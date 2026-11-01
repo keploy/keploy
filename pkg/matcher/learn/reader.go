@@ -95,8 +95,10 @@ type readWord struct {
 // textReading is what the reader reads of one drifted text: where it
 // stands (At names the text whole, Word -1; Off is how many words of R's
 // and F's text at those steps come before it, readLeaf's), both texts,
-// their words, the stretches, every changed word in order, the instants
-// those words are part of, and whether any stretch changed shape.
+// their words, the stretches, every changed word in order, the separators
+// that changed between paired words, the instants those words are part
+// of, and whether the text changed shape: a stretch only one run has, or a
+// changed separator no whole token holds.
 type textReading struct {
 	At                  variables.Address
 	Off                 [2]int
@@ -104,6 +106,7 @@ type textReading struct {
 	RecWords, LiveWords [][2]int
 	Stretches           []wordStretch
 	Words               []readWord
+	Separators          []sepChange
 	Instants            []*instantWord
 	ChangedShape        bool
 }
@@ -192,8 +195,16 @@ func readTextIn(dc *DriftCache, rec, live string) textReading {
 	rSpans, lSpans := dc.spansOf(rec), dc.spansOf(live)
 	rTok := tokenSpans(rec, rSpans)
 	lTok := tokenSpans(live, lSpans)
+	kept := keptWords(rw, lw)
+	paired := make([]int, len(rw))
+	for i := range paired {
+		paired[i] = -1
+	}
+	for _, k := range kept {
+		paired[k[0]] = k[1]
+	}
 	prev := [2]int{-1, -1}
-	for _, k := range append(keptWords(rw, lw), [2]int{len(rw), len(lw)}) {
+	for _, k := range append(kept[:len(kept):len(kept)], [2]int{len(rw), len(lw)}) {
 		st := wordStretch{Rec: [2]int{prev[0] + 1, k[0]}, Live: [2]int{prev[1] + 1, k[1]}}
 		prev = k
 		nr, nl := st.Rec[1]-st.Rec[0], st.Live[1]-st.Live[0]
@@ -217,6 +228,7 @@ func readTextIn(dc *DriftCache, rec, live string) textReading {
 		if st.Shape == stretchPaired {
 			for d := 0; d < nr; d++ {
 				i, j := st.Rec[0]+d, st.Live[0]+d
+				paired[i] = j
 				if rw[i] == lw[j] {
 					continue
 				}
@@ -233,8 +245,56 @@ func readTextIn(dc *DriftCache, rec, live string) textReading {
 			rd.Words = append(rd.Words, readWord{Live: lw[j], RecIdx: -1, LiveIdx: j, RecAt: [2]int{-1, -1}, LiveAt: rd.LiveWords[j], Stretch: n, LiveBits: wordBits(lw[j])})
 		}
 	}
+	rd.readSeparators(paired, rTok, lTok)
 	rd.readInstants(rSpans, lSpans)
 	return rd
+}
+
+// sepChange is a separator that changed between two paired words, or
+// before the first or after the last where those pair: [start, end) of
+// its bytes in each run, and the whole tokens that hold it with the words
+// beside it in both runs. Word by word, replay cannot give the new
+// separator, so the words around it bind only as one of Tokens; with none,
+// the text changed shape.
+type sepChange struct {
+	RecAt, LiveAt [2]int
+	Tokens        []wholeToken
+}
+
+// readSeparators lists the separators that changed between paired words
+// (paired: R's word index to F's, -1 where it moved), and marks the text
+// changed in shape where no whole token holds one. A text with no words in
+// either run changed in its separators alone.
+func (rd *textReading) readSeparators(paired []int, rTok, lTok wholeTokenSpans) {
+	rw, lw := rd.RecWords, rd.LiveWords
+	add := func(r, l, rAround, lAround [2]int) {
+		if rd.Rec[r[0]:r[1]] == rd.Live[l[0]:l[1]] {
+			return
+		}
+		sc := sepChange{RecAt: r, LiveAt: l, Tokens: tokensAround(rd.Rec, rd.Live, rTok, lTok, rAround, lAround, false)}
+		rd.Separators = append(rd.Separators, sc)
+		if len(sc.Tokens) == 0 {
+			rd.ChangedShape = true
+		}
+	}
+	if len(rw) == 0 || len(lw) == 0 {
+		if len(rw) == 0 && len(lw) == 0 {
+			all := [2]int{0, len(rd.Rec)}
+			add(all, [2]int{0, len(rd.Live)}, all, [2]int{0, len(rd.Live)})
+		}
+		return
+	}
+	if paired[0] == 0 {
+		add([2]int{0, rw[0][0]}, [2]int{0, lw[0][0]}, [2]int{0, rw[0][1]}, [2]int{0, lw[0][1]})
+	}
+	for i := 0; i+1 < len(rw); i++ {
+		if j := paired[i]; j >= 0 && paired[i+1] == j+1 {
+			add([2]int{rw[i][1], rw[i+1][0]}, [2]int{lw[j][1], lw[j+1][0]}, [2]int{rw[i][0], rw[i+1][1]}, [2]int{lw[j][0], lw[j+1][1]})
+		}
+	}
+	if i, j := len(rw)-1, len(lw)-1; paired[i] == j {
+		add([2]int{rw[i][1], len(rd.Rec)}, [2]int{lw[j][1], len(rd.Live)}, [2]int{rw[i][0], len(rd.Rec)}, [2]int{lw[j][0], len(rd.Live)})
+	}
 }
 
 // bytesOf is [start, end) of the words [from, to) of spans.

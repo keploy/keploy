@@ -51,11 +51,12 @@ func mustPlace(t *testing.T, s string) variables.Place {
 	return p
 }
 
-// A step opens a text only where it decodes in both runs and the opened
-// texts still differ: percent escapes, a JSON string literal, base64 and
-// base64url that decode to text, nested. Where one run does not decode (a
-// base64 of text in R, of binary in F; a broken escape), or both open to
-// one text (only the escaping changed), the text is read as it is.
+// A step opens a text only where both runs are so encoded, both decode,
+// and the opened texts still differ: percent escapes, a JSON string
+// literal, base64 and base64url that decode to text, nested. Where one run
+// does not decode (a base64 of text in R, of binary in F; a broken escape;
+// escapes in R alone), or both open to one text (only the escaping
+// changed), the text is read as it is.
 func TestReaderDecodeStepsOpenWhereBothRunsDecode(t *testing.T) {
 	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	b64u := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
@@ -70,7 +71,7 @@ func TestReaderDecodeStepsOpenWhereBothRunsDecode(t *testing.T) {
 		{"percent", "body.next", "uploads%2F17%2Fa.png", "uploads%2F18%2Fa.png",
 			[]string{"body.next|pct#1: 17>18"}},
 		{"percent in R only", "body.next", "a%2F17", "a/18",
-			[]string{"body.next|pct#1: 17>18"}},
+			[]string{"body.next#1: 2F17>18"}},
 		{"a broken escape in F", "body.next", "a%2F17", "a%zz18",
 			[]string{"body.next#1: 2F17>zz18"}},
 		{"only the escaping changed", "body.next", "a%2Fb", "a/b",
