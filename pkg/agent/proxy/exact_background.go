@@ -401,7 +401,11 @@ func (m *MockManager) BackgroundCursor() (integrations.MockCursor, bool) {
 // reached (isWorker). False with exact serving off.
 func (m *MockManager) InBackground(name string) bool {
 	v := m.exactView()
-	if v == nil || !v.bg.has(name) && !(v.test != "" && v.isWorker(name)) {
+	if v == nil {
+		return false
+	}
+	// Neither the background's nor, in a test, the reached worker scope's.
+	if !v.bg.has(name) && (v.test == "" || !v.isWorker(name)) {
 		return false
 	}
 	_, own := v.index[name]

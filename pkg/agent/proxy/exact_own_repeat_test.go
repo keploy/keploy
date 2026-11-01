@@ -41,7 +41,7 @@ func genericCall(t *testing.T, mm integrations.MockMemDb, req string) (string, *
 	ctx = context.WithValue(ctx, models.ClientConnectionIDKey, "1")
 	ctx = context.WithValue(ctx, models.DestConnectionIDKey, "2")
 	app, agentEnd := net.Pipe()
-	defer app.Close()
+	defer func() { _ = app.Close() }()
 	done := make(chan error, 1)
 	go func() {
 		err := generic.New(zap.NewNop()).MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{})
@@ -177,7 +177,7 @@ func httpMissSend(t *testing.T, mm *MockManager, raw string) (string, *models.Mo
 	ctx, cancel := context.WithTimeout(context.Background(), callDeadline)
 	defer cancel()
 	app, agentEnd := net.Pipe()
-	defer app.Close()
+	defer func() { _ = app.Close() }()
 	done := make(chan error, 1)
 	go func() {
 		err := httpint.New(zap.NewNop()).MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{})

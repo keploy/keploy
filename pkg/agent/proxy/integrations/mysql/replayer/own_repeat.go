@@ -5,8 +5,8 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
@@ -42,7 +42,7 @@ func commandType(b mysql.PacketBundle) string {
 // (matchOptions.probed) on a view that holds only own and the connection's
 // prepared statements: it consumes nothing, binds no statement id and sends
 // no served event. Each recording it finds is passed over by the next.
-func ownRepeats(ctx context.Context, req mysql.Request, db integrations.MockMemDb, own []*models.Mock, decodeCtx *wire.DecodeContext, noiseEngine *schemanoise.Engine, userBodyNoise map[string][]string, limit int) []*models.Mock {
+func ownRepeats(ctx context.Context, req mysql.Request, db integrations.MockMemDb, own []*models.Mock, decodeCtx *wire.DecodeContext, noiseEngine *mocknoise.Engine, userBodyNoise map[string][]string, limit int) []*models.Mock {
 	if len(own) == 0 {
 		return nil
 	}
