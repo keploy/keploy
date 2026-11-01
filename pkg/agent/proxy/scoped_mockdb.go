@@ -323,9 +323,21 @@ func (s *scopedMockDb) ClaimPairing(m *models.Mock) bool {
 	return integrations.ClaimPairing(s.MockMemDb, m)
 }
 
+// LearnElsewhereCandidates and LearnElsewhere forward the store's
+// learning-only pairing (integrations.LearnElsewhere): nil and false from a
+// store that has none.
+func (s *scopedMockDb) LearnElsewhereCandidates(kind models.Kind) []*models.Mock {
+	return integrations.LearnElsewhereCandidates(s.MockMemDb, kind)
+}
+
+func (s *scopedMockDb) LearnElsewhere(m *models.Mock, noise map[string][]string, clocks map[string]models.ClockOffset) bool {
+	return integrations.LearnElsewhereOnto(s.MockMemDb, m, noise, clocks)
+}
+
 var (
 	_ integrations.ExactBackground = (*scopedMockDb)(nil)
 	_ integrations.Pairing         = (*scopedMockDb)(nil)
+	_ integrations.LearnElsewhere  = (*scopedMockDb)(nil)
 )
 
 // RoundSnapshot, WithinRound, ClaimPairingIn, SpendByKindIn and TakenLog

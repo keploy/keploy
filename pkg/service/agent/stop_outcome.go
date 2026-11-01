@@ -144,6 +144,10 @@ func (a *Agent) readStopOutcome(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read the calls this replay could not match: %w", err)
 	}
 	outcome := models.MockOutcome{Consumed: consumed, Missed: missed, Windows: windows, MissedUnread: missedUnread, Settled: settled, SettleError: settleErr}
+	// What record's full round learned onto recordings from calls made in
+	// other windows: the CLI writes it onto them beside what the consumed
+	// ones learned.
+	outcome.LearnedElsewhere, _ = a.LearnedElsewhere(ctx)
 	// Nor whether its hooks could track every process. Hooks that never count
 	// leave both fields out, which the CLI reads as "unknown" and lets pass.
 	// A count that could not be read leaves its error instead: completeness

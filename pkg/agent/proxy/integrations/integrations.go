@@ -1126,6 +1126,52 @@ func ClaimPairing(db MockMemDb, m *models.Mock) bool {
 	return false
 }
 
+// LearnElsewhere is record's full round learning a recording's changing
+// fields from a call of the same shape made in another window than the
+// recording's, for learning only (founder, 2026-11-01). A timer fires
+// wherever the clock puts it: its call, recorded in one test's window, lands
+// in another's in the full round, and the learn step, which pairs a call
+// only with the open test's recordings or the pool's, would teach its
+// recording nothing. A parser's learn step that misses such a call pairs it
+// by its drift pairing's rule and guards with one of these candidates and
+// hands what it learned to LearnElsewhere. An optional MockMemDb
+// capability: the agent's MockManager implements it, and every MockMemDb
+// wrapper must forward it.
+type LearnElsewhere interface {
+	// LearnElsewhereCandidates is kind's data-plane recordings of other
+	// windows than the open test's (neither the open view's own nor the
+	// set's background; under today's rules, which name no background, the
+	// pool's too) that the set's calls have not consumed and no pairing
+	// claimed, in recorded order, while the session runs record's full
+	// round's learn step under the proven switch, whatever rules serve the
+	// set; nil otherwise.
+	LearnElsewhereCandidates(kind models.Kind) []*models.Mock
+	// LearnElsewhere keeps what a call learned onto m (noise, clock reads)
+	// for record's full round to write onto the recording, as it writes
+	// what a consumed recording learned. It consumes, claims and answers
+	// nothing: m stays its owner's, and no test's verdict reads it. False
+	// when the session does not learn, or m is no candidate.
+	LearnElsewhere(m *models.Mock, noise map[string][]string, clocks map[string]models.ClockOffset) bool
+}
+
+// LearnElsewhereCandidates is db's LearnElsewhereCandidates of kind; nil when
+// db does not implement LearnElsewhere.
+func LearnElsewhereCandidates(db MockMemDb, kind models.Kind) []*models.Mock {
+	if l, ok := db.(LearnElsewhere); ok {
+		return l.LearnElsewhereCandidates(kind)
+	}
+	return nil
+}
+
+// LearnElsewhereOnto is db's LearnElsewhere; false when db does not implement
+// it.
+func LearnElsewhereOnto(db MockMemDb, m *models.Mock, noise map[string][]string, clocks map[string]models.ClockOffset) bool {
+	if l, ok := db.(LearnElsewhere); ok {
+		return l.LearnElsewhere(m, noise, clocks)
+	}
+	return false
+}
+
 // InFlightOwner is an optional MockMemDb capability: whether a mock was in
 // flight when the test the replay runs now began, sent in the gap before that
 // test's recorded window and answered inside it (models.SentInGapAnsweredBy),

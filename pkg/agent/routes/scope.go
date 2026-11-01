@@ -87,6 +87,13 @@ type mockStatsReader interface {
 type servedMockReader interface {
 	ServedMocks(ctx context.Context) (map[string]models.MockState, error)
 }
+
+// learnedElsewhereReader is the agent service's optional read of what
+// record's full round learned onto recordings from calls made in other
+// windows than theirs (service/agent.Agent.LearnedElsewhere).
+type learnedElsewhereReader interface {
+	LearnedElsewhere(ctx context.Context) ([]models.MockState, error)
+}
 type capturedMockDrainer interface {
 	DrainCapturedMocks(ctx context.Context) ([]*models.Mock, error)
 }
@@ -455,6 +462,32 @@ func (a *Agent) HandleServedMocks(w http.ResponseWriter, r *http.Request) {
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, served)
+}
+
+// HandleLearnedElsewhere answers what record's full round's learn step
+// taught recordings from calls made in other windows than theirs, for
+// learning only: one state per recording, none of it consumption (unlike
+// /consumedmocks). 501 from an agent that cannot say, so a caller tells
+// "this agent learns none" from "it learned none".
+func (a *Agent) HandleLearnedElsewhere(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	s, ok := a.svc.(learnedElsewhereReader)
+	if !ok {
+		render.Status(r, http.StatusNotImplemented)
+		render.JSON(w, r, map[string]string{"error": "this agent cannot report what it learned from calls made in other windows"})
+		return
+	}
+	learned, err := s.LearnedElsewhere(r.Context())
+	if err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": err.Error()})
+		return
+	}
+	if learned == nil {
+		learned = []models.MockState{}
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, learned)
 }
 
 func (a *Agent) HandleAppStart(w http.ResponseWriter, r *http.Request) {

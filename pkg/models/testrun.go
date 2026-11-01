@@ -789,6 +789,11 @@ type MockOutcome struct {
 	// incomplete (ErrUnmatchedCallsUnread, under the proven switch). Missed
 	// holds what was read.
 	MissedUnread string `json:"missed_unread,omitempty"`
+	// LearnedElsewhere is what record's full round's learn step taught
+	// recordings from calls made in other windows than theirs, for
+	// learning only (the agent's /mock/learned-elsewhere): none of it is
+	// consumption, so Consumed never holds it.
+	LearnedElsewhere []MockState `json:"learned_elsewhere,omitempty"`
 	// PIDMapRefusals are the inserts into the agent's PID maps the kernel
 	// refused over its life, which under compose is the replay's: processes
 	// its hooks could not track. nil when it cannot count them, which is

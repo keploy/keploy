@@ -2368,6 +2368,18 @@ func (a *Agent) ServedMocks(_ context.Context) (map[string]models.MockState, err
 	return reader.GetPersistentConsumed(), nil
 }
 
+// LearnedElsewhere reports what record's full round's learn step taught
+// recordings from calls made in other windows than theirs, for learning only
+// (coreAgent.LearnedElsewhereReader). None of it is consumption. Empty when
+// the proxy cannot say: it then learned none.
+func (a *Agent) LearnedElsewhere(_ context.Context) ([]models.MockState, error) {
+	reader, ok := a.Proxy.(coreAgent.LearnedElsewhereReader)
+	if !ok {
+		return nil, nil
+	}
+	return reader.LearnedElsewhere(), nil
+}
+
 // ReadsConsumedForPerTestOnly reports whether svc, the service the route
 // serves, reads the consumed history the way this one does: only in
 // filterOutDeleted, over the per-test mocks it stages, which all come from the

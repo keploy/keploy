@@ -2028,7 +2028,7 @@ func composeUnsettled(why string) error {
 // agent answer" flag makes a half-answer indistinguishable from no answer, and
 // then reports a run whose misses were never read as a clean one.
 func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail replayDetail, stopped func() bool) replayCounts {
-	var consumed []models.MockState
+	var consumed, elsewhere []models.MockState
 	var misses []models.UnmatchedCall
 	var consumedErr, missesErr, settleErr error
 	// Under docker compose the runner exiting is what stops the whole project,
@@ -2040,6 +2040,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	if fromCompose {
 		outcome, err := composeOutcome.ComposeAgentOutcome()
 		consumed, misses, consumedErr, missesErr = outcome.Consumed, outcome.Missed, err, err
+		elsewhere = outcome.LearnedElsewhere
 		if err == nil && outcome.MissedUnread != "" {
 			// As the agent's own read would have said it: incomplete, with
 			// what was read.
@@ -2069,6 +2070,9 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				settleErr = m.settleRun(outcomeCtx)
 				if consumedErr = settleErr; consumedErr == nil {
 					consumed, consumedErr = m.instrumentation.GetConsumedMocks(outcomeCtx)
+				}
+				if consumedErr == nil && m.learning() {
+					elsewhere = m.readLearnedElsewhere(outcomeCtx)
 				}
 				misses, missesErr = m.instrumentation.GetMockErrors(outcomeCtx)
 				if reader, ok := m.instrumentation.(idPairReader); ok {
@@ -2158,7 +2162,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	var learnedPool []string
 	var learnErr error
 	if m.learning() {
-		learned, learnedPool, learnErr = m.keepLearned(ctx, detail.set, consumed, consumedErr, flows, detail.expected)
+		learned, learnedPool, learnErr = m.keepLearned(ctx, detail.set, consumed, consumedErr, elsewhere, flows, detail.expected)
 	}
 
 	// Metering LAST: it may do network I/O, and the miss warnings above are what
@@ -2410,6 +2414,35 @@ func testReceipts(flows []FlowMocks, consumedKnown, missesKnown bool) []TestRece
 // compiling without it — the same discipline ConsumedStateReader uses.
 type idPairReader interface {
 	GetIDPairs(ctx context.Context) (map[string]string, error)
+}
+
+// learnedElsewhereReader is an optional extension of Instrumentation: what
+// record's full round's learn step taught recordings from calls made in
+// other windows than theirs, for learning only (AgentClient's
+// GetLearnedElsewhere).
+type learnedElsewhereReader interface {
+	GetLearnedElsewhere(ctx context.Context) ([]models.MockState, error)
+}
+
+// readLearnedElsewhere is what the agent's learn step taught recordings
+// from calls made in other windows than theirs (learnedElsewhereReader):
+// nil from an instrumentation that cannot say, and, said in a warning, when
+// the read failed. None of it served a call or decides a verdict, so a
+// round that cannot read it keeps only what its consumed recordings
+// learned, as before it.
+func (m *mockService) readLearnedElsewhere(ctx context.Context) []models.MockState {
+	r, ok := m.instrumentation.(learnedElsewhereReader)
+	if !ok {
+		return nil
+	}
+	learned, err := r.GetLearnedElsewhere(ctx)
+	if err != nil {
+		m.logger.Warn("keploy could not read what record's full round learned onto recordings from calls made in other windows than theirs; it keeps what their own calls taught them, and a recording only another window's call taught compares every field",
+			zap.Error(err),
+			zap.String("next_step", "record the test set again"))
+		return nil
+	}
+	return learned
 }
 
 type servedMockPoller interface {

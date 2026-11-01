@@ -508,6 +508,13 @@ func (m *MockManager) PairingCandidates(kind models.Kind) []*models.Mock {
 	if v == nil {
 		return nil
 	}
+	return m.pairableOfKind(v, epoch, kind)
+}
+
+// pairableOfKind is kind's recordings a pairing may take in v (pairable), in
+// recorded order: those the trees hold, then those the agent keeps on disk
+// (SetRecordedOfKind), each once.
+func (m *MockManager) pairableOfKind(v *exactView, epoch uint64, kind models.Kind) []*models.Mock {
 	seen := map[string]bool{}
 	var out []*models.Mock
 	for _, mk := range m.stagedOfKind(kind) {
