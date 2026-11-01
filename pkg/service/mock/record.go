@@ -1418,32 +1418,62 @@ func flowOf(windows []models.ScopeWindow, test string) string {
 // setScopeMocks is startupMocks under the proven switch, split as the set
 // scope of mappings.yaml lists it: keploy decides no call's owner, so a
 // call is a test's only when a test's window holds it, and every other one
-// is the set's. startup: is what came before the first test began, and the
-// protocol-phase and app-start calls; worker: is every other call outside
-// every window, made between or after the tests, in recorded order. Each
-// keeps the key of the claim it was made under. A replay serves both to any
-// test and requires neither; a reader who finds one of a test's own calls
-// is the app's moves it from the test's list to worker: (models.Mapping).
-// Without a window every call is startup:'s, as startupMocks has it.
+// is the set's. startup: is what a test process did before its own first
+// test began, and the protocol-phase and app-start calls; worker: is every
+// other call outside every window, made between or after its tests, in
+// recorded order. Each keeps the key of the claim it was made under, and a
+// call is split by the first window of that key (firstWindowByKey): a run
+// of several test binaries starts each one's start-up afresh, so a later
+// binary's init or TestMain call, made after an earlier binary's tests, is
+// still its start-up. A call made under no claim keeps the run's first
+// window, and so does a set recorded without claims. A key no test began
+// under never reached a test: all its calls are startup:'s. A replay serves
+// both to any test and requires neither; a reader who finds one of a test's
+// own calls is the app's moves it from the test's list to worker:
+// (models.Mapping). Without a window every call is startup:'s, as
+// startupMocks has it.
 func setScopeMocks(windows []models.ScopeWindow, mocks []capturedMock, claims []models.ScopeWindow) (startup, worker []models.MockEntry) {
-	var first time.Time
-	for _, w := range windows {
-		if !w.Start.IsZero() && (first.IsZero() || w.Start.Before(first)) {
-			first = w.Start
-		}
-	}
+	first, byKey := firstWindowByKey(windows, claims)
 	for _, mk := range mocks {
 		if !mk.boot && !mk.protocol && containing(windows, mk.ts) != "" {
 			continue
 		}
-		e := models.MockEntry{Name: mk.name, Kind: mk.kind, Key: claimKeyAt(claims, mk.ts)}
-		if mk.boot || mk.protocol || first.IsZero() || mk.ts.Before(first) {
+		key := claimKeyAt(claims, mk.ts)
+		e := models.MockEntry{Name: mk.name, Kind: mk.kind, Key: key}
+		start := first
+		if key != "" {
+			start = byKey[key] // zero: no test began under key
+		}
+		if mk.boot || mk.protocol || start.IsZero() || mk.ts.Before(start) {
 			startup = append(startup, e)
 			continue
 		}
 		worker = append(worker, e)
 	}
 	return startup, worker
+}
+
+// firstWindowByKey is when the run's first test began (first), and when the
+// first test begun under each claim key did (byKey): a window's key is the
+// claim made at or before it began, as stampKeys gives it.
+func firstWindowByKey(windows, claims []models.ScopeWindow) (first time.Time, byKey map[string]time.Time) {
+	byKey = make(map[string]time.Time)
+	for _, w := range windows {
+		if w.Start.IsZero() {
+			continue
+		}
+		if first.IsZero() || w.Start.Before(first) {
+			first = w.Start
+		}
+		key := claimKeyAt(claims, w.Start)
+		if key == "" {
+			continue
+		}
+		if at, ok := byKey[key]; !ok || w.Start.Before(at) {
+			byKey[key] = w.Start
+		}
+	}
+	return first, byKey
 }
 
 func startupMocks(windows []models.ScopeWindow, mocks []capturedMock, claims []models.ScopeWindow) []models.MockEntry {
