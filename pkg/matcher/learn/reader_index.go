@@ -94,6 +94,16 @@ type readerText struct {
 	raw       *Raw
 	rawUnread bool
 	e         *readerEntry
+	// now is the read the steps of one question share (oneRead); nil
+	// outside it, so a handle keeps no text between questions.
+	now *rawBody
+}
+
+// oneRead has the steps of one question share one read of the recording,
+// let go when the question is over (the call of what it returns).
+func (t *readerText) oneRead() func() {
+	t.now = &rawBody{}
+	return func() { t.now = nil }
 }
 
 // newReaderIndex is an empty index for one call, reading through dc's
@@ -191,6 +201,9 @@ func (t *readerText) read() (string, []rawField, bool) {
 	if t.rawUnread {
 		return "", nil, false
 	}
+	if t.now != nil && t.now.read {
+		return t.now.text, t.now.fields, true
+	}
 	b := t.raw.payload()
 	if !b.read {
 		t.rawUnread = true
@@ -199,6 +212,9 @@ func (t *readerText) read() (string, []rawField, bool) {
 	}
 	if t.e == nil {
 		t.e = t.x.entryOf(b.text)
+	}
+	if t.now != nil {
+		*t.now = b
 	}
 	return b.text, b.fields, true
 }
@@ -377,9 +393,10 @@ func fieldWordsBytes(f fieldWords) int64 {
 // read for it: a word only a field's own text decoded twice holds (a JSON
 // string whose content is itself escaped) is no word of the text. Read
 // once for the call where they fit the budget; past it, by a scan of the
-// fields of the text read now, which keeps nothing. read is false where
-// the recording was not read.
+// fields of the text read now, which keeps nothing. Both steps share one
+// read. read is false where the recording was not read.
 func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
+	defer t.oneRead()()
 	if held, ok := t.holdsWord(w); !held {
 		return nil, ok
 	}
@@ -464,7 +481,7 @@ func jsonValues(text string) (any, bool) {
 	if len(vs) == 1 {
 		return vs[0], true
 	}
-	return vs, len(vs) > 0
+	return vs, true
 }
 
 // inOneField reports whether one field holds rw in r's text and lw in l's

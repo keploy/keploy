@@ -435,6 +435,7 @@ func TestReaderTextOfARecordingPinsNothingPastTheBudget(t *testing.T) {
 		{"a word", func() { last.holdsWord("zzz") }},
 		{"a base64 run", func() { last.holdsToken(tokenB64, "QUJDREVGR0g") }},
 		{"a word's fields", func() { last.fieldsWith("zzz") }},
+		{"a held word's fields", func() { last.fieldsWith(id(n - 1)) }},
 		{"an instant", func() { last.holdsMoment(moment{}) }},
 		{"its instants", func() { last.spansOf() }},
 	} {
