@@ -755,7 +755,7 @@ func listsHold(l answerLists, t string) bool {
 func viewNew(g givenWords) bool {
 	for i, list := range g.view.words {
 		for _, t := range list {
-			if !g.answerLists.holds(i, t, true) {
+			if !g.holds(i, t, true) {
 				return true
 			}
 		}

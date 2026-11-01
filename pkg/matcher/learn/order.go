@@ -651,11 +651,11 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// that gives no moment F saw in it as sent. Never at a given.
 	for _, h := range hs {
 		p := h.p
-		if p.gave || !(p.side == Response || request(p)) {
+		if p.gave || p.side != Response && !request(p) {
 			continue
 		}
 		switch {
-		case before(p) && h.hl && !(h.hr && !p.same()):
+		case before(p) && h.hl && (!h.hr || p.same()):
 			why := "round F's moment stands unchanged in " + p.name
 			if !p.same() {
 				why = "round F's moment stands in " + p.name + ", which does not show it"
