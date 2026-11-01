@@ -321,16 +321,13 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 	a.provenMu.Lock()
 	a.proven.unservable = unservable
 	a.provenMu.Unlock()
-	// The key's worker scope answers in the test's window too.
-	a.provenMu.Lock()
-	key := a.proven.key
-	a.provenMu.Unlock()
-	if key == "" {
-		key = models.PoolKeyNone
-	}
-	if err := a.serveKeyWorker(es, key); err != nil {
-		return err
-	}
+	// The key's worker scope answers in the test's window too: the last
+	// pool serve showed it (servePoolExactly). Every change of key serves
+	// the pool again, at its claim or, when a test is open then, at that
+	// test's end, and a new worker table comes in the same request as the
+	// pool slices it serves with (SetScopeWorker, then SetScopePool), so
+	// the view the test opens on already shows it.
+	//
 	// A test is the scope of the variables keploy mock replay binds: it
 	// begins with none bound, as it opens.
 	if err := a.openExactTest(es, id, owned, nil); err != nil {
