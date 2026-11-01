@@ -107,9 +107,18 @@ func (m *MockManager) learnElsewhereAt(mk *models.Mock, clocks map[string]models
 // begin or end: RoundAt.Bounds), or whose read keeps no round, came in a
 // window keploy no longer knows: it names none, as a call between tests
 // does, so whatever undoes a window's learning undoes it with any.
+//
+// Besides what pairable offers, an idle answer of the background (a
+// worker's "nothing yet", models.IsIdleAnswer) is kept: a poll's call
+// teaches the idle recordings of its request their clock reads wherever
+// it lands, as the parser carries them, and without that the recording
+// cannot answer a later poll whose clock read moved.
 func (m *MockManager) learnElsewhereLocked(mk *models.Mock, clocks map[string]models.ClockOffset, read *callRead) bool {
 	v, epoch := m.learningElsewhere()
-	if v == nil || !m.pairable(v, epoch, mk) {
+	if v == nil {
+		return false
+	}
+	if idle := v.isBackgroundRecording(mk) && models.IsIdleAnswer(mk); !idle && !m.pairable(v, epoch, mk) {
 		return false
 	}
 	window := models.TeachingWindow{Test: v.test, At: time.Now()}
