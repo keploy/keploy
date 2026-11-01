@@ -50,10 +50,11 @@ type pairedConn struct {
 	noSession atomic.Bool
 }
 
-// appWrote is what the application had written to a connection (appWritten).
+// appWrote is what the application had written to a connection, in bytes and
+// a FIN (noteWroteAtClose). Whether the count holds a FIN is not kept: no
+// answer turns on it (pairReached).
 type appWrote struct {
-	want uint64 // bytes, and a FIN
-	fin  bool   // want counts its FIN
+	want uint64
 }
 
 // proxySide is what the wait reads of the proxy's side of a connection.

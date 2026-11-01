@@ -343,7 +343,7 @@ func TestAppWrittenTellsTheFINByLockOrder(t *testing.T) {
 	look := func(hdr uint8, wq uint32, st uint8, acked uint64) diagTCP {
 		return diagTCP{state: hdr, wqueue: wq, info: &unix.TCPInfo{State: st, Bytes_acked: acked}}
 	}
-	const e, f1, f2 = tcpEstablished, tcpFinWait1, tcpFinWait2
+	const e, f1, f2, la = tcpEstablished, tcpFinWait1, tcpFinWait2, tcpLastAck
 	for _, tc := range []struct {
 		name    string
 		reads   []diagTCP
@@ -351,6 +351,7 @@ func TestAppWrittenTellsTheFINByLockOrder(t *testing.T) {
 		fin     bool
 		errGone bool
 	}{
+		{"closed after its peer's FIN (LAST_ACK)", []diagTCP{look(la, 11, la, 101), look(la, 11, la, 101)}, 111, true, false},
 		{"open throughout", []diagTCP{look(e, 10, e, 101), look(e, 10, e, 101), look(e, 10, e, 101)}, 110, false, false},
 		{"closed before the reads", []diagTCP{look(f1, 11, f1, 101), look(f1, 11, f1, 101)}, 111, true, false},
 		{"half-closed, the FIN acknowledged (FIN_WAIT2, a full socket)", []diagTCP{look(f2, 0, f2, 112), look(f2, 0, f2, 112)}, 111, true, false},
@@ -380,6 +381,54 @@ func TestAppWrittenTellsTheFINByLockOrder(t *testing.T) {
 			}
 			if err != nil || want != tc.want || fin != tc.fin {
 				t.Fatalf("appWritten = %d, FIN %v, %v; want %d, FIN %v", want, fin, err, tc.want, tc.fin)
+			}
+		})
+	}
+}
+
+// The close's read of what the application had written (wroteNow) is never
+// short of it, counts no byte twice, and takes one lookup when nothing is
+// unacknowledged.
+func TestTheClosesReadCountsWhatTheApplicationHadWritten(t *testing.T) {
+	look := func(st uint8, wq uint32, acked uint64) diagTCP {
+		return diagTCP{state: st, wqueue: wq, info: &unix.TCPInfo{State: st, Bytes_acked: acked}}
+	}
+	const e, f1 = tcpEstablished, tcpFinWait1
+	for _, tc := range []struct {
+		name  string
+		reads []diagTCP
+		want  uint64
+		ok    bool
+	}{
+		{"nothing unacknowledged: one lookup", []diagTCP{look(e, 0, 101)}, 100, true},
+		{"bytes unacknowledged, no ACK between the lookups", []diagTCP{look(e, 10, 101), look(e, 10, 101)}, 110, true},
+		{"an ACK between the first's wqueue and its tcp_info", []diagTCP{look(e, 5, 104), look(e, 2, 104)}, 105, true},
+		{"an ACK between a later lookup's wqueue and its tcp_info", []diagTCP{look(e, 5, 101), look(e, 5, 104), look(e, 2, 104)}, 105, true},
+		{"acknowledged by the second lookup", []diagTCP{look(e, 5, 101), look(e, 0, 106)}, 105, true},
+		{"an ACK between the lookups, then two that agree", []diagTCP{look(e, 5, 101), look(e, 3, 103), look(e, 3, 103)}, 105, true},
+		{"its FIN unacknowledged", []diagTCP{look(f1, 11, 101), look(f1, 11, 101)}, 111, true},
+		{"read in CLOSE", []diagTCP{look(tcpClose, 0, 101)}, 0, false},
+		{"a timewait socket (no tcp_info)", []diagTCP{{state: tcpTimeWait}}, 0, false},
+		{"gone between the lookups", []diagTCP{look(e, 5, 101)}, 0, false},
+		{"no byte counts", []diagTCP{look(e, 0, 0)}, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			was := lookupWritten
+			n := 0
+			lookupWritten = func(*diagSock, netip.AddrPort, netip.AddrPort) (diagTCP, error) {
+				if n == len(tc.reads) {
+					return diagTCP{}, errNoSocket
+				}
+				n++
+				return tc.reads[n-1], nil
+			}
+			t.Cleanup(func() { lookupWritten = was })
+			want, ok := wroteNow(nil, netip.AddrPort{}, netip.AddrPort{})
+			if want != tc.want || ok != tc.ok {
+				t.Fatalf("wroteNow = %d, %v; want %d, %v", want, ok, tc.want, tc.ok)
+			}
+			if tc.ok && n != len(tc.reads) {
+				t.Fatalf("wroteNow made %d lookups, want %d", n, len(tc.reads))
 			}
 		})
 	}

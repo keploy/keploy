@@ -488,10 +488,12 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 		// What was written is counted up to what the application had
 		// written as the close began (noteWroteAtClose), when that is less:
 		// bytes it wrote after keploy's close are no capture loss, and are
-		// not waited for.
+		// not waited for. Less, it wrote on after that read, so the read
+		// held no FIN of its (nothing is written after one): the cut count
+		// is all data, and one short of it is a byte, never the FIN.
 		want, finCounted := t.want, t.finCounted
 		if w := pc.wroteAtClose.Load(); w != nil && w.want < want {
-			want, finCounted = w.want, w.fin
+			want, finCounted = w.want, false
 		}
 		if ps.received >= want {
 			return true, nil
@@ -722,14 +724,68 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 // the answer keploy closed after (a 502 with Connection: close), is such a
 // write. A socket that cannot be read leaves it unset, and the wait judges the
 // connection by what was written when it began.
+//
+// It runs on every paired close, so it reads no more than an answer needs. A
+// proxy's side that has taken the application's FIN, or its reset, needs no
+// record: nothing is written after either, so a wait's own read of the
+// application's socket counts what was written before the close (wroteNow
+// says the rest).
 func noteWroteAtClose(pc *pairedConn) {
+	if ps := readProxySide(pc.conn); ps.err == nil && peerEnded(ps.state) {
+		return
+	}
 	ds, err := openDiag()
 	if err != nil {
 		return
 	}
 	defer ds.close()
-	if want, fin, _, err := appWritten(ds, pc.app, pc.proxy); err == nil {
-		pc.wroteAtClose.Store(&appWrote{want: want, fin: fin})
+	if want, ok := wroteNow(ds, pc.app, pc.proxy); ok {
+		pc.wroteAtClose.Store(&appWrote{want: want})
+	}
+}
+
+// peerEnded says whether the proxy's side of a connection, in state, has taken
+// the application's FIN (CLOSE_WAIT, or LAST_ACK, CLOSING after a FIN of its
+// own) or its reset (CLOSE).
+func peerEnded(state uint8) bool {
+	return state == tcpCloseWait || state == tcpLastAck || state == tcpClosing || state == tcpClose
+}
+
+// wroteNow is how many bytes (and a FIN) the application had written to the
+// socket whose ends are app and proxy, for noteWroteAtClose: never fewer than
+// it had written as the read began (a count that is short would settle bytes
+// that never arrived), and never one it had not written. One lookup does when
+// it shows nothing unacknowledged (idiag_wqueue 0): the count is then
+// tcpi_bytes_acked, read under the socket's lock after that wqueue, so what
+// was written before it is all acknowledged and counted, and no ACK between
+// the two counts a byte twice. With bytes unacknowledged, an ACK between a
+// lookup's wqueue and its tcp_info would count them twice (appWritten), so it
+// looks again until two lookups agree on tcpi_bytes_acked: the second's
+// wqueue is bracketed. Whether the count holds a FIN, which appWritten tells
+// with one lookup more, no answer needs (pairReached). A timewait socket (no
+// tcp_info) or one read in CLOSE, or one not found, gives no count: its FIN
+// or reset is the last it sent, and the wait reads it so.
+func wroteNow(ds *diagSock, app, proxy netip.AddrPort) (uint64, bool) {
+	read := func() (diagTCP, bool) {
+		d, err := lookupWritten(ds, app, proxy)
+		return d, err == nil && d.info != nil && d.info.State != tcpClose && d.info.Bytes_acked != 0
+	}
+	prev, ok := read()
+	if !ok {
+		return 0, false
+	}
+	if prev.wqueue == 0 {
+		return prev.info.Bytes_acked - 1, true
+	}
+	for {
+		cur, ok := read()
+		if !ok {
+			return 0, false
+		}
+		if cur.wqueue == 0 || cur.info.Bytes_acked == prev.info.Bytes_acked {
+			return cur.info.Bytes_acked - 1 + uint64(cur.wqueue), true
+		}
+		prev = cur
 	}
 }
 
