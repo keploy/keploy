@@ -162,7 +162,7 @@ func TestOutcomeCostAValueItsAnswerEchoesBesideAChancePlaceIsFresh(t *testing.T)
 	costFresh(t, "50 echoed in its answer beside VARCHAR(50) sent unchanged", d)
 	if len(d.Echo) != 1 || d.Echo[0].Place.Part == 0 {
 		t.Errorf("50 echoed in its answer: %s, Echo %v; want the answer's place named", oDescribe([]Decision{d}), d.Echo)
-	} else if want := "answered at " + d.Echo[0].String() + ", where the call's answer holds \"50\" as recorded"; !strings.Contains(d.Line, want) {
+	} else if want := "answered at " + d.Echo[0].String() + ", where the call's answer holds \"50\" whole as recorded"; !strings.Contains(d.Line, want) {
 		// The answer rewritten at replay is learned too: its line says where.
 		t.Errorf("50 echoed in its answer: line %q; want it to name the answer place (%q)", d.Line, want)
 	}
