@@ -389,11 +389,13 @@ type ClockWord struct {
 	// base64 runs decoded where they stand (a percent-encoded instant, one
 	// written with "\u002b" for its '+', one inside a base64 cursor), where
 	// the word and its sides are read, so the sides are compared as decoded
-	// text. Any other form is no place of a text (Valid). WordOf does not
-	// decode yet: the replay that reads Decoded lands before any learn step
-	// writes it, and until then nothing writes it. A Decoded word read raw
-	// fails its decoded sides' hashes, or, as the whole value, is the raw
-	// text checked whole, which the learned layout does not read.
+	// text. Any other form is no place of a text (Valid). WordOf reads the
+	// text it is given: a replay decodes the value once first (learn's
+	// decodedWordForm, which a learn step that writes Decoded reads its
+	// place in), and reads a word of form "" in the value as it is. A
+	// keploy that does not decode fails a Decoded word's decoded sides'
+	// hashes, or, as the whole value, reads the raw text checked whole,
+	// which the learned layout does not read: it holds nothing.
 	Form string `json:"form,omitempty" yaml:"form,omitempty" bson:"form,omitempty"`
 }
 

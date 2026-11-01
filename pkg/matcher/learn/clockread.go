@@ -849,7 +849,11 @@ func wordIn(w models.ClockWord, live Leaf) (Leaf, string) {
 	if !w.Valid() {
 		return Leaf{}, ", one word of a text, at no place a text has (bytes " + strconv.Itoa(w.Start) + "-" + strconv.Itoa(w.End) + ", " + strconv.Itoa(w.After) + " after, and a SHA-256 of each side): keploy refuses the value whatever it is. Record the test again"
 	}
-	v, changed := w.WordOf(live.Value)
+	text := live.Value
+	if w.Form == models.ClockWordDecoded {
+		text = decodedWordForm(text)
+	}
+	v, changed := w.WordOf(text)
 	switch changed {
 	case "short":
 		return Leaf{}, ", one word of a text, and the text this call carries is too short to hold the " + strconv.Itoa(w.Start) + " bytes the learn step saw before that word and the " + strconv.Itoa(w.After) + " after it apart, with a word between them: it changed"
@@ -861,6 +865,36 @@ func wordIn(w models.ClockWord, live Leaf) (Leaf, string) {
 	word := live
 	word.Value = v
 	return word, ""
+}
+
+// decodedWordForm is s decoded once (models.ClockWordDecoded), the text a
+// replay reads a word learned in it from: its escapes read (unescaped:
+// a percent-encoded instant, one written with "\u002b" for its '+'), then
+// each run of the base64 alphabets outside its instants (instantSpans,
+// nextB64Run) of minEncodedRun characters or more that decodes to text
+// (b64Decode) decoded where it stands, its escapes read too: a cursor's
+// JSON, between the text before the run and the text after it. It is s
+// where s holds neither. A learn step that writes a word in this form
+// reads its place in this same text.
+func decodedWordForm(s string) string {
+	d := unescaped(s)
+	var sb strings.Builder
+	done, from := 0, 0
+	for _, in := range append(instantSpans(d), instant{start: len(d), end: len(d)}) {
+		for st, en, ok := nextB64Run(d[:in.start], from); ok; st, en, ok = nextB64Run(d[:in.start], en) {
+			if t, ok := b64Decode(d[st:en]); ok && en-st >= minEncodedRun {
+				sb.WriteString(d[done:st])
+				sb.WriteString(unescaped(t))
+				done = en
+			}
+		}
+		from = in.end
+	}
+	if done == 0 {
+		return d
+	}
+	sb.WriteString(d[done:])
+	return sb.String()
 }
 
 // checkClockRead is CheckClockRead of o, a read of the clock that is its
