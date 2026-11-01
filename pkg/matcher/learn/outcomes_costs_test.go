@@ -451,3 +451,22 @@ func TestOutcomeCostAShortWordAtAMovedEarlierPlaceIsChance(t *testing.T) {
 		costRefused(t, c.what, d, c.kinds, "pool-1", "body.node")
 	}
 }
+
+// A word round F's view of an earlier recording gave at another field than
+// the one whose recorded text holds the recorded word (follows_test.go:326,
+// main refuses it): keploy reads a recording and F's view of it each whole,
+// not yet field by field, so it binds the word there today. Replay serves
+// that recording as recorded, so the bind checks the recorded value: a red
+// only, never a false green. Its line says what keploy read, each run's
+// text whole, and never that one place shows the word in both runs. When
+// the reader gives a recording's words per field, this row is refused.
+func TestOutcomeAWordFsViewMovedToAnotherFieldIsBoundWithoutClaimingBothRuns(t *testing.T) {
+	raw := append(eStartup(), eRow("48d1", "6c7d", "aaaa").ServedAs(6).ServedLive(eRow("9998", "9999", "6c7d")))
+	d := oWord(t, Decide(costF("k-48d1", "k-6c7d", nil, raw, nil)), "48d1", "6c7d")
+	if d.Outcome != OutcomeValue || d.From.Mock != "mock-6" {
+		t.Errorf("k-48d1 to k-6c7d, F's view moved the word to another column: %s; pinned: a Value from mock-6 (a red only)", oDescribe([]Decision{d}))
+	}
+	if strings.Contains(d.Line, "both runs") || !strings.Contains(d.Line, `holds "48d1" as recorded and "6c7d" as round F gave it, each run's text read whole, not field by field`) {
+		t.Errorf("the line of a word read in two texts whole claims more than keploy read: %q", d.Line)
+	}
+}
