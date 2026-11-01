@@ -194,6 +194,7 @@ type Agent struct {
 	scopeMeta    map[scopeKey]scopeMeta
 	givenBytes   int                            // record, proven switch: the bytes of the values the session's tests gave, held with their windows (MaxGivenBytesPerRecord)
 	scopeTable   map[string][]string            // replay: test name -> mock names (from mappings.yaml)
+	scopeRepeat  map[string][]string            // replay, proven switch: test name -> its mock names marked `repeat: any` (MockEntry.Repeat)
 	testBegins   map[string]time.Time           // replay: test name -> when it began in its recording (SetTestBegins)
 	testReal     map[string][]string            // replay: test name -> the mock.real destinations its recording lists (SetTestBegins)
 	testGiven    map[string][]models.GivenValue // replay, proven switch: test ID -> the values it gave when recorded; replaced with the scope table (SetScopeGiven)

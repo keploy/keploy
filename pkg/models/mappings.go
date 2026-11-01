@@ -82,6 +82,64 @@ type MockEntry struct {
 	// Owner running beside it, as judging kept it. Read and kept by each
 	// rewrite, whatever the switch.
 	Drift bool `json:"drift,omitempty" yaml:"drift,omitempty" bson:"drift,omitempty"`
+	// Repeat is, on an entry of a test's own list, the mark a reader of the
+	// mappings (a person, or an LLM following keploy's proposal) sets for a
+	// read the test makes once or several times, by its timing:
+	// MockEntryRepeatAny. The recording is still required of the test once;
+	// once it has answered, its recorded answer is served for every
+	// identical request the test makes, at any count. Every other recording
+	// is served as before. keploy never sets it; it reads and keeps it, and
+	// refuses any other value (RepeatMarkError). Empty on every other entry.
+	Repeat string `json:"repeat,omitempty" yaml:"repeat,omitempty" bson:"repeat,omitempty"`
+}
+
+// MockEntryRepeatAny is the one value of MockEntry.Repeat: the recording
+// answers its test's identical requests at any count, once at least.
+const MockEntryRepeatAny = "any"
+
+// RepeatMarks is, by test, the names of the entries of its list marked
+// `repeat: any` (MockEntry.Repeat), in list order; nil when no entry is.
+func RepeatMarks(tests map[string][]MockEntry) map[string][]string {
+	var out map[string][]string
+	for test, entries := range tests {
+		for _, e := range entries {
+			if e.Repeat != MockEntryRepeatAny || e.Name == "" {
+				continue
+			}
+			if out == nil {
+				out = map[string][]string{}
+			}
+			out[test] = append(out[test], e.Name)
+		}
+	}
+	return out
+}
+
+// errRepeatMark is a test entry whose recording carries a repeat mark keploy
+// does not know, under the proven switch: serving it once (as unmarked) or at
+// any count would each guess what its writer meant.
+const errRepeatMark = "test %q in mappings marks recording %q `repeat: %s`, and keploy knows only `repeat: any` (its recorded answer serves every identical request of the test, once at least): write `repeat: any`, or delete the line to serve it once"
+
+// RepeatMarkError is the refusal of a test entry with a repeat mark keploy does
+// not know (errRepeatMark).
+type RepeatMarkError struct{ Test, Mock, Value string }
+
+func (e *RepeatMarkError) Error() string {
+	return fmt.Sprintf(errRepeatMark, e.Test, e.Mock, e.Value)
+}
+
+// repeatMarkRefusal is the refusal of tc's first entry whose repeat mark
+// keploy does not know, under the proven switch; nil when there is none.
+func (tc *MappedTestCase) repeatMarkRefusal() error {
+	if !provenswitch.On() {
+		return nil
+	}
+	for _, e := range tc.Mocks {
+		if e.Repeat != "" && e.Repeat != MockEntryRepeatAny {
+			return &RepeatMarkError{Test: tc.ID, Mock: e.Name, Value: e.Repeat}
+		}
+	}
+	return nil
 }
 
 // RecordedWithS12Routing is the Mapping.RecordedWith mark of a test set keploy
@@ -585,7 +643,7 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 		return err
 	}
 	tc.At, tc.Real, tc.Given, tc.Key = at, rl, gv, key
-	return nil
+	return tc.repeatMarkRefusal()
 }
 
 // errBothMockLists is a test entry with a mock_entries list and a mocks list
@@ -680,7 +738,7 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	tc.At, tc.Real, tc.Given, tc.Key = at, rl, gv, key
-	return nil
+	return tc.repeatMarkRefusal()
 }
 
 // unmarshalJSONEntry is unmarshalYAMLEntry for a JSON entry.

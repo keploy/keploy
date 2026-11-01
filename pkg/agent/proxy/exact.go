@@ -30,7 +30,10 @@ import (
 //     answered finds no test mock: a miss (models.MissExtraCall). Under the
 //     proven switch no worker-scope mock (below) answers it either
 //     (integrations.OwnRepeatRead); with the switch off, one the run has
-//     reached that is that request does.
+//     reached that is that request does. The one exception is a recording
+//     the test's mappings entry marks `repeat: any` (models.MockEntry.Repeat):
+//     still required of the test once, it answers every identical request of
+//     the test once it has answered (exactView.repeat).
 //   - While no test is open, the current key's pool slice answers, with
 //     reuse or cursor-saturate as its mocks were recorded, beside the
 //     protocol-phase mocks. Its stateful cursors are the key's own.
@@ -107,6 +110,14 @@ type exactView struct {
 	// start (SequenceView); zero for a test the replay sent none of.
 	poolKey          string
 	winStart, winEnd time.Time
+	// repeat marks, by position in owned, on a test view, the open test's
+	// recordings its mappings entry marks `repeat: any` (TestModeInfo.Repeat):
+	// each is required of the test once, like the rest of its own, and once
+	// it has answered (repeated) it answers every identical request of the
+	// test again. Its consumed never turns true, so every read keeps showing
+	// it. nil for a view with none.
+	repeat   []bool
+	repeated []bool
 	// cand marks, by position in owned, the recordings the open test shares
 	// with the tests whose requests were open beside its own at record time
 	// (ServeExactTestConcurrent): filed after every one of its own, each
@@ -1301,11 +1312,10 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 	}
 	for _, a := range answered {
 		i, ok := v.index[a.owned.Name]
-		if !ok || v.consumed[i] || v.isCand(i) {
+		if !ok || v.answered(i) || v.isCand(i) {
 			continue
 		}
-		v.consumed[i] = true
-		v.order = append(v.order, i)
+		v.answerLocked(i)
 		if v.carried == nil {
 			v.carried = map[string]bool{}
 		}
@@ -1418,6 +1428,38 @@ func (v *exactView) addShared(cands []*models.Mock) {
 	v.add(cands, true)
 }
 
+// isRepeat reports whether owned position i is a recording its test marks
+// `repeat: any` (exactView.repeat).
+func (v *exactView) isRepeat(i int) bool {
+	return i < len(v.repeat) && v.repeat[i]
+}
+
+// answered reports whether owned position i has answered in v: consumed, or,
+// marked `repeat: any`, answered once at least. Under v.mu.
+func (v *exactView) answered(i int) bool {
+	return v.consumed[i] || (i < len(v.repeated) && v.repeated[i])
+}
+
+// answerLocked files owned position i as answered in v, holding v.mu: a
+// recording marked `repeat: any` answers again, the rest once. first says
+// it is i's first answer, which v.order files.
+func (v *exactView) answerLocked(i int) (first bool) {
+	if v.isRepeat(i) {
+		if v.repeated == nil {
+			v.repeated = make([]bool, len(v.owned))
+		}
+		first = !v.repeated[i]
+		v.repeated[i] = true
+	} else {
+		first = !v.consumed[i]
+		v.consumed[i] = true
+	}
+	if first {
+		v.order = append(v.order, i)
+	}
+	return first
+}
+
 // isCand reports whether owned position i is a shared recording.
 func (v *exactView) isCand(i int) bool {
 	return i < len(v.cand) && v.cand[i]
@@ -1452,6 +1494,18 @@ func (v *exactView) add(owned []*models.Mock, shared bool) {
 		c.TestModeInfo.SortOrder = int64(len(v.owned)) + 1
 		c.TestModeInfo.ServedIn = v.gen
 		c.TestModeInfo.Concurrent = shared
+		// A test's own recording its mappings entry marks `repeat: any`; a
+		// shared recording, or a pool view's ahead, answers once whatever
+		// its mark.
+		c.TestModeInfo.Repeat = c.TestModeInfo.Repeat && !shared && v.test != ""
+		if c.TestModeInfo.Repeat {
+			if v.repeat == nil {
+				v.repeat = make([]bool, len(v.owned), len(v.owned)+len(owned))
+			}
+			v.repeat = append(v.repeat, true)
+		} else if v.repeat != nil {
+			v.repeat = append(v.repeat, false)
+		}
 		c.MarkPooled()
 		v.index[c.Name] = len(v.owned)
 		v.owned = append(v.owned, c)
@@ -1778,8 +1832,8 @@ func (v *exactView) outcomeLocked() *testOutcome {
 			o.consumed = append(o.consumed, v.owned[i].Name)
 		}
 	}
-	for i, done := range v.consumed {
-		if !done && !v.isCand(i) {
+	for i := range v.consumed {
+		if !v.answered(i) && !v.isCand(i) {
 			o.unconsumed = append(o.unconsumed, v.owned[i].Name)
 		}
 	}
@@ -2815,9 +2869,15 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 				v.mu.Unlock()
 				return exactRefused, nil, nil
 			}
-			v.consumed[i] = true
-			v.order = append(v.order, i)
+			first := v.answerLocked(i)
 			owned := v.owned[i]
+			if !first {
+				// A recording marked `repeat: any` answering its test
+				// again: no new take, the test's first answer is the one
+				// its outcome and the take log hold.
+				v.mu.Unlock()
+				return exactServed, nil, func() { m.noteExactServed(owned, mk) }
+			}
 			if v.test == "" {
 				// A pool view's ahead: its consume is flagged as the
 				// next test opens (ServeExactTest), not now, so the

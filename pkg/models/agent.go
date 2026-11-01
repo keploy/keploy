@@ -328,6 +328,13 @@ type ScopeTableReq struct {
 	// no slice of its key holds is not served. Absent from an older CLI:
 	// worker: entries then answer between tests only, as the pool's.
 	Worker map[string][]string `json:"worker,omitempty"`
+	// Repeat is, under the proven switch, by test, the names of its own
+	// recordings its mappings entry marks `repeat: any` (MockEntry.Repeat):
+	// each is required of the test once, and once it has answered, answers
+	// every identical request of the test again. Absent when no test marks
+	// one. An agent that predates it serves each once, and a test that reads
+	// it again fails, as without the mark.
+	Repeat map[string][]string `json:"repeat,omitempty"`
 }
 
 // TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy
@@ -595,6 +602,12 @@ type ExactServing struct {
 	// (its mapping). Without Stage, an empty Test serves the pool again.
 	Test  string   `json:"test,omitempty"`
 	Owned []string `json:"owned,omitempty"`
+	// Repeat is, on a call that opens a test case (Test), the names of
+	// Owned its mappings entry marks `repeat: any` (MockEntry.Repeat): each
+	// is required of it once, and once it has answered, answers every
+	// identical request of it again. An agent that predates it serves each
+	// once.
+	Repeat []string `json:"repeat,omitempty"`
 	// Ahead is, on a call that serves the pool (no Test), the mocks of the
 	// next test case's mapping that were in flight when it began: recorded
 	// in the gap before its window, answered once it had begun

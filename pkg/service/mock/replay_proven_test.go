@@ -1153,3 +1153,23 @@ func TestARefusalDoesNotCallANameAbsentWhenTheMocksFileCannotBeReadAgain(t *test
 		require.NotContains(t, err.Error(), wrong)
 	}
 }
+
+// Under the switch the replay hands the agent, with the table, each test's
+// recordings its mappings entry marks `repeat: any`, read from
+// mappings.yaml; a test that marks none is not in it.
+func TestTheReplayPushesTheRepeatMarks(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mock_entries:\n        - name: mock-1\n          repeat: any\n        - name: mock-2\n    - id: o::TestB\n      dir: o\n      mock_entries:\n        - name: mock-3\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-1"}, {Name: "mock-2"}, {Name: "mock-3"}}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	require.NoError(t, New(zap.NewNop(), instr, named("mock-1", "mock-2", "mock-3"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	require.Equal(t, map[string][]string{"o::TestA": {"mock-1"}}, instr.repeat)
+}

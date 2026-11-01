@@ -544,3 +544,47 @@ func TestScopeTableInstallsTheRecordedWindowsBeforeThePool(t *testing.T) {
 		t.Fatalf("switch off: installed %v", svc.order)
 	}
 }
+
+// repeatSvc is poolSvc that takes each test's recordings marked
+// `repeat: any` too.
+type repeatSvc struct {
+	*poolSvc
+	repeat *map[string][]string
+}
+
+func (s repeatSvc) SetScopeRepeat(_ context.Context, r map[string][]string) error {
+	*s.repeat = r
+	s.order = append(s.order, "repeat")
+	return nil
+}
+
+// Under the switch the scope table carries each test's recordings marked
+// `repeat: any` to the agent, an empty table none (a set never keeps the
+// previous set's marks); an agent that cannot serve the mark refuses a table
+// that has some, since the CLI judges each test on them, and serves a table
+// without them.
+func TestScopeTableCarriesTheRepeatMarks(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	post := func(a *Agent, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		a.HandleScopeTable(rec, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(body)))
+		return rec
+	}
+	var got map[string][]string
+	svc := repeatSvc{poolSvc: &poolSvc{}, repeat: &got}
+	if rec := post(&Agent{logger: zap.NewNop(), svc: svc}, `{"mappings":{"o::TestA":["mock-3","mock-4"]},"pool":{},"repeat":{"o::TestA":["mock-3"]}}`); rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if !slices.Equal(got["o::TestA"], []string{"mock-3"}) {
+		t.Fatalf("repeat marks %v; want o::TestA's mock-3", got)
+	}
+	if rec := post(&Agent{logger: zap.NewNop(), svc: svc}, `{"mappings":{"o::TestA":["mock-3"]},"pool":{}}`); rec.Code != http.StatusOK || got != nil {
+		t.Fatalf("a table without marks: status %d, marks %v; want none kept", rec.Code, got)
+	}
+	if rec := post(&Agent{logger: zap.NewNop(), svc: &poolSvc{}}, `{"mappings":{"o::TestA":["mock-3"]},"pool":{},"repeat":{"o::TestA":["mock-3"]}}`); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("an agent without the mark answered %d to a table with one", rec.Code)
+	}
+	if rec := post(&Agent{logger: zap.NewNop(), svc: &poolSvc{}}, `{"mappings":{"o::TestA":["mock-3"]},"pool":{}}`); rec.Code != http.StatusOK {
+		t.Fatalf("an agent without the mark answered %d to a table without one", rec.Code)
+	}
+}

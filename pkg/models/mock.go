@@ -318,6 +318,13 @@ type TestModeInfo struct {
 	// test. Its matcher prefers the test's own recordings to it. Runtime-only,
 	// like the fields above.
 	Concurrent bool `json:"-" bson:"-"`
+
+	// Repeat is, on a copy exact serving serves an open test (KEPLOY_PROVEN),
+	// set for a recording the test's mappings entry marks `repeat: any`
+	// (MockEntry.Repeat): required of the test once, like every recording of
+	// its own, and once it has answered, it answers every identical request
+	// of the test again, at any count. Runtime-only, like the fields above.
+	Repeat bool `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {

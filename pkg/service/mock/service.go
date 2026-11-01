@@ -140,10 +140,11 @@ type SetPusher interface {
 // proven switch needs: it hands the agent the per-test table and each key's
 // pool slice (models.ScopeTableReq.Pool) in one request, with the recorded
 // window of every test of the set (models.ScopeTableReq.Windows), each
-// key's worker scope (models.ScopeTableReq.Worker) and the values each test
-// gave when it was recorded (models.ScopeTableReq.Given).
+// key's worker scope (models.ScopeTableReq.Worker), each test's recordings
+// marked `repeat: any` (models.ScopeTableReq.Repeat) and the values each
+// test gave when it was recorded (models.ScopeTableReq.Given).
 type ProvenTablePusher interface {
-	PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) error
+	PushProvenTable(ctx context.Context, table, pool, worker, repeat map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) error
 }
 
 type MappingReader interface {

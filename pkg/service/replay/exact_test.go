@@ -513,3 +513,19 @@ func TestTheLearningServedAfterTheLearnStepEndedIsEveryStateThatCarriesSome(t *t
 		t.Fatalf("the states sent with the learn step ended are %v; want %v (a binds-only and a clock-only state among them)", got, want)
 	}
 }
+
+// keploy test and record's full round open each test case with its
+// recordings its mappings entry marks `repeat: any` (ExactServing.Repeat);
+// a test case that marks none says none.
+func TestAnExactPlanCarriesEachTestsRepeatMarks(t *testing.T) {
+	p := newExactPlan(map[string][]models.MockEntry{
+		"test-1": {{Name: "mock-1", Repeat: models.MockEntryRepeatAny}, {Name: "mock-2"}},
+		"test-2": {{Name: "mock-3"}},
+	}, nil, []*models.Mock{{Name: "mock-1", Kind: models.HTTP}, {Name: "mock-2", Kind: models.HTTP}, {Name: "mock-3", Kind: models.HTTP}})
+	if got := p.repeat["test-1"]; len(got) != 1 || got[0] != "mock-1" {
+		t.Fatalf("test-1's marks %v; want mock-1", got)
+	}
+	if got := p.repeat["test-2"]; len(got) != 0 {
+		t.Fatalf("test-2 marks nothing, the plan says %v", got)
+	}
+}

@@ -263,6 +263,19 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this keploy agent cannot take the values the tests gave when they were recorded", http.StatusNotImplemented)
 			return
 		}
+		// Each test's recordings marked `repeat: any`, before its table:
+		// every table says them, an empty one too, so a set never keeps the
+		// previous set's. An agent that cannot serve them refuses a table
+		// that has some: the CLI judges each test on them.
+		if rs, ok := a.svc.(scopeRepeatSetter); ok {
+			if err := rs.SetScopeRepeat(r.Context(), req.Repeat); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if len(req.Repeat) > 0 {
+			http.Error(w, "this keploy agent cannot serve a recording marked `repeat: any` again", http.StatusNotImplemented)
+			return
+		}
 	}
 	if s, ok := a.svc.(scopeTableSetter); ok && req.Sets == nil {
 		if err := s.SetScopeTable(r.Context(), req.Mappings); err != nil {
@@ -324,6 +337,13 @@ type scopeGivenSetter interface {
 // scopePoolSetter installs each key's pool slice (proven wire).
 type scopePoolSetter interface {
 	SetScopePool(ctx context.Context, pool map[string][]string) error
+}
+
+// scopeRepeatSetter installs, for a replay under the proven switch, each
+// test's recordings its mappings entry marks `repeat: any`
+// (models.ScopeTableReq.Repeat).
+type scopeRepeatSetter interface {
+	SetScopeRepeat(ctx context.Context, repeat map[string][]string) error
 }
 
 // scopeWorkerSetter installs each key's worker scope for a replay

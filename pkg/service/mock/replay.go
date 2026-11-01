@@ -1271,7 +1271,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 			zap.String("next_step", "record the set again with this keploy: keploy mock record writes mappings.yaml"))
 	}
 	worker := workerSlices(mp, pool)
-	if err := pp.PushProvenTable(ctx, table, pool, worker, windows, recordedGivens(mp)); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, worker, models.RepeatMarks(mappings), windows, recordedGivens(mp)); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)

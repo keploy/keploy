@@ -313,7 +313,10 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		owned = a.notReal(id, testMocks(names, mocks))
+		a.scopeMu.Lock()
+		repeat := a.scopeRepeat[id]
+		a.scopeMu.Unlock()
+		owned = a.notReal(id, markRepeat(testMocks(names, mocks), repeat))
 	}
 	// What the store refused of the test's mapping serves nothing; its end
 	// counts each as a recorded call the test did not make.
@@ -352,6 +355,38 @@ func (a *Agent) openExactTest(es coreAgent.ExactServer, test string, owned []*mo
 		return err
 	}
 	return es.ServeExactTest(test, owned)
+}
+
+// SetScopeRepeat installs, for a replay under the proven switch, each test's
+// recordings its mappings entry marks `repeat: any`
+// (models.ScopeTableReq.Repeat): the test's begin serves each of them again
+// for every identical request, once it has answered (markRepeat). nil
+// installs none.
+func (a *Agent) SetScopeRepeat(_ context.Context, repeat map[string][]string) error {
+	a.scopeMu.Lock()
+	a.scopeRepeat = repeat
+	a.scopeMu.Unlock()
+	return nil
+}
+
+// markRepeat is owned with each mock repeat names marked
+// (models.TestModeInfo.Repeat) on a copy of its own: exact serving requires it
+// of the test once and answers every identical request of the test with it
+// again once it has. The others are owned's own.
+func markRepeat(owned []*models.Mock, repeat []string) []*models.Mock {
+	if len(repeat) == 0 {
+		return owned
+	}
+	out := make([]*models.Mock, len(owned))
+	for i, mk := range owned {
+		if mk != nil && slices.Contains(repeat, mk.Name) {
+			c := mk.ShallowCopy()
+			c.TestModeInfo.Repeat = true
+			mk = c
+		}
+		out[i] = mk
+	}
+	return out
 }
 
 // testMocks is the test mocks among a test's mapped names: the data-plane
@@ -544,7 +579,7 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 			if err != nil {
 				return fmt.Errorf("serve %s its own mocks: %w", ex.Test, err)
 			}
-			owned = testMocks(ex.Owned, mocks)
+			owned = markRepeat(testMocks(ex.Owned, mocks), ex.Repeat)
 		}
 		a.scopeMu.Lock()
 		if a.testBegun == nil {

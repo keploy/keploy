@@ -74,6 +74,8 @@ type composeInstr struct {
 	// the worker scope the last proven table push sent, and given the
 	// values each test gave when it was recorded that it sent with them.
 	table, pool, worker map[string][]string
+	// repeat is the recordings marked `repeat: any` the last push sent.
+	repeat map[string][]string
 	// recordedWindows are the recorded test windows that push sent.
 	recordedWindows []models.TestWindow
 	given           map[string][]models.GivenValue
@@ -221,10 +223,10 @@ func (f *composeInstr) GetScopeWindows(context.Context) ([]models.ScopeWindow, e
 func (f *composeInstr) PushScopeTable(context.Context, map[string][]string) error { return nil }
 
 // PushProvenTable takes the per-test table, the pool slices, the worker
-// scope, the recorded test windows and the recorded givens
-// (ProvenTablePusher), and keeps them.
-func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) error {
-	f.table, f.pool, f.worker, f.recordedWindows, f.given = table, pool, worker, windows, given
+// scope, the recordings marked `repeat: any`, the recorded test windows and
+// the recorded givens (ProvenTablePusher), and keeps them.
+func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker, repeat map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) error {
+	f.table, f.pool, f.worker, f.repeat, f.recordedWindows, f.given = table, pool, worker, repeat, windows, given
 	return nil
 }
 

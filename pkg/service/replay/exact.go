@@ -52,7 +52,11 @@ type exactPlan struct {
 	// filter the plan sends says so (models.MockFilterParams.LearnEnded).
 	learnEnded bool
 	owned      map[string][]string
-	pool       []string
+	// repeat is, by test, its recordings its mappings entry marks
+	// `repeat: any` (models.MockEntry.Repeat): the call that opens it says
+	// them (models.ExactServing.Repeat).
+	repeat map[string][]string
+	pool   []string
 	// worker is the set's worker scope (models.Mapping.Worker): the mocks of
 	// it the agent holds, in recorded order, each with its place. The
 	// staging call hands it to the agent, which serves each from its place
@@ -623,7 +627,7 @@ func (r *Replayer) windowOwnershipOf(testSetID string, cases []*models.TestCase,
 // stored data-plane mocks it lists that no test case's mapping lists, in its
 // order; it is not the pool's.
 func newExactPlan(mappings map[string][]models.MockEntry, worker []models.MockEntry, stored ...[]*models.Mock) *exactPlan {
-	p := &exactPlan{owned: make(map[string][]string, len(mappings))}
+	p := &exactPlan{owned: make(map[string][]string, len(mappings)), repeat: models.RepeatMarks(mappings)}
 	// held: the stored mocks by name, true for a test mock (data-plane).
 	held := map[string]bool{}
 	for _, list := range stored {
@@ -787,7 +791,7 @@ func carriesLearning(states map[string]models.MockState) []models.MockState {
 func (r *Replayer) serveExactTest(ctx context.Context, plan *exactPlan, name string, open testOpening) error {
 	plan.begin(name)
 	plan.testView = name
-	ex := &models.ExactServing{Test: name, Owned: append([]string(nil), plan.owned[name]...)}
+	ex := &models.ExactServing{Test: name, Owned: append([]string(nil), plan.owned[name]...), Repeat: append([]string(nil), plan.repeat[name]...)}
 	// keploy record's full round: the recordings it shares with the tests
 	// that ran beside it, after its own.
 	ex.Concurrent = plan.concurrentServing(name)
