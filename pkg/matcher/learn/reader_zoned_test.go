@@ -173,3 +173,70 @@ func TestReaderAnInstantInsideAnEmbeddedBase64CursorIsNotAPlainWord(t *testing.T
 		}
 	}
 }
+
+// A cursor whose base64 splits into a different number of words in the two
+// runs ('+' and '/' fall at other places once its instant moved) still
+// carries its instant: the words have no partner in the other run (an
+// unequal stretch), and each carries the cursor's instant, encoded, so the
+// caller refuses it rather than learn a plain word, even one bound whole.
+func TestReaderAnUnequalWordCountCursorInstantIsNotAPlainWord(t *testing.T) {
+	rec := time.Date(2026, 10, 31, 10, 50, 13, 305_000_000, time.UTC)
+	words := func(s string) int { return len(tokensBy(s, isWord)) }
+	cur := func(at time.Time, last string) string {
+		return "cursor=" + base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`{"since":"%s","last":"%s"}`, at.Format(time.RFC3339Nano), last)))
+	}
+	at := variables.Address{Place: variables.Place{Part: variables.PartHeader, Name: "X-Page"}, Word: -1}
+	found := 0
+	for k := 0; k < 4000 && found < 3; k++ {
+		r, l := cur(rec, "a?b>c~d"), cur(rec.Add(time.Duration(k+1)*7919*time.Millisecond), "a?b>c~d"[:1+k%7])
+		if words(r) == words(l) {
+			continue
+		}
+		found++
+		for _, rd := range readLeaf(NewDriftCache(), at, r, l) {
+			if rd.ChangedShape {
+				continue // refused whole: fails closed
+			}
+			for _, w := range rd.Words {
+				if w.Instant == nil || !w.Instant.Encoded {
+					t.Errorf("%q -> %q: word %q>%q (idx %d/%d) has instant %+v; want the cursor's, encoded", r, l, w.Rec, w.Live, w.RecIdx, w.LiveIdx, w.Instant)
+				}
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatalf("fixture: no pair with unequal word counts")
+	}
+}
+
+// A cursor whose only change is a time-ordered UUID (v7) carries no
+// instant: main reads a moment only from a keyed instant (heldMoments), so
+// the UUID's words are words, as the same UUID outside a cursor is.
+func TestReaderACursorWhoseTimeOrderedUUIDChangedCarriesNoInstant(t *testing.T) {
+	v7 := func(at time.Time) string {
+		ms := at.UnixMilli()
+		return fmt.Sprintf("%08x-%04x-7abc-8def-0123456789ab", ms>>16, ms&0xffff)
+	}
+	t0 := time.Date(2026, 10, 31, 10, 50, 13, 305_000_000, time.UTC)
+	cur := func(id string) string {
+		return "cursor=" + base64.StdEncoding.EncodeToString([]byte(`{"last":"`+id+`","n":20}`))
+	}
+	rec, live := cur(v7(t0)), cur(v7(t0.Add(74600*time.Millisecond)))
+	dc := NewDriftCache()
+	if len(dc.spansOf(dc.rawExtra(rec))) == 0 {
+		t.Fatalf("fixture: main reads no time group in %q's declared forms", rec)
+	}
+	at := variables.Address{Place: variables.Place{Part: variables.PartHeader, Name: "X-Page"}, Word: -1}
+	n := 0
+	for _, rd := range readLeaf(dc, at, rec, live) {
+		for _, w := range rd.Words {
+			n++
+			if w.Instant != nil {
+				t.Errorf("%q -> %q: word %q>%q carries instant %+v; want none (an unkeyed time group)", rec, live, w.Rec, w.Live, w.Instant)
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatalf("fixture: no changed word in %q -> %q", rec, live)
+	}
+}
