@@ -515,6 +515,11 @@ type SyncMockManager struct {
 	// namespace, so that none of the calls they carried was recorded as a
 	// test case (NoteUnnamedCallerConn).
 	unnamedCallerConns atomic.Uint64
+	// tlsRelayedConns counts the connections to the app that opened with a
+	// TLS handshake, which the ingress relayed to the app's TLS unread, so
+	// that none of the calls they carried was recorded as a test case
+	// (NoteTLSRelayedConn).
+	tlsRelayedConns atomic.Uint64
 
 	// outChanClosedDrops counts mocks that were already counted in
 	// totalAdded (they passed the pressure gate) but were then dropped

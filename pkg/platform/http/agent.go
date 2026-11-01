@@ -531,6 +531,11 @@ func (a *AgentClient) readIncoming(ctx context.Context, res *http.Response, tcCh
 // (models.StreamEndSummary.UnnamedCallerConns).
 const unnamedCallerConnsSaid = "the keploy agent recorded no test case for the calls some connections to the app carried: it could not name their callers in its PID namespace, so it could not tell whether a test made them"
 
+// tlsRelayedConnsSaid is what the client says of the session's connections to
+// the app that opened with a TLS handshake, which the agent relayed to the
+// app's own TLS unread (models.StreamEndSummary.TLSRelayedConns).
+const tlsRelayedConnsSaid = "the keploy agent recorded no test case for the calls some connections to the app carried: they were TLS (HTTPS), which it relayed to the app's own TLS without reading"
+
 // sayAgentSummary says, in this client's own log, what the agent's summary of
 // the session says it lost (models.StreamEndSummary): for an agent this client
 // did not start (docker compose's, kubelet's), whose own log reaches the user
@@ -548,6 +553,11 @@ func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
 		a.logger.Warn(unnamedCallerConnsSaid,
 			zap.Uint64("connections", s.UnnamedCallerConns),
 			zap.String("next_step", "run keploy in the PID namespace of the app's tests, or in the host's (--pid=host, or hostPID in Kubernetes)"))
+	}
+	if s.TLSRelayedConns > 0 {
+		a.logger.Warn(tlsRelayedConnsSaid,
+			zap.Uint64("connections", s.TLSRelayedConns),
+			zap.String("next_step", "serve the app's API over plain HTTP (or h2c gRPC) to the tests while recording, for example with TLS ended in front of the app, so keploy can read and record these calls"))
 	}
 	if s.Unsettled > 0 {
 		a.logger.Warn("the keploy agent saved some test cases before it had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",

@@ -127,6 +127,7 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 				markerSeen++
 				syncmgr.Get().NoteNotHandedOn()
 				syncmgr.Get().NoteUnnamedCallerConn()
+				syncmgr.Get().NoteTLSRelayedConn()
 			}
 			return nil
 		})
@@ -140,6 +141,9 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		// name.
 		syncmgr.Get().NoteNotHandedOn()
 		syncmgr.Get().NoteUnnamedCallerConn()
+		// And a TLS connection of an earlier session the ingress relayed to
+		// the app unread.
+		syncmgr.Get().NoteTLSRelayedConn()
 		endPause := memoryguard.SetRecordingPausedForTest(true)
 		memoryguard.IngressRequest()
 		endPause()
@@ -162,6 +166,10 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		// could not name in its PID namespace.
 		syncmgr.Get().NoteUnnamedCallerConn()
 		syncmgr.Get().NoteUnnamedCallerConn()
+		// Two TLS connections to the app this session, relayed to the app's
+		// TLS unread.
+		syncmgr.Get().NoteTLSRelayedConn()
+		syncmgr.Get().NoteTLSRelayedConn()
 		// The ingress requests of this session: one before its pause, two
 		// during it, one after.
 		memoryguard.IngressRequest()
@@ -214,6 +222,9 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		if sum.UnnamedCallerConns != 2 {
 			t.Fatalf("the marker says %d connections came from unnamed callers, want this session's 2", sum.UnnamedCallerConns)
 		}
+		if sum.TLSRelayedConns != 2 {
+			t.Fatalf("the marker says %d TLS connections were relayed unread, want this session's 2", sum.TLSRelayedConns)
+		}
 		if _, err := mr.NextPart(); err != io.EOF {
 			t.Fatalf("the stream did not end after its marker: %v", err)
 		}
@@ -239,6 +250,7 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 			"requests_before_first_pause":      1,
 			"tcs_not_handed_on":                2,
 			"connections_from_unnamed_callers": 2,
+			"connections_relayed_tls":          2,
 		} {
 			if got := sumLine[name]; got != want {
 				t.Errorf("the summary says %s=%v, want %d", name, got, want)
@@ -254,10 +266,49 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		if got := fields(unnamedCallerConnsSaid)["connections"]; got != uint64(2) {
 			t.Errorf("the warning of connections from unnamed callers says %v, want 2", got)
 		}
+		if f := fields(tlsRelayedConnsSaid); f["connections"] != uint64(2) || f["next_step"] != tlsRelayedNextStep {
+			t.Errorf("the warning of TLS connections relayed unread says %v, want 2 connections and what to do so their calls are recorded", f)
+		}
 		if got, want := fmt.Sprint(warn["connections_most"]), "[10.0.0.1:5000 -> 127.0.0.1:8080 (2) 10.0.0.2:5001 -> 127.0.0.1:8080 (1)]"; got != want {
 			t.Errorf("the warning names the connections %s, want %s", got, want)
 		}
 	})
+}
+
+// Every recording session on an agent says, at WARN in its own summary, the
+// TLS connections to the app its ingress relayed unread (none of their calls
+// was recorded), however many sessions before it did: the ingress warns as
+// they come only of the agent's first to each app port, so a later session's
+// summary is the one place its own are said above Debug.
+func TestEachRecordingSessionSaysItsOwnTLSConnectionsRelayedUnread(t *testing.T) {
+	syncmgr.Get().SetWatermark(nil) // no hold: test cases go at once
+	for session, relayed := range []int{1, 2} {
+		svc := streamsSvc{tc: make(chan *models.TestCase, 1), mocks: make(chan *models.Mock), maps: make(chan models.TestMockMapping)}
+		core, logs := observer.New(zapcore.InfoLevel)
+		a := &Agent{logger: zap.New(core), svc: svc}
+		tok := rand.Text() // its own each run: a token ended stays ended
+		resp, done := openHeldStream(t, a.HandleIncoming, models.IncomingReq{}, tok)
+		svc.tc <- &models.TestCase{Name: "test-1"}
+		for i := 0; i < relayed; i++ {
+			syncmgr.Get().NoteTLSRelayedConn()
+		}
+		endRecordingStreams(tok)
+		if _, err := io.ReadAll(resp.Body); err != nil {
+			t.Fatalf("session %d: the stream did not end: %v", session+1, err)
+		}
+		done() // the handler has returned, its summary said
+		said := logs.FilterMessage(tlsRelayedConnsSaid).All()
+		if len(said) != 1 || said[0].Level != zapcore.WarnLevel {
+			t.Fatalf("session %d said its TLS connections relayed unread %d times, want once at WARN", session+1, len(said))
+		}
+		if f := said[0].ContextMap(); f["connections"] != uint64(relayed) || f["next_step"] != tlsRelayedNextStep {
+			t.Fatalf("session %d's warning says %v, want its own %d connections and what to do so their calls are recorded", session+1, f, relayed)
+		}
+		sumLine := logs.FilterMessage("agent: recording complete").All()
+		if len(sumLine) != 1 || sumLine[0].ContextMap()["connections_relayed_tls"] != uint64(relayed) {
+			t.Fatalf("session %d's summary is %v, want connections_relayed_tls=%d", session+1, sumLine, relayed)
+		}
+	}
 }
 
 // A recording's request ends its own streams alone: another recording's
