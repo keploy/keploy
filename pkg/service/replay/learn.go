@@ -38,14 +38,10 @@ type learnedPersister interface {
 // it learned, per test" (design §7.2 step 10). A mock no test consumed is
 // named on its own.
 //
-// elsewhere is what calls made in other windows than their recordings'
-// taught them, for learning only (learnedElsewhere): their clock reads
-// alone are written onto the recordings no call of the round consumed
-// (learn.WithLearnedElsewhere), each said apart, under the test whose
-// recording it is (owner, by the set's recorded mapping: such a recording
-// is in no test's consumed list), with the windows that taught it. What
-// such a call taught a recording the round consumed is voided, and said so:
-// its own pairing wins (learn.OwnPairingWins). None of it is consumption.
+// elsewhere (learnedElsewhere) is written onto the recordings no call of
+// the round consumed and said apart, under owner's test (such a recording
+// is in no test's consumed list); on one the round consumed it is voided
+// and said so (learn.OwnPairingWins).
 //
 // consumerOf, when set, is the test that made each shared recording's call
 // (models.SetShares.Pins): what was learned on one is said under that test,

@@ -157,11 +157,7 @@ type Tracker struct {
 	// in the order of the real instants it served them at (servedIn), each
 	// with the instant its call reached keploy. NewSet forgets them.
 	servedAt []servedInstant
-	// serveOwner, when set, says whether a recording is the open test's own
-	// (its mapping) or the start-up's, as the store's view in force holds
-	// it (SetServeOwner): each serve is filed so as it is made, and a call
-	// checked against such a recording reads its span from those serves
-	// (LiveSpanOf).
+	// serveOwner is SetServeOwner's f.
 	serveOwner atomic.Pointer[func(*models.Mock) bool]
 	// serveAt is the real instant each of the running set's serves was made
 	// at, by number (serveAt[n-1] of the n-th, ServedMockAt's at): what an
@@ -2040,17 +2036,11 @@ func (t *Tracker) SetServeOwner(f func(*models.Mock) bool) {
 }
 
 // LiveSpanOf is LiveSpan for a call that judging or a replay checks against
-// the recording rec. Where rec is the open test's own recording or the
-// start-up's (SetServeOwner), the span starts at the latest serve before
-// arrival of the test's own recordings or the start-up's, and never before
-// the latest serve of any flow made before the test began (liveClockAtOf):
-// a worker: or background serve that lands between the test's clock read
-// and its send does not put the read before its span, and a read the
-// application kept from an earlier test is still before it, as LiveSpan
-// has it. Any other recording (a worker: scope's, the background's, the
-// pool's), and every call while no test is open, keeps LiveSpan's span
-// from any flow's serve. Record's learn step reads its windows from any
-// flow's serve (CallWindowFrom), never from this.
+// the recording rec: from the test's own serves where rec is the open test's
+// own or the start-up's (liveClockAtOf), so a worker: or background serve
+// landing between the test's clock read and its send does not put the read
+// before its span. Record's learn step reads its windows from any flow's
+// serve (CallWindowFrom), never from this.
 func (t *Tracker) LiveSpanOf(arrival time.Time, rec *models.Mock) (Span, bool) {
 	if t == nil {
 		return Span{}, false
