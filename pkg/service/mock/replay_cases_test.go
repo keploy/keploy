@@ -375,8 +375,9 @@ func TestAttributeMocksCarriesEachTestsLatestVerdict(t *testing.T) {
 		{Name: "pkg.TestB", Start: at(600), End: at(650)},                                                                            // a re-run that reported nothing
 		{Name: "pkg.TestPure", Start: at(700), End: at(800), Outcome: models.ScopeOutcomePassed},
 		{Name: "pkg.TestGated", Start: at(900), End: at(900), Outcome: models.ScopeOutcomeGated},
+		{Name: "pkg.TestKept", Start: at(950), End: at(990), Outcome: models.ScopeOutcomeFailed, Reported: models.ScopeOutcomePassed}, // keploy failed it on its recordings
 	}
-	expected := map[string][]models.MockEntry{"pkg.TestA": {{Name: "mock-0"}}, "pkg.TestB": {{Name: "mock-1"}}, "pkg.TestGated": {{Name: "mock-2"}}}
+	expected := map[string][]models.MockEntry{"pkg.TestA": {{Name: "mock-0"}}, "pkg.TestB": {{Name: "mock-1"}}, "pkg.TestGated": {{Name: "mock-2"}}, "pkg.TestKept": {{Name: "mock-3"}}}
 	got := map[string]string{}
 	reported := map[string]string{}
 	for _, f := range attributeMocks(windows, expected, nil, nil) {
@@ -385,6 +386,10 @@ func TestAttributeMocksCarriesEachTestsLatestVerdict(t *testing.T) {
 	}
 	require.Equal(t, models.ScopeOutcomePassed, reported["pkg.TestOwn"], "the latest run's harness verdict, beside its keploy verdict")
 	delete(got, "pkg.TestOwn")
+	// A test with recordings (the usual one) carries both verdicts too.
+	require.Equal(t, models.ScopeOutcomeFailed, got["pkg.TestKept"])
+	require.Equal(t, models.ScopeOutcomePassed, reported["pkg.TestKept"], "a test with recordings keeps its harness verdict")
+	delete(got, "pkg.TestKept")
 	require.Equal(t, map[string]string{
 		"pkg.TestA":     models.ScopeOutcomePassed,
 		"pkg.TestB":     "",

@@ -1018,7 +1018,7 @@ func TestRecordTestsReceipt(t *testing.T) {
 	windows := []models.ScopeWindow{
 		{Name: "orders::TestA", Outcome: models.ScopeOutcomePassed},
 		{Name: "orders::TestA/case", Outcome: models.ScopeOutcomePassed},
-		{Name: "orders::TestB", Outcome: models.ScopeOutcomeFailed},
+		{Name: "orders::TestB", Outcome: models.ScopeOutcomeFailed, Reported: models.ScopeOutcomeFailed},
 		{Name: "orders::TestC", Outcome: models.ScopeOutcomePassed, Evidence: lost},
 		{Name: "orders::TestD", Outcome: models.ScopeOutcomePassed, Evidence: &models.ScopeEvidence{}},
 		{Name: "suite", Suite: true},
@@ -1031,10 +1031,10 @@ func TestRecordTestsReceipt(t *testing.T) {
 	require.Equal(t, "t2-go", got.Set)
 	require.Equal(t, []TestReceipt{
 		{Name: "orders::TestA", Outcome: models.ScopeOutcomePassed},
-		{Name: "orders::TestB", Outcome: models.ScopeOutcomeFailed},
+		{Name: "orders::TestB", Outcome: models.ScopeOutcomeFailed, Reported: models.ScopeOutcomeFailed},
 		{Name: "orders::TestC", Outcome: models.ScopeOutcomePassed, Evidence: lost},
 		{Name: "orders::TestD", Outcome: models.ScopeOutcomePassed},
-	}, got.Tests, "a window's capture loss is kept for judging; empty evidence is not written")
+	}, got.Tests, "a window's capture loss is kept for judging, and the harness's own verdict; empty evidence is not written")
 	ignore, err := os.ReadFile(filepath.Join(keployDir, ".gitignore"))
 	require.NoError(t, err)
 	require.Contains(t, string(ignore), "/*/"+RecordTestsReceiptFile)
