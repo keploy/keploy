@@ -600,6 +600,17 @@ func TestKeployMockWritesWhatACallInAnotherWindowTaughtOntoTheRecording(t *testi
 		t.Fatalf("a recording of a test the round does not learn onto was written: %+v", store.got["mock-9"])
 	}
 
+	// Nor is a voiding said of a recording the round does not learn onto:
+	// mock-1 stays as it is, so nothing of it was voided.
+	logs.TakeAll()
+	m.config.Test.LearnTests = map[string]bool{"o::B": true}
+	if _, err := m.keepLearned(context.Background(), "s", consumed, nil, elsewhere, flows, expected); err != nil {
+		t.Fatal(err)
+	}
+	if void := logs.FilterMessageSnippet("voided what a call made in another window taught").AllUntimed(); len(void) != 0 {
+		t.Fatalf("the voided lines %+v; want none for a test the round does not learn onto", void)
+	}
+
 	// An agent that does not read client tests keeps none of it, and says so.
 	m.config.Test.LearnTests = nil
 	m.instrumentation = clientTestsInstr{reads: false}

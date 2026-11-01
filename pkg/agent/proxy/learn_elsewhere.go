@@ -15,7 +15,7 @@ import (
 
 // Record's full round learning a recording's clock reads from a call of its
 // shape made in another window than the recording's, for learning only
-// (integrations.LearnElsewhere; founder, 2026-11-01). A timer (a reconciler,
+// (integrations.LearnElsewhere). A timer (a reconciler,
 // a stale scan, a janitor) fires wherever the clock puts it: recorded in one
 // test's window, its call lands in another's in the full round, and a
 // recording the learn step taught nothing cannot answer the timer's next

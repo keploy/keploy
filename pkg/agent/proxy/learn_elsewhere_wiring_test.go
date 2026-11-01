@@ -1,13 +1,99 @@
 package proxy
 
 import (
+	"context"
+	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
+	"go.uber.org/zap"
 )
+
+// A clock read taught across windows reaches the mock on disk whole, however
+// many hops it took: the agent's store, the JSON the route answers with and
+// the client decodes, the CLI's writing of it, and the mock store. Each field
+// is what a replay checks the value by, or (Why) the line a reader of the
+// mock has; a hop that rebuilt the offset from its bounds would drop them with
+// every other row green. A field added to ClockOffset must be set here.
+func TestAClockReadTaughtAcrossWindowsReachesTheMockOnDiskWhole(t *testing.T) {
+	const name = "[E2E] stop-1793336961102639022"
+	whole := models.ClockOffset{
+		Min: -time.Minute, Max: time.Minute, Res: time.Millisecond,
+		Zone: "+05:30", Layout: "rfc3339", AppZone: "Asia/Kolkata",
+		Since: models.SinceTestBegin, Word: models.ClockWordOf(name, len("[E2E] stop-"), len(name)),
+		Why: "name reads the clock: the rule, both values and the undo", Step: time.Hour,
+	}
+	fields := reflect.ValueOf(whole)
+	for i := 0; i < fields.NumField(); i++ {
+		if fields.Field(i).IsZero() {
+			t.Fatalf("this row leaves ClockOffset.%s unset", fields.Type().Field(i).Name)
+		}
+	}
+
+	mm, ms := s12Set(t)
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+	mm.SetPairing(true)
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	clocks := map[string]models.ClockOffset{"body.name": whole}
+	if !integrations.LearnElsewhereOnto(mm, ms["other"], clocks) {
+		t.Fatal("a call taught other nothing")
+	}
+
+	sent, err := json.Marshal(mm.LearnedElsewhere())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var read []models.MockState
+	if err := json.Unmarshal(sent, &read); err != nil {
+		t.Fatal(err)
+	}
+	// The store names the set's recordings: this one is its first.
+	const onDisk = "mock-0"
+	states := map[string]models.MockState{}
+	for _, st := range learn.WithLearnedElsewhere(nil, read) {
+		st.Name = onDisk
+		states[onDisk] = st
+	}
+
+	ctx, set := context.Background(), "test-set-0"
+	ys := mockdb.New(zap.NewNop(), t.TempDir(), "mocks")
+	if err := ys.InsertMock(ctx, &models.Mock{Name: onDisk, Version: "api.keploy.io/v1beta1", Kind: models.HTTP, Spec: models.MockSpec{
+		Metadata: map[string]string{"src": "wiring"},
+		HTTPReq:  &models.HTTPReq{Method: "POST", URL: "http://x/y", ProtoMajor: 1, ProtoMinor: 1, Header: map[string]string{"Content-Type": "application/json"}, Body: `{"name":"` + name + `"}`},
+		HTTPResp: &models.HTTPResp{StatusCode: 200, StatusMessage: "OK", Body: `{"ok":true}`},
+	}}, set); err != nil {
+		t.Fatal(err)
+	}
+	if err := ys.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ys.PersistLearned(ctx, set, states); err != nil {
+		t.Fatal(err)
+	}
+	mocks, err := ys.GetUnFilteredMocks(ctx, set, models.BaseTime, models.BaseTime.AddDate(100, 0, 0), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filtered, err := ys.GetFilteredMocks(ctx, set, models.BaseTime, models.BaseTime.AddDate(100, 0, 0), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range append(mocks, filtered...) {
+		if m.Name != onDisk {
+			continue
+		}
+		if got, ok := m.Spec.Clocks["body.name"]; !ok || got != whole {
+			t.Fatalf("the mock on disk holds %#v (kept %v); want %#v", got, ok, whole)
+		}
+		return
+	}
+	t.Fatalf("no mock named %s among %d read back", onDisk, len(mocks)+len(filtered))
+}
 
 // A parser reaches the store's learning-only pairing through the views it is
 // handed, never the manager itself: the scoped view of its connection
