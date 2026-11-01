@@ -382,7 +382,7 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 			rule += "; answered at " + addrList(echo) + ", where the call's answer holds " + strconv.Quote(rec) + " whole as recorded"
 		}
 		d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeValue, rule, names(src))
-		d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: w.Live}
+		d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: w.Live, Run: first.startUp || first.otherTest, InStartUp: first.startUp}
 		d.FromAt = dc.fromAt(first, w.Rec)
 		d.Echo = echo
 		return d
@@ -1077,7 +1077,8 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 	return d
 }
 
-// bound is a Value bound at the earliest of src.
+// bound is a Value bound at the earliest of src; From says Run where that
+// place is the start-up's or an earlier test's (the run's variable).
 func (dc *decider) bound(path string, at variables.Address, n int, r, l string, src []evPlace, rule string) Decision {
 	first := src[0]
 	for _, p := range src[1:] {
@@ -1086,7 +1087,7 @@ func (dc *decider) bound(path string, at variables.Address, n int, r, l string, 
 		}
 	}
 	d := dc.learned(path, at, n, r, l, OutcomeValue, "bound to "+first.name+": "+rule, names(src))
-	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: l}
+	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: l, Run: first.startUp || first.otherTest, InStartUp: first.startUp}
 	d.FromAt = dc.fromAt(first, r)
 	return d
 }

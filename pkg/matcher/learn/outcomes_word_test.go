@@ -626,3 +626,17 @@ func TestOutcomeAFreshWordNamesThePlaceItSetAside(t *testing.T) {
 		}
 	}
 }
+
+// A value bound at a place of the start-up is the run's, so its From says
+// Run, as Earlier.Run said it to the adapter: every adapter then names that
+// value as the run's variable from the decision alone. One bound at the
+// call's own test's place is not.
+func TestOutcomeAValueBoundAtTheStartUpIsTheRuns(t *testing.T) {
+	for _, startUp := range []bool{true, false} {
+		earlier := oServed("mock-0", startUp, startUp, Response, oText("body.id", "app-0b1e"), "app-77c4", time.Millisecond)
+		d := oWord(t, Decide(oInput("body.user", "app-0b1e", "app-77c4", earlier, nil)), "0b1e", "77c4")
+		if d.Outcome != OutcomeValue || d.From.Mock != "mock-0" || d.From.Run != startUp {
+			t.Errorf("bound at the start-up %v: %s, from %+v; want a value bound to mock-0, Run %v", startUp, oDescribe([]Decision{d}), d.From, startUp)
+		}
+	}
+}
