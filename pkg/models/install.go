@@ -12,5 +12,8 @@ package models
 //
 // It hands the script over through /dev/stdin and a here-string rather than
 // `source <(curl ...)`: bash 3.2, macOS's /bin/bash, sources a process
-// substitution as an empty file, returns 0 and installs nothing.
-const InstallCommand = `source /dev/stdin <<<"$(curl -fsSL https://keploy.io/install.sh)"`
+// substitution as an empty file, returns 0 and installs nothing. When the
+// download fails, the echo hands over a script that says so and returns 1,
+// so the failure shows at the install line rather than at a later
+// "keploy: command not found".
+const InstallCommand = `source /dev/stdin <<<"$(curl -fsSL https://keploy.io/install.sh || echo 'echo Keploy installer download failed >&2; return 1')"`

@@ -106,7 +106,7 @@ This helps expand API Schema, Statement, and Branch Coverage.
 ### 1. Install Keploy Agent
 
 ```bash
-source /dev/stdin <<<"$(curl -fsSL https://keploy.io/install.sh)"
+source /dev/stdin <<<"$(curl -fsSL https://keploy.io/install.sh || echo 'echo Keploy installer download failed >&2; return 1')"
 ```
 
 ### 2. Record Test Cases

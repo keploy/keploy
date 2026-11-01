@@ -25,4 +25,10 @@ func TestInstallCommandWritesNothingInTheWorkingDirectory(t *testing.T) {
 	if !strings.Contains(InstallCommand, "curl -fsSL https://keploy.io/install.sh") {
 		t.Errorf("InstallCommand %q must fetch https://keploy.io/install.sh with curl -fsSL", InstallCommand)
 	}
+	// A failed download returns 1 with a message. Without the fallback the
+	// shell sources an empty script and returns 0, and the next keploy
+	// command fails with "command not found", far from the cause.
+	if !strings.HasSuffix(InstallCommand, ` || echo 'echo Keploy installer download failed >&2; return 1')"`) {
+		t.Errorf("InstallCommand %q must return 1 with a message when the download fails", InstallCommand)
+	}
 }

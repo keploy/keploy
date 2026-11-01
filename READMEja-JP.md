@@ -52,7 +52,7 @@ KeployはAPI呼び出しだけでなく、データベース呼び出しも記�
 エージェントをローカルにインストールしてKeployを統合します。コード変更は不要です。
 
 ```shell
-source /dev/stdin <<<"$(curl -fsSL https://keploy.io/install.sh)"
+source /dev/stdin <<<"$(curl -fsSL https://keploy.io/install.sh || echo 'echo Keploy installer download failed >&2; return 1')"
 ```
 
 ##  🎬 テストケースの記録
