@@ -295,33 +295,46 @@ func TestOutcomeAReReadBesideACarriedReadIsTwoSources(t *testing.T) {
 // the test began, whose check goes red where the value was no read of the
 // clock, never green. Where that window does not hold it either, the two
 // reads stay the refusal, naming both. In a keploy test, whose calls are not
-// read from a begin, too.
+// read from a begin, too. Here at a hundredth of a second: a millisecond is
+// no coarse cut, and two sends of the same millisecond are two sources, as a
+// carried read beside a re-read is.
 func TestOutcomeACoarseReadBesideTwoClockReadsIsReadSinceItsBegin(t *testing.T) {
 	const p = "body.app.createdAt"
 	rAt, fAt := oAt.Add(300*time.Millisecond), oAt.Add(time.Hour+320*time.Millisecond)
 	read, fRead := oAt.Add(-200*time.Millisecond), oAt.Add(time.Hour-205*time.Millisecond)
-	rec, live := iMs(read), iMs(fRead)
-	clockRead := func(mock, path string, at time.Time) Earlier {
-		e := iSent(mock, at, path, String, rec, live)
-		e.Seen[0].Clock = true
-		return e
+	centi := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.00Z") }
+	for _, cut := range []struct {
+		what string
+		form func(time.Time) string
+		read bool // a read since the test began; else two sources
+	}{{"hundredth of a second", centi, true}, {"millisecond", iMs, false}} {
+		rec, live := cut.form(read), cut.form(fRead)
+		clockRead := func(mock, path string, at time.Time) Earlier {
+			e := iSent(mock, at, path, String, rec, live)
+			e.Seen[0].Clock = true
+			return e
+		}
+		lease, audit := clockRead("mock-196", "body.lease_until", oAt.Add(-150*time.Millisecond)), clockRead("mock-305", "body.auditedAt", oAt.Add(-120*time.Millisecond))
+		w := iWin(rAt, fAt, 50*time.Millisecond)
+		w.Rec.Began, w.F.Began = oAt.Add(-5*time.Second), fAt.Add(-5*time.Second)
+		in := iCall(p, String, rec, live, rAt, fAt, w, []Earlier{lease, audit}, nil)
+		in.Drifts = oClientDrifts()
+		d := oWord(t, Decide(in), rec, live)
+		if !cut.read {
+			oRefused(t, "a client test's millisecond beside two clock reads of that millisecond", d, "two-sources", "mock-196", "mock-305")
+		} else {
+			iClock(t, "a client test's hundredth of a second beside two clock reads of it", d)
+			if d.Clock != nil && d.Clock.Since != models.SinceTestBegin {
+				t.Errorf("checked since %v; want since the test began", d.Clock.Since)
+			}
+		}
+		late := *w
+		late.F.Began = fAt
+		in.Window = &late
+		oRefused(t, "a "+cut.what+": round F's begin came after the read", oWord(t, Decide(in), rec, live), "two-sources", "mock-196", "mock-305")
+		in.Drifts, in.Window = oDrifts(), w
+		oRefused(t, "a "+cut.what+": a keploy test", oWord(t, Decide(in), rec, live), "two-sources", "mock-196", "mock-305")
 	}
-	lease, audit := clockRead("mock-196", "body.lease_until", oAt.Add(-150*time.Millisecond)), clockRead("mock-305", "body.auditedAt", oAt.Add(-120*time.Millisecond))
-	w := iWin(rAt, fAt, 50*time.Millisecond)
-	w.Rec.Began, w.F.Began = oAt.Add(-5*time.Second), fAt.Add(-5*time.Second)
-	in := iCall(p, String, rec, live, rAt, fAt, w, []Earlier{lease, audit}, nil)
-	in.Drifts = oClientDrifts()
-	d := oWord(t, Decide(in), rec, live)
-	iClock(t, "a client test's millisecond beside two clock reads of that millisecond", d)
-	if d.Clock != nil && d.Clock.Since != models.SinceTestBegin {
-		t.Errorf("checked since %v; want since the test began", d.Clock.Since)
-	}
-	late := *w
-	late.F.Began = fAt
-	in.Window = &late
-	oRefused(t, "round F's begin came after the read", oWord(t, Decide(in), rec, live), "two-sources", "mock-196", "mock-305")
-	in.Drifts, in.Window = oDrifts(), w
-	oRefused(t, "a keploy test", oWord(t, Decide(in), rec, live), "two-sources", "mock-196", "mock-305")
 }
 
 // A read of the second beside an answer that holds a finer instant of that
@@ -1220,4 +1233,50 @@ func TestOutcomeACoarseCopyOfAClockReadIsAClock(t *testing.T) {
 	in := iCall(q, Number, nr, nf, rAt, fAt, w, []Earlier{fine}, nil)
 	in.Drifts = oClientDrifts()
 	iValue(t, "a nanosecond sent by an earlier read of the clock", oWord(t, Decide(in), nr, nf), "mock-204")
+}
+
+// A copy at exactly a millisecond is no coarse cut: two reads of the clock
+// do not share a millisecond as the runs' timing falls, so a value that an
+// earlier send of its test held as the same millisecond in both runs is
+// bound to that send, whether or not that send's call read the clock. A
+// typed date (a BSON date: its leaf a date and time, its place in the
+// earlier send the raw milliseconds) is held by its moment at its own cut,
+// whatever text each side writes. A place that holds it only as a cut of a
+// finer instant is no source, and the read since the test began stays; at
+// a second, a send that is its call's read of the clock is no source.
+func TestOutcomeAMillisecondCopyIsBoundToItsSource(t *testing.T) {
+	const p, src = "body.cmd.documents.0.auth_time", "body.cmd.documents.0.lease_until"
+	ms := time.Millisecond
+	r0, f0 := oAt.Add(6300*ms), oAt.Add(61*time.Second+14800*ms)
+	rAt, fAt := r0.Add(900*ms), f0.Add(1400*ms)
+	w := iWin(rAt, fAt, 100*ms)
+	w.Rec.Began, w.F.Began = r0, f0
+	readR, readF := r0.Add(107*ms), f0.Add(153*ms)
+	typed := func(at time.Time, res time.Duration) string { return InstantLeaf(p, p, at, res).Value }
+	decide := func(typ Type, rec, live string, put Earlier) Decision {
+		t.Helper()
+		in := iCall(p, typ, rec, live, rAt, fAt, w, []Earlier{put}, nil)
+		in.Drifts = oClientDrifts()
+		return oWord(t, Decide(in), rec, live)
+	}
+	since := func(what string, d Decision) {
+		t.Helper()
+		iClock(t, what, d)
+		if d.Clock != nil && d.Clock.Since != models.SinceTestBegin {
+			t.Errorf("%s: %+v; want a read since the test began", what, *d.Clock)
+		}
+	}
+	for _, clock := range []bool{false, true} {
+		put := iSent("mock-204", rAt.Add(-500*ms), src, Number, iEpochMs(readR), iEpochMs(readF))
+		put.Seen[0].Clock = clock
+		iValue(t, fmt.Sprintf("milliseconds an earlier send held as its text (its call read the clock: %v)", clock),
+			decide(Number, iEpochMs(readR), iEpochMs(readF), put), "mock-204")
+		iValue(t, fmt.Sprintf("a typed date an earlier send held as its milliseconds (its call read the clock: %v)", clock),
+			decide(Instant, typed(readR, ms), typed(readF, ms), put), "mock-204")
+	}
+	micro := iSent("mock-204", rAt.Add(-500*ms), src, String, iMicro(readR.Add(412*time.Microsecond)), iMicro(readF.Add(388*time.Microsecond)))
+	since("a typed date an earlier send held only as a cut of its microseconds", decide(Instant, typed(readR, ms), typed(readF, ms), micro))
+	sec := iSent("mock-204", rAt.Add(-500*ms), src, Instant, typed(readR, time.Second), typed(readF, time.Second))
+	sec.Seen[0].Clock = true
+	since("a typed second an earlier send held as its call's read of the clock", decide(Instant, typed(readR, time.Second), typed(readF, time.Second), sec))
 }
