@@ -124,11 +124,9 @@ func mainRead(mm *MockManager, r string) ([]*models.Mock, bool) {
 	uk := map[models.Kind]*TreeDb{models.HTTP: mm.unfilteredByKind[models.HTTP], models.MySQL: mm.unfilteredByKind[models.MySQL]}
 	mm.treesMu.RUnlock()
 	perTest := func(kind models.Kind, staged []*models.Mock) []*models.Mock {
-		var teardown []*models.Mock
-		if v.afterTests(mm.exact.fired.Load()) {
-			teardown = mm.teardown(v.poolKey, mm.treeValues(startup, kind))
-		}
-		return v.perTest(kind, staged, teardown)
+		// The startup tree read whole: in a test the worker scope's, between
+		// tests once one fired the teardown (perTestFromStartup).
+		return v.perTest(kind, staged, mm.perTestFromStartup(v, mm.treeValues(startup, kind), mm.exact.fired.Load()))
 	}
 	read, k, _ := strings.Cut(r, " ")
 	kind := map[string]models.Kind{"http": models.HTTP, "mysql": models.MySQL}[k]

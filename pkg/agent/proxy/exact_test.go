@@ -593,9 +593,13 @@ func TestTheTeardownBoundIsReadOncePerTreeRevision(t *testing.T) {
 // The reached worker scope is shown whether a test is open or not, so after
 // a test a per-test read shows its per-test recordings of the set's teardown,
 // as it shows the pool slice's, and never one made before the set's last test
-// ended. In a test a per-test read is unchanged: it shows the test's own
-// alone (the worker scope's per-test recordings there are a stated limit,
-// read through no per-test read).
+// ended. In a test a per-test read shows the test's own, then the worker
+// scope's per-test recordings in their order (windowWorker): the staging
+// files those in the startup tree alone, and a parser that reads
+// per-test-lifetime recordings from its per-test tier only (Postgres) found
+// them in no read of a window. Changed from "the test's own alone", a stated
+// limit the one rule for the worker scope removes (a worker: recording
+// answers at most once in the windows, wherever a parser reads it).
 func TestAfterTheLastTestAPerTestReadShowsTheReachedWorkerScopesTeardown(t *testing.T) {
 	early := exactMongo("worker-early", 200*time.Millisecond, models.LifetimePerTest)
 	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
@@ -606,7 +610,7 @@ func TestAfterTheLastTestAPerTestReadShowsTheReachedWorkerScopesTeardown(t *test
 	mm.ServeExactPool("k", nil)
 	perTestReads(t, mm, "before the first test")
 	mm.ServeExactTest("T", []*models.Mock{owned})
-	perTestReads(t, mm, "in the test", "owned")
+	perTestReads(t, mm, "in the test", "owned", "worker-early", "worker")
 	mm.ServeExactPool("k", nil)
 	perTestReads(t, mm, "after the test", "worker")
 }
@@ -4041,5 +4045,78 @@ func TestAWorkerSpendFollowsTheViewTheCallWasReadIn(t *testing.T) {
 				t.Errorf("TestB's window was answered %v after TestA's call committed past TestA's end; want %v: w-0 answered TestA's window, as when the commit lands before the end", got, want)
 			}
 		})
+	}
+}
+
+// A worker: recording of per-test lifetime is offered by a test's per-test
+// read. The staging files a per-test-lifetime recording in the startup tree
+// alone, and a parser that serves only session-lifetime recordings from its
+// session tier (Postgres) reads per-test-lifetime ones from its per-test tier
+// only: a recording a mapping edit moved to worker: answered no call in any
+// window. Every per-test read offers it (GetPerTestMocksInWindow,
+// RangePerTestMocksInWindow, GetFilteredMocksByKind, the round snapshot,
+// SharedMocks), and every read that drops what was spent drops it once a
+// window spent it: it answers at most one call in the windows of the staging.
+// SharedMocks is what the view shows whatever it spent (showsStatic). A
+// startup: recording is not offered in a window.
+func TestAWorkerRecordingIsInAWindowsPerTestRead(t *testing.T) {
+	w := exactMock("w-0", time.Second, models.LifetimePerTest)
+	s := exactMock("s-0", 2*time.Second, models.LifetimePerTest)
+	if w.IsProtocolPhase() {
+		t.Fatal("the fixture is protocol-phase; the row is about a data-plane recording")
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SetMocksWithWindowThreeTier(nil, nil, []*models.Mock{w, s}, models.BaseTime, time.Now())
+	open := func(test string) {
+		mm.ServeExactWorker([]string{"w-0"})
+		mm.ServeExactPool("k", []string{"s-0"})
+		mm.ServeExactWorker([]string{"w-0"})
+		mm.ServeExactTest(test, nil)
+	}
+	reads := []struct {
+		name   string
+		read   func() []*models.Mock
+		static bool
+	}{
+		{"GetPerTestMocksInWindow", func() []*models.Mock { got, _ := mm.GetPerTestMocksInWindow(); return got }, false},
+		{"RangePerTestMocksInWindow", func() []*models.Mock {
+			var got []*models.Mock
+			_ = mm.RangePerTestMocksInWindow(func(mk *models.Mock) bool { got = append(got, mk); return true })
+			return got
+		}, false},
+		{"GetFilteredMocksByKind", func() []*models.Mock { got, _ := mm.GetFilteredMocksByKind(w.Kind); return got }, false},
+		{"RoundSnapshot", func() []*models.Mock {
+			snap, _ := mm.RoundSnapshot(integrations.RoundQuery{Kind: w.Kind})
+			return snap.PerTest
+		}, false},
+		{"SharedMocks", func() []*models.Mock { got, _, _ := mm.SharedMocks(); return got }, true},
+	}
+	has := func(ms []*models.Mock, name string) bool {
+		for _, mk := range ms {
+			if mk != nil && mk.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+	open("TestA")
+	for _, r := range reads {
+		got := r.read()
+		if !has(got, "w-0") {
+			t.Errorf("TestA's %s offered %v; want w-0, the worker scope's recording, which no other read of a lifetime-honouring parser serves in a window", r.name, exactNames(got))
+		}
+		if has(got, "s-0") {
+			t.Errorf("TestA's %s offered s-0, a startup: recording: start-up recordings are served between tests only", r.name)
+		}
+	}
+	if !mm.MarkMockAsUsed(*w) {
+		t.Fatal("TestA could not consume w-0")
+	}
+	open("TestB")
+	for _, r := range reads {
+		if got := r.read(); !r.static && has(got, "w-0") {
+			t.Errorf("TestB's %s offered w-0 again; want it spent: a worker: recording answers at most one call in the windows of the staging", r.name)
+		}
 	}
 }

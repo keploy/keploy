@@ -2420,7 +2420,9 @@ func (v *exactView) backgroundOrder(out, in []*models.Mock, show func(*models.Mo
 // mocks of kind (between tests, the next test's ahead), then what the view
 // shows of the per-test tree's values (staged) and of teardown.
 //
-// teardown is the set's teardown recordings (MockManager.teardown), which the
+// teardown is what the read takes of the startup tree (perTestFromStartup):
+// in a test's window the worker scope's recordings (windowWorker); between
+// tests the set's teardown recordings (MockManager.teardown), which the
 // callers (exactPerTest, the round snapshot) pass only while no test is open
 // after the first test fired (afterTests). The staging files every per-test
 // recording in the startup tree alone, so a call recorded after the set's
@@ -2695,19 +2697,55 @@ func (b *teardownBound) after(clock string) func(time.Time) bool {
 }
 
 // exactPerTest is v's per-test read of staged, of kind (exactView.perTest),
-// with the set's teardown recordings of kind when the read takes them.
+// with the startup tree's recordings of kind the read takes (exactFromStartup).
 func (m *MockManager) exactPerTest(v *exactView, kind models.Kind, staged []*models.Mock) []*models.Mock {
-	return v.perTest(kind, staged, m.exactTeardown(v, kind))
+	return v.perTest(kind, staged, m.exactFromStartup(v, kind))
 }
 
-// exactTeardown is the set's teardown recordings of kind v's per-test read
-// takes (exactView.afterTests), nil when it takes none.
-func (m *MockManager) exactTeardown(v *exactView, kind models.Kind) []*models.Mock {
-	if !v.afterTests(m.exact.fired.Load()) {
+// exactFromStartup is what v's per-test read of kind takes of the startup
+// tree (perTestFromStartup), nil when it takes none.
+func (m *MockManager) exactFromStartup(v *exactView, kind models.Kind) []*models.Mock {
+	fired := m.exact.fired.Load()
+	if v.test == "" && !v.afterTests(fired) {
 		return nil
 	}
 	// What the view shows of the startup tier: perTest keeps only those.
-	return m.teardown(v.poolKey, v.shownOf(m.startupTree(), kind))
+	return m.perTestFromStartup(v, v.shownOf(m.startupTree(), kind), fired)
+}
+
+// perTestFromStartup is what a per-test read in v takes of startup (what v
+// shows of the startup tree) after the per-test tier: in a test's window the
+// worker scope's data-plane recordings (windowWorker); between tests, once
+// the first test fired (fired), the set's teardown (teardown); else nothing.
+// Every per-test read (exactPerTest, the round snapshot, SharedMocks) takes
+// it through here, so they read one set.
+func (m *MockManager) perTestFromStartup(v *exactView, startup []*models.Mock, fired bool) []*models.Mock {
+	if v.test != "" {
+		return v.windowWorker(startup)
+	}
+	if !v.afterTests(fired) {
+		return nil
+	}
+	return m.teardown(v.poolKey, startup)
+}
+
+// windowWorker is, of startup, the worker scope's recordings that are not
+// protocol-phase: a test's per-test read takes them, so a worker: recording
+// answers in a test's window whatever tier a parser reads it from. The
+// staging files a per-test-lifetime recording in the startup tree alone, and
+// a parser that serves only session-lifetime recordings from its session
+// tier (Postgres) reads per-test-lifetime ones from its per-test tier only:
+// without this, a recording a mapping edit moved to worker: answered no call
+// in any window. Each answers at most one call in the windows of the staging
+// (spendsInTests), whichever read offered it.
+func (v *exactView) windowWorker(startup []*models.Mock) []*models.Mock {
+	var out []*models.Mock
+	for _, mk := range startup {
+		if mk != nil && v.isWorker(mk.Name) && !mk.IsProtocolPhase() {
+			out = append(out, mk)
+		}
+	}
+	return out
 }
 
 // rangeExactPerTest calls fn with each mock of exactPerTest(v, kind, staged
@@ -2719,7 +2757,7 @@ func (m *MockManager) rangeExactPerTest(v *exactView, kind models.Kind, tree *Tr
 	if !v.rangeUnanswered(kind, false, fn) {
 		return
 	}
-	for _, mk := range v.keepPerTest(v.shownOf(tree, kind), m.exactTeardown(v, kind)) {
+	for _, mk := range v.keepPerTest(v.shownOf(tree, kind), m.exactFromStartup(v, kind)) {
 		if !fn(mk) {
 			return
 		}

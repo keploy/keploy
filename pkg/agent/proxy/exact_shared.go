@@ -127,8 +127,9 @@ func (m *MockManager) SharedMocks() (perTest, session []*models.Mock, ok bool) {
 	m.treesMu.RUnlock()
 	m.swapMu.RUnlock()
 	// A test's view reads no teardown (afterTests): its per-test read is its
-	// own then what it shows of the per-test tier (exactPerTest).
-	perTest = v.keepWith(v.shownOf(filtered, ""), v.showsStatic)
+	// own then what it shows of the per-test tier and of the worker scope in
+	// the startup tier (exactPerTest, windowWorker).
+	perTest = v.keepWith(append(v.shownOf(filtered, ""), v.windowWorker(v.shownOf(startup, ""))...), v.showsStatic)
 	// GetSessionMocks: GetStartupMocks, what the view shows of the startup
 	// tier then the session tier, then GetSessionScopedMocks, what it shows
 	// of the session tier then the startup tier, each mock once: the second
