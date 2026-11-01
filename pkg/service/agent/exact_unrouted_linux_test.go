@@ -129,7 +129,7 @@ func requireMappingEdit(t *testing.T, code int, rep *models.MockMismatchReport, 
 	require.Equal(t, name, rep.ClosestMock, at)
 	require.True(t, strings.HasPrefix(rep.NextSteps, "This call, made "+made+", is "+name+", which mappings.yaml lists for o::TestB."), "%s: %q", at, rep.NextSteps)
 	require.Contains(t, rep.NextSteps, "move "+name+" out of o::TestB's list to worker: in mappings.yaml", at)
-	for _, never := range []string{"record again", "Re-record", "judging", "'keploy mock record'"} {
+	for _, never := range []string{"record again", "Re-record", "judging", "'keploy mock record'", "keploy mock record"} {
 		require.NotContains(t, rep.NextSteps, never, at)
 	}
 }
@@ -248,6 +248,29 @@ func TestKeployMockReplaysATestsOwnExtraCallIsNeverNamedAgain(t *testing.T) {
 	require.False(t, rep.NotOwned, "%+v", rep)
 	require.NotContains(t, rep.NextSteps, "again:")
 	require.NotContains(t, rep.NextSteps, "mock-2")
+}
+
+// keploy mock replay names a call "again" only when it is exactly the
+// recording an earlier miss was named as (the strict match of the store's
+// lookup): mock-2 (GET /b, o::TestB's) named between tests by a first miss,
+// a later call between tests to /b?v=2, which no recording holds, though
+// the store finds mock-2 by the keys it asks with, is never told it is
+// mock-2 again (nor that the mock set needs a recording of each, which
+// 'keploy mock record' makes): it is a call no recording holds.
+func TestKeployMockReplaysOtherCallOfTheSameKeysIsNeverNamedAgain(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := &routingProxy{newServingProxy()}
+	a.Proxy = p
+	routedMockSession(t, a, []*models.Mock{pingMock("mock-1", "/a", "a", t0), pingMock("mock-2", "/b", "b", t0.Add(time.Second))})
+	code, rep := routedMiss(t, p.servingProxy, "/b")
+	requireMappingEdit(t, code, rep, "between tests", "mock-2", "precondition: the first call between tests")
+	code, rep = routedMiss(t, p.servingProxy, "/b?v=2")
+	require.NotEqual(t, nethttp.StatusOK, code)
+	require.NotNil(t, rep)
+	require.False(t, rep.NotOwned, "a call no recording holds is named not-owned: %+v", rep)
+	for _, never := range []string{"again:", "This call, made between tests, is mock-2", "a recording of each", "keploy mock record"} {
+		require.NotContains(t, rep.NextSteps, never, "a call no recording holds is named as mock-2 again: %q", rep.NextSteps)
+	}
 }
 
 // diskRoutingProxy is keploy mock replay's proxy as the agent drives it with

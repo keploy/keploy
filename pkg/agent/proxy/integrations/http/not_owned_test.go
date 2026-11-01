@@ -131,7 +131,7 @@ func TestAMissOnACallMadeElsewhereNamesItsRecording(t *testing.T) {
 		}
 		// The set holds a recording of the call, so none is missing: the
 		// miss never says to make one with keploy mock record either.
-		if !strings.Contains(r.NextSteps, "made between tests, is other-test-delete") || !strings.Contains(r.NextSteps, "move other-test-delete to worker: in mappings.yaml") || strings.Contains(r.NextSteps, "judging") || strings.Contains(r.NextSteps, "record again") || strings.Contains(r.NextSteps, "'keploy mock record'") {
+		if !strings.Contains(r.NextSteps, "made between tests, is other-test-delete") || !strings.Contains(r.NextSteps, "move other-test-delete to worker: in mappings.yaml") || strings.Contains(r.NextSteps, "judging") || strings.Contains(r.NextSteps, "record again") || strings.Contains(r.NextSteps, "keploy mock record") {
 			t.Fatalf("keploy mock replay's miss does not say the mapping edit alone: %q", r.NextSteps)
 		}
 	}
@@ -381,7 +381,7 @@ func TestKeployMocksMappingEditNamesTheTestsItsRecordingIsListedFor(t *testing.T
 				t.Errorf("%s: the miss does not say %q: %q", tc.name, want, r.NextSteps)
 			}
 		}
-		for _, never := range append(tc.never, "record again", "judging", "'keploy mock record'") {
+		for _, never := range append(tc.never, "record again", "judging", "'keploy mock record'", "keploy mock record") {
 			if strings.Contains(r.NextSteps, never) {
 				t.Errorf("%s: the miss says %q: %q", tc.name, never, r.NextSteps)
 			}
