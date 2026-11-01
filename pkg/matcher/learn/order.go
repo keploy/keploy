@@ -689,6 +689,10 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		return dc.learned(path, at, n, r, l, OutcomeFresh, "the test's own value: no place before the call holds it; bound at its first call", nil)
 	}
 	why := "a time its call's window does not hold in both runs, that no answer gave and no request of this scope sent"
+	if dc.in.Window == nil {
+		// The adapter read no app clock for the call: name that cause.
+		why = "a time no answer gave and no request of this scope sent; the call carries no app clock, so no window of its own can hold it"
+	}
 	if cutWhy != "" {
 		why += " (" + cutWhy + ")"
 	}
