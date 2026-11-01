@@ -925,23 +925,53 @@ func TestACallThroughTheSharedIndexComparesOnlyTheOwnRecordingsOfItsPath(t *test
 // landings is what other calls do while the call under test runs, keyed by
 // the call's reads of what the store reports spent (MockSpent and
 // SpentReader.Spent, each one point): the change at point p lands just after
-// the p-th read answered, as another call's consume, or a test's end, lands
-// between two reads of a call that runs beside it.
+// the p-th read answered, as another call's consume, an ended test's Spend,
+// or a test's end, lands between two reads of a call that runs beside it.
+// took is the twin the landing consumed or spent, fired how many of at ran,
+// and ended what ended tests spent, as SpentReader reports it.
 type landings struct {
 	at     map[int]func()
 	points int
+	fired  int
 	took   string
+	ended  map[string]bool
 }
 
 func (l *landings) point() {
 	l.points++
 	if f := l.at[l.points]; f != nil {
+		l.fired++
 		f()
 	}
 }
 
 // sweep is the store's landings (landingDb).
 func (l *landings) sweep() *landings { return l }
+
+// spend is an ended test's Spend of the first of names it has not spent:
+// SpentReader reports it spent from then on, and, as MockManager.Spend, it
+// moves no generation and consumes nothing.
+func (l *landings) spend(names ...string) func() {
+	return func() {
+		for _, name := range names {
+			if !l.ended[name] {
+				if l.ended == nil {
+					l.ended = map[string]bool{}
+				}
+				l.ended[name], l.took = true, name
+				return
+			}
+		}
+	}
+}
+
+// spentByAnEndedTest is SpentReader.Spent of what ended tests spent, one
+// point.
+func (l *landings) spentByAnEndedTest(m *models.Mock) bool {
+	spent := l.ended[m.Name]
+	l.point()
+	return spent
+}
 
 // landingDb is a store under landings: take is another call's consume of
 // the first of names the store still holds, end a test's end, which moves
@@ -966,10 +996,7 @@ func (d *landingGenDb) MockSpent(name string) bool {
 	return spent
 }
 
-func (d *landingGenDb) Spent(*models.Mock) bool {
-	d.point()
-	return false
-}
+func (d *landingGenDb) Spent(m *models.Mock) bool { return d.spentByAnEndedTest(m) }
 
 func (d *landingGenDb) take(names ...string) func() {
 	return func() {
@@ -998,10 +1025,7 @@ func (d *landingVarDb) MockSpent(name string) bool {
 	return spent
 }
 
-func (d *landingVarDb) Spent(*models.Mock) bool {
-	d.point()
-	return false
-}
+func (d *landingVarDb) Spent(m *models.Mock) bool { return d.spentByAnEndedTest(m) }
 
 func (d *landingVarDb) take(names ...string) func() {
 	return func() {
@@ -1085,50 +1109,72 @@ func newVarLandingDb() landingDb {
 	return &landingVarDb{genVarDb: &genVarDb{varDb: &varDb{perTest: bindTwins()}, gen: 1}}
 }
 
+// consumeLanding and spendLanding are what a sweep lands at a point of a
+// call's reads: another call's consume of the first twin of order the store
+// still holds (take), or an ended test's Spend of the first it has not spent
+// (landings.spend).
+func consumeLanding(db landingDb, order ...string) func() { return db.take(order...) }
+
+func spendLanding(db landingDb, order ...string) func() { return db.sweep().spend(order...) }
+
 // sweepLandings runs, on a fresh store of newDb, the call prepare readies
-// (after the generation's first calls built its index), once for each point
-// at which another call's consume of one of the twins (the first the store
-// still holds, of either order) can land, and with end, once for each later
-// point at which the test's end can land too. check is handed each run's
-// answer, with the twin the other call took, when no test ended.
-func sweepLandings(t *testing.T, newDb func() landingDb, prepare func(landingDb) func() *models.Mock, withEnd bool, check func(served *models.Mock, took string)) {
+// (after the generation's first calls built its index), once for each of the
+// call's own reads of what is spent, with land (of one of the twins, the
+// first it can of either order) landing just after that read, and with end,
+// once for each later read with the test's end landing just after it too.
+// Only runs whose landings all fired count, and the sweep fails unless least
+// of them did, least being what the call's reads made when its row was
+// written: a call that reads what is spent at fewer points, or reads it off
+// the instrumented methods, sweeps fewer. check, when there is one, is
+// handed each run's answer, with the twin land took, when no test ended.
+func sweepLandings(t *testing.T, newDb func() landingDb, prepare func(landingDb) func() *models.Mock, land func(db landingDb, order ...string) func(), withEnd bool, least int, check func(served *models.Mock, took string)) {
 	t.Helper()
 	runs := 0
 	for _, order := range [][]string{{"twin-0", "twin-1"}, {"twin-1", "twin-0"}} {
 		for at := 1; ; at++ {
-			swept := false
+			landed := false
 			for end := at + 1; ; end++ {
 				db := newDb()
 				call := prepare(db)
 				l := db.sweep()
-				l.at = map[int]func(){at: db.take(order...)}
+				// Points count the call's own reads, not prepare's.
+				l.points = 0
+				l.at = map[int]func(){at: land(db, order...)}
 				if withEnd {
 					l.at[end] = db.end
 				}
 				served, panicked := landingRun(call)
 				if panicked != nil {
-					t.Fatalf("%v: another call's consume at point %d (test end at %d: %v) of %d made verify mode panic: %v", order, at, end, withEnd, l.points, panicked)
+					t.Fatalf("%v: a landing at point %d (test end at %d: %v) of %d made verify mode panic: %v", order, at, end, withEnd, l.points, panicked)
 				}
-				if l.points < at {
+				if l.fired == 0 {
+					// at is past the call's last read.
+					break
+				}
+				if l.took == "" {
+					t.Fatalf("%v: the landing at point %d of %d took no twin", order, at, l.points)
+				}
+				landed = true
+				if !withEnd {
+					runs++
+					if check != nil {
+						check(served, l.took)
+					}
+					break
+				}
+				if l.fired < 2 {
+					// end is past the call's last read.
 					break
 				}
 				runs++
-				swept = true
-				if !withEnd {
-					check(served, l.took)
-					break
-				}
-				if l.points < end {
-					break
-				}
 			}
-			if !swept {
+			if !landed {
 				break
 			}
 		}
 	}
-	if runs < 10 {
-		t.Fatalf("swept %d landings; want a call that reads what is spent at ten points at least", runs)
+	if runs < least {
+		t.Fatalf("%d runs had their landings fire; want %d at least, as many as the call's reads of what is spent made", runs, least)
 	}
 }
 
@@ -1138,6 +1184,16 @@ func otherTwin(t *testing.T) func(served *models.Mock, took string) {
 		t.Helper()
 		if served == nil || !strings.HasPrefix(served.Name, "twin-") || served.Name == took {
 			t.Fatalf("served %v while another call took %s; want the other twin", served, took)
+		}
+	}
+}
+
+// aTwin fails t unless the call was answered with one of the twins.
+func aTwin(t *testing.T) func(served *models.Mock, took string) {
+	return func(served *models.Mock, took string) {
+		t.Helper()
+		if served == nil || !strings.HasPrefix(served.Name, "twin-") {
+			t.Fatalf("served %v (an ended test spent %s); want a twin", served, took)
 		}
 	}
 }
@@ -1152,7 +1208,7 @@ func otherTwin(t *testing.T) func(served *models.Mock, took string) {
 func TestAConsumeLandingInAStrictCallsVerifyIsNoDifference(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	verifyOff(t)
-	sweepLandings(t, newStrictLandingDb, strictLanding(t), false, otherTwin(t))
+	sweepLandings(t, newStrictLandingDb, strictLanding(t), consumeLanding, false, 56, otherTwin(t))
 }
 
 // So too of the variable pass's verify: the other call's consume of a
@@ -1161,7 +1217,26 @@ func TestAConsumeLandingInAStrictCallsVerifyIsNoDifference(t *testing.T) {
 func TestAConsumeLandingInAVariableCallsVerifyIsNoDifference(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	verifyOff(t)
-	sweepLandings(t, newVarLandingDb, varLanding(t), false, otherTwin(t))
+	sweepLandings(t, newVarLandingDb, varLanding(t), consumeLanding, false, 36, otherTwin(t))
+}
+
+// An ended test's Spend of a twin (SpentReader reports it spent; the
+// generation does not move) may land between any two of a strict call's
+// reads of what is spent too. The strict verify reads that account once per
+// twin as well, so the Spend is no difference of the index, and no panic.
+// Which twin the call is answered with is not this row's: it asserts only
+// that the call is answered with one.
+func TestASpendLandingInAStrictCallsVerifyIsNoDifference(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	verifyOff(t)
+	sweepLandings(t, newStrictLandingDb, strictLanding(t), spendLanding, false, 56, aTwin(t))
+}
+
+// So too of the variable pass's verify under an ended test's Spend.
+func TestASpendLandingInAVariableCallsVerifyIsNoDifference(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	verifyOff(t)
+	sweepLandings(t, newVarLandingDb, varLanding(t), spendLanding, false, 36, aTwin(t))
 }
 
 // A test that ends while a call verifies (its staging generation moved, and
@@ -1172,9 +1247,9 @@ func TestAConsumeLandingInAVariableCallsVerifyIsNoDifference(t *testing.T) {
 func TestATestEndLandingInACallsVerifyIsNotCompared(t *testing.T) {
 	_, _, _ = learnOn(t)
 	verifyOff(t)
-	sweepLandings(t, newStrictLandingDb, strictLanding(t), true, nil)
-	sweepLandings(t, newVarLandingDb, varLanding(t), true, nil)
-	sweepLandings(t, newLearnLandingDb, learnLanding(t), true, nil)
+	sweepLandings(t, newStrictLandingDb, strictLanding(t), consumeLanding, true, 796, nil)
+	sweepLandings(t, newVarLandingDb, varLanding(t), consumeLanding, true, 426, nil)
+	sweepLandings(t, newLearnLandingDb, learnLanding(t), consumeLanding, true, 11, nil)
 }
 
 // lockedGenDb is ownGenDb that calls may read and consume at once, as they

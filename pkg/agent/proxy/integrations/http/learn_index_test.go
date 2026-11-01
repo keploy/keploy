@@ -389,5 +389,5 @@ func learnLanding(t *testing.T) func(db landingDb) func() *models.Mock {
 func TestAConsumeLandingInALearnedCallsVerifyIsNoDifference(t *testing.T) {
 	_, _, _ = learnOn(t)
 	verifyOff(t)
-	sweepLandings(t, newLearnLandingDb, learnLanding(t), false, otherTwin(t))
+	sweepLandings(t, newLearnLandingDb, learnLanding(t), consumeLanding, false, 8, otherTwin(t))
 }
