@@ -474,6 +474,7 @@ func (ys *MockYaml) prunePass(ctx context.Context, path, mockFileName string, fo
 				continue
 			}
 			st.recordPruned(mock, debugEnabled)
+			verdict.noteDropped(mock)
 		}
 	}
 
@@ -590,6 +591,7 @@ func (ys *MockYaml) prunePassGob(ctx context.Context, gobPath string, verdict *p
 			return rw.write(mock)
 		}
 		st.recordPruned(mock, debugEnabled)
+		verdict.noteDropped(mock)
 		return nil
 	})
 	if err != nil {
@@ -603,6 +605,89 @@ func (ys *MockYaml) prunePassGob(ctx context.Context, gobPath string, verdict *p
 		return st, err
 	}
 	return st, rw.commit()
+}
+
+// DropMocks deletes the named mocks of a test set and returns the names it
+// deleted: the mocks a replay found that only the tests dynamic dedup dropped
+// consumed (replay's dropDuplicates, through k8s-proxy auto-replay's
+// duplicates). It is the prune's pass, under the same file lock, with a keep
+// rule that keeps every mock but the named ones and reads no time: a named
+// mock recorded in the startup window, or after the replay began, is deleted,
+// where UpdateMocks keeps it. A named mock is still kept when it is a config
+// mock, a connection failure, protocol-phase (models.Mock.IsProtocolPhase) or
+// reusable across tests (models.Mock.Reusable), and, as in every prune, when a
+// kept mock requires it (prune_deps.go). No names, or no mock file, writes
+// nothing.
+func (ys *MockYaml) DropMocks(ctx context.Context, testSetID string, names []string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	drop := make(map[string]bool, len(names))
+	for _, n := range names {
+		drop[n] = true
+	}
+	verdict := &pruneVerdict{collect: true, keeps: func(m *models.Mock) bool { return dropKeeps(m, drop) }}
+
+	mockFileName := "mocks"
+	if ys.MockName != "" {
+		mockFileName = ys.MockName
+	}
+	path := filepath.Join(ys.MockPath, testSetID)
+	lock := getMockFileLock(mockFileLockKey(path, mockFileName, ys.Format))
+	lock.Lock()
+	defer lock.Unlock()
+
+	var st pruneStats
+	var err error
+	gobPath := filepath.Join(path, mockFileName+".gob")
+	if _, statErr := os.Stat(gobPath); statErr == nil {
+		// As the gob prune: no in-flight writer may hold the file it rewrites.
+		if err := ys.CloseUnless(ctx.Done()); err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		st, err = ys.prunePassGob(ctx, gobPath, verdict)
+		if err == nil && st.again {
+			st, err = ys.prunePassGob(ctx, gobPath, verdict)
+		}
+	} else {
+		existsAny, format, statErr := yaml.FileExistsAny(ctx, ys.Logger, path, mockFileName, ys.Format)
+		if statErr != nil {
+			return nil, statErr
+		}
+		if !existsAny {
+			return nil, nil
+		}
+		st, err = ys.prunePass(ctx, path, mockFileName, format, verdict)
+		if err == nil && st.again {
+			st, err = ys.prunePass(ctx, path, mockFileName, format, verdict)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	ys.Logger.Debug("dropped the mocks only dynamic dedup's duplicates consumed",
+		zap.String("testSetID", testSetID),
+		zap.Int("named", len(names)),
+		zap.Int("dropped", len(verdict.dropped)),
+		zap.Int("keptAsDependency", verdict.asDependency),
+		zap.Int("keptAsAsyncEpoch", verdict.asTimeline),
+		zap.Int("total", st.total))
+	return verdict.dropped, nil
+}
+
+// dropKeeps is DropMocks' keep rule: every mock but a named one, and a named
+// one that is a config mock, a connection failure, protocol-phase or reusable.
+func dropKeeps(m *models.Mock, drop map[string]bool) bool {
+	if !drop[m.Name] {
+		return true
+	}
+	if m.Spec.Metadata["type"] == "config" || m.Kind == models.ConnectionFailure {
+		return true
+	}
+	return m.IsProtocolPhase() || m.Reusable()
 }
 
 // PersistMockNoise merges learned request-body noise (MockState.ReqBodyNoise,
