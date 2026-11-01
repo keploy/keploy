@@ -2,6 +2,7 @@ package learn
 
 import (
 	"encoding/base64"
+	"slices"
 	"strings"
 	"testing"
 
@@ -42,13 +43,15 @@ func readsBack(t *testing.T, rec, live string, rds []textReading) {
 	}
 }
 
-func mustPlace(t *testing.T, s string) variables.Place {
+// mustAt is the address s names, the leaf whole (Word -1).
+func mustAt(t *testing.T, s string) variables.Address {
 	t.Helper()
-	p, err := variables.Parse(s)
+	a, err := variables.ParseAddress(s)
 	if err != nil {
-		t.Fatalf("place %q: %v", s, err)
+		t.Fatalf("address %q: %v", s, err)
 	}
-	return p
+	a.Word = -1
+	return a
 }
 
 // A step opens a text only where both runs are so encoded, both decode,
@@ -85,7 +88,7 @@ func TestReaderDecodeStepsOpenWhereBothRunsDecode(t *testing.T) {
 		{"base64url holding escapes", "body.cursor", b64u("id%3D17&r=eu~~~"), b64u("id%3D18&r=eu~~~"),
 			[]string{"body.cursor|b64url|pct#1: 17>18"}},
 	} {
-		place := mustPlace(t, c.place)
+		place := mustAt(t, c.place)
 		rds := readLeaf(nil, place, c.rec, c.live)
 		got := leafChanges(rds)
 		if c.name == "base64 of text in R, of binary in F" {
@@ -123,7 +126,7 @@ func jwtOf(bearer bool, payload, sig string) string {
 // value and each lists the whole signature token, whatever the payload
 // did. A claim that is an array in both runs keeps the JWT unopened.
 func TestReaderJWTClaimsOpen(t *testing.T) {
-	place := mustPlace(t, "header.Authorization")
+	place := mustAt(t, "header.Authorization")
 	rs, ls := "Sfl-KxwRJ_SMeKKF2QT4fwpMeJf36POk6yJV_adQssw", "Q1x_Yp-9vTq3LmN0Rr4sWkHd2cJ7aBfE5gUoZ_iXyPq"
 	rec := jwtOf(true, `{"sub":"u-1","iat":1761955200,"jti":"a-17"}`, rs)
 	live := jwtOf(true, `{"sub":"u-1","iat":1761955260,"jti":"a-18"}`, ls)
@@ -206,7 +209,7 @@ func TestReaderCookiePairsOpen(t *testing.T) {
 		{"a name twice", "header.Cookie", "sid=abc-17; sid=x", "sid=abc-18; sid=x", nil},
 		{"not a cookie header", "body.c", "theme=dark; sid=abc-17", "theme=dark; sid=abc-18", nil},
 	} {
-		rds := readLeaf(nil, mustPlace(t, c.place), c.rec, c.live)
+		rds := readLeaf(nil, mustAt(t, c.place), c.rec, c.live)
 		readsBack(t, c.rec, c.live, rds)
 		got := leafChanges(rds)
 		if c.want == nil {
@@ -226,6 +229,48 @@ func TestReaderCookiePairsOpen(t *testing.T) {
 		}
 		if !sameStrings(got, c.want) {
 			t.Errorf("%s: %q; want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// The adapter's address opens first: each of its steps where both runs
+// decode by it to texts that still differ, so a base64 too short for main's
+// guess opens where the adapter says it is base64, and a text it opens is
+// read on from there (escapes inside it open too). At the first step a run
+// does not decode by, or that opens both runs to one text, the text is
+// read from the steps before it: no reading takes that step.
+func TestReaderOpensFromTheAdaptersAddress(t *testing.T) {
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	if len(b64("17")) >= minEncodedRun {
+		t.Fatalf("fixture: %q is long enough for main's guess", b64("17"))
+	}
+	for _, c := range []struct {
+		name, at, rec, live string
+		want                []string
+		noStep              variables.Step
+	}{
+		{"a short base64 the adapter names", "body.n|b64", b64("17"), b64("42"),
+			[]string{"body.n|b64#0: 17>42"}, ""},
+		{"escapes inside the adapter's base64", "body.n|b64", b64("a%2F17"), b64("a%2F18"),
+			[]string{"body.n|b64|pct#1: 17>18"}, ""},
+		{"two steps, both open", "body.n|b64|json", b64(`"order-17"`), b64(`"order-18"`),
+			[]string{"body.n|b64|json#1: 17>18"}, ""},
+		{"F does not decode by the step", "body.n|b64", b64("17"), "x-42", nil, variables.StepB64},
+		{"the second step opens R only", "body.n|b64|json", b64(`"order-17"`), b64("order-18"), nil, variables.StepJSON},
+		{"only the padding changed", "body.n|b64", b64("order-17"), strings.TrimRight(b64("order-17"), "="), nil, variables.StepB64},
+	} {
+		rds := readLeaf(nil, mustAt(t, c.at), c.rec, c.live)
+		readsBack(t, c.rec, c.live, rds)
+		if c.want != nil {
+			if got := leafChanges(rds); !sameStrings(got, c.want) {
+				t.Errorf("%s: %q; want %q", c.name, got, c.want)
+			}
+			continue
+		}
+		for _, rd := range rds {
+			if slices.Contains(rd.At.Steps, c.noStep) {
+				t.Errorf("%s: read at %s; the step %s does not open both runs", c.name, rd.At, c.noStep)
+			}
 		}
 	}
 }

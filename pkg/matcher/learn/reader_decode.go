@@ -56,15 +56,31 @@ type openedSpan struct {
 	Parts         []openedStep
 }
 
-// readLeaf reads a drifted leaf at place: each text it reads, the leaf's
-// own and each a step opens, in the leaf's order, read word by word
-// (readTextIn, instants through dc's cache). A reading's At names its text
-// whole (Word -1); a changed word's At names it by its index among R's
-// words of that text. A word R has no partner for keeps Word -1: it stands
-// in a stretch that binds whole or not at all.
-func readLeaf(dc *DriftCache, place variables.Place, rec, live string) []textReading {
+// readLeaf reads a drifted leaf at at, the address the adapter names it by
+// (Input.AddressOf): each text it reads, the leaf's own and each a step
+// opens, in the leaf's order, read word by word (readTextIn, instants
+// through dc's cache). at's own steps open first, each only where it
+// decodes in both runs to texts that still differ; at the first that does
+// not, the text is read from the steps before it, so a step one run does
+// not hold is never taken. A reading's At names its text whole (Word -1);
+// a changed word's At names it by its index among R's words of that text.
+// A word R has no partner for keeps Word -1: it stands in a stretch that
+// binds whole or not at all.
+func readLeaf(dc *DriftCache, at variables.Address, rec, live string) []textReading {
 	var out []textReading
-	openText(dc, &out, variables.Address{Place: place, Word: -1}, rec, live, 0)
+	open := variables.Address{Place: at.Place, Word: -1}
+	for _, st := range at.Steps {
+		if len(open.Steps) == maxDecodeLevels {
+			break
+		}
+		r, rok := variables.Decode(st, rec)
+		l, lok := variables.Decode(st, live)
+		if !rok || !lok || r == l {
+			break
+		}
+		open, rec, live = withStep(open, st), r, l
+	}
+	openText(dc, &out, open, rec, live, len(open.Steps))
 	return out
 }
 
