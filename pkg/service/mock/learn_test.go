@@ -492,37 +492,65 @@ func (s *mergingStore) PersistLearned(_ context.Context, _ string, states map[st
 	return out, nil
 }
 
-// A consumed recording that learned clock reads of its own keeps them beside
-// those a call made in another window taught it: merged, never overwritten.
-// The consumed states handed in are not changed, whichever the merge reaches
-// first (a consumed recording's, before any state of its own is added).
-func TestWithLearnedElsewhereMergesOntoAConsumedRecordingsOwnClockReads(t *testing.T) {
+// One pairing per recording per round, and its own one wins (DESIGN T4): a
+// recording a call of the round consumed keeps what its own pairing learned
+// alone, and what a call made in another window taught it is voided, never
+// merged, whichever came first (the agent pairs no consumed recording across
+// windows, so a teaching beside a consumption came first). A recording no
+// call consumed carries its teaching, and two states the agent sends for one
+// such recording (two teachings of one kind) are merged, never overwritten.
+// The states handed in are not changed.
+func TestARecordingsOwnPairingVoidsWhatACallInAnotherWindowTaughtIt(t *testing.T) {
 	minute := models.ClockOffset{Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}
 	second := models.ClockOffset{Min: -time.Second, Max: -time.Second, Res: time.Millisecond}
-	consumed := []models.MockState{{Name: "mock-1", Clocks: map[string]models.ClockOffset{"own_at": minute}}}
+	consumed := []models.MockState{{Name: "mock-1", Clocks: map[string]models.ClockOffset{"own_at": minute}}, {Name: "mock-2"}}
 	elsewhere := []models.MockState{
 		{Name: "mock-1", Clocks: map[string]models.ClockOffset{"claimed_at": second}},
+		{Name: "mock-2", Clocks: map[string]models.ClockOffset{"claimed_at": second}},
 		{Name: "mock-9", Clocks: map[string]models.ClockOffset{"claimed_at": second}},
+		{Name: "mock-9", Clocks: map[string]models.ClockOffset{"expires_at": minute}},
 	}
-	out := withLearnedElsewhere(consumed, elsewhere)
-	if len(out) != 2 || out[0].Name != "mock-1" || !reflect.DeepEqual(out[0].Clocks, map[string]models.ClockOffset{"own_at": minute, "claimed_at": second}) {
-		t.Fatalf("written %+v; want mock-1 with its own_at and the claimed_at another window taught, then mock-9", out)
+	kept, voided := ownPairingWins(consumed, elsewhere)
+	if len(voided) != 2 || voided[0].Name != "mock-1" || voided[1].Name != "mock-2" || len(kept) != 2 || kept[0].Name != "mock-9" || kept[1].Name != "mock-9" {
+		t.Fatalf("kept %v, voided %v; want mock-1 and mock-2 (consumed in the round) voided, mock-9's two teachings kept", learnedStateNames(kept), learnedStateNames(voided))
 	}
-	if len(consumed) != 1 || !reflect.DeepEqual(consumed[0].Clocks, map[string]models.ClockOffset{"own_at": minute}) {
+	want := []models.MockState{
+		{Name: "mock-1", Clocks: map[string]models.ClockOffset{"own_at": minute}},
+		{Name: "mock-2"},
+		{Name: "mock-9", Clocks: map[string]models.ClockOffset{"claimed_at": second, "expires_at": minute}},
+	}
+	for _, from := range [][]models.MockState{elsewhere, kept} {
+		if out := withLearnedElsewhere(consumed, from); !reflect.DeepEqual(out, want) {
+			t.Fatalf("written %+v; want %+v: mock-1 with its own clock read alone, mock-2 as consumed, mock-9 with both teachings", out, want)
+		}
+	}
+	if len(consumed) != 2 || !reflect.DeepEqual(consumed[0].Clocks, map[string]models.ClockOffset{"own_at": minute}) || consumed[1].Clocks != nil {
 		t.Fatalf("the consumed states changed: %+v", consumed)
 	}
+	if len(elsewhere[2].Clocks) != 1 {
+		t.Fatalf("the states the agent sent changed: %+v", elsewhere[2])
+	}
+}
+
+func learnedStateNames(sts []models.MockState) []string {
+	out := make([]string, 0, len(sts))
+	for _, st := range sts {
+		out = append(out, st.Name)
+	}
+	return out
 }
 
 // What record's full round's learn step taught a recording from a call made
 // in another window than its own (the agent's LearnedElsewhere) is written
-// onto the recording beside what consumed recordings learned, merged with a
-// consumed recording's own: a timer's recording no test consumed carries its
-// clock reads. It is no consumption: no test's flow holds it, the consumed
-// states are not changed, and a recording of a test the round does not
-// learn onto keeps nothing. The record says it apart, under the test whose
-// recording it is, with the windows that taught it: never as the set's
-// start-up and pool's, nor on a consumer's line, but for a field the
-// consumer learned too.
+// onto the recording beside what consumed recordings learned: a timer's
+// recording no test consumed carries its clock reads. It is no consumption:
+// no test's flow holds it, the consumed states are not changed, and a
+// recording of a test the round does not learn onto keeps nothing. The
+// record says it apart, under the test whose recording it is, with the
+// windows that taught it and the evidence: never as the set's start-up and
+// pool's, nor on a consumer's line. A recording its own test's call
+// consumed keeps what that pairing learned alone (DESIGN T4): what another
+// window taught it is voided, and the record says which evidence won.
 func TestKeployMockWritesWhatACallInAnotherWindowTaughtOntoTheRecording(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	minute := models.ClockOffset{Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}
@@ -536,7 +564,8 @@ func TestKeployMockWritesWhatACallInAnotherWindowTaughtOntoTheRecording(t *testi
 	flows := []FlowMocks{{Flow: "o::A", Consumed: []models.MockState{{Name: "mock-1"}}}}
 	expected := map[string][]models.MockEntry{"o::A": {{Name: "mock-1"}}, "o::B": {{Name: "mock-9"}}}
 	merging := &mergingStore{}
-	m := &mockService{config: &config.Config{}, mockDB: merging, logger: zap.NewNop(), instrumentation: clientTestsInstr{reads: true}}
+	core, logs := observer.New(zap.InfoLevel)
+	m := &mockService{config: &config.Config{}, mockDB: merging, logger: zap.New(core), instrumentation: clientTestsInstr{reads: true}}
 	out, err := m.keepLearned(context.Background(), "s", consumed, nil, elsewhere, flows, expected)
 	if err != nil {
 		t.Fatal(err)
@@ -546,14 +575,24 @@ func TestKeployMockWritesWhatACallInAnotherWindowTaughtOntoTheRecording(t *testi
 		t.Fatalf("by test %v, on the set's start-up and pool %v; want o::A's own fields alone, and none on the pool", out.byTest, out.pool)
 	}
 	want := []LearnedElsewhere{
-		{Mock: "mock-1", Owner: "o::A", Fields: []string{"dirty_at" + clock, "lease_at" + clock}, TaughtIn: inC},
 		{Mock: "mock-9", Owner: "o::B", Fields: []string{"claimed_at" + clock}, TaughtIn: []models.TeachingWindow{{Test: "o::C", At: began}, {At: began.Add(2 * time.Second)}}},
 	}
 	if !reflect.DeepEqual(out.elsewhere, want) {
-		t.Fatalf("said as learned elsewhere %+v; want %+v", out.elsewhere, want)
+		t.Fatalf("said as learned elsewhere %+v; want %+v: mock-1, its own test's to consume, learns nothing from another window", out.elsewhere, want)
 	}
-	if got := out.elsewhere[1].Windows(); got != "o::C's window, between tests" {
+	if got := out.elsewhere[0].Windows(); got != "o::C's window, between tests" {
 		t.Fatalf("mock-9's windows said %q", got)
+	}
+	learned := logs.FilterMessageSnippet("from calls made in other windows").AllUntimed()
+	if len(learned) != 1 || learned[0].ContextMap()["mock"] != "mock-9" || !strings.Contains(fmt.Sprint(learned[0].ContextMap()["evidence"]), "no call of the round consumed") {
+		t.Fatalf("the learned lines %+v; want mock-9's alone, naming its evidence", learned)
+	}
+	void := logs.FilterMessageSnippet("voided what a call made in another window taught").AllUntimed()
+	if len(void) != 1 {
+		t.Fatalf("the voided lines %+v; want mock-1's", void)
+	}
+	if c := void[0].ContextMap(); c["mock"] != "mock-1" || c["test"] != "o::A" || c["taughtIn"] != "o::C's window" || c["evidence"] != "its own pairing in the round" || !reflect.DeepEqual(c["voided"], []interface{}{"dirty_at", "lease_at"}) {
+		t.Fatalf("mock-1's voided line said %v; want o::A's recording, the clock reads o::C's window taught, its own pairing as the evidence that won", c)
 	}
 	if len(consumed) != 1 || len(consumed[0].Clocks) != 1 || len(flows[0].Consumed) != 1 {
 		t.Fatalf("the consumed states changed: %+v, flows %+v", consumed, flows)
@@ -569,11 +608,11 @@ func TestKeployMockWritesWhatACallInAnotherWindowTaughtOntoTheRecording(t *testi
 		t.Fatalf("the timer's recording no test consumed was written %+v; want its claimed_at clock read", store.got["mock-9"])
 	}
 	one := store.got["mock-1"]
-	if _, ok := one.Clocks["dirty_at"]; !ok {
-		t.Fatalf("a consumed recording a call in another window taught was written %+v; want its dirty_at clock read", one)
+	if _, ok := one.Clocks["dirty_at"]; ok {
+		t.Fatalf("a recording its own test consumed was written %+v; want the dirty_at another window taught voided", one)
 	}
-	if _, ok := one.ReqBodyNoise["body.ts"]; !ok {
-		t.Fatalf("a consumed recording lost its own learning: %+v", one)
+	if _, ok := one.ReqBodyNoise["body.ts"]; !ok || !reflect.DeepEqual(one.Clocks, map[string]models.ClockOffset{"lease_at": minute}) {
+		t.Fatalf("a consumed recording was written %+v; want its own learning whole, its own lease_at alone", one)
 	}
 
 	// Clock reads alone: what a call made in another window carried as

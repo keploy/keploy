@@ -261,6 +261,29 @@ func TestLearnElsewhereTeachesARecordingOncePerRound(t *testing.T) {
 	}
 }
 
+// One pairing per recording per round, and its own one wins (DESIGN T4),
+// the other way round from the record's (the record voids a teaching its
+// own pairing followed): a recording its own test's call consumed first is
+// taught nothing by a later call of its shape in another window, and the
+// set holds no such teaching of it.
+func TestARecordingItsOwnTestConsumedFirstIsTaughtNothingAcrossWindows(t *testing.T) {
+	mm, ms := s12Set(t)
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+	mm.SetPairing(true)
+	mm.ServeExactTest("T2", []*models.Mock{ms["other"]})
+	if p := pollFirst(t, mm, "other"); p != "other" {
+		t.Fatalf("the recording's own test did not consume it: %s", p)
+	}
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	minute := models.ClockOffset{Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}
+	if mm.LearnElsewhere(ms["other"], map[string]models.ClockOffset{"claimed_at": minute}) {
+		t.Fatal("a call in T1's window taught a recording its own test's call consumed first")
+	}
+	if got := mm.LearnedElsewhere(); len(got) != 0 {
+		t.Fatalf("learned elsewhere %v; want none", learnedNames(got))
+	}
+}
+
 // What a call made in another window teaches a recording is that window's:
 // each state names the test open when the call came, with the instant it
 // taught, and "" for a call between tests. A call whose round moved since
