@@ -170,7 +170,7 @@ func TestReaderByMoment(t *testing.T) {
 		}
 	}
 	x := newReaderIndex(nil)
-	held, fine, readOK := x.holdsMoment(`{"at":"`+strings.Repeat("x", 3)+` 1792667656473120999"}`, read("1792667656473120999"))
+	held, fine, readOK := x.text(`{"at":"` + strings.Repeat("x", 3) + ` 1792667656473120999"}`).holdsMoment(read("1792667656473120999"))
 	if !held || !fine || !readOK {
 		t.Errorf("a place holding the nanosecond read: held %v fine %v read %v", held, fine, readOK)
 	}

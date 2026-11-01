@@ -286,34 +286,23 @@ type sepChange struct {
 // changed in shape where no whole token holds one. A text with no words in
 // either run changed in its separators alone.
 func (rd *textReading) readSeparators(paired []int, rTok, lTok wholeTokenSpans) {
-	rw, lw := rd.RecWords, rd.LiveWords
-	add := func(r, l, rAround, lAround [2]int) {
-		if rd.Rec[r[0]:r[1]] == rd.Live[l[0]:l[1]] {
-			return
-		}
-		sc := sepChange{RecAt: r, LiveAt: l, Tokens: tokensAround(rd.Rec, rd.Live, rTok, lTok, rAround, lAround, false)}
-		rd.Separators = append(rd.Separators, sc)
-		if len(sc.Tokens) == 0 {
-			rd.ChangedShape = true
-		}
+	// The text's start and end stand as one more paired word in each run.
+	rw := append(append([][2]int{{0, 0}}, rd.RecWords...), [2]int{len(rd.Rec), len(rd.Rec)})
+	lw := append(append([][2]int{{0, 0}}, rd.LiveWords...), [2]int{len(rd.Live), len(rd.Live)})
+	pj := []int{0}
+	for _, j := range paired {
+		pj = append(pj, j+min(1, j+1)) // -1 stays -1
 	}
-	if len(rw) == 0 || len(lw) == 0 {
-		if len(rw) == 0 && len(lw) == 0 {
-			all := [2]int{0, len(rd.Rec)}
-			add(all, [2]int{0, len(rd.Live)}, all, [2]int{0, len(rd.Live)})
-		}
-		return
-	}
-	if paired[0] == 0 {
-		add([2]int{0, rw[0][0]}, [2]int{0, lw[0][0]}, [2]int{0, rw[0][1]}, [2]int{0, lw[0][1]})
-	}
+	pj = append(pj, len(lw)-1)
 	for i := 0; i+1 < len(rw); i++ {
-		if j := paired[i]; j >= 0 && paired[i+1] == j+1 {
-			add([2]int{rw[i][1], rw[i+1][0]}, [2]int{lw[j][1], lw[j+1][0]}, [2]int{rw[i][0], rw[i+1][1]}, [2]int{lw[j][0], lw[j+1][1]})
+		j := pj[i]
+		r, l := [2]int{rw[i][1], rw[i+1][0]}, [2]int{lw[max(j, 0)][1], lw[max(j, 0)+1][0]}
+		if j < 0 || pj[i+1] != j+1 || rd.Rec[r[0]:r[1]] == rd.Live[l[0]:l[1]] {
+			continue
 		}
-	}
-	if i, j := len(rw)-1, len(lw)-1; paired[i] == j {
-		add([2]int{rw[i][1], len(rd.Rec)}, [2]int{lw[j][1], len(rd.Live)}, [2]int{rw[i][0], len(rd.Rec)}, [2]int{lw[j][0], len(rd.Live)})
+		sc := sepChange{RecAt: r, LiveAt: l, Tokens: tokensAround(rd.Rec, rd.Live, rTok, lTok, [2]int{rw[i][0], rw[i+1][1]}, [2]int{lw[j][0], lw[j+1][1]}, false)}
+		rd.Separators = append(rd.Separators, sc)
+		rd.ChangedShape = rd.ChangedShape || len(sc.Tokens) == 0
 	}
 }
 
@@ -328,17 +317,12 @@ type wholeTokenSpans struct{ id, b64 [][2]int }
 // that stand whole outside its instants (spans: eachB64Run).
 func tokenSpans(s string, spans []instant) wholeTokenSpans {
 	var t wholeTokenSpans
-	for i := 0; i < len(s); {
-		if !idByte(s[i]) {
-			i++
-			continue
+	off := 0
+	for _, seg := range segmentsBy(s, idByte) {
+		if seg.word {
+			t.id = append(t.id, [2]int{off, off + len(seg.text)})
 		}
-		j := i + 1
-		for j < len(s) && idByte(s[j]) {
-			j++
-		}
-		t.id = append(t.id, [2]int{i, j})
-		i = j
+		off += len(seg.text)
 	}
 	eachB64Run(s, spans, func(a, b int) bool {
 		t.b64 = append(t.b64, [2]int{a, b})
@@ -347,19 +331,20 @@ func tokenSpans(s string, spans []instant) wholeTokenSpans {
 	return t
 }
 
-// around is the span of spans that holds [a[0], a[1]) whole, ok false where
-// none does.
-func around(spans [][2]int, a [2]int) ([2]int, bool) {
-	for _, sp := range spans {
-		if sp[0] <= a[0] && a[1] <= sp[1] {
-			return sp, true
-		}
-		if sp[0] >= a[1] {
+// spanHolding is the index of the span of spans (in order; bounds gives each
+// one's [start, end)) that holds at whole, or -1.
+func spanHolding[S any](spans []S, bounds func(S) (int, int), at [2]int) int {
+	for k := 0; k < len(spans) && at[0] >= 0; k++ {
+		if s, e := bounds(spans[k]); s <= at[0] && at[1] <= e {
+			return k
+		} else if s >= at[1] {
 			break
 		}
 	}
-	return [2]int{}, false
+	return -1
 }
+
+func pairBounds(p [2]int) (int, int) { return p[0], p[1] }
 
 // tokensAround are the whole tokens that hold r (of rec) and l (of live)
 // whole, each in both runs (where longer, one longer than what it holds in
@@ -372,14 +357,11 @@ func tokensAround(rec, live string, rt, lt wholeTokenSpans, r, l [2]int, longer 
 		if k == tokenB64 {
 			rs, ls = rt.b64, lt.b64
 		}
-		ra, ok := around(rs, r)
-		if !ok {
+		ri, li := spanHolding(rs, pairBounds, r), spanHolding(ls, pairBounds, l)
+		if ri < 0 || li < 0 || longer && rs[ri] == r && ls[li] == l {
 			continue
 		}
-		la, ok := around(ls, l)
-		if !ok || longer && ra == r && la == l {
-			continue
-		}
+		ra, la := rs[ri], ls[li]
 		tok := wholeToken{Kind: k, Rec: rec[ra[0]:ra[1]], Live: live[la[0]:la[1]], RecAt: ra, LiveAt: la}
 		if len(out) > 0 && out[0].Rec == tok.Rec && out[0].Live == tok.Live {
 			continue

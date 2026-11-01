@@ -56,7 +56,7 @@ func (iw *instantWord) fine() bool {
 func epochDigits(s string) bool {
 	switch len(s) {
 	case 10, 13, 16, 19:
-		return allDigits(s)
+		return isDigitsOnly(s)
 	}
 	return false
 }
@@ -64,18 +64,7 @@ func epochDigits(s string) bool {
 // spanAt is the index of the instant of spans that holds at whole, -1
 // where none does (or at is none).
 func spanAt(spans []instant, at [2]int) int {
-	if at[0] < 0 {
-		return -1
-	}
-	for k, sp := range spans {
-		if sp.start <= at[0] && at[1] <= sp.end {
-			return k
-		}
-		if sp.start >= at[1] {
-			break
-		}
-	}
-	return -1
+	return spanHolding(spans, func(sp instant) (int, int) { return sp.start, sp.end }, at)
 }
 
 // spanPartners pairs R's instants (rSpans) with F's (lSpans): the two a
@@ -217,13 +206,8 @@ func (rd *textReading) readEncoded(dc *DriftCache, rTok, lTok wholeTokenSpans) {
 		if l[0] < 0 {
 			l = bytesOf(rd.LiveWords, st.Live)
 		}
-		for _, sp := range [][2][][2]int{{rTok.id, lTok.id}, {rTok.b64, lTok.b64}} {
-			ra, rok := around(sp[0], r)
-			la, lok := around(sp[1], l)
-			if !rok || !lok {
-				continue
-			}
-			key := [2]string{rd.Rec[ra[0]:ra[1]], rd.Live[la[0]:la[1]]}
+		for _, tok := range tokensAround(rd.Rec, rd.Live, rTok, lTok, r, l, false) {
+			key := [2]string{tok.Rec, tok.Live}
 			iw, ok := byTok[key]
 			if !ok {
 				iw = encodedInstant(dc, key[0], key[1])

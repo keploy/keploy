@@ -185,10 +185,10 @@ func TestReaderJWTSignatureIsOneWholeToken(t *testing.T) {
 	}
 	x := newReaderIndex(nil)
 	both := `{"auth":"` + rs + `"}`
-	if held, read := x.holdsToken(both, tokenID, rs); !held || !read {
+	if held, read := x.text(both).holdsToken(tokenID, rs); !held || !read {
 		t.Errorf("a place holding the signature whole: held %v read %v", held, read)
 	}
-	if held, _ := x.holdsToken(`{"auth":"x`+rs+`"}`, tokenID, rs); held {
+	if held, _ := x.text(`{"auth":"x`+rs+`"}`).holdsToken(tokenID, rs); held {
 		t.Errorf("a place holding the signature inside a longer id: held")
 	}
 }
@@ -220,11 +220,11 @@ func TestReaderIndexBudget(t *testing.T) {
 	x := newReaderIndex(nil)
 	for _, id := range ids {
 		group := strings.Split(id, "-")[1]
-		if held, read := x.holdsWord(answer, group); !held || !read {
+		if held, read := x.text(answer).holdsWord(group); !held || !read {
 			t.Fatalf("group %q of %s: held %v read %v; want held", group, id, held, read)
 		}
 	}
-	if held, read := x.holdsWord(answer, "zzzz9"); held || !read {
+	if held, read := x.text(answer).holdsWord("zzzz9"); held || !read {
 		t.Errorf("a word the answer lacks: held %v read %v", held, read)
 	}
 	if x.unread() {
@@ -236,13 +236,13 @@ func TestReaderIndexBudget(t *testing.T) {
 	defer func(b int64) { readerBudget = b }(readerBudget)
 	readerBudget = 4 << 10
 	small := newReaderIndex(nil)
-	if held, read := small.holdsWord(answer, strings.Split(ids[0], "-")[1]); !held || !read {
+	if held, read := small.text(answer).holdsWord(strings.Split(ids[0], "-")[1]); !held || !read {
 		t.Errorf("past the budget: held %v read %v; want held, as within it", held, read)
 	}
 	if small.unread() || small.used != 0 {
 		t.Errorf("past the budget: unread %v, %d bytes kept; want read, nothing kept", small.unread(), small.used)
 	}
-	if held, read := small.holdsWord("a short text 42", "42"); !held || !read || small.used == 0 {
+	if held, read := small.text("a short text 42").holdsWord("42"); !held || !read || small.used == 0 {
 		t.Errorf("a text within what is left of the budget: held %v read %v, %d bytes kept", held, read, small.used)
 	}
 }
@@ -342,7 +342,7 @@ func TestReaderIndexHoldsNoTextPastItsBudget(t *testing.T) {
 	before := heap()
 	for i := 0; i < n; i++ {
 		text := fmt.Sprintf("%07d ", i) + strings.Repeat("a", size-8)
-		if held, read := x.holdsWord(text, fmt.Sprintf("%07d", i)); !held || !read {
+		if held, read := x.text(text).holdsWord(fmt.Sprintf("%07d", i)); !held || !read {
 			t.Fatalf("recording %d: held %v read %v; want its own id held", i, held, read)
 		}
 	}
