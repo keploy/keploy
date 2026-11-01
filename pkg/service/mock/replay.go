@@ -900,6 +900,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		Real:          realRun,
 		CannotCapture: lostNotJudged,
 		Learned:       counts.learnedPool,
+		// What calls made in other windows than their recordings' taught
+		// them, said apart.
+		LearnedElsewhere: counts.learnedElsewhere,
 	})
 	return keployFailure
 }
@@ -1971,6 +1974,9 @@ type replayCounts struct {
 	tests        []TestReceipt
 	// learnedPool is what the learn step wrote onto mocks no test consumed.
 	learnedPool []string
+	// learnedElsewhere is what it wrote onto recordings from calls made in
+	// other windows than theirs.
+	learnedElsewhere []LearnedElsewhere
 	// learnErr is why what the learn step learned could not be written: the
 	// round did not complete.
 	learnErr error
@@ -2158,11 +2164,10 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	// that runs this round commits it. A round whose learning cannot be read
 	// or kept did not complete: its record would judge recordings that lack
 	// what this round served.
-	var learned map[string][]string
-	var learnedPool []string
+	var learned learnedOut
 	var learnErr error
 	if m.learning() {
-		learned, learnedPool, learnErr = m.keepLearned(ctx, detail.set, consumed, consumedErr, elsewhere, flows, detail.expected)
+		learned, learnErr = m.keepLearned(ctx, detail.set, consumed, consumedErr, elsewhere, flows, detail.expected)
 	}
 
 	// Metering LAST: it may do network I/O, and the miss warnings above are what
@@ -2223,9 +2228,10 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		counts.tests = withBegan(counts.tests, detail.windows)
 	}
 	for i := range counts.tests {
-		counts.tests[i].Learned = learned[counts.tests[i].Name]
+		counts.tests[i].Learned = learned.byTest[counts.tests[i].Name]
 	}
-	counts.learnedPool = learnedPool
+	counts.learnedPool = learned.pool
+	counts.learnedElsewhere = learned.elsewhere
 	counts.learnErr = learnErr
 	counts.settleErr = settleErr
 	return counts

@@ -1126,6 +1126,14 @@ type MockState struct {
 	// reason. An agent that predates it reports none; the agent and the CLI
 	// are one keploy.
 	LearnedAfterEnd bool `json:"learnedAfterEnd,omitempty"`
+	// TaughtIn is, on a state record's full round's learn step kept from
+	// calls made in other windows than its recording's, for learning only
+	// (the agent's LearnedElsewhere), each window such a call taught it in:
+	// whose window it was and when (TeachingWindow). Learning is scoped to
+	// a window, so whatever reads a window's learning (undoing what a round
+	// learned past a point it could not read) reads such learning as that
+	// window's, not the recording owner's. Empty on every other state.
+	TaughtIn []TeachingWindow `json:"taughtIn,omitempty"`
 }
 
 // ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -134,5 +135,73 @@ func TestLearnElsewhereIsNoConsumption(t *testing.T) {
 	mm.dropPreviousSetConsumes()
 	if got := mm.LearnedElsewhere(); len(got) != 0 {
 		t.Fatalf("a new set holds the previous set's learning: %v", learnedNames(got))
+	}
+}
+
+// What a call made in another window teaches a recording is that window's:
+// each state names the test open when such a call came, once per window
+// with the last instant it taught, and "" for a call between tests. A call
+// whose round moved since it was read (a test's begin or end between the
+// read and its learning) names none: keploy no longer knows its window, so
+// whatever undoes a window's learning reads it as any window's.
+func TestLearnElsewhereNamesTheWindowThatTaughtIt(t *testing.T) {
+	mm, ms := s12Set(t)
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+	mm.SetPairing(true)
+	minute := map[string]models.ClockOffset{"claimed_at": {Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}}
+	windows := func() []models.TeachingWindow {
+		t.Helper()
+		got := mm.LearnedElsewhere()
+		if len(got) != 1 || got[0].Name != "other" {
+			t.Fatalf("learned elsewhere %v; want other alone", learnedNames(got))
+		}
+		return got[0].TaughtIn
+	}
+
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	if !mm.LearnElsewhere(ms["other"], minute) {
+		t.Fatal("a call in T1's window taught other nothing")
+	}
+	first := windows()
+	if len(first) != 1 || first[0].Test != "T1" || first[0].At.IsZero() {
+		t.Fatalf("taught in %+v; want T1's window, with its instant", first)
+	}
+	time.Sleep(time.Millisecond)
+	if !mm.LearnElsewhere(ms["other"], minute) {
+		t.Fatal("a second call in T1's window taught other nothing")
+	}
+	if again := windows(); len(again) != 1 || again[0].Test != "T1" || !again[0].At.After(first[0].At) {
+		t.Fatalf("taught in %+v after a second call in T1's window; want T1's window once, at the later instant", again)
+	}
+
+	mm.ServeExactPool("", nil)
+	if !mm.LearnElsewhere(ms["other"], minute) {
+		t.Fatal("a call between tests taught other nothing")
+	}
+	if got := windows(); len(got) != 2 || got[1].Test != "" {
+		t.Fatalf("taught in %+v; want T1's window, then between tests", got)
+	}
+
+	// A call read in T3's window whose learning lands after T4 began.
+	mm.ServeExactTest("T3", nil)
+	call := mm.MarkCallRound()
+	held, _ := mm.HoldToRound(call)
+	mm.ServeExactTest("T4", nil)
+	if !held.(integrations.LearnElsewhere).LearnElsewhere(ms["other"], minute) {
+		t.Fatal("a call whose round moved taught other nothing")
+	}
+	for _, w := range windows() {
+		if w.Test == "T3" || w.Test == "T4" {
+			t.Fatalf("taught in %+v; a call whose round moved since its read named %s", windows(), w.Test)
+		}
+	}
+	// Read and learned in one window, it names it.
+	call = mm.MarkCallRound()
+	held, _ = mm.HoldToRound(call)
+	if !held.(integrations.LearnElsewhere).LearnElsewhere(ms["other"], minute) {
+		t.Fatal("a call in T4's window taught other nothing")
+	}
+	if got := windows(); len(got) != 3 || got[2].Test != "T4" {
+		t.Fatalf("taught in %+v; want T4's window last", got)
 	}
 }

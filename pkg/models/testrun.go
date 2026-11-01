@@ -1181,3 +1181,13 @@ type (
 	GlobalNoise  map[string]map[string][]string
 	TestsetNoise map[string]map[string]map[string][]string
 )
+
+// TeachingWindow is a window in which a call taught a recording of another
+// window, for learning only (MockState.TaughtIn). Test is the test whose
+// window it was (the one open when the call came), "" between tests. At is
+// when the last such call of that window taught the recording: its learn
+// step, just after the call came. A window is named once per recording.
+type TeachingWindow struct {
+	Test string    `json:"test,omitempty" yaml:"test,omitempty"`
+	At   time.Time `json:"at" yaml:"at"`
+}
