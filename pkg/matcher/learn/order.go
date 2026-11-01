@@ -25,10 +25,68 @@ func init() { decideBy = decideOrder }
 // decided with every earlier place in scope, or the call's own order.
 func decideOrder(in Input) []Decision {
 	if in.Mode == ModeElsewhere {
-		ds, fields := decideWords(in, true)
+		ds, fields := decideBoth(in, true)
 		return elsewhere(in, ds, fields)
 	}
-	ds, _ := decideWords(in, false)
+	ds, _ := decideBoth(in, false)
+	return ds
+}
+
+// decideBoth decides in's words as main reads its exchanges served leaf by
+// leaf (classifyGiven). One recorded after the call gave the recorded
+// application nothing before it: it is read as a recording F gave before
+// the call, outside the call's own test, so only what F served there
+// counts, never its leaves as a place both runs were given
+// (leafedAfterCall). One recorded at the call's own instant, or at a time
+// keploy cannot read (timedEarlier, timedRaw), may have come before the
+// call or after it: the call is read both ways (leafedAtCall), and a word
+// either reading refuses is refused, as is one the two readings learn
+// differently, naming both (bothWays).
+func decideBoth(in Input, allScope bool) ([]Decision, []string) {
+	in.Earlier, in.Raw = timedEarlier(in.Earlier, in.At), timedRaw(in.Raw, in.At)
+	in.Earlier, in.Raw = leafedAfterCall(in.Earlier, in.Raw, in.At)
+	ds, fields := decideWords(in, allScope)
+	kept, late := leafedAtCall(in.Earlier, in.At)
+	if len(late) == 0 {
+		return ds, fields
+	}
+	alt := in
+	alt.Earlier, alt.Raw = kept, append(append([]Raw(nil), in.Raw...), late...)
+	as, afields := decideWords(alt, allScope)
+	return bothWays(in, ds, fields, as, afields), fields
+}
+
+// bothWays is ds, the call read with its exchanges at the call's own
+// instant as earlier places of its test, with each word the reading as
+// recordings made after the call (as) refuses, or learns otherwise,
+// refused.
+func bothWays(in Input, ds []Decision, fields []string, as []Decision, afields []string) []Decision {
+	key := func(f string, n int) string { return f + "\x00" + strconv.Itoa(n) }
+	late := make(map[string]Decision, len(as))
+	for i, a := range as {
+		late[key(afields[i], a.At.Word)] = a
+	}
+	dc := &decider{in: in}
+	names := [...]string{"refused", "a read of the clock", "a value bound to an earlier place", "a value made anew each run"}
+	for i, d := range ds {
+		a, ok := late[key(fields[i], d.At.Word)]
+		if !ok {
+			a, ok = late[key(fields[i], -1)]
+		}
+		switch {
+		case !ok || d.Outcome == OutcomeRefused || a.Outcome == d.Outcome && a.Outcome != OutcomeRefused:
+		case a.Outcome == OutcomeRefused:
+			rf := *a.Refusal
+			rf.Word, rf.Recorded, rf.Full = d.At.Word, d.Recorded, d.Full
+			rf.Why += "; read as an earlier place of the test instead, it would be " + names[d.Outcome] + ", yet keploy refuses a value either reading refuses"
+			ds[i] = Decision{At: d.At, Recorded: d.Recorded, Full: d.Full, Refusal: &rf, Line: RefusalLine(rf)}
+		default:
+			ds[i] = dc.refuse(fields[i], d.At, d.At.Word, d.Recorded, d.Full, RefusalUnknown,
+				"an exchange recorded at the call's own instant read as an earlier place of the test makes it "+names[d.Outcome]+
+					", read as a recording made after the call "+names[a.Outcome]+": keploy cannot tell which the application did",
+				nil, dc.wordNoise(fields[i], d.At.Word))
+		}
+	}
 	return ds
 }
 
@@ -49,12 +107,6 @@ type decider struct {
 // decision is of; allScope reads every earlier place of the run as the
 // call's scope (Mode Elsewhere).
 func decideWords(in Input, allScope bool) ([]Decision, []string) {
-	// An exchange served leaf by leaf whose request was recorded after the
-	// call gave the recorded application nothing before it: it is read as a
-	// recording F gave before the call, outside the call's own test, so only
-	// what F served there counts, never its leaves as a place both runs
-	// were given (main's leafedAfterCall).
-	in.Earlier, in.Raw = leafedAfterCall(in.Earlier, in.Raw, in.At)
 	ps, unread := placesOf(in)
 	set, setUnread := setUnread(in)
 	if unread == "" {
@@ -529,12 +581,22 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		// An answer recorded after the call that round F gave the
 		// application before it, holding F's moment, is a second source:
 		// the bind would be a guess between the two.
+		// So is another test's answer given before the call whose view in
+		// round F keploy cannot tell, holding R's moment apart from F's.
+		late, why := dc.setSecondSource(c)
 		for _, h := range hs {
-			if p := h.p; p.side == Response && !p.given && p.fGave && p.state == stateNotBefore && h.hl {
-				return dc.refuse(path, at, n, r, l, RefusalUnknown,
-					"round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it, beside "+answers[0].name+": two sources", []string{p.name, answers[0].name},
-					Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
+			p := h.p
+			switch {
+			case late != "" || p.side != Response || p.given:
+			case p.fGave && p.state == stateNotBefore && h.hl:
+				late, why = p.name, "round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it"
+			case !inScope(p) && p.state == stateBefore && p.fUnstated && h.hr && !h.hl:
+				late, why = p.name, "the recorded moment stands in "+p.name+", another test's answer given before the call, whose view in round F keploy cannot tell"
 			}
+		}
+		if late != "" {
+			return dc.refuse(path, at, n, r, l, RefusalUnknown, why+", beside "+answers[0].name+": two sources", []string{late, answers[0].name},
+				Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
 		}
 		return dc.bound(path, at, n, r, l, answers, "an answer given before the call holds it: the dependency's value")
 	}
