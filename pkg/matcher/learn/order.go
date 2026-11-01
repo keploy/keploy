@@ -1127,8 +1127,11 @@ func (dc *decider) readBack(path string, at variables.Address, w readWord, rec s
 	if at.Word < 0 || len(at.Steps) > 0 || w.Rec == rec && !withWhole {
 		return nil, ""
 	}
+	// An answer scalar of any type holding the whole text reads it back (a
+	// number sent as text, answered as a number), as main's WholeEcho has it.
 	return dc.answerAt(func(l Leaf) []int {
-		if l.Type == r.Type && l.Value == rec || l.Type == Keys && slices.Contains(strings.Split(l.Value, "\n"), rec) {
+		scalar := l.Type == String || l.Type == Number || l.Type == Bool
+		if l.Value == rec && (l.Type == r.Type || scalar) || l.Type == Keys && slices.Contains(strings.Split(l.Value, "\n"), rec) {
 			return []int{at.Word}
 		}
 		return nil
