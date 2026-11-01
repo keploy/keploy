@@ -456,6 +456,27 @@ func TestARepeatNoteJoinsANotOwnedMissAndLeavesAnExtraCall(t *testing.T) {
 	}
 }
 
+// A call one more than the test recorded names the test's own recording it
+// repeats (ExtraOf): of the answered recordings it matches on its own, the
+// first to answer, never one of another call that answered before it. A
+// mappings edit marks that recording `repeat: any`. Any other miss names
+// none.
+func TestAnExtraCallNamesTheRecordingItRepeats(t *testing.T) {
+	const addr, host = "127.0.0.1:8099", "localhost:8099"
+	const path = "/cluster?name=default"
+	t.Setenv(provenswitch.Env, "1")
+	other := onHost("mock-1", "/cluster?name=other", host)
+	first, second := onHost("mock-2", path, host), onHost("mock-3", path, host)
+	r := missReport(t, gateDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{}}, consumed: []*models.Mock{other, first, second}}, addr, host, path, models.OutgoingOptions{})
+	if r.MissKind != models.MissExtraCall || r.Recorded != 2 || r.ExtraOf != "mock-2" {
+		t.Fatalf("a third identical read of a call recorded twice is kind %q (recorded %d) of %q; want extra_call, recorded twice, of mock-2", r.MissKind, r.Recorded, r.ExtraOf)
+	}
+	r = missReport(t, gateDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{}}, consumed: []*models.Mock{other}}, addr, host, path, models.OutgoingOptions{})
+	if r.MissKind == models.MissExtraCall || r.ExtraOf != "" {
+		t.Fatalf("a call the test never recorded is kind %q of %q; want no extra call and no recording it repeats", r.MissKind, r.ExtraOf)
+	}
+}
+
 // perTestDb is earlierDb whose per-test read shows perTest, or fails with
 // readErr; spent are the recordings it reports spent (integrations.
 // SpentReader), and others those it tells are not the open test's own

@@ -209,7 +209,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				// round: whether that read found a staging is told from it.
 				integrations.StampMark(report, miss.call)
 				if miss.extraCall > 0 {
-					report.MissKind, report.Recorded = models.MissExtraCall, miss.extraCall
+					report.MissKind, report.Recorded, report.ExtraOf = models.MissExtraCall, miss.extraCall, miss.extraOf
 				}
 				if miss.matchPhase == models.MatchPhaseNoMocks && !miss.restaged && miss.extraCall == 0 {
 					// The pool held no data mock for the command phase to compare

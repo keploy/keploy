@@ -151,8 +151,10 @@ type mockMiss struct {
 	call integrations.CallRound
 	// extraCall is, for a command one more than the open test recorded (its
 	// own recordings of it answered, ownRepeats), how many times the test
-	// recorded it (models.MissExtraCall); 0 for every other miss.
+	// recorded it (models.MissExtraCall); 0 for every other miss. extraOf
+	// is the first of those recordings (models.MockMismatchReport.ExtraOf).
 	extraCall int
+	extraOf   string
 }
 
 // maxUnknownStatementsNamed caps how many mocks a miss of an unknown statement
