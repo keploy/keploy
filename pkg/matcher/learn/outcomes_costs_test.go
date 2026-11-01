@@ -414,3 +414,40 @@ func TestOutcomeCostThePlacesKeepNoRecordingsText(t *testing.T) {
 		t.Errorf("a place's text, read when asked, is not its recording's (%d bytes)", len(got))
 	}
 }
+
+// A short word of a value at a place the start-up or an earlier test sent,
+// which round F moved to a word that shares nothing with F's new one, is
+// chance: the place shows the value did not follow it, so the word is made
+// anew each run, fresh (http learn_test.go:2829, :2853 on main refuse it;
+// DESIGN's evidence table, a changed place disproven). A word of 32 bits or
+// more there is a conflict, and so is the start-up's place that held the
+// value's whole recorded token; an earlier test's is out of the call's
+// scope, so that one is chance too.
+func TestOutcomeCostAShortWordAtAMovedEarlierPlaceIsChance(t *testing.T) {
+	const long, longF = "A7K29QXMtq", "Zq81Lm0Xwe"
+	for _, c := range []struct {
+		what                 string
+		startUp              bool
+		rec, live, sent, inF string
+		kinds                []RefusalKind
+	}{
+		{"k-1 to k-3 beside the start-up's n-1, n-2 in F (http learn_test.go:2829)", true, "k-1", "k-3", "n-1", "n-2", nil},
+		{"k-1 to k-3 beside an earlier test's n-1, n-2 in F (http learn_test.go:2853)", false, "k-1", "k-3", "n-1", "n-2", nil},
+		{"a ten-letter word beside the start-up's", true, "k-" + long, "k-" + longF, "n-" + long, "n-Pp00Kk11Jj", costConflict},
+		{"a ten-letter word beside an earlier test's", false, "k-" + long, "k-" + longF, "n-" + long, "n-Pp00Kk11Jj", costConflict},
+		{"k-1 to k-3, the start-up sent k-1 whole, k-2 in F", true, "k-1", "k-3", "k-1", "k-2", costConflict},
+		{"k-1 to k-3, an earlier test sent k-1 whole, k-2 in F", false, "k-1", "k-3", "k-1", "k-2", nil},
+	} {
+		in := oInput("body.key", c.rec, c.live, oServed("pool-1", true, c.startUp, Request, oText("body.node", c.sent), c.inF, time.Millisecond), nil)
+		r, f := "1", "3"
+		if c.rec != "k-1" {
+			r, f = long, longF
+		}
+		d := oWord(t, Decide(in), r, f)
+		if c.kinds == nil {
+			costFresh(t, c.what, d)
+			continue
+		}
+		costRefused(t, c.what, d, c.kinds, "pool-1", "body.node")
+	}
+}
