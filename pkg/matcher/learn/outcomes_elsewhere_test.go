@@ -98,6 +98,15 @@ func TestOutcomeElsewhereLearnsNothingBesideAValueAnEarlierPlaceSent(t *testing.
 	pick := []Earlier{{Mock: "mock-13", At: eRAt.Add(-2 * time.Second), Run: true,
 		Seen: []Seen{{Side: Response, Leaf: oText("body.claimed_at", iMs(eFAt.Add(-time.Millisecond))), Live: iMs(eFAt.Add(-time.Millisecond))}}}}
 	eNothing(t, "a claimed_at another test's answer gave", Decide(eLease(eRAt, eFAt, "pat-janitor:968290", "pat-janitor:968290", pick)), "mock-13")
+	// The call's recorded answer echoes the bucket that changed: an echo.
+	echo := eLease(eRAt, eFAt, "pat-janitor:968290", "pat-janitor:968291", nil)
+	echo.Resp = []Leaf{oText("reply.lease", "pat-janitor:968290")}
+	eNothing(t, "a bucket its recorded answer echoes", Decide(echo), "reply.lease")
+	// Another test's request held the recorded id whole, and round F moved
+	// it while the call sent another: a conflict at an earlier place.
+	held := []Earlier{{Mock: "mock-15", At: eRAt.Add(-time.Second), Run: true,
+		Seen: []Seen{{Side: Request, Leaf: oText("body.lease", "pat-janitor:968290"), Live: "pat-janitor:968292"}}}}
+	eNothing(t, "a bucket another test held whole, F moved", Decide(eLease(eRAt, eFAt, "pat-janitor:968290", "pat-janitor:968291", held)), "mock-15")
 }
 
 // RT12: a janitor-like insert tied with another flow's recording; its word
