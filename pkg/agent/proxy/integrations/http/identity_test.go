@@ -1,8 +1,10 @@
 package http
 
 import (
+	"context"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/identity"
@@ -142,5 +144,93 @@ func TestTextualContentType(t *testing.T) {
 		if got := textualContentType(h); got != want {
 			t.Errorf("textualContentType(%q) = %v, want %v", ct, got, want)
 		}
+	}
+}
+
+// A correlation binds its value from the aliased body, so it matches the
+// recording; the app is echoed the value it sent, its own identity, not the
+// recorded pod's.
+func TestACorrelationEchoesTheValueTheAppSent(t *testing.T) {
+	setProven(t, false)
+	rec, live := "api-55f5fd9659-fzsfr", "api-rpl-1a2b3c"
+	lease := &models.Mock{
+		Name: "lease",
+		Kind: models.Kind(models.HTTP),
+		Spec: models.MockSpec{
+			HTTPReq: &models.HTTPReq{
+				Method: models.Method("POST"),
+				URL:    "http://api/lease",
+				Header: map[string]string{"Content-Type": "application/json"},
+				Body:   `{"pod":"` + rec + `","token":"` + rec + `_1"}`,
+			},
+			HTTPResp: &models.HTTPResp{
+				StatusCode: 200,
+				Header:     map[string]string{"Content-Type": "application/json"},
+				Body:       `{"token":"` + rec + `_1"}`,
+			},
+			Correlations: []models.FieldCorrelation{{
+				RequestPath:   "body.token",
+				ResponsePaths: []string{"body.token"},
+				RecordedValue: rec + "_1",
+			}},
+		},
+	}
+	db := &mockMemDb{mocks: []*models.Mock{lease}, updateUnFilteredReturn: true}
+	in := jsonReq("POST", "/lease", `{"pod":"`+live+`","token":"`+live+`_9"}`)
+	aliasIdentity(aliasFixture(t), in)
+
+	ok, served, _, err := newHTTP().match(context.Background(), in, db, nil, nil, nil, true, false, false, true, true)
+	if err != nil || !ok || served == nil {
+		t.Fatalf("the correlated recording should answer: ok=%v served=%v err=%v", ok, served, err)
+	}
+	if got := served.Spec.HTTPResp.Body; !strings.Contains(got, live+"_9") || strings.Contains(got, rec+"_9") {
+		t.Fatalf("echoed %s, want the token the app sent (%s_9)", got, live)
+	}
+}
+
+// The fuzzy pass compares the request as aliased: the recorded pod's own
+// call is then the closest recording. Compared as the app sent it, the
+// recording that names only the app is closer (Levenshtein 12, against 17).
+func TestTheFuzzyPassComparesTheAliasedRequest(t *testing.T) {
+	setProven(t, false)
+	rec, live := "api-55f5fd9659-fzsfr", "api-rpl-1a2b3c"
+	recording := func(name, body string) *models.Mock {
+		return &models.Mock{
+			Name: name,
+			Kind: models.Kind(models.HTTP),
+			Spec: models.MockSpec{
+				HTTPReq:  &models.HTTPReq{Method: models.Method("POST"), URL: "http://api/lease", Header: map[string]string{"Content-Type": "text/plain"}, Body: body},
+				HTTPResp: &models.HTTPResp{StatusCode: 200, Body: name},
+			},
+		}
+	}
+	db := &mockMemDb{mocks: []*models.Mock{
+		recording("own", "holder="+rec+" renew=1"),
+		recording("app", "holder=api renew=2"),
+	}, updateUnFilteredReturn: true}
+	body := []byte("holder=" + live + " renew=9")
+	in := &req{method: "POST", url: &url.URL{Path: "/lease"}, header: http.Header{"Content-Type": {"text/plain"}}, body: body, raw: body}
+	aliasIdentity(aliasFixture(t), in)
+
+	ok, served, _, err := newHTTP().match(context.Background(), in, db, nil, nil, nil, true, false, false, true, true)
+	if err != nil || !ok || served == nil {
+		t.Fatalf("the fuzzy pass should answer: ok=%v served=%v err=%v", ok, served, err)
+	}
+	if served.Name != "own" {
+		t.Fatalf("the fuzzy pass chose %q, want the recorded pod's own call", served.Name)
+	}
+}
+
+// A miss is reported on the request as it was matched: the recorded pod's
+// identity in its path, as in its body, not the live pod's.
+func TestAMissIsReportedOnTheRequestAsItWasMatched(t *testing.T) {
+	setProven(t, false)
+	live, rec := identity.Live().Name, "api-55f5fd9659-rec1"
+	db := &mockMemDb{mocks: []*models.Mock{httpMock("status", "GET", "http://api.example/pods/"+rec+"/status")}, updateUnFilteredReturn: true}
+	opts := models.OutgoingOptions{Identity: &models.IdentityAliasing{RecordedPods: []models.PodIdentity{{Name: rec}}}}
+
+	r := missReport(t, db, "203.0.113.10:80", "api.example", "/pods/"+live+"/log", opts)
+	if !strings.Contains(r.ActualSummary, "/pods/"+rec+"/log") || strings.Contains(r.ActualSummary, live) {
+		t.Fatalf("the miss reads %q, want the request as matched (/pods/%s/log)", r.ActualSummary, rec)
 	}
 }

@@ -19,6 +19,7 @@ func aliasIdentity(rw *identity.Rewriter, input *req) {
 	if rw == nil || input == nil {
 		return
 	}
+	input.alias = rw
 	if input.url != nil {
 		u := *input.url
 		u.Path = rw.String(u.Path)
@@ -34,6 +35,34 @@ func aliasIdentity(rw *identity.Rewriter, input *req) {
 		input.sent = input.sentBody()
 		input.body = body
 	}
+}
+
+// unaliasBindings puts the identity the app knows back into the values a
+// correlation bound from the aliased body (rw's reverse: the presented
+// identity where the pod presents one, the live one elsewhere), so the
+// echoed value is the one the app sent. A nil rw returns bindings as they are.
+func unaliasBindings(rw *identity.Rewriter, bindings map[string]string) map[string]string {
+	rev := rw.Reverse()
+	if rev == nil {
+		return bindings
+	}
+	for k, v := range bindings {
+		bindings[k] = rev.String(v)
+	}
+	return bindings
+}
+
+// asMatched is request as the passes compared it: the URL, headers and Host
+// aliasIdentity rewrote (its body is input.body), so a miss report diffs the
+// same request the passes did. request itself when nothing was aliased.
+func asMatched(request *http.Request, input *req) *http.Request {
+	if request == nil || input == nil || input.alias == nil {
+		return request
+	}
+	r := request.WithContext(request.Context())
+	r.URL, r.Header = input.url, input.header
+	r.Host = input.alias.String(request.Host)
+	return r
 }
 
 // aliasHeader is h with every value rewritten; h itself when none changed.

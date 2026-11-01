@@ -18,6 +18,7 @@ import (
 	"github.com/agnivade/levenshtein"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/identity"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
@@ -45,6 +46,10 @@ type req struct {
 	// (aliasIdentity) changed body: what a hash of the payload it sent
 	// (x-amz-content-sha256) is a hash of is the bytes before the rewrite.
 	sent []byte
+	// alias is the identity rewrite aliasIdentity applied (nil: none). raw
+	// is not rewritten in place: the fuzzy pass reads it through alias, and
+	// a correlation's bound values are put back through its reverse.
+	alias *identity.Rewriter
 	// arrived is when keploy had read the whole request (zero: unknown):
 	// the app sent it, and read whatever clock it carries, no later.
 	arrived time.Time
@@ -453,7 +458,9 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 			if ce := h.Logger.Check(zap.DebugLevel, "correlation match found"); ce != nil {
 				ce.Write(zap.String("mock name", bestC.Name))
 			}
-			served, claimed, err := h.claim(ctx, bestC, mockDb, nil, bindings)
+			// The values were bound from the aliased body: the app gets back
+			// what it sent, its own identity, not the recorded pod's.
+			served, claimed, err := h.claim(ctx, bestC, mockDb, nil, unaliasBindings(input.alias, bindings))
 			if err != nil {
 				return false, nil, nil, err
 			}
@@ -512,8 +519,9 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		}
 
 		h.Logger.Debug("Performing fuzzy match for req buffer")
-		// Perform fuzzy match on the request
-		isMatched, bestMatch := h.PerformFuzzyMatch(shortListed, input.raw)
+		// Perform fuzzy match on the request, as aliased: the recordings
+		// carry the recorded pod's identity (aliasIdentity).
+		isMatched, bestMatch := h.PerformFuzzyMatch(shortListed, input.alias.Bytes(input.raw))
 		if isMatched {
 			if ce := h.Logger.Check(zap.DebugLevel, "fuzzy match found a matching mock"); ce != nil {
 				ce.Write(zap.String("mock name", bestMatch.Name))

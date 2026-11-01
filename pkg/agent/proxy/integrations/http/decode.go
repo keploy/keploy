@@ -454,7 +454,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// (A learn-step miss names the candidate it refused.)
 					diag = h.answeredDiag(reqCtx, input, db, diag, headerNoise, bodyNoise, urlNoise)
 				}
-				report := h.buildHTTPMismatchReport(request, input.body, db, nil, headerNoise, bodyNoise, diag)
+				// The report diffs the request as it was matched: aliased in
+				// its URL, headers and Host as in its body (asMatched).
+				report := h.buildHTTPMismatchReport(asMatched(request, input), input.body, db, nil, headerNoise, bodyNoise, diag)
 				if n > 0 && report != nil {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
 				}
