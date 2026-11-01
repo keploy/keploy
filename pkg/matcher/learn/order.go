@@ -829,12 +829,30 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		return dc.copied(path, at, n, r, l, coarse, "the same moment, at a millisecond or coarser, was sent before the call in both runs and its own window does not hold it: one read, copied")
 	}
 
-	// 7. Since begin (client tests): a plain read the window from each
-	// run's test begin to the call holds, checked from the test's begin.
+	// 7. Since begin (client tests): a read the window from each run's
+	// test begin to the call holds, plain or plus an offset (a time to live
+	// added to a read the application made earlier in its test, before its
+	// call's window), checked from the test's begin where the reading takes
+	// it (clockSinceBegin) and the guards of step 5 keep it. A look-back is
+	// never checked from the begin, whichever reading is registered: it
+	// would pass one the application shortened, or dropped, within the
+	// test's span. A reading or guard that declines it leaves step 8 as it
+	// was.
 	if dc.in.Drifts != nil && dc.in.Drifts.clientTests && c.rm != nil && c.lm != nil && cutWhy == "" {
-		if wb := dc.in.Window.sinceBegin(); wb != nil && wb.holdsRead(*c.rm, *c.lm, zone) {
-			if ln, ok := clockSinceBegin(Learned{Kind: KindClockOffset, Offset: &models.ClockOffset{Res: max(c.rm.res, c.lm.res)}}); ok && ln.Offset != nil {
-				return dc.clock(path, at, n, c, *ln.Offset, "a read of the application's clock made since its test began in both runs, before its call's window")
+		if wb := dc.in.Window.sinceBegin(); wb != nil {
+			enc := max(c.rm.res, c.lm.res)
+			off, ok := models.ClockOffset{Res: enc}, wb.holdsRead(*c.rm, *c.lm, zone)
+			if !ok {
+				off, _, ok = clockInWindow(path, c.ri, c.li, wb, zone)
+				ok = ok && off.Min > 0
+			}
+			if ln, sok := clockSinceBegin(Learned{Kind: KindClockOffset, Offset: &off}); ok && sok && ln.Offset != nil {
+				switch g, uncompared := dc.offsetGuard(path, *ln.Offset, enc, wb); {
+				case uncompared:
+					return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
+				case g == "":
+					return dc.clock(path, at, n, c, *ln.Offset, "a read of the application's clock made since its test began in both runs, before its call's window")
+				}
 			}
 		}
 	}

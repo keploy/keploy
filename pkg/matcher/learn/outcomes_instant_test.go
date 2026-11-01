@@ -474,6 +474,45 @@ func TestOutcomeAClientTestsReadSinceItsBeginIsAClock(t *testing.T) {
 	oRefused(t, "a keploy test's read 2 s and 3 s before its call", oWord(t, Decide(in), rec, live), "no-clock-read")
 }
 
+// A client test's token expiry, a read the application made earlier in its
+// test plus a time to live of 30 days cut to the second (expires_at =
+// cut_s(now) + 30d), 3.2 s before its call in the recording and 5.9 s in
+// round F: no offset its call's own window shows holds in both runs, but
+// the window from each run's test begin does, so it is a Clock checked from
+// the test's begin. A time to live that changed between the runs (30 days,
+// then 29) holds in neither window: refused, never fresh and never a Value.
+// In a keploy test, whose calls are not read from a begin, the expiry is
+// refused.
+func TestOutcomeAClientTestsTimeToLiveOnAnEarlyReadIsAClockSinceItsBegin(t *testing.T) {
+	const p = "body.expires_at"
+	rAt, fAt := oAt.Add(155*time.Millisecond), oAt.Add(61*time.Second+147*time.Millisecond)
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	w := iWin(rAt, fAt, 61*time.Millisecond).ComparesOffsets()
+	w.Rec.Began, w.F.Began = rAt.Add(-12*time.Second), fAt.Add(-12*time.Second)
+	for _, tc := range []struct {
+		what      string
+		rec, live string
+		clock     bool
+	}{
+		{"an expiry 30 days on", secs(rAt.Add(-3200 * time.Millisecond).Add(30 * 24 * time.Hour)), secs(fAt.Add(-5900 * time.Millisecond).Add(30 * 24 * time.Hour)), true},
+		{"time to live changed to 29 days", secs(rAt.Add(-3200 * time.Millisecond).Add(30 * 24 * time.Hour)), secs(fAt.Add(-5900 * time.Millisecond).Add(29 * 24 * time.Hour)), false},
+	} {
+		in := iCall(p, Number, tc.rec, tc.live, rAt, fAt, w, nil, nil)
+		in.Drifts = oClientDrifts()
+		d := oWord(t, Decide(in), tc.rec, tc.live)
+		if !tc.clock {
+			oRefused(t, "a client test's "+tc.what+" read before its call's window", d, "no-clock-read")
+			continue
+		}
+		iClock(t, "a client test's "+tc.what+" read before its call's window", d)
+		if d.Clock != nil && (d.Clock.Since != models.SinceTestBegin || d.Clock.Min <= 0) {
+			t.Errorf("a client test's %s: %+v; want a time to live checked since the test began", tc.what, *d.Clock)
+		}
+		in.Drifts = oDrifts()
+		oRefused(t, "a keploy test's "+tc.what+" read before its call's window", oWord(t, Decide(in), tc.rec, tc.live), "no-clock-read")
+	}
+}
+
 // A read plus a time to live, cut to the minute in Europe/Berlin, in the
 // hour its clocks go back (2026-10-25, 03:00 CEST to 02:00 CET): an
 // application that resolves a wall time shown twice to its first showing
