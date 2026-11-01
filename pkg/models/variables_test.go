@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -1683,6 +1684,13 @@ func TestAnOffsetLearnedAtAStepHoldsByItsStepAndItsGuards(t *testing.T) {
 			t.Errorf("FALSE GREEN: %s holds", c.name)
 		}
 	}
+	// An offset Fine for its unit (clock - 2s at the millisecond, which the
+	// learn step refuses as reading in seconds) holds nothing, though a file
+	// may carry one and a window narrow enough checks it.
+	fine := ClockOffset{Min: -2061 * time.Millisecond, Max: -1990 * time.Millisecond, Res: time.Millisecond, Layout: LayoutTyped, Step: time.Millisecond}
+	if !fine.Fine() || !fine.Checkable(time.Millisecond, from, to) || fine.Holds(to.Add(-2030*time.Millisecond), time.Millisecond, from, to) {
+		t.Errorf("FALSE GREEN: an offset Fine for its unit (Fine %v, Checkable %v) holds", fine.Fine(), fine.Checkable(time.Millisecond, from, to))
+	}
 	for _, d := range []time.Duration{73 * sec, 133 * sec} {
 		if lock.Holds(to.Truncate(time.Minute).Add(-d), sec, from, to) {
 			t.Errorf("FALSE GREEN: a look-back of %s holds", d)
@@ -1718,3 +1726,158 @@ func TestAnOffsetLearnedAtAStepHoldsByItsStepAndItsGuards(t *testing.T) {
 		t.Errorf("an own cut and a phase lock meet as %+v, want StepApart", m)
 	}
 }
+
+// An offset learned before Step (Step 0: every recording made before, and
+// what main's chain still writes) reads and checks exactly as main does,
+// method by method: its line (String), Narrow, CoarseCut and Unit,
+// CoarseChecked and Checkable, Holds, and Meet. stepZeroOnMain is what main
+// (f04e97d6f) answers, read there by this same stepZeroReadings: a look-back
+// of a second or less at the second, refused as too fine (it holds
+// nothing), stays refused; the cuts, times to live and plain read hold
+// where they held.
+func TestAnOffsetLearnedBeforeAStepChecksAsOnMain(t *testing.T) {
+	want := strings.Split(strings.TrimSpace(stepZeroOnMain), "\n")
+	got := stepZeroReadings()
+	if len(got) != len(want) {
+		t.Fatalf("%d readings, main has %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("an old recording reads unlike main:\n got  %s\n main %s", got[i], want[i])
+		}
+	}
+}
+
+// stepZeroReadings is what each method a learning at a Step changed
+// answers of offsets learned before Step (Step 0), one line per offset and
+// method: Holds of a value at seven offsets from the window's end (Min
+// less two Res, less one, Min, the middle, Max, plus one Res, plus two), 1
+// where it holds, in windows 61 ms, 2 s and 90 s wide.
+func stepZeroReadings() []string {
+	ms, sec, min, hour, day := time.Millisecond, time.Second, time.Minute, time.Hour, 24*time.Hour
+	typed := func(lo, hi, res time.Duration) ClockOffset {
+		return ClockOffset{Min: lo, Max: hi, Res: res, Layout: LayoutTyped}
+	}
+	since := typed(30*day-5*sec, 30*day+sec, sec)
+	since.Since = SinceTestBegin
+	offsets := []struct {
+		name string
+		o    ClockOffset
+	}{
+		{"clock - 2s at the second", typed(-2*sec-61*ms, -sec-400*ms, sec)},
+		{"clock - 1m43s at the second", typed(-103*sec, -102*sec, sec)},
+		{"clock - 1500ms at the millisecond", typed(-1561*ms, -1500*ms, ms)},
+		{"clock + 30m at the minute", typed(29*min, 31*min, min)},
+		{"clock + 30m at the second", typed(30*min-61*ms, 30*min+sec, sec)},
+		{"clock + 2h at the hour", typed(100*min, 140*min, hour)},
+		{"clock + 30d at the day", typed(29*day+20*hour, 30*day+10*hour, day)},
+		{"clock + 30d at the millisecond", typed(30*day-ms, 30*day+62*ms, ms)},
+		{"clock + 30d at the second, a whole second apart", typed(30*day-ms, 30*day+sec+ms, sec)},
+		{"clock + 30d since its test began", since},
+		{"a plain read at the second", ClockOffset{Res: sec, Layout: LayoutTyped}},
+	}
+	from := time.Date(2026, 10, 28, 9, 30, 15, 400e6, time.UTC)
+	var out []string
+	for i, c := range offsets {
+		o := c.o
+		add := func(method, v string) { out = append(out, c.name+" | "+method+" = "+v) }
+		add("String", o.String())
+		add("Narrow, CoarseCut, Unit", fmt.Sprint(o.Narrow(), o.CoarseCut(), o.Unit()))
+		for _, res := range []time.Duration{ms, sec} {
+			checkable, holds := fmt.Sprint(o.CoarseChecked(res)), ""
+			for _, width := range []time.Duration{61 * ms, 2 * sec, 90 * sec} {
+				to := from.Add(width)
+				checkable += " " + fmt.Sprint(o.Checkable(res, from, to))
+				holds += " "
+				for _, d := range []time.Duration{o.Min - 2*o.Res, o.Min - o.Res, o.Min, (o.Min + o.Max) / 2, o.Max, o.Max + o.Res, o.Max + 2*o.Res} {
+					holds += map[bool]string{true: "1", false: "0"}[o.Holds(to.Add(d).Truncate(res), res, from, to)]
+				}
+			}
+			add("CoarseChecked, Checkable("+res.String()+")", checkable)
+			add("Holds("+res.String()+")", holds[1:])
+		}
+		m := o.Meet(offsets[(i+1)%len(offsets)].o)
+		add("Meet(next), Meet(self)", fmt.Sprintf("%s, empty %v, step %v; %s", m, m.Empty(), m.Step, o.Meet(o)))
+	}
+	return out
+}
+
+const stepZeroOnMain = `
+clock - 2s at the second | String = clock - 2s (from -2.061s to -1.4s)
+clock - 2s at the second | Narrow, CoarseCut, Unit = false false 1s
+clock - 2s at the second | CoarseChecked, Checkable(1ms) = false false false false
+clock - 2s at the second | Holds(1ms) = 0000000 0000000 0000000
+clock - 2s at the second | CoarseChecked, Checkable(1s) = false false false false
+clock - 2s at the second | Holds(1s) = 0000000 0000000 0000000
+clock - 2s at the second | Meet(next), Meet(self) = clock reads no one offset holds (from -2.061s up to -1m42s), empty true, step 0s; clock - 2s (from -2.061s to -1.4s)
+clock - 1m43s at the second | String = clock - 1m43s (from -1m43s to -1m42s)
+clock - 1m43s at the second | Narrow, CoarseCut, Unit = false false 1s
+clock - 1m43s at the second | CoarseChecked, Checkable(1ms) = false false false false
+clock - 1m43s at the second | Holds(1ms) = 0000000 0000000 0000000
+clock - 1m43s at the second | CoarseChecked, Checkable(1s) = false false false false
+clock - 1m43s at the second | Holds(1s) = 0000000 0000000 0000000
+clock - 1m43s at the second | Meet(next), Meet(self) = clock reads no one offset holds (from -1.561s up to -1m42s), empty true, step 0s; clock - 1m43s (from -1m43s to -1m42s)
+clock - 1500ms at the millisecond | String = clock plus an offset from -1.561s to -1.5s
+clock - 1500ms at the millisecond | Narrow, CoarseCut, Unit = false false 1ms
+clock - 1500ms at the millisecond | CoarseChecked, Checkable(1ms) = false false false false
+clock - 1500ms at the millisecond | Holds(1ms) = 0000000 0000000 0000000
+clock - 1500ms at the millisecond | CoarseChecked, Checkable(1s) = false false false false
+clock - 1500ms at the millisecond | Holds(1s) = 0000000 0000000 0000000
+clock - 1500ms at the millisecond | Meet(next), Meet(self) = clock reads no one offset holds (from 29m up to -1.5s), empty true, step 0s; clock plus an offset from -1.561s to -1.5s
+clock + 30m at the minute | String = clock plus an offset from 29m to 31m
+clock + 30m at the minute | Narrow, CoarseCut, Unit = false false 1m0s
+clock + 30m at the minute | CoarseChecked, Checkable(1ms) = false false false false
+clock + 30m at the minute | Holds(1ms) = 0000000 0000000 0000000
+clock + 30m at the minute | CoarseChecked, Checkable(1s) = false false false false
+clock + 30m at the minute | Holds(1s) = 0000000 0000000 0000000
+clock + 30m at the minute | Meet(next), Meet(self) = clock + 30m (from 29m59.939s to 30m1s), empty false, step 0s; clock plus an offset from 29m to 31m
+clock + 30m at the second | String = clock + 30m (from 29m59.939s to 30m1s)
+clock + 30m at the second | Narrow, CoarseCut, Unit = true false 1m0s
+clock + 30m at the second | CoarseChecked, Checkable(1ms) = false true true false
+clock + 30m at the second | Holds(1ms) = 0111110 1111110 0000000
+clock + 30m at the second | CoarseChecked, Checkable(1s) = false true true false
+clock + 30m at the second | Holds(1s) = 0111110 1111110 0000000
+clock + 30m at the second | Meet(next), Meet(self) = clock reads no one offset holds (from 1h40m up to 30m1s), empty true, step 0s; clock + 30m (from 29m59.939s to 30m1s)
+clock + 2h at the hour | String = clock + 2h (from 1h40m to 2h20m)
+clock + 2h at the hour | Narrow, CoarseCut, Unit = true true 1h0m0s
+clock + 2h at the hour | CoarseChecked, Checkable(1ms) = true true true true
+clock + 2h at the hour | Holds(1ms) = 0111110 0111110 0111110
+clock + 2h at the hour | CoarseChecked, Checkable(1s) = true true true true
+clock + 2h at the hour | Holds(1s) = 0111110 0111110 0111110
+clock + 2h at the hour | Meet(next), Meet(self) = clock reads no one offset holds (from 716h up to 2h20m), empty true, step 0s; clock + 2h (from 1h40m to 2h20m)
+clock + 30d at the day | String = clock + 30d (from 716h to 730h)
+clock + 30d at the day | Narrow, CoarseCut, Unit = true true 24h0m0s
+clock + 30d at the day | CoarseChecked, Checkable(1ms) = true true true true
+clock + 30d at the day | Holds(1ms) = 0111110 0111110 0111110
+clock + 30d at the day | CoarseChecked, Checkable(1s) = true true true true
+clock + 30d at the day | Holds(1s) = 0111110 0111110 0111110
+clock + 30d at the day | Meet(next), Meet(self) = clock + 30d (from 719h59m59.999s to 720h0m0.062s), empty false, step 0s; clock + 30d (from 716h to 730h)
+clock + 30d at the millisecond | String = clock + 30d (from 719h59m59.999s to 720h0m0.062s)
+clock + 30d at the millisecond | Narrow, CoarseCut, Unit = true false 24h0m0s
+clock + 30d at the millisecond | CoarseChecked, Checkable(1ms) = false true true true
+clock + 30d at the millisecond | Holds(1ms) = 1111110 1111110 1111110
+clock + 30d at the millisecond | CoarseChecked, Checkable(1s) = false true true true
+clock + 30d at the millisecond | Holds(1s) = 1111111 1111111 1111111
+clock + 30d at the millisecond | Meet(next), Meet(self) = clock + 30d (from 719h59m59.999s to 720h0m0.062s), empty false, step 0s; clock + 30d (from 719h59m59.999s to 720h0m0.062s)
+clock + 30d at the second, a whole second apart | String = clock + 30d (from 719h59m59.999s to 720h0m1.001s)
+clock + 30d at the second, a whole second apart | Narrow, CoarseCut, Unit = true false 24h0m0s
+clock + 30d at the second, a whole second apart | CoarseChecked, Checkable(1ms) = false true true true
+clock + 30d at the second, a whole second apart | Holds(1ms) = 0111110 1111110 1111110
+clock + 30d at the second, a whole second apart | CoarseChecked, Checkable(1s) = false true true true
+clock + 30d at the second, a whole second apart | Holds(1s) = 0111110 1111110 1111110
+clock + 30d at the second, a whole second apart | Meet(next), Meet(self) = clock + 30d (from 719h59m59.999s to 720h0m1s), read after its test began and before its call, empty false, step 0s; clock + 30d (from 719h59m59.999s to 720h0m1.001s)
+clock + 30d since its test began | String = clock + 30d (from 719h59m55s to 720h0m1s), read after its test began and before its call
+clock + 30d since its test began | Narrow, CoarseCut, Unit = true false 24h0m0s
+clock + 30d since its test began | CoarseChecked, Checkable(1ms) = false true true true
+clock + 30d since its test began | Holds(1ms) = 0111110 1111110 1111110
+clock + 30d since its test began | CoarseChecked, Checkable(1s) = false true true true
+clock + 30d since its test began | Holds(1s) = 0111110 1111110 1111110
+clock + 30d since its test began | Meet(next), Meet(self) = clock reads no one offset holds (from 719h59m55s up to 0s), read after its test began and before its call, empty true, step 0s; clock + 30d (from 719h59m55s to 720h0m1s), read after its test began and before its call
+a plain read at the second | String = clock
+a plain read at the second | Narrow, CoarseCut, Unit = false false 0s
+a plain read at the second | CoarseChecked, Checkable(1ms) = false true true true
+a plain read at the second | Holds(1ms) = 0000000 0000000 0000000
+a plain read at the second | CoarseChecked, Checkable(1s) = false true true true
+a plain read at the second | Holds(1s) = 0111110 1111110 1111110
+a plain read at the second | Meet(next), Meet(self) = clock reads no one offset holds (from 0s up to -1.4s), empty true, step 0s; clock
+`

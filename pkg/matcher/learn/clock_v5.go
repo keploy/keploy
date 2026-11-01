@@ -8,6 +8,7 @@ package learn
 // on main and a keploy that does not read Step holds nothing of a new one.
 
 import (
+	"strconv"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -40,7 +41,9 @@ func init() {
 //     changed by part of a step, fails at every read; an application that
 //     does not cut and wrote two such values by chance (one recording in
 //     some sixty, of seconds a whole minute apart) fails a replay where its
-//     read falls at another remainder: a false red, never a false green.
+//     read falls at another remainder (a false red), and where its read
+//     lands on the learned one (a read in sixty) passes whatever its
+//     look-back, a dropped one too: never at every read.
 //   - An offset cut to a second or a minute that no unit holds three of
 //     (clock - 2s, an epoch's seconds: a debounce or a stale scan's cutoff)
 //     is learned whatever its width and checked at the cut against the
@@ -215,7 +218,7 @@ func lineV5(path string, o models.ClockOffset, enc, gap time.Duration) string {
 	c := models.ShortDuration(o.Res)
 	if o.Step > o.Res {
 		st := models.ShortDuration(o.Step)
-		return seen + ". Its two values stand " + models.ShortDuration(gap) + " apart, a whole number of " + st + ", and share their remainder within it, so keploy reads the application as cutting its read to " + st + " and then subtracting the look-back. A replay passes a value only where it is a whole " + st + " of its call's window (within " + c + " on either side) plus " + o.Range() + ": a look-back dropped, or changed by part of " + st + ", fails at every read, and so does one changed by a whole " + st + " unless the window holds a turn of the " + unitWord(o.Step) + "; an application that does not cut and wrote these two values by chance fails a replay wherever its value's remainder within " + st + " moves (a false red, never a false green)" + noiseEdit
+		return seen + ". Its two values stand " + models.ShortDuration(gap) + " apart, a whole number of " + st + ", and share their remainder within it, so keploy reads the application as cutting its read to " + st + " and then subtracting the look-back. A replay passes a value only where it is a whole " + st + " of its call's window (within " + c + " on either side) plus " + o.Range() + ": a look-back dropped, or changed by part of " + st + ", fails at every read, and so does one changed by a whole " + st + " unless the window holds a turn of the " + unitWord(o.Step) + "; an application that does not cut and wrote these two values by chance fails a replay wherever its value's remainder within " + st + " moves (a false red), and passes one where that remainder lands on the learned one, about one read in " + strconv.FormatInt(int64(o.Step/o.Res), 10) + ", whatever its look-back" + noiseEdit
 	}
 	via := ", cut to " + aUnit(o.Res)
 	if gap > 0 && o.Res > enc {
@@ -230,7 +233,14 @@ func lineV5(path string, o models.ClockOffset, enc, gap time.Duration) string {
 		_, on := cutExceptions(o.Res)
 		return seen + via + ". A replay checks it at the " + w + " against " + cutOffsetsV5(o, lo, hi) + ", as standing for its whole " + w + ", within one " + w + " of its call's window plus that offset on either side, whatever the window's width: " + offsetNamed(o) + " changed by one " + w + " passes there at every read, and one changed by more " + w + "s only where the replay's call's window holds a turn of the " + w + " for each " + w + " more, " + dir + ", so in a window narrower than the " + w + " one changed by two " + w + "s passes only where a turn of the " + w + " falls in it, and one changed by three " + w + "s or more fails" + on + noiseEdit
 	}
-	return seen + via + ". A replay passes a value of a read in its call's window plus " + o.Range() + ", checked at " + c + " (from one " + c + " before the " + c + " that holds the window's start plus " + models.ShortDuration(o.Min) + ", up to one " + c + " after its end plus " + models.ShortDuration(o.Max) + "), so " + offsetNamed(o) + " changed by less than " + models.ShortDuration(o.Max-o.Min+o.Res) + " can pass and one changed by " + aUnit(o.Unit()) + " or more fails; near a wall time the application's zone shows twice as its clocks go back a replay refuses the value" + noiseEdit
+	// Holds checks a value from one Res before the cut that holds the
+	// window's start plus Min up to one Res after its end plus Max: a read
+	// r in the window plus d passes at every read for d from Min - Res to
+	// Max + Res, at some reads (r late or early in the window and its cut)
+	// down to one Res and the window's width below that or up to the
+	// window's width above it, and at no read further out.
+	lo, hi := models.ShortDuration(o.Min-o.Res), models.ShortDuration(o.Max+o.Res)
+	return seen + via + ". A replay checks a value written as recorded at " + c + ": it passes one from one " + c + " before the start of the " + c + " that holds its call's window's start plus " + models.ShortDuration(o.Min) + " up to one " + c + " after the window's end plus " + models.ShortDuration(o.Max) + ". So a read in that window plus an offset from " + lo + " to " + hi + " passes at every read; plus an offset from one " + c + " and the window's width below " + lo + " up to it, or from " + hi + " up to the window's width above it, only where the read falls late or early enough in the window and its " + c + "; and plus any other offset (" + offsetNamed(o) + " changed by more) at no read; near a wall time the application's zone shows twice as its clocks go back a replay refuses the value" + noiseEdit
 }
 
 // cutOffsetsV5 names the whole cuts lo to hi a replay checks o against:
