@@ -3,6 +3,7 @@ package learn
 import (
 	"encoding/json"
 	"hash/maphash"
+	"io"
 	"slices"
 	"strings"
 )
@@ -364,11 +365,17 @@ func fieldWordsBytes(f fieldWords) int64 {
 // fieldsWith are the fields of the text that hold w as a word, in any of
 // main's readings and any declared form of the field's own text (holdsWord,
 // field by field): a recording's by its fields, so a word that moved to
-// another field in round F's view is not at its recorded field. Read once
-// for the call where they fit the budget; past it, by a scan of the fields
-// of the text read now, which keeps nothing. read is false where the
-// recording was not read.
+// another field in round F's view is not at its recorded field. A text
+// that does not hold w (holdsWord) has no field with it, and no field is
+// read for it: a word only a field's own text decoded twice holds (a JSON
+// string whose content is itself escaped) is no word of the text. Read
+// once for the call where they fit the budget; past it, by a scan of the
+// fields of the text read now, which keeps nothing. read is false where
+// the recording was not read.
 func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
+	if held, ok := t.holdsWord(w); !held {
+		return nil, ok
+	}
 	fw, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[fieldWords] { return &e.fields },
 		func(s string, fields []rawField) fieldWords {
 			fw := fieldWords{of: map[string][]int32{}}
@@ -404,8 +411,8 @@ func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
 
 // eachField calls yield with each field of s, the text read now, and the
 // field's text: its recording's fields (fields, read with s), a field that
-// is a JSON object or array (an HTTP body) by its own fields below its
-// path (textFields), else s whole as one field.
+// is JSON (an HTTP body: jsonValues) by its own fields below its path
+// (textFields), else s whole as one field.
 func eachField(s string, fields []rawField, yield func(fieldAt, string)) {
 	if len(fields) == 0 {
 		yield(fieldAt{}, s)
@@ -415,10 +422,8 @@ func eachField(s string, fields []rawField, yield func(fieldAt, string)) {
 			continue
 		}
 		text := s[f.start:f.end]
-		var v any
-		d := json.NewDecoder(strings.NewReader(text))
-		d.UseNumber()
-		if f.key || !strings.ContainsAny(text[:min(1, len(text))], "{[") || d.Decode(&v) != nil || d.More() {
+		v, ok := jsonValues(text)
+		if f.key || !ok {
 			yield(fieldAt{f.path, f.key}, text)
 			continue
 		}
@@ -427,6 +432,32 @@ func eachField(s string, fields []rawField, yield func(fieldAt, string)) {
 			yield(fieldAt{strings.TrimSuffix(f.path+"."+g.path, "."), g.key}, doc[g.start:g.end])
 		}
 	}
+}
+
+// jsonValues is text read as JSON where it opens with an object or an
+// array: one value, or several (NDJSON, a streaming API's body), each then
+// below its index as an array's element is. ok is false where text is not
+// wholly JSON values: a body that is no JSON is one field, as main reads it.
+func jsonValues(text string) (any, bool) {
+	if !strings.ContainsAny(text[:min(1, len(text))], "{[") {
+		return nil, false
+	}
+	d := json.NewDecoder(strings.NewReader(text))
+	d.UseNumber()
+	var vs []any
+	for {
+		var v any
+		if err := d.Decode(&v); err == io.EOF {
+			break
+		} else if err != nil {
+			return nil, false
+		}
+		vs = append(vs, v)
+	}
+	if len(vs) == 1 {
+		return vs[0], true
+	}
+	return vs, len(vs) > 0
 }
 
 // inOneField reports whether one field holds rw in r's text and lw in l's
