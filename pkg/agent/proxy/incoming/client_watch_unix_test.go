@@ -481,7 +481,7 @@ func TestAClientsHangUpReachesTheAppAfterARedialAndReplay(t *testing.T) {
 
 // dropsFirst is a listener whose first connection reads one request's head
 // and is closed with no answer, as a stale pooled connection is (dropped is
-// closed then); the rest are accepted as they come.
+// closed just before it); the rest are accepted as they come.
 type dropsFirst struct {
 	net.Listener
 	once    sync.Once
@@ -500,13 +500,18 @@ func (l *dropsFirst) Accept() (net.Conn, error) {
 			return c, nil
 		}
 		go func() {
-			defer close(l.dropped)
 			br := bufio.NewReader(c)
 			for {
 				if line, err := br.ReadString('\n'); err != nil || line == "\r\n" {
 					break
 				}
 			}
+			// dropped is closed before the conn is: the ingress redials
+			// only once it sees this close, so a client that has an
+			// answer from the redial finds dropped closed. Closed after,
+			// the ingress could redial, replay and answer while this
+			// goroutine waited to run.
+			close(l.dropped)
 			_ = c.Close()
 		}()
 	}
