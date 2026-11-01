@@ -539,11 +539,27 @@ for arg in "$@"; do
 done
 set -- "${forwarded_args[@]}"
 
+# Neither route deletes or writes anything in the caller's working directory:
+# run from a repo root, an `install.sh` there is the repo's own file. This one
+# used to download the installer below over ./install.sh, source whatever was
+# there, and `rm -rf keploy.sh install.sh` afterwards. Downloads go to a
+# mktemp directory of the installer's own, removed when it is done.
 if [ "$USE_OSS" = false ]; then
     echo "Installing Keploy"
-    curl --silent -O -L https://keploy.io/ent/install.sh
-    source install.sh "$@"
-    ent_status=$?
+    keploy_installer_dir=$(mktemp -d) || {
+        echo "Error: could not create a temporary directory to download the installer into." >&2
+        return 1 2>/dev/null || exit 1
+    }
+    # --fail: a 404 page must not be sourced as the installer.
+    if curl --fail --silent --show-error --location -o "$keploy_installer_dir/install.sh" https://keploy.io/ent/install.sh; then
+        source "$keploy_installer_dir/install.sh" "$@"
+        ent_status=$?
+    else
+        echo "Error: could not download the Keploy installer from https://keploy.io/ent/install.sh." >&2
+        ent_status=1
+    fi
+    rm -rf "$keploy_installer_dir"
+    unset keploy_installer_dir
     # Hand back whatever the enterprise installer returned: it refuses an
     # Intel Mac (and a bad -v) with status 1, and this is the default route
     # `curl ... install.sh && source install.sh` takes, so exiting 0 here
@@ -563,6 +579,4 @@ fi
 if command -v keploy &> /dev/null; then
     keploy example
     cleanup_tmp
-    rm -rf keploy.sh
-    rm -rf install.sh
 fi
