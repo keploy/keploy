@@ -1189,8 +1189,8 @@ func (h *heldScope) ClaimPairing(mk *models.Mock) bool {
 // round; LearnElsewhere keeps what a call taught only while it is
 // (learnElsewhereAt): a recording of a later staging that shares a name is
 // taught nothing by a call of h's.
-func (h *heldScope) LearnElsewhereCandidates(kind models.Kind) []*models.Mock {
-	return h.heldOf(h.MockManager.LearnElsewhereCandidates(kind))
+func (h *heldScope) LearnElsewhereCandidates(kind models.Kind, keys []string) []*models.Mock {
+	return h.heldOf(h.MockManager.LearnElsewhereCandidates(kind, keys))
 }
 
 func (h *heldScope) LearnElsewhere(mk *models.Mock, clocks map[string]models.ClockOffset) bool {

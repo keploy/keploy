@@ -48,12 +48,25 @@ func (m *MockManager) learningElsewhere() (*exactView, uint64) {
 // nil otherwise. A parser pairs a call with one only by its drift pairing's
 // guards, and the round writes what it learned onto a recording only of a
 // test it learns onto (or the pool's, in a full record).
-func (m *MockManager) LearnElsewhereCandidates(kind models.Kind) []*models.Mock {
+//
+// With keys, of a kind whose parser declares request keys
+// (models.HasRequestKeys), only the recordings filed under one of keys are
+// read: each tree's index for them (TreeDb.keyedValues), and on disk the
+// store's (RecordingSource), each decoded only once its name passed. Every
+// miss of the learn step asks, and a full round parks thousands of other
+// tests' recordings on disk: read by kind alone, each miss would decode
+// every one of them, though the parser compares the call only with
+// recordings of its operation, all of which its keys file. Without keys
+// (a call the parser keys none of), every recording of kind.
+func (m *MockManager) LearnElsewhereCandidates(kind models.Kind, keys []string) []*models.Mock {
 	v, epoch := m.learningElsewhere()
 	if v == nil {
 		return nil
 	}
-	return m.pairableOfKind(v, epoch, kind)
+	if len(keys) == 0 || !models.HasRequestKeys(kind) {
+		return m.pairableOfKind(v, epoch, kind)
+	}
+	return m.pairableUnderKeys(v, epoch, kind, keys)
 }
 
 // LearnElsewhere keeps clocks, the clock reads a call made in another window

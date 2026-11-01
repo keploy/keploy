@@ -326,8 +326,8 @@ func (s *scopedMockDb) ClaimPairing(m *models.Mock) bool {
 // LearnElsewhereCandidates and LearnElsewhere forward the store's
 // learning-only pairing (integrations.LearnElsewhere): nil and false from a
 // store that has none.
-func (s *scopedMockDb) LearnElsewhereCandidates(kind models.Kind) []*models.Mock {
-	return integrations.LearnElsewhereCandidates(s.MockMemDb, kind)
+func (s *scopedMockDb) LearnElsewhereCandidates(kind models.Kind, keys []string) []*models.Mock {
+	return integrations.LearnElsewhereCandidates(s.MockMemDb, kind, keys)
 }
 
 func (s *scopedMockDb) LearnElsewhere(m *models.Mock, clocks map[string]models.ClockOffset) bool {

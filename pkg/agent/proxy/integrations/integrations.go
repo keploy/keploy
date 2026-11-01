@@ -1146,8 +1146,12 @@ type LearnElsewhere interface {
 	// pool's too) that the set's calls have not consumed and no pairing
 	// claimed, in recorded order, while the session runs record's full
 	// round's learn step under the proven switch, whatever rules serve the
-	// set; nil otherwise.
-	LearnElsewhereCandidates(kind models.Kind) []*models.Mock
+	// set; nil otherwise. With keys, the call's request keys, of a kind
+	// whose parser declares them (models.HasRequestKeys), only those filed
+	// under one of keys: a parser asks by the keys every recording its
+	// pairing may take is filed under, so a recording kept on disk is
+	// decoded only if it may be the call's. Without, every one of kind.
+	LearnElsewhereCandidates(kind models.Kind, keys []string) []*models.Mock
 	// LearnElsewhere keeps the clock reads a call learned onto m for
 	// record's full round to write onto the recording, as it writes what a
 	// consumed recording learned. Clock reads alone (the founder approved
@@ -1159,11 +1163,11 @@ type LearnElsewhere interface {
 	LearnElsewhere(m *models.Mock, clocks map[string]models.ClockOffset) bool
 }
 
-// LearnElsewhereCandidates is db's LearnElsewhereCandidates of kind; nil when
-// db does not implement LearnElsewhere.
-func LearnElsewhereCandidates(db MockMemDb, kind models.Kind) []*models.Mock {
+// LearnElsewhereCandidates is db's LearnElsewhereCandidates of kind under
+// keys; nil when db does not implement LearnElsewhere.
+func LearnElsewhereCandidates(db MockMemDb, kind models.Kind, keys []string) []*models.Mock {
 	if l, ok := db.(LearnElsewhere); ok {
-		return l.LearnElsewhereCandidates(kind)
+		return l.LearnElsewhereCandidates(kind, keys)
 	}
 	return nil
 }
