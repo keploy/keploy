@@ -73,6 +73,45 @@ func TestHandleTestBegins(t *testing.T) {
 	}
 }
 
+// seedsSvc keeps the tests' begins and their seeds.
+type seedsSvc struct {
+	beginsSvc
+	seeds map[string]string
+}
+
+func (s *seedsSvc) SetTestSeeds(_ context.Context, seeds map[string]string) { s.seeds = seeds }
+
+// /agent/replay/clock hands the service the seed each test's recording kept
+// for its browser with the tests' begins; a service that keeps begins but no
+// seeds, given some, takes neither and answers 501: its tests' browsers would
+// draw other numbers than their recordings'.
+func TestHandleTestBeginsHandsTheServiceEachTestsSeed(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	send := func(a *Agent, body string) int {
+		rec := httptest.NewRecorder()
+		a.HandleTestBegins(rec, httptest.NewRequest(http.MethodPost, "/agent/replay/clock", strings.NewReader(body)))
+		return rec.Code
+	}
+	svc := &seedsSvc{}
+	if code := send(&Agent{logger: zap.NewNop(), svc: svc}, `{"begins":{"ui::tr":"2026-10-06T09:01:00Z"},"seeds":{"ui::tr":"0123456789abcdef"}}`); code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	if svc.seeds["ui::tr"] != "0123456789abcdef" || svc.begins["ui::tr"].IsZero() {
+		t.Fatalf("the service got seeds %v and begins %v", svc.seeds, svc.begins)
+	}
+	// None given clears what an earlier replay installed.
+	if code := send(&Agent{logger: zap.NewNop(), svc: svc}, `{"begins":{}}`); code != http.StatusOK || svc.seeds != nil {
+		t.Fatalf("status %d, seeds %v", code, svc.seeds)
+	}
+	old := &beginsSvc{}
+	if code := send(&Agent{logger: zap.NewNop(), svc: old}, `{"begins":{"ui::tr":"2026-10-06T09:01:00Z"},"seeds":{"ui::tr":"0123456789abcdef"}}`); code != http.StatusNotImplemented || old.begins != nil {
+		t.Fatalf("a service without seeds, given some: status %d, begins %v", code, old.begins)
+	}
+	if code := send(&Agent{logger: zap.NewNop(), svc: old}, `{"begins":{"ui::tr":"2026-10-06T09:01:00Z"}}`); code != http.StatusOK {
+		t.Fatalf("a service without seeds, given none: status %d", code)
+	}
+}
+
 // refusingScopeSvc refuses every begin with err.
 type refusingScopeSvc struct {
 	agent.Service

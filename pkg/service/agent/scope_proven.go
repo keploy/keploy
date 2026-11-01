@@ -905,7 +905,8 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	// the listener's drops with these.
 	a.markDrops(ctx, drops)
 	a.NoteScope(id, 0, dir, false)
-	a.noteScopeRandom(id, 0, models.NormalizeScopeRandom(req.Random))
+	seed := a.beginSeed(id, models.NormalizeScopeSeed(req.Seed))
+	a.noteScopeRandom(id, 0, models.NormalizeScopeRandom(req.Random), seed)
 	// opened: the test's capture window opened (open), so a begin that
 	// fails after it takes the window back.
 	var open func()
@@ -976,7 +977,31 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	a.proven.scopeTests[scope] = scopeTest{id: id, start: boundaryTime(at)} // its window's start (BeginScopeAt)
 	a.provenMu.Unlock()
 	begun = true
-	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
+	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok", Seed: seed}, nil
+}
+
+// beginSeed is the seed a beginning test's browser draws its random numbers
+// from (ScopeBeginResp.Seed), for a begin that sent one (asked; "" for one
+// that sent none). In a replay it is the one the test's recording kept
+// (SetTestSeeds), and none when it kept none: the browser then draws its own,
+// as it did in that recording. In a record it is the one the test's earlier
+// attempt in this record drew, so a retry draws the numbers the attempt did,
+// and else asked: each record of a test draws new numbers.
+func (a *Agent) beginSeed(id, asked string) string {
+	if asked == "" {
+		return ""
+	}
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	if a.replaying() {
+		return a.testSeeds[id]
+	}
+	for _, w := range a.scopeWindows {
+		if w.Name == id && w.Seed != "" {
+			return w.Seed
+		}
+	}
+	return asked
 }
 
 // oldWireFields refuses a begin or an end that carries the old wire's
@@ -1064,6 +1089,9 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 	// What the harness itself said, kept beside the verdict keploy gives
 	// the test below (ScopeWindow.Reported).
 	a.noteScopeReported(id, 0, reported)
+	// How the test's browser drew its random numbers, as its harness saw
+	// it: it replaces what the begin meant to do.
+	a.noteScopeRandomDone(id, 0, models.NormalizeScopeRandom(req.Random))
 	ev, outcome, err := a.closeOpen(ctx, id, outcome, at, "")
 	if err != nil {
 		// A test keploy could not read is unread on its window (its

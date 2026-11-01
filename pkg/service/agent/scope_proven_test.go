@@ -637,32 +637,115 @@ func TestAReplayedTestKeepsWhatItsHarnessReportedBesideKeploysVerdict(t *testing
 	}
 }
 
-// A test's window keeps how its browser drew its random numbers, as its begin
-// said (ScopeWindow.Random), normalized: a judge that finds the test's calls
-// vary between runs then tells a draw the seeding reaches from one it does not.
+// A test's window keeps how its browser drew its random numbers, as its end
+// said, else its begin (ScopeWindow.Random), normalized: a judge that finds
+// the test's calls vary between runs then tells a draw the seeding reaches
+// from one it does not. The claim names a folder, as @keploy/playwright's
+// does: NoteScope then starts the test's notes, and what the begin noted must
+// come after it.
 func TestATestsWindowKeepsHowItsBrowserDrewItsRandomNumbers(t *testing.T) {
-	for _, tc := range []struct{ sent, kept string }{
-		{"seeded", models.ScopeRandomSeeded},
-		{" OWN ", models.ScopeRandomOwn},
-		{"", ""},
-		{"dice", ""}, // a word keploy does not know says nothing
+	for _, tc := range []struct{ began, ended, kept string }{
+		{"seeded", "", models.ScopeRandomSeeded},
+		{" OWN ", "", models.ScopeRandomOwn},
+		{"", "", ""},
+		{"dice", "", ""}, // a word keploy does not know says nothing
+		// What the harness did replaces what it meant to do.
+		{"seeded", "own", models.ScopeRandomOwn},
+		{"", "Seeded", models.ScopeRandomSeeded},
+		{"seeded", "dice", models.ScopeRandomSeeded},
 	} {
-		t.Run("sent "+tc.sent, func(t *testing.T) {
+		t.Run("began "+tc.began+" ended "+tc.ended, func(t *testing.T) {
 			for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
 				a, _ := wireAgent(t, mode)
 				ctx := context.Background()
-				_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "ui"}, os.Getpid())
+				_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "ui", Dir: t.TempDir()}, os.Getpid())
 				require.Nil(t, serr)
 				req := begin("tr renders the case list")
-				req.Random = tc.sent
+				req.Random = tc.began
 				_, serr = a.ProvenBegin(ctx, req)
 				require.Nil(t, serr)
-				_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "tr renders the case list", Outcome: "passed"})
+				_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "tr renders the case list", Outcome: "passed", Random: tc.ended})
 				require.Nil(t, serr)
 				require.Equal(t, tc.kept, windowOf(t, a, "ui::tr renders the case list").Random, mode)
 			}
 		})
 	}
+}
+
+// seededBegin is a begin that asks for a seed for its browser, as
+// @keploy/playwright's does.
+func seededBegin(name, seed string) models.ScopeReq {
+	req := begin(name)
+	req.Random, req.Seed = models.ScopeRandomSeeded, seed
+	return req
+}
+
+// runSeeded begins and ends name with seed, and returns the seed keploy
+// answered the begin with.
+func runSeeded(t *testing.T, a *Agent, name, seed string) string {
+	t.Helper()
+	ctx := context.Background()
+	b, serr := a.ProvenBegin(ctx, seededBegin(name, seed))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: name, Outcome: "passed"})
+	require.Nil(t, serr)
+	return b.Seed
+}
+
+// A record answers a begin with the seed it sent, and keeps it on the test's
+// window for the test's mapping: each record of a test draws new numbers. A
+// retry of the test in the same record draws the first attempt's, so its
+// calls are the ones the attempt made. A seed keploy could not write back as
+// it came is none.
+func TestARecordAnswersABeginWithItsOwnSeedAndARetryWithTheFirstAttempts(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_RECORD)
+	ctx := context.Background()
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "ui", Dir: t.TempDir()}, os.Getpid())
+	require.Nil(t, serr)
+	require.Equal(t, "0123456789abcdef", runSeeded(t, a, "tr", "0123456789ABCDEF"))
+	require.Equal(t, "0123456789abcdef", runSeeded(t, a, "tr", "fedcba9876543210"), "a retry draws the first attempt's numbers")
+	require.Equal(t, "fedcba9876543210", runSeeded(t, a, "deep link", "fedcba9876543210"))
+	require.Empty(t, runSeeded(t, a, "history", "not hex!"))
+	require.Empty(t, runSeeded(t, a, "schema", ""), "a begin that asks for no seed gets none")
+	require.Empty(t, runSeeded(t, a, "tr", ""), "a retry with seeding off gets none")
+	ws, err := a.FinalScopeWindows(ctx)
+	require.NoError(t, err)
+	seeds := map[string][]string{}
+	for _, w := range ws {
+		if strings.HasPrefix(w.Name, "ui::") { // not the claim's own window
+			seeds[w.Name] = append(seeds[w.Name], w.Seed)
+		}
+	}
+	require.Equal(t, map[string][]string{
+		"ui::tr":        {"0123456789abcdef", "0123456789abcdef", ""},
+		"ui::deep link": {"fedcba9876543210"},
+		"ui::history":   {""},
+		"ui::schema":    {""},
+	}, seeds)
+
+	// The next record of the test is a new session: it draws new numbers.
+	b, _ := wireAgent(t, models.MODE_RECORD)
+	_, serr = b.ClaimInstance(ctx, models.InstanceReq{Key: "ui", Dir: t.TempDir()}, os.Getpid())
+	require.Nil(t, serr)
+	require.Equal(t, "1111222233334444", runSeeded(t, b, "tr", "1111222233334444"))
+}
+
+// A replay answers a begin with the seed the test's recording kept, whatever
+// seed the begin sent, so its pages draw what the recording's drew; a test
+// whose recording kept none (recorded before keploy kept seeds, or with
+// seeding off) gets none, and its browser draws its own. A seed is the
+// recording's entry's, not its name's: an entry renamed keeps it.
+func TestAReplayAnswersABeginWithTheSeedItsRecordingKept(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	a.SetTestSeeds(ctx, map[string]string{"ui::tr renamed": "0123456789abcdef", "ui::history": "not hex!"})
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "ui", Dir: t.TempDir()}, os.Getpid())
+	require.Nil(t, serr)
+	require.Equal(t, "0123456789abcdef", runSeeded(t, a, "tr renamed", "fedcba9876543210"))
+	require.Empty(t, runSeeded(t, a, "deep link", "fedcba9876543210"), "an older recording kept no seed")
+	require.Empty(t, runSeeded(t, a, "history", "fedcba9876543210"), "a seed keploy cannot write back is none")
+	require.Empty(t, runSeeded(t, a, "tr renamed", ""), "a begin with seeding off is answered none")
+	require.Equal(t, "0123456789abcdef", windowOf(t, a, "ui::tr renamed").Seed)
 }
 
 func TestAnEndOfATestThatIsNotOpenIsRefused(t *testing.T) {

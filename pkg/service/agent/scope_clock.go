@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
@@ -106,6 +107,26 @@ func (a *Agent) SetTestBegins(_ context.Context, begins map[string]time.Time, re
 	}
 	a.scopeMu.Unlock()
 	return nil
+}
+
+// SetTestSeeds installs, by test name, the seed each test's recording kept
+// for its browser's random numbers (models.TestBeginsReq.Seeds): a replayed
+// test's begin that asks for a seed is answered its recording's
+// (ProvenBegin). The CLI installs them with the tests' begins; a new session
+// clears them (resetScopeState).
+func (a *Agent) SetTestSeeds(_ context.Context, seeds map[string]string) {
+	a.scopeMu.Lock()
+	a.testSeeds = nil
+	for test, seed := range seeds {
+		if seed = models.NormalizeScopeSeed(seed); seed == "" {
+			continue
+		}
+		if a.testSeeds == nil {
+			a.testSeeds = map[string]string{}
+		}
+		a.testSeeds[test] = seed
+	}
+	a.scopeMu.Unlock()
 }
 
 // anyReal reports whether any test lists a mock.real destination.

@@ -366,6 +366,15 @@ type MappedTestCase struct {
 	// made before keploy kept it, in those made without the switch, and for
 	// a test run under no claim.
 	Key string `json:"key,omitempty" yaml:"key,omitempty" bson:"key,omitempty"`
+	// Seed is the seed the test's browser drew its random numbers from in
+	// its recording (models.ScopeWindow.Seed): each replay's begin is
+	// answered it, so the replay's pages draw what the recording's drew. It
+	// is the entry's, not derived from the test's name: an entry renamed
+	// keeps it, and a record of the test draws a new one. Written and read
+	// only under the proven switch; empty in recordings made before keploy
+	// kept it, in those made with seeding off, and for a test whose harness
+	// drives no browser.
+	Seed string `json:"seed,omitempty" yaml:"seed,omitempty" bson:"seed,omitempty"`
 }
 
 type persistedTestFormat struct {
@@ -388,6 +397,7 @@ type writtenTestFormat struct {
 	Real                []string     `json:"real,omitempty" yaml:"real,omitempty"`
 	Given               []GivenValue `json:"given,omitempty" yaml:"given,omitempty"`
 	Key                 string       `json:"key,omitempty" yaml:"key,omitempty"`
+	Seed                string       `json:"seed,omitempty" yaml:"seed,omitempty"`
 }
 
 type structuredTestFormat struct {
@@ -402,11 +412,11 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Key: tc.Key}, nil
+	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Key: tc.Key, Seed: tc.Seed}, nil
 }
 
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
-	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Key: tc.Key})
+	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Key: tc.Key, Seed: tc.Seed})
 }
 
 // errRecordedBegin is a test entry whose at: is not a time.
@@ -532,6 +542,40 @@ func recordedKeyJSON(data []byte) (string, error) {
 	return k.Key, nil
 }
 
+// errRecordedSeed is a test entry whose seed: is not a string.
+const errRecordedSeed = "a test's browser seed (seed) is not a string: %w"
+
+// recordedSeedYAML is a test entry's seed: under the proven switch. One that
+// is not a string is an error, never a reason to read the entry without it:
+// its replay would draw other numbers than its recording. With the switch
+// off seed: is not read.
+func recordedSeedYAML(node *yaml.Node) (string, error) {
+	if !provenswitch.On() || !nodeHasField(node, "seed") {
+		return "", nil
+	}
+	var k struct {
+		Seed string `yaml:"seed"`
+	}
+	if err := node.Decode(&k); err != nil {
+		return "", fmt.Errorf(errRecordedSeed, err)
+	}
+	return k.Seed, nil
+}
+
+// recordedSeedJSON is recordedSeedYAML for a JSON entry.
+func recordedSeedJSON(data []byte) (string, error) {
+	if !provenswitch.On() || !jsonContainsField(data, "seed") {
+		return "", nil
+	}
+	var k struct {
+		Seed string `json:"seed"`
+	}
+	if err := json.Unmarshal(data, &k); err != nil {
+		return "", fmt.Errorf(errRecordedSeed, err)
+	}
+	return k.Seed, nil
+}
+
 // recordedBeginJSON is recordedBeginYAML for a JSON entry.
 func recordedBeginJSON(data []byte) (time.Time, error) {
 	if !provenswitch.On() || !jsonContainsField(data, "at") {
@@ -581,10 +625,14 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
+	seed, err := recordedSeedYAML(node)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalYAMLEntry(node); err != nil {
 		return err
 	}
-	tc.At, tc.Real, tc.Given, tc.Key = at, rl, gv, key
+	tc.At, tc.Real, tc.Given, tc.Key, tc.Seed = at, rl, gv, key, seed
 	return nil
 }
 
@@ -676,10 +724,14 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
+	seed, err := recordedSeedJSON(data)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalJSONEntry(data); err != nil {
 		return err
 	}
-	tc.At, tc.Real, tc.Given, tc.Key = at, rl, gv, key
+	tc.At, tc.Real, tc.Given, tc.Key, tc.Seed = at, rl, gv, key, seed
 	return nil
 }
 

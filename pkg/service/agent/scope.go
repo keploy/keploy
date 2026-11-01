@@ -332,7 +332,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 		if a.replaying() {
 			meta.given = nil
 		}
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Reported: meta.reported, Random: meta.random, Evidence: ev, Real: meta.real, Given: meta.given})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Reported: meta.reported, Random: meta.random, Seed: meta.seed, Evidence: ev, Real: meta.real, Given: meta.given})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
@@ -508,8 +508,11 @@ type scopeMeta struct {
 	// (ScopeWindow.Reported).
 	reported string
 	// random is how the test's browser drew its random numbers, as its
-	// begin said (ScopeWindow.Random).
-	random   string
+	// end said, else its begin (ScopeWindow.Random).
+	random string
+	// seed is the seed keploy answered the test's begin with
+	// (ScopeWindow.Seed).
+	seed     string
 	evidence *models.ScopeEvidence
 	// real are the mock.real destinations the test used while open.
 	real []models.RealUse
@@ -534,10 +537,11 @@ func (a *Agent) NoteScope(name string, pid int, dir string, suite bool) {
 }
 
 // noteScopeRandom records how a beginning test's browser draws its random
-// numbers (ScopeWindow.Random), after NoteScope noted the test's folder:
-// NoteScope starts the test's notes afresh. A begin that says nothing
-// clears what an earlier begin of the test left.
-func (a *Agent) noteScopeRandom(name string, pid int, random string) {
+// numbers (ScopeWindow.Random) and the seed keploy answered its begin with
+// (ScopeWindow.Seed), after NoteScope noted the test's folder: NoteScope
+// starts the test's notes afresh. A begin that says nothing clears what an
+// earlier begin of the test left.
+func (a *Agent) noteScopeRandom(name string, pid int, random, seed string) {
 	if name == "" {
 		return
 	}
@@ -545,12 +549,34 @@ func (a *Agent) noteScopeRandom(name string, pid int, random string) {
 	defer a.scopeMu.Unlock()
 	k := scopeKey{pid: uint32(pid), name: name}
 	meta, ok := a.scopeMeta[k]
-	if !ok && random == "" {
+	if !ok && random == "" && seed == "" {
 		return
 	}
 	if a.scopeMeta == nil {
 		a.scopeMeta = make(map[scopeKey]scopeMeta)
 	}
+	meta.random, meta.seed = random, seed
+	a.scopeMeta[k] = meta
+}
+
+// noteScopeRandomDone records how an ending test's browser drew its random
+// numbers, as its end said (ScopeWindow.Random): what its harness did
+// replaces what its begin meant to do. An end that says nothing leaves the
+// begin's, and an end of a test that is not open notes nothing.
+func (a *Agent) noteScopeRandomDone(name string, pid int, random string) {
+	if name == "" || random == "" {
+		return
+	}
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	k := scopeKey{pid: uint32(pid), name: name}
+	if _, open := a.workerOpen[k]; !open {
+		return
+	}
+	if a.scopeMeta == nil {
+		a.scopeMeta = make(map[scopeKey]scopeMeta)
+	}
+	meta := a.scopeMeta[k]
 	meta.random = random
 	a.scopeMeta[k] = meta
 }

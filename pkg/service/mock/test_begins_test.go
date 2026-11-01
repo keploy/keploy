@@ -38,11 +38,12 @@ type beginsPusher struct {
 	Instrumentation
 	begins map[string]time.Time
 	real   map[string][]string
+	seeds  map[string]string
 	calls  int
 }
 
-func (p *beginsPusher) PushTestBegins(_ context.Context, begins map[string]time.Time, real map[string][]string) error {
-	p.begins, p.real = begins, real
+func (p *beginsPusher) PushTestBegins(_ context.Context, begins map[string]time.Time, real map[string][]string, seeds map[string]string) error {
+	p.begins, p.real, p.seeds = begins, real, seeds
 	p.calls++
 	return nil
 }
@@ -76,6 +77,57 @@ func TestPushTestBeginsSendsTheRecordingsBegins(t *testing.T) {
 	}
 	if p.calls != 1 || len(p.begins) != 0 {
 		t.Fatalf("pushed begins %v (%d calls)", p.begins, p.calls)
+	}
+}
+
+// A test's mapping keeps the seed its browser drew from in the recording: of
+// a test run twice (a retry, which draws the first attempt's seed) the
+// earliest window's with one; a window with none gives none.
+func TestStampSeedsKeepsTheSeedEachTestsBrowserDrewFrom(t *testing.T) {
+	t0 := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	byCase := map[string]models.MappedTestCase{"ui::tr": {Dir: "tests"}}
+	stampSeeds(byCase, []models.ScopeWindow{
+		{Name: "ui::tr", Start: t0.Add(time.Minute), Seed: "2222222222222222"},
+		{Name: "ui::tr", Start: t0, Seed: "1111111111111111"},
+		{Name: "ui::tr", Start: t0.Add(-time.Minute)},
+		{Name: "ui::history", Start: t0},
+	})
+	if got := byCase["ui::tr"]; got.Seed != "1111111111111111" || got.Dir != "tests" {
+		t.Fatalf("ui::tr: %+v", got)
+	}
+	if got, ok := byCase["ui::history"]; ok {
+		t.Fatalf("a window with no seed gave ui::history %+v", got)
+	}
+}
+
+// Replay hands the agent the seed each test's recording kept, by the test's
+// entry: an entry renamed keeps its seed under its new name, and one recorded
+// before keploy kept seeds (or with seeding off) sends none.
+func TestPushTestBeginsSendsEachTestsSeed(t *testing.T) {
+	t0 := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	p := &beginsPusher{}
+	m := &mockService{logger: zap.NewNop(), instrumentation: p, mappingDB: setTableDB{mapping: &models.Mapping{
+		TestCases: []models.MappedTestCase{
+			{ID: "ui::tr renders the paginated case list", At: t0, Seed: "0123456789abcdef"},
+			{ID: "ui::history", At: t0.Add(time.Minute)},
+		},
+	}}}
+	if err := m.pushTestBegins(context.Background(), "rec"); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.seeds) != 1 || p.seeds["ui::tr renders the paginated case list"] != "0123456789abcdef" {
+		t.Fatalf("pushed seeds %v", p.seeds)
+	}
+
+	p = &beginsPusher{}
+	m = &mockService{logger: zap.NewNop(), instrumentation: p, mappingDB: setTableDB{mapping: &models.Mapping{
+		TestCases: []models.MappedTestCase{{ID: "ui::history"}},
+	}}}
+	if err := m.pushTestBegins(context.Background(), "rec"); err != nil {
+		t.Fatal(err)
+	}
+	if p.seeds != nil {
+		t.Fatalf("a recording that kept no seed pushed %v", p.seeds)
 	}
 }
 

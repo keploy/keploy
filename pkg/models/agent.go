@@ -145,26 +145,54 @@ type ScopeReq struct {
 	// A Go test sends neither; its instance's key is the path.
 	File    string `json:"file,omitempty"`
 	Project string `json:"project,omitempty"`
-	// Random, sent with /agent/scope/begin, says how the test's browser drew
-	// its random numbers (ScopeRandomSeeded or ScopeRandomOwn), from a
-	// harness that drives one (@keploy/playwright). Optional: without it
-	// keploy knows nothing of the test's randomness.
+	// Random says how the test's browser drew its random numbers
+	// (ScopeRandomSeeded or ScopeRandomOwn), from a harness that drives one
+	// (@keploy/playwright). Sent with /agent/scope/begin, it is what the
+	// harness means to do; sent with /agent/scope/end, what it did, which
+	// replaces the begin's. Optional: without it keploy knows nothing of the
+	// test's randomness.
 	Random string `json:"random,omitempty"`
+	// Seed, sent with /agent/scope/begin, is a seed the harness drew afresh
+	// for the test's browser (NormalizeScopeSeed). It asks keploy for the
+	// seed to draw from (ScopeBeginResp.Seed): a record keeps the begin's,
+	// and a replay answers the one the test's recording kept instead.
+	Seed string `json:"seed,omitempty"`
 }
 
 // How a test's browser drew its random numbers (ScopeReq.Random):
-// ScopeRandomSeeded from a stream its harness seeded for the test, the same
-// in its recording and every replay, so a call that still varies is drawn on
-// a server or in a worker the seeding does not reach; ScopeRandomOwn from the
-// browser's own, as its harness was told not to seed them.
+// ScopeRandomSeeded from the seed keploy answered its begin with
+// (ScopeBeginResp.Seed), the same in its recording and every replay, so a
+// call that still varies is drawn where the seeding does not reach (a
+// server, a worker); ScopeRandomOwn from the browser's own, as its harness
+// was told not to seed them or keploy gave it no seed.
 const (
 	ScopeRandomSeeded = "seeded"
 	ScopeRandomOwn    = "own"
 )
 
-// NormalizeScopeRandom is ScopeRandomSeeded or ScopeRandomOwn for a begin that
-// says one of them, in any case, and "" for anything else: a word keploy does
-// not know says nothing of the test's randomness.
+// maxScopeSeed bounds a seed's length: a seed is a number, which a harness
+// sends as hex, and a longer one is no seed keploy keeps.
+const maxScopeSeed = 64
+
+// NormalizeScopeSeed is a begin's seed in lower case when it is 8 to
+// maxScopeSeed hex digits, and "" for anything else: keploy keeps and
+// answers no seed it cannot write back as it was sent.
+func NormalizeScopeSeed(s string) string {
+	v := strings.ToLower(strings.TrimSpace(s))
+	if len(v) < 8 || len(v) > maxScopeSeed {
+		return ""
+	}
+	for _, c := range v {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return ""
+		}
+	}
+	return v
+}
+
+// NormalizeScopeRandom is ScopeRandomSeeded or ScopeRandomOwn for a begin or
+// an end that says one of them, in any case, and "" for anything else: a
+// word keploy does not know says nothing of the test's randomness.
 func NormalizeScopeRandom(s string) string {
 	switch v := strings.ToLower(strings.TrimSpace(s)); v {
 	case ScopeRandomSeeded, ScopeRandomOwn:
@@ -225,6 +253,14 @@ type ScopeBeginResp struct {
 	Status string `json:"status"`
 	Action string `json:"action,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// Seed is the seed the test's browser draws its random numbers from,
+	// answered to a begin that sent one (ScopeReq.Seed): in a record, the
+	// begin's own, or the one the test's first attempt in the record drew
+	// (a retry draws the same numbers); in a replay, the one its recording
+	// kept (MappedTestCase.Seed). "" when there is none: the test was
+	// recorded with seeding off or before keploy kept seeds, and its
+	// browser draws its own.
+	Seed string `json:"seed,omitempty"`
 }
 
 // ScopeActionSkip is the ScopeBeginResp.Action telling a harness to skip.
@@ -297,9 +333,14 @@ type ScopeWindow struct {
 	// Outcome failed and Reported passed: a judge reads the two apart, as a
 	// test that failed on its own makes calls a passing one does not.
 	Reported string `json:"reported,omitempty"`
-	// Random is how the test's browser drew its random numbers, as its
-	// begin said (ScopeReq.Random, normalized); "" when it said nothing.
+	// Random is how the test's browser drew its random numbers, as its end
+	// said, else its begin (ScopeReq.Random, normalized); "" when neither
+	// said.
 	Random string `json:"random,omitempty"`
+	// Seed is the seed keploy answered the test's begin with
+	// (ScopeBeginResp.Seed); "" when it answered none. A record writes it
+	// into the test's mapping (MappedTestCase.Seed).
+	Seed string `json:"seed,omitempty"`
 	// Evidence is, under the proven wire, what keploy saw that failed the
 	// test at its end in a replay; nil when nothing did.
 	Evidence *ScopeEvidence `json:"evidence,omitempty"`
@@ -380,6 +421,10 @@ type TestBeginsReq struct {
 	// a test runs on the real clock, not at its recorded begin (design v14
 	// §3.4, F3). Absent when no test lists any.
 	Real map[string][]string `json:"real,omitempty"`
+	// Seeds is, by test, the seed its recording kept for its browser's
+	// random numbers (MappedTestCase.Seed): a begin that asks for one is
+	// answered it (ScopeBeginResp.Seed). Absent when no test kept one.
+	Seeds map[string]string `json:"seeds,omitempty"`
 }
 
 type SetTable struct {

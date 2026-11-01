@@ -1601,7 +1601,8 @@ func (m *mockService) pushTestBegins(ctx context.Context, name string) error {
 	}
 	begins := testBegins(mapping)
 	real := testReal(mapping)
-	if err := pusher.PushTestBegins(ctx, begins, real); err != nil {
+	seeds := testSeeds(mapping)
+	if err := pusher.PushTestBegins(ctx, begins, real, seeds); err != nil {
 		return err
 	}
 	m.realListed = real
@@ -1613,6 +1614,26 @@ func (m *mockService) pushTestBegins(ctx context.Context, name string) error {
 	}
 	m.logger.Info("sent the agent when each test began in its recording", zap.Int("tests", len(begins)), zap.String("mock-set", name))
 	return nil
+}
+
+// testSeeds is, by test ID, the seed each test of mapping kept for its
+// browser's random numbers (models.MappedTestCase.Seed); nil when none kept
+// one.
+func testSeeds(mapping *models.Mapping) map[string]string {
+	if mapping == nil {
+		return nil
+	}
+	var out map[string]string
+	for _, tc := range mapping.TestCases {
+		if tc.Seed == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[tc.ID] = tc.Seed
+	}
+	return out
 }
 
 // testReal is, by test ID, the mock.real destinations each test of mapping

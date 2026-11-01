@@ -895,6 +895,7 @@ func (m *mockService) Record(ctx context.Context) error {
 				stampBegins(byCase, windows)
 				stampReal(byCase, windows)
 				stampGiven(byCase, windows)
+				stampSeeds(byCase, windows)
 				stampKeys(byCase, windows, m.claims)
 			}
 			if len(starts) > 0 {
@@ -1382,6 +1383,27 @@ func stampGiven(byCase map[string]models.MappedTestCase, windows []models.ScopeW
 		}
 		tc.Given = slices.Clone(windows[i].Given)
 		byCase[name] = tc
+	}
+}
+
+// stampSeeds writes into each test's mapping the seed its browser drew its
+// random numbers from in this recording (models.ScopeWindow.Seed): each
+// replay's begin is answered it. Every attempt of a test in one record draws
+// from one seed (beginSeed); of a name with more than one window the
+// earliest's with a seed is kept, as its begin is (stampBegins).
+func stampSeeds(byCase map[string]models.MappedTestCase, windows []models.ScopeWindow) {
+	first := map[string]time.Time{}
+	for _, w := range windows {
+		if w.Seed == "" {
+			continue
+		}
+		if at, ok := first[w.Name]; ok && !w.Start.Before(at) {
+			continue
+		}
+		first[w.Name] = w.Start
+		tc := byCase[w.Name]
+		tc.Seed = w.Seed
+		byCase[w.Name] = tc
 	}
 }
 
