@@ -294,3 +294,17 @@ func TestOutcomeAWordInsideATokenIsJudgedByItsPlaces(t *testing.T) {
 	d = oWord(t, Decide(oInput(p, "kq-1730361600-z", "pw-2840472711-y", oServed("mock-231", true, true, Response, oText("body.cursor.firstBatch.0.n", "1730361600"), "1730361600", time.Millisecond), nil)), "1730361600", "2840472711")
 	oRefused(t, "kq-1730361600-z beside the start-up's 1730361600", d, "no-clock-read")
 }
+
+// A record with no Body (Mongo's shape) names its places through its
+// adapter's namer (Input.PlaceOf): the changed word, and a Value's bind
+// place at the earlier answer that gave it, at the word that changed.
+func TestOutcomeABodylessRecordNamesItsPlacesThroughItsAdapter(t *testing.T) {
+	src := oServed("mock-23", false, false, Response, oText("body.documents[0]._id", "o-41"), "o-42", time.Millisecond)
+	in := oInput("body.cmd.filter._id", "o-41", "o-42", src, nil)
+	in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
+	d := oWord(t, Decide(in), "41", "42")
+	if d.Outcome != OutcomeValue || d.At.String() != "body.cmd.filter._id#1" || d.FromAt.String() != "body.documents[0]._id#1" {
+		t.Errorf("o-41 to o-42 bound to an earlier answer, a record with no Body: %s at %q from %q; want a Value at body.cmd.filter._id#1 from body.documents[0]._id#1",
+			oDescribe([]Decision{d}), d.At.String(), d.FromAt.String())
+	}
+}

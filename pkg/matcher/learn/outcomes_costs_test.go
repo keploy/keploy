@@ -126,17 +126,26 @@ func TestOutcomeCostAnUnchangedPlaceHoldingOneShortWordIsChance(t *testing.T) {
 // Flyway's execution_time recorded 50 beside a CREATE TABLE F sent byte for
 // byte (VARCHAR(50)), 7 in F, the call's recorded answer echoing 50: the
 // unchanged place holds one short word, chance, so the value is fresh, its
-// echo named; refused where the adapter cannot answer a word (approved flip,
+// echo named where the adapter names its answer's cells (Input.PlaceOf);
+// refused where it names none or cannot answer a word (approved flip,
 // follows_test.go:407-411).
 func TestOutcomeCostAValueItsAnswerEchoesBesideAChancePlaceIsFresh(t *testing.T) {
 	raw := append(eStartup(), eHistory(eRecAt.Add(-150*time.Millisecond), 6, true))
 	resp := []Leaf{{Path: "rows[0][0]", Type: String, Value: "50"}}
-	d := oWord(t, Decide(costF("50", "7", nil, raw, resp)), "50", "7")
-	costFresh(t, "50 echoed in its answer beside VARCHAR(50) sent unchanged", d)
-	if len(d.Echo) == 0 {
-		t.Errorf("50 echoed in its answer: %s, Echo %v; want the answer's place named", oDescribe([]Decision{d}), d.Echo)
+	cells := func(l Leaf, answer bool) (string, bool) {
+		if !answer {
+			return "", false
+		}
+		return VarPlace(Leaf{Path: "body." + l.Path}, true)
 	}
 	in := costF("50", "7", nil, raw, resp)
+	in.PlaceOf = cells
+	d := oWord(t, Decide(in), "50", "7")
+	costFresh(t, "50 echoed in its answer beside VARCHAR(50) sent unchanged", d)
+	if len(d.Echo) != 1 || d.Echo[0].Place.Part == 0 {
+		t.Errorf("50 echoed in its answer: %s, Echo %v; want the answer's place named", oDescribe([]Decision{d}), d.Echo)
+	}
+	costRefused(t, "50 echoed at an answer place its adapter names not", oWord(t, Decide(costF("50", "7", nil, raw, resp)), "50", "7"), []RefusalKind{"cannot-check"})
 	in.Caps.AnswerAtWord = false
 	costRefused(t, "50 echoed in its answer, an adapter that cannot answer a word", oWord(t, Decide(in), "50", "7"), []RefusalKind{"cannot-check"})
 }

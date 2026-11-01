@@ -196,6 +196,7 @@ func (dc *decider) word(path string, at variables.Address, rec, live string, w r
 		}
 		d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeValue, "bound to "+first.name+", the earliest place before the call that shows it in both runs", names(src))
 		d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: w.Live}
+		d.FromAt = dc.fromAt(first, w.Rec)
 		return d
 	case len(conflict) > 0:
 		p := conflict[0]
@@ -599,6 +600,7 @@ func (dc *decider) bound(path string, at variables.Address, n int, r, l string, 
 	}
 	d := dc.learned(path, at, n, r, l, OutcomeValue, "bound to "+first.name+": "+rule, names(src))
 	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: l}
+	d.FromAt = dc.fromAt(first, r)
 	return d
 }
 
@@ -640,7 +642,7 @@ func (dc *decider) echoes(v string) []variables.Address {
 		ws := variables.Words(l.Value)
 		for i, w := range ws {
 			if l.Value[w[0]:w[1]] == v {
-				a := addressOf(dc.in, l)
+				a := dc.in.AddressOf(l, true)
 				a.Word = i
 				out = append(out, a)
 			}
@@ -666,15 +668,24 @@ func (dc *decider) echoPath(v string, i int) string {
 }
 
 // addressOf is l's word address, word -1 (the whole leaf).
-func addressOf(in Input, l Leaf) variables.Address {
-	at := variables.Address{Word: -1}
-	if s, ok := VarPlace(l, in.Rec.Body != nil); ok {
-		if a, err := variables.ParseAddress(s); err == nil {
-			at = a
-			at.Word = -1
+func addressOf(in Input, l Leaf) variables.Address { return in.AddressOf(l, false) }
+
+// fromAt is the address of the word v at p, a Value's bind place: the
+// earlier exchange's leaf as its adapter names it (an answer's as an
+// answer's), at v's word where v is one of its words, else the whole leaf;
+// no place (word -1) for a recording keploy read whole.
+func (dc *decider) fromAt(p evPlace, v string) variables.Address {
+	if p.leaf.Path == "" {
+		return variables.Address{Word: -1}
+	}
+	a := dc.in.AddressOf(p.leaf, p.side == Response)
+	for i, w := range variables.Words(p.leaf.Value) {
+		if p.leaf.Value[w[0]:w[1]] == v {
+			a.Word = i
+			break
 		}
 	}
-	return at
+	return a
 }
 
 // learned is a decided word and its line.
