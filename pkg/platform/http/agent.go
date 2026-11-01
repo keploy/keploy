@@ -1206,7 +1206,8 @@ var (
 // for as long as the agent serves it: until it answers, the agent this client
 // started exits (whileAgentRuns), the connection ends (an agent that dies
 // closes it; a host that is gone stops answering its keepalives), or ctx ends
-// (the run is stopped, or the test set's app exited). There is no deadline: on
+// (the run is stopped; replay calls a test case's hooks on the run's context,
+// not its test set's, which the set's app exit cancels). There is no deadline: on
 // a starved host a hook takes what it takes, and an agent that is alive but
 // never answers is for the user or the job's own limit to stop, as an app that
 // never answers a test is; while it waits keploy says so. The 50 s deadline
