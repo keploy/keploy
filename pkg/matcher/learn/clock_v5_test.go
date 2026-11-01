@@ -951,3 +951,46 @@ func TestAnOffsetAReplayCannotCompareOfAReadSinceItsTestBeganIsLeftToItsBegin(t 
 		}
 	}
 }
+
+// What the read nearest its call leaves alone. A value in milliseconds
+// shows its read's lead at its cut, so a plain read in a window 3.2 s wide
+// is no look-back of that lead, and now - 2s there is left to the order as
+// it was (no offset, no refusal). A quiet window that holds a turn of the
+// cut in both runs keeps the two whole seconds it holds: the turn, not the
+// window's width, put them there. And where one run's window is wide and
+// the other's narrow, the offsets both hold may hold no whole second: no
+// read nearest its call stands there, and the reading stays silent rather
+// than name a whole second one run's window does not hold, or refuse what
+// a later step of the order may read.
+func TestTheReadNearestItsCallLeavesAloneWhatNoLoadWidened(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	p := "body.cmd.query.dirtyAt.$lte"
+	s := time.Date(2026, 11, 1, 15, 21, 40, 0, time.UTC)
+	for _, back := range []time.Duration{0, 2 * sec} {
+		rec, f := v5Call(s.Add(407*ms), 3200*ms, 4*ms), v5Call(s.Add(FullRoundLead+3*ms), 3200*ms, 4*ms)
+		o, why, ok := clockInWindow(p, v5Instant(rec.read.Add(-back), ms), v5Instant(f.read.Add(-back), ms), v5Window(rec, f), nil)
+		if ok || why != "" {
+			t.Errorf("milliseconds, now - %s in a wide window: %+v %q %v; want no offset and no refusal", back, o, why, ok)
+		}
+	}
+	turn := func(call time.Time) v5Read { return v5Call(call.Add(20*ms), 61*ms, 30*ms) } // read 10 ms before the second turns
+	rec, f := turn(s), turn(s.Add(61*sec))
+	o, why, ok := clockInWindow(p, v5Instant(rec.read.Truncate(sec).Add(-2*sec), sec), v5Instant(f.read.Truncate(sec).Add(-2*sec), sec), v5Window(rec, f), nil)
+	if lo, hi := o.CutOffsets(); !ok || why != "" || lo != -3*sec || hi != -2*sec || strings.Contains(o.Why, "nearest its call") {
+		t.Errorf("a quiet window at a turn of the second: %+v %q %v, CutOffsets %s..%s; want both whole seconds, read as before", o, why, ok, lo, hi)
+	}
+	narrow, wide := v5Read{from: s, to: s.Add(100 * ms)}, v5Read{from: s.Add(57400 * ms), to: s.Add(60600 * ms)} // bounds -3.1 s to -2 s, and -2.6 s to 1.6 s
+	nv, wv := v5Instant(s.Add(-3*sec), sec), v5Instant(s.Add(58*sec), sec)
+	for _, row := range []struct {
+		name   string
+		w      *Window
+		rv, lv typedInstant
+	}{
+		{"the recording's window narrow, round F's wide", v5Window(narrow, wide), nv, wv},
+		{"the recording's window wide, round F's narrow", v5Window(wide, narrow), wv, nv},
+	} {
+		if o, why, ok := clockInWindow(p, row.rv, row.lv, row.w, nil); ok || why != "" {
+			t.Errorf("%s: %+v %q %v; want no offset and no refusal: both windows hold no whole second", row.name, o, why, ok)
+		}
+	}
+}
