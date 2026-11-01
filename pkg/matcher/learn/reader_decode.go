@@ -9,7 +9,7 @@ import (
 	"go.keploy.io/server/v3/pkg/variables"
 )
 
-// This file opens a drifted leaf's encoded parts (DESIGN §1). A changed
+// This file opens a drifted leaf's encoded parts. A changed
 // word's address is the leaf's place, the decode steps that open the text
 // it stands in, and its index among that text's words (variables.Address).
 // A step is taken only where it decodes in both runs and the opened texts

@@ -269,7 +269,7 @@ func BenchmarkReaderIndex498KB(b *testing.B) {
 	b.ReportMetric(float64(peak)/(1<<20), "heapMiB")
 }
 
-// RD8: past the budget a word is found by a scan of the text and its other
+// Past the budget a word is found by a scan of the text and its other
 // declared forms, exactly where main's word lists hold it, in each reading,
 // and no word list of the text is built: a recording past the budget costs
 // a scan per question, not a list of its every word.
@@ -322,7 +322,7 @@ func TestReaderAWordPastTheBudgetIsScannedAsMainsListsHoldIt(t *testing.T) {
 	}
 }
 
-// RD8: a call asking about many large earlier recordings, each handed over
+// A call asking about many large earlier recordings, each handed over
 // and dropped in turn as keploy's store streams them, holds at once only
 // what fits its budget and main's text cache (whose heap is about twice
 // what it counts, as set_budget_test.go allows): a text past the budget is
@@ -355,7 +355,7 @@ func TestReaderIndexHoldsNoTextPastItsBudget(t *testing.T) {
 	}
 }
 
-// RD8: a place keeps its recording's handle in the call's index (textOf),
+// A place keeps its recording's handle in the call's index (textOf),
 // never the recording's text. A call that asks about every recording before
 // it, each read from the set's store and let go again, holds at once no more
 // than the index's budget and the one text it reads, however many handles
