@@ -443,6 +443,33 @@ func mockSpentOf(db integrations.MockMemDb) func(string) bool {
 	return func(string) bool { return false }
 }
 
+// unspentOnce hands each list a verify compares back less the recordings
+// gone reports (what the store reports spent), reading gone once for each
+// recording, by its name, for every list. Another call's consume can land
+// between two reads of one recording's account (two identical calls at
+// once, the call recorded twice): read twice, the recording would be dropped
+// from one list and kept in the other, a difference the index never made.
+// Read once, after the verify's read of the store, it is dropped from both
+// or from neither: what the store reports spent only grows while a staging
+// generation holds, so a recording the index found and the read lacks was
+// spent before the read, and one the read holds was not spent when the index
+// was read. A verify compares the lists only while its generation held to
+// the last of these reads: one read under a later generation is of another
+// view (a test's end), whose spent are not the read's.
+func unspentOnce(gone func(*models.Mock) bool) func([]*models.Mock) []*models.Mock {
+	read := map[string]bool{}
+	return func(ms []*models.Mock) []*models.Mock {
+		return slices.DeleteFunc(slices.Clone(ms), func(m *models.Mock) bool {
+			was, ok := read[m.Name]
+			if !ok {
+				was = gone(m)
+				read[m.Name] = was
+			}
+			return was
+		})
+	}
+}
+
 // learnedGroupOf is learnedGroup for the live request: through h's indexed
 // read of db (learnIndexes.of) where there is one, else (and always with
 // reread) from db's reads. In the exact view's verify mode a group found
@@ -483,20 +510,20 @@ func (h *HTTP) learnedGroupOf(base, db integrations.MockMemDb, tracker *learn.Tr
 		// Another call's consume between the index's look and the read
 		// drops a recording from the read alone, and a test's open or close
 		// moves the generation: both are compared less what the store
-		// reports spent after the read, and only while the staging
-		// generation the indexed read is of still holds.
+		// reports spent after the read (unspentOnce), and only while the
+		// staging generation the indexed read is of held to the last of
+		// those reports.
+		full.answered, full.answeredMocks = r.answered, r.answeredMocks
+		fsc := full.scope(live, liveShape, n, true)
+		all, allOwner := exactGroup(liveShape, fsc, false), fsc.owner()
+		spentNow := mockSpentOf(db)
+		unspent := unspentOnce(func(m *models.Mock) bool { return spentNow(m.Name) })
+		got, want := unspent(group), unspent(all)
 		if again, _ := integrations.StagingGenerationOf(db, models.HTTP); again == look.gen {
-			full.answered, full.answeredMocks = r.answered, r.answeredMocks
-			fsc := full.scope(live, liveShape, n, true)
-			all, allOwner := exactGroup(liveShape, fsc, false), fsc.owner()
-			spentNow := mockSpentOf(db)
-			unspent := func(ms []*models.Mock) []*models.Mock {
-				return slices.DeleteFunc(slices.Clone(ms), func(m *models.Mock) bool { return spentNow(m.Name) })
+			if !slices.Equal(want, got) {
+				panic(fmt.Sprintf("exact view verify: indexed learned group of %s %s: indexed %v, read %v", live.method, live.path, strictNames(got), strictNames(want)))
 			}
-			if !slices.Equal(unspent(all), unspent(group)) {
-				panic(fmt.Sprintf("exact view verify: indexed learned group of %s %s: indexed %v, read %v", live.method, live.path, strictNames(group), strictNames(all)))
-			}
-			for _, m := range unspent(group) {
+			for _, m := range got {
 				if owner(m) != allOwner(m) {
 					panic(fmt.Sprintf("exact view verify: indexed learned group of %s %s: %s is the open test's own %v through the index, %v from a read", live.method, live.path, m.Name, owner(m), allOwner(m)))
 				}
