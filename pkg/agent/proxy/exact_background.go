@@ -414,8 +414,7 @@ func (m *MockManager) InBackground(name string) bool {
 
 var _ integrations.BackgroundMember = (*MockManager)(nil)
 
-// backgroundCursor is the background's stateful cursor (BackgroundCursor),
-// and, in a test under any rules, the worker scope's (SequenceView.Between):
+// backgroundCursor is the background's stateful cursor (BackgroundCursor):
 // the one the calls between tests advance.
 type backgroundCursor struct{ m *MockManager }
 
@@ -438,6 +437,27 @@ func (m *MockManager) backgroundCursorKey(key string) string {
 }
 
 var _ integrations.BackgroundCursor = (*MockManager)(nil)
+
+// windowsCursor is, in a test under any rules, the worker scope's stateful
+// cursor (SequenceView.Between): one sequence across the test windows of the
+// staging, kept apart from the one the calls between tests advance
+// (backgroundCursor), so no gap call walks or saturates what a window reads.
+// It is under the key of the pool view installed last, as the calls between
+// tests are, so a test process claimed again (RestartExactKey) starts it
+// over and two keys' windows never share a sequence.
+type windowsCursor struct{ m *MockManager }
+
+// windowsCursorTag sets the windows' cursors apart from the calls between
+// tests' under one pool key; no request key begins with a NUL.
+const windowsCursorTag = "\x00windows\x00"
+
+func (c windowsCursor) MockCursorIndex(key string, n int) int {
+	return c.m.cursorIndexAt(cursorSlot{key: c.m.backgroundCursorKey(windowsCursorTag + key)}, n)
+}
+
+func (c windowsCursor) AdvanceMockCursor(key string, servedIdx, n int) {
+	c.m.advanceCursorAt(cursorSlot{key: c.m.backgroundCursorKey(windowsCursorTag + key)}, servedIdx, n)
+}
 
 // learns reports whether the running set's learn step is on: the session is
 // record's full round (SetPairing) and the set's learn step has not ended

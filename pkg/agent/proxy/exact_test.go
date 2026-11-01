@@ -975,8 +975,13 @@ func TestACallReadBeforeATestOpensIsWalkedInTheViewItWasReadIn(t *testing.T) {
 			}
 			gap := probe(t, db)
 			open()
-			if first := probe(t, mm); gap != "s0" || first != "s1" {
-				t.Fatalf("the call made between tests answered %q and test A's first %q; want s0 and s1, whenever the test opened", gap, first)
+			// The gap call walks the calls between tests' cursor, the
+			// view it was read in; the windows walk their own, so test
+			// A's first is s0 too. Main's row wanted s1: one cursor for
+			// both, so A's answer moved with the calls between tests. A
+			// gap call walked in A's view would advance A's and give s1.
+			if first := probe(t, mm); gap != "s0" || first != "s0" {
+				t.Fatalf("the call made between tests answered %q and test A's first %q; want s0 and s0, whenever the test opened: the windows' sequence is apart from the calls between tests'", gap, first)
 			}
 		})
 	}
@@ -1179,13 +1184,16 @@ func TestATestsOwnRecordingsAnswerInRecordOrderThenTheWorkerScope(t *testing.T) 
 
 // A worker-scope request (models.Mapping.Worker) belongs to no test: record
 // places each of its recordings in the gap it was made in, so no test's
-// recorded window holds one. Its sequence is the set's, walked by placement
-// on one cursor wherever its calls land: a poll recorded in the gap after a
-// test that replay makes inside that test, or inside the next one, is
-// answered the recording placed there, as when it lands in the gap, and the
-// set's end finds every worker-scope recording it reached answered. A
-// recording whose place the run has not reached answers nothing, in a test
-// or out of one. Each case runs through every pass that walks the sequence,
+// recorded window holds one. It is walked by placement on two cursors: one
+// across the test windows and one across the calls between tests. Main
+// walked one sequence for both, so how many polls landed between tests
+// moved what a later window was answered, and with it the test's verdict,
+// with load. Now neither's count moves the other's answers: polls made only
+// between tests are answered as recorded, a poll made in a window is
+// answered the windows' next recording by placement, and the set's end may
+// find a reached recording unanswered (the worker scope is required of
+// none). A recording whose place the run has not reached answers nothing, in
+// a test or out of one. Each case runs through every pass that walks the sequence,
 // with the proven switch off and on, and the agent's order of calls: the
 // worker set named before each view goes in.
 func TestAWorkerScopeRequestIsWalkedByPlacementWhereverItsCallsLand(t *testing.T) {
@@ -1248,23 +1256,36 @@ func TestAWorkerScopeRequestIsWalkedByPlacementWhereverItsCallsLand(t *testing.T
 				}
 				return got, unanswered
 			}
-			for _, lands := range [][]string{
-				{"start", "gapA", "gapB"},
-				{"start", "inA", "gapB"},
-				{"start", "inB", "gapB"},
-				{"inA", "gapA", "gapB"},
-				{"start", "gapA", "inB"},
+			for _, c := range []struct {
+				lands      []string
+				want       []string
+				unanswered []string
+				why        string
+			}{
+				{[]string{"start", "gapA", "gapB"}, []string{"0", "1", "2"}, nil,
+					"made where recorded, all between tests: one sequence, as on main"},
+				{[]string{"start", "inA", "gapB"}, []string{"0", "0", "1"}, []string{"g2"},
+					"A's poll starts the windows' sequence at g0, whatever the gap answered; gapB goes on from the gap's g0"},
+				{[]string{"start", "inB", "gapB"}, []string{"0", "0", "1"}, []string{"g2"},
+					"B's poll starts the windows' sequence at g0; gapB goes on from the gap's g0"},
+				{[]string{"inA", "gapA", "gapB"}, []string{"0", "0", "1"}, []string{"g2"},
+					"the gaps' sequence starts at g0, whatever A's window answered"},
+				{[]string{"start", "gapA", "inB"}, []string{"0", "1", "0"}, []string{"g2"},
+					"B's poll starts the windows' sequence at g0, however many polls the gaps made"},
 			} {
-				got, unanswered := run(lands...)
-				if !reflect.DeepEqual(got, []string{"0", "1", "2"}) || len(unanswered) != 0 {
-					t.Errorf("polls made %v answered %v, leaving %v unanswered at the set's end; want 0 1 2 and none, as made where recorded", lands, got, unanswered)
+				got, unanswered := run(c.lands...)
+				if !reflect.DeepEqual(got, c.want) || !reflect.DeepEqual(unanswered, c.unanswered) {
+					t.Errorf("polls made %v answered %v, leaving %v unanswered at the set's end; want %v and %v: %s", c.lands, got, unanswered, c.want, c.unanswered, c.why)
 				}
 			}
-			// One poll more than the set recorded is answered nothing,
-			// never an earlier recording again; and a recording whose
-			// place the run has not reached answers nothing in a test.
-			if got, _ := run("start", "inA", "inA"); !reflect.DeepEqual(got, []string{"0", "1", miss}) {
-				t.Errorf("three polls by A's end answered %v; want 0 1, then nothing: g2's place is after B began", got)
+			// Polls in one window walk the windows' sequence in placement
+			// order, never an earlier recording again; and a recording
+			// whose place the run has not reached answers nothing in a
+			// test: three polls in A take g0 and g1 (g2's place is after
+			// B began), then nothing. The gap's poll before them moves
+			// none of A's answers.
+			if got, _ := run("start", "inA", "inA", "inA"); !reflect.DeepEqual(got, []string{"0", "0", "1", miss}) {
+				t.Errorf("a gap poll, then three polls in A, answered %v; want 0, then 0 1 and nothing: g2's place is after B began", got)
 			}
 		})
 	}
@@ -3903,5 +3924,50 @@ func TestAVariableCallPastItsRecordingsIsAnsweredNothingBetweenTests(t *testing.
 		if want := []string{"p0", "p1", "no answer", "no answer"}; !reflect.DeepEqual(got, want) {
 			t.Errorf("worker scope %v: ids r1 r2 r1 r1 answered %v; want %v: past its recordings, nothing", worker, got, want)
 		}
+	}
+}
+
+// A test window's answers never depend on how many calls landed between
+// tests before it. The windows and the calls between tests read the worker
+// scope apart, each on its own spends: a call between tests that spends a
+// worker: recording through a delete door (this parser's, enterprise SQS's)
+// spends it for the calls outside every test only, and a window's call
+// spends it for the windows only. So a poller recorded three times, polled
+// 0, 1, 3 or 10 times between tests as a slower or faster replay makes it,
+// is answered the same in the next test's window every time: its three
+// recordings once each, in placement order, then a miss. Through a door
+// that keeps the recording (MarkMockAsUsed) the same holds.
+func TestAWindowsWorkerAnswersDoNotMoveWithTheCallsBetweenTests(t *testing.T) {
+	for _, door := range []struct {
+		name string
+		ask  func(*testing.T, *MockManager, string) string
+	}{{"delete door", pollFirst}, {"keeping door", markFirst}} {
+		t.Run(door.name, func(t *testing.T) {
+			window := func(gap int) []string {
+				polls := []*models.Mock{httpCall("w-0", time.Second, "/poll"), httpCall("w-1", 2*time.Second, "/poll"), httpCall("w-2", 3*time.Second, "/poll")}
+				mm := stagedManager(t, nil, polls)
+				names := []string{"w-0", "w-1", "w-2"}
+				mm.ServeExactWorker(names)
+				mm.ServeExactTest("TestA", nil)
+				mm.ServeExactWorker(names)
+				mm.ServeExactPool("k", nil)
+				for i := 0; i < gap; i++ {
+					door.ask(t, mm, "w-")
+				}
+				mm.ServeExactWorker(names)
+				mm.ServeExactTest("TestB", nil)
+				var got []string
+				for i := 0; i < 4; i++ {
+					got = append(got, door.ask(t, mm, "w-"))
+				}
+				return got
+			}
+			want := []string{"w-0", "w-1", "w-2", "a miss"}
+			for _, gap := range []int{0, 1, 3, 10} {
+				if got := window(gap); !reflect.DeepEqual(got, want) {
+					t.Errorf("after %d calls between tests, TestB's window was answered %v; want %v whatever the gap made", gap, got, want)
+				}
+			}
+		})
 	}
 }

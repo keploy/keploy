@@ -36,19 +36,24 @@ import (
 //     protocol-phase mocks. Its stateful cursors are the key's own.
 //   - Whether a test is open or not, the set's worker-scope mocks its run
 //     has reached the place of answer (ServeExactWorker,
-//     models.Mapping.Worker): no test owns them. In a test they come after
-//     the test's own, and each answers at most one request in the windows
-//     of the staging, through whichever door a parser consumes it. Outside
-//     every test each is served by the pool slice's rule, whatever a test's
-//     window spent: reused, or walked to its last answer and saturated
-//     there, by a door that keeps it; spent for the staging by a delete
-//     door (decision 31). A call the app makes more often between tests
-//     when replay is slower (a poller, a retry, a heartbeat) is then
-//     answered as the pool answered it before the call was listed in
-//     worker:, and the verdicts do not move with load. That rule is the
-//     pool slice's without the background rules (exact_background.go):
-//     under them one of the pool's is spent through a door that keeps it
-//     too, and the worker scope, staged apart from the pool, keeps it.
+//     models.Mapping.Worker): no test owns them. The test windows and the
+//     calls between tests read them apart, each on its own spends and its
+//     own stateful cursor, so neither's count moves what the other is
+//     answered. In a test they come after the test's own, and each answers
+//     at most one request in the windows of the staging, through whichever
+//     door a parser consumes it, walked by placement on the windows' cursor
+//     (windowsCursor) whatever the calls between tests spent or walked.
+//     Outside every test each is served by the pool slice's rule, whatever
+//     a test's window spent: reused, or walked to its last answer and
+//     saturated there, by a door that keeps it; spent for the calls outside
+//     every test by a delete door (decision 31). A call the app makes more
+//     often between tests when replay is slower (a poller, a retry, a
+//     heartbeat) is then answered as the pool answered it before the call
+//     was listed in worker:, and no test window's answers depend on how
+//     many such calls came before it. That rule is the pool slice's without
+//     the background rules (exact_background.go): under them one of the
+//     pool's is spent through a door that keeps it too, and the worker
+//     scope, staged apart from the pool, keeps it.
 //
 // A data-plane recording a parser consumes through a delete door while no
 // test is open (a call before the first test or between tests) is consumed
@@ -611,9 +616,10 @@ type outsideState struct {
 	spent sync.Map
 	// inTests holds the names of the worker scope's recordings consumed in
 	// a test's window: each answers at most one call in the windows of the
-	// staging. A view with no test open does not read it: outside every
-	// test the worker scope is served by the pool slice's rule
-	// (exactView.spentOutside).
+	// staging. The windows read it alone for the worker scope (spent does
+	// not hide one there), and a view with no test open does not read it:
+	// outside every test the worker scope is served by the pool slice's
+	// rule (exactView.spentOutside).
 	inTests sync.Map
 	// unstaged holds the names of the recordings a door named that staged
 	// does not hold, once each is said (MockManager.servedAsNamed).
@@ -713,8 +719,8 @@ func (m *MockManager) RestartExactKey(key string, names []string) {
 //
 // inTest is a consume of one of the worker scope's in a test's window
 // (spendsInTests): it is spent for the windows of the staging alone
-// (outsideState.inTests), and refused when a call outside every test spent
-// it for the staging.
+// (outsideState.inTests), whatever the calls outside every test spent, so
+// no window's answer depends on how many calls landed between tests.
 func (m *MockManager) consumeOutside(mk *models.Mock, inTest bool) exactVerdict {
 	st := m.exact.outside.cur.Load()
 	if st == nil || st.epoch != m.stagingEpoch.Load() {
@@ -726,9 +732,6 @@ func (m *MockManager) consumeOutside(mk *models.Mock, inTest bool) exactVerdict 
 		return exactRefused
 	}
 	if inTest {
-		if _, out := st.spent.Load(mk.Name); out {
-			return exactRefused
-		}
 		if _, taken := st.inTests.LoadOrStore(mk.Name, true); taken {
 			return exactRefused
 		}
@@ -2278,15 +2281,20 @@ func (v *exactView) isWorker(name string) bool {
 // spentOutside reports whether name, a data-plane recording, was spent for
 // the staging in the current staging (outsideAnswers): consumed outside
 // every test; or, in a test's view, one of the worker scope's a test's
-// window consumed (outsideState.inTests). A view with no test open shows
-// the worker scope a window spent: outside every test it is served by the
-// pool slice's rule.
+// window consumed (outsideState.inTests). The two never mix for the worker
+// scope: a test's view reads only what the windows spent of it, so a call
+// between tests never hides one from a window, and a view with no test
+// open shows the worker scope a window spent: outside every test it is
+// served by the pool slice's rule.
 func (v *exactView) spentOutside(name string) bool {
 	if v.outside == nil {
 		return false
 	}
 	e := v.epoch.Load()
-	return v.outside.hidden(name, e) || (v.test != "" && v.outside.hiddenInTests(name, e))
+	if v.test != "" && v.isWorker(name) {
+		return v.outside.hiddenInTests(name, e)
+	}
+	return v.outside.hidden(name, e)
 }
 
 var _ integrations.StagingGenerations = (*MockManager)(nil)
@@ -3177,14 +3185,17 @@ func (m *MockManager) SequenceView() (integrations.SequenceView, bool) {
 
 // sequenceViewOf is the sequence view of v (SequenceView), the view in force
 // now or the one a call was read in (MarkCallRound). In a test that shows
-// worker-scope mocks it tells them (Worker) with the cursor the calls between
-// tests advance (Between), so a worker-scope request is one sequence for the
-// set wherever its calls land: the worker scope belongs to no test.
+// worker-scope mocks it tells them (Worker) with the windows' cursor
+// (Between: windowsCursor), so a worker-scope request is one sequence across
+// the test windows wherever its calls land in them: the worker scope belongs
+// to no test. The calls between tests walk their own cursor (the pool
+// view's), so a window's answers never depend on how many calls landed
+// between tests.
 func (m *MockManager) sequenceViewOf(v *exactView) integrations.SequenceView {
 	sv := integrations.SequenceView{Cursor: viewCursor{m: m, v: v}, Test: v.test, Start: v.winStart, End: v.winEnd}
 	if v.test != "" && len(v.worker) > 0 {
 		sv.Worker = func(mk *models.Mock) bool { return mk != nil && !mk.IsProtocolPhase() && v.isWorker(mk.Name) }
-		sv.Between = backgroundCursor{m: m}
+		sv.Between = windowsCursor{m: m}
 	}
 	return sv
 }

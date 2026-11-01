@@ -718,8 +718,11 @@ func TestAnswersAndMissesHaveRoomOfTheirOwn(t *testing.T) {
 // answered by kind only when every background reply of it is equal):
 // KindBackground lists a worker recording placed after a test not begun,
 // which Background, what exact serving reads, hides; and SpendByKind spends it
-// for the staging, once, so it answers nothing more once its place is
-// reached. A test's own or another test's recording is no background; today's
+// once for the calls outside every test, where it was made: once its place
+// is reached a test's window still reads it, since the windows and the calls
+// between tests read the worker scope apart (a window's answers never depend
+// on what the calls between tests spent), and it answers one window's call,
+// then nothing more. A test's own or another test's recording is no background; today's
 // rules have none; a scoped view forwards it.
 func TestKindBackgroundIgnoresPlace(t *testing.T) {
 	mm, ms := s12Set(t)
@@ -747,12 +750,18 @@ func TestKindBackgroundIgnoresPlace(t *testing.T) {
 	equalNames(t, "the kind's spent background after the spend", spent, "w-later")
 	equalNames(t, "the spent background", mm.SpentBackground(models.HTTP), "w-later")
 
-	// Its place reached, it is spent for the staging: not shown.
+	// Its place reached, a window reads it: the by-kind answer between
+	// tests spent it for the calls outside every test only. Main's row hid
+	// it here, so whether a window was answered depended on how many calls
+	// landed between tests. It answers one window's call, then nothing.
 	mm.ServeExactWorker([]string{"w-boot", "w-later"})
 	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
-	equalNames(t, "the background once w-later's place is reached", mm.Background(models.HTTP), "w-boot", "pool")
+	equalNames(t, "the background once w-later's place is reached", mm.Background(models.HTTP), "w-boot", "w-later", "pool")
+	if got := pollFirst(t, mm, "w-later"); got != "w-later" {
+		t.Fatalf("a recording a by-kind answer spent between tests did not answer a window: %s", got)
+	}
 	if got := pollFirst(t, mm, "w-later"); got != "a miss" {
-		t.Fatalf("a recording a by-kind answer spent answered again: %s", got)
+		t.Fatalf("a worker recording answered twice in the windows: %s", got)
 	}
 
 	// Through a scoped view.

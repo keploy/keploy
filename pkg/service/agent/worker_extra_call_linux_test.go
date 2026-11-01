@@ -149,3 +149,57 @@ func TestKeployMockABetweenTestPollerAtTwiceItsCallsMovesNoVerdict(t *testing.T)
 		require.NotContains(t, v, " "+models.ScopeActionFail+" ", "a test that made its own calls failed")
 	}
 }
+
+// A test window's answers never depend on how many calls landed between
+// tests: a poller's three HTTP recordings are listed in worker:, TestB polls
+// twice in its window, and only the number of polls between TestA and TestB
+// changes (0, 1, 3 and 10, as a faster or slower replay makes it). The
+// windows walk the worker scope on a cursor of their own, which no call
+// between tests advances or saturates, so TestB is answered the first two
+// recordings in placement order and passes every time. It holds for an
+// untagged recording, which HTTP keeps as it answers, and for one stated
+// per-test, as keploy mock record writes them.
+func TestAWindowsVerdictDoesNotMoveWithThePollsBetweenTests(t *testing.T) {
+	for _, shape := range []struct {
+		name string
+		meta map[string]string
+	}{
+		{"untagged", nil},
+		{"stated per-test", map[string]string{models.MetadataLifetimeKey: models.MetadataLifetimePerTest}},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			run := func(gap int) string {
+				a, _ := wireAgent(t, models.MODE_TEST)
+				p := newServingProxy()
+				a.Proxy = p
+				ctx := context.Background()
+				mocks := []*models.Mock{pingMock("mock-a", "/a", "a", t0), pingMock("mock-b", "/b", "b", t0.Add(time.Hour))}
+				var names []string
+				for i := 0; i < 3; i++ {
+					n := fmt.Sprintf("poll-%d", i)
+					m := pingMock(n, "/poll", fmt.Sprintf("poll%d", i), t0.Add(time.Duration(i+1)*time.Second))
+					m.Spec.Metadata = shape.meta
+					mocks = append(mocks, m)
+					names = append(names, n)
+				}
+				require.NoError(t, a.StoreMocks(ctx, nil, mocks))
+				require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {"mock-a"}, "o::TestB": {"mock-b"}}))
+				require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{"o": names}))
+				require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": names}))
+				claimSelf(t, a)
+				runTest(t, a, p, "TestA", "/a")
+				for i := 0; i < gap; i++ {
+					code, _ := p.call(t, "/poll")
+					require.Equal(t, 200, code, "poll %d of %d between tests went unanswered", i+1, gap)
+				}
+				got, e := runTest(t, a, p, "TestB", "/b", "/poll", "/poll")
+				return fmt.Sprintf("%s verdict=%q", strings.Join(got, ","), e.Action)
+			}
+			want := run(0)
+			require.True(t, strings.HasPrefix(want, "200 b,200 poll0,200 poll1 "), "with no poll between tests TestB was answered %s; want b, then poll0 and poll1 in placement order", want)
+			for _, gap := range []int{1, 3, 10} {
+				require.Equal(t, want, run(gap), "TestB's answers and verdict moved with %d polls between tests", gap)
+			}
+		})
+	}
+}

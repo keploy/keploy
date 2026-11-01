@@ -402,13 +402,16 @@ func TestAWorkerMockAnswersInAnyTestOnceAndIsRequiredOfNone(t *testing.T) {
 	got, e := runTest(t, a, p, "TestA", "/a", "/token")
 	require.Equal(t, []string{"200 a", "200 first-use"}, got, "a worker: mock answers in a test's window, in recorded order")
 	require.Empty(t, e.Action, e.Reason)
+	// Between tests the calls walk their own sequence, from its first
+	// recording, whatever the windows answered (main walked one sequence
+	// for both, so this call's answer moved with the windows' calls).
 	code, body := p.call(t, "/token")
-	require.Equal(t, "200 again", fmt.Sprintf("%d %s", code, body), "and between tests")
+	require.Equal(t, "200 first-use", fmt.Sprintf("%d %s", code, body), "and between tests, on the calls between tests' own sequence")
 	_, e = runTest(t, a, p, "TestB")
 	require.Empty(t, e.Action, "a worker: mock no call answered (mock-4) is required of no test: %s", e.Reason)
-	// mock-3 answered between tests by the pool's rule, which spends nothing
-	// in the windows: it answers TestC's first /token, and is then spent
-	// for the set's windows, as mock-2 was in TestA's.
+	// The windows' sequence goes on after TestA's mock-2, whatever the call
+	// between tests answered: mock-3 answers TestC's first /token, and is
+	// then spent for the set's windows, as mock-2 was in TestA's.
 	got, e = runTest(t, a, p, "TestC", "/token", "/token", "/other")
 	require.Equal(t, "200 again", got[0], "a worker: mock no window spent answers a test's call")
 	require.True(t, strings.HasPrefix(got[1], "502"), "a worker: mock answers at most once in the set's windows: %s", got[1])

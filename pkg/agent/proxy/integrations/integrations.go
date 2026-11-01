@@ -343,11 +343,14 @@ type SequenceView struct {
 	// window was open, at its place in the gap it was made in, and an idle
 	// answer wherever it was recorded), so its request's sequence is walked
 	// on Between over every reached recording of it, by placement, with no
-	// window: one sequence for the set wherever its calls land.
+	// window: one sequence across the test windows wherever its calls land
+	// in them.
 	Worker func(*models.Mock) bool
-	// Between is, with Worker, the stateful cursor the calls between tests
-	// advance (the last pool view's), which a worker-scope call in a test
-	// reads and advances too.
+	// Between is, with Worker, the worker scope's stateful cursor in the
+	// test windows: one sequence across the windows of the staging. The
+	// calls between tests never advance it (they walk the last pool view's
+	// cursor), so a window's answers never depend on how many calls landed
+	// between tests.
 	Between MockCursor
 }
 
