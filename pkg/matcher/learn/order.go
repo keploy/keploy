@@ -982,11 +982,13 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	answers := heldWhere(hs, answer)
 	// An answer that holds it only as a coarse cut of a finer instant is no
 	// source keploy can bind, and where the call's own window holds the
-	// read, it is that read (5), as main reads it.
+	// read, it is that read (5), as main reads it; so is a client test's
+	// read since its begin (7).
 	cutOnly := len(heldWhere(hs, func(h instantHold) bool {
 		return answer(h) && !h.fr && c.rm != nil && dc.cutOfFinerOnly(h.p.t.rec, r, *c.rm)
 	})) == len(answers)
-	ownRead := cutOnly && c.rm != nil && c.lm != nil && dc.in.Window.holdsRead(*c.rm, *c.lm, dc.dr.zone)
+	readIn := func(w *Window) bool { return w.holdsRead(*c.rm, *c.lm, dc.dr.zone) }
+	ownRead := cutOnly && c.rm != nil && c.lm != nil && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()))
 	if len(answers) > 0 && !ownRead {
 		// An answer recorded after the call that round F gave the
 		// application before it, holding F's moment, is a second source:

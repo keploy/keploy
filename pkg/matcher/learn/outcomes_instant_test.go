@@ -328,9 +328,10 @@ func TestOutcomeACoarseReadBesideTwoClockReadsIsReadSinceItsBegin(t *testing.T) 
 // second inside a longer text ("[E2E] x-<UnixNano>"): a variable holds one
 // text, so the answer is no source keploy can bind, and two reads of one
 // coarse cut say nothing of each other. Where the call's own window holds
-// the read it is a Clock, as main reads it. Where it does not, the answer
-// stays the source named, and a value the answer holds by its text stays a
-// Value.
+// the read it is a Clock, as main reads it, and so is a client test's read
+// since its begin (an app's updatedAt beside the UnixNano in the app's name
+// an answer read back). Where neither holds it, the answer stays the source
+// named, and a value the answer holds by its text stays a Value.
 func TestOutcomeASecondReadBesideAFinerInstantInAnAnswerIsAClock(t *testing.T) {
 	const p = "body.created_at"
 	rAt, fAt := oAt.Truncate(time.Second).Add(700*time.Millisecond), oAt.Truncate(time.Second).Add(102*time.Second+700*time.Millisecond)
@@ -346,6 +347,14 @@ func TestOutcomeASecondReadBesideAFinerInstantInAnAnswerIsAClock(t *testing.T) {
 	d := oWord(t, Decide(call(far, ans(name(rAt), name(fAt)))), sec(rAt), sec(fAt))
 	if d.Outcome != OutcomeValue || d.From.Mock != "mock-1624" {
 		t.Errorf("a second its window does not hold: %s; want the Value bound to the answer", oDescribe([]Decision{d}))
+	}
+	far.Rec.Began, far.F.Began = rAt.Add(-time.Second), fAt.Add(-time.Second)
+	in := call(far, ans(name(rAt), name(fAt)))
+	in.Drifts = oClientDrifts()
+	d = oWord(t, Decide(in), sec(rAt), sec(fAt))
+	iClock(t, "a client test's second read since its begin", d)
+	if d.Clock != nil && d.Clock.Since != models.SinceTestBegin {
+		t.Errorf("%+v; want a read since the test began", *d.Clock)
 	}
 	d = oWord(t, Decide(call(iWin(rAt, fAt, 100*time.Millisecond), ans("x-"+sec(rAt), "x-"+sec(fAt)))), sec(rAt), sec(fAt))
 	if d.Outcome != OutcomeValue || d.From.Mock != "mock-1624" {
