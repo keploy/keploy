@@ -104,11 +104,14 @@ func TestOutcomeCostAnUnchangedPlaceHoldingOneShortWordIsChance(t *testing.T) {
 	costFresh(t, "82 to 7 beside a 7 the start-up sent unchanged (run_test.go:751)",
 		oWord(t, Decide(costCall(clockedDrifts(), "body.count", "82", "7", costAt, sevenSent, nil, nil, nil)), "82", "7"))
 
+	// A seven-letter word counts by its text, so the request's unchanged
+	// leaf that held it disproves it as a conflict; a short id is unknown.
+	// Either way it stays refused.
 	for _, c := range []struct {
 		what, body, rec, live string
 		kinds                 []RefusalKind
 	}{
-		{"morning to evening, the request lists both (given_test.go:192)", `{"shifts":["morning","evening"]}`, "morning", "evening", costUnknown},
+		{"morning to evening, the request lists both (given_test.go:192)", `{"shifts":["morning","evening"]}`, "morning", "evening", []RefusalKind{"unknown", "conflict"}},
 		{"s17 to s18, the request lists both (given_test.go:193)", `{"slots":[{"id":"s17","at":"11:14"},{"id":"s18","at":"11:15"}]}`, "s17", "s18", costUnknown},
 		{"17 to 18, the request lists both (given_test.go:194)", `{"slots":[{"id":17,"at":"11:14"},{"id":18,"at":"11:15"}]}`, "17", "18", costUnknown},
 	} {
