@@ -106,7 +106,7 @@ func b64Text(s string, clock map[string]bool) string {
 	for depth := 0; depth < maxDecodeLevels && len(level) > 0; depth++ {
 		var next []string
 		try := func(c string) bool {
-			if len(c) < minEncodedRun || seen[c] || allIn(tokensBy(c, isWord), clock) {
+			if len(c) < minEncodedRun || seen[c] || len(clock) > 0 && allIn(tokensBy(c, isWord), clock) {
 				return false
 			}
 			seen[c] = true
@@ -126,8 +126,10 @@ func b64Text(s string, clock map[string]bool) string {
 		}
 		tryRun := func(run string) bool {
 			whole := try(run)
-			for _, part := range strings.FieldsFunc(run, func(r rune) bool { return r == '/' || r == '.' }) {
-				try(part)
+			if strings.ContainsAny(run, "/.") {
+				for _, part := range strings.FieldsFunc(run, func(r rune) bool { return r == '/' || r == '.' }) {
+					try(part)
+				}
 			}
 			if h, ok := strings.CutPrefix(run, "0x"); ok {
 				try(h)
@@ -343,6 +345,9 @@ func textControl(r rune) bool {
 // offsets, of minGluedRun characters or more, longest first; the whole run
 // is not one.
 func gluedSpans(run string) [][2]int {
+	if !strings.ContainsAny(run, "-_") {
+		return nil
+	}
 	// starts and ends of the stretches between groups.
 	starts, ends := []int{0}, []int{}
 	for i := 0; i < len(run); {
