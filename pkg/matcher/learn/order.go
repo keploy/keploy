@@ -37,6 +37,11 @@ type decider struct {
 	ps       []evPlace
 	x        *readerIndex
 	allScope bool
+	// set: the recordings the set read once (Input.Given); sw: the words
+	// of each recording outside the call's scope (setWords), read once.
+	set    []GivenPlaces
+	sw     []givenWords
+	swDone bool
 }
 
 // decideWords decides every changed word of in, and the field each
@@ -44,7 +49,11 @@ type decider struct {
 // call's scope (Mode Elsewhere).
 func decideWords(in Input, allScope bool) ([]Decision, []string) {
 	ps, unread := placesOf(in)
-	dc := &decider{in: in, ps: ps, x: newReaderIndex(in.Drifts), allScope: allScope}
+	set, setUnread := setUnread(in)
+	if unread == "" {
+		unread = setUnread
+	}
+	dc := &decider{in: in, ps: ps, x: newReaderIndex(in.Drifts), allScope: allScope, set: set}
 	var out []Decision
 	var fields []string // fields[i] is the field out[i] decides
 	for _, path := range in.Drift {
@@ -184,6 +193,24 @@ func (dc *decider) word(path string, at variables.Address, rec, live string, w r
 			unknown = append(unknown, p)
 		}
 	}
+	for _, g := range dc.setWords() {
+		p := evPlace{name: g.mock, mock: g.mock, otherTest: true, scope: "another test, or after this call", at: g.at}
+		ev, changed := setEvidence(g, w.Rec, w.Live, dc.in.At)
+		if changed {
+			p.live = "a value without " + w.Live
+		}
+		switch ev {
+		case evShown:
+			outside = append(outside, p)
+		case evUnknown:
+			p.why = "round F gave it there; keploy keeps its words, and cannot tell this word did not come from it"
+			unknown = append(unknown, p)
+		case evDisproven:
+			if wordBits(w.Rec) >= 32 || wordBits(w.Live) >= 32 {
+				conflict = append(conflict, p)
+			}
+		}
+	}
 	switch {
 	case len(src) > 0:
 		first := src[0]
@@ -207,7 +234,10 @@ func (dc *decider) word(path string, at variables.Address, rec, live string, w r
 	case len(unknown) > 0:
 		p := unknown[0]
 		why := p.why
-		if why == "" {
+		switch {
+		case why == "" && (p.fMay || len(p.views) > 0):
+			why = "round F served it and keploy cannot tell what it gave there"
+		case why == "":
 			why = "both values hold it, or only part of a word"
 		}
 		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalUnknown,
