@@ -484,3 +484,39 @@ func TestReaderAOneSidedWordOfAnInstantTakesItsPairedWordsPartner(t *testing.T) 
 		t.Fatalf("305 reads %+v, 50>51 reads %+v; want the one instant, with a moment in each run", one, paired)
 	}
 }
+
+// An instant that crosses a minute between the runs (08:59:00 to
+// 09:00:01) is one instant read whole, judged by its moment: the "00" of
+// R's seconds and of F's minutes stays in the word alignment, which leaves
+// a word only F has there, and that word is the instant's, not a change of
+// the text's shape. A word only one run has outside any instant still is.
+func TestReaderAnInstantThatCrossesAMinuteIsOneInstant(t *testing.T) {
+	for _, c := range []struct{ rec, live string }{
+		{"2026-10-31T08:59:00.000Z", "2026-10-31T09:00:01.000Z"},
+		{"at 2026-10-31T08:59:00.000Z ok", "at 2026-10-31T09:00:01.000Z ok"},
+		{"10:50:13.305 x", "10:51:13 x"},
+	} {
+		rd := readText(c.rec, c.live)
+		if rd.ChangedShape {
+			t.Errorf("%q -> %q: changed shape (%v); want one instant read whole", c.rec, c.live, changedPairs(rd))
+		}
+		if len(rd.Instants) != 1 || rd.Instants[0].Rec == nil || rd.Instants[0].Live == nil {
+			t.Errorf("%q -> %q: %d instants; want one, with a moment in each run", c.rec, c.live, len(rd.Instants))
+			continue
+		}
+		for _, w := range rd.Words {
+			if w.Instant != rd.Instants[0] {
+				t.Errorf("%q -> %q: word %q>%q reads %+v; want the one instant", c.rec, c.live, w.Rec, w.Live, w.Instant)
+			}
+		}
+	}
+	for _, c := range []struct{ rec, live string }{
+		{"at 2026-10-31T08:59:00.000Z ok", "at 2026-10-31T09:00:01.000Z ok 7"},
+		{"id 10:50", "id 10:50:13"},
+		{"id 10:50:13", "id 10:50"},
+	} {
+		if rd := readText(c.rec, c.live); !rd.ChangedShape {
+			t.Errorf("%q -> %q: no changed shape; want a word only one run has, that no paired instant holds, to change it", c.rec, c.live)
+		}
+	}
+}

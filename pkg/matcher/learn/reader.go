@@ -97,8 +97,9 @@ type readWord struct {
 // and F's text at those steps come before it, readLeaf's), both texts,
 // their words, the stretches, every changed word in order, the separators
 // that changed between paired words, the instants those words are part
-// of, and whether the text changed shape: a stretch only one run has, or a
-// changed separator no whole token holds.
+// of, and whether the text changed shape: a word only one run has that no
+// instant paired across the runs holds (readShape), or a changed separator
+// no whole token holds.
 type textReading struct {
 	At                  variables.Address
 	Off                 [2]int
@@ -216,7 +217,6 @@ func readTextIn(dc *DriftCache, rec, live string) textReading {
 			st.Shape = stretchPaired
 		case nr == 0 || nl == 0:
 			st.Shape = stretchShapeChanged
-			rd.ChangedShape = true
 		default:
 			st.Shape = stretchUnequal
 		}
@@ -247,8 +247,27 @@ func readTextIn(dc *DriftCache, rec, live string) textReading {
 	}
 	rd.readSeparators(paired, rTok, lTok)
 	rd.readInstants(rSpans, lSpans)
+	rd.readShape()
 	rd.readEncoded(dc, rTok, lTok)
 	return rd
+}
+
+// readShape marks the text changed in shape where a stretch only one run
+// has holds a word that no instant paired across the runs holds. A word
+// such an instant holds is one of the instant's, which is read whole and
+// judged by its moment (a minute crossed, 08:59:00 to 09:00:01, leaves the
+// "00" of R's seconds kept with F's minutes; a fraction dropped), not a
+// word the text gained or lost.
+func (rd *textReading) readShape() {
+	for _, w := range rd.Words {
+		if rd.Stretches[w.Stretch].Shape != stretchShapeChanged {
+			continue
+		}
+		if iw := w.Instant; iw == nil || iw.RecAt[0] < 0 || iw.LiveAt[0] < 0 {
+			rd.ChangedShape = true
+			return
+		}
+	}
 }
 
 // sepChange is a separator that changed between two paired words, or
