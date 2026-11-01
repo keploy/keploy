@@ -318,7 +318,27 @@ type ClockOffset struct {
 	// read Word checks the whole value as one read, which a text around the
 	// word is not, so it refuses it.
 	Word ClockWord `json:"word,omitzero" yaml:"word,omitempty" bson:"word,omitempty"`
+	// Why is the line the learn step wrote for the read: what, where, both
+	// values, the rule and the undo, for a person or a tool reading the mock.
+	// Nothing replays it. Meet keeps the first that is not "".
+	Why string `json:"why,omitempty" yaml:"why,omitempty" bson:"why,omitempty"`
+	// Step is the cut the application made its clock read to before it added
+	// the offset (a read cut to the hour, plus thirty days): a replay checks
+	// the offset from that cut of the call's span (holdsStep). 0 for none,
+	// as every learning before Step was, and then omitted: an old file reads
+	// the same. Two learnings of one place at two Steps meet as StepApart
+	// (Empty), which holds nothing.
+	Step time.Duration `json:"step,omitempty" yaml:"step,omitempty" bson:"step,omitempty"`
 }
+
+// StepApart is the Step of the Meet of two learnings of one place that saw
+// the application cut its read to two different steps: no one step holds
+// both, so it holds nothing (Empty).
+const StepApart time.Duration = -1
+
+// holdsStep is Holds of o, whose Step is above zero. Until a keploy reads
+// such a value, it holds nothing (fail closed).
+var holdsStep = func(o ClockOffset, at time.Time, res time.Duration, from, to time.Time) bool { return false }
 
 // ClockWord is where a read of the clock stands in a longer text
 // (ClockOffset.Word), as recorded: the word at bytes Start to End of the
@@ -341,7 +361,17 @@ type ClockWord struct {
 	After        int    `json:"after" yaml:"after" bson:"after"`
 	BeforeSHA256 string `json:"before_sha256" yaml:"before_sha256" bson:"before_sha256"`
 	AfterSHA256  string `json:"after_sha256" yaml:"after_sha256" bson:"after_sha256"`
+	// Form is the text the word stands in: "" the value as it is; Decoded
+	// (ClockWordDecoded) the value decoded once, its escapes read and its
+	// base64 runs decoded where they stand (a percent-encoded instant, one
+	// written with "\u002b" for its '+', one inside a base64 cursor), where
+	// the word and its sides are read, so the sides are compared as decoded
+	// text. A form this keploy does not read is no place of a text (Valid).
+	Form string `json:"form,omitempty" yaml:"form,omitempty" bson:"form,omitempty"`
 }
+
+// ClockWordDecoded is the Form of a word read in its value decoded once.
+const ClockWordDecoded = "decoded"
 
 // ClockWordOf is the ClockWord of the word at bytes start to end (end
 // exclusive) of text, a value as recorded, 0 <= start < end <= len(text).
@@ -355,11 +385,12 @@ func (w ClockWord) IsZero() bool { return w == ClockWord{} }
 
 // Valid reports whether w is a word a replay can check: a word of one byte
 // or more (Start < End), at bytes of a text (none negative), with text on
-// one side of it at least, and both hashes a SHA-256 in lower-case hex.
+// one side of it at least or read in the value's decoded form, both hashes
+// a SHA-256 in lower-case hex, in a form this keploy reads.
 // What a file holds otherwise (a hand edit, a cut copy) is no place of a
 // text, and a replay refuses the value there whatever it is.
 func (w ClockWord) Valid() bool {
-	return w.Start >= 0 && w.End > w.Start && w.After >= 0 && (w.Start > 0 || w.After > 0) && isSHA256Hex(w.BeforeSHA256) && isSHA256Hex(w.AfterSHA256)
+	return w.Start >= 0 && w.End > w.Start && w.After >= 0 && (w.Start > 0 || w.After > 0 || w.Form == ClockWordDecoded) && isSHA256Hex(w.BeforeSHA256) && isSHA256Hex(w.AfterSHA256) && (w.Form == "" || w.Form == ClockWordDecoded)
 }
 
 // WordOf is the word of live, a replay's text at a place learned as w (a
@@ -924,7 +955,8 @@ func (o ClockOffset) Within(spans ...time.Duration) bool {
 
 // Holds reports whether at, a value written at resolution res (its own
 // encoding's), is a read of the clock made from from to to (a call's window
-// on the application's clock) plus an offset of o; of a Plain o (a zero
+// on the application's clock) plus an offset of o; of an o with a Step, as
+// holdsStep says (until a keploy reads one, nothing); of a Plain o (a zero
 // offset, a plain read of the clock), a read made there itself (holdsRead).
 // Of any other o, a read of the clock plus an offset, then cut, is a clock
 // read (2026-10-28): at is checked as a plain read of the span from
@@ -965,6 +997,9 @@ func (o ClockOffset) Within(spans ...time.Duration) bool {
 func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) bool {
 	if !o.ZoneKnown() || !o.LayoutKnown() {
 		return false
+	}
+	if o.Step != 0 {
+		return o.Step > 0 && holdsStep(o, at, res, from, to)
 	}
 	if o.Plain() {
 		return o.holdsRead(at, res, from, to)
@@ -1254,9 +1289,17 @@ func (o ClockOffset) signed() bool {
 // hour in UTC, and refuses any other (learn's CheckClockRead). Meet is the
 // same in either order and however a place's learnings are grouped, so a
 // recording paired many times keeps one answer whatever order its
-// pairings came in.
+// pairings came in. Two at different Steps meet as StepApart (Empty). Why
+// is o's, or p's where o has none: nothing replays it, so the order only
+// picks which learned line a reader sees.
 func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
-	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout), Since: meetSince(o.Since, p.Since)}
+	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout), Since: meetSince(o.Since, p.Since), Why: o.Why, Step: o.Step}
+	if m.Why == "" {
+		m.Why = p.Why
+	}
+	if o.Step != p.Step {
+		m.Step = StepApart
+	}
 	// One read whole and one inside a text, or at two places of a text
 	// (meetWord), were written in two forms: no one layout holds both.
 	if word, ok := meetWord(o.Word, p.Word); ok {
@@ -1303,10 +1346,10 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 // no offset: a Max not above its Min, other than a Plain o's (a Plain and
 // an offset meet so, and so do two offsets apart, of one sign or of two);
 // that read it in zones no one zone holds (ZoneApart); or that saw it
-// written in different layouts (LayoutApart). Holds holds nothing for it,
-// and String says why.
+// written in different layouts (LayoutApart); or at different Steps
+// (StepApart). Holds holds nothing for it, and String says why.
 func (o ClockOffset) Empty() bool {
-	return !o.Plain() && o.Max <= o.Min || o.Zone == ZoneApart || o.Layout == LayoutApart
+	return !o.Plain() && o.Max <= o.Min || o.Zone == ZoneApart || o.Layout == LayoutApart || o.Step < 0
 }
 
 // MergeClocks is a and b, two sets of the places a call's learn steps
@@ -1508,8 +1551,13 @@ func (o ClockOffset) String() string {
 		return "clock read written in a layout this keploy does not read (" + strconv.Quote(o.Layout) + ")"
 	case !o.SinceKnown():
 		return "clock read from a start this keploy does not read (" + strconv.Quote(o.Since) + ")"
+	case o.Step < 0:
+		return "clock reads cut to no one step (one place learned as a read cut to different steps before its offset at different calls)"
 	}
 	s := o.offsetString() + o.zoneString() + o.layoutString()
+	if o.Step > 0 {
+		s += ", read cut to " + o.Step.String() + " before the offset"
+	}
 	if !o.Word.IsZero() {
 		// Where the word stands, never what the text holds.
 		s += ", as the word at bytes " + strconv.Itoa(o.Word.Start) + "-" + strconv.Itoa(o.Word.End) + " of the text as recorded, with " + strconv.Itoa(o.Word.After) + " bytes after it"
