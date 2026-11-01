@@ -439,7 +439,16 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				report := h.buildHTTPMismatchReport(request, input.body, db, nil, headerNoise, bodyNoise, diag)
 				if n > 0 && report != nil {
-					report.MissKind, report.Recorded, report.ExtraOf = models.MissExtraCall, n, extraOf
+					report.MissKind, report.Recorded = models.MissExtraCall, n
+					if extraOf != nil {
+						report.ExtraOf = extraOf.Name
+						// Named against the recording it repeats, never
+						// the live pool's closest other one. A learn-step
+						// miss keeps the candidate it refused and why.
+						if lmiss == nil {
+							markExtraCall(report, extraOf, n)
+						}
+					}
 				}
 				// The miss was decided where the request first read the
 				// round: whether that read found a staging is told from it.
