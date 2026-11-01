@@ -110,6 +110,102 @@ func TestAPollsLookBackCutToTheSecondIsTheCallsClockCheckedAtTheCut(t *testing.T
 	}
 }
 
+// The call's window runs from its previous data-plane call, so load (or an
+// idle poll) can widen it to seconds: api-server's reconciler, recorded on
+// boxes at 2 to 3.5 load per CPU, showed windows that held its dirtyAt <=
+// now - 2s as a read with no look-back too, and in others three whole
+// seconds of look-back, where a quiet window holds one. A look-back cut to
+// the second is read there as the read nearest its call (the latest whole
+// second both runs' windows put a read in, the one a quiet window reads),
+// so a window widened by load learns the Clock a quiet one does, at every
+// phase of the call's second: clock - 2s (and clock - 15s), checked at the
+// cut, whose replay passes the application's value at every phase, in a
+// quiet window and in one as wide, and fails a stale value and a plain
+// read, and in a quiet window a look-back changed by three seconds. A
+// plain read made just before its call in such a window is no look-back
+// (the order's plain read stands); one the application made 1.2 s before
+// its call in both runs is read as a look-back of the seconds between,
+// which a replay passes where the application waits as long again.
+func TestALookBackInAWindowWidenedByLoadIsReadAsTheReadNearestItsCall(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	p := "body.cmd.query.$and.0.$or.0.dirtyAt.$lte.$numberLong"
+	start := time.Date(2026, 11, 1, 15, 21, 40, 0, time.UTC)
+	type row = struct {
+		name string
+		at   time.Time
+		want bool
+	}
+	// check runs a replay of o at every phase of a quiet window and of one
+	// 3.2 s wide, the application reading lead before its call.
+	check := func(name string, o models.ClockOffset, recText string, lead time.Duration, rows func(read time.Time, quiet bool) []row) {
+		t.Helper()
+		for _, width := range []time.Duration{61 * ms, 3200 * ms} {
+			for ph := time.Duration(0); ph < sec; ph += 70 * ms {
+				s := Span{From: start.Add(48*time.Hour + ph), To: start.Add(48*time.Hour + ph + width)}
+				for _, row := range rows(s.To.Add(-lead), width < sec) {
+					if got, why := v5Check(p, o, recText, row.at, s); got != row.want {
+						t.Errorf("%s: %s, a replay's window %s wide at %s into its second, %s: %v (%s)", map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}[row.want], name, width, ph, row.name, got, why)
+					}
+				}
+			}
+		}
+	}
+	for _, back := range []time.Duration{2 * sec, 15 * sec} {
+		for _, width := range []time.Duration{2500 * ms, 3200 * ms, 6 * sec} {
+			for phase := 7 * ms; phase < sec; phase += 90 * ms {
+				rec := v5Call(start.Add(phase), width, 4*ms)
+				f := v5Call(rec.to.Add(FullRoundLead-8*ms), width, 4*ms)
+				rv, lv := rec.read.Truncate(sec).Add(-back), f.read.Truncate(sec).Add(-back)
+				o, why, ok := clockInWindow(p, v5Instant(rv, sec), v5Instant(lv, sec), v5Window(rec, f), nil)
+				named := "clock - " + models.ShortDuration(back)
+				name := named + " in a window " + width.String() + " wide, the call " + phase.String() + " into its second"
+				if lo, hi := o.CutOffsets(); !ok || why != "" || !o.Narrow() || o.Step != sec || o.Res != sec || lo != -back || hi != -back {
+					t.Errorf("FALSE RED (flips with load): %s: %+v %q %v, CutOffsets %s..%s; want %s alone, as a quiet window learns it", name, o, why, ok, lo, hi, named)
+					continue
+				}
+				for _, part := range []string{" = " + named + " (", "the read nearest its call", "A replay checks it at the second against " + named + ", "} {
+					if !strings.Contains(o.Why, part) {
+						t.Errorf("%s: the line does not say %q: %s", name, part, o.Why)
+					}
+				}
+				check(name, o, strconv.FormatInt(rv.Unix(), 10), 4*ms, func(read time.Time, quiet bool) []row {
+					rows := []row{
+						{"the application's value", read.Truncate(sec).Add(-back), true},
+						{"the recorded value, two days stale", rv, false},
+						{"a plain read", read.Truncate(sec), false},
+					}
+					if quiet {
+						rows = append(rows, row{"a look-back three seconds longer", read.Truncate(sec).Add(-back - 3*sec), false}, row{"a look-back three seconds shorter", read.Truncate(sec).Add(-back + 3*sec), false})
+					}
+					return rows
+				})
+			}
+		}
+	}
+	for _, lead := range []time.Duration{4 * ms, 1200 * ms} {
+		for phase := 7 * ms; phase < sec; phase += 90 * ms {
+			rec := v5Call(start.Add(phase), 3200*ms, lead)
+			f := v5Call(rec.to.Add(FullRoundLead-8*ms), 3200*ms, lead)
+			rv, lv := rec.read.Truncate(sec), f.read.Truncate(sec)
+			o, why, ok := clockInWindow(p, v5Instant(rv, sec), v5Instant(lv, sec), v5Window(rec, f), nil)
+			name := "a plain read " + lead.String() + " before its call, in a window 3.2s wide, the call " + phase.String() + " into its second"
+			if lead < sec {
+				if ok || why != "" {
+					t.Errorf("FALSE RED: %s: %+v %q %v; want no offset, the order's plain read", name, o, why, ok)
+				}
+				continue
+			}
+			if !ok || why != "" || o.Max >= 0 || o.Step != sec || !strings.Contains(o.Why, "the read nearest its call") {
+				t.Errorf("%s: %+v %q %v; want a look-back of the seconds between its read and its call", name, o, why, ok)
+				continue
+			}
+			check(name, o, strconv.FormatInt(rv.Unix(), 10), lead, func(read time.Time, _ bool) []row {
+				return []row{{"the application's value, read as long before its call", read.Truncate(sec), true}}
+			})
+		}
+	}
+}
+
 // A look-back of an application that cuts its read to a minute and then
 // subtracts 103 s, written in seconds (cut_m(now) - 103s), whose two runs
 // read at different phases of their minutes, so no offset at the values'

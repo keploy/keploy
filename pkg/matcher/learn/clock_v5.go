@@ -49,6 +49,10 @@ func init() {
 //     is learned whatever its width and checked at the cut against the
 //     whole cuts its range holds (models.ClockOffset.CutOffsets), as main
 //     checks a day's or an hour's.
+//   - A look-back cut to a second or coarser whose window is wider than its
+//     cut (load, or an idle poll: the window runs from the previous call)
+//     is read as the read nearest its call (nearestCall), as a window
+//     narrower than the cut reads it, so a verdict never flips with load.
 //
 // It refuses what main's clockOffset refuses for its unit (Fine: an offset
 // that reads in a second or finer, but one cut to the second; why) and for
@@ -76,7 +80,7 @@ func init() {
 //     (and a dropped one), so it is declined, never refused: the order
 //     goes on as if there were no such read.
 func offsetInWindow(path string, r, l typedInstant, w *Window, zone *time.Location) (models.ClockOffset, string, bool) {
-	o, gap, ok := offsetV5(r, l, w, zone)
+	o, gap, near, ok := offsetV5(r, l, w, zone)
 	if !ok || w.begun && o.Min <= 0 {
 		return models.ClockOffset{}, "", false
 	}
@@ -97,7 +101,7 @@ func offsetInWindow(path string, r, l typedInstant, w *Window, zone *time.Locati
 		o.Why = sinceLineV5(path, o)
 		return o, "", true
 	}
-	o.Why = lineV5(path, o, enc, gap)
+	o.Why = lineV5(path, o, enc, gap, nearLine(o, w, near))
 	return o, "", true
 }
 
@@ -122,16 +126,25 @@ func sinceBeginV5(ln Learned) (Learned, bool) {
 }
 
 // offsetV5 is offsetInWindow's reading, before its guards: the offset, with
-// its Step, and gap, the values' gap where it set the step the offset was
-// read at (0 where their own cut did).
-func offsetV5(r, l typedInstant, w *Window, zone *time.Location) (o models.ClockOffset, gap time.Duration, ok bool) {
+// its Step, gap, the values' gap where it set the step the offset was read
+// at (0 where their own cut did), and near, the kind of reading
+// nearestCall replaced ("" where it did not).
+func offsetV5(r, l typedInstant, w *Window, zone *time.Location) (o models.ClockOffset, gap time.Duration, near string, ok bool) {
 	if w == nil || r.names != namesMoment || l.names != namesMoment || !inClockRange(r.at) || !inClockRange(l.at) || r.at.Equal(l.at) {
-		return models.ClockOffset{}, 0, false
+		return models.ClockOffset{}, 0, "", false
 	}
 	enc := max(r.res, l.res)
 	cut := zonedRes(enc, r.at, l.at, false, zone)
 	o, ok = offsetAt(r, l, w, cut)
 	o.Step = cut
+	if n, nok := nearestCall(r, l, w, cut); nok {
+		switch lo, hi := o.CutOffsets(); {
+		case !ok:
+			o, ok, near = n, true, "a read with no look-back"
+		case o.Max <= 0 && hi-lo >= 2*cut:
+			o, near = n, "more whole "+unitWord(cut)+"s of look-back"
+		}
+	}
 	g := l.at.Sub(r.at)
 	if step := models.CutOf(int64(g), enc, 24*time.Hour); step > cut {
 		so, sok := offsetAt(r, l, w, step)
@@ -141,14 +154,52 @@ func offsetV5(r, l typedInstant, w *Window, zone *time.Location) (o models.Clock
 			// A time to live: the step's check holds both the writer that
 			// cuts to the step and adds it, and one that does not cut.
 			so.Step = step
-			return so, g.Abs(), true
+			return so, g.Abs(), "", true
 		default:
 			if p, pok := phaseAt(r, l, w, step, cut, zone); pok {
-				return p, g.Abs(), true
+				return p, g.Abs(), "", true
 			}
 		}
 	}
-	return o, 0, ok
+	return o, 0, near, ok
+}
+
+// nearestCall is the look-back r and l stand at, cut to cut (a second or
+// coarser), from the read of each run's clock nearest its call: the offsets
+// from the greatest of v less each run's call (Min) up to one cut above it,
+// so the one whole cut they hold is the latest one both runs' windows put
+// a read in. ok only where that is a look-back in both runs. A window
+// narrower than its cut holds that cut, or it and the next (a turn of the
+// cut in both runs); a wider one (the window runs from the previous call,
+// so load or an idle poll widens it) holds more, or a read with no
+// look-back too (dirtyAt <= now - 2s in a window 2.5 s wide), which the
+// reading would read as three or more cuts, checked as one, or leave to a
+// plain read that a quiet replay's window fails. An application that cuts
+// its read and subtracts a look-back writes a value in the cut nearest its
+// call, less the look-back, unless it read its clock a whole cut or more
+// before its call in both runs: that is read as a look-back so much
+// longer, which a replay passes where the application waits as long again
+// (a plain read made 1.2 s before its call reads as clock - 1s). Of a cut
+// finer than a second the lead itself shows at the cut, so ok is false.
+func nearestCall(r, l typedInstant, w *Window, cut time.Duration) (models.ClockOffset, bool) {
+	rlo, rhi, rok := offsetBounds(r.at, cut, w.Rec)
+	llo, lhi, lok := offsetBounds(l.at, cut, w.F)
+	if cut < time.Second || !rok || !lok || rlo >= 0 || llo >= 0 {
+		return models.ClockOffset{}, false
+	}
+	lo := max(rlo, llo)
+	o := models.ClockOffset{Min: lo, Max: min(lo+cut, rhi, lhi), Res: cut, Layout: models.LayoutTyped, Step: cut}
+	return o, o.Min < o.Max && o.Max < 0
+}
+
+// nearLine is the sentence a line of o, read by nearestCall where its
+// window held near, inserts: "" where it was not.
+func nearLine(o models.ClockOffset, w *Window, near string) string {
+	if near == "" {
+		return ""
+	}
+	u := unitWord(o.Res)
+	return "; its call's window (" + models.ShortDuration(w.Rec.To.Sub(w.Rec.From)) + " in the recording, " + models.ShortDuration(w.F.To.Sub(w.F.From)) + " in record's full round) also held " + near + ", as a window widened by load or an idle poll does, so keploy reads the look-back of the read nearest its call, the latest whole " + u + " both runs' windows hold, as a window narrower than " + aUnit(o.Res) + " reads it: a read the application made a whole " + u + " or more before its call in both runs is read that much longer, and a replay passes it only where the application waits about as long again"
 }
 
 // ownLookBack reports whether o, the offset the values' own cut puts in
@@ -231,8 +282,9 @@ func fineV5Why(path string, o models.ClockOffset) string {
 
 // lineV5 is the Why of a Clock o learned in its call's window: what was
 // seen, and what a replay passes (models.ClockOffset.Holds), truly. gap is
-// the values' gap where it set the step o was read at.
-func lineV5(path string, o models.ClockOffset, enc, gap time.Duration) string {
+// the values' gap where it set the step o was read at; near, nearLine's
+// sentence where nearestCall read o.
+func lineV5(path string, o models.ClockOffset, enc, gap time.Duration, near string) string {
 	seen := clockSeenV5(path, o)
 	c := models.ShortDuration(o.Res)
 	if o.Step > o.Res {
@@ -250,7 +302,7 @@ func lineV5(path string, o models.ClockOffset, enc, gap time.Duration) string {
 			dir = "between the window's start and the application's read (a longer one) or between the read and its call (a shorter one)"
 		}
 		_, on := cutExceptions(o.Res)
-		return seen + via + ". A replay checks it at the " + w + " against " + cutOffsetsV5(o, lo, hi) + ", as standing for its whole " + w + ", within one " + w + " of its call's window plus that offset on either side, whatever the window's width: " + offsetNamed(o) + " changed by one " + w + " passes there at every read, and one changed by more " + w + "s only where the replay's call's window holds a turn of the " + w + " for each " + w + " more, " + dir + ", so in a window narrower than the " + w + " one changed by two " + w + "s passes only where a turn of the " + w + " falls in it, and one changed by three " + w + "s or more fails" + on + noiseEdit
+		return seen + via + near + ". A replay checks it at the " + w + " against " + cutOffsetsV5(o, lo, hi) + ", as standing for its whole " + w + ", within one " + w + " of its call's window plus that offset on either side, whatever the window's width: " + offsetNamed(o) + " changed by one " + w + " passes there at every read, and one changed by more " + w + "s only where the replay's call's window holds a turn of the " + w + " for each " + w + " more, " + dir + ", so in a window narrower than the " + w + " one changed by two " + w + "s passes only where a turn of the " + w + " falls in it, and one changed by three " + w + "s or more fails" + on + noiseEdit
 	}
 	// Holds checks a value from one Res before the cut that holds the
 	// window's start plus Min up to one Res after its end plus Max: a read
@@ -259,7 +311,7 @@ func lineV5(path string, o models.ClockOffset, enc, gap time.Duration) string {
 	// down to one Res and the window's width below that or up to the
 	// window's width above it, and at no read further out.
 	lo, hi := models.ShortDuration(o.Min-o.Res), models.ShortDuration(o.Max+o.Res)
-	return seen + via + ". A replay checks a value written as recorded at " + c + ": it passes one from one " + c + " before the start of the " + c + " that holds its call's window's start plus " + models.ShortDuration(o.Min) + " up to one " + c + " after the window's end plus " + models.ShortDuration(o.Max) + ". So a read in that window plus an offset from " + lo + " to " + hi + " passes at every read; plus an offset from one " + c + " and the window's width below " + lo + " up to it, or from " + hi + " up to the window's width above it, only where the read falls late or early enough in the window and its " + c + "; and plus any other offset (" + offsetNamed(o) + " changed by more) at no read; near a wall time the application's zone shows twice as its clocks go back a replay refuses the value" + noiseEdit
+	return seen + via + near + ". A replay checks a value written as recorded at " + c + ": it passes one from one " + c + " before the start of the " + c + " that holds its call's window's start plus " + models.ShortDuration(o.Min) + " up to one " + c + " after the window's end plus " + models.ShortDuration(o.Max) + ". So a read in that window plus an offset from " + lo + " to " + hi + " passes at every read; plus an offset from one " + c + " and the window's width below " + lo + " up to it, or from " + hi + " up to the window's width above it, only where the read falls late or early enough in the window and its " + c + "; and plus any other offset (" + offsetNamed(o) + " changed by more) at no read; near a wall time the application's zone shows twice as its clocks go back a replay refuses the value" + noiseEdit
 }
 
 // cutOffsetsV5 names the whole cuts lo to hi a replay checks o against:
