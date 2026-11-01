@@ -2850,9 +2850,9 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 	// consumes it: a parser that keeps a session mock it serves (HTTP's
 	// MarkMockAsUsed) spends it too. So does one of the pool's under the
 	// background rules, in a test or between tests: a parser that consumes
-	// only through the door that never evicts (enterprise Redis and
-	// Aerospike) would else have one pool recording answer every identical
-	// call of the set.
+	// only through a door that never evicts (MarkMockAsUsed: enterprise
+	// Redis and Aerospike; UpdateUnFilteredMock: keploy's Generic) would
+	// else have one pool recording answer every identical call of the set.
 	worker := v.isWorker(mk.Name) && !mk.IsProtocolPhase()
 	if !evicts && !worker && !v.spendsAsPool(mk) {
 		return exactPass, nil, nil
