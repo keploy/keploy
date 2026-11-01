@@ -389,13 +389,11 @@ type ClockWord struct {
 	// base64 runs decoded where they stand (a percent-encoded instant, one
 	// written with "\u002b" for its '+', one inside a base64 cursor), where
 	// the word and its sides are read, so the sides are compared as decoded
-	// text. Any other form is no place of a text (Valid). WordOf reads the
-	// text it is given: a replay decodes the value once first (learn's
-	// decodedWordForm, which a learn step that writes Decoded reads its
-	// place in), and reads a word of form "" in the value as it is. A
-	// keploy that does not decode fails a Decoded word's decoded sides'
-	// hashes, or, as the whole value, reads the raw text checked whole,
-	// which the learned layout does not read: it holds nothing.
+	// text. Any other form is no place of a text (Valid). WordOf does not
+	// decode yet: the replay that reads Decoded lands before any learn step
+	// writes it, and until then nothing writes it. A Decoded word read raw
+	// fails its decoded sides' hashes, or, as the whole value, is the raw
+	// text checked whole, which the learned layout does not read.
 	Form string `json:"form,omitempty" yaml:"form,omitempty" bson:"form,omitempty"`
 }
 
@@ -1119,11 +1117,20 @@ func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) 
 	return ClockOffset{Res: c}.holdsRead(at, c, from.Add(o.Min), to.Add(o.Max))
 }
 
+// phaseLocked reports whether o is a look-back read at a step above its
+// cut (holdsAtStep): its range lies below zero, up to zero at most, since
+// Max is not in it: an application that cuts its read to the minute and
+// subtracts one second has Min -1s and Max 0.
+func (o ClockOffset) phaseLocked() bool {
+	return o.Step > o.Res && o.Min < o.Max && o.Max <= 0
+}
+
 // holdsAtStep is Holds of o, learned at a Step above zero (holdsStep), with
-// Holds' own guards first: a range around zero (signed), no Res, an o Fine
-// for its unit, a window with no start or that ends before it starts, a
-// res of none, an o not Checkable in the window, and a window that meets a
-// wall time at's zone shows twice (FallBack) hold nothing.
+// Holds' own guards first: a Step below Res, a range around zero or above
+// it at a step (signed, phaseLocked), no Res, an o Fine for its unit, a
+// window with no start or that ends before it starts, a res of none, an o
+// not Checkable in the window, and a window that meets a wall time at's
+// zone shows twice (FallBack) hold nothing.
 //   - Step is Res (the offset read at its values' own cut): at is checked
 //     as Holds checks any offset, at c (CheckedAt), within one c of the
 //     span plus the offset on either side, but that of an o cut to a unit
@@ -1142,27 +1149,22 @@ func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) 
 //     checkReadIn reads it in UTC and in the application's). A value
 //     written at an encoding coarser than Res cannot show that remainder
 //     and holds nothing.
-//
-// Any other Step (below Res) holds nothing.
 func (o ClockOffset) holdsAtStep(at time.Time, res time.Duration, from, to time.Time) bool {
-	if o.Plain() {
-		return o.Step == o.Res && o.holdsRead(at, res, from, to)
-	}
-	if !o.signed() || o.Res <= 0 || o.Fine() || from.IsZero() || to.Before(from) || res <= 0 || !o.Checkable(res, from, to) {
+	if !o.phaseLocked() && (o.Step != o.Res || !o.signed()) || o.Res <= 0 || o.Fine() || from.IsZero() || to.Before(from) || res <= 0 || !o.Checkable(res, from, to) {
 		return false
 	}
 	if _, _, met := o.FallBack(res, from, to, at.Location()); met {
 		return false
 	}
-	switch {
-	case o.Step == o.Res:
+	if o.Step == o.Res {
 		c := o.CheckedAt(res)
 		lo, hi := o.Min, o.Max
 		if o.CoarseChecked(res) {
 			lo, hi = o.CutOffsets()
 		}
 		return ClockOffset{Res: c}.holdsRead(at, c, from.Add(lo), to.Add(hi))
-	case o.Step < o.Res || res > o.Res:
+	}
+	if res > o.Res {
 		return false
 	}
 	loc := at.Location()
@@ -1452,8 +1454,11 @@ func (o ClockOffset) signed() bool {
 // hour in UTC, and refuses any other (learn's CheckClockRead). Meet is the
 // same in either order and however a place's learnings are grouped, so a
 // recording paired many times keeps one answer whatever order its
-// pairings came in. Two at different Steps meet as StepApart (Empty), but
-// two each read at its values' own cut (Step is Res) at the coarser. Why
+// pairings came in. Two at different Steps meet as StepApart (Empty), and
+// so do a phase lock (Step above Res) and an offset read at its values' own
+// cut that is that step (Step is Res, the same Step): the second holds no
+// phase, and a meet read at its Res would drop the first's. Two each read
+// at its values' own cut meet at the coarser. Why
 // is the lesser of the two that are set (nothing replays it): one learned
 // line, whatever the order.
 func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
@@ -1462,7 +1467,7 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 		m.Why = p.Why
 	}
 	switch own := func(x ClockOffset) bool { return x.Step > 0 && x.Step == x.Res }; {
-	case o.Step == p.Step:
+	case o.Step == p.Step && own(o) == own(p):
 	case own(o) && own(p):
 		// Both read at their values' own cuts: the met offset is read at
 		// the coarser (Res), as an offset learned before Step meets.
@@ -1738,11 +1743,7 @@ func (o ClockOffset) String() string {
 		// stated where it is learned: the learn step cannot tell where in
 		// that span the application read its clock, so a replay passes a
 		// read anywhere in it.
-		switch {
-		case o.Step <= 0:
-		case o.Plain():
-			s += " (a replay passes a read made anywhere in that span, so a look-back the application shortened or dropped within it passes too)"
-		default:
+		if o.Step > 0 {
 			s += " (a replay passes a read made anywhere in that span plus the offset, so a time to live changed by less than that span passes too)"
 		}
 	}

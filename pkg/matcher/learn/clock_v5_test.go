@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -151,7 +152,7 @@ func TestALookBackInAWindowWidenedByLoadIsReadAsTheReadNearestItsCall(t *testing
 		}
 	}
 	for _, back := range []time.Duration{2 * sec, 15 * sec} {
-		for _, width := range []time.Duration{2500 * ms, 3200 * ms, 6 * sec} {
+		for _, width := range []time.Duration{61 * ms, 400 * ms, 700 * ms, 900 * ms, 1100 * ms, 1500 * ms, 1900 * ms, 2500 * ms, 3200 * ms, 6 * sec} {
 			for phase := 7 * ms; phase < sec; phase += 90 * ms {
 				rec := v5Call(start.Add(phase), width, 4*ms)
 				f := v5Call(rec.to.Add(FullRoundLead-8*ms), width, 4*ms)
@@ -163,7 +164,11 @@ func TestALookBackInAWindowWidenedByLoadIsReadAsTheReadNearestItsCall(t *testing
 					t.Errorf("FALSE RED (flips with load): %s: %+v %q %v, CutOffsets %s..%s; want %s alone, as a quiet window learns it", name, o, why, ok, lo, hi, named)
 					continue
 				}
-				for _, part := range []string{" = " + named + " (", "the read nearest its call", "A replay checks it at the second against " + named + ", "} {
+				parts := []string{" = " + named + " (", "A replay checks it at the second against " + named + ", "}
+				if width >= sec { // a narrower window holds one whole second at most phases, and is read as it is there
+					parts = append(parts, "the read nearest its call")
+				}
+				for _, part := range parts {
 					if !strings.Contains(o.Why, part) {
 						t.Errorf("%s: the line does not say %q: %s", name, part, o.Why)
 					}
@@ -980,18 +985,9 @@ func TestTheReadNearestItsCallLeavesAloneWhatNoLoadWidened(t *testing.T) {
 	sec, ms := time.Second, time.Millisecond
 	p := "body.cmd.query.dirtyAt.$lte"
 	s := time.Date(2026, 11, 1, 15, 21, 40, 0, time.UTC)
-	for _, back := range []time.Duration{0, 2 * sec} {
-		rec, f := v5Call(s.Add(407*ms), 3200*ms, 4*ms), v5Call(s.Add(FullRoundLead+3*ms), 3200*ms, 4*ms)
-		o, why, ok := clockInWindow(p, v5Instant(rec.read.Add(-back), ms), v5Instant(f.read.Add(-back), ms), v5Window(rec, f), nil)
-		if ok || why != "" {
-			t.Errorf("milliseconds, now - %s in a wide window: %+v %q %v; want no offset and no refusal", back, o, why, ok)
-		}
-	}
-	turn := func(call time.Time) v5Read { return v5Call(call.Add(20*ms), 61*ms, 30*ms) } // read 10 ms before the second turns
-	rec, f := turn(s), turn(s.Add(61*sec))
-	o, why, ok := clockInWindow(p, v5Instant(rec.read.Truncate(sec).Add(-2*sec), sec), v5Instant(f.read.Truncate(sec).Add(-2*sec), sec), v5Window(rec, f), nil)
-	if lo, hi := o.CutOffsets(); !ok || why != "" || lo != -3*sec || hi != -2*sec || strings.Contains(o.Why, "nearest its call") {
-		t.Errorf("a quiet window at a turn of the second: %+v %q %v, CutOffsets %s..%s; want both whole seconds, read as before", o, why, ok, lo, hi)
+	rec, f := v5Call(s.Add(407*ms), 3200*ms, 4*ms), v5Call(s.Add(FullRoundLead+3*ms), 3200*ms, 4*ms)
+	if o, why, ok := clockInWindow(p, v5Instant(rec.read, ms), v5Instant(f.read, ms), v5Window(rec, f), nil); ok || why != "" {
+		t.Errorf("milliseconds, a plain read in a wide window: %+v %q %v; want no offset and no refusal", o, why, ok)
 	}
 	narrow, wide := v5Read{from: s, to: s.Add(100 * ms)}, v5Read{from: s.Add(57400 * ms), to: s.Add(60600 * ms)} // bounds -3.1 s to -2 s, and -2.6 s to 1.6 s
 	nv, wv := v5Instant(s.Add(-3*sec), sec), v5Instant(s.Add(58*sec), sec)
@@ -1006,5 +1002,533 @@ func TestTheReadNearestItsCallLeavesAloneWhatNoLoadWidened(t *testing.T) {
 		if o, why, ok := clockInWindow(p, row.rv, row.lv, row.w, nil); ok || why != "" {
 			t.Errorf("%s: %+v %q %v; want no offset and no refusal: both windows hold no whole second", row.name, o, why, ok)
 		}
+	}
+}
+
+// A quiet window at a turn of the second (the application read 10 ms
+// before it, its call came 20 ms after, in both runs) holds two whole
+// seconds of look-back, as a window 900 ms wide does at most phases. Both
+// are read as the one nearest the call: read as two, a replay's check would
+// run up to a whole second past the look-back, and a dropped look-back
+// would pass at every read. At the turn that one is a second longer than
+// the application's, which the one cut of slack passes.
+func TestAWindowAtATurnOfTheSecondReadsTheWholeSecondNearestItsCall(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	p := "body.cmd.query.dirtyAt.$lte"
+	s := time.Date(2026, 11, 1, 15, 21, 40, 0, time.UTC)
+	turn := func(call time.Time) v5Read { return v5Call(call.Add(20*ms), 61*ms, 30*ms) }
+	rec, f := turn(s), turn(s.Add(61*sec))
+	rv := rec.read.Truncate(sec).Add(-2 * sec)
+	o, why, ok := clockInWindow(p, v5Instant(rv, sec), v5Instant(f.read.Truncate(sec).Add(-2*sec), sec), v5Window(rec, f), nil)
+	if lo, hi := o.CutOffsets(); !ok || why != "" || lo != -3*sec || hi != -3*sec || !strings.Contains(o.Why, "the read nearest its call") {
+		t.Fatalf("a quiet window at a turn of the second: %+v %q %v, CutOffsets %s..%s; want the one whole second nearest its call", o, why, ok, lo, hi)
+	}
+	text := strconv.FormatInt(rv.Unix(), 10)
+	for ph := 7 * ms; ph < sec; ph += 70 * ms {
+		to := s.Add(48*time.Hour + ph + 61*ms)
+		sp, read := Span{From: to.Add(-61 * ms), To: to}, to.Add(-4*ms)
+		if got, why := v5Check(p, o, text, read.Truncate(sec).Add(-2*sec), sp); !got {
+			t.Errorf("FALSE RED: the application's value, %s into its second: %s", ph, why)
+		}
+		if got, _ := v5Check(p, o, text, read.Truncate(sec), sp); got {
+			t.Errorf("FALSE GREEN: a dropped look-back, %s into its second", ph)
+		}
+	}
+}
+
+// A look-back one cut below its step (the end of the last minute: an
+// application's now.Truncate(time.Minute).Add(-time.Second)) has offsets
+// from one cut below zero up to, not including, zero: Max 0 says no value
+// past the whole step, and it is a look-back in both runs. A replay passes
+// the application's value at every phase of the step and fails a dropped
+// look-back wherever its remainder is not the learned one. A Clock that can
+// never pass a replay is a false contract.
+func TestALookBackOfOneCutBelowItsStepPassesTheApplicationsValue(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	start := time.Date(2026, 11, 1, 15, 21, 40, 400e6, time.UTC)
+	for _, row := range []struct {
+		name                 string
+		step, res, back, gap time.Duration
+	}{
+		{"cut_m(now) - 1s", time.Minute, sec, -sec, FullRoundLead},
+		{"cut_h(now) - 1s", time.Hour, sec, -sec, time.Hour + 7*sec},
+		{"cut_s(now) - 1ms", sec, ms, -ms, 3400 * ms},
+		{"cut_m(now) - 1m1s, the control", time.Minute, sec, -61 * sec, FullRoundLead},
+	} {
+		value := func(read time.Time) time.Time { return read.Truncate(row.step).Add(row.back) }
+		rec, f := v5Call(start, 61*ms, 4*ms), v5Call(start.Add(row.gap), 61*ms, 4*ms)
+		o, why, ok := clockInWindow("body.until", v5Instant(value(rec.read), row.res), v5Instant(value(f.read), row.res), v5Window(rec, f), nil)
+		if !ok || why != "" || o.Step != row.step || o.Res != row.res || !strings.Contains(o.Why, "Its two values stand "+models.ShortDuration(value(f.read).Sub(value(rec.read)))+" apart") {
+			t.Errorf("%s: %+v %q %v; want it locked to its step", row.name, o, why, ok)
+			continue
+		}
+		for i := time.Duration(0); i < 40; i++ {
+			to := start.Add(48 * time.Hour).Truncate(row.step).Add(row.step*i/40 + row.step/97)
+			from, read := to.Add(-61*ms), to.Add(-4*ms)
+			if !o.Holds(value(read), row.res, from, to) {
+				t.Errorf("FALSE RED: %s: the application's value, %s into its step", row.name, to.Sub(to.Truncate(row.step)))
+			}
+			dropped := read.Truncate(row.res)
+			if dropped.Add(-row.back).Truncate(row.step).Equal(dropped.Add(-row.back)) {
+				continue // the one read in many whose remainder is the learned one
+			}
+			if o.Holds(dropped, row.res, from, to) {
+				t.Errorf("FALSE GREEN: %s: a dropped look-back, %s into its step", row.name, to.Sub(to.Truncate(row.step)))
+			}
+		}
+	}
+}
+
+// A look-back of a millisecond's value in a window that also holds it as a
+// plain read (dirtyAt <= now - 2s, a BSON date) is refused as the quiet
+// window refuses it, whatever the window's width: read as a plain read it
+// fails the application's value on every quiet replay and passes a dropped
+// look-back on every one; silent, it flips with load. The read nearest the
+// call stands a second or more before it in both runs, which a plain read
+// made that long before its call does too: that is the rule's stated cost
+// (fail closed). A read under a second before its call in either run stays
+// the order's plain read.
+func TestAMillisecondsLookBackIsRefusedInEveryWindowAsAQuietOneRefusesIt(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	p := "body.cmd.query.dirtyAt.$lte.$date"
+	start := time.Date(2026, 11, 1, 15, 21, 40, 0, time.UTC)
+	fine := "so keploy refuses an offset that reads in a second or finer"
+	for _, back := range []time.Duration{2 * sec, 15 * sec} {
+		for _, ws := range [][2]time.Duration{{61 * ms, 61 * ms}, {400 * ms, 400 * ms}, {1100 * ms, 1100 * ms}, {1900 * ms, 1900 * ms}, {2500 * ms, 2500 * ms}, {3200 * ms, 3200 * ms}, {6 * sec, 6 * sec}, {30 * sec, 30 * sec}, {61 * ms, 3200 * ms}, {3200 * ms, 61 * ms}} {
+			for phase := 7 * ms; phase < sec; phase += 190 * ms {
+				rec := v5Call(start.Add(phase), ws[0], 4*ms)
+				f := v5Call(rec.to.Add(FullRoundLead-8*ms), ws[1], 4*ms)
+				o, why, ok := clockInWindow(p, v5Instant(rec.read.Add(-back), ms), v5Instant(f.read.Add(-back), ms), v5Window(rec, f), nil)
+				if ok || !strings.Contains(why, fine) {
+					t.Errorf("now - %s, windows %s and %s: %+v %q %v; want refused as a quiet window refuses it", back, ws[0], ws[1], o, why, ok)
+				}
+				if ws[0] > back && ws[1] > back && !strings.Contains(why, "also held a read with no look-back") {
+					t.Errorf("now - %s, windows %s and %s: the refusal does not say what the window held: %q", back, ws[0], ws[1], why)
+				}
+			}
+		}
+	}
+	for _, row := range []struct {
+		name         string
+		rLead, fLead time.Duration
+		wantRefused  bool
+	}{
+		{"read 4 ms before its call in both runs", 4 * ms, 4 * ms, false},
+		{"read 900 ms before its call in both runs", 900 * ms, 900 * ms, false},
+		{"read 1.2 s before its call in one run", 1200 * ms, 4 * ms, false},
+		{"read 1.2 s before its call in both runs", 1200 * ms, 1200 * ms, true},
+	} {
+		rec := v5Call(start.Add(407*ms), 3200*ms, row.rLead)
+		f := v5Call(rec.to.Add(FullRoundLead), 3200*ms, row.fLead)
+		o, why, ok := clockInWindow(p, v5Instant(rec.read, ms), v5Instant(f.read, ms), v5Window(rec, f), nil)
+		switch {
+		case row.wantRefused && (ok || !strings.Contains(why, fine)):
+			t.Errorf("%s: %+v %q %v; want refused, the rule's stated cost", row.name, o, why, ok)
+		case !row.wantRefused && (ok || why != ""):
+			t.Errorf("%s: %+v %q %v; want no offset and no refusal: the order's plain read", row.name, o, why, ok)
+		}
+	}
+}
+
+// A time to live under a minute at the second is refused, as main refuses
+// it, where its call's window is as wide as its cut: every whole second the
+// range holds stands for it, so a replay would pass one changed by the
+// window's width at every read, where a narrow window's check tells it
+// from one changed by two seconds. One of a minute or longer is read at its
+// cut and the line says how far a changed one passes, truly.
+func TestATimeToLiveInAWindowAsWideAsItsCutIsRefusedUnderAMinute(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	p := "body.expiresAt"
+	start := time.Date(2026, 11, 1, 15, 21, 40, 0, time.UTC)
+	read := func(width, phase time.Duration, ttl time.Duration) (models.ClockOffset, string, bool, time.Time) {
+		rec := v5Call(start.Add(phase), width, 4*ms)
+		f := v5Call(rec.to.Add(FullRoundLead-8*ms), width, 4*ms)
+		rv := rec.read.Truncate(sec).Add(ttl)
+		o, why, ok := clockInWindow(p, v5Instant(rv, sec), v5Instant(f.read.Truncate(sec).Add(ttl), sec), v5Window(rec, f), nil)
+		return o, why, ok, rv
+	}
+	for phase := 7 * ms; phase < sec; phase += 90 * ms {
+		for _, width := range []time.Duration{1000 * ms, 1500 * ms, 3200 * ms, 6 * sec} {
+			if o, why, ok, _ := read(width, phase, 30*sec); ok || !strings.Contains(why, "a time to live under a minute") || !strings.Contains(why, models.ShortDuration(width)) {
+				t.Errorf("clock + 30s in a window %s wide: %+v %q %v; want refused, as main refuses it", width, o, why, ok)
+			}
+		}
+		if o, why, ok, _ := read(61*ms, phase, 30*sec); !ok || why != "" {
+			t.Errorf("clock + 30s in a quiet window, %s into its second: %+v %q %v; want the Clock", phase, o, why, ok)
+		}
+		o, why, ok, rv := read(3200*ms, phase, 90*sec)
+		if !ok || why != "" || o.Step != sec || o.Res != sec {
+			t.Errorf("clock + 90s in a window 3.2s wide: %+v %q %v; want read at the second", o, why, ok)
+			continue
+		}
+		lo, hi := o.CutOffsets()
+		sh := models.ShortDuration
+		if want := "a time to live from " + sh(lo-sec) + " to " + sh(hi+sec) + " passes at every read"; !strings.Contains(o.Why, want) || !strings.Contains(o.Why, "each whole second from "+sh(lo)+" to "+sh(hi)) {
+			t.Errorf("clock + 90s in a window 3.2s wide: the line does not say %q: %s", want, o.Why)
+		}
+		text := strconv.FormatInt(rv.Unix(), 10)
+		for ph := 7 * ms; ph < sec; ph += 70 * ms {
+			to := start.Add(48*time.Hour + ph)
+			sp, app := Span{From: to.Add(-61 * ms), To: to}, to.Add(-4*ms).Truncate(sec)
+			for d := lo - sec; d <= hi+sec; d += sec {
+				if got, why := v5Check(p, o, text, app.Add(d), sp); !got {
+					t.Errorf("a time to live of %s, in the line's range %s to %s: %s", d, lo-sec, hi+sec, why)
+				}
+			}
+			for _, d := range []time.Duration{lo - 3*sec, hi + 3*sec} {
+				if got, _ := v5Check(p, o, text, app.Add(d), sp); got {
+					t.Errorf("FALSE GREEN: a time to live of %s, past the line's range %s to %s", d, lo-sec, hi+sec)
+				}
+			}
+		}
+	}
+}
+
+// v5Decide is the order's decision on the one changed value of a call,
+// recorded as rec and seen in record's full round as live, in a window
+// width wide in both runs. Where the order is not on this tree (Decide then
+// refuses every word) the row is skipped: it runs wherever the two meet.
+func v5Decide(t *testing.T, path string, typ Type, rec, live string, rAt, fAt time.Time, width time.Duration) Decision {
+	t.Helper()
+	if reflect.ValueOf(decideBy).Pointer() == reflect.ValueOf(refuseAll).Pointer() {
+		t.Skip("the order of a changed word is not on this tree")
+	}
+	leaf := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{path: {Path: path, Noise: path, Type: typ, Value: v}}}
+	}
+	dc := NewDriftCache()
+	dc.appClock = true
+	ds := Decide(Input{
+		Drifts: dc, Drift: []string{path}, Live: leaf(live), Rec: leaf(rec),
+		At: rAt, Arrived: fAt, Test: "test-2", Mock: "mock-300", Mode: ModeOwn,
+		Window: v5Window(v5Call(rAt, width, 0), v5Call(fAt, width, 0)),
+		Landed: Landed{Where: LandedBetween},
+		Caps:   Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true},
+	})
+	if len(ds) != 1 {
+		t.Fatalf("%q to %q: %d decisions; want one", rec, live, len(ds))
+	}
+	return ds[0]
+}
+
+// api-server's reconciler's claim end to end, through the order: dirtyAt <=
+// now - 2s, and the stale scan's now - 15s, an epoch's seconds, is a Clock
+// of exactly that look-back in a quiet window and in every width load gives
+// it, never a plain read, and a replay passes the application's value and
+// fails a dropped look-back; a plain read made just before its call stays a
+// plain read. In the widest windows this waits for the order to ask the
+// reading before it asks whether the window holds a plain read: a window
+// wider than the look-back holds both.
+func TestAPollsDebounceIsAClockThroughTheOrderInEveryWindow(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	const p = "body.filter.dirtyAt.$lte"
+	at := time.Date(2026, 10, 31, 9, 0, 0, 400e6, time.UTC)
+	fAt := at.Add(2*time.Hour + 17*time.Minute + 23*time.Second + 150*ms)
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	for _, width := range []time.Duration{30 * ms, 900 * ms, 1100 * ms, 2500 * ms, 3200 * ms, 6 * sec} {
+		for _, back := range []time.Duration{0, 2 * sec, 15 * sec} {
+			rec, live := secs(at.Add(-4*ms-back)), secs(fAt.Add(-4*ms-back))
+			d := v5Decide(t, p, Number, rec, live, at, fAt, width)
+			if d.Clock == nil || d.Outcome != OutcomeClock {
+				t.Errorf("window %s, now - %s: %+v; want a Clock", width, back, d)
+				continue
+			}
+			if back == 0 {
+				if !d.Clock.Plain() {
+					t.Errorf("window %s, a plain read: %s; want a plain read", width, d.Clock)
+				}
+				continue
+			}
+			if lo, hi := d.Clock.CutOffsets(); lo != -back || hi != -back {
+				t.Errorf("window %s, now - %s: %s, CutOffsets %s..%s; want exactly that look-back", width, back, d.Clock, lo, hi)
+			}
+			for ph := 7 * ms; ph < sec; ph += 70 * ms {
+				to := at.Add(72*time.Hour + ph)
+				sp := Span{From: to.Add(-61 * ms), To: to}
+				leaf := func(v time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: Number, Value: secs(v)} }
+				if got, why := CheckClockRead(p, *d.Clock, leaf(to.Add(-4*ms-back)), sp, true); !got {
+					t.Errorf("FALSE RED: window %s, now - %s, %s into its second: %s", width, back, ph, why)
+				}
+				if got, _ := CheckClockRead(p, *d.Clock, leaf(to.Add(-4*ms)), sp, true); got {
+					t.Errorf("FALSE GREEN: window %s, now - %s dropped, %s into its second", width, back, ph)
+				}
+			}
+		}
+	}
+}
+
+// The same look-back as a word of a raw text (dirtyAt<2026-...Z&limit=10):
+// one rule across value forms. It waits for the same change to the order.
+func TestALookBackInARawTextIsAClockThroughTheOrder(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	const p = "url.query.q"
+	at := time.Date(2026, 10, 31, 9, 0, 0, 400e6, time.UTC)
+	fAt := at.Add(FullRoundLead + 13*ms)
+	text := func(v time.Time) string { return "dirtyAt<" + v.UTC().Truncate(sec).Format(time.RFC3339) + "&limit=10" }
+	for _, width := range []time.Duration{61 * ms, 3200 * ms} {
+		d := v5Decide(t, p, String, text(at.Add(-4*ms-2*sec)), text(fAt.Add(-4*ms-2*sec)), at, fAt, width)
+		if d.Clock == nil || d.Outcome != OutcomeClock || d.Clock.Word.IsZero() {
+			t.Errorf("window %s: %+v; want a Clock on the text's word", width, d)
+			continue
+		}
+		for ph := 7 * ms; ph < sec; ph += 70 * ms {
+			to := at.Add(72*time.Hour + ph)
+			sp := Span{From: to.Add(-61 * ms), To: to}
+			leaf := func(v time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: String, Value: text(v)} }
+			if got, why := CheckClockRead(p, *d.Clock, leaf(to.Add(-4*ms-2*sec)), sp, true); !got {
+				t.Errorf("FALSE RED: window %s, %s into its second: %s", width, ph, why)
+			}
+			if got, _ := CheckClockRead(p, *d.Clock, leaf(to.Add(-4*ms)), sp, true); got {
+				t.Errorf("FALSE GREEN: window %s, a dropped look-back, %s into its second", width, ph)
+			}
+		}
+	}
+}
+
+// An offset checked against its unit (not cut: clock + 30m at the
+// millisecond) is refused where either run's call's window is too wide for
+// it (Checkable reads both): a replay as wide would refuse it whatever it
+// carried. The reason names the wider.
+func TestAnOffsetIsRefusedWhereEitherRunsWindowIsTooWideForItsUnit(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	p := "body.expiresAt"
+	start := time.Date(2026, 11, 1, 15, 21, 40, 400e6, time.UTC)
+	for _, ws := range []struct {
+		name   string
+		rw, fw time.Duration
+	}{
+		{"the recording's window a minute and a second wide", 61 * sec, 50 * ms},
+		{"record's full round's window a minute and a second wide", 50 * ms, 61 * sec},
+	} {
+		rec, f := v5Call(start, ws.rw, 4*ms), v5Call(start.Add(FullRoundLead), ws.fw, 4*ms)
+		o, why, ok := clockInWindow(p, v5Instant(rec.read.Add(30*time.Minute), ms), v5Instant(f.read.Add(30*time.Minute), ms), v5Window(rec, f), nil)
+		if ok || !strings.Contains(why, "a replay in a window as wide as its call's (1m1s) could not tell a time to live changed by a minute from it") {
+			t.Errorf("%s: %+v %q %v; want refused, naming the window", ws.name, o, why, ok)
+		}
+	}
+}
+
+// An offset cut to a unit whose range holds no whole cut (a cut hour plus
+// 90 minutes, a cut minute less 90 seconds: the application cuts first and
+// offsets after) is read as its range, never as "each whole hour from" a
+// range that holds none, and is checked within one cut of it on either
+// side, a look-back too.
+func TestARangeHoldingNoWholeCutIsReadAsItsRange(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	for _, row := range []struct {
+		o     models.ClockOffset
+		named string
+	}{
+		{models.ClockOffset{Min: 89 * time.Minute, Max: 91 * time.Minute, Res: time.Hour, Step: time.Hour, Layout: models.LayoutTyped}, "clock plus an offset from 1h29m to 1h31m"},
+		{models.ClockOffset{Min: -90*sec - 200*ms, Max: -90*sec + 300*ms, Res: time.Minute, Step: time.Minute, Layout: models.LayoutTyped}, "from -1m30.2s to -1m29.7s"},
+	} {
+		if !row.o.CoarseCut() {
+			t.Fatalf("precondition: %+v CoarseCut false; want a cut", row.o)
+		}
+		lo, hi := row.o.CutOffsets()
+		if lo != row.o.Min || hi != row.o.Max {
+			t.Errorf("%+v: CutOffsets %s..%s; want its range", row.o, lo, hi)
+		}
+		why := lineV5("body.expiresAt", row.o, sec, 0, "")
+		if !strings.Contains(why, "against "+row.o.Range()+", as standing for") || !strings.Contains(row.o.Range(), row.named) || !strings.Contains(why, "on either side, whatever the window's width") {
+			t.Errorf("%+v: the learned line does not read it as its range, on either side: %s", row.o, why)
+		}
+	}
+}
+
+// The learned line of an offset checked at its cut names which way a
+// changed one passes: of a time to live, a longer one where turns of the
+// cut fall between the application's read and its call, a shorter one
+// between the window's start and the read; of a look-back, the other way
+// round. A replay checks both within one cut on either side.
+func TestALearnedCutLineNamesWhichWayAChangedOffsetPasses(t *testing.T) {
+	hour, day := time.Hour, 24*time.Hour
+	ttl := "between the application's read and its call (a longer one) or between the window's start and the read (a shorter one)"
+	back := "between the window's start and the application's read (a longer one) or between the read and its call (a shorter one)"
+	at := func(min, max, res time.Duration) models.ClockOffset {
+		return models.ClockOffset{Min: min, Max: max, Res: res, Step: res, Layout: models.LayoutTyped}
+	}
+	for _, row := range []struct {
+		name string
+		o    models.ClockOffset
+		want string
+	}{
+		{"clock + 30d at the day", at(30*day-3*hour, 30*day+20*hour, day), ttl},
+		{"clock + 2h at the hour", at(2*hour-10*time.Minute, 2*hour+50*time.Minute, hour), ttl},
+		{"now - 7d at the day", at(-7*day-3*hour, -7*day+20*hour, day), back},
+		{"now - 2h at the hour", at(-2*hour-10*time.Minute, -2*hour+50*time.Minute, hour), back},
+		{"now - 2s at the second", at(-2*time.Second-155*time.Millisecond, -2*time.Second+368*time.Millisecond, time.Second), back},
+	} {
+		if !row.o.CoarseCut() {
+			t.Fatalf("precondition: %s (%+v) is no offset checked at its cut", row.name, row.o)
+		}
+		if why := lineV5("body.cutoff", row.o, time.Second, 0, ""); !strings.Contains(why, ", "+row.want+", ") || !strings.Contains(why, "on either side, whatever the window's width") {
+			t.Errorf("%s: the learned line does not say %q, on either side: %s", row.name, row.want, why)
+		}
+	}
+}
+
+// A time to live its call's window cannot check (too wide for its unit, or
+// Fine for it) is read from its test's begin where that window holds it.
+func TestATimeToLiveItsWindowCannotCheckIsReadFromItsTestsBegin(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	p := "body.expiresAt"
+	day := 24 * time.Hour
+	start := time.Date(2026, 11, 1, 15, 21, 40, 400e6, time.UTC)
+	window := func(rec, f v5Read, began time.Duration) *Window {
+		return (&Window{Rec: Span{From: rec.from, To: rec.to, Began: rec.to.Add(-began)}, F: Span{From: f.from, To: f.to, Began: f.to.Add(-began)}}).ComparesOffsets()
+	}
+	rec, f := v5Call(start, 61*sec, 4*ms), v5Call(start.Add(FullRoundLead), 61*sec, 4*ms)
+	o, why, ok := clockInWindow(p, v5Instant(rec.read.Add(30*time.Minute), ms), v5Instant(f.read.Add(30*time.Minute), ms), window(rec, f, sec), nil)
+	if !ok || why != "" || o.Since != models.SinceTestBegin || o.Unit() != time.Minute {
+		t.Errorf("clock + 30m at the millisecond in a window a minute wide, its test a second old: %+v %q %v; want it read from its test's begin", o, why, ok)
+	}
+	rec, f = v5Call(start, 61*ms, 3200*ms), v5Call(start.Add(FullRoundLead), 61*ms, 3200*ms)
+	o, why, ok = clockInWindow(p, v5Instant(rec.read.Add(30*day), ms), v5Instant(f.read.Add(30*day), ms), window(rec, f, 5*sec), nil)
+	if !ok || why != "" || o.Since != models.SinceTestBegin || o.Unit() != day {
+		t.Errorf("clock + 30d at the millisecond, read 3.2 s before its call: %+v %q %v; want it read from its test's begin", o, why, ok)
+	}
+	line := sinceLineV5(p, models.ClockOffset{Min: time.Hour + 10*time.Minute, Max: 2*time.Hour + 50*time.Minute, Res: time.Hour, Step: time.Hour, Layout: models.LayoutTyped, Since: models.SinceTestBegin})
+	for _, part := range []string{"holds its test's begin plus 2h,", "after its call plus 2h,"} {
+		if !strings.Contains(line, part) {
+			t.Errorf("a time to live at the hour since its test began: the line does not say %q: %s", part, line)
+		}
+	}
+}
+
+// A look-back cut to a day, whose values stand a day apart, is locked to
+// the day's phase, as one cut to the minute is to the minute's, and its
+// line names that gap.
+func TestADayCutLookBackIsLockedToItsDay(t *testing.T) {
+	sec, ms, day := time.Second, time.Millisecond, 24*time.Hour
+	value := func(read time.Time) time.Time { return read.Truncate(day).Add(-103 * sec) }
+	rec := v5Call(time.Date(2026, 11, 1, 23, 59, 50, 400e6, time.UTC), 61*ms, 4*ms)
+	f := v5Call(time.Date(2026, 11, 2, 0, 0, 52, 0, time.UTC), 61*ms, 4*ms)
+	o, why, ok := clockInWindow("body.until", v5Instant(value(rec.read), sec), v5Instant(value(f.read), sec), v5Window(rec, f), nil)
+	if !ok || why != "" || o.Step != day || o.Res != sec || o.Min != -103*sec || o.Max != -102*sec {
+		t.Fatalf("cut_d(now) - 103s: %+v %q %v; want it locked to the day", o, why, ok)
+	}
+	if !strings.Contains(o.Why, "Its two values stand "+models.ShortDuration(day)+" apart") {
+		t.Errorf("the line does not name the values' gap: %s", o.Why)
+	}
+	for h := time.Duration(0); h < 24; h++ {
+		to := rec.to.Add(48 * time.Hour).Truncate(day).Add(h*time.Hour + 7*time.Minute)
+		read := to.Add(-4 * ms)
+		if !o.Holds(value(read), sec, to.Add(-61*ms), to) {
+			t.Errorf("FALSE RED: the application's value, %d h into its day", h)
+		}
+		if o.Holds(read.Truncate(sec), sec, to.Add(-61*ms), to) {
+			t.Errorf("FALSE GREEN: a dropped look-back, %d h into its day", h)
+		}
+	}
+}
+
+// A time to live whose two values stand a whole minute apart is read at the
+// minute, which holds both the application that cuts to it and one that
+// does not, at Step and Res the minute, and its line says so.
+func TestATimeToLiveWhoseValuesStandAWholeMinuteApartIsReadAtTheMinute(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	start := time.Date(2026, 11, 1, 15, 21, 40, 400e6, time.UTC)
+	rec, f := v5Call(start, 61*ms, 4*ms), v5Call(start.Add(time.Minute), 61*ms, 4*ms)
+	o, why, ok := clockInWindow("body.expiresAt", v5Instant(rec.read.Truncate(sec).Add(90*sec), sec), v5Instant(f.read.Truncate(sec).Add(90*sec), sec), v5Window(rec, f), nil)
+	if !ok || why != "" || o.Step != time.Minute || o.Res != time.Minute {
+		t.Fatalf("%+v %q %v; want read at the minute", o, why, ok)
+	}
+	if !strings.Contains(o.Why, "the step its two values stand 1m apart") {
+		t.Errorf("the line does not name the step: %s", o.Why)
+	}
+}
+
+// A Go application in +05:30 cuts on UTC's hour (Truncate counts from
+// UTC), and writes its value with its own offset: a replay reads it on
+// UTC's grid whatever the offset it is written with.
+func TestAnHourLockedLookBackWrittenWithItsOwnOffsetIsReadOnUTCsGrid(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	p := "body.until"
+	india := time.FixedZone("", 5*3600+1800)
+	o := models.ClockOffset{Min: -20*time.Minute - 7*sec, Max: -20*time.Minute - 6*sec, Res: sec, Step: time.Hour}
+	for ph := 7 * time.Minute; ph < time.Hour; ph += 7 * time.Minute {
+		to := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC).Add(ph)
+		v := to.Truncate(time.Hour).Add(-20*time.Minute - 7*sec)
+		o.Layout = clockTextLayout(v.In(india).Format(time.RFC3339))
+		if got, why := CheckClockRead(p, o, Leaf{Path: p, Noise: p, Type: String, Value: v.In(india).Format(time.RFC3339)}, Span{From: to.Add(-61 * ms), To: to}, true); !got {
+			t.Errorf("FALSE RED: %s into its hour: %s", ph, why)
+		}
+	}
+}
+
+// An application that cuts to the second and subtracts 1500 ms, whose two
+// runs' values happen to stand exactly sixty seconds apart, is read at the
+// minute they stand a whole number of: the phase lock's stated cost. A
+// replay passes its value only where its second of the minute lands on the
+// learned one; anywhere else it is a false red, which auto-replay's own
+// replays read and set aside. A dropped look-back fails at every read.
+func TestASecondCutterWhoseValuesStandAWholeMinuteApartIsLockedToTheMinute(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	value := func(read time.Time) time.Time { return read.Truncate(sec).Add(-1500 * ms) }
+	start := time.Date(2026, 11, 1, 15, 22, 0, 155e6, time.UTC) // the first second of a minute: the look-back crosses into the last one
+	rec, f := v5Call(start, 61*ms, 20*ms), v5Call(start.Add(60*sec+300*ms), 61*ms, 20*ms)
+	o, why, ok := clockInWindow("body.until", v5Instant(value(rec.read), ms), v5Instant(value(f.read), ms), v5Window(rec, f), nil)
+	if !ok || why != "" || o.Step != time.Minute || o.Res != ms {
+		t.Fatalf("%+v %q %v; want it locked to the minute", o, why, ok)
+	}
+	if !strings.Contains(o.Why, "fails a replay wherever its value's remainder within 1m moves (a false red)") {
+		t.Errorf("the line does not state the cost: %s", o.Why)
+	}
+	passes := 0
+	for s := time.Duration(0); s < 60; s++ {
+		to := start.Add(48 * time.Hour).Truncate(time.Minute).Add(s*sec + 155*ms)
+		read := to.Add(-20 * ms)
+		if o.Holds(value(read), ms, to.Add(-61*ms), to) {
+			passes++
+		}
+		if o.Holds(read.Truncate(ms), ms, to.Add(-61*ms), to) {
+			t.Errorf("FALSE GREEN: a dropped look-back, %d s into its minute", s)
+		}
+	}
+	if passes != 1 {
+		t.Errorf("the application's value passes %d of the sixty seconds of a minute; want the learned one alone, the stated cost", passes)
+	}
+}
+
+// A look-back of a millisecond's value that stands under a second before
+// its call in both runs is a plain read's ordinary lead too: where the
+// window from its test's begin holds it, the reading leaves it to the
+// order's step 7. A second or more before its call it stays refused, read
+// from the test's begin it would pass a dropped look-back. A time to live
+// under a minute is refused in that window too, and one run's narrow window
+// is no wide window.
+func TestAMillisecondsLeadUnderASecondIsLeftToItsBegin(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	p := "body.app.createdAt"
+	start := time.Date(2026, 11, 1, 15, 21, 40, 400e6, time.UTC)
+	window := func(rec, f v5Read) *Window {
+		return (&Window{Rec: Span{From: rec.from, To: rec.to, Began: rec.to.Add(-5 * sec)}, F: Span{From: f.from, To: f.to, Began: f.to.Add(-5 * sec)}}).ComparesOffsets()
+	}
+	for _, row := range []struct {
+		name    string
+		lead    time.Duration
+		refused bool
+	}{
+		{"500 ms", 500 * ms, false},
+		{"900 ms", 900 * ms, false},
+		{"1.5 s", 1500 * ms, true},
+		{"2 s", 2 * sec, true},
+	} {
+		rec, f := v5Call(start, 50*ms, row.lead), v5Call(start.Add(FullRoundLead), 50*ms, row.lead)
+		o, why, ok := clockInWindow(p, v5Instant(rec.read, ms), v5Instant(f.read, ms), window(rec, f), nil)
+		if ok || (why != "") != row.refused {
+			t.Errorf("read %s before its call: %+v %q %v; want refused %v", row.name, o, why, ok, row.refused)
+		}
+	}
+	rec, f := v5Call(start, 61*ms, 4*ms), v5Call(start.Add(FullRoundLead), 3200*ms, 4*ms)
+	rv, lv := rec.read.Truncate(sec).Add(30*sec), f.read.Truncate(sec).Add(30*sec)
+	if o, why, ok := clockInWindow(p, v5Instant(rv, sec), v5Instant(lv, sec), v5Window(rec, f), nil); !ok || why != "" {
+		t.Errorf("clock + 30s, one run's window narrow: %+v %q %v; want the Clock its narrow window reads", o, why, ok)
+	}
+	rec, f = v5Call(start, 61*ms, 4*ms), v5Call(start.Add(FullRoundLead), 61*ms, 4*ms)
+	rv, lv = rec.read.Truncate(sec).Add(30*sec), f.read.Truncate(sec).Add(30*sec)
+	if o, why, ok := clockInWindow(p, v5Instant(rv, sec), v5Instant(lv, sec), window(rec, f).sinceBegin(), nil); ok || !strings.Contains(why, "a time to live under a minute") {
+		t.Errorf("clock + 30s from a test's begin five seconds back: %+v %q %v; want refused, as main refuses it", o, why, ok)
 	}
 }
