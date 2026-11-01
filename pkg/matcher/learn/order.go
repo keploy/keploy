@@ -678,44 +678,18 @@ func (dc *decider) holds(p evPlace, t *readerText, w string, m *moment, byText b
 			return false, false, false
 		}
 	}
-	// Held as written only at a coarse cut, or not at all: a text with
-	// escapes is read as it opens (the date alone of a percent-encoded
-	// time is no hold of that time), and its other decoded forms add what
-	// they hold.
-	if !fm {
-		if hf, ff, opened, ok := formsHold(t, w, *m); ok && (opened || hf) {
-			hm, fm = hf, ff
+	// A text with escapes is read as it opens: as written, the date alone
+	// of a percent-encoded time reads as a coarse instant, no hold of that
+	// time. A form that opens holds what holdsMoment found at a fine cut.
+	if hm && !fm {
+		if text, ok := t.textNow(); ok && decodeForms(text).hasDec {
+			hm = false
 		}
 	}
 	if hm {
 		return true, fm, true
 	}
 	return h, h && fineCut(m.res), true
-}
-
-// formsHold is what t's decoded forms (decodeForms: its escapes read, its
-// quoted-printable form, its encoded runs' text) hold of the instant w
-// (moment m), by its text or by moment; opened: its escapes read change it.
-// An earlier place that sent the instant percent-encoded holds it once
-// opened, as the call's own leaf is read opened (leafText). Read now and
-// kept by no one, as the reader's index reads a word past its budget.
-func formsHold(t *readerText, w string, m moment) (held, fine, opened, read bool) {
-	text, ok := t.textNow()
-	if !ok {
-		return false, false, false, false
-	}
-	d := decodeForms(text)
-	for _, f := range [...]string{d.dec, d.q, d.b} {
-		if f != "" && strings.Contains(f, w) {
-			held, fine = true, fine || fineCut(m.res)
-		}
-		for _, sp := range instantSpans(f) {
-			if h, fn := byMoment(sp.moment(), m); sp.keyed && h {
-				held, fine = true, fine || fn
-			}
-		}
-	}
-	return held, fine, d.hasDec, true
 }
 
 // coarserOnly reports whether t, which holds w (moment m), holds it only
