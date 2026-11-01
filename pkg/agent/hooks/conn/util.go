@@ -65,7 +65,10 @@ var CaptureHook CaptureFunc = Capture
 // An empty schemaKey means "no fingerprint" and disables cross-pod judgement
 // for this test case. Enterprise sets this when --static-dedup is enabled;
 // nil means no dedup.
-var GRPCCaptureHook func(req *models.GrpcReq, resp *models.GrpcResp) (isDuplicate bool, schemaKey string)
+//
+// appPort is the port of the app that answered: two containers of one pod
+// can serve the same call with the same shape, and are two apps.
+var GRPCCaptureHook func(req *models.GrpcReq, resp *models.GrpcResp, appPort uint16) (isDuplicate bool, schemaKey string)
 
 // MaxTestCaseSize is the maximum combined size of HTTP/gRPC request and response (5MB)
 const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
@@ -670,9 +673,22 @@ func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 	}
 }
 
+// grpcMessagesSize is the size of a direction's messages' protoscope text.
+func grpcMessagesSize(msgs []models.GrpcLengthPrefixedMessage) int {
+	n := 0
+	for _, m := range msgs {
+		n += len(m.DecodedData)
+	}
+	return n
+}
+
 // CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel.
 // Mirrors NewCapture (HTTP) exactly:
-//   - GRPCCaptureHook is invoked unconditionally before ResolveRange, so
+//   - A call over MaxTestCaseSize, every message of both directions counted, is
+//     never a test case: it is judged before GRPCCaptureHook, which so never
+//     counts its shape as seen (a later call of that shape under the limit is
+//     no duplicate of it), and its mocks are released (keep=false).
+//   - GRPCCaptureHook is invoked before ResolveRange for every other call, so
 //     ResolveRange always runs — even for duplicates (with keep=false to flush
 //     their mocks cleanly).
 //   - Counter is always incremented so concurrent duplicate streams each get a
@@ -697,10 +713,15 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	}
 
 	testName := http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"]
+	// Reuse the same 5 MB cap as HTTP. DecodedData is the protoscope text
+	// representation of the binary payload — large protobuf messages can
+	// easily exceed this threshold, and a stream's later messages count too.
+	totalSize := grpcMessagesSize(http2Stream.GRPCReq.AllMessages()) + grpcMessagesSize(http2Stream.GRPCResp.AllMessages())
+	oversized := totalSize > MaxTestCaseSize
 	var isDuplicate bool
 	var schemaKey string
-	if GRPCCaptureHook != nil {
-		isDuplicate, schemaKey = GRPCCaptureHook(http2Stream.GRPCReq, http2Stream.GRPCResp)
+	if GRPCCaptureHook != nil && !oversized {
+		isDuplicate, schemaKey = GRPCCaptureHook(http2Stream.GRPCReq, http2Stream.GRPCResp, appPort)
 	}
 
 	// Bin buffered outgoing mocks into this stream's window before any early
@@ -722,24 +743,19 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 				http2Stream.GRPCReq.Timestamp,
 				http2Stream.GRPCResp.Timestamp,
 				testName,
-				!isDuplicate,
+				!isDuplicate && !oversized,
 				mapping,
 			)
 		}
 	}
 
-	if isDuplicate {
-		return
-	}
-
-	// Reuse the same 5 MB cap as HTTP. DecodedData is the protoscope text
-	// representation of the binary payload — large protobuf messages can
-	// easily exceed this threshold.
-	totalSize := len(http2Stream.GRPCReq.Body.DecodedData) + len(http2Stream.GRPCResp.Body.DecodedData)
-	if totalSize > MaxTestCaseSize {
+	if oversized {
 		logger.Error("gRPC test case data exceeds 5MB limit, skipping capture",
 			zap.Int("totalSize", totalSize),
 			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
+		return
+	}
+	if isDuplicate {
 		return
 	}
 
