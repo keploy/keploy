@@ -1212,6 +1212,33 @@ func TestOutcomeAClockLineNamesThePlaceSetAside(t *testing.T) {
 	}
 }
 
+// A client test's name minted from the clock in nanoseconds some 11 ms
+// before its call ("[E2E] app-crud-<UnixNano>", api-server's TestAppCRUD)
+// is a read made since its test began, whether or not the two runs' gaps
+// from minting to the call agree: where they agreed to well under a
+// millisecond (the runs' load set them), the window's reading found one
+// offset, refused its cut and kept the read from step 7, so the kept count
+// flipped with load.
+func TestOutcomeANameMintedFromTheClockBeforeItsCallIsAReadAtAnyGap(t *testing.T) {
+	const p = "body.cmd.query.app.name"
+	rAt, fAt := oAt.Add(123457*time.Nanosecond), oAt.Add(66*time.Second+987653*time.Nanosecond)
+	for _, gap := range []struct {
+		what   string
+		rg, fg time.Duration
+	}{{"gaps alike", 11346410 * time.Nanosecond, 11276112 * time.Nanosecond}, {"gaps apart", 11546410 * time.Nanosecond, 30123457 * time.Nanosecond}} {
+		recN, liveN := iEpochNs(rAt.Add(-gap.rg)), iEpochNs(fAt.Add(-gap.fg))
+		w := iWin(rAt, fAt, 2*time.Millisecond)
+		w.Rec.Began, w.F.Began = rAt.Add(-200*time.Millisecond), fAt.Add(-200*time.Millisecond)
+		in := iCall(p, String, "[E2E] app-crud-"+recN, "[E2E] app-crud-"+liveN, rAt, fAt, w, nil, nil)
+		in.Drifts = oClientDrifts()
+		d := oWord(t, Decide(in), recN, liveN)
+		iClock(t, "a name minted "+gap.what, d)
+		if !strings.Contains(d.Line, "made since its test began in both runs") {
+			t.Errorf("a name minted %s: line %q; want a read since its test began", gap.what, d.Line)
+		}
+	}
+}
+
 // An app's createdAt in seconds, read when the app was made, beside an
 // earlier send of its test that holds the same second: a PUT's lastUsedAt,
 // seconds with a fraction, which its own call learned as its read of the
