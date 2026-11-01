@@ -332,7 +332,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 		if a.replaying() {
 			meta.given = nil
 		}
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Evidence: ev, Real: meta.real, Given: meta.given})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Reported: meta.reported, Evidence: ev, Real: meta.real, Given: meta.given})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
@@ -501,9 +501,12 @@ func (a *Agent) MockStats(_ context.Context) (models.MockStats, error) {
 }
 
 type scopeMeta struct {
-	dir      string
-	suite    bool
-	outcome  string
+	dir     string
+	suite   bool
+	outcome string
+	// reported is the verdict the test's harness itself reported
+	// (ScopeWindow.Reported).
+	reported string
 	evidence *models.ScopeEvidence
 	// real are the mock.real destinations the test used while open.
 	real []models.RealUse
@@ -546,6 +549,26 @@ func (a *Agent) NoteScopeOutcome(name string, pid int, outcome string) {
 	}
 	meta := a.scopeMeta[k]
 	meta.outcome = outcome
+	a.scopeMeta[k] = meta
+}
+
+// noteScopeReported records the verdict an open test's harness itself
+// reported as it ended it (ScopeWindow.Reported), before keploy judges it.
+func (a *Agent) noteScopeReported(name string, pid int, reported string) {
+	if name == "" || reported == "" {
+		return
+	}
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	k := scopeKey{pid: uint32(pid), name: name}
+	if _, open := a.workerOpen[k]; !open {
+		return
+	}
+	if a.scopeMeta == nil {
+		a.scopeMeta = make(map[scopeKey]scopeMeta)
+	}
+	meta := a.scopeMeta[k]
+	meta.reported = reported
 	a.scopeMeta[k] = meta
 }
 

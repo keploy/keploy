@@ -607,6 +607,34 @@ func TestAnEndWithoutAnOutcomeCountsAsFailed(t *testing.T) {
 	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA"})
 	require.Nil(t, serr)
 	require.Equal(t, models.ScopeOutcomeFailed, windowOf(t, a, "o::TestA").Outcome)
+	require.Empty(t, windowOf(t, a, "o::TestA").Reported, "a harness that reported no verdict reported none: keploy's failure is not the harness's")
+}
+
+// A replayed test keploy fails on its evidence keeps the verdict its harness
+// reported beside keploy's (ScopeWindow.Reported): a judge tells a test that
+// failed on its own (a wait that timed out) from one only keploy failed, as
+// the calls a failing test makes are not the ones a passing one makes.
+func TestAReplayedTestKeepsWhatItsHarnessReportedBesideKeploysVerdict(t *testing.T) {
+	for _, tc := range []struct{ harness, reported string }{
+		{"passed", models.ScopeOutcomePassed},
+		{"timedOut", models.ScopeOutcomeFailed},
+	} {
+		t.Run(tc.harness, func(t *testing.T) {
+			a, p := wireAgent(t, models.MODE_TEST)
+			ctx := context.Background()
+			_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "orders"}, os.Getpid())
+			require.Nil(t, serr)
+			_, serr = a.ProvenBegin(ctx, begin("TestPlaceOrder"))
+			require.Nil(t, serr)
+			p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /auth/check", Destination: "127.0.0.1:18282"}}
+			e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestPlaceOrder", Outcome: tc.harness})
+			require.Nil(t, serr)
+			require.Equal(t, models.ScopeActionFail, e.Action)
+			w := windowOf(t, a, "orders::TestPlaceOrder")
+			require.Equal(t, models.ScopeOutcomeFailed, w.Outcome, "keploy fails a test it holds evidence against")
+			require.Equal(t, tc.reported, w.Reported, "the harness's own verdict, normalized, whatever keploy made of it")
+		})
+	}
 }
 
 func TestAnEndOfATestThatIsNotOpenIsRefused(t *testing.T) {

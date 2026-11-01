@@ -1055,10 +1055,14 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 		}
 		return models.ScopeEndResp{}, serr
 	}
-	outcome := models.NormalizeScopeOutcome(req.Outcome)
+	reported := models.NormalizeScopeOutcome(req.Outcome)
+	outcome := reported
 	if outcome == "" {
 		outcome = models.ScopeOutcomeFailed
 	}
+	// What the harness itself said, kept beside the verdict keploy gives
+	// the test below (ScopeWindow.Reported).
+	a.noteScopeReported(id, 0, reported)
 	ev, outcome, err := a.closeOpen(ctx, id, outcome, at, "")
 	if err != nil {
 		// A test keploy could not read is unread on its window (its

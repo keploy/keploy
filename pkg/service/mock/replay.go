@@ -2442,7 +2442,7 @@ func testReceipts(flows []FlowMocks, consumedKnown, missesKnown bool) []TestRece
 	}
 	out := make([]TestReceipt, 0, len(flows))
 	for _, f := range flows {
-		t := TestReceipt{Name: f.Flow, Outcome: f.Outcome, Consumed: len(f.Consumed), Missed: len(f.Missed)}
+		t := TestReceipt{Name: f.Flow, Outcome: f.Outcome, Reported: f.Reported, Consumed: len(f.Consumed), Missed: len(f.Missed)}
 		if !consumedKnown {
 			t.Consumed = -1
 		}

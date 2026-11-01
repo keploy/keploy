@@ -370,15 +370,21 @@ func TestAttributeMocksCarriesEachTestsLatestVerdict(t *testing.T) {
 		{Name: "pkg.TestA", Start: at(0), End: at(100), Outcome: models.ScopeOutcomeFailed},
 		{Name: "pkg.TestA", Start: at(400), End: at(500), Outcome: models.ScopeOutcomePassed},
 		{Name: "pkg.TestB", Start: at(200), End: at(300), Outcome: models.ScopeOutcomePassed},
-		{Name: "pkg.TestB", Start: at(600), End: at(650)}, // a re-run that reported nothing
+		{Name: "pkg.TestOwn", Start: at(520), End: at(560), Outcome: models.ScopeOutcomeFailed, Reported: models.ScopeOutcomeFailed},
+		{Name: "pkg.TestOwn", Start: at(570), End: at(590), Outcome: models.ScopeOutcomeFailed, Reported: models.ScopeOutcomePassed}, // keploy failed this run alone
+		{Name: "pkg.TestB", Start: at(600), End: at(650)},                                                                            // a re-run that reported nothing
 		{Name: "pkg.TestPure", Start: at(700), End: at(800), Outcome: models.ScopeOutcomePassed},
 		{Name: "pkg.TestGated", Start: at(900), End: at(900), Outcome: models.ScopeOutcomeGated},
 	}
 	expected := map[string][]models.MockEntry{"pkg.TestA": {{Name: "mock-0"}}, "pkg.TestB": {{Name: "mock-1"}}, "pkg.TestGated": {{Name: "mock-2"}}}
 	got := map[string]string{}
+	reported := map[string]string{}
 	for _, f := range attributeMocks(windows, expected, nil, nil) {
 		got[f.Flow] = f.Outcome
+		reported[f.Flow] = f.Reported
 	}
+	require.Equal(t, models.ScopeOutcomePassed, reported["pkg.TestOwn"], "the latest run's harness verdict, beside its keploy verdict")
+	delete(got, "pkg.TestOwn")
 	require.Equal(t, map[string]string{
 		"pkg.TestA":     models.ScopeOutcomePassed,
 		"pkg.TestB":     "",
@@ -397,6 +403,9 @@ func TestTestReceiptsMarkAnUnreportedCount(t *testing.T) {
 	require.Equal(t, []TestReceipt{{Name: "pkg.TestA", Outcome: models.ScopeOutcomePassed, Consumed: 2, Missed: 1}}, testReceipts(flows, true, true))
 	require.Equal(t, []TestReceipt{{Name: "pkg.TestA", Outcome: models.ScopeOutcomePassed, Consumed: -1, Missed: 1}}, testReceipts(flows, false, true))
 	require.Nil(t, testReceipts(nil, true, true))
+	// The verdict the harness itself reported rides beside keploy's.
+	require.Equal(t, []TestReceipt{{Name: "pkg.TestB", Outcome: models.ScopeOutcomeFailed, Reported: models.ScopeOutcomePassed}},
+		testReceipts([]FlowMocks{{Flow: "pkg.TestB", Outcome: models.ScopeOutcomeFailed, Reported: models.ScopeOutcomePassed}}, true, true))
 }
 
 // gatePusher records the gate a replay pushes.

@@ -324,10 +324,14 @@ func (r TestsReceipt) empty() bool {
 
 // TestReceipt is one test's line in a TestsReceipt. Outcome is its latest
 // run's verdict this replay (models.ScopeOutcome*); "" when it did not run or
-// reported none. A count the agent did not report in full is -1.
+// reported none. Reported is the verdict the test's harness itself reported
+// for that run, whatever keploy made of it (models.ScopeWindow.Reported): a
+// test keploy failed on its evidence whose own assertions passed says failed
+// and passed. A count the agent did not report in full is -1.
 type TestReceipt struct {
 	Name     string `yaml:"name" json:"name"`
 	Outcome  string `yaml:"outcome,omitempty" json:"outcome,omitempty"`
+	Reported string `yaml:"reported,omitempty" json:"reported,omitempty"`
 	Consumed int    `yaml:"consumed" json:"consumed"`
 	Missed   int    `yaml:"missed" json:"missed"`
 	// Began is when the test's latest run began (its window's start); zero
@@ -427,7 +431,7 @@ func writeRecordTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceip
 		if w.App || w.Suite || parentOf(windows, w.Name) != "" {
 			continue
 		}
-		tr := TestReceipt{Name: w.Name, Outcome: w.Outcome, Real: w.Real}
+		tr := TestReceipt{Name: w.Name, Outcome: w.Outcome, Reported: w.Reported, Real: w.Real}
 		// What keploy could not capture while the test ran (a record's
 		// window carries no misses): a verdict against real infra keploy
 		// did not see whole is no basis for judging the recording.

@@ -258,9 +258,19 @@ type ScopeWindow struct {
 	Ready   time.Time `json:"ready,omitzero"`
 	Ref     string    `json:"ref,omitempty"`
 	Worker  uint32    `json:"worker,omitempty"`
-	// Outcome is the verdict the test's harness reported when it ended the
-	// scope (ScopeReq.Outcome); "" when it reported none.
+	// Outcome is the test's verdict: the one its harness reported when it
+	// ended the scope (ScopeReq.Outcome), or failed when keploy failed it
+	// (a replayed test keploy holds evidence against, one keploy could not
+	// read or end, one its harness left open); "" when its harness reported
+	// none and keploy failed nothing.
 	Outcome string `json:"outcome,omitempty"`
+	// Reported is the verdict the test's harness itself reported when it
+	// ended the scope (ScopeReq.Outcome, normalized), whatever keploy made
+	// of it; "" when it reported none or did not end the test. A replayed
+	// test keploy failed on its evidence whose own assertions passed has
+	// Outcome failed and Reported passed: a judge reads the two apart, as a
+	// test that failed on its own makes calls a passing one does not.
+	Reported string `json:"reported,omitempty"`
 	// Evidence is, under the proven wire, what keploy saw that failed the
 	// test at its end in a replay; nil when nothing did.
 	Evidence *ScopeEvidence `json:"evidence,omitempty"`
