@@ -285,6 +285,43 @@ func TestARecordingItsOwnTestConsumedFirstIsTaughtNothingAcrossWindows(t *testin
 	}
 }
 
+// An idle answer of the background (a worker's "nothing yet") is taught the
+// clock reads of a poll's call wherever the call lands, as the parser
+// carries them to it: without that it answers no later poll whose clock
+// read moved. Any other background recording, and an idle answer of the
+// open test's own, is still taught nothing; the teaching is no consumption,
+// names its window, and comes once per round, as any recording's.
+func TestLearnElsewhereKeepsWhatAPollTaughtAnIdleBackgroundRecording(t *testing.T) {
+	mm, ms := s12Set(t)
+	t.Cleanup(models.RegisterIdleAnswer(models.HTTP, func(m *models.Mock) bool { return m.Name == "w-later" || m.Name == "own" }))
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+	mm.SetPairing(true)
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	minute := models.ClockOffset{Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}
+	clocks := map[string]models.ClockOffset{"dirty_at": minute}
+	if !mm.LearnElsewhere(ms["w-later"], clocks) {
+		t.Fatal("an idle answer of the worker scope was taught nothing")
+	}
+	for _, name := range []string{"w-boot", "pool", "own"} {
+		if mm.LearnElsewhere(ms[name], clocks) {
+			t.Fatalf("%s, no idle answer of the background, was taught", name)
+		}
+	}
+	got := mm.LearnedElsewhere()
+	if len(got) != 1 || got[0].Name != "w-later" || got[0].Clocks["dirty_at"] != minute {
+		t.Fatalf("learned elsewhere %v (%v); want w-later alone, with the poll's dirty_at", learnedNames(got), got)
+	}
+	if w := got[0].TaughtIn; len(w) != 1 || w[0].Test != "T1" {
+		t.Fatalf("taught in %+v; want the poll's window, T1", w)
+	}
+	if c := mm.GetConsumedMocks(); len(c) != 0 || mm.consumedInSet("w-later") {
+		t.Fatalf("teaching an idle answer consumed %v", c)
+	}
+	if mm.LearnElsewhere(ms["w-later"], map[string]models.ClockOffset{"dirty_at": {Res: time.Millisecond}}) {
+		t.Fatal("a second poll of the round taught the idle answer again")
+	}
+}
+
 // What a call made in another window teaches a recording is that window's:
 // each state names the test open when the call came, with the instant it
 // taught, and "" for a call between tests. A call whose round moved since
