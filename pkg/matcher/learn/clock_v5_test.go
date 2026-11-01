@@ -177,6 +177,51 @@ func TestAMinuteCutLookBackLearnedAtItsStepIsLockedToItsPhase(t *testing.T) {
 	}
 }
 
+// The same minute cutter (cut_m(now) - 103s), whose two runs read within
+// a few hundred milliseconds of the same second of their minutes (7.1 s and
+// 7.4 s in), looks exactly like an application that does not cut: one
+// offset at the values' own second holds both runs (clock - 1m50s), and
+// that is what is learned (the stated cost). A replay that reads in that
+// same second, or within about a cut of it, passes the application's
+// value; a replay that reads at another phase of the minute fails it (a
+// false red: 114 of 120 phases here, the 95 % stated), and every replay
+// fails a dropped look-back. So auto-replay's own replays, which read a
+// third value at a phase of their own, fail such a test about 19 times in
+// 20, and it is set aside there, never kept on a contract a later replay
+// breaks.
+func TestAMinuteCutterReadAtTheSameSecondInBothRunsFailsAThirdReadAtAnotherPhase(t *testing.T) {
+	sec, ms, min := time.Second, time.Millisecond, time.Minute
+	cutter := func(t time.Time) time.Time { return t.Truncate(min).Add(-103 * sec) }
+	p := "body.lastSeen.$lte"
+	base := time.Date(2026, 10, 26, 11, 14, 0, 0, time.UTC)
+	rec := v5Call(base.Add(7*sec+100*ms), 61*ms, 20*ms)
+	f := v5Call(base.Add(3*min+7*sec+400*ms), 61*ms, 20*ms)
+	rv, lv := cutter(rec.read), cutter(f.read)
+	o, why, ok := clockInWindow(p, v5Instant(rv, sec), v5Instant(lv, sec), v5Window(rec, f), nil)
+	if !ok || o.Step != sec || o.Res != sec || !strings.Contains(o.Why, " = clock - 1m50s (") {
+		t.Fatalf("%+v %q %v; want clock - 1m50s at the values' own second", o, why, ok)
+	}
+	recText := strconv.FormatInt(rv.Unix(), 10)
+	passed := 0
+	for phase := time.Duration(0); phase < min; phase += 500 * ms {
+		s := Span{From: base.Add(48*time.Hour + phase), To: base.Add(48*time.Hour + phase + 61*ms)}
+		read := s.To.Add(-20 * ms)
+		app, _ := v5Check(p, o, recText, cutter(read), s)
+		if app {
+			passed++
+			if d := phase - 7*sec; d < -2*sec || d > 2*sec {
+				t.Errorf("a replay %s into its minute passes the application's value; want it to fail there (a false red auto-replay sets aside)", phase)
+			}
+		}
+		if got, why := v5Check(p, o, recText, read.Truncate(sec), s); got {
+			t.Errorf("FALSE GREEN: a replay %s into its minute passes a dropped look-back (%s)", phase, why)
+		}
+	}
+	if passed == 0 || passed > 6 {
+		t.Errorf("the application's value passed %d of 120 replays; want only those reading within about a cut of 7 s into the minute", passed)
+	}
+}
+
 // A client test whose runs know no test begin sends an expiry an hour
 // ahead (expires_at = now + 1h), read 300 ms before its call when recorded
 // and 200 ms before it in round F, outside the call's 61 ms window. Written
@@ -238,7 +283,9 @@ func TestAFutureInstantOfAClientTestWithNoBeginIsAClockWhereItsOffsetHolds(t *te
 // ten minutes, writes its value at the second (an epoch's seconds): a Java
 // application cuts to its own zone's hour (truncatedTo), which starts at
 // half past an hour in UTC; a Go one cuts to UTC's (Truncate counts from
-// UTC). Recorded at 09:40 UTC and replayed an hour and five minutes later,
+// UTC). Recorded at 09:40 UTC or at 09:10 UTC (where both grids hold a
+// look-back of the Java cutter's value: its own, the shorter, is kept) and
+// replayed an hour and five minutes later,
 // each is locked to its phase on its own grid: a replay passes the
 // application's value at every phase of the hour, with keploy reading the
 // application's zone from its process or from the learn step's name of it,
@@ -248,48 +295,53 @@ func TestAnHourCutLookBackInAZoneOffTheHourIsLockedToItsZonesPhase(t *testing.T)
 	sec, ms, min := time.Second, time.Millisecond, time.Minute
 	ist := time.FixedZone("+05:30", 5*3600+1800)
 	p := "body.cutoff.$lte"
-	base := time.Date(2026, 10, 26, 9, 40, 0, 0, time.UTC)
-	rec := v5Call(base, 61*ms, 20*ms)
-	f := v5Call(base.Add(time.Hour+5*min), 61*ms, 20*ms)
-	for _, c := range []struct {
-		name string
-		cut  func(time.Time) time.Time
-		want time.Duration
-	}{
-		{"its zone's hour (Java)", func(t time.Time) time.Time { return models.ReadCut(t, time.Hour, ist).Add(-10 * min).Truncate(sec) }, -10 * min},
-		{"UTC's hour (Go)", func(t time.Time) time.Time { return t.Truncate(time.Hour).Add(-10 * min) }, -10 * min},
-	} {
-		rv, lv := c.cut(rec.read), c.cut(f.read)
-		o, why, ok := clockInWindow(p, v5Instant(rv, sec), v5Instant(lv, sec), v5Window(rec, f), ist)
-		if !ok || o.Step != time.Hour || o.Min != c.want || o.Max != c.want+min || o.AppZone != "+05:30" {
-			t.Errorf("FALSE RED: a cut to %s less 10m: %+v %q %v; want clock - 10m locked to the hour, in +05:30", c.name, o, why, ok)
-			continue
-		}
-		recText := strconv.FormatInt(rv.Unix(), 10)
-		for _, zone := range []struct {
-			what string
-			s    Span
+	// Recorded at 09:40 UTC (15:10 in +05:30), one grid holds a look-back of
+	// each cutter; at 09:10 UTC (14:40), both grids hold one of the Java
+	// cutter's value (08:20 UTC: 40 minutes before UTC's hour, ten before
+	// its zone's), and the shorter is its own.
+	for _, base := range []time.Time{time.Date(2026, 10, 26, 9, 40, 0, 0, time.UTC), time.Date(2026, 10, 26, 9, 10, 0, 0, time.UTC)} {
+		rec := v5Call(base, 61*ms, 20*ms)
+		f := v5Call(base.Add(time.Hour+5*min), 61*ms, 20*ms)
+		for _, c := range []struct {
+			name string
+			cut  func(time.Time) time.Time
+			want time.Duration
 		}{
-			{"read from its process", Span{Zone: ist, Own: true}},
-			{"named by the learn step", Span{}},
+			{"its zone's hour (Java)", func(t time.Time) time.Time { return models.ReadCut(t, time.Hour, ist).Add(-10 * min).Truncate(sec) }, -10 * min},
+			{"UTC's hour (Go)", func(t time.Time) time.Time { return t.Truncate(time.Hour).Add(-10 * min) }, -10 * min},
 		} {
-			for phase := time.Duration(0); phase < time.Hour; phase += 5*min + 7*sec {
-				s := zone.s
-				s.From = base.Add(48*time.Hour + phase)
-				s.To = s.From.Add(61 * ms)
-				read := s.To.Add(-20 * ms)
-				for _, row := range []struct {
-					name string
-					at   time.Time
-					want bool
-				}{
-					{"the application's value", c.cut(read), true},
-					{"a dropped look-back", read.Truncate(sec), false},
-					{"seven minutes shorter", c.cut(read).Add(7 * min), false},
-					{"seven minutes longer", c.cut(read).Add(-7 * min), false},
-				} {
-					if got, why := v5Check(p, o, recText, row.at, s); got != row.want {
-						t.Errorf("%s: a cut to %s, the zone %s, a replay %s into its hour, %s: %v (%s)", map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}[row.want], c.name, zone.what, phase, row.name, got, why)
+			rv, lv := c.cut(rec.read), c.cut(f.read)
+			o, why, ok := clockInWindow(p, v5Instant(rv, sec), v5Instant(lv, sec), v5Window(rec, f), ist)
+			if !ok || o.Step != time.Hour || o.Min != c.want || o.Max != c.want+min || o.AppZone != "+05:30" {
+				t.Errorf("FALSE RED: recorded at %s, a cut to %s less 10m: %+v %q %v; want clock - 10m locked to the hour, in +05:30", base.Format("15:04"), c.name, o, why, ok)
+				continue
+			}
+			recText := strconv.FormatInt(rv.Unix(), 10)
+			for _, zone := range []struct {
+				what string
+				s    Span
+			}{
+				{"read from its process", Span{Zone: ist, Own: true}},
+				{"named by the learn step", Span{}},
+			} {
+				for phase := time.Duration(0); phase < time.Hour; phase += 5*min + 7*sec {
+					s := zone.s
+					s.From = base.Add(48*time.Hour + phase)
+					s.To = s.From.Add(61 * ms)
+					read := s.To.Add(-20 * ms)
+					for _, row := range []struct {
+						name string
+						at   time.Time
+						want bool
+					}{
+						{"the application's value", c.cut(read), true},
+						{"a dropped look-back", read.Truncate(sec), false},
+						{"seven minutes shorter", c.cut(read).Add(7 * min), false},
+						{"seven minutes longer", c.cut(read).Add(-7 * min), false},
+					} {
+						if got, why := v5Check(p, o, recText, row.at, s); got != row.want {
+							t.Errorf("%s: recorded at %s, a cut to %s, the zone %s, a replay %s into its hour, %s: %v (%s)", map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}[row.want], base.Format("15:04"), c.name, zone.what, phase, row.name, got, why)
+						}
 					}
 				}
 			}

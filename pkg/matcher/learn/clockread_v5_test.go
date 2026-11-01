@@ -1,7 +1,9 @@
 package learn
 
 import (
+	"encoding/base64"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -65,5 +67,52 @@ func TestAWordLearnedInItsTextDecodedOnceIsReadThereAtReplay(t *testing.T) {
 	s := Span{From: base, To: base.Add(61 * ms)}
 	if got, why := check(word(""), encoded(base), s); got {
 		t.Errorf("FALSE GREEN: a word learned in the raw text passed the same value percent-encoded: %s", why)
+	}
+}
+
+// A read of the clock learned inside a base64 cursor (a page token whose
+// JSON carries the instant it pages after, as the query's
+// cursor=eyJhZnRlciI6...), at its place in the text decoded once (the run
+// decoded where it stands: {"after":"2026-10-26T11:14:17Z","id":7}), is
+// checked at replay in the call's cursor decoded the same way: the
+// application's value passes at every phase of the second, and a stale
+// value, one a minute ahead, and a cursor whose JSON beside the word
+// changed fail. Read raw, the cursor holds no word at that place.
+func TestAWordLearnedInABase64CursorIsReadInItsDecodedText(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	p := "url.query.cursor"
+	stamp := func(at time.Time) string { return at.UTC().Format(time.RFC3339) }
+	plain := func(at time.Time, id int) string {
+		return `{"after":"` + stamp(at) + `","id":` + strconv.Itoa(id) + `}`
+	}
+	cursor := func(at time.Time, id int) string { return base64.RawURLEncoding.EncodeToString([]byte(plain(at, id))) }
+	recAt := time.Date(2026, 10, 26, 11, 14, 17, 0, time.UTC)
+	d := plain(recAt, 7)
+	st := strings.Index(d, "2026")
+	w := models.ClockWordOf(d, st, st+len(stamp(recAt)))
+	w.Form = models.ClockWordDecoded
+	o := models.ClockOffset{Res: sec, Word: w, Layout: clockTextLayout(stamp(recAt))}
+	if got := decodedWordForm(cursor(recAt, 7)); got != d {
+		t.Fatalf("the recorded cursor decodes to %q, want %q", got, d)
+	}
+	base := recAt.Add(48 * time.Hour)
+	for phase := time.Duration(0); phase < sec; phase += 50 * ms {
+		s := Span{From: base.Add(phase), To: base.Add(phase + 61*ms)}
+		read := s.To.Add(-20 * ms)
+		for _, row := range []struct {
+			name string
+			v    string
+			want bool
+		}{
+			{"the application's cursor", cursor(read, 7), true},
+			{"the recorded cursor, two days stale", cursor(recAt, 7), false},
+			{"a minute ahead", cursor(read.Add(time.Minute), 7), false},
+			{"the JSON beside the word changed", cursor(read, 8), false},
+		} {
+			got, why := CheckClockRead(p, o, Leaf{Path: p, Noise: p, Type: String, Value: row.v}, s, true)
+			if got != row.want {
+				t.Errorf("%s: %s into its second, %s %q: %v (%s)", map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}[row.want], phase, row.name, row.v, got, why)
+			}
+		}
 	}
 }
