@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
@@ -201,4 +202,30 @@ func FullAuthHandshakeForTest(n int) *models.Mock {
 // numbered seq, as a recording holds it (mysqlUtils.ClientAuthData).
 func authData(seq uint8, n int, typ string) mysql.Request {
 	return mysqlUtils.ClientAuthData(mysql.Packet{Header: mysql.Header{PayloadLength: uint32(n), SequenceID: seq}, Payload: make([]byte, n)}, typ)
+}
+
+// NativeHandshakeForTest is the recorded handshake of a native-password
+// login (nativeHandshake), for this package's external tests.
+func NativeHandshakeForTest() *models.Mock { return nativeHandshake() }
+
+// ReplayCommandsForTest serves one client connection from db as the proxy
+// does (replay): the client logs in as NativeHandshakeForTest recorded, then
+// sends each command payload and reads the first packet of its reply, but
+// for the last command's, which it leaves unread. It returns those packets,
+// and what Replay returns once it ends the connection.
+func ReplayCommandsForTest(t *testing.T, db integrations.MockMemDb, commands ...[]byte) ([][]byte, <-chan error) {
+	t.Helper()
+	client, done := replay(t, db)
+	client.greetAndAnswer("app", mysql.Native)
+	if ok := client.read(); len(ok) == 0 || ok[0] != mysql.OK {
+		t.Fatalf("the client read % x after its handshake; want the recorded OK", ok)
+	}
+	var replies [][]byte
+	for i, cmd := range commands {
+		client.send(0, cmd)
+		if i < len(commands)-1 {
+			replies = append(replies, client.read())
+		}
+	}
+	return replies, done
 }

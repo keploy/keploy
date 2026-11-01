@@ -2,6 +2,7 @@ package replayer_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -648,5 +649,61 @@ func TestTwoIdenticalCommandsAtOnceOfACommandTheTestRecordedOnceAnswerOnlyOne(t 
 				t.Fatalf("the EXECUTE id=1 between tests was answered with %s; want the pool's %s, unspent", got, bg.Name)
 			}
 		})
+	}
+}
+
+// A command one more than the open test recorded ends its connection with a
+// miss that says so to the user: the mismatch report Replay returns names it
+// an extra call (models.MissExtraCall) and the times the test recorded the
+// command, as the HTTP and generic misses do. The rows above read only the
+// matcher's verdict (MatchForTest's miss); dropped from the report, the
+// user read a plain no-match for a test that made one call too many.
+func TestACommandOneMoreThanTheTestRecordedIsReportedAsAnExtraCall(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	s1, _ := diffWindow(1)
+	const sql = "DELETE FROM jobs WHERE id = 1"
+	recording := func(name string, at time.Time) *models.Mock {
+		m := diffMock(name, "c1", []mysql.Request{{PacketBundle: mysql.PacketBundle{
+			Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: uint32(1 + len(sql))}, Type: "COM_QUERY"},
+			Message: &mysql.QueryPacket{Command: mysql.COM_QUERY, Query: sql},
+		}}}, at, models.LifetimePerTest, "mocks")
+		m.Spec.MySQLResponses = []mysql.Response{{PacketBundle: mysql.PacketBundle{
+			Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 7, SequenceID: 1}, Type: mysql.StatusToString(mysql.OK)},
+			Message: &mysql.OKPacket{Header: mysql.OK, StatusFlags: 2},
+		}}}
+		return m
+	}
+	bg := recording("pool-delete-1", diffBase.Add(-500*time.Microsecond))
+	own := recording("t1-delete-1", s1.Add(time.Millisecond))
+	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SetMocksWithWindow(nil, []*models.Mock{replayer.NativeHandshakeForTest(), bg, own}, models.BaseTime, time.Now().Add(time.Hour))
+	seedWindows(mm, 2)
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{bg.Name}, nil)
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	if !mm.ExactServing() {
+		t.Fatal("precondition: test T1 is not served exactly")
+	}
+
+	cmd := append([]byte{mysql.COM_QUERY}, sql...)
+	replies, done := replayer.ReplayCommandsForTest(t, mm, cmd, cmd)
+	if len(replies[0]) == 0 || replies[0][0] != mysql.OK {
+		t.Fatalf("the client read % x for T1's command; want its own recording's OK", replies[0])
+	}
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("T1's command made once more was answered; want a miss that ends the connection")
+	}
+	var r interface {
+		MismatchReport() *models.MockMismatchReport
+	}
+	if !errors.Is(err, models.ErrNoMockMatched) || !errors.As(err, &r) || r.MismatchReport() == nil {
+		t.Fatalf("Replay returned %v for T1's command made once more; want a miss carrying a mismatch report", err)
+	}
+	if rep := r.MismatchReport(); rep.MissKind != models.MissExtraCall || rep.Recorded != 1 || mm.MockSpent(bg.Name) {
+		t.Fatalf("the report says kind %q, recorded %d (background spent %v); want %q, 1, the background unspent: one call more than the test recorded",
+			rep.MissKind, rep.Recorded, mm.MockSpent(bg.Name), models.MissExtraCall)
 	}
 }
