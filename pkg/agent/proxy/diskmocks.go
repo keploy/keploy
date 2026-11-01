@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -98,9 +99,13 @@ type DiskMocks struct {
 	// records decodes what the store reads, with decoders that live as long
 	// as it does (gobRecords).
 	records gobRecords
+
+	// decoded counts the bytes of records and answers the store has decoded
+	// (DecodedBytes).
+	decoded atomic.Int64
 }
 
-// diskEntry locates one stored mock: 48 B, held in entries and byName and in
+// diskEntry locates one stored mock: 56 B, held in entries and byName and in
 // each index that lists the mock (carry, staged, placed, destinations,
 // statements).
 // For spilled HTTP/Mongo mocks the response is a separate blob at
@@ -119,10 +124,13 @@ type diskEntry struct {
 	respLen     int
 }
 
-// responseSpillMinBytes: only answers at least this big are kept apart from
-// their mock (an HTTP body, or the Mongo responses as encoded); smaller ones
-// stay inline, decoded with the mock, as reading one apart on each serve costs
-// more than it saves.
+// responseSpillMinBytes: an HTTP answer is kept apart from its mock only
+// with a body at least this big; smaller ones stay inline, decoded with the
+// mock. A Mongo answer is kept apart at any size (EligibleForResponseSpill),
+// and one that encodes to fewer bytes, which the record used to carry, is
+// read once and then held for the mock read and its copies (heldAnswer). An
+// answer this big or bigger is read back on every load and held by no one,
+// so a window's big answers are never in memory at once.
 const responseSpillMinBytes = 8 * 1024
 
 // residentBudgetBytes is how many bytes of encoded records a store keeps in
@@ -180,8 +188,8 @@ func EligibleForDisk(m *models.Mock) bool {
 
 // EligibleForResponseSpill reports whether a disk-eligible mock's HTTP/Mongo
 // response may be worth eliding from the window (matching never reads it): an
-// HTTP body of responseSpillMinBytes or more, or any Mongo responses, which
-// Add keeps apart only when they encode to responseSpillMinBytes or more.
+// HTTP body of responseSpillMinBytes or more, or any Mongo responses, so a
+// window open decodes no Mongo answer.
 func EligibleForResponseSpill(m *models.Mock) bool {
 	if !EligibleForDisk(m) {
 		return false
@@ -196,10 +204,10 @@ func EligibleForResponseSpill(m *models.Mock) bool {
 }
 
 // Add stores a mock and indexes it; caller drops its resident ref after.
-// A mock with a big answer (EligibleForResponseSpill, and for Mongo
-// responses that encode to responseSpillMinBytes or more) has its answer
-// written as a separate blob and the record encoded with it elided. Called
-// from the single-threaded ingest loop.
+// A mock with a big HTTP answer, or with Mongo responses
+// (EligibleForResponseSpill), has its answer written as a separate blob and
+// the record encoded with it elided. Called from the single-threaded ingest
+// loop.
 func (d *DiskMocks) Add(m *models.Mock) error {
 	spill := EligibleForResponseSpill(m)
 
@@ -216,9 +224,6 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 			return fmt.Errorf("disk mocks: encode response %q: %w", m.Name, err)
 		}
 		respBlob = b
-		if m.Kind == models.Mongo && len(respBlob) < responseSpillMinBytes {
-			spill, respBlob = false, nil
-		}
 	}
 
 	// Elide a spilled response for encoding, then restore (caller drops m anyway).
@@ -391,7 +396,8 @@ func (d *DiskMocks) Finalize() {
 
 // readAt decodes the mock at an entry, into a mock of its own (gobRecords).
 // Stored records never change, so reads are concurrency-safe. Elided
-// responses get a lazy serve-time loader.
+// responses get a lazy serve-time loader; one under responseSpillMinBytes is
+// read once for the mock and its copies (heldAnswer).
 func (d *DiskMocks) readAt(e diskEntry) (*models.Mock, error) {
 	buf, err := d.bytesAt(e.off, e.length)
 	if err != nil {
@@ -401,21 +407,64 @@ func (d *DiskMocks) readAt(e diskEntry) (*models.Mock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("disk mocks: decode at %d: %w", e.off, err)
 	}
+	d.decoded.Add(int64(e.length))
 	if f := d.onLoad.Load(); f != nil {
 		(*f)(m)
 	}
 	if e.respOff >= 0 {
-		respOff, respLen := e.respOff, e.respLen
-		m.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
-			return d.loadResponse(respOff, respLen)
-		})
+		if e.respLen < responseSpillMinBytes {
+			m.SetResponseHydrator((&heldAnswer{d: d, off: e.respOff, n: e.respLen}).load)
+		} else {
+			respOff, respLen := e.respOff, e.respLen
+			m.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
+				return d.loadResponse(respOff, respLen)
+			})
+		}
 	}
 	return m, nil
+}
+
+// heldAnswer is the answer of one mock read from the store, kept apart though
+// it encodes to under responseSpillMinBytes: a Mongo answer, which the record
+// used to carry (an HTTP answer that small stays in the record). load reads
+// it at its first successful call and holds it. Each call gets its own slice
+// of the responses, as a DeepCopy of the record's answer did; the responses'
+// headers and messages are shared by the mock read and every copy of it
+// (ShallowCopy and DeepCopy carry its loader), as the record's were, which no
+// reader writes: a reader that answers otherwise answers with a copy of its
+// own (Mock.MarkPooled). A failed read is not held: the next call reads again.
+type heldAnswer struct {
+	d   *DiskMocks
+	off int64
+	n   int
+
+	mu    sync.Mutex
+	held  bool
+	http  *models.HTTPResp
+	mongo []models.MongoResponse
+}
+
+func (h *heldAnswer) load() (*models.HTTPResp, []models.MongoResponse, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.held {
+		httpResp, mongoResp, err := h.d.loadResponse(h.off, h.n)
+		if err != nil {
+			return nil, nil, err
+		}
+		h.http, h.mongo, h.held = httpResp, mongoResp, true
+	}
+	return h.http, slices.Clone(h.mongo), nil
 }
 
 // DecodersBuilt returns how many gob decoders the store has made to read
 // what it holds (gobRecords; diagnostics/tests).
 func (d *DiskMocks) DecodersBuilt() int64 { return d.records.built.Load() }
+
+// DecodedBytes returns how many bytes of records and answers the store has
+// decoded: what its loads (readAt) and answer reads (loadResponse) cost
+// (diagnostics/tests).
+func (d *DiskMocks) DecodedBytes() int64 { return d.decoded.Load() }
 
 // SetOnLoad has f applied to every mock the store reads from now on, as it is
 // decoded, before any caller holds it: the agent puts on them what a test
@@ -439,6 +488,7 @@ func (d *DiskMocks) loadResponse(off int64, length int) (*models.HTTPResp, []mod
 	if err != nil {
 		return nil, nil, fmt.Errorf("disk mocks: decode response at %d: %w", off, err)
 	}
+	d.decoded.Add(int64(length))
 	return sr.HTTP, sr.Mongo, nil
 }
 
