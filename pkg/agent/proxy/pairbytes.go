@@ -38,11 +38,22 @@ type pairedConn struct {
 	// from its socket while it still could be: after the close nothing
 	// reads it (a reset socket is unhashed, sock_diag no longer finds it).
 	atClose atomic.Pointer[proxySide]
+	// wroteAtClose is what the application had written to the connection
+	// as the proxy began closing it, read from its socket before atClose
+	// (pairClosing): bytes past it it wrote after keploy's close, which are
+	// no capture loss. nil when it could not be read.
+	wroteAtClose atomic.Pointer[appWrote]
 	// noSession: the proxy serves it with no session (serveWithoutSession):
 	// it closes it unanswered, or passes it through, and records and mocks
 	// nothing on it by design, so nothing the application wrote to it is a
 	// capture loss, and no bytes wait holds it.
 	noSession atomic.Bool
+}
+
+// appWrote is what the application had written to a connection (appWritten).
+type appWrote struct {
+	want uint64 // bytes, and a FIN
+	fin  bool   // want counts its FIN
 }
 
 // proxySide is what the wait reads of the proxy's side of a connection.
@@ -66,13 +77,17 @@ func (s *pairedConns) holds(conn net.Conn) bool {
 // connection (nil for one it does not keep, or whose close was noted) and how
 // many bytes its socket holds unread, read after its side: the close tosses
 // them with a reset (tcp_close), bytes the application wrote that its side
-// counts received and the proxy never read.
-func (s *pairedConns) closing(conn net.Conn) (*pairedConn, int, error) {
+// counts received and the proxy never read. first, when set, runs before its
+// side is read.
+func (s *pairedConns) closing(conn net.Conn, first func(*pairedConn)) (*pairedConn, int, error) {
 	s.mu.Lock()
 	pc := s.byConn[conn]
 	s.mu.Unlock()
 	if pc == nil || pc.atClose.Load() != nil {
 		return nil, 0, nil
+	}
+	if first != nil {
+		first(pc)
 	}
 	ps := readProxySide(pc.conn)
 	pc.atClose.Store(&ps)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"syscall"
 	"testing"
 
@@ -328,5 +329,58 @@ func TestTheCanaryProvesTheByteCountsReadable(t *testing.T) {
 	p.checkPairedBytes(c, s)
 	if err := p.paired.failure(); err != nil {
 		t.Fatalf("checkPairedBytes on a plain connection: %v", err)
+	}
+}
+
+// appWritten tells whether its count holds the application's FIN by the order
+// of the socket's lock, not by a state read without it. Each sequence is what
+// consecutive lookups can read of one socket (idiag_state, idiag_wqueue,
+// tcpi_state, tcpi_bytes_acked) as its owner closes it, or does not; a close
+// that runs within a lookup must not make the FIN a byte of data, nor a byte
+// of data the FIN. A read past a sequence fails: each holds the reads the lock
+// order needs, and no more.
+func TestAppWrittenTellsTheFINByLockOrder(t *testing.T) {
+	look := func(hdr uint8, wq uint32, st uint8, acked uint64) diagTCP {
+		return diagTCP{state: hdr, wqueue: wq, info: &unix.TCPInfo{State: st, Bytes_acked: acked}}
+	}
+	const e, f1, f2 = tcpEstablished, tcpFinWait1, tcpFinWait2
+	for _, tc := range []struct {
+		name    string
+		reads   []diagTCP
+		want    uint64
+		fin     bool
+		errGone bool
+	}{
+		{"open throughout", []diagTCP{look(e, 10, e, 101), look(e, 10, e, 101), look(e, 10, e, 101)}, 110, false, false},
+		{"closed before the reads", []diagTCP{look(f1, 11, f1, 101), look(f1, 11, f1, 101)}, 111, true, false},
+		{"half-closed, the FIN acknowledged (FIN_WAIT2, a full socket)", []diagTCP{look(f2, 0, f2, 112), look(f2, 0, f2, 112)}, 111, true, false},
+		{"the close between idiag_state and idiag_wqueue", []diagTCP{look(e, 10, e, 101), look(e, 11, f1, 101), look(f1, 11, f1, 101)}, 111, true, false},
+		{"the close between idiag_wqueue and tcpi_state", []diagTCP{look(e, 10, e, 101), look(e, 10, f1, 101), look(f1, 11, f1, 101)}, 111, true, false},
+		{"the close's FIN seen before its state", []diagTCP{look(e, 10, e, 101), look(e, 11, e, 101), look(f1, 11, f1, 101), look(f1, 11, f1, 101)}, 111, true, false},
+		{"an ACK between the lookups", []diagTCP{look(e, 10, e, 101), look(e, 5, e, 106), look(e, 5, e, 106), look(e, 5, e, 106)}, 110, false, false},
+		{"read in CLOSE", []diagTCP{look(e, 10, e, 101), look(tcpClose, 0, tcpClose, 101), look(tcpClose, 0, tcpClose, 101), look(tcpClose, 0, tcpClose, 101)}, 0, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			was := lookupWritten
+			n := 0
+			lookupWritten = func(*diagSock, netip.AddrPort, netip.AddrPort) (diagTCP, error) {
+				if n == len(tc.reads) {
+					return diagTCP{}, errors.New("read past the sequence")
+				}
+				n++
+				return tc.reads[n-1], nil
+			}
+			t.Cleanup(func() { lookupWritten = was })
+			want, fin, _, err := appWritten(nil, netip.AddrPort{}, netip.AddrPort{})
+			if tc.errGone {
+				if !errors.Is(err, errNoSocket) {
+					t.Fatalf("appWritten = %d, %v, %v; want the socket gone", want, fin, err)
+				}
+				return
+			}
+			if err != nil || want != tc.want || fin != tc.fin {
+				t.Fatalf("appWritten = %d, FIN %v, %v; want %d, FIN %v", want, fin, err, tc.want, tc.fin)
+			}
+		})
 	}
 }
