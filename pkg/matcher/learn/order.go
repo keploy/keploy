@@ -1028,23 +1028,32 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// as a word's is; never a read of the clock. So is one main's echo of the
 	// recordings outside the scope refuses (echoedElsewhere), and one round
 	// F's view of a recording of the set holds (echoedOutside).
+	// At a millisecond or coarser such an answer may hold the moment only
+	// as two stamps the runs' timing put in one cut: where the call's own
+	// window holds the read (5) it is that read, and else it is refused so.
+	// One that holds it finer is a pick from it, refused here.
 	var gaveOutside []string
+	var gaveRefusal *Decision
+	fine := false
 	for _, h := range hs {
 		if p := h.p; p.side == Response && !p.given && !inScope(p) && p.state == stateBefore && h.hr && (p.fUnstated || h.hl) {
-			gaveOutside = append(gaveOutside, p.mock)
+			gaveOutside, fine = append(gaveOutside, p.mock), fine || h.fr || h.fl
 		}
 	}
 	if mock, ok := dc.echoedOutside(c); ok {
-		gaveOutside = append(gaveOutside, mock)
+		gaveOutside, fine = append(gaveOutside, mock), fine || fineCut(c.rm.res) || fineCut(c.lm.res)
 	}
 	if len(gaveOutside) > 0 {
-		if gaveOutside[0] == "" {
-			return dc.refuse(path, at, n, r, l, RefusalPick, "round F's moment, or the recorded one, stands in an answer round F gave before the call outside its scope", nil, Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
+		d := dc.refuse(path, at, n, r, l, RefusalPick, "round F's moment, or the recorded one, stands in an answer round F gave before the call outside its scope", nil, Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
+		if m := gaveOutside[0]; m != "" {
+			d = dc.refuse(path, at, n, r, l, RefusalAnotherScope,
+				"the moment stands in "+m+"'s answer, which round F gave before the call outside its scope: a copy or a pick from it, never a read of the clock; keploy binds only within a test and the start-up", []string{m},
+				Edit{Kind: EditMoveToMocks, Mock: m}, Edit{Kind: EditMoveToStartup, Mock: m}, dc.wordNoise(path, n))
 		}
-		m := gaveOutside[0]
-		return dc.refuse(path, at, n, r, l, RefusalAnotherScope,
-			"the moment stands in "+m+"'s answer, which round F gave before the call outside its scope: a copy or a pick from it, never a read of the clock; keploy binds only within a test and the start-up", []string{m},
-			Edit{Kind: EditMoveToMocks, Mock: m}, Edit{Kind: EditMoveToStartup, Mock: m}, dc.wordNoise(path, n))
+		if fine || len(untold) > 0 {
+			return d
+		}
+		gaveRefusal = &d
 	}
 
 	// F may have given its moment at an answer whose view keploy cannot tell,
@@ -1086,6 +1095,9 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		} else {
 			if inWindow {
 				if g, uncompared := dc.offsetGuard(path, off, max(c.rm.res, c.lm.res), dc.in.Window); uncompared && copies(false) == nil {
+					if gaveRefusal != nil {
+						return *gaveRefusal
+					}
 					return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
 				} else if g != "" {
 					off, cutWhy, guardWhy, inWindow = models.ClockOffset{}, "", g, false
@@ -1095,6 +1107,9 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	}
 	if inWindow {
 		return dc.clock(path, at, n, c, off, "a read of the application's clock its call's window holds in both runs")
+	}
+	if gaveRefusal != nil {
+		return *gaveRefusal
 	}
 
 	// 6. Coarse copy: as 4, a millisecond or coarser; no window condition.
