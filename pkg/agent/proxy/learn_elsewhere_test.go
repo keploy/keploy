@@ -191,9 +191,6 @@ func TestLearnElsewhereIsNoConsumption(t *testing.T) {
 	if !mm.LearnElsewhere(ms["other"], map[string]models.ClockOffset{"claimed_at": minute}) {
 		t.Fatal("another test's unconsumed recording was taught nothing")
 	}
-	if !mm.LearnElsewhere(ms["other"], map[string]models.ClockOffset{"dirty_at": {Res: time.Millisecond}}) {
-		t.Fatal("a second call taught the recording nothing")
-	}
 	if mm.LearnElsewhere(ms["other"], nil) {
 		t.Fatal("a call that taught no clock read was kept")
 	}
@@ -213,10 +210,7 @@ func TestLearnElsewhereIsNoConsumption(t *testing.T) {
 		t.Fatalf("learned elsewhere %v; want other alone", learnedNames(got))
 	}
 	if _, ok := got[0].Clocks["claimed_at"]; !ok {
-		t.Fatalf("the first call's clock read was lost: %v", got[0].Clocks)
-	}
-	if _, ok := got[0].Clocks["dirty_at"]; !ok {
-		t.Fatalf("the second call's clock read was lost: %v", got[0].Clocks)
+		t.Fatalf("the call's clock read was lost: %v", got[0].Clocks)
 	}
 	// Its owner still consumes it.
 	mm.ServeExactTest("T2", []*models.Mock{ms["other"]})
@@ -230,48 +224,86 @@ func TestLearnElsewhereIsNoConsumption(t *testing.T) {
 	}
 }
 
-// What a call made in another window teaches a recording is that window's:
-// each state names the test open when such a call came, once per window
-// with the last instant it taught, and "" for a call between tests. A call
-// whose round moved since it was read (a test's begin or end between the
-// read and its learning) names none: keploy no longer knows its window, so
-// whatever undoes a window's learning reads it as any window's.
-func TestLearnElsewhereNamesTheWindowThatTaughtIt(t *testing.T) {
+// One pairing per recording per round: a recording a call made in another
+// window taught is taught no more in the round, whatever a later call would
+// teach it, so a timer that ticked more often than the recordings it left
+// teaches each of them once, the first tie of each tick onto the next one
+// (the parser's pairing reads a refused recording as spent and pairs again).
+// What the first call taught is kept whole. A new set teaches it anew.
+func TestLearnElsewhereTeachesARecordingOncePerRound(t *testing.T) {
 	mm, ms := s12Set(t)
 	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
 	mm.SetPairing(true)
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	minute := models.ClockOffset{Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}
+	if !mm.LearnElsewhere(ms["other"], map[string]models.ClockOffset{"claimed_at": minute}) {
+		t.Fatal("another test's unconsumed recording was taught nothing")
+	}
+	mm.ServeExactTest("T3", nil)
+	if mm.LearnElsewhere(ms["other"], map[string]models.ClockOffset{"dirty_at": {Res: time.Millisecond}}) {
+		t.Fatal("a second call of the round taught a recording a call of the round taught already")
+	}
+	got := mm.LearnedElsewhere()
+	if len(got) != 1 || got[0].Name != "other" {
+		t.Fatalf("learned elsewhere %v; want other alone", learnedNames(got))
+	}
+	if c, ok := got[0].Clocks["claimed_at"]; !ok || c != minute || len(got[0].Clocks) != 1 {
+		t.Fatalf("other holds %v; want the first call's claimed_at alone", got[0].Clocks)
+	}
+	if w := got[0].TaughtIn; len(w) != 1 || w[0].Test != "T1" {
+		t.Fatalf("taught in %+v; want the first call's window, T1, alone", w)
+	}
+	// A new set's round teaches its recordings anew.
+	mm.dropPreviousSetConsumes()
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	if !mm.LearnElsewhere(ms["other"], map[string]models.ClockOffset{"dirty_at": {Res: time.Millisecond}}) {
+		t.Fatal("a new set's round could not teach a recording the previous set's taught")
+	}
+}
+
+// What a call made in another window teaches a recording is that window's:
+// each state names the test open when the call came, with the instant it
+// taught, and "" for a call between tests. A call whose round moved since
+// it was read (a test's begin or end between the read and its learning)
+// names none: keploy no longer knows its window, so whatever undoes a
+// window's learning reads it as any window's.
+func TestLearnElsewhereNamesTheWindowThatTaughtIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	ms := map[string]*models.Mock{"own": httpCall("own", 0, "/own")}
+	all := []*models.Mock{ms["own"]}
+	for i, name := range []string{"o1", "o2", "o3", "o4"} {
+		ms[name] = httpCall(name, time.Duration(i+1)*time.Second, "/"+name)
+		all = append(all, ms[name])
+	}
+	mm := stagedManager(t, nil, all)
+	mm.ServeExactBackground(models.RecordedWithS12Routing, nil, nil)
+	mm.SetPairing(true)
 	minute := map[string]models.ClockOffset{"claimed_at": {Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}}
-	windows := func() []models.TeachingWindow {
+	windowOf := func(name string) []models.TeachingWindow {
 		t.Helper()
-		got := mm.LearnedElsewhere()
-		if len(got) != 1 || got[0].Name != "other" {
-			t.Fatalf("learned elsewhere %v; want other alone", learnedNames(got))
+		for _, st := range mm.LearnedElsewhere() {
+			if st.Name == name {
+				return st.TaughtIn
+			}
 		}
-		return got[0].TaughtIn
+		t.Fatalf("learned elsewhere %v; want %s among them", learnedNames(mm.LearnedElsewhere()), name)
+		return nil
 	}
 
 	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
-	if !mm.LearnElsewhere(ms["other"], minute) {
-		t.Fatal("a call in T1's window taught other nothing")
+	if !mm.LearnElsewhere(ms["o1"], minute) {
+		t.Fatal("a call in T1's window taught o1 nothing")
 	}
-	first := windows()
-	if len(first) != 1 || first[0].Test != "T1" || first[0].At.IsZero() {
-		t.Fatalf("taught in %+v; want T1's window, with its instant", first)
-	}
-	time.Sleep(time.Millisecond)
-	if !mm.LearnElsewhere(ms["other"], minute) {
-		t.Fatal("a second call in T1's window taught other nothing")
-	}
-	if again := windows(); len(again) != 1 || again[0].Test != "T1" || !again[0].At.After(first[0].At) {
-		t.Fatalf("taught in %+v after a second call in T1's window; want T1's window once, at the later instant", again)
+	if got := windowOf("o1"); len(got) != 1 || got[0].Test != "T1" || got[0].At.IsZero() {
+		t.Fatalf("taught in %+v; want T1's window, with its instant", got)
 	}
 
 	mm.ServeExactPool("", nil)
-	if !mm.LearnElsewhere(ms["other"], minute) {
-		t.Fatal("a call between tests taught other nothing")
+	if !mm.LearnElsewhere(ms["o2"], minute) {
+		t.Fatal("a call between tests taught o2 nothing")
 	}
-	if got := windows(); len(got) != 2 || got[1].Test != "" {
-		t.Fatalf("taught in %+v; want T1's window, then between tests", got)
+	if got := windowOf("o2"); len(got) != 1 || got[0].Test != "" {
+		t.Fatalf("taught in %+v; want between tests", got)
 	}
 
 	// A call read in T3's window whose learning lands after T4 began.
@@ -279,21 +311,19 @@ func TestLearnElsewhereNamesTheWindowThatTaughtIt(t *testing.T) {
 	call := mm.MarkCallRound()
 	held, _ := mm.HoldToRound(call)
 	mm.ServeExactTest("T4", nil)
-	if !held.(integrations.LearnElsewhere).LearnElsewhere(ms["other"], minute) {
-		t.Fatal("a call whose round moved taught other nothing")
+	if !held.(integrations.LearnElsewhere).LearnElsewhere(ms["o3"], minute) {
+		t.Fatal("a call whose round moved taught o3 nothing")
 	}
-	for _, w := range windows() {
-		if w.Test == "T3" || w.Test == "T4" {
-			t.Fatalf("taught in %+v; a call whose round moved since its read named %s", windows(), w.Test)
-		}
+	if got := windowOf("o3"); len(got) != 1 || got[0].Test != "" {
+		t.Fatalf("taught in %+v; a call whose round moved since its read must name no window", got)
 	}
 	// Read and learned in one window, it names it.
 	call = mm.MarkCallRound()
 	held, _ = mm.HoldToRound(call)
-	if !held.(integrations.LearnElsewhere).LearnElsewhere(ms["other"], minute) {
-		t.Fatal("a call in T4's window taught other nothing")
+	if !held.(integrations.LearnElsewhere).LearnElsewhere(ms["o4"], minute) {
+		t.Fatal("a call in T4's window taught o4 nothing")
 	}
-	if got := windows(); len(got) != 3 || got[2].Test != "T4" {
-		t.Fatalf("taught in %+v; want T4's window last", got)
+	if got := windowOf("o4"); len(got) != 1 || got[0].Test != "T4" {
+		t.Fatalf("taught in %+v; want T4's window", got)
 	}
 }

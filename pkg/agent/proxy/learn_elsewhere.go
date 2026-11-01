@@ -70,12 +70,20 @@ func (m *MockManager) LearnElsewhereCandidates(kind models.Kind, keys []string) 
 }
 
 // LearnElsewhere keeps clocks, the clock reads a call made in another window
-// taught mk, for record's full round to write onto mk (LearnedElsewhere),
-// merged with what earlier calls taught it as flagMockAsUsed merges a
-// consumed recording's clock reads. Clock reads alone: what such a call
-// shows as noise is never kept (integrations.LearnElsewhere). It consumes,
-// claims and answers nothing. False when the session does not learn, mk is
-// no candidate, or there is nothing to keep.
+// taught mk, for record's full round to write onto mk (LearnedElsewhere).
+// Clock reads alone: what such a call shows as noise is never kept
+// (integrations.LearnElsewhere). It consumes, claims and answers nothing.
+//
+// One pairing per recording per round: a recording a call of the round
+// taught already is taught nothing more, as a recording another call took
+// competes as spent. A timer that ticked more often than the recordings it
+// left then teaches each of them once: the parser reads a refused recording
+// as spent and pairs the call again, so a tie moves to the next recording
+// it drifts from alike, and a recording closest alone teaches no second
+// tick. Which call of the round teaches first decides only which recording
+// learns, never what a learned clock read accepts: each is checked at its
+// own recording's offset. False when the session does not learn, mk is no
+// candidate or was taught in the round, or there is nothing to keep.
 func (m *MockManager) LearnElsewhere(mk *models.Mock, clocks map[string]models.ClockOffset) bool {
 	return m.learnElsewhereAt(mk, clocks, nil, nil)
 }
@@ -122,18 +130,16 @@ func (m *MockManager) learnElsewhereLocked(mk *models.Mock, clocks map[string]mo
 	if v == nil || !m.pairable(v, epoch, mk) {
 		return false
 	}
-	st := models.MockState{Name: mk.Name, Kind: mk.Kind, Clocks: maps.Clone(clocks)}
 	window := models.TeachingWindow{Test: v.test, At: time.Now()}
 	if read != nil && (!read.known || read.at.Epoch != epoch || read.at.Bounds != m.exact.round.bounds) {
 		window.Test = ""
 	}
+	st := models.MockState{Name: mk.Name, Kind: mk.Kind, Clocks: maps.Clone(clocks), TaughtIn: []models.TeachingWindow{window}}
 	m.consumedMu.Lock()
 	defer m.consumedMu.Unlock()
-	if prev, ok := m.learnedElsewhere[mk.Name]; ok {
-		st.Clocks = models.MergeClocks(prev.Clocks, st.Clocks)
-		st.TaughtIn = slices.Clone(prev.TaughtIn)
+	if _, taught := m.learnedElsewhere[mk.Name]; taught {
+		return false
 	}
-	st.TaughtIn = taughtIn(st.TaughtIn, window)
 	if m.learnedElsewhere == nil {
 		m.learnedElsewhere = map[string]models.MockState{}
 	}
@@ -141,25 +147,10 @@ func (m *MockManager) learnElsewhereLocked(mk *models.Mock, clocks map[string]mo
 	return true
 }
 
-// taughtIn is windows with w: its test's entry moved to w's instant, or w
-// added. A window is named once, so the list is as long as the windows that
-// taught the recording, however many calls did.
-func taughtIn(windows []models.TeachingWindow, w models.TeachingWindow) []models.TeachingWindow {
-	for i := range windows {
-		if windows[i].Test == w.Test {
-			if w.At.After(windows[i].At) {
-				windows[i].At = w.At
-			}
-			return windows
-		}
-	}
-	return append(windows, w)
-}
-
 // LearnedElsewhere is the clock reads calls made in other windows than their
 // recordings' taught them in the current test set (LearnElsewhere), one
-// state per recording, by name, each with the windows that taught it
-// (MockState.TaughtIn): the test open when such a call came, "" between
+// state per recording, by name, each with the window that taught it
+// (MockState.TaughtIn): the test open when the call came, "" between
 // tests, and when it taught. Not drained: each read is the set's whole.
 func (m *MockManager) LearnedElsewhere() []models.MockState {
 	m.consumedMu.Lock()
