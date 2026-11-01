@@ -1280,3 +1280,37 @@ func TestOutcomeAMillisecondCopyIsBoundToItsSource(t *testing.T) {
 	sec.Seen[0].Clock = true
 	since("a typed second an earlier send held as its call's read of the clock", decide(Instant, typed(readR, time.Second), typed(readF, time.Second), sec))
 }
+
+// An answer recorded after the call that round F gave the application
+// before it, holding round F's moment and not the recorded one: in round F
+// the value may be a pick from it, so it is refused naming it, as main
+// refuses it, never read as the call's clock read. Where F never gave it,
+// or it holds F's minute only as a cut of a finer instant (no pick, as at
+// the answer step), the call's window reads the clock.
+func TestOutcomeAMomentALaterRecordingGaveBeforeTheCallIsAPick(t *testing.T) {
+	const p = "body.sent_at"
+	minute := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04Z07:00") }
+	rAt, fAt := oAt.Add(30*time.Second), oAt.Add(time.Hour+61*time.Second)
+	rec, live := minute(rAt), minute(fAt)
+	w := iWin(rAt, fAt, 100*time.Millisecond)
+	// mock-0 was recorded 15 s after the call.
+	later := func(word string) Raw { return oAnswer("mock-0", -45*time.Second, word) }
+	fMinute := fAt.Truncate(time.Minute)
+	for _, tc := range []struct {
+		what string
+		raw  Raw
+		pick bool
+	}{
+		{"round F's minute, given before the call", later(live).WithServed(true).ServedAsRecorded(), true},
+		{"round F's minute at its first second, given before the call", later(fMinute.Format(time.RFC3339)).WithServed(true).ServedAsRecorded(), true},
+		{"round F's minute as a cut of a later second, given before the call", later(fMinute.Add(5 * time.Second).Format(time.RFC3339)).WithServed(true).ServedAsRecorded(), false},
+		{"round F's minute, never given", later(live), false},
+	} {
+		d := oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, w, nil, []Raw{tc.raw})), rec, live)
+		if tc.pick {
+			oRefused(t, tc.what, d, "pick", "mock-0")
+		} else {
+			iClock(t, tc.what, d)
+		}
+	}
+}

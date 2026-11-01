@@ -938,6 +938,10 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 				why = "round F's moment stands in " + p.name + ", which does not show it"
 			}
 			return dc.refuse(path, at, n, r, l, RefusalPick, why, []string{p.name}, dc.wordNoise(path, n))
+		// An answer recorded after the call that round F gave before it:
+		// in round F the value may be a pick from it, as main reads it.
+		case p.fGave && p.state == stateNotBefore && p.side == Response && h.hl && !h.hr && !cut:
+			return dc.refuse(path, at, n, r, l, RefusalPick, "round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it", []string{p.name}, dc.wordNoise(path, n))
 		case p.side == Response && p.state == stateUnknown && (h.hr || h.hl):
 			return untold(p.why)
 		case h.hr && dc.swappable(p, c):
