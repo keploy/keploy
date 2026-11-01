@@ -563,6 +563,9 @@ type CallRound struct {
 	// every is whether the read held every recording as its own because
 	// its store could not tell which are the call's (HoldingEvery).
 	every bool
+	// ahead is whether the read found the learn tracker had begun a test
+	// the store had not opened (WithTrackerAhead).
+	ahead bool
 }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
@@ -620,6 +623,20 @@ func (c CallRound) InWorkerView(shows bool) CallRound {
 	c.worker = c.worker || shows
 	return c
 }
+
+// WithTrackerAhead is c, of a read that found the learn tracker had begun a
+// test the store had not opened when ahead is true
+// (RoundSnapshot.TrackerAhead): the call is decided in the test the store
+// opens next, so a store held to it (RoundHolder) reads the view in force,
+// not the one the read was made in.
+func (c CallRound) WithTrackerAhead(ahead bool) CallRound {
+	c.ahead = c.ahead || ahead
+	return c
+}
+
+// TrackerAhead reports whether c's read found the learn tracker ahead of the
+// store (WithTrackerAhead).
+func (c CallRound) TrackerAhead() bool { return c.ahead }
 
 // ShowsWorker reports whether c's read found a test's view that showed the
 // worker scope (WithSequence, InWorkerView).

@@ -1047,10 +1047,16 @@ func (m *MockManager) ensureKindTrees(kind models.Kind) (f *TreeDb, u *TreeDb) {
 // ---------- getters ----------
 
 func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
+	return m.getFilteredMocksIn(m.exactView())
+}
+
+// getFilteredMocksIn is GetFilteredMocks read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getFilteredMocksIn(v *exactView) ([]*models.Mock, error) {
 	m.treesMu.RLock()
 	tree := m.filtered
 	m.treesMu.RUnlock()
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		return m.exactPerTest(v, "", v.shownOf(tree, "")), nil
 	}
 	results := make([]*models.Mock, 0, 64)
@@ -1208,6 +1214,12 @@ func (m *MockManager) windowActiveLocked() bool {
 //
 // Drop count is exposed via DroppedOutOfWindow() for observability.
 func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
+	return m.getFilteredMocksInWindowIn(m.exactView())
+}
+
+// getFilteredMocksInWindowIn is GetFilteredMocksInWindow read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getFilteredMocksInWindowIn(v *exactView) ([]*models.Mock, error) {
 	// Atomicity contract: snapshot the per-test tree POINTER and the
 	// window together under swapMu.RLock so SetMocksWithWindow can't
 	// interleave a (tree, window) swap between our two reads. Once
@@ -1225,7 +1237,7 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 
 	// Under exact serving the test's mapping decides, not a recorded time,
 	// over what the view shows of the tier (shownOf).
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		return m.exactPerTest(v, "", v.shownOf(tree, "")), nil
 	}
 	all := make([]*models.Mock, 0, 64)
@@ -2061,12 +2073,18 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 }
 
 func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
+	return m.getUnFilteredMocksIn(m.exactView())
+}
+
+// getUnFilteredMocksIn is GetUnFilteredMocks read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getUnFilteredMocksIn(v *exactView) ([]*models.Mock, error) {
 	m.treesMu.RLock()
 	tree := m.unfiltered
 	m.treesMu.RUnlock()
 	// Under exact serving only what the view shows of each tier is read
 	// (shownOf): reusable narrows it as it narrowed the tier's values.
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		return v.reusable("", v.shownOf(tree, ""), v.shownOf(m.startupTree(), "")), nil
 	}
 	results := make([]*models.Mock, 0, 128)
@@ -2145,17 +2163,23 @@ func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup 
 // trees are disjoint and the dedup is a free no-op (zero duplicate
 // insertions into the seen-set).
 func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
-	startup, err := m.GetStartupMocks()
+	return m.getSessionMocksIn(m.exactView())
+}
+
+// getSessionMocksIn is GetSessionMocks read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getSessionMocksIn(v *exactView) ([]*models.Mock, error) {
+	startup, err := m.getStartupMocksIn(v)
 	if err != nil {
 		return nil, err
 	}
-	session, err := m.GetSessionScopedMocks()
+	session, err := m.getSessionScopedMocksIn(v)
 	if err != nil {
 		return nil, err
 	}
 	// Under exact serving the open test's unanswered mocks lead the union:
 	// it is every mock a parser that reads nothing else may serve.
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		if owned := v.unanswered(""); len(owned) > 0 {
 			startup = append(owned, startup...)
 		}
@@ -2655,13 +2679,19 @@ func (m *MockManager) NewVariableSet() {
 // HikariCP/JDBC pool warm-up queries. Pool is rebuilt by every
 // SetMocksWithWindow call using the latest firstWindowStart.
 func (m *MockManager) GetStartupMocks() ([]*models.Mock, error) {
+	return m.getStartupMocksIn(m.exactView())
+}
+
+// getStartupMocksIn is GetStartupMocks read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getStartupMocksIn(v *exactView) ([]*models.Mock, error) {
 	m.treesMu.RLock()
 	tree := m.startup
 	m.treesMu.RUnlock()
 	if tree == nil {
 		return nil, nil
 	}
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		return v.reusable("", v.shownOf(tree, ""), v.shownOf(m.unfilteredTree(), "")), nil
 	}
 	results := make([]*models.Mock, 0, 32)
@@ -2688,13 +2718,19 @@ func (m *MockManager) GetStartupMocks() ([]*models.Mock, error) {
 // Returns nil, nil when the startup tree has never been populated (fresh
 // manager pre-first SetMocksWithWindow).
 func (m *MockManager) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	return m.getStartupMocksByKindIn(m.exactView(), kind)
+}
+
+// getStartupMocksByKindIn is GetStartupMocksByKind read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getStartupMocksByKindIn(v *exactView, kind models.Kind) ([]*models.Mock, error) {
 	m.treesMu.RLock()
 	tree := m.startup
 	m.treesMu.RUnlock()
 	if tree == nil {
 		return nil, nil
 	}
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		return v.reusable(kind, v.shownOf(tree, kind), v.shownOf(m.unfilteredTree(), kind)), nil
 	}
 	results := make([]*models.Mock, 0, 16)
@@ -2717,7 +2753,13 @@ func (m *MockManager) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, e
 // per-connID trees for O(1) lookup). Startup entries are in `m.startup`
 // and deliberately excluded here.
 func (m *MockManager) GetSessionScopedMocks() ([]*models.Mock, error) {
-	return m.GetUnFilteredMocks()
+	return m.getSessionScopedMocksIn(m.exactView())
+}
+
+// getSessionScopedMocksIn is GetSessionScopedMocks read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getSessionScopedMocksIn(v *exactView) ([]*models.Mock, error) {
+	return m.getUnFilteredMocksIn(v)
 }
 
 // HasFirstTestFired reports whether at least one real test window has
@@ -2866,7 +2908,13 @@ func (m *MockManager) CurrentTestWindow() (time.Time, time.Time) {
 // collapse this accessor into a plain tree Snapshot with no iteration
 // overhead at all.
 func (m *MockManager) GetPerTestMocksInWindow() ([]*models.Mock, error) {
-	return m.GetFilteredMocksInWindow()
+	return m.getPerTestMocksInWindowIn(m.exactView())
+}
+
+// getPerTestMocksInWindowIn is GetPerTestMocksInWindow read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getPerTestMocksInWindowIn(v *exactView) ([]*models.Mock, error) {
+	return m.getFilteredMocksInWindowIn(v)
 }
 
 // RangePerTestMocksInWindow is GetPerTestMocksInWindow handed to fn one mock
@@ -2874,16 +2922,22 @@ func (m *MockManager) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 // unanswered mocks are read a few at a time and the tier only once fn has
 // not stopped at them (rangeExactPerTest); otherwise the read is walked.
 func (m *MockManager) RangePerTestMocksInWindow(fn func(*models.Mock) bool) error {
+	return m.rangePerTestMocksInWindowIn(m.exactView(), fn)
+}
+
+// rangePerTestMocksInWindowIn is RangePerTestMocksInWindow read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) rangePerTestMocksInWindowIn(v *exactView, fn func(*models.Mock) bool) error {
 	m.swapMu.RLock()
 	m.treesMu.RLock()
 	tree := m.filtered
 	m.treesMu.RUnlock()
 	m.swapMu.RUnlock()
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		m.rangeExactPerTest(v, "", tree, fn)
 		return nil
 	}
-	mocks, err := m.GetPerTestMocksInWindow()
+	mocks, err := m.getPerTestMocksInWindowIn(v)
 	if err != nil {
 		return err
 	}
@@ -2955,10 +3009,16 @@ func (m *MockManager) noteStatedLifetimes(slices ...[]*models.Mock) {
 //   - Every successful read touches connectionLastTs so the
 //     idle-sweeper doesn't reclaim an active connection.
 func (m *MockManager) GetConnectionMocks(connID string) ([]*models.Mock, error) {
+	return m.getConnectionMocksIn(m.exactView(), connID)
+}
+
+// getConnectionMocksIn is GetConnectionMocks read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getConnectionMocksIn(v *exactView, connID string) ([]*models.Mock, error) {
 	mocks, err := m.connectionMocks(connID)
 	// Under exact serving a connection mock a parser evicted is gone, as from
 	// every other read (unspent).
-	if v := m.exactView(); v != nil && err == nil {
+	if v != nil && err == nil {
 		mocks = v.withLearned(v.unspent(mocks))
 	}
 	return mocks, err
@@ -3280,6 +3340,12 @@ func (m *MockManager) HasMocksByKind(kind models.Kind, match func(*models.Mock) 
 }
 
 func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	return m.getFilteredMocksByKindIn(m.exactView(), kind)
+}
+
+// getFilteredMocksByKindIn is GetFilteredMocksByKind read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getFilteredMocksByKindIn(v *exactView, kind models.Kind) ([]*models.Mock, error) {
 	// Fetch pointer safely; the tree itself is responsible for its own safety.
 	m.treesMu.RLock()
 	flt := m.filteredByKind[kind]
@@ -3288,7 +3354,7 @@ func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, 
 		flt, _ = m.ensureKindTrees(kind)
 	}
 
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		return m.exactPerTest(v, kind, v.shownOf(flt, "")), nil
 	}
 	results := make([]*models.Mock, 0, 64)
@@ -3302,6 +3368,12 @@ func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, 
 }
 
 func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	return m.getUnFilteredMocksByKindIn(m.exactView(), kind)
+}
+
+// getUnFilteredMocksByKindIn is GetUnFilteredMocksByKind read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getUnFilteredMocksByKindIn(v *exactView, kind models.Kind) ([]*models.Mock, error) {
 	m.treesMu.RLock()
 	unf := m.unfilteredByKind[kind]
 	m.treesMu.RUnlock()
@@ -3309,7 +3381,7 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 		_, unf = m.ensureKindTrees(kind)
 	}
 
-	if v := m.exactView(); v != nil {
+	if v != nil {
 		return v.reusable(kind, v.shownOf(unf, ""), v.shownOf(m.startupTree(), kind)), nil
 	}
 	results := make([]*models.Mock, 0, 128)
@@ -5184,7 +5256,13 @@ func (m *MockManager) CarryOverLoadRange(start time.Time) (from, to time.Time, o
 // and consumes them through DeleteFilteredMock. Empty while nothing is
 // registered.
 func (m *MockManager) GetCarryOverMocks() ([]*models.Mock, error) {
-	if v := m.exactView(); v != nil {
+	return m.getCarryOverMocksIn(m.exactView())
+}
+
+// getCarryOverMocksIn is GetCarryOverMocks read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getCarryOverMocksIn(v *exactView) ([]*models.Mock, error) {
+	if v != nil {
 		return v.keep(m.carry.snapshot("")), nil
 	}
 	return m.carry.snapshot(""), nil
@@ -5192,7 +5270,13 @@ func (m *MockManager) GetCarryOverMocks() ([]*models.Mock, error) {
 
 // GetCarryOverMocksByKind is GetCarryOverMocks for one kind.
 func (m *MockManager) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, error) {
-	if v := m.exactView(); v != nil {
+	return m.getCarryOverMocksByKindIn(m.exactView(), kind)
+}
+
+// getCarryOverMocksByKindIn is GetCarryOverMocksByKind read in v: the view in force, or the view a call held to
+// its mark was read in (heldScope.readView); nil with exact serving off.
+func (m *MockManager) getCarryOverMocksByKindIn(v *exactView, kind models.Kind) ([]*models.Mock, error) {
+	if v != nil {
 		return v.keep(m.carry.snapshot(kind)), nil
 	}
 	return m.carry.snapshot(kind), nil

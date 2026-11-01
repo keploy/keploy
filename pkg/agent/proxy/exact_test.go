@@ -4107,6 +4107,182 @@ func TestAWorkerSpendFollowsTheViewTheCallWasReadIn(t *testing.T) {
 	}
 }
 
+// heldFirst answers a call held to its mark (HoldToRound) as a parser that
+// takes the first recording of the request it reads from the held store and
+// consumes it there does: "refused" when the door refused the one the read
+// offered.
+func heldFirst(t *testing.T, held integrations.MockMemDb, prefix string, evicts bool) string {
+	t.Helper()
+	mocks, _ := held.GetSessionScopedMocks()
+	for _, mk := range mocks {
+		if !strings.HasPrefix(mk.Name, prefix) {
+			continue
+		}
+		var ok bool
+		if evicts {
+			ok = held.DeleteUnFilteredMock(*mk)
+		} else {
+			ok = held.MarkMockAsUsed(*mk)
+		}
+		if ok {
+			return mk.Name
+		}
+		return "refused"
+	}
+	return "a miss"
+}
+
+// A held call reads the worker scope in the view it was read in, as it walks
+// it and spends it there, never in a view a test's begin or end installed
+// after its read: so a read that lands late is answered as one that landed
+// on time, and a call's answer never moves with when its read lands. A call
+// read between tests whose read lands after the next test opened reads the
+// worker scope as the calls between tests do: by gap order (what a call
+// between tests consumed after the rest), and whatever a window spent. A
+// test's call whose read lands after its end reads it as the windows do: what
+// a window spent is gone. Both through a delete door and a door that keeps
+// the recording.
+func TestAHeldCallReadsTheWorkerScopeInTheViewItWasReadIn(t *testing.T) {
+	names := []string{"w-0", "w-1"}
+	setup := func(t *testing.T) *MockManager {
+		polls := []*models.Mock{httpCall("w-0", time.Second, "/poll"), httpCall("w-1", 2*time.Second, "/poll")}
+		mm := stagedManager(t, nil, polls)
+		mm.ServeExactWorker(names)
+		return mm
+	}
+	open := func(mm *MockManager, test string) {
+		mm.ServeExactWorker(names)
+		if test == "" {
+			mm.ServeExactPool("k", nil)
+			return
+		}
+		mm.ServeExactTest(test, nil)
+	}
+	for _, door := range []struct {
+		name   string
+		ask    func(*testing.T, *MockManager, string) string
+		evicts bool
+	}{{"delete door", pollFirst, true}, {"keeping door", markFirst, false}} {
+		t.Run(door.name+"/read between tests after a call between tests, landing in the next test", func(t *testing.T) {
+			mm := setup(t)
+			open(mm, "")
+			if got := door.ask(t, mm, "w-"); got != "w-0" {
+				t.Fatalf("the first call between tests was answered %s; want w-0", got)
+			}
+			held, _ := mm.HoldToRound(mm.MarkCallRound())
+			open(mm, "TestA")
+			if w, ok := held.(interface{ IsTestWindowActive() bool }); !ok || w.IsTestWindowActive() {
+				t.Error("the held store of a call read between tests says a test window is active once TestA opened; want no window, the view the call was read in: a parser routes its tier by it")
+			}
+			// Read in TestA's view, the call would be answered w-0 again:
+			// TestA's view orders no call between tests, and the window
+			// spent nothing.
+			if got := heldFirst(t, held, "w-", door.evicts); got != "w-1" {
+				t.Errorf("a call read between tests, its read landing after TestA opened, was answered %s; want w-1, as when its read lands before the begin: the calls between tests walk w-0, then w-1", got)
+			}
+			var win []string
+			for i := 0; i < 3; i++ {
+				win = append(win, door.ask(t, mm, "w-"))
+			}
+			if want := []string{"w-0", "w-1", "a miss"}; !reflect.DeepEqual(win, want) {
+				t.Errorf("TestA's window was answered %v; want %v: no call between tests spends for the windows", win, want)
+			}
+		})
+		t.Run(door.name+"/read between tests after a window spent it, landing in the next test", func(t *testing.T) {
+			mm := setup(t)
+			open(mm, "TestA")
+			if got := door.ask(t, mm, "w-"); got != "w-0" {
+				t.Fatalf("TestA's window was answered %s; want w-0", got)
+			}
+			open(mm, "")
+			held, _ := mm.HoldToRound(mm.MarkCallRound())
+			open(mm, "TestB")
+			// Read in TestB's view, w-0 would be hidden as the windows
+			// spent it, and the call answered w-1, which TestB's window
+			// then never gets.
+			if got := heldFirst(t, held, "w-", door.evicts); got != "w-0" {
+				t.Errorf("a call read between tests, its read landing after TestB opened, was answered %s; want w-0, as when its read lands before the begin: outside every window a worker recording answers again", got)
+			}
+			var win []string
+			for i := 0; i < 2; i++ {
+				win = append(win, door.ask(t, mm, "w-"))
+			}
+			if want := []string{"w-1", "a miss"}; !reflect.DeepEqual(win, want) {
+				t.Errorf("TestB's window was answered %v; want %v: the windows' cursor, which TestA left at w-1", win, want)
+			}
+		})
+		t.Run(door.name+"/read in a test after its window spent one, landing after its end", func(t *testing.T) {
+			mm := setup(t)
+			open(mm, "TestA")
+			if got := door.ask(t, mm, "w-"); got != "w-0" {
+				t.Fatalf("TestA's window was answered %s; want w-0", got)
+			}
+			held, _ := mm.HoldToRound(mm.MarkCallRound())
+			open(mm, "")
+			// Read in the view between tests, w-0 would be offered first
+			// and the door, which spends for the windows, refuse it.
+			if got := heldFirst(t, held, "w-", door.evicts); got != "w-1" {
+				t.Errorf("TestA's second call, its read landing after TestA ended, was answered %s; want w-1, as when its read lands before the end", got)
+			}
+			open(mm, "TestB")
+			if got := door.ask(t, mm, "w-"); got != "a miss" {
+				t.Errorf("TestB's window was answered %s; want a miss: TestA's window spent both", got)
+			}
+		})
+	}
+}
+
+// A held call whose consume the view in force refused is not offered that
+// recording again. The call is read in T1, T1 ends before its matcher reads,
+// and the matcher reads in T1's view (the view it was read in): it is offered
+// T1's own exchange, and the consume, settled in T2's view, is refused. A
+// parser takes a refused consume for a recording another call took and reads
+// again; offered the same recording again, the Generic parser's matcher spun
+// on it without end (TestAGenericMissIsAskedOfTheRoundItsRequestWasReadIn
+// timed out). Through each consume door, the read after the refusal is the
+// view in force's: T1's exchange is not in it.
+func TestAHeldCallIsNotOfferedARecordingTheViewInForceRefused(t *testing.T) {
+	has := func(ms []*models.Mock, name string) bool {
+		for _, mk := range ms {
+			if mk != nil && mk.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+	for _, door := range []struct {
+		name    string
+		consume func(h integrations.MockMemDb, mk *models.Mock) bool
+	}{
+		{"UpdateUnFilteredMock", func(h integrations.MockMemDb, mk *models.Mock) bool {
+			served := *mk
+			return h.UpdateUnFilteredMock(mk, &served)
+		}},
+		{"DeleteUnFilteredMock", func(h integrations.MockMemDb, mk *models.Mock) bool { return h.DeleteUnFilteredMock(*mk) }},
+		{"DeleteFilteredMock", func(h integrations.MockMemDb, mk *models.Mock) bool { return h.DeleteFilteredMock(*mk) }},
+		{"MarkMockAsUsed", func(h integrations.MockMemDb, mk *models.Mock) bool { return h.MarkMockAsUsed(*mk) }},
+	} {
+		t.Run(door.name, func(t *testing.T) {
+			mine := genericExchange("ex-mine", 0, "AUTH step2")
+			mm := stagedManager(t, nil, []*models.Mock{mine})
+			mm.ServeExactTest("T1", []*models.Mock{mine})
+			call := mm.MarkCallRound()
+			mm.ServeExactTest("T2", nil)
+			h, _ := mm.HoldToRound(call)
+			if door.consume(h, mine) {
+				t.Fatal("T2's view settled the consume of T1's own exchange; want it refused: the row is about a refused consume")
+			}
+			got, _ := h.GetUnFilteredMocks()
+			if has(got, "ex-mine") {
+				t.Fatalf("after its consume was refused the held call was offered %v again; want the view in force's read, without it: a parser that reads again on a refused consume spins on it", exactNames(got))
+			}
+			if again, _ := h.GetSessionScopedMocks(); has(again, "ex-mine") {
+				t.Fatalf("GetSessionScopedMocks offered %v after the refusal; want it without ex-mine", exactNames(again))
+			}
+		})
+	}
+}
+
 // A worker: recording of per-test lifetime is offered by a test's per-test
 // read. The staging files a per-test-lifetime recording in the startup tree
 // alone, and a parser that serves only session-lifetime recordings from its

@@ -953,6 +953,9 @@ const restagedWhy = "the staging moved: the test set was staged again"
 func (m *MockManager) HoldToRound(call integrations.CallRound) (integrations.MockMemDb, func() bool) {
 	h := &heldScope{roundScope: roundScope{MockManager: m, g: roundGuard{at: integrations.RoundAt{Epoch: call.Epoch()}, staging: true, read: call.Read(), readInTest: call.InTest()}}}
 	h.seq, h.seqOK = call.Sequence()
+	if c, ok := h.seq.Cursor.(viewCursor); ok && h.seqOK && c.m == m && !call.TrackerAhead() {
+		h.readIn = c.v
+	}
 	h.read.at, h.read.known = call.Round()
 	return h, h.restaged
 }
@@ -978,6 +981,12 @@ type heldScope struct {
 	// (integrations.CallRound.Sequence), seqOK whether its mark kept one.
 	seq   integrations.SequenceView
 	seqOK bool
+	// readIn is the view the call was read in (its mark's), which h's reads
+	// of the staged recordings are made in (readView): nil when the mark
+	// kept none, or was made where the learn tracker had begun a test the
+	// store had not opened (integrations.CallRound.TrackerAhead), and nil
+	// once a consume the view in force refused there (settled).
+	readIn *exactView
 	// owns is the call's decision whether it is one of the open test's own
 	// calls (HideBackgroundWhen), until a door or HidesBackground asks it.
 	owns func() bool
@@ -1002,6 +1011,35 @@ func (h *heldScope) SequenceView() (integrations.SequenceView, bool) {
 		return h.seq, true
 	}
 	return h.MockManager.SequenceView()
+}
+
+// readView is the view h's reads of the staged recordings are made in: the
+// view the call was read in, as its walk is (SequenceView) and its worker
+// scope's spend (roundGuard.windowed), never one a test's begin or end
+// installed after the read. So a read that lands late is answered as one
+// that landed on time: a call read between tests reads the worker scope in
+// gap order and whatever a window spent of it, a test's call what the windows
+// left, and neither reads the recordings of a test whose view came or went
+// meanwhile. Its consumes settle in the view in force (roundGuard): one the
+// view in force refuses is a miss, as a consume that lands after a test's
+// begin or end is. A call marked where the learn tracker had begun a test
+// the store had not opened is decided in the test the store opens next
+// (integrations.CallRound.TrackerAhead): it reads the view in force.
+func (h *heldScope) readView() *exactView {
+	if h.readIn != nil {
+		return h.readIn
+	}
+	return h.MockManager.exactView()
+}
+
+// IsTestWindowActive implements integrations.TestWindows' question for h's
+// call: whether a test was open in the view its reads are made in
+// (readView), which tells a parser that routes by it which tier serves it.
+func (h *heldScope) IsTestWindowActive() bool {
+	if v := h.readView(); v != nil {
+		return v.test != ""
+	}
+	return h.MockManager.IsTestWindowActive()
 }
 
 // restaged reports whether a read or a consume door of h found the staging
@@ -1078,19 +1116,19 @@ func (h *heldScope) ServingFor(f *learn.Flight) integrations.MockMemDb {
 }
 
 func (h *heldScope) GetFilteredMocks() ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetFilteredMocks())
+	return h.held(h.getFilteredMocksIn(h.readView()))
 }
 
 func (h *heldScope) GetFilteredMocksInWindow() ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetFilteredMocksInWindow())
+	return h.held(h.getFilteredMocksInWindowIn(h.readView()))
 }
 
 func (h *heldScope) GetUnFilteredMocks() ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetUnFilteredMocks())
+	return h.held(h.getUnFilteredMocksIn(h.readView()))
 }
 
 func (h *heldScope) GetPerTestMocksInWindow() ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetPerTestMocksInWindow())
+	return h.held(h.getPerTestMocksInWindowIn(h.readView()))
 }
 
 // RangePerTestMocksInWindow is the manager's per-test walk
@@ -1100,29 +1138,29 @@ func (h *heldScope) RangePerTestMocksInWindow(fn func(*models.Mock) bool) error 
 	if h.moved() {
 		return nil
 	}
-	return h.MockManager.RangePerTestMocksInWindow(func(mk *models.Mock) bool {
+	return h.rangePerTestMocksInWindowIn(h.readView(), func(mk *models.Mock) bool {
 		return !h.moved() && (h.hides(mk) || fn(mk))
 	})
 }
 
 func (h *heldScope) GetSessionMocks() ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetSessionMocks())
+	return h.held(h.getSessionMocksIn(h.readView()))
 }
 
 func (h *heldScope) GetSessionMocksInWindow(start, end time.Time) ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetSessionMocksInWindow(start, end))
+	return h.held(h.getSessionMocksInWindowIn(h.readView(), start, end))
 }
 
 func (h *heldScope) GetSessionScopedMocks() ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetSessionScopedMocks())
+	return h.held(h.getSessionScopedMocksIn(h.readView()))
 }
 
 func (h *heldScope) GetStartupMocks() ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetStartupMocks())
+	return h.held(h.getStartupMocksIn(h.readView()))
 }
 
 func (h *heldScope) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetStartupMocksByKind(kind))
+	return h.held(h.getStartupMocksByKindIn(h.readView(), kind))
 }
 
 // RangeSessionMocksWithKey is the manager's keyed walk of the session tier
@@ -1132,29 +1170,29 @@ func (h *heldScope) RangeSessionMocksWithKey(ix *integrations.MockIndex, key str
 	if h.moved() {
 		return nil
 	}
-	return h.MockManager.RangeSessionMocksWithKey(ix, key, func(mk *models.Mock) bool {
+	return h.rangeSessionMocksWithKeyIn(h.readView(), ix, key, func(mk *models.Mock) bool {
 		return !h.moved() && (h.hides(mk) || fn(mk))
 	})
 }
 
 func (h *heldScope) GetConnectionMocks(connID string) ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetConnectionMocks(connID))
+	return h.held(h.getConnectionMocksIn(h.readView(), connID))
 }
 
 func (h *heldScope) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetFilteredMocksByKind(kind))
+	return h.held(h.getFilteredMocksByKindIn(h.readView(), kind))
 }
 
 func (h *heldScope) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetUnFilteredMocksByKind(kind))
+	return h.held(h.getUnFilteredMocksByKindIn(h.readView(), kind))
 }
 
 func (h *heldScope) GetCarryOverMocks() ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetCarryOverMocks())
+	return h.held(h.getCarryOverMocksIn(h.readView()))
 }
 
 func (h *heldScope) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, error) {
-	return h.held(h.MockManager.GetCarryOverMocksByKind(kind))
+	return h.held(h.getCarryOverMocksByKindIn(h.readView(), kind))
 }
 
 func (h *heldScope) Background(kind models.Kind) []*models.Mock {
