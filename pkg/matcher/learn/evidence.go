@@ -47,7 +47,10 @@ type evPlace struct {
 	raw int
 	// otherTest: an earlier test's place, or one served between tests:
 	// outside the call's scope (Mode Own reads it only to name the edit).
+	// scope names that scope for a line where mappings.yaml names it
+	// ("worker:", a test's name); "" where the place keeps its marks.
 	otherTest bool
+	scope     string
 	at        time.Time
 	state     placeState
 	why       string
@@ -78,6 +81,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 			continue
 		}
 		st, why := earlierState(in, e)
+		startUp, other, scope := inScope(in, e.Mock, e.StartUp, e.ofEarlierTest())
 		for _, s := range e.Seen {
 			path := s.Leaf.Path
 			if path == "" {
@@ -86,7 +90,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 			ps = append(ps, evPlace{
 				name: e.Mock + " " + path, mock: e.Mock, path: path,
 				rec: s.Leaf.Value, live: s.Live, side: s.Side,
-				given: e.Given, gave: e.Gave, clock: s.Clock, startUp: e.StartUp, otherTest: e.ofEarlierTest(),
+				given: e.Given, gave: e.Gave, clock: s.Clock, startUp: startUp, otherTest: other, scope: scope,
 				at: e.At, state: st, why: why,
 			})
 			if s.Side == Response && st == stateBefore && e.Payload.isRead() {
@@ -119,13 +123,33 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		case r.AsRecorded():
 			unstated = false
 		}
+		startUp, other, scope := inScope(in, r.Mock(), r.beforeTest && !r.olderTest, r.olderTest)
 		ps = append(ps, evPlace{
 			name: r.Mock(), mock: r.Mock(), rec: r.Text(), live: live, side: Response,
-			startUp: r.beforeTest && !r.olderTest, otherTest: r.olderTest,
+			startUp: startUp, otherTest: other, scope: scope,
 			at: r.at, state: st, why: why, fUnstated: unstated || !in.Caps.FViewStated, raw: i + 1,
 		})
 	}
 	return ps, unread
+}
+
+// inScope is a place's scope: mappings.yaml's (Input.Scope) where it names
+// mock in one place, else where mock was recorded (startUp, other). This
+// test's own list and startup: are the call's scope; worker:, another test's
+// list or any other section are outside it, and scope names it for the
+// line ("worker:", the other test's name). keploy never decides the scope:
+// it reads mappings.yaml and names the edit.
+func inScope(in Input, mock string, startUp, other bool) (bool, bool, string) {
+	switch s := in.ScopeOf(mock); s {
+	case ScopeUnknown:
+		return startUp, other, ""
+	case ScopeStartup:
+		return true, false, ""
+	case ScopeTest(in.Test):
+		return false, false, ""
+	default:
+		return false, true, strings.TrimPrefix(string(s), "test ")
+	}
 }
 
 // earlierState is the state of a place F served earlier: a given and an

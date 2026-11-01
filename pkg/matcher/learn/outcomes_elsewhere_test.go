@@ -40,7 +40,7 @@ func eLease(rAt, fAt time.Time, rid, fid string, earlier []Earlier) Input {
 		Drifts: oDrifts(), Drift: drift,
 		Live: shape(fAt, fid), Rec: shape(rAt, rid),
 		At: rAt, Arrived: fAt, Earlier: earlier, Window: iWin(rAt, fAt, 50*time.Millisecond),
-		Test: "test-4", Mock: "mock-90", Mode: ModeElsewhere,
+		Test: "test-4", Mock: "mock-90", Mode: ModeElsewhere, Landed: Landed{Where: LandedOther, Test: "test-5"},
 		Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true},
 	}
 }
@@ -81,8 +81,21 @@ func TestOutcomeElsewhereLearnsATimersClockWords(t *testing.T) {
 	} {
 		d := oWord(t, ds, tc.rec, tc.live)
 		iClock(t, tc.what, d)
-		if !strings.Contains(d.Line, "for learning only") {
-			t.Errorf("%s: line %q; want it to say it was learned from round F's call, for learning only", tc.what, d.Line)
+		if !strings.Contains(d.Line, "learned from round F's call in test-5's window, for learning only") {
+			t.Errorf("%s: line %q; want it to say it was learned from round F's call in test-5's window, for learning only", tc.what, d.Line)
+		}
+	}
+	// Landed between tests, the line says so; nothing kept says "another window".
+	in := eLease(eRAt, eFAt, "pat-janitor:968290", "pat-janitor:968290", nil)
+	in.Landed = Landed{Where: LandedBetween}
+	if d := oWord(t, Decide(in), iMs(eRAt.Add(-time.Millisecond)), iMs(eFAt.Add(-time.Millisecond))); !strings.Contains(d.Line, "round F's call in between tests, for learning only") {
+		t.Errorf("claimed_at landed between tests: line %q; want it to name between tests", d.Line)
+	}
+	// A pairing that learns nothing names where the call landed too.
+	in = eLease(eRAt, eFAt, "pat-janitor:968290", "pat-janitor:968291", nil)
+	for _, d := range Decide(in) {
+		if !strings.Contains(d.Line, "landed in test-5's window") {
+			t.Errorf("a pairing that learned nothing: line %q; want it to name test-5's window", d.Line)
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -47,6 +48,50 @@ func TestOutcomeASourceBetweenTestsIsRefusedNamingTheEdit(t *testing.T) {
 	if d.Outcome != OutcomeValue || d.From.Mock != "mock-21" {
 		t.Errorf("a token served at the start-up: %s; want a Value from mock-21", oDescribe([]Decision{d}))
 	}
+}
+
+// mappings.yaml names each mock's scope, and that scope decides, not where
+// the mock was recorded. A source mappings.yaml lists under worker: is out
+// of the call's scope even where it was recorded in this test's window:
+// refused, naming worker: and the edit (worker: is served, never required,
+// so it never binds). The same source listed in this test's mocks: or in
+// startup: binds, even where it was recorded in an earlier test's window:
+// that edit is the one the line names. A mock mappings.yaml names in no
+// place keeps where it was recorded.
+func TestOutcomeAWorkerSourceIsRefusedNamingTheEdit(t *testing.T) {
+	const p = "header.Authorization"
+	scoped := func(run bool, s Scope) Input {
+		in := oInput(p, "Bearer tok-9a1", "Bearer tok-9b2",
+			oServed("mock-22", run, false, Response, oText("body.token", "tok-9a1"), "tok-9b2", time.Millisecond), nil)
+		in.Scope = func(mock string) Scope {
+			if mock == "mock-22" {
+				return s
+			}
+			return ScopeUnknown
+		}
+		return in
+	}
+	d := oWord(t, Decide(scoped(false, ScopeWorker)), "9a1", "9b2")
+	oRefused(t, "a token a worker: mock sent in the test's window", d, "another-scope", "mock-22")
+	if d.Refusal != nil && !strings.Contains(d.Refusal.Why, "worker:") {
+		t.Errorf("a worker: source: why %q; want it to name worker:", d.Refusal.Why)
+	}
+	if !oEdits(d.Refusal, "move-to-mocks", "move-to-startup", "noise-at-word") {
+		t.Errorf("a worker: source: edits %+v; want move to mocks:, move to startup:, noise at the word", d.Refusal)
+	}
+	d = oWord(t, Decide(scoped(false, ScopeTest("test-1"))), "9a1", "9b2")
+	oRefused(t, "a token test-1's mock sent", d, "another-scope", "mock-22")
+	if d.Refusal != nil && !strings.Contains(d.Refusal.Why, "test-1") {
+		t.Errorf("another test's source: why %q; want it to name test-1", d.Refusal.Why)
+	}
+	for _, s := range []Scope{ScopeTest("test-2"), ScopeStartup} {
+		d = oWord(t, Decide(scoped(true, s)), "9a1", "9b2")
+		if d.Outcome != OutcomeValue || d.From.Mock != "mock-22" {
+			t.Errorf("a token an earlier test's recording sent, listed in %s: %s; want a Value from mock-22", s, oDescribe([]Decision{d}))
+		}
+	}
+	d = oWord(t, Decide(scoped(true, ScopeUnknown)), "9a1", "9b2")
+	oRefused(t, "a token an earlier test's recording sent, in no mappings place", d, "another-scope", "mock-22")
 }
 
 // A place before the call that keploy could not read (the test case's own
