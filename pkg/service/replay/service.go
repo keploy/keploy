@@ -185,6 +185,15 @@ type MockPayloadMutator interface {
 	MutateMockPayload(ctx context.Context, m *models.Mock) error
 }
 
+// DuplicateNamer is an optional TestHooks extension: the tests of a set that
+// dynamic dedup (k8s-proxy auto-replay) decided are duplicates, decided in
+// BeforeTestResult. A run whose prune runs deletes the mocks only they consumed
+// and their mapping lines (dropDuplicates), and does not write their entries
+// back. Checked by type assertion, so hooks without it are unchanged.
+type DuplicateNamer interface {
+	GetDuplicateTestCaseNames(testSetID string) []string
+}
+
 // wholeSetMockMutator is the hook a replay called with a test set's mocks
 // loaded whole, which it no longer loads (MockPayloadMutator). Hooks that
 // still implement it are refused, loudly, rather than left uncalled: a

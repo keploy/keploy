@@ -218,6 +218,17 @@ type pruneVerdict struct {
 	// them, and asTimelineNames names the first maxPrunedMocksLogged.
 	asTimeline      int
 	asTimelineNames []string
+	// collect says the pass names every mock it drops in dropped (DropMocks);
+	// off for the prune, which logs a capped list only (pruneStats).
+	collect bool
+	dropped []string
+}
+
+// noteDropped names m, a mock the pass drops, when the pass collects them.
+func (v *pruneVerdict) noteDropped(m *models.Mock) {
+	if v.collect {
+		v.dropped = append(v.dropped, m.Name)
+	}
 }
 
 // judge reports whether the pass keeps m, the next mock of the file.
@@ -264,7 +275,7 @@ func (v *pruneVerdict) secondPass() bool {
 	if also == nil {
 		return false
 	}
-	*v = pruneVerdict{keeps: v.keeps, keepAlso: also, firstPass: v.place}
+	*v = pruneVerdict{keeps: v.keeps, keepAlso: also, firstPass: v.place, collect: v.collect}
 	return true
 }
 

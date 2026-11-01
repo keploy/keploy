@@ -936,6 +936,35 @@ func (db *MappingDb) ApplyShares(ctx context.Context, testSetID string, s models
 	return wrote, err
 }
 
+// DropTests deletes the entries of the given tests from the set's mapping
+// file, keeping every other entry and section, in the format it was in: the
+// lines of the tests dynamic dedup dropped, deleted with their mocks (replay's
+// dropDuplicates). Insert merges and never deletes an entry, so without this
+// the line of a test that is gone stays for good. A file with none of them is
+// left as it is, byte for byte; a missing one stays missing.
+func (db *MappingDb) DropTests(ctx context.Context, testSetID string, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	drop := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		drop[id] = true
+	}
+	return db.rewrite(ctx, testSetID, false, false, func(m *models.Mapping) bool {
+		kept := make([]models.MappedTestCase, 0, len(m.TestCases))
+		for _, tc := range m.TestCases {
+			if !drop[tc.ID] {
+				kept = append(kept, tc)
+			}
+		}
+		if len(kept) == len(m.TestCases) {
+			return false
+		}
+		m.TestCases = kept
+		return true
+	})
+}
+
 // rewrite reads the set's mapping file, applies change, and writes it back
 // in the format it was in when change reports a change. A missing file is
 // created (as an empty mapping) when create; otherwise it is an error when

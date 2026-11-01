@@ -607,6 +607,13 @@ const (
 // client that checks one refuses the response.
 const MetadataBodyDigestsKey = "bodyDigests"
 
+// Reusable reports whether m is served across tests: session or connection
+// lifetime, as DeriveLifetime gives it, kind fallbacks included. A look only:
+// m is not derived, and no fallback count counts it (lifetimeOf).
+func (m *Mock) Reusable() bool {
+	return lifetimeOf(m) != LifetimePerTest
+}
+
 // StatesLifetime reports whether m's recorder stated its lifetime
 // (MetadataLifetimeKey) with a value DeriveLifetime takes as given.
 func (m *Mock) StatesLifetime() bool {
