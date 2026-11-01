@@ -18,7 +18,7 @@
 <a href="https://join.slack.com/t/keploy/shared_invite/zt-3zcnuqfgl-WYK1NMhslVHsCtNcA1ULwA"><img src="https://img.shields.io/badge/Slack-4A154B?style=flat&logo=slack&logoColor=white" alt="Slack" /></a>
   <a href="https://www.linkedin.com/company/keploy/"><img src="https://img.shields.io/badge/LinkedIn-%230077B5.svg?style=flat&logo=linkedin&logoColor=white" alt="LinkedIn" /></a>
   <a href="https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg"><img src="https://img.shields.io/badge/YouTube-%23FF0000.svg?style=flat&logo=YouTube&logoColor=white" alt="YouTube" /></a>
-  <a href="https://x.com/Keployio"><img src="https://img.shields.io/badge/X-%231DA1F2.svg?style=flat&logo=X&logoColor=white" alt="X" /></a>
+  <a href="https://x.com/Keployio"><img src="https://img.shields.io/badge/X-%231DA1F2.svg?style=flat&logo=X" alt="X" /></a>
 </p>
 
 <p align="center">
@@ -69,9 +69,9 @@ It replays them deterministically so you can run tests without re‑provisioning
 
 ## 🧪 Combined Test Coverage
 
-If you’re a **developer**, you probably care about *statement* and *branch* coverage — Keploy calculates that for you. 
+If you’re a **developer**, you probably care about **statement** and **branch** coverage — Keploy calculates that for you. 
 
-If you’re a **QA**, you focus more on *API schema* and *business use‑case coverage* — Keploy calculates that too. This way coverage isn’t subjective anymore. 
+If you’re a **QA**, you focus on **API schema** and **business use-case coverage** — Keploy calculates that too. This way coverage isn’t subjective anymore. 
 
 👉 [Read the docs on coverage](https://keploy.io/docs/server/sdk-installation/go/)
 
@@ -79,7 +79,7 @@ If you’re a **QA**, you focus more on *API schema* and *business use‑case co
 
 ## 🤖 Expand API Coverage using AI
 
-Keploy uses existing recordings, Swagger/OpenAPI Schema to find: boundary values, missing/extra fields, wrong types, out‑of‑order sequences, retries/timeouts. 
+Keploy uses existing recordings, Swagger/OpenAPI Schema to find: boundary values, missing/extra fields, wrong types, out-of-order sequences, retries/timeouts. 
 
 This helps expand API Schema, Statement, and Branch Coverage. 
 
@@ -135,6 +135,25 @@ keploy test -c "CMD_TO_RUN_APP" --delay 10
 ### - 📘 [Installation](https://keploy.io/docs/server/installation/)
 ### - 🏁 [QuickStarts](https://keploy.io/docs/quickstart/quickstart-filter/)
 
+## Troubleshooting
+
+If Keploy does not start or recording/replay does not behave as expected, check these areas first:
+
+### Kernel version
+
+Keploy uses eBPF for network-level traffic capture. Check your Linux kernel version and compare it with the requirements in the [installation documentation](https://keploy.io/docs/server/installation/) before troubleshooting further.
+
+### Docker on macOS
+
+If you are running Keploy with Docker on macOS, check the platform-specific installation guidance and known limitations in the [installation documentation](https://keploy.io/docs/server/installation/).
+
+### Known errors
+
+For an error not covered by the documentation:
+
+1. Search the [Keploy issue tracker](https://github.com/keploy/keploy/issues) for the exact error message.
+2. Check the [Keploy documentation](https://keploy.io/docs/) for the relevant installation or runtime guidance.
+3. If the problem is still unresolved, open a new issue with your operating system, Keploy version, command used, and the complete error output.
 
 ---
 
