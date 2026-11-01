@@ -45,14 +45,16 @@ func readerBudgetBytes() int64 {
 // readerIndex is one Decide call's index: what it kept of each text asked
 // about, by the text's hash, the bytes that takes (counted on the set's budget
 // too where the call is a set's), and how many recordings keploy could not
-// read.
+// read. peak is the most a question of fields (fieldsWith) held at once by
+// the index's own count: what it keeps, the text read now, the view as it
+// is built, and the field it reads with that field's forms.
 type readerIndex struct {
-	dc           *DriftCache
-	set          *setDerived
-	budget, used int64
-	seed         maphash.Seed
-	texts        map[uint64][]*readerEntry
-	unreadTexts  int
+	dc                 *DriftCache
+	set                *setDerived
+	budget, used, peak int64
+	seed               maphash.Seed
+	texts              map[uint64][]*readerEntry
+	unreadTexts        int
 }
 
 // readerEntry is what the index keeps of one text: its words, its base64
@@ -218,16 +220,17 @@ func (e *readerEntry) own(s string) int64 {
 
 // indexOnce is what one kind of question (slot) asks of the text: the
 // answer the entry keeps, or the one of builds from the text read now (and
-// its recording's fields). That answer is kept, with the text that tells it
-// apart, where both fit what is left of the budget and cost times the text
-// does (the peak of building it, where that is far more than the text). Past
-// it, scan (where given) answers the caller's one question from the text read now, and
-// builds no answer (scanned true); else the answer is the caller's for
-// this question alone. Nothing here holds either, so the same question
+// its recording's fields), given the room left of the index's cap once the
+// text is counted (-1: none, past the budget). That answer is kept, with the
+// text that tells it apart, where both fit what is left of the budget. of
+// reports false where building it would pass that room (it counts what it
+// builds as it goes, and stops there). Past the budget, or past the room,
+// scan (where given) answers the caller's one question from the text read
+// now, and builds no answer (scanned true); else the answer is the caller's
+// for this question alone. Nothing here holds either, so the same question
 // asked again reads the text again (through main's caches, which keep what
-// fits theirs). The text is read once per question. ok is false only
-// where the recording was not read.
-func indexOnce[V any](t *readerText, slot func(*readerEntry) *answer[V], of func(string, []rawField) V, size func(V) int64, scan func(string, []rawField), cost int64) (v V, scanned, ok bool) {
+// fits theirs). ok is false only where the recording was not read.
+func indexOnce[V any](t *readerText, slot func(*readerEntry) *answer[V], of func(s string, fields []rawField, room int64) (V, bool), size func(V) int64, scan func(string, []rawField)) (v V, scanned, ok bool) {
 	if t.e != nil && slot(t.e).ok {
 		return slot(t.e).v, false, true
 	}
@@ -239,21 +242,33 @@ func indexOnce[V any](t *readerText, slot func(*readerEntry) *answer[V], of func
 	if a.ok {
 		return a.v, false, true
 	}
-	if !x.mayKeep(e, s) || x.used+cost*int64(len(s)) > x.budget {
-		if scan != nil {
-			scan(s, fields)
-			return v, true, true
+	room := int64(-1)
+	if x.mayKeep(e, s) {
+		room = x.budget - x.used - e.own(s)
+	}
+	if room >= 0 || scan == nil {
+		var fits bool
+		if v, fits = of(s, fields, room); fits && room >= 0 {
+			if x.claim(size(v) + e.own(s)) {
+				e.text = s
+				a.v, a.ok = v, true
+			} else {
+				e.past = true
+			}
 		}
-		return of(s, fields), false, true
+		if fits {
+			return v, false, true
+		}
 	}
-	v = of(s, fields)
-	if x.claim(size(v) + e.own(s)) {
-		e.text = s
-		a.v, a.ok = v, true
-	} else {
-		e.past = true
-	}
-	return v, false, true
+	scan(s, fields)
+	var none V
+	return none, true, true
+}
+
+// uncapped is of, for an answer built whole however little room is left: what
+// it builds is counted once built (claim), as main's caches count theirs.
+func uncapped[V any](of func(string, []rawField) V) func(string, []rawField, int64) (V, bool) {
+	return func(s string, fields []rawField, _ int64) (V, bool) { return of(s, fields), true }
 }
 
 // mayKeep reports whether an answer of s may still be kept in e: e is not
@@ -271,13 +286,13 @@ func (x *readerIndex) mayKeep(e *readerEntry, s string) bool {
 // answering past it (indexOnce).
 func (t *readerText) tokens(scan func(string, []rawField)) ([]map[string]bool, bool, bool) {
 	return indexOnce(t, func(e *readerEntry) *answer[[]map[string]bool] { return &e.tokens },
-		func(s string, _ []rawField) []map[string]bool { return t.x.dc.rawTokens(s) }, tokensBytes, scan, 0)
+		uncapped(func(s string, _ []rawField) []map[string]bool { return t.x.dc.rawTokens(s) }), tokensBytes, scan)
 }
 
 // spansOf are the text's instants (instantSpans), read once for the call
 // where they fit the budget; ok false where the recording was not read.
 func (t *readerText) spansOf() ([]instant, bool) {
-	v, _, ok := indexOnce(t, func(e *readerEntry) *answer[[]instant] { return &e.spans }, func(s string, _ []rawField) []instant { return t.x.dc.spansOf(s) }, spansBytes, nil, 0)
+	v, _, ok := indexOnce(t, func(e *readerEntry) *answer[[]instant] { return &e.spans }, uncapped(func(s string, _ []rawField) []instant { return t.x.dc.spansOf(s) }), spansBytes, nil)
 	return v, ok
 }
 
@@ -311,17 +326,17 @@ func (t *readerText) holdsWord(w string) (held, read bool) {
 // read), which reads no other word of it and keeps nothing, in no cache
 // either. read is false where the recording was not read.
 func (t *readerText) wordIn(w string, rs ...int) (held, read bool) {
-	sets, scanned, ok := t.tokens(func(s string, _ []rawField) { held = heldIn(s, w, rs...) })
+	sets, scanned, ok := t.tokens(func(s string, _ []rawField) { held = heldIn(textForms(s), w, rs...) })
 	if scanned || !ok {
 		return held, ok
 	}
 	return slices.ContainsFunc(rs, func(r int) bool { return r < len(sets) && sets[r][w] }), true
 }
 
-// heldIn reports whether a declared form of s holds w as a word in any of
-// the readings rs.
-func heldIn(s, w string, rs ...int) bool {
-	return slices.ContainsFunc(textForms(s), func(f string) bool {
+// heldIn reports whether one of a text's declared forms (textForms) holds w
+// as a word in any of the readings rs.
+func heldIn(forms []string, w string, rs ...int) bool {
+	return slices.ContainsFunc(forms, func(f string) bool {
 		return slices.ContainsFunc(rs, func(r int) bool { return heldBy(f, w, readings[r]) })
 	})
 }
@@ -361,12 +376,6 @@ type fieldAt struct {
 	key  bool
 }
 
-// fieldViewCost is what building a field view holds at its peak, in times
-// its text: 5 to 14 on JSON answers, up to 38 on one long string of short words. A
-// view is built only where that much is left of the budget, so what it holds
-// before it is counted stays within the budget too.
-const fieldViewCost = 48
-
 // fieldWords is what the index keeps of a text's fields: each field, and,
 // by word, the fields (indices into at) whose own text holds it.
 type fieldWords struct {
@@ -389,32 +398,61 @@ func fieldWordsBytes(f fieldWords) int64 {
 // main's readings and any declared form of the field's own text (holdsWord,
 // field by field): a recording's by its fields, so a word that moved to
 // another field in round F's view is not at its recorded field. Read once
-// for the call where the view has room in the budget (fieldViewCost); past
-// it, by a scan of the fields of the text read now, which keeps nothing.
-// read is false where the recording was not read.
+// for the call where the view fits what is left of the index's cap as it is
+// built (counted word by word, with the field it reads and that field's
+// forms, and dropped once past it); else, by a scan of the fields of the text
+// read now, which keeps nothing. Either way the index's count of what the
+// question held (peak) is what these hold. read is false where the recording
+// was not read.
 func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
+	x := t.x
 	fw, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[fieldWords] { return &e.fields },
-		func(s string, fields []rawField) fieldWords {
-			fw := fieldWords{of: map[string][]int32{}}
+		func(s string, fields []rawField, room int64) (fieldWords, bool) {
+			fw, n, fits := fieldWords{of: map[string][]int32{}}, int64(headerBytes), room >= 0
 			eachField(s, fields, func(f fieldAt, text string) {
-				k := int32(len(fw.at))
-				fw.at = append(fw.at, f)
-				for _, set := range tokensOfForms(textForms(text)) {
-					for w := range set {
-						if l := fw.of[w]; len(l) == 0 || l[len(l)-1] != k {
-							fw.of[w] = append(l, k)
+				if !fits {
+					return
+				}
+				forms, held := formsHeld(text)
+				k, head := int32(len(fw.at)), headerBytes+int64(len(f.path))
+				if fits = n+head+held <= room; fits {
+					fw.at = append(fw.at, f)
+					n += head
+				}
+				for _, form := range forms {
+					for _, word := range readings {
+						for i, j := 0, 0; i < len(form) && fits; i = max(j, i+1) {
+							for j = i; j < len(form) && word(form[j]); {
+								j++
+							}
+							l, seen := fw.of[form[i:j]]
+							if j == i || seen && l[len(l)-1] == k {
+								continue
+							}
+							w, more := form[i:j], int64(4)
+							if !seen {
+								w, more = strings.Clone(w), wordBytes+int64(len(w))+4
+							}
+							if fits = n+more+held <= room; fits {
+								n += more
+								fw.of[w] = append(l, k)
+							}
 						}
 					}
 				}
+				x.peak = max(x.peak, x.budget-room+n+held)
 			})
-			return fw
+			return fw, fits
 		}, fieldWordsBytes, func(s string, fields []rawField) {
+			own := t.e.own(s)
 			eachField(s, fields, func(f fieldAt, text string) {
-				if heldIn(text, w, 0, 1, 2) {
+				forms, held := formsHeld(text)
+				x.peak = max(x.peak, x.used+own+held)
+				if heldIn(forms, w, 0, 1, 2) {
 					at = append(at, f)
 				}
 			})
-		}, fieldViewCost)
+		})
 	if scanned || !ok {
 		return at, ok
 	}
@@ -422,6 +460,18 @@ func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
 		at = append(at, fw.at[k])
 	}
 	return at, true
+}
+
+// formsHeld are text's declared forms (textForms), and what reading them
+// holds by the index's count: the text as the walk's decoder buffers it (up
+// to twice its length: its buffer doubles), and each form, the text among
+// them.
+func formsHeld(text string) ([]string, int64) {
+	forms, n := textForms(text), 2*int64(len(text))
+	for _, f := range forms {
+		n += int64(len(f))
+	}
+	return forms, n
 }
 
 // eachField calls yield with each field of s, the text read now, and the
@@ -453,13 +503,16 @@ func eachField(s string, fields []rawField, yield func(fieldAt, string)) {
 }
 
 // walkJSON walks text as JSON values token by token, each key and scalar to
-// yield at the path textFields gives it, so a large body costs its largest
-// token: no tree, no rewritten copy. several puts each value below its index,
-// as an array's element is (NDJSON, a streaming API's body). A repeated key's
+// yield at its path, so a large body costs its largest token: no tree, no
+// rewritten copy. A path is spelled as textFields spells it (a.b[0].c), but a
+// key no nesting could spell alike (pathKey) is quoted, so two places of one
+// text never share a path. several puts each value below its index, as an
+// array's element is (NDJSON, a streaming API's body). A repeated key's
 // values all stand at that key; a null is no leaf. It gives how many values
-// text holds, none where text is not wholly JSON values or nests deeper than
-// encoding/json reads (its Token refuses past its depth, which bounds the
-// walk's recursion).
+// text holds, none where text is not wholly JSON values (a scalar glued to
+// the value beside it, as in "007" or "2026-11-02", is text, not values) or
+// nests deeper than encoding/json reads (its Token refuses past its depth,
+// which bounds the walk's recursion).
 func walkJSON(text string, several bool, yield func(path string, key bool, leaf string)) (values int) {
 	d := json.NewDecoder(strings.NewReader(text))
 	d.UseNumber()
@@ -472,7 +525,9 @@ func walkJSON(text string, several bool, yield func(path string, key bool, leaf 
 			return false
 		}
 		t, open := tok.(json.Delim)
-		if tok != nil && !open { // a string, a json.Number or a bool, written as textFields writes it
+		if s, isText := tok.(string); isText {
+			yield(string(path), false, s)
+		} else if tok != nil && !open { // a json.Number or a bool, written as textFields writes it
 			yield(string(path), false, fmt.Sprint(tok))
 		}
 		if !open {
@@ -486,10 +541,7 @@ func walkJSON(text string, several bool, yield func(path string, key bool, leaf 
 				return false
 			} else {
 				name, _ := k.(string)
-				if base > 0 {
-					path = append(path, '.')
-				}
-				path = append(path, name...)
+				path = pathKey(path, name)
 				yield(string(path), true, name)
 			}
 			if !walk() {
@@ -500,18 +552,39 @@ func walkJSON(text string, several bool, yield func(path string, key bool, leaf 
 		_, err = d.Token()
 		return err == nil
 	}
-	for ; d.More(); values++ {
+	scalar := func(i int) bool { return text[i] != '{' && text[i] != '[' }
+	for end, last := -1, 0; d.More(); values++ {
+		if start := int(d.InputOffset()); start == end && (scalar(last) || scalar(start)) {
+			return 0
+		} else {
+			last = start
+		}
 		if path = path[:0]; several {
 			index(values)
 		}
 		if !walk() {
 			return 0
 		}
+		end = int(d.InputOffset())
 	}
 	if _, err := d.Token(); err != io.EOF {
 		return 0
 	}
 	return values
+}
+
+// pathKey is path with key k below it: ".k" (no dot at the root), as
+// textFields writes it, or, for a key that path syntax could read as more
+// than one key (empty, or holding '.', '[', ']', a quote or a backslash),
+// the key quoted in brackets (["a.b"]), which no other key or index spells.
+func pathKey(path []byte, k string) []byte {
+	if k == "" || strings.ContainsAny(k, `.[]"\`) {
+		return append(strconv.AppendQuote(append(path, '['), k), ']')
+	}
+	if len(path) > 0 {
+		path = append(path, '.')
+	}
+	return append(path, k...)
 }
 
 // inOneField reports whether one field holds rw in r's text and lw in l's
@@ -537,13 +610,13 @@ func (t *readerText) holdsToken(kind tokenKind, tok string) (held, read bool) {
 		return t.wordIn(tok, len(readings)-1)
 	}
 	runs, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[map[string]bool] { return &e.runs },
-		func(s string, _ []rawField) map[string]bool {
+		uncapped(func(s string, _ []rawField) map[string]bool {
 			runs := map[string]bool{}
 			eachB64Run(s, t.x.dc.spansOf(s), func(a, b int) bool { runs[s[a:b]] = true; return true })
 			return runs
-		}, wordsBytes, func(s string, _ []rawField) {
+		}), wordsBytes, func(s string, _ []rawField) {
 			eachB64Run(s, t.x.dc.spansOf(s), func(a, b int) bool { held = s[a:b] == tok; return !held })
-		}, 0)
+		})
 	if scanned || !ok {
 		return held, ok
 	}
@@ -600,9 +673,9 @@ func eachB64Run(s string, spans []instant, yield func(start, end int) bool) {
 func (t *readerText) holdsMoment(m moment) (held, fine, read bool) {
 	dc := t.x.dc
 	spans, _, ok := indexOnce(t, func(e *readerEntry) *answer[[]instant] { return &e.formSpans },
-		func(s string, _ []rawField) []instant {
+		uncapped(func(s string, _ []rawField) []instant {
 			return slices.Concat(dc.spansOf(s), dc.spansOf(dc.rawExtra(s)))
-		}, spansBytes, nil, 0)
+		}), spansBytes, nil)
 	for _, sp := range spans {
 		if !sp.keyed {
 			continue
