@@ -83,9 +83,10 @@ var ErrPlace = errors.New("not a variable place")
 // '\' is itself. A JSON key holding '|' or '#' is quoted, as one holding '.'.
 // A name written before the escape reads here as it did, but for a "\|",
 // "\#" or "\\" in it: no header name holds one ('\' is not a token byte),
-// and a query name that did now reads with that '\' dropped. A field
-// written before word addresses is read with Parse, never with
-// ParseAddress, which reads a name ending in #<digits> as a word of it.
+// and a query name that did now reads with that '\' dropped. A place of a
+// mock's variables block is read with ReadPlace: as Parse reads it where the
+// recording holds it, else as a word address (ParseAddress, which reads a
+// name ending in #<digits> as a word of it).
 func Parse(s string) (Place, error) {
 	switch {
 	case s == bodyPrefix:

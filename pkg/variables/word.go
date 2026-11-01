@@ -26,7 +26,7 @@ import (
 // step gives; with no #n the address names that text whole. A plain place
 // (no step, no word) is written as Place.String writes it, so a place
 // written before word addresses prints the same (and reads the same through
-// Parse; ParseAddress states its limit).
+// Parse and ReadPlace; ParseAddress states its limit).
 //
 // The steps:
 //
@@ -77,8 +77,8 @@ type Address struct {
 // ("url.query.page#2") reads here as a word of the shorter name, and one
 // that holds '|' and a step's name ("url.query.a|json", "body.a|b64") reads
 // here as the shorter name and that step, where Parse reads the whole name
-// in both. A field written before word addresses is read with Parse, never
-// with ParseAddress.
+// in both. A place of a mock's variables block is read with ReadPlace,
+// which reads such a name whole where the recording holds it.
 func ParseAddress(s string) (Address, error) {
 	a, err := parseAddress(s)
 	if err != nil {
@@ -89,6 +89,26 @@ func ParseAddress(s string) (Address, error) {
 	}
 	return a, nil
 }
+
+// ReadPlace reads s, a place of a mock's variables block (a bind, a use or
+// an answer of models.MockVariable), as each protocol's replay reads one: as
+// Parse reads it where the recording holds a value there (holds), so a place
+// written before word addresses reads as it did, a name that ends in
+// #<digits> or holds '|' included; else as ParseAddress reads it, a word or
+// a decode step of a shorter place. Another protocol's learn step writes a
+// word address there: a Mongo call that copies one word of a field an HTTP
+// call sent binds its variable at that word of the HTTP recording. A place
+// the recording holds neither way reads as ParseAddress reads it, and its
+// reader finds no value there.
+func ReadPlace(s string, holds func(Place) bool) (Address, error) {
+	if p, err := Parse(s); err == nil && holds(p) {
+		return Address{Place: p, Word: -1}, nil
+	}
+	return ParseAddress(s)
+}
+
+// Whole reports whether a names its place's value whole: no step, no word.
+func (a Address) Whole() bool { return a.Word < 0 && len(a.Steps) == 0 }
 
 func parseAddress(s string) (Address, error) {
 	end := placeEnd(s)
