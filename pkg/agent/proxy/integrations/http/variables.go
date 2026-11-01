@@ -123,9 +123,10 @@ func splitVariableMocks(pool []*models.Mock) (withVars, rest []*models.Mock) {
 }
 
 // readDecls reads m's variables, by name, or says why one cannot be followed.
-// A request place is read against m's recorded request (variables.ReadPlace);
-// an answer place against its recorded response, which may not be loaded yet,
-// where it is answered (renderAnswers): here, as a word address.
+// A place is read against m's recorded request (variables.ReadPlace). An answer
+// place is read again against the recorded response, which may not be loaded
+// yet, where it is answered (renderAnswers): here only its part counts, which
+// every reading of it gives alike.
 func readDecls(m *models.Mock) ([]varDecl, string) {
 	names := make([]string, 0, len(m.Spec.Variables))
 	for name := range m.Spec.Variables {
@@ -142,11 +143,7 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 		return recorded && ok
 	}
 	parse := func(name, role, raw string, answer bool) (varPlace, string) {
-		holds := inRequest
-		if answer {
-			holds = func(variables.Place) bool { return false }
-		}
-		a, err := variables.ReadPlace(raw, holds)
+		a, err := variables.ReadPlace(raw, inRequest)
 		if err != nil {
 			return varPlace{}, fmt.Sprintf("the %s place of variable %s: %v", role, name, err)
 		}
@@ -264,12 +261,9 @@ type held struct {
 	kind templates.LeafKind
 	raw  string // the JSON text of a body place
 	body bool
-	// word: value is a word of the place's value (kind and raw are the
-	// place's), compared as text.
-	word bool
 }
 
-func (h held) number() bool { return h.body && h.kind == templates.LeafNumber && !h.word }
+func (h held) number() bool { return h.body && h.kind == templates.LeafNumber }
 
 // empty reports whether the value cannot be a variable's: empty text, or a
 // JSON null.
@@ -279,20 +273,22 @@ func (h held) empty() bool {
 
 // read returns the value at vp: the value at its place, or the word of it the
 // place names (its kind and raw the place's); false where the request has no
-// value there, or no such word.
+// value there, or no such word. A word is a word of a string, as Mongo's
+// replay reads one: a body value of another JSON type holds none (a value
+// outside the body is text, LeafString).
 func (v reqView) read(vp varPlace) (held, bool) {
 	h, ok := v.leaf(vp.place)
 	if !ok || vp.whole() {
 		return h, ok
 	}
-	if h.body && h.kind == templates.LeafNull {
+	if h.kind != templates.LeafString {
 		return held{}, false
 	}
 	w, ok := vp.at.WordOf(h.value)
 	if !ok {
 		return held{}, false
 	}
-	h.value, h.word = w, true
+	h.value = w
 	return h, true
 }
 
@@ -593,11 +589,11 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 			}
 			r, ok := rec.read(vp)
 			if !ok {
+				if l, isLeaf := rec.leaf(vp.place); isLeaf && l.kind != templates.LeafString {
+					// A word place at a value of another JSON type (read).
+					return refuse(fmt.Sprintf("its recorded request holds %s at %s, which is no string to hold a word of (variable %s)", l.raw, vp.raw, d.name))
+				}
 				return refuse(fmt.Sprintf("its recorded request holds no single value at %s (variable %s)", vp.raw, d.name))
-			}
-			if r.word && r.body && r.kind != templates.LeafString {
-				// A word is a word of a string, as Mongo's replay reads one.
-				return refuse(fmt.Sprintf("its recorded request holds %s at %s, which is no string to hold a word of (variable %s)", r.raw, vp.raw, d.name))
 			}
 			if !variables.SameValue(d.recorded, r.value, r.number()) {
 				return refuse(fmt.Sprintf("its recorded request holds %q at %s, not variable %s's recorded value %q", r.value, vp.raw, d.name, d.recorded))
