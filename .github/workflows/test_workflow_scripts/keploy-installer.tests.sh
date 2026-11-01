@@ -502,6 +502,7 @@ suite() {
   check "nothing is installed, and no keploy runs" eval 'nothing_installed && release_keploy_did_not_run'
   check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
   check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
+  check "no status variable is left set in the caller's shell" no_status_left
 
   echo "== --oss, the download is cut off partway through keploy"
   case_env=(FAKE_RELEASE_TARBALL="$tmp/truncated.tar.gz")
@@ -510,6 +511,7 @@ suite() {
   check "the part of keploy that was extracted is not installed, and no keploy runs" eval 'nothing_installed && release_keploy_did_not_run'
   check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
   check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
+  check "no status variable is left set in the caller's shell" no_status_left
 
   echo "== --oss, the release tarball has no keploy in it"
   case_env=(FAKE_RELEASE_TARBALL="$tmp/no-keploy.tar.gz")
@@ -519,6 +521,7 @@ suite() {
   check "nothing is installed, and no keploy runs" eval 'nothing_installed && release_keploy_did_not_run'
   check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
   check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
+  check "no status variable is left set in the caller's shell" no_status_left
 
   echo "== --oss, ~/.keploy is a file, so keploy cannot be put in ~/.keploy/bin"
   case_home_blocked=1
@@ -564,6 +567,7 @@ suite() {
   check "the install fails" test "$rc" -ne 0
   check "the part of keploy that was extracted is not installed, and no keploy runs" eval 'nothing_installed && release_keploy_did_not_run'
   check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+  check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
 
   echo "== --oss on macOS, ~/.keploy is a file, so keploy cannot be put in ~/.keploy/bin"
   case_env=(FAKE_UNAME_S=Darwin FAKE_UNAME_M=arm64)
@@ -573,6 +577,7 @@ suite() {
   check "the shell it was sourced into lives on: keploy.sh returns, never exits" lived_on
   check "no keploy runs" release_keploy_did_not_run
   check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+  check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
 
   local row name what env args said_what argv
   for row in \
