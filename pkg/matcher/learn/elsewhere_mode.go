@@ -35,21 +35,15 @@ func elsewhere(in Input, ds []Decision, fields []string) []Decision {
 	gField := fields[guard]
 	stop := "round F's call landed in " + in.Landed.String() + ", which teaches clock reads only; " +
 		wordWhere(in.Test, in.Mock, gField, g.At.Word) + " is " + outcomeWords(g)
-	edit := Edit{Kind: EditNoiseAtWord, Mock: in.Mock, Field: gField, Word: g.At.Word}
-	if g.At.Word < 0 {
-		edit = Edit{Kind: EditNoiseAtField, Mock: in.Mock, Field: gField, Word: -1}
-	}
+	edit := noiseEdit(in.Mock, gField, g.At.Word)
 	out := make([]Decision, 0, len(ds))
 	for i, d := range ds {
-		kind := RefusalLandedElsewhere
+		kind, places := RefusalLandedElsewhere, []string(nil)
 		if d.Refusal != nil {
-			kind = d.Refusal.Kind
+			kind, places = d.Refusal.Kind, d.Refusal.Places
 		}
 		rf := &Refusal{Kind: kind, Test: in.Test, Mock: in.Mock, Field: fields[i], Word: d.At.Word,
-			Recorded: d.Recorded, Full: d.Full, Why: "learned nothing: " + stop, Edits: []Edit{edit}}
-		if d.Refusal != nil {
-			rf.Places = d.Refusal.Places
-		}
+			Recorded: d.Recorded, Full: d.Full, Why: "learned nothing: " + stop, Places: places, Edits: []Edit{edit}}
 		hideSecrets(rf)
 		out = append(out, Decision{At: d.At, Recorded: d.Recorded, Full: d.Full, Outcome: OutcomeRefused, Refusal: rf, Line: RefusalLine(*rf)})
 	}
@@ -64,11 +58,7 @@ func outcomeWords(d Decision) string {
 	case OutcomeFresh:
 		why := "a value made anew each run"
 		if len(d.Echo) > 0 {
-			var at []string
-			for _, a := range d.Echo {
-				at = append(at, a.String())
-			}
-			why += ", which the call's recorded answer echoes at " + strings.Join(at, ", ")
+			why += ", which the call's recorded answer echoes at " + addrList(d.Echo)
 		}
 		return why + " (noise at it in keploy.yml lets its clock reads learn)"
 	}

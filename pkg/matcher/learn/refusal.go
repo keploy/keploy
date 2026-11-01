@@ -2,6 +2,7 @@ package learn
 
 import (
 	"encoding/json"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -10,7 +11,7 @@ import (
 // A refused word's line is one line a person, an LLM or a tool
 // reads:
 //
-//	<test> <mock> <field>[ word <n>]: recorded "<r>", round F "<f>": refused (<kind>): <why>. Places: <p>, <p>, <p>. Edits: <edit>; or <edit>. edits=[{"kind":...}]
+//	[<test> ]<mock> <field>[ word <n>]: recorded "<r>", round F "<f>": refused (<kind>): <why>. Places: <p>, <p>, <p>. Edits: <edit>; or <edit>. edits=[{"kind":...}]
 //
 // The values are always quoted (strconv.Quote), so a value with quotes,
 // colons or newlines stays on one line and reads back as it was. A name
@@ -85,41 +86,35 @@ func RefusalLine(r Refusal) string {
 	} else {
 		b.WriteString(strconv.Quote(r.Why))
 	}
-	if len(r.Places) > 0 {
-		b.WriteString(placesMark)
-		for i, p := range r.Places {
-			if i == maxLinePlaces {
-				break
-			}
-			if i > 0 {
-				b.WriteString(placeSep)
-			}
-			if plainPlace(p) {
-				b.WriteString(p)
-			} else {
-				b.WriteString(strconv.Quote(p))
-			}
-		}
-	}
-	if len(r.Edits) > 0 {
-		b.WriteString(editsMark)
-		for i, e := range r.Edits {
-			if i > 0 {
-				b.WriteString(editSep)
-			}
-			b.WriteString(editWords(e))
-		}
-	}
-	tail := make([]lineEdit, len(r.Edits))
+	b.WriteString(placesPart(r.Places))
+	tail, words := make([]lineEdit, len(r.Edits)), make([]string, len(r.Edits))
 	for i, e := range r.Edits {
-		tail[i] = lineEdit(e)
+		tail[i], words[i] = lineEdit(e), editWords(e)
+	}
+	if len(words) > 0 {
+		b.WriteString(editsMark + strings.Join(words, editSep))
 	}
 	js, _ := json.Marshal(tail) // a slice of strings and ints always marshals
 	b.WriteString("." + editsTail + string(js))
 	return b.String()
 }
 
-// wordWhere is "<test> <mock> <field>[ word <n>]", each name bare or quoted.
+// placesPart is a line's places, each bare or quoted, at most three.
+func placesPart(ps []string) string {
+	if len(ps) == 0 {
+		return ""
+	}
+	out := make([]string, 0, maxLinePlaces)
+	for _, p := range ps[:min(len(ps), maxLinePlaces)] {
+		if !plainPlace(p) {
+			p = strconv.Quote(p)
+		}
+		out = append(out, p)
+	}
+	return placesMark + strings.Join(out, placeSep)
+}
+
+// wordWhere is "[<test> ]<mock> <field>[ word <n>]", each name bare or quoted.
 func wordWhere(test, mock, field string, word int) string {
 	s := lineName(mock) + " " + lineName(field)
 	if test != "" {
@@ -202,18 +197,9 @@ func ParseRefusal(line string) (Refusal, bool) {
 	return Refusal{}, false
 }
 
-// endsWhere reports whether s, what follows a line's second name, ends the
-// word's place: that name was the field, of a line of no test.
-func endsWhere(s string) bool {
-	if rest, ok := strings.CutPrefix(s, " word "); ok {
-		digits := len(rest) - len(strings.TrimLeft(rest, "0123456789"))
-		s = rest[digits:]
-		if digits == 0 {
-			return false
-		}
-	}
-	return strings.HasPrefix(s, recordedMark)
-}
+// whereEnds matches what follows a line's second name where that name is the
+// field, in a line of no test.
+var whereEnds = regexp.MustCompile("^( word [0-9]+)?" + recordedMark)
 
 // parseHead reads the line before its tail: the word, both values, the
 // kind, the why and the places. The words of the edits are skipped: the
@@ -222,7 +208,7 @@ func parseHead(s string) (Refusal, bool) {
 	r := Refusal{Word: -1}
 	p := lineReader{s: strings.TrimSuffix(s, "."), ok: strings.HasSuffix(s, ".")}
 	r.Mock, r.Field = p.text(" "), p.lit(" ").text(" ", ":")
-	if !endsWhere(p.s) {
+	if !whereEnds.MatchString(p.s) {
 		r.Test, r.Mock, r.Field = r.Mock, r.Field, p.lit(" ").text(" ", ":")
 	}
 	if p.ok && strings.HasPrefix(p.s, " word ") {
