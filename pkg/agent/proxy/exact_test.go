@@ -1421,7 +1421,7 @@ func TestAConsumeOfAReplacedViewIsRefused(t *testing.T) {
 	mm.ServeExactPool("-", nil)
 	// The race: a consume that loaded v before the swap.
 	mk := *held[0]
-	verdict, wait, _ := mm.exactConsumeIn(v, &mk, true)
+	verdict, wait, _ := mm.exactConsumeIn(v, &mk, true, nil)
 	if verdict != exactRefused || wait == nil {
 		t.Fatalf("a consume in a replaced view: %v, wait %v; want refused, to be settled in the view in force", verdict, wait)
 	}
@@ -3967,6 +3967,78 @@ func TestAWindowsWorkerAnswersDoNotMoveWithTheCallsBetweenTests(t *testing.T) {
 				if got := window(gap); !reflect.DeepEqual(got, want) {
 					t.Errorf("after %d calls between tests, TestB's window was answered %v; want %v whatever the gap made", gap, got, want)
 				}
+			}
+		})
+	}
+}
+
+// A worker-scope consume is spent for the view its call was read in, not the
+// one in force as its commit lands. A held call (HoldToRound) settles in the
+// view in force while its staging holds, which a begin or an end may have
+// replaced since its read, more often the slower the replay. So a call read
+// between tests that commits after the next test opened spends nothing a
+// window reads, and a test's call that commits after its end still spends
+// its recording for the windows: whether a commit lands before or after a
+// begin or an end never moves what a window is answered. Both through a
+// delete door (DeleteUnFilteredMock, enterprise SQS's) and through a door
+// that keeps the recording (MarkMockAsUsed, HTTP's).
+func TestAWorkerSpendFollowsTheViewTheCallWasReadIn(t *testing.T) {
+	names := []string{"w-0", "w-1"}
+	setup := func(t *testing.T) (*MockManager, models.Mock) {
+		polls := []*models.Mock{httpCall("w-0", time.Second, "/poll"), httpCall("w-1", 2*time.Second, "/poll")}
+		mm := stagedManager(t, nil, polls)
+		mm.ServeExactWorker(names)
+		return mm, *polls[0]
+	}
+	for _, door := range []struct {
+		name    string
+		consume func(integrations.MockMemDb, models.Mock) bool
+		ask     func(*testing.T, *MockManager, string) string
+		evicts  bool
+	}{
+		{"delete door", func(db integrations.MockMemDb, mk models.Mock) bool { return db.DeleteUnFilteredMock(mk) }, pollFirst, true},
+		{"keeping door", func(db integrations.MockMemDb, mk models.Mock) bool { return db.MarkMockAsUsed(mk) }, markFirst, false},
+	} {
+		t.Run(door.name+"/read between tests, committed after the test opened", func(t *testing.T) {
+			mm, w0 := setup(t)
+			mm.ServeExactPool("k", nil)
+			held, _ := mm.HoldToRound(mm.MarkCallRound())
+			mm.ServeExactWorker(names)
+			mm.ServeExactTest("TestA", nil)
+			if ok := door.consume(held, w0); door.evicts && !ok {
+				t.Fatal("a call read between tests could not spend w-0 for the calls between tests once the test opened")
+			}
+			var got []string
+			for i := 0; i < 3; i++ {
+				got = append(got, door.ask(t, mm, "w-"))
+			}
+			// Settled as TestA's window's, the gap call would spend w-0
+			// for the windows and TestA would be answered w-1, then a
+			// miss: its answers would move with when the commit landed.
+			if want := []string{"w-0", "w-1", "a miss"}; !reflect.DeepEqual(got, want) {
+				t.Errorf("TestA's window was answered %v after a call read between tests committed in it; want %v, as when the commit lands before the begin", got, want)
+			}
+		})
+		t.Run(door.name+"/read in a test, committed after its end", func(t *testing.T) {
+			mm, w0 := setup(t)
+			mm.ServeExactTest("TestA", nil)
+			held, _ := mm.HoldToRound(mm.MarkCallRound())
+			mm.ServeExactWorker(names)
+			mm.ServeExactPool("k", nil)
+			if !door.consume(held, w0) {
+				t.Fatal("TestA's call could not spend w-0 for the windows once its test ended")
+			}
+			mm.ServeExactWorker(names)
+			mm.ServeExactTest("TestB", nil)
+			var got []string
+			for i := 0; i < 2; i++ {
+				got = append(got, door.ask(t, mm, "w-"))
+			}
+			// Settled as one of the calls between tests, TestA's call
+			// would leave w-0 unspent for the windows and TestB would be
+			// answered it again: one recording, two windows' answers.
+			if want := []string{"w-1", "a miss"}; !reflect.DeepEqual(got, want) {
+				t.Errorf("TestB's window was answered %v after TestA's call committed past TestA's end; want %v: w-0 answered TestA's window, as when the commit lands before the end", got, want)
 			}
 		})
 	}

@@ -784,6 +784,54 @@ func TestKindBackgroundIgnoresPlace(t *testing.T) {
 	}
 }
 
+// A by-kind spend of a worker recording is the view's its call was read in,
+// as a consume door's is (TestAWorkerSpendFollowsTheViewTheCallWasReadIn): a
+// call read between tests whose spend lands after the next test opened
+// spends it for the calls between tests only, and a test's call whose spend
+// lands after its end spends it for the windows. Settled in the view in
+// force, the first hid the recording from the test's window and the second
+// let a later window be answered it again, as the commit landed before or
+// after the boundary.
+func TestAByKindSpendFollowsTheViewTheCallWasReadIn(t *testing.T) {
+	worker := []string{"w-boot", "w-later"}
+	serve := func(mm *MockManager) {
+		mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, worker)
+		mm.ServeExactWorker(worker)
+	}
+	spend := func(t *testing.T, db integrations.MockMemDb, mk *models.Mock) {
+		t.Helper()
+		if !integrations.SpendByKind(db, mk) {
+			t.Fatalf("a held call's by-kind answer could not spend %s", mk.Name)
+		}
+	}
+	t.Run("read between tests, spent after the test opened", func(t *testing.T) {
+		mm, ms := s12Set(t)
+		serve(mm)
+		mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
+		held, _ := mm.HoldToRound(mm.MarkCallRound())
+		mm.ServeExactWorker(worker)
+		mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+		spend(t, held, ms["w-later"])
+		if got := pollFirst(t, mm, "w-later"); got != "w-later" {
+			t.Fatalf("T1's window was answered %s after a call read between tests spent w-later by kind in it; want w-later, as when the spend lands before the begin", got)
+		}
+	})
+	t.Run("read in a test, spent after its end", func(t *testing.T) {
+		mm, ms := s12Set(t)
+		serve(mm)
+		mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+		held, _ := mm.HoldToRound(mm.MarkCallRound())
+		mm.ServeExactWorker(worker)
+		mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
+		spend(t, held, ms["w-later"])
+		mm.ServeExactWorker(worker)
+		mm.ServeExactTest("T2", []*models.Mock{ms["other"]})
+		if got := pollFirst(t, mm, "w-later"); got != "a miss" {
+			t.Fatalf("T2's window was answered %s after T1's call spent w-later by kind past T1's end; want a miss: w-later answered T1's window", got)
+		}
+	})
+}
+
 // An async lane's worker-scope recording keeps today's reuse under the background
 // rules: the view shows it, as today, but it is no
 // background: exact serving's background (Background, SpentBackground) and
@@ -936,7 +984,7 @@ func TestASpendInAClosedViewBackInForceIsRefused(t *testing.T) {
 	mm.ServeExactPool("k", []string{"pool"})
 	v := mm.exactView()
 	mm.ServeExactPool("k2", []string{"pool"})
-	if spent, wait := mm.spendByKindIn(v, ms["pool"]); spent || wait == nil {
+	if spent, wait := mm.spendByKindIn(v, ms["pool"], nil); spent || wait == nil {
 		t.Fatalf("a spend in a replaced view: spent %v, wait %v; want it to wait for the view in force", spent, wait)
 	}
 	mm.exact.view.Store(v)
@@ -1058,9 +1106,9 @@ func TestAViewInstallExactClosesReleasesItsWaitersAfterTheRevisionsMove(t *testi
 					t.Errorf("the view replaced is %p; want %p", prev, replaced)
 				}
 				rev = mm.Revision()
-				_, waits["spend"] = mm.spendByKindIn(prev, ms["pool"])
+				_, waits["spend"] = mm.spendByKindIn(prev, ms["pool"], nil)
 				mk := *ms["pool"]
-				_, waits["consume"], _ = mm.exactConsumeIn(prev, &mk, true)
+				_, waits["consume"], _ = mm.exactConsumeIn(prev, &mk, true, nil)
 				for name, w := range waits {
 					if w == nil {
 						t.Errorf("a %s in the replaced view settled: it is closed", name)

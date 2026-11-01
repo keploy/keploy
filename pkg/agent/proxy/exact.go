@@ -743,12 +743,21 @@ func (m *MockManager) consumeOutside(mk *models.Mock, inTest bool) exactVerdict 
 	return exactServed
 }
 
-// spendsInTests reports whether a consume of mk in v spends it for the
-// windows of the staging only: mk is one of the worker scope's, not
-// protocol-phase, and a test is open. Outside every test the worker scope is
-// served by the pool slice's rule (consumeOutside, spentOutside).
-func (v *exactView) spendsInTests(mk *models.Mock) bool {
-	return v.test != "" && v.isWorker(mk.Name) && !mk.IsProtocolPhase()
+// spendsInTests reports whether a consume of mk settled in v spends it for
+// the windows of the staging only: mk is one of the worker scope's, not
+// protocol-phase, and the consume is a window's (windowed: its call was read
+// in a test's view, roundGuard.windowed). Outside every test the worker
+// scope is served by the pool slice's rule (consumeOutside, spentOutside).
+func (v *exactView) spendsInTests(mk *models.Mock, windowed bool) bool {
+	return windowed && v.isWorker(mk.Name) && !mk.IsProtocolPhase()
+}
+
+// spendsBetween reports whether a consume of mk settled in v is one of the
+// calls' between tests of the worker scope: mk is one of the worker scope's,
+// not protocol-phase, and its call was read with no test open, whatever view
+// is in force as it settles (roundGuard.windowed).
+func (v *exactView) spendsBetween(mk *models.Mock, windowed bool) bool {
+	return !windowed && v.isWorker(mk.Name) && !mk.IsProtocolPhase()
 }
 
 // exactView returns the view exact serving shows, nil when it is off.
@@ -2251,10 +2260,17 @@ func ownedKeysOf(ix *integrations.MockIndex, mk *models.Mock) []string {
 // mocks are read from the view itself (unanswered), never from the staged
 // trees.
 func (v *exactView) shows(mk *models.Mock) bool {
+	return v.showsTo(mk, v.test != "")
+}
+
+// showsTo is shows to a call read in a test's view (windowed) or between
+// tests, whatever view is in force (roundGuard.windowed): the worker scope's
+// spends it reads are that read's (spentOutsideIn).
+func (v *exactView) showsTo(mk *models.Mock, windowed bool) bool {
 	if mk == nil {
 		return false
 	}
-	return v.unspentNow(mk) && v.showsStatic(mk)
+	return !v.spentIn(mk.Name) && !v.spentOutsideIn(mk.Name, windowed) && v.showsStatic(mk)
 }
 
 // inBackgroundPool reports whether mk, consumed in an open test, is one of
@@ -2287,11 +2303,19 @@ func (v *exactView) isWorker(name string) bool {
 // open shows the worker scope a window spent: outside every test it is
 // served by the pool slice's rule.
 func (v *exactView) spentOutside(name string) bool {
+	return v.spentOutsideIn(name, v.test != "")
+}
+
+// spentOutsideIn is spentOutside read for a call read in a test's view
+// (windowed) or between tests, whatever view is in force
+// (roundGuard.windowed): it differs from spentOutside for the worker scope
+// alone.
+func (v *exactView) spentOutsideIn(name string, windowed bool) bool {
 	if v.outside == nil {
 		return false
 	}
 	e := v.epoch.Load()
-	if v.test != "" && v.isWorker(name) {
+	if windowed && v.isWorker(name) {
 		return v.outside.hiddenInTests(name, e)
 	}
 	return v.outside.hidden(name, e)
@@ -2799,7 +2823,7 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 		(*f)(mk.Name)
 	}
 	return settleInForce(m, exactRefused, func(v *exactView) (exactVerdict, <-chan struct{}) {
-		if v != nil && mk != nil && (evicts || v.spendsInTests(mk) || v.spendsAsPool(mk)) {
+		if v != nil && mk != nil && (evicts || v.spendsInTests(mk, g.windowed(v)) || v.spendsAsPool(mk)) {
 			if _, own := v.index[mk.Name]; !own {
 				// What a spend reads (consumeOutside), and the staged
 				// recording its take names (stagedRecording), before the
@@ -2815,7 +2839,7 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 		if ok, wait := m.guardLocked(g, v); !ok {
 			return exactRefused, wait
 		}
-		verdict, wait, after := m.exactConsumeIn(v, mk, evicts)
+		verdict, wait, after := m.exactConsumeIn(v, mk, evicts, g)
 		// Told once the view decided, in this step, that it is a serve,
 		// still holding the round lock: never of a consume it refused. One
 		// that found this view closed (wait) is told once, as it settles as
@@ -2858,12 +2882,14 @@ func settleInForce[T any](m *MockManager, refused T, settle func(v *exactView) (
 }
 
 // exactConsumeIn is exactConsume settled against v, holding the round lock:
-// what it takes is written to the staging's take log in the same step.
+// what it takes is written to the staging's take log in the same step. g,
+// when not nil, is the consume's guard: a worker-scope recording is read and
+// spent for the view g's call was read in (roundGuard.windowed).
 // wait, when not nil, says v is closed: nothing was settled, and the consume
 // is to be settled again once wait is closed. after, when not nil, is what
 // the consume tells the replay and the parsers' indexes, to run once the
 // round lock is let go.
-func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool) (exactVerdict, <-chan struct{}, func()) {
+func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool, g *roundGuard) (exactVerdict, <-chan struct{}, func()) {
 	if v == nil || mk == nil {
 		return exactPass, nil, nil
 	}
@@ -2909,7 +2935,8 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 			return exactServed, nil, func() { m.noteExactServed(owned, mk) }
 		}
 	}
-	if !v.shows(mk) {
+	windowed := g.windowed(v)
+	if !v.showsTo(mk, windowed) {
 		return exactRefused, nil, nil
 	}
 	// In a test's window one of the worker scope's answers at most one
@@ -2928,7 +2955,7 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 	// (models.ExactServing.Worker), so a call the app makes more often
 	// between tests when replay is slower never spends a worker: recording
 	// a later test's window needs.
-	worker := v.spendsInTests(mk)
+	worker := v.spendsInTests(mk, windowed)
 	if !evicts && !worker && !v.spendsAsPool(mk) {
 		return exactPass, nil, nil
 	}
@@ -2937,8 +2964,13 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 	// set. So is one of the pool's under the background rules, in a test or
 	// between tests, through any door: the background is the set's, whoever's
 	// call it answers. One of the worker scope's a test consumes is spent for
-	// the windows of the staging (consumeOutside's inTest).
-	if (v.test == "" || worker || v.inBackgroundPool(mk)) && !mk.IsProtocolPhase() {
+	// the windows of the staging (consumeOutside's inTest). Which of the two
+	// a worker-scope consume is follows the view its call was read in
+	// (windowed), not the one in force as it settles: a call read between
+	// tests whose commit lands after the next test opened is still one of
+	// the calls between tests (spendsBetween), and a test's call that
+	// commits after its end is still the window's.
+	if (v.test == "" || worker || v.spendsBetween(mk, windowed) || v.inBackgroundPool(mk)) && !mk.IsProtocolPhase() {
 		// The view's closed check and the spend are one step: no begin or
 		// end lands between them.
 		v.mu.Lock()

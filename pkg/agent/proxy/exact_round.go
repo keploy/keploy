@@ -413,14 +413,37 @@ func (m *MockManager) bumpStagingEpoch() {
 // replaced within it, at a test's begin or end, is still the call's set, and
 // a consume that finds its view closed is settled in the view that replaces
 // it, as one with no guard is. restaged: a staging guard found the staging
-// moved.
+// moved. read: the guard knows the view its call was read in (a staging
+// guard's mark), readInTest whether that view was a test's (windowed).
 type roundGuard struct {
-	at       integrations.RoundAt
-	moved    string
-	in       *learn.Flight
-	free     bool
-	staging  bool
-	restaged bool
+	at         integrations.RoundAt
+	moved      string
+	in         *learn.Flight
+	free       bool
+	staging    bool
+	restaged   bool
+	read       bool
+	readInTest bool
+}
+
+// windowed reports whether a consume settled in v is a test window's: made
+// by a call read in a test's view. It decides which spend of the worker
+// scope the consume reads and makes (exactView.spendsInTests,
+// spentOutsideIn): the windows' or the calls' between tests. A staging
+// guard's call (HoldToRound) settles in the view in force, which a test's
+// begin or end may have installed since its read; its spend is the view's it
+// was read in, as its walk is (heldScope.SequenceView). So a call read
+// between tests that commits after the next test opened never spends a
+// worker recording for the windows, nor one read in a test that commits
+// after its end for the calls between tests: a window's answers never move
+// with when a call's commit lands. Any other consume settles in the view it
+// was read in (a guard of the round refuses one the round moved under), or
+// tells no read: v's.
+func (g *roundGuard) windowed(v *exactView) bool {
+	if g != nil && g.read {
+		return g.readInTest
+	}
+	return v.test != ""
 }
 
 // checks says g checks its take against a round: a guard, not ServingFor's.
@@ -921,7 +944,7 @@ const restagedWhy = "the staging moved: the test set was staged again"
 // staging call was marked in (heldScope). restaged reports whether a read or
 // a consume door of it found the staging moved since.
 func (m *MockManager) HoldToRound(call integrations.CallRound) (integrations.MockMemDb, func() bool) {
-	h := &heldScope{roundScope: roundScope{MockManager: m, g: roundGuard{at: integrations.RoundAt{Epoch: call.Epoch()}, staging: true}}}
+	h := &heldScope{roundScope: roundScope{MockManager: m, g: roundGuard{at: integrations.RoundAt{Epoch: call.Epoch()}, staging: true, read: call.Read(), readInTest: call.InTest()}}}
 	h.seq, h.seqOK = call.Sequence()
 	return h, h.restaged
 }

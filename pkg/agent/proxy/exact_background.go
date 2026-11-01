@@ -336,7 +336,7 @@ func (m *MockManager) spendByKindAt(mk *models.Mock, g *roundGuard) (spent bool,
 			}
 			return false, wait
 		}
-		ok, wait := m.spendByKindIn(v, mk)
+		ok, wait := m.spendByKindIn(v, mk, g)
 		m.exact.round.mu.Unlock()
 		if ok {
 			why = ""
@@ -349,9 +349,15 @@ func (m *MockManager) spendByKindAt(mk *models.Mock, g *roundGuard) (spent bool,
 
 // spendByKindIn is SpendByKind settled against v, holding the round lock.
 // wait, when not nil, says v is closed: nothing was spent, and the spend is
-// to be settled again once wait is closed.
-func (m *MockManager) spendByKindIn(v *exactView, mk *models.Mock) (bool, <-chan struct{}) {
-	if v == nil || v.bg == nil || !v.isBackgroundRecording(mk) || v.spentBackground(mk.Name) {
+// to be settled again once wait is closed. A worker-scope recording is read
+// and spent for the view g's call was read in (roundGuard.windowed), as
+// exactConsumeIn does.
+func (m *MockManager) spendByKindIn(v *exactView, mk *models.Mock, g *roundGuard) (bool, <-chan struct{}) {
+	if v == nil || v.bg == nil || !v.isBackgroundRecording(mk) {
+		return false, nil
+	}
+	windowed := g.windowed(v)
+	if v.spentIn(mk.Name) || v.spentOutsideIn(mk.Name, windowed) {
 		return false, nil
 	}
 	// The view's closed check and the spend are one step, as exactConsume's.
@@ -360,7 +366,7 @@ func (m *MockManager) spendByKindIn(v *exactView, mk *models.Mock) (bool, <-chan
 		v.mu.Unlock()
 		return false, wait
 	}
-	verdict := m.consumeOutside(mk, v.spendsInTests(mk))
+	verdict := m.consumeOutside(mk, v.spendsInTests(mk, windowed))
 	v.mu.Unlock()
 	if verdict != exactServed {
 		return false, nil
