@@ -744,3 +744,100 @@ func TestACallDecidedTheTestsOwnIsRefusedTheBackgroundAtEveryDoorAndWalk(t *test
 		})
 	}
 }
+
+// A connection's scoped view (scopedMockDb) held to a call passes on its held
+// store's answers for the call, as the bare held store gives them. A
+// recording of the worker scope the run reached is the background's, and the
+// open test's own is not (InBackground: Postgres hides a statement's
+// background copy by it, and Mongo's learn step reads it). A call decided the
+// test's own is refused the worker scope's recording, never the test's own
+// (RefusesAnswer: HTTP's variable pass asks it before it binds), and the view
+// says it hides the background (OwnRepeat: a MySQL, gRPC or HTTP/2 miss asks
+// it before it is reported). A call decided otherwise is refused nothing.
+// Without the view passing any one of them on, on a connection opened before
+// exact serving began (scopedFor decides once per connection), the
+// background could answer a call one more than the test recorded, or be
+// compared with its miss.
+func TestAScopedViewHeldToACallPassesOnTheOwnCallDecision(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	worker := workerProbe("mock-worker-x", time.Second, "/x", "worker")
+	own := workerProbe("mock-own-x", 4*time.Second, "/x", "own")
+	mm := stagedManager(t, nil, []*models.Mock{worker, own})
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-a", Start: exactT0.Add(3 * time.Second), End: exactT0.Add(5 * time.Second)}})
+	mm.ServeExactWorker([]string{worker.Name})
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	mm.ServeExactTest("test-a", []*models.Mock{roundMock(mm, own.Name)})
+	worker, own = roundMock(mm, worker.Name), roundMock(mm, own.Name)
+	if !mm.ExactServing() || worker == nil || own == nil {
+		t.Fatal("precondition: test-a is not served exactly with both recordings staged")
+	}
+
+	for _, owns := range []bool{false, true} {
+		scoped := &scopedMockDb{MockMemDb: mm}
+		call := scoped.MarkCallRound()
+		held, _ := scoped.HoldToRound(call)
+		if _, ok := held.(*scopedMockDb); !ok {
+			t.Fatalf("the scoped view held to a call is a %T; want the view over the held store", held)
+		}
+		if !integrations.InBackground(held, worker.Name) || integrations.InBackground(held, own.Name) {
+			t.Fatalf("InBackground through the view: the worker scope's %v, test-a's own %v; want true, false",
+				integrations.InBackground(held, worker.Name), integrations.InBackground(held, own.Name))
+		}
+		decided := owns
+		held = integrations.OwnRepeatRead(held, call, func() bool { return decided })
+		if got := integrations.RefusesAnswer(held, worker); got != owns {
+			t.Fatalf("owns %v: the view refuses the worker scope's recording %v; want %v", owns, got, owns)
+		}
+		if integrations.RefusesAnswer(held, own) {
+			t.Fatalf("owns %v: the view refuses test-a's own recording", owns)
+		}
+		if got := integrations.OwnRepeat(held); got != owns {
+			t.Fatalf("owns %v: the view says it hides the background %v; want %v", owns, got, owns)
+		}
+		if mm.MockSpent(worker.Name) || mm.MockSpent(own.Name) {
+			t.Fatalf("owns %v: a recording was spent by a call no recording answered", owns)
+		}
+	}
+}
+
+// An exchange one more than the test recorded that no background recording
+// is about to answer asks whether it is one of the test's own when it misses
+// (integrations.OwnRepeat), and is reported with the background hidden: its
+// miss is compared with no background recording, as when the background
+// holds a copy of it. The pool's PINGS, close to PING but not it, is never
+// compared with the test's second PING, and still answers its own exchange.
+func TestAnExchangeOneMoreThanTheTestRecordedIsDiagnosedWithTheBackgroundHidden(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	now := time.Now()
+	start := now.Add(time.Second)
+	near := ownRepeatExchange("mock-pool-pings", "PINGS", "POOL", now)
+	own := ownRepeatExchange("mock-own-ping", "PING", "OWN1", start.Add(100*time.Millisecond))
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-0", Start: start, End: start.Add(900 * time.Millisecond)}})
+	mm.SetMocksWithWindow([]*models.Mock{own}, []*models.Mock{near}, models.BaseTime, now.Add(time.Hour))
+	poolNames := []string{near.Name}
+	mm.ServeExactBackground(models.RecordedWithS12Routing, poolNames, nil)
+	mm.ServeExactPool(models.PoolKeyNone, poolNames)
+	mm.ServeExactTest("test-0", []*models.Mock{roundMock(mm, own.Name)})
+	if !mm.ExactServing() {
+		t.Fatal("precondition: test-0 is not served exactly")
+	}
+
+	if got, miss := genericCall(t, mm, "PING"); got != "OWN1" {
+		t.Fatalf("test-0's PING was answered %q (miss %+v); want its own OWN1", got, miss)
+	}
+	got, miss := genericCall(t, mm, "PING")
+	if got != "" {
+		t.Fatalf("test-0's second PING, one more than it recorded, was answered %q", got)
+	}
+	if miss.MissKind != models.MissExtraCall || miss.Recorded != 1 {
+		t.Fatalf("the second PING missed as %q, recorded %d; want %q, recorded 1", miss.MissKind, miss.Recorded, models.MissExtraCall)
+	}
+	if miss.ClosestMock == near.Name || miss.CandidateCount != 0 {
+		t.Fatalf("the second PING was compared with the pool (closest %q, %d candidates); want no background recording compared", miss.ClosestMock, miss.CandidateCount)
+	}
+	if got, miss := genericCall(t, mm, "PINGS"); got != "POOL" {
+		t.Fatalf("test-0's PINGS, an exchange it never recorded, was answered %q (miss %+v); want the pool's POOL, unspent", got, miss)
+	}
+}
