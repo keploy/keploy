@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"cmp"
 	"strings"
 	"time"
 
@@ -155,10 +156,18 @@ const (
 // change of the call is then refused.
 func placesOf(in Input) (ps []evPlace, unread string) {
 	for _, e := range in.Earlier {
-		if e.Unread != "" {
-			if unread == "" {
-				unread = unreadName(e.Mock, e) + " (" + e.Unread + ")"
+		// An exchange keploy could not read (Earlier.Unread), or one F
+		// served with no leaf and no payload keploy read, is a place it
+		// cannot search, never one it drops.
+		bad := e.Unread
+		if bad == "" && len(e.Seen) == 0 && !e.Given && !e.Payload.Read() {
+			bad = cmp.Or(e.Payload.unreadWhy(), "it was not read from its mock, learn.RawOf")
+			if e.Payload.mock == "" {
+				bad = "keploy was given no payload of it, learn.Earlier.Payload"
 			}
+		}
+		if bad != "" {
+			unread = cmp.Or(unread, unreadName(e.Mock, e)+" ("+bad+")")
 			continue
 		}
 		st, why := earlierState(in, e)
