@@ -10,14 +10,22 @@ import (
 type fakeSource struct {
 	wall  time.Time
 	cpu   time.Duration
-	limit float64 // CPUs; 0: none
-	reads int     // of the CPU limit
+	limit float64       // CPUs; 0: none
+	reads int           // of the CPU limit
+	held  time.Duration // the threads' wait the next heldOff says
+	heldN int           // calls of heldOff
 }
 
 func (f *fakeSource) now() (time.Time, time.Duration, bool) { return f.wall, f.cpu, true }
 func (f *fakeSource) cpuLimit() (float64, bool) {
 	f.reads++
 	return f.limit, f.limit > 0
+}
+func (f *fakeSource) heldOff() time.Duration {
+	d := f.held
+	f.held = 0
+	f.heldN++
+	return d
 }
 
 // newFakeSampler is a sampler over a fakeSource, started as acquire starts
@@ -26,6 +34,7 @@ func newFakeSampler(limit float64) (*sampler, *fakeSource) {
 	src := &fakeSource{wall: time.Unix(1_000_000, 0), limit: limit}
 	s := &sampler{src: src, tick: Tick}
 	s.lastWall, s.lastCPU, s.cpuOK = src.now()
+	s.waitWall = s.lastWall
 	return s, src
 }
 
@@ -47,6 +56,139 @@ func TestSampler_OnTimeSamplesCountWallTime(t *testing.T) {
 	s, src := newFakeSampler(0)
 	if n := samplesUntil(s, src, 2*time.Second, Tick, 0); n != 200 {
 		t.Fatalf("accrued 2 s after %d on-time samples, want 200 (2 s of 10 ms)", n)
+	}
+}
+
+// On an overloaded host the sampler is on time while the thread a stall waits
+// on queues behind other work: what on-time samples count pays for that wait.
+// A thread that waits three parts in four accrues a quarter of wall time.
+func TestSampler_OnTimeSamplesPayForTheTimeAThreadWaited(t *testing.T) {
+	s, src := newFakeSampler(0)
+	m := NewMeter(heldClock{s}, 2*time.Second)
+	n := 0
+	for !m.Expired() {
+		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/4
+		src.held += Tick * 3 / 4
+		s.sample()
+		n++
+	}
+	if n < 800 || n > 804 {
+		t.Fatalf("2 s expired after %d on-time samples, a thread waiting 3/4 of them, want about 800 (8 s of wall time)", n)
+	}
+}
+
+// A late sample counts only what the process ran, so a wait beside it was
+// never counted, and on-time samples do not pay for it again.
+func TestSampler_AWaitBesideLateSamplesIsNotPaidTwice(t *testing.T) {
+	s, src := newFakeSampler(0)
+	for range 20 { // 2 s late, using 200 ms of CPU, a thread waiting 1800 ms
+		src.wall, src.cpu = src.wall.Add(100*time.Millisecond), src.cpu+10*time.Millisecond
+		src.held += 90 * time.Millisecond
+		s.sample()
+	}
+	if got, want := time.Duration(s.ran.Load()), 200*time.Millisecond; got != want {
+		t.Fatalf("late samples accrued %v, want what the process ran: %v", got, want)
+	}
+	before := s.ran.Load()
+	for range 10 {
+		src.wall = src.wall.Add(Tick)
+		s.sample()
+	}
+	if got, want := time.Duration(s.ran.Load()-before), 10*Tick; got != want {
+		t.Fatalf("%v on time after the late samples accrued %v: the wait beside them was paid twice", want, got)
+	}
+}
+
+// What on-time samples owe is bounded by what they counted: a long stretch
+// that kept a process off the CPU does not keep a stall that is real from
+// counting once it is over.
+func TestSampler_WhatWaitingOwesIsBounded(t *testing.T) {
+	s, src := newFakeSampler(0)
+	for range 6000 { // a minute on time, a thread said to wait ten times that
+		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/10
+		src.held += 10 * Tick
+		s.sample()
+	}
+	if s.waitOwed > heldEvery+Tick {
+		t.Fatalf("owes %v after a minute, past a read's worth", s.waitOwed)
+	}
+	before := s.ran.Load()
+	for range 300 { // the host quietens
+		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/10
+		s.sample()
+	}
+	if got := time.Duration(s.ran.Load() - before); got < 3*time.Second-heldEvery-Tick {
+		t.Fatalf("3 s on a quiet host accrued %v, want all but a read's worth", got)
+	}
+}
+
+// Verdicts read the threads at most once a sample: the clock does not move in
+// between, and every stalled connection of a starved process looks.
+func TestSampler_VerdictsReadTheThreadsOncePerSample(t *testing.T) {
+	s, src := newFakeSampler(0)
+	src.wall = src.wall.Add(Tick)
+	s.sample()
+	for range 10 {
+		s.owed()
+	}
+	if src.heldN != 1 {
+		t.Fatalf("read the threads %d times for 10 verdicts on one sample, want once", src.heldN)
+	}
+	src.wall = src.wall.Add(Tick)
+	s.sample()
+	s.owed()
+	if src.heldN != 2 {
+		t.Fatalf("read the threads %d times after the next sample, want twice", src.heldN)
+	}
+}
+
+// A read looks at every thread of the process, so it comes once a heldEvery.
+func TestSampler_ReadsTheThreadsOncePerHeldEvery(t *testing.T) {
+	s, src := newFakeSampler(0)
+	if n := samplesUntil(s, src, 5*heldEvery, Tick, 0); n != int(5*heldEvery/Tick) {
+		t.Fatalf("accrued %v after %d samples, with no thread waiting", 5*heldEvery, n)
+	}
+	if src.heldN != 5 {
+		t.Fatalf("read the threads %d times in %v, want 5", src.heldN, 5*heldEvery)
+	}
+}
+
+// heldClock is a process clock over a sampler the test samples.
+type heldClock struct{ s *sampler }
+
+func (c heldClock) Runnable() time.Duration { return time.Duration(c.s.ran.Load()) }
+func (c heldClock) After(time.Duration) (<-chan time.Time, func() bool) {
+	return nil, func() bool { return true }
+}
+func (c heldClock) owed() time.Duration { return c.s.owed() }
+
+// The verdict is what must not wait for the next read: a stall that reaches
+// its bound on samples that counted a wait not read yet has not expired, and
+// goes on as what the process could run.
+func TestMeter_AVerdictReadsTheWaitsFirst(t *testing.T) {
+	s, src := newFakeSampler(0)
+	m := NewMeter(heldClock{s}, 200*time.Millisecond)
+	step := func(n int) {
+		for range n {
+			src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/4
+			s.sample()
+		}
+	}
+	step(20) // the grace, on time
+	if m.Stalled() < 200*time.Millisecond {
+		t.Fatalf("stalled %v on the samples", m.Stalled())
+	}
+	src.held = 150 * time.Millisecond // the thread gets the CPU, after waiting that long
+	if m.Expired() {
+		t.Fatal("expired on 200 ms on time, 150 ms of it a thread's wait")
+	}
+	step(14)
+	if m.Expired() {
+		t.Fatalf("expired after %v on the samples, %v owed", m.Stalled(), s.waitOwed)
+	}
+	step(1)
+	if !m.Expired() {
+		t.Fatalf("not expired on 200 ms that could run: %v on the samples, %v owed", m.Stalled(), s.waitOwed)
 	}
 }
 
@@ -247,5 +389,39 @@ func TestSampler_ARestartDoesNotCountTheGap(t *testing.T) {
 	s.sample()
 	if got := time.Duration(s.ran.Load()); got != Tick {
 		t.Fatalf("the first sample after a restart counted %v, want the %v since the restart", got, Tick)
+	}
+}
+
+// A stall of one burst of work after another starts the sampling each burst:
+// that reads the threads no more often than sampling on does.
+func TestSampler_RestartsReadTheThreadsOncePerHeldEvery(t *testing.T) {
+	src := &fakeSource{wall: time.Unix(1_000_000, 0)}
+	s := &sampler{src: src, tick: time.Hour} // the test samples, not the goroutine
+	for range 100 {
+		release := s.acquire()
+		src.wall = src.wall.Add(Tick)
+		s.sample()
+		release()
+	}
+	if src.heldN > 2 {
+		t.Fatalf("read the threads %d times in 100 restarts over %v, want one a %v", src.heldN, 100*Tick, heldEvery)
+	}
+}
+
+// Nor is what the threads waited in the gap owed, or what was owed before it.
+func TestSampler_ARestartOwesNoWaitFromBeforeIt(t *testing.T) {
+	src := &fakeSource{wall: time.Unix(1_000_000, 0)}
+	s := &sampler{src: src, tick: time.Hour} // the test samples, not the goroutine
+	s.acquire()()
+	s.waitOwed = 300 * time.Millisecond
+	src.wall, src.held = src.wall.Add(time.Minute), 30*time.Second
+	release := s.acquire()
+	defer release()
+	for range 10 {
+		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick
+		s.sample()
+	}
+	if got, want := time.Duration(s.ran.Load()), 10*Tick; got != want {
+		t.Fatalf("10 ticks after a restart counted %v, want all of them: %v", got, want)
 	}
 }
