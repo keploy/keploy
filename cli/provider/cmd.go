@@ -379,7 +379,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return err
 		}
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
-		cmd.Flags().MarkDeprecated("app-id", "DEPRICATED : was used for unique name for the user's application")
+		cmd.Flags().MarkDeprecated("app-id", "DEPRECATED: was used for unique name for the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		cmd.Flags().String("keploy-container", c.cfg.KeployContainer, "Keploy server container name")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
