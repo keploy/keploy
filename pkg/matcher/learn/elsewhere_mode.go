@@ -17,25 +17,21 @@ func elsewhere(in Input, ds []Decision, fields []string) []Decision {
 	var kept []Decision
 	guard := -1
 	for i, d := range ds {
-		field := fields[i]
 		switch {
 		case d.Outcome == OutcomeClock:
 			kept = append(kept, d)
-		case in.Declared != nil && in.Declared(field, d.At.Word):
-		default:
-			if guard < 0 {
-				guard = i
-			}
+		case in.Declared != nil && in.Declared(fields[i], d.At.Word):
+		case guard < 0:
+			guard = i
 		}
 	}
 	if guard < 0 {
 		return kept
 	}
 	g := ds[guard]
-	gField := fields[guard]
 	stop := "round F's call landed in " + in.Landed.String() + ", which teaches clock reads only; " +
-		wordWhere(in.Test, in.Mock, gField, g.At.Word) + " is " + outcomeWords(g)
-	edit := noiseEdit(in.Mock, gField, g.At.Word)
+		wordWhere(in.Test, in.Mock, fields[guard], g.At.Word) + " is " + outcomeWords(g)
+	edit := noiseEdit(in.Mock, fields[guard], g.At.Word)
 	out := make([]Decision, 0, len(ds))
 	for i, d := range ds {
 		kind, places := RefusalLandedElsewhere, []string(nil)

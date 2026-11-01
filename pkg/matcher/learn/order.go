@@ -107,11 +107,12 @@ type decider struct {
 	ps       []evPlace
 	x        *readerIndex
 	allScope bool
+	// dr is the call's drift cache, or an empty one.
+	dr *DriftCache
 	// set: the recordings the set read once (Input.Given); op: what each
 	// recording outside the call's scope holds (outside), read once.
-	set    []GivenPlaces
-	op     *offsetPlaces
-	opDone bool
+	set []GivenPlaces
+	op  *offsetPlaces
 	// encoded is the leaf's inDecodedForm, read once and only where a word
 	// of it would be learned fresh.
 	encoded func() (string, *evPlace)
@@ -122,13 +123,14 @@ type decider struct {
 // call's scope (Mode Elsewhere).
 func decideWords(in Input, allScope bool) ([]Decision, []string) {
 	ps, unread := placesOf(in)
-	set, setUnread := setUnread(in)
-	if unread == "" {
-		unread = setUnread
-	}
+	set, setNotRead := setUnread(in)
+	unread = cmp.Or(unread, setNotRead)
 	x := newReaderIndex(in.Drifts)
 	defer x.release() // what the index keeps goes back to the set's budget
-	dc := &decider{in: in, ps: withTexts(x, ps), x: x, allScope: allScope, set: set}
+	dc := &decider{in: in, ps: withTexts(x, ps), x: x, allScope: allScope, set: set, dr: in.Drifts}
+	if dc.dr == nil {
+		dc.dr = NewDriftCache()
+	}
 	var out []Decision
 	var fields []string // fields[i] is the field out[i] decides
 	for _, path := range in.Drift {
@@ -189,7 +191,7 @@ func (dc *decider) oneValue(out []Decision, fields []string) {
 // leaf decides the changed words of the drifted leaf at path.
 func (dc *decider) leaf(path, unread string) []Decision {
 	rec, live := dc.in.Rec.Leaves[path], dc.in.Live.Leaves[path]
-	at := addressOf(dc.in, rec)
+	at := dc.in.AddressOf(rec, false)
 	switch {
 	case unread != "":
 		return []Decision{dc.refuse(path, at, -1, rec.Value, live.Value, RefusalUnread,
@@ -329,10 +331,8 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 // base64 alphabet whose changed part, past what they share at each end,
 // carries tokenBits in both.
 func randomToken(rec, live string) bool {
-	urlSafe := func(r rune) bool {
-		return r == '-' || r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
-	}
-	if strings.IndexFunc(rec, func(r rune) bool { return !urlSafe(r) }) >= 0 || strings.IndexFunc(live, func(r rune) bool { return !urlSafe(r) }) >= 0 {
+	const urlSafe = "-_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	if strings.Trim(rec, urlSafe) != "" || strings.Trim(live, urlSafe) != "" {
 		return false
 	}
 	head := 0
@@ -352,13 +352,10 @@ func randomToken(rec, live string) bool {
 func (dc *decider) unpaired(path string, at variables.Address, rec, live string, rd textReading) Decision {
 	var held []evPlace
 	for _, p := range dc.ps {
-		for _, w := range rd.Words {
-			hr := w.Rec != "" && evHolds(p.t.rec, w.Rec)
-			hl := w.Live != "" && evHolds(p.t.live, w.Live)
-			if hr || hl {
-				held = append(held, p)
-				break
-			}
+		if slices.ContainsFunc(rd.Words, func(w readWord) bool {
+			return w.Rec != "" && evHolds(p.t.rec, w.Rec) || w.Live != "" && evHolds(p.t.live, w.Live)
+		}) {
+			held = append(held, p)
 		}
 	}
 	if len(held) == 0 {
@@ -461,7 +458,7 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 			unknown = append(unknown, p)
 		}
 	}
-	for _, g := range dc.setWords() {
+	for _, g := range dc.outside().words {
 		p := evPlace{name: g.mock, mock: g.mock, otherTest: true, scope: "another test, or after this call", at: g.at}
 		ev, changed := setEvidence(g, w.Rec, w.Live, dc.in.At)
 		if changed {
@@ -490,20 +487,11 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 	}
 	switch {
 	case len(src) > 0:
-		first := earliest(src)
-		if d, ok := dc.atWord(path, bare, n, w, rec, live); !ok {
-			return d
+		echo, no := dc.answered(path, bare, w, rec, live, false)
+		if no != nil {
+			return *no
 		}
-		rule := "bound to " + first.name + ", the earliest place before the call that shows it in both runs"
-		echo, unnamed := dc.readBack(path, at, w, rec, false)
-		if r, no := dc.unanswerable(path, bare, rec, live, echo, unnamed); no {
-			return r
-		}
-		d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeValue, rule+answeredAt(echo, rec), names(src))
-		d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: w.Live, Run: first.startUp || first.otherTest, InStartUp: first.startUp}
-		d.FromAt = dc.fromAt(first, w.Rec)
-		d.Echo = echo
-		return d
+		return dc.bound(path, at, n, changedInstant{r: w.Rec, l: w.Live, valueEcho: echo, rec: rec}, src, ", the earliest place before the call that shows it in both runs")
 	case len(conflict) > 0:
 		p := conflict[0]
 		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalConflict,
@@ -534,12 +522,9 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 		}
 		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalUnknown, why, []string{p.name}, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 	}
-	if d, ok := dc.atWord(path, bare, n, w, rec, live); !ok {
-		return d
-	}
-	echo, unnamed := dc.readBack(path, at, w, rec, true)
-	if r, no := dc.unanswerable(path, bare, rec, live, echo, unnamed); no {
-		return r
+	echo, no := dc.answered(path, bare, w, rec, live, true)
+	if no != nil {
+		return *no
 	}
 	rule := "no place before the call shows it"
 	if len(aside) > 0 {
@@ -599,29 +584,27 @@ func decodedOnly(dc *DriftCache, s, other string) []string {
 	return slices.Compact(out)
 }
 
-// atWord refuses a word inside a longer value where the adapter cannot
-// bind at a word address.
-func (dc *decider) atWord(path string, at variables.Address, n int, w readWord, rec, live string) (Decision, bool) {
-	if dc.in.Caps.BindAtWord || (w.Rec == rec && w.Live == live) {
-		return Decision{}, true
+// answered is where the call's answer reads back w, a word of the leaf at
+// bare; no is its refusal where the adapter cannot bind it inside a longer
+// value, or cannot answer those places (unanswerable).
+func (dc *decider) answered(path string, bare variables.Address, w readWord, rec, live string, withWhole bool) (echo []variables.Address, no *Decision) {
+	if !dc.in.Caps.BindAtWord && (w.Rec != rec || w.Live != live) {
+		d := dc.cannotCheck(path, bare, -1, rec, live, "the adapter cannot bind a word inside this field yet")
+		return nil, &d
 	}
-	return dc.cannotCheck(path, at, -1, rec, live, "the adapter cannot bind a word inside this field yet"), false
+	echo, unnamed := dc.readBack(path, w.At, w, rec, withWhole)
+	if d, refused := dc.unanswerable(path, bare, rec, live, echo, unnamed); refused {
+		return nil, &d
+	}
+	return echo, nil
 }
 
 // tokenShown reports whether p shows a whole token around w: one place
 // holds that whole token in each run.
 func tokenShown(p evPlace, w readWord) bool {
-	if p.state != stateBefore || p.same() {
-		return false
-	}
-	for _, t := range w.Tokens {
-		hr, _ := p.t.rec.holdsToken(t.Kind, t.Rec)
-		hl, _ := p.t.live.holdsToken(t.Kind, t.Live)
-		if hr && hl {
-			return true
-		}
-	}
-	return false
+	return p.state == stateBefore && !p.same() && slices.ContainsFunc(w.Tokens, func(t wholeToken) bool {
+		return tokenIn(p.t.rec, t.Kind, t.Rec) && tokenIn(p.t.live, t.Kind, t.Live)
+	})
 }
 
 // textInstant decides an instant the changed words of rd, a text the leaf
@@ -672,6 +655,17 @@ type instantHold struct {
 	rank int64
 }
 
+// heldWhere is the place of each of hs that keep keeps, in order.
+func heldWhere(hs []instantHold, keep func(instantHold) bool) []evPlace {
+	var out []evPlace
+	for _, h := range hs {
+		if keep(h) {
+			out = append(out, h.p)
+		}
+	}
+	return out
+}
+
 // changedInstant is one changed instant: its text in each run, its typed
 // reading for the window, its moments (nil for a number that does not
 // parse: matched by its exact text alone, byText).
@@ -718,19 +712,11 @@ func clockWordOf(rec, live string, rd textReading, iw *instantWord) (word models
 	return models.ClockWordOf(rec, rs, re), ""
 }
 
-// zone is the application's zone where keploy knows it (DriftCache.zone).
-func (dc *decider) zone() *time.Location {
-	if dc.in.Drifts == nil {
-		return nil
-	}
-	return dc.in.Drifts.zone
-}
-
 // inZone is m, a wall clock of no zone, read in the application's zone, as
 // main's echo reads it too (a pick from a timetable written in UTC); false
 // for any other moment, or where keploy knows no zone.
 func (dc *decider) inZone(m moment) (moment, bool) {
-	zone := dc.zone()
+	zone := dc.dr.zone
 	if m.zoned || m.key.day || zone == nil {
 		return m, false
 	}
@@ -828,10 +814,8 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			hs = append(hs, instantHold{p: p, hr: hr, hl: hl, fr: fr, fl: fl, coarseR: hr && c.rm != nil && dc.coarserOnly(p.t.rec, r, *c.rm),
 				rank: min(dc.rank(p.t.rec, r, c.rm, hr), dc.rank(p.t.live, l, c.lm, hl))})
 		}
-	}
-	for _, h := range hs {
-		if h.hr && !h.hl && len(c.aside) < maxLinePlaces {
-			c.aside = append(c.aside, h.p.name)
+		if hr && !hl && len(c.aside) < maxLinePlaces {
+			c.aside = append(c.aside, p.name)
 		}
 	}
 	// A place that holds a value by its exact text is named before one
@@ -845,12 +829,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// at a fine cut (or by the text of a number that does not parse), or a
 	// given that held its text, where round F gave another value and this
 	// one did not follow.
-	var conflict []evPlace
-	for _, h := range hs {
-		if before(h.p) && inScope(h.p) && h.hr && !h.hl && (h.fr || h.p.gave) {
-			conflict = append(conflict, h.p)
-		}
-	}
+	conflict := heldWhere(hs, func(h instantHold) bool { return before(h.p) && inScope(h.p) && h.hr && !h.hl && (h.fr || h.p.gave) })
 	if len(conflict) > 0 {
 		p := conflict[0]
 		return dc.refuse(path, at, n, r, l, RefusalConflict,
@@ -868,6 +847,11 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		if p.gave || p.side != Response && !request(p) {
 			continue
 		}
+		untold := func(note string) Decision {
+			return dc.refuse(path, at, n, r, l, RefusalPick,
+				"the recorded moment stands in "+p.name+", whose state in round F keploy cannot tell ("+note+")", []string{p.name},
+				Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
+		}
 		switch {
 		case before(p) && h.hl && (!h.hr || p.same()):
 			why := "round F's moment stands unchanged in " + p.name
@@ -876,23 +860,19 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			}
 			return dc.refuse(path, at, n, r, l, RefusalPick, why, []string{p.name}, dc.wordNoise(path, n))
 		case p.side == Response && p.state == stateUnknown && (h.hr || h.hl):
-			return dc.refuse(path, at, n, r, l, RefusalPick,
-				"the recorded moment stands in "+p.name+", whose state in round F keploy cannot tell ("+p.why+")", []string{p.name},
-				Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
+			return untold(p.why)
 		case h.hr && dc.swappable(p, c):
-			return dc.refuse(path, at, n, r, l, RefusalPick,
-				"the recorded moment stands in "+p.name+", whose state in round F keploy cannot tell ("+swapNote+")", []string{p.name},
-				Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
+			return untold(swapNote)
 		}
 	}
-	if c.rm != nil && c.lm != nil && dc.in.Drifts != nil {
+	if c.rm != nil && c.lm != nil {
 		var reqs []Earlier
 		for _, e := range dc.in.Earlier {
 			if e.Given && !e.Gave && e.Unread == "" {
 				reqs = append(reqs, e)
 			}
 		}
-		if where, _ := dc.in.Drifts.requestHolds([]moment{*c.rm}, []moment{*c.lm}, reqs); where != "" {
+		if where, _ := dc.dr.requestHolds([]moment{*c.rm}, []moment{*c.lm}, reqs); where != "" {
 			return dc.refuse(path, at, n, r, l, RefusalPick,
 				"the recorded moment stands in the test case at "+where+", and no cut there gives round F's", []string{where}, dc.wordNoise(path, n))
 		}
@@ -900,23 +880,15 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 
 	// A given's text, and 2. one templated slot of the test case's request
 	// that shows it in both runs: a Value bound there; two slots, refused.
-	var gave, slots []evPlace
-	for _, h := range hs {
-		switch {
-		case !before(h.p) || !h.hr || !h.hl:
-		case h.p.gave:
-			gave = append(gave, h.p)
-		case request(h.p) && !h.p.same():
-			slots = append(slots, h.p)
-		}
-	}
+	gave := heldWhere(hs, func(h instantHold) bool { return before(h.p) && h.hr && h.hl && h.p.gave })
+	slots := heldWhere(hs, func(h instantHold) bool { return before(h.p) && h.hr && h.hl && request(h.p) && !h.p.same() })
 	if len(gave) > 0 {
-		return dc.bound(path, at, n, c, gave, "a value the test gave keploy, which the call sends as given in both runs")
+		return dc.bound(path, at, n, c, gave, ": a value the test gave keploy, which the call sends as given in both runs")
 	}
 	switch len(slots) {
 	case 0:
 	case 1:
-		return dc.bound(path, at, n, c, slots, "the test case's request holds it, templated, in both runs")
+		return dc.bound(path, at, n, c, slots, ": the test case's request holds it, templated, in both runs")
 	default:
 		return dc.refuse(path, at, n, r, l, RefusalTwoSources,
 			"the same moment was sent at "+slots[0].name+" and "+slots[1].name+", two separate reads", names(slots), dc.wordNoise(path, n))
@@ -925,13 +897,10 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// 3. Answer: an answer of the call's scope or the start-up, given
 	// before the call in both runs, holds R's value, and F's text there
 	// holds F's or is not stated.
-	var answers []evPlace
-	for _, h := range hs {
+	answers := heldWhere(hs, func(h instantHold) bool {
 		p := h.p
-		if p.side == Response && !p.given && inScope(p) && p.state == stateBefore && h.hr && !h.coarseR && (p.fUnstated || h.hl) {
-			answers = append(answers, p)
-		}
-	}
+		return p.side == Response && !p.given && inScope(p) && p.state == stateBefore && h.hr && !h.coarseR && (p.fUnstated || h.hl)
+	})
 	if len(answers) > 0 {
 		// An answer recorded after the call that round F gave the
 		// application before it, holding F's moment, is a second source:
@@ -953,7 +922,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			return dc.refuse(path, at, n, r, l, RefusalUnknown, why+", beside "+answers[0].name+": two sources", []string{late, answers[0].name},
 				Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
 		}
-		return dc.bound(path, at, n, c, answers, "an answer given before the call holds it: the dependency's value")
+		return dc.bound(path, at, n, c, answers, ": an answer given before the call holds it: the dependency's value")
 	}
 
 	// 4. and 6. A copy: requests of the call's scope or the start-up, sent
@@ -962,20 +931,18 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// hold the recorded moment and F's) did not move with the value: no
 	// copy's source.
 	copies := func(fine bool) []evPlace {
-		var out []evPlace
-		for _, h := range hs {
+		return heldWhere(hs, func(h instantHold) bool {
 			p := h.p
-			if p.side == Request && !p.given && inScope(p) && before(p) && h.hr && h.hl && (h.fr && h.fl) == fine {
-				rf, _, _ := dc.holds(p, p.t.live, r, c.rm, c.byText)
-				if fr, _, _ := dc.holds(p, p.t.rec, l, c.lm, c.byText); !rf && !fr {
-					out = append(out, p)
-				}
+			if p.side != Request || p.given || !inScope(p) || !before(p) || !h.hr || !h.hl || (h.fr && h.fl) != fine {
+				return false
 			}
-		}
-		return out
+			rf, _, _ := dc.holds(p, p.t.live, r, c.rm, c.byText)
+			fr, _, _ := dc.holds(p, p.t.rec, l, c.lm, c.byText)
+			return !rf && !fr
+		})
 	}
 	if fine := copies(true); len(fine) > 0 {
-		return dc.copied(path, at, n, c, fine, "the same moment, at a cut finer than a millisecond, was sent before the call in both runs: one read, copied")
+		return dc.copied(path, at, n, c, fine, ": the same moment, at a cut finer than a millisecond, was sent before the call in both runs: one read, copied")
 	}
 
 	// An answer outside the call's scope that would bind it at step 3 were
@@ -1013,7 +980,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// millisecond read carried to a later send its window does not hold);
 	// with none, an offset it does not compare is refused as one keploy
 	// cannot check.
-	zone := dc.zone()
+	zone := dc.dr.zone
 	// cutWhy: the reading's own refusal of a cut, which keeps steps 7 and
 	// 8 from reading the value; guardWhy: the offset guard's refusal of the
 	// window plus an offset, which refuses that reading alone, so the value
@@ -1042,7 +1009,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 
 	// 6. Coarse copy: as 4, a millisecond or coarser; no window condition.
 	if coarse := copies(false); len(coarse) > 0 {
-		return dc.copied(path, at, n, c, coarse, "the same moment, at a millisecond or coarser, was sent before the call in both runs and its own window does not hold it: one read, copied")
+		return dc.copied(path, at, n, c, coarse, ": the same moment, at a millisecond or coarser, was sent before the call in both runs and its own window does not hold it: one read, copied")
 	}
 
 	// 7. Since begin (client tests): a read the window from each run's
@@ -1054,7 +1021,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// would pass one the application shortened, or dropped, within the
 	// test's span. A reading or guard that declines it leaves step 8 as it
 	// was.
-	if dc.in.Drifts != nil && dc.in.Drifts.clientTests && c.rm != nil && c.lm != nil && cutWhy == "" {
+	if dc.dr.clientTests && c.rm != nil && c.lm != nil && cutWhy == "" {
 		if wb := dc.in.Window.sinceBegin(); wb != nil {
 			enc := max(c.rm.res, c.lm.res)
 			off, ok := models.ClockOffset{Res: enc}, wb.holdsRead(*c.rm, *c.lm, zone)
@@ -1077,7 +1044,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// either run, its answer does not echo it, its cut is not ambiguous,
 	// and, where the runs know their test's begin, it was made before it.
 	late := ""
-	if dc.in.Drifts != nil && dc.in.Drifts.clientTests && len(hs) == 0 && cutWhy == "" && dc.instantEchoed(c) == "" {
+	if dc.dr.clientTests && len(hs) == 0 && cutWhy == "" && dc.instantEchoed(c) == "" {
 		if late = madeSinceBegin(dc.in.Window, dc.in.RecBegan, c, zone); late == "" {
 			d := dc.learned(path, at, n, r, l, OutcomeFresh, "the test's own value: no place before the call holds it; bound at its first call"+answeredAt(c.echo, c.rec), nil)
 			d.Echo = c.echo
@@ -1183,10 +1150,6 @@ func (dc *decider) offsetGuard(path string, off models.ClockOffset, enc time.Dur
 	if off.Min == 0 && off.Max == 0 {
 		return "", false
 	}
-	drifts := dc.in.Drifts
-	if drifts == nil {
-		drifts = &DriftCache{}
-	}
 	switch {
 	case off.Why == "" && off.Unit() <= time.Second:
 		return clockOffsetFineWhy(path, off), false
@@ -1195,7 +1158,7 @@ func (dc *decider) offsetGuard(path string, off models.ClockOffset, enc time.Dur
 	case !off.Narrow():
 		return clockOffsetWideWhy(path, off, enc), false
 	}
-	return drifts.offsetFallBackWhy(path, off, enc, w), false
+	return dc.dr.offsetFallBackWhy(path, off, enc, w), false
 }
 
 // rank is how closely t names w (its moment m): 0 by its exact text,
@@ -1284,11 +1247,12 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 	return d
 }
 
-// bound is a Value bound at the earliest of src; From says Run where that
-// place is the start-up's or an earlier test's (the run's variable).
+// bound is a Value bound at the earliest of src, rule following that
+// place's name; From says Run where it is the start-up's or an earlier
+// test's (the run's variable).
 func (dc *decider) bound(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
 	first := earliest(src)
-	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+first.name+": "+rule+answeredAt(c.valueEcho, c.rec), names(src))
+	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+first.name+rule+answeredAt(c.valueEcho, c.rec), names(src))
 	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest, InStartUp: first.startUp}
 	d.FromAt = dc.fromAt(first, c.r)
 	d.Echo = c.valueEcho
@@ -1297,13 +1261,7 @@ func (dc *decider) bound(path string, at variables.Address, n int, c changedInst
 
 // earliest is the first of src to happen, src's first of those at one time.
 func earliest(src []evPlace) evPlace {
-	first := src[0]
-	for _, p := range src[1:] {
-		if p.at.Before(first.at) {
-			first = p
-		}
-	}
-	return first
+	return slices.MinFunc(src, func(a, b evPlace) int { return a.at.Compare(b.at) })
 }
 
 // answeredAt is the end of a word's rule that names where its call's answer
@@ -1352,42 +1310,31 @@ func (dc *decider) instantEchoed(c changedInstant) string {
 // is served as recorded: a word that short may stand there by chance, and
 // a test that reads it goes red at replay, never green by a rewrite. One
 // rule for a Value and a fresh word; withWhole: a fresh word's whole value
-// too (a Value's is the adapter's echo, as main answers it).
-func (dc *decider) readBack(path string, at variables.Address, w readWord, rec string, withWhole bool) ([]variables.Address, string) {
+// too (a Value's is the adapter's echo, as main answers it). unnamed is the
+// path of the first such leaf keploy cannot name to the adapter.
+func (dc *decider) readBack(path string, at variables.Address, w readWord, rec string, withWhole bool) (echo []variables.Address, unnamed string) {
 	r := dc.in.Rec.Leaves[path]
 	if at.Word < 0 || len(at.Steps) > 0 || w.Rec == rec && !withWhole {
 		return nil, ""
 	}
-	// An answer scalar of any type holding the whole text reads it back (a
-	// number sent as text, answered as a number), as main's WholeEcho has it.
-	return dc.answerAt(func(l Leaf) []int {
+	for _, l := range dc.in.Resp {
+		// An answer scalar of any type holding the whole text reads it back
+		// (a number sent as text, answered as a number), as main's WholeEcho.
 		scalar := l.Type == String || l.Type == Number || l.Type == Bool
 		if l.Value == rec && (l.Type == r.Type || scalar) || l.Type == Keys && slices.Contains(strings.Split(l.Value, "\n"), rec) {
-			return []int{at.Word}
-		}
-		return nil
-	})
-}
-
-// answerAt is each word of the call's answer that words gives, at its
-// address, and the path of the first such leaf keploy cannot name to the
-// adapter ("" where it names each).
-func (dc *decider) answerAt(words func(Leaf) []int) (out []variables.Address, unnamed string) {
-	for _, l := range dc.in.Resp {
-		for _, i := range words(l) {
 			a := dc.in.AddressOf(l, true)
 			if a.Place.Part == 0 && unnamed == "" {
 				unnamed = l.Path
 			}
-			a.Word = i
-			out = append(out, a)
+			a.Word = at.Word
+			echo = append(echo, a)
 		}
 	}
-	return out, unnamed
+	return echo, unnamed
 }
 
 // unanswerable refuses a word whose answer places (echo, unnamed: as
-// answerAt gives them) the adapter cannot answer: at a word, where it
+// readBack gives them) the adapter cannot answer: at a word, where it
 // cannot answer one, or at a place keploy cannot name to it.
 func (dc *decider) unanswerable(path string, bare variables.Address, rec, live string, echo []variables.Address, unnamed string) (Decision, bool) {
 	switch {
@@ -1407,9 +1354,6 @@ func addrList(as []variables.Address) string {
 	}
 	return strings.Join(s, ", ")
 }
-
-// addressOf is l's word address, word -1 (the whole leaf).
-func addressOf(in Input, l Leaf) variables.Address { return in.AddressOf(l, false) }
 
 // fromAt is the address of the word v at p, a Value's bind place: the
 // earlier exchange's leaf as its adapter names it (an answer's as an

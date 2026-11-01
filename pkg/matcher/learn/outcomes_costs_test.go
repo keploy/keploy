@@ -327,6 +327,22 @@ func TestOutcomeCostASlotNamingBothMomentsIsAPick(t *testing.T) {
 	costRefused(t, "a minute read beside a slot of both moments", oWord(t, Decide(in), "11:14", "11:15"), []RefusalKind{"pick"}, "body.slots[0]")
 }
 
+// A time whose day stands in the test case's request as recorded, where round
+// F's time is a day on: the request names the recorded moment by a coarse
+// cut and none of round F's, so it may be a pick the request no longer
+// lists. Refused naming the slot, never a read of the clock its window
+// holds. It is a pick with no drift cache too: the order is one rule,
+// whatever the caller passes.
+func TestOutcomeCostAPickFromTheRequestIsRefusedWithOrWithoutACache(t *testing.T) {
+	const rec, live = "2026-10-22T11:14:40Z", "2026-10-23T09:00:10Z"
+	fAt := time.Date(2026, 10, 23, 9, 0, 20, 0, time.UTC)
+	w := &Window{Rec: Span{From: costAt.Add(-time.Minute), To: costAt.Add(2 * time.Minute)}, F: Span{From: fAt.Add(-time.Minute), To: fAt}}
+	for name, dc := range map[string]*DriftCache{"a cache": clockedDrifts(), "no cache": nil} {
+		in := costCall(dc, "body.at", rec, live, costAt, []Earlier{GivenRequest(slotRequest("2026-10-22"))}, nil, nil, w)
+		costRefused(t, name, oWord(t, Decide(in), rec, live), []RefusalKind{"pick"}, "body.slots[0]")
+	}
+}
+
 // Pinned: where the test case's request could not be read (none
 // sent, or of a kind keploy reads no request of), every change is refused
 // as unread, an instant or not, echoed in its answer or not

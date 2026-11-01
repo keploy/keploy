@@ -2,6 +2,7 @@ package learn
 
 import (
 	"cmp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -162,7 +163,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		// cannot search, never one it drops.
 		bad := e.Unread
 		if bad == "" && len(e.Seen) == 0 && !e.Given && !e.Payload.Read() {
-			bad = cmp.Or(e.Payload.unreadWhy(), "it was not read from its mock, learn.RawOf")
+			bad = cmp.Or(e.Payload.unreadWhy(), notFromMock)
 			if e.Payload.mock == "" {
 				bad = "keploy was given no payload of it, learn.Earlier.Payload"
 			}
@@ -174,10 +175,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		st, why := earlierState(in, e)
 		startUp, other, scope := inScope(in, e.Mock, e.StartUp, e.ofEarlierTest())
 		for _, s := range e.Seen {
-			path := s.Leaf.Path
-			if path == "" {
-				path = s.Place
-			}
+			path := cmp.Or(s.Leaf.Path, s.Place)
 			ps = append(ps, evPlace{
 				name: e.Mock + " " + path, mock: e.Mock, path: path,
 				rec: s.Leaf.Value, live: s.Live, side: s.Side, leaf: s.Leaf,
@@ -199,13 +197,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 	}
 	for i, r := range in.Raw {
 		if !r.Read() {
-			if unread == "" {
-				why := r.unreadWhy()
-				if why == "" {
-					why = "it was not read from its mock, learn.RawOf"
-				}
-				unread = unreadName(r.Mock(), Earlier{}) + " (" + why + ")"
-			}
+			unread = cmp.Or(unread, unreadName(r.Mock(), Earlier{})+" ("+cmp.Or(r.unreadWhy(), notFromMock)+")")
 			continue
 		}
 		st, why := rawState(in, r)
@@ -237,6 +229,10 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 	}
 	return ps, unread
 }
+
+// notFromMock is why a recording's payload was not read, where its read
+// gave none.
+const notFromMock = "it was not read from its mock, learn.RawOf"
 
 // unreadName names a place keploy could not read in its refusal: its mock,
 // else what it is (the run's values, the test case's request, a
@@ -327,14 +323,9 @@ func orderUnknown(in Input, ps []evPlace, cand map[string]bool) {
 	source := func(mock string) bool { return cand[mock] }
 	rec, untoldRec := recordedOrder(in.At, in.Earlier, in.Raw, source)
 	f, untoldF := servedOrder(in.Earlier, in.Raw, source)
-	why := untoldRec
-	if why == "" {
-		why = untoldF
-	}
-	if why == "" {
-		if d := orderDiff(rec, f); d != "" {
-			why = "another order: " + d
-		}
+	why := cmp.Or(untoldRec, untoldF)
+	if d := orderDiff(rec, f); why == "" && d != "" {
+		why = "another order: " + d
 	}
 	if why == "" {
 		return
@@ -383,15 +374,7 @@ const (
 // match it finds in no one field as a swap's.
 func swapUnknown(in Input, ps []evPlace, w readWord) {
 	holds := func(own string) bool {
-		if holdsToken(own, w.Rec) {
-			return true
-		}
-		for _, t := range w.Tokens {
-			if holdsToken(own, t.Rec) {
-				return true
-			}
-		}
-		return false
+		return holdsToken(own, w.Rec) || slices.ContainsFunc(w.Tokens, func(t wholeToken) bool { return holdsToken(own, t.Rec) })
 	}
 	for i := range ps {
 		p := &ps[i]
@@ -424,26 +407,16 @@ func evidenceAt(p evPlace, r, f string) (ev wordEvidence, read bool) {
 		}
 		return evNone, true
 	}
-	if p.same() {
-		// Unchanged: one text holds R's word, F's word, both or neither.
-		if !hr && !hf {
-			return evNone, true
-		}
-		if p.state != stateBefore {
-			return evUnknown, true
-		}
-		if hr && hf {
-			return evUnknown, true
-		}
-		return evDisproven, true
-	}
-	if !hr && !hf {
+	switch same := p.same(); {
+	case !hr && !hf:
 		return evNone, true
-	}
-	if p.state != stateBefore {
+	case p.state != stateBefore:
 		return evUnknown, true
-	}
-	switch {
+	case same && hr && hf:
+		// Unchanged: one text holds both, so neither run's shows the change.
+		return evUnknown, true
+	case same:
+		return evDisproven, true
 	case hr && hf:
 		return evShown, true
 	case nothingNew(p):
@@ -477,18 +450,15 @@ func movedField(p evPlace, r, f string) string {
 // text: 32 bits or more (wordBits), alone or as a whole token around it
 // the place also holds whole: an unchanged place that holds only one of the two words is chance.
 func countsByText(p evPlace, w readWord) bool {
-	if wordBits(w.Rec) >= 32 || wordBits(w.Live) >= 32 {
-		return true
-	}
-	for _, t := range w.Tokens {
-		if held, _ := p.t.rec.holdsToken(t.Kind, t.Rec); held && wordBits(t.Rec) >= 32 {
-			return true
-		}
-		if held, _ := p.t.live.holdsToken(t.Kind, t.Live); held && wordBits(t.Live) >= 32 {
-			return true
-		}
-	}
-	return false
+	return wordBits(w.Rec) >= 32 || wordBits(w.Live) >= 32 || slices.ContainsFunc(w.Tokens, func(t wholeToken) bool {
+		return wordBits(t.Rec) >= 32 && tokenIn(p.t.rec, t.Kind, t.Rec) || wordBits(t.Live) >= 32 && tokenIn(p.t.live, t.Kind, t.Live)
+	})
+}
+
+// tokenIn reports whether t holds the whole token tok, read or not.
+func tokenIn(t *readerText, kind tokenKind, tok string) bool {
+	h, _ := t.holdsToken(kind, tok)
+	return h
 }
 
 // heldWhole reports whether p, a place F moved, held the recorded value's
@@ -498,21 +468,10 @@ func heldWhole(p evPlace, w readWord, rec string) bool {
 	if p.same() {
 		return false
 	}
-	if held, _ := p.t.rec.holdsToken(tokenID, rec); held {
-		return true
-	}
-	// A word that is a whole token of its own (no ID byte beside it).
-	if len(w.Tokens) == 0 {
-		if held, _ := p.t.rec.holdsToken(tokenID, w.Rec); held {
-			return true
-		}
-	}
-	for _, t := range w.Tokens {
-		if held, _ := p.t.rec.holdsToken(t.Kind, t.Rec); held {
-			return true
-		}
-	}
-	return false
+	// No token around it: the word is a whole token of its own (no ID byte
+	// beside it).
+	return tokenIn(p.t.rec, tokenID, rec) || len(w.Tokens) == 0 && tokenIn(p.t.rec, tokenID, w.Rec) ||
+		slices.ContainsFunc(w.Tokens, func(t wholeToken) bool { return tokenIn(p.t.rec, t.Kind, t.Rec) })
 }
 
 // nothingNew reports whether every word of round F's text at p stands among
@@ -564,36 +523,19 @@ func setUnread(in Input) ([]GivenPlaces, string) {
 // outside are the recordings outside the call's scope that round F gave
 // before it, read once for the call, as main's word rule and echo read them
 // (offsetPlacesOf: the set's and raw's, each recording once): their
-// answers' words and instants. nil where the call has none.
+// answers' words and instants; empty where the call has none.
 func (dc *decider) outside() *offsetPlaces {
-	if !dc.opDone {
-		dc.opDone = true
+	if dc.op == nil {
+		dc.op = &offsetPlaces{}
 		elsewhere := len(dc.set) > 0
 		for _, r := range dc.in.Raw {
 			elsewhere = elsewhere || r.elsewhere
 		}
 		if elsewhere {
-			dc.op = dc.drifts().offsetPlacesOf(dc.in.At, dc.in.Earlier, dc.in.Raw, dc.set)
+			dc.op = dc.dr.offsetPlacesOf(dc.in.At, dc.in.Earlier, dc.in.Raw, dc.set)
 		}
 	}
 	return dc.op
-}
-
-// setWords are the words of each recording outside the call's scope that
-// round F gave before it (outside).
-func (dc *decider) setWords() []givenWords {
-	if op := dc.outside(); op != nil {
-		return op.words
-	}
-	return nil
-}
-
-// drifts is the call's drift cache, or an empty one.
-func (dc *decider) drifts() *DriftCache {
-	if dc.in.Drifts != nil {
-		return dc.in.Drifts
-	}
-	return NewDriftCache()
 }
 
 // setSecondSource names a recording of the set (Input.Given), which round
@@ -610,14 +552,6 @@ func (dc *decider) setSecondSource(c changedInstant) (mock, why string) {
 	if c.rm == nil || c.lm == nil {
 		return "", ""
 	}
-	names := func(ms []givenMoment, m, other moment) bool {
-		for _, v := range ms {
-			if namesMomentApart(v.m, m, other, nil) {
-				return true
-			}
-		}
-		return false
-	}
 	for _, g := range dc.set {
 		atCall := g.at.IsZero() || g.words.noTime || g.at.Equal(dc.in.At)
 		when := "after it"
@@ -630,16 +564,22 @@ func (dc *decider) setSecondSource(c changedInstant) (mock, why string) {
 		}
 		switch {
 		case !atCall && g.at.Before(dc.in.At):
-			if (g.words.unstated || g.words.unread) && names(g.answer, *c.rm, *c.lm) {
+			if (g.words.unstated || g.words.unread) && namesApart(g.answer, *c.rm, *c.lm) {
 				return g.mock, "the recorded moment stands in " + g.mock + ", another test's answer given before the call, whose view in round F keploy cannot tell"
 			}
-		case names(ms, *c.lm, *c.rm):
+		case namesApart(ms, *c.lm, *c.rm):
 			return g.mock, "round F's moment stands in " + g.mock + ", which round F gave before the call but which was recorded " + when
-		case atCall && names(g.answer, *c.rm, *c.lm):
+		case atCall && namesApart(g.answer, *c.rm, *c.lm):
 			return g.mock, "the recorded moment stands in " + g.mock + ", recorded " + when + ", which the recording may have given before the call"
 		}
 	}
 	return "", ""
+}
+
+// namesApart reports whether one of ms names m by a cut that does not name
+// other too.
+func namesApart(ms []givenMoment, m, other moment) bool {
+	return slices.ContainsFunc(ms, func(v givenMoment) bool { return namesMomentApart(v.m, m, other, nil) })
 }
 
 // echoedOutside names the recording outside the call's scope whose answer,
@@ -656,18 +596,16 @@ func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
 		return "", false
 	}
 	for _, g := range dc.set {
-		for _, v := range g.fView {
-			if namesMomentApart(v.m, *c.lm, *c.rm, nil) {
-				return g.mock, true
-			}
+		if namesApart(g.fView, *c.lm, *c.rm) {
+			return g.mock, true
 		}
 	}
 	op := dc.outside()
-	if op == nil || len(op.answers) == 0 {
+	if len(op.answers) == 0 {
 		return "", false
 	}
 	pair := []driftedInstant{{rec: *c.rm, live: *c.lm}}
-	if dc.drifts().echoedElsewhere(pair, dc.in.At, dc.in.Earlier, dc.in.Raw, func() *offsetPlaces { return op }) == "" {
+	if dc.dr.echoedElsewhere(pair, dc.in.At, dc.in.Earlier, dc.in.Raw, func() *offsetPlaces { return op }) == "" {
 		return "", false
 	}
 	for _, g := range op.answers {
@@ -694,12 +632,7 @@ func setEvidence(g givenWords, r, f string, at time.Time) (ev wordEvidence, chan
 		// Round F served it and keploy cannot tell what it gave there.
 		return evUnknown, true
 	case len(g.views) > 0:
-		for _, v := range g.views {
-			if listsHold(v, f) {
-				return evUnknown, true
-			}
-		}
-		if hr {
+		if hr || slices.ContainsFunc(g.views, func(v answerLists) bool { return listsHold(v, f) }) {
 			return evUnknown, true
 		}
 		return evNone, true
@@ -747,7 +680,7 @@ func (dc *decider) gluedAt(p evPlace, w readWord) bool {
 	if !p.undeclared {
 		return false
 	}
-	ed := dc.drifts().of(p.rec, p.live)
+	ed := dc.dr.of(p.rec, p.live)
 	return gluedIn(ed, w.Rec, true) || gluedIn(ed, w.Live, false)
 }
 
