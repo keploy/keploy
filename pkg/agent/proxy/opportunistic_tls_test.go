@@ -106,11 +106,12 @@ func (c *stopBeforeTheArm) SetReadDeadline(t time.Time) error {
 // every run, and the window is longer than the test binary's deadline.
 func TestSniffAndRelayLoop_AStopJustBeforeTheArmEndsTheLoop(t *testing.T) {
 	from, fromPeer := net.Pipe()
-	defer from.Close()
-	defer fromPeer.Close()
 	to, toPeer := net.Pipe()
-	defer to.Close()
-	defer toPeer.Close()
+	t.Cleanup(func() {
+		for _, c := range []net.Conn{from, fromPeer, to, toPeer} {
+			_ = c.Close()
+		}
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
