@@ -215,3 +215,35 @@ func TestOutcomeASecretsValuesPrintMasked(t *testing.T) {
 		}
 	}
 }
+
+// Text keploy reads no words in (its words are runs of ASCII letters and
+// digits: CJK, accented letters) is still refused when it changes, and the
+// reason names the text that changed, never "only what separates its words",
+// which reads as if nothing but punctuation moved. A secret's changed text
+// prints masked, as its values do.
+func TestOutcomeChangedTextOutsideTheWordsIsNamed(t *testing.T) {
+	for _, c := range []struct {
+		path, rec, live, r, f string
+		kind                  RefusalKind
+	}{
+		{"body.name", "山田 太郎", "佐藤 花子", "山田 太郎", "佐藤 花子", RefusalChangedShape},
+		{"body.status", "订单 A7 已创建", "订单 A7 已发货", " 已创建", " 已发货", RefusalChangedShape},
+		{"body.city", "Zürich", "Zärich", "ü", "ä", RefusalCannotCheck},
+	} {
+		ds := Decide(oInput(c.path, c.rec, c.live, nil, nil))
+		if len(ds) != 1 {
+			t.Fatalf("%q to %q: %s; want one refusal of the field", c.rec, c.live, oDescribe(ds))
+		}
+		oRefused(t, c.rec+" to "+c.live, ds[0], c.kind, strconv.Quote(c.r)+" to "+strconv.Quote(c.f))
+		if why := ds[0].Refusal.Why; strings.Contains(why, "separates") || strings.Contains(why, "added or dropped") {
+			t.Errorf("%q to %q: refused %q; want the changed text named, not a word added or only separators", c.rec, c.live, why)
+		}
+		if back, ok := ParseRefusal(ds[0].Line); !ok || back.Why != ds[0].Refusal.Why {
+			t.Errorf("%q to %q: ParseRefusal(%q) = %q, %v; want the reason back", c.rec, c.live, ds[0].Line, back.Why, ok)
+		}
+	}
+	d := Decide(oInput("body.password", "密码一", "密码二", nil, nil))[0]
+	if d.Refusal == nil || strings.Contains(d.Line+d.Refusal.Why, "一") || strings.Contains(d.Line+d.Refusal.Why, "二") {
+		t.Errorf("LEAK a password's changed text: %s, line %q", oDescribe([]Decision{d}), d.Line)
+	}
+}

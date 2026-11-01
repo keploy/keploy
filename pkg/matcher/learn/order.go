@@ -226,23 +226,46 @@ func (dc *decider) leafText(path string, at variables.Address, rec, live string)
 		return []Decision{dc.cannotCheck(path, bare, -1, rec, live, "only its encoding changed")}
 	}
 	var out []Decision
+	between := textReading{Rec: rec, Live: live}
 	for _, rd := range readLeaf(dc.in.Drifts, at, rec, live) {
+		if len(between.Separators) == 0 {
+			between = rd
+		}
 		ds, whole := dc.text(path, bare, rec, live, rd)
 		if out = append(out, ds...); whole {
 			return out
 		}
 	}
 	if len(out) == 0 && rec != live {
-		out = append(out, dc.cannotCheck(path, bare, -1, rec, live, "only what separates its words changed"))
+		out = append(out, dc.cannotCheck(path, bare, -1, rec, live, betweenWords(between)))
 	}
 	return out
+}
+
+// betweenWords is the reason a text whose words did not change is refused:
+// the text between them that did, named (CJK or accented text holds none
+// of keploy's words, so all of it is between them), first three.
+func betweenWords(rd textReading) string {
+	seps := rd.Separators
+	if len(seps) == 0 {
+		seps = []sepChange{{RecAt: [2]int{0, len(rd.Rec)}, LiveAt: [2]int{0, len(rd.Live)}}}
+	}
+	var named []string
+	for _, sc := range seps[:min(len(seps), maxLinePlaces)] {
+		named = append(named, strconv.Quote(rd.Rec[sc.RecAt[0]:sc.RecAt[1]])+" to "+strconv.Quote(rd.Live[sc.LiveAt[0]:sc.LiveAt[1]]))
+	}
+	return "the text between its words changed, " + strings.Join(named, " and ") + " (keploy's words are runs of ASCII letters and digits)"
 }
 
 // text decides the changed words of rd, one text the leaf at bare opens;
 // whole reports a refusal of the field whole, which ends the leaf.
 func (dc *decider) text(path string, bare variables.Address, rec, live string, rd textReading) ([]Decision, bool) {
 	if rd.ChangedShape {
-		return []Decision{dc.refuse(path, bare, -1, rec, live, RefusalChangedShape, "a word was added or dropped", nil, dc.fieldNoise(path))}, true
+		why := "a word was added or dropped"
+		if slices.ContainsFunc(rd.Separators, func(sc sepChange) bool { return len(sc.Tokens) == 0 }) {
+			why = betweenWords(rd)
+		}
+		return []Decision{dc.refuse(path, bare, -1, rec, live, RefusalChangedShape, why, nil, dc.fieldNoise(path))}, true
 	}
 	var out []Decision
 	done := map[*instantWord]bool{}
