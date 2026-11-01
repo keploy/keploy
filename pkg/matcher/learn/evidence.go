@@ -51,6 +51,8 @@ type evPlace struct {
 	// ("worker:", a test's name); "" where the place keeps its marks.
 	otherTest bool
 	scope     string
+	// leaf: an earlier exchange's leaf, which names its place (FromAt).
+	leaf Leaf
 	at        time.Time
 	state     placeState
 	why       string
@@ -89,7 +91,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 			}
 			ps = append(ps, evPlace{
 				name: e.Mock + " " + path, mock: e.Mock, path: path,
-				rec: s.Leaf.Value, live: s.Live, side: s.Side,
+				rec: s.Leaf.Value, live: s.Live, side: s.Side, leaf: s.Leaf,
 				given: e.Given, gave: e.Gave, clock: s.Clock, startUp: startUp, otherTest: other, scope: scope,
 				at: e.At, state: st, why: why,
 			})
