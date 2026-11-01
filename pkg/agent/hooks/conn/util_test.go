@@ -306,6 +306,38 @@ func TestCaptureGRPC_SchemaKeyStamping(t *testing.T) {
 	})
 }
 
+// TestCaptureGRPC_OversizedCallIsJudgedBeforeTheHook: a call over
+// MaxTestCaseSize, its stream's later messages counted, is dropped before the
+// dedup hook sees it. Judged after, it was counted as a seen shape, and every
+// later call of that shape under the limit was dropped as its duplicate.
+func TestCaptureGRPC_OversizedCallIsJudgedBeforeTheHook(t *testing.T) {
+	origHook := GRPCCaptureHook
+	defer func() { GRPCCaptureHook = origHook }()
+	hookCalls := 0
+	GRPCCaptureHook = func(_ *models.GrpcReq, _ *models.GrpcResp) (bool, string) {
+		hookCalls++
+		return false, ""
+	}
+
+	big := strings.Repeat("x", MaxTestCaseSize/2+1)
+	resp := &models.GrpcResp{}
+	// Under the limit in its first message alone; over it with the second.
+	resp.SetMessages([]models.GrpcLengthPrefixedMessage{{DecodedData: "1: {\"a\"}"}, {DecodedData: big}, {DecodedData: big}})
+	tChan := make(chan *models.TestCase, 1)
+	CaptureGRPC(context.Background(), zap.NewNop(), tChan, &pkg.HTTP2Stream{GRPCReq: &models.GrpcReq{}, GRPCResp: resp}, 9090, false, false)
+	if len(tChan) != 0 {
+		t.Fatal("an oversized call must not emit a test case")
+	}
+	if hookCalls != 0 {
+		t.Fatalf("the dedup hook saw an oversized call %d time(s), want none", hookCalls)
+	}
+
+	CaptureGRPC(context.Background(), zap.NewNop(), tChan, &pkg.HTTP2Stream{GRPCReq: &models.GrpcReq{}, GRPCResp: &models.GrpcResp{}}, 9090, false, false)
+	if len(tChan) != 1 || hookCalls != 1 {
+		t.Fatalf("a call under the limit: %d test case(s), %d hook call(s); want 1 and 1", len(tChan), hookCalls)
+	}
+}
+
 // A request header that arrived on several lines is replayed on those lines,
 // in their order — recorded, written to disk, read back and sent. Folding them
 // into one comma-joined line is not the same request: an app that reads the
