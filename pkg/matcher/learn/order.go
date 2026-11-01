@@ -156,6 +156,7 @@ func (dc *decider) word(path string, at variables.Address, rec, live string, w r
 		}
 	}
 	orderUnknown(dc.in, ps, cand)
+	swapUnknown(dc.in, dc.x, ps, w)
 	var src, outside, conflict, unknown []evPlace
 	for _, p := range ps {
 		ev, read := evidenceAt(dc.x, p, w.Rec, w.Live)
@@ -389,7 +390,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 				Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
 		case h.hr && dc.swappable(p, c):
 			return dc.refuse(path, at, n, r, l, RefusalPick,
-				"the recorded moment stands in "+p.name+", whose state in round F keploy cannot tell (a connection start-up keploy may swap)", []string{p.name},
+				"the recorded moment stands in "+p.name+", whose state in round F keploy cannot tell ("+swapNote+")", []string{p.name},
 				Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
 		}
 	}

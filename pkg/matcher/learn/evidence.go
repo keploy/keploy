@@ -99,9 +99,9 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 				p := &ps[len(ps)-1]
 				switch a := e.Payload.answered; {
 				case a.IsZero():
-					p.state, p.why = stateUnknown, "no answer time"
+					p.state, p.why = stateUnknown, noAnswerAt
 				case a.Equal(in.At):
-					p.state, p.why = stateUnknown, atCallNote
+					p.state, p.why = stateUnknown, atCallWhy
 				case a.After(in.At):
 					p.state = stateNotBefore
 				}
@@ -164,11 +164,11 @@ func earlierState(in Input, e Earlier) (placeState, string) {
 	case e.alwaysEarlier():
 		return stateBefore, ""
 	case e.noTime:
-		return stateUnknown, noTimeNote
+		return stateUnknown, noTimeWhy
 	case e.Payload.servedAfter:
 		return stateNotBefore, ""
 	case e.At.Equal(in.At):
-		return stateUnknown, atCallNote
+		return stateUnknown, atCallWhy
 	case e.At.After(in.At):
 		return stateNotBefore, ""
 	}
@@ -180,9 +180,9 @@ func earlierState(in Input, e Earlier) (placeState, string) {
 func rawState(in Input, r Raw) (placeState, string) {
 	switch {
 	case r.noTime || r.answered.IsZero():
-		return stateUnknown, "no answer time"
+		return stateUnknown, noAnswerAt
 	case r.answered.Equal(in.At) || r.at.Equal(in.At):
-		return stateUnknown, atCallNote
+		return stateUnknown, atCallWhy
 	case r.answered.After(in.At) || !r.served || r.servedAfter:
 		return stateNotBefore, ""
 	}
@@ -205,7 +205,7 @@ func orderUnknown(in Input, ps []evPlace, cand map[string]bool) {
 	}
 	if why == "" {
 		if d := orderDiff(rec, f); d != "" {
-			why = "another order (" + d + ")"
+			why = "another order: " + d
 		}
 	}
 	if why == "" {
@@ -214,6 +214,48 @@ func orderUnknown(in Input, ps []evPlace, cand map[string]bool) {
 	for i := range ps {
 		if cand[ps[i].mock] && ps[i].state == stateBefore {
 			ps[i].state, ps[i].why = stateUnknown, why
+		}
+	}
+}
+
+// Why a place's state in round F is unknown, as a refusal's line says it
+// in parentheses.
+const (
+	swapNote   = "a connection start-up keploy may swap"
+	atCallWhy  = "recorded at the call's own instant"
+	noTimeWhy  = "recorded at a time keploy cannot read"
+	noAnswerAt = "no answer time"
+)
+
+// swapUnknown marks unknown each place of ps, before the call in both runs,
+// that is a connection's recorded start-up whose field a swap of start-ups
+// can change (a backend pid, a secret key, a server parameter set per pool)
+// and holds the recorded word w or a whole token around it (Raw's
+// swapHolds). keploy gives each connection a recorded start-up by the order
+// the connections open in, not by what each sent: round F's connection may
+// have got another's, so keploy cannot tell what F gave there. A field every
+// start-up carries alike is no swap's, and reads as any recording's. Only
+// a place whose recorded text holds the word is asked: swapHolds reads a
+// match it finds in no one field as a swap's.
+func swapUnknown(in Input, x *readerIndex, ps []evPlace, w readWord) {
+	holds := func(own string) bool {
+		if holdsToken(own, w.Rec) {
+			return true
+		}
+		for _, t := range w.Tokens {
+			if holdsToken(own, t.Rec) {
+				return true
+			}
+		}
+		return false
+	}
+	for i := range ps {
+		p := &ps[i]
+		if p.raw == 0 || p.state != stateBefore || !evHolds(x, p.rec, w.Rec) {
+			continue
+		}
+		if r := in.Raw[p.raw-1]; r.swapHolds(r.payload().text, in.Raw, holds) {
+			p.state, p.why = stateUnknown, swapNote
 		}
 	}
 }
