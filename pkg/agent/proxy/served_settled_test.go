@@ -659,10 +659,13 @@ func TestAMarkWhileTheLearnStepRunsGoesThrough(t *testing.T) {
 }
 
 // Once the staging's outside answers are built, a mark after the learn step
-// ended takes no staging lock before its round step, so it waits behind no
-// staging that lands (swapMu held): in a retry cycle a parser marks every
-// reusable recording it answers from, one consume at a time.
-func TestAMarkAfterTheLearnStepEndedWaitsBehindNoLandingStaging(t *testing.T) {
+// ended takes no lock before its round step, neither swapMu nor the outside
+// answers' own: so it waits behind no staging until that staging starts its
+// epoch (one waiting for swapMu, or holding it before its epoch). In a retry
+// cycle a parser marks every reusable recording it answers from, one consume
+// at a time. A door after a staging started its epoch waits for it to land,
+// as there is nothing to read before it does; no staging here gets that far.
+func TestAMarkAfterTheLearnStepEndedTakesNoLockBeforeAStagingStartsItsEpoch(t *testing.T) {
 	provenswitch.Pin(true)
 	t.Cleanup(provenswitch.Unpin)
 	m := exactMock("session", 0, models.LifetimeSession)
@@ -674,27 +677,61 @@ func TestAMarkAfterTheLearnStepEndedWaitsBehindNoLandingStaging(t *testing.T) {
 		t.Fatal("precondition: the first mark did not go through")
 	}
 	mm.swapMu.Lock()
+	mm.exact.outside.mu.Lock()
+	unlock := func() { mm.exact.outside.mu.Unlock(); mm.swapMu.Unlock() }
 	done := make(chan bool, 1)
 	go func() { done <- mm.MarkMockAsUsed(*m) }()
 	select {
 	case ok := <-done:
-		mm.swapMu.Unlock()
+		unlock()
 		if !ok {
 			t.Fatal("the mark, its staging's outside answers built, was refused")
 		}
 	case <-time.After(time.Minute):
-		mm.swapMu.Unlock()
+		unlock()
 		<-done
-		t.Fatal("the mark waited for the staging lock with its staging's outside answers built")
+		t.Fatal("the mark waited for the staging lock or the outside answers' lock with its staging's outside answers built")
 	}
 	wantTold(t, "both marks", told, "session", "session")
+}
+
+// A staging lets the past staging's outside answers go before it starts its
+// epoch, and they are built only under swapMu: so at every instant they are
+// none or the current staging's, and a read that takes no lock never sees a
+// past staging's answers under the new epoch.
+func TestAStagingLetsThePastOutsideAnswersGoBeforeItStartsItsEpoch(t *testing.T) {
+	provenswitch.Pin(true)
+	t.Cleanup(provenswitch.Unpin)
+	m := exactMock("session", 0, models.LifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{m})
+	mm.SetLearnEnded(true)
+	mm.prepareOutside()
+	if mm.outsideNow() == nil {
+		t.Fatal("precondition: the outside answers were not built")
+	}
+	seen := false
+	mm.exact.outside.onLetGo = func() {
+		mm.exact.outside.onLetGo = nil
+		seen = true
+		if st := mm.exact.outside.cur.Load(); st != nil && st.epoch != mm.stagingEpoch.Load() {
+			t.Errorf("as the staging started its epoch, the outside answers held staging %d's under epoch %d", st.epoch, mm.stagingEpoch.Load())
+		}
+	}
+	mm.SetMocksWithWindow(nil, []*models.Mock{m}, models.BaseTime, time.Now())
+	if !seen {
+		t.Fatal("the staging started no epoch")
+	}
+	if st := mm.exact.outside.cur.Load(); st != nil && st.epoch != mm.stagingEpoch.Load() {
+		t.Fatalf("after the staging, the outside answers held staging %d's under epoch %d", st.epoch, mm.stagingEpoch.Load())
+	}
 }
 
 // A named read (a delete door's spend: noteExactSpent) builds the staging's
 // outside answers, then reads them. A staging that lands between the two
 // leaves no base to read the copy against: every noise path it carries is
 // read as learned after the end (fail closed: its tests get no verdict), and
-// a Warn naming the recording says so.
+// a Warn naming the recording says a staging began under the read. It does
+// not say the staging lacks the recording: the new staging holds it.
 func TestANamedReadAStagingLandedUnderIsReadAsLearnedAndSaid(t *testing.T) {
 	provenswitch.Pin(true)
 	t.Cleanup(provenswitch.Unpin)
@@ -714,9 +751,18 @@ func TestANamedReadAStagingLandedUnderIsReadAsLearnedAndSaid(t *testing.T) {
 	if !mm.learnedAfterEndNamed(&c) {
 		t.Fatal("read with no staging's base, the copy's noise path was read as learned before the end")
 	}
-	if said := unstagedWarns(logs); len(said) != 1 || said[0].ContextMap()["mock"] != "session" {
-		t.Fatalf("the Warns %v; want one, naming session", said)
+	if said := begunUnderWarns(logs); len(said) != 1 || said[0].ContextMap()["mock"] != "session" {
+		t.Fatalf("the Warns that a staging began under the read %v; want one, naming session", said)
 	}
+	if said := unstagedWarns(logs); len(said) != 0 {
+		t.Fatalf("the Warns %v say the staging does not hold session; it does, a staging began under the read", said)
+	}
+}
+
+// begunUnderWarns is the Warns that a staging began while keploy read a
+// consumed recording's staged base (warnStagingBegunUnder).
+func begunUnderWarns(logs *observer.ObservedLogs) []observer.LoggedEntry {
+	return logs.FilterMessageSnippet("a new staging began while keploy read the staged recording").All()
 }
 
 // DeleteFilteredMock's fall to the start-up tier calls this door saying not to
