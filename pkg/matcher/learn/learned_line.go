@@ -58,23 +58,8 @@ func learnedLine(l learnedWord) string {
 	if l.From != "" {
 		b.WriteString(", learned from round F's call in " + l.From + ", for learning only")
 	}
-	if len(l.Places) > 0 {
-		b.WriteString(placesMark)
-		for i, p := range l.Places {
-			if i == maxLinePlaces {
-				break
-			}
-			if i > 0 {
-				b.WriteString(placeSep)
-			}
-			b.WriteString(p)
-		}
-	}
-	undo := Edit{Kind: EditNoiseAtWord, Mock: l.Mock, Field: l.Field, Word: l.Word}
-	if l.Word < 0 {
-		undo = Edit{Kind: EditNoiseAtField, Mock: l.Mock, Field: l.Field, Word: -1}
-	}
-	b.WriteString(". Undo: " + editWords(undo) + editSep + editWords(Edit{Kind: EditReRecord}) + ".")
+	b.WriteString(placesPart(l.Places))
+	b.WriteString(". Undo: " + editWords(noiseEdit(l.Mock, l.Field, l.Word)) + editSep + editWords(Edit{Kind: EditReRecord}) + ".")
 	return b.String()
 }
 

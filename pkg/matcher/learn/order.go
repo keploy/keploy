@@ -393,12 +393,7 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 	}
 	switch {
 	case len(src) > 0:
-		first := src[0]
-		for _, p := range src[1:] {
-			if p.at.Before(first.at) {
-				first = p
-			}
-		}
+		first := earliest(src)
 		if d, ok := dc.atWord(path, bare, n, w, rec, live); !ok {
 			return d
 		}
@@ -501,7 +496,10 @@ func (dc *decider) textInstant(path string, bare variables.Address, rec, live st
 		c.li = typedInstant{at: time.Unix(0, iw.Live.key.at).UTC(), res: iw.Live.res, names: namesMoment}
 	}
 	c.echo, c.unnamed = dc.readBack(path, w.At, w, rec, true)
-	c.rec, c.wholeText = rec, w.Rec == rec
+	c.rec = rec
+	if w.Rec != rec {
+		c.valueEcho = c.echo
+	}
 	d := dc.instant(path, w.At, w.At.Word, c)
 	if r, no := dc.unanswerable(path, bare, rec, live, d.Echo, c.unnamed); no && len(d.Echo) > 0 {
 		return r
@@ -538,13 +536,11 @@ type changedInstant struct {
 	word   models.ClockWord
 	noWord string
 	// echo is where the call's answer reads the word back (readBack, whole
-	// values too), unnamed the first such place keploy cannot name, rec the
-	// leaf's recorded text; wholeText: the instant is that text whole, whose
-	// Value the adapter's echo answers.
-	echo      []variables.Address
-	unnamed   string
-	rec       string
-	wholeText bool
+	// values too), valueEcho the same for a Value (the text whole is the
+	// adapter's echo), unnamed the first such place keploy cannot name, rec
+	// the leaf's recorded text.
+	echo, valueEcho []variables.Address
+	unnamed, rec    string
 	// aside names the earlier places that held R's value where F's does
 	// not stand: a Clock's line says it set them aside.
 	aside []string
@@ -1166,21 +1162,23 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 // bound is a Value bound at the earliest of src; From says Run where that
 // place is the start-up's or an earlier test's (the run's variable).
 func (dc *decider) bound(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
+	first := earliest(src)
+	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+first.name+": "+rule+answeredAt(c.valueEcho, c.rec), names(src))
+	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest, InStartUp: first.startUp}
+	d.FromAt = dc.fromAt(first, c.r)
+	d.Echo = c.valueEcho
+	return d
+}
+
+// earliest is the first of src to happen, src's first of those at one time.
+func earliest(src []evPlace) evPlace {
 	first := src[0]
 	for _, p := range src[1:] {
 		if p.at.Before(first.at) {
 			first = p
 		}
 	}
-	var echo []variables.Address
-	if !c.wholeText {
-		echo = c.echo
-	}
-	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+first.name+": "+rule+answeredAt(echo, c.rec), names(src))
-	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest, InStartUp: first.startUp}
-	d.FromAt = dc.fromAt(first, c.r)
-	d.Echo = echo
-	return d
+	return first
 }
 
 // answeredAt is the end of a word's rule that names where its call's answer
@@ -1197,12 +1195,7 @@ func answeredAt(echo []variables.Address, rec string) string {
 // one its own call learned as a read of the clock is a second, separate
 // read, and the word is refused naming both.
 func (dc *decider) copied(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
-	first := src[0]
-	for _, p := range src[1:] {
-		if p.at.Before(first.at) {
-			first = p
-		}
-	}
+	first := earliest(src)
 	for _, p := range src {
 		if p.clock && p.name != first.name {
 			return dc.refuse(path, at, n, c.r, c.l, RefusalTwoSources,
@@ -1337,15 +1330,16 @@ func (dc *decider) cannotCheck(path string, at variables.Address, n int, r, f, w
 	return dc.refuse(path, at, n, r, f, RefusalCannotCheck, why, nil, dc.fieldNoise(path))
 }
 
-func (dc *decider) fieldNoise(path string) Edit {
-	return Edit{Kind: EditNoiseAtField, Mock: dc.in.Mock, Field: path, Word: -1}
-}
+func (dc *decider) fieldNoise(path string) Edit { return noiseEdit(dc.in.Mock, path, -1) }
 
-func (dc *decider) wordNoise(path string, n int) Edit {
+func (dc *decider) wordNoise(path string, n int) Edit { return noiseEdit(dc.in.Mock, path, n) }
+
+// noiseEdit is noise at word n of field, or at the field where n is -1.
+func noiseEdit(mock, field string, n int) Edit {
 	if n < 0 {
-		return dc.fieldNoise(path)
+		return Edit{Kind: EditNoiseAtField, Mock: mock, Field: field, Word: -1}
 	}
-	return Edit{Kind: EditNoiseAtWord, Mock: dc.in.Mock, Field: path, Word: n}
+	return Edit{Kind: EditNoiseAtWord, Mock: mock, Field: field, Word: n}
 }
 
 // names are ps' line names, first three.
