@@ -169,21 +169,35 @@ func TestReaderJWTClaimsOpen(t *testing.T) {
 		t.Errorf("only the signature changed: %d readings %q; want one, the signature's", len(rds), leafChanges(rds))
 	}
 
-	// The payload re-encoded with no claim changed: no step.
-	ro := jwtOf(false, `{"sub":"u-1","n":"a-17"}`, rs)
-	lo := jwtOf(false, `{"n":"a-17","sub":"u-1"}`, rs)
-	for _, rd := range readLeaf(nil, place, ro, lo) {
-		if len(rd.At.Steps) != 0 || rd.Off != [2]int{} {
-			t.Errorf("a payload re-encoded: opened at %s off %v", rd.At, rd.Off)
-		}
+	// The payload re-encoded with no claim changed: no step, and the change
+	// is read where it is (the payload's words), not lost; so too in an
+	// unsigned JWT, whose empty signature reads no word.
+	for _, sig := range []string{rs, ""} {
+		ro := jwtOf(false, `{"sub":"u-1","n":"a-17"}`, sig)
+		lo := jwtOf(false, `{"n":"a-17","sub":"u-1"}`, sig)
+		unopened(t, "a payload re-encoded, signature "+sig, readLeaf(nil, place, ro, lo))
 	}
 
-	// A claim that differs as an array is no string or number: no step.
-	ra := jwtOf(false, `{"roles":["a-17"]}`, rs)
-	la := jwtOf(false, `{"roles":["a-18"]}`, rs)
-	for _, rd := range readLeaf(nil, place, ra, la) {
+	// A claim that differs as an array is no string or number: no step,
+	// alone or beside a string claim that differs too.
+	for _, c := range [][2]string{
+		{`{"roles":["a-17"]}`, `{"roles":["a-18"]}`},
+		{`{"roles":["a-17"],"sub":"u-17"}`, `{"roles":["a-18"],"sub":"u-18"}`},
+	} {
+		unopened(t, "an array claim "+c[0], readLeaf(nil, place, jwtOf(false, c[0], rs), jwtOf(false, c[1], rs)))
+	}
+}
+
+// unopened checks that rds read the leaf as it is, from its first word,
+// with no step, and that they hold a changed word.
+func unopened(t *testing.T, what string, rds []textReading) {
+	t.Helper()
+	if len(leafChanges(rds)) == 0 {
+		t.Errorf("%s: no changed word read", what)
+	}
+	for _, rd := range rds {
 		if len(rd.At.Steps) != 0 || rd.Off != [2]int{} {
-			t.Errorf("an array claim: opened at %s off %v", rd.At, rd.Off)
+			t.Errorf("%s: opened at %s off %v", what, rd.At, rd.Off)
 		}
 	}
 }
@@ -208,6 +222,10 @@ func TestReaderCookiePairsOpen(t *testing.T) {
 		{"another order", "header.Cookie", "sid=abc-17; lang=en", "lang=fr; sid=abc-18", nil},
 		{"a name twice", "header.Cookie", "sid=abc-17; sid=x", "sid=abc-18; sid=x", nil},
 		{"not a cookie header", "body.c", "theme=dark; sid=abc-17", "theme=dark; sid=abc-18", nil},
+		// A pair's value that opens to pairs is a value, not a cookie: its
+		// words stand at their index in it, no cookie step opens inside it.
+		{"pairs inside a pair's value", "header.Cookie", "next=a%3D1%3B%20b%3D17", "next=a%3D1%3B%20b%3D18",
+			[]string{"header.Cookie|cookie.next|pct#3: 17>18"}},
 	} {
 		rds := readLeaf(nil, mustAt(t, c.place), c.rec, c.live)
 		readsBack(t, c.rec, c.live, rds)

@@ -52,6 +52,10 @@ func TestReaderEpochNumbersAreInstants(t *testing.T) {
 		{"13 digits before 2000", "0000000000473", "0000000000901"},
 		{"13 digits after 2100", "9999999999473", "9999999999901"},
 		{"10 digits in one run only parses", "1792667656", "0000000001"},
+		// An epoch's length in one run is enough: the other run's number
+		// is matched by its text, parse or not.
+		{"10 digits in R, 8 in F", "1792667656", "17926676"},
+		{"10 digits in R that do not parse, 8 in F", "0000000001", "17926676"},
 	} {
 		iw := instantOfWord(t, c.rec, c.live)
 		if iw == nil || !iw.Number || !iw.ByText {
@@ -153,6 +157,12 @@ func TestReaderByMoment(t *testing.T) {
 		{"a value that is the second of a microsecond read held", "2026-10-21T08:34:16.473120Z", "2026-10-21T08:34:16Z", true, false},
 		{"a microsecond value beside a second held: no copy", "2026-10-21T08:34:16Z", "2026-10-21T08:34:16.473120Z", false, false},
 		{"another moment", "2026-10-21T08:34:16Z", "2026-10-21T09:34:17Z", false, false},
+		// One moment at two resolutions is cut at the coarser of them.
+		{"a nanosecond read held, its millisecond copy", "1792667656473000000", "1792667656473", true, false},
+		{"a millisecond read held, its nanosecond copy", "1792667656473", "1792667656473000000", true, false},
+		// Of several rules that name the value, the finest is the cut: a
+		// microsecond's truncation names it as well as a millisecond's.
+		{"the finest of several cuts", "2026-10-21T08:34:16.473000999Z", "2026-10-21T08:34:16.473Z", true, true},
 	} {
 		ok, fine := byMoment(read(c.held), read(c.m))
 		if ok != c.ok || fine != c.fine {
@@ -202,6 +212,16 @@ func TestReaderKeepsRoundFsViewOfASetRecordingsInstants(t *testing.T) {
 	view := func(id string) func() (*models.Mock, error) {
 		return func() (*models.Mock, error) { loads[id]++; return jobsMock(id, "9"), nil }
 	}
+	// A view whose own stamps say nothing of when it was recorded: its
+	// instants stand where the recording does all the same.
+	unstamped := func(id string) func() (*models.Mock, error) {
+		return func() (*models.Mock, error) {
+			loads[id]++
+			v := jobsMock(id, "9")
+			v.Spec.ReqTimestampMock, v.Spec.ResTimestampMock = time.Time{}, time.Time{}
+			return v, nil
+		}
+	}
 	for _, c := range []struct {
 		name   string
 		proven string
@@ -220,6 +240,7 @@ func TestReaderKeepsRoundFsViewOfASetRecordingsInstants(t *testing.T) {
 			tr.ServedMock(m)
 			tr.ServedMockLive(m, "a", view(viewAt))
 		}, []string{viewAt}},
+		{"told with a view stamped with no time", "1", func(tr *Tracker) { tr.ServedMockLive(m, "a", unstamped(viewAt)) }, []string{viewAt}},
 		{"told with two views", "1", func(tr *Tracker) {
 			tr.ServedMockLive(m, "a", view(viewAt))
 			tr.ServedMock(m)
@@ -260,6 +281,21 @@ func TestReaderKeepsRoundFsViewOfASetRecordingsInstants(t *testing.T) {
 				for _, v := range g.fView {
 					if v.mock != m.Name || !strings.HasPrefix(v.where, m.Name+" at ") || !v.at.Equal(m.Spec.ReqTimestampMock) {
 						t.Errorf("%s: a view instant stands at %q of %q recorded %v; want mock-6's field, recorded when mock-6 was", read, v.where, v.mock, v.at)
+					}
+					if a := g.answer[0]; v.late != a.late || v.noTime != a.noTime {
+						t.Errorf("%s: a view instant reads late %v, no time %v; want the recording's %v, %v", read, v.late, v.noTime, a.late, a.noTime)
+					}
+				}
+			}
+			// With the switch off the set keeps no view's instants: it reads
+			// the views for their words, and nothing reads their instants.
+			if o.places != nil && c.proven == "0" {
+				if len(o.places.views) == 0 {
+					t.Errorf("the set kept no view: the switch-off row reads nothing")
+				}
+				for key, v := range o.places.views {
+					if len(v.moments) != 0 {
+						t.Errorf("switch off: the set keeps %d instants of the view %q", len(v.moments), key)
 					}
 				}
 			}
