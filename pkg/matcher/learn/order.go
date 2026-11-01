@@ -337,7 +337,8 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 			unknown = append(unknown, evPlace{name: p.name, why: "past the call's budget"})
 			continue
 		}
-		if ev == evNone || ev == evDisproven {
+		switch ev {
+		case evNone, evDisproven:
 			if tokenShown(p, w) {
 				ev = evShown
 			} else if ev == evNone && dc.gluedAt(p, w) {
@@ -348,7 +349,7 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 				// changed with it, and keploy binds a given only whole.
 				ev, p.why = evUnknown, "the given stands inside the word in both runs, glued to the text around it: keploy binds a given only as a whole word"
 			}
-		} else if ev == evShown {
+		case evShown:
 			if why := movedField(p, w.Rec, w.Live); why != "" {
 				ev, p.why = evUnknown, why
 			}
