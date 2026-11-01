@@ -205,6 +205,46 @@ func TestADrainHoldsAtMostItsBound(t *testing.T) {
 	}
 }
 
+// A drain holds within the read-aheads' bound in all (aheadMaxInAll) too:
+// with what they hold together charged to 4 KB short of it, a drain of a
+// socket that holds 64 KB holds those 4 KB and no more, so keploy holds no
+// more than the bound in all. Its own bound (drainMax) is far above. What
+// stays in the socket its consumer reads after the drain's, in order.
+func TestADrainHoldsAtMostWhatTheBoundInAllLeaves(t *testing.T) {
+	const room = 4 << 10
+	if drainMax <= room {
+		t.Fatalf("drainMax is %d: this row needs it above %d", drainMax, room)
+	}
+	charged := aheadMaxInAll - room - aheadInAll.Load()
+	aheadInAll.Add(charged)
+	t.Cleanup(func() { aheadInAll.Add(-charged) })
+	app, ingress := tcpPair(t)
+	d := newDrainConn(ingress)
+	t.Cleanup(d.release)
+	answer := make([]byte, 64<<10)
+	for i := range answer {
+		answer[i] = byte('a' + i/(4<<10))
+	}
+	if _, err := app.Write(answer); err != nil {
+		t.Fatal(err)
+	}
+	waitAcked(t, app)
+	d.drain()
+	d.mu.Lock()
+	held := len(d.held)
+	d.mu.Unlock()
+	if held != room {
+		t.Fatalf("with %d bytes in the socket and %d left of the bound in all, the drain holds %d, want %d", len(answer), room, held, room)
+	}
+	if inAll := aheadInAll.Load(); inAll > aheadMaxInAll {
+		t.Fatalf("keploy holds %d bytes ahead in all, over the bound %d", inAll, aheadMaxInAll)
+	}
+	got := make([]byte, len(answer))
+	if _, err := io.ReadFull(d, got); err != nil || !bytes.Equal(got, answer) {
+		t.Fatalf("the consumer read the %d bytes out of their order (%v)", len(answer), err)
+	}
+}
+
 // readerWaits reports whether a goroutine waits in a drainConn's read for the
 // socket to bring something.
 func readerWaits() bool {
