@@ -232,6 +232,11 @@ type Record struct {
 	// should stick with GlobalPassthrough.
 	OpportunisticTLSIntercept bool `json:"opportunisticTlsIntercept" yaml:"opportunisticTlsIntercept" mapstructure:"opportunisticTlsIntercept"`
 
+	// Watch keeps a recording going when the application exits on its own:
+	// keploy restarts the command (with backoff) and keeps appending to the
+	// same test set. Not supported for docker compose.
+	Watch bool `json:"watch" yaml:"watch" mapstructure:"watch"`
+
 	// RecordBuffer tunes the per-connection record buffer. Defaults
 	// suit ~99% of workloads; only touch these if you see "mock
 	// incomplete" warnings with reason "per_conn_cap" in the agent logs.
