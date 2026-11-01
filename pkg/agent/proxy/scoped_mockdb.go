@@ -445,17 +445,35 @@ func (s *scopedMockDb) HoldToRound(call integrations.CallRound) (integrations.Mo
 	return &c, restaged
 }
 
-// HideBackground implements integrations.BackgroundHider: this view over the
-// store HideBackground returned for it, a held store being one call's, as
-// HoldToRound's copy is.
-func (s *scopedMockDb) HideBackground() integrations.MockMemDb {
-	inner := integrations.HideBackground(s.MockMemDb)
+// HideBackgroundWhen implements integrations.BackgroundHider: this view over
+// the store HideBackgroundWhen returned for it, a held store being one
+// call's, as HoldToRound's copy is. Under exact serving scopedFor wraps no
+// new connection, but scopedFor decides once per connection: one opened
+// before exact serving began keeps this view, and its calls must keep the
+// held store's decision too, or the background would answer a call one more
+// than the test recorded on that connection.
+func (s *scopedMockDb) HideBackgroundWhen(owns func() bool) integrations.MockMemDb {
+	h, ok := s.MockMemDb.(integrations.BackgroundHider)
+	if !ok {
+		return s
+	}
+	inner := h.HideBackgroundWhen(owns)
 	if inner == s.MockMemDb {
 		return s
 	}
 	c := *s
 	c.MockMemDb = inner
 	return &c
+}
+
+// HidesBackground implements integrations.BackgroundHider: the held store's.
+func (s *scopedMockDb) HidesBackground() bool {
+	return integrations.OwnRepeat(s.MockMemDb)
+}
+
+// RefusesAnswer implements integrations.BackgroundHider: the held store's.
+func (s *scopedMockDb) RefusesAnswer(mk *models.Mock) bool {
+	return integrations.RefusesAnswer(s.MockMemDb, mk)
 }
 
 var _ integrations.BackgroundHider = (*scopedMockDb)(nil)

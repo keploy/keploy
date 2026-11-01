@@ -388,17 +388,17 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	db, restaged := integrations.HoldToRound(mockDb, call)
 	// A command one of the open test's own recordings is, answered or not,
 	// as the matcher judges it (ownRepeats), is matched with the set's
-	// background hidden (integrations.OwnRepeatRead): no pool or worker
-	// recording answers a command one more than the test recorded, which then
-	// misses as such, its background copy left unspent, even when two of
-	// them are run at once (the retry below reads the same hidden store).
+	// background hidden (integrations.OwnRepeatRead) once the background is
+	// about to answer it: no pool or worker recording answers a command one
+	// more than the test recorded, which then misses as such, its background
+	// copy left unspent, even when two of them are run at once (the store
+	// refuses the copy, and the retry below reads it hidden). A command the
+	// test's own recordings answer never asks.
 	var own []*models.Mock
 	held := db
-	hidden := false
 	db = integrations.OwnRepeatRead(db, call, func() bool {
 		own = ownCommands.Of(held, commandType(req.PacketBundle))
-		hidden = len(ownRepeats(ctx, req, held, own, decodeCtx, noiseEngine, userBodyNoise, 1)) > 0
-		return hidden
+		return len(ownRepeats(ctx, req, held, own, decodeCtx, noiseEngine, userBodyNoise, 1)) > 0
 	})
 	var opts matchOptions
 	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, decodeCtx, noiseEngine, userBodyNoise, opts)
@@ -422,6 +422,15 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			opts.refused = make(map[*models.Mock]struct{})
 		}
 		opts.refused[refused.mock] = struct{}{}
+		resp, ok, miss, err = matchCommandWith(ctx, logger, req, db, decodeCtx, noiseEngine, userBodyNoise, opts)
+	}
+	// A command that missed before the background could answer it asks now
+	// whether it is one of the open test's own (integrations.OwnRepeat): one
+	// is matched again as it reads the store, with the background hidden, so
+	// its miss is diagnosed as one command more than the test recorded, never
+	// against the background.
+	hidden := miss != nil && integrations.OwnRepeat(db)
+	if hidden && err == nil {
 		resp, ok, miss, err = matchCommandWith(ctx, logger, req, db, decodeCtx, noiseEngine, userBodyNoise, opts)
 	}
 	// A store that marked the command's round but could not hold it read

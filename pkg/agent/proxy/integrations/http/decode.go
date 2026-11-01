@@ -369,10 +369,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					db, _ = integrations.HoldToRound(mockDb, call)
 					// A call one of the open test's own recordings is,
 					// answered or not (ownCall), is read with the set's
-					// background hidden: no pool or worker recording answers
-					// a call one more than the test recorded, which then
-					// misses as such (extraCall), its background copy left
-					// unspent, even when two of them are made at once.
+					// background hidden once the background is about to
+					// answer it: no pool or worker recording answers a call
+					// one more than the test recorded, which then misses as
+					// such (extraCall), its background copy left unspent,
+					// even when two of them are made at once. A call the
+					// test's own recordings answer never asks.
 					held := db
 					db = integrations.OwnRepeatRead(db, call, func() bool {
 						return h.ownCall(reqCtx, input, held, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict())
@@ -391,6 +393,15 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 						detect, correlate = false, true
 					}
 					ok, stub, diag, err = h.matchOf(reqCtx, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
+					// A call that missed before the background could answer
+					// it asks now whether it is one of the open test's own
+					// (integrations.OwnRepeat): one is matched again as it
+					// reads the store, with the background hidden, so its
+					// miss is diagnosed as one call more than the test
+					// recorded, never against the background.
+					if proven && !ok && err == nil && integrations.OwnRepeat(db) {
+						ok, stub, diag, err = h.matchOf(reqCtx, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate)
+					}
 				}
 			}
 			if err != nil {

@@ -947,9 +947,11 @@ type heldScope struct {
 	// (integrations.CallRound.Sequence), seqOK whether its mark kept one.
 	seq   integrations.SequenceView
 	seqOK bool
-	// hideBg says the call is one more than the open test's own recordings
-	// of it (HideBackground): the set's background is in none of h's reads
-	// and its doors refuse it (hides).
+	// owns is the call's decision whether it is one of the open test's own
+	// calls (HideBackgroundWhen), until a door or HidesBackground asks it.
+	owns func() bool
+	// hideBg says the call is one of them (HidesBackground): the set's
+	// background is in none of h's reads and its doors refuse it (hides).
 	hideBg bool
 }
 
@@ -1161,7 +1163,7 @@ func (h *heldScope) ExactTakenCandidates(kind models.Kind) []*models.Mock {
 }
 
 func (h *heldScope) SpendByKind(mk *models.Mock) bool {
-	if h.hides(mk) {
+	if h.refuses(mk) {
 		return false
 	}
 	ok, _ := h.spendByKindAt(mk, &h.g)
