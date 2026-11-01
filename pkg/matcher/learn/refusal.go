@@ -135,25 +135,7 @@ func editWords(e Edit) string {
 	if !ok {
 		return lineName(string(e.Kind))
 	}
-	var b strings.Builder
-	for i := 0; i < len(form); i++ {
-		if form[i] != '%' || i+1 == len(form) {
-			b.WriteByte(form[i])
-			continue
-		}
-		i++
-		switch form[i] {
-		case 'm':
-			b.WriteString(lineName(e.Mock))
-		case 'f':
-			b.WriteString(lineName(e.Field))
-		case 'w':
-			b.WriteString(strconv.Itoa(e.Word))
-		case 'n':
-			b.WriteString(strconv.Quote(e.Name))
-		}
-	}
-	return b.String()
+	return strings.NewReplacer("%m", lineName(e.Mock), "%f", lineName(e.Field), "%w", strconv.Itoa(e.Word), "%n", strconv.Quote(e.Name)).Replace(form)
 }
 
 // lineName is s bare where it is a plain name: not empty, valid UTF-8, no

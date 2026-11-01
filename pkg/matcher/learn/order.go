@@ -1054,6 +1054,10 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 		}
 		off.Layout, off.Word = lay, c.word
 	}
+	if !off.Plain() {
+		// The window holds the read; the value is the read plus this.
+		rule += ", stored as " + models.ClockOffset{Min: off.Min, Max: off.Max, Res: off.Res}.String()
+	}
 	d := dc.learned(path, at, n, r, l, OutcomeClock, rule, nil)
 	if off.Why == "" {
 		off.Why = d.Line
