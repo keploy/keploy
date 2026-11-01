@@ -58,9 +58,9 @@ func TestDecideWithNoOrderRefusesEveryChangedWord(t *testing.T) {
 	}
 	in := Input{
 		Test: "test-1", Mock: "mock-3",
-		Rec:   Shape{Leaves: leaves("body.id", "order-17-a-5", "body.sep", "a-b", "header.date", "2026-11-01T10:00:00Z", "body.more", "a b"), Body: map[string]interface{}{}},
-		Live:  Shape{Leaves: leaves("body.id", "order-42-a-6", "body.sep", "a_b", "header.date", "2026-11-01T10:00:05Z", "body.more", "a b c"), Body: map[string]interface{}{}},
-		Drift: []string{"body.id", "body.sep", "header.date", "body.more", "body.gone"},
+		Rec:   Shape{Leaves: leaves("body.id", "order-17-a-5", "body.sep", "a-b", "header.date", "2026-11-01T10:00:00Z", "body.more", "a b", "body.mix", "a-17"), Body: map[string]interface{}{}},
+		Live:  Shape{Leaves: leaves("body.id", "order-42-a-6", "body.sep", "a_b", "header.date", "2026-11-01T10:00:05Z", "body.more", "a b c", "body.mix", "a_42"), Body: map[string]interface{}{}},
+		Drift: []string{"body.id", "body.sep", "header.date", "body.more", "body.gone", "body.mix"},
 	}
 	ds := Decide(in)
 	type got struct {
@@ -88,6 +88,7 @@ func TestDecideWithNoOrderRefusesEveryChangedWord(t *testing.T) {
 		{"header.date", "header.date", "2026-11-01T10:00:00Z", "2026-11-01T10:00:05Z", -1},
 		{"body.more", "body.more", "a b", "a b c", -1},
 		{"body.gone", "", "", "", -1},
+		{"body.mix", "body.mix", "a-17", "a_42", -1},
 	}
 	if !reflect.DeepEqual(gots, want) {
 		t.Errorf("Decide refused\n%+v\nwant\n%+v", gots, want)

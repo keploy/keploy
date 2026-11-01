@@ -142,8 +142,9 @@ func TestClockFieldsMeetAndHold(t *testing.T) {
 	if !w.Valid() {
 		t.Error("a word of a decoded form is not valid")
 	}
-	w.Form = "base64"
-	if w.Valid() || reflect.DeepEqual(w, ClockWord{}) {
-		t.Error("a form this keploy does not read is valid")
+	for _, w := range []ClockWord{ClockWordOf("17", 0, 2), ClockWordOf("a=17", 2, 4)} {
+		if w.Form = "base64"; w.Valid() || reflect.DeepEqual(w, ClockWord{}) {
+			t.Errorf("a form this keploy does not read is valid: %+v", w)
+		}
 	}
 }
