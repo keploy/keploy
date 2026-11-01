@@ -438,9 +438,10 @@ func TestReaderTextOfARecordingPinsNothingPastTheBudget(t *testing.T) {
 
 // A base64 token is held where it stands whole, no byte of the base64
 // alphabets or its padding on either side. The index reads a text's whole
-// runs once (wholeB64Runs) instead of scanning the text per token: each
-// base64 token (isB64Run, as tokenSpans cuts them) is held by the one
-// exactly where the scan holds it.
+// runs once (runsOf) instead of scanning the text per token, and past its
+// budget finds a run by a scan that lists no other (eachB64Run): each base64
+// token (isB64Run, as tokenSpans cuts them) is held by both exactly where
+// the scan holds it.
 func TestReaderWholeBase64RunsAreTheScansTokens(t *testing.T) {
 	scan := func(text, tok string) bool {
 		for i := 0; i+len(tok) <= len(text); i++ {
@@ -452,7 +453,9 @@ func TestReaderWholeBase64RunsAreTheScansTokens(t *testing.T) {
 		return false
 	}
 	texts := []string{"ab=cd", "abc==x", "abc==", "x.abc=.y", "abc=def", "eyJh.c2ln_-+/==;", "a==b==", "==ab", "a-b_c+d/e", "q=1&r=Zm9v=="}
-	for _, text := range texts {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	for k, text := range texts {
+		readerBudget = int64(k % 2) // past the budget (1): the scan
 		x := newReaderIndex(nil)
 		for i := 0; i < len(text); i++ {
 			for j := i + 1; j <= len(text); j++ {
@@ -523,15 +526,20 @@ func TestReaderCutsABase64TokenAsItFindsOne(t *testing.T) {
 		{"QUJD=======x", []string{"x"}},
 		{"tok=ab+cd/ef==", []string{"ab+cd/ef=="}},
 		{"a-b_c", []string{"a-b_c"}},
+		{"QUJDREVG+2026-10-31T10:50:13Z", []string{"QUJDREVG+"}},
+		{"at 2026-10-31T10:50:13Z+QUJDREVG", []string{"at", "+QUJDREVG"}},
 	} {
 		var got []string
-		x := newReaderIndex(nil).text(c.text)
 		for _, sp := range tokenSpans(c.text, instantSpans(c.text)).b64 {
 			tok := c.text[sp[0]:sp[1]]
 			got = append(got, tok)
-			if held, read := x.holdsToken(tokenB64, tok); !held || !read {
-				t.Errorf("%q: the reader lists the base64 token %q, which its own text does not hold whole (held %v read %v)", c.text, tok, held, read)
+			for _, budget := range []int64{0, 1} {
+				readerBudget = budget
+				if held, read := newReaderIndex(nil).text(c.text).holdsToken(tokenB64, tok); !held || !read {
+					t.Errorf("%q (budget %d): the reader lists the base64 token %q, which its own text does not hold whole (held %v read %v)", c.text, budget, tok, held, read)
+				}
 			}
+			readerBudget = 0
 		}
 		if fmt.Sprint(got) != fmt.Sprint(c.want) {
 			t.Errorf("%q: base64 tokens %q, want %q", c.text, got, c.want)

@@ -246,12 +246,17 @@ func (t *readerText) tokensOf() ([]map[string]bool, bool) {
 		t.x.dc.rawTokens, tokensBytes, func(e *readerEntry, v []map[string]bool) { e.tokens = v })
 }
 
-// runsOf are the text's base64 runs that stand whole (wholeB64Runs), read
-// once for the call where they fit the budget; ok false where the recording
-// was not read.
+// runsOf are the text's base64 runs that stand whole outside its
+// instants (eachB64Run), read once for the call where they fit the budget;
+// ok false where the recording was not read.
 func (t *readerText) runsOf() (map[string]bool, bool) {
+	dc := t.x.dc
 	return indexOnce(t, func(e *readerEntry) *bool { return &e.runsKept }, func(e *readerEntry) map[string]bool { return e.runs },
-		wholeB64Runs, wordsBytes, func(e *readerEntry, v map[string]bool) { e.runs = v })
+		func(s string) map[string]bool {
+			runs := map[string]bool{}
+			eachB64Run(s, dc.spansOf(s), func(a, b int) bool { runs[s[a:b]] = true; return true })
+			return runs
+		}, wordsBytes, func(e *readerEntry, v map[string]bool) { e.runs = v })
 }
 
 // spansOf are the text's instants (instantSpans), read once for the call
@@ -356,54 +361,71 @@ func heldBy(s, w string, word func(byte) bool) bool {
 
 // holdsToken reports whether the text holds tok whole, as a token of its
 // kind: an idByte token (any declared form), or a base64 run that stands
-// whole (wholeB64Spans, the rule tokenSpans cuts it by); read as holdsWord.
+// whole outside the text's instants (eachB64Run, the rule tokenSpans cuts
+// it by); read as holdsWord. Past the budget a run is found by a scan of
+// the text read now, which lists none of its other runs.
 func (t *readerText) holdsToken(kind tokenKind, tok string) (held, read bool) {
 	if kind == tokenID {
 		return t.wordIn(tok, len(readings)-1)
+	}
+	if t.e == nil || !t.e.runsKept {
+		s, ok := t.read()
+		if !ok {
+			return false, false
+		}
+		if !t.e.runsKept && !t.x.mayKeep(t.e, s) {
+			spans, _ := t.spansOf()
+			eachB64Run(s, spans, func(a, b int) bool {
+				held = s[a:b] == tok
+				return !held
+			})
+			return held, true
+		}
 	}
 	runs, ok := t.runsOf()
 	return runs[tok], ok
 }
 
-// wholeB64Runs are s's base64 runs that stand whole (wholeB64Spans): the
-// tokens holdsToken finds in s.
-func wholeB64Runs(s string) map[string]bool {
-	runs := map[string]bool{}
-	for _, sp := range wholeB64Spans(s) {
-		runs[s[sp[0]:sp[1]]] = true
+// eachB64Run calls yield with [start, end) of each of s's base64 runs that
+// stand whole outside its instants (spans), in order, until it returns
+// false: a run of the base64 alphabets, standard or URL-safe, that no byte
+// of them comes right before, with all the padding ('=') after it, that no
+// byte of them follows, an instant's bounds standing as the text's ends
+// ("QUJDREVG+" of "QUJDREVG+2026-10-31T10:50:13Z"). It is the one rule the
+// reader cuts a base64 token by (tokenSpans) and finds one in a text by
+// (holdsToken), so every token it cuts is held by its own text: a run a
+// byte of the alphabets follows past its padding (`tok=` of
+// `tok=ab+cd/ef==`) is none, and its words are judged one by one.
+func eachB64Run(s string, spans []instant, yield func(start, end int) bool) {
+	from := 0
+	gap := func(to int) bool {
+		for i := from; i < to; {
+			if !isB64Byte(s[i]) {
+				i++
+				continue
+			}
+			j := i
+			for j < to && isB64Byte(s[j]) {
+				j++
+			}
+			k := j
+			for k < to && s[k] == '=' {
+				k++
+			}
+			if (k == to || !isB64Byte(s[k])) && !yield(i, k) {
+				return false
+			}
+			i = k
+		}
+		return true
 	}
-	return runs
-}
-
-// wholeB64Spans are s's base64 runs that stand whole, as s[start:end] each,
-// in order: a run of the base64 alphabets, standard or URL-safe, that no
-// byte of them comes right before, with all the padding ('=') after it,
-// that no byte of them follows. It is the one rule the reader cuts a base64
-// token by (tokenSpans) and finds one in a text by (holdsToken), so every
-// token it cuts is held by its own text: a run a byte of the alphabets
-// follows past its padding (`tok=` of `tok=ab+cd/ef==`) is none, and its
-// words are judged one by one.
-func wholeB64Spans(s string) [][2]int {
-	var out [][2]int
-	for i := 0; i < len(s); {
-		if !isB64Byte(s[i]) {
-			i++
-			continue
+	for _, in := range spans {
+		if in.start >= from && !gap(in.start) {
+			return
 		}
-		j := i
-		for j < len(s) && isB64Byte(s[j]) {
-			j++
-		}
-		k := j
-		for k < len(s) && s[k] == '=' {
-			k++
-		}
-		if k == len(s) || !isB64Byte(s[k]) {
-			out = append(out, [2]int{i, k})
-		}
-		i = k
+		from = max(from, in.end)
 	}
-	return out
+	gap(len(s))
 }
 
 // holdsMoment reports whether an instant of the text names m by moment
