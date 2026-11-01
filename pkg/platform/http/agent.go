@@ -2735,8 +2735,7 @@ func (a *AgentClient) requestAgentStop() error {
 	// connection for being idle: a POST is not resent, so the request failed
 	// ("server closed idle connection") with an agent that was not going
 	// away, and that agent was signalled at once.
-	client := a.client
-	client.Transport = ownConnections(client.Transport)
+	client := a.ownConnection()
 	res, err := client.Do(req)
 	if err != nil {
 		return err
@@ -4360,7 +4359,10 @@ func (a *AgentClient) EndRecordingStreams(ctx context.Context, token string) err
 	if err != nil {
 		return err
 	}
-	resp, err := a.client.Do(req)
+	// A round's end cancels this request once the streams are read to their
+	// markers, which the agent sends just before it answers (ownConnection).
+	client := a.ownConnection()
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -4421,7 +4423,10 @@ func (a *AgentClient) awaitStopNotice(ctx context.Context) (answered bool, err e
 	if err != nil {
 		return false, err
 	}
-	resp, err := a.client.Do(req)
+	// Held open beside the run's requests, and cancelled as the run ends
+	// (ownConnection).
+	client := a.ownConnection()
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, err
 	}
