@@ -190,7 +190,8 @@ func TestAForwarderYieldsAPortAListenerHoldsOnIPv6(t *testing.T) {
 // app on :: (dual-stack or IPV6_V6ONLY) conflicts with that listener, and
 // the port is yielded. An app on ::1 conflicts with it too, but not with a
 // listener on another IPv6 address ([fd00::5]:P), which a check of [::]
-// would find. When the hooks cannot say what the binds take, the whole of
+// would find. Each address the binds take is checked, the conflicting one
+// first or last. When the hooks cannot say what the binds take, the whole of
 // IPv6 is checked: a hold must never take calls from a listener keploy does
 // not own.
 func TestTheIPv6CheckMirrorsWhatTheAppsBindsTake(t *testing.T) {
@@ -209,6 +210,7 @@ func TestTheIPv6CheckMirrorsWhatTheAppsBindsTake(t *testing.T) {
 		{"an app on ::1, a listener on [::1]", "[::1]:0", []netip.Addr{loop6}, nil, true},
 		{"an app on ::1, a listener on [fd00::5]", "[fd00::5]:0", []netip.Addr{loop6}, nil, false},
 		{"an app on ::1 and ::, a listener on [fd00::5]", "[fd00::5]:0", []netip.Addr{loop6, any6}, nil, true},
+		{"an app on ::1 and fd00::6, a listener on [::1]", "[::1]:0", []netip.Addr{loop6, netip.MustParseAddr("fd00::6")}, nil, true},
 		{"binds the hooks cannot read, a listener on [fd00::5]", "[fd00::5]:0", nil, errors.New("iteration aborted"), true},
 	} {
 		t.Run(c.name, func(t *testing.T) {

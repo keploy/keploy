@@ -563,4 +563,108 @@ func TestTheHoldReadsTheIPv6AddressesTheAppsBindsTake(t *testing.T) {
 			}
 		})
 	}
+	// Several of the app's sockets live on one port (one on ::1 and a
+	// dual-stack one on ::, beside an IPv4 one): every note is read, so the
+	// forwarder checks each address they take.
+	t.Run("an IPv6 socket on ::1, one on :: without IPV6_V6ONLY and an IPv4 one", func(t *testing.T) {
+		orig := unusedPort(t)
+		note(orig, appBindV6, loop6, 1)
+		note(orig, appBindV6Dual, [16]byte{}, 2)
+		note(orig, appBindV4, [16]byte{}, 1)
+		got, err := h.AppIPv6Binds(orig)
+		slices.SortFunc(got, netip.Addr.Compare)
+		want := []netip.Addr{netip.IPv6Unspecified(), netip.IPv6Loopback()}
+		if err != nil || !slices.Equal(got, want) {
+			t.Fatalf("the IPv6 addresses taken on port %d: %v, %v; want %v", orig, got, err, want)
+		}
+	})
+}
+
+// The notes Go writes and reads (appBind*) are the ones the C lookup matches
+// (APP_BIND_*, ingress_bound_here): a held port's call is parked only where
+// a noted socket of the app's would have taken it. A socket on :: without
+// IPV6_V6ONLY takes both families; one on :: with it, all of IPv6 only; one
+// on ::1, ::1 only; an IPv4 one, no IPv6. Each note here is written with
+// Go's constant, so a Go constant that is not C's parks nothing, and a
+// dual-stack app beside a listener on [::1]:P would get no IPv6 check.
+func TestTheLookupParksWhereTheGoNotesSayTheAppsSocketsTakeCalls(t *testing.T) {
+	h := ingressHoldAgent(t)
+	if ln, err := net.Listen("tcp6", "[::1]:0"); err != nil {
+		t.Skipf("no IPv6 loopback here: %v", err)
+	} else {
+		_ = ln.Close()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h.startIngressHold(ctx, holdCgroup(t))
+	if !h.IngressHeld() {
+		t.Fatal("the hold did not start")
+	}
+	park := h.IngressParkListener()
+	accepted := make(chan net.Conn, 8)
+	go func() {
+		for {
+			c, err := park.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- c
+		}
+	}()
+	for _, c := range []struct {
+		name   string
+		kind   uint16
+		addr   [16]byte
+		v4, v6 bool // whether a call to 127.0.0.1:P, and one to [::1]:P, is parked
+	}{
+		{"an IPv6 socket on :: without IPV6_V6ONLY", appBindV6Dual, [16]byte{}, true, true},
+		{"an IPv6 socket on :: with IPV6_V6ONLY", appBindV6, [16]byte{}, false, true},
+		{"an IPv6 socket on ::1", appBindV6, netip.IPv6Loopback().As16(), false, true},
+		{"an IPv4 socket on 127.0.0.1", appBindV4, [16]byte{127, 0, 0, 1}, true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			orig := unusedPort(t)
+			movedAndNoted(t, h, orig, false)
+			if err := h.objects.AppPortBinds.Update(appBindKey{Port: orig, Kind: c.kind, Addr: c.addr}, appBindCount{N: 1}, ebpf.UpdateAny); err != nil {
+				t.Fatal(err)
+			}
+			for _, d := range []struct {
+				network, host string
+				parked        bool
+			}{{"tcp4", "127.0.0.1", c.v4}, {"tcp6", "::1", c.v6}} {
+				addr := net.JoinHostPort(d.host, strconv.Itoa(int(orig)))
+				before := h.IngressLookupCounts()["parked"]
+				conn, err := net.DialTimeout(d.network, addr, 10*time.Second)
+				if !d.parked {
+					if err == nil {
+						_ = conn.Close()
+						t.Fatalf("a call to %s was answered; want it refused, as no noted socket takes it", addr)
+					}
+					if !errors.Is(err, syscall.ECONNREFUSED) {
+						t.Fatalf("a call to %s: %v, want refused", addr, err)
+					}
+					if n := h.IngressLookupCounts()["parked"]; n != before {
+						t.Fatalf("a call to %s: parked went from %d to %d, want it unmoved", addr, before, n)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("a call to %s: %v, want the park to take it", addr, err)
+				}
+				select {
+				case p := <-accepted:
+					if got := p.LocalAddr().(*net.TCPAddr).Port; got != int(orig) {
+						t.Fatalf("a call to %s: the parked connection's local port is %d, want %d", addr, got, orig)
+					}
+					_ = p.Close()
+				case <-time.After(10 * time.Second):
+					t.Fatalf("a call to %s: the park did not accept it", addr)
+				}
+				_ = conn.Close()
+				if n := h.IngressLookupCounts()["parked"]; n <= before {
+					t.Fatalf("a call to %s: parked went from %d to %d, want it moved", addr, before, n)
+				}
+			}
+		})
+	}
 }
