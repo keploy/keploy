@@ -110,6 +110,65 @@ func TestAnAuthoredBlockRoundTrips(t *testing.T) {
 	}
 }
 
+// An authored mock whose answer ends in a fault (derive or generate --fault)
+// is written as any fault mock is, under kind HttpFault, so that a keploy
+// that knows no faults skips it instead of serving its head as a whole
+// answer; its `authored:` block, the delta's fault included, is a legible
+// top-level key, and it reads back, from YAML and from JSON, as the HTTP
+// mock with that fault and that block.
+func TestAnAuthoredFaultMockIsWrittenAsAFaultMock(t *testing.T) {
+	m := variablesMock()
+	m.Spec.Fault = &models.Fault{Kind: models.FaultReset}
+	a := derivedAuthored()
+	a.Delta.Fault = &models.Fault{Kind: models.FaultReset}
+	m.Spec.Authored = a
+	want := a.Clone()
+	doc, err := EncodeMock(m, zap.NewNop())
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if doc.Kind != models.HTTPFault {
+		t.Fatalf("written as kind %s, want %s", doc.Kind, models.HTTPFault)
+	}
+	var buf bytes.Buffer
+	enc := yamlLib.NewEncoder(&buf)
+	if err := enc.Encode(doc); err != nil {
+		t.Fatal(err)
+	}
+	_ = enc.Close()
+	if text := buf.String(); !strings.Contains(text, "kind: HttpFault") || !strings.Contains(text, "\nauthored:\n") || !strings.Contains(text, "        fault:\n            kind: reset") {
+		t.Fatalf("not written as a fault mock with its authored fault:\n%s", text)
+	}
+	var back yaml.NetworkTrafficDoc
+	if err := yamlLib.Unmarshal(buf.Bytes(), &back); err != nil {
+		t.Fatal(err)
+	}
+	jsonBytes, err := yaml.MarshalDoc(yaml.FormatJSON, doc)
+	if err != nil {
+		t.Fatalf("MarshalDoc(json): %v", err)
+	}
+	jdoc, err := yaml.UnmarshalDoc(yaml.FormatJSON, jsonBytes)
+	if err != nil {
+		t.Fatalf("UnmarshalDoc(json): %v", err)
+	}
+	for name, d := range map[string]*yaml.NetworkTrafficDoc{"yaml": &back, "json": jdoc} {
+		out, err := DecodeMocks([]*yaml.NetworkTrafficDoc{d}, zap.NewNop())
+		if err != nil || len(out) != 1 {
+			t.Fatalf("%s decode: err=%v n=%d", name, err, len(out))
+		}
+		got := out[0]
+		if got.Kind != models.HTTP || got.Spec.Fault == nil || *got.Spec.Fault != *m.Spec.Fault {
+			t.Fatalf("%s: read back as kind %s with fault %+v, want %s with %+v", name, got.Kind, got.Spec.Fault, models.HTTP, m.Spec.Fault)
+		}
+		if !reflect.DeepEqual(got.Spec.Authored, want) {
+			t.Fatalf("%s: authored block %+v, want %+v", name, got.Spec.Authored, want)
+		}
+		if got.FaultServed() != "mock-1: upstream reset after 0 bytes, as authored" {
+			t.Fatalf("%s: FaultServed() = %q", name, got.FaultServed())
+		}
+	}
+}
+
 // An authored mock is written by the store, in every format a recording is
 // kept in (YAML, JSON, gob), and every rewrite of the recording (the noise
 // write-back, the prune of unused mocks) keeps its `authored:` block as it

@@ -44,8 +44,9 @@ type Authored struct {
 	// Delta is, for a derived mock, what it changed in its source's answer;
 	// nil for a generated one.
 	Delta *AuthoredDelta `json:"delta,omitempty" yaml:"delta,omitempty" bson:"delta,omitempty"`
-	// Malformed says, for a generated mock, that its author wrote an answer
-	// body that does not parse as its Content-Type says, on purpose.
+	// Malformed says that its author wrote an answer body that does not
+	// parse as its Content-Type says, on purpose: a generated mock's body,
+	// or the body a derived mock's Delta sets.
 	Malformed bool `json:"malformed,omitempty" yaml:"malformed,omitempty" bson:"malformed,omitempty"`
 }
 
@@ -64,6 +65,10 @@ type AuthoredDelta struct {
 	Header map[string]string `json:"header,omitempty" yaml:"header,omitempty" bson:"header,omitempty"`
 	// DropHeader is the headers taken off the answer.
 	DropHeader []string `json:"drop_header,omitempty" yaml:"drop_header,omitempty" bson:"drop_header,omitempty"`
+	// Fault is the fault the answer ends in (MockSpec.Fault), which
+	// replaces the recorded one, if any; nil keeps the recorded answer's
+	// ending.
+	Fault *Fault `json:"fault,omitempty" yaml:"fault,omitempty" bson:"fault,omitempty"`
 }
 
 // Clone is a copy of a that shares nothing with it; nil for nil.
@@ -80,7 +85,24 @@ func (a *Authored) Clone() *Authored {
 		}
 		d.Header = maps.Clone(a.Delta.Header)
 		d.DropHeader = slices.Clone(a.Delta.DropHeader)
+		if a.Delta.Fault != nil {
+			f := *a.Delta.Fault
+			d.Fault = &f
+		}
 		c.Delta = &d
 	}
 	return &c
+}
+
+// IsAuthored reports whether m was written, derived or generated, rather
+// than recorded (MockSpec.Authored). A mock whose payload is left on disk
+// (LeavePayloadOnDisk) keeps the answer until its payload is read back.
+func (m *Mock) IsAuthored() bool {
+	if m == nil {
+		return false
+	}
+	if m.onDisk != nil {
+		return m.onDisk.authored
+	}
+	return m.Spec.Authored != nil
 }

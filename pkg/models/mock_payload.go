@@ -87,6 +87,8 @@ type payloadOnDisk struct {
 	// IsMySQLStatementLifecycle's and mysqlIsSessionReusableCommand's.
 	mysqlStatementLifecycle bool
 	mysqlSessionReusable    bool
+	// authored is IsAuthored's: whether the mock's Spec.Authored was set.
+	authored bool
 	// fault is a copy of the mock's Spec.Fault (FaultOf), nil for none: what
 	// a replay's summary names when the mock was served (FaultServed).
 	fault *Fault
@@ -121,6 +123,7 @@ func (m *Mock) LeavePayloadOnDisk(src PayloadSource, at PayloadAt) {
 	d.fingerprint = requestFingerprint(m)
 	d.summary, d.longSummary = keptDisplay(MockSummaryFromSpec(m))
 	d.target, d.longTarget = keptDisplay(MockTargetFromSpec(m))
+	d.authored = m.Spec.Authored != nil
 	if f := m.Spec.Fault; f != nil {
 		kept := *f
 		kept.Observed = strings.Clone(f.Observed)
