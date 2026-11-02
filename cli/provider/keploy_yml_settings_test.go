@@ -16,11 +16,15 @@ import (
 
 // settingRow is one run of a verb: keploy.yml's body, the environment, the
 // command line after the verb, and what the run has to leave in the config
-// (or the refusal it has to end in).
+// (or the refusal it has to end in). parent, when set, is the command the verb
+// runs under (contract), and files are written into the working directory
+// first.
 type settingRow struct {
 	name    string
+	parent  string
 	yml     string
 	env     map[string]string
+	files   map[string]string
 	args    []string
 	check   func(t *testing.T, cfg *config.Config)
 	refused string
@@ -51,9 +55,17 @@ func runVerbWithKeployYml(t *testing.T, verb string, row settingRow) {
 	if err := os.WriteFile(filepath.Join(dir, "keploy.yml"), []byte(row.yml), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	for name, body := range row.files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cfg := config.New()
 	c := NewCmdConfigurator(zap.NewNop(), cfg)
 	cmd := &cobra.Command{Use: verb}
+	if row.parent != "" {
+		(&cobra.Command{Use: row.parent}).AddCommand(cmd)
+	}
 	if err := c.AddFlags(cmd); err != nil {
 		t.Fatalf("AddFlags: %v", err)
 	}
@@ -294,5 +306,196 @@ func TestMockVerbsKeepKeployYmlPath(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// wantFolder checks that the run keeps its recordings in <rel>/keploy, as an
+// absolute path.
+func wantFolder(name string, get func(*config.Config) string, rel string) func(*testing.T, *config.Config) {
+	return func(t *testing.T, cfg *config.Config) {
+		t.Helper()
+		want, err := filepath.Abs(filepath.Join(rel, "keploy"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := get(cfg); got != want {
+			t.Fatalf("%s = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func wantStrings(name string, get func(*config.Config) []string, want ...string) func(*testing.T, *config.Config) {
+	return func(t *testing.T, cfg *config.Config) {
+		t.Helper()
+		got := get(cfg)
+		if len(got) != len(want) {
+			t.Fatalf("%s = %q, want %q", name, got, want)
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Fatalf("%s = %q, want %q", name, got, want)
+			}
+		}
+	}
+}
+
+func allOf(checks ...func(*testing.T, *config.Config)) func(*testing.T, *config.Config) {
+	return func(t *testing.T, cfg *config.Config) {
+		t.Helper()
+		for _, check := range checks {
+			check(t, cfg)
+		}
+	}
+}
+
+// pathRows are a verb's rows for keploy.yml's path: it names the folder the
+// recordings are in as --path does, and so does KEPLOY_PATH; --path, when
+// given, wins.
+func pathRows(get func(*config.Config) string, args ...string) []settingRow {
+	folder := func(rel string) func(*testing.T, *config.Config) { return wantFolder("path", get, rel) }
+	with := func(more ...string) []string { return append(append([]string{}, args...), more...) }
+	return []settingRow{
+		{name: "path, no flag", yml: "path: recordings\n", args: with(), check: folder("recordings")},
+		{name: "KEPLOY_PATH, no flag", yml: "inCi: false\n", env: map[string]string{"KEPLOY_PATH": "recordings"}, args: with(), check: folder("recordings")},
+		{name: "path, -p .", yml: "path: recordings\n", args: with("-p", "."), check: folder(".")},
+		{name: "no path, no flag", yml: "inCi: false\n", args: with(), check: folder(".")},
+	}
+}
+
+// keploy.yml's path and report settings count on `keploy report` as their
+// flags do, as does the environment where a flag binds one; the flag, when
+// given, wins. Each flag's default was read over them on every run.
+func TestKeployReportKeepsKeployYmlSettings(t *testing.T) {
+	path := func(c *config.Config) string { return c.Path }
+	summary := func(c *config.Config) bool { return c.Report.Summary }
+	full := func(c *config.Config) bool { return c.Report.ShowFullBody }
+	testCases := func(want ...string) func(*testing.T, *config.Config) {
+		return wantStrings("report.testCaseIDs", func(c *config.Config) []string { return c.Report.TestCaseIDs }, want...)
+	}
+	testSets := func(want ...string) func(*testing.T, *config.Config) {
+		return wantStrings("report.selectedTestSets", func(c *config.Config) []string {
+			names := make([]string, 0, len(c.Report.SelectedTestSets))
+			for name := range c.Report.SelectedTestSets {
+				names = append(names, name)
+			}
+			return names
+		}, want...)
+	}
+	reportPath := func(rel string) func(*testing.T, *config.Config) {
+		return func(t *testing.T, cfg *config.Config) {
+			t.Helper()
+			want := ""
+			if rel != "" {
+				var err error
+				if want, err = filepath.Abs(rel); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if cfg.Report.ReportPath != want {
+				t.Fatalf("report.reportPath = %q, want %q", cfg.Report.ReportPath, want)
+			}
+		}
+	}
+	runs := map[string]string{"run-1.yaml": "tests: []\n", "run-2.yaml": "tests: []\n"}
+	rows := append(pathRows(path),
+		settingRow{name: "reportPath, no flag", yml: "report:\n  reportPath: run-1.yaml\n", files: runs, check: reportPath("run-1.yaml")},
+		settingRow{name: "reportPath, -r", yml: "report:\n  reportPath: run-1.yaml\n", files: runs, args: []string{"-r", "run-2.yaml"}, check: reportPath("run-2.yaml")},
+		settingRow{name: "REPORT_REPORTPATH, no flag", yml: "inCi: false\n", files: runs, env: map[string]string{"REPORT_REPORTPATH": "run-1.yaml"}, check: reportPath("run-1.yaml")},
+		settingRow{name: "reportPath and path, no flag", yml: "path: recordings\nreport:\n  reportPath: run-1.yaml\n", files: runs,
+			check: allOf(reportPath("run-1.yaml"), wantFolder("path", path, "recordings"))},
+		settingRow{name: "reportPath naming a folder", yml: "report:\n  reportPath: keploy\n", refused: "must point to a file"},
+		settingRow{name: "summary, no flag", yml: "report:\n  summary: true\n", check: wantBool("report.summary", summary, true)},
+		settingRow{name: "summary, --summary=false", yml: "report:\n  summary: true\n", args: []string{"--summary=false"}, check: wantBool("report.summary", summary, false)},
+		settingRow{name: "REPORT_SUMMARY, no flag", yml: "inCi: false\n", env: map[string]string{"REPORT_SUMMARY": "true"}, check: wantBool("report.summary", summary, true)},
+		settingRow{name: "showFullBody, no flag", yml: "report:\n  showFullBody: true\n", check: wantBool("report.showFullBody", full, true)},
+		settingRow{name: "showFullBody, --full=false", yml: "report:\n  showFullBody: true\n", args: []string{"--full=false"}, check: wantBool("report.showFullBody", full, false)},
+		settingRow{name: "showFullBody false, --full", yml: "report:\n  showFullBody: false\n", args: []string{"--full"}, check: wantBool("report.showFullBody", full, true)},
+		settingRow{name: "testCaseIDs, no flag", yml: "report:\n  testCaseIDs: [test-1, test-2]\n", check: testCases("test-1", "test-2")},
+		settingRow{name: "testCaseIDs, --test-case", yml: "report:\n  testCaseIDs: [test-1, test-2]\n", args: []string{"--test-case", "test-3, test-4"}, check: testCases("test-3", "test-4")},
+		settingRow{name: "selectedTestSets, no flag", yml: "report:\n  selectedTestSets:\n    test-set-1: []\n", check: testSets("test-set-1")},
+		settingRow{name: "selectedTestSets, -t", yml: "report:\n  selectedTestSets:\n    test-set-1: []\n", args: []string{"-t", "test-set-2"}, check: testSets("test-set-2")},
+		settingRow{name: "no report settings, no flag", yml: "inCi: false\n", check: allOf(reportPath(""), wantBool("report.summary", summary, false),
+			wantBool("report.showFullBody", full, false), testCases(), testSets())},
+	)
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) { runVerbWithKeployYml(t, "report", row) })
+	}
+}
+
+// keploy.yml's path and KEPLOY_PATH name the folder `keploy diff` and `keploy
+// sanitize` read as --path does; --path, when given, wins.
+func TestDiffAndSanitizeKeepKeployYmlPath(t *testing.T) {
+	path := func(c *config.Config) string { return c.Path }
+	for _, verb := range []string{"diff", "sanitize"} {
+		for _, row := range pathRows(path) {
+			t.Run(verb+": "+row.name, func(t *testing.T) { runVerbWithKeployYml(t, verb, row) })
+		}
+	}
+}
+
+// keploy.yml's path and contract settings count on `keploy contract generate`,
+// `download` and `test` as their flags do; the flag, when given, wins.
+func TestContractVerbsKeepKeployYmlSettings(t *testing.T) {
+	contractPath := func(c *config.Config) string { return c.Contract.Path }
+	services := func(want ...string) func(*testing.T, *config.Config) {
+		return wantStrings("contract.services", func(c *config.Config) []string { return c.Contract.Services }, want...)
+	}
+	tests := func(want ...string) func(*testing.T, *config.Config) {
+		return wantStrings("contract.tests", func(c *config.Config) []string { return c.Contract.Tests }, want...)
+	}
+	driven := func(want string) func(*testing.T, *config.Config) {
+		return func(t *testing.T, cfg *config.Config) {
+			t.Helper()
+			if cfg.Contract.Driven != want {
+				t.Fatalf("contract.driven = %q, want %q", cfg.Contract.Driven, want)
+			}
+		}
+	}
+	servicesRows := []settingRow{
+		{name: "services, no flag", yml: "contract:\n  services: [orders, billing]\n", check: services("orders", "billing")},
+		{name: "services, -s", yml: "contract:\n  services: [orders, billing]\n", args: []string{"-s", "email"}, check: services("email")},
+		{name: "no services, no flag", yml: "inCi: false\n", check: services()},
+	}
+	drivenRows := []settingRow{
+		{name: "driven, no flag", yml: "contract:\n  driven: provider\n", check: driven("provider")},
+		{name: "driven, --driven", yml: "contract:\n  driven: provider\n", args: []string{"--driven", "consumer"}, check: driven("consumer")},
+	}
+	verbs := map[string][]settingRow{
+		"generate": append(append(pathRows(contractPath), servicesRows...),
+			settingRow{name: "tests, no flag", yml: "contract:\n  tests: [test-1, test-2]\n", check: tests("test-1", "test-2")},
+			settingRow{name: "tests, -t", yml: "contract:\n  tests: [test-1, test-2]\n", args: []string{"-t", "test-3"}, check: tests("test-3")},
+			settingRow{name: "no tests, no flag", yml: "inCi: false\n", check: tests()},
+		),
+		"download": append(append([]settingRow{}, servicesRows...), drivenRows...),
+		"test":     append(append(pathRows(contractPath), servicesRows...), drivenRows...),
+	}
+	for verb, rows := range verbs {
+		for _, row := range rows {
+			row.parent = "contract"
+			t.Run(verb+": "+row.name, func(t *testing.T) { runVerbWithKeployYml(t, verb, row) })
+		}
+	}
+}
+
+// keploy.yml's normalize.selectedTests counts on `keploy normalize` as --tests
+// does; --tests, when given, wins. The flag's default, read unguarded, cleared
+// it on every run.
+func TestKeployNormalizeKeepsKeployYmlSelectedTests(t *testing.T) {
+	selected := func(want ...string) func(*testing.T, *config.Config) {
+		return wantStrings("normalize.selectedTests", func(c *config.Config) []string {
+			var got []string
+			for _, s := range c.Normalize.SelectedTests {
+				got = append(got, s.TestSet+":"+strings.Join(s.Tests, " "))
+			}
+			return got
+		}, want...)
+	}
+	yml := "normalize:\n  selectedTests:\n    - testSet: test-set-1\n      tests: [test-1]\n"
+	for _, row := range []settingRow{
+		{name: "selectedTests, no flag", yml: yml, check: selected("test-set-1:test-1")},
+		{name: "selectedTests, --tests", yml: yml, args: []string{"--tests", "test-set-2"}, check: selected("test-set-2:")},
+		{name: "no selectedTests, no flag", yml: "inCi: false\n", check: selected()},
+	} {
+		t.Run(row.name, func(t *testing.T) { runVerbWithKeployYml(t, "normalize", row) })
 	}
 }

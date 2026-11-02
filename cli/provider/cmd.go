@@ -1303,6 +1303,40 @@ func (c *CmdConfigurator) keployFolderPath(path string) (string, error) {
 	return absPath + "/keploy", nil
 }
 
+// contractFlags puts --services, --tests and --driven, where the contract
+// verb has them and they are given, over contract.services, contract.tests
+// and contract.driven as keploy.yml set them.
+func (c *CmdConfigurator) contractFlags(cmd *cobra.Command) error {
+	if cmd.Flags().Changed("services") {
+		services, err := cmd.Flags().GetStringSlice("services")
+		if err != nil {
+			errMsg := "failed to get the services"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		config.SetSelectedServices(c.cfg, services)
+	}
+	if cmd.Flags().Changed("tests") {
+		selectedTests, err := cmd.Flags().GetStringSlice("tests")
+		if err != nil {
+			errMsg := "failed to get the tests"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		config.SetSelectedContractTests(c.cfg, selectedTests)
+	}
+	if cmd.Flags().Changed("driven") {
+		driven, err := cmd.Flags().GetString("driven")
+		if err != nil {
+			errMsg := "failed to get the driven flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Contract.Driven = driven
+	}
+	return nil
+}
+
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	// The calls keploy.yaml declares shared apply to every mock this process
 	// derives the lifetime of (loading a recording to replay it), and travel
@@ -1509,27 +1543,24 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	switch cmd.Name() {
 
 	case "report":
-		path, err := cmd.Flags().GetString("path")
-		if err != nil {
-			errMsg := "failed to get the path"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
+		// path, report.reportPath and report.summary need no read: --path,
+		// --report-path and --summary are bound to them, and viper.Unmarshal
+		// has resolved them from the flag, the environment and keploy.yml.
+		// --test-sets, --full and --test-case are bound to keys of their own
+		// names, not to report.selectedTestSets, report.showFullBody and
+		// report.testCaseIDs, so each is read only when it is given.
+		var err error
+		if cmd.Flags().Changed("test-sets") {
+			testSets, err := cmd.Flags().GetStringSlice("test-sets")
+			if err != nil {
+				errMsg := "failed to get the test-sets"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			config.SetSelectedTestSets(c.cfg, testSets)
 		}
 
-		testSets, err := cmd.Flags().GetStringSlice("test-sets")
-		if err != nil {
-			errMsg := "failed to get the test-sets"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		config.SetSelectedTestSets(c.cfg, testSets)
-
-		reportPath, err := cmd.Flags().GetString("report-path")
-		if err != nil {
-			errMsg := "failed to get the report path"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
+		reportPath := c.cfg.Report.ReportPath
 
 		// validate the report path if provided
 		if reportPath != "" {
@@ -1562,35 +1593,32 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		// Without it, the report comes from the keploy folder, which has to be
 		// one.
 		if reportPath != "" {
-			c.cfg.Path, err = c.keployFolderPath(path)
+			c.cfg.Path, err = c.keployFolderPath(c.cfg.Path)
 		} else {
-			c.cfg.Path, err = c.keployFolder(path)
+			c.cfg.Path, err = c.keployFolder(c.cfg.Path)
 		}
 		if err != nil {
 			return err
 		}
 
 		// whether to print entire body for comparison
-		fb, err := cmd.Flags().GetBool("full")
-		if err != nil {
-			errMsg := "failed to get the full flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
+		if cmd.Flags().Changed("full") {
+			fb, err := cmd.Flags().GetBool("full")
+			if err != nil {
+				errMsg := "failed to get the full flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Report.ShowFullBody = fb
 		}
 
-		c.cfg.Report.ShowFullBody = fb
-
-		summary, err := cmd.Flags().GetBool("summary")
-		if err != nil {
-			utils.LogError(c.logger, err, "failed to get the summary flag")
-			return errors.New("failed to get the summary flag")
-		}
-		c.cfg.Report.Summary = summary
-
-		tcIDs, err := cmd.Flags().GetStringSlice("test-case")
-		if err != nil {
-			utils.LogError(c.logger, err, "failed to get the test-case flag")
-			return errors.New("failed to get the test-case flag")
+		tcIDs := c.cfg.Report.TestCaseIDs
+		if cmd.Flags().Changed("test-case") {
+			tcIDs, err = cmd.Flags().GetStringSlice("test-case")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the test-case flag")
+				return errors.New("failed to get the test-case flag")
+			}
 		}
 		// Allow comma-separated or repeated flags
 		cleaned := make([]string, 0, len(tcIDs))
@@ -1613,13 +1641,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return err
 		}
 	case "diff":
-		path, err := cmd.Flags().GetString("path")
-		if err != nil {
-			errMsg := "failed to get the path"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		if c.cfg.Path, err = c.keployFolder(path); err != nil {
+		// path needs no read: --path is bound to it, and viper.Unmarshal has
+		// resolved it from the flag, the environment and keploy.yml.
+		var err error
+		if c.cfg.Path, err = c.keployFolder(c.cfg.Path); err != nil {
 			return err
 		}
 
@@ -1632,13 +1657,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		config.SetSelectedTestSets(c.cfg, testSets)
 
 	case "sanitize":
-		path, err := cmd.Flags().GetString("path")
-		if err != nil {
-			errMsg := "failed to get the path"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		if c.cfg.Path, err = c.keployFolder(path); err != nil {
+		// path needs no read, as for diff.
+		var err error
+		if c.cfg.Path, err = c.keployFolder(c.cfg.Path); err != nil {
 			return err
 		}
 
@@ -1654,42 +1675,19 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		config.SetSelectedTests(c.cfg, testSets)
 
 	case "generate", "download":
-		path, err := cmd.Flags().GetString("path")
-		if err != nil {
-			errMsg := "failed to get the path"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-
-		if c.cfg.Path, err = c.keployFolder(path); err != nil {
+		// path needs no read: --path is bound to it, and viper.Unmarshal has
+		// resolved it from the flag, the environment and keploy.yml. The
+		// contract flags are bound to keys of their own names, not to
+		// contract.services, contract.tests and contract.driven, so each is
+		// read only when it is given.
+		var err error
+		if c.cfg.Path, err = c.keployFolder(c.cfg.Path); err != nil {
 			return err
 		}
 		c.cfg.Contract.Path = c.cfg.Path
 
-		services, err := cmd.Flags().GetStringSlice("services")
-		if err != nil {
-			errMsg := "failed to get the services"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		config.SetSelectedServices(c.cfg, services)
-
-		selectedTests, err := cmd.Flags().GetStringSlice("tests")
-		if err != nil {
-			errMsg := "failed to get the tests"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		config.SetSelectedContractTests(c.cfg, selectedTests)
-
-		if cmd.Name() == "download" {
-			c.cfg.Contract.Driven, err = cmd.Flags().GetString("driven")
-			if err != nil {
-				errMsg := "failed to get the driven flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-
+		if err = c.contractFlags(cmd); err != nil {
+			return err
 		}
 
 	case "config":
@@ -1707,26 +1705,22 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 	case "record", "test":
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
-			path, err := cmd.Flags().GetString("path")
-			if err != nil {
-				errMsg := "failed to get the path"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-
-			if c.cfg.Path, err = c.keployFolder(path); err != nil {
+			// path, contract.services and contract.driven as for generate
+			// and download.
+			var err error
+			if c.cfg.Path, err = c.keployFolder(c.cfg.Path); err != nil {
 				return err
 			}
 			c.cfg.Contract.Path = c.cfg.Path
 
-			services, err := cmd.Flags().GetStringSlice("services")
-			if err != nil {
-				errMsg := "failed to get the services"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			if err = c.contractFlags(cmd); err != nil {
+				return err
 			}
-			config.SetSelectedServices(c.cfg, services)
 
+			// --download and --generate are still read whether or not they
+			// are given: the keploy.yml keploy config writes sets
+			// contract.download and contract.generate false, and both flags
+			// default to true.
 			c.cfg.Contract.Download, err = cmd.Flags().GetBool("download")
 			if err != nil {
 				errMsg := "failed to get the download flag"
@@ -1736,12 +1730,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			c.cfg.Contract.Generate, err = cmd.Flags().GetBool("generate")
 			if err != nil {
 				errMsg := "failed to get the generate flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-			c.cfg.Contract.Driven, err = cmd.Flags().GetString("driven")
-			if err != nil {
-				errMsg := "failed to get the driven flag"
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
@@ -2216,17 +2204,20 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if c.cfg.Path, err = c.keployFolder(c.cfg.Path); err != nil {
 			return err
 		}
-		tests, err := cmd.Flags().GetString("tests")
-		if err != nil {
-			errMsg := "failed to read tests to be normalized"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		err = config.SetSelectedTestsNormalize(c.cfg, tests)
-		if err != nil {
-			errMsg := "failed to normalize the selected tests"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
+		// --tests is bound to normalize.tests, not normalize.selectedTests,
+		// so it is read only when it is given.
+		if cmd.Flags().Changed("tests") {
+			tests, err := cmd.Flags().GetString("tests")
+			if err != nil {
+				errMsg := "failed to read tests to be normalized"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			if err := config.SetSelectedTestsNormalize(c.cfg, tests); err != nil {
+				errMsg := "failed to normalize the selected tests"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
 		}
 		// normalize.allowHighRisk needs no read: --allow-high-risk is bound to
 		// it, and viper.Unmarshal has resolved it from the flag and keploy.yml.
