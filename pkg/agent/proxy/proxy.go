@@ -2638,6 +2638,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
 
+	// Every dial made for the connection connects where reachAt says.
+	ctx = util.WithReachAt(ctx, p.reachAt)
+
 	// making a new client connection id for each client connection
 	clientConnID := util.GetNextID()
 
@@ -6388,6 +6391,37 @@ func (p *Proxy) appAt(host, dstAddr string, port uint32) (uint32, string) {
 		return port, dstAddr
 	}
 	return uint32(moved), net.JoinHostPort(host, strconv.FormatUint(uint64(moved), 10))
+}
+
+// reachAt is where keploy's own dial of addr, the destination of a call the
+// proxy relays, connects (util.WithReachAt): addr, unless addr is on this
+// machine at a port keploy mock's ingress forwarder holds and the run's
+// socket for that port is known to listen at another (SetAppListenPort):
+// then that one. The forwarder keeps each connection it takes as a caller's
+// from outside the run, and its requests as test cases: keploy's own dial is
+// none, and a dependency the run started (the app's call to it comes through
+// the proxy) was recorded as its mock and again as a test case. Where the
+// socket went is not known yet, addr is dialed, as without the forwarder.
+// keploy record's own forwarder (not keploy mock's) is left as it was.
+func (p *Proxy) reachAt(addr string) string {
+	if !p.mockMode || p.appPort == nil {
+		return addr
+	}
+	host, portText, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil {
+		return addr
+	}
+	// Moved first: ownIP may read the machine's addresses, and most dials
+	// are to a port no forwarder holds.
+	moved, ok := p.appPort(uint16(port))
+	if !ok || uint64(moved) == port || !ownIP(net.ParseIP(host)) {
+		return addr
+	}
+	return net.JoinHostPort(host, strconv.FormatUint(uint64(moved), 10))
 }
 
 // atPort is addr, a host and port, at port instead.

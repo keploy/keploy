@@ -229,6 +229,7 @@ func (p *Proxy) decideHandshake(lookup agent.HandshakeDestInfo) synhold.Decide {
 // dependency: a REAL destination that does not accept counts as a failed
 // connection of the open test's REAL row, as the app sees it fail.
 func (p *Proxy) dialHeld(ctx context.Context, lookup agent.HandshakeDestInfo, client, proxy netip.AddrPort, dest *agent.NetworkAddress, label string) synhold.Decision {
+	ctx = util.WithReachAt(ctx, p.reachAt) // connects as the connection's own dials do
 	addr := destAddr(dest)
 	conn, err := p.dialWhileHeld(ctx, lookup, client, proxy, addr)
 	if errors.Is(err, errHandshakeAbandoned) {

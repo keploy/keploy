@@ -1319,7 +1319,9 @@ func fetchServerGreeting(ctx context.Context, logger *zap.Logger, opts models.Ou
 
 	dialer := &net.Dialer{Timeout: fetchGreetingDialTimeout}
 	dial := func(ctx context.Context, a string) (net.Conn, error) {
-		return dialer.DialContext(ctx, "tcp", a)
+		// Where the proxy's dials of the destination connect (ReachAt),
+		// as the connection's own did.
+		return dialer.DialContext(ctx, "tcp", pUtils.ReachAt(ctx, a))
 	}
 	// A connection made from another network namespace to a namespace-local
 	// address (a pod's 127.0.0.1) is a different server from keploy's own

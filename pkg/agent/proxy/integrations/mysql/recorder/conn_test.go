@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	connPhase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	pUtils "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 )
@@ -92,6 +93,43 @@ func TestFetchServerGreeting_ReadsRealGreeting(t *testing.T) {
 	buf, err := fetchServerGreeting(context.Background(), zap.NewNop(), opts)
 	if err != nil {
 		t.Fatalf("fetchServerGreeting: %v", err)
+	}
+	if !bytes.Equal(buf, greeting) {
+		t.Fatalf("greeting bytes mismatch: got %d bytes, want %d", len(buf), len(greeting))
+	}
+}
+
+// TestFetchServerGreeting_ConnectsWhereTheProxysDialsDo: the greeting is
+// fetched where the proxy's dials of the destination connect
+// (pUtils.ReachAt), as the connection's own dial did: keploy mock's ingress
+// forwarder may hold the destination's port, its socket moved, and the
+// forwarder keeps each connection it takes as a test case.
+func TestFetchServerGreeting_ConnectsWhereTheProxysDialsDo(t *testing.T) {
+	greeting := cannedHandshakeV10(t)
+	moved, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer moved.Close()
+	go func() {
+		conn, aerr := moved.Accept()
+		if aerr != nil {
+			return
+		}
+		_, _ = conn.Write(greeting)
+		_ = conn.Close()
+	}()
+	const dest = "127.0.0.1:3306"
+	ctx := pUtils.WithReachAt(context.Background(), func(addr string) string {
+		if addr == dest {
+			return moved.Addr().String()
+		}
+		return addr
+	})
+	opts := models.OutgoingOptions{DstCfg: &models.ConditionalDstCfg{Addr: dest, Port: 3306}}
+	buf, err := fetchServerGreeting(ctx, zap.NewNop(), opts)
+	if err != nil {
+		t.Fatalf("fetchServerGreeting did not connect where the proxy's dials do: %v", err)
 	}
 	if !bytes.Equal(buf, greeting) {
 		t.Fatalf("greeting bytes mismatch: got %d bytes, want %d", len(buf), len(greeting))

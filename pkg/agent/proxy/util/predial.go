@@ -176,15 +176,37 @@ func (p *Predialed) Return(taken, replay net.Conn) bool {
 	return true
 }
 
+// reachAtKey keys the context value WithReachAt sets.
+type reachAtKey struct{}
+
+// WithReachAt is ctx carrying at: where a dial of a destination's address
+// connects (ReachAt). The proxy sets it on each connection it handles, so
+// that every dial made for that connection, here or in a parser, is told.
+func WithReachAt(ctx context.Context, at func(addr string) string) context.Context {
+	return context.WithValue(ctx, reachAtKey{}, at)
+}
+
+// ReachAt is where a dial of addr, a destination's address, connects: what
+// ctx's WithReachAt says, else addr. Only the socket's connect uses it: the
+// address stays the destination's everywhere else (a mock's, a pre-dialled
+// connection's, a TLS name's).
+func ReachAt(ctx context.Context, addr string) string {
+	if at, ok := ctx.Value(reachAtKey{}).(func(string) string); ok {
+		return at(addr)
+	}
+	return addr
+}
+
 // DialUpstream dials addr: every connection to a destination is opened here,
 // the pre-dialled ones too, and read through the connseq.Upstream it returns,
 // under any TLS, so the relay can number what the connection carries by what
-// the destination had sent (connseq.Upstream).
+// the destination had sent (connseq.Upstream). It connects where ReachAt
+// says.
 func DialUpstream(ctx context.Context, d *net.Dialer, network, addr string) (*connseq.Upstream, error) {
 	if d == nil {
 		d = &net.Dialer{}
 	}
-	c, err := d.DialContext(ctx, network, addr)
+	c, err := d.DialContext(ctx, network, ReachAt(ctx, addr))
 	if err != nil {
 		return nil, err
 	}
