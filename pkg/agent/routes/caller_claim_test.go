@@ -20,6 +20,9 @@ import (
 // the server at its value and exit.
 const envClaimFrom = "KEPLOY_TEST_CLAIM_FROM"
 
+// envBegin makes that child send a test's begin instead.
+const envBegin = "KEPLOY_TEST_CLAIM_BEGIN"
+
 // envHoldConnTo makes this test binary, run again as a child, dial its value,
 // print the connection's local address, and hold the connection until its
 // stdin closes.
@@ -45,7 +48,11 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	if url := os.Getenv(envClaimFrom); url != "" {
-		resp, err := http.Post(url, "application/json", strings.NewReader(`{"key":"orders","pid":1}`))
+		body := `{"key":"orders","pid":1}`
+		if os.Getenv(envBegin) != "" {
+			body = `{"name":"TestA","canSkip":true}`
+		}
+		resp, err := http.Post(url, "application/json", strings.NewReader(body))
 		if err != nil {
 			os.Exit(3)
 		}
