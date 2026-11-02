@@ -133,16 +133,33 @@ func (mysqlNoiseAdapter) RecordedValueIsNoise(m *models.Mock) func(string) bool 
 // every parameter's type, unsigned flag and name unless both packets sent
 // them (typesSentByBoth). Any other request keeps noise as it is.
 func executeBodyNoise(noise map[string][]string, recorded *models.Mock, live *mysql.PacketBundle) map[string][]string {
+	return widenedBodyNoise(noise, executeNoiseParams(recorded, live), nil)
+}
+
+// executeNoiseParams is how many parameters executeBodyNoise ignores the
+// type, unsigned flag and name of when it compares recorded with live: the
+// larger parameter count of the two COM_STMT_EXECUTEs, or -1 (none, noise
+// kept as it is) when both sent their types or either is not one.
+func executeNoiseParams(recorded *models.Mock, live *mysql.PacketBundle) int {
 	if recorded == nil || live == nil || len(recorded.Spec.MySQLRequests) != 1 {
-		return noise
+		return -1
 	}
 	act, _ := live.Message.(*mysql.StmtExecutePacket)
 	exp, _ := recorded.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket)
 	if act == nil || exp == nil || typesSentByBoth(exp, act) {
+		return -1
+	}
+	return max(len(exp.Parameters), len(act.Parameters))
+}
+
+// widenedBodyNoise is noise as it is when n is negative and leftOut is
+// empty, else a copy that also ignores the type, unsigned flag and name of
+// parameters 0 to n-1 and the paths in leftOut, whatever their values.
+func widenedBodyNoise(noise map[string][]string, n int, leftOut []string) map[string][]string {
+	if n < 0 && len(leftOut) == 0 {
 		return noise
 	}
-	n := max(len(exp.Parameters), len(act.Parameters))
-	out := make(map[string][]string, len(noise)+3*n)
+	out := make(map[string][]string, len(noise)+3*max(n, 0)+len(leftOut))
 	for k, v := range noise {
 		out[k] = v
 	}
@@ -151,6 +168,9 @@ func executeBodyNoise(noise map[string][]string, recorded *models.Mock, live *my
 			// An empty list ignores the field whatever its value.
 			out["parameters."+strconv.Itoa(i)+"."+field] = []string{}
 		}
+	}
+	for _, p := range leftOut {
+		out[p] = []string{}
 	}
 	return out
 }
@@ -242,6 +262,12 @@ type strictGate struct {
 	// when set, collects the ones made, as bodiesBuilt counts the builds.
 	liveDoc, legacyDoc *mocknoise.JSONBody
 	docsMade           *[]*mocknoise.JSONBody
+
+	// noiseMade keeps the noise sets bodyNoise made for this command's
+	// candidates; noiseSetsMade, when set, counts them, as bodiesBuilt
+	// counts the builds.
+	noiseMade     map[bodyNoiseKey]map[string][]string
+	noiseSetsMade *int
 }
 
 // bodyFor is the live request body mock's recorded one is compared with: the
@@ -483,18 +509,7 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 	if seen && v.allowed {
 		return true
 	}
-	noise := executeBodyNoise(g.userBodyNoise, mock, g.live)
-	if len(leftOut) > 0 {
-		out := make(map[string][]string, len(noise)+len(leftOut))
-		for k, v := range noise {
-			out[k] = v
-		}
-		for _, p := range leftOut {
-			// An empty list ignores the field whatever its value.
-			out[p] = []string{}
-		}
-		noise = out
-	}
+	noise := g.bodyNoise(mock, leftOut)
 	body := g.bodyDocFor(mock)
 	if !seen {
 		recorded, recordedOK := g.recordedJSONBody(mock)
@@ -530,6 +545,37 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 			zap.Strings("drifted_fields", paths))
 	}
 	return false
+}
+
+// bodyNoise is the noise compare compares mock under: executeBodyNoise's,
+// with the paths in leftOut ignored too. It depends on mock only through
+// executeNoiseParams, so it is made once a gate for each parameter count and
+// leftOut, not once a candidate: the engine and its adapters only read it.
+func (g *strictGate) bodyNoise(mock *models.Mock, leftOut []string) map[string][]string {
+	n := executeNoiseParams(mock, g.live)
+	if n < 0 && len(leftOut) == 0 {
+		return g.userBodyNoise
+	}
+	key := bodyNoiseKey{params: n, leftOut: strings.Join(leftOut, "\x00")}
+	if noise, ok := g.noiseMade[key]; ok {
+		return noise
+	}
+	noise := widenedBodyNoise(g.userBodyNoise, n, leftOut)
+	if g.noiseMade == nil {
+		g.noiseMade = make(map[bodyNoiseKey]map[string][]string)
+	}
+	g.noiseMade[key] = noise
+	if g.noiseSetsMade != nil {
+		*g.noiseSetsMade++
+	}
+	return noise
+}
+
+// bodyNoiseKey names a noise set bodyNoise made: its parameter count and its
+// leftOut paths, joined by NUL (no path holds one).
+type bodyNoiseKey struct {
+	params  int
+	leftOut string
 }
 
 // resetDiagnostics clears the rejection diagnostics for a scan that starts over

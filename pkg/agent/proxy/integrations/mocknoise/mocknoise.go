@@ -89,6 +89,9 @@ type Adapter interface {
 	// match (learned-dynamic enforcement); valueChangesOnly restricts the result
 	// to value drift (the learn pass, so a type change is never learned). Both
 	// empty/false => prior behaviour.
+	// known and typeStrict are read only: known may be the caller's own
+	// noise, given to every recording it is compared with
+	// (StrictRejectRecordedJSONBody).
 	Diff(m *models.Mock, recorded, live []byte, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, valIsNoise func(string) bool) (drift map[string][]string, comparable bool)
 }
 
@@ -246,7 +249,9 @@ func (e *Engine) StrictRejectRecordedBody(m *models.Mock, recorded []byte, ok bo
 // decoded (NewDecodedJSONBody) gives it as it is, so the engine neither
 // validates nor decodes it, and reads its bytes only where it compares
 // bytes (an adapter that is not a JSONBodyDiffer, or bodies that are not
-// both JSON).
+// both JSON). A recording with no learned noise is compared under userNoise
+// itself (knownWithLearned), so a parser that compares a call with many
+// recordings builds no noise set per recording.
 func (e *Engine) StrictRejectRecordedJSONBody(m *models.Mock, recorded *JSONBody, ok bool, live *JSONBody, userNoise map[string][]string) (allowed bool, drift map[string][]string) {
 	if e == nil {
 		return true, nil
@@ -270,32 +275,15 @@ func (e *Engine) StrictRejectRecordedJSONBody(m *models.Mock, recorded *JSONBody
 	// typeStrict, still fully exclude learned noise; typeStrict additionally marks
 	// them so a JSON parser type-enforces rather than fully ignores (collectJSON
 	// consults typeStrict first). User-configured noise stays full-ignore/regex.
-	learned := StripBodyPrefix(e.adapter.StoredNoise(m))
-	// User body noise is lowercased at ingest (decode.go), while learned noise
-	// keeps the recorded JSON case (e.g. "userId"), so the exclusion must compare
-	// case-insensitively — otherwise a user-ignored camelCase field would slip into
-	// typeStrict and get type-enforced.
-	userKeys := make(map[string]struct{}, len(userNoise))
-	for k := range userNoise {
-		userKeys[strings.ToLower(k)] = struct{}{}
-	}
-	typeStrict := make(map[string]struct{}, len(learned))
-	for k := range learned {
-		// A path the user ALSO configured as noise keeps the user's intent
-		// (full-ignore / value-regex); only purely auto-learned paths become
-		// type-strict. KnownNoise still carries it, so a non-JSON parser keeps
-		// excluding it.
-		if _, userConfigured := userKeys[strings.ToLower(k)]; userConfigured {
-			continue
-		}
-		typeStrict[k] = struct{}{}
-	}
+	learned := StripBodyPrefix(stored)
+	known := knownWithLearned(userNoise, learned)
+	typeStrict := learnedTypeStrict(userNoise, learned)
 	var d map[string][]string
 	var comparable bool
 	if jd, isJSON := e.adapter.(JSONBodyDiffer); isJSON {
-		d, comparable = jd.DiffJSONBodies(m, recorded, live, e.KnownNoise(m, userNoise), typeStrict, false, e.adapter.RecordedValueIsNoise(m))
+		d, comparable = jd.DiffJSONBodies(m, recorded, live, known, typeStrict, false, e.adapter.RecordedValueIsNoise(m))
 	} else {
-		d, comparable = e.adapter.Diff(m, recorded.Raw(), live.Raw(), e.KnownNoise(m, userNoise), typeStrict, false, e.adapter.RecordedValueIsNoise(m))
+		d, comparable = e.adapter.Diff(m, recorded.Raw(), live.Raw(), known, typeStrict, false, e.adapter.RecordedValueIsNoise(m))
 	}
 	if !comparable {
 		// No field structure to diff — fall back to byte equality so unequal
@@ -309,6 +297,42 @@ func (e *Engine) StrictRejectRecordedJSONBody(m *models.Mock, recorded *JSONBody
 		return true, nil
 	}
 	return false, d
+}
+
+// knownWithLearned is KnownNoise's set (userNoise ∪ learned, userNoise winning
+// on a key both hold) for the strict compare, which only reads it: userNoise
+// itself when nothing is learned, a merged copy otherwise.
+func knownWithLearned(userNoise, learned map[string][]string) map[string][]string {
+	if len(learned) == 0 {
+		return userNoise
+	}
+	return MergeKnown(userNoise, learned)
+}
+
+// learnedTypeStrict is the learned paths a JSON parser type-enforces: every
+// learned path but one the user ALSO configured as noise, which keeps the
+// user's intent (full-ignore / value-regex). known still carries it, so a
+// non-JSON parser keeps excluding it. nil when nothing is learned.
+func learnedTypeStrict(userNoise, learned map[string][]string) map[string]struct{} {
+	if len(learned) == 0 {
+		return nil
+	}
+	// User body noise is lowercased at ingest (decode.go), while learned noise
+	// keeps the recorded JSON case (e.g. "userId"), so the exclusion must compare
+	// case-insensitively — otherwise a user-ignored camelCase field would slip into
+	// typeStrict and get type-enforced.
+	userKeys := make(map[string]struct{}, len(userNoise))
+	for k := range userNoise {
+		userKeys[strings.ToLower(k)] = struct{}{}
+	}
+	typeStrict := make(map[string]struct{}, len(learned))
+	for k := range learned {
+		if _, userConfigured := userKeys[strings.ToLower(k)]; userConfigured {
+			continue
+		}
+		typeStrict[k] = struct{}{}
+	}
+	return typeStrict
 }
 
 // DetectJSONDrift compares a recorded request body against the live one and
@@ -401,6 +425,7 @@ func (b *JSONBody) decodedValue() (value any, ok bool) {
 // (DetectJSONBodyDrift): the engine then reads a live body compared with many
 // recordings once. JSONDiffer does not implement it, so an adapter that embeds
 // JSONDiffer and has a Diff of its own (HTTP's, for form bodies) keeps its Diff.
+// Like Diff, it reads known and typeStrict only.
 type JSONBodyDiffer interface {
 	DiffJSONBodies(m *models.Mock, recorded, live *JSONBody, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, valIsNoise func(string) bool) (drift map[string][]string, comparable bool)
 }
