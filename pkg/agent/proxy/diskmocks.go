@@ -813,16 +813,17 @@ func (d *DiskMocks) RangeKind(kind models.Kind, visit func(name string, load fun
 }
 
 // RangeTimes calls visit with every mock on disk, each once, in no order:
-// its name, its request and answer times, whether it is protocol-phase
-// (models.Mock.IsProtocolPhase) and its clock (models.Origin.Clock, "" for
-// none; both told under the proven switch only, the only one the teardown
-// bound reads them under), until visit returns false. Nothing is
-// decoded: the times are the store's own, kept as each mock was added. It
+// its name, its place (models.PlaceOf, as Add computed it), whether it is
+// protocol-phase (models.Mock.IsProtocolPhase) and its clock
+// (models.Origin.Clock, "" for none; both told under the proven switch
+// only, the only one the teardown bound reads them under), until visit
+// returns false. Nothing is decoded: the places are the store's own, kept
+// as each mock was added. It
 // is what bounds a set's teardown under keploy mock replay
 // (MockManager.SetRecordingTimes): the latest recording of the set's tests,
 // which the staging does not read. visit runs under the store's lock, so it
 // must not call the store.
-func (d *DiskMocks) RangeTimes(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error {
+func (d *DiskMocks) RangeTimes(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closed {
@@ -833,7 +834,7 @@ func (d *DiskMocks) RangeTimes(visit func(name string, req, res time.Time, proto
 		if i, ok := d.clockOf[name]; ok {
 			clock = d.clocks[i]
 		}
-		if !visit(name, time.Unix(0, e.reqTsNano), time.Unix(0, e.resTsNano), d.phase[name], clock) {
+		if !visit(name, time.Unix(0, e.placeTsNano), d.phase[name], clock) {
 			return nil
 		}
 	}
