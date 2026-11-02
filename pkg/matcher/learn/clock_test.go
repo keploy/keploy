@@ -531,9 +531,9 @@ func TestAClockWordWindowsEdgesReadAsTheWholeTexts(t *testing.T) {
 // read at all.
 func TestAClockWordIsLookedForInABoundedPartOfALongText(t *testing.T) {
 	if clockWordMax != 36 {
-		t.Fatalf("clockWordMax = %d; the longest instant of the layouts is a UUID's 36 bytes", clockWordMax)
+		t.Fatalf("clockWordMax = %d; the longest instants of the layouts are 36 bytes, a UUID's and an ISO instant's to the nanosecond with its zone after a space", clockWordMax)
 	}
-	for k, s := range []string{"Fri, 30 Oct 2026 08:00:00 +0000", "2026-10-30 08:00:00.123456789+05:30", "20261030T080000Z", "0192ab3c-1d2e-7f00-8abc-0123456789ab", "1793336961.123456789", "08:00:00.123456789"} {
+	for k, s := range []string{"Fri, 30 Oct 2026 08:00:00 +0000", "2026-10-30 08:00:00.123456789 +05:30", "20261030T080000Z", "0192ab3c-1d2e-7f00-8abc-0123456789ab", "1793336961.123456789", "08:00:00.123456789"} {
 		if m := clockLayouts[k].re.FindString(s); m != s {
 			t.Fatalf("layout %d matches %q of %q", k, m, s)
 		}

@@ -325,7 +325,7 @@ func rfc1123At(s string, i int) int {
 }
 
 // isoAt is layout 1:
-// \d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?|T\d{2})?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?
+// \d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?(?: [+-]\d{2}:?\d{2}|Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?|(?:T\d{2})?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?)
 func isoAt(s string, i int) int {
 	tried()
 	if !digitsAt(s, i, 4) || !byteIs(s, i+4, "-") || !digitsAt(s, i+5, 2) || !byteIs(s, i+7, "-") || !digitsAt(s, i+8, 2) {
@@ -341,6 +341,16 @@ func isoAt(s string, i int) int {
 			j += 3
 			if byteIs(s, j, ".,") && digitsAt(s, j+1, 1) {
 				j += 1 + digitsFrom(s, j+1, 9)
+			}
+		}
+		// A zone after a space, whole (" +05:30", " +0530"): the
+		// instant's one zone.
+		if byteIs(s, j, " ") && byteIs(s, j+1, "+-") && digitsAt(s, j+2, 2) {
+			switch {
+			case byteIs(s, j+4, ":") && digitsAt(s, j+5, 2):
+				return j + 7
+			case digitsAt(s, j+4, 2):
+				return j + 6
 			}
 		}
 	case byteIs(s, j, "Tt") && digitsAt(s, j+1, 2):
