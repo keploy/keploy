@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-chi/render"
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -274,6 +275,24 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if provenswitch.On() {
+		// Each test's recorded callbacks (deliver:). A table with Sets was
+		// refused above under the switch. An agent that cannot
+		// send them refuses a table that has any: those tests would wait
+		// for a callback that never comes.
+		if s, ok := a.svc.(scopeDeliverySetter); ok {
+			if err := s.SetScopeDeliver(r.Context(), req.Deliver); errors.Is(err, coreAgent.ErrNoWebhookDeliverer) {
+				http.Error(w, err.Error(), http.StatusNotImplemented)
+				return
+			} else if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if len(req.Deliver) > 0 {
+			http.Error(w, coreAgent.ErrNoWebhookDeliverer.Error(), http.StatusNotImplemented)
+			return
+		}
+	}
 	if s, ok := a.svc.(scopeTableSetter); ok && req.Sets == nil {
 		if err := s.SetScopeTable(r.Context(), req.Mappings); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -316,6 +335,12 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 // (proven wire, models.ScopeTableReq.Given).
 type scopeGivenSetter interface {
 	SetScopeGiven(ctx context.Context, given map[string][]models.GivenValue) error
+}
+
+// scopeDeliverySetter installs each test's recorded callbacks and their
+// cases (proven wire, models.ScopeTableReq.Deliver).
+type scopeDeliverySetter interface {
+	SetScopeDeliver(ctx context.Context, deliveries map[string][]models.DeliveryCase) error
 }
 
 // scopePoolSetter installs each key's pool slice (proven wire).

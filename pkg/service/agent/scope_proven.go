@@ -1042,7 +1042,14 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 	if outcome == "" {
 		outcome = models.ScopeOutcomeFailed
 	}
-	ev, outcome, err := a.closeOpen(ctx, id, outcome, at, "")
+	// The test's recorded callbacks (deliver:) are answered before it is
+	// judged, its window still open: the calls the application makes to
+	// handle them are the test's, and it ends once they are answered.
+	delivered, why := a.settleDeliveries(ctx, id)
+	if delivered {
+		at = time.Now()
+	}
+	ev, outcome, err := a.closeOpen(ctx, id, outcome, at, why)
 	if err != nil {
 		// A test keploy could not read is unread on its window (its
 		// verdict is keploy's not-judged); a failure to end it is the run's

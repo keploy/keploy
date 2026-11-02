@@ -338,6 +338,12 @@ type ScopeTableReq struct {
 	// bound with the recorded value of its variable, so the learn step and
 	// the replay pair the two. Absent when no test gave any.
 	Given map[string][]GivenValue `json:"given,omitempty"`
+	// Deliver is, under the proven switch, each test's deliver: entries
+	// (MappedTestCase.Deliver) with their cases' recorded requests and
+	// answers, by test ID: the agent sends each case to the application
+	// once the test's after: mock was answered. Absent when no test has
+	// any; an agent that cannot deliver refuses a table with any.
+	Deliver map[string][]DeliveryCase `json:"deliver,omitempty"`
 }
 
 // TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy

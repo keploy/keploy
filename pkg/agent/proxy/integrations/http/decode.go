@@ -613,6 +613,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				errCh <- err
 				return
 			}
+			// The answer is the application's now: a recorded callback waiting
+			// for it (deliver: after:) may be sent.
+			integrations.AnswerWritten(stub)
 
 			reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
 			if err != nil {

@@ -351,6 +351,12 @@ type MappedTestCase struct {
 	// given-api §3). Written and read only under the proven switch; empty in
 	// recordings made without it.
 	Given []GivenValue `json:"given,omitempty" yaml:"given,omitempty" bson:"given,omitempty"`
+	// Deliver is the test's recorded incoming requests that keploy sends
+	// the application at replay, each once a mock of the test was answered
+	// (Delivery: a provider's callback). Written and read only under the
+	// proven switch, and refused when keploy could not send it as written
+	// (ValidateDeliver).
+	Deliver []Delivery `json:"deliver,omitempty" yaml:"deliver,omitempty" bson:"deliver,omitempty"`
 }
 
 type persistedTestFormat struct {
@@ -372,6 +378,7 @@ type writtenTestFormat struct {
 	At                  time.Time    `json:"at,omitzero" yaml:"at,omitempty"`
 	Real                []string     `json:"real,omitempty" yaml:"real,omitempty"`
 	Given               []GivenValue `json:"given,omitempty" yaml:"given,omitempty"`
+	Deliver             []Delivery   `json:"deliver,omitempty" yaml:"deliver,omitempty"`
 }
 
 type structuredTestFormat struct {
@@ -386,11 +393,11 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given}, nil
+	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Deliver: tc.Deliver}, nil
 }
 
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
-	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given})
+	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Deliver: tc.Deliver})
 }
 
 // errRecordedBegin is a test entry whose at: is not a time.
@@ -526,11 +533,15 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
+	dl, err := recordedDeliverYAML(node)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalYAMLEntry(node); err != nil {
 		return err
 	}
-	tc.At, tc.Real, tc.Given = at, rl, gv
-	return nil
+	tc.At, tc.Real, tc.Given, tc.Deliver = at, rl, gv, dl
+	return ValidateDeliver(*tc)
 }
 
 // errBothMockLists is a test entry with a mock_entries list and a mocks list
@@ -617,11 +628,15 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
+	dl, err := recordedDeliverJSON(data)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalJSONEntry(data); err != nil {
 		return err
 	}
-	tc.At, tc.Real, tc.Given = at, rl, gv
-	return nil
+	tc.At, tc.Real, tc.Given, tc.Deliver = at, rl, gv, dl
+	return ValidateDeliver(*tc)
 }
 
 // unmarshalJSONEntry is unmarshalYAMLEntry for a JSON entry.
