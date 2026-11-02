@@ -1,8 +1,6 @@
 package mock
 
 import (
-	"sort"
-
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -13,7 +11,7 @@ func faultMocks(pools ...[]*models.Mock) map[string]*models.Mock {
 	out := map[string]*models.Mock{}
 	for _, pool := range pools {
 		for _, mk := range pool {
-			if mk != nil && mk.Spec.Fault != nil {
+			if mk.FaultOf() != nil {
 				out[mk.Name] = mk
 			}
 		}
@@ -27,14 +25,7 @@ func faultMocks(pools ...[]*models.Mock) map[string]*models.Mock {
 // gave it at record, not an answer. A fault mock no call consumed is not
 // named: it was not served.
 func logFaultsServed(logger *zap.Logger, consumed []models.MockState, faults map[string]*models.Mock) {
-	served := make([]models.MockState, 0, len(faults))
-	for _, state := range consumed {
-		if _, ok := faults[state.Name]; ok {
-			served = append(served, state)
-		}
-	}
-	sort.SliceStable(served, func(i, j int) bool { return served[i].Timestamp < served[j].Timestamp })
-	for _, state := range served {
-		logger.Info("served a mock's fault", zap.String("fault", faults[state.Name].FaultServed()))
+	for _, line := range models.FaultsServed(consumed, func(name string) string { return faults[name].FaultServed() }) {
+		logger.Info("served a mock's fault", zap.String("fault", line))
 	}
 }

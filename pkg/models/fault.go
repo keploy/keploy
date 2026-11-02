@@ -3,6 +3,7 @@ package models
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -170,12 +171,55 @@ func (m *Mock) ValidateFault() error {
 	return nil
 }
 
+// FaultOf is the fault m's answer ends in (Spec.Fault), nil for none. A mock
+// whose payload is on disk (LeavePayloadOnDisk) has its Spec.Fault back only
+// once the payload is read back; it keeps a copy for this until then.
+func (m *Mock) FaultOf() *Fault {
+	if m == nil {
+		return nil
+	}
+	if m.onDisk != nil {
+		return m.onDisk.fault
+	}
+	return m.Spec.Fault
+}
+
 // FaultServed says, for a replay summary, the fault the mock's answer ends in,
 // as the application met it: "mock-12: upstream reset after 0 bytes, as
 // recorded". It is "" for a mock whose answer ends in none.
 func (m *Mock) FaultServed() string {
-	if m == nil || m.Spec.Fault == nil {
+	f := m.FaultOf()
+	if f == nil {
 		return ""
 	}
-	return m.Name + ": " + m.Spec.Fault.String() + ", as recorded"
+	return m.Name + ": " + f.String() + ", as recorded"
+}
+
+// FaultsServed is what a replay summary says of the faults a replay served:
+// served(name) for each mock it consumed, the line of that mock's fault
+// (Mock.FaultServed), "" for a mock whose answer ends in none, which is not
+// named. The lines are in the order the mocks were first served
+// (MockState.Timestamp), by name between mocks first served at one time.
+func FaultsServed(consumed []MockState, served func(name string) string) []string {
+	type line struct {
+		state MockState
+		text  string
+	}
+	var lines []line
+	for _, st := range consumed {
+		if text := served(st.Name); text != "" {
+			lines = append(lines, line{st, text})
+		}
+	}
+	sort.Slice(lines, func(i, j int) bool {
+		if lines[i].state.Timestamp != lines[j].state.Timestamp {
+			return lines[i].state.Timestamp < lines[j].state.Timestamp
+		}
+		return lines[i].state.Name < lines[j].state.Name
+	})
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		out[i] = l.text
+	}
+	return out
 }

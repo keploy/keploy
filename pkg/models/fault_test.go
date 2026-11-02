@@ -2,9 +2,11 @@ package models
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // Each fault the format has, spelled the one way it has for it, validates;
@@ -136,5 +138,62 @@ func TestFaultServedNamesTheMockAndItsFault(t *testing.T) {
 		if got := c.mock.FaultServed(); got != c.want {
 			t.Errorf("FaultServed() = %q, want %q", got, c.want)
 		}
+	}
+}
+
+// A mock whose payload is left on disk (LeavePayloadOnDisk), as keploy test
+// reads a set's mocks, still says the fault its answer ends in, for the
+// replay summary: its Spec.Fault is back only once its payload is read back.
+// It keeps a copy of its own, counted in what its index entry costs; a mock
+// whose answer ends in no fault keeps none.
+func TestFaultOfAMockWhosePayloadIsOnDisk(t *testing.T) {
+	recorded := payloadMocks()
+	src := &fileSource{recorded: recorded}
+	onDisk := func(fault *Fault) *Mock {
+		m := recorded["http"]()
+		m.Name = "mock-4"
+		m.Spec.Fault = fault
+		m.DeriveLifetime()
+		m.LeavePayloadOnDisk(src, PayloadAt{Name: "http"})
+		return m
+	}
+	fault := &Fault{Kind: FaultTruncate, BodyBytes: 3, Observed: "the upstream closed the connection partway through the answer"}
+	m := onDisk(fault)
+	if !m.PayloadOnDisk() || m.Spec.Fault != nil {
+		t.Fatalf("the payload stayed in memory: on disk %v, Spec.Fault %+v", m.PayloadOnDisk(), m.Spec.Fault)
+	}
+	if got := m.FaultOf(); got == nil || *got != *fault {
+		t.Fatalf("FaultOf() = %+v, want %+v", got, fault)
+	}
+	if got, want := m.FaultServed(), "mock-4: upstream sent the head and 3 body bytes, then closed, as recorded"; got != want {
+		t.Fatalf("FaultServed() = %q, want %q", got, want)
+	}
+	plain := onDisk(nil)
+	if plain.FaultOf() != nil || plain.FaultServed() != "" {
+		t.Fatalf("a mock with no fault: FaultOf() %+v, FaultServed() %q", plain.FaultOf(), plain.FaultServed())
+	}
+	if got, least := m.IndexEntryBytes()-plain.IndexEntryBytes(), int64(unsafe.Sizeof(*fault))+int64(len(fault.Observed)); got < least {
+		t.Fatalf("the kept fault adds %d bytes to the index entry's cost, want at least %d", got, least)
+	}
+}
+
+// The faults a replay served are named in the order it first served them,
+// by name between mocks first served at one time; a consumed mock whose
+// answer ends in no fault is not named.
+func TestFaultsServedInTheOrderTheyWereServed(t *testing.T) {
+	lines := map[string]string{"mock-9": "nine", "mock-2": "two", "mock-5": "five", "mock-1": "one"}
+	consumed := []MockState{
+		{Name: "mock-9", Timestamp: 30},
+		{Name: "mock-3", Timestamp: 5},
+		{Name: "mock-5", Timestamp: 10},
+		{Name: "mock-2", Timestamp: 10},
+		{Name: "mock-1", Timestamp: 20},
+	}
+	got := FaultsServed(consumed, func(name string) string { return lines[name] })
+	if want := []string{"two", "five", "one", "nine"}; !slices.Equal(got, want) {
+		t.Fatalf("FaultsServed() = %q, want %q", got, want)
+	}
+	if got := FaultsServed(nil, func(string) string { return "x" }); len(got) != 0 {
+		t.Fatalf("no mock consumed: %q", got)
 	}
 }
