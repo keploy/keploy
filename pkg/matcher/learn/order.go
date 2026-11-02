@@ -2,6 +2,7 @@ package learn
 
 import (
 	"cmp"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -858,15 +859,144 @@ func (dc *decider) coarserOnly(t *readerText, w string, m moment) bool {
 
 // cutOfFinerOnly reports whether t, which holds w (moment m), holds it only
 // as m's cut of a finer instant: no word of it is w, and no instant of it
-// is m at m's unit or a coarser one. A second read beside a UnixNano in a
-// name: no variable can hold that text, and two reads of one coarse cut
-// say nothing of each other. A finer instant at the first millisecond or
-// nanosecond of m names m too, but only as that cut, the same as any other
-// of m's finer instants: when the application wrote it never moves the
-// verdict.
-func (dc *decider) cutOfFinerOnly(t *readerText, w string, m moment) bool {
+// is m at m's unit or a coarser one, each instant judged at the finest unit
+// its place shows in either run (other is the other run's text there,
+// atFinest). A second read beside a UnixNano in a name: no variable can
+// hold that text, and two reads of one coarse cut say nothing of each
+// other. A finer instant at the first millisecond or nanosecond of m names
+// m too, but only as that cut, the same as any other of m's finer instants,
+// and so does one an encoder writes without its trailing zeros, which then
+// shows m's own text in one run: only where neither run's text there shows
+// a unit finer than m is it m.
+func (dc *decider) cutOfFinerOnly(t, other *readerText, w string, m moment) bool {
 	h, ok := t.holdsWord(w)
-	return ok && !h && dc.namedBy(t, m, func(h, m moment) bool { return h.key == m.key && h.res >= m.res }) == 0
+	if !ok {
+		return false
+	}
+	spans, wide, read := dc.atFinest(t, other)
+	return read && (!h || !heldOutside(t, spans, wide, w, m)) &&
+		dc.namedIn(spans, m, func(h, m moment) bool { return h.key == m.key && h.res >= m.res }) == 0
+}
+
+// atFinest is t's instants, each at the finest unit its place shows in
+// either run: other is the other run's text at the place. An encoder that
+// leaves out a fraction's trailing zeros (Go's RFC3339Nano, Java's
+// Instant.toString, Python's isoformat, a JavaScript number) writes a time
+// made at a second's first millisecond as a whole second, and the same
+// field's time in the other run with its fraction. Two instants are one
+// place's, written alike, where each is the k-th of its layout in its
+// text, both texts hold as many of that layout, and the two read the same
+// but for their fraction's digits; any other is judged at its own text's
+// unit. wide marks each instant the other run's finer unit was taken for
+// (nil where none); read is false where keploy could not read t.
+func (dc *decider) atFinest(t, other *readerText) (spans []instant, wide []bool, read bool) {
+	spans, read = t.spansOf()
+	if !read || other == nil || other == t {
+		return spans, nil, read
+	}
+	os, ok := other.spansOf()
+	if !ok {
+		return spans, nil, true
+	}
+	var text, otext string
+	for i, sp := range spans {
+		o, n := kthOfLayout(os, sp.layout, ordinalOf(spans, i))
+		if !sp.keyed || n < 0 || !o.keyed || o.res >= sp.res || n != kthCount(spans, sp.layout) {
+			continue
+		}
+		if wide == nil {
+			var ok1, ok2 bool
+			if text, ok1 = t.textNow(); ok1 {
+				otext, ok2 = other.textNow()
+			}
+			if !ok1 || !ok2 {
+				return spans, nil, true
+			}
+		}
+		if instantShape(text[sp.start:sp.end]) != instantShape(otext[o.start:o.end]) {
+			continue
+		}
+		if wide == nil {
+			spans, wide = slices.Clone(spans), make([]bool, len(spans))
+		}
+		spans[i].res, wide[i] = o.res, true
+	}
+	return spans, wide, true
+}
+
+// ordinalOf is how many instants of spans[i]'s layout come before it.
+func ordinalOf(spans []instant, i int) int {
+	k := 0
+	for _, sp := range spans[:i] {
+		if sp.layout == spans[i].layout {
+			k++
+		}
+	}
+	return k
+}
+
+// kthOfLayout is the k-th instant of layout lay in spans, and how many of
+// that layout spans holds; n is -1 where it holds no k-th.
+func kthOfLayout(spans []instant, lay, k int) (sp instant, n int) {
+	n = kthCount(spans, lay)
+	for _, s := range spans {
+		if s.layout != lay {
+			continue
+		}
+		if k == 0 {
+			return s, n
+		}
+		k--
+	}
+	return instant{}, -1
+}
+
+// kthCount is how many instants of layout lay spans holds.
+func kthCount(spans []instant, lay int) int {
+	n := 0
+	for _, s := range spans {
+		if s.layout == lay {
+			n++
+		}
+	}
+	return n
+}
+
+// instantShape is an instant's text with its fraction left out and each
+// digit read as 0: two texts of one encoder's field, one written without
+// its trailing zeros, read the same.
+func instantShape(s string) string {
+	s = fractionText.ReplaceAllString(s, "")
+	return strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return '0'
+		}
+		return r
+	}, s)
+}
+
+// fractionText is a fraction as an instant's text writes it.
+var fractionText = regexp.MustCompile(`[.,][0-9]+`)
+
+// heldOutside reports whether t's text holds w as a word outside each of
+// its instants spans takes at a finer unit than m from the other run
+// (wide): there w is that finer instant's text cut to m, which no variable
+// held. True where there is none, or where keploy could not read the text.
+func heldOutside(t *readerText, spans []instant, wide []bool, w string, m moment) bool {
+	text, ok := t.textNow()
+	if !ok || wide == nil {
+		return true
+	}
+	b, masked := []byte(text), false
+	for i, sp := range spans {
+		if wide[i] && sp.res < m.res {
+			for j := sp.start; j < sp.end; j++ {
+				b[j] = ' '
+			}
+			masked = true
+		}
+	}
+	return !masked || heldIn(textForms(string(b)), w, 0, 1, 2)
 }
 
 // namedBy counts the instants of t that name m, or m in the application's
@@ -876,6 +1006,19 @@ func (dc *decider) namedBy(t *readerText, m moment, by func(h, m moment) bool) i
 	if !read {
 		return 1
 	}
+	return dc.namedIn(spans, m, by)
+}
+
+// namedFiner reports whether an instant of t, at the finest unit its place
+// shows in either run (atFinest), names m by the rule by.
+func (dc *decider) namedFiner(t, other *readerText, m moment, by func(h, m moment) bool) bool {
+	spans, _, read := dc.atFinest(t, other)
+	return read && dc.namedIn(spans, m, by) > 0
+}
+
+// namedIn counts the instants of spans that name m, or m in the
+// application's zone (inZone), by the rule by.
+func (dc *decider) namedIn(spans []instant, m moment, by func(h, m moment) bool) int {
 	ms := []moment{m}
 	if z, ok := dc.inZone(m); ok {
 		ms = append(ms, z)
@@ -1018,7 +1161,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		// steps read it, where the call's own window reads the clock,
 		// checked at replay. One keploy cannot read is a pick (fail closed).
 		finer := func(h, m moment) bool { return h.res < m.res && covers(h, m) }
-		cut := c.lm != nil && dc.cutOfFinerOnly(p.t.live, l, *c.lm) && dc.namedBy(p.t.live, *c.lm, finer) > 0
+		cut := c.lm != nil && dc.cutOfFinerOnly(p.t.live, p.t.rec, l, *c.lm) && dc.namedFiner(p.t.live, p.t.rec, *c.lm, finer)
 		switch {
 		case before(p) && h.hl && !cut && (!h.hr || p.same()):
 			why := "round F's moment stands unchanged in " + p.name
@@ -1081,7 +1224,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// read, it is that read (5), as main reads it; so is a client test's
 	// read since its begin (7).
 	cutOnly := len(heldWhere(hs, func(h instantHold) bool {
-		return answer(h) && !h.fr && c.rm != nil && dc.cutOfFinerOnly(h.p.t.rec, r, *c.rm)
+		return answer(h) && !h.fr && c.rm != nil && dc.cutOfFinerOnly(h.p.t.rec, h.p.t.live, r, *c.rm)
 	})) == len(answers)
 	readIn := func(w *Window) bool { return w.holdsRead(*c.rm, *c.lm, dc.dr.zone) }
 	ownRead := cutOnly && c.rm != nil && c.lm != nil && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()))

@@ -1451,8 +1451,11 @@ func TestOutcomeAMomentALaterRecordingGaveBeforeTheCallIsAPick(t *testing.T) {
 // no value at the call's cut to pick from. So it is where the finer time
 // was made at the second's first millisecond or nanosecond, which names
 // the second itself, and where the recorded answer holds the recorded
-// second the same way: when the app wrote its time never moves the
-// verdict. One that holds round F's second at the call's cut (as a number
+// second the same way, and so where its encoder writes it without its
+// trailing zeros and one run's text shows the whole second: the place is
+// judged at the finest unit either run's text there shows. Only where
+// neither run shows a fraction is it a time of seconds. One that holds
+// round F's second at the call's cut (as a number
 // of seconds, or a time of seconds) is a pick, refused naming it. As a
 // recording, leaf by leaf, and in a window the call landed in from another
 // test, the decision is the same.
@@ -1602,6 +1605,83 @@ func TestOutcomeAFinerTimeHoldingRoundFsSecondIsNoPick(t *testing.T) {
 			} {
 				in := iCall("body.cmd.query.dirtyAt.$lte", Instant, tsec(rAt), tsec(fAt), rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), form.earlier, form.raw)
 				iClock(t, "a typed second beside "+tc.what+" made "+off.String()+" into the call's second in both runs, "+form.what, oWord(t, Decide(in), tsec(rAt), tsec(fAt)))
+			}
+		}
+	}
+	// A time of milliseconds its encoder writes without its trailing zeros
+	// (Go's RFC3339Nano, Java's Instant.toString, Python's isoformat): made
+	// at a second's first millisecond it shows no fraction at all. A place
+	// is judged at the finest unit either run's text there shows, so one
+	// run's whole second is still that finer time's cut, and the verdict is
+	// the one every other millisecond gives. Only where neither run shows a
+	// fraction is the place a time of seconds.
+	for _, tc := range []struct {
+		what   string
+		fields func(time.Time) string
+	}{
+		{"a time without its trailing zeros", func(x time.Time) string { return `"created_at":"` + x.UTC().Format(time.RFC3339Nano) + `"` }},
+		{"a time without its trailing zeros at an offset", func(x time.Time) string {
+			return `"created_at":"` + x.In(time.FixedZone("", 19800)).Format(time.RFC3339Nano) + `"`
+		}},
+	} {
+		offs := []time.Duration{0, time.Millisecond, 120 * time.Millisecond, 999 * time.Millisecond}
+		forms := func(rm, lm *models.Mock) []struct {
+			what    string
+			earlier []Earlier
+			raw     []Raw
+		} {
+			return []struct {
+				what    string
+				earlier []Earlier
+				raw     []Raw
+			}{
+				{"as a recording", nil, []Raw{RawOf(rm, true).ServedAs(1).ServedLive(RawOf(lm, true))}},
+				{"leaf by leaf", []Earlier{leaves(rm, lm)}, nil},
+			}
+		}
+		// The pick side: made 37 s before the call in the recording (a
+		// fraction shows), and in the call's second in round F.
+		for _, made := range []struct {
+			rMade time.Time
+			fOff  time.Duration
+			pick  bool
+		}{
+			{rMade, 0, false}, {rMade, time.Millisecond, false}, {rMade, 120 * time.Millisecond, false}, {rMade, 999 * time.Millisecond, false},
+			{rMade.Truncate(time.Second), 0, true},
+		} {
+			rm, lm := find(tc.fields(made.rMade)), find(tc.fields(fAt.Truncate(time.Second).Add(made.fOff)))
+			for _, form := range forms(rm, lm) {
+				for _, mode := range []Mode{ModeOwn, ModeElsewhere} {
+					in := iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), form.earlier, form.raw)
+					what := fmt.Sprintf("%s made %v before the call and %v into the call's second in round F, %s", tc.what, rAt.Sub(made.rMade), made.fOff, form.what)
+					if mode == ModeElsewhere {
+						in.Mode, in.Landed = ModeElsewhere, Landed{Where: LandedOther, Test: "test-5"}
+						what += ", landed from another test"
+					}
+					d := oWord(t, Decide(in), rec, live)
+					if made.pick {
+						oRefused(t, what, d, RefusalPick, "mock-799")
+					} else {
+						iClock(t, what, d)
+					}
+				}
+			}
+		}
+		// The answer side: a typed second the answer holds in both runs
+		// only inside that time, made in the call's second in each run.
+		for _, ro := range offs {
+			for _, fo := range offs {
+				rm, lm := find(tc.fields(rAt.Truncate(time.Second).Add(ro))), find(tc.fields(fAt.Truncate(time.Second).Add(fo)))
+				for _, form := range forms(rm, lm) {
+					in := iCall("body.cmd.query.dirtyAt.$lte", Instant, tsec(rAt), tsec(fAt), rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), form.earlier, form.raw)
+					what := fmt.Sprintf("a typed second beside %s made %v and %v into the call's second, %s", tc.what, ro, fo, form.what)
+					d := oWord(t, Decide(in), tsec(rAt), tsec(fAt))
+					if ro == 0 && fo == 0 {
+						iValue(t, what, d, "mock-799")
+					} else {
+						iClock(t, what, d)
+					}
+				}
 			}
 		}
 	}
