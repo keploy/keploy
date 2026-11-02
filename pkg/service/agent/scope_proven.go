@@ -1010,6 +1010,7 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 		// left open, it would be blamed on the next begin
 		// (one_test_at_a_time).
 		if open == id {
+			a.dropDeliveries(id)
 			if _, _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, at, serr.Message, nil); err != nil {
 				a.logger.Warn("could not judge a test whose end keploy refused", zap.String("test", id), zap.Error(err))
 			}
@@ -1031,6 +1032,7 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 		// once), and the run names the cause. An end with no test open
 		// refuses only that call.
 		if open != "" {
+			a.dropDeliveries(open)
 			if _, _, err := a.closeOpen(ctx, open, models.ScopeOutcomeFailed, at, msg, nil); err != nil {
 				a.logger.Warn("could not judge a test another test's end left open", zap.String("test", open), zap.Error(err))
 			}
@@ -1044,9 +1046,14 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 	}
 	// The test's recorded callbacks (deliver:) are answered before it is
 	// judged, its window still open: the calls the application makes to
-	// handle them are the test's, and it ends once they are answered.
-	delivered, undelivered := a.settleDeliveries(ctx, id)
-	if delivered {
+	// handle them are the test's, and it ends once they are answered. A
+	// test that skipped itself is not judged on them, as it is not on the
+	// calls it then never made (endTest): they are dropped.
+	var delivered bool
+	var undelivered []string
+	if outcome == models.ScopeOutcomeSkipped {
+		a.dropDeliveries(id)
+	} else if delivered, undelivered = a.settleDeliveries(ctx, id); delivered {
 		at = time.Now()
 	}
 	ev, outcome, err := a.closeOpen(ctx, id, outcome, at, strings.Join(undelivered, "; "), undelivered)

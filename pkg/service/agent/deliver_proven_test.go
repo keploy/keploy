@@ -188,3 +188,77 @@ func TestARecordSettlesNoDelivery(t *testing.T) {
 	require.Empty(t, d.settled)
 	require.NotEqual(t, models.ScopeActionFail, e.Action)
 }
+
+// A test that skipped itself is not failed for its recorded callbacks, as
+// it is not for the calls it then never made: its deliveries are dropped,
+// not judged (Settle with a done ctx, so none is waited for), and it ends
+// skipped, naming none.
+func TestASkippedTestDropsItsDeliveries(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	const notDelivered = "test-2 (POST /webhooks/pay) was not delivered: its after: mock-3 was never called in o::TestA; set after: to the call that triggers it"
+	d := &fakeDeliverer{a: a, answers: map[string][]string{"o::TestA": {notDelivered}}}
+	deliverWith(t, d)
+	ctx := context.Background()
+	require.NoError(t, a.SetScopeDeliver(ctx, payCallback))
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "skipped"})
+	require.Nil(t, serr)
+	require.NotEqual(t, models.ScopeActionFail, e.Action, e.Reason)
+	require.NotContains(t, e.Reason, notDelivered)
+	require.Equal(t, []string{"o::TestA"}, d.settled, "a skipped test's deliveries are forgotten")
+	require.Equal(t, []bool{false}, d.mayWait, "a skipped test waits for no callback")
+	wa := windowOf(t, a, "o::TestA")
+	require.Equal(t, models.ScopeOutcomeSkipped, wa.Outcome)
+	require.True(t, wa.Evidence == nil || len(wa.Evidence.Undelivered) == 0, "a skipped test names no callback")
+}
+
+// A test keploy fails with its own reason at a refused end (an end from an
+// old harness, or another test's end while it is open) has its deliveries
+// forgotten, waiting for none: a later run of the test starts afresh, never
+// in the run the refused end left.
+func TestARefusedEndForgetsTheOpenTestsDeliveries(t *testing.T) {
+	const notDelivered = "test-2 (POST /webhooks/pay) was not delivered: its after: mock-3 was never called in o::TestA; set after: to the call that triggers it"
+	for _, tt := range []struct {
+		name string
+		end  models.ScopeReq
+	}{
+		{"an old harness's end", models.ScopeReq{Name: "TestA", Outcome: "passed", Pid: 7}},
+		{"another test's end", models.ScopeReq{Name: "TestB", Outcome: "passed"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			a, _ := wireAgent(t, models.MODE_TEST)
+			d := &fakeDeliverer{a: a, answers: map[string][]string{"o::TestA": {notDelivered}}}
+			deliverWith(t, d)
+			ctx := context.Background()
+			require.NoError(t, a.SetScopeDeliver(ctx, payCallback))
+			claimSelf(t, a)
+			_, serr := a.ProvenBegin(ctx, begin("TestA"))
+			require.Nil(t, serr)
+			_, serr = a.ProvenEnd(ctx, tt.end)
+			require.NotNil(t, serr)
+			require.Equal(t, []string{"o::TestA"}, d.settled, "the open test's deliveries are forgotten")
+			require.Equal(t, []bool{false}, d.mayWait, "a refused end waits for no callback")
+			require.Equal(t, []string{"o::TestA"}, d.openAt, "forgotten before the test is closed")
+		})
+	}
+}
+
+// A test's end settles its deliveries with the end's own ctx: an end whose
+// caller went away (its ctx done) waits for no callback's answer, so the
+// agent's wire is never held for a test process that is gone.
+func TestAnEndSettlesWithItsOwnCtx(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	d := &fakeDeliverer{a: a, answers: map[string][]string{"o::TestA": nil}}
+	deliverWith(t, d)
+	require.NoError(t, a.SetScopeDeliver(context.Background(), payCallback))
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(context.Background(), begin("TestA"))
+	require.Nil(t, serr)
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = a.ProvenEnd(gone, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Equal(t, []string{"o::TestA"}, d.settled)
+	require.Equal(t, []bool{false}, d.mayWait, "the end's done ctx reaches Settle")
+}

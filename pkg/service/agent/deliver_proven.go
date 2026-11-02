@@ -59,3 +59,13 @@ func (a *Agent) settleDeliveries(ctx context.Context, test string) (bool, []stri
 	}
 	return d.Settle(ctx, test)
 }
+
+// dropDeliveries forgets test's deliveries in a replay without judging
+// them: the end of a test that skipped itself, or one keploy failed with its
+// own reason (a refused end). Settle is given a done ctx, so it waits for
+// none, and a later run of the test starts afresh.
+func (a *Agent) dropDeliveries(test string) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = a.settleDeliveries(ctx, test)
+}
