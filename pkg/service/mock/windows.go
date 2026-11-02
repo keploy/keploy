@@ -12,10 +12,11 @@ import (
 // test's staging sends the agent from its test cases
 // (models.MockFilterParams.RecordedWindows), here from what keploy mock
 // record wrote. A test's window runs from when it began in its recording
-// (models.MappedTestCase.At, its scope window's start) to the last request
-// or answer of the recordings its mapping lists (table, by test ID; decoded
-// is every mapped mock the set decoded, held or not). A test with no begin
-// starts at its earliest recording; a test with neither has none.
+// (models.MappedTestCase.At, its scope window's start) to the last place
+// (models.PlaceOf) of the recordings its mapping lists (table, by test ID;
+// decoded is every mapped mock the set decoded, held or not). A test with no
+// begin starts at its earliest recording's place; a test with neither has
+// none.
 //
 // The window starts at the begin even where a recording the test lists was
 // sent before it (in flight when the test began), as keploy test's starts at
@@ -31,14 +32,22 @@ import (
 // scope's end: a pool recording made after that, still inside the scope,
 // reads as the pool's.
 //
-// Windows that overlap or touch (tests run in parallel, or a call a test
-// left running answered inside the next one) are one window named by no
-// test: the agent places a moment in the earliest-starting window that holds
-// it (models.WindowSchedule.IndexOf), so two of one test's recordings could
-// otherwise read as two tests', and a value one gave the other as noise.
-// Read as one, each test's recordings are earlier places of the others',
-// and a window no test names is no one test's (its stateful sequences walk
-// every recording, as with no window).
+// A recording is charged to the test whose scope holds its place (record's
+// correlateScopes), so the window ends at its recordings' last place, never
+// at an answer's time, which can come after the scope's end: an answer is
+// stamped once the relay's write of it to the application returns, and the
+// application can end its test, and make its next call, before that. Read
+// by its answer, the window of a set's last test held the driver's
+// endSessions the app sent as it disconnected after that test (a pool
+// recording), and the replay missed it, outside every test.
+//
+// Windows that overlap or touch (tests run in parallel) are one window named
+// by no test: the agent places a moment in the earliest-starting window that
+// holds it (models.WindowSchedule.IndexOf), so two of one test's recordings
+// could otherwise read as two tests', and a value one gave the other as
+// noise. Read as one, each test's recordings are earlier places of the
+// others', and a window no test names is no one test's (its stateful
+// sequences walk every recording, as with no window).
 func recordedTestWindows(mp *models.Mapping, table map[string][]string, decoded []*models.Mock) []models.TestWindow {
 	byName := make(map[string]*models.Mock, len(decoded))
 	for _, mk := range decoded {
@@ -69,20 +78,15 @@ func recordedTestWindows(mp *models.Mapping, table map[string][]string, decoded 
 		begin := begins[id]
 		start, end := begin, begin
 		for _, name := range table[id] {
-			mk := byName[name]
-			if mk == nil {
+			t := models.PlaceOf(byName[name])
+			if t.IsZero() {
 				continue
 			}
-			for _, t := range []time.Time{mk.Spec.ReqTimestampMock, mk.Spec.ResTimestampMock} {
-				if t.IsZero() {
-					continue
-				}
-				if begin.IsZero() && (start.IsZero() || t.Before(start)) {
-					start = t
-				}
-				if t.After(end) {
-					end = t
-				}
+			if begin.IsZero() && (start.IsZero() || t.Before(start)) {
+				start = t
+			}
+			if t.After(end) {
+				end = t
 			}
 		}
 		if start.IsZero() {
