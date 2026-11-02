@@ -103,7 +103,8 @@ func TestPlaintextOnItsWayAtAnUnheldCloseIsJudged(t *testing.T) {
 // it (its socket read with the FIN sent): the bytes the application writes
 // once it has the close's FIN are then refused, as after any close, and no
 // loss. One byte short of a count that may not hold the FIN is read, and so is
-// a count short by the FIN and a byte.
+// a count short by the FIN and a byte. Keploy's stop as the read returns, with
+// data or with a failed read, charges nothing either.
 func TestPlaintextOnItsWayAtTheProxysCloseIsReadThrough(t *testing.T) {
 	cases := append([]struct {
 		name string
@@ -113,7 +114,8 @@ func TestPlaintextOnItsWayAtTheProxysCloseIsReadThrough(t *testing.T) {
 		name string
 		want uint64
 	}{{"a failed read", 1}, {"data, after a cut end's bytes arrived", 1}, {"data, all written before a cut end", 0},
-		{"its FIN alone on its way", 0}, {"a byte on its way, its FIN not surely counted", 1}, {"a byte and its FIN on their way", 1}}...)
+		{"its FIN alone on its way", 0}, {"a byte on its way, its FIN not surely counted", 1}, {"a byte and its FIN on their way", 1},
+		{"data, as keploy stops", 0}, {"a failed read, as keploy stops", 0}}...)
 	// How many more than were written the close's read counts, and whether
 	// its socket reads with the FIN sent: 24, open, unless named.
 	type onItsWay struct {
@@ -167,6 +169,17 @@ func TestPlaintextOnItsWayAtTheProxysCloseIsReadThrough(t *testing.T) {
 				return d, err
 			}
 			t.Cleanup(func() { lookupWritten = was })
+			if tc.name == "data, as keploy stops" || tc.name == "a failed read, as keploy stops" {
+				// Keploy stops once the close's read has returned,
+				// before the close judges what it read.
+				read := plainOnItsWay
+				plainOnItsWay = func(ctx context.Context, c *net.TCPConn) (bool, error) {
+					data, err := read(ctx, c)
+					stop()
+					return data, err
+				}
+				t.Cleanup(func() { plainOnItsWay = read })
+			}
 			closed := make(chan struct{})
 			go func() {
 				defer close(closed)
@@ -181,11 +194,12 @@ func TestPlaintextOnItsWayAtTheProxysCloseIsReadThrough(t *testing.T) {
 			}
 			switch tc.name {
 			case "data", "data, after a cut end's bytes arrived", "data, all written before a cut end",
-				"its FIN alone on its way", "a byte on its way, its FIN not surely counted", "a byte and its FIN on their way":
+				"its FIN alone on its way", "a byte on its way, its FIN not surely counted", "a byte and its FIN on their way",
+				"data, as keploy stops":
 				if _, err := app.Write([]byte("publish 2\n")); err != nil {
 					t.Fatal(err)
 				}
-			case "a failed read":
+			case "a failed read", "a failed read, as keploy stops":
 				_ = proxySide.Close()
 			case "its FIN":
 				if err := app.CloseWrite(); err != nil {

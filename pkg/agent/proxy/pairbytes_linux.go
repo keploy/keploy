@@ -1005,10 +1005,14 @@ func tlsUnreadData(ctx context.Context, conn *net.TCPConn, layer *tls.Conn) (dat
 	return unreadData(ctx, conn, layer)
 }
 
-// plainOnItsWay reads conn, a plaintext connection the proxy is closing with
-// nothing unread and bytes the application wrote before the close still on
-// their way to it (onItsWayAtClose), until the first of them arrives (data: a
-// loss, as unread bytes the close tosses are), or the application's FIN or
+// plainOnItsWay is how a close reads plaintext on its way (readPlainOnItsWay);
+// a test replaces it to have keploy stop as the read returns.
+var plainOnItsWay = readPlainOnItsWay
+
+// readPlainOnItsWay reads conn, a plaintext connection the proxy is closing
+// with nothing unread and bytes the application wrote before the close still
+// on their way to it (onItsWayAtClose), until the first of them arrives (data:
+// a loss, as unread bytes the close tosses are), or the application's FIN or
 // reset ends it first (none), as tlsUnreadData reads through a TLS layer. A
 // FIN comes after every byte written before it, so one with none before it
 // says the bytes on their way were that FIN. The kernel takes a reset only
@@ -1016,7 +1020,7 @@ func tlsUnreadData(ctx context.Context, conn *net.TCPConn, layer *tls.Conn) (dat
 // 5961): every byte it had sent had arrived, and what its abort dropped
 // unsent it would have dropped without keploy. The bytes on their way are
 // sent, or dropped by such an abort: the read ends on an event, not a clock.
-func plainOnItsWay(ctx context.Context, conn *net.TCPConn) (data bool, err error) {
+func readPlainOnItsWay(ctx context.Context, conn *net.TCPConn) (data bool, err error) {
 	data, err = unreadData(ctx, conn, conn)
 	if errors.Is(err, unix.ECONNRESET) {
 		return false, nil

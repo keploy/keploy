@@ -452,6 +452,42 @@ func TestALossACutShortEndOwnedIsNeverTheOpenTests(t *testing.T) {
 	}
 }
 
+// A loss a cut-short end owned, counted before that test's own end, whose read
+// of the losses then failed, is the run's: the test is one keploy could not
+// judge, and charges nothing, so the run's read of what no test was charged
+// with has it. It is never dropped.
+func TestALossAnEndOwnedWhoseReadFailedIsTheRuns(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mode   models.Mode
+		action string
+	}{
+		{"replay", models.MODE_TEST, models.ScopeActionFail},
+		{"record", models.MODE_RECORD, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, p := wireAgent(t, tc.mode)
+			var owned []coreAgent.OwnedLoss
+			a.Proxy = ownedLossProxy{lossProxy: lossProxy{wireProxy: p}, owned: &owned}
+			a.proven.losses = a.markCaptureLosses(context.Background())
+			claimSelf(t, a)
+			loss := models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1,
+				What: "from [::ffff:127.0.0.1]:50912, written in o::TestCut, whose end could not wait for them"}
+			owned = []coreAgent.OwnedLoss{{Test: "o::TestCut", Loss: loss}}
+			hooks := a.Hooks
+			a.Hooks = blindHooks{err: errors.New("the count cannot be read")}
+			require.Equal(t, tc.action, endPassed(t, a, "TestCut").Action, "a test whose losses could not be read")
+			a.Hooks = hooks
+			w := windowOf(t, a, "o::TestCut")
+			require.True(t, w.Evidence.Unread)
+			require.Empty(t, w.Evidence.CaptureIncomplete)
+			un, err := a.UnchargedCaptureLosses(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, models.CaptureLosses{loss}, un, "the run's")
+		})
+	}
+}
+
 // A TLS client's rejection of keploy's certificate is the test's it happened
 // in, not a taint of every later test: the client's other calls are captured,
 // or rejected, on their own. One between two tests is the next test's, as a

@@ -393,8 +393,11 @@ func TestWaitProxySettledLastWaitsForTheBytesOnThePairedConnections(t *testing.T
 // wait, given no time (a context already done), under the test's name
 // (coreAgent.EndOf), so the proxy marks what it could not see reached as that
 // test's: a loss of those bytes counted later is charged to it, not to the
-// test open then. A wait of no test's makes none, nor does a proxy that
-// cannot wait for the bytes, and an end whose bytes wait ran makes no second.
+// test open then. One that failed in an earlier phase with its context live
+// (the counts could not be read) gives that wait no time either: it would wait
+// on for bytes no wait may then hold the end for. A wait of no test's makes
+// none, nor does a proxy that cannot wait for the bytes, and an end whose bytes
+// wait ran makes no second.
 func TestAnEndCutBeforeItsBytesWaitStillMarksThem(t *testing.T) {
 	type wait struct {
 		n    uint64
@@ -404,13 +407,14 @@ func TestAnEndCutBeforeItsBytesWaitStillMarksThem(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		end     string // the test whose end it is; "" for none
-		cutAt   string // "apps": before the application's connections settle; "" for none
+		cutAt   string // "apps": before the application's connections settle; "count": the counts unreadable after them; "" for none
 		bytes   error  // the bytes wait's answer
 		noBytes bool   // a proxy that cannot wait for the bytes
 		want    []wait
 	}{
 		{"cut before the bytes wait", "test-2", "apps", nil, false, []wait{{3, true, "test-2"}}},
 		{"cut, no test's", "", "apps", nil, false, nil},
+		{"failed before the bytes wait, its context live", "test-2", "count", nil, false, []wait{{3, true, "test-2"}}},
 		{"cut, a proxy that cannot wait for the bytes", "test-2", "apps", nil, true, nil},
 		{"the bytes wait ran and failed", "test-2", "", errors.New("unknown"), false, []wait{{3, false, "test-2"}}},
 		{"settled", "test-2", "", nil, false, []wait{{3, false, "test-2"}}},
@@ -437,9 +441,17 @@ func TestAnEndCutBeforeItsBytesWaitStillMarksThem(t *testing.T) {
 			done := make(chan error, 1)
 			go func() { done <- a.WaitProxySettled(ctx, c) }()
 			<-hooks.appParked
-			if tc.cutAt == "apps" {
+			switch tc.cutAt {
+			case "apps":
 				cancel()
-			} else {
+			case "count":
+				hooks.mu.Lock()
+				hooks.err = errors.New("the kernel's count cannot be read")
+				hooks.mu.Unlock()
+				for i := 0; i < 3; i++ {
+					hooks.appSettled.Add(uint64(i + 1))
+				}
+			default:
 				hooks.count(1)
 				for i := 0; i < 3; i++ {
 					hooks.appSettled.Add(uint64(i + 1))
