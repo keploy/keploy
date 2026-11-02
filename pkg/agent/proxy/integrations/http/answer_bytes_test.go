@@ -193,6 +193,34 @@ func answerPool(t *testing.T, n int) []*models.Mock {
 	return pool
 }
 
+// ownKeptAnswers gives t a table of kept answers of its own at the agent's
+// limit (answerKeepLimit), the process's back after it. The process's table
+// holds the answers of the rows before t until the collector takes their
+// recordings (forget), so it may have no room left: an answer served again
+// is then built on every serve, the same bytes (encodeAnswer), but not kept.
+// Only a row that holds the table's own bookkeeping (what it keeps, how many
+// builds go through it) reads a table of its own this way.
+func ownKeptAnswers(t *testing.T) {
+	t.Helper()
+	was := keptAnswers
+	keptAnswers = newAnswerTable(answerKeepLimit)
+	t.Cleanup(func() { keptAnswers = was })
+}
+
+// A row that reads what the table keeps reads its own (ownKeptAnswers):
+// with the process's table full, as the rows before it can leave it until
+// the collector takes their recordings, an answer served again is still
+// built twice and kept, and the process's table is back after the row.
+func TestARowReadsItsOwnKeptAnswersWhateverTheProcesssHold(t *testing.T) {
+	process := keptAnswers
+	process.held.Add(answerKeepLimit)
+	defer process.held.Add(-answerKeepLimit)
+	t.Run("an answer served again", TestAnAnswerServedAgainIsNotBuiltAgain)
+	if keptAnswers != process {
+		t.Fatal("the row left its own table as the process's")
+	}
+}
+
 // TestAnswersAreMainsAnswers serves every mock of pools of 100, 1k and 10k
 // three times (built, built and kept, written from the kept bytes) with the
 // proven switch off and on, and compares each answer with main's. The mocks
@@ -375,6 +403,7 @@ func TestAnswersServedRewrittenAreBuiltEachServe(t *testing.T) {
 // not, and leaves the kept answer as recorded: a serve after it is given the
 // recorded answer, never another serve's rewrite.
 func TestARewrittenServeNeverReadsOrFillsKeptAnswers(t *testing.T) {
+	ownKeptAnswers(t)
 	h := newHTTP()
 	m := reusedAnswer(`{"holder":"recorded-pod"}`)
 	alias := func(pod string) answerRewrite {
@@ -437,6 +466,66 @@ func TestARewrittenServeNeverReadsOrFillsKeptAnswers(t *testing.T) {
 	runtime.KeepAlive(m)
 }
 
+// TestAnAnswerBuiltAgainIsTheBytesServedBefore: an answer's kept bytes go
+// with its entry (forget, as when the collector takes its recording), and a
+// table with no room keeps none; the answer built again after that is the
+// bytes served before, its header lines in one order (encodeAnswer). On main
+// they were written in the header map's order, so after an eviction the same
+// mock could be served as other bytes.
+func TestAnAnswerBuiltAgainIsTheBytesServedBefore(t *testing.T) {
+	h := newHTTP()
+	m := reusedAnswer(`{"ok":true}`)
+	for i := range 20 {
+		m.Spec.HTTPResp.Header["X-More-"+strconv.Itoa(i)] = "more-" + strconv.Itoa(i)
+	}
+	key := weak.Make(m.Spec.HTTPResp)
+	first, err := h.buildMockResponseBytes(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for evict := range 50 {
+		// Served again (kept, when the table has room) and from what is kept.
+		for range 2 {
+			got, err := h.buildMockResponseBytes(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, first) {
+				t.Fatalf("eviction %d: a serve before it is not the first serve's bytes\nfirst: %q\nnow:   %q", evict, first, got)
+			}
+		}
+		keptAnswers.forget(key)
+		if _, ok := keptAnswers.entries.Load(key); ok {
+			t.Fatal("precondition: the answer's entry is still held after its eviction")
+		}
+		before := keptAnswers.builds.Load()
+		got, err := h.buildMockResponseBytes(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if keptAnswers.builds.Load() == before {
+			t.Fatal("precondition: the serve after an eviction was not built again")
+		}
+		if !bytes.Equal(got, first) {
+			t.Fatalf("eviction %d: the answer built again is not the bytes served before\nbefore: %q\nagain:  %q", evict, first, got)
+		}
+	}
+	full := newAnswerTable(0)
+	for serve := range 50 {
+		got, err := full.serve(m, h.encodeRecordedAnswer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, first) {
+			t.Fatalf("serve %d from a table with no room is not the bytes served before\nbefore: %q\nagain:  %q", serve, first, got)
+		}
+	}
+	if full.held.Load() != 0 || full.builds.Load() != 50 {
+		t.Fatalf("precondition: a table with no room holds %d bytes after %d builds, want 0 after 50", full.held.Load(), full.builds.Load())
+	}
+	runtime.KeepAlive(m)
+}
+
 // reusedAnswer is a recorded answer with a dozen header lines.
 func reusedAnswer(body string) *models.Mock {
 	header := map[string]string{"Content-Type": "application/json", "Content-Length": strconv.Itoa(len(body))}
@@ -456,6 +545,7 @@ func reusedAnswer(body string) *models.Mock {
 // kept bytes after, with no allocation. On main every serve built it: 68
 // allocations a serve for this answer.
 func TestAnAnswerServedAgainIsNotBuiltAgain(t *testing.T) {
+	ownKeptAnswers(t)
 	h := newHTTP()
 	m := reusedAnswer(`{"ok":true}`)
 	before := keptAnswers.builds.Load()
