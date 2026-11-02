@@ -1114,9 +1114,9 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			"keploy's agent could not open "+id+": "+err.Error(), "check the agent's log")
 	}
 	if t := a.realTracker(); t != nil {
-		// The mock.real destinations its connections send bytes to from
-		// here are this test's.
-		t.BeginTest()
+		// The mock.real destinations its worker's connections send bytes
+		// to from here are this test's.
+		t.BeginTestOf(worker)
 	}
 	a.provenMu.Lock()
 	if a.proven.open == nil {
@@ -1361,9 +1361,6 @@ func (a *Agent) overlapRefusal(ctx context.Context) string {
 	if a.replaying() {
 		return "this keploy replays one test at a time across a run's workers"
 	}
-	if a.realDepsSet.Load() {
-		return "this run's mock.real destinations are tracked one test at a time"
-	}
 	if !a.countsCaptureLosses(ctx) {
 		return "keploy's hooks here count no capture losses, so a connection the kernel dropped could not be charged to every test open across it"
 	}
@@ -1394,11 +1391,11 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	// The mock.real destinations the test used, and the connections keploy
 	// could neither capture nor relay as real while it was open: in a record
 	// as in a replay (design v14 §3.2, §4).
-	var uses []models.RealUse
-	var incomplete []models.CaptureIncomplete
+	var real realdeps.TestEnd
 	if t := a.realTracker(); t != nil {
-		uses, incomplete = t.EndTest()
+		real = t.EndTestOf(a.scopeInstance(id))
 	}
+	uses, incomplete := real.Uses, real.Incomplete
 	// When exact serving began serving the test: a miss made before it is
 	// no call of the test's (evidenceReason).
 	beganAt := a.servedSince()
@@ -1442,6 +1439,17 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	}
 	// Before why: why goes in front of whatever reason the evidence gives.
 	ev, outcome = a.chargeCaptureLosses(ctx, id, ev, outcome, readErr == nil, beganAt)
+	if len(real.Unattributed) > 0 {
+		// A mock.real use from a process in no test worker's instance,
+		// while this test was open, could have been its: it is in no
+		// test's REAL row, and leaves each test open then without a
+		// verdict, as the record does a mock of such a call. The hooks
+		// never count it, so it is charged to no run-wide total.
+		if ev == nil {
+			ev = &models.ScopeEvidence{}
+		}
+		ev.ChargeNotJudged(real.Unattributed)
+	}
 	// A value the test gave that its recording does not hold checks
 	// nothing, and the call that carries it misses as a plain call, or
 	// leaves the recorded one unmade: said first, with the step that fixes

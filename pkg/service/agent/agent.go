@@ -72,10 +72,7 @@ type Agent struct {
 	dockerClient    kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
 	coreAgent.IncomingProxy
 	proxyStarted bool
-	// realDepsSet: the run's mock.real names a destination (SetRealDeps),
-	// whose uses are tracked one test at a time (overlapRefusal).
-	realDepsSet atomic.Bool
-	config      *config.Config
+	config       *config.Config
 	// countsCalls: once its proxy was up, the kernel counted the calls
 	// waiting for it (the proxy's CountedFromStart: its canary counted, the
 	// bytes on its paired connections readable). Latched at the start

@@ -31,6 +31,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -254,6 +255,13 @@ func silentServer(t *testing.T) uint32 {
 // answer, and returns what serveTreeListener did.
 func sendTree(ctx context.Context, t *testing.T, p *Proxy, port, caller uint32) (bool, error) {
 	t.Helper()
+	return sendTreeAs(ctx, t, p, &agent.NetworkAddress{Version: 4, Port: port, KernelPid: caller, AgentNsPid: caller})
+}
+
+// sendTreeAs is sendTree from the caller dest names, in dest's instance.
+func sendTreeAs(ctx context.Context, t *testing.T, p *Proxy, dest *agent.NetworkAddress) (bool, error) {
+	t.Helper()
+	port := dest.Port
 	cli, srv := net.Pipe()
 	type result struct {
 		served bool
@@ -261,7 +269,6 @@ func sendTree(ctx context.Context, t *testing.T, p *Proxy, port, caller uint32) 
 	}
 	done := make(chan result, 1)
 	go func() {
-		dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: caller, AgentNsPid: caller}
 		served, _, err := p.serveTreeListener(ctx, srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "7")
 		_ = srv.Close()
 		done <- result{served, err}
@@ -335,6 +342,55 @@ func TestUnderTheSwitchATreeServedMockRealDestinationIsCountedAsARelay(t *testin
 	}
 }
 
+// With two test workers' tests open, a tree-served mock.real call is the
+// test of the worker whose instance the kernel stamped its connection with:
+// a relayed one's use and a failed dial's count, and a live handler's call,
+// each in that worker's REAL row only.
+func TestUnderTheSwitchATreeServedRealCallIsItsOwnWorkersTests(t *testing.T) {
+	p, _ := provenTreeProxy(t)
+	silent := silentServer(t)
+	listed := fmt.Sprintf("127.0.0.1:%d", silent)
+	live := pingServer(t)
+	liveListed := fmt.Sprintf("127.0.0.1:%d", live)
+	if err := p.SetRealDeps(context.Background(), []string{listed, liveListed}); err != nil {
+		t.Fatal(err)
+	}
+	tr := p.RealTracker()
+	self := uint32(os.Getpid())
+	from := func(port, caller, inst uint32) *agent.NetworkAddress {
+		return &agent.NetworkAddress{Version: 4, Port: port, KernelPid: caller, AgentNsPid: caller, Instance: inst}
+	}
+	tr.BeginTestOf(3)
+	tr.BeginTestOf(4)
+	if served, err := sendTreeAs(context.Background(), t, p, from(silent, self, 4)); !served || err != nil {
+		t.Fatalf("precondition: a call to the tree's listener is relayed: served=%v err=%v", served, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if served, err := sendTreeAs(ctx, t, p, from(silent, self, 3)); !served || err == nil {
+		t.Fatalf("precondition: the dial fails: served=%v err=%v", served, err)
+	}
+	p.live = func(_ context.Context, conn net.Conn, upstream string, _ uint16) {
+		up, err := net.Dial("tcp", upstream)
+		if err != nil {
+			return
+		}
+		defer func() { _ = up.Close() }()
+		util.RelayRawPassthrough(conn, up)
+	}
+	if served, got, _ := callTreeAs(t, p, from(live, uint32(os.Getppid()), 4)); !served || got != "pong" {
+		t.Fatalf("precondition: a call to an app the caller started goes to the live handler: served=%v answer=%q", served, got)
+	}
+	if got, want := tr.EndTestOf(3).Uses, []models.RealUse{{Dest: listed, Failed: 1}}; !slices.Equal(got, want) {
+		t.Fatalf("worker 3's REAL row: %+v, want only its own failed dial %+v", got, want)
+	}
+	want := []models.RealUse{{Dest: listed, Conns: 1}, {Dest: liveListed, Conns: 1}}
+	slices.SortFunc(want, func(a, b models.RealUse) int { return strings.Compare(a.Dest, b.Dest) }) // a row is by destination
+	if got := tr.EndTestOf(4).Uses; !slices.Equal(got, want) {
+		t.Fatalf("worker 4's REAL row: %+v, want its relayed and live calls %+v", got, want)
+	}
+}
+
 // A mock.real loopback destination nothing listens at is mock.real's:
 // serveTreeListener leaves it to serveReal, whose failed dial the open
 // test's REAL row counts, where it closed the call uncounted, so the row
@@ -353,7 +409,7 @@ func TestUnderTheSwitchAMockRealDestinationNothingListensAtIsCountedFailed(t *te
 	tr.BeginTest()
 	cli, srv := net.Pipe()
 	t.Cleanup(func() { _ = cli.Close(); _ = srv.Close() })
-	if handled, _, err := p.serveReal(context.Background(), srv, listed, "", 1, nil); !handled || err != nil {
+	if handled, _, err := p.serveReal(context.Background(), srv, listed, "", 1, realdeps.Origin{}, nil); !handled || err != nil {
 		t.Fatalf("serveReal: handled=%v err=%v", handled, err)
 	}
 	uses, _ := tr.EndTest()

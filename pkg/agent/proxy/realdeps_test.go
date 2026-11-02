@@ -103,7 +103,7 @@ type served struct {
 func serveRealAsync(p *Proxy, accepted net.Conn, dst string) chan served {
 	out := make(chan served, 1)
 	go func() {
-		h, c, err := p.serveReal(context.Background(), accepted, dst, "", 1, nil)
+		h, c, err := p.serveReal(context.Background(), accepted, dst, "", 1, realdeps.Origin{}, nil)
 		out <- served{h, c, err}
 	}()
 	return out
@@ -211,14 +211,14 @@ func TestServeRealDecidesNothingWithoutTheSwitchOrAList(t *testing.T) {
 	p := realProxy(t, []string{dst}, nil)
 	t.Setenv(provenswitch.Env, "")
 	_, accepted := realConnPair(t)
-	h, c, err := p.serveReal(context.Background(), accepted, dst, "", 1, nil)
+	h, c, err := p.serveReal(context.Background(), accepted, dst, "", 1, realdeps.Origin{}, nil)
 	require.False(t, h)
 	require.NoError(t, err)
 	require.Same(t, accepted, c)
 
 	t.Setenv(provenswitch.Env, "1")
 	empty := &Proxy{logger: zap.NewNop()}
-	h, c, _ = empty.serveReal(context.Background(), accepted, dst, "", 1, nil)
+	h, c, _ = empty.serveReal(context.Background(), accepted, dst, "", 1, realdeps.Origin{}, nil)
 	require.False(t, h)
 	require.Same(t, accepted, c)
 }
@@ -483,7 +483,7 @@ func TestARealPredialOfADependencyIsClosedInAReplay(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = c.Close() })
 		_, accepted := realConnPair(t)
-		h, _, err := p.serveReal(context.Background(), accepted, up, "", 1, util.NewPredialed(up, c))
+		h, _, err := p.serveReal(context.Background(), accepted, up, "", 1, realdeps.Origin{}, util.NewPredialed(up, c))
 		require.False(t, h)
 		require.NoError(t, err)
 		_, werr := c.Write([]byte("x"))
@@ -642,11 +642,11 @@ func TestKeepRealDepsKeepsTheRunsBookkeeping(t *testing.T) {
 	ctx := context.Background()
 	p := &Proxy{logger: zap.NewNop()}
 	require.NoError(t, p.SetRealDeps(ctx, []string{"localhost:5432"}))
-	p.realTracker.Dialed(1, "localhost:5432", true)
+	p.realTracker.Dialed(realdeps.Origin{}, 1, "localhost:5432", true)
 	require.NoError(t, p.KeepRealDeps(ctx, []string{"localhost:5432"}))
 	require.Equal(t, []string{"localhost:5432"}, p.RealRun().Reached, "the same list keeps what the run saw")
 
-	p.realTracker.Dialed(1, "localhost:5432", true)
+	p.realTracker.Dialed(realdeps.Origin{}, 1, "localhost:5432", true)
 	require.NoError(t, p.KeepRealDeps(ctx, []string{"localhost:6379"}))
 	require.Empty(t, p.RealRun().Reached, "another list starts afresh")
 	require.Equal(t, []string{"localhost:6379"}, p.realList().list.Labels())
@@ -685,10 +685,15 @@ func TestARefusedDialToAContainerStillBeingPlacedCountsAgainstTheTest(t *testing
 		containerkey.Default = k
 		resolved := make(chan struct{}, 1)
 		p.realDialResolved = func() { resolved <- struct{}{} }
-		p.realTracker.BeginTest()
+		// Two test workers' tests open: the connect is worker 4's, whose
+		// instance the kernel stamped it with, and never worker 9's.
+		p.realTracker.BeginTestOf(9)
+		p.realTracker.BeginTestOf(4)
+		dest := ipv4Dest(t, refused)
+		dest.Instance = 4
 
 		// Answered at once: the decision returns before the placing ends.
-		d := p.decideHandshake(fakeHandshakeDest{dest: ipv4Dest(t, refused)})(context.Background(), appEnd, proxyEnd)
+		d := p.decideHandshake(fakeHandshakeDest{dest: dest})(context.Background(), appEnd, proxyEnd)
 		require.Equal(t, synhold.Refuse, d.Outcome, "placed=%v", placed)
 		<-f.awaiting // the placing is waited for, off the decision's path
 		if placed {
@@ -698,7 +703,11 @@ func TestARefusedDialToAContainerStillBeingPlacedCountsAgainstTheTest(t *testing
 		}
 		<-resolved
 		end()
-		uses, inc := p.realTracker.EndTest()
+		other := p.realTracker.EndTestOf(9)
+		require.Empty(t, other.Uses, "placed=%v: worker 9's", placed)
+		require.Empty(t, other.Incomplete, "placed=%v: worker 9's", placed)
+		mine := p.realTracker.EndTestOf(4)
+		uses, inc := mine.Uses, mine.Incomplete
 		if placed {
 			require.Equal(t, []models.RealUse{{Dest: "container:redis", Failed: 1}}, uses)
 			require.Empty(t, inc)
@@ -866,7 +875,7 @@ func TestAServerFirstRealDestinationKeployCannotNameIsCaptureIncompleteAtItsTest
 			ctx, endRun := context.WithCancel(context.Background())
 			done := make(chan served, 1)
 			go func() {
-				h, c, err := p.serveReal(ctx, reading, dst, "", 1, pre)
+				h, c, err := p.serveReal(ctx, reading, dst, "", 1, realdeps.Origin{}, pre)
 				done <- served{h, c, err}
 			}()
 			// serveReal reads the client for its name once the connection

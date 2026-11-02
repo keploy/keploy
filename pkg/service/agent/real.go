@@ -19,7 +19,6 @@ type realDepsProxy interface {
 // names any (models.ErrNoRealRelay), so the run fails rather than record or
 // mock them; an empty list asks nothing of it.
 func (a *Agent) SetRealDeps(ctx context.Context, real []string) error {
-	a.realDepsSet.Store(len(real) > 0)
 	p, ok := a.Proxy.(realDepsProxy)
 	if !ok || a.Proxy == nil {
 		if len(real) == 0 {
@@ -41,7 +40,6 @@ type realDepsKeeper interface {
 // One that cannot keep installs it afresh.
 func (a *Agent) KeepRealDeps(ctx context.Context, real []string) error {
 	if k, ok := a.Proxy.(realDepsKeeper); ok && a.Proxy != nil {
-		a.realDepsSet.Store(len(real) > 0)
 		return k.KeepRealDeps(ctx, real)
 	}
 	return a.SetRealDeps(ctx, real)
