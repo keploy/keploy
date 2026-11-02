@@ -33,6 +33,12 @@ import (
 // too), ctx ends, or utils.StopStallBudget of keploy's runnable time passes
 // with no answer. The error is then the last failure's, wrapped; what, in the
 // log, names what keploy asked for and what it does with no answer.
+//
+// It returns only once the ask it cancelled has returned, so no read of the
+// daemon outlives it (ask must end on its context, as the docker client's
+// calls do). One left running went on beside what its caller did next: the
+// docker run stop, whose grace ran out mid-read, read the container again
+// and killed it with the first read still in flight.
 func askDaemon[T any](ctx context.Context, logger *zap.Logger, what string, ask func(context.Context) (T, error)) (T, error) {
 	meter := stall.NewMeter(nil, utils.StopStallBudget)
 	defer meter.Stop()
@@ -70,10 +76,12 @@ func askDaemon[T any](ctx context.Context, logger *zap.Logger, what string, ask 
 			case <-meter.Wait():
 				if meter.Expired() {
 					cancel()
+					<-answered
 					return unanswered("no answer for " + utils.StopStallSaid())
 				}
 			case <-ctx.Done():
 				cancel()
+				<-answered
 				return unanswered("its caller stopped waiting")
 			}
 		}
