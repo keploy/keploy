@@ -71,6 +71,54 @@ func TestAReadOfARefusedWorkerIsRefusedUntilItsTestEnds(t *testing.T) {
 	}
 }
 
+// A refusal changes what a view of the worker made before it shows: its
+// reads, served before, are refused now. So the view reports a higher
+// revision (and staging generation), and a parser that caches its index by
+// revision re-reads and is refused, instead of serving the index it read
+// before the refusal: the whole pool, for a keep-alive connection that
+// stayed open from the worker's earlier test.
+func TestARefusalRaisesTheRevisionOfAViewMadeBeforeIt(t *testing.T) {
+	starts.Default.Reset()
+	t.Cleanup(starts.Default.Reset)
+	mgr := newCursorManager(t)
+	mgr.SetMocksWithWindow(nil, counterPool(time.Now().Add(-time.Hour), "a1", "a2"), models.BaseTime, time.Now())
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a1", "a2"})
+	self := uint32(os.Getpid())
+	p.SetWorkerScope(self, []string{"a1", "a2"})
+	earlier := p.scopedFor(self, mgr)
+	// Its test ended: the view stays open into the worker's next begin.
+	p.ClearWorkerScope(self)
+	if err := errOfRead(earlier.GetPerTestMocksInWindow()); err != nil {
+		t.Fatalf("between tests the view was refused: %v", err)
+	}
+	type revisions interface {
+		Revision() uint64
+		RevisionByKind(models.Kind) uint64
+		StagingGeneration() uint64
+		StagingGenerationByKind(models.Kind) uint64
+	}
+	rev, ok := earlier.(revisions)
+	if !ok {
+		t.Fatalf("the worker's view %T reports no revisions", earlier)
+	}
+	read := func() [4]uint64 {
+		return [4]uint64{rev.Revision(), rev.RevisionByKind(models.HTTP), rev.StagingGeneration(), rev.StagingGenerationByKind(models.HTTP)}
+	}
+	before := read()
+	const why = "t2 began with the pid 42: keploy narrows a test by its pid only with the marks"
+	p.RefuseWorker(self, why)
+	after := read()
+	for i, name := range []string{"Revision", "RevisionByKind", "StagingGeneration", "StagingGenerationByKind"} {
+		if after[i] <= before[i] {
+			t.Fatalf("after the refusal the view's %s is %d, was %d: a parser that caches by it keeps serving what it read before", name, after[i], before[i])
+		}
+	}
+	if err := errOfRead(earlier.GetPerTestMocksInWindow()); err == nil || !strings.Contains(err.Error(), why) {
+		t.Fatalf("after the refusal the view's next read returned %v, want the refusal", err)
+	}
+}
+
 // With the marks, a keyed walk of the session tier (MySQL's lookups by
 // statement) with no test open, at boot or between two tests, shows what the
 // connection's read of that tier shows there.

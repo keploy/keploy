@@ -552,9 +552,10 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 	if parent.Err() != nil {
 		// The user's Ctrl+C came while keploy read what the run did, and
-		// the read may be short of it (with the switch off, a failed read is
-		// no windows): a verdict on part of a run could pass a suite that did
-		// not. Not judged: 128+N (the deferred rule above).
+		// the read may be short of it or cut off by the interrupt: a
+		// verdict on part of a run could pass a suite that did not, and a
+		// read the interrupt cut is not one keploy failed to make (no read
+		// ERROR). Not judged: 128+N (the deferred rule above).
 		return nil
 	}
 	detail := replayDetail{
