@@ -67,18 +67,19 @@ jobs:
       #   ./internal/testnet  the ports ./pkg, ./pkg/neterr and
       #                       ./pkg/agent/proxy/incoming take for their
       #                       refused dials and their listeners. Their
-      #                       SharedPort and RefusedAddr ports are held by a
-      #                       connection's local end here, with SO_REUSEADDR
-      #                       on the tests' own listeners. incoming's
-      #                       ReservedPort ports are not: they are ports below
-      #                       the dynamic port range, claimed by a lock file
-      #                       per port, which no bind to port 0 and no
-      #                       connect is given.
-      #                       Its rows check that a held port refuses a dial,
-      #                       that no other socket can bind it, that the
-      #                       test's own listener opens there beside the hold,
-      #                       and that a claim takes a port no other test
-      #                       claimed below the range netsh reports.
+      #                       RefusedAddr ports are held by a connection's
+      #                       local end here, whose socket binds the port
+      #                       exclusively (SO_EXCLUSIVEADDRUSE). Their
+      #                       SharedPort and ReservedPort ports are not held:
+      #                       they are ports below the dynamic port range,
+      #                       claimed by a lock file per port, which no bind
+      #                       to port 0 and no connect is given.
+      #                       Its rows check that a held port refuses a dial
+      #                       and that no other socket can bind it, that a
+      #                       claimed port refuses a dial until the test's
+      #                       own listener opens there, and that a claim
+      #                       takes a port no other test claimed below the
+      #                       range netsh reports.
       #
       # Every one of these but connseq was cross-compiled and executed on a
       # real Windows host before being listed. No Windows host was at hand for
@@ -87,7 +88,7 @@ jobs:
       # counter fails four of them. Nor for testnet: no Windows host and no
       # Wine was at hand, and ./pkg, ./pkg/neterr and incoming already hold
       # their ports through it here, so its rows are listed to run where its
-      # callers do; this job is their first run on Windows.
+      # callers do; this job is where they run on Windows.
       #
       # pkg/agent/proxy is deliberately NOT here: two of its tests read a
       # source file by relative path, so I could not separate "fails on

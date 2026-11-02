@@ -23,11 +23,13 @@ import (
 // finds no listener and is refused. The connection closes with a reset, so
 // the port is free once the test ends.
 //
-// On Linux and Windows no other socket can bind P while it is held. macOS
-// lets a socket that sets SO_REUSEADDR, as Go's listeners there do, bind the
-// port of a connected socket, so there P is a port the system never gives a
-// bind to port 0 (see connectUnpicked). A server that names P itself can
-// still take it on macOS.
+// On Linux no other socket can bind P while it is held. On Windows the
+// holding socket binds P exclusively (holdControl): Go binds it at the
+// wildcard address, and without the option a listener that sets none, as
+// Go's there do, binds 127.0.0.1:P beside it. macOS lets a socket that sets
+// SO_REUSEADDR, as Go's listeners there do, bind the port of a connected
+// socket, so there P is a port the system never gives a bind to port 0 (see
+// connectUnpicked). A server that names P itself can still take it on macOS.
 func holdByConnection(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -44,14 +46,18 @@ func holdByConnection(t *testing.T) string {
 // of a UDP socket connected to a peer socket on 127.0.0.1, both open until
 // the test ends. A connected socket takes only its peer's datagrams, so the
 // kernel answers any other sender's as it answers one to a port nothing
-// holds: port unreachable. Go's UDP sockets do not set SO_REUSEADDR, so no
-// other one can bind the port meanwhile.
+// holds: port unreachable. Go's UDP sockets do not set SO_REUSEADDR, so on
+// Linux and macOS no other one can bind the port meanwhile; on Windows the
+// holding socket binds it exclusively (holdControl), as a TCP hold does,
+// since a UDP socket that sets no option binds 127.0.0.1:P beside one that
+// does not.
 func holdUDPByConnection(t *testing.T) string {
 	t.Helper()
 	peer, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = peer.Close() })
-	held, err := net.DialUDP("udp4", nil, peer.LocalAddr().(*net.UDPAddr))
+	d := net.Dialer{Control: holdControl}
+	held, err := d.Dial("udp4", peer.LocalAddr().String())
 	require.NoError(t, err, "hold a port")
 	t.Cleanup(func() { _ = held.Close() })
 	return held.LocalAddr().String()

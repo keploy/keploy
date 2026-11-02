@@ -5,7 +5,6 @@ package testnet
 import (
 	"context"
 	"net"
-	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -16,7 +15,8 @@ import (
 // P is the local end of a connection that stays open until the test ends
 // (holdByConnection, holdUDPByConnection): a socket that is only bound, as
 // RefusedAddr holds the port on Linux, does not refuse a connect on macOS.
-// P is held at 127.0.0.1 only.
+// On Windows the holding socket binds P exclusively. P is held at 127.0.0.1
+// only.
 func RefusedAddr(t *testing.T, network string) string {
 	t.Helper()
 	switch network {
@@ -29,22 +29,18 @@ func RefusedAddr(t *testing.T, network string) string {
 	return ""
 }
 
-// SharedPort is a TCP port nothing listens at, held for the test's life as
-// RefusedAddr's is, by a connection (holdByConnection), at 127.0.0.1 only.
-// ListenShared and OpenShared open a listener at 127.0.0.1 at the port beside
-// the hold, so a test can close its listener, find a dial to the port
-// refused, and listen there again. On macOS a listener that sets
-// SO_REUSEADDR, as Go's do, binds beside a connected socket; on Windows,
-// where Go's listeners set no option, SharedListenConfig sets SO_REUSEADDR.
-// A bind to port 0 is never given the port. A socket that names the port and
-// sets SO_REUSEADDR can still take it.
+// SharedPort is a TCP port nothing listens at, kept for the test's life,
+// that the test's own listeners open at: ListenShared and OpenShared open a
+// listener at 127.0.0.1 at the port, so a test can close its listener, find
+// a dial to the port refused, and listen there again. On macOS the port is
+// held as RefusedAddr's is, by a connection (holdByConnection), at 127.0.0.1
+// only, and a listener that sets SO_REUSEADDR, as Go's do, binds beside the
+// connected socket. On Windows it is ReservedPort's port, claimed below the
+// dynamic port range with no socket at it (sharedPort). A bind to port 0 is
+// never given the port. A socket that names the port can still take it.
 func SharedPort(t *testing.T) int {
 	t.Helper()
-	_, p, err := net.SplitHostPort(holdByConnection(t))
-	require.NoError(t, err)
-	port, err := strconv.Atoi(p)
-	require.NoError(t, err)
-	return port
+	return sharedPort(t)
 }
 
 // ListenShared opens a TCP listener at addr, a port SharedPort holds, beside
@@ -80,8 +76,9 @@ func SharedListenConfig() net.ListenConfig {
 // port is refused again. On Windows, where Go's listeners set no option and
 // so cannot bind beside any socket that holds the port, it is a port below
 // the dynamic port range, which no bind to port 0 and no connect is given,
-// claimed for the test's life so that no other test is given it either. A
-// socket that names the port can still take it.
+// claimed for the test's life so that no other test is given it either, and
+// SharedPort's port is the same. A socket that names the port can still
+// take it.
 func ReservedPort(t *testing.T) int {
 	t.Helper()
 	return reservedPort(t)
