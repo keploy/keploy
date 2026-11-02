@@ -1829,7 +1829,10 @@ func (a *Agent) MockWindowOf(params models.MockFilterParams) models.MockWindowMo
 // window staging files them in the reusable tier (pkg's ruleSessionLifetime),
 // and every parser's claim of one looks there (UpdateUnFilteredMock); a
 // mapping staging files them there too, whatever the mapping names, so a test
-// begun without a pid is answered by them as with no test begun. Staged in the
+// staged by its mapping is answered by them as with no test's mapping sent:
+// one begun without a pid with the switch off, and, under the proven switch,
+// one a caller stages by mapping rather than exactly (enterprise's sandbox
+// runner; keploy test's exact serving never sends a mapping). Staged in the
 // per-test tier, no claim of one could take it. They are resident, never
 // parked on disk (EligibleForDisk), so a mapping's load does not need them.
 func reusableByLifetime(mocks []*models.Mock) (perTest, reusable []*models.Mock) {
@@ -2319,14 +2322,7 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 
 	// Apply filtering based on parameters
 	if params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping) {
-		// Under the proven switch a begin is served exactly, never staged by
-		// its mapping (stageScope is switch-off only), and the exact view
-		// settles the claim of a test's own recording by its name, not by
-		// its tier: its pool is left as it was.
-		perTest, reusable := originalFiltered, []*models.Mock(nil)
-		if !provenswitch.On() {
-			perTest, reusable = reusableByLifetime(originalFiltered)
-		}
+		perTest, reusable := reusableByLifetime(originalFiltered)
 		filteredMocks = pkg.FilterTcsMocksMappingInWindow(ctx, a.logger, perTest, params.MockMapping, params.AfterTime, params.BeforeTime)
 		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, append(originalUnfiltered[:len(originalUnfiltered):len(originalUnfiltered)], reusable...), params.MockMapping)
 	} else {

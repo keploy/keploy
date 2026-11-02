@@ -1,10 +1,15 @@
 package agent
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/config"
+	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 // laxSessionMock is stageMock as an HTTP recorder that stated no lifetime
@@ -92,6 +97,76 @@ func TestAPidlessBeginServesAConnectionMockAsWithNoBegin(t *testing.T) {
 	}
 	if got := served(t, true); got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("pid-less begin of TestB: GET /c twice answered %q; want %q, as with no begin", got, want)
+	}
+}
+
+// newMappingStagedReplay is a replaying agent under the proven switch that
+// its caller stages by mapping, never exactly, as enterprise's sandbox runner
+// (pkg/service/runner) does: the set's mocks stored, then the set staged over
+// the widest window with an empty mapping and UseMappingBased, and no
+// models.ExactServing (the runner's first UpdateMockParams).
+func newMappingStagedReplay(t *testing.T, perTest, session []*models.Mock) (*Agent, *stageProxy) {
+	t.Helper()
+	t.Setenv(provenswitch.Env, "1")
+	mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	p := &stageProxy{mm: mm}
+	cfg := &config.Config{}
+	cfg.Agent.Mode = models.MODE_TEST
+	a := New(zap.NewNop(), nil, p, nil, nil, cfg)
+	ctx := context.Background()
+	if err := a.StoreMocks(ctx, perTest, session); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.UpdateMockParams(ctx, models.MockFilterParams{
+		AfterTime: models.BaseTime, BeforeTime: time.Now(), MockMapping: []string{}, UseMappingBased: true, StrictMockWindow: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return a, p
+}
+
+// Under the proven switch a caller that stages each test by its mapping, not
+// exactly (the sandbox runner's per-test UpdateMockParams: UseMappingBased,
+// the test's mapping and window, no models.ExactServing), reaches the same
+// mapping staging a pid-less begin reaches with the switch off. Over a
+// recording made before the HTTP recorder stated lifetimes, the lax rule's
+// session mocks are filed in the reusable tier there too, so TestB's GET /q
+// is answered as with the set staged and no test's mapping sent. Left in the
+// per-test tier under the switch, where no claim of a session mock looks,
+// every call missed, though TestB's mapping names mock-b; before the matcher
+// left a refused recording out of the call, every call hung at 99% CPU.
+//
+// The calls wait for the answer or the parser's return, never a timer: a hang
+// ends in go test's own -timeout, which names this row.
+func TestAMappingStagingUnderTheSwitchServesALaxSessionMockAsTheSetStaged(t *testing.T) {
+	served := func(t *testing.T, mapped bool) []string {
+		a, p := newMappingStagedReplay(t,
+			[]*models.Mock{laxSessionMock("mock-a", "/q", stageT0), laxSessionMock("mock-b", "/q", stageT0.Add(3*time.Second))},
+			[]*models.Mock{stageSessionMock("cfg", "/cfg")})
+		if mapped {
+			if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+				AfterTime: stageT0.Add(2 * time.Second), BeforeTime: stageT0.Add(4 * time.Second),
+				UseMappingBased: true, MockMapping: []string{"mock-b"}, StrictMockWindow: true,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var got []string
+		for i := 0; i < 3; i++ {
+			got = append(got, answer(t, p.mm, "/q"))
+		}
+		return got
+	}
+	want := served(t, false)
+	got := served(t, true)
+	if want[0] != "mock-a" || want[1] != "mock-b" || want[2] != "mock-b" {
+		t.Fatalf("set staged: GET /q three times answered %q; want the cursor [mock-a mock-b mock-b]", want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("TestB's mapping staged under the switch: GET /q three times answered %q; want %q, as with the set staged", got, want)
+		}
 	}
 }
 
