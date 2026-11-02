@@ -1485,6 +1485,65 @@ func TestReaderKeyedPathTakesAKeyByItsWholePath(t *testing.T) {
 	}
 }
 
+// A key that comes after a deeper subtree below a dotted key ("c" after
+// "a"{"b"} in "x.y") stands below the dotted key, not below the subtree's
+// last key: its spelling is found past the latest key, so it never reads as
+// the nested x{y{c}}'s, whichever run holds which.
+func TestReaderAKeyAfterADeeperSubtreeIsSpelledByItsParentsKey(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	const w = "ord7Kq2Xw9"
+	type m = map[string]any
+	pg := func(cell any) Raw {
+		return ePg("mock-6", 100*time.Millisecond, "SELECT doc FROM jobs", []models.PostgresV3Cells{{{Value: cell}}}, "SELECT 1")
+	}
+	for _, c := range []struct {
+		name   string
+		r, f   m
+		atOnce bool
+	}{
+		{"x.y's c after a{b} to nested x{y{c}}", m{"x.y": m{"a": m{"b": "1"}, "c": w}}, m{"x": m{"y": m{"c": w}}}, false},
+		{"nested x{y{c}} to x.y's c after a{b}", m{"x": m{"y": m{"c": w}}}, m{"x.y": m{"a": m{"b": "1"}, "c": w}}, false},
+		{"x.y's c after a{b} stayed", m{"x.y": m{"a": m{"b": "1"}, "c": w}}, m{"x.y": m{"a": m{"b": "2"}, "c": w}}, true},
+	} {
+		for _, budget := range []int64{0, 1} {
+			readerBudget = budget
+			x := newReaderIndex(NewDriftCache())
+			if same, read := inOneField(x.textOf(pg(c.r)), w, x.textOf(pg(c.f)), w); same != c.atOnce || !read {
+				t.Errorf("budget %d, %s: at one place %v read %v; want %v", budget, c.name, same, read, c.atOnce)
+			}
+		}
+	}
+}
+
+// Fields with no key at one path stand by their order among that path's
+// fields, whatever other paths stand between them (P, Q, P): a word that
+// moved from the first P to the second is not at one place.
+func TestReaderFieldsAtOnePathStandByTheirOrderPastOtherPaths(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	const w = "ord7Kq2Xw9"
+	leaves := func(vals ...[2]string) Raw {
+		x := Raw{mock: "mock-1", rRead: true}
+		var sb strings.Builder
+		for _, v := range vals {
+			x.rFields = append(x.rFields, rawField{start: sb.Len(), end: sb.Len() + len(v[1]), path: v[0]})
+			sb.WriteString(v[1] + "\n")
+		}
+		x.rText = sb.String()
+		return x
+	}
+	for _, budget := range []int64{0, 1} {
+		readerBudget = budget
+		x := newReaderIndex(NewDriftCache())
+		r := leaves([2]string{"P", w}, [2]string{"Q", "z"}, [2]string{"P", "x"})
+		if same, read := inOneField(x.textOf(r), w, x.textOf(leaves([2]string{"P", "x"}, [2]string{"Q", "z"}, [2]string{"P", w})), w); same || !read {
+			t.Errorf("budget %d: at one place %v read %v; want a word that moved from the first P to the second, Q between, not at one place", budget, same, read)
+		}
+		if same, read := inOneField(x.textOf(r), w, x.textOf(leaves([2]string{"P", w}, [2]string{"Q", "y"}, [2]string{"P", "x"})), w); !same || !read {
+			t.Errorf("budget %d: at one place %v read %v; want a word that stayed at the first P at one place", budget, same, read)
+		}
+	}
+}
+
 // An object glued to a value beside it ({"a":W,"b":x}"z") is two values, each
 // at its own index, as a stream is: a word that moved within the object, or
 // from it to the value beside it, is not at one place; one that stayed is.
