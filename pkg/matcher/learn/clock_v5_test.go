@@ -1688,3 +1688,151 @@ func TestAMillisecondsLookBackIsRefusedThroughTheOrderInEveryWindow(t *testing.T
 		}
 	}
 }
+
+// A phase lock holds the remainder both runs share within the step only
+// where one whole step of look-back is common to both runs' windows. Where
+// each run's window holds a turn of the step (one widened by load to 1.1 s
+// beside one of 30 s or 3m20s, in either order, or a 61 ms window at a turn
+// beside a 30 s one), two phases hold both runs, every remainder of the
+// step stands in the range, and a lock there would pass a look-back
+// changed by any part of the step at every read: the reading declines the
+// lock, and the offset is refused at the values' own cut, as a quiet window
+// refuses it (fail closed). The same of a minute's step. Wherever a lock or
+// any other offset is learned, a replay passes the application's value at
+// every phase and fails a dropped look-back and one changed by half a
+// step at every phase.
+func TestAPhaseLockIsLearnedOnlyWhereBothRunsShareOneWholeStep(t *testing.T) {
+	sec, ms, min := time.Second, time.Millisecond, time.Minute
+	const p = "body.filter.until"
+	for _, c := range []struct {
+		name      string
+		res, step time.Duration
+		back      time.Duration
+		rw, fw    time.Duration
+		recAt     time.Time
+	}{
+		{"cut_s(now) - 1500ms, 1.1s beside 30s", ms, sec, 1500 * ms, 1100 * ms, 30 * sec, time.Date(2026, 10, 31, 9, 0, 0, 400e6, time.UTC)},
+		{"cut_s(now) - 1500ms, 30s beside 1.1s", ms, sec, 1500 * ms, 30 * sec, 1100 * ms, time.Date(2026, 10, 31, 9, 0, 0, 400e6, time.UTC)},
+		{"cut_s(now) - 1500ms, 1.1s beside 3m20s", ms, sec, 1500 * ms, 1100 * ms, 200 * sec, time.Date(2026, 10, 31, 9, 0, 0, 400e6, time.UTC)},
+		{"cut_s(now) - 1500ms, 3m20s beside 1.1s", ms, sec, 1500 * ms, 200 * sec, 1100 * ms, time.Date(2026, 10, 31, 9, 0, 0, 400e6, time.UTC)},
+		{"cut_s(now) - 1500ms, 61ms at a turn beside 30s", ms, sec, 1500 * ms, 61 * ms, 30 * sec, time.Date(2026, 10, 31, 9, 0, 0, 30e6, time.UTC)},
+		{"cut_s(now) - 1500ms, 30s beside 61ms at a turn", ms, sec, 1500 * ms, 30 * sec, 61 * ms, time.Date(2026, 10, 31, 9, 0, 0, 30e6, time.UTC)},
+		{"cut_m(now) - 103s, 61ms at a turn beside 3m20s", sec, min, 103 * sec, 61 * ms, 200 * sec, time.Date(2026, 10, 31, 9, 0, 0, 30e6, time.UTC)},
+		{"cut_m(now) - 103s, 3m20s beside 1.1s at a turn", sec, min, 103 * sec, 200 * sec, 1100 * ms, time.Date(2026, 10, 31, 9, 0, 0, 500e6, time.UTC)},
+	} {
+		value := func(read time.Time) time.Time { return read.Truncate(c.step).Add(-c.back) }
+		text := func(v time.Time) string {
+			if c.res < sec {
+				return strconv.FormatInt(v.UnixMilli(), 10)
+			}
+			return strconv.FormatInt(v.Unix(), 10)
+		}
+		rec := v5Call(c.recAt, c.rw, 4*ms)
+		spans, learned := 0, 0
+		for d := time.Duration(0); d < c.step; d += c.step / 20 {
+			// Round F 17 steps and d after a whole number of hours: its
+			// value stands a whole number of steps, never of hours, from
+			// the recording's.
+			f := v5Call(c.recAt.Add(73*time.Hour+17*c.step+d), c.fw, 4*ms)
+			rv, lv := value(rec.read), value(f.read)
+			o, why, ok := clockInWindow(p, v5Instant(rv, c.res), v5Instant(lv, c.res), v5Window(rec, f), nil)
+			if !ok {
+				continue
+			}
+			learned++
+			if o.Step > o.Res && o.Max-o.Min >= o.Step {
+				spans++
+				t.Errorf("FALSE GREEN: %s, round F %s later in its step: %s (%q), a lock whose range spans its step; want none", c.name, d, o, why)
+				continue
+			}
+			o.Layout = clockTextLayout(text(rv))
+			for ph := 7 * ms; ph < c.step; ph += c.step / 13 {
+				to := c.recAt.Add(96*time.Hour + ph)
+				s := Span{From: to.Add(-61 * ms), To: to}
+				read := to.Add(-4 * ms)
+				for _, row := range []struct {
+					name string
+					at   time.Time
+					want bool
+				}{
+					{"the application's value", value(read), true},
+					{"a dropped look-back", read.Truncate(c.res), false},
+					{"half a step shorter", value(read).Add(c.step / 2), false},
+					{"half a step longer", value(read).Add(-c.step / 2), false},
+				} {
+					if row.want && o.Step == o.Res && c.step == min {
+						// A minute cutter read at its own second where
+						// both runs read at about one phase of their
+						// minutes: the stated false red of the minute
+						// cutter (TestAMinuteCutterReadAtTheSameSecondInBothRunsFailsAThirdReadAtAnotherPhase).
+						continue
+					}
+					leaf := Leaf{Path: p, Noise: p, Type: String, Value: text(row.at)}
+					if got, why := CheckClockRead(p, o, leaf, s, true); got != row.want {
+						t.Errorf("%s: %s, round F %s later, learned %s, a replay %s into its step, %s: %v (%s)", map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}[row.want], c.name, d, o, ph, row.name, got, why)
+					}
+				}
+			}
+		}
+		t.Logf("%s: %d of 20 recordings learned, %d spanning their step", c.name, learned, spans)
+	}
+}
+
+// v5DecideIn is v5Decide in the window w.
+func v5DecideIn(t *testing.T, path string, typ Type, rec, live string, rAt, fAt time.Time, w *Window) Decision {
+	t.Helper()
+	if reflect.ValueOf(decideBy).Pointer() == reflect.ValueOf(refuseAll).Pointer() {
+		t.Skip("the order of a changed word is not on this tree")
+	}
+	leaf := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{path: {Path: path, Noise: path, Type: typ, Value: v}}}
+	}
+	dc := NewDriftCache()
+	dc.appClock = true
+	ds := Decide(Input{
+		Drifts: dc, Drift: []string{path}, Live: leaf(live), Rec: leaf(rec),
+		At: rAt, Arrived: fAt, Test: "test-2", Mock: "mock-300", Mode: ModeOwn,
+		Window: w, Landed: Landed{Where: LandedBetween},
+		Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true},
+	})
+	if len(ds) != 1 {
+		t.Fatalf("%q to %q: %d decisions; want one", rec, live, len(ds))
+	}
+	return ds[0]
+}
+
+// The milliseconds second-cutter in a window of 1.1 s beside one of 30 s,
+// through the order: whatever it decides, its line never claims what a
+// replay does not check. Where it is a Clock, a replay passes the
+// application's value and fails a look-back of 1 s in place of 1.5 s and a
+// dropped one at every phase.
+func TestAPhaseLockSpanningItsStepIsNoClockThroughTheOrder(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	const p = "body.filter.until"
+	at := time.Date(2026, 10, 31, 9, 0, 0, 400e6, time.UTC)
+	val := func(r time.Time, b time.Duration) time.Time { return r.Truncate(sec).Add(-b) }
+	text := func(v time.Time) string { return strconv.FormatInt(v.UnixMilli(), 10) }
+	for _, ws := range [][2]time.Duration{{1100 * ms, 30 * sec}, {30 * sec, 1100 * ms}, {1100 * ms, 200 * sec}} {
+		for d := time.Duration(0); d < sec; d += 130 * ms {
+			fAt := at.Add(FullRoundLead + d)
+			w := (&Window{Rec: Span{From: at.Add(-ws[0]), To: at}, F: Span{From: fAt.Add(-ws[1]), To: fAt}}).ComparesOffsets()
+			dd := v5DecideIn(t, p, Number, text(val(at.Add(-4*ms), 1500*ms)), text(val(fAt.Add(-4*ms), 1500*ms)), at, fAt, w)
+			if dd.Clock == nil {
+				continue
+			}
+			for ph := 7 * ms; ph < sec; ph += 50 * ms {
+				to := at.Add(72*time.Hour + ph)
+				sp := Span{From: to.Add(-61 * ms), To: to}
+				lf := func(v time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: Number, Value: text(v)} }
+				if ok, why := CheckClockRead(p, *dd.Clock, lf(val(to.Add(-4*ms), 1500*ms)), sp, true); !ok {
+					t.Errorf("FALSE RED: windows %s and %s, round F %s later, %s, a replay %s into its second: %s", ws[0], ws[1], d, dd.Clock, ph, why)
+				}
+				for _, wrong := range []time.Time{val(to.Add(-4*ms), sec), to.Add(-4 * ms)} {
+					if ok, _ := CheckClockRead(p, *dd.Clock, lf(wrong), sp, true); ok {
+						t.Errorf("FALSE GREEN: windows %s and %s, round F %s later, %s (%s), a replay %s into its second passes %s", ws[0], ws[1], d, dd.Clock, dd.Clock.Why, ph, text(wrong))
+					}
+				}
+			}
+		}
+	}
+}

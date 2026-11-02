@@ -309,8 +309,14 @@ func ownLookBack(o models.ClockOffset, ok bool, cut time.Duration) bool {
 // to, common to both runs. Their values stand a whole number of steps
 // apart, so they share their remainder within the step and the offsets of
 // each run lie on one grid. Min is the least common offset and Max the
-// greatest plus cut, the values' own cut; ok only where both runs share one
-// and it lies below zero, a look-back in both.
+// greatest plus cut, the values' own cut; ok only where both runs share
+// exactly one and it lies below zero, a look-back in both. Where each run's
+// window holds a turn of the step (one widened by load to 1.1 s beside one
+// of 30 s), two whole steps hold both runs, Max - Min is a step and a cut,
+// and every remainder within the step stands in the range: a lock there
+// would pass a look-back changed by any part of the step at every read, so
+// none is read (fail closed: the guards then refuse the offset at the
+// values' own cut, as a quiet window refuses it).
 //
 // A minute's step or a finer one is one grid in every zone (zones' offsets
 // are whole minutes). An hour's or a day's is not: an application in
@@ -336,7 +342,7 @@ func phaseAt(r, l typedInstant, w *Window, step, cut time.Duration, zone *time.L
 		rlo, rhi, rok := phaseRange(r.at, w.Rec, step, g)
 		llo, lhi, lok := phaseRange(l.at, w.F, step, g)
 		o := models.ClockOffset{Min: max(rlo, llo), Max: min(rhi, lhi) + cut, Res: cut, Layout: models.LayoutTyped, Step: step, AppZone: name}
-		if rok && lok && o.Min < o.Max && o.Max <= 0 && (!found || o.Max > best.Max) {
+		if rok && lok && o.Min < o.Max && o.Max-o.Min < step && o.Max <= 0 && (!found || o.Max > best.Max) {
 			best, found = o, true
 		}
 	}

@@ -1172,8 +1172,9 @@ func (o ClockOffset) holdsAtStep(at time.Time, res time.Duration, from, to time.
 	last := ReadCut(to.Add(o.Res), o.Step, loc)
 	// The latest whole step that leaves at at Min or more past it, then
 	// each step before it while at stays below Max past it (Max - Min is
-	// one Res, or a few steps where two phases held both runs); a day's
-	// step before a day whose clocks change is the cut before, not 24 h.
+	// one Res: the learn step reads no lock whose range spans its step);
+	// a day's step before a day whose clocks change is the cut before,
+	// not 24 h.
 	for k := ReadCut(at.Add(-o.Min), o.Step, loc); at.Sub(k) < o.Max && !k.Before(first); k = ReadCut(k.Add(-1), o.Step, loc) {
 		if !k.After(last) {
 			return true
