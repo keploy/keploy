@@ -115,6 +115,33 @@ func TestCallsOfThreeCasesInFlightAreSaidOnceACase(t *testing.T) {
 	}, sharedLines(cases, shared))
 }
 
+// A case is in flight from its request's first instant to its response's
+// last, both included: a call made at the instant one case began, or the
+// instant one ended, while another was in flight is left out of both.
+func TestACallAtACasesFirstOrLastInstantIsInFlight(t *testing.T) {
+	at := func(us int) time.Time { return runnerT0.Add(time.Duration(us) * time.Microsecond) }
+	windows := []models.ScopeWindow{{Name: paidTest, Start: at(0), End: at(200_000)}}
+	cases := []capturedMock{
+		{name: "get-a-1", ts: at(10_000), end: at(40_000), call: "GET /a"},
+		{name: "get-b-1", ts: at(20_000), end: at(60_000), call: "GET /b"},
+	}
+	var mocks []capturedMock
+	for _, m := range []struct {
+		n  int
+		us int
+	}{{1, 20_000}, {2, 40_000}, {3, 15_000}, {4, 50_000}} {
+		mocks = append(mocks, capturedMock{name: fmt.Sprintf("mock-%d", m.n), kind: string(models.PostgresV2), ts: at(m.us)})
+	}
+	got, shared := correlateCases(windows, mocks, cases, nil)
+	require.Equal(t, map[string][]string{"get-a-1": {"mock-3"}, "get-b-1": {"mock-4"}}, got[paidTest].CaseMocks,
+		"mock-1 at get-b-1's first instant and mock-2 at get-a-1's last are in both")
+	calls := "mock-1 (PostgresV2), mock-2 (PostgresV2)"
+	require.Equal(t, []string{
+		"case get-a-1: case_mocks leaves out 2 calls made while other cases were in flight too (get-b-1), as the time alone cannot tell whose handler made them: " + calls,
+		"case get-b-1: case_mocks leaves out 2 calls made while other cases were in flight too (get-a-1), as the time alone cannot tell whose handler made them: " + calls,
+	}, sharedLines(cases, shared))
+}
+
 // Recorded, a callback's lookup made while the test's GET was in flight too
 // is in neither case's case_mocks, and keploy record says why at INFO, once
 // a case.
