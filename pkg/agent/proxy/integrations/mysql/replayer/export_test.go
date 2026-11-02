@@ -98,11 +98,13 @@ func MatchCommandBodiesForTest(ctx context.Context, logger *zap.Logger, req mysq
 // MatchCommandGateForTest is MatchCommandForTest that also returns how many
 // candidates the strict gate compared with the live request
 // (matchOptions.compared). With eager the gate decides on each fallback of a
-// COM_STMT_EXECUTE as the walk meets it, as the matcher did before it
-// deferred the gate past the walk (matchOptions.eagerGate).
+// COM_STMT_EXECUTE as the walk meets it and walks on past a definitive match
+// no later candidate can outrank, as the matcher did before it deferred the
+// gate past the walk and ended the walk there (matchOptions.eagerGate,
+// matchOptions.wholeWalk).
 func MatchCommandGateForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *mocknoise.Engine, eager bool) (*mysql.Response, bool, string, int, error) {
 	compared := 0
-	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, dctx, eng, nil, matchOptions{compared: &compared, eagerGate: eager})
+	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, dctx, eng, nil, matchOptions{compared: &compared, eagerGate: eager, wholeWalk: eager})
 	missText := ""
 	if miss != nil {
 		missText = fmt.Sprintf("%+v", *miss)

@@ -68,10 +68,13 @@ func TestDeferredGateServesReportsAndLearnsWhatTheEagerGateDoes(t *testing.T) {
 					if engine {
 						eng = replayer.StrictEngineForTest
 					}
-					calls, eagerCompared, deferredCompared, _ := btReplayBothWays(t, n, eng, rp.staging, rp.timing, func(kind string, call int, c btCall, want, got string) {
+					calls, eagerCompared, deferredCompared, own := btReplayBothWays(t, n, eng, rp.staging, rp.timing, func(kind string, call int, c btCall, want, got string) {
 						t.Fatalf("%s call %d (%s on %s):\n eager gate:    %s\n deferred gate: %s", kind, call, c.key, c.conn, want, got)
 					})
-					t.Logf("%d calls; the gate compared %d candidates eager, %d deferred", calls, eagerCompared, deferredCompared)
+					t.Logf("%d calls (%d recordings of their requests, summed); the gate compared %d candidates eager, %d deferred", calls, own, eagerCompared, deferredCompared)
+					if deferredCompared > own {
+						t.Errorf("deferred, the gate compared %d candidates over %d calls, want at most the %d recordings of their requests", deferredCompared, calls, own)
+					}
 				})
 			}
 		}
@@ -190,9 +193,14 @@ func btReplayBothWays(t *testing.T, n int, eng func() *mocknoise.Engine, staging
 // call, as many as the set holds of its request. Gated as the walk met them,
 // every recording of the call's statement was compared, a call (n² a
 // replay: 64% of the CPU of the 10,000-call replay, which timed the package
-// out under load). Counted, not timed.
+// out under load). Counted, not timed. The bound and the row's check that the
+// eager side still pays that cost hold at any size, so under -race, where the
+// eager side's n² comparisons of 1,000 calls took 54 s, the set is 200 calls.
 func TestAStrictMockReplayComparesTheRecordingsItsAnswersNeed(t *testing.T) {
 	n := 1000
+	if raceEnabled {
+		n = 200
+	}
 	calls, eager, deferred, own := btReplayBothWays(t, n, replayer.StrictEngineForTest, btMockReplay, btStillOpen, func(kind string, call int, c btCall, want, got string) {
 		t.Fatalf("%s call %d (%s on %s):\n eager gate:    %s\n deferred gate: %s", kind, call, c.key, c.conn, want, got)
 	})
@@ -301,6 +309,77 @@ func TestAMissReportsTheRecordingOfItsRequestStrictRejected(t *testing.T) {
 	for _, want := range []string{"ok=false", "fieldDiffs:[{Path:body.parameters.0.value Kind:value_changed Expected:1e-300 Actual:0}]", "strictRejected:2"} {
 		if !strings.Contains(got[1], want) {
 			t.Errorf("the miss does not say %q: %s", want, got[1])
+		}
+	}
+}
+
+// TestAnExecuteThatScoresOneIsAnsweredByItsScore: an EXECUTE whose statement
+// neither side knows (the live statement id was never prepared, the recording
+// has no PREPARE) is answered by score, without exact serving, by the
+// recording that shares the most of its packet. Here the only recording
+// shares one field, its status byte: other header, flags, iteration and
+// parameter counts, bind flag and parameters. A score of 1 is still a score,
+// with the strict gate eager or deferred.
+func TestAnExecuteThatScoresOneIsAnsweredByItsScore(t *testing.T) {
+	recorded := mysql.Request{PacketBundle: mysql.PacketBundle{
+		Header: &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 40}, Type: "COM_STMT_EXECUTE"},
+		Message: &mysql.StmtExecutePacket{Status: 0x17, StatementID: 51, Flags: 1, IterationCount: 2, ParameterCount: 2, NewParamsBindFlag: 1,
+			Parameters: []mysql.Parameter{{Type: 254, Value: "x"}, {Type: 254, Value: "y"}}},
+	}}
+	pool := []*models.Mock{diffMock("scores-one", "c1", []mysql.Request{recorded}, diffBase.Add(time.Millisecond), models.LifetimePerTest, "mocks")}
+	live := executeReq(50, "z")
+	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "c1")
+	for _, eager := range []bool{true, false} {
+		s := newDiffSide(pool)
+		s.stageNoWindow()
+		got, _ := s.matchGate(ctx, live, s.dctx, nil, eager)
+		s.mm.Close()
+		if !strings.HasPrefix(got, "served scores-one ") {
+			t.Errorf("eager gate %v: %s, want the recording that scores 1 served", eager, got)
+		}
+	}
+}
+
+// TestAMockReplayEndsItsWalkAtItsRequestsFirstRecording: keploy mock replay
+// without exact serving opens no window, so no recording is the open test's
+// own, and nothing ranks above a call's first recording of its own request
+// (the gate allowing it): the walk ends there (execDecided). The recorded set
+// of 1,000 calls is replayed in its recorded order, and each recording is
+// spent once it answers, so at each call the first recording of its
+// statement the store holds is the call's own: each call is answered with its
+// own recording and examines that one candidate alone. Walked whole, each
+// call examined every recording of its statement left. Counted, not timed.
+func TestAMockReplayEndsItsWalkAtItsRequestsFirstRecording(t *testing.T) {
+	n := 1000
+	preps, startup, tests, between := btRecordedSet(n, 4, int64(n), false)
+	pool := append([]*models.Mock{}, preps...)
+	var calls []btCall
+	for _, part := range [][][]btCall{{startup}, tests, between} {
+		for _, cs := range part {
+			for _, c := range cs {
+				pool = append(pool, c.mock)
+			}
+		}
+	}
+	calls = append(calls, startup...)
+	for _, ti := range btReplayedTests(len(tests)) {
+		calls = append(append(calls, tests[ti]...), between[ti]...)
+	}
+	s := newDiffSide(pool)
+	defer s.mm.Close()
+	s.stage(models.BaseTime, time.Now())
+	dctx := &wire.DecodeContext{PreparedStatements: map[uint32]*mysql.StmtPrepareOkPacket{}, StmtIDToQuery: btSetStatements(false), NextStmtID: 100}
+	for i, c := range calls {
+		ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, c.conn)
+		resp, ok, examined, err := replayer.MatchCommandExaminedForTest(ctx, c.req, s.mm, dctx, nil, false)
+		if err != nil || !ok || resp == nil {
+			t.Fatalf("call %d (%s): ok=%v err=%v", i, c.key, ok, err)
+		}
+		if resp.Payload != c.mock.Name {
+			t.Fatalf("call %d (%s): served %v, want %s, its own recording, the first of its request left", i, c.key, resp.Payload, c.mock.Name)
+		}
+		if examined != 1 {
+			t.Fatalf("call %d (%s): examined %d candidates, want 1: its own recording, the first of its statement left", i, c.key, examined)
 		}
 	}
 }

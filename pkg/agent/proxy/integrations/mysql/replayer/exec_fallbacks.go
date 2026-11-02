@@ -194,22 +194,21 @@ func (f *execFallbacks) scorePick() *models.Mock {
 // fieldDiffs, exactRejected) the values the eager walk left them with, for a
 // miss's report: it replays the eager walk's gate calls in walk order. The
 // verdicts are cached, so it compares no candidate a second time. Eager, the
-// walk left them so.
+// walk left them so. The highest score the eager walk had admitted is 0 at
+// every candidate of a miss: a candidate it admitted with a score would have
+// answered the command, as the FIFO pick (query-exact) or the score pick.
 func (f *execFallbacks) diagnose() {
 	if f.eager {
 		return
 	}
 	f.gate.resetDiagnostics()
-	maxScore := 0
 	for i := range f.list {
 		e := &f.list[i]
 		if e.definitive {
 			f.gate.allows(e.mock)
 			continue
 		}
-		if f.walkGate(e, maxScore) && e.score > maxScore {
-			maxScore = e.score
-		}
+		f.walkGate(e, 0)
 	}
 }
 

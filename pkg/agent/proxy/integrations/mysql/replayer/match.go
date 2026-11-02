@@ -362,6 +362,11 @@ type matchOptions struct {
 	// (execFallbacks): the reference a test checks that the deferred gate
 	// serves, reports and learns the same against.
 	eagerGate bool
+	// wholeWalk walks a COM_STMT_EXECUTE's candidates on past a definitive
+	// match no later candidate can outrank (execDecided), as the matcher did
+	// before it ended the walk there: the reference a test checks that the
+	// ended walk serves the same recording against.
+	wholeWalk bool
 	// probed, when set, makes the match a dry one (ownRepeats): the scan picks
 	// the recording that would answer the command, and the match stops there
 	// and writes it to *probed (nil when no recording would), before any
@@ -1474,6 +1479,23 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// recorded in a different test's window. See firstPass above for the two
 	// passes.
 	closeSettled := false
+	// execDecided ends a COM_STMT_EXECUTE's walk at a definitive match no
+	// later candidate can outrank. With no window open and without exact
+	// serving no recording is the open test's own (testsOwn), so no
+	// candidate reaches the ranks above the out-of-window definitive match
+	// (defExecMock): an own definitive one, an own match on the parameters
+	// alone, an own FIFO one. A later definitive match replaces defExecMock
+	// only on a strictly better gap rank, so once it holds the best rank
+	// outsideGapRank gives (the start-up gap's, or, with no recorded
+	// windows, the one rank every recording has) the selection below serves
+	// it whatever the rest of the pool holds. That is keploy mock replay's
+	// walk without exact serving, and keploy test's before its first test.
+	execDecided := false
+	decidedGapRank := 2
+	if gapsKnown {
+		decidedGapRank = 0
+	}
+	decidesOnDefinitive := req.Header.Type == sCOM_STMT_EXEC && !windowActive && !exactServing && !opts.wholeWalk
 	for {
 		for mock := range candidates {
 			if opts.examined != nil {
@@ -1752,6 +1774,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						default:
 							if rank := outsideGapRank(mock); defExecMock == nil || rank < defExecRank {
 								defExecResp, defExecMock, defExecRank = &mock.Spec.MySQLResponses[0], mock, rank
+								execDecided = decidesOnDefinitive && rank <= decidedGapRank
 							}
 						}
 					} else {
@@ -1813,7 +1836,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 					}
 				}
 			}
-			if queryMatched || stmtMatched || closeSettled {
+			if queryMatched || stmtMatched || closeSettled || execDecided {
 				break
 			}
 		}
@@ -1851,7 +1874,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		}
 		candidates = slices.Values(pool)
 		maxMatchedCount, matchedResp, matchedMock = 0, nil, nil
-		queryMatched, stmtMatched = false, false
+		queryMatched, stmtMatched, execDecided = false, false, false
 		bestPartialMock, bestPartialQuery = nil, ""
 		nearestMock, nearestQuery, nearestPrefix = nil, "", 0
 		fallbacks.reset()
