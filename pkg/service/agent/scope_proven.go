@@ -1090,8 +1090,15 @@ func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time,
 }
 
 // failOpen ends, as failed, a test whose harness can no longer end it. With
-// the wire held.
+// the wire held. Its recorded callbacks (deliver:) that were not answered
+// are named first: one never sent is why a test waiting for it never ended.
+// Nothing waits for an answer: the test can no longer pass.
 func (a *Agent) failOpen(ctx context.Context, id string, why string) {
+	now, stop := context.WithCancel(ctx)
+	stop()
+	if _, failed := a.settleDeliveries(now, id); failed != "" {
+		why = failed + "; " + why
+	}
 	if _, _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, time.Now(), why); err != nil {
 		a.logger.Warn("could not judge a test whose process went away", zap.String("test", id), zap.Error(err))
 	}

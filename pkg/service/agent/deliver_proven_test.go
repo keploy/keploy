@@ -22,8 +22,10 @@ type fakeDeliverer struct {
 	settled   []string
 	openAt    []string
 	settledAt []time.Time
-	answers   map[string][]string
-	err       error
+	// mayWait is, for each Settle, whether its ctx let it wait.
+	mayWait []bool
+	answers map[string][]string
+	err     error
 }
 
 func (d *fakeDeliverer) Install(_ context.Context, ds map[string][]models.DeliveryCase) error {
@@ -33,8 +35,9 @@ func (d *fakeDeliverer) Install(_ context.Context, ds map[string][]models.Delive
 
 func (d *fakeDeliverer) Served(test, mock string) { d.served = append(d.served, test+" "+mock) }
 
-func (d *fakeDeliverer) Settle(_ context.Context, test string) (bool, []string) {
+func (d *fakeDeliverer) Settle(ctx context.Context, test string) (bool, []string) {
 	d.settled = append(d.settled, test)
+	d.mayWait = append(d.mayWait, ctx.Err() == nil)
 	d.openAt = append(d.openAt, d.a.openTest())
 	d.settledAt = append(d.settledAt, time.Now())
 	failed, has := d.answers[test]
@@ -116,6 +119,53 @@ func TestAWrittenAnswerReachesTheOpenTestsDeliveries(t *testing.T) {
 	// harness's end: the application's calls handling them are inside.
 	require.False(t, wa.End.Before(d.settledAt[0]), "%v ended before its deliveries settled at %v", wa.End, d.settledAt[0])
 	require.False(t, wb.End.Before(d.settledAt[1]), "%v ended before its deliveries settled at %v", wb.End, d.settledAt[1])
+}
+
+// A test the run's end finds still open (its process waited for a callback
+// that never came, until its own framework stopped it) fails naming each
+// recorded callback not delivered, with its case and the mock it waited for,
+// before the reap's reason; the run's end waits for no answer. A test that
+// ended is not settled again.
+func TestARunsEndNamesTheCallbacksOfATestLeftOpen(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	const notDelivered = "test-2 (POST /webhooks/pay) was not delivered: its after: mock-3 was never called in o::TestA; set after: to the call that triggers it"
+	d := &fakeDeliverer{a: a, answers: map[string][]string{"o::TestA": {notDelivered}, "o::TestB": nil}}
+	deliverWith(t, d)
+	ctx := context.Background()
+	require.NoError(t, a.SetScopeDeliver(ctx, payCallback))
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestB"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestB", Outcome: "passed"})
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+
+	// Reading the windows is the run's end.
+	wa := windowOf(t, a, "o::TestA")
+	require.Equal(t, models.ScopeOutcomeFailed, wa.Outcome)
+	require.True(t, strings.HasPrefix(wa.Evidence.Reason, "keploy: "+notDelivered+"; "), wa.Evidence.Reason)
+	require.Contains(t, wa.Evidence.Reason, "outlived the test command")
+	require.Equal(t, []string{"o::TestB", "o::TestA"}, d.settled)
+	require.Equal(t, []bool{true, false}, d.mayWait, "the run's end waits for no callback's answer")
+	require.Equal(t, models.ScopeOutcomePassed, windowOf(t, a, "o::TestB").Outcome)
+}
+
+// A test left open with no delivery that failed fails with the reap's
+// reason alone.
+func TestARunsEndWithNoUndeliveredCallbackKeepsItsReason(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	d := &fakeDeliverer{a: a, answers: map[string][]string{"o::TestA": nil}}
+	deliverWith(t, d)
+	ctx := context.Background()
+	require.NoError(t, a.SetScopeDeliver(ctx, payCallback))
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	wa := windowOf(t, a, "o::TestA")
+	require.Equal(t, []string{"o::TestA"}, d.settled)
+	require.True(t, strings.HasPrefix(wa.Evidence.Reason, "keploy: the test was still open"), wa.Evidence.Reason)
+	require.NotContains(t, wa.Evidence.Reason, ";")
 }
 
 // A record sends no delivery: its provider sends the callback itself. Its

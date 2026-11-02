@@ -22,7 +22,9 @@ type WebhookDeliverer interface {
 	// parser's goroutine.
 	Served(test, mock string)
 	// Settle waits until every delivery of test that Served started has
-	// been answered, or ctx ends. It returns whether test has deliveries,
+	// been answered, or ctx ends: with ctx already done (a test whose
+	// process went away) it waits for none, and one not answered yet
+	// fails as unanswered. It returns whether test has deliveries,
 	// and why each that failed did, in its deliver: order: one never sent
 	// (its after: mock was never answered, or its body could not be sent
 	// as signed), one the application answered other than recorded. It
