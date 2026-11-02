@@ -117,6 +117,85 @@ func TestThreadWaits_StealThatShowsWhileTheThreadIsStillQueuedIsCharged(t *testi
 	}
 }
 
+// A CPU's steal that reads lower than at the last read (a /proc/stat that is
+// not the kernel's own, or CPUs renumbered under the process) is no time given
+// back: it takes nothing off a thread's run delay.
+func TestThreadWaits_StealThatReadsLowerTakesNoWaitOff(t *testing.T) {
+	var w threadWaits
+	w.account(map[string]threadStat{
+		"1": {exec: 100, delay: 10, runs: 1, cpu: "cpu0"},
+	}, map[string]int64{"cpu0": 50})
+	most, _ := w.account(map[string]threadStat{ // it ran, after 30 ms queued
+		"1": {exec: 200, delay: 10 + int64(30*time.Millisecond), runs: 2, cpu: "cpu0"},
+	}, map[string]int64{"cpu0": 20})
+	if most != 30*time.Millisecond {
+		t.Fatalf("charged %v; want the 30 ms the thread was queued, the lower steal taking none of it off", most)
+	}
+}
+
+// tidSource is a process's clocks that do not move, noting the thread the
+// sampler reads its own wait for a CPU on, at each read, and closing done at
+// the want-th read.
+type tidSource struct {
+	fakeSource
+	tids  map[int]int // thread id: reads of the sampler's own wait made on it
+	looks int
+	want  int
+	done  chan struct{}
+}
+
+func (f *tidSource) ownWait() (time.Duration, bool) {
+	runtime.Gosched() // a goroutine not bound to its thread may resume on another
+	f.tids[unix.Gettid()]++
+	if f.looks++; f.looks == f.want {
+		close(f.done)
+	}
+	return 0, true
+}
+
+// The sampler reads its own wait for a CPU from the thread it runs on, and
+// sets it against how late its samples are: so it samples on one thread. A
+// goroutine not bound to its thread resumes on whichever thread has a P free
+// after it sleeps or yields, and with every P kept busy that is mostly
+// another one; another thread's run delay says nothing of this one's waits.
+func TestSampler_ReadsItsOwnWaitOnOneThread(t *testing.T) {
+	procs := max(runtime.GOMAXPROCS(0), 4)
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(procs))
+	stop := make(chan struct{})
+	spun := make(chan struct{}, procs)
+	for range procs {
+		go func() {
+			defer func() { spun <- struct{}{} }()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+			}
+		}()
+	}
+	defer func() {
+		close(stop)
+		for range procs {
+			<-spun
+		}
+	}()
+	src := &tidSource{tids: map[int]int{}, want: 30, done: make(chan struct{})}
+	s := &sampler{src: src, tick: time.Millisecond}
+	release := s.acquire()
+	select {
+	case <-src.done:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		release()
+		t.Fatalf("the sampler read its own wait %d times in a minute; want %d", src.looks, src.want)
+	}
+	release() // the sampler's goroutine has ended: its reads are all in
+	if len(src.tids) != 1 {
+		t.Fatalf("the sampler read its own wait on %d threads (%v); want one", len(src.tids), src.tids)
+	}
+}
+
 // fakeProcFiles writes files, by path under dir, holding their contents;
 // "" removes one.
 func fakeProcFiles(t *testing.T, dir string, files map[string]string) {
