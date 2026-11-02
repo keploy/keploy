@@ -154,12 +154,27 @@ func sweep(tree func() []utils.Reached) {
 // leftoverDirEnv names the directory TestOwnProcessLeftoverHelper writes in.
 const leftoverDirEnv = "KEPLOY_TEST_LEFTOVER_DIR"
 
+// outerLifelineEnv names, in TestOwnProcessLeftoverHelper's environment, the
+// lifeline of the test binary that started it
+// (TestATestInItsOwnProcessLeavesNothingBehind's): the helper's own init sets
+// testproc.LifelineEnv to the helper's lifeline, and leaves this name as it
+// was.
+const outerLifelineEnv = "KEPLOY_TEST_OUTER_LIFELINE"
+
 // TestOwnProcessLeftoverHelper is not a test: with leftoverDirEnv set it is a
 // test's own process (inOwnProcess) that starts an application as keploy
 // runs a native one, a shell ignoring SIGHUP that starts a child it leaves
 // running and then starts one after another for as long as it runs; writes
 // the pid and start time of each of the two once it runs; and fails while
 // they do, before any stop of them.
+//
+// The child waits on the lifeline of the test binary that started this
+// process (outerLifelineEnv), not on this process's: it outlives this
+// process unless this process's end kills it (endWhatItStarted's sweep of
+// what its children started), and ends with that test binary however that
+// ends. One that waited on this process's lifeline would end with this
+// process by itself, and the test that checks it is gone once this process
+// ended would pass with no sweep at all.
 func TestOwnProcessLeftoverHelper(t *testing.T) {
 	dir := os.Getenv(leftoverDirEnv)
 	if dir == "" {
@@ -168,11 +183,14 @@ func TestOwnProcessLeftoverHelper(t *testing.T) {
 	if !inOwnProcess(t) {
 		return
 	}
+	if os.Getenv(outerLifelineEnv) == "" {
+		t.Fatalf("no %s: the app's child would have nothing to wait on", outerLifelineEnv)
+	}
 	// The app and its child ignore SIGHUP, as a daemon does: the hangup the
 	// kernel sends a process group orphaned with members stopped does not end
 	// them, so only a kill does.
-	client := newRunClient(fmt.Sprintf("trap '' HUP; "+testproc.UntilTheTestEnds+" & echo $! > %s; echo $$ > %s; while kill -0 \"$DAEMON_OWNER\"; do sleep 0.01; done",
-		filepath.Join(dir, "child.pid"), filepath.Join(dir, "app.pid")))
+	client := newRunClient(fmt.Sprintf("trap '' HUP; cat <\"$%s\" & echo $! > %s; echo $$ > %s; while kill -0 \"$DAEMON_OWNER\"; do sleep 0.01; done",
+		outerLifelineEnv, filepath.Join(dir, "child.pid"), filepath.Join(dir, "app.pid")))
 	ran := make(chan struct{})
 	go func() {
 		defer close(ran)
@@ -233,7 +251,8 @@ func TestATestInItsOwnProcessLeavesNothingBehind(t *testing.T) {
 	}
 	defer out.Close()
 	cmd := exec.Command(os.Args[0], ownProcessArgs(t, "TestOwnProcessLeftoverHelper")...)
-	cmd.Env = append(os.Environ(), adoptHelperEnv+"=TestOwnProcessLeftoverHelper", leftoverDirEnv+"="+dir)
+	cmd.Env = append(os.Environ(), adoptHelperEnv+"=TestOwnProcessLeftoverHelper", leftoverDirEnv+"="+dir,
+		outerLifelineEnv+"="+os.Getenv(testproc.LifelineEnv))
 	cmd.Stdout, cmd.Stderr = out, out
 	runErr := cmd.Run()
 	said, _ := os.ReadFile(filepath.Join(dir, "out"))
