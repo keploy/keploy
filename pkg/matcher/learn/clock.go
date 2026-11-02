@@ -364,8 +364,10 @@ func (w *Window) sinceBegin() *Window {
 // refuses, as the replay's check passes a value its span refuses where it
 // holds from the test's begin (CheckClockRead). Another goroutine of the
 // application can make a call between the read and the call that carries
-// it, in either run, so that call bounds no read of this one. nil where
-// neither run's span knows such a begin.
+// it, in either run, so that call bounds no read of this one. It is also
+// the window in which a server test's value's words are read as the
+// clock's rather than as data (newDrift). nil where neither run's span
+// knows such a begin.
 func (w *Window) fromTestBegin() *Window {
 	if w == nil || w.Rec.TestFrom.IsZero() && w.F.TestFrom.IsZero() {
 		return nil
@@ -653,19 +655,27 @@ func (w *Window) Holds(rec, live time.Time, res time.Duration) bool {
 	return w != nil && w.Rec.holds(rec, res) && w.F.holds(live, res)
 }
 
-// key is w as a map key, the zero key for none: its spans' bounds, and 1
-// last for a reading from each run's test begin (begun), which reads a
-// value's words otherwise than its call's own window does even where the
-// two windows' bounds are the same.
-func (w *Window) key() [5]int64 {
+// key is w as a map key, the zero key for none: its spans' bounds, 1 for a
+// reading from each run's test begin (begun), which reads a value's words
+// otherwise than its call's own window does even where the two windows'
+// bounds are the same, and each run's test begin a server test's span
+// carries (Span.TestFrom, 0 for none), from which the value's clock words
+// are read too (newDrift).
+func (w *Window) key() [7]int64 {
 	if w == nil {
-		return [5]int64{}
+		return [7]int64{}
 	}
 	var begun int64
 	if w.begun {
 		begun = 1
 	}
-	return [5]int64{w.Rec.From.UnixNano(), w.Rec.To.UnixNano(), w.F.From.UnixNano(), w.F.To.UnixNano(), begun}
+	at := func(t time.Time) int64 {
+		if t.IsZero() {
+			return 0
+		}
+		return t.UnixNano()
+	}
+	return [7]int64{w.Rec.From.UnixNano(), w.Rec.To.UnixNano(), w.F.From.UnixNano(), w.F.To.UnixNano(), begun, at(w.Rec.TestFrom), at(w.F.TestFrom)}
 }
 
 // clockOf is clockIn with no call's window: the clock reads that moved by

@@ -939,11 +939,26 @@ func isText(b []byte) bool {
 	return true
 }
 
+// The reasons unparsed gives for a value whose text of a script keploy
+// reads only whole (nonASCIIRuns) changed, by where that text stands: in the
+// value's own text, in the text its escapes write (a percent- or
+// quoted-printable-escaped name), or in the text an encoded run of it
+// decodes to (b64Text: the base64 run "3505371Z" of a .NET stamp's fraction
+// decodes to such text). A value all in ASCII is never said to hold such
+// text itself.
+const (
+	scriptWhy        = "it changed in text of a script keploy does not split into words"
+	escapedScriptWhy = "it changed in the text its escapes write, of a script keploy does not split into words"
+	encodedScriptWhy = "it changed in the text an encoded run of it decodes to, of a script keploy does not split into words"
+)
+
 // unparsed says what of a drifted value, read in form (recorded, live),
 // the declared readings cannot read whole, where it drifted: "" when
 // nothing. clock are the value's clock words: a clock read the lead moved
-// ("41+00:00" of an aware datetime) is read, whatever runs it makes.
-func unparsed(rec, live string, clock clockSet) string {
+// ("41+00:00" of an aware datetime) is read, whatever runs it makes. script
+// is the reason to give where the form's text of a script keploy reads only
+// whole changed (scriptWhy and its kin: where that text stands).
+func unparsed(rec, live string, clock clockSet, script string) string {
 	if rec == live {
 		return ""
 	}
@@ -951,7 +966,7 @@ func unparsed(rec, live string, clock clockSet) string {
 		return "it holds a '%' or '\\' that is no escape keploy reads"
 	}
 	if !sameStrings(nonASCIIRuns(rec), nonASCIIRuns(live)) {
-		return "it changed in text of a script keploy does not split into words"
+		return script
 	}
 	r, l := b64Runs(rec), b64Runs(live)
 	for _, side := range []struct {
@@ -1027,7 +1042,8 @@ func b64DecodeAny(s string) ([]byte, bool) {
 // live, on its own (encoded). The words of each form are searched for what
 // flowed into the value. qp is where forms holds the quoted-printable form
 // and its case-folded one (forms[qp[0]:qp[1]], empty where it holds none):
-// right after the value as written.
+// right after the value as written. The last encN forms are that text's
+// (none where there is none), in forms and in checked alike.
 //
 // checked are the forms unparsed reads, the same but for the
 // quoted-printable one: that is read only where both values read as
@@ -1038,7 +1054,7 @@ func b64DecodeAny(s string) ([]byte, bool) {
 // the base64 alphabet that does not decode, which unparsed refuses. The
 // search reads it in every value: a word only that reading shows
 // ("=23A7K29Q" a '#' and an id) is found where it flowed.
-func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms, checked [][2]string, qp [2]int, encoded [2]string) {
+func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms, checked [][2]string, qp [2]int, encoded [2]string, encN int) {
 	with := func(fs [][2]string, f [2]string) [][2]string {
 		fs = append(fs, f)
 		if lr, ll := strings.ToLower(f[0]), strings.ToLower(f[1]); lr != f[0] || ll != f[1] {
@@ -1060,11 +1076,13 @@ func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms, checked 
 		}
 	}
 	if br, bl := b64Text(decRec, clock.rec), b64Text(decLive, clock.live); br != "" || bl != "" {
+		n := len(forms)
 		encoded = [2]string{br, bl}
 		forms = with(forms, encoded)
 		checked = with(checked, encoded)
+		encN = len(forms) - n
 	}
-	return forms, checked, qp, encoded
+	return forms, checked, qp, encoded, encN
 }
 
 // allIn reports whether every word of ws is in set, and there is one.

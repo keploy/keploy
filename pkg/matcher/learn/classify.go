@@ -2080,14 +2080,18 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// queue's consumer beside the test's handler, served between the
 		// handler's read and its call). Only a plain read of the clock it
 		// learns there is taken, checked in its call's span at every replay,
-		// which passes it from the test's begin too (CheckClockRead): the
-		// wider window turns a refusal into a checked read, never into
-		// noise, a variable or a read plus an offset.
+		// which passes it from the test's begin too (CheckClockRead): here
+		// the wider window turns a refusal into a checked read, never into
+		// noise, a variable or a read plus an offset. (Which words of a value
+		// are the clock's is read in that window as well, for every form of
+		// the value (newDrift), so a word of a text that is a read there is
+		// never read as data, and is noise of that word as where no serve
+		// came between the read and its call.)
 		//
 		// So is a value its call's window learns only as a part found in a
-		// recording's payload (partInPayload): its call's window shows no
-		// read, so the search read the value's changed words, and their
-		// decoded and case-folded forms, as data, and whether one stands as
+		// recording's payload (partInPayload): a word the window from the
+		// test's begin shows no read of is read as data, as are its decoded
+		// and case-folded forms, and whether one stands as
 		// a token in a recording's payload is chance, which would decide,
 		// run by run, between that variable, which no call can bind, and the
 		// read the window from each run's test begin holds. A plain read
@@ -3028,7 +3032,7 @@ func (dc *DriftCache) rawExtra(text string) string {
 // (Window.key) and the call's recorded instant (UnixNano, 0 for none).
 type driftKey struct {
 	run
-	w    [5]int64
+	w    [7]int64
 	call int64
 	// zone is the zone the clock reads were read in (DriftCache.zone): a
 	// test's caches share what they keep across the zones of its calls'
@@ -3077,7 +3081,33 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window, call time.Time) *valueDr
 // nothing changes it once built: the set's tests share one bounded by no call
 // (driftOf).
 func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time.Location) *valueDrift {
-	d := &valueDrift{rec: rec, live: live, clock: clockAt(rec, live, w, lead, call, zone), begun: w != nil && w.begun}
+	// In a server test, which words of a form of the value are the clock's
+	// is read in the window from each run's test begin too
+	// (Window.fromTestBegin), the span in which the replay's check passes a
+	// read (CheckClockRead): another goroutine's call served between the
+	// read and the call that carries it bounds no read of this one, so its
+	// words are never read as data, decoded (b64Text) or searched as the
+	// parts of a payload (appearedIn, unaccounted), which would decide by
+	// chance, by the read's digits and by that serve, between noise of the
+	// word, a variable no call binds and a refusal. Whether the value is a
+	// read of the clock (reads, whole) stays its call's window's: whole, the
+	// window from the test's begin turns a refusal, or a part found by
+	// chance, into a plain read alone (ClassifyIn).
+	wt := w.fromTestBegin()
+	clockWordsOf := func(a, b string) clockSet {
+		c := clockAt(a, b, w, lead, call, zone)
+		if wt != nil {
+			o := clockAt(a, b, wt, lead, call, zone)
+			for x := range o.rec {
+				c.rec[x] = true
+			}
+			for x := range o.live {
+				c.live[x] = true
+			}
+		}
+		return c
+	}
+	d := &valueDrift{rec: rec, live: live, clock: clockWordsOf(rec, live), begun: w != nil && w.begun}
 	d.decRec, d.decLive = unescaped(rec), unescaped(live)
 	d.decoded = d.decRec != rec || d.decLive != live
 	// A value with escapes is read raw and decoded: a '%' or '\' may be
@@ -3093,15 +3123,15 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 	}
 	var dclock clockSet
 	if d.decoded {
-		dclock = clockAt(d.decRec, d.decLive, w, lead, call, zone)
+		dclock = clockWordsOf(d.decRec, d.decLive)
 		merge(dclock)
 	}
-	forms, checked, qp, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
+	forms, checked, qp, encoded, encN := formsOf(rec, live, d.decRec, d.decLive, d.clock)
 	d.encodedRec = encoded[0]
 	// The clock reads of every other form searched (the first is the
 	// decoded value, read above).
 	for _, f := range forms[1:] {
-		merge(clockAt(f[0], f[1], w, lead, call, zone))
+		merge(clockWordsOf(f[0], f[1]))
 	}
 	if d.decoded {
 		forms = append([][2]string{{rec, live}}, forms...)
@@ -3123,9 +3153,21 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 	d.forms = forms
 	// What the readings cannot read whole, in every form checked (formsOf;
 	// never the raw one of a value with escapes, whose '%' and '\' are the
-	// escapes).
-	for _, f := range checked {
-		if why := unparsed(f[0], f[1], d.clock); why != "" {
+	// escapes). Text of a script keploy reads only whole that changed is
+	// named where it stands: in the value's own text, else in an encoded
+	// run's (the last encN forms checked) or in its escapes' text, which
+	// the quoted-printable form's, where it is checked, is too (scriptWhy).
+	ownScript := !sameStrings(nonASCIIRuns(rec), nonASCIIRuns(live))
+	for i, f := range checked {
+		script := scriptWhy
+		switch {
+		case ownScript:
+		case i >= len(checked)-encN:
+			script = encodedScriptWhy
+		default:
+			script = escapedScriptWhy
+		}
+		if why := unparsed(f[0], f[1], d.clock, script); why != "" {
 			d.unparsed = why
 			break
 		}

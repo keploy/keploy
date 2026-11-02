@@ -2,6 +2,7 @@ package learn
 
 import (
 	"context"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -457,6 +458,43 @@ func serverStampWindow(rec, f serverStampRun) *Window {
 	}
 }
 
+// serverStampRuns are the recording and record's full round of a server
+// test whose handler read its clock for a .NET stamp a second after the test
+// began, after which another goroutine's call was served before the
+// handler's call reached keploy (serverStampRun). The timings are
+// illustrative.
+func serverStampRuns() (rec, f serverStampRun) {
+	rec = serverStampRun{
+		began: time.Date(2026, 11, 2, 12, 48, 54, 330_000_000, time.UTC),
+		read:  time.Date(2026, 11, 2, 12, 48, 55, 350_537_100, time.UTC),
+		prev:  time.Date(2026, 11, 2, 12, 48, 55, 423_433_000, time.UTC),
+		call:  time.Date(2026, 11, 2, 12, 48, 55, 606_243_000, time.UTC),
+	}
+	f = serverStampRun{
+		began: time.Date(2026, 11, 2, 12, 49, 57, 215_000_000, time.UTC),
+		read:  time.Date(2026, 11, 2, 12, 49, 58, 275_116_400, time.UTC),
+		prev:  time.Date(2026, 11, 2, 12, 49, 58, 391_020_000, time.UTC),
+		call:  time.Date(2026, 11, 2, 12, 49, 58, 570_310_000, time.UTC),
+	}
+	return rec, f
+}
+
+// dotNetStamp is v as .NET writes DateTime.UtcNow.ToString("O").
+func dotNetStamp(v time.Time) string { return v.UTC().Format("2006-01-02T15:04:05.0000000Z") }
+
+// startUpLookUp is the Pulsar topic look-up the application's start-up made
+// three seconds before rec's test began, as recorded: an opaque payload no
+// call of the test binds.
+func startUpLookUp(rec serverStampRun) []Raw {
+	at := rec.began.Add(-3 * time.Second)
+	return []Raw{RawOf(&models.Mock{Name: "mock-1", Kind: "Pulsar", Spec: models.MockSpec{
+		Metadata:         map[string]string{"commandType": "LOOKUP", "type": "config"},
+		GenericRequests:  []models.Payload{{Origin: "client", Message: []models.OutputBinary{{Type: "json", Data: `{"commandType":"LOOKUP","requestId":0,"topic":"persistent://public/default/lead-events","body":{"authoritative":false,"topic":"persistent://public/default/lead-events"}}`}}}},
+		GenericResponses: []models.Payload{{Origin: "server", Message: []models.OutputBinary{{Type: "json", Data: `{"commandType":"LOOKUP_RESPONSE","requestId":0,"body":{"authoritative":true,"brokerServiceUrl":"pulsar://localhost:6650","proxyThroughServiceUrl":true,"response":"Connect"}}`}}}},
+		ReqTimestampMock: at, ResTimestampMock: at.Add(211 * time.Millisecond),
+	}}, false)}
+}
+
 // A server test's clock read made before another goroutine's call is
 // learned the same way whatever digits the clock gave it: as a plain read
 // of the clock that its window from the test's begin holds, which the
@@ -478,26 +516,9 @@ func serverStampWindow(rec, f serverStampRun) *Window {
 // payload aside (under the proven flow, a payload F had not served before
 // the call is no source of a read that window holds).
 func TestAServerTestsReadPastAnotherGoroutinesServeIsLearnedWhateverPartAPayloadHoldsByChance(t *testing.T) {
-	recRun := serverStampRun{
-		began: time.Date(2026, 11, 2, 12, 48, 54, 330_000_000, time.UTC),
-		read:  time.Date(2026, 11, 2, 12, 48, 55, 350_537_100, time.UTC),
-		prev:  time.Date(2026, 11, 2, 12, 48, 55, 423_433_000, time.UTC),
-		call:  time.Date(2026, 11, 2, 12, 48, 55, 606_243_000, time.UTC),
-	}
-	fRun := serverStampRun{
-		began: time.Date(2026, 11, 2, 12, 49, 57, 215_000_000, time.UTC),
-		read:  time.Date(2026, 11, 2, 12, 49, 58, 275_116_400, time.UTC),
-		prev:  time.Date(2026, 11, 2, 12, 49, 58, 391_020_000, time.UTC),
-		call:  time.Date(2026, 11, 2, 12, 49, 58, 570_310_000, time.UTC),
-	}
-	stamp := func(v time.Time) string { return v.UTC().Format("2006-01-02T15:04:05.0000000Z") }
-	lookUpAt := recRun.began.Add(-3 * time.Second)
-	lookUp := []Raw{RawOf(&models.Mock{Name: "mock-1", Kind: "Pulsar", Spec: models.MockSpec{
-		Metadata:         map[string]string{"commandType": "LOOKUP", "type": "config"},
-		GenericRequests:  []models.Payload{{Origin: "client", Message: []models.OutputBinary{{Type: "json", Data: `{"commandType":"LOOKUP","requestId":0,"topic":"persistent://public/default/lead-events","body":{"authoritative":false,"topic":"persistent://public/default/lead-events"}}`}}}},
-		GenericResponses: []models.Payload{{Origin: "server", Message: []models.OutputBinary{{Type: "json", Data: `{"commandType":"LOOKUP_RESPONSE","requestId":0,"body":{"authoritative":true,"brokerServiceUrl":"pulsar://localhost:6650","proxyThroughServiceUrl":true,"response":"Connect"}}`}}}},
-		ReqTimestampMock: lookUpAt, ResTimestampMock: lookUpAt.Add(211 * time.Millisecond),
-	}}, false)}
+	recRun, fRun := serverStampRuns()
+	lookUp := startUpLookUp(recRun)
+	stamp := dotNetStamp
 	const p = "body.Item.CreatedAt.S"
 	str := func(v string) Shape {
 		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
@@ -547,13 +568,22 @@ func TestAServerTestsReadPastAnotherGoroutinesServeIsLearnedWhateverPartAPayload
 	}
 	// An earlier call of the test that F served field by field (its
 	// adapter gives its payload), whose field drifted from the value's
-	// minute to F's: a place F saw move with it, never a token found by
-	// chance, though the window from the test's begin holds the read.
+	// minute to F's (the application sent its clock's minute there): the
+	// minute is a word of a read the window from the test's begin holds, so
+	// the value is learned as it is where no serve came between the read and
+	// its call, a plain read checked in its call's span. Where that window
+	// does not hold the read, the field F saw move with it stays its place.
 	minute := []Earlier{{Mock: "mock-8", At: recRun.prev, Payload: payloadOf("mock-8", recRun.prev), Own: true, Seen: []Seen{
 		{Side: Request, Leaf: Leaf{Path: "body.minute", Noise: "body.minute", Type: String, Value: "48"}, Live: "49", Place: "body.minute"},
 	}}}
-	if ln := learnAfter(minute, recRun.read, w, nil); ln.Kind != KindVariable || ln.From.Mock != "mock-8" || ln.From.Side != Request || ln.From.Whole {
-		t.Errorf("a served call's field that drifted with it: %s from %q %s whole=%v Read=%+v (%s); want the variable of mock-8's request, a part", ln.Kind, ln.From.Mock, ln.From.Side, ln.From.Whole, ln.Read, ln.Why)
+	inSpan := &Window{Rec: Span{From: recRun.began, To: recRun.call}, F: Span{From: fRun.began, To: fRun.call}}
+	for _, mw := range []*Window{w, inSpan} {
+		if ln := learnAfter(minute, recRun.read, mw, nil); ln.Kind != KindClockRead || ln.Read == nil || ln.From.Mock != "" {
+			t.Errorf("a served call's field that drifted with it, window %+v: %s from %q %s whole=%v Read=%+v (%s); want a plain read of the clock", *mw, ln.Kind, ln.From.Mock, ln.From.Side, ln.From.Whole, ln.Read, ln.Why)
+		}
+	}
+	if ln := learnAfter(minute, recRun.read, serverStampWindow(early, fRun), nil); ln.Kind != KindVariable || ln.From.Mock != "mock-8" || ln.From.Side != Request || ln.From.Whole {
+		t.Errorf("a served call's field that drifted with it, the recording's read made before its test began: %s from %q %s whole=%v Read=%+v (%s); want the variable of mock-8's request, a part", ln.Kind, ln.From.Mock, ln.From.Side, ln.From.Whole, ln.Read, ln.Why)
 	}
 	sent := func(served bool) []Raw {
 		at := recRun.read.Add(40 * time.Millisecond)
@@ -623,6 +653,133 @@ func TestAServerTestsReadPastAnotherGoroutinesServeIsLearnedWhateverPartAPayload
 					t.Fatalf("its test's begin known: learned as %s, which the replay's check refuses: %s", ln.Read, why)
 				}
 			})
+		}
+	}
+}
+
+// A server test's clock read written as one word of a text ("lead <.NET
+// stamp> created") is noise of that word whatever another goroutine served
+// between the read and its call, and whatever digits the clock gave it, as
+// it is where no serve came between them: the replay's check passes a read
+// in its call's span from the test's begin, so the learn step reads which
+// words of the value are the clock's in that window too, and none of them
+// is read as data. Read as data, the stamp's fraction "3505371Z" decodes as
+// base64 to a text whose word, case-folded, is "y", a token the start-up
+// Pulsar look-up holds, so the text was the look-up's variable, which no call
+// can bind; with no payload, the decoded text, of a script keploy does not
+// split into words, was refused; a read 30 ms later decodes to no text and
+// was noise. A read the window from the test's begin does not hold (made
+// before the test began, or the recording's begin unknown) keeps today's
+// answer, and an all-ASCII text is never refused for text of a script it
+// does not hold: the reason names the decoded text.
+func TestAServerTestsStampWordOfATextPastAnotherGoroutinesServeIsNoiseOfThatWord(t *testing.T) {
+	recRun, fRun := serverStampRuns()
+	lookUp := startUpLookUp(recRun)
+	const p = "body.Item.Note.S"
+	text := func(v time.Time) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: "lead " + dotNetStamp(v) + " created"}}}
+	}
+	learn := func(rec time.Time, w *Window, raw []Raw) Learned {
+		return ClassifyIn(clockedDrifts(), []string{p}, text(fRun.read), text(rec), recRun.call, nil, raw, nil, w)[0]
+	}
+	inSpan := &Window{Rec: Span{From: recRun.began, To: recRun.call}, F: Span{From: fRun.began, To: fRun.call}}
+	// The text percent-escaped ("lead%202026-11-02T12%3A48%3A55.3505371Z%20created"
+	// in a query): its decoded form's words are read the same way.
+	escaped := func(v time.Time) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: strings.NewReplacer(" ", "%20", ":", "%3A").Replace("lead " + dotNetStamp(v) + " created")}}}
+	}
+	for _, rec := range []time.Time{recRun.read, recRun.read.Add(30 * time.Millisecond)} {
+		for _, raw := range [][]Raw{lookUp, nil} {
+			ln := ClassifyIn(clockedDrifts(), []string{p}, escaped(fRun.read), escaped(rec), recRun.call, nil, raw, nil, serverStampWindow(recRun, fRun))[0]
+			if ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+				t.Errorf("escaped, read at %s, look-up %v: %s from %q held %q (%s); want noise of the word", rec.Format("05.000000"), raw != nil, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+			}
+		}
+	}
+	for _, c := range []struct {
+		what string
+		rec  time.Time
+		raw  []Raw
+	}{
+		{"a decoded word of it stands in the start-up look-up", recRun.read, lookUp},
+		{"no payload", recRun.read, nil},
+		{"no word of it stands in the look-up (read 30 ms later)", recRun.read.Add(30 * time.Millisecond), lookUp},
+	} {
+		for _, wc := range []struct {
+			what string
+			w    *Window
+		}{
+			{"another goroutine served between the read and its call", serverStampWindow(recRun, fRun)},
+			{"no serve between the read and its call", inSpan},
+		} {
+			if ln := learn(c.rec, wc.w, c.raw); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+				t.Errorf("%s, %s: %s from %q held %q (%s); want noise of the word", c.what, wc.what, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+			}
+		}
+	}
+	// Fail closed where the window from the test's begin does not hold the
+	// read: the look-up's part stays the value's place, and with no payload
+	// the decoded text is refused, named so.
+	early := recRun
+	early.began = recRun.read.Add(50 * time.Millisecond) // after the read, before the other goroutine's serve
+	unknown := serverStampWindow(recRun, fRun)
+	unknown.Rec.TestFrom = time.Time{}
+	for _, wc := range []struct {
+		what string
+		w    *Window
+	}{
+		{"the recording's read made before its test began", serverStampWindow(early, fRun)},
+		{"the recording's begin unknown", unknown},
+		{"the call's window alone", &Window{Rec: Span{From: recRun.prev, To: recRun.call}, F: Span{From: fRun.prev, To: fRun.call}}},
+	} {
+		if ln := learn(recRun.read, wc.w, lookUp); !partInPayload(ln) || ln.From.Mock != "mock-1" {
+			t.Errorf("%s, the look-up: %s from %q held %q (%s); want the look-up's part to stay the value's place", wc.what, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+		}
+		ln := learn(recRun.read, wc.w, nil)
+		if ln.Kind != KindUnaccounted || ln.Why != encodedScriptWhy {
+			t.Errorf("%s, no payload: %s (%s); want it refused as %q", wc.what, ln.Kind, ln.Why, encodedScriptWhy)
+		}
+	}
+	// One cache, one value, one call's window bounds: the window from the
+	// test's begin decides which words are the clock's, so a window that
+	// carries it is never read as one that does not.
+	fUnknown := serverStampWindow(recRun, fRun)
+	fUnknown.F.TestFrom = time.Time{}
+	dc := clockedDrifts()
+	for _, c := range []struct {
+		what  string
+		w     *Window
+		noise bool
+	}{
+		{"the recording's begin unknown", unknown, false},
+		{"both begins known", serverStampWindow(recRun, fRun), true},
+		{"the recording's begin unknown, again", unknown, false},
+		{"record's full round's begin unknown", fUnknown, false},
+		{"both begins known, again", serverStampWindow(recRun, fRun), true},
+	} {
+		ln := ClassifyIn(dc, []string{p}, text(fRun.read), text(recRun.read), recRun.call, nil, lookUp, nil, c.w)[0]
+		if (ln.Kind == KindNoise) != c.noise {
+			t.Errorf("one cache, %s: %s from %q (%s); want noise %v", c.what, ln.Kind, ln.From.Mock, ln.Why, c.noise)
+		}
+	}
+}
+
+// A value whose text of a script keploy reads only whole changed is refused
+// naming where that text stands: in the value's own text, in the text its
+// escapes write, or in the text an encoded run of it decodes to. A value all
+// in ASCII is never said to hold such text itself.
+func TestARefusalForTextOfAScriptNamesWhereThatTextStands(t *testing.T) {
+	esc := func(s string) string { return strings.ReplaceAll(url.PathEscape(s), "%20", " ") }
+	for _, c := range []struct {
+		what, rec, live, want string
+	}{
+		{"its own text", "день понедельник", "день вторник", scriptWhy},
+		{"its own text, escaped too", "понедельник " + esc("ок"), "вторник " + esc("да"), scriptWhy},
+		{"the text its escapes write", "day " + esc("понедельник"), "day " + esc("вторник"), escapedScriptWhy},
+		{"the text an encoded run decodes to", "lead 3505371Z created", "lead 2751164Z created", encodedScriptWhy},
+	} {
+		if got := NewDriftCache().of(c.rec, c.live).unparsed; got != c.want {
+			t.Errorf("%s (%q -> %q): %q; want %q", c.what, c.rec, c.live, got, c.want)
 		}
 	}
 }
