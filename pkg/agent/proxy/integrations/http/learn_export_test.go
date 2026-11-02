@@ -56,7 +56,7 @@ func TestLearnMatchAnswersAnotherParsersDriftedCall(t *testing.T) {
 	db := &learnDb{perTest: []*models.Mock{exportSendRecording()}}
 	ctx := learn.WithTracker(context.Background(), tr)
 	call := live("POST", "/", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportSend)
-	served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{})
+	served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{}, nil)
 	if err != nil || miss != nil || served == nil || served.Name != "mock-1" {
 		t.Fatalf("served %v miss %+v err %v, want mock-1 served", served, miss, err)
 	}
@@ -80,10 +80,10 @@ func TestLearnMatchRefusesAnotherParsersCallItCannotExplain(t *testing.T) {
 	ctx := learn.WithTracker(context.Background(), tr)
 	noise := NewRequestNoise(zap.NewNop(), opts)
 	liveAt := exportAt.Add(learn.FullRoundLead)
-	if served, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/", exportPutBody(exportLiveID, liveAt), exportPut)), noise, db, opts, integrations.CallRound{}); err != nil || miss != nil || served == nil {
+	if served, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/", exportPutBody(exportLiveID, liveAt), exportPut)), noise, db, opts, integrations.CallRound{}, nil); err != nil || miss != nil || served == nil {
 		t.Fatalf("the PutItem: served %v miss %+v err %v, want it answered", served, miss, err)
 	}
-	served, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/", exportSendBody(exportLiveID, liveAt), exportSend)), noise, db, opts, integrations.CallRound{})
+	served, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/", exportSendBody(exportLiveID, liveAt), exportSend)), noise, db, opts, integrations.CallRound{}, nil)
 	if err != nil || served != nil || miss == nil {
 		t.Fatalf("the SendMessage: served %v miss %+v err %v, want a miss", served, miss, err)
 	}
@@ -130,7 +130,7 @@ func TestLearnMatchRunsOnlyInRecordsFullRound(t *testing.T) {
 			db = endedDb{ldb}
 		}
 		call := live("POST", "/", exportSendBody(exportLiveID, exportAt), exportSend)
-		served, miss, err := h.LearnMatch(context.Background(), exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{})
+		served, miss, err := h.LearnMatch(context.Background(), exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{}, nil)
 		if err != nil || served != nil || miss != nil || len(ldb.perTest) != 1 || len(ldb.consumed) != 0 {
 			t.Fatalf("%s: served %v miss %+v err %v, store %d left %d taken; want nothing run", c.name, served, miss, err, len(ldb.perTest), len(ldb.consumed))
 		}
@@ -145,7 +145,7 @@ func TestLearnMatchReturnsTheLearnStepsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	call := live("POST", "/", exportSendBody(exportLiveID, exportAt), exportSend)
-	served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{})
+	served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{}, nil)
 	if err == nil || served != nil || miss != nil {
 		t.Fatalf("served %v miss %+v err %v, want the context's error alone", served, miss, err)
 	}
@@ -220,7 +220,7 @@ func TestLearnMatchDecidesTheCallInTheRoundItsCallerMarked(t *testing.T) {
 			}
 			ctx := learn.WithTracker(context.Background(), tr)
 			call := live("POST", "/", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportSend)
-			served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, c.mark)
+			served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, c.mark, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -282,10 +282,81 @@ func TestLearnMatchHoldsOnlyItsFirstReadToTheCallersMark(t *testing.T) {
 	ctx := learn.WithTracker(context.Background(), tr)
 	call := live("POST", "/", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportSend)
 	mark := integrations.NewCallRound(marked.Epoch, nil).ReadAt(marked).InView(true, false)
-	served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, mark)
+	served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, mark, nil)
 	if err != nil || !db.installed || miss != nil || served == nil || served.Name != "mock-1" {
 		report := &models.MockMismatchReport{}
 		miss.Explain(report)
 		t.Fatalf("served %v (installed %v) err %v, miss %q; want mock-1 served in test-2's round", served, db.installed, err, report.NextSteps)
+	}
+}
+
+// A serve the learn step gives another parser's call (LearnMatch) is told
+// with the answer the caller writes (written), which may differ from the one
+// the learn step gave it (SQS sets a send's digests over the message sent):
+// F's view of the serve, which a later call of the set reads the recording
+// with (learn.Order.ServedView), holds the answer the application read, also
+// where the call was the recording byte for byte. A later changed value that
+// holds a word of it is refused, naming the recording; a fresh one is
+// learned. Without written, the answer served is the one written. Before,
+// the view held the answer the learn step handed over: a word the
+// application read in the answer written was learned as noise (a false
+// green).
+func TestLearnMatchTellsTheServeWithTheAnswerTheCallerWrites(t *testing.T) {
+	const path = "body.ref"
+	for _, tc := range []struct {
+		name    string
+		sent    string // the call's request body in F (recorded {"max":10})
+		rewrite bool   // the caller writes count 77 for the recorded 9
+		value   string // the later changed value (recorded "7")
+		refused bool   // refused, naming mock-2; else learned
+	}{
+		{"a word of the answer written", `{"max":12}`, true, "77", true},
+		{"a fresh word", `{"max":12}`, true, "42", false},
+		{"sent as recorded, a word of the answer written", `{"max":10}`, true, "77", true},
+		{"sent as recorded, a fresh word", `{"max":10}`, true, "42", false},
+		{"no answer of the caller's, a word F gave nowhere", `{"max":12}`, false, "77", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, opts := learnOn(t)
+			other := learnRecorded("mock-2", time.Second, "POST", "/v1/receive", `{"max":10}`, nil, `{"count":"9"}`)
+			tr := learn.NewTracker()
+			ctx := learn.WithTracker(context.Background(), tr)
+			tr.Begin()
+			var written func(*models.Mock) *models.Mock
+			if tc.rewrite {
+				written = func(m *models.Mock) *models.Mock {
+					c := m.ShallowCopy()
+					rs := *m.Spec.HTTPResp
+					rs.Body = strings.ReplaceAll(rs.Body, `"9"`, `"77"`)
+					c.Spec.HTTPResp = &rs
+					return c
+				}
+			}
+			db := &learnDb{perTest: []*models.Mock{other}, observe: tr.ServedMock}
+			got, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/v1/receive", tc.sent, nil)), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{}, written)
+			if err != nil || got == nil || got.Name != "mock-2" || got.Spec.HTTPResp.Body != `{"count":"9"}` {
+				t.Fatalf("the call: served %v miss %+v err %v; want mock-2 served as the learn step gives it", got, miss, err)
+			}
+			tr.End()
+			tr.Begin()
+			order := tr.Placed().Order
+			first, last := order.Of(other)
+			if first == 0 || last == 0 {
+				t.Fatalf("mock-2 is at %d,%d: its serve was not numbered", first, last)
+			}
+			r := order.ServedView(other, learn.RawOf(other, true).ServedIn(first, last))
+			rec := learn.Shape{Leaves: map[string]learn.Leaf{path: {Path: path, Type: learn.String, Value: "7"}}}
+			lv := learn.Shape{Leaves: map[string]learn.Leaf{path: {Path: path, Type: learn.String, Value: tc.value}}}
+			v := learn.Classify(learn.NewDriftCache(), []string{path}, lv, rec, learnAt, nil, []learn.Raw{r}, nil)
+			if len(v) != 1 {
+				t.Fatalf("%d verdicts; want one", len(v))
+			}
+			switch refused := v[0].Kind == learn.KindUnaccounted; {
+			case tc.refused && (!refused || !strings.Contains(v[0].Why, "mock-2")):
+				t.Fatalf("FALSE GREEN: %s %s (%q); want refused, naming mock-2: the application read it there", tc.value, v[0].Kind, v[0].Why)
+			case !tc.refused && refused:
+				t.Fatalf("FALSE RED: %s refused (%q); want learned: the application read no word of it at mock-2", tc.value, v[0].Why)
+			}
+		})
 	}
 }

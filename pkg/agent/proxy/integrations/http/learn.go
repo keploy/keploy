@@ -2531,6 +2531,12 @@ func leafPaths(ls []learn.Leaf) []string {
 // the request or the answer was not the recorded one (learn.Order.ServedView).
 // An answer F gave otherwise states no view: a later call refuses a word a
 // value holds now that may stand there (fail closed). A nil in states none.
+//
+// Of another parser's call (LearnMatch) the answer is the one that parser
+// writes for served (req.written), which may differ from it (SQS sets a
+// send's digests over the message sent): the exchange holds the answer the
+// application read, at its leaves and in its view, never the one the learn
+// step handed over.
 func (n learnNoise) servedExchange(dc *learn.DriftCache, m, recorded *models.Mock, rec learn.Shape, rp httpParts, liveShape learn.Shape, in *req, live httpParts, served *models.Mock, own bool, av answerView) (learn.Earlier, bool) {
 	if recorded == nil {
 		var err error
@@ -2542,6 +2548,9 @@ func (n learnNoise) servedExchange(dc *learn.DriftCache, m, recorded *models.Moc
 		unmasked := n
 		unmasked.url = nil
 		rec, liveShape = unmasked.shape(rp, destOf(live, rp)), unmasked.shape(live, sameDest)
+	}
+	if in != nil && in.written != nil && served != nil {
+		served, av = in.written(served), writtenView(av, in.written)
 	}
 	e := withExcused(earlierOf(dc, m, recorded, rec, liveShape, served, own), n, live, rp)
 	switch {

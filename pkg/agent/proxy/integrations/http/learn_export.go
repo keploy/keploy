@@ -57,13 +57,24 @@ func (m *LearnMiss) Explain(r *models.MockMismatchReport) {
 // next test's recording. The zero CallRound, of a store that marks no
 // round, holds the learn step to nothing.
 //
+// written is the answer the caller writes for a recording the learn step
+// served (nil: served itself). The learn step tells the tracker of the serve
+// (learn.Tracker.Served) with that answer, at its leaves and in F's view of
+// the exchange, which a later call of the set reads (learn.Order.ServedView):
+// the caller may write another answer than served (SQS sets a send's digests
+// over the message sent), and a view of the answer served would read a later
+// call against words the application never read and miss the ones it did.
+// The caller states no view of the serve again.
+//
 // Outside record's full round nothing here runs, and served and miss are
 // both nil: the caller matches the call as it would have.
-func (h *HTTP) LearnMatch(ctx context.Context, call VariableCall, noise RequestNoise, mockDb integrations.MockMemDb, opts models.OutgoingOptions, round integrations.CallRound) (served *models.Mock, miss *LearnMiss, err error) {
+func (h *HTTP) LearnMatch(ctx context.Context, call VariableCall, noise RequestNoise, mockDb integrations.MockMemDb, opts models.OutgoingOptions, round integrations.CallRound, written func(served *models.Mock) *models.Mock) (served *models.Mock, miss *LearnMiss, err error) {
 	if !provenswitch.On() || !opts.Learn || integrations.LearnEnded(mockDb) {
 		return nil, nil, nil
 	}
-	served, lmiss, err := h.learnMatchIn(ctx, call.req(), mockDb, h.newLearnNoise(opts, noise.Body, noise.URL), opts, round, nil)
+	in := call.req()
+	in.written = written
+	served, lmiss, err := h.learnMatchIn(ctx, in, mockDb, h.newLearnNoise(opts, noise.Body, noise.URL), opts, round, nil)
 	if err != nil {
 		return nil, nil, err
 	}
