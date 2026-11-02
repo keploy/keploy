@@ -852,6 +852,15 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	if mockFileName == "" {
 		mockFileName = "mocks"
 	}
+	// A fault on a call of any kind but HTTP is refused in every format
+	// (faultDropped): a text document of that kind, written by EncodeMock or
+	// in place, has no place for it, and a keploy that knows no faults
+	// reads a gob mock's fault as no field at all; each would serve the
+	// recorded answer whole. Refused, the call's test goes with it.
+	if err := faultDropped(mock); err != nil {
+		utils.LogError(ys.Logger, err, "refusing to write a mock whose fault would be dropped", zap.String("mock_name", mock.Name))
+		return fmt.Errorf("%w: %w", models.ErrMockEncode, err)
+	}
 	// An insert writes to the mock file the set already has, in that file's
 	// format; only a set with none takes the configured format (insertFormat).
 	// gob is the binary record-time format (async writer, ~28% CPU win over

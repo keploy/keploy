@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"encoding/json"
+	"errors"
+	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
@@ -288,4 +293,215 @@ func TestTheGobWriterWritesAFaultMockAsHttpFault(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0].Kind != models.HTTP || got[0].Spec.Fault == nil || *got[0].Spec.Fault != *m.Spec.Fault {
 		t.Fatalf("read back %+v, %v; want the HTTP mock with its fault", got, err)
 	}
+}
+
+// A fault is written on an HTTP call only: a mock of any other kind with one
+// is refused, in every format and through either encoder, since its document
+// has no place for the fault and would leave the recorded answer for replay
+// to serve whole (in a mocks.gob, a keploy that knows no faults reads the
+// fault as no field at all). An HTTP mock's fault is written as it is, for
+// the reader to enact or refuse.
+func TestAFaultIsWrittenOnlyOnAnHTTPCall(t *testing.T) {
+	faulted := func(m *models.Mock, name string) *models.Mock {
+		m.Name = name
+		m.Spec.Fault = &models.Fault{Kind: models.FaultEOF}
+		return m
+	}
+	for _, format := range []string{"yaml", "json", "gob"} {
+		t.Run(format, func(t *testing.T) {
+			t.Setenv("KEPLOY_MOCK_FORMAT", format)
+			dir := t.TempDir()
+			ys := New(zap.NewNop(), dir, "mocks")
+			// Mongo goes through EncodeMock, MySQL is written in place.
+			for _, m := range []*models.Mock{faulted(pruneMongoMock(0), "mongo-fault"), faulted(pruneMySQLMock(1, 1), "mysql-fault")} {
+				err := ys.InsertMock(context.Background(), m, pruneSet)
+				if !errors.Is(err, models.ErrMockEncode) || !errors.Is(err, models.ErrFaultUnsupported) {
+					t.Errorf("InsertMock(%s) = %v; want it refused as a fault keploy enacts on HTTP calls only", m.Name, err)
+				}
+			}
+			// InsertMock names each mock it is given, refused or not: the
+			// two above are mock-0 and mock-1.
+			if err := ys.InsertMock(context.Background(), pruneMongoMock(2), pruneSet); err != nil {
+				t.Fatal(err)
+			}
+			if err := ys.Close(); err != nil {
+				t.Fatal(err)
+			}
+			served, _ := readSetOracle(t, dir, yaml.FormatYAML)
+			if !served["mock-2"] || len(served) != 1 {
+				t.Fatalf("the set's read served %v; want only the mock without a fault", served)
+			}
+		})
+	}
+
+	t.Run("encoders", func(t *testing.T) {
+		m := faulted(pruneMongoMock(0), "mongo-fault")
+		if _, err := EncodeMock(m, zap.NewNop()); !errors.Is(err, models.ErrFaultUnsupported) {
+			t.Errorf("EncodeMock = %v; want the fault refused", err)
+		}
+		if _, _, err := EncodeMockJSON(m, zap.NewNop()); !errors.Is(err, models.ErrFaultUnsupported) {
+			t.Errorf("EncodeMockJSON = %v; want the fault refused", err)
+		}
+		h := variablesMock()
+		h.Spec.Fault = &models.Fault{Kind: "explode"} // newer than this keploy: written, for the reader to refuse
+		if _, err := EncodeMock(h, zap.NewNop()); err != nil {
+			t.Errorf("EncodeMock(an HTTP mock with a fault) = %v; want it written as it is", err)
+		}
+	})
+}
+
+// A document of any kind but HTTP whose spec has a `fault:` key is skipped,
+// never served whole, and named as a fault in every list of skipped mocks: no
+// such kind's schema reads the key. A "fault" key deeper in the spec is the
+// call's own data, and the mock is served.
+func TestAFaultOnACallOfAnotherKindIsSkippedAndNamed(t *testing.T) {
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		t.Run(string(format), func(t *testing.T) {
+			t.Setenv("KEPLOY_MOCK_FORMAT", string(format))
+			dir := t.TempDir()
+			ys := NewWithFormat(zap.NewNop(), dir, "mocks", format)
+			// InsertMock names them mock-0 (given a fault below), mock-1 (a
+			// "fault" key in its metadata) and mock-2.
+			for i := 0; i < 3; i++ {
+				m := pruneMongoMock(i)
+				if i == 1 {
+					m.Spec.Metadata["fault"] = "eof"
+				}
+				if err := ys.InsertMock(context.Background(), m, pruneSet); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := ys.Close(); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, pruneSet, "mocks.yaml")
+			from, to := "name: mock-0\nspec:\n", "name: mock-0\nspec:\n    fault:\n        kind: eof\n"
+			if format == yaml.FormatJSON {
+				path = filepath.Join(dir, pruneSet, "mocks.json")
+				from, to = `"name":"mock-0","spec":{`, `"name":"mock-0","spec":{"fault":{"kind":"eof"},`
+			}
+			b, err := os.ReadFile(path)
+			if err != nil || !bytes.Contains(b, []byte(from)) {
+				t.Fatalf("read %s (%v): no %q in\n%s", path, err, from, b)
+			}
+			if err := os.WriteFile(path, bytes.Replace(b, []byte(from), []byte(to), 1), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			served, listed := readSetOracle(t, dir, format)
+			if served["mock-0"] || !served["mock-1"] || !served["mock-2"] {
+				t.Fatalf("the set's read served %v; want all but the mock with a fault", served)
+			}
+			if listed["mock-0"] != models.Mongo || len(listed) != 1 {
+				t.Fatalf("the set's read lists as skipped %v", listed)
+			}
+			for _, d := range readDocs(t, dir, format) {
+				want := models.MockSkip("")
+				if d.Name == "mock-0" {
+					want = models.MockSkipFault
+				}
+				if d.Skip != want {
+					t.Errorf("the reader says %s is %q, want %q", d.Name, d.Skip, want)
+				}
+			}
+			_, skipped := NewWithFormat(zap.NewNop(), dir, "mocks", format).SkippedMocks(context.Background(), pruneSet)
+			if skipped["mock-0"].Why != models.MockSkipFault || len(skipped) != 1 {
+				t.Errorf("SkippedMocks: %v", skipped)
+			}
+		})
+	}
+}
+
+// An HTTP document with a fault is judged with its call (faultKindSupported),
+// so the read names the cause a user acts on: a fault under kind Http is
+// written under the wrong kind, whatever the fault. A spec that is no
+// mapping holds no fault: its kind's own decode refuses it.
+func TestAnHTTPFaultIsJudgedWithItsKind(t *testing.T) {
+	core, logs := observer.New(zap.ErrorLevel)
+	var doc yaml.NetworkTrafficDoc
+	if err := yamlLib.Unmarshal([]byte(httpDocYAML("fault-as-http", "Http", "a")+"    fault:\n        kind: explode\n"), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := DecodeMocks([]*yaml.NetworkTrafficDoc{&doc}, zap.New(core)); err != nil || len(out) != 0 {
+		t.Fatalf("DecodeMocks = %d mocks, %v; want the mock skipped", len(out), err)
+	}
+	var jdoc yaml.NetworkTrafficDocJSON
+	if err := json.Unmarshal([]byte(strings.TrimSuffix(httpDocJSON("fault-as-http", "Http", "a"), "}}")+`,"fault":{"kind":"explode"}}}`), &jdoc); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := DecodeMocksJSON([]*yaml.NetworkTrafficDocJSON{&jdoc}, zap.New(core)); err != nil || len(out) != 0 {
+		t.Fatalf("DecodeMocksJSON = %d mocks, %v; want the mock skipped", len(out), err)
+	}
+	if got := logs.FilterMessage("skipping a mock whose kind does not go with its fault").Len(); got != 2 || logs.Len() != 2 {
+		t.Errorf("logged %v; want the kind named as the cause, once per document", logs.All())
+	}
+
+	var seq yaml.NetworkTrafficDoc
+	if err := yamlLib.Unmarshal([]byte("version: api.keploy.io/v1beta1\nkind: Mongo\nname: m\nspec: [fault, eof]\n"), &seq); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeMocks([]*yaml.NetworkTrafficDoc{&seq}, zap.NewNop()); err == nil {
+		t.Error("DecodeMocks of a Mongo document whose spec is a list: no error; want its kind's decode to refuse it")
+	}
+}
+
+// rawGobKinds is the kind of each mock a mocks.gob holds, by name, as gob
+// decodes it with no reader's mapping: what a keploy that knows no faults
+// reads.
+func rawGobKinds(t *testing.T, path string) map[string]models.Kind {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil || !bytes.HasPrefix(b, []byte(gobMockMagic)) {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	dec := gob.NewDecoder(bytes.NewReader(b[len(gobMockMagic):]))
+	out := map[string]models.Kind{}
+	for {
+		var m models.Mock
+		if err := dec.Decode(&m); err != nil {
+			if errors.Is(err, io.EOF) {
+				return out
+			}
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		out[m.Name] = m.Kind
+	}
+}
+
+// A mocks.gob keeps a fault mock as kind HttpFault through every rewrite of
+// the file: a writer that adds to the set carries the mocks it holds over,
+// and a prune writes back the mocks it keeps. Written back as kind Http, the
+// fault mock would be served whole by a keploy that knows no faults.
+func TestAGobFileKeepsAFaultMockAsHttpFaultThroughItsRewrites(t *testing.T) {
+	fault, whole := pruneHTTPMock(0), pruneHTTPMock(1)
+	fault.Spec.Fault = &models.Fault{Kind: models.FaultReset}
+	want := map[string]models.Kind{"mock-0": models.HTTPFault, "mock-1": models.HTTP}
+
+	t.Run("an insert into the set", func(t *testing.T) {
+		dir := t.TempDir()
+		path := writePruneFixture(t, dir, "gob", []*models.Mock{fault.ShallowCopy()}, "")
+		t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
+		add := New(zap.NewNop(), dir, "mocks")
+		add.SetCounterID(0)
+		if err := add.InsertMock(context.Background(), whole.ShallowCopy(), pruneSet); err != nil {
+			t.Fatal(err)
+		}
+		if err := add.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if got := rawGobKinds(t, path); !maps.Equal(got, want) {
+			t.Fatalf("the file holds %v, want %v", got, want)
+		}
+	})
+
+	t.Run("a prune", func(t *testing.T) {
+		dir := t.TempDir()
+		path := writePruneFixture(t, dir, "gob", []*models.Mock{fault.ShallowCopy(), whole.ShallowCopy(), pruneHTTPMock(2)}, "")
+		consumed := map[string]models.MockState{"mock-0": {Name: "mock-0"}, "mock-1": {Name: "mock-1"}}
+		if err := New(zap.NewNop(), dir, "mocks").UpdateMocks(context.Background(), pruneSet, consumed, pruneT0.Add(time.Hour), time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		if got := rawGobKinds(t, path); !maps.Equal(got, want) {
+			t.Fatalf("the prune left %v, want %v", got, want)
+		}
+	})
 }

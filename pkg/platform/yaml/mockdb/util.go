@@ -35,6 +35,9 @@ import (
 // Postgres) still go through the legacy YAML path because their specs
 // contain pre-encoded yaml.Node fields (req.Message).
 func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDocJSON, bool, error) {
+	if err := faultDropped(mock); err != nil {
+		return nil, false, err
+	}
 	doc := &yaml.NetworkTrafficDocJSON{
 		Version:      mock.Version,
 		Kind:         mock.DiskKind(),
@@ -310,6 +313,9 @@ var errMapperEncode = errors.New("mock encode mapper failure")
 
 func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
 
+	if err := faultDropped(mock); err != nil {
+		return nil, err
+	}
 	yamlDoc := yaml.NetworkTrafficDoc{
 		Version:      mock.Version,
 		Kind:         mock.DiskKind(),
@@ -690,6 +696,16 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 			ConnectionID: m.ConnectionID,
 			Start:        m.Start,
 			Origin:       m.Origin,
+		}
+		// A fault is read on an HTTP call only (the case below). Any other
+		// kind's schema has no place for one and would drop it, serving
+		// the recorded answer whole: such a document with a `fault:` key
+		// is skipped instead (faultSupported), and the read says why.
+		if m.Kind != models.HTTP && m.Kind != models.HTTPFault {
+			mock.Spec.Fault = yamlSpecFault(&m.Spec)
+			if !faultSupported(&mock, logger, rewrite) {
+				continue
+			}
 		}
 		mapped, err := decodeWithMapper(m, &mock)
 		if err != nil {
@@ -1128,6 +1144,55 @@ func connFailureSupported(mock *models.Mock, logger *zap.Logger, rewrite bool) b
 	}
 	skipConnFailure(logger, mock.Name, err, rewrite)
 	return false
+}
+
+// faultDropped is why mock is not written: a fault on a call of a kind other
+// than HTTP (Mock.ValidateFault). No such kind's document has a place for
+// one, so the write would drop the fault and leave the recorded answer for a
+// replay to serve whole. nil for every other mock: an HTTP mock's fault is
+// written as it is (kind HttpFault), for the reader to enact or refuse.
+func faultDropped(mock *models.Mock) error {
+	if mock.Kind == models.HTTP {
+		return nil
+	}
+	return mock.ValidateFault()
+}
+
+// yamlSpecFault is the fault under a document spec's `fault:` key, read from
+// that key alone: nil for a spec with none. A value that is no fault (a hand
+// edit) reads as one of no kind, which no keploy enacts.
+func yamlSpecFault(spec *yamlLib.Node) *models.Fault {
+	if spec.Kind != yamlLib.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(spec.Content); i += 2 {
+		if spec.Content[i].Value == "fault" {
+			f := &models.Fault{}
+			_ = spec.Content[i+1].Decode(f) // a value that is no fault stays one of no kind
+			return f
+		}
+	}
+	return nil
+}
+
+// jsonSpecFault is yamlSpecFault for an NDJSON document's spec.
+func jsonSpecFault(spec json.RawMessage) *models.Fault {
+	if !bytes.Contains(spec, []byte(`"fault"`)) {
+		return nil // no key: the common case, without decoding the spec
+	}
+	var s struct {
+		Fault json.RawMessage `json:"fault"`
+	}
+	// An error leaves s.Fault nil: of the valid JSON an NDJSON document's
+	// spec is, only one that is no object fails, and so does its kind's
+	// own decode.
+	_ = json.Unmarshal(spec, &s)
+	if s.Fault == nil {
+		return nil
+	}
+	f := &models.Fault{}
+	_ = json.Unmarshal(s.Fault, f) // a value that is no fault stays one of no kind
+	return f
 }
 
 // faultKindSupported is faultSupported for a mock read from a document of
@@ -1709,6 +1774,14 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 func decodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger, rewrite bool) ([]*models.Mock, error) {
 	mocks := make([]*models.Mock, 0, len(docs))
 	for _, m := range docs {
+		// A fault on a call of any kind but HTTP, skipped and named, the way
+		// DecodeMocks skips it.
+		if m.Kind != models.HTTP && m.Kind != models.HTTPFault {
+			faulted := models.Mock{Name: m.Name, Kind: m.Kind, Spec: models.MockSpec{Fault: jsonSpecFault(m.Spec)}}
+			if !faultSupported(&faulted, logger, rewrite) {
+				continue
+			}
+		}
 		// Skip enterprise-only kinds the way DecodeMocks does.
 		if strings.Count(string(m.Kind), "-") > 0 {
 			logger.Debug("This dependency does not belong to open source version, will be skipped", zap.String("mock kind:", string(m.Kind)))

@@ -2,6 +2,7 @@ package mockdb
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -114,7 +115,7 @@ func (fr *MockFileReader) Next() (MockFileDoc, error) {
 		case d.separator:
 			continue // the start of a separator, ending the file: no document
 		case len(d.mocks) == 0:
-			out.Skip = skipReason(d.kind, fr.r.Format() == yaml.FormatJSON)
+			out.Skip = skipReason(d.kind, fr.r.Format() == yaml.FormatJSON, docSpecFault(d) != nil)
 		}
 		return out, nil
 	}
@@ -124,12 +125,15 @@ func (fr *MockFileReader) Next() (MockFileDoc, error) {
 // from a document of kind that parsed and decoded without error: they skip
 // only a document with no kind, a kind they have no decoder for, a
 // connection failure they cannot replay, and an HTTP call whose fault they
-// cannot enact (faultSupported). Of an NDJSON document (json), a
-// kind with a "-" in it, or one a registered mapper decodes, is one
-// decodeMocksJSON skips in every build: only the YAML decoder reads it, and
-// a "-" kind only with keploy enterprise's mapper.
-func skipReason(kind models.Kind, json bool) models.MockSkip {
+// cannot enact (faultSupported), as they skip a document of any other kind
+// whose spec has a fault (fault), before anything else. Of an NDJSON
+// document (json), a kind with a "-" in it, or one a registered mapper
+// decodes, is one decodeMocksJSON skips in every build: only the YAML
+// decoder reads it, and a "-" kind only with keploy enterprise's mapper.
+func skipReason(kind models.Kind, json, fault bool) models.MockSkip {
 	switch {
+	case fault:
+		return models.MockSkipFault
 	case kind == "":
 		return models.MockSkipNoKind
 	case kind == models.ConnectionFailure:
@@ -140,6 +144,19 @@ func skipReason(kind models.Kind, json bool) models.MockSkip {
 		return models.MockSkipYAMLOnlyKind
 	}
 	return models.MockSkipUnknownKind
+}
+
+// docSpecFault is the fault under d's spec's `fault:` key (yamlSpecFault,
+// jsonSpecFault), nil for none, or for a document that does not parse.
+func docSpecFault(d fileDoc) *models.Fault {
+	if d.doc != nil {
+		return yamlSpecFault(&d.doc.Spec)
+	}
+	var j struct {
+		Spec json.RawMessage `json:"spec"`
+	}
+	_ = json.Unmarshal(d.raw, &j) // an error leaves j.Spec nil, which has none
+	return jsonSpecFault(j.Spec)
 }
 
 // Format is the format of the file it opened.
