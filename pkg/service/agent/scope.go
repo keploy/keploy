@@ -85,6 +85,13 @@ func (a *Agent) beginScopeAt(ctx context.Context, name string, pid int, at time.
 		return nil
 	}
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
+		if a.pidCannotScope(name, pid) {
+			// The test fails whatever its harness does with the refusal: a
+			// harness that runs it anyway is served the whole pool. Refused
+			// before the clock moves, so there is nothing to give back.
+			a.noteScopeFailed(name, pid, at)
+			return fmt.Errorf("%s began with the pid %d: %w", name, pid, ErrPidBeginWithoutMarks)
+		}
 		took, lost, err := a.beginTestClock(ctx, name, pid)
 		if lost.key.name != "" {
 			a.failLostScope(ctx, lost, at)
@@ -187,6 +194,37 @@ func (a *Agent) beginScopeAt(ctx context.Context, name string, pid int, at time.
 	a.openWindow(name, pid, at)
 	a.logger.Debug("scope begin (record)", zap.String("test", name), zap.Int("worker", pid))
 	return nil
+}
+
+// ErrPidBeginWithoutMarks refuses a replayed test that begins with a worker
+// pid in a run with no suite and app-start marks (pidCannotScope).
+var ErrPidBeginWithoutMarks = errors.New("keploy narrows a test to its own mocks by the pid of its test process only in a run recorded with the suite and app-start marks (a begin with \"suite\": true, and POST /agent/app/start for each app the tests start). Without them, a connection the app opened before the test began (its database pool at boot, or one opened between two tests) is served every test's mocks, so a test could pass on another test's recording. Send the begin without a pid, and run the tests one at a time: keploy then narrows the whole run to the open test")
+
+// pidCannotScope is whether a replayed test that begins with pid would be
+// served another test's mocks: it begins with a worker pid, in a run whose
+// replay has a mapping for it, with no suite and app-start marks
+// (starts.Default.Active).
+//
+// A pid begin narrows only the connections the proxy wraps for the worker's
+// process tree (proxy scopedFor), and the proxy wraps a connection only when
+// it opens while a test of the worker is open. A connection opened before
+// that keeps the bare manager, which a pid begin never narrows; wrapping
+// every connection instead would split, per connection, the state parsers
+// keep per store (enterprise Redis, Memcached, Couchbase, HBase cursors) in
+// every run, those that begin without a pid included. With the marks, every
+// connection's view is resolved from the app starts on every read, whenever
+// it opened. Under the proven switch the wire refuses a pid (oldWireFields),
+// and a pid begin from within the agent would skip the test's exact serving,
+// so it is refused there too. A test with no mapping is served the whole
+// pool with a pid or without one, so its begin is not refused.
+func (a *Agent) pidCannotScope(name string, pid int) bool {
+	if pid <= 0 || starts.Default.Active() {
+		return false
+	}
+	a.scopeMu.Lock()
+	_, mapped := a.scopeTable[name]
+	a.scopeMu.Unlock()
+	return mapped
 }
 
 // refuseBegin fails a replayed test's begin with err, after its window

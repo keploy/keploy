@@ -1311,7 +1311,10 @@ func (p *Proxy) SetMappedUniverse(names []string) {
 // manager: it is not wrapped on the chance that it might belong to a worker
 // later, because a wrap is a new store identity, and parsers that key their
 // indexes and stateful cursors on the store (enterprise Redis, Memcached,
-// Couchbase, HBase) would then split one app's state per connection.
+// Couchbase, HBase) would then split one app's state per connection. So a
+// pid begin cannot narrow a connection its app opened outside a test (its pool
+// at boot, or one opened between two tests), and keploy refuses a pid begin in
+// a run without the suite and app-start marks (service/agent pidCannotScope).
 func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.MockMemDb {
 	if kpid == 0 || mgr == nil {
 		return mgr

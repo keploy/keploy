@@ -558,11 +558,14 @@ func (p *workerProxy) SetWorkerScope(pid uint32, names []string) {
 
 func (p *workerProxy) ClearWorkerScope(pid uint32) { p.cleared = append(p.cleared, pid) }
 
-// A worker that reports its pid is scoped on its own view, with the switch off
-// as before: its begin and end stage nothing on the global pool, whether its
-// test recorded calls or none.
+// A worker that reports its pid, in a run with the suite and app-start marks,
+// is scoped on its own view, with the switch off as before: its begin and end
+// stage nothing on the global pool, whether its test recorded calls or none.
+// (Without the marks its begin is refused:
+// TestAPidBeginWithoutMarksIsRefusedAndFailsTheTest.)
 func TestScopeWorkerScopeStagesNothingGlobal(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "")
+	marked(t, "TestA", "TestC")
 	p := &workerProxy{}
 	cfg := &config.Config{}
 	cfg.Agent.Mode = models.MODE_TEST

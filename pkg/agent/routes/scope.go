@@ -147,8 +147,9 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 	if err := beginScope(r.Context(), a.svc, req); err != nil {
 		a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))
 		code := http.StatusInternalServerError
-		if errors.Is(err, agent.ErrOneTestAtATime) {
-			// release1-cut §2.1: 422 one_test_at_a_time.
+		if errors.Is(err, agent.ErrOneTestAtATime) || errors.Is(err, agent.ErrPidBeginWithoutMarks) {
+			// release1-cut §2.1: 422 one_test_at_a_time. A pid begin keploy
+			// cannot narrow is the harness's to change, as that one is.
 			code = http.StatusUnprocessableEntity
 		}
 		http.Error(w, err.Error(), code)
