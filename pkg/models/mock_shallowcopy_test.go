@@ -64,3 +64,19 @@ func TestShallowCopyIsAnUnpooledCopy(t *testing.T) {
 		t.Error("the copy shares TestModeInfo with the original")
 	}
 }
+
+// DeepCopy is how the replay's filters copy each mock before the mock
+// manager holds it: the copy carries the store's count of the mock's bytes
+// (StoredSize), so the learn step's readers reserve what reading the copy's
+// payload costs, and not all their bytes in flight, as for a mock no store
+// counted whose answer is parked.
+func TestDeepCopyKeepsTheStoresCountOfTheMocksBytes(t *testing.T) {
+	m := &Mock{Kind: HTTP, Name: "m"}
+	m.SetStoredSize(4096)
+	if c := m.DeepCopy(); c.StoredSize() != 4096 {
+		t.Fatalf("the copy's stored size is %d: want the mock's 4096", c.StoredSize())
+	}
+	if c := (&Mock{Kind: HTTP}).DeepCopy(); c.StoredSize() != 0 {
+		t.Fatalf("a copy of a mock no store read counts %d bytes: want 0", c.StoredSize())
+	}
+}

@@ -305,7 +305,8 @@ func TestAStagingReadCostingAllTheSetsReadsInFlightRunsAlone(t *testing.T) {
 // Raw's text; the agent store's count of a lazy one's (StoredSize); the
 // bytes of the spec of one no store counted whose answer is in memory
 // (specBytes); and all of readInFlight, a read alone, for one whose answer
-// is parked and no store counted, or one that costs more.
+// is parked and no store counted, one made of no recording in hand (a
+// served view's), or one that costs more.
 func TestAReadReservesWhatItsRecordingsBytesCost(t *testing.T) {
 	tr := NewTracker()
 	tr.NewSet()
@@ -331,6 +332,8 @@ func TestAReadReservesWhatItsRecordingsBytesCost(t *testing.T) {
 		{"a lazy one the store counted", dc.LazyRawOf(counted, true, nil), readCost * 1000},
 		{"a lazy one in memory no store counted, by its spec", dc.LazyRawOf(inMemory, true, nil), readCost * spec},
 		{"a lazy one parked no store counted, alone", dc.LazyRawOf(parked, true, nil), readInFlight},
+		{"a served view's, of no recording in hand, alone", Raw{id: "view", src: &rawSource{name: "view",
+			load: func() (*models.Mock, error) { return small, nil }}}, readInFlight},
 		{"one costing more than readInFlight, alone", dc.LazyRawOf(big, true, nil), readInFlight},
 	} {
 		if got := readWeight(c.x); got != c.want {
@@ -369,4 +372,51 @@ func TestAReadReservesWhatItsRecordingsBytesCost(t *testing.T) {
 	if got := specBytes(reflect.ValueOf(l), 0); got != 0 {
 		t.Errorf("specBytes of a value that holds itself counts %d: want 0, no deeper than its limit", got)
 	}
+}
+
+// A read the set has no room for (take: nil, its held tier full) gives back
+// what it reserved of the set's readInFlight before it took the recording,
+// in a call's warm and in the set's staging alike: a read that kept it
+// would leave the set's later reads (its next call's, the staging's)
+// waiting for room no read gives back. Counted: all of readInFlight is free
+// once each ends, and each reserved some.
+func TestAReadTheSetHasNoRoomForGivesBackWhatItReserved(t *testing.T) {
+	const n = 6
+	row := newHeldRow(n, 4)
+	warmReadersOf(t, 2)
+	was := stageReaders
+	stageReaders = func() int { return 2 }
+	t.Cleanup(func() { stageReaders = was })
+	tr := NewTracker()
+	tr.NewSet()
+	keepsNoMoreHeld(tr)
+	s := tr.derived
+	free := func(who string) {
+		t.Helper()
+		if !s.inFlight.TryAcquire(readInFlight) {
+			t.Fatalf("%s kept some of the set's reads in flight after it ended: want all given back", who)
+		}
+		s.inFlight.Release(readInFlight)
+	}
+
+	tr.Begin()
+	dc := tr.Drifts()
+	raw := make([]Raw, n)
+	for i, m := range row.mocks {
+		raw[i] = dc.LazyRawOf(m, true, nil)
+		if w := readWeight(raw[i]); w <= 0 || w >= readInFlight {
+			t.Fatalf("a recording's read reserves %d of the %d in flight: want some, under all of them", w, readInFlight)
+		}
+	}
+	dc.warm(raw)
+	tr.End()
+	free("a call's warm")
+
+	if w := readWeight(dc.LazyRawOf(row.mocks[0], false, withAnswer(row.mocks[0]))); w <= 0 || w >= readInFlight {
+		t.Fatalf("a staged recording's read reserves %d of the %d in flight: want some, under all of them", w, readInFlight)
+	}
+	if use := <-tr.WarmSet(srcOf(row.mocks)); use.Staged != 0 || !use.HeldFull {
+		t.Fatalf("the set's staging reported %+v: want none read, its held tier full", use)
+	}
+	free("the set's staging")
 }

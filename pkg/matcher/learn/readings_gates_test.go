@@ -275,3 +275,42 @@ func TestRunSeparatorsIsWhatContainsAndIndexByteSay(t *testing.T) {
 		check(string(b))
 	}
 }
+
+// b64Digit reads a byte only where both base64 alphabets read it, as the
+// same value: a letter or a digit. '+' and '/' (the standard alphabet's)
+// and '-' and '_' (the URL one's) are read apart, and every other byte by
+// neither.
+func TestB64DigitReadsOnlyWhatBothAlphabetsReadAlike(t *testing.T) {
+	const std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	const url = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	for c := 0; c < 256; c++ {
+		i, j := strings.IndexByte(std, byte(c)), strings.IndexByte(url, byte(c))
+		alike := i >= 0 && i == j
+		d, ok := b64Digit(byte(c))
+		if ok != alike || ok && d != uint32(i) {
+			t.Errorf("b64Digit(%q) = %d, %v: want %d, %v (standard %d, URL %d)", byte(c), d, ok, max(i, 0), alike, i, j)
+		}
+	}
+}
+
+// textBegins is true of every beginning of every text (isText): a valid
+// character's bytes, U+FFFD's among them, which utf8.DecodeRune reads as
+// RuneError as it does an invalid byte, three bytes at once and not one;
+// and false of a beginning holding a control or a byte no text holds.
+func TestTextBeginsEveryBeginningOfAText(t *testing.T) {
+	for _, s := range []string{"�", "a�", "�z", "é€😀", "line\nbreak\ttab"} {
+		if !isText([]byte(s)) {
+			t.Fatalf("%q is no text: the row reads texts", s)
+		}
+		for k := 0; k <= len(s); k++ {
+			if !textBegins([]byte(s[:k])) {
+				t.Errorf("textBegins(%q) is false: want true, it begins %q", s[:k], s)
+			}
+		}
+	}
+	for _, b := range []string{"\x01", "ab\x7f", "\xff", "\xc0\x80", "a\xed\xa0\x80"} {
+		if textBegins([]byte(b)) {
+			t.Errorf("textBegins(%q) is true: want false, no text begins with it", b)
+		}
+	}
+}
