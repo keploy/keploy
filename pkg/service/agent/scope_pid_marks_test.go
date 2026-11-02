@@ -68,3 +68,42 @@ func TestAPidBeginWithoutMarksIsRefusedAndFailsTheTest(t *testing.T) {
 		t.Fatalf("an unmapped test began with a pid: %v, want it begun", err)
 	}
 }
+
+// Under the proven switch a test that begins with a worker pid (an in-process
+// caller's: the wire refuses one) is served exactly its own mocks, as one
+// without a pid is: every connection reads the manager's exact view, the ones
+// the app opened at boot or between two tests included, so it is not refused
+// and no per-worker view is made. Its end serves the pool between tests.
+func TestAPidBeginUnderTheSwitchIsServedExactly(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	starts.Default.Reset()
+	t.Cleanup(starts.Default.Reset)
+	useHooks(t, &clockHooks{})
+	a := newClockAgent(t)
+	pool := &workerPool{}
+	a.Proxy = pool
+	loadMocks(a, "mock-a")
+	ctx := context.Background()
+	if err := a.SetScopeTable(ctx, map[string][]string{"TestA": {"mock-a"}, "TestC": {}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []string{"TestA", "TestC"} {
+		if err := a.BeginScope(ctx, test, 4242); err != nil {
+			t.Fatalf("%s began with a pid under the switch: %v, want it served exactly", test, err)
+		}
+		if err := a.EndScope(ctx, test, 4242); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if want := []string{"test TestA", "pool", "test TestC", "pool"}; !slices.Equal(pool.served(), want) {
+		t.Fatalf("exact serving put in %v, want %v", pool.served(), want)
+	}
+	if len(pool.narrowed) != 0 || len(pool.cleared) != 0 {
+		t.Fatalf("worker views narrowed %v, cleared %v; want none under exact serving", pool.narrowed, pool.cleared)
+	}
+	for _, test := range []string{"TestA", "TestC"} {
+		if got := outcomesOf(t, a, test); slices.Contains(got, models.ScopeOutcomeFailed) {
+			t.Fatalf("%s's outcomes %v, want it not failed", test, got)
+		}
+	}
+}

@@ -118,12 +118,17 @@ func (a *Agent) beginScopeAt(ctx context.Context, name string, pid int, at time.
 				a.ResetVariables()
 			}
 		}
-		if pid == 0 && provenswitch.On() {
+		if pid >= 0 && provenswitch.On() {
 			// The proven wire serves a test exactly its own mocks
 			// (exact_proven.go): one with no mapping, or none in it, owns
 			// none, so any data-plane call of its own is a miss. Its
 			// variables begin as it opens, in the same step, so no call its
-			// mocks answer binds before them (serveTestExactly).
+			// mocks answer binds before them (serveTestExactly). A worker
+			// pid (an in-process caller's: the wire refuses one) names the
+			// clock's holder only: exact serving decides what every
+			// connection reads, whenever it opened, and no per-worker view
+			// narrows it (proxy scopedFor), so its test is served exactly
+			// as one without a pid is.
 			if err := a.serveTestExactly(ctx, name); err != nil {
 				return a.refuseBegin(ctx, name, pid, at, took, err)
 			}
@@ -166,9 +171,9 @@ func (a *Agent) beginScopeAt(ctx context.Context, name string, pid int, at time.
 		default:
 			// Only a negative pid under the switch, which the proven wire
 			// refuses (oldWireFields), so only an in-process caller passes one:
-			// pid 0 under the switch was served exactly above, and with the
-			// switch off case !provenswitch.On() staged it. Restrict the single
-			// global pool, the pre-Design-A behavior.
+			// any other pid under the switch was served exactly above, and with
+			// the switch off case !provenswitch.On() staged it. Restrict the
+			// single global pool, the pre-Design-A behavior.
 			a.logger.Debug("scope begin: restricting served pool to test", zap.String("test", name), zap.Int("mocks", len(names)))
 			params = models.MockFilterParams{
 				MockMapping:     names,
@@ -213,12 +218,12 @@ var ErrPidBeginWithoutMarks = errors.New("keploy narrows a test to its own mocks
 // keep per store (enterprise Redis, Memcached, Couchbase, HBase cursors) in
 // every run, those that begin without a pid included. With the marks, every
 // connection's view is resolved from the app starts on every read, whenever
-// it opened. Under the proven switch the wire refuses a pid (oldWireFields),
-// and a pid begin from within the agent would skip the test's exact serving,
-// so it is refused there too. A test with no mapping is served the whole
-// pool with a pid or without one, so its begin is not refused.
+// it opened. Under the proven switch every connection reads the manager's
+// exact view, which a begin with any pid serves exactly the test's own
+// mocks, so nothing is refused there. A test with no mapping is served the
+// whole pool with a pid or without one, so its begin is not refused.
 func (a *Agent) pidCannotScope(name string, pid int) bool {
-	if pid <= 0 || starts.Default.Active() {
+	if pid <= 0 || provenswitch.On() || starts.Default.Active() {
 		return false
 	}
 	a.scopeMu.Lock()
@@ -428,20 +433,22 @@ func (a *Agent) restorePool(ctx context.Context, name string, pid int) error {
 	a.scopeMu.Lock()
 	_, scoped := a.scopeTable[name]
 	a.scopeMu.Unlock()
-	// The proven wire narrowed even a test without a mapping entry.
-	if !scoped && !(pid == 0 && provenswitch.On()) {
+	// The proven wire narrowed even a test without a mapping entry, with a
+	// worker pid or without one (beginScopeAt).
+	exact := pid >= 0 && provenswitch.On()
+	if !scoped && !exact {
 		return nil
+	}
+	if exact {
+		// Between tests the proven wire serves the current key's pool
+		// slice (exact_proven.go).
+		a.logger.Debug("scope end: serving the pool slice of the current key", zap.String("test", name))
+		return a.servePoolExactly(ctx)
 	}
 	if pid > 0 {
 		a.logger.Debug("scope end: clearing worker scope", zap.String("test", name), zap.Int("worker", pid))
 		a.ClearWorkerScope(uint32(pid))
 		return nil
-	}
-	if pid == 0 && provenswitch.On() {
-		// Between tests the proven wire serves the current key's pool
-		// slice (exact_proven.go).
-		a.logger.Debug("scope end: serving the pool slice of the current key", zap.String("test", name))
-		return a.servePoolExactly(ctx)
 	}
 	a.logger.Debug("scope end: restoring whole pool", zap.String("test", name))
 	if !provenswitch.On() {
@@ -450,8 +457,8 @@ func (a *Agent) restorePool(ctx context.Context, name string, pid int) error {
 		return a.stageScope(ctx, nil, false)
 	}
 	// Only a negative pid under the switch, from an in-process caller,
-	// reaches here: pid 0 under the switch served its pool slice exactly
-	// above.
+	// reaches here: any other pid under the switch served its pool slice
+	// exactly above.
 	return a.UpdateMockParams(ctx, models.MockFilterParams{
 		AfterTime:  models.BaseTime,
 		BeforeTime: time.Now(),

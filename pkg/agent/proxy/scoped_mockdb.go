@@ -1315,6 +1315,7 @@ func (p *Proxy) SetMappedUniverse(names []string) {
 // pid begin cannot narrow a connection its app opened outside a test (its pool
 // at boot, or one opened between two tests), and keploy refuses a pid begin in
 // a run without the suite and app-start marks (service/agent pidCannotScope).
+// Under exact serving (below) a begin with any pid is served exactly.
 func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.MockMemDb {
 	if kpid == 0 || mgr == nil {
 		return mgr
