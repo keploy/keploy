@@ -123,3 +123,25 @@ func TestAComposeRunWithTheSwitchOffTellsTheAppsDieBeforeItsUpReturns(t *testing
 	}
 	<-ran
 }
+
+// The halt is told only when it is kept and its run's caller listens: a
+// halt under the switch is ended for runs that do not listen (keploy
+// record's), and a listener is told nothing until a halt is kept.
+func TestTheComposeHaltIsToldOnlyWhenKeptAndListenedFor(t *testing.T) {
+	a := composeApp(newComposeDocker(true, true))
+	a.composeApp.halted.Store(&composeHalt{exitCode: 3})
+	a.tellComposeHalt(context.Background())
+
+	var told []models.AppError
+	ctx := models.WithAppExit(context.Background(), func(e models.AppError) { told = append(told, e) })
+	a.composeApp.halted.Store(nil)
+	a.tellComposeHalt(ctx)
+	if len(told) != 0 {
+		t.Fatalf("told %+v with no halt kept", told)
+	}
+	a.composeApp.halted.Store(&composeHalt{exitCode: 3})
+	a.tellComposeHalt(ctx)
+	if len(told) != 1 || told[0].AppErrorType != models.ErrUnExpected || told[0].ExitCode != 3 {
+		t.Fatalf("told %+v; want the kept halt once, code 3", told)
+	}
+}

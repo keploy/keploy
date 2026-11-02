@@ -2,6 +2,7 @@ package replay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -175,6 +176,10 @@ func TestAnAppsExitWhileKeployReadiesAStreamingTestSendsItNot(t *testing.T) {
 type toldExitInstr struct {
 	*composeInstr
 	died chan models.AppError
+	// toldBack is closed once the exit is told: the tell is the runner's
+	// call to its caller's listener, which returns before the die's tell
+	// does.
+	toldBack chan struct{}
 }
 
 func (c *toldExitInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError {
@@ -183,6 +188,7 @@ func (c *toldExitInstr) Run(ctx context.Context, _ models.RunOptions) models.App
 		if told := models.AppExitOf(ctx); told != nil {
 			told(e)
 		}
+		close(c.toldBack)
 	case <-ctx.Done():
 	}
 	<-ctx.Done()
@@ -227,9 +233,9 @@ func runComposeExitMidTest(t *testing.T, on, serving bool, adjust func(*prRun, *
 		h.replayer.keptExit = kept
 		tell = func() { models.AppExitOf(ctx)(exit) }
 	} else {
-		told := &toldExitInstr{composeInstr: c, died: make(chan models.AppError, 1)}
+		told := &toldExitInstr{composeInstr: c, died: make(chan models.AppError, 1), toldBack: make(chan struct{})}
 		h.replayer.instrumentation = told
-		tell = func() { told.died <- exit }
+		tell = func() { told.died <- exit; <-told.toldBack }
 	}
 	app := &heldRequests{exitAt: "test-2", exit: tell, requests: map[string]int{}}
 	h.replayer.hookImpl = prHooks{onRequest: app.onRequest}
@@ -302,6 +308,72 @@ func haltedSetBeginsNoRetryCycle(t *testing.T, held string, on, serving bool) {
 	}
 	if n := r.app.count("test-1"); n != 1 {
 		t.Fatalf("test-1 was sent %d times; the set halted before any retry, so it is sent once", n)
+	}
+}
+
+// An app that exits holding a test fails that test's request (its
+// connection reset) before keploy learns of its exit: under compose the
+// app's die is told after the request failed. The test was never answered,
+// so the set halts naming it: here the die is told once keploy has filed
+// the test's failure, the set's last, for a stack the set brings up (whose
+// runner tells the die to the set as it comes).
+func TestAnExitToldAfterTheHeldTestsRequestFailedNamesThatTest(t *testing.T) {
+	for _, tc := range composeExitShapes {
+		if tc.serving {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			r := runComposeExitMidTest(t, tc.on, tc.serving, func(h *prRun, app *heldRequests) {
+				tell := app.exit
+				app.exitAt = ""
+				h.replayer.hookImpl = prHooks{onRequest: app.onRequest,
+					simErr: map[string]error{"test-3": errors.New("read tcp 172.18.0.3:8080: connection reset by peer")}}
+				h.report.afterInsert = func(name string) {
+					if name == "test-3" {
+						tell()
+					}
+				}
+			})
+			if r.status != models.TestSetStatusAppHalted {
+				t.Fatalf("status %s, want APP_HALTED", r.status)
+			}
+			reason := r.h.report.report.FailureReason
+			if !strings.Contains(reason, "it exited with code 3 before it answered test test-3") {
+				t.Fatalf("reason %q; want it to name the exit's code and test-3, whose request failed on the exit", reason)
+			}
+		})
+	}
+}
+
+// A run with no agent whose context ends after a cycle's last test, a test
+// of the cycle having failed, begins no mock-consistency retry: the set
+// ends on its user's stop, and the passing tests are not run again.
+func TestARunWithNoAgentEndedInAFailingCycleBeginsNoRetry(t *testing.T) {
+	const retrying = "Retrying passing test cases to validate mock consistency"
+	provenOn(t, false)
+	core, logs := observer.New(zapcore.InfoLevel)
+	h := newPartialRunHarness(t, 3, 0)
+	h.replayer.noAgent = true
+	h.replayer.config.RetryPassing = true
+	h.replayer.logger = zap.New(core)
+	app := &heldRequests{requests: map[string]int{}}
+	h.replayer.hookImpl = prHooks{wrongBody: map[string]bool{"test-2": true},
+		onRequest: func(ctx context.Context, tc *models.TestCase) error {
+			err := app.onRequest(ctx, tc)
+			if tc.Name == "test-3" {
+				h.cancel()
+			}
+			return err
+		}}
+
+	if status := h.run(t); status != models.TestSetStatusUserAbort {
+		t.Fatalf("status %s, want USER_ABORT", status)
+	}
+	if n := logs.FilterMessage(retrying).Len(); n != 0 {
+		t.Fatalf("%d retry cycles began after the run's context had ended; want none", n)
+	}
+	if n := app.count("test-1"); n != 1 {
+		t.Fatalf("test-1 was sent %d times; the set ended before any retry, so it is sent once", n)
 	}
 }
 
