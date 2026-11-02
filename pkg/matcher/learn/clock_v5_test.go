@@ -1843,8 +1843,8 @@ func TestAPhaseLockSpanningItsStepIsNoClockThroughTheOrder(t *testing.T) {
 // (dirtyAt <= now - 2s, last_active < now - 15s) is refused, naming that
 // the replay does not compare it, never handed to the window from the
 // test's begin, where a plain read since the begin would pass a dropped
-// look-back at every replay. A plain read made in its call's window, and
-// a time to live, read as before.
+// look-back at every replay. A plain read made in its call's window is
+// left to the plain read, as before.
 func TestALookBackAReplayDoesNotCompareIsRefusedNeverReadFromItsTestsBegin(t *testing.T) {
 	sec, ms := time.Second, time.Millisecond
 	const p = "body.filter.dirtyAt.$lte"
@@ -2058,5 +2058,171 @@ func TestAWholeMinuteLookBackInAWideWindowGetsOneVerdictAtEveryPhase(t *testing.
 	}
 	if len(verdicts) > 1 || len(verdicts[false]) > 0 {
 		t.Errorf("the verdict turns on the phase of the recording's call, or refuses it: learned at %v, refused at %v; want it learned at every phase, checked at the cut", verdicts[true], verdicts[false])
+	}
+}
+
+// An offset main's reading learned (no Step, so no Phase), of a +05:30
+// application that writes the start of its own hour plus two hours: its
+// values sit 30m past UTC's hour. A replay of the application's value
+// passes, and one whose time to live changed fails with main's reason,
+// naming no place within UTC's hour: the phase is a rule only of offsets
+// learned at a Step, and an old recording never learned where its values
+// sat.
+func TestAnOldRecordingsHourCutFailsNamingNoPhaseItNeverLearned(t *testing.T) {
+	ms, sec := time.Millisecond, time.Second
+	ist := time.FixedZone("+05:30", 5*3600+1800)
+	const p = "body.expires_at"
+	val := func(x time.Time, ttl time.Duration) time.Time { return models.ReadCut(x, time.Hour, ist).Add(ttl) }
+	for _, base := range []time.Time{time.Date(2026, 10, 26, 10, 29, 30, 0, time.UTC), time.Date(2026, 10, 26, 11, 29, 50, 0, time.UTC)} {
+		rec, f := v5Call(base, 61*ms, 20*ms), v5Call(base.Add(FullRoundLead), 61*ms, 20*ms)
+		rv, fv := val(rec.read, 2*time.Hour), val(f.read, 2*time.Hour)
+		o, why, ok := offsetReading(p, v5Instant(rv, sec), v5Instant(fv, sec), v5Window(rec, f), ist)
+		if !ok || o.Step != 0 || o.Phase != 0 || o.Res != time.Hour {
+			t.Fatalf("main's reading of cut_hour_IST(now) + 2h at %s: %+v %q %v; want it learned at the hour, with no Step", base.Format("15:04"), o, why, ok)
+		}
+		recText := strconv.FormatInt(rv.Unix(), 10)
+		for _, ttl := range []time.Duration{2 * time.Hour, 5 * time.Hour} {
+			s := Span{Zone: ist, Own: true, From: base.Add(48*time.Hour + 7*time.Minute)}
+			s.To = s.From.Add(61 * ms)
+			got, why := v5Check(p, o, recText, val(s.To.Add(-20*ms), ttl), s)
+			if got != (ttl == 2*time.Hour) {
+				t.Errorf("recorded at %s, a replay of a time to live of %s: %v (%s); want it to pass only the recorded time to live", base.Format("15:04"), ttl, got, why)
+			}
+			if strings.Contains(why, "UTC's whole hour") {
+				t.Errorf("FALSE REASON: recorded at %s, an old recording's replay of a time to live of %s names a place within UTC's hour it never learned: %q", base.Format("15:04"), ttl, why)
+			}
+		}
+	}
+}
+
+// A +05:30 application that cuts its read to its own day and subtracts 5h,
+// recorded across its midnight: its values stand a day apart and are cut
+// to the hour, 30m past UTC's, so it is a phase lock at the day's step,
+// read at the hour on that phase. A replay passes the application's value
+// at every phase of its day, and fails one moved onto UTC's day (cut to
+// UTC's midnight, less 5h), which a lock read off its phase passed at every
+// replay.
+func TestADayLockCutToTheHourInAZoneOffTheHourHoldsOnlyItsPhase(t *testing.T) {
+	ms, sec := time.Millisecond, time.Second
+	ist := time.FixedZone("+05:30", 5*3600+1800)
+	const p = "body.since"
+	app := func(x time.Time) time.Time { return models.ReadCut(x, 24*time.Hour, ist).Add(-5 * time.Hour) }
+	moved := func(x time.Time) time.Time { return models.ReadCut(x, 24*time.Hour, time.UTC).Add(-5 * time.Hour) }
+	call := time.Date(2026, 10, 26, 18, 29, 50, 0, time.UTC) // 23:59:50 in +05:30
+	rec, f := v5Call(call, 61*ms, 20*ms), v5Call(call.Add(FullRoundLead), 61*ms, 20*ms)
+	o, why, ok := clockInWindow(p, v5Instant(app(rec.read), sec), v5Instant(app(f.read), sec), v5Window(rec, f), ist)
+	if !ok || o.Step != 24*time.Hour || o.Res != time.Hour || o.Phase != 30*time.Minute {
+		t.Fatalf("cut_day_IST(now) - 5h across its midnight: %+v %q %v; want a lock at the day's step, read at the hour, 30m past UTC's", o, why, ok)
+	}
+	recText := strconv.FormatInt(app(rec.read).Unix(), 10)
+	for ph := time.Duration(0); ph < 24*time.Hour; ph += 37*time.Minute + 11*sec {
+		s := Span{Zone: ist, Own: true, From: call.Add(72*time.Hour + ph)}
+		s.To = s.From.Add(61 * ms)
+		read := s.To.Add(-20 * ms)
+		if got, why := v5Check(p, o, recText, app(read), s); !got {
+			t.Errorf("FALSE RED: a replay %s into the day, the application's value: %s", ph, why)
+		}
+		if got, why := v5Check(p, o, recText, moved(read), s); got {
+			t.Errorf("FALSE GREEN: a replay %s into the day passes a value moved onto UTC's day, %s (%s)", ph, moved(read).UTC().Format(time.RFC3339), why)
+		}
+	}
+}
+
+// An expiry at the start of the application's own day plus 30 days, in
+// +05:30, whose two runs fell on two of its days: learned at its own cut,
+// the day (Step and Res a day), checked in the application's zone. Its
+// values sit 30m past UTC's hour, which an own cut of a day never holds a
+// value to (only an hour's carries a Phase): a replay passes the
+// application's value at every phase of its day and fails a time to live
+// changed by three days and a dropped one (one changed by a day is within
+// the cut's stated slack).
+func TestAnOwnCutDayInAZoneOffTheHourPassesItsValueAtEveryPhase(t *testing.T) {
+	ms, sec, day := time.Millisecond, time.Second, 24*time.Hour
+	ist := time.FixedZone("+05:30", 5*3600+1800)
+	const p = "body.expires_at"
+	val := func(x time.Time, ttl time.Duration) time.Time { return models.ReadCut(x, day, ist).Add(ttl) }
+	for _, base := range []time.Time{time.Date(2026, 10, 26, 9, 40, 0, 0, time.UTC), time.Date(2026, 10, 26, 18, 10, 0, 0, time.UTC)} {
+		rec, f := v5Call(base, 61*ms, 20*ms), v5Call(base.Add(day+3*time.Hour), 61*ms, 20*ms)
+		o, why, ok := clockInWindow(p, v5Instant(val(rec.read, 30*day), sec), v5Instant(val(f.read, 30*day), sec), v5Window(rec, f), ist)
+		if !ok || o.Step != day || o.Res != day || o.Phase != 0 {
+			t.Errorf("recorded at %s, the start of its day in +05:30 plus 30 days: %+v %q %v; want it learned at its own cut, the day, with no phase", base.Format("15:04"), o, why, ok)
+			continue
+		}
+		recText := strconv.FormatInt(val(rec.read, 30*day).Unix(), 10)
+		for ph := time.Duration(0); ph < day; ph += 37*time.Minute + 11*sec {
+			s := Span{Zone: ist, Own: true, From: base.Add(72*time.Hour + ph)}
+			s.To = s.From.Add(61 * ms)
+			read := s.To.Add(-20 * ms)
+			if got, why := v5Check(p, o, recText, val(read, 30*day), s); !got {
+				t.Errorf("FALSE RED: recorded at %s, a replay %s later, the application's value: %s", base.Format("15:04"), ph, why)
+			}
+			for _, ttl := range []time.Duration{27 * day, 33 * day, 0} {
+				if got, _ := v5Check(p, o, recText, val(read, ttl), s); got {
+					t.Errorf("FALSE GREEN: recorded at %s, a replay %s later passes a time to live of %s", base.Format("15:04"), ph, ttl)
+				}
+			}
+		}
+	}
+}
+
+// The whole-minute look-back's rule one unit up: claimedAt <= cut_m(now) -
+// 1h, an epoch's seconds cut to the minute, carried to an idle recording
+// whose window runs two hours back. Whether keploy learns it must not turn
+// on where in its minute the call fell, and where it is learned a replay as
+// wide passes the application's value at every phase of the minute and a
+// dropped look-back at none.
+func TestAWholeHourLookBackAtTheMinuteInAWideWindowGetsOneVerdictAtEveryPhase(t *testing.T) {
+	sec, ms, min := time.Second, time.Millisecond, time.Minute
+	const p = "body.claimedAt.$lte"
+	f := v5Call(time.Date(2026, 10, 27, 1, 0, 0, 0, time.UTC), 5*ms, 2*ms)
+	base := time.Date(2026, 11, 2, 3, 53, 0, 0, time.UTC)
+	verdicts := map[bool][]time.Duration{}
+	for _, phase := range []time.Duration{343 * time.Microsecond, 900 * time.Microsecond, 1500 * time.Microsecond, 250 * ms, 15 * sec, 30 * sec, 59 * sec} {
+		rec := v5Call(base.Add(phase), 2*time.Hour, ms)
+		rv, lv := rec.read.Truncate(min).Add(-time.Hour), f.read.Truncate(min).Add(-time.Hour)
+		o, why, ok := clockInWindow(p, v5Instant(rv, sec), v5Instant(lv, sec), v5Window(rec, f), nil)
+		verdicts[ok] = append(verdicts[ok], phase)
+		if !ok {
+			t.Logf("call %v into its minute: refused, %.120q", phase, why)
+			continue
+		}
+		recText := strconv.FormatInt(rv.Unix(), 10)
+		for ph := time.Duration(0); ph < min; ph += 7*sec + 500*ms {
+			s := Span{From: base.Add(72*time.Hour + ph - 2*time.Hour), To: base.Add(72*time.Hour + ph)}
+			read := s.To.Add(-ms)
+			if got, why := v5Check(p, o, recText, read.Truncate(min).Add(-time.Hour), s); !got {
+				t.Errorf("FALSE RED: learned at a call %v into its minute, a replay %v into its minute, the application's value: %s", phase, ph, why)
+			}
+			if got, _ := v5Check(p, o, recText, read.Truncate(min), s); got {
+				t.Errorf("FALSE GREEN: learned at a call %v into its minute, a replay %v into its minute passes a dropped look-back", phase, ph)
+			}
+		}
+	}
+	if len(verdicts) > 1 || len(verdicts[false]) > 0 {
+		t.Errorf("the verdict turns on where in its minute the recording's call fell, or refuses it: learned at %v, refused at %v; want it learned at every phase, checked at the cut", verdicts[true], verdicts[false])
+	}
+}
+
+// The uncompared look-back's refusal at its exact bound: in two calls whose
+// windows start on a whole second, now - 2s (an epoch's seconds) stands
+// from 2.061 s before its call up to, not including, exactly one second
+// before its window's start: a range that ends exactly one cut back and
+// holds only the whole cut of 2 s, more than one cut. Where the call's
+// replay does not compare offsets it is refused, naming that, never left
+// to the test's begin.
+func TestALookBackOfTwoCutsEndingExactlyOneCutBackIsRefusedWhereNotCompared(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	const p = "body.filter.dirtyAt.$lte"
+	call := time.Date(2026, 10, 31, 9, 0, 0, 61e6, time.UTC)
+	fcall := call.Add(62 * sec)
+	span := func(at time.Time) Span { return Span{From: at.Add(-61 * ms), To: at, Began: at.Add(-20 * sec)} }
+	rv, lv := call.Add(-4*ms).Truncate(sec).Add(-2*sec), fcall.Add(-4*ms).Truncate(sec).Add(-2*sec)
+	compared := (&Window{Rec: span(call), F: span(fcall)}).ComparesOffsets()
+	if o, _, _, ok := offsetV5(v5Instant(rv, sec), v5Instant(lv, sec), compared, nil); !ok || o.Max != -sec || cutHi(o) != -2*sec {
+		t.Fatalf("the look-back's range: %+v %v; want it up to, not including, -1s, its one whole cut -2s", o, ok)
+	}
+	o, why, ok := clockInWindow(p, v5Instant(rv, sec), v5Instant(lv, sec), &Window{Rec: span(call), F: span(fcall)}, nil)
+	if ok || !strings.Contains(why, "this protocol's replay does not compare such an offset yet") {
+		t.Errorf("FALSE GREEN: now - 2s ending exactly one cut back, where a replay does not compare offsets: %+v %q %v; want it refused, naming that", o, why, ok)
 	}
 }
