@@ -2,11 +2,13 @@ package learn
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // sibRolesInsert is a recording of node-jwt's start-up INSERT of a role, on
@@ -46,6 +48,11 @@ func sibMySQLInsert(name, id, role, stamp string, at time.Time) *models.Mock {
 // against the recordings raw before it, with the call's recorded answer
 // resp, as a statement's learn step does (ClassifyGiven, no window).
 func sibCall(at time.Time, rec, live map[string]string, raw []Raw, resp ...Leaf) map[string]Learned {
+	return sibCallBy(ClassifyGiven, at, rec, live, raw, resp...)
+}
+
+// sibCallBy is sibCall by classify: ClassifyGiven, or ClassifyFollowing.
+func sibCallBy(classify func(*DriftCache, []string, Shape, Shape, time.Time, []Earlier, []Raw, []Leaf, *Window, GivenEarlier) []Learned, at time.Time, rec, live map[string]string, raw []Raw, resp ...Leaf) map[string]Learned {
 	r, l := Shape{Leaves: map[string]Leaf{}}, Shape{Leaves: map[string]Leaf{}}
 	var drift []string
 	for p, v := range rec {
@@ -55,7 +62,7 @@ func sibCall(at time.Time, rec, live map[string]string, raw []Raw, resp ...Leaf)
 	}
 	slices.Sort(drift)
 	out := map[string]Learned{}
-	for _, ln := range ClassifyGiven(clockedDrifts(), drift, l, r, at, nil, raw, resp, nil, nil) {
+	for _, ln := range classify(clockedDrifts(), drift, l, r, at, nil, raw, resp, nil, nil) {
 		out[ln.Recorded.Path] = ln
 	}
 	return out
@@ -239,5 +246,77 @@ func TestASiblingSetAsideTakesItsMomentsWithIt(t *testing.T) {
 	}
 	if ln := call(other, sibling); ln.Kind != KindVariable || ln.From.Mock != "mock-9" {
 		t.Errorf("a stamp found carried from another recording: learned %s from %q (%s); want carried from mock-9, as before", ln.Kind, ln.From.Mock, ln.Why)
+	}
+}
+
+// node-jwt sends its three role INSERTs at start-up at once, and Sequelize's
+// pool sends them on two connections or more: record's full round (F) may
+// take a later recorded one first, before it served its earlier siblings,
+// which its learn step has then not read yet. Under the rule a copy follows
+// its source (ClassifyFollowing) such a sibling's place is no source of the
+// stamp (F had not served it: the application sent the call first), and the
+// echo RETURNING gives stands beside it: the verdict is one in any order F
+// took the statements in. Before, the echo was refused beside a source set
+// aside, or, beside a sibling learned as an echo, the stamp was carried
+// from that sibling. It fails closed: an echo beside an unserved recording
+// that states no role, one that holds another value, one learned in another
+// role, or any other recording set aside, is refused as before.
+func TestAnEqualStampBesideASiblingFHadNotServedIsAnEcho(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	first := time.Date(2026, 11, 2, 3, 52, 27, 62_000_000, time.UTC)
+	at := first.Add(5 * time.Millisecond)
+	const same, other = "2026-11-02 03:52:27.056 +00:00", "2026-11-02 03:52:27.051 +00:00"
+	role := func(kind Kind, v string) map[string]SiblingRole {
+		return map[string]SiblingRole{"bind.$3": {Kind: kind, Value: v}, "bind.$4": {Kind: kind, Value: v}}
+	}
+	// A sibling's recorded answer holds its timestamptz cells in Postgres's
+	// own spelling; the call's answer is handed to the classifier as its
+	// protocol's learn step reads an echo, written back from the bind.
+	const cell = "2026-11-02 03:52:27.056+00"
+	insert := func(name, id, role string, at time.Time) *models.Mock {
+		m := sibRolesInsert(name, id, role, same, at)
+		row := m.Spec.PostgresV3.Query.Response.Rows[0]
+		row[2].Value, row[3].Value = cell, cell
+		return m
+	}
+	served := RawOf(insert("mock-16", "1", "user", first), true).ServedAs(1)
+	unserved := RawOf(insert("mock-17", "2", "moderator", first.Add(2*time.Millisecond)), false)
+	unserved16 := RawOf(insert("mock-16", "1", "user", first), false)
+	resp := []Leaf{{Path: "row.1.createdAt", Type: String, Value: same}, {Path: "row.1.updatedAt", Type: String, Value: same}}
+	live := sibLive(same, sequelize)
+	call := func(raw ...Raw) map[string]Learned {
+		return sibCallBy(ClassifyFollowing, at, map[string]string{"bind.$3": same, "bind.$4": same}, map[string]string{"bind.$3": live, "bind.$4": live}, raw, resp...)
+	}
+	want := []string{"row.1.createdAt", "row.1.updatedAt"}
+	for _, row := range []struct {
+		what string
+		raw  []Raw
+	}{
+		{"the sibling F served learned as an echo, the other unread", []Raw{served.Sibling(role(KindEcho, same)), unserved.Sibling(role("", same))}},
+		{"one sibling, unread", []Raw{unserved.Sibling(role("", same))}},
+		{"two siblings, both unread", []Raw{unserved16.Sibling(role("", same)), unserved.Sibling(role("", same))}},
+		{"one sibling F had not served, learned as an echo already", []Raw{unserved.Sibling(role(KindEcho, same))}},
+	} {
+		got := call(row.raw...)
+		for _, p := range []string{"bind.$3", "bind.$4"} {
+			if ln := got[p]; ln.Kind != KindEcho || !slices.Equal(echoPaths(ln), want) {
+				t.Errorf("%s: %s learned %s %v from %q (%s); want an echo answered at %v", row.what, p, ln.Kind, echoPaths(ln), ln.From.Mock, ln.Why, want)
+			}
+		}
+	}
+	for _, row := range []struct {
+		what string
+		raw  []Raw
+	}{
+		{"no role stated", []Raw{unserved}},
+		{"stated unread with another value", []Raw{unserved.Sibling(role("", other))}},
+		{"learned as noise", []Raw{unserved.Sibling(role(KindNoise, same))}},
+		{"beside an unread sibling, an unserved recording that is none", []Raw{unserved16, unserved.Sibling(role("", same))}},
+	} {
+		for p, ln := range call(row.raw...) {
+			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "an echo keploy cannot answer beside a source it set aside") {
+				t.Errorf("FALSE GREEN? %s: %s learned %s from %q (%s); want the echo refused beside a source set aside, as before", row.what, p, ln.Kind, ln.From.Mock, ln.Why)
+			}
+		}
 	}
 }

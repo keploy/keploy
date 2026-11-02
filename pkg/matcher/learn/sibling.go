@@ -31,9 +31,25 @@ package learn
 //     reading is taken only where it learns the sibling's role: a reading
 //     that finds another source, or refuses, or learns another kind, leaves
 //     the value carried from the sibling, as before.
+//
+// A sibling record's full round had not served before the call has not been
+// learned yet: the application sent its statements at once, on two pooled
+// connections or more, and F took them in another order than the recording
+// shows. Under the rule a copy follows its source (ClassifyFollowing) such a
+// place is no source of the value (follows.notServed): in F the application
+// sent the call first. An echo is refused beside a source the search set
+// aside; beside a sibling's place set aside so, it stands, where every place
+// the search went past is such a sibling's, holding the call's recorded
+// value at the call's own leaf, its learn step has stated it unread there or
+// learned it as the same echo, and no word was let go nor leaf set aside
+// on the way (pastSiblingsOnly). Otherwise the echo is refused as before.
+// Without it, the verdict hung on which connection F's pool sent first.
 
 // SiblingRole is what a sibling's learn step learned one of its places as
-// (Raw.Sibling): its kind, and the value the sibling recorded there.
+// (Raw.Sibling): its kind, and the value the sibling recorded there. Kind ""
+// states the place unread: the sibling's learn step has read none of its
+// places yet, and every place of it that holds Value is one the call holds
+// its own recorded value at too.
 type SiblingRole struct {
 	Kind  Kind
 	Value string
@@ -97,4 +113,36 @@ func siblingsAside(raw []Raw, r Leaf, from Place) (own []Raw, role Kind, ok bool
 		}
 	}
 	return own, role, true
+}
+
+// pastSiblingsOnly reports whether every place the search for the value of
+// r went past (refutedOf: classifyRead asks only where it went past one) is
+// a sibling's that record's full round had not served before the call
+// (follows.notServed), holding r's recorded value at r's own leaf, stated
+// there unread or learned as kind; and that the search let no word go
+// (first) and set no leaf aside (aside).
+func (f *follows) pastSiblingsOnly(raw []Raw, r Leaf, kind Kind) bool {
+	if f.first != "" || f.aside != "" {
+		return false
+	}
+	for mock := range f.refutedOf {
+		if !f.unserved[mock] {
+			return false
+		}
+		found := false
+		for _, x := range raw {
+			if x.mock != mock {
+				continue
+			}
+			sr, ok := x.roles[r.Path]
+			if !ok || sr.Value != r.Value || sr.Kind != "" && sr.Kind != kind {
+				return false
+			}
+			found = true
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }

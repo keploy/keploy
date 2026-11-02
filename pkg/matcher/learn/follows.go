@@ -140,6 +140,9 @@ type follows struct {
 	// why (refutedAll); refutedOf are the mocks of all of them.
 	refutes   []refutedPlace
 	refutedOf map[string]bool
+	// unserved are the mocks of refutedOf the search went past as places
+	// record's full round had not served before the call (notServed).
+	unserved map[string]bool
 	// aside, where the search for the value's source went past a leaf that
 	// held its recorded value whole and that F saw hold another value
 	// (refuteSeen), names the first such leaf: what a value learned as noise
@@ -293,6 +296,10 @@ func (f *follows) notServed(x Raw, texts [2]string, v *valueDrift, p Place) bool
 		}
 	}
 	f.wentPast(x.mock, "its recorded value stands whole in "+placeAt(p)+", which the application sent there and record's full round had not served before this call: in that round the application sent this call first, and two reads of the clock in one second are a coincidence, not dataflow, so the value is no copy of it")
+	if f.unserved == nil {
+		f.unserved = map[string]bool{}
+	}
+	f.unserved[x.mock] = true
 	return true
 }
 

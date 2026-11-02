@@ -1767,6 +1767,11 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					ln.Why = fol.chance + ", and keploy learns it as varying"
 				}
 			case KindEcho:
+				// Past its own siblings alone, which F had not served
+				// before the call, the echo stands (sibling.go).
+				if fol.pastSiblingsOnly(all, r, KindEcho) {
+					break
+				}
 				why := fol.first
 				if why == "" {
 					why = fol.refuted + "; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside"
