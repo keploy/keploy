@@ -106,8 +106,12 @@ func b64Text(s string, clock map[string]bool) string { return b64Read(s, clock, 
 // three reads whose answer it knows: the one part of a run with no '/' is
 // the run (no run holds a '.': nextB64Run ends one there), its glued spans
 // are none where it has no group of '-' or '_', and no word is in an empty
-// clock. everySplit makes those reads all the same: only the row that holds
-// b64Text to them sets it.
+// clock. And it keeps, of the runs it tried, only those that decoded
+// (seen): a run that did not decodes to nothing whenever it is tried again
+// (decodeText and the clock's words read c alone), and keeping each was
+// about a third of b64Read's CPU on a payload of words that are no text
+// (the bound row's). everySplit makes those reads all the same and keeps
+// every run tried: only the row that holds b64Text to them sets it.
 func b64Read(s string, clock map[string]bool, everySplit bool) string {
 	var sb strings.Builder
 	seen := map[string]bool{}
@@ -118,11 +122,14 @@ func b64Read(s string, clock map[string]bool, everySplit bool) string {
 			if len(c) < minEncodedRun || seen[c] || (everySplit || len(clock) > 0) && allIn(tokensBy(c, isWord), clock) {
 				return false
 			}
-			seen[c] = true
+			if everySplit {
+				seen[c] = true
+			}
 			t, ok := decodeText(c)
 			if !ok {
 				return false
 			}
+			seen[c] = true
 			raw := t
 			t = unescaped(raw)
 			if q := qpForm(raw); q != t {
@@ -148,7 +155,7 @@ func b64Read(s string, clock map[string]bool, everySplit bool) string {
 			if whole {
 				return true
 			}
-			if !everySplit && !strings.ContainsAny(run, "-_") {
+			if !everySplit && strings.IndexByte(run, '-') < 0 && strings.IndexByte(run, '_') < 0 {
 				return false
 			}
 			// Its longest parts between groups of '-' and '_' that are text,
@@ -204,7 +211,7 @@ func b64Read(s string, clock map[string]bool, everySplit bool) string {
 						}
 					}
 				}
-				for _, part := range strings.FieldsFunc(tx, func(r rune) bool { return r == '.' }) {
+				for part := range strings.SplitSeq(tx, ".") {
 					if isB64Run(part) {
 						try(part)
 					}
@@ -583,7 +590,7 @@ func b64Byte(c byte) bool {
 // decodes otherwise is a word far more often than an encoded value (its
 // decode is garbage that would refuse fresh ids).
 func decodeText(c string) (string, bool) {
-	if hexRun.MatchString(c) && len(c)%2 == 0 {
+	if isHexRun(c) && len(c)%2 == 0 {
 		if b, err := hex.DecodeString(c); err == nil && isASCIIText(b) {
 			return string(b), true
 		}
@@ -596,7 +603,7 @@ func decodeText(c string) (string, bool) {
 
 // b32Decode decodes s as base32 in one case, padded or not.
 func b32Decode(s string) ([]byte, bool) {
-	if !b32Run.MatchString(s) && !b32Lower.MatchString(s) {
+	if !isB32Run(s, 'A', 'Z') && !isB32Run(s, 'a', 'z') {
 		return nil, false
 	}
 	b, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.TrimRight(strings.ToUpper(s), "="))
@@ -625,11 +632,35 @@ const minEncodedRun = 8
 // "ord-<id>" are words far more often than encoded values.
 const minGluedRun = 16
 
-var (
-	hexRun   = regexp.MustCompile(`^[0-9a-fA-F]+$`)
-	b32Run   = regexp.MustCompile(`^[A-Z2-7]+=*$`)
-	b32Lower = regexp.MustCompile(`^[a-z2-7]+=*$`)
-)
+// isHexRun is whether s is hex digits whole, one or more, of either case
+// (the pattern ^[0-9a-fA-F]+$). decodeText reads every run of a payload,
+// and the pattern's match was a tenth of learning a big one.
+func isHexRun(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if !isHex(s[i]) {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// isB32Run is whether s is a run of base32's alphabet in one case, its
+// letters from lo to hi ('A' to 'Z', or 'a' to 'z') and the digits 2 to 7,
+// one or more, then its padding, none or more '=' (the pattern
+// ^[A-Z2-7]+=*$, or ^[a-z2-7]+=*$).
+func isB32Run(s string, lo, hi byte) bool {
+	i := 0
+	for i < len(s) && (s[i] >= lo && s[i] <= hi || s[i] >= '2' && s[i] <= '7') {
+		i++
+	}
+	if i == 0 {
+		return false
+	}
+	for i < len(s) && s[i] == '=' {
+		i++
+	}
+	return i == len(s)
+}
 
 // b64Decode decodes s in any base64 variant to text: valid UTF-8 with no
 // control characters but whitespace, its padding read leniently. Binary (a
