@@ -195,7 +195,9 @@ func answerPool(t *testing.T, n int) []*models.Mock {
 
 // TestAnswersAreMainsAnswers serves every mock of pools of 100, 1k and 10k
 // three times (built, built and kept, written from the kept bytes) with the
-// proven switch off and on, and compares each answer with main's.
+// proven switch off and on, and compares each answer with main's. The mocks
+// share no state but the kept answers, which the agent's calls serve at once,
+// so each pool's are served in shards at once (inShards).
 func TestAnswersAreMainsAnswers(t *testing.T) {
 	for _, proven := range []bool{false, true} {
 		for _, n := range []int{100, 1_000, 10_000} {
@@ -203,7 +205,8 @@ func TestAnswersAreMainsAnswers(t *testing.T) {
 				t.Setenv(provenswitch.Env, map[bool]string{false: "0", true: "1"}[proven])
 				h := newHTTP()
 				pool := answerPool(t, n)
-				for _, m := range pool {
+				inShards(t, len(pool), func(t *testing.T, i int) {
+					m := pool[i]
 					want, err := mainBuildMockResponseBytes(h, m)
 					if err != nil {
 						t.Fatalf("%s: main: %v", m.Name, err)
@@ -226,7 +229,7 @@ func TestAnswersAreMainsAnswers(t *testing.T) {
 						t.Fatal(err)
 					}
 					sameAnswer(t, m.Name+" copy", want, got)
-				}
+				})
 			})
 		}
 	}

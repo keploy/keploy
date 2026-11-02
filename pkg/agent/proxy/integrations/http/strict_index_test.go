@@ -1290,7 +1290,8 @@ func (d *lockedGenDb) MockSpent(name string) bool {
 // answered with a twin of its own, and verify mode never panics. (It
 // panicked in about one run of a hundred, more under -race: its two reads of
 // a twin's account straddled the other call's consume.) Under -race the
-// row is also the verify path's race check.
+// row is also the verify path's race check. Each run has a handler and a
+// store of its own, so the runs go in shards at once (inShards).
 func TestTwoIdenticalCallsAtOnceAreAnsweredInVerifyMode(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	verifyOff(t)
@@ -1299,7 +1300,7 @@ func TestTwoIdenticalCallsAtOnceAreAnsweredInVerifyMode(t *testing.T) {
 	if raceOn {
 		runs = 500
 	}
-	for run := 0; run < runs; run++ {
+	inShards(t, runs, func(t *testing.T, run int) {
 		h, db := newHTTP(), &lockedGenDb{ownGenDb: newOwnGenDb(strictTwins(), nil)}
 		strictMatchOf(t, h, strictCall(0), db, db, nil)
 		strictMatchOf(t, h, strictCall(1), db, db, nil)
@@ -1334,5 +1335,5 @@ func TestTwoIdenticalCallsAtOnceAreAnsweredInVerifyMode(t *testing.T) {
 		if served[0] == nil || served[1] == nil || served[0].Name == served[1].Name {
 			t.Fatalf("run %d: served %v and %v; want a twin each", run, served[0], served[1])
 		}
-	}
+	})
 }
