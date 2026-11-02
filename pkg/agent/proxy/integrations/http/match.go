@@ -98,6 +98,11 @@ type matchDiag struct {
 	// recording of the call the walk holds has answered (answeredSequence),
 	// and the report says so, whatever else the cascade found.
 	answered *answeredSequence
+	// refused is, when every recording the call had was one whose claim the
+	// store refused (matchCascade's refused), the last of them: the miss
+	// names it and the refusal, never "no mocks", for the store holds the
+	// recording.
+	refused *models.Mock
 }
 
 // match returns (matched, mock, diag, err). diag is non-nil only when
@@ -210,11 +215,13 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 	// staged in the per-test tier) spun the call at full CPU, never
 	// answered.
 	var refused map[*models.Mock]struct{}
+	var lastRefused *models.Mock
 	refuse := func(m *models.Mock) {
 		if refused == nil {
 			refused = make(map[*models.Mock]struct{})
 		}
 		refused[m] = struct{}{}
+		lastRefused = m
 	}
 	for {
 		if ctx.Err() != nil {
@@ -309,6 +316,11 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		}
 
 		if len(unfilteredMocks) == 0 {
+			if lastRefused != nil {
+				// The store holds the call's recordings and refused each
+				// claim: the miss says so (refusedMissReport).
+				return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(refused), refused: lastRefused}, nil
+			}
 			return false, nil, &matchDiag{phase: models.MatchPhaseNoMocks}, nil
 		}
 
@@ -2346,6 +2358,10 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		// miss's shape writes {} (models.MissShape).
 		return variableMismatchReport(request, liveBody, dest, request.Method+" "+request.URL.EscapedPath(), diag, httpMocks, variableTable(mockDb))
 	}
+	if diag != nil && diag.refused != nil {
+		return withRoutePlaces(refusedMissReport(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).WithDestination(dest), diag.refused.Name, diag.candidates),
+			request, nil, nil, variableTable(mockDb))
+	}
 
 	phase := models.MatchPhaseExhausted
 	candidateCount := len(httpMocks)
@@ -2618,4 +2634,17 @@ func mockNamesOf(mocks []*models.Mock) []string {
 		names[i] = m.Name
 	}
 	return names
+}
+
+// refusedMissReport finishes the report of a call whose every recording was
+// one the store refused this call's claim of (matchDiag.refused): it names
+// the last of them as the closest, and says the store holds it and would not
+// hand it over, for "no mocks" would send the reader to record again a
+// recording that is there.
+func refusedMissReport(b *mismatch.Builder, name string, refused int) *models.MockMismatchReport {
+	return b.WithPhase(models.MatchPhaseExhausted, refused).
+		WithClosest(name, nil).
+		WithDiff("the call matched " + name + ", and the mock store refused to hand it over: another call took it first, or it already answered").
+		WithNextSteps("The recording " + name + " fits this call, but another call took it first or it already answered in this test. If the test now makes this call more times than it was recorded, record the test again.").
+		Build()
 }

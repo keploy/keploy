@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -62,12 +63,22 @@ func TestAClaimTheStoreRefusesEndsTheCall(t *testing.T) {
 			h.Set("Host", "api") // under the proven switch the authority is compared
 			h.Set("Content-Type", tc.contentType)
 			live := &req{method: "POST", url: &url.URL{Path: "/q"}, header: h, body: []byte(tc.live), raw: []byte("POST /q HTTP/1.1\r\nHost: api\r\n\r\n" + tc.live)}
-			ok, stub, _, err := newHTTP().match(context.Background(), live, db, nil, nil, nil, true, false, false, true, true)
+			hp := newHTTP()
+			ok, stub, diag, err := hp.match(context.Background(), live, db, nil, nil, nil, true, false, false, true, true)
 			if err != nil || ok || stub != nil {
 				t.Fatalf("match: ok %v, served %v, err %v; want a miss", ok, stub != nil, err)
 			}
 			if db.updateUnFilteredMockOld != m {
 				t.Fatalf("the pass under test never claimed the recording (claimed %v): the row does not reach its claim", db.updateUnFilteredMockOld)
+			}
+			// The miss names the refused recording and the refusal, never
+			// "no mocks": the store holds the recording.
+			if diag == nil || diag.refused != m || diag.phase != models.MatchPhaseExhausted || diag.candidates != 1 {
+				t.Fatalf("diag %+v; want the refused recording, phase %s, 1 candidate", diag, models.MatchPhaseExhausted)
+			}
+			r := hp.buildHTTPMismatchReport(&http.Request{Method: "POST", URL: &url.URL{Path: "/q"}, Host: "api", Header: h}, []byte(tc.live), db, nil, nil, nil, diag)
+			if r.MatchPhase != models.MatchPhaseExhausted || r.ClosestMock != "refused" || !strings.Contains(r.Diff, "refused to hand it over") || !strings.Contains(r.NextSteps, "another call took it first") {
+				t.Fatalf("report phase %q, closest %q, diff %q, next %q; want the refusal named", r.MatchPhase, r.ClosestMock, r.Diff, r.NextSteps)
 			}
 		})
 	}
