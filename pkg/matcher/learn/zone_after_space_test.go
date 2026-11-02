@@ -206,4 +206,32 @@ func TestATimeThenASumIsTheTimeAloneInEveryReading(t *testing.T) {
 			t.Errorf("%q holds 2026-11-01 10:00:00 whole: %v, want %v", tc.text, got, tc.whole)
 		}
 	}
+	// The instant a text starts with reaches the time's end, not the sum's
+	// (clockReach), and a window's instant left over pairs with the same
+	// time after the window, a sum after it, as with itself (clockPairsAfter);
+	// with a zone after it, it is another instant.
+	for _, tc := range []struct {
+		text  string
+		reach int
+	}{
+		{"2026-11-01 10:00:00 -1400.00", 19},
+		{"2026-11-01 10:00:00 +05:30,5", 19},
+		{"2026-11-01 10:00:00 +05:30", 26},
+	} {
+		if got := clockReach(tc.text, 0); got != tc.reach {
+			t.Errorf("the instant at the start of %q reaches byte %d; want %d", tc.text, got, tc.reach)
+		}
+	}
+	const window = "w 2026-11-01 10:00:00"
+	for _, tc := range []struct {
+		after string
+		pairs bool
+	}{
+		{" paid 2026-11-01 10:00:00 -1400.00", true},
+		{" paid 2026-11-01 10:00:00 +05:30", false},
+	} {
+		if s := window + tc.after; clockPairsAfter(clockLayouts[1], s, len(window), s, [][]int{{2, 21}}) != tc.pairs {
+			t.Errorf("%q after the window's 2026-11-01 10:00:00 pairs with it: %v, want %v", tc.after, !tc.pairs, tc.pairs)
+		}
+	}
 }
