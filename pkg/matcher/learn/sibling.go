@@ -1,5 +1,7 @@
 package learn
 
+import "go.keploy.io/server/v3/pkg/models"
+
 // A field keeps one learned role across its sibling places. A sibling is a
 // recording of the same call as the one being classified: the same
 // statement, on the same connection or in one recorded scope (one test, or
@@ -44,6 +46,40 @@ package learn
 // learned it as the same echo, and no word was let go nor leaf set aside
 // on the way (pastSiblingsOnly). Otherwise the echo is refused as before.
 // Without it, the verdict hung on which connection F's pool sent first.
+
+// A call's siblings start no clock window of each other's. A call's window
+// (CallWindowFrom, LiveSpan) starts at the previous call keploy served: the
+// application read its clock after that call was answered. An application
+// that stamps a burst of one statement reads its clock for every call of
+// the burst at once, then sends them queued one behind another (node-jwt's
+// role INSERTs: Sequelize reads JavaScript's Date once per role in one tick
+// under Promise.all, then sends each INSERT when the one before it on the
+// connection was answered). Each call after the burst's first then made its
+// read before the call ahead of it reached keploy: its window, started at
+// that serve, refused its own read of the clock as "it changed", and the
+// learn step's own reading of it found no read in its window either. So a
+// serve of a sibling, as the protocol's sibling rule tells it (Siblings: the
+// same statement, on the same connection or in one recorded scope, never
+// another statement), starts no window of the call, in a replay
+// (LiveSpanOfSiblings) and in the learn step alike (CallWindowFromSiblings,
+// with the recording's half from NewPreviousCallOf). The learn step's second
+// reading already sets the siblings' places aside (Raw.Sibling); the window
+// now agrees with it, and a replay agrees with the learn step.
+//
+// It fails closed: a read made before the latest serve that is not a
+// sibling's is still refused, as is a read queued behind a call of another
+// statement, and a call no rule names siblings of keeps its window. Its
+// cost, the kind accepted for clocks cut coarser than a call: inside a
+// burst of one statement, a stale stamp read after the latest serve that
+// is not a sibling's passes.
+
+// Siblings says whether a recording is a sibling of one call, by its
+// protocol's sibling rule: the same statement, on the same connection or in
+// one recorded scope. The tracker asks it holding its own lock, of the
+// recordings the store served (servedInstant.m) and of those a learn step
+// sees (PreviousCall.See): it must read only the recording, never call back
+// into the tracker. A nil Siblings names no sibling.
+type Siblings func(*models.Mock) bool
 
 // SiblingRole is what a sibling's learn step learned one of its places as
 // (Raw.Sibling): its kind, and the value the sibling recorded there. Kind ""
