@@ -2,6 +2,7 @@ package learn
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +64,26 @@ func (r concurrentRun) tracker(client bool) *Tracker {
 	return tr
 }
 
+// concurrentRead is a value a row checks at the upsert, and whether the
+// replay's check passes it.
+type concurrentRead struct {
+	what string
+	v    time.Time
+	ok   bool
+}
+
+// reads are the values the rows check at the upsert, on the app's clock.
+func (r concurrentRun) reads() []concurrentRead {
+	return []concurrentRead{
+		{"the handler's read, before the consumer's serves", r.appRead, true},
+		{"a read at the move's end", r.recBegin, true},
+		{"a read at the upsert's arrival", r.upTo.Add(r.move.offset), true},
+		{"a read of the clock before the move", r.read, false},
+		{"a value two cuts before the test's begin", r.recBegin.Add(-2 * time.Millisecond), false},
+		{"a value more than a cut after the arrival", r.upTo.Add(r.move.offset + 2*time.Millisecond), false},
+	}
+}
+
 // A call's span on the app's clock starts no later than where its test
 // began: another goroutine's call that keploy serves after the test began
 // (a consumer beside the test's handler) can be served between a read of
@@ -72,10 +93,9 @@ func (r concurrentRun) tracker(client bool) *Tracker {
 // keploy after the consumer's two calls were served: the replay's check
 // (record's confirming round, and keploy test) passes it, in a server test
 // and in a client test alike, as it passes a read at the move itself and
-// one at the call's arrival. A value outside
-// the test's span is refused as before: a read of the clock before the
-// move (the previous test's), a value a millisecond before the recorded
-// begin's cut and less a cut, and one more than a cut after the arrival.
+// one at the call's arrival. A value outside the test's span is refused as
+// before: a read of the clock as it ran before the move, a value two cuts
+// before the test's begin, and one more than a cut after the arrival.
 func TestAConcurrentServeAfterTheReadDoesNotNarrowItsCallsSpan(t *testing.T) {
 	r := newConcurrentRun()
 	const p = "body.docs.msgs[].u.{}.created"
@@ -90,20 +110,40 @@ func TestAConcurrentServeAfterTheReadDoesNotNarrowItsCallsSpan(t *testing.T) {
 		if got := at(r.appRead).Value; !strings.HasSuffix(got, ":33.934Z") {
 			t.Fatalf("the handler's read writes %s; want the .934 cut", got)
 		}
-		for _, c := range []struct {
-			what string
-			v    time.Time
-			ok   bool
-		}{
-			{"the handler's read, before the consumer's serves", r.appRead, true},
-			{"a read at the move's end", r.recBegin, true},
-			{"a read at the upsert's arrival", r.upTo.Add(r.move.offset), true},
-			{"a read of the clock before the move", r.read, false},
-			{"a read of the previous test, on the moved clock", r.recBegin.Add(-2 * time.Millisecond), false},
-			{"a value more than a cut after the arrival", r.upTo.Add(r.move.offset + 2*time.Millisecond), false},
-		} {
+		for _, c := range r.reads() {
 			if ok, why := CheckClockRead(p, read, at(c.v), s, true); ok != c.ok {
 				t.Errorf("client %v: %s (%s): ok %v (%s); want %v", client, c.what, at(c.v).Value, ok, why, c.ok)
+			}
+		}
+	}
+}
+
+// A word read (one word of a text, here the millisecond count in an event's
+// id, learned as a plain read of the clock) is checked from its test's begin
+// as a whole value is: the same values, in the same timeline, pass and are
+// refused, in a server test and in a client test alike. The word stands
+// where it was recorded in every text here, so each refusal is the clock
+// check's.
+func TestAWordReadIsCheckedFromItsTestsBeginPastAnotherGoroutinesServes(t *testing.T) {
+	r := newConcurrentRun()
+	const p = "body.msg"
+	text := func(v time.Time) string { return "evt-" + strconv.FormatInt(v.UnixMilli(), 10) + "-sqs" }
+	if got := text(r.appRead); !strings.HasSuffix(got, "934-sqs") {
+		t.Fatalf("the handler's read writes %s; want the .934 cut", got)
+	}
+	read := models.ClockOffset{Res: time.Millisecond, Word: sides{"evt-", "-sqs"}.at(t, text(r.recBegin))}
+	for _, client := range []bool{false, true} {
+		s, ok := ClockSpanFrom(WithTracker(context.Background(), r.tracker(client)), r.upTo)
+		if !ok {
+			t.Fatalf("client %v: no span for the upsert", client)
+		}
+		for _, c := range r.reads() {
+			live := Leaf{Path: p, Noise: p, Type: String, Value: text(c.v)}
+			ok, why := CheckClockRead(p, read, live, s, true)
+			if ok != c.ok {
+				t.Errorf("client %v: %s (%s): ok %v (%s); want %v", client, c.what, live.Value, ok, why, c.ok)
+			} else if !ok && !strings.Contains(why, "not a read of the application's clock made in this call's window") {
+				t.Errorf("client %v: %s (%s): refused with %q; want the clock check's refusal", client, c.what, live.Value, why)
 			}
 		}
 	}
