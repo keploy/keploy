@@ -5,6 +5,7 @@ package testnet
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"os"
@@ -129,6 +130,72 @@ func OpenShared(network, addr string) (net.Listener, error) {
 // binds beside the hold.
 func SharedListenConfig() net.ListenConfig {
 	return net.ListenConfig{Control: setReusePort}
+}
+
+// UnlistedPort returns a port P that this network namespace's socket tables
+// (/proc/net/tcp, tcp6, udp and udp6, and sock_diag's dumps) list no socket
+// at, and that no other socket is given for the test's life: P lies below
+// net.ipv4.ip_local_port_range, the range a bind to port 0 and a connect
+// are given a port from (IPv6 shares it), and at or above 1024; P is held at
+// TCP, at every address, by a socket that only binds, which the tables leave
+// out. No
+// socket is at P on UDP when it returns; a socket that names P can still
+// bind it there. It is for a test that reads those tables: a port it freed
+// by closing a socket could be given to another socket at once.
+func UnlistedPort(t *testing.T) int {
+	t.Helper()
+	b, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
+	require.NoError(t, err)
+	f := strings.Fields(string(b))
+	require.Len(t, f, 2, "ip_local_port_range is %q", b)
+	first, err := strconv.Atoi(f[0])
+	require.NoError(t, err)
+	port, err := unlistedPort(t, 1024, first)
+	require.NoError(t, err)
+	return port
+}
+
+// unlistedPort is UnlistedPort over the ports [from, below), highest first:
+// it returns the first one it can hold at TCP and finds free at UDP. A port
+// it held and then found taken at UDP stays held until the test ends.
+func unlistedPort(t *testing.T, from, below int) (int, error) {
+	t.Helper()
+	for port := below - 1; port >= from; port-- {
+		_, err := bindHold(t, "tcp", "::", port, false)
+		if addrAbsent(err) {
+			_, err = bindHold(t, "tcp", "0.0.0.0", port, false)
+		}
+		if errors.Is(err, syscall.EADDRINUSE) {
+			continue // another socket is at the port at TCP
+		}
+		if err != nil {
+			return 0, err
+		}
+		free, err := udpFree(port)
+		if err != nil {
+			return 0, err
+		}
+		if free {
+			return port, nil
+		}
+	}
+	return 0, fmt.Errorf("no port from %d to below %d is free at both TCP and UDP", from, below)
+}
+
+// udpFree reports whether no UDP socket is at port, at any address: a
+// socket of its own binds it at every address and closes.
+func udpFree(port int) (bool, error) {
+	pc, err := net.ListenPacket("udp", net.JoinHostPort("::", strconv.Itoa(port)))
+	if addrAbsent(err) {
+		pc, err = net.ListenPacket("udp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(port)))
+	}
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, pc.Close()
 }
 
 // setReusePort is a net.ListenConfig Control that sets SO_REUSEPORT on the

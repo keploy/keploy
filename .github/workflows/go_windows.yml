@@ -64,9 +64,11 @@ jobs:
       #                       and the macOS one can run it; upstream_test.go
       #                       checks the numbering by what was read. Neither
       #                       had run on Windows before this job.
-      #   ./internal/testnet  the ports ./pkg and ./pkg/neterr hold for their
-      #                       refused dials: a connection's local end here,
-      #                       with SO_REUSEADDR on the tests' own listeners.
+      #   ./internal/testnet  the ports ./pkg, ./pkg/neterr and
+      #                       ./pkg/agent/proxy/incoming hold for their
+      #                       refused dials and their own listeners: a
+      #                       connection's local end here, with SO_REUSEADDR
+      #                       on the tests' own listeners.
       #                       Its rows check that a held port refuses a dial,
       #                       that no other socket can bind it, and that the
       #                       test's own listener opens there beside the hold.
@@ -76,13 +78,15 @@ jobs:
       # connseq: it was listed after its windows/amd64 test binary ran under
       # Wine 10.0, where every test passes and a socketCounterOf that returns a
       # counter fails four of them. Nor for testnet: no Windows host and no
-      # Wine was at hand, and ./pkg and ./pkg/neterr already hold their ports
-      # through it here, so its rows are listed to run where its callers do;
-      # this job is their first run on Windows. pkg/agent/proxy is deliberately NOT here:
-      # two of its tests read a source file by relative path, so I could not
-      # separate "fails on Windows" from "fails in my harness" and will not
-      # add a package on a guess. Widen this list as packages are shown to
-      # pass here, not speculatively.
+      # Wine was at hand, and ./pkg, ./pkg/neterr and incoming already hold
+      # their ports through it here, so its rows are listed to run where its
+      # callers do; this job is their first run on Windows.
+      #
+      # pkg/agent/proxy is deliberately NOT here: two of its tests read a
+      # source file by relative path, so I could not separate "fails on
+      # Windows" from "fails in my harness" and will not add a package on a
+      # guess. Widen this list as packages are shown to pass here, not
+      # speculatively.
       #
       # One `go test` invocation with several patterns, not several joined by
       # &&: under `shell: cmd` a multi-line block is a batch file that does not
