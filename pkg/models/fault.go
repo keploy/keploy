@@ -154,6 +154,39 @@ func (f *Fault) String() string {
 	return fmt.Sprintf("fault %q", string(f.Kind))
 }
 
+// HTTPFault is the kind an HTTP mock whose answer ends in a fault is written
+// under, on disk only: read back, it is an HTTP mock (HTTP) with its
+// Spec.Fault. A keploy that knows no faults (v3.6.204 and older) reads
+// `kind: Http`, ignores the `fault:` block, and serves the head and the
+// partial body as a whole answer; the same document under a kind it does not
+// know is one it skips, saying it was recorded by a newer keploy, so the
+// call misses. TestFaultMockKindHasNoHyphen keeps it out of the "-" kinds an
+// open-source keploy skips without a word.
+const HTTPFault Kind = "HttpFault"
+
+// DiskKind is the kind m is written under: HTTPFault for an HTTP mock with a
+// fault, m.Kind otherwise.
+func (m *Mock) DiskKind() Kind {
+	if m.Kind == HTTP && m.Spec.Fault != nil {
+		return HTTPFault
+	}
+	return m.Kind
+}
+
+// FaultKindMismatch is why a document's kind and its fault do not go
+// together, "" when they do: a fault on a mock written as HTTP (an older
+// keploy would serve its head as a whole answer), or an HTTPFault document
+// with no fault.
+func FaultKindMismatch(docKind Kind, f *Fault) string {
+	switch {
+	case docKind == HTTP && f != nil:
+		return "an HTTP mock with a fault is written as kind " + string(HTTPFault) + ", not " + string(HTTP) + ", so that a keploy that knows no faults skips it instead of serving its head as a whole answer; change its kind, or re-record it"
+	case docKind == HTTPFault && f == nil:
+		return "a mock of kind " + string(HTTPFault) + " has no fault: give it its fault, or make it kind " + string(HTTP) + " if its answer was whole"
+	}
+	return ""
+}
+
 // ValidateFault checks the mock's fault, if it has one: a fault this keploy
 // can enact (Fault.Validate), on a call of a protocol it enacts faults for.
 // Only HTTP's are enacted; a fault on any other call fails closed, never

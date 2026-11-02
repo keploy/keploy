@@ -1277,6 +1277,20 @@ func (ys *MockYaml) drainAndClose() {
 	}
 }
 
+// gobKinded is mock under the kind a mocks.gob holds it as (Mock.DiskKind),
+// on a copy when that differs: an HTTP mock with a fault as models.HTTPFault,
+// which no parser of a keploy that knows no faults takes, so its call misses
+// there instead of being served the head as a whole answer.
+// forEachGobMockCut reads it back as HTTP.
+func gobKinded(mock *models.Mock) *models.Mock {
+	if mock == nil || mock.DiskKind() == mock.Kind {
+		return mock
+	}
+	c := mock.ShallowCopy()
+	c.Kind = mock.DiskKind()
+	return c
+}
+
 // persisted is mock as a mocks.gob holds it: its origin as a file holds one
 // (models.Origin.Persisted, without what only travels), on a copy when that
 // differs; mock itself otherwise. gob writes every field a mock has.
@@ -1309,7 +1323,7 @@ func (ys *MockYaml) gobEncodeLocked(mock *models.Mock, mockPath, mockFileName st
 			return err
 		}
 	}
-	if err := ys.gobEnc.Encode(persisted(mock)); err != nil {
+	if err := ys.gobEnc.Encode(gobKinded(persisted(mock))); err != nil {
 		return err
 	}
 	ys.gobFileW.encoded(ys.gobFileW.took + uint64(ys.gobBufw.Buffered()))
@@ -1420,7 +1434,7 @@ func (ys *MockYaml) gobCarryOverLocked(filePath, tmpPath string) error {
 	carried := 0
 	cut, err := forEachGobMockCut(filePath, func(m *models.Mock) error {
 		carried++
-		return ys.gobEnc.Encode(m)
+		return ys.gobEnc.Encode(gobKinded(m))
 	})
 	if err != nil {
 		return err
@@ -2010,8 +2024,10 @@ func (ys *MockYaml) readMockPoolsVisiting(ctx context.Context, testSetID string,
 				connFailures++
 			}
 			// gob has no per-kind decoder either: a fault is validated here,
-			// as DecodeMocks and DecodeMocksJSON validate theirs.
-			if mock.Spec.Fault != nil && !faultSupported(mock, logger, false) {
+			// as DecodeMocks and DecodeMocksJSON validate theirs. A mock
+			// forEachGobMockCut left of kind HttpFault has no fault.
+			if (mock.Kind == models.HTTPFault && !faultKindSupported(mock.Kind, mock, logger, false)) ||
+				(mock.Spec.Fault != nil && !faultSupported(mock, logger, false)) {
 				addSkipped(&out, mock.Name, mock.Kind)
 				return nil
 			}

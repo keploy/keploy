@@ -197,3 +197,41 @@ func TestFaultsServedInTheOrderTheyWereServed(t *testing.T) {
 		t.Fatalf("no mock consumed: %q", got)
 	}
 }
+
+// The kind a fault mock is written under has no "-": an open-source keploy
+// skips a "-" kind as an enterprise one without a word, and the kind is there
+// to make a keploy that knows no faults say it skipped the mock.
+func TestFaultMockKindHasNoHyphen(t *testing.T) {
+	if strings.Contains(string(HTTPFault), "-") || HTTPFault == HTTP {
+		t.Fatalf("HTTPFault = %q", HTTPFault)
+	}
+}
+
+// An HTTP mock with a fault is written as HttpFault, and only it; a document's
+// kind and its fault must go together.
+func TestDiskKindAndFaultKindMismatch(t *testing.T) {
+	f := &Fault{Kind: FaultEOF}
+	for _, tc := range []struct {
+		m    Mock
+		want Kind
+	}{
+		{Mock{Kind: HTTP, Spec: MockSpec{Fault: f}}, HTTPFault},
+		{Mock{Kind: HTTP}, HTTP},
+		{Mock{Kind: DNS, Spec: MockSpec{Fault: f}}, DNS},
+	} {
+		if got := tc.m.DiskKind(); got != tc.want {
+			t.Errorf("DiskKind(%s, fault %v) = %s, want %s", tc.m.Kind, tc.m.Spec.Fault, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		kind Kind
+		f    *Fault
+		bad  bool
+	}{
+		{HTTP, f, true}, {HTTPFault, nil, true}, {HTTPFault, f, false}, {HTTP, nil, false}, {DNS, f, false},
+	} {
+		if got := FaultKindMismatch(tc.kind, tc.f) != ""; got != tc.bad {
+			t.Errorf("FaultKindMismatch(%s, %v) refuses: %v, want %v", tc.kind, tc.f, got, tc.bad)
+		}
+	}
+}

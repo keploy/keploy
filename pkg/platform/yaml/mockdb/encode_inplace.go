@@ -76,7 +76,7 @@ func encodeMockInPlace(mock *models.Mock) (any, bool) {
 	}
 	doc := inPlaceDoc{
 		Version:      mock.Version,
-		Kind:         mock.Kind,
+		Kind:         mock.DiskKind(),
 		Name:         mock.Name,
 		ConnectionID: mock.ConnectionID,
 		Async:        mock.Spec.Async,

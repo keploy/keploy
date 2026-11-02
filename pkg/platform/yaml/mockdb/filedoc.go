@@ -134,7 +134,7 @@ func skipReason(kind models.Kind, json bool) models.MockSkip {
 		return models.MockSkipNoKind
 	case kind == models.ConnectionFailure:
 		return models.MockSkipConnFailure
-	case kind == models.HTTP:
+	case kind == models.HTTP || kind == models.HTTPFault:
 		return models.MockSkipFault
 	case json && (strings.Contains(string(kind), "-") || hasMapperForKind(kind)):
 		return models.MockSkipYAMLOnlyKind
@@ -177,7 +177,7 @@ func (ys *MockYaml) SkippedMocks(ctx context.Context, testSetID string) (string,
 			if mock.Kind == models.ConnectionFailure && mock.Name != "" && !connFailureSupported(mock, zap.NewNop(), false) {
 				out[mock.Name] = models.SkippedMock{Name: mock.Name, Kind: mock.Kind, Why: models.MockSkipConnFailure}
 			}
-			if mock.Spec.Fault != nil && mock.Name != "" && !faultSupported(mock, zap.NewNop(), false) {
+			if mock.Name != "" && (mock.Kind == models.HTTPFault || mock.Spec.Fault != nil && !faultSupported(mock, zap.NewNop(), false)) {
 				out[mock.Name] = models.SkippedMock{Name: mock.Name, Kind: mock.Kind, Why: models.MockSkipFault}
 			}
 		}

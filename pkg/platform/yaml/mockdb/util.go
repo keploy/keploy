@@ -37,7 +37,7 @@ import (
 func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDocJSON, bool, error) {
 	doc := &yaml.NetworkTrafficDocJSON{
 		Version:      mock.Version,
-		Kind:         mock.Kind,
+		Kind:         mock.DiskKind(),
 		Name:         mock.Name,
 		ConnectionID: mock.ConnectionID,
 		Start:        mock.Start,
@@ -312,7 +312,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 
 	yamlDoc := yaml.NetworkTrafficDoc{
 		Version:      mock.Version,
-		Kind:         mock.Kind,
+		Kind:         mock.DiskKind(),
 		Name:         mock.Name,
 		ConnectionID: mock.ConnectionID,
 		Start:        mock.Start,
@@ -722,7 +722,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 			continue
 		}
 		switch m.Kind {
-		case models.HTTP:
+		case models.HTTP, models.HTTPFault:
 			httpSpec := models.HTTPSchema{}
 			err := m.Spec.Decode(&httpSpec)
 			if err != nil {
@@ -740,7 +740,8 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 				ResTimestampMock: httpSpec.ResTimestampMock,
 				Fault:            httpSpec.Fault,
 			}
-			if !faultSupported(&mock, logger, rewrite) {
+			mock.Kind = models.HTTP
+			if !faultKindSupported(m.Kind, &mock, logger, rewrite) {
 				continue
 			}
 		case models.DNS:
@@ -1126,6 +1127,25 @@ func connFailureSupported(mock *models.Mock, logger *zap.Logger, rewrite bool) b
 		return true
 	}
 	skipConnFailure(logger, mock.Name, err, rewrite)
+	return false
+}
+
+// faultKindSupported is faultSupported for a mock read from a document of
+// kind docKind, which must go with its fault (models.FaultKindMismatch): a
+// fault under kind Http, the kind an older keploy serves whole, or kind
+// HttpFault with no fault, is skipped, never served, and the read says why.
+func faultKindSupported(docKind models.Kind, mock *models.Mock, logger *zap.Logger, rewrite bool) bool {
+	why := models.FaultKindMismatch(docKind, mock.Spec.Fault)
+	if why == "" {
+		return faultSupported(mock, logger, rewrite)
+	}
+	err := fmt.Errorf("%w: mock %q: %s", models.ErrFaultUnsupported, mock.Name, why)
+	if rewrite {
+		logger.Debug("kept as written: a mock whose kind does not go with its fault", zap.String("mock", mock.Name), zap.Error(err))
+		return false
+	}
+	utils.LogError(logger, err, "skipping a mock whose kind does not go with its fault",
+		zap.String("mock", mock.Name), zap.String("kind", string(docKind)))
 	return false
 }
 
@@ -1706,7 +1726,7 @@ func decodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger, rew
 		}
 
 		switch m.Kind {
-		case models.HTTP:
+		case models.HTTP, models.HTTPFault:
 			var s models.HTTPSchema
 			if err := json.Unmarshal(m.Spec, &s); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal http mock %q: %w", m.Name, err)
@@ -1720,7 +1740,8 @@ func decodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger, rew
 				ResTimestampMock: s.ResTimestampMock,
 				Fault:            s.Fault,
 			}
-			if !faultSupported(&mock, logger, rewrite) {
+			mock.Kind = models.HTTP
+			if !faultKindSupported(m.Kind, &mock, logger, rewrite) {
 				continue
 			}
 		case models.DNS:

@@ -43,6 +43,11 @@ func TestAFaultRoundTrips(t *testing.T) {
 		if !strings.Contains(text, "    fault:\n        kind: "+string(want.Kind)+"\n") {
 			t.Fatalf("the fault is not a legible block of the spec:\n%s", text)
 		}
+		// Under a kind a keploy that knows no faults skips (models.HTTPFault),
+		// never kind Http, whose head it would serve as a whole answer.
+		if !strings.Contains(text, "kind: HttpFault\n") {
+			t.Fatalf("a fault mock is not written as kind HttpFault:\n%s", text)
+		}
 		if want.Delay != 0 && !strings.Contains(text, "delay: 1.5s") {
 			t.Fatalf("the delay is not written as a duration a person reads:\n%s", text)
 		}
@@ -51,8 +56,11 @@ func TestAFaultRoundTrips(t *testing.T) {
 			t.Fatal(err)
 		}
 		out, err := DecodeMocks([]*yaml.NetworkTrafficDoc{&back}, zap.NewNop())
-		if err != nil || len(out) != 1 || out[0].Spec.Fault == nil || *out[0].Spec.Fault != want {
-			t.Fatalf("yaml round-trip: err=%v %+v, want %+v", err, out, want)
+		if err != nil || len(out) != 1 || out[0].Spec.Fault == nil || *out[0].Spec.Fault != want || out[0].Kind != models.HTTP {
+			t.Fatalf("yaml round-trip: err=%v %+v, want an HTTP mock with %+v", err, out, want)
+		}
+		if ip, ok := encodeMockInPlace(m); !ok || ip.(*inPlaceDoc).Kind != models.HTTPFault {
+			t.Fatalf("the in-place encoder writes a fault mock as %+v, want kind HttpFault", ip)
 		}
 
 		jsonBytes, err := yaml.MarshalDoc(yaml.FormatJSON, doc)
@@ -64,7 +72,7 @@ func TestAFaultRoundTrips(t *testing.T) {
 			t.Fatalf("UnmarshalDoc(json): %v", err)
 		}
 		jout, err := DecodeMocks([]*yaml.NetworkTrafficDoc{jdoc}, zap.NewNop())
-		if err != nil || len(jout) != 1 || jout[0].Spec.Fault == nil || *jout[0].Spec.Fault != want {
+		if err != nil || len(jout) != 1 || jout[0].Spec.Fault == nil || *jout[0].Spec.Fault != want || jout[0].Kind != models.HTTP || !bytes.Contains(jsonBytes, []byte(`"kind":"HttpFault"`)) {
 			t.Fatalf("json document round-trip: err=%v %+v, want %+v", err, jout, want)
 		}
 
@@ -73,7 +81,7 @@ func TestAFaultRoundTrips(t *testing.T) {
 			t.Fatalf("EncodeMockJSON: ok=%v err=%v", ok, err)
 		}
 		jmout, err := DecodeMocksJSON([]*yaml.NetworkTrafficDocJSON{jm}, zap.NewNop())
-		if err != nil || len(jmout) != 1 || jmout[0].Spec.Fault == nil || *jmout[0].Spec.Fault != want {
+		if err != nil || len(jmout) != 1 || jmout[0].Spec.Fault == nil || *jmout[0].Spec.Fault != want || jm.Kind != models.HTTPFault || jmout[0].Kind != models.HTTP {
 			t.Fatalf("json mock round-trip: err=%v %+v, want %+v", err, jmout, want)
 		}
 	}
@@ -89,14 +97,14 @@ func TestAFaultRoundTrips(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = enc.Close()
-	if strings.Contains(buf.String(), "fault") {
-		t.Fatalf("a mock without a fault wrote the key:\n%s", buf.String())
+	if strings.Contains(buf.String(), "fault") || !strings.Contains(buf.String(), "kind: Http\n") {
+		t.Fatalf("a mock without a fault wrote the key, or another kind than Http:\n%s", buf.String())
 	}
 	jm, _, err := EncodeMockJSON(m, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(jm.Spec, []byte("fault")) {
+	if bytes.Contains(jm.Spec, []byte("fault")) || jm.Kind != models.HTTP {
 		t.Fatalf("a mock without a fault wrote the key in its JSON form: %s", jm.Spec)
 	}
 }
@@ -108,12 +116,16 @@ func TestAFaultRoundTrips(t *testing.T) {
 // this keploy enacts is served.
 func TestAFaultThisKeployCannotEnactIsSkippedAndNamed(t *testing.T) {
 	cases := map[yaml.Format]string{
-		yaml.FormatYAML: httpDocYAML("fault-newer", "Http", "a") + "    fault:\n        kind: explode\n" +
-			"---\n" + httpDocYAML("fault-misspelt", "Http", "b") + "    fault:\n        kind: eof\n        after_head: true\n" +
-			"---\n" + httpDocYAML("fault-ok", "Http", "c") + "    fault:\n        kind: eof\n",
-		yaml.FormatJSON: strings.TrimSuffix(httpDocJSON("fault-newer", "Http", "a"), "}}") + `,"fault":{"kind":"explode"}}}` + "\n" +
-			strings.TrimSuffix(httpDocJSON("fault-misspelt", "Http", "b"), "}}") + `,"fault":{"kind":"eof","after_head":true}}}` + "\n" +
-			strings.TrimSuffix(httpDocJSON("fault-ok", "Http", "c"), "}}") + `,"fault":{"kind":"eof"}}}` + "\n",
+		yaml.FormatYAML: httpDocYAML("fault-newer", "HttpFault", "a") + "    fault:\n        kind: explode\n" +
+			"---\n" + httpDocYAML("fault-misspelt", "HttpFault", "b") + "    fault:\n        kind: eof\n        after_head: true\n" +
+			"---\n" + httpDocYAML("fault-as-http", "Http", "d") + "    fault:\n        kind: eof\n" +
+			"---\n" + httpDocYAML("fault-none", "HttpFault", "e") +
+			"---\n" + httpDocYAML("fault-ok", "HttpFault", "c") + "    fault:\n        kind: eof\n",
+		yaml.FormatJSON: strings.TrimSuffix(httpDocJSON("fault-newer", "HttpFault", "a"), "}}") + `,"fault":{"kind":"explode"}}}` + "\n" +
+			strings.TrimSuffix(httpDocJSON("fault-misspelt", "HttpFault", "b"), "}}") + `,"fault":{"kind":"eof","after_head":true}}}` + "\n" +
+			strings.TrimSuffix(httpDocJSON("fault-as-http", "Http", "d"), "}}") + `,"fault":{"kind":"eof"}}}` + "\n" +
+			httpDocJSON("fault-none", "HttpFault", "e") + "\n" +
+			strings.TrimSuffix(httpDocJSON("fault-ok", "HttpFault", "c"), "}}") + `,"fault":{"kind":"eof"}}}` + "\n",
 	}
 	for format, body := range cases {
 		t.Run(string(format), func(t *testing.T) {
@@ -121,10 +133,11 @@ func TestAFaultThisKeployCannotEnactIsSkippedAndNamed(t *testing.T) {
 			dir := t.TempDir()
 			writeSetFile(t, dir, format, body)
 			served, listed := readSetOracle(t, dir, format)
-			if !served["fault-ok"] || served["fault-newer"] || served["fault-misspelt"] {
+			if !served["fault-ok"] || served["fault-newer"] || served["fault-misspelt"] || served["fault-as-http"] || served["fault-none"] {
 				t.Fatalf("the set's read served %v; want only the fault this keploy enacts", served)
 			}
-			if listed["fault-newer"] != models.HTTP || listed["fault-misspelt"] != models.HTTP {
+			// Each listed under the kind its document is written as.
+			if listed["fault-newer"] != models.HTTPFault || listed["fault-misspelt"] != models.HTTPFault || listed["fault-as-http"] != models.HTTP || listed["fault-none"] != models.HTTPFault {
 				t.Fatalf("the set's read lists as skipped %v", listed)
 			}
 			for _, d := range readDocs(t, dir, format) {
@@ -137,7 +150,8 @@ func TestAFaultThisKeployCannotEnactIsSkippedAndNamed(t *testing.T) {
 				}
 			}
 			_, skipped := NewWithFormat(zap.NewNop(), dir, "mocks", format).SkippedMocks(context.Background(), pruneSet)
-			if skipped["fault-newer"].Why != models.MockSkipFault || skipped["fault-misspelt"].Why != models.MockSkipFault || len(skipped) != 2 {
+			if skipped["fault-newer"].Why != models.MockSkipFault || skipped["fault-misspelt"].Why != models.MockSkipFault ||
+				skipped["fault-as-http"].Why != models.MockSkipFault || skipped["fault-none"].Why != models.MockSkipFault || len(skipped) != 4 {
 				t.Errorf("SkippedMocks: %v", skipped)
 			}
 		})
@@ -191,4 +205,87 @@ func TestAFaultThisKeployCannotEnactIsSkippedAndNamed(t *testing.T) {
 			t.Fatalf("DecodeMocksJSON = %d mocks, %v; want the mock skipped", len(out), err)
 		}
 	})
+}
+
+// A mocks.gob holds a fault mock as kind HttpFault (gobKinded), which no
+// parser of a keploy that knows no faults takes, and reads it back as an HTTP
+// mock with its fault. A gob mock of kind HttpFault with no fault is skipped
+// and named; a mock without a fault is written and read as it is.
+func TestAGobFileHoldsAFaultMockAsHttpFault(t *testing.T) {
+	m, plain, none := pruneHTTPMock(0), pruneHTTPMock(1), pruneHTTPMock(2)
+	m.Name, plain.Name, none.Name = "fault-ok", "plain", "fault-none"
+	m.Spec.Fault = &models.Fault{Kind: models.FaultEOF}
+	none.Kind = models.HTTPFault
+	if k := gobKinded(m).Kind; k != models.HTTPFault || m.Kind != models.HTTP {
+		t.Fatalf("gobKinded wrote kind %s (and left the mock %s)", k, m.Kind)
+	}
+	if gobKinded(plain) != plain {
+		t.Fatal("gobKinded copied a mock without a fault")
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, pruneSet), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	buf.WriteString(gobMockMagic)
+	enc := gob.NewEncoder(&buf)
+	for _, mk := range []*models.Mock{m, plain, none} {
+		if err := enc.Encode(gobKinded(mk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(dir, pruneSet, "mocks.gob")
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw := gob.NewDecoder(bytes.NewReader(buf.Bytes()[len(gobMockMagic):]))
+	var first models.Mock
+	if err := raw.Decode(&first); err != nil || first.Kind != models.HTTPFault {
+		t.Fatalf("the file holds the fault mock as kind %q (%v), want HttpFault", first.Kind, err)
+	}
+	var kinds []models.Kind
+	if _, err := forEachGobMockCut(path, func(r *models.Mock) error { kinds = append(kinds, r.Kind); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(kinds) != 3 || kinds[0] != models.HTTP || kinds[1] != models.HTTP || kinds[2] != models.HTTPFault {
+		t.Fatalf("read back as kinds %v, want [Http Http HttpFault]", kinds)
+	}
+	served, _ := readSetOracle(t, dir, yaml.FormatYAML)
+	if !served["fault-ok"] || !served["plain"] || served["fault-none"] {
+		t.Fatalf("the set's read served %v; want fault-ok and plain only", served)
+	}
+	_, skipped := NewWithFormat(zap.NewNop(), dir, "mocks", yaml.FormatYAML).SkippedMocks(context.Background(), pruneSet)
+	if skipped["fault-none"].Why != models.MockSkipFault || len(skipped) != 1 {
+		t.Errorf("SkippedMocks: %v", skipped)
+	}
+}
+
+// The gob writer a recording uses (InsertMock with KEPLOY_MOCK_FORMAT=gob)
+// writes a fault mock as kind HttpFault, and the read gives it back as an
+// HTTP mock with its fault.
+func TestTheGobWriterWritesAFaultMockAsHttpFault(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "mocks")
+	m := pruneHTTPMock(0)
+	m.Spec.Fault = &models.Fault{Kind: models.FaultTruncate, BodyBytes: 3}
+	if err := ys.InsertMock(context.Background(), m, "set-0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ys.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "set-0", "mocks.gob")
+	b, err := os.ReadFile(path)
+	if err != nil || !bytes.HasPrefix(b, []byte(gobMockMagic)) {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var raw models.Mock
+	if err := gob.NewDecoder(bytes.NewReader(b[len(gobMockMagic):])).Decode(&raw); err != nil || raw.Kind != models.HTTPFault {
+		t.Fatalf("the file holds the fault mock as kind %q (%v), want HttpFault", raw.Kind, err)
+	}
+	got, err := readGobMocks(path)
+	if err != nil || len(got) != 1 || got[0].Kind != models.HTTP || got[0].Spec.Fault == nil || *got[0].Spec.Fault != *m.Spec.Fault {
+		t.Fatalf("read back %+v, %v; want the HTTP mock with its fault", got, err)
+	}
 }
