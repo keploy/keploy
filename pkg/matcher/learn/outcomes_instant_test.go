@@ -1685,6 +1685,25 @@ func TestOutcomeAFinerTimeHoldingRoundFsSecondIsNoPick(t *testing.T) {
 			}
 		}
 	}
+	// Round F's second as a time or a number of seconds, beside the other
+	// run's text at that place that is no trimmed form of it: the place
+	// holds round F's second at the call's cut, a pick. The other run holds
+	// a number of milliseconds there (another shape), or one more time
+	// before it (another count), or its own second after a finer time (the
+	// same count, read in order).
+	trim := func(x time.Time) string { return x.UTC().Format(time.RFC3339Nano) }
+	for _, c := range []struct{ what, rec, live string }{
+		{"a number of seconds where the recording holds one of milliseconds",
+			`"claimedAt":{"$numberLong":"` + iEpochMs(rMade) + `"}`, `"claimedAt":{"$numberLong":"` + sec(fAt) + `"}`},
+		{"a time of seconds where the recording holds a finer time before it",
+			`"created_at":"` + trim(rMade) + `","claimed_at":"` + tsec(rMade) + `"`, `"claimed_at":"` + tsec(fAt) + `"`},
+		{"a time of seconds after a finer time in both runs",
+			`"created_at":"` + trim(rMade) + `","claimed_at":"` + tsec(rMade) + `"`, `"created_at":"` + trim(fAt) + `","claimed_at":"` + tsec(fAt) + `"`},
+	} {
+		raw := []Raw{RawOf(find(c.rec), true).ServedAs(1).ServedLive(RawOf(find(c.live), true))}
+		in := iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), nil, raw)
+		oRefused(t, "round F's second as "+c.what, oWord(t, Decide(in), rec, live), RefusalPick, "mock-799")
+	}
 }
 
 // A value the clock reading takes for a look-back no replay of its call
