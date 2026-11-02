@@ -858,11 +858,15 @@ func (dc *decider) coarserOnly(t *readerText, w string, m moment) bool {
 
 // cutOfFinerOnly reports whether t, which holds w (moment m), holds it only
 // as m's cut of a finer instant: no word of it is w, and no instant of it
-// is m. A second read beside a UnixNano in a name: no variable can hold
-// that text, and two reads of one coarse cut say nothing of each other.
+// is m at m's unit or a coarser one. A second read beside a UnixNano in a
+// name: no variable can hold that text, and two reads of one coarse cut
+// say nothing of each other. A finer instant at the first millisecond or
+// nanosecond of m names m too, but only as that cut, the same as any other
+// of m's finer instants: when the application wrote it never moves the
+// verdict.
 func (dc *decider) cutOfFinerOnly(t *readerText, w string, m moment) bool {
 	h, ok := t.holdsWord(w)
-	return ok && !h && dc.namedBy(t, m, func(h, m moment) bool { return h.key == m.key }) == 0
+	return ok && !h && dc.namedBy(t, m, func(h, m moment) bool { return h.key == m.key && h.res >= m.res }) == 0
 }
 
 // namedBy counts the instants of t that name m, or m in the application's
