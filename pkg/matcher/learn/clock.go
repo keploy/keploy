@@ -814,8 +814,9 @@ func isoEnd(s string, b int) int {
 }
 
 // zoneRunsOn reports whether c, right after the digits of a zone written
-// after a space, says the signed number there runs on past them: a letter
-// or a digit, or a "." or a "," before more digits.
+// after a space, says the signed number there runs on past them: a letter,
+// a digit, a "." or a ",", whatever follows it. So "… +05:30." and
+// "… +05:30,next" hold no zone, as "… -1400.00" holds none.
 func zoneRunsOn(c byte) bool {
 	return isWord(c) || c == '.' || c == ','
 }
