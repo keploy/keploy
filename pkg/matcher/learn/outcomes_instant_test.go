@@ -1394,8 +1394,9 @@ func TestOutcomeAMillisecondCopyIsBoundToItsSource(t *testing.T) {
 // another cut: it was recorded after the call, so the recorded application
 // never read it. A pick needs round F's moment at the call's cut: where F
 // never gave it, or it holds F's minute only as a finer time cut or rounded
-// to it (a SentAt whole, or a UnixNano in a name), the call's window reads
-// the clock, checked at replay, where main refuses the SentAt.
+// to it (a SentAt whole, at any second of the minute, its first included,
+// or a UnixNano in a name), the call's window reads the clock, checked at
+// replay, where main refuses the SentAt.
 func TestOutcomeAMomentALaterRecordingGaveBeforeTheCallIsAPick(t *testing.T) {
 	const p = "body.sent_at"
 	minute := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04Z07:00") }
@@ -1418,7 +1419,8 @@ func TestOutcomeAMomentALaterRecordingGaveBeforeTheCallIsAPick(t *testing.T) {
 			pick bool
 		}{
 			{"round F's minute, given before the call", later(live).WithServed(true).ServedAsRecorded(), true},
-			{"round F's minute at its first second, given before the call", later(fMinute.Format(time.RFC3339)).WithServed(true).ServedAsRecorded(), true},
+			{"round F's minute as a cut of its first second, given before the call", later(fMinute.Format(time.RFC3339)).WithServed(true).ServedAsRecorded(), false},
+			{"round F's minute as a cut of its first millisecond, given before the call", later(iMs(fMinute)).WithServed(true).ServedAsRecorded(), false},
 			{"round F's minute as a cut of a later second, given before the call", later(fMinute.Add(5 * time.Second).Format(time.RFC3339)).WithServed(true).ServedAsRecorded(), false},
 			{"round F's minute as a second before it, rounded, given before the call", later(fMinute.Add(-20 * time.Second).Format(time.RFC3339)).WithServed(true).ServedAsRecorded(), false},
 			{"round F's minute as a cut of a UnixNano in a name, given before the call", later("app-crud-" + iEpochNs(fMinute.Add(5*time.Second+123))).WithServed(true).ServedAsRecorded(), false},
@@ -1437,21 +1439,25 @@ func TestOutcomeAMomentALaterRecordingGaveBeforeTheCallIsAPick(t *testing.T) {
 
 // A second the call reads from the clock in its own window, which round
 // F's view of an earlier answer holds only inside a finer time (an app's
-// name holding the UnixNano it was made at, a $date of milliseconds, or
-// both in one answer), is the call's own read of the clock, checked at
-// replay: that answer gave the application no value at the call's cut to
-// pick from. One that holds round F's second at the call's cut (as a
-// number of seconds, or a time of seconds) is a pick, refused naming it.
-// As a recording, leaf by leaf, and in a window the call landed in from
-// another test, the decision is the same.
+// name holding the UnixNano it was made at, a $date or a time of
+// milliseconds, or a name and a $date in one answer), is the call's own
+// read of the clock, checked at replay: that answer gave the application
+// no value at the call's cut to pick from. So it is where the finer time
+// was made at the second's first millisecond or nanosecond, which names
+// the second itself, and where the recorded answer holds the recorded
+// second the same way: when the app wrote its time never moves the
+// verdict. One that holds round F's second at the call's cut (as a number
+// of seconds, or a time of seconds) is a pick, refused naming it. As a
+// recording, leaf by leaf, and in a window the call landed in from another
+// test, the decision is the same.
 func TestOutcomeAFinerTimeHoldingRoundFsSecondIsNoPick(t *testing.T) {
 	const p = "body.cmd.query.dirtyAt.$lte.$numberLong"
 	sec := func(x time.Time) string { return strconv.FormatInt(x.Unix(), 10) }
 	rAt, fAt := oAt.Add(20400*time.Millisecond), oAt.Add(96400*time.Millisecond)
 	rec, live := sec(rAt), sec(fAt)
-	// The app was made 300 ms before the call in round F, in the call's
-	// second, and 37 s before it in the recording, in another minute.
-	rMade, fMade := rAt.Add(-37*time.Second), fAt.Add(-300*time.Millisecond)
+	// The app was made 37 s before the call in the recording, in another
+	// minute, and in the call's second in round F.
+	rMade := rAt.Add(-37 * time.Second)
 	find := func(fields string) *models.Mock {
 		return &models.Mock{Name: "mock-799", Kind: models.HTTP, Spec: models.MockSpec{
 			HTTPReq:          &models.HTTPReq{Method: "POST", URL: "http://db.local/apps/find", Body: `{"find":"apps"}`},
@@ -1461,6 +1467,10 @@ func TestOutcomeAFinerTimeHoldingRoundFsSecondIsNoPick(t *testing.T) {
 	}
 	name := func(x time.Time) string { return `"app":{"name":"[E2E] page-queries-` + iEpochNs(x) + `"}` }
 	date := func(x time.Time) string { return `"created_at":{"$date":{"$numberLong":"` + iEpochMs(x) + `"}}` }
+	iso := func(x time.Time) string { return `"created_at":"` + iMs(x) + `"` }
+	isoAt := func(x time.Time) string {
+		return `"created_at":"` + x.In(time.FixedZone("", 19800)).Format("2006-01-02T15:04:05.000-07:00") + `"`
+	}
 	leaves := func(rm, lm *models.Mock) Earlier {
 		e := leafedOf(rm, true, 1)
 		e.Payload = e.Payload.ServedLive(RawOf(lm, true))
@@ -1481,33 +1491,96 @@ func TestOutcomeAFinerTimeHoldingRoundFsSecondIsNoPick(t *testing.T) {
 	}{
 		{"a name holding the UnixNano it was made at", name, false},
 		{"a $date of milliseconds", date, false},
+		{"a time of milliseconds", iso, false},
+		{"a time of milliseconds at an offset", isoAt, false},
 		{"a name and a $date beside it", func(x time.Time) string { return name(x) + "," + date(x) }, false},
+		{"the second, as a time of seconds, beside a $date", func(x time.Time) string { return date(x) + `,"claimed_at":"` + x.UTC().Format(time.RFC3339) + `"` }, true},
 		{"the second, as a number of seconds", func(x time.Time) string { return `"claimedAt":{"$numberLong":"` + sec(x) + `"}` }, true},
 		{"the second, as a time of seconds", func(x time.Time) string { return `"claimed_at":"` + x.UTC().Format(time.RFC3339) + `"` }, true},
 		{"the second beside a name", func(x time.Time) string { return name(x) + `,"claimedAt":{"$numberLong":"` + sec(x) + `"}` }, true},
 	} {
-		rm, lm := find(tc.fields(rMade)), find(tc.fields(fMade))
-		for _, form := range []struct {
-			what    string
-			earlier []Earlier
-			raw     []Raw
+		for _, made := range []struct {
+			what       string
+			rMade      time.Time
+			fMade      time.Time
+			inBothRuns bool
 		}{
-			{"as a recording", nil, []Raw{RawOf(rm, true).ServedAs(1).ServedLive(RawOf(lm, true))}},
-			{"leaf by leaf", []Earlier{leaves(rm, lm)}, nil},
+			{"made 300 ms before the call in round F", rMade, fAt.Add(-300 * time.Millisecond), false},
+			{"made at the first millisecond of the call's second in round F", rMade, fAt.Truncate(time.Second), false},
+			{"made 300 ms before the call in both runs", rAt.Add(-300 * time.Millisecond), fAt.Add(-300 * time.Millisecond), true},
+			{"made at the first millisecond of the call's second in both runs", rAt.Truncate(time.Second), fAt.Truncate(time.Second), true},
 		} {
-			for _, mode := range []Mode{ModeOwn, ModeElsewhere} {
-				in := iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), form.earlier, form.raw)
-				what := tc.what + ", " + form.what
-				if mode == ModeElsewhere {
-					in.Mode, in.Landed = ModeElsewhere, Landed{Where: LandedOther, Test: "test-5"}
-					what += ", landed from another test"
+			// An answer that holds the second at the call's cut in both
+			// runs is an answer, not a pick: those rows are step 3's.
+			if tc.pick && made.inBothRuns {
+				continue
+			}
+			rm, lm := find(tc.fields(made.rMade)), find(tc.fields(made.fMade))
+			for _, form := range []struct {
+				what    string
+				earlier []Earlier
+				raw     []Raw
+			}{
+				{"as a recording", nil, []Raw{RawOf(rm, true).ServedAs(1).ServedLive(RawOf(lm, true))}},
+				{"leaf by leaf", []Earlier{leaves(rm, lm)}, nil},
+			} {
+				for _, mode := range []Mode{ModeOwn, ModeElsewhere} {
+					in := iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), form.earlier, form.raw)
+					what := tc.what + ", " + made.what + ", " + form.what
+					if mode == ModeElsewhere {
+						in.Mode, in.Landed = ModeElsewhere, Landed{Where: LandedOther, Test: "test-5"}
+						what += ", landed from another test"
+					}
+					d := oWord(t, Decide(in), rec, live)
+					if tc.pick {
+						oRefused(t, what, d, RefusalPick, "mock-799")
+					} else {
+						iClock(t, what, d)
+					}
 				}
-				d := oWord(t, Decide(in), rec, live)
-				if tc.pick {
-					oRefused(t, what, d, RefusalPick, "mock-799")
-				} else {
-					iClock(t, what, d)
-				}
+			}
+		}
+	}
+	// A $date beside its day, as a recording: the day names no second, so
+	// the call's own clock read, made at the second's first millisecond or
+	// later. (Leaf by leaf, the day is a leaf of its own, judged as a day
+	// alone is.)
+	day := func(x time.Time) string { return date(x) + `,"day":"` + x.UTC().Format("2006-01-02") + `"` }
+	for _, off := range []time.Duration{0, 100 * time.Millisecond} {
+		raw := []Raw{RawOf(find(day(rMade)), true).ServedAs(1).ServedLive(RawOf(find(day(fAt.Truncate(time.Second).Add(off))), true))}
+		for _, mode := range []Mode{ModeOwn, ModeElsewhere} {
+			in := iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), nil, raw)
+			if mode == ModeElsewhere {
+				in.Mode, in.Landed = ModeElsewhere, Landed{Where: LandedOther, Test: "test-5"}
+			}
+			iClock(t, "a $date beside its day made "+off.String()+" into the call's second in round F", oWord(t, Decide(in), rec, live))
+		}
+	}
+	// The call's second as a typed time of seconds, which the answer holds
+	// in both runs only inside a finer time made in the call's second: no
+	// source keploy can bind, so the call's own clock read, whether that
+	// time was made at the second's first millisecond or later.
+	tsec := func(x time.Time) string { return x.UTC().Format(time.RFC3339) }
+	for _, tc := range []struct {
+		what   string
+		fields func(time.Time) string
+	}{
+		{"a $date of milliseconds", date},
+		{"a time of milliseconds", iso},
+		{"a time of milliseconds at an offset", isoAt},
+	} {
+		for _, off := range []time.Duration{0, 100 * time.Millisecond} {
+			rm, lm := find(tc.fields(rAt.Truncate(time.Second).Add(off))), find(tc.fields(fAt.Truncate(time.Second).Add(off)))
+			for _, form := range []struct {
+				what    string
+				earlier []Earlier
+				raw     []Raw
+			}{
+				{"as a recording", nil, []Raw{RawOf(rm, true).ServedAs(1).ServedLive(RawOf(lm, true))}},
+				{"leaf by leaf", []Earlier{leaves(rm, lm)}, nil},
+			} {
+				in := iCall("body.cmd.query.dirtyAt.$lte", Instant, tsec(rAt), tsec(fAt), rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), form.earlier, form.raw)
+				iClock(t, "a typed second beside "+tc.what+" made "+off.String()+" into the call's second in both runs, "+form.what, oWord(t, Decide(in), tsec(rAt), tsec(fAt)))
 			}
 		}
 	}

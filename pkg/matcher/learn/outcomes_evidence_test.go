@@ -392,12 +392,13 @@ func TestOutcomeAWordGluedInABodyOfNoDeclaredTypeIsUnknown(t *testing.T) {
 // round F's minute: binding the instant to mock-42 is then a guess between
 // two sources, so it is refused, naming mock-44, as main refuses it
 // (offset_test.go:2054), whether mock-44's field is a finer time cut or
-// rounded to round F's minute or the minute itself. Where it is the minute
-// itself, it is refused as a pick from mock-44 before any answer is read: a
-// pick needs round F's moment at the call's cut. Without mock-44 holding
-// round F's minute (it holds the recorded minute alone), mock-42 binds it. An answer that holds the
-// minute only inside a time of it (11:14:45), which main binds by a cut, is
-// no source a variable could hold: refused, naming it.
+// rounded to round F's minute (its first second included) or the minute
+// itself. Where it is the minute itself, it is refused as a pick from
+// mock-44 before any answer is read: a pick needs round F's moment at the
+// call's cut. Without mock-44 holding round F's minute (it holds the
+// recorded minute alone), mock-42 binds it. An answer that holds the
+// minute only inside a time of it (11:14:45), which main binds by a cut,
+// is no source a variable could hold: refused, naming it.
 func TestOutcomeAnAnswersInstantBesideALaterRecordingFGaveIsRefused(t *testing.T) {
 	const p = "body.sent_at"
 	at := r1Insert
@@ -416,6 +417,7 @@ func TestOutcomeAnAnswersInstantBesideALaterRecordingFGaveIsRefused(t *testing.T
 		kind    RefusalKind
 	}{
 		{"15:51:05, cut to F's minute", base.Add(65 * time.Second).Format(time.RFC3339), RefusalUnknown},
+		{"15:51:00, cut to F's minute", base.Add(time.Minute).Format(time.RFC3339), RefusalUnknown},
 		{"15:50:40, rounded to F's minute", base.Add(40 * time.Second).Format(time.RFC3339), RefusalUnknown},
 		{"the minute 15:51 verbatim", base.Add(time.Minute).Format(minute), RefusalPick},
 	} {
