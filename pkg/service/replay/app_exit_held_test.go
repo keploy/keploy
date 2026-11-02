@@ -135,6 +135,39 @@ func TestAnAppsExitMidTestNamesTheTestItHeld(t *testing.T) {
 	}
 }
 
+// An app's exit told while keploy readies a streaming test case on its agent
+// ends the set before that test's request is sent, as in the set's main loop,
+// with the proven switch off and on: the set is APP_HALTED, its reason names
+// the exit's code and no test as held, and the streaming test is not sent.
+// The streaming tests' loop looked for the exit only at its head, and sent
+// the test to an app keploy knew had exited.
+func TestAnAppsExitWhileKeployReadiesAStreamingTestSendsItNot(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("switch on %v", on), func(t *testing.T) {
+			provenOn(t, on)
+			h := newPartialRunHarness(t, 3, 0)
+			h.streaming("test-3")
+			h.instr.stopErr = models.ErrUnExpected
+			h.instr.stopAppReadying = "test-3"
+			app := &heldRequests{requests: map[string]int{}}
+			h.replayer.hookImpl = prHooks{onRequest: app.onRequest}
+
+			if status := h.run(t); status != models.TestSetStatusAppHalted {
+				t.Fatalf("status %s, want APP_HALTED", status)
+			}
+			reason := h.report.report.FailureReason
+			if !strings.Contains(reason, "it exited with code 1") || strings.Contains(reason, "before it answered test") {
+				t.Fatalf("reason %q; want it to name the exit's code and no test held", reason)
+			}
+			for name, want := range map[string]int{"test-1": 1, "test-2": 1, "test-3": 0} {
+				if n := app.count(name); n != want {
+					t.Fatalf("%s was sent %d times, want %d: the app exited as keploy readied test-3", name, n, want)
+				}
+			}
+		})
+	}
+}
+
 // toldExitInstr runs a compose app the way `docker compose up` does with its
 // abort on the app's exit: the runner tells the exit at the app's container's
 // die (models.WithAppExit), and the run returns only once keploy's end of the

@@ -2,6 +2,8 @@ package replay
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -198,5 +200,82 @@ func TestANativeAppsExitWhileKeployWaitsForItHaltsTheSet(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// nativeStagingExitInstr is the agent of a native app the run keeps for
+// every set (--keep-app-alive), whose app exits while keploy stages a set on
+// the agent: at the call named at (MockOutgoing, or the set's first
+// UpdateMockParams, its staging), the exit is told (tell), and the call
+// fails as one to a gone agent does.
+type nativeStagingExitInstr struct {
+	*prInstr
+	at   string
+	tell func()
+}
+
+func (n *nativeStagingExitInstr) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
+	if n.at != "MockOutgoing" {
+		return n.prInstr.MockOutgoing(ctx, opts)
+	}
+	n.at = ""
+	n.tell()
+	return errors.New("dial tcp 127.0.0.1:16789: connect: connection refused")
+}
+
+func (n *nativeStagingExitInstr) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+	if n.at != "UpdateMockParams" {
+		return n.prInstr.UpdateMockParams(ctx, params)
+	}
+	n.at = ""
+	n.tell()
+	return errors.New("dial tcp 127.0.0.1:16789: connect: connection refused")
+}
+
+// A native app kept alive across sets that exits while keploy stages a set
+// on its agent, before the readiness wait, halts the set as an exit in a
+// compose set's setup does (setupEnd), with the proven switch off and on, in
+// the run's first set and in a later one: the set is APP_HALTED, its reason
+// saying the app failed to start (the first set) or exited while keploy set
+// the set up (a later one), with the exit's code; none of its tests is sent,
+// and the staging's error is not logged as keploy's own. The set returned
+// the staging's error as a setup failure, and the run stopped on "failed to
+// run test set", the set unreported.
+func TestAKeptNativeAppsExitWhileKeployStagesASetHaltsTheSet(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		for _, at := range []string{"MockOutgoing", "UpdateMockParams"} {
+			for _, later := range []bool{false, true} {
+				t.Run(fmt.Sprintf("switch on %v, at %s, later set %v", on, at, later), func(t *testing.T) {
+					provenOn(t, on)
+					h := newPartialRunHarness(t, 3, 0)
+					core, logs := observer.New(zapcore.DebugLevel)
+					h.replayer.logger = zap.New(core)
+					_, kept := listenedTo(context.Background())
+					h.replayer.keptExit = kept
+					exit := models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 3}
+					n := &nativeStagingExitInstr{prInstr: h.instr, tell: func() { kept.tell(exit) }}
+					h.replayer.instrumentation = n
+					app := &heldRequests{requests: map[string]int{}}
+					h.replayer.hookImpl = prHooks{onRequest: app.onRequest}
+					h.replayer.isFirstTestSet = true
+					set, want := "test-set-0", "application startup failed: it exited with code 3 - check application logs"
+					var sent map[string]int
+					if later {
+						if status, err := runSet(h, set, true); err != nil || status != models.TestSetStatusPassed {
+							t.Fatalf("first set: status %s, error %v; want PASSED", status, err)
+						}
+						sent = map[string]int{"test-1": app.count("test-1"), "test-2": app.count("test-2"), "test-3": app.count("test-3")}
+						h.replayer.isFirstTestSet = false
+						set, want = "test-set-1", "application exited while keploy set this test set up, before its first test: it exited with code 3 - check application logs"
+					}
+					n.at = at
+					status, err := runSet(h, set, true)
+					haltedBeforeTests(t, h, app, set, status, err, want, sent)
+					if n := logs.FilterMessage("failed to mock outgoing").Len(); n != 0 {
+						t.Fatalf("keploy logged %d failures to mock outgoing as its own; the app had exited", n)
+					}
+				})
+			}
+		}
 	}
 }

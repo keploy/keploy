@@ -243,7 +243,11 @@ type prInstr struct {
 	// stopAppAfterNUpdates makes the stand-in application exit part-way through
 	// the set, the way a crash or an OOM kill does. 0 = it stays up.
 	stopAppAfterNUpdates int
-	appStopped           chan struct{}
+	// stopAppReadying, set, makes it exit as stopAppAfterNUpdates does, but
+	// during the send that readies the test case named on the agent: its
+	// window (the proven switch off) or its own view (exact serving).
+	stopAppReadying string
+	appStopped      chan struct{}
 	// stopErr is how the app exits; ErrAppStopped when empty.
 	stopErr models.AppErrorType
 	// lastParams is the filter-params payload of the most recent send, so a
@@ -404,7 +408,11 @@ func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilter
 			f.backgroundSaid = ex.Background
 		}
 	}
-	if f.stopAppAfterNUpdates != 0 && f.updateCalls == f.stopAppAfterNUpdates {
+	readying := f.readies(params, f.stopAppReadying)
+	if readying {
+		f.stopAppReadying = ""
+	}
+	if f.stopAppAfterNUpdates != 0 && f.updateCalls == f.stopAppAfterNUpdates || readying {
 		close(f.appStopped) // the application exits mid-set
 		// Wait for the replayer to ACTUALLY observe the exit rather than
 		// guessing how long that takes. The app-watcher raises the stop signal
@@ -425,6 +433,25 @@ func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilter
 	}
 	return nil
 }
+
+// readies says whether params readies the test case named on the agent: its
+// own view under exact serving, else its window, which opens at its recorded
+// request.
+func (f *prInstr) readies(params models.MockFilterParams, name string) bool {
+	if name == "" {
+		return false
+	}
+	if ex := params.Exact; ex != nil {
+		return !ex.Stage && ex.Test == name
+	}
+	for _, tc := range f.cases {
+		if tc.Name == name {
+			return params.AfterTime.Equal(tc.HTTPReq.Timestamp)
+		}
+	}
+	return false
+}
+
 func (f *prInstr) GetMockStats(context.Context) (models.MockStats, error) {
 	return models.MockStats{}, nil
 }

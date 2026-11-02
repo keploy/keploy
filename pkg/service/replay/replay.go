@@ -2826,17 +2826,22 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			PassThroughPorts:          r.config.Record.PassThroughPorts,
 			PassThroughHosts:          r.config.Record.PassThroughHosts,
 		})
+		// The app the run keeps for every set (--keep-app-alive) can exit
+		// while keploy stages this set on its agent: the staging's failure
+		// is then the exit's, as in a compose set's setup (setupEnd). An app
+		// the set starts itself starts after the staging, and its exit is
+		// not known yet.
 		if err != nil {
-			if ctx.Err() != context.Canceled {
+			if _, _, _, exited := appExitKnown(); ctx.Err() != context.Canceled && !exited {
 				utils.LogError(r.logger, err, "failed to mock outgoing")
 			}
-			return models.TestSetStatusFailed, err
+			return setupEnd(models.TestSetStatusFailed, err)
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
 		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, perTestRegion, useMappingBased, r.recordedSetShape(ctx, testSetID, testCases), nil)
 		if err != nil {
-			return models.TestSetStatusFailed, err
+			return setupEnd(models.TestSetStatusFailed, err)
 		}
 
 		if r.instrument {
@@ -4904,8 +4909,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// last read of what it consumed and its misses (as the main
 			// loop serves it once its test case has its answer), so the
 			// next test case never begins over this one's view. Every exit
-			// calls it once and leaves the iteration (continue or break).
-			// On the two endedPartWay exits, which only a run with no agent
+			// once the request is sent calls it once and leaves the
+			// iteration (continue or break). The set's end just before the
+			// request (the app's exit, below) does not: no test case comes
+			// after it in the set, as after the main loop's. On the two
+			// endedPartWay exits, which only a run with no agent
 			// reaches, it does nothing: that run has no exact plan (r.exact
 			// is nil, exactServing). A failed pool call is returned, and
 			// served again at the next one's loop head (poolBeforeBegin).
@@ -4918,6 +4926,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			// Exact serving: as the main loop reads what the gap answered.
 			answeredInGap, gapReadErr := r.drainAnsweredInGap(runTestSetCtx, r.exact, tc.Name)
+
+			// As in the main loop: the app's exit told while keploy readied
+			// this streaming test case on its agent (the calls above) ends
+			// the set before its request is sent, so the test is not begun
+			// against an app keploy knows is gone, nor named as the one the
+			// app held.
+			select {
+			case <-exitLoopChan:
+				testSetStatus = getErrStatus()
+				exitLoop = true
+			default:
+			}
+			if exitLoop {
+				break
+			}
 
 			// Execute: SimulateRequest returns once response headers arrive;
 			// for streaming cases the body reader is drained later by
