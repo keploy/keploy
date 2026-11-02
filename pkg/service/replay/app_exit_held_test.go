@@ -153,27 +153,50 @@ func (c *toldExitInstr) Run(ctx context.Context, _ models.RunOptions) models.App
 }
 
 // A compose app that exits while it holds a test's request halts the set at
-// its die, with or without the proven switch: the set is APP_HALTED, its
-// reason names the exit's code and the test held, the held test is not sent
-// again, and no test begins after it. The repro: the app exits 3 holding the
-// set's second test while compose's up waits out the rest of the stack.
+// its die, with or without the proven switch, and whether the set brings its
+// stack up (run) or the run keeps one stack for every set (runServing, the
+// default with mocking: keploy runs the app once, in Start): the set is
+// APP_HALTED, its reason names the exit's code and the test held, the held
+// test is not sent again, and no test begins after it. The repro: the app
+// exits 3 holding the set's second test while compose's up waits out the
+// rest of the stack.
 func TestAComposeAppsExitMidTestHaltsTheSetNamingTheTestItHeld(t *testing.T) {
-	for _, on := range []bool{false, true} {
-		name := "switch off"
-		if on {
-			name = "switch on"
-		}
-		t.Run(name, func(t *testing.T) {
-			provenOn(t, on)
+	for _, tc := range []struct {
+		name        string
+		on, serving bool
+	}{
+		{"a stack per set, switch off", false, false},
+		{"a stack per set, switch on", true, false},
+		{"a stack kept across sets, switch off", false, true},
+		{"a stack kept across sets, switch on", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provenOn(t, tc.on)
 			c := &composeInstr{}
 			h := composeHarnessOf(t, c, 3)
-			told := &toldExitInstr{composeInstr: c, died: make(chan models.AppError, 1)}
-			h.replayer.instrumentation = told
 			exit := models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 3}
-			app := &heldRequests{exitAt: "test-2", exit: func() { told.died <- exit }, requests: map[string]int{}}
+			var tell func()
+			if tc.serving {
+				// Start runs the app under listenedTo's context: its
+				// runner tells the exit through it.
+				ctx, kept := listenedTo(context.Background())
+				h.replayer.keptExit = kept
+				tell = func() { models.AppExitOf(ctx)(exit) }
+			} else {
+				told := &toldExitInstr{composeInstr: c, died: make(chan models.AppError, 1)}
+				h.replayer.instrumentation = told
+				tell = func() { told.died <- exit }
+			}
+			app := &heldRequests{exitAt: "test-2", exit: tell, requests: map[string]int{}}
 			h.replayer.hookImpl = prHooks{onRequest: app.onRequest}
 
-			if status := h.run(t); status != models.TestSetStatusAppHalted {
+			var status models.TestSetStatus
+			if tc.serving {
+				status = h.runServing(t)
+			} else {
+				status = h.run(t)
+			}
+			if status != models.TestSetStatusAppHalted {
 				t.Fatalf("status %s, want APP_HALTED", status)
 			}
 			reason := h.report.report.FailureReason
@@ -187,5 +210,30 @@ func TestAComposeAppsExitMidTestHaltsTheSetNamingTheTestItHeld(t *testing.T) {
 				t.Fatalf("test-3 was sent %d times after the app had exited", n)
 			}
 		})
+	}
+}
+
+// The exit the run's application tells is kept once, the first word: a later
+// tell (the run's return after the die) does not replace it.
+func TestTheKeptAppExitIsTheFirstWord(t *testing.T) {
+	ctx, kept := listenedTo(context.Background())
+	told := models.AppExitOf(ctx)
+	if told == nil {
+		t.Fatal("the run's context carries no listener for the app's exit")
+	}
+	select {
+	case <-kept.told:
+		t.Fatal("an exit was told before the app exited")
+	default:
+	}
+	told(models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 3})
+	told(models.AppError{AppErrorType: models.ErrAppStopped})
+	select {
+	case <-kept.told:
+	default:
+		t.Fatal("the told exit was not kept")
+	}
+	if kept.exit.ExitCode != 3 {
+		t.Fatalf("kept exit %+v; want the first word, code 3", kept.exit)
 	}
 }

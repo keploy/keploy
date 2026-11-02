@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -62,4 +63,37 @@ func appExitWhy(e models.AppError, held string) string {
 		why += " before it answered test " + held
 	}
 	return why
+}
+
+// keptAppExit is an exit of its own of the application keploy runs once for
+// the whole run (a compose stack kept across sets, --keep-app-alive), as its
+// runner tells it at the exit (models.WithAppExit): the set running then
+// halts on it at once, and every later set finds it told. Under docker
+// compose the runner tells it at the app's container's die, while compose's
+// up still waits out the rest of the stack: until then keploy took the app
+// for running.
+type keptAppExit struct {
+	once sync.Once
+	// told is closed once the exit is told; exit is then set.
+	told chan struct{}
+	exit models.AppError
+}
+
+func newKeptAppExit() *keptAppExit {
+	return &keptAppExit{told: make(chan struct{})}
+}
+
+// tell keeps the exit e, once: the first word is the exit's.
+func (k *keptAppExit) tell(e models.AppError) {
+	k.once.Do(func() {
+		k.exit = e
+		close(k.told)
+	})
+}
+
+// listenedTo is ctx carrying k's tell (models.WithAppExit), with k: the
+// context the run's application runs under.
+func listenedTo(ctx context.Context) (context.Context, *keptAppExit) {
+	k := newKeptAppExit()
+	return models.WithAppExit(ctx, k.tell), k
 }

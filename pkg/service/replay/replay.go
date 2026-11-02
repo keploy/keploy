@@ -500,6 +500,10 @@ type Replayer struct {
 	// (P101-c). The last set's final attempt calls it before its end's read.
 	// nil otherwise.
 	keepAliveStop func() string
+	// keptExit is the exit of the application the run started once for
+	// all its sets (effectiveKeepAlive), when its runner tells it
+	// (keptAppExit). nil when the run started none.
+	keptExit *keptAppExit
 
 	// exact is the set being replayed's exact serving, under the proven
 	// switch (exact.go); nil otherwise.
@@ -1034,6 +1038,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 	// This run's last set, and its final attempt, are this run's alone.
 	r.keepAliveStop, r.isLastTestSet, r.finalAttempt = nil, false, false
+	r.keptExit = nil
 	r.composeAppStopped = false
 	if effectiveKeepAlive {
 		// Under the proven switch the app runs under a context of its own,
@@ -1041,6 +1046,9 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		// read (P101-c), as a set stops the app it started (P101-b).
 		kaCtx, stopKeepAlive, keepAliveRan := keepAliveStopper(ctx, cmdType)
 		r.keepAliveStop = stopKeepAlive
+		// Its runner tells an exit of its own at once (under compose, at
+		// the app's container's die), and the set running then halts on it.
+		kaCtx, r.keptExit = listenedTo(kaCtx)
 		g.Go(func() error {
 			var appErr models.AppError
 			defer func() { keepAliveRan(appErr) }()
@@ -2421,6 +2429,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					return nil
 				}
 				tellAppExit(appErr)
+				return nil
+			})
+		} else if kept := r.keptExit; kept != nil {
+			// The app the run started once for every set: its exit, told
+			// at once by its runner (keptAppExit), halts this set as the
+			// return of a run of the set's own does. An exit told before
+			// this set began halts it too: the app is gone.
+			runTestSetErrGrp.Go(func() error {
+				defer utils.Recover(r.logger)
+				select {
+				case <-kept.told:
+				case <-runTestSetCtx.Done():
+					return nil
+				}
+				setLastAppErr(kept.exit)
+				if mappedStatus, ok := mapAppErrorToTestSetStatus(kept.exit); ok {
+					setErrStatus(mappedStatus)
+				}
+				appErrChan <- kept.exit
 				return nil
 			})
 		}
