@@ -2343,17 +2343,22 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 		// This process's own privileges were checked before Setup changed
 		// anything (checkDockerModePrivileges).
 		// Start the agent in Docker container using errgroup
+		// Asked when the stop begins (dockerAgentCancel): the run's CA
+		// volume is freed only once the engine has removed the container.
+		removal := kdocker.NewRemovalWatch(a.dockerClient, opts.KeployContainer)
 		grp.Go(func() error {
 			defer cancel() // Cancel agent context when Docker agent stops
-			err := a.startInDocker(agentCtx, a.logger, opts, run)
+			err := a.startInDocker(agentCtx, a.logger, opts, run, removal)
 			// `docker run` has returned: the container has exited -- unless the
 			// stop could not reach it (the engine refused `kill`, or sudo -n),
 			// in which case cmd.Cancel killed the client and it may still run.
 			run.exited()
-			// The run's CA volume goes with its agent. The engine keeps it
-			// while a container still mounts it: an agent the stop could not
-			// reach, or the application's container.
+			// The run's CA volume goes with its agent, once the engine has
+			// removed the agent's container. The engine keeps it while a
+			// container still mounts it: an agent the stop could not reach,
+			// or an application container run without --rm.
 			rmCtx, cancelRm := withRunnableBound(context.Background(), daemonAnswerStall, errDaemonSilent)
+			removal.Wait(rmCtx, a.logger)
 			kdocker.RemoveTLSVolume(rmCtx, a.logger, a.dockerClient, kdocker.TLSVolumeFor(opts.KeployContainer))
 			cancelRm()
 			// `docker run` exits with the agent's own status, so this carries
@@ -3907,7 +3912,7 @@ func (a *AgentClient) ComposeDownOnSetupFailure(_ context.Context) error {
 	return nil
 }
 
-func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, run *agentRun) error {
+func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, run *agentRun, removal *kdocker.RemovalWatch) error {
 	// The CLI's own config: the alias forwards the root flags the agent
 	// container must share with the CLI (agentargs.Root) from it.
 	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, a.conf, opts)
@@ -3922,7 +3927,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		return err
 	}
 
-	cmd.Cancel = dockerAgentCancel(logger, cmd, run, opts.KeployContainer)
+	cmd.Cancel = dockerAgentCancel(logger, cmd, run, opts.KeployContainer, removal)
 
 	logger.Debug("running the following command to start agent in docker", zap.String("command", redactToken(cmd.String())))
 
@@ -3955,9 +3960,12 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 
 // dockerAgentCancel is the `docker run` command's Cancel: it stops the agent's
 // container (stopAgentContainerFor) and then kills the client -- through
-// cmd.Process, not its raw pid, which cmd.Wait may have reaped already.
-func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name string) func() error {
+// cmd.Process, not its raw pid, which cmd.Wait may have reaped already. The
+// client was waiting for the container's removal (--rm), so the engine is
+// asked first to say when it is removed (removal).
+func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name string, removal *kdocker.RemovalWatch) func() error {
 	return func() error {
+		removal.Watch()
 		stopAgentContainerFor(logger, run, name)
 		if cmd.Process == nil {
 			return nil

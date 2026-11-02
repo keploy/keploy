@@ -34,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"go.keploy.io/server/v3/config"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
@@ -269,9 +270,11 @@ func TestStopPTYAgentRestoresTheTerminalAndSignals(t *testing.T) {
 	}
 }
 
-// dockerAgentCancel, the `docker run` command's Cancel: the container is sent
-// SIGTERM and waited for, answered or not, never `stop`, and then the client
-// is killed.
+// dockerAgentCancel, the `docker run` command's Cancel: the engine is first
+// asked to say when the container is removed -- the client it kills was
+// waiting for that, and the run's CA volume is freed only then -- and the
+// container is then sent SIGTERM and waited for, answered or not, never
+// `stop`, and then the client is killed.
 func TestDockerAgentCancel(t *testing.T) {
 	for _, ready := range []bool{true, false} {
 		log, release := fakeEngine(t)
@@ -284,14 +287,37 @@ func TestDockerAgentCancel(t *testing.T) {
 		}
 		run := newAgentRun()
 		run.ready.Store(ready)
-		if err := dockerAgentCancel(zap.NewNop(), client, run, stopTestContainer)(); err != nil {
+		watch := &removalAsked{t: t, log: log, before: -1}
+		if err := dockerAgentCancel(zap.NewNop(), client, run, stopTestContainer, kdocker.NewRemovalWatch(watch, stopTestContainer))(); err != nil {
 			t.Fatalf("ready=%v: cancel: %v", ready, err)
+		}
+		if watch.before != 0 || watch.cond != container.WaitConditionRemoved || watch.name != stopTestContainer {
+			t.Errorf("ready=%v: the engine was asked to wait for %q's %q after %d engine calls, want its removal asked before the stop's first", ready, watch.name, watch.cond, watch.before)
 		}
 		if err := client.Wait(); err == nil {
 			t.Fatalf("ready=%v: the docker client was not killed", ready)
 		}
 		requireSignalledAndWaited(t, engineLines(t, log))
 	}
+}
+
+// removalAsked is the engine's API a removal watch asks: it records the
+// wait asked and how many engine CLI calls came before it.
+type removalAsked struct {
+	t      *testing.T
+	log    string
+	before int
+	name   string
+	cond   container.WaitCondition
+}
+
+func (r *removalAsked) ContainerWait(_ context.Context, name string, cond container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+	r.before, r.name, r.cond = len(engineLines(r.t, r.log)), name, cond
+	return make(chan container.WaitResponse), make(chan error)
+}
+
+func (r *removalAsked) ContainerInspect(context.Context, string) (container.InspectResponse, error) {
+	return container.InspectResponse{}, nil
 }
 
 // requireSignalledAndWaited fails the test unless the engine calls are a

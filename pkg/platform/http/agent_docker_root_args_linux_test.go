@@ -47,7 +47,7 @@ func TestStartInDocker_HandsTheAgentContainerTheCLIsRootSettings(t *testing.T) {
 		ProxyPort:       16789,
 		DnsPort:         26789,
 	}
-	if err := a.startInDocker(context.Background(), zap.NewNop(), opts, newAgentRun()); err != nil {
+	if err := a.startInDocker(context.Background(), zap.NewNop(), opts, newAgentRun(), nil); err != nil {
 		t.Fatalf("startInDocker: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestSetup_HandsTheAgentContainerTheAppsRunSettings(t *testing.T) {
 		ProxyPort:       16790,
 		DnsPort:         26790,
 	}, ports, networks, hosts, dns)
-	if err := a.startInDocker(context.Background(), zap.NewNop(), opts, newAgentRun()); err != nil {
+	if err := a.startInDocker(context.Background(), zap.NewNop(), opts, newAgentRun(), nil); err != nil {
 		t.Fatalf("startInDocker: %v", err)
 	}
 	run := " " + strings.Join(strings.Fields(agentContainerRun(t, calls)), " ") + " "
@@ -171,7 +171,7 @@ func TestStartInDocker_MountsEachRunsOwnCAVolume(t *testing.T) {
 		calls := fakeDockerForStartInDocker(t)
 		a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{InstallationID: "install-id"}}
 		opts := models.SetupOptions{KeployContainer: agent, Mode: models.MODE_RECORD, AgentPort: 43902, ProxyPort: 16791, DnsPort: 26791}
-		if err := a.startInDocker(context.Background(), zap.NewNop(), opts, newAgentRun()); err != nil {
+		if err := a.startInDocker(context.Background(), zap.NewNop(), opts, newAgentRun(), nil); err != nil {
 			t.Fatalf("startInDocker: %v", err)
 		}
 		words := strings.Fields(agentContainerRun(t, calls))
