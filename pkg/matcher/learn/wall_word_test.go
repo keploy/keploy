@@ -65,6 +65,20 @@ func TestAClientTestsReadOfAUTCStampNamesTheWordOfItsDateAndTime(t *testing.T) {
 			t.Errorf("%s (%q): %s %+v (%s); want a read that names no word", row.name, rec, ln.Kind, o, ln.Why)
 		}
 	}
+	// A word of the value decoded once stands at places of the decoded
+	// text, so the recorded text's bytes there say nothing of its zone: it
+	// names no word, even where those bytes end in UTC's zone after a space.
+	rec := "q=" + "2026-10-30 05:09:21.102 +00:00"
+	asRecorded := models.ClockWordOf(rec, 2, len(rec))
+	decoded := asRecorded
+	decoded.Form = models.ClockWordDecoded
+	for _, w := range []models.ClockWord{decoded, asRecorded} {
+		read := models.ClockOffset{Res: time.Millisecond, Layout: "iso-second-space", Word: w}
+		got := withWallWord(Learned{Kind: KindClockRead, Recorded: Leaf{Value: rec}, Read: &read})
+		if named := !got.Read.WallWord.IsZero(); named != (w.Form == "") {
+			t.Errorf("a read at %+v of %q named the word %+v; want one only of a word read as recorded", w, rec, got.Read.WallWord)
+		}
+	}
 }
 
 // olderWordRead is the clock read keploy before WallWord learned of a
