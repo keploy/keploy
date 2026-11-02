@@ -262,11 +262,10 @@ var mockMode atomic.Bool
 func SetMockMode(on bool) { mockMode.Store(on) }
 
 // MockMode reports whether the agent serves a `keploy mock` session. A
-// protocol that writes its own hint with WithNextSteps uses it to leave out
-// advice a mock run cannot act on, such as test.globalNoise: `keploy mock
-// replay` sends the agent no NoiseConfig (its MockOutgoing options in
-// pkg/service/mock/replay.go), so noise from keploy.yml never reaches a
-// matcher there.
+// protocol that writes its own hint with WithNextSteps uses it to name what
+// a mock run is recorded and replayed with (RecordCommand, a mock set) and
+// to leave out advice a mock run cannot act on, such as keploy test's
+// --update-test-mapping.
 func MockMode() bool { return mockMode.Load() }
 
 // RecordCommand is the command that records this run again. A protocol that
@@ -328,16 +327,16 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 		for _, d := range r.FieldDiffs {
 			paths = append(paths, d.Path)
 		}
+		// keploy test and keploy mock replay alike hand the agent
+		// keploy.yml's test.globalNoise, so the noise is a remedy in both. A
+		// mock run is recorded again as a mock set, and only the HTTP parser
+		// acts on --on-miss, only when it can reach the real dependency.
+		rerecord := "re-record with '" + RecordCommand() + "'"
 		if mockMode.Load() {
-			// `keploy mock replay` sends the agent no noise config, so
-			// test.globalNoise would not change the next run's match. Only
-			// the HTTP parser acts on --on-miss, and only when it can reach
-			// the real dependency.
-			hint := fmt.Sprintf("Only values drifted (%s). If the change is expected, re-record the mock set with '%s'", strings.Join(paths, ", "), RecordCommand())
+			rerecord = "re-record the mock set with '" + RecordCommand() + "'"
 			if r.Protocol == ProtocolHTTP {
-				hint += ", or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'"
+				rerecord += ", or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'"
 			}
-			return hint + "."
 		}
 		// Body diffs are reported "body."-prefixed for readability, but HTTP
 		// request matching reads the request-body noise bucket with
@@ -350,10 +349,12 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 				bodyKeys = append(bodyKeys, k)
 			}
 		}
+		// The bucket's path is test.globalNoise.global.requestbody: a bucket
+		// written straight under test.globalNoise is no noise keploy reads.
 		if len(bodyKeys) > 0 {
-			return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.requestbody with root-relative keys (e.g. requestbody: {%s: []}); otherwise re-record with '%s'.", strings.Join(paths, ", "), strings.Join(bodyKeys, ": [], "), RecordCommand())
+			return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.global.requestbody in keploy.yml with root-relative keys (e.g. requestbody: {%s: []}); otherwise %s.", strings.Join(paths, ", "), strings.Join(bodyKeys, ": [], "), rerecord)
 		}
-		return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add them to the matching noise (test.globalNoise); otherwise re-record with '%s'.", strings.Join(paths, ", "), RecordCommand())
+		return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add them to the matching noise (test.globalNoise in keploy.yml); otherwise %s.", strings.Join(paths, ", "), rerecord)
 	default:
 		// Not --update-test-mapping alone: it updates only a passing test's
 		// mapping, so a test this miss failed keeps its recorded one. With
