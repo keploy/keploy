@@ -54,6 +54,23 @@ func (s *setupExitInstr) Run(ctx context.Context, _ models.RunOptions) models.Ap
 	return models.AppError{AppErrorType: models.ErrCtxCanceled, ExitCode: -1}
 }
 
+// WatchAgentStart, at "agent start", is the start of the agent of a stack
+// that goes down with its app: the app's exit is told, and then the agent's
+// start fails.
+func (s *setupExitInstr) WatchAgentStart(context.Context) <-chan error {
+	if s.at != "agent start" {
+		return nil
+	}
+	s.at = ""
+	failed := make(chan error, 1)
+	go func() {
+		s.tell()
+		<-s.known
+		failed <- errors.New("the keploy-agent container exited with code 1 before it was ready")
+	}()
+	return failed
+}
+
 func (s *setupExitInstr) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
 	if s.at != "MockOutgoing" {
 		return s.composeInstr.MockOutgoing(ctx, opts)
@@ -93,10 +110,12 @@ func composeExitInSetup(t *testing.T, on, serving bool, at string) (*prRun, *hel
 		// The first set of a kept stack waits for its agent too.
 		h.replayer.isFirstTestSet = true
 	}
-	if at == "agent health" {
+	if at == "agent health" || at == "agent start" {
 		var once sync.Once
 		agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			once.Do(s.tell)
+			if at == "agent health" {
+				once.Do(s.tell)
+			}
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}))
 		t.Cleanup(agent.Close)
@@ -235,5 +254,26 @@ func TestASetupFailureWithNoAppExitStands(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// An agent's start that fails once the app's exit is told, before the reader
+// of the app's errors ends the set (held here in its log of the exit until
+// the set's report is kept), is the exit's: the stack went down with the
+// app. The set halts on the exit, as at the agent's /health, not on "the
+// keploy-agent docker compose started did not come up".
+func TestAnAgentsStartFailingOnceTheAppsExitIsToldHaltsTheSet(t *testing.T) {
+	for _, tc := range composeExitShapes {
+		t.Run(tc.name, func(t *testing.T) {
+			h, app, _ := composeExitInSetup(t, tc.on, tc.serving, "agent start")
+			hold := holdExitLog(t, h.replayer)
+			h.report.afterReport = hold.release
+			status, err := runSet(h, "test-set-0", tc.serving)
+			if hold.boundHit.Load() {
+				t.Fatalf("the reader was let go by the row's bound (status %s, error %v): the set kept no report", status, err)
+			}
+			haltedBeforeTests(t, h, app, "test-set-0", status, err,
+				"application startup failed: it exited with code 3 - check application logs", nil)
+		})
 	}
 }

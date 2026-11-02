@@ -165,6 +165,8 @@ type prReportDB struct {
 	// filed it under, once its result is kept: a test acts there, after
 	// keploy filed the test.
 	afterInsert func(ctx context.Context, name string)
+	// afterReport, set, runs once the set's report is kept.
+	afterReport func()
 }
 
 func (f *prReportDB) GetAllTestRunIDs(context.Context) ([]string, error) { return nil, nil }
@@ -217,8 +219,12 @@ func (f *prReportDB) InsertTestCaseResult(ctx context.Context, _ string, _ strin
 }
 func (f *prReportDB) InsertReport(_ context.Context, _ string, _ string, rep *models.TestReport) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.report = rep
+	after := f.afterReport
+	f.mu.Unlock()
+	if after != nil {
+		after()
+	}
 	return nil
 }
 func (f *prReportDB) UpdateReport(context.Context, string, any) error { return nil }
@@ -256,7 +262,10 @@ type prInstr struct {
 	// during the send that readies the test case named on the agent: its
 	// window (the proven switch off) or its own view (exact serving).
 	stopAppReadying string
-	appStopped      chan struct{}
+	// onUpdate, set, runs with each send of filter params, before the send
+	// is taken.
+	onUpdate   func(params models.MockFilterParams)
+	appStopped chan struct{}
 	// stopErr is how the app exits; ErrAppStopped when empty.
 	stopErr models.AppErrorType
 	// lastParams is the filter-params payload of the most recent send, so a
@@ -395,6 +404,9 @@ func wholeMocks(ctx context.Context, mocks []*models.Mock) ([]*models.Mock, erro
 	return out, nil
 }
 func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+	if f.onUpdate != nil {
+		f.onUpdate(params)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastParams = params

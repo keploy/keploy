@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -689,6 +690,190 @@ func TestAnAppsExitWhileKeployReadiesATestSendsItNot(t *testing.T) {
 				if n := app.count(name); n != want {
 					t.Fatalf("%s was sent %d times, want %d: the app exited as keploy readied test-3", name, n, want)
 				}
+			}
+		})
+	}
+}
+
+// exitLogHold holds the reader of a set's app errors in its log of the app's
+// exit (applicationFailedToRunLogMessage), which it writes before it ends the
+// set (exitLoopChan, the set's cancel), until release: keploy knows of the
+// exit meanwhile (the app's listener, the kept app's tell), and the reader
+// has not ended the set. A bound keeps a miswired row from hanging; the row
+// fails if the bound, not release, let the reader go (boundHit).
+type exitLogHold struct {
+	once     sync.Once
+	released chan struct{}
+	boundHit atomic.Bool
+}
+
+func (h *exitLogHold) release() { h.once.Do(func() { close(h.released) }) }
+
+type exitLogHoldCore struct {
+	zapcore.Core
+	h *exitLogHold
+}
+
+func (c exitLogHoldCore) Enabled(l zapcore.Level) bool {
+	return l >= zapcore.ErrorLevel || c.Core.Enabled(l)
+}
+
+func (c exitLogHoldCore) With(f []zapcore.Field) zapcore.Core {
+	return exitLogHoldCore{c.Core.With(f), c.h}
+}
+
+func (c exitLogHoldCore) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	if e.Message == applicationFailedToRunLogMessage {
+		select {
+		case <-c.h.released:
+		case <-time.After(10 * time.Second):
+			c.h.boundHit.Store(true)
+		}
+	}
+	return c.Core.Check(e, ce)
+}
+
+// holdExitLog makes r's logger hold the reader of its sets' app errors
+// (exitLogHold).
+func holdExitLog(t *testing.T, r *Replayer) *exitLogHold {
+	t.Helper()
+	h := &exitLogHold{released: make(chan struct{})}
+	r.logger = zap.New(exitLogHoldCore{r.logger.Core(), h})
+	t.Cleanup(h.release)
+	return h
+}
+
+// An app's exit keploy knows of ends the set before its next test, though
+// the reader of the app's errors has not ended it yet: the app's listener
+// keeps the exit as it is told (the kept app's runner, its tell), and the
+// reader logs it before it ends the set. Here the exit is told as keploy
+// readies test-3 on its agent, and the reader is held in that log until the
+// set reads its results: in every compose shape test-3 is not sent, and the
+// set halts naming the exit's code and no test held.
+func TestAnExitKeployKnowsOfEndsTheSetBeforeItsReaderDoes(t *testing.T) {
+	for _, tc := range composeExitShapes {
+		t.Run(tc.name, func(t *testing.T) {
+			var hold *exitLogHold
+			r := runComposeExitMidTest(t, tc.on, tc.serving, func(h *prRun, app *heldRequests) {
+				hold = holdExitLog(t, h.replayer)
+				tell := app.exit
+				app.exitAt = ""
+				h.replayer.hookImpl = prHooks{onRequest: func(ctx context.Context, c *models.TestCase) error {
+					if c.Name == "test-3" {
+						hold.release()
+					}
+					return app.onRequest(ctx, c)
+				}}
+				var once sync.Once
+				h.instr.onUpdate = func(p models.MockFilterParams) {
+					if h.instr.readies(p, "test-3") {
+						once.Do(tell)
+					}
+				}
+				h.report.onRead = hold.release
+			})
+			if hold.boundHit.Load() {
+				t.Fatal("the reader was let go by the row's bound: the set never read its results")
+			}
+			if n := r.app.count("test-3"); n != 0 {
+				t.Fatalf("test-3 was sent %d times; keploy knew the app had exited", n)
+			}
+			if r.status != models.TestSetStatusAppHalted {
+				t.Fatalf("status %s, want APP_HALTED", r.status)
+			}
+			reason := r.h.report.report.FailureReason
+			if !strings.Contains(reason, "it exited with code 3") || strings.Contains(reason, "before it answered test") {
+				t.Fatalf("reason %q; want it to name the exit's code and no test held", reason)
+			}
+		})
+	}
+}
+
+// goneReal is keploy's agent with mock.real once it went down with the app's
+// stack: the set's end cannot read what the run reached.
+type goneReal struct{}
+
+func (goneReal) PushRealDeps(context.Context, []string) error { return nil }
+func (goneReal) KeepRealDeps(context.Context, []string) error { return nil }
+func (goneReal) RealTest(context.Context) (models.RealTest, error) {
+	return models.RealTest{}, nil
+}
+func (goneReal) RealRun(context.Context) (models.RealRun, error) {
+	return models.RealRun{}, errors.New("dial tcp 172.18.0.2:16789: connect: connection refused")
+}
+
+type goneRealTold struct {
+	*toldExitInstr
+	goneReal
+}
+
+type goneRealCompose struct {
+	*composeInstr
+	goneReal
+}
+
+// A set its app's exit halted keeps the exit's status through its end's
+// reads: with the proven switch and mock.real, the agent that went down with
+// the app cannot say what the run reached, and the set is APP_HALTED naming
+// the exit, not "not judged" (INTERNAL_ERR) for the read. Those reads judge
+// only a set with a verdict to give, and a halted set has its status as the
+// loop ends on the exit.
+func TestAHaltedSetIsNotJudgedOnReadsItsGoneAgentFails(t *testing.T) {
+	for _, tc := range composeExitShapes {
+		if !tc.on {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			r := runComposeExitMidTest(t, tc.on, tc.serving, func(h *prRun, _ *heldRequests) {
+				h.replayer.config.Mock.Real = []string{"db:5432"}
+				switch in := h.replayer.instrumentation.(type) {
+				case *toldExitInstr:
+					h.replayer.instrumentation = &goneRealTold{toldExitInstr: in}
+				case *composeInstr:
+					h.replayer.instrumentation = &goneRealCompose{composeInstr: in}
+				default:
+					t.Fatalf("instrumentation %T", in)
+				}
+			})
+			if r.status != models.TestSetStatusAppHalted {
+				t.Fatalf("status %s (reason %q), want APP_HALTED", r.status, r.h.report.report.FailureReason)
+			}
+			reason := r.h.report.report.FailureReason
+			if !strings.Contains(reason, "it exited with code 3 before it answered test test-2") || strings.Contains(reason, "judged") {
+				t.Fatalf("reason %q; want it to name the exit and the test held, and nothing of the gone agent's read", reason)
+			}
+		})
+	}
+}
+
+// A streaming test whose request failed on the app's exit (its connection
+// reset), the exit told once keploy filed it, was never answered: the set
+// halts naming it, as a test of the main loop is named
+// (TestAnExitToldAfterTheHeldTestsRequestFailedNamesThatTest).
+func TestAnExitToldAfterAHeldStreamingTestsRequestFailedNamesThatTest(t *testing.T) {
+	for _, tc := range composeExitShapes {
+		if tc.serving {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			r := runComposeExitMidTest(t, tc.on, tc.serving, func(h *prRun, app *heldRequests) {
+				h.streaming("test-3")
+				tell := app.exit
+				app.exitAt = ""
+				h.replayer.hookImpl = prHooks{onRequest: app.onRequest,
+					simErr: map[string]error{"test-3": errors.New("read tcp 172.18.0.3:8080: connection reset by peer")}}
+				h.report.afterInsert = func(_ context.Context, name string) {
+					if name == "test-3" {
+						tell()
+					}
+				}
+			})
+			if r.status != models.TestSetStatusAppHalted {
+				t.Fatalf("status %s, want APP_HALTED", r.status)
+			}
+			reason := r.h.report.report.FailureReason
+			if !strings.Contains(reason, "it exited with code 3 before it answered test test-3") {
+				t.Fatalf("reason %q; want it to name the exit's code and test-3, whose request failed on the exit", reason)
 			}
 		})
 	}

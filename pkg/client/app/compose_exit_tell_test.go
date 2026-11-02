@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -143,5 +144,36 @@ func TestTheComposeHaltIsToldOnlyWhenKeptAndListenedFor(t *testing.T) {
 	a.tellComposeHalt(ctx)
 	if len(told) != 1 || told[0].AppErrorType != models.ErrUnExpected || told[0].ExitCode != 3 {
 		t.Fatalf("told %+v; want the kept halt once, code 3", told)
+	}
+}
+
+// The run's end on a halt under the switch tells the run's caller of the halt
+// kept, with the app's exit code, before the project's stop: that waits for
+// every service of the stack to stop, each within its own grace, and the
+// caller is not to take the app for running meanwhile.
+func TestTheComposeHaltsEndTellsTheExitBeforeTheProjectsStop(t *testing.T) {
+	rec := &inspectRecorder{inspects: map[string]container.InspectResponse{"app": {
+		ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Status: "exited", ExitCode: 3}},
+		Config:            &container.Config{Labels: map[string]string{"com.docker.compose.project": "p1"}},
+	}}}
+	a := &App{logger: zap.NewNop(), container: "app", docker: rec}
+	a.composeApp.halted.Store(&composeHalt{exitCode: 3})
+	var told []models.AppError
+	listsAtTell := -1
+	ctx := models.WithAppExit(context.Background(), func(e models.AppError) {
+		told = append(told, e)
+		rec.mu.Lock()
+		listsAtTell = len(rec.listedLabels)
+		rec.mu.Unlock()
+	})
+	a.composeHaltEnd(ctx, make(chan struct{}), func() {})()
+	if len(told) != 1 || told[0].AppErrorType != models.ErrUnExpected || told[0].ExitCode != 3 {
+		t.Fatalf("told %+v; want the kept halt once, code 3", told)
+	}
+	rec.mu.Lock()
+	lists := len(rec.listedLabels)
+	rec.mu.Unlock()
+	if listsAtTell != 0 || lists != 1 {
+		t.Fatalf("told after %d of the project's %d stops; want it told before the project's stop", listsAtTell, lists)
 	}
 }
