@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/internal/testnet"
 )
 
 // dialAndGetReset drives a real TCP connection whose peer answers with RST,
@@ -94,33 +96,16 @@ func TestIsConnReset_RealPeerReset(t *testing.T) {
 }
 
 func TestIsConnRefused_RealDeadPort(t *testing.T) {
-	// Bind and immediately release, so the port is known to have no listener.
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	if err := ln.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-
-	// Retry rather than skip. This is the only test of IsConnRefused
-	// anywhere, so a skip would let the Windows job go green having proven
-	// nothing at all.
-	var dialErr error
-	for attempt := 0; attempt < 5; attempt++ {
-		c, err := net.Dial("tcp4", addr)
-		if err != nil {
-			dialErr = err
-			break
-		}
+	// A port nothing listens on, held for the test's life so that no other
+	// socket can take it (testnet.RefusedAddr). This is the only test of
+	// IsConnRefused anywhere, so it never skips: a skip would let the
+	// Windows job go green having proven nothing at all.
+	addr := testnet.RefusedAddr(t, "tcp")
+	c, err := net.Dial("tcp4", addr)
+	if err == nil {
 		_ = c.Close()
-		time.Sleep(50 * time.Millisecond)
+		t.Fatalf("a connection to %s was accepted; the harness could not produce the error under test", addr)
 	}
-	if dialErr == nil {
-		t.Fatalf("nothing refused a connection to %s across 5 attempts; the harness could not produce the error under test", addr)
-	}
-	err = dialErr
 
 	if !IsConnRefused(err) {
 		var errno syscall.Errno

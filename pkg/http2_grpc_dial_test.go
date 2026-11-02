@@ -3,9 +3,11 @@ package pkg
 import (
 	"context"
 	"net"
+	"strconv"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.uber.org/zap"
 )
 
@@ -14,12 +16,7 @@ import (
 // — it does NOT give up on the first refusal (the old single-shot behavior that
 // false-failed a slow-starting gRPC app), nor hang forever.
 func TestDialTCPWithConnRefusedRetry_RetriesBoundedOnPersistentRefusal(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close() // nothing listening now → refused
+	addr := testnet.RefusedAddr(t, "tcp")
 
 	start := time.Now()
 	conn, err := dialTCPWithConnRefusedRetry(context.Background(), zap.NewNop(), addr, nil, 0)
@@ -39,17 +36,15 @@ func TestDialTCPWithConnRefusedRetry_RetriesBoundedOnPersistentRefusal(t *testin
 // TestDialTCPWithConnRefusedRetry_RetriesThenConnects proves the value: a dial
 // refused at first succeeds once the app starts listening.
 func TestDialTCPWithConnRefusedRetry_RetriesThenConnects(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
+	// The port is held for the test's life (testnet.SharedPort): a dial to
+	// it is refused until the listener opens there, and no other socket can
+	// take it meanwhile.
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t)))
 
 	ready := make(chan net.Listener, 1)
 	go func() {
 		time.Sleep(connRefusedRetryBackoff / 2)
-		l, lerr := net.Listen("tcp", addr)
+		l, lerr := testnet.OpenShared("tcp4", addr)
 		if lerr != nil {
 			ready <- nil
 			return
@@ -66,7 +61,7 @@ func TestDialTCPWithConnRefusedRetry_RetriesThenConnects(t *testing.T) {
 		_ = l.Close()
 	}
 	if l == nil {
-		t.Skip("could not re-bind the reserved port (likely TIME_WAIT); retry-connect path not exercised this run")
+		t.Fatal("the listener could not open at the held port")
 	}
 	if err != nil {
 		t.Fatalf("expected the dial to retry and connect once the listener opened, got: %v", err)
@@ -77,12 +72,7 @@ func TestDialTCPWithConnRefusedRetry_RetriesThenConnects(t *testing.T) {
 // TestDialTCPWithConnRefusedRetry_RespectsContext proves a cancelled context
 // aborts the retry loop promptly instead of running all backoffs.
 func TestDialTCPWithConnRefusedRetry_RespectsContext(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
+	addr := testnet.RefusedAddr(t, "tcp")
 
 	ctx, cancel := context.WithTimeout(context.Background(), connRefusedRetryBackoff/2)
 	defer cancel()

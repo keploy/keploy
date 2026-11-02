@@ -6,7 +6,7 @@ import (
 	"net"
 	"testing"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
+	"go.keploy.io/server/v3/internal/testnet"
 )
 
 func TestRefusedLocallyOnlyForALocalPortWithNothingListening(t *testing.T) {

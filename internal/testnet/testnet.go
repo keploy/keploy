@@ -1,5 +1,5 @@
-// Package testnet gives the tests of the proxy tree the loopback ports they
-// expect refused or free, held for the test's life. go test ./... tests
+// Package testnet gives this module's tests the loopback ports they expect
+// refused or free, held for the test's life. go test ./... tests
 // packages side by side, and a port a test took from a listener it then
 // closed is free at once: a socket of another test, in this binary or in a
 // package tested beside it, can take the port and answer the dial the test
@@ -11,7 +11,8 @@
 // hold cannot give the refusal the tests expect there, and Windows is not
 // checked. There the helpers give a port a listener left when it closed, as
 // the tests took one before, and another socket can take it meanwhile. CI
-// runs these tests on Linux, and those of package incoming on Windows too.
+// runs these tests on Linux, and some packages' tests on Windows and macOS
+// too.
 //
 // BoundHere counts the sockets of this process at a port, so a test can tell
 // a port its code still holds from one another process took once it was

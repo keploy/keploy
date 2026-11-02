@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v3/config"
@@ -67,13 +68,8 @@ func TestWaitForAppReady_DockerPortGate_ReadyPort(t *testing.T) {
 // anyway, matching the historical fixed-delay behavior — the gate never blocks
 // forever and never weakens the run) after the bounded ceiling.
 func TestWaitForAppReady_DockerPortGate_DeadPortProceeds(t *testing.T) {
-	// Pick a port nothing is listening on by opening then closing a listener.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	_, port, _ := net.SplitHostPort(ln.Addr().String())
-	ln.Close()
+	// A port nothing is listening on, held so no other socket takes it.
+	_, port, _ := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
 
 	cfg := &config.Config{Command: "docker run -p " + port + ":" + port + " img"}
 	cfg.Test.Delay = 0
@@ -91,9 +87,7 @@ func TestWaitForAppReady_DockerPortGate_DeadPortProceeds(t *testing.T) {
 // ctx cancellation during the port wait must unblock immediately and report
 // not-ready (false), preserving the "false only on ctx cancel" contract.
 func TestWaitForAppReady_DockerPortGate_CtxCancel(t *testing.T) {
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	_, port, _ := net.SplitHostPort(ln.Addr().String())
-	ln.Close()
+	_, port, _ := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
 
 	cfg := &config.Config{Command: "docker run -p " + port + ":" + port + " img"}
 	cfg.Test.Delay = 0
