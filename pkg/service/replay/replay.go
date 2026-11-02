@@ -3211,6 +3211,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// loop first judged the tests: ranging a map of them wrote a report's tests
 	// in an order that changed on every run.
 	finalTestCaseResults := newJudgedRows()
+	// insertNow writes a row the test loop writes at once (IGNORED, no
+	// answer, an internal error). A test an earlier RetryPassing cycle judged
+	// has that cycle's row in finalTestCaseResults: it is written first and
+	// leaves the map, so the store holds the test's rows in the order its
+	// cycles ran and its last row is its last cycle's.
+	insertNow := func(name string, res *models.TestResult) error {
+		if earlier := finalTestCaseResults.take(name); earlier != nil {
+			if err := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, earlier); err != nil {
+				return err
+			}
+		}
+		return r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, res)
+	}
 	// firstCycleLearned is, once a retry cycle of record's full round
 	// begins, every mock state the set's first cycle consumed: what the learn
 	// step learned there, the one cycle it learns in. nil while no retry
@@ -3330,7 +3343,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 					SkipReason:   r.skipReasonFor(testSetID, testCase.Name),
 				}
-				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+				loopErr = insertNow(testCase.Name, testCaseResult)
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert test case result")
 					break
@@ -3577,7 +3590,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					currentFailures++
 					testSetStatus = models.TestSetStatusFailed
 					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
-					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+					loopErr = insertNow(testCase.Name, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, "failed to insert test case result for an answer judged on its start")
 						break
@@ -3598,7 +3611,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// during this (failed) test attaches here and isn't carried to
 				// the next test or lost.
 				r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
-				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+				loopErr = insertNow(testCase.Name, testCaseResult)
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert test case result for simulation error")
 					break
@@ -3842,7 +3855,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testSetStatus = models.TestSetStatusFailed
 					testCaseResult := r.CreateFailedTestResult(noAnswerView(tmplRun, &sent), testSetID, started, errors.New("invalid response type for HTTP test case"))
 					attachMisses(testCaseResult)
-					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+					loopErr = insertNow(testCase.Name, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, fmt.Sprintf("failed to insert test case result for type assertion error in %s test case", testCase.Kind))
 						break testLoop
@@ -3897,7 +3910,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testSetStatus = models.TestSetStatusFailed
 					testCaseResult := r.CreateFailedTestResult(noAnswerView(tmplRun, &sent), testSetID, started, errors.New("invalid response type for gRPC test case"))
 					attachMisses(testCaseResult)
-					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+					loopErr = insertNow(testCase.Name, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, "failed to insert test case result for type assertion error")
 						break testLoop
@@ -4398,7 +4411,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// later test (or vanishing) when we bail out on this internal error.
 					failedResult := r.CreateFailedTestResult(testCase, testSetID, started, errors.New("internal error: test case result is nil"))
 					attachMisses(failedResult)
-					if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
+					if insErr := insertNow(testCase.Name, failedResult); insErr != nil {
 						utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil test case result")
 					}
 					// Outcome was already counted at lines ~1850-1864; don't double-count here.
@@ -4411,7 +4424,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// failed result so the miss surfaces and can't carry forward.
 				failedResult := r.CreateFailedTestResult(testCase, testSetID, started, errors.New("internal error: comparison returned no result"))
 				attachMisses(failedResult)
-				if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
+				if insErr := insertNow(testCase.Name, failedResult); insErr != nil {
 					utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil comparison result")
 				}
 				// Outcome was already counted at lines ~1850-1864; don't double-count here.
@@ -5378,6 +5391,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// writes a test it judged without an answer (or IGNORED) at once but a
 	// judged answer only when its last cycle ends: put them back in the order
 	// the set ran its tests, for the hooks, the failure reason and the report.
+	// A test's own rows keep their order, cycle by cycle (insertNow).
 	runOrder.sort(testCaseResults)
 	// The prune's connection-error rule reads these back: unreadable or short of
 	// the verdicts, they cannot vouch for anything (fail closed). They are
@@ -5558,6 +5572,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				utils.LogError(r.logger, insErr, "failed to insert a test result the evidence floor put back")
 			}
 		}
+		// The floor appends what it put back: a test takes its place in the
+		// run again, and a row the hook renamed goes after every test.
+		runOrder.sort(testCaseResults)
 		if len(held) > 0 {
 			r.logger.Error("a before-test-result hook passed, relabelled or removed tests with evidence against them, or cleared that evidence; they stay FAILED (KEPLOY_PROVEN=1)",
 				zap.String("test-set", testSetID),

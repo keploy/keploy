@@ -2,12 +2,16 @@ package replay
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // orderOf is the test of each row, one per line, as the report lists them.
@@ -139,5 +143,206 @@ func TestRunOrderSortIsStable(t *testing.T) {
 	want := "b a" + string(models.TestStatusFailed) + " a" + string(models.TestStatusPassed) + " c x y"
 	if strings.Join(got, " ") != want {
 		t.Fatalf("sorted %q, want %q", strings.Join(got, " "), want)
+	}
+}
+
+// The sort is stable over more rows than an insertion sort handles: Go's
+// sort.Slice happens to keep the order of 12 rows or fewer.
+func TestRunOrderSortIsStableOverManyRows(t *testing.T) {
+	o := newRunOrder()
+	for i := 0; i < 5; i++ {
+		o.note(fmt.Sprintf("t%d", i))
+	}
+	var rows []models.TestResult
+	for k := 0; k < 40; k++ {
+		for i := 4; i >= 0; i-- {
+			rows = append(rows, models.TestResult{TestCaseID: fmt.Sprintf("t%d", i), Name: fmt.Sprintf("%03d", k)})
+		}
+	}
+	o.sort(rows)
+	for i := 1; i < len(rows); i++ {
+		if rows[i].TestCaseID < rows[i-1].TestCaseID {
+			t.Fatalf("not in run order at %d: %s after %s", i, rows[i].TestCaseID, rows[i-1].TestCaseID)
+		}
+		if rows[i].TestCaseID == rows[i-1].TestCaseID && rows[i].Name < rows[i-1].Name {
+			t.Fatalf("the rows of %s left their order at %d: %s before %s", rows[i].TestCaseID, i, rows[i-1].Name, rows[i].Name)
+		}
+	}
+}
+
+// take gives a test's row back once, and the test leaves the order.
+func TestJudgedRowsTakeLeavesTheOrder(t *testing.T) {
+	j := newJudgedRows()
+	for _, n := range []string{"a", "b", "c"} {
+		j.put(n, &models.TestResult{TestCaseID: n})
+	}
+	if r := j.take("b"); r == nil || r.TestCaseID != "b" {
+		t.Fatalf("take(b) = %v, want b's row", r)
+	}
+	if r := j.take("b"); r != nil {
+		t.Fatalf("take(b) again = %v, want nil", r)
+	}
+	if got, want := ptrOrderOf(j.inRunOrder()), []byte("a\nc\n"); !bytes.Equal(got, want) {
+		t.Fatalf("rows after take\n%s\nwant\n%s", got, want)
+	}
+}
+
+// An IGNORED test, judged before the walk, comes first, and a streaming test,
+// deferred past the walk, comes last.
+func TestRunTestSetIgnoredFirstStreamingLast(t *testing.T) {
+	h := newPartialRunHarness(t, 8, 0)
+	h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": {"test-6"}}
+	h.streaming("test-3")
+	_ = h.run(t)
+	if h.report.report == nil {
+		t.Fatal("precondition: the set wrote no report")
+	}
+	got := orderOf(h.report.report.Tests)
+	want := []byte("test-6\ntest-1\ntest-2\ntest-4\ntest-5\ntest-7\ntest-8\ntest-3\n")
+	if !bytes.Equal(got, want) {
+		t.Fatalf("the report lists its tests in order\n%s\nwant\n%s", got, want)
+	}
+}
+
+// retryRun is what a RetryPassing run's hooks and agent share: how many times
+// each test ran, and which test ran last.
+type retryRun struct {
+	mu    sync.Mutex
+	calls map[string]int
+	cur   string
+}
+
+// cycleHooks: the wrongAll tests always answer wrong (they fail cycle 1, so
+// the passing tests run again); the noAnswerFrom tests get no answer from
+// their n-th run on.
+type cycleHooks struct {
+	prHooks
+	run          *retryRun
+	wrongAll     map[string]bool
+	noAnswerFrom map[string]int
+}
+
+func (h cycleHooks) SimulateRequest(ctx context.Context, tc *models.TestCase, set string) (interface{}, error) {
+	h.run.mu.Lock()
+	h.run.calls[tc.Name]++
+	h.run.cur = tc.Name
+	n := h.run.calls[tc.Name]
+	h.run.mu.Unlock()
+	if from, ok := h.noAnswerFrom[tc.Name]; ok && n >= from {
+		return nil, errors.New("connection reset by peer")
+	}
+	resp, err := h.prHooks.SimulateRequest(ctx, tc, set)
+	if r, ok := resp.(*models.HTTPResp); ok && h.wrongAll[tc.Name] {
+		r.Body = `{"ok":false}`
+	}
+	return resp, err
+}
+
+// missOnRun is the agent of a retryRun: on test's nth run, the test made a
+// call no mock answered (miss).
+type missOnRun struct {
+	*prInstr
+	run  *retryRun
+	test string
+	nth  int
+	miss models.UnmatchedCall
+}
+
+func (m *missOnRun) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {
+	m.run.mu.Lock()
+	defer m.run.mu.Unlock()
+	if m.run.cur == m.test && m.run.calls[m.test] == m.nth {
+		return []models.UnmatchedCall{m.miss}, nil
+	}
+	return nil, nil
+}
+
+// With RetryPassing, test-3 passes cycle 1 and gets no answer in cycle 2. Its
+// rows are written cycle by cycle: cycle 1's PASSED, then cycle 2's FAILED, so
+// what reads a test's last row (lastResultOfEachTest, returnedMissed) reads
+// cycle 2's. Each cycle's row stays, and the set counts test-3 once.
+func TestRunTestSetRetryPassingWritesATestsRowsCycleByCycle(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("proven=%v", on), func(t *testing.T) {
+			if on {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			h := newPartialRunHarness(t, 4, 0)
+			h.replayer.config.RetryPassing = true
+			run := &retryRun{calls: map[string]int{}}
+			h.replayer.hookImpl = cycleHooks{run: run, wrongAll: map[string]bool{"test-2": true}, noAnswerFrom: map[string]int{"test-3": 2}}
+			miss := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /gone", ClosestMock: "mock-given-back"}
+			h.replayer.instrumentation = &missOnRun{prInstr: h.instr, run: run, test: "test-3", nth: 2, miss: miss}
+			_ = h.run(t)
+			rep := h.report.report
+			if rep == nil {
+				t.Fatal("precondition: the set wrote no report")
+			}
+			run.mu.Lock()
+			ran := run.calls["test-3"]
+			run.mu.Unlock()
+			if ran != 2 {
+				t.Fatalf("precondition: test-3 ran %d time(s), want 2 (a second cycle)", ran)
+			}
+			var got []string
+			for _, r := range rep.Tests {
+				got = append(got, r.TestCaseID+":"+string(r.Status))
+			}
+			want := []string{"test-1:PASSED", "test-2:FAILED", "test-3:PASSED", "test-3:FAILED", "test-4:PASSED"}
+			if !slices.Equal(got, want) {
+				t.Fatalf("the report's rows are\n%v\nwant\n%v", got, want)
+			}
+			for _, r := range lastResultOfEachTest(rep.Tests) {
+				if r.TestCaseID == "test-3" && r.Status != models.TestStatusFailed {
+					t.Fatalf("test-3's last row is %s, want its last cycle's (FAILED)", r.Status)
+				}
+			}
+			plan := &exactPlan{returned: map[string]string{"mock-given-back": "test-1"}}
+			back := plan.returnedMissed(rep.Tests)
+			if wantBack := []string{"test-3: GET /gone (mock-given-back, given back to test-1)"}; !slices.Equal(back, wantBack) {
+				t.Fatalf("returnedMissed = %q, want cycle 2's miss %q", back, wantBack)
+			}
+			if rep.Success != 2 || rep.Failure != 2 || rep.Total != 4 {
+				t.Fatalf("the set counts passed %d, failed %d of %d; want 2, 2 of 4 (test-3 once)", rep.Success, rep.Failure, rep.Total)
+			}
+		})
+	}
+}
+
+// renameHooks renames a test's row in BeforeTestResult.
+type renameHooks struct {
+	prHooks
+	from, to string
+}
+
+func (h renameHooks) BeforeTestResult(_ context.Context, _, _ string, results []models.TestResult) error {
+	for i := range results {
+		if results[i].TestCaseID == h.from {
+			results[i].TestCaseID = h.to
+		}
+	}
+	return nil
+}
+
+// Under the proven switch the evidence floor puts back a test a hook renamed:
+// the test takes its place in the run, and the renamed row comes after every
+// test.
+func TestRunTestSetFloorPutsATestBackInItsPlace(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newPartialRunHarness(t, 5, 0)
+	h.replayer.hookImpl = renameHooks{from: "test-3", to: "test-3-renamed"}
+	_ = h.run(t)
+	if h.report.report == nil {
+		t.Fatal("precondition: the set wrote no report")
+	}
+	got := orderOf(h.report.report.Tests)
+	want := []byte("test-1\ntest-2\ntest-3\ntest-4\ntest-5\ntest-3-renamed\n")
+	if !bytes.Equal(got, want) {
+		t.Fatalf("the report lists its tests in order\n%s\nwant\n%s", got, want)
+	}
+	if r := h.report.report.Tests[2]; r.Status != models.TestStatusFailed {
+		t.Fatalf("precondition: the floor put test-3 back %s, want FAILED", r.Status)
 	}
 }
