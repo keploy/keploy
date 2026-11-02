@@ -49,6 +49,13 @@ type mysqlNoiseAdapter struct {
 	mocknoise.JSONDiffer
 }
 
+// The strict gate's live body is decoded once for all of a command's
+// candidates only through DiffJSONBodies.
+var _ mocknoise.JSONBodyDiffer = mysqlNoiseAdapter{}
+
+// The strict gate's live body is decoded once for all of a command's
+// candidates only through DiffJSONBodies.
+
 // DiffJSONBodies is the adapter's Diff (JSONDiffer's, DetectJSONDrift) over
 // the bodies as mocknoise.JSONBody, so the strict gate's live body, compared
 // with every candidate of a command, is decoded once (strictGate.bodyDocFor).
@@ -231,9 +238,9 @@ type strictGate struct {
 
 	// liveDoc and legacyDoc are the live body and legacyBody as compare
 	// gives them to the engine, made on first use (bodyDocFor); docsMade,
-	// when set, counts the ones made, as bodiesBuilt counts the builds.
+	// when set, collects the ones made, as bodiesBuilt counts the builds.
 	liveDoc, legacyDoc *mocknoise.JSONBody
-	docsMade           *int
+	docsMade           *[]*mocknoise.JSONBody
 }
 
 // bodyFor is the live request body mock's recorded one is compared with: the
@@ -249,7 +256,7 @@ func (g *strictGate) bodyFor(mock *models.Mock) ([]byte, bool) {
 // bodyDocFor is bodyFor's body as compare gives it to the engine: one
 // mocknoise.JSONBody for the live body and one for legacyBody, so each is
 // decoded once however many candidates the command compares it with.
-// docsMade, when set, counts the ones made.
+// docsMade, when set, collects the ones made.
 func (g *strictGate) bodyDocFor(mock *models.Mock) *mocknoise.JSONBody {
 	doc := &g.liveDoc
 	if g.comparesLegacy(mock) {
@@ -259,7 +266,7 @@ func (g *strictGate) bodyDocFor(mock *models.Mock) *mocknoise.JSONBody {
 		body, _ := g.bodyFor(mock)
 		*doc = mocknoise.NewJSONBody(body)
 		if g.docsMade != nil {
-			*g.docsMade++
+			*g.docsMade = append(*g.docsMade, *doc)
 		}
 	}
 	return *doc

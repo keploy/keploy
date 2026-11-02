@@ -313,9 +313,9 @@ func TestAMissReportsTheRecordingOfItsRequestStrictRejected(t *testing.T) {
 // TestAStrictCommandGivesTheEngineItsLiveBodyOnce: a live COM_STMT_EXECUTE
 // under strict enforcement, the gate eager, compares its live body with each
 // of the three recordings of its statement made with other parameters, and
-// rejects them all. It gives the engine that body once, to be validated and
-// decoded once for all three (mocknoise.JSONBody), not once a candidate.
-// Counted, not timed.
+// rejects them all. It gives MySQL's engine that body once, which validates
+// and decodes it once for all three (mocknoise.JSONBody, through the
+// adapter's DiffJSONBodies), not once a candidate. Counted, not timed.
 func TestAStrictCommandGivesTheEngineItsLiveBodyOnce(t *testing.T) {
 	exec := func(v string) mysql.Request {
 		req := executeReq(8, "")
@@ -331,12 +331,12 @@ func TestAStrictCommandGivesTheEngineItsLiveBodyOnce(t *testing.T) {
 	s := newDiffSide(t, pool)
 	defer s.mm.Close()
 	s.stageNoWindow()
-	compared, docs, err := replayer.MatchCommandDocsForTest(context.Background(), zap.NewNop(), exec("live"), s.mm, s.dctx, replayer.StrictEngineForTest(), true)
+	compared, docs, reads, err := replayer.MatchCommandDocsForTest(context.Background(), zap.NewNop(), exec("live"), s.mm, s.dctx, replayer.StrictEngineForTest(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if compared != 3 || docs != 1 {
-		t.Errorf("the gate compared %d candidates and gave the engine %d live bodies, want 3 and 1", compared, docs)
+	if compared != 3 || docs != 1 || reads != 2 {
+		t.Errorf("the gate compared %d candidates and gave the engine %d live bodies, read %d times; want 3, 1 and 2 (validated once, decoded once)", compared, docs, reads)
 	}
 }
 

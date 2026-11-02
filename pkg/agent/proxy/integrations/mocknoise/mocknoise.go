@@ -344,6 +344,12 @@ func (b *JSONBody) Raw() []byte {
 	return b.raw
 }
 
+// Reads is how many times the body was validated or decoded so far: each
+// once at most, however many comparisons read it.
+func (b *JSONBody) Reads() int {
+	return b.reads
+}
+
 // isJSON reports whether the body is JSON (json.Valid), asked once.
 func (b *JSONBody) isJSON() bool {
 	if !b.checked {

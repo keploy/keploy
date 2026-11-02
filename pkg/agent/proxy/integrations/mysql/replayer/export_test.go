@@ -124,10 +124,15 @@ func MatchCommandGateForTest(ctx context.Context, logger *zap.Logger, req mysql.
 
 // MatchCommandDocsForTest is MatchCommandGateForTest that also returns how
 // many live bodies the strict gate gave the engine to compare
-// (matchOptions.docsMade).
-func MatchCommandDocsForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *mocknoise.Engine, eager bool) (compared, docs int, err error) {
-	_, _, _, err = matchCommandWith(ctx, logger, req, db, dctx, eng, nil, matchOptions{compared: &compared, docsMade: &docs, eagerGate: eager, wholeWalk: eager})
-	return compared, docs, err
+// (matchOptions.docsMade), and how many times the engine validated or
+// decoded them, summed (mocknoise.JSONBody.Reads).
+func MatchCommandDocsForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *mocknoise.Engine, eager bool) (compared, docs, reads int, err error) {
+	var made []*mocknoise.JSONBody
+	_, _, _, err = matchCommandWith(ctx, logger, req, db, dctx, eng, nil, matchOptions{compared: &compared, docsMade: &made, eagerGate: eager, wholeWalk: eager})
+	for _, d := range made {
+		reads += d.Reads()
+	}
+	return compared, len(made), reads, err
 }
 
 // NoiseEngineForTest is the schema-noise engine matchCommand runs with, with

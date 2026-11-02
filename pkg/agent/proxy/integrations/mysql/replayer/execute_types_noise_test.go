@@ -155,13 +155,14 @@ func TestAStrictCommandComparesEachRecordingWithItsOwnReading(t *testing.T) {
 	dctx := newDecodeCtx()
 	dctx.StmtIDToQuery[33] = ordersInsert
 	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
-	var compared, docs int
+	var compared int
+	var docs []*mocknoise.JSONBody
 	resp, ok, _, err := matchCommandWith(ctx, zap.NewNop(), req, db, dctx, mocknoise.New(mysqlNoiseAdapter{}, false, true), nil,
 		matchOptions{compared: &compared, docsMade: &docs, eagerGate: true, wholeWalk: true})
 	if err != nil || !ok || resp.Payload != "row" {
 		t.Fatalf("served %v (ok %v, %v), want the older keploy's recording's row", resp, ok, err)
 	}
-	if compared != 2 || docs != 2 {
-		t.Errorf("the gate compared %d recordings with %d bodies, want 2 with 2 (one for each reading)", compared, docs)
+	if compared != 2 || len(docs) != 2 {
+		t.Errorf("the gate compared %d recordings with %d bodies, want 2 with 2 (one for each reading)", compared, len(docs))
 	}
 }

@@ -16,6 +16,7 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	mysqlutils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	// vitesslog must load before any vitess code logs: see that package.
 	_ "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/vitesslog"
@@ -357,10 +358,10 @@ type matchOptions struct {
 	// with the live request (strictGate.compare), so a test can check what
 	// a command costs without timing it.
 	compared *int
-	// docsMade, when set, counts the live bodies the strict gate gives the
-	// engine to compare (strictGate.bodyDocFor), each decoded once however
-	// many candidates it is compared with.
-	docsMade *int
+	// docsMade, when set, collects the live bodies the strict gate gives the
+	// engine to compare (strictGate.bodyDocFor), each validated and decoded
+	// once however many candidates it is compared with (JSONBody.Reads).
+	docsMade *[]*mocknoise.JSONBody
 	// eagerGate gates each fallback of a COM_STMT_EXECUTE as the walk meets
 	// it, as the matcher did before it deferred the gate past the walk
 	// (execFallbacks): the reference a test checks that the deferred gate
