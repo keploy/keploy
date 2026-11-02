@@ -199,3 +199,44 @@ func TestMockRunOnlyFlagRespectsKeployYml(t *testing.T) {
 		})
 	}
 }
+
+// A committed `mock.local: true` keeps the run on disk: the flag's zero default
+// must not send it to the cloud registry. An explicit flag still wins.
+func TestMockLocalRespectsKeployYml(t *testing.T) {
+	t.Cleanup(viper.Reset)
+	for _, tc := range []struct {
+		name string
+		file *bool
+		flag string
+		want bool
+	}{
+		{name: "keploy.yml's mock.local: true", file: ptrBool(true), want: true},
+		{name: "keploy.yml's mock.local: false", file: ptrBool(false), want: false},
+		{name: "neither", want: false},
+		{name: "--local alone", flag: "true", want: true},
+		{name: "--local=false over keploy.yml's true", file: ptrBool(true), flag: "false", want: false},
+		{name: "--local over keploy.yml's false", file: ptrBool(false), flag: "true", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			viper.Reset()
+			cmd, cfg, c := replayCmd(t)
+			if tc.file != nil {
+				viper.Set("mock.local", *tc.file)
+				cfg.Mock.Local = *tc.file
+			}
+			if tc.flag != "" {
+				if err := cmd.Flags().Set("local", tc.flag); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := c.readMockLocal(cmd); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Mock.Local != tc.want {
+				t.Fatalf("mock.local = %v, want %v", cfg.Mock.Local, tc.want)
+			}
+		})
+	}
+}
+
+func ptrBool(b bool) *bool { return &b }
