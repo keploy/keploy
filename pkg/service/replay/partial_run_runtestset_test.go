@@ -524,6 +524,28 @@ func prLogger() *zap.Logger { return zap.NewNop() }
 // HTTP path — a bare TCP accept is not enough. It never has to return the
 // RECORDED response: the comparison is fed by the TestHooks fake, and this
 // server exists only to open the readiness gate.
+// stopAppAnswering has the app runner end (h.instr.stopErr) while the named
+// test's request is in flight, and the request answered once the set has
+// taken the end: the set ends with that test's verdict, and every earlier
+// one's, in. An end told before a test's request is sent ends the set before
+// it, so that test is not run at all.
+func stopAppAnswering(h *prRun, name string) func(ctx context.Context, tc *models.TestCase) error {
+	var once sync.Once
+	return func(ctx context.Context, tc *models.TestCase) error {
+		if tc.Name != name {
+			return nil
+		}
+		once.Do(func() {
+			close(h.instr.appStopped)
+			select {
+			case <-ctx.Done():
+			case <-time.After(10 * time.Second): // a miswired harness must not hang
+			}
+		})
+		return nil
+	}
+}
+
 func prAppListener(t *testing.T) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1019,7 +1041,7 @@ func TestRunTestSetIncompleteRunDoesNotCreateMappings(t *testing.T) {
 		name          string
 		failNth       int
 		simErr        map[string]error
-		stopAppNth    int
+		stopAppAt     string
 		stopErr       models.AppErrorType
 		updateMapping bool
 		fileExists    bool
@@ -1028,10 +1050,10 @@ func TestRunTestSetIncompleteRunDoesNotCreateMappings(t *testing.T) {
 		{name: "stopped early", failNth: 3},
 		{name: "a request got no answer", simErr: map[string]error{"test-4": timeout}},
 		{name: "a request was refused", simErr: map[string]error{"test-4": refused}},
-		// The app runner fails with an internal error during test-4's filter call,
-		// and test-4 still runs: every verdict and result is in, the set is
-		// INTERNAL_ERR.
-		{name: "keploy hit an internal error", stopAppNth: 5, stopErr: models.ErrInternal},
+		// The app runner fails with an internal error while test-4's request
+		// is in flight, and test-4 still gets its answer: every verdict and
+		// result is in, the set is INTERNAL_ERR.
+		{name: "keploy hit an internal error", stopAppAt: "test-4", stopErr: models.ErrInternal},
 		{name: "every test answered", wantInserts: 1},
 		// Into a file that exists, only the startup backfill writes.
 		{name: "a request got no answer, file exists", simErr: map[string]error{"test-4": timeout},
@@ -1045,10 +1067,14 @@ func TestRunTestSetIncompleteRunDoesNotCreateMappings(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newPartialRunHarness(t, 4, tc.failNth)
-			h.replayer.hookImpl = prHooks{consumed: session, simErr: tc.simErr}
+			hooks := prHooks{consumed: session, simErr: tc.simErr}
+			if tc.stopAppAt != "" {
+				hooks.onRequest = stopAppAnswering(h, tc.stopAppAt)
+			}
+			h.replayer.hookImpl = hooks
 			h.replayer.config.Test.UpdateTestMapping = tc.updateMapping
 			h.mappings.exists = tc.fileExists
-			h.instr.stopAppAfterNUpdates, h.instr.stopErr = tc.stopAppNth, tc.stopErr
+			h.instr.stopErr = tc.stopErr
 			_ = h.run(t)
 
 			if h.report.report == nil {
@@ -1231,7 +1257,8 @@ func TestRunTestSetPruneRefusalNamesTheRule(t *testing.T) {
 			h.report.failInsertOf = map[string]error{"test-1": errors.New("report store is unwritable")}
 		}, "internal_error", ""},
 		{"an internal error with every result in", func(h *prRun) {
-			h.instr.stopAppAfterNUpdates, h.instr.stopErr = 5, models.ErrInternal
+			h.instr.stopErr = models.ErrInternal
+			h.replayer.hookImpl = prHooks{onRequest: stopAppAnswering(h, "test-4")}
 		}, "internal_error", ""},
 		{"a short read", func(h *prRun) { h.report.dropOnRead = "test-4" }, "results_unreadable", ""},
 		{"requests a cancel ended", func(h *prRun) {

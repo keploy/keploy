@@ -1063,7 +1063,9 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		r.keepAliveStop = stopKeepAlive
 		// Its runner tells an exit of its own at once (under compose, at
 		// the app's container's die), and the set running then halts on it.
-		kaCtx, r.keptExit = listenedTo(kaCtx)
+		var kept *keptAppExit
+		kaCtx, kept = listenedTo(kaCtx)
+		r.keptExit = kept
 		g.Go(func() error {
 			var appErr models.AppError
 			defer func() { keepAliveRan(appErr) }()
@@ -1077,19 +1079,26 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			//   2. ErrCtxCanceled: ctx was cancelled (normal end-of-run
 			//      teardown — the outer Start() defers a graceful
 			//      shutdown notify; the app exits as a consequence).
-			// Either case → return nil; errgroup keeps the run alive.
 			if appErr == (models.AppError{}) || appErr.AppErrorType == models.ErrCtxCanceled {
 				return nil
 			}
-			// Anything else is an app startup / crash failure. Propagate
-			// it back through the errgroup so g.Wait() at the bottom of
-			// Start() surfaces the cause as the run's exit reason and
-			// any sibling goroutine listening on the errgroup-derived
-			// context unblocks. Logging the failure here too because
-			// errgroup only ever returns the FIRST error — if the test
-			// loop trips on a parallel error first, the actionable
-			// next_step that explains WHY tests started failing en
-			// masse would otherwise be hidden.
+			// Anything else is the app's own exit, or its start failing.
+			// It is told to the sets as a compose runner tells its app's
+			// die (a runner that told it already keeps its word): the set
+			// running halts on it, APP_HALTED and naming the test it held,
+			// and a set that begins after it runs nothing. The exit code
+			// reads it (replayRunOutcome).
+			//
+			// It is not returned to the errgroup: that cancels the run's
+			// context, which a set reads as its user's stop (USER_ABORT),
+			// and Start then returned nil on it, the run's stop saying it
+			// "completed successfully" and, with no test failed yet,
+			// exiting 0.
+			//
+			// Stored before it is told, so the run's end, which the halt
+			// it tells can bring on at once, reads it.
+			keepAliveAppErr.Store(&appErr)
+			kept.tell(appErr)
 			utils.LogError(r.logger, fmt.Errorf("user application failed under --keep-app-alive: %v", appErr),
 				applicationFailedToRunLogMessage,
 				zap.String("kind", string(appErr.AppErrorType)),
@@ -1100,8 +1109,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 						"Common causes: image build failure, port already in use, missing env var, dependency container crash-looped. "+
 						"If the app is expected to manage its own lifecycle across test-sets, drop --keep-app-alive and let keploy "+
 						"restart it per test-set instead."))
-			keepAliveAppErr.Store(&appErr)
-			return appErr
+			return nil
 		})
 	}
 
@@ -2200,6 +2208,27 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return r.reportHaltedBeforeTests(runTestSetCtx, testRunID, testSetID, testCases, startTime, halted, exit,
 			runShape{exitedInSetup: afterASet}, "the application exited while keploy set this test set up, so keploy runs none of its tests")
 	}
+	// watchKeptApp halts this set at the exit of the app the run started
+	// once for every set (serveTest), told at once by its runner (compose's,
+	// at the app's container's die) or by Start at its run's return
+	// (keptAppExit), as the return of a run of the set's own does. A set that
+	// began with the exit told ran nothing (reportHaltedBeforeTests).
+	watchKeptApp := func(kept *keptAppExit) {
+		runTestSetErrGrp.Go(func() error {
+			defer utils.Recover(r.logger)
+			select {
+			case <-kept.told:
+			case <-runTestSetCtx.Done():
+				return nil
+			}
+			setLastAppErr(kept.exit)
+			if mappedStatus, ok := mapAppErrorToTestSetStatus(kept.exit); ok {
+				setErrStatus(mappedStatus)
+			}
+			appErrChan <- kept.exit
+			return nil
+		})
+	}
 	// stopAppBeforeSetEnd, under the proven switch, stops the application
 	// keploy started for this set as the set's teardown does (an interrupt,
 	// the runner's grace, then a kill) and waits for it to exit (P101-b). It
@@ -2510,24 +2539,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				return nil
 			})
 		} else if kept := r.keptExit; kept != nil {
-			// The app the run started once for every set: its exit, told
-			// at once by its runner (keptAppExit), halts this set as the
-			// return of a run of the set's own does. A set that began
-			// with the exit told ran nothing (reportHaltedBeforeTests).
-			runTestSetErrGrp.Go(func() error {
-				defer utils.Recover(r.logger)
-				select {
-				case <-kept.told:
-				case <-runTestSetCtx.Done():
-					return nil
-				}
-				setLastAppErr(kept.exit)
-				if mappedStatus, ok := mapAppErrorToTestSetStatus(kept.exit); ok {
-					setErrStatus(mappedStatus)
-				}
-				appErrChan <- kept.exit
-				return nil
-			})
+			watchKeptApp(kept)
 		}
 
 		// Checking for errors in the mocking and application
@@ -2897,6 +2909,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// One application, started once in Start, serves every set:
 				// what its processes lost in an earlier one taints this one.
 				r.lossAppKept = "the application is kept alive across test-sets (--keep-app-alive): keploy started it once, before the first test-set, and it runs on into this one"
+				if kept := r.keptExit; kept != nil {
+					watchKeptApp(kept)
+				}
 			}
 
 			// Checking for errors in the mocking and application
@@ -2933,7 +2948,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if !waitsForApp(serveTest, r.isFirstTestSet) {
 				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
 			} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, true, serveTest && !r.isFirstTestSet); !ready && why == "" {
-				return models.TestSetStatusUserAbort, context.Canceled
+				// The set's end cut the wait short: the user's stop, or the
+				// app's exit (setupEnd).
+				return setupEnd(models.TestSetStatusUserAbort, context.Canceled)
 			} else if !ready {
 				notReady = why
 			}
@@ -3656,6 +3673,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// transport-reset re-send gate, retryResetOnce) holds the request's
 			// consumption alone; it is the test case's, read with the rest.
 			answeredInGap, gapReadErr := r.drainAnsweredInGap(runTestSetCtx, r.exact, testCase.Name)
+
+			// The app's exit told while keploy readied this test case on its
+			// agent (the calls above) ends the set before its request is
+			// sent: the test is not begun against an app keploy knows is
+			// gone, nor named as the one the app held.
+			select {
+			case <-exitLoopChan:
+				testSetStatus = getErrStatus()
+				exitLoop = true
+			default:
+			}
+			if exitLoop {
+				break
+			}
 
 			// Host and Port replacements are now handled inside SimulateHTTP/SimulateGRPC via config parameters.
 			// This ensures that replaceWith configuration takes precedence over global host/port overrides.
