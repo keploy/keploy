@@ -43,7 +43,7 @@ func TestTheLoadedHooksAreToldTheProxysMovedPorts(t *testing.T) {
 	}
 	defer func() { _ = wrong.Close() }()
 	h.agentRegistrationMap = wrong
-	if err := h.sendLoadedAgentInfo(structs.AgentInfo{DNSPort: 26789}); err == nil {
+	if err := h.SendAgentInfo(structs.AgentInfo{DNSPort: 26789}); err == nil {
 		t.Fatal("a send to a map of another value size succeeded")
 	}
 	h.agentRegistrationMap = m
@@ -53,7 +53,7 @@ func TestTheLoadedHooksAreToldTheProxysMovedPorts(t *testing.T) {
 
 	loaded := structs.AgentInfo{KeployAgentNsPid: 7, DNSPort: 26789, IsDocker: 1, Flags: 0x5, RecordingStartTime: 99,
 		Proxy: structs.ProxyInfo{IP4: 0x7f000001, IP6: [4]uint32{0, 0, 0, 1}, Port: 16789}}
-	if err := h.sendLoadedAgentInfo(loaded); err != nil {
+	if err := h.SendAgentInfo(loaded); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.SetProxyPorts(40001, 40002); err != nil {

@@ -108,13 +108,25 @@ func (h *Hooks) SendClientInfo(clientInfo structs.ClientInfo) error {
 	return nil
 }
 
+var _ agent.ProxyPortsSetter = (*Hooks)(nil)
+
+// SendAgentInfo sends the kernel the agent info, and keeps what it sent for
+// SetProxyPorts to send again with the proxy's ports.
 func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
+	h.agentInfoMu.Lock()
+	defer h.agentInfoMu.Unlock()
+	return h.sendAgentInfoLocked(agentInfo)
+}
+
+// sendAgentInfoLocked is SendAgentInfo, with agentInfoMu held.
+func (h *Hooks) sendAgentInfoLocked(agentInfo structs.AgentInfo) error {
 	key := 0
 	err := h.agentRegistrationMap.Update(uint32(key), agentInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the agent info to the ebpf program")
 		return err
 	}
+	h.agentInfo, h.agentInfoSent = agentInfo, true
 	return nil
 }
 

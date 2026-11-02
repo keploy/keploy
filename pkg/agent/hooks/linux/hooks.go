@@ -56,8 +56,8 @@ type Hooks struct {
 	conf      *config.Config
 	m         sync.Mutex
 
-	// agentInfo is what Load sent the kernel (agentInfoSent), for
-	// SetProxyPorts to send again with the proxy's ports.
+	// agentInfo is what SendAgentInfo last sent the kernel (agentInfoSent),
+	// for SetProxyPorts to send again with the proxy's ports.
 	agentInfoMu   sync.Mutex
 	agentInfo     structs.AgentInfo
 	agentInfoSent bool
@@ -717,7 +717,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
 
 	agentInfo.Proxy = proxyInfo
-	err = h.sendLoadedAgentInfo(agentInfo)
+	err = h.SendAgentInfo(agentInfo)
 	if err != nil {
 		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
 		return err
@@ -1118,17 +1118,5 @@ func (h *Hooks) SetProxyPorts(proxyPort, dnsPort uint32) error {
 	info := h.agentInfo
 	info.Proxy.Port = proxyPort
 	info.DNSPort = int32(dnsPort)
-	return h.SendAgentInfo(info)
-}
-
-// sendLoadedAgentInfo sends the kernel the agent info Load built, and keeps
-// it for SetProxyPorts to send again with the proxy's ports.
-func (h *Hooks) sendLoadedAgentInfo(info structs.AgentInfo) error {
-	h.agentInfoMu.Lock()
-	defer h.agentInfoMu.Unlock()
-	if err := h.SendAgentInfo(info); err != nil {
-		return err
-	}
-	h.agentInfo, h.agentInfoSent = info, true
-	return nil
+	return h.sendAgentInfoLocked(info)
 }
