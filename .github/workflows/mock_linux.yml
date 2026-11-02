@@ -117,6 +117,12 @@ jobs:
         with:
           python-version: '3.11'
 
+      # The parallel-scope lane builds its boot-pool app (mock/boot-pool).
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
       - id: record
         uses: ./.github/actions/download-binary
         with:
@@ -151,8 +157,10 @@ jobs:
       # Parallel test workers, without the switch: in a run with the suite
       # mark, two concurrent pid-scoped workers are each served only their
       # own scope's mocks; in a run without the marks a pid begin is refused
-      # with 422 and fails the run. (Its switched half, the refusal check,
-      # runs in mock_linux_proven.)
+      # with 422 and fails the run. With the marks, an app the tests did not
+      # start, whose connection was opened at boot, is served only the one
+      # open test's mocks, and refused while two tests are open. (Its
+      # switched half, the refusal check, runs in mock_linux_proven.)
       - name: Run mock-mode parallel-scope e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
