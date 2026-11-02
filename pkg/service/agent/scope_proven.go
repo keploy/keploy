@@ -304,10 +304,12 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	// Losses an earlier session's cut-short ends owned that no read took
 	// are this session's to report, as the run's: none of its tests is the
 	// test that owned them, which only their words still name.
+	// Bounded, as the proxy's are, while no read takes them.
 	left := a.takeOwnedLosses()
 	for i := range left {
 		left[i].Test = ""
 	}
+	left = boundOwnedLeft(left)
 	a.provenMu.Lock()
 	a.proven = provenWire{losses: losses, ownedLeft: left}
 	a.provenMu.Unlock()

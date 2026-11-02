@@ -213,6 +213,30 @@ func (a *Agent) takeOwnedLosses() []coreAgent.OwnedLoss {
 	return out
 }
 
+// boundOwnedLeft bounds the losses a session leaves unread to the next run
+// (resetSession) as the proxy bounds those it keeps untaken: with no reader
+// (an older keploy on a long-lived agent) they would grow by a session's at
+// every reset. It keeps the first coreAgent.MaxOwnedLosses, the oldest, and
+// counts every one past them in one entry of its kind, the run's; none is
+// dropped, and no kind is counted as another.
+func boundOwnedLeft(left []coreAgent.OwnedLoss) []coreAgent.OwnedLoss {
+	if len(left) <= coreAgent.MaxOwnedLosses {
+		return left
+	}
+	out := left[:coreAgent.MaxOwnedLosses:coreAgent.MaxOwnedLosses]
+	at := make(map[models.CaptureLossKind]int)
+	for _, o := range left[coreAgent.MaxOwnedLosses:] {
+		i, ok := at[o.Loss.Kind]
+		if !ok {
+			i = len(out)
+			at[o.Loss.Kind] = i
+			out = append(out, coreAgent.OwnedLoss{Loss: models.CaptureLoss{Kind: o.Loss.Kind, What: coreAgent.OwnedLossesPastTheBound}})
+		}
+		out[i].Loss.Count += o.Loss.Count
+	}
+	return out
+}
+
 // TakeOwnedCaptureLosses takes, once each, the losses a test whose end was
 // cut short owned, by test: keploy test's read, at each test case's end and
 // at the set's end. keploy test reaches no end that charges them

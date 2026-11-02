@@ -187,7 +187,7 @@ type pairedConns struct {
 }
 
 // maxOwned bounds the owned losses the proxy keeps untaken.
-const maxOwned = 64
+const maxOwned = agent.MaxOwnedLosses
 
 // own notes a loss of the bytes test wrote to the connection from app, which
 // its end could not wait for.
@@ -198,7 +198,7 @@ func (s *pairedConns) own(test string, app netip.AddrPort) {
 	// past maxOwned, one entry of no test's, the run's, counts the rest.
 	if n := len(s.owned); n >= maxOwned {
 		if s.owned[n-1].Test != "" {
-			s.owned = append(s.owned, agent.OwnedLoss{Loss: models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, What: "from connections each written in a test whose end could not wait for them"}})
+			s.owned = append(s.owned, agent.OwnedLoss{Loss: models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, What: agent.OwnedLossesPastTheBound}})
 		}
 		s.owned[len(s.owned)-1].Loss.Count++
 		return

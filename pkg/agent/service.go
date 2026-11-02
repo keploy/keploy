@@ -92,6 +92,15 @@ type OwnedLossTaker interface {
 	TakeOwnedLosses() []OwnedLoss
 }
 
+// MaxOwnedLosses bounds the owned losses a component keeps while nothing
+// takes them (a run that never reads them): past it, one entry of the run's,
+// naming no test and saying OwnedLossesPastTheBound, counts the rest.
+const MaxOwnedLosses = 64
+
+// OwnedLossesPastTheBound is the words of the entry that counts the owned
+// losses past MaxOwnedLosses.
+const OwnedLossesPastTheBound = "from connections each written in a test whose end could not wait for them"
+
 type endOfKey struct{}
 
 // WithEndOf is ctx carrying the test whose end waits under it: a wait of the
