@@ -1389,7 +1389,7 @@ func (p *Proxy) recordMySQLOutgoing(
 //
 // The order is load-bearing. The parser leaves the client's connection open
 // when it returns, and handleConnection's deferred close shuts it after this
-// returns: a returned miss is queued here (sendMockNotFoundError) before the
+// returns: a returned miss is queued here (sendMockNotFoundErrorFrom) before the
 // application sees its connection fail, so a test that ends as soon as its
 // database call fails still has its miss.
 func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, dstAddr string, m integrations.MockMemDb, outgoingOpts models.OutgoingOptions) error {
@@ -1414,7 +1414,7 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 	err := mysqlMocker.MockOutgoing(reportCtx, srcConn, mysqlDst, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 	p.countParserPanic(err, integrations.MYSQL, dstAddr)
 	if errors.Is(err, util.ErrParserPanicked) {
-		// Counted as a capture loss just above; no miss (mockFailed).
+		// Counted as a capture loss just above; no miss (mockFailedFrom).
 		utils.LogError(p.logger, err, "failed to mock the outgoing message")
 		return err
 	}
@@ -4053,7 +4053,7 @@ func (p *Proxy) mockGenericOutgoing(
 		// mode-gated), so report rather than relay — which is what the MySQL
 		// replay site does too.
 		err := errors.New("no generic parser is registered to mock this connection")
-		return p.mockFailed(logger, err)
+		return p.mockFailedFrom(logger, err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, dstCfg)
 	}
 	err := genericParser.MockOutgoing(parserCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 	p.countParserPanic(err, integrations.GENERIC, dstCfg.Addr)
@@ -6024,7 +6024,7 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 				// protocols' misses used to vanish from
 				// FailureInfo.UnmatchedCalls. Errors that are NOT wrapped
 				// around models.ErrNoMockMatched are infrastructure/decode
-				// failures mislabeled by sendMockNotFoundError; reporting
+				// failures mislabeled by sendMockNotFoundErrorFrom; reporting
 				// them as unmatched calls would misdirect the user, so they
 				// stay out of the report (they are already logged).
 				errs = append(errs, models.UnmatchedCall{
@@ -6131,20 +6131,18 @@ func isMockMiss(err error) bool {
 	return errors.Is(err, models.ErrNoMockMatched) || (errors.As(err, &reporter) && reporter != nil)
 }
 
-// mockFailed reports a MockOutgoing failure and returns the error the
+// mockFailedFrom reports a MockOutgoing failure and returns the error the
 // connection handler gets. Under the proven switch, whose verdict names each
 // miss once with its test at the end of the run, a miss is logged at Debug
 // and returned as reportedMiss; anything else, and every run with the switch
 // off, keeps the error log it always had.
-func (p *Proxy) mockFailed(logger *zap.Logger, err error) error {
-	return p.mockFailedFrom(logger, err, 0, 0, nil)
-}
-
-// mockFailedFrom is mockFailed for a connection from process pid (0 when the
-// redirect gave none), whom its miss names, of test worker inst (0: none),
-// whose tests alone it is charged to, dialled at dst (nil when none is
-// known), which its miss names when its parser named no destination
-// (sendMockNotFoundErrorFrom).
+//
+// The connection was made by process pid (0 when the redirect gave none),
+// whom its miss names, of test worker inst (0: none), whose tests alone it
+// is charged to, dialled at dst (nil when none is known), which its miss
+// names when its parser named no destination (sendMockNotFoundErrorFrom).
+// There is no form without the worker: a miss filed under none would land
+// in the run's window, which no worker's test reads.
 func (p *Proxy) mockFailedFrom(logger *zap.Logger, err error, pid, inst uint32, dst *models.ConditionalDstCfg) error {
 	if errors.Is(err, util.ErrParserPanicked) {
 		// keploy's failure, counted as a capture loss where the parser
@@ -6182,16 +6180,12 @@ func (p *Proxy) mismatchLog() func(string, ...zap.Field) {
 	return p.logger.Warn
 }
 
-// sendMockNotFoundError builds a ParserError from a mock-miss error,
-// extracting the MismatchReport if the error carries one.
-func (p *Proxy) sendMockNotFoundError(err error) {
-	p.sendMockNotFoundErrorFrom(err, 0, 0, nil)
-}
-
-// sendMockNotFoundErrorFrom is sendMockNotFoundError for a call from process
-// pid (0 when the redirect gave none) of test worker inst (0: none): the
-// miss goes to inst's misses window (missWindowOf), so only its tests read
-// it. Under the proven switch the report,
+// sendMockNotFoundErrorFrom builds a ParserError from a mock-miss error,
+// extracting the MismatchReport if the error carries one, for a call from
+// process pid (0 when the redirect gave none) of test worker inst (0: none):
+// the miss goes to inst's misses window (missWindowOf), so only its tests
+// read it. There is no form without the worker, as for mockFailedFrom.
+// Under the proven switch the report,
 // a miss's or an answer's (models.ReportAnswer), names that process
 // (MockMismatchReport.Source) when its parser named none. An
 // answered call (models.ErrAnswered) is stamped as a miss is, and kept for

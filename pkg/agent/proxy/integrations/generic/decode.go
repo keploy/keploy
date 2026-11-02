@@ -158,7 +158,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + why)
 				}
 				// Per-call generic detail at Debug; the canonical mock-mismatch
-				// WARN is emitted once in proxy.sendMockNotFoundError (covers
+				// WARN is emitted once in proxy.sendMockNotFoundErrorFrom (covers
 				// every parser), so this stays Debug to avoid double-logging.
 				logger.Debug("no matching generic mock found for outgoing call",
 					zap.String("protocol", report.Protocol),

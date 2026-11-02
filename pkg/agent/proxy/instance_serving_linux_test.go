@@ -564,3 +564,53 @@ func TestEachTestWorkersMissesAreReadByItsOwnTestsAlone(t *testing.T) {
 		t.Fatalf("worker 1's next set's test read %v, the previous set's tail", got)
 	}
 }
+
+// A worker's call keploy answers before any parser is handed its
+// connection, one to a port the recording never saw whose client closed it
+// without sending anything, is a miss of that worker's test: its test reads
+// it, naming its process, and the run's window, which no worker's test
+// reads, does not hold it.
+func TestAWorkersMissAtAnUnlistedEndpointIsReadByItsOwnTest(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	p := testProxy(t)
+	p.errChannel = make(chan error, 4)
+	p.mockManager = NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.StartErrorDrain(ctx)
+	recordedMySQL(p, "127.0.0.1:3306", "")
+	s, err := p.ServeInstance(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.endInstances)
+	w := s.(workerMisses)
+	w.ContinueTestErrorCapture()
+	p.ContinueTestErrorCapture()
+
+	self := uint32(os.Getpid())
+	client := newSilentClient()
+	done := make(chan *mysqlProbe, 1)
+	go func() {
+		probe, _ := p.probeMysql(ctx, client, "10.9.9.9:13306", nil, 13306, models.MODE_TEST,
+			models.OutgoingOptions{SrcPid: self, SrcInstance: 7}, zap.NewNop())
+		done <- probe
+	}()
+	if probe := readOrVerdict(t, done, client); probe != nil {
+		t.Fatalf("the probe decided (reason %q) before the client did anything", probe.Reason)
+	}
+	_ = client.Close() // the application gave up waiting for a greeting
+	if probe := awaitEvent(t, done, "the probe's verdict once the client left"); probe.IsMySQL {
+		t.Fatalf("reason %q: an endpoint the recording cannot be tied to was served as MySQL", probe.Reason)
+	}
+	got, err := w.GetMockErrors(ctx)
+	if err != nil {
+		t.Fatalf("worker 7's read: %v", err)
+	}
+	if len(got) != 1 || got[0].Instance != 7 || got[0].MatchPhase != models.MatchPhaseNoRequest || got[0].Source == nil || got[0].Source.PID != self {
+		t.Fatalf("worker 7's test read %+v; want its one miss at the unlisted endpoint, naming process %d", got, self)
+	}
+	if got, err := p.GetMockErrors(ctx); err != nil || len(got) != 0 {
+		t.Fatalf("the run's window read %+v (err %v); want nothing, the miss is worker 7's", got, err)
+	}
+}
