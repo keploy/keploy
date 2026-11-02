@@ -379,9 +379,10 @@ func TestGobCarryOverWritesNoRuntimeOnlyField(t *testing.T) {
 // The prune of a gob file an earlier build wrote drops what the prune of the
 // same mocks in YAML drops, and writes the mocks it keeps without the
 // runtime-only fields. The three mocks are recordings of one HTTP request.
-// Read with the recorder's Consume (cursor-saturate) left on them, they were
-// one stateful sequence, which the prune keeps whole: it kept mock-1, which no
-// test consumed, for the sake of the two a test did.
+// Read with Consume cursor-saturate left on them (on the two config mocks,
+// mock-0 and mock-2, it is stale: a read derives them without it), they were
+// one stateful sequence, which the prune keeps whole: it kept mock-1, which
+// no test consumed, for the sake of the two a test did.
 func TestGobPruneDropsWhatYAMLDropsAndWritesNoRuntimeOnlyField(t *testing.T) {
 	ctx := context.Background()
 	pruneBefore := time.Unix(1_800_000_000, 0)
