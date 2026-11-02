@@ -269,7 +269,10 @@ func TestOutcomeAnInstantAnAnswerOutsideTheScopeGaveIsRefusedNamingTheEdit(t *te
 // that holds a short word of the value unchanged shows the word is chance
 // only where it is before the call in both runs, as a recording handed to
 // the call does: one with no answer time, or answered at the call's own
-// instant, is unknown, refused naming why (chance_word_test.go:83).
+// instant, is unknown, refused naming why (chance_word_test.go:83). One
+// answered after the call gave R's application nothing before it, so R's
+// word there decides nothing; served as recorded, it holds no source of F's
+// value: fresh (answerState, one rule however a recording is handed in).
 func TestOutcomeASetRecordingWithNoTimeBeforeTheCallShowsNothing(t *testing.T) {
 	const p = "body.appId"
 	before := r1Insert.Add(-time.Minute)
@@ -285,7 +288,7 @@ func TestOutcomeASetRecordingWithNoTimeBeforeTheCallShowsNothing(t *testing.T) {
 		{"answered before the call", "", answered(before.Add(time.Second))},
 		{"no answer time", noAnswerAt, answered(time.Time{})},
 		{"answered at the call's own instant", atCallWhy, answered(r1Insert)},
-		{"answered after the call", "before the call", answered(r1Insert.Add(time.Second))},
+		{"answered after the call", "", answered(r1Insert.Add(time.Second))},
 	} {
 		x := c.x
 		in := oInput(p, "5c0e9a7b-1f2d-48d1-9a3b-c4d5e6f70812", "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5", nil, nil)
@@ -548,6 +551,138 @@ func TestOutcomeARecordingMadeAfterTheCallDecidesNothingByItsRecordedWord(t *tes
 	}
 }
 
+// answeredAtInput is the call changing "82" to "6c7d" beside one recording
+// that holds "82", asked at req and answered at res, handed in as an
+// exchange of the test (its leaf holds "82"), as a start-up recording or as
+// a set entry; round F served it as recorded, or with a view that holds
+// "6c7d" where fView. mock-6 is the exchange's name, mock-5 the others'.
+func answeredAtInput(how string, req, res time.Time, fView bool) Input {
+	const path = "bind.$8"
+	in := Input{Drifts: clockedDrifts(), Drift: []string{path}, At: eRecAt, Arrived: eRecAt, Raw: eStartup(), Test: "test-2", Mock: "mock-300",
+		Rec:  Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}},
+		Live: Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "6c7d"}}},
+		Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true}}
+	pg := func(id string) Raw {
+		return ePgAnswered("mock-5", eRecAt.Sub(req), res, "SELECT id, n FROM jobs", []models.PostgresV3Cells{{{Value: id}, {Value: "5"}}}, "SELECT 1")
+	}
+	x := pg("82").ServedAs(6).ServedAsRecorded()
+	if fView {
+		x = pg("82").ServedAs(6).ServedLive(pg("6c7d"))
+	}
+	switch how {
+	case "an exchange of the test":
+		m := jobsMock("82", "5")
+		m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = req, res
+		tr := NewTracker()
+		tr.Begin()
+		tr.ServedMock(m)
+		tr.Served(tr.Placed().Test, Earlier{Mock: m.Name, At: req, Own: true, Payload: RawOf(m, true),
+			Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "row.0.id", Type: String, Value: "82"}, Live: map[bool]string{false: "82", true: "6c7d"}[fView]}}})
+		if fView {
+			tr.ServedMockLive(m, "a", func() (*models.Mock, error) {
+				v := jobsMock("6c7d", "5")
+				v.Spec.ReqTimestampMock, v.Spec.ResTimestampMock = req, res
+				return v, nil
+			})
+		} else {
+			tr.ServedMockAsRecorded(m)
+		}
+		pl := tr.Placed()
+		in.Earlier = InServeOrder(pl.Earlier, []*models.Mock{m}, pl.Order)
+	case "a start-up recording":
+		in.Raw = append(in.Raw, x)
+	default:
+		in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(x)}, nil }
+	}
+	return in
+}
+
+// answeredAtHow are the ways a recording is handed to the call.
+var answeredAtHow = []string{"an exchange of the test", "a start-up recording", "a set entry"}
+
+// A recording is placed by its answer, when the application got its words,
+// however it is handed in (an exchange of the test, a start-up recording, a
+// set entry): answered before the call, it is before it; answered after
+// the call, however its request was timed, it gave R's application nothing
+// before the call, so R's word there decides nothing; and the call's own
+// instant is neither before nor after it: a recording answered at it is
+// unknown, refused naming it (fail closed). Each holds R's word and round
+// F served it as recorded, so only the instant refuses: the others hold no
+// source of F's value, and the value is made anew each run.
+func TestOutcomeARecordingIsPlacedByItsAnswerHoweverItIsHandedIn(t *testing.T) {
+	ms := time.Millisecond
+	for _, c := range []struct {
+		name     string
+		req, res time.Time
+		refused  bool
+	}{
+		{"asked and answered before the call", eRecAt.Add(-20 * ms), eRecAt.Add(-19 * ms), false},
+		{"asked before the call and answered 10ms after it", eRecAt.Add(-10 * ms), eRecAt.Add(10 * ms), false},
+		{"asked before the call and answered a second after it", eRecAt.Add(-10 * ms), eRecAt.Add(time.Second), false},
+		{"asked and answered after the call", eRecAt.Add(time.Second), eRecAt.Add(time.Second + ms), false},
+		{"asked at the call's own instant and answered after it", eRecAt, eRecAt.Add(ms), false},
+		{"asked before the call and answered at its own instant", eRecAt.Add(-10 * ms), eRecAt, true},
+		{"asked and answered at the call's own instant", eRecAt, eRecAt, true},
+	} {
+		for _, how := range answeredAtHow {
+			d := oWord(t, Decide(answeredAtInput(how, c.req, c.res, false)), "82", "6c7d")
+			what := how + " " + c.name + ", served as recorded"
+			if !c.refused {
+				if d.Outcome != OutcomeFresh {
+					t.Errorf("FALSE RED: %s: %s; want a value made anew", what, oDescribe([]Decision{d}))
+				}
+				continue
+			}
+			oRefused(t, what, d, RefusalUnknown, map[bool]string{true: "mock-6", false: "mock-5"}[how == answeredAtHow[0]], atCallWhy)
+		}
+	}
+	// An exchange keploy was given no payload of is placed by its request:
+	// at the call's own instant, unknown.
+	in := answeredAtInput(answeredAtHow[1], eRecAt.Add(-time.Second), eRecAt.Add(-time.Second+ms), false)
+	in.Earlier = []Earlier{{Mock: "mock-77", At: eRecAt, Own: true, Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "row.0.id", Type: String, Value: "82"}, Live: "82"}}}}
+	oRefused(t, "an exchange with no payload at the call's own instant", oWord(t, Decide(in), "82", "6c7d"), RefusalUnknown, "mock-77", atCallWhy)
+	// A recording answered after the call that round F never served holds
+	// no source of F's value either.
+	in = answeredAtInput(answeredAtHow[1], eRecAt.Add(time.Second), eRecAt.Add(time.Second+ms), false)
+	in.Raw[len(in.Raw)-1] = ePgAnswered("mock-5", -time.Second, eRecAt.Add(time.Second+ms), "SELECT id, n FROM jobs", []models.PostgresV3Cells{{{Value: "82"}, {Value: "5"}}}, "SELECT 1")
+	if d := oWord(t, Decide(in), "82", "6c7d"); d.Outcome != OutcomeFresh {
+		t.Errorf("FALSE RED: a recording answered after the call that round F never served: %s; want a value made anew", oDescribe([]Decision{d}))
+	}
+}
+
+// A word refused at a recording answered after the call is refused by round
+// F's side, never by R's: R's word there decides nothing. So its line says
+// what round F gave there, not that the recording gave the application
+// nothing (why R's word decides nothing), whichever way the recording is
+// handed in and however its request was timed: round F's view there holds
+// the new value, or round F served it with no view told.
+func TestOutcomeAWordRefusedAtARecordingAnsweredAfterTheCallSaysWhatRoundFGave(t *testing.T) {
+	const fSide = "answered after the call, it shows nothing of the recorded value; round F gave, or may have given, the new value there"
+	ms := time.Millisecond
+	check := func(what string, d Decision, mock string) {
+		t.Helper()
+		oRefused(t, what, d, RefusalUnknown, mock, fSide)
+		if strings.Contains(d.Refusal.Why, "did not give the application") {
+			t.Errorf("%s: refused %q; its reason says the recording gave nothing, which refuses nothing", what, d.Refusal.Why)
+		}
+	}
+	for _, c := range []struct {
+		name     string
+		req, res time.Time
+	}{
+		{"asked before the call and answered after it", eRecAt.Add(-10 * ms), eRecAt.Add(10 * ms)},
+		{"asked and answered after the call", eRecAt.Add(time.Second), eRecAt.Add(time.Second + ms)},
+	} {
+		for _, how := range answeredAtHow {
+			d := oWord(t, Decide(answeredAtInput(how, c.req, c.res, true)), "82", "6c7d")
+			check(how+" "+c.name+", round F's view holding the new value", d, map[bool]string{true: "mock-6", false: "mock-5"}[how == answeredAtHow[0]])
+		}
+		in := answeredAtInput(answeredAtHow[1], c.req, c.res, false)
+		in.Raw[len(in.Raw)-1] = ePgAnswered("mock-5", eRecAt.Sub(c.req), c.res, "SELECT id, n FROM jobs", []models.PostgresV3Cells{{{Value: "82"}, {Value: "5"}}}, "SELECT 1").ServedAs(6)
+		check("a start-up recording "+c.name+", served with no view told", oWord(t, Decide(in), "82", "6c7d"), "mock-5")
+	}
+}
+
 // An answer of the call's own test holds the changed minute by its text (step 3), but
 // a second place may be where it came from: a recording of the set F gave
 // in an earlier test that was recorded after the call, or at its own
@@ -753,5 +888,37 @@ func TestOutcomeAPieceAStartUpsAnswerHoldsInASessionOfItsOwnIsChance(t *testing.
 	whole := ans(recSID, seeded, other).ServedAs(1).ServedLive(ans(liveSID, holding, other))
 	if d := call(plain, holding, whole); len(d) == 0 || d[0].Outcome != OutcomeRefused {
 		t.Errorf("FALSE GREEN? round F's answer gave round F's id whole: %s; want refused", oDescribe(d))
+	}
+}
+
+// Decide hands an exchange of the test whose request was recorded after the
+// call in as a recording (leafedAfterCall), which answerState places. placesOf
+// alone places it by the same rule, so no caller reads its leaves as before
+// the call: not before, R's word deciding nothing, with the reason that says
+// what round F gave there. The test case's own request (Given) is before the
+// call in both runs, whatever its time.
+func TestOutcomeAnExchangeAskedAfterTheCallIsPlacedAsARecordingIs(t *testing.T) {
+	late := eRecAt.Add(time.Second)
+	in := answeredAtInput(answeredAtHow[1], late, late.Add(time.Millisecond), false)
+	seen := []Seen{{Side: Request, Leaf: Leaf{Path: "q.id", Type: String, Value: "82"}, Live: "82"}}
+	in.Earlier = []Earlier{{Mock: "mock-77", At: late, Own: true, Seen: seen}, {At: late, Given: true, Seen: seen}}
+	ps, _ := placesOf(in)
+	found := 0
+	for _, p := range ps {
+		switch {
+		case p.mock == "mock-77":
+			found++
+			if p.state != stateNotBefore || !p.recAfter || p.why != recordedAfterWhy {
+				t.Errorf("an exchange asked after the call: state %v, recorded after %v, why %q; want not before, R's word deciding nothing, why %q", p.state, p.recAfter, p.why, recordedAfterWhy)
+			}
+		case p.given:
+			found++
+			if p.state != stateBefore || p.recAfter {
+				t.Errorf("the test case's request: state %v, recorded after %v; want before in both runs", p.state, p.recAfter)
+			}
+		}
+	}
+	if found != 2 {
+		t.Errorf("placesOf gave %d of the two exchanges' places; want both", found)
 	}
 }

@@ -73,10 +73,10 @@ type evPlace struct {
 	// it before the call and no view of what it gave there is stated or
 	// read, so it may hold round F's new word: unknown for every word.
 	// fGave: round F gave the application this place before the call
-	// reached keploy, whenever it was recorded. recAfter: recorded after
-	// the call, so it gave R's application nothing before it; R's word
-	// there decides nothing (setEvidence's rule for a set entry, one rule
-	// however a recording is handed in).
+	// reached keploy, whenever it was recorded. recAfter: answered after
+	// the call (answerState), so it gave R's application nothing before
+	// it; R's word there decides nothing (setEvidence's rule for a set
+	// entry, one rule however a recording is handed in).
 	// views: the views round F's serves gave where they differ
 	// (Raw.ServedChanged); one that holds F's word leaves it unknown.
 	fUnstated, fMay, fGave, recAfter bool
@@ -183,15 +183,12 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 				at: e.At, state: st, why: why, fGave: !e.Payload.servedAfter,
 				recAfter: !e.alwaysEarlier() && !e.noTime && e.At.After(in.At),
 			})
-			if s.Side == Response && st == stateBefore && e.Payload.isRead() {
+			// What the application got in an answer it got at the answer's
+			// time (answerState), its request before or at the call's instant.
+			if s.Side == Response && (st == stateBefore || why == atCallWhy) && e.Payload.isRead() {
 				p := &ps[len(ps)-1]
-				switch a := e.Payload.answered; {
-				case untimedAnswer(e.At, a):
-					p.state, p.why = stateUnknown, noAnswerAt
-				case a.Equal(in.At):
-					p.state, p.why = stateUnknown, atCallWhy
-				case a.After(in.At):
-					p.state, p.why = stateNotBefore, recordedAfterWhy
+				if ast, awhy := answerState(e.At, e.Payload.answered, in.At); ast != stateBefore {
+					p.state, p.why, p.recAfter = ast, awhy, ast == stateNotBefore && !e.alwaysEarlier()
 				}
 			}
 		}
@@ -216,11 +213,6 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 			views = r.views
 		}
 		fUnstated := unstated || !in.Caps.FViewStated
-		if fUnstated && why == recordedAfterWhy {
-			// R's word there decides nothing (recAfter): what keploy
-			// cannot tell there is what round F gave.
-			why = ""
-		}
 		// Another test's recording, or one recorded after the call
 		// (OfAnotherTest), is outside the call's scope.
 		other := r.olderTest || r.elsewhere
@@ -230,7 +222,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 			startUp: startUp, otherTest: other, scope: scope,
 			at: r.at, state: st, why: why, fUnstated: fUnstated, raw: i + 1,
 			fMay: fUnstated && len(views) == 0 && r.served && !r.servedAfter, views: views,
-			fGave: r.served && !r.servedAfter, recAfter: !r.noTime && r.at.After(in.At),
+			fGave: r.served && !r.servedAfter, recAfter: !r.noTime && (r.at.After(in.At) || r.answered.After(in.At)),
 		})
 	}
 	return ps, unread
@@ -295,25 +287,44 @@ func earlierState(in Input, e Earlier) (placeState, string) {
 	return stateBefore, ""
 }
 
-// rawState is a recording's state: answered before the call in R, and given
-// the application by F before the call reached keploy.
+// rawState is a recording's state: answered before the call in R
+// (answerState), and given the application by F before the call reached
+// keploy.
 func rawState(in Input, r Raw) (placeState, string) {
-	switch {
-	case r.noTime || untimedAnswer(r.at, r.answered):
+	switch st, why := answerState(r.at, r.answered, in.At); {
+	case r.noTime:
 		return stateUnknown, noAnswerAt
-	case r.answered.Equal(in.At) || r.at.Equal(in.At):
-		return stateUnknown, atCallWhy
-	case r.at.After(in.At) || r.answered.After(in.At):
-		return stateNotBefore, recordedAfterWhy
+	case st != stateBefore:
+		return st, why
 	case !r.served || r.servedAfter:
 		return stateNotBefore, ""
 	}
 	return stateBefore, ""
 }
 
-// recordedAfterWhy is why a recording made or answered after the call shows
-// nothing of a word: it gave R's application nothing before the call.
-const recordedAfterWhy = "the recording did not give the application that word before the call"
+// answerState places a recording by its answer, when the application got
+// its words: one rule for an exchange of the test, a start-up recording and
+// a set entry. Answered before the call, it is before; answered after it
+// (however its request was timed), it gave R's application nothing before
+// the call, so R's word there decides nothing (recAfter). The call's own
+// instant is neither before nor after: a recording answered at it is
+// unknown, refused (fail closed). One with no answer time keploy can read
+// is unknown.
+func answerState(req, answered, at time.Time) (placeState, string) {
+	switch {
+	case untimedAnswer(req, answered):
+		return stateUnknown, noAnswerAt
+	case answered.After(at):
+		return stateNotBefore, recordedAfterWhy
+	case answered.Equal(at):
+		return stateUnknown, atCallWhy
+	}
+	return stateBefore, ""
+}
+
+// recordedAfterWhy is why a word is refused at a recording answered after
+// the call: R's word there decides nothing, so round F's side refuses it.
+const recordedAfterWhy = "answered after the call, it shows nothing of the recorded value; round F gave, or may have given, the new value there"
 
 // untimedAnswer: a recording's answer time keploy cannot read, none or one
 // before its own request was recorded (follows.go's recordedGave), so it
@@ -400,9 +411,9 @@ func evidenceAt(p evPlace, r, f string, piece bool) (ev wordEvidence, read bool)
 	if !okR || !okF {
 		return evNone, false
 	}
-	// A recording made after the call gave R's application nothing before
-	// it: R's word there decides nothing (F's still does), as setEvidence
-	// reads a set entry.
+	// A recording answered after the call gave R's application nothing
+	// before it: R's word there decides nothing (F's still does), as
+	// setEvidence reads a set entry.
 	hr = hr && !p.recAfter
 	if p.fUnstated {
 		if hr || hf || p.fMay || slices.ContainsFunc(p.t.views, func(v *readerText) bool { return evHolds(v, f) }) {
@@ -622,9 +633,9 @@ func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
 // recording handed to the call is (rawState): one with no answer time, or
 // recorded or answered at the call's own instant, is unknown there.
 func setEvidence(g givenWords, r, f string, at time.Time, piece bool) (ev wordEvidence, changed bool) {
-	// A recording made after the call gave R's application nothing before
-	// it: R's word there decides nothing (F's still does).
-	hr := listsHold(g.answerLists, r) && (g.noTime || !g.at.After(at))
+	// A recording answered after the call gave R's application nothing
+	// before it: R's word there decides nothing (F's still does).
+	hr := listsHold(g.answerLists, r) && (g.noTime || !g.at.After(at) && !g.answered.After(at))
 	before := g.at.Before(at) && !g.noTime && !untimedAnswer(g.at, g.answered) && g.answered.Before(at)
 	switch {
 	case g.unstated || g.unread:
@@ -681,13 +692,11 @@ func (dc *decider) gluedAt(p evPlace, w readWord) bool {
 // time, where keploy cannot place it before the call (rawState), else that
 // keploy keeps only its words.
 func setUnknownWhy(g givenWords, at time.Time) string {
-	switch {
-	case g.noTime || untimedAnswer(g.at, g.answered):
+	switch st, why := answerState(g.at, g.answered, at); {
+	case g.noTime:
 		return noAnswerAt
-	case g.at.Equal(at) || g.answered.Equal(at):
-		return atCallWhy
-	case g.at.After(at) || g.answered.After(at):
-		return recordedAfterWhy
+	case st != stateBefore:
+		return why
 	}
 	return "round F gave it there; keploy keeps its words, and cannot tell this word did not come from it"
 }
