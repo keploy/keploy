@@ -257,22 +257,22 @@ B_PID=$(line_of refused.log B_PID)
 # Two tests at once in one process.
 [ "$(line_of refused.log A_REFUSED)" = "422 one_test_at_a_time" ] ||
   fail "a test begun while another was open was not refused with 422 one_test_at_a_time (got '$(line_of refused.log A_REFUSED)')"
-line_of refused.log A_MESSAGE | grep -qF "refuse.py::t2 began while refuse.py::t1 was still open: two tests ran at once in one test process" ||
+line_of refused.log A_MESSAGE | grep -F "refuse.py::t2 began while refuse.py::t1 was still open: two tests ran at once in one test process" >/dev/null ||
   fail "the one_test_at_a_time refusal does not say which tests ran at once: '$(line_of refused.log A_MESSAGE)'"
-line_of refused.log A_REMEDY | grep -qF "run them one at a time" ||
+line_of refused.log A_REMEDY | grep -F "run them one at a time" >/dev/null ||
   fail "the one_test_at_a_time refusal does not say to run them one at a time: '$(line_of refused.log A_REMEDY)'"
-line_of refused.log A_REMEDY | grep -qF "parallel test workers arrive in a later keploy release" ||
+line_of refused.log A_REMEDY | grep -F "parallel test workers arrive in a later keploy release" >/dev/null ||
   fail "the one_test_at_a_time refusal does not say parallel workers come later: '$(line_of refused.log A_REMEDY)'"
 grep -q "A_BEGAN_T2_WHILE_T1_WAS_OPEN" refused.log && fail "the agent opened a second test while the first was open"
 # A second test process.
 [ "$(line_of refused.log B_REFUSED)" = "422 one_test_process_at_a_time" ] ||
   fail "a second test process's claim was not refused with 422 one_test_process_at_a_time (got '$(line_of refused.log B_REFUSED)')"
 [ -n "$A_PID" ] && [ -n "$B_PID" ] &&
-  line_of refused.log B_MESSAGE | grep -qF "process $B_PID asked to run tests while process $A_PID still runs this keploy run's tests: two test processes ran at once" ||
+  line_of refused.log B_MESSAGE | grep -F "process $B_PID asked to run tests while process $A_PID still runs this keploy run's tests: two test processes ran at once" >/dev/null ||
   fail "the one_test_process_at_a_time refusal does not name both processes (A=$A_PID, B=$B_PID): '$(line_of refused.log B_MESSAGE)'"
-line_of refused.log B_REMEDY | grep -qF "run one test process at a time" ||
+line_of refused.log B_REMEDY | grep -F "run one test process at a time" >/dev/null ||
   fail "the one_test_process_at_a_time refusal does not say to run one test process at a time: '$(line_of refused.log B_REMEDY)'"
-line_of refused.log B_REMEDY | grep -qF "parallel test workers arrive in a later keploy release" ||
+line_of refused.log B_REMEDY | grep -F "parallel test workers arrive in a later keploy release" >/dev/null ||
   fail "the one_test_process_at_a_time refusal does not say parallel workers come later: '$(line_of refused.log B_REMEDY)'"
 grep -q "B_CLAIMED_WHILE_A_HELD_THE_RUN" refused.log && fail "the agent let a second test process claim the run while the first held it"
 # The run does not pass: each process reached its end, refused, and failed.

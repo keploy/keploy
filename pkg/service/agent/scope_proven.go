@@ -208,8 +208,16 @@ type missCapturer interface {
 	WithdrawTestErrorCapture()
 }
 
+// RunnableText makes the keploy commands in what the agent tells a developer
+// through a test harness runnable as printed: a harness (go-sdk keploytest,
+// @keploy/playwright) shows the agent's text as it stands, so nothing after
+// the agent can add what a build's commands need. keploy's own commands need
+// nothing, so here it changes nothing; enterprise, whose commands need its
+// staging switch, sets it once, before the agent serves.
+var RunnableText = func(text string) string { return text }
+
 func scopeErr(status int, code, msg, remedy string) *models.ScopeError {
-	return &models.ScopeError{Status: status, Code: code, Message: msg, Remedy: remedy}
+	return &models.ScopeError{Status: status, Code: code, Message: msg, Remedy: RunnableText(remedy)}
 }
 
 // wireLock serialises the wire's operations. A wait for it ends with the
@@ -339,7 +347,7 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		}
 		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
 			msg,
-			"run the test command natively: keploy mock record -c \"<command>\" or keploy mock replay -c \"<command>\"")
+			"run the test command natively, to record: keploy mock record -c \"<command>\"; to replay: keploy mock replay -c \"<command>\"")
 	}
 	if caller == agentPID {
 		return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrNoCaller,
@@ -354,7 +362,7 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	if !procDescends(caller, root) {
 		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
 			fmt.Sprintf("process %d is not part of this keploy run, so keploy cannot capture or mock its calls", caller),
-			`run the test command through keploy: keploy mock record -c "<command>" or keploy mock replay -c "<command>"`)
+			`run the test command through keploy, to record: keploy mock record -c "<command>"; to replay: keploy mock replay -c "<command>"`)
 	}
 	me := claimant{pid: caller, start: start}
 	a.provenMu.Lock()
@@ -788,7 +796,7 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	if !req.CanSkip || req.Suite {
 		return models.ScopeBeginResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrUpgradeIntegration,
 			"this test harness predates keploy's scope protocol v1: it cannot skip a test keploy quarantines, or it opens suite scopes",
-			"upgrade the keploy integration of your test framework (go-sdk keploytest, keploy-pytest, @keploy/jest)")
+			models.ScopeUpgradeRemedy)
 	}
 	if serr := oldWireFields(req); serr != nil {
 		return models.ScopeBeginResp{}, serr
@@ -805,14 +813,14 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		a.provenMu.Unlock()
 		return models.ScopeBeginResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
 			req.Name+" began before its test process claimed this keploy run, so keploy cannot tell that its calls are captured or mocked",
-			"upgrade the keploy integration of your test framework: it claims the run (POST /agent/instance) before its first test")
+			"have the test process claim the run before its first test: go-sdk keploytest and @keploy/playwright do; a framework with neither claims it by hand (POST /agent/instance with its package folder, relative to the project, as key)")
 	}
 	id := models.TestID(req.Project, req.File, a.proven.key, req.Name)
 	if open := a.proven.open; open != "" {
 		a.provenMu.Unlock()
 		return models.ScopeBeginResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrOneTestAtATime,
 			fmt.Sprintf("%s began while %s was still open: two tests ran at once in one test process", id, open),
-			"run them one at a time: start parallel tests with keploytest.Parallel and subtests with keploytest.Run (keploy mock codemod go writes them); parallel test workers arrive in a later keploy release")
+			"run them one at a time: in Go, start parallel tests with keploytest.Parallel and subtests with keploytest.Run, which take turns; elsewhere, end each test before the next one begins; parallel test workers arrive in a later keploy release")
 	}
 	reason, gated := a.proven.skip[id]
 	outcome := models.ScopeOutcomeGated
@@ -977,7 +985,7 @@ func oldWireFields(req models.ScopeReq) *models.ScopeError {
 	}
 	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrUpgradeIntegration,
 		"this test harness sends "+strings.Join(sent, ", ")+", which keploy's scope protocol v1 does not use: the claim names the test process, and keploy stamps each test's begin and end itself",
-		"upgrade the keploy integration of your test framework (go-sdk keploytest, keploy-pytest, @keploy/jest)")
+		models.ScopeUpgradeRemedy)
 }
 
 // ProvenEnd closes the open test. An end without an outcome counts as
@@ -1760,8 +1768,8 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 	} else {
 		head += " "
 	}
-	return fmt.Sprintf("%sIf this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n"+
-		"If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", head, id, shellQuote(id))
+	return RunnableText(fmt.Sprintf("%sIf this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n"+
+		"If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", head, id, shellQuote(id)))
 }
 
 // missWhys are, for a failed test's reason, why its calls missed, in the

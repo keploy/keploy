@@ -195,7 +195,7 @@ check_for_errors() {
 }
 
 check_recorded_tests() {
-    if ! find ./keploy -path '*/tests/*.yaml' -print -quit 2>/dev/null | grep -q .; then
+    if ! find ./keploy -path '*/tests/*.yaml' -print -quit 2>/dev/null | grep . >/dev/null; then
         echo "No recorded test cases were generated."
         return 1
     fi
@@ -231,7 +231,7 @@ check_test_report() {
         }
 
         test_set_name="$(basename "$report_file" -report.yaml)"
-        test_status="$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')"
+        test_status="$(grep 'status:' "$report_file" | sed -n 1p | awk '{print $2}')"
 
         echo "Status for ${test_set_name}: $test_status"
         if [ "$test_status" != "PASSED" ]; then

@@ -40,8 +40,14 @@ func commandType(b mysql.PacketBundle) string {
 // the background hidden, one call more than the test recorded, for all of
 // them: how often the test recorded it. The match is a dry one
 // (matchOptions.probed) on a view that holds only own and the connection's
-// prepared statements: it consumes nothing, binds no statement id and sends
-// no served event. Each recording it finds is passed over by the next.
+// recordings (its prepared statements, and a CLOSE it made between tests):
+// it consumes nothing, binds no statement id and sends no served event. Each
+// own recording it finds is passed over by the next, and the first it finds
+// that is not the test's own ends it: the matcher prefers that recording to
+// every own one left, so the command is its, not one more of the test's. Any
+// recorded CLOSE matches a live one by its header alone, so the test's CLOSE
+// of another statement matches a live CLOSE too, below the pool's CLOSE of
+// the live statement: that one ends the scan, and the pool answers it.
 func ownRepeats(ctx context.Context, req mysql.Request, db integrations.MockMemDb, own []*models.Mock, decodeCtx *wire.DecodeContext, noiseEngine *mocknoise.Engine, userBodyNoise map[string][]string, limit int) []*models.Mock {
 	if len(own) == 0 {
 		return nil
@@ -59,11 +65,12 @@ func ownRepeats(ctx context.Context, req mysql.Request, db integrations.MockMemD
 		if _, _, _, err := matchCommandWith(ctx, zap.NewNop(), req, view, decodeCtx, noiseEngine, userBodyNoise, opts); err != nil || probed == nil {
 			return out
 		}
-		// A connection's prepared statement the scan reads too is no
-		// recording of the test's: passed over, as each own one is.
-		if _, ok := ownSet[probed]; ok {
-			out = append(out, probed)
+		// A connection's recording the scan reads too is no recording of
+		// the test's, and the matcher prefers it to the own ones left.
+		if _, ok := ownSet[probed]; !ok {
+			return out
 		}
+		out = append(out, probed)
 		opts.refused[probed] = struct{}{}
 	}
 	return out

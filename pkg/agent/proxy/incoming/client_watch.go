@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -22,16 +23,39 @@ import (
 // nothing more for a while (a stream of a job's events, a long poll) never
 // learned its client had gone: it kept the request, and the ingress, the
 // connection's handler, waited on it with the client's end unread, for good
-// if no more came. stop ends the watch and reports whether the client ended
-// the exchange so; one that did is not recorded: its client did not take the
-// answer, and the app's end of it may be the client's going.
+// if no more came. endedBefore ends the watch and reports whether the client
+// ended the exchange so; one that did is not recorded: its client did not take
+// the answer, and the app's end of it may be the client's going.
+//
+// Whether the client went before the answer's end is decided by what had
+// arrived from the app when its going was seen, not by how far the ingress
+// had forwarded the answer: arrived drains the app's side and counts what it
+// has brought (drainConn), as the going is seen and before the app is told of
+// it. The drain reads into keploy what the app connection's socket holds,
+// without waiting, and with it what the app wrote that waited in its own send
+// queue, held there by keploy's receive window, up to drainMax; the count is
+// the kernel's of what the socket has received, its bytes read or not and its
+// close as one more (TCP_INFO), taken at once, so it can only undercount,
+// and counts nothing the app sent once told. endedBefore is given where the
+// answer ended in that count (answerEnd), or -1 while its end is not found.
+// A client that went once the answer's end had arrived did not end the
+// exchange: the app sent that end before it could learn of the going, so the
+// answer is the app's answer to the request, whatever the client then took
+// of it, and is recorded even when forwarding the rest of it to the gone
+// client fails (the ingress reads on to its end, finishAnswer). A client
+// that takes the headers and closes without reading the body (Go's http.Get
+// and a Body.Close, a client that wanted only the status) does that as soon
+// as the ingress forwards the headers, which it does before it reads the
+// body on: an answer the app wrote whole at once, its end in the read that
+// brought its headers, was not recorded whenever the watch saw the close
+// before the ingress read the body, which a loaded host makes often.
 //
 // The watch only peeks at the client's socket: what the client sends next
 // (a request it pipelined) stays for the next read, and ends the watch. A
 // client whose next bytes the ingress has already read (buffered) is not
 // watched: its end, if it sent one, comes after that request, as without
-// keploy. Nothing may read client until stop has returned; the response may
-// be written to it meanwhile.
+// keploy. Nothing may read client until the watch is halted; the response
+// may be written to it meanwhile.
 //
 // A client with no socket to be found under it (a wrapper that does not
 // give the conn it wraps, or a platform with no watch) is not watched, and
@@ -39,11 +63,12 @@ import (
 //
 // Under the proxy's settle, the connection it keeps under client holds the
 // hang-up while the watch runs and, once the hang-up is told on to the app,
-// holds no test's work (proxyutil.HoldHangUp): the exchange is not recorded
-// and nothing asserts its answer.
-func watchClient(logger *zap.Logger, client net.Conn, buffered *bufio.Reader, app func() net.Conn) (stop func() (ended bool)) {
+// holds no test's work (proxyutil.HoldHangUp): the exchange is not recorded,
+// or, its answer's end with keploy before the client went, is recorded from
+// what had arrived, and nothing waits on what the app sends after.
+func watchClient(logger *zap.Logger, client net.Conn, buffered *bufio.Reader, app func() net.Conn, arrived func() int64) *clientWatch {
 	if buffered.Buffered() > 0 {
-		return noClientEnd
+		return nil
 	}
 	conn := client
 	if r, ok := client.(*replayConn); ok {
@@ -57,7 +82,12 @@ func watchClient(logger *zap.Logger, client net.Conn, buffered *bufio.Reader, ap
 	// client left (one deaf to its request's context) is no test's to wait
 	// for.
 	release := proxyutil.HoldHangUp(conn)
+	w := &clientWatch{release: release}
 	stopWatch, watched := proxyutil.WatchPeerEnd(conn, func(reset bool) {
+		// Read before the app is told: all it counts, the app sent before
+		// it could learn of the going. Read by halt only once the watch has
+		// ended (stopWatch returns after this callback).
+		w.arrivedAtGoing = arrived()
 		up := app()
 		if up == nil {
 			return
@@ -70,16 +100,55 @@ func watchClient(logger *zap.Logger, client net.Conn, buffered *bufio.Reader, ap
 	if !watched {
 		release(false)
 		tellUnwatched(logger, conn)
-		return stopWatch
+		return nil
 	}
-	return func() bool {
-		ended := stopWatch()
-		release(false) // no-op once told
-		return ended
-	}
+	w.stop = stopWatch
+	return w
 }
 
-func noClientEnd() bool { return false }
+// errPastArrived ends a read of an app's answer bounded at what had arrived
+// from the app before it could learn its client had gone (readTo): what comes
+// after may answer the going, not the request.
+var errPastArrived = errors.New("the app's answer goes on past what had arrived from the app before it could learn its client had gone")
+
+// clientWatch is the watch on an exchange's client (watchClient). nil is no
+// watch: a client that is not watched never ends an exchange, and its app is
+// told nothing by keploy while it answers.
+type clientWatch struct {
+	stop    func() (ended bool) // the watch's; nil once halted
+	release func(told bool)
+	// went is whether the watch saw the client go, and told the app.
+	went bool
+	// arrivedAtGoing is what had arrived from the app when the client's
+	// going was seen, read before the app was told of it.
+	arrivedAtGoing int64
+}
+
+// halt ends the watch, if it still runs, and reports whether the client went
+// while it ran (and the app was told) and, if it did, what had arrived from
+// the app by then: all of it the app sent before it could learn of the going.
+// Once halted, nothing more is told the app until the ingress closes its
+// connection.
+func (w *clientWatch) halt() (went bool, arrived int64) {
+	if w == nil {
+		return false, 0
+	}
+	if w.stop != nil {
+		w.went = w.stop()
+		w.stop = nil
+		w.release(false) // no-op once told
+	}
+	return w.went, w.arrivedAtGoing
+}
+
+// endedBefore halts the watch and reports whether the client ended the
+// exchange: it went before the answer's end had arrived from the app.
+// answerEnd is where the answer ended in what arrives from the app, or -1
+// while its end is not found.
+func (w *clientWatch) endedBefore(answerEnd int64) bool {
+	went, arrived := w.halt()
+	return went && (answerEnd < 0 || arrived < answerEnd)
+}
 
 // unwatched is the kinds of client connection told as not watched
 // (tellUnwatched), by type: a handful at most, as the proxy's wrappers are.

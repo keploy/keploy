@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -218,6 +221,99 @@ func TestAReplayWhoseLossCountIsLostIsUnverified(t *testing.T) {
 	require.Contains(t, r.IsolationNote, "could not read whether the agent captured every call")
 	require.Contains(t, logged(logs), "keploy could not read whether the agent captured every call the test command made")
 	require.NotContains(t, logged(logs), "tracked every process")
+}
+
+// pidLossReplayInstr is replayIn's runner whose agent counts both the
+// processes it could not track and the calls it could not capture.
+type pidLossReplayInstr struct {
+	*runWrites
+	*lossCounter
+	*pidMapCounter
+}
+
+// Each of the agent's counts that keploy could not read stays on the
+// receipt as data, whatever reason the isolation note keeps. The note keeps
+// one: a call that matched nothing, a failed test command, a process the
+// agent could not track, a capture loss the agent counted, or the PID-map
+// count ahead of the capture-loss count. A reader judging a test that
+// passed beside another test's misses has no other way to learn the run is
+// not proven. Mutation: drop either field, set one only while the run
+// still reads isolated, set the capture-loss one only when the PID-map
+// count was read or no process was refused, or set the PID-map one only
+// when no capture loss failed the run.
+func TestAReceiptKeepsEachUnreadCountAsData(t *testing.T) {
+	provenOn(t)
+	tracking := errors.New("agent returned 500: read pid_map_insert_failures[target_namespace_pids]: bad file descriptor")
+	capture := errors.New("connection reset")
+	missed := []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x"}}
+	failed := models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 1}
+	for _, tc := range []struct {
+		name                   string
+		c                      replayCase
+		wantNote               string
+		wantTracking, wantLoss bool
+		wantExitZero           bool
+	}{
+		{name: "process tracking unread beside a call that matched nothing",
+			c:        replayCase{mockErrs: missed, pidMaps: &pidMapCounter{afterErr: tracking}},
+			wantNote: "1 call(s) matched nothing", wantTracking: true},
+		{name: "call capture unread beside a call that matched nothing",
+			c:        replayCase{mockErrs: missed, pidMaps: &pidMapCounter{}, losses: &lossCounter{errAt: map[int]error{2: capture}}},
+			wantNote: "1 call(s) matched nothing", wantLoss: true},
+		{name: "both unread, the test command failed",
+			c:        replayCase{runExit: failed, pidMaps: &pidMapCounter{afterErr: tracking}, losses: &lossCounter{errAt: map[int]error{2: capture}}},
+			wantNote: "the test command failed", wantTracking: true, wantLoss: true},
+		{name: "both unread, a clean run: the note keeps process tracking",
+			c:        replayCase{pidMaps: &pidMapCounter{afterErr: tracking}, losses: &lossCounter{errAt: map[int]error{2: capture}}},
+			wantNote: "could not read whether the agent tracked every process", wantTracking: true, wantLoss: true, wantExitZero: true},
+		// A process the agent refused fails the run, and the note names
+		// it; the capture-loss count unread is still kept.
+		{name: "call capture unread beside a process the agent could not track",
+			c:        replayCase{keployFails: true, pidMaps: &pidMapCounter{after: models.PIDMapRefusals{Target: 1}}, losses: &lossCounter{errAt: map[int]error{2: capture}}},
+			wantNote: "capture incomplete", wantLoss: true},
+		// A capture loss the agent counted fails the run, and the note
+		// names it; the PID-map count unread is still kept.
+		{name: "process tracking unread beside a capture loss the agent counted",
+			c: replayCase{keployFails: true, pidMaps: &pidMapCounter{afterErr: tracking},
+				losses: &lossCounter{after: models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443"}}}},
+			wantNote: "capture incomplete", wantTracking: true},
+		// Controls: both counts read.
+		{name: "both read, a call that matched nothing",
+			c:        replayCase{mockErrs: missed, pidMaps: &pidMapCounter{}},
+			wantNote: "1 call(s) matched nothing"},
+		{name: "both read, a clean run", c: replayCase{pidMaps: &pidMapCounter{}}, wantExitZero: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.c.mapped = true
+			dir, code, _ := replayIn(t, tc.c)
+			if tc.wantExitZero {
+				require.Zero(t, code, "no --strict: an unread count alone fails nothing")
+			}
+			r := mustReceipt(t, dir)
+			if tc.wantNote == "" {
+				require.True(t, r.Isolated, r.IsolationNote)
+			} else {
+				require.False(t, r.Isolated)
+				require.Contains(t, r.IsolationNote, tc.wantNote)
+			}
+			if tc.wantTracking {
+				require.Contains(t, r.ProcessTrackingUnread, "could not read whether the agent tracked every process")
+				require.Contains(t, r.ProcessTrackingUnread, "bad file descriptor", "why it could not be read")
+			} else {
+				require.Empty(t, r.ProcessTrackingUnread)
+			}
+			if tc.wantLoss {
+				require.Contains(t, r.CallCaptureUnread, "could not read whether the agent captured every call")
+				require.Contains(t, r.CallCaptureUnread, "connection reset", "why it could not be read")
+			} else {
+				require.Empty(t, r.CallCaptureUnread)
+			}
+			raw, err := os.ReadFile(filepath.Join(dir, "set", ReceiptFile))
+			require.NoError(t, err)
+			require.Equal(t, tc.wantTracking, strings.Contains(string(raw), "processTrackingUnread:"), "written to the file, and only when unread")
+			require.Equal(t, tc.wantLoss, strings.Contains(string(raw), "callCaptureUnread:"), "written to the file, and only when unread")
+		})
+	}
 }
 
 // Decision 20: a test command that called what keploy cannot capture at all

@@ -108,6 +108,14 @@ type MockManager struct {
 	// by treesMu. An entry whose mock DeleteStartupMock removed stays until the
 	// next staging; every swap and remove is pointer-checked, so it is inert.
 	startupKeys map[*models.Mock]models.TestModeInfo
+	// startupNames is the names of the set's start-up recordings the startup
+	// tree holds: a staging's startup-init mocks (recorded before the first
+	// test window) and its explicit startup slice, never the initial
+	// staging's copy of the whole pool. Rebuilt with the tree and read with
+	// no lock (ServedAsOwnOrStartup, which runs while a serve holds the round
+	// lock). A name DeleteStartupMock removed stays until the next staging:
+	// that recording is never served again.
+	startupNames atomic.Pointer[map[string]struct{}]
 	// startupShared is set while the startup tier may hold the session tier's
 	// own mocks — after a staging that filed them in both (see mirrorStartup)
 	// — and clear otherwise, so session updates pay for mirroring only then.
@@ -156,6 +164,18 @@ type MockManager struct {
 	// its OWN consumption history instead of a copy the client re-sends every
 	// testcase. Read only when MockFilterParams.AgentOwnsConsumed is set.
 	consumedPersistent map[string]models.MockState
+	// learnedElsewhere is what record's full round learned onto recordings
+	// from calls made in other windows than theirs (LearnElsewhere), by
+	// name: never consumption, so never in consumedList or
+	// consumedPersistent. Reset as a new test set is staged.
+	learnedElsewhere map[string]models.MockState
+	// elsewhereCounts is the current test set's count of learning-only
+	// pairings, by operation, then outcome (LearnElsewhereCounted);
+	// elsewhereCounted is how many calls it counts, elsewhereSaid how many
+	// of them the log said (unsaidElsewhereCounts). Reset with
+	// learnedElsewhere.
+	elsewhereCounts                 map[elsewhereOp]map[string]int
+	elsewhereCounted, elsewhereSaid int
 	// servedCount counts, per mock name, every time the mock answered a
 	// request this session, reset with consumedPersistent. A mock that may
 	// answer more than once keeps its first-use timestamp and its usage in
@@ -1859,9 +1879,25 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		// parser that is refused reads the new pool on its next try.
 		m.dropPreviousSetConsumes()
 	}
+	// The initial staging files every recording in the startup tier, so its
+	// startup-init slice names none as the start-up's (startupNames).
+	startupNames := make(map[string]struct{}, len(newStartupKeys))
+	if !isInitialStaging {
+		for _, mk := range startupInit {
+			if mk != nil && mk.Name != "" {
+				startupNames[mk.Name] = struct{}{}
+			}
+		}
+	}
+	for _, mk := range explicitStartup {
+		if mk != nil && mk.Name != "" {
+			startupNames[mk.Name] = struct{}{}
+		}
+	}
 	m.treesMu.Lock()
 	m.startup = newStartup
 	m.startupKeys = newStartupKeys
+	m.startupNames.Store(&startupNames)
 	// Initial staging files the session pool in the startup tier too; an
 	// explicit startup slice may share mocks with it as well.
 	m.startupShared.Store(isInitialStaging || len(explicitStartup) > 0)
@@ -3482,22 +3518,14 @@ func (m *MockManager) updateUnFilteredMock(old *models.Mock, new *models.Mock, g
 	if served == nil {
 		served = old
 	}
-	if m.exactView() == nil {
-		if g.checks() {
-			g.refuse("exact serving is off")
-			return false
-		}
-		m.observeServed(new, g.flight())
-	} else {
-		// Under exact serving the served observer is told in the step that
-		// settles the consume, holding the round lock (exactConsumeAt).
-		switch m.exactConsumeAt(served, false, g, func() { m.observeServed(new, g.flight()) }) {
-		case exactServed:
-			return true
-		case exactRefused:
-			return false
-		}
-	}
+	return m.consumeAt(served, false, g,
+		func() bool { return m.updateUnFilteredTier(old, new) },
+		func() { m.observeServed(new, g.flight()) })
+}
+
+// updateUnFilteredTier files new over old in the session tier, and reports
+// whether it was consumed. It may run holding the round lock (consumeAt).
+func (m *MockManager) updateUnFilteredTier(old *models.Mock, new *models.Mock) bool {
 	if old != nil && m.stalePooled(old) {
 		return false
 	}
@@ -3638,12 +3666,12 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 // deleteFilteredMock is DeleteFilteredMock, settled under exact serving only
 // while the store is at g's round when g is set (WithinRound).
 func (m *MockManager) deleteFilteredMock(mock models.Mock, g *roundGuard) bool {
-	switch m.exactConsumeValueAt(mock, true, g, true) {
-	case exactServed:
-		return true
-	case exactRefused:
-		return false
-	}
+	return m.consumeValueAt(mock, true, g, true, m.deleteFilteredTier)
+}
+
+// deleteFilteredTier takes mock out of its tier, the per-test one first, and
+// reports whether it was consumed.
+func (m *MockManager) deleteFilteredTier(mock models.Mock) bool {
 	if m.stalePooled(&mock) {
 		return false
 	}
@@ -3788,12 +3816,12 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 // deleteUnFilteredMock is DeleteUnFilteredMock, settled under exact serving
 // only while the store is at g's round when g is set (WithinRound).
 func (m *MockManager) deleteUnFilteredMock(mock models.Mock, g *roundGuard) bool {
-	switch m.exactConsumeValueAt(mock, true, g, true) {
-	case exactServed:
-		return true
-	case exactRefused:
-		return false
-	}
+	return m.consumeValueAt(mock, true, g, true, m.deleteUnFilteredTier)
+}
+
+// deleteUnFilteredTier takes mock out of the session tier, and reports
+// whether it was consumed.
+func (m *MockManager) deleteUnFilteredTier(mock models.Mock) bool {
 	if m.stalePooled(&mock) {
 		return false
 	}
@@ -3902,12 +3930,12 @@ func (m *MockManager) deleteStartupMock(mock models.Mock, g *roundGuard, observe
 		// The observer is told of no unnamed mock.
 		return false
 	}
-	switch m.exactConsumeValueAt(mock, true, g, observe) {
-	case exactServed:
-		return true
-	case exactRefused:
-		return false
-	}
+	return m.consumeValueAt(mock, true, g, observe, m.deleteStartupTier)
+}
+
+// deleteStartupTier takes mock out of the startup tier, and reports whether
+// it was consumed.
+func (m *MockManager) deleteStartupTier(mock models.Mock) bool {
 	if m.stalePooled(&mock) {
 		return false
 	}
@@ -4212,13 +4240,25 @@ func (m *MockManager) markMockAsUsed(mock models.Mock, g *roundGuard) bool {
 		// The observer is told of no unnamed mock.
 		return false
 	}
-	switch m.exactConsumeValueAt(mock, false, g, true) {
-	case exactServed:
-		return true
-	case exactRefused:
+	// What the tier reads of the staging (learnedAfterEndPrepared), prepared
+	// before the door: that takes swapMu, which nothing holding the round
+	// lock takes, and the tier may run holding it.
+	if provenswitch.On() && m.exact.learnEnded.Load() {
+		m.prepareOutside()
+	}
+	return m.consumeValueAt(mock, false, g, true, m.markUsedTier)
+}
+
+// markUsedTier records mock's use, and reports whether it was consumed. It
+// may run holding the round lock (consumeAt). A consume a view settles itself
+// never gets here, so a test's own mock, which the staging does not hold, is
+// never read against the staging.
+func (m *MockManager) markUsedTier(mock models.Mock) bool {
+	if m.stalePooled(&mock) {
 		return false
 	}
-	if m.stalePooled(&mock) {
+	learned, ok := m.learnedAfterEndPrepared(&mock)
+	if !ok {
 		return false
 	}
 	m.bumpHitCount(mock.Name, mock.Kind)
@@ -4246,7 +4286,7 @@ func (m *MockManager) markMockAsUsed(mock models.Mock, g *roundGuard) bool {
 		Binds:     bindsOf(mock.Spec),
 		// Learning the consume carries beyond what exact serving handed
 		// the parser out, once the set's learn step ended.
-		LearnedAfterEnd: m.learnedAfterEndNamed(&mock),
+		LearnedAfterEnd: learned,
 		// A registered kind's per-test mock consumed outside the current
 		// window (a server push delivered late) belongs to its own window.
 		CarryOver: m.consumedOutOfWindow(mock),
@@ -4435,6 +4475,30 @@ func (m *MockManager) SetServedObserver(f func(*models.Mock)) {
 	m.servedObserver.Store(&f)
 }
 
+// ServedAsOwnOrStartup reports whether mk is the open test's own recording in
+// the view in force (one its view holds as its own: its mapping's, in flight
+// into it, shared with it; never its worker: scope's or the background
+// pool's; and none while a pool view, which is no test's, is in force, even
+// one holding the next test's recordings ahead) or one of the set's start-up
+// recordings (startupNames). The learn
+// tracker files each serve so (learn.Tracker.SetServeOwner), and judging and
+// a replay check a call against such a recording in a span those serves
+// start (learn.Tracker.LiveSpanOf). It runs while a serve holds the round
+// lock and reads the view and the names atomically: it takes no lock and
+// never calls back into the manager.
+func (m *MockManager) ServedAsOwnOrStartup(mk *models.Mock) bool {
+	if m == nil || mk == nil || mk.Name == "" {
+		return false
+	}
+	if names := m.startupNames.Load(); names != nil {
+		if _, ok := (*names)[mk.Name]; ok {
+			return true
+		}
+	}
+	v := m.exactView()
+	return v != nil && v.test != "" && v.holds(mk.Name) && !v.isWorker(mk.Name) && !v.bg.has(mk.Name)
+}
+
 // SetServedInObserver sets the observer told, instead of the served
 // observer, of a mock served in a request its parser said (ServingFor);
 // nil clears it. The same rules as SetServedObserver's hold.
@@ -4485,18 +4549,16 @@ func (m *MockManager) SetTrackerSetAt(f func() uint64) {
 	m.trackerSetAt.Store(&f)
 }
 
-// observeServed tells the served observer of mock before a parser's claim
-// takes it out of the pool, so a request reading the pool and then the
-// observer's record never finds it in neither (the learn step's earlier
-// places). A claim that then fails was another connection's serve of the
-// same mock: the observer is told of a mock that was served either way.
-// Under exact serving it is told once the view settled the consume as a
-// serve, in the step that takes it and holding the round lock
-// (exactConsumeAt), and never of a consume the view refused: nothing served
-// that one. There the take comes first, so only a reader that reads both
-// under that lock (RoundSnapshot) never finds the mock in neither; no reader
-// reads them without it, and none may. in is the request it is served in, as
-// its parser said (nil: not said).
+// observeServed tells the served observer of mock, a consume that went
+// through: its consume door calls it only once the consume succeeded
+// (consumeAt), never for one the view or the tier refused, since nothing
+// served that one. A parser asks again after a refusal, and the learn tracker
+// numbers every serve it hears in F's order of the set, so one told early
+// reads as a serve the application never got. Under exact serving it is told
+// in the step that settles the consume, holding the round lock, with the take
+// before it, so only a reader that reads both under that lock (RoundSnapshot)
+// never finds the mock in neither; no reader reads them without it, and none
+// may. in is the request it is served in, as its parser said (nil: not said).
 //
 // With an observer (the served-in observer for a said request, else the
 // served observer), the serve is then filed in the open test's view
@@ -4930,7 +4992,14 @@ func (m *MockManager) dropPreviousSetConsumes() {
 	if m.consumedPersistent != nil {
 		m.consumedPersistent = make(map[string]models.MockState)
 	}
+	// What the previous set's calls taught its recordings is not this
+	// set's: recordings' names restart in each set. Its count is said
+	// first, if no read of the round's learning said it.
+	m.learnedElsewhere = nil
+	unsaid := m.unsaidElsewhereCounts()
+	m.elsewhereCounts, m.elsewhereCounted, m.elsewhereSaid = nil, 0, 0
 	m.consumedMu.Unlock()
+	m.sayElsewhereCounts(unsaid)
 	m.bootTakenMu.Lock()
 	m.bootTaken = nil
 	m.bootTakenMu.Unlock()

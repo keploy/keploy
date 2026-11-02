@@ -438,13 +438,12 @@ type ExactConsumedReader interface {
 //   - The account is every mock a parser was served while the view was
 //     installed, of any lifetime and through any door (the test's own, a
 //     protocol-phase or reusable one, one spent through a delete door, a
-//     worker-scope one), one the store passed to its pool whose claim there
-//     then failed included (another connection's serve of it: the tracker
-//     hears those too), once each by learn.MockID, in the order they came;
+//     worker-scope one), once each by learn.MockID, in the order they came;
 //     none while no test is open, and none with no observer. A consume the
-//     store's view refused (a mock it does not show, one that answered
-//     already) is no serve: neither this account nor the tracker holds it,
-//     and it makes its request no serve in the tracker's order. The
+//     store refused, in its view (a mock it does not show, one that answered
+//     already) or in the pool the view passed it to (a claim that failed: the
+//     door said false), is no serve: neither this account nor the tracker
+//     holds it, and it makes its request no serve in the tracker's order. The
 //     test's own mocks the pool view answered before the test's view was
 //     installed (in flight when it began: InFlightIntoOpenTest) are in
 //     ConsumedTestMocks and not here: they were served before the test
@@ -558,6 +557,9 @@ type CallRound struct {
 	// worker is whether the read's view showed a test the worker scope
 	// (WithSequence's Worker, InWorkerView): ShowsBackgroundIn.
 	worker bool
+	// every is whether the read held every recording as its own because
+	// its store could not tell which are the call's (HoldingEvery).
+	every bool
 }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
@@ -573,7 +575,27 @@ func (c CallRound) Read() bool { return c.read }
 func (c CallRound) Epoch() uint64 { return c.epoch }
 
 // Held reports whether the read's view held the recording name as its own.
+// Of a read that held every recording (HoldsEveryRecording) it is true of
+// every name and tells nothing of whose a recording is.
 func (c CallRound) Held(name string) bool { return c.held != nil && c.held(name) }
+
+// HoldingEvery is c holding every recording as the call's own (HoldsEvery):
+// the mark of a call whose store cannot tell which recordings are the
+// call's, the learn tracker ahead of the store (RoundSnapshot.TrackerAhead)
+// or in a test set the store has not staged (RoundSnapshot.SetUnstaged).
+// HoldsEveryRecording says so.
+func (c CallRound) HoldingEvery() CallRound {
+	c.held, c.every = HoldsEvery, true
+	return c
+}
+
+// HoldsEveryRecording reports whether c's read held every recording as its
+// own because its store could not tell which are the call's (HoldingEvery).
+// Held then says nothing of whose a recording is: a parser that tells the
+// user a recording is the call's own (and that its differing fields may be
+// the test's noise) asks this first, and a read that holds every recording
+// tells it nothing is.
+func (c CallRound) HoldsEveryRecording() bool { return c.every }
 
 // WithSequence is c, read in the view whose sequence view is sv
 // (SequenceViewer): a store held to c's call (RoundHolder) walks the
@@ -938,6 +960,21 @@ type RecordedTests interface {
 	BeforeTestWindow(t time.Time) (before, known bool)
 }
 
+// RecordedTestBegins is an optional TestWindows capability: where the
+// recorded test whose window a recording lies in began. In keploy mock's
+// client tests, whose begin moves the application's clock, a learn step reads
+// the clock reads of a recording another test made (a timer's call recorded
+// in an earlier test's window) from that test's recorded begin
+// (learn.Tracker.CallWindowIn), never from the running test's.
+type RecordedTestBegins interface {
+	// RecordedTestBegan is the start of the recorded test window t lies in
+	// (the test case's recorded begin, or its first recording where it
+	// carries none); ok is false where t is zero or inside none, the replay
+	// sent none, or the window carries no test's name (windows that overlap
+	// are one window named by no test).
+	RecordedTestBegan(t time.Time) (began time.Time, ok bool)
+}
+
 // TestWindows is an optional MockMemDb capability: where the request time of
 // a recorded mock falls among the replay's test windows. The learn step tells
 // the open test's own mocks, the pool's and other tests' apart by it where
@@ -1122,6 +1159,84 @@ func PairingCandidates(db MockMemDb, kind models.Kind) []*models.Mock {
 func ClaimPairing(db MockMemDb, m *models.Mock) bool {
 	if p, ok := db.(Pairing); ok {
 		return p.ClaimPairing(m)
+	}
+	return false
+}
+
+// LearnElsewhere is record's full round learning a recording's clock reads
+// from a call of the same shape made in another window than the
+// recording's, for learning only. A timer fires
+// wherever the clock puts it: its call, recorded in one test's window, lands
+// in another's in the full round, and the learn step, which pairs a call
+// only with the open test's recordings or the pool's, would teach its
+// recording nothing. A parser's learn step that misses such a call pairs it
+// by its drift pairing's rule and guards with one of these candidates and
+// hands the clock reads it learned to LearnElsewhere. Mongo's learn step
+// is the one that does today; HTTP's does not, a stated limit (a timer's
+// HTTP call learns nothing across windows). An optional MockMemDb
+// capability: the agent's MockManager implements it, and every MockMemDb
+// wrapper must forward it.
+type LearnElsewhere interface {
+	// LearnElsewhereCandidates is kind's data-plane recordings of other
+	// windows than the open test's (neither the open view's own nor the
+	// set's background; under today's rules, which name no background, the
+	// pool's too) that the set's calls have not consumed and no pairing
+	// claimed, in recorded order, while the session runs record's full
+	// round's learn step under the proven switch, whatever rules serve the
+	// set; nil otherwise. With keys, the call's request keys, of a kind
+	// whose parser declares them (models.HasRequestKeys), only those filed
+	// under one of keys: a parser asks by the keys every recording its
+	// pairing may take is filed under, so a recording kept on disk is
+	// decoded only if it may be the call's. Without, every one of kind.
+	LearnElsewhereCandidates(kind models.Kind, keys []string) []*models.Mock
+	// LearnElsewhere keeps the clock reads a call learned onto m for
+	// record's full round to write onto the recording, as it writes what a
+	// consumed recording learned. Clock reads alone: a leaf the call changed
+	// that is no read of the clock is never learned across windows as noise,
+	// a looser rule.
+	// It consumes, claims and answers nothing: m stays its owner's, and no
+	// test's verdict reads it. One pairing per recording per round: false
+	// when a call of the round taught m already, and a parser then reads m
+	// as spent (a tie moves to the next recording). False too when the
+	// session does not learn, or m is no candidate and no idle answer of
+	// the set's background (models.IsIdleAnswer) its calls have not consumed.
+	LearnElsewhere(m *models.Mock, clocks map[string]models.ClockOffset) bool
+}
+
+// LearnElsewhereCounter is a store's count of record's full round's
+// learning-only pairings (LearnElsewhere): for each call a parser offered
+// LearnElsewhereCandidates for, the call's operation as the parser says it,
+// and what came of it (learned, or what stopped the pairing). The store
+// says the count by operation in the agent's log, which keploy mock record
+// prints with the round's. An optional MockMemDb capability beside
+// LearnElsewhere: the agent's MockManager implements it, and every
+// MockMemDb wrapper must forward it.
+type LearnElsewhereCounter interface {
+	LearnElsewhereCounted(kind models.Kind, operation, outcome string)
+}
+
+// CountLearnElsewhere is db's LearnElsewhereCounted; nothing when db does
+// not implement LearnElsewhereCounter.
+func CountLearnElsewhere(db MockMemDb, kind models.Kind, operation, outcome string) {
+	if c, ok := db.(LearnElsewhereCounter); ok {
+		c.LearnElsewhereCounted(kind, operation, outcome)
+	}
+}
+
+// LearnElsewhereCandidates is db's LearnElsewhereCandidates of kind under
+// keys; nil when db does not implement LearnElsewhere.
+func LearnElsewhereCandidates(db MockMemDb, kind models.Kind, keys []string) []*models.Mock {
+	if l, ok := db.(LearnElsewhere); ok {
+		return l.LearnElsewhereCandidates(kind, keys)
+	}
+	return nil
+}
+
+// LearnElsewhereOnto is db's LearnElsewhere; false when db does not implement
+// it.
+func LearnElsewhereOnto(db MockMemDb, m *models.Mock, clocks map[string]models.ClockOffset) bool {
+	if l, ok := db.(LearnElsewhere); ok {
+		return l.LearnElsewhere(m, clocks)
 	}
 	return false
 }

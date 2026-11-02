@@ -206,7 +206,7 @@ saved_all() {
 ended_at_markers() {
   local log="$1.log" frames
   for frames in "test cases" mocks mappings; do
-    if ! grep "read the stream to the keploy agent's end marker" "$log" | grep -q "\"frames\": \"$frames\""; then
+    if ! grep "read the stream to the keploy agent's end marker" "$log" | grep "\"frames\": \"$frames\"" >/dev/null; then
       echo "FAIL: $1: the $frames drain did not end at the agent's marker"
       grep -n "end marker\|ended its\|recording complete" "$log"
       FAIL=1

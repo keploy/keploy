@@ -369,13 +369,20 @@ func TestATestStillOpenAtTheFinalReadFails(t *testing.T) {
 }
 
 // A test begun before its process claimed the run is refused: keploy cannot
-// tell that the caller's calls are captured or mocked.
+// tell that the caller's calls are captured or mocked. The remedy names only
+// the integrations that exist. Mutation: name keploy-pytest or @keploy/jest
+// in it, or drop the by-hand claim or its key.
 func TestABeginWithoutAClaimIsRefused(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	_, serr := a.ProvenBegin(context.Background(), begin("TestOrphan"))
 	require.NotNil(t, serr)
 	require.Equal(t, models.ScopeErrNotInRun, serr.Code)
 	require.Equal(t, http.StatusUnprocessableEntity, serr.Status)
+	// The remedy says how to claim, with or without an integration.
+	require.Contains(t, serr.Remedy, "go-sdk keploytest and @keploy/playwright do; a framework with neither claims it by hand (POST /agent/instance with its package folder, relative to the project, as key)")
+	for _, never := range []string{"keploy-pytest", "@keploy/jest"} {
+		require.NotContains(t, serr.Remedy, never)
+	}
 	ws, err := a.FinalScopeWindows(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, ws, "the refused begin opened nothing")
@@ -479,6 +486,55 @@ func TestBeginWithoutCanSkipNeedsANewIntegration(t *testing.T) {
 	require.Equal(t, models.ScopeErrUpgradeIntegration, serr.Code)
 }
 
+// Each upgrade_integration refusal of a harness that predates the wire (its
+// begin, or the old wire's fields) names only the integrations of the wire
+// that exist, go-sdk keploytest and @keploy/playwright, and what a framework
+// with none does: one test process at a time, its calls made by hand. It
+// used to tell users to upgrade keploy-pytest and @keploy/jest, which were
+// never published. Mutation: put the old remedy back at any one refusal
+// (the begin of a harness older than the wire, or the old wire's fields),
+// or in models.ScopeUpgradeRemedy.
+func TestAnUpgradeRefusalNamesOnlyIntegrationsThatExist(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	claimSelf(t, a)
+	for _, tc := range []struct {
+		what string
+		req  models.ScopeReq
+	}{
+		{"a begin without canSkip", models.ScopeReq{Name: "TestA"}},
+		{"a suite begin", models.ScopeReq{Name: "suite", CanSkip: true, Suite: true}},
+		{"a begin with a pid", models.ScopeReq{Name: "TestA", CanSkip: true, Pid: 4242}},
+	} {
+		_, serr := a.ProvenBegin(ctx, tc.req)
+		require.NotNil(t, serr, tc.what)
+		require.Equal(t, models.ScopeErrUpgradeIntegration, serr.Code, tc.what)
+		requireOnlyRealIntegrations(t, serr.Remedy, tc.what)
+	}
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed", Dir: "/repo/o"})
+	require.NotNil(t, serr)
+	require.Equal(t, models.ScopeErrUpgradeIntegration, serr.Code)
+	requireOnlyRealIntegrations(t, serr.Remedy, "an end with a dir")
+}
+
+func requireOnlyRealIntegrations(t *testing.T, remedy, what string) {
+	t.Helper()
+	for _, want := range []string{
+		"go-sdk keploytest for go test", "@keploy/playwright for Playwright",
+		"run one test process at a time", "makes the calls by hand",
+		"claims the run (POST /agent/instance with its package folder, relative to the project, as key) before its first test",
+		"begin with canSkip true, skips the test when the begin answers action skip",
+		"never with pid, at, dir or suite",
+	} {
+		require.Contains(t, remedy, want, what)
+	}
+	for _, never := range []string{"keploy-pytest", "@keploy/jest"} {
+		require.NotContains(t, remedy, never, what)
+	}
+}
+
 func TestASecondOpenTestIsRefused(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
@@ -489,6 +545,11 @@ func TestASecondOpenTestIsRefused(t *testing.T) {
 	require.NotNil(t, serr)
 	require.Equal(t, models.ScopeErrOneTestAtATime, serr.Code)
 	require.Contains(t, serr.Message, "o::TestB began while o::TestA was still open")
+	// The remedy names what exists: keploytest's Parallel and Run, never
+	// the keploy mock codemod go command, which no keploy release has.
+	// Mutation: put the codemod back in the remedy.
+	require.Contains(t, serr.Remedy, "in Go, start parallel tests with keploytest.Parallel and subtests with keploytest.Run, which take turns; elsewhere, end each test before the next one begins")
+	require.NotContains(t, serr.Remedy, "codemod")
 	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
 	require.Nil(t, serr)
 	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
@@ -1563,6 +1624,34 @@ func TestTheReasonQuotesAnIDTheShellWouldSplit(t *testing.T) {
 	r := evidenceReason("tests/a.py::test_x[1-2] y", &models.ScopeEvidence{Unconsumed: []string{"m"}}, nil, time.Time{})
 	require.Contains(t, r, "keploy mock quarantine 'tests/a.py::test_x[1-2] y' --reason")
 	require.Equal(t, "orders::TestA", shellQuote("orders::TestA"))
+}
+
+// A harness shows the agent's text as it stands, so a build whose commands
+// need more than keploy's sets RunnableText, and both of the agent's answers
+// that print a command go through it: the reason of the test it failed, and a
+// refusal's remedy. Left as it is, it changes neither (the rows above pin that
+// text word for word).
+func TestWhatTheAgentTellsAHarnessGoesThroughRunnableText(t *testing.T) {
+	kept := RunnableText
+	t.Cleanup(func() { RunnableText = kept })
+	RunnableText = func(text string) string { return "[" + text + "]" }
+
+	a, p := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "orders"}, os.Getpid())
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(ctx, begin("TestPlaceOrder"))
+	require.Nil(t, serr)
+	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", Destination: "127.0.0.1:18282"}}
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestPlaceOrder", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Equal(t, "[keploy: GET /x to 127.0.0.1:18282 had no recorded answer. If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting orders::TestPlaceOrder>\".\n"+
+		"If it is flaky, not broken: keploy mock quarantine orders::TestPlaceOrder --reason \"<why>\".]", e.Reason)
+
+	refused := scopeErr(http.StatusConflict, models.ScopeErrNotInRun, "not in a run", "run it through keploy")
+	require.Equal(t, "not in a run", refused.Message)
+	require.Equal(t, "[run it through keploy]", refused.Remedy)
 }
 
 // A claim whose process exited is no claim: a begin under it is refused, so

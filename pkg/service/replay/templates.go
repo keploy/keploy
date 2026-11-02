@@ -29,8 +29,11 @@ import (
 // resolved from this copy once the answer is in (resolveExpected): a hook that
 // changes the case it is handed in place, such as enterprise's
 // DecryptingTestHooks decrypting it, changes this copy, and what is compared.
+// A hook that rewrites the copy's expected body says so on the copy
+// (models.TestCase.ExpectedRewrite), and only for that send.
 func toSend(run *templates.Run, tc *models.TestCase) models.TestCase {
 	sent := *tc
+	sent.ExpectedRewrite = nil
 	switch tc.Kind {
 	case models.GRPC_EXPORT:
 		sent.GrpcReq = run.GRPCRequest(tc.GrpcReq)
@@ -75,8 +78,16 @@ func (r *Replayer) resolveExpected(run *templates.Run, check *templates.CheckRes
 	exp := *sent
 	exp.HTTPResp = res.Resp
 	var opts []httpMatcher.MatchOption
-	if res.BodyTemplated {
+	switch {
+	case res.BodyTemplated:
+		// A templated body a hook also rewrote: its recorded body is
+		// rendered from the rewritten one, which no recorded digest was
+		// computed over, so each digest header is compared as written.
 		opts = append(opts, httpMatcher.WithRecordedBody(res.RecordedBody))
+	case sent.ExpectedRewrite != nil:
+		// A hook rewrote the expected body for this send: its digest
+		// headers were computed over the body as recorded.
+		opts = append(opts, httpMatcher.WithRecordedBody(sent.ExpectedRewrite.RecordedBody))
 	}
 	if len(res.Failures) > 0 {
 		// The test case has failed on its own: a comparison that matches

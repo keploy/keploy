@@ -163,16 +163,16 @@ func TestAKeptConnectionTellsTheLearnStepItsRequests(t *testing.T) {
 func TestAServeSaidInItsRequestIsOrderedPastAHeartbeat(t *testing.T) {
 	doors := map[string]func(db integrations.MockMemDb, m models.Mock) bool{
 		"MarkMockAsUsed":       func(db integrations.MockMemDb, m models.Mock) bool { return db.MarkMockAsUsed(m) },
-		"UpdateUnFilteredMock": func(db integrations.MockMemDb, m models.Mock) bool { db.UpdateUnFilteredMock(&m, &m); return true },
-		"DeleteFilteredMock":   func(db integrations.MockMemDb, m models.Mock) bool { db.DeleteFilteredMock(m); return true },
-		"DeleteUnFilteredMock": func(db integrations.MockMemDb, m models.Mock) bool { db.DeleteUnFilteredMock(m); return true },
-		"DeleteStartupMock":    func(db integrations.MockMemDb, m models.Mock) bool { db.DeleteStartupMock(m); return true },
+		"UpdateUnFilteredMock": func(db integrations.MockMemDb, m models.Mock) bool { return db.UpdateUnFilteredMock(&m, &m) },
+		"DeleteFilteredMock":   func(db integrations.MockMemDb, m models.Mock) bool { return db.DeleteFilteredMock(m) },
+		"DeleteUnFilteredMock": func(db integrations.MockMemDb, m models.Mock) bool { return db.DeleteUnFilteredMock(m) },
+		"DeleteStartupMock":    func(db integrations.MockMemDb, m models.Mock) bool { return db.DeleteStartupMock(m) },
 	}
 	for name, door := range doors {
 		t.Run(name, func(t *testing.T) {
 			tr := learn.NewTracker()
-			mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
-			defer mm.Close()
+			a := doorMock(name, "mock-a", 0, models.HTTP)
+			mm := stagedForDoor(t, name, a)
 			mm.SetServedObserver(tr.ServedMock)
 			mm.SetServedInObserver(tr.ServedMockIn)
 			c1, app1 := flyingPair(t, tr, nil)
@@ -180,10 +180,12 @@ func TestAServeSaidInItsRequestIsOrderedPastAHeartbeat(t *testing.T) {
 			request(t, c1, app1)
 			request(t, heartbeat, app2)
 			ctx := integrations.WithRequestHolder(context.Background(), c1)
-			door(integrations.ServingIn(ctx, mm), models.Mock{Name: "mock-a", Kind: models.HTTP})
+			if !door(integrations.ServingIn(ctx, mm), *a) {
+				t.Fatal("the door refused a mock its tier holds")
+			}
 			_, _ = heartbeat.Write([]byte("H"))
 			_, _ = c1.Write([]byte("A"))
-			if fa, la := tr.Placed().Order.Of(&models.Mock{Name: "mock-a", Kind: models.HTTP}); fa != 1 || la != 1 {
+			if fa, la := tr.Placed().Order.Of(a); fa != 1 || la != 1 {
 				t.Fatalf("A at %d,%d; want 1,1: the heartbeat read no recording", fa, la)
 			}
 		})
@@ -285,26 +287,26 @@ func TestAServeSaidInItsRequestIsOrderedPastAHeartbeat(t *testing.T) {
 func TestAServeToldInNoRequestOrInItsCauseThroughTheStore(t *testing.T) {
 	doors := map[string]func(db integrations.MockMemDb, m models.Mock) bool{
 		"MarkMockAsUsed":       func(db integrations.MockMemDb, m models.Mock) bool { return db.MarkMockAsUsed(m) },
-		"UpdateUnFilteredMock": func(db integrations.MockMemDb, m models.Mock) bool { db.UpdateUnFilteredMock(&m, &m); return true },
-		"DeleteFilteredMock":   func(db integrations.MockMemDb, m models.Mock) bool { db.DeleteFilteredMock(m); return true },
-		"DeleteUnFilteredMock": func(db integrations.MockMemDb, m models.Mock) bool { db.DeleteUnFilteredMock(m); return true },
-		"DeleteStartupMock":    func(db integrations.MockMemDb, m models.Mock) bool { db.DeleteStartupMock(m); return true },
+		"UpdateUnFilteredMock": func(db integrations.MockMemDb, m models.Mock) bool { return db.UpdateUnFilteredMock(&m, &m) },
+		"DeleteFilteredMock":   func(db integrations.MockMemDb, m models.Mock) bool { return db.DeleteFilteredMock(m) },
+		"DeleteUnFilteredMock": func(db integrations.MockMemDb, m models.Mock) bool { return db.DeleteUnFilteredMock(m) },
+		"DeleteStartupMock":    func(db integrations.MockMemDb, m models.Mock) bool { return db.DeleteStartupMock(m) },
 	}
-	a := &models.Mock{Name: "mock-a", Kind: models.REDIS}
-	push := &models.Mock{Name: "mock-push", Kind: models.REDIS}
 	for name, door := range doors {
+		a, push := doorMock(name, "mock-a", 0, models.REDIS), doorMock(name, "mock-push", time.Second, models.REDIS)
 		t.Run("in no request: "+name, func(t *testing.T) {
 			tr := learn.NewTracker()
-			mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
-			defer mm.Close()
+			mm := stagedForDoor(t, name, a, push)
 			mm.SetServedObserver(tr.ServedMock)
 			mm.SetServedInObserver(tr.ServedMockIn)
 			c1, app1 := flyingPair(t, tr, nil)
 			heartbeat, app2 := flyingPair(t, tr, nil)
 			request(t, c1, app1)
 			request(t, heartbeat, app2)
-			door(mm.ServingFor(learn.NoRequest()), *push)
-			door(integrations.ServingIn(integrations.WithRequestHolder(context.Background(), c1), mm), *a)
+			if !door(mm.ServingFor(learn.NoRequest()), *push) ||
+				!door(integrations.ServingIn(integrations.WithRequestHolder(context.Background(), c1), mm), *a) {
+				t.Fatal("the door refused a mock its tier holds")
+			}
 			_, _ = heartbeat.Write([]byte("H"))
 			_, _ = c1.Write([]byte("A"))
 			o := tr.Placed().Order
@@ -317,18 +319,21 @@ func TestAServeToldInNoRequestOrInItsCauseThroughTheStore(t *testing.T) {
 		})
 		t.Run("in its cause, once the cause's answer went out: "+name, func(t *testing.T) {
 			tr := learn.NewTracker()
-			mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
-			defer mm.Close()
+			mm := stagedForDoor(t, name, a, push)
 			mm.SetServedObserver(tr.ServedMock)
 			mm.SetServedInObserver(tr.ServedMockIn)
 			c1, app1 := flyingPair(t, tr, nil)
 			request(t, c1, app1)
 			ctx := integrations.WithRequestHolder(context.Background(), c1)
 			cause := integrations.InFlightOf(ctx)
-			door(integrations.ServingIn(ctx, mm), *a)
+			if !door(integrations.ServingIn(ctx, mm), *a) {
+				t.Fatal("the door refused a mock its tier holds")
+			}
 			_, _ = c1.Write([]byte("A"))
 			p := cause.LiftCaused()
-			door(mm.ServingFor(p), *push)
+			if !door(mm.ServingFor(p), *push) {
+				t.Fatal("the door refused a mock its tier holds")
+			}
 			p.Land()
 			o := tr.Placed().Order
 			if f, l := o.Of(a); f != 1 || l != 1 {

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
@@ -141,6 +142,24 @@ type Receipt struct {
 	// the app sent), with the process that made it. nil when the misses
 	// were not read, and with the switch off.
 	UnchargedMisses []UnchargedMiss `yaml:"unchargedMisses,omitempty" json:"unchargedMisses,omitempty"`
+	// ProcessTrackingUnread and CallCaptureUnread each say, when keploy
+	// asked for one of the agent's counts at the run's end and could not
+	// read it, what that leaves unproven and why it could not be read: the
+	// count of processes the agent could not track (its PID maps'
+	// refusals), and, under the proven switch, the count of calls it could
+	// not capture. Either one unread, nothing shows that no call reached a
+	// real dependency unmocked. Each is kept here whatever IsolationNote
+	// says: the note keeps one reason, so a run whose test command failed,
+	// whose calls matched nothing, whose agent refused a process or lost a
+	// call, or whose other count was unread too keeps that reason there.
+	//
+	// Each is empty when its count was read, or was never asked for (an
+	// agent that cannot count it, the switch off for capture losses, or a
+	// run keploy failed first). So an empty field proves nothing: a reader
+	// keys off FailedBy first, and never takes empty fields as proof that
+	// the run was isolated.
+	ProcessTrackingUnread string `yaml:"processTrackingUnread,omitempty" json:"processTrackingUnread,omitempty"`
+	CallCaptureUnread     string `yaml:"callCaptureUnread,omitempty" json:"callCaptureUnread,omitempty"`
 }
 
 // UnchargedMiss is a call no recorded mock answered that no test was charged
@@ -288,9 +307,21 @@ type TestsReceipt struct {
 	// Learned is what the learn step of a record's full round wrote onto
 	// mocks no test consumed (the set's start-up and pool), each field as
 	// "<mock> <path> (<kind>)"; a test's own is on its line (design v14
-	// §7.2 step 10).
+	// §7.2 step 10). What a call made in another window than its
+	// recording's taught it is LearnedElsewhere's, not this.
 	Learned []string `yaml:"learned,omitempty" json:"learned,omitempty"`
+	// LearnedElsewhere is what the learn step of a record's full round
+	// wrote onto recordings from calls made in other windows than theirs,
+	// for learning only (a timer's call that fired in another test's
+	// window): by recording, with the test whose recording it is and the
+	// windows that taught it. Such learning is that window's: whatever
+	// undoes what a window learned undoes it too.
+	LearnedElsewhere []LearnedElsewhere `yaml:"learnedElsewhere,omitempty" json:"learnedElsewhere,omitempty"`
 }
+
+// LearnedElsewhere is what calls made in other windows than a recording's
+// taught it, as a record's receipt says it (TestsReceipt.LearnedElsewhere).
+type LearnedElsewhere = learn.Taught
 
 // empty reports whether the run reported no test and keploy refused
 // nothing: such a run leaves no per-test file, whatever rows it saw. A

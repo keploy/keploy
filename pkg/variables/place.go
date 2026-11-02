@@ -76,6 +76,16 @@ var ErrPlace = errors.New("not a variable place")
 //	url.path[2]           the third segment of the URL path
 //	url.query.page        the value of the query parameter page
 //	header.X-Request-Id   the value of a header (any case)
+//
+// A query or header name writes '|' and '#', which a word address
+// (ParseAddress) reads as its own, as \| and \#, and a '\' before one of
+// them, before another '\' or at its end as \\ (escapeName); any other
+// '\' is itself. A JSON key holding '|' or '#' is quoted, as one holding '.'.
+// A name written before the escape reads here as it did, but for a "\|",
+// "\#" or "\\" in it: no header name holds one ('\' is not a token byte),
+// and a query name that did now reads with that '\' dropped. A field
+// written before word addresses is read with Parse, never with
+// ParseAddress, which reads a name ending in #<digits> as a word of it.
 func Parse(s string) (Place, error) {
 	switch {
 	case s == bodyPrefix:
@@ -93,9 +103,9 @@ func Parse(s string) (Place, error) {
 		}
 		return Place{Part: PartPath, Index: n}, nil
 	case strings.HasPrefix(s, queryPrefix) && len(s) > len(queryPrefix):
-		return Place{Part: PartQuery, Name: s[len(queryPrefix):]}, nil
+		return Place{Part: PartQuery, Name: unescapeName(s[len(queryPrefix):])}, nil
 	case strings.HasPrefix(s, headerPrefix) && len(s) > len(headerPrefix):
-		return Place{Part: PartHeader, Name: s[len(headerPrefix):]}, nil
+		return Place{Part: PartHeader, Name: unescapeName(s[len(headerPrefix):])}, nil
 	}
 	return Place{}, fmt.Errorf("%w: %q (want body.<path>, url.path[<n>], url.query.<name> or header.<name>)", ErrPlace, s)
 }
@@ -108,11 +118,44 @@ func (p Place) String() string {
 	case PartPath:
 		return pathPrefix + strconv.Itoa(p.Index) + "]"
 	case PartQuery:
-		return queryPrefix + p.Name
+		return queryPrefix + escapeName(p.Name)
 	case PartHeader:
-		return headerPrefix + p.Name
+		return headerPrefix + escapeName(p.Name)
 	}
 	return ""
+}
+
+// escapeName writes a name so that a '|' or '#' in it never ends it in a
+// word address: \| and \#, and \\ for a '\' before one of them, before
+// another '\' or at the end. A name with none of them is itself.
+func escapeName(n string) string {
+	if !strings.ContainsAny(n, `|#\`) {
+		return n
+	}
+	var b strings.Builder
+	for i := 0; i < len(n); i++ {
+		if c := n[i]; c == '|' || c == '#' || c == '\\' && (i+1 == len(n) || strings.IndexByte(`|#\`, n[i+1]) >= 0) {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(n[i])
+	}
+	return b.String()
+}
+
+// unescapeName reads what escapeName wrote: \|, \# and \\ are the byte
+// after the '\'; any other '\' is itself.
+func unescapeName(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) && strings.IndexByte(`|#\`, s[i+1]) >= 0 {
+			i++
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // BodyPlace is the place of a scalar of a JSON body.
@@ -179,7 +222,7 @@ func formatJSONPath(path []templates.PathSeg) string {
 		switch {
 		case s.IsIndex:
 			b.WriteString("[" + strconv.Itoa(s.Index) + "]")
-		case s.Key == "" || strings.ContainsAny(s.Key, `.[]"`):
+		case s.Key == "" || strings.ContainsAny(s.Key, `.[]"|#`):
 			q, _ := json.Marshal(s.Key)
 			b.WriteString("[" + string(q) + "]")
 		default:

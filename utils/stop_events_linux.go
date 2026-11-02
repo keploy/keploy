@@ -50,16 +50,24 @@ func StopStallSaid() string { return StopStallBudget.String() + " of keploy's ru
 
 // ExitMark is how far processes are on their way out: how many still run,
 // with how many threads and open files (files, not descriptors: openFiles),
-// how much storage they have read and written, and whether one waits on
-// storage (an uninterruptible sleep, D). FilesUnsettled is a read of their
-// open files that did not settle (openFiles), of descriptors the kernel
-// would not list, or through a task that had begun to exit (taskExiting):
-// its Fds are no evidence. FilesUncompared, where it is not
+// how much storage each of their threads has read and written itself (IO,
+// by tid), and whether one waits on storage (an uninterruptible sleep, D).
+// A process's own count of its storage I/O (/proc/<pid>/io) is not read: it
+// takes in the I/O of every child it reaps, so a process that starts one
+// (a shell, posix_spawn, os/exec), and is in the kernel as it next starts
+// one (a vfork waits there, D, for the child to exec), would read as on its
+// way out through storage when only the child read its binary from disk.
+// IOPartial is a reading in which a process's threads could not all be
+// listed (taskIDs): IO may leave out one that runs. FilesUnsettled is a read
+// of their open files that did not settle (openFiles), of descriptors the
+// kernel would not list, or through a task that had begun to exit
+// (taskExiting): its Fds are no evidence. FilesUncompared, where it is not
 // nil, is why the kernel would not compare a process's files (kcmp(2)): its
 // Fds then count its descriptors, each once (openFiles).
 type ExitMark struct {
 	Running, Threads, Fds int
-	IO                    uint64
+	IO                    map[int]uint64
+	IOPartial             bool
 	OnStorage             bool
 	FilesUnsettled        bool
 	FilesUncompared       error
@@ -71,7 +79,7 @@ type ExitMark struct {
 // zombie in its stat, but runs (Exited): its open files, which its main
 // thread no longer shows, are read through a thread of it that runs.
 func MarkExit(procs []Reached) ExitMark {
-	var m ExitMark
+	m := ExitMark{IO: map[int]uint64{}}
 	for _, p := range procs {
 		st, ok := ReadProcStat(p.PID)
 		if !ok || st.StartTime != p.Start {
@@ -111,9 +119,36 @@ func MarkExit(procs []Reached) ExitMark {
 		}
 		m.Fds += n
 		m.FilesUnsettled = m.FilesUnsettled || !settled
-		m.IO += readStorageIO(dir + "/io")
+		if !threadsIO(p.PID, m.IO) {
+			m.IOPartial = true
+		}
 	}
 	return m
+}
+
+// threadsIO is readThreadsIO of a process in this host's /proc, as MarkExit
+// reads it: a test makes it read a /proc of its own.
+var threadsIO = func(pid int, io map[int]uint64) (whole bool) {
+	return readThreadsIO("/proc", pid, io)
+}
+
+// readThreadsIO puts into io the storage I/O each thread of process pid has
+// done itself (readStorageIO of <root>/<pid>/task/<tid>/io: 0 for one whose
+// count cannot be read), by its tid, and reports whether its threads were
+// listed whole (taskIDs): where they were not, one that runs may be left
+// out. A process gone has no thread that runs. root is /proc.
+func readThreadsIO(root string, pid int, io map[int]uint64) (whole bool) {
+	ids, whole, gone, err := taskIDs(root, pid)
+	if gone {
+		return true
+	}
+	dir := root + "/" + strconv.Itoa(pid) + "/task/"
+	for _, id := range ids {
+		if tid, err := strconv.Atoi(id); err == nil {
+			io[tid] = readStorageIO(dir + id + "/io")
+		}
+	}
+	return whole && err == nil
 }
 
 // kcmpFile is kcmp(2)'s KCMP_FILE: whether two descriptors name one open file.
@@ -471,21 +506,28 @@ var processThreads = func(pid int) int {
 }
 
 // ExitRatchet is the furthest processes have come on their way out: the
-// fewest running, threads and open files seen, and the most storage I/O. A
-// reading is progress only where it passes that mark, so a count that rises
-// and falls back (a socket opened and closed, a thread started and ended: a
-// retry loop, a DNS lookup, a pool) is none; and storage I/O counts only
-// while one of them waits on it: one that logs as it waits on its own makes
-// none. A reading whose open files did not settle (ExitMark.FilesUnsettled:
-// descriptors that kept changing as they were read) neither sets nor passes
-// the open-file mark: a look that could not tell the files apart is no
-// evidence, and so a first look that counted too many cannot make a later,
-// true one look like progress. The stop of the daemons an app leaves behind
-// reads them so too (stopMembers, pkg/platform/http/adopt_linux.go).
+// fewest running, threads and open files seen, and the most storage I/O
+// each thread was seen to have done itself. A reading is progress only where
+// it passes that mark, so a count that rises and falls back (a socket opened
+// and closed, a thread started and ended: a retry loop, a DNS lookup, a
+// pool) is none; and storage I/O counts only while one of them waits on it:
+// one that logs as it waits on its own makes none. A thread's I/O is held
+// against its own most (one not seen before has done none), so a thread
+// that ends, its I/O gone from the reading, takes none of the mark with it
+// from the others; one the reading's whole listing of threads leaves out
+// has ended (ExitMark.IOPartial), and its tid, given again, names a thread
+// whose I/O starts at none. A reading whose open files did not settle
+// (ExitMark.FilesUnsettled: descriptors that kept changing as they were
+// read) neither sets nor passes the open-file mark: a look that could not
+// tell the files apart is no evidence, and so a first look that counted too
+// many cannot make a later, true one look like progress. The stop of the
+// daemons an app leaves behind reads them so too (stopMembers,
+// pkg/platform/http/adopt_linux.go).
 type ExitRatchet struct {
 	best  ExitMark
 	set   bool
-	files bool // best.Fds is a settled reading's
+	files bool           // best.Fds is a settled reading's
+	io    map[int]uint64 // the most storage I/O each thread was seen to have done itself, by tid
 }
 
 // Advance takes reading m and reports whether it passed the mark.
@@ -493,6 +535,8 @@ func (r *ExitRatchet) Advance(m ExitMark) bool {
 	files := !m.FilesUnsettled
 	if !r.set {
 		r.best, r.set, r.files = m, true, files
+		r.best.IO = nil
+		r.takeIO(m)
 		return false
 	}
 	moved := false
@@ -509,17 +553,38 @@ func (r *ExitRatchet) Advance(m ExitMark) bool {
 	case m.Fds < r.best.Fds:
 		r.best.Fds, moved = m.Fds, true
 	}
-	if m.IO > r.best.IO {
-		if m.OnStorage {
-			moved = true
-		}
-		r.best.IO = m.IO
+	if r.takeIO(m) && m.OnStorage {
+		moved = true
 	}
 	return moved
 }
 
-// readStorageIO is the bytes a process has read from and written to storage
-// (read_bytes and write_bytes of /proc/<pid>/io), 0 where it cannot be read.
+// takeIO takes reading m's storage I/O into the mark, thread by thread, and
+// reports whether a thread had done more than the mark held for it.
+func (r *ExitRatchet) takeIO(m ExitMark) (rose bool) {
+	io := make(map[int]uint64, len(m.IO))
+	for tid, n := range m.IO {
+		if most := r.io[tid]; n > most {
+			rose = true
+		} else {
+			n = most
+		}
+		io[tid] = n
+	}
+	if m.IOPartial {
+		for tid, most := range r.io {
+			if _, ok := io[tid]; !ok {
+				io[tid] = most
+			}
+		}
+	}
+	r.io = io
+	return rose
+}
+
+// readStorageIO is the bytes read from and written to storage that an io
+// file of /proc counts (its read_bytes and write_bytes), 0 where it cannot
+// be read.
 func readStorageIO(path string) uint64 {
 	b, err := os.ReadFile(path)
 	if err != nil {

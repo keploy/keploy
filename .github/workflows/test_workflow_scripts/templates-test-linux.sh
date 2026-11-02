@@ -260,16 +260,16 @@ CREATED="$(curl -s -XPOST "http://127.0.0.1:$APP/users" -H 'Content-Type: applic
 REC_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$CREATED" 2>/dev/null)"
 REC_NO="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["order_no"])' "$CREATED" 2>/dev/null)"
 [ -n "$REC_ID" ] && [ -n "$REC_NO" ] || fail "the create answered '$CREATED'"
-curl -s "http://127.0.0.1:$APP/users/$REC_ID" | grep -q "\"$REC_ID\"" || fail "the read-back did not answer the id"
+curl -s "http://127.0.0.1:$APP/users/$REC_ID" | grep "\"$REC_ID\"" >/dev/null || fail "the read-back did not answer the id"
 curl -s -XPOST "http://127.0.0.1:$APP/orders/lookup" -H 'Content-Type: application/json' \
-  -d "{\"order_no\": $REC_NO, \"user\": \"$REC_ID\"}" | grep -q '"open"' || fail "the order lookup did not find the order"
+  -d "{\"order_no\": $REC_NO, \"user\": \"$REC_ID\"}" | grep '"open"' >/dev/null || fail "the order lookup did not find the order"
 curl -s -c cookies.txt -XPOST "http://127.0.0.1:$APP/login" -H 'Content-Type: application/json' -d '{"user":"alice"}' >/dev/null
 REC_CSRF="$(awk '$6=="csrftoken"{print $7}' cookies.txt)"
 REC_SID="$(awk '$6=="sessionid"{print $7}' cookies.txt)"
 [ -n "$REC_CSRF" ] && [ -n "$REC_SID" ] || fail "the login set no csrftoken/sessionid cookies: $(cat cookies.txt)"
-curl -s -b cookies.txt -H "X-CSRFToken: $REC_CSRF" "http://127.0.0.1:$APP/me" | grep -q '"alice"' || fail "the call with both cookies was refused"
+curl -s -b cookies.txt -H "X-CSRFToken: $REC_CSRF" "http://127.0.0.1:$APP/me" | grep '"alice"' >/dev/null || fail "the call with both cookies was refused"
 [ "$(curl -s -o /dev/null -w '%{redirect_url}' -XPOST "http://127.0.0.1:$APP/logout")" = "http://127.0.0.1:$APP/bye" ] || fail "the logout did not redirect to /bye"
-curl -s -H 'Cookie: page=bye' "http://127.0.0.1:$APP/bye" | grep -q '"bye"' || fail "/bye did not answer"
+curl -s -H 'Cookie: page=bye' "http://127.0.0.1:$APP/bye" | grep '"bye"' >/dev/null || fail "/bye did not answer"
 wait_for_tests 7 || fail "keploy record wrote $(test_files) test cases, want 7"
 stop_keploy "$RECORD_BIN"; own
 cp -a keploy keploy.plain # the recording as it is, for step 9b
@@ -316,7 +316,7 @@ done
 # where it sent the recorded one, its cookie and its path (value flow).
 grep -Eqi "location: '?/bye'?$" "$T6" || fail "templatize wrote in the logout's redirect target: $(grep -m1 -i 'location:' "$T6")"
 grep -q 'page={{capture string .page}}' "$T6" || fail "the logout's page cookie is not a capture: $(grep -i -m1 'set-cookie' "$T6")"
-grep -m1 'url:' "$T7" | grep -q 'url: http://127.0.0.1:[0-9]*/{{string .page}}$' || fail "the call to the page does not send the cookie's value in its path: $(grep -m1 'url:' "$T7")"
+grep -m1 'url:' "$T7" | grep 'url: http://127.0.0.1:[0-9]*/{{string .page}}$' >/dev/null || fail "the call to the page does not send the cookie's value in its path: $(grep -m1 'url:' "$T7")"
 grep -Eqi "cookie: '?page=\{\{string \.page\}\}" "$T7" || fail "the call to the page does not send the page cookie: $(grep -i -m1 'cookie:' "$T7")"
 grep -q 'of a 302 response holds Location.path.0 .*bye.*, which a later request sends: templatize captures nothing there' templatize.log \
   || fail "templatize did not say why it left the logout's redirect target as recorded: $(grep -m1 '302' templatize.log)"
@@ -333,15 +333,15 @@ if [ "$(set_status)" != PASSED ]; then
 fi
 SENT_URL=$(report_block "$(name_of "$T2")" | grep -m1 "url: .*/users/")
 [ -n "$SENT_URL" ] || fail "the report has no request URL for the read-back"
-echo "$SENT_URL" | grep -q "/users/usr_" || fail "the read-back was not sent to a user id: $SENT_URL"
-echo "$SENT_URL" | grep -q "$REC_ID" && fail "the read-back was sent with the recorded id: $SENT_URL"
+echo "$SENT_URL" | grep "/users/usr_" >/dev/null || fail "the read-back was not sent to a user id: $SENT_URL"
+echo "$SENT_URL" | grep "$REC_ID" >/dev/null && fail "the read-back was sent with the recorded id: $SENT_URL"
 LOOKUP=$(report_block "$(name_of "$T3")" | grep -m1 'body: .*order_no')
 [ -n "$LOOKUP" ] || fail "the report has no request body for the lookup"
-echo "$LOOKUP" | grep -Eq '"order_no": *[1-9][0-9]{6}[,}]' || fail "the lookup was not sent a seven-digit JSON number: $LOOKUP"
-echo "$LOOKUP" | grep -q "$REC_NO" && fail "the lookup was sent the recorded number: $LOOKUP"
+echo "$LOOKUP" | grep -E '"order_no": *[1-9][0-9]{6}[,}]' >/dev/null || fail "the lookup was not sent a seven-digit JSON number: $LOOKUP"
+echo "$LOOKUP" | grep "$REC_NO" >/dev/null && fail "the lookup was sent the recorded number: $LOOKUP"
 COOKIE=$(report_block "$(name_of "$T5")" | grep -i -m1 'cookie: ')
 [ -n "$COOKIE" ] || fail "the report has no Cookie for the call"
-echo "$COOKIE" | grep -q "$REC_CSRF\|$REC_SID" && fail "the call was sent a recorded cookie: $COOKIE"
+echo "$COOKIE" | grep "$REC_CSRF\|$REC_SID" >/dev/null && fail "the call was sent a recorded cookie: $COOKIE"
 for key in id orderNo csrftoken sessionid; do
   grep -q "key: $key" "$(REPORT)" || fail "the report does not say what was captured for $key"
 done
@@ -377,7 +377,7 @@ replay noise "wrong-id $REC_ID $REC_NO"
 expect_rc 1 "step 7, a template variable's place under noise that fails"
 rm -f keploy.yml
 [ "$(test_status "$(name_of "$T2")")" = FAILED ] || fail "under noise on body.id the read-back answering another id passed: the variable must be asserted anyway"
-report_block "$(name_of "$T2")" | grep -q "where: body.id" || fail "the read-back's report does not name the variable place it failed on"
+report_block "$(name_of "$T2")" | grep "where: body.id" >/dev/null || fail "the read-back's report does not name the variable place it failed on"
 grep -q "a noise entry covers a template variable's place" noise.log || fail "the noise entry over the read-back's {{string .id}} was not named"
 [ "$(test_status "$(name_of "$T1")")" = PASSED ] || fail "the create should pass under the noise (its capture holds)"
 # Every report format says which variable place failed and why: the
@@ -397,18 +397,18 @@ grep -q '"template_failures":\[{"where":"body.id","placeholder":"{{string .id}}"
 # The next step says both things the failure can mean, and never sends the
 # user to keploy normalize (which leaves a HIGH-risk failure as it is).
 NEXT=$(grep "a template variable's place does not hold what it must" noise.log)
-echo "$NEXT" | grep -q "this run's value of id is what" || fail "the template failure's next step does not say where the run's value came from: $NEXT"
-echo "$NEXT" | grep -q "re-record" || fail "the template failure's next step does not say what to do when the value changed on purpose: $NEXT"
-echo "$NEXT" | grep -q "keploy normalize" && fail "the template failure's next step points at keploy normalize: $NEXT"
+echo "$NEXT" | grep "this run's value of id is what" >/dev/null || fail "the template failure's next step does not say where the run's value came from: $NEXT"
+echo "$NEXT" | grep "re-record" >/dev/null || fail "the template failure's next step does not say what to do when the value changed on purpose: $NEXT"
+echo "$NEXT" | grep "keploy normalize" >/dev/null && fail "the template failure's next step points at keploy normalize: $NEXT"
 # The read-back's own request sent the id: a capture there would accept any
 # id and send the wrong one on, so its next step never offers one.
-echo "$NEXT" | grep -qF "{{capture" && fail "the read-back's next step offers to make it a capture: $NEXT"
-echo "$NEXT" | grep -q "own request sent it" || fail "the read-back's next step does not say its own request sent the id: $NEXT"
+echo "$NEXT" | grep -F "{{capture" >/dev/null && fail "the read-back's next step offers to make it a capture: $NEXT"
+echo "$NEXT" | grep "own request sent it" >/dev/null || fail "the read-back's next step does not say its own request sent the id: $NEXT"
 # The noise entry also covers the create's capture: its warning says to keep
 # the capture, never to replace it with the recorded value.
 WARN_CAP=$(grep "a noise entry covers a template variable's place" noise.log | grep -F "{{capture string .id}}" || true)
 [ -n "$WARN_CAP" ] || fail "the noise entry over the create's {{capture string .id}} was not named"
-echo "$WARN_CAP" | grep -q "keep the capture" || fail "the noise warning over the create's capture does not say to keep it: $WARN_CAP"
+echo "$WARN_CAP" | grep "keep the capture" >/dev/null || fail "the noise warning over the create's capture does not say to keep it: $WARN_CAP"
 
 echo "== 8. --update-template is ignored: config.yaml keeps the recorded values =="
 replay update "" --update-template
@@ -463,7 +463,7 @@ HELD=$(grep -o "test-set-0 holds template placeholders already ({{string .page}}
 [ -n "$HELD" ] || fail "templatize did not name the older set and its first placeholder: $(tail -5 templatize3.log)"
 HELD_FILE=$(echo "$HELD" | sed -E 's/.* at ([^ ]*) line ([0-9]*)\).*/\1/')
 HELD_LINE=$(echo "$HELD" | sed -E 's/.* at ([^ ]*) line ([0-9]*)\).*/\2/')
-sed -n "${HELD_LINE:-0}p" "keploy/test-set-0/tests/$HELD_FILE" 2>/dev/null | grep -qF '{{string .page}}' \
+sed -n "${HELD_LINE:-0}p" "keploy/test-set-0/tests/$HELD_FILE" 2>/dev/null | grep -F '{{string .page}}' >/dev/null \
   || fail "the line templatize names does not hold the placeholder: $HELD"
 grep -q "re-record the set and run keploy templatize on the new recording" templatize3.log || fail "templatize did not say what to do with the older set: $(tail -5 templatize3.log)"
 replay redirect9b redirect
@@ -521,8 +521,8 @@ for line in open(sys.argv[1], errors="replace"):
             break
 REASON_OF
 )
-echo "$REASON" | grep -q "rename tests/$(basename "$T1").keploy-old to tests/$(basename "$T1")" || fail "the set's failure reason does not give the step for the templatized create: $REASON"
-echo "$REASON" | grep -q "config.yaml.keploy-absent" || fail "the set's failure reason does not name config.yaml's marker: $REASON"
+echo "$REASON" | grep "rename tests/$(basename "$T1").keploy-old to tests/$(basename "$T1")" >/dev/null || fail "the set's failure reason does not give the step for the templatized create: $REASON"
+echo "$REASON" | grep "config.yaml.keploy-absent" >/dev/null || fail "the set's failure reason does not name config.yaml's marker: $REASON"
 grep -q "found no test results" killed.log && fail "keploy test said it found no test results for the refused set"
 # Every report format shows the refused set's test cases as failed and
 # refused, with the steps: a CI that reads JUnit sees the set fail.
@@ -574,8 +574,8 @@ grep -q "X-User: '{{string .id}}'" "$T2" || fail "could not write the variable i
 replay refused
 expect_rc 1 "step 9e, a refused test case"
 [ "$(test_status "$(name_of "$T2")")" = FAILED ] || fail "the read-back with a variable in its assertions was not failed"
-report_block "$(name_of "$T2")" | grep -q "refused: true" || fail "the read-back's report does not say it was refused: $(report_block "$(name_of "$T2")" | grep -m3 -i 'why\|refused')"
-report_block "$(name_of "$T2")" | grep -q "an assertion is read as written" || fail "the read-back's report does not give the refusal's reason"
+report_block "$(name_of "$T2")" | grep "refused: true" >/dev/null || fail "the read-back's report does not say it was refused: $(report_block "$(name_of "$T2")" | grep -m3 -i 'why\|refused')"
+report_block "$(name_of "$T2")" | grep "an assertion is read as written" >/dev/null || fail "the read-back's report does not give the refusal's reason"
 rm -rf keploy && mv keploy.before9e keploy
 
 echo "== 10. logs: no ERROR where nothing failed, no data race anywhere =="

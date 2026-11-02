@@ -50,6 +50,11 @@ jobs:
       # utils or pkg/platform/http on a developer's machine pins no CPU.
       # This lane is where they run.
       KEPLOY_TEST_CPU_HOLD: "1"
+      # utils' tests of a stop's storage I/O read a file from storage, out of
+      # the page cache; where no read reaches storage (both test dirs in
+      # memory) they skip. This runner's disks take them: with this set they
+      # fail instead.
+      KEPLOY_TEST_STORAGE_IO_REQUIRED: "1"
       KEPLOY_TEST_MYSQL_ADDR: "127.0.0.1:3306"
       KEPLOY_TEST_MYSQL_USER: root
       KEPLOY_TEST_MYSQL_PASS: rootpass
@@ -195,7 +200,12 @@ jobs:
       # whether or not the one before it passed or built (a leg's failure is
       # in its output, not the shell's -e and pipefail), so one run says both
       # answers; each PASS line is grepped at the end, so a row that fails,
-      # does not build or vanishes fails the step.
+      # does not build or vanishes fails the step. Each run passes
+      # -test.timeout, as go test does: a test binary run with none has no
+      # deadline. The http row bounds its waits by the test's deadline, so a
+      # hang there fails naming what it waited on instead of running to the
+      # job's end; the utils rows bound none of their waits so (awaitFile), and
+      # the timeout alone bounds their run.
       - name: Open-file rows as the runner user and as root
         if: success() || failure()
         shell: bash
@@ -206,18 +216,35 @@ jobs:
           go test -c -o /tmp/http.test ./pkg/platform/http/ || failed=1
           cd utils
           rows='^(TestMarkExitCountsOpenFilesNotDescriptors|TestAChildReapedBeforeItsFilesAreComparedIsNoRefusal|TestAReadThroughExitingThreadsNeverSettlesLow)$'
-          /tmp/utils.test -test.count=1 -test.v -test.run "$rows" | tee /tmp/utils-runner.out || true
-          sudo env KEPLOY_TEST_KCMP_REQUIRED=1 /tmp/utils.test -test.count=1 -test.v -test.run "$rows" | tee /tmp/utils-root.out || true
+          /tmp/utils.test -test.count=1 -test.v -test.timeout=10m -test.run "$rows" | tee /tmp/utils-runner.out || true
+          sudo env KEPLOY_TEST_KCMP_REQUIRED=1 /tmp/utils.test -test.count=1 -test.v -test.timeout=10m -test.run "$rows" | tee /tmp/utils-root.out || true
           # The churning daemon's stop, which reads its files the same way.
           cd ../pkg/platform/http
-          /tmp/http.test -test.count=1 -test.v -test.run '^TestADaemonThatOnlyChurnsMovesNoTeardown$' | tee /tmp/http-runner.out || true
-          sudo env KEPLOY_TEST_KCMP_REQUIRED=1 /tmp/http.test -test.count=1 -test.v -test.run '^TestADaemonThatOnlyChurnsMovesNoTeardown$' | tee /tmp/http-root.out || true
+          /tmp/http.test -test.count=1 -test.v -test.timeout=10m -test.run '^TestADaemonThatOnlyChurnsMovesNoTeardown$' | tee /tmp/http-runner.out || true
+          sudo env KEPLOY_TEST_KCMP_REQUIRED=1 /tmp/http.test -test.count=1 -test.v -test.timeout=10m -test.run '^TestADaemonThatOnlyChurnsMovesNoTeardown$' | tee /tmp/http-root.out || true
           for leg in {utils-runner,utils-root}:{TestMarkExitCountsOpenFilesNotDescriptors,TestAChildReapedBeforeItsFilesAreComparedIsNoRefusal,TestAReadThroughExitingThreadsNeverSettlesLow} \
             http-runner:TestADaemonThatOnlyChurnsMovesNoTeardown http-root:TestADaemonThatOnlyChurnsMovesNoTeardown; do
             out=/tmp/${leg%%:*}.out
             grep -q -- "^--- PASS: ${leg#*:} " "$out" || { echo "${leg#*:} did not pass in $out"; failed=1; }
           done
           exit "$failed"
+
+      # internal/starvetest's hold gives the threads it let go their policy
+      # back, where the kernel lets it: from the idle policy, the runner user
+      # gets back only what RLIMIT_NICE allows (nothing, by default), so its
+      # run checks their CPUs alone. Run as root with
+      # KEPLOY_TEST_POLICY_RESTORE_REQUIRED=1, which fails it where the
+      # kernel would not, so the policy given back is checked on every PR.
+      - name: Hold row as root
+        if: success() || failure()
+        shell: bash
+        run: |
+          set -o pipefail
+          rm -f /tmp/starvetest.test
+          go test -c -o /tmp/starvetest.test ./internal/starvetest/
+          cd internal/starvetest
+          sudo env KEPLOY_TEST_CPU_HOLD=1 KEPLOY_TEST_POLICY_RESTORE_REQUIRED=1 /tmp/starvetest.test -test.count=1 -test.v -test.run '^TestAHoldLetsItsProcessesRunAsBefore$' | tee /tmp/starvetest-root.out
+          grep -q -- '^--- PASS: TestAHoldLetsItsProcessesRunAsBefore ' /tmp/starvetest-root.out
 
       # The hooks package's root tests skip in the run above, which is the
       # runner user's: TestTheHooksLoadOnThisKernel loads the agent's eBPF

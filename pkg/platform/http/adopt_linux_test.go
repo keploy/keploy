@@ -51,12 +51,13 @@ func inOwnProcess(t *testing.T) bool {
 		t.Cleanup(endWhatItStarted)
 		return true
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.v", "-test.count=1")
+	cmd := exec.Command(os.Args[0], ownProcessArgs(t, t.Name())...)
 	cmd.Env = append(os.Environ(), adoptHelperEnv+"="+t.Name())
-	// A process of its own that hangs ends with the test binary, at its
-	// timeout, rather than outliving it holding what it adopted. The
-	// signal comes when the thread that started it exits: it is held for
-	// as long as the process runs.
+	// A process of its own that hangs ends at its own timeout
+	// (ownProcessArgs), and if this test binary ends first, with it,
+	// rather than outliving it holding what it adopted. The signal comes
+	// when the thread that started it exits: it is held for as long as
+	// the process runs.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	runtime.LockOSThread()
 	out, err := cmd.CombinedOutput()
@@ -68,6 +69,24 @@ func inOwnProcess(t *testing.T) bool {
 		t.Skipf("skipped in its own process:\n%s", out)
 	}
 	return false
+}
+
+// ownProcessArgs runs test name alone in a copy of this test binary, with a
+// timeout of its own: three quarters of the time left to this binary's. So
+// the bounds of the copy's waits (beforeTheDeadline) have a deadline to come
+// before, and they say what it waited on while this binary still reads its
+// output, instead of this binary's timeout ending both and saying only that
+// it ran out. (The copy's own timeout panic runs no cleanups, so its output
+// ends only once nothing it started still holds it.) With no timeout here,
+// the copy has none either.
+func ownProcessArgs(t *testing.T, name string) []string {
+	args := []string{"-test.run=^" + name + "$", "-test.v", "-test.count=1"}
+	if dl, ok := t.Deadline(); ok {
+		if left := time.Until(dl) * 3 / 4; left > 0 {
+			args = append(args, "-test.timeout="+left.String())
+		}
+	}
+	return args
 }
 
 // endWhatItStarted kills every process this one still runs: each it started,
@@ -212,7 +231,7 @@ func TestATestInItsOwnProcessLeavesNothingBehind(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer out.Close()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestOwnProcessLeftoverHelper$", "-test.v", "-test.count=1")
+	cmd := exec.Command(os.Args[0], ownProcessArgs(t, "TestOwnProcessLeftoverHelper")...)
 	cmd.Env = append(os.Environ(), adoptHelperEnv+"=TestOwnProcessLeftoverHelper", leftoverDirEnv+"="+dir)
 	cmd.Stdout, cmd.Stderr = out, out
 	runErr := cmd.Run()
@@ -397,6 +416,28 @@ func daemonize(t *testing.T, command string, args ...string) int {
 	return pid
 }
 
+// daemonExitingAdopted daemonizes a daemon that exits once it is adopted,
+// and returns its pid then. One that exits at once may exit before the
+// child that started it does, which then reaps it itself (dash does, at its
+// next command): it is never adopted, and a test that waits for it to be
+// (a zombie of this process, the reaper's reap of it) waits for ever. This
+// one holds its fifo open for read until it is written, which the test does
+// once daemonize returned: its starter has exited, and it is adopted.
+func daemonExitingAdopted(t *testing.T) int {
+	t.Helper()
+	fifo := filepath.Join(t.TempDir(), "exit")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pid := daemonize(t, `exec cat "$1"`, fifo)
+	f, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close() // cat reads EOF and exits
+	return pid
+}
+
 // ownerEnv names, in the environment of every process these tests start, the
 // pid of the test process that started it: set in this process's own
 // environment as it starts (init), it is inherited by each daemon a test
@@ -431,15 +472,35 @@ func startDaemon(command string, args ...string) (int, error) {
 	return pid, nil
 }
 
-// await waits until cond holds; the bound only turns a hang into a failure.
+// beforeTheDeadline fires a quarter of the way to the test binary's
+// deadline, and never with none: a wait it bounds fails only when it takes
+// over a quarter of the time the binary has left, far longer than a loaded
+// host takes for what does happen, and says what it waited on before the
+// binary's own panic. go test gives the binary a deadline unless run as
+// go test -timeout 0; a binary run directly has one only with
+// -test.timeout, as CI's direct runs pass.
+func beforeTheDeadline(t *testing.T) <-chan time.Time {
+	t.Helper()
+	dl, ok := t.Deadline()
+	if !ok {
+		return nil
+	}
+	timer := time.NewTimer(time.Until(dl) / 4)
+	t.Cleanup(func() { timer.Stop() })
+	return timer.C
+}
+
+// await waits until cond holds; its bound (beforeTheDeadline) only turns a
+// hang into a failure.
 func await(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(time.Minute)
+	expired := beforeTheDeadline(t)
 	for !cond() {
-		if time.Now().After(deadline) {
+		select {
+		case <-expired:
 			t.Fatalf("%s did not happen", what)
+		case <-time.After(10 * time.Millisecond):
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -540,7 +601,7 @@ func TestNoReapIsCountedAndAnUnreadableFdTableReapsNothing(t *testing.T) {
 	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	pid := daemonize(t, "exit 0")
+	pid := daemonExitingAdopted(t)
 	await(t, "the daemon exiting, adopted", func() bool { return zombieOf(pid, os.Getpid()) })
 
 	real := waitAdopted
@@ -552,7 +613,7 @@ func TestNoReapIsCountedAndAnUnreadableFdTableReapsNothing(t *testing.T) {
 	go func() { reapAll(zap.NewNop()); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(time.Minute): // the bound only turns a spin into a failure
+	case <-beforeTheDeadline(t): // the bound only turns a spin into a failure
 		t.Fatal("the reaper kept scanning for a child it could not reap yet")
 	}
 	waitAdopted = real
@@ -928,7 +989,7 @@ func TestADaemonEndsWithTheProcessThatStartedIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = out.Close() })
-	cmd := exec.Command(os.Args[0], "-test.run=^TestOwnProcessKilledHelper$", "-test.v", "-test.count=1")
+	cmd := exec.Command(os.Args[0], ownProcessArgs(t, "TestOwnProcessKilledHelper")...)
 	cmd.Env = append(os.Environ(), adoptHelperEnv+"=TestOwnProcessKilledHelper", killedDirEnv+"="+dir)
 	cmd.Stdout, cmd.Stderr = out, out
 	in, err := cmd.StdinPipe()
@@ -1660,7 +1721,7 @@ func TestAZombieNotReapedYetIsNothingLeftRunning(t *testing.T) {
 		t.Fatalf("startAdopting: %v", err)
 	}
 	defer stop()
-	pid := daemonize(t, "exit 0")
+	pid := daemonExitingAdopted(t)
 	await(t, "the daemon exited, adopted", func() bool { return zombieOf(pid, os.Getpid()) })
 	if _, left := stopAdopted(zap.NewNop(), nil, nil); left != "" {
 		t.Fatalf("left %q; want nothing: daemon %d exited, a zombie not reaped yet", left, pid)
@@ -1690,7 +1751,7 @@ func TestTheReaperReapsUnderTheLockAReadOfTheChildrenHolds(t *testing.T) {
 		t.Fatalf("startAdopting: %v", err)
 	}
 	defer stop()
-	pid := daemonize(t, "exit 0")
+	pid := daemonExitingAdopted(t)
 	await(t, "the daemon reaped", func() bool { _, ok := utils.ReadProcStat(pid); return !ok })
 	if held.Load() == 0 || free.Load() != 0 {
 		t.Fatalf("%d reaps under the lock, %d without it; want every one under it", held.Load(), free.Load())
@@ -1801,7 +1862,7 @@ func TestAReaperThatStopsLeavesEveryStopSayingItCannotTell(t *testing.T) {
 		t.Fatalf("startAdopting: %v", err)
 	}
 	defer stop()
-	daemonize(t, "exit 0") // adopted as it exits: the reaper's first reap
+	daemonExitingAdopted(t) // adopted, then exits: the reaper's first reap
 	await(t, "the reaper stopped", func() bool { return !adopting.Load() })
 	_, left := stopAdopted(zap.NewNop(), nil, nil)
 	if !strings.Contains(left, "keploy cannot tell whether its processes ended (it could not adopt them: keploy stopped reaping the daemons it adopts)") {
