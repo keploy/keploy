@@ -178,6 +178,11 @@ func TestOwnConnectionsKeepsNotingTheAgentProcess(t *testing.T) {
 		if bt, ok := base.(*bearerTransport); ok {
 			base = bt.base
 		}
+		// The stop is an http request: it goes on the pool's side of
+		// ownPool, not to a scheme the embedder registered.
+		if op, ok := base.(*ownPool); ok {
+			base = op.pool
+		}
 		if ht, ok := base.(*http.Transport); !ok || !ht.DisableKeepAlives {
 			t.Fatalf("token %q: the stop's transport %T keeps connections", tok, base)
 		}

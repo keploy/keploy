@@ -121,9 +121,13 @@ type TestMockMapping struct {
 type ScopeReq struct {
 	Name string `json:"name"`
 	// Pid is the calling test WORKER's PID (e.g. Node process.pid, os.Getpid()).
-	// It keys the per-worker scope so parallel workers don't stomp each other
-	// (Design A). Optional: 0/omitted falls back to the single global scope
-	// (correct for sequential single-worker runs and suite-level).
+	// It keys the per-worker scope so two workers never overwrite one filter;
+	// it does not keep parallel tests apart. At replay, unless the app starts
+	// are marked, it narrows only the connections the worker, or a process it
+	// started, opens while a test is open: a connection opened outside a test,
+	// and every connection of a process the worker did not start (a shared
+	// app server), keep the whole pool. Optional: 0/omitted falls back to the single global scope, which
+	// narrows every connection (a sequential run, a shared app, suite-level).
 	Pid int `json:"pid,omitempty"`
 	// At is the runner's own clock for this boundary; zero means the agent stamps its read time.
 	At    time.Time `json:"at,omitzero"`
@@ -243,15 +247,22 @@ type ScopeNeed struct {
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during
 // which the named test made its outgoing calls. Record correlates captured
 // mocks into these windows to build mappings.yaml — by source PID when the
-// worker reported one (exact, parallel-safe), else by request timestamp.
+// worker reported one, else by request timestamp. The PID match is exact only
+// for a call the worker makes itself while one test of it is open: it is not
+// parallel-safe (see PID).
 type ScopeWindow struct {
 	Name  string    `json:"name"`
 	Start time.Time `json:"start"`
 	End   time.Time `json:"end"`
 	// PID is the reporting worker's PID (ScopeReq.Pid), 0 if none. When set,
-	// record attributes a captured mock to this window if the mock's own source
-	// PID resolves (up the /proc tree) to this worker — exact even when windows
-	// from parallel workers overlap in time.
+	// record attributes a captured mock to this window if the mock's source PID
+	// (the kernel PID of the caller, not walked up the /proc tree) is this
+	// worker's. Any other call (one from a child of the worker or from a
+	// shared app server, or one with no source PID) falls back to the time
+	// scan, which charges it to the latest-begun window open at that time,
+	// whatever worker's; and two windows open at once in one worker (parallel
+	// tests of one go test binary) share its PID, so the later-begun one takes
+	// both tests' calls.
 	PID     uint32    `json:"pid,omitempty"`
 	Dir     string    `json:"dir,omitempty"`
 	Suite   bool      `json:"suite,omitempty"`
@@ -1068,6 +1079,11 @@ type StreamEndSummary struct {
 	// recorded as a test case. Connections, not calls: the agent relays them
 	// without reading the calls, so a keep-alive connection counts once.
 	UnnamedCallerConns uint64 `json:"connections_from_unnamed_callers,omitempty"`
+	// TLSRelayedConns: connections to the app that opened with a TLS
+	// handshake, which the agent relayed to the app's own TLS unread: their
+	// calls are encrypted, so none was recorded as a test case. Connections,
+	// not calls: a keep-alive connection counts once.
+	TLSRelayedConns uint64 `json:"connections_relayed_tls,omitempty"`
 	// Unsettled: test cases saved before the agent had parsed all the
 	// traffic they overlap.
 	Unsettled int `json:"tcs_released_unsettled"`

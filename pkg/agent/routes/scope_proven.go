@@ -235,6 +235,6 @@ func provenAppStart(w http.ResponseWriter, r *http.Request) {
 		Status:  http.StatusUnprocessableEntity,
 		Code:    models.ScopeErrUpgradeIntegration,
 		Message: "this test harness marks app starts, which keploy's scope protocol v1 does not use",
-		Remedy:  "upgrade the keploy integration of your test framework (go-sdk keploytest, keploy-pytest, @keploy/jest)",
+		Remedy:  models.ScopeUpgradeRemedy,
 	})
 }

@@ -65,9 +65,11 @@ type scopeKey struct {
 // the served pool to this test's mocks when the CLI supplied a mapping table.
 //
 // pid is the calling worker's PID (ScopeReq.Pid). When > 0 the scope is keyed to
-// that worker so PARALLEL workers each get their own served view without
-// stomping each other (Design A); pid == 0 falls back to the single global
-// scope (sequential single-worker runs, and the suite-level default).
+// that worker, so two workers never overwrite one served view; unless the app
+// starts are marked, the view narrows only the connections the worker, or a
+// process it started, opens while a test is open (proxy scopedFor), and it
+// does not keep parallel tests apart. pid == 0 falls back to the single global scope, which narrows every
+// connection (sequential runs, a shared app, and the suite-level default).
 func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.Time) error {
 	return a.beginScopeAt(ctx, name, pid, at, nil)
 }
@@ -140,8 +142,10 @@ func (a *Agent) beginScopeAt(ctx context.Context, name string, pid int, at time.
 			beginVariables()
 			return nil
 		case pid > 0:
-			// Parallel-safe: narrow ONLY this worker's served view, keyed by its
-			// PID, so concurrent workers never overwrite one shared filter.
+			// Narrow ONLY this worker's served view, keyed by its PID, so two
+			// workers never overwrite one shared filter. It is not isolation:
+			// a process the worker did not start (a shared app server) is
+			// still served the whole pool (proxy scopedFor).
 			a.logger.Debug("scope begin: worker-scoped pool", zap.String("test", name), zap.Int("worker", pid), zap.Int("mocks", len(names)))
 			a.SetWorkerScope(uint32(pid), names)
 			beginVariables()
