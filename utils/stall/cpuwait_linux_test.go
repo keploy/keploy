@@ -370,3 +370,40 @@ func TestMeter_AConsumerHeldOffSinceBeforeItsStallWasDueHoldsItsVerdict(t *testi
 		}
 	}
 }
+
+// The sampler sleeps in the kernel, a Tick at a time: a sleep ends once its
+// length has passed, and a release ends a long one at its next Tick. Each is
+// waited on for far more of the test's own short sleeps than a Tick takes,
+// so a sleep that does not end fails here, not on the test's timeout.
+func TestSleepForEndsAtItsLengthOrItsRelease(t *testing.T) {
+	const most = 10000 // the test's 1 ms sleeps: ten seconds and more
+	ends := func(t *testing.T, ended <-chan bool, want bool) {
+		t.Helper()
+		for i := 0; ; i++ {
+			select {
+			case got := <-ended:
+				if got != want {
+					t.Fatalf("sleepFor said stopped=%v, want %v", got, want)
+				}
+				return
+			default:
+			}
+			if i == most {
+				t.Fatalf("sleepFor still sleeping after %d of the test's 1 ms sleeps", most)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	t.Run("a sleep ends at its length", func(t *testing.T) {
+		ended := make(chan bool, 1)
+		go func() { ended <- sleepFor(5*time.Millisecond, make(chan struct{})) }()
+		ends(t, ended, false)
+	})
+	t.Run("a release ends a long sleep", func(t *testing.T) {
+		stop, ended := make(chan struct{}), make(chan bool, 1)
+		go func() { ended <- sleepFor(time.Hour, stop) }()
+		time.Sleep(2 * Tick) // most likely asleep by now; either way it must end
+		close(stop)
+		ends(t, ended, true)
+	})
+}

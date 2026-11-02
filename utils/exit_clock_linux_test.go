@@ -464,6 +464,11 @@ func TestTheExitClockCountsOnlyTheTimeTheProcessesCouldRun(t *testing.T) {
 		if got := r.look(w, 70*ms, nil); got != 70*ms {
 			t.Fatalf("added %v, want keploy's 70ms", got)
 		}
+		// Keploy's clock read over a longer span than the look's: no more
+		// than the look.
+		if got := r.look(w, 2*w, nil); got != w {
+			t.Fatalf("added %v with keploy's clock %v on, want no more than the look's %v", got, 2*w, w)
+		}
 	})
 	t.Run("a look that read nothing sets the next one's account against none", func(t *testing.T) {
 		// A thread a second old, asleep; one look reads nothing.

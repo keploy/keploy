@@ -205,9 +205,18 @@ func (s *sampler) acquire() func() {
 	}
 }
 
-// run samples every tick until stop. A timer re-armed after each sample, not
-// a ticker: a ticker's pending tick is delivered at once after a freeze, and
-// would look on time.
+// run samples every tick until stop, sleeping a tick after each sample, not
+// on a ticker: a ticker's pending tick is delivered at once after a freeze,
+// and would look on time. The thread sleeps in the kernel (sleepFor), not on
+// a Go timer: one fires on whichever thread runs the timers, and on a host
+// that holds the process off (a CPU quota spent, an overloaded host) that
+// thread's wait made the samples late by more than their own thread waited.
+// A late sample counts only the CPU the process used, and the threads' waits
+// read later are taken again from on-time samples: in a four-CPU quota beside
+// 26 busy loops, where a thread could run about a seventh of the time, the
+// clock counted 2.7 s of 184 s, 83% of the wall time in late samples. Woken
+// in its own sleep, the thread's wait for a CPU is its run delay (ownWait),
+// and its samples are on time.
 func (s *sampler) run(stop, done chan struct{}) {
 	defer close(done)
 	// One thread samples, so its wait for a CPU between two samples is read
@@ -217,16 +226,8 @@ func (s *sampler) run(stop, done chan struct{}) {
 	s.mu.Lock()
 	s.lastOwn, s.ownOK = s.src.ownWait()
 	s.mu.Unlock()
-	t := time.NewTimer(s.tick)
-	defer t.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-t.C:
-			s.sample()
-			t.Reset(s.tick)
-		}
+	for !sleepFor(s.tick, stop) {
+		s.sample()
 	}
 }
 
@@ -278,10 +279,11 @@ func (s *sampler) sample() {
 
 // readWaits adds to what on-time samples owe the time the process's threads
 // waited for a CPU since the last read. A wait is only owed out of what
-// on-time samples counted and no wait has yet taken, of the last heldEvery:
-// the rest of it was never counted, so what is owed stays within a read's
-// worth of time, and a stall that is real goes on counting when the host
-// quietens. Called with mu held.
+// on-time samples counted and no wait has yet taken: what the last read
+// carried over (at most heldEvery) and what came since. The rest of it was
+// never counted, so what is owed stays within about two reads' worth of
+// time, and a stall that is real goes on counting when the host quietens.
+// Called with mu held.
 func (s *sampler) readWaits() {
 	held, heldFor := s.src.heldOff()
 	took := min(held, s.onTime)

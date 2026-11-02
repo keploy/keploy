@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"os"
 	"strconv"
+	"syscall"
 	"time"
 )
 
@@ -99,6 +100,28 @@ func (w *threadWaits) account(seen map[string]threadStat, steal map[string]int64
 	}
 	w.last, w.steal, w.held = seen, steal, held
 	return most, heldFor
+}
+
+// sleepFor sleeps the calling thread in the kernel for d, a Tick at a time,
+// and says whether stop closed first (looked at between them). The thread
+// is woken where its sleep ends, so on a host that holds the process off
+// its wait for a CPU from then on is its own run delay (threadRunDelay).
+func sleepFor(d time.Duration, stop <-chan struct{}) (stopped bool) {
+	end := time.Now().Add(d)
+	for {
+		select {
+		case <-stop:
+			return true
+		default:
+		}
+		left := time.Until(end)
+		if left <= 0 {
+			return false
+		}
+		// Cut short by a signal, it sleeps what is left.
+		ts := syscall.NsecToTimespec(int64(min(left, Tick)))
+		_ = syscall.Nanosleep(&ts, nil)
+	}
 }
 
 // threadRunDelay is the calling thread's run delay so far (schedstat); false
