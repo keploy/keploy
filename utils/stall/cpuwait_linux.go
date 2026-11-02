@@ -63,10 +63,20 @@ func (w *threadWaits) longestIn(tasksDir, statFile string) (time.Duration, uint6
 		return 0, 0
 	}
 	seen := make(map[string]threadStat, len(tasks))
+	kept := false
 	for _, task := range tasks {
 		if st, ok := readThread(tasksDir, task.Name()); ok {
 			seen[task.Name()] = st
+			kept = kept || st.runs > 0
 		} // else the thread has exited
+	}
+	if !kept {
+		// No thread has run, the one reading included: the kernel keeps
+		// no account and shows each as "0 0 0" (before 5.14, built without
+		// schedstats and booted with nodelayacct). No thread would ever
+		// move, so every runnable one would be held off at every read,
+		// and a verdict waiting for it would never come. Nothing is read.
+		seen = nil
 	}
 	var steal map[string]int64
 	if b, err := os.ReadFile(statFile); err == nil {

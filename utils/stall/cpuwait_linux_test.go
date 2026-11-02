@@ -190,6 +190,34 @@ func TestThreadWaits_ReadOnlyTheAccountsTheKernelShows(t *testing.T) {
 			t.Fatalf("got %v, held for %d reads; want the 5 ticks of steal of its CPU, held for one", most, held)
 		}
 	})
+	t.Run("a kernel that keeps no account", func(t *testing.T) {
+		// Every thread shows 0 0 0, the one reading included, though it
+		// runs: none moves, and none is found held off, however long it
+		// is runnable, so no verdict waits for it for ever.
+		sleeping := "S" + strings.Repeat(" 1", 35) + " 0 0 0\n"
+		var w threadWaits
+		dir := t.TempDir()
+		files := map[string]string{
+			"task/1/schedstat": "0 0 0\n", "task/1/stat": "1 (a) " + runnable,
+			"task/2/schedstat": "0 0 0\n", "task/2/stat": "2 (a) " + runnable,
+		}
+		for i := range 3 {
+			files["stat"] = steal(10 + 5*i)
+			if most, held := read(t, &w, dir, files); most != 0 || held != 0 {
+				t.Fatalf("read %d: %v, held for %d reads; want nothing: the kernel keeps no account", i+1, most, held)
+			}
+		}
+		// The control: one thread has run, so the kernel keeps accounts,
+		// and the other, runnable and not run yet, is held off from the
+		// read after the one that first saw it.
+		files["task/1/schedstat"], files["task/1/stat"] = "500 0 1\n", "1 (a) "+sleeping
+		if _, held := read(t, &w, dir, files); held != 0 {
+			t.Fatalf("first read with accounts: held for %d reads; want none: both threads new", held)
+		}
+		if _, held := read(t, &w, dir, files); held != 1 {
+			t.Fatalf("second read with accounts: held for %d reads; want the thread not run yet held, for one", held)
+		}
+	})
 	t.Run("no threads listed", func(t *testing.T) {
 		var w threadWaits
 		dir := t.TempDir()
