@@ -287,14 +287,15 @@ func placedFor(p evPlace, r string) evPlace {
 // laid out as textFields lays a text out; t itself where it is no
 // recording's (a leaf is one side already). What a recording's request
 // holds is what the application sent there, never what the recording gave
-// it. ok is false where keploy could not read the recording.
-func textHalf(t *readerText, request bool) (*readerText, bool) {
+// it. Where keploy could not read the recording, t itself, which its read
+// marked unread: every question of it is unread, and the call refused.
+func textHalf(t *readerText, request bool) *readerText {
 	if t.raw == nil {
-		return t, true
+		return t
 	}
 	s, fields, ok := t.read()
 	if !ok {
-		return nil, false
+		return t
 	}
 	var b strings.Builder
 	for _, f := range fields {
@@ -303,22 +304,17 @@ func textHalf(t *readerText, request bool) (*readerText, bool) {
 			b.WriteByte('\n')
 		}
 	}
-	return t.x.text(b.String()), true
+	return t.x.text(b.String())
 }
 
 // halves is p, a recording's place, as its two halves, each read in that
 // half of each run's text (textHalf): its request, what the application
 // sent there, a send placed by its request's time (p.req), and its answer,
-// what the recording gave it, placed by its answer's (rawState). ok is
-// false where keploy could not read a text.
-func halves(p evPlace) (req, ans evPlace, ok bool) {
-	ok = true
+// what the recording gave it, placed by its answer's (rawState).
+func halves(p evPlace) (req, ans evPlace) {
 	half := func(request bool) evPlace {
 		h := p
-		rec, okR := textHalf(p.t.rec, request)
-		live, okL := textHalf(p.t.live, request)
-		ok = ok && okR && okL
-		h.t = &placeText{rec: rec, live: live, views: p.t.views, of: p.t}
+		h.t = &placeText{rec: textHalf(p.t.rec, request), live: textHalf(p.t.live, request), views: p.t.views, of: p.t}
 		return h
 	}
 	req, ans = half(true), half(false)
@@ -326,7 +322,7 @@ func halves(p evPlace) (req, ans evPlace, ok bool) {
 	if p.req != nil {
 		req.state, req.why, req.recAfter = p.req.state, p.req.why, p.req.after
 	}
-	return req, ans, ok
+	return req, ans
 }
 
 // notFromMock is why a recording's payload was not read, where its read

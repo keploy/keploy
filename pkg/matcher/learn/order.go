@@ -919,9 +919,6 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// keploy cannot tell, that hold F's moment and not R's.
 	var hs []instantHold
 	var untold []evPlace
-	unread := func() Decision {
-		return dc.refuse(path, at, n, r, l, RefusalUnread, dc.unreadWhy(), nil, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
-	}
 	held := func(p evPlace) bool {
 		hr, _, _ := dc.holds(p, p.t.rec, r, c.rm, c.byText)
 		hl, _, _ := dc.holds(p, p.t.live, l, c.lm, c.byText)
@@ -935,17 +932,14 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		// the application, placed by when it was answered (halves).
 		ps := []evPlace{q}
 		if q.raw > 0 && held(q) {
-			req, ans, ok := halves(q)
-			if !ok {
-				return unread()
-			}
+			req, ans := halves(q)
 			ps = []evPlace{req, ans}
 		}
 		for _, p := range ps {
 			hr, fr, okR := dc.holds(p, p.t.rec, r, c.rm, c.byText)
 			hl, fl, okL := dc.holds(p, p.t.live, l, c.lm, c.byText)
 			if !okR || !okL {
-				return unread()
+				return dc.refuse(path, at, n, r, l, RefusalUnread, dc.unreadWhy(), nil, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 			}
 			if hr || hl {
 				hs = append(hs, instantHold{p: p, hr: hr, hl: hl, fr: fr, fl: fl, coarseR: hr && c.rm != nil && dc.coarserOnly(p.t.rec, r, *c.rm),
