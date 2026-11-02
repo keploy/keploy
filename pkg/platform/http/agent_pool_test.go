@@ -24,13 +24,19 @@ import (
 // ("failed to get scope windows ...: context canceled"). The trace holds the
 // other client's transport at that instant, the AgentClient's read takes a
 // connection then, and the other client's request is cancelled, on every run.
+// It runs on a client with no token and on one with the session's token
+// (agentHTTPClient), and on New's, which is the latter: New takes the token
+// token.Session mints when the process was handed none.
 func TestAnotherClientsCancelLeavesTheAgentClientsReadAlone(t *testing.T) {
-	for _, token := range []string{"", "session-token"} {
-		name := "New's client"
-		if token != "" {
-			name = "a client with the session's token"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		client func() http.Client // nil: New's own
+	}{
+		{"a client with no token", func() http.Client { return agentHTTPClient("") }},
+		{"a client with the session's token", func() http.Client { return agentHTTPClient("session-token") }},
+		{"New's client", nil},
+	} {
+		t.Run(row.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/scope/windows" {
 					_, _ = w.Write([]byte("[]"))
@@ -41,8 +47,8 @@ func TestAnotherClientsCancelLeavesTheAgentClientsReadAlone(t *testing.T) {
 			defer srv.Close()
 			cfg := &config.Config{Agent: config.Agent{AgentURI: srv.URL}}
 			a := New(zap.NewNop(), nil, cfg)
-			if token != "" {
-				a.client = agentHTTPClient(token)
+			if row.client != nil {
+				a.client = row.client()
 			}
 			// The other client: on http.DefaultTransport, as enterprise's
 			// agentBearerTransport with its nil base is.

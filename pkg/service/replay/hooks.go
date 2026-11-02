@@ -119,10 +119,14 @@ func withRunLife(set, run context.Context) context.Context {
 // connection back in the pool (net/http, golang/go#82547); a cancel then
 // closes the connection under the next request, which took it, and keploy's
 // next read of the agent fails with the hook's cancel, on a context nothing
-// cancelled ("failed to get scope windows ...: context canceled"). The run's
-// context is cancelled only at the run's end (the user's stop), and a hook
-// also ends when the agent this client started does (callHook). The test's
-// own request stays on ctx: the app's exit ends it.
+// cancelled ("failed to get scope windows ...: context canceled"). A set's
+// app exiting does not cancel the run's context. What does: the user's stop,
+// the run's teardown, and a failure on the run's errgroup (Start). That is
+// the agent's unexpected exit, which ends a hook anyway (callHook), or, when
+// the app is kept alive across sets (--keep-app-alive, or docker compose with
+// mocks), the app's failure. That last one cuts hooks at any instant again,
+// but the run then fails on the app's error, so no verdict rests on them.
+// The test's own request stays on ctx: the app's exit ends it.
 func agentHookContext(ctx context.Context) context.Context {
 	if run, ok := ctx.Value(runLifeKey{}).(context.Context); ok {
 		return run
