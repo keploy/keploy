@@ -2372,6 +2372,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if r.exactServing() {
 			r.exact = newExactPlan(expectedTestMockMappings, workerScope, filtered, unfiltered)
 			r.exact.noteAhead(expectedTestMockMappings, testCases)
+			r.exact.order, r.exact.mainPass = passOrder(testCases)
 			if r.exact.share, err = newSharePlan(ctx, conc, workerScope, filtered, unfiltered); err != nil {
 				return nil, nil, err
 			}
@@ -3208,7 +3209,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			continue
 		}
 
-		if testCase != nil && testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase) {
+		if deferredStreaming(testCase) {
 			streamingTests = append(streamingTests, newStreamingTest(testCase, expectedTestMockMappings))
 			r.logger.Debug("deferring streaming test case",
 				zap.String("testcase", testCase.Name),
@@ -4538,6 +4539,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// simply absent from the report.
 		if cycleIncomplete(currentSuccess, currentFailures, currentObsolete, currentSkipped, len(testsToRun)) {
 			stoppedEarly = true
+		} else if loopErr == nil && !exitLoop {
+			// The cycle took up every test case it meant to: the run has
+			// passed the set's test cases the main loop holds, those it
+			// skipped after the last one it ran among them, or every test
+			// case when no streaming pass follows. A retry cycle's end
+			// tells the agent nothing more.
+			r.passExactRun(runTestSetCtx, r.exact, len(streamingTests) > 0)
 		}
 		failure += currentFailures
 		success = currentSuccess
@@ -5437,6 +5445,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				utils.LogError(r.logger, nil, "streaming test result is nil")
 				break
 			}
+		}
+		// The streaming pass took up every test case it meant to: the run
+		// has passed every test case of the set, those it skipped after the
+		// last one it ran among them.
+		if loopErr == nil && !exitLoop {
+			r.passExactRun(runTestSetCtx, r.exact, false)
 		}
 	}
 
@@ -7564,7 +7578,7 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	// BaseTime) stages the set once, and the agent then serves its pool
 	// (exact.go).
 	if r.exact != nil && afterTime.Equal(models.BaseTime) && len(expectedMockMapping) == 0 {
-		params.Exact = &models.ExactServing{Stage: true, Pool: append([]string(nil), r.exact.pool...), Worker: r.exact.staged()}
+		params.Exact = &models.ExactServing{Stage: true, Pool: append([]string(nil), r.exact.pool...), Worker: r.exact.staged(), Order: r.exact.stagedOrder()}
 		if r.exact.background {
 			params.Exact.Background = models.RecordedWithS12Routing
 		}
@@ -7578,6 +7592,11 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	}
 	if ex := params.Exact; ex != nil && ex.Stage && ex.Background != "" {
 		r.confirmBackground(ex.Background)
+	}
+	// The agent holds the run's order from here: the ends of the run's
+	// passes tell it what the run passed (passExactRun).
+	if ex := params.Exact; ex != nil && ex.Stage {
+		r.exact.ordered = len(ex.Order) > 0
 	}
 
 	r.logger.Debug("Successfully sent mock filter parameters to agent",

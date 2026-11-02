@@ -4,6 +4,7 @@ import (
 	"encoding/gob"
 	"maps"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -291,10 +292,9 @@ type TestModeInfo struct {
 	// captured mocks before they are persisted. (Replay's own startup-mock
 	// preservation is timestamp-based — see replay.startupMockCutoff — not
 	// keyed off this flag.) Like the sibling runtime-only fields, the
-	// json/bson tags keep it out of the text formats; gob (which ignores
-	// struct tags) does encode it, but a value carried on a reloaded mock is
-	// inert — the reapers run only on the live record buffer, never on
-	// disk-loaded mocks.
+	// json/bson tags keep it out of the text formats, and the gob store
+	// (encoding/gob ignores struct tags) clears it on write and on read
+	// (mockdb's clearRuntimeOnly), so a disk-loaded mock never carries it.
 	IsStartup bool `json:"-" bson:"-"`
 
 	// ServedIn is, on a copy exact serving serves an open test
@@ -1149,6 +1149,17 @@ func (m *Mock) ShallowCopy() *Mock {
 	return &c
 }
 
+// DeepCopy returns a new, unpooled Mock with every field of m, sharing no
+// map, slice or pointer with it that a caller can edit: a copy's headers,
+// form values, stream chunks, gRPC headers and messages, DNS records,
+// generic packets, noise, variables and learning are its own. The one
+// exception is the decoded wire messages of the database protocols (each
+// Mongo, MySQL and Postgres request's and response's header, message and
+// meta, and a Postgres v3 spec's contents below its parts): the copy has its
+// own lists of them but shares each message. A parser writes those once, as
+// it decodes them, and nothing edits one after; they are a query's rows, and
+// replay copies every mock of a test's pool, so copying them would cost each
+// test their whole size.
 func (m *Mock) DeepCopy() *Mock {
 	if m == nil {
 		return nil
@@ -1166,7 +1177,11 @@ func (m *Mock) DeepCopy() *Mock {
 		Spec:         m.Spec,
 		TestModeInfo: m.TestModeInfo,
 		ConnectionID: m.ConnectionID,
+		SourcePID:    m.SourcePID,
+		Start:        m.Start,
+		StartRef:     m.StartRef,
 	}
+	c.Spec.learned, c.Spec.learnedBinds = m.Spec.learned.Clone(), cloneBinds(m.Spec.learnedBinds)
 
 	// Carry the loader so tree copies can still hydrate their elided response.
 	c.responseHydrator = m.responseHydrator
@@ -1222,11 +1237,8 @@ func (m *Mock) DeepCopy() *Mock {
 
 	// 3. Deep copy all slices by creating new slices and copying the elements.
 	// This gives each copy its own separate backing array.
-	c.Spec.GenericRequests = make([]Payload, len(m.Spec.GenericRequests))
-	copy(c.Spec.GenericRequests, m.Spec.GenericRequests)
-
-	c.Spec.GenericResponses = make([]Payload, len(m.Spec.GenericResponses))
-	copy(c.Spec.GenericResponses, m.Spec.GenericResponses)
+	c.Spec.GenericRequests = clonePayloads(m.Spec.GenericRequests)
+	c.Spec.GenericResponses = clonePayloads(m.Spec.GenericResponses)
 
 	c.Spec.MongoRequests = make([]MongoRequest, len(m.Spec.MongoRequests))
 	copy(c.Spec.MongoRequests, m.Spec.MongoRequests)
@@ -1247,26 +1259,14 @@ func (m *Mock) DeepCopy() *Mock {
 	copy(c.Spec.PostgresResponsesV2, m.Spec.PostgresResponsesV2)
 
 	// 4. Deep copy all pointers by creating a new object and copying the value.
-	if m.Spec.HTTPReq != nil {
-		httpReqCopy := *m.Spec.HTTPReq
-		c.Spec.HTTPReq = &httpReqCopy
-	}
-	if m.Spec.HTTPResp != nil {
-		httpRespCopy := *m.Spec.HTTPResp
-		c.Spec.HTTPResp = &httpRespCopy
-	}
+	c.Spec.HTTPReq = m.Spec.HTTPReq.clone()
+	c.Spec.HTTPResp = m.Spec.HTTPResp.clone()
 	if m.Spec.Async != nil {
 		asyncCopy := *m.Spec.Async
 		c.Spec.Async = &asyncCopy
 	}
-	if m.Spec.GRPCReq != nil {
-		grpcReqCopy := *m.Spec.GRPCReq
-		c.Spec.GRPCReq = &grpcReqCopy
-	}
-	if m.Spec.GRPCResp != nil {
-		grpcRespCopy := *m.Spec.GRPCResp
-		c.Spec.GRPCResp = &grpcRespCopy
-	}
+	c.Spec.GRPCReq = m.Spec.GRPCReq.clone()
+	c.Spec.GRPCResp = m.Spec.GRPCResp.clone()
 	if m.Spec.ConnFailure != nil {
 		connFailureCopy := *m.Spec.ConnFailure
 		c.Spec.ConnFailure = &connFailureCopy
@@ -1281,6 +1281,8 @@ func (m *Mock) DeepCopy() *Mock {
 			dnsRespCopy.Answers = make([]string, len(m.Spec.DNSResp.Answers))
 			copy(dnsRespCopy.Answers, m.Spec.DNSResp.Answers)
 		}
+		dnsRespCopy.Ns = slices.Clone(m.Spec.DNSResp.Ns)
+		dnsRespCopy.Extra = slices.Clone(m.Spec.DNSResp.Extra)
 		c.Spec.DNSResp = &dnsRespCopy
 	}
 

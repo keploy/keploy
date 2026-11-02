@@ -49,6 +49,15 @@ type ProxyAddressReporter interface {
 	ProxyIPv4() string
 }
 
+// ProxyPortsSetter is the optional extension implemented by hooks that can be
+// told, once loaded, that the proxy listens on another port than the one they
+// loaded with, or its DNS server does: the proxy moved off a port another
+// socket held when it bound it (proxy.SetPortMover). Hooks without it keep a
+// taken port a failed start.
+type ProxyPortsSetter interface {
+	SetProxyPorts(proxyPort, dnsPort uint32) error
+}
+
 // PIDMapReporter is the optional extension implemented by hooks that count
 // the inserts into their per-process maps the kernel refused, each of them a
 // process they could not track (models.PIDMapRefusals). The agent
@@ -159,9 +168,10 @@ type ProxyConnsReporter interface {
 
 // ListenerCountTaker is the optional extension implemented by proxies that can
 // have their listener counted by the hooks. The agent hands it the hooks
-// (ListenerCounter), under the proven switch only, before StartProxy; the
-// proxy then listens plain TCP, never MPTCP, marks its socket before
-// listen(), and reads each accepted connection's sequence number.
+// (ListenerCounter) whenever they can count, switch or not, before
+// StartProxy; the proxy then listens plain TCP, never MPTCP, marks its socket
+// before listen(), and reads each accepted connection's sequence number and
+// its pairing with the application's connection, which routes it.
 type ListenerCountTaker interface {
 	SetListenerCounter(c ListenerCounter)
 }
@@ -416,6 +426,11 @@ type Proxy interface {
 	// /proc tree, once, when it opens; what it sees then follows the nearest
 	// registered worker on that chain, read by read.
 	SetWorkerScope(pid uint32, names []string)
+	// RefuseWorker refuses, until ClearWorkerScope or the worker's next
+	// scope, every read of a connection the worker's process tree opens or
+	// opened while registered, naming why keploy refused its test at its
+	// begin.
+	RefuseWorker(pid uint32, why string)
 	ClearWorkerScope(pid uint32)
 	ClearAllWorkerScopes()
 	// SetMappedUniverse records the union of all tests' mapped mock names so a

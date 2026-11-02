@@ -226,12 +226,23 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 	pidMode := fmt.Sprintf("--pid=container:%s", a.keployContainer)
 	networkMode := fmt.Sprintf("--network=container:%s", a.keployContainer)
 
-	keployTLSVolumeName := "keploy-tls-certs"
-	keployTLSMountPath := "/tmp/keploy-tls"
+	// The run's own CA volume, the one its agent writes to (TLSVolumeFor).
+	keployTLSVolumeName := docker.TLSVolumeFor(a.keployContainer)
+	keployTLSMountPath := docker.KeployTLSMountPath
 	certPath := fmt.Sprintf("%s/ca.crt", keployTLSMountPath)
 	trustStorePath := fmt.Sprintf("%s/truststore.jks", keployTLSMountPath)
 
 	tlsFlags := fmt.Sprintf("-v %s:%s:ro ", keployTLSVolumeName, keployTLSMountPath)
+	// An embedder's volumes of the run's own (docker.RunVolume): a command
+	// that mounts one by the name every run shared is given the run's.
+	cmd, runVolumeFlags, renamed := docker.RunVolumesForApp(a.cmd, a.keployContainer)
+	for _, base := range renamed {
+		a.logger.Warn("the command mounts the volume "+base+", the name keploy gave every run's volume until now; "+
+			"this run is given its own, so two runs on one host no longer share it. Drop the mount from the command: keploy mounts the run's own",
+			zap.String("volume", docker.RunVolumeFor(base, a.keployContainer)))
+	}
+	a.cmd = cmd
+	tlsFlags += runVolumeFlags
 	tlsFlags += fmt.Sprintf("-e NODE_EXTRA_CA_CERTS=%s ", certPath)
 	tlsFlags += fmt.Sprintf("-e REQUESTS_CA_BUNDLE=%s ", certPath)
 	tlsFlags += fmt.Sprintf("-e SSL_CERT_FILE=%s ", certPath)

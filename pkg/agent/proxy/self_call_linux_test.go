@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"testing"
-	"time"
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
@@ -89,28 +88,40 @@ func TestServeTreeListenerPassesSelfCallToRealHandler(t *testing.T) {
 	cli, srv := net.Pipe()
 	defer cli.Close()
 
-	servedCh := make(chan bool, 1)
+	// Two events, in the order a pass-through has them: the real handler's
+	// response reaches the caller, then serveTreeListener returns once the
+	// caller hangs up. No deadline of its own: serveTreeListener returning
+	// first (the mock path, or a failed dial) is the failure, at once.
+	type event struct {
+		read   bool // the caller's read ended (else serveTreeListener returned)
+		served bool
+		err    error
+	}
+	events := make(chan event, 2)
 	go func() {
-		served, _, _ := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
-		servedCh <- served
+		served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+		events <- event{served: served, err: err}
 	}()
 
 	// The real handler's response must reach the caller, relayed over srcConn —
 	// proving the live handler answered, not a mock.
 	buf := make([]byte, len(live))
-	_ = cli.SetReadDeadline(time.Now().Add(3 * time.Second))
-	if _, err := io.ReadFull(cli, buf); err != nil || string(buf) != live {
-		t.Fatalf("the real handler's response must reach the caller: got %q (%v), want %q", string(buf), err, live)
+	go func() {
+		_, err := io.ReadFull(cli, buf)
+		events <- event{read: true, err: err}
+	}()
+	first := awaitEvent(t, events, "the real handler's response reaching the caller, or serveTreeListener returning")
+	if !first.read {
+		_ = cli.Close()
+		t.Fatalf("serveTreeListener returned (served=%v, err=%v) before the real handler's response reached the caller", first.served, first.err)
+	}
+	if first.err != nil || string(buf) != live {
+		t.Fatalf("the real handler's response must reach the caller: got %q (%v), want %q", string(buf), first.err, live)
 	}
 	_ = cli.Close() // let the relay's other direction finish so serveTreeListener returns
 
-	select {
-	case served := <-servedCh:
-		if !served {
-			t.Fatal("a self-call must be served by passing it through to the real handler")
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("serveTreeListener did not return after the relay finished")
+	if r := awaitEvent(t, events, "serveTreeListener returning after the relay finished"); !r.served || r.err != nil {
+		t.Fatalf("a self-call must be served by passing it through to the real handler: served=%v err=%v", r.served, r.err)
 	}
 }
 
@@ -223,13 +234,8 @@ func TestServeTreeListenerSaysTheFirstAndCountsTheRest(t *testing.T) {
 			}
 			done <- err
 		}()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatalf("a self-call must be passed through: %v", err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("serveTreeListener did not return")
+		if err := awaitEvent(t, done, "serveTreeListener returning"); err != nil {
+			t.Fatalf("a self-call must be passed through: %v", err)
 		}
 	}
 	selfCall()

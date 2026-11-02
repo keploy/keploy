@@ -1245,7 +1245,11 @@ func TestCompressDecompress_AllEncodings_555(t *testing.T) {
 
 // TestReadAllCapped_556 exercises the capped reader directly: boundary
 // sizes, tiny limits below the initial buffer, and that buffer capacity
-// never overshoots limit+1 (the reason it replaced io.ReadAll+LimitReader).
+// never overshoots limit+1 rounded up to whole 8 KiB heap pages: for
+// limit+1 over 32 KiB, what the allocator gives a buffer of limit+1 bytes;
+// under it, up to a page more than the size class it would give, so that
+// what a decode reserves for its buffer is what it holds
+// (io.ReadAll+LimitReader, which it replaced, could keep twice limit+1).
 func TestReadAllCapped_556(t *testing.T) {
 	t.Run("Boundaries", func(t *testing.T) {
 		for _, tc := range []struct {
@@ -1271,7 +1275,8 @@ func TestReadAllCapped_556(t *testing.T) {
 				}
 				require.NoError(t, err)
 				assert.Equal(t, tc.size, int64(len(data)))
-				assert.LessOrEqual(t, int64(cap(data)), tc.limit+1, "capacity must never overshoot limit+1")
+				pages := (tc.limit + 1 + 8<<10 - 1) / (8 << 10) * (8 << 10)
+				assert.LessOrEqual(t, int64(cap(data)), pages, "capacity must never overshoot limit+1 in whole pages")
 			})
 		}
 	})

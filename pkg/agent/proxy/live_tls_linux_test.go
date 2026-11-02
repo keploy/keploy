@@ -55,11 +55,7 @@ func TestALiveTLSCallReachesTheTreesTLSListener(t *testing.T) {
 				t.Fatalf("the client was not shown the listener's own certificate")
 			}
 			_ = lc.app.Close()
-			select {
-			case <-lc.served:
-			case <-lc.never:
-				t.Fatalf("the live call's handler never ended: %s", lc.state())
-			}
+			<-lc.served
 		})
 	}
 }

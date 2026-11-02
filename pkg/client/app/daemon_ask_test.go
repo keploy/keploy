@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -234,4 +235,48 @@ func TestTheWaitForADockerRunAppsExitReadsTheDaemonsAnswer(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A read of the daemon that ends with no answer ends only once the ask it
+// cancelled has returned: it ended at once, its ask still in flight, so the
+// read after it (the docker run stop's last look at the container, as its
+// grace ran out mid-read) ran beside the first, and so did what the stop did
+// next (its kill). Each round's ask takes some turns of the scheduler to
+// return once cancelled, as a call to the daemon takes to unwind, and counts
+// itself left running if the read had returned by then.
+func TestAReadThatEndsWithNoAnswerEndsWithItsAsk(t *testing.T) {
+	rounds := func(ctx context.Context, t *testing.T, n int, want string) {
+		t.Helper()
+		for round := 0; round < n; round++ {
+			var readDone, leftRunning atomic.Bool
+			var asks sync.WaitGroup
+			asks.Add(1)
+			_, err := askDaemon(ctx, zap.NewNop(), "a test read", func(actx context.Context) (string, error) {
+				defer asks.Done()
+				<-actx.Done()
+				for i := 0; i < 1000 && !readDone.Load(); i++ {
+					runtime.Gosched()
+				}
+				leftRunning.Store(readDone.Load())
+				return "", actx.Err()
+			})
+			readDone.Store(true)
+			asks.Wait()
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("round %d: askDaemon's error %v; want no answer, %s", round, err, want)
+			}
+			if leftRunning.Load() {
+				t.Fatalf("round %d: the read ended with its ask still running", round)
+			}
+		}
+	}
+	t.Run("its caller stopped waiting", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		rounds(ctx, t, 200, "caller stopped waiting")
+	})
+	t.Run("no answer for the stall bound", func(t *testing.T) {
+		stallBudget(t, 20*time.Millisecond)
+		rounds(context.Background(), t, 10, "no answer for")
+	})
 }

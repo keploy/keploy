@@ -209,10 +209,7 @@ func TestATLSConnectionToAnAppThatHasNotListenedYetIsRelayedOnceItListens(t *tes
 	go func() { called <- tlsCall(client, clientTLSConfig(trust), trust.Certificate(), "/late") }()
 	// The ClientHello came, and its dial waits for the app.
 	awaitWaiters(t, pm, addr, 1)
-	app := httptest.NewUnstartedServer(tlsPong)
-	app.Listener = testnet.ListenShared(t, "tcp4", addr)
-	app.StartTLS()
-	t.Cleanup(app.Close)
+	app := startTLSAppOn(t, testnet.ListenShared(t, "tcp4", addr))
 	select {
 	case err := <-called:
 		if err != nil {
@@ -239,6 +236,17 @@ func TestATLSConnectionToAnAppThatHasNotListenedYetIsRelayedOnceItListens(t *tes
 func startTLSApp(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewUnstartedServer(tlsPong)
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// startTLSAppOn is startTLSApp on ln: an app that listens late, at a port
+// the test holds.
+func startTLSAppOn(t *testing.T, ln net.Listener) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(tlsPong)
+	srv.Listener = ln
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	return srv

@@ -17,7 +17,7 @@ import (
 
 // A test whose worker exited without its end (os.Exit, a -timeout kill) is
 // recorded failed when another worker's test begins, which takes the clock;
-// its worker's view of the pool is given back.
+// the pool it was served is given back.
 func TestATestWhoseWorkerExitedLosesTheClock(t *testing.T) {
 	if _, err := os.Stat("/proc/self/stat"); err != nil {
 		t.Skip("needs /proc")
@@ -34,6 +34,7 @@ func TestATestWhoseWorkerExitedLosesTheClock(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, worker.Start())
 	gone := worker.Process.Pid
+	loadMocks(a, "m-a")
 	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"pkg::TestA": {"m-a"}}))
 	require.NoError(t, a.BeginScopeAt(ctx, "pkg::TestA", gone, time.Now()))
 	require.ErrorIs(t, a.BeginScopeAt(ctx, "pkg::TestB", os.Getpid(), time.Now()), ErrOneTestAtATime, "the holder's worker lives")
@@ -43,7 +44,7 @@ func TestATestWhoseWorkerExitedLosesTheClock(t *testing.T) {
 	require.NoError(t, a.BeginScopeAt(ctx, "pkg::TestC", os.Getpid(), time.Now()))
 	require.Equal(t, []string{"begin pkg::TestA 0001-01-01T00:00:00Z", "begin pkg::TestC 0001-01-01T00:00:00Z"}, h.moves)
 	require.Equal(t, []string{models.ScopeOutcomeFailed}, outcomesOf(t, a, "pkg::TestA"))
-	require.Equal(t, []uint32{uint32(gone)}, pool.cleared)
+	require.Equal(t, []string{"test pkg::TestA", "pool", "test pkg::TestC"}, pool.served(), "the lost test's pool is given back before the next test's goes in")
 	require.NoError(t, a.EndScopeAt(ctx, "pkg::TestC", os.Getpid(), time.Now()))
 	require.Equal(t, "end pkg::TestC", h.moves[len(h.moves)-1])
 }
@@ -193,8 +194,9 @@ func TestALostWorkersSweepSparesANewProcessOnItsPid(t *testing.T) {
 	require.Equal(t, []string{""}, outcomesOf(t, a, "pkgB"))
 }
 
-// A lost worker's narrowed view is given back though only its subtest, not
-// the test that held the clock, had a mapping.
+// A lost worker's narrowed pool is given back for its subtest too, before
+// the next test's goes in, though only the subtest, not the test that held
+// the clock, had a mapping.
 func TestALostWorkersSubtestPoolIsGivenBack(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	useHooks(t, &clockHooks{})
@@ -203,14 +205,14 @@ func TestALostWorkersSubtestPoolIsGivenBack(t *testing.T) {
 	a.Proxy = pool
 	ctx := context.Background()
 	pid, exit, reap := exitedWorker(t)
+	loadMocks(a, "m-1")
 	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"pkg::TestA/case": {"m-1"}}))
 	require.NoError(t, a.BeginScopeAt(ctx, "pkg::TestA", pid, time.Now()))
 	require.NoError(t, a.BeginScopeAt(ctx, "pkg::TestA/case", pid, time.Now()))
 	exit()
 	reap()
 	require.NoError(t, a.BeginScopeAt(ctx, "pkg::TestC", os.Getpid(), time.Now()))
-	require.Equal(t, []uint32{uint32(pid)}, pool.narrowed)
-	require.Equal(t, []uint32{uint32(pid)}, pool.cleared)
+	require.Equal(t, []string{"test pkg::TestA", "test pkg::TestA/case", "pool", "pool", "test pkg::TestC"}, pool.served())
 }
 
 // procStartTime sees a live process of the agent's pid namespace, and

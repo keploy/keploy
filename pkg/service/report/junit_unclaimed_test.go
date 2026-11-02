@@ -53,3 +53,24 @@ func TestBuildJUnitSuites_ACallBeforeTheFirstTestIsNamedAsSuch(t *testing.T) {
 		}
 	}
 }
+
+// A GraphQL call after the last test names the operation it carries after
+// its call, so two operations posted to one URL read apart.
+// Mutation: the junit line drops the operation.
+func TestBuildJUnitSuites_AnUnclaimedCallNamesItsOperation(t *testing.T) {
+	passed := []models.TestResult{{TestCaseID: "tc-1", Name: "s", Status: models.TestStatusPassed, TimeTaken: "1ms"}}
+	calls := []models.UnmatchedCall{
+		{Protocol: "HTTP", ActualSummary: "POST /query", Operation: "query GetAppLabels", Destination: "api:8080"},
+		{Protocol: "HTTP", ActualSummary: "POST /query", Destination: "api:8080"},
+	}
+	s := buildJUnitSuites(map[string]*models.TestReport{"s": {Total: 1, Success: 1, Status: "FAILED", Tests: passed, UnclaimedCalls: calls}}).Suites[0]
+	last := s.Cases[len(s.Cases)-1]
+	if last.Failure == nil {
+		t.Fatalf("last case %+v, want a failure", last)
+	}
+	for _, want := range []string{"HTTP POST /query {query GetAppLabels} to api:8080", "HTTP POST /query to api:8080"} {
+		if !strings.Contains(last.Failure.Text, want) {
+			t.Fatalf("failure text %q does not name %q", last.Failure.Text, want)
+		}
+	}
+}

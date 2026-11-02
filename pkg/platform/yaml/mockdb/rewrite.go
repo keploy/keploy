@@ -569,24 +569,9 @@ func forEachGobMockCut(path string, fn func(*models.Mock) error) (cut bool, err 
 			}
 			return false, fmt.Errorf("decode gob mock: %w", err)
 		}
-		// Lifetime and LifetimeDerived are RUNTIME-ONLY (models.Mock tags them
-		// json:"-" bson:"-" and says persisting them would create a second
-		// source of truth). encoding/gob ignores struct tags, so a gob file
-		// carries whatever the recorder stamped — and DeriveLifetime then
-		// short-circuits on the reloaded flag instead of re-deriving.
-		//
-		// The effect is that the SAME recording replays into a different tier
-		// depending on the storage format: gob keeps the recorder's per-test
-		// tag, while yaml drops it and the lax kind-fallback promotes the mock
-		// to session. A call two tests depend on is then consumed by the first
-		// and missing for the second — a CPU-optimisation knob silently
-		// changing replay semantics.
-		//
 		// Clearing on READ (not just on write) also repairs the recordings
-		// already on disk.
-		var zeroLifetime models.Lifetime
-		m.TestModeInfo.Lifetime = zeroLifetime
-		m.TestModeInfo.LifetimeDerived = false
+		// already on disk (clearRuntimeOnly).
+		clearRuntimeOnly(&m)
 		if err := fn(&m); err != nil {
 			return false, err
 		}
