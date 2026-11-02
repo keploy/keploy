@@ -172,7 +172,7 @@ func (h *heldScope) MarkMockAsUsed(mock models.Mock) bool {
 // made now reads: that recording is not offered, and the call is answered
 // by another or misses, as a call read after the begin or end is.
 func (h *heldScope) settled(ok bool) bool {
-	if !ok && h.readIn != nil && h.readIn != h.MockManager.exactView() {
+	if !ok && h.readIn != nil && h.readIn != h.exactView() {
 		h.readIn = nil
 	}
 	return ok

@@ -1032,7 +1032,7 @@ func (h *heldScope) readView() *exactView {
 	if h.readIn != nil {
 		return h.readIn
 	}
-	return h.MockManager.exactView()
+	return h.exactView()
 }
 
 // IsTestWindowActive implements integrations.TestWindows' question for h's
@@ -1105,7 +1105,7 @@ func (h *heldScope) generation(g uint64) uint64 {
 // the view its call was read in (readIn), which a test's begin or end has
 // since replaced.
 func (h *heldScope) elsewhere() bool {
-	return h.readIn != nil && h.readIn != h.MockManager.exactView()
+	return h.readIn != nil && h.readIn != h.exactView()
 }
 
 // elsewhereStride parts the generations held stores report while they read

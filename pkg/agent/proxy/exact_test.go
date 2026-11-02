@@ -4272,7 +4272,8 @@ func TestAHeldCallIsNotOfferedARecordingTheViewInForceRefused(t *testing.T) {
 			if door.consume(h, mine) {
 				t.Fatal("T2's view settled the consume of T1's own exchange; want it refused: the row is about a refused consume")
 			}
-			got, _ := h.GetUnFilteredMocks()
+			//nolint:staticcheck // SA1019: the Generic parser reads through GetSessionMocks, and its spin is what this row is about.
+			got, _ := h.GetSessionMocks()
 			if has(got, "ex-mine") {
 				t.Fatalf("after its consume was refused the held call was offered %v again; want the view in force's read, without it: a parser that reads again on a refused consume spins on it", exactNames(got))
 			}
