@@ -1158,28 +1158,35 @@ func faultDropped(mock *models.Mock) error {
 	return mock.ValidateFault()
 }
 
-// yamlSpecFault is the fault under a document spec's `fault:` key, read from
-// that key alone: nil for a spec with none. A value that is no fault (a hand
-// edit) reads as one of no kind, which no keploy enacts.
+// yamlSpecFault is the fault under a document spec's `fault:` key, found
+// the way the YAML decoder finds models.HTTPSchema's Fault on an HTTP call:
+// the key itself, or one a merge key (`<<:`) brings in, of a spec given in
+// place or by an alias. nil for a spec with none, or one that is no
+// mapping. A value that is no fault (a hand edit, null included) reads as
+// one of no kind, which no keploy enacts.
 func yamlSpecFault(spec *yamlLib.Node) *models.Fault {
-	if spec.Kind != yamlLib.MappingNode {
+	var s struct {
+		Fault yamlLib.Node `yaml:"fault"`
+	}
+	// An error leaves s.Fault as the decoder left it: unset for a spec that
+	// is no mapping, which its kind's own decode refuses too, and the first
+	// of a key given twice.
+	_ = spec.Decode(&s)
+	if s.Fault.Kind == 0 {
 		return nil
 	}
-	for i := 0; i+1 < len(spec.Content); i += 2 {
-		if spec.Content[i].Value == "fault" {
-			f := &models.Fault{}
-			_ = spec.Content[i+1].Decode(f) // a value that is no fault stays one of no kind
-			return f
-		}
-	}
-	return nil
+	f := &models.Fault{}
+	_ = s.Fault.Decode(f) // a value that is no fault stays one of no kind
+	return f
 }
 
-// jsonSpecFault is yamlSpecFault for an NDJSON document's spec.
+// jsonSpecFault is yamlSpecFault for an NDJSON document's spec, found the
+// way encoding/json finds models.HTTPSchema's Fault: by a key that unescapes
+// to "fault" in any case ("Fault", "FAULT", "\u0066ault"), the last such key
+// of the spec's own object, never one inside a value. A text search for
+// `"fault"` misses the others, and a document of any kind but HTTP that
+// holds one would be served whole.
 func jsonSpecFault(spec json.RawMessage) *models.Fault {
-	if !bytes.Contains(spec, []byte(`"fault"`)) {
-		return nil // no key: the common case, without decoding the spec
-	}
 	var s struct {
 		Fault json.RawMessage `json:"fault"`
 	}
@@ -1191,7 +1198,7 @@ func jsonSpecFault(spec json.RawMessage) *models.Fault {
 		return nil
 	}
 	f := &models.Fault{}
-	_ = json.Unmarshal(s.Fault, f) // a value that is no fault stays one of no kind
+	_ = json.Unmarshal(s.Fault, f) // a value that is no fault (null included) stays one of no kind
 	return f
 }
 

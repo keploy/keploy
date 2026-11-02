@@ -124,9 +124,10 @@ func (fr *MockFileReader) Next() (MockFileDoc, error) {
 // skipReason is why the decoders (decodeMocks, decodeMocksJSON) took no mock
 // from a document of kind that parsed and decoded without error: they skip
 // only a document with no kind, a kind they have no decoder for, a
-// connection failure they cannot replay, and an HTTP call whose fault they
-// cannot enact (faultSupported), as they skip a document of any other kind
-// whose spec has a fault (fault), before anything else. Of an NDJSON
+// connection failure they cannot replay, a document of kind HttpFault with
+// no fault, and a document whose spec holds a fault (fault, found as the
+// decoders find it: docSpecFault) of any kind but HTTP, of kind Http, or
+// that they cannot enact (faultKindSupported). Of an NDJSON
 // document (json), a kind with a "-" in it, or one a registered mapper
 // decodes, is one decodeMocksJSON skips in every build: only the YAML
 // decoder reads it, and a "-" kind only with keploy enterprise's mapper.
@@ -138,7 +139,7 @@ func skipReason(kind models.Kind, json, fault bool) models.MockSkip {
 		return models.MockSkipNoKind
 	case kind == models.ConnectionFailure:
 		return models.MockSkipConnFailure
-	case kind == models.HTTP || kind == models.HTTPFault:
+	case kind == models.HTTPFault:
 		return models.MockSkipFault
 	case json && (strings.Contains(string(kind), "-") || hasMapperForKind(kind)):
 		return models.MockSkipYAMLOnlyKind

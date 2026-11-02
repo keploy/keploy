@@ -411,6 +411,111 @@ func TestAFaultOnACallOfAnotherKindIsSkippedAndNamed(t *testing.T) {
 	}
 }
 
+// A spec's fault is found the way its kind's decoder would find a field
+// named fault, never by the spec's text: encoding/json takes the key in any
+// case and with escapes, and yaml.v3 takes one a merge key (`<<:`) brings in
+// and a spec given by an alias. A document of any kind but HTTP that holds
+// one is skipped and named, where a search for the text "fault" served it
+// whole; a fault key inside a value of the spec is no fault, and its mock is
+// served. Of kind Http, such a document is skipped as a fault, and the
+// reader says so.
+func TestASpecsFaultIsFoundAsItsDecoderFindsIt(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		format yaml.Format
+		spec   string // what mock-0's spec starts with
+		held   bool   // whether it holds a fault
+	}{
+		{"json Fault", yaml.FormatJSON, `"Fault":{"kind":"eof"},`, true},
+		{"json FAULT", yaml.FormatJSON, `"FAULT":{"kind":"eof"},`, true},
+		{"json escaped", yaml.FormatJSON, `"\u0066ault":{"kind":"eof"},`, true},
+		{"json escaped capital", yaml.FormatJSON, `"\u0046AULT":{"kind":"eof"},`, true},
+		{"json nested", yaml.FormatJSON, `"x":{"Fault":{"kind":"eof"},"fault":{"kind":"eof"}},`, false},
+		{"yaml merge", yaml.FormatYAML, "    <<:\n        fault:\n            kind: eof\n", true},
+		{"yaml nested", yaml.FormatYAML, "    x:\n        fault:\n            kind: eof\n", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("KEPLOY_MOCK_FORMAT", string(c.format))
+			dir := t.TempDir()
+			ys := NewWithFormat(zap.NewNop(), dir, "mocks", c.format)
+			for i := 0; i < 2; i++ {
+				if err := ys.InsertMock(context.Background(), pruneMongoMock(i), pruneSet); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := ys.Close(); err != nil {
+				t.Fatal(err)
+			}
+			path, from := filepath.Join(dir, pruneSet, "mocks.yaml"), "name: mock-0\nspec:\n"
+			if c.format == yaml.FormatJSON {
+				path, from = filepath.Join(dir, pruneSet, "mocks.json"), `"name":"mock-0","spec":{`
+			}
+			b, err := os.ReadFile(path)
+			if err != nil || !bytes.Contains(b, []byte(from)) {
+				t.Fatalf("read %s (%v): no %q in\n%s", path, err, from, b)
+			}
+			if err := os.WriteFile(path, bytes.Replace(b, []byte(from), []byte(from+c.spec), 1), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			served, listed := readSetOracle(t, dir, c.format)
+			if served["mock-0"] == c.held || !served["mock-1"] {
+				t.Fatalf("the set's read served %v; want mock-0 served: %v", served, !c.held)
+			}
+			wantListed, wantWhy := 0, models.MockSkip("")
+			if c.held {
+				wantListed, wantWhy = 1, models.MockSkipFault
+			}
+			if len(listed) != wantListed {
+				t.Fatalf("the set's read lists as skipped %v", listed)
+			}
+			for _, d := range readDocs(t, dir, c.format) {
+				want := models.MockSkip("")
+				if d.Name == "mock-0" {
+					want = wantWhy
+				}
+				if d.Skip != want {
+					t.Errorf("the reader says %s is %q, want %q", d.Name, d.Skip, want)
+				}
+			}
+			if _, skipped := NewWithFormat(zap.NewNop(), dir, "mocks", c.format).SkippedMocks(context.Background(), pruneSet); skipped["mock-0"].Why != wantWhy || len(skipped) != wantListed {
+				t.Errorf("SkippedMocks: %v", skipped)
+			}
+		})
+	}
+
+	t.Run("yaml alias", func(t *testing.T) {
+		var doc yaml.NetworkTrafficDoc
+		if err := yamlLib.Unmarshal([]byte("version: api.keploy.io/v1beta1\nkind: Mongo\nname: m\nx: &s\n    fault:\n        kind: eof\nspec: *s\n"), &doc); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := DecodeMocks([]*yaml.NetworkTrafficDoc{&doc}, zap.NewNop()); err != nil || len(out) != 0 {
+			t.Fatalf("DecodeMocks of a Mongo document whose spec is an alias of one with a fault = %d mocks, %v; want it skipped", len(out), err)
+		}
+	})
+
+	for format, body := range map[yaml.Format]string{
+		yaml.FormatJSON: strings.Replace(httpDocJSON("mock-0", "Http", "a"), `"spec":{`, `"spec":{"Fault":{"kind":"eof"},`, 1) + "\n" + httpDocJSON("mock-1", "Http", "b") + "\n",
+		yaml.FormatYAML: httpDocYAML("mock-0", "Http", "a") + "    <<:\n        fault:\n            kind: eof\n---\n" + httpDocYAML("mock-1", "Http", "b"),
+	} {
+		t.Run("http "+string(format), func(t *testing.T) {
+			dir := t.TempDir()
+			writeSetFile(t, dir, format, body)
+			if served, listed := readSetOracle(t, dir, format); served["mock-0"] || !served["mock-1"] || listed["mock-0"] != models.HTTP || len(listed) != 1 {
+				t.Fatalf("the set's read served %v and lists as skipped %v; want mock-0 skipped", served, listed)
+			}
+			for _, d := range readDocs(t, dir, format) {
+				want := models.MockSkip("")
+				if d.Name == "mock-0" {
+					want = models.MockSkipFault
+				}
+				if d.Skip != want {
+					t.Errorf("the reader says %s is %q, want %q", d.Name, d.Skip, want)
+				}
+			}
+		})
+	}
+}
+
 // An HTTP document with a fault is judged with its call (faultKindSupported),
 // so the read names the cause a user acts on: a fault under kind Http is
 // written under the wrong kind, whatever the fault. A spec that is no
