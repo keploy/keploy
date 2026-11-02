@@ -5330,6 +5330,7 @@ var (
 	missLostBeforeSetFull   = fmt.Sprintf("a miss made before the test set's first test was dropped: the list of misses waiting for it was full (%d)", maxPendingMockErrors)
 	missLostDrainStopped    = "a miss could not be queued for its test: keploy's error drain had stopped"
 	missLostNoDrainChanFull = "a miss could not be queued for its test: keploy's error channel was full and no error drain was running"
+	missUnfiledNoDrain      = "no error drain was running to file each miss under the test worker that made it, so this worker's misses could not be told from the others'"
 )
 
 // cutMissesAtSetStart drops, once a test set's mocks are staged (its first
@@ -5895,6 +5896,12 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 	}
 	if lost := w.missLoss.Swap(nil); lost != nil && unreadCause == "" {
 		unreadCause = *lost
+	}
+	// With no drain, every miss waits unfiled in errChannel, and only the
+	// run's read sweeps it (below): a worker's own misses are not in its
+	// window, so its read cannot vouch for them.
+	if !drainActive && w != &p.missWindow && unreadCause == "" {
+		unreadCause = missUnfiledNoDrain
 	}
 
 	p.captureMu.Lock()
