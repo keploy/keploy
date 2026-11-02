@@ -2016,3 +2016,47 @@ func TestAPhaseLockIsNeverAWholeStepWide(t *testing.T) {
 		t.Errorf("the lock on UTC's grid: %+v %v; want one an hour wide", o, ok)
 	}
 }
+
+// A reconciler's claimedAt <= now - 60 s, an epoch's seconds, carried to an
+// idle recording whose window runs two minutes back to the recording before
+// it: whether keploy learns it or refuses it must not turn on where in its
+// second each run's call fell. A read that fell in the second before its
+// call (the call a fraction of a millisecond past a whole second) reads one
+// second longer, clock - 1m1s, a range of seconds no whole minute lies in,
+// and is learned at the cut in any window; any other phase reads clock -
+// 1m, a range a whole minute lies in, and a window two minutes wide refuses
+// it. The same application, two verdicts.
+func TestAWholeMinuteLookBackInAWideWindowGetsOneVerdictAtEveryPhase(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	p := "body.cmd.query.$and.1.$or.1.claimedAt.$lte.$numberLong"
+	f := v5Call(time.Date(2026, 10, 27, 1, 0, 0, 0, time.UTC), 5*ms, 2*ms)
+	base := time.Date(2026, 11, 2, 3, 53, 31, 0, time.UTC)
+	verdicts := map[bool][]time.Duration{}
+	for _, phase := range []time.Duration{343 * time.Microsecond, 900 * time.Microsecond, 1500 * time.Microsecond, 250 * ms, 500 * ms, 999 * ms} {
+		rec := v5Call(base.Add(phase), 2*time.Minute, ms)
+		rv, lv := rec.read.Truncate(sec).Add(-time.Minute), f.read.Truncate(sec).Add(-time.Minute)
+		o, why, ok := clockInWindow(p, v5Instant(rv, sec), v5Instant(lv, sec), v5Window(rec, f), nil)
+		t.Logf("call %v into its second: %v ok=%v why=%.80q", phase, o, ok, why)
+		verdicts[ok] = append(verdicts[ok], phase)
+		if !ok {
+			continue
+		}
+		// Checked at the cut: in a replay's window as wide, the
+		// application's value passes at every phase and a dropped
+		// look-back at none.
+		recText := strconv.FormatInt(rv.Unix(), 10)
+		for ph := time.Duration(0); ph < sec; ph += 125 * ms {
+			s := Span{From: base.Add(72*time.Hour + ph - 2*time.Minute), To: base.Add(72*time.Hour + ph)}
+			read := s.To.Add(-ms)
+			if got, why := v5Check(p, o, recText, read.Truncate(sec).Add(-time.Minute), s); !got {
+				t.Errorf("FALSE RED: learned at a call %v into its second, a replay %v into its second, the application's value: %s", phase, ph, why)
+			}
+			if got, _ := v5Check(p, o, recText, read.Truncate(sec), s); got {
+				t.Errorf("FALSE GREEN: learned at a call %v into its second, a replay %v into its second passes a dropped look-back", phase, ph)
+			}
+		}
+	}
+	if len(verdicts) > 1 || len(verdicts[false]) > 0 {
+		t.Errorf("the verdict turns on the phase of the recording's call, or refuses it: learned at %v, refused at %v; want it learned at every phase, checked at the cut", verdicts[true], verdicts[false])
+	}
+}

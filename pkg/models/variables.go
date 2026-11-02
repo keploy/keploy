@@ -939,8 +939,12 @@ func (o ClockOffset) CoarseCut() bool {
 		// Learned at a Step: a minute's or a second's cut whose offset reads
 		// in that unit or a finer one (clock + 30m at the minute; a poll's
 		// dirtyAt <= now - 2s, an epoch's seconds) is a cut no unit holds
-		// three of too. An offset learned before Step is read as before.
-		return o.Step > 0 && o.Unit() <= o.Res
+		// three of too. So is a look-back whose range spans at most two
+		// cuts (a whole minute read in a window wider than it: clock - 1m,
+		// or clock - 1m1s where the read fell in the second before its
+		// call), so that where in its second a call fell never turns the
+		// verdict. An offset learned before Step is read as before.
+		return o.Step > 0 && (o.Unit() <= o.Res || o.Max <= 0 && o.Max-o.Min <= 2*o.Res)
 	}
 	return false
 }
