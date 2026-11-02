@@ -234,6 +234,32 @@ func TestOutcomeCostACopyOfAPlaceNotBeforeInBothRunsIsRefused(t *testing.T) {
 	}
 }
 
+// The value made anew at follows_test.go:392 (main binds it to the CREATE
+// TABLE's VARCHAR(50)) is looser than main only at its first send: it is
+// bound there, and every later use is checked against it. A later call of
+// the test that sends the same value again is a Value of the first call, so
+// a replay whose later value is not what its first call sent goes red; and
+// where round F's later value is not what its first call sent, it is
+// refused, never made anew.
+func TestOutcomeCostAValueMadeAnewBesideALiteralIsCheckedAtItsLaterUse(t *testing.T) {
+	first := eRecAt
+	hist := func() []Raw { return append(eStartup(), eHistory(first.Add(-time.Millisecond), 6, true)) }
+	costFresh(t, "50 beside VARCHAR(50), asked a millisecond before the call and answered at its own instant, 7 in F (follows_test.go:392)",
+		oWord(t, Decide(costF("50", "7", nil, hist(), nil)), "50", "7"))
+	// The first call, as a later call of the test sees it: it sent 50, and 7
+	// in round F.
+	sent := []Earlier{{Mock: "mock-300", At: first, Own: true,
+		Payload: ePgAnswered("mock-300", 0, first.Add(time.Millisecond), "INSERT INTO flyway_schema_history (execution_time) VALUES ($8)", nil, "INSERT 0 1").ServedAs(7),
+		Seen:    []Seen{{Side: Request, Leaf: Leaf{Path: "bind.$8", Noise: "bind.$8", Type: String, Value: "50"}, Live: "7", Place: "bind.$8"}}}}
+	later := func(live string) Decision {
+		in := costCall(clockedDrifts(), "bind.$3", "50", live, first.Add(time.Second), sent, hist(), nil, nil)
+		in.Mock = "mock-301"
+		return oWord(t, Decide(in), "50", live)
+	}
+	iValue(t, "a later call sends the value again", later("7"), "mock-300")
+	costRefused(t, "round F's later value is not what its first call sent", later("9"), nil, "mock-300")
+}
+
 // costFind is the branch janitor's find on branches (startup_same_second_
 // test.go:46-58): its request holds sent, its answer answer, recorded
 // before before eRecAt and answered at eRecAt+answered.
