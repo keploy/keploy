@@ -1,0 +1,119 @@
+package proxy
+
+import (
+	"context"
+	"errors"
+	"sync/atomic"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
+
+// missWindow is one misses window: the run's (the proxy's own) or a test
+// worker's (instanceServing.misses). The error drain files each miss in the
+// window of the worker whose process made it (missWindowOf), so a worker's
+// test reads its own misses and never another worker's.
+type missWindow struct {
+	// activeTestErrors accumulates mock-not-found errors during active test
+	// execution. The continuous drain goroutine routes errors here when non-nil.
+	// When nil (no window), mock-not-found errors fall to pendingMockErrors and
+	// only non-mock noise (OTel, health checks) is discarded — keeping the
+	// errChannel drained either way.
+	activeTestErrors atomic.Pointer[testErrorAccumulator]
+	// missLoss is why a miss was lost since the last read (the first cause):
+	// it could not be queued (the error drain had stopped, or never ran) or
+	// its test's list was full. The next GetMockErrors then reports its read
+	// incomplete (ErrUnmatchedCallsUnread), naming the cause, instead of
+	// returning a list a miss is missing from.
+	missLoss atomic.Pointer[string]
+	// pendingLost is set, under captureMu, when a miss made with no test's
+	// window open was dropped because pendingMockErrors was full. The next
+	// window decides whose loss it is: a set's first discards those misses
+	// (they are no test's), so it only says so, but under the proven switch,
+	// where they are the set's (beforeSetMiss) and its read is incomplete
+	// (missLoss); the next test's carries them, so its read is incomplete.
+	pendingLost bool
+	// pendingMockErrors retains mock-not-found errors that arrive while no test
+	// capture window is active (activeTestErrors is nil) — e.g. between tests,
+	// or when the replayer/agent predates the BeginTestErrorCapture wiring.
+	// ContinueTestErrorCapture carries them into the next test's window;
+	// BeginTestErrorCapture (a set's first test) discards and logs them, but
+	// under the proven switch, where it carries them as the set's
+	// (beforeSetMiss);
+	// GetMockErrors returns them where no window is opened at all. Only
+	// mock-not-found errors are retained (background noise — OTel, health
+	// checks — is still discarded), and the buffer is bounded so it can't grow
+	// unboundedly.
+	pendingMockErrors testErrorAccumulator
+}
+
+// missInstance is the test worker whose process made the miss err (0: none).
+func missInstance(err error) uint32 {
+	if b, ok := err.(beforeSetMiss); ok {
+		err = b.error
+	}
+	var pe models.ParserError
+	if errors.As(err, &pe) {
+		return pe.Instance
+	}
+	return 0
+}
+
+// missWindowOf is the misses window of test worker inst: the run's for 0,
+// nil for a worker keploy does not serve (it ended, or never began).
+func (p *Proxy) missWindowOf(inst uint32) *missWindow {
+	if inst == 0 {
+		return &p.missWindow
+	}
+	s := &p.instances
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.misses[inst]
+}
+
+// workerMissWindows is every served test worker's misses window.
+func (p *Proxy) workerMissWindows() []*missWindow {
+	s := &p.instances
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*missWindow, 0, len(s.misses))
+	for _, w := range s.misses {
+		out = append(out, w)
+	}
+	return out
+}
+
+// missManager is the manager that served the call a miss of test worker
+// inst was made on: the run's for 0, nil for a worker keploy does not serve.
+func (p *Proxy) missManager(inst uint32) *MockManager {
+	if inst == 0 {
+		return p.getMockManager()
+	}
+	return p.instanceManager(inst)
+}
+
+// ContinueTestErrorCapture opens the window of the worker's next test, as
+// the proxy's own does the run's (Proxy.ContinueTestErrorCapture).
+func (s instanceExact) ContinueTestErrorCapture() {
+	if w := s.p.missWindowOf(s.inst); w != nil {
+		s.p.openCaptureOn(w, true, false)
+	}
+}
+
+// WithdrawTestErrorCapture takes back the window of a worker's test that
+// did not begin (Proxy.WithdrawTestErrorCapture).
+func (s instanceExact) WithdrawTestErrorCapture() {
+	if w := s.p.missWindowOf(s.inst); w != nil {
+		s.p.withdrawCaptureOn(w)
+	}
+}
+
+// GetMockErrors reads the misses of the worker's test (Proxy.GetMockErrors):
+// its own process tree's, never another worker's. A worker keploy no longer
+// serves has none to read, which is an error.
+func (s instanceExact) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	w := s.p.missWindowOf(s.inst)
+	if w == nil {
+		return nil, instanceNotServed(s.inst)
+	}
+	return s.p.getMockErrorsOn(ctx, w)
+}

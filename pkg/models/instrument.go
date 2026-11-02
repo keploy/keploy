@@ -340,6 +340,10 @@ type OutgoingOptions struct {
 	// agent's namespace or unknown. Runtime, per-connection: json:"-" like
 	// SrcPid.
 	SrcNsPid uint32 `json:"-"`
+	// SrcInstance is the test worker instance the kernel stamped THIS
+	// connection with (0: none). Runtime, per-connection: json:"-" like
+	// SrcPid.
+	SrcInstance uint32 `json:"-"`
 	// NetNS names the network namespace THIS connection was made from, as an
 	// opaque token. It exists because some destination addresses name a
 	// different server in every network namespace: 127.0.0.0/8, ::1, link-local

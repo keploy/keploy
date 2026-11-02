@@ -52,10 +52,12 @@ type instanceServing struct {
 	// staging reaches a manager once, whenever it starts.
 	stageMu sync.Mutex
 	staged  []staging
-	// mu guards on and mgrs, read by every connection.
+	// mu guards on, mgrs and misses, read by every connection.
 	mu   sync.RWMutex
 	on   bool
 	mgrs map[uint32]*MockManager
+	// misses is each served worker's misses window (missWindowOf).
+	misses map[uint32]*missWindow
 }
 
 // stage applies a staging of kind key to the run's manager m and every
@@ -103,7 +105,7 @@ func (p *Proxy) endInstances() {
 	s.staged = nil
 	s.mu.Lock()
 	mgrs := s.mgrs
-	s.mgrs, s.on = nil, false
+	s.mgrs, s.misses, s.on = nil, nil, false
 	s.mu.Unlock()
 	s.stageMu.Unlock()
 	for _, wm := range mgrs {
@@ -172,6 +174,10 @@ func (p *Proxy) ServeInstance(inst uint32) (agent.ExactServer, error) {
 		s.mgrs = make(map[uint32]*MockManager)
 	}
 	s.mgrs[inst] = wm
+	if s.misses == nil {
+		s.misses = make(map[uint32]*missWindow)
+	}
+	s.misses[inst] = &missWindow{}
 	s.on = true
 	s.mu.Unlock()
 	return instanceExact{p: p, inst: inst}, nil
@@ -185,6 +191,7 @@ func (p *Proxy) StopServingInstance(inst uint32) error {
 	s.mu.Lock()
 	wm := s.mgrs[inst]
 	delete(s.mgrs, inst)
+	delete(s.misses, inst)
 	s.mu.Unlock()
 	s.stageMu.Unlock()
 	if wm == nil {
