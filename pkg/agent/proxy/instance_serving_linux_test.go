@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -334,5 +335,44 @@ func TestEveryStagingOfTheSetReachesEachTestWorker(t *testing.T) {
 	}
 	if m2 := instanceMgrOf(t, p, 2); m2.exact.times.Load() == nil || m2.exact.staging.Load() {
 		t.Fatal("worker 2, served after the set's stagings, missed some")
+	}
+	// The same kind staged again is kept once, as the latest of them all,
+	// and a worker served after it begins with it, not the one it replaced.
+	if err := p.SetPoolNames([]string{"b"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	keys = keys[:0]
+	for _, st := range p.instances.staged {
+		keys = append(keys, st.key)
+	}
+	want = "mocks mocksWindow bgRules bg recordedOfKind recordingTimes recordedBefore recordingSource startupCutoff catalog recordedWindows poolNames"
+	if got := strings.Join(keys, " "); got != want {
+		t.Fatalf("kept stagings after pool names came again: %s, want %s", got, want)
+	}
+	if _, err := p.ServeInstance(3); err != nil {
+		t.Fatal(err)
+	}
+	for inst := uint32(1); inst <= 3; inst++ {
+		names := instanceMgrOf(t, p, inst).exact.poolNames.Load()
+		if names == nil {
+			t.Fatalf("worker %d holds no pool names, want the latest, b", inst)
+		}
+		if _, b := (*names)["b"]; len(*names) != 1 || !b {
+			t.Fatalf("worker %d holds pool names %v, want only the latest, b", inst, *names)
+		}
+	}
+}
+
+// A staging of the set before the run has a manager (no replay yet) is
+// refused, as it was before workers, and kept for no worker: a worker
+// served later begins from the run's stagings only.
+func TestASetStagingWithNoReplayIsRefusedAndKeptForNoWorker(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	p := &Proxy{logger: zap.NewNop()}
+	if err := p.SetPoolNames([]string{"a"}, nil); !errors.Is(err, errNoMockManager) {
+		t.Fatalf("SetPoolNames with no replay gave %v, want errNoMockManager", err)
+	}
+	if len(p.instances.staged) != 0 {
+		t.Fatalf("a refused staging was kept for later workers: %d kept", len(p.instances.staged))
 	}
 }
