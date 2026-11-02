@@ -321,7 +321,10 @@ func (pm *IngressProxyManager) probeApp(wait *appWait, d *net.Dialer) (string, n
 	}
 	listeners, terr := util.TCPListeners(dialed.Port())
 	if terr != nil {
-		if !wait.tableErr {
+		// Where the table is not read at all (ErrNoSocketTable: every
+		// platform but Linux), that is a stated limit, not news of this
+		// wait.
+		if !wait.tableErr && !errors.Is(terr, util.ErrNoSocketTable) {
 			wait.tableErr = true
 			pm.logger.Debug("could not read the kernel's socket table to see where the application listens; waiting for it to listen at the address keploy dials",
 				zap.String("dialed", wait.addr), zap.Error(terr))
