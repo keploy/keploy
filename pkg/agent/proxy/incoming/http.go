@@ -1192,7 +1192,9 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	logger.Debug("Using request-framed HTTP/1.1 proxy with MSG_PEEK pool liveness")
 
 	// A redial goes to the address the first dial reached, and its family
-	// (appNetwork: tcp6 for an IPv6 upstream).
+	// (appNetwork: tcp6 for an IPv6 upstream), but never off the host: one
+	// to an interface's address the namespace no longer has is not made
+	// (dialHere), and fails the call at ERROR.
 	upstreamAddr := upConn.RemoteAddr().String()
 
 	// upConnHolder lets the ctx-cancel + function-exit goroutines safely

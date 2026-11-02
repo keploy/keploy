@@ -555,3 +555,80 @@ func TestAClientThatLeavesWhileARedialWaitsEndsTheHandler(t *testing.T) {
 		t.Errorf("%d waits left", waits)
 	}
 }
+
+// A call given an address no connection to stays on the host is not dialed:
+// an address the namespace does not have (an interface's that went: the
+// redial of a connection first made there), one whose device the kernel
+// cannot be asked about, and a name, which cannot be asked about at all.
+// Each fails at once with the reason, and nothing is sent off the host.
+func TestACallGivenAnAddressNoConnectionToStaysOnTheHostIsNotDialed(t *testing.T) {
+	ip := notLocal(t)
+	port := strconv.Itoa(testnet.SharedPort(t))
+	for _, c := range []struct{ addr, why string }{
+		{net.JoinHostPort(ip, port), whyNotOwn},
+		{net.JoinHostPort("fe80::1%keploy-no-such-dev", port), whyNotAsked},
+		{net.JoinHostPort("localhost", port), whyNotAnIP},
+	} {
+		pm := New(zap.NewNop(), nil, &config.Config{})
+		r := result(t, dialAsync(context.Background(), pm, c.addr, nil))
+		if r.conn != nil {
+			_ = r.conn.Close()
+		}
+		var unreachable *appUnreachableError
+		if !errors.As(r.err, &unreachable) || unreachable.dialed != c.addr || len(unreachable.at) != 0 || !strings.HasPrefix(unreachable.why, c.why) {
+			t.Errorf("dialApp(%s) = %v, want it not dialed because %s", c.addr, r.err, c.why)
+		}
+	}
+}
+
+// elsewhereConn is a connection whose far end reads as at.
+type elsewhereConn struct {
+	net.Conn
+	at net.Addr
+}
+
+func (c elsewhereConn) RemoteAddr() net.Addr { return c.at }
+
+// The HTTP/1 ingress redials the address its first dial reached. When that
+// was an interface's address the namespace no longer has, the redial is not
+// made (it would leave the host): the call fails at once, with an ERROR that
+// says why.
+func TestAnHTTP1RedialToAnAddressTheNamespaceNoLongerHasIsNotMade(t *testing.T) {
+	ip := notLocal(t)
+	ln := testnet.ListenShared(t, "tcp4", sharedAppAddr(t))
+	up, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = up.Close() // the request's write fails, so the call is redialed
+	port := ln.Addr().(*net.TCPAddr).Port
+	gone := net.JoinHostPort(ip, strconv.Itoa(port))
+	upConn := elsewhereConn{Conn: up, at: &net.TCPAddr{IP: net.ParseIP(ip), Port: port}}
+	core, logs := observer.New(zapcore.InfoLevel)
+	pm := New(zap.New(core), nil, &config.Config{})
+	client, proxied := tcpPairForWatch(t)
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		defer func() { _ = proxied.Close() }()
+		pm.handleHttp1ZeroCopy(context.Background(), proxied, upConn, pm.logger, nil, 8080, false, nil)
+	}()
+	if _, err := client.Write([]byte("GET /where HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-served:
+	case <-never(t):
+		t.Fatalf("never: the handler ended; logged %v", logs.All())
+	}
+	pm.captures.Wait()
+	found := false
+	for _, e := range atOrAbove(logs, zapcore.ErrorLevel) {
+		if msg, _ := e.ContextMap()["error"].(string); strings.Contains(msg, gone) && strings.Contains(msg, whyNotOwn) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no ERROR says the redial to %s was not made; logged %v", gone, logs.All())
+	}
+}

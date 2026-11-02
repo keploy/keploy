@@ -287,7 +287,7 @@ func TestAConnectionHandedToACallThatHasEndedIsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = app.Close() }()
-	wait := &appWait{addr: addr, network: "tcp4", callers: map[*appWaiter]struct{}{}}
+	wait := &appWait{addr: addr, callers: map[*appWaiter]struct{}{}}
 	wait.ctx, wait.cancel = context.WithCancel(context.Background())
 	w := &appWaiter{done: make(chan struct{})}
 	wait.callers[w] = struct{}{}
