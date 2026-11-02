@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
@@ -115,13 +116,18 @@ func TestAVariableClaimTheStoreRefusesEndsTheCall(t *testing.T) {
 }
 
 // refusesOne is mockMemDb whose store refuses the claims of one recording
-// only, as when another call took that copy first.
+// only, as when another call took that copy first, and keeps the claims in
+// order.
 type refusesOne struct {
 	*mockMemDb
 	refused *models.Mock
+	claimed []*models.Mock
 }
 
-func (d *refusesOne) UpdateUnFilteredMock(old, _ *models.Mock) bool { return old != d.refused }
+func (d *refusesOne) UpdateUnFilteredMock(old, _ *models.Mock) bool {
+	d.claimed = append(d.claimed, old)
+	return old != d.refused
+}
 
 // A call whose claim of one recording failed is answered by the next one it
 // matches: the failed claim leaves that recording out of the call's later
@@ -520,4 +526,101 @@ func TestARefiledCopyOfARefusedRecordingAnswersTheCall(t *testing.T) {
 			t.Fatalf("match: ok %v, served %v, err %v, refiled %v; want the new copy of %s", ok, stub, err, db.refiled, create.Name)
 		}
 	})
+}
+
+// refusesOneVar is varDb whose store refuses the claims of one recording
+// only, and keeps the claims in order.
+type refusesOneVar struct {
+	*varDb
+	refused *models.Mock
+	claimed []*models.Mock
+}
+
+func (d *refusesOneVar) UpdateUnFilteredMock(old, nw *models.Mock) bool {
+	d.claimed = append(d.claimed, old)
+	return old != d.refused && d.varDb.UpdateUnFilteredMock(old, nw)
+}
+
+// A pass whose pick is a stateful cursor's, not its first fit, leaves out the
+// recording it picked and the store refused, never its first fit: a call of
+// two recordings of one request (ConsumeCursorSaturate) whose first has
+// answered picks the second; the store refuses it, and the next pass answers
+// with the first, the one recording left. Leaving out the first fit instead
+// would pick the refused second again and claim it a second time. One row per
+// pass whose pick is a cursor's: the exact-body pass, the strict pass and the
+// variable pass under the proven switch. The store refuses the second every
+// time, so the call ends either way; the claims say which was left out.
+func TestARefusedCursorPickIsLeftOutNotTheFirstFit(t *testing.T) {
+	t0 := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	rec := func(name string, at time.Time) *models.Mock {
+		return &models.Mock{
+			Name: name,
+			Kind: models.Kind(models.HTTP),
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Method: "POST", URL: "http://api/q", ProtoMajor: 1, ProtoMinor: 1,
+					Header: map[string]string{"Content-Type": "application/json", "Host": "api"},
+					Body:   `{"a":1}`,
+				},
+				HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: name},
+				ReqTimestampMock: at,
+				ResTimestampMock: at.Add(time.Millisecond),
+			},
+			TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession, Consume: models.ConsumeCursorSaturate},
+		}
+	}
+	echo := func(name, key string, seq int) *models.Mock {
+		return reusable(at(varMock(name, "POST", "http://pay/charge", `{"key":"`+key+`"}`, 200, `{"echo":"`+key+`"}`,
+			models.MockVariables{"key": {Recorded: key, Bind: "body.key", Answer: []string{"body.echo"}, Echo: true}}), seq))
+	}
+	for _, tc := range []struct {
+		name   string
+		proven bool
+		vars   bool
+	}{
+		{name: "exact-body"},
+		{name: "strict", proven: true},
+		{name: "variable", proven: true, vars: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.proven {
+				t.Setenv("KEPLOY_PROVEN", "1")
+			} else {
+				t.Setenv("KEPLOY_PROVEN", "")
+			}
+			var (
+				first, second *models.Mock
+				db            integrations.MockMemDb
+				claimed       func() []*models.Mock
+				live          *req
+			)
+			if tc.vars {
+				first, second = echo("first", "k-1", 1), echo("second", "k-2", 2)
+				vdb := &refusesOneVar{varDb: &varDb{session: []*models.Mock{first, second}}, refused: second}
+				// The first recording has answered: the cursor is on the second.
+				vdb.cursors = map[string]int{servedKey(first): 1}
+				db, claimed, live = vdb, func() []*models.Mock { return vdb.claimed }, liveReq("POST", "/charge", `{"key":"x-1"}`)
+			} else {
+				first, second = rec("first", t0), rec("second", t0.Add(time.Second))
+				mdb := &refusesOne{mockMemDb: &mockMemDb{mocks: []*models.Mock{first, second}}, refused: second}
+				// The first recording has answered: the cursor is on the
+				// second, for the exact-body pass's group and the strict
+				// pass's served marks alike.
+				_, key, _ := cursorGroup(first, []*models.Mock{first, second}, func(*models.Mock) bool { return false })
+				mdb.cursors = map[string]int{servedKey(first): 1, key: 1}
+				h := http.Header{}
+				h.Set("Host", "api")
+				h.Set("Content-Type", "application/json")
+				db, claimed = mdb, func() []*models.Mock { return mdb.claimed }
+				live = &req{method: "POST", url: &url.URL{Path: "/q"}, header: h, body: []byte(`{"a":1}`), raw: []byte("POST /q HTTP/1.1\r\nHost: api\r\n\r\n{\"a\":1}")}
+			}
+			ok, stub, _, err := newHTTP().match(context.Background(), live, db, nil, nil, nil, true, false, false, true, true)
+			if got := mockNamesOf(claimed()); strings.Join(got, " ") != "second first" {
+				t.Fatalf("claims %v; want the cursor's pick (second), refused, then the first: the refused pick is never claimed again", got)
+			}
+			if err != nil || !ok || stub == nil || stub.Name != "first" {
+				t.Fatalf("match: ok %v, served %v, err %v; want the first recording", ok, stub, err)
+			}
+		})
+	}
 }
