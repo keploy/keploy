@@ -51,6 +51,11 @@ func NewRemovalWatch(api ContainerWaiter, name string) *RemovalWatch {
 // bound on an answer from the engine's daemon). A daemon that has not taken
 // the question by then is not waited for: the question is withdrawn, and the
 // stop goes on. Wait then finds the engine's wait ended and returns at once.
+// A question the engine has taken is kept past ask, for Wait -- unless ask
+// ends in the moment between the engine's taking it and Watch's return. It
+// is withdrawn then too, and Wait returns at once: the run's volumes may
+// still be held when RemoveRunVolumes asks, which leaves them for a later
+// run's SweepRunVolumes.
 func (w *RemovalWatch) Watch(ask context.Context) {
 	withdraw := context.AfterFunc(ask, w.cancel)
 	said, failed := w.api.ContainerWait(w.ctx, w.name, container.WaitConditionRemoved)

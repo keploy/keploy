@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -185,10 +186,10 @@ func TestRemovalWatchWithdrawsAnUntakenQuestionWhenItsAskEnds(t *testing.T) {
 	ask, end := context.WithCancel(context.Background())
 	returned := make(chan struct{})
 	go func() { w.Watch(ask); close(returned) }()
-	<-d.asked
+	within(t, "the engine's being asked", d.asked)
 	end()
-	<-returned
-	<-waitInBackground(context.Background(), w)
+	within(t, "Watch, once its ask ended", returned)
+	within(t, "Wait, after a withdrawn question", waitInBackground(context.Background(), w))
 }
 
 // A question the engine has taken outlives Watch's ask: the ask bounds only
@@ -196,14 +197,93 @@ func TestRemovalWatchWithdrawsAnUntakenQuestionWhenItsAskEnds(t *testing.T) {
 func TestRemovalWatchKeepsATakenQuestionPastItsAsk(t *testing.T) {
 	f := newFakeRemovals(goneByInspect)
 	w := NewRemovalWatch(f, "keploy-v3-0a1b2c3d4e5f6071")
-	ask, end := context.WithCancel(context.Background())
+	ask := newEndingAsk()
 	w.Watch(ask)
-	end()
-	// Only that it has not happened: the withdrawal, were it made, runs at
-	// once on the ask's end.
-	select {
-	case <-f.askedCtx.Done():
-		t.Fatal("the engine's wait ended with Watch's ask, after the engine had taken the question")
-	case <-time.After(200 * time.Millisecond):
+	if ask.registered() == 0 {
+		t.Fatal("Watch registered nothing on its ask: the check below would hold of any Watch")
 	}
+	if f.askedCtx.Err() != nil {
+		t.Fatal("the engine's wait ended before Watch's ask did")
+	}
+	if n := ask.end(); n != 0 {
+		t.Fatalf("the end of Watch's ask withdrew the question the engine had taken (%d still registered)", n)
+	}
+}
+
+// hangBound turns a regression that would hang a test into a failure that
+// names what never came. It is part of no assertion.
+const hangBound = 2 * time.Minute
+
+// within fails the test, naming what, unless done is closed within hangBound.
+func within(t *testing.T, what string, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(hangBound):
+		t.Fatalf("%s did not come within %v", what, hangBound)
+	}
+}
+
+// endingAsk is an ask the test ends (end). context.AfterFunc registers on it
+// through its AfterFunc method, and end runs what is still registered on the
+// test's goroutine and says how many: whether the ask's end withdrew
+// anything is known as it ends, not by waiting for the withdrawal's goroutine.
+type endingAsk struct {
+	done chan struct{}
+	mu   sync.Mutex
+	fns  map[int]func()
+	next int
+}
+
+func newEndingAsk() *endingAsk {
+	return &endingAsk{done: make(chan struct{}), fns: map[int]func(){}}
+}
+
+func (a *endingAsk) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (a *endingAsk) Done() <-chan struct{}       { return a.done }
+func (a *endingAsk) Value(any) any               { return nil }
+
+func (a *endingAsk) Err() error {
+	select {
+	case <-a.done:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
+// AfterFunc registers f, to run at end unless stopped first.
+func (a *endingAsk) AfterFunc(f func()) func() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	id := a.next
+	a.next++
+	a.fns[id] = f
+	return func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		_, ok := a.fns[id]
+		delete(a.fns, id)
+		return ok
+	}
+}
+
+// registered is how many funcs were ever registered.
+func (a *endingAsk) registered() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.next
+}
+
+// end ends the ask, runs what is still registered, and returns how many.
+func (a *endingAsk) end() int {
+	a.mu.Lock()
+	fns := a.fns
+	a.fns = map[int]func(){}
+	a.mu.Unlock()
+	close(a.done)
+	for _, f := range fns {
+		f()
+	}
+	return len(fns)
 }
