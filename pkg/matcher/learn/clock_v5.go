@@ -73,7 +73,11 @@ func init() {
 // minute at the second is refused, as main refuses every one, where its
 // window is as wide as its cut (ttlTooWide). The other guards (one no replay
 // compares, one too wide to narrow, one near a wall time shown twice) are
-// the order's, as for any reading.
+// the order's, as for any reading, except of a whole-cut look-back no replay
+// of its call compares (HTTP's learn path today) that the window from its
+// test's begin holds as a plain read, of more than one cut: refused here
+// with main's reason, never left to step 7, whose plain read since the
+// begin would pass a dropped look-back at every replay.
 //
 // Since its test began (the 2026-10-31 ruling on a time to live):
 //   - A time to live (Min above zero) that its call's window holds at a
@@ -107,6 +111,14 @@ func offsetInWindow(path string, r, l typedInstant, w *Window, zone *time.Locati
 		}
 	}
 	switch {
+	case !w.offsets && !o.Fine() && o.Res >= time.Second && cutHi(o) < -o.Res && heldSinceBegin(r, l, w, enc):
+		// A look-back of more than one whole cut a replay of this call
+		// does not compare (HTTP's learn path today): refused, never left
+		// to the window from its test's begin, where a plain read since the
+		// begin would pass a dropped look-back at every replay. One of one
+		// cut is a plain read made about a cut before its call as much as
+		// a look-back, and is left there (the stated cost).
+		return models.ClockOffset{}, clockOffsetUncomparedWhy(path, o), false
 	case (o.Fine() || !w.offsets) && (o.Res >= time.Second || o.Min > -time.Second) && heldSinceBegin(r, l, w, enc):
 		return models.ClockOffset{}, "", false
 	case o.Fine():
@@ -122,6 +134,12 @@ func offsetInWindow(path string, r, l typedInstant, w *Window, zone *time.Locati
 	}
 	o.Why = lineV5(path, o, enc, gap, nearLine(o, w, near))
 	return o, "", true
+}
+
+// cutHi is the latest whole cut of look-back o holds (CutOffsets' hi).
+func cutHi(o models.ClockOffset) time.Duration {
+	_, hi := o.CutOffsets()
+	return hi
 }
 
 // heldSinceBegin reports whether the window from each run's test begin to

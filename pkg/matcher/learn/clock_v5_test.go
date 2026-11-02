@@ -1836,3 +1836,31 @@ func TestAPhaseLockSpanningItsStepIsNoClockThroughTheOrder(t *testing.T) {
 		}
 	}
 }
+
+// A call whose replay does not compare a read of the clock plus an offset
+// (a window without ComparesOffsets: HTTP's learn path today), in a client
+// test whose begin comes before the value: a whole-second look-back
+// (dirtyAt <= now - 2s, last_active < now - 15s) is refused, naming that
+// the replay does not compare it, never handed to the window from the
+// test's begin, where a plain read since the begin would pass a dropped
+// look-back at every replay. A plain read made in its call's window, and
+// a time to live, read as before.
+func TestALookBackAReplayDoesNotCompareIsRefusedNeverReadFromItsTestsBegin(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	const p = "body.filter.dirtyAt.$lte"
+	call := time.Date(2026, 10, 31, 9, 0, 0, 400e6, time.UTC)
+	fcall := call.Add(FullRoundLead + 130*ms)
+	span := func(at time.Time) Span { return Span{From: at.Add(-61 * ms), To: at, Began: at.Add(-20 * sec)} }
+	w := &Window{Rec: span(call), F: span(fcall)}
+	for _, back := range []time.Duration{2 * sec, 15 * sec} {
+		rv, lv := call.Add(-4*ms).Truncate(sec).Add(-back), fcall.Add(-4*ms).Truncate(sec).Add(-back)
+		o, why, ok := clockInWindow(p, v5Instant(rv, sec), v5Instant(lv, sec), w, nil)
+		if ok || !strings.Contains(why, "this protocol's replay does not compare such an offset yet") {
+			t.Errorf("FALSE GREEN: now - %s where a replay does not compare offsets: %+v %q %v; want it refused, naming that", back, o, why, ok)
+		}
+	}
+	rv, lv := call.Add(-4*ms).Truncate(sec), fcall.Add(-4*ms).Truncate(sec)
+	if o, why, ok := clockInWindow(p, v5Instant(rv, sec), v5Instant(lv, sec), w, nil); ok || why != "" {
+		t.Errorf("a plain read in its call's window where a replay does not compare offsets: %+v %q %v; want it left to the plain read", o, why, ok)
+	}
+}
