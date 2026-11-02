@@ -2,6 +2,7 @@ package learn
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -920,5 +921,28 @@ func TestOutcomeAnExchangeAskedAfterTheCallIsPlacedAsARecordingIs(t *testing.T) 
 	}
 	if found != 2 {
 		t.Errorf("placesOf gave %d of the two exchanges' places; want both", found)
+	}
+}
+
+// An object glued to a value beside it (`{"a":W,"b":x}"z"`, or `"z"{...}`)
+// is two values, as a stream of values is: an answer whose word moved
+// within the object between the runs does not show it at one field, so it
+// proves no link and the word is refused, never bound there. A word that
+// stayed at its field binds, as in any body. The reader reads the two
+// values apart; this is the verdict Decide gives on it.
+func TestOutcomeAnObjectGluedToAValueIsTwoValues(t *testing.T) {
+	answer := func(body string) Raw {
+		return RawOf(getAnswer("mock-6", "http://api/items/1", body, eRecAt.Add(-100*time.Millisecond)), true)
+	}
+	for _, c := range []struct{ name, r, f string }{
+		{"an object glued to a string", `{"a":"48d1","b":"x"}"z"`, `{"a":"%s","b":"%s"}"z"`},
+		{"a string glued to an object", `"z"{"a":"48d1","b":"x"}`, `"z"{"a":"%s","b":"%s"}`},
+	} {
+		call := func(f string) Decision {
+			raw := append(eStartup(), answer(c.r).ServedAs(6).ServedLive(answer(f)))
+			return oWord(t, Decide(costF("k-48d1", "k-6c7d", nil, raw, nil)), "48d1", "6c7d")
+		}
+		oRefused(t, c.name+", the word moved within the object", call(fmt.Sprintf(c.f, "9998", "6c7d")), RefusalUnknown, "mock-6")
+		iValue(t, c.name+", the word stayed at its field", call(fmt.Sprintf(c.f, "6c7d", "x")), "mock-6")
 	}
 }
