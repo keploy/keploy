@@ -23,9 +23,10 @@ const netSysctlDir = "/proc/sys/net/ipv4"
 // when it ends below 65535, else below it, from the higher of 1024 and
 // net.ipv4.ip_unprivileged_port_start up. They do so when a post_bind hook
 // did not attach, so the kernel cannot pick the port for them
-// (structs.FlagKernelPortAlloc unset). When no port lies there, they leave
-// the bind on the port the app asked for, and keploy's ingress never hears
-// of it: that port's incoming calls are not recorded.
+// (structs.FlagKernelPortAlloc unset). When no port lies there, or each
+// port they try there is listened on, they leave the bind on the port the
+// app asked for, and keploy's ingress never hears of it: that port's
+// incoming calls are not recorded.
 type bindMovePorts struct {
 	lo, hi int // net.ipv4.ip_local_port_range, both included
 	unpriv int // net.ipv4.ip_unprivileged_port_start
@@ -83,9 +84,11 @@ func readSysctlPorts(dir, name string, n int) ([]int, error) {
 
 // warnBindFallback says, once, where the app's binds go when the post_bind
 // hook named hook did not attach (attachErr): the ports the bind hooks move
-// them to, read from the sysctls in dir; or, when there are none or a
-// sysctl cannot be read, that the binds are left on the ports the app names
-// and those ports' incoming traffic is not recorded.
+// them to, read from the sysctls in dir, and that a bind which finds each
+// port it tries there listened on is left on the port the app names and not
+// recorded; or, when there are none or a sysctl cannot be read, that the
+// binds are left on the ports the app names and those ports' incoming
+// traffic is not recorded.
 func warnBindFallback(logger *zap.Logger, hook string, attachErr error, dir string) {
 	head := fmt.Sprintf("the %s cgroup hook did not attach, so keploy picks the port each of the app's binds moves to itself", hook)
 	p, err := readBindMovePorts(dir)
@@ -99,7 +102,9 @@ func warnBindFallback(logger *zap.Logger, hook string, attachErr error, dir stri
 			"and that port's incoming traffic is not recorded", head, p.lo, p.hi, max(1024, p.unpriv), p.unpriv), zap.Error(attachErr))
 	default:
 		logger.Warn(fmt.Sprintf("%s: a port in %d-%d, outside net.ipv4.ip_local_port_range %d-%d, that no socket listens on "+
-			"(rare: a port there that another socket bound without listening fails the app's bind with 'address already in use')",
+			"(rare: a port there that another socket bound without listening fails the app's bind with 'address already in use'). "+
+			"A bind that finds each port it tries there listened on is left on the port the app names, "+
+			"and that port's incoming traffic is not recorded",
 			head, p.first, p.last, p.lo, p.hi), zap.Error(attachErr))
 	}
 }

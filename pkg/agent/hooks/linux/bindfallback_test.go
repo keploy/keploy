@@ -96,9 +96,10 @@ func TestTheBindMovePortsFailOnAnUnreadableSysctl(t *testing.T) {
 }
 
 // warnBindFallback says once where the app's binds go when a post_bind
-// hook did not attach: where they move, or, with no room or a sysctl it
-// cannot read, that they are left on the app's ports and those are not
-// recorded.
+// hook did not attach: where they move, and that one which finds each port
+// it tries there listened on is left alone and not recorded; or, with no
+// room or a sysctl it cannot read, that they are left on the app's ports and
+// those are not recorded.
 func TestTheBindFallbackWarnSaysWhereTheBindsGo(t *testing.T) {
 	attachErr := errors.New("operation not supported")
 	rows := []struct {
@@ -106,8 +107,9 @@ func TestTheBindFallbackWarnSaysWhereTheBindsGo(t *testing.T) {
 		want, not               []string
 	}{
 		{"room", "32768\t60999", "1024",
-			[]string{"the post_bind4 cgroup hook did not attach", "a port in 61000-65535, outside net.ipv4.ip_local_port_range 32768-60999"},
-			[]string{"not recorded"}},
+			[]string{"the post_bind4 cgroup hook did not attach", "a port in 61000-65535, outside net.ipv4.ip_local_port_range 32768-60999",
+				"A bind that finds each port it tries there listened on is left on the port the app names, and that port's incoming traffic is not recorded"},
+			[]string{"no port is left", "each bind is left", "cannot say"}},
 		{"no room from the range", "1024\t65535", "1024",
 			[]string{"no port is left outside net.ipv4.ip_local_port_range 1024-65535 from 1024 up", "net.ipv4.ip_unprivileged_port_start 1024)",
 				"each bind is left on the port the app names", "incoming traffic is not recorded"},
