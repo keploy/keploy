@@ -97,6 +97,24 @@ func agentHTTPClient(token string) http.Client {
 	return c
 }
 
+// AgentPoolBase, when set, is the RoundTripper the agent client builds on,
+// in place of a clone of http.DefaultTransport.
+//
+// http.Transport.Clone copies a transport's settings but NOT the protocols
+// registered on it with RegisterProtocol, so an embedder that taught the
+// default transport a scheme of its own loses it the moment the agent client
+// moves to a pool of its own -- every request on that scheme is then refused
+// as "unsupported protocol scheme" before a connection is opened. k8s-proxy
+// does exactly that: it carries the agent's token inside a keploy-agent://
+// URL that a registered handler unseals (pkg/platform/agentauth), so with the
+// clone its every agent call fails and a recording dies at its first one.
+//
+// An embedder in that position sets this to the transport it registered on.
+// It then shares that transport's pool, as it did before the pool of our own
+// -- the cancellation this file's pool exists to contain is a risk it carries
+// knowingly, rather than losing its scheme silently.
+var AgentPoolBase http.RoundTripper
+
 // agentPool is a pool of connections for one AgentClient alone: a clone of
 // http.DefaultTransport, with its proxy, dial and idle settings, but none of
 // its connections. Any other client on the default pool (enterprise's own
@@ -113,6 +131,9 @@ func agentHTTPClient(token string) http.Client {
 // replaced with a RoundTripper of its own is used as it is: there is no pool
 // in it to copy.
 func agentPool() http.RoundTripper {
+	if AgentPoolBase != nil {
+		return AgentPoolBase
+	}
 	if t, ok := http.DefaultTransport.(*http.Transport); ok {
 		return t.Clone()
 	}

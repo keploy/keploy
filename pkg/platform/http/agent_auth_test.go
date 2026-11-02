@@ -2,12 +2,14 @@ package http
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -356,4 +358,56 @@ func TestNativeAgentLaunch_TellsTheAgentWhereToReportItsTeardown(t *testing.T) {
 	remove()
 	_, err = os.Stat(filepath.Dir(progress))
 	require.True(t, os.IsNotExist(err), "the directory outlives the agent: %v", err)
+}
+
+// A SCHEME AN EMBEDDER REGISTERED MUST SURVIVE THE AGENT'S OWN POOL.
+//
+// agentPool gives the AgentClient a clone of http.DefaultTransport so another
+// client's cancellation cannot close a connection under it. http.Transport.Clone
+// copies the settings and NOT the handlers installed with RegisterProtocol, so
+// an embedder that taught the default transport a scheme of its own lost it the
+// moment that clone landed: every request on that scheme is refused as
+// "unsupported protocol scheme" before a connection is opened.
+//
+// k8s-proxy does exactly that -- it carries the agent's token inside a
+// keploy-agent:// URL that a registered handler unseals -- so with the clone
+// alone its every agent call fails and a recording dies at its first one.
+// AgentPoolBase is the way out, and this is what it has to do.
+func TestAgentPoolKeepsAnEmbeddersRegisteredScheme(t *testing.T) {
+	const scheme = "keploy-agent-probe"
+
+	base := http.DefaultTransport.(*http.Transport).Clone()
+	base.RegisterProtocol(scheme, answeringRoundTripper{})
+
+	// The regression, stated as a fact about the standard library rather than
+	// assumed: a clone of a transport does NOT carry its registered schemes.
+	cloned := base.Clone()
+	if _, err := (&http.Client{Transport: cloned}).Get(scheme + "://agent/ping"); err == nil {
+		t.Fatal("a clone served the registered scheme; this test's premise no longer holds and the hook below may be unnecessary")
+	}
+
+	prev := AgentPoolBase
+	AgentPoolBase = base
+	t.Cleanup(func() { AgentPoolBase = prev })
+
+	resp, err := (&http.Client{Transport: agentPool()}).Get(scheme + "://agent/ping")
+	if err != nil {
+		t.Fatalf("agentPool dropped the embedder's registered scheme: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// answeringRoundTripper stands in for the embedder's handler: it answers
+// without a network, which is the whole point of registering a scheme.
+type answeringRoundTripper struct{}
+
+func (answeringRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("ok")),
+		Request:    r,
+	}, nil
 }
