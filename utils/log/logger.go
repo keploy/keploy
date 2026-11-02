@@ -626,7 +626,9 @@ func AddMode(mode string) (*zap.Logger, error) {
 	cfg.EncoderConfig.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
 		emoji := "\U0001F430"
 		modeStr := fmt.Sprintf("Keploy(%s):", mode)
-		enc.AppendString(emoji + " " + modeStr + " " + t.Format(time.RFC3339))
+		// To the nanosecond, as the CLI's own lines (customTimeEncoder): a
+		// stall of a second or two shows between two of the agent's lines.
+		enc.AppendString(emoji + " " + modeStr + " " + t.Format(time.RFC3339Nano))
 	}
 
 	core := consoleCore(cfg, primarySyncer(), cfg.Level)
