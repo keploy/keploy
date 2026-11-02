@@ -1545,42 +1545,60 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	}
 	unreadRaw := rawUnread(raw)
 	unreadReq := requestUnread(served)
-	// The moved places the offset rule reads (offset.go), read once for the
-	// call, and only where a changed instant or word reaches it or the word
-	// rule (givenWhy): another recorded test's too (OfAnotherTest), and
-	// those F gave earlier in the set (given), which no other rule reads.
 	all := raw
-	raw = ownPlaces(raw)
-	// The moments the call's earlier places hold (echoedIn), read once for
-	// the call: every leaf and window of every value it classifies holds
-	// its moments against the same places.
-	var eh earlierHeld
-	var op *offsetPlaces
-	places := func() *offsetPlaces {
-		if op == nil {
-			var unread string
-			var set []GivenPlaces
-			if given != nil {
-				more, err := given()
-				switch {
-				case err != nil:
-					unread = "keploy cannot read back a recording record's full round gave the application earlier in the test set, so it cannot tell whether what changed came from it or was built on it: " + err.Error()
-				default:
-					unread, set = placesUnread(more), more
-				}
-			}
-			op = dc.offsetPlacesOf(at, served, all, set)
-			if unread != "" {
-				op.unread = unread
+	// The places F gave the application earlier in the set (given), read
+	// once for the call, and only where the offset rule reads them.
+	givenRead, givenUnread, givenSet := false, "", []GivenPlaces(nil)
+	givenPlaces := func() (string, []GivenPlaces) {
+		if !givenRead && given != nil {
+			more, err := given()
+			switch {
+			case err != nil:
+				givenUnread = "keploy cannot read back a recording record's full round gave the application earlier in the test set, so it cannot tell whether what changed came from it or was built on it: " + err.Error()
+			default:
+				givenUnread, givenSet = placesUnread(more), more
 			}
 		}
-		return op
+		givenRead = true
+		return givenUnread, givenSet
 	}
+	// A reading is the recordings a leaf is read against: all of them, which
+	// the offset rule and the word rule read (another recorded test's too:
+	// OfAnotherTest), and raw, those every rule reads (ownPlaces); with the
+	// moments their earlier places hold (eh: echoedIn) and the moved places
+	// the offset rule reads (places: offset.go, with those F gave earlier in
+	// the set), each read once for the reading, and only where a changed
+	// instant or word reaches it: every leaf and window of every value read
+	// against it holds them against the same places.
+	type reading struct {
+		all, raw []Raw
+		eh       earlierHeld
+		places   func() *offsetPlaces
+	}
+	readingOf := func(all []Raw) *reading {
+		rd := &reading{all: all, raw: ownPlaces(all)}
+		var op *offsetPlaces
+		rd.places = func() *offsetPlaces {
+			if op == nil {
+				unread, set := givenPlaces()
+				op = dc.offsetPlacesOf(at, served, all, set)
+				if unread != "" {
+					op.unread = unread
+				}
+			}
+			return op
+		}
+		return rd
+	}
+	// The call's reading: every recording before it.
+	callReading := readingOf(all)
 	out := make([]Learned, 0, len(drift))
 	// leafIn classifies one changed leaf, r as recorded and l as F saw it,
-	// as a value of the call whose window is w, against the recordings raw,
-	// without the rules skip names (skipRule), every other rule as it stands.
-	leafIn := func(raw []Raw, r, l Leaf, w *Window, skip skipRule) Learned {
+	// as a value of the call whose window is w, against the recordings of
+	// rd, without the rules skip names (skipRule), every other rule as it
+	// stands.
+	leafIn := func(rd *reading, r, l Leaf, w *Window, skip skipRule) Learned {
+		raw, all, places, eh := rd.raw, rd.all, rd.places, &rd.eh
 		if unreadRaw != "" {
 			return Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw}
 		}
@@ -1593,7 +1611,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at, served: served, raw: raw, places: places}
 		}
 		if r.Value != "" {
-			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, placed, raw, fol, &eh); ok && skip&skipSource == 0 {
+			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, placed, raw, fol, eh); ok && skip&skipSource == 0 {
 				ln.Kind, ln.From = KindVariable, from
 				if from.Side == "" || from.Echo {
 					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w, at), from)
@@ -1638,7 +1656,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// any lead or window excuses its words (offset.go).
 				why = offsetWhy(m)
 				offWhy = why
-			} else if why = unaccounted(dc, v, at, served, raw, fol, &eh); why != "" {
+			} else if why = unaccounted(dc, v, at, served, raw, fol, eh); why != "" {
 				sourced = true
 				if fol != nil && fol.refused != "" {
 					why += "; " + fol.refused
@@ -1868,17 +1886,19 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	// leaf is leafIn against the call's recordings, where a value found
 	// carried from a sibling's place learned in a role a sibling passes on
 	// is learned in that role (sibling.go): read again with those siblings
-	// set aside, and taken only where that reading learns their role.
+	// set aside, and taken only where that reading learns their role. That
+	// reading is of the recordings left, its own (readingOf): no rule of it
+	// reads a sibling, nor the moments or moved places a sibling holds.
 	leaf := func(r, l Leaf, w *Window, skip skipRule) Learned {
-		ln := leafIn(raw, r, l, w, skip)
+		ln := leafIn(callReading, r, l, w, skip)
 		if ln.Kind != KindVariable {
 			return ln
 		}
-		own, role, ok := siblingsAside(raw, r, ln.From)
+		own, role, ok := siblingsAside(all, r, ln.From)
 		if !ok {
 			return ln
 		}
-		if same := leafIn(own, r, l, w, skip); same.Kind == role {
+		if same := leafIn(readingOf(own), r, l, w, skip); same.Kind == role {
 			return same
 		}
 		return ln

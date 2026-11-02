@@ -205,10 +205,39 @@ func TestASiblingsRoleIsPassedOnOnlyWhereItsRuleHolds(t *testing.T) {
 		{"a reading that learns another kind than the sibling's", []Raw{insert("mock-16", token).Sibling(role(KindNoise, token))}, []Leaf{echoed}},
 		{"another recording that holds the value", []Raw{insert("mock-16", token).Sibling(role(KindNoise, token)), insert("mock-9", token)}, nil},
 		{"a sibling's place learned as a carried value, another recording holding the value", []Raw{insert("mock-16", token).Sibling(role(KindVariable, token)), insert("mock-9", token)}, nil},
+		{"a sibling's place refused, another recording holding the value F saw", []Raw{insert("mock-16", token).Sibling(role(KindUnaccounted, token)), insert("mock-9", live)}, nil},
 		{"siblings that learned the place two ways, the noise last", []Raw{insert("mock-16", token).Sibling(role(KindEcho, token)), insert("mock-17", token).Sibling(role(KindNoise, token))}, nil},
 	} {
 		if ln := nonce(row.raw, row.resp...); ln.Kind != KindVariable || ln.From.Mock != "mock-16" {
 			t.Errorf("%s: learned %s from %q (%s); want carried from mock-16, as before", row.what, ln.Kind, ln.From.Mock, ln.Why)
 		}
+	}
+}
+
+// The value is read again with the siblings set aside, and the moments
+// they hold go with them: a sibling whose other places hold the moment F
+// saw in the call's stamp is no earlier place of that reading's echo, and
+// the stamp is learned in the sibling's role. A stamp found carried from
+// another recording (by the moment it was recorded with, written there in
+// another layout) stays carried from there, whatever a sibling learned.
+func TestASiblingSetAsideTakesItsMomentsWithIt(t *testing.T) {
+	first := time.Date(2026, 11, 2, 3, 52, 27, 62_000_000, time.UTC)
+	at := first.Add(5 * time.Millisecond)
+	const stamp, iso = "2026-11-02 03:52:27.056 +00:00", "2026-11-02T03:52:27.056Z"
+	live := sibLive(stamp, sequelize)
+	// The sibling bound the stamp at $2, which RETURNING answers, and
+	// the moment F saw at $3 and $4.
+	sibling := RawOf(sibRolesInsert("mock-16", "1", stamp, live, first), true).ServedAs(1).
+		Sibling(map[string]SiblingRole{"bind.$2": {Kind: KindEcho, Value: stamp}})
+	other := RawOf(sibRolesInsert("mock-9", "1", iso, iso, first.Add(-time.Millisecond)), true).ServedAs(1)
+	answer := Leaf{Path: "row.0.1", Type: String, Value: stamp}
+	call := func(raw ...Raw) Learned {
+		return sibCall(at, map[string]string{"bind.$2": stamp}, map[string]string{"bind.$2": live}, raw, answer)["bind.$2"]
+	}
+	if ln := call(sibling); ln.Kind != KindEcho || !slices.Equal(echoPaths(ln), []string{"row.0.1"}) {
+		t.Errorf("a sibling holding the moment F saw elsewhere: learned %s from %q echoing %v (%s); want the sibling's echo of row.0.1", ln.Kind, ln.From.Mock, echoPaths(ln), ln.Why)
+	}
+	if ln := call(other, sibling); ln.Kind != KindVariable || ln.From.Mock != "mock-9" {
+		t.Errorf("a stamp found carried from another recording: learned %s from %q (%s); want carried from mock-9, as before", ln.Kind, ln.From.Mock, ln.Why)
 	}
 }
