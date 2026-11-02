@@ -101,12 +101,14 @@ func (*appWaitInstr) GetConsumedMocks(context.Context) ([]models.MockState, erro
 // appWaitRunner is a runner of one recorded GET /health, with probes paced
 // at a millisecond and a budget that has run out before the first probe:
 // a wait that keeps a budget ends at once, one that has none waits for the
-// app.
+// app. Its probes have no timeout of their own, so the rows' counts of
+// probes and connections hold on a host that stalls the test: a stall can
+// delay a probe, but not end one and so add another.
 func appWaitRunner(t *testing.T, logger *zap.Logger) *Runner {
 	t.Helper()
-	budget, tick, say := appWaitBudget, appProbeTick, appSayEvery
-	appWaitBudget, appProbeTick, appSayEvery = time.Nanosecond, time.Millisecond, 2
-	t.Cleanup(func() { appWaitBudget, appProbeTick, appSayEvery = budget, tick, say })
+	budget, tick, say, probeTimeout := appWaitBudget, appProbeTick, appSayEvery, appProbeTimeout
+	appWaitBudget, appProbeTick, appSayEvery, appProbeTimeout = time.Nanosecond, time.Millisecond, 2, 0
+	t.Cleanup(func() { appWaitBudget, appProbeTick, appSayEvery, appProbeTimeout = budget, tick, say, probeTimeout })
 	r := &Runner{
 		logger: logger,
 		testCaseDB: oneCaseDB{tc: &models.TestCase{

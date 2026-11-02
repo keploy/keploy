@@ -823,11 +823,13 @@ var appWaitBudget = 2 * time.Minute
 
 // appProbeTick is how long the wait leaves between two probes the app did not
 // answer, and appSayEvery how many unanswered probes pass between the lines an
-// unbudgeted wait says it still waits with. Pacing only: neither is a verdict.
-// Variables for tests.
+// unbudgeted wait says it still waits with. appProbeTimeout ends one probe the
+// app has not answered in that long (0: none), and the wait probes again.
+// Pacing only: none of them is a verdict. Variables for tests.
 var (
-	appProbeTick = 2 * time.Second
-	appSayEvery  = 30
+	appProbeTick    = 2 * time.Second
+	appSayEvery     = 30
+	appProbeTimeout = 3 * time.Second
 )
 
 // answerNeverAccepted reports whether a probe's error says the app answered in
@@ -917,7 +919,7 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, e
 	defer cancel()
 
 	probeClient := &http.Client{
-		Timeout: 3 * time.Second,
+		Timeout: appProbeTimeout,
 		// New connection each probe so we're exercising real readiness
 		// rather than a cached keep-alive from an earlier attempt.
 		Transport: &http.Transport{DisableKeepAlives: true},
