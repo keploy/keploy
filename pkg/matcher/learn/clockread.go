@@ -1182,6 +1182,10 @@ func checkReadIn(o models.ClockOffset, live Leaf, s Span, learned, read, hint st
 		if c := o.CheckedAt(res); c > res {
 			cut = " (checked as standing for the whole " + models.ShortDuration(c) + " the learn step read it cut to" + in + ")"
 		}
+		if ph := hourPhase(ats[0]); o.Res == time.Hour && ph != o.Phase {
+			// models.ClockOffset.Phase: off the hour the learned values sat on.
+			cut += " (it sits " + phaseName(ph) + ", off the hour the learned values sat on, " + phaseName(o.Phase) + ")"
+		}
 		return false, o.CheckedAt(res), learned + ", and the value this call carries is not " + read + made + ": it changed" + cut + hint
 	}
 	// A cut the value shows is checked at that cut, read in the zone it

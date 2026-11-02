@@ -349,6 +349,17 @@ type ClockOffset struct {
 	// (Empty), which holds nothing, but two read at their values' own cuts
 	// meet at the coarser (Meet).
 	Step time.Duration `json:"step,omitempty" yaml:"step,omitempty" bson:"step,omitempty"`
+	// Phase, of an offset learned at a Step whose values are cut to the
+	// hour (Res an hour), is where that hour starts within UTC's, as both
+	// runs' values showed it: their time past UTC's whole hour (0 for an
+	// application that cuts to UTC's hour or a whole-hour zone's, 30m for
+	// one that cuts to +05:30's, 15m for +05:45's). A replay passes only a
+	// value on that phase (holdsAtStep), so one moved onto another zone's
+	// hour fails at every read. The learn step writes it of every such
+	// offset (learn's offsetInWindow), and refuses one whose two values sit
+	// on two phases. Of any other Res a Phase is no learning: it holds
+	// nothing (fail closed), as one outside the hour does.
+	Phase time.Duration `json:"phase,omitempty" yaml:"phase,omitempty" bson:"phase,omitempty"`
 }
 
 // StepApart is the Step of the Meet of two learnings of one place that saw
@@ -1129,8 +1140,9 @@ func (o ClockOffset) phaseLocked() bool {
 // Holds' own guards first: a Step below Res, a range around zero or above
 // it at a step (signed, phaseLocked), no Res, an o Fine for its unit, a
 // window with no start or that ends before it starts, a res of none, an o
-// not Checkable in the window, and a window that meets a wall time at's
-// zone shows twice (FallBack) hold nothing.
+// not Checkable in the window, a value of an o cut to the hour that sits
+// off o's Phase within UTC's hour (onPhase), and a window that meets a wall
+// time at's zone shows twice (FallBack) hold nothing.
 //   - Step is Res (the offset read at its values' own cut): at is checked
 //     as Holds checks any offset, at c (CheckedAt), within one c of the
 //     span plus the offset on either side, but that of an o cut to a unit
@@ -1150,7 +1162,7 @@ func (o ClockOffset) phaseLocked() bool {
 //     written at an encoding coarser than Res cannot show that remainder
 //     and holds nothing.
 func (o ClockOffset) holdsAtStep(at time.Time, res time.Duration, from, to time.Time) bool {
-	if !o.phaseLocked() && (o.Step != o.Res || !o.signed()) || o.Res <= 0 || o.Fine() || from.IsZero() || to.Before(from) || res <= 0 || !o.Checkable(res, from, to) {
+	if !o.phaseLocked() && (o.Step != o.Res || !o.signed()) || o.Res <= 0 || o.Fine() || from.IsZero() || to.Before(from) || res <= 0 || !o.Checkable(res, from, to) || !o.onPhase(at) {
 		return false
 	}
 	if _, _, met := o.FallBack(res, from, to, at.Location()); met {
@@ -1181,6 +1193,22 @@ func (o ClockOffset) holdsAtStep(at time.Time, res time.Duration, from, to time.
 		}
 	}
 	return false
+}
+
+// onPhase reports whether at sits where o's values do within UTC's hour: of
+// an o cut to the hour, Phase past UTC's whole hour (Truncate counts from
+// UTC in every zone); of any other, only where o names no Phase. The own
+// cut's check admits a value up to a cut stale or ahead, which, read in a
+// zone the value shows a whole hour in, held one moved onto that zone's
+// hour by part of an hour (1h15m earlier in +05:45, onto UTC's) at most
+// reads; on the recorded phase the application's value holds at every
+// read and such a value at none. An application replayed in a zone whose
+// hour starts at another phase than the recording's fails (a false red).
+func (o ClockOffset) onPhase(at time.Time) bool {
+	if o.Res != time.Hour {
+		return o.Phase == 0
+	}
+	return o.Phase >= 0 && o.Phase < time.Hour && at.Sub(at.Truncate(time.Hour)) == o.Phase
 }
 
 // FallBack is the turn at which loc's clocks go back, and by how much, that
@@ -1464,15 +1492,16 @@ func (o ClockOffset) signed() bool {
 // learning shows the place's values are not cut to the coarser cut, and a
 // meet read at the coarser would pass a look-back changed by most of it
 // (and one read at the finer would make Meet depend on how its learnings
-// are grouped), so it holds nothing. Why
+// are grouped), so it holds nothing. So do two cut to the hour at two
+// Phases: no one hour holds both runs' values. Why
 // is the lesser of the two that are set (nothing replays it): one learned
 // line, whatever the order.
 func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
-	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout), Since: meetSince(o.Since, p.Since), Why: o.Why, Step: o.Step}
+	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout), Since: meetSince(o.Since, p.Since), Why: o.Why, Step: o.Step, Phase: max(o.Phase, p.Phase)}
 	if m.Why == "" || p.Why != "" && p.Why < m.Why {
 		m.Why = p.Why
 	}
-	if own := func(x ClockOffset) bool { return x.Step > 0 && x.Step == x.Res }; o.Step != p.Step || own(o) != own(p) {
+	if own := func(x ClockOffset) bool { return x.Step > 0 && x.Step == x.Res }; o.Step != p.Step || own(o) != own(p) || o.Phase != p.Phase {
 		m.Step = StepApart
 	}
 	// One read whole and one inside a text, or at two places of a text
@@ -1712,7 +1741,9 @@ func WallNanos(t time.Time, loc *time.Location) int64 {
 // offset from 29m59.96s to 32m59.956s"; an Empty o says it holds none:
 // "clock reads no one offset holds (from 30m up to 0s)". A Zone of a wall
 // clock of no zone follows it: "clock, a wall clock of no zone in the
-// application's zone"; one of ZoneApart, or one this keploy does not read,
+// application's zone"; of one learned at a Step cut to the hour, where its
+// hour starts: "clock - 2h, its hour starting 30m past UTC's whole hour";
+// one of ZoneApart, or one this keploy does not read,
 // says so instead. It never decides anything.
 func (o ClockOffset) String() string {
 	switch {
@@ -1732,6 +1763,14 @@ func (o ClockOffset) String() string {
 	s := o.offsetString() + o.zoneString() + o.layoutString()
 	if o.Step > o.Res {
 		s += ", read cut to " + o.Step.String() + " before the offset"
+	}
+	if o.Step > 0 && o.Res == time.Hour {
+		// Where its hour starts (Phase), which a replay holds it to.
+		if o.Phase == 0 {
+			s += ", its hour starting on UTC's whole hour"
+		} else {
+			s += ", its hour starting " + ShortDuration(o.Phase) + " past UTC's whole hour"
+		}
 	}
 	if !o.Word.IsZero() {
 		// Where the word stands, never what the text holds.

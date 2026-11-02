@@ -1869,18 +1869,19 @@ func TestALookBackAReplayDoesNotCompareIsRefusedNeverReadFromItsTestsBegin(t *te
 // application in +05:30 truncating to its own hour, less two or three
 // hours) is learned at its own cut, the hour (Step == Res), and a replay
 // that reads the application's zone from its process checks it at that
-// cut, never on a step's grids as a phase lock is: it passes the
-// application's value at every phase of the hour and fails one 1h15m
-// earlier (a quarter past UTC's hour, on neither zone's), and a dropped
-// look-back, at every phase. Read on a step's grids, the 1h15m-earlier
-// value would pass at half of them. (A value shifted onto UTC's hour, 1h30m
-// earlier, is read in UTC as a value whole there and passes at half the
-// phases of the hour: the cut-zone rule's slack of up to two cuts, by
-// where in its cut the replay's read falls.)
+// cut, never on a step's grids as a phase lock is. The recording shows
+// where that hour falls within UTC's (its values' minutes past UTC's whole
+// hour: 30m in +05:30, 15m in +05:45, none in a whole-hour zone), and a
+// replay passes a value only on that phase: the application's value at
+// every phase of the hour; one 1h15m or 1h30m earlier (on UTC's hour, or
+// another zone's, or on none), and a dropped look-back, at none. Without
+// the phase, a value moved onto UTC's hour was read in UTC as a value whole
+// there, within the own cut's slack: in +05:45 one 1h15m earlier passed 9
+// of the 12 phases, in +05:30 one 1h30m earlier 6.
 func TestAnOwnCutHourInTheAppsZoneIsCheckedOnlyAtThatZonesHour(t *testing.T) {
 	sec, ms, min := time.Second, time.Millisecond, time.Minute
 	const p = "body.cutoff.$lte"
-	for _, zn := range []*time.Location{time.FixedZone("+05:30", 5*3600+1800)} {
+	for _, zn := range []*time.Location{time.FixedZone("+05:30", 5*3600+1800), time.FixedZone("+05:45", 5*3600+2700), time.FixedZone("+02:00", 2*3600)} {
 		for _, back := range []time.Duration{2 * time.Hour, 3 * time.Hour} {
 			cut := func(x time.Time) time.Time { return models.ReadCut(x, time.Hour, zn).Add(-back) }
 			for _, base := range []time.Time{time.Date(2026, 10, 26, 9, 40, 0, 0, time.UTC), time.Date(2026, 10, 26, 9, 10, 0, 0, time.UTC)} {
@@ -1903,14 +1904,45 @@ func TestAnOwnCutHourInTheAppsZoneIsCheckedOnlyAtThatZonesHour(t *testing.T) {
 					}{
 						{"the application's value", cut(read), true},
 						{"1h15m earlier", cut(read).Add(-75 * min), false},
+						{"1h30m earlier", cut(read).Add(-90 * min), false},
 						{"a dropped look-back", read.Truncate(sec), false},
 					} {
-						if got, why := v5Check(p, o, recText, row.at, s); got != row.want {
+						got, why := v5Check(p, o, recText, row.at, s)
+						if got != row.want {
 							t.Errorf("%s: recorded at %s in %s, a cut to its hour less %s, a replay %s into its hour, %s: %v (%s)", map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}[row.want], base.Format("15:04"), zn, back, phase, row.name, got, why)
+						}
+						if ph := row.at.Sub(row.at.Truncate(time.Hour)); !got && ph != o.Phase && !strings.Contains(why, ", off the hour the learned values sat on, ") {
+							t.Errorf("recorded in %s, %s: refused as %q; want it to name that the value sits off the learned hour", zn, row.name, why)
 						}
 					}
 				}
 			}
 		}
+	}
+}
+
+// Two values cut to the hour, each written in a zone that shows it a whole
+// hour, that sit at two places within UTC's hour (the recording's on
+// +05:30's hour, 30m past UTC's, record's full round's on +05:45's, 15m past
+// it): keploy cannot tell which hour a replay's value must sit on, so it
+// refuses the offset (fail closed), naming both places. Read without the
+// phase, it was learned at the hour, and a replay held a value on either
+// zone's hour within the cut's slack.
+func TestAnOwnCutHourWhoseValuesSitOnTwoPhasesIsRefused(t *testing.T) {
+	ms := time.Millisecond
+	const p = "body.cutoff.$lte"
+	ist, npt := time.FixedZone("+05:30", 5*3600+1800), time.FixedZone("+05:45", 5*3600+2700)
+	base := time.Date(2026, 10, 26, 9, 40, 0, 0, time.UTC)
+	rec, f := v5Call(base, 61*ms, 20*ms), v5Call(base.Add(3*time.Hour+5*time.Minute), 61*ms, 20*ms)
+	rv := models.ReadCut(rec.read, time.Hour, ist).Add(-2 * time.Hour).In(ist)
+	lv := models.ReadCut(f.read, time.Hour, npt).Add(-2 * time.Hour).In(npt)
+	o, why, ok := clockInWindow(p, v5Instant(rv, time.Second), v5Instant(lv, time.Second), v5Window(rec, f), nil)
+	if ok || !strings.Contains(why, "two places within UTC's hour (30m past UTC's whole hour in the recording, 15m past UTC's whole hour in record's full round)") {
+		t.Errorf("FALSE GREEN: values on +05:30's hour and on +05:45's: %+v %q %v; want it refused, naming both phases", o, why, ok)
+	}
+	// One zone's hour in both runs is learned on its phase.
+	lv = models.ReadCut(f.read, time.Hour, ist).Add(-2 * time.Hour).In(ist)
+	if o, why, ok := clockInWindow(p, v5Instant(rv, time.Second), v5Instant(lv, time.Second), v5Window(rec, f), nil); !ok || o.Phase != 30*time.Minute || o.Step != time.Hour || !strings.Contains(o.Why, "(30m past UTC's whole hour)") {
+		t.Errorf("FALSE RED: values on +05:30's hour in both runs: %+v %q %v; want it learned at the hour on its phase, 30m past UTC's, its line naming it", o, why, ok)
 	}
 }

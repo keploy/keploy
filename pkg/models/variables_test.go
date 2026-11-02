@@ -2036,16 +2036,31 @@ func TestMeetKeepsAPhaseLockAndIsTheSameInAnyOrder(t *testing.T) {
 	if m := lock.Meet(lock); m.Step != time.Minute || m.Res != sec || m.Empty() {
 		t.Errorf("a phase lock met with itself: %+v; want it kept", m)
 	}
+	// Two learnings cut to the hour, one on +05:30's hour (30m past UTC's)
+	// and one on +05:45's: no one hour holds both, so they meet as StepApart;
+	// one met with itself keeps its phase.
+	hour30 := ClockOffset{Min: -3 * time.Hour, Max: -2 * time.Hour, Res: time.Hour, Step: time.Hour, Layout: LayoutTyped, Phase: 30 * time.Minute}
+	hour15 := hour30
+	hour15.Phase = 15 * time.Minute
+	for _, m := range []ClockOffset{hour30.Meet(hour15), hour15.Meet(hour30)} {
+		if m.Step != StepApart || !m.Empty() {
+			t.Errorf("FALSE GREEN: two cut to the hour at two phases: %+v; want StepApart, which holds nothing", m)
+		}
+	}
+	if m := hour30.Meet(hour30); m.Step != time.Hour || m.Phase != 30*time.Minute || m.Empty() {
+		t.Errorf("an hour's cut met with itself: %+v; want it kept on its phase", m)
+	}
 	pick := []ClockOffset{lock, ownMin, ownSec,
 		{Min: -3 * sec, Max: -2 * sec, Res: sec, Step: sec, Layout: LayoutTyped},
 		{Min: -3 * sec, Max: -sec, Res: sec, Layout: LayoutTyped},
 		{Min: -103 * sec, Max: -102 * sec, Res: time.Millisecond, Step: sec, Layout: LayoutTyped},
-		{Min: -time.Hour, Max: -sec, Res: time.Minute, Step: time.Hour, Layout: LayoutTyped}}
+		{Min: -time.Hour, Max: -sec, Res: time.Minute, Step: time.Hour, Layout: LayoutTyped},
+		hour30, hour15, {Min: -3 * time.Hour, Max: -2 * time.Hour, Res: time.Hour, Step: time.Hour, Layout: LayoutTyped}}
 	for _, a := range pick {
 		for _, b := range pick {
 			for _, c := range pick {
 				x, y, z := a.Meet(b).Meet(c), a.Meet(c).Meet(b), b.Meet(c).Meet(a)
-				if x.Step != y.Step || y.Step != z.Step || x.Res != y.Res || x.Min != y.Min || x.Max != z.Max {
+				if x.Step != y.Step || y.Step != z.Step || x.Res != y.Res || x.Min != y.Min || x.Max != z.Max || x.Phase != y.Phase || y.Phase != z.Phase {
 					t.Errorf("meet depends on its order: %+v, %+v, %+v: %+v, %+v, %+v", a, b, c, x, y, z)
 				}
 			}
@@ -2075,5 +2090,57 @@ func TestAClockOffsetsStringNamesItsStepAndItsSpan(t *testing.T) {
 	since.Step = sec
 	if got := since.String(); !strings.Contains(got, limit) {
 		t.Errorf("a read since its test began learned at a Step: %q; want its limit stated", got)
+	}
+}
+
+// An offset learned at its values' own cut of an hour holds a value only on
+// its Phase within UTC's hour: the application's value (an hour of +05:30,
+// 30m past UTC's, less two hours) at every read of the hour; one moved onto
+// UTC's hour (1h30m earlier), which the cut's slack of a cut on either side
+// held at some reads, at none. A Phase outside the hour, or on an offset cut
+// to anything but the hour, holds nothing (fail closed), and String names
+// where the hour starts.
+func TestAnHourCutsPhaseIsWhereAReplaysValueMustSit(t *testing.T) {
+	ist := time.FixedZone("+05:30", 5*3600+1800)
+	o := ClockOffset{Min: -2*time.Hour - 40*time.Minute, Max: -time.Hour - 40*time.Minute, Res: time.Hour, Step: time.Hour, Layout: LayoutTyped, Phase: 30 * time.Minute}
+	base := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
+	moved := 0
+	for ph := time.Duration(0); ph < time.Hour; ph += 5*time.Minute + 7*time.Second {
+		to := base.Add(ph)
+		from, read := to.Add(-61*time.Millisecond), to.Add(-20*time.Millisecond)
+		app := ReadCut(read, time.Hour, ist).Add(-2 * time.Hour)
+		if !o.Holds(app, time.Second, from, to) {
+			t.Errorf("FALSE RED: the application's value %s at %s into UTC's hour", app, ph)
+		}
+		// Read in UTC, which shows it a whole hour, as a replay reads it
+		// (learn's cutZones).
+		onUTC := app.Add(-90 * time.Minute).In(time.UTC)
+		if o.Holds(onUTC, time.Second, from, to) {
+			t.Errorf("FALSE GREEN: a value moved onto UTC's hour, 1h30m earlier, at %s into UTC's hour", ph)
+		}
+		if p := (ClockOffset{Min: o.Min, Max: o.Max, Res: o.Res, Step: o.Step, Layout: o.Layout}); p.Holds(onUTC, time.Second, from, to) {
+			moved++
+		}
+		for _, bad := range []time.Duration{time.Hour, -time.Minute} {
+			p := o
+			p.Phase = bad
+			if p.Holds(app, time.Second, from, to) {
+				t.Errorf("FALSE GREEN: a Phase of %s holds the application's value", bad)
+			}
+		}
+		if p := (ClockOffset{Min: -3 * time.Second, Max: -2 * time.Second, Res: time.Second, Step: time.Second, Layout: LayoutTyped, Phase: 30 * time.Minute}); p.Holds(read.Truncate(time.Second).Add(-2*time.Second), time.Second, from, to) {
+			t.Errorf("FALSE GREEN: a Phase on an offset cut to the second holds a value")
+		}
+	}
+	if moved == 0 {
+		t.Errorf("the same offset on UTC's hour (Phase 0) holds the value moved onto UTC's hour at no read: the row no longer shows what Phase guards")
+	}
+	if s := o.String(); !strings.Contains(s, "its hour starting 30m past UTC's whole hour") {
+		t.Errorf("String names no phase: %q", s)
+	}
+	utc := o
+	utc.Phase = 0
+	if s := utc.String(); !strings.Contains(s, "its hour starting on UTC's whole hour") {
+		t.Errorf("String of Phase 0 names no phase: %q", s)
 	}
 }

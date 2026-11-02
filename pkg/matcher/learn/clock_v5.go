@@ -103,6 +103,15 @@ func offsetInWindow(path string, r, l typedInstant, w *Window, zone *time.Locati
 	if !ok || w.begun && o.Min <= 0 {
 		return models.ClockOffset{}, "", false
 	}
+	if o.Res == time.Hour {
+		// Where the hour the values are cut to starts within UTC's
+		// (models.ClockOffset.Phase), which a replay holds a value to.
+		pr, pl := hourPhase(r.at), hourPhase(l.at)
+		if pr != pl {
+			return models.ClockOffset{}, clockSeenV5(path, o) + ", but its values are cut to hours that start at two places within UTC's hour (" + phaseName(pr) + " in the recording, " + phaseName(pl) + " in record's full round), so keploy cannot tell which hour a replay's value must sit on, and refuses it rather than pass a value moved onto another zone's hour" + clockNoiseLine, false
+		}
+		o.Phase = pr
+	}
 	enc := max(r.res, l.res)
 	checkable := o.Checkable(enc, w.Rec.From, w.Rec.To) && o.Checkable(enc, w.F.From, w.F.To)
 	if wb := w.sinceBegin(); wb != nil && o.Min > 0 && (o.Fine() || o.CoarseCut() || !checkable) {
@@ -134,6 +143,27 @@ func offsetInWindow(path string, r, l typedInstant, w *Window, zone *time.Locati
 	}
 	o.Why = lineV5(path, o, enc, gap, nearLine(o, w, near))
 	return o, "", true
+}
+
+// hourPhase is how far past UTC's whole hour t falls.
+func hourPhase(t time.Time) time.Duration { return t.Sub(t.Truncate(time.Hour)) }
+
+// phaseName names a phase within UTC's hour: "30m past UTC's whole hour",
+// "on UTC's whole hour".
+func phaseName(d time.Duration) string {
+	if d == 0 {
+		return "on UTC's whole hour"
+	}
+	return models.ShortDuration(d) + " past UTC's whole hour"
+}
+
+// phaseLine is the sentence a line of o, cut to the hour, inserts: a replay
+// passes only a value on o's Phase; "" for any other o.
+func phaseLine(o models.ClockOffset) string {
+	if o.Res != time.Hour {
+		return ""
+	}
+	return "; a replay passes only a value on the hour its values sat on (" + phaseName(o.Phase) + "), so one moved onto another zone's hour by part of an hour fails at every read, and so does the application's own value where a replay runs in a zone whose hour starts elsewhere (a false red)"
 }
 
 // cutHi is the latest whole cut of look-back o holds (CutOffsets' hi).
@@ -401,7 +431,7 @@ func lineV5(path string, o models.ClockOffset, enc, gap time.Duration, near stri
 	c := models.ShortDuration(o.Res)
 	if o.Step > o.Res {
 		st := models.ShortDuration(o.Step)
-		return seen + ". Its two values stand " + models.ShortDuration(gap) + " apart, a whole number of " + st + ", and share their remainder within it, so keploy reads the application as cutting its read to " + st + " and then subtracting the look-back. A replay passes a value only where it is a whole " + st + " of its call's window (within " + c + " on either side) plus an offset from " + models.ShortDuration(o.Min) + " to " + models.ShortDuration(o.Max) + ": a look-back dropped, or changed by part of " + st + ", fails at every read, and so does one changed by a whole " + st + " unless the window holds a turn of the " + unitWord(o.Step) + "; an application that does not cut and wrote these two values by chance fails a replay wherever its value's remainder within " + st + " moves (a false red), and passes one where that remainder lands on the learned one, about one read in " + strconv.FormatInt(int64(o.Step/o.Res), 10) + ", whatever its look-back" + clockNoiseLine
+		return seen + ". Its two values stand " + models.ShortDuration(gap) + " apart, a whole number of " + st + ", and share their remainder within it, so keploy reads the application as cutting its read to " + st + " and then subtracting the look-back. A replay passes a value only where it is a whole " + st + " of its call's window (within " + c + " on either side) plus an offset from " + models.ShortDuration(o.Min) + " to " + models.ShortDuration(o.Max) + ": a look-back dropped, or changed by part of " + st + ", fails at every read, and so does one changed by a whole " + st + " unless the window holds a turn of the " + unitWord(o.Step) + "; an application that does not cut and wrote these two values by chance fails a replay wherever its value's remainder within " + st + " moves (a false red), and passes one where that remainder lands on the learned one, about one read in " + strconv.FormatInt(int64(o.Step/o.Res), 10) + ", whatever its look-back" + phaseLine(o) + clockNoiseLine
 	}
 	via := ", cut to " + aUnit(o.Res)
 	if gap > 0 && o.Res > enc {
@@ -420,7 +450,7 @@ func lineV5(path string, o models.ClockOffset, enc, gap time.Duration, near stri
 			next, later = "one a "+w+" further out", "one two "+w+"s further out or more"
 		}
 		_, on := cutExceptions(o.Res)
-		return seen + via + near + ". A replay checks it at the " + w + " against " + cutOffsetsV5(o, lo, hi) + ", as standing for its whole " + w + ", within one " + w + " of its call's window plus that offset on either side, whatever the window's width: " + changed + " only where the replay's call's window holds a turn of the " + w + " for each " + w + " more, " + dir + ", so in a window narrower than the " + w + " " + next + " passes only where a turn of the " + w + " falls in it, and " + later + " fails" + on + clockNoiseLine
+		return seen + via + near + ". A replay checks it at the " + w + " against " + cutOffsetsV5(o, lo, hi) + ", as standing for its whole " + w + ", within one " + w + " of its call's window plus that offset on either side, whatever the window's width: " + changed + " only where the replay's call's window holds a turn of the " + w + " for each " + w + " more, " + dir + ", so in a window narrower than the " + w + " " + next + " passes only where a turn of the " + w + " falls in it, and " + later + " fails" + on + phaseLine(o) + clockNoiseLine
 	}
 	// Holds checks a value from one Res before the cut that holds the
 	// window's start plus Min up to one Res after its end plus Max: a read
@@ -429,7 +459,7 @@ func lineV5(path string, o models.ClockOffset, enc, gap time.Duration, near stri
 	// down to one Res and the window's width below that or up to the
 	// window's width above it, and at no read further out.
 	lo, hi := models.ShortDuration(o.Min-o.Res), models.ShortDuration(o.Max+o.Res)
-	return seen + via + near + ". A replay checks a value written as recorded at " + c + ": it passes one from one " + c + " before the start of the " + c + " that holds its call's window's start plus " + models.ShortDuration(o.Min) + " up to one " + c + " after the window's end plus " + models.ShortDuration(o.Max) + ". So a read in that window plus an offset from " + lo + " to " + hi + " passes at every read; plus an offset from one " + c + " and the window's width below " + lo + " up to it, or from " + hi + " up to the window's width above it, only where the read falls late or early enough in the window and its " + c + "; and plus any other offset (" + offsetNamed(o) + " changed by more) at no read; near a wall time the application's zone shows twice as its clocks go back a replay refuses the value" + clockNoiseLine
+	return seen + via + near + ". A replay checks a value written as recorded at " + c + ": it passes one from one " + c + " before the start of the " + c + " that holds its call's window's start plus " + models.ShortDuration(o.Min) + " up to one " + c + " after the window's end plus " + models.ShortDuration(o.Max) + ". So a read in that window plus an offset from " + lo + " to " + hi + " passes at every read; plus an offset from one " + c + " and the window's width below " + lo + " up to it, or from " + hi + " up to the window's width above it, only where the read falls late or early enough in the window and its " + c + "; and plus any other offset (" + offsetNamed(o) + " changed by more) at no read; near a wall time the application's zone shows twice as its clocks go back a replay refuses the value" + phaseLine(o) + clockNoiseLine
 }
 
 // cutOffsetsV5 names the whole cuts lo to hi a replay checks o against:
@@ -457,5 +487,5 @@ func sinceLineV5(path string, o models.ClockOffset) string {
 	if o.CoarseChecked(o.Res) {
 		lo, hi = o.CutOffsets()
 	}
-	return path + " = " + o.String() + ": in the recording and in record's full round alike, it is a read of the application's clock made after its test began and before its call, plus a time to live, cut to " + aUnit(o.Res) + ". Its call's window alone shows an offset that measures how long the application waited between its read and its call as much as what it added, so keploy checks it from the test's begin: a replay passes a value from one " + c + " before the " + c + " that holds its test's begin plus " + models.ShortDuration(lo) + ", up to one " + c + " after its call plus " + models.ShortDuration(hi) + ", checked at " + c + ", however long the application waited between its read and its call; so a time to live changed by less than the test's span plus " + models.ShortDuration(hi-lo) + " can pass too, and one changed by more fails" + clockNoiseLine
+	return path + " = " + o.String() + ": in the recording and in record's full round alike, it is a read of the application's clock made after its test began and before its call, plus a time to live, cut to " + aUnit(o.Res) + ". Its call's window alone shows an offset that measures how long the application waited between its read and its call as much as what it added, so keploy checks it from the test's begin: a replay passes a value from one " + c + " before the " + c + " that holds its test's begin plus " + models.ShortDuration(lo) + ", up to one " + c + " after its call plus " + models.ShortDuration(hi) + ", checked at " + c + ", however long the application waited between its read and its call; so a time to live changed by less than the test's span plus " + models.ShortDuration(hi-lo) + " can pass too, and one changed by more fails" + phaseLine(o) + clockNoiseLine
 }
