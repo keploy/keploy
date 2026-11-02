@@ -702,12 +702,15 @@ func TestAppWrittenTellsTheFINByLockOrder(t *testing.T) {
 
 // The close's read of what the application had written (wroteNow) is never
 // short of it, counts no byte twice, and takes one lookup when nothing is
-// unacknowledged.
+// unacknowledged. A lookup that fails (not a socket not found) gives no count,
+// and its error, which tells the close to drop the socket it read on.
 func TestTheClosesReadCountsWhatTheApplicationHadWritten(t *testing.T) {
 	look := func(st uint8, wq uint32, acked uint64) diagTCP {
 		return diagTCP{state: st, wqueue: wq, info: &unix.TCPInfo{State: st, Bytes_acked: acked}}
 	}
 	const e, f1 = tcpEstablished, tcpFinWait1
+	const failedLookup = 0xff // a read whose lookup fails, with errLookupFailed
+	errLookupFailed := errors.New("sock_diag reply: bad file descriptor")
 	for _, tc := range []struct {
 		name  string
 		reads []diagTCP
@@ -725,6 +728,7 @@ func TestTheClosesReadCountsWhatTheApplicationHadWritten(t *testing.T) {
 		{"a timewait socket (no tcp_info)", []diagTCP{{state: tcpTimeWait}}, 0, false},
 		{"gone between the lookups", []diagTCP{look(e, 5, 101)}, 0, false},
 		{"no byte counts", []diagTCP{look(e, 0, 0)}, 0, false},
+		{"a lookup that fails", []diagTCP{look(e, 5, 101), {state: failedLookup}}, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			was := lookupWritten
@@ -734,12 +738,18 @@ func TestTheClosesReadCountsWhatTheApplicationHadWritten(t *testing.T) {
 					return diagTCP{}, errNoSocket
 				}
 				n++
+				if tc.reads[n-1].state == failedLookup {
+					return diagTCP{}, errLookupFailed
+				}
 				return tc.reads[n-1], nil
 			}
 			t.Cleanup(func() { lookupWritten = was })
-			want, ok := wroteNow(nil, netip.AddrPort{}, netip.AddrPort{})
+			want, ok, err := wroteNow(nil, netip.AddrPort{}, netip.AddrPort{})
 			if want != tc.want || ok != tc.ok {
 				t.Fatalf("wroteNow = %d, %v; want %d, %v", want, ok, tc.want, tc.ok)
+			}
+			if failed := tc.reads[len(tc.reads)-1].state == failedLookup; failed != errors.Is(err, errLookupFailed) || !failed && err != nil {
+				t.Fatalf("wroteNow's error = %v; want the failed lookup's, and only after one", err)
 			}
 			if tc.ok && n != len(tc.reads) {
 				t.Fatalf("wroteNow made %d lookups, want %d", n, len(tc.reads))

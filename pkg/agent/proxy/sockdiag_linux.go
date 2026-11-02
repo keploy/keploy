@@ -71,6 +71,46 @@ func openDiag() (*diagSock, error) {
 
 func (d *diagSock) close() { _ = unix.Close(d.fd) }
 
+// diagFree holds sock_diag sockets that closes have done with, for the next
+// close to take: opening and closing one is most of what a close's read of the
+// application's socket costs (noteWroteAtClose). Neither taking nor giving
+// back waits, and no lock is held across a close: a close that finds none free
+// opens one, and one that finds the list full closes its own, so the list
+// holds at most diagFreeMax descriptors. A socket on it holds nothing that
+// changes a later lookup's answer: a lookup that succeeds has read every
+// reply to its requests (an exact lookup's one, a dump's to its end), and a
+// socket a lookup failed on is never given back. Each socket is in the
+// process's network namespace, as the proxy's connections are.
+var diagFree = make(chan *diagSock, diagFreeMax)
+
+const diagFreeMax = 4
+
+// takeDiag is a socket from diagFree, or a new one when none is free; listed
+// says which.
+func takeDiag() (ds *diagSock, listed bool, err error) {
+	select {
+	case ds = <-diagFree:
+		return ds, true, nil
+	default:
+		ds, err = openDiag()
+		return ds, false, err
+	}
+}
+
+// giveDiag puts ds back on diagFree when its last lookup succeeded (failed is
+// nil) and the list has room, and closes it otherwise.
+func giveDiag(ds *diagSock, failed error) {
+	if failed != nil {
+		ds.close()
+		return
+	}
+	select {
+	case diagFree <- ds:
+	default:
+		ds.close()
+	}
+}
+
 // lookupTCP is one lookup on a socket of its own.
 func lookupTCP(local, remote netip.AddrPort) (diagTCP, error) {
 	d, err := openDiag()

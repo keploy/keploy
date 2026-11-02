@@ -729,17 +729,28 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 // proxy's side that has taken the application's FIN, or its reset, needs no
 // record: nothing is written after either, so a wait's own read of the
 // application's socket counts what was written before the close (wroteNow
-// says the rest).
+// says the rest). The read takes a sock_diag socket an earlier close gave back
+// (diagFree) rather than open one. One from the list that fails is dropped and
+// the read made on a new one, as a close that found none free makes it, so a
+// socket kept between closes cannot change an answer.
 func noteWroteAtClose(pc *pairedConn) {
 	if ps := readProxySide(pc.conn); ps.err == nil && peerEnded(ps.state) {
 		return
 	}
-	ds, err := openDiag()
+	ds, listed, err := takeDiag()
 	if err != nil {
 		return
 	}
-	defer ds.close()
-	if want, ok := wroteNow(ds, pc.app, pc.proxy); ok {
+	want, ok, err := wroteNow(ds, pc.app, pc.proxy)
+	if err != nil && listed {
+		ds.close()
+		if ds, err = openDiag(); err != nil {
+			return
+		}
+		want, ok, err = wroteNow(ds, pc.app, pc.proxy)
+	}
+	giveDiag(ds, err)
+	if ok {
 		pc.wroteAtClose.Store(&appWrote{want: want})
 	}
 }
@@ -764,26 +775,30 @@ func peerEnded(state uint8) bool {
 // wqueue is bracketed. Whether the count holds a FIN, which appWritten tells
 // with one lookup more, no answer needs (pairReached). A timewait socket (no
 // tcp_info) or one read in CLOSE, or one not found, gives no count: its FIN
-// or reset is the last it sent, and the wait reads it so.
-func wroteNow(ds *diagSock, app, proxy netip.AddrPort) (uint64, bool) {
-	read := func() (diagTCP, bool) {
+// or reset is the last it sent, and the wait reads it so. A lookup that fails
+// gives no count either, and its error.
+func wroteNow(ds *diagSock, app, proxy netip.AddrPort) (uint64, bool, error) {
+	read := func() (diagTCP, bool, error) {
 		d, err := lookupWritten(ds, app, proxy)
-		return d, err == nil && d.info != nil && d.info.State != tcpClose && d.info.Bytes_acked != 0
+		if err != nil && !errors.Is(err, errNoSocket) {
+			return d, false, err
+		}
+		return d, err == nil && d.info != nil && d.info.State != tcpClose && d.info.Bytes_acked != 0, nil
 	}
-	prev, ok := read()
+	prev, ok, err := read()
 	if !ok {
-		return 0, false
+		return 0, false, err
 	}
 	if prev.wqueue == 0 {
-		return prev.info.Bytes_acked - 1, true
+		return prev.info.Bytes_acked - 1, true, nil
 	}
 	for {
-		cur, ok := read()
+		cur, ok, err := read()
 		if !ok {
-			return 0, false
+			return 0, false, err
 		}
 		if cur.wqueue == 0 || cur.info.Bytes_acked == prev.info.Bytes_acked {
-			return cur.info.Bytes_acked - 1 + uint64(cur.wqueue), true
+			return cur.info.Bytes_acked - 1 + uint64(cur.wqueue), true, nil
 		}
 		prev = cur
 	}
