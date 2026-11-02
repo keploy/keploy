@@ -235,10 +235,21 @@ func TestTheCallersContextEndsTheUnbudgetedWait(t *testing.T) {
 // if set, is told each connection's count as it is accepted.
 func answerApp(t *testing.T, cfg *tls.Config, onConn func(n int64)) (*httptest.Server, *atomic.Int64) {
 	t.Helper()
+	srv, conns, _ := heldAnswerApp(t, 0, cfg, onConn)
+	return srv, conns
+}
+
+// heldAnswerApp is answerApp with its start held for hold connections (see
+// heldListener): only the connections after those reach the app, and its
+// TLS, and are counted.
+func heldAnswerApp(t *testing.T, hold int64, cfg *tls.Config, onConn func(n int64)) (*httptest.Server, *atomic.Int64, *heldListener) {
+	t.Helper()
 	conns := &atomic.Int64{}
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok")
 	}))
+	held := &heldListener{Listener: srv.Listener, hold: hold}
+	srv.Listener = held
 	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
 		if s == http.StateNew {
 			if n := conns.Add(1); onConn != nil {
@@ -253,7 +264,7 @@ func answerApp(t *testing.T, cfg *tls.Config, onConn func(n int64)) (*httptest.S
 		srv.Start()
 	}
 	t.Cleanup(srv.Close)
-	return srv, conns
+	return srv, conns, held
 }
 
 // expiredCert is a certificate for the loopback addresses whose validity
@@ -320,6 +331,32 @@ func TestAnAnswerTheTestCanNeverAcceptEndsTheUnbudgetedWaitAtOnce(t *testing.T) 
 				t.Fatalf("the wait probed the app %d times; want it to end on the first answer", got)
 			}
 		})
+	}
+}
+
+// The same answer ends the unbudgeted wait at once when it comes after a held
+// start, the case the wait has no budget for: compose holds the app's start
+// behind a slow dependency, so the first probes are reset, and then the app
+// comes up with a certificate the probe cannot verify. The app's run goes on
+// (its end never closes); the caller's ctx ends the wait at the app's third
+// TLS connection, so a wait that goes on fails the row instead of holding it.
+func TestAnAnswerNoProbeCanAcceptEndsTheWaitWhenItComesAfterAHeldStart(t *testing.T) {
+	r := appWaitRunner(t, zap.NewNop())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv, conns, held := heldAnswerApp(t, 4, &tls.Config{}, func(n int64) {
+		if n == 3 {
+			cancel()
+		}
+	})
+
+	res := r.RunTest(ctx, RunTestOpts{TestSetID: "test-set-0", TestStepID: "health", ServiceURL: srv.URL, AppEnded: make(chan struct{})})
+
+	if ctx.Err() != nil || !strings.Contains(res.Error, "app not reachable: failed to probe") || !strings.Contains(res.Error, "certificate signed by unknown authority") {
+		t.Fatalf("error = %q (ctx: %v); want the wait to fail on the app's first answer, with its ctx live", res.Error, ctx.Err())
+	}
+	if refused, got := held.refused.Load(), conns.Load(); refused != 4 || got != 1 {
+		t.Fatalf("the wait ended after %d reset probes and %d answered; want it to wait out the 4 resets, then end on the first answer", refused, got)
 	}
 }
 
