@@ -109,8 +109,8 @@ func instanceAgent(t *testing.T, mode models.Mode) (*Agent, *instanceWire, *inst
 }
 
 // claimAsWorker claims the run for process pid as one of two test workers,
-// under the wire, as ClaimInstance does past its refusal of a replay's
-// workers (replayWorkersRefusal).
+// under the wire, as ClaimInstance does past its refusal of record's full
+// round's workers (learnWorkersRefusal).
 func claimAsWorker(a *Agent, pid int, key string) (models.InstanceResp, *models.ScopeError) {
 	ctx := context.Background()
 	if err := a.wire.lock(ctx); err != nil {
@@ -421,4 +421,118 @@ func TestAReplaysRefusedCallIsChargedToTheTestOpenThenAlone(t *testing.T) {
 	p.refuse(2)
 	run(w1.Process.Pid, "TestThree", func() {})
 	require.Equal(t, refused(4002), charged("a::TestThree"), "a call refused while no test was open is the next test's")
+}
+
+// A replay that learns nothing takes each worker's claim, each served from a
+// manager of its own: only record's full round refuses them
+// (learnWorkersRefusal).
+func TestAReplayTakesEachWorkersClaim(t *testing.T) {
+	a, p, h := instanceAgent(t, models.MODE_TEST)
+	w1, w2 := child(t), child(t)
+	require.Equal(t, "1", claimWorker(t, a, w1.Process.Pid, "a", 2))
+	require.Equal(t, "2", claimWorker(t, a, w2.Process.Pid, "b", 2))
+	require.Equal(t, map[uint32]uint32{1: uint32(w1.Process.Pid), 2: uint32(w2.Process.Pid)}, h.given())
+	served, _ := p.log()
+	require.Equal(t, []uint32{1, 2}, served)
+}
+
+// In a replay, different workers' tests are open at once, each served on
+// its own worker's manager and charged its own worker's misses alone,
+// whichever ends first.
+func TestWorkersTestsOverlapAtReplay(t *testing.T) {
+	a, p, _ := instanceAgent(t, models.MODE_TEST)
+	a.proven.pool = map[string][]string{"a": {"pa"}, "b": {"pb"}}
+	w1, w2 := child(t), child(t)
+	claimWorker(t, a, w1.Process.Pid, "a", 2)
+	claimWorker(t, a, w2.Process.Pid, "b", 2)
+	_, serr := a.ProvenBegin(as(w1.Process.Pid), begin("TestOne"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestTwo"))
+	require.Nil(t, serr, "another worker's test may be open")
+	one, two := p.worker(t, 1), p.worker(t, 2)
+	require.Equal(t, "a::TestOne", one.exactTest)
+	require.Equal(t, "b::TestTwo", two.exactTest)
+	require.Empty(t, p.lastTest, "the run's manager serves no worker's test")
+	one.mu.Lock()
+	one.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /one", Instance: 1}}
+	one.mu.Unlock()
+	two.mu.Lock()
+	two.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /two", Instance: 2}}
+	two.mu.Unlock()
+
+	_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestTwo", Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	require.Equal(t, "a::TestOne", a.proven.openOf(1), "its end leaves the other worker's test open")
+	require.Equal(t, "a::TestOne", one.exactTest, "its end leaves the other worker's test served")
+	require.Equal(t, []string{"pb"}, two.exactNames, "its end serves its own worker its key's pool")
+	_, serr = a.ProvenEnd(as(w1.Process.Pid), models.ScopeReq{Name: "TestOne", Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	for id, want := range map[string]string{"a::TestOne": "GET /one", "b::TestTwo": "GET /two"} {
+		w := windowOf(t, a, id)
+		require.Equal(t, models.ScopeOutcomeFailed, w.Outcome, id)
+		require.Len(t, w.Evidence.Misses, 1, id)
+		require.Equal(t, want, w.Evidence.Misses[0].ActualSummary, id)
+	}
+	require.EqualValues(t, 1, windowOf(t, a, "a::TestOne").Instance)
+	require.EqualValues(t, 2, windowOf(t, a, "b::TestTwo").Instance)
+}
+
+// A replay whose build moves the run's one clock to each test's recorded
+// begin refuses an overlap, named: two tests cannot each run on their own
+// recorded begin. A record moves no clock, and lets them overlap.
+func TestAnOverlapIsRefusedOnTheRunsOneClockOnlyInAReplay(t *testing.T) {
+	for _, mode := range []models.Mode{models.MODE_TEST, models.MODE_RECORD} {
+		t.Run(string(mode), func(t *testing.T) {
+			a, _, _ := instanceAgent(t, mode)
+			clock := &clockHooks{}
+			useHooks(t, clock)
+			w1, w2 := child(t), child(t)
+			claimWorker(t, a, w1.Process.Pid, "a", 2)
+			claimWorker(t, a, w2.Process.Pid, "b", 2)
+			_, serr := a.ProvenBegin(as(w1.Process.Pid), begin("TestOne"))
+			require.Nil(t, serr)
+			_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestTwo"))
+			if mode == models.MODE_RECORD {
+				require.Nil(t, serr, "a record moves no clock")
+				require.Equal(t, "b::TestTwo", a.proven.openOf(2))
+				require.Empty(t, clock.moves)
+				return
+			}
+			require.NotNil(t, serr)
+			require.Equal(t, models.ScopeErrOneTestAtATime, serr.Code)
+			require.Contains(t, serr.Message, "b::TestTwo began in test worker 2 while test worker 1's test a::TestOne was still open, but keploy moves the run's one clock to each test's recorded begin")
+			require.Empty(t, a.proven.openOf(2))
+			require.Len(t, clock.moves, 1, "the refused test moved the clock")
+			require.Contains(t, clock.moves[0], "begin a::TestOne")
+		})
+	}
+}
+
+// A call a replay of test workers refused while two workers' tests were
+// open is charged to both, and leaves each without a verdict.
+func TestAReplaysRefusedCallDuringAnOverlapIsChargedToEveryOpenTest(t *testing.T) {
+	a, iw, _ := instanceAgent(t, models.MODE_TEST)
+	p := &lossWire{instanceWire: iw}
+	a.Proxy = p
+	a.proven.losses = a.markCaptureLosses(context.Background())
+	a.proven.pool = map[string][]string{"a": {"pa"}, "b": {"pb"}}
+	w1, w2 := child(t), child(t)
+	claimWorker(t, a, w1.Process.Pid, "a", 2)
+	claimWorker(t, a, w2.Process.Pid, "b", 2)
+	_, serr := a.ProvenBegin(as(w1.Process.Pid), begin("TestOne"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestTwo"))
+	require.Nil(t, serr)
+	p.refuse(1)
+	_, serr = a.ProvenEnd(as(w1.Process.Pid), models.ScopeReq{Name: "TestOne", Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestTwo", Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	want := models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1, What: "the latest: a connection to 10.0.0.9:5432, from process 4001, in no test worker's keploy instance"}}
+	for _, id := range []string{"a::TestOne", "b::TestTwo"} {
+		w := windowOf(t, a, id)
+		require.NotNil(t, w.Evidence, id)
+		require.Equal(t, want, w.Evidence.CannotCapture, id)
+		require.Contains(t, w.Evidence.Reason, "a replay refuses them unanswered", id)
+	}
 }

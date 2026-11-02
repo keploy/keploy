@@ -461,7 +461,7 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	a.endGoneWorkers(ctx)
 	me := claimant{pid: caller, start: start}
 	if declared > 1 {
-		if serr := a.replayWorkersRefusal(caller, declared); serr != nil {
+		if serr := a.learnWorkersRefusal(caller, declared); serr != nil {
 			return models.InstanceResp{}, serr
 		}
 		return a.claimWorker(ctx, req, me, declared)
@@ -1382,10 +1382,13 @@ func (a *Agent) reScope() {
 
 // overlapRefusal is why a test cannot begin while another worker's test is
 // open, "" when it can: what keploy keeps for the run as one, not per test
-// worker, would charge one worker's calls to another's test.
+// worker, would charge one worker's calls to another's test, or run one
+// worker's test on another's clock. A replay whose build moves the run's
+// one clock to each test's recorded begin (testClock) holds one test on it
+// at a time (beginTestClock).
 func (a *Agent) overlapRefusal(ctx context.Context) string {
-	if a.replaying() {
-		return "this keploy replays one test at a time across a run's workers"
+	if _, moves := testClock(); moves && a.replaying() {
+		return "keploy moves the run's one clock to each test's recorded begin, so two tests open at once cannot each run on their own"
 	}
 	if !a.countsCaptureLosses(ctx) {
 		return "keploy's hooks here count no capture losses, so a connection the kernel dropped could not be charged to every test open across it"

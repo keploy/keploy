@@ -63,17 +63,22 @@ func declaredWorkers(n, caller int) (int, *models.ScopeError) {
 	return n, nil
 }
 
-// replayWorkersRefusal refuses, in a replay, process pid's claim as one of
-// declared test workers: each worker's tests are served from its own
-// manager (serveWorker), but its misses still reach one run-wide list,
-// which cannot tell one worker's from another's.
-func (a *Agent) replayWorkersRefusal(pid, declared int) *models.ScopeError {
-	if !a.replaying() {
+// learnWorkersRefusal refuses process pid's claim as one of declared test
+// workers in record's full round (models.OutgoingOptions.Learn): its learn
+// step keeps the set's tests to the order they were recorded in, one after
+// another (keepRecordedOrder, holdLearn), and tests that several workers run
+// at once keep no order. A replay that learns nothing serves each worker on
+// its own (serveWorker).
+func (a *Agent) learnWorkersRefusal(pid, declared int) *models.ScopeError {
+	a.provenMu.Lock()
+	learn := a.proven.order.learn
+	a.provenMu.Unlock()
+	if !learn {
 		return nil
 	}
 	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrTooManyWorkers,
-		fmt.Sprintf("process %d declared %d test workers, but this keploy replays one test worker at a time", pid, declared),
-		"replay with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
+		fmt.Sprintf("process %d declared %d test workers, but record's full round replays one test worker at a time: its learn step pairs each call with a recording by the order the set's tests were recorded in, and tests that several workers run at once keep none", pid, declared),
+		"record with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand); keploy mock replay runs the workers at once")
 }
 
 // claimWorker claims an instance of the run for me, a worker of a run of

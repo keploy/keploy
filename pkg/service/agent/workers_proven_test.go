@@ -342,15 +342,19 @@ func TestAWorkersTestIsTheWorkersWhoseProcessBeganIt(t *testing.T) {
 	require.Equal(t, models.ScopeOutcomePassed, windowOf(t, a, "b::TestX").Outcome)
 }
 
-// A replay of more than one worker is refused at its first claim: one
-// staging serves every worker's recorded calls today.
-func TestAWorkerRunIsRefusedInAReplay(t *testing.T) {
+// Record's full round refuses a run of more than one worker at its first
+// claim, named: its learn step keeps the set's tests to their recorded
+// order, which tests run at once in several workers do not keep.
+func TestAWorkerRunIsRefusedInRecordsFullRound(t *testing.T) {
 	a, h := workerAgent(t, models.MODE_TEST, 4)
+	a.proven.order.learn = true
 	_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "a", Workers: 2}, os.Getpid())
 	require.NotNil(t, serr)
 	require.Equal(t, models.ScopeErrTooManyWorkers, serr.Code)
-	require.Contains(t, serr.Message, "this keploy replays one test worker at a time")
+	require.Contains(t, serr.Message, fmt.Sprintf("process %d declared 2 test workers, but record's full round replays one test worker at a time", os.Getpid()))
+	require.Contains(t, serr.Remedy, "record with one worker")
 	require.Empty(t, h.given())
+	require.Empty(t, a.proven.workers)
 }
 
 // Hooks that cannot stamp a worker on its connections, or that refuse its
