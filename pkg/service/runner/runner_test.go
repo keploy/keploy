@@ -196,10 +196,14 @@ func TestMockMismatchReportLeavesOutWhatTheAssertionDoes(t *testing.T) {
 // keeps what it was asked to store.
 type setupInstr struct {
 	paramsInstr
-	stored []*models.Mock
+	stored   []*models.Mock
+	outgoing []models.OutgoingOptions
 }
 
-func (*setupInstr) MockOutgoing(context.Context, models.OutgoingOptions) error { return nil }
+func (s *setupInstr) MockOutgoing(_ context.Context, opts models.OutgoingOptions) error {
+	s.outgoing = append(s.outgoing, opts)
+	return nil
+}
 func (s *setupInstr) StoreMocks(_ context.Context, f, u []*models.Mock) error {
 	s.stored = append(append(s.stored, f...), u...)
 	return nil
@@ -247,6 +251,45 @@ func TestTheRunnerStoresNoConnectionFailureOnTheAgent(t *testing.T) {
 	}
 	if setup.mockKindByName["mock-0"] != models.ConnectionFailure {
 		t.Fatal("the connection failure's kind is still known, for the mismatch report")
+	}
+}
+
+// The runner hands the agent keploy.yml's matching noise in every bucket the
+// agent's mock matchers read, url included: test.globalNoise.url masks the
+// part of a path or query value that changes per run, and reaches the HTTP
+// matcher only through OutgoingOptions.NoiseConfig. A bucket no matcher reads
+// stays out.
+func TestTheRunnerHandsTheAgentEveryMatchingNoiseBucket(t *testing.T) {
+	instr := &setupInstr{}
+	r := &Runner{
+		logger:          zap.NewNop(),
+		instrumentation: instr,
+		mappingDB:       &stubMappingDB{mappings: map[string][]models.MockEntry{}},
+		mockDB:          &skippingMockDB{},
+		globalNoise: models.GlobalNoise{
+			"header":      {"x-request-id": {}},
+			"body":        {"eventTs": {}},
+			"requestbody": {"nonce": {}},
+			"url":         {"/orders/": {`[0-9]+`}},
+			"status":      {"code": {}},
+		},
+	}
+	setup, err := r.setupTestSet(context.Background(), "test-set-0", time.Time{})
+	if err != nil {
+		t.Fatalf("setupTestSet: %v", err)
+	}
+	defer setup.cleanup()
+	if len(instr.outgoing) != 1 {
+		t.Fatalf("MockOutgoing called %d times; want 1", len(instr.outgoing))
+	}
+	want := map[string]map[string][]string{
+		"header":      {"x-request-id": {}},
+		"body":        {"eventTs": {}},
+		"requestbody": {"nonce": {}},
+		"url":         {"/orders/": {`[0-9]+`}},
+	}
+	if got := instr.outgoing[0].NoiseConfig; !reflect.DeepEqual(got, want) {
+		t.Fatalf("NoiseConfig = %v, want %v", got, want)
 	}
 }
 
