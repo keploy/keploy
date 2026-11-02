@@ -138,7 +138,7 @@ func TestWhatValidateRefusesIsSaidWithoutTheUsageText(t *testing.T) {
 	}{
 		{hintCase: hintCase{name: "test --must-pass with no --test-sets", command: "test",
 			args: []string{"-c", nativeRunApp, "--must-pass"}, keployDir: true},
-			refusal: "--test-sets flag must be set to use --must-pass=true"},
+			refusal: "--test-sets flag must be set to use must-pass mode (--must-pass, or test.mustPass in keploy.yml)"},
 		{hintCase: hintCase{name: "compose with no --container-name, in docker", command: "record",
 			args: []string{"-c", composeRun}, inDocker: true, keployDir: true},
 			refusal: noContainer},

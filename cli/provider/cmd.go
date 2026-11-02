@@ -1889,14 +1889,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 		if cmd.Name() == "record" {
-			metadata, err := cmd.Flags().GetString("metadata")
-			if err != nil {
-				errMsg := "failed to get the metadata flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-			c.cfg.Record.Metadata = metadata
-
+			// record.metadata, record.enableSampling and
+			// record.opportunisticTlsIntercept need no read: each flag is
+			// bound to its own key, and viper.Unmarshal has resolved it from
+			// the flag, the environment and keploy.yml.
 			if cmd.Flags().Changed("memory-limit") {
 				memoryLimit, err := cmd.Flags().GetUint64("memory-limit")
 				if err != nil {
@@ -1917,14 +1913,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					c.cfg.Record.MemoryLimit = 0
 				}
 			}
-
-			enableSampling, err := cmd.Flags().GetInt("enable-sampling")
-			if err != nil {
-				errMsg := "failed to get the enable-sampling flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-			c.cfg.Record.EnableSampling = enableSampling
 
 			// Resolve record-buffer values: flag overrides yaml, env
 			// overrides flag. Range validation and clamping live in
@@ -2005,19 +1993,19 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				c.cfg.DisableMapping = disableMapping
 			}
 
-			retryPassing, err := cmd.Flags().GetBool("retry-passing-test")
-			if err != nil {
-				errMsg := "failed to get the retry-passing-test flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-			c.cfg.RetryPassing = retryPassing
-
-			c.cfg.Test.DisableAutoHeaderNoise, err = cmd.Flags().GetBool("disableAutoHeaderNoise")
-			if err != nil {
-				errMsg := "failed to read the --disableAutoHeaderNoise flag; check the flag name with --help and confirm this command supports it"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			// The flag, when given, wins over keploy.yml's retryPassing. It is
+			// bound to test.retryPassingTest, not to retryPassing, so
+			// viper.Unmarshal cannot carry it; the flag's default must not
+			// replace keploy.yml's value. test.disableAutoHeaderNoise needs no
+			// read: its flag is bound to its own key, and viper.Unmarshal has
+			// resolved it from the flag, the environment and keploy.yml.
+			if cmd.Flags().Changed("retry-passing-test") {
+				c.cfg.RetryPassing, err = cmd.Flags().GetBool("retry-passing-test")
+				if err != nil {
+					errMsg := "failed to get the retry-passing-test flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
 			}
 
 			// Both spellings are read and OR-ed. --schema-noise-* is the
@@ -2079,12 +2067,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			// enforce that the test-sets are provided when --must-pass is set to true
 			// to prevent accidental deletion of failed testcases in testsets which was due to application changes
 			// and not due to flakiness or our internal issue.
-			mustPass, err := cmd.Flags().GetBool("must-pass")
-			if err != nil {
-				errMsg := "failed to get the must-pass flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
+			// Test.MustPass is what the replay deletes failing test cases by:
+			// viper.Unmarshal resolved it from --must-pass, TEST_MUSTPASS and
+			// keploy.yml's test.mustPass, so the checks below hold for each.
+			mustPass := c.cfg.Test.MustPass
 
 			if mustPass {
 				c.cfg.Test.SkipCoverage = true
@@ -2125,7 +2111,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 
 			if mustPass && !cmd.Flags().Changed("test-sets") {
-				return fmt.Errorf("--test-sets flag must be set to use --must-pass=true")
+				return fmt.Errorf("--test-sets flag must be set to use must-pass mode (--must-pass, or test.mustPass in keploy.yml)")
 			}
 
 			// skip coverage by default if command is of type docker
@@ -2142,13 +2128,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
-		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
-		if err != nil {
-			errMsg := "failed to read the global passthrough flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
+		// The flag, when given, wins over keploy.yml's record.globalPassthrough:
+		// on test it is bound to test.globalPassthrough, which viper.Unmarshal
+		// does not carry into Record.
+		if cmd.Flags().Changed("global-passthrough") {
+			c.cfg.Record.GlobalPassthrough, err = cmd.Flags().GetBool("global-passthrough")
+			if err != nil {
+				errMsg := "failed to read the global passthrough flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
 		}
-		c.cfg.Record.GlobalPassthrough = globalPassthrough
 
 		// The flag, when given, wins over keploy.yml's record.disableHandshakeHold.
 		if cmd.Flags().Changed("disable-handshake-hold") {
@@ -2162,14 +2152,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 		if cmd.Name() == "record" {
-			opportunisticTLSIntercept, err := cmd.Flags().GetBool("opportunistic-tls-intercept")
-			if err != nil {
-				errMsg := "failed to read the opportunistic-tls-intercept flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-			c.cfg.Record.OpportunisticTLSIntercept = opportunisticTLSIntercept
-
 			// Upstream TLS verification. Unlike the flat flags above these
 			// must be applied ONLY when the user actually typed them.
 			// record.upstreamTls is a nested block, and utils.BindFlagsToViper
@@ -2246,13 +2228,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-
-		c.cfg.Normalize.AllowHighRisk, err = cmd.Flags().GetBool("allow-high-risk")
-		if err != nil {
-			errMsg := "failed to read allow-high-risk flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
+		// normalize.allowHighRisk needs no read: --allow-high-risk is bound to
+		// it, and viper.Unmarshal has resolved it from the flag and keploy.yml.
 
 	case "templatize":
 		var err error
@@ -2943,13 +2920,9 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		return fmt.Errorf("a native command is not supported on OS %s/%s for `keploy mock`; run your tests through a docker command instead (e.g. -c \"docker compose run tests\")", runtime.GOOS, runtime.GOARCH)
 	}
 
-	// Resolve the keploy folder path.
-	path, err := cmd.Flags().GetString("path")
-	if err != nil {
-		utils.LogError(c.logger, err, "failed to get the path")
-		return errors.New("failed to get the path")
-	}
-	if c.cfg.Path, err = c.keployFolder(path); err != nil {
+	// Resolve the keploy folder path. viper.Unmarshal has resolved cfg.Path
+	// from --path, KEPLOY_PATH and keploy.yml's path, as for record and test.
+	if c.cfg.Path, err = c.keployFolder(c.cfg.Path); err != nil {
 		return err
 	}
 
