@@ -247,6 +247,10 @@ type Decision struct {
 	Clock          *models.ClockOffset
 	Refusal        *Refusal
 	Line           string
+	// AnsweredAfter are the recordings whose answer holds Recorded that
+	// the decision set aside because they were asked at or before the
+	// call and answered after it: R's word there decided nothing.
+	AnsweredAfter []Place
 }
 
 // Decide is every changed word of in, decided (see above).
