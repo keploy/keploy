@@ -74,7 +74,7 @@ func TestBindFreePortTriesEachPortAboveTheEphemeralRangeOnce(t *testing.T) {
 // PortTaken names what holds the port where it can, and says it cannot
 // where it cannot.
 func TestPortTakenNamesTheHolderWhereItCan(t *testing.T) {
-	if got := PortTaken(1); !strings.Contains(got, "port 1 is taken (by a process keploy cannot name") {
+	if got := PortTaken(1); got != "port 1 is taken ("+unnamedHolder+")" {
 		t.Fatalf("a port nothing here holds: %q", got)
 	}
 }

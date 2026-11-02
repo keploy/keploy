@@ -49,10 +49,11 @@ func bindFreePortAbove(ephemeral func() (lo, hi uint32, known bool), bind func(p
 }
 
 // PortTaken says that port is taken and, where it can, what holds it
-// (PortHolder): "port 16789 is taken by pid 4242 (keploy)".
+// (PortHolder): "port 16789 is taken by pid 4242 (keploy)". Where it cannot,
+// it says why (unnamedHolder, the platform's).
 func PortTaken(port uint32) string {
 	if h := PortHolder(port); h != "" {
 		return fmt.Sprintf("port %d is taken by %s", port, h)
 	}
-	return fmt.Sprintf("port %d is taken (by a process keploy cannot name: another network namespace's, or one it may not read)", port)
+	return fmt.Sprintf("port %d is taken (%s)", port, unnamedHolder)
 }

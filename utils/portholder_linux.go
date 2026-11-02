@@ -11,6 +11,10 @@ import (
 	"strings"
 )
 
+// unnamedHolder is why PortTaken names no holder (PortHolder ""): the
+// socket's process is in another namespace, or its /proc cannot be read.
+const unnamedHolder = "by a process keploy cannot name: another network namespace's, or one it may not read"
+
 // PortHolder names the processes of this network namespace that hold a TCP or
 // UDP socket bound to port, as "pid 4242 (keploy)" (at most three, then how
 // many more), or "" when it can name none: the socket's process is in another
