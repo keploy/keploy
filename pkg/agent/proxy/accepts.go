@@ -402,11 +402,16 @@ func (p *Proxy) failCount(err error) {
 // waiting will never be accepted, so every wait ends, now, with that said,
 // rather than waiting on a count that cannot grow. Called right after the
 // listener is closed, before the shutdown's slower steps.
+//
+// The counts fail as the listener is dropped, under acceptsMu, which every
+// read of them takes first (markedListener): a read finds the listener, or
+// the counts failed, never neither, which it would take for a listener never
+// marked.
 func (p *Proxy) closeAccepts() {
 	p.acceptsMu.Lock()
 	p.acceptsLn = nil
-	p.acceptsMu.Unlock()
 	p.accepts.Fail(errListenerClosed)
+	p.acceptsMu.Unlock()
 	p.paired.fail(errListenerClosed)
 }
 
