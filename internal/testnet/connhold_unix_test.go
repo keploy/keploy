@@ -14,6 +14,10 @@ import (
 // What a dial to a held address ends in.
 var errConnRefused error = syscall.ECONNREFUSED
 
+// errHeldBind is what a bind at a held port ends in: the address is in use,
+// as at any port another socket is at.
+var errHeldBind error = syscall.EADDRINUSE
+
 // The address holdUDPByConnection gives stays its own while the test runs:
 // no other UDP socket can bind it, and a datagram sent to it is answered port
 // unreachable, which a connected sender reads as refused.
@@ -21,17 +25,17 @@ func TestAUDPPortHeldByAConnectionCannotBeTakenAndRefusesADatagram(t *testing.T)
 	requireUDPHeld(t, holdUDPByConnection(t))
 }
 
-// requireUDPHeld checks that a UDP bind at addr fails because the address is
-// in use, and that a datagram sent to addr is refused. A hold that took the
-// datagram would answer nothing; the deadline makes that a failure, not a
-// hang.
+// requireUDPHeld checks that a UDP bind at addr is refused because the hold
+// is at the port (errHeldBind), and that a datagram sent to addr is refused.
+// A hold that took the datagram would answer nothing; the deadline makes
+// that a failure, not a hang.
 func requireUDPHeld(t *testing.T, addr string) {
 	t.Helper()
 	pc, err := net.ListenPacket("udp", addr)
 	if err == nil {
 		_ = pc.Close()
 	}
-	require.ErrorIs(t, err, errAddrInUse, "a UDP socket took the held port %s", addr)
+	require.ErrorIs(t, err, errHeldBind, "a UDP socket took the held port %s", addr)
 	c, err := net.Dial("udp", addr)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })

@@ -36,9 +36,9 @@ func TestDialTCPWithConnRefusedRetry_RetriesBoundedOnPersistentRefusal(t *testin
 // TestDialTCPWithConnRefusedRetry_RetriesThenConnects proves the value: a dial
 // refused at first succeeds once the app starts listening.
 func TestDialTCPWithConnRefusedRetry_RetriesThenConnects(t *testing.T) {
-	// The port is held for the test's life (testnet.SharedPort): a dial to
-	// it is refused until the listener opens there, and no other socket can
-	// take it meanwhile.
+	// The port is kept for the test's life (testnet.SharedPort): a dial to
+	// it is refused until the listener opens there, and no bind to port 0 is
+	// given it meanwhile.
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t)))
 
 	ready := make(chan net.Listener, 1)

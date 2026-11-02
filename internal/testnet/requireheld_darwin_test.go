@@ -33,7 +33,7 @@ func requireHeld(t *testing.T, addr string) {
 		_ = ln.Close()
 		t.Fatalf("listened on %s without SO_REUSEADDR: no socket holds the port", addr)
 	}
-	require.ErrorIs(t, err, errAddrInUse, "listen on %s without SO_REUSEADDR: want the address in use", addr)
+	require.ErrorIs(t, err, errHeldBind, "listen on %s without SO_REUSEADDR: want the address in use", addr)
 	tcp, err := net.ResolveTCPAddr("tcp", addr)
 	require.NoError(t, err)
 	for _, r := range [][2]string{{"lowlast", "lowfirst"}, {"first", "last"}, {"hifirst", "hilast"}} {

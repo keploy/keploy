@@ -15,9 +15,10 @@ import (
 // reservedPort is ReservedPort on Windows: a port below the dynamic port
 // range, IPv4's and IPv6's, that netsh reports, claimed in os.TempDir for
 // the test's life (claimPort) and free for a listener at every address when
-// it is returned. Go's listeners set no option on Windows, so no socket can
-// hold the port beside the code's listener; instead no bind to port 0 and no
-// connect is given a port below the range, and the claim keeps the port from
+// it is returned. No socket can hold the port for the code's listener: an
+// exclusive hold refuses the listener's bind, and one that is not exclusive
+// keeps no socket off the port. Instead no bind to port 0 and no connect is
+// given a port below the range, and the claim keeps the port from
 // every other test that claims one. A socket that names the port can still
 // take it.
 func reservedPort(t *testing.T) int {
@@ -36,9 +37,11 @@ func reservedPort(t *testing.T) int {
 }
 
 // sharedPort is SharedPort on Windows: ReservedPort's port, claimed below
-// the dynamic port range, with no socket at it. A listener binds beside a
-// hold here only by setting SO_REUSEADDR, which lets any other socket that
-// sets it bind the port as well, and it binds beside no exclusive hold.
+// the dynamic port range, with no socket at it. No hold here keeps other
+// sockets off a port and lets the test's listeners bind it: no listener
+// binds beside an exclusive hold, and a listener that sets no option, as
+// Go's do, binds 127.0.0.1 at a port a socket that is not exclusive holds
+// at the wildcard address, as any other socket can.
 func sharedPort(t *testing.T) int {
 	t.Helper()
 	return reservedPort(t)

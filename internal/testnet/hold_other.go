@@ -43,8 +43,9 @@ func SharedPort(t *testing.T) int {
 	return sharedPort(t)
 }
 
-// ListenShared opens a TCP listener at addr, a port SharedPort holds, beside
-// the hold; it is closed when the test ends if the test has not closed it.
+// ListenShared opens a TCP listener at addr, a port SharedPort keeps (on
+// macOS beside the connection that holds it); it is closed when the test
+// ends if the test has not closed it.
 func ListenShared(t *testing.T, network, addr string) net.Listener {
 	t.Helper()
 	ln, err := OpenShared(network, addr)
@@ -61,8 +62,8 @@ func OpenShared(network, addr string) (net.Listener, error) {
 }
 
 // SharedListenConfig is the net.ListenConfig OpenShared listens with, for a
-// test that sets more on it before it listens at a port SharedPort holds:
-// its Control is shareControl, which lets the listener bind beside the hold.
+// test that sets more on it before it listens at a port SharedPort keeps:
+// its Control is shareControl, which sets nothing here (see shareControl).
 func SharedListenConfig() net.ListenConfig {
 	return net.ListenConfig{Control: shareControl}
 }
@@ -73,12 +74,13 @@ func SharedListenConfig() net.ListenConfig {
 // SharedPort's port: held by a connection at 127.0.0.1, at a port no bind to
 // port 0 is given, and Go's listeners there set SO_REUSEADDR, which binds
 // beside the connected socket; once the code's listener closes, a dial to the
-// port is refused again. On Windows, where Go's listeners set no option and
-// so cannot bind beside any socket that holds the port, it is a port below
-// the dynamic port range, which no bind to port 0 and no connect is given,
-// claimed for the test's life so that no other test is given it either, and
-// SharedPort's port is the same. A socket that names the port can still
-// take it.
+// port is refused again. On Windows, where no socket can hold the port for
+// the code's listener (an exclusive hold refuses the listener's bind, and
+// one that is not exclusive keeps no socket off the port), it is a port
+// below the dynamic port range, which no bind to port 0 and no connect is
+// given, claimed for the test's life so that no other test is given it
+// either, and SharedPort's port is the same. A socket that names the port
+// can still take it.
 func ReservedPort(t *testing.T) int {
 	t.Helper()
 	return reservedPort(t)
