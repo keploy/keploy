@@ -161,14 +161,17 @@ func TestLearnMatchLearnsADriftedBodyValueAsNoise(t *testing.T) {
 
 func TestLearnMatchLearnsEveryPartOfARequest(t *testing.T) {
 	h, n, opts := learnOn(t)
+	// The path is the same: a path segment names the call, and a change
+	// there nothing explains is refused
+	// (TestLearnMatchRefusesAChangeInWhatNamesTheCall).
 	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "GET", "/v1/users/41?at=100", "", map[string]string{"Authorization": "Bearer one", "X-Trace": "t1"}, `{}`)}}
-	served, miss, err := h.learnMatch(context.Background(), live("GET", "/v1/users/42?at=200", "", map[string]string{"Authorization": "Bearer two", "X-Trace": "t2"}), db, n, opts)
+	served, miss, err := h.learnMatch(context.Background(), live("GET", "/v1/users/41?at=200", "", map[string]string{"Authorization": "Bearer two", "X-Trace": "t2"}), db, n, opts)
 	if err != nil || miss != nil || served == nil {
 		t.Fatalf("served %v miss %+v err %v", served, miss, err)
 	}
-	// The path segment, the query value, the header, and the credential the
-	// static noise list names: it leaves that list in the learn step.
-	want := map[string][]string{"url.path.2": {}, "url.query.at": {}, "header.x-trace": {}, "header.authorization": {}}
+	// The query value, the header, and the credential the static noise list
+	// names: it leaves that list in the learn step.
+	want := map[string][]string{"url.query.at": {}, "header.x-trace": {}, "header.authorization": {}}
 	if got := db.consumed[0].Spec.ReqBodyNoise; !reflect.DeepEqual(got, want) {
 		t.Fatalf("learned %v, want %v", got, want)
 	}
@@ -381,22 +384,22 @@ func TestLearnMatchMissReasons(t *testing.T) {
 
 func TestLearnMatchPoolOnlyInAFullRecord(t *testing.T) {
 	h, n, opts := learnOn(t)
-	pool := learnRecorded("pool-0", 0, "GET", "/config/1", "", nil, `{}`)
+	pool := learnRecorded("pool-0", 0, "GET", "/config?v=1", "", nil, `{}`)
 	pool.TestModeInfo.Lifetime = models.LifetimeSession
 	db := &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{pool}}}
-	if served, miss, _ := h.learnMatch(context.Background(), live("GET", "/config/2", "", nil), db, n, opts); served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged {
+	if served, miss, _ := h.learnMatch(context.Background(), live("GET", "/config?v=2", "", nil), db, n, opts); served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged {
 		t.Fatalf("a partial record never pairs a pool mock: served %v miss %+v", served, miss)
 	}
 	opts.LearnPool = true
-	served, miss, _ := h.learnMatch(context.Background(), live("GET", "/config/2", "", nil), db, n, opts)
+	served, miss, _ := h.learnMatch(context.Background(), live("GET", "/config?v=2", "", nil), db, n, opts)
 	if served == nil || miss != nil {
 		t.Fatalf("a full record pairs it: miss %+v", miss)
 	}
-	if len(db.pooled) != 1 || !reflect.DeepEqual(db.pooled[0].Spec.ReqBodyNoise, map[string][]string{"url.path.1": {}}) {
+	if len(db.pooled) != 1 || !reflect.DeepEqual(db.pooled[0].Spec.ReqBodyNoise, map[string][]string{"url.query.v": {}}) {
 		t.Fatalf("the pool mock carries what was learned: %+v", db.pooled)
 	}
 	// The pool keeps it: the next call with yet another value matches exactly.
-	if served, miss, _ := h.learnMatch(context.Background(), live("GET", "/config/3", "", nil), db, n, models.OutgoingOptions{Learn: true}); served == nil || miss != nil {
+	if served, miss, _ := h.learnMatch(context.Background(), live("GET", "/config?v=3", "", nil), db, n, models.OutgoingOptions{Learn: true}); served == nil || miss != nil {
 		t.Fatalf("learned noise is known to the next call: miss %+v", miss)
 	}
 }
@@ -1346,16 +1349,6 @@ func TestWhatFLearnsReplaysWithNoiseBesideAVariable(t *testing.T) {
 			[]*req{live("POST", "/orders", `{"id":"o-9999","item":"pen"}`, nil), live("GET", "/orders/o-9999?ts=200", "", nil)},
 			[]*req{live("POST", "/orders", `{"id":"o-5555","item":"pen"}`, nil), live("GET", "/orders/o-5555?ts=300", "", nil)},
 			"url.query.ts", "mock-2",
-		},
-		{
-			"a path segment",
-			[]*models.Mock{
-				learnRecorded("mock-1", 0, "POST", "/orders", `{"id":"o-1111","item":"pen"}`, nil, `{"id":"o-1111"}`),
-				learnRecorded("mock-2", time.Second, "GET", "/orders/o-1111/v/100", "", nil, `{"id":"o-1111","state":"new"}`),
-			},
-			[]*req{live("POST", "/orders", `{"id":"o-9999","item":"pen"}`, nil), live("GET", "/orders/o-9999/v/200", "", nil)},
-			[]*req{live("POST", "/orders", `{"id":"o-5555","item":"pen"}`, nil), live("GET", "/orders/o-5555/v/300", "", nil)},
-			"url.path.3", "mock-2",
 		},
 		{
 			"one array element",

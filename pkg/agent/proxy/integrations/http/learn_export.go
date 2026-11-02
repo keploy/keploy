@@ -52,6 +52,13 @@ const (
 	// entry's Id), never as noise, a read of the clock or an earlier call's
 	// value.
 	LearnEchoOnly
+	// LearnExplainedOnly: only as a value an earlier call gave or a read of
+	// the application's clock, never as noise or an echo. The leaf names
+	// which call this is (a path segment, an operation header, a field
+	// naming the destination: identityClass), as every HTTP call's leaves
+	// of those classes are held, so a change nothing explains is the
+	// request's.
+	LearnExplainedOnly
 )
 
 // LearnMatch decides a call of another parser in record's full round with

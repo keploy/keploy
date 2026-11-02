@@ -314,17 +314,24 @@ func (n learnNoise) declared(l learn.Leaf) bool {
 	return false
 }
 
-// heldLearned is why the learn step refuses what it learned of another
-// parser's call, by the leaves the caller holds (learnNoise.hold): a leaf
-// held LearnEchoOnly learned as anything but a value the answer carries
-// back. "" where it refuses nothing.
-func (n learnNoise) heldLearned(learned []learn.Learned) string {
-	if n.hold == nil {
-		return ""
-	}
+// heldLearned is why the learn step refuses what it learned of a call, by
+// how it may learn each leaf (holdOf): a leaf held LearnEchoOnly learned as
+// anything but a value the answer carries back; one held
+// LearnExplainedOnly, that names which call this is (identityClass), learned
+// as anything a value an earlier call gave, a value the test gave (given) or
+// a read of the clock does not explain (explained). "" where it refuses
+// nothing.
+func (n learnNoise) heldLearned(learned []learn.Learned, given []variables.Binding) string {
 	for _, l := range learned {
-		if l.Kind != learn.KindEcho && n.hold(l.Recorded.Noise) == LearnEchoOnly {
-			return l.Recorded.Path + " changed, and keploy learns it only as a value the answer carries back, which the answer does not"
+		switch n.holdOf(l.Recorded.Noise) {
+		case LearnEchoOnly:
+			if l.Kind != learn.KindEcho {
+				return l.Recorded.Path + " changed, and keploy learns it only as a value the answer carries back, which the answer does not"
+			}
+		case LearnExplainedOnly:
+			if !explained(l, given) {
+				return l.Recorded.Path + " changed, and it says which call this is (" + identityClass(l.Recorded.Noise) + "): keploy learns a change there only as a value an earlier call or the test gave, or a read of the clock, and this one is none of them. If the application now makes this call, record it again; if the value there may really change, declare it noise in keploy.yml"
+			}
 		}
 	}
 	return ""
@@ -1873,11 +1880,12 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				res.Outcome, res.Reason, res.Why = learn.Miss, "", why
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
-			if why := n.heldLearned(learned); why != "" {
+			gave := givenBindings(mockDb)
+			if why := n.heldLearned(learned, gave); why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
-			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb))
+			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, gave)
 			if why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
@@ -2568,7 +2576,7 @@ func (h *HTTP) declaredPlan(tracker *learn.Tracker, test uint64, m *models.Mock,
 			zap.String("mock", m.Name), zap.Strings("declared", fields), zap.String("why", why))
 		return pairing{}, nil
 	}
-	if why := n.heldLearned(kept); why != "" {
+	if why := n.heldLearned(kept, givenBindings(mockDb)); why != "" {
 		return refuse(why)
 	}
 	plan, why := learnPlan(tracker, test, answered, rec, own, kept, earlier, givenBindings(mockDb))

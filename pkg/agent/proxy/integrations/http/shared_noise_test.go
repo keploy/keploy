@@ -180,12 +180,16 @@ func TestNoServedCallWritesTheSharedRequestNoise(t *testing.T) {
 			{orderCall("18", 2, 3, "r-9"), map[string]int{"off": 200, "on": 502, "learn": 200, "mock noise": 502}}}},
 		{"an unrecorded call", orderRec, []call{
 			{"GET /none HTTP/1.1\r\nHost: api.test\r\nX-Request-Id: r-9\r\n\r\n", map[string]int{"off": 502, "on": 502, "learn": 502, "mock noise": 502}}}},
+		// In the learn row no tracker shows the read-back the create call
+		// before it, so nothing explains its path segment's change, which
+		// names the order read: refused (a tracker's own variable is served,
+		// TestLearnMatchFollowsAVariable).
 		{"a variable bound and used", varRecs, []call{
 			{createCall("ord-liv-9"), map[string]int{"off": 201, "on": 201, "learn": 201, "mock noise": 502}},
-			{readBackCall("ord-liv-9"), map[string]int{"off": 502, "on": 200, "learn": 200, "mock noise": 502}}}},
+			{readBackCall("ord-liv-9"), map[string]int{"off": 502, "on": 200, "learn": 502, "mock noise": 502}}}},
 		{"a variable used with another value", varRecs, []call{
 			{createCall("ord-liv-9"), map[string]int{"off": 201, "on": 201, "learn": 201, "mock noise": 502}},
-			{readBackCall("ord-oth-7"), map[string]int{"off": 502, "on": 502, "learn": 200, "mock noise": 502}}}},
+			{readBackCall("ord-oth-7"), map[string]int{"off": 502, "on": 502, "learn": 502, "mock noise": 502}}}},
 	}
 	for _, row := range []struct {
 		name, proven     string
