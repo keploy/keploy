@@ -2,6 +2,7 @@ package replay
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -268,6 +269,184 @@ func haltedSetBeginsNoRetryCycle(t *testing.T, held string, on, serving bool) {
 	}
 	if n := r.app.count("test-1"); n != 1 {
 		t.Fatalf("test-1 was sent %d times; the set halted before any retry, so it is sent once", n)
+	}
+}
+
+// agentCalls is a compose stack's instrumentation that notes each call that
+// stages a set on keploy's agent or starts or stops the app's container: a
+// set that begins after the app has gone makes none.
+type agentCalls struct {
+	*composeInstr
+	mu    sync.Mutex
+	calls []string
+}
+
+func (a *agentCalls) note(call string) {
+	a.mu.Lock()
+	a.calls = append(a.calls, call)
+	a.mu.Unlock()
+}
+
+func (a *agentCalls) made() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.calls...)
+}
+
+func (a *agentCalls) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
+	a.note("MockOutgoing")
+	return a.composeInstr.MockOutgoing(ctx, opts)
+}
+
+func (a *agentCalls) StoreMocks(ctx context.Context, filtered, unfiltered []*models.Mock) error {
+	a.note("StoreMocks")
+	return a.composeInstr.StoreMocks(ctx, filtered, unfiltered)
+}
+
+func (a *agentCalls) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+	a.note("UpdateMockParams")
+	return a.composeInstr.UpdateMockParams(ctx, params)
+}
+
+func (a *agentCalls) MakeAgentReadyForDockerCompose(ctx context.Context) error {
+	a.note("MakeAgentReadyForDockerCompose")
+	return a.composeInstr.MakeAgentReadyForDockerCompose(ctx)
+}
+
+func (a *agentCalls) BeforeTestSetCompose(ctx context.Context, testRunID, firstRunTestSet string, serve bool) error {
+	a.note("BeforeTestSetCompose")
+	return a.composeInstr.BeforeTestSetCompose(ctx, testRunID, firstRunTestSet, serve)
+}
+
+func (a *agentCalls) StartComposeApp(ctx context.Context) (models.ComposeAppStart, error) {
+	a.note("StartComposeApp")
+	return a.composeInstr.StartComposeApp(ctx)
+}
+
+func (a *agentCalls) StopComposeApp(ctx context.Context) (string, error) {
+	a.note("StopComposeApp")
+	return a.composeInstr.StopComposeApp(ctx)
+}
+
+// A set that begins after the app the run keeps for every set has exited
+// says so, naming the set it exited in, and begins nothing: no test is sent
+// and nothing is staged on keploy's agent, whose stack went down with the
+// app. Its app did not fail to start, it was gone. The repro's second set
+// staged its mocks on the gone agent, failed "context canceled", and the run
+// stopped on that, the set unreported.
+func TestASetAfterTheKeptAppsExitSaysTheAppWasGone(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("switch on %v", on), func(t *testing.T) {
+			r := runComposeExitMidTest(t, on, true, nil)
+			if r.status != models.TestSetStatusAppHalted {
+				t.Fatalf("first set: status %s, want APP_HALTED", r.status)
+			}
+			calls := &agentCalls{composeInstr: r.h.replayer.instrumentation.(*composeInstr)}
+			r.h.replayer.instrumentation = calls
+			r.h.set = "test-set-1"
+			if status := r.h.runServing(t); status != models.TestSetStatusAppHalted {
+				t.Fatalf("second set: status %s, want APP_HALTED", status)
+			}
+			rep := r.h.report.report
+			const want = "application exited before this test set began: it exited with code 3 while test set test-set-0 ran - check application logs"
+			if rep.TestSet != "test-set-1" || rep.Status != string(models.TestSetStatusAppHalted) || !strings.Contains(rep.FailureReason, want) {
+				t.Fatalf("second set's report: set %s, status %s, reason %q; want test-set-1 APP_HALTED with %q", rep.TestSet, rep.Status, rep.FailureReason, want)
+			}
+			if rep.Total != 3 || rep.Success+rep.Failure != 0 {
+				t.Fatalf("second set's report: total %d, %d passed, %d failed; want its 3 tests, none run", rep.Total, rep.Success, rep.Failure)
+			}
+			if made := calls.made(); len(made) != 0 {
+				t.Fatalf("the second set called %v; the app and its stack were gone, so it calls nothing", made)
+			}
+			if r.h.replayer.saysResultsUnread(models.TestSetStatusAppHalted, "test-set-1") {
+				t.Fatal("the second set's missing results would be said as an error; it said why it ran none")
+			}
+			for name, was := range map[string]int{"test-1": 1, "test-2": 1, "test-3": 0} {
+				if n := r.app.count(name); n != was {
+					t.Fatalf("%s was sent %d times, %d of them by the second set; the app was gone, so it sends none", name, n, n-was)
+				}
+			}
+		})
+	}
+}
+
+// An exit told before any set began is the app's startup failing: the first
+// set says that, with the exit's code, and begins nothing.
+func TestAKeptAppGoneBeforeTheFirstSetFailedToStart(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("switch on %v", on), func(t *testing.T) {
+			provenOn(t, on)
+			c := &composeInstr{}
+			h := composeHarnessOf(t, c, 3)
+			ctx, kept := listenedTo(context.Background())
+			h.replayer.keptExit = kept
+			models.AppExitOf(ctx)(models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 3})
+			app := &heldRequests{requests: map[string]int{}}
+			h.replayer.hookImpl = prHooks{onRequest: app.onRequest}
+			calls := &agentCalls{composeInstr: c}
+			h.replayer.instrumentation = calls
+			if status := h.runServing(t); status != models.TestSetStatusAppHalted {
+				t.Fatalf("status %s, want APP_HALTED", status)
+			}
+			const want = "application startup failed: it exited with code 3 - check application logs"
+			if reason := h.report.report.FailureReason; !strings.Contains(reason, want) {
+				t.Fatalf("reason %q; want %q", reason, want)
+			}
+			if made := calls.made(); len(made) != 0 {
+				t.Fatalf("the set called %v; the app was gone, so it calls nothing", made)
+			}
+			if h.replayer.saysResultsUnread(models.TestSetStatusAppHalted, "test-set-0") {
+				t.Fatal("the set's missing results would be said as an error; it said why it ran none")
+			}
+			for _, name := range []string{"test-1", "test-2", "test-3"} {
+				if n := app.count(name); n != 0 {
+					t.Fatalf("%s was sent %d times; the app was gone, so the set sends none", name, n)
+				}
+			}
+		})
+	}
+}
+
+// When an exit was told is said from the set running then, or the one that
+// had ended last: an exit before any set ran is the app's startup failing.
+func TestTheKeptExitSaysWhenItWasTold(t *testing.T) {
+	exit := models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 3}
+	for _, tc := range []struct {
+		name string
+		// before runs the sets, by name, that begin and end before the
+		// exit, and during the one running at it ("" for none).
+		before        []string
+		during, begin string
+		want          string
+	}{
+		{"before any set", nil, "", "s0", ""},
+		{"while a set ran", nil, "s0", "s1", "while test set s0 ran"},
+		{"between sets", []string{"s0"}, "", "s1", "after test set s0 ended"},
+		{"while an earlier attempt ran", nil, "s0", "s0", "while an earlier attempt of this test set ran"},
+		{"after an earlier attempt", []string{"s0"}, "", "s0", "after an earlier attempt of this test set ended"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, kept := listenedTo(context.Background())
+			for _, s := range tc.before {
+				gone, _, end := kept.begin(s)
+				if gone {
+					t.Fatalf("set %s began with the app gone before its exit", s)
+				}
+				end()
+			}
+			if tc.during != "" {
+				_, _, end := kept.begin(tc.during)
+				models.AppExitOf(ctx)(exit)
+				end()
+			} else {
+				models.AppExitOf(ctx)(exit)
+			}
+			gone, earlier, end := kept.begin(tc.begin)
+			defer end()
+			if !gone || earlier != tc.want {
+				t.Fatalf("begin: gone %v, earlier %q; want gone, %q", gone, earlier, tc.want)
+			}
+		})
 	}
 }
 

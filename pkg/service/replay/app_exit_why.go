@@ -4,8 +4,13 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
+	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
 )
 
 // unansweredTest is the test a set sent its application last that the
@@ -77,6 +82,15 @@ type keptAppExit struct {
 	// told is closed once the exit is told; exit is then set.
 	told chan struct{}
 	exit models.AppError
+
+	mu sync.Mutex
+	// running is the set running now ("" between sets) and last the set
+	// that ran before it, as begin and its end mark them.
+	running, last string
+	// isTold is whether the exit is told, and toldIn and toldAfter the
+	// set running and the one that had ended last when it was.
+	isTold            bool
+	toldIn, toldAfter string
 }
 
 func newKeptAppExit() *keptAppExit {
@@ -86,9 +100,50 @@ func newKeptAppExit() *keptAppExit {
 // tell keeps the exit e, once: the first word is the exit's.
 func (k *keptAppExit) tell(e models.AppError) {
 	k.once.Do(func() {
+		k.mu.Lock()
 		k.exit = e
+		k.isTold, k.toldIn, k.toldAfter = true, k.running, k.last
+		k.mu.Unlock()
 		close(k.told)
 	})
+}
+
+// begin marks the set named running until end, and says whether the app's
+// exit was told before the set began (gone) and, if so, when (earlier,
+// earlierExitWhy): a set that begins after the app has gone is not the app's
+// startup, unless no set ran before the exit. begin and tell take the same
+// lock, so an exit is told either before the set began, and said here, or
+// while it runs.
+func (k *keptAppExit) begin(set string) (gone bool, earlier string, end func()) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.running = set
+	if k.isTold {
+		gone, earlier = true, earlierExitWhy(set, k.toldIn, k.toldAfter)
+	}
+	return gone, earlier, func() {
+		k.mu.Lock()
+		k.running, k.last = "", set
+		k.mu.Unlock()
+	}
+}
+
+// earlierExitWhy says when an exit told before set began was told: while the
+// set in ran, or after the set after had ended. A run that tries a set again
+// runs it twice, and the earlier try is said so. "" for an exit told before
+// any set began: that is the app's startup failing.
+func earlierExitWhy(set, in, after string) string {
+	switch {
+	case in == set:
+		return "while an earlier attempt of this test set ran"
+	case in != "":
+		return "while test set " + in + " ran"
+	case after == set:
+		return "after an earlier attempt of this test set ended"
+	case after != "":
+		return "after test set " + after + " ended"
+	}
+	return ""
 }
 
 // listenedTo is ctx carrying k's tell (models.WithAppExit), with k: the
@@ -96,4 +151,57 @@ func (k *keptAppExit) tell(e models.AppError) {
 func listenedTo(ctx context.Context) (context.Context, *keptAppExit) {
 	k := newKeptAppExit()
 	return models.WithAppExit(ctx, k.tell), k
+}
+
+// reportKeptAppGone ends a set that began after the exit of the app the run
+// keeps for every set was told (keptAppExit.begin): it ran none of its tests,
+// and its report says the app's exit, status (mapAppErrorToTestSetStatus) and
+// when it went (earlier, earlierExitWhy), or that it failed to start where no
+// set had begun before the exit. The set is counted in the run's totals as one
+// whose app halted before its first test is.
+func (r *Replayer) reportKeptAppGone(ctx context.Context, testRunID, testSetID string, testCases []*models.TestCase, startTime time.Time, status models.TestSetStatus, exit models.AppError, earlier string) (models.TestSetStatus, error) {
+	total := len(testCases)
+	if selected := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID]); len(selected) != 0 {
+		total = len(selected)
+	}
+	reason := describeTestSetFailure(status, nil, runShape{appExit: appExitWhy(exit, ""), exitedEarlier: earlier})
+	r.logger.Error("the application had exited before this test set began, so keploy runs none of its tests",
+		zap.String("test-set", testSetID), zap.String("reason", reason))
+	appLogs := exit.AppLogs
+	if appLogs == "" && shouldIncludeAppLogs(status) {
+		logCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		appLogs = r.instrumentation.GetRecentAppLogs(logCtx)
+		cancel()
+	}
+	timeTaken := time.Since(startTime)
+	testReport := &models.TestReport{
+		Version:       models.GetVersion(),
+		TestSet:       testSetID,
+		Status:        string(status),
+		Total:         total,
+		TimeTaken:     timeTaken.String(),
+		FailureReason: reason,
+		AppLogs:       appLogs,
+		CmdUsed:       r.config.Test.CmdUsed,
+		Proven:        provenswitch.On(),
+	}
+	r.noteSetEnd(testReport)
+	if err := r.reportDB.InsertReport(context.WithoutCancel(ctx), testRunID, testSetID, testReport); err != nil {
+		utils.LogError(r.logger, err, "failed to insert report")
+		return models.TestSetStatusInternalErr, fmt.Errorf("failed to insert report")
+	}
+	// It said why it ran none, above: that it has no results to read is not
+	// another error (saysResultsUnread).
+	r.markNeverReady(testSetID)
+
+	r.completeTestReportMu.Lock()
+	r.completeTestReport[testSetID] = TestReportVerdict{
+		total:     total,
+		duration:  timeTaken,
+		timeTaken: timeTaken.String(),
+	}
+	r.totalTests += total
+	r.totalTestTimeTaken += timeTaken
+	r.completeTestReportMu.Unlock()
+	return status, nil
 }

@@ -222,6 +222,11 @@ type runShape struct {
 	// heldTest is the test the application had not answered at its exit:
 	// it took the test's request, so it had started. Empty otherwise.
 	heldTest string
+	// exitedEarlier is when the application the run keeps for every set
+	// exited, when that was before the set began and after a set had begun
+	// (earlierExitWhy): the app was gone, it did not fail to start. Empty
+	// otherwise.
+	exitedEarlier string
 }
 
 const partialRunReason = "replay stopped before every test ran - the tests missing from the totals were not " +
@@ -273,6 +278,9 @@ func describeTestSetVerdict(status models.TestSetStatus, testCaseResults []model
 			exit = ": " + shape.appExit
 		}
 		const nextStep = " - check application logs in the app_logs field for details and next steps"
+		if shape.exitedEarlier != "" {
+			return "application exited before this test set began" + exit + " " + shape.exitedEarlier + nextStep
+		}
 		if len(testCaseResults) == 0 && shape.heldTest == "" {
 			return "application startup failed" + exit + nextStep
 		}
@@ -2021,6 +2029,24 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusIgnored, nil
 	}
 
+	// The app the run keeps for every set: a set that begins once its exit
+	// is told begins nothing. keploy knows then that the app is gone, and its
+	// stack with it (keploy's agent among it): the set stages nothing on the
+	// agent and sends no test, and its report says the app had exited, and
+	// when, not that it failed to start. begin and the exit's tell take one
+	// lock: an exit told after begin is this set's, which the watch below
+	// halts it on.
+	if kept := r.keptExit; serveTest && kept != nil {
+		gone, earlier, endKept := kept.begin(testSetID)
+		defer endKept()
+		// kept.exit is set, for good, once gone is said.
+		if gone {
+			if status, ok := mapAppErrorToTestSetStatus(kept.exit); ok {
+				return r.reportKeptAppGone(runTestSetCtx, testRunID, testSetID, testCases, startTime, status, kept.exit, earlier)
+			}
+		}
+	}
+
 	var conf *models.TestSet
 	if r.testSetConf != nil {
 		conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
@@ -2434,8 +2460,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		} else if kept := r.keptExit; kept != nil {
 			// The app the run started once for every set: its exit, told
 			// at once by its runner (keptAppExit), halts this set as the
-			// return of a run of the set's own does. An exit told before
-			// this set began halts it too: the app is gone.
+			// return of a run of the set's own does. A set that began
+			// with the exit told ran nothing (reportKeptAppGone).
 			runTestSetErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
 				select {

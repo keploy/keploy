@@ -68,8 +68,9 @@ func (r *Replayer) notJudged(testSetID string) bool {
 	return r.notJudgedSets[testSetID]
 }
 
-// markNeverReady records that testSetID was not judged because its
-// application never got ready (proven switch): it ran no test.
+// markNeverReady records that testSetID ran no test because its application
+// never got ready: it was not judged (proven switch), or the app the run keeps
+// for every set had exited before the set began (reportKeptAppGone).
 func (r *Replayer) markNeverReady(testSetID string) {
 	r.notJudgedMu.Lock()
 	defer r.notJudgedMu.Unlock()
@@ -89,8 +90,8 @@ func (r *Replayer) neverReady(testSetID string) bool {
 
 // saysResultsUnread says whether a set's results that could not be read are
 // an error to say: not for a set with no tests to run, nor for one whose
-// application never got ready (it said why already, and ran no test); for
-// any other, one not judged for another reason too.
+// application never got ready or was gone (it said why already, and ran no
+// test); for any other, one not judged for another reason too.
 func (r *Replayer) saysResultsUnread(status models.TestSetStatus, testSetID string) bool {
 	return status != models.TestSetStatusNoTestsToRun && !r.neverReady(testSetID)
 }
