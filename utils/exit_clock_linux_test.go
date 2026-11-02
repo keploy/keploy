@@ -1189,6 +1189,43 @@ func TestTheExitClockCreditsWaitsInTheKernelForTheHungTaskTimeInAll(t *testing.T
 			t.Fatalf("the look after the credit was spent added %v, want the %v keploy could run", got, w/4)
 		}
 	})
+	t.Run("a keploy held off the CPU spends the credit before the stall", func(t *testing.T) {
+		// The thread runs 20 ms of each look between its waits in the
+		// kernel, there for the other 80 ms, its storage serving. Where
+		// keploy could run less than the thread could, its time is set
+		// against the thread's waits first: the stall counts only what it
+		// could run past them while the credit stands, then all of it.
+		const ran = 20 * time.Millisecond
+		for _, tc := range []struct {
+			name        string
+			own, before time.Duration // keploy's time a look; what the stall counts a look while the credit stands
+			creditLooks int
+		}{
+			{"keploy runnable throughout", w, ran, 4},
+			{"keploy runnable for half of it", w / 2, 0, 6},
+			{"keploy runnable for a tenth of it", w / 10, 0, 30},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				r := stop(map[int]taskTime{1: held})
+				step := func(m map[int]taskTime) {
+					adds(1, ran, 0, 1, false)(m)
+					th := m[1]
+					th.blocked = true
+					m[1] = th
+				}
+				for i := range tc.creditLooks + 2 {
+					want := tc.before
+					if i >= tc.creditLooks {
+						want = tc.own
+					}
+					r.serves(w)
+					if got := r.look(w, tc.own, step); got != want {
+						t.Fatalf("look %d, keploy runnable for %v of it, added %v, want %v (credit spent: %v of %v)", i, tc.own, got, want, r.c.credited, wedge)
+					}
+				}
+			})
+		}
+	})
 	t.Run("a thread standing in the kernel spends the credit too", func(t *testing.T) {
 		// A credit of two looks, short of the hung-task time of three.
 		r := newClockRigCredited(map[int]taskTime{1: held}, wedge, wedge, 2*w, diskMark{"259:0": {}})
