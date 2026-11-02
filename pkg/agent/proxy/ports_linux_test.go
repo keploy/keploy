@@ -61,7 +61,7 @@ func TestTwoProxiesStartedTogetherOnOnePortBothListen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Close()
+	defer func() { _ = first.Close() }()
 	taken := uint32(first.Addr().(*net.TCPAddr).Port)
 	holder := fmt.Sprintf("the proxy's port %d is taken by pid %d (", taken, os.Getpid())
 
@@ -201,7 +201,7 @@ func TestADNSPortTakenOnTCPOnlyLetsItsUDPGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	taken := uint32(ln.Addr().(*net.TCPAddr).Port)
 	var told [][2]uint32
 	p := dnsProxy(0, taken)

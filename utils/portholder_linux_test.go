@@ -31,22 +31,22 @@ func TestPortHolderNamesTheProcessOnThePort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tcp4.Close()
+	defer func() { _ = tcp4.Close() }()
 	tcp6, err := net.Listen("tcp", ":0") // dual-stack: the tcp6 table
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tcp6.Close()
+	defer func() { _ = tcp6.Close() }()
 	udp4, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer udp4.Close()
+	defer func() { _ = udp4.Close() }()
 	udp6, err := net.ListenPacket("udp", ":0") // dual-stack: the udp6 table
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer udp6.Close()
+	defer func() { _ = udp6.Close() }()
 	for name, port := range map[string]int{
 		"tcp": tcp4.Addr().(*net.TCPAddr).Port, "tcp6": tcp6.Addr().(*net.TCPAddr).Port,
 		"udp": udp4.LocalAddr().(*net.UDPAddr).Port, "udp6": udp6.LocalAddr().(*net.UDPAddr).Port,
@@ -76,12 +76,12 @@ func TestPortHolderNamesThreeHoldersThenCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	f, err := ln.(*net.TCPListener).File()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	pids := []int{os.Getpid()}
 	for i := 0; i < 4; i++ {
 		cmd := exec.Command("sleep", "60")

@@ -23,7 +23,7 @@ func TestTheLoadedHooksAreToldTheProxysMovedPorts(t *testing.T) {
 	if err != nil {
 		t.Skipf("no kernel map for the agent info (needs root): %v", err)
 	}
-	defer m.Close()
+	defer func() { _ = m.Close() }()
 	h := &Hooks{logger: zap.NewNop(), agentRegistrationMap: m}
 	if err := h.SetProxyPorts(40001, 40002); err == nil {
 		t.Fatal("hooks that sent no agent info took the proxy's ports")
@@ -41,7 +41,7 @@ func TestTheLoadedHooksAreToldTheProxysMovedPorts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer wrong.Close()
+	defer func() { _ = wrong.Close() }()
 	h.agentRegistrationMap = wrong
 	if err := h.sendLoadedAgentInfo(structs.AgentInfo{DNSPort: 26789}); err == nil {
 		t.Fatal("a send to a map of another value size succeeded")
