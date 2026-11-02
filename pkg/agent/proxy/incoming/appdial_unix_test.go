@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -428,6 +429,103 @@ func TestEveryFirstDialEndsItsWaitWithTheCallsContext(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The last call to leave its wait returns only once the wait's poll dials
+// the app no more. The end of the wait's context cannot stop a dial already
+// past its dialer's look at the context, and that dial's connect reaches an
+// app that listens as the call ends: a connection for a call that has ended.
+// The poll's dial is held here in that gap (pollControl) until the call is
+// seen waiting for the poll; then the dial goes on, refused, and the app,
+// listening once the call has returned, sees nothing. The dial held is the
+// poll's first, or a later look's (its third): the call waits for the whole
+// poll, not for its first look only.
+func TestTheLastCallToLeaveItsWaitReturnsOnlyOnceThePollDialsNoMore(t *testing.T) {
+	for _, look := range []struct {
+		name string
+		dial int32 // the poll's dial held, counted from 1
+	}{
+		{"the poll's first look", 1},
+		{"a later look of the poll's", 3},
+	} {
+		t.Run(look.name, func(t *testing.T) {
+			t.Parallel()
+			addr := sharedAppAddr(t)
+			pm := New(zap.NewNop(), nil, &config.Config{})
+			inDial, release := make(chan struct{}), make(chan struct{})
+			var dials atomic.Int32
+			pm.pollControl = func(string, string, syscall.RawConn) error {
+				if dials.Add(1) == look.dial {
+					close(inDial)
+					<-release
+				}
+				return nil
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			ch := make(chan dialed, 1)
+			caller := make(chan string, 1) // the call's goroutine, as its stack names it
+			go func() {
+				caller <- thisGoroutine()
+				c, err := pm.dialApp(ctx, addr, nil)
+				ch <- dialed{c, err}
+			}()
+			g := <-caller
+			end := never(t)
+			select {
+			case <-inDial:
+			case <-end:
+				t.Fatalf("the wait's poll did not dial the app %d times", look.dial)
+			}
+			cancel()
+			for !receivingIn(g, "(*IngressProxyManager).leaveWait") {
+				select {
+				case r := <-ch:
+					close(release)
+					t.Fatalf("the call's dial returned (%v) while its wait's own dial to the app was still to connect: that connect reaches an app that listens now, for a call that has ended", r.err)
+				case <-end:
+					t.Fatal("the call neither returned nor waited for its wait's poll to stop")
+				case <-time.After(time.Millisecond):
+				}
+			}
+			close(release)
+			if r := result(t, ch); !errors.Is(r.err, context.Canceled) {
+				t.Fatalf("a call whose context ended in its wait returned %v, want the context's end", r.err)
+			}
+			if n := accepted(t, testnet.ListenShared(t, "tcp4", addr)); n != 0 {
+				t.Fatalf("the app, listening once the call had returned, saw %d connections keploy opened for it", n)
+			}
+		})
+	}
+}
+
+// thisGoroutine is the calling goroutine's stack header up to its state:
+// "goroutine 42 [".
+func thisGoroutine() string {
+	buf := make([]byte, 64)
+	header, _, _ := strings.Cut(string(buf[:runtime.Stack(buf, false)]), "[")
+	return header + "["
+}
+
+// receivingIn reports whether goroutine g (thisGoroutine's) is blocked
+// receiving from a channel in fn itself (its stack's top frame).
+func receivingIn(g, fn string) bool {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	for _, stack := range strings.Split(string(buf), "\n\n") {
+		header, frames, _ := strings.Cut(stack, "\n")
+		top, _, _ := strings.Cut(frames, "\n")
+		if strings.HasPrefix(header, g+"chan receive") && strings.Contains(top, fn+"(") {
+			return true
+		}
+	}
+	return false
 }
 
 // A redial of a stale pooled connection waits for an app that restarts for
