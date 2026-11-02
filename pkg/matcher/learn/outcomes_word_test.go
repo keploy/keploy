@@ -1170,3 +1170,50 @@ func TestOutcomeAFieldKeployCanNameIsNoToken(t *testing.T) {
 		}
 	}
 }
+
+// Two places that both show a word, whose requests were in flight together,
+// are each a source, and either binds the same value: a place before the
+// call that holds the recorded word in the recording and round F's word in
+// round F, at one field, proves the link, so the order of their answers,
+// which keploy cannot tell, is never asked. The word is bound at the
+// earliest, a copy, never refused. This is no false green: the two carry
+// the same value in both runs, and replay checks the bound value at every
+// use, so a replay whose two places part goes red. A group of an id (a
+// 16-bit piece of a UUID the call carries whole) reads alike. Where one of
+// the two keeps the recorded word, it is no source and the other binds;
+// where neither shows the pair at one field (round F gave it at another
+// field), their order is all that could tie the word to one and it is
+// refused.
+func TestOutcomeAWordTwoRequestsInFlightTogetherBothShowIsACopy(t *testing.T) {
+	const r, f = "6f1c2a9e-77b2-4303-9d1e-3c5a7b9e0f12", "0b8e4d21-1a3f-4d9c-8e2b-5d7f9a1c3e64"
+	insert := oCarried("mock-1497", "body.docs.0.appId", r, f, 3*time.Second, 200*time.Millisecond, 1)
+	// The two finds: mock-1500's request was recorded before mock-1499 was
+	// answered, on another connection.
+	find := oCarried("mock-1499", "body.filter.appId", r, f, 2*time.Second, 300*time.Millisecond, 2)
+	other := oCarried("mock-1500", "body.filter.appId", r, f, 1900*time.Millisecond, 300*time.Millisecond, 3)
+	call := func(earlier ...Earlier) []Decision {
+		return Decide(oInput("body.cmd.documents.0._id", r, f, earlier, nil))
+	}
+	for _, tc := range []struct {
+		name    string
+		earlier []Earlier
+		from    string
+	}{
+		{"the two finds alone", []Earlier{find, other}, "mock-1499"},
+		{"the insert before the two finds", []Earlier{insert, find, other}, "mock-1497"},
+		{"one find kept the recorded id", []Earlier{find, oCarried("mock-1500", "body.filter.appId", r, r, 1900*time.Millisecond, 300*time.Millisecond, 3)}, "mock-1499"},
+	} {
+		ds := call(tc.earlier...)
+		for _, w := range [][2]string{{"6f1c2a9e", "0b8e4d21"}, {"4303", "4d9c"}} {
+			if d := oWord(t, ds, w[0], w[1]); d.Outcome != OutcomeValue || d.From.Mock != tc.from {
+				t.Errorf("%s, word %q: %s; want a Value bound at %s", tc.name, w[0], oDescribe([]Decision{d}), tc.from)
+			}
+		}
+	}
+	moved := func(e Earlier, field string) Earlier {
+		e.Seen = []Seen{{Side: Request, Leaf: oText(e.Seen[0].Place, r), Live: "", Place: e.Seen[0].Place}, {Side: Request, Leaf: oText(field, "none"), Live: f, Place: field}}
+		return e
+	}
+	d := oWord(t, call(moved(find, "body.filter.ownerId"), moved(other, "body.filter.ownerId")), "4303", "4d9c")
+	oRefused(t, "neither find shows the pair at one field", d, RefusalUnknown, "mock-1499", "in flight together")
+}
