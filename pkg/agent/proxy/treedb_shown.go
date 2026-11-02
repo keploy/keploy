@@ -323,10 +323,12 @@ func (v *exactView) rangeShownKeyed(db *TreeDb, ix *integrations.MockIndex, key 
 }
 
 // verifyWalk is the verify mode's walk of every entry a key index files under
-// one key, narrowed to those the view shows (showsStatic), at one tree
-// generation, in the index's order. A read narrows it to the live ones.
+// one key, narrowed to those the view shows (showsStatic), at one version of
+// that index (keyIndex.ver), in the index's order. A read narrows it to the
+// live ones.
 type verifyWalk struct {
-	gen  uint64
+	ki   *keyIndex
+	ver  uint64
 	want []keyedEntry
 }
 
@@ -338,13 +340,16 @@ type verifyWalk struct {
 // caller compares them once it is released (verifyExactRead panics).
 //
 // The walk examines every entry filed under key, so it is made once per view,
-// tree, key and generation (walkedLocked); each read narrows it to the
-// entries live at that read. That is the walk the read would make: within a
-// generation a tree only loses values (every store moves it first,
-// storedLocked), so no entry filed under key becomes live and none is filed;
-// and what the view shows of a mock (showsStatic) does not change while the
-// view is in force. Every read is still compared whole, and a call's read
-// costs what the view shows, not every recording of the key.
+// tree, MockIndex, key and version of the tree's key index (walkedLocked);
+// each read narrows it to the entries live at that read. That is the walk the
+// read would make: the index's lists change only by a rebuild, which is a new
+// index, or by follow and swapInPlace, which move its version; and what the
+// view shows of a mock (showsStatic) does not change while the view is in
+// force. The walk does not read the tree's generation, which the split it
+// checks (keyParts) trusts: a store that changes the index without moving
+// the generation leaves the split stale, and the next read panics. Every read
+// is still compared whole, and a call's read costs what the view shows, not
+// every recording of the key.
 func (v *exactView) recomputeShownLocked(db *TreeDb, ix *integrations.MockIndex, key string, p *keyPart, extra []keyedEntry) (want, got []*models.Mock) {
 	for _, e := range v.walkedLocked(db, ix, key) {
 		if db.liveLocked(e) {
@@ -370,22 +375,25 @@ func (v *exactView) recomputeShownLocked(db *TreeDb, ix *integrations.MockIndex,
 }
 
 // walkedLocked returns the verify mode's walk of what ix files under key in db
-// that v shows, at db's generation, making it on its first use there. db.mu
-// must be held, for reading at least.
+// that v shows, at the current version of db's key index for ix, making it on
+// its first use there; nothing when db has no index for ix. db.mu must be
+// held, for reading at least.
 func (v *exactView) walkedLocked(db *TreeDb, ix *integrations.MockIndex, key string) []keyedEntry {
+	ki := db.keyed[ix]
+	if ki == nil {
+		return nil
+	}
 	at := shownAt{db, ix, key}
 	v.shownMu.Lock()
 	defer v.shownMu.Unlock()
-	if w := v.walked[at]; w != nil && w.gen == db.gen {
+	if w := v.walked[at]; w != nil && w.ki == ki && w.ver == ki.ver {
 		return w.want
 	}
-	w := &verifyWalk{gen: db.gen}
-	if ki := db.keyed[ix]; ki != nil {
-		verifyExamined.Add(uint64(len(ki.lists[key])))
-		for _, e := range ki.lists[key] {
-			if v.showsStatic(e.mk) {
-				w.want = append(w.want, e)
-			}
+	w := &verifyWalk{ki: ki, ver: ki.ver}
+	verifyExamined.Add(uint64(len(ki.lists[key])))
+	for _, e := range ki.lists[key] {
+		if v.showsStatic(e.mk) {
+			w.want = append(w.want, e)
 		}
 	}
 	if v.walked == nil {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -400,15 +401,17 @@ func TestTheVerifyModeRefusesAStaleShownEntry(t *testing.T) {
 	}
 }
 
-// TestTheVerifyModeWalksAKeyOncePerViewAndGeneration: the verify mode's walk
-// of every entry under a key is made once per view and tree generation, and
-// every read is still compared with it, narrowed to what is live then.
-// Counted, not timed: on a tree of 300 mocks under one key, 41 reads of one
-// view walk the 300 once; a removal, which leaves the generation, walks
-// nothing and the next read leaves the removed mock out; a store, which
-// moves it, walks the 300 again once; a new view walks them for itself; and
-// another tree at the same generation is walked for itself too.
-func TestTheVerifyModeWalksAKeyOncePerViewAndGeneration(t *testing.T) {
+// TestTheVerifyModeWalksAKeyOncePerViewAndIndexVersion: the verify mode's
+// walk of every entry under a key is made once per view, tree, MockIndex and
+// version of the tree's key index, and every read is still compared with it,
+// narrowed to what is live then. Counted, not timed: on a tree of 300 mocks
+// under one key, 41 reads of one view walk the 300 once; a removal, which
+// leaves the index as it is, walks nothing and the next read leaves the
+// removed mock out; a store, which drops the index, walks the 300 again once;
+// a new view walks them for itself; another tree at the same generation is
+// walked for itself too; and reads of one key through two indexes of one
+// tree, taken in turn, walk each index's list once.
+func TestTheVerifyModeWalksAKeyOncePerViewAndIndexVersion(t *testing.T) {
 	if !exactViewVerify.Load() {
 		t.Fatal("precondition: the rows run with the verify mode on")
 	}
@@ -459,5 +462,108 @@ func TestTheVerifyModeWalksAKeyOncePerViewAndGeneration(t *testing.T) {
 	}
 	if n := verifyExamined.Load() - before; n != 301 {
 		t.Fatalf("reads of a second tree made the verify mode examine %d entries; want its 301 once", n)
+	}
+	// A second MockIndex of the same tree files under "k" only the
+	// protocol-phase mocks: the same key string with another list, as two
+	// parsers' indexes may file one SQL text. Reads through the two in turn
+	// are each checked with their own index's walk, made once.
+	phaseIx := &integrations.MockIndex{Keys: func(m *models.Mock) []string {
+		if m.IsProtocolPhase() {
+			return m.Noise
+		}
+		return nil
+	}}
+	byIx := func(ix *integrations.MockIndex) []string {
+		var out []string
+		v.rangeShownKeyed(db, ix, "k", func(mk *models.Mock) bool {
+			out = append(out, mk.Name)
+			return true
+		})
+		return out
+	}
+	full := shownWalk(v, db, "k")
+	before = verifyExamined.Load()
+	for i := 0; i < 4; i++ {
+		if got := byIx(phaseIx); !slices.Equal(got, full) {
+			t.Fatalf("a read through the second index gives %v; want the protocol-phase %v", got, full)
+		}
+		if got := shownWalk(v, db, "k"); !slices.Equal(got, full) {
+			t.Fatalf("a read through the first index gives %v; want %v", got, full)
+		}
+	}
+	if n := verifyExamined.Load() - before; n != 30 {
+		t.Fatalf("reads through two indexes in turn made the verify mode examine %d entries; want the second index's 30 once", n)
+	}
+}
+
+// TestTheVerifyModeRefusesAKeyIndexChangeTheGenerationMissed: the verify
+// mode's walk is kept per version of the key index, not per tree generation,
+// so it still checks the split a keyed read is served from (keyParts) against
+// the index when a change to the index leaves the generation: a swap in
+// place, a re-stamp that the index follows, and an insert that drops it, each
+// made here under the tree's lock without storedLocked. The split, kept at
+// the generation, is stale then, and the next read must panic, as the walk
+// made at every read panicked.
+func TestTheVerifyModeRefusesAKeyIndexChangeTheGenerationMissed(t *testing.T) {
+	if !exactViewVerify.Load() {
+		t.Fatal("precondition: the rows run with the verify mode on")
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(db *TreeDb, ms []*models.Mock) bool
+	}{
+		{"a swap in place", func(db *TreeDb, ms []*models.Mock) bool {
+			old := ms[29] // m030, protocol-phase
+			sw := *old
+			sw.Name = "m030-swapped"
+			for ix, ki := range db.keyed {
+				if !ki.swapInPlace(db, ix, old.TestModeInfo, old, &sw) {
+					return false
+				}
+			}
+			db.rbt.Put(old.TestModeInfo, &sw)
+			return db.keyed[keyedTestIndex] != nil
+		}},
+		{"a re-stamp the index follows", func(db *TreeDb, ms []*models.Mock) bool {
+			old := ms[9] // m010, protocol-phase
+			upd := *old
+			upd.Name = "m010-restamped"
+			upd.TestModeInfo.SortOrder = 1000
+			db.followKeyedLocked(old.TestModeInfo, upd.TestModeInfo, old, &upd)
+			db.rbt.Remove(old.TestModeInfo)
+			db.rbt.Put(upd.TestModeInfo, &upd)
+			return db.keyed[keyedTestIndex] != nil
+		}},
+		{"an insert that drops the index", func(db *TreeDb, _ []*models.Mock) bool {
+			mk := &models.Mock{Name: "m500", Kind: models.MySQL, Noise: []string{"k"}}
+			mk.Spec.Metadata = map[string]string{"type": "config"}
+			mk.TestModeInfo = models.TestModeInfo{ID: 500, SortOrder: 500}
+			db.keyed = nil
+			db.rbt.Put(mk.TestModeInfo, mk)
+			return true
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, ms := shownTree(60)
+			v := &exactView{test: "T"}
+			if got := shownWalk(v, db, "k"); len(got) != 6 {
+				t.Fatalf("precondition: the first read gives %v; want the 6 protocol-phase mocks", got)
+			}
+			gen := db.gen
+			db.mu.Lock()
+			ok := tc.change(db, ms)
+			db.mu.Unlock()
+			if !ok || db.gen != gen {
+				t.Fatalf("precondition: the change was made=%v and left the generation at %d (was %d)", ok, db.gen, gen)
+			}
+			func() {
+				defer func() {
+					if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), "exact view verify") {
+						t.Fatalf("a keyed read after %s that left the generation: recovered %v; want the verify mode's panic", tc.name, r)
+					}
+				}()
+				shownWalk(v, db, "k")
+			}()
+		})
 	}
 }

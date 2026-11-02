@@ -212,8 +212,8 @@ type exactView struct {
 	shownMu sync.Mutex
 	shown   map[shownAt]*shownExtra
 	// walked is, in the verify mode only, the walk recomputeShownLocked
-	// made of each tree, MockIndex and key, at the tree's generation it
-	// made it at. Under shownMu.
+	// made of each tree, MockIndex and key, at the version of the tree's
+	// key index it made it at. Under shownMu.
 	walked map[shownAt]*verifyWalk
 	// stamp is the learn tracker's open test (learn.Tracker.OpenEpoch) as
 	// the test's view was installed (exactState.stampTest), set before the
