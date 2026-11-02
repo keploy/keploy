@@ -48,7 +48,11 @@ func Start(t testing.TB, cmd *exec.Cmd) <-chan struct{} {
 	beforeWait := waiting
 	go func() {
 		// Never unlocked: the runtime ends the thread with this goroutine,
-		// once cmd is reaped or failed to start.
+		// once cmd is reaped or failed to start. The lock comes before
+		// cmd.Start: the thread that starts cmd is its parent, whose end
+		// the kernel kills it on, and a goroutine not yet locked may move
+		// to another thread inside cmd.Start, after the fork, leaving that
+		// parent to the runtime.
 		runtime.LockOSThread()
 		err := cmd.Start()
 		started <- err

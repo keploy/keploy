@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -298,7 +299,10 @@ func TestACommandThatCannotStartFailsItsTest(t *testing.T) {
 // run on is one that could end so, and the process with it, while its test
 // runs. While the goroutine that waits on the process waits, goroutines that
 // each lock a thread and keep it are started, until one runs on its thread
-// or on a thread made since (see othersRunOnThisThread).
+// or on a thread made since (see othersRunOnThisThread). First, the thread
+// the goroutine waits on is the process's parent, the thread that started
+// it: a goroutine that moved to another thread after it started the process
+// left that parent to the runtime.
 func TestTheThreadThatStartedAProcessRunsNothingElseUntilItIsReaped(t *testing.T) {
 	if err := SetLifeline(); err != nil {
 		t.Fatal(err)
@@ -306,17 +310,36 @@ func TestTheThreadThatStartedAProcessRunsNothingElseUntilItIsReaped(t *testing.T
 	// One P: a goroutine that waits hands its thread to the next one to
 	// run, the one it started, unless it is locked to that thread.
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
-	ran := make(chan bool, 1)
-	setWaiting(t, func() { ran <- othersRunOnThisThread() })
 	cmd := exec.Command("sh", "-c", "exec "+UntilTheTestEnds)
+	type look struct {
+		thread   int
+		children []int
+		err      error
+		others   bool
+	}
+	ran := make(chan look, 1)
+	setWaiting(t, func() {
+		l := look{thread: unix.Gettid()}
+		l.children, l.err = childrenOf(l.thread)
+		l.others = othersRunOnThisThread()
+		ran <- l
+	})
 	reaped := Start(t, cmd)
-	var others bool
+	var l look
 	select {
-	case others = <-ran:
+	case l = <-ran:
 	case <-beforeTheDeadline(t):
 		t.Fatal("Start did not run its hook before it waited on the process")
 	}
-	if others {
+	if l.err != nil {
+		t.Fatal(l.err)
+	}
+	if !slices.Contains(l.children, cmd.Process.Pid) {
+		t.Fatalf("the process (%d) is not a child of the thread (%d) that waits on it, whose children are %v: "+
+			"the thread that started it, whose end the kernel kills it on, is one the runtime may end while the test runs",
+			cmd.Process.Pid, l.thread, l.children)
+	}
+	if l.others {
 		t.Fatal("a goroutine ran on the thread that started the process, while the goroutine that waits on the process waited, " +
 			"and exited locked to it: the runtime ended the thread, and the kernel killed the process with it")
 	}
@@ -360,6 +383,24 @@ func othersRunOnThisThread() bool {
 			return false
 		}
 	}
+}
+
+// childrenOf lists the children of thread tid of this process: the
+// processes it started (by fork or clone), not those of its other threads.
+func childrenOf(tid int) ([]int, error) {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/self/task/%d/children", tid))
+	if err != nil {
+		return nil, fmt.Errorf("read thread %d's children: %w", tid, err)
+	}
+	var pids []int
+	for _, f := range strings.Fields(string(b)) {
+		pid, err := strconv.Atoi(f)
+		if err != nil {
+			return nil, fmt.Errorf("thread %d's children: %q is no pid", tid, f)
+		}
+		pids = append(pids, pid)
+	}
+	return pids, nil
 }
 
 // threads is the set of this process's threads.
