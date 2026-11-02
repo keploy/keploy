@@ -1145,7 +1145,7 @@ func (h *HTTP) variableMember(ctx context.Context, input *req, scope varScope, h
 // a disagreement of the check and the table: a problem, never a retry, which
 // would be refused again forever.
 func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrations.MockMemDb) (served *models.Mock, problem *varProblem, retry bool, err error) {
-	return h.serveVariablesBy(hit, mockDb, func(m *models.Mock) bool { return h.updateMock(ctx, m, mockDb, nil) })
+	return h.serveVariablesBy(hit, mockDb, func(m *models.Mock) bool { return h.updateMock(ctx, m, mockDb, nil) }, nil)
 }
 
 // serveVariablesBy is serveVariables with consume taking the mock from the
@@ -1155,7 +1155,7 @@ func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrati
 // one of the open test's own) binds nothing and is refused as at its consume
 // door: the call is checked again, and the recording's variables stay
 // unbound for the call it is the recording of.
-func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, consume func(*models.Mock) bool) (served *models.Mock, problem *varProblem, retry bool, err error) {
+func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, consume func(*models.Mock) bool, written func(*models.Mock) *models.Mock) (served *models.Mock, problem *varProblem, retry bool, err error) {
 	if integrations.RefusesAnswer(mockDb, hit.mock) {
 		return nil, nil, true, nil
 	}
@@ -1166,6 +1166,13 @@ func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, cons
 	rendered, problem := h.renderAnswers(loaded, hit, hit.table)
 	if problem != nil {
 		return nil, problem, false, nil
+	}
+	if written != nil {
+		// Another parser's answer (VariableMatch), asked before any bind or
+		// take: one it cannot write is no answer to the call.
+		if rendered = written(rendered); rendered == nil {
+			return nil, &varProblem{mock: hit.mock.Name, why: "the call's parser cannot write an answer from its rendered answer for this call", next: "re-record the test"}, false, nil
+		}
 	}
 	if bad, with, stale, ok := hit.table.BindAll(hit.gen, hit.binds); !ok {
 		if !stale && hit.read(with) {

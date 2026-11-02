@@ -56,7 +56,7 @@ func TestLearnMatchAnswersAnotherParsersDriftedCall(t *testing.T) {
 	db := &learnDb{perTest: []*models.Mock{exportSendRecording()}}
 	ctx := learn.WithTracker(context.Background(), tr)
 	call := live("POST", "/", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportSend)
-	served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{}, nil)
+	served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{}, nil, nil)
 	if err != nil || miss != nil || served == nil || served.Name != "mock-1" {
 		t.Fatalf("served %v miss %+v err %v, want mock-1 served", served, miss, err)
 	}
@@ -80,10 +80,10 @@ func TestLearnMatchRefusesAnotherParsersCallItCannotExplain(t *testing.T) {
 	ctx := learn.WithTracker(context.Background(), tr)
 	noise := NewRequestNoise(zap.NewNop(), opts)
 	liveAt := exportAt.Add(learn.FullRoundLead)
-	if served, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/", exportPutBody(exportLiveID, liveAt), exportPut)), noise, db, opts, integrations.CallRound{}, nil); err != nil || miss != nil || served == nil {
+	if served, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/", exportPutBody(exportLiveID, liveAt), exportPut)), noise, db, opts, integrations.CallRound{}, nil, nil); err != nil || miss != nil || served == nil {
 		t.Fatalf("the PutItem: served %v miss %+v err %v, want it answered", served, miss, err)
 	}
-	served, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/", exportSendBody(exportLiveID, liveAt), exportSend)), noise, db, opts, integrations.CallRound{}, nil)
+	served, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/", exportSendBody(exportLiveID, liveAt), exportSend)), noise, db, opts, integrations.CallRound{}, nil, nil)
 	if err != nil || served != nil || miss == nil {
 		t.Fatalf("the SendMessage: served %v miss %+v err %v, want a miss", served, miss, err)
 	}
@@ -130,7 +130,7 @@ func TestLearnMatchRunsOnlyInRecordsFullRound(t *testing.T) {
 			db = endedDb{ldb}
 		}
 		call := live("POST", "/", exportSendBody(exportLiveID, exportAt), exportSend)
-		served, miss, err := h.LearnMatch(context.Background(), exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{}, nil)
+		served, miss, err := h.LearnMatch(context.Background(), exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{}, nil, nil)
 		if err != nil || served != nil || miss != nil || len(ldb.perTest) != 1 || len(ldb.consumed) != 0 {
 			t.Fatalf("%s: served %v miss %+v err %v, store %d left %d taken; want nothing run", c.name, served, miss, err, len(ldb.perTest), len(ldb.consumed))
 		}
@@ -145,7 +145,7 @@ func TestLearnMatchReturnsTheLearnStepsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	call := live("POST", "/", exportSendBody(exportLiveID, exportAt), exportSend)
-	served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{}, nil)
+	served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{}, nil, nil)
 	if err == nil || served != nil || miss != nil {
 		t.Fatalf("served %v miss %+v err %v, want the context's error alone", served, miss, err)
 	}
@@ -220,7 +220,7 @@ func TestLearnMatchDecidesTheCallInTheRoundItsCallerMarked(t *testing.T) {
 			}
 			ctx := learn.WithTracker(context.Background(), tr)
 			call := live("POST", "/", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportSend)
-			served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, c.mark, nil)
+			served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, c.mark, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -233,7 +233,9 @@ func TestLearnMatchDecidesTheCallInTheRoundItsCallerMarked(t *testing.T) {
 			report := &models.MockMismatchReport{}
 			miss.Explain(report)
 			if served != nil || miss == nil || miss.Closest() != nil || len(ldb.consumed) != 0 || len(ldb.perTest) != 1 || ldb.perTest[0].Spec.ReqBodyNoise != nil ||
-				report.Reason != "" || !strings.Contains(report.NextSteps, "marked this request "+c.moved) {
+				report.Reason != "" || !strings.HasPrefix(report.NextSteps, "keploy record's full round marked this request "+c.moved) ||
+				!strings.HasSuffix(report.NextSteps, ": keploy learns nothing of a call in a round it was not made in, and pairs it with none of that round's recordings. "+
+					"If the application makes this call at a test's start or end, make the test, or the application's readiness, wait for it, then record again.") {
 				t.Fatalf("served %v miss %+v (closest %v), %d taken, recording's noise %v, report %+v; want the moved miss (%q), nothing taken or learned",
 					served, miss, miss.Closest(), len(ldb.consumed), ldb.perTest[0].Spec.ReqBodyNoise, report, c.moved)
 			}
@@ -282,7 +284,7 @@ func TestLearnMatchHoldsOnlyItsFirstReadToTheCallersMark(t *testing.T) {
 	ctx := learn.WithTracker(context.Background(), tr)
 	call := live("POST", "/", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportSend)
 	mark := integrations.NewCallRound(marked.Epoch, nil).ReadAt(marked).InView(true, false)
-	served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, mark, nil)
+	served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, mark, nil, nil)
 	if err != nil || !db.installed || miss != nil || served == nil || served.Name != "mock-1" {
 		report := &models.MockMismatchReport{}
 		miss.Explain(report)
@@ -333,7 +335,7 @@ func TestLearnMatchTellsTheServeWithTheAnswerTheCallerWrites(t *testing.T) {
 				}
 			}
 			db := &learnDb{perTest: []*models.Mock{other}, observe: tr.ServedMock}
-			got, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/v1/receive", tc.sent, nil)), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{}, written)
+			got, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/v1/receive", tc.sent, nil)), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{}, written, nil)
 			if err != nil || got == nil || got.Name != "mock-2" || got.Spec.HTTPResp.Body != `{"count":"9"}` {
 				t.Fatalf("the call: served %v miss %+v err %v; want mock-2 served as the learn step gives it", got, miss, err)
 			}
@@ -356,6 +358,159 @@ func TestLearnMatchTellsTheServeWithTheAnswerTheCallerWrites(t *testing.T) {
 				t.Fatalf("FALSE GREEN: %s %s (%q); want refused, naming mock-2: the application read it there", tc.value, v[0].Kind, v[0].Why)
 			case !tc.refused && refused:
 				t.Fatalf("FALSE RED: %s refused (%q); want learned: the application read no word of it at mock-2", tc.value, v[0].Why)
+			}
+		})
+	}
+}
+
+const exportOtherQueue = "http://127.0.0.1:9324/000000000000/lead-events-dlq"
+
+// exportHold holds an SQS call's identity, as the SQS parser does: its queue
+// and its operation never learned, a batch entry's Id only as an echo.
+func exportHold(leaf string) LearnHold {
+	switch leaf {
+	case "body.QueueUrl", "header.x-amz-target":
+		return LearnNever
+	case "body.Entries[].Id":
+		return LearnEchoOnly
+	}
+	return LearnAny
+}
+
+// A leaf the caller holds as the call's identity is never learned: a send of
+// the recorded message, or of a drifted one, to another queue misses
+// (request_changed), naming the queue's leaf and the recording, and nothing
+// is taken or learned; so does a send of another operation. A drift outside
+// the held leaves is still learned, and keploy.yml's noise on a held leaf
+// still excuses it.
+func TestLearnMatchNeverLearnsALeafItsCallerHolds(t *testing.T) {
+	toQueue := func(body, queue string) string {
+		return strings.Replace(body, "http://127.0.0.1:9324/000000000000/lead-events", queue, 1)
+	}
+	batchTarget := map[string]string{"X-Amz-Target": "AmazonSQS.SendMessageBatch", "Content-Type": "application/x-amz-json-1.0"}
+	for _, c := range []struct {
+		name    string
+		body    string
+		header  map[string]string
+		noise   map[string][]string
+		differs string // the held leaf the miss names; "" where served
+	}{
+		{"the recorded message to another queue", toQueue(exportSendBody(exportRecID, exportAt), exportOtherQueue), exportSend, nil, "body.QueueUrl"},
+		{"a drifted message to another queue", toQueue(exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportOtherQueue), exportSend, nil, "body.QueueUrl"},
+		{"a drifted message as another operation", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), batchTarget, nil, "header.x-amz-target"},
+		{"a drifted message to the recorded queue", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportSend, nil, ""},
+		{"keploy.yml's noise on the queue", toQueue(exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportOtherQueue), exportSend, map[string][]string{"QueueUrl": {}}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, _, opts := learnOn(t)
+			tr := clockedTracker()
+			tr.Begin()
+			db := &learnDb{perTest: []*models.Mock{exportSendRecording()}}
+			ctx := learn.WithTracker(context.Background(), tr)
+			noise := NewRequestNoise(zap.NewNop(), opts)
+			noise.Body = c.noise
+			served, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/", c.body, c.header)), noise, db, opts, integrations.CallRound{}, nil, exportHold)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.differs == "" {
+				if miss != nil || served == nil || served.Name != "mock-1" || len(db.consumed) != 1 ||
+					!reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.MessageBody": {}}) {
+					t.Fatalf("served %v miss %+v, took %+v; want mock-1 served with only its message body learned", served, miss, db.consumed)
+				}
+				return
+			}
+			if served != nil || miss == nil || len(db.consumed) != 0 || len(db.perTest) != 1 || db.perTest[0].Spec.ReqBodyNoise != nil {
+				t.Fatalf("served %v miss %+v, took %+v; want a miss, nothing taken or learned", served, miss, db.consumed)
+			}
+			report := &models.MockMismatchReport{}
+			miss.Explain(report)
+			if c := miss.Closest(); c == nil || c.Name != "mock-1" {
+				t.Fatalf("the miss names %v, want mock-1", c)
+			}
+			if report.Reason != models.MissRequestChanged || !strings.HasPrefix(report.NextSteps, "keploy's learn step: it differs from the closest recorded call in more than values: "+c.differs+" differs. ") {
+				t.Fatalf("the report says %q (%q), want request_changed naming %s", report.NextSteps, report.Reason, c.differs)
+			}
+		})
+	}
+}
+
+// A leaf held LearnEchoOnly is learned only as a value the answer carries
+// back: a batch entry whose fresh Id the recorded answer echoes is served,
+// the answer carrying the call's Id; one whose answer does not carry it
+// back is refused (request_changed), nothing taken or learned.
+func TestLearnMatchLearnsAnEchoOnlyLeafOnlyAsAnEcho(t *testing.T) {
+	const recEntry, liveEntry = "aaaaaaaa-1111-4222-8333-444455556666", "bbbbbbbb-1111-4222-8333-444455556666"
+	batch := func(id, body string) string {
+		return `{"Entries":[{"Id":"` + id + `","MessageBody":` + strings.TrimSuffix(strings.TrimPrefix(body, `{"MessageBody":`), `,"QueueUrl":"http://127.0.0.1:9324/000000000000/lead-events"}`) + `}],"QueueUrl":"http://127.0.0.1:9324/000000000000/lead-events"}`
+	}
+	target := map[string]string{"X-Amz-Target": "AmazonSQS.SendMessageBatch", "Content-Type": "application/x-amz-json-1.0"}
+	for _, c := range []struct {
+		name, answer string
+		echoed       bool
+	}{
+		{"the answer echoes the entry's Id", `{"Failed":[],"Successful":[{"Id":"` + recEntry + `","MD5OfMessageBody":"x","MessageId":"m-1"}]}`, true},
+		{"the answer does not carry it back", `{"Failed":[],"Successful":[{"MD5OfMessageBody":"x","MessageId":"m-1"}]}`, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, _, opts := learnOn(t)
+			tr := clockedTracker()
+			tr.Begin()
+			rec := learnRecorded("mock-1", time.Second, "POST", "/", batch(recEntry, exportSendBody(exportRecID, exportAt)), target, c.answer)
+			db := &learnDb{perTest: []*models.Mock{rec}}
+			ctx := learn.WithTracker(context.Background(), tr)
+			call := live("POST", "/", batch(liveEntry, exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead))), target)
+			served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{}, nil, exportHold)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.echoed {
+				if miss != nil || served == nil || served.Name != "mock-1" || len(db.consumed) != 1 || !strings.Contains(served.Spec.HTTPResp.Body, `"Id":"`+liveEntry+`"`) {
+					t.Fatalf("served %v miss %+v, took %d; want mock-1 served with the call's entry Id echoed", served, miss, len(db.consumed))
+				}
+				if _, noised := db.consumed[0].Spec.ReqBodyNoise["body.Entries[0].Id"]; noised {
+					t.Fatalf("the entry's Id was learned as noise: %v", db.consumed[0].Spec.ReqBodyNoise)
+				}
+				return
+			}
+			if served != nil || miss == nil || len(db.consumed) != 0 || len(db.perTest) != 1 || db.perTest[0].Spec.ReqBodyNoise != nil {
+				t.Fatalf("served %v miss %+v, took %d; want a miss, nothing taken or learned", served, miss, len(db.consumed))
+			}
+			report := &models.MockMismatchReport{}
+			miss.Explain(report)
+			if report.Reason != models.MissRequestChanged || !strings.HasPrefix(report.NextSteps, "keploy's learn step: body.Entries[0].Id changed, and keploy learns it only as a value the answer carries back, which the answer does not") {
+				t.Fatalf("the report says %q (%q), want the echo-only refusal", report.NextSteps, report.Reason)
+			}
+		})
+	}
+}
+
+// The caller's written answer is asked before the take: where it writes
+// none, of a call that is its recording exactly or one that drifted from
+// it, the call misses (request_changed), naming the recording, which stays
+// in the store with nothing learned onto it.
+func TestLearnMatchAsksTheWrittenAnswerBeforeTheTake(t *testing.T) {
+	for _, c := range []struct{ name, body string }{
+		{"the recording exactly", exportSendBody(exportRecID, exportAt)},
+		{"a drifted message", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead))},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, _, opts := learnOn(t)
+			tr := clockedTracker()
+			tr.Begin()
+			db := &learnDb{perTest: []*models.Mock{exportSendRecording()}}
+			ctx := learn.WithTracker(context.Background(), tr)
+			var asked []string
+			none := func(a *models.Mock) *models.Mock { asked = append(asked, a.Name); return nil }
+			served, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/", c.body, exportSend)), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{}, none, nil)
+			if err != nil || served != nil || miss == nil || len(asked) == 0 || len(db.consumed) != 0 || len(db.perTest) != 1 || db.perTest[0].Spec.ReqBodyNoise != nil {
+				t.Fatalf("served %v miss %+v err %v, asked %v, took %d; want a miss, nothing taken or learned", served, miss, err, asked, len(db.consumed))
+			}
+			report := &models.MockMismatchReport{}
+			miss.Explain(report)
+			if c := miss.Closest(); c == nil || c.Name != "mock-1" || report.Reason != models.MissRequestChanged ||
+				!strings.HasPrefix(report.NextSteps, "keploy's learn step: the call's parser cannot write an answer from mock-1's recorded answer for this request") {
+				t.Fatalf("the miss names %v and says %q (%q), want request_changed naming mock-1", c, report.NextSteps, report.Reason)
 			}
 		})
 	}

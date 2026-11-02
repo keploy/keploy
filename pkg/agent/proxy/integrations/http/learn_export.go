@@ -38,6 +38,22 @@ func (m *LearnMiss) Explain(r *models.MockMismatchReport) {
 	m.m.explain(r)
 }
 
+// LearnHold is how the learn step may learn a leaf of another parser's call
+// (LearnMatch's hold).
+type LearnHold uint8
+
+const (
+	// LearnAny: as it learns a leaf of an HTTP call.
+	LearnAny LearnHold = iota
+	// LearnNever: never. The leaf is the call's identity (which queue, which
+	// operation, which message group): a change there is the request's.
+	LearnNever
+	// LearnEchoOnly: only as a value the answer carries back (a batch
+	// entry's Id), never as noise, a read of the clock or an earlier call's
+	// value.
+	LearnEchoOnly
+)
+
 // LearnMatch decides a call of another parser in record's full round with
 // the learn step, as the HTTP parser decides its own: under the proven
 // switch, with opts.Learn, until the set's learn step ended
@@ -58,23 +74,45 @@ func (m *LearnMiss) Explain(r *models.MockMismatchReport) {
 // round, holds the learn step to nothing.
 //
 // written is the answer the caller writes for a recording the learn step
-// served (nil: served itself). The learn step tells the tracker of the serve
-// (learn.Tracker.Served) with that answer, at its leaves and in F's view of
-// the exchange, which a later call of the set reads (learn.Order.ServedView):
-// the caller may write another answer than served (SQS sets a send's digests
-// over the message sent), and a view of the answer served would read a later
-// call against words the application never read and miss the ones it did.
-// The caller states no view of the serve again.
+// serves (nil: served itself). The learn step asks it before it takes the
+// recording, of the answer it would serve: where it gives nil (the caller
+// cannot answer the call from that recording: SQS cannot set a send's
+// digests over the message sent), the learn step takes nothing, learns
+// nothing and tells nothing, and the call misses (request_changed), naming
+// the recording. Of a serve, it tells the tracker (learn.Tracker.Served)
+// with the answer written, at the exchange's leaves and in the view of the
+// exchange the learn step keeps, which a later call of the set reads
+// (learn.Order.ServedView): the caller may write another answer than served
+// (SQS sets a send's digests over the message sent), and a view of the
+// answer served would read a later call against words the application
+// never read and miss the ones it did. The caller states no view of the
+// serve again. written must give the same answer each time it is given the
+// same one.
+//
+// hold names how the learn step may learn each leaf of the call, by the
+// leaf's name in keploy.yml's noise dialect (learn.Leaf.Noise:
+// "body.QueueUrl", "body.Entries[].Id", "header.x-amz-target",
+// "url.path.1"); nil learns every leaf as an HTTP call's (LearnAny). A
+// leaf held LearnNever is the call's identity: a recording that holds
+// another value there is no candidate for the call, so nothing is learned
+// there and the call is never answered from such a recording; a call that
+// differs from every recording there misses (request_changed), naming the
+// leaf. keploy.yml's noise still excuses it, as the user declared. A leaf
+// held LearnEchoOnly is learned only as a value the answer carries back,
+// which the answer then carries for the call: as noise, a read of the
+// clock or an earlier call's value it is refused (request_changed).
 //
 // Outside record's full round nothing here runs, and served and miss are
 // both nil: the caller matches the call as it would have.
-func (h *HTTP) LearnMatch(ctx context.Context, call VariableCall, noise RequestNoise, mockDb integrations.MockMemDb, opts models.OutgoingOptions, round integrations.CallRound, written func(served *models.Mock) *models.Mock) (served *models.Mock, miss *LearnMiss, err error) {
+func (h *HTTP) LearnMatch(ctx context.Context, call VariableCall, noise RequestNoise, mockDb integrations.MockMemDb, opts models.OutgoingOptions, round integrations.CallRound, written func(served *models.Mock) *models.Mock, hold func(leaf string) LearnHold) (served *models.Mock, miss *LearnMiss, err error) {
 	if !provenswitch.On() || !opts.Learn || integrations.LearnEnded(mockDb) {
 		return nil, nil, nil
 	}
 	in := call.req()
 	in.written = written
-	served, lmiss, err := h.learnMatchIn(ctx, in, mockDb, h.newLearnNoise(opts, noise.Body, noise.URL), opts, round, nil)
+	n := h.newLearnNoise(opts, noise.Body, noise.URL)
+	n.hold = hold
+	served, lmiss, err := h.learnMatchIn(ctx, in, mockDb, n, opts, round, nil)
 	if err != nil {
 		return nil, nil, err
 	}

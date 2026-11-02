@@ -46,10 +46,12 @@ type req struct {
 	arrived time.Time
 	// written is, for a call of another parser that the learn step decides
 	// (LearnMatch), the answer that parser writes for a recording the learn
-	// step served it: it may write another one than the learn step gave it
-	// (SQS sets a send's digests over the message sent). nil: the answer
-	// served is the one written. The learn step states F's view of its serve
-	// with the answer written (servedExchange).
+	// step serves it: it may write another one than the learn step gives it
+	// (SQS sets a send's digests over the message sent), or none (nil),
+	// which the learn step asks before it takes the recording, and then
+	// refuses it. nil written: the answer served is the one written. The
+	// learn step states its view of a serve with the answer written
+	// (servedExchange).
 	written func(served *models.Mock) *models.Mock
 }
 

@@ -68,6 +68,13 @@ type learnNoise struct {
 	// url is keploy.yml's url noise: what a pattern matches in a path or a
 	// query value is not compared.
 	url []*regexp.Regexp
+	// hold is how another parser's call may have each leaf learned
+	// (LearnMatch), by its name in the noise dialect; nil: as an HTTP
+	// call's. A leaf held LearnNever is a fixed part of the shape too
+	// (shape), so a recording that holds another value there is no
+	// candidate; one held LearnEchoOnly is learned only as an echo
+	// (heldLearned).
+	hold func(leaf string) LearnHold
 }
 
 func (h *HTTP) newLearnNoise(opts models.OutgoingOptions, bodyNoise map[string][]string, urlNoise []string) learnNoise {
@@ -264,7 +271,55 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 		s.Body = v
 		learn.JSONLeaves("body", v, s.Leaves)
 	}
+	if n.hold != nil {
+		for path, l := range s.Leaves {
+			// A leaf the caller holds as the call's identity is a fixed part
+			// as well, under its own path: a recording that holds another
+			// value there is no candidate, so nothing is learned there, and
+			// a miss names it ("body.QueueUrl differs"). It stays a leaf, so
+			// a view of the exchange still shows it. keploy.yml's noise
+			// still excuses it.
+			if n.hold(l.Noise) == LearnNever && !n.declared(l) {
+				s.Fixed[path] = l.Value
+			}
+		}
+	}
 	return s
+}
+
+// declared reports whether keploy.yml's noise excuses the leaf l, as
+// httpKnown.Excused reads it.
+func (n learnNoise) declared(l learn.Leaf) bool {
+	switch {
+	case strings.HasPrefix(l.Noise, "body."):
+		scalar := l.Type != 0 && l.Type != learn.EmptyObj && l.Type != learn.EmptyArray
+		return n.body.Covers(strings.TrimPrefix(l.Noise, "body."), l.Value, scalar)
+	case strings.HasPrefix(l.Noise, "header."):
+		return n.headers[strings.TrimPrefix(l.Noise, "header.")]
+	}
+	return false
+}
+
+// heldLearned is why the learn step refuses what it learned of another
+// parser's call, by the leaves the caller holds (learnNoise.hold): a leaf
+// held LearnEchoOnly learned as anything but a value the answer carries
+// back. "" where it refuses nothing.
+func (n learnNoise) heldLearned(learned []learn.Learned) string {
+	if n.hold == nil {
+		return ""
+	}
+	for _, l := range learned {
+		if l.Kind != learn.KindEcho && n.hold(l.Recorded.Noise) == LearnEchoOnly {
+			return l.Recorded.Path + " changed, and keploy learns it only as a value the answer carries back, which the answer does not"
+		}
+	}
+	return ""
+}
+
+// unwrittenWhy is why the learn step refuses the recording m for another
+// parser's call whose parser cannot write an answer from it (req.written).
+func unwrittenWhy(m *models.Mock) string {
+	return "the call's parser cannot write an answer from " + m.Name + "'s recorded answer for this request"
 }
 
 // multipartLeaves reads a multipart/form-data body by its own boundary: each
@@ -338,17 +393,10 @@ func (k httpKnown) Excused(l learn.Leaf) (bool, bool) {
 	if !clock && (learnedCovers(k.learned, l.Path) || l.Noise != l.Path && hasKey(k.learned, l.Noise)) {
 		return true, true
 	}
-	scalar := l.Type != 0 && l.Type != learn.EmptyObj && l.Type != learn.EmptyArray
-	switch {
-	case strings.HasPrefix(l.Noise, "body."):
-		if k.n.body.Covers(strings.TrimPrefix(l.Noise, "body."), l.Value, scalar) {
-			return true, false
-		}
-	case strings.HasPrefix(l.Noise, "header."):
-		if k.n.headers[strings.TrimPrefix(l.Noise, "header.")] {
-			return true, false
-		}
+	if k.n.declared(l) {
+		return true, false
 	}
+	scalar := l.Type != 0 && l.Type != learn.EmptyObj && l.Type != learn.EmptyArray
 	if scalar && k.values != nil && k.values.IsNoisy(l.Value) {
 		return true, false
 	}
@@ -1612,6 +1660,18 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			if stuck(picked, read.at) {
 				return refused(picked, res, sc)
 			}
+			if input.written != nil {
+				// Asked before the take: an answer the caller cannot
+				// write is no answer, and nothing is taken or told.
+				ans, err := withResponse(picked)
+				if err != nil {
+					return nil, nil, err
+				}
+				if input.written(ans) == nil {
+					res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, unwrittenWhy(picked)
+					return nil, &learnMiss{res: res, closest: picked, pool: sc.http}, nil
+				}
+			}
 			if own && !tracker.Answer(test, picked) {
 				// Read again, held to the call's round: a test's own is
 				// offered only where the store and the tracker agreed on
@@ -1739,6 +1799,10 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				w = tracker.CallWindowFrom(prev.At(), m, input.arrived)
 			}
 			learned := learn.ClassifyGiven(tracker.DriftsOf(ctx), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, classifiedAnswer(answered), w, givenEarlier(m, set, served, given, earlier, order))
+			if why := n.heldLearned(learned); why != "" {
+				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
+				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
+			}
 			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb))
 			if why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
@@ -1748,7 +1812,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				retake = true
 				continue
 			}
-			out, claimed, why, err := h.claimLearned(ctx, m, claimDb, plan, sc.owner())
+			out, claimed, why, err := h.claimLearned(ctx, m, claimDb, plan, sc.owner(), input.written)
 			if own && (err != nil || why != "" || !claimed) {
 				tracker.Unanswer(test, m.Name)
 			}
@@ -2406,13 +2470,17 @@ func appendNew(list []string, vs ...string) []string {
 // took m first. owner says which of the scope's mocks are the open test's
 // own: one no open test owns (a stated stateful recording of the pool) is
 // kept reusable, as the matcher keeps it (ownedKey).
-func (h *HTTP) claimLearned(ctx context.Context, m *models.Mock, mockDb integrations.MockMemDb, p pairing, owner func(*models.Mock) bool) (served *models.Mock, claimed bool, why string, err error) {
+func (h *HTTP) claimLearned(ctx context.Context, m *models.Mock, mockDb integrations.MockMemDb, p pairing, owner func(*models.Mock) bool, written func(*models.Mock) *models.Mock) (served *models.Mock, claimed bool, why string, err error) {
 	served, err = withResponse(m)
 	if err != nil {
 		return nil, false, "", err
 	}
 	if served, why = h.renderLearned(served, m.Name, p); why != "" {
 		return nil, false, why, nil
+	}
+	if written != nil && written(served) == nil {
+		// Asked of the answer rendered, before the take (req.written).
+		return nil, false, unwrittenWhy(m), nil
 	}
 	claimed = h.consumeWith(context.WithValue(ctx, ownedKey{}, owner), m, mockDb, func(spec *models.MockSpec) {
 		if len(p.noise) > 0 {
