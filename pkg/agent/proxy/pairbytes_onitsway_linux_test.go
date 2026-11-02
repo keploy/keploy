@@ -114,7 +114,8 @@ func TestPlaintextOnItsWayAtTheProxysCloseIsReadThrough(t *testing.T) {
 	cases = append(cases, []struct {
 		name string
 		want uint64
-	}{{"a failed read", 1}, {"data, after a cut end's bytes arrived", 1}, {"data, all written before a cut end", 0},
+	}{{"a failed read", 1}, {"a failed read, written before a cut end and after it", 1},
+		{"data, after a cut end's bytes arrived", 1}, {"data, all written before a cut end", 0},
 		{"data, written before a cut end and after it", 1},
 		{"its FIN alone on its way", 0}, {"a byte on its way, its FIN not surely counted", 1}, {"a byte and its FIN on their way", 1},
 		{"data, as keploy stops", 0}, {"a failed read, as keploy stops", 0}}...)
@@ -139,7 +140,7 @@ func TestPlaintextOnItsWayAtTheProxysCloseIsReadThrough(t *testing.T) {
 			pc := pairedConnOf(t, p, 1)
 			owner := ""
 			if cut, ok := map[string]uint64{"data, after a cut end's bytes arrived": 1, "data, all written before a cut end": 25,
-				"data, written before a cut end and after it": 13}[tc.name]; ok {
+				"data, written before a cut end and after it": 13, "a failed read, written before a cut end and after it": 13}[tc.name]; ok {
 				// A byte written and read, then an end cut short that
 				// waited for cut: 1, that byte; 25, that byte and the
 				// 24 the close counts on their way; 13, that byte and
@@ -204,7 +205,7 @@ func TestPlaintextOnItsWayAtTheProxysCloseIsReadThrough(t *testing.T) {
 				if _, err := app.Write([]byte("publish 2\n")); err != nil {
 					t.Fatal(err)
 				}
-			case "a failed read", "a failed read, as keploy stops":
+			case "a failed read", "a failed read, as keploy stops", "a failed read, written before a cut end and after it":
 				_ = proxySide.Close()
 			case "its FIN":
 				if err := app.CloseWrite(); err != nil {

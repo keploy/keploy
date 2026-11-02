@@ -419,13 +419,17 @@ func TestATLSClientsCloseNotifyAfterTheProxysCloseIsNoLoss(t *testing.T) {
 // that FIN and records it, so a bytes wait settles without an orphan to ask.
 func TestATLSClientsBytesOnTheirWayAtTheProxysCloseAreReadThrough(t *testing.T) {
 	for _, v := range tlsVersions {
-		for _, kind := range []string{"its close_notify", "data", "its FIN alone", "data past a cut end"} {
+		for _, kind := range []string{"its close_notify", "data", "its FIN alone", "data past a cut end", "a failed read past a cut end"} {
 			data := kind == "data" || kind == "data past a cut end"
+			// The layer's read fails (the proxy's socket closed under
+			// it): whether data was on its way cannot be told, a loss,
+			// its bytes past the cut end the open test's.
+			failed := kind == "a failed read past a cut end"
 			t.Run(v.name+", "+kind, func(t *testing.T) {
 				p, _, proxySide, tracked, srv, cli := tlsHeldPair(t, v.version)
 				pc := pairedConnOf(t, p, 1)
 				owner := ""
-				if kind == "data past a cut end" {
+				if kind == "data past a cut end" || failed {
 					// An end cut short once what the client had
 					// written so far had arrived: the bytes lost may
 					// begin anywhere, so it owns a share, and the
@@ -469,11 +473,22 @@ func TestATLSClientsBytesOnTheirWayAtTheProxysCloseAreReadThrough(t *testing.T) 
 					}
 					runtime.Gosched()
 				}
-				if data {
+				switch {
+				case failed:
+					for tracked.reading.Load() == 0 { // the close reads on through the layer
+						select {
+						case <-closed:
+							t.Fatal("the close did not read through the layer with data on its way")
+						default:
+						}
+						runtime.Gosched()
+					}
+					_ = proxySide.Close()
+				case data:
 					if _, err := cli.Write([]byte("publish 2\n")); err != nil {
 						t.Fatal(err)
 					}
-				} else {
+				default:
 					if _, err := io.ReadAll(cli); err != nil { // keploy's close_notify
 						t.Fatal(err)
 					}
@@ -481,7 +496,7 @@ func TestATLSClientsBytesOnTheirWayAtTheProxysCloseAreReadThrough(t *testing.T) 
 				}
 				<-closed
 				want := uint64(0)
-				if data {
+				if data || failed {
 					want = 1
 				}
 				if l := lossesOf(p, models.CaptureLossAppBytesLost); l != want {
@@ -494,7 +509,7 @@ func TestATLSClientsBytesOnTheirWayAtTheProxysCloseAreReadThrough(t *testing.T) 
 				if got := ownersOf(p); !slices.Equal(got, owners) {
 					t.Fatalf("the loss is owned by %q, want %q", got, owners)
 				}
-				if data {
+				if data || failed {
 					return
 				}
 				if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
