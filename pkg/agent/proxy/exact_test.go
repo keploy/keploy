@@ -3835,25 +3835,26 @@ func TestAVariableCallPastItsRecordingsIsAnsweredNothingBetweenTests(t *testing.
 	}
 }
 
-// ExactTestServed names a test only while its view is in force: not as the
-// first view is installed, before it serves (a pool call ending then wrote
-// its bytes before the test began), and not once a pool view or a session
-// reset replaced it.
+// ExactTestServed names a test only while its view is in force: not while
+// its view is being installed, before it serves (a pool call ending then
+// wrote its bytes before the test began), whichever view serves then (none
+// for the first, the pool's after a test ended, the test's before it), and
+// not once a pool view or a session reset replaced it.
 func TestExactTestServedNamesATestOnlyWhileItsViewIsInForce(t *testing.T) {
 	a := exactMock("a", 0, models.LifetimePerTest)
 	mm := stagedManager(t, []*models.Mock{a}, nil)
 	if got := mm.ExactTestServed(); got != "" {
 		t.Fatalf("before exact serving: %q, want none", got)
 	}
-	installing := "unread"
-	mm.exact.beforePublish = func(*exactView) {
-		if installing == "unread" {
-			installing = mm.ExactTestServed()
+	installing := map[string]string{}
+	mm.exact.beforePublish = func(v *exactView) {
+		if _, ok := installing[v.test]; !ok && v.test != "" {
+			installing[v.test] = mm.ExactTestServed()
 		}
 	}
 	mm.ServeExactTest("T", []*models.Mock{a})
-	if installing != "" {
-		t.Fatalf("as T's view, the first, was installed: %q, want none: it was not serving yet", installing)
+	if got := installing["T"]; got != "" {
+		t.Fatalf("as T's view, the first, was installed: %q, want none: it was not serving yet", got)
 	}
 	if got := mm.ExactTestServed(); got != "T" {
 		t.Fatalf("while T's view serves: %q, want T", got)
@@ -3863,6 +3864,16 @@ func TestExactTestServedNamesATestOnlyWhileItsViewIsInForce(t *testing.T) {
 		t.Fatalf("after T's end: %q, want none", got)
 	}
 	mm.ServeExactTest("U", []*models.Mock{a})
+	if got := installing["U"]; got != "" {
+		t.Fatalf("as U's view was installed after the pool's: %q, want none: the pool served", got)
+	}
+	mm.ServeExactTest("V", []*models.Mock{a})
+	if got := installing["V"]; got != "U" {
+		t.Fatalf("as V's view was installed over U's: %q, want U: U's view served", got)
+	}
+	if got := mm.ExactTestServed(); got != "V" {
+		t.Fatalf("while V's view serves: %q, want V", got)
+	}
 	mm.ResetForReplaySession()
 	if got := mm.ExactTestServed(); got != "" {
 		t.Fatalf("after a session reset: %q, want none", got)

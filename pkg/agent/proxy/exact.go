@@ -1786,12 +1786,12 @@ func (m *MockManager) ExactTestOutcome() (test string, consumed, unconsumed []st
 
 // ExactTestServed is, under exact serving, the test whose view is in force
 // now: "" when none is, the pool being served, before a set's first test or
-// after a test ended (agent.ExactTestServedReader).
+// after a test ended (agent.ExactTestServedReader). It reads the published
+// view itself, not the latest test opened (exact.last), which an install
+// stores before it publishes the view: a test is named only once its view
+// serves, and the one before it until then.
 func (m *MockManager) ExactTestServed() string {
-	if m.exactView() == nil {
-		return ""
-	}
-	if v := m.exact.last.Load(); v != nil {
+	if v := m.exactView(); v != nil {
 		return v.test
 	}
 	return ""
