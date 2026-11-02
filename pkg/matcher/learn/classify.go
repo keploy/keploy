@@ -4159,7 +4159,11 @@ func callOf(m *models.Mock) string {
 // through the round trip, which reads each invalid byte as U+FFFD; and if
 // a kept body's place in the decoded value is not its field's empty string
 // (an encoding that left the field out or put it elsewhere), the whole
-// spec goes through the round trip as it is.
+// spec goes through the round trip as it is. With models' JSON tags today
+// that never happens: "Req" and "Res" are written whenever they are not
+// nil, and "body" has no omitempty, so dropping the fallback gives the same
+// value; it is there so that a tag changed later reads the plain round
+// trip, not a payload with a body missing.
 func payloadValue(spec models.MockSpec) (interface{}, bool) {
 	out, kept := keepBodies(spec)
 	v, ok := roundTrip(out)

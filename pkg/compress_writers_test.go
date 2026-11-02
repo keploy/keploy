@@ -53,11 +53,14 @@ func newWriterCompress(t *testing.T, encoding string, data []byte) []byte {
 // Compress keeps its writers between calls (gzipWriters, brotliWriters), and
 // each body still compresses to the bytes a new writer gives it, byte for
 // byte, whatever body its writer compressed before: every size here follows
-// every other once (sizeWalk), on both sides of the size from which a
-// brotli writer hashes with its large table (brotliLargeBody) and at it.
+// every other once (sizeWalk), on both sides of 1 MiB, from which a brotli
+// writer hashes with its large table (andybalholm/brotli's chooseHasher;
+// brotliLargeBody), and at it. The sizes are literal, not brotliLargeBody's:
+// a writer kept across 1 MiB gives other bytes than a new one, so a wrong
+// constant, or a brotli whose boundary moved, fails here.
 func TestCompressWithAKeptWriterIsWhatANewWriterGives(t *testing.T) {
 	logger := zap.NewNop()
-	sizes := []int{0, 1, 777, 64 << 10, brotliLargeBody - 1, brotliLargeBody, brotliLargeBody + 1}
+	sizes := []int{0, 1, 777, 64 << 10, 512 << 10, 1<<20 - 1, 1 << 20, 2 << 20}
 	for _, enc := range []string{"gzip", "br"} {
 		bodies := make([][]byte, len(sizes))
 		want := make([][]byte, len(sizes))

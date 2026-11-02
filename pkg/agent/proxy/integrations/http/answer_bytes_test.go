@@ -469,20 +469,38 @@ func TestARewrittenServeNeverReadsOrFillsKeptAnswers(t *testing.T) {
 // TestAnAnswerBuiltAgainIsTheBytesServedBefore: an answer's kept bytes go
 // with its entry (forget, as when the collector takes its recording), and a
 // table with no room keeps none; the answer built again after that is the
-// bytes served before, its header lines in one order (encodeAnswer). On main
-// they were written in the header map's order, so after an eviction the same
-// mock could be served as other bytes.
+// bytes served before, its header lines in one order (encodeAnswer), and
+// main's lines. On main they were written in the header map's order, so
+// after an eviction the same mock could be served as other bytes. With 32
+// header names and with 45: encodeAnswer sorts the names in an array of 32
+// on its stack, and past 32 in one on the heap.
 func TestAnAnswerBuiltAgainIsTheBytesServedBefore(t *testing.T) {
+	for _, names := range []int{32, 45} {
+		t.Run(fmt.Sprintf("%d header names", names), func(t *testing.T) {
+			answerBuiltAgain(t, names)
+		})
+	}
+}
+
+func answerBuiltAgain(t *testing.T, names int) {
 	h := newHTTP()
 	m := reusedAnswer(`{"ok":true}`)
-	for i := range 20 {
+	for i := range names - len(m.Spec.HTTPResp.Header) {
 		m.Spec.HTTPResp.Header["X-More-"+strconv.Itoa(i)] = "more-" + strconv.Itoa(i)
+	}
+	if len(m.Spec.HTTPResp.Header) != names {
+		t.Fatalf("precondition: the answer has %d header names, want %d", len(m.Spec.HTTPResp.Header), names)
+	}
+	want, err := mainBuildMockResponseBytes(h, m)
+	if err != nil {
+		t.Fatal(err)
 	}
 	key := weak.Make(m.Spec.HTTPResp)
 	first, err := h.buildMockResponseBytes(m)
 	if err != nil {
 		t.Fatal(err)
 	}
+	sameAnswer(t, "the first serve", want, first)
 	for evict := range 50 {
 		// Served again (kept, when the table has room) and from what is kept.
 		for range 2 {
