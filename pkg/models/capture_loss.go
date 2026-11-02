@@ -253,7 +253,23 @@ const (
 	// it outlives). What names the latest program and its pid. Only under
 	// the proven switch.
 	CaptureLossProcessUnshimmed CaptureLossKind = "process_unshimmed"
+	// CaptureLossUnattributed: in a run of more than one test worker, the
+	// application made a call from a process in no test worker's keploy
+	// instance (one the test command did not start inside a worker, such as
+	// a server every worker shares) while workers' tests were open: keploy
+	// recorded it, but cannot tell which of those tests made it, so it is
+	// in none of their recordings. Each test open at its time is charged
+	// with it and left without a verdict (NotJudged), never failed. The
+	// record charges it itself, as the agent's counts never hold it, and
+	// not as a test's own (PerTest): the call may have been any of those
+	// tests'. What names the latest such call and its process.
+	CaptureLossUnattributed CaptureLossKind = "call_unattributed"
 )
+
+// UnattributedRemedy is what to do about a call from a process in no test
+// worker's keploy instance while workers' tests were open
+// (CaptureLossUnattributed).
+const UnattributedRemedy = "start the process that made the call inside each test worker (a worker fixture that starts the application on its own port), or run one test worker"
 
 // ContainerUnreadMetadata is the mock metadata field the agent stamps a mock
 // with when the Docker daemon did not answer keploy's read of its
@@ -269,7 +285,7 @@ const ContainerUnreadMetadata = "containerUnread"
 // kernel dropped at keploy's listener, which keploy cannot tell lost a call,
 // as opposed to one it saw and lost.
 func (k CaptureLossKind) NotJudged() bool {
-	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossUnclassified || k == CaptureLossAgentStartedAgain || k == CaptureLossProcessUnshimmed
+	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossUnclassified || k == CaptureLossAgentStartedAgain || k == CaptureLossProcessUnshimmed || k == CaptureLossUnattributed
 }
 
 // Evidence reports whether a loss of kind k is evidence only, never a
@@ -483,11 +499,13 @@ const ProcessUnshimmedRemedy = "run the test where keploy sees every process (Li
 // all; make a TLS client that abandoned its handshake trust keploy's CA; list
 // a server-first destination in mock.real. Empty for none.
 func (l CaptureLosses) NotJudgedRemedy() string {
-	var unix, unseen, tls, serverFirst, refused, docker, dropped, unclassified, restarted, unshimmed bool
+	var unix, unseen, tls, serverFirst, refused, docker, dropped, unclassified, restarted, unshimmed, unattributed bool
 	for _, c := range l {
 		switch c.Kind {
 		case CaptureLossProcessUnshimmed:
 			unshimmed = true
+		case CaptureLossUnattributed:
+			unattributed = true
 		case CaptureLossAgentStartedAgain:
 			restarted = true
 		case CaptureLossUnclassified:
@@ -538,6 +556,9 @@ func (l CaptureLosses) NotJudgedRemedy() string {
 	}
 	if unshimmed {
 		do = append(do, ProcessUnshimmedRemedy)
+	}
+	if unattributed {
+		do = append(do, UnattributedRemedy)
 	}
 	return strings.Join(do, ", and ")
 }
@@ -827,6 +848,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("keploy could not mark %d process(es) forked in the application's subtree as the application's (its map of the subtree was full, or it could not read the fork's start time), so their calls may have been neither recorded nor mocked while this test ran, or before it; report it to keploy with the agent's log, which names the process", c.Count)
 	case CaptureLossProcessUnshimmed:
 		return fmt.Sprintf("a process of the run ran a program keploy's shim is not in (macOS drops DYLD_INSERT_LIBRARIES for a platform, hardened-runtime or restricted binary), so keploy saw none of its calls while this test ran (found %d time(s): as it started, and at each test end it outlived)", c.Count)
+	case CaptureLossUnattributed:
+		return fmt.Sprintf("the application made %d call(s) from a process in no test worker's keploy instance while this test was open, in a run of more than one test worker, so keploy cannot tell which test made them, and they are in none of the open tests' recordings", c.Count)
 	case CaptureLossAgentStartedAgain:
 		return "keploy's agent was started again while the application ran on, and what the agent before counted went with it: a process of the application's that it could not place, or a call keploy cannot capture at all, may taint this test, and the new agent cannot see it (keploy judges the tests again once it starts the application anew)"
 	default:
