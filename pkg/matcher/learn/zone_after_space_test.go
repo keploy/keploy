@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -48,30 +49,65 @@ var zoneAfterSpace = []struct {
 // the zone's digits ("05:30").
 func TestAZoneAfterASpaceIsTheInstantsZone(t *testing.T) {
 	for _, tc := range zoneAfterSpace {
-		spans := instantSpans(tc.text)
-		if len(spans) != 1 {
-			t.Errorf("%q: %d instants, want 1: %+v", tc.text, len(spans), spans)
-			continue
+		zoneAfterSpaceIs(t, tc.text, tc.at, tc.res, tc.zone)
+	}
+}
+
+// Every hour a zone after a space names, 00 to 14 east and west of UTC,
+// written with its colon and without, is read as the zone, and each places
+// one instant at its own time of day: Tokyo writes +09:00, Magadan +11:00,
+// Pago Pago -11:00. Minute 59 is the last a zone writes.
+func TestEveryHourOfAZoneAfterASpaceIsTheInstantsZone(t *testing.T) {
+	at := time.Date(2026, 11, 1, 18, 12, 37, 172e6, time.UTC)
+	type offset struct{ hours, minutes int }
+	var offsets []offset
+	for h := 0; h <= 14; h++ {
+		offsets = append(offsets, offset{h, 0})
+	}
+	offsets = append(offsets, offset{5, 59})
+	for _, o := range offsets {
+		for _, sign := range []string{"+", "-"} {
+			zone := time.Duration(o.hours)*time.Hour + time.Duration(o.minutes)*time.Minute
+			if sign == "-" {
+				zone = -zone
+			}
+			wall := at.In(time.FixedZone("", int(zone/time.Second))).Format("2006-01-02 15:04:05.000")
+			for _, form := range []string{"%s%02d:%02d", "%s%02d%02d"} {
+				zoneAfterSpaceIs(t, wall+" "+fmt.Sprintf(form, sign, o.hours, o.minutes), at, time.Millisecond, zone)
+			}
 		}
-		sp := spans[0]
-		// Go writes the zone's name after its offset: the offset places
-		// the instant, and the name stands after the span.
-		want := len(strings.TrimSuffix(strings.TrimSuffix(tc.text, " IST"), " UTC"))
-		if sp.start != 0 || sp.end != want {
-			t.Errorf("%q: span [%d, %d), want [0, %d)", tc.text, sp.start, sp.end, want)
-		}
-		if !sp.keyed || sp.key != (instantKey{at: tc.at.UnixNano()}) {
-			t.Errorf("%q: names %v, want %v", tc.text, time.Unix(0, sp.key.at).UTC(), tc.at)
-		}
-		if !sp.zoned || sp.zone != int64(tc.zone) {
-			t.Errorf("%q: zoned %v at %v, want zoned at %v", tc.text, sp.zoned, time.Duration(sp.zone), tc.zone)
-		}
-		if sp.wall != clockOfDay(tc.at.In(time.FixedZone("", int(tc.zone/time.Second)))) {
-			t.Errorf("%q: writes %v of its day", tc.text, time.Duration(sp.wall))
-		}
-		if sp.res != tc.res {
-			t.Errorf("%q: resolution %v, want %v", tc.text, sp.res, tc.res)
-		}
+	}
+}
+
+// zoneAfterSpaceIs checks that text, which writes at with its zone after a
+// space, holds the instant that zone places it at: one span over the
+// text's date, time and zone, zoned at the zone's offset, writing its own
+// time of day at resolution res.
+func zoneAfterSpaceIs(t *testing.T, text string, at time.Time, res, zone time.Duration) {
+	t.Helper()
+	spans := instantSpans(text)
+	if len(spans) != 1 {
+		t.Errorf("%q: %d instants, want 1: %+v", text, len(spans), spans)
+		return
+	}
+	sp := spans[0]
+	// Go writes the zone's name after its offset: the offset places the
+	// instant, and the name stands after the span.
+	want := len(strings.TrimSuffix(strings.TrimSuffix(text, " IST"), " UTC"))
+	if sp.start != 0 || sp.end != want {
+		t.Errorf("%q: span [%d, %d), want [0, %d)", text, sp.start, sp.end, want)
+	}
+	if !sp.keyed || sp.key != (instantKey{at: at.UnixNano()}) {
+		t.Errorf("%q: names %v, want %v", text, time.Unix(0, sp.key.at).UTC(), at)
+	}
+	if !sp.zoned || sp.zone != int64(zone) {
+		t.Errorf("%q: zoned %v at %v, want zoned at %v", text, sp.zoned, time.Duration(sp.zone), zone)
+	}
+	if sp.wall != clockOfDay(at.In(time.FixedZone("", int(zone/time.Second)))) {
+		t.Errorf("%q: writes %v of its day", text, time.Duration(sp.wall))
+	}
+	if sp.res != res {
+		t.Errorf("%q: resolution %v, want %v", text, sp.res, res)
 	}
 }
 
