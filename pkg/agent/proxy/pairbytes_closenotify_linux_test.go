@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -418,11 +419,24 @@ func TestATLSClientsCloseNotifyAfterTheProxysCloseIsNoLoss(t *testing.T) {
 // that FIN and records it, so a bytes wait settles without an orphan to ask.
 func TestATLSClientsBytesOnTheirWayAtTheProxysCloseAreReadThrough(t *testing.T) {
 	for _, v := range tlsVersions {
-		for _, kind := range []string{"its close_notify", "data", "its FIN alone"} {
-			data := kind == "data"
+		for _, kind := range []string{"its close_notify", "data", "its FIN alone", "data past a cut end"} {
+			data := kind == "data" || kind == "data past a cut end"
 			t.Run(v.name+", "+kind, func(t *testing.T) {
-				p, _, _, tracked, srv, cli := tlsHeldPair(t, v.version)
+				p, _, proxySide, tracked, srv, cli := tlsHeldPair(t, v.version)
 				pc := pairedConnOf(t, p, 1)
+				owner := ""
+				if kind == "data past a cut end" {
+					// An end cut short once what the client had
+					// written so far had arrived: the bytes lost may
+					// begin anywhere, so it owns a share, and the
+					// data written after it is the open test's.
+					ps := readProxySide(proxySide)
+					if ps.err != nil {
+						t.Fatal(ps.err)
+					}
+					pc.cutShort("test-1", ps.received)
+					owner = "test-1"
+				}
 				was := lookupWritten
 				lookupWritten = func(ds *diagSock, c *pairedConn, atClose bool) (diagTCP, error) {
 					d, err := was(ds, c, atClose)
@@ -472,6 +486,13 @@ func TestATLSClientsBytesOnTheirWayAtTheProxysCloseAreReadThrough(t *testing.T) 
 				}
 				if l := lossesOf(p, models.CaptureLossAppBytesLost); l != want {
 					t.Fatalf("app_bytes_lost = %d at the proxy's close, want %d", l, want)
+				}
+				var owners []string
+				if owner != "" {
+					owners = []string{owner}
+				}
+				if got := ownersOf(p); !slices.Equal(got, owners) {
+					t.Fatalf("the loss is owned by %q, want %q", got, owners)
 				}
 				if data {
 					return

@@ -488,6 +488,90 @@ func TestALossAnEndOwnedWhoseReadFailedIsTheRuns(t *testing.T) {
 	}
 }
 
+// A test's end cut short in its wait for the bytes on the paired connections
+// (ProvenEnd, endTest, settledSince) makes that wait under the test's window
+// id (coreAgent.WithEndOf): the proxy marks what it could not see reached with
+// that id, so a loss of those bytes it counts later names the test, and is
+// charged to that test, or to the run, never to the test open then. Counted
+// before the end reads its losses, it is on that test's evidence, and the next
+// test and the run are not charged with it.
+func TestAnEndCutShortNamesItsTestToTheBytesWait(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode models.Mode
+	}{
+		{"replay", models.MODE_TEST},
+		{"record", models.MODE_RECORD},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, p := wireAgent(t, tc.mode)
+			var owned []coreAgent.OwnedLoss
+			a.Proxy = ownedLossProxy{lossProxy: lossProxy{wireProxy: p}, owned: &owned}
+			a.proven.losses = a.markCaptureLosses(context.Background())
+			claimSelf(t, a)
+			ctx := context.Background()
+			_, serr := a.ProvenBegin(ctx, begin("TestCut"))
+			require.Nil(t, serr)
+			var ends []string
+			var loss models.CaptureLoss
+			p.bytesWait = func(ctx context.Context, _ uint64) error {
+				// As the proxy does: what the cut wait could not see
+				// reached is marked with the end it names, and a loss
+				// of it counted later is that test's.
+				end := coreAgent.EndOf(ctx)
+				ends = append(ends, end)
+				loss = models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1,
+					What: "from [::ffff:127.0.0.1]:50912, written in " + end + ", whose end could not wait for them"}
+				owned = append(owned, coreAgent.OwnedLoss{Test: end, Loss: loss})
+				return errors.New("keploy cannot tell whether the bytes reached its proxy")
+			}
+			_, _ = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestCut", Outcome: models.ScopeOutcomePassed})
+			p.bytesWait = nil
+			require.Equal(t, []string{"o::TestCut"}, ends, "the end's bytes wait names the test's window")
+			require.Empty(t, endPassed(t, a, "TestNext").Action)
+
+			w := windowOf(t, a, "o::TestCut")
+			require.True(t, w.Evidence.Unread, "cut short: not verified")
+			require.Equal(t, models.CaptureLosses{loss}, w.Evidence.CaptureIncomplete, "the test charged with what it owned")
+			require.Nil(t, windowOf(t, a, "o::TestNext").Evidence)
+			un, err := a.UnchargedCaptureLosses(context.Background())
+			require.NoError(t, err)
+			require.Empty(t, un, "charged to its test, not the run")
+		})
+	}
+}
+
+// A loss a cut-short end owned, counted after the run's last end, is in no
+// test's charge: the run's read of what no test was charged with takes it from
+// the proxy, and holds it however often it is made. A new session's reset
+// takes what an earlier session's ends owned: no test of the new run is
+// charged with it, nor is its run.
+func TestALossOwnedAfterTheLastEndIsTheRunsAndNoNextSessions(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	var owned []coreAgent.OwnedLoss
+	a.Proxy = ownedLossProxy{lossProxy: lossProxy{wireProxy: p}, owned: &owned}
+	a.proven.losses = a.markCaptureLosses(context.Background())
+	claimSelf(t, a)
+	loss := models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1,
+		What: "from [::ffff:127.0.0.1]:50912, written in o::TestLast, whose end could not wait for them"}
+	require.Empty(t, endPassed(t, a, "TestLast").Action)
+	owned = []coreAgent.OwnedLoss{{Test: "o::TestLast", Loss: loss}}
+	for range 2 {
+		un, err := a.UnchargedCaptureLosses(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, models.CaptureLosses{loss}, un, "the run's, once")
+	}
+
+	owned = []coreAgent.OwnedLoss{{Test: "o::TestLast", Loss: loss}}
+	require.NoError(t, a.resetSession(context.Background()))
+	claimSelf(t, a)
+	require.Empty(t, endPassed(t, a, "TestA").Action, "a test of the next session")
+	require.Nil(t, windowOf(t, a, "o::TestA").Evidence)
+	un, err := a.UnchargedCaptureLosses(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, un, "the next session's run")
+}
+
 // A TLS client's rejection of keploy's certificate is the test's it happened
 // in, not a taint of every later test: the client's other calls are captured,
 // or rejected, on their own. One between two tests is the next test's, as a

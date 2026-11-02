@@ -36,6 +36,7 @@ func TestACutEndOwnsOnlyTheBytesWrittenBeforeIt(t *testing.T) {
 		{"all before the first of two cut ends", []cut{{"A", 5}, {"B", 10}}, 2, 4, []string{"A"}, false},
 		{"all between two cut ends", []cut{{"A", 5}, {"B", 10}}, 6, 9, []string{"B"}, false},
 		{"across two cut ends and after", []cut{{"A", 5}, {"B", 10}}, 4, 12, []string{"A", "B"}, true},
+		{"ending at the first of two cut ends' wants", []cut{{"A", 5}, {"B", 10}}, 2, 5, []string{"A"}, false},
 		{"a cut end that wrote nothing more", []cut{{"A", 10}, {"B", 10}}, 3, 12, []string{"A"}, true},
 		{"a range from 0 begins at the first byte", []cut{{"A", 10}}, 0, 0, []string{"A"}, false},
 		{"a range from 0 with no end cut short", nil, 0, 0, nil, true},

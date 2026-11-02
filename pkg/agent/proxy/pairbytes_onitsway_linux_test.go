@@ -95,7 +95,8 @@ func TestPlaintextOnItsWayAtAnUnheldCloseIsJudged(t *testing.T) {
 // under it) is a loss: whether the bytes were calls cannot be told. The loss
 // is the bytes past what the proxy had received at the close, up to what the
 // application had written by then: a test whose end was cut short owns it
-// only when some of those were written before that end (pairedConn.lostBy).
+// only when some of those were written before that end (pairedConn.lostBy),
+// and the test open now is charged when some were written after it.
 // Once the close is done, a bytes wait that holds the connection finds it
 // reached. A connection whose close found nothing on its way is not read at
 // all: its close does not wait. Nor is one whose close found only the
@@ -114,6 +115,7 @@ func TestPlaintextOnItsWayAtTheProxysCloseIsReadThrough(t *testing.T) {
 		name string
 		want uint64
 	}{{"a failed read", 1}, {"data, after a cut end's bytes arrived", 1}, {"data, all written before a cut end", 0},
+		{"data, written before a cut end and after it", 1},
 		{"its FIN alone on its way", 0}, {"a byte on its way, its FIN not surely counted", 1}, {"a byte and its FIN on their way", 1},
 		{"data, as keploy stops", 0}, {"a failed read, as keploy stops", 0}}...)
 	// How many more than were written the close's read counts, and whether
@@ -136,10 +138,13 @@ func TestPlaintextOnItsWayAtTheProxysCloseIsReadThrough(t *testing.T) {
 			tracked.beforeClose = func() { p.pairClosing(ctx, proxySide, tracked) }
 			pc := pairedConnOf(t, p, 1)
 			owner := ""
-			if cut, ok := map[string]uint64{"data, after a cut end's bytes arrived": 1, "data, all written before a cut end": 25}[tc.name]; ok {
+			if cut, ok := map[string]uint64{"data, after a cut end's bytes arrived": 1, "data, all written before a cut end": 25,
+				"data, written before a cut end and after it": 13}[tc.name]; ok {
 				// A byte written and read, then an end cut short that
 				// waited for cut: 1, that byte; 25, that byte and the
-				// 24 the close counts on their way.
+				// 24 the close counts on their way; 13, that byte and
+				// the first 12 of those, the rest written after the
+				// cut end, in the test open now.
 				if _, err := app.Write([]byte("x")); err != nil {
 					t.Fatal(err)
 				}
@@ -147,7 +152,7 @@ func TestPlaintextOnItsWayAtTheProxysCloseIsReadThrough(t *testing.T) {
 					t.Fatal(err)
 				}
 				pc.cutShort("test-1", cut)
-				if cut == 25 {
+				if cut > 1 {
 					owner = "test-1"
 				}
 			}
@@ -193,7 +198,7 @@ func TestPlaintextOnItsWayAtTheProxysCloseIsReadThrough(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch tc.name {
-			case "data", "data, after a cut end's bytes arrived", "data, all written before a cut end",
+			case "data", "data, after a cut end's bytes arrived", "data, all written before a cut end", "data, written before a cut end and after it",
 				"its FIN alone on its way", "a byte on its way, its FIN not surely counted", "a byte and its FIN on their way",
 				"data, as keploy stops":
 				if _, err := app.Write([]byte("publish 2\n")); err != nil {
