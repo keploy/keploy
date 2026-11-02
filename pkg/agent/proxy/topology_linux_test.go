@@ -553,7 +553,7 @@ func TestUnderTheSwitchALocalListenerOutsideTheTreeIsMocked(t *testing.T) {
 	if live, mocked := s.rows(); len(live) != 0 || len(mocked) != 0 {
 		t.Fatalf("nothing is listed before the call is known to be mocked, got live=%+v mocked=%+v", live, mocked)
 	}
-	p.noteMockedLocal(want.Addr, port, outside, "")
+	p.noteMockedLocal(want.Addr, port, outside, "", 0)
 	if live, mocked := s.rows(); len(live) != 0 || len(mocked) != 1 || mocked[0] != want {
 		t.Fatalf("want one mocked row %+v and no LIVE row, got live=%+v mocked=%+v", want, live, mocked)
 	}
@@ -566,9 +566,9 @@ func TestUnderTheSwitchALocalListenerOutsideTheTreeIsMocked(t *testing.T) {
 func TestAMockedContainerIsListedByItsKey(t *testing.T) {
 	p, s := provenTreeProxy(t)
 	const key = "container:postgres:5432@aaaaaaaaaaaa"
-	p.noteMockedLocal("127.0.0.1:49153", 49153, &models.MockedRow{Addr: "127.0.0.1:49153", PID: 9, Exe: "/usr/bin/docker-proxy", Port: 49153}, key)
-	p.noteMockedLocal("172.17.0.2:5432", 5432, nil, key)
-	p.noteMockedLocal("10.0.0.7:443", 443, nil, "")
+	p.noteMockedLocal("127.0.0.1:49153", 49153, &models.MockedRow{Addr: "127.0.0.1:49153", PID: 9, Exe: "/usr/bin/docker-proxy", Port: 49153}, key, 0)
+	p.noteMockedLocal("172.17.0.2:5432", 5432, nil, key, 0)
+	p.noteMockedLocal("10.0.0.7:443", 443, nil, "", 0)
 	_, mocked := s.rows()
 	want := []models.MockedRow{
 		{Addr: "127.0.0.1:49153", Container: key, Port: 49153},
@@ -581,7 +581,7 @@ func TestAMockedContainerIsListedByItsKey(t *testing.T) {
 	other := &rowSink{}
 	p.SetTopologySink(other)
 	p.mockMode = false
-	p.noteMockedLocal("172.17.0.2:5432", 5432, nil, key)
+	p.noteMockedLocal("172.17.0.2:5432", 5432, nil, key, 0)
 	if _, got := other.rows(); len(got) != 0 {
 		t.Fatalf("a run that is not keploy mock's lists nothing, got %+v", got)
 	}
@@ -653,7 +653,7 @@ func (eofConn) Read([]byte) (int, error) { return 0, io.EOF }
 // make a call LIVE for the test open when they come.
 func TestALiveReadWithNoBytesListsNothing(t *testing.T) {
 	p, s := provenTreeProxy(t)
-	c := p.liveConn(eofConn{}, os.Getpid(), 8080)
+	c := p.liveConn(eofConn{}, os.Getpid(), 8080, 0)
 	if n, err := c.Read(make([]byte, 8)); n != 0 || err != io.EOF {
 		t.Fatalf("read %d, %v", n, err)
 	}
@@ -693,7 +693,7 @@ func tcpPair(t *testing.T) (*net.TCPConn, *net.TCPConn) {
 func TestALiveConnectionForwardsAHalfClose(t *testing.T) {
 	p, _ := provenTreeProxy(t)
 	caller, proxySide := tcpPair(t)
-	c := p.liveConn(proxySide, os.Getpid(), 8080)
+	c := p.liveConn(proxySide, os.Getpid(), 8080, 0)
 	if _, err := c.Write([]byte("bye")); err != nil {
 		t.Fatal(err)
 	}
@@ -1665,5 +1665,23 @@ func TestHandleConnectionListsAnHTTPConnectionABypassRulePassesThroughOnlyForACa
 				}
 			}
 		})
+	}
+}
+
+// oneByteConn reads one byte of a caller's request each time.
+type oneByteConn struct{ net.Conn }
+
+func (oneByteConn) Read(b []byte) (int, error) { b[0] = 'x'; return 1, nil }
+
+// A LIVE call carries the instance of the test worker whose process made
+// it, which names its test.
+func TestALiveCallCarriesItsWorkersInstance(t *testing.T) {
+	p, s := provenTreeProxy(t)
+	c := p.liveConn(oneByteConn{}, os.Getpid(), 8080, 3)
+	if _, err := c.Read(make([]byte, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if live, _ := s.rows(); len(live) != 1 || live[0].Instance != 3 {
+		t.Fatalf("listed %+v", live)
 	}
 }

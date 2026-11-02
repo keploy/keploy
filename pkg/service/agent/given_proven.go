@@ -83,8 +83,13 @@ func (a *Agent) ProvenGive(ctx context.Context, req models.GivenReq) (models.Giv
 		return models.GivenResp{}, abandoned(err)
 	}
 	defer a.wire.unlock()
+	// The test is the open test of the worker whose process gave the value.
+	worker, serr := a.callerWorker(ctx, "given value", req.Name)
+	if serr != nil {
+		return models.GivenResp{}, serr
+	}
 	a.provenMu.Lock()
-	closed, id := a.proven.closed, a.proven.open
+	closed, id := a.proven.closed, a.proven.openOf(worker)
 	a.provenMu.Unlock()
 	if closed {
 		return models.GivenResp{}, errClosed()

@@ -89,7 +89,7 @@ func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me clai
 		// The run's single test process is gone: a test it left open can
 		// no longer end, and fails. (No worker runs beside a single test
 		// process, so an open test is that process's.)
-		stale = a.proven.open
+		stale = a.proven.openOf(0)
 		a.proven.claim = claimant{}
 	}
 	var live []string
@@ -176,7 +176,7 @@ func (a *Agent) workerIDs() []uint32 {
 func (a *Agent) endGoneWorkers(ctx context.Context) {
 	a.provenMu.Lock()
 	var gone []uint32
-	stale := ""
+	var stale []string
 	for _, id := range a.workerIDs() {
 		w := a.proven.workers[id]
 		if procAlive(w.pid, w.start) {
@@ -184,13 +184,13 @@ func (a *Agent) endGoneWorkers(ctx context.Context) {
 		}
 		gone = append(gone, id)
 		delete(a.proven.workers, id)
-		if a.proven.openWorker == id {
-			stale = a.proven.open
+		if open := a.proven.openOf(id); open != "" {
+			stale = append(stale, open)
 		}
 	}
 	a.provenMu.Unlock()
-	if stale != "" {
-		a.failOpen(ctx, stale, "the test worker's process exited while the test was open")
+	for _, id := range stale {
+		a.failOpen(ctx, id, "the test worker's process exited while the test was open")
 	}
 	a.endInstances(gone)
 }
