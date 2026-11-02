@@ -167,21 +167,21 @@ func ReservedControl(_, _ string, c syscall.RawConn) error {
 }
 
 // UnlistedPort returns a port P that this network namespace's socket tables
-// (/proc/net/tcp, tcp6, udp and udp6, and sock_diag's dumps) list no socket
-// at, and that no other socket is given for the test's life: P lies below
-// net.ipv4.ip_local_port_range, the range a bind to port 0, a connect and a
-// UDP send from an unbound socket are given a port from (IPv6 shares it),
-// and at or above 1024. P is held at TCP, at every address, by a socket that
-// only binds, which the tables leave out. The hold binds P with no option, so
-// a search in another test binary, whose bind sets none either, passes P
-// over; then it sets SO_REUSEADDR, so a listener that sets it too, as Go's
-// listeners do, binds beside the hold and listens at P: the test's own, to
-// have a socket of its own at P, or its code's, when the test hands P to
-// code that binds it. Once that listener closes, P is held as before. No
-// socket is at P on UDP when it returns; one that names P can bind it there,
-// as the code a test hands P to does. It is for a test that reads those
-// tables, or whose code binds P at TCP and UDP: a port it freed by closing a
-// socket could be given to another socket at once.
+// (/proc/net/tcp, tcp6, udp and udp6, and sock_diag's dumps of listening and
+// connected sockets) list no socket at, and that no other socket is given for
+// the test's life: P lies below net.ipv4.ip_local_port_range, the range a bind
+// to port 0, a connect and a UDP send from an unbound socket are given a port
+// from (IPv6 shares it), and at or above 1024. P is held at TCP, at every
+// address, by a socket that only binds, which those tables leave out. The hold
+// binds P with no option, so a search in another test binary, whose bind sets
+// none either, passes P over; then it sets SO_REUSEADDR, so a listener that
+// sets it too, as Go's listeners do, binds beside the hold and listens at P:
+// the test's own, to have a socket of its own at P, or its code's, when the
+// test hands P to code that binds it. Once that listener closes, P is held as
+// before. No socket is at P on UDP when it returns; one that names P can bind
+// it there, as the code a test hands P to does. It is for a test that reads
+// those tables, or whose code binds P at TCP and UDP: a port it freed by
+// closing a socket could be given to another socket at once.
 func UnlistedPort(t *testing.T) int {
 	t.Helper()
 	b, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")

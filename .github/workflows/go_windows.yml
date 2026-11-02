@@ -65,13 +65,20 @@ jobs:
       #                       checks the numbering by what was read. Neither
       #                       had run on Windows before this job.
       #   ./internal/testnet  the ports ./pkg, ./pkg/neterr and
-      #                       ./pkg/agent/proxy/incoming hold for their
-      #                       refused dials and their own listeners: a
+      #                       ./pkg/agent/proxy/incoming take for their
+      #                       refused dials and their listeners. Their
+      #                       SharedPort and RefusedAddr ports are held by a
       #                       connection's local end here, with SO_REUSEADDR
-      #                       on the tests' own listeners.
+      #                       on the tests' own listeners. incoming's
+      #                       ReservedPort ports are not: they are ports below
+      #                       the dynamic port range, claimed by a lock file
+      #                       per port, which no bind to port 0 and no
+      #                       connect is given.
       #                       Its rows check that a held port refuses a dial,
-      #                       that no other socket can bind it, and that the
-      #                       test's own listener opens there beside the hold.
+      #                       that no other socket can bind it, that the
+      #                       test's own listener opens there beside the hold,
+      #                       and that a claim takes a port no other test
+      #                       claimed below the range netsh reports.
       #
       # Every one of these but connseq was cross-compiled and executed on a
       # real Windows host before being listed. No Windows host was at hand for
