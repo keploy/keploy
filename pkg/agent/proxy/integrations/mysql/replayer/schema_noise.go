@@ -49,6 +49,13 @@ type mysqlNoiseAdapter struct {
 	mocknoise.JSONDiffer
 }
 
+// DiffJSONBodies is the adapter's Diff (JSONDiffer's, DetectJSONDrift) over
+// the bodies as mocknoise.JSONBody, so the strict gate's live body, compared
+// with every candidate of a command, is decoded once (strictGate.bodyDocFor).
+func (mysqlNoiseAdapter) DiffJSONBodies(_ *models.Mock, recorded, live *mocknoise.JSONBody, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, valIsNoise func(string) bool) (map[string][]string, bool) {
+	return mocknoise.DetectJSONBodyDrift(recorded, live, known, typeStrict, valueChangesOnly, valIsNoise)
+}
+
 // RecordedBody returns the canonical JSON body of the mock's recorded request.
 // Command-phase data mocks carry exactly one request; multi-request bundles
 // (handshake config mocks) and non-drift-capable commands return ok=false.
@@ -221,14 +228,49 @@ type strictGate struct {
 	// (legacyRecordedMock); read once, when first needed.
 	legacyBody                   []byte
 	legacyBodyOK, legacyBodyRead bool
+
+	// liveDoc and legacyDoc are the live body and legacyBody as compare
+	// gives them to the engine, made on first use (bodyDocFor); docsMade,
+	// when set, counts the ones made, as bodiesBuilt counts the builds.
+	liveDoc, legacyDoc *mocknoise.JSONBody
+	docsMade           *int
 }
 
 // bodyFor is the live request body mock's recorded one is compared with: the
 // live packet as an older keploy read it when that keploy recorded mock
 // (legacyRecordedMock), else as this one reads it.
 func (g *strictGate) bodyFor(mock *models.Mock) ([]byte, bool) {
+	if g.comparesLegacy(mock) {
+		return g.legacyBody, true
+	}
+	return g.liveRequestBody()
+}
+
+// bodyDocFor is bodyFor's body as compare gives it to the engine: one
+// mocknoise.JSONBody for the live body and one for legacyBody, so each is
+// decoded once however many candidates the command compares it with.
+// docsMade, when set, counts the ones made.
+func (g *strictGate) bodyDocFor(mock *models.Mock) *mocknoise.JSONBody {
+	doc := &g.liveDoc
+	if g.comparesLegacy(mock) {
+		doc = &g.legacyDoc
+	}
+	if *doc == nil {
+		body, _ := g.bodyFor(mock)
+		*doc = mocknoise.NewJSONBody(body)
+		if g.docsMade != nil {
+			*g.docsMade++
+		}
+	}
+	return *doc
+}
+
+// comparesLegacy reports whether mock's recorded body is compared with the live
+// packet as an older keploy read it (legacyBody): mock was recorded by such a
+// keploy (legacyRecordedMock) and the live packet has that reading.
+func (g *strictGate) comparesLegacy(mock *models.Mock) bool {
 	if !legacyRecordedMock(mock) {
-		return g.liveRequestBody()
+		return false
 	}
 	if !g.legacyBodyRead {
 		g.legacyBodyRead = true
@@ -253,10 +295,7 @@ func (g *strictGate) bodyFor(mock *models.Mock) ([]byte, bool) {
 			}
 		}
 	}
-	if !g.legacyBodyOK {
-		return g.liveRequestBody()
-	}
-	return g.legacyBody, true
+	return g.legacyBodyOK
 }
 
 // liveRequestBody is the live command's body (liveBody), built on its first
@@ -426,10 +465,10 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 		}
 		noise = out
 	}
-	body, _ := g.bodyFor(mock)
+	body := g.bodyDocFor(mock)
 	if !seen {
 		recorded, recordedOK := g.recordedBody(mock)
-		v.allowed, v.drift = engine.StrictRejectRecorded(mock, recorded, recordedOK, body, noise)
+		v.allowed, v.drift = engine.StrictRejectRecordedBody(mock, recorded, recordedOK, body, noise)
 		if g.compared != nil {
 			*g.compared++
 		}
@@ -448,7 +487,7 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 			// KnownNoise is root-relative (user ∪ learned); JSONFieldDiffs
 			// skips those paths so the report shows only non-noise drift.
 			known := engine.KnownNoise(mock, noise)
-			g.fieldDiffs = maskAttributeDiffs(matcher.JSONFieldDiffs(string(recorded), string(body), known, "body.", 96), mock, g.live)
+			g.fieldDiffs = maskAttributeDiffs(matcher.JSONFieldDiffs(string(recorded), string(body.Raw()), known, "body.", 96), mock, g.live)
 		}
 	}
 	if ce := g.logger.Check(zap.DebugLevel, "schema-noise strict: rejected candidate mock (non-noise request field drifted)"); ce != nil && !seen {

@@ -357,6 +357,10 @@ type matchOptions struct {
 	// with the live request (strictGate.compare), so a test can check what
 	// a command costs without timing it.
 	compared *int
+	// docsMade, when set, counts the live bodies the strict gate gives the
+	// engine to compare (strictGate.bodyDocFor), each decoded once however
+	// many candidates it is compared with.
+	docsMade *int
 	// eagerGate gates each fallback of a COM_STMT_EXECUTE as the walk meets
 	// it, as the matcher did before it deferred the gate past the walk
 	// (execFallbacks): the reference a test checks that the deferred gate
@@ -1272,7 +1276,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// when strict enforcement, the rule of exact serving or detection first
 	// reads it.
 	gate := newStrictGate(noiseEngine, logger, req.Header.Type, &req.PacketBundle, liveStatementParams, liveStmtQuery, userBodyNoise)
-	gate.bodiesBuilt, gate.compared = opts.bodiesBuilt, opts.compared
+	gate.bodiesBuilt, gate.compared, gate.docsMade = opts.bodiesBuilt, opts.compared, opts.docsMade
 	if opts.eagerBody {
 		gate.liveRequestBody()
 	}

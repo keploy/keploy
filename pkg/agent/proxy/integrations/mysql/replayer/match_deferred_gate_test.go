@@ -310,6 +310,36 @@ func TestAMissReportsTheRecordingOfItsRequestStrictRejected(t *testing.T) {
 	}
 }
 
+// TestAStrictCommandGivesTheEngineItsLiveBodyOnce: a live COM_STMT_EXECUTE
+// under strict enforcement, the gate eager, compares its live body with each
+// of the three recordings of its statement made with other parameters, and
+// rejects them all. It gives the engine that body once, to be validated and
+// decoded once for all three (mocknoise.JSONBody), not once a candidate.
+// Counted, not timed.
+func TestAStrictCommandGivesTheEngineItsLiveBodyOnce(t *testing.T) {
+	exec := func(v string) mysql.Request {
+		req := executeReq(8, "")
+		req.Message.(*mysql.StmtExecutePacket).Parameters[0] = mysql.Parameter{Type: 254, Value: v}
+		return req
+	}
+	var pool []*models.Mock
+	for i, v := range []string{"a", "b", "c"} {
+		rec := exec(v)
+		rec.SetStoredQuery(diffQueryB)
+		pool = append(pool, diffMock("m-"+v, "c1", []mysql.Request{rec}, diffBase.Add(time.Duration(i)*time.Millisecond), models.LifetimeSession, "mocks"))
+	}
+	s := newDiffSide(t, pool)
+	defer s.mm.Close()
+	s.stageNoWindow()
+	compared, docs, err := replayer.MatchCommandDocsForTest(context.Background(), zap.NewNop(), exec("live"), s.mm, s.dctx, replayer.StrictEngineForTest(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compared != 3 || docs != 1 {
+		t.Errorf("the gate compared %d candidates and gave the engine %d live bodies, want 3 and 1", compared, docs)
+	}
+}
+
 // TestAnExecuteThatScoresOneIsAnsweredByItsScore: an EXECUTE whose statement
 // neither side knows (the live statement id was never prepared, the recording
 // has no PREPARE) is answered by score, without exact serving, by the
