@@ -1656,3 +1656,158 @@ func TestOutcomeARecordingReadOnceAndNotAgainLeavesTheCallUnread(t *testing.T) {
 		}
 	}
 }
+
+// sentAtMock is a recording whose request sends the moment sent (an UPDATE
+// that stamps a row), asked at req and answered at res (none where res is
+// zero); its answer is the tag alone, or returns returned where it is set.
+func sentAtMock(name, sent, returned string, req, res time.Time) *models.Mock {
+	sql, resp := "UPDATE jobs SET at = '"+sent+"' WHERE id = 1", &models.PostgresV3Response{CommandComplete: "UPDATE 1"}
+	if returned != "" {
+		sql += " RETURNING at"
+		resp.Rows = []models.PostgresV3Cells{{{Value: returned}}}
+	}
+	return &models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
+		ReqTimestampMock: req, ResTimestampMock: res,
+		PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
+			SQLNormalized: sql, Response: resp,
+		}},
+	}}
+}
+
+// A moment that stands in a recording's request is what the recorded
+// application sent: a send, placed by when it was sent and decided by the
+// send rules, as an exchange's request leaf is, however the recording is
+// handed in and whenever (or if ever) it was answered. Asked a second
+// before the call, answered before it, two seconds after it or at no time
+// keploy can read: an exchange of the test, and a start-up recording whose
+// view sent round F's moment, are each a copy bound at the send; one served
+// as recorded sent the recorded moment in round F too, a conflict; one
+// never served sent nothing in round F, a time no place gave. Asked at the
+// call's own instant, every form is the call's own read of the clock; asked
+// after it, none is a source. What round F gave in a recording's answer
+// keeps the answer's time: an answer that returns round F's moment, given
+// before the call but answered after it or at no time keploy can read, is
+// still refused as a pick.
+func TestOutcomeAMomentARecordingsRequestHoldsIsASend(t *testing.T) {
+	const p = "body.at"
+	ms := time.Millisecond
+	rAt := oAt.Add(2*time.Hour + 400*time.Millisecond + 123*time.Microsecond)
+	fAt := rAt.Add(time.Hour + 37*time.Second + 211*time.Millisecond + 7*time.Microsecond)
+	w := iWin(rAt, fAt, 100*ms)
+	hows := []string{"an exchange of the test", "a start-up recording whose view sent round F's moment",
+		"a start-up recording served as recorded", "a start-up recording never served"}
+	decide := func(how string, req, res time.Duration, noAnswer bool) Decision {
+		rec, live := iMicro(rAt.Add(req)), iMicro(fAt.Add(req))
+		asked, answered := rAt.Add(req), rAt.Add(res)
+		if noAnswer {
+			answered = time.Time{}
+		}
+		m := sentAtMock("mock-5", rec, "", asked, answered)
+		var earlier []Earlier
+		var raw []Raw
+		switch how {
+		case hows[0]:
+			m.Name = "mock-6"
+			earlier = []Earlier{{Mock: "mock-6", At: asked, Own: true, Payload: RawOf(m, true),
+				Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "q.at", Noise: "q.at", Type: String, Value: rec}, Live: live}}}}
+		case hows[1]:
+			raw = []Raw{RawOf(m, true).ServedAs(1).ServedLive(RawOf(sentAtMock("mock-5", live, "", asked, answered), true))}
+		case hows[2]:
+			raw = []Raw{RawOf(m, true).ServedAs(1).ServedAsRecorded()}
+		default:
+			raw = []Raw{RawOf(m, false)}
+		}
+		return oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, w, earlier, raw)), rec, live)
+	}
+	sentBefore := func(what, how string, d Decision) {
+		t.Helper()
+		switch how {
+		case hows[0]:
+			iValue(t, what, d, "mock-6")
+		case hows[1]:
+			iValue(t, what, d, "mock-5")
+		case hows[2]:
+			oRefused(t, what, d, RefusalConflict, "mock-5")
+		default:
+			oRefused(t, what, d, RefusalNoClockRead)
+		}
+	}
+	for _, c := range []struct {
+		name     string
+		req, res time.Duration
+		noAnswer bool
+		check    func(what, how string, d Decision)
+	}{
+		{"asked a second before the call and answered 0.9s before it", -time.Second, -900 * ms, false, sentBefore},
+		{"asked a second before the call and answered two seconds after it", -time.Second, 2 * time.Second, false, sentBefore},
+		{"asked a second before the call, with no answer time", -time.Second, 0, true, sentBefore},
+		{"asked at the call's own instant and answered 1ms after it", 0, ms, false, func(what, _ string, d Decision) {
+			t.Helper()
+			iClock(t, what, d)
+		}},
+		{"asked a second after the call", time.Second, time.Second + ms, false, func(what, _ string, d Decision) {
+			t.Helper()
+			oRefused(t, what, d, RefusalNoClockRead)
+		}},
+	} {
+		for _, how := range hows {
+			c.check(how+" "+c.name, how, decide(how, c.req, c.res, c.noAnswer))
+		}
+	}
+	rec, live := iMicro(rAt.Add(-time.Second)), iMicro(fAt.Add(-time.Second))
+	asked := rAt.Add(-time.Second)
+	for _, c := range []struct {
+		what     string
+		answered time.Time
+		why      string
+	}{
+		{"answered two seconds after the call", rAt.Add(2 * time.Second), "recorded after it"},
+		{"with no answer time", time.Time{}, noAnswerAt},
+	} {
+		raw := RawOf(sentAtMock("mock-5", rec, rec, asked, c.answered), true).ServedAs(1).
+			ServedLive(RawOf(sentAtMock("mock-5", live, live, asked, c.answered), true))
+		d := oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, w, nil, []Raw{raw})), rec, live)
+		oRefused(t, "round F's answer returns round F's moment, "+c.what, d, RefusalPick, "mock-5", c.why)
+	}
+}
+
+// A recording whose request and answer both hold the recorded moment (an
+// UPDATE that returns the time it set) is one place, named once in a line,
+// though each half is read apart: as a Clock's place set aside, as a place
+// that held the recorded value, and as another test's recording that sent
+// the moment in both runs.
+func TestOutcomeARecordingsTwoHalvesAreNamedOnce(t *testing.T) {
+	const p = "body.at"
+	ms := time.Millisecond
+	rAt := oAt.Add(2*time.Hour + 400*time.Millisecond + 123*time.Microsecond)
+	fAt := rAt.Add(time.Hour + 37*time.Second + 211*time.Millisecond + 7*time.Microsecond)
+	w := iWin(rAt, fAt, 100*ms)
+	once := func(what string, d Decision, want func(string, Decision)) {
+		t.Helper()
+		want(what, d)
+		line := d.Line
+		if d.Refusal != nil {
+			line = d.Refusal.Why
+			if n := strings.Count(strings.Join(d.Refusal.Places, " "), "mock-5"); n != 1 {
+				t.Errorf("%s: places %v; want mock-5 once", what, d.Refusal.Places)
+			}
+		}
+		if strings.Contains(line, "mock-5, mock-5") || strings.Count(line, "stood at mock-5") > 1 || strings.Count(line, "mock-5 in ") > 1 {
+			t.Errorf("%s: %q names mock-5 more than once", what, line)
+		}
+	}
+	asked := rAt.Add(-time.Second)
+	rec, live := iMicro(rAt), iMicro(fAt)
+	never := RawOf(sentAtMock("mock-5", rec, rec, asked, asked.Add(100*ms)), false)
+	once("a Clock beside a recording never served", oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, w, nil, []Raw{never})), rec, live),
+		func(what string, d Decision) { t.Helper(); iClock(t, what, d) })
+	rec, live = iMicro(asked), iMicro(fAt.Add(-time.Second))
+	never = RawOf(sentAtMock("mock-5", rec, rec, asked, asked.Add(100*ms)), false)
+	once("a time no place gave, beside a recording never served", oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, w, nil, []Raw{never})), rec, live),
+		func(what string, d Decision) { t.Helper(); oRefused(t, what, d, RefusalNoClockRead, "mock-5") })
+	other := RawOf(sentAtMock("mock-5", rec, rec, asked, asked.Add(100*ms)), true).ServedAs(1).
+		ServedLive(RawOf(sentAtMock("mock-5", live, live, asked, asked.Add(100*ms)), true)).OfAnotherTest()
+	other.servedAfter = true
+	once("a time another test's recording sent in both runs", oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, w, nil, []Raw{other})), rec, live),
+		func(what string, d Decision) { t.Helper(); oRefused(t, what, d, RefusalNoClockRead, "mock-5") })
+}

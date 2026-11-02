@@ -316,6 +316,10 @@ func TestOutcomeCostAStartUpSiblingsSecondIsTheCallsOwnRead(t *testing.T) {
 			notValue(mode.name+", "+shape.what, d)
 		}
 		iClock(t, mode.name+": F served the find, no view stated (:134)", call(mode.dc(), []Raw{costFind(recT, "", 600*time.Microsecond, 400*time.Microsecond).ServedAs(1)}, w))
+		// Answered 100us before the call, the find's request is still a send
+		// of the same second, never what the find gave: the timing of its
+		// answer moves nothing.
+		iClock(t, mode.name+": F served the find, answered before the call", call(mode.dc(), []Raw{costFind(recT, "", 600*time.Microsecond, -100*time.Microsecond).ServedAs(1)}, w))
 		iClock(t, mode.name+": the find's text holds F's second too (:136)", call(mode.dc(), []Raw{costFind(recT, `{"n":{"$numberLong":"`+liveT+`"}}`, 600*time.Microsecond, 400*time.Microsecond)}, w))
 		notValue(mode.name+": the find's answer gave the instant in flight (:135)", call(mode.dc(), []Raw{costFind(recT, `{"expires_at":{"$numberLong":"`+recT+`"}}`, 600*time.Microsecond, 400*time.Microsecond)}, w))
 	}

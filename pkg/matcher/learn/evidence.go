@@ -100,10 +100,13 @@ type reqPlace struct {
 // recording): made once per place and shared by its copies, so the index
 // finds each text's entry once, and the place keeps no recording's text.
 // same: whether round F gave the place as recorded (0: not asked yet).
+// of: the recording's own texts, where these are one half of them
+// (halves): a question of its fields reads them there.
 type placeText struct {
 	rec, live *readerText
 	views     []*readerText
 	same      int8
+	of        *placeText
 }
 
 // withTexts gives each of ps the handles its texts are read by, in x.
@@ -226,9 +229,10 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		}
 		fUnstated := unstated || !in.Caps.FViewStated
 		// Another test's recording, or one recorded after the call
-		// (OfAnotherTest), is outside the call's scope. Its place is read
-		// as an answer, request and all; only what round F gave there is
-		// read in its answer alone (answerHalf).
+		// (OfAnotherTest), is outside the call's scope. A word is read in
+		// its text whole, placed by its request's time where its request
+		// holds it (placedFor); an instant in each half, its request a send
+		// and its answer an answer (halves).
 		other := r.olderTest || r.elsewhere
 		startUp, other, scope := inScope(in, r.Mock(), r.beforeTest && !other, other)
 		p := evPlace{
@@ -278,13 +282,13 @@ func placedFor(p evPlace, r string) evPlace {
 	return p
 }
 
-// answerHalf is t, a recording's text, as its answer alone: each field
-// outside its request (requestPath), laid out as textFields lays a text
-// out; t itself where it is no recording's (a leaf is one side already).
-// What a recording's request holds is what the application sent there,
-// never what the recording gave it. ok is false where keploy could not
-// read the recording.
-func answerHalf(t *readerText) (*readerText, bool) {
+// textHalf is t, a recording's text, as its request alone (request) or
+// its answer alone: each field in or outside its request (requestPath),
+// laid out as textFields lays a text out; t itself where it is no
+// recording's (a leaf is one side already). What a recording's request
+// holds is what the application sent there, never what the recording gave
+// it. ok is false where keploy could not read the recording.
+func textHalf(t *readerText, request bool) (*readerText, bool) {
 	if t.raw == nil {
 		return t, true
 	}
@@ -294,12 +298,35 @@ func answerHalf(t *readerText) (*readerText, bool) {
 	}
 	var b strings.Builder
 	for _, f := range fields {
-		if !requestPath(f.path) {
+		if requestPath(f.path) == request {
 			b.WriteString(s[f.start:f.end])
 			b.WriteByte('\n')
 		}
 	}
 	return t.x.text(b.String()), true
+}
+
+// halves is p, a recording's place, as its two halves, each read in that
+// half of each run's text (textHalf): its request, what the application
+// sent there, a send placed by its request's time (p.req), and its answer,
+// what the recording gave it, placed by its answer's (rawState). ok is
+// false where keploy could not read a text.
+func halves(p evPlace) (req, ans evPlace, ok bool) {
+	ok = true
+	half := func(request bool) evPlace {
+		h := p
+		rec, okR := textHalf(p.t.rec, request)
+		live, okL := textHalf(p.t.live, request)
+		ok = ok && okR && okL
+		h.t = &placeText{rec: rec, live: live, views: p.t.views, of: p.t}
+		return h
+	}
+	req, ans = half(true), half(false)
+	req.side = Request
+	if p.req != nil {
+		req.state, req.why, req.recAfter = p.req.state, p.req.why, p.req.after
+	}
+	return req, ans, ok
 }
 
 // notFromMock is why a recording's payload was not read, where its read
