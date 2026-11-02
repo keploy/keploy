@@ -258,6 +258,107 @@ func TestBytesThatCanNoLongerArriveAreACaptureLoss(t *testing.T) {
 	}
 }
 
+// A pooled connection (pgxpool, database/sql) carries the calls of several
+// tests, one test after another, and a loss on it is charged to the test whose
+// bytes were lost: not to an earlier test that used the connection, nor to a
+// later one. Each test's end waits for every byte written to the connection
+// before it (WaitPairedBytes), and the agent reads what the test is charged
+// only after that wait (settledSince, then chargeCaptureLosses): a test's
+// bytes have reached the proxy by its end, or their loss was counted before
+// its charge was read. Each test here is charged what the count grew by
+// across its end. The proxy closes the pooled connection in test lostIn,
+// short of what that test wrote, and the pool dials a new one for the tests
+// after it.
+//
+// A test whose end could not wait (here its context ended) is not verified,
+// and the bytes it wrote stay unsettled. A loss of them counted later, at the
+// proxy's close in the next test, is charged to that test as well: past an
+// end that could not wait, which test wrote bytes still unsettled is not
+// told, so both tests carry the loss, never the test open at the count alone.
+func TestAPooledConnectionsLossIsChargedToTheTestThatWroteIt(t *testing.T) {
+	call := func(t *testing.T, p *Proxy, app *net.TCPConn, reader net.Conn, seq uint64) error {
+		t.Helper()
+		msg := []byte("Q\x00\x00\x00\x0eSELECT 1;\x00")
+		if _, err := app.Write(msg); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.ReadFull(reader, make([]byte, len(msg))); err != nil {
+			t.Fatal(err)
+		}
+		return p.WaitPairedBytes(context.Background(), seq)
+	}
+	for _, tc := range []struct {
+		name   string
+		lostIn int
+		// cutShort: test lostIn's end cannot wait, and the proxy closes the
+		// connection in the next test.
+		cutShort bool
+		want     []uint64
+	}{
+		{"lost in the first test", 1, false, []uint64{1, 0, 0, 0}},
+		{"lost in the second test", 2, false, []uint64{0, 1, 0, 0}},
+		{"lost in the third test", 3, false, []uint64{0, 0, 1, 0}},
+		{"its test's end could not wait", 2, true, []uint64{0, 0, 1, 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, app, proxySide, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+			seq := uint64(1)
+			redial := func() {
+				seq++
+				app, proxySide, reader = heldPairOn(t, p, seq, "tcp4", "127.0.0.1:0")
+			}
+			var charged []uint64
+			var was uint64
+			for test := 1; test <= 4; test++ {
+				var end error
+				switch {
+				case test == tc.lostIn && tc.cutShort:
+					queue(t, app)
+					ctx, cancel := context.WithCancel(context.Background())
+					cancel()
+					if end = p.WaitPairedBytes(ctx, seq); !errors.Is(end, context.Canceled) {
+						t.Fatalf("test %d's end = %v, want it cut short", test, end)
+					}
+				case test == tc.lostIn:
+					// More than the proxy's side takes before it reads: the
+					// test's end waits for it, and the proxy closes the
+					// connection first.
+					queue(t, app)
+					targets, err := p.pairTargets(seq)
+					if err != nil || len(targets) != 1 {
+						t.Fatalf("pairTargets = %d, %v; want the pooled connection", len(targets), err)
+					}
+					done := waitOn(p, targets...)
+					_ = reader.Close()
+					p.paired.remove(proxySide)
+					end = <-done
+				case test == tc.lostIn+1 && tc.cutShort:
+					// The proxy closes the pooled connection with the last
+					// test's bytes unread, and the pool dials a new one.
+					_ = reader.Close()
+					p.paired.remove(proxySide)
+					redial()
+					end = call(t, p, app, reader, seq)
+				case test == tc.lostIn+1:
+					redial()
+					end = call(t, p, app, reader, seq)
+				default:
+					end = call(t, p, app, reader, seq)
+				}
+				if end != nil && (!tc.cutShort || test != tc.lostIn) {
+					t.Fatalf("test %d's end: %v", test, end)
+				}
+				now := lossesOf(p, models.CaptureLossAppBytesLost)
+				charged = append(charged, now-was)
+				was = now
+			}
+			if !slices.Equal(charged, tc.want) {
+				t.Fatalf("app_bytes_lost charged by test = %v, want %v", charged, tc.want)
+			}
+		})
+	}
+}
+
 // Everything written, then the application's FIN: once it has all arrived
 // there is nothing to wait for, whether the application's socket is still
 // there or gone.
