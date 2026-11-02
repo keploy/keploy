@@ -463,7 +463,7 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 			return err
 		}
 		// Its end waits only for the requests opened from here.
-		a.beginWindow()
+		a.beginWindow(0)
 		a.markDrops(ctx, drops)
 	default:
 		// A test case that ends is served the pool whatever its settling
@@ -472,7 +472,7 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		// One cut short marks what it could not see reached with the test
 		// case's name, or the gap's for a pool call between test cases
 		// (endingTestCase, settledSince), which its owned losses then say.
-		unknown = a.settledSince(ctx, true, endingTestCase(es))
+		unknown = a.settledSince(ctx, true, 0, endingTestCase(es))
 	}
 	switch {
 	case ex.Stage:

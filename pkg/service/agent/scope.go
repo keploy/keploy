@@ -667,6 +667,15 @@ func (a *Agent) noteScopeInstance(name string, inst uint32) {
 	a.scopeMeta[k] = meta
 }
 
+// scopeInstance is the keploy instance of the test worker that began test
+// name (noteScopeInstance), while its window is open; 0 in a run of one test
+// process.
+func (a *Agent) scopeInstance(name string) uint32 {
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	return a.scopeMeta[scopeKey{pid: 0, name: name}].instance
+}
+
 // NoteScopeOutcome records the verdict a test's harness reported as it ended
 // the scope, for the window that end closes. Called before the end itself,
 // and only for a scope that is open: an end with no begin closes nothing, so
