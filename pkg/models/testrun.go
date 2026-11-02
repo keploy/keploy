@@ -182,6 +182,11 @@ type TestResult struct {
 	// test, nor land in FailureInfo.UnmatchedCalls. Absent when there is
 	// none.
 	Answers []UnmatchedCall `json:"answers,omitempty" yaml:"answers,omitempty"`
+	// Rewritten are the places of the expected response a replay hook
+	// rewrote for this send before the answer was compared with it
+	// (TestCase.ExpectedRewrite), each with its recorded value and why: the
+	// comparison read the rewritten value there. Absent when there is none.
+	Rewritten []RewrittenPlace `json:"rewritten,omitempty" yaml:"rewritten,omitempty"`
 }
 
 // TemplateFailure is one template variable place a test case failed on, or

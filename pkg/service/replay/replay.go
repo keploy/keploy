@@ -4139,6 +4139,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 						TemplateFailures: templateFailures,
 					}
+					if sent.ExpectedRewrite != nil {
+						testCaseResult.Rewritten = sent.ExpectedRewrite.Places
+					}
 				case models.GRPC_EXPORT:
 					grpcResp := resp.(*models.GrpcResp)
 
