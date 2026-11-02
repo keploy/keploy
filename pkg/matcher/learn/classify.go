@@ -1963,7 +1963,29 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// learned as a read since its test began (models.ClockOffset.Word),
 		// checked at every replay, and the rest of the text is still
 		// compared.
-		if wb := w.sinceBegin(); ln.Kind == KindUnaccounted && wb != nil {
+		//
+		// So is a value its call's window learns only as a part found in a
+		// recording's payload (partInPayload): its call's window shows no
+		// read, so the search read the value's changed words, and their
+		// decoded and case-folded forms, as data, and one stood as a token in
+		// a recording's payload (a .NET stamp's "3505371Z" decodes as base64
+		// to a text whose word "y" a Pulsar look-up's JSON holds; a stamp a
+		// consumer read on a pushed event has the minute of the stamp that
+		// event carries). Which words a read of the clock makes changes with
+		// every read, so whether one stands in a payload by chance would
+		// decide, run by run, between that variable, which no call can bind,
+		// and the read the window from each run's test begin holds. That
+		// window reads the value's words as the clock's first, as its call's
+		// window does: a plain read it learns there is taken, and so is a
+		// text whose one changed word it learns as such a read (sinceWord: a
+		// stamp inside "lead created at <stamp> by crm" is learned as a read
+		// of that word since its test began, models.ClockOffset.Word, and
+		// the rest of the text is still compared); a whole copy, or anything
+		// else, is not, and the variable stands. A payload F served with its
+		// view counts too (partInPayload): either read is checked at every
+		// replay from its test's begin, so where the application copied that
+		// payload's word it is red at replay, never a pass.
+		if wb := w.sinceBegin(); (ln.Kind == KindUnaccounted || partInPayload(ln)) && wb != nil {
 			if early := leaf(r, l, wb, 0); early.Kind == KindClockRead && early.Read != nil {
 				early.Read.Since = models.SinceTestBegin
 				ln = early
@@ -2064,6 +2086,26 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		out = append(out, ln)
 	}
 	return out
+}
+
+// partInPayload reports whether ln is a variable whose place is in a raw
+// mock's payload (Place.Side "": appearedIn reads its words as tokens there)
+// and holds only a part of the recorded value (Place.Held: a word, a piece,
+// or a decoded or case-folded form of one), never an echo's instant. A place
+// that holds the value whole, or a leaf of an exchange F served field by
+// field that drifted with it (Place.Side Request or Response), is not one.
+// A place holding only the value's decoded text counts as a part here,
+// though appearedIn ranks it whole: no clock layout reads an escape, so the
+// re-read from the test's begin never takes a read for it.
+// A payload F served with its view (Raw.Live) is one too: Place carries no
+// mark of it. There follows.refute keeps a part unless F's view shows the
+// value moved apart from it, so the part may be no chance, yet the value is
+// read again from its test's begin, where the plain read learned is refused
+// at replay if the application copied that payload's word (the replay
+// serves it as recorded): red there, where the part's variable is refused
+// at record, never a pass.
+func partInPayload(ln Learned) bool {
+	return ln.Kind == KindVariable && ln.From.Side == "" && !ln.From.Echo && ln.From.Held != ln.Recorded.Value
 }
 
 // clockSourceWhy is why a value an earlier call of the run sent at from (the
