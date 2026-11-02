@@ -143,6 +143,12 @@ type follows struct {
 	// unserved are the mocks of refutedOf the search went past as places
 	// record's full round had not served before the call (notServed).
 	unserved map[string]bool
+	// older names the first place the search for the value's source went
+	// past (refute), or the word rule let a word of it go at (excusedRaw,
+	// excusedLive), that F gave the application only in an older test of
+	// the set (noteOlder): a value left noise past it is refused
+	// (olderRefused).
+	older string
 	// aside, where the search for the value's source went past a leaf that
 	// held its recorded value whole and that F saw hold another value
 	// (refuteSeen), names the first such leaf: what a value learned as noise
@@ -203,7 +209,9 @@ func (f *follows) source(mock string) {
 // the call or whose times keploy cannot read, one holding F's value too)
 // the place stays where the value came from. A start-up's word a swap can
 // change is never handed here (appearedIn refuses a value found there:
-// swapHolds).
+// swapHolds). A place F gave the application only in an older test of the
+// set (Raw.InAnOlderTest) is set aside so too, and the search goes on, but
+// it is named (noteOlder): a value left noise past it is refused.
 //
 // A place of a payload F served changed and gave its view of (ServedLive)
 // is set aside so too where, at every field of it holding the word, F gave
@@ -249,6 +257,7 @@ func (f *follows) refute(x Raw, texts [2]string, keep bool, v *valueDrift, p Pla
 		found = "a part of its recorded value (" + partOf(v.rec, p.Held) + ") stands in " + placeAt(p)
 	}
 	f.wentPast(x.mock, found+gave+": a copy moves with its source, so the value is no copy of it")
+	f.noteOlder(x)
 	// The word rule reads the same word at the same place on the same terms
 	// and notes it there too (excusedRaw); a source set aside is noted here
 	// as well, so it is ordered should the two searches ever part.
@@ -749,7 +758,9 @@ func (f *follows) excusedSeen(e Earlier, ed, v *valueDrift, i int, t string, at 
 // value v took none of the words of. A payload F served changed with no
 // view, F may have given another word there, which keploy does not see. A
 // payload's clock stamps are read blanked: F may have stamped its own
-// there, so a word that stands only in one is no word both gave.
+// there, so a word that stands only in one is no word both gave. A payload
+// F gave the application only in an older test of the set is named where it
+// lets a word go (noteOlder): a value left noise past it is refused.
 func (f *follows) excusedRaw(x Raw, v *valueDrift, i int, t string, at time.Time, why, place string) bool {
 	if f == nil {
 		return false
@@ -772,6 +783,7 @@ func (f *follows) excusedRaw(x Raw, v *valueDrift, i int, t string, at time.Time
 		return false
 	}
 	f.source(x.mock)
+	f.noteOlder(x)
 	return true
 }
 
@@ -794,7 +806,9 @@ func (f *follows) excusedRaw(x Raw, v *valueDrift, i int, t string, at time.Time
 // request, or at a field the recording lacks, a field the recorded value took a word of or
 // drifted with, one that lost no word in F, a payload the recording gave at
 // or after the call, or whose times keploy cannot read, shows nothing, and
-// the word stays refused, naming why.
+// the word stays refused, naming why. A payload F gave the application only
+// in an older test of the set is named where it lets a word go (noteOlder):
+// a value left noise past it is refused.
 func (f *follows) excusedLive(x Raw, v *valueDrift, i int, t string, at time.Time, why, place string) bool {
 	if f == nil {
 		return false
@@ -838,6 +852,7 @@ func (f *follows) excusedLive(x Raw, v *valueDrift, i int, t string, at time.Tim
 		f.moved = v.wordOf(t, false) + " stands in " + place + ", where the recording gave the application another value, which the recorded value took none of the words of: a copy moves with its source, so the value is no copy of it"
 	}
 	f.source(x.mock)
+	f.noteOlder(x)
 	return true
 }
 
@@ -1043,6 +1058,36 @@ func (dc *DriftCache) holdsWord(value, t string) bool {
 	return false
 }
 
+// noteOlder names x as older where F gave the application x only in an older
+// test of the set than the call's (Raw.InAnOlderTest), the first such place
+// once. No excuse from a place served only in an older test (a founder
+// ruling, 2026-11-02): what F gave there shows nothing of what the
+// application did with the value in the tests since, so a value left noise
+// past it is refused (olderRefused). The search for the value's source still
+// goes past it, and the word rule still lets its word go, so a later place
+// stays where the value came from, and a value the call's window then
+// learns as a read of the clock, which every replay checks, is learned so
+// (an older test's instant moved apart from: a founder ruling, 2026-10-29).
+func (f *follows) noteOlder(x Raw) {
+	if f.older == "" && x.InAnOlderTest() {
+		f.older = x.mock
+	}
+}
+
+// olderRefused is ln, the verdict on a drift once its kind is final, refused
+// where it is noise, which no replay checks, past a place F gave the
+// application only in an older test of the set (noteOlder), naming that
+// place and why, as followed names a refusal; ln as it is otherwise. A read
+// of the clock is checked against its call's clock at every replay, and
+// stands.
+func (f *follows) olderRefused(ln Learned) Learned {
+	if f == nil || f.older == "" || ln.Kind != KindNoise {
+		return ln
+	}
+	ln.Kind, ln.Why, ln.Echo = KindUnaccounted, f.lead()+"; record's full round gave the application "+f.older+" only in an older test of the set, and what it gave there shows nothing of what the application did with the value in the tests since, so keploy cannot tell a copy from a varying value", nil
+	return ln
+}
+
 // followed is the verdict on a drift record's full round would learn as
 // noise once the word rule let go the words fol found (fol.first non-empty),
 // or once the search for its source went past a place (fol.refuted):
@@ -1068,25 +1113,31 @@ func (fol *follows) followed(ln Learned, at time.Time, earlier []Earlier, raw []
 		}
 	}
 	if why != "" {
-		lead := fol.first
-		// refute sets a source aside only where F served it as recorded, the
-		// recording gave it before the call and F's value is not in it, and
-		// the word rule then reads the same word at the same place on the
-		// same terms (excused), so it lets the word go there and sets first
-		// before a value is learned as noise. A leaf refuteSeen sets aside
-		// leaves first unset where the value's words there are a clock
-		// read's, which the word rule never reads (aside). Either way the
-		// refusal names the source set aside (fail closed), and the echo's
-		// refusal in classifyRead does the same.
-		if lead == "" {
-			lead = fol.refuted
-		}
-		if lead == "" {
-			lead = fol.aside
-		}
-		ln.Kind, ln.Why, ln.Echo = KindUnaccounted, lead+"; "+why+", so keploy cannot tell a copy from a varying value", nil
+		ln.Kind, ln.Why, ln.Echo = KindUnaccounted, fol.lead()+"; "+why+", so keploy cannot tell a copy from a varying value", nil
 	}
 	return ln
+}
+
+// lead is what a refusal of a value the rule would learn as noise names
+// first (followed, olderRefused): the word rule's reason at the first word
+// it let go (first), else the first place the search for its source went
+// past (refuted), else the first leaf it set aside (aside). refute sets a
+// source aside only where F served it as recorded, the recording gave it
+// before the call and F's value is not in it, and the word rule then reads
+// the same word at the same place on the same terms (excused), so it lets
+// the word go there and sets first before a value is learned as noise. A
+// leaf refuteSeen sets aside leaves first unset where the value's words
+// there are a clock read's, which the word rule never reads (aside). Either
+// way the refusal names the source set aside (fail closed), and the echo's
+// refusal in classifyRead does the same.
+func (f *follows) lead() string {
+	switch {
+	case f.first != "":
+		return f.first
+	case f.refuted != "":
+		return f.refuted
+	}
+	return f.aside
 }
 
 // ClassifyFollowing is ClassifyGiven of record's full round under the rule a

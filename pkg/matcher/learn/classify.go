@@ -1883,6 +1883,11 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln.Why = fol.aside + ", and keploy learns it as varying"
 			}
 		}
+		// No excuse from a place served only in an older test (a founder
+		// ruling, 2026-11-02): a value left noise past a place F gave the
+		// application only in an older test of the set is refused, naming
+		// it (follows.noteOlder); a read of the clock stands.
+		ln = fol.olderRefused(ln)
 		if ln.Kind == KindNoise || ln.Kind == KindClockRead {
 			ln.Refuted = fol.refutedAll()
 		}
