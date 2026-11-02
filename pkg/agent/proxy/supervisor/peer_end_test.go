@@ -91,4 +91,35 @@ func TestEndFollowedStopIsTheFirstEndReadAfterTheStopBegan(t *testing.T) {
 	if none.EndFollowedStop() {
 		t.Error("a nil session's end followed a stop")
 	}
+	// The mark has a bit of its own in peerEnds, apart from the server's
+	// unasked bytes (ServerSpokeUnasked: set by the floor, cleared by each
+	// request) and from an end where the client stopped taking the stream
+	// (EndedWhereClientStopped): neither sets it, the stop sets neither, and
+	// a request's clear leaves it.
+	for _, other := range []struct {
+		name string
+		set  func(*Session)
+		read func(*Session) bool
+	}{
+		{"the server spoke unasked", func(s *Session) { s.dropped(fakeconn.Dropped{}) }, (*Session).ServerSpokeUnasked},
+		{"the stream ended where the client stopped", (*Session).MarkEndedWhereClientStopped, (*Session).EndedWhereClientStopped},
+	} {
+		s := &Session{}
+		other.set(s)
+		s.MarkPeerEndedStopping(fakeconn.FromClient, false, false)
+		if !other.read(s) || s.EndFollowedStop() {
+			t.Errorf("%s, then an end with no stop: that mark %v, EndFollowedStop %v; want true, false", other.name, other.read(s), s.EndFollowedStop())
+		}
+		stopped := &Session{}
+		stopped.MarkPeerEndedStopping(fakeconn.FromClient, false, true)
+		if other.read(stopped) {
+			t.Errorf("an end after the stop says %s", other.name)
+		}
+	}
+	stopped := &Session{}
+	stopped.MarkPeerEndedStopping(fakeconn.FromClient, false, true)
+	stopped.peerEnds.And(^uint32(spokeUnaskedBit)) // as NextRequest clears it for the next request
+	if !stopped.EndFollowedStop() {
+		t.Error("a request's clear of the unasked mark took the stop's mark away")
+	}
 }
