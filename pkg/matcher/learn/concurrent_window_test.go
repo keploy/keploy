@@ -52,12 +52,22 @@ func (r concurrentRun) recordings() []windowRecording {
 // call, recorded as wr says, in a server test or a client test.
 func (r concurrentRun) learnUpsert(t *testing.T, client bool, wr windowRecording, p string, rec, live Leaf) (Learned, *Tracker) {
 	t.Helper()
+	return r.learnUpsertIn(t, client, wr, p, rec, live, nil)
+}
+
+// learnUpsertIn is learnUpsert in the call's window as edit gives it, where
+// edit is not nil.
+func (r concurrentRun) learnUpsertIn(t *testing.T, client bool, wr windowRecording, p string, rec, live Leaf, edit func(*Window) *Window) (Learned, *Tracker) {
+	t.Helper()
 	tr := r.windowTracker(client)
 	paired := &models.Mock{Name: "mock-5", Kind: models.Mongo}
 	paired.Spec.ReqTimestampMock = r.recBegin.Add(wr.call)
 	w := tr.CallWindowFrom(r.recBegin.Add(wr.prev), paired, r.upTo)
 	if w == nil {
 		t.Fatalf("client %v, %s: no window for the upsert", client, wr.what)
+	}
+	if edit != nil {
+		w = edit(w)
 	}
 	dc := clockedDrifts()
 	dc.clientTests = client
@@ -113,6 +123,55 @@ func TestTheLearnStepReadsAReadFromItsTestsBeginPastAnotherGoroutinesServes(t *t
 		ln, _ := r.learnUpsert(t, client, r.recordings()[1], p, at(r.recBegin.Add(-2*time.Millisecond)), at(r.appRead))
 		if ln.Kind == KindClockRead {
 			t.Errorf("client %v: a recorded value two cuts before the test's recorded begin was learned as %s; want it refused", client, ln.Read)
+		}
+	}
+}
+
+// A read of the clock plus a constant offset (an expiry the handler stamps
+// thirty minutes after its read) that its server test's call's window
+// refuses is not learned from its test's begin: the learn step takes only a
+// plain read there (Window.fromTestBegin). An offset's constant is fitted
+// to the window it is read in, so a wider window widens the offsets it
+// admits by as much as it widens the window, and a time to live shorter by
+// up to that much would read as the same offset. The handler's expiry past
+// the consumer's serves, and one recorded two cuts before the test's
+// recorded begin, are learned as the call's window alone learns them, its
+// refusal and its reason, with the consumer's call recorded before and
+// after the read. A client test's window from its test's begin
+// (Window.sinceBegin) takes no offset either, as on main.
+func TestTheLearnStepTakesNoReadPlusAnOffsetFromItsTestsBegin(t *testing.T) {
+	r := newConcurrentRun()
+	const p = "body.docs.msgs[].u.{}.expiresAt"
+	const ttl = 30 * time.Minute
+	at := func(v time.Time) Leaf { return InstantLeaf(p, p, v.Add(ttl), time.Millisecond) }
+	offsets := func(w *Window) *Window { return w.ComparesOffsets() }
+	callsOwn := func(w *Window) *Window { // the call's window alone: no test begin to read from (TestFrom, Began)
+		w = w.ComparesOffsets()
+		w.Rec.TestFrom, w.F.TestFrom, w.Rec.Began, w.F.Began = time.Time{}, time.Time{}, time.Time{}, time.Time{}
+		return w
+	}
+	for _, wr := range r.recordings() {
+		for _, c := range []struct {
+			what string
+			rec  time.Time
+		}{
+			{"the handler's expiry", r.recBegin.Add(300 * time.Microsecond)},
+			{"an expiry recorded two cuts before the test's recorded begin", r.recBegin.Add(-2 * time.Millisecond)},
+		} {
+			for _, client := range []bool{false, true} {
+				ln, _ := r.learnUpsertIn(t, client, wr, p, at(c.rec), at(r.appRead), offsets)
+				if ln.Kind != KindUnaccounted {
+					t.Errorf("client %v, %s: %s (recorded %s, %s in the full round): learned %s (%s); want it refused", client, wr.what, c.what, at(c.rec).Value, at(r.appRead).Value, ln.Kind, ln.Why)
+					continue
+				}
+				own, _ := r.learnUpsertIn(t, client, wr, p, at(c.rec), at(r.appRead), callsOwn)
+				if own.Kind != KindUnaccounted || own.Why == "" {
+					t.Fatalf("client %v, %s: %s: the call's window alone learned %s (%q); want a refusal with its reason", client, wr.what, c.what, own.Kind, own.Why)
+				}
+				if ln.Why != own.Why {
+					t.Errorf("client %v, %s: %s: refused with %q; want the call's window's reason %q", client, wr.what, c.what, ln.Why, own.Why)
+				}
+			}
 		}
 	}
 }
