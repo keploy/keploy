@@ -678,7 +678,7 @@ func TestAppWrittenTellsTheFINByLockOrder(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			was := lookupWritten
 			n := 0
-			lookupWritten = func(*diagSock, netip.AddrPort, netip.AddrPort) (diagTCP, error) {
+			lookupWritten = func(*diagSock, *pairedConn, bool) (diagTCP, error) {
 				if n == len(tc.reads) {
 					return diagTCP{}, errors.New("read past the sequence")
 				}
@@ -686,7 +686,7 @@ func TestAppWrittenTellsTheFINByLockOrder(t *testing.T) {
 				return tc.reads[n-1], nil
 			}
 			t.Cleanup(func() { lookupWritten = was })
-			want, fin, _, err := appWritten(nil, netip.AddrPort{}, netip.AddrPort{})
+			want, fin, _, err := appWritten(nil, nil)
 			if tc.errGone {
 				if !errors.Is(err, errNoSocket) {
 					t.Fatalf("appWritten = %d, %v, %v; want the socket gone", want, fin, err)
@@ -733,7 +733,7 @@ func TestTheClosesReadCountsWhatTheApplicationHadWritten(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			was := lookupWritten
 			n := 0
-			lookupWritten = func(*diagSock, netip.AddrPort, netip.AddrPort) (diagTCP, error) {
+			lookupWritten = func(*diagSock, *pairedConn, bool) (diagTCP, error) {
 				if n == len(tc.reads) {
 					return diagTCP{}, errNoSocket
 				}
@@ -744,7 +744,7 @@ func TestTheClosesReadCountsWhatTheApplicationHadWritten(t *testing.T) {
 				return tc.reads[n-1], nil
 			}
 			t.Cleanup(func() { lookupWritten = was })
-			want, ok, err := wroteNow(nil, netip.AddrPort{}, netip.AddrPort{})
+			want, ok, err := wroteNow(nil, nil)
 			if want != tc.want || ok != tc.ok {
 				t.Fatalf("wroteNow = %d, %v; want %d, %v", want, ok, tc.want, tc.ok)
 			}

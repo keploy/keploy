@@ -1162,7 +1162,7 @@ func TestAConnectionServedWithoutASessionAfterTheWaitTookItHoldsNothing(t *testi
 			case "gone after the close":
 				// pairTarget's read raced the mark: it found the socket gone.
 				for {
-					if _, _, _, err := appWritten(ds, pc.app, pc.proxy); errors.Is(err, errNoSocket) {
+					if _, _, _, err := appWritten(ds, pc); errors.Is(err, errNoSocket) {
 						break
 					}
 					runtime.Gosched()
@@ -1756,12 +1756,12 @@ func TestTheCloseReadsTheApplicationsSocketBeforeItsOwnSide(t *testing.T) {
 	pc := pairedConnOf(t, p, 1)
 	was := lookupWritten
 	var reads, afterSide int
-	lookupWritten = func(ds *diagSock, a, b netip.AddrPort) (diagTCP, error) {
+	lookupWritten = func(ds *diagSock, c *pairedConn, atClose bool) (diagTCP, error) {
 		reads++
 		if pc.atClose.Load() != nil {
 			afterSide++
 		}
-		return was(ds, a, b)
+		return was(ds, c, atClose)
 	}
 	t.Cleanup(func() { lookupWritten = was })
 	_ = reader.Close()
@@ -1832,9 +1832,9 @@ func TestACloseAfterTheApplicationsFINReadsNoMore(t *testing.T) {
 			pc := pairedConnOf(t, p, 1)
 			was := lookupWritten
 			reads := 0
-			lookupWritten = func(ds *diagSock, a, b netip.AddrPort) (diagTCP, error) {
+			lookupWritten = func(ds *diagSock, c *pairedConn, atClose bool) (diagTCP, error) {
 				reads++
-				return was(ds, a, b)
+				return was(ds, c, atClose)
 			}
 			t.Cleanup(func() { lookupWritten = was })
 			_ = reader.Close()
@@ -1899,8 +1899,9 @@ func dropAll(t *testing.T, c *net.TCPConn) {
 // A sock_diag socket on the free list (diagFree) that has gone bad is
 // dropped, and the close reads on a new one: its record is the one a close
 // that found the list empty makes, and the list then holds the new socket,
-// never the bad one. One that works is taken and given back. A socket whose
-// lookup fails is never given back, though it is new.
+// never the bad one, which is closed if it is a descriptor, not left open.
+// One that works is taken and given back. A socket whose lookup fails is
+// never given back, though it is new.
 func TestACloseDropsAFreeSockDiagSocketThatFails(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1937,7 +1938,7 @@ func TestACloseDropsAFreeSockDiagSocketThatFails(t *testing.T) {
 			pc := pairedConnOf(t, p, 1)
 			if tc.name == "a lookup that fails on a new socket" {
 				was := lookupWritten
-				lookupWritten = func(*diagSock, netip.AddrPort, netip.AddrPort) (diagTCP, error) {
+				lookupWritten = func(*diagSock, *pairedConn, bool) (diagTCP, error) {
 					return diagTCP{}, fmt.Errorf("sock_diag reply: %w", unix.ENOBUFS)
 				}
 				t.Cleanup(func() { lookupWritten = was })
@@ -1951,8 +1952,11 @@ func TestACloseDropsAFreeSockDiagSocketThatFails(t *testing.T) {
 				return
 			}
 			var listed *diagSock
+			badLink := ""
 			if tc.bad != nil {
-				listed = tc.bad(t)
+				if listed = tc.bad(t); listed.fd >= 0 {
+					badLink = socketLink(t, listed.fd)
+				}
 			} else {
 				var err error
 				if listed, err = openDiag(); err != nil {
@@ -1974,6 +1978,11 @@ func TestACloseDropsAFreeSockDiagSocketThatFails(t *testing.T) {
 			}
 			if tc.bad != nil && ds == listed {
 				t.Fatal("the close gave back the socket that failed")
+			}
+			for _, l := range fdLinks(t) {
+				if badLink != "" && l == badLink {
+					t.Fatalf("the listed socket that failed, %s, is still open after the close dropped it", badLink)
+				}
 			}
 			if _, err := ds.lookup(pc.app, pc.proxy); err != nil && !errors.Is(err, errNoSocket) {
 				t.Fatalf("the socket given back fails a lookup: %v", err)

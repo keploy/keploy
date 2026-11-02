@@ -48,6 +48,10 @@ type pairedConn struct {
 	// nothing on it by design, so nothing the application wrote to it is a
 	// capture loss, and no bytes wait holds it.
 	noSession atomic.Bool
+	// appDev is the index of the device the application's socket is bound
+	// to (0 for none), as the first lookup of the connection to find it
+	// read it (lookupApp): nil before one has.
+	appDev atomic.Pointer[uint32]
 }
 
 // appWrote is what the application had written to a connection, in bytes and

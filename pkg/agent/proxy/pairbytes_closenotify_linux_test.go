@@ -8,7 +8,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"net/netip"
 	"runtime"
 	"sync"
 	"testing"
@@ -425,8 +424,8 @@ func TestATLSClientsBytesOnTheirWayAtTheProxysCloseAreReadThrough(t *testing.T) 
 				p, _, _, _, srv, cli := tlsHeldPair(t, v.version)
 				pc := pairedConnOf(t, p, 1)
 				was := lookupWritten
-				lookupWritten = func(ds *diagSock, a, b netip.AddrPort) (diagTCP, error) {
-					d, err := was(ds, a, b)
+				lookupWritten = func(ds *diagSock, c *pairedConn, atClose bool) (diagTCP, error) {
+					d, err := was(ds, c, atClose)
 					if err == nil && d.info != nil {
 						d.wqueue += 24
 					}

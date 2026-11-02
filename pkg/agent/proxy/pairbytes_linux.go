@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -312,7 +311,7 @@ func (p *Proxy) pairTarget(ds *diagSock, pc *pairedConn) (*pairTarget, error) {
 		// after the connection's side.
 		return nil, nil
 	}
-	want, fin, d, err := appWritten(ds, pc.app, pc.proxy)
+	want, fin, d, err := appWritten(ds, pc)
 	if err == nil {
 		p.paired.visible.Store(true)
 	}
@@ -372,9 +371,9 @@ func finSent(state uint8) bool {
 // between them), the reads move on by one. A socket read in CLOSE is leaving
 // the kernel's tables (reset, or closed at both ends): gone, as one not found,
 // which also tells no FIN from a reset.
-func appWritten(ds *diagSock, app, proxy netip.AddrPort) (want uint64, fin bool, d diagTCP, err error) {
+func appWritten(ds *diagSock, pc *pairedConn) (want uint64, fin bool, d diagTCP, err error) {
 	read := func() (diagTCP, error) {
-		d, err := lookupWritten(ds, app, proxy)
+		d, err := lookupWritten(ds, pc, false)
 		if err == nil && d.info != nil && d.info.State == tcpClose {
 			return d, errNoSocket
 		}
@@ -408,9 +407,78 @@ func appWritten(ds *diagSock, app, proxy netip.AddrPort) (want uint64, fin bool,
 	}
 }
 
-// lookupWritten is how appWritten reads the application's socket; a test
-// replaces it to give the reads a close can straddle.
-var lookupWritten = (*diagSock).lookup
+// lookupWritten is how appWritten and wroteNow read the application's
+// socket; a test replaces it to give the reads a close can straddle.
+var lookupWritten = (*diagSock).lookupApp
+
+// lookupApp is lookup of pc's application socket, made cheaper by the device
+// the socket is bound to, with lookup's answer. lookup asks with no device,
+// so it misses a socket bound to one, and follows a miss with a dump, a walk
+// of every bucket of the established hash (tens of ms on a large hash,
+// whatever it holds). An exact lookup asked with a device finds a socket
+// bound to it or to none (exactOn), so lookupApp asks with the device, and
+// dumps only where a dump can give its answer:
+//
+//   - The first lookup of the connection to find the socket learns its device
+//     from the reply (pairedConn.appDev), and later ones ask with it. A miss
+//     then is the socket gone, or becoming a timewait socket (the lockless
+//     lookup's miss, lookupOrdered). The close's read (atClose) answers so
+//     with no dump: whatever a dump finds then gives wroteNow no count (the
+//     timewait socket, one read in CLOSE, none, or a socket with the two ends
+//     bound to another device, which is not the one found before). A wait's
+//     miss dumps, as lookup's does: a timewait socket needs no waiting, one
+//     gone does (pairTarget).
+//   - A first lookup that misses asks again with the device the proxy's own
+//     socket is bound to, before it dumps. In a VRF the application's socket
+//     is bound to the VRF's device, and so is the proxy's: the kernel binds
+//     an accepted socket to the device of the VRF its connection came in by
+//     (tcp_l3mdev_accept), and a proxy listening in the VRF is bound to it.
+//     The miss before says no socket bound to none has the two ends, so a
+//     socket this finds is bound to the proxy's device, in the proxy's VRF.
+//     There no two connected sockets share both ends (the proxy's side would
+//     be a second socket with its ends), so it is the one the proxy's socket
+//     is connected to, or one whose connect has not completed, which has no
+//     byte counts (tcpi_bytes_acked 0) and gives none. A dump would also find
+//     a socket with those ends in another VRF, and answer that which one is
+//     meant cannot be told (dumpOne).
+func (d *diagSock) lookupApp(pc *pairedConn, atClose bool) (diagTCP, error) {
+	if dev := pc.appDev.Load(); dev != nil {
+		s, err := lookupExactOn(d, *dev, pc.app, pc.proxy)
+		if !errors.Is(err, errNoSocket) || atClose {
+			return s, err
+		}
+		return lookupDump(d, pc.app, pc.proxy)
+	}
+	s, err := d.exact(pc.app, pc.proxy)
+	if errors.Is(err, errNoSocket) {
+		if dev := boundDevice(pc.conn); dev != 0 {
+			s, err = d.exactOn(dev, pc.app, pc.proxy)
+		}
+		if errors.Is(err, errNoSocket) {
+			s, err = lookupDump(d, pc.app, pc.proxy)
+		}
+	}
+	if err == nil {
+		pc.appDev.Store(&s.dev)
+	}
+	return s, err
+}
+
+// lookupExactOn is how lookupApp asks with the device a lookup learned; a
+// test replaces it to miss as the kernel's lockless lookup can.
+var lookupExactOn = (*diagSock).exactOn
+
+// boundDevice is the index of the device conn's socket is bound to: 0 for
+// none, or when it cannot be read.
+func boundDevice(conn *net.TCPConn) uint32 {
+	dev := 0
+	if rc, err := conn.SyscallConn(); err == nil {
+		_ = rc.Control(func(fd uintptr) {
+			dev, _ = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_BINDTOIFINDEX)
+		})
+	}
+	return uint32(dev)
+}
 
 // pairReached says whether t needs no more waiting: the proxy's side received
 // what the application had written, or it never will (a capture loss).
@@ -741,13 +809,13 @@ func noteWroteAtClose(pc *pairedConn) {
 	if err != nil {
 		return
 	}
-	want, ok, err := wroteNow(ds, pc.app, pc.proxy)
+	want, ok, err := wroteNow(ds, pc)
 	if err != nil && listed {
 		ds.close()
 		if ds, err = openDiag(); err != nil {
 			return
 		}
-		want, ok, err = wroteNow(ds, pc.app, pc.proxy)
+		want, ok, err = wroteNow(ds, pc)
 	}
 	giveDiag(ds, err)
 	if ok {
@@ -777,9 +845,9 @@ func peerEnded(state uint8) bool {
 // tcp_info) or one read in CLOSE, or one not found, gives no count: its FIN
 // or reset is the last it sent, and the wait reads it so. A lookup that fails
 // gives no count either, and its error.
-func wroteNow(ds *diagSock, app, proxy netip.AddrPort) (uint64, bool, error) {
+func wroteNow(ds *diagSock, pc *pairedConn) (uint64, bool, error) {
 	read := func() (diagTCP, bool, error) {
-		d, err := lookupWritten(ds, app, proxy)
+		d, err := lookupWritten(ds, pc, true)
 		if err != nil && !errors.Is(err, errNoSocket) {
 			return d, false, err
 		}
