@@ -238,3 +238,47 @@ func TestAClockReadAtAVariablesPlaceStays(t *testing.T) {
 		}
 	}
 }
+
+// A mock keploy mock derive or generate wrote (its authored block set) takes
+// none of what a run learned, with the proven switch on or off: no noise, no
+// variable, no bind another mock's use names and no clock read is written
+// onto it, so it is matched only as its author declared. The same learning
+// still goes onto a recorded mock.
+func TestLearningIsNeverWrittenOntoAnAuthoredMock(t *testing.T) {
+	st := models.MockState{
+		Name:         "mock-1",
+		ReqBodyNoise: map[string][]string{"body.at": nil},
+		Variables:    models.MockVariables{"id": {Recorded: "42", Use: []string{"body.id"}}},
+		Clocks:       map[string]models.ClockOffset{"body.ts": {}},
+	}
+	binds := models.MockVariables{"order": {Recorded: "7", Bind: "body.order"}}
+	authored := func() *models.Mock {
+		return &models.Mock{Name: "mock-1", Spec: models.MockSpec{
+			Authored:     &models.Authored{How: models.AuthoredGenerated, Reason: "declined card"},
+			ReqBodyNoise: map[string][]string{"body.key": nil},
+		}}
+	}
+	for _, proven := range []string{"1", ""} {
+		t.Setenv("KEPLOY_PROVEN", proven)
+		mk := authored()
+		if added := MergeLearned(mk, st, binds); len(added) != 0 {
+			t.Fatalf("KEPLOY_PROVEN=%q: learning was written onto an authored mock: %v", proven, added)
+		}
+		if !reflect.DeepEqual(mk, authored()) {
+			t.Fatalf("KEPLOY_PROVEN=%q: the authored mock changed: %+v", proven, mk.Spec)
+		}
+		kept := NewKeptLearning([]models.MockState{st})
+		if kept == nil {
+			t.Fatalf("KEPLOY_PROVEN=%q: the learning was read as none", proven)
+		}
+		got := kept.Onto(authored())
+		if len(got.Spec.ReqBodyNoise) != 1 || len(got.Spec.Variables) != 0 || len(got.Spec.Clocks) != 0 {
+			t.Fatalf("KEPLOY_PROVEN=%q: a retry cycle is served the authored mock with learning on it: noise %v, variables %v, clocks %v",
+				proven, got.Spec.ReqBodyNoise, got.Spec.Variables, got.Spec.Clocks)
+		}
+		rec := &models.Mock{Name: "mock-1"}
+		if added := MergeLearned(rec, st, binds); len(added) == 0 {
+			t.Fatalf("KEPLOY_PROVEN=%q: the same learning was not written onto a recorded mock", proven)
+		}
+	}
+}
