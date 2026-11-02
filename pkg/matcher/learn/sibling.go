@@ -2,7 +2,8 @@ package learn
 
 // A field keeps one learned role across its sibling places. A sibling is a
 // recording of the same call as the one being classified: the same
-// statement, on the same connection or in the same test, which its
+// statement, on the same connection or in one recorded scope (one test, or
+// one gap between tests, the app's start-up being one), which its
 // protocol's learn step tells (Raw.Sibling). Where the sibling's learn step
 // learned a place as noise, as an echo, or as a plain read of the
 // application's clock, and the call holds an equal value at the same place,
@@ -11,8 +12,9 @@ package learn
 //
 // An application that reads its clock once per statement in a coarser unit
 // than its statements run apart in (Sequelize's JavaScript Date, to the
-// millisecond: three role INSERTs made in one millisecond, sent one after
-// another on one connection) writes one stamp at the same place of each.
+// millisecond: three role INSERTs made in one millisecond at start-up, sent
+// at once on the pool's connections) writes one stamp at the same place of
+// each.
 // Read as a copy, the later statement's stamp was carried from the earlier
 // one, and a replay passed or failed by whether its two stamps fell in one
 // millisecond: the verdict hung on the clock's unit. Read in the sibling's
@@ -39,7 +41,7 @@ type SiblingRole struct {
 
 // Sibling is r, a recording of the same call as the one being classified
 // (its protocol's learn step tells: the same statement, on the same
-// connection or in the same test), stating the roles its learn step learned
+// connection or in one recorded scope), stating the roles its learn step learned
 // at its places (roles: by the leaf path the call names each place by, as a
 // statement's binds are named alike in each of its recordings). A role is
 // stated only where every place of r that holds its Value is one of that
