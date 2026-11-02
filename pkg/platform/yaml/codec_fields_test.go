@@ -12,6 +12,7 @@ import (
 // everyFieldDoc is a document with every field of NetworkTrafficDoc set.
 func everyFieldDoc(t *testing.T) *NetworkTrafficDoc {
 	t.Helper()
+	body := `{"error":"card declined"}`
 	doc := &NetworkTrafficDoc{
 		Version:      models.GetVersion(),
 		Kind:         models.HTTP,
@@ -25,7 +26,10 @@ func everyFieldDoc(t *testing.T) *NetworkTrafficDoc {
 		Variables:    models.MockVariables{"orderId": {Use: []string{"req.body.orderId"}, Answer: []string{"resp.body.id"}}},
 		Clocks:       map[string]models.ClockOffset{"req.header.Date": {Min: time.Second, Max: 2 * time.Second, Zone: "UTC"}},
 		Real:         []string{"localhost:5432", "auth.example.com:443"},
-		Origin:       &models.Origin{Clock: "realtime", Comm: "app", Exe: "/usr/bin/app"},
+		Authored: &models.Authored{How: models.AuthoredDerived, Reason: "declined card", Source: "checkout::TestCheckout/mock-1",
+			Request: "sha256:5d1e", Malformed: true, Delta: &models.AuthoredDelta{Status: 402, Body: &body,
+				JSONPatch: `[{"op":"add","path":"/code","value":"declined"}]`, Header: map[string]string{"Retry-After": "5"}, DropHeader: []string{"Etag"}}},
+		Origin: &models.Origin{Clock: "realtime", Comm: "app", Exe: "/usr/bin/app"},
 	}
 	if err := doc.Spec.Encode(map[string]any{"req": map[string]any{"method": "GET", "url": "/orders"}}); err != nil {
 		t.Fatal(err)
