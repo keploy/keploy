@@ -163,7 +163,8 @@ func (h *heldScope) MarkMockAsUsed(mock models.Mock) bool {
 // settled is ok, a consume door's answer, after h took a refusal into its
 // reads: once a consume the view in force settles is refused while h reads in
 // another view (readIn: a test's begin or end installed the view in force
-// after the call's read), h reads in the view in force from then on. A parser
+// after the call's read), h reads, walks and spends in the view in force
+// from then on (heldScope.readView). A parser
 // takes a refused consume for a recording another call took, and reads
 // again: read in the view the call was read in, the recording the view in
 // force refused was offered again, and refused again, without end (the
@@ -172,8 +173,8 @@ func (h *heldScope) MarkMockAsUsed(mock models.Mock) bool {
 // made now reads: that recording is not offered, and the call is answered
 // by another or misses, as a call read after the begin or end is.
 func (h *heldScope) settled(ok bool) bool {
-	if !ok && h.readIn != nil && h.readIn != h.exactView() {
-		h.readIn = nil
+	if !ok && h.elsewhere() {
+		h.g.readIn = nil
 	}
 	return ok
 }

@@ -424,17 +424,18 @@ func (m *MockManager) bumpStagingEpoch() {
 // replaced within it, at a test's begin or end, is still the call's set, and
 // a consume that finds its view closed is settled in the view that replaces
 // it, as one with no guard is. restaged: a staging guard found the staging
-// moved. read: the guard knows the view its call was read in (a staging
-// guard's mark), readInTest whether that view was a test's (windowed).
+// moved. readIn: the view a staging guard's call was read in (its mark's),
+// in which the call's reads, walk and worker spend are made
+// (heldScope.readView, heldScope.SequenceView, windowed); nil when they are
+// made in the view in force (heldScope.readView says when).
 type roundGuard struct {
-	at         integrations.RoundAt
-	moved      string
-	in         *learn.Flight
-	free       bool
-	staging    bool
-	restaged   bool
-	read       bool
-	readInTest bool
+	at       integrations.RoundAt
+	moved    string
+	in       *learn.Flight
+	free     bool
+	staging  bool
+	restaged bool
+	readIn   *exactView
 }
 
 // windowed reports whether a consume settled in v is a test window's: made
@@ -442,17 +443,21 @@ type roundGuard struct {
 // scope the consume reads and makes (exactView.spendsInTests,
 // spentOutsideIn): the windows' or the calls' between tests. A staging
 // guard's call (HoldToRound) settles in the view in force, which a test's
-// begin or end may have installed since its read; its spend is the view's it
-// was read in, as its walk is (heldScope.SequenceView). So a call read
-// between tests that commits after the next test opened never spends a
-// worker recording for the windows, nor one read in a test that commits
-// after its end for the calls between tests: a window's answers never move
-// with when a call's commit lands. Any other consume settles in the view it
-// was read in (a guard of the round refuses one the round moved under), or
-// tells no read: v's.
+// begin or end may have installed since its read; its spend is made in the
+// view its reads are (heldScope.readView), as its walk is
+// (heldScope.SequenceView): the view it was read in (readIn) while it reads
+// there. So a call read between tests that commits after the next test
+// opened never spends a worker recording for the windows, nor one read in a
+// test that commits after its end for the calls between tests: a window's
+// answers never move with when a call's commit lands. A call that reads the
+// view in force (one marked where the learn tracker was ahead of the store,
+// decided in the test the store opens next) spends there too, so a worker
+// recording it is answered in a window is spent for the windows. Any other
+// consume settles in the view it was read in (a guard of the round refuses
+// one the round moved under), or tells no read: v's.
 func (g *roundGuard) windowed(v *exactView) bool {
-	if g != nil && g.read {
-		return g.readInTest
+	if g != nil && g.readIn != nil {
+		return g.readIn.test != ""
 	}
 	return v.test != ""
 }
@@ -951,12 +956,18 @@ const restagedWhy = "the staging moved: the test set was staged again"
 // staging call was marked in (heldScope). restaged reports whether a read or
 // a consume door of it found the staging moved since.
 func (m *MockManager) HoldToRound(call integrations.CallRound) (integrations.MockMemDb, func() bool) {
-	h := &heldScope{roundScope: roundScope{MockManager: m, g: roundGuard{at: integrations.RoundAt{Epoch: call.Epoch()}, staging: true, read: call.Read(), readInTest: call.InTest()}}}
-	h.seq, h.seqOK = call.Sequence()
-	if c, ok := h.seq.Cursor.(viewCursor); ok && h.seqOK && c.m == m && !call.TrackerAhead() {
-		h.readIn = c.v
-	}
+	h := &heldScope{roundScope: roundScope{MockManager: m, g: roundGuard{at: integrations.RoundAt{Epoch: call.Epoch()}, staging: true}}}
 	h.read.at, h.read.known = call.Round()
+	if call.TrackerAhead() {
+		// Decided in the test the store opens next: the call reads, walks
+		// and spends in the view in force (readView).
+		return h, h.restaged
+	}
+	if seq, ok := call.Sequence(); ok {
+		if c, mine := seq.Cursor.(viewCursor); mine && c.m == m {
+			h.seq, h.g.readIn = seq, c.v
+		}
+	}
 	return h, h.restaged
 }
 
@@ -978,15 +989,9 @@ var (
 type heldScope struct {
 	roundScope
 	// seq is the sequence view of the view the call was read in
-	// (integrations.CallRound.Sequence), seqOK whether its mark kept one.
-	seq   integrations.SequenceView
-	seqOK bool
-	// readIn is the view the call was read in (its mark's), which h's reads
-	// of the staged recordings are made in (readView): nil when the mark
-	// kept none, or was made where the learn tracker had begun a test the
-	// store had not opened (integrations.CallRound.TrackerAhead), and nil
-	// once a consume the view in force refused there (settled).
-	readIn *exactView
+	// (integrations.CallRound.Sequence, the view g.readIn), which h walks
+	// while it reads there (SequenceView).
+	seq integrations.SequenceView
 	// owns is the call's decision whether it is one of the open test's own
 	// calls (HideBackgroundWhen), until a door or HidesBackground asks it.
 	owns func() bool
@@ -1007,10 +1012,10 @@ type heldScope struct {
 // the view h's call was read in, so a call read in one view and walked after
 // the next one is installed (a test opening or ending between the read and
 // the walk) walks the view it was read in, its cursor and its window, never
-// the next view's; with no view kept by the mark (exact serving began after
-// it), the view in force now.
+// the next view's; while h reads in the view in force (readView), that
+// view's.
 func (h *heldScope) SequenceView() (integrations.SequenceView, bool) {
-	if h.seqOK {
+	if h.g.readIn != nil {
 		return h.seq, true
 	}
 	return h.MockManager.SequenceView()
@@ -1027,10 +1032,15 @@ func (h *heldScope) SequenceView() (integrations.SequenceView, bool) {
 // view in force refuses is a miss, as a consume that lands after a test's
 // begin or end is. A call marked where the learn tracker had begun a test
 // the store had not opened is decided in the test the store opens next
-// (integrations.CallRound.TrackerAhead): it reads the view in force.
+// (integrations.CallRound.TrackerAhead): it reads the view in force, and
+// walks and spends the worker scope there too, as does a call whose mark
+// kept no view, and one whose consume the view in force refused (settled).
+// One rule for the three, so one worker recording never answers two calls
+// in the windows, wherever a test's begin lands between a call's mark and
+// its read.
 func (h *heldScope) readView() *exactView {
-	if h.readIn != nil {
-		return h.readIn
+	if h.g.readIn != nil {
+		return h.g.readIn
 	}
 	return h.exactView()
 }
@@ -1105,7 +1115,7 @@ func (h *heldScope) generation(g uint64) uint64 {
 // the view its call was read in (readIn), which a test's begin or end has
 // since replaced.
 func (h *heldScope) elsewhere() bool {
-	return h.readIn != nil && h.readIn != h.exactView()
+	return h.g.readIn != nil && h.g.readIn != h.exactView()
 }
 
 // elsewhereStride parts the generations held stores report while they read

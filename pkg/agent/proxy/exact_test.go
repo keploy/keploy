@@ -4817,3 +4817,157 @@ func TestBetweenTestsAWorkerRequestWalksItsRecordingsThenStaysOnItsLast(t *testi
 		})
 	}
 }
+
+// spendFirstByKind answers a call as a parser that answers by kind
+// (integrations.SpendByKind): the first of the kind's background recordings
+// named with prefix that it can spend, or "a miss".
+func spendFirstByKind(t *testing.T, mm *MockManager, prefix string) string {
+	t.Helper()
+	unused, _ := mm.KindBackground(models.HTTP)
+	for _, mk := range unused {
+		if strings.HasPrefix(mk.Name, prefix) && mm.SpendByKind(mk) {
+			return mk.Name
+		}
+	}
+	return "a miss"
+}
+
+// A call marked where keploy's learn tracker began TestB before the store
+// opened it (integrations.CallRound.TrackerAhead) is decided in the test the
+// store opens next: it reads the view in force (heldScope.readView), so it
+// spends and walks the worker scope there too. keploy mock's begin opens the
+// learn tracker's test before it installs the test's view, so a poller's
+// call marked in that gap and read after the install is TestB's window's: a
+// worker: recording it is answered with answers no other call in the
+// windows, through each door (the by-kind one under the background rules),
+// and it walks the windows' cursor, as a call marked once the store opened
+// TestB does. Before, it was spent as a call between tests, and the same
+// recording answered TestB's next call too: how a window was answered moved
+// with how long the install took.
+func TestACallMarkedWithTheTrackerAheadSpendsAndWalksTheWorkerScopeInItsTest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	names := []string{"w-0", "w-1"}
+	for _, door := range []struct {
+		name    string
+		bg      bool
+		consume func(integrations.MockMemDb, *models.Mock) bool
+		ask     func(*testing.T, *MockManager, string) string
+	}{
+		{"delete door", false, func(db integrations.MockMemDb, mk *models.Mock) bool { return db.DeleteUnFilteredMock(*mk) }, pollFirst},
+		{"keeping door", false, func(db integrations.MockMemDb, mk *models.Mock) bool { return db.MarkMockAsUsed(*mk) }, markFirst},
+		{"by-kind door", true, integrations.SpendByKind, spendFirstByKind},
+	} {
+		for _, ahead := range []bool{false, true} {
+			name := door.name + "/marked once the store opened TestB"
+			if ahead {
+				name = door.name + "/marked with the tracker ahead of the store"
+			}
+			t.Run(name, func(t *testing.T) {
+				a := httpCall("a", 0, "/a")
+				mm := stagedManager(t, nil, []*models.Mock{a, httpCall("w-0", time.Second, "/poll"), httpCall("w-1", 2*time.Second, "/poll")})
+				if door.bg {
+					mm.ServeExactBackground(models.RecordedWithS12Routing, nil, names)
+				}
+				tr := learn.NewTracker()
+				mm.LearnBoundary(tr, func(t *learn.Tracker) { t.Begin() })
+				mm.ServeExactWorker(names)
+				mm.ServeExactTest("TestA", []*models.Mock{a})
+				mm.LearnBoundary(tr, func(t *learn.Tracker) { t.End() })
+				mm.ServeExactWorker(names)
+				mm.ServeExactPool(models.PoolKeyNone, nil)
+				mm.LearnBoundary(tr, func(t *learn.Tracker) { t.Begin() })
+				var call integrations.CallRound
+				if ahead {
+					snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr})
+					if !ok || !snap.TrackerAhead() {
+						t.Fatalf("precondition: want the tracker ahead of the store, got %v (%s)", snap.Phase, snap.Boundary)
+					}
+					call = mm.MarkCallRound()
+					if !call.TrackerAhead() {
+						t.Fatal("precondition: the call's mark does not say the tracker was ahead of the store")
+					}
+				}
+				mm.ServeExactWorker(names)
+				mm.ServeExactTest("TestB", nil)
+				if !ahead {
+					call = mm.MarkCallRound()
+				}
+				held, _ := mm.HoldToRound(call)
+				sv, ok := integrations.SequenceViewOf(held)
+				if _, windows := sv.Between.(windowsCursor); !ok || sv.Test != "TestB" || sv.Worker == nil || !windows {
+					t.Errorf("the call walks %q's view (worker band %v, windows' cursor %v); want TestB's, with the worker scope on the windows' cursor", sv.Test, sv.Worker != nil, windows)
+				}
+				first := "a miss"
+				mocks, _ := held.GetSessionScopedMocks()
+				for _, mk := range mocks {
+					if strings.HasPrefix(mk.Name, "w-") {
+						if door.consume(held, mk) {
+							first = mk.Name
+						}
+						break
+					}
+				}
+				got := []string{first, door.ask(t, mm, "w-"), door.ask(t, mm, "w-")}
+				if want := []string{"w-0", "w-1", "a miss"}; !reflect.DeepEqual(got, want) {
+					t.Errorf("TestB's window was answered %v; want %v (each worker: recording at most once in the windows)", got, want)
+				}
+			})
+		}
+	}
+}
+
+// A call read in TestA's window whose consume the view in force refuses
+// once TestA ended (heldScope.settled) reads, from then on, what a call made
+// between tests reads, and spends and walks there too: the worker: recording
+// it is then answered with is spent for the calls between tests (nothing),
+// so TestB's window is still answered by it. Before, the call read the pool
+// view but spent as TestA's window, and TestB's window missed a recording no
+// window had answered.
+func TestACallRefusedAfterItsTestEndedSpendsTheWorkerScopeAsTheCallsBetweenTests(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	names := []string{"w-0", "w-1"}
+	for _, door := range []struct {
+		name    string
+		consume func(integrations.MockMemDb, *models.Mock) bool
+		ask     func(*testing.T, *MockManager, string) string
+	}{
+		{"delete door", func(db integrations.MockMemDb, mk *models.Mock) bool { return db.DeleteUnFilteredMock(*mk) }, pollFirst},
+		{"keeping door", func(db integrations.MockMemDb, mk *models.Mock) bool { return db.MarkMockAsUsed(*mk) }, markFirst},
+	} {
+		t.Run(door.name, func(t *testing.T) {
+			a := httpCall("a", 0, "/a")
+			mm := stagedManager(t, nil, []*models.Mock{a, httpCall("w-0", time.Second, "/poll"), httpCall("w-1", 2*time.Second, "/poll")})
+			mm.ServeExactWorker(names)
+			mm.ServeExactTest("TestA", []*models.Mock{a})
+			call := mm.MarkCallRound()
+			held, _ := mm.HoldToRound(call)
+			mm.ServeExactWorker(names)
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+			if door.consume(held, a) {
+				t.Fatal("precondition: the pool view took TestA's own recording after TestA ended")
+			}
+			if sv, ok := integrations.SequenceViewOf(held); !ok || sv.Test != "" || sv.Worker != nil {
+				t.Errorf("after the refusal the call walks %q's view (worker band %v); want the pool view's", sv.Test, sv.Worker != nil)
+			}
+			first := "a miss"
+			mocks, _ := held.GetSessionScopedMocks()
+			for _, mk := range mocks {
+				if strings.HasPrefix(mk.Name, "w-") {
+					if door.consume(held, mk) {
+						first = mk.Name
+					}
+					break
+				}
+			}
+			if first != "w-0" {
+				t.Fatalf("precondition: the call read again between tests was answered %s; want w-0", first)
+			}
+			mm.ServeExactWorker(names)
+			mm.ServeExactTest("TestB", nil)
+			got := []string{door.ask(t, mm, "w-"), door.ask(t, mm, "w-"), door.ask(t, mm, "w-")}
+			if want := []string{"w-0", "w-1", "a miss"}; !reflect.DeepEqual(got, want) {
+				t.Errorf("TestB's window was answered %v; want %v (the call between tests spent nothing for the windows)", got, want)
+			}
+		})
+	}
+}
