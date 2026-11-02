@@ -68,7 +68,13 @@ var clockLayouts = []clockLayout{
 	{re: regexp.MustCompile(`(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} (?:GMT|UTC|[+-]\d{4})`), read: readRFC1123},
 	// ISO 8601 at the day, the hour ("2026-10-22T10Z", its reduced
 	// precision, after a T only), the minute, the second and a fraction.
-	{re: regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?|T\d{2})?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?`), read: readISO},
+	// A time to the minute or finer may write its zone after a space, whole
+	// ("2026-11-01 23:42:37.172 +05:30" of Sequelize's timezone option,
+	// "… +0530 IST" of Go's time.Time.String(), "… +0530" of Ruby's
+	// Time#to_s), as its one zone: the zone places the instant, as it does
+	// with no space. After a date alone, or as two digits, a signed number
+	// after a space ("2026-11-01 -1500.00") is no zone.
+	{re: regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?(?: [+-]\d{2}:?\d{2}|Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?|(?:T\d{2})?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?)`), read: readISO},
 	{re: regexp.MustCompile(`\d{8}T\d{6}Z?`), read: readCompact},
 	{re: regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[17][0-9a-fA-F]{3}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`), read: readUUIDTime, timeWord: uuidTimeWord},
 	{re: regexp.MustCompile(`\d{10}\.\d{1,9}|\d{19}|\d{16}|\d{13}|\d{10}`), read: readEpoch},
@@ -863,7 +869,14 @@ func readRFC1123(s string) (time.Time, time.Duration, bool) {
 
 func readISO(s string) (time.Time, time.Duration, bool) {
 	s = strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(s, "UTC"), "GMT"), " ")
-	n := strings.Replace(strings.Replace(s, " ", "T", 1), ",", ".", 1)
+	// The date's separator from its time, a space or a T, as a T, and no
+	// space before the zone ("… 23:42:37.172 +05:30"): the forms the
+	// layouts below write.
+	n := strings.Replace(s, ",", ".", 1)
+	if len(n) > 10 && n[10] == ' ' {
+		n = n[:10] + "T" + n[11:]
+	}
+	n = strings.Replace(n, " ", "", 1)
 	res := 24 * time.Hour
 	if i := strings.Index(n, "T"); i >= 0 {
 		// The time's own colons, not its zone's ("+05:30").
