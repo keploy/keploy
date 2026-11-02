@@ -4950,9 +4950,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// this streaming test case on its agent (the calls above) ends
 			// the set before its request is sent, so the test is not begun
 			// against an app keploy knows is gone, nor named as the one the
-			// app held.
+			// app held. Nothing reads exitLoop past this loop.
 			if exitSignalled() {
-				exitLoop = true
 				break
 			}
 
