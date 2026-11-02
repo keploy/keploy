@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -308,6 +309,105 @@ func TestRunTestSetRetryPassingWritesATestsRowsCycleByCycle(t *testing.T) {
 				t.Fatalf("the set counts passed %d, failed %d of %d; want 2, 2 of 4 (test-3 once)", rep.Success, rep.Failure, rep.Total)
 			}
 		})
+	}
+}
+
+// secondRunHooks: test-2 fails every run (a wrong body over HTTP, no answer
+// over gRPC), so the passing tests run again; test, on its second run, gets
+// what second answers.
+type secondRunHooks struct {
+	prHooks
+	run    *retryRun
+	test   string
+	second func(tc *models.TestCase) (interface{}, error)
+}
+
+func (h secondRunHooks) SimulateRequest(ctx context.Context, tc *models.TestCase, set string) (interface{}, error) {
+	h.run.mu.Lock()
+	h.run.calls[tc.Name]++
+	h.run.cur = tc.Name
+	n := h.run.calls[tc.Name]
+	h.run.mu.Unlock()
+	if tc.Name == h.test && n == 2 {
+		return h.second(tc)
+	}
+	if tc.Name == "test-2" && tc.Kind == models.GRPC_EXPORT {
+		return nil, errors.New("connection reset by peer")
+	}
+	resp, err := h.prHooks.SimulateRequest(ctx, tc, set)
+	if r, ok := resp.(*models.HTTPResp); ok && tc.Name == "test-2" {
+		r.Body = `{"ok":false}`
+	}
+	return resp, err
+}
+
+// With RetryPassing, test-3 passes cycle 1 and fails cycle 2 on each path
+// that writes its row at once: no answer, an answer judged on its start (a
+// status line, then a drop), and an answer of the wrong type over HTTP and
+// over gRPC. On each, cycle 1's PASSED row is written before cycle 2's
+// FAILED row, so test-3's last row is its last cycle's.
+func TestRunTestSetEveryAtOnceWriterOfALaterCycleWritesTheEarlierRowFirst(t *testing.T) {
+	paths := []struct {
+		name   string
+		grpc   bool
+		second func(tc *models.TestCase) (interface{}, error)
+	}{
+		{"no answer", false, func(*models.TestCase) (interface{}, error) {
+			return nil, errors.New("connection reset by peer")
+		}},
+		{"start judged", false, func(tc *models.TestCase) (interface{}, error) {
+			return &models.HTTPResp{StatusCode: 503, Header: tc.HTTPResp.Header}, &pkg.AnswerStallError{Target: "app", Answered: true}
+		}},
+		{"wrong answer type", false, func(*models.TestCase) (interface{}, error) {
+			return &models.GrpcResp{}, nil
+		}},
+		{"grpc wrong answer type", true, func(*models.TestCase) (interface{}, error) {
+			return &models.HTTPResp{}, nil
+		}},
+	}
+	for _, p := range paths {
+		for _, on := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/proven=%v", p.name, on), func(t *testing.T) {
+				if on {
+					t.Setenv(provenswitch.Env, "1")
+				} else {
+					t.Setenv(provenswitch.Env, "")
+				}
+				h := newPartialRunHarness(t, 4, 0)
+				if p.grpc {
+					for _, tc := range h.cases {
+						tc.Kind = models.GRPC_EXPORT
+					}
+				}
+				h.replayer.config.RetryPassing = true
+				run := &retryRun{calls: map[string]int{}}
+				h.replayer.hookImpl = secondRunHooks{run: run, test: "test-3", second: p.second}
+				_ = h.run(t)
+				rep := h.report.report
+				if rep == nil {
+					t.Fatal("precondition: the set wrote no report")
+				}
+				run.mu.Lock()
+				ran := run.calls["test-3"]
+				run.mu.Unlock()
+				if ran != 2 {
+					t.Fatalf("precondition: test-3 ran %d time(s), want 2 (a second cycle)", ran)
+				}
+				var got []string
+				for _, r := range rep.Tests {
+					got = append(got, r.TestCaseID+":"+string(r.Status))
+				}
+				want := []string{"test-1:PASSED", "test-2:FAILED", "test-3:PASSED", "test-3:FAILED", "test-4:PASSED"}
+				if !slices.Equal(got, want) {
+					t.Fatalf("the report's rows are\n%v\nwant\n%v", got, want)
+				}
+				for _, r := range lastResultOfEachTest(rep.Tests) {
+					if r.TestCaseID == "test-3" && r.Status != models.TestStatusFailed {
+						t.Fatalf("test-3's last row is %s, want its last cycle's (FAILED)", r.Status)
+					}
+				}
+			})
+		}
 	}
 }
 
