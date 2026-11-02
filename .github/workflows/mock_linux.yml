@@ -148,9 +148,11 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-cli-exit-codes-linux.sh"
 
-      # Parallel test workers, without the switch: two concurrent pid-scoped
-      # workers are each served only their own scope's mocks. (Its switched
-      # half, the refusal check, runs in mock_linux_proven.)
+      # Parallel test workers, without the switch: in a run with the suite
+      # mark, two concurrent pid-scoped workers are each served only their
+      # own scope's mocks; in a run without the marks a pid begin is refused
+      # with 422 and fails the run. (Its switched half, the refusal check,
+      # runs in mock_linux_proven.)
       - name: Run mock-mode parallel-scope e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}

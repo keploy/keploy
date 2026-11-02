@@ -16,12 +16,18 @@
 # the same two tests one after the other, passes and records both.
 #
 # Without the switch (today's default, which the flip deletes), PER-PID mock
-# scoping: two named scopes recorded (t1->/a, t2->/b), then TWO CONCURRENT
-# workers in one replay that BOTH call /b, each registered under its own pid:
-# the worker scoped to t2 must be SERVED /b, the worker scoped to t1 must MISS
-# it (its scope allows only /a's mock). Without per-PID scoping both would be
-# served, so t1's MISS is the proof of isolation. The pid travels on the scope
-# API as it was, which is how today's parallel workers call it; v1 has no pid.
+# scoping, which keploy serves only in a run with the suite and app-start
+# marks: two named scopes recorded inside a suite mark (t1->/a, t2->/b), then
+# TWO CONCURRENT workers in one replay, inside a suite mark, that BOTH call
+# /b, each registered under its own pid: the worker scoped to t2 must be
+# SERVED /b, the worker scoped to t1 must MISS it (its scope allows only /a's
+# mock). Without per-PID scoping both would be served, so t1's MISS is the
+# proof of isolation. The pid travels on the scope API as it was, which is
+# how today's parallel workers call it; v1 has no pid. A run recorded without
+# the marks refuses a test that begins with a pid (422, naming the test, with
+# the marks and a pid-less begin as the two ways out), fails it, and so fails
+# the run: there a connection the app opened before the test began would be
+# served every test's mocks.
 #
 # Both ways, the control plane refuses a caller with no token (401) and still
 # answers /agent/health without one.
@@ -88,22 +94,40 @@ def check():
     assert urllib.request.urlopen(k.AGENT + "/agent/health").status == 200
 PY
 
+# The suite mark of the scope API as it was (no v1 call: v1 has no pid and
+# no suite): mark("begin") before a process's first test and mark("end")
+# after its last, under this process's pid.
+cat > marks.py <<'PY'
+import json, os
+import keploy_v1 as k
+def mark(edge):
+    status, raw = k.post("/agent/scope/" + edge, {"name": "suite", "pid": os.getpid(), "suite": True})
+    assert status == 200, "the suite mark's %s answered %d: %r" % (edge, status, raw[:512])
+PY
+
 # One test process running t1 (/a) then t2 (/b), each in a scope of its own.
 # Each call is the wire's own: v1 under the switch, and without it the scope
-# API as it was, with this worker's pid (keploy_v1.py).
+# API as it was, with this worker's pid (keploy_v1.py), inside a suite mark
+# when argv[2] is "marks".
 cat > rec.py <<'PY'
 import os, sys, urllib.request
-import guard, keploy_v1 as k
+import guard, keploy_v1 as k, marks
 PORT = sys.argv[1]
+MARKS = sys.argv[2:] == ["marks"]
 def call(p): return urllib.request.urlopen("http://127.0.0.1:%s%s" % (PORT, p)).read()
 guard.check()
 mode = k.claim(".", os.getcwd())
 print("CLAIM=" + mode, flush=True)
+if MARKS:
+    assert mode == k.LEGACY, "the suite mark is the scope API without the proven switch, and the agent answered the claim: " + mode
+    marks.mark("begin")
 for name, path, want in (("t1", "/a", b"AAA"), ("t2", "/b", b"BBB")):
     assert k.begin(name, "rec.py") is None, "keploy told the record to skip " + name
     assert call(path) == want
     reason = k.end(name, "passed", file="rec.py")
     assert reason is None, "keploy failed %s: %s" % (name, reason)
+if MARKS:
+    marks.mark("end")
 print("RECORD_OK", flush=True)
 PY
 
@@ -131,7 +155,9 @@ PY
 
 cat > run.py <<'PY'
 import os, subprocess, sys
+import marks
 PORT = sys.argv[1]
+marks.mark("begin")
 r1, w1 = os.pipe()
 r2, w2 = os.pipe()
 ps = [subprocess.Popen(["python3", "worker.py", PORT, n, str(mine), str(other)], stdout=subprocess.PIPE, pass_fds=(mine, other))
@@ -140,6 +166,33 @@ for fd in (r1, w1, r2, w2):
     os.close(fd)
 for p in ps:
     print(p.communicate()[0].decode().strip(), flush=True)
+marks.mark("end")
+PY
+
+# Without the switch, in a run recorded without the marks: one worker begins
+# t1 with its pid. keploy refuses it; the driver prints BARE_STATUS= and
+# BARE_PID=, keeps the whole answer in bare-body.txt (k.post: a Refused keeps
+# only its first 512 bytes), and fails, as an integration must on a non-2xx
+# answer.
+cat > bare.py <<'PY'
+import os, sys, urllib.request
+import guard, keploy_v1 as k
+PORT = sys.argv[1]
+guard.check()
+mode = k.claim(".", os.getcwd())
+assert mode == k.LEGACY, "this check is the scope API without the proven switch, and the agent answered the claim: " + mode
+print("BARE_PID=%d" % os.getpid(), flush=True)
+status, raw = k.post("/agent/scope/begin", {"name": "t1", "file": "bare.py", "pid": os.getpid(), "canSkip": True})
+print("BARE_STATUS=%d" % status, flush=True)
+open("bare-body.txt", "wb").write(raw)
+if status == 200:
+    try:
+        print("BARE_SERVED=" + urllib.request.urlopen("http://127.0.0.1:%s/b" % PORT).read().decode(), flush=True)
+    except Exception:
+        print("BARE_MISS", flush=True)
+    k.end("t1", "passed", file="bare.py")
+    sys.exit(0)
+sys.exit(1)
 PY
 
 # Under the switch: two test processes, A and B, started side by side by a
@@ -286,24 +339,47 @@ grep -q "tests failed; the recording was not kept" refused.log ||
 fi
 
 if half off; then
-echo "== 3. without the switch: record two endpoints under two pid scopes =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 rec.py $PORT" --name p --disable-tele 2>&1 | tee rec.log
-RC=${PIPESTATUS[0]}
-[ "$RC" -eq 0 ] || fail "without the switch the record should pass (exit 0), got $RC"
-case "$(line_of rec.log CLAIM)" in
-  legacy) ;;
-  "") fail "without the switch the record driver never claimed the run" ;;
-  *) fail "without the switch the agent took the claim ($(line_of rec.log CLAIM)): it has no claim route without the switch" ;;
-esac
-grep -q "RECORD_OK" rec.log || fail "the record driver did not complete without the switch"
-[ "$(mocks_of rec.log)" = "2" ] || fail "expected 2 recorded mocks, got $(mocks_of rec.log)"
+echo "== 3. without the switch: record two endpoints under two pid scopes, with the suite mark and without it =="
+# record_off NAME [marks]: records NAME without the switch.
+record_off() {
+  sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 rec.py $PORT ${2:-}" --name "$1" --disable-tele 2>&1 | tee "rec-$1.log"
+  local rc=${PIPESTATUS[0]}
+  [ "$rc" -eq 0 ] || fail "without the switch the record of $1 should pass (exit 0), got $rc"
+  case "$(line_of "rec-$1.log" CLAIM)" in
+    legacy) ;;
+    "") fail "without the switch the record driver of $1 never claimed the run" ;;
+    *) fail "without the switch the agent took the claim of $1 ($(line_of "rec-$1.log" CLAIM)): it has no claim route without the switch" ;;
+  esac
+  grep -q "RECORD_OK" "rec-$1.log" || fail "the record driver of $1 did not complete without the switch"
+  [ "$(mocks_of "rec-$1.log")" = "2" ] || fail "expected 2 recorded mocks in $1, got $(mocks_of "rec-$1.log")"
+}
+record_off p marks
+record_off p-bare
+grep -q "^suites:" keploy/p/mappings.yaml || fail "the record with the suite mark kept no suite in its mapping"
+grep -q "^suites:" keploy/p-bare/mappings.yaml && fail "the record without the suite mark kept a suite in its mapping"
 kill "$DP" 2>/dev/null
 wait "$DP" 2>/dev/null
 
-echo "== 4. without the switch: two concurrent workers, both hitting /b, dependency DOWN =="
+echo "== 4. without the switch, with the marks: two concurrent workers, both hitting /b, dependency DOWN =="
 sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "python3 run.py $PORT" --name p --disable-tele 2>&1 | tee rep.log
 grep -q "t2=SERVED:BBB" rep.log || fail "the worker scoped to t2 was NOT served /b"
 grep -q "t1=MISS"       rep.log || fail "the worker scoped to t1 was NOT isolated (it saw another test's mock)"
+
+echo "== 5. without the switch, without the marks: a test that begins with a pid is refused, and fails the run =="
+sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "python3 bare.py $PORT" --name p-bare --disable-tele 2>&1 | tee bare.log
+RC=${PIPESTATUS[0]}
+BARE_PID=$(line_of bare.log BARE_PID)
+[ "$(line_of bare.log BARE_STATUS)" = 422 ] ||
+  fail "a pid begin in a run without the marks was not refused with 422 (got '$(line_of bare.log BARE_STATUS)', $(grep -E '^BARE_(SERVED|MISS)' bare.log))"
+[ -n "$BARE_PID" ] && head -1 bare-body.txt | grep -F "t1 began with the pid $BARE_PID: keploy narrows a test to its own mocks by the pid of its test process only in a run with the suite and app-start marks" >/dev/null ||
+  fail "the refusal does not name the test and its pid (pid $BARE_PID): $(head -c 400 bare-body.txt)"
+MARKS_WAY="Either add the marks, at record and at replay: begin a scope with \"suite\": true and the pid before the first test and end it after the last, and POST /agent/app/start {\"pid\": <the app's pid>} each time the tests start the app."
+PIDLESS_WAY="Or send the begin without a pid, and run the tests one at a time: keploy then narrows every connection to the open test."
+grep -qxF -- "$MARKS_WAY" bare-body.txt ||
+  fail "the refusal does not give the marks, with the calls to make, as one way out on a line of its own: $(cat bare-body.txt)"
+grep -qxF -- "$PIDLESS_WAY" bare-body.txt ||
+  fail "the refusal does not give a pid-less begin, one test at a time, as the other way out on a line of its own: $(cat bare-body.txt)"
+[ "$RC" -ne 0 ] || fail "a replay whose test was refused passed (keploy exited 0)"
 fi
 
 [ "$FAIL" = 0 ] && echo "MOCK PARALLEL E2E: PASSED" || echo "MOCK PARALLEL E2E: FAILED"

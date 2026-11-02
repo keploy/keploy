@@ -46,8 +46,16 @@ func TestAPidBeginWithoutMarksIsRefusedAndFailsTheTest(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, test := range []string{"TestA", "TestC"} {
-		if err := a.BeginScope(ctx, test, 4242); !errors.Is(err, ErrPidBeginWithoutMarks) {
+		err := a.BeginScope(ctx, test, 4242)
+		if !errors.Is(err, ErrPidBeginWithoutMarks) {
 			t.Fatalf("%s began with a pid in a run without marks: got %v, want ErrPidBeginWithoutMarks", test, err)
+		}
+		// It names the test and its pid, then the two ways out, one line each.
+		want := test + " began with the pid 4242: " + ErrPidBeginWithoutMarks.Error() + ".\n" +
+			"Either add the marks, at record and at replay: begin a scope with \"suite\": true and the pid before the first test and end it after the last, and POST /agent/app/start {\"pid\": <the app's pid>} each time the tests start the app.\n" +
+			"Or send the begin without a pid, and run the tests one at a time: keploy then narrows every connection to the open test."
+		if err.Error() != want {
+			t.Fatalf("%s's refusal:\n%s\nwant:\n%s", test, err, want)
 		}
 		// A harness that ignores the refusal runs the test and ends it.
 		if err := a.EndScope(ctx, test, 4242); err != nil {
