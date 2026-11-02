@@ -18,6 +18,7 @@
 package stall
 
 import (
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -86,9 +87,14 @@ var proc = &sampler{src: realSource{}, tick: Tick}
 //     is wall time, for a process with CPU to spare, busy or idle.
 //   - A sample that comes late, more than two ticks after the last, shows the
 //     process was held off the CPU for part of the interval (frozen, stopped,
-//     or waiting behind other work on an overloaded host): only what it ran
-//     then counts, its CPU time, and never more than the scaled interval. A
-//     freeze of any length counts as the CPU the process used before it froze.
+//     or taken by the host): only what it ran then counts, its CPU time, and
+//     never more than the scaled interval. A freeze of any length counts as
+//     the CPU the process used before it froze. A sample is late by what its
+//     own thread's wait for a CPU (ownWait) does not explain: that wait is
+//     one of the threads' waits, which on-time samples pay for (below), and
+//     a sample late behind it counted as late would pay for it twice. In a
+//     four-CPU quota beside 26 busy loops, where one thread could run about
+//     a seventh of the time, a clock that did counted 2.7 s of 117 s.
 //
 // A sample that comes on time does not show that the process could run the
 // whole interval when it has a CPU limit: CFS hands out the quota in per-CPU
@@ -142,6 +148,10 @@ type sampler struct {
 	waitOwed time.Duration
 	heldFrom uint64
 	reads    uint64
+	// The sampling thread's wait for a CPU so far, at the last sample
+	// (ownOK: it could be read).
+	lastOwn time.Duration
+	ownOK   bool
 }
 
 // heldEvery is how often the sampler reads how long the process's threads
@@ -159,6 +169,10 @@ type source interface {
 	// where that cannot be read; and for how many calls in a row, this one
 	// included, the thread held off now the longest has been, 0 if none is.
 	heldOff() (time.Duration, uint64)
+	// ownWait is how long the calling thread (the sampler's, locked to it)
+	// has waited for a CPU so far (its run delay); false where that cannot
+	// be read.
+	ownWait() (time.Duration, bool)
 }
 
 // acquire adds a user, starting the sampling with the first, and returns the
@@ -196,6 +210,13 @@ func (s *sampler) acquire() func() {
 // would look on time.
 func (s *sampler) run(stop, done chan struct{}) {
 	defer close(done)
+	// One thread samples, so its wait for a CPU between two samples is read
+	// from its own account (ownWait).
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	s.mu.Lock()
+	s.lastOwn, s.ownOK = s.src.ownWait()
+	s.mu.Unlock()
 	t := time.NewTimer(s.tick)
 	defer t.Stop()
 	for {
@@ -234,8 +255,15 @@ func (s *sampler) sample() {
 		share = l
 	}
 	iv, ok := max(wall.Sub(s.lastWall), 0), s.cpuOK && cpuOK
-	got := accrue(iv, cpu-s.lastCPU, ok, s.tick, share)
-	if !late(iv, ok, s.tick) {
+	own, ownOK := s.src.ownWait()
+	var waited time.Duration
+	if ownOK && s.ownOK {
+		waited = max(own-s.lastOwn, 0)
+	}
+	s.lastOwn, s.ownOK = own, ownOK
+	isLate := late(iv-waited, ok, s.tick)
+	got := accrue(iv, cpu-s.lastCPU, isLate, share)
+	if !isLate {
 		s.onTime += got
 		pay := min(got, s.waitOwed)
 		s.waitOwed -= pay
@@ -282,19 +310,20 @@ func (s *sampler) owed() (owed time.Duration, heldFrom, read uint64) {
 	return s.waitOwed, s.heldFrom, s.reads
 }
 
-// accrue is what a process could run in an interval iv between two samples
-// tick apart, in which it used cpu of CPU time (cpuOK: both readings were
-// had), at share of a CPU at most (see sampler).
-func accrue(iv, cpu time.Duration, cpuOK bool, tick time.Duration, share float64) time.Duration {
+// accrue is what a process could run in an interval iv between two samples,
+// in which it used cpu of CPU time, at share of a CPU at most (see sampler):
+// all of it, or for a late sample (late) only what it ran.
+func accrue(iv, cpu time.Duration, isLate bool, share float64) time.Duration {
 	could := time.Duration(float64(iv) * share)
-	if !late(iv, cpuOK, tick) {
+	if !isLate {
 		return could
 	}
 	return min(could, max(cpu, 0))
 }
 
 // late says whether a sample shows the process was held off the CPU: it came
-// more than two ticks after the last, and there is a CPU clock to tell by.
+// more than two ticks after the last, past what its thread waited for a CPU
+// (iv: the interval less that wait), and there is a CPU clock to tell by.
 func late(iv time.Duration, cpuOK bool, tick time.Duration) bool {
 	return iv > 2*tick && cpuOK
 }
@@ -311,6 +340,8 @@ func (realSource) now() (time.Time, time.Duration, bool) {
 var procWaits threadWaits
 
 func (realSource) heldOff() (time.Duration, uint64) { return procWaits.longest() }
+
+func (realSource) ownWait() (time.Duration, bool) { return threadRunDelay() }
 
 // cpuLimit is ProcessCPULimit, read at most once per cpuLimitRefresh: reading
 // the cgroup files at every sample would cost a starved process the CPU it

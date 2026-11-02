@@ -8,3 +8,6 @@ import "time"
 type threadWaits struct{}
 
 func (*threadWaits) longest() (time.Duration, uint64) { return 0, 0 }
+
+// threadRunDelay: no run delay to read outside Linux.
+func threadRunDelay() (time.Duration, bool) { return 0, false }

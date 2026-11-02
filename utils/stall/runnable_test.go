@@ -17,6 +17,7 @@ type fakeSource struct {
 	heldFrom int           // the call of heldOff from which it is
 	heldFor  uint64        // the calls of heldOff it has been held off for
 	heldN    int           // calls of heldOff
+	own      time.Duration // the sampling thread's wait for a CPU so far (ownWait)
 }
 
 // holdOff says a thread is held off from the next read of the threads on, or
@@ -28,6 +29,7 @@ func (f *fakeSource) cpuLimit() (float64, bool) {
 	f.reads++
 	return f.limit, f.limit > 0
 }
+func (f *fakeSource) ownWait() (time.Duration, bool) { return f.own, true }
 func (f *fakeSource) heldOff() (time.Duration, uint64) {
 	d := f.held
 	f.held = 0
@@ -107,6 +109,55 @@ func TestSampler_AWaitBesideLateSamplesIsNotPaidTwice(t *testing.T) {
 	}
 	if got, want := time.Duration(s.ran.Load()-before), 10*Tick; got != want {
 		t.Fatalf("%v on time after the late samples accrued %v: the wait beside them was paid twice", want, got)
+	}
+}
+
+// Behind a CPU quota that other work spends three parts in four, the sampler
+// wakes late, its own thread waiting out the throttle, and every thread of the
+// process waits as long. That wait is paid once, by on-time samples (the
+// threads' waits read): a sample late by its own thread's wait alone is on
+// time.
+func TestSampler_AWaitThatMadeASampleLateIsPaidOnce(t *testing.T) {
+	s, src := newFakeSampler(0)
+	for range 100 { // 10 s; in each 100 ms, two samples on time, then one 80 ms after behind a 75 ms wait
+		for range 2 {
+			src.wall, src.cpu = src.wall.Add(Tick), src.cpu+time.Millisecond
+			s.sample()
+		}
+		src.wall, src.cpu = src.wall.Add(80*time.Millisecond), src.cpu+time.Millisecond
+		src.own += 75 * time.Millisecond
+		src.held += 75 * time.Millisecond
+		s.sample()
+	}
+	// 10 s less the 7.5 s every thread waited, and less what was read last and
+	// is not paid yet, at most a read's worth.
+	if got, want := time.Duration(s.ran.Load()), 2500*time.Millisecond; got < want || got > want+heldEvery {
+		t.Fatalf("10 s, a thread waiting 7.5 s of it, accrued %v, want %v (and at most %v more): the wait was paid twice", got, want, heldEvery)
+	}
+
+	// A sample later than its own thread's wait explains was held off past it
+	// (frozen, or taken by the host): it counts only what the process ran.
+	s, src = newFakeSampler(0)
+	src.wall = src.wall.Add(Tick)
+	s.sample() // the thread's account read
+	before := s.ran.Load()
+	src.wall, src.cpu = src.wall.Add(80*time.Millisecond), src.cpu+time.Millisecond
+	src.own += 30 * time.Millisecond
+	s.sample()
+	if got := time.Duration(s.ran.Load() - before); got != time.Millisecond {
+		t.Fatalf("a sample 80 ms after the last, its thread waiting 30 ms of it, accrued %v, want what the process ran: 1ms", got)
+	}
+}
+
+// A thread's wait is read from the sample the account was first read at: the
+// wait it had before is not one between two samples.
+func TestSampler_AThreadsWaitBeforeItsFirstReadExplainsNoSample(t *testing.T) {
+	s, src := newFakeSampler(0) // the thread's account not read yet
+	src.own = time.Hour
+	src.wall, src.cpu = src.wall.Add(100*time.Millisecond), src.cpu+time.Millisecond
+	s.sample()
+	if got := time.Duration(s.ran.Load()); got != time.Millisecond {
+		t.Fatalf("a sample 100 ms late, its thread's account first read with an hour's wait in it, accrued %v, want what the process ran: 1ms", got)
 	}
 }
 

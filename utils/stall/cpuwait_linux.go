@@ -101,6 +101,17 @@ func (w *threadWaits) account(seen map[string]threadStat, steal map[string]int64
 	return most, heldFor
 }
 
+// threadRunDelay is the calling thread's run delay so far (schedstat); false
+// if the kernel keeps none.
+func threadRunDelay() (time.Duration, bool) {
+	b, err := os.ReadFile("/proc/thread-self/schedstat")
+	if err != nil {
+		return 0, false
+	}
+	_, delay, _, ok := parseSchedstat(b)
+	return time.Duration(delay), ok
+}
+
 // readThread reads a thread's account; false if it has exited or the kernel
 // keeps none.
 func readThread(tid string) (threadStat, bool) {
