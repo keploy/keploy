@@ -592,7 +592,7 @@ type TestRequest struct {
 	// RecordedAt is when the test case's request reached the application
 	// in its recording, the instant keploy test's begin moves the app's
 	// clock to: where the test began in its recording, which the learn step
-	// reads its calls' windows from too (learn.Tracker.RecordedTestBegin).
+	// reads its calls' windows from too (learn.Tracker.GiveRequest).
 	// Zero where the recording holds none, or from a keploy older than its
 	// agent: the windows then start at each call's previous call alone.
 	RecordedAt time.Time `json:"recordedAt,omitzero"`

@@ -4903,14 +4903,12 @@ func (p *Proxy) learnBoundary(step func(*learn.Tracker)) {
 // request (agent.TestRequestTaker; learn.Tracker.Give), under the proven
 // switch: the test's earliest place, which it reads as any earlier place.
 // Where the request carries when it was recorded, the learn step takes that
-// as where the test began in its recording (learn.Tracker.RecordedTestBegin)
-// first, before any call the request releases reads its window.
+// as where the test began in its recording in the same step
+// (learn.Tracker.GiveRequest), so a call the request releases reads its
+// window with it.
 func (p *Proxy) TakeTestRequest(req *models.TestRequest) {
 	if provenswitch.On() {
-		if req != nil {
-			p.learnTracker.RecordedTestBegin(req.RecordedAt)
-		}
-		p.learnTracker.Give(learn.GivenRequest(req))
+		p.learnTracker.GiveRequest(req)
 	}
 }
 

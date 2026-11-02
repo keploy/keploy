@@ -532,24 +532,6 @@ func (t *Tracker) RecordedBegin(at time.Time) {
 	t.mu.Unlock()
 }
 
-// RecordedTestBegin gives the instant the running test began at in its
-// recording, where none was given before it began (RecordedBegin): keploy
-// test gives it with its test case's request (the request's recorded time,
-// models.TestRequest.RecordedAt), after the test began awaiting it. In a
-// server test a call's window in the recording then knows where its test
-// began there (CallWindowFrom, Span.TestFrom). One given while no test is
-// open is tied to no test, and dropped.
-func (t *Tracker) RecordedTestBegin(at time.Time) {
-	if t == nil || at.IsZero() {
-		return
-	}
-	t.mu.Lock()
-	if t.open && t.recBegan.IsZero() {
-		t.recBegan = at
-	}
-	t.mu.Unlock()
-}
-
 // Begin starts the next test now (BeginAt).
 func (t *Tracker) Begin() { t.BeginAt(time.Now()) }
 
@@ -649,7 +631,9 @@ func (t *Tracker) await() {
 // the running test's earliest place, read as any earlier place
 // (Earlier.Given), until the next test begins. The agent gives it as the
 // test case opens (its mock filter), after Begin and before the replay sends
-// the request: a call the test's request led to finds it. One given while no
+// the request: a call the test's request led to finds it. The agent gives
+// a models.TestRequest through GiveRequest, which takes its recorded begin
+// too; Give takes none. One given while no
 // test is open (the test's begin never reached the agent) is tied to no
 // test's calls: the calls made until the next test begins read a request
 // that could not be read, never the previous test's.
@@ -657,9 +641,40 @@ func (t *Tracker) Give(e Earlier) {
 	if t == nil {
 		return
 	}
+	t.give(e, time.Time{})
+}
+
+// GiveRequest gives req, the running keploy test case's own request, as
+// Give gives GivenRequest(req), and in the same step the instant it was
+// recorded at (models.TestRequest.RecordedAt) as where the test began in
+// its recording, where none was given before it began (RecordedBegin), as
+// keploy test gives it, after the test began awaiting it. In a server test
+// a call's window in the recording then knows where its test began there
+// (CallWindowFrom, Span.TestFrom); a call the request releases
+// (AwaitRequest) reads its window once both are taken, never between them.
+// A request given while no test is open is tied to no test (Give), and its
+// recorded begin is dropped.
+func (t *Tracker) GiveRequest(req *models.TestRequest) {
+	if t == nil {
+		return
+	}
+	var recBegan time.Time
+	if req != nil {
+		recBegan = req.RecordedAt
+	}
+	t.give(GivenRequest(req), recBegan)
+}
+
+// give is Give, and GiveRequest's step: recBegan, where it is not zero, is
+// where the open test began in its recording, taken under the same hold of
+// t.mu that releases the calls awaiting e (closeAwaiting).
+func (t *Tracker) give(e Earlier, recBegan time.Time) {
 	e.Given = true
 	e.Seen = append([]Seen(nil), e.Seen...)
 	t.mu.Lock()
+	if t.open && !recBegan.IsZero() && t.recBegan.IsZero() {
+		t.recBegan = recBegan
+	}
 	if t.open {
 		t.given = &e
 	} else {
@@ -1986,7 +2001,7 @@ func (t *Tracker) CallWindow(paired *models.Mock, recorded []*models.Mock, arriv
 // In a server test each run's span also carries where the running test
 // began there (Span.TestFrom), where a call made after that begin starts
 // the span: in the recording the test's recorded begin (RecordedBegin, or
-// RecordedTestBegin with keploy test's request), where it came before
+// GiveRequest with keploy test's request), where it came before
 // prevRec; in this run where liveClock.testFrom puts the replay's span's
 // (LiveSpan). Another goroutine of the application (a queue's consumer
 // beside the test's handler) can make a call between a read of the clock
@@ -2101,16 +2116,19 @@ func (o *OwnCall) Window(arrival time.Time) *Window {
 	return lc.window(o.prev.At(), recBegan, o.paired, arrival)
 }
 
-// CallWindowIn is CallWindowFrom with the recording's half of a client
-// test's window bounded by recBegan, the recorded begin of the test whose
-// recorded window paired lies in, instead of the running test's: a
-// recording another test made (a timer's call recorded in an earlier test's
-// window, which a call of the running test pairs with) read the clock in
-// that test's run of it, which that test's begin moved the clock to, and
-// the running test's recorded begin, after the recording, bounds no span
-// of it (CallWindowFrom has none there). Zero recBegan is none given, as a
-// test begun with no recorded begin. keploy test reads no recorded begin,
-// so its window is CallWindowFrom's.
+// CallWindowIn is CallWindowFrom with recBegan, the recorded begin of the
+// test whose recorded window paired lies in, in place of the running
+// test's: a recording another test made (a timer's call recorded in an
+// earlier test's window, which a call of the running test pairs with) read
+// the clock in that test's run of it, which that test's begin moved the
+// clock to, and the running test's recorded begin, after the recording,
+// bounds no span of it (CallWindowFrom has none there). In a client test
+// recBegan bounds the recording's half of the window; in a server test that
+// half carries it as where its test began (Span.TestFrom) where a call
+// recorded after it starts the span, so the learn step reads a read the
+// window refuses from the begin of the recording's own test
+// (Window.fromTestBegin). Zero recBegan is none given, as a test begun with
+// no recorded begin.
 func (t *Tracker) CallWindowIn(prevRec, recBegan time.Time, paired *models.Mock, arrival time.Time) *Window {
 	if t == nil {
 		return nil
@@ -2121,7 +2139,8 @@ func (t *Tracker) CallWindowIn(prevRec, recBegan time.Time, paired *models.Mock,
 
 // window is the window of the call that reached keploy at arrival, paired
 // with paired, with the recording's half bounded by prevRec and, in a client
-// test, by recBegan (CallWindowFrom).
+// test, by recBegan, which in a server test that half carries as its test's
+// begin where it came before prevRec (CallWindowFrom).
 func (lc liveClock) window(prevRec, recBegan time.Time, paired *models.Mock, arrival time.Time) *Window {
 	if paired == nil || paired.Spec.ReqTimestampMock.IsZero() {
 		return nil

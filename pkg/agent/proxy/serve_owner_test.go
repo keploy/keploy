@@ -70,9 +70,10 @@ func TestTheStoreSaysARecordingIsTheOpenTestsOwnOrTheStartupsFromItsView(t *test
 // The store tells what it cannot say of a recording apart from what it says
 // no to (ServeOwnerOf): with no test's view in force (the initial staging, a
 // pool view holding the next test's recording ahead) it cannot say whose any
-// recording is, as of a recording with no name; with a test's view in force
-// the test's own recordings and the start-up's are the test's, and a
-// worker: recording and another test's are another's. Its yes is
+// recording is, as of a recording with no name, except the start-up's,
+// which are the test's whatever the view; with a test's view in force the
+// test's own recordings and the start-up's are the test's, and a worker:
+// recording and another test's are another's. Its yes is
 // ServedAsOwnOrStartup's.
 func TestTheStoreSaysWhoseARecordingIsOnlyWhereATestsViewIsInForce(t *testing.T) {
 	own := exactMock("own", 0, models.LifetimePerTest)
@@ -103,7 +104,10 @@ func TestTheStoreSaysWhoseARecordingIsOnlyWhereATestsViewIsInForce(t *testing.T)
 	says("T1 open", other, learn.OwnerOther)
 	says("T1 open, a recording with no name", &models.Mock{}, learn.OwnerUnknown)
 	mm.SetMocksWithWindowThreeTier([]*models.Mock{own, other}, []*models.Mock{worker}, []*models.Mock{start}, exactT0, exactT0.Add(time.Hour))
-	says("a staging with a start-up slice, no test open", start, learn.OwnerTest)
+	mm.ServeExactWorker([]string{"w-tick"})
+	mm.ServeExactPool("k", nil, own)
+	says("a staging with a start-up slice, a pool view in force", start, learn.OwnerTest)
+	says("a staging with a start-up slice, a pool view in force", worker, learn.OwnerUnknown)
 	mm.ServeExactWorker([]string{"w-tick"})
 	mm.ServeExactTest("T1", []*models.Mock{own})
 	says("a staging with a start-up slice", start, learn.OwnerTest)

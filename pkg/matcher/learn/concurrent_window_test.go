@@ -12,7 +12,7 @@ import (
 
 // windowTracker is r's tracker (concurrentRun.tracker) told the test's
 // recorded begin, as the agent tells it (RecordedBegin before a keploy mock
-// test begins, RecordedTestBegin with a keploy test case's request), so a
+// test begins, GiveRequest with a keploy test case's request), so a
 // call's window in the recording knows where its test began there.
 func (r concurrentRun) windowTracker(client bool) *Tracker {
 	tr := NewTracker()
@@ -225,7 +225,7 @@ func TestTheLearnStepReadsAWordReadFromItsTestsBeginPastAnotherGoroutinesServes(
 }
 
 // keploy test gives a server test's recorded begin with its test case's
-// request, after the test began awaiting it (RecordedTestBegin): a call's
+// request, after the test began awaiting it (GiveRequest): a call's
 // window in the recording then carries it where a call recorded after it
 // starts the span. One given before the test began (RecordedBegin) stands,
 // and so does the first given; one given while no test is open is dropped,
@@ -250,20 +250,22 @@ func TestATestsRecordedBeginGivenWithItsRequestBoundsItsWindowInTheRecording(t *
 		return tr
 	}
 	other := r.recBegin.Add(-time.Millisecond)
+	// give hands tr the test case's request, recorded at at.
+	give := func(tr *Tracker, at time.Time) { tr.GiveRequest(&models.TestRequest{Test: "test-2", RecordedAt: at}) }
 	for _, c := range []struct {
 		what string
 		tr   *Tracker
 		want time.Time
 	}{
-		{"given with the request", server(func(tr *Tracker) { tr.RecordedTestBegin(r.recBegin) }), r.recBegin},
+		{"given with the request", server(func(tr *Tracker) { give(tr, r.recBegin) }), r.recBegin},
 		{"none given", server(func(tr *Tracker) {}), time.Time{}},
-		{"given twice", server(func(tr *Tracker) { tr.RecordedTestBegin(r.recBegin); tr.RecordedTestBegin(other) }), r.recBegin},
+		{"given twice", server(func(tr *Tracker) { give(tr, r.recBegin); give(tr, other) }), r.recBegin},
 		{"given before the test began", r.windowTracker(false), r.recBegin},
-		{"given before, then with the request", func() *Tracker { tr := r.windowTracker(false); tr.RecordedTestBegin(other); return tr }(), r.recBegin},
-		{"given after the test ended", server(func(tr *Tracker) { tr.End(); tr.RecordedTestBegin(r.recBegin) }), time.Time{}},
-		{"the test ended after it was given", server(func(tr *Tracker) { tr.RecordedTestBegin(r.recBegin); tr.End() }), time.Time{}},
-		{"given to the previous test", server(func(tr *Tracker) { tr.RecordedTestBegin(r.recBegin); tr.BeginAt(r.a) }), time.Time{}},
-		{"a recorded begin after the previous recorded call", server(func(tr *Tracker) { tr.RecordedTestBegin(prevRec.Add(time.Microsecond)) }), time.Time{}},
+		{"given before, then with the request", func() *Tracker { tr := r.windowTracker(false); give(tr, other); return tr }(), r.recBegin},
+		{"given after the test ended", server(func(tr *Tracker) { tr.End(); give(tr, r.recBegin) }), time.Time{}},
+		{"the test ended after it was given", server(func(tr *Tracker) { give(tr, r.recBegin); tr.End() }), time.Time{}},
+		{"given to the previous test", server(func(tr *Tracker) { give(tr, r.recBegin); tr.BeginAt(r.a) }), time.Time{}},
+		{"a recorded begin after the previous recorded call", server(func(tr *Tracker) { give(tr, prevRec.Add(time.Microsecond)) }), time.Time{}},
 	} {
 		if got := window(c.tr); !got.Equal(c.want) {
 			t.Errorf("%s: the recording's span carries the test's begin %v; want %v", c.what, got, c.want)
@@ -275,7 +277,7 @@ func TestATestsRecordedBeginGivenWithItsRequestBoundsItsWindowInTheRecording(t *
 	// reads the recording's span from the previous recorded call.
 	ct := r.tracker(true)
 	ct.End()
-	ct.RecordedTestBegin(prevRec.Add(time.Microsecond))
+	give(ct, prevRec.Add(time.Microsecond))
 	if w := ct.CallWindowFrom(prevRec, paired, r.upTo); w == nil || !w.Rec.From.Equal(prevRec) || !w.Rec.Began.IsZero() {
 		t.Errorf("a client test's call once its test ended, a recorded begin given then: window %+v; want the recording's span from the previous recorded call, with no begin", w)
 	}
@@ -330,6 +332,110 @@ func TestAClientTestsWindowTakesNoServerTestsSpanFromItsBegin(t *testing.T) {
 			t.Errorf("a client test's value %s (%s, recorded %s): learned %s (%s); want a read of the clock %v, else a refusal", c.what, at(c.live).Value, rec.Value, ln.Kind, ln.Why, c.ok)
 		} else if learned && ln.Read.Since != models.SinceTestBegin {
 			t.Errorf("a client test's value %s (%s, recorded %s): learned %s; want a read since its test began", c.what, at(c.live).Value, rec.Value, ln.Read)
+		}
+	}
+}
+
+// A value its server test's call's window learns as anything but a refusal
+// keeps what that window learned: the learn step reads the window from the
+// test's begin (Window.fromTestBegin) only for a value the call's window
+// refuses, and only for a plain read there. In a test that ran two minutes
+// before another goroutine's call was served, the handler's created, read
+// about a second after the test began in each run, reached keploy past that
+// serve: the call's window, which compares offsets, learns it as a read
+// made two minutes before the call (a cutoff such as createdAt >= now -
+// 2m), and the window from the test's begin holds it as a plain read. It is
+// learned as the offset, checked so at every replay, never as the plain
+// read. A copy of what the consumer's call was answered, the moment in both
+// runs, is learned as that call's variable, as the call's window learns it.
+func TestAServerTestsCallKeepsWhatItsWindowLearnedPastAnotherGoroutinesServes(t *testing.T) {
+	recBegin := time.Date(2026, 10, 31, 8, 50, 0, 0, time.UTC)
+	began := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+	tr := NewTracker()
+	tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+	tr.SetAppClockRun(func(time.Time) (time.Time, bool) { return time.Time{}, true })
+	tr.NewSetAt(began.Add(-time.Minute))
+	tr.ServedMockAt(&models.Mock{Name: "mock-4", Kind: models.HTTP}, began.Add(-time.Second))
+	tr.RecordedBegin(recBegin)
+	tr.BeginAt(began)
+	serve := began.Add(2*time.Minute + 600*time.Millisecond)
+	tr.ServedMockAt(&models.Mock{Name: "mock-7", Kind: models.Mongo}, serve)
+	paired := &models.Mock{Name: "mock-5", Kind: models.Mongo}
+	paired.Spec.ReqTimestampMock = recBegin.Add(2*time.Minute + 1500*time.Millisecond)
+	prevRec := recBegin.Add(2*time.Minute + 500*time.Millisecond)
+	arrival := began.Add(2*time.Minute + 1400*time.Millisecond)
+	w := tr.CallWindowFrom(prevRec, paired, arrival)
+	if w == nil {
+		t.Fatal("no window for the upsert")
+	}
+	if !w.F.From.Equal(serve) || !w.F.TestFrom.Equal(began) || !w.Rec.From.Equal(prevRec) || !w.Rec.TestFrom.Equal(recBegin) {
+		t.Fatalf("window %+v; want each run's span from the consumer's call, carrying its test's begin", w)
+	}
+	w = w.ComparesOffsets()
+	const p = "body.docs.msgs[].u.{}.created"
+	at := func(v time.Time) Leaf { return InstantLeaf(p, p, v, time.Millisecond) }
+	rec, live := at(recBegin.Add(1037*time.Millisecond)), at(began.Add(789*time.Millisecond))
+	learn := func(earlier []Earlier, w *Window) Learned {
+		return ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: live}}, Shape{Leaves: map[string]Leaf{p: rec}}, paired.Spec.ReqTimestampMock, earlier, nil, nil, w)[0]
+	}
+	if wide := learn(nil, w.fromTestBegin()); wide.Kind != KindClockRead || wide.Read == nil {
+		t.Fatalf("the window from the test's begin learned %s (%s); want a plain read of the clock, which the call's window must not take", wide.Kind, wide.Why)
+	}
+	ln := learn(nil, w)
+	if ln.Kind != KindClockOffset || ln.Offset == nil || ln.Offset.Min > -2*time.Minute || ln.Offset.Max <= -2*time.Minute {
+		t.Errorf("the handler's created read about a second after the test began: learned %s (%s, offset %v); want the read two minutes before the call its window learns", ln.Kind, ln.Why, ln.Offset)
+	}
+	consumer := []Earlier{{Mock: "mock-7", At: prevRec, Own: true, Seen: []Seen{{Side: Response, Leaf: rec, Live: live.Value, Place: p}}}}
+	if ln := learn(consumer, w); ln.Kind != KindVariable || ln.From.Mock != "mock-7" {
+		t.Errorf("a copy of what the consumer's call was answered: learned %s (%s, from %+v); want that call's variable", ln.Kind, ln.Why, ln.From)
+	}
+}
+
+// A server test's call that waits for its test case's request
+// (AwaitRequest) is released by GiveRequest, and reads its window in the
+// recording with the test's recorded begin the request carries. A request
+// with no recorded time releases it with none. GiveRequest takes the begin
+// in the same hold of the tracker's lock that releases the call; no row
+// pins that order within the hold, which would need a hook between the two.
+func TestACallTheRequestReleasesReadsItsWindowWithItsRecordedBegin(t *testing.T) {
+	r := newConcurrentRun()
+	paired := &models.Mock{Name: "mock-5", Kind: models.Mongo}
+	paired.Spec.ReqTimestampMock = r.recBegin.Add(2 * time.Millisecond)
+	prevRec := r.recBegin.Add(1200 * time.Microsecond)
+	for _, c := range []struct {
+		what string
+		req  *models.TestRequest
+		want time.Time
+	}{
+		{"a request recorded at the test's begin", &models.TestRequest{Test: "test-2", RecordedAt: r.recBegin}, r.recBegin},
+		{"a request with no recorded time", &models.TestRequest{Test: "test-2"}, time.Time{}},
+	} {
+		tr := r.tracker(false)
+		waiting, got := make(chan struct{}, 1), make(chan *Window, 1)
+		tr.OnAwait(func() { waiting <- struct{}{} })
+		tr.Await()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		go func() {
+			if err := tr.AwaitRequest(ctx); err != nil {
+				got <- nil
+				return
+			}
+			got <- tr.CallWindowFrom(prevRec, paired, r.upTo)
+		}()
+		select {
+		case <-waiting:
+		case w := <-got:
+			cancel()
+			t.Fatalf("%s: the call did not wait for the request (window %+v)", c.what, w)
+		}
+		tr.GiveRequest(c.req)
+		w := <-got
+		cancel()
+		switch {
+		case w == nil:
+			t.Errorf("%s: the call awaiting it was not released, or read no window", c.what)
+		case !w.Rec.TestFrom.Equal(c.want):
+			t.Errorf("%s: the released call's window in the recording carries the test's begin %v; want %v", c.what, w.Rec.TestFrom, c.want)
 		}
 	}
 }

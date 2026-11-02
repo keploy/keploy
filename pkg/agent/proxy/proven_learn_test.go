@@ -1187,7 +1187,7 @@ func TestALearnStepRefusesAPickFromTheTestCasesRequest(t *testing.T) {
 
 // The test case's request carries where the test began in its recording
 // (models.TestRequest.RecordedAt), which the agent hands the learn step with
-// it (learn.Tracker.RecordedTestBegin): a server test's call whose previous
+// it (learn.Tracker.GiveRequest): a server test's call whose previous
 // recorded call came after that begin has its window in the recording carry
 // it. A request of none, none handed, or the switch off: none.
 func TestTheTestCasesRecordedBeginReachesTheLearnStepsWindow(t *testing.T) {
