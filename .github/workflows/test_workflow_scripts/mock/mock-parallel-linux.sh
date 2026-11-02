@@ -121,10 +121,11 @@ print("CLAIM=" + mode, flush=True)
 if MARKS:
     assert mode == k.LEGACY, "the suite mark is the scope API without the proven switch, and the agent answered the claim: " + mode
     marks.mark("begin")
+pid = os.getpid() if mode == k.LEGACY else None
 for name, path, want in (("t1", "/a", b"AAA"), ("t2", "/b", b"BBB")):
-    assert k.begin(name, "rec.py") is None, "keploy told the record to skip " + name
+    assert k.begin(name, "rec.py", pid=pid) is None, "keploy told the record to skip " + name
     assert call(path) == want
-    reason = k.end(name, "passed", file="rec.py")
+    reason = k.end(name, "passed", file="rec.py", pid=pid)
     assert reason is None, "keploy failed %s: %s" % (name, reason)
 if MARKS:
     marks.mark("end")
@@ -190,7 +191,7 @@ if status == 200:
         print("BARE_SERVED=" + urllib.request.urlopen("http://127.0.0.1:%s/b" % PORT).read().decode(), flush=True)
     except Exception:
         print("BARE_MISS", flush=True)
-    k.end("t1", "passed", file="bare.py")
+    k.end("t1", "passed", file="bare.py", pid=os.getpid())
     sys.exit(0)
 sys.exit(1)
 PY
