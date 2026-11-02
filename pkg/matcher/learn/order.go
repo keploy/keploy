@@ -707,7 +707,12 @@ type instantHold struct {
 	p evPlace
 	// coarseR: R's text holds R's value only as an instant of a coarser
 	// unit (a day, an hour) that the value, cut to it, is (coarserOnly).
-	hr, hl, fr, fl, coarseR bool
+	// gl: round F gave the application its moment there: hl, read in a
+	// recording only in its answer (answerHalf), as a set entry's answer
+	// is. A moment F's view of a recording holds only in the request the
+	// application sent there is a send, which the send rules decide, never
+	// a pick from what F gave.
+	hr, hl, fr, fl, coarseR, gl bool
 	// rank orders the places that name a value: by its exact text (0),
 	// else by the finest cut that gives it (its unit in nanoseconds).
 	rank int64
@@ -918,11 +923,18 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	for _, p := range dc.ps {
 		hr, fr, okR := dc.holds(p, p.t.rec, r, c.rm, c.byText)
 		hl, fl, okL := dc.holds(p, p.t.live, l, c.lm, c.byText)
+		gl := hl
+		if hl && okL && p.raw > 0 {
+			var fa *readerText
+			if fa, okL = answerHalf(p.t.live); okL {
+				gl, _, okL = dc.holds(p, fa, l, c.lm, c.byText)
+			}
+		}
 		if !okR || !okL {
 			return dc.refuse(path, at, n, r, l, RefusalUnread, "keploy could not read the run's values past their budget, which came before this call", nil, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 		}
 		if hr || hl {
-			hs = append(hs, instantHold{p: p, hr: hr, hl: hl, fr: fr, fl: fl, coarseR: hr && c.rm != nil && dc.coarserOnly(p.t.rec, r, *c.rm),
+			hs = append(hs, instantHold{p: p, hr: hr, hl: hl, fr: fr, fl: fl, gl: gl, coarseR: hr && c.rm != nil && dc.coarserOnly(p.t.rec, r, *c.rm),
 				rank: min(dc.rank(p.t.rec, r, c.rm, hr), dc.rank(p.t.live, l, c.lm, hl))})
 		}
 		if hr && !hl && len(c.aside) < maxLinePlaces {
@@ -1015,7 +1027,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		}
 		cut := c.lm != nil && dc.cutOfFinerOnly(p.t.live, l, *c.lm) && dc.namedBy(p.t.live, *c.lm, cutOf) > 0 && !dc.wholeNames(p.t.live, *c.lm, cutOf)
 		switch {
-		case before(p) && h.hl && !cut && (!h.hr || p.same()):
+		case before(p) && h.gl && !cut && (!h.hr || p.same()):
 			why := "round F's moment stands unchanged in " + p.name
 			if !p.same() {
 				why = "round F's moment stands in " + p.name + ", which does not show it"
@@ -1025,9 +1037,9 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		// in round F the value may be a pick from it, as main reads it.
 		// The recorded application never read it, so R's moment standing
 		// there too (by another cut) says nothing.
-		case p.fGave && p.state == stateNotBefore && p.side == Response && h.hl && !cut:
+		case p.fGave && p.state == stateNotBefore && p.side == Response && h.gl && !cut:
 			return dc.refuse(path, at, n, r, l, RefusalPick, "round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it", []string{p.name}, dc.wordNoise(path, n))
-		case p.side == Response && p.state == stateUnknown && (h.hr || h.hl):
+		case p.side == Response && p.state == stateUnknown && (h.hr || h.gl):
 			return untold(p.why)
 		case h.hr && dc.swappable(p, c):
 			return untold(swapNote)
@@ -1091,7 +1103,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			p := h.p
 			switch {
 			case late != "" || p.side != Response || p.given:
-			case p.fGave && p.state == stateNotBefore && h.hl:
+			case p.fGave && p.state == stateNotBefore && h.gl:
 				late, why = p.name, "round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it"
 			case !inScope(p) && p.state == stateBefore && p.fUnstated && h.hr && !h.hl:
 				late, why = p.name, "the recorded moment stands in "+p.name+", another test's answer given before the call, whose view in round F keploy cannot tell"

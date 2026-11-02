@@ -226,7 +226,9 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		}
 		fUnstated := unstated || !in.Caps.FViewStated
 		// Another test's recording, or one recorded after the call
-		// (OfAnotherTest), is outside the call's scope.
+		// (OfAnotherTest), is outside the call's scope. Its place is read
+		// as an answer, request and all; only what round F gave there is
+		// read in its answer alone (answerHalf).
 		other := r.olderTest || r.elsewhere
 		startUp, other, scope := inScope(in, r.Mock(), r.beforeTest && !other, other)
 		p := evPlace{
@@ -274,6 +276,30 @@ func placedFor(p evPlace, r string) evPlace {
 		p.state, p.why, p.recAfter = p.req.state, p.req.why, p.req.after
 	}
 	return p
+}
+
+// answerHalf is t, a recording's text, as its answer alone: each field
+// outside its request (requestPath), laid out as textFields lays a text
+// out; t itself where it is no recording's (a leaf is one side already).
+// What a recording's request holds is what the application sent there,
+// never what the recording gave it. ok is false where keploy could not
+// read the recording.
+func answerHalf(t *readerText) (*readerText, bool) {
+	if t.raw == nil {
+		return t, true
+	}
+	s, fields, ok := t.read()
+	if !ok {
+		return nil, false
+	}
+	var b strings.Builder
+	for _, f := range fields {
+		if !requestPath(f.path) {
+			b.WriteString(s[f.start:f.end])
+			b.WriteByte('\n')
+		}
+	}
+	return t.x.text(b.String()), true
 }
 
 // notFromMock is why a recording's payload was not read, where its read

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/wiremessage"
 )
 
 // Rows for the one entry's order on an instant (Decide): a conflict at a fine
@@ -1498,5 +1499,96 @@ func TestALookBackAPlaceHeldInAnotherFormIsNeverReadFromItsTestsBegin(t *testing
 		if d.Refusal != nil && (strings.Contains(d.Refusal.Why, "another form") || strings.Contains(d.Line, "another form")) {
 			t.Errorf("a look-back no replay compares %s: refused %q (line %q); want no place named as holding the moment in another form", c.what, d.Refusal.Why, d.Line)
 		}
+	}
+}
+
+// A recording made after the call that round F served before it, whose view
+// holds round F's second only in the request the application sent there (a
+// worker that claims a row with F's second): that is a send, which the send
+// rules decide, never something round F gave the application. The call's
+// own window holds the read, so the second is a Clock, checked at every
+// replay, as it is where the worker sends another second. Where round F's
+// answer to the worker gives F's second back, F gave it: refused as a pick
+// naming the recording. One rule for a Mongo command and a Postgres query.
+// The same holds where the worker was answered before the call, or at the
+// call's own instant (its state in round F unknown): the send is no pick. Beside
+// an answer of the call's scope that holds both runs' seconds, the send is
+// no second source either: the value is bound at that answer.
+func TestOutcomeASecondOnlyTheApplicationSentToALaterRecordingIsNoPick(t *testing.T) {
+	const p = "body.cmd.documents.0.createdAt"
+	rAt := oAt.Truncate(time.Second).Add(7*time.Second + 400*time.Millisecond)
+	fAt := rAt.Add(time.Hour + 37*time.Second + 200*time.Millisecond)
+	sec := func(x time.Time) string { return strconv.FormatInt(x.Unix(), 10) }
+	rec, live, other := sec(rAt), sec(fAt), sec(fAt.Add(7*time.Second))
+	// mock-0 was asked 15 s after the call and answered 1 ms later.
+	later := rAt.Add(15 * time.Second)
+	num := func(s string) string { return `{"$numberLong":"` + s + `"}` }
+	mongo := func(asked time.Time, sent, claimed string) Raw {
+		value := "null"
+		if claimed != "" {
+			value = `{"claimedAt":` + num(claimed) + `}`
+		}
+		return RawOf(&models.Mock{Name: "mock-0", Kind: models.Mongo, Spec: models.MockSpec{
+			MongoRequests: []models.MongoRequest{{Header: &models.MongoHeader{Opcode: wiremessage.OpMsg}, Message: &models.MongoOpMessage{Sections: []string{
+				`{ SectionSingle msg: {"findAndModify":"ptw_endpoints","update":{"$set":{"claimedAt":` + num(sent) + `}},"$db":"app"} }`,
+			}}}},
+			MongoResponses: []models.MongoResponse{{Header: &models.MongoHeader{Opcode: wiremessage.OpMsg}, Message: &models.MongoOpMessage{Sections: []string{
+				`{ SectionSingle msg: {"value":` + value + `,"ok":{"$numberDouble":"1.0"}} }`,
+			}}}},
+			ReqTimestampMock: asked, ResTimestampMock: asked.Add(time.Millisecond),
+		}}, false)
+	}
+	pg := func(asked time.Time, sent, claimed string) Raw {
+		var rows []models.PostgresV3Cells
+		if claimed != "" {
+			rows = []models.PostgresV3Cells{{{Value: claimed}}}
+		}
+		return RawOf(&models.Mock{Name: "mock-0", Kind: models.PostgresV3, Spec: models.MockSpec{
+			ReqTimestampMock: asked, ResTimestampMock: asked.Add(time.Millisecond),
+			PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
+				SQLNormalized: "UPDATE ptw_endpoints SET claimed_at = " + sent + " WHERE id = 1 RETURNING claimed_at",
+				Response:      &models.PostgresV3Response{Rows: rows, CommandComplete: "UPDATE 1"},
+			}},
+		}}, false)
+	}
+	w := iWin(rAt, fAt, 100*time.Millisecond)
+	decide := func(raw ...Raw) Decision {
+		return oWord(t, Decide(iCall(p, Number, rec, live, rAt, fAt, w, nil, raw)), rec, live)
+	}
+	for _, proto := range []struct {
+		what string
+		raw  func(asked time.Time, sent, claimed string) Raw
+	}{{"a Mongo command", mongo}, {"a Postgres query", pg}} {
+		recorded := proto.raw(later, sec(later), "")
+		for _, tc := range []struct {
+			what string
+			view Raw
+			pick bool
+		}{
+			{"the worker sends round F's second", proto.raw(later, live, ""), false},
+			{"the worker sends another second", proto.raw(later, other, ""), false},
+			{"round F's answer to the worker gives round F's second back", proto.raw(later, other, live), true},
+		} {
+			what := proto.what + ": " + tc.what
+			d := decide(recorded.ServedAs(1).ServedLive(tc.view))
+			if tc.pick {
+				oRefused(t, what, d, RefusalPick, "mock-0")
+			} else {
+				iClock(t, what, d)
+			}
+		}
+		// Answered before the call (300 ms before it, in the call's second),
+		// or at the call's own instant: the recorded worker sent an earlier
+		// second, round F's sent F's.
+		for _, asked := range []struct {
+			what string
+			at   time.Time
+		}{{"answered before the call", rAt.Add(-300 * time.Millisecond)}, {"answered at the call's own instant", rAt.Add(-time.Millisecond)}} {
+			raw := proto.raw(asked.at, sec(rAt.Add(-5*time.Second)), "").ServedAs(1).ServedLive(proto.raw(asked.at, live, ""))
+			iClock(t, proto.what+": the worker, "+asked.what+", sends round F's second", decide(raw))
+		}
+		ans := oAnswer("mock-1624", time.Second, rec).ServedAs(1).ServedLive(oAnswer("mock-1624", time.Second, live))
+		iValue(t, proto.what+": the worker sends round F's second beside an answer that holds both runs' seconds",
+			decide(ans, recorded.ServedAs(2).ServedLive(proto.raw(later, live, ""))), "mock-1624")
 	}
 }
