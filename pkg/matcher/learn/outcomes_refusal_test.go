@@ -361,7 +361,9 @@ func TestOutcomeDecideNamesTheNoiseKeployYmlReads(t *testing.T) {
 		{"a SQL bind", bind, "Undo: re-record.", Edit{Kind: EditReRecord}},
 	} {
 		d := oWord(t, Decide(c.in), "8c41f2", "e09b7d")
-		if d.Outcome != OutcomeFresh || !strings.Contains(d.Line, c.undo) || strings.Contains(d.Line, "in mock-300") {
+		// A noise edit is one undo; a re-record, the other, ends the line.
+		if d.Outcome != OutcomeFresh || !strings.Contains(d.Line, c.undo) || strings.Contains(d.Line, "in mock-300") ||
+			!strings.HasSuffix(d.Line, "re-record.") || strings.Count(d.Line, "re-record") != 1 {
 			t.Errorf("%s: %s %q; want fresh, its undo %q", c.what, oDescribe([]Decision{d}), d.Line, c.undo)
 		}
 		c.in.Mode, c.in.Landed = ModeElsewhere, Landed{Where: LandedOther, Test: "test-5"}
@@ -373,17 +375,27 @@ func TestOutcomeDecideNamesTheNoiseKeployYmlReads(t *testing.T) {
 }
 
 // A refusal at a field no keploy.yml noise names offers its re-record once.
+// One at a field keploy.yml's noise names otherwise than its path (a
+// Mongo $date's number, an array's element) names it as keploy.yml does.
 func TestOutcomeARefusalNoNoiseNamesOffersOneReRecord(t *testing.T) {
 	const rec, live = "k1b2e4d70", "k5d0e8a33"
 	held := clockedDrifts().RawOf(receiveOf("mock-0", live, r1Insert.Add(30*time.Second)), true).ServedAs(3).ServedAsRecorded()
 	for _, c := range []struct {
-		field string
-		edits []Edit
+		field, noise string
+		edits        []Edit
 	}{
-		{"bind.1", []Edit{{Kind: EditReRecord}}},
-		{"body.msg_id", []Edit{{Kind: EditReRecord}, {Kind: EditNoiseAtWord, Mock: "mock-300", Field: "body.msg_id", Word: 0}}},
+		{"bind.1", "", []Edit{{Kind: EditReRecord}}},
+		{"body.msg_id", "", []Edit{{Kind: EditReRecord}, {Kind: EditNoiseAtWord, Mock: "mock-300", Field: "body.msg_id", Word: 0}}},
+		{"body.at.$date.$numberLong", "body.at", []Edit{{Kind: EditReRecord}, {Kind: EditNoiseAtWord, Mock: "mock-300", Field: "body.at", Word: 0}}},
+		{"body.items[0].msg_id", "body.items[].msg_id", []Edit{{Kind: EditReRecord}, {Kind: EditNoiseAtWord, Mock: "mock-300", Field: "body.items[].msg_id", Word: 0}}},
 	} {
 		in := oInput(c.field, rec, live, nil, nil)
+		for _, sh := range []*Shape{&in.Rec, &in.Live} {
+			if l, ok := sh.Leaves[c.field]; ok && c.noise != "" {
+				l.Noise = c.noise
+				sh.Leaves[c.field] = l
+			}
+		}
 		in.At, in.Arrived = r1Insert, r1Insert
 		in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(held)}, nil }
 		d := oWord(t, Decide(in), rec, live)
