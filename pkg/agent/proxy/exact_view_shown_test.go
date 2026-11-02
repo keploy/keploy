@@ -399,3 +399,65 @@ func TestTheVerifyModeRefusesAStaleShownEntry(t *testing.T) {
 		t.Fatalf("precondition: the stale read gives %v", got)
 	}
 }
+
+// TestTheVerifyModeWalksAKeyOncePerViewAndGeneration: the verify mode's walk
+// of every entry under a key is made once per view and tree generation, and
+// every read is still compared with it, narrowed to what is live then.
+// Counted, not timed: on a tree of 300 mocks under one key, 41 reads of one
+// view walk the 300 once; a removal, which leaves the generation, walks
+// nothing and the next read leaves the removed mock out; a store, which
+// moves it, walks the 300 again once; a new view walks them for itself; and
+// another tree at the same generation is walked for itself too.
+func TestTheVerifyModeWalksAKeyOncePerViewAndGeneration(t *testing.T) {
+	if !exactViewVerify.Load() {
+		t.Fatal("precondition: the rows run with the verify mode on")
+	}
+	db, ms := shownTree(300)
+	v := &exactView{test: "T", worker: nameSet("m005")}
+	walked := func(what string, reads, want int) []string {
+		t.Helper()
+		before := verifyExamined.Load()
+		var got []string
+		for i := 0; i < reads; i++ {
+			got = shownWalk(v, db, "k")
+		}
+		if n := verifyExamined.Load() - before; n != uint64(want) {
+			t.Fatalf("%s: %d reads made the verify mode examine %d entries; want %d", what, reads, n, want)
+		}
+		return got
+	}
+	if got := walked("one generation", 41, 300); len(got) != 31 {
+		t.Fatalf("the reads give %d mocks; want 30 protocol-phase and one worker-scope", len(got))
+	}
+	if !db.delete(ms[9].TestModeInfo) {
+		t.Fatal("precondition: m010 was not removed")
+	}
+	if got := walked("after a removal", 5, 0); len(got) != 30 || slices.Contains(got, "m010") {
+		t.Fatalf("after m010's removal the reads give %v; want the 30 others", got)
+	}
+	shownMock(db, 301, true, "k")
+	if got := walked("after a store", 5, 300); len(got) != 31 || got[len(got)-1] != "m301" {
+		t.Fatalf("after m301's store the reads give %v; want the 30 then m301", got)
+	}
+	v = &exactView{test: "T"}
+	if got := walked("a new view", 3, 300); len(got) != 30 {
+		t.Fatalf("the new view's reads give %d mocks; want the 30 protocol-phase", len(got))
+	}
+	// Another tree at the same generation, read by the same view under the
+	// same key, is walked for itself, and each read is checked with its own.
+	other, _ := shownTree(300)
+	shownMock(other, 301, false, "k")
+	if other.gen != db.gen {
+		t.Fatalf("precondition: the trees are at generations %d and %d; want one", other.gen, db.gen)
+	}
+	before := verifyExamined.Load()
+	for i := 0; i < 3; i++ {
+		if got := shownWalk(v, other, "k"); len(got) != 30 {
+			t.Fatalf("the other tree's read gives %d mocks; want its 30 protocol-phase", len(got))
+		}
+		shownWalk(v, db, "k")
+	}
+	if n := verifyExamined.Load() - before; n != 301 {
+		t.Fatalf("reads of a second tree made the verify mode examine %d entries; want its 301 once", n)
+	}
+}
