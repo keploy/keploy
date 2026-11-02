@@ -92,7 +92,9 @@ func TestLazyBodyServesReportsAndLearnsWhatTheEagerBodyDoes(t *testing.T) {
 // setting and summed over its subtests, that some command learned noise
 // exactly when detection is on alone, and that strict rejected candidates on
 // some command exactly when strict is on, so a row cannot pass by never
-// reading the body.
+// reading the body. A setting is judged only when every one of its subtests
+// ran to its end: one that -run did not select, or -failfast did not start,
+// added nothing to its tally.
 func replayCorporaPerEngine(t *testing.T, seeds int64, sizes []int, sides [2]string, match func(s *diffSide, ctx context.Context, req mysql.Request, eng *mocknoise.Engine, ref bool) string) {
 	t.Helper()
 	type part struct {
@@ -104,12 +106,15 @@ func replayCorporaPerEngine(t *testing.T, seeds int64, sizes []int, sides [2]str
 	for _, n := range sizes {
 		parts = append(parts, part{fmt.Sprintf("n=%d", n), 0, []int{n}})
 	}
-	tallies := make([]struct{ learned, rejected atomic.Int64 }, len(noiseEngines))
+	tallies := make([]struct{ learned, rejected, ran atomic.Int64 }, len(noiseEngines))
 	t.Cleanup(func() {
 		if t.Failed() {
 			return
 		}
 		for i, ne := range noiseEngines {
+			if tallies[i].ran.Load() != int64(len(parts)) {
+				continue
+			}
 			learned, rejected := tallies[i].learned.Load(), tallies[i].rejected.Load()
 			// Under strict, the drift detection learns from is a miss instead.
 			detects, stricts := ne.name == "detect", strings.Contains(ne.name, "strict")
@@ -125,6 +130,7 @@ func replayCorporaPerEngine(t *testing.T, seeds int64, sizes []int, sides [2]str
 				learned, rejected := replayCorpora(t, ne.name, ne.eng, p.seeds, p.sizes, sides, match)
 				tallies[i].learned.Add(int64(learned))
 				tallies[i].rejected.Add(int64(rejected))
+				tallies[i].ran.Add(1)
 			})
 		}
 	}
