@@ -672,7 +672,10 @@ func (a *Agent) settledSince(ctx context.Context, answers bool, what string) err
 	// What the window owned at its cut is what the next begin waits for
 	// (settleBegin).
 	var owned coreAgent.InFlightScope
-	drops, err := a.settleKeeping(ctx, answers, func(sc coreAgent.InFlightScope) { owned = sc })
+	// A bytes wait the end cuts short leaves what it could not see reached
+	// as this test's (coreAgent.WithEndOf): a loss of it counted later is
+	// charged here, or to the run, never to the test open then.
+	drops, err := a.settleKeeping(coreAgent.WithEndOf(ctx, what), answers, func(sc coreAgent.InFlightScope) { owned = sc })
 	a.provenMu.Lock()
 	a.proven.owned = owned
 	a.provenMu.Unlock()

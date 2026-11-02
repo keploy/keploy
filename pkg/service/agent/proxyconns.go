@@ -94,7 +94,39 @@ func (a *Agent) WaitProxySettled(ctx context.Context, counts models.ProxyConnCou
 // waitProxySettled is WaitProxySettled; accepting, when set, is told the
 // count of accepts the wait then waits for, before it waits for them (the
 // settle's watchdog weighs those accepts only: settle).
+//
+// One that ends before its wait for the bytes on the paired connections began
+// (its context's end, or an error) still marks them as the bytes wait it
+// would have made marks what it could not see reached (cutPairedBytes).
 func (a *Agent) waitProxySettled(ctx context.Context, counts models.ProxyConnCounts, accepting func(n uint64)) error {
+	waited := false
+	err := a.waitProxyPhases(ctx, counts, accepting, &waited)
+	if err != nil && !waited {
+		a.cutPairedBytes(ctx, counts.AppConns)
+	}
+	return err
+}
+
+// cutPairedBytes marks, for the end of the test ctx names (coreAgent.EndOf)
+// cut short before its bytes wait began, what the application had written to
+// each paired connection numbered 1..n that the proxy's side has not received:
+// the bytes wait, given no time, marks what it could not see reached as that
+// test's, so a loss of them counted later is charged to it, not to the test
+// open then. A wait of no test's marks nothing, and nor does a proxy that
+// cannot wait for the bytes.
+func (a *Agent) cutPairedBytes(ctx context.Context, n uint64) {
+	pb, ok := a.Proxy.(coreAgent.PairedBytesWaiter)
+	if !ok || a.Proxy == nil || coreAgent.EndOf(ctx) == "" {
+		return
+	}
+	cut, cancel := context.WithCancel(ctx)
+	cancel()
+	_ = pb.WaitPairedBytes(cut, n)
+}
+
+// waitProxyPhases is waitProxySettled's phases; waited is set once its wait
+// for the bytes on the paired connections begins.
+func (a *Agent) waitProxyPhases(ctx context.Context, counts models.ProxyConnCounts, accepting func(n uint64), waited *bool) error {
 	h, _, err := a.proxyConnSides()
 	if err != nil {
 		return err
@@ -123,6 +155,7 @@ func (a *Agent) waitProxySettled(ctx context.Context, counts models.ProxyConnCou
 	if !ok {
 		return fmt.Errorf("%w: this agent's proxy cannot wait for the bytes on its connections", models.ErrProxyConnsUnsupported)
 	}
+	*waited = true
 	return pb.WaitPairedBytes(ctx, counts.AppConns)
 }
 

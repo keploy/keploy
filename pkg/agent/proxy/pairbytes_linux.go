@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils/stall"
 )
@@ -50,6 +52,8 @@ type pairTarget struct {
 	// ESTABLISHED for a close that has not reached the kernel); 0 when it
 	// does not.
 	orphan uint8
+	// done: the wait needs no more of it (pairReached).
+	done bool
 }
 
 // orphanFINBudget is how long, in time the agent could run, a bytes wait
@@ -145,10 +149,26 @@ func (p *Proxy) pairTargets(n uint64) ([]*pairTarget, error) {
 // more, was resolved, or saw its orphan change state. A starved agent accrues
 // that budget only as fast as it gets to run (stall.Meter). The looks only
 // say when to look: what ends the wait is what the orphan shows.
-func (p *Proxy) waitPairTargets(ctx context.Context, pending []*pairTarget) error {
+//
+// A wait that ends first (ctx's end, or an answer of unknown) leaves each
+// connection it had not seen reached marked with the test whose end it is
+// (agent.EndOf) and what it waited for (pairedConn.cutShort): bytes written
+// before it that are lost later are that test's, not the one open then.
+func (p *Proxy) waitPairTargets(ctx context.Context, pending []*pairTarget) (err error) {
 	if len(pending) == 0 {
 		return nil
 	}
+	all := append([]*pairTarget(nil), pending...)
+	defer func() {
+		if err == nil {
+			return
+		}
+		for _, t := range all {
+			if !t.done {
+				t.pc.cutShort(agent.EndOf(ctx), t.want)
+			}
+		}
+	}()
 	looks := orphanLooks{clk: p.paired.clk}
 	defer looks.close()
 	for {
@@ -168,6 +188,7 @@ func (p *Proxy) waitPairTargets(ctx context.Context, pending []*pairTarget) erro
 				return err
 			}
 			if reached {
+				t.done = true
 				p.paired.progress.Add(1)
 				moved = true
 				continue
@@ -586,7 +607,13 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 			}
 			return false, nil
 		}
-		p.pairLost(pc, "bytes the application wrote to a connection keploy's proxy holds never reached the proxy: the connection was reset, or closed, first, so what they carried was neither recorded nor mocked")
+		// The bytes lost are those past what the side received, up to
+		// want, but for a FIN it counts.
+		top := want
+		if finCounted {
+			top--
+		}
+		p.pairLost(pc, dataReceived(ps)+1, top, "bytes the application wrote to a connection keploy's proxy holds never reached the proxy: the connection was reset, or closed, first, so what they carried was neither recorded nor mocked")
 		return true, nil
 	}
 	return false, nil
@@ -762,11 +789,19 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 	case pc == nil, ctx.Err() != nil, pc.noSession.Load():
 	case err != nil:
 		p.paired.fail(fmt.Errorf("%w: read what the proxy's socket from %s held unread as the proxy closed it: %v", models.ErrProxyConnsUnsupported, pc.app, err))
-		p.pairLost(pc, "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread: from now on it cannot vouch that every call of a test is in its hands", zap.Error(err))
+		p.pairLost(pc, 1, lostTop(pc), "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread: from now on it cannot vouch that every call of a test is in its hands", zap.Error(err))
 	case unread == 0 && (!tlsLayer || !onItsWayAtClose(pc)):
 	case !tlsLayer:
-		p.pairLost(pc, unreadLost)
+		// The bytes tossed are the last unread of what its side had
+		// received.
+		low := uint64(1)
+		if at := pc.atClose.Load(); at != nil && at.err == nil {
+			low = dataReceived(*at) - min(uint64(unread), dataReceived(*at)) + 1
+		}
+		p.pairLost(pc, low, lostTop(pc), unreadLost)
 	default:
+		// The layer may hold bytes it took from the socket that its reader
+		// never read: the bytes lost may begin anywhere (1).
 		data, err := tlsUnreadData(ctx, pc.conn, tc.tlsLayer.Load())
 		// Its side as the read left it: the application's FIN, if the read
 		// waited for it, is in, which the wait counts (pairReached).
@@ -775,9 +810,9 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 		switch {
 		case ctx.Err() != nil:
 		case err != nil:
-			p.pairLost(pc, "keploy's proxy closed a connection with bytes still unread that its TLS layer could not read: whether calls of the application's were among them cannot be told", zap.Error(err))
+			p.pairLost(pc, 1, lostTop(pc), "keploy's proxy closed a connection with bytes still unread that its TLS layer could not read: whether calls of the application's were among them cannot be told", zap.Error(err))
 		case data:
-			p.pairLost(pc, unreadLost)
+			p.pairLost(pc, 1, lostTop(pc), unreadLost)
 		}
 	}
 }
@@ -945,20 +980,59 @@ func readUnread(conn *net.TCPConn) (int, error) {
 	return n, ierr
 }
 
+// dataReceived is what ps, a proxy's side, received of the application's data:
+// its count, but for the application's FIN once it took it.
+func dataReceived(ps proxySide) uint64 {
+	if ps.received > 0 && (ps.state == tcpCloseWait || ps.state == tcpLastAck || ps.state == tcpClosing || ps.state == tcpTimeWait) {
+		return ps.received - 1
+	}
+	return ps.received
+}
+
+// lostTop is the last byte the application wrote to pc before the proxy's
+// close of it, for a loss at that close: what its side had received when it
+// had taken the application's FIN or reset by then (nothing is written after
+// either), what the application had written as the close began
+// (noteWroteAtClose: bytes written after it are no capture loss), and any
+// byte when neither is known.
+func lostTop(pc *pairedConn) uint64 {
+	if at := pc.atClose.Load(); at != nil && at.err == nil && peerEnded(at.state) {
+		return dataReceived(*at)
+	}
+	if w := pc.wroteAtClose.Load(); w != nil {
+		return w.want
+	}
+	return math.MaxUint64
+}
+
 // unreadLost is pairLost's message for a close that tossed bytes unread.
 const unreadLost = "keploy's proxy closed a connection with bytes the application wrote still unread: what they carried was neither recorded nor mocked"
 
 // pairLost charges, once per connection, bytes the application wrote to pc
 // that the proxy never captured, or that it cannot tell it did, saying which
-// (msg).
-func (p *Proxy) pairLost(pc *pairedConn, msg string, fields ...zap.Field) {
+// (msg): the bytes low..top, counted from 1 as the application wrote them. A
+// test whose end was cut short with some of them unsettled owns its share
+// (pairedConn.lostBy, TakeOwnedLosses): the loss is that test's, and the test
+// open now is charged only when some were written after the last such end.
+// With no end cut short on pc, they are the open test's.
+func (p *Proxy) pairLost(pc *pairedConn, low, top uint64, msg string, fields ...zap.Field) {
 	if pc.noSession.Load() || !pc.lost.CompareAndSwap(false, true) {
 		return
 	}
-	p.losses.Add(models.CaptureLossAppBytesLost, "from "+pc.app.String())
+	owners, open := pc.lostBy(low, top)
+	for _, test := range owners {
+		p.paired.own(test, pc.app)
+	}
+	next := "keploy cannot vouch for the calls of the test that was open (under the proven switch, that test is not verified); check the agent's log for why the connection ended"
+	if open {
+		p.losses.Add(models.CaptureLossAppBytesLost, "from "+pc.app.String())
+	} else {
+		next = "the bytes were written in " + strings.Join(owners, ", ") + ", whose end could not wait for them (that test is not verified), not in the test open now; check the agent's log for why that end was cut short"
+	}
 	p.logger.Warn(msg, append([]zap.Field{
 		zap.String("from", pc.app.String()),
-		zap.String("next_step", "keploy cannot vouch for the calls of the test that was open (under the proven switch, that test is not verified); check the agent's log for why the connection ended"),
+		zap.Strings("owned_by", owners),
+		zap.String("next_step", next),
 	}, fields...)...)
 }
 

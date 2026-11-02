@@ -173,14 +173,22 @@ func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosse
 	// What the listener dropped after the last test is counted first
 	// (closeDropsGap), as every loss after it is.
 	a.closeDropsGap(ctx)
+	// Read first: a loss the proxy counted before the counts are read
+	// is in this answer whichever way it was counted.
+	taken := a.takeOwnedLosses()
 	a.provenMu.Lock()
-	mark, charged, outside := a.proven.losses, a.proven.lossesCharged, a.proven.unreadOutside
+	for _, o := range taken {
+		a.proven.ownedRun = a.proven.ownedRun.Plus(models.CaptureLosses{o.Loss})
+	}
+	mark, charged, outside, owned := a.proven.losses, a.proven.lossesCharged, a.proven.unreadOutside, a.proven.ownedRun
 	a.provenMu.Unlock()
 	_, now, err := a.captureLossesSince(ctx, mark, nil)
 	if err != nil {
 		return nil, err
 	}
-	uncharged := sinceRun(now, mark).Since(charged)
+	// What cut-short ends owned that was counted after their charge: in
+	// no count, so in no test's charge, and the run's.
+	uncharged := sinceRun(now, mark).Since(charged).Plus(owned)
 	if !a.replaying() {
 		// A record charges a container read the daemon did not answer by
 		// the mocks its stamps marked (unreadMock): the run's are those of
@@ -188,6 +196,17 @@ func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosse
 		uncharged = uncharged.Without(models.CaptureLossContainerUnread).Plus(outside)
 	}
 	return uncharged, nil
+}
+
+// takeOwnedLosses takes, once each, the losses the proxy counted that a test
+// whose end was cut short owned (coreAgent.OwnedLossTaker): none for a proxy
+// that does not tell them apart, whose counts hold every loss.
+func (a *Agent) takeOwnedLosses() []coreAgent.OwnedLoss {
+	t, ok := a.Proxy.(coreAgent.OwnedLossTaker)
+	if !ok || a.Proxy == nil {
+		return nil
+	}
+	return t.TakeOwnedLosses()
 }
 
 // sinceRun is what was lost since the run began, read as now: what keploy

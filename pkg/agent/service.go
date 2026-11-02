@@ -76,6 +76,37 @@ type CaptureLossReporter interface {
 	CaptureLosses() models.CaptureLosses
 }
 
+// OwnedLoss is a capture loss counted after the end of the test that owned
+// it (Test): bytes that test wrote to a connection, which its end could not
+// wait for, and which were lost later, under another test. It is no capture
+// loss of that other test's, and is in no count CaptureLosses reports.
+type OwnedLoss struct {
+	Test string
+	Loss models.CaptureLoss
+}
+
+// OwnedLossTaker is the optional extension implemented by a proxy that tells
+// the losses a cut-short end owned apart from the test open when they are
+// counted (OwnedLoss). TakeOwnedLosses returns each once, oldest first.
+type OwnedLossTaker interface {
+	TakeOwnedLosses() []OwnedLoss
+}
+
+type endOfKey struct{}
+
+// WithEndOf is ctx carrying the test whose end waits under it: a wait of the
+// proxy's that ends short of what it waited for leaves what it could not see
+// reached marked as that test's (OwnedLoss).
+func WithEndOf(ctx context.Context, test string) context.Context {
+	return context.WithValue(ctx, endOfKey{}, test)
+}
+
+// EndOf is the test WithEndOf put in ctx: "" for none.
+func EndOf(ctx context.Context) string {
+	s, _ := ctx.Value(endOfKey{}).(string)
+	return s
+}
+
 // CaptureLossDrainer is the optional extension implemented by hooks whose
 // counts of capture losses are fed by reports the kernel makes: before a read
 // of them, DrainCaptureLosses waits until every report made before it has
