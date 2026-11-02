@@ -133,6 +133,34 @@ func TestSampler_WhatWaitingOwesIsBounded(t *testing.T) {
 	}
 }
 
+// And in time, not only in reads: the threads are read about once a second,
+// and what a wait owes stays within about a second of on-time time, so a
+// process whose threads wait without end still has its stall judged within
+// about a second of what it could run.
+func TestSampler_WhatWaitingOwesIsAtMostASecond(t *testing.T) {
+	s, src := newFakeSampler(0)
+	reads, lastRead := 0, src.wall
+	for i := range 3000 { // 30 s on time
+		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/4
+		src.held = time.Hour // every read finds an endless wait
+		before := src.heldN
+		s.sample()
+		if src.heldN != before {
+			reads++
+			if gap := src.wall.Sub(lastRead); gap > time.Second+2*Tick {
+				t.Fatalf("a read of the threads came %v after the last, want about 1 s", gap)
+			}
+			lastRead = src.wall
+		}
+		if s.waitOwed > time.Second+2*Tick {
+			t.Fatalf("owes %v at sample %d, want at most about 1 s", s.waitOwed, i)
+		}
+	}
+	if reads < 29 {
+		t.Fatalf("%d reads in 30 s, want about one a second", reads)
+	}
+}
+
 // Verdicts read the threads at most once a sample: the clock does not move in
 // between, and every stalled connection of a starved process looks.
 func TestSampler_VerdictsReadTheThreadsOncePerSample(t *testing.T) {
@@ -577,5 +605,10 @@ func TestSampler_ARestartOwesNoWaitFromBeforeIt(t *testing.T) {
 	}
 	if got, want := time.Duration(s.ran.Load()), 10*Tick; got != want {
 		t.Fatalf("10 ticks after a restart counted %v, want all of them: %v", got, want)
+	}
+	// Nor at the verdict, which reads the threads again: the restart's own
+	// read took the gap's waits.
+	if owed, _, _ := s.owed(); owed != 0 {
+		t.Fatalf("a verdict 10 ticks after a restart owes %v, for waits before it", owed)
 	}
 }

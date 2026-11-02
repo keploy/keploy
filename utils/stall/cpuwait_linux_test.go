@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -85,9 +86,40 @@ func TestThreadWaits_CountStealAndSeeAWaitInProgress(t *testing.T) {
 	}
 }
 
+// The host gives a virtual CPU back, so its steal shows at its first tick,
+// while the thread on it is still queued behind others: at that read the
+// thread is runnable and has not moved. The steal held it off, and is charged
+// then: at the next read the thread has run, and the steal shows no more.
+func TestThreadWaits_StealThatShowsWhileTheThreadIsStillQueuedIsCharged(t *testing.T) {
+	var w threadWaits
+	tick := time.Second / userHZ
+	w.account(map[string]threadStat{
+		"1": {exec: 100, delay: 10, runs: 1, runnable: true, cpu: "cpu0"},
+	}, map[string]int64{"cpu0": 5})
+	most, _ := w.account(map[string]threadStat{ // back, still queued
+		"1": {exec: 100, delay: 10, runs: 1, runnable: true, cpu: "cpu0"},
+	}, map[string]int64{"cpu0": 30})
+	total := most
+	most, _ = w.account(map[string]threadStat{ // it ran, after 5 ms queued
+		"1": {exec: 200, delay: 10 + int64(5*time.Millisecond), runs: 2, cpu: "cpu0"},
+	}, map[string]int64{"cpu0": 30})
+	total += most
+	if want := 25*tick + 5*time.Millisecond; total != want {
+		t.Fatalf("charged %v over the two reads, want the 25 ticks of steal and the 5 ms queued: %v", total, want)
+	}
+}
+
 // The reader sees the wait the kernel keeps: two threads bound to one CPU
-// take turns, so each waits about as long as the other runs.
+// take turns, so each waits about as long as the other runs. The two must be
+// on the kernel's run queue together, so each has a P of its own (with one
+// P, the Go scheduler takes them in turns, and the one not running sleeps),
+// and the row reads the two threads' own accounts, not the most any thread
+// of the test binary waited.
 func TestThreadWaits_SeeAThreadKeptOffItsCPU(t *testing.T) {
+	if was := runtime.GOMAXPROCS(0); was < 2 {
+		runtime.GOMAXPROCS(2)
+		t.Cleanup(func() { runtime.GOMAXPROCS(was) })
+	}
 	var was unix.CPUSet
 	if err := unix.SchedGetaffinity(0, &was); err != nil {
 		t.Fatal(err)
@@ -96,11 +128,10 @@ func TestThreadWaits_SeeAThreadKeptOffItsCPU(t *testing.T) {
 	for !was.IsSet(cpu) {
 		cpu++
 	}
-	var w threadWaits
-	_, _ = w.longest()
 
 	const each = 100 * time.Millisecond
-	done, leave := make(chan struct{}), make(chan struct{})
+	tids := make(chan int, 2)
+	start, done, leave := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	defer close(leave)
 	for range 2 {
 		go func() {
@@ -113,10 +144,13 @@ func TestThreadWaits_SeeAThreadKeptOffItsCPU(t *testing.T) {
 			}()
 			var one unix.CPUSet
 			one.Set(cpu)
-			if err := unix.SchedSetaffinity(0, &one); err != nil {
+			err := unix.SchedSetaffinity(0, &one)
+			tids <- unix.Gettid()
+			if err != nil {
 				t.Error(err)
 				return
 			}
+			<-start // both are bound before either runs
 			var ts0, ts unix.Timespec
 			_ = unix.ClockGettime(unix.CLOCK_THREAD_CPUTIME_ID, &ts0)
 			for time.Duration(ts.Nano()-ts0.Nano()) < each {
@@ -124,17 +158,32 @@ func TestThreadWaits_SeeAThreadKeptOffItsCPU(t *testing.T) {
 			}
 		}()
 	}
+	pinned := []string{strconv.Itoa(<-tids), strconv.Itoa(<-tids)}
+	var w threadWaits
+	_, _ = w.longest()
+	before := w.last
+	close(start)
 	<-done
 	<-done
-	got, _ := w.longest()
-	if got < each/10 {
-		b, err := os.ReadFile("/proc/self/schedstat")
-		if err == nil {
-			if _, d, _, ok := parseSchedstat(b); ok && d == 0 {
-				t.Skip("this kernel keeps no run delay")
-			}
+	if t.Failed() {
+		return
+	}
+	_, _ = w.longest()
+	for _, tid := range pinned {
+		was, ok1 := before[tid]
+		now, ok2 := w.last[tid]
+		if !ok1 || !ok2 {
+			t.Fatalf("the reader did not see thread %s at both reads", tid)
 		}
-		t.Fatalf("the threads waited for a CPU at most %v by the reader, want about %v", got, each)
+		if got := time.Duration(now.delay - was.delay); got < each/10 {
+			b, err := os.ReadFile("/proc/self/schedstat")
+			if err == nil {
+				if _, d, _, ok := parseSchedstat(b); ok && d == 0 {
+					t.Skip("this kernel keeps no run delay")
+				}
+			}
+			t.Fatalf("thread %s, bound to cpu%d beside the other, waited for it %v by the reader, want about %v", tid, cpu, got, each)
+		}
 	}
 }
 
