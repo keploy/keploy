@@ -5,6 +5,7 @@ package testnet
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"os"
@@ -33,9 +34,9 @@ func RefusedAddr(t *testing.T, network string) string {
 	if network == "tcp" {
 		host = "::"
 	}
-	port, err := bindHold(t, network, host, 0, false)
+	port, err := bindHold(t, network, host, 0, 0, 0)
 	if network == "tcp" && addrAbsent(err) {
-		port, err = bindHold(t, network, "0.0.0.0", 0, false)
+		port, err = bindHold(t, network, "0.0.0.0", 0, 0, 0)
 	}
 	require.NoError(t, err)
 	return net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
@@ -62,7 +63,7 @@ func ListenIPv6Only(t *testing.T) net.Listener {
 func listenIPv6Only(t *testing.T, between func(port int)) net.Listener {
 	t.Helper()
 	for range 10 {
-		port, err := bindHold(t, "tcp", "0.0.0.0", 0, false)
+		port, err := bindHold(t, "tcp", "0.0.0.0", 0, 0, 0)
 		require.NoError(t, err)
 		if between != nil {
 			between(port)
@@ -97,9 +98,9 @@ func listenIPv6Only(t *testing.T, between func(port int)) net.Listener {
 // can, as keploy's DNS server does at the port it is given.
 func SharedPort(t *testing.T) int {
 	t.Helper()
-	port, err := bindHold(t, "tcp", "::", 0, true)
+	port, err := bindHold(t, "tcp", "::", 0, unix.SO_REUSEPORT, 0)
 	if addrAbsent(err) {
-		port, err = bindHold(t, "tcp", "0.0.0.0", 0, true)
+		port, err = bindHold(t, "tcp", "0.0.0.0", 0, unix.SO_REUSEPORT, 0)
 	}
 	require.NoError(t, err)
 	return port
@@ -119,8 +120,122 @@ func ListenShared(t *testing.T, network, addr string) net.Listener {
 // test, for a goroutine the test starts or a test that skips on it; the
 // caller closes the listener.
 func OpenShared(network, addr string) (net.Listener, error) {
-	lc := net.ListenConfig{Control: setReusePort}
+	lc := SharedListenConfig()
 	return lc.Listen(context.Background(), network, addr)
+}
+
+// SharedListenConfig is the net.ListenConfig OpenShared listens with, for a
+// test that sets more on it (SetMultipathTCP, KeepAlive) before it listens
+// at a port SharedPort holds: its Control sets SO_REUSEPORT, so the listener
+// binds beside the hold.
+func SharedListenConfig() net.ListenConfig {
+	return net.ListenConfig{Control: setReusePort}
+}
+
+// ReservedPort holds a free TCP port for the test's life, for code under
+// test that listens at it by number with net.Listen, or dials from it, and
+// returns it. The hold is one dual-stack socket at [::] (at 0.0.0.0 where
+// there is no IPv6) that sets SO_REUSEADDR and only binds. A socket that
+// sets SO_REUSEADDR too, as each of Go's listeners does, binds beside it at
+// any address of either family and listens there, since no socket listens
+// at the port before it; once that listener closes, a dial to the port is
+// refused again. A bind to port 0 is never given the port, nor is a
+// connect's source port, unless net.ipv4.ip_autobind_reuse is on and every
+// other port of the range is taken. A socket that names the port and sets
+// neither option is refused it; one that sets SO_REUSEADDR is not, so a
+// test that hands the port to its code keeps the number to itself.
+func ReservedPort(t *testing.T) int {
+	t.Helper()
+	port, err := bindHold(t, "tcp", "::", 0, unix.SO_REUSEADDR, 0)
+	if addrAbsent(err) {
+		port, err = bindHold(t, "tcp", "0.0.0.0", 0, unix.SO_REUSEADDR, 0)
+	}
+	require.NoError(t, err)
+	return port
+}
+
+// ReservedControl is a net.Dialer Control that sets SO_REUSEADDR, so a dial
+// whose LocalAddr is a port ReservedPort holds binds beside the hold.
+func ReservedControl(_, _ string, c syscall.RawConn) error {
+	var serr error
+	if err := c.Control(func(fd uintptr) {
+		serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
+	}); err != nil {
+		return err
+	}
+	return serr
+}
+
+// UnlistedPort returns a port P that this network namespace's socket tables
+// (/proc/net/tcp, tcp6, udp and udp6, and sock_diag's dumps of listening and
+// connected sockets) list no socket at, and that no other socket is given for
+// the test's life: P lies below net.ipv4.ip_local_port_range, the range a bind
+// to port 0, a connect and a UDP send from an unbound socket are given a port
+// from (IPv6 shares it), and at or above 1024. P is held at TCP, at every
+// address, by a socket that only binds, which those tables leave out. The hold
+// binds P with no option, so a search in another test binary, whose bind sets
+// none either, passes P over; then it sets SO_REUSEADDR, so a listener that
+// sets it too, as Go's listeners do, binds beside the hold and listens at P:
+// the test's own, to have a socket of its own at P, or its code's, when the
+// test hands P to code that binds it. Once that listener closes, P is held as
+// before. No socket is at P on UDP when it returns; one that names P can bind
+// it there, as the code a test hands P to does. It is for a test that reads
+// those tables, or whose code binds P at TCP and UDP: a port it freed by
+// closing a socket could be given to another socket at once.
+func UnlistedPort(t *testing.T) int {
+	t.Helper()
+	b, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
+	require.NoError(t, err)
+	f := strings.Fields(string(b))
+	require.Len(t, f, 2, "ip_local_port_range is %q", b)
+	first, err := strconv.Atoi(f[0])
+	require.NoError(t, err)
+	port, err := unlistedPort(t, 1024, first)
+	require.NoError(t, err)
+	return port
+}
+
+// unlistedPort is UnlistedPort over the ports [from, below), highest first:
+// it returns the first one it can hold at TCP and finds free at UDP. A port
+// it held and then found taken at UDP stays held until the test ends.
+func unlistedPort(t *testing.T, from, below int) (int, error) {
+	t.Helper()
+	for port := below - 1; port >= from; port-- {
+		_, err := bindHold(t, "tcp", "::", port, 0, unix.SO_REUSEADDR)
+		if addrAbsent(err) {
+			_, err = bindHold(t, "tcp", "0.0.0.0", port, 0, unix.SO_REUSEADDR)
+		}
+		if errors.Is(err, syscall.EADDRINUSE) {
+			continue // another socket is at the port at TCP
+		}
+		if err != nil {
+			return 0, err
+		}
+		free, err := udpFree(port)
+		if err != nil {
+			return 0, err
+		}
+		if free {
+			return port, nil
+		}
+	}
+	return 0, fmt.Errorf("no port from %d to below %d is free at both TCP and UDP", from, below)
+}
+
+// udpFree reports whether no UDP socket is at port, at any address: a
+// socket of its own binds it at every address and closes.
+func udpFree(port int) (bool, error) {
+	pc, err := net.ListenPacket("udp", net.JoinHostPort("::", strconv.Itoa(port)))
+	if addrAbsent(err) {
+		pc, err = net.ListenPacket("udp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(port)))
+	}
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, pc.Close()
 }
 
 // setReusePort is a net.ListenConfig Control that sets SO_REUSEPORT on the
@@ -138,15 +253,20 @@ func setReusePort(_, _ string, c syscall.RawConn) error {
 // bindHold binds a socket that never listens at host:port for the test's
 // life and returns its port; on an error nothing is held. The socket is made
 // with syscall.Socket, so without the SO_REUSEADDR that net.Listen sets, and
-// no other socket can bind the port at an address it overlaps. shared sets
+// no other socket can bind the port at an address it overlaps. opt, when it
+// is not 0, is a SOL_SOCKET option the socket sets to 1 before it binds:
 // SO_REUSEPORT, so a socket of this user that sets it too, as OpenShared's
-// listeners do, can bind beside it. An IPv6 socket is dual-stack: it holds
+// listeners do, can bind beside it; SO_REUSEADDR, so a socket that sets it
+// too, as Go's listeners do, can bind beside it and listen. then, when it is
+// not 0, is one it sets to 1 once it is bound: the bind itself conflicts
+// with every socket at the port then, and a socket that binds later and
+// sets the option too binds beside it. An IPv6 socket is dual-stack: it holds
 // the port at IPv4 addresses too. A UDP socket is connected to itself:
 // bound alone it would take every datagram sent to its port, while
 // connected it takes only its own, and the kernel answers any other
 // sender's as it answers one to a port nothing holds, port unreachable,
 // which a connected sender reads as refused.
-func bindHold(t *testing.T, network, host string, port int, shared bool) (int, error) {
+func bindHold(t *testing.T, network, host string, port, opt, then int) (int, error) {
 	t.Helper()
 	sotype := syscall.SOCK_STREAM
 	switch network {
@@ -177,13 +297,18 @@ func bindHold(t *testing.T, network, host string, port int, shared bool) (int, e
 			return fail(err)
 		}
 	}
-	if shared {
-		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
+	if opt != 0 {
+		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, opt, 1); err != nil {
 			return fail(err)
 		}
 	}
 	if err := syscall.Bind(fd, sa); err != nil {
 		return fail(err)
+	}
+	if then != 0 {
+		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, then, 1); err != nil {
+			return fail(err)
+		}
 	}
 	name, err := syscall.Getsockname(fd)
 	if err != nil {

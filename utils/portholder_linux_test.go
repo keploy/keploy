@@ -8,9 +8,12 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+
+	"go.keploy.io/server/v3/internal/testnet"
 )
 
 func ownName(t *testing.T, pid int) string {
@@ -24,25 +27,32 @@ func ownName(t *testing.T, pid int) string {
 
 // PortHolder names the process that holds a port, by the socket's inode in
 // the kernel's TCP and UDP tables (IPv4 and IPv6), and no process for a port
-// none of its sockets is bound to.
+// the tables list no socket at. Each socket of the test is at a port the
+// tables list no other socket at, and that no other socket is given while
+// the test reads them (testnet.UnlistedPort): a port a bind to port 0 gave
+// it could be at a socket of another process in another table, which
+// PortHolder would name too.
 func TestPortHolderNamesTheProcessOnThePort(t *testing.T) {
 	me := ownName(t, os.Getpid())
-	tcp4, err := net.Listen("tcp4", "127.0.0.1:0")
+	at := func(host string) string {
+		return net.JoinHostPort(host, strconv.Itoa(testnet.UnlistedPort(t)))
+	}
+	tcp4, err := net.Listen("tcp4", at("127.0.0.1"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = tcp4.Close() }()
-	tcp6, err := net.Listen("tcp", ":0") // dual-stack: the tcp6 table
+	tcp6, err := net.Listen("tcp", at("")) // dual-stack: the tcp6 table
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = tcp6.Close() }()
-	udp4, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	udp4, err := net.ListenPacket("udp4", at("127.0.0.1"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = udp4.Close() }()
-	udp6, err := net.ListenPacket("udp", ":0") // dual-stack: the udp6 table
+	udp6, err := net.ListenPacket("udp", at("")) // dual-stack: the udp6 table
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,21 +68,20 @@ func TestPortHolderNamesTheProcessOnThePort(t *testing.T) {
 			t.Fatalf("PortTaken(%d) = %q", port, got)
 		}
 	}
-	free, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := free.Addr().(*net.TCPAddr).Port
-	_ = free.Close()
+	// A port the tables list no socket at, and that no other socket is
+	// given while the test reads them: one a listener of this test closed
+	// could be given to another process's socket at once.
+	port := testnet.UnlistedPort(t)
 	if got := PortHolder(uint32(port)); got != "" {
-		t.Fatalf("port %d, which no socket holds: holder %q", port, got)
+		t.Fatalf("port %d, which the tables list no socket at: holder %q", port, got)
 	}
 }
 
 // A socket that many processes hold (inherited): the first three by pid
-// are named, then how many more.
+// are named, then how many more. The socket is at a port no other socket is
+// at or given (testnet.UnlistedPort), so no other process is named.
 func TestPortHolderNamesThreeHoldersThenCounts(t *testing.T) {
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	ln, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.UnlistedPort(t))))
 	if err != nil {
 		t.Fatal(err)
 	}

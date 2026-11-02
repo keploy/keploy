@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/reportdb"
 	"go.uber.org/zap"
@@ -308,12 +309,9 @@ func TestUnderTheSwitchAnAgentReadErrorIsNoProgressAndNamedAtTheStall(t *testing
 func TestUnderTheSwitchAnAgentThatCannotWatchLeavesItToTheFirstTestsAddress(t *testing.T) {
 	wake := manualWake(t)
 	stallLimit(t, 1000)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close() // nothing listens there yet
+	// Nothing listens there yet. The port is held for the test's life
+	// (testnet.SharedPort), so no other socket can take it meanwhile.
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t)))
 	host, port, _ := net.SplitHostPort(addr)
 	a := &fakeAgent{answers: []models.AppReadiness{{}}, errs: []error{fmt.Errorf("%w: 404", models.ErrReadinessUnsupported)}}
 	res := startWait(provenReadiness{logger: zap.NewNop(), cfg: testCfg(), agent: a, host: host, port: port, listen: 1})
@@ -325,11 +323,7 @@ func TestUnderTheSwitchAnAgentThatCannotWatchLeavesItToTheFirstTestsAddress(t *t
 			time.Sleep(10 * time.Millisecond) // a dial refused in wall time
 		}
 	}
-	ln, err = net.Listen("tcp", addr)
-	if err != nil {
-		t.Skipf("the port was taken meanwhile: %v", err)
-	}
-	defer ln.Close()
+	testnet.ListenShared(t, "tcp4", addr)
 	var r waitResult
 	for done := false; !done; {
 		select {

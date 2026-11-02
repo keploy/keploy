@@ -4,15 +4,19 @@ package testnet
 
 import (
 	"context"
+	"errors"
 	"io"
+	"io/fs"
 	"net"
+	"net/netip"
+	"os"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"golang.org/x/sys/unix"
 )
 
 // ipv4Binds are the binds a listener of another test could make at port at
@@ -83,19 +87,6 @@ func requireDialsRefused(t *testing.T, dials []string, when string) {
 	}
 }
 
-// setReuseAddr is a net.ListenConfig Control that sets SO_REUSEADDR on the
-// socket before it binds, as Go's ListenMulticastUDP and many servers do on
-// a UDP socket. Two UDP sockets that both set it may share a port.
-func setReuseAddr(_, _ string, c syscall.RawConn) error {
-	var serr error
-	if err := c.Control(func(fd uintptr) {
-		serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
-	}); err != nil {
-		return err
-	}
-	return serr
-}
-
 // A refused address refuses every dial for as long as the test that took it
 // runs, and no other socket can take its port meanwhile. A TCP listener
 // opened on it, as one of a package tested beside this one can be, by
@@ -124,7 +115,7 @@ func TestARefusedAddressRefusesEveryDialForTheTestsLife(t *testing.T) {
 		}{
 			{"net.ListenPacket", nil},
 			{"a socket that sets SO_REUSEPORT", setReusePort},
-			{"a socket that sets SO_REUSEADDR", setReuseAddr},
+			{"a socket that sets SO_REUSEADDR", ReservedControl},
 		} {
 			lc := net.ListenConfig{Control: b.control}
 			pc, err := lc.ListenPacket(context.Background(), "udp", addr)
@@ -301,4 +292,161 @@ func TestBoundHereCountsOnlyThisProcesssSockets(t *testing.T) {
 	require.NoError(t, closed.Close())
 	n, _ = BoundHere(t, port)
 	require.Zero(t, n, "a listener this test closed")
+}
+
+// listedAt returns the lines of /proc/net/tcp, tcp6, udp and udp6 whose
+// local port is port.
+func listedAt(t *testing.T, port int) []string {
+	t.Helper()
+	var at []string
+	for _, table := range []string{"tcp", "tcp6", "udp", "udp6"} {
+		b, err := os.ReadFile("/proc/net/" + table)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // no IPv6
+		}
+		require.NoError(t, err)
+		for _, line := range strings.Split(string(b), "\n")[1:] {
+			f := strings.Fields(line)
+			if len(f) < 2 {
+				continue
+			}
+			_, hex, _ := strings.Cut(f[1], ":")
+			if p, err := strconv.ParseUint(hex, 16, 16); err == nil && int(p) == port {
+				at = append(at, table+": "+line)
+			}
+		}
+	}
+	return at
+}
+
+// An unlisted port is one the socket tables list nothing at, below the
+// range a bind to port 0 is given a port from, held at TCP at every address
+// for the test's life and free at UDP. A socket that names it and sets no
+// option, as a search for an unlisted port in another test binary does, is
+// refused it at loopback, at every IPv4 address, at [::1] and at [::]. A
+// listener made by net.Listen, as the test's or its code's is, opens beside
+// the hold at each of those addresses in turn and answers a dial; once it
+// closes, a dial is refused again.
+func TestAnUnlistedPortIsInNoTableHeldAtTCPAndBelowTheEphemeralRange(t *testing.T) {
+	p := UnlistedPort(t)
+	port := strconv.Itoa(p)
+	b, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
+	require.NoError(t, err)
+	first, err := strconv.Atoi(strings.Fields(string(b))[0])
+	require.NoError(t, err)
+	require.Less(t, p, first, "below the range a bind to port 0 is given a port from")
+	require.GreaterOrEqual(t, p, 1024)
+	require.Empty(t, listedAt(t, p), "no socket is listed at the port")
+	_, dials := foreignBinds(port)
+	addrs := []string{net.JoinHostPort("127.0.0.1", port), net.JoinHostPort("0.0.0.0", port)}
+	if len(dials) > 1 {
+		addrs = append(addrs, net.JoinHostPort("::1", port), net.JoinHostPort("::", port))
+	}
+	requireDialsRefused(t, dials, "before a listener opens")
+	for _, a := range addrs {
+		require.ErrorIs(t, plainBind(t, a), syscall.EADDRINUSE, "a bind with no option at %s", a)
+	}
+	for _, a := range addrs {
+		ln, err := net.Listen("tcp", a)
+		require.NoError(t, err, "a listener at %s", a)
+		c, err := net.Dial("tcp", ln.Addr().String())
+		require.NoError(t, err, "a dial to the listener at %s", a)
+		_ = c.Close()
+		require.NoError(t, ln.Close())
+		requireDialsRefused(t, dials, "after the listener at "+a+" closed")
+	}
+	pc, err := net.ListenPacket("udp4", net.JoinHostPort("127.0.0.1", port))
+	require.NoError(t, err, "the port is free at UDP")
+	require.NoError(t, pc.Close())
+}
+
+// A port another socket is at, at TCP or at UDP, is not given: the search
+// moves on to the next port down, and fails when none is left.
+func TestAnUnlistedPortIsNoneAnotherSocketIsAt(t *testing.T) {
+	held := UnlistedPort(t)
+	next, err := unlistedPort(t, held-1000, held+1)
+	require.NoError(t, err)
+	require.Less(t, next, held, "the port held at TCP is passed over")
+	_, err = unlistedPort(t, held, held+1)
+	require.ErrorContains(t, err, "free at both TCP and UDP", "no port is left")
+
+	// A port below next, below the range a bind to port 0 is given one
+	// from, taken at UDP here: nothing is at it at TCP.
+	udp := next - 1
+	for ; udp > next-1000; udp-- {
+		pc, err := net.ListenPacket("udp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(udp)))
+		if err == nil {
+			t.Cleanup(func() { _ = pc.Close() })
+			break
+		}
+		require.ErrorIs(t, err, syscall.EADDRINUSE)
+	}
+	_, err = unlistedPort(t, udp, udp+1)
+	require.ErrorContains(t, err, "free at both TCP and UDP", "the port taken at UDP is passed over")
+
+	// The lowest port of the range is given when it is free.
+	for p := udp - 1; ; p-- {
+		require.Greater(t, p, udp-1000, "no port below %d was given alone", udp)
+		if got, err := unlistedPort(t, p, p+1); err == nil {
+			require.Equal(t, p, got)
+			break
+		}
+	}
+}
+
+// plainBind binds a TCP socket that sets no option at addr, as a socket of
+// another test or process that names the port does, and closes it.
+func plainBind(t *testing.T, addr string) error {
+	t.Helper()
+	ap, err := netip.ParseAddrPort(addr)
+	require.NoError(t, err)
+	family, sa := syscall.AF_INET6, syscall.Sockaddr(&syscall.SockaddrInet6{Port: int(ap.Port()), Addr: ap.Addr().As16()})
+	if ap.Addr().Is4() {
+		family, sa = syscall.AF_INET, &syscall.SockaddrInet4{Port: int(ap.Port()), Addr: ap.Addr().As4()}
+	}
+	fd, err := syscall.Socket(family, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+	require.NoError(t, err)
+	defer func() { _ = syscall.Close(fd) }()
+	return syscall.Bind(fd, sa)
+}
+
+// A port ReservedPort holds refuses a dial while nothing listens there, and
+// a socket that names it and sets no option is refused it at loopback, at
+// every IPv4 address, at [::1] and at [::]. The code's listener, made by
+// net.Listen, opens beside the hold at each of those addresses in turn and
+// answers a dial; once it closes, a dial is refused again. A dial from the
+// port binds beside the hold with ReservedControl, and is refused the port
+// without it.
+func TestAReservedPortIsHeldForTheTestsLifeBesideTheCodesListener(t *testing.T) {
+	p := ReservedPort(t)
+	port := strconv.Itoa(p)
+	_, dials := foreignBinds(port)
+	addrs := []string{net.JoinHostPort("127.0.0.1", port), net.JoinHostPort("0.0.0.0", port)}
+	if len(dials) > 1 {
+		addrs = append(addrs, net.JoinHostPort("::1", port), net.JoinHostPort("::", port))
+	}
+	requireDialsRefused(t, dials, "before the code listens")
+	for _, a := range addrs {
+		require.ErrorIs(t, plainBind(t, a), syscall.EADDRINUSE, "a bind with no option at %s", a)
+	}
+	for _, a := range addrs {
+		ln, err := net.Listen("tcp", a)
+		require.NoError(t, err, "the code's listener at %s", a)
+		c, err := net.Dial("tcp", ln.Addr().String())
+		require.NoError(t, err, "a dial to the code's listener at %s", a)
+		_ = c.Close()
+		require.NoError(t, ln.Close())
+		requireDialsRefused(t, dials, "after the code's listener at "+a+" closed")
+	}
+
+	srv, err := net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = srv.Close() }()
+	from := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: p}
+	_, err = (&net.Dialer{LocalAddr: from}).Dial("tcp4", srv.Addr().String())
+	require.ErrorIs(t, err, syscall.EADDRINUSE, "a dial from the port without ReservedControl")
+	c, err := (&net.Dialer{LocalAddr: from, Control: ReservedControl}).Dial("tcp4", srv.Addr().String())
+	require.NoError(t, err, "a dial from the port with ReservedControl")
+	defer func() { _ = c.Close() }()
+	require.Equal(t, p, c.LocalAddr().(*net.TCPAddr).Port)
 }

@@ -28,6 +28,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 )
 
 // ingressHoldAgent loads keploy's main object as the agent does and returns
@@ -56,16 +57,46 @@ func ingressHoldAgent(t *testing.T) *Hooks {
 	return h
 }
 
-// unusedPort is a loopback port nothing listens on now.
-func unusedPort(t *testing.T) uint16 {
+// heldPort is a port nothing listens on for the test's life:
+// testnet.RefusedAddr holds it with a socket that never listens, at every
+// address, so a call to it that the lookup leaves to the kernel is refused
+// and no other socket can take it meanwhile. A socket that does not listen
+// takes no call, and the lookup runs before the kernel's own, so the hold
+// changes nothing the lookup or the park sees.
+func heldPort(t *testing.T) uint16 {
 	t.Helper()
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	_, p, err := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := ln.Addr().(*net.TCPAddr).Port
-	_ = ln.Close()
-	return uint16(p)
+	n, err := strconv.ParseUint(p, 10, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return uint16(n)
+}
+
+// sharedPort is heldPort for a row that listens at the port later:
+// testnet.SharedPort holds it, and listenShared opens a listener beside the
+// hold.
+func sharedPort(t *testing.T) uint16 {
+	t.Helper()
+	return uint16(testnet.SharedPort(t))
+}
+
+// listenShared opens a plain TCP listener (no MPTCP, as the agent's
+// forwarder is) at host:port, a port sharedPort holds, beside the hold. It
+// is closed when the test ends if the test has not closed it.
+func listenShared(t *testing.T, network, host string, port uint16) net.Listener {
+	t.Helper()
+	lc := testnet.SharedListenConfig()
+	lc.SetMultipathTCP(false)
+	ln, err := lc.Listen(context.Background(), network, net.JoinHostPort(host, strconv.Itoa(int(port))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln
 }
 
 func dialPort(port uint16) (net.Conn, error) {
@@ -77,7 +108,7 @@ func dialPort(port uint16) (net.Conn, error) {
 // structs.FlagIngressHold, its note. It returns the moved port.
 func movedAndNoted(t *testing.T, h *Hooks, orig uint16, note bool) uint16 {
 	t.Helper()
-	moved := unusedPort(t)
+	moved := heldPort(t)
 	if err := h.objects.AppPortInfo.Update(orig, appPortTranslate{ProxyPort: orig, ApplicationPort: moved}, ebpf.UpdateAny); err != nil {
 		t.Fatal(err)
 	}
@@ -124,9 +155,9 @@ func refusedPort(t *testing.T, port uint16, what string) {
 // kernel's. The park and the forwarder are plain TCP.
 func TestAMovedPortIsHeldByTheParkUntilItsForwarderListens(t *testing.T) {
 	h := ingressHoldAgent(t)
-	orig := unusedPort(t)
+	orig := sharedPort(t)
 	moved := movedAndNoted(t, h, orig, true)
-	unnoted := unusedPort(t)
+	unnoted := heldPort(t)
 	movedAndNoted(t, h, unnoted, false)
 	if c, err := dialPort(orig); err == nil {
 		_ = c.Close()
@@ -178,13 +209,7 @@ func TestAMovedPortIsHeldByTheParkUntilItsForwarderListens(t *testing.T) {
 		t.Fatalf("the unnoted port's lookup was not counted: %v", h.IngressLookupCounts())
 	}
 
-	var lc net.ListenConfig
-	lc.SetMultipathTCP(false)
-	fwd, err := lc.Listen(context.Background(), "tcp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(int(orig))))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = fwd.Close() }()
+	fwd := listenShared(t, "tcp4", "0.0.0.0", orig)
 	h.RegisterIngressForwarder(orig, fwd)
 	fwdAccepted := make(chan struct{}, 1)
 	go func() {
@@ -322,7 +347,7 @@ func TestAPortWhoseSocketWentIsNotHeld(t *testing.T) {
 	}
 
 	// The note the bind hooks' post_bind writes for the helper's socket.
-	orig := unusedPort(t)
+	orig := heldPort(t)
 	movedAndNoted(t, h, orig, true)
 	key := appBindKey{Port: orig, Kind: appBindV4}
 	if err := h.objects.AppBindSocks.Update(cookie, key, ebpf.UpdateAny); err != nil {
@@ -390,13 +415,9 @@ func dialAccepted(t *testing.T, port uint16, ln net.Listener, what string) {
 // to a moved port no forwarder takes is then refused, as without the hold.
 func TestAYieldedPortIsItsListenersAndAStoppedParkHoldsNothing(t *testing.T) {
 	h := ingressHoldAgent(t)
-	orig := unusedPort(t)
+	orig := sharedPort(t)
 	movedAndNoted(t, h, orig, true)
-	other, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(orig))))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = other.Close() }()
+	other := listenShared(t, "tcp4", "127.0.0.1", orig)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -414,12 +435,7 @@ func TestAYieldedPortIsItsListenersAndAStoppedParkHoldsNothing(t *testing.T) {
 	}
 	_ = other.Close()
 
-	var lc net.ListenConfig
-	lc.SetMultipathTCP(false)
-	fwd, err := lc.Listen(context.Background(), "tcp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(int(orig))))
-	if err != nil {
-		t.Fatal(err)
-	}
+	fwd := listenShared(t, "tcp4", "0.0.0.0", orig)
 	h.RegisterIngressForwarder(orig, fwd)
 	dialAccepted(t, orig, fwd, "the forwarder registered after the yield")
 	if n := h.IngressLookupCounts()["to_forwarder"]; n != 1 {
@@ -460,7 +476,7 @@ func TestTheHoldClosesOnlyBetweenItsCalls(t *testing.T) {
 	if !h.IngressHeld() {
 		t.Fatal("the hold did not start")
 	}
-	orig := unusedPort(t)
+	orig := heldPort(t)
 	movedAndNoted(t, h, orig, true)
 	var lc net.ListenConfig
 	lc.SetMultipathTCP(false)
@@ -552,8 +568,10 @@ func TestTheHoldReadsTheIPv6AddressesTheAppsBindsTake(t *testing.T) {
 		{"an IPv6 socket on :: with IPV6_V6ONLY", appBindV6, [16]byte{}, []netip.Addr{netip.IPv6Unspecified()}},
 		{"an IPv6 socket on ::1", appBindV6, loop6, []netip.Addr{netip.IPv6Loopback()}},
 	} {
+		// Held by the parent: the notes stay in the map after a row
+		// ends, so each row takes a port no other row is given.
+		orig := heldPort(t)
 		t.Run(c.name, func(t *testing.T) {
-			orig := unusedPort(t)
 			note(orig, c.kind, c.addr, 1)
 			note(orig, appBindV6, [16]byte{0xfd, 15: 5}, 0) // a socket on [fd00::5] that went
 			note(orig+1, appBindV6, [16]byte{0xfd, 15: 6}, 1)
@@ -566,8 +584,8 @@ func TestTheHoldReadsTheIPv6AddressesTheAppsBindsTake(t *testing.T) {
 	// Several of the app's sockets live on one port (one on ::1 and a
 	// dual-stack one on ::, beside an IPv4 one): every note is read, so the
 	// forwarder checks each address they take.
+	orig := heldPort(t)
 	t.Run("an IPv6 socket on ::1, one on :: without IPV6_V6ONLY and an IPv4 one", func(t *testing.T) {
-		orig := unusedPort(t)
 		note(orig, appBindV6, loop6, 1)
 		note(orig, appBindV6Dual, [16]byte{}, 2)
 		note(orig, appBindV4, [16]byte{}, 1)
@@ -622,8 +640,9 @@ func TestTheLookupParksWhereTheGoNotesSayTheAppsSocketsTakeCalls(t *testing.T) {
 		{"an IPv6 socket on ::1", appBindV6, netip.IPv6Loopback().As16(), false, true},
 		{"an IPv4 socket on 127.0.0.1", appBindV4, [16]byte{127, 0, 0, 1}, true, false},
 	} {
+		// Held by the parent, as above: each row's port is its own.
+		orig := heldPort(t)
 		t.Run(c.name, func(t *testing.T) {
-			orig := unusedPort(t)
 			movedAndNoted(t, h, orig, false)
 			if err := h.objects.AppPortBinds.Update(appBindKey{Port: orig, Kind: c.kind, Addr: c.addr}, appBindCount{N: 1}, ebpf.UpdateAny); err != nil {
 				t.Fatal(err)

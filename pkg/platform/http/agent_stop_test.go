@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -35,9 +36,7 @@ func TestAgentGoingAwayIsHowAStoppingAgentAnswers(t *testing.T) {
 		}
 	}))
 	defer eof.Close()
-	gone := httptest.NewServer(http.NotFoundHandler())
-	goneURL := gone.URL
-	gone.Close() // nothing listens there any more
+	goneURL := "http://" + testnet.RefusedAddr(t, "tcp") // nothing listens there, nor can come to
 
 	for name, uri := range map[string]string{"server closing": eof.URL, "nothing listening": goneURL} {
 		a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: uri + "/agent"}}}

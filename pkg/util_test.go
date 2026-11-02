@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -1986,10 +1988,7 @@ func TestSimulateHTTP_TargetFromURLLeavesTheRecordedAddressOut(t *testing.T) {
 	serverHost := strings.TrimPrefix(server.URL, "http://")
 
 	// The port the test was recorded on: nothing listens there any more.
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	recordedPort := uint16(l.Addr().(*net.TCPAddr).Port)
-	require.NoError(t, l.Close())
+	recordedPort := refusedPort(t)
 
 	newCase := func(appPort uint16) *models.TestCase {
 		return &models.TestCase{
@@ -2410,9 +2409,7 @@ func TestAgentHealthAnswer_IsOnlyAHealthyAnswersHeaders(t *testing.T) {
 	require.Nil(t, agentHealthAnswer(context.Background(), zap.NewNop(), &http.Client{}, answer(http.StatusServiceUnavailable)),
 		"the headers of a 503 were taken for the agent's")
 
-	gone := httptest.NewServer(http.NotFoundHandler())
-	goneURL := gone.URL
-	gone.Close()
+	goneURL := "http://" + testnet.RefusedAddr(t, "tcp") // nothing answers there, nor can come to
 	require.Nil(t, agentHealthAnswer(context.Background(), zap.NewNop(), &http.Client{}, goneURL+"/agent"),
 		"an address nothing answers on gave headers")
 }
@@ -2541,14 +2538,15 @@ func TestATestGoesToTheAppPortItWasRecordedOn(t *testing.T) {
 	}
 }
 
-// refusedPort is a port on 127.0.0.1 nothing listens on.
+// refusedPort is a port on 127.0.0.1 nothing listens on, held for the test's
+// life so that no other socket can take it (testnet.RefusedAddr).
 func refusedPort(t *testing.T) uint16 {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	_, p, err := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
 	require.NoError(t, err)
-	port := uint16(ln.Addr().(*net.TCPAddr).Port)
-	require.NoError(t, ln.Close())
-	return port
+	port, err := strconv.ParseUint(p, 10, 16)
+	require.NoError(t, err)
+	return uint16(port)
 }
 
 // unreachableAt says every address is one the app can never be reached at,

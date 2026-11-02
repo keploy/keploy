@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -730,12 +731,7 @@ func TestWaitForAppReady_DockerStartKeepsItsGate(t *testing.T) {
 // (status_code=0 because nothing was listening yet).
 func TestWaitForAppReady_UnreachableTargetReportsWhatWasObserved(t *testing.T) {
 	// A port nothing listens on: TCP never accepts.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	host, port, _ := net.SplitHostPort(ln.Addr().String())
-	_ = ln.Close() // free it so connects are refused
+	host, port, _ := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
 
 	core, logs := observer.New(zapcore.WarnLevel)
 	logger := zap.New(core)

@@ -20,8 +20,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +34,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
 	"go.keploy.io/server/v3/utils"
@@ -47,13 +46,12 @@ import (
 )
 
 // closedAgentURL is the URL of an agent API nothing listens on: a stop
-// request to it is refused, as one to an agent that cannot be asked is.
+// request to it is refused, as one to an agent that cannot be asked is. Its
+// port is held for the test's life (testnet.RefusedAddr), so no other
+// server can come to answer there.
 func closedAgentURL(t *testing.T) string {
 	t.Helper()
-	srv := httptest.NewServer(http.NotFoundHandler())
-	u := srv.URL
-	srv.Close()
-	return u
+	return "http://" + testnet.RefusedAddr(t, "tcp")
 }
 
 // startPTYSleeper starts a long sleep on a PTY, as startNativeAgentWithPTY
