@@ -163,18 +163,24 @@ func atOrAbove(logs *observer.ObservedLogs, l zapcore.Level) []observer.LoggedEn
 }
 
 // A client that leaves while its call waits for the app to listen ends the
-// call through each handler (HTTP/1 and gRPC's preface), nothing is sent on
-// to the app once it listens, and nothing is said above DEBUG.
+// call through each handler (HTTP/1, gRPC's preface, and the relay of a TLS
+// connection), nothing is sent on to the app once it listens, and nothing is
+// said above DEBUG.
 func TestAClientThatLeavesWhileItsCallWaitsEndsTheHandler(t *testing.T) {
-	for _, proto := range []string{"HTTP/1", "gRPC"} {
+	for _, proto := range []string{"HTTP/1", "gRPC", "TLS"} {
 		t.Run(proto, func(t *testing.T) {
 			addr := sharedAppAddr(t)
 			core, logs := observer.New(zapcore.DebugLevel)
 			pm := New(zap.New(core), nil, &config.Config{})
 			client, proxied := tcpPairForWatch(t)
 			payload := "GET / HTTP/1.1\r\nHost: api\r\n\r\n"
-			if proto == "gRPC" {
+			switch proto {
+			case "gRPC":
 				payload = clientPreface
+			case "TLS":
+				// A ClientHello's record header and the start of its
+				// body: as much as the ingress reads to tell a call's kind.
+				payload = "\x16\x03\x01\x00\xc8\x01\x00\x00\xc4\x03\x03" + strings.Repeat("\x00", len(clientPreface))
 			}
 			if _, err := client.Write([]byte(payload)); err != nil {
 				t.Fatal(err)

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -135,21 +137,20 @@ func TestAnOpenTLSConnectionRelayedInOSSIsCountedOnTheProcesssManager(t *testing
 	}
 }
 
-// A TLS connection to an app port nothing answers on (the app is not
-// listening) is closed, and the failed dial is said; nothing is relayed or
-// counted, and the agent does not panic.
-func TestATLSConnectionTheAppDoesNotAnswerIsClosed(t *testing.T) {
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	refused := ln.Addr().String()
-	_ = ln.Close()
+// While the recording stops, its client stops the app on purpose: a TLS
+// connection then to an app that refuses it is closed, and the refusal is
+// said at DEBUG, as for any call then (logAppDialFailure). Nothing is relayed
+// or counted, and the agent does not panic. Before the stop, the same
+// refusal is an app that has not listened yet, and the connection waits for
+// it (the next row).
+func TestATLSConnectionTheStoppedAppRefusesIsClosed(t *testing.T) {
+	refused := testnet.RefusedAddr(t, "tcp")
 	srv := startTLSApp(t) // only for its client's trust
 	core, logs := observer.New(zapcore.DebugLevel)
 	cfg := &config.Config{}
 	cfg.Agent.RecordRequests = true
 	pm := New(zap.New(core), nil, cfg)
+	pm.SetStopping(true)
 	rec := syncMock.New(zap.NewNop())
 	ctx := syncMock.NewContext(context.Background(), rec)
 	app, proxied := loopbackPair(t)
@@ -160,7 +161,7 @@ func TestATLSConnectionTheAppDoesNotAnswerIsClosed(t *testing.T) {
 	}()
 	_ = app.SetDeadline(time.Now().Add(time.Minute)) // only turns a hang into a failure
 	if err := tls.Client(app, clientTLSConfig(srv)).Handshake(); err == nil {
-		t.Fatal("the TLS handshake with an app that is not listening succeeded")
+		t.Fatal("the TLS handshake with an app the stop took succeeded")
 	}
 	<-served
 	// Closed: its end (EOF), or a reset, since the ingress closed it with
@@ -170,8 +171,8 @@ func TestATLSConnectionTheAppDoesNotAnswerIsClosed(t *testing.T) {
 		t.Fatalf("the client's connection read %d bytes (%v) after the failed dial, want it closed", n, err)
 	}
 	failed := logs.FilterMessage("Failed to connect to the application to relay a TLS connection to it. Verify that the application is listening on the resolved address and port.").All()
-	if len(failed) != 1 || failed[0].Level != zapcore.ErrorLevel || failed[0].ContextMap()["final_app_addr"] != refused {
-		t.Fatalf("the failed dial was said %v, want once at ERROR naming %s", failed, refused)
+	if len(failed) != 1 || failed[0].Level != zapcore.DebugLevel || failed[0].ContextMap()["final_app_addr"] != refused {
+		t.Fatalf("the refused dial was said %v, want once at DEBUG naming %s", failed, refused)
 	}
 	if n := logs.FilterMessage(tlsRelayedWarning).Len(); n != 0 {
 		t.Fatalf("a connection that never reached the app was said relayed %d times", n)
@@ -181,17 +182,72 @@ func TestATLSConnectionTheAppDoesNotAnswerIsClosed(t *testing.T) {
 	}
 }
 
+// A TLS connection to an app that has not listened yet waits for its
+// listener, as every call to the app does (dialApp), and is relayed to the
+// app's TLS once it listens: its client is shown the app's own certificate
+// and gets its answer, and the connection is counted once. Nothing is said
+// at ERROR.
+func TestATLSConnectionToAnAppThatHasNotListenedYetIsRelayedOnceItListens(t *testing.T) {
+	addr := sharedAppAddr(t)
+	// Every httptest TLS server has the same certificate (the package's
+	// localhost one), so this server's trust is the late app's too; the
+	// call checks the app's own certificate all the same.
+	trust := startTLSApp(t)
+	core, logs := observer.New(zapcore.DebugLevel)
+	cfg := &config.Config{}
+	cfg.Agent.RecordRequests = true
+	pm := New(zap.New(core), nil, cfg)
+	rec := syncMock.New(zap.NewNop())
+	ctx := syncMock.NewContext(context.Background(), rec)
+	client, proxied := loopbackPair(t)
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		pm.handleConnection(ctx, proxied, addr, pm.logger, make(chan *models.TestCase, 1), make(chan struct{}, 1), 8443)
+	}()
+	called := make(chan error, 1)
+	go func() { called <- tlsCall(client, clientTLSConfig(trust), trust.Certificate(), "/late") }()
+	// The ClientHello came, and its dial waits for the app.
+	awaitWaiters(t, pm, addr, 1)
+	app := httptest.NewUnstartedServer(tlsPong)
+	app.Listener = testnet.ListenShared(t, "tcp4", addr)
+	app.StartTLS()
+	t.Cleanup(app.Close)
+	select {
+	case err := <-called:
+		if err != nil {
+			t.Fatalf("the TLS call that waited for the app: %v", err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("the TLS call that waited for the app did not end")
+	}
+	if certs := app.Certificate(); certs == nil || !certs.Equal(trust.Certificate()) {
+		t.Fatal("the late app's certificate is not the one the client trusted")
+	}
+	_ = client.Close()
+	<-served
+	if got := rec.TLSRelayedConns(); got != 1 {
+		t.Fatalf("the connection was counted relayed %d times, want once", got)
+	}
+	if e := logs.FilterLevelExact(zapcore.ErrorLevel).All(); len(e) != 0 {
+		t.Fatalf("logged at ERROR: %v", e)
+	}
+}
+
 // startTLSApp is an app that serves HTTPS, answering "tls-pong <path>",
 // closed at the test's end.
 func startTLSApp(t *testing.T) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, "tls-pong "+r.URL.Path)
-	}))
+	srv := httptest.NewUnstartedServer(tlsPong)
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	return srv
 }
+
+// tlsPong is a TLS app's answer: "tls-pong <path>".
+var tlsPong = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, _ = io.WriteString(w, "tls-pong "+r.URL.Path)
+})
 
 // clientTLSConfig trusts srv's certificate, and only it.
 func clientTLSConfig(srv *httptest.Server) *tls.Config {
@@ -205,30 +261,41 @@ func clientTLSConfig(srv *httptest.Server) *tls.Config {
 // srv's close and nothing else.
 func callOverTLS(t *testing.T, i int, srv *httptest.Server, conn net.Conn, path string) {
 	t.Helper()
-	_ = conn.SetDeadline(time.Now().Add(time.Minute)) // only turns a hang into a failure
-	c := tls.Client(conn, clientTLSConfig(srv))
-	if err := c.Handshake(); err != nil {
-		t.Fatalf("call %d, the TLS handshake with the app through the ingress: %v", i, err)
+	if err := tlsCall(conn, clientTLSConfig(srv), srv.Certificate(), path); err != nil {
+		t.Fatalf("call %d: %v", i, err)
 	}
-	if certs := c.ConnectionState().PeerCertificates; len(certs) == 0 || !certs[0].Equal(srv.Certificate()) {
-		t.Fatalf("call %d: the client was not shown the app's own certificate", i)
+}
+
+// tlsCall makes one HTTPS request for path over conn, trusting only what cfg
+// trusts: it fails unless the client is shown the app's own certificate,
+// want, and gets the app's answer, then its close and nothing else. It
+// returns, not fails, so it can run beside the test.
+func tlsCall(conn net.Conn, cfg *tls.Config, want *x509.Certificate, path string) error {
+	_ = conn.SetDeadline(time.Now().Add(time.Minute)) // only turns a hang into a failure
+	c := tls.Client(conn, cfg)
+	if err := c.Handshake(); err != nil {
+		return fmt.Errorf("the TLS handshake with the app through the ingress: %w", err)
+	}
+	if certs := c.ConnectionState().PeerCertificates; len(certs) == 0 || !certs[0].Equal(want) {
+		return errors.New("the client was not shown the app's own certificate")
 	}
 	if _, err := io.WriteString(c, "GET "+path+" HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"); err != nil {
-		t.Fatalf("call %d, the request: %v", i, err)
+		return fmt.Errorf("the request: %w", err)
 	}
 	br := bufio.NewReader(c)
 	resp, err := http.ReadResponse(br, nil)
 	if err != nil {
-		t.Fatalf("call %d, the app's answer: %v", i, err)
+		return fmt.Errorf("the app's answer: %w", err)
 	}
 	body, err := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	if err != nil || resp.StatusCode != http.StatusOK || string(body) != "tls-pong "+path {
-		t.Fatalf("call %d, the app's answer: %d %q (%v), want 200 %q", i, resp.StatusCode, body, err, "tls-pong "+path)
+		return fmt.Errorf("the app's answer: %d %q (%v), want 200 %q", resp.StatusCode, body, err, "tls-pong "+path)
 	}
 	if n, err := br.Read(make([]byte, 1)); n != 0 || err != io.EOF {
-		t.Fatalf("call %d: after the app's answer the client read %d bytes (%v), want the app's close (EOF) and nothing else", i, n, err)
+		return fmt.Errorf("after the app's answer the client read %d bytes (%v), want the app's close (EOF) and nothing else", n, err)
 	}
+	return nil
 }
 
 // loopbackPair is a loopback TCP connection: the client's end, and the
