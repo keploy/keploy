@@ -571,6 +571,10 @@ func TestAServerTestsReadPastAnotherGoroutinesServeIsLearnedWhateverPartAPayload
 		{"sent whole in a payload F had not served before the call", sent(false), false},
 		{"the same, under the proven flow", sent(false), true},
 		{"served before the call, under the proven flow", sent(true), true},
+		{"sent whole in a payload F had not served, after the look-up's chance part", append(append([]Raw{}, lookUp...), sent(false)...), false},
+		{"sent whole in a payload F had not served, after the look-up's chance part, under the proven flow", append(append([]Raw{}, lookUp...), sent(false)...), true},
+		{"sent whole in a payload F served, after the look-up's chance part", append(append([]Raw{}, lookUp...), sent(true)...), false},
+		{"sent whole in a payload F served, after the look-up's chance part, under the proven flow", append(append([]Raw{}, lookUp...), sent(true)...), true},
 	} {
 		t.Run(c.what, func(t *testing.T) {
 			if c.proven {
@@ -580,5 +584,124 @@ func TestAServerTestsReadPastAnotherGoroutinesServeIsLearnedWhateverPartAPayload
 				t.Fatalf("%s from %q held %q Read=%+v (%s); want the variable of mock-9 holding the stamp whole", ln.Kind, ln.From.Mock, ln.From.Held, ln.Read, ln.Why)
 			}
 		})
+	}
+	// Fail closed: only a payload that holds the value whole (or its echo:
+	// the next row), made or served before the call, outranks the look-up's
+	// part. One that holds another
+	// stamp of the same minute (a part again), or the value whole but
+	// recorded after the call and not served before it, leaves the earliest
+	// part the value's place: where the window from the test's begin does
+	// not hold the read, its variable stands, and where it does, the value
+	// is learned as the plain read the replay's check passes, as with the
+	// look-up alone.
+	other := func(v string, at time.Time, served bool) Raw {
+		return RawOf(&models.Mock{Name: "mock-10", Kind: "Pulsar", Spec: models.MockSpec{
+			GenericRequests:  []models.Payload{{Origin: "client", Message: []models.OutputBinary{{Type: "json", Data: `{"commandType":"SEND","payload":{"type":"lead.updated","at":"` + v + `"}}`}}}},
+			ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
+		}}, served)
+	}
+	for _, c := range []struct {
+		what string
+		x    Raw
+	}{
+		{"another stamp of the minute", other(stamp(recRun.read.Add(-2*time.Second)), recRun.read.Add(40*time.Millisecond), true)},
+		{"the stamp whole, recorded after the call, not served before it", other(stamp(recRun.read), recRun.call.Add(5*time.Millisecond), false)},
+	} {
+		for _, proven := range []bool{false, true} {
+			t.Run(c.what+", proven "+strconv.FormatBool(proven), func(t *testing.T) {
+				if proven {
+					t.Setenv(provenswitch.Env, "1")
+				}
+				raw := append(append([]Raw{}, lookUp...), c.x)
+				if ln := learn(recRun.read, serverStampWindow(early, fRun), raw); !partInPayload(ln) || ln.From.Mock != "mock-1" {
+					t.Fatalf("%s from %q held %q Read=%+v (%s); want the look-up's part to stay the value's place", ln.Kind, ln.From.Mock, ln.From.Held, ln.Read, ln.Why)
+				}
+				ln := learn(recRun.read, w, raw)
+				if ln.Kind != KindClockRead || ln.Read == nil || ln.Read.Since == models.SinceTestBegin {
+					t.Fatalf("its test's begin known: %s from %q held %q (%s); want a plain read of the clock", ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+				}
+				if ok, why := CheckClockRead(p, *ln.Read, str(live).Leaves[p], Span{From: fRun.prev, To: fRun.call, TestFrom: fRun.began}, true); !ok {
+					t.Fatalf("its test's begin known: learned as %s, which the replay's check refuses: %s", ln.Read, why)
+				}
+			})
+		}
+	}
+}
+
+// A payload that holds the moment a value was recorded with (the echo: a
+// departure picked from a timetable the application was given) outranks
+// an earlier payload that holds only a word of the value by chance (a
+// slot "11:14" in a start-up's config): the echo names the value's place
+// whichever payload came first. A timetable recorded after the call that F
+// had not served before it is no place, and the earlier part stays.
+func TestAnEchoInALaterPayloadOutranksAnEarlierPayloadsPart(t *testing.T) {
+	at := time.Date(2026, 10, 22, 11, 14, 20, 0, time.UTC)
+	const p = "body.departure"
+	str := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	w := &Window{Rec: Span{From: at.Add(-time.Second), To: at}, F: Span{From: at.Add(time.Minute - time.Second), To: at.Add(time.Minute)}}
+	answer := func(name, body string, when time.Time, served bool) Raw {
+		return RawOf(&models.Mock{Name: name, Kind: "Pulsar", Spec: models.MockSpec{
+			GenericResponses: []models.Payload{{Origin: "server", Message: []models.OutputBinary{{Type: "json", Data: body}}}},
+			ReqTimestampMock: when, ResTimestampMock: when,
+		}}, served)
+	}
+	config := answer("mock-1", `{"slot":"11:14","n":7}`, at.Add(-3*time.Second), true)
+	timetable := func(when time.Time, served bool) Raw {
+		return answer("mock-2", `{"cursor":[{"at":"2026-10-22T11:14:00Z"},{"at":"2026-10-22T11:15:00Z"}]}`, when, served)
+	}
+	learn := func(raw ...Raw) Learned {
+		return ClassifyIn(clockedDrifts(), []string{p}, str("2026-10-22T11:15:00Z"), str("2026-10-22T11:14:00Z"), at, nil, raw, nil, w)[0]
+	}
+	for what, raw := range map[string][]Raw{
+		"the timetable alone":            {timetable(at.Add(-time.Second), true)},
+		"after the config's chance word": {config, timetable(at.Add(-time.Second), true)},
+	} {
+		if ln := learn(raw...); ln.Kind != KindVariable || ln.From.Mock != "mock-2" || !ln.From.Echo {
+			t.Errorf("%s: %s from %q held %q echo %v (%s); want the echo's variable of mock-2", what, ln.Kind, ln.From.Mock, ln.From.Held, ln.From.Echo, ln.Why)
+		}
+	}
+	if ln := learn(config, timetable(at.Add(time.Second), false)); !partInPayload(ln) || ln.From.Mock != "mock-1" || ln.From.Held != "14" {
+		t.Errorf("a timetable recorded after the call, not served before it: %s from %q held %q echo %v (%s); want the config's part to stay the value's place", ln.Kind, ln.From.Mock, ln.From.Held, ln.From.Echo, ln.Why)
+	}
+}
+
+// A stamp its call's window holds, followed by a changed word with no ASCII
+// in it (a Russian weekday, the lead crossing midnight): the search reads
+// that word as data, as a part, since the clock's words are the ASCII ones. A payload holding the weekday by chance (a locale table)
+// comes first; a later payload made before the call holds the value whole.
+// The whole copy names the value's place; with no whole copy, or one
+// recorded after the call that F had not served, the weekday's part stays.
+func TestAStampWholeInALaterPayloadOutranksAnEarlierNonASCIIPart(t *testing.T) {
+	const p = "body.at"
+	rec, live := "2026-11-02T23:59:58Z понедельник", "2026-11-03T00:01:00Z вторник"
+	recAt := time.Date(2026, 11, 2, 23, 59, 58, 400_000_000, time.UTC)
+	fAt := time.Date(2026, 11, 3, 0, 1, 0, 300_000_000, time.UTC)
+	w := &Window{Rec: Span{From: recAt.Add(-time.Second), To: recAt}, F: Span{From: fAt.Add(-time.Second), To: fAt}}
+	str := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	payload := func(name, body string, at time.Time, served bool) Raw {
+		return RawOf(&models.Mock{Name: name, Kind: "Pulsar", Spec: models.MockSpec{
+			GenericRequests:  []models.Payload{{Origin: "client", Message: []models.OutputBinary{{Type: "json", Data: body}}}},
+			ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
+		}}, served)
+	}
+	locale := payload("mock-1", `{"locale":"ru","days":["воскресенье","понедельник","вторник"]}`, recAt.Add(-5*time.Second), true)
+	sent := func(at time.Time, served bool) Raw {
+		return payload("mock-9", `{"commandType":"SEND","payload":{"at":"`+rec+`"}}`, at, served)
+	}
+	learn := func(raw ...Raw) Learned {
+		return ClassifyIn(clockedDrifts(), []string{p}, str(live), str(rec), recAt, nil, raw, nil, w)[0]
+	}
+	if ln := learn(locale); !partInPayload(ln) || ln.From.Mock != "mock-1" {
+		t.Fatalf("the locale table alone: %s from %q held %q (%s); want the weekday's part of mock-1", ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+	}
+	if ln := learn(locale, sent(recAt.Add(-time.Second), true)); ln.Kind != KindVariable || ln.From.Mock != "mock-9" || ln.From.Held != rec {
+		t.Errorf("a later payload holding the value whole: %s from %q held %q (%s); want the variable of mock-9 holding it whole", ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+	}
+	if ln := learn(locale, sent(recAt.Add(time.Second), false)); !partInPayload(ln) || ln.From.Mock != "mock-1" {
+		t.Errorf("the whole copy recorded after the call, not served before it: %s from %q held %q (%s); want the weekday's part of mock-1", ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
 	}
 }

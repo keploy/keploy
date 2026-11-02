@@ -2088,11 +2088,12 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// recording's payload (partInPayload): its call's window shows no
 		// read, so the search read the value's changed words, and their
 		// decoded and case-folded forms, as data, and whether one stands as
-		// a token in a payload keploy has no view of F's in is chance, which
-		// would decide, run by run, between that variable, which no call can
-		// bind, and the read the window from each run's test begin holds. A
-		// plain read that window learns is taken; anything else is not, and
-		// the variable stands.
+		// a token in a recording's payload is chance, which would decide,
+		// run by run, between that variable, which no call can bind, and the
+		// read the window from each run's test begin holds. A plain read
+		// that window learns is taken; anything else is not, and the
+		// variable stands. A payload F served with its view counts too
+		// (partInPayload).
 		if wt := w.fromTestBegin(); (ln.Kind == KindUnaccounted || partInPayload(ln)) && wt != nil {
 			if wide := leaf(r, l, wt, 0); wide.Kind == KindClockRead && wide.Read != nil {
 				ln = wide
@@ -2201,11 +2202,21 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 }
 
 // partInPayload reports whether ln is a variable whose place is in a raw
-// mock's payload (Place.Side "", where F gave no view of the value: appearedIn
-// reads its words as tokens there) and holds only a part of the recorded
-// value (Place.Held: a word, a piece, or a decoded or case-folded form of
-// one), never an echo's instant. A place that holds the value whole, or one
-// of a served call F saw drift with it, is not one.
+// mock's payload (Place.Side "": appearedIn reads its words as tokens there)
+// and holds only a part of the recorded value (Place.Held: a word, a piece,
+// or a decoded or case-folded form of one), never an echo's instant. A place
+// that holds the value whole, or a leaf of an exchange F served field by
+// field that drifted with it (Place.Side Request or Response), is not one.
+// A place holding only the value's decoded text counts as a part here,
+// though appearedIn ranks it whole: no clock layout reads an escape, so the
+// re-read from the test's begin never takes a read for it.
+// A payload F served with its view (Raw.Live) is one too: Place carries no
+// mark of it. There follows.refute keeps a part unless F's view shows the
+// value moved apart from it, so the part may be no chance, yet the value is
+// read again from its test's begin, where the plain read learned is refused
+// at replay if the application copied that payload's word (the replay
+// serves it as recorded): red there, where the part's variable is refused
+// at record, never a pass.
 func partInPayload(ln Learned) bool {
 	return ln.Kind == KindVariable && ln.From.Side == "" && !ln.From.Echo && ln.From.Held != ln.Recorded.Value
 }
@@ -3695,6 +3706,21 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			decRuns = wordsBy(v.decRec, isWord)
 		}
 	}
+	// A payload that holds only a part of the value (a word, a piece, or a
+	// decoded or case-folded form of one, a start-up's word included) is its
+	// place only where no later payload holds the value whole (a whole
+	// clock read, its decoded text, or the value as one token), or the
+	// moment it was recorded with (echoRaw): a short word stands in an
+	// opaque payload by chance (a stamp's digits decode to a word a start-up
+	// look-up's JSON holds), while the value whole stands where the
+	// application sent it, in whichever payload that is. Where none does,
+	// the earliest part stands. The search past a part sets later places
+	// aside as it would with no part found (fol.refute). A variable found
+	// here never reads what it set aside; a re-read that takes no source
+	// (skipSource) does, and only refuses more for it (follows.followed,
+	// Learned.Bindable), never less.
+	var part Place
+	var parted bool
 	for _, x := range raw {
 		if !x.earlierThan(at) {
 			continue
@@ -3814,11 +3840,17 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 					}
 					continue
 				}
-				return p, true
+				if w == recorded {
+					return p, true
+				}
+				if !parted {
+					part, parted = p, true
+				}
+				break
 			}
 		}
 	}
-	return Place{}, false
+	return part, parted
 }
 
 // echoServed is the place of an exchange F served leaf by leaf (or the test
