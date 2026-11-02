@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -128,7 +129,7 @@ func TestATestThatEndsEarlyLeavesNothingOfItsGroup(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer out.Close()
+			defer func() { _ = out.Close() }()
 			cmd := exec.Command(os.Args[0], "-test.run=^TestDyingTestHelper$", "-test.v")
 			cmd.Env = append(os.Environ(), diesEnv+"="+how+" "+dir)
 			cmd.Stdout, cmd.Stderr = out, out
@@ -136,7 +137,7 @@ func TestATestThatEndsEarlyLeavesNothingOfItsGroup(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer word.Close()
+			defer func() { _ = word.Close() }()
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
@@ -285,16 +286,183 @@ func TestACommandThatCannotStartFailsItsTest(t *testing.T) {
 	if !strings.Contains(ft.fatal, "absent") {
 		t.Fatalf("the start failed as %q; want its failure", ft.fatal)
 	}
-	if ft.cleanups != 0 {
-		t.Fatalf("a start that failed left %d cleanups", ft.cleanups)
+	if len(ft.cleanups) != 0 {
+		t.Fatalf("a start that failed left %d cleanups", len(ft.cleanups))
 	}
+}
+
+// The thread that started a process runs nothing else until the process is
+// reaped. The kernel kills the process as that thread ends
+// (PR_SET_PDEATHSIG), and the runtime ends a thread that a goroutine locked
+// and exited on, as a test's goroutine may: a thread that other goroutines
+// run on is one that could end so, and the process with it, while its test
+// runs. While the goroutine that waits on the process waits, goroutines that
+// each lock a thread and keep it are started, until one runs on its thread
+// or on a thread made since (see othersRunOnThisThread).
+func TestTheThreadThatStartedAProcessRunsNothingElseUntilItIsReaped(t *testing.T) {
+	if err := SetLifeline(); err != nil {
+		t.Fatal(err)
+	}
+	// One P: a goroutine that waits hands its thread to the next one to
+	// run, the one it started, unless it is locked to that thread.
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	ran := make(chan bool, 1)
+	setWaiting(t, func() { ran <- othersRunOnThisThread() })
+	cmd := exec.Command("sh", "-c", "exec "+UntilTheTestEnds)
+	reaped := Start(t, cmd)
+	var others bool
+	select {
+	case others = <-ran:
+	case <-beforeTheDeadline(t):
+		t.Fatal("Start did not run its hook before it waited on the process")
+	}
+	if others {
+		t.Fatal("a goroutine ran on the thread that started the process, while the goroutine that waits on the process waited, " +
+			"and exited locked to it: the runtime ended the thread, and the kernel killed the process with it")
+	}
+	select {
+	case <-reaped:
+		t.Fatalf("the process ended (%v) while its test ran", cmd.ProcessState)
+	default:
+	}
+}
+
+// othersRunOnThisThread reports whether another goroutine runs on this
+// goroutine's thread while this one waits. It starts goroutines, one at a
+// time, that each lock the thread they run on and keep it, as long as this
+// one runs: one that runs on this goroutine's thread exits, locked, which
+// ends the thread; one that runs on a thread made since this call shows that
+// no thread was idle, this one's included, as the runtime makes one only
+// then. Each keeps a thread of its own, so no more of them start than there
+// were threads, and one.
+func othersRunOnThisThread() bool {
+	this := unix.Gettid()
+	before := threads()
+	done := make(chan struct{})
+	defer close(done)
+	for {
+		on := make(chan int)
+		go func() {
+			runtime.LockOSThread()
+			tid := unix.Gettid()
+			on <- tid
+			if tid == this {
+				return
+			}
+			<-done
+			runtime.UnlockOSThread()
+		}()
+		tid := <-on
+		if tid == this {
+			return true
+		}
+		if !before[tid] {
+			return false
+		}
+	}
+}
+
+// threads is the set of this process's threads.
+func threads() map[int]bool {
+	ents, _ := os.ReadDir("/proc/self/task")
+	tids := make(map[int]bool, len(ents))
+	for _, e := range ents {
+		if tid, err := strconv.Atoi(e.Name()); err == nil {
+			tids[tid] = true
+		}
+	}
+	return tids
+}
+
+// A test's cleanup returns once the process it killed is reaped: the test's
+// cleanups after it (its TempDir's removal among them) run with the process
+// gone, and cmd.ProcessState set. The reap is held back until the cleanup is
+// seen waiting on a channel (for the reap); one that returns first fails.
+func TestACleanupReturnsOnceTheProcessItKilledIsReaped(t *testing.T) {
+	if err := SetLifeline(); err != nil {
+		t.Fatal(err)
+	}
+	hold := make(chan struct{})
+	var once sync.Once
+	letReap := func() { once.Do(func() { close(hold) }) }
+	setWaiting(t, func() { <-hold })
+	ft := &fatalTB{TB: t}
+	cmd := exec.Command("sh", "-c", "exec "+UntilTheTestEnds)
+	reaped := Start(ft, cmd)
+	// A row that fails leaves nothing: not reaped, the pid is still its own.
+	t.Cleanup(func() {
+		select {
+		case <-reaped:
+		default:
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		letReap()
+		<-reaped
+	})
+	if len(ft.cleanups) != 1 {
+		t.Fatalf("Start left %d cleanups; want 1", len(ft.cleanups))
+	}
+	returned := make(chan struct{})
+	go runCleanup(ft.cleanups[0], returned)
+	for expired := beforeTheDeadline(t); !receiving("testproc.runCleanup"); {
+		select {
+		case <-returned:
+			t.Fatalf("the cleanup returned before the process it killed was reaped (state %v)", cmd.ProcessState)
+		case <-expired:
+			t.Fatal("the cleanup neither returned nor waited")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	letReap()
+	<-returned
+	select {
+	case <-reaped:
+	default:
+		t.Fatal("the cleanup returned before the process it killed was reaped")
+	}
+	if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); !ok || ws.Signal() != syscall.SIGKILL {
+		t.Fatalf("the process ended %v, not killed", cmd.ProcessState)
+	}
+}
+
+// runCleanup runs a test's cleanup, and closes returned once it returns.
+func runCleanup(cleanup func(), returned chan<- struct{}) {
+	cleanup()
+	close(returned)
+}
+
+// receiving reports whether a goroutine that runs fn (as a stack names it,
+// package.function) waits on a channel receive.
+func receiving(fn string) bool {
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		head, frames, _ := strings.Cut(g, "\n")
+		if strings.Contains(head, "[chan receive") && strings.Contains(frames, fn+"(") {
+			return true
+		}
+	}
+	return false
+}
+
+// setWaiting sets Start's hook (waiting) until t ends.
+func setWaiting(t *testing.T, f func()) {
+	waiting = f
+	t.Cleanup(func() { waiting = nil })
 }
 
 // fatalTB records its Fatalf and Cleanup, and ends its goroutine on Fatalf.
 type fatalTB struct {
 	testing.TB
 	fatal    string
-	cleanups int
+	cleanups []func()
 }
 
 func (f *fatalTB) Fatalf(format string, args ...any) {
@@ -302,7 +470,7 @@ func (f *fatalTB) Fatalf(format string, args ...any) {
 	runtime.Goexit()
 }
 
-func (f *fatalTB) Cleanup(func()) { f.cleanups++ }
+func (f *fatalTB) Cleanup(c func()) { f.cleanups = append(f.cleanups, c) }
 
 // beforeTheDeadline fires a quarter of the way to the test binary's
 // deadline, and never with none.

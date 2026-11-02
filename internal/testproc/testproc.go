@@ -23,6 +23,12 @@ import (
 	"testing"
 )
 
+// waiting, which only this package's tests set, runs on the goroutine that
+// started a process, on the thread that started it, before that goroutine
+// waits on (reaps) the process: a test sees there that the thread is that
+// goroutine's alone, and holds the reap back to see what waits for it.
+var waiting func()
+
 // Start starts cmd in a process group of its own and returns a channel
 // closed once cmd has exited and been reaped; cmd.ProcessState is set by
 // then, and the caller does not Wait. It sets cmd.SysProcAttr. When t ends,
@@ -39,6 +45,7 @@ func Start(t testing.TB, cmd *exec.Cmd) <-chan struct{} {
 	cmd.SysProcAttr = procAttr()
 	started := make(chan error, 1)
 	reaped := make(chan struct{})
+	beforeWait := waiting
 	go func() {
 		// Never unlocked: the runtime ends the thread with this goroutine,
 		// once cmd is reaped or failed to start.
@@ -47,6 +54,9 @@ func Start(t testing.TB, cmd *exec.Cmd) <-chan struct{} {
 		started <- err
 		if err != nil {
 			return
+		}
+		if beforeWait != nil {
+			beforeWait()
 		}
 		_ = cmd.Wait()
 		close(reaped)
