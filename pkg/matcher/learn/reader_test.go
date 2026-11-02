@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
 	"runtime"
 	"slices"
@@ -989,6 +990,8 @@ func TestReaderAFieldViewIsBuiltOnlyWhereWhatIsLeftHasRoom(t *testing.T) {
 	w := ids[3][9:13]
 	rec := RawOf(getAnswer("mock-1", "http://api/items/1", body, eRecAt), false)
 	room := viewRoom(t, rec, w)
+	p, stop := rec.payload(), int64(0)
+	eachField(p.text, p.fields, func(_ fieldAt, text string) { _, held := formsHeld(text); stop = max(stop, held) })
 	otherBody, _ := uuidAnswer(40, 64<<10)
 	other := RawOf(getAnswer("mock-2", "http://api/items/2", otherBody, eRecAt), false)
 	answers := map[bool][]fieldAt{}
@@ -1019,6 +1022,9 @@ func TestReaderAFieldViewIsBuiltOnlyWhereWhatIsLeftHasRoom(t *testing.T) {
 			}
 			if !c.view && x.used != kept {
 				t.Errorf("keeping %d, budget %d: no view, %d bytes kept; want only the %d kept before", kept, c.budget, x.used, kept)
+			}
+			if !c.view && x.peak > c.budget+stop {
+				t.Errorf("keeping %d, budget %d: no view, the question held %d bytes; want at most the budget and the forms of the field it stopped at, %d", kept, c.budget, x.peak, c.budget+stop)
 			}
 			if c.view && x.peak > c.budget {
 				t.Errorf("keeping %d, budget %d: the view held %d bytes as it was built; want at most the budget", kept, c.budget, x.peak)
@@ -1089,7 +1095,7 @@ func TestReaderWalkJSONReadsOnlyWhollyJSONValues(t *testing.T) {
 		values, leaves int
 	}{
 		{`{"a":"w"}`, 1, 2}, {" \n{\"a\":\"w\"}\n", 1, 2}, {`{"a":1}{"b":2}`, 2, 4}, {"1 2 3", 3, 3}, {`"w" "x"`, 2, 2},
-		{`[1][2]`, 2, 2}, {`007`, 0, 0}, {`2026-11-02`, 0, 0}, {`truefalse`, 0, 0}, {`"w""x"`, 0, 0}, {`1{"a":1}`, 0, 0}, {`{"a":1}2`, 0, 0}, {"1 2\t3", 3, 3},
+		{`[1][2]`, 2, 2}, {`007`, 0, 0}, {`2026-11-02`, 0, 0}, {`truefalse`, 0, 0}, {`"w""x"`, 0, 0}, {`1{"a":1}`, 2, 3}, {`{"a":1}2`, 2, 3}, {"1 2\t3", 3, 3},
 		{`null`, 1, 0}, {`{}`, 1, 0}, {`[]`, 1, 0}, {" \n ", 0, 0}, {``, 0, 0},
 		{`{"a":"w"`, 0, 0}, {`{"a":"w"} tail`, 0, 0}, {`{"a":"w"} ]`, 0, 0}, {`[1,2`, 0, 0}, {`data: {"a":"w"}`, 0, 0}, {"\xef\xbb\xbf{\"a\":\"w\"}", 0, 0}, {`a=1&b=2`, 0, 0}, {`<a>w</a>`, 0, 0}, {`{"a":1,}`, 0, 0}, {`[1,]`, 0, 0}, {`{"a" 1}`, 0, 0}, {`]`, 0, 0}, {`plain text`, 0, 0},
 		{deep(maxJSONDepth), 1, 1}, {deep(maxJSONDepth + 1), 0, 0},
@@ -1220,6 +1226,172 @@ func TestReaderAWordPastTheThousandthElementStandsAtItsOwn(t *testing.T) {
 			}
 			if same, read := inOneField(rec, w, x.textOf(answer(body(1600))), w); same || !read {
 				t.Errorf("budget %d, %.20q: a word that moved 1500 -> 1600: in one field %v read %v", budget, body(1500), same, read)
+			}
+		}
+	}
+}
+
+// Two recording fields whose joined paths are spelled alike (a header "a.b"
+// holding {"c":W} and a header "a" holding {"b":{"c":x}} both read as
+// Res.header.a.b.c) are two places: a word that moved from one to the other
+// is not at one place, within the budget and past it, and a word that
+// stayed is.
+func TestReaderAWordMovedBetweenFieldsSpelledAlikeIsNotAtOnePlace(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	const w = "ord7Kq2Xw9"
+	answer := func(hdr map[string]string) Raw {
+		m := getAnswer("mock-1", "http://api/items/1", `{"ok":true}`, eRecAt)
+		m.Spec.HTTPResp.Header = hdr
+		return RawOf(m, false)
+	}
+	for _, c := range []struct {
+		name, dotted, nested string
+		rec, live            [2]string
+	}{
+		{"a.b and a", "a.b", "a", [2]string{`{"c":"` + w + `"}`, `{"b":{"c":"x"}}`}, [2]string{`{"c":"x"}`, `{"b":{"c":"` + w + `"}}`}},
+		{"X.y and X", "X.y", "X", [2]string{`{"c":"` + w + `"}`, `{"y":{"c":"z"}}`}, [2]string{`{"c":"z"}`, `{"y":{"c":"` + w + `"}}`}},
+	} {
+		rec := answer(map[string]string{c.dotted: c.rec[0], c.nested: c.rec[1]})
+		moved := answer(map[string]string{c.dotted: c.live[0], c.nested: c.live[1]})
+		for _, budget := range []int64{0, 1} {
+			readerBudget = budget
+			x := newReaderIndex(NewDriftCache())
+			if same, read := inOneField(x.textOf(rec), w, x.textOf(moved), w); same || !read {
+				t.Errorf("budget %d, %s: in one field %v read %v; want a word that moved between the headers not at one place", budget, c.name, same, read)
+			}
+			if same, read := inOneField(x.textOf(rec), w, x.textOf(rec), w); !same || !read {
+				t.Errorf("budget %d, %s: in one field %v read %v; want a word that stayed at one place", budget, c.name, same, read)
+			}
+		}
+	}
+}
+
+// An object glued to a value beside it ({"a":W,"b":x}"z") is two values, each
+// at its own index, as a stream is: a word that moved within the object, or
+// from it to the value beside it, is not at one place; one that stayed is.
+func TestReaderAnObjectGluedToAValueIsTwoValues(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	const w = "ord7Kq2Xw9"
+	answer := func(body string) Raw { return RawOf(getAnswer("mock-1", "http://api/items/1", body, eRecAt), false) }
+	for _, c := range []struct{ rec, moved string }{
+		{`{"a":"` + w + `","b":"x"}"z"`, `{"a":"x","b":"` + w + `"}"z"`},
+		{`"z"{"a":"` + w + `","b":"x"}`, `"z"{"a":"x","b":"` + w + `"}`},
+		{`{"a":"` + w + `"}"z"`, `{"a":"z"}"` + w + `"`},
+		{`[1,"` + w + `"]2`, `["` + w + `",1]2`},
+	} {
+		for _, budget := range []int64{0, 1} {
+			readerBudget = budget
+			x := newReaderIndex(NewDriftCache())
+			if same, read := inOneField(x.textOf(answer(c.rec)), w, x.textOf(answer(c.moved)), w); same || !read {
+				t.Errorf("budget %d, %q -> %q: in one field %v read %v; want a word that moved not at one place", budget, c.rec, c.moved, same, read)
+			}
+			if same, read := inOneField(x.textOf(answer(c.rec)), w, x.textOf(answer(c.rec)), w); !same || !read {
+				t.Errorf("budget %d, %q: in one field %v read %v; want a word that stayed at one place", budget, c.rec, same, read)
+			}
+		}
+	}
+}
+
+// A field view that did not fit what was left of the index's cap is built
+// once a call: room only shrinks, so a later question on the same text is
+// the scan's alone, and holds what a question past the budget holds.
+func TestReaderAViewThatDoesNotFitIsBuiltOnceACall(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	body, ids := uuidAnswer(40, 64<<10)
+	rec := RawOf(getAnswer("mock-1", "http://api/items/1", body, eRecAt), false)
+	room := viewRoom(t, rec, ids[3][9:13])
+	readerBudget = 1
+	past := newReaderIndex(NewDriftCache())
+	past.textOf(rec).fieldsWith(ids[5][9:13])
+	readerBudget = room - 1
+	x := newReaderIndex(NewDriftCache())
+	r := x.textOf(rec)
+	r.fieldsWith(ids[3][9:13])
+	if r.e.fields.ok || !r.e.fields.big || x.peak <= past.peak {
+		t.Fatalf("fixture: kept %v, big %v, the first question held %d (the scan alone %d); want an abandoned build", r.e.fields.ok, r.e.fields.big, x.peak, past.peak)
+	}
+	x.peak = 0
+	if at, read := r.fieldsWith(ids[5][9:13]); len(at) == 0 || !read || x.peak != past.peak {
+		t.Errorf("a second question past the room held %d; want the scan's alone, %d (at %d fields, read %v)", x.peak, past.peak, len(at), read)
+	}
+}
+
+// Past the budget, a question on one long text holds by the index's count
+// the text, the decoder's buffer of it (twice its length) and each of its
+// declared forms: exactly that, no more and no less.
+func TestReaderAQuestionPastTheBudgetCountsTheTextAndItsForms(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	readerBudget = 1
+	s := strings.Repeat("ord-17%20x%2Fcart_42 ", 4000)
+	forms := textForms(s)
+	if len(forms) < 2 {
+		t.Fatalf("fixture: %d forms; want the percent-decoded form beside the text", len(forms))
+	}
+	want := int64(3 * len(s))
+	for _, f := range forms {
+		want += int64(len(f))
+	}
+	x := newReaderIndex(NewDriftCache())
+	if at, read := x.text(s).fieldsWith("cart_42"); len(at) != 1 || !read {
+		t.Fatalf("at %v read %v; want the one field", at, read)
+	}
+	if x.peak != want {
+		t.Errorf("held %d by the count; want the text, twice it and its forms, %d", x.peak, want)
+	}
+}
+
+// readerAllWords is every word of every declared form of s and of each of
+// its JSON leaves, in every reading.
+func readerAllWords(s string) []string {
+	set := map[string]bool{}
+	add := func(t string) {
+		for _, f := range textForms(t) {
+			for _, word := range readings {
+				for w := range tokensBy(f, word) {
+					set[w] = true
+				}
+			}
+		}
+	}
+	add(s)
+	walkJSON(s, true, func(_ string, _ bool, leaf string) { add(leaf) })
+	return slices.Sorted(maps.Keys(set))
+}
+
+// For every word of each body, a part of a word and none, the kept view, an
+// abandoned build (budgets between nothing and the view's room) and the scan
+// past the budget give the same fields.
+func TestReaderTheViewAndTheScanPlaceEveryWordAlike(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	b64 := base64.StdEncoding.EncodeToString([]byte(`{"inner":"Ord7Kq2Xw9","n":17}`))
+	b64u := base64.RawURLEncoding.EncodeToString([]byte("id=ab_cd-ef?x>y"))
+	for _, body := range []string{
+		`{"a":"ord7Kq2Xw9","b":"p%20ord7Kq2Xw9%2Fq","c":"` + b64 + `","d":["x","Y-z_9",17,true],"e":{"f.g":"h","":"k"}}`,
+		`{"jwt":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig_-x","u":"` + b64u + `","q":"a=3D=C3=A9b"}`,
+		"{\"a\":\"café é9 tok_a-b_c --x__\"}\n{\"a\":\"cart_42-a CART_42\"}\n",
+		`[{"id":"order-17","path":"uploads/17/a.png","q":"Order+17"},"s",1.5e3,-0,null]`,
+		`{"note":"{\"inner\":\"v-9\"}","t":"2026-11-02T10:00:00.123Z","n":1730541600123}`,
+		`not json at all, ord7Kq2Xw9 x=1&y=2`,
+		`007`, `2026-11-02`, `"w""x"`, `{"a":"w"}{"a":"x"}`, `{"a":"w"}"x"`,
+	} {
+		rec := RawOf(getAnswer("mock-1", "http://api/items/1", body, eRecAt), false)
+		words := append(readerAllWords(body), "", "zz-none", "items", "1", "9", "Xw9", "rd7Kq2Xw9")
+		room := viewRoom(t, rec, "items")
+		budgets := []int64{1 << 40, room, room - 1, room / 2, room / 8, 49, 1}
+		for _, w := range words {
+			var first string
+			for i, budget := range budgets {
+				readerBudget = budget
+				r := newReaderIndex(NewDriftCache()).textOf(rec)
+				at, read := r.fieldsWith(w)
+				if got := fmt.Sprint(at, read); i == 0 {
+					first = got
+				} else if got != first {
+					t.Errorf("body %.40q word %q budget %d (room %d, kept %v): %s; at a huge budget %s", body, w, budget, room, r.e.fields.ok, got, first)
+				}
+				if budget < room && r.e.fields.ok {
+					t.Errorf("body %.40q budget %d < room %d: view kept", body, budget, room)
+				}
 			}
 		}
 	}

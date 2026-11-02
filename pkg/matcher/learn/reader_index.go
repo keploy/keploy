@@ -78,10 +78,13 @@ type readerEntry struct {
 	past bool
 }
 
-// answer is one kind of answer an entry keeps: v, once kept (ok).
+// answer is one kind of answer an entry keeps: v, once kept (ok). big:
+// building it passed the room left of the index's cap, which only shrinks
+// within a call, so each later question of its kind is a scan, building
+// none again.
 type answer[V any] struct {
-	v  V
-	ok bool
+	v       V
+	ok, big bool
 }
 
 // readerText is one text as a caller asks the index about it, and the
@@ -243,7 +246,7 @@ func indexOnce[V any](t *readerText, slot func(*readerEntry) *answer[V], of func
 		return a.v, false, true
 	}
 	room := int64(-1)
-	if x.mayKeep(e, s) {
+	if !a.big && x.mayKeep(e, s) {
 		room = x.budget - x.used - e.own(s)
 	}
 	if room >= 0 || scan == nil {
@@ -259,6 +262,7 @@ func indexOnce[V any](t *readerText, slot func(*readerEntry) *answer[V], of func
 		if fits {
 			return v, false, true
 		}
+		a.big = true
 	}
 	scan(s, fields)
 	var none V
@@ -368,12 +372,16 @@ func heldBy(s, w string, word func(byte) bool) bool {
 }
 
 // fieldAt names one field of a recording's text (rawBody.fields, whose
-// paths round F's view of it shares): its path, and whether it is the
-// field's name rather than its value. A text the caller hands, or a
-// recording read with no fields, is one field: the zero fieldAt.
+// paths round F's view of it shares): its path, whether it is the field's
+// name rather than its value, and the recording's field it stands in (in),
+// so places compare as the field and the path in it: a header "a.b" holding
+// {"c":..} and a header "a" holding {"b":{"c":..}} both spell a.b.c, and are
+// two places. A text the caller hands, or a recording read with no fields,
+// is one field: the zero fieldAt.
 type fieldAt struct {
 	path string
 	key  bool
+	in   string
 }
 
 // fieldWords is what the index keeps of a text's fields: each field, and,
@@ -383,13 +391,23 @@ type fieldWords struct {
 	of map[string][]int32
 }
 
+// The sizes a field view counts: a fieldAt (two strings' headers and a
+// bool), and a word's entry in its map past its letters and its list: the
+// slot (a string's header and a slice's) doubled for the map's growth, as
+// wordBytes counts map[string]bool's. A list counts what it holds (its
+// capacity, 4 bytes an index), as append grew it.
+const (
+	fieldAtBytes   = 40
+	fieldWordBytes = 80
+)
+
 func fieldWordsBytes(f fieldWords) int64 {
-	n := int64(headerBytes) * int64(1+len(f.at))
+	n := int64(headerBytes + fieldAtBytes*cap(f.at))
 	for _, a := range f.at {
-		n += int64(len(a.path))
+		n += int64(len(a.path) + len(a.in))
 	}
 	for w, at := range f.of {
-		n += wordBytes + int64(len(w)+4*len(at))
+		n += fieldWordBytes + int64(len(w)+4*cap(at))
 	}
 	return n
 }
@@ -401,22 +419,25 @@ func fieldWordsBytes(f fieldWords) int64 {
 // for the call where the view fits what is left of the index's cap as it is
 // built (counted word by word, with the field it reads and that field's
 // forms, and dropped once past it); else, by a scan of the fields of the text
-// read now, which keeps nothing. Either way the index's count of what the
-// question held (peak) is what these hold. read is false where the recording
-// was not read.
+// read now, which keeps nothing. Either way the question's peak is the
+// index's count of what these hold: the text, the view's slots and lists by
+// their capacity, and the field read with its forms (the decoder's garbage
+// and a map's growth as it happens are outside it). read is false where the
+// recording was not read.
 func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
 	x := t.x
 	fw, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[fieldWords] { return &e.fields },
 		func(s string, fields []rawField, room int64) (fieldWords, bool) {
-			fw, n, fits := fieldWords{of: map[string][]int32{}}, int64(headerBytes), room >= 0
+			fw, n, fits, own := fieldWords{of: map[string][]int32{}}, int64(headerBytes), room >= 0, t.e.own(s)
 			eachField(s, fields, func(f fieldAt, text string) {
 				if !fits {
 					return
 				}
 				forms, held := formsHeld(text)
-				k, head := int32(len(fw.at)), headerBytes+int64(len(f.path))
+				k, ats := int32(len(fw.at)), append(fw.at, f)
+				head := int64(fieldAtBytes*(cap(ats)-cap(fw.at)) + len(f.path) + len(f.in))
 				if fits = n+head+held <= room; fits {
-					fw.at = append(fw.at, f)
+					fw.at = ats
 					n += head
 				}
 				for _, form := range forms {
@@ -429,18 +450,20 @@ func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
 							if j == i || seen && l[len(l)-1] == k {
 								continue
 							}
-							w, more := form[i:j], int64(4)
+							w, more, grown := form[i:j], int64(0), append(l, k)
 							if !seen {
-								w, more = strings.Clone(w), wordBytes+int64(len(w))+4
+								w, more = strings.Clone(w), fieldWordBytes+int64(len(w))
 							}
-							if fits = n+more+held <= room; fits {
+							if more += 4 * int64(cap(grown)-cap(l)); n+more+held <= room {
 								n += more
-								fw.of[w] = append(l, k)
+								fw.of[w] = grown
+							} else {
+								fits = false
 							}
 						}
 					}
 				}
-				x.peak = max(x.peak, x.budget-room+n+held)
+				x.peak = max(x.peak, x.used+own+n+held)
 			})
 			return fw, fits
 		}, fieldWordsBytes, func(s string, fields []rawField) {
@@ -493,11 +516,11 @@ func eachField(s string, fields []rawField, yield func(fieldAt, string)) {
 			values = walkJSON(text, false, func(string, bool, string) { leaves++ })
 		}
 		if values == 0 || leaves == 0 {
-			yield(fieldAt{f.path, f.key}, text)
+			yield(fieldAt{f.path, f.key, f.path}, text)
 			continue
 		}
 		walkJSON(text, values > 1, func(path string, key bool, leaf string) {
-			yield(fieldAt{strings.TrimSuffix(f.path+"."+path, "."), key}, leaf)
+			yield(fieldAt{strings.TrimSuffix(f.path+"."+path, "."), key, f.path}, leaf)
 		})
 	}
 }
@@ -510,9 +533,11 @@ func eachField(s string, fields []rawField, yield func(fieldAt, string)) {
 // array's element is (NDJSON, a streaming API's body). A repeated key's
 // values all stand at that key; a null is no leaf. It gives how many values
 // text holds, none where text is not wholly JSON values (a scalar glued to
-// the value beside it, as in "007" or "2026-11-02", is text, not values) or
-// nests deeper than encoding/json reads (its Token refuses past its depth,
-// which bounds the walk's recursion).
+// a scalar, as in "007" or "2026-11-02", is text, not values; an object or
+// array glued to a value is still two values, each at its own index, so a
+// word that moved between them, or within the object, is not at one place)
+// or nests deeper than encoding/json reads (its Token refuses past its
+// depth, which bounds the walk's recursion).
 func walkJSON(text string, several bool, yield func(path string, key bool, leaf string)) (values int) {
 	d := json.NewDecoder(strings.NewReader(text))
 	d.UseNumber()
@@ -554,7 +579,7 @@ func walkJSON(text string, several bool, yield func(path string, key bool, leaf 
 	}
 	scalar := func(i int) bool { return text[i] != '{' && text[i] != '[' }
 	for end, last := -1, 0; d.More(); values++ {
-		if start := int(d.InputOffset()); start == end && (scalar(last) || scalar(start)) {
+		if start := int(d.InputOffset()); start == end && scalar(last) && scalar(start) {
 			return 0
 		} else {
 			last = start
