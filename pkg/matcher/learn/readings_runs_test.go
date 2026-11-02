@@ -145,10 +145,13 @@ func boundRowPayload(size int) string {
 	return b.String()
 }
 
-// b64Text keeps no run that decodes to nothing (b64Read's seen): reading a
-// payload of 1 MiB of runs that are none allocates less than ten times the
-// payload's size. The runs' failed decodes leave about seven times its
-// size; keeping every run tried as well took about fourteen.
+// b64Text keeps no run that decodes to nothing (b64Read's seen), decodes
+// none whole that its first four characters tell is no text
+// (b64MayBeText), and copies no text it joins nowhere (joinWrapped):
+// reading a payload of 1 MiB of runs that are none allocates less than the
+// payload's size (about a third of it). Decoding each run whole left about
+// seven times its size, and keeping every run tried as well took about
+// fourteen.
 func TestB64TextKeepsNoRunThatDecodesToNothing(t *testing.T) {
 	payload := boundRowPayload(1 << 20)
 	if got := b64Text(payload, nil); got != "" {
@@ -161,8 +164,8 @@ func TestB64TextKeepsNoRunThatDecodesToNothing(t *testing.T) {
 	runtime.ReadMemStats(&after)
 	alloc := after.TotalAlloc - before.TotalAlloc
 	t.Logf("b64Text of %d bytes of runs that are no text allocated %d bytes", len(payload), alloc)
-	if alloc > 10*uint64(len(payload)) {
-		t.Fatalf("b64Text of %d bytes of runs that are no text allocated %d bytes, more than ten times the payload: it keeps the runs that decoded to nothing", len(payload), alloc)
+	if alloc > uint64(len(payload)) {
+		t.Fatalf("b64Text of %d bytes of runs that are no text allocated %d bytes, more than the payload: it keeps the runs that decoded to nothing, decodes whole the runs that are no text, or copies the payload", len(payload), alloc)
 	}
 }
 

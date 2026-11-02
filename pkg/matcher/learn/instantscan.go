@@ -106,7 +106,8 @@ func tried() {
 // a payload of words and numbers ("w12x345") has a digit at most of its
 // bytes, and trying every digit layout at each was most of the scan's CPU.
 // The runs of digits and of hex digits a byte begins are each read once,
-// where the scan enters them (digEnd, hexEnd).
+// where the scan enters them (digEnd, hexEnd). An RFC 1123 date is tried
+// only where a ',' ends the day name it would begin with (dayMayEnd).
 func scanInstants(s string) (matches [numLayouts][]span) {
 	var next [numLayouts]int
 	var steps int64
@@ -126,6 +127,9 @@ func scanInstants(s string) (matches [numLayouts][]span) {
 			}
 		}
 		set &= mayBegin(digEnd-i, hexEnd-i)
+		if set&1 != 0 && !dayMayEnd(s, i) {
+			set &^= 1
+		}
 		for set != 0 {
 			k := bits.TrailingZeros8(set)
 			set &^= 1 << k
@@ -166,6 +170,21 @@ func mayBegin(d, h int) uint8 {
 		m |= 1 << 5 // timeOfDayAt: \d{2}:
 	}
 	return m
+}
+
+// dayMayEnd says whether an RFC 1123 date's day name may begin at s[i]: the
+// byte after the name's three letters is the ',' every such date has there.
+// Of the names' letters only a leading 's' has a fold beyond ASCII (ſ, two
+// bytes, of "Sat" and "Sun"), so the name ends three bytes on, or four where
+// s[i] is ſ's lead byte. A payload of words begins one at each 'w' or 'S'
+// ("w12x345", rfcDays' "Wed"), and trying rfc1123At at each was most of
+// what scanning it cost past stepping over its bytes.
+func dayMayEnd(s string, i int) bool {
+	j := i + 3
+	if s[i] == 0xc5 {
+		j++
+	}
+	return j < len(s) && s[j] == ','
 }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }

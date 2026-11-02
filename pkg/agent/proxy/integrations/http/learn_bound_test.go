@@ -31,11 +31,22 @@ func parkedBig(i int, at time.Duration, size int, sample func()) *models.Mock {
 		var b strings.Builder
 		b.Grow(size + 64)
 		b.WriteString(`{"blob":"`)
-		var word []byte
-		for j := 0; b.Len() < size; j++ {
-			word = strconv.AppendInt(append(word[:0], 'w'), int64(i), 10)
-			word = strconv.AppendInt(append(word, 'x'), int64(j), 10)
-			b.Write(append(word, ' '))
+		// The words "w<i>x<j> ", j from 0: j's digits are counted up in
+		// place, not formatted anew for each word.
+		prefix, j := "w"+strconv.Itoa(i)+"x", []byte{'0'}
+		for b.Len() < size {
+			b.WriteString(prefix)
+			b.Write(j)
+			b.WriteByte(' ')
+			k := len(j) - 1
+			for ; k >= 0 && j[k] == '9'; k-- {
+				j[k] = '0'
+			}
+			if k < 0 {
+				j = append([]byte{'1'}, j...)
+			} else {
+				j[k]++
+			}
 		}
 		b.WriteString(`"}`)
 		return &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: b.String()}, nil, nil

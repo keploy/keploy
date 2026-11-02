@@ -479,14 +479,23 @@ func gluedSpans(run string) [][2]int {
 // characters or more and a multiple of four, before more of the alphabet.
 // A line starts after a key glued before the base64 by '=' ("data="), or
 // counts from after a prefix glued by '-' or '_' ("v1_").
+//
+// Until it takes a line break out, what it has read is s's own bytes, so it
+// copies s only from its first join (built): a text with none, a payload
+// of words, is s itself, read with no copy. b64Read reads each text it
+// decodes this way, and copying each in full was a sixth of its CPU on the
+// bound row's payloads.
 func joinWrapped(s string) (string, []int) {
 	var b strings.Builder
 	var joins []int
+	built := false
 	line, glued := 0, 0
 	for i := 0; i < len(s); {
 		c := s[i]
 		if b64Byte(c) {
-			b.WriteByte(c)
+			if built {
+				b.WriteByte(c)
+			}
 			line++
 			glued++
 			i++
@@ -508,20 +517,32 @@ func joinWrapped(s string) (string, []int) {
 				j++
 			}
 		default:
-			b.WriteByte(c)
+			if built {
+				b.WriteByte(c)
+			}
 			line, glued = 0, 0
 			i++
 			continue
 		}
 		if line >= 16 && (line%4 == 0 || glued >= 16 && glued%4 == 0) && j < len(s) && b64Byte(s[j]) {
+			if !built {
+				b.Grow(len(s))
+				b.WriteString(s[:i])
+				built = true
+			}
 			line, glued = 0, 0
 			i = j
 			joins = append(joins, b.Len())
 			continue
 		}
-		b.WriteString(s[i:j])
+		if built {
+			b.WriteString(s[i:j])
+		}
 		line, glued = 0, 0
 		i = j
+	}
+	if !built {
+		return s, nil
 	}
 	return b.String(), joins
 }
@@ -666,6 +687,9 @@ func isB32Run(s string, lo, hi byte) bool {
 // control characters but whitespace, its padding read leniently. Binary (a
 // signature, a hash) is no text, and nothing is read in it.
 func b64Decode(s string) (string, bool) {
+	if !b64MayBeText(s) {
+		return "", false
+	}
 	b, ok := b64DecodeAny(s)
 	if !ok {
 		if t := strings.TrimRight(s, "="); t != s {
@@ -676,6 +700,64 @@ func b64Decode(s string) (string, bool) {
 		return "", false
 	}
 	return string(b), true
+}
+
+// b64MayBeText is false where no decode of s by any of b64Variants, nor of
+// s with its padding trimmed, is text (isText), told from s's first four
+// characters: where each is a letter or a digit, both alphabets read them
+// alike, every decode of s begins with the three bytes they make (a
+// decoder skips line breaks only, and there are four characters before
+// any), and isText refuses whatever begins with bytes no text begins with
+// (textBegins). A payload's runs are mostly words that decode to no text
+// ("w12x1000" of the bound row's), and decoding each whole, a copy each,
+// was most of what reading its runs (b64Read) cost.
+func b64MayBeText(s string) bool {
+	if len(s) < 4 {
+		return true
+	}
+	var v uint32
+	for k := 0; k < 4; k++ {
+		d, ok := b64Digit(s[k])
+		if !ok {
+			return true
+		}
+		v = v<<6 | d
+	}
+	first := [3]byte{byte(v >> 16), byte(v >> 8), byte(v)}
+	return textBegins(first[:])
+}
+
+// b64Digit is the value of c, a letter or a digit, in both base64
+// alphabets; ok is false for any other byte, which the two read apart or
+// not at all.
+func b64Digit(c byte) (d uint32, ok bool) {
+	switch {
+	case c >= 'A' && c <= 'Z':
+		return uint32(c - 'A'), true
+	case c >= 'a' && c <= 'z':
+		return uint32(c-'a') + 26, true
+	case c >= '0' && c <= '9':
+		return uint32(c-'0') + 52, true
+	}
+	return 0, false
+}
+
+// textBegins says whether some text (isText) begins with b: each whole
+// character of it valid UTF-8 and no control (textControl), and what is
+// left the start of a character. A character's bytes that are invalid
+// already (utf8.FullRune: no byte after them makes them valid) begin none.
+func textBegins(b []byte) bool {
+	for len(b) > 0 {
+		r, n := utf8.DecodeRune(b)
+		if r == utf8.RuneError && n == 1 {
+			return !utf8.FullRune(b)
+		}
+		if textControl(r) {
+			return false
+		}
+		b = b[n:]
+	}
+	return true
 }
 
 func isText(b []byte) bool {

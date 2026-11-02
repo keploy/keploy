@@ -445,3 +445,37 @@ func TestADigitIsTriedOnlyForTheLayoutsItsDigitsAllow(t *testing.T) {
 	}
 	sameAsThePatterns(t, payload[:4096])
 }
+
+// The scan tries an RFC 1123 date only where a ',' ends the day name it
+// would begin with (dayMayEnd): three bytes on, or four after ſ's lead byte.
+// Of the words below, nine bytes can begin a day name ("Wed", "wed1",
+// "Sun", "ſun", "Mon,", "ſat," and its 't', "Tue,x", "Fri"); a ',' ends one
+// after "Mon", "ſat" and "Tue" only, so it tries three matchers a copy and
+// no other layout; a day name that ends the text is no date, and nothing is
+// read past its end. On the bound row's payload, words that each begin with
+// a 'w' and none with a ',' after it, it tries no matcher more than it does
+// with each 'w' a 'q', which begins no layout. The matches are the
+// patterns' (TestInstantSpansIsTheSixPatternsScans holds every text to
+// them, its corpus a date that begins with ſ among them).
+func TestAnRFC1123DateIsTriedOnlyWhereACommaEndsItsDayName(t *testing.T) {
+	countTries.Store(true)
+	defer countTries.Store(false)
+	triesOf := func(s string) int64 {
+		tries := instantScanTries.Load()
+		scanInstants(s)
+		return instantScanTries.Load() - tries
+	}
+	const copies = 50
+	words := strings.Repeat("Wed wed1 Sun ſun Mon, ſat, Tue,x Fri ", copies)
+	if got := triesOf(words); got != 3*copies {
+		t.Fatalf("the scan of %d copies of day-like words tried %d matchers; want %d, an RFC 1123 date only where a ',' ends its day name", copies, got, 3*copies)
+	}
+	sameAsThePatterns(t, words)
+	for _, end := range []string{"Wed", "ſat", "a Sun", "Mon,"} {
+		sameAsThePatterns(t, end)
+	}
+	payload := boundRowPayload(1 << 20)
+	if got, want := triesOf(payload), triesOf(strings.ReplaceAll(payload, "w", "q")); got != want {
+		t.Fatalf("the scan of a %d-byte payload of words that begin with a 'w' tried %d matchers, %d with each 'w' a 'q': it tries an RFC 1123 date where no ',' ends a day name", len(payload), got, want)
+	}
+}
