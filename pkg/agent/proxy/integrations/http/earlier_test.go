@@ -173,6 +173,15 @@ func TestAChangedCallOfTheTestsOwnNamesTheEarlierTestsRecordingOfItsMethodAndPat
 			if r := missReportOf(t, db(nil, []*models.Mock{own}, early), addr, put(2), opts); r.MissKind != models.MissExtraCall || r.Earlier != "" {
 				t.Fatalf("an extra PUT is kind %q, earlier %q; want an extra call naming no earlier recording", r.MissKind, r.Earlier)
 			}
+			// Without the switch nothing is named. (The test's own recording
+			// carries a header the call lacks, so the matcher without the
+			// switch, which this store cannot serve, has no candidate.)
+			t.Setenv(provenswitch.Env, "")
+			ownHdr := secretPut("mock-own-hdr", "PUT", path, host, 2, rec)
+			ownHdr.Spec.HTTPReq.Header["X-Vault-Token"] = "t"
+			if r := missReportOf(t, db([]*models.Mock{ownHdr}, nil, early), addr, put(5), opts); r.Earlier != "" {
+				t.Fatalf("without the switch, a changed PUT names earlier %q; want none", r.Earlier)
+			}
 		})
 	}
 }
