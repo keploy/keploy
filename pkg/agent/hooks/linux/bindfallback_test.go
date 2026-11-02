@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -18,6 +17,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 )
 
@@ -169,25 +169,33 @@ type fakeLink struct {
 func (l *fakeLink) Close() error { l.closed = true; return nil }
 
 // refusingAttach is an attach for attachIngress that attaches nothing: it
-// refuses the attach types in refuse and hands back a fakeLink, kept by
-// attach type, for each other.
-func refusingAttach(refuse ...ebpf.AttachType) (func(link.CgroupOptions) (link.Link, error), map[ebpf.AttachType]*fakeLink) {
-	got := map[ebpf.AttachType]*fakeLink{}
+// refuses the attach types in refuse, each with an error of its own, kept
+// by attach type in refused, and hands back a fakeLink, kept by attach type
+// in got, for each other.
+func refusingAttach(refuse ...ebpf.AttachType) (attach func(link.CgroupOptions) (link.Link, error), got map[ebpf.AttachType]*fakeLink, refused map[ebpf.AttachType]error) {
+	got, refused = map[ebpf.AttachType]*fakeLink{}, map[ebpf.AttachType]error{}
+	for _, a := range refuse {
+		refused[a] = fmt.Errorf("attach %v: operation not supported", a)
+	}
 	return func(o link.CgroupOptions) (link.Link, error) {
-		if slices.Contains(refuse, o.Attach) {
-			return nil, fmt.Errorf("attach %v: operation not supported", o.Attach)
+		if err, ok := refused[o.Attach]; ok {
+			return nil, err
 		}
 		l := &fakeLink{}
 		got[o.Attach] = l
 		return l, nil
-	}, got
+	}, got, refused
 }
 
 // ownRangeSaid is what the warning says of the agent's own network
 // namespace's ephemeral range, read here without readBindMovePorts: "LO-HI",
-// or, when it cannot be read, that it cannot say.
+// or, when it or ip_unprivileged_port_start cannot be read, that it cannot
+// say.
 func ownRangeSaid(t *testing.T) string {
 	t.Helper()
+	if _, err := os.ReadFile("/proc/sys/net/ipv4/ip_unprivileged_port_start"); err != nil {
+		return "cannot say whether any port is left"
+	}
 	b, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
 	if err != nil {
 		return "cannot say whether any port is left"
@@ -218,7 +226,7 @@ func TestTheBindFallbackIsSaidOnceTheFlagsAreFinal(t *testing.T) {
 		t.Run(r.name, func(t *testing.T) {
 			core, logs := observer.New(zapcore.WarnLevel)
 			h := NewHooks(zap.New(core), &config.Config{})
-			attach, got := refusingAttach(r.refuse...)
+			attach, got, refused := refusingAttach(r.refuse...)
 			if err := h.attachIngress("/sys/fs/cgroup/app", bpfObjects{}, attach); err != nil {
 				t.Fatalf("attachIngress: %v, want a refused post_bind hook not to fail it", err)
 			}
@@ -236,8 +244,9 @@ func TestTheBindFallbackIsSaidOnceTheFlagsAreFinal(t *testing.T) {
 				}
 				return
 			}
-			if h.postBindRefused == nil || h.postBindRefused.hook != r.hook || h.postBindRefused.err == nil {
-				t.Fatalf("kept refusal %+v, want %s's with its error", h.postBindRefused, r.hook)
+			attachErr := refused[r.refuse[0]]
+			if h.postBindRefused == nil || h.postBindRefused.hook != r.hook || !errors.Is(h.postBindRefused.err, attachErr) {
+				t.Fatalf("kept refusal %+v, want %s's with the attach's error, %q", h.postBindRefused, r.hook, attachErr)
 			}
 			if h.kernelPortAlloc || h.cgPostBind4 != nil || h.cgPostBind6 != nil {
 				t.Fatalf("%s refused, and the kernel picks %v, post_bind4 %v, post_bind6 %v; want neither kept", r.hook, h.kernelPortAlloc, h.cgPostBind4, h.cgPostBind6)
@@ -261,8 +270,125 @@ func TestTheBindFallbackIsSaidOnceTheFlagsAreFinal(t *testing.T) {
 					t.Errorf("the warning %q does not say %q", msg, w)
 				}
 			}
-			if got := all[0].ContextMap()["error"]; got != h.postBindRefused.err.Error() {
-				t.Errorf("the warning's error is %v, want the attach's, %q", got, h.postBindRefused.err)
+			if got := all[0].ContextMap()["error"]; got != attachErr.Error() {
+				t.Errorf("the warning's error is %v, want the attach's, %q", got, attachErr)
+			}
+		})
+	}
+}
+
+// sendFinalAgentInfo, the end of load, says where the app's binds go only
+// once send has taken the flags the bind hooks read, and from those flags:
+// the downstream build's customizer's first, then the kernel picking the
+// moved port when both post_bind hooks attached, which a customizer that
+// sets the flags whole does not clear, then start's. So under the
+// customizer's FlagObserveOnly, where the bind hooks move no bind, nothing
+// is warned, and a start or a send that fails says nothing.
+func TestTheBindFallbackIsSaidWithTheFlagsSent(t *testing.T) {
+	const otherFlag = 1 << 30 // a customizer's flag the agent does not use
+	startErr, sendErr := errors.New("the watches did not start"), errors.New("the kernel took nothing")
+	for _, r := range []struct {
+		name      string
+		refuse    []ebpf.AttachType
+		customize uint32 // the flags the customizer sets, whole; no customizer when 0
+		failStart bool
+		failSend  bool
+		warns     bool
+	}{
+		{"post_bind4 refused, no customizer", []ebpf.AttachType{ebpf.AttachCGroupInet4PostBind}, 0, false, false, true},
+		{"post_bind6 refused, a customizer's other flag", []ebpf.AttachType{ebpf.AttachCGroupInet6PostBind}, otherFlag, false, false, true},
+		{"post_bind4 refused, observing only", []ebpf.AttachType{ebpf.AttachCGroupInet4PostBind}, structs.FlagObserveOnly, false, false, false},
+		{"post_bind6 refused, observing only", []ebpf.AttachType{ebpf.AttachCGroupInet6PostBind}, structs.FlagObserveOnly | otherFlag, false, false, false},
+		{"both attach, no customizer", nil, 0, false, false, false},
+		{"both attach, observing only", nil, structs.FlagObserveOnly, false, false, false},
+		{"both attach, a customizer's other flag", nil, otherFlag, false, false, false},
+		{"post_bind4 refused, start fails", []ebpf.AttachType{ebpf.AttachCGroupInet4PostBind}, 0, true, false, false},
+		{"post_bind4 refused, send fails", []ebpf.AttachType{ebpf.AttachCGroupInet4PostBind}, 0, false, true, false},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			prev := agent.AgentInfoCustomizer
+			t.Cleanup(func() { agent.AgentInfoCustomizer = prev })
+			agent.AgentInfoCustomizer = nil
+			if r.customize != 0 {
+				agent.AgentInfoCustomizer = func(info *structs.AgentInfo) { info.Flags = r.customize }
+			}
+			core, logs := observer.New(zapcore.WarnLevel)
+			h := NewHooks(zap.New(core), &config.Config{})
+			attach, _, refused := refusingAttach(r.refuse...)
+			if err := h.attachIngress("/sys/fs/cgroup/app", bpfObjects{}, attach); err != nil {
+				t.Fatalf("attachIngress: %v", err)
+			}
+			want := r.customize
+			if len(r.refuse) == 0 {
+				want |= structs.FlagKernelPortAlloc
+			}
+
+			var started, sent bool
+			var gotSent structs.AgentInfo
+			start := func(info *structs.AgentInfo) error {
+				started = true
+				if info.Flags != want {
+					t.Errorf("start got the flags %#x, want %#x: the customizer's, then the kernel's pick when both post_bind hooks attached", info.Flags, want)
+				}
+				if n := logs.Len(); n != 0 {
+					t.Errorf("%d warnings before the flags are sent: %v", n, logs.All())
+				}
+				if r.failStart {
+					return startErr
+				}
+				info.Flags |= structs.FlagProvenUDP
+				info.DNSPort = 26789
+				return nil
+			}
+			send := func(info structs.AgentInfo) error {
+				sent, gotSent = true, info
+				if n := logs.Len(); n != 0 {
+					t.Errorf("%d warnings before the flags are sent: %v", n, logs.All())
+				}
+				if r.failSend {
+					return sendErr
+				}
+				return nil
+			}
+			err := h.sendFinalAgentInfo(structs.AgentInfo{KeployAgentNsPid: 7}, start, send)
+
+			switch {
+			case r.failStart:
+				if !errors.Is(err, startErr) || sent {
+					t.Fatalf("start failed: sendFinalAgentInfo returned %v, sent %v; want start's error, nothing sent", err, sent)
+				}
+			case r.failSend:
+				if !errors.Is(err, sendErr) {
+					t.Fatalf("send failed: sendFinalAgentInfo returned %v, want send's error", err)
+				}
+			default:
+				if err != nil || !started || !sent {
+					t.Fatalf("sendFinalAgentInfo returned %v, started %v, sent %v; want nil, both", err, started, sent)
+				}
+				if w := (structs.AgentInfo{KeployAgentNsPid: 7, DNSPort: 26789, Flags: want | structs.FlagProvenUDP}); gotSent != w {
+					t.Fatalf("sent %+v, want %+v: info with the customizer's flags, the kernel's pick's, and start's", gotSent, w)
+				}
+			}
+
+			all := logs.FilterLevelExact(zapcore.WarnLevel).All()
+			if !r.warns {
+				if len(all) != 0 {
+					t.Fatalf("%d warnings, want none: %v", len(all), all)
+				}
+				return
+			}
+			if len(all) != 1 {
+				t.Fatalf("%d warnings, want 1: %v", len(all), all)
+			}
+			hook := "post_bind4"
+			if r.refuse[0] == ebpf.AttachCGroupInet6PostBind {
+				hook = "post_bind6"
+			}
+			if msg := all[0].Message; !strings.Contains(msg, "the "+hook+" cgroup hook did not attach") {
+				t.Errorf("the warning %q does not name %s", msg, hook)
+			}
+			if got := all[0].ContextMap()["error"]; got != refused[r.refuse[0]].Error() {
+				t.Errorf("the warning's error is %v, want the attach's, %q", got, refused[r.refuse[0]])
 			}
 		})
 	}

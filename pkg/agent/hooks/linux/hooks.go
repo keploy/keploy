@@ -240,11 +240,12 @@ func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects, attach func(li
 	// set when both attach, and without the flag bind4/6 pick the port
 	// themselves, a free one outside the network namespace's ephemeral
 	// range, or leave the bind alone when there is none (sayBindFallback
-	// says which, once the agent's flags are final). So a cgroup setup that rejects them still starts,
-	// while everyone else stops hitting "That port is already in use" on
-	// the relocated port. This covers ATTACH failure only — a program the
-	// kernel refuses to LOAD already fails LoadAndAssign above and aborts
-	// the agent, the same as every other program in this object.
+	// says which, once the agent's flags are final). So a cgroup setup
+	// that rejects them still starts, while everyone else stops hitting
+	// "That port is already in use" on the relocated port. This covers
+	// ATTACH failure only — a program the kernel refuses to LOAD already
+	// fails LoadAndAssign above and aborts the agent, the same as every
+	// other program in this object.
 	pb4, err := attach(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCGroupInet4PostBind,
@@ -276,6 +277,43 @@ func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects, attach func(li
 
 	h.logger.Debug("Attached ingress redirection hooks.",
 		zap.Bool("kernel_port_alloc", h.kernelPortAlloc))
+	return nil
+}
+
+// sendFinalAgentInfo makes info's flags final and sends info with send
+// (load's: SendAgentInfo). The downstream build's customizer
+// (agent.AgentInfoCustomizer) goes first, then the flags of the hooks that
+// attached, then start, which starts the watches whose flags it sets and
+// fills in the rest of info. The bind hooks read the flags as sent, so only
+// once send has taken them does it say where the app's binds go when a
+// post_bind hook did not attach (sayBindFallback): nothing under the
+// customizer's FlagObserveOnly, where the bind hooks move no bind.
+func (h *Hooks) sendFinalAgentInfo(info structs.AgentInfo, start func(*structs.AgentInfo) error, send func(structs.AgentInfo) error) error {
+	// Allow downstream builds to mutate AgentInfo (e.g. set the Flags
+	// slot consumed by the BPF cgroup hooks) before it is written.
+	if agent.AgentInfoCustomizer != nil {
+		agent.AgentInfoCustomizer(&info)
+	}
+
+	// OR'd in after the customizer so a downstream build setting its own
+	// flags cannot accidentally clear it, and only when both post_bind
+	// hooks are attached — bind4/6 must not hand the port choice to the
+	// kernel unless something is listening for the kernel's answer.
+	if h.kernelPortAlloc {
+		info.Flags |= structs.FlagKernelPortAlloc
+	}
+	info.Flags = classifyFlag(info.Flags, h.socket != nil)
+	// The bind hooks note what the app binds for the ingress hold only
+	// once both its programs are attached (ingressport.go).
+	info.Flags = ingressHoldFlag(info.Flags, h.IngressHeld())
+	if err := start(&info); err != nil {
+		return err
+	}
+	if err := send(info); err != nil {
+		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
+		return err
+	}
+	h.sayBindFallback(info.Flags)
 	return nil
 }
 
@@ -676,63 +714,44 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		agentInfo.RecordingStartTime = recordingStart(h.logger, hostRecordingStart())
 	}
 
-	// Allow downstream builds to mutate AgentInfo (e.g. set the Flags
-	// slot consumed by the BPF cgroup hooks) before it is written.
-	if agent.AgentInfoCustomizer != nil {
-		agent.AgentInfoCustomizer(&agentInfo)
-	}
+	err = h.sendFinalAgentInfo(agentInfo, func(info *structs.AgentInfo) error {
+		// Under the proven switch, the application's non-DNS UDP is watched
+		// for replies, and QUIC refused (udpwatch.go).
+		udpFlags, err := h.startProvenUDP(cGroupPath)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to start the proven switch's UDP watch")
+			return err
+		}
+		info.Flags &^= structs.FlagProvenUDP
+		info.Flags |= udpFlags
+		// Under the proven switch, the application's listens and the
+		// progress of its start, for keploy test's readiness (readywatch.go).
+		readyFlags, err := h.startProvenReady(cGroupPath, opts.IsDocker, opts.Mode)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to start the proven switch's readiness watch")
+			return err
+		}
+		info.Flags &^= structs.FlagProvenReady
+		info.Flags |= readyFlags
 
-	// OR'd in after the customizer so a downstream build setting its own
-	// flags cannot accidentally clear it, and only when both post_bind
-	// hooks are attached — bind4/6 must not hand the port choice to the
-	// kernel unless something is listening for the kernel's answer.
-	if h.kernelPortAlloc {
-		agentInfo.Flags |= structs.FlagKernelPortAlloc
-	}
-	agentInfo.Flags = classifyFlag(agentInfo.Flags, h.socket != nil)
-	// The bind hooks note what the app binds for the ingress hold only
-	// once both its programs are attached (ingressport.go).
-	agentInfo.Flags = ingressHoldFlag(agentInfo.Flags, h.IngressHeld())
-	// Under the proven switch, the application's non-DNS UDP is watched for
-	// replies, and QUIC refused (udpwatch.go).
-	udpFlags, err := h.startProvenUDP(cGroupPath)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to start the proven switch's UDP watch")
-		return err
-	}
-	agentInfo.Flags &^= structs.FlagProvenUDP
-	agentInfo.Flags |= udpFlags
-	// Under the proven switch, the application's listens and the progress
-	// of its start, for keploy test's readiness (readywatch.go).
-	readyFlags, err := h.startProvenReady(cGroupPath, opts.IsDocker, opts.Mode)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to start the proven switch's readiness watch")
-		return err
-	}
-	agentInfo.Flags &^= structs.FlagProvenReady
-	agentInfo.Flags |= readyFlags
-
-	// A client keploy cannot register would have none of its pass-through
-	// ports bypassed, so the start fails here rather than going on without them.
-	if err := h.registerClient(clientInfo, setupOpts); err != nil {
-		return fmt.Errorf("failed to register the client's pass-through ports with the kernel: %w", err)
-	}
-	logKernelPassThroughEgress(ctx, h.logger, setupOpts, opts.Rules)
-	proxyInfo, err := h.resolveProxyInfo(ctx, setupOpts, opts)
+		// A client keploy cannot register would have none of its
+		// pass-through ports bypassed, so the start fails here rather than
+		// going on without them.
+		if err := h.registerClient(clientInfo, setupOpts); err != nil {
+			return fmt.Errorf("failed to register the client's pass-through ports with the kernel: %w", err)
+		}
+		logKernelPassThroughEgress(ctx, h.logger, setupOpts, opts.Rules)
+		proxyInfo, err := h.resolveProxyInfo(ctx, setupOpts, opts)
+		if err != nil {
+			return err
+		}
+		h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
+		info.Proxy = proxyInfo
+		return nil
+	}, h.SendAgentInfo)
 	if err != nil {
 		return err
 	}
-	h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
-
-	agentInfo.Proxy = proxyInfo
-	err = h.SendAgentInfo(agentInfo)
-	if err != nil {
-		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
-		return err
-	}
-	// The flags are final and the bind hooks read them from here: say where
-	// the app's binds go when a post_bind hook did not attach.
-	h.sayBindFallback(agentInfo.Flags)
 
 	// With the flag set: the kernel records the agent's own mount namespace
 	// (its container), so what runs in its container is not the application's progress

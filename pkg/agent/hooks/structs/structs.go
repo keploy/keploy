@@ -18,10 +18,11 @@ const (
 	// forwarder. Unset, the hooks pick a port no socket listens on
 	// themselves, outside the network namespace's ephemeral range, or leave
 	// the bind on the port the app names when there is none, so a cgroup
-	// setup that rejects the post_bind attach still starts (the agent says
-	// which: linux.warnBindFallback). (A LOAD failure is not
-	// covered and cannot be: LoadAndAssign fails the whole object, as it
-	// already does for every other program in it.)
+	// setup that rejects the post_bind attach still starts. The agent says
+	// which once its flags are final (linux's sayBindFallback), and does
+	// not warn under FlagObserveOnly, where the hooks move no bind. (A LOAD
+	// failure is not covered and cannot be: LoadAndAssign fails the whole
+	// object, as it already does for every other program in it.)
 	FlagKernelPortAlloc uint32 = 1 << 1
 	// FlagProvenUDP (bit 2), set under the proven switch with the UDP
 	// watch's programs attached (udpwatch.go): the cgroup hooks register a
