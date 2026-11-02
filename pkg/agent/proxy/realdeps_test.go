@@ -786,12 +786,16 @@ func TestARefusedDialToAContainerPlacedMeanwhileCountsAtOnce(t *testing.T) {
 	k.Bind(session)
 	k.Watch(session, zap.NewNop())
 	containerkey.Default = k
-	p.realTracker.BeginTest()
-	d := p.decideHandshake(fakeHandshakeDest{dest: ipv4Dest(t, refused)})(context.Background(), appEnd, proxyEnd)
+	// Two test workers' tests open: the failure is worker 4's, whose
+	// instance the kernel stamped the connect with.
+	twoWorkers(p)
+	dest := ipv4Dest(t, refused)
+	dest.Instance = 4
+	d := p.decideHandshake(fakeHandshakeDest{dest: dest})(context.Background(), appEnd, proxyEnd)
 	require.Equal(t, synhold.Refuse, d.Outcome)
-	uses, inc := p.realTracker.EndTest()
-	require.Equal(t, []models.RealUse{{Dest: "container:redis", Failed: 1}}, uses, "the failure was not counted when it was decided")
-	require.Empty(t, inc)
+	mine := endWorkers(t, p)
+	require.Equal(t, []models.RealUse{{Dest: "container:redis", Failed: 1}}, mine.Uses, "the failure was not counted when it was decided")
+	require.Empty(t, mine.Incomplete)
 }
 
 // A refused connect to a localhost entry's IPv4 loopback written the
@@ -956,4 +960,118 @@ type readSignal struct {
 func (c *readSignal) Read(p []byte) (int, error) {
 	c.once.Do(func() { close(c.started) })
 	return c.Conn.Read(p)
+}
+
+// workerFour is a connection's origin in test worker 4's keploy instance.
+var workerFour = realdeps.Origin{Instance: 4, Pid: 1004}
+
+// twoWorkers opens test worker 9's test, then worker 4's, on p's tracker.
+func twoWorkers(p *Proxy) {
+	p.realTracker.BeginTestOf(9)
+	p.realTracker.BeginTestOf(4)
+}
+
+// endWorkers ends both tests twoWorkers opened, requires that worker 9's
+// holds nothing and that worker 4's holds nothing unattributed, and returns
+// worker 4's.
+func endWorkers(t *testing.T, p *Proxy) realdeps.TestEnd {
+	t.Helper()
+	other := p.realTracker.EndTestOf(9)
+	require.Empty(t, other.Uses, "worker 9's REAL row")
+	require.Empty(t, other.Incomplete, "worker 9's evidence")
+	require.Empty(t, other.Unattributed, "worker 9's unattributed uses")
+	mine := p.realTracker.EndTestOf(4)
+	require.Empty(t, mine.Unattributed, "worker 4's own connection is never unattributed")
+	return mine
+}
+
+func serveRealFrom(p *Proxy, accepted net.Conn, dst string, from realdeps.Origin) chan served {
+	out := make(chan served, 1)
+	go func() {
+		h, c, err := p.serveReal(context.Background(), accepted, dst, "", 1, from, nil)
+		out <- served{h, c, err}
+	}()
+	return out
+}
+
+// sendAndRead writes b on app, half-closes it, and reads what comes back.
+func sendAndRead(t *testing.T, app net.Conn, b string) string {
+	t.Helper()
+	_, err := app.Write([]byte(b))
+	require.NoError(t, err)
+	require.NoError(t, app.(*net.TCPConn).CloseWrite())
+	got, _ := io.ReadAll(app)
+	return string(got)
+}
+
+// Two test workers' tests open at once: what a REAL connection from worker
+// 4's process does (the kernel stamped it with instance 4) is worker 4's
+// test's alone, whichever way it goes: relayed, h2c, refused at the dial or
+// at the handshake, ended by a name check, or closed before naming itself.
+// Worker 9's test holds nothing of it, and nothing is unattributed.
+func TestARealConnectionIsItsOwnWorkersTestsWhicheverWayItGoes(t *testing.T) {
+	dst := realServer(t)
+	_, portText, _ := net.SplitHostPort(dst)
+	named := "api.test:" + portText
+
+	p := realProxy(t, []string{dst}, nil)
+	twoWorkers(p)
+	app, accepted := realConnPair(t)
+	done := serveRealFrom(p, accepted, dst, workerFour)
+	require.Equal(t, "real:hello", sendAndRead(t, app, "hello"))
+	require.True(t, (<-done).handled)
+	require.Equal(t, []models.RealUse{{Dest: dst, Conns: 1}}, endWorkers(t, p).Uses, "relayed")
+
+	// The one name keploy's DNS gave the address makes it REAL at the
+	// accept, with its names checked: h2c's are not read, and its row says
+	// so.
+	p = realProxy(t, []string{named}, map[string]string{"api.test": "127.0.0.1"})
+	p.real.Load().book.Answered("api.test", []netip.Addr{netip.MustParseAddr("127.0.0.1")})
+	twoWorkers(p)
+	app, accepted = realConnPair(t)
+	done = serveRealFrom(p, accepted, dst, workerFour)
+	preface := "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+	require.Equal(t, "real:"+preface, sendAndRead(t, app, preface))
+	require.True(t, (<-done).handled)
+	require.Equal(t, []models.RealUse{{Dest: named, Conns: 1, H2: true}}, endWorkers(t, p).Uses, "h2c")
+
+	refused := testnet.RefusedAddr(t, "tcp")
+	p = realProxy(t, []string{refused}, nil)
+	twoWorkers(p)
+	_, accepted = realConnPair(t)
+	require.True(t, (<-serveRealFrom(p, accepted, refused, workerFour)).handled)
+	require.Equal(t, []models.RealUse{{Dest: refused, Failed: 1}}, endWorkers(t, p).Uses, "refused at the dial")
+
+	p = realProxy(t, []string{refused}, nil)
+	p.setSession(&agent.Session{Mode: models.MODE_TEST, OutgoingOptions: models.OutgoingOptions{Mocking: true}})
+	twoWorkers(p)
+	dest := ipv4Dest(t, refused)
+	dest.Instance, dest.KernelPid = workerFour.Instance, workerFour.Pid
+	d := p.decideHandshake(fakeHandshakeDest{dest: dest})(context.Background(), appEnd, proxyEnd)
+	require.Equal(t, synhold.Refuse, d.Outcome)
+	require.Equal(t, []models.RealUse{{Dest: refused, Failed: 1}}, endWorkers(t, p).Uses, "refused at the handshake")
+
+	// Two names on the address: the first request's names it, the second's
+	// is one mock.real does not list, and keploy ends the connection.
+	p = realProxy(t, []string{named}, map[string]string{"api.test": "127.0.0.1", "web.test": "127.0.0.1"})
+	twoWorkers(p)
+	app, accepted = realConnPair(t)
+	done = serveRealFrom(p, accepted, dst, workerFour)
+	sendAndRead(t, app, "GET / HTTP/1.1\r\nHost: api.test\r\n\r\nGET / HTTP/1.1\r\nHost: web.test\r\n\r\n")
+	require.True(t, (<-done).handled)
+	mine := endWorkers(t, p)
+	require.Equal(t, []models.RealUse{{Dest: named, Conns: 1}}, mine.Uses, "its first request went")
+	require.Len(t, mine.Incomplete, 1, "a name check ended it")
+	require.Contains(t, mine.Incomplete[0].Why, "web.test")
+
+	p = realProxy(t, []string{"db.test:3306"}, map[string]string{"db.test": "127.0.0.1"})
+	twoWorkers(p)
+	app, accepted = realConnPair(t)
+	done = serveRealFrom(p, accepted, "127.0.0.1:3306", workerFour)
+	require.NoError(t, app.Close())
+	require.True(t, (<-done).handled)
+	mine = endWorkers(t, p)
+	require.Empty(t, mine.Uses)
+	require.Len(t, mine.Incomplete, 1, "closed before naming itself")
+	require.Contains(t, mine.Incomplete[0].Why, "before naming it")
 }

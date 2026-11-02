@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -137,5 +138,35 @@ func TestEachConnectionsMocksCarryTheWorkerInstanceTheKernelStampedItWith(t *tes
 	}
 	if err := awaitEvent(t, hdone, "handleConnection returning"); err != nil {
 		t.Fatalf("handleConnection: %v", err)
+	}
+}
+
+// A connection handleConnection relays to a mock.real destination carries the
+// keploy instance the kernel stamped it with to the REAL bookkeeping: with
+// two test workers' tests open, its send is in its worker's REAL row, and
+// nothing of it is the other worker's, or unattributed.
+func TestARelayedRealConnectionIsTheWorkerInstanceTheKernelStampedItWith(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	dst := realServer(t)
+	dest := ipv4Dest(t, dst)
+	dest.KernelPid, dest.Instance = uint32(os.Getpid()), 4
+	p, _ := instanceProxy(t, dest, nil)
+	list, err := realdeps.Parse([]string{dst})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.real.Store(&realState{list: list, book: &realdeps.Book{}})
+	twoWorkers(p)
+	app, src := acceptedConn(t)
+	hdone := make(chan error, 1)
+	go func() { hdone <- p.handleConnection(context.Background(), p.inflight.track(src)) }()
+	if got := sendAndRead(t, app, "hello"); got != "real:hello" {
+		t.Fatalf("the app read %q, want the real destination's answer", got)
+	}
+	if err := awaitEvent(t, hdone, "handleConnection returning"); err != nil {
+		t.Fatalf("handleConnection: %v", err)
+	}
+	if got := endWorkers(t, p).Uses; len(got) != 1 || got[0] != (models.RealUse{Dest: dst, Conns: 1}) {
+		t.Fatalf("worker 4's REAL row: %+v, want its one relayed connection to %s", got, dst)
 	}
 }

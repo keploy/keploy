@@ -507,5 +507,27 @@ func TestAWorkersTestLeftOpenIsItsOwnToDrop(t *testing.T) {
 	tr.Dialed(worker(2), 2, "cache:6379", true)
 	run = tr.Run()
 	require.Len(t, run.Incomplete, 2, "an interrupt gives the run every open test's")
+	require.Equal(t, []string{"10.0.0.2:443", "10.0.0.3:443"},
+		[]string{run.Incomplete[0].Destination, run.Incomplete[1].Destination}, "in the order the tests began")
 	require.Equal(t, []string{"cache:6379"}, run.Outside, "reached with no test open")
+}
+
+// A failed connect still untold is charged once: by the end of a test it
+// failed in, or by a read, which then holds it. A later read, that test's
+// end, or its tell that it is unresolved charges it again nowhere.
+func TestAFailedConnectChargedByAnEndOrAReadIsChargedOnce(t *testing.T) {
+	tr := newTracker()
+	tr.BeginTestOf(1)
+	ended := tr.FailedUndecided(worker(1), "127.0.0.1:6379")
+	require.Len(t, tr.EndTestOf(1).Incomplete, 1, "undecided when its test ended")
+	require.Empty(t, tr.Run().Incomplete, "its test's end holds it, not the run")
+	ended("", true)
+	require.Empty(t, tr.Run().Incomplete, "told unresolved after its test's end holds it")
+
+	tr.BeginTestOf(1)
+	read := tr.FailedUndecided(worker(1), "127.0.0.1:6380")
+	require.Len(t, tr.Run().Incomplete, 1, "a read while its test is open: the run's")
+	require.Empty(t, tr.EndTestOf(1).Incomplete, "the read holds it, not its test's end")
+	read("", true)
+	require.Empty(t, tr.Run().Incomplete, "told unresolved after a read held it")
 }
