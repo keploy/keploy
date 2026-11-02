@@ -341,3 +341,84 @@ func TestAGoneReplayWorkersOpenTestFails(t *testing.T) {
 	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
 	require.Contains(t, w.Evidence.Reason, "the test worker's process exited while the test was open")
 }
+
+// lossWire is an instanceWire whose proxy counts the calls it refused, as
+// the proxy does each connection of no served worker's.
+type lossWire struct {
+	*instanceWire
+	lmu    sync.Mutex
+	losses models.CaptureLosses
+}
+
+func (p *lossWire) CaptureLosses() models.CaptureLosses {
+	p.lmu.Lock()
+	defer p.lmu.Unlock()
+	return append(models.CaptureLosses(nil), p.losses...)
+}
+
+// refuse counts the proxy's n-th refused call so far.
+func (p *lossWire) refuse(n uint64) {
+	p.lmu.Lock()
+	defer p.lmu.Unlock()
+	p.losses = models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: n, What: fmt.Sprintf("the latest: a connection to 10.0.0.9:5432, from process %d, in no test worker's keploy instance", 4000+n)}}
+}
+
+// A call a replay of test workers refused is charged to the test open when
+// it was made, and leaves it without a verdict; one made while no test was
+// open is the next test's, whichever worker's. A test that began after a
+// refusal was charged is not charged it again.
+func TestAReplaysRefusedCallIsChargedToTheTestOpenThenAlone(t *testing.T) {
+	a, iw, _ := instanceAgent(t, models.MODE_TEST)
+	p := &lossWire{instanceWire: iw}
+	a.Proxy = p
+	ctx := context.Background()
+	a.proven.losses = a.markCaptureLosses(ctx)
+	a.proven.pool = map[string][]string{"a": {"pa"}, "b": {"pb"}}
+	w1, w2 := child(t), child(t)
+	_, serr := claimAsWorker(a, w1.Process.Pid, "a")
+	require.Nil(t, serr)
+	_, serr = claimAsWorker(a, w2.Process.Pid, "b")
+	require.Nil(t, serr)
+	run := func(pid int, name string, during func()) {
+		t.Helper()
+		_, serr := a.ProvenBegin(as(pid), begin(name))
+		require.Nil(t, serr)
+		during()
+		_, serr = a.ProvenEnd(as(pid), models.ScopeReq{Name: name, Outcome: models.ScopeOutcomePassed})
+		require.Nil(t, serr)
+	}
+	// The windows so far, not the run's final read, which ends the run.
+	windowNow := func(id string) models.ScopeWindow {
+		t.Helper()
+		for _, w := range a.scopeWindowsNow() {
+			if w.Name == id {
+				return w
+			}
+		}
+		t.Fatalf("no window of %s", id)
+		return models.ScopeWindow{}
+	}
+	charged := func(id string) models.CaptureLosses {
+		t.Helper()
+		if w := windowNow(id); w.Evidence != nil {
+			return w.Evidence.CannotCapture
+		}
+		return nil
+	}
+	refused := func(pid uint64) models.CaptureLosses {
+		return models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1, What: fmt.Sprintf("the latest: a connection to 10.0.0.9:5432, from process %d, in no test worker's keploy instance", pid)}}
+	}
+
+	run(w1.Process.Pid, "TestOne", func() { p.refuse(1) })
+	require.Equal(t, refused(4001), charged("a::TestOne"), "worker 1's test was open as the call was refused")
+	w := windowNow("a::TestOne")
+	require.Equal(t, models.ScopeOutcomePassed, w.Outcome, "a refused call leaves the test without a verdict, never failed")
+	require.Contains(t, w.Evidence.Reason, "a replay refuses them unanswered")
+
+	run(w2.Process.Pid, "TestTwo", func() {})
+	require.Empty(t, charged("b::TestTwo"), "a test begun after the refusal was charged is charged it again")
+
+	p.refuse(2)
+	run(w1.Process.Pid, "TestThree", func() {})
+	require.Equal(t, refused(4002), charged("a::TestThree"), "a call refused while no test was open is the next test's")
+}

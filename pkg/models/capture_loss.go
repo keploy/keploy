@@ -253,23 +253,27 @@ const (
 	// it outlives). What names the latest program and its pid. Only under
 	// the proven switch.
 	CaptureLossProcessUnshimmed CaptureLossKind = "process_unshimmed"
-	// CaptureLossUnattributed: in a run of more than one test worker, the
-	// application made a call from a process in no test worker's keploy
-	// instance (one the test command did not start inside a worker, such as
-	// a server every worker shares) while workers' tests were open: keploy
-	// recorded it, but cannot tell which of those tests made it, so it is
-	// in none of their recordings. Each test open at its time is charged
-	// with it and left without a verdict (NotJudged), never failed. The
-	// record charges it itself, as the agent's counts never hold it, and
-	// not as a test's own (PerTest): the call may have been any of those
-	// tests'. What names the latest such call and its process.
+	// CaptureLossUnattributed: in a run of test workers, the application
+	// made a call from a process in no test worker's keploy instance (one
+	// the test command did not start inside a worker, such as a server
+	// every worker shares) while workers' tests were open, or, in a replay,
+	// from a process of a worker keploy does not serve (it ended, or keploy
+	// never began serving it): keploy cannot tell which test made it. A
+	// record keeps it in none of the tests' recordings, and charges it
+	// itself to each test open at its time, from the mocks it recorded. A
+	// replay refuses it unanswered, and the proxy counts the refusal, which
+	// is a test's own (PerTest): it charges each test open when it was made
+	// (the call may have been any of theirs), and, made while none was, the
+	// next test. Either way a test charged with it is left without a verdict
+	// (NotJudged), never failed. What names the latest such call and its
+	// process.
 	CaptureLossUnattributed CaptureLossKind = "call_unattributed"
 )
 
 // UnattributedRemedy is what to do about a call from a process in no test
 // worker's keploy instance while workers' tests were open
 // (CaptureLossUnattributed).
-const UnattributedRemedy = "start the process that made the call inside each test worker (a worker fixture that starts the application on its own port), or run one test worker"
+const UnattributedRemedy = "start the process that made the call inside each test worker (a worker fixture that starts the application on its own port), and stop it before its worker ends, or run one test worker"
 
 // ContainerUnreadMetadata is the mock metadata field the agent stamps a mock
 // with when the Docker daemon did not answer keploy's read of its
@@ -626,6 +630,10 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 //   - a program of the run keploy's shim is not in (process_unshimmed),
 //     counted as it starts and again at each read it outlives, so each
 //     test it runs in is charged it, and no test after it ends.
+//   - a connection a replay of test workers refused unanswered, made by a
+//     process in no served worker's instance (call_unattributed): no test
+//     can be told to have made it, so the count lands in each test open
+//     then, every one of them charged.
 //
 // One between two tests is the next test's, as a miss between tests is;
 // one before a test process's claim, or after the run's last test, is the
@@ -643,7 +651,7 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 // build does not know. (CaptureLossRealUncaptured is a test's own too, but never in the
 // agent's counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
-	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded || k == CaptureLossAppBytesLost || k == CaptureLossProcessUnshimmed
+	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded || k == CaptureLossAppBytesLost || k == CaptureLossProcessUnshimmed || k == CaptureLossUnattributed
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
@@ -849,7 +857,7 @@ func captureLossText(c CaptureLoss) string {
 	case CaptureLossProcessUnshimmed:
 		return fmt.Sprintf("a process of the run ran a program keploy's shim is not in (macOS drops DYLD_INSERT_LIBRARIES for a platform, hardened-runtime or restricted binary), so keploy saw none of its calls while this test ran (found %d time(s): as it started, and at each test end it outlived)", c.Count)
 	case CaptureLossUnattributed:
-		return fmt.Sprintf("the application made %d call(s) from a process in no test worker's keploy instance while this test was open, in a run of more than one test worker, so keploy cannot tell which test made them, and they are in none of the open tests' recordings", c.Count)
+		return fmt.Sprintf("the application made %d call(s) from a process in no test worker's keploy instance, or in that of a worker keploy does not serve, while this test was open (or, in a replay, while no test was, before it began), in a run of test workers, so keploy cannot tell which test made them: a record keeps them in none of the tests' recordings, and a replay refuses them unanswered", c.Count)
 	case CaptureLossAgentStartedAgain:
 		return "keploy's agent was started again while the application ran on, and what the agent before counted went with it: a process of the application's that it could not place, or a call keploy cannot capture at all, may taint this test, and the new agent cannot see it (keploy judges the tests again once it starts the application anew)"
 	default:

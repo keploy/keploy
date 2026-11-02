@@ -27,7 +27,8 @@ import (
 // From the first worker served until the run's manager is replaced (a new
 // session), a connection from no worker, or from a worker whose manager was
 // stopped or never made, is refused: no manager can tell which test made
-// it, and none of them may answer it.
+// it, and none of them may answer it. Each refusal is counted as a call
+// keploy cannot attribute (refuseUnserved), never only logged.
 
 // errNoWorkerInstance refuses a connection the kernel stamped with no test
 // worker while workers are served.
@@ -305,7 +306,15 @@ var (
 
 // refuseUnserved is the error that ends a connection no test worker's
 // manager may answer (connManager's refusal), before anything answers it:
-// which process made it, and where it went.
-func refuseUnserved(dest *agent.NetworkAddress, dst string, why error) error {
+// which process made it, and where it went. The refusal is counted as a
+// call keploy cannot attribute (models.CaptureLossUnattributed), which
+// leaves each test open as it was made without a verdict: the call went
+// unanswered, and any of them may have made it, or waited on it.
+func (p *Proxy) refuseUnserved(dest *agent.NetworkAddress, dst string, why error) error {
+	what := fmt.Sprintf("the latest: a connection to %s, from process %d, in no test worker's keploy instance", dst, dest.KernelPid)
+	if dest.Instance != 0 {
+		what = fmt.Sprintf("the latest: a connection to %s, from process %d of test worker instance %d, which keploy does not serve (the worker ended, or keploy never began serving it)", dst, dest.KernelPid, dest.Instance)
+	}
+	p.losses.Add(models.CaptureLossUnattributed, what)
 	return fmt.Errorf("keploy refused a call of process %d (test worker instance %d) to %s: %w", dest.KernelPid, dest.Instance, dst, why)
 }
