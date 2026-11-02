@@ -213,6 +213,17 @@ type TestSetOrderer interface {
 	OrderTestSets(testSets []string) []string
 }
 
+// CoverageOnlyHook is an optional extension to TestHooks.
+// Start detects it via type assertion. A test set it names runs, once and
+// after every other set, only for the code coverage its tests take: its
+// result counts in nothing of the run's, not its verdict or exit code, not
+// its totals or summary, and it is not among the sets AfterTestRun is handed.
+// Enterprise cloud replay names the previous build's kept tests this way.
+// Hooks without it run every set as counted.
+type CoverageOnlyHook interface {
+	CoverageOnly(testSetID string) bool
+}
+
 type Storage interface {
 	Upload(ctx context.Context, file io.Reader, mockName string, appName string, jwtToken string) error // 3
 	Download(ctx context.Context, mockName string, appName string, userName string, jwtToken string) (io.Reader, error)

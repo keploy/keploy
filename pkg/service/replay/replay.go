@@ -1082,12 +1082,15 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// cmdType is hoisted above the one-shot RunApplication block; the
 	// original assignment that lived here is removed to keep a single
 	// canonical declaration.
-	r.testRunTestSets = testSets
+	// AfterTestRun is handed the counted sets only (CoverageOnlyHook), here
+	// and from RunTestSet.
+	r.testRunTestSets = r.countedTestSets(testSets)
 	r.testRunID = testRunID
 	r.firstRun = true
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
+		coverageOnly := r.coverageOnly(testSet)
 
 		err := r.hookImpl.BeforeTestSetRun(ctx, testSet)
 		if err != nil {
@@ -1181,9 +1184,29 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			// The set's exact plan is this run's: a run that ends before it
 			// makes one tells its end hooks no earlier set's shares.
 			r.exact = nil
-			r.finalAttempt = noAttemptFollows(attempt, r.config.Test)
+			r.finalAttempt = coverageOnly || noAttemptFollows(attempt, r.config.Test)
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, effectiveKeepAlive)
 			r.tellSetEnd(testSet, testSetStatus, err)
+			if coverageOnly {
+				// A set run only for its coverage runs once and counts in
+				// nothing of the run's, failed, errored or halted: its tests
+				// leave the totals and the summary as they were. Only its
+				// user stopping the run ends the run.
+				if err != nil && ctx.Err() == context.Canceled {
+					return err
+				}
+				if err == nil && testSetStatus == models.TestSetStatusUserAbort {
+					return nil
+				}
+				r.completeTestReportMu.Lock()
+				r.totalTests, r.totalTestPassed, r.totalTestFailed = initTotal, initPassed, initFailed
+				r.totalTestObsolete, r.totalTestIgnored, r.totalTestTimeTaken = initObsolete, initIgnored, initTimeTaken
+				delete(r.completeTestReport, testSet)
+				r.completeTestReportMu.Unlock()
+				r.logger.Info("ran a test set for code coverage only: its result does not count in this run",
+					zap.String("testSet", testSet), zap.String("status", string(testSetStatus)), zap.Error(err))
+				break
+			}
 			if err != nil {
 				if ctx.Err() == context.Canceled {
 					return err
@@ -1504,7 +1527,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			if cmdType == utils.DockerCompose && r.instrument && !effectiveKeepAlive {
 				hookCtx = withoutAgent(ctx)
 			}
-			err = r.hookImpl.AfterTestRun(hookCtx, testRunID, testSets, coverageData)
+			err = r.hookImpl.AfterTestRun(hookCtx, testRunID, r.testRunTestSets, coverageData)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to execute after test run hook")
 			}
@@ -8776,15 +8799,42 @@ func (r *Replayer) selectTestSets(testSetIDs []string) ([]string, error) {
 }
 
 func (r *Replayer) applyTestSetOrder(testSets []string) []string {
-	orderer, ok := r.hookImpl.(TestSetOrderer)
-	if !ok {
+	if orderer, ok := r.hookImpl.(TestSetOrderer); ok {
+		if reordered := orderer.OrderTestSets(testSets); len(reordered) == len(testSets) {
+			testSets = reordered
+		}
+	}
+	// The sets run only for their coverage go last, in the order they had,
+	// so the counted sets run as they would without them.
+	counted := r.countedTestSets(testSets)
+	if len(counted) == len(testSets) {
 		return testSets
 	}
-	reordered := orderer.OrderTestSets(testSets)
-	if len(reordered) != len(testSets) {
-		return testSets
+	for _, id := range testSets {
+		if r.coverageOnly(id) {
+			counted = append(counted, id)
+		}
 	}
-	return reordered
+	return counted
+}
+
+// coverageOnly reports whether the hooks name testSetID a set run only for its
+// code coverage (CoverageOnlyHook).
+func (r *Replayer) coverageOnly(testSetID string) bool {
+	h, ok := r.hookImpl.(CoverageOnlyHook)
+	return ok && h.CoverageOnly(testSetID)
+}
+
+// countedTestSets is testSets without the sets run only for their coverage:
+// the sets whose results are the run's.
+func (r *Replayer) countedTestSets(testSets []string) []string {
+	counted := make([]string, 0, len(testSets))
+	for _, id := range testSets {
+		if !r.coverageOnly(id) {
+			counted = append(counted, id)
+		}
+	}
+	return counted
 }
 
 func (r *Replayer) StoreMappings(ctx context.Context, mapping *models.Mapping) error {
