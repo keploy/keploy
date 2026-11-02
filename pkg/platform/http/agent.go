@@ -3962,10 +3962,14 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 // container (stopAgentContainerFor) and then kills the client -- through
 // cmd.Process, not its raw pid, which cmd.Wait may have reaped already. The
 // client was waiting for the container's removal (--rm), so the engine is
-// asked first to say when it is removed (removal).
+// asked first to say when it is removed (removal), within keploy's bound on
+// an answer from its daemon: a daemon that does not answer does not hold the
+// stop.
 func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name string, removal *kdocker.RemovalWatch) func() error {
 	return func() error {
-		removal.Watch()
+		ask, release := withRunnableBound(context.Background(), daemonAnswerStall, errDaemonSilent)
+		removal.Watch(ask)
+		release()
 		stopAgentContainerFor(logger, run, name)
 		if cmd.Process == nil {
 			return nil

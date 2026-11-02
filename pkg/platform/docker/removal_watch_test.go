@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/errdefs"
@@ -72,7 +73,7 @@ func TestRemovalWatchWaitsForTheEnginesWord(t *testing.T) {
 		for _, answer := range []string{"removed", "not found"} {
 			f := newFakeRemovals(inspect)
 			w := NewRemovalWatch(f, "keploy-v3-0a1b2c3d4e5f6071")
-			w.Watch()
+			w.Watch(context.Background())
 			if len(f.asked) != 1 || f.asked[0] != container.WaitConditionRemoved {
 				t.Fatalf("%s: Watch asked the engine for %v, want one wait for the removal", name, f.asked)
 			}
@@ -116,7 +117,7 @@ func TestRemovalWatchWaitsForTheEnginesWord(t *testing.T) {
 func TestRemovalWatchDoesNotWaitForARunningContainer(t *testing.T) {
 	f := newFakeRemovals(inspectState(&container.State{Status: container.StateRunning, Running: true}))
 	w := NewRemovalWatch(f, "keploy-v3-0a1b2c3d4e5f6071")
-	w.Watch()
+	w.Watch(context.Background())
 	returned := waitInBackground(context.Background(), w)
 	select {
 	case <-returned:
@@ -150,10 +151,59 @@ func TestRemovalWatchEndsWithItsContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	f := newFakeRemovals(goneByInspect)
 	w := NewRemovalWatch(f, "keploy-v3-0a1b2c3d4e5f6071")
-	w.Watch()
+	w.Watch(context.Background())
 	cancel()
 	<-waitInBackground(ctx, w)
 	if f.askedCtx.Err() == nil {
 		t.Error("the engine's wait outlived Wait")
+	}
+}
+
+// silentDaemon is an engine whose daemon does not take a wait's question:
+// ContainerWait returns only once its context ends, as the engine's client
+// does, with that end on its error channel.
+type silentDaemon struct{ asked chan struct{} }
+
+func (d *silentDaemon) ContainerWait(ctx context.Context, _ string, _ container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+	close(d.asked)
+	<-ctx.Done()
+	failed := make(chan error, 1)
+	failed <- ctx.Err()
+	return make(chan container.WaitResponse), failed
+}
+
+func (d *silentDaemon) ContainerInspect(context.Context, string) (container.InspectResponse, error) {
+	return container.InspectResponse{}, nil
+}
+
+// A daemon that does not take the question holds Watch only until its ask
+// ends: the question is withdrawn, so the stop goes on, and Wait finds the
+// engine's wait ended and returns at once.
+func TestRemovalWatchWithdrawsAnUntakenQuestionWhenItsAskEnds(t *testing.T) {
+	d := &silentDaemon{asked: make(chan struct{})}
+	w := NewRemovalWatch(d, "keploy-v3-0a1b2c3d4e5f6071")
+	ask, end := context.WithCancel(context.Background())
+	returned := make(chan struct{})
+	go func() { w.Watch(ask); close(returned) }()
+	<-d.asked
+	end()
+	<-returned
+	<-waitInBackground(context.Background(), w)
+}
+
+// A question the engine has taken outlives Watch's ask: the ask bounds only
+// the engine's taking it, and Wait needs the engine's answer after the stop.
+func TestRemovalWatchKeepsATakenQuestionPastItsAsk(t *testing.T) {
+	f := newFakeRemovals(goneByInspect)
+	w := NewRemovalWatch(f, "keploy-v3-0a1b2c3d4e5f6071")
+	ask, end := context.WithCancel(context.Background())
+	w.Watch(ask)
+	end()
+	// Only that it has not happened: the withdrawal, were it made, runs at
+	// once on the ask's end.
+	select {
+	case <-f.askedCtx.Done():
+		t.Fatal("the engine's wait ended with Watch's ask, after the engine had taken the question")
+	case <-time.After(200 * time.Millisecond):
 	}
 }

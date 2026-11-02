@@ -46,10 +46,15 @@ func NewRemovalWatch(api ContainerWaiter, name string) *RemovalWatch {
 }
 
 // Watch asks the engine to say when the container is removed. It returns
-// once the engine has taken the question: the engine answers a wait's
-// request only after it has registered it.
-func (w *RemovalWatch) Watch() {
+// once the engine has taken the question -- the engine answers a wait's
+// request only after it has registered it -- or once ask ends (keploy's
+// bound on an answer from the engine's daemon). A daemon that has not taken
+// the question by then is not waited for: the question is withdrawn, and the
+// stop goes on. Wait then finds the engine's wait ended and returns at once.
+func (w *RemovalWatch) Watch(ask context.Context) {
+	withdraw := context.AfterFunc(ask, w.cancel)
 	said, failed := w.api.ContainerWait(w.ctx, w.name, container.WaitConditionRemoved)
+	withdraw()
 	w.mu.Lock()
 	w.said, w.failed = said, failed
 	w.mu.Unlock()

@@ -193,28 +193,31 @@ func TestStartInDocker_MountsEachRunsOwnCAVolume(t *testing.T) {
 }
 
 // An embedder's run volume (kdocker.RunVolume) is each run's own in its agent
-// container: two runs' agents mount two volumes at its target.
+// container: two runs' agents mount two volumes at its target, whatever the
+// target.
 func TestStartInDocker_MountsEachRunsOwnEmbedderVolume(t *testing.T) {
 	prev := kdocker.DockerConfig.RunVolumes
-	kdocker.DockerConfig.RunVolumes = []kdocker.RunVolume{{Base: "keploy-sockets-vol", Target: "/tmp"}}
 	t.Cleanup(func() { kdocker.DockerConfig.RunVolumes = prev })
-	for _, agent := range []string{"keploy-v3-0a1b2c3d4e5f6071", "keploy-v3-8899aabbccddeeff"} {
-		calls := fakeDockerForStartInDocker(t)
-		a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{InstallationID: "install-id"}}
-		opts := models.SetupOptions{KeployContainer: agent, Mode: models.MODE_RECORD, AgentPort: 43902, ProxyPort: 16791, DnsPort: 26791}
-		if err := a.startInDocker(context.Background(), zap.NewNop(), opts, newAgentRun(), nil); err != nil {
-			t.Fatalf("startInDocker: %v", err)
-		}
-		words := strings.Fields(agentContainerRun(t, calls))
-		var mounts []string
-		for i, w := range words {
-			if w == "-v" && i+1 < len(words) && strings.HasSuffix(words[i+1], ":/tmp") {
-				mounts = append(mounts, words[i+1])
+	for _, v := range []kdocker.RunVolume{{Base: "keploy-sockets-vol", Target: "/tmp"}, {Base: "keploy-embed-vol", Target: "/srv/keploy-embed"}} {
+		kdocker.DockerConfig.RunVolumes = []kdocker.RunVolume{v}
+		for _, agent := range []string{"keploy-v3-0a1b2c3d4e5f6071", "keploy-v3-8899aabbccddeeff"} {
+			calls := fakeDockerForStartInDocker(t)
+			a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{InstallationID: "install-id"}}
+			opts := models.SetupOptions{KeployContainer: agent, Mode: models.MODE_RECORD, AgentPort: 43902, ProxyPort: 16791, DnsPort: 26791}
+			if err := a.startInDocker(context.Background(), zap.NewNop(), opts, newAgentRun(), nil); err != nil {
+				t.Fatalf("startInDocker: %v", err)
 			}
-		}
-		want := "keploy-sockets-vol-" + strings.TrimPrefix(agent, "keploy-v3-") + ":/tmp"
-		if len(mounts) != 1 || mounts[0] != want {
-			t.Errorf("agent %s: /tmp mounts %v, want only %s", agent, mounts, want)
+			words := strings.Fields(agentContainerRun(t, calls))
+			var mounts []string
+			for i, w := range words {
+				if w == "-v" && i+1 < len(words) && strings.HasSuffix(words[i+1], ":"+v.Target) {
+					mounts = append(mounts, words[i+1])
+				}
+			}
+			want := v.Base + "-" + strings.TrimPrefix(agent, "keploy-v3-") + ":" + v.Target
+			if len(mounts) != 1 || mounts[0] != want {
+				t.Errorf("agent %s: %s mounts %v, want only %s", agent, v.Target, mounts, want)
+			}
 		}
 	}
 }

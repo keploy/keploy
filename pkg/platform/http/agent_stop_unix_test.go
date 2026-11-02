@@ -39,6 +39,7 @@ import (
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -294,6 +295,13 @@ func TestDockerAgentCancel(t *testing.T) {
 		if watch.before != 0 || watch.cond != container.WaitConditionRemoved || watch.name != stopTestContainer {
 			t.Errorf("ready=%v: the engine was asked to wait for %q's %q after %d engine calls, want its removal asked before the stop's first", ready, watch.name, watch.cond, watch.before)
 		}
+		// Only that it has not happened: the wait the engine took outlives
+		// the stop, for the removal's Wait after it.
+		select {
+		case <-watch.ctx.Done():
+			t.Errorf("ready=%v: the engine's wait for the removal ended with the stop", ready)
+		case <-time.After(200 * time.Millisecond):
+		}
 		if err := client.Wait(); err == nil {
 			t.Fatalf("ready=%v: the docker client was not killed", ready)
 		}
@@ -301,18 +309,76 @@ func TestDockerAgentCancel(t *testing.T) {
 	}
 }
 
+// A daemon that does not take the removal's question does not hold the
+// stop: once keploy has had daemonAnswerStall of its own runnable time, the
+// question is withdrawn and the container is sent SIGTERM and waited for,
+// and the client is killed.
+func TestDockerAgentCancelDoesNotWaitOnASilentDaemon(t *testing.T) {
+	clk := &stall.ManualClock{}
+	boundClock = clk
+	t.Cleanup(func() { boundClock = nil })
+	log, release := fakeEngine(t)
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client := exec.Command("sleep", "300")
+	if err := client.Start(); err != nil {
+		t.Fatal(err)
+	}
+	run := newAgentRun()
+	run.ready.Store(true)
+	silent := &removalSilent{asked: make(chan struct{})}
+	cancelled := make(chan error, 1)
+	go func() {
+		cancelled <- dockerAgentCancel(zap.NewNop(), client, run, stopTestContainer, kdocker.NewRemovalWatch(silent, stopTestContainer))()
+	}()
+	<-silent.asked
+	// The bound's look at the clock is armed before the clock moves: a move
+	// made before would fire no timer.
+	for clk.Pending() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	clk.Advance(daemonAnswerStall)
+	within(t, "dockerAgentCancel", func() {
+		if err := <-cancelled; err != nil {
+			t.Errorf("cancel: %v", err)
+		}
+	})
+	if err := client.Wait(); err == nil {
+		t.Fatal("the docker client was not killed")
+	}
+	requireSignalledAndWaited(t, engineLines(t, log))
+}
+
+// removalSilent is an engine whose daemon does not take the removal's
+// question: ContainerWait returns only once its context ends.
+type removalSilent struct{ asked chan struct{} }
+
+func (r *removalSilent) ContainerWait(ctx context.Context, _ string, _ container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+	close(r.asked)
+	<-ctx.Done()
+	failed := make(chan error, 1)
+	failed <- ctx.Err()
+	return make(chan container.WaitResponse), failed
+}
+
+func (r *removalSilent) ContainerInspect(context.Context, string) (container.InspectResponse, error) {
+	return container.InspectResponse{}, nil
+}
+
 // removalAsked is the engine's API a removal watch asks: it records the
-// wait asked and how many engine CLI calls came before it.
+// wait asked, its context, and how many engine CLI calls came before it.
 type removalAsked struct {
 	t      *testing.T
 	log    string
 	before int
 	name   string
 	cond   container.WaitCondition
+	ctx    context.Context
 }
 
-func (r *removalAsked) ContainerWait(_ context.Context, name string, cond container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
-	r.before, r.name, r.cond = len(engineLines(r.t, r.log)), name, cond
+func (r *removalAsked) ContainerWait(ctx context.Context, name string, cond container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+	r.before, r.name, r.cond, r.ctx = len(engineLines(r.t, r.log)), name, cond, ctx
 	return make(chan container.WaitResponse), make(chan error)
 }
 

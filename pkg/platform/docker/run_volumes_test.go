@@ -176,6 +176,22 @@ func TestRunVolumesForAppGivesTheRunsOwnAndRenamesTheSharedName(t *testing.T) {
 			t.Errorf("%q: got %q, flags %q, renamed %v; want it unchanged and the run's own mount in the flags", cmd, out, flags, renamed)
 		}
 	}
+	// A volume at another target: its own target, both for the flag and for
+	// the mount renamed.
+	const embedOwn = "keploy-embed-vol-0a1b2c3d4e5f6071"
+	withRunVolumes(t, RunVolume{Base: "keploy-embed-vol", Target: "/srv/keploy-embed"})
+	if out, flags, renamed := RunVolumesForApp("docker run app", agent); out != "docker run app" || flags != "-v "+embedOwn+":/srv/keploy-embed " || renamed != nil {
+		t.Errorf("a volume at /srv/keploy-embed: got %q, flags %q, renamed %v; want the run's own mount at /srv/keploy-embed in the flags", out, flags, renamed)
+	}
+	if out, flags, renamed := RunVolumesForApp("docker run -v keploy-embed-vol:/srv/keploy-embed app", agent); out != "docker run -v "+embedOwn+":/srv/keploy-embed app" || flags != "" || !reflect.DeepEqual(renamed, []string{"keploy-embed-vol"}) {
+		t.Errorf("a volume at /srv/keploy-embed mounted bare: got %q, flags %q, renamed %v; want it renamed, no flags", out, flags, renamed)
+	}
+	if out, flags, renamed := RunVolumesForApp("docker run --mount type=volume,source=keploy-embed-vol,target=/srv/keploy-embed app", agent); out != "docker run --mount type=volume,source="+embedOwn+",target=/srv/keploy-embed app" || flags != "" || !reflect.DeepEqual(renamed, []string{"keploy-embed-vol"}) {
+		t.Errorf("a volume at /srv/keploy-embed mounted bare with --mount: got %q, flags %q, renamed %v; want it renamed, no flags", out, flags, renamed)
+	}
+	if out, flags, renamed := RunVolumesForApp("docker run -v keploy-embed-vol:/tmp app", agent); out != "docker run -v keploy-embed-vol:/tmp app" || flags != "-v "+embedOwn+":/srv/keploy-embed " || renamed != nil {
+		t.Errorf("a volume at /srv/keploy-embed mounted bare at /tmp: got %q, flags %q, renamed %v; want it left and the run's own mount in the flags", out, flags, renamed)
+	}
 	withRunVolumes(t)
 	if out, flags, renamed := RunVolumesForApp("docker run -v keploy-sockets-vol:/tmp app", agent); out != "docker run -v keploy-sockets-vol:/tmp app" || flags != "" || renamed != nil {
 		t.Errorf("with no run volumes named: got %q, %q, %v; want the command as it is", out, flags, renamed)
