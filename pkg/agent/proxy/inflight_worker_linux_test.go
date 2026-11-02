@@ -35,7 +35,7 @@ func TestEachWorkersWindowIsCutAndWaitedForOnItsOwnConnectionsOnly(t *testing.T)
 	if n, _ := px.InFlightScopeOf(1).State(true); n != 1 {
 		t.Fatalf("lost call: worker 1's call, held since before worker 2's test began, is held and unanswered, but worker 1's end's scope pending = %d, want 1", n)
 	}
-	if n, _ := tr.scope(2).State(true); n != 0 {
+	if n, _ := px.InFlightScopeOf(2).State(true); n != 0 {
 		t.Fatalf("worker 2's end waits for worker 1's call: pending = %d, want 0", n)
 	}
 	if n, _ := px.InFlightScope().State(true); n != 1 {
