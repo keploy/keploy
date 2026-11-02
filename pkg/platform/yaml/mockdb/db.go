@@ -1172,14 +1172,13 @@ func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPa
 	// cost is bounded by the mock's own size and is acceptable vs.
 	// the alternative (encoding to bytes synchronously on every
 	// InsertMock, which would defeat the whole async-writer win).
-	// Strip the runtime-only lifetime fields before they reach the encoder —
-	// gob ignores the json:"-" tags that keep them out of every other format.
-	// The reader clears them too (so existing files are repaired), but not
-	// writing them keeps the on-disk shape honest about what it means.
+	// Strip the runtime-only fields before they reach the encoder: gob
+	// ignores the tags that keep them out of every other format
+	// (clearRuntimeOnly). The reader clears them too, so existing files are
+	// repaired, but not writing them keeps the on-disk shape honest about
+	// what it means.
 	gobMock := mock.DeepCopy()
-	var zeroLifetime models.Lifetime
-	gobMock.TestModeInfo.Lifetime = zeroLifetime
-	gobMock.TestModeInfo.LifetimeDerived = false
+	clearRuntimeOnly(gobMock)
 	job := gobWriteJob{mock: gobMock, testSetPath: mockPath, filename: mockFileName}
 	// Counted before the send, so the writer never counts it as written
 	// before it is counted as handed over; taken back if it is not sent.

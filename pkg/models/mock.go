@@ -292,10 +292,9 @@ type TestModeInfo struct {
 	// captured mocks before they are persisted. (Replay's own startup-mock
 	// preservation is timestamp-based — see replay.startupMockCutoff — not
 	// keyed off this flag.) Like the sibling runtime-only fields, the
-	// json/bson tags keep it out of the text formats; gob (which ignores
-	// struct tags) does encode it, but a value carried on a reloaded mock is
-	// inert — the reapers run only on the live record buffer, never on
-	// disk-loaded mocks.
+	// json/bson tags keep it out of the text formats, and the gob store
+	// (encoding/gob ignores struct tags) clears it on write and on read
+	// (mockdb's clearRuntimeOnly), so a disk-loaded mock never carries it.
 	IsStartup bool `json:"-" bson:"-"`
 
 	// ServedIn is, on a copy exact serving serves an open test

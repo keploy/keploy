@@ -110,7 +110,7 @@ func TestTestCaseReadsTheSameFromEitherCodec(t *testing.T) {
 // A mock read back from a JSON file is the one read back from a YAML file,
 // field by field, for each kind whose spec is plain data. (The database
 // protocols' specs hold decoded wire messages behind interfaces, which a
-// reflective fill leaves empty; their own round-trip rows cover them.)
+// reflective fill leaves empty, so this row does not cover them.)
 func TestMockReadsTheSameFromEitherCodec(t *testing.T) {
 	logger := zap.NewNop()
 	for _, kind := range []models.Kind{models.HTTP, models.HTTP2, models.GRPC_EXPORT, models.GENERIC, models.DNS, models.ConnectionFailure} {
