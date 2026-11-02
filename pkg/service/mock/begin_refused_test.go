@@ -133,6 +133,17 @@ func TestAReplayThatCannotReadItsWindowsFailsWithTheSwitchOff(t *testing.T) {
 			t.Fatalf("%d lines blame the read for a run whose agent died", n)
 		}
 	})
+	// A keploy failure that names no error is no agent death the read failed
+	// of: the failed read is said all the same.
+	t.Run("keploy failed without saying why", func(t *testing.T) {
+		_, code, logs := replayIn(t, replayCase{runExit: models.AppError{AppErrorType: models.ErrInternal}, keployFails: true, windowsErr: errors.New("connection reset by peer")})
+		if code != 1 {
+			t.Fatalf("exit %d, want 1", code)
+		}
+		if n := logs.FilterMessageSnippet("cannot tell whether it refused a test").Len(); n != 1 {
+			t.Fatalf("%d lines name the failed read, want 1", n)
+		}
+	})
 	t.Run("docker compose", func(t *testing.T) {
 		const why = "keploy did not read the replay outcome the keploy-agent container left"
 		core, logs := observer.New(zapcore.DebugLevel)
