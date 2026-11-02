@@ -1946,3 +1946,73 @@ func TestAnOwnCutHourWhoseValuesSitOnTwoPhasesIsRefused(t *testing.T) {
 		t.Errorf("FALSE RED: values on +05:30's hour in both runs: %+v %q %v; want it learned at the hour on its phase, 30m past UTC's, its line naming it", o, why, ok)
 	}
 }
+
+// A whole-second look-back of more than a second (dirtyAt <= now - 2s,
+// last_active < now - 15s) in a client test whose begin comes before the
+// value, in a call whose replay compares offsets (Window.ComparesOffsets):
+// learned as the clock less that look-back at its own cut, checked by the
+// replay, which passes the application's value and fails a dropped
+// look-back (but in a window that holds a turn of the second, the cut's
+// stated cost). Only a call whose replay does not compare offsets refuses it
+// (TestALookBackAReplayDoesNotCompareIsRefusedNeverReadFromItsTestsBegin).
+func TestALookBackAReplayComparesInAClientTestIsLearnedAtItsCut(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	const p = "body.filter.dirtyAt.$lte"
+	call := time.Date(2026, 10, 31, 9, 0, 0, 400e6, time.UTC)
+	fcall := call.Add(FullRoundLead + 130*ms)
+	span := func(at time.Time) Span { return Span{From: at.Add(-61 * ms), To: at, Began: at.Add(-20 * sec)} }
+	w := (&Window{Rec: span(call), F: span(fcall)}).ComparesOffsets()
+	for _, back := range []time.Duration{2 * sec, 15 * sec} {
+		rv, lv := call.Add(-4*ms).Truncate(sec).Add(-back), fcall.Add(-4*ms).Truncate(sec).Add(-back)
+		o, why, ok := clockInWindow(p, v5Instant(rv, sec), v5Instant(lv, sec), w, nil)
+		if lo, hi := o.CutOffsets(); !ok || why != "" || o.Step != sec || o.Res != sec || o.Since != "" || lo != -back || hi != -back {
+			t.Errorf("FALSE RED: now - %s where a replay compares offsets: %+v %q %v; want clock - %s at the second", back, o, why, ok, back)
+			continue
+		}
+		recText := strconv.FormatInt(rv.Unix(), 10)
+		for ph := time.Duration(0); ph < sec; ph += 150 * ms {
+			s := Span{From: call.Add(time.Hour + ph - 61*ms), To: call.Add(time.Hour + ph)}
+			read := s.To.Add(-4 * ms)
+			if got, why := v5Check(p, o, recText, read.Truncate(sec).Add(-back), s); !got {
+				t.Errorf("FALSE RED: now - %s, a replay %s into its second, the application's value: %s", back, ph, why)
+			}
+			// A window that holds a turn of the second passes a look-back
+			// changed by two seconds (the cut's stated cost).
+			if got, _ := v5Check(p, o, recText, read.Truncate(sec), s); got && s.From.Truncate(sec).Equal(s.To.Truncate(sec)) {
+				t.Errorf("FALSE GREEN: now - %s, a replay %s into its second, a dropped look-back passes", back, ph)
+			}
+		}
+	}
+}
+
+// A phase lock's range is never a whole step wide: such a range holds every
+// remainder within the step, so it would pass a look-back changed by any
+// part of it. Steps of one length never make one (a turn of the step in
+// each run's window makes the range a step and a cut wide), but a day's
+// step in a zone whose clocks change does: a window holding the turn after
+// New York's 23-hour day of 2026-03-08 in the recording, one holding a
+// 24-hour day's turn in record's full round, an application cutting to its
+// zone's day less 2d3h at the hour, read after the turn in both, puts the
+// range on New York's grid from -51h to -27h, exactly a day. The lock is
+// read on UTC's grid instead, one hour wide.
+func TestAPhaseLockIsNeverAWholeStepWide(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m9, m20 := time.Date(2026, 3, 9, 0, 0, 0, 0, ny), time.Date(2026, 3, 20, 0, 0, 0, 0, ny)
+	if d := m9.Sub(time.Date(2026, 3, 8, 0, 0, 0, 0, ny)); d != 23*time.Hour {
+		t.Fatalf("New York's 2026-03-08 is %s long; the row needs its 23-hour day", d)
+	}
+	back := 51 * time.Hour
+	rec := v5Read{from: m9.Add(-10 * time.Minute), to: m9.Add(10 * time.Minute), read: m9.Add(5 * time.Minute)}
+	f := v5Read{from: m20.Add(-10 * time.Minute), to: m20.Add(10 * time.Minute), read: m20.Add(5 * time.Minute)}
+	rv, lv := m9.Add(-back), m20.Add(-back)
+	o, ok := phaseAt(v5Instant(rv, time.Second), v5Instant(lv, time.Second), v5Window(rec, f), 24*time.Hour, time.Hour, ny)
+	if ok && o.Max-o.Min >= 24*time.Hour {
+		t.Errorf("FALSE GREEN: a phase lock a whole day wide: %+v; want none that wide", o)
+	}
+	if !ok || o.Max-o.Min != time.Hour || o.AppZone == "" {
+		t.Errorf("the lock on UTC's grid: %+v %v; want one an hour wide", o, ok)
+	}
+}
