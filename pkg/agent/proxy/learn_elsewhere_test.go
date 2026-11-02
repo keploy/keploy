@@ -356,6 +356,27 @@ func TestLearnElsewhereTeachesNoIdleAnswerACallConsumed(t *testing.T) {
 	}
 }
 
+// An idle answer no call of the set consumed is taught by a poll that lands
+// between tests (the pool's view), as it is in a test's window, and its
+// teaching window names no test.
+func TestAPollBetweenTestsTeachesAnIdleAnswerNoCallConsumed(t *testing.T) {
+	mm, ms := s12Set(t)
+	t.Cleanup(models.RegisterIdleAnswer(models.HTTP, func(m *models.Mock) bool { return m.Name == "w-later" || m.Name == "w-boot" }))
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+	mm.SetPairing(true)
+	mm.ServeExactWorker([]string{"w-later", "w-boot"})
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	mm.ServeExactPool("", nil)
+	minute := map[string]models.ClockOffset{"dirty_at": {Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}}
+	if !mm.LearnElsewhere(ms["w-boot"], minute) {
+		t.Fatal("a poll between tests did not teach an idle answer no call consumed")
+	}
+	got := mm.LearnedElsewhere()
+	if len(got) != 1 || got[0].Name != "w-boot" || len(got[0].TaughtIn) != 1 || got[0].TaughtIn[0].Test != "" {
+		t.Fatalf("learned elsewhere %+v; want w-boot alone, taught between tests", got)
+	}
+}
+
 // What a call made in another window teaches a recording is that window's:
 // each state names the test open when the call came, with the instant it
 // taught, and "" for a call between tests. A call whose round moved since

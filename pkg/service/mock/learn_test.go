@@ -645,9 +645,9 @@ func TestKeployMockSaysEveryTeachingOfARecordingAcrossWindows(t *testing.T) {
 // A recording no test's mapping lists is said, on the line for what a call
 // in another window taught it and on the line for what its own pairing
 // voided, as the set's start-up and pool's, even when the mapping lists it
-// under worker:: keploy mock record serves a worker: entry as the pool's
-// (unknownBesideTests), so it names no worker scope. The receipt names no
-// owner test for it either.
+// under worker:, since keploy mock record serves a worker: entry as the
+// pool's (unknownBesideTests) and so names no worker scope. The receipt names
+// no owner test for it either.
 func TestKeployMockSaysARecordingNoTestOwnsAsTheSetsStartUpAndPools(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	minute := models.ClockOffset{Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}
