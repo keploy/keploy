@@ -67,6 +67,49 @@ func TestTheStoreSaysARecordingIsTheOpenTestsOwnOrTheStartupsFromItsView(t *test
 	says("a staging with a start-up slice", worker, false)
 }
 
+// The store tells what it cannot say of a recording apart from what it says
+// no to (ServeOwnerOf): with no test's view in force (the initial staging, a
+// pool view holding the next test's recording ahead) it cannot say whose any
+// recording is, as of a recording with no name; with a test's view in force
+// the test's own recordings and the start-up's are the test's, and a
+// worker: recording and another test's are another's. Its yes is
+// ServedAsOwnOrStartup's.
+func TestTheStoreSaysWhoseARecordingIsOnlyWhereATestsViewIsInForce(t *testing.T) {
+	own := exactMock("own", 0, models.LifetimePerTest)
+	other := exactMock("other", time.Second, models.LifetimePerTest)
+	worker := httpCall("w-tick", 2*time.Second, "/tick")
+	start := exactMock("boot", -time.Second, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{own, other}, []*models.Mock{worker})
+	says := func(what string, mk *models.Mock, want learn.ServeOwner) {
+		t.Helper()
+		got := mm.ServeOwnerOf(mk)
+		if got != want {
+			t.Fatalf("%s: the store says %s is %v, want %v", what, mk.Name, got, want)
+		}
+		if yes := mm.ServedAsOwnOrStartup(mk); yes != (got == learn.OwnerTest) {
+			t.Fatalf("%s: ServedAsOwnOrStartup(%s) = %v beside ServeOwnerOf's %v", what, mk.Name, yes, got)
+		}
+	}
+	says("the initial staging", own, learn.OwnerUnknown)
+	says("the initial staging", worker, learn.OwnerUnknown)
+	mm.ServeExactWorker([]string{"w-tick"})
+	mm.ServeExactPool("k", nil, own)
+	says("no test open, own ahead", own, learn.OwnerUnknown)
+	says("no test open", worker, learn.OwnerUnknown)
+	mm.ServeExactWorker([]string{"w-tick"})
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	says("T1 open", own, learn.OwnerTest)
+	says("T1 open", worker, learn.OwnerOther)
+	says("T1 open", other, learn.OwnerOther)
+	says("T1 open, a recording with no name", &models.Mock{}, learn.OwnerUnknown)
+	mm.SetMocksWithWindowThreeTier([]*models.Mock{own, other}, []*models.Mock{worker}, []*models.Mock{start}, exactT0, exactT0.Add(time.Hour))
+	says("a staging with a start-up slice, no test open", start, learn.OwnerTest)
+	mm.ServeExactWorker([]string{"w-tick"})
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	says("a staging with a start-up slice", start, learn.OwnerTest)
+	says("a staging with a start-up slice", worker, learn.OwnerOther)
+}
+
 // Under the proven switch the proxy wires its store's view into the learn
 // tracker (setMockManager): a worker: serve that lands between the open
 // test's own serve and a call's arrival does not start the span of the
@@ -154,4 +197,53 @@ func droppedStoreFilesNothing(t *testing.T, p *Proxy, tr *learn.Tracker, arrival
 	anyFlow, _ := tr.LiveSpan(arrival)
 	of, _ := tr.LiveSpanOf(arrival, rec)
 	return of.From.Equal(anyFlow.From)
+}
+
+// The proxy wires what its store cannot say of a recording apart from what
+// it says no to (setMockManager, ServeOwnerOf): on a clock whose run the
+// hooks tell, a check against the test's own recording carries where the
+// test began (learn.Span.TestFrom) once a serve made after that begin starts
+// its span, and one against the reached worker: recording carries none.
+// Once a pool view replaces the test's while the tracker's test is still
+// open, the store cannot say whose the worker: recording is, and its span
+// carries the test's begin as LiveSpan's does.
+func TestTheProxyTellsTheTrackerWhatItsStoreCannotSayOfARecording(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	own := exactMock("own", 0, models.LifetimePerTest)
+	own2 := exactMock("own-2", time.Second, models.LifetimePerTest)
+	worker := httpCall("w-tick", 2*time.Second, "/tick")
+	mm := stagedManager(t, []*models.Mock{own, own2}, []*models.Mock{worker})
+	p := startedDrainProxy(t, 10)
+	tr := learn.NewTracker()
+	tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+	tr.SetAppClockRun(func(time.Time) (time.Time, bool) { return time.Time{}, true })
+	p.learnTracker = tr
+	p.setMockManager(mm)
+	t.Cleanup(func() { p.setMockManager(nil) })
+
+	tr.NewSet()
+	tr.Begin()
+	time.Sleep(2 * time.Millisecond)
+	mm.ServeExactWorker([]string{"w-tick"})
+	mm.ServeExactTest("T1", []*models.Mock{own, own2})
+	if !mm.DeleteFilteredMock(*own) {
+		t.Fatal("the open test's own recording was refused")
+	}
+	time.Sleep(2 * time.Millisecond)
+	if got := pollFirst(t, mm, "w-tick"); got != "w-tick" {
+		t.Fatalf("the reached worker: recording did not answer in the test: %s", got)
+	}
+	time.Sleep(2 * time.Millisecond)
+	arrival := time.Now()
+	ofOwn, ok := tr.LiveSpanOf(arrival, own2)
+	if !ok || ofOwn.TestFrom.IsZero() {
+		t.Fatalf("a check against the test's own recording: span %+v,%v; want it carrying the test's begin", ofOwn, ok)
+	}
+	if ofWorker, ok := tr.LiveSpanOf(arrival, worker); !ok || !ofWorker.TestFrom.IsZero() {
+		t.Fatalf("a check against the worker: recording: span %+v,%v; want none of the test's begin", ofWorker, ok)
+	}
+	mm.ServeExactPool("k", nil, own2)
+	if ofWorker, ok := tr.LiveSpanOf(arrival, worker); !ok || !ofWorker.TestFrom.Equal(ofOwn.TestFrom) {
+		t.Fatalf("a pool view in force, the test still open: span of the worker: recording %+v,%v; want the test's begin %v", ofWorker, ok, ofOwn.TestFrom)
+	}
 }

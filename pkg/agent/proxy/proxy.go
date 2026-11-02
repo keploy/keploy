@@ -1973,10 +1973,12 @@ func (p *Proxy) setMockManager(m *MockManager) {
 		// as neither (a worker: scope's, the background's), as m's view in
 		// force says: a call checked against the test's own recording is
 		// read in a span only those serves start (learn.Tracker.LiveSpanOf).
-		p.learnTracker.SetServeOwner(m.ServedAsOwnOrStartup)
+		// Where no test's view is in force m says it cannot tell, and a
+		// call's span then carries its test's begin as LiveSpan's does.
+		p.learnTracker.SetServeOwnerOf(m.ServeOwnerOf)
 	} else if provenswitch.On() {
 		// No manager serves: the tracker keeps no hold on the one it drops.
-		p.learnTracker.SetServeOwner(nil)
+		p.learnTracker.SetServeOwnerOf(nil)
 	}
 	p.sessionMu.Lock()
 	prev := p.mockManager

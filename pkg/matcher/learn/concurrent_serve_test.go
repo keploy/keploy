@@ -2,6 +2,7 @@ package learn
 
 import (
 	"context"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -144,6 +145,87 @@ func TestAWordReadIsCheckedFromItsTestsBeginPastAnotherGoroutinesServes(t *testi
 				t.Errorf("client %v: %s (%s): ok %v (%s); want %v", client, c.what, live.Value, ok, why, c.ok)
 			} else if !ok && !strings.Contains(why, "not a read of the application's clock made in this call's window") {
 				t.Errorf("client %v: %s (%s): refused with %q; want the clock check's refusal", client, c.what, live.Value, why)
+			}
+		}
+	}
+}
+
+// A replay checks a call against the recording it pairs with in that
+// recording's span (ClockSpanOf, as HTTP's strict match reads it): from the
+// test's own serves where the store says the recording is the test's own
+// (SetServeOwnerOf), from any flow's serve otherwise. On a clock that ran as
+// one from the test's begin, the test served a call of its own, read its
+// clock, and a consumer's call was served before the call reached keploy.
+// The span carries where the test began (Span.TestFrom), as ClockSpanFrom's
+// does, wherever the call is the test's: where no owner is told, where the
+// store cannot say (no test's view in force), where it calls the consumer's
+// recording the test's own (the span starts at the consumer's serve), and
+// where it calls it another's (the span starts at the test's own serve). So
+// the test's read, and one made before the test's own serve, pass there.
+// Checked against a recording the store says is not the test's (a
+// worker:'s), the span starts at the consumer's serve and carries no begin:
+// both reads are refused, a read at the arrival passes. A value two cuts
+// before the test's begin is refused in each.
+func TestARecordingsSpanCarriesItsTestsBeginUnlessTheStoreSaysItIsAnothers(t *testing.T) {
+	base := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+	early, ownServe, read := base.Add(time.Millisecond), base.Add(2*time.Millisecond), base.Add(3*time.Millisecond)
+	consumer, arrival := base.Add(5*time.Millisecond), base.Add(6*time.Millisecond)
+	const p = "body.created"
+	clock := models.ClockOffset{Res: time.Millisecond, Layout: models.LayoutTyped}
+	at := func(v time.Time) Leaf { return InstantLeaf(p, p, v, time.Millisecond) }
+	upsert := &models.Mock{Name: "mock-5", Kind: models.Mongo}
+	worker := &models.Mock{Name: "mock-9", Kind: models.Mongo}
+	tests := func(names ...string) func(*models.Mock) ServeOwner {
+		return func(m *models.Mock) ServeOwner {
+			if slices.Contains(names, m.Name) {
+				return OwnerTest
+			}
+			return OwnerOther
+		}
+	}
+	for _, c := range []struct {
+		what     string
+		owner    func(*models.Mock) ServeOwner
+		rec      *models.Mock
+		from     time.Time
+		testFrom time.Time
+	}{
+		{"no owner told", nil, upsert, consumer, base},
+		{"the store cannot say", func(*models.Mock) ServeOwner { return OwnerUnknown }, upsert, consumer, base},
+		{"the consumer's recording the test's own", tests("mock-1", "mock-7", "mock-5"), upsert, consumer, base},
+		{"the consumer's recording another's", tests("mock-1", "mock-5"), upsert, ownServe, base},
+		{"an owner told, checked against no recording", tests("mock-1", "mock-5"), nil, consumer, base},
+		{"checked against a worker's recording", tests("mock-1", "mock-5"), worker, consumer, time.Time{}},
+	} {
+		for _, client := range []bool{false, true} {
+			tr := NewTracker()
+			tr.SetClientTests(client)
+			tr.SetServeOwnerOf(c.owner)
+			tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+			tr.SetAppClockRun(func(time.Time) (time.Time, bool) { return time.Time{}, true })
+			tr.NewSetAt(base.Add(-time.Second))
+			tr.ServedMockAt(&models.Mock{Name: "mock-4", Kind: models.HTTP}, base.Add(-25*time.Millisecond))
+			tr.BeginAt(base)
+			tr.ServedMockAt(&models.Mock{Name: "mock-1", Kind: models.Mongo}, ownServe)
+			tr.ServedMockAt(&models.Mock{Name: "mock-7", Kind: models.Mongo}, consumer)
+			s, ok := ClockSpanOf(WithTracker(context.Background(), tr), arrival, c.rec)
+			if !ok || !s.From.Equal(c.from) || !s.TestFrom.Equal(c.testFrom) {
+				t.Fatalf("%s, client %v: span = %+v,%v; want from %v carrying the test's begin %v", c.what, client, s, ok, c.from, c.testFrom)
+			}
+			testsCall := !c.testFrom.IsZero()
+			for _, v := range []struct {
+				what string
+				at   time.Time
+				ok   bool
+			}{
+				{"a read before the test's own serve", early, testsCall},
+				{"the test's read, before the consumer's serve", read, testsCall},
+				{"a read at the arrival", arrival, true},
+				{"a value two cuts before the test's begin", base.Add(-2 * time.Millisecond), false},
+			} {
+				if ok, why := CheckClockRead(p, clock, at(v.at), s, true); ok != v.ok {
+					t.Errorf("%s, client %v: %s (%s): ok %v (%s); want %v", c.what, client, v.what, at(v.at).Value, ok, why, v.ok)
+				}
 			}
 		}
 	}
