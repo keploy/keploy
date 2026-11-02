@@ -1,0 +1,29 @@
+//go:build windows
+
+package testnet
+
+import (
+	"os"
+	"os/exec"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+// requireReserved checks that port lies below the dynamic port range that
+// netsh reports, so no bind to port 0 and no connect is given it, and that
+// it is claimed in os.TempDir, so no other test is given it.
+func requireReserved(t *testing.T, port int) {
+	t.Helper()
+	var outs []string
+	for _, family := range []string{"ipv4", "ipv6"} {
+		out, err := exec.Command("netsh", "interface", family, "show", "dynamicportrange", "protocol=tcp").Output()
+		require.NoError(t, err)
+		outs = append(outs, string(out))
+	}
+	start, err := dynamicPortStart(outs...)
+	require.NoError(t, err)
+	require.Less(t, port, start, "the reserved port")
+	require.GreaterOrEqual(t, port, 1024, "the reserved port")
+	require.FileExists(t, claimFile(os.TempDir(), port), "the reserved port's claim")
+}

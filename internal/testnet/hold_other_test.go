@@ -42,3 +42,23 @@ func TestASharedPortIsHeldForTheTestsLifeBesideItsOwnListeners(t *testing.T) {
 		requireDialRefused(t, addr)
 	}
 }
+
+// A reserved port is kept from other sockets (requireReserved says how, per
+// platform) and takes the code's own listener, as net.Listen opens it, at
+// 0.0.0.0 and at 127.0.0.1; the listener takes a dial, and once it closes a
+// dial to the port is refused.
+func TestAReservedPortTakesTheCodesListener(t *testing.T) {
+	p := ReservedPort(t)
+	requireReserved(t, p)
+	port := strconv.Itoa(p)
+	addr := net.JoinHostPort("127.0.0.1", port)
+	for _, host := range []string{"0.0.0.0", "127.0.0.1"} {
+		ln, err := net.Listen("tcp4", net.JoinHostPort(host, port))
+		require.NoError(t, err, "the code's listener at %s", host)
+		c, err := net.Dial("tcp4", addr)
+		require.NoError(t, err, "a dial to the code's listener at %s", host)
+		_ = c.Close()
+		require.NoError(t, ln.Close())
+		requireDialRefused(t, addr)
+	}
+}

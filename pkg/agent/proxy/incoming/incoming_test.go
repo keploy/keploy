@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"strconv"
-	"syscall"
 	"testing"
 	"time"
 
@@ -30,37 +29,15 @@ func newTestIngressHook() *goTCPIngressHook {
 	return newGoTCPIngressHook(&IngressProxyManager{logger: zap.NewNop()})
 }
 
-func freeTCPPort(t *testing.T) uint16 {
-	t.Helper()
-	// Probe on 0.0.0.0 (the address the forwarder binds) so the port we hand back
-	// is actually free for that bind, then release it for the caller to claim.
-	ln, err := net.Listen("tcp4", "0.0.0.0:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	port := uint16(ln.Addr().(*net.TCPAddr).Port)
-	_ = ln.Close()
-	return port
-}
-
-// startIngressAtFreePort starts hook's forwarder at a free port and returns
-// the port. Nothing holds the port between freeTCPPort and the forwarder's
-// bind: the forwarder binds it itself, and no hold can sit beside
-// that. So when another socket took the port meanwhile, it tries another.
-// On Windows the bind's error there is WSAEADDRINUSE, which errors.Is does
-// not match to EADDRINUSE, so it fails at once, as the test did before.
+// startIngressAtFreePort starts hook's forwarder at a port no other socket
+// is given while the test runs (testnet.ReservedPort) and returns the port.
 func startIngressAtFreePort(t *testing.T, ctx context.Context, hook *goTCPIngressHook) uint16 {
 	t.Helper()
-	for i := 0; ; i++ {
-		port := freeTCPPort(t)
-		err := hook.StartIngress(ctx, port, 0)
-		if err == nil {
-			return port
-		}
-		if !errors.Is(err, syscall.EADDRINUSE) || i == 19 {
-			t.Fatalf("StartIngress: %v", err)
-		}
+	port := uint16(testnet.ReservedPort(t))
+	if err := hook.StartIngress(ctx, port, 0); err != nil {
+		t.Fatalf("StartIngress: %v", err)
 	}
+	return port
 }
 
 // bindAgain binds port at every IPv4 address and closes it, as the next
@@ -203,7 +180,7 @@ func TestBindAgainFailsAPortASocketOfThisProcessTookAfterItsFirstLook(t *testing
 func TestStartIngressSkipsBindWhenContextCanceled(t *testing.T) {
 	testnet.HoldFinalizers(t)
 	hook := newTestIngressHook()
-	port := freeTCPPort(t)
+	port := uint16(testnet.ReservedPort(t))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // agent already shutting down
@@ -274,7 +251,7 @@ func TestStartIngressProxySilentOnCanceledContext(t *testing.T) {
 	}
 	pm.ingressHook = newGoTCPIngressHook(pm)
 
-	port := freeTCPPort(t)
+	port := uint16(testnet.ReservedPort(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // agent already shutting down
 
