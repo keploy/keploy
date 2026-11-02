@@ -937,7 +937,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	}
 	copied := len(copies(true)) > 0
 	conflict := heldWhere(hs, func(h instantHold) bool {
-		return before(h.p) && inScope(h.p) && h.hr && !h.hl && (h.fr || h.p.gave) && !(copied && asRecorded(h))
+		return before(h.p) && inScope(h.p) && h.hr && !h.hl && (h.fr || h.p.gave) && (!copied || !asRecorded(h))
 	})
 	if len(conflict) > 0 {
 		p := conflict[0]
