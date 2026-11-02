@@ -397,7 +397,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 		if a.replaying() {
 			meta.given = nil
 		}
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Random: meta.random, Seed: meta.seed, Evidence: ev, Real: meta.real, Given: meta.given})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Random: meta.random, Seed: meta.seed, Evidence: ev, Real: meta.real, Given: meta.given, Instance: meta.instance})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
@@ -586,6 +586,10 @@ type scopeMeta struct {
 	// whose container the Docker daemon did not answer the read of
 	// (unreadMock): its window says so as it closes.
 	unread models.CaptureLosses
+	// instance is, under the proven wire, the keploy instance of the test
+	// worker that began the test (ProvenBegin), which its window carries
+	// (models.ScopeWindow.Instance): 0 in a run of one worker.
+	instance uint32
 }
 
 func (a *Agent) NoteScope(name string, pid int, dir string, suite bool) {
@@ -642,6 +646,24 @@ func (a *Agent) noteScopeRandomDone(name string, pid int, random string) {
 	}
 	meta := a.scopeMeta[k]
 	meta.random = random
+	a.scopeMeta[k] = meta
+}
+
+// noteScopeInstance records, under the proven wire, that test name was begun
+// by the test worker with keploy instance inst, for the window its end
+// closes: record charges it only that worker's calls. inst 0 notes nothing.
+func (a *Agent) noteScopeInstance(name string, inst uint32) {
+	if inst == 0 {
+		return
+	}
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	if a.scopeMeta == nil {
+		a.scopeMeta = make(map[scopeKey]scopeMeta)
+	}
+	k := scopeKey{pid: 0, name: name}
+	meta := a.scopeMeta[k]
+	meta.instance = inst
 	a.scopeMeta[k] = meta
 }
 

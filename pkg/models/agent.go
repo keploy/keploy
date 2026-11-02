@@ -334,6 +334,11 @@ type ScopeWindow struct {
 	Ready   time.Time `json:"ready,omitzero"`
 	Ref     string    `json:"ref,omitempty"`
 	Worker  uint32    `json:"worker,omitempty"`
+	// Instance is, under the proven wire, the keploy instance of the test
+	// worker whose test this window is (InstanceReq.Workers): only its
+	// calls (models.Mock.Instance) are this window's. 0 in a run of one
+	// worker, whose calls carry none.
+	Instance uint32 `json:"instance,omitempty"`
 	// Outcome is the verdict the test's harness reported when it ended the
 	// scope (ScopeReq.Outcome); "" when it reported none.
 	Outcome string `json:"outcome,omitempty"`

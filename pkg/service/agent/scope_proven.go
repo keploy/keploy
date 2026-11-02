@@ -990,6 +990,8 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	a.NoteScope(id, 0, dir, false)
 	seed := a.beginSeed(id, models.NormalizeScopeSeed(req.Seed))
 	a.noteScopeRandom(id, 0, models.NormalizeScopeRandom(req.Random), seed)
+	// The worker that begins it, whose calls alone its window holds.
+	a.noteScopeInstance(id, worker)
 	// opened: the test's capture window opened (open), so a begin that
 	// fails after it takes the window back.
 	var open func()

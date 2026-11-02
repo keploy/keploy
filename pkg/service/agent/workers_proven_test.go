@@ -431,3 +431,23 @@ func TestANewSessionAndTheFinalReadEndTheWorkersInstances(t *testing.T) {
 	require.Contains(t, w.Evidence.Reason, fmt.Sprintf("its process %d outlived the test command", w1.Process.Pid))
 	require.Equal(t, []uint32{1, 2, 1}, h.endedIDs(), "a second read ends nothing again")
 }
+
+// Each worker's test window carries that worker's keploy instance, by which
+// record charges it only that worker's calls.
+func TestAWorkersTestWindowCarriesItsInstance(t *testing.T) {
+	a, _ := workerAgent(t, models.MODE_RECORD, 4)
+	w1, w2 := child(t), child(t)
+	require.Equal(t, "1", claimWorker(t, a, w1.Process.Pid, "a", 2))
+	require.Equal(t, "2", claimWorker(t, a, w2.Process.Pid, "b", 2))
+	for _, w := range []struct {
+		pid  int
+		name string
+	}{{w2.Process.Pid, "TestTwo"}, {w1.Process.Pid, "TestOne"}} {
+		_, serr := a.ProvenBegin(as(w.pid), begin(w.name))
+		require.Nil(t, serr)
+		_, serr = a.ProvenEnd(as(w.pid), models.ScopeReq{Name: w.name, Outcome: "passed"})
+		require.Nil(t, serr)
+	}
+	require.EqualValues(t, 1, windowOf(t, a, "a::TestOne").Instance)
+	require.EqualValues(t, 2, windowOf(t, a, "b::TestTwo").Instance)
+}
