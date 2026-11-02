@@ -894,6 +894,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	// proxy's listener is marked for the hooks' count of the connections
 	// waiting for it (proxyconns.go).
 	a.markProxyListener()
+	a.letProxyPortsMove()
 
 	// The proxy's start can take long without a step: its CA's install runs
 	// keytool, update-ca-certificates (whose Java hook starts a JVM) and
@@ -928,6 +929,35 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	a.proxyStarted = true
 	a.latchCounting()
 	return nil
+}
+
+// letProxyPortsMove lets the proxy and its DNS server move off a port another
+// socket holds when they bind it (proxy.SetPortMover), where the hooks can be
+// told where they then listen (coreAgent.ProxyPortsSetter) and redirect to the
+// proxy's own port (no coreAgent.EbpfProxyPortOverride), outside Docker. The
+// move is told to the hooks and kept in the agent's config. Elsewhere a taken
+// port fails the start, naming what holds it: in Docker the CLI publishes the
+// agent container's ports as the ones it handed the agent, and the container
+// has a network namespace of its own, which no other keploy run binds in.
+func (a *Agent) letProxyPortsMove() {
+	setter, ok := a.Hooks.(coreAgent.ProxyPortsSetter)
+	if !ok || coreAgent.EbpfProxyPortOverride != 0 || a.config.Agent.IsDocker {
+		return
+	}
+	mover, ok := a.Proxy.(interface {
+		SetPortMover(func(proxyPort, dnsPort uint32) error)
+	})
+	if !ok {
+		return
+	}
+	mover.SetPortMover(func(proxyPort, dnsPort uint32) error {
+		if err := setter.SetProxyPorts(proxyPort, dnsPort); err != nil {
+			return err
+		}
+		a.config.Agent.ProxyPort, a.config.Agent.DnsPort = proxyPort, dnsPort
+		a.config.ProxyPort, a.config.DNSPort = proxyPort, dnsPort
+		return nil
+	})
 }
 
 func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {

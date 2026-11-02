@@ -56,6 +56,12 @@ type Hooks struct {
 	conf      *config.Config
 	m         sync.Mutex
 
+	// agentInfo is what Load sent the kernel (agentInfoSent), for
+	// SetProxyPorts to send again with the proxy's ports.
+	agentInfoMu   sync.Mutex
+	agentInfo     structs.AgentInfo
+	agentInfoSent bool
+
 	// Linux-specific fields
 	objectsMutex sync.RWMutex // Protects eBPF objects during load/unload operations
 	// proxyMarked is set once MarkProxyListener has marked the proxy's
@@ -711,7 +717,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
 
 	agentInfo.Proxy = proxyInfo
-	err = h.SendAgentInfo(agentInfo)
+	err = h.sendLoadedAgentInfo(agentInfo)
 	if err != nil {
 		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
 		return err
@@ -1096,4 +1102,33 @@ func ToIPv4MappedIPv6(ipv4 string) ([4]uint32, error) {
 	}
 
 	return result, nil
+}
+
+// SetProxyPorts tells the loaded hooks that the proxy listens on proxyPort and
+// its DNS server on dnsPort (agent.ProxyPortsSetter): the agent info Load
+// sent, sent again with those ports. Load's redirect to the proxy goes to
+// GetProxyInfo's port, the proxy's own unless a port override is set; the
+// agent moves no port where one is.
+func (h *Hooks) SetProxyPorts(proxyPort, dnsPort uint32) error {
+	h.agentInfoMu.Lock()
+	defer h.agentInfoMu.Unlock()
+	if !h.agentInfoSent {
+		return errors.New("the hooks have sent the kernel no agent info: they are not loaded")
+	}
+	info := h.agentInfo
+	info.Proxy.Port = proxyPort
+	info.DNSPort = int32(dnsPort)
+	return h.SendAgentInfo(info)
+}
+
+// sendLoadedAgentInfo sends the kernel the agent info Load built, and keeps
+// it for SetProxyPorts to send again with the proxy's ports.
+func (h *Hooks) sendLoadedAgentInfo(info structs.AgentInfo) error {
+	h.agentInfoMu.Lock()
+	defer h.agentInfoMu.Unlock()
+	if err := h.SendAgentInfo(info); err != nil {
+		return err
+	}
+	h.agentInfo, h.agentInfoSent = info, true
+	return nil
 }

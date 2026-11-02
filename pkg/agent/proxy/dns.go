@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -50,10 +51,9 @@ type dnsServer struct {
 func (p *Proxy) newDNSServer(network string) *dnsServer {
 	s := &dnsServer{logger: p.logger, settled: make(chan struct{})}
 	s.srv = &dns.Server{
-		Addr:      fmt.Sprintf(":%v", p.DNSPort),
-		Net:       network,
-		Handler:   p,
-		ReusePort: true,
+		Addr:    fmt.Sprintf(":%v", p.DNSPort),
+		Net:     network,
+		Handler: p,
 		// miekg/dns calls it once the socket is bound, just before it serves,
 		// on the goroutine that called ListenAndServe. A failed bind never
 		// calls it.
@@ -111,16 +111,22 @@ func (s *dnsServer) serve() (err error) {
 	return err
 }
 
-// listenAndServe binds s's socket and serves on it. The TCP server's socket
-// is bound here, as miekg/dns would bind it (SO_REUSEPORT where it sets that)
-// but plain TCP: miekg/dns binds TCP with a zero net.ListenConfig, which Go
-// makes MPTCP, on every interface. UDP has no MPTCP; miekg/dns binds it.
+// listenAndServe serves s on the socket startDNSServers bound for it, or
+// binds one and serves on it. The TCP server's socket is bound plain TCP:
+// miekg/dns binds TCP with a zero net.ListenConfig, which Go makes MPTCP, on
+// every interface. UDP has no MPTCP; miekg/dns binds it. Neither sets
+// SO_REUSEPORT (startDNSServers says why).
 func (s *dnsServer) listenAndServe() error {
+	// Bound already (startDNSServers): served. Closed by the server as it
+	// stops serving; closed here if it never started to.
+	if bound := preBound(s.srv); bound != nil {
+		defer func() { _ = bound.Close() }()
+		return s.srv.ActivateAndServe()
+	}
 	if s.srv.Net != "tcp" {
 		return s.srv.ListenAndServe()
 	}
-	lc := plaintcp.Config(dnsReusePort)
-	ln, err := lc.Listen(context.Background(), "tcp", s.srv.Addr)
+	ln, err := plaintcp.Listen(context.Background(), "tcp", s.srv.Addr)
 	if err != nil {
 		return err
 	}
@@ -168,7 +174,32 @@ func (s *dnsServer) stop() error {
 // p.tcpDNS and p.udpDNS are set here, before the goroutines that serve and
 // stop them start, and each goroutine is handed its server.
 func (p *Proxy) startDNSServers(ctx context.Context, g *errgroup.Group) error {
+	// Both sockets are bound here, on one port: p.DNSPort, or, where another
+	// socket holds it and the port may move (SetPortMover), a free one. They
+	// bind it alone (no SO_REUSEPORT): with it, a second agent bound the same
+	// port beside the first, and the kernel then shared each one's DNS
+	// queries between the two.
+	var udpConn net.PacketConn
+	var tcpLn net.Listener
+	err := p.bindOrMove("DNS server", &p.DNSPort, func(port uint32) error {
+		addr := fmt.Sprintf(":%v", port)
+		pc, err := net.ListenPacket("udp", addr)
+		if err != nil {
+			return err
+		}
+		ln, err := plaintcp.Listen(context.Background(), "tcp", addr)
+		if err != nil {
+			_ = pc.Close()
+			return err
+		}
+		udpConn, tcpLn = pc, ln
+		return nil
+	}, func() { _ = udpConn.Close(); _ = tcpLn.Close() })
+	if err != nil {
+		return fmt.Errorf("DNS server failed to start: %w", err)
+	}
 	p.tcpDNS, p.udpDNS = p.newDNSServer("tcp"), p.newDNSServer("udp")
+	p.tcpDNS.srv.Listener, p.udpDNS.srv.PacketConn = tcpLn, udpConn
 	for _, s := range []*dnsServer{p.tcpDNS, p.udpDNS} {
 		g.Go(func() error {
 			defer utils.Recover(p.logger)
@@ -1249,5 +1280,16 @@ func (p *Proxy) resetNsSwitchConfig() error {
 	}
 
 	p.logger.Debug("Successfully reset the nsswitch config of linux")
+	return nil
+}
+
+// preBound is the socket srv was handed bound (startDNSServers), or nil.
+func preBound(srv *dns.Server) io.Closer {
+	if srv.Listener != nil {
+		return srv.Listener
+	}
+	if srv.PacketConn != nil {
+		return srv.PacketConn
+	}
 	return nil
 }
