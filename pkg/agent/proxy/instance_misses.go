@@ -47,10 +47,8 @@ type missWindow struct {
 }
 
 // missInstance is the test worker whose process made the miss err (0: none).
+// errors.As reaches a miss carried as the set's through beforeSetMiss.Unwrap.
 func missInstance(err error) uint32 {
-	if b, ok := err.(beforeSetMiss); ok {
-		err = b.error
-	}
 	var pe models.ParserError
 	if errors.As(err, &pe) {
 		return pe.Instance
