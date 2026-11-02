@@ -1,6 +1,7 @@
 package connseq
 
 import (
+	"net"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
@@ -97,10 +98,15 @@ func TestPendingBeforeADestChunkLooksAtEveryCutBeforeTheNumber(t *testing.T) {
 }
 
 // A Read on the conn beneath is in flight from when it begins, which OnRead's
-// func is told, until it returns; what it returns passes the cut it reached.
+// func is told before the Read reaches that conn, until it returns; what it
+// returns passes the cut it reached. The row learns the Read reached the conn
+// from the conn itself, so a Read that does not tell fails here.
 func TestReadInFlightIsToldAndEndsWithTheRead(t *testing.T) {
 	t.Parallel()
-	u, dest := pipeUpstream(t)
+	proxyEnd, dest := net.Pipe()
+	t.Cleanup(func() { _ = proxyEnd.Close(); _ = dest.Close() })
+	reached := make(chan struct{}, 4)
+	u := NewUpstream(readSignalConn{Conn: proxyEnd, reads: reached})
 	begun := make(chan struct{}, 4)
 	u.OnRead(func() { begun <- struct{}{} })
 	u.mu.Lock()
@@ -116,7 +122,12 @@ func TestReadInFlightIsToldAndEndsWithTheRead(t *testing.T) {
 		_, err := u.Read(make([]byte, 8))
 		done <- err
 	}()
-	<-begun
+	<-reached // the Read is in the conn beneath until dest writes
+	select {
+	case <-begun:
+	default:
+		t.Fatal("a Read reached the conn beneath and OnRead's func was not told before it")
+	}
 	if u.PendingBefore(fakeconn.FromDest, q) {
 		t.Fatal("a Read on the conn beneath has begun: nothing is left to be numbered at the cut")
 	}
@@ -132,4 +143,15 @@ func TestReadInFlightIsToldAndEndsWithTheRead(t *testing.T) {
 	if reading {
 		t.Fatal("the Read returned: it is not in flight")
 	}
+}
+
+// readSignalConn sends on reads as each Read on it begins.
+type readSignalConn struct {
+	net.Conn
+	reads chan<- struct{}
+}
+
+func (c readSignalConn) Read(p []byte) (int, error) {
+	c.reads <- struct{}{}
+	return c.Conn.Read(p)
 }
