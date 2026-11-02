@@ -2963,7 +2963,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// the MySQL probe or anything else reads the connection, and relayed to
 	// the real thing (design v14 §4). Anything else continues below, reading
 	// any bytes keploy read to name the connection from the returned conn.
-	if handled, conn, err := p.serveReal(parserCtx, srcConn, dstAddr, containerRepo, clientConnID, predialed); handled {
+	if handled, conn, err := p.serveReal(parserCtx, srcConn, dstAddr, containerRepo, clientConnID, realOrigin(destInfo), predialed); handled {
 		return err
 	} else {
 		srcConn = conn
@@ -6658,7 +6658,7 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 			// The live handler dials for itself: the listener's answer
 			// reaches the destination, and the caller's bytes are the open
 			// test's use, with no use point (Tracker.SentLive).
-			srcConn = &treeRealConn{Conn: srcConn, p: p, label: realLabel, id: realID, live: true}
+			srcConn = &treeRealConn{Conn: srcConn, p: p, label: realLabel, id: realID, from: realOrigin(dest), live: true}
 		}
 		p.live(ctx, srcConn, dstAddr, uint16(dest.Port))
 		return true, nil, nil
@@ -6676,14 +6676,14 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	if isReal {
 		// A dial that fails counts in the open test's row; one that
 		// connects reaches the destination (relayReal).
-		p.realTracker.Dialed(realID, realLabel, err == nil)
+		p.realTracker.Dialed(realOrigin(dest), realID, realLabel, err == nil)
 	}
 	if err != nil {
 		return true, nil, err
 	}
 	defer dstConn.Close()
 	if isReal {
-		srcConn = &treeRealConn{Conn: srcConn, p: p, label: realLabel, id: realID}
+		srcConn = &treeRealConn{Conn: srcConn, p: p, label: realLabel, id: realID, from: realOrigin(dest)}
 	}
 	util.RelayRawPassthrough(srcConn, dstConn)
 	return true, nil, nil

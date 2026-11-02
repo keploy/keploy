@@ -1389,12 +1389,7 @@ func chargeUnattributed(windows []models.ScopeWindow, mocks []capturedMock) []un
 		if windows[i].Evidence != nil {
 			ev = *windows[i].Evidence
 		}
-		ev.CannotCapture = ev.CannotCapture.Plus(models.CaptureLosses{loss})
-		if text := (models.CaptureLosses{loss}).NotJudgedText(); ev.Reason == "" {
-			ev.Reason = "keploy: " + text + "."
-		} else {
-			ev.Reason = strings.TrimSpace(ev.Reason + " Also " + text + ".")
-		}
+		ev.ChargeNotJudged(models.CaptureLosses{loss})
 		windows[i].Evidence = &ev
 	}
 	return out

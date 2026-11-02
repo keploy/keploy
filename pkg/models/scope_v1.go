@@ -213,6 +213,18 @@ func (e *ScopeEvidence) Empty() bool {
 	return e == nil || (len(e.Misses) == 0 && len(e.Unconsumed) == 0 && len(e.CaptureIncomplete) == 0 && len(e.Incomplete) == 0 && len(e.CannotCapture) == 0)
 }
 
+// ChargeNotJudged charges the test with losses that leave it without a
+// verdict (CaptureLosses.Split's notJudged), never failed: on CannotCapture,
+// and in the reason, after what it already says.
+func (e *ScopeEvidence) ChargeNotJudged(l CaptureLosses) {
+	e.CannotCapture = e.CannotCapture.Plus(l)
+	if text := l.NotJudgedText(); e.Reason == "" {
+		e.Reason = "keploy: " + text + "."
+	} else {
+		e.Reason = strings.TrimSpace(e.Reason + " Also " + text + ".")
+	}
+}
+
 // TestID is a test's ID on the wire (design v14 §6.2):
 // [<project>::]<path>::<name>, where path is the test file a harness names,
 // else its instance's key. With neither, the ID is the bare name. The name

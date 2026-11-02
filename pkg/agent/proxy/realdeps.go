@@ -165,6 +165,16 @@ func (p *Proxy) realOrPassthroughLabels(tgid uint32) []string {
 	return labels
 }
 
+// realOrigin is who made the connection to dest: the test worker's keploy
+// instance the kernel stamped it with (0 for none, and on hooks that stamp
+// none), and its process.
+func realOrigin(dest *agent.NetworkAddress) realdeps.Origin {
+	if dest == nil {
+		return realdeps.Origin{}
+	}
+	return realdeps.Origin{Instance: dest.Instance, Pid: dest.KernelPid}
+}
+
 // realList is the run's list when one is installed and the switch is on.
 func (p *Proxy) realList() *realState {
 	if !provenswitch.On() {
@@ -186,7 +196,10 @@ func (p *Proxy) realList() *realState {
 // sends them, closes the connection, or the run ends. A connection whose name
 // keploy cannot read is closed, as capture_incomplete: it is never guessed,
 // passed through or mocked.
-func (p *Proxy) serveReal(ctx context.Context, src net.Conn, dstAddr, containerRepo string, connID int64, predialed *util.Predialed) (handled bool, out net.Conn, err error) {
+//
+// from is who made the connection (realOrigin): what it does is charged to
+// that test worker's open test (realdeps.Tracker).
+func (p *Proxy) serveReal(ctx context.Context, src net.Conn, dstAddr, containerRepo string, connID int64, from realdeps.Origin, predialed *util.Predialed) (handled bool, out net.Conn, err error) {
 	st := p.realList()
 	if st == nil {
 		return false, src, nil
@@ -207,7 +220,7 @@ func (p *Proxy) serveReal(ctx context.Context, src net.Conn, dstAddr, containerR
 	br := bufio.NewReaderSize(src, realdeps.ReaderSize)
 	wrapped := &util.Conn{Conn: src, Reader: br, Logger: p.logger}
 	if dec.Verdict == realdeps.NeedName {
-		done := p.realTracker.Pending(connID, dstAddr, dec.Candidates)
+		done := p.realTracker.Pending(from, connID, dstAddr, dec.Candidates)
 		stop := context.AfterFunc(ctx, func() { _ = src.Close() })
 		name, rerr := realdeps.ReadName(br)
 		stop()
@@ -236,7 +249,7 @@ func (p *Proxy) serveReal(ctx context.Context, src net.Conn, dstAddr, containerR
 			return false, wrapped, nil
 		}
 	}
-	return true, wrapped, p.relayReal(ctx, src, br, dec, dstAddr, connID, predialed)
+	return true, wrapped, p.relayReal(ctx, src, br, dec, dstAddr, connID, from, predialed)
 }
 
 // realLabelAt is the mock.real entry (proven switch) that a connection to
@@ -270,6 +283,7 @@ type treeRealConn struct {
 	p     *Proxy
 	label string
 	id    int64
+	from  realdeps.Origin
 	// live: the live handler serves it, and may capture it as a test case
 	// (Tracker.SentLive).
 	live bool
@@ -279,9 +293,9 @@ func (c *treeRealConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
 	if n > 0 {
 		if c.live {
-			c.p.realTracker.SentLive(c.id, c.label)
+			c.p.realTracker.SentLive(c.from, c.id, c.label)
 		} else {
-			c.p.realTracker.Sent(c.id, c.label)
+			c.p.realTracker.Sent(c.from, c.id, c.label)
 		}
 	}
 	return n, err
@@ -308,7 +322,7 @@ func (c *treeRealConn) NetConn() net.Conn { return c.Conn }
 // it (realdeps.Relay). A dial that fails is the app's to see, as it would be
 // without keploy: its connection is reset, and the test's REAL row counts the
 // failure.
-func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader, dec realdeps.Decision, dstAddr string, connID int64, predialed *util.Predialed) error {
+func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader, dec realdeps.Decision, dstAddr string, connID int64, from realdeps.Origin, predialed *util.Predialed) error {
 	logger := p.logger.With(zap.Int64("Client ConnectionID", connID), zap.String("destination", dstAddr), zap.String("real", dec.Label))
 	// Exactly the address the app dialed, with no loopback-family fallback
 	// and no budget of keploy's: a fallback could reach an address mock.real
@@ -328,7 +342,7 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 			}
 		}
 	}
-	p.realTracker.Dialed(connID, dec.Label, err == nil)
+	p.realTracker.Dialed(from, connID, dec.Label, err == nil)
 	if err != nil {
 		logger.Debug("a mock.real destination refused or could not be reached; the app sees its connection reset", zap.Error(err))
 		if tc, ok := tcpConnOf(client); ok {
@@ -340,11 +354,11 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 	logger.Debug("relaying a connection to a mock.real destination")
 	r := &realdeps.Relay{
 		Client: client, In: br, Dest: dest, Check: dec.Check,
-		Sent:     func(int) { p.realTracker.Sent(connID, dec.Label) },
+		Sent:     func(int) { p.realTracker.Sent(from, connID, dec.Label) },
 		Answered: func() { p.realTracker.Answered(dec.Label) },
-		H2:       func() { p.realTracker.H2(dec.Label) },
+		H2:       func() { p.realTracker.H2(from, dec.Label) },
 		Refused: func(why string) {
-			p.realTracker.Incomplete(dstAddr, why)
+			p.realTracker.Incomplete(from, dstAddr, why)
 			logger.Warn("keploy ended a mock.real connection: capture_incomplete", zap.String("why", why))
 		},
 		// The app's side over, the connection waits on the real server's
@@ -566,10 +580,11 @@ func tcpConnOf(c net.Conn) (*net.TCPConn, bool) {
 // told REAL while the test it failed in is open, it counts against that test;
 // that test ending first is charged with it as capture_incomplete. An index
 // that cannot be read, or places nothing that could be there, leaves it a
-// dependency's failed connect, as at the accept.
-func (p *Proxy) realDialFailed(addr, label string) (string, bool) {
+// dependency's failed connect, as at the accept. from is who connected
+// (realOrigin): the failure is its test worker's test's.
+func (p *Proxy) realDialFailed(addr, label string, from realdeps.Origin) (string, bool) {
 	if label != "" {
-		p.realTracker.Dialed(0, label, false)
+		p.realTracker.Dialed(from, 0, label, false)
 		return label, false
 	}
 	st := p.realList()
@@ -590,11 +605,11 @@ func (p *Proxy) realDialFailed(addr, label string) (string, bool) {
 	switch {
 	case ok:
 		if label = decide(containerkey.Repository(c.Image)); label != "" {
-			p.realTracker.Dialed(0, label, false)
+			p.realTracker.Dialed(from, 0, label, false)
 		}
 		return label, false
 	case wait != nil:
-		resolve := p.realTracker.FailedUndecided(addr)
+		resolve := p.realTracker.FailedUndecided(from, addr)
 		wait(func(c containerkey.Container, ok, resolved bool) {
 			label := ""
 			if resolved && ok {

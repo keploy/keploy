@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -62,14 +63,12 @@ func TestOneTestOpenInTwoWorkersIsRefused(t *testing.T) {
 }
 
 // What keploy keeps for the run as one refuses an overlap, with its reason:
-// mock.real's uses, and drops an agent counts as no capture loss.
+// drops an agent counts as no capture loss.
 func TestAnOverlapIsRefusedWhereKeployKeepsTheRunAsOne(t *testing.T) {
 	for _, c := range []struct {
 		name, why string
 		set       func(*Agent, *instanceHooks)
 	}{
-		{"mock.real", "this run's mock.real destinations are tracked one test at a time",
-			func(a *Agent, _ *instanceHooks) { a.realDepsSet.Store(true) }},
 		{"no capture-loss count", "keploy's hooks here count no capture losses",
 			func(_ *Agent, h *instanceHooks) { h.countingHooks.err = models.ErrPIDMapRefusalsUnsupported }},
 	} {
@@ -222,26 +221,55 @@ func TestAnUnreadMockOfAnOverlapIsChargedToEveryOpenTest(t *testing.T) {
 	require.EqualValues(t, 2, unread("b::TestTwo"))
 }
 
-// realKeeper is a wireProxy that keeps a run's mock.real across pushes.
-type realKeeper struct{ *wireProxy }
+// realWire is a wireProxy that relays mock.real: its tracker is what each
+// test's end reads.
+type realWire struct {
+	*wireProxy
+	tracker realdeps.Tracker
+}
 
-func (realKeeper) KeepRealDeps(context.Context, []string) error { return nil }
+func (p *realWire) RealTracker() *realdeps.Tracker { return &p.tracker }
 
-// The overlap check sees the run's mock.real as each push installs it.
-func TestARunsMockRealIsSeenByTheOverlapCheck(t *testing.T) {
-	a, p := wireAgent(t, models.MODE_RECORD)
-	ctx := context.Background()
-	// This proxy relays no real destination: the list is refused, and the
-	// run still counts as one that names some.
-	_ = a.SetRealDeps(ctx, []string{"api.example.com:443"})
-	require.True(t, a.realDepsSet.Load())
-	require.NoError(t, a.SetRealDeps(ctx, nil))
-	require.False(t, a.realDepsSet.Load())
-	a.Proxy = realKeeper{p}
-	require.NoError(t, a.KeepRealDeps(ctx, []string{"api.example.com:443"}))
-	require.True(t, a.realDepsSet.Load())
-	require.NoError(t, a.KeepRealDeps(ctx, nil))
-	require.False(t, a.realDepsSet.Load())
+// Two workers' tests open at once in a run with mock.real: each test's REAL
+// row holds what its own worker's connections used, and a use from a
+// process in no worker, which could be either's, is in neither row and
+// leaves both without a verdict, naming the process.
+func TestOverlappingWorkersTestsEachHoldTheirOwnWorkersRealUses(t *testing.T) {
+	a, _ := workerAgent(t, models.MODE_RECORD, 4)
+	p := &realWire{wireProxy: a.Proxy.(*wireProxy)}
+	a.Proxy = p
+	w1, w2 := child(t), child(t)
+	require.Equal(t, "1", claimWorker(t, a, w1.Process.Pid, "a", 2))
+	require.Equal(t, "2", claimWorker(t, a, w2.Process.Pid, "b", 2))
+	_, serr := a.ProvenBegin(as(w1.Process.Pid), begin("TestOne"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestTwo"))
+	require.Nil(t, serr, "mock.real keeps each worker's uses apart: the overlap is not refused")
+	p.tracker.Sent(realdeps.Origin{Instance: 1}, 1, "db:5432")
+	p.tracker.Sent(realdeps.Origin{Instance: 2}, 2, "cache:6379")
+	_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestTwo", Outcome: "passed"})
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestThree"))
+	require.Nil(t, serr)
+	p.tracker.Sent(realdeps.Origin{Pid: 4242}, 3, "auth:443")
+	_, serr = a.ProvenEnd(as(w1.Process.Pid), models.ScopeReq{Name: "TestOne", Outcome: "passed"})
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestThree", Outcome: "passed"})
+	require.Nil(t, serr)
+
+	one, two, three := windowOf(t, a, "a::TestOne"), windowOf(t, a, "b::TestTwo"), windowOf(t, a, "b::TestThree")
+	require.Equal(t, []models.RealUse{{Dest: "db:5432", Conns: 1}}, one.Real)
+	require.Equal(t, []models.RealUse{{Dest: "cache:6379", Conns: 1}}, two.Real)
+	require.Empty(t, three.Real)
+	require.Nil(t, two.Evidence, "the use from no worker came after it ended")
+	unattributed := models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1,
+		What: "the latest: a connection to mock.real destination auth:443, from process 4242"}}
+	for _, w := range []models.ScopeWindow{one, three} {
+		require.NotNil(t, w.Evidence, w.Name)
+		require.Equal(t, unattributed, w.Evidence.CannotCapture, w.Name)
+		require.Contains(t, w.Evidence.Reason, "from a process in no test worker's keploy instance", w.Name)
+		require.Equal(t, models.ScopeOutcomePassed, w.Outcome, "not judged, never failed: "+w.Name)
+	}
 }
 
 // A given is the open test's of the worker whose process gave it, while
