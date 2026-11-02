@@ -110,7 +110,7 @@ func TestFetchServerGreeting_ConnectsWhereTheProxysDialsDo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer moved.Close()
+	defer func() { _ = moved.Close() }()
 	go func() {
 		conn, aerr := moved.Accept()
 		if aerr != nil {
