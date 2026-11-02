@@ -18,7 +18,7 @@ func TestParse_ReadsTheKernelsAccounts(t *testing.T) {
 	if e, d, r, ok := parseSchedstat([]byte("123456 7890 12\n")); !ok || e != 123456 || d != 7890 || r != 12 {
 		t.Fatalf("parseSchedstat = %v %v %v %v; want 123456 7890 12", e, d, r, ok)
 	}
-	for _, bad := range []string{"", "123456 7890\n", "123456 x 12\n"} {
+	for _, bad := range []string{"", "123456 7890\n", "123456 x 12\n", "123456 7890 x\n"} {
 		if _, _, _, ok := parseSchedstat([]byte(bad)); ok {
 			t.Fatalf("parseSchedstat(%q) read, want no reading", bad)
 		}
@@ -34,7 +34,15 @@ func TestParse_ReadsTheKernelsAccounts(t *testing.T) {
 	if _, _, ok := parseStat([]byte("42 (x) R 1 2 3\n")); ok {
 		t.Fatal("parseStat read a short stat")
 	}
-	steal := parseSteal([]byte("cpu  1 2 3 4 5 6 7 99 0 0\ncpu0 1 2 3 4 5 6 7 40 0 0\ncpu1 1 2 3 4 5 6 7 59 0 0\nintr 5\n"))
+	if _, _, ok := parseStat([]byte("42 (x) R" + strings.Repeat(" 1", 35) + "\n")); ok {
+		t.Fatal("parseStat read a stat that ends before the CPU")
+	}
+	if _, cpu, ok := parseStat([]byte("42 (x) R" + strings.Repeat(" 1", 35) + " x 0 0\n")); ok {
+		t.Fatalf("parseStat read a CPU that is not a number: %q", cpu)
+	}
+	// A CPU line without steal (kernels before 2.6.11) and other lines as long
+	// as a CPU's are skipped.
+	steal := parseSteal([]byte("cpu  1 2 3 4 5 6 7 99 0 0\ncpu0 1 2 3 4 5 6 7 40 0 0\ncpu1 1 2 3 4 5 6 7 59 0 0\ncpu2 1 2 3 4 5 6 7\nintr 5\nsoftirq 1 2 3 4 5 6 7 8 9 10\n"))
 	if len(steal) != 2 || steal["cpu0"] != 40 || steal["cpu1"] != 59 {
 		t.Fatalf("parseSteal = %v; want cpu0 40, cpu1 59", steal)
 	}

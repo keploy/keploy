@@ -18,13 +18,14 @@ type fakeSource struct {
 	heldFor  uint64        // the calls of heldOff it has been held off for
 	heldN    int           // calls of heldOff
 	own      time.Duration // the sampling thread's wait for a CPU so far (ownWait)
+	noCPU    bool          // the process's CPU time cannot be read
 }
 
 // holdOff says a thread is held off from the next read of the threads on, or
 // is no longer.
 func (f *fakeSource) holdOff(now bool) { f.heldNow, f.heldFrom = now, f.heldN+1 }
 
-func (f *fakeSource) now() (time.Time, time.Duration, bool) { return f.wall, f.cpu, true }
+func (f *fakeSource) now() (time.Time, time.Duration, bool) { return f.wall, f.cpu, !f.noCPU }
 func (f *fakeSource) cpuLimit() (float64, bool) {
 	f.reads++
 	return f.limit, f.limit > 0
@@ -209,6 +210,57 @@ func TestSampler_WhatWaitingOwesIsAtMostASecond(t *testing.T) {
 	}
 	if reads < 29 {
 		t.Fatalf("%d reads in 30 s, want about one a second", reads)
+	}
+}
+
+// What on-time samples pay comes out of what they count: a wait owed past a
+// sample's worth is paid over the samples after it, and the clock never goes
+// back.
+func TestSampler_AWaitOwedPastASampleIsPaidOverTheNextOnes(t *testing.T) {
+	s, src := newFakeSampler(0)
+	src.held = 500 * time.Millisecond // the first read finds a thread waited 500 ms
+	last := s.ran.Load()
+	for i := range 300 { // 3 s on time
+		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/10
+		s.sample()
+		if r := s.ran.Load(); r < last {
+			t.Fatalf("sample %d took the clock back from %v to %v, owing %v", i, time.Duration(last), time.Duration(r), s.waitOwed)
+		}
+		last = s.ran.Load()
+	}
+	if got, want := time.Duration(last), 3*time.Second-500*time.Millisecond; got != want {
+		t.Fatalf("3 s on time, a thread waiting 500 ms of it, accrued %v, want %v", got, want)
+	}
+}
+
+// A read carries at most heldEvery of the on-time time no wait took to the
+// next read: a wait found after a quiet stretch takes no more than that and
+// what came on time since, however long the stretch was.
+func TestSampler_AQuietStretchOwesNoMoreThanItsLastTwoReads(t *testing.T) {
+	s, src := newFakeSampler(0)
+	for range 1000 { // 10 s on time, no thread waiting
+		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/10
+		s.sample()
+	}
+	src.held = time.Hour
+	for n := src.heldN; src.heldN == n; {
+		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/10
+		s.sample()
+	}
+	if s.waitOwed > 2*heldEvery+2*Tick {
+		t.Fatalf("an endless wait found after 10 s on time owes %v, want at most the carry and a read's worth: %v", s.waitOwed, 2*heldEvery)
+	}
+}
+
+// With no CPU clock to tell a late sample by, a sample counts as on time.
+func TestSampler_WithoutACPUClockASampleIsOnTime(t *testing.T) {
+	s, src := newFakeSampler(0)
+	src.noCPU = true
+	s.lastWall, s.lastCPU, s.cpuOK = src.now()
+	src.wall = src.wall.Add(500 * time.Millisecond)
+	s.sample()
+	if got := time.Duration(s.ran.Load()); got != 500*time.Millisecond {
+		t.Fatalf("a sample 500 ms after the last, with no CPU clock, accrued %v, want all of it", got)
 	}
 }
 
