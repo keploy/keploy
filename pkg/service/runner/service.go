@@ -58,6 +58,16 @@ type RunTestOpts struct {
 	TestSetID  string
 	TestStepID string // TestStepID is the test case name used to load the case from TestCaseDB.
 	ServiceURL string
+	// AppEnded is for a caller that started the app at ServiceURL: it closes
+	// once that run of the app has ended (the process exited, or the compose
+	// that runs it came down). Given it, the wait for the app before the
+	// request has no budget. It ends when the app answers, when AppEnded
+	// closes (the test fails: the app stopped before it answered), or when ctx
+	// ends. So an app whose start is held (compose waiting on a slow
+	// dependency's health before it starts the app) is waited for for as long
+	// as its start takes. Nil, for a caller that did not start the app and has
+	// no such event: the wait keeps its two-minute budget.
+	AppEnded <-chan struct{}
 }
 
 // Service runs a single integration test end-to-end.
