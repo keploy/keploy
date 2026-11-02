@@ -194,6 +194,24 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 	// on, so a recording the index still lists and the store no longer hands
 	// out is never chosen again.
 	reread := false
+	// refused: the recordings a claim of this call's failed on (claim: the
+	// store no longer holds that copy where its claim looks, as when another
+	// call took it first). The loop ends by construction: each pass returns,
+	// or claims a candidate, or adds the candidate whose claim failed to
+	// refused, which every later pass's candidates leave out. So no pass
+	// retries a recording it failed to claim, and the passes are bounded by
+	// the copies the store hands out; it hands out a new one only when another
+	// call served the recording or the pool was staged again. Before, a store
+	// that kept handing out a recording it would not let a claim take (a
+	// session mock staged in the per-test tier) spun the call at full CPU,
+	// never answered.
+	var refused map[*models.Mock]struct{}
+	refuse := func(m *models.Mock) {
+		if refused == nil {
+			refused = make(map[*models.Mock]struct{})
+		}
+		refused[m] = struct{}{}
+	}
 	for {
 		if ctx.Err() != nil {
 			return false, nil, nil, ctx.Err()
@@ -269,6 +287,15 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		// Less what a test kept for its repeats and is over with.
 		combined = integrations.WithoutSpent(mockDb, combined)
 		unfilteredMocks := FilterHTTPMocks(combined)
+		if len(refused) > 0 {
+			candidates := unfilteredMocks[:0:0]
+			for _, m := range unfilteredMocks {
+				if _, out := refused[m]; !out {
+					candidates = append(candidates, m)
+				}
+			}
+			unfilteredMocks = candidates
+		}
 
 		if debugOn(h.Logger) {
 			// Log all mock names in a single line for better readability
@@ -416,6 +443,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 				return false, nil, nil, err
 			}
 			if !claimed {
+				refuse(bestMatch)
 				continue
 			}
 			// Advance the cursor only now the response is actually served, so a
@@ -451,6 +479,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 				return false, nil, nil, err
 			}
 			if !claimed {
+				refuse(bestC)
 				continue
 			}
 			return true, served, nil, nil
@@ -495,6 +524,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 					return false, nil, nil, err
 				}
 				if !claimed {
+					refuse(bodyMatched[0])
 					continue
 				}
 				return true, served, nil, nil
@@ -517,6 +547,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 				return false, nil, nil, err
 			}
 			if !claimed {
+				refuse(bestMatch)
 				continue
 			}
 			return true, served, nil, nil

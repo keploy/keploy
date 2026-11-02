@@ -1821,6 +1821,29 @@ func (a *Agent) MockWindowOf(params models.MockFilterParams) models.MockWindowMo
 	return models.MockWindowMode{Strict: pkg.IsStrictMockWindow(params.StrictMockWindow), Load: perTestLoadMode(params)}
 }
 
+// reusableByLifetime splits the per-test region of the store into the mocks a
+// test's mapping narrows and the session and connection mocks in it, which no
+// test owns: a "mocks"-tagged call of a kind DeriveLifetime's lax rule makes a
+// session mock (an HTTP recording made before its recorder stated lifetimes,
+// KEPLOY_STRICT_MOCK_WINDOW unset), or a MySQL statement's lifecycle. The
+// window staging files them in the reusable tier (pkg's ruleSessionLifetime),
+// and every parser's claim of one looks there (UpdateUnFilteredMock); a
+// mapping staging files them there too, whatever the mapping names, so a test
+// begun without a pid is answered by them as with no test begun. Staged in the
+// per-test tier, no claim of one could take it. They are resident, never
+// parked on disk (EligibleForDisk), so a mapping's load does not need them.
+func reusableByLifetime(mocks []*models.Mock) (perTest, reusable []*models.Mock) {
+	perTest = make([]*models.Mock, 0, len(mocks))
+	for _, m := range mocks {
+		if m != nil && (m.TestModeInfo.Lifetime == models.LifetimeSession || m.TestModeInfo.Lifetime == models.LifetimeConnection) {
+			reusable = append(reusable, m)
+			continue
+		}
+		perTest = append(perTest, m)
+	}
+	return perTest, reusable
+}
+
 // perTestLoadMode is which per-test mocks loadPerTestMocks reads from disk for
 // this call: mapping -> named mocks; strict -> window + startup band; lax -> all.
 //
@@ -2296,8 +2319,12 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 
 	// Apply filtering based on parameters
 	if params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping) {
-		filteredMocks = pkg.FilterTcsMocksMappingInWindow(ctx, a.logger, originalFiltered, params.MockMapping, params.AfterTime, params.BeforeTime)
-		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
+		perTest, reusable := originalFiltered, []*models.Mock(nil)
+		if !provenswitch.On() {
+			perTest, reusable = reusableByLifetime(originalFiltered)
+		}
+		filteredMocks = pkg.FilterTcsMocksMappingInWindow(ctx, a.logger, perTest, params.MockMapping, params.AfterTime, params.BeforeTime)
+		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, append(originalUnfiltered[:len(originalUnfiltered):len(originalUnfiltered)], reusable...), params.MockMapping)
 	} else {
 		// Lax-mode promotion restoration: filterByTimeStamp moves
 		// out-of-window non-config per-test mocks into its "unfiltered"
