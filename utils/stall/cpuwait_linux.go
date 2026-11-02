@@ -52,18 +52,24 @@ type threadStat struct {
 // 0 and 0 where the threads cannot be read (no /proc, a kernel without
 // CONFIG_SCHED_INFO).
 func (w *threadWaits) longest() (time.Duration, uint64) {
-	tasks, err := os.ReadDir(taskDir)
+	return w.longestIn(taskDir, procStat)
+}
+
+// longestIn is longest, the threads read from their directories in tasksDir
+// and the CPUs' steal from statFile (the tests' are not the kernel's).
+func (w *threadWaits) longestIn(tasksDir, statFile string) (time.Duration, uint64) {
+	tasks, err := os.ReadDir(tasksDir)
 	if err != nil {
 		return 0, 0
 	}
 	seen := make(map[string]threadStat, len(tasks))
 	for _, task := range tasks {
-		if st, ok := readThread(task.Name()); ok {
+		if st, ok := readThread(tasksDir, task.Name()); ok {
 			seen[task.Name()] = st
 		} // else the thread has exited
 	}
 	var steal map[string]int64
-	if b, err := os.ReadFile(procStat); err == nil {
+	if b, err := os.ReadFile(statFile); err == nil {
 		steal = parseSteal(b)
 	}
 	return w.account(seen, steal)
@@ -135,11 +141,11 @@ func threadRunDelay() (time.Duration, bool) {
 	return time.Duration(delay), ok
 }
 
-// readThread reads a thread's account; false if it has exited or the kernel
-// keeps none.
-func readThread(tid string) (threadStat, bool) {
+// readThread reads the account of thread tid, in tasksDir; false if it has
+// exited or the kernel keeps none.
+func readThread(tasksDir, tid string) (threadStat, bool) {
 	var st threadStat
-	b, err := os.ReadFile(taskDir + "/" + tid + "/schedstat")
+	b, err := os.ReadFile(tasksDir + "/" + tid + "/schedstat")
 	if err != nil {
 		return st, false
 	}
@@ -147,7 +153,7 @@ func readThread(tid string) (threadStat, bool) {
 	if st.exec, st.delay, st.runs, ok = parseSchedstat(b); !ok {
 		return st, false
 	}
-	if b, err = os.ReadFile(taskDir + "/" + tid + "/stat"); err != nil {
+	if b, err = os.ReadFile(tasksDir + "/" + tid + "/stat"); err != nil {
 		return st, false
 	}
 	st.runnable, st.cpu, ok = parseStat(b)

@@ -117,6 +117,88 @@ func TestThreadWaits_StealThatShowsWhileTheThreadIsStillQueuedIsCharged(t *testi
 	}
 }
 
+// fakeProcFiles writes files, by path under dir, holding their contents;
+// "" removes one.
+func fakeProcFiles(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	for name, body := range files {
+		path := dir + "/" + name
+		if body == "" {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(path[:strings.LastIndexByte(path, '/')], 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The reader takes a thread only as the kernel shows all of its account,
+// and the CPUs' steal from the kernel's times. A thread whose run delay
+// cannot be read, or whose state cannot (it exited between the reads of
+// its two files), is not seen at that read: its account is all new at the
+// next, and its wait so far is counted then, not as though it had none. And
+// steal that shows in the kernel's times holds off a thread runnable on
+// that CPU. Where the threads cannot be listed, nothing is read.
+func TestThreadWaits_ReadOnlyTheAccountsTheKernelShows(t *testing.T) {
+	// ppid through exit_signal (fields 4 to 38), then the CPU (39): cpu0.
+	runnable := "R" + strings.Repeat(" 1", 35) + " 0 0 0\n"
+	steal := func(ticks int) string {
+		return fmt.Sprintf("cpu  1 2 3 4 5 6 7 %d 0 0\ncpu0 1 2 3 4 5 6 7 %d 0 0\nintr 5\n", ticks, ticks)
+	}
+	read := func(t *testing.T, w *threadWaits, dir string, files map[string]string) (time.Duration, uint64) {
+		t.Helper()
+		fakeProcFiles(t, dir, files)
+		return w.longestIn(dir+"/task", dir+"/stat")
+	}
+	t.Run("a run delay that cannot be read", func(t *testing.T) {
+		var w threadWaits
+		dir := t.TempDir()
+		if most, held := read(t, &w, dir, map[string]string{
+			"task/2/schedstat": "x 2000 3\n", "task/2/stat": "2 (a) " + runnable, "stat": steal(10),
+		}); most != 0 || held != 0 {
+			t.Fatalf("first read: %v, held for %d reads; want nothing, the thread not seen", most, held)
+		}
+		if most, held := read(t, &w, dir, map[string]string{"task/2/schedstat": "500 2000 3\n"}); most != 2000 || held != 0 {
+			t.Fatalf("second read: %v, held for %d reads; want the thread's 2µs of waits, all new, and none held", most, held)
+		}
+	})
+	t.Run("a state that cannot be read", func(t *testing.T) {
+		var w threadWaits
+		dir := t.TempDir()
+		if most, held := read(t, &w, dir, map[string]string{
+			"task/3/schedstat": "1000 4000 3\n", "stat": steal(10),
+		}); most != 0 || held != 0 {
+			t.Fatalf("first read: %v, held for %d reads; want nothing, the thread not seen", most, held)
+		}
+		if most, held := read(t, &w, dir, map[string]string{"task/3/stat": "3 (a) " + runnable}); most != 4000 || held != 0 {
+			t.Fatalf("second read: %v, held for %d reads; want the thread's 4µs of waits, all new, and none held", most, held)
+		}
+	})
+	t.Run("steal in the kernel's times", func(t *testing.T) {
+		var w threadWaits
+		dir := t.TempDir()
+		read(t, &w, dir, map[string]string{
+			"task/1/schedstat": "1000 2000 3\n", "task/1/stat": "1 (a) " + runnable, "stat": steal(10),
+		})
+		if most, held := read(t, &w, dir, map[string]string{"stat": steal(15)}); most != 5*time.Second/userHZ || held != 1 {
+			t.Fatalf("got %v, held for %d reads; want the 5 ticks of steal of its CPU, held for one", most, held)
+		}
+	})
+	t.Run("no threads listed", func(t *testing.T) {
+		var w threadWaits
+		dir := t.TempDir()
+		if most, held := read(t, &w, dir, map[string]string{"stat": steal(10)}); most != 0 || held != 0 || w.reads != 0 {
+			t.Fatalf("got %v, held for %d reads, %d reads; want no read", most, held, w.reads)
+		}
+	})
+}
+
 // The reader sees the wait the kernel keeps: two threads bound to one CPU
 // take turns, so each waits about as long as the other runs. The two must be
 // on the kernel's run queue together, so each has a P of its own (with one
