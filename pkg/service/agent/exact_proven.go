@@ -281,6 +281,16 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 	return nil
 }
 
+// endingTestCase names the test case a keploy test end is for: the latest one
+// exact serving opened, which it still serves (ExactTestOutcome; a set's test
+// cases run one at a time), or "the test case" when none was opened.
+func endingTestCase(es coreAgent.ExactServer) string {
+	if test, _, _, _ := es.ExactTestOutcome(); test != "" {
+		return test
+	}
+	return "the test case"
+}
+
 // openExactTest opens test under exact serving, served exactly owned, and
 // begins its variables with given bound, in one step (coreAgent.
 // ExactTestOpener): no call the test's mocks answer binds before its
@@ -388,7 +398,9 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		// A test case that ends is served the pool whatever its settling
 		// found, and told it is not verified when keploy cannot tell its
 		// calls settled: the calls after it are the pool's either way.
-		unknown = a.settledSince(ctx, true, "the test case")
+		// One cut short marks what it could not see reached with the test
+		// case's name (settledSince), which its owned losses then say.
+		unknown = a.settledSince(ctx, true, endingTestCase(es))
 	}
 	switch {
 	case ex.Stage:

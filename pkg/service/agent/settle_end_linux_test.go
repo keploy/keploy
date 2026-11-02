@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -111,6 +112,25 @@ func TestAnEndWithAConnectionWhoseHeldRequestsAreUnknownIsNotVerified(t *testing
 	require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}}, nil), "a test case opens")
 	err = a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{}}, nil)
 	require.ErrorIs(t, err, errHoldsUnknown, "a test case's end is told it is not verified")
+}
+
+// keploy test's end of a test case makes its bytes wait under the test case's
+// name (endingTestCase): one cut short marks what it could not see reached
+// with it, so the owned losses counted later say which test case wrote the
+// bytes. An end with no test case opened says "the test case"; an opening
+// waits under no test's name.
+func TestAKeployTestEndNamesItsTestCaseToTheBytesWait(t *testing.T) {
+	a, p := exactAgent(t, nil, map[string][]string{}, map[string][]string{})
+	ctx := context.Background()
+	var ends []string
+	p.bytesWait = func(ctx context.Context, _ uint64) error {
+		ends = append(ends, coreAgent.EndOf(ctx))
+		return nil
+	}
+	require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{}}, nil), "an end with no test case opened")
+	require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}}, nil))
+	require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{}}, nil))
+	require.Equal(t, []string{"the test case", "", "test-1"}, ends)
 }
 
 // A test during which the kernel dropped, at the proxy's listener, what can
