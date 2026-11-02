@@ -1001,10 +1001,16 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 
 	// 3. Answer: an answer of the call's scope or the start-up, given
 	// before the call in both runs, holds R's value, and F's text there
-	// holds F's or is not stated.
+	// holds F's or may (fGaveIt).
+	// fGaveIt: F's text at an answer holds F's moment, a view F served there
+	// does, or F served it with no view told or read (fMay). Where F served
+	// it changed and no view it gave holds F's moment, F's application took
+	// its moment from elsewhere: the answer is no source, in or outside the
+	// call's scope alike (an answer F never served is never before in F).
+	fGaveIt := func(h instantHold) bool { return h.p.fMay || h.hl || dc.inAView(h.p, c) }
 	answer := func(h instantHold) bool {
 		p := h.p
-		return p.side == Response && !p.given && inScope(p) && p.state == stateBefore && h.hr && !h.coarseR && (p.fUnstated || h.hl) && byText(h)
+		return p.side == Response && !p.given && inScope(p) && p.state == stateBefore && h.hr && !h.coarseR && fGaveIt(h) && byText(h)
 	}
 	answers := heldWhere(hs, answer)
 	// An answer that holds it only as a coarse cut of a finer instant is no
@@ -1063,7 +1069,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	var gaveRefusal *Decision
 	fine := false
 	for _, h := range hs {
-		if p := h.p; p.side == Response && !p.given && !inScope(p) && p.state == stateBefore && h.hr && (p.fUnstated || h.hl) {
+		if p := h.p; p.side == Response && !p.given && !inScope(p) && p.state == stateBefore && h.hr && fGaveIt(h) {
 			gaveOutside, fine = append(gaveOutside, p.mock), fine || h.fr || h.fl
 		}
 	}

@@ -472,6 +472,39 @@ func TestOutcomeFsMomentInAnAnswerOfNoStatedViewIsUnknown(t *testing.T) {
 	iValue(t, "an unstated answer that holds the recorded moment", call(ans(rec).ServedAs(1)), "mock-7")
 }
 
+// An answer recorded before the call that holds the recorded moment, which
+// round F served changed: keploy read the views F gave there. Where no view
+// holds F's moment, F's application took its moment from elsewhere, so the
+// answer is not one F gave it: no source, in or outside the call's scope,
+// and the call's window holds a read of the clock. Where a view holds F's
+// moment, or F served it with no view keploy read, it may be: an answer of
+// the scope binds the value, and one outside the scope is refused naming
+// the edit.
+func TestOutcomeAnAnswerWhoseViewsInFHoldNoneOfFsMomentIsNoSource(t *testing.T) {
+	const p = "bind.$2"
+	rAt := oAt.Add(300 * time.Millisecond)
+	fAt := oAt.Add(time.Hour + 300*time.Millisecond)
+	rec, live := iMicro(rAt.Add(-50*time.Millisecond)), iMicro(fAt.Add(-50*time.Millisecond))
+	ans := func(v string) Raw { return oAnswer("mock-7", 100*time.Millisecond, v) }
+	call := func(x Raw, outside bool) Decision {
+		in := iCall(p, String, rec, live, rAt, fAt, iWin(rAt, fAt, 60*time.Millisecond), nil, []Raw{x})
+		if outside {
+			in.Scope = func(string) Scope { return ScopeTest("test-1") }
+		}
+		return oWord(t, Decide(in), rec, live)
+	}
+	served := ans(rec).ServedAs(1)
+	for _, outside := range []bool{false, true} {
+		where := map[bool]string{false: "in the call's scope", true: "outside the call's scope"}[outside]
+		iClock(t, "views as recorded and another, "+where, call(served.ServedChanged(ans(rec), ans("no")), outside))
+		iClock(t, "one view of neither moment, "+where, call(served.ServedChanged(ans("no")), outside))
+	}
+	iValue(t, "a view holds F's moment, in the call's scope", call(served.ServedChanged(ans(rec), ans(live)), false), "mock-7")
+	iValue(t, "no view keploy read, in the call's scope", call(served.ServedChanged(), false), "mock-7")
+	oRefused(t, "a view holds F's moment, outside the call's scope", call(served.ServedChanged(ans(rec), ans(live)), true), RefusalAnotherScope, "mock-7")
+	oRefused(t, "no view keploy read, outside the call's scope", call(served.ServedChanged(), true), RefusalAnotherScope, "mock-7")
+}
+
 // An answer that holds only the date of a time the call sends (a timetable's
 // day, its times of day neither run's): the date reads as the recorded time
 // cut to a day, but the time of day the app wrote beside it is none of the
