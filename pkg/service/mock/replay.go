@@ -1272,7 +1272,9 @@ func recordedGivens(mp *models.Mapping) map[string][]models.GivenValue {
 // startup:), else models.PoolKeyNone. A mapping that cannot be read, or that
 // names a mock the recording does not have, refuses, and so does an agent
 // that refuses the table: nothing is served from a whole pool instead. The
-// values each test gave when it was recorded go in the same request.
+// values each test gave when it was recorded go in the same request, and so
+// do each test's deliver: entries with their cases' recorded requests
+// (recordedDeliveries), which refuse when one cannot be sent as recorded.
 func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, decoded []*models.Mock) error {
 	refuse := func(why string) error {
 		return fmt.Errorf("keploy cannot judge each test of mock set %q: %s; record it again with keploy mock record", name, why)
@@ -1321,13 +1323,17 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	// Every test's recorded window, of every recording its mapping lists,
 	// the ones the agent never holds included: they were made in it.
 	windows := recordedTestWindows(mp, table, decoded)
+	deliver, err := m.recordedDeliveries(ctx, name, mp)
+	if err != nil {
+		return err
+	}
 	table = heldOnly(table, loaded)
 	if !ownsTestMocks(table, loaded) {
 		m.logger.Warn("under KEPLOY_PROVEN no test of this mock set owns a recorded call: it has no mappings.yaml, or its mapping lists no data-plane mock the agent holds, so every call a test makes to a dependency misses",
 			zap.String("mock-set", name),
 			zap.String("next_step", "record the set again with this keploy: keploy mock record writes mappings.yaml"))
 	}
-	if err := pp.PushProvenTable(ctx, table, pool, windows, recordedGivens(mp)); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, windows, recordedGivens(mp), deliver); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)

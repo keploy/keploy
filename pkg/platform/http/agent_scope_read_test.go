@@ -2,9 +2,11 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -79,20 +81,20 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	defer srv.Close()
 	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
 	ctx := context.Background()
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, nil, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// The recorded test windows go with them, in the same request.
 	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// The values each test gave when it was recorded ride the same request.
 	given := map[string][]models.GivenValue{"o::TestA": {{Name: "given:nonce", Value: "1761", Source: "a_test.go:9"}}}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, given); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, given, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -104,9 +106,26 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	if !slices.Equal(bodies, want) {
 		t.Fatalf("posted %q, want %q", bodies, want)
 	}
+	// Each test's deliveries, with their cases' recorded requests and
+	// answers, ride the same request.
+	deliver := map[string][]models.DeliveryCase{"o::TestA": {{
+		Delivery: models.Delivery{Case: "test-2", After: "mock-3"},
+		Req:      models.HTTPReq{Method: "POST", URL: "http://localhost:8080/webhooks/pay", Header: map[string]string{"X-Pay-Signature": "ab12"}, Body: `{"order":"o-1"}`},
+		Resp:     models.HTTPResp{StatusCode: 200, Body: "ok"},
+	}}}
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, nil, deliver); err != nil {
+		t.Fatal(err)
+	}
+	var got models.ScopeTableReq
+	if err := json.Unmarshal([]byte(bodies[len(bodies)-1]), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Deliver, deliver) {
+		t.Fatalf("posted deliveries %+v, want %+v", got.Deliver, deliver)
+	}
 	for _, s := range []int{http.StatusNotFound, http.StatusNotImplemented, http.StatusInternalServerError} {
 		status = s
-		if err := a.PushProvenTable(ctx, nil, nil, nil, nil); err == nil {
+		if err := a.PushProvenTable(ctx, nil, nil, nil, nil, nil); err == nil {
 			t.Fatalf("status %d: want an error", s)
 		}
 	}
@@ -136,16 +155,31 @@ func TestAgentClient_PushProvenTableIsReappliedWithItsWindows(t *testing.T) {
 	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	windows := []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}
 	given := map[string][]models.GivenValue{"o::TestA": {{Name: "given:nonce", Value: "1761", Source: "a_test.go:9"}}}
-	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, windows, given); err != nil {
+	deliver := map[string][]models.DeliveryCase{"o::TestA": {{Delivery: models.Delivery{Case: "test-2", After: "mock-3"}, Req: models.HTTPReq{Method: "POST", URL: "/webhooks/pay"}}}}
+	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, windows, given, deliver); err != nil {
 		t.Fatal(err)
 	}
 	windows[0].TestCase = "o::Changed" // the caller's slice is its own
 	given["o::TestA"] = nil            // and so is its map
+	deliver["o::TestA"] = nil          // and its deliveries
 	if err := a.session().reapply(context.Background(), zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
-	want := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}],"given":{"o::TestA":[{"name":"given:nonce","value":"1761","source":"a_test.go:9"}]}}`
-	if !slices.Equal(bodies, []string{want, want}) {
-		t.Fatalf("posted %q, want the table, its windows and its givens twice: %q", bodies, want)
+	if len(bodies) != 2 || bodies[0] != bodies[1] {
+		t.Fatalf("posted %q, want the same table twice", bodies)
+	}
+	var got models.ScopeTableReq
+	if err := json.Unmarshal([]byte(bodies[1]), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := models.ScopeTableReq{
+		Mappings: map[string][]string{"o::TestA": {"mock-3"}},
+		Pool:     map[string][]string{"o": {"mock-1"}},
+		Windows:  []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}},
+		Given:    map[string][]models.GivenValue{"o::TestA": {{Name: "given:nonce", Value: "1761", Source: "a_test.go:9"}}},
+		Deliver:  map[string][]models.DeliveryCase{"o::TestA": {{Delivery: models.Delivery{Case: "test-2", After: "mock-3"}, Req: models.HTTPReq{Method: "POST", URL: "/webhooks/pay"}}}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("reapplied %+v, want the table, its windows, its givens and its deliveries as pushed: %+v", got, want)
 	}
 }
