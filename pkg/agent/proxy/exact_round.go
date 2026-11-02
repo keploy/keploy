@@ -998,6 +998,9 @@ type heldScope struct {
 	// background is in none of h's reads but KindBackground's, and its doors
 	// refuse it (hides).
 	hideBg bool
+	// ownGen is the generation h reports while it reads elsewhere
+	// (elsewhereGen), 0 until then.
+	ownGen uint64
 }
 
 // SequenceView implements integrations.SequenceViewer: the sequence view of
@@ -1066,7 +1069,11 @@ func (h *heldScope) moved() bool {
 // set and miss each later call of it. Each is sampled before the check, as a
 // read is made before held's: a staging moves its epoch before it changes the
 // trees or a generation, so a sample the staging is still the call's after
-// is of the call's set.
+// is of the call's set. While h reads in a view other than the one in force
+// (elsewhere) each is h's own (elsewhereGen): h's reads are not the view in
+// force's, so a parser must neither answer the call from its index of the
+// view in force, nor file what h read under that view's generation for the
+// view's own calls to be answered from.
 func (h *heldScope) StagingGeneration() uint64 {
 	return h.generation(h.MockManager.StagingGeneration())
 }
@@ -1082,12 +1089,41 @@ func (h *heldScope) RevisionByKind(kind models.Kind) uint64 {
 }
 
 // generation is g, sampled before the call, while the staging is still h's
-// call's; integrations.RestagedGeneration once it moved.
+// call's and h reads in the view in force; integrations.RestagedGeneration
+// once the staging moved; h's own while it reads in another view.
 func (h *heldScope) generation(g uint64) uint64 {
 	if h.moved() {
 		return integrations.RestagedGeneration
 	}
+	if h.elsewhere() {
+		return h.elsewhereGen()
+	}
 	return g
+}
+
+// elsewhere reports whether h reads in a view other than the one in force:
+// the view its call was read in (readIn), which a test's begin or end has
+// since replaced.
+func (h *heldScope) elsewhere() bool {
+	return h.readIn != nil && h.readIn != h.MockManager.exactView()
+}
+
+// elsewhereStride parts the generations held stores report while they read
+// elsewhere: wider than any version a view over the store adds to them
+// (scopedMockDb.viewVersion), so no two stores' meet.
+const elsewhereStride = 1 << 20
+
+// elsewhereGens counts the held stores that read elsewhere.
+var elsewhereGens atomic.Uint64
+
+// elsewhereGen is h's own generation while it reads elsewhere
+// (integrations.ElsewhereGeneration): the same at each sample, and no other
+// store's.
+func (h *heldScope) elsewhereGen() uint64 {
+	if h.ownGen == 0 {
+		h.ownGen = integrations.ElsewhereGeneration + elsewhereGens.Add(1)*elsewhereStride
+	}
+	return h.ownGen
 }
 
 var _ integrations.StagingGenerations = (*heldScope)(nil)

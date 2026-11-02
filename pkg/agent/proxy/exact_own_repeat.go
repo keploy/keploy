@@ -125,9 +125,15 @@ func (h *heldScope) Spent(mk *models.Mock) bool {
 }
 
 // MockSpent implements integrations.StagingGenerations' spent read: the
-// manager's, and every recording h hides (Spent's, by name).
+// view's h reads in (readView), as the manager's is the view in force's, and
+// every recording h hides (Spent's, by name). Its reads drop what that view
+// spent, never what another view did.
 func (h *heldScope) MockSpent(name string) bool {
-	return h.hidesName(name) || h.MockManager.MockSpent(name)
+	if h.hidesName(name) {
+		return true
+	}
+	v := h.readView()
+	return v != nil && v.spentNow(name)
 }
 
 // The consume doors refuse what h hides, the call's decision asked first for

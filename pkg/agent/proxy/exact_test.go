@@ -4283,6 +4283,229 @@ func TestAHeldCallIsNotOfferedARecordingTheViewInForceRefused(t *testing.T) {
 	}
 }
 
+// viewMovedAtMark is mm with a test's begin or end landing between a call's
+// mark and its matcher's reads, as a slow replay lands it: its MarkCallRound
+// marks the call, then runs move, once. Every call of a row goes through the
+// same one, so a parser's index of its reads is kept for one store, as the
+// agent's is.
+type viewMovedAtMark struct {
+	*MockManager
+	move func()
+}
+
+func (v *viewMovedAtMark) MarkCallRound() integrations.CallRound {
+	c := v.MockManager.MarkCallRound()
+	if move := v.move; move != nil {
+		v.move = nil
+		move()
+	}
+	return c
+}
+
+// A held HTTP call is answered in the view it was read in through every
+// pass of the HTTP parser that holds a call to its mark, its indexes of the
+// reads included. An index is keyed on what the store says it reads: its
+// staging generation, or the shared generation of an open test's reads. A
+// held store that read in one view and said the generation, or the shared
+// reads, of the view in force had the call answered from the view in force's
+// index, and an index of the view it read in filed under the view in force,
+// for the next call to be answered from. One parser serves every call, as
+// the agent's does, so what it indexed is kept between calls.
+//   - A call read between tests after a call between tests, its read landing
+//     after TestA opened, is answered 1, the next of the calls between tests;
+//     TestA's window then walks 0, 1, its own cursor.
+//   - TestA's call after its window spent 0, its read landing after TestA's
+//     end and after a call between tests nothing answers, is answered 1, the
+//     windows' next; the calls between tests then walk 0, then 1.
+//
+// The learn step reads a round snapshot taken whole at its first read
+// (integrations.SnapshotRound) and holds no call to a mark.
+func TestAHeldHTTPCallIsAnsweredInTheViewItWasReadInThroughTheIndexes(t *testing.T) {
+	for _, pass := range workerWalkPasses() {
+		if pass.sw == "" || pass.opts.Learn {
+			continue // neither holds a call to its mark
+		}
+		setup := func(t *testing.T) (db *viewMovedAtMark, ask func(path string) string, late func(path string, move func()) string, open func(test string)) {
+			t.Setenv(provenswitch.Env, pass.sw)
+			names := []string{"w-0", "w-1"}
+			mm := stagedManager(t, nil, []*models.Mock{pass.rec("w-0", time.Second, "0"), pass.rec("w-1", 2*time.Second, "1")})
+			db = &viewMovedAtMark{MockManager: mm}
+			h := httpint.New(zap.NewNop())
+			calls := 0
+			ask = func(path string) string {
+				t.Helper()
+				calls++
+				id := "rec"
+				if pass.vary {
+					id = "r" + strconv.Itoa(calls)
+				}
+				resp, body := learnServe(t, h, db, context.Background(), pass.opts, "GET "+path+" HTTP/1.1\r\nHost: deps\r\nX-Req-Id: "+id+"\r\n\r\n")
+				if resp == nil || resp.StatusCode != http.StatusOK {
+					return "no answer"
+				}
+				return string(body)
+			}
+			// late asks path, its read held at its mark while move runs.
+			late = func(path string, move func()) string {
+				t.Helper()
+				marked, release := make(chan struct{}), make(chan struct{})
+				db.move = func() { close(marked); <-release }
+				answered := make(chan string, 1)
+				go func() { answered <- ask(path) }()
+				select {
+				case <-marked:
+				case got := <-answered:
+					t.Fatalf("the call was answered %s and never marked; the row is about a call held to its mark", got)
+				}
+				move()
+				close(release)
+				return <-answered
+			}
+			open = func(test string) {
+				mm.ServeExactWorker(names)
+				if test == "" {
+					mm.ServeExactPool("k", nil)
+					return
+				}
+				mm.ServeExactTest(test, nil)
+			}
+			return db, ask, late, open
+		}
+		t.Run(pass.name+"/read between tests, landing in the next test", func(t *testing.T) {
+			_, ask, late, open := setup(t)
+			open("")
+			if got := ask("/probe"); got != "0" {
+				t.Fatalf("the first call between tests was answered %s; want 0", got)
+			}
+			if got := late("/probe", func() { open("TestA") }); got != "1" {
+				t.Errorf("a call read between tests, its read landing after TestA opened, was answered %s; want 1, as when its read lands before the begin: the calls between tests walk 0, then 1", got)
+			}
+			var win []string
+			for i := 0; i < 3; i++ {
+				win = append(win, ask("/probe"))
+			}
+			if want := []string{"0", "1", "no answer"}; !reflect.DeepEqual(win, want) {
+				t.Errorf("TestA's window was answered %v; want %v: no call between tests spends for the windows", win, want)
+			}
+		})
+		t.Run(pass.name+"/read in a test, landing after its end", func(t *testing.T) {
+			_, ask, late, open := setup(t)
+			open("TestA")
+			if got := ask("/probe"); got != "0" {
+				t.Fatalf("TestA's window was answered %s; want 0", got)
+			}
+			// A call between tests that nothing answers reads the view
+			// between tests and moves no generation: the held call's read
+			// is the second at it.
+			got := late("/probe", func() {
+				open("")
+				if got := ask("/none"); got != "no answer" {
+					t.Errorf("the call of /none between tests was answered %s; want no answer: nothing recorded it", got)
+				}
+			})
+			if got != "1" {
+				t.Errorf("TestA's second call, its read landing after TestA ended, was answered %s; want 1, as when its read lands before the end", got)
+			}
+			var gap []string
+			for i := 0; i < 3; i++ {
+				gap = append(gap, ask("/probe"))
+			}
+			if want := []string{"0", "1", "1"}; !reflect.DeepEqual(gap, want) {
+				t.Errorf("the calls between tests after TestA were answered %v; want %v: they walk the worker scope by their own order, and answer the latest they consumed again", gap, want)
+			}
+		})
+	}
+}
+
+// A held store that reads in a view other than the one in force says what it
+// reads, as integrations.StagingGenerations and integrations.SharedReads
+// tell a parser: a generation and a revision of its own, the same at each
+// sample and no other store's, beyond every generation a store counts
+// (integrations.ElsewhereGeneration); no shared reads, which are the view in
+// force's open test's; and MockSpent of the view it reads in, so a recording
+// its reads show is not skipped because the view in force spent it. Once a
+// consume the view in force refused makes it read the view in force
+// (heldScope.settled), it says the manager's again.
+func TestAHeldStoreThatReadsInAnotherViewSaysWhatItReads(t *testing.T) {
+	names := []string{"w-0", "w-1"}
+	mm := stagedManager(t, nil, []*models.Mock{httpCall("w-0", time.Second, "/poll"), httpCall("w-1", 2*time.Second, "/poll")})
+	mm.ServeExactWorker(names)
+	mm.ServeExactPool("k", nil)
+	call := mm.MarkCallRound()
+	held, _ := mm.HoldToRound(call)
+	other, _ := mm.HoldToRound(call)
+	mm.ServeExactWorker(names)
+	mm.ServeExactTest("TestA", nil)
+	if got := pollFirst(t, mm, "w-"); got != "w-0" {
+		t.Fatalf("TestA's window was answered %s; want w-0", got)
+	}
+	type gens interface {
+		integrations.StagingGenerations
+		Revision() uint64
+		RevisionByKind(models.Kind) uint64
+	}
+	samples := func(db integrations.MockMemDb) []uint64 {
+		g := db.(gens)
+		return []uint64{g.StagingGeneration(), g.StagingGenerationByKind(models.HTTP), g.Revision(), g.RevisionByKind(models.HTTP)}
+	}
+	inForce := samples(mm)
+	first, again, theirs := samples(held), samples(held), samples(other)
+	for i, what := range []string{"StagingGeneration", "StagingGenerationByKind", "Revision", "RevisionByKind"} {
+		if first[i] < integrations.ElsewhereGeneration || first[i] == integrations.RestagedGeneration {
+			t.Errorf("%s of a held store that reads in another view is %d; want one of its own, at or past ElsewhereGeneration (the view in force's is %d)", what, first[i], inForce[i])
+		}
+		if again[i] != first[i] {
+			t.Errorf("%s moved from %d to %d between two samples with nothing between; want the same: a parser keeps an index only when both samples agree", what, first[i], again[i])
+		}
+		if theirs[i] == first[i] {
+			t.Errorf("%s of two held stores that read in another view is %d for both; want each its own: neither reads what the other read", what, first[i])
+		}
+	}
+	sr := held.(integrations.SharedReads)
+	if _, ok := sr.SharedGeneration(models.HTTP); ok {
+		t.Error("SharedGeneration of a held store that reads between tests says TestA's; want none: its reads are not TestA's")
+	}
+	if _, _, ok := sr.SharedMocks(); ok {
+		t.Error("SharedMocks of a held store that reads between tests gave TestA's; want none")
+	}
+	if _, ok := sr.OwnedUnanswered(); ok {
+		t.Error("OwnedUnanswered of a held store that reads between tests gave TestA's; want none")
+	}
+	if _, _, ok := sr.OwnedRecordings(); ok {
+		t.Error("OwnedRecordings of a held store that reads between tests gave TestA's; want none")
+	}
+	read, _ := held.GetSessionScopedMocks()
+	if !reflect.DeepEqual(exactNames(read), names) {
+		t.Fatalf("the held store read %v; want %v: between tests a worker recording a window spent answers again", exactNames(read), names)
+	}
+	spent := held.(integrations.StagingGenerations)
+	for _, mk := range read {
+		if spent.MockSpent(mk.Name) {
+			t.Errorf("MockSpent(%s) of the held store is true while its read shows it; want false: TestA's window spent it, not the view the store reads in", mk.Name)
+		}
+	}
+
+	// Refused once, a held call reads the view in force, and says its
+	// generation again.
+	mine := genericExchange("ex-mine", 0, "AUTH step2")
+	mm2 := stagedManager(t, nil, []*models.Mock{mine})
+	mm2.ServeExactTest("T1", []*models.Mock{mine})
+	h2, _ := mm2.HoldToRound(mm2.MarkCallRound())
+	mm2.ServeExactTest("T2", nil)
+	if g := h2.(integrations.StagingGenerations).StagingGeneration(); g < integrations.ElsewhereGeneration {
+		t.Fatalf("before the refusal the held store's generation is %d; want its own: it reads in T1's view", g)
+	}
+	if h2.DeleteUnFilteredMock(*mine) {
+		t.Fatal("T2's view settled the consume of T1's own exchange; want it refused")
+	}
+	if got, want := h2.(integrations.StagingGenerations).StagingGeneration(), mm2.StagingGeneration(); got != want {
+		t.Errorf("after the refusal the held store's generation is %d; want the manager's %d: it reads in the view in force", got, want)
+	}
+	if _, ok := h2.(integrations.SharedReads).SharedGeneration(models.GENERIC); !ok {
+		t.Error("after the refusal the held store has no shared reads; want T2's: it reads in T2's view")
+	}
+}
+
 // A worker: recording of per-test lifetime is offered by a test's per-test
 // read. The staging files a per-test-lifetime recording in the startup tree
 // alone, and a parser that serves only session-lifetime recordings from its
