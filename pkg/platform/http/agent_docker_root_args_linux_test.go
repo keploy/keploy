@@ -117,8 +117,16 @@ func fakeDockerForStartInDocker(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	calls := filepath.Join(dir, "calls")
+	fakeEngineForStartInDocker(t, dir, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '"+calls+"'\nexit 0\n")
+	return calls
+}
+
+// fakeEngineForStartInDocker is fakeDockerForStartInDocker's engine, with
+// docker the given script, in dir.
+func fakeEngineForStartInDocker(t *testing.T, dir, docker string) {
+	t.Helper()
 	fakes := map[string]string{
-		"docker": "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + calls + "'\nexit 0\n",
+		"docker": docker,
 		"sudo": `#!/bin/sh
 if [ "$1" = --version ]; then echo "Sudo version 1.9.15"; exit 0; fi
 while [ $# -gt 0 ]; do
@@ -138,7 +146,6 @@ exec "$@"
 	// DockerConfig; leave it as other tests found it.
 	envs := maps.Clone(kdocker.DockerConfig.Envs)
 	t.Cleanup(func() { kdocker.DockerConfig.Envs = envs })
-	return calls
 }
 
 // agentContainerRun returns the `docker container run` the fake logged.
