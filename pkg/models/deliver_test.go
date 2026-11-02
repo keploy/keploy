@@ -22,16 +22,12 @@ cases: [test-1, test-2]
 deliver:
   - case: test-2
     after: mock-3
-    sign:
-      scheme: hmac-sha256-hex
-      header: X-Pay-Signature
-      secret_env: PAY_WEBHOOK_SECRET
 `
 
 // Under the switch a test's deliver: is read and written as it was, in YAML
 // and in JSON; with the switch off it is not read.
 func TestDeliverRoundTrips(t *testing.T) {
-	want := []Delivery{{Case: "test-2", After: "mock-3", Sign: &SignSpec{Scheme: SignHMACSHA256Hex, Header: "X-Pay-Signature", SecretEnv: "PAY_WEBHOOK_SECRET"}}}
+	want := []Delivery{{Case: "test-2", After: "mock-3"}}
 	t.Setenv(provenswitch.Env, "1")
 	var tc MappedTestCase
 	require.NoError(t, yaml.Unmarshal([]byte(deliverEntry), &tc))
@@ -84,12 +80,12 @@ func TestDeliverRefusesWhatItCouldNotSend(t *testing.T) {
 			`test-2's after: "mock-4" is not an HTTP call (kind "Postgres"); keploy delivers after an HTTP call's answer only`},
 		{"case twice", "deliver: [{case: test-2, after: mock-3}, {case: test-2, after: mock-3}]", DeliverCaseTwice,
 			`case "test-2" is listed twice; keploy delivers a case once`},
-		{"unknown scheme", "deliver: [{case: test-2, after: mock-3, sign: {scheme: md5, header: X-S, secret_env: S}}]", DeliverSignInvalid,
-			`test-2's sign: scheme "md5" is not one keploy signs with ([hmac-sha256-hex stripe-v1 razorpay github-sha256])`},
-		{"no header", "deliver: [{case: test-2, after: mock-3, sign: {scheme: stripe-v1, secret_env: S}}]", DeliverSignInvalid,
-			"test-2's sign: names no header to carry the signature"},
-		{"no secret_env", "deliver: [{case: test-2, after: mock-3, sign: {scheme: razorpay, header: X-Razorpay-Signature}}]", DeliverSignInvalid,
-			"test-2's sign: names no secret_env to read the secret from"},
+		{"sign: named", "deliver: [{case: test-2, after: mock-3, sign: {scheme: hmac-sha256-hex, header: X-S, secret_env: S}}]", DeliverSignUnsupported,
+			"test-2's sign: is not supported yet; remove it, or keep the body as recorded"},
+		{"sign: empty", "deliver: [{case: test-2, after: mock-3, sign: {}}]", DeliverSignUnsupported,
+			"test-2's sign: is not supported yet; remove it, or keep the body as recorded"},
+		{"sign: a word", "deliver: [{case: test-2, after: mock-3, sign: hmac}]", DeliverSignUnsupported,
+			"test-2's sign: is not supported yet; remove it, or keep the body as recorded"},
 		{"too many", many, DeliverTooMany,
 			"65 entries, more than the 64 keploy delivers in one test"},
 	} {
@@ -111,10 +107,13 @@ func TestDeliverRefusesWhatItCouldNotSend(t *testing.T) {
 			require.Equal(t, c.code, de.Code)
 		})
 	}
-	// An entry with no sign: is taken, as is the most a test may have.
-	var unsigned MappedTestCase
-	require.NoError(t, yaml.Unmarshal([]byte(entry("deliver: [{case: test-2, after: mock-3}]")), &unsigned))
-	require.Nil(t, unsigned.Deliver[0].Sign)
+	// An entry with no sign: (or a null one) is taken, as is the most a
+	// test may have.
+	for _, d := range []string{"deliver: [{case: test-2, after: mock-3}]", "deliver: [{case: test-2, after: mock-3, sign: null}]"} {
+		var unsigned MappedTestCase
+		require.NoError(t, yaml.Unmarshal([]byte(entry(d)), &unsigned), d)
+		require.Nil(t, unsigned.Deliver[0].Sign)
+	}
 	most := MappedTestCase{ID: "t", Mocks: []MockEntry{{Name: "mock-3", Kind: string(HTTP)}}}
 	for i := 0; i < MaxDeliveriesPerTest; i++ {
 		c := "test-" + strconv.Itoa(i)
@@ -122,11 +121,6 @@ func TestDeliverRefusesWhatItCouldNotSend(t *testing.T) {
 		most.Deliver = append(most.Deliver, Delivery{Case: c, After: "mock-3"})
 	}
 	require.NoError(t, ValidateDeliver(most))
-	// Each scheme keploy names is one it takes.
-	for _, s := range SignSchemes {
-		var tc MappedTestCase
-		require.NoError(t, yaml.Unmarshal([]byte(entry("deliver: [{case: test-2, after: mock-3, sign: {scheme: "+s+", header: X-S, secret_env: S}}]")), &tc), s)
-	}
 }
 
 // A deliver: that is not a list of entries is an error, never a reason to
@@ -136,9 +130,9 @@ func TestDeliverThatIsNotAListIsAnError(t *testing.T) {
 	bad := strings.Replace(deliverEntry, deliverEntry[strings.Index(deliverEntry, "deliver:"):], "deliver: test-2\n", 1)
 	var tc MappedTestCase
 	err := yaml.Unmarshal([]byte(bad), &tc)
-	require.ErrorContains(t, err, "a test's deliveries (deliver) are not a list of case, after and sign")
+	require.ErrorContains(t, err, "a test's deliveries (deliver) are not a list of case and after")
 	err = json.Unmarshal([]byte(`{"id":"t","mock_entries":[],"deliver":"test-2"}`), &tc)
-	require.ErrorContains(t, err, "a test's deliveries (deliver) are not a list of case, after and sign")
+	require.ErrorContains(t, err, "a test's deliveries (deliver) are not a list of case and after")
 }
 
 // The table carries a delivery's entry beside its case's request and answer.

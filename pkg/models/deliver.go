@@ -17,7 +17,9 @@ import (
 //	deliver:
 //	  - case: test-2
 //	    after: mock-3
-//	    sign: {scheme: hmac-sha256-hex, header: X-Pay-Signature, secret_env: PAY_WEBHOOK_SECRET}
+//
+// The case is sent as recorded, byte for byte, so a signature the provider
+// computed over its body still matches; keploy signs nothing.
 //
 // Written and read only under the proven switch.
 type Delivery struct {
@@ -27,36 +29,11 @@ type Delivery struct {
 	// After is one of the test's HTTP mocks (MappedTestCase.Mocks): the case
 	// is sent once that mock's answer was written to the application.
 	After string `json:"after" yaml:"after"`
-	// Sign says how to sign a body that differs from the recording. Without
-	// it such a body is not sent (its signature would not match).
-	Sign *SignSpec `json:"sign,omitempty" yaml:"sign,omitempty"`
+	// Sign is read only to refuse it: keploy sends a case as recorded and
+	// signs nothing, so an entry that names sign: (any value but null) is
+	// refused at load (DeliverSignUnsupported), never taken and ignored.
+	Sign any `json:"sign,omitempty" yaml:"sign,omitempty"`
 }
-
-// SignSpec is how a delivered body is signed again when it differs from the
-// recording: the scheme, the header that carries the signature, and the
-// environment variable that holds the secret. keploy reads the secret at
-// replay and never stores it.
-type SignSpec struct {
-	Scheme    string `json:"scheme" yaml:"scheme"`
-	Header    string `json:"header" yaml:"header"`
-	SecretEnv string `json:"secret_env" yaml:"secret_env"`
-}
-
-// The signing schemes a deliver: entry may name.
-const (
-	// SignHMACSHA256Hex is the hex HMAC-SHA256 of the body.
-	SignHMACSHA256Hex = "hmac-sha256-hex"
-	// SignStripeV1 is Stripe's t=<unix>,v1=<hex HMAC-SHA256 of "t.body">.
-	SignStripeV1 = "stripe-v1"
-	// SignRazorpay is Razorpay's hex HMAC-SHA256 of the body.
-	SignRazorpay = "razorpay"
-	// SignGitHubSHA256 is GitHub's sha256=<hex HMAC-SHA256 of the body>.
-	SignGitHubSHA256 = "github-sha256"
-)
-
-// SignSchemes are the schemes a deliver: entry may name, in the order the
-// refusal of another lists them.
-var SignSchemes = []string{SignHMACSHA256Hex, SignStripeV1, SignRazorpay, SignGitHubSHA256}
 
 // MaxDeliveriesPerTest bounds the deliver: entries of one test: the replay
 // carries each one's recorded request to the agent with the set's table.
@@ -65,11 +42,11 @@ const MaxDeliveriesPerTest = 64
 // The codes a refused deliver: entry carries (DeliverError.Code), which keploy
 // mock check reports as they are.
 const (
-	DeliverCaseUnknown  = "deliver_case_unknown"
-	DeliverAfterUnknown = "deliver_after_unknown"
-	DeliverSignInvalid  = "deliver_sign_invalid"
-	DeliverCaseTwice    = "deliver_case_twice"
-	DeliverTooMany      = "deliver_too_many"
+	DeliverCaseUnknown     = "deliver_case_unknown"
+	DeliverAfterUnknown    = "deliver_after_unknown"
+	DeliverSignUnsupported = "deliver_sign_unsupported"
+	DeliverCaseTwice       = "deliver_case_twice"
+	DeliverTooMany         = "deliver_too_many"
 )
 
 // DeliverError is a deliver: entry keploy refuses to read: the test's mapping
@@ -111,7 +88,7 @@ type DeliveryCase struct {
 }
 
 // errRecordedDeliver is a test entry whose deliver: is not a list of entries.
-const errRecordedDeliver = "a test's deliveries (deliver) are not a list of case, after and sign: %w"
+const errRecordedDeliver = "a test's deliveries (deliver) are not a list of case and after: %w"
 
 // recordedDeliverYAML is a test entry's deliver: under the proven switch. One
 // that is not a list of entries is an error, never a reason to read the entry
@@ -146,9 +123,8 @@ func recordedDeliverJSON(data []byte) ([]Delivery, error) {
 // ValidateDeliver refuses a test's deliver: entries that keploy could not
 // send as written (DeliverError): a case that is not one of the test's
 // cases, an after: that is not one of its HTTP mocks (keploy tells only an
-// HTTP answer's write), a sign: with an unknown scheme or without its header
-// or secret_env, a case listed twice, or more than MaxDeliveriesPerTest
-// entries.
+// HTTP answer's write), a sign: (keploy signs nothing), a case listed twice,
+// or more than MaxDeliveriesPerTest entries.
 func ValidateDeliver(tc MappedTestCase) error {
 	refuse := func(code, format string, a ...any) error {
 		return &DeliverError{Test: tc.ID, Code: code, Msg: fmt.Sprintf(format, a...)}
@@ -180,31 +156,9 @@ func ValidateDeliver(tc MappedTestCase) error {
 		if kind != string(HTTP) {
 			return refuse(DeliverAfterUnknown, "%s's after: %q is not an HTTP call (kind %q); keploy delivers after an HTTP call's answer only", d.Case, d.After, kind)
 		}
-		if err := validSign(d.Sign); err != "" {
-			return refuse(DeliverSignInvalid, "%s's sign: %s", d.Case, err)
+		if d.Sign != nil {
+			return refuse(DeliverSignUnsupported, "%s's sign: is not supported yet; remove it, or keep the body as recorded", d.Case)
 		}
 	}
 	return nil
-}
-
-// validSign is why s is not a sign: keploy can use ("" when it is, or nil).
-func validSign(s *SignSpec) string {
-	if s == nil {
-		return ""
-	}
-	known := false
-	for _, k := range SignSchemes {
-		if s.Scheme == k {
-			known = true
-		}
-	}
-	switch {
-	case !known:
-		return fmt.Sprintf("scheme %q is not one keploy signs with (%v)", s.Scheme, SignSchemes)
-	case s.Header == "":
-		return "names no header to carry the signature"
-	case s.SecretEnv == "":
-		return "names no secret_env to read the secret from"
-	}
-	return ""
 }
