@@ -5,14 +5,17 @@
 // package tested beside it, can take the port and answer the dial the test
 // expects refused, or hold the port the test means to listen at again.
 //
-// On Linux the port is held with a socket that never listens (RefusedAddr).
-// On macOS and Windows nothing is held: macOS drops a SYN sent to a bound
-// socket that is not listening, by XNU's source, instead of refusing it, so a
-// hold cannot give the refusal the tests expect there, and Windows is not
-// checked. There the helpers give a port a listener left when it closed, as
-// the tests took one before, and another socket can take it meanwhile. CI
-// runs these tests on Linux, and some packages' tests on Windows and macOS
-// too.
+// RefusedAddr's port is held for the test's life on every platform. On
+// Linux it is held with a socket that never listens, at every address and
+// in both families. macOS drops a SYN sent to a bound socket that is not
+// listening, by XNU's source, instead of refusing it, so on macOS and
+// Windows the port is held as the local end of a connection that is never
+// accepted, at 127.0.0.1 (holdByConnection). SharedPort's port is held on
+// Linux only, with SO_REUSEPORT so the test's own listeners can bind beside
+// the hold: on macOS and Windows it is a port a listener left when it
+// closed, as the tests took one before, and another socket can take it
+// meanwhile. CI runs these tests on Linux, and some packages' tests on
+// Windows and macOS too.
 //
 // BoundHere counts the sockets of this process at a port, so a test can tell
 // a port its code still holds from one another process took once it was
