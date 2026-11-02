@@ -101,12 +101,31 @@ func tried() {
 // scanInstants is each layout's matches in s, in the order they stand, as
 // FindAllStringIndex of the layout's pattern, folded, gives them: matches[k]
 // for layout k. It reads s once.
+//
+// A layout is tried only where the digits from the byte allow it (mayBegin):
+// a payload of words and numbers ("w12x345") has a digit at most of its
+// bytes, and trying every digit layout at each was most of the scan's CPU.
+// The runs of digits and of hex digits a byte begins are each read once,
+// where the scan enters them (digEnd, hexEnd).
 func scanInstants(s string) (matches [numLayouts][]span) {
 	var next [numLayouts]int
 	var steps int64
+	digEnd, hexEnd := 0, 0
 	for i := 0; i < len(s); i++ {
 		steps++
 		set := layoutStarts[s[i]]
+		if set == 0 {
+			continue
+		}
+		if i >= digEnd {
+			for digEnd = i; digEnd < len(s) && isDigit(s[digEnd]); digEnd++ {
+			}
+		}
+		if i >= hexEnd {
+			for hexEnd = i; hexEnd < len(s) && isHex(s[hexEnd]); hexEnd++ {
+			}
+		}
+		set &= mayBegin(digEnd-i, hexEnd-i)
 		for set != 0 {
 			k := bits.TrailingZeros8(set)
 			set &^= 1 << k
@@ -122,6 +141,31 @@ func scanInstants(s string) (matches [numLayouts][]span) {
 	instantScanPasses.Add(1)
 	instantScanSteps.Add(steps)
 	return matches
+}
+
+// mayBegin are the layouts (bit k for layout k of layoutAt) whose matches
+// may begin at a byte that begins d ASCII digits and h hex digits, of either
+// case: each matcher reads that run first, up to a byte no digit may be, so
+// it finds no match where the run is of another length. An RFC 1123 date
+// begins with a day's name, and may begin wherever layoutStarts says.
+func mayBegin(d, h int) uint8 {
+	m := uint8(1) // rfc1123At: (?:Mon|…|Sun),
+	if d == 4 {
+		m |= 1 << 1 // isoAt: \d{4}-
+	}
+	if d == 8 {
+		m |= 1 << 2 // compactAt: \d{8}T
+	}
+	if h == 8 {
+		m |= 1 << 3 // uuidAt: [0-9a-fA-F]{8}-
+	}
+	if d >= 10 {
+		m |= 1 << 4 // epochAt: \d{10} or more
+	}
+	if d == 2 {
+		m |= 1 << 5 // timeOfDayAt: \d{2}:
+	}
+	return m
 }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }

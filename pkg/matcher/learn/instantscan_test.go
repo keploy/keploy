@@ -398,3 +398,50 @@ func TestInstantSpansRunsNoPattern(t *testing.T) {
 		t.Fatalf("found %d Find/Match methods on *regexp.Regexp: %v", len(methods), methods)
 	}
 }
+
+// The scan tries a digit's layouts only where the digits from it allow them
+// (mayBegin). Over runs of digits of each length from 1 to 20, and of hex
+// digits (letters and digits in turn), it tries, of a run of n digits, a
+// time of day once where n is 2 or more, a date once where 4 or more, a
+// compact date and a UUID once each where 8 or more, and an epoch once
+// where 10 or more (its match then covers the run's ten or more); and of a
+// hex run of 8 or more, a UUID once: each where the run left from the byte
+// is the length the layout reads first. And on a payload of words and
+// numbers, as the HTTP bound row's recordings answer (boundRowPayload, a
+// digit at half of its bytes), it tries under half a matcher a byte, where
+// trying each layout a digit can begin tried more than three. The matches
+// are the patterns' (TestInstantSpansIsTheSixPatternsScans holds every text
+// to them).
+func TestADigitIsTriedOnlyForTheLayoutsItsDigitsAllow(t *testing.T) {
+	countTries.Store(true)
+	defer countTries.Store(false)
+	triesOf := func(s string) int64 {
+		tries := instantScanTries.Load()
+		scanInstants(s)
+		return instantScanTries.Load() - tries
+	}
+	var b strings.Builder
+	var want int64
+	at := func(ok bool) int64 {
+		if ok {
+			return 1
+		}
+		return 0
+	}
+	for n := 1; n <= 20; n++ {
+		b.WriteString(strings.Repeat("1234567890", 2)[:n] + " " + strings.Repeat("a1b2c3d4e5", 2)[:n] + " ")
+		want += at(n >= 2) + at(n >= 4) + 2*at(n >= 8) + at(n >= 10) + at(n >= 8)
+	}
+	runs := b.String()
+	if got := triesOf(runs); got != want {
+		t.Fatalf("the scan of runs of digits and hex digits of 1 to 20 tried %d matchers; want %d, each layout once where the run is the length it reads first", got, want)
+	}
+	sameAsThePatterns(t, runs)
+	payload := boundRowPayload(1 << 20)
+	got := triesOf(payload)
+	t.Logf("a %d-byte payload of words and numbers: %d matchers tried, %d could begin in it", len(payload), got, startsIn(payload))
+	if got > int64(len(payload)/2) {
+		t.Fatalf("the scan of a %d-byte payload of words and numbers tried %d matchers, more than half of its bytes: it tries a digit's layouts where its digits rule them out", len(payload), got)
+	}
+	sameAsThePatterns(t, payload[:4096])
+}

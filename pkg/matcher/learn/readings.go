@@ -744,10 +744,25 @@ func b64Runs(s string) map[string]bool {
 	return out
 }
 
+// b64Variants are the base64 variants b64DecodeAny tries, in its order:
+// padded at even places, raw (no padding) at odd ones.
+var b64Variants = [...]*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding}
+
 // b64DecodeAny reports whether s decodes in any base64 variant, to text or
-// not.
+// not: what the first of b64Variants that decodes it gives. It does not try
+// a variant whose length rule s breaks, which would fail: a padded variant
+// decodes whole quanta only (a length a multiple of four), and a raw one no
+// '=' and no last quantum of one character. The decoder skips '\r' and
+// '\n', so s holding either is tried in every variant. On a payload of
+// words that are no text (the HTTP bound row's), the variants tried and
+// failed were most of b64DecodeAny's CPU.
 func b64DecodeAny(s string) ([]byte, bool) {
-	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+	lines := strings.IndexByte(s, '\n') >= 0 || strings.IndexByte(s, '\r') >= 0
+	padded := strings.IndexByte(s, '=') >= 0
+	for i, enc := range b64Variants {
+		if raw := i%2 == 1; !lines && (!raw && len(s)%4 != 0 || raw && (padded || len(s)%4 == 1)) {
+			continue
+		}
 		if b, err := enc.DecodeString(s); err == nil {
 			return b, true
 		}

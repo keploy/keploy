@@ -165,3 +165,87 @@ func TestB64TextKeepsNoRunThatDecodesToNothing(t *testing.T) {
 		t.Fatalf("b64Text of %d bytes of runs that are no text allocated %d bytes, more than ten times the payload: it keeps the runs that decoded to nothing", len(payload), alloc)
 	}
 }
+
+// everyVariant is b64DecodeAny as it tried each of b64Variants in turn,
+// whatever s's length and padding.
+func everyVariant(s string) ([]byte, bool) {
+	for _, enc := range b64Variants {
+		if b, err := enc.DecodeString(s); err == nil {
+			return b, true
+		}
+	}
+	return nil, false
+}
+
+// b64DecodeAny gives what trying every variant gave (everyVariant), of
+// every text of up to five of b64Edges' bytes (each length's four places in
+// a quantum, padding at each place, and line breaks the decoder skips), of
+// random texts of up to forty, and of each variant's encodings of random
+// bytes, padded or not.
+func TestB64DecodeAnyIsEveryVariantTried(t *testing.T) {
+	const b64Edges = "Aa0+/-_=\r\n"
+	same := func(s string) {
+		t.Helper()
+		b, ok := b64DecodeAny(s)
+		wb, wok := everyVariant(s)
+		if ok != wok || string(b) != string(wb) {
+			t.Fatalf("b64DecodeAny(%q) = %q, %v; trying every variant gives %q, %v", s, b, ok, wb, wok)
+		}
+	}
+	var decoded int
+	var each func(prefix string, n int)
+	each = func(prefix string, n int) {
+		same(prefix)
+		if _, ok := everyVariant(prefix); ok {
+			decoded++
+		}
+		if n == 0 {
+			return
+		}
+		for i := 0; i < len(b64Edges); i++ {
+			each(prefix+b64Edges[i:i+1], n-1)
+		}
+	}
+	each("", 5)
+	r := rand.New(rand.NewPCG(20261102, 2))
+	for i := 0; i < 100000; i++ {
+		b := make([]byte, r.IntN(41))
+		for j := range b {
+			b[j] = b64Edges[r.IntN(len(b64Edges))]
+		}
+		same(string(b))
+		raw := make([]byte, r.IntN(30))
+		for j := range raw {
+			raw[j] = byte(r.Uint32())
+		}
+		for _, enc := range b64Variants {
+			e := enc.EncodeToString(raw)
+			same(e)
+			same(e + "=")
+			if len(e) > 1 {
+				same(e[:len(e)-1])
+				same(e[:len(e)/2] + "\n" + e[len(e)/2:])
+			}
+		}
+	}
+	if decoded < 1000 {
+		t.Fatalf("%d of the edge texts decode; want the texts to reach the decodes too", decoded)
+	}
+}
+
+// b64DecodeAny tries no variant a run's length rules out, each of which
+// failed with a buffer of its decode allocated: of a run of nine (a last
+// quantum of one character, which no variant decodes) or of seven with
+// padding, at its end or its start (no whole quanta, and a raw variant
+// reads no '=') it allocates nothing, and of a run of ten (raw only) one
+// buffer, its decode.
+func TestB64DecodeAnyTriesNoVariantItsLengthRulesOut(t *testing.T) {
+	for _, c := range []struct {
+		run    string
+		allocs float64
+	}{{"w255x1234", 0}, {"w255x1=", 0}, {"=w255x1", 0}, {"w255x12345", 1}} {
+		if got := testing.AllocsPerRun(100, func() { b64DecodeAny(c.run) }); got > c.allocs {
+			t.Errorf("b64DecodeAny(%q) allocated %v times; want at most %v: it tries a variant its length rules out", c.run, got, c.allocs)
+		}
+	}
+}
