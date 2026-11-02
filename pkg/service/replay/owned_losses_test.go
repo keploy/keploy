@@ -35,8 +35,10 @@ func (o *ownedTaker) TakeOwnedCaptureLosses(context.Context) ([]models.OwnedCapt
 // and never the test case open when it was counted: the gap's (a pool call
 // between test cases cut short), the run's, an earlier set's and a passing
 // test case's fail the set, naming it; a test case already failed, or with
-// no verdict, has it named in its report. A take that failed is the set's
-// error; an agent that has none to tell apart adds nothing.
+// no verdict, has it named in its report. A loss that names no test case
+// (the run's, after a session reset) is the set's even beside a failed test
+// case whose file names it nothing. A take that failed is the set's error;
+// an agent that has none to tell apart adds nothing.
 func TestKeployTestReadsTheLossesACutShortEndOwned(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	loss := func(test string) models.OwnedCaptureLoss {
@@ -47,6 +49,7 @@ func TestKeployTestReadsTheLossesACutShortEndOwned(t *testing.T) {
 		{TestCaseID: "test-2", Status: models.TestStatusFailed},
 		{TestCaseID: "test-3", Status: models.TestStatusPassed, FailureInfo: models.FailureInfo{TestMocksUnread: true}},
 		{TestCaseID: "test-4", Status: models.TestStatusPassed},
+		{TestCaseID: "", Status: models.TestStatusFailed},
 	}
 	instr := &ownedTaker{takes: []ownedTake{
 		{owned: []models.OwnedCaptureLoss{loss("between test cases"), loss("test-2")}},
@@ -70,7 +73,7 @@ func TestKeployTestReadsTheLossesACutShortEndOwned(t *testing.T) {
 			t.Fatalf("the set's: %v, want %v", set, want)
 		}
 	}
-	for i, n := range []int{0, 1, 1, 0} {
+	for i, n := range []int{0, 1, 1, 0, 0} {
 		if got := len(results[i].FailureInfo.CaptureIncomplete); got != n {
 			t.Fatalf("%s's report names %d owned losses, want %d", results[i].TestCaseID, got, n)
 		}
