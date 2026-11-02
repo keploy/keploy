@@ -620,6 +620,12 @@ func TestBuildHTTPMock_FaultOnlyOnAnUnfinishedAnswer(t *testing.T) {
 	if err != nil || m == nil || m.Spec.Fault != nil || m.Spec.HTTPResp.Body != "ok" {
 		t.Errorf("a whole answer with a reset after it: %v, %v; want the answer, no fault", m, err)
 	}
+	empty := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+	m, err = h.buildHTTPMock(&FinalHTTP{Req: []byte(faultReq), Resp: []byte(empty),
+		Fault: &models.Fault{Kind: models.FaultReset, AfterHead: true}}, 80, "c", models.OutgoingOptions{})
+	if err != nil || m == nil || m.Spec.Fault != nil || m.Spec.HTTPResp.StatusCode != 200 {
+		t.Errorf("a whole answer with no body (Content-Length: 0) and a reset after it: %v, %v; want the answer, no fault", m, err)
+	}
 	bareLF := "HTTP/1.1 200 OK\nContent-Length: 20\n\n0123456789"
 	if m, err := h.buildHTTPMock(&FinalHTTP{Req: []byte(faultReq), Resp: []byte(bareLF),
 		Fault: &models.Fault{Kind: models.FaultTruncate}}, 80, "c", models.OutgoingOptions{}); err == nil {

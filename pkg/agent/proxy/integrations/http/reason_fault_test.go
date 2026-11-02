@@ -34,6 +34,7 @@ func TestReasonPhraseServesTheRecordedOne(t *testing.T) {
 		{"Card Declined", 402, "Card Declined"},
 		{"402 Card Declined", 402, "Card Declined"},
 		{"", 402, "Payment Required"},
+		{"402 ", 402, "Payment Required"},
 		{"Bad\r\nX-Injected: 1", 402, "Payment Required"},
 		{"Bad\nline", 200, "OK"},
 	} {
@@ -51,6 +52,7 @@ func TestCloseDelimited(t *testing.T) {
 	}{
 		{http.Response{ContentLength: -1, StatusCode: 200}, "GET", true},
 		{http.Response{ContentLength: 5, StatusCode: 200}, "GET", false},
+		{http.Response{ContentLength: 0, StatusCode: 200}, "GET", false},
 		{http.Response{ContentLength: -1, TransferEncoding: []string{"chunked"}, StatusCode: 200}, "GET", false},
 		{http.Response{ContentLength: -1, StatusCode: 204}, "GET", false},
 		{http.Response{ContentLength: -1, StatusCode: 200}, "HEAD", false},

@@ -67,6 +67,16 @@ func TestTheReplaySummaryNamesEachFaultServed(t *testing.T) {
 	}
 }
 
+// The summary keeps only a set's fault mocks for the run, not every mock the
+// set loaded: a set of many whole answers is not indexed a second time.
+func TestTheSummaryKeepsOnlyTheSetsFaultMocks(t *testing.T) {
+	reset := &models.Mock{Name: "mock-2", Kind: models.HTTP, Spec: models.MockSpec{Fault: &models.Fault{Kind: models.FaultReset}}}
+	got := faultMocks([]*models.Mock{{Name: "mock-0", Kind: models.HTTP}, nil, reset}, []*models.Mock{{Name: "mock-1", Kind: models.HTTP}})
+	if len(got) != 1 || got["mock-2"] != reset {
+		t.Fatalf("kept %d mocks (%v), want only mock-2", len(got), got)
+	}
+}
+
 // faultSetDB is a set of one whole answer and a fault mock in each pool.
 type faultSetDB struct{ stubMockDB }
 
