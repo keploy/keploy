@@ -379,6 +379,10 @@ type Raw struct {
 	// application, keyed as the payload's own are (movePlaces), never as
 	// places the recording gave it.
 	moves []servedMove
+	// roles are, of a recording of the same call as the one classified
+	// (Sibling), the roles its learn step learned at its places, by the
+	// call's leaf path; nil for any other.
+	roles map[string]SiblingRole
 }
 
 // Mock is the name of r's mock.
@@ -1573,10 +1577,10 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		return op
 	}
 	out := make([]Learned, 0, len(drift))
-	// leaf classifies one changed leaf, r as recorded and l as F saw it, as
-	// a value of the call whose window is w, without the rules skip names
-	// (skipRule), every other rule as it stands.
-	leaf := func(r, l Leaf, w *Window, skip skipRule) Learned {
+	// leafIn classifies one changed leaf, r as recorded and l as F saw it,
+	// as a value of the call whose window is w, against the recordings raw,
+	// without the rules skip names (skipRule), every other rule as it stands.
+	leafIn := func(raw []Raw, r, l Leaf, w *Window, skip skipRule) Learned {
 		if unreadRaw != "" {
 			return Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw}
 		}
@@ -1858,6 +1862,24 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		}
 		if ln.Kind == KindNoise || ln.Kind == KindClockRead {
 			ln.Refuted = fol.refutedAll()
+		}
+		return ln
+	}
+	// leaf is leafIn against the call's recordings, where a value found
+	// carried from a sibling's place learned in a role a sibling passes on
+	// is learned in that role (sibling.go): read again with those siblings
+	// set aside, and taken only where that reading learns their role.
+	leaf := func(r, l Leaf, w *Window, skip skipRule) Learned {
+		ln := leafIn(raw, r, l, w, skip)
+		if ln.Kind != KindVariable {
+			return ln
+		}
+		own, role, ok := siblingsAside(raw, r, ln.From)
+		if !ok {
+			return ln
+		}
+		if same := leafIn(own, r, l, w, skip); same.Kind == role {
+			return same
 		}
 		return ln
 	}
