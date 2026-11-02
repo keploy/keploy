@@ -329,12 +329,40 @@ type ClockOffset struct {
 	// writes Why again from the met offset.
 	Why string `json:"why,omitempty" yaml:"why,omitempty" bson:"why,omitempty"`
 	// Step is the cut the application made its clock read to before it added
-	// the offset (a read cut to the hour, plus thirty days): a replay checks
-	// the offset from that cut of the call's span (holdsStep). 0 for none,
-	// as every learning before Step was, and then omitted: an old file reads
-	// the same. Two learnings of one place at two Steps meet as StepApart
-	// (Empty), which holds nothing.
+	// the offset, as the learn step that writes it read it (learn's
+	// offsetInWindow; a replay checks it by holdsStep):
+	//   - Res: the offset was read at the cut its values show (clock - 2s,
+	//     an epoch's seconds; clock + 30d at the millisecond). A replay
+	//     checks it as Holds does any offset, but that an offset cut to a
+	//     second or a minute that no unit holds three of is checked at the
+	//     cut against the whole cuts its range holds (CoarseCut,
+	//     CutOffsets), never refused for its width;
+	//   - above Res: a look-back read at the step its two values stand a
+	//     whole number of apart (cut_m(now) - 103s, written in seconds,
+	//     Step a minute). Both runs' values share their remainder within
+	//     the step, and Min (to Min plus Res) is that remainder: a replay
+	//     passes a value only where it is a whole step of the call's span,
+	//     within one Res on either side, plus that offset (the phase lock),
+	//     so a look-back dropped or changed by part of a step fails at every
+	//     read.
+	// 0 for none, as every learning before Step was and main's chain still
+	// writes, and then omitted: an old file reads, and checks, as before.
+	// A keploy that does not read Step holds nothing of one above zero (fail
+	// closed). Two learnings of one place at two Steps meet as StepApart
+	// (Empty), which holds nothing, but two read at their values' own cuts
+	// meet at the coarser (Meet).
 	Step time.Duration `json:"step,omitempty" yaml:"step,omitempty" bson:"step,omitempty"`
+	// Phase, of an offset learned at a Step whose values are cut to the
+	// hour (Res an hour), is where that hour starts within UTC's, as both
+	// runs' values showed it: their time past UTC's whole hour (0 for an
+	// application that cuts to UTC's hour or a whole-hour zone's, 30m for
+	// one that cuts to +05:30's, 15m for +05:45's). A replay passes only a
+	// value on that phase (holdsAtStep), so one moved onto another zone's
+	// hour fails at every read. The learn step writes it of every such
+	// offset (learn's offsetInWindow), and refuses one whose two values sit
+	// on two phases. Of any other Res a Phase is no learning: it holds
+	// nothing (fail closed), as one outside the hour does.
+	Phase time.Duration `json:"phase,omitempty" yaml:"phase,omitempty" bson:"phase,omitempty"`
 }
 
 // StepApart is the Step of the Meet of two learnings of one place that saw
@@ -343,8 +371,11 @@ type ClockOffset struct {
 const StepApart time.Duration = -1
 
 // holdsStep is Holds of o, whose Step is above zero. Until a keploy reads
-// such a value, it holds nothing (fail closed).
+// such a value, it holds nothing (fail closed); this one registers
+// holdsAtStep in init.
 var holdsStep = func(o ClockOffset, at time.Time, res time.Duration, from, to time.Time) bool { return false }
+
+func init() { holdsStep = ClockOffset.holdsAtStep }
 
 // ClockWord is where a read of the clock stands in a longer text
 // (ClockOffset.Word), as recorded: the word at bytes Start to End of the
@@ -832,6 +863,14 @@ func (o ClockOffset) Checkable(res time.Duration, from, to time.Time) bool {
 		return true
 	}
 	m := max(o.CheckedAt(res), o.Res)
+	if o.Step > 0 {
+		// Read at its values' own cut (Step is Res): one cut that no unit
+		// holds three of is checked at the cut against the whole cuts its
+		// range holds (CutOffsets), in any window, so a verdict never turns
+		// on how long the call took. A phase-locked look-back (Step above
+		// Res) is checked on its step's grid (holdsAtStep), in any window.
+		return o.Step > o.Res || o.CoarseChecked(res) || o.Within(to.Sub(from), o.Max-o.Min, m, m, m)
+	}
 	if o.CoarseChecked(res) {
 		return to.Sub(from) < m && o.Max-o.Min < m-to.Sub(from)
 	}
@@ -857,6 +896,15 @@ func (o ClockOffset) CoarseChecked(res time.Duration) bool {
 // at the cut, as standing for its whole cut, within one cut of its window
 // plus the offset on either side (Holds, Checkable).
 func (o ClockOffset) Narrow() bool {
+	if o.Step > 0 {
+		// Learned at a Step (holdsAtStep): one cut that no unit holds three
+		// of whatever its width, a replay checking it against the whole
+		// cuts its range holds (founder decision, 2026-10-27: a clock read
+		// cut coarser than a millisecond is checked at the cut, never
+		// refused), and a phase-locked look-back, whose range is one Res
+		// wide.
+		return o.Step > o.Res || o.CoarseCut() || o.Within(o.Max-o.Min, o.Res, o.Res, o.Res)
+	}
 	if o.CoarseCut() {
 		return o.Max-o.Min < o.Res
 	}
@@ -890,8 +938,68 @@ func (o ClockOffset) CoarseCut() bool {
 		return true
 	case time.Hour:
 		return o.Unit() <= time.Hour
+	case time.Minute, time.Second:
+		// Learned at a Step: a minute's or a second's cut whose offset reads
+		// in that unit or a finer one (clock + 30m at the minute; a poll's
+		// dirtyAt <= now - 2s, an epoch's seconds) is a cut no unit holds
+		// three of too. So is a look-back whose range spans at most two
+		// cuts (a whole minute read in a window wider than it: clock - 1m,
+		// or clock - 1m1s where the read fell in the second before its
+		// call), so that where in its second a call fell never turns the
+		// verdict. An offset learned before Step is read as before.
+		return o.Step > 0 && (o.Unit() <= o.Res || o.Max <= 0 && o.Max-o.Min <= 2*o.Res)
 	}
 	return false
+}
+
+// Fine reports whether o reads in a unit the learn step never learns an
+// offset in, so a replay holds nothing of it: a unit of a second or finer
+// (clock + 300ms; or clock + 719h59m59.45s, cut to the second, where one
+// run's read fell before its call's window). A read the application made
+// outside its call's window stands from it by how long before or after it
+// was made, which shows such an offset too, bounded to a few of its
+// resolution, and a check that tight fails as soon as that wait changes;
+// an application that cuts its value to that unit makes a time to live
+// changed by one look the same. Of an o learned at a Step, a second is
+// Fine only where o is no cut no unit holds three of (CoarseCut: a poll's
+// dirtyAt <= now - 2s, written as an epoch's seconds, is checked at the
+// cut, which admits a value up to a cut stale or ahead, as any cut's check
+// does), and a phase-locked look-back (Step above Res) is never Fine: its
+// step's grid checks it (holdsAtStep). An empty o (no Unit) is Fine.
+func (o ClockOffset) Fine() bool {
+	u := o.Unit()
+	switch {
+	case o.Step <= 0:
+		return u <= time.Second
+	case o.Step > o.Res:
+		return false
+	}
+	return u < time.Second || u == time.Second && !o.CoarseCut()
+}
+
+// CutOffsets are the offsets a replay checks a value of o, learned at a
+// Step and cut to a unit that no unit holds three of (CoarseCut), against
+// (holdsAtStep): the whole cuts (multiples of o.Res) from Min up to, not
+// including, Max, lo the least and hi the greatest. Each run's range is its
+// window's width and one cut wide (a value v cut to c stands for reads from
+// v up to v plus c), and holds the one whole cut the application adds
+// (dirtyAt <= now - 2s at the second: -2s, lo == hi, the offset String
+// names) unless both runs' windows held a turn of the cut, where it may
+// hold the next one too. A range that holds no whole cut, of an offset that
+// reads in a finer unit (a cut hour plus 90 minutes), is narrower than the
+// cut: lo and hi are Min and Max. The offset the application adds lies
+// within one cut of lo to hi, so a check of the call's window plus lo to
+// hi, widened by one cut on either side, holds every value it writes, cut
+// down or rounded, wherever its read falls in the window.
+func (o ClockOffset) CutOffsets() (lo, hi time.Duration) {
+	if o.Res <= 0 {
+		return o.Min, o.Max
+	}
+	lo = ceilTo(o.Min, o.Res)
+	if lo >= o.Max {
+		return o.Min, o.Max
+	}
+	return lo, ceilTo(o.Max, o.Res) - o.Res
 }
 
 // cutSteps are the steps a Plain read's cut is read in, coarsest first:
@@ -1025,6 +1133,89 @@ func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) 
 	}
 	c := o.CheckedAt(res)
 	return ClockOffset{Res: c}.holdsRead(at, c, from.Add(o.Min), to.Add(o.Max))
+}
+
+// phaseLocked reports whether o is a look-back read at a step above its
+// cut (holdsAtStep): its range lies below zero, up to zero at most, since
+// Max is not in it: an application that cuts its read to the minute and
+// subtracts one second has Min -1s and Max 0.
+func (o ClockOffset) phaseLocked() bool {
+	return o.Step > o.Res && o.Min < o.Max && o.Max <= 0
+}
+
+// holdsAtStep is Holds of o, learned at a Step above zero (holdsStep), with
+// Holds' own guards first: a Step below Res, a range around zero or above
+// it at a step (signed, phaseLocked), no Res, an o Fine for its unit, a
+// window with no start or that ends before it starts, a res of none, an o
+// not Checkable in the window, a value of an o cut to the hour that sits
+// off o's Phase within UTC's hour (onPhase), and a window that meets a wall
+// time at's zone shows twice (FallBack) hold nothing.
+//   - Step is Res (the offset read at its values' own cut): at is checked
+//     as Holds checks any offset, at c (CheckedAt), within one c of the
+//     span plus the offset on either side, but that of an o cut to a unit
+//     no unit holds three of (CoarseChecked) the span is the call's window
+//     plus the whole cuts its range holds (CutOffsets: clock - 2s), never
+//     its range, so a verdict never turns on how long the call took: the
+//     application's value holds at every read, one a cut stale or ahead
+//     too (a cut's cost), and one changed by two cuts or more only where
+//     the window holds a turn of the cut for each cut more;
+//   - Step above Res (a phase-locked look-back): at holds only where it
+//     is a whole Step of the call's span (cut to Step on the clock of at's
+//     zone, from one Res before from up to one Res after to) plus an
+//     offset from Min up to, not including, Max: both runs' remainder
+//     within the step. A minute's step or a finer one is one grid in every
+//     zone; an hour's or a day's is read in the zone at is in (learn's
+//     checkReadIn reads it in UTC and in the application's). A value
+//     written at an encoding coarser than Res cannot show that remainder
+//     and holds nothing.
+func (o ClockOffset) holdsAtStep(at time.Time, res time.Duration, from, to time.Time) bool {
+	if !o.phaseLocked() && (o.Step != o.Res || !o.signed()) || o.Res <= 0 || o.Fine() || from.IsZero() || to.Before(from) || res <= 0 || !o.Checkable(res, from, to) || !o.onPhase(at) {
+		return false
+	}
+	if _, _, met := o.FallBack(res, from, to, at.Location()); met {
+		return false
+	}
+	if o.Step == o.Res {
+		c := o.CheckedAt(res)
+		lo, hi := o.Min, o.Max
+		if o.CoarseChecked(res) {
+			lo, hi = o.CutOffsets()
+		}
+		return ClockOffset{Res: c}.holdsRead(at, c, from.Add(lo), to.Add(hi))
+	}
+	if res > o.Res {
+		return false
+	}
+	loc := at.Location()
+	first := ReadCut(from.Add(-o.Res), o.Step, loc)
+	last := ReadCut(to.Add(o.Res), o.Step, loc)
+	// The latest whole step that leaves at at Min or more past it, then
+	// each step before it while at stays below Max past it (Max - Min is
+	// one Res: the learn step reads no lock whose range spans its step);
+	// a day's step before a day whose clocks change is the cut before,
+	// not 24 h.
+	for k := ReadCut(at.Add(-o.Min), o.Step, loc); at.Sub(k) < o.Max && !k.Before(first); k = ReadCut(k.Add(-1), o.Step, loc) {
+		if !k.After(last) {
+			return true
+		}
+	}
+	return false
+}
+
+// onPhase reports whether at sits where o's values do within UTC's hour: of
+// an o cut to the hour, Phase past UTC's whole hour (Truncate counts from
+// UTC in every zone); of any other, only where o names no Phase. The own
+// cut's check admits a value up to a cut stale or ahead, which, read in a
+// zone the value shows a whole hour in, held one moved onto that zone's
+// hour by part of an hour (1h15m earlier in +05:45, onto UTC's) at most
+// reads; on the recorded phase the application's value holds at every
+// read and such a value at none. An application replayed in a zone whose
+// hour starts at another phase than the recording's fails (a false red).
+func (o ClockOffset) onPhase(at time.Time) bool {
+	if o.Res != time.Hour {
+		return o.Phase == 0
+	}
+	return o.Phase >= 0 && o.Phase < time.Hour && at.Sub(at.Truncate(time.Hour)) == o.Phase
 }
 
 // FallBack is the turn at which loc's clocks go back, and by how much, that
@@ -1299,15 +1490,25 @@ func (o ClockOffset) signed() bool {
 // hour in UTC, and refuses any other (learn's CheckClockRead). Meet is the
 // same in either order and however a place's learnings are grouped, so a
 // recording paired many times keeps one answer whatever order its
-// pairings came in. Two at different Steps meet as StepApart (Empty). Why
+// pairings came in. Two at different Steps meet as StepApart (Empty), and
+// so do a phase lock (Step above Res) and an offset read at its values' own
+// cut that is that step (Step is Res, the same Step): the second holds no
+// phase, and a meet read at its Res would drop the first's. So do two each
+// read at its values' own cut at two cuts (now - 75s in seconds, one
+// recording's two values on a whole minute, another's not): the finer
+// learning shows the place's values are not cut to the coarser cut, and a
+// meet read at the coarser would pass a look-back changed by most of it
+// (and one read at the finer would make Meet depend on how its learnings
+// are grouped), so it holds nothing. So do two cut to the hour at two
+// Phases: no one hour holds both runs' values. Why
 // is the lesser of the two that are set (nothing replays it): one learned
 // line, whatever the order.
 func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
-	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout), Since: meetSince(o.Since, p.Since), Why: o.Why, Step: o.Step}
+	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout), Since: meetSince(o.Since, p.Since), Why: o.Why, Step: o.Step, Phase: max(o.Phase, p.Phase)}
 	if m.Why == "" || p.Why != "" && p.Why < m.Why {
 		m.Why = p.Why
 	}
-	if o.Step != p.Step {
+	if own := func(x ClockOffset) bool { return x.Step > 0 && x.Step == x.Res }; o.Step != p.Step || own(o) != own(p) || o.Phase != p.Phase {
 		m.Step = StepApart
 	}
 	// One read whole and one inside a text, or at two places of a text
@@ -1547,7 +1748,9 @@ func WallNanos(t time.Time, loc *time.Location) int64 {
 // offset from 29m59.96s to 32m59.956s"; an Empty o says it holds none:
 // "clock reads no one offset holds (from 30m up to 0s)". A Zone of a wall
 // clock of no zone follows it: "clock, a wall clock of no zone in the
-// application's zone"; one of ZoneApart, or one this keploy does not read,
+// application's zone"; of one learned at a Step cut to the hour, where its
+// hour starts: "clock - 2h, its hour starting 30m past UTC's whole hour";
+// one of ZoneApart, or one this keploy does not read,
 // says so instead. It never decides anything.
 func (o ClockOffset) String() string {
 	switch {
@@ -1565,8 +1768,16 @@ func (o ClockOffset) String() string {
 		return "clock reads cut to no one step (one place learned as a read cut to different steps before its offset at different calls)"
 	}
 	s := o.offsetString() + o.zoneString() + o.layoutString()
-	if o.Step > 0 {
+	if o.Step > o.Res {
 		s += ", read cut to " + o.Step.String() + " before the offset"
+	}
+	if o.Step > 0 && o.Res == time.Hour {
+		// Where its hour starts (Phase), which a replay holds it to.
+		if o.Phase == 0 {
+			s += ", its hour starting on UTC's whole hour"
+		} else {
+			s += ", its hour starting " + ShortDuration(o.Phase) + " past UTC's whole hour"
+		}
 	}
 	if !o.Word.IsZero() {
 		// Where the word stands, never what the text holds.
@@ -1574,6 +1785,13 @@ func (o ClockOffset) String() string {
 	}
 	if o.Since == SinceTestBegin {
 		s += ", read after its test began and before its call"
+		// Learned at a Step, the limit of a read since its test began,
+		// stated where it is learned: the learn step cannot tell where in
+		// that span the application read its clock, so a replay passes a
+		// read anywhere in it.
+		if o.Step > 0 {
+			s += " (a replay passes a read made anywhere in that span plus the offset, so a time to live changed by less than that span passes too)"
+		}
 	}
 	switch o.AppZone {
 	case "":
