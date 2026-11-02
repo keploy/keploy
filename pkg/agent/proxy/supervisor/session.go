@@ -469,6 +469,20 @@ const endedWithConnectionShift = 16
 // NextRequest clears it.
 const spokeUnaskedBit = 1 << (peerEndFirstShift + 2)
 
+// endFollowedStopBit, in peerEnds, after spokeUnaskedBit: EndFollowedStop.
+const endFollowedStopBit = 1 << (peerEndFirstShift + 3)
+
+// EndFollowedStop reports whether the first end of the connection
+// (FirstPeerEnded) was read after the recording's stop had begun
+// (MarkPeerEndedStopping): keploy stops the application only once it has
+// told the agent, so a client that closed then was closed by the stop, and
+// the call it had in flight ended in no fault of the upstream's or the
+// application's. An end read before the stop began (the application's own
+// timeout, the upstream's reset) is not one, however late the stop. Nil-safe.
+func (s *Session) EndFollowedStop() bool {
+	return s != nil && s.peerEnds.Load()&endFollowedStopBit != 0
+}
+
 // ServerSpokeUnasked reports whether the server sent bytes that answer no
 // request before the current request's first chunk was captured: the floor
 // the request set (NextRequest) dropped a run of the server's stream that is
@@ -492,6 +506,15 @@ func (s *Session) ServerSpokeUnasked() bool {
 // after it. The caller marks it before the stream ends, so a parser that
 // reaches the end sees it. Nil-safe.
 func (s *Session) MarkPeerEnded(dir fakeconn.Direction, reset bool) {
+	s.MarkPeerEndedStopping(dir, reset, false)
+}
+
+// MarkPeerEndedStopping is MarkPeerEnded for a relay that knows whether the
+// recording's stop had begun as it read the end (stopBegun): keploy record's
+// client tells the agent it is stopping (the proxy's graceful-shutdown flag)
+// before it stops the application, so an end read after that is the stop's
+// doing (EndFollowedStop). Only the first end's is kept. Nil-safe.
+func (s *Session) MarkPeerEndedStopping(dir fakeconn.Direction, reset, stopBegun bool) {
 	if s == nil || dir > fakeconn.FromDest {
 		return
 	}
@@ -508,6 +531,9 @@ func (s *Session) MarkPeerEnded(dir fakeconn.Direction, reset bool) {
 		next := old | uint32(end)<<shift
 		if (old>>peerEndFirstShift)&3 == 0 {
 			next |= (uint32(dir) + 1) << peerEndFirstShift
+			if stopBegun {
+				next |= endFollowedStopBit
+			}
 		}
 		if s.peerEnds.CompareAndSwap(old, next) {
 			return

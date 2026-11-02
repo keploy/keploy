@@ -52,3 +52,43 @@ func TestMarkPeerEndedKeepsEachSidesFirstEndAndWhichEndedFirst(t *testing.T) {
 		t.Errorf("an unknown direction's end = %d, want PeerOpen", got)
 	}
 }
+
+// An end the relay reads once the recording's stop has begun is the stop's
+// (EndFollowedStop): the first end decides it, as it is read, and a stop
+// that begins after it, or a second end after the stop, does not.
+func TestEndFollowedStopIsTheFirstEndReadAfterTheStopBegan(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// stopBefore[i]: the stop had begun when end i was read.
+		ends       []fakeconn.Direction
+		stopBefore []bool
+		want       bool
+	}{
+		{"the app closed after the stop began", []fakeconn.Direction{fakeconn.FromClient, fakeconn.FromDest}, []bool{true, true}, true},
+		{"the upstream reset after the stop began", []fakeconn.Direction{fakeconn.FromDest}, []bool{true}, true},
+		{"the app gave up before the stop", []fakeconn.Direction{fakeconn.FromClient, fakeconn.FromDest}, []bool{false, true}, false},
+		{"no stop", []fakeconn.Direction{fakeconn.FromClient}, []bool{false}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Session{}
+			for i, dir := range tc.ends {
+				s.MarkPeerEndedStopping(dir, false, tc.stopBefore[i])
+			}
+			if got := s.EndFollowedStop(); got != tc.want {
+				t.Errorf("EndFollowedStop = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if (&Session{}).EndFollowedStop() {
+		t.Error("a session with no ends followed a stop")
+	}
+	never := &Session{}
+	never.MarkPeerEnded(fakeconn.FromClient, false)
+	if never.EndFollowedStop() {
+		t.Error("an end marked with no stop (MarkPeerEnded) followed one")
+	}
+	var none *Session
+	if none.EndFollowedStop() {
+		t.Error("a nil session's end followed a stop")
+	}
+}

@@ -283,8 +283,13 @@ func (p *Proxy) recordViaSupervisor(
 		// How each side ended its side of the connection, and which ended
 		// first: a call the destination never answered is recorded with
 		// the fault it gave (its reset or its close), or as the client's
-		// giving up when the client closed first.
-		PeerEnded: svSess.MarkPeerEnded,
+		// giving up when the client closed first. An end read once keploy
+		// record's client said it is stopping, which it says before it
+		// stops the application (SetGracefulShutdown), is the stop's, and
+		// records no fault (Session.EndFollowedStop).
+		PeerEnded: func(dir fakeconn.Direction, reset bool) {
+			svSess.MarkPeerEndedStopping(dir, reset, p.IsGracefulShutdown())
+		},
 		// User-tunable record-buffer caps. Snapshotted onto the Proxy
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via

@@ -632,3 +632,54 @@ func TestBuildHTTPMock_FaultOnlyOnAnUnfinishedAnswer(t *testing.T) {
 		t.Errorf("a cut-short answer whose head has bare LFs recorded as %+v; want an error: its body's bytes are not known", m.Spec)
 	}
 }
+
+// keploy record tells the agent it is stopping before it stops the
+// application (Session.MarkPeerEndedStopping): a call the application had in
+// flight, closed by that stop, ended in no fault of the upstream's or of the
+// application's own client, and records none. Before the answer and after its
+// head alike.
+func TestRecordV2_FaultNotRecordedWhenTheAppIsStoppedMidCall(t *testing.T) {
+	const head = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n"
+	for _, afterHead := range []bool{false, true} {
+		c := newRelayedConn(t)
+		c.start(t)
+		write(t, c.app, c.src, faultReq)
+		relayed(t, c.dest, faultReq)
+		if afterHead {
+			write(t, c.dest, c.dst, head+"01234")
+			relayed(t, c.app, head+"01234")
+		}
+		c.stopBegun.Store(true)
+		appClosed(t, c)
+		mocks, _ := c.finish(t)
+		for _, m := range mocks {
+			if m.Spec.Fault != nil {
+				t.Errorf("after the head %v: recorded fault %v, want none: the recording's stop closed the application, which did not give up on the call", afterHead, m.Spec.Fault)
+			}
+		}
+	}
+}
+
+// The reverse order: the application gave up on the call (its client's
+// timeout) before the recording's stop began. Its timeout is recorded,
+// however soon the stop follows.
+func TestRecordV2_FaultTimeoutRecordedWhenTheAppGaveUpBeforeTheStop(t *testing.T) {
+	const head = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n"
+	for _, afterHead := range []bool{false, true} {
+		c := newRelayedConn(t)
+		c.start(t)
+		write(t, c.app, c.src, faultReq)
+		relayed(t, c.dest, faultReq)
+		want := models.Fault{Kind: models.FaultTimeout}
+		if afterHead {
+			write(t, c.dest, c.dst, head+"01234")
+			relayed(t, c.app, head+"01234")
+			want = models.Fault{Kind: models.FaultTimeout, AfterHead: true, BodyBytes: 5}
+		}
+		appClosed(t, c)
+		awaitPeerEnd(t, c, fakeconn.FromClient)
+		c.stopBegun.Store(true)
+		mocks, err := c.finish(t)
+		wantFault(t, oneMock(t, mocks, err), want)
+	}
+}

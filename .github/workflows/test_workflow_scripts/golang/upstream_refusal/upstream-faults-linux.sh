@@ -18,6 +18,10 @@
 #   4. With OLD_BIN (a released keploy that knows no faults): it skips each
 #      HttpFault mock, naming the kind, and the four fault tests fail; none is
 #      served the recorded head as a whole answer.
+#   5. keploy record stopped while the application holds a call open (a long
+#      poll the upstream never answers, its client's timeout far off): the
+#      stop closes it, which is no fault, so none is recorded and no fault
+#      note is said.
 #
 # Env: RECORD_BIN, REPLAY_BIN (default RECORD_BIN), OLD_BIN (optional). Ports:
 # 18090 (app), 18091 (upstream). Runs as a user with passwordless sudo.
@@ -202,6 +206,40 @@ if [ -n "$OLD_BIN" ]; then
     grep -qx "ok PASSED" old_statuses.txt || fail "4: the old keploy's test of /call/ok did not pass, so its misses prove nothing"
     [ "$FAIL" -eq "$before" ] || show old.log
 fi
+
+echo "== 5. keploy record stopped with a call in flight =="
+before=$FAIL
+mkdir -p "$WORK/stop" && cd "$WORK/stop" || exit 1
+"$WORK/faults" -upstream "$UP" > held_upstream.log 2>&1 &
+UP_PID=$!
+wait_listen "$UP" "$UP_PID" || { echo "::error::the upstream did not start"; exit 1; }
+# shellcheck disable=SC2024
+sudo -E env PATH="$PATH" HELD_CALL=1 "$RECORD_BIN" record -c "$WORK/faults -app $APP $UP" \
+    --generateGithubActions=false --disable-tele > held_record.log 2>&1 < /dev/null &
+REC_PID=$!
+wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 held_record.log; exit 1; }
+curl -s --max-time 30 "http://$APP/call/ok" > /dev/null
+held=0
+for _ in $(seq 1 300); do
+    grep -q 'upstream: holding /held' held_upstream.log && held=1 && break
+    sleep 0.1
+done
+[ "$held" = 1 ] || fail "5: the application's held call did not reach the upstream"
+# The stop, while the call is held: the upstream answers it never.
+stop_pid "$REC_PID"; REC_PID=""
+kill "$UP_PID" 2>/dev/null; wait "$UP_PID" 2>/dev/null; UP_PID=""
+sudo chown -R "$(id -u):$(id -g)" . 2>/dev/null
+if grep -q 'held call: timeout' held_record.log; then
+    fail "5: the application's own client gave up on the held call, so this proves nothing"
+fi
+got=$(grep -c '^kind: HttpFault$' keploy/test-set-0/mocks.yaml 2>/dev/null)
+[ "${got:-0}" = 0 ] || fail "5: keploy record wrote $got fault mocks for a call its own stop cut, want none"
+if grep -q 'keploy now records a call that ended in a fault' held_record.log; then
+    fail "5: keploy record said its fault note for a call its own stop cut"
+fi
+[ "$FAIL" -eq "$before" ] || { grep -n 'fault' keploy/test-set-0/mocks.yaml | head -20; tail -40 held_record.log; }
+cp held_upstream.log held_record.log "$WORK/" 2>/dev/null
+cd "$WORK" || exit 1
 
 if [ "$FAIL" -ne 0 ]; then
     echo "::error::$FAIL check(s) failed"

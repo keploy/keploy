@@ -62,6 +62,11 @@ func answer(c *net.TCPConn) {
 	case "/hang":
 		// Held until the client closes: its read then ends.
 		_, _ = io.Copy(io.Discard, c)
+	case "/held":
+		// A long poll's: held until the client closes, said as it begins,
+		// so a stop can be sent while it is in flight.
+		fmt.Println("upstream: holding /held")
+		_, _ = io.Copy(io.Discard, c)
 	case "/truncate":
 		_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\n0123456789"))
 	case "/reason":
@@ -116,6 +121,21 @@ func app(addr, up string) {
 			o.Read = saw(err)
 		}
 	})
+	if os.Getenv("HELD_CALL") == "1" {
+		// A background long poll, as a queue consumer's: in flight until it
+		// is answered or its client's 120s timeout, which no run here
+		// reaches; what ends it is said.
+		go func() {
+			pc := &http.Client{Timeout: 120 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+			resp, err := pc.Get("http://" + up + "/held")
+			if err != nil {
+				fmt.Println("held call:", saw(err))
+				return
+			}
+			_ = resp.Body.Close()
+			fmt.Println("held call: answered", resp.Status)
+		}()
+	}
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		fmt.Println("listen:", err)
 		os.Exit(1)

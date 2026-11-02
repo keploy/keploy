@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -54,6 +55,10 @@ type relayedConn struct {
 	stopRelay context.CancelFunc
 	// grace is the relay's HalfCloseGrace (0: its default).
 	grace time.Duration
+	// stopBegun is whether the recording's stop has begun as the relay reads
+	// an end (Session.MarkPeerEndedStopping): set, as keploy record's client
+	// says it is stopping before it stops the application.
+	stopBegun atomic.Bool
 }
 
 // loopback returns the two ends of a loopback TCP connection.
@@ -117,7 +122,9 @@ func (c *relayedConn) startRelay(t *testing.T) {
 	if c.wrapDst != nil {
 		dst = c.wrapDst(dst)
 	}
-	r := relay.New(relay.Config{Logger: zap.NewNop(), HalfCloseGrace: c.grace, ClientStopped: c.sess.MarkEndedWhereClientStopped, PeerEnded: c.sess.MarkPeerEnded}, src, dst)
+	r := relay.New(relay.Config{Logger: zap.NewNop(), HalfCloseGrace: c.grace, ClientStopped: c.sess.MarkEndedWhereClientStopped, PeerEnded: func(dir fakeconn.Direction, reset bool) {
+		c.sess.MarkPeerEndedStopping(dir, reset, c.stopBegun.Load())
+	}}, src, dst)
 	c.sess.ClientStream, c.sess.DestStream = r.ClientStream(), r.DestStream()
 	ctx, cancel := context.WithCancel(context.Background())
 	c.stopRelay = cancel
