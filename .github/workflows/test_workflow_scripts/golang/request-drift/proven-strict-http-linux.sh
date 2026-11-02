@@ -310,7 +310,7 @@ if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
 fi
 # Under the switch the first test goes on the readiness event: /healthz's 2xx,
 # which the app gives only once it knows the container's URL (U18).
-grep "the application is ready; firing the first test" midsession.log | grep -q "healthz answered 200" ||
+grep "the application is ready; firing the first test" midsession.log | grep "healthz answered 200" >/dev/null ||
     fail "step 7b: the first test did not wait for /healthz's 2xx (the container's start)"
 expect_pass "step 7b"
 stop_containers

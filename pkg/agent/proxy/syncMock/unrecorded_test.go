@@ -1,9 +1,12 @@
 package manager
 
 import (
+	"bytes"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -46,22 +49,79 @@ func (l *spanLog) lastStart() time.Time {
 	return l.starts[len(l.starts)-1]
 }
 
-func waitUntil(t *testing.T, timeout time.Duration, what string, cond func() bool) {
+// waitUntil polls cond until it holds. How long a loaded host takes to get
+// there is no part of what these tests check, so the wait has no budget of its
+// own: only the test binary's deadline ends it, early enough to name what
+// never happened.
+func waitUntil(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(time.Millisecond)
+	var expired <-chan time.Time
+	if dl, ok := t.Deadline(); ok {
+		timer := time.NewTimer(time.Until(dl) / 4)
+		defer timer.Stop()
+		expired = timer.C
 	}
-	t.Fatalf("not within %v: %s", timeout, what)
+	for !cond() {
+		select {
+		case <-expired:
+			t.Fatalf("%s never happened", what)
+		case <-time.After(time.Millisecond):
+		}
+	}
 }
 
 const (
 	testIdleGrace = 40 * time.Millisecond
 	testIdleCheck = 10 * time.Millisecond
 )
+
+// idleChecks makes an UnrecordedConn's checks of idleness itself, in place of
+// its ticker. A check is one the follower took (the send returns once it has),
+// as of the instant the test names, so whether the connection fell idle is the
+// test's to say, whatever a loaded host does to the time between two Notes.
+type idleChecks struct {
+	t     *testing.T
+	u     *UnrecordedConn
+	ticks chan time.Time
+}
+
+func checkedConn(t *testing.T, open func(start time.Time) func()) *idleChecks {
+	u := NewUnrecordedConn(open, testIdleGrace, testIdleCheck)
+	ticks := make(chan time.Time)
+	u.ticks = ticks
+	return &idleChecks{t: t, u: u, ticks: ticks}
+}
+
+// check has the follower check as of at. With no follower left to take it
+// (the span was closed, and nothing opened another), it fails the test, by
+// the test binary's deadline as waitUntil does.
+func (c *idleChecks) check(at time.Time) {
+	c.t.Helper()
+	var expired <-chan time.Time
+	if dl, ok := c.t.Deadline(); ok {
+		timer := time.NewTimer(time.Until(dl) / 4)
+		defer timer.Stop()
+		expired = timer.C
+	}
+	select {
+	case c.ticks <- at:
+	case <-expired:
+		c.t.Fatalf("no follower took a check as of %v: the span was closed and none followed it", at)
+	}
+}
+
+// busySince checks as of a grace past `before`: the connection is busy then
+// only if bytes were seen at or after it.
+func (c *idleChecks) busySince(before time.Time) {
+	c.t.Helper()
+	c.check(before.Add(testIdleGrace))
+}
+
+// idle checks as of a grace past the connection's latest bytes: it fell idle.
+func (c *idleChecks) idle() {
+	c.t.Helper()
+	c.check(time.Unix(0, c.u.seen.Load()).Add(testIdleGrace + time.Nanosecond))
+}
 
 // A stopped connection costs a test case only while the app uses it. These pin
 // that its span follows its activity, not the rest of the recording.
@@ -88,11 +148,11 @@ func TestUnrecordedConnFollowsTraffic(t *testing.T) {
 		u := NewUnrecordedConn(l.open, testIdleGrace, testIdleCheck)
 		at := time.Now().Add(-5 * time.Millisecond)
 		u.Stop(at)
-		waitUntil(t, time.Second, "a span opens", func() bool { o, _ := l.counts(); return o == 1 })
+		waitUntil(t, "a span opens", func() bool { o, _ := l.counts(); return o == 1 })
 		if got := l.lastStart(); !got.Equal(at) {
 			t.Fatalf("span starts at %v, want the stop at %v", got, at)
 		}
-		waitUntil(t, time.Second, "the span closes when idle", func() bool { _, c := l.counts(); return c == 1 })
+		waitUntil(t, "the span closes when idle", func() bool { _, c := l.counts(); return c == 1 })
 		u.End()
 		if o, c := l.counts(); o != c {
 			t.Fatalf("opens=%d closes=%d: a span left open suppresses the rest of the recording", o, c)
@@ -110,9 +170,9 @@ func TestUnrecordedConnFollowsTraffic(t *testing.T) {
 		if u.Stop(time.Now()) {
 			t.Fatal("second Stop reported true")
 		}
-		waitUntil(t, time.Second, "one span", func() bool { o, _ := l.counts(); return o == 1 })
+		waitUntil(t, "one span", func() bool { o, _ := l.counts(); return o == 1 })
 		u.End()
-		waitUntil(t, time.Second, "End closes it", func() bool { _, c := l.counts(); return c == 1 })
+		waitUntil(t, "End closes it", func() bool { _, c := l.counts(); return c == 1 })
 		if o, _ := l.counts(); o != 1 || !l.lastStart().Equal(first) {
 			t.Fatalf("opens=%d start=%v, want one span from the first stop %v", o, l.lastStart(), first)
 		}
@@ -121,44 +181,48 @@ func TestUnrecordedConnFollowsTraffic(t *testing.T) {
 	t.Run("a busy connection stays covered by one span", func(t *testing.T) {
 		t.Parallel()
 		l := &spanLog{}
-		u := NewUnrecordedConn(l.open, testIdleGrace, testIdleCheck)
+		checks := checkedConn(t, l.open)
+		u := checks.u
 		u.Stop(time.Now())
-		for deadline := time.Now().Add(6 * testIdleGrace); time.Now().Before(deadline); {
+		for i := 0; i < 20; i++ {
+			// Each check is as of a grace past a moment before the Note, so
+			// it finds the connection busy only if the Note said it was.
+			before := time.Now()
 			u.Note(time.Now())
-			time.Sleep(testIdleCheck / 2)
+			checks.busySince(before)
 		}
 		if o, c := l.counts(); o != 1 || c != 0 {
 			t.Fatalf("opens=%d closes=%d, want 1/0: a gap between spans lets a test case through", o, c)
 		}
 		u.End()
-		waitUntil(t, time.Second, "End closes it", func() bool { _, c := l.counts(); return c == 1 })
+		waitUntil(t, "End closes it", func() bool { _, c := l.counts(); return c == 1 })
 	})
 
 	// The span that reopens must start at the FIRST byte after the idle close.
-	// Traffic that resumes and keeps flowing is only noticed on the next tick,
-	// and the latest byte by then is up to a tick later than the first: a span
-	// from there leaves the start of the spell, and any request served inside
-	// it, uncovered.
+	// A span from any later byte of traffic that resumes and keeps flowing
+	// leaves the start of the spell, and any request served inside it,
+	// uncovered.
 	t.Run("traffic that resumes reopens from its first byte", func(t *testing.T) {
 		t.Parallel()
 		l := &spanLog{}
-		u := NewUnrecordedConn(l.open, testIdleGrace, 50*time.Millisecond)
+		checks := checkedConn(t, l.open)
+		u := checks.u
 		u.Stop(time.Now())
-		waitUntil(t, 2*time.Second, "the first span closes", func() bool { _, c := l.counts(); return c == 1 })
+		checks.idle()
+		waitUntil(t, "the first span closes", func() bool { _, c := l.counts(); return c == 1 })
 
 		first := time.Now()
 		u.Note(first)
-		for i := 0; i < 20; i++ { // keeps flowing, well inside the next tick
-			time.Sleep(time.Millisecond)
-			u.Note(time.Now())
+		for i := 1; i <= 20; i++ { // keeps flowing: its latest byte is not its first
+			u.Note(first.Add(time.Duration(i) * time.Millisecond))
 		}
-		waitUntil(t, time.Second, "a second span", func() bool { o, _ := l.counts(); return o == 2 })
+		waitUntil(t, "a second span", func() bool { o, _ := l.counts(); return o == 2 })
 		if got := l.lastStart(); got.After(first) {
 			t.Fatalf("reopened at %v, %v after the traffic resumed at %v: that part of it is not covered",
 				got, got.Sub(first), first)
 		}
 		u.End()
-		waitUntil(t, time.Second, "End closes it", func() bool { o, c := l.counts(); return o == c })
+		waitUntil(t, "End closes it", func() bool { o, c := l.counts(); return o == c })
 	})
 
 	t.Run("no follower is left once idle, and none after End", func(t *testing.T) {
@@ -166,7 +230,7 @@ func TestUnrecordedConnFollowsTraffic(t *testing.T) {
 		l := &spanLog{}
 		u := NewUnrecordedConn(l.open, testIdleGrace, testIdleCheck)
 		u.Stop(time.Now())
-		waitUntil(t, time.Second, "idle close", func() bool { return !u.running.Load() })
+		waitUntil(t, "idle close", func() bool { _, c := l.counts(); return c == 1 && !u.running.Load() })
 		u.End()
 		u.Note(time.Now())
 		time.Sleep(3 * testIdleCheck)
@@ -192,11 +256,59 @@ func TestUnrecordedConnNoteRacingIdleClose(t *testing.T) {
 			u.Note(last)
 			if ok, _ := spans.Overlaps(last, last); !ok {
 				// The follower may not have opened yet: give it a moment.
-				waitUntil(t, time.Second, "traffic after the stop is covered", func() bool {
+				waitUntil(t, "traffic after the stop is covered", func() bool {
 					ok, _ := spans.Overlaps(last, last)
 					return ok
 				})
 			}
+		}
+		u.End()
+	}
+}
+
+// The span that reopens starts at the first byte after the idle close, however
+// a byte's Note and the close land. Here the first Note comes while the
+// follower is closing the span, and the Notes after it race to the restart: a
+// span opened from one of those leaves the first bytes uncovered.
+func TestUnrecordedConnReopensFromTheFirstByteWhoeverRestartsIt(t *testing.T) {
+	t.Parallel()
+	for i := 0; i < 5000; i++ {
+		l := &spanLog{}
+		closing, finish := make(chan struct{}), make(chan struct{})
+		var opened atomic.Int32
+		checks := checkedConn(t, func(start time.Time) func() {
+			closeSpan := l.open(start)
+			if opened.Add(1) > 1 {
+				return closeSpan
+			}
+			return func() {
+				close(closing)
+				<-finish
+				closeSpan()
+			}
+		})
+		u := checks.u
+		u.Stop(time.Now())
+		checks.idle()
+		<-closing
+
+		first := time.Now()
+		reopened := make(chan struct{})
+		go func() {
+			defer close(reopened)
+			u.Note(first)
+			for at := first; ; {
+				at = at.Add(time.Millisecond)
+				u.Note(at)
+				if o, _ := l.counts(); o == 2 {
+					return
+				}
+			}
+		}()
+		close(finish)
+		<-reopened
+		if got := l.lastStart(); got.After(first) {
+			t.Fatalf("round %d: reopened %v after the first byte: the bytes before it are not covered", i, got.Sub(first))
 		}
 		u.End()
 	}
@@ -246,12 +358,144 @@ func TestUnrecordedConnOpensItsSpanBeforeReturning(t *testing.T) {
 	if ok, _ := spans.Overlaps(at, at); !ok {
 		t.Fatal("no span right after Stop returned")
 	}
-	waitUntil(t, time.Second, "idle close", func() bool { return !u.running.Load() })
+	waitUntil(t, "idle close", func() bool { return !u.running.Load() })
 	resume := time.Now()
 	u.Note(resume)
 	if _, open := spans.Counts(); open != 1 {
 		t.Fatal("no span open right after the Note that resumed traffic returned")
 	}
+}
+
+// running is set only once its span is open: a Note that sees it set returns
+// with no span of its own, so the span its bytes are in must be open by then.
+// Both opens here, the stop's and the one resumed traffic makes, find it
+// still clear.
+func TestUnrecordedConnRunningIsSetOnceItsSpanIsOpen(t *testing.T) {
+	t.Parallel()
+	l := &spanLog{}
+	var early atomic.Int32
+	var checks *idleChecks
+	checks = checkedConn(t, func(start time.Time) func() {
+		if checks.u.running.Load() {
+			early.Add(1)
+		}
+		return l.open(start)
+	})
+	u := checks.u
+	u.Stop(time.Now())
+	checks.idle()
+	waitUntil(t, "the first span closes", func() bool { _, c := l.counts(); return c == 1 })
+	u.Note(time.Now())
+	if o, _ := l.counts(); o != 2 {
+		t.Fatalf("opens=%d, want 2: the traffic that resumed opened no span", o)
+	}
+	u.End()
+	if n := early.Load(); n != 0 {
+		t.Fatalf("%d of 2 spans were said to be open before they were: a Note that saw that returned with its bytes in no span", n)
+	}
+}
+
+// A Note that saw no span open, and then waited at start's lock behind the
+// start that is opening one, opens none of its own: one connection has one
+// span and one follower at a time. The second start comes inside the first
+// open, under the lock with running still clear, as a Note that read running
+// clear just then calls it, and the open returns only once it waits at the
+// lock.
+func TestUnrecordedConnAStartBehindAnOpenSpanOpensNone(t *testing.T) {
+	t.Parallel()
+	l := &spanLog{}
+	var u *UnrecordedConn
+	var second sync.WaitGroup
+	u = NewUnrecordedConn(func(start time.Time) func() {
+		closeSpan := l.open(start)
+		if o, _ := l.counts(); o == 1 {
+			second.Add(1)
+			go func() { defer second.Done(); startBehindTheOpen(u) }()
+			waitUntil(t, "the second start waiting at the lock", func() bool {
+				o, _ := l.counts()
+				return o > 1 || parkedAtSpanMu("startBehindTheOpen")
+			})
+			if o, _ := l.counts(); o > 1 {
+				t.Errorf("opens=%d inside the first open: the second start took no lock", o)
+			}
+		}
+		return closeSpan
+	}, time.Hour, time.Hour)
+	u.Stop(time.Now())
+	second.Wait()
+	if o, _ := l.counts(); o != 1 {
+		t.Fatalf("opens=%d, want 1: a start that waited at the lock behind the open opened a second span and a second follower", o)
+	}
+	u.End()
+	waitUntil(t, "End closes it", func() bool { _, c := l.counts(); return c == 1 })
+}
+
+// The idle close holds start's lock until the span is closed: a Note that
+// finds running cleared, the close begun and not over, opens the next span
+// only once it is. So a connection has one span open at a time. The first
+// span's close is held here until that Note waits at the lock.
+func TestUnrecordedConnTheNextSpanOpensOnceTheIdleCloseIsOver(t *testing.T) {
+	t.Parallel()
+	l := &spanLog{}
+	var overlap atomic.Int32
+	closing, release := make(chan struct{}), make(chan struct{})
+	checks := checkedConn(t, func(start time.Time) func() {
+		if o, c := l.counts(); o != c {
+			overlap.Add(1)
+		}
+		closeSpan := l.open(start)
+		if o, _ := l.counts(); o == 1 {
+			return func() { close(closing); <-release; closeSpan() }
+		}
+		return closeSpan
+	})
+	u := checks.u
+	u.Stop(time.Now())
+	checks.idle()
+	waitUntil(t, "the idle close begins", func() bool {
+		select {
+		case <-closing:
+			return true
+		default:
+			return false
+		}
+	})
+	var note sync.WaitGroup
+	note.Add(1)
+	go func() { defer note.Done(); noteDuringTheClose(u) }()
+	waitUntil(t, "the Note waiting at the lock", func() bool {
+		o, _ := l.counts()
+		return o > 1 || parkedAtSpanMu("noteDuringTheClose")
+	})
+	close(release)
+	note.Wait()
+	if overlap.Load() != 0 {
+		t.Fatalf("the next span opened while the idle close of the last one was not over: two spans open for one connection")
+	}
+	if o, c := l.counts(); o != 2 || c != 1 {
+		t.Fatalf("opens=%d closes=%d, want 2 and 1: the resumed traffic opened no span, or the first did not close", o, c)
+	}
+	u.End()
+	waitUntil(t, "End closes the second span", func() bool { _, c := l.counts(); return c == 2 })
+}
+
+// startBehindTheOpen and noteDuringTheClose name, in a goroutine's stack, the
+// call a test waits to see at start's lock (parkedAtSpanMu).
+func startBehindTheOpen(u *UnrecordedConn) { u.start(time.Now()) }
+
+func noteDuringTheClose(u *UnrecordedConn) { u.Note(time.Now()) }
+
+// parkedAtSpanMu reports whether the goroutine running caller is parked in
+// sync.Mutex.Lock in UnrecordedConn.start: it waits at start's lock.
+func parkedAtSpanMu(caller string) bool {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	for _, g := range bytes.Split(buf[:n], []byte("\n\n")) {
+		if bytes.Contains(g, []byte("[sync.Mutex.Lock")) && bytes.Contains(g, []byte("(*UnrecordedConn).start(")) && bytes.Contains(g, []byte("."+caller+"(")) {
+			return true
+		}
+	}
+	return false
 }
 
 // A span still open is never evicted to make room for spans long closed: a

@@ -19,9 +19,10 @@ import (
 // four ways, and only for such a set:
 //
 //   - In a test, the view shows the pool's data-plane recordings too, after
-//     the open test's own and the worker scope (exactView.shows, keep). One a
-//     parser consumes through a delete door is spent for the staging, as one
-//     consumed outside every test is.
+//     the open test's own and the worker scope (exactView.shows, keep). One
+//     of them, unless an async lane's, is spent for the staging through
+//     whichever door a parser consumes it (exactConsumeIn), in a test or
+//     between tests.
 //   - The worker scope the view shows is ordered by its places: the earlier
 //     place first, and within one place a delivering answer before an idle
 //     one, in recorded order (ServeExactWorker's order, which the agent
@@ -508,17 +509,67 @@ func (m *MockManager) PairingCandidates(kind models.Kind) []*models.Mock {
 	if v == nil {
 		return nil
 	}
+	return m.pairableOfKind(v, epoch, kind)
+}
+
+// pairableOfKind is kind's recordings a pairing may take in v (pairable), in
+// recorded order: those the trees hold, then those the agent keeps on disk
+// (SetRecordedOfKind), each once.
+func (m *MockManager) pairableOfKind(v *exactView, epoch uint64, kind models.Kind) []*models.Mock {
+	m.exact.ofKind.mu.Lock()
+	src := m.exact.ofKind.src
+	m.exact.ofKind.mu.Unlock()
+	return m.pairableFrom(v, epoch, kind, m.stagedOfKind(kind), src)
+}
+
+// pairableUnderKeys is pairableOfKind of the recordings filed under any of
+// keys (models.RequestKeys) alone: the trees' by their index
+// (TreeDb.keyedValues), and those the agent keeps on disk by its store's
+// (SetRecordingSource), so a recording filed under none is never decoded.
+func (m *MockManager) pairableUnderKeys(v *exactView, epoch uint64, kind models.Kind, keys []string) []*models.Mock {
+	m.treesMu.RLock()
+	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
+	m.treesMu.RUnlock()
+	seen := map[string]bool{}
+	var staged []*models.Mock
+	for _, t := range trees {
+		if t == nil {
+			continue
+		}
+		for _, mk := range t.keyedValues(requestKeyIndex, keys, kind) {
+			if mk.Name == "" || seen[mk.Name] {
+				continue
+			}
+			seen[mk.Name] = true
+			staged = append(staged, mk)
+		}
+	}
+	m.exact.recorded.mu.Lock()
+	src := m.exact.recorded.src
+	m.exact.recorded.mu.Unlock()
+	var ofKind func(models.Kind, func(string, func() (*models.Mock, error)) bool) error
+	if src != nil {
+		ofKind = func(kind models.Kind, visit func(string, func() (*models.Mock, error)) bool) error {
+			return src(kind, keys, visit)
+		}
+	}
+	return m.pairableFrom(v, epoch, kind, staged, ofKind)
+}
+
+// pairableFrom is, of staged (the trees' recordings of kind) and of what src
+// visits (those the agent keeps on disk), the recordings a pairing may take
+// in v (pairable), in recorded order, each once: one on disk is decoded only
+// once its name passed (pairableName).
+func (m *MockManager) pairableFrom(v *exactView, epoch uint64, kind models.Kind, staged []*models.Mock,
+	src func(models.Kind, func(string, func() (*models.Mock, error)) bool) error) []*models.Mock {
 	seen := map[string]bool{}
 	var out []*models.Mock
-	for _, mk := range m.stagedOfKind(kind) {
+	for _, mk := range staged {
 		seen[mk.Name] = true
 		if m.pairable(v, epoch, mk) {
 			out = append(out, mk)
 		}
 	}
-	m.exact.ofKind.mu.Lock()
-	src := m.exact.ofKind.src
-	m.exact.ofKind.mu.Unlock()
 	if src != nil {
 		err := src(kind, func(name string, load func() (*models.Mock, error)) bool {
 			if seen[name] {

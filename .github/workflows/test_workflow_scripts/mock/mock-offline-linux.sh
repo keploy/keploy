@@ -217,7 +217,7 @@ phase() {
   local got
   got="$(cat "$WORK/$name.exit" 2>/dev/null)"
   [ "$got" = 0 ] || fail "$name: keploy exited ${got:-nothing}, want 0"
-  grep -c "^ok /" "$WORK/$name.log" | grep -qx 2 || fail "$name: the test command did not get both answers"
+  grep -c "^ok /" "$WORK/$name.log" | grep -x 2 >/dev/null || fail "$name: the test command did not get both answers"
   if [ "$FAIL" -ne 0 ]; then
     echo "--- $name: the last 40 lines keploy logged ---"
     tail -n 40 "$WORK/$name.log" 2>/dev/null

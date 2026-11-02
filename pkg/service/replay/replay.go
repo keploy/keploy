@@ -1852,6 +1852,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
 	runTestSetCtx, runTestSetCtxCancel := context.WithCancel(runTestSetCtx)
+	// A test case's calls to the agent's hooks are keploy's own, on the run's
+	// context (agentHookContext): the set's is cancelled when its app exits.
+	runTestSetCtx = withRunLife(runTestSetCtx, ctx)
 
 	startTime := time.Now()
 	pruneBefore := startTime.UTC()
@@ -6309,7 +6312,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Warn("keploy did not keep what this full round of the record learned: it could not read all the set's tests read, so what it learned may be about values it could not read",
 				zap.String("testSetID", testSetID),
 				zap.String("reason", unchecked))
-		} else if err := r.persistLearned(runTestSetCtx, testSetID, learnedKept, actualTestMockMappings, r.exact.consumerOf()); err != nil {
+		} else if err := r.persistLearned(runTestSetCtx, testSetID, learnedKept, r.learnedElsewhere(runTestSetCtx, testSetID), ownerOf(expectedTestMockMappings), actualTestMockMappings, r.exact.consumerOf()); err != nil {
 			utils.LogError(r.logger, err, "keploy did not complete the full round of this record: what its learn step learned was not kept", zap.String("testSetID", testSetID))
 			testSetStatus = models.TestSetStatusInternalErr
 		}

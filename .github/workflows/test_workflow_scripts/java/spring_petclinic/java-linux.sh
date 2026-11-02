@@ -81,7 +81,7 @@ wait_for_port_free() {
   section "Ensure port ${port} is free before (re)launch"
   local reaped=0
   for i in $(seq 1 60); do
-    if ! ss -ltn "sport = :${port}" 2>/dev/null | grep -q LISTEN; then
+    if ! ss -ltn "sport = :${port}" 2>/dev/null | grep LISTEN >/dev/null; then
       echo "Port ${port} is free."
       endsec; return 0
     fi

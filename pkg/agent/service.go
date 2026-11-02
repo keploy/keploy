@@ -861,6 +861,14 @@ type ConsumedStateReader interface {
 	GetPersistentConsumed() map[string]models.MockState
 }
 
+// LearnedElsewhereReader is an optional Proxy extension: what record's full
+// round's learn step taught recordings from calls made in other windows than
+// theirs, for learning only (integrations.LearnElsewhere), one state per
+// recording. None of it is consumption: GetConsumedMocks never holds it.
+type LearnedElsewhereReader interface {
+	LearnedElsewhere() []models.MockState
+}
+
 type IncomingProxy interface {
 	Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase
 }

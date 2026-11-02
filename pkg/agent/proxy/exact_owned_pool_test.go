@@ -81,6 +81,12 @@ func answerWithin(h integrations.Integrations, p *Proxy, mm *MockManager, reques
 // callWithin is one call of request through h, ended at callDeadline, that
 // returns once the parser returned too where untilParserEnds.
 func callWithin(h integrations.Integrations, p *Proxy, mm *MockManager, request string, untilParserEnds bool) (int, string, error) {
+	return callWithinOpts(h, p, mm, models.OutgoingOptions{}, request, untilParserEnds)
+}
+
+// callWithinOpts is callWithin with the parser's options (Learn: record's
+// full round).
+func callWithinOpts(h integrations.Integrations, p *Proxy, mm *MockManager, opts models.OutgoingOptions, request string, untilParserEnds bool) (int, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), callDeadline)
 	defer cancel()
 	app, agentEnd := net.Pipe()
@@ -92,7 +98,7 @@ func callWithin(h integrations.Integrations, p *Proxy, mm *MockManager, request 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = h.MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{})
+		_ = h.MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, opts)
 		_ = agentEnd.Close()
 	}()
 	// The app hangs up after its answer, and the parser, which waits for the
