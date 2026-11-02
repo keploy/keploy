@@ -269,6 +269,7 @@ func (r *Registry) Stamp(m *models.Mock) {
 	// sync manager stamped it as its parser handed it over, else here.
 	if provenswitch.On() {
 		r.StampOrigin(m)
+		r.StampInstance(m)
 	}
 	// The address its connection reached, for a mock no parser handed the
 	// sync manager, which stamps it as it is handed over (StampDest).

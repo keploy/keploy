@@ -390,11 +390,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			m.logger.Debug("AfterMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
 		}
 		mockCount++
-		typ := mk.Spec.Metadata["type"]
-		// Under the proven switch a protocol-phase mock is the pool's, never
-		// a test's (design v14 §5.2): the mapping lists data-plane mocks only.
-		protocol := provenswitch.On() && mk.IsProtocolPhase()
-		recorded = append(recorded, capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, boot: typ == "config" || typ == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef})
+		recorded = append(recorded, capturedOf(mk))
 	}
 	go func() {
 		defer utils.Recover(m.logger)
@@ -868,6 +864,11 @@ func (m *mockService) Record(ctx context.Context) error {
 	if keep && m.mappingDB != nil {
 		if len(windows) > 0 {
 			byTest := correlateScopes(windows, dataPlane(recorded))
+			for mock, open := range unattributedCalls(windows, dataPlane(recorded)) {
+				m.logger.Warn("a call came from a process in no test worker's keploy instance while test workers' tests were open, so keploy cannot tell which test made it: it is in none of their mappings",
+					zap.String("mock", mock), zap.Strings("open_tests", open),
+					zap.String("next_step", "start the process the call came from inside the test worker (a worker fixture), or run one worker"))
+			}
 			owned := recorded
 			var plan bootPlan
 			if len(starts) > 0 {
@@ -1216,6 +1217,19 @@ type capturedMock struct {
 	protocol bool
 	start    string
 	ref      string
+	// instance is the keploy instance (a test worker's) the call's
+	// connection was stamped with (models.Mock.Instance): only a window of
+	// that worker's (ScopeWindow.Instance) holds it. 0 for none.
+	instance uint32
+}
+
+// capturedOf is what record correlates of mk, a mock it recorded.
+func capturedOf(mk *models.Mock) capturedMock {
+	typ := mk.Spec.Metadata["type"]
+	// Under the proven switch a protocol-phase mock is the pool's, never
+	// a test's (design v14 §5.2): the mapping lists data-plane mocks only.
+	protocol := provenswitch.On() && mk.IsProtocolPhase()
+	return capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, instance: mk.Instance, boot: typ == "config" || typ == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef}
 }
 
 // stagingSetID returns the staging set name record captures into while recording
@@ -1242,6 +1256,17 @@ func stagingSetID(name string) string { return name + yaml.MockStagingSuffix }
 // self-reported PID differs from the kernel PID, falls back to the timestamp
 // scan — which is exact for sequential record and best-effort under overlap.
 func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[string][]models.MockEntry {
+	return correlate(windows, mocks, true)
+}
+
+// correlate is correlateScopes. byInstance: the items are calls, each
+// stamped with its test worker's keploy instance, and a window holds only
+// the calls of its own worker's (ScopeWindow.Instance), whatever their
+// times: a call from another worker, or from no worker while workers' tests
+// are open, is never a window's of theirs. Otherwise (a test's recorded
+// requests, which carry no instance) an item that falls in windows of more
+// than one worker is no window's: its time alone cannot say whose it is.
+func correlate(windows []models.ScopeWindow, mocks []capturedMock, byInstance bool) map[string][]models.MockEntry {
 	// Sort windows by start so overlapping scopes resolve to the innermost
 	// (latest-started) window deterministically.
 	sort.SliceStable(windows, func(i, j int) bool { return windows[i].Start.Before(windows[j].Start) })
@@ -1253,11 +1278,17 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 	containingWindow := func(mk capturedMock, sameWorkerOnly bool) int {
 		best := -1
 		for i, w := range windows {
+			if byInstance && w.Instance != mk.instance {
+				continue
+			}
 			if sameWorkerOnly && w.PID != mk.pid {
 				continue
 			}
 			if mk.ts.Before(w.Start) || mk.ts.After(w.End) {
 				continue
+			}
+			if best != -1 && w.Instance != windows[best].Instance {
+				return -1
 			}
 			if best == -1 || windows[i].Start.After(windows[best].Start) {
 				best = i
@@ -1287,6 +1318,35 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 	return byTest
 }
 
+// unattributedCalls are the calls from a process in no test worker's keploy
+// instance (instance 0) made while test workers' tests were open and no
+// test of a run of one worker was: each by name, with the tests open at its
+// time. No test's window holds one (correlateScopes), so keploy says it.
+func unattributedCalls(windows []models.ScopeWindow, mocks []capturedMock) map[string][]string {
+	out := map[string][]string{}
+	for _, mk := range mocks {
+		if mk.instance != 0 {
+			continue
+		}
+		var open []string
+		mine := false
+		for _, w := range windows {
+			if mk.ts.Before(w.Start) || mk.ts.After(w.End) {
+				continue
+			}
+			if w.Instance == 0 {
+				mine = true
+				break
+			}
+			open = append(open, w.Name)
+		}
+		if !mine && len(open) > 0 {
+			out[mk.name] = open
+		}
+	}
+	return out
+}
+
 // dataPlane is the captured mocks less the protocol-phase ones (none
 // without the proven switch): only data-plane mocks go in a test's mapping.
 func dataPlane(mocks []capturedMock) []capturedMock {
@@ -1306,7 +1366,7 @@ func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, s
 	for _, c := range cases {
 		spans[c.name] = models.ScopeWindow{Name: c.name, Start: c.ts, End: c.end}
 	}
-	for test, entries := range correlateScopes(windows, cases) {
+	for test, entries := range correlate(windows, cases, false) {
 		tc := models.MappedTestCase{CaseSteps: make(map[string]string, len(entries))}
 		for _, e := range entries {
 			tc.Cases = append(tc.Cases, e.Name)

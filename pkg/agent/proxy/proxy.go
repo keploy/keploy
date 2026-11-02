@@ -2803,9 +2803,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if proven {
 		connID := fmt.Sprint(clientConnID)
 		// The process the connection came from, which each mock its parsers
-		// record names (starts.Registry.StampOrigin): kept
+		// record names (starts.Registry.StampOrigin), and the test worker's
+		// instance the kernel stamped it with (StampInstance): kept
 		// until they are done, as the container key is.
-		starts.Default.NoteOrigin(connID, destInfo.KernelPid)
+		starts.Default.NoteOriginIn(connID, destInfo.KernelPid, destInfo.Instance)
 		defer starts.Default.ForgetOrigin(connID)
 		if c, _, isContainer := containerkey.Default.Name(p.logger, connID, dstAddr); isContainer {
 			// Its key, or, while its configuration is unread, its

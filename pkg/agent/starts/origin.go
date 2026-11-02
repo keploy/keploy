@@ -103,9 +103,12 @@ type origins struct {
 
 // connOrigin is one connection's process, named once, at its first stamp.
 type connOrigin struct {
-	pid   uint32
-	name  procName
-	named bool
+	pid uint32
+	// instance is the keploy instance (a test worker's) the kernel stamped
+	// the connection with (NoteOriginIn): 0 for none.
+	instance uint32
+	name     procName
+	named    bool
 }
 
 // procName is a process's comm and argv[0]; ok is false when it could not
@@ -132,6 +135,13 @@ func (r *Registry) SetLogger(l *zap.Logger) {
 // A connection ID noted again while it is open is the later connection's;
 // only its last ForgetOrigin closes it.
 func (r *Registry) NoteOrigin(conn string, pid uint32) {
+	r.NoteOriginIn(conn, pid, 0)
+}
+
+// NoteOriginIn is NoteOrigin for a connection the kernel stamped with the
+// keploy instance its process was in (agent.NetworkAddress.Instance; 0 for
+// none), which each mock it records carries (StampInstance).
+func (r *Registry) NoteOriginIn(conn string, pid, instance uint32) {
 	if conn == "" || pid == 0 {
 		return
 	}
@@ -142,8 +152,8 @@ func (r *Registry) NoteOrigin(conn string, pid uint32) {
 		o.conns, o.opened = map[string]*connOrigin{}, map[string]int{}
 	}
 	cur, known := o.conns[conn]
-	if !known || cur.pid != pid {
-		o.conns[conn] = &connOrigin{pid: pid}
+	if !known || cur.pid != pid || cur.instance != instance {
+		o.conns[conn] = &connOrigin{pid: pid, instance: instance}
 	}
 	o.opened[conn]++
 	// Noted afresh: no longer among the closed (a later close puts it
@@ -203,6 +213,26 @@ func (r *Registry) StampOrigin(m *models.Mock) {
 		o.Clock = m.Origin.Clock
 	}
 	m.Origin = o
+}
+
+// StampInstance gives m, a recorded mock, the keploy instance its
+// connection was stamped with (NoteOriginIn), which record charges it by
+// (models.Mock.Instance). A mock that carries one already, or whose
+// connection is not known, is left as it is.
+func (r *Registry) StampInstance(m *models.Mock) {
+	if m == nil || m.Instance != 0 {
+		return
+	}
+	id := m.ConnectionID
+	if id == "" && m.Spec.Metadata != nil {
+		id = m.Spec.Metadata["connID"]
+	}
+	o := &r.origin
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if c := o.conns[id]; c != nil {
+		m.Instance = c.instance
+	}
 }
 
 // origin is the origin a mock or a call from n's process names it by: its

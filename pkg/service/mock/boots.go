@@ -30,7 +30,7 @@ func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, moc
 				boots[i].Mocks = append(boots[i].Mocks, entry)
 				continue
 			}
-			test := testAt(tests, s.Worker, mk.ts)
+			test := testAt(tests, s.Worker, mk.instance, mk.ts)
 			if test == "" {
 				boots[i].Mocks = append(boots[i].Mocks, entry)
 				continue
@@ -40,7 +40,7 @@ func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, moc
 			out.perTest = append(out.perTest, mk)
 			continue
 		}
-		if test := testAt(tests, mk.pid, mk.ts); test != "" {
+		if test := testAt(tests, mk.pid, mk.instance, mk.ts); test != "" {
 			out.tests[test] = append(out.tests[test], entry)
 			out.perTest = append(out.perTest, mk)
 			continue
@@ -58,10 +58,12 @@ func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, moc
 	return out
 }
 
-func testAt(tests []models.ScopeWindow, worker uint32, at time.Time) string {
+func testAt(tests []models.ScopeWindow, worker, instance uint32, at time.Time) string {
 	var mine, all []models.ScopeWindow
 	for _, w := range tests {
-		if at.Before(w.Start) || at.After(w.End) {
+		// Only the windows of the call's own test worker's keploy instance
+		// (correlateScopes).
+		if w.Instance != instance || at.Before(w.Start) || at.After(w.End) {
 			continue
 		}
 		all = append(all, w)

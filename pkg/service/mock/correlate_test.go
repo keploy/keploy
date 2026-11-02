@@ -122,6 +122,52 @@ func TestCorrelateScopesParallelPID(t *testing.T) {
 		"PID-less mock should fall back to the innermost time window")
 }
 
+// Under declared test workers each call is charged by the keploy instance
+// its connection was stamped with, never by its time: two workers' tests
+// overlap, a call from either worker's child (no pid of a window's) goes to
+// its own worker's test though the other's began later, a call from no
+// worker while their tests are open goes to neither and is named with
+// them, and a run of one worker is charged by time as before. A recorded
+// request carries no instance: one inside both workers' tests is neither's.
+func TestCorrelateScopesByWorkerInstance(t *testing.T) {
+	windows := []models.ScopeWindow{
+		{Name: "a", Start: ts(10), End: ts(30), Instance: 1},
+		{Name: "b", Start: ts(15), End: ts(35), Instance: 2},
+		{Name: "seq", Start: ts(28), End: ts(29)},
+		{Name: "solo", Start: ts(50), End: ts(60)},
+	}
+	mocks := []capturedMock{
+		{name: "seq-call", ts: ts(28)},
+		{name: "between", ts: ts(40)},
+		{name: "a-child", ts: ts(20), pid: 7, instance: 1},
+		{name: "b-child", ts: ts(12), pid: 8, instance: 2},
+		{name: "a-late", ts: ts(32), instance: 1},
+		{name: "nobody", ts: ts(25)},
+		{name: "solo-call", ts: ts(55)},
+		{name: "solo-from-a", ts: ts(55), instance: 1},
+	}
+	got := correlateScopes(windows, mocks)
+	require.Equal(t, []string{"a-child"}, names(got["a"]), "a's worker's call is a's, though b began later")
+	require.Empty(t, names(got["b"]), "b's worker's call made before b began is no window's, though a held its time")
+	require.Equal(t, []string{"solo-call"}, names(got["solo"]))
+	require.Equal(t, []string{"seq-call"}, names(got["seq"]), "a run of one worker's test inside workers' tests holds its call")
+	require.Len(t, got, 3, "a call from no worker, or from a worker outside its tests, is no test's")
+	require.Equal(t, map[string][]string{"nobody": {"a", "b"}}, unattributedCalls(windows, mocks),
+		"only the call from no worker made while workers' tests were open is named, with those tests")
+
+	cases := []capturedMock{{name: "both", ts: ts(20)}, {name: "only-a", ts: ts(12)}, {name: "only-solo", ts: ts(55)}}
+	byCase := correlate(windows, cases, false)
+	require.Equal(t, []string{"only-a"}, names(byCase["a"]))
+	require.Equal(t, []string{"only-solo"}, names(byCase["solo"]))
+	require.Len(t, byCase, 2, "a request inside two workers' tests is neither's")
+	require.Equal(t, "seq", testAt(windows, 0, 0, ts(28)), "a call from no worker is a run of one worker's test's")
+	require.Equal(t, "", testAt(windows, 0, 0, ts(20)), "a call from no worker is no worker's test's")
+	require.Equal(t, "a", testAt(windows, 0, 1, ts(20)))
+	require.Equal(t, "b", testAt(windows, 0, 2, ts(20)))
+	require.EqualValues(t, 2, capturedOf(&models.Mock{Name: "m", SourcePID: 8, Instance: 2}).instance,
+		"a recorded mock is correlated by the instance it carries")
+}
+
 func names(entries []models.MockEntry) []string {
 	out := make([]string, 0, len(entries))
 	for _, e := range entries {

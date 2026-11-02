@@ -152,6 +152,12 @@ type Mock struct {
 	// yaml "-" here. Set it whole, never edit one in place: ShallowCopy shares
 	// it, as it shares Spec's pointers.
 	Origin *Origin `json:"origin,omitempty" yaml:"-" bson:"origin,omitempty"`
+	// Instance is, under the proven switch, the keploy instance (a test
+	// worker's) the process that made the call was in when it connected,
+	// as the kernel stamped its connection: record charges the call to
+	// that worker's test only (ScopeWindow.Instance). 0 for none. Like
+	// SourcePID it only travels, to keploy record, and is never stored.
+	Instance uint32 `json:"-" yaml:"-" bson:"-"`
 
 	// pooled is set when the replay mock manager takes the mock into a staging,
 	// or stores it in a pool that matchers read, and is never cleared. The
@@ -1212,6 +1218,8 @@ func (m *Mock) DeepCopy() *Mock {
 	// Where the call came from (proven switch): the copy's own, so a copy
 	// written later (the async gob writer's) holds what the mock held.
 	c.Origin = m.Origin.clone()
+	// And the test worker it came from, which record charges it by.
+	c.Instance = m.Instance
 
 	// Deep copy the Noise slice so mutations to one copy don't affect the other.
 	if len(m.Noise) > 0 {

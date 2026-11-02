@@ -525,3 +525,50 @@ func TestAFailedNameReadIsTriedAgain(t *testing.T) {
 		t.Fatalf("the connection is named %+v, %v once its process can be read", n, ok)
 	}
 }
+
+// Each mock carries the keploy instance (a test worker's) its own
+// connection was stamped with, the connection's process aside: a mock that
+// names one already keeps it, a connection noted again with another
+// instance is the later connection's, and Stamp gives it under the proven
+// switch only, by the connection's metadata ID too.
+func TestAMockCarriesItsConnectionsInstance(t *testing.T) {
+	c := newCommander()
+	c.comm[42], c.comm[43] = "w1", "w2"
+	r := New(c, 0)
+	r.NoteOriginIn("1", 42, 3)
+	r.NoteOriginIn("2", 43, 5)
+	r.NoteOrigin("3", 42)
+	for conn, want := range map[string]uint32{"1": 3, "2": 5, "3": 0, "unknown": 0} {
+		m := &models.Mock{ConnectionID: conn}
+		r.StampInstance(m)
+		if m.Instance != want {
+			t.Fatalf("connection %s's mock got instance %d; want %d", conn, m.Instance, want)
+		}
+	}
+	kept := &models.Mock{ConnectionID: "2", Instance: 7}
+	r.StampInstance(kept)
+	if kept.Instance != 7 {
+		t.Fatalf("a mock that names its instance got %d", kept.Instance)
+	}
+	r.NoteOriginIn("1", 42, 4)
+	again := &models.Mock{ConnectionID: "1"}
+	r.StampInstance(again)
+	if again.Instance != 4 {
+		t.Fatalf("a connection ID noted again with another instance stamps %d; want the later 4", again.Instance)
+	}
+	t.Setenv(provenswitch.Env, "")
+	off := &models.Mock{ConnectionID: "2"}
+	r.Stamp(off)
+	if off.Instance != 0 {
+		t.Fatalf("without the switch Stamp gave the mock instance %d", off.Instance)
+	}
+	t.Setenv(provenswitch.Env, "1")
+	on := &models.Mock{Spec: models.MockSpec{Metadata: map[string]string{"connID": "2"}}}
+	r.Stamp(on)
+	if on.Instance != 5 {
+		t.Fatalf("under the switch Stamp gave the mock instance %d; want 5", on.Instance)
+	}
+	if c := on.DeepCopy(); c.Instance != 5 {
+		t.Fatalf("a copy of the mock carries instance %d; want 5", c.Instance)
+	}
+}
