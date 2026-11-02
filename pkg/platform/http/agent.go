@@ -2357,7 +2357,7 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 			// agent, once the engine has removed the agent's container. The engine keeps it while a
 			// container still mounts it: an agent the stop could not reach,
 			// or an application container run without --rm.
-			rmCtx, cancelRm := withRunnableBound(context.Background(), daemonAnswerStall, errDaemonSilent)
+			rmCtx, cancelRm := daemonAsk()
 			removal.Wait(rmCtx, a.logger)
 			kdocker.RemoveRunVolumes(rmCtx, a.logger, a.dockerClient, opts.KeployContainer)
 			cancelRm()
@@ -3963,11 +3963,12 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 // cmd.Process, not its raw pid, which cmd.Wait may have reaped already. The
 // client was waiting for the container's removal (--rm), so the engine is
 // asked first to say when it is removed (removal), within keploy's bound on
-// an answer from its daemon: a daemon that does not answer does not hold the
-// stop.
+// an answer from its daemon (daemonAsk): a daemon that does not take that
+// question does not hold the stop, nor one that does not answer the stop's
+// signals (engineCLI.ask).
 func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name string, removal *kdocker.RemovalWatch) func() error {
 	return func() error {
-		ask, release := withRunnableBound(context.Background(), daemonAnswerStall, errDaemonSilent)
+		ask, release := daemonAsk()
 		removal.Watch(ask)
 		release()
 		stopAgentContainerFor(logger, run, name)
@@ -3985,7 +3986,8 @@ func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name st
 // sent SIGTERM and waited for while its teardown makes progress
 // (stopAgentContainer), answered or not -- the agent attaches its TLS uprobes
 // before it answers (agentRun). The signal is sent synchronously, as `stop`
-// always was, so it has gone out before keploy can exit. An agent that never
+// always was, so it has gone out before keploy can exit -- unless the daemon
+// did not answer it within keploy's bound (engineCLI.ask). An agent that never
 // answered is sent SIGTERM again until it reports its teardown
 // (resendSIGTERM).
 func stopAgentContainerFor(logger *zap.Logger, run *agentRun, name string) {
@@ -4063,6 +4065,31 @@ func (e *engineCLI) combined(ctx context.Context, args ...string) ([]byte, error
 	return e.run(ctx, (*exec.Cmd).CombinedOutput, args...)
 }
 
+// daemonAsk is the context of one question of a stop to the container
+// engine's daemon -- the word on a container's removal, or a signal to it --
+// and the func that releases it: it ends once keploy has had
+// daemonAnswerStall of its own runnable time (withRunnableBound), so a
+// daemon that does not answer does not hold the stop. A variable for tests.
+var daemonAsk = func() (context.Context, func()) {
+	return withRunnableBound(context.Background(), daemonAnswerStall, errDaemonSilent)
+}
+
+// ask runs args, a question of a stop to the engine's daemon (a `kill`),
+// within daemonAsk's bound, and returns their output, stderr included. A
+// question the bound ended is said at WARN: what it asked may not have been
+// done, and the agent's container may still run.
+func (e *engineCLI) ask(args ...string) ([]byte, error) {
+	ctx, release := daemonAsk()
+	defer release()
+	out, err := e.combined(ctx, args...)
+	if err != nil && ctx.Err() != nil {
+		err = fmt.Errorf("%w: %v", context.Cause(ctx), err)
+		e.logger.Warn("The container engine's daemon did not answer keploy's `"+strings.Join(args, " ")+"` within keploy's bound: keploy goes on without its answer, and the keploy agent's container may still run",
+			zap.Duration("bound", daemonAnswerStall), zap.Error(err))
+	}
+	return out, err
+}
+
 // stdout runs args and returns their stdout alone.
 func (e *engineCLI) stdout(ctx context.Context, args ...string) ([]byte, error) {
 	return e.run(ctx, (*exec.Cmd).Output, args...)
@@ -4076,7 +4103,8 @@ var dockerStopPoll = time.Second
 // stopAgentContainer stops an agent's container, and returns once it has
 // exited, or once it killed it at once at the user's Ctrl+C (killedAtOnce).
 // It sends the agent SIGTERM
-// (`kill --signal SIGTERM`, synchronously) and waits for the container to stop
+// (`kill --signal SIGTERM`, synchronously; each `kill` within keploy's bound
+// on the daemon's answer, engineCLI.ask) and waits for the container to stop
 // (`wait`) while the agent's teardown makes progress, which it reports in its
 // container (readContainerProgress). It kills it only once it has stopped
 // making any, or has detached everything and not exited -- with the
@@ -4092,7 +4120,7 @@ var dockerStopPoll = time.Second
 func stopAgentContainer(logger *zap.Logger, name string, unanswered bool, moved *utils.TeardownScope) (killedAtOnce bool) {
 	logger = logger.With(zap.String("container", name))
 	cli := newEngineCLI(logger)
-	if out, err := cli.combined(context.Background(), "kill", "--signal", "SIGTERM", name); err != nil {
+	if out, err := cli.ask("kill", "--signal", "SIGTERM", name); err != nil {
 		logger.Debug("Could not signal the agent container. It may have already stopped.",
 			zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
 		return
@@ -4115,7 +4143,7 @@ func awaitAgentContainer(logger *zap.Logger, cli *engineCLI, name string, unansw
 		if now {
 			args = []string{"kill", name}
 		}
-		out, err := cli.combined(context.Background(), args...)
+		out, err := cli.ask(args...)
 		if err != nil {
 			logger.Debug("Could not kill the agent container. It may have already stopped.",
 				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
@@ -4179,7 +4207,7 @@ func (a *AgentClient) EndComposeAgent(release bool) {
 	cli := newEngineCLI(logger)
 	if release {
 		logger.Warn("a drain of the keploy agent's streams was given up on a stall; telling the agent to stop waiting for it")
-		if out, err := cli.combined(context.Background(), "kill", "--signal", "SIGUSR2", name); err != nil {
+		if out, err := cli.ask("kill", "--signal", "SIGUSR2", name); err != nil {
 			logger.Debug("Could not signal the agent container. It may have already stopped.",
 				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
 		}
