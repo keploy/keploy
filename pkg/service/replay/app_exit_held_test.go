@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -25,7 +26,7 @@ func TestAnAppHaltedSetsReasonNamesTheExitAndTheTestItHeld(t *testing.T) {
 	exit := models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 3}
 
 	got := describeTestSetFailure(models.TestSetStatusAppHalted, results,
-		runShape{appExit: appExitWhy(exit, "get-price-r0b-1"), heldTest: "get-price-r0b-1"})
+		runShape{appExit: appExitWhy(exit, testHeld{name: "get-price-r0b-1"}), heldTest: "get-price-r0b-1"})
 	want := "application stopped during replay: it exited with code 3 before it answered test get-price-r0b-1 - check application logs"
 	if !strings.HasPrefix(got, want) {
 		t.Fatalf("reason %q; want it to begin %q", got, want)
@@ -34,12 +35,12 @@ func TestAnAppHaltedSetsReasonNamesTheExitAndTheTestItHeld(t *testing.T) {
 	// The app took the first test's request and exited before any result
 	// was written: it had started, so this is no startup failure.
 	got = describeTestSetFailure(models.TestSetStatusAppHalted, nil,
-		runShape{appExit: appExitWhy(exit, "get-price-r0a-1"), heldTest: "get-price-r0a-1"})
+		runShape{appExit: appExitWhy(exit, testHeld{name: "get-price-r0a-1"}), heldTest: "get-price-r0a-1"})
 	if !strings.Contains(got, "stopped during replay: it exited with code 3 before it answered test get-price-r0a-1") {
 		t.Fatalf("an app that exited holding the set's first test reads %q", got)
 	}
 
-	got = describeTestSetFailure(models.TestSetStatusAppHalted, nil, runShape{appExit: appExitWhy(exit, "")})
+	got = describeTestSetFailure(models.TestSetStatusAppHalted, nil, runShape{appExit: appExitWhy(exit, testHeld{})})
 	if !strings.HasPrefix(got, "application startup failed: it exited with code 3 - ") {
 		t.Fatalf("a startup failure reads %q; want its exit code", got)
 	}
@@ -49,16 +50,18 @@ func TestAppExitWhySaysOnlyWhatTheRunKnows(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		e    models.AppError
-		held string
+		held testHeld
 		want string
 	}{
-		{"keploy's own stop is no exit of the app's", models.AppError{AppErrorType: models.ErrCtxCanceled, ExitCode: -1}, "t-1", ""},
-		{"no app error", models.AppError{}, "t-1", ""},
-		{"a code above 0", models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 3}, "", "it exited with code 3"},
-		{"a clean exit", models.AppError{AppErrorType: models.ErrAppStopped}, "t-1", "it exited with code 0 before it answered test t-1"},
+		{"keploy's own stop is no exit of the app's", models.AppError{AppErrorType: models.ErrCtxCanceled, ExitCode: -1}, testHeld{name: "t-1"}, ""},
+		{"no app error", models.AppError{}, testHeld{name: "t-1"}, ""},
+		{"a code above 0", models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 3}, testHeld{}, "it exited with code 3"},
+		{"a clean exit", models.AppError{AppErrorType: models.ErrAppStopped}, testHeld{name: "t-1"}, "it exited with code 0 before it answered test t-1"},
 		// No code is known: none is made up.
-		{"an unknown code", models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: -1}, "t-1", "it exited before it answered test t-1"},
-		{"an internal error with no code", models.AppError{AppErrorType: models.ErrInternal}, "", "it exited"},
+		{"an unknown code", models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: -1}, testHeld{name: "t-1"}, "it exited before it answered test t-1"},
+		{"an internal error with no code", models.AppError{AppErrorType: models.ErrInternal}, testHeld{}, "it exited"},
+		// A streaming test's head came, its body still being read.
+		{"an answer begun", models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 3}, testHeld{name: "t-1", answering: true}, "it exited with code 3 while it was answering test t-1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := appExitWhy(tc.e, tc.held); got != tc.want {
@@ -137,37 +140,133 @@ func TestAnAppsExitMidTestNamesTheTestItHeld(t *testing.T) {
 	}
 }
 
-// An app's exit told while keploy readies a streaming test case on its agent
-// ends the set before that test's request is sent, as in the set's main loop,
-// with the proven switch off and on: the set is APP_HALTED, its reason names
-// the exit's code and no test as held, and the streaming test is not sent.
+// An app's exit while a set runs its streaming tests names, as the one the
+// app held, only a test whose answer it had not given whole, with the proven
+// switch off and on, and the set is APP_HALTED with the exit's code:
+//   - told as keploy readies test-3 on its agent, test-2 answered whole
+//     (read by its send, or as a stream read to its end): test-3 is not sent,
+//     and no test is named;
+//   - told while test-3's stream is read, its head come: "while it was
+//     answering test test-3";
+//   - told after test-3's stream broke part-way, as keploy readies test-4:
+//     test-3's answer was never whole, so it is named as above;
+//   - told while test-3's send waits for its head: "before it answered test
+//     test-3", and so for test-4's after test-3's stream broke.
+//
 // The streaming tests' loop looked for the exit only at its head, and sent
-// the test to an app keploy knew had exited.
+// the test to an app keploy knew had exited; and it took a stream's head for
+// its whole answer.
 func TestAnAppsExitWhileKeployReadiesAStreamingTestSendsItNot(t *testing.T) {
-	for _, on := range []bool{false, true} {
-		t.Run(fmt.Sprintf("switch on %v", on), func(t *testing.T) {
-			provenOn(t, on)
-			h := newPartialRunHarness(t, 3, 0)
-			h.streaming("test-3")
-			h.instr.stopErr = models.ErrUnExpected
-			h.instr.stopAppReadying = "test-3"
-			app := &heldRequests{requests: map[string]int{}}
-			h.replayer.hookImpl = prHooks{onRequest: app.onRequest}
-
-			if status := h.run(t); status != models.TestSetStatusAppHalted {
-				t.Fatalf("status %s, want APP_HALTED", status)
-			}
-			reason := h.report.report.FailureReason
-			if !strings.Contains(reason, "it exited with code 1") || strings.Contains(reason, "before it answered test") {
-				t.Fatalf("reason %q; want it to name the exit's code and no test held", reason)
-			}
-			for name, want := range map[string]int{"test-1": 1, "test-2": 1, "test-3": 0} {
-				if n := app.count(name); n != want {
-					t.Fatalf("%s was sent %d times, want %d: the app exited as keploy readied test-3", name, n, want)
-				}
-			}
-		})
+	whole := func(_ context.Context, tc *models.TestCase, _ func()) *pkg.StreamingHTTPResponse {
+		return &pkg.StreamingHTTPResponse{StatusCode: tc.HTTPResp.StatusCode, Header: tc.HTTPResp.Header,
+			Reader: io.NopCloser(strings.NewReader(tc.HTTPResp.Body)), StreamConfig: pkg.DetectHTTPStreamConfig(tc, nil)}
 	}
+	exitMidBody := func(ctx context.Context, tc *models.TestCase, exit func()) *pkg.StreamingHTTPResponse {
+		return &pkg.StreamingHTTPResponse{StatusCode: tc.HTTPResp.StatusCode, Header: tc.HTTPResp.Header,
+			Reader: io.NopCloser(&exitingBody{ctx: ctx, exit: exit}), StreamConfig: pkg.DetectHTTPStreamConfig(tc, nil)}
+	}
+	for _, tc := range []struct {
+		name      string
+		n         int
+		streaming []string
+		// readying is the test whose readying on the agent the exit lands
+		// in; answers, the tests answered by a stream, given the exit.
+		readying string
+		answers  map[string]func(context.Context, *models.TestCase, func()) *pkg.StreamingHTTPResponse
+		// exitAt is the test whose send the exit lands in, before its head
+		// comes; broken, the tests whose stream breaks part-way.
+		exitAt string
+		broken []string
+		// held is the phrase the reason names the held test in, "" for
+		// none; sent, how many times each test is sent.
+		held string
+		sent map[string]int
+	}{
+		{"not sent, test-2 answered by its send", 3, []string{"test-2", "test-3"}, "test-3", nil, "", nil,
+			"", map[string]int{"test-1": 1, "test-2": 1, "test-3": 0}},
+		{"not sent, test-2's stream read whole", 3, []string{"test-2", "test-3"}, "test-3",
+			map[string]func(context.Context, *models.TestCase, func()) *pkg.StreamingHTTPResponse{"test-2": whole}, "", nil,
+			"", map[string]int{"test-1": 1, "test-2": 1, "test-3": 0}},
+		{"its stream being read", 3, []string{"test-2", "test-3"}, "",
+			map[string]func(context.Context, *models.TestCase, func()) *pkg.StreamingHTTPResponse{"test-2": whole, "test-3": exitMidBody}, "", nil,
+			"while it was answering test test-3", map[string]int{"test-1": 1, "test-2": 1, "test-3": 1}},
+		{"its stream broken, then the exit", 4, []string{"test-3", "test-4"}, "test-4", nil, "", []string{"test-3"},
+			"while it was answering test test-3", map[string]int{"test-1": 1, "test-2": 1, "test-3": 1, "test-4": 0}},
+		{"its head not come", 3, []string{"test-2", "test-3"}, "", nil, "test-3", nil,
+			"before it answered test test-3", map[string]int{"test-1": 1, "test-2": 1, "test-3": 1}},
+		{"its head not come, the stream before it broken", 4, []string{"test-3", "test-4"}, "", nil, "test-4", []string{"test-3"},
+			"before it answered test test-4", map[string]int{"test-1": 1, "test-2": 1, "test-3": 1, "test-4": 1}},
+	} {
+		for _, on := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, switch on %v", tc.name, on), func(t *testing.T) {
+				provenOn(t, on)
+				h := newPartialRunHarness(t, tc.n, 0)
+				h.streaming(tc.streaming...)
+				h.instr.stopErr = models.ErrUnExpected
+				h.instr.stopAppReadying = tc.readying
+				exit := func() { close(h.instr.appStopped) }
+				app := &heldRequests{exitAt: tc.exitAt, exit: exit, requests: map[string]int{}}
+				hooks := prHooks{onRequest: app.onRequest, streamErr: map[string]error{}}
+				for _, name := range tc.broken {
+					hooks.streamErr[name] = io.ErrUnexpectedEOF
+				}
+				h.replayer.hookImpl = answerHooks{prHooks: hooks, answers: tc.answers, exit: exit}
+
+				if status := h.run(t); status != models.TestSetStatusAppHalted {
+					t.Fatalf("status %s, reason %q; want APP_HALTED", status, h.report.report.FailureReason)
+				}
+				reason := h.report.report.FailureReason
+				named := strings.Contains(reason, "answered test") || strings.Contains(reason, "answering test")
+				if !strings.Contains(reason, "it exited with code 1") || (tc.held == "") == named || (tc.held != "" && !strings.Contains(reason, tc.held)) {
+					t.Fatalf("reason %q; want it to name the exit's code and %q", reason, tc.held)
+				}
+				for name, want := range tc.sent {
+					if n := app.count(name); n != want {
+						t.Fatalf("%s was sent %d times, want %d", name, n, want)
+					}
+				}
+			})
+		}
+	}
+}
+
+// answerHooks answers the tests named in answers with the stream each
+// gives, under the send's context, and exit as the app's exit; the rest as
+// prHooks does. Every send is taken by prHooks.onRequest first.
+type answerHooks struct {
+	prHooks
+	answers map[string]func(context.Context, *models.TestCase, func()) *pkg.StreamingHTTPResponse
+	exit    func()
+}
+
+func (h answerHooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
+	answer := h.answers[tc.Name]
+	if answer == nil {
+		return h.prHooks.SimulateRequest(ctx, tc, testSetID)
+	}
+	if err := h.onRequest(ctx, tc); err != nil {
+		return nil, err
+	}
+	return answer(ctx, tc, h.exit), nil
+}
+
+// exitingBody is a stream whose app exits at its first read: the read waits
+// until keploy has ended the set's run (ctx), or a bound, so a replayer that
+// never learns of the exit fails the row rather than hanging it, and then
+// fails as a stream cut part-way does.
+type exitingBody struct {
+	ctx  context.Context
+	exit func()
+	once sync.Once
+}
+
+func (b *exitingBody) Read([]byte) (int, error) {
+	b.once.Do(b.exit)
+	select {
+	case <-b.ctx.Done():
+	case <-time.After(10 * time.Second):
+	}
+	return 0, io.ErrUnexpectedEOF
 }
 
 // toldExitInstr runs a compose app the way `docker compose up` does with its

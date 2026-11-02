@@ -14,44 +14,68 @@ import (
 )
 
 // unansweredTest is the test a set sent its application last that the
-// application has not answered yet: the test an exit of the application held,
-// which the set's report names (appExitWhy). A set sends its tests one at a
-// time, so a test sent replaces the one before it, answered or not.
+// application has not answered whole yet: the test an exit of the
+// application held, which the set's report names (appExitWhy). A set sends
+// its tests one at a time, so a test sent replaces the one before it,
+// answered or not.
 type unansweredTest struct {
 	mu   sync.Mutex
 	name string
+	// answering is whether name's answer has begun: a streaming test's
+	// head came, and its body is still being read.
+	answering bool
+}
+
+// testHeld is the test an exit of the application held ("" for none), and
+// whether its answer had begun (unansweredTest.answering).
+type testHeld struct {
+	name      string
+	answering bool
 }
 
 // sent marks the test named sent to the application.
 func (u *unansweredTest) sent(name string) {
 	u.mu.Lock()
-	u.name = name
+	u.name, u.answering = name, false
 	u.mu.Unlock()
 }
 
-// answered marks the test named answered: an exit of the application from
-// now on did not hold it.
-func (u *unansweredTest) answered(name string) {
+// began marks the answer of the test named begun: its head came, and its
+// body is still to be read whole (a streaming test's).
+func (u *unansweredTest) began(name string) {
 	u.mu.Lock()
 	if u.name == name {
-		u.name = ""
+		u.answering = true
 	}
 	u.mu.Unlock()
 }
 
-// held is the test sent and not answered, "" when there is none.
-func (u *unansweredTest) held() string {
+// answered marks the test named answered, its answer read whole: an exit of
+// the application from now on did not hold it.
+func (u *unansweredTest) answered(name string) {
+	u.mu.Lock()
+	if u.name == name {
+		u.name, u.answering = "", false
+	}
+	u.mu.Unlock()
+}
+
+// held is the test sent and not answered whole, its name "" when there is
+// none.
+func (u *unansweredTest) held() testHeld {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return u.name
+	return testHeld{name: u.name, answering: u.answering}
 }
 
 // appExitWhy says how the application's own exit stopped its set, for the
 // set's report: the exit code, where the run knows it, and the test the
-// application had not answered when keploy learned of the exit (held). It is
-// "" for an end of the run that is no exit of the application's own: keploy's
-// stop of it is a cancel (models.ErrCtxCanceled).
-func appExitWhy(e models.AppError, held string) string {
+// application had not answered whole when keploy learned of the exit (held):
+// "before it answered" it when no answer had begun, "while it was answering"
+// it when its head had come and its body was still being read. It is "" for
+// an end of the run that is no exit of the application's own: keploy's stop
+// of it is a cancel (models.ErrCtxCanceled).
+func appExitWhy(e models.AppError, held testHeld) string {
 	if e == (models.AppError{}) || e.AppErrorType == models.ErrCtxCanceled {
 		return ""
 	}
@@ -64,8 +88,12 @@ func appExitWhy(e models.AppError, held string) string {
 		// with no code above 0 is one whose code the run does not know.
 		why += " with code 0"
 	}
-	if held != "" {
-		why += " before it answered test " + held
+	switch {
+	case held.name == "":
+	case held.answering:
+		why += " while it was answering test " + held.name
+	default:
+		why += " before it answered test " + held.name
 	}
 	return why
 }
@@ -176,7 +204,7 @@ func (r *Replayer) reportHaltedBeforeTests(ctx context.Context, testRunID, testS
 	if selected := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID]); len(selected) != 0 {
 		total = len(selected)
 	}
-	shape.appExit = appExitWhy(exit, "")
+	shape.appExit = appExitWhy(exit, testHeld{})
 	reason := describeTestSetFailure(status, nil, shape)
 	r.logger.Error(why, zap.String("test-set", testSetID), zap.String("reason", reason))
 	appLogs := exit.AppLogs

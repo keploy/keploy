@@ -2132,11 +2132,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	testSetStatusByErrChan := models.TestSetStatusRunning
 	var testSetStatusByErrChanMu sync.RWMutex
 	var lastAppErr models.AppError
-	// unanswered is the test the app was sent last and has not answered;
-	// heldAtExit is that test when keploy first learned of an exit of the
-	// app's own (heldAtExitRead), which the report names (appExitWhy).
+	// unanswered is the test the app was sent last and has not answered
+	// whole; heldAtExit is that test when keploy first learned of an exit
+	// of the app's own (heldAtExitRead), which the report names
+	// (appExitWhy).
 	var unanswered unansweredTest
-	var heldAtExit string
+	var heldAtExit testHeld
 	var heldAtExitRead bool
 	setErrStatus := func(status models.TestSetStatus) {
 		testSetStatusByErrChanMu.Lock()
@@ -2163,7 +2164,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		defer testSetStatusByErrChanMu.RUnlock()
 		return lastAppErr
 	}
-	getHeldAtExit := func() string {
+	getHeldAtExit := func() testHeld {
 		testSetStatusByErrChanMu.RLock()
 		defer testSetStatusByErrChanMu.RUnlock()
 		return heldAtExit
@@ -4997,7 +4998,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 			if simErr == nil {
-				unanswered.answered(tc.Name)
+				// Its head came. A stream's body is read below, and the
+				// test is answered once it is read whole; any other answer
+				// came whole.
+				if _, streams := resp.(*pkg.StreamingHTTPResponse); streams {
+					unanswered.began(tc.Name)
+				} else {
+					unanswered.answered(tc.Name)
+				}
 			}
 
 			if simErr != nil {
@@ -5127,6 +5135,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 					if closeErr := streamResp.Reader.Close(); closeErr != nil {
 						r.logger.Debug("failed to close streaming response reader", zap.Error(closeErr))
+					}
+					if streamErr == nil {
+						// Read whole: the app answered it. A stream cut
+						// short, stalled or held open was not answered
+						// whole, and an exit of the app's still names it.
+						unanswered.answered(tc.Name)
 					}
 					if errors.Is(streamErr, pkg.ErrStreamHeldOpen) {
 						// The app kept the stream open on keepalives, past
@@ -6658,7 +6672,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Ignored:       ignored,
 		Tests:         testCaseResults,
 		TimeTaken:     timeTaken.String(),
-		FailureReason: withUnchecked(uncheckedFirst, withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy, unclaimedWhy: unclaimedReason, staleWhy: staleWhy, appExit: appExitWhy(appFailure, getHeldAtExit()), heldTest: getHeldAtExit()}))),
+		FailureReason: withUnchecked(uncheckedFirst, withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy, unclaimedWhy: unclaimedReason, staleWhy: staleWhy, appExit: appExitWhy(appFailure, getHeldAtExit()), heldTest: getHeldAtExit().name}))),
 		AppLogs:       appLogs,
 		HighRisk:      riskHigh,
 		MediumRisk:    riskMed,
