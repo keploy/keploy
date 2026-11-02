@@ -675,8 +675,18 @@ func readBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, eofRet
 }
 
 // ReadRequiredBytes reads exactly numBytes from reader, returning fewer only
-// with the error that stopped it. Empty io.EOF reads are retried (maxEmptyReads,
-// 100ms apart) before EOF is believed, and ctx is checked before every read.
+// with the error that stopped it. ctx is checked before every read.
+//
+// An io.EOF is believed at the read that returns it. Every reader these reads
+// are given returns it only at its end: a TCP connection, TLS over one, the
+// bufio, prefix and multi readers that put bytes read ahead in front of one,
+// a capture's fakeconn stream (its EOF is its producer closing the channel),
+// and a proxyless capture's conn (its EOF is its Close or a capture hole, and
+// a closed conn takes no more bytes). They used to read an EOF five times,
+// 100 ms apart, before believing it, so every connection that ended short of
+// numBytes waited 400 ms first: a port probe (one byte, then its close)
+// reached the ingress's HTTP/1 handler, and its dial of the app, 400 ms after
+// it had closed.
 //
 // It reads on the calling goroutine. It used to start a goroutine per Read
 // (with a deferred Recover that flushed Sentry) and wait for it over a
@@ -707,12 +717,10 @@ const readGrowStep = 64 << 10
 // was read (at most twice that, or readGrowStep), never by numBytes. On an
 // error it returns dst with whatever was read appended.
 func AppendRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, dst []byte, numBytes int) ([]byte, error) {
-	const maxEmptyReads = 5
 	if numBytes <= 0 {
 		return dst, nil
 	}
 	want := len(dst) + numBytes
-	emptyReads := 0
 	for len(dst) < want {
 		if err := ctx.Err(); err != nil {
 			return dst, err
@@ -723,23 +731,12 @@ func AppendRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Read
 			dst = grown
 		}
 		n, err := readContained(logger, reader, dst[len(dst):min(cap(dst), want)])
-		if n > 0 {
-			dst = dst[:len(dst)+n]
-			emptyReads = 0
-		}
-		if err == nil || (err == io.EOF && len(dst) == want) {
-			continue
-		}
-		if err != io.EOF {
+		dst = dst[:len(dst)+n]
+		if err != nil {
+			if err == io.EOF && len(dst) == want {
+				return dst, nil // the last bytes wanted came with the EOF
+			}
 			return dst, err
-		}
-		if emptyReads++; emptyReads >= maxEmptyReads {
-			return dst, err // several EOFs in a row: a true EOF
-		}
-		select {
-		case <-ctx.Done():
-			return dst, ctx.Err()
-		case <-time.After(100 * time.Millisecond):
 		}
 	}
 	return dst, nil

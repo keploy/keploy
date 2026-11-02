@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"syscall"
 	"testing"
-	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -50,9 +49,6 @@ func TestTheForwardersListenerIsPlainTCP(t *testing.T) {
 
 	holder := &fakePortHolder{held: true}
 	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
-	saved := ingressTargetWait
-	t.Cleanup(func() { ingressTargetWait = saved })
-	ingressTargetWait = func(context.Context, uint16, string, time.Duration) (bool, error) { return true, nil }
 	orig := portOf(t, freeAddr(t))
 	g := newGoTCPIngressHook(pm)
 	if err := g.StartIngress(context.Background(), orig, portOf(t, freeAddr(t))); err != nil {
@@ -100,13 +96,6 @@ func v6Listener(t *testing.T, addr string) net.Listener {
 // IPv4 (the hold takes none of its port's IPv6 calls, so an IPv6 listener
 // keeps them anyway), or without a hold, the forwarder starts.
 func TestAForwarderYieldsAPortAListenerHoldsOnIPv6(t *testing.T) {
-	saved := ingressTargetWait
-	t.Cleanup(func() { ingressTargetWait = saved })
-	waited := 0
-	ingressTargetWait = func(context.Context, uint16, string, time.Duration) (bool, error) {
-		waited++
-		return true, nil
-	}
 	start := func(t *testing.T, orig uint16, held, ipv6 bool) (*fakePortHolder, *observer.ObservedLogs, error) {
 		t.Helper()
 		holder := &fakePortHolder{held: held}
@@ -130,7 +119,6 @@ func TestAForwarderYieldsAPortAListenerHoldsOnIPv6(t *testing.T) {
 			other := v6Listener(t, x)
 			orig := portOf(t, other.Addr().String())
 
-			waited = 0
 			holder, logs, err := start(t, orig, true, true)
 			if !errors.Is(err, errIngressPortYielded) || !errors.Is(err, syscall.EADDRINUSE) {
 				t.Fatalf("an IPv6 app's forwarder, with %s on its port: %v, want the port yielded (EADDRINUSE)", other.Addr(), err)
@@ -138,8 +126,8 @@ func TestAForwarderYieldsAPortAListenerHoldsOnIPv6(t *testing.T) {
 			holder.mu.Lock()
 			yielded, registered := holder.yielded, len(holder.registered)
 			holder.mu.Unlock()
-			if len(yielded) != 1 || yielded[0] != orig || registered != 0 || waited != 0 {
-				t.Fatalf("yielded %v, registered %d, waited %d; want [%d], no forwarder and no wait", yielded, registered, waited, orig)
+			if len(yielded) != 1 || yielded[0] != orig || registered != 0 {
+				t.Fatalf("yielded %v, registered %d; want [%d] and no forwarder", yielded, registered, orig)
 			}
 			warns := logs.FilterMessageSnippet("another listener, not keploy's, holds the application's port").All()
 			if len(warns) != 1 || warns[0].ContextMap()["port"] != orig || warns[0].ContextMap()["family"] != "IPv6" {
@@ -195,9 +183,6 @@ func TestAForwarderYieldsAPortAListenerHoldsOnIPv6(t *testing.T) {
 // IPv6 is checked: a hold must never take calls from a listener keploy does
 // not own.
 func TestTheIPv6CheckMirrorsWhatTheAppsBindsTake(t *testing.T) {
-	saved := ingressTargetWait
-	t.Cleanup(func() { ingressTargetWait = saved })
-	ingressTargetWait = func(context.Context, uint16, string, time.Duration) (bool, error) { return true, nil }
 	any6, loop6 := netip.IPv6Unspecified(), netip.IPv6Loopback()
 	for _, c := range []struct {
 		name, x string
@@ -278,12 +263,6 @@ func TestTheIPv6ProbeFindsAListenerNotAConnection(t *testing.T) {
 // a forwarder that fails for another reason (the agent stopping) yields
 // nothing.
 func TestAForwarderThatFindsItsPortTakenYieldsTheHold(t *testing.T) {
-	saved := ingressTargetWait
-	t.Cleanup(func() { ingressTargetWait = saved })
-	ingressTargetWait = func(context.Context, uint16, string, time.Duration) (bool, error) {
-		t.Error("a forwarder whose port is taken waited for the app")
-		return true, nil
-	}
 	other, err := net.Listen("tcp4", "0.0.0.0:0")
 	if err != nil {
 		t.Fatal(err)
@@ -337,9 +316,6 @@ func TestAForwarderThatFindsItsPortTakenYieldsTheHold(t *testing.T) {
 // does, as on main, for a forwarder that cannot listen on a port nothing
 // holds for keploy.
 func TestAYieldedPortLogsOnlyItsWarn(t *testing.T) {
-	saved := ingressTargetWait
-	t.Cleanup(func() { ingressTargetWait = saved })
-	ingressTargetWait = func(context.Context, uint16, string, time.Duration) (bool, error) { return true, nil }
 	other, err := net.Listen("tcp4", "0.0.0.0:0")
 	if err != nil {
 		t.Fatal(err)
