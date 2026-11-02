@@ -554,6 +554,27 @@ func TestRecordV2_FaultNotedOnceAsRecorded(t *testing.T) {
 	}
 }
 
+// A call answered whole is recorded with no fault, and records no note of
+// faults: the note is for a recording that holds one.
+func TestRecordV2_NoNoteForACallAnsweredWhole(t *testing.T) {
+	const answer = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n01234"
+	faultNoted = sync.Once{}
+	c := newRelayedConn(t)
+	c.start(t)
+	write(t, c.app, c.src, faultReq)
+	relayed(t, c.dest, faultReq)
+	write(t, c.dest, c.dst, answer)
+	relayed(t, c.app, answer)
+	_ = c.dest.Close()
+	mocks, err := c.finish(t)
+	if m := oneMock(t, mocks, err); m.Spec.Fault != nil {
+		t.Fatalf("recorded fault %v on a call answered whole, want none", m.Spec.Fault)
+	}
+	if n := c.logs.FilterMessageSnippet("keploy now records a call that ended in a fault").Len(); n != 0 {
+		t.Errorf("the note was logged %d times for a call answered whole, want never", n)
+	}
+}
+
 // A passthrough call records nothing, faulted or not.
 func TestRecordV2_FaultOnAPassthroughCallIsNotRecorded(t *testing.T) {
 	const head = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n"
