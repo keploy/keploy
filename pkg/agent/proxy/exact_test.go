@@ -4680,6 +4680,87 @@ func TestAWorkerRecordingAnswersOnceInTheWindowsAndAgainOutsideThem(t *testing.T
 	}
 }
 
+// A test process that claims its key again (a retried package,
+// --rerun-fails: RestartExactKey) starts the key's worker: recordings afresh
+// in the test windows too, as the rest of its pool slice: one a window of
+// the first run answered answers one window of the retried run again. The
+// other key's window spend is its own. Without it, a retried package's test
+// that needed a worker: recording missed because the first run had used it.
+func TestAKeyStartedAfreshAnswersItsWorkerRecordingsInTheWindowsAgain(t *testing.T) {
+	for _, door := range []struct {
+		name string
+		ask  func(*testing.T, *MockManager, string) string
+	}{{"delete door", pollFirst}, {"keeping door", markFirst}} {
+		t.Run(door.name, func(t *testing.T) {
+			mm := stagedManager(t, nil, []*models.Mock{httpCall("w-0", time.Second, "/w"), httpCall("v-0", 2*time.Second, "/v")})
+			window := func(key, test, name string) string {
+				t.Helper()
+				names := []string{name}
+				mm.ServeExactWorker(names)
+				mm.ServeExactPool(key, names)
+				mm.ServeExactWorker(names)
+				mm.ServeExactTest(test, nil)
+				return door.ask(t, mm, name)
+			}
+			for _, c := range []struct{ key, test, name, want, why string }{
+				{"k1", "TestA", "w-0", "w-0", "k1's first window"},
+				{"k2", "TestB", "v-0", "v-0", "k2's first window"},
+				{"k1", "TestC", "w-0", "a miss", "a second window of k1's run: a worker: recording answers once in the windows"},
+			} {
+				if got := window(c.key, c.test, c.name); got != c.want {
+					t.Fatalf("%s was answered %s; want %s", c.why, got, c.want)
+				}
+			}
+			mm.RestartExactKey("k1", []string{"w-0"})
+			if got := window("k1", "TestA", "w-0"); got != "w-0" {
+				t.Fatalf("the retried run of k1 was answered %s in TestA's window; want w-0: a key started afresh answers its worker: recordings in the windows again", got)
+			}
+			if got := window("k2", "TestB", "v-0"); got != "a miss" {
+				t.Fatalf("k2 was answered %s after k1 started afresh; want a miss: k2's window spend is its own", got)
+			}
+		})
+	}
+}
+
+// worker: changes nothing for a protocol-phase recording it lists (a
+// connection's handshake or session setting the app made between tests):
+// in a test's window and between tests, through a delete door and one that
+// keeps it, it answers call for call as when worker: does not list it. The
+// worker rules (at most once in the windows, walked between tests) are a
+// data-plane recording's; a protocol-phase one belongs to its connection.
+func TestAProtocolPhaseRecordingWorkerListsKeepsTheProtocolPhaseRule(t *testing.T) {
+	for _, door := range []struct {
+		name string
+		ask  func(*testing.T, *MockManager, string) string
+	}{{"delete door", pollFirst}, {"keeping door", markFirst}} {
+		for _, place := range []string{"in a window", "between tests"} {
+			t.Run(door.name+"/"+place, func(t *testing.T) {
+				answers := func(listed bool) []string {
+					mm := stagedManager(t, nil, []*models.Mock{configMock("w-cfg", time.Second)})
+					var worker []string
+					if listed {
+						worker = []string{"w-cfg"}
+					}
+					mm.ServeExactWorker(worker)
+					mm.ServeExactPool("k", []string{"w-cfg"})
+					if place == "in a window" {
+						mm.ServeExactWorker(worker)
+						mm.ServeExactTest("T1", nil)
+					}
+					var got []string
+					for i := 0; i < 3; i++ {
+						got = append(got, door.ask(t, mm, "w-"))
+					}
+					return got
+				}
+				if want, got := answers(false), answers(true); !reflect.DeepEqual(got, want) {
+					t.Errorf("three calls %s were answered %v with w-cfg in worker:, %v without it; want the same: worker: changes nothing for a protocol-phase recording", place, got, want)
+				}
+			})
+		}
+	}
+}
+
 // Outside every window the worker scope's recordings of one request are
 // walked by placement, then the last answers again: a gap consume orders the
 // next gap read (gapOrder), never hides one. So a parser that takes the
