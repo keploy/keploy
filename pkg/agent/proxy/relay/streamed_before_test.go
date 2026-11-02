@@ -301,3 +301,137 @@ func TestRelay_StreamedBeforeIsNotHeldByAChunkInHandCapturedAfter(t *testing.T) 
 		t.Fatalf("StreamedBefore(client, %d) = %d, %v with only a chunk captured after it in hand: want 3, true", resp.ConnSeq, end, ok)
 	}
 }
+
+// answeredThenCut has the client's request answered and then the client's
+// next chunk captured, with every server chunk before it, the 4 bytes of the
+// answer, on the stream. It returns the answer and that next chunk.
+func answeredThenCut(t *testing.T, h *relayHarness) (resp, cut fakeconn.Chunk) {
+	t.Helper()
+	h.writeClient([]byte("req"))
+	h.readDest(3)
+	h.writeDest([]byte("resp"))
+	h.readClient(4)
+	readChunk(t, h.r.ClientStream())
+	resp = readChunk(t, h.r.DestStream())
+	h.writeClient([]byte("rst"))
+	h.readDest(3)
+	cut = readChunk(t, h.r.ClientStream())
+	if end := streamedThrough(t, h.r, fakeconn.FromDest, cut.ConnSeq); end != 4 {
+		t.Fatalf("every server chunk before the client's is %d bytes into the stream, want 4", end)
+	}
+	return resp, cut
+}
+
+// StreamedBefore takes the channel it gives before it looks: a server chunk in
+// the forwarder's hand, numbered before the cut and let go of (refused) right
+// after StreamedBefore looked at the hand, tells the channel it gives.
+func TestRelay_StreamedBeforeIsToldOfAChangeRightAfterItsLook(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, Config{})
+	defer h.shutdown()
+	resp, cut := answeredThenCut(t, h)
+
+	tt := h.r.teeD2C
+	tt.noteReading()
+	tt.noteNumbered(resp.ConnSeq)
+	tt.progress.afterLook = func(p place) {
+		if p == placeInHand {
+			tt.noteReleased()
+		}
+	}
+	end, ok, changed := h.r.StreamedBefore(fakeconn.FromDest, cut.ConnSeq)
+	tt.progress.afterLook = nil
+	if ok || changed == nil {
+		t.Fatalf("StreamedBefore(dest, %d) = %d, %v with a chunk numbered %d in the forwarder's hand as it looked: want it to wait", cut.ConnSeq, end, ok, resp.ConnSeq)
+	}
+	select {
+	case <-changed:
+	default:
+		t.Fatal("the chunk in hand was let go of right after StreamedBefore looked at it, and the channel it gave was not told")
+	}
+	if end, ok, _ := h.r.StreamedBefore(fakeconn.FromDest, cut.ConnSeq); !ok || end != 4 {
+		t.Fatalf("StreamedBefore(dest, %d) = %d, %v once the chunk in hand is let go of: want 4, true", cut.ConnSeq, end, ok)
+	}
+}
+
+// StreamedBefore takes how far the stream is after it has looked: a server
+// chunk numbered before the cut, queued from the forwarder's hand while it
+// looks, is inside the end it gives.
+func TestRelay_StreamedBeforeEndsPastAChunkQueuedWhileItLooks(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, Config{})
+	defer h.shutdown()
+	resp, cut := answeredThenCut(t, h)
+
+	tt := h.r.teeD2C
+	more := fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: resp.ConnSeq, Bytes: []byte("more")}
+	tt.noteReading()
+	tt.noteNumbered(more.ConnSeq)
+	pushed := true
+	tt.progress.afterLook = func(p place) {
+		if p == placeNotNumbered {
+			pushed = tt.push(more)
+			tt.noteReleased()
+		}
+	}
+	end, ok, _ := h.r.StreamedBefore(fakeconn.FromDest, cut.ConnSeq)
+	tt.progress.afterLook = nil
+	if !pushed {
+		t.Fatal("the tee refused the chunk: the row proves nothing")
+	}
+	if !ok || end != 8 {
+		t.Fatalf("StreamedBefore(dest, %d) = %d, %v with a chunk numbered %d queued while it looked: want 8, true", cut.ConnSeq, end, ok, more.ConnSeq)
+	}
+}
+
+// StreamedBefore looks at each place in the order chunks move through them: a
+// server chunk numbered before the cut, moved on from the forwarder's hand to
+// set aside for the client's answer right after the first look, is found set
+// aside.
+func TestRelay_StreamedBeforeFindsAChunkThatMovesOnBetweenItsLooks(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, Config{})
+	defer h.shutdown()
+	resp, cut := answeredThenCut(t, h)
+
+	tt := h.r.teeD2C
+	aside := fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: resp.ConnSeq, Bytes: []byte("zz")}
+	tt.noteReading()
+	tt.noteNumbered(aside.ConnSeq)
+	moved := false
+	tt.progress.afterLook = func(place) {
+		if !moved {
+			moved = true
+			tt.await(aside)
+			tt.noteReleased()
+		}
+	}
+	end, ok, changed := h.r.StreamedBefore(fakeconn.FromDest, cut.ConnSeq)
+	tt.progress.afterLook = nil
+	if ok || changed == nil {
+		t.Fatalf("StreamedBefore(dest, %d) = %d, %v with a chunk numbered %d moved on from the hand to set aside as it looked: want it to wait", cut.ConnSeq, end, ok, aside.ConnSeq)
+	}
+	tt.doneAwaiting() // refused: it never comes on the stream
+	if end, ok, _ := h.r.StreamedBefore(fakeconn.FromDest, cut.ConnSeq); !ok || end != 4 {
+		t.Fatalf("StreamedBefore(dest, %d) = %d, %v once the chunk set aside is let go of: want 4, true", cut.ConnSeq, end, ok)
+	}
+}
+
+// A forwarder that numbers the chunk in its hand tells a reader waiting on it
+// while it was not numbered: numbered after the number asked of, it holds
+// nothing back.
+func TestTee_ToldWhenTheChunkInHandIsNumbered(t *testing.T) {
+	t.Parallel()
+	tt := newTee(fakeconn.FromDest, 1<<20, 4, time.Second, nil, zap.NewNop())
+	tt.noteReading()
+	changed := tt.progress.changed.wait()
+	tt.noteNumbered(9)
+	select {
+	case <-changed:
+	default:
+		t.Fatal("the chunk in hand was numbered: a reader waiting on it while it was not is not told")
+	}
+	if tt.heldBefore(9) {
+		t.Fatal("the chunk in hand is numbered 9: nothing held is before 9")
+	}
+}

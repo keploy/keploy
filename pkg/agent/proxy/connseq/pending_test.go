@@ -155,3 +155,35 @@ func (c readSignalConn) Read(p []byte) (int, error) {
 	c.reads <- struct{}{}
 	return c.Conn.Read(p)
 }
+
+// OnRead's func is told once PendingBefore no longer holds the cut that a Read
+// on the conn beneath passes: a reader it wakes asks again at once. Told
+// before, the reader would find the cut still pending and wait for a wake that
+// does not come.
+func TestOnReadIsToldOnceTheCutIsNoLongerPending(t *testing.T) {
+	t.Parallel()
+	proxyEnd, dest := net.Pipe()
+	t.Cleanup(func() { _ = proxyEnd.Close(); _ = dest.Close() })
+	u := NewUpstream(proxyEnd)
+	go func() { _, _ = dest.Write([]byte("abc")) }()
+	p := make([]byte, 16)
+	if n, err := u.Read(p); n != 3 || err != nil {
+		t.Fatalf("read %d, %v: want 3, nil", n, err)
+	}
+	u.FromDest()
+	seq := u.FromClient()
+	if !u.PendingBefore(fakeconn.FromDest, seq) {
+		t.Fatal("read to the cut with no Read in flight: a layer above may still hand on a chunk ending there")
+	}
+	pending := make(chan bool, 1)
+	u.OnRead(func() { pending <- u.PendingBefore(fakeconn.FromDest, seq) })
+	done := make(chan struct{})
+	go func() { defer close(done); _, _ = u.Read(p) }()
+	if <-pending {
+		t.Fatal("OnRead's func was told that a Read on the conn beneath began while PendingBefore still holds the cut")
+	}
+	if _, err := dest.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+}

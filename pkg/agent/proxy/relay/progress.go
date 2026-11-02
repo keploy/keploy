@@ -79,6 +79,10 @@ type teeProgress struct {
 	// changed is told whenever what Relay.StreamedBefore says of this
 	// direction may change though no chunk comes on its stream.
 	changed waker
+	// afterLook, when set, runs in Relay.StreamedBefore after it looks at
+	// each place a chunk of this direction is in before its stream. Tests
+	// set it to move a chunk on between two looks.
+	afterLook func(place)
 
 	// delivered is the chunks the drain took off the queue that the parser
 	// has not consumed whole, oldest first, by where each ends in the stream.
@@ -117,8 +121,13 @@ func (t *tee) noteReading() {
 	t.progress.held.Store(heldUnstamped)
 }
 
-// noteNumbered says the chunk the forwarder holds is numbered seq.
-func (t *tee) noteNumbered(seq uint32) { t.progress.heldSeq.Store(uint64(seq)) }
+// noteNumbered says the chunk the forwarder holds is numbered seq. A reader
+// that waits on it while it was not numbered is told (changed): numbered after
+// the number it asked of, it holds nothing back.
+func (t *tee) noteNumbered(seq uint32) {
+	t.progress.heldSeq.Store(uint64(seq))
+	t.progress.changed.wake()
+}
 
 // noteReleased says the forwarder holds no chunk: it queued, refused,
 // stashed or set aside (tee.await) the one it read. One it refused or stashed
@@ -199,10 +208,30 @@ func (r *Relay) StreamedBefore(dir fakeconn.Direction, seq uint32) (end int64, o
 		t = r.teeD2C
 	}
 	changed = t.progress.changed.wait()
-	if r.order.PendingBefore(dir, seq) || t.heldBefore(seq) || t.awaitingBefore(seq) {
+	if t.looked(placeNotNumbered, r.order.PendingBefore(dir, seq)) ||
+		t.looked(placeInHand, t.heldBefore(seq)) ||
+		t.looked(placeSetAside, t.awaitingBefore(seq)) {
 		return 0, false, changed
 	}
 	return t.acceptedBytes(), true, nil
+}
+
+// place is where a chunk is before its stream, in the order chunks move
+// through them (Relay.StreamedBefore).
+type place int
+
+const (
+	placeNotNumbered place = iota // connseq.Upstream.PendingBefore
+	placeInHand                   // the forwarder's (heldBefore)
+	placeSetAside                 // for the client's answer (awaitingBefore)
+)
+
+// looked returns found, what StreamedBefore saw at p, once afterLook has run.
+func (t *tee) looked(p place, found bool) bool {
+	if t.progress.afterLook != nil {
+		t.progress.afterLook(p)
+	}
+	return found
 }
 
 // noteLayerGone says nothing the layer the forwarder read through holds will

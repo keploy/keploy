@@ -229,8 +229,8 @@ func (u *Upstream) Read(p []byte) (int, error) {
 }
 
 // OnRead has f told each time a Read on the conn beneath begins: from then on
-// no chunk read so far is left to be numbered (PendingBefore). f must not block
-// and must not call into u.
+// no chunk read so far is left to be numbered (PendingBefore), which f, told
+// without u's lock held, may ask. f must not block.
 func (u *Upstream) OnRead(f func()) {
 	u.mu.Lock()
 	u.onRead = f
