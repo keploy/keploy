@@ -166,9 +166,13 @@ func TestAClaimRefusedIsAnsweredByTheNextRecording(t *testing.T) {
 			h.Set("Host", "api") // under the proven switch the authority is compared
 			h.Set("Content-Type", "application/json")
 			live := &req{method: "POST", url: &url.URL{Path: "/q"}, header: h, body: []byte(`{"a":1}`), raw: []byte("POST /q HTTP/1.1\r\nHost: api\r\n\r\n{\"a\":1}")}
-			ok, stub, _, err := newHTTP().match(context.Background(), live, db, nil, nil, nil, true, false, false, false, true)
+			ok, stub, diag, err := newHTTP().match(context.Background(), live, db, nil, nil, nil, true, false, false, false, true)
 			if err != nil || !ok || stub == nil || stub.Name != "second" {
 				t.Fatalf("match: ok %v, served %v, err %v; want the second recording", ok, stub, err)
+			}
+			// An answer carries no miss, whatever was refused before it.
+			if diag != nil {
+				t.Fatalf("the answer carries a miss: %+v", diag)
 			}
 		})
 	}
@@ -304,8 +308,10 @@ func (d *refusesNamed) UpdateUnFilteredMock(old, nw *models.Mock) bool {
 // variables do not hold, is left to an exact recording of the call alone. A
 // claim of that recording the store refuses leaves it out of the call's
 // later passes: the next copy answers the call, and with none the call
-// misses after the one refusal. Each waits for the match to return; a hang
-// ends in go test's own -timeout, which names the row.
+// misses after the one refusal, and the miss names the exact recording the
+// store refused, not the variable that did not hold: the exact recording fit
+// the call, and would have answered it. Each waits for the match to return;
+// a hang ends in go test's own -timeout, which names the row.
 func TestAnExactRecordingRefusedAfterAVariableDidNotHoldIsLeftOut(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, tc := range []struct {
@@ -334,7 +340,9 @@ func TestAnExactRecordingRefusedAfterAVariableDidNotHoldIsLeftOut(t *testing.T) 
 				t.Fatalf("the store refused %d claims of exact-1; want the one", db.claims)
 			}
 			if tc.want == "" {
-				wantProblem(t, ok, diag, "this call sent")
+				if ok || diag == nil || diag.refused == nil || diag.refused.Name != "exact-1" || diag.phase != models.MatchPhaseExhausted || diag.variable != nil {
+					t.Fatalf("ok %v, diag %+v; want a miss naming exact-1 as refused", ok, diag)
+				}
 				return
 			}
 			if !ok || stub.Name != tc.want {
@@ -620,6 +628,67 @@ func TestARefusedCursorPickIsLeftOutNotTheFirstFit(t *testing.T) {
 			}
 			if err != nil || !ok || stub == nil || stub.Name != "first" {
 				t.Fatalf("match: ok %v, served %v, err %v; want the first recording", ok, stub, err)
+			}
+		})
+	}
+}
+
+// A miss after a refusal is the refusal's, whichever pass it ends in: the
+// store refuses the call's one fit (POST /q) beside a recording of another
+// call (GET /other), as every real store holds more than one, and the miss
+// names the refused recording and the refusal. Before, the passes after the
+// refusal compared the call with GET /other alone: with the switch off the
+// report named the refused recording as the closest with "no field-level
+// differences" and told the reader to record again; with it on it named GET
+// /other, a call this one is not. With the switch off and on.
+func TestAMissAfterARefusalBesideAnotherRecordingNamesTheRefusal(t *testing.T) {
+	for _, proven := range []bool{false, true} {
+		name := "switch-off"
+		if proven {
+			name = "switch-on"
+		}
+		t.Run(name, func(t *testing.T) {
+			if proven {
+				t.Setenv("KEPLOY_PROVEN", "1")
+			} else {
+				t.Setenv("KEPLOY_PROVEN", "")
+			}
+			mk := func(n, method, u, body string) *models.Mock {
+				return &models.Mock{
+					Name: n,
+					Kind: models.Kind(models.HTTP),
+					Spec: models.MockSpec{
+						HTTPReq: &models.HTTPReq{
+							Method: models.Method(method), URL: u, ProtoMajor: 1, ProtoMinor: 1,
+							Header: map[string]string{"Content-Type": "application/json", "Host": "api"},
+							Body:   body,
+						},
+						HTTPResp: &models.HTTPResp{StatusCode: 200, Body: "ok"},
+					},
+					TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession},
+				}
+			}
+			refused := mk("refused", "POST", "http://api/q", `{"a":1}`)
+			other := mk("other", "GET", "http://api/other", "")
+			db := &refusesOne{mockMemDb: &mockMemDb{mocks: []*models.Mock{refused, other}}, refused: refused}
+			h := http.Header{}
+			h.Set("Host", "api")
+			h.Set("Content-Type", "application/json")
+			live := &req{method: "POST", url: &url.URL{Path: "/q"}, header: h, body: []byte(`{"a":1}`), raw: []byte("POST /q HTTP/1.1\r\nHost: api\r\n\r\n{\"a\":1}")}
+			hp := newHTTP()
+			ok, stub, diag, err := hp.match(context.Background(), live, db, nil, nil, nil, true, false, false, true, true)
+			if err != nil || ok || stub != nil {
+				t.Fatalf("match: ok %v, served %v, err %v; want a miss", ok, stub != nil, err)
+			}
+			if got := mockNamesOf(db.claimed); strings.Join(got, " ") != "refused" {
+				t.Fatalf("claims %v; want the one claim of the refused recording", got)
+			}
+			if diag == nil || diag.refused != refused || diag.phase != models.MatchPhaseExhausted || diag.candidates != 1 {
+				t.Fatalf("diag %+v; want the refused recording, phase %s, 1 candidate", diag, models.MatchPhaseExhausted)
+			}
+			r := hp.buildHTTPMismatchReport(&http.Request{Method: "POST", URL: &url.URL{Path: "/q"}, Host: "api", Header: h}, []byte(`{"a":1}`), db, nil, nil, nil, diag)
+			if r.MatchPhase != models.MatchPhaseExhausted || r.ClosestMock != "refused" || !strings.Contains(r.Diff, "refused to hand it over") || !strings.Contains(r.NextSteps, "another call took it first") {
+				t.Fatalf("report phase %q, closest %q, diff %q, next %q; want the refusal named", r.MatchPhase, r.ClosestMock, r.Diff, r.NextSteps)
 			}
 		})
 	}

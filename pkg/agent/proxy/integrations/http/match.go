@@ -98,10 +98,10 @@ type matchDiag struct {
 	// recording of the call the walk holds has answered (answeredSequence),
 	// and the report says so, whatever else the cascade found.
 	answered *answeredSequence
-	// refused is, when every recording the call had was one whose claim the
-	// store refused (matchCascade's refused), the last of them: the miss
-	// names it and the refusal, never "no mocks", for the store holds the
-	// recording.
+	// refused is, when a claim of the call's was refused before it missed
+	// (matchCascade's refused), the last recording refused: the miss names
+	// it and the refusal, never "no mocks" or a closest recording the call
+	// did not fit, for the store holds the recording.
 	refused *models.Mock
 }
 
@@ -176,7 +176,7 @@ func ownedBy(ctx context.Context) func(*models.Mock) bool {
 }
 
 // matchCascade is match without its proven-switch report additions.
-func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
+func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (_ bool, _ *models.Mock, diag *matchDiag, _ error) {
 
 	// Shared schema-noise engine for this match. HTTP is a full client of the
 	// same engine Pulsar (and any future parser) uses — httpNoiseAdapter owns
@@ -223,6 +223,17 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		refused[m] = struct{}{}
 		lastRefused = m
 	}
+	// A miss after a refusal is the refusal's, whichever pass it ends in:
+	// the call fit the refused recording, and the store would not hand it
+	// over. The passes after it compare the call with the recordings left,
+	// which it did not fit, and their miss would name one of them as the
+	// closest, or tell the reader to record again a recording that is there
+	// (refusedMissReport).
+	defer func() {
+		if diag != nil && lastRefused != nil {
+			diag = &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(refused), refused: lastRefused}
+		}
+	}()
 	for {
 		if ctx.Err() != nil {
 			return false, nil, nil, ctx.Err()
@@ -316,11 +327,6 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		}
 
 		if len(unfilteredMocks) == 0 {
-			if lastRefused != nil {
-				// The store holds the call's recordings and refused each
-				// claim: the miss says so (refusedMissReport).
-				return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(refused), refused: lastRefused}, nil
-			}
 			return false, nil, &matchDiag{phase: models.MatchPhaseNoMocks}, nil
 		}
 
@@ -2636,11 +2642,12 @@ func mockNamesOf(mocks []*models.Mock) []string {
 	return names
 }
 
-// refusedMissReport finishes the report of a call whose every recording was
-// one the store refused this call's claim of (matchDiag.refused): it names
-// the last of them as the closest, and says the store holds it and would not
-// hand it over, for "no mocks" would send the reader to record again a
-// recording that is there.
+// refusedMissReport finishes the report of a call that missed after the
+// store refused a claim of it (matchDiag.refused): it names the last
+// recording refused as the closest, and says the store holds it and would
+// not hand it over, for "no mocks", or a recording the call did not fit as
+// the closest, would send the reader to record again a recording that is
+// there.
 func refusedMissReport(b *mismatch.Builder, name string, refused int) *models.MockMismatchReport {
 	return b.WithPhase(models.MatchPhaseExhausted, refused).
 		WithClosest(name, nil).
