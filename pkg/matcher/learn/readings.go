@@ -141,8 +141,9 @@ func b64Read(s string, clock map[string]bool, everySplit bool) string {
 			return true
 		}
 		tryRun := func(run string) bool {
+			slash, glued := runSeparators(run)
 			whole := try(run)
-			if everySplit || strings.Contains(run, "/") {
+			if everySplit || slash {
 				for _, part := range strings.FieldsFunc(run, func(r rune) bool { return r == '/' || r == '.' }) {
 					try(part)
 				}
@@ -155,7 +156,7 @@ func b64Read(s string, clock map[string]bool, everySplit bool) string {
 			if whole {
 				return true
 			}
-			if !everySplit && strings.IndexByte(run, '-') < 0 && strings.IndexByte(run, '_') < 0 {
+			if !everySplit && !glued {
 				return false
 			}
 			// Its longest parts between groups of '-' and '_' that are text,
@@ -221,6 +222,24 @@ func b64Read(s string, clock map[string]bool, everySplit bool) string {
 		level = next
 	}
 	return sb.String()
+}
+
+// runSeparators says whether run holds a '/' (slash: it is read by its
+// parts between '/' too) and a '-' or '_' (glued: by its parts between
+// groups of them, where it is no text whole), read in one pass of its
+// bytes. b64Read asks both of every run of a payload, mostly words of a few
+// bytes, and asking with strings.Contains and strings.IndexByte, three
+// calls each, was a quarter of what trying such a run cost.
+func runSeparators(run string) (slash, glued bool) {
+	for i := 0; i < len(run); i++ {
+		switch run[i] {
+		case '/':
+			slash = true
+		case '-', '_':
+			glued = true
+		}
+	}
+	return slash, glued
 }
 
 // maxGluedGroups bounds the groups of '-' and '_' a run is cut at every

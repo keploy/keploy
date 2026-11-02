@@ -236,3 +236,42 @@ func TestARunThatDecodesToNoTextIsNotDecodedWhole(t *testing.T) {
 		}
 	}
 }
+
+// runSeparators reads, in one pass of a run's bytes, what b64Read asked
+// with strings.Contains and strings.IndexByte: whether the run holds a '/',
+// and a '-' or '_'. Over every byte alone and in runs with it at each end
+// and in the middle, and 20000 random runs of the base64 alphabets and
+// their padding (the separators a byte in eight), the two answers are the
+// calls'.
+func TestRunSeparatorsIsWhatContainsAndIndexByteSay(t *testing.T) {
+	check := func(run string) {
+		t.Helper()
+		slash, glued := runSeparators(run)
+		wantSlash := strings.Contains(run, "/")
+		wantGlued := strings.IndexByte(run, '-') >= 0 || strings.IndexByte(run, '_') >= 0
+		if slash != wantSlash || glued != wantGlued {
+			t.Fatalf("runSeparators(%q) = %v, %v; want %v, %v (strings.Contains, strings.IndexByte)", run, slash, glued, wantSlash, wantGlued)
+		}
+	}
+	check("")
+	for c := 0; c < 256; c++ {
+		b := string([]byte{byte(c)})
+		check(b)
+		check(b + "QUJD")
+		check("QUJD" + b)
+		check("QU" + b + "JD")
+	}
+	const alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+="
+	rng := rand.New(rand.NewPCG(7, 11))
+	for range 20000 {
+		b := make([]byte, 1+rng.IntN(24))
+		for i := range b {
+			if rng.IntN(8) == 0 {
+				b[i] = "/-_"[rng.IntN(3)]
+			} else {
+				b[i] = alpha[rng.IntN(len(alpha))]
+			}
+		}
+		check(string(b))
+	}
+}

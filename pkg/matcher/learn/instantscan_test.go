@@ -479,3 +479,39 @@ func TestAnRFC1123DateIsTriedOnlyWhereACommaEndsItsDayName(t *testing.T) {
 		t.Fatalf("the scan of a %d-byte payload of words that begin with a 'w' tried %d matchers, %d with each 'w' a 'q': it tries an RFC 1123 date where no ',' ends a day name", len(payload), got, want)
 	}
 }
+
+// mayBeginCompared is mayBegin as it was: each layout's digit length
+// compared in turn.
+func mayBeginCompared(d, h int) uint8 {
+	m := uint8(1)
+	if d == 4 {
+		m |= 1 << 1
+	}
+	if d == 8 {
+		m |= 1 << 2
+	}
+	if h == 8 {
+		m |= 1 << 3
+	}
+	if d >= 10 {
+		m |= 1 << 4
+	}
+	if d == 2 {
+		m |= 1 << 5
+	}
+	return m
+}
+
+// mayBegin reads the digits' layouts from a table (digitLayouts), and gives,
+// for every run of digits and of hex digits a byte can begin (0 to 64 of
+// each, past the table's last entry, which stands for 10 or more), the
+// layouts the comparisons it replaces gave.
+func TestMayBeginsTableIsTheLengthsComparisons(t *testing.T) {
+	for d := 0; d <= 64; d++ {
+		for h := 0; h <= 64; h++ {
+			if got, want := mayBegin(d, h), mayBeginCompared(d, h); got != want {
+				t.Fatalf("mayBegin(%d, %d) = %06b, want %06b (the comparisons')", d, h, got, want)
+			}
+		}
+	}
+}

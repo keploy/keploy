@@ -151,26 +151,36 @@ func scanInstants(s string) (matches [numLayouts][]span) {
 // may begin at a byte that begins d ASCII digits and h hex digits, of either
 // case: each matcher reads that run first, up to a byte no digit may be, so
 // it finds no match where the run is of another length. An RFC 1123 date
-// begins with a day's name, and may begin wherever layoutStarts says.
+// begins with a day's name, and may begin wherever layoutStarts says. The
+// digits' layouts are read from a table (digitLayouts) by d, not compared
+// for each length: the scan asks at every digit of a payload, and the
+// comparisons' branches, taken by a run's length, were a fifth of its CPU.
 func mayBegin(d, h int) uint8 {
-	m := uint8(1) // rfc1123At: (?:Mon|…|Sun),
-	if d == 4 {
-		m |= 1 << 1 // isoAt: \d{4}-
-	}
-	if d == 8 {
-		m |= 1 << 2 // compactAt: \d{8}T
-	}
+	m := digitLayouts[min(d, len(digitLayouts)-1)]
 	if h == 8 {
 		m |= 1 << 3 // uuidAt: [0-9a-fA-F]{8}-
 	}
-	if d >= 10 {
-		m |= 1 << 4 // epochAt: \d{10} or more
-	}
-	if d == 2 {
-		m |= 1 << 5 // timeOfDayAt: \d{2}:
-	}
 	return m
 }
+
+// digitLayouts are the layouts whose matches may begin at a byte that begins
+// d ASCII digits (mayBegin), by d, the last entry for 10 digits or more.
+var digitLayouts = func() (t [11]uint8) {
+	for d := range t {
+		t[d] = 1 // rfc1123At: (?:Mon|…|Sun),
+		switch {
+		case d == 2:
+			t[d] |= 1 << 5 // timeOfDayAt: \d{2}:
+		case d == 4:
+			t[d] |= 1 << 1 // isoAt: \d{4}-
+		case d == 8:
+			t[d] |= 1 << 2 // compactAt: \d{8}T
+		case d >= 10:
+			t[d] |= 1 << 4 // epochAt: \d{10} or more
+		}
+	}
+	return t
+}()
 
 // dayMayEnd says whether an RFC 1123 date's day name may begin at s[i]: the
 // byte after the name's three letters is the ',' every such date has there.
