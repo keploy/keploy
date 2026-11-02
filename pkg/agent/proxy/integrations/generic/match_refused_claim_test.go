@@ -53,6 +53,62 @@ func TestAGenericClaimTheStoreRefusesEndsTheExchange(t *testing.T) {
 	}
 }
 
+// refusesEachOnce is refusingStore whose second claim of one recording
+// cancels the exchange's context: a match that claims again a recording it
+// was refused ends there, with the context's error, instead of spinning until
+// go test's -timeout.
+type refusesEachOnce struct {
+	refusingStore
+	cancel context.CancelFunc
+}
+
+func (s *refusesEachOnce) UpdateUnFilteredMock(old, _ *models.Mock) bool {
+	for _, c := range s.claimed {
+		if c == old {
+			s.cancel()
+		}
+	}
+	s.claimed = append(s.claimed, old)
+	return false
+}
+
+// Every recording an exchange's claim failed on stays out of its later
+// passes, not only the latest: two recordings the store hands out and
+// refuses are each claimed once, and the exchange ends in a miss. An exchange
+// that left out only its latest refusal would claim the first again, and the
+// two would take turns forever. Two per-test recordings, two session ones,
+// and one of each.
+func TestEveryGenericRecordingTheStoreRefusedStaysLeftOut(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		first, second bool // IsFiltered: a per-test recording
+	}{
+		{name: "per-test", first: true, second: true},
+		{name: "session", first: false, second: false},
+		{name: "both-tiers", first: true, second: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := func(name string, filtered bool) *models.Mock {
+				m := exchange(name, "PING")
+				m.TestModeInfo.IsFiltered = filtered
+				m.Spec.GenericResponses = []models.Payload{{Message: []models.OutputBinary{{Type: models.String, Data: "PONG"}}}}
+				return m
+			}
+			first, second := rec("first", tc.first), rec("second", tc.second)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			db := &refusesEachOnce{refusingStore: refusingStore{mocks: []*models.Mock{first, second}}, cancel: cancel}
+			ok, resp, err := fuzzyMatch(ctx, zap.NewNop(), [][]byte{[]byte("PING")}, db)
+			if err != nil || ok || resp != nil {
+				t.Fatalf("match: ok %v, response %v, err %v, claims %d; want a miss, each recording claimed once", ok, resp, err, len(db.claimed))
+			}
+			if len(db.claimed) != 2 || db.claimed[0] == db.claimed[1] {
+				t.Fatalf("claims %d; want each of the two recordings claimed once", len(db.claimed))
+			}
+		})
+	}
+}
+
 // refilingStore hands out its recordings and, at the first claim, files a
 // new copy of the claimed one (same name, new pointer) in its place and
 // refuses the claim of the old one, as when another connection's serve filed

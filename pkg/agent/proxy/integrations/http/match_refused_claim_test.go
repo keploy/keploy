@@ -168,6 +168,82 @@ func TestAClaimRefusedIsAnsweredByTheNextRecording(t *testing.T) {
 	}
 }
 
+// refusesEveryClaimOnce is mockMemDb whose store refuses every claim and
+// keeps the claims in order. A second claim of one recording cancels the
+// call's context: a match that claims again a recording it was refused ends
+// there, with the context's error, instead of spinning until go test's
+// -timeout.
+type refusesEveryClaimOnce struct {
+	*mockMemDb
+	claimed []*models.Mock
+	cancel  context.CancelFunc
+}
+
+func (d *refusesEveryClaimOnce) UpdateUnFilteredMock(old, _ *models.Mock) bool {
+	for _, c := range d.claimed {
+		if c == old {
+			d.cancel()
+		}
+	}
+	d.claimed = append(d.claimed, old)
+	return false
+}
+
+// Every recording a call's claim failed on stays out of its later passes,
+// not only the latest: two recordings the store hands out and refuses are
+// each claimed once, and the call ends in a miss naming the second. A call
+// that left out only its latest refusal would claim the first again, and the
+// two would take turns forever. The exact-body pass, and the strict pass
+// under the proven switch.
+func TestEveryRecordingTheStoreRefusedStaysLeftOut(t *testing.T) {
+	for _, proven := range []bool{false, true} {
+		name := "exact-body"
+		if proven {
+			name = "strict"
+		}
+		t.Run(name, func(t *testing.T) {
+			if proven {
+				t.Setenv("KEPLOY_PROVEN", "1")
+			} else {
+				t.Setenv("KEPLOY_PROVEN", "")
+			}
+			rec := func(name string) *models.Mock {
+				return &models.Mock{
+					Name: name,
+					Kind: models.Kind(models.HTTP),
+					Spec: models.MockSpec{
+						HTTPReq: &models.HTTPReq{
+							Method: "POST", URL: "http://api/q", ProtoMajor: 1, ProtoMinor: 1,
+							Header: map[string]string{"Content-Type": "application/json", "Host": "api"},
+							Body:   `{"a":1}`,
+						},
+						HTTPResp: &models.HTTPResp{StatusCode: 200, Body: name},
+					},
+					TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession},
+				}
+			}
+			first, second := rec("first"), rec("second")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			db := &refusesEveryClaimOnce{mockMemDb: &mockMemDb{mocks: []*models.Mock{first, second}}, cancel: cancel}
+			h := http.Header{}
+			h.Set("Host", "api") // under the proven switch the authority is compared
+			h.Set("Content-Type", "application/json")
+			live := &req{method: "POST", url: &url.URL{Path: "/q"}, header: h, body: []byte(`{"a":1}`), raw: []byte("POST /q HTTP/1.1\r\nHost: api\r\n\r\n{\"a\":1}")}
+			ok, stub, diag, err := newHTTP().match(ctx, live, db, nil, nil, nil, true, false, false, false, true)
+			if err != nil || ok || stub != nil {
+				t.Fatalf("match: ok %v, served %v, err %v, claims %v; want a miss, each recording claimed once", ok, stub != nil, err, mockNamesOf(db.claimed))
+			}
+			if len(db.claimed) != 2 || db.claimed[0] == db.claimed[1] {
+				t.Fatalf("claims %v; want each of the two recordings claimed once", mockNamesOf(db.claimed))
+			}
+			if diag == nil || diag.refused != db.claimed[1] || diag.phase != models.MatchPhaseExhausted || diag.candidates != 2 {
+				t.Fatalf("diag %+v; want the last refused recording, phase %s, 2 candidates", diag, models.MatchPhaseExhausted)
+			}
+		})
+	}
+}
+
 // refusingBackground is varDb as a store whose consume door refuses its call
 // every recording (integrations.RefusesAnswer: the background's recordings,
 // the call being one of the open test's own).
