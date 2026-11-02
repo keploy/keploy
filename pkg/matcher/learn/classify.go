@@ -3944,9 +3944,15 @@ func correction(mock string, unserved bool) string {
 
 // partOf names where part stands in value, by its characters' places,
 // never by its text: "its characters 15 to 26", or "a part of it in another
-// form" (decoded, case-folded) where value holds it in none of its own.
+// form" (decoded, case-folded) where value holds it in none of its own. A
+// word stands where value first holds it as a word (tokenIndex), so the
+// word "0" of a hash "$2a$08$Kx9/0.…" is named at its own place, not at the
+// "0" of the word "08"; a part value holds as no word, at its first place.
 func partOf(value, part string) string {
-	i := strings.Index(value, part)
+	i := tokenIndex(value, part)
+	if i < 0 {
+		i = strings.Index(value, part)
+	}
 	if part == "" || i < 0 {
 		return "a part of it in another form"
 	}
