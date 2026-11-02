@@ -15,9 +15,11 @@ const (
 	// only once cgroup/post_bind4 AND cgroup/post_bind6 are ATTACHED,
 	// because those hooks are what report the kernel's choice back to user
 	// space; without them the relocated port would never reach the ingress
-	// forwarder. Unset, the hooks keep their previous guess-and-check
-	// behaviour, so a cgroup setup that rejects the post_bind attach
-	// degrades to exactly what shipped before. (A LOAD failure is not
+	// forwarder. Unset, the hooks pick a port no socket listens on
+	// themselves, outside the network namespace's ephemeral range, or leave
+	// the bind on the port the app names when there is none, so a cgroup
+	// setup that rejects the post_bind attach still starts (the agent says
+	// which: linux.warnBindFallback). (A LOAD failure is not
 	// covered and cannot be: LoadAndAssign fails the whole object, as it
 	// already does for every other program in it.)
 	FlagKernelPortAlloc uint32 = 1 << 1

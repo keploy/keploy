@@ -115,6 +115,11 @@ type Hooks struct {
 	// the precondition for telling bind4/6 to let the kernel pick the
 	// application's relocated port (structs.FlagKernelPortAlloc).
 	kernelPortAlloc bool
+	// postBindRefused is the post_bind hook that did not attach, and why:
+	// bind4/6 then pick the port each of the app's binds moves to
+	// themselves. nil when both attached or ingress was not attached.
+	// load says so once the agent's flags are final (sayBindFallback).
+	postBindRefused *postBindRefusal
 
 	BindEvents *ebpf.Map
 	sockops    link.Link
@@ -199,9 +204,11 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	return nil
 }
 
-func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
+// attachIngress attaches the bind hooks to cGroupPath with attach
+// (link.AttachCgroup; a test passes one that refuses a hook).
+func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects, attach func(link.CgroupOptions) (link.Link, error)) error {
 	h.BindEvents = objs.BindEvents
-	cg4, err := link.AttachCgroup(link.CgroupOptions{
+	cg4, err := attach(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCGroupInet4Bind,
 		Program: objs.K_bind4,
@@ -212,7 +219,7 @@ func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
 	}
 	h.cgBind4 = cg4
 
-	cg6, err := link.AttachCgroup(link.CgroupOptions{
+	cg6, err := attach(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCGroupInet6Bind,
 		Program: objs.K_bind6,
@@ -232,21 +239,21 @@ func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
 	// Non-fatal on purpose, and both-or-nothing: the flag below is only
 	// set when both attach, and without the flag bind4/6 pick the port
 	// themselves, a free one outside the network namespace's ephemeral
-	// range, or leave the bind alone when there is none (warnBindFallback
-	// says which). So a cgroup setup that rejects them still starts,
+	// range, or leave the bind alone when there is none (sayBindFallback
+	// says which, once the agent's flags are final). So a cgroup setup that rejects them still starts,
 	// while everyone else stops hitting "That port is already in use" on
 	// the relocated port. This covers ATTACH failure only — a program the
 	// kernel refuses to LOAD already fails LoadAndAssign above and aborts
 	// the agent, the same as every other program in this object.
-	pb4, err := link.AttachCgroup(link.CgroupOptions{
+	pb4, err := attach(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCGroupInet4PostBind,
 		Program: objs.K_postBind4,
 	})
 	if err != nil {
-		warnBindFallback(h.logger, "post_bind4", err, netSysctlDir)
+		h.postBindRefused = &postBindRefusal{hook: "post_bind4", err: err}
 	} else {
-		pb6, err := link.AttachCgroup(link.CgroupOptions{
+		pb6, err := attach(link.CgroupOptions{
 			Path:    cGroupPath,
 			Attach:  ebpf.AttachCGroupInet6PostBind,
 			Program: objs.K_postBind6,
@@ -259,7 +266,7 @@ func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
 			if cerr := pb4.Close(); cerr != nil {
 				h.logger.Debug("failed to detach post_bind4 after post_bind6 failed", zap.Error(cerr))
 			}
-			warnBindFallback(h.logger, "post_bind6", err, netSysctlDir)
+			h.postBindRefused = &postBindRefusal{hook: "post_bind6", err: err}
 		} else {
 			h.cgPostBind4 = pb4
 			h.cgPostBind6 = pb6
@@ -523,7 +530,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	// test runner, so a failure to attach here only means no requests are recorded; the egress capture
 	// the run depends on goes ahead.
 	if (opts.Mode == models.MODE_RECORD && !setupOpts.MockMode) || (setupOpts.MockMode && setupOpts.RecordRequests && len(agent.GetPortToSendToKernel(ctx, opts.Rules)) > 0) {
-		if err := h.attachIngress(cGroupPath, objs); err != nil {
+		if err := h.attachIngress(cGroupPath, objs, link.AttachCgroup); err != nil {
 			if !setupOpts.MockMode {
 				return err
 			}
@@ -723,6 +730,9 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
 		return err
 	}
+	// The flags are final and the bind hooks read them from here: say where
+	// the app's binds go when a post_bind hook did not attach.
+	h.sayBindFallback(agentInfo.Flags)
 
 	// With the flag set: the kernel records the agent's own mount namespace
 	// (its container), so what runs in its container is not the application's progress

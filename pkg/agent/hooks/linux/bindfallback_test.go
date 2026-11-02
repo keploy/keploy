@@ -4,14 +4,21 @@ package linux
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/link"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 )
 
 // sysctlDir writes a net/ipv4 sysctl directory for readBindMovePorts: the
@@ -147,6 +154,115 @@ func TestTheBindFallbackWarnSaysWhereTheBindsGo(t *testing.T) {
 			}
 			if got := all[0].ContextMap()["error"]; got != attachErr.Error() {
 				t.Errorf("the warning's error is %v, want the attach's, %q", got, attachErr)
+			}
+		})
+	}
+}
+
+// fakeLink is what refusingAttach hands back for a hook it attaches: no
+// link at all, its Close noted.
+type fakeLink struct {
+	link.Link
+	closed bool
+}
+
+func (l *fakeLink) Close() error { l.closed = true; return nil }
+
+// refusingAttach is an attach for attachIngress that attaches nothing: it
+// refuses the attach types in refuse and hands back a fakeLink, kept by
+// attach type, for each other.
+func refusingAttach(refuse ...ebpf.AttachType) (func(link.CgroupOptions) (link.Link, error), map[ebpf.AttachType]*fakeLink) {
+	got := map[ebpf.AttachType]*fakeLink{}
+	return func(o link.CgroupOptions) (link.Link, error) {
+		if slices.Contains(refuse, o.Attach) {
+			return nil, fmt.Errorf("attach %v: operation not supported", o.Attach)
+		}
+		l := &fakeLink{}
+		got[o.Attach] = l
+		return l, nil
+	}, got
+}
+
+// ownRangeSaid is what the warning says of the agent's own network
+// namespace's ephemeral range, read here without readBindMovePorts: "LO-HI",
+// or, when it cannot be read, that it cannot say.
+func ownRangeSaid(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
+	if err != nil {
+		return "cannot say whether any port is left"
+	}
+	f := strings.Fields(string(b))
+	if len(f) != 2 {
+		t.Fatalf("this namespace's net.ipv4.ip_local_port_range is %q", b)
+	}
+	return "net.ipv4.ip_local_port_range " + f[0] + "-" + f[1]
+}
+
+// A post_bind hook that does not attach is kept, by name, with why, and
+// said only once the agent's flags are final: the warning names it and
+// reads the agent's own network namespace's sysctls, and under
+// FlagObserveOnly, where the bind hooks move no bind, nothing is warned.
+// When post_bind6 does not attach, post_bind4's half is detached; the
+// kernel picks the moved port only when both attached.
+func TestTheBindFallbackIsSaidOnceTheFlagsAreFinal(t *testing.T) {
+	for _, r := range []struct {
+		name   string
+		refuse []ebpf.AttachType
+		hook   string // the hook refused; "" when both attach
+	}{
+		{"both attach", nil, ""},
+		{"post_bind4 refused", []ebpf.AttachType{ebpf.AttachCGroupInet4PostBind}, "post_bind4"},
+		{"post_bind6 refused", []ebpf.AttachType{ebpf.AttachCGroupInet6PostBind}, "post_bind6"},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			core, logs := observer.New(zapcore.WarnLevel)
+			h := NewHooks(zap.New(core), &config.Config{})
+			attach, got := refusingAttach(r.refuse...)
+			if err := h.attachIngress("/sys/fs/cgroup/app", bpfObjects{}, attach); err != nil {
+				t.Fatalf("attachIngress: %v, want a refused post_bind hook not to fail it", err)
+			}
+			if n := logs.Len(); n != 0 {
+				t.Fatalf("attachIngress warned %d times before the flags are final: %v", n, logs.All())
+			}
+			if r.hook == "" {
+				if h.postBindRefused != nil || !h.kernelPortAlloc || h.cgPostBind4 == nil || h.cgPostBind6 == nil {
+					t.Fatalf("both attached: refused %+v, kernel picks %v, post_bind4 %v, post_bind6 %v; want none refused, the kernel picking, both kept",
+						h.postBindRefused, h.kernelPortAlloc, h.cgPostBind4, h.cgPostBind6)
+				}
+				h.sayBindFallback(0)
+				if n := logs.Len(); n != 0 {
+					t.Fatalf("both attached, and %d warnings: %v", n, logs.All())
+				}
+				return
+			}
+			if h.postBindRefused == nil || h.postBindRefused.hook != r.hook || h.postBindRefused.err == nil {
+				t.Fatalf("kept refusal %+v, want %s's with its error", h.postBindRefused, r.hook)
+			}
+			if h.kernelPortAlloc || h.cgPostBind4 != nil || h.cgPostBind6 != nil {
+				t.Fatalf("%s refused, and the kernel picks %v, post_bind4 %v, post_bind6 %v; want neither kept", r.hook, h.kernelPortAlloc, h.cgPostBind4, h.cgPostBind6)
+			}
+			if pb4 := got[ebpf.AttachCGroupInet4PostBind]; pb4 != nil && !pb4.closed {
+				t.Fatal("post_bind6 refused, and post_bind4 stayed attached")
+			}
+
+			h.sayBindFallback(structs.FlagObserveOnly)
+			if n := logs.Len(); n != 0 {
+				t.Fatalf("observing only, the bind hooks move no bind, and %d warnings: %v", n, logs.All())
+			}
+			h.sayBindFallback(^structs.FlagObserveOnly)
+			all := logs.All()
+			if len(all) != 1 {
+				t.Fatalf("%d warnings with every flag but observe-only, want 1: %v", len(all), all)
+			}
+			msg := all[0].Message
+			for _, w := range []string{"the " + r.hook + " cgroup hook did not attach", ownRangeSaid(t)} {
+				if !strings.Contains(msg, w) {
+					t.Errorf("the warning %q does not say %q", msg, w)
+				}
+			}
+			if got := all[0].ContextMap()["error"]; got != h.postBindRefused.err.Error() {
+				t.Errorf("the warning's error is %v, want the attach's, %q", got, h.postBindRefused.err)
 			}
 		})
 	}

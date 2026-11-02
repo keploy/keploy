@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"go.uber.org/zap"
+
+	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 )
 
 // netSysctlDir holds the IPv4 sysctls of the network namespace of the
@@ -80,6 +82,30 @@ func readSysctlPorts(dir, name string, n int) ([]int, error) {
 		ports[i] = v
 	}
 	return ports, nil
+}
+
+// postBindRefusal is a post_bind hook that did not attach (hook names it)
+// and why (err).
+type postBindRefusal struct {
+	hook string
+	err  error
+}
+
+// sayBindFallback says where the app's binds go when a post_bind hook did
+// not attach (warnBindFallback, from the agent's own network namespace's
+// sysctls), given the agent's final flags. Under structs.FlagObserveOnly
+// the bind hooks move no bind, so there is nothing to say of where one goes:
+// it only notes the refusal at debug.
+func (h *Hooks) sayBindFallback(flags uint32) {
+	r := h.postBindRefused
+	if r == nil {
+		return
+	}
+	if flags&structs.FlagObserveOnly != 0 {
+		h.logger.Debug("a post_bind cgroup hook did not attach; observing only, the bind hooks move no bind", zap.String("hook", r.hook), zap.Error(r.err))
+		return
+	}
+	warnBindFallback(h.logger, r.hook, r.err, netSysctlDir)
 }
 
 // warnBindFallback says, once, where the app's binds go when the post_bind
