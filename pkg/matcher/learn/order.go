@@ -1110,8 +1110,20 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// protocol's replay does not compare, a coarse copy is still tried (a
 	// millisecond read carried to a later send its window does not hold);
 	// with none, an offset it does not compare is refused as one keploy
-	// cannot check.
+	// cannot check, except where a place of the scope held the moment
+	// before the call only in another form: the value is as much a copy of
+	// that place as a look-back, so it gets the last refusal, which names
+	// the place, with the guard's reason beside it, and steps 7 and 8 do
+	// not read it (read from the test's begin, a look-back would pass
+	// dropped).
 	zone := dc.dr.zone
+	// otherForm: a place of the scope, before the call, that held the
+	// moment only in another form (epoch nanoseconds in a name beside a
+	// second), which no variable holds as this text.
+	otherForm := func(h instantHold) bool {
+		p := h.p
+		return h.hr && (h.hl || p.fUnstated) && inScope(p) && p.state == stateBefore && !byText(h)
+	}
 	// cutWhy: the reading's own refusal of a cut, which keeps steps 7 and
 	// 8 from reading the value; guardWhy: the offset guard's refusal of the
 	// window plus an offset, which refuses that reading alone, so the value
@@ -1126,12 +1138,15 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		if off, cutWhy, inWindow = clockInWindow(path, c.ri, c.li, dc.in.Window, zone); !inWindow && cutWhy == "" && dc.in.Window.holdsRead(*c.rm, *c.lm, zone) {
 			off, cutWhy, inWindow = models.ClockOffset{Res: max(c.rm.res, c.lm.res)}, "", true
 		} else if inWindow {
-			if g, uncompared := dc.offsetGuard(path, off, max(c.rm.res, c.lm.res), dc.in.Window); uncompared && copies(false) == nil {
+			switch g, uncompared := dc.offsetGuard(path, off, max(c.rm.res, c.lm.res), dc.in.Window); {
+			case uncompared && copies(false) == nil && len(heldWhere(hs, otherForm)) > 0:
+				off, cutWhy, inWindow = models.ClockOffset{}, g, false
+			case uncompared && copies(false) == nil:
 				if gaveRefusal != nil {
 					return *gaveRefusal
 				}
 				return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
-			} else if g != "" {
+			case g != "":
 				off, cutWhy, guardWhy, inWindow = models.ClockOffset{}, "", g, false
 			}
 		}
@@ -1240,11 +1255,11 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// The places whose recorded text held the recorded value and that are
 	// no source in round F are named with why (main named the recording
 	// round F never served): a person reads where the value came from.
-	var outside, sentIn, heldAt, otherForm []string
+	var outside, sentIn, heldAt, inOtherForm []string
 	for _, h := range hs {
 		switch p := h.p; {
-		case h.hr && (h.hl || p.fUnstated) && inScope(p) && p.state == stateBefore && !byText(h) && len(otherForm) < maxLinePlaces:
-			otherForm = append(otherForm, p.name)
+		case otherForm(h) && len(inOtherForm) < maxLinePlaces:
+			inOtherForm = append(inOtherForm, p.name)
 		case h.hr && h.hl && p.otherTest && !dc.allScope:
 			if len(outside) < maxLinePlaces {
 				outside = append(outside, p.name)
@@ -1265,10 +1280,10 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	if len(outside) > 0 {
 		why += " [but " + strings.Join(sentIn, ", ") + " did]"
 	}
-	if len(otherForm) > 0 {
-		why += "; " + strings.Join(otherForm, ", ") + " held the moment only in another form, which no variable holds as this text"
+	if len(inOtherForm) > 0 {
+		why += "; " + strings.Join(inOtherForm, ", ") + " held the moment only in another form, which no variable holds as this text"
 	}
-	return dc.refuse(path, at, n, r, l, RefusalNoClockRead, why, append(append(outside, heldAt...), otherForm...), dc.wordNoise(path, n), Edit{Kind: EditReRecord})
+	return dc.refuse(path, at, n, r, l, RefusalNoClockRead, why, append(append(outside, heldAt...), inOtherForm...), dc.wordNoise(path, n), Edit{Kind: EditReRecord})
 }
 
 // madeSinceBegin is why c, a changed instant of a client test's call that
