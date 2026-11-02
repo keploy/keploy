@@ -150,6 +150,15 @@ func TestWithEvidence(t *testing.T) {
 	require.NotNil(t, got[0].Evidence)
 	require.Contains(t, got[0].Evidence.Reason, "exited while the test was open")
 
+	// The recorded callbacks a test's attempts did not deliver reach its
+	// line, each attempt's, with only a reason to carry them.
+	const cb1, cb2 = "test-2 (POST /webhooks/pay) answered 500, recorded 200: \"no\"", "test-2 (POST /webhooks/pay) was sent, and the application had not answered it when the test ended"
+	got = withEvidence([]TestReceipt{{Name: "o::G", Outcome: "failed"}}, []models.ScopeWindow{
+		{Name: "o::G", Evidence: &models.ScopeEvidence{Reason: "keploy: " + cb1 + ".", Undelivered: []string{cb1}}},
+		{Name: "o::G", Evidence: &models.ScopeEvidence{Reason: "keploy: " + cb2 + ".", Undelivered: []string{cb2}}},
+	})
+	require.Equal(t, []string{cb1, cb2}, got[0].Evidence.Undelivered)
+
 	// A test keploy could not read stays unread on its line, through the
 	// receipt the CLI reads: one unread attempt is enough. A read test's
 	// evidence says nothing of it.

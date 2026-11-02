@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"strings"
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -50,14 +49,13 @@ func (a *Agent) openTest() string {
 }
 
 // settleDeliveries waits, in a replay, for test's deliveries to be answered.
-// It says whether test has any, and why those that failed did ("" when none
+// It says whether test has any, and why each that failed did (none when none
 // did). The test's window is still open: the calls the application makes
 // while handling a delivery are the test's.
-func (a *Agent) settleDeliveries(ctx context.Context, test string) (bool, string) {
+func (a *Agent) settleDeliveries(ctx context.Context, test string) (bool, []string) {
 	d := coreAgent.ActiveWebhookDeliverer
 	if d == nil || !a.replaying() {
-		return false, ""
+		return false, nil
 	}
-	has, failed := d.Settle(ctx, test)
-	return has, strings.Join(failed, "; ")
+	return d.Settle(ctx, test)
 }

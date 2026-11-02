@@ -1010,7 +1010,7 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 		// left open, it would be blamed on the next begin
 		// (one_test_at_a_time).
 		if open == id {
-			if _, _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, at, serr.Message); err != nil {
+			if _, _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, at, serr.Message, nil); err != nil {
 				a.logger.Warn("could not judge a test whose end keploy refused", zap.String("test", id), zap.Error(err))
 			}
 		}
@@ -1031,7 +1031,7 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 		// once), and the run names the cause. An end with no test open
 		// refuses only that call.
 		if open != "" {
-			if _, _, err := a.closeOpen(ctx, open, models.ScopeOutcomeFailed, at, msg); err != nil {
+			if _, _, err := a.closeOpen(ctx, open, models.ScopeOutcomeFailed, at, msg, nil); err != nil {
 				a.logger.Warn("could not judge a test another test's end left open", zap.String("test", open), zap.Error(err))
 			}
 			a.NoteRefusal(serr.Refusal())
@@ -1045,11 +1045,11 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 	// The test's recorded callbacks (deliver:) are answered before it is
 	// judged, its window still open: the calls the application makes to
 	// handle them are the test's, and it ends once they are answered.
-	delivered, why := a.settleDeliveries(ctx, id)
+	delivered, undelivered := a.settleDeliveries(ctx, id)
 	if delivered {
 		at = time.Now()
 	}
-	ev, outcome, err := a.closeOpen(ctx, id, outcome, at, why)
+	ev, outcome, err := a.closeOpen(ctx, id, outcome, at, strings.Join(undelivered, "; "), undelivered)
 	if err != nil {
 		// A test keploy could not read is unread on its window (its
 		// verdict is keploy's not-judged); a failure to end it is the run's
@@ -1069,7 +1069,7 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 
 // closeOpen ends the open test id (endTest) and clears it, whatever happens
 // on the way. With the wire held.
-func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, string, error) {
+func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time, why string, undelivered []string) (*models.ScopeEvidence, string, error) {
 	defer func() {
 		a.provenMu.Lock()
 		closed := a.proven.open == id
@@ -1086,7 +1086,7 @@ func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time,
 			a.releaseLearn(id)
 		}
 	}()
-	return a.endTest(ctx, id, outcome, at, why)
+	return a.endTest(ctx, id, outcome, at, why, undelivered)
 }
 
 // failOpen ends, as failed, a test whose harness can no longer end it. With
@@ -1096,10 +1096,11 @@ func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time,
 func (a *Agent) failOpen(ctx context.Context, id string, why string) {
 	now, stop := context.WithCancel(ctx)
 	stop()
-	if _, failed := a.settleDeliveries(now, id); failed != "" {
-		why = failed + "; " + why
+	_, undelivered := a.settleDeliveries(now, id)
+	if len(undelivered) > 0 {
+		why = strings.Join(undelivered, "; ") + "; " + why
 	}
-	if _, _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, time.Now(), why); err != nil {
+	if _, _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, time.Now(), why, undelivered); err != nil {
 		a.logger.Warn("could not judge a test whose process went away", zap.String("test", id), zap.Error(err))
 	}
 	a.logger.Warn("a test is counted failed: "+why, zap.String("test", id))
@@ -1108,8 +1109,9 @@ func (a *Agent) failOpen(ctx context.Context, id string, why string) {
 // endTest records a test's outcome and evidence and closes its window. A
 // read that failed is an error, and the test is recorded failed with it: a
 // test keploy could not judge never passes. A test that skipped itself is
-// not failed for the recorded calls it then never made.
-func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, string, error) {
+// not failed for the recorded calls it then never made. undelivered are its
+// recorded callbacks (deliver:) not delivered as recorded, each also in why.
+func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, why string, undelivered []string) (*models.ScopeEvidence, string, error) {
 	var ev *models.ScopeEvidence
 	var readErr error
 	// The test's calls are settled before it is judged (settle_proven.go):
@@ -1201,6 +1203,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 			ev = &models.ScopeEvidence{}
 		}
 		ev.Reason = strings.TrimSpace("keploy: " + why + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
+		ev.Undelivered = undelivered
 		outcome = models.ScopeOutcomeFailed
 	}
 	a.NoteScopeOutcome(id, 0, outcome)

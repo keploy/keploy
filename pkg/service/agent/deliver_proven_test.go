@@ -83,7 +83,8 @@ func TestADeliveryNeedsAnAgentThatCanSendIt(t *testing.T) {
 func TestAWrittenAnswerReachesTheOpenTestsDeliveries(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	const notDelivered = "test-2 (POST /webhooks/pay) was not delivered: its after: mock-3 was never called in o::TestA; set after: to the call that triggers it"
-	d := &fakeDeliverer{a: a, answers: map[string][]string{"o::TestA": {notDelivered}, "o::TestB": nil}}
+	const unanswered = "test-4 (POST /webhooks/refund) was sent, and the application had not answered it when the test ended"
+	d := &fakeDeliverer{a: a, answers: map[string][]string{"o::TestA": {notDelivered, unanswered}, "o::TestB": nil}}
 	deliverWith(t, d)
 	ctx := context.Background()
 	require.NoError(t, a.SetScopeDeliver(ctx, payCallback))
@@ -103,7 +104,7 @@ func TestAWrittenAnswerReachesTheOpenTestsDeliveries(t *testing.T) {
 	require.Equal(t, []string{"o::TestA"}, d.settled)
 	require.Equal(t, []string{"o::TestA"}, d.openAt, "a test's deliveries settle while its window is open")
 	require.Equal(t, models.ScopeActionFail, e.Action)
-	require.True(t, strings.HasPrefix(e.Reason, "keploy: "+notDelivered), e.Reason)
+	require.True(t, strings.HasPrefix(e.Reason, "keploy: "+notDelivered+"; "+unanswered+"."), e.Reason)
 	reasonA := e.Reason
 
 	_, serr = a.ProvenBegin(ctx, begin("TestB"))
@@ -114,7 +115,9 @@ func TestAWrittenAnswerReachesTheOpenTestsDeliveries(t *testing.T) {
 	// Read last: reading the windows ends the run.
 	wa, wb := windowOf(t, a, "o::TestA"), windowOf(t, a, "o::TestB")
 	require.Equal(t, reasonA, wa.Evidence.Reason)
+	require.Equal(t, []string{notDelivered, unanswered}, wa.Evidence.Undelivered, "each callback not delivered is named on its own")
 	require.Equal(t, models.ScopeOutcomePassed, wb.Outcome)
+	require.True(t, wb.Evidence == nil || len(wb.Evidence.Undelivered) == 0, "a test whose callbacks were delivered names none")
 	// A test with deliveries ends once they were answered, not at its
 	// harness's end: the application's calls handling them are inside.
 	require.False(t, wa.End.Before(d.settledAt[0]), "%v ended before its deliveries settled at %v", wa.End, d.settledAt[0])
@@ -146,6 +149,7 @@ func TestARunsEndNamesTheCallbacksOfATestLeftOpen(t *testing.T) {
 	require.Equal(t, models.ScopeOutcomeFailed, wa.Outcome)
 	require.True(t, strings.HasPrefix(wa.Evidence.Reason, "keploy: "+notDelivered+"; "), wa.Evidence.Reason)
 	require.Contains(t, wa.Evidence.Reason, "outlived the test command")
+	require.Equal(t, []string{notDelivered}, wa.Evidence.Undelivered)
 	require.Equal(t, []string{"o::TestB", "o::TestA"}, d.settled)
 	require.Equal(t, []bool{true, false}, d.mayWait, "the run's end waits for no callback's answer")
 	require.Equal(t, models.ScopeOutcomePassed, windowOf(t, a, "o::TestB").Outcome)
@@ -166,6 +170,7 @@ func TestARunsEndWithNoUndeliveredCallbackKeepsItsReason(t *testing.T) {
 	require.Equal(t, []string{"o::TestA"}, d.settled)
 	require.True(t, strings.HasPrefix(wa.Evidence.Reason, "keploy: the test was still open"), wa.Evidence.Reason)
 	require.NotContains(t, wa.Evidence.Reason, ";")
+	require.Empty(t, wa.Evidence.Undelivered)
 }
 
 // A record sends no delivery: its provider sends the callback itself. Its

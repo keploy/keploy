@@ -156,6 +156,11 @@ type ScopeEvidence struct {
 	CannotCapture CaptureLosses `json:"cannotCapture,omitempty" yaml:"cannotCapture,omitempty"`
 	// Reason is the text the test was failed with at its end.
 	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
+	// Undelivered names each of the test's recorded callbacks (deliver:)
+	// that a replay did not deliver as recorded, and why: its case, its
+	// method and path, and the trigger mock it waited for or the answer it
+	// got. Each is in Reason too, which failed the test.
+	Undelivered []string `json:"undelivered,omitempty" yaml:"undelivered,omitempty"`
 	// Unread: keploy could not read everything the test did (its misses,
 	// or the mocks it consumed), so the test has no verdict of its own;
 	// keploy's verdict on the run is "not judged", never the test's fault.
