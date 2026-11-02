@@ -117,64 +117,69 @@ func TestAWholeSetServedThroughAPerTestRangerServesWhatTheFullScanServes(t *test
 	if raceEnabled {
 		commands = 104
 	}
+	// Each strict setting is a subtest of its own, run side by side
+	// (t.Parallel): each builds its own set, stores and engine.
 	for _, strict := range []bool{false, true} {
-		owned := keyedSet(1000, models.LifetimePerTest)
-		pool := append(owned[:len(owned):len(owned)], diffPrepareMock("prepare-a", "c1", diffQueryA, 7, diffBase.Add(-time.Millisecond)))
-		ref, fast := newDiffSide(t, pool), newDiffSide(t, pool)
-		var eng *mocknoise.Engine
-		if strict {
-			eng = replayer.StrictEngineForTest()
-		}
-		for _, s := range []*diffSide{ref, fast} {
-			s.stageNoWindow()
-			copies := make([]*models.Mock, len(owned))
-			for i, m := range owned {
-				copies[i] = m.DeepCopy()
+		t.Run(fmt.Sprintf("strict=%v", strict), func(t *testing.T) {
+			t.Parallel()
+			owned := keyedSet(1000, models.LifetimePerTest)
+			pool := append(owned[:len(owned):len(owned)], diffPrepareMock("prepare-a", "c1", diffQueryA, 7, diffBase.Add(-time.Millisecond)))
+			ref, fast := newDiffSide(t, pool), newDiffSide(t, pool)
+			var eng *mocknoise.Engine
+			if strict {
+				eng = replayer.StrictEngineForTest()
 			}
-			s.mm.ServeExactTest("whole-set", copies)
-		}
-		db := &rangingStore{MockManager: fast.mm}
-		ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "c1")
-		prepared := 0
-		for i := 0; i < commands; i++ {
-			var req mysql.Request
-			switch i % 8 {
-			case 0:
-				req = queryReq(keyedSetText(i))
-			case 1:
-				req = queryReq("SELECT id, name, payload FROM small WHERE id = 9999")
-			case 2, 4:
-				req = executeReq(7, fmt.Sprintf("k%d", i%500))
-			case 3:
-				req = executeReq(8, fmt.Sprintf("k%d", i%500))
-			case 7:
-				req = prepareReq(diffQueryA)
-			default:
-				req = executeReq(uint32(7+i%2), fmt.Sprintf("app-made-%d", i))
+			for _, s := range []*diffSide{ref, fast} {
+				s.stageNoWindow()
+				copies := make([]*models.Mock, len(owned))
+				for i, m := range owned {
+					copies[i] = m.DeepCopy()
+				}
+				s.mm.ServeExactTest("whole-set", copies)
 			}
-			want := ref.match(ctx, req, eng, true)
-			before := db.handed
-			got := fast.matchThrough(ctx, db, req, eng, false)
-			if want != got {
-				t.Fatalf("strict=%v command %d:\n full scan:  %s\n keyed pass: %s", strict, i, want, got)
-			}
-			if i%8 == 7 && strings.Contains(want, "served prepare-a ") {
-				prepared++
-				// No recording of the test answers it: the keyed pass reads
-				// the per-test tier through, then the connection tier, and
-				// settles there, with no full scan reading the tier again.
-				if read := db.handed - before; read > len(owned) {
-					t.Fatalf("strict=%v command %d: the PREPARE read %d mocks of the per-test tier, more than the %d the test owns: it was not settled by the keyed pass", strict, i, read, len(owned))
+			db := &rangingStore{MockManager: fast.mm}
+			ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "c1")
+			prepared := 0
+			for i := 0; i < commands; i++ {
+				var req mysql.Request
+				switch i % 8 {
+				case 0:
+					req = queryReq(keyedSetText(i))
+				case 1:
+					req = queryReq("SELECT id, name, payload FROM small WHERE id = 9999")
+				case 2, 4:
+					req = executeReq(7, fmt.Sprintf("k%d", i%500))
+				case 3:
+					req = executeReq(8, fmt.Sprintf("k%d", i%500))
+				case 7:
+					req = prepareReq(diffQueryA)
+				default:
+					req = executeReq(uint32(7+i%2), fmt.Sprintf("app-made-%d", i))
+				}
+				want := ref.match(ctx, req, eng, true)
+				before := db.handed
+				got := fast.matchThrough(ctx, db, req, eng, false)
+				if want != got {
+					t.Fatalf("strict=%v command %d:\n full scan:  %s\n keyed pass: %s", strict, i, want, got)
+				}
+				if i%8 == 7 && strings.Contains(want, "served prepare-a ") {
+					prepared++
+					// No recording of the test answers it: the keyed pass reads
+					// the per-test tier through, then the connection tier, and
+					// settles there, with no full scan reading the tier again.
+					if read := db.handed - before; read > len(owned) {
+						t.Fatalf("strict=%v command %d: the PREPARE read %d mocks of the per-test tier, more than the %d the test owns: it was not settled by the keyed pass", strict, i, read, len(owned))
+					}
 				}
 			}
-		}
-		if db.handed == 0 {
-			t.Fatalf("strict=%v: the keyed pass never read the per-test tier", strict)
-		}
-		if prepared == 0 {
-			t.Fatalf("strict=%v: no PREPARE was answered by the connection's recorded setup", strict)
-		}
-		ref.mm.Close()
-		fast.mm.Close()
+			if db.handed == 0 {
+				t.Fatalf("strict=%v: the keyed pass never read the per-test tier", strict)
+			}
+			if prepared == 0 {
+				t.Fatalf("strict=%v: no PREPARE was answered by the connection's recorded setup", strict)
+			}
+			ref.mm.Close()
+			fast.mm.Close()
+		})
 	}
 }

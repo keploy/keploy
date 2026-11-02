@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -380,12 +381,33 @@ func newDiffSide(t testing.TB, pool []*models.Mock) *diffSide {
 // diffSide to that.
 func stagedCopy(m *models.Mock) *models.Mock { return m.ShallowCopy() }
 
+// guardedPool names one pool unwrittenSpecs guards for one test: its backing
+// array and length.
+type guardedPool struct {
+	t     testing.TB
+	first **models.Mock
+	n     int
+}
+
+// guardedPools holds the pools guarded by tests still running.
+var guardedPools sync.Map
+
 // unwrittenSpecs fails t, once it ends, for every mock of pool whose Spec
 // (requests, responses, metadata, noise, variables) is not what it was when
 // t staged it first: a staging or serving wrote through a copy stagedCopy
 // shares, and a later staging would serve what it wrote.
+//
+// Both sides of a row stage the one pool, so it is guarded once per test: the
+// first call digests it, and a later one for the same pool adds nothing.
 func unwrittenSpecs(t testing.TB, pool []*models.Mock) {
 	t.Helper()
+	if len(pool) == 0 {
+		return
+	}
+	k := guardedPool{t, &pool[0], len(pool)}
+	if _, dup := guardedPools.LoadOrStore(k, struct{}{}); dup {
+		return
+	}
 	digest := func(m *models.Mock) [sha256.Size]byte {
 		b, err := json.Marshal(m.Spec)
 		if err != nil {
@@ -398,6 +420,7 @@ func unwrittenSpecs(t testing.TB, pool []*models.Mock) {
 		was[i] = digest(m)
 	}
 	t.Cleanup(func() {
+		guardedPools.Delete(k)
 		changed := 0
 		for i, m := range pool {
 			if digest(m) != was[i] {

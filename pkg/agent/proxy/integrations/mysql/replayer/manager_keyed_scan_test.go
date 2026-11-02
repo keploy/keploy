@@ -76,39 +76,50 @@ func TestNoWindowSetsServeWhatTheFullScanServes(t *testing.T) {
 	if testing.Short() || raceEnabled {
 		sizes = sizes[:2]
 	}
+	// Each set and strict setting is a subtest of its own, run side by side
+	// (t.Parallel): each builds its own set, stores and engine.
 	for _, n := range sizes {
 		for _, strict := range []bool{false, true} {
-			pool := keyedSet(n, models.LifetimePerTest)
-			ref, fast := newDiffSide(t, pool), newDiffSide(t, pool)
-			ref.stageNoWindow()
-			fast.stageNoWindow()
-			var eng *mocknoise.Engine
-			if strict {
-				eng = replayer.StrictEngineForTest()
-			}
-			step := n / 100
-			for i := 0; i < n; i += step {
-				var reqs []mysql.Request
-				switch i % 4 {
-				case 0, 1:
-					reqs = []mysql.Request{queryReq(keyedSetText(i)), queryReq(keyedSetText(i) + " LIMIT 1")}
-				case 2:
-					reqs = []mysql.Request{executeReq(7, fmt.Sprintf("k%d", i%500)), executeReq(7, "never-recorded")}
-				default:
-					reqs = []mysql.Request{executeReq(8, fmt.Sprintf("k%d", i%500)), executeReq(8, "never-recorded")}
-				}
-				for _, req := range reqs {
-					want := ref.match(context.Background(), req, eng, true)
-					got := fast.match(context.Background(), req, eng, false)
-					if want != got {
-						t.Fatalf("set of %d strict=%v command for mock %d:\n full scan:  %s\n keyed pass: %s", n, strict, i, want, got)
-					}
-				}
-			}
-			ref.mm.Close()
-			fast.mm.Close()
+			t.Run(fmt.Sprintf("n=%d/strict=%v", n, strict), func(t *testing.T) {
+				t.Parallel()
+				noWindowSetServesWhatTheFullScanServes(t, n, strict)
+			})
 		}
 	}
+}
+
+// noWindowSetServesWhatTheFullScanServes is one set of
+// TestNoWindowSetsServeWhatTheFullScanServes: n mocks, strict or not.
+func noWindowSetServesWhatTheFullScanServes(t *testing.T, n int, strict bool) {
+	pool := keyedSet(n, models.LifetimePerTest)
+	ref, fast := newDiffSide(t, pool), newDiffSide(t, pool)
+	ref.stageNoWindow()
+	fast.stageNoWindow()
+	var eng *mocknoise.Engine
+	if strict {
+		eng = replayer.StrictEngineForTest()
+	}
+	step := n / 100
+	for i := 0; i < n; i += step {
+		var reqs []mysql.Request
+		switch i % 4 {
+		case 0, 1:
+			reqs = []mysql.Request{queryReq(keyedSetText(i)), queryReq(keyedSetText(i) + " LIMIT 1")}
+		case 2:
+			reqs = []mysql.Request{executeReq(7, fmt.Sprintf("k%d", i%500)), executeReq(7, "never-recorded")}
+		default:
+			reqs = []mysql.Request{executeReq(8, fmt.Sprintf("k%d", i%500)), executeReq(8, "never-recorded")}
+		}
+		for _, req := range reqs {
+			want := ref.match(context.Background(), req, eng, true)
+			got := fast.match(context.Background(), req, eng, false)
+			if want != got {
+				t.Fatalf("set of %d strict=%v command for mock %d:\n full scan:  %s\n keyed pass: %s", n, strict, i, want, got)
+			}
+		}
+	}
+	ref.mm.Close()
+	fast.mm.Close()
 }
 
 // TestExactServingServesWhatTheFullScanServes is the keyed pass under exact

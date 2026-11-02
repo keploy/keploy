@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,16 +75,56 @@ func TestLazyBodyServesReportsAndLearnsWhatTheEagerBodyDoes(t *testing.T) {
 	if testing.Short() || raceEnabled {
 		seeds, sizes = 6, sizes[:2]
 	}
-	for _, ne := range noiseEngines {
-		learned, rejected := replayCorpora(t, ne.name, ne.eng, seeds, sizes, [2]string{"eager body", "lazy body"},
-			func(s *diffSide, ctx context.Context, req mysql.Request, eng *mocknoise.Engine, ref bool) string {
-				got, _ := s.matchBody(ctx, req, eng, ref)
-				return got
+	replayCorporaPerEngine(t, seeds, sizes, [2]string{"eager body", "lazy body"},
+		func(s *diffSide, ctx context.Context, req mysql.Request, eng *mocknoise.Engine, ref bool) string {
+			got, _ := s.matchBody(ctx, req, eng, ref)
+			return got
+		})
+}
+
+// replayCorporaPerEngine runs replayCorpora under every noise setting
+// (noiseEngines): each setting's windowed replays (seeds of them) and each of
+// its sets of sizes mocks is a subtest of its own, and the subtests run side
+// by side (t.Parallel). They share nothing they write: each builds its own
+// recordings, stores and noise engines, and adds its counts to its setting's
+// tally atomically. Once they have all ended (t.Cleanup), it requires, per
+// setting and summed over its subtests, that some command learned noise
+// exactly when detection is on alone, and that strict rejected candidates on
+// some command exactly when strict is on, so a row cannot pass by never
+// reading the body.
+func replayCorporaPerEngine(t *testing.T, seeds int64, sizes []int, sides [2]string, match func(s *diffSide, ctx context.Context, req mysql.Request, eng *mocknoise.Engine, ref bool) string) {
+	t.Helper()
+	type part struct {
+		name  string
+		seeds int64
+		sizes []int
+	}
+	parts := []part{{"windows", seeds, nil}}
+	for _, n := range sizes {
+		parts = append(parts, part{fmt.Sprintf("n=%d", n), 0, []int{n}})
+	}
+	tallies := make([]struct{ learned, rejected atomic.Int64 }, len(noiseEngines))
+	t.Cleanup(func() {
+		if t.Failed() {
+			return
+		}
+		for i, ne := range noiseEngines {
+			learned, rejected := tallies[i].learned.Load(), tallies[i].rejected.Load()
+			// Under strict, the drift detection learns from is a miss instead.
+			detects, stricts := ne.name == "detect", strings.Contains(ne.name, "strict")
+			if detects != (learned > 0) || stricts != (rejected > 0) {
+				t.Errorf("noise %s: %d commands learned noise and strict rejected candidates on %d", ne.name, learned, rejected)
+			}
+		}
+	})
+	for i, ne := range noiseEngines {
+		for _, p := range parts {
+			t.Run(ne.name+"/"+p.name, func(t *testing.T) {
+				t.Parallel()
+				learned, rejected := replayCorpora(t, ne.name, ne.eng, p.seeds, p.sizes, sides, match)
+				tallies[i].learned.Add(int64(learned))
+				tallies[i].rejected.Add(int64(rejected))
 			})
-		// Under strict, the drift detection learns from is a miss instead.
-		detects, stricts := ne.name == "detect", strings.Contains(ne.name, "strict")
-		if detects != (learned > 0) || stricts != (rejected > 0) {
-			t.Errorf("noise %s: %d commands learned noise and strict rejected candidates on %d", ne.name, learned, rejected)
 		}
 	}
 }

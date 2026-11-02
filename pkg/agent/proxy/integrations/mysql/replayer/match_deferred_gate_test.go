@@ -44,17 +44,11 @@ func TestDeferredGateServesReportsAndLearnsWhatTheEagerGateDoes(t *testing.T) {
 	if testing.Short() || raceEnabled {
 		seeds, sizes, btSizes = 6, sizes[:1], btSizes[:1]
 	}
-	for _, ne := range noiseEngines {
-		learned, rejected := replayCorpora(t, ne.name, ne.eng, seeds, sizes, [2]string{"eager gate", "deferred gate"},
-			func(s *diffSide, ctx context.Context, req mysql.Request, eng *mocknoise.Engine, ref bool) string {
-				got, _ := s.matchGate(ctx, req, s.dctx, eng, ref)
-				return got
-			})
-		detects, stricts := ne.name == "detect", strings.Contains(ne.name, "strict")
-		if detects != (learned > 0) || stricts != (rejected > 0) {
-			t.Errorf("noise %s: %d commands learned noise and strict rejected candidates on %d", ne.name, learned, rejected)
-		}
-	}
+	replayCorporaPerEngine(t, seeds, sizes, [2]string{"eager gate", "deferred gate"},
+		func(s *diffSide, ctx context.Context, req mysql.Request, eng *mocknoise.Engine, ref bool) string {
+			got, _ := s.matchGate(ctx, req, s.dctx, eng, ref)
+			return got
+		})
 	for _, n := range btSizes {
 		for _, engine := range []bool{false, true} {
 			for _, rp := range btReplays {
