@@ -158,9 +158,12 @@ func (r *Report) printTests(ctx context.Context, tests []models.TestResult) erro
 		// A test keploy could not judge says why, right under its status:
 		// whatever its row's status, nothing vouches for it.
 		fmt.Fprint(r.out, notJudgedLines(t))
-		// A test keploy skipped for a reason says why, right under its status.
-		if t.Status == models.TestStatusIgnored && t.SkipReason != "" {
+		// A test keploy skipped for a reason says why, right under its
+		// status; one keploy.yml ignores says that.
+		if t.Status == models.TestStatusIgnored && models.KeploySetAside(t.SkipReason) {
 			fmt.Fprintf(r.out, "  %s\n", quarantinedLine(models.SkipReasonOneLine(t.SkipReason)))
+		} else if t.Status == models.TestStatusIgnored && t.SkipReason != "" {
+			fmt.Fprintf(r.out, "  %s\n", t.SkipReason)
 		}
 		// ... but a PASSED test can still have stopped making a recorded
 		// outgoing call. That is the silent-green case; it gets one line here
@@ -472,7 +475,8 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 type quarantinedTest struct{ set, test, reason string }
 
 // quarantinedTests are the IGNORED tests of the reports that carry a skip
-// reason, by test set and then in report order.
+// reason keploy gave (not keploy.yml's ignore list), by test set and then in
+// report order.
 func quarantinedTests(reports map[string]*models.TestReport) []quarantinedTest {
 	names := make([]string, 0, len(reports))
 	for name := range reports {
@@ -486,7 +490,7 @@ func quarantinedTests(reports map[string]*models.TestReport) []quarantinedTest {
 			continue
 		}
 		for _, t := range rep.Tests {
-			if t.Status == models.TestStatusIgnored && t.SkipReason != "" {
+			if t.Status == models.TestStatusIgnored && models.KeploySetAside(t.SkipReason) {
 				out = append(out, quarantinedTest{set: name, test: t.TestCaseID, reason: t.SkipReason})
 			}
 		}

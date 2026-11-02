@@ -628,11 +628,15 @@ func depFailureLines(deps []models.DepResult) []string {
 // ignoredSkip is the <skipped> element of an IGNORED case. A case keploy
 // skipped with a reason (a quarantine) says so in the message, which is what
 // every CI dashboard shows for a skipped case: "quarantined by keploy
-// (<reason>)", with the reason in the body too. A case skipped without one
-// keeps the historical literal, byte for byte.
+// (<reason>)", with the reason in the body too. A case keploy.yml's ignore
+// list skipped says that ("ignored by keploy.yml"). A case skipped without a
+// reason keeps the historical literal, byte for byte.
 func ignoredSkip(t models.TestResult) *junitSkipped {
 	if t.SkipReason == "" {
 		return &junitSkipped{Message: ignoredSkipMessage}
+	}
+	if !models.KeploySetAside(t.SkipReason) {
+		return &junitSkipped{Message: t.SkipReason}
 	}
 	return &junitSkipped{
 		Message: quarantinedSkipMessage(t.SkipReason),

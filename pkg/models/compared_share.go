@@ -41,8 +41,21 @@ type SetAsideReason struct {
 }
 
 // NoSkipReason is the reason entry of tests a run skipped with no reason
-// given: an ignore list, or a hook that set them IGNORED.
+// given: a hook that set them IGNORED, or a list its caller gave no reason
+// for.
 const NoSkipReason = "no reason given"
+
+// IgnoredByConfigReason is the reason of a test the run skips because
+// keploy.yml's test.ignoredTests names it, or ignores its whole set: the
+// user's own choice, said as such.
+const IgnoredByConfigReason = "ignored by keploy.yml"
+
+// KeploySetAside reports whether reason, an IGNORED test's, is one keploy
+// gave (a quarantine, a test with no mapping entry): any reason but none and
+// IgnoredByConfigReason.
+func KeploySetAside(reason string) bool {
+	return reason != "" && reason != IgnoredByConfigReason
+}
 
 // MaxShareReasons and MaxShareReasonBytes bound the share a report carries
 // (Capped): it sits in the report's head, before its tests, where a reader

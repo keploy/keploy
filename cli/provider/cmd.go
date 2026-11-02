@@ -936,6 +936,10 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		return errors.New(errMsg)
 	}
 
+	// keploy.yml's ignore list, as it gave it: a test it names reports
+	// keploy.yml as why it is skipped, where it read "no reason given".
+	c.cfg.Test.KeepConfigIgnores()
+
 	// 8) Persist the path used
 	c.cfg.ConfigPath = configPath
 	c.configRead = true

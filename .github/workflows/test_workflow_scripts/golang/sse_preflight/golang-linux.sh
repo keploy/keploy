@@ -163,10 +163,30 @@ case "${REPLAY_BIN:-}" in
             cat "$ignored_report"
             exit 1
         fi
+        # keploy.yml's ignore list is the user's choice: each row, the run's
+        # share line and each JUnit <skipped> say so, not "no reason given"
+        # or "quarantined by keploy".
+        by_yml=$(yq '[.tests[] | select(.skip_reason == "ignored by keploy.yml")] | length' "$ignored_report")
+        if [ "$by_yml" -ne "$recorded" ]; then
+            echo "::error::$by_yml of the $recorded rows of the set keploy.yml ignores say \"ignored by keploy.yml\"; want every one"
+            cat "$ignored_report"
+            exit 1
+        fi
+        if ! grep -q "set aside: $recorded ignored by keploy.yml" test_logs_ignored.txt; then
+            echo "::error::the run's share line does not name keploy.yml for its $recorded ignored tests"
+            tail -20 test_logs_ignored.txt
+            exit 1
+        fi
         "$REPLAY_BIN" report --format junit > junit_ignored.xml 2> junit_ignored_err.txt
         junit_skipped=$(grep -c '<skipped' junit_ignored.xml || true)
         if [ "$junit_skipped" -ne "$recorded" ]; then
             echo "::error::keploy report --format junit has $junit_skipped <skipped> cases; want one for each of the $recorded skipped tests"
+            cat junit_ignored.xml
+            exit 1
+        fi
+        junit_by_yml=$(grep -c '<skipped message="ignored by keploy.yml"' junit_ignored.xml || true)
+        if [ "$junit_by_yml" -ne "$recorded" ] || grep -q 'quarantined by keploy' junit_ignored.xml; then
+            echo "::error::$junit_by_yml of the $recorded JUnit <skipped> cases say \"ignored by keploy.yml\"; want every one, and none quarantined"
             cat junit_ignored.xml
             exit 1
         fi

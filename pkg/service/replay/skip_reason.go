@@ -15,15 +15,19 @@ import (
 // what config.Test.SkipReasons holds for it, whoever set it, with the proven
 // switch on or off. A test skipped for a reason is said as it is skipped (at
 // Debug), once a run, and is listed in the run's summary (quarantinedSummary).
-// A test skipped with no reason gets "", and nothing is said, so a run whose
-// caller sets no reason (every run with the switch off, but a cloud replay
-// that skips a test for having no mapping entry) is what it was.
+// A test with no reason there that keploy.yml's test.ignoredTests names, or
+// whose set it ignores whole, gets models.IgnoredByConfigReason: the user's
+// own choice, which the summary does not list as skipped by keploy. Any
+// other test skipped with no reason gets "", and nothing is said.
 func (r *Replayer) skipReasonFor(testSetID, testCaseID string) string {
-	reason := r.config.Test.SkipReasons[testSetID][testCaseID]
-	if reason != "" {
+	if reason := r.config.Test.SkipReasons[testSetID][testCaseID]; reason != "" {
 		r.noteQuarantined(testSetID, testCaseID, reason)
+		return reason
 	}
-	return reason
+	if r.config.Test.ConfigIgnores(testSetID, testCaseID) {
+		return models.IgnoredByConfigReason
+	}
+	return ""
 }
 
 // noteQuarantined says, at Debug, that the run skips a test for a reason, the
@@ -106,7 +110,8 @@ func ignoredKind(tc *models.TestCase) models.Kind {
 // ignoredSetResults is one IGNORED result, with its reason, for each test of a
 // test set the run ignores whole, under the proven switch, or with it off when
 // the run's caller gave a reason for any test of the set (config.Test.SkipReasons:
-// a cloud replay that skips a set's tests for having no mapping entry). A set's
+// a cloud replay that skips a set's tests for having no mapping entry) or
+// keploy.yml's ignore list names the set (config.Test.ConfigIgnoredTests). A set's
 // skip used to leave its report with counts and no rows, so neither the report
 // nor JUnit could say which tests were skipped, or why. The run's own
 // selection still decides which tests exist: a test it did not select is not
@@ -115,7 +120,8 @@ func ignoredKind(tc *models.TestCase) models.Kind {
 // With the switch off and no reason for the set it returns nil, and the set's
 // report is what it was.
 func (r *Replayer) ignoredSetResults(testSetID string, testCases []*models.TestCase) []models.TestResult {
-	if !provenswitch.On() && len(r.config.Test.SkipReasons[testSetID]) == 0 {
+	_, configListed := r.config.Test.ConfigIgnoredTests[testSetID]
+	if !provenswitch.On() && len(r.config.Test.SkipReasons[testSetID]) == 0 && !configListed {
 		return nil
 	}
 	selected := r.config.Test.SelectedTests[testSetID]
