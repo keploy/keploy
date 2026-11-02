@@ -92,3 +92,27 @@ func TestMergeLearnedDropsNoiseAtAWordVariablesField(t *testing.T) {
 		})
 	}
 }
+
+// A cookie read by name is placed by its own value, which the replay holds
+// to the recording whatever the header's noise: learned noise at its header
+// (a session cookie beside it that changes each run) survives the merge.
+// A word of the header itself is placed by the whole header, so noise there
+// is dropped, as at a whole variable's header.
+func TestMergeLearnedKeepsHeaderNoiseBesideACookieReadByName(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	for place, kept := range map[string]bool{
+		"header.Cookie|cookie.uid":   true,
+		"header.Cookie|cookie.uid#0": true,
+		"header.cookie|cookie.uid":   true,
+		"header.Cookie#1":            false,
+		"header.Cookie|pct#1":        false,
+		"header.Cookie":              false,
+	} {
+		m := wordRecording(nil)
+		MergeLearned(m, models.MockState{ReqBodyNoise: map[string][]string{"header.cookie": nil}},
+			models.MockVariables{"uid": {Recorded: "appRec7", Bind: place}})
+		if _, ok := m.Spec.ReqBodyNoise["header.cookie"]; ok != kept {
+			t.Errorf("a bind at %s: header noise kept %v, want %v (%v)", place, ok, kept, m.Spec.ReqBodyNoise)
+		}
+	}
+}

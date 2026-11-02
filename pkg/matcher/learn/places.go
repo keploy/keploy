@@ -66,15 +66,37 @@ func LeafPath(place string) (string, bool) {
 // here, so its places read as word addresses, as Place.String and its
 // learn step write them. ok is false for a place that reads neither way.
 func VariableLeafPath(m *models.Mock, place string) (string, bool) {
-	var req *models.HTTPReq
-	if m != nil {
-		req = m.Spec.HTTPReq
-	}
-	a, err := variables.ReadPlace(place, variables.InRequest(req))
+	a, err := variableAddress(m, place)
 	if err != nil {
 		return "", false
 	}
 	return placeLeafPath(a.Place)
+}
+
+// noiseDroppedAt is the leaf path at which learned noise is dropped when
+// place, a place of m's variables block, is a variable's (MergeLearned):
+// its leaf (VariableLeafPath), where the text that places it
+// (variables.Address.Within) is that leaf whole. A cookie read by name is
+// placed by its own value, which the replay holds to the recording
+// whatever the noise at its header: noise learned there stays, for the
+// header's other cookies, and ok is false. ok is false too for a place
+// that reads neither way.
+func noiseDroppedAt(m *models.Mock, place string) (string, bool) {
+	a, err := variableAddress(m, place)
+	if err != nil || !a.Within().Whole() {
+		return "", false
+	}
+	return placeLeafPath(a.Place)
+}
+
+// variableAddress is place, a place of m's variables block, read as m's
+// replay reads it (variables.ReadPlace against m's recorded request).
+func variableAddress(m *models.Mock, place string) (variables.Address, error) {
+	var req *models.HTTPReq
+	if m != nil {
+		req = m.Spec.HTTPReq
+	}
+	return variables.ReadPlace(place, variables.InRequest(req))
 }
 
 // placeLeafPath is the exact leaf path (Leaf.Path) of p.

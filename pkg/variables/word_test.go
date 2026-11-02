@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/templates"
 )
 
@@ -288,10 +289,152 @@ func TestSpliceJSONStringKeepsTheRecordedBytes(t *testing.T) {
 		{raw: `"é"`, next: "ê", want: `"ê"`},
 		{raw: `"x\u00e9"`, next: "xê", want: `"xê"`},
 		{raw: "\"bad \xff appRec7\"", next: "bad \ufffd appLive9", want: `"bad � appLive9"`},
+		// A lone surrogate escape decodes to U+FFFD and is kept as written,
+		// as is a surrogate followed by an escape that pairs with none.
+		{raw: `"\ud800 hello appRec7"`, next: "\ufffd hello appLive9", want: `"\ud800 hello appLive9"`},
+		{raw: `"\ud83d\u0041 appRec7"`, next: "\ufffdA appLive9", want: `"\ud83d\u0041 appLive9"`},
 	} {
 		got, ok := SpliceJSONString(c.raw, c.next)
 		if !ok || got != c.want {
 			t.Errorf("SpliceJSONString(%s, %q) = %s, %v; want %s", c.raw, c.next, got, ok, c.want)
+		}
+	}
+}
+
+// Two addresses of one value overlap where a word written at one changes
+// what the other names: one word, or bytes in common under other steps.
+func TestAddressOverlaps(t *testing.T) {
+	b64 := base64.StdEncoding.EncodeToString([]byte("hello appRec7"))
+	for _, c := range []struct {
+		leaf, a, b string
+		want       bool
+	}{
+		{"hello appRec7", "body.m#1", "body.m#1", true},
+		{"hello appRec7 appRec7", "body.m#1", "body.m#2", false},
+		{"sid=appRec7; Path=/", "header.S#1", "header.S|cookie.sid#0", true},
+		{"sid=appRec7; uid=appRec7", "header.S|cookie.sid#0", "header.S|cookie.uid", false},
+		// A word in a cookie's name is no word of a value: written, it
+		// renames the cookie the other reads.
+		{"sid=appRec7; uid=appRec7", "header.S#0", "header.S|cookie.sid", true},
+		{"sid=appRec7; uid=appRec7", "header.S#2", "header.S|cookie.sid", true},
+		{"sid=appRec7; uid=appRec7", "header.S#1", "header.S|cookie.uid", false},
+		// A cookie's value whole may be written with another number of
+		// words ("app-LiveA"): every word after it moves, a pair with no
+		// '=' (no cookie) included. A word before it, and a word read
+		// through another cookie by name, stay where they are; a word for
+		// a word of a value, raw or pct, moves none.
+		{"sid=appRec7; uid=appRec7", "header.S#3", "header.S|cookie.sid", true},
+		{"sid=appRec7; HttpOnly", "header.S#2", "header.S|cookie.sid", true},
+		{"sid=appRec7; uid=appRec8", "header.S|cookie.sid", "header.S#3", true},
+		{"sid=a%20b; uid=x", "header.S|cookie.sid|pct", "header.S#4", true},
+		{"sid=appRec7; uid=appRec8", "header.S|cookie.sid", "header.S|cookie.uid#0", false},
+		{"sid=appRec7; uid=appRec8", "header.S|cookie.uid#0", "header.S|cookie.sid", false},
+		{"sid=appRec7; uid=appRec8", "header.S|cookie.sid#0", "header.S#3", false},
+		{"sid=appRec7; uid=appRec8", "header.S|cookie.sid|pct#0", "header.S#3", false},
+		{"sid=appRec7; uid=appRec8", "header.S|cookie.sid", "header.S|cookie.uid|pct#0", false},
+		{"HttpOnly; sid=appRec7", "header.S#0", "header.S|cookie.sid", false},
+		// A step that re-encodes a cookie's value moves the words after it.
+		{"sid=" + b64 + "; uid=x", "header.S|cookie.sid|b64#0", "header.S#3", true},
+		{"sid=" + b64 + "; uid=x", "header.S|cookie.sid|b64#0", "header.S|cookie.uid", false},
+		// pct keeps the bytes around a word: "a%20appRec7%20b" reads
+		// "a", "20appRec7" and "20b" raw.
+		{"a%20appRec7%20b", "header.X|pct#1", "header.X#1", true},
+		{"a%20appRec7%20b", "header.X|pct#1", "header.X#0", false},
+		// A word holding an escape's byte, written, changes what pct
+		// decodes: "2F" is the escape's digits beside the word "A", "41b"
+		// decodes to "Ab" (written "2Fb", "c" becomes word 2), and "xAy"
+		// written as letters joins the raw words around "%41".
+		{"%2F%41", "header.X#0", "header.X|pct#0", true},
+		{"a%41b c", "header.X#1", "header.X|pct#1", true},
+		{"a%41b c", "header.X|pct#1", "header.X#1", true},
+		{"x%41y z", "header.X|pct#0", "header.X#2", true},
+		{"x=a%41b; y=c", "header.S|cookie.x|pct#0", "header.S#4", true},
+		// Without a pct step an escape is three raw bytes.
+		{"x%41 y", "header.X#1", "header.X#2", false},
+		// Under pct, "b" is a cookie's name; raw, it is in x's value.
+		{"x=a%3B b=1", "header.S|pct|cookie.b", "header.S#3", true},
+		// b64 re-encodes its whole text; two words of the text it decodes
+		// to are two places.
+		{b64, "header.X|b64#0", "header.X|b64#1", false},
+		{b64, "header.X|b64#1", "header.X#0", true},
+		// "fn5+IGhlbGxv" decodes to "~~~ hello": its raw words "fn5" and
+		// "IGhlbGxv" are both bytes of "hello".
+		{"fn5+IGhlbGxv", "header.X|b64#0", "header.X#0", true},
+		// A number's text is its value.
+		{"12.5", "body.n|json#1", "body.n#0", false},
+		{"12.5", "body.n|json#1", "body.n#1", true},
+		// A json step writes its text anew, a number's too: the words
+		// after its word are counted as moved.
+		{"12.5", "body.n|json#0", "body.n#1", true},
+		// An empty text stands at its offset.
+		{"sid=; uid=x", "header.S|cookie.sid", "header.S|cookie.sid", true},
+		{"sid=; uid=x", "header.S|cookie.sid", "header.S#0", true},
+		{"sid=; uid=x", "header.S|cookie.sid", "header.S#2", true},
+		{"sid=; uid=x", "header.S|cookie.sid", "header.S|cookie.uid", false},
+		// "sid=" is b64 too, whose whole text ends where the empty value is.
+		{"sid=", "header.S|b64", "header.S|cookie.sid", true},
+		// A leaf that does not hold both cannot tell them apart.
+		{"hello", "body.m#0", "body.m#3", true},
+		{"hello", "body.m#3", "body.m#0", true},
+		{"hello appRec7", "body.m#1", "body.m#3", true},
+		{"hello appRec7", "body.m#3", "body.m#1", true},
+		{"sid=x; uid=y", "header.S|cookie.sid#3", "header.S#3", true},
+		{"sid=x; uid=y", "header.S|cookie.zz", "header.S#3", true},
+		{"not b64!", "header.X|b64#0", "header.X|b64#1", true},
+		{"sid=x; uid=y", "header.S|cookie.zz", "header.S#2", true},
+		{"sid=x; uid=y", "header.S|cookie.zz", "header.S|cookie.uid", true},
+		{"sid=x", "header.S|cookie.sid#3", "header.S#0", true},
+	} {
+		a, err := ParseAddress(c.a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := ParseAddress(c.b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := a.Overlaps(b, c.leaf); got != c.want {
+			t.Errorf("%s over %s in %q: %v, want %v", c.a, c.b, c.leaf, got, c.want)
+		}
+	}
+}
+
+// A call's shape (models.IsPathPlace) reads a word of a segment as
+// ParseAddress reads it: one grammar.
+func TestPathPlacesReadAsParseAddressReadsThem(t *testing.T) {
+	for _, suffix := range []string{"", "#0", "#12", "|pct", "|json#1", "|b64|b64url", "|cookie.sid#0", "|jwt.sub", `|jwt.a\|b#2`, `|jwt.a\`,
+		"#", "#x", "#01", "#-1", "#+1", "#0#1", "#0|pct", "|", "|foo", "|jwt.", "|cookie.", "|pct|foo#0", "0", "x"} {
+		s := "url.path[1]" + suffix
+		a, err := ParseAddress(s)
+		want := err == nil && a.Place.Part == PartPath
+		if got := models.IsPathPlace(s); got != want {
+			t.Errorf("IsPathPlace(%q) = %v; ParseAddress reads it as a segment's place: %v (%v)", s, got, want, err)
+		}
+	}
+}
+
+// The text that places a word (Within) is the value of the cookie its
+// first step reads by name, whatever steps follow; a word of the place
+// itself, or one read under another first step (a cookie under b64 is
+// moved by every byte of the b64 text), is placed by the place whole.
+func TestTheTextThatPlacesAWord(t *testing.T) {
+	for in, want := range map[string]string{
+		"header.Cookie|cookie.uid":          "header.Cookie|cookie.uid",
+		"header.Cookie|cookie.uid#1":        "header.Cookie|cookie.uid",
+		"header.Cookie|cookie.tok|b64#0":    "header.Cookie|cookie.tok",
+		"header.Cookie#3":                   "header.Cookie",
+		"header.Cookie|pct#1":               "header.Cookie",
+		"header.X-Session|b64|cookie.uid#0": "header.X-Session",
+		"header.Authorization|jwt.sub":      "header.Authorization",
+		"body.note#1":                       "body.note",
+		"body.note":                         "body.note",
+	} {
+		a, err := ParseAddress(in)
+		if err != nil {
+			t.Fatalf("ParseAddress(%q): %v", in, err)
+		}
+		if got := a.Within(); got.String() != want || got.Word != -1 {
+			t.Errorf("%s: Within() = %q (word %d); want %q, the text whole", in, got.String(), got.Word, want)
 		}
 	}
 }

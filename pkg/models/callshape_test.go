@@ -270,7 +270,15 @@ func TestDeclaredPathPlaces(t *testing.T) {
 	// writes) names that segment.
 	require.True(t, IsPathPlace("url.path[2]#1"))
 	require.True(t, IsPathPlace("url.path[2]|pct#0"))
+	for _, p := range []string{"url.path[2]|json#10", "url.path[2]|b64|b64url", "url.path[2]|cookie.sid", "url.path[2]|jwt.sub#3", `url.path[2]|jwt.a\|b#0`, `url.path[2]|jwt.a\`} {
+		require.True(t, IsPathPlace(p), p)
+	}
 	for _, p := range []string{"", "url.path[]", "url.path[x]", "url.query.id", "body.id", "url.path[1]x", "url.path[1]x#0", "url.path[x]#0"} {
+		require.False(t, IsPathPlace(p), p)
+	}
+	// What variables.ParseAddress refuses after a segment is no word of it.
+	for _, p := range []string{"url.path[1]#x", "url.path[1]#", "url.path[1]|", "url.path[1]#01", "url.path[1]#-1", "url.path[1]#+1", "url.path[1]0",
+		"url.path[1]#0#1", "url.path[1]#0|pct", "url.path[1]|foo", "url.path[1]|jwt.", "url.path[1]|cookie.", "url.path[1]|pct|foo#0"} {
 		require.False(t, IsPathPlace(p), p)
 	}
 }

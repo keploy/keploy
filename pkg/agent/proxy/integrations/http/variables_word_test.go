@@ -65,15 +65,24 @@ func TestVariables_ABindAtTheOneWordOfAFieldIsRead(t *testing.T) {
 	}
 }
 
-// Every byte of the field outside its variable's word is compared as recorded.
+// Every byte of the field outside its variable's word is compared as
+// recorded. A call that is the recording but there misses with that field
+// named; one that differs elsewhere too is another call, of no evidence.
 func TestVariables_TheRestOfAWordedFieldIsCompared(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	h := newHTTP()
 	db := &varDb{perTest: wordedCreate()}
 	for _, note := range []string{"made by appLive9 at noon", "made by appLive9", "made-by appLive9 at boot", "made by app Live9 at boot"} {
-		if ok, stub, _ := matchVar(t, h, db, liveReq("PUT", "/secrets/app", `{"data":{"note":"`+note+`"}}`)); ok {
+		ok, stub, diag := matchVar(t, h, db, liveReq("PUT", "/secrets/app", `{"data":{"note":"`+note+`"}}`))
+		if ok {
 			t.Fatalf("note %q: answered by %s; only the word of the variable may differ", note, stub.Name)
 		}
+		if p := wantWorded(t, diag, "body.data.note", "appId"); p.expected != "made by appRec7 at boot" || p.actual != note {
+			t.Fatalf("note %q: evidence %+v; want the recorded note and the one sent", note, p)
+		}
+	}
+	if ok, _, diag := matchVar(t, h, db, liveReq("PUT", "/secrets/other", `{"data":{"note":"made by appLive9 at noon"}}`)); ok || diag != nil && diag.variable != nil {
+		t.Fatalf("a call to another path: served %v, evidence %+v; want a plain miss", ok, diag)
 	}
 	if _, bound := db.table.Lookup("appId"); bound {
 		t.Fatal("a call that is not the recording bound appId")
@@ -388,10 +397,12 @@ func TestVariables_NoiseAtAWordedFieldLeavesTheRestCompared(t *testing.T) {
 	m := wordedCreate()[0]
 	m.Spec.ReqBodyNoise = map[string][]string{"body.data.note": nil}
 	db := &varDb{perTest: []*models.Mock{m}}
-	if ok, _, _ := matchVar(t, h, db, liveReq("PUT", "/secrets/app", `{"data":{"note":"made by appLive9 at noon"}}`)); ok {
+	ok, _, diag := matchVar(t, h, db, liveReq("PUT", "/secrets/app", `{"data":{"note":"made by appLive9 at noon"}}`))
+	if ok {
 		t.Fatal("served a call that changes the field outside the variable's word")
 	}
-	ok, _, diag := matchVar(t, h, db, liveReq("PUT", "/secrets/app", `{"data":{"note":"made by appLive9 at boot"}}`))
+	wantWorded(t, diag, "body.data.note", "appId")
+	ok, _, diag = matchVar(t, h, db, liveReq("PUT", "/secrets/app", `{"data":{"note":"made by appLive9 at boot"}}`))
 	if !ok {
 		t.Fatalf("not served: %+v", diag)
 	}
@@ -412,7 +423,7 @@ func TestVariables_NoiseOverAWordedValueLeavesTheRestCompared(t *testing.T) {
 		mock         func() *models.Mock
 		live         func(string) *req
 		shifted, ok  string
-		want         string
+		want, field  string
 	}{
 		{
 			header: map[string][]string{"cookie": {}},
@@ -427,7 +438,7 @@ func TestVariables_NoiseOverAWordedValueLeavesTheRestCompared(t *testing.T) {
 				r.header.Set("Cookie", v)
 				return r
 			},
-			shifted: "sid=app-LiveA; uid=appLiveB", ok: "sid=appRec7; uid=appLiveB", want: "appLiveB",
+			shifted: "sid=app-LiveA; uid=appLiveB", ok: "sid=appRec7; uid=appLiveB", want: "appLiveB", field: "header.Cookie",
 		},
 		{
 			header: map[string][]string{"Cookie": {}},
@@ -442,7 +453,7 @@ func TestVariables_NoiseOverAWordedValueLeavesTheRestCompared(t *testing.T) {
 				r.header.Set("Cookie", v)
 				return r
 			},
-			shifted: "sid=app-LiveA; uid=appLiveB", ok: "sid=appRec7; uid=appLiveB", want: "appLiveB",
+			shifted: "sid=app-LiveA; uid=appLiveB", ok: "sid=appRec7; uid=appLiveB", want: "appLiveB", field: "header.Cookie",
 		},
 		{
 			body: map[string][]string{"note": {}},
@@ -451,7 +462,7 @@ func TestVariables_NoiseOverAWordedValueLeavesTheRestCompared(t *testing.T) {
 					models.MockVariables{"b": bindV("appRec7", "body.note#1", "body.u")})
 			},
 			live:    func(v string) *req { return liveReq("PUT", "/notes/1", `{"note":"`+v+`"}`) },
-			shifted: "by app-Live9 at boot", ok: "by appLive9 at boot", want: "appLive9",
+			shifted: "by app-Live9 at boot", ok: "by appLive9 at boot", want: "appLive9", field: "body.note",
 		},
 	} {
 		for _, live := range []string{c.shifted, c.ok} {
@@ -466,6 +477,7 @@ func TestVariables_NoiseOverAWordedValueLeavesTheRestCompared(t *testing.T) {
 				if ok || bound {
 					t.Fatalf("noise %v %v, %q: served (%v), b bound as %q (%v); want a miss", c.header, c.body, live, ok, b.Value, bound)
 				}
+				wantWorded(t, diag, c.field, "b")
 				continue
 			}
 			if !ok {
@@ -609,6 +621,576 @@ func TestVariables_AWordAnswerKeepsTheRestOfTheTextAsRecorded(t *testing.T) {
 		}
 		if want := strings.Replace(resp, "appRec7", "appLive9", 1); stub.Spec.HTTPResp.Body != want {
 			t.Fatalf("answered %s, want %s", stub.Spec.HTTPResp.Body, want)
+		}
+	}
+}
+
+// A use at a word, before any call bound its variable, names the word the
+// call sent there, not the segment's whole text or "".
+func TestVariables_AnEarlyUseAtAWordNamesTheWordSent(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	db := &varDb{perTest: []*models.Mock{
+		at(varMock("mock-1", "GET", "http://store/apps/app-appRec7", "", 200, `{}`,
+			models.MockVariables{"appId": useV("appRec7", []string{"url.path[1]#1"})}), 1),
+	}}
+	ok, _, diag := matchVar(t, h, db, liveReq("GET", "/apps/app-appOther", ""))
+	p := wantProblem(t, ok, diag, "before the call that binds it")
+	if p.place != "url.path[1]#1" || p.actual != "appOther" {
+		t.Fatalf("evidence %+v; want the word appOther the call sent at url.path[1]#1", p)
+	}
+}
+
+// Of two type changes, the first place's is the evidence, at a word as at a
+// whole place; the diff is of the word's whole field, named by its path.
+func TestVariables_ATypeChangeAtAWordIsADiffOfItsField(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, word := range []string{"", "#0"} {
+		h := newHTTP()
+		db := &varDb{perTest: []*models.Mock{
+			at(varMock("mock-1", "PUT", "http://store/secrets/app", `{"x":"1730000000","y":"1730000001"}`, 204, `{}`,
+				models.MockVariables{"a": bindV("1730000000", "body.x"+word), "b": bindV("1730000001", "body.y"+word)}), 1),
+		}}
+		body := `{"x":5,"y":6}`
+		ok, _, diag := matchVar(t, h, db, liveReq("PUT", "/secrets/app", body))
+		p := wantProblem(t, ok, diag, "a value of another JSON type")
+		if p.place != "body.x"+word || p.name != "a" {
+			t.Fatalf("evidence %+v; want variable a's type change at body.x%s", p, word)
+		}
+		rep := h.buildHTTPMismatchReport(makeReq("PUT", "/secrets/app"), []byte(body), db, nil, nil, nil, diag)
+		want := models.MockFieldDiff{Path: "body.x", Kind: models.DiffKindTypeChanged, Expected: `"1730000000"`, Actual: "5"}
+		if rep.MatchPhase != models.MatchPhaseVariable || len(rep.FieldDiffs) != 1 || rep.FieldDiffs[0] != want {
+			t.Fatalf("at body.x%s: phase %q, diffs %+v; want %+v", word, rep.MatchPhase, rep.FieldDiffs, want)
+		}
+	}
+}
+
+// Two answers at one word, or at bytes of one value that overlap under
+// other steps, are refused as two whole answers at one place are: the
+// one written last would drop the other's value. Two words of one value
+// are two places.
+func TestVariables_TwoAnswersAtOneWordAreRefused(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, c := range []struct {
+		a, b, recorded, header string
+		want                   string // the answer, or "" for the refusal
+	}{
+		{a: "body.msg", b: "body.msg", recorded: `{"msg":"appRec7"}`},
+		{a: "body.msg#1", b: "body.msg#1", recorded: `{"msg":"hello appRec7"}`},
+		{a: "header.Set-Cookie#1", b: "header.Set-Cookie|cookie.sid#0", header: "sid=appRec7; Path=/"},
+		{a: "header.Set-Cookie|cookie.sid", b: "header.set-cookie#1", header: "sid=appRec7; Path=/"},
+		{a: "body.msg#1", b: "body.msg#2", recorded: `{"msg":"hello appRec7 appRec7"}`, want: `{"msg":"hello appLiveA appLiveB"}`},
+		{a: "header.Set-Cookie|cookie.sid#0", b: "header.Set-Cookie|cookie.uid", header: "sid=appRec7; uid=appRec7", want: "sid=appLiveA; uid=appLiveB"},
+	} {
+		h := newHTTP()
+		resp := c.recorded
+		if resp == "" {
+			resp = `{}`
+		}
+		m := varMock("mock-1", "POST", "http://store/apps", `{"a":"appRec7","b":"appRec7"}`, 201, resp,
+			models.MockVariables{"a": bindV("appRec7", "body.a", c.a), "b": bindV("appRec7", "body.b", c.b)})
+		if c.header != "" {
+			m.Spec.HTTPResp.Header["Set-Cookie"] = c.header
+		}
+		db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+		ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/apps", `{"a":"appLiveA","b":"appLiveB"}`))
+		if c.want == "" {
+			p := wantProblem(t, ok, diag, "two of its answer places overlap")
+			if strings.ContainsAny(c.a+c.b, "#|") && (p.place != c.b || !strings.Contains(p.why, c.a+" of variable a")) {
+				t.Fatalf("%s and %s: evidence %+v; want b's place refused beside a's", c.a, c.b, p)
+			}
+			continue
+		}
+		if !ok {
+			t.Fatalf("%s and %s: not served: %+v", c.a, c.b, diag)
+		}
+		got := stub.Spec.HTTPResp.Body
+		if c.header != "" {
+			got = stub.Spec.HTTPResp.Header["Set-Cookie"]
+		}
+		if got != c.want {
+			t.Fatalf("%s and %s: answered %s, want %s", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+// A word that holds a pct escape's digits shares no byte with the word the
+// escape stands beside, yet writing it rewrites what pct decodes: "2F"
+// written as "41" makes "%41%41", whose word 0 is "AA", and b's answer
+// would drop a's. The two are refused as overlapping places.
+func TestVariables_AWordInAnEscapeOverlapsTheWordsItDecodesTo(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := varMock("mock-1", "POST", "http://store/apps", `{"a":"2F","b":"A"}`, 201, `{}`,
+		models.MockVariables{"a": bindV("2F", "body.a", "header.X-Tok#0"), "b": bindV("A", "body.b", "header.X-Tok|pct#0")})
+	m.Spec.HTTPResp.Header["X-Tok"] = "%2F%41"
+	db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+	ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/apps", `{"a":"41","b":"B"}`))
+	if ok {
+		t.Fatalf("served X-Tok %q; want the two answer places refused", stub.Spec.HTTPResp.Header["X-Tok"])
+	}
+	p := wantProblem(t, ok, diag, "two of its answer places overlap")
+	if p.place != "header.X-Tok|pct#0" || !strings.Contains(p.why, "header.X-Tok#0 of variable a") {
+		t.Fatalf("evidence %+v; want b's place refused beside a's", p)
+	}
+}
+
+// Only a header's name is read in any case: two cookies, or two claims,
+// whose names differ in case are two places.
+func TestVariables_CookieNamesInTwoCasesAreTwoPlaces(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := varMock("mock-1", "GET", "http://store/apps", "", 200, `{}`,
+		models.MockVariables{"a": bindV("appRec7", "header.Cookie|cookie.SID"), "b": bindV("appRec8", "header.Cookie|cookie.sid")})
+	m.Spec.HTTPReq.Header["Cookie"] = "SID=appRec7; sid=appRec8"
+	db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+	r := liveReq("GET", "/apps", "")
+	r.header.Set("Cookie", "SID=appLiveA; sid=appLiveB")
+	if ok, _, diag := matchVar(t, h, db, r); !ok {
+		t.Fatalf("not served: %+v", diag)
+	}
+	for name, want := range map[string]string{"a": "appLiveA", "b": "appLiveB"} {
+		if b, bound := db.table.Lookup(name); !bound || b.Value != want {
+			t.Fatalf("%s bound as %+v (%v), want %s", name, b, bound, want)
+		}
+	}
+
+	m = varMock("mock-1", "GET", "http://store/apps", "", 200, `{}`,
+		models.MockVariables{"a": bindV("appRec7", "header.Cookie|cookie.sid"), "b": useV("appRec7", []string{"header.cookie|cookie.sid"})})
+	m.Spec.HTTPReq.Header["Cookie"] = "sid=appRec7"
+	db = &varDb{perTest: []*models.Mock{at(m, 1)}}
+	r = liveReq("GET", "/apps", "")
+	r.header.Set("Cookie", "sid=appLiveA")
+	ok, _, diag := matchVar(t, h, db, r)
+	wantProblem(t, ok, diag, "the request place header.cookie|cookie.sid is declared twice")
+}
+
+// A cookie's value answered whole may be written with another number of
+// words ("app-LiveA" is two): a word of the header after it then names
+// another word, and served it would rename the uid cookie or the Path
+// attribute. The two places are refused as overlapping, whatever the
+// values and in either order of the variables' names.
+func TestVariables_AWholeCookieAnswerMovesTheWordsAfterIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, c := range []struct{ header, liveA string }{
+		{"sid=appRec7; uid=appRec8", "app-LiveA"},
+		{"sid=appRec7; Path=/appRec8", "app-LiveA"},
+		{"sid=appRec7; uid=appRec8", "appLiveA"},
+	} {
+		for _, names := range [][2]string{{"a", "b"}, {"z", "b"}} {
+			h := newHTTP()
+			m := varMock("mock-1", "POST", "http://store/apps", `{"a":"appRec7","b":"appRec8"}`, 201, `{}`,
+				models.MockVariables{names[0]: bindV("appRec7", "body.a", "header.Set-Cookie|cookie.sid"), names[1]: bindV("appRec8", "body.b", "header.Set-Cookie#3")})
+			m.Spec.HTTPResp.Header["Set-Cookie"] = c.header
+			db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+			ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/apps", `{"a":"`+c.liveA+`","b":"appLiveB"}`))
+			if ok {
+				t.Fatalf("%q, a=%q, names %v: served Set-Cookie %q; want the two answer places refused", c.header, c.liveA, names, stub.Spec.HTTPResp.Header["Set-Cookie"])
+			}
+			p := wantProblem(t, ok, diag, "two of its answer places overlap")
+			sid, word := "header.Set-Cookie|cookie.sid", "header.Set-Cookie#3"
+			named := p.place == word && strings.Contains(p.why, sid+" of variable "+names[0]) ||
+				p.place == sid && strings.Contains(p.why, word+" of variable "+names[1])
+			if !named {
+				t.Fatalf("%q, names %v: evidence %+v; want one place refused beside the other", c.header, names, p)
+			}
+		}
+	}
+}
+
+// A word read through another cookie, by its name, stays where it is
+// whatever is written in this cookie's value.
+func TestVariables_AWholeCookieAnswerBesideAnotherCookie(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := varMock("mock-1", "POST", "http://store/apps", `{"a":"appRec7","b":"appRec8"}`, 201, `{}`,
+		models.MockVariables{"a": bindV("appRec7", "body.a", "header.Set-Cookie|cookie.sid"), "b": bindV("appRec8", "body.b", "header.Set-Cookie|cookie.uid#0")})
+	m.Spec.HTTPResp.Header["Set-Cookie"] = "sid=appRec7; uid=appRec8.x"
+	db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+	ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/apps", `{"a":"app-LiveA","b":"appLiveB"}`))
+	if !ok {
+		t.Fatalf("not served: %+v", diag)
+	}
+	if got, want := stub.Spec.HTTPResp.Header["Set-Cookie"], "sid=app-LiveA; uid=appLiveB.x"; got != want {
+		t.Fatalf("served Set-Cookie %q, want %q", got, want)
+	}
+}
+
+// The same on the request side: a call whose sid value has two words
+// sends "uid" at its word 3, not the value the recording holds there. The
+// two bind places are refused as overlapping, never bound as "uid", and so
+// they are where the call's sid value is one word, and where the word's
+// place writes the header's name in another case.
+func TestVariables_AWholeCookieBindMovesTheWordsAfterIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, live := range []string{"sid=app-LiveA; uid=appLiveB", "sid=appLiveA; uid=appLiveB"} {
+		for _, word := range []string{"header.Cookie#3", "header.cookie#3"} {
+			h := newHTTP()
+			m := varMock("mock-1", "GET", "http://store/apps", "", 200, `{}`,
+				models.MockVariables{"a": bindV("appRec7", "header.Cookie|cookie.sid"), "b": bindV("appRec8", word)})
+			m.Spec.HTTPReq.Header["Cookie"] = "sid=appRec7; uid=appRec8"
+			db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+			r := liveReq("GET", "/apps", "")
+			r.header.Set("Cookie", live)
+			ok, _, diag := matchVar(t, h, db, r)
+			p := wantProblem(t, ok, diag, "two of its request places overlap")
+			if !strings.Contains(p.why, word+" (variable b)") || !strings.Contains(p.why, "header.Cookie|cookie.sid (variable a)") {
+				t.Fatalf("%q, %s: evidence %+v; want both places named", live, word, p)
+			}
+			if _, bound := db.table.Lookup("b"); bound {
+				t.Fatalf("%q, %s: b bound", live, word)
+			}
+		}
+	}
+}
+
+// A value bound whole and at a word of it is refused as two places that
+// overlap: the call may send the value with another number of words (a sid
+// value of two words makes word 3 of the Cookie header "uid"), and the
+// word would be bound where the call did not send it. So it is where the
+// call sends the value with as many words as the recording.
+func TestVariables_AValueBoundWholeAndAtAWord(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, c := range []struct{ whole, word, header, live string }{
+		{"header.Cookie", "header.Cookie#3", "sid=appRec7; uid=appRec8", "sid=app-LiveA; uid=appLiveB"},
+		{"header.Cookie", "header.cookie#3", "sid=appRec7; uid=appRec8", "sid=appLiveA; uid=appLiveB"},
+		{"body.note", "body.note#1", "", `{"note":"by app-Live9 at boot"}`},
+		{"body.note", "body.note#1", "", `{"note":"by appLive9 at boot"}`},
+	} {
+		h := newHTTP()
+		var m *models.Mock
+		r := liveReq("PUT", "/notes/1", c.live)
+		if c.header != "" {
+			m = varMock("mock-1", "PUT", "http://store/notes/1", "", 200, `{"u":"appRec8"}`,
+				models.MockVariables{"a": bindV(c.header, c.whole), "b": bindV("appRec8", c.word, "body.u")})
+			m.Spec.HTTPReq.Header["Cookie"] = c.header
+			r = liveReq("PUT", "/notes/1", "")
+			r.header.Set("Cookie", c.live)
+		} else {
+			m = varMock("mock-1", "PUT", "http://store/notes/1", `{"note":"by appRec7 at boot"}`, 200, `{"u":"appRec7"}`,
+				models.MockVariables{"a": bindV("by appRec7 at boot", c.whole), "b": bindV("appRec7", c.word, "body.u")})
+		}
+		db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+		ok, stub, diag := matchVar(t, h, db, r)
+		if ok {
+			t.Fatalf("%s and %s, %q: served %s; want the two places refused", c.whole, c.word, c.live, stub.Spec.HTTPResp.Body)
+		}
+		p := wantProblem(t, ok, diag, "two of its request places overlap")
+		if !strings.Contains(p.why, c.word+" (variable b)") || !strings.Contains(p.why, c.whole+" (variable a)") {
+			t.Fatalf("%s and %s: evidence %+v; want both places named", c.whole, c.word, p)
+		}
+		if _, bound := db.table.Lookup("b"); bound {
+			t.Fatalf("%s and %s, %q: b bound", c.whole, c.word, c.live)
+		}
+	}
+}
+
+// Of three places of one value, two that are not side by side in the
+// order of binding are refused as overlapping too, before any is put back.
+func TestVariables_ThreeWordsOfOneValue(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := varMock("mock-1", "PUT", "http://store/notes/1", `{"note":"appRec7 x appRec8"}`, 204, `{}`,
+		models.MockVariables{"a": bindV("appRec7", "body.note#0"), "b": bindV("appRec8", "body.note#2"), "c": bindV("appRec7", "body.note|pct#0")})
+	db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+	ok, _, diag := matchVar(t, h, db, liveReq("PUT", "/notes/1", `{"note":"appLiveA x appLiveB"}`))
+	wantProblem(t, ok, diag, "a word written at body.note|pct#0 (variable c) changes what body.note#0 (variable a) names")
+}
+
+// A put-back that changes a word put back before it is refused with both
+// places named, whichever was put back first: the call's "%20" makes b's
+// word 0 "20b", and appRec8 put back there leaves "%ap", which a's pct
+// step cannot read.
+func TestVariables_APutBackThatMovesAnEarlierWord(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := varMock("mock-1", "GET", "http://store/apps", "", 200, `{}`,
+		models.MockVariables{"a": bindV("appRec7", "header.X-Q|pct#1"), "b": bindV("appRec8", "header.X-Q#0")})
+	m.Spec.HTTPReq.Header["X-Q"] = "appRec8 appRec7"
+	db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+	r := liveReq("GET", "/apps", "")
+	r.header.Set("X-Q", "%20b appLiveA")
+	ok, _, diag := matchVar(t, h, db, r)
+	wantProblem(t, ok, diag, "a word put back at header.X-Q#0 (variable b) or at header.X-Q|pct#1 (variable a) moves what the other names")
+}
+
+// Two word places the recorded request does not hold as words, or holds
+// at a value of another type, are refused for what the recording holds,
+// not as overlapping.
+func TestVariables_TwoWordsTheRecordingDoesNotHold(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, c := range []struct{ body, a, b, want string }{
+		{`{"note":"by appRec7"}`, "body.note#1", "body.note#4", "holds no single value at body.note#4"},
+		{`{"note":"by appRec7"}`, "body.note#4", "body.note#1", "holds no single value at body.note#4"},
+		{`{"n":12.5}`, "body.n#0", "body.n|pct#0", "which is no string to hold a word of"},
+		// Two values whole under a step, at a field the recording does
+		// not hold, are left to the variable pass, which says so: they
+		// are not refused as overlapping. Read in the empty text, both
+		// would overlap there.
+		{`{"other":"x"}`, "body.note|pct", "body.note|pct|pct", "holds no single value at body.note|pct"},
+	} {
+		h := newHTTP()
+		db := &varDb{perTest: []*models.Mock{
+			at(varMock("mock-1", "PUT", "http://store/notes/1", c.body, 204, `{}`,
+				models.MockVariables{"a": bindV("appRec7", c.a), "b": bindV("appRec7", c.b)}), 1),
+		}}
+		ok, _, diag := matchVar(t, h, db, liveReq("PUT", "/notes/1", c.body))
+		wantProblem(t, ok, diag, c.want)
+	}
+}
+
+// A variables block read with no recorded request, as the learn step reads
+// the variables it paired, holds no value to overlap in.
+func TestVariables_WordsReadWithNoRequest(t *testing.T) {
+	decls, why := readDecls(&models.Mock{Name: "mock-1", Spec: models.MockSpec{Variables: models.MockVariables{
+		"a": bindV("appRec7", "header.Cookie|cookie.sid"), "b": bindV("appRec8", "header.Cookie#3"),
+	}}})
+	if why != "" || len(decls) != 2 {
+		t.Fatalf("readDecls = %d decls, %q; want both read", len(decls), why)
+	}
+}
+
+// wantWorded checks a miss's evidence is the worded check's: the text
+// field that places variable name's word is not the recording's, and noise
+// is not applied there.
+func wantWorded(t *testing.T, diag *matchDiag, field, name string) *varProblem {
+	t.Helper()
+	p := wantProblem(t, false, diag, "noise is not applied there")
+	if p.kind != models.DiffKindValueChanged || p.field != field || p.name != name || p.expected == p.actual {
+		t.Fatalf("evidence %+v; want a value change of %s for variable %s", p, field, name)
+	}
+	return p
+}
+
+// A cookie read by name is placed by its own value, which no other cookie
+// of the header moves: that value, its words put back, is compared with
+// the recording, and the rest of the header keeps the noise keploy.yml or
+// the learn step gives it. So another session cookie, one with more words,
+// or the cookies in another order still bind the word; a shift inside the
+// cookie's own value is a miss that names it. A word of the header itself
+// is placed by the whole header, which is compared whatever the noise.
+func TestVariables_ACookieReadByNameIsPlacedByItsOwnValue(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const rec = "sid=appRec7; uid=appRec8"
+	for _, c := range []struct {
+		place, rec, live string
+		want             string // the value bound, or "" for a miss
+		// a miss's evidence: the text that places the word, its recorded
+		// and sent values
+		field, expected, actual string
+	}{
+		{"header.Cookie|cookie.uid", rec, "sid=appLiveX; uid=appLiveB", "appLiveB", "", "", ""},
+		{"header.Cookie|cookie.uid", rec, "sid=app-LiveA; uid=appLiveB", "appLiveB", "", "", ""},
+		{"header.Cookie|cookie.uid", rec, "uid=appLiveB; sid=appRec7", "appLiveB", "", "", ""},
+		{"header.Cookie|cookie.uid#1", "sid=appRec7; uid=a.appRec8", "sid=appLiveX; uid=a.appLiveB", "appLiveB", "", "", ""},
+		{"header.Cookie|cookie.uid#1", "sid=appRec7; uid=a.appRec8", "sid=appRec7; uid=a-b.appLive", "", "header.Cookie|cookie.uid", "a.appRec8", "a-b.appLive"},
+		{"header.Cookie#3", rec, "sid=appLiveX; uid=appLiveB", "", "header.Cookie", rec, "sid=appLiveX; uid=appLiveB"},
+	} {
+		for _, learned := range []bool{false, true} {
+			h := newHTTP()
+			m := varMock("mock-1", "GET", "http://store/apps", "", 200, `{"u":"appRec8"}`,
+				models.MockVariables{"b": bindV("appRec8", c.place, "body.u")})
+			m.Spec.HTTPReq.Header["Cookie"] = c.rec
+			headerNoise := map[string][]string{"cookie": {}}
+			if learned {
+				m.Spec.ReqBodyNoise = map[string][]string{"header.cookie": nil}
+				headerNoise = nil
+			}
+			db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+			r := liveReq("GET", "/apps", "")
+			r.header.Set("Cookie", c.live)
+			ok, stub, diag, err := h.match(t.Context(), r, db, headerNoise, nil, nil, true, false, false, true, true)
+			if err != nil {
+				t.Fatalf("match: %v", err)
+			}
+			b, bound := db.table.Lookup("b")
+			if c.want == "" {
+				if ok || bound {
+					t.Fatalf("%s, %q (learned noise %v): served (%v), b bound as %q; want a miss", c.place, c.live, learned, ok, b.Value)
+				}
+				if p := wantWorded(t, diag, c.field, "b"); p.expected != c.expected || p.actual != c.actual {
+					t.Fatalf("%s, %q (learned noise %v): evidence %+v; want %q recorded, %q sent", c.place, c.live, learned, p, c.expected, c.actual)
+				}
+				continue
+			}
+			if !ok {
+				t.Fatalf("%s, %q (learned noise %v): not served: %+v", c.place, c.live, learned, diag)
+			}
+			if !bound || b.Value != c.want || stub.Spec.HTTPResp.Body != `{"u":"`+c.want+`"}` {
+				t.Fatalf("%s, %q (learned noise %v): b bound as %q (%v), answered %s; want %s", c.place, c.live, learned, b.Value, bound, stub.Spec.HTTPResp.Body, c.want)
+			}
+		}
+	}
+	// With no noise at the header, its other cookies are compared.
+	h := newHTTP()
+	m := varMock("mock-1", "GET", "http://store/apps", "", 200, `{"u":"appRec8"}`,
+		models.MockVariables{"b": bindV("appRec8", "header.Cookie|cookie.uid", "body.u")})
+	m.Spec.HTTPReq.Header["Cookie"] = rec
+	db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+	r := liveReq("GET", "/apps", "")
+	r.header.Set("Cookie", "sid=appLiveX; uid=appLiveB")
+	if ok, stub, _ := matchVar(t, h, db, r); ok {
+		t.Fatalf("served %s with another sid and no noise", stub.Spec.HTTPResp.Body)
+	}
+}
+
+// Two cookies read by name in one Cookie header are two texts, each
+// compared with the recording, its word put back, whatever the header's
+// noise: a shift inside either cookie's value is a miss that names that
+// cookie, its recorded and sent values, and a call that sends both in the
+// recorded shape, beside another cookie or in another order, binds both.
+func TestVariables_TwoCookiesReadByNameInOneHeader(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, c := range []struct {
+		live string
+		// a miss's evidence, or "" where the call is served
+		name, field, expected, actual string
+	}{
+		{"sid=x.appLiveA; uid=a-b.appLive", "b", "header.Cookie|cookie.uid", "a.appRec8", "a-b.appLive"},
+		{"sid=x-y.appLiveA; uid=a.appLiveB", "a", "header.Cookie|cookie.sid", "x.appRec7", "x-y.appLiveA"},
+		{"sid=x.appLiveA; uid=a.appLiveB", "", "", "", ""},
+		{"z=1; uid=a.appLiveB; sid=x.appLiveA", "", "", "", ""},
+	} {
+		for _, learned := range []bool{false, true} {
+			h := newHTTP()
+			m := varMock("mock-1", "GET", "http://store/apps", "", 200, `{"u":"appRec8","v":"appRec7"}`, models.MockVariables{
+				"a": bindV("appRec7", "header.Cookie|cookie.sid#1", "body.v"),
+				"b": bindV("appRec8", "header.Cookie|cookie.uid#1", "body.u"),
+			})
+			m.Spec.HTTPReq.Header["Cookie"] = "sid=x.appRec7; uid=a.appRec8"
+			headerNoise := map[string][]string{"cookie": {}}
+			if learned {
+				m.Spec.ReqBodyNoise = map[string][]string{"header.cookie": nil}
+				headerNoise = nil
+			}
+			db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+			r := liveReq("GET", "/apps", "")
+			r.header.Set("Cookie", c.live)
+			ok, stub, diag, err := h.match(t.Context(), r, db, headerNoise, nil, nil, true, false, false, true, true)
+			if err != nil {
+				t.Fatalf("match: %v", err)
+			}
+			a, aBound := db.table.Lookup("a")
+			b, bBound := db.table.Lookup("b")
+			if c.name != "" {
+				if ok || aBound || bBound {
+					t.Fatalf("%q (learned noise %v): served (%v), a bound as %q (%v), b as %q (%v); want a miss", c.live, learned, ok, a.Value, aBound, b.Value, bBound)
+				}
+				if p := wantWorded(t, diag, c.field, c.name); p.expected != c.expected || p.actual != c.actual {
+					t.Fatalf("%q (learned noise %v): evidence %+v; want %q recorded, %q sent", c.live, learned, p, c.expected, c.actual)
+				}
+				continue
+			}
+			if !ok || !aBound || !bBound || a.Value != "appLiveA" || b.Value != "appLiveB" || stub.Spec.HTTPResp.Body != `{"u":"appLiveB","v":"appLiveA"}` {
+				t.Fatalf("%q (learned noise %v): served %v, a bound as %q (%v), b as %q (%v), diag %+v", c.live, learned, ok, a.Value, aBound, b.Value, bBound, diag)
+			}
+		}
+	}
+}
+
+// Every value a word is bound in is compared, not the first only: a call
+// that sends the header's word as recorded but the note with more words
+// before its word misses on the note, whatever its noise, and names it.
+// Where both are sent so, the miss names the first in the order of binding.
+func TestVariables_EachWordedValueIsCompared(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, c := range []struct{ xa, note, field, name string }{
+		{"id appLive5", "by app-Live9 at boot", "body.note", "c"},
+		{"i-d appLive5", "by app-Live9 at boot", "header.X-A", "b"},
+		{"id appLive5", "by appLive9 at boot", "", ""},
+	} {
+		note := c.note
+		h := newHTTP()
+		m := varMock("mock-1", "PUT", "http://store/notes/1", `{"note":"by appRec7 at boot"}`, 200, `{"u":"appRec7","v":"appRec5"}`,
+			models.MockVariables{"b": bindV("appRec5", "header.X-A#1", "body.v"), "c": bindV("appRec7", "body.note#1", "body.u")})
+		m.Spec.HTTPReq.Header["X-A"] = "id appRec5"
+		db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+		r := liveReq("PUT", "/notes/1", `{"note":"`+note+`"}`)
+		r.header.Set("X-A", c.xa)
+		ok, stub, diag, err := h.match(t.Context(), r, db, nil, map[string][]string{"note": {}}, nil, true, false, false, true, true)
+		if err != nil {
+			t.Fatalf("match: %v", err)
+		}
+		v, bound := db.table.Lookup("c")
+		if c.field != "" {
+			if ok || bound {
+				t.Fatalf("%q, %q: served (%v), c bound as %q; want a miss", c.xa, note, ok, v.Value)
+			}
+			wantWorded(t, diag, c.field, c.name)
+			continue
+		}
+		if !ok || !bound || v.Value != "appLive9" || stub.Spec.HTTPResp.Body != `{"u":"appLive9","v":"appLive5"}` {
+			t.Fatalf("%q: served %v, c bound as %q (%v), diag %+v", note, ok, v.Value, bound, diag)
+		}
+	}
+}
+
+// A call that changes a bound value's JSON type and sends a worded value in
+// another shape misses with the type change as its evidence, as where that
+// is the call's one difference.
+func TestVariables_ATypeChangeIsTheEvidenceBeforeAWordedMiss(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := varMock("mock-1", "PUT", "http://store/notes/1", `{"x":"1730000000"}`, 200, `{"v":"appRec5"}`,
+		models.MockVariables{"a": bindV("1730000000", "body.x"), "b": bindV("appRec5", "header.X-A#1", "body.v")})
+	m.Spec.HTTPReq.Header["X-A"] = "id appRec5"
+	db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+	r := liveReq("PUT", "/notes/1", `{"x":5}`)
+	r.header.Set("X-A", "i-d appLive5")
+	ok, _, diag := matchVar(t, h, db, r)
+	if p := wantProblem(t, ok, diag, "a value of another JSON type"); p.name != "a" || p.place != "body.x" || p.kind != models.DiffKindTypeChanged {
+		t.Fatalf("evidence %+v; want variable a's type change at body.x", p)
+	}
+	if _, bound := db.table.Lookup("b"); bound {
+		t.Fatal("b bound")
+	}
+}
+
+// A value bound whole is refused beside a word of it whichever comes first
+// in the order of binding, with both places named.
+func TestVariables_AWordBoundBeforeItsValueWhole(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const rec = "sid=appRec7; uid=appRec8"
+	h := newHTTP()
+	m := varMock("mock-1", "GET", "http://store/apps", "", 200, `{"u":"appRec8"}`,
+		models.MockVariables{"a": bindV("appRec8", "header.Cookie#3", "body.u"), "b": bindV(rec, "header.Cookie")})
+	m.Spec.HTTPReq.Header["Cookie"] = rec
+	db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+	r := liveReq("GET", "/apps", "")
+	r.header.Set("Cookie", "sid=app-LiveA; uid=appLiveB")
+	ok, _, diag := matchVar(t, h, db, r)
+	wantProblem(t, ok, diag, "two of its request places overlap: a word written at header.Cookie (variable b) changes what header.Cookie#3 (variable a) names")
+	if _, bound := db.table.Lookup("a"); bound {
+		t.Fatal("a bound")
+	}
+}
+
+// A text bound whole under a step has no word to move, and the field it is
+// read in is still compared as the recording spells it, the recorded text
+// put back: a call that spells the escape before the variable's text as
+// recorded binds it, and one that spells it otherwise misses, naming the
+// field.
+func TestVariables_AWholeTextUnderAStepIsComparedAsRecorded(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for live, want := range map[string]string{"app%2DLive7": "app-Live7", "app-Live7": ""} {
+		h := newHTTP()
+		m := varMock("mock-1", "GET", "http://store/apps", "", 200, `{"u":"app-Rec7"}`,
+			models.MockVariables{"b": bindV("app-Rec7", "header.X-Q|pct", "body.u")})
+		m.Spec.HTTPReq.Header["X-Q"] = "app%2DRec7"
+		db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+		r := liveReq("GET", "/apps", "")
+		r.header.Set("X-Q", live)
+		ok, stub, diag := matchVar(t, h, db, r)
+		b, bound := db.table.Lookup("b")
+		if want == "" {
+			if ok || bound {
+				t.Fatalf("%q: served (%v), b bound as %q; want a miss", live, ok, b.Value)
+			}
+			wantWorded(t, diag, "header.X-Q", "b")
+			continue
+		}
+		if !ok || !bound || b.Value != want || stub.Spec.HTTPResp.Body != `{"u":"`+want+`"}` {
+			t.Fatalf("%q: served %v, b bound as %q (%v), diag %+v", live, ok, b.Value, bound, diag)
 		}
 	}
 }
