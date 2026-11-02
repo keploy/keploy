@@ -4,8 +4,8 @@ import (
 	"context"
 	"sync"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/errdefs"
 	"go.uber.org/zap"
 )
 
@@ -85,7 +85,7 @@ func (w *RemovalWatch) Wait(ctx context.Context, logger *zap.Logger) {
 	select {
 	case <-said:
 	case err := <-failed:
-		if !errdefs.IsNotFound(err) {
+		if !cerrdefs.IsNotFound(err) {
 			logger.Debug("the engine did not say the container was removed", zap.String("container", w.name), zap.Error(err))
 		}
 	case <-ctx.Done():
