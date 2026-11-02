@@ -500,7 +500,13 @@ func isSHA256Hex(s string) bool {
 // classZones hold, its Word and WallWord zero. Each field of the result is
 // one however the learnings are grouped: the place both read (one
 // wordClass, or none), the zone every classZone holds, and the instant's
-// form only where every learning read the instant.
+// form only where every learning read the instant. That holds over the
+// learnings the learn step makes (its withWallWord), where a read of an
+// instant names the WallWord of its own span: its Word (none where it
+// reads the value whole) is that WallWord with the zone after it, so two
+// reads that name one WallWord name one Word. Two that named it at two
+// Words would meet as Empty, though each meets the word read at that
+// WallWord as that read, and grouping would tell; no learning makes them.
 func meetWord(o, p ClockOffset) (word, wall ClockWord, zone string, ok bool) {
 	zone = meetZones(classZone(o), classZone(p))
 	switch {

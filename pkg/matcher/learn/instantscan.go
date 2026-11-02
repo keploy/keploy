@@ -328,7 +328,7 @@ func rfc1123At(s string, i int) int {
 // s[j], " [+-](?:0\d|1[0-4]):?[0-5]\d" with no letter, digit, "." or ","
 // right after it (zoneRunsOn), or -1 where none does.
 func spaceZoneAt(s string, j int) int {
-	if !byteIs(s, j, " ") || !byteIs(s, j+1, "+-") || !(byteIs(s, j+2, "0") && digitsAt(s, j+3, 1) || byteIs(s, j+2, "1") && byteIs(s, j+3, "01234")) {
+	if !byteIs(s, j, " ") || !byteIs(s, j+1, "+-") || !zoneHourAt(s, j+2) {
 		return -1
 	}
 	e := j + 4
@@ -342,6 +342,14 @@ func spaceZoneAt(s string, j int) int {
 		return -1
 	}
 	return e
+}
+
+// zoneHourAt reports whether s[i:i+2] is a zone's hour, "0\d" or "1[0-4]".
+func zoneHourAt(s string, i int) bool {
+	if byteIs(s, i, "0") {
+		return digitsAt(s, i+1, 1)
+	}
+	return byteIs(s, i, "1") && byteIs(s, i+1, "01234")
 }
 
 // isoAt is layout 1, its match ending where isoEnd says:

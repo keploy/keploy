@@ -89,7 +89,9 @@ func TestAWallClockWordAndTheInstantItIsMeetAsTheWordInUTC(t *testing.T) {
 	// whole or at a word, in any zone, and a read of an instant at the
 	// text's end (a Sequelize stamp) or at a word (Go's, its zone's name
 	// after it) that names the word of its date and time, in any zone (none
-	// but "" is learned), each in any layout.
+	// but "" is learned), each in any layout. A read of an instant at a
+	// Word its WallWord does not fix ({other, word}) is left out: no
+	// learning makes it, and grouping tells there (meetWord).
 	var all []ClockOffset
 	for _, pair := range [][2]ClockWord{{}, {word, {}}, {other, {}}, {goWord, {}}, {goInstant.Word, {}}, {{}, word}, {goInstant.Word, goWord}} {
 		for _, z := range []string{"", ZoneUTC, ZoneApp, ZoneEither, ZoneApart} {
