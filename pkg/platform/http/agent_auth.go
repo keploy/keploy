@@ -87,8 +87,10 @@ func noKeepAlives(t *http.Transport) *http.Transport {
 // "keploy-agent". Sent to registered, a scheme nothing registered fails there
 // with that same error, as it does on the clone.
 type ownPool struct {
-	pool       *http.Transport
-	registered *http.Transport
+	pool *http.Transport
+	// registered is the transport the embedder registered its schemes on.
+	// Nothing here needs more of it than RoundTrip.
+	registered http.RoundTripper
 }
 
 func (t *ownPool) RoundTrip(req *http.Request) (*http.Response, error) {

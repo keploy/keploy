@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
@@ -167,16 +166,21 @@ func TestASchemeTheEmbedderRegisteredReachesItsRoundTripper(t *testing.T) {
 	for client, newClient := range clientsOfTheAgentClient {
 		for path, ask := range requestsOnBothPaths {
 			t.Run(client+", "+path, func(t *testing.T) {
+				scheme := registerScheme(t, "pod-token")
+				// The note is kept per address for the life of the process,
+				// and a later server can get an earlier one's port: an
+				// instance of this subtest's own cannot be an earlier note.
+				instance := "proc-of-" + scheme
 				var auth atomic.Value
 				auth.Store("")
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					auth.Store(r.Header.Get("Authorization"))
-					w.Header().Set(models.AgentInstanceHeader, "proc-1")
+					w.Header().Set(models.AgentInstanceHeader, instance)
 					_, _ = w.Write([]byte("[]"))
 				}))
 				defer srv.Close()
-				scheme := registerScheme(t, "pod-token")
 				host := strings.TrimPrefix(srv.URL, "http://")
+				t.Cleanup(func() { instances.Delete(host) })
 				a := &AgentClient{logger: zap.NewNop(), client: newClient(), conf: &config.Config{Agent: config.Agent{AgentURI: scheme + "://" + host}}}
 				if err := ask(context.Background(), a); err != nil {
 					t.Fatalf("the request in the embedder's scheme failed: %v", err)
@@ -188,8 +192,8 @@ func TestASchemeTheEmbedderRegisteredReachesItsRoundTripper(t *testing.T) {
 				s.mu.Lock()
 				latest := s.latest
 				s.mu.Unlock()
-				if latest != "proc-1" {
-					t.Fatalf("the agent process noted last is %q, want proc-1: this answer was not noted", latest)
+				if latest != instance {
+					t.Fatalf("the agent process noted last is %q, want %q: this answer was not noted", latest, instance)
 				}
 			})
 		}
@@ -212,15 +216,15 @@ func TestASchemeNothingRegisteredFailsAsBefore(t *testing.T) {
 	}
 }
 
-// A request on http or https goes on the pool of keploy's (ownPool), never to
-// the transport the pool was cloned from, whose connections are shared with
-// every other client on it (agentPool); and a request with no URL fails there
-// as it does on any transport.
+// A request on http or https, and a request with no URL, goes on the pool of
+// keploy's (ownPool), never to the round tripper a registered scheme goes to:
+// that is the default transport, whose connections are shared with every
+// other client on it (agentPool). The stand-in for it here fails every
+// request it gets with an error of its own, so a request it served cannot
+// pass as one the pool served.
 func TestHTTPAndHTTPSStayOnThePool(t *testing.T) {
-	onRegistered := errors.New("dialed on the transport the pool was cloned from")
-	registered := &http.Transport{
-		DialContext: func(context.Context, string, string) (net.Conn, error) { return nil, onRegistered },
-	}
+	onRegistered := errors.New("served by the round tripper a registered scheme goes to")
+	registered := roundTripperFunc(func(*http.Request) (*http.Response, error) { return nil, onRegistered })
 	answer := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	plain := httptest.NewServer(answer)
 	defer plain.Close()
@@ -250,8 +254,59 @@ func TestHTTPAndHTTPSStayOnThePool(t *testing.T) {
 	}
 	t.Run("no URL", func(t *testing.T) {
 		_, err := (&ownPool{pool: &http.Transport{}, registered: registered}).RoundTrip(&http.Request{Header: http.Header{}})
+		if errors.Is(err, onRegistered) {
+			t.Fatalf("a request with no URL left the pool: %v", err)
+		}
 		if err == nil || !strings.Contains(err.Error(), "nil Request.URL") {
-			t.Fatalf("got %v, want the transport's nil Request.URL error", err)
+			t.Fatalf("got %v, want the pool's nil Request.URL error", err)
 		}
 	})
+}
+
+// A connection of its own (ownConnection) is made on a copy of the client's
+// pool, for its one request: the copy keeps no connection, and the client's
+// pool, and the default transport a registered scheme goes to, keep theirs
+// for every request after it. Keep-alives turned off on the pool itself
+// would be gone for every later request on the client, and that write would
+// race with the requests on the pool.
+func TestAnOwnConnectionLeavesThePoolItsConnections(t *testing.T) {
+	for client, newClient := range clientsOfTheAgentClient {
+		t.Run(client, func(t *testing.T) {
+			a := &AgentClient{logger: zap.NewNop(), client: newClient()}
+			own := a.ownConnection()
+			if !poolOf(t, own.Transport).DisableKeepAlives {
+				t.Fatal("the connection of its own is on a pool that keeps connections")
+			}
+			if poolOf(t, a.client.Transport).DisableKeepAlives {
+				t.Fatal("the client's pool keeps no connection after a connection of its own was made")
+			}
+			if http.DefaultTransport.(*http.Transport).DisableKeepAlives {
+				t.Fatal("the default transport keeps no connection after a connection of its own was made")
+			}
+		})
+	}
+}
+
+// poolOf is the transport an AgentClient's http request goes on, under its
+// instance note and token: the pool of an ownPool, or the default transport
+// when there is none.
+func poolOf(t *testing.T, rt http.RoundTripper) *http.Transport {
+	t.Helper()
+	for {
+		switch r := rt.(type) {
+		case nil:
+			rt = http.DefaultTransport
+		case *instanceTransport:
+			rt = r.base
+		case *bearerTransport:
+			rt = r.base
+		case *ownPool:
+			return r.pool
+		case *http.Transport:
+			return r
+		default:
+			t.Fatalf("%T is no transport of the agent client's", rt)
+			return nil
+		}
+	}
 }
