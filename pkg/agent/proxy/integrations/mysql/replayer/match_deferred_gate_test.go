@@ -383,3 +383,29 @@ func TestAMockReplayEndsItsWalkAtItsRequestsFirstRecording(t *testing.T) {
 		}
 	}
 }
+
+// TestAStartUpExecuteTakesItsStartUpRecordingThoughALaterGapsComesFirst:
+// before keploy test's first test no window is open, so no recording is the
+// open test's own, and a call's recordings of its request made outside every
+// test's window rank by gap (outsideGapRank): the start-up gap's above a
+// later gap's. The walk ends at such a recording only at the best rank
+// (execDecided). Here the set holds a recording of the call's request made
+// between tests 0 and 1 before the start-up one: it does not decide the call,
+// and the start-up recording after it answers, as the whole walk answers it.
+func TestAStartUpExecuteTakesItsStartUpRecordingThoughALaterGapsComesFirst(t *testing.T) {
+	_, end0 := diffWindow(0)
+	prep, _, _ := betweenTestsRecording()
+	later := diffMock("gap0-exec-5", "c1", []mysql.Request{executeReq(7, "5")}, end0.Add(2*time.Millisecond), models.LifetimePerTest, "mocks")
+	startup := diffMock("startup-exec-5", "c1", []mysql.Request{executeReq(7, "5")}, diffBase.Add(-300*time.Microsecond), models.LifetimePerTest, "mocks")
+	ctx, _ := betweenTestsConn()
+	for _, eager := range []bool{true, false} {
+		s := newDiffSide(t, []*models.Mock{prep, later, startup})
+		seedWindows(s.mm, 2)
+		s.stageNoWindow()
+		got, _ := s.matchGate(ctx, executeReq(7, "5"), s.dctx, nil, eager)
+		s.mm.Close()
+		if !strings.HasPrefix(got, "served startup-exec-5 ") {
+			t.Errorf("eager gate and whole walk %v: %s, want startup-exec-5, the start-up gap's recording, served", eager, got)
+		}
+	}
+}
