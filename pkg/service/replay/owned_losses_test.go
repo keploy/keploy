@@ -87,6 +87,11 @@ func TestKeployTestReadsTheLossesACutShortEndOwned(t *testing.T) {
 	if set, err := failed.applyOwnedLosses(nil); err == nil || len(set) != 1 {
 		t.Fatalf("a take that failed: %v, %v; want its loss and the error", set, err)
 	}
+	// Its error is the set's it was applied at, and no later set's: a
+	// later set whose takes answered is judged.
+	if set, err := failed.applyOwnedLosses(nil); len(set) != 0 || err != nil {
+		t.Fatalf("a take that failed, applied again: %v, %v; want each once", set, err)
+	}
 
 	t.Setenv(provenswitch.Env, "")
 	off := &Replayer{instrumentation: &ownedTaker{takes: []ownedTake{{owned: []models.OwnedCaptureLoss{loss("test-1")}}}}}
