@@ -420,6 +420,18 @@ func TestLearnedFieldTypeStrict(t *testing.T) {
 			t.Fatalf("a user-configured path must keep full-ignore even when it was also learned")
 		}
 
+		// A user value regex on a path that was also learned keeps the user's
+		// regex: the regex is a constraint the user set, and the learned
+		// full-ignore must not erase it. The recorded id is 1. A regex that
+		// covers neither 1 nor the live 2 leaves the change to be judged, so
+		// it is rejected; one that covers both lets it through.
+		if strict().StrictAllows(&models.Mock{}, []byte(`{"id":2,"name":"a"}`), map[string][]string{"id": {"^3$"}}) {
+			t.Fatalf("a value change the user's regex does not cover must be rejected even when the path was also learned")
+		}
+		if !strict().StrictAllows(&models.Mock{}, []byte(`{"id":2,"name":"a"}`), map[string][]string{"id": {"^[12]$"}}) {
+			t.Fatalf("a value change the user's regex covers must be allowed when the path was also learned")
+		}
+
 		// camelCase collision: user body noise is lowercased at ingest ("userid"),
 		// learned noise keeps the JSON case ("userId"). The user-exclusion must be
 		// case-insensitive, so a user-ignored camelCase field stays full-ignore (a type
