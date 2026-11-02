@@ -22,7 +22,7 @@ func TestAReadSpanningTheWindowsBeginKeepsTheTestsStream(t *testing.T) {
 	}
 	p.send(bg)
 	waitInq(t, p.proxy, len(bg))
-	p.tr.beginWindow()
+	p.tr.beginWindow(0)
 	p.send(call)
 	waitInq(t, p.proxy, len(bg)+len(call))
 	go readOnce(p.proxy, p.got)
@@ -32,7 +32,7 @@ func TestAReadSpanningTheWindowsBeginKeepsTheTestsStream(t *testing.T) {
 	release := p.proxy.Hold() // the test's own stream
 	go readOnce(p.proxy, p.got)
 	waitSettled(t, p.tr, func() bool { return p.proxy.reading.Load() == 1 })
-	sc := p.tr.scope() // the test's end
+	sc := p.tr.scope(0) // the test's end
 	if n, _ := sc.State(true); n != 1 {
 		t.Fatalf("lost call: the test's own stream, opened after its window began, is held and unanswered, but its end's scope pending = %d, want 1", n)
 	}
@@ -56,7 +56,7 @@ func TestAStreamInTheReadThatSpansTheWindowsBeginHoldsTheTestsEnd(t *testing.T) 
 	}
 	p.send(before)
 	waitInq(t, p.proxy, len(before))
-	p.tr.beginWindow()
+	p.tr.beginWindow(0)
 	p.send(call)
 	waitInq(t, p.proxy, len(before)+len(call))
 	go readOnce(p.proxy, p.got)
@@ -67,7 +67,7 @@ func TestAStreamInTheReadThatSpansTheWindowsBeginHoldsTheTestsEnd(t *testing.T) 
 	test := p.proxy.Hold()
 	go readOnce(p.proxy, p.got)
 	waitSettled(t, p.tr, func() bool { return p.proxy.reading.Load() == 1 })
-	sc := p.tr.scope()
+	sc := p.tr.scope(0)
 	if n, _ := sc.State(true); n != 1 {
 		t.Fatalf("both streams held: scope pending %d, want 1", n)
 	}
@@ -98,7 +98,7 @@ func TestAReadSpanningTheWindowsBeginLeavesAStreamHeldBeforeItOut(t *testing.T) 
 	}
 	p.send(more)
 	waitInq(t, p.proxy, len(more))
-	p.tr.beginWindow()
+	p.tr.beginWindow(0)
 	p.send(call)
 	waitInq(t, p.proxy, len(more)+len(call))
 	go readOnce(p.proxy, p.got)
@@ -108,7 +108,7 @@ func TestAReadSpanningTheWindowsBeginLeavesAStreamHeldBeforeItOut(t *testing.T) 
 	own := p.proxy.Hold() // the test's own stream
 	go readOnce(p.proxy, p.got)
 	waitSettled(t, p.tr, func() bool { return p.proxy.reading.Load() == 1 })
-	sc := p.tr.scope() // the test's end
+	sc := p.tr.scope(0) // the test's end
 	if n, _ := sc.State(true); n != 1 {
 		t.Fatalf("the test's own stream held: scope pending %d, want 1", n)
 	}
@@ -135,7 +135,7 @@ func TestAReadSpanningTheEndsCutWaitsForTheLaterStreamToo(t *testing.T) {
 	}
 	p.send(call)
 	waitInq(t, p.proxy, len(call))
-	sc := p.tr.scope() // the test's end, its call in the socket
+	sc := p.tr.scope(0) // the test's end, its call in the socket
 	p.send(later)
 	waitInq(t, p.proxy, len(call)+len(later))
 	go readOnce(p.proxy, p.got)
@@ -163,22 +163,22 @@ func TestAReadSpanningTheEndsCutWaitsForTheLaterStreamToo(t *testing.T) {
 // waits for it.
 func TestAGiveUpOnANeverAnsweredStreamLeavesLaterTestsOnItsConnectionVerified(t *testing.T) {
 	p := newStreamParser(t)
-	p.tr.beginWindow()
+	p.tr.beginWindow(0)
 	stuck := p.open("HEADERS stream 1", false) // the test's stream, never answered
 	defer stuck()
-	sc := p.tr.scope()
+	sc := p.tr.scope(0)
 	if words := sc.GiveUp([]uint64{p.proxy.id}, true); len(words) != 1 {
 		t.Fatalf("give-up words %q", words)
 	}
 	for i, s := range []string{"HEADERS stream 3", "HEADERS stream 5", "HEADERS stream 7"} {
-		p.tr.beginWindow()
+		p.tr.beginWindow(0)
 		own := p.open(s, false)
-		held := p.tr.scope()
+		held := p.tr.scope(0)
 		if n, _ := held.State(true); n != 1 {
 			t.Fatalf("later test %d: its own stream held: scope pending %d, want 1", i+1, n)
 		}
 		own() // the later test's own call, answered in its window
-		later := p.tr.scope()
+		later := p.tr.scope(0)
 		n, _ := later.State(true)
 		b, charge := later.Behind()
 		if n != 0 || len(b) != 0 {
@@ -198,10 +198,10 @@ func TestAGiveUpOnANeverAnsweredStreamLeavesLaterTestsOnItsConnectionVerified(t 
 // since until it is answered.
 func TestAGiveUpOnAStreamEndsWithItForTheNextBegin(t *testing.T) {
 	p := newStreamParser(t)
-	p.tr.beginWindow()
+	p.tr.beginWindow(0)
 	stuck := p.open("HEADERS stream 1", false)
 	defer stuck()
-	sc := p.tr.scope() // the test's end
+	sc := p.tr.scope(0) // the test's end
 	if words := sc.GiveUp([]uint64{p.proxy.id}, true); len(words) != 1 {
 		t.Fatalf("give-up words %q", words)
 	}
@@ -215,7 +215,7 @@ func TestAGiveUpOnAStreamEndsWithItForTheNextBegin(t *testing.T) {
 		t.Fatalf("behind %q, want none", b)
 	}
 	own := p.open("HEADERS stream 3", false)
-	again := p.tr.scope()
+	again := p.tr.scope(0)
 	if n, _ := again.State(true); n != 1 {
 		t.Fatalf("a stream opened after the give-up held: scope pending %d, want 1", n)
 	}
@@ -241,7 +241,7 @@ func TestAGiveUpOnAStreamEndsWithItForTheNextBegin(t *testing.T) {
 // hang-up again.
 func TestAGiveUpOnAConnectionWhoseClientHungUpEndsWithAllItHeld(t *testing.T) {
 	p := newStreamParser(t)
-	p.tr.beginWindow()
+	p.tr.beginWindow(0)
 	stuck := p.open("HEADERS stream 1", false)
 	defer stuck()
 	release := p.proxy.HoldHangUp()
@@ -250,7 +250,7 @@ func TestAGiveUpOnAConnectionWhoseClientHungUpEndsWithAllItHeld(t *testing.T) {
 	if r := <-p.got; r != "" {
 		t.Fatalf("read %q, want the end of the stream", r)
 	}
-	sc := p.tr.scope() // the test's end
+	sc := p.tr.scope(0) // the test's end
 	words := sc.GiveUp([]uint64{p.proxy.id}, true)
 	if len(words) != 1 || !strings.Contains(words[0], "its client's hang-up its handler had not told") {
 		t.Fatalf("give-up words %q: want the stream and the hang-up", words)
@@ -275,7 +275,7 @@ func TestTheLatchAtExactlyTheCutIgnoresTheNextRequestsMark(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-got
-	sc := tr.scope() // cut at 4 bytes, the handler answering req1
+	sc := tr.scope(0) // cut at 4 bytes, the handler answering req1
 	go readOnce(proxy, got)
 	waitSettled(t, tr, func() bool { return proxy.reading.Load() == 1 })
 	if _, err := app.Write([]byte("req2")); err != nil {
@@ -299,8 +299,8 @@ func TestAQuietLongLivedStreamDoesNotHoldTheEnd(t *testing.T) {
 	p := newStreamParser(t)
 	longLived := p.open("HEADERS stream 1", false) // an earlier window's stream, still held
 	defer longLived()
-	p.tr.beginWindow() // the test begins, the frame reader blocked at what the socket has received
-	sc := p.tr.scope() // the test's end
+	p.tr.beginWindow(0) // the test begins, the frame reader blocked at what the socket has received
+	sc := p.tr.scope(0) // the test's end
 	if n, _ := sc.State(true); n != 0 {
 		t.Fatalf("a long-lived stream opened before the test's window and quiet through it holds the test's end: scope pending %d, want 0", n)
 	}

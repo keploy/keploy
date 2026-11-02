@@ -2761,6 +2761,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}
 	seeProcess(Process{Pid: destInfo.AgentNsPid, KernelPid: destInfo.KernelPid})
+	// The test worker whose process made the connection, as the kernel
+	// stamped it: only that worker's test windows wait for it
+	// (inflight.of).
+	tracked.setWorker(destInfo.Instance)
 
 	var dstAddr string
 

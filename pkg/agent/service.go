@@ -415,6 +415,21 @@ type InFlightWindower interface {
 	InFlightBeginWindow()
 }
 
+// InFlightWorkerScoper is the optional extension of an InFlightWindower that
+// keeps each test worker's windows apart, by the keploy instance the kernel
+// stamped each connection with (DestInfo.Instance): instance 0 is the run's,
+// every connection, as InFlightScope and InFlightBeginWindow.
+type InFlightWorkerScoper interface {
+	// InFlightScopeOf is InFlightScope over the connections of instance's
+	// processes, and those whose stamp the proxy has not read yet (which
+	// may be its).
+	InFlightScopeOf(instance uint32) InFlightScope
+	// InFlightBeginWindowOf is InFlightBeginWindow on the connections of
+	// instance's processes alone: another worker's requests stay its
+	// window's.
+	InFlightBeginWindowOf(instance uint32)
+}
+
 // InFlightScope is InFlightState and InFlightPendingProgress over the
 // connections kept when it began, each with the bytes it had received then,
 // until they are taken and, in a replay, answered: a connection accepted

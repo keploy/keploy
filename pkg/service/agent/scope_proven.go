@@ -138,10 +138,13 @@ type provenWire struct {
 	dropsInTest       bool
 	dropsUncounted    uint64
 	dropsUncountedWhy string
-	// owned is the work the last window's end cut (settledSince), nil when
-	// it cut none (its proxy cannot, or the switch is off): all a begin
-	// waits for (settleBegin).
-	owned coreAgent.InFlightScope
+	// owned is, by test worker's instance (0: the run's, in a run of one
+	// test process), the work the worker's last window's end cut
+	// (settledSince), none when it cut none (its proxy cannot, or the
+	// switch is off): all that worker's next begin waits for (settleBegin).
+	// Another worker's leftover calls are that worker's, never the
+	// beginning test's.
+	owned map[uint32]coreAgent.InFlightScope
 	// refusals are what the wire refused, and what an integration refused
 	// and told the agent, in order, as windows (models.ScopeWindow.Refused).
 	refusals []models.ScopeWindow
@@ -976,13 +979,14 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	// background work, and do not hold the begin.
 	// A connection whose held requests cannot be told does not stop the
 	// begin: the test's end finds it, and the test is not verified.
-	drops, err := a.settleBegin(ctx, a.replaying())
+	drops, err := a.settleBegin(ctx, a.replaying(), worker)
 	if err != nil && !errors.Is(err, errHoldsUnknown) {
 		return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 			"keploy cannot judge "+id+": "+err.Error(), "check the agent's log")
 	}
-	// The test's end waits only for the requests opened from here.
-	a.beginWindow()
+	// The test's end waits only for the requests its worker opened from
+	// here.
+	a.beginWindow(worker)
 	// The drops read now close the gap's window, whose drops are the
 	// beginning test's (markDrops), and open the test's: its end compares
 	// the listener's drops with these.
@@ -1271,7 +1275,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	// a call it made that the proxy has not yet taken or answered is its
 	// own, whatever the load. One keploy cannot settle leaves the test
 	// unjudged, and failed.
-	settleErr := a.settledSince(ctx, a.replaying(), id)
+	settleErr := a.settledSince(ctx, a.replaying(), a.scopeInstance(id), id)
 	// The mock.real destinations the test used, and the connections keploy
 	// could neither capture nor relay as real while it was open: in a record
 	// as in a replay (design v14 §3.2, §4).

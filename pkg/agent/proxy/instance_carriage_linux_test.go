@@ -130,6 +130,11 @@ func TestEachConnectionsMocksCarryTheWorkerInstanceTheKernelStampedItWith(t *tes
 	if got := awaitEvent(t, w.saw, "the parser being handed the connection"); got != 5 {
 		t.Fatalf("a connection routed by its redirect entry carries instance %d, want that entry's 5", got)
 	}
+	// The connection kept for test windows is that worker's too: only its
+	// windows cut it and wait for it (inflight.of).
+	if got := tc.worker.Load(); got != 5+1 {
+		t.Fatalf("the kept connection is noted as worker %d's (stored %d), want worker 5's", int64(got)-1, got)
+	}
 	if err := awaitEvent(t, hdone, "handleConnection returning"); err != nil {
 		t.Fatalf("handleConnection: %v", err)
 	}

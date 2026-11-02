@@ -451,3 +451,121 @@ func TestAWorkersTestWindowCarriesItsInstance(t *testing.T) {
 	require.EqualValues(t, 1, windowOf(t, a, "a::TestOne").Instance)
 	require.EqualValues(t, 2, windowOf(t, a, "b::TestTwo").Instance)
 }
+
+// inFlightLog is a wireProxy whose settles keep to scopes
+// (coreAgent.InFlightWindower) but cannot keep test workers' connections
+// apart. log says, in order, each window begun ("window N", "window all"),
+// each scope cut ("cut N", "cut all") and each read of a scope's work
+// ("read N", "read all"): each holds none.
+type inFlightLog struct {
+	*wireProxy
+	lmu sync.Mutex
+	log []string
+}
+
+// workerInFlightProxy is an inFlightLog that keeps each test worker's
+// connections apart (coreAgent.InFlightWorkerScoper).
+type workerInFlightProxy struct{ *inFlightLog }
+
+func (p *inFlightLog) note(s string) {
+	p.lmu.Lock()
+	defer p.lmu.Unlock()
+	p.log = append(p.log, s)
+}
+
+func (p *inFlightLog) since(n int) []string {
+	p.lmu.Lock()
+	defer p.lmu.Unlock()
+	return append([]string(nil), p.log[n:]...)
+}
+
+func (p *inFlightLog) InFlightScope() coreAgent.InFlightScope {
+	p.note("cut all")
+	return workerScope{p: p, of: "all"}
+}
+
+func (p *workerInFlightProxy) InFlightScopeOf(instance uint32) coreAgent.InFlightScope {
+	p.note(fmt.Sprint("cut ", instance))
+	return workerScope{p: p.inFlightLog, of: fmt.Sprint(instance)}
+}
+
+func (p *inFlightLog) InFlightBeginWindow() { p.note("window all") }
+
+func (p *workerInFlightProxy) InFlightBeginWindowOf(instance uint32) {
+	p.note(fmt.Sprint("window ", instance))
+}
+
+type workerScope struct {
+	p  *inFlightLog
+	of string
+}
+
+func (s workerScope) State(bool) (int, []string) {
+	s.p.note("read " + s.of)
+	return 0, nil
+}
+func (workerScope) PendingProgress(bool) map[uint64]uint64 { return nil }
+func (workerScope) GiveUp([]uint64, bool) []string         { return nil }
+func (workerScope) Behind() ([]string, func())             { return nil, func() {} }
+
+// A test worker's test window is cut on its own worker's connections alone:
+// its begin cuts where its window begins on them, its end waits for their
+// work, and its worker's next begin waits for what that end left, never for
+// another worker's. A cut on every connection would take a test another
+// worker has open out of its end's wait, and its calls out of its
+// recording.
+func TestAWorkersWindowIsCutAndSettledOnItsOwnWorkersConnections(t *testing.T) {
+	a, _ := workerAgent(t, models.MODE_RECORD, 4)
+	p := &workerInFlightProxy{&inFlightLog{wireProxy: a.Proxy.(*wireProxy)}}
+	a.Proxy = p
+	w1, w2 := child(t), child(t)
+	require.Equal(t, "1", claimWorker(t, a, w1.Process.Pid, "a", 2))
+	require.Equal(t, "2", claimWorker(t, a, w2.Process.Pid, "b", 2))
+	step := func(pid int, name string, end bool) []string {
+		t.Helper()
+		n := len(p.since(0))
+		if end {
+			_, serr := a.ProvenEnd(as(pid), models.ScopeReq{Name: name, Outcome: "passed"})
+			require.Nil(t, serr)
+		} else {
+			_, serr := a.ProvenBegin(as(pid), begin(name))
+			require.Nil(t, serr)
+		}
+		return p.since(n)
+	}
+	require.Equal(t, []string{"window 1"}, step(w1.Process.Pid, "TestOne", false), "worker 1's first begin waits for nothing and cuts its own connections")
+	end1 := step(w1.Process.Pid, "TestOne", true)
+	require.Contains(t, end1, "cut 1", "worker 1's end waits for its own connections' work")
+	require.Subset(t, []string{"cut 1", "read 1"}, end1, "and for no other worker's")
+	require.Equal(t, []string{"window 2"}, step(w2.Process.Pid, "TestTwo", false), "worker 2's begin waits for none of worker 1's leftover work")
+	end2 := step(w2.Process.Pid, "TestTwo", true)
+	require.Contains(t, end2, "cut 2")
+	require.Subset(t, []string{"cut 2", "read 2"}, end2)
+	require.Equal(t, []string{"read 1", "window 1"}, step(w1.Process.Pid, "TestThree", false), "worker 1's next begin waits for what its own last end left")
+}
+
+// A proxy that cannot keep test workers' connections apart cuts no window
+// for a worker's test, whose end then waits for every connection's work:
+// more than the worker's calls, never fewer. A run of one test process cuts
+// and waits on every connection, as before.
+func TestAProxyThatCannotKeepWorkersApartCutsNoWorkersWindow(t *testing.T) {
+	a, _ := workerAgent(t, models.MODE_RECORD, 4)
+	p := &inFlightLog{wireProxy: a.Proxy.(*wireProxy)}
+	a.Proxy = p
+	w1 := child(t)
+	require.Equal(t, "1", claimWorker(t, a, w1.Process.Pid, "a", 2))
+	_, serr := a.ProvenBegin(as(w1.Process.Pid), begin("TestOne"))
+	require.Nil(t, serr)
+	require.Empty(t, p.since(0), "no window is cut for a worker's test")
+	_, serr = a.ProvenEnd(as(w1.Process.Pid), models.ScopeReq{Name: "TestOne", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Contains(t, p.since(0), "cut all", "its end waits for every connection's work")
+
+	b, _ := wireAgent(t, models.MODE_RECORD)
+	q := &inFlightLog{wireProxy: b.Proxy.(*wireProxy)}
+	b.Proxy = q
+	claimSelf(t, b)
+	_, serr = b.ProvenBegin(context.Background(), begin("TestOne"))
+	require.Nil(t, serr)
+	require.Equal(t, []string{"window all"}, q.since(0), "a run of one test process cuts every connection")
+}
