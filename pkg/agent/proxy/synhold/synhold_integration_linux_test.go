@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/nftables"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.uber.org/zap/zaptest"
 	"golang.org/x/sys/unix"
 )
@@ -64,14 +65,13 @@ func proxyListeners(t *testing.T) uint16 {
 	return 0
 }
 
-func freePort(t *testing.T, host string) int {
+// freePort is a port a connection of the test dials from, at host, held at
+// every address for the test's life (testnet.ReservedPort): a dial binds it
+// beside the hold with testnet.ReservedControl, and no other socket is given
+// it meanwhile.
+func freePort(t *testing.T, _ string) int {
 	t.Helper()
-	l, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	return testnet.ReservedPort(t)
 }
 
 // localPorts gives each connection a test makes a local port that no earlier
@@ -198,7 +198,7 @@ func TestHeldHandshakesAreAnsweredAsDecided(t *testing.T) {
 			mu.Lock()
 			plans[uint16(lp)] = tc.plan
 			mu.Unlock()
-			d := net.Dialer{Timeout: 2500 * time.Millisecond, LocalAddr: &net.TCPAddr{IP: net.ParseIP(host), Port: lp}}
+			d := net.Dialer{Timeout: 2500 * time.Millisecond, LocalAddr: &net.TCPAddr{IP: net.ParseIP(host), Port: lp}, Control: testnet.ReservedControl}
 			start := time.Now()
 			c, err := d.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(int(port))))
 			took := time.Since(start)
@@ -374,7 +374,7 @@ func TestANewConnectionOnAReusedPortIsNotHeldBehindTheAbandonedOne(t *testing.T)
 
 	lp := freePort(t, "127.0.0.1")
 	dial := func(timeout time.Duration) error {
-		d := net.Dialer{Timeout: timeout, LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: lp}}
+		d := net.Dialer{Timeout: timeout, LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: lp}, Control: testnet.ReservedControl}
 		c, err := d.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))))
 		if c != nil {
 			_ = c.Close()
