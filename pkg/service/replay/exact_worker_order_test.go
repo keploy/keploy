@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 )
 
 // keploy test hands the agent, on the set's staging, every test case of the
@@ -117,9 +119,12 @@ func passTrace(h *prRun) []string {
 // skipped after the last one the run opened (a quarantined last test case, a
 // --testcase selection that ends before the set does, a quarantined one
 // before the streaming pass) reaches the worker-scope mocks placed after it.
-// A retry cycle's end tells the agent nothing more, a run the application
-// stops part way tells it nothing, and a set whose staging handed the agent
-// no order is told nothing.
+// A retry cycle's end tells the agent nothing more, and a set whose staging
+// handed the agent no order is told nothing. A pass that ends on a stop
+// tells it nothing either: the application stopping part way, a result the
+// report store refuses, the compose stack halting (keploy's agent with it)
+// as the last test case ends, or the agent beginning no streaming test case.
+// A last test case that fails unsent ends its pass as any other.
 func TestTheEndOfEachPassTellsTheAgentWhatTheRunPassed(t *testing.T) {
 	placed := []models.MockEntry{{Name: "mock-boot", Kind: string(models.HTTP)}, {Name: "mock-late", Kind: string(models.HTTP), Place: "test-4"}}
 	for _, tc := range []struct {
@@ -131,7 +136,17 @@ func TestTheEndOfEachPassTellsTheAgentWhatTheRunPassed(t *testing.T) {
 		retry     bool
 		stopNth   int    // the application exits at this filter call
 		unsaved   string // a test case whose result the report store refuses
-		want      []string
+		// unsendable is a test case whose URL has no origin for the run's
+		// base path: it fails unsent.
+		unsendable string
+		// compose runs the application under docker compose: the set is
+		// served, its agent holding the set's mocks as the stack's bring-up
+		// left them. haltAt is the pool call (1 for the set's first) the
+		// stack's halt fails, keploy's agent going down with it.
+		compose    bool
+		haltAt     int
+		refuseOpen int // the agent opens no capture window at this one (1 for the set's first)
+		want       []string
 	}{
 		{name: "a quarantined last test case", worker: placed, ignored: []string{"test-4"},
 			want: []string{"test-1", "test-2", "test-3", "passed 4"}},
@@ -151,6 +166,16 @@ func TestTheEndOfEachPassTellsTheAgentWhatTheRunPassed(t *testing.T) {
 			want: []string{"test-1", "test-2", "passed 3", "test-4"}},
 		{name: "the streaming test case's result cannot be saved", worker: placed, streaming: []string{"test-4"}, ignored: []string{"test-3"}, unsaved: "test-4",
 			want: []string{"test-1", "test-2", "passed 3", "test-4"}},
+		{name: "the last test case cannot be sent", worker: placed, unsendable: "test-4",
+			want: []string{"test-1", "test-2", "test-3", "passed 4"}},
+		{name: "the last test case cannot be sent and its result cannot be saved", worker: placed, unsendable: "test-4", unsaved: "test-4",
+			want: []string{"test-1", "test-2", "test-3"}},
+		{name: "under docker compose", worker: placed, ignored: []string{"test-4"}, compose: true,
+			want: []string{"test-1", "test-2", "test-3", "passed 4"}},
+		{name: "the compose stack halts as the last test case ends", worker: placed, ignored: []string{"test-4"}, compose: true, haltAt: 3,
+			want: []string{"test-1", "test-2", "test-3"}},
+		{name: "the agent does not begin the streaming test case", worker: placed, streaming: []string{"test-4"}, ignored: []string{"test-3"}, refuseOpen: 3,
+			want: []string{"test-1", "test-2", "passed 3"}},
 		{name: "no worker mock placed after a test case", worker: placed[:1], ignored: []string{"test-4"},
 			want: []string{"test-1", "test-2", "test-3"}},
 	} {
@@ -175,9 +200,32 @@ func TestTheEndOfEachPassTellsTheAgentWhatTheRunPassed(t *testing.T) {
 			if tc.unsaved != "" {
 				h.report.failInsertOf = map[string]error{tc.unsaved: errors.New("report store is unwritable")}
 			}
+			if tc.unsendable != "" {
+				h.replayer.config.Test.BasePath = strings.TrimSuffix(h.cases[0].HTTPReq.URL, "/test-1")
+				for _, c := range h.cases {
+					if c.Name == tc.unsendable {
+						c.HTTPReq.URL = "/" + c.Name
+					}
+				}
+			}
 			h.mocks.filtered = []*models.Mock{httpAt("mock-boot", 500), httpAt("mock-a", 1010), httpAt("mock-late", 1050)}
 			s12MappingFile(t, h, nil, tc.worker...)
-			h.run(t)
+			if tc.compose || tc.refuseOpen != 0 {
+				vi := &viewInstr{prInstr: h.instr,
+					failPool: func(n int) bool { return n == tc.haltAt },
+					poolErr:  errors.New("dial tcp 172.18.0.3:8086: connect: connection refused"),
+					failOpen: func(n int) bool { return n == tc.refuseOpen }}
+				h.replayer.instrumentation = vi
+				if tc.compose {
+					h.replayer.config.CommandType = string(utils.DockerCompose)
+					vi.loaded = len(h.mocks.filtered)
+				}
+			}
+			if tc.compose {
+				h.runServing(t)
+			} else {
+				h.run(t)
+			}
 			if got := passTrace(h); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("the run opened and passed %v; want %v", got, tc.want)
 			}

@@ -25,13 +25,15 @@ import (
 // capture window opened ("begin", "continue": the agent's learn tracker
 // begins the test there) and each one read ("end": GetMockErrors, where the
 // tracker ends it). failPool fails the pool calls it answers true for, by
-// their number (1 for the set's first). failOpen fails the capture windows
-// it answers true for ("begin-failed", "continue-failed"), by their number
-// (1 for the set's first test), with openErr when it is set. loaded is the
-// mocks it says it holds (GetMockStats).
+// their number (1 for the set's first), with poolErr when it is set.
+// failOpen fails the capture windows it answers true for ("begin-failed",
+// "continue-failed"), by their number (1 for the set's first test), with
+// openErr when it is set. loaded is the mocks it says it holds
+// (GetMockStats).
 type viewInstr struct {
 	*prInstr
 	failPool func(n int) bool
+	poolErr  error
 	failOpen func(n int) bool
 	openErr  error
 	loaded   int
@@ -100,6 +102,9 @@ func (v *viewInstr) UpdateMockParams(ctx context.Context, params models.MockFilt
 		v.mu.Unlock()
 		if v.failPool != nil && v.failPool(n) {
 			v.note("pool-failed")
+			if v.poolErr != nil {
+				return v.poolErr
+			}
 			return errors.New("the agent did not take the pool call")
 		}
 		v.mu.Lock()
