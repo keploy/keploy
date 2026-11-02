@@ -1235,11 +1235,16 @@ var warmReaders = func() int { return readersFor(runtime.GOMAXPROCS(0)) }
 const readInFlight = 8 << 20
 
 // readCost is what a read of a payload costs in flight, per byte of its
-// recording: what the read allocates, since a collection running through
-// the read keeps all it allocated until the next one. A 1 MiB HTTP answer
-// measured 14 bytes per byte to load (bodyOf) and 9 more for the rules'
-// reads (warmOne); 32 leaves room for other kinds.
-const readCost = 32
+// recording: what the read allocates (its load, bodyOf, and the parts
+// every call's rules read, warmOne), since a collection running through
+// the read keeps all it allocated until the next one. It follows how dense
+// the payload's instants are: 1 MiB of words (the HTTP bound row's
+// answers) allocates 10 bytes for each byte; of JSON items with an
+// instant each, 42; of epoch seconds, 174; of dates alone, 228. 256 holds
+// each of those (TestAReadAllocatesNoMoreThanItsReservationPerByte), so a
+// recording of 32 KiB or more is read alone, and those of a few KiB
+// (api-server's) eight at once.
+const readCost = 256
 
 // readWeight is what x's read reserves of the set's readInFlight: readCost
 // for each byte of its recording (recordingBytes), or all of readInFlight
@@ -1258,8 +1263,9 @@ func readWeight(x Raw) int64 {
 // recordingBytes is the bytes of m's recording, known before its payload is
 // read: the agent's store's count (models.Mock.StoredSize), or, of one no
 // store read whose answer is in memory, the bytes of its spec's text
-// (specBytes); -1 for one whose answer is parked and no store counted, or
-// a Raw made of no recording in hand (nil: a served view's).
+// (specBytes); -1 (not known: a read alone) for one whose answer is parked
+// and no store counted, and for nil, which no Raw the set's readers read
+// holds (LazyRawOf keeps the recording it was made of).
 func recordingBytes(m *models.Mock) int64 {
 	if m == nil {
 		return -1
