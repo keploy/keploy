@@ -71,6 +71,7 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 			Created:          mock.Spec.Created,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
+			Fault:            mock.Spec.Fault,
 		}
 	case models.DNS:
 		var dnsReq models.DNSReq
@@ -737,6 +738,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 				Created:          httpSpec.Created,
 				ReqTimestampMock: httpSpec.ReqTimestampMock,
 				ResTimestampMock: httpSpec.ResTimestampMock,
+				Fault:            httpSpec.Fault,
 			}
 		case models.DNS:
 			dnsSpec := models.DNSSchema{}
@@ -1692,6 +1694,7 @@ func decodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger, rew
 				Created:          s.Created,
 				ReqTimestampMock: s.ReqTimestampMock,
 				ResTimestampMock: s.ResTimestampMock,
+				Fault:            s.Fault,
 			}
 		case models.DNS:
 			var s models.DNSSchema

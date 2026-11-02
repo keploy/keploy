@@ -128,6 +128,7 @@ func httpSpecOf(mock *models.Mock) models.HTTPSchema {
 		Created:          mock.Spec.Created,
 		ReqTimestampMock: mock.Spec.ReqTimestampMock,
 		ResTimestampMock: mock.Spec.ResTimestampMock,
+		Fault:            mock.Spec.Fault,
 	}
 }
 

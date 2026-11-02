@@ -422,6 +422,10 @@ type MockSpec struct {
 	// encoding/gob drops any field the receiving struct lacks.
 	ConnFailure *ConnFailureSpec `yaml:"connFailure,omitempty" json:"connFailure,omitempty" bson:"conn_failure,omitempty"`
 
+	// Fault is how the call ended without its whole answer (see fault.go);
+	// nil for a call that got one. Carried on an HTTP mock's spec.
+	Fault *Fault `yaml:"fault,omitempty" json:"fault,omitempty" bson:"fault,omitempty"`
+
 	// Aerospike (enterprise-only) stores its captured frames in the
 	// generic GenericRequests / GenericResponses payload slices above,
 	// like Redis/Kafka — so OSS core needs no Aerospike-specific field.
@@ -1288,6 +1292,10 @@ func (m *Mock) DeepCopy() *Mock {
 	if m.Spec.ConnFailure != nil {
 		connFailureCopy := *m.Spec.ConnFailure
 		c.Spec.ConnFailure = &connFailureCopy
+	}
+	if m.Spec.Fault != nil {
+		faultCopy := *m.Spec.Fault
+		c.Spec.Fault = &faultCopy
 	}
 	if m.Spec.DNSReq != nil {
 		dnsReqCopy := *m.Spec.DNSReq
