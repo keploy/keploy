@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -2142,8 +2143,23 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 	}
 	unmade := append([]string(nil), ev.Unconsumed...)
 	sort.Strings(unmade)
+	// An authored mock (keploy mock derive or generate) is no recording: a
+	// record keeps it, so a re-record never clears it. It is named as
+	// authored, with its author's reason, and its remedy is the command
+	// that takes it out (authoredFix).
+	var authored []string
 	for _, n := range unmade {
-		what = append(what, "recorded call "+mockText(n, mocks[n])+" was never made")
+		m := mocks[n]
+		if !m.IsAuthored() {
+			what = append(what, "recorded call "+mockText(n, m)+" was never made")
+			continue
+		}
+		authored = append(authored, n)
+		line := "authored call " + mockText(n, m) + " was never made"
+		if a := m.Spec.Authored; a != nil && a.Reason != "" {
+			line += " (" + strconv.Quote(strings.Join(strings.Fields(a.Reason), " ")) + ")"
+		}
+		what = append(what, line)
 	}
 	if t := ev.CaptureIncomplete.Text(); t != "" {
 		if len(what) == 0 {
@@ -2173,8 +2189,29 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 	} else {
 		head += " "
 	}
-	return RunnableText(fmt.Sprintf("%sIf this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n"+
-		"If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", head, id, shellQuote(id)))
+	quarantine := fmt.Sprintf("If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", shellQuote(id))
+	if len(ev.Misses) == 0 && len(authored) == len(ev.Unconsumed) {
+		// Only authored mocks were left unmade: a re-record keeps them.
+		return RunnableText(head + authoredFix(id, authored) + "\n" + quarantine)
+	}
+	fix := ""
+	if len(authored) > 0 {
+		fix = authoredFix(id, authored) + "\n"
+	}
+	return RunnableText(fmt.Sprintf("%sIf this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n%s%s",
+		head, id, fix, quarantine))
+}
+
+// authoredFix is what a test (id) that never called its authored mocks
+// (names) is told: a re-record keeps them, the command that takes each out,
+// and that a call the test now makes differently is authored again.
+func authoredFix(id string, names []string) string {
+	cmds := make([]string, 0, len(names))
+	for _, n := range names {
+		cmds = append(cmds, "keploy mock derive --remove "+shellQuote(id+"/"+n))
+	}
+	return "A re-record keeps an authored mock. If the test no longer makes its call, remove it: " + strings.Join(cmds, "; ") +
+		". If the call changed, derive or generate it again into this test."
 }
 
 // missWhys are, for a failed test's reason, why its calls missed, in the
@@ -2289,7 +2326,7 @@ func mockText(name string, m *models.Mock) string {
 	if m == nil {
 		return name
 	}
-	if m.Kind == models.HTTP && m.Spec.HTTPReq != nil {
+	if (m.Kind == models.HTTP || m.Kind == models.HTTPFault) && m.Spec.HTTPReq != nil {
 		return fmt.Sprintf("%s %s (%s)", m.Spec.HTTPReq.Method, models.MockURLShape(m), name)
 	}
 	return fmt.Sprintf("%s mock %s", m.Kind, name)

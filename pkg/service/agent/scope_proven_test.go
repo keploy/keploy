@@ -2849,3 +2849,76 @@ func TestStoringASetNotesItsDestinationsOnlyUnderTheSwitch(t *testing.T) {
 		}
 	}
 }
+
+// An authored mock (keploy mock derive or generate) the test never called
+// is no recording a re-record replaces: a record keeps a test's authored
+// mocks. Its reason says it is authored, with its author's reason, and
+// gives the exact command that takes it out; re-recording is offered only
+// for what was recorded.
+func TestANeverMadeAuthoredMockIsGivenItsRemoveCommand(t *testing.T) {
+	derived := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq:  &models.HTTPReq{Method: "POST", URL: "http://pay.internal/charge"},
+		Authored: &models.Authored{How: models.AuthoredDerived, Reason: "card\ndeclined", Source: "checkout::TestCheckout/mock-1"}}}
+	generated := &models.Mock{Kind: models.HTTPFault, Spec: models.MockSpec{
+		HTTPReq:  &models.HTTPReq{Method: "POST", URL: "http://pay.internal/charge"},
+		Authored: &models.Authored{How: models.AuthoredGenerated, Reason: "payments hangs"}}}
+	recorded := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://pay.internal/rates"}}}
+	mocks := map[string]*models.Mock{"mock-12": derived, "mock-13": generated, "mock-2": recorded}
+
+	only := evidenceReason("checkout::TestCheckoutDeclined", &models.ScopeEvidence{Unconsumed: []string{"mock-13", "mock-12"}}, mocks, time.Time{})
+	require.Contains(t, only, `authored call POST pay.internal/charge (mock-12) was never made ("card declined")`)
+	require.Contains(t, only, `authored call POST pay.internal/charge (mock-13) was never made ("payments hangs")`, "a fault mock is named by its request too")
+	require.NotContains(t, only, "recorded call")
+	require.Contains(t, only, "A re-record keeps an authored mock. If the test no longer makes its call, remove it: "+
+		"keploy mock derive --remove checkout::TestCheckoutDeclined/mock-12; keploy mock derive --remove checkout::TestCheckoutDeclined/mock-13. "+
+		"If the call changed, derive or generate it again into this test.")
+	require.NotContains(t, only, "re-record it", "a re-record keeps the authored mocks, so it cannot clear this test")
+	require.Contains(t, only, "keploy mock quarantine checkout::TestCheckoutDeclined --reason")
+
+	mixed := evidenceReason("checkout::TestCheckoutDeclined", &models.ScopeEvidence{Unconsumed: []string{"mock-12", "mock-2"}}, mocks, time.Time{})
+	require.Contains(t, mixed, "recorded call GET pay.internal/rates (mock-2) was never made")
+	require.Contains(t, mixed, "re-record it: keploy mock record", "a recorded call never made is still re-recorded")
+	require.Contains(t, mixed, "keploy mock derive --remove checkout::TestCheckoutDeclined/mock-12. If the call changed")
+	require.NotContains(t, mixed, "mock-2. If the call changed", "a recorded mock is not authored")
+
+	missed := evidenceReason("checkout::TestCheckoutDeclined", &models.ScopeEvidence{Unconsumed: []string{"mock-12"},
+		Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /charge", Destination: "pay.internal"}}}, mocks, time.Time{})
+	require.Contains(t, missed, "re-record it", "a call with no answer is re-recorded, whatever else the test left unmade")
+	require.Contains(t, missed, "keploy mock derive --remove checkout::TestCheckoutDeclined/mock-12")
+
+	plain := evidenceReason("t", &models.ScopeEvidence{Unconsumed: []string{"mock-2"}}, mocks, time.Time{})
+	require.NotContains(t, plain, "authored")
+	require.NotContains(t, plain, "derive")
+
+	// A mock with no reason gets no empty quotes.
+	unexplained := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq:  &models.HTTPReq{Method: "POST", URL: "http://pay.internal/charge"},
+		Authored: &models.Authored{How: models.AuthoredGenerated}}}
+	bare := evidenceReason("t", &models.ScopeEvidence{Unconsumed: []string{"mock-14"}}, map[string]*models.Mock{"mock-14": unexplained}, time.Time{})
+	require.Contains(t, bare, "authored call POST pay.internal/charge (mock-14) was never made.")
+	require.NotContains(t, bare, `("")`)
+
+	// A replay that left an authored mock's payload on disk holds no
+	// authored block in memory: the mock is still named as authored and
+	// given its remove command, and the line names no reason, as none was
+	// read.
+	lazy := &models.Mock{Name: "mock-15", Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq:  &models.HTTPReq{Method: "POST", URL: "http://pay.internal/charge"},
+		Authored: &models.Authored{How: models.AuthoredDerived, Reason: "card declined"}}}
+	lazy.LeavePayloadOnDisk(noPayloadSource{}, models.PayloadAt{Name: "mock-15"})
+	require.Nil(t, lazy.Spec.Authored, "the row needs a mock whose authored block is on disk")
+	onDisk := evidenceReason("t", &models.ScopeEvidence{Unconsumed: []string{"mock-15"}}, map[string]*models.Mock{"mock-15": lazy}, time.Time{})
+	require.Contains(t, onDisk, "authored call ")
+	require.Contains(t, onDisk, "keploy mock derive --remove t/mock-15")
+	require.NotContains(t, onDisk, "re-record it")
+	require.NotContains(t, onDisk, `was never made (`, "a block left on disk is not read, so no reason is named")
+}
+
+// noPayloadSource is a PayloadSource that reads nothing back.
+type noPayloadSource struct{}
+
+func (noPayloadSource) LoadPayload(context.Context, models.PayloadAt) (*models.Mock, error) {
+	return nil, errors.New("no payload")
+}
+func (noPayloadSource) SetPayloadMutator(models.PayloadMutator) {}
+func (noPayloadSource) PayloadMutator() models.PayloadMutator   { return nil }
