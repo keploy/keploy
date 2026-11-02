@@ -21,7 +21,12 @@
 #   5. keploy record stopped while the application holds a call open (a long
 #      poll the upstream never answers, its client's timeout far off): the
 #      stop closes it, which is no fault, so none is recorded and no fault
-#      note is said.
+#      note is said, while the /ok call made before it is recorded.
+#   6-8. keploy mock record, the same held call, ended three ways: stopped by
+#      SIGINT, stopped by --record-timer, and the command exiting on its own
+#      (its /exit) with the call still open. Each is the run's end, not the
+#      application giving up: no fault is recorded and no note is said, and
+#      the /ok call is recorded.
 #
 # Env: RECORD_BIN, REPLAY_BIN (default RECORD_BIN), OLD_BIN (optional). Ports:
 # 18090 (app), 18091 (upstream). Runs as a user with passwordless sudo.
@@ -232,6 +237,7 @@ sudo chown -R "$(id -u):$(id -g)" . 2>/dev/null
 if grep -q 'held call: timeout' held_record.log; then
     fail "5: the application's own client gave up on the held call, so this proves nothing"
 fi
+grep -q '/ok' keploy/test-set-0/mocks.yaml 2>/dev/null || fail "5: keploy record did not record the /ok call, so a recording with no fault proves nothing"
 got=$(grep -c '^kind: HttpFault$' keploy/test-set-0/mocks.yaml 2>/dev/null)
 [ "${got:-0}" = 0 ] || fail "5: keploy record wrote $got fault mocks for a call its own stop cut, want none"
 if grep -q 'keploy now records a call that ended in a fault' held_record.log; then
@@ -240,6 +246,61 @@ fi
 [ "$FAIL" -eq "$before" ] || { grep -n 'fault' keploy/test-set-0/mocks.yaml | head -20; tail -40 held_record.log; }
 cp held_upstream.log held_record.log "$WORK/" 2>/dev/null
 cd "$WORK" || exit 1
+
+# mock_record_held LEG HOW: keploy mock record of the application with a call
+# held open, ended HOW (sigint, timer or exit), and what it wrote checked.
+mock_record_held() {
+    local leg="$1" how="$2" extra=() held=0 mocks
+    echo "== $leg. keploy mock record ended by $how with a call in flight =="
+    local before=$FAIL
+    mkdir -p "$WORK/mock-$how" && cd "$WORK/mock-$how" || exit 1
+    "$WORK/faults" -upstream "$UP" > upstream.log 2>&1 &
+    UP_PID=$!
+    wait_listen "$UP" "$UP_PID" || { echo "::error::the upstream did not start"; exit 1; }
+    [ "$how" = timer ] && extra=(--record-timer 30s)
+    # shellcheck disable=SC2024
+    sudo -E env PATH="$PATH" HELD_CALL=1 "$RECORD_BIN" mock record -c "$WORK/faults -app $APP $UP" --name held \
+        --disable-tele "${extra[@]}" > record.log 2>&1 < /dev/null &
+    REC_PID=$!
+    wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy mock record"; tail -30 record.log; exit 1; }
+    curl -s --max-time 30 "http://$APP/call/ok" > /dev/null
+    for _ in $(seq 1 300); do
+        grep -q 'upstream: holding /held' upstream.log && held=1 && break
+        sleep 0.1
+    done
+    [ "$held" = 1 ] || fail "$leg: the application's held call did not reach the upstream"
+    case "$how" in
+    sigint) stop_pid "$REC_PID" ;;
+    timer) wait "$REC_PID" 2>/dev/null ;;
+    exit)
+        curl -s --max-time 30 "http://$APP/exit" > /dev/null
+        wait "$REC_PID" 2>/dev/null
+        ;;
+    esac
+    REC_PID=""
+    kill "$UP_PID" 2>/dev/null; wait "$UP_PID" 2>/dev/null; UP_PID=""
+    sudo chown -R "$(id -u):$(id -g)" . 2>/dev/null
+    if grep -q 'held call: timeout' record.log; then
+        fail "$leg: the application's own client gave up on the held call, so this proves nothing"
+    fi
+    if [ "$how" = exit ] && ! grep -q 'app: exiting on its own' record.log; then
+        fail "$leg: the application did not exit on its own"
+    fi
+    mocks=keploy/held/mocks.yaml
+    grep -q '/ok' "$mocks" 2>/dev/null || fail "$leg: keploy mock record did not record the /ok call, so a recording with no fault proves nothing"
+    got=$(grep -c '^kind: HttpFault$' "$mocks" 2>/dev/null)
+    [ "${got:-0}" = 0 ] || fail "$leg: keploy mock record wrote $got fault mocks for a call the run's end cut, want none"
+    if grep -q 'keploy now records a call that ended in a fault' record.log; then
+        fail "$leg: keploy mock record said its fault note for a call the run's end cut"
+    fi
+    [ "$FAIL" -eq "$before" ] || { grep -n 'fault' "$mocks" | head -20; tail -40 record.log; }
+    cp upstream.log "$WORK/mock-$how-upstream.log" 2>/dev/null
+    cp record.log "$WORK/mock-$how-record.log" 2>/dev/null
+    cd "$WORK" || exit 1
+}
+mock_record_held 6 sigint
+mock_record_held 7 timer
+mock_record_held 8 exit
 
 if [ "$FAIL" -ne 0 ]; then
     echo "::error::$FAIL check(s) failed"

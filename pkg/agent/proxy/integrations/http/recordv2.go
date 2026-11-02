@@ -343,10 +343,11 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 //   - neither side ended it: the relay ended the stream (the recording's
 //     stop), the session closed it (err is not io.EOF: the supervisor's
 //     abort), or the capture lost part of it (Session.EndedAtHole);
-//   - the first end came after the recording's stop began
-//     (Session.EndFollowedStop): keploy record stops the application, and
-//     the close of a call it had in flight is the stop's, not its client's
-//     timeout.
+//   - the first end was the application's stop (Session.EndFollowedStop):
+//     read after the recording's stop began (keploy stops the application),
+//     or the client's end as its process exited (the command's own exit
+//     included). The close of a call it had in flight is the stop's, not its
+//     client's timeout.
 func noAnswerFault(sess *supervisor.Session, err error, exchanges int) *models.Fault {
 	if !errors.Is(err, io.EOF) {
 		return nil
@@ -379,8 +380,8 @@ func noAnswerFault(sess *supervisor.Session, err error, exchanges int) *models.F
 // (FaultTruncate), or the client closed first, the upstream silent, and gave
 // up on the rest (FaultTimeout after the head). Where the client closed while
 // the destination still sent (Session.EndedWhereClientStopped) the exchange is
-// left out before this is asked. An end that came after the recording's stop
-// began (Session.EndFollowedStop) is the stop's: no fault, as noAnswerFault.
+// left out before this is asked. An end that was the application's stop
+// (Session.EndFollowedStop) records no fault, as in noAnswerFault.
 // buildHTTPMock records the fault only when the response is in fact
 // unfinished (FinalHTTP.Fault).
 func partAnswerFault(sess *supervisor.Session) *models.Fault {

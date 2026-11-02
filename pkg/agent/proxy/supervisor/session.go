@@ -473,12 +473,13 @@ const spokeUnaskedBit = 1 << (peerEndFirstShift + 2)
 const endFollowedStopBit = 1 << (peerEndFirstShift + 3)
 
 // EndFollowedStop reports whether the first end of the connection
-// (FirstPeerEnded) was read after the recording's stop had begun
-// (MarkPeerEndedStopping): keploy stops the application only once it has
-// told the agent, so a client that closed then was closed by the stop, and
-// the call it had in flight ended in no fault of the upstream's or the
-// application's. An end read before the stop began (the application's own
-// timeout, the upstream's reset) is not one, however late the stop. Nil-safe.
+// (FirstPeerEnded) was the application's stop (MarkPeerEndedStopping): read
+// after the recording's stop had begun (keploy stops the application only
+// once it has told the agent), or the client's end as its process exited.
+// The call it had in flight ended in no fault of the upstream's or the
+// application's. An end read before the stop began while the client's process
+// ran on (the application's own timeout, the upstream's reset) is not one,
+// however late the stop. Nil-safe.
 func (s *Session) EndFollowedStop() bool {
 	return s != nil && s.peerEnds.Load()&endFollowedStopBit != 0
 }
@@ -510,10 +511,11 @@ func (s *Session) MarkPeerEnded(dir fakeconn.Direction, reset bool) {
 }
 
 // MarkPeerEndedStopping is MarkPeerEnded for a relay that knows whether the
-// recording's stop had begun as it read the end (stopBegun): keploy record's
-// client tells the agent it is stopping (the proxy's graceful-shutdown flag)
-// before it stops the application, so an end read after that is the stop's
-// doing (EndFollowedStop). Only the first end's is kept. Nil-safe.
+// end it read is the application's stop (stopBegun): the recording's stop had
+// begun (keploy record and keploy mock record tell the agent before they stop
+// the application), or the client's process was exiting as its end was read
+// (the proxy's peerEndMarker). Such an end is not a fault (EndFollowedStop).
+// Only the first end's is kept. Nil-safe.
 func (s *Session) MarkPeerEndedStopping(dir fakeconn.Direction, reset, stopBegun bool) {
 	if s == nil || dir > fakeconn.FromDest {
 		return

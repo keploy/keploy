@@ -461,6 +461,19 @@ func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOpti
 	return tc, nil
 }
 
+// NoteStopBegun tells the proxy that the recording's stop has begun, before
+// the recording client stops the application (Proxy.NoteStopBegun): a call
+// the stop cuts then records no fault. It has none of SetGracefulShutdown's
+// other effects, which keploy mock record's client asks for after its drain.
+func (a *Agent) NoteStopBegun(context.Context) error {
+	s, ok := a.Proxy.(interface{ NoteStopBegun() })
+	if !ok {
+		return errors.New("this agent's proxy cannot note that a recording's stop has begun")
+	}
+	s.NoteStopBegun()
+	return nil
+}
+
 // SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
 // When this flag is set, connection errors will be logged as debug instead of error.
 func (a *Agent) SetGracefulShutdown(ctx context.Context) error {

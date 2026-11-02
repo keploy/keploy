@@ -683,3 +683,45 @@ func TestRecordV2_FaultTimeoutRecordedWhenTheAppGaveUpBeforeTheStop(t *testing.T
 		wantFault(t, oneMock(t, mocks, err), want)
 	}
 }
+
+// An upstream end the relay reads once the recording's stop has begun is the
+// stop's too (Session.EndFollowedStop): keploy stops the application and its
+// dependencies' fixtures alike, and an upstream that closes or resets then
+// gave no fault the application met. No fault is recorded, by a close or a
+// reset, before the answer or after its head.
+func TestRecordV2_FaultNotRecordedWhenTheUpstreamEndsAfterTheStopBegan(t *testing.T) {
+	const head = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n"
+	for _, tc := range []struct {
+		name             string
+		afterHead, reset bool
+	}{
+		{"closed before the answer", false, false},
+		{"reset before the answer", false, true},
+		{"closed after the head", true, false},
+		{"reset after the head", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newRelayedConn(t)
+			c.start(t)
+			write(t, c.app, c.src, faultReq)
+			relayed(t, c.dest, faultReq)
+			if tc.afterHead {
+				write(t, c.dest, c.dst, head+"01234")
+				relayed(t, c.app, head+"01234")
+			}
+			c.stopBegun.Store(true)
+			if tc.reset {
+				resetConn(t, c.dest)
+			} else {
+				_ = c.dest.Close()
+			}
+			awaitPeerEnd(t, c, fakeconn.FromDest)
+			mocks, _ := c.finish(t)
+			for _, m := range mocks {
+				if m.Spec.Fault != nil {
+					t.Errorf("recorded fault %v, want none: the upstream's end came after the recording's stop began", m.Spec.Fault)
+				}
+			}
+		})
+	}
+}

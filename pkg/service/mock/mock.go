@@ -332,6 +332,56 @@ func (m *mockService) releaseComposeApp(ctx context.Context) error {
 	return m.instrumentation.MakeAgentReadyForDockerCompose(ctx)
 }
 
+// stopBeganNotifier is an Instrumentation that can tell the agent a
+// recording's stop has begun (the agent client's NotifyStopBegun).
+type stopBeganNotifier interface {
+	NotifyStopBegun(ctx context.Context) error
+}
+
+// runUntilStopNoted returns the context the recorded test command runs on,
+// with ctx's values, and ran, which releases it once the command's run has
+// returned. A stop of the user's (parent ends: Ctrl+C, or the record timer's
+// stop) ends the command only once the agent has been told the recording's
+// stop has begun, so the calls the command still has in flight are cut by a
+// stop the agent knows of, and record no fault; ended with the stop, the
+// command was killed first, and a call it had open was recorded as the
+// application's giving up. keploy's own failure (ctx ends, parent does not)
+// ends the command at once, with no notice: no stop of the user's began.
+func (m *mockService) runUntilStopNoted(parent, ctx context.Context) (runCtx context.Context, ran func()) {
+	runCtx, stopRun := context.WithCancel(context.WithoutCancel(ctx))
+	stopNotice := context.AfterFunc(parent, func() {
+		m.notifyStopBegun()
+		stopRun()
+	})
+	stopOnFailure := context.AfterFunc(ctx, func() {
+		if parent.Err() == nil {
+			stopRun()
+		}
+	})
+	return runCtx, func() {
+		stopNotice()
+		stopOnFailure()
+		stopRun()
+	}
+}
+
+// notifyStopBegun tells the agent the recording's stop has begun, bounded so
+// an agent that does not answer cannot hold the stop. One that did not take
+// it is said at WARN: a call the stop cuts may then be recorded as a timeout
+// fault the application never met.
+func (m *mockService) notifyStopBegun() {
+	n, ok := m.instrumentation.(stopBeganNotifier)
+	if !ok {
+		return
+	}
+	notifyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := n.NotifyStopBegun(notifyCtx); err != nil {
+		m.logger.Warn("keploy could not tell the agent the recording is stopping: a call the stop cuts may be recorded as a timeout fault",
+			zap.Error(err), zap.String("next_step", "check the mock's fault in the recording, or record again"))
+	}
+}
+
 // notifyShutdown tells the agent the session is ending so connection errors are
 // logged at debug level. The notification is bounded so an unresponsive agent
 // can't hang teardown; with --from-container, restoring the user's container

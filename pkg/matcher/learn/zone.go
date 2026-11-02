@@ -1024,6 +1024,13 @@ func statExiting(f []string) bool {
 	return err != nil || flags&pfExiting != 0
 }
 
+// ProcExiting reports whether pid, under procRoot ("/proc"), is exiting or
+// gone, or cannot be read (procExiting): pid 0, which names no process, is
+// one that cannot.
+func ProcExiting(procRoot string, pid uint32) bool {
+	return procExiting(procRoot, pid)
+}
+
 // procExiting reports whether pid is exiting or gone as <pid>/stat shows
 // it (statExiting), or its stat cannot be read.
 func procExiting(root string, pid uint32) bool {

@@ -4597,6 +4597,33 @@ func (a *AgentClient) newStreamEnd(kind models.FrameStream) *atomic.Bool {
 	return ended
 }
 
+// NotifyStopBegun tells the agent that the recording's stop has begun, before
+// keploy stops the application: a call the stop cuts then records no fault
+// (the agent's /stop-begun). Unlike NotifyGracefulShutdown it changes nothing
+// else in the agent. It errors when the agent did not take it.
+func (a *AgentClient) NotifyStopBegun(ctx context.Context) error {
+	if a.conf.Agent.AgentURI == "" {
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.conf.Agent.AgentURI+"/stop-begun", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("the agent answered %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
 // NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.
 // This should be called before cancelling contexts during application shutdown.
 // When the flag is set, connection errors will be logged as debug instead of error.

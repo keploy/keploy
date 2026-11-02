@@ -121,6 +121,17 @@ func app(addr, up string) {
 			o.Read = saw(err)
 		}
 	})
+	// The application's own exit, as a test command's when its tests are
+	// done: whatever it still has in flight (the held call) is cut by the
+	// exit, not given up on.
+	http.HandleFunc("/exit", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Println("app: exiting on its own")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		os.Exit(0)
+	})
 	if os.Getenv("HELD_CALL") == "1" {
 		// A background long poll, as a queue consumer's: in flight until it
 		// is answered or its client's 120s timeout, which no run here
