@@ -1,6 +1,7 @@
 package golang
 
 import (
+	"debug/buildinfo"
 	"debug/elf"
 	"slices"
 	"strings"
@@ -28,6 +29,12 @@ func checkForCoverFlag(logger *zap.Logger, cmd string) bool {
 		logger.Debug("cover flag not found in command, skipping coverage calculation")
 		return false
 	}
+	// Newer Go records -cover=true in the binary's build info. It survives
+	// -ldflags='-s -w' and works for non-ELF binaries; when it is missing the
+	// symbol scan below still decides.
+	if info, err := buildinfo.ReadFile(cmdFields[i]); err == nil && builtWithCover(info) {
+		return true
+	}
 	file, err := elf.Open(cmdFields[i])
 	if err != nil {
 		utils.LogError(logger, err, "failed to open file, skipping coverage calculation")
@@ -52,5 +59,15 @@ func checkForCoverFlag(logger *zap.Logger, cmd string) bool {
 		}
 	}
 	logger.Debug("go binary was not build with -cover flag", zap.String("file", cmd))
+	return false
+}
+
+// builtWithCover reports whether the build info records -cover=true.
+func builtWithCover(info *buildinfo.BuildInfo) bool {
+	for _, setting := range info.Settings {
+		if setting.Key == "-cover" && setting.Value == "true" {
+			return true
+		}
+	}
 	return false
 }
