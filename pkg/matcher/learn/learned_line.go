@@ -15,8 +15,9 @@ import (
 //
 //	<test> <mock> <field>[ word <n>]: recorded "<r>", round F "<f>": learned <what>: <rule>[, learned from round F's call in <window>, for learning only]. Places: <p>, <p>. Undo: <edit>.
 //
-// The undo is the edit that stops it: noise at the word (or the field) in
-// keploy.yml, which keploy then never compares, or a re-record.
+// The undo is the edit that stops it: noise at the field in keploy.yml
+// (noiseWords), which keploy then never compares in any mock of the set, or
+// a re-record; a re-record alone where no keploy.yml noise names the field.
 
 // learnedWord is what one learned word's line says.
 type learnedWord struct {
@@ -31,6 +32,9 @@ type learnedWord struct {
 	Rule, From string
 	// Places are the evidence places, "mock-N <path>" each; three print.
 	Places []string
+	// Noise is the field as keploy.yml's noise names it (noiseName), which
+	// the undo names; Field where it is "".
+	Noise string
 }
 
 // outcomeSays is what a learned line says of each outcome.
@@ -57,7 +61,13 @@ func learnedLine(l learnedWord) string {
 		b.WriteString(", learned from round F's call in " + l.From + ", for learning only")
 	}
 	b.WriteString(placesPart(l.Places))
-	b.WriteString(". Undo: " + editWords(noiseEdit(l.Mock, l.Field, l.Word)) + editSep + editWords(Edit{Kind: EditReRecord}) + ".")
+	b.WriteString(". Undo: ")
+	sep := ""
+	for _, e := range onceEach([]Edit{noiseEdit(l.Mock, cmp.Or(l.Noise, l.Field), l.Word), {Kind: EditReRecord}}) {
+		b.WriteString(sep + editWords(e))
+		sep = editSep
+	}
+	b.WriteString(".")
 	return b.String()
 }
 

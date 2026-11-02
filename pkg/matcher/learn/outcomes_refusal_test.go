@@ -33,7 +33,7 @@ func TestOutcomeRefusalLinesNameTheWordAndTheirEdits(t *testing.T) {
 		want []string // what the line says beside the prefix and Why
 	}{
 		{rfBase("pick", "round F's moment stands unchanged in mock-12 body.next", []string{"mock-12 body.next"}, word, Edit{Kind: "none"}),
-			[]string{"mock-12 body.next", "keploy.yml", "word 1 of body.slot"}},
+			[]string{"mock-12 body.next", `requestbody: {"slot": []}`, "names no word"}},
 		{rfBase("no-clock-read", "a time its call's window does not hold in both runs, that no answer gave and no request of this scope sent, but mock-9 in TestA did", []string{"mock-9 body.at"},
 			Edit{Kind: "move-to-mocks", Mock: "mock-9"}, word, Edit{Kind: "re-record"}),
 			[]string{"mock-9", "mocks:", "re-record"}},
@@ -42,7 +42,7 @@ func TestOutcomeRefusalLinesNameTheWordAndTheirEdits(t *testing.T) {
 			[]string{"mock-7", "worker:", "startup:"}},
 		{rfBase("conflict", `slot-17 stood whole at mock-5 body.id; round F gave slot-90 there and the value did not follow`, []string{"mock-5 body.id"},
 			Edit{Kind: "fix-app"}, field, Edit{Kind: "give", Name: "slot"}),
-			[]string{"mock-5 body.id", `keploytest.Given(t, "slot"`, "noise at body.slot"}},
+			[]string{"mock-5 body.id", `keploytest.Given(t, "slot"`, `requestbody: {"slot": []}`}},
 		{rfBase("unknown", "keploy cannot tell what round F gave at mock-6 rows[0][0] before this call (view not stated)", []string{"mock-6 rows[0][0]"},
 			Edit{Kind: "re-record"}, word),
 			[]string{"mock-6 rows[0][0]", "view not stated", "re-record"}},
@@ -51,13 +51,13 @@ func TestOutcomeRefusalLinesNameTheWordAndTheirEdits(t *testing.T) {
 			[]string{"mock-21", "mocks:", "startup:"}},
 		{rfBase("unread", "keploy could not read the test case's request (none was sent), which came before this call", nil,
 			Edit{Kind: "re-record"}, field),
-			[]string{"the test case's request", "re-record", "noise at body.slot"}},
+			[]string{"the test case's request", "re-record", `requestbody: {"slot": []}`}},
 		{rfBase("changed-shape", "a word was added or dropped", nil, field),
-			[]string{"a word was added or dropped", "noise at body.slot"}},
+			[]string{"a word was added or dropped", `requestbody: {"slot": []}`}},
 		{rfBase("cannot-check", "Mongo cannot bind a word inside this field yet", nil, field),
-			[]string{"keploy's limit", "noise at body.slot"}},
+			[]string{"keploy's limit", `requestbody: {"slot": []}`}},
 		{rfBase("landed-elsewhere", "learned nothing: round F's call landed in TestB's window, which teaches clock reads only; word 1 of body.slot is a value bound to mock-4", nil, field),
-			[]string{"TestB's window", "noise at body.slot"}},
+			[]string{"TestB's window", `requestbody: {"slot": []}`}},
 	} {
 		line := RefusalLine(c.r)
 		if !strings.HasPrefix(line, prefix) || !strings.Contains(line, c.r.Why) {
@@ -288,7 +288,125 @@ func TestOutcomeALineOfNoTestLeavesItOut(t *testing.T) {
 		}
 	}
 	line := learnedLine(learnedWord{Mock: "mock-2", Field: "body.a", Word: 1, Recorded: "a", Full: "b", Outcome: OutcomeFresh})
-	if !strings.HasPrefix(line, "mock-2 body.a word 1: recorded ") {
+	if !strings.HasPrefix(line, "mock-2 body.a word 1: recorded ") || !strings.Contains(line, `Undo: in keploy.yml, test.globalNoise.global.requestbody: {"a": []}`) {
 		t.Errorf("a learned line of no test: %q", line)
+	}
+}
+
+// A noise edit names what keploy.yml can say: the bucket of
+// test.globalNoise the request matchers read and the key the field has
+// there (a body field root-relative, as the noise dialect writes an array's
+// element, a header by its name, a url part by a regex), for the test set
+// or for all, and that it is noise for every mock there: keploy.yml has no
+// noise for one mock, nor for one word. A field no bucket names (a whole
+// body, a SQL bind) has no noise edit: its edit is a re-record.
+func TestOutcomeANoiseEditNamesWhatKeployYmlCanSay(t *testing.T) {
+	const every = "or the same under test.globalNoise.test-sets.<the test set>: noise for every mock there"
+	for _, c := range []struct {
+		e    Edit
+		says []string
+	}{
+		{Edit{Kind: EditNoiseAtField, Mock: "mock-300", Field: "body.items[].id", Word: -1},
+			[]string{`in keploy.yml, test.globalNoise.global.requestbody: {"items[].id": []}, ` + every}},
+		{Edit{Kind: EditNoiseAtWord, Mock: "mock-300", Field: "body.slot", Word: 1},
+			[]string{`test.globalNoise.global.requestbody: {"slot": []}`, "the whole field, as keploy.yml names no word", every}},
+		{Edit{Kind: EditNoiseAtField, Mock: "mock-300", Field: "header.x-request-id", Word: -1},
+			[]string{`test.globalNoise.global.header: {"x-request-id": []}`, every}},
+		{Edit{Kind: EditNoiseAtWord, Mock: "mock-300", Field: "url.path.2", Word: 0},
+			[]string{`test.globalNoise.global.url: {"<regex>": []}`, "a regex of the part of url.path.2 that changes", every}},
+		{Edit{Kind: EditNoiseAtField, Mock: "mock-300", Field: "bind.1", Word: -1},
+			[]string{"re-record: no keploy.yml noise names bind.1"}},
+		{Edit{Kind: EditNoiseAtField, Mock: "mock-300", Field: "body", Word: -1},
+			[]string{"re-record: no keploy.yml noise names body"}},
+		{Edit{Kind: EditNoiseAtField, Mock: "mock-300", Field: "body.", Word: -1},
+			[]string{`re-record: no keploy.yml noise names "body."`}},
+		{Edit{Kind: EditNoiseAtWord, Mock: "mock-300", Field: "header.", Word: 0},
+			[]string{`re-record: no keploy.yml noise names "header."`}},
+	} {
+		w := editWords(c.e)
+		for _, s := range c.says {
+			if !strings.Contains(w, s) {
+				t.Errorf("%+v: %q; want it to say %q", c.e, w, s)
+			}
+		}
+		if strings.Contains(w, "mock-300") || strings.Contains(w, editSep) {
+			t.Errorf("%+v: %q names one mock's noise, or reads as two edits", c.e, w)
+		}
+		r := rfBase(RefusalChangedShape, "a word was added or dropped", nil, c.e)
+		if back, ok := ParseRefusal(RefusalLine(r)); !ok || !reflect.DeepEqual(back, r) {
+			t.Errorf("%+v: ParseRefusal(%q) = %+v, %v", c.e, RefusalLine(r), back, ok)
+		}
+	}
+}
+
+// Decide's noise edits and undos name the field as keploy.yml's noise does
+// (Leaf.Noise: an array's element as "[]"), and a field no keploy.yml
+// noise names is undone and accepted by a re-record alone, named once.
+func TestOutcomeDecideNamesTheNoiseKeployYmlReads(t *testing.T) {
+	arr := oInput("body.items[0].ref", "ref-8c41f2", "ref-e09b7d", nil, nil)
+	for _, s := range []*Shape{&arr.Live, &arr.Rec} {
+		l := s.Leaves["body.items[0].ref"]
+		l.Noise = "body.items[].ref"
+		s.Leaves["body.items[0].ref"] = l
+	}
+	bind := oInput("bind.1", "ref-8c41f2", "ref-e09b7d", nil, nil)
+	for _, c := range []struct {
+		what string
+		in   Input
+		undo string
+		edit Edit
+	}{
+		{"an array's element", arr, `Undo: in keploy.yml, test.globalNoise.global.requestbody: {"items[].ref": []}`,
+			Edit{Kind: EditNoiseAtWord, Mock: "mock-300", Field: "body.items[].ref", Word: 1}},
+		{"a SQL bind", bind, "Undo: re-record.", Edit{Kind: EditReRecord}},
+	} {
+		d := oWord(t, Decide(c.in), "8c41f2", "e09b7d")
+		if d.Outcome != OutcomeFresh || !strings.Contains(d.Line, c.undo) || strings.Contains(d.Line, "in mock-300") {
+			t.Errorf("%s: %s %q; want fresh, its undo %q", c.what, oDescribe([]Decision{d}), d.Line, c.undo)
+		}
+		c.in.Mode, c.in.Landed = ModeElsewhere, Landed{Where: LandedOther, Test: "test-5"}
+		d = oWord(t, Decide(c.in), "8c41f2", "e09b7d")
+		if d.Refusal == nil || !reflect.DeepEqual(d.Refusal.Edits, []Edit{c.edit}) {
+			t.Errorf("%s, landed in another test's window: %s; want the one edit %+v", c.what, oDescribe([]Decision{d}), c.edit)
+		}
+	}
+}
+
+// A refusal at a field no keploy.yml noise names offers its re-record once.
+func TestOutcomeARefusalNoNoiseNamesOffersOneReRecord(t *testing.T) {
+	const rec, live = "k1b2e4d70", "k5d0e8a33"
+	held := clockedDrifts().RawOf(receiveOf("mock-0", live, r1Insert.Add(30*time.Second)), true).ServedAs(3).ServedAsRecorded()
+	for _, c := range []struct {
+		field string
+		edits []Edit
+	}{
+		{"bind.1", []Edit{{Kind: EditReRecord}}},
+		{"body.msg_id", []Edit{{Kind: EditReRecord}, {Kind: EditNoiseAtWord, Mock: "mock-300", Field: "body.msg_id", Word: 0}}},
+	} {
+		in := oInput(c.field, rec, live, nil, nil)
+		in.At, in.Arrived = r1Insert, r1Insert
+		in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(held)}, nil }
+		d := oWord(t, Decide(in), rec, live)
+		if d.Refusal == nil || d.Refusal.Kind != RefusalUnknown || !reflect.DeepEqual(d.Refusal.Edits, c.edits) {
+			t.Errorf("%s: %s %+v; want unknown, edits %+v", c.field, oDescribe([]Decision{d}), d.Refusal, c.edits)
+		}
+	}
+}
+
+// A field one recording does not hold is named by its leaf in the other.
+func TestOutcomeANoiseEditNamesAFieldOneRecordingLacks(t *testing.T) {
+	const p = "body.items[0].ref"
+	leaf := Leaf{Path: p, Noise: "body.items[].ref", Type: String, Value: "ref-8c41f2", Unnamed: true}
+	want := []Edit{{Kind: EditNoiseAtField, Mock: "mock-300", Field: "body.items[].ref", Word: -1}}
+	for _, only := range []string{"recorded", "full round"} {
+		in := oInput(p, "ref-8c41f2", "ref-e09b7d", nil, nil)
+		in.Rec.Leaves, in.Live.Leaves = map[string]Leaf{p: leaf}, map[string]Leaf{}
+		if only == "full round" {
+			in.Rec.Leaves, in.Live.Leaves = in.Live.Leaves, in.Rec.Leaves
+		}
+		ds := Decide(in)
+		if len(ds) != 1 || ds[0].Refusal == nil || !reflect.DeepEqual(ds[0].Refusal.Edits, want) {
+			t.Errorf("a leaf only the %s call holds: %s; want edits %+v", only, oDescribe(ds), want)
+		}
 	}
 }
