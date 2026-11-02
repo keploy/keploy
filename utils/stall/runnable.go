@@ -259,18 +259,12 @@ func (s *sampler) begin() {
 func (s *sampler) sample() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	wall, cpu, cpuOK := s.src.now()
+	wall, cpu, cpuOK, waited := s.read()
 	share := 1.0
 	if l, ok := s.src.cpuLimit(); ok && l > 0 && l < 1 {
 		share = l
 	}
 	iv, ok := max(wall.Sub(s.lastWall), 0), s.cpuOK && cpuOK
-	own, ownOK := s.src.ownWait()
-	var waited time.Duration
-	if ownOK && s.ownOK {
-		waited = max(own-s.lastOwn, 0)
-	}
-	s.lastOwn, s.ownOK = own, ownOK
 	isLate := late(iv-waited, ok, s.tick)
 	got := accrue(iv, cpu-s.lastCPU, isLate, share)
 	if !isLate {
@@ -284,6 +278,40 @@ func (s *sampler) sample() {
 	if wall.Sub(s.waitWall) >= heldEvery {
 		s.readWaits()
 	}
+}
+
+// ownReads is how many times at most a sample reads the wall clock (read).
+const ownReads = 3
+
+// read reads the wall clock and the process's CPU time, and how long the
+// sampling thread waited for a CPU since the last sample (waited). A sample's
+// interval runs from one wall read to the next, and the wait set against it
+// must have ended between them; a wait shows in the thread's account as it
+// ends. So the account is read just before the wall and just after it. A
+// wait that ends between those two reads may have ended on either side of
+// the wall read: one ended after a frozen sample's wall read, set against
+// that sample, passed it as on time, and the frozen time counted as time the
+// process could run. While a wait ends between them, all three are read
+// again, up to ownReads times; the waits before the last wall read are set
+// against this sample, those after it against the next, and one that ends
+// between the last two reads against neither, so the samples it lies between
+// can only look later. Called with mu held.
+func (s *sampler) read() (wall time.Time, cpu time.Duration, cpuOK bool, waited time.Duration) {
+	var own time.Duration
+	var ownOK bool
+	next, nextOK := s.src.ownWait()
+	for range ownReads {
+		own, ownOK = next, nextOK
+		wall, cpu, cpuOK = s.src.now()
+		if next, nextOK = s.src.ownWait(); next == own {
+			break
+		}
+	}
+	if ownOK && s.ownOK {
+		waited = max(own-s.lastOwn, 0)
+	}
+	s.lastOwn, s.ownOK = next, nextOK
+	return wall, cpu, cpuOK, waited
 }
 
 // readWaits adds to what on-time samples owe the time the process's threads

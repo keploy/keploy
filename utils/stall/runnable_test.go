@@ -150,6 +150,148 @@ func TestSampler_AWaitThatMadeASampleLateIsPaidOnce(t *testing.T) {
 	}
 }
 
+// waitAtWallSource is a fakeSource whose sampling thread waits for a CPU, for
+// wait, at each of its next waits reads of the wall clock: just before the
+// read, which then shows the wait, or (afterWall) just after it, which then
+// does not. A wait shows in the thread's own account (ownWait) as it ends.
+// The failOwn-th read of the account (counted from 1) fails, saying failSays.
+type waitAtWallSource struct {
+	fakeSource
+	wait      time.Duration
+	waits     int
+	afterWall bool
+	walls     int // reads of the wall clock
+	owns      int // reads of the account
+	failOwn   int
+	failSays  time.Duration
+}
+
+func (f *waitAtWallSource) ownWait() (time.Duration, bool) {
+	if f.owns++; f.owns == f.failOwn {
+		return f.failSays, false
+	}
+	return f.fakeSource.ownWait()
+}
+
+func (f *waitAtWallSource) now() (time.Time, time.Duration, bool) {
+	f.walls++
+	wall, cpu, ok := f.fakeSource.now()
+	if f.waits > 0 {
+		f.waits--
+		f.wall, f.own = f.wall.Add(f.wait), f.own+f.wait
+		if !f.afterWall {
+			wall = f.wall
+		}
+	}
+	return wall, cpu, ok
+}
+
+// A sample's interval runs from one read of the wall clock to the next, and
+// the wait set against it, its thread's own wait for a CPU, must be one that
+// ended between them. A wait ended after a frozen sample's wall read, set
+// against that sample, passed it as on time: the frozen time counted as time
+// the process could run. One that ends just before the wall read is the
+// sample's own. The sampler reads its account just before and just after the
+// wall, and reads them again while a wait ends between the two.
+func TestSampler_SetsAWaitAgainstTheIntervalItEndedIn(t *testing.T) {
+	start := func() (*sampler, *waitAtWallSource) {
+		src := &waitAtWallSource{fakeSource: fakeSource{wall: time.Unix(1_000_000, 0)}}
+		s := &sampler{src: src, tick: Tick}
+		s.lastWall, s.lastCPU, s.cpuOK = src.now()
+		s.waitWall = s.lastWall
+		s.lastOwn, s.ownOK = src.ownWait()
+		return s, src
+	}
+	// step moves the clocks, samples, and says what the sample accrued and
+	// how many times it read the wall clock.
+	step := func(s *sampler, src *waitAtWallSource, wall, cpu time.Duration) (time.Duration, int) {
+		src.wall, src.cpu = src.wall.Add(wall), src.cpu+cpu
+		before, walls := s.ran.Load(), src.walls
+		s.sample()
+		return time.Duration(s.ran.Load() - before), src.walls - walls
+	}
+
+	t.Run("a wait that ends just after a frozen sample's wall read", func(t *testing.T) {
+		s, src := start()
+		if got, walls := step(s, src, Tick, time.Millisecond); got != Tick || walls != 1 {
+			t.Fatalf("a sample on time, no wait at its reads, accrued %v reading the wall %d times; want %v, once", got, walls, Tick)
+		}
+		// The process frozen 90 ms; let go, the sampler reads the wall,
+		// then waits 85 ms for a CPU.
+		src.wait, src.waits, src.afterWall = 85*time.Millisecond, 1, true
+		if got, _ := step(s, src, 9*Tick, 0); got != 0 {
+			t.Fatalf("a sample after 90 ms frozen accrued %v; want what the process ran, nothing: the wait after its wall read was set against it", got)
+		}
+		// On time, 10 ms after the sampler got its CPU.
+		if got, _ := step(s, src, Tick, time.Millisecond); got != Tick {
+			t.Fatalf("a sample on time after the wait accrued %v; want %v: the wait was set against neither interval", got, Tick)
+		}
+	})
+
+	t.Run("a wait that ends just before an on-time sample's wall read", func(t *testing.T) {
+		s, src := start()
+		step(s, src, Tick, time.Millisecond)
+		// 10 ms on, the sampler waits 85 ms for a CPU just before it reads
+		// the wall: late by its own wait alone, so on time (the threads'
+		// waits read pay for it).
+		src.wait, src.waits, src.afterWall = 85*time.Millisecond, 1, false
+		if got, _ := step(s, src, Tick, time.Millisecond); got != Tick+src.wait {
+			t.Fatalf("a sample late by its own 85 ms wait alone accrued %v; want %v", got, Tick+src.wait)
+		}
+		if got, _ := step(s, src, 9*Tick, 0); got != 0 {
+			t.Fatalf("a sample after 90 ms frozen accrued %v; want nothing: the wait before the last wall read was set against it", got)
+		}
+	})
+
+	t.Run("a sampler held off at every read", func(t *testing.T) {
+		s, src := start()
+		step(s, src, Tick, time.Millisecond)
+		// The process frozen 40 ms; let go, the sampler waits 30 ms for a CPU
+		// after each wall read: it reads it at most ownReads times, and the
+		// wait after the last read is set against neither interval.
+		src.wait, src.waits, src.afterWall = 30*time.Millisecond, ownReads, true
+		got, walls := step(s, src, 4*Tick, 0)
+		if walls != ownReads {
+			t.Fatalf("a sampler held off after each wall read read the wall %d times; want %d", walls, ownReads)
+		}
+		if got != 0 {
+			t.Fatalf("a sample after 40 ms frozen accrued %v; want nothing: the wait after its last wall read was set against it", got)
+		}
+		// The process frozen 10 ms more.
+		if got, _ := step(s, src, Tick, 0); got != 0 {
+			t.Fatalf("a sample after the last wait and 10 ms frozen accrued %v; want nothing: that wait was set against it", got)
+		}
+	})
+
+	t.Run("a read of the account that fails after the last wall read", func(t *testing.T) {
+		s, src := start()
+		step(s, src, Tick, time.Millisecond)
+		// As above, and the account read after the last wall read fails:
+		// the next sample has no account to set a wait against.
+		src.wait, src.waits, src.afterWall = 30*time.Millisecond, ownReads, true
+		src.failOwn = src.owns + 1 + ownReads
+		if got, _ := step(s, src, 4*Tick, 0); got != 0 {
+			t.Fatalf("a sample after 40 ms frozen accrued %v; want nothing", got)
+		}
+		if got, _ := step(s, src, Tick, 0); got != 0 {
+			t.Fatalf("a sample after a failed read of the account and 10 ms frozen accrued %v; want nothing: a wait was set against it from that read", got)
+		}
+	})
+
+	t.Run("a read of the account that fails before the wall read", func(t *testing.T) {
+		s, src := start()
+		step(s, src, Tick, time.Millisecond)
+		// The process frozen 10 ms, and the sampler, let go, waits 85 ms for
+		// a CPU; its account's first read then fails, saying the wait (a
+		// line read in part). A wait from a failed read explains nothing.
+		src.wall, src.own = src.wall.Add(85*time.Millisecond), src.own+85*time.Millisecond
+		src.failOwn, src.failSays = src.owns+1, src.own
+		if got, _ := step(s, src, Tick, 0); got != 0 {
+			t.Fatalf("a sample 95 ms on, its account's read failing, accrued %v; want what the process ran, nothing", got)
+		}
+	})
+}
+
 // A thread's wait is read from the sample the account was first read at: the
 // wait it had before is not one between two samples.
 func TestSampler_AThreadsWaitBeforeItsFirstReadExplainsNoSample(t *testing.T) {
