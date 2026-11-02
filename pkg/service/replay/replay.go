@@ -517,7 +517,9 @@ type Replayer struct {
 	keepAliveStop func() string
 	// keptExit is the exit of the application the run started once for
 	// all its sets (effectiveKeepAlive), when its runner tells it
-	// (keptAppExit). nil when the run started none.
+	// (keptAppExit). nil when the run started none. Start sets it for a run
+	// whose every set it runs serving (RunTestSet's serveTest): a set reads
+	// the kept app by it alone.
 	keptExit *keptAppExit
 
 	// exact is the set being replayed's exact serving, under the proven
@@ -2051,7 +2053,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// when, not that it failed to start. begin and the exit's tell take one
 	// lock: an exit told after begin is this set's, which the watch below
 	// halts it on.
-	if kept := r.keptExit; serveTest && kept != nil {
+	if kept := r.keptExit; kept != nil {
 		gone, earlier, endKept := kept.begin(testSetID)
 		defer endKept()
 		// kept.exit is set, for good, once gone is said.
@@ -2174,7 +2176,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return exit, false, "", false
 		}
 		exit = getLastAppErr()
-		if kept := r.keptExit; serveTest && kept != nil {
+		if kept := r.keptExit; kept != nil {
 			if e, told, after := kept.toldExit(); told {
 				exit, afterASet = e, after
 			}

@@ -440,6 +440,35 @@ func TestAKeptAppGoneBeforeTheFirstSetFailedToStart(t *testing.T) {
 	}
 }
 
+// A set halted before its first test counts the tests the run selected of it,
+// as a set that ran does, and its report carries the app's last logs: the
+// told exit carries none (its runner reads none at the die), so they are read
+// then, as at the end of a set that ran.
+func TestASetHaltedBeforeItsTestsCountsTheSelectedOnesAndCarriesTheAppsLogs(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("switch on %v", on), func(t *testing.T) {
+			provenOn(t, on)
+			c := &composeInstr{}
+			h := composeHarnessOf(t, c, 3)
+			h.replayer.config.Test.SelectedTests = map[string][]string{"test-set-0": {"test-1", "test-3"}}
+			h.instr.recentAppLogs = "app: exiting with code 3\n"
+			ctx, kept := listenedTo(context.Background())
+			h.replayer.keptExit = kept
+			models.AppExitOf(ctx)(models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 3})
+			if status := h.runServing(t); status != models.TestSetStatusAppHalted {
+				t.Fatalf("status %s, want APP_HALTED", status)
+			}
+			rep := h.report.report
+			if rep.Total != 2 || rep.Success+rep.Failure != 0 {
+				t.Fatalf("total %d, %d passed, %d failed; want the 2 tests selected of the set, none run", rep.Total, rep.Success, rep.Failure)
+			}
+			if rep.AppLogs != h.instr.recentAppLogs {
+				t.Fatalf("app_logs %q; want the app's last logs, %q", rep.AppLogs, h.instr.recentAppLogs)
+			}
+		})
+	}
+}
+
 // When an exit was told is said from the set running then, or the one that
 // had ended last: an exit before any set ran is the app's startup failing.
 func TestTheKeptExitSaysWhenItWasTold(t *testing.T) {

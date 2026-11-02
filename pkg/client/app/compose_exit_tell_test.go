@@ -2,10 +2,17 @@ package app
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/events"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
 )
 
 // With the switch off compose's abort stops the stack on the app's exit, and
@@ -63,4 +70,56 @@ func TestTheDieOfKeploysOwnStopIsNotToldWithTheSwitchOff(t *testing.T) {
 		t.Fatalf("keploy's own stop was told as the app's exit: %+v", e)
 	default:
 	}
+}
+
+// The run, with the switch off, watches the app's container for its caller
+// when the caller listens (models.WithAppExit): the app's die is told while
+// compose's up still waits out the rest of the stack, and the run returns
+// only once the up does.
+func TestAComposeRunWithTheSwitchOffTellsTheAppsDieBeforeItsUpReturns(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0")
+	argvLog := stubDockerCLI(t, "", 0)
+	upEnds := filepath.Join(t.TempDir(), "up-returns")
+	t.Setenv("KEPLOY_STUB_UP_WAIT_FILE", upEnds)
+	rec := &inspectRecorder{events: make(chan events.Message, 1)}
+	a := &App{
+		logger:          zap.NewNop(),
+		docker:          rec,
+		kind:            utils.DockerCompose,
+		cmd:             "docker compose -f /tmp/keploy-compose.yaml up app",
+		composeFile:     "/tmp/keploy-compose.yaml",
+		keployContainer: "keploy-v3",
+		container:       "app",
+		composeServices: []string{"app", "keploy-agent"},
+	}
+	told := make(chan models.AppError, 2)
+	ctx, cancel := context.WithCancel(models.WithAppExit(context.Background(), func(e models.AppError) { told <- e }))
+	defer cancel()
+	ran := make(chan models.AppError, 1)
+	go func() { ran <- a.run(ctx) }()
+	for !strings.Contains(recordedLog(t, argvLog), "ARG up") {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	rec.events <- events.Message{Type: events.ContainerEventType, Action: events.ActionDie,
+		Actor: events.Actor{ID: "app", Attributes: map[string]string{"exitCode": "3"}}}
+	select {
+	case e := <-told:
+		if e.AppErrorType != models.ErrUnExpected || e.ExitCode != 3 {
+			t.Fatalf("told %+v; want the app's unexpected exit, code 3", e)
+		}
+	case e := <-ran:
+		t.Fatalf("the run returned (%+v) before the up did, and told nothing", e)
+	case <-time.After(time.Minute):
+		t.Fatal("the app's die was not told while the up still ran")
+	}
+	select {
+	case e := <-ran:
+		t.Fatalf("the run returned (%+v) while the up still ran", e)
+	default:
+	}
+	if err := os.WriteFile(upEnds, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	<-ran
 }

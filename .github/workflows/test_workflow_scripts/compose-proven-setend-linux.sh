@@ -60,10 +60,10 @@
 #      code and the test the app held; the second set is APP_HALTED and runs
 #      none of its tests, its reason saying the app exited while the first
 #      set ran; keploy begins nothing after the exit (no re-send of the held
-#      test, no mock-consistency retry), exits 1, and its stop does not say
-#      it completed successfully. With the switch off the first set read
-#      FAILED for its one failed test, the exit never said, and keploy's
-#      stop read "replay completed successfully".
+#      test, no mock-consistency retry), exits 1, and its stop says the
+#      replay completed and the run failed. With the switch off the first
+#      set read FAILED for its one failed test, the exit never said, and
+#      keploy's stop read "replay completed successfully".
 # After every run no container or network of the project is left.
 #
 # Every wait is on an event: a line in a log, a file, or keploy's own exit.
@@ -486,9 +486,13 @@ for sw in 0 1; do
   if grep -a -q -E "re-sending|Retrying passing test cases" "$log"; then
     fail "7 (switch $sw): keploy sent a test again after the app's exit: $(grep -a -m1 -E 're-sending|Retrying passing test cases' "$log" | cut -c1-200)"
   fi
+  # The run reached its end and failed on the sets' verdicts: not
+  # "successfully", nor keploy's own failure to run a set ("failed to run
+  # test set": a set that staged its mocks on the gone agent).
   stop=$(grep -a "stopping Keploy" "$log" | tail -n1)
   case "$stop" in
-  "" | *successfully*) fail "7 (switch $sw): keploy's stop reads: ${stop:-no stop logged}" ;;
+  *"replay completed, and the run failed"*) ;;
+  *) fail "7 (switch $sw): keploy's stop reads: ${stop:-no stop logged}; want \"replay completed, and the run failed\"" ;;
   esac
   [ "$FAIL" -eq "$failed_before" ] || tail -80 "$log"
 done
