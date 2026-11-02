@@ -22,12 +22,15 @@ import (
 // (POST /agent/scope/begin|end) so replay serves only that test's recorded
 // mocks. Keying the filter by the worker's PID keeps two workers' begin/end
 // calls from overwriting one shared filter, but it does NOT isolate tests that
-// run at the same time: it narrows only the worker's own process tree, so a
-// process no registered worker started (an app server the tests share) is
-// served the whole pool (scopedFor), and at record such a process's calls, and every
-// call of two tests open at once in one process, are charged by time
-// (service/mock correlateScopes). Run scoped tests one at a time; a shared app
-// server needs a begin without a pid, which narrows the global pool.
+// run at the same time: it narrows only the worker's own process tree. So a
+// replay without the suite and app-start marks refuses a begin with a pid
+// (service/agent pidCannotScope); with them, a process no registered worker
+// started (an app server the tests share) is served the one open test's
+// mocks, or refused while more than one test is open (scopedFor,
+// starts.Unattributed). At record such a process's calls, and every call of
+// two tests open at once in one process, are charged by time (service/mock
+// correlateScopes). Run scoped tests one at a time; a shared app server needs
+// a begin without a pid, which narrows the global pool.
 //
 // A worker self-reports its PID in the scope call (ScopeReq.Pid — e.g. Node
 // process.pid), which registers an allowlist of that test's mock names on the
@@ -142,7 +145,11 @@ func (s *scopedMockDb) keep(mocks []*models.Mock, err error) ([]*models.Mock, er
 		return mocks, err
 	}
 	if s.live {
-		return without(byStart(s.pid, mocks), s.consumed(workerView{})), nil
+		shown, err := byStart(s.pid, mocks)
+		if err != nil {
+			return nil, err
+		}
+		return without(shown, s.consumed(workerView{})), nil
 	}
 	v := s.current()
 	gone := s.consumed(v)
@@ -729,8 +736,15 @@ func (s *scopedMockDb) RangeSessionMocksWithKey(ix *integrations.MockIndex, key 
 		}
 		v := s.current()
 		gone := s.consumed(v)
+		shown := func(mk *models.Mock) bool { return visibleIn(v, mk) }
+		if s.live {
+			var err error
+			if shown, err = startShown(s.pid); err != nil {
+				return err
+			}
+		}
 		return r.RangeSessionMocksWithKey(ix, key, func(mk *models.Mock) bool {
-			return !visibleIn(v, mk) || (gone != nil && gone(mk.Name)) || fn(mk)
+			return !shown(mk) || (gone != nil && gone(mk.Name)) || fn(mk)
 		})
 	}
 	all, err := s.GetSessionMocks()
@@ -1300,11 +1314,15 @@ func (p *Proxy) SetMappedUniverse(names []string) {
 	p.workerScopeMu.Unlock()
 }
 
-// scopedFor returns a mock view for an outgoing call from kpid. A call whose
-// process descends from a registered worker gets a view that follows that
-// worker from test to test, resolved on every read (see scopedMockDb.src);
-// any other call gets the bare manager (whole pool), as does kpid == 0
-// (non-eBPF platform / lookup miss).
+// scopedFor returns a mock view for an outgoing call from kpid. In a run with
+// the suite and app-start marks (starts.Default.Active) every call, kpid == 0
+// (non-eBPF platform / lookup miss) included, gets a view resolved from the
+// app starts on every read (scopedMockDb.live): a call of no test process is
+// the one open test's, or refused while more than one is open (starts
+// Unattributed). Otherwise a call whose process descends from a registered
+// worker gets a view that follows that worker from test to test, resolved on
+// every read (see scopedMockDb.src); any other call gets the bare manager
+// (whole pool), as does kpid == 0.
 //
 // A connection opened before its process (or an ancestor) registered as a
 // worker — a client a test binary dialled during its setup — keeps the bare
@@ -1317,7 +1335,7 @@ func (p *Proxy) SetMappedUniverse(names []string) {
 // a run without the suite and app-start marks (service/agent pidCannotScope).
 // Under exact serving (below) a begin with any pid is served exactly.
 func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.MockMemDb {
-	if kpid == 0 || mgr == nil {
+	if mgr == nil {
 		return mgr
 	}
 	// Under exact serving (the proven switch) the manager itself decides what
@@ -1328,6 +1346,9 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 	}
 	if starts.Default.Active() {
 		return &scopedMockDb{MockMemDb: mgr, pid: kpid, live: true}
+	}
+	if kpid == 0 {
+		return mgr
 	}
 	p.workerScopeMu.RLock()
 	nobody := len(p.workerScope) == 0
@@ -1397,10 +1418,16 @@ func ppidFromStat(pid uint32) (uint32, bool) {
 	return uint32(st.PPID), true
 }
 
-func byStart(pid uint32, mocks []*models.Mock) []*models.Mock {
-	rank, universe, ok := starts.Default.View(pid, time.Now())
+// byStart is mocks as a live view for pid shows them (starts View): those it
+// may be served, in its order. An error refuses the call every recording
+// (starts.Unattributed).
+func byStart(pid uint32, mocks []*models.Mock) ([]*models.Mock, error) {
+	rank, universe, ok, err := starts.Default.View(pid, time.Now())
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
-		return mocks
+		return mocks, nil
 	}
 	type ranked struct {
 		m *models.Mock
@@ -1424,7 +1451,28 @@ func byStart(pid uint32, mocks []*models.Mock) []*models.Mock {
 	for i, k := range kept {
 		out[i] = k.m
 	}
-	return out
+	return out, nil
+}
+
+// startShown is whether a live view for pid shows a mock, as byStart keeps
+// it, for a walk that keeps its own order (a keyed walk of the session
+// tier). An error refuses the call every recording. With no view (View's ok
+// false) rank and universe are nil, and every mock is shown.
+func startShown(pid uint32) (func(*models.Mock) bool, error) {
+	rank, universe, _, err := starts.Default.View(pid, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	return func(m *models.Mock) bool {
+		if m == nil {
+			return false
+		}
+		if _, ranked := rank[m.Name]; ranked {
+			return true
+		}
+		_, known := universe[m.Name]
+		return !known
+	}, nil
 }
 
 // Every MockMemDb the proxy hands a parser must keep the stateful cursor.
