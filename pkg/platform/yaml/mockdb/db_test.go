@@ -857,3 +857,32 @@ func TestInsertMock_HandsTheDocumentWithTheFileUnlocked(t *testing.T) {
 		t.Fatalf("the receiver read back %d mocks, want the 1 just written", readBack)
 	}
 }
+
+func TestResolveMockFileMode(t *testing.T) {
+	dir := t.TempDir()
+	nonExistent := filepath.Join(dir, "new-mock.yaml")
+	mode, err := resolveMockFileMode(nonExistent)
+	if err != nil {
+		t.Fatalf("resolveMockFileMode on non-existent file failed: %v", err)
+	}
+	if mode != 0o644 {
+		t.Errorf("resolveMockFileMode for new file = %o, want 0o644", mode)
+	}
+
+	existing := filepath.Join(dir, "existing-mock.yaml")
+	if err := os.WriteFile(existing, []byte("test"), 0o600); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	info, err := os.Stat(existing)
+	if err != nil {
+		t.Fatalf("stat failed: %v", err)
+	}
+	mode, err = resolveMockFileMode(existing)
+	if err != nil {
+		t.Fatalf("resolveMockFileMode on existing file failed: %v", err)
+	}
+	if mode != info.Mode().Perm() {
+		t.Errorf("resolveMockFileMode for existing file = %o, want %o", mode, info.Mode().Perm())
+	}
+}
+

@@ -147,7 +147,7 @@ func generateJacocoReport(ctx context.Context, jacocoCliPath string) error {
 	reportDir := "target/site/keployE2E"
 
 	// Ensure the report directory exists
-	if err := os.MkdirAll(reportDir, 0777); err != nil {
+	if err := os.MkdirAll(reportDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create report directory: %w", err)
 	}
 
