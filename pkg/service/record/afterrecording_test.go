@@ -360,11 +360,11 @@ func TestAfterRecordingComplete_AnInterruptBeforeThePassOffersDoesNotStopIt(t *t
 			return
 		}
 		if n := logs.FilterMessageSnippet(hookOfferSnippet).Len(); n != 0 {
-			t.Errorf("setup: the stop offered to end the pass %d times while its clock was held: %v", n, logs.All())
+			t.Errorf("the pass offered to stop %d times before a whole notice period after the stop's signal (the notices' clock is held): %v", n, logs.All())
 			return
 		}
 		if utils.MarkInterruptedAgain() { // sudo's copy of the stop's signal
-			t.Error("setup: an offer to stop stood before the pass made one")
+			t.Error("an offer to stop stood before the pass made its own, so sudo's copy of the stop's signal stopped it")
 			return
 		}
 		// A stop that took the copy ends its notices; five more say it did not.
