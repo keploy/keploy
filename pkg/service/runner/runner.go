@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -829,10 +830,23 @@ var (
 	appSayEvery  = 30
 )
 
+// answerNeverAccepted reports whether a probe's error says the app answered in
+// a way that no later probe, nor the test's own request (it verifies the app's
+// certificate as the probe does), can accept: a certificate that fails
+// verification (an unknown authority, another host's, an expired one), or
+// plain HTTP from an app the ServiceURL names as https. Refused connections
+// and other TLS handshake errors (a TLS sidecar can send those while it
+// starts) are not ready yet, not this.
+func answerNeverAccepted(err error) bool {
+	var verifyErr *tls.CertificateVerificationError
+	return errors.As(err, &verifyErr) || errors.Is(err, http.ErrSchemeMismatch)
+}
+
 // waitForApp blocks until the app at serviceURL responds to an HTTP
 // request. Given ended, the end of the app's run (RunTestOpts.AppEnded), it
 // has no budget: it also ends when ended closes, with an error that says the
-// app stopped before it answered, or when ctx ends. An app compose holds
+// app stopped before it answered, when ctx ends, or at once on an answer
+// the test can never accept (answerNeverAccepted). An app compose holds
 // from starting until a slow dependency is healthy is waited for however
 // long that takes (enterprise atg-with-mocks pipelines 13105 and 13112: the
 // two-minute budget ran out 8 s before compose started the app). With ended
@@ -932,7 +946,9 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, e
 	//   nil          — response received (any status code; we care
 	//                  about liveness, not correctness).
 	//   fatal=true   — deterministic request-construction error; no
-	//                  point retrying.
+	//                  point retrying. Also, for a wait with no budget,
+	//                  an answer no later probe can accept (see
+	//                  answerNeverAccepted).
 	//   fatal=false  — transport error (connect refused, reset, TLS
 	//                  handshake fail, etc.); retry on the next tick.
 	//
@@ -955,6 +971,14 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, e
 		}
 		resp, httpErr := probeClient.Do(req)
 		if httpErr != nil {
+			// A wait with no budget would hold the run for as long as the
+			// app runs on an answer no later probe can accept: it ends at
+			// once instead. A budgeted wait retries it until its budget, as
+			// before: a k8s ingress serves a placeholder certificate until
+			// its own is loaded.
+			if ended != nil && answerNeverAccepted(httpErr) {
+				return true, fmt.Errorf("the app answered, but in a way the test's request can never accept: check the ServiceURL (--app-url)'s scheme and the app's certificate: %w", httpErr)
+			}
 			return false, httpErr
 		}
 		_ = resp.Body.Close()

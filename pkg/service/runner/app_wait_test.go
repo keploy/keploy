@@ -2,8 +2,18 @@ package integration
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"errors"
+	"io"
+	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -217,5 +227,179 @@ func TestTheCallersContextEndsTheUnbudgetedWait(t *testing.T) {
 	}
 	if got := app.refused.Load(); got >= 1000 {
 		t.Fatalf("the wait went on after its ctx ended: %d refused probes", got)
+	}
+}
+
+// answerApp is an app that answers at once, over TLS with the config cfg when
+// cfg is set (the test server's own certificate when cfg has none). onConn,
+// if set, is told each connection's count as it is accepted.
+func answerApp(t *testing.T, cfg *tls.Config, onConn func(n int64)) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	conns := &atomic.Int64{}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			if n := conns.Add(1); onConn != nil {
+				onConn(n)
+			}
+		}
+	}
+	if cfg != nil {
+		srv.TLS = cfg
+		srv.StartTLS()
+	} else {
+		srv.Start()
+	}
+	t.Cleanup(srv.Close)
+	return srv, conns
+}
+
+// expiredCert is a certificate for the loopback addresses whose validity
+// ended a day ago.
+func expiredCert(t *testing.T) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "expired"},
+		NotBefore:    time.Now().Add(-48 * time.Hour),
+		NotAfter:     time.Now().Add(-24 * time.Hour),
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+// An unbudgeted wait ends at once, failing the test, on an answer that no
+// later probe can accept: it would otherwise hold the run for as long as the
+// app runs. Each case's app runs on (its end never closes); the caller's ctx
+// ends the wait at the third connection, so a wait that goes on fails the
+// row instead of holding it.
+func TestAnAnswerTheTestCanNeverAcceptEndsTheUnbudgetedWaitAtOnce(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		cfg   *tls.Config
+		url   func(srvURL string) string
+		cause string
+	}{
+		{"a certificate of an unknown authority", &tls.Config{}, func(u string) string { return u }, "certificate signed by unknown authority"},
+		{"another host's certificate", &tls.Config{}, func(u string) string { return strings.Replace(u, "127.0.0.1", "localhost", 1) }, "not localhost"},
+		{"an expired certificate", &tls.Config{Certificates: []tls.Certificate{expiredCert(t)}}, func(u string) string { return u }, "certificate has expired"},
+		{"plain HTTP to an https ServiceURL", nil, func(u string) string { return strings.Replace(u, "http://", "https://", 1) }, "server gave HTTP response to HTTPS client"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := appWaitRunner(t, zap.NewNop())
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			srv, conns := answerApp(t, c.cfg, func(n int64) {
+				if n == 3 {
+					cancel()
+				}
+			})
+			appURL := c.url(srv.URL)
+
+			res := r.RunTest(ctx, RunTestOpts{TestSetID: "test-set-0", TestStepID: "health", ServiceURL: appURL, AppEnded: make(chan struct{})})
+
+			if !strings.Contains(res.Error, "app not reachable: failed to probe") || !strings.Contains(res.Error, c.cause) {
+				t.Fatalf("error = %q; want the wait to fail at once on %q", res.Error, c.cause)
+			}
+			if !strings.Contains(res.Error, appURL) || !strings.Contains(res.Error, "ServiceURL (--app-url)") {
+				t.Fatalf("error = %q; want it to name the app's URL %s and the ServiceURL (--app-url)", res.Error, appURL)
+			}
+			if got := conns.Load(); got != 1 {
+				t.Fatalf("the wait probed the app %d times; want it to end on the first answer", got)
+			}
+		})
+	}
+}
+
+// Other TLS handshake errors stay not-ready: a TLS sidecar can send them
+// while it starts. Here the app's TLS fails every handshake with an internal
+// error, and the wait goes on until the app's run ends, at the third
+// connection. Should the wait not end on that, the caller's ctx ends it at
+// the twentieth.
+func TestAnotherTLSHandshakeErrorLeavesTheAppNotReady(t *testing.T) {
+	r := appWaitRunner(t, zap.NewNop())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ended := make(chan struct{})
+	var once sync.Once
+	srv, conns := answerApp(t, &tls.Config{GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+		return nil, errors.New("certificate not loaded yet")
+	}}, func(n int64) {
+		switch n {
+		case 3:
+			once.Do(func() { close(ended) })
+		case 20:
+			cancel()
+		}
+	})
+
+	res := r.RunTest(ctx, RunTestOpts{TestSetID: "test-set-0", TestStepID: "health", ServiceURL: srv.URL, AppEnded: ended})
+
+	if !strings.Contains(res.Error, "app not reachable: the app's run ended before the app at") || !strings.Contains(res.Error, "internal error") {
+		t.Fatalf("error = %q; want the wait to go on past the handshake errors until the app's run ended", res.Error)
+	}
+	if got := conns.Load(); got < 3 {
+		t.Fatalf("the wait ended after %d connections; want it to go on until the app's run ended at the third", got)
+	}
+}
+
+// A wait with a budget (a caller that did not start the app: k8s-proxy, the
+// sandbox's UI path) retries a certificate it cannot verify until its budget,
+// as before: a k8s ingress serves a placeholder certificate until its own is
+// loaded. The caller's ctx ends it at the third connection.
+func TestABudgetedWaitRetriesACertificateItCannotVerify(t *testing.T) {
+	r := appWaitRunner(t, zap.NewNop())
+	appWaitBudget = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv, conns := answerApp(t, &tls.Config{}, func(n int64) {
+		if n == 3 {
+			cancel()
+		}
+	})
+
+	res := r.RunTest(ctx, RunTestOpts{TestSetID: "test-set-0", TestStepID: "health", ServiceURL: srv.URL})
+
+	if !strings.Contains(res.Error, "app not reachable: stopped waiting for app at") {
+		t.Fatalf("error = %q; want the budgeted wait to retry the certificate until its ctx ended", res.Error)
+	}
+	if got := conns.Load(); got < 3 {
+		t.Fatalf("the budgeted wait ended after %d connections; want it to retry until its ctx ended at the third", got)
+	}
+}
+
+// A wait with a budget has no run to wait on, so it never says that its run
+// has not ended, however many probes go unanswered.
+func TestABudgetedWaitSaysNothingOfAnAppsRun(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	r := appWaitRunner(t, zap.New(core))
+	appWaitBudget = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	appURL, app, _ := heldApp(t, 1000, func(n int64) {
+		if n == 6 {
+			cancel()
+		}
+	})
+
+	res := r.RunTest(ctx, RunTestOpts{TestSetID: "test-set-0", TestStepID: "health", ServiceURL: appURL})
+
+	if !strings.Contains(res.Error, "app not reachable: stopped waiting for app at") || app.refused.Load() < 6 {
+		t.Fatalf("error = %q after %d refused probes; want the budgeted wait to go on until its ctx ended at the sixth", res.Error, app.refused.Load())
+	}
+	if said := logs.FilterMessageSnippet("its run has not ended").All(); len(said) != 0 {
+		t.Fatalf("the budgeted wait said %d times that its run has not ended: %q", len(said), said[0].Message)
 	}
 }
