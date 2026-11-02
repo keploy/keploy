@@ -235,6 +235,201 @@ func TestServeLiveEndsForAClientThatLeavesWhileItWaits(t *testing.T) {
 	}
 }
 
+// oldDialBudget is how long the ingress once let a call wait for the app to
+// listen before it failed the call.
+const oldDialBudget = 3 * time.Second
+
+// firstDial is one of the handlers that dial the app for a new connection:
+// handleConnection's three (an HTTP/1 call, gRPC's preface, the relay of a
+// TLS connection) and ServeLive's passthrough, with requests off.
+type firstDial struct {
+	name string
+	// open is what the client sends first: as much as tells the handler the
+	// call's kind (the passthrough reads nothing before its dial).
+	open string
+	// serve has the app serve on ln, which it listens at late.
+	serve func(t *testing.T, ln net.Listener)
+	// call makes the client's call over conn: nil once the app answered.
+	call func(conn net.Conn) error
+}
+
+func firstDials(t *testing.T) []firstDial {
+	trust := startTLSApp(t) // the late TLS app's certificate is the same
+	return []firstDial{
+		{
+			name: "HTTP/1",
+			open: "GET /late HTTP/1.1\r\nHost: api\r\n\r\n",
+			serve: func(t *testing.T, ln net.Listener) {
+				serveApp(t, ln, func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "late "+r.URL.Path) })
+			},
+			call: func(conn net.Conn) error {
+				if _, err := io.WriteString(conn, "GET /late HTTP/1.1\r\nHost: api\r\n\r\n"); err != nil {
+					return err
+				}
+				resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+				if err != nil {
+					return fmt.Errorf("the app's answer: %w", err)
+				}
+				body, err := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				if err != nil || string(body) != "late /late" {
+					return fmt.Errorf("the app's answer: %s %q (%v), want %q", resp.Status, body, err, "late /late")
+				}
+				return nil
+			},
+		},
+		{
+			name:  "gRPC",
+			open:  clientPreface,
+			serve: func(t *testing.T, ln net.Listener) { serveRaw(ln, clientPreface, emptySettingsFrame) },
+			call:  func(conn net.Conn) error { return rawCall(conn, clientPreface, emptySettingsFrame) },
+		},
+		{
+			name: "TLS",
+			// A ClientHello's record header and the start of its body.
+			open:  "\x16\x03\x01\x00\xc8\x01\x00\x00\xc4\x03\x03" + strings.Repeat("\x00", len(clientPreface)),
+			serve: func(t *testing.T, ln net.Listener) { startTLSAppOn(t, ln) },
+			call: func(conn net.Conn) error {
+				return tlsCall(conn, clientTLSConfig(trust), trust.Certificate(), "/late")
+			},
+		},
+		{
+			name:  "passthrough",
+			serve: func(t *testing.T, ln net.Listener) { serveRaw(ln, "ping", "pong") },
+			call:  func(conn net.Conn) error { return rawCall(conn, "ping", "pong") },
+		},
+	}
+}
+
+// emptySettingsFrame is an HTTP/2 SETTINGS frame with no settings: a gRPC
+// server's first bytes.
+const emptySettingsFrame = "\x00\x00\x00\x04\x00\x00\x00\x00\x00"
+
+// serveRaw is an app that takes one connection on ln, reads want from it,
+// answers it with answer and closes it.
+func serveRaw(ln net.Listener, want, answer string) {
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.Close() }()
+		got := make([]byte, len(want))
+		if _, err := io.ReadFull(c, got); err == nil && string(got) == want {
+			_, _ = io.WriteString(c, answer)
+		}
+	}()
+}
+
+// rawCall sends want over conn and reads the app's answer: nil when it is
+// answer.
+func rawCall(conn net.Conn, want, answer string) error {
+	if _, err := io.WriteString(conn, want); err != nil {
+		return err
+	}
+	got := make([]byte, len(answer))
+	if n, err := io.ReadFull(conn, got); err != nil {
+		return fmt.Errorf("the app's answer: %q (%v), want %q", got[:n], err, answer)
+	}
+	if string(got) != answer {
+		return fmt.Errorf("the app's answer: %q, want %q", got, answer)
+	}
+	return nil
+}
+
+// serveFirstDial runs d's handler, on ctx, for a new client's connection to
+// the app at addr. served is closed once the handler ends and its captures
+// with it.
+func serveFirstDial(t *testing.T, ctx context.Context, d firstDial, addr string) (pm *IngressProxyManager, client net.Conn, served <-chan struct{}, logs *observer.ObservedLogs) {
+	t.Helper()
+	core, logs := observer.New(zapcore.DebugLevel)
+	cfg := &config.Config{}
+	cfg.Agent.RecordRequests = d.name != "passthrough"
+	pm = New(zap.New(core), nil, cfg)
+	client, proxied := tcpPairForWatch(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() { _ = proxied.Close() }() // as ServeLive's caller does
+		if d.name == "passthrough" {
+			pm.ServeLive(ctx, proxied, addr, 8080)
+		} else {
+			pm.handleConnection(ctx, proxied, addr, pm.logger, make(chan *models.TestCase, 4), make(chan struct{}, 1), 8080)
+		}
+		pm.captures.Wait()
+	}()
+	return pm, client, done, logs
+}
+
+// Every first dial to the app waits for an app that listens only after the
+// 3 s the ingress once gave it, and the call is answered by the app: its
+// listener coming ends the wait, not a time. The app here listens once the
+// call has waited past that budget (the wait's own start is the mark); a
+// budget put back around any of the dials fails that call.
+func TestEveryFirstDialWaitsPastTheOldBudgetForTheApp(t *testing.T) {
+	for _, d := range firstDials(t) {
+		t.Run(d.name, func(t *testing.T) {
+			t.Parallel()
+			addr := sharedAppAddr(t)
+			pm, client, served, logs := serveFirstDial(t, context.Background(), d, addr)
+			called := make(chan error, 1)
+			go func() { called <- d.call(client) }()
+			awaitWaiters(t, pm, addr, 1)
+			time.Sleep(oldDialBudget + time.Second)
+			d.serve(t, testnet.ListenShared(t, "tcp4", addr))
+			select {
+			case err := <-called:
+				if err != nil {
+					t.Fatalf("the call that waited past %v for the app: %v", oldDialBudget, err)
+				}
+			case <-never(t):
+				t.Fatal("the call that waited for the app did not end")
+			}
+			_ = client.Close()
+			<-served
+			if e := atOrAbove(logs, zapcore.ErrorLevel); len(e) != 0 {
+				t.Errorf("logged at ERROR: %v", e)
+			}
+		})
+	}
+}
+
+// Every first dial ends its wait for the app when the call's context ends
+// (keploy's own end: the forwarder's, the agent's), and its handler with it:
+// the app, listening after, sees nothing of the call, no wait is left, and
+// nothing is said above DEBUG.
+func TestEveryFirstDialEndsItsWaitWithTheCallsContext(t *testing.T) {
+	for _, d := range firstDials(t) {
+		t.Run(d.name, func(t *testing.T) {
+			t.Parallel()
+			addr := sharedAppAddr(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			pm, client, served, logs := serveFirstDial(t, ctx, d, addr)
+			if _, err := io.WriteString(client, d.open); err != nil {
+				t.Fatal(err)
+			}
+			awaitWaiters(t, pm, addr, 1)
+			cancel()
+			select {
+			case <-served:
+			case <-never(t):
+				t.Fatal("the handler still waits for the app after its context ended")
+			}
+			if callers, waits := waitersAt(pm, addr); callers != 0 || waits != 0 {
+				t.Errorf("after the call's context ended: %d calls in %d waits, want none", callers, waits)
+			}
+			ln := testnet.ListenShared(t, "tcp4", addr)
+			if n := accepted(t, ln); n != 0 {
+				t.Errorf("the app saw %d connections for a call whose context ended", n)
+			}
+			if e := atOrAbove(logs, zapcore.InfoLevel); len(e) != 0 {
+				t.Errorf("logged at INFO or above: %v", e)
+			}
+		})
+	}
+}
+
 // A redial of a stale pooled connection waits for an app that restarts for
 // longer than the 3 s the redial once had, and the call is answered by the
 // restarted app.
