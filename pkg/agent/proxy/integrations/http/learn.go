@@ -629,6 +629,27 @@ func (c learnRound) movedFrom(now learnRound, retake bool) (moved string, caught
 // staged a test set again.
 const movedRestaged = "staged a test set again"
 
+// markMovedWhy is why learnMatchIn decides nothing of a call its caller
+// marked in a round (mark) its first pass no longer reads: at the round at,
+// where that read is a snapshot of the round (snap; CallRound.MovedSince).
+func markMovedWhy(mark integrations.CallRound, snap bool, at integrations.RoundAt) string {
+	where := "in the round between tests"
+	switch {
+	case mark.Staging():
+		where = "while the replay staged a test set"
+	case mark.InTest():
+		where = "in the test then running"
+	}
+	was, known := mark.Round()
+	switch {
+	case !known || !snap:
+		return "keploy record's full round marked this request " + where + " in a store that keeps no count of its round's moves, so keploy cannot tell that the replay did not move that round before its learn step read it"
+	case was.Epoch != at.Epoch:
+		return "keploy record's full round marked this request " + where + ", and the replay " + movedRestaged + " before keploy's learn step read it"
+	}
+	return "keploy record's full round marked this request " + where + ", and the replay ended or began a test, or served another view of its recordings, before keploy's learn step read it"
+}
+
 // where is the round c was read in, as a miss says it: in the test open (by
 // its view's name where the store and the tracker agreed on it, or as the
 // test then running), while the store showed a test's view the tracker had
@@ -1371,14 +1392,25 @@ func (h *HTTP) orderMiss(ctx context.Context, input *req, mockDb integrations.Mo
 // otherwise it is a miss with its reason. It returns the mock to serve, or
 // the miss.
 func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions) (*models.Mock, *learnMiss, error) {
-	return h.learnMatchIn(ctx, input, mockDb, n, opts, nil)
+	return h.learnMatchIn(ctx, input, mockDb, n, opts, integrations.CallRound{}, nil)
 }
 
 // learnMatchIn is learnMatch, telling call, when set, where the call's first
 // read of the round found it made (integrations.CallRound): its first
 // pass's. A miss's lookup of a recording made elsewhere is asked of that
 // round (notOwnedRecording).
-func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions, call *integrations.CallRound) (*models.Mock, *learnMiss, error) {
+//
+// mark, where it is of a read (CallRound.Read), is where the caller marked
+// the call before any read of the learn step (LearnMatch: another parser's
+// decoder marks its call, then reads the store held to that mark): the
+// first pass must read the round mark is of. One the replay moved since
+// (CallRound.MovedSince: a staging, a test's end or begin on the store or
+// the tracker) is the moved miss, learning nothing: decided in the round
+// the first pass shows, a late call of one test would be paired with the
+// next test's recording, and what it differs in learned onto it as noise.
+// The zero CallRound (the HTTP parser's own call, whose first pass is its
+// mark, or a store that marks no round) holds the first pass to nothing.
+func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions, mark integrations.CallRound, call *integrations.CallRound) (*models.Mock, *learnMiss, error) {
 	tracker := learn.TrackerFrom(ctx)
 	live := liveParts(ctx, input)
 	liveShape := n.shape(live, sameDest)
@@ -1432,6 +1464,13 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 		read, err := h.readLearnPass(mockDb, tracker, live, liveShape, n, opts.LearnPool)
 		if err != nil {
 			return nil, nil, err
+		}
+		if !made.read && mark.MovedSince(read.at.round) {
+			// The caller marked the call in a round its first pass no
+			// longer reads (a read that is no snapshot of the round keeps
+			// no instant of it, and is moved: nothing tells it did not).
+			res := learn.Result{Outcome: learn.Miss, Index: -1, Why: markMovedWhy(mark, read.round.snap, read.at.round)}
+			return nil, &learnMiss{res: res, moved: true}, nil
 		}
 		if first {
 			*call, marked = read.call, true

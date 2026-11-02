@@ -56,7 +56,7 @@ func TestLearnMatchAnswersAnotherParsersDriftedCall(t *testing.T) {
 	db := &learnDb{perTest: []*models.Mock{exportSendRecording()}}
 	ctx := learn.WithTracker(context.Background(), tr)
 	call := live("POST", "/", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportSend)
-	served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, nil)
+	served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{})
 	if err != nil || miss != nil || served == nil || served.Name != "mock-1" {
 		t.Fatalf("served %v miss %+v err %v, want mock-1 served", served, miss, err)
 	}
@@ -80,10 +80,10 @@ func TestLearnMatchRefusesAnotherParsersCallItCannotExplain(t *testing.T) {
 	ctx := learn.WithTracker(context.Background(), tr)
 	noise := NewRequestNoise(zap.NewNop(), opts)
 	liveAt := exportAt.Add(learn.FullRoundLead)
-	if served, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/", exportPutBody(exportLiveID, liveAt), exportPut)), noise, db, opts, nil); err != nil || miss != nil || served == nil {
+	if served, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/", exportPutBody(exportLiveID, liveAt), exportPut)), noise, db, opts, integrations.CallRound{}); err != nil || miss != nil || served == nil {
 		t.Fatalf("the PutItem: served %v miss %+v err %v, want it answered", served, miss, err)
 	}
-	served, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/", exportSendBody(exportLiveID, liveAt), exportSend)), noise, db, opts, nil)
+	served, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/", exportSendBody(exportLiveID, liveAt), exportSend)), noise, db, opts, integrations.CallRound{})
 	if err != nil || served != nil || miss == nil {
 		t.Fatalf("the SendMessage: served %v miss %+v err %v, want a miss", served, miss, err)
 	}
@@ -130,7 +130,7 @@ func TestLearnMatchRunsOnlyInRecordsFullRound(t *testing.T) {
 			db = endedDb{ldb}
 		}
 		call := live("POST", "/", exportSendBody(exportLiveID, exportAt), exportSend)
-		served, miss, err := h.LearnMatch(context.Background(), exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, nil)
+		served, miss, err := h.LearnMatch(context.Background(), exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{})
 		if err != nil || served != nil || miss != nil || len(ldb.perTest) != 1 || len(ldb.consumed) != 0 {
 			t.Fatalf("%s: served %v miss %+v err %v, store %d left %d taken; want nothing run", c.name, served, miss, err, len(ldb.perTest), len(ldb.consumed))
 		}
@@ -145,7 +145,7 @@ func TestLearnMatchReturnsTheLearnStepsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	call := live("POST", "/", exportSendBody(exportLiveID, exportAt), exportSend)
-	served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, nil)
+	served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{})
 	if err == nil || served != nil || miss != nil {
 		t.Fatalf("served %v miss %+v err %v, want the context's error alone", served, miss, err)
 	}
@@ -159,5 +159,133 @@ func TestANilLearnMissSaysNothing(t *testing.T) {
 		if m.Closest() != nil || report.NextSteps != "the parser's own words" || report.Reason != "" {
 			t.Fatalf("%+v: closest %v, report %+v", m, m.Closest(), report)
 		}
+	}
+}
+
+// atRoundDb is roundLearnDb read at the round's instant at
+// (integrations.RoundAt), as the agent's MockManager reads its round: the
+// store another parser marked its call in, read again by the learn step.
+type atRoundDb struct {
+	*roundLearnDb
+	at integrations.RoundAt
+}
+
+func (d *atRoundDb) RoundSnapshot(q integrations.RoundQuery) (integrations.RoundSnapshot, bool) {
+	s, ok := d.roundLearnDb.RoundSnapshot(q)
+	s.At = d.at
+	return s, ok
+}
+
+// The learn step decides another parser's call in the round its caller
+// marked it in, never in one the replay moved to since: a staging, or a
+// test's end or begin, between the caller's mark and the learn step's first
+// read is the moved miss, which takes and learns nothing and names no
+// recording, so a late call of one test is never answered with the next
+// test's recording. A move of the generation alone (a test process's claim
+// of its key again) is no move, and a mark of a store that keeps no
+// generation fails closed.
+func TestLearnMatchDecidesTheCallInTheRoundItsCallerMarked(t *testing.T) {
+	marked := integrations.RoundAt{Epoch: 3, Gen: 9, Bounds: 4}
+	at := integrations.NewCallRound(marked.Epoch, nil).ReadAt(marked)
+	inTest := at.InView(true, false)
+	for _, c := range []struct {
+		name string
+		mark integrations.CallRound
+		read integrations.RoundAt
+		// plain: the store reads no snapshot of its round (no
+		// integrations.RoundReader).
+		plain bool
+		// moved is what the moved miss says after "marked this request ";
+		// "" where the call is served.
+		moved string
+	}{
+		{"read in the round it was marked in", inTest, marked, false, ""},
+		{"a claim again moved the generation alone", inTest, integrations.RoundAt{Epoch: 3, Gen: 10, Bounds: 4}, false, ""},
+		{"no mark (a store that marks no round)", integrations.CallRound{}, integrations.RoundAt{Epoch: 4, Gen: 12, Bounds: 6}, false, ""},
+		{"a test ended or began since the mark", inTest, integrations.RoundAt{Epoch: 3, Gen: 11, Bounds: 6}, false, "in the test then running, and the replay ended or began a test"},
+		{"a test began since a mark between tests", at, integrations.RoundAt{Epoch: 3, Gen: 10, Bounds: 5}, false, "in the round between tests, and the replay ended or began a test"},
+		{"a test set staged since the mark", inTest, integrations.RoundAt{Epoch: 4, Gen: 9, Bounds: 4}, false, "in the test then running, and the replay " + movedRestaged},
+		{"a test set staged again since a mark as one staged", at.InStaging(true), integrations.RoundAt{Epoch: 4, Gen: 9, Bounds: 4}, false, "while the replay staged a test set, and the replay " + movedRestaged},
+		{"a mark of a store that keeps no generation", integrations.NewCallRound(marked.Epoch, nil).InView(true, false), marked, false, "in the test then running in a store that keeps no count of its round's moves"},
+		{"a store whose reads are no snapshot of the round", inTest, marked, true, "in the test then running in a store that keeps no count of its round's moves"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, _, opts := learnOn(t)
+			tr := clockedTracker()
+			tr.Begin()
+			ldb := &learnDb{perTest: []*models.Mock{exportSendRecording()}}
+			var db integrations.MockMemDb = &atRoundDb{roundLearnDb: &roundLearnDb{s12LearnDb: &s12LearnDb{learnDb: ldb}, test: "test-1"}, at: c.read}
+			if c.plain {
+				db = ldb
+			}
+			ctx := learn.WithTracker(context.Background(), tr)
+			call := live("POST", "/", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportSend)
+			served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, c.mark)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.moved == "" {
+				if miss != nil || served == nil || served.Name != "mock-1" || len(ldb.consumed) != 1 {
+					t.Fatalf("served %v miss %+v, %d taken; want mock-1 served", served, miss, len(ldb.consumed))
+				}
+				return
+			}
+			report := &models.MockMismatchReport{}
+			miss.Explain(report)
+			if served != nil || miss == nil || miss.Closest() != nil || len(ldb.consumed) != 0 || len(ldb.perTest) != 1 || ldb.perTest[0].Spec.ReqBodyNoise != nil ||
+				report.Reason != "" || !strings.Contains(report.NextSteps, "marked this request "+c.moved) {
+				t.Fatalf("served %v miss %+v (closest %v), %d taken, recording's noise %v, report %+v; want the moved miss (%q), nothing taken or learned",
+					served, miss, miss.Closest(), len(ldb.consumed), ldb.perTest[0].Spec.ReqBodyNoise, report, c.moved)
+			}
+		})
+	}
+}
+
+// installDb is atRoundDb showing test-1's view while the learn tracker has
+// begun the next test (integrations.RoundSnapshot.TrackerAhead), until the
+// call's wait for the round to move (integrations.RoundWaiter) installs
+// test-2's view: a boundary of the round, after the caller's mark.
+type installDb struct {
+	*atRoundDb
+	installed bool
+}
+
+func (d *installDb) RoundSnapshot(q integrations.RoundQuery) (integrations.RoundSnapshot, bool) {
+	s, ok := d.atRoundDb.RoundSnapshot(q)
+	if !d.installed {
+		s.Phase, s.Open = integrations.RoundBoundary, false
+	}
+	return s, ok
+}
+
+func (d *installDb) AwaitRoundMove(_ context.Context, at integrations.RoundAt) (bool, error) {
+	d.installed, d.test = true, "test-2"
+	d.at = integrations.RoundAt{Epoch: at.Epoch, Gen: at.Gen + 1, Bounds: at.Bounds + 1}
+	return true, nil
+}
+
+// Only the learn step's first read is held to its caller's mark: a call
+// marked where the tracker had begun test-2 over test-1's view, whose first
+// read found the round as marked, waits for the store to open test-2 and is
+// decided there (the learn step's own catch-up), though that install moved
+// the round past the mark.
+func TestLearnMatchHoldsOnlyItsFirstReadToTheCallersMark(t *testing.T) {
+	h, _, opts := learnOn(t)
+	tr := clockedTracker()
+	tr.Begin()
+	marked := integrations.RoundAt{Epoch: 3, Gen: 9, Bounds: 4}
+	ldb := &learnDb{perTest: []*models.Mock{exportSendRecording()}}
+	db := &installDb{atRoundDb: &atRoundDb{roundLearnDb: &roundLearnDb{s12LearnDb: &s12LearnDb{learnDb: ldb}, test: "test-1"}, at: marked}}
+	if s, _ := db.RoundSnapshot(integrations.RoundQuery{Tracker: tr}); !s.TrackerAhead() || s.PoolsCall() {
+		t.Fatalf("precondition: the store does not read the tracker ahead of test-1's view: %+v", s.Phase)
+	}
+	ctx := learn.WithTracker(context.Background(), tr)
+	call := live("POST", "/", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportSend)
+	mark := integrations.NewCallRound(marked.Epoch, nil).ReadAt(marked).InView(true, false)
+	served, miss, err := h.LearnMatch(ctx, exportCall(call), NewRequestNoise(zap.NewNop(), opts), db, opts, mark)
+	if err != nil || !db.installed || miss != nil || served == nil || served.Name != "mock-1" {
+		report := &models.MockMismatchReport{}
+		miss.Explain(report)
+		t.Fatalf("served %v (installed %v) err %v, miss %q; want mock-1 served in test-2's round", served, db.installed, err, report.NextSteps)
 	}
 }

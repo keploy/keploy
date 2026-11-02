@@ -44,18 +44,26 @@ func (m *LearnMiss) Explain(r *models.MockMismatchReport) {
 // (integrations.LearnEnded). served is the answer: the recording the call
 // matches exactly modulo what is known, or the one it drifted from, taken
 // from mockDb with what drifted learned onto it. miss is why it answered
-// none. round, when set, is told where the call's first read of the round
-// found it made (integrations.CallRound). ctx has the call's destination
-// pinned (PinLiveDestination), and noise is the run's request noise
-// (NewRequestNoise).
+// none. ctx has the call's destination pinned (PinLiveDestination), and
+// noise is the run's request noise (NewRequestNoise).
+//
+// round is the caller's mark of the call (integrations.MarkCallRound of
+// mockDb), made before the caller's own reads of the store held to it
+// (integrations.HoldToRound): the learn step's first read must be of that
+// round. Where the replay moved it since (a staging, a test's end or begin:
+// integrations.CallRound.MovedSince), the call is the learn step's moved
+// miss, which learns nothing and names no recording: decided in the round
+// the learn step reads, a late call of one test would be answered with the
+// next test's recording. The zero CallRound, of a store that marks no
+// round, holds the learn step to nothing.
 //
 // Outside record's full round nothing here runs, and served and miss are
 // both nil: the caller matches the call as it would have.
-func (h *HTTP) LearnMatch(ctx context.Context, call VariableCall, noise RequestNoise, mockDb integrations.MockMemDb, opts models.OutgoingOptions, round *integrations.CallRound) (served *models.Mock, miss *LearnMiss, err error) {
+func (h *HTTP) LearnMatch(ctx context.Context, call VariableCall, noise RequestNoise, mockDb integrations.MockMemDb, opts models.OutgoingOptions, round integrations.CallRound) (served *models.Mock, miss *LearnMiss, err error) {
 	if !provenswitch.On() || !opts.Learn || integrations.LearnEnded(mockDb) {
 		return nil, nil, nil
 	}
-	served, lmiss, err := h.learnMatchIn(ctx, call.req(), mockDb, h.newLearnNoise(opts, noise.Body, noise.URL), opts, round)
+	served, lmiss, err := h.learnMatchIn(ctx, call.req(), mockDb, h.newLearnNoise(opts, noise.Body, noise.URL), opts, round, nil)
 	if err != nil {
 		return nil, nil, err
 	}
