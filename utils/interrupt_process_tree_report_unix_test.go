@@ -12,23 +12,19 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/internal/testproc"
 	"go.uber.org/zap"
 )
 
 // startGroupLeader starts argv in a process group of its own, as keploy
 // starts a native app, and returns it with a channel closed once it has
-// exited and been reaped. It is killed when the test ends.
+// exited and been reaped. Its group is killed when the test ends, and on
+// Linux it is killed with the test's process however that ends
+// (testproc.Start).
 func startGroupLeader(t *testing.T, argv ...string) (*exec.Cmd, <-chan struct{}) {
 	t.Helper()
 	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	reaped := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(reaped) }()
-	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); <-reaped })
-	return cmd, reaped
+	return cmd, testproc.Start(t, cmd)
 }
 
 // beforeTheDeadline fires a quarter of the way to the test binary's
