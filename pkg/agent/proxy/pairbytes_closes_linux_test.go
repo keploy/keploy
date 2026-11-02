@@ -431,11 +431,11 @@ func TestAnOrphanGoneWithTheApplicationsFINUnacknowledgedIsUnknown(t *testing.T)
 		t.Fatal("the proxy's side is not closed")
 	}
 	was := lookupOrphan
-	lookupOrphan = func(local, remote netip.AddrPort) (diagTCP, error) {
+	lookupOrphan = func(dev uint32, local, remote netip.AddrPort) (diagTCP, error) {
 		if local == pc.proxy {
 			return diagTCP{}, errNoSocket
 		}
-		return was(local, remote)
+		return was(dev, local, remote)
 	}
 	t.Cleanup(func() { lookupOrphan = was })
 	wroteBeforeTheClose(pc, ps, 1)
@@ -779,7 +779,7 @@ func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
 	t.Run("its orphan unreadable, one short is unknown", func(t *testing.T) {
 		p, pc, _, ps := closedPair(t, 120)
 		was := lookupOrphan
-		lookupOrphan = func(netip.AddrPort, netip.AddrPort) (diagTCP, error) {
+		lookupOrphan = func(uint32, netip.AddrPort, netip.AddrPort) (diagTCP, error) {
 			return diagTCP{}, fmt.Errorf("sock_diag socket: %w", unix.EMFILE)
 		}
 		t.Cleanup(func() { lookupOrphan = was })
@@ -1695,7 +1695,7 @@ func TestTheApplicationsAcknowledgedFINIsReadAsTheOrphanIs(t *testing.T) {
 		runtime.Gosched() // its FIN's ACK can be a delayed one
 	}
 	was := lookupOrphan
-	lookupOrphan = func(local, remote netip.AddrPort) (diagTCP, error) {
+	lookupOrphan = func(_ uint32, local, _ netip.AddrPort) (diagTCP, error) {
 		if local == pc.proxy {
 			return diagTCP{}, errNoSocket
 		}

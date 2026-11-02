@@ -125,14 +125,21 @@ func lookupTCP(local, remote netip.AddrPort) (diagTCP, error) {
 	return d.lookup(local, remote)
 }
 
-// lookupTCPOrdered is lookupOrdered on a socket of its own.
+// lookupTCPOrdered is lookupOrdered on a socket of its own, asked with no
+// device.
 func lookupTCPOrdered(local, remote netip.AddrPort) (diagTCP, error) {
+	return lookupTCPOrderedOn(0, local, remote)
+}
+
+// lookupTCPOrderedOn is lookupOrdered on a socket of its own, its exact
+// lookup asked with the device dev (exactOn).
+func lookupTCPOrderedOn(dev uint32, local, remote netip.AddrPort) (diagTCP, error) {
 	d, err := openDiag()
 	if err != nil {
 		return diagTCP{}, err
 	}
 	defer d.close()
-	return d.lookupOrdered(local, remote)
+	return d.lookupOrdered(dev, local, remote)
 }
 
 // lookupOrdered is lookup for a socket that may be moving between the
@@ -161,18 +168,22 @@ func lookupTCPOrdered(local, remote netip.AddrPort) (diagTCP, error) {
 // timewait socket be taken, a gap no read from user space can close: a dump
 // in it answers gone, which a bytes wait reads as unknown, never as
 // settled.)
-func (d *diagSock) lookupOrdered(local, remote netip.AddrPort) (diagTCP, error) {
-	s, err := lookupExact(d, local, remote)
+//
+// Its exact lookup is asked with the device dev (exactOn): one bound to a
+// device is missed by an exact lookup asked with none, which a dump then
+// follows (lookup); asked with its device, it is found by the exact lookup.
+func (d *diagSock) lookupOrdered(dev uint32, local, remote netip.AddrPort) (diagTCP, error) {
+	s, err := lookupExact(d, dev, local, remote)
 	if (err == nil && s.state != tcpClose) || (err != nil && !errors.Is(err, errNoSocket)) {
 		return s, err
 	}
 	return lookupDump(d, local, remote)
 }
 
-// lookupExact is how lookupOrdered makes its exact lookup: exact, not lookup,
-// whose dump after a miss lookupOrdered's own dump would repeat. A test
-// replaces it to miss as the kernel's lockless lookup can.
-var lookupExact = (*diagSock).exact
+// lookupExact is how lookupOrdered makes its exact lookup: exactOn, not
+// lookup, whose dump after a miss lookupOrdered's own dump would repeat. A
+// test replaces it to miss as the kernel's lockless lookup can.
+var lookupExact = (*diagSock).exactOn
 
 // lookup finds the TCP socket whose local end is local and remote end is
 // remote in this network namespace, with its tcp_info: by an exact sock_diag

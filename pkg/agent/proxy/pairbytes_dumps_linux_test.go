@@ -367,3 +367,107 @@ func TestAFailedLookupLearnsNoDevice(t *testing.T) {
 		t.Fatalf("the close's record after a failed lookup: %+v, want the 10 bytes written", w)
 	}
 }
+
+// foundOn waits until the socket whose ends are local and remote, found by an
+// exact lookup asked with the device dev, reads as is says, and returns it.
+func foundOn(t *testing.T, dev uint32, local, remote netip.AddrPort, what string, is func(diagTCP) bool) diagTCP {
+	t.Helper()
+	ds, err := openDiag()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ds.close()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		s, err := ds.exactOn(dev, local, remote)
+		if err == nil && is(s) {
+			return s
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the socket %s -> %s asked with device %d = state %d, %v; want it %s (this case's premise)", local, remote, dev, s.state, err, what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// missedAskedWithNone fails the row unless an exact lookup asked with no
+// device misses the socket whose ends are local and remote: the row's
+// premise, that a read asked with none would dump to find it.
+func missedAskedWithNone(t *testing.T, local, remote netip.AddrPort) {
+	t.Helper()
+	ds, err := openDiag()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ds.close()
+	if s, err := ds.exact(local, remote); !errors.Is(err, errNoSocket) {
+		t.Fatalf("the exact lookup asked with no device of %s -> %s = state %d, %v; want a miss (this case's premise)", local, remote, s.state, err)
+	}
+}
+
+// A wait's reads of a closed connection's sockets ask with their devices, so
+// a socket bound to one, as in a VRF, is found by the exact lookup, with no
+// dump (a walk of every bucket of the established hash, tens of ms on a large
+// one, on every look of a wait):
+//   - the proxy's orphan (orphanTookFIN), with the device its socket was
+//     bound to as its close began, waiting for the application's FIN and
+//     then having taken it;
+//   - the application's socket (appFINAcknowledged), its FIN acknowledged,
+//     with the device the wait's own lookup of it learned.
+func TestAClosedConnectionsReadsAskWithTheirDevices(t *testing.T) {
+	t.Run("the proxy's orphan", func(t *testing.T) {
+		emptyDiagFree(t)
+		p := &Proxy{logger: zap.NewNop()}
+		app, proxySide, reader := heldPairBound(t, p, 1, "tcp4", "127.0.0.1:0", "lo", "lo")
+		dev := boundDevice(proxySide)
+		if dev == 0 {
+			t.Fatal("the proxy's socket is bound to no device (this case's premise)")
+		}
+		written10(t, app, reader)
+		pc := pairedConnOf(t, p, 1)
+		_ = reader.Close()
+		foundOn(t, dev, pc.proxy, pc.app, "in FIN_WAIT2", func(s diagTCP) bool { return s.state == tcpFinWait2 })
+		missedAskedWithNone(t, pc.proxy, pc.app)
+		dumps := countDumps(t)
+		if d, took, err := orphanTookFIN(pc); err != nil || took || d.state != tcpFinWait2 {
+			t.Fatalf("orphanTookFIN of an orphan waiting for the FIN = state %d, took %v, %v; want FIN_WAIT2, not taken", d.state, took, err)
+		}
+		if got := dumps.Swap(0); got != 0 {
+			t.Fatalf("the read of the orphan waiting for the FIN made %d dumps, want none", got)
+		}
+		_ = app.Close()
+		foundOn(t, dev, pc.proxy, pc.app, "in TIME_WAIT", func(s diagTCP) bool { return s.state == tcpTimeWait })
+		if d, took, err := orphanTookFIN(pc); err != nil || !took {
+			t.Fatalf("orphanTookFIN of an orphan that took the FIN = state %d, took %v, %v; want it taken", d.state, took, err)
+		}
+		if got := dumps.Load(); got != 0 {
+			t.Fatalf("the read of the orphan that took the FIN made %d dumps, want none", got)
+		}
+	})
+	t.Run("the application's socket", func(t *testing.T) {
+		emptyDiagFree(t)
+		p := &Proxy{logger: zap.NewNop()}
+		app, proxySide, reader := heldPairBound(t, p, 1, "tcp4", "127.0.0.1:0", "lo", "lo")
+		written10(t, app, reader)
+		pc := pairedConnOf(t, p, 1)
+		if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
+			t.Fatalf("WaitPairedBytes = %v, want settled", err)
+		}
+		dev := pc.appDev.Load()
+		if dev == nil || *dev == 0 {
+			t.Fatalf("the wait learned the application's socket's device %v; want lo's (this case's premise)", dev)
+		}
+		_ = app.Close()
+		sideIn(t, proxySide, tcpCloseWait)
+		_ = reader.Close()
+		foundOn(t, *dev, pc.app, pc.proxy, "in TIME_WAIT", func(s diagTCP) bool { return s.state == tcpTimeWait })
+		missedAskedWithNone(t, pc.app, pc.proxy)
+		dumps := countDumps(t)
+		if !appFINAcknowledged(pc) {
+			t.Fatal("appFINAcknowledged of a socket in TIME_WAIT = false, want true")
+		}
+		if got := dumps.Load(); got != 0 {
+			t.Fatalf("the read of the application's socket made %d dumps, want none", got)
+		}
+	})
+}

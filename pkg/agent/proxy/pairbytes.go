@@ -54,6 +54,12 @@ type pairedConn struct {
 	// to (0 for none), as the first lookup of the connection to find it
 	// read it (lookupApp): nil before one has.
 	appDev atomic.Pointer[uint32]
+	// proxyDev is the index of the device the proxy's socket is bound to (0
+	// for none), read as the proxy began closing it (noteWroteAtClose), for
+	// a wait's later reads of its orphan (orphanTookFIN): after the close,
+	// nothing reads it from the socket. A close whose side had taken the
+	// application's FIN or reset leaves it 0: no wait reads that orphan.
+	proxyDev atomic.Uint32
 	// cuts are the ends cut short on the connection, oldest first: each a
 	// test whose bytes wait ended before the proxy's side had received what
 	// the application had written when the wait began (cutShort). Bytes up

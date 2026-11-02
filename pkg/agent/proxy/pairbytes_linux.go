@@ -632,8 +632,19 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 // FIN_WAIT1 or takes the FIN, and an exact lookup made as it moves can miss
 // it, or find it closed, while it is there: it is gone only once a read
 // ordered against that move agrees (lookupOrdered).
+//
+// It asks with the device the proxy's socket was bound to as its close began
+// (pairedConn.proxyDev): an orphan bound to a device, as one accepted in a
+// VRF is (tcp_l3mdev_accept), is found by the exact lookup asked with it, and
+// one asked with none misses it and dumps (a walk of every bucket of the
+// established hash, tens of ms on a large one), on every look of a wait.
+// Asked with the device, the lookup finds the orphan, or a socket bound to no
+// device with its two ends, which one asked with none finds too: another of
+// the proxy's own connections (no other socket can be bound to the proxy's
+// listening address and port while it listens), from an application in no
+// VRF with this one's addresses.
 func orphanTookFIN(pc *pairedConn) (diagTCP, bool, error) {
-	d, err := lookupOrphan(pc.proxy, pc.app)
+	d, err := lookupOrphan(pc.proxyDev.Load(), pc.proxy, pc.app)
 	if err != nil {
 		return d, false, err
 	}
@@ -645,15 +656,22 @@ func orphanTookFIN(pc *pairedConn) (diagTCP, bool, error) {
 // proxy's socket acknowledges a FIN only in sequence, after every byte before
 // it, and a socket that refused a byte answers with a reset, which destroys the
 // application's, so nothing was refused. It reads the socket as orphanTookFIN
-// does: a socket moving to the timewait table is no miss.
+// does: a socket moving to the timewait table is no miss. It asks with the
+// device the wait's own lookup of the socket learned (pairedConn.appDev, as
+// lookupApp's later lookups do): a wait asks it only of a connection whose
+// application socket it found, which learned the device.
 func appFINAcknowledged(pc *pairedConn) bool {
-	d, err := lookupOrphan(pc.app, pc.proxy)
+	var dev uint32
+	if d := pc.appDev.Load(); d != nil {
+		dev = *d
+	}
+	d, err := lookupOrphan(dev, pc.app, pc.proxy)
 	return err == nil && d.state == tcpTimeWait
 }
 
 // lookupOrphan is how orphanTookFIN and appFINAcknowledged read the socket
-// (lookupTCPOrdered); a test replaces it to make the read fail.
-var lookupOrphan = lookupTCPOrdered
+// (lookupTCPOrderedOn); a test replaces it to make the read fail.
+var lookupOrphan = lookupTCPOrderedOn
 
 // side is the proxy's side of pc: read from its socket while the proxy holds
 // it, or as it was when the proxy closed it (closed).
@@ -862,14 +880,16 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 // proxy's side that has taken the application's FIN, or its reset, needs no
 // record: nothing is written after either, so a wait's own read of the
 // application's socket counts what was written before the close (wroteNow
-// says the rest). The read takes a sock_diag socket an earlier close gave back
-// (diagFree) rather than open one. One from the list that fails is dropped and
-// the read made on a new one, as a close that found none free makes it, so a
-// socket kept between closes cannot change an answer.
+// says the rest), and no wait reads its orphan, whose device (proxyDev) a
+// close otherwise reads. The read takes a sock_diag socket an earlier close
+// gave back (diagFree) rather than open one. One from the list that fails is
+// dropped and the read made on a new one, as a close that found none free
+// makes it, so a socket kept between closes cannot change an answer.
 func noteWroteAtClose(pc *pairedConn) {
 	if ps := readProxySide(pc.conn); ps.err == nil && peerEnded(ps.state) {
 		return
 	}
+	pc.proxyDev.Store(boundDevice(pc.conn))
 	ds, listed, err := takeDiag()
 	if err != nil {
 		return
