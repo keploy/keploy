@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // The reason an APP_HALTED set gives names the application's exit code and
@@ -152,64 +155,119 @@ func (c *toldExitInstr) Run(ctx context.Context, _ models.RunOptions) models.App
 	return models.AppError{AppErrorType: models.ErrCtxCanceled, ExitCode: -1}
 }
 
-// A compose app that exits while it holds a test's request halts the set at
-// its die, with or without the proven switch, and whether the set brings its
-// stack up (run) or the run keeps one stack for every set (runServing, the
-// default with mocking: keploy runs the app once, in Start): the set is
-// APP_HALTED, its reason names the exit's code and the test held, the held
-// test is not sent again, and no test begins after it. The repro: the app
-// exits 3 holding the set's second test while compose's up waits out the
-// rest of the stack.
-func TestAComposeAppsExitMidTestHaltsTheSetNamingTheTestItHeld(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		on, serving bool
-	}{
-		{"a stack per set, switch off", false, false},
-		{"a stack per set, switch on", true, false},
-		{"a stack kept across sets, switch off", false, true},
-		{"a stack kept across sets, switch on", true, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			provenOn(t, tc.on)
-			c := &composeInstr{}
-			h := composeHarnessOf(t, c, 3)
-			exit := models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 3}
-			var tell func()
-			if tc.serving {
-				// Start runs the app under listenedTo's context: its
-				// runner tells the exit through it.
-				ctx, kept := listenedTo(context.Background())
-				h.replayer.keptExit = kept
-				tell = func() { models.AppExitOf(ctx)(exit) }
-			} else {
-				told := &toldExitInstr{composeInstr: c, died: make(chan models.AppError, 1)}
-				h.replayer.instrumentation = told
-				tell = func() { told.died <- exit }
-			}
-			app := &heldRequests{exitAt: "test-2", exit: tell, requests: map[string]int{}}
-			h.replayer.hookImpl = prHooks{onRequest: app.onRequest}
+// composeExitShapes are the compose runs an app's exit mid-set halts: with
+// or without the proven switch, and whether the set brings its stack up
+// (run) or the run keeps one stack for every set (runServing, the default
+// with mocking: keploy runs the app once, in Start).
+var composeExitShapes = []struct {
+	name        string
+	on, serving bool
+}{
+	{"a stack per set, switch off", false, false},
+	{"a stack per set, switch on", true, false},
+	{"a stack kept across sets, switch off", false, true},
+	{"a stack kept across sets, switch on", true, true},
+}
 
-			var status models.TestSetStatus
-			if tc.serving {
-				status = h.runServing(t)
-			} else {
-				status = h.run(t)
+// composeExitRun is a compose set of three tests whose app exits with code
+// 3 while it holds test-2, the repro's shape: compose's up waits out the rest
+// of the stack meanwhile. adjust, set, readies the harness and the app before
+// the run.
+type composeExitRun struct {
+	h      *prRun
+	app    *heldRequests
+	status models.TestSetStatus
+}
+
+func runComposeExitMidTest(t *testing.T, on, serving bool, adjust func(*prRun, *heldRequests)) composeExitRun {
+	t.Helper()
+	provenOn(t, on)
+	c := &composeInstr{}
+	h := composeHarnessOf(t, c, 3)
+	exit := models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 3}
+	var tell func()
+	if serving {
+		// Start runs the app under listenedTo's context: its runner tells
+		// the exit through it.
+		ctx, kept := listenedTo(context.Background())
+		h.replayer.keptExit = kept
+		tell = func() { models.AppExitOf(ctx)(exit) }
+	} else {
+		told := &toldExitInstr{composeInstr: c, died: make(chan models.AppError, 1)}
+		h.replayer.instrumentation = told
+		tell = func() { told.died <- exit }
+	}
+	app := &heldRequests{exitAt: "test-2", exit: tell, requests: map[string]int{}}
+	h.replayer.hookImpl = prHooks{onRequest: app.onRequest}
+	if adjust != nil {
+		adjust(h, app)
+	}
+	r := composeExitRun{h: h, app: app}
+	if serving {
+		r.status = h.runServing(t)
+	} else {
+		r.status = h.run(t)
+	}
+	return r
+}
+
+// A compose app that exits while it holds a test's request halts the set at
+// its die, in every compose shape (composeExitShapes): the set is
+// APP_HALTED, its reason names the exit's code and the test held, the held
+// test is not sent again, and no test begins after it.
+func TestAComposeAppsExitMidTestHaltsTheSetNamingTheTestItHeld(t *testing.T) {
+	for _, tc := range composeExitShapes {
+		t.Run(tc.name, func(t *testing.T) {
+			r := runComposeExitMidTest(t, tc.on, tc.serving, nil)
+			if r.status != models.TestSetStatusAppHalted {
+				t.Fatalf("status %s, want APP_HALTED", r.status)
 			}
-			if status != models.TestSetStatusAppHalted {
-				t.Fatalf("status %s, want APP_HALTED", status)
-			}
-			reason := h.report.report.FailureReason
+			reason := r.h.report.report.FailureReason
 			if !strings.Contains(reason, "it exited with code 3 before it answered test test-2") {
 				t.Fatalf("reason %q; want it to name the exit's code and the test the app held", reason)
 			}
-			if n := app.count("test-2"); n != 1 {
+			if n := r.app.count("test-2"); n != 1 {
 				t.Fatalf("test-2 was sent %d times; the app had exited holding it, so it is sent once", n)
 			}
-			if n := app.count("test-3"); n != 0 {
+			if n := r.app.count("test-3"); n != 0 {
 				t.Fatalf("test-3 was sent %d times after the app had exited", n)
 			}
 		})
+	}
+}
+
+// A set its app's exit halted begins no mock-consistency retry (retryPassing):
+// the passing tests are not run again against an app that is gone, and no
+// retry cycle begins, its log and its rewind of the consumed mocks with it.
+// The repro: the retry cycle began 0.6 ms after the told exit, the held
+// test, the set's last, having failed on the set's end; a held test with
+// another after it ends the cycle at that one.
+func TestAHaltedSetBeginsNoRetryCycle(t *testing.T) {
+	for _, held := range []string{"test-3", "test-2"} {
+		for _, tc := range composeExitShapes {
+			t.Run(held+" held, "+tc.name, func(t *testing.T) {
+				haltedSetBeginsNoRetryCycle(t, held, tc.on, tc.serving)
+			})
+		}
+	}
+}
+
+func haltedSetBeginsNoRetryCycle(t *testing.T, held string, on, serving bool) {
+	const retrying = "Retrying passing test cases to validate mock consistency"
+	core, logs := observer.New(zapcore.InfoLevel)
+	r := runComposeExitMidTest(t, on, serving, func(h *prRun, app *heldRequests) {
+		h.replayer.config.RetryPassing = true
+		h.replayer.logger = zap.New(core)
+		app.exitAt = held
+	})
+	if r.status != models.TestSetStatusAppHalted {
+		t.Fatalf("status %s, want APP_HALTED", r.status)
+	}
+	if n := logs.FilterMessage(retrying).Len(); n != 0 {
+		t.Fatalf("%d retry cycles began after the app had exited; want none", n)
+	}
+	if n := r.app.count("test-1"); n != 1 {
+		t.Fatalf("test-1 was sent %d times; the set halted before any retry, so it is sent once", n)
 	}
 }
 

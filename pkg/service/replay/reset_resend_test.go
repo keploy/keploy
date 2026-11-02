@@ -15,6 +15,8 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // connResetURLErr builds the exact error chain net/http returns for a
@@ -305,5 +307,42 @@ func TestRetryResetOnce_NoReSendOnceTheAppHasExited(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&hook.calls); got != 0 {
 		t.Fatalf("keploy re-sent the request %d time(s) after the app's exit; want none", got)
+	}
+}
+
+// The readiness wait of a reset re-send says what follows it: one the set's
+// end cut short (an exit of the app brings it on) re-sends nothing, and says
+// so; one that ran to its bound re-sends anyway. The repro's wait said
+// "re-sending anyway" at the app's exit, and nothing was re-sent.
+func TestTheResetResendWaitSaysWhatFollows(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, port, _ := net.SplitHostPort(ln.Addr().String())
+	_ = ln.Close() // nothing serves there: the wait cannot end on a serve
+	core, logs := observer.New(zapcore.DebugLevel)
+	cfg := &config.Config{}
+	cfg.Test.Host = host
+	r := &Replayer{config: cfg, logger: zap.New(core)}
+
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	r.waitForResetResendReady(ended, &models.TestCase{Kind: models.HTTP,
+		HTTPReq: models.HTTPReq{URL: "http://" + host + ":" + port + "/x"}}, "test-set-0")
+	r.logResetResendWait(context.Background(), "app not serving HTTP before reset re-send", host, port, context.DeadlineExceeded)
+
+	got := logs.FilterMessageSnippet("before reset re-send").All()
+	want := []string{
+		"app not serving HTTP before reset re-send; the test set has ended, so nothing is re-sent",
+		"app not serving HTTP before reset re-send; re-sending anyway",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%d log lines %v; want %q", len(got), got, want)
+	}
+	for i, w := range want {
+		if got[i].Message != w {
+			t.Fatalf("line %d: %q; want %q", i, got[i].Message, w)
+		}
 	}
 }

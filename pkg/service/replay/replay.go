@@ -4541,11 +4541,27 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		failure += currentFailures
 		success = currentSuccess
 		obsolete += currentObsolete
+		// A set that has ended runs no cycle again: an exit of its app (or
+		// its user's stop, or its context's end) took it down. The exit is
+		// told on exitLoopChan before the set's cancel, so a cycle whose
+		// last test the cancel cut short reads it here, and the mock-
+		// consistency retry is not begun against an app that is gone.
+		if !exitLoop {
+			select {
+			case <-exitLoopChan:
+				testSetStatus = getErrStatus()
+				exitLoop = true
+			default:
+			}
+			if status, ended := endedPartWay(); ended {
+				testSetStatus, exitLoop = status, true
+			}
+		}
 		// The passing tests run again only after a cycle a test failed in,
 		// and not once a loss has tainted the set (proven switch): a test
 		// this cycle ran clean, before the loss, would be charged the loss in
 		// the next one, and that row would be its verdict.
-		if currentFailures == 0 || replay == 2 || r.captureTaintsTheSet() {
+		if exitLoop || currentFailures == 0 || replay == 2 || r.captureTaintsTheSet() {
 			success = currentSuccess
 			for k, v := range currentPassingMocks {
 				passingTotalConsumedMocks[k] = v
@@ -9172,8 +9188,7 @@ func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models
 
 	if scheme, host, port, ok := resolveProbeTarget(wctx, r.config.Test, testCase, testSetID, r.logger, publishedPortsOf(r.logger, r.instrumentation).of(testSetID)); ok {
 		if err := waitForHTTPServing(wctx, scheme, host, port); err != nil {
-			r.logger.Debug("app not serving HTTP before reset re-send; re-sending anyway",
-				zap.String("host", host), zap.String("port", port), zap.Error(err))
+			r.logResetResendWait(ctx, "app not serving HTTP before reset re-send", host, port, err)
 		}
 		return
 	}
@@ -9183,9 +9198,20 @@ func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models
 		return
 	}
 	if err := pkg.WaitForPort(wctx, host, port, resetResendReadyTimeout); err != nil {
-		r.logger.Debug("app host port not ready before reset re-send; re-sending anyway",
-			zap.String("host", host), zap.String("port", port), zap.Error(err))
+		r.logResetResendWait(ctx, "app host port not ready before reset re-send", host, port, err)
 	}
+}
+
+// logResetResendWait says how a reset re-send's wait for the app ended
+// short of it serving (what): at its bound, the re-send goes ahead; at the
+// set's end (ctx done: an exit of the app brings it on), nothing is re-sent
+// (retryResetOnce).
+func (r *Replayer) logResetResendWait(ctx context.Context, what, host, port string, err error) {
+	next := "re-sending anyway"
+	if ctx.Err() != nil {
+		next = "the test set has ended, so nothing is re-sent"
+	}
+	r.logger.Debug(what+"; "+next, zap.String("host", host), zap.String("port", port), zap.Error(err))
 }
 
 // openTestErrorCapture opens a test's mock-error capture window on the agent,
