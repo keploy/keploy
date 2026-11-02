@@ -123,30 +123,20 @@ func splitVariableMocks(pool []*models.Mock) (withVars, rest []*models.Mock) {
 }
 
 // readDecls reads m's variables, by name, or says why one cannot be followed.
-// A request place is read against m's recorded request (variables.ReadPlace);
-// an answer place against its recorded response, which may not be loaded yet,
-// where it is answered (renderAnswers): here, as a word address.
+// A place is read against m's recorded request (variables.ReadPlace,
+// variables.InRequest: as the learn step reads it, learn.VariableLeafPath). An answer
+// place is read again against the recorded response, which may not be loaded
+// yet, where it is answered (renderAnswers): here only its part counts, which
+// every reading of it gives alike.
 func readDecls(m *models.Mock) ([]varDecl, string) {
 	names := make([]string, 0, len(m.Spec.Variables))
 	for name := range m.Spec.Variables {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	var rec reqView
-	recorded := false
-	if m.Spec.HTTPReq != nil {
-		rec, recorded = recordedView(m.Spec.HTTPReq)
-	}
-	inRequest := func(p variables.Place) bool {
-		_, ok := rec.leaf(p)
-		return recorded && ok
-	}
+	inRequest := variables.InRequest(m.Spec.HTTPReq)
 	parse := func(name, role, raw string, answer bool) (varPlace, string) {
-		holds := inRequest
-		if answer {
-			holds = func(variables.Place) bool { return false }
-		}
-		a, err := variables.ReadPlace(raw, holds)
+		a, err := variables.ReadPlace(raw, inRequest)
 		if err != nil {
 			return varPlace{}, fmt.Sprintf("the %s place of variable %s: %v", role, name, err)
 		}
@@ -264,12 +254,9 @@ type held struct {
 	kind templates.LeafKind
 	raw  string // the JSON text of a body place
 	body bool
-	// word: value is a word of the place's value (kind and raw are the
-	// place's), compared as text.
-	word bool
 }
 
-func (h held) number() bool { return h.body && h.kind == templates.LeafNumber && !h.word }
+func (h held) number() bool { return h.body && h.kind == templates.LeafNumber }
 
 // empty reports whether the value cannot be a variable's: empty text, or a
 // JSON null.
@@ -279,20 +266,22 @@ func (h held) empty() bool {
 
 // read returns the value at vp: the value at its place, or the word of it the
 // place names (its kind and raw the place's); false where the request has no
-// value there, or no such word.
+// value there, or no such word. A word is a word of a string, as Mongo's
+// replay reads one: a body value of another JSON type holds none (a value
+// outside the body is text, LeafString).
 func (v reqView) read(vp varPlace) (held, bool) {
 	h, ok := v.leaf(vp.place)
 	if !ok || vp.whole() {
 		return h, ok
 	}
-	if h.body && h.kind == templates.LeafNull {
+	if h.kind != templates.LeafString {
 		return held{}, false
 	}
 	w, ok := vp.at.WordOf(h.value)
 	if !ok {
 		return held{}, false
 	}
-	h.value, h.word = w, true
+	h.value = w
 	return h, true
 }
 
@@ -351,11 +340,11 @@ func (v reqView) putBackAt(vp varPlace, rec held) (reqView, bool) {
 	}
 	text := held{value: out}
 	if vp.place.Part == variables.PartBody {
-		raw, err := json.Marshal(out)
-		if err != nil {
+		raw, ok := variables.SpliceJSONString(cur.raw, out)
+		if !ok {
 			return v, false
 		}
-		text.raw = string(raw)
+		text.raw = raw
 	}
 	return v.putBack(vp.place, text)
 }
@@ -570,6 +559,13 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	// The variables' places, read on both sides; then the recorded values put
 	// back into the live call.
 	liveAt := map[string]held{}
+	// varLeaves are the leaf paths (learn.LeafPath) the variables' request
+	// places stand in, a word's field included: a variable's place is never
+	// noise (learn.MergeLearned drops learned noise there), so learned noise
+	// at one is not put back below; the field of a word is compared with
+	// the recording whatever the noise, its words put back.
+	varLeaves := map[string]bool{}
+	worded := map[string]variables.Place{} // the values words are put back in
 	asRecorded := live
 	var typeChange *varProblem
 	clocks := clocksOf(m)
@@ -593,28 +589,44 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 			}
 			r, ok := rec.read(vp)
 			if !ok {
+				if l, isLeaf := rec.leaf(vp.place); isLeaf && l.kind != templates.LeafString {
+					// A word place at a value of another JSON type (read).
+					return refuse(fmt.Sprintf("its recorded request holds %s at %s, which is no string to hold a word of (variable %s)", l.raw, vp.raw, d.name))
+				}
 				return refuse(fmt.Sprintf("its recorded request holds no single value at %s (variable %s)", vp.raw, d.name))
-			}
-			if r.word && r.body && r.kind != templates.LeafString {
-				// A word is a word of a string, as Mongo's replay reads one.
-				return refuse(fmt.Sprintf("its recorded request holds %s at %s, which is no string to hold a word of (variable %s)", r.raw, vp.raw, d.name))
 			}
 			if !variables.SameValue(d.recorded, r.value, r.number()) {
 				return refuse(fmt.Sprintf("its recorded request holds %q at %s, not variable %s's recorded value %q", r.value, vp.raw, d.name, d.recorded))
 			}
 			l, ok := live.read(vp)
 			if !ok {
-				return nil, nil // the call has no such place: it is not this mock's call
+				// The call holds no value there (the one way a whole
+				// place's read fails), or a string with no such word: it
+				// is not this mock's call.
+				lf, isLeaf := live.leaf(vp.place)
+				if !isLeaf || lf.kind == templates.LeafString {
+					return nil, nil
+				}
+				// A word place where the call sends a value of another
+				// JSON type than the recorded string (a word is read of a
+				// string only): as at a whole place, the call is the
+				// mock's with that value's type changed, where the rest of
+				// it is the recording (its recorded field put back whole).
+				// Mongo's replay says so of both.
+				rf, _ := rec.leaf(vp.place)
+				if typeChange == nil {
+					typeChange = typeChanged(m.Name, d.name, vp.raw, rf.raw, lf.raw)
+				}
+				if asRecorded, ok = asRecorded.putBack(vp.place, rf); !ok {
+					return nil, nil
+				}
+				if leaf, ok := learn.LeafPath(vp.place.String()); ok {
+					varLeaves[leaf] = true
+				}
+				continue
 			}
 			if l.body && l.kind != r.kind && typeChange == nil {
-				typeChange = &varProblem{
-					mock: m.Name, name: d.name, place: vp.raw, kind: models.DiffKindTypeChanged, expected: r.raw, actual: l.raw,
-					why:  fmt.Sprintf("variable %s at %s: the call sent %s where the recording has %s, a value of another JSON type", d.name, vp.raw, l.raw, r.raw),
-					next: "the application changed the type of the value it sends at " + vp.raw + ": if that is intended, re-record the test; otherwise fix the application",
-				}
-				if models.IsGivenVariable(d.name) {
-					typeChange.given = d.name
-				}
+				typeChange = typeChanged(m.Name, d.name, vp.raw, r.raw, l.raw)
 			}
 			if asRecorded, ok = asRecorded.putBackAt(vp, r); !ok {
 				if vp.whole() {
@@ -622,7 +634,25 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 				}
 				return refuse(fmt.Sprintf("keploy cannot put variable %s's recorded value %q back at %s in this call, so it cannot compare the rest of the call with the recording", d.name, r.value, vp.raw))
 			}
+			if !vp.whole() {
+				worded[vp.place.String()] = vp.place
+			}
 			liveAt[vp.key()] = l
+			if leaf, ok := learn.LeafPath(vp.place.String()); ok {
+				varLeaves[leaf] = true
+			}
+		}
+	}
+
+	// A word is where the rest of its value places it: the value, its
+	// words put back, is the recorded one, whatever noise keploy.yml or the
+	// learn step gives there, or the call is not this mock's. Noise that
+	// excused the rest would let a call that sends the value with more
+	// words before the word bind the word it sent there instead.
+	for _, p := range worded {
+		got, _ := asRecorded.leaf(p)
+		if want, _ := rec.leaf(p); got.value != want.value {
+			return nil, nil
 		}
 	}
 
@@ -639,7 +669,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 		if err != nil {
 			continue
 		}
-		if _, isVar := liveAt[place.String()]; isVar {
+		if varLeaves[k] {
 			continue
 		}
 		if _, clock := clocks[k]; clock {
@@ -671,6 +701,20 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 		return nil, &varProblem{mock: m.Name, why: "this keploy's mock store keeps no variables, so it cannot follow them", next: "run the keploy agent of this keploy version"}
 	}
 	return holdVariables(m, decls, liveAt, table, refuse)
+}
+
+// typeChanged is the evidence of a call that sent actual, a value of another
+// JSON type, where mock's recording holds expected at variable name's place.
+func typeChanged(mock, name, place, expected, actual string) *varProblem {
+	p := &varProblem{
+		mock: mock, name: name, place: place, kind: models.DiffKindTypeChanged, expected: expected, actual: actual,
+		why:  fmt.Sprintf("variable %s at %s: the call sent %s where the recording has %s, a value of another JSON type", name, place, actual, expected),
+		next: "the application changed the type of the value it sends at " + place + ": if that is intended, re-record the test; otherwise fix the application",
+	}
+	if models.IsGivenVariable(name) {
+		p.given = name
+	}
+	return p
 }
 
 // holdVariables checks the variables of m on a call that fits its recording
@@ -1218,11 +1262,12 @@ func answerWords(resp *models.HTTPResp, header map[string]string, changed map[st
 			changed[strings.ToLower(t.key)] = true
 			continue
 		}
-		raw, err := json.Marshal(t.text)
-		if err != nil {
+		// Every recorded byte outside the words is kept as recorded.
+		raw, ok := variables.SpliceJSONString(t.leaf.Raw(resp.Body), t.text)
+		if !ok {
 			return nil, t.puts[0], "keploy cannot write it as JSON"
 		}
-		edits = append(edits, variables.Edit{Start: t.leaf.Start, End: t.leaf.End, Raw: string(raw)})
+		edits = append(edits, variables.Edit{Start: t.leaf.Start, End: t.leaf.End, Raw: raw})
 	}
 	return edits, wordPut{}, ""
 }

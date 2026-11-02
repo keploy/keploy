@@ -51,8 +51,11 @@ import (
 type MockVariables map[string]MockVariable
 
 // MockVariable is where one variable is in one call. A place is written in
-// the grammar of variables.Parse: body.<json path>, url.path[<n>],
-// url.query.<name>, header.<name>.
+// the grammar of variables.Parse (body.<json path>, url.path[<n>],
+// url.query.<name>, header.<name>), or as a word address of one
+// (variables.ParseAddress: a word "#<n>" of its text, after any decode steps
+// "|<step>"). Every reader reads a place with variables.ReadPlace: as Parse
+// reads it where the recording holds it so, else as a word address.
 type MockVariable struct {
 	// Recorded is the variable's value in the recording: every place below
 	// held it when the call was recorded.
