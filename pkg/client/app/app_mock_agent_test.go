@@ -30,3 +30,23 @@ func TestDockerRunGetsTheAgentAddressInMockMode(t *testing.T) {
 		t.Fatalf("classic record must not: %s", b.cmd)
 	}
 }
+
+// Each docker-run run's application mounts its own run's CA volume, the one
+// its agent writes to. With one name for every run, a second run's agent
+// overwrote the first's CA while the first ran, and the first's application
+// refused its own agent's certificates.
+func TestDockerRunMountsItsOwnRunsCAVolume(t *testing.T) {
+	for agent, want := range map[string]string{
+		"keploy-v3-0a1b2c3d4e5f6071": "-v keploy-tls-certs-0a1b2c3d4e5f6071:/tmp/keploy-tls:ro ",
+		"keploy-v3-8899aabbccddeeff": "-v keploy-tls-certs-8899aabbccddeeff:/tmp/keploy-tls:ro ",
+	} {
+		a := NewApp(zap.NewNop(), "docker run --rm orders-e2e", nil, models.SetupOptions{})
+		a.keployContainer = agent
+		if err := a.modifyDockerRun(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(a.cmd, want) || strings.Count(a.cmd, ":/tmp/keploy-tls") != 1 {
+			t.Errorf("agent %s: want the one CA mount %q in: %s", agent, want, a.cmd)
+		}
+	}
+}

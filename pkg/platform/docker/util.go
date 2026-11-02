@@ -323,7 +323,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	}
 	appHostsStr += appDNSStr
 
-	tlsVolumeMount := fmt.Sprintf("-v %s:%s ", KeployTLSVolumeName, KeployTLSMountPath)
+	tlsVolumeMount := fmt.Sprintf("-v %s:%s ", TLSVolumeFor(opts.KeployContainer), KeployTLSMountPath)
 	agentMemoryLimitFlag := ""
 	if opts.MemoryLimit > 0 {
 		agentMemoryLimitFlag = " --memory-limit " + strconv.FormatUint(opts.MemoryLimit, 10)

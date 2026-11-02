@@ -245,8 +245,9 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 	pidMode := fmt.Sprintf("--pid=container:%s", a.keployContainer)
 	networkMode := fmt.Sprintf("--network=container:%s", a.keployContainer)
 
-	keployTLSVolumeName := "keploy-tls-certs"
-	keployTLSMountPath := "/tmp/keploy-tls"
+	// The run's own CA volume, the one its agent writes to (TLSVolumeFor).
+	keployTLSVolumeName := docker.TLSVolumeFor(a.keployContainer)
+	keployTLSMountPath := docker.KeployTLSMountPath
 	certPath := fmt.Sprintf("%s/ca.crt", keployTLSMountPath)
 	trustStorePath := fmt.Sprintf("%s/truststore.jks", keployTLSMountPath)
 

@@ -159,3 +159,35 @@ func agentContainerRun(t *testing.T, calls string) string {
 	}
 	return run
 }
+
+// Two docker-run runs on one host: each agent container writes its CA to its
+// own run's volume. With one name for every run, the second run's agent
+// overwrote the first's ca.crt while the first ran, and the first's
+// application then refused its own agent's certificates. The row reads the
+// CA mount of the `docker run` startInDocker executes for each run.
+func TestStartInDocker_MountsEachRunsOwnCAVolume(t *testing.T) {
+	seen := map[string]string{}
+	for _, agent := range []string{"keploy-v3-0a1b2c3d4e5f6071", "keploy-v3-8899aabbccddeeff"} {
+		calls := fakeDockerForStartInDocker(t)
+		a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{InstallationID: "install-id"}}
+		opts := models.SetupOptions{KeployContainer: agent, Mode: models.MODE_RECORD, AgentPort: 43902, ProxyPort: 16791, DnsPort: 26791}
+		if err := a.startInDocker(context.Background(), zap.NewNop(), opts, newAgentRun()); err != nil {
+			t.Fatalf("startInDocker: %v", err)
+		}
+		words := strings.Fields(agentContainerRun(t, calls))
+		var mounts []string
+		for i, w := range words {
+			if w == "-v" && i+1 < len(words) && strings.HasSuffix(words[i+1], ":/tmp/keploy-tls") {
+				mounts = append(mounts, strings.TrimSuffix(words[i+1], ":/tmp/keploy-tls"))
+			}
+		}
+		if len(mounts) != 1 {
+			t.Fatalf("agent %s: CA mounts %v, want one", agent, mounts)
+		}
+		seen[agent] = mounts[0]
+	}
+	if seen["keploy-v3-0a1b2c3d4e5f6071"] != "keploy-tls-certs-0a1b2c3d4e5f6071" ||
+		seen["keploy-v3-8899aabbccddeeff"] != "keploy-tls-certs-8899aabbccddeeff" {
+		t.Fatalf("the two runs' agents mount %v, want each its own run's volume", seen)
+	}
+}
