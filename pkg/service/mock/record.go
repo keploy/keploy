@@ -274,6 +274,10 @@ func (m *mockService) Record(ctx context.Context) error {
 		}
 	}()
 	m.mockDB.ResetCounterID()
+	// The tests' deliver: entries, read before their mappings go: the
+	// re-record names its cases and mocks anew, and the DeliveryCarrier
+	// finds each entry's case and call again in it (carryDeliveries).
+	prior := m.priorDeliveries(persistCtx, name)
 	m.deleteMappings(persistCtx, name)
 	if requests {
 		// The old cases stay until the run has ended so the new ones are numbered after them: a flow
@@ -394,7 +398,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		// Under the proven switch a protocol-phase mock is the pool's, never
 		// a test's (design v14 §5.2): the mapping lists data-plane mocks only.
 		protocol := provenswitch.On() && mk.IsProtocolPhase()
-		recorded = append(recorded, capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, boot: typ == "config" || typ == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef})
+		recorded = append(recorded, capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, boot: typ == "config" || typ == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef, call: mockCall(mk)})
 	}
 	go func() {
 		defer utils.Recover(m.logger)
@@ -891,6 +895,7 @@ func (m *mockService) Record(ctx context.Context) error {
 				tc.Dir = w.Dir
 				byCase[w.Name] = tc
 			}
+			m.carryDeliveries(name, prior, windows, byCase, byTest, capture.list(), recorded)
 			if provenswitch.On() {
 				stampBegins(byCase, windows)
 				stampReal(byCase, windows)
@@ -1179,6 +1184,11 @@ type capturedMock struct {
 	protocol bool
 	start    string
 	ref      string
+	// call is, for an HTTP mock or case, the call it is (mockCall,
+	// caseCall): a re-record hands it to the DeliveryCarrier, which carries
+	// a deliver: entry to the mock or case of the new recording that is
+	// the same call.
+	call string
 }
 
 // stagingSetID returns the staging set name record captures into while recording

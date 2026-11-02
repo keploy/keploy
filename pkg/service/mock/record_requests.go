@@ -99,7 +99,7 @@ func (c *caseCapture) add(tc *models.TestCase) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.cases = append(c.cases, capturedMock{name: tc.Name, ts: caseTime(tc), end: caseEnd(tc)})
+	c.cases = append(c.cases, capturedMock{name: tc.Name, ts: caseTime(tc), end: caseEnd(tc), call: caseCall(tc)})
 }
 
 // caseTime is when the app received the request, which decides the flow it belongs to.

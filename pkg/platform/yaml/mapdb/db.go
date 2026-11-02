@@ -674,6 +674,9 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 			// replace what an earlier record wrote, none included, as they
 			// pair with this record's calls.
 			tc.Given = in.Given
+			// Its deliver: entries likewise: those the record carried from
+			// the previous recording, named as this one names its calls.
+			tc.Deliver = in.Deliver
 		}
 		// The mock.real destinations this record's run of the test used
 		// (proven switch only): they replace what an earlier record wrote.
