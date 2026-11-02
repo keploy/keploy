@@ -19,6 +19,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
@@ -283,10 +284,7 @@ func TestTwoConnectionsWithOneFourTupleEachGoWhereTheirOwnPairingSays(t *testing
 			a.latchCounting()
 			proxyAddr := p.Listener.Addr().String()
 
-			free, err := net.Listen("tcp", "127.0.0.1:0")
-			require.NoError(t, err)
-			port := free.Addr().(*net.TCPAddr).Port
-			require.NoError(t, free.Close())
+			port := testnet.ReservedPort(t) // X's and Y's source port, held beside them
 			call := "GET / HTTP/1.1\r\nHost: dependency\r\nConnection: close\r\n\r\n"
 
 			pm.set(port, xDst) // X's connect
