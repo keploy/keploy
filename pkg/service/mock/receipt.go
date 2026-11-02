@@ -342,9 +342,9 @@ func (r TestsReceipt) empty() bool {
 // TestReceipt is one test's line in a TestsReceipt. Outcome is its latest
 // run's verdict this replay (models.ScopeOutcome*); "" when it did not run or
 // reported none. Random is how the test's browser drew its random numbers
-// in that run, as its harness said at its begin (models.ScopeWindow.Random):
-// seeded, own, or "" when it said nothing. A count the agent did not report
-// in full is -1.
+// in that run, as its harness said at its end, else at its begin
+// (models.ScopeWindow.Random): seeded, own, or "" when it said nothing. A
+// count the agent did not report in full is -1.
 type TestReceipt struct {
 	Name     string `yaml:"name" json:"name"`
 	Outcome  string `yaml:"outcome,omitempty" json:"outcome,omitempty"`
