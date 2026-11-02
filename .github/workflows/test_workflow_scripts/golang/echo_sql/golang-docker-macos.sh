@@ -313,7 +313,7 @@ do
     report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
 
     # Extract the test status
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+    test_status=$(grep 'status:' "$report_file" | sed -n 1p | awk '{print $2}')
 
     # Print the status for debugging
     echo "Test status for test-set-$i: $test_status"
