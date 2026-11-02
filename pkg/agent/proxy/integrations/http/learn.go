@@ -775,7 +775,7 @@ func (h *HTTP) learnReads(mockDb integrations.MockMemDb, tracker *learn.Tracker)
 // whose a recording is, whether a test is open, and which of its own
 // answered.
 func (h *HTTP) learnRules(mockDb integrations.MockMemDb, tracker *learn.Tracker) scopeReads {
-	r := scopeReads{open: tracker.Open(), answered: tracker.Answered, answeredMocks: tracker.AnsweredMocks}
+	r := scopeReads{open: tracker.Open(), answered: tracker.Answered, answeredMocks: tracker.AnsweredMocks, verify: h.verifying()}
 	r.owner, _ = mockDb.(integrations.TestOwnership)
 	if integrations.ExactServing(mockDb) {
 		// Under exact serving the store alone says what the open test owns:
@@ -874,6 +874,9 @@ type scopeReads struct {
 	// request exactly and may answer it (learnSieve): the scope is then
 	// exactGroup's and owner's, not learn.Pair's.
 	sieve *learnSieve
+	// verify is the handler's verify mode (HTTP.verifying), for
+	// learnedGroup.
+	verify bool
 }
 
 // scope is the scope r reads.
@@ -1096,10 +1099,10 @@ var learnShapes atomic.Int64
 
 // learnedGroup is exactGroup over r's scope for the live request and that
 // scope's owner, for learnedMatch, with only the candidates sieve passes
-// shaped (learnSieve). In the exact view's verify mode every candidate is
-// shaped too, and a different group panics.
+// shaped (learnSieve). In the exact view's verify mode (r.verify) every
+// candidate is shaped too, and a different group panics.
 func (r scopeReads) learnedGroup(live httpParts, liveShape learn.Shape, n learnNoise, sieve *learnSieve) ([]*models.Mock, func(*models.Mock) bool) {
-	verify := integrations.ExactViewVerify.Load()
+	verify := r.verify
 	if verify {
 		// Both scopes read one account of what the test's own answered.
 		r = r.answersOnce()

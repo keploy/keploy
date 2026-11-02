@@ -213,47 +213,48 @@ func randomStrictSeeds() int64 {
 
 // Over random pools and calls, under url noise or none, a call answered
 // through the index is answered with the recording a read answers it with,
-// and misses where a read misses; verify mode, on for the indexed side,
-// compares every indexed call's fits with a read's.
+// and misses where a read misses; verify mode, on for the indexed side (its
+// handler's own: verifyOf), compares every indexed call's fits with a
+// read's. The seeds share nothing and run at once.
 func TestAnIndexedStrictMatchIsTheOneAReadGives(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	was := integrations.ExactViewVerify.Load()
-	t.Cleanup(func() { integrations.ExactViewVerify.Store(was) })
 	for seed := int64(1); seed <= randomStrictSeeds(); seed++ {
-		var noise []string
-		if seed%2 == 0 {
-			noise = []string{`/q/[0-9]+`}
-		}
-		indexed, read := newHTTP(), newHTTP()
-		ixDb := &exactGenDb{newOwnGenDb(strictPoolOf(seed, 400))}
-		readDb := &exactGenDb{newOwnGenDb(strictPoolOf(seed, 400))}
-		rnd := rand.New(rand.NewSource(seed * 7))
-		for c := 0; c < 300; c++ {
-			r := getTo(fmt.Sprintf("/p/%d/q/%d", rnd.Intn(7), rnd.Intn(4)), strictIxHost)
-			if rnd.Intn(3) == 0 {
-				r.method = "POST"
+		t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) {
+			t.Parallel()
+			var noise []string
+			if seed%2 == 0 {
+				noise = []string{`/q/[0-9]+`}
 			}
-			integrations.ExactViewVerify.Store(true)
-			got := strictMatchOf(t, indexed, r, ixDb, ixDb, noise)
-			integrations.ExactViewVerify.Store(false)
-			want := strictMatchOf(t, read, r, readDb, nil, noise)
-			if (got == nil) != (want == nil) || got != nil && got.Name != want.Name {
-				t.Fatalf("seed %d call %d %s %s: indexed %v, read %v", seed, c, r.method, r.url.Path, got, want)
+			indexed, read := verifyOf(newHTTP(), true), verifyOf(newHTTP(), false)
+			ixDb := &exactGenDb{newOwnGenDb(strictPoolOf(seed, 400))}
+			readDb := &exactGenDb{newOwnGenDb(strictPoolOf(seed, 400))}
+			rnd := rand.New(rand.NewSource(seed * 7))
+			for c := 0; c < 300; c++ {
+				r := getTo(fmt.Sprintf("/p/%d/q/%d", rnd.Intn(7), rnd.Intn(4)), strictIxHost)
+				if rnd.Intn(3) == 0 {
+					r.method = "POST"
+				}
+				got := strictMatchOf(t, indexed, r, ixDb, ixDb, noise)
+				want := strictMatchOf(t, read, r, readDb, nil, noise)
+				if (got == nil) != (want == nil) || got != nil && got.Name != want.Name {
+					t.Fatalf("seed %d call %d %s %s: indexed %v, read %v", seed, c, r.method, r.url.Path, got, want)
+				}
 			}
-		}
-		if !indexed.strictIx.has || ixDb.refused != 0 {
-			t.Fatalf("seed %d: no index was built, or it offered %d recordings the store refused", seed, ixDb.refused)
-		}
+			if !indexed.strictIx.has || ixDb.refused != 0 {
+				t.Fatalf("seed %d: no index was built, or it offered %d recordings the store refused", seed, ixDb.refused)
+			}
+		})
 	}
 }
 
 // An index that lost a recording a call is (here, its path's bucket) is
 // caught in verify mode: the call's indexed fits differ from a read's, and it
-// panics.
+// panics. The mode is the handler's own (verifyOf), on with the process's
+// off.
 func TestAStrictIndexThatLostAMatchPanicsInVerifyMode(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	verifyOff(t)
-	h := newHTTP()
+	h := verifyOf(newHTTP(), false)
 	db := newOwnGenDb(strictItems("mock", 10), nil)
 	strictMatchOf(t, h, strictCall(0), db, db, nil)
 	strictMatchOf(t, h, strictCall(1), db, db, nil)
@@ -262,7 +263,7 @@ func TestAStrictIndexThatLostAMatchPanicsInVerifyMode(t *testing.T) {
 			delete(h.strictIx.last.byPath, k)
 		}
 	}
-	integrations.ExactViewVerify.Store(true)
+	h.verify.Store(true)
 	defer func() {
 		if recover() == nil {
 			t.Fatal("verify mode did not catch an index that lost a match")
@@ -661,16 +662,17 @@ func TestARecordingWithVariablesIsServedThroughTheIndexWithoutARead(t *testing.T
 
 // An index that lost a recording with variables (here the generation's one)
 // is caught in verify mode: what the call's variable pass reads through the
-// index differs from a read's, and it panics.
+// index differs from a read's, and it panics. The mode is the handler's own
+// (verifyOf), on with the process's off.
 func TestAStrictIndexThatLostAVariableRecordingPanicsInVerifyMode(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	verifyOff(t)
-	h := newHTTP()
+	h := verifyOf(newHTTP(), false)
 	db := newOwnGenDb(append(strictItems("mock", 10), orderBind()), nil)
 	strictMatchOf(t, h, strictCall(0), db, db, nil)
 	strictMatchOf(t, h, strictCall(1), db, db, nil) // the generation's second call builds its index
 	h.strictIx.last.vars, h.strictIx.last.varSplit = nil, 0
-	integrations.ExactViewVerify.Store(true)
+	h.verify.Store(true)
 	defer func() {
 		if r, _ := recover().(string); !strings.Contains(r, "exact view verify: indexed variable recordings") {
 			t.Fatalf("verify mode did not catch an index that lost a recording with variables (recovered %q)", r)

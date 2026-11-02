@@ -217,7 +217,7 @@ func sameDestinationMocks(live destination, mocks []*models.Mock) []*models.Mock
 // report says was compared.
 func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool []*models.Mock, mockDb integrations.MockMemDb, n strictNoise, statefulMocks bool) (served *models.Mock, diag *matchDiag, retry bool, err error) {
 	live := liveDestination(ctx, input)
-	fits, err := strictFits(ctx, input, live, pool, n)
+	fits, err := strictFits(ctx, input, live, pool, n, h.verifying())
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -303,9 +303,9 @@ func (c nearest) closerThan(o nearest) bool {
 // in pool's order: strictCompare's fits, with only the recordings that may be
 // the call (strictSieve) compared, so a call that is one recording of a large
 // pool compares that one, not the pool. In the exact view's verify mode
-// (integrations.ExactViewVerify) every recording is compared too, and a
-// difference panics.
-func strictFits(ctx context.Context, input *req, live destination, pool []*models.Mock, n strictNoise) ([]*models.Mock, error) {
+// (verify, the handler's: HTTP.verifying) every recording is compared too,
+// and a difference panics.
+func strictFits(ctx context.Context, input *req, live destination, pool []*models.Mock, n strictNoise, verify bool) ([]*models.Mock, error) {
 	sieve := newStrictSieve(input, n)
 	strictVisits.Add(int64(len(pool)))
 	var fits []*models.Mock
@@ -317,7 +317,7 @@ func strictFits(ctx context.Context, input *req, live destination, pool []*model
 			fits = append(fits, m)
 		}
 	}
-	if integrations.ExactViewVerify.Load() {
+	if verify {
 		all, _, err := strictCompare(ctx, input, live, pool, n)
 		if err != nil {
 			return nil, err
