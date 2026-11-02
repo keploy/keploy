@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -136,6 +137,11 @@ func TestReadRequiredBytes(t *testing.T) {
 		{name: "reader error returns what was read", r: &stepReader{data: []byte("ab"), step: 1, err: boom}, n: 4, want: "ab", wantErr: boom},
 		{name: "an EOF is believed at the read that returns it", r: &stepReader{data: []byte("xy"), step: 2}, n: 5, want: "xy", wantErr: io.EOF},
 		{name: "an EOF on nothing read is returned with nil", r: &stepReader{}, n: 5, wantErr: io.EOF},
+		// A reader that returns its last bytes and io.EOF in one read, as
+		// crypto/tls does for data a close_notify follows (a TLS MySQL
+		// client's COM_QUIT): the bytes wanted are all there, so nil.
+		{name: "the last bytes wanted that come with the EOF are returned with nil", r: iotest.DataErrReader(strings.NewReader("abcd")), n: 4, want: "abcd"},
+		{name: "bytes short of those wanted that come with the EOF are returned with it", r: iotest.DataErrReader(strings.NewReader("abcd")), n: 6, want: "abcd", wantErr: io.EOF},
 		{name: "cancelled context", ctx: cancelled, r: &stepReader{data: []byte("abcd"), step: 1}, n: 4, wantErr: context.Canceled},
 	}
 	for _, tc := range tests {
