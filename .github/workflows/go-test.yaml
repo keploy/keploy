@@ -253,7 +253,10 @@ jobs:
       # cilium/ebpf's own tracefs lookup in five mount layouts, each built in a
       # mount namespace of its own, and TestTheClientsRegistrationKeepsItsPIDNamespace
       # holds RegisterClient, which needs a kernel map, to keeping the pid
-      # namespace the CLI said. Built as the runner user, run as root, and
+      # namespace the CLI said, and TestTheLoadedHooksAreToldTheProxysMovedPorts
+      # holds SetProxyPorts, which writes the agent info's kernel map, to
+      # sending the moved proxy and DNS ports with the rest as Load sent it.
+      # Built as the runner user, run as root, and
       # each PASS line grepped, so a test or layout that skips or vanishes
       # fails the step.
       - name: Hooks tests as root
@@ -261,8 +264,9 @@ jobs:
         run: |
           go test -c -o /tmp/hooks-linux.test ./pkg/agent/hooks/linux/
           cd pkg/agent/hooks/linux
-          sudo /tmp/hooks-linux.test -test.count=1 -test.v -test.run '^(TestTheHooksLoadOnThisKernel|TestTracefsMountedAgreesWithCiliumInEveryLayout|TestTheClientsRegistrationKeepsItsPIDNamespace)$' | tee /tmp/hooks-linux.out
+          sudo /tmp/hooks-linux.test -test.count=1 -test.v -test.run '^(TestTheHooksLoadOnThisKernel|TestTracefsMountedAgreesWithCiliumInEveryLayout|TestTheClientsRegistrationKeepsItsPIDNamespace|TestTheLoadedHooksAreToldTheProxysMovedPorts)$' | tee /tmp/hooks-linux.out
           for t in TestTheHooksLoadOnThisKernel TestTracefsMountedAgreesWithCiliumInEveryLayout TestTheClientsRegistrationKeepsItsPIDNamespace \
+            TestTheLoadedHooksAreToldTheProxysMovedPorts \
             TestTracefsMountedAgreesWithCiliumInEveryLayout/{none,canonical,elsewhere,subdir,debugfs}; do
             grep -q -- "--- PASS: $t " /tmp/hooks-linux.out || { echo "$t did not pass as root"; exit 1; }
           done
