@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
@@ -306,9 +307,21 @@ type TestsReceipt struct {
 	// Learned is what the learn step of a record's full round wrote onto
 	// mocks no test consumed (the set's start-up and pool), each field as
 	// "<mock> <path> (<kind>)"; a test's own is on its line (design v14
-	// §7.2 step 10).
+	// §7.2 step 10). What a call made in another window than its
+	// recording's taught it is LearnedElsewhere's, not this.
 	Learned []string `yaml:"learned,omitempty" json:"learned,omitempty"`
+	// LearnedElsewhere is what the learn step of a record's full round
+	// wrote onto recordings from calls made in other windows than theirs,
+	// for learning only (a timer's call that fired in another test's
+	// window): by recording, with the test whose recording it is and the
+	// windows that taught it. Such learning is that window's: whatever
+	// undoes what a window learned undoes it too.
+	LearnedElsewhere []LearnedElsewhere `yaml:"learnedElsewhere,omitempty" json:"learnedElsewhere,omitempty"`
 }
+
+// LearnedElsewhere is what calls made in other windows than a recording's
+// taught it, as a record's receipt says it (TestsReceipt.LearnedElsewhere).
+type LearnedElsewhere = learn.Taught
 
 // empty reports whether the run reported no test and keploy refused
 // nothing: such a run leaves no per-test file, whatever rows it saw. A

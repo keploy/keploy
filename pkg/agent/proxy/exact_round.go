@@ -923,6 +923,7 @@ const restagedWhy = "the staging moved: the test set was staged again"
 func (m *MockManager) HoldToRound(call integrations.CallRound) (integrations.MockMemDb, func() bool) {
 	h := &heldScope{roundScope: roundScope{MockManager: m, g: roundGuard{at: integrations.RoundAt{Epoch: call.Epoch()}, staging: true}}}
 	h.seq, h.seqOK = call.Sequence()
+	h.read.at, h.read.known = call.Round()
 	return h, h.restaged
 }
 
@@ -950,6 +951,10 @@ type heldScope struct {
 	// owns is the call's decision whether it is one of the open test's own
 	// calls (HideBackgroundWhen), until a door or HidesBackground asks it.
 	owns func() bool
+	// read is the round the call was read in (CallRound.Round), so what it
+	// teaches across windows names that window only while the round is
+	// still there (learnElsewhereAt).
+	read callRead
 	// hideBg says the call is one of them (HidesBackground): the set's
 	// background is in none of h's reads but KindBackground's, and its doors
 	// refuse it (hides).
@@ -1178,4 +1183,16 @@ func (h *heldScope) SpendByKind(mk *models.Mock) bool {
 func (h *heldScope) ClaimPairing(mk *models.Mock) bool {
 	ok, _ := h.claimPairingAt(mk, &h.g)
 	return ok
+}
+
+// LearnElsewhereCandidates is the manager's while the store is still at h's
+// round; LearnElsewhere keeps what a call taught only while it is
+// (learnElsewhereAt): a recording of a later staging that shares a name is
+// taught nothing by a call of h's.
+func (h *heldScope) LearnElsewhereCandidates(kind models.Kind, keys []string) []*models.Mock {
+	return h.heldOf(h.MockManager.LearnElsewhereCandidates(kind, keys))
+}
+
+func (h *heldScope) LearnElsewhere(mk *models.Mock, clocks map[string]models.ClockOffset) bool {
+	return h.learnElsewhereAt(mk, clocks, &h.g, &h.read)
 }

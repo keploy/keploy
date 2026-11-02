@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/ids"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -900,6 +901,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		Real:          realRun,
 		CannotCapture: lostNotJudged,
 		Learned:       counts.learnedPool,
+		// What calls made in other windows than their recordings' taught
+		// them, said apart.
+		LearnedElsewhere: counts.learnedElsewhere,
 	})
 	return keployFailure
 }
@@ -1971,6 +1975,9 @@ type replayCounts struct {
 	tests        []TestReceipt
 	// learnedPool is what the learn step wrote onto mocks no test consumed.
 	learnedPool []string
+	// learnedElsewhere is what it wrote onto recordings from calls made in
+	// other windows than theirs.
+	learnedElsewhere []LearnedElsewhere
 	// learnErr is why what the learn step learned could not be written: the
 	// round did not complete.
 	learnErr error
@@ -2028,7 +2035,7 @@ func composeUnsettled(why string) error {
 // agent answer" flag makes a half-answer indistinguishable from no answer, and
 // then reports a run whose misses were never read as a clean one.
 func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail replayDetail, stopped func() bool) replayCounts {
-	var consumed []models.MockState
+	var consumed, elsewhere []models.MockState
 	var misses []models.UnmatchedCall
 	var consumedErr, missesErr, settleErr error
 	// Under docker compose the runner exiting is what stops the whole project,
@@ -2040,6 +2047,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	if fromCompose {
 		outcome, err := composeOutcome.ComposeAgentOutcome()
 		consumed, misses, consumedErr, missesErr = outcome.Consumed, outcome.Missed, err, err
+		elsewhere = outcome.LearnedElsewhere
 		if err == nil && outcome.MissedUnread != "" {
 			// As the agent's own read would have said it: incomplete, with
 			// what was read.
@@ -2069,6 +2077,9 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				settleErr = m.settleRun(outcomeCtx)
 				if consumedErr = settleErr; consumedErr == nil {
 					consumed, consumedErr = m.instrumentation.GetConsumedMocks(outcomeCtx)
+				}
+				if consumedErr == nil && m.learning() {
+					elsewhere = learn.ReadLearnedElsewhere(outcomeCtx, m.instrumentation, m.logger)
 				}
 				misses, missesErr = m.instrumentation.GetMockErrors(outcomeCtx)
 				if reader, ok := m.instrumentation.(idPairReader); ok {
@@ -2154,11 +2165,10 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	// that runs this round commits it. A round whose learning cannot be read
 	// or kept did not complete: its record would judge recordings that lack
 	// what this round served.
-	var learned map[string][]string
-	var learnedPool []string
+	var learned learnedOut
 	var learnErr error
 	if m.learning() {
-		learned, learnedPool, learnErr = m.keepLearned(ctx, detail.set, consumed, consumedErr, flows, detail.expected)
+		learned, learnErr = m.keepLearned(ctx, detail.set, consumed, consumedErr, elsewhere, flows, detail.expected)
 	}
 
 	// Metering LAST: it may do network I/O, and the miss warnings above are what
@@ -2219,9 +2229,10 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		counts.tests = withBegan(counts.tests, detail.windows)
 	}
 	for i := range counts.tests {
-		counts.tests[i].Learned = learned[counts.tests[i].Name]
+		counts.tests[i].Learned = learned.byTest[counts.tests[i].Name]
 	}
-	counts.learnedPool = learnedPool
+	counts.learnedPool = learned.pool
+	counts.learnedElsewhere = learned.elsewhere
 	counts.learnErr = learnErr
 	counts.settleErr = settleErr
 	return counts
