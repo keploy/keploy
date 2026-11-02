@@ -463,6 +463,10 @@ func TestRelay_StreamedBeforeLooksAtTheHandBeforeTheSetAsidePlace(t *testing.T) 
 
 // seenAsTold runs step and reports whether it woke w's readers (told) and
 // whether look was true at any of those wakes, as a reader told then sees it.
+// look runs inside the wake, so step must wake with no lock held that look
+// takes: a step that wakes under such a lock (say the tee's mu, which
+// awaitingBefore takes) hangs the test until go test's -timeout (10m by
+// default) panics the whole binary, instead of failing with its message.
 func seenAsTold(w *waker, step func(), look func() bool) (told, seen bool) {
 	w.woken = func() {
 		told = true

@@ -148,7 +148,12 @@ type waker struct {
 	mu sync.Mutex
 	ch chan struct{}
 	// woken, when set, runs at each wake before a reader is told, so it sees
-	// what that reader, told, looks at. Tests set it.
+	// what that reader, told, looks at. Set it only on a bare tee (newTee,
+	// in no Relay), where only the test's own goroutine wakes w: wake reads
+	// it without w.mu, so setting it where another goroutine may wake (any
+	// tee in a Relay) is a data race. It runs with w.mu not held, but with
+	// whatever lock the waking caller holds, so a woken func that takes that
+	// lock deadlocks.
 	woken func()
 }
 

@@ -820,7 +820,13 @@ func (t *tee) firstAwaiting() (c fakeconn.Chunk, ok bool) {
 // doneAwaiting lets go of the oldest chunk waiting for the client's answer,
 // once it was pushed (it is on the queue now) or refused. The backing array
 // is let go of with the last one. One refused never comes on the stream, so a
-// reader waiting on it is told (Relay.StreamedBefore).
+// reader waiting on it is told (Relay.StreamedBefore). The wake runs after
+// t.mu is let go of (deferred first, it runs last): waker.woken runs on this
+// goroutine inside the wake, and a test's look there
+// (TestTee_AwaitingBeforeAndToldWhenLetGo, through seenAsTold, looks with
+// awaitingBefore) takes t.mu. Were the wake under t.mu, a reader on another
+// goroutine would only wait for the unlock; the order is there for the look
+// on this goroutine.
 func (t *tee) doneAwaiting() {
 	defer t.progress.changed.wake()
 	t.mu.Lock()
