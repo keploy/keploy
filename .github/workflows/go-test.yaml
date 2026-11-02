@@ -202,8 +202,10 @@ jobs:
       # answers; each PASS line is grepped at the end, so a row that fails,
       # does not build or vanishes fails the step. Each run passes
       # -test.timeout, as go test does: a test binary run with none has no
-      # deadline, and these rows bound their waits by the test's deadline, so a
-      # hang fails naming what it waited on instead of running to the job's end.
+      # deadline. The http row bounds its waits by the test's deadline, so a
+      # hang there fails naming what it waited on instead of running to the
+      # job's end; the utils rows bound none of their waits so (awaitFile), and
+      # the timeout alone bounds their run.
       - name: Open-file rows as the runner user and as root
         if: success() || failure()
         shell: bash
