@@ -4552,9 +4552,9 @@ func (c *cappedReadCloser) Close() error { return c.closer.Close() }
 
 // readAllCapped reads r to EOF, failing with ErrDecompressedTooLarge once
 // the stream exceeds limit bytes. Unlike io.ReadAll, buffer capacity is
-// never grown past limit+1, so at most limit+1 bytes are read from r and
-// the returned slice retains no doubling slack (io.ReadAll can retain ~2x
-// the limit near the cap).
+// never grown past limit+1 rounded up to whole heap pages (wholePages), at
+// most limit+1 bytes are read from r, and the returned slice retains no
+// doubling slack (io.ReadAll can retain ~2x the limit near the cap).
 func readAllCapped(r io.Reader, limit int64) ([]byte, error) {
 	return readAllReserved(r, limit, nil)
 }
@@ -4564,11 +4564,51 @@ func readAllCapped(r io.Reader, limit int64) ([]byte, error) {
 // there and holds nothing. The caller that refused counts and reports it.
 var ErrDecodeRefused = errors.New("decode refused: no room for the decoded body")
 
-// gzipDecoderStateBytes is what a gzip decoder holds while it decodes, beside
-// its output: compress/flate's 32 KiB history window and its Huffman tables,
-// and gzip.Reader's header state. TestDecoderStateIsReservedAsItIsHeld pins
-// it against what the decoder allocates.
-const gzipDecoderStateBytes = 64 << 10
+// gzipDecoderStateBytes is the most a gzip decoder holds beside its output,
+// at the format's limits (compress/gzip and compress/flate, Go 1.27), as the
+// allocator gives it:
+//   - gzipInflaterBytes: gzip.Reader and flate's decompressor;
+//   - gzipLinkBytes: the link tables of the decompressor's Huffman decoders;
+//   - gzipHeaderBytes twice: the first member's header, which gzip.Reader
+//     keeps, and the next member's, as it reads it;
+//   - gzipLatin1Bytes: the runes it converts a name or comment through.
+//
+// TestAGzipDecodeReservesItsDecoderAtTheFormatsLimits pins it against the
+// decoder.
+const gzipDecoderStateBytes = gzipInflaterBytes + gzipLinkBytes + 2*gzipHeaderBytes + gzipLatin1Bytes
+
+// The parts of gzipDecoderStateBytes, in bytes as the allocator gives them.
+const (
+	// gzipInflaterBytes: gzip.Reader (704), flate's decompressor (4,864: its
+	// two Huffman decoders' 2 KiB chunk tables are in it), its code-length
+	// arrays (2,688 and 160), and its 32 KiB history window.
+	gzipInflaterBytes = 704 + 4_864 + 2_688 + 160 + 32<<10
+
+	// gzipLinkBytes: a Huffman decoder links each 9-bit prefix of its codes
+	// longer than 9 bits to a table of 2^(longest-9) entries of 4 bytes, so
+	// 256 bytes when its longest code is 15 bits, and indexes them in a
+	// slice of 24-byte headers. A complete code of 286 literal/length
+	// symbols with a 15-bit code among them takes at most 137 such
+	// prefixes: each takes at least two codes, the one with the 15-bit
+	// code seven, and the codes of 9 bits or fewer take at least one per
+	// bit set in the 512ths of the code space they cover, so 137 prefixes
+	// take 2*137 + 5 + 7 = 286 codes and 138 would take 287. One of 30
+	// distance symbols takes at most 8 (27 codes; 9 would take 31). Their
+	// indexes are 3,456 and 192 bytes.
+	gzipLinkBytes = 137*256 + 3_456 + 8*256 + 192
+
+	// gzipHeaderBytes: a member's header at the most: an extra field of
+	// 65,535 bytes (65,536 given), and a name and a comment of 511 bytes
+	// each, held as UTF-8: 1,022 bytes when every byte is Latin-1 past
+	// ASCII. The runtime makes such a string from its runes with room for
+	// one more rune of 3 bytes (slicerunetostring asks for size+3), so it
+	// asks for 1,025 bytes, and the allocator gives 1,152 (its size class).
+	gzipHeaderBytes = 65_536 + 1_152 + 1_152
+
+	// gzipLatin1Bytes: the 511 runes of 4 bytes readString converts a name
+	// or comment through (2,048 given).
+	gzipLatin1Bytes = 2_048
+)
 
 // brotliReaderBytes is what a brotli decoder holds beside its ring buffer and
 // its prefix-code tables (brotliTableBytes, brotliTableRegrowBytes): its
@@ -4654,6 +4694,26 @@ func brotliWindowBits(data []byte) (uint, bool) {
 	}
 }
 
+// heapPageBytes is the Go allocator's page. It gives a buffer of more than
+// 32 KiB whole pages, and one of 8, 16, 24 or 32 KiB a size class of
+// exactly its size, so it gives a buffer whose capacity is whole pages
+// exactly that capacity.
+const heapPageBytes = 8 << 10
+
+// maxWholePages is the most whole heapPageBytes an int64 holds.
+const maxWholePages = math.MaxInt64 &^ (heapPageBytes - 1)
+
+// wholePages is n rounded up to whole heapPageBytes; an n past
+// maxWholePages, which rounding up would take past the most an int64 holds,
+// is maxWholePages. No buffer is that large: the allocator refuses one far
+// smaller.
+func wholePages(n int64) int64 {
+	if n > maxWholePages {
+		return maxWholePages
+	}
+	return (n + heapPageBytes - 1) &^ (heapPageBytes - 1)
+}
+
 // reserveFor asks reserve for n bytes before the decode holds them; a nil
 // reserve lets the decode hold anything (Decompress).
 func reserveFor(reserve func(int64) bool, n int64) bool {
@@ -4674,11 +4734,17 @@ func giveBack(reserve func(int64) bool, n int64) {
 // on any error (reserve refused, ErrDecodeRefused; the stream was too large,
 // or failed) nothing does: it gives back the buffer it drops.
 func readAllReserved(r io.Reader, limit int64, reserve func(int64) bool) ([]byte, error) {
-	errTooLarge := fmt.Errorf("%w of %d bytes (possible decompression bomb)", ErrDecompressedTooLarge, limit)
-	startCap := int64(64 * 1024)
-	if startCap > limit+1 {
-		startCap = limit + 1
+	// The error is made only when it is returned, so a decode that fits
+	// allocates none (fmt would take its printer from its pool, and keep
+	// that pool's per-P array).
+	tooLarge := func() error {
+		return fmt.Errorf("%w of %d bytes (possible decompression bomb)", ErrDecompressedTooLarge, limit)
 	}
+	// Each buffer's capacity is whole pages, the last one's too (it holds
+	// limit+1 bytes), so what it reserves for a buffer is what the
+	// allocator gives the buffer. The min keeps limit+1 in an int64.
+	lastCap := wholePages(min(limit, maxWholePages) + 1)
+	startCap := min(int64(64*1024), lastCap)
 	if !reserveFor(reserve, startCap) {
 		return nil, ErrDecodeRefused
 	}
@@ -4688,14 +4754,11 @@ func readAllReserved(r io.Reader, limit int64, reserve func(int64) bool) ([]byte
 		return nil, err
 	}
 	for {
+		if int64(len(data)) > limit {
+			return fail(tooLarge())
+		}
 		if len(data) == cap(data) {
-			if int64(len(data)) > limit {
-				return fail(errTooLarge)
-			}
-			newCap := int64(cap(data)) * 2
-			if newCap > limit+1 {
-				newCap = limit + 1
-			}
+			newCap := min(int64(cap(data))*2, lastCap)
 			if !reserveFor(reserve, newCap) {
 				return fail(ErrDecodeRefused)
 			}
@@ -4705,11 +4768,15 @@ func readAllReserved(r io.Reader, limit int64, reserve func(int64) bool) ([]byte
 			data = grown
 			giveBack(reserve, outgrown)
 		}
-		n, err := r.Read(data[len(data):cap(data)])
+		end := int64(cap(data))
+		if end > limit {
+			end = limit + 1 // the last buffer's pages may hold more than it reads
+		}
+		n, err := r.Read(data[len(data):end])
 		data = data[:len(data)+n]
 		if err == io.EOF {
 			if int64(len(data)) > limit {
-				return fail(errTooLarge)
+				return fail(tooLarge())
 			}
 			return data, nil
 		}
@@ -4732,11 +4799,11 @@ func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) (
 // DecompressReserving is Decompress for a caller that bounds what its
 // decodes hold (the enterprise agent's capture bound): the decode asks
 // reserve(n), n > 0, before it holds n more bytes (its output buffer as it
-// grows it, and the decoder's own state: gzip's window and tables, brotli's
-// ring buffer as large as the stream's window allows and its prefix-code
-// tables as large as the format allows, with one group's again while it
-// regrows them), and tells it
-// reserve(-n) once it holds n bytes less (the buffer it outgrew, the decoder
+// grows it, in whole heap pages, and the decoder's own state: gzip's window,
+// tables and headers as large as the format allows, brotli's ring buffer as
+// large as the stream's window allows and its prefix-code tables as large
+// as the format allows, with one group's again while it regrows them), and
+// tells it reserve(-n) once it holds n bytes less (the buffer it outgrew, the decoder
 // it closed). A refusal stops the decode at once: it returns
 // ErrDecodeRefused, holding nothing. On success what stays reserved is the
 // returned slice's capacity; on any error, nothing. An encoding it does not
