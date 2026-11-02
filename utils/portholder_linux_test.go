@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"go.keploy.io/server/v3/internal/testnet"
 )
 
 func ownName(t *testing.T, pid int) string {
@@ -24,7 +26,7 @@ func ownName(t *testing.T, pid int) string {
 
 // PortHolder names the process that holds a port, by the socket's inode in
 // the kernel's TCP and UDP tables (IPv4 and IPv6), and no process for a port
-// none of its sockets is bound to.
+// the tables list no socket at.
 func TestPortHolderNamesTheProcessOnThePort(t *testing.T) {
 	me := ownName(t, os.Getpid())
 	tcp4, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -58,14 +60,12 @@ func TestPortHolderNamesTheProcessOnThePort(t *testing.T) {
 			t.Fatalf("PortTaken(%d) = %q", port, got)
 		}
 	}
-	free, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := free.Addr().(*net.TCPAddr).Port
-	_ = free.Close()
+	// A port the tables list no socket at, and that no other socket is
+	// given while the test reads them: one a listener of this test closed
+	// could be given to another process's socket at once.
+	port := testnet.UnlistedPort(t)
 	if got := PortHolder(uint32(port)); got != "" {
-		t.Fatalf("port %d, which no socket holds: holder %q", port, got)
+		t.Fatalf("port %d, which the tables list no socket at: holder %q", port, got)
 	}
 }
 

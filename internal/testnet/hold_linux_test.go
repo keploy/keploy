@@ -4,9 +4,13 @@ package testnet
 
 import (
 	"context"
+	"errors"
 	"io"
+	"io/fs"
 	"net"
+	"os"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -301,4 +305,84 @@ func TestBoundHereCountsOnlyThisProcesssSockets(t *testing.T) {
 	require.NoError(t, closed.Close())
 	n, _ = BoundHere(t, port)
 	require.Zero(t, n, "a listener this test closed")
+}
+
+// listedAt returns the lines of /proc/net/tcp, tcp6, udp and udp6 whose
+// local port is port.
+func listedAt(t *testing.T, port int) []string {
+	t.Helper()
+	var at []string
+	for _, table := range []string{"tcp", "tcp6", "udp", "udp6"} {
+		b, err := os.ReadFile("/proc/net/" + table)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // no IPv6
+		}
+		require.NoError(t, err)
+		for _, line := range strings.Split(string(b), "\n")[1:] {
+			f := strings.Fields(line)
+			if len(f) < 2 {
+				continue
+			}
+			_, hex, _ := strings.Cut(f[1], ":")
+			if p, err := strconv.ParseUint(hex, 16, 16); err == nil && int(p) == port {
+				at = append(at, table+": "+line)
+			}
+		}
+	}
+	return at
+}
+
+// An unlisted port is one the socket tables list nothing at, below the
+// range a bind to port 0 is given a port from, held at TCP at every address
+// for the test's life and free at UDP.
+func TestAnUnlistedPortIsInNoTableHeldAtTCPAndBelowTheEphemeralRange(t *testing.T) {
+	port := UnlistedPort(t)
+	b, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
+	require.NoError(t, err)
+	first, err := strconv.Atoi(strings.Fields(string(b))[0])
+	require.NoError(t, err)
+	require.Less(t, port, first, "below the range a bind to port 0 is given a port from")
+	require.GreaterOrEqual(t, port, 1024)
+	require.Empty(t, listedAt(t, port), "no socket is listed at the port")
+	for _, b := range ipv4Binds(strconv.Itoa(port)) {
+		_, err := net.Listen(b.network, b.addr)
+		require.ErrorIs(t, err, syscall.EADDRINUSE, "a listener at %s %s", b.network, b.addr)
+	}
+	pc, err := net.ListenPacket("udp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	require.NoError(t, err, "the port is free at UDP")
+	require.NoError(t, pc.Close())
+}
+
+// A port another socket is at, at TCP or at UDP, is not given: the search
+// moves on to the next port down, and fails when none is left.
+func TestAnUnlistedPortIsNoneAnotherSocketIsAt(t *testing.T) {
+	held := UnlistedPort(t)
+	next, err := unlistedPort(t, held-1000, held+1)
+	require.NoError(t, err)
+	require.Less(t, next, held, "the port held at TCP is passed over")
+	_, err = unlistedPort(t, held, held+1)
+	require.ErrorContains(t, err, "free at both TCP and UDP", "no port is left")
+
+	// A port below next, below the range a bind to port 0 is given one
+	// from, taken at UDP here: nothing is at it at TCP.
+	udp := next - 1
+	for ; udp > next-1000; udp-- {
+		pc, err := net.ListenPacket("udp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(udp)))
+		if err == nil {
+			t.Cleanup(func() { _ = pc.Close() })
+			break
+		}
+		require.ErrorIs(t, err, syscall.EADDRINUSE)
+	}
+	_, err = unlistedPort(t, udp, udp+1)
+	require.ErrorContains(t, err, "free at both TCP and UDP", "the port taken at UDP is passed over")
+
+	// The lowest port of the range is given when it is free.
+	for p := udp - 1; ; p-- {
+		require.Greater(t, p, udp-1000, "no port below %d was given alone", udp)
+		if got, err := unlistedPort(t, p, p+1); err == nil {
+			require.Equal(t, p, got)
+			break
+		}
+	}
 }
