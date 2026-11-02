@@ -5,6 +5,7 @@ package utils
 import (
 	"context"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sync/atomic"
 	"syscall"
@@ -22,20 +23,26 @@ const bootStarvedWork = 500 * time.Millisecond
 
 // TestBootStarvedHelper is not a test of its own: with KEPLOY_TEST_BOOT_STARVED
 // set it is an agent whose start spends bootStarvedWork of CPU time between
-// two steps, outside any stage, reporting at 50 ms beats. It writes "ready" as
-// that work begins.
+// two steps, outside any stage, reporting at 50 ms beats. It writes "ready",
+// then starts only on the test's go-ahead (SIGUSR1), which the test gives once
+// the starving has begun. A start begun on "ready" ran unstarved, and was
+// charged beats, for as long as the test took to see the file: on a loaded
+// host most of its work ran before the starving did.
 func TestBootStarvedHelper(t *testing.T) {
 	dir := os.Getenv("KEPLOY_TEST_BOOT_STARVED")
 	if dir == "" {
 		return
 	}
 	helperExitsWithParent()
-	bootBeat = 50 * time.Millisecond
-	reportBootProgress(context.Background(), zap.NewNop(), pathSink(filepath.Join(dir, BootProgressFileName)), nil)
-	BootStep("the helper runs")
+	goAhead := make(chan os.Signal, 1)
+	signal.Notify(goAhead, syscall.SIGUSR1) // before "ready": the test signals only after it
 	if err := os.WriteFile(filepath.Join(dir, "ready"), nil, 0o600); err != nil {
 		os.Exit(3)
 	}
+	<-goAhead
+	bootBeat = 50 * time.Millisecond
+	reportBootProgress(context.Background(), zap.NewNop(), pathSink(filepath.Join(dir, BootProgressFileName)), nil)
+	BootStep("the helper runs")
 	spinCPU(bootStarvedWork)
 	BootStep("the helper's work is over")
 	MarkBootReady()
@@ -97,7 +104,17 @@ func TestAStarvedStartIsNotChargedBeatsItCouldNotRun(t *testing.T) {
 	dir := t.TempDir()
 	helper, exited, out := startHelper(t, "TestBootStarvedHelper", "KEPLOY_TEST_BOOT_STARVED="+dir)
 	awaitHelperFile(t, dir, "ready", exited, out)
-	defer starve(helper.Process.Pid)()
+	// Stopped before it is let go, and starve's first act is to let it run:
+	// so the work begins inside the starving, however late this goroutine or
+	// starve's runs on a loaded host.
+	pid := helper.Process.Pid
+	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(pid, syscall.SIGUSR1); err != nil {
+		t.Fatal(err)
+	}
+	defer starve(pid)()
 	began := time.Now()
 
 	path := filepath.Join(dir, BootProgressFileName)
