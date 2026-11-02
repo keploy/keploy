@@ -170,3 +170,45 @@ func TestKeployTestFailsTheSetOnTheGapsLostBytes(t *testing.T) {
 		t.Fatalf("a failed take: capture_verification %+v, want unverified", cv)
 	}
 }
+
+// postScriptFails is a set's configuration whose post-script fails.
+type postScriptFails struct{ prTestSetConf }
+
+func (postScriptFails) Read(context.Context, string) (*models.TestSet, error) {
+	return &models.TestSet{PostScript: "exit 3"}, nil
+}
+
+// A set that returns before its end applies what keploy took (its
+// post-script failed) leaves losses that name its test cases, and the next
+// set's test cases repeat those names. A later set's end never names one of
+// its own test cases with them: they are the run's, and fail that set, in
+// words that still name the test case they were written in.
+func TestOwnedLossesASetLeftUnappliedNameNoLaterSetsTestCase(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newPartialRunHarness(t, 3, 0)
+	h.replayer.config.Test.Mocking = true
+	h.replayer.testSetConf = postScriptFails{}
+	loss := models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1,
+		What: "from 127.0.0.1:50912, written in test-2, where keploy's wait for them was cut short"}
+	// Taken at test-3's end, the set's last before its post-script.
+	instr := &prOwnedInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil}},
+		at: 3, owned: []models.OwnedCaptureLoss{{Test: "test-2", Loss: loss}}}
+	h.replayer.instrumentation = instr
+	h.replayer.markPIDMaps(context.Background())
+	status, err := h.replayer.RunTestSet(context.Background(), "test-set-0", "test-run-0", false)
+	if status != models.TestSetStatusFaultScript || err == nil {
+		t.Fatalf("set %q, %v; want %q and the post-script's error", status, err, models.TestSetStatusFaultScript)
+	}
+	if instr.takes != 3 {
+		t.Fatalf("%d takes, want 3: one at each test case's end, none at a set's end it never reached", instr.takes)
+	}
+	// The next set's own test-2 failed.
+	next := []models.TestResult{{TestCaseID: "test-1", Status: models.TestStatusPassed}, {TestCaseID: "test-2", Status: models.TestStatusFailed}}
+	set, err := h.replayer.applyOwnedLosses(next)
+	if err != nil || len(set) != 1 || set[0] != loss {
+		t.Fatalf("the next set's end: %v, %v; want the set's, %v", set, err, loss)
+	}
+	if got := next[1].FailureInfo.CaptureIncomplete; len(got) != 0 {
+		t.Fatalf("the next set's test-2 names %v: an earlier set's loss, by its name", got)
+	}
+}

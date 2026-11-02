@@ -1833,6 +1833,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Whether this run of the set is judged is this run's to say: a mark left
 	// by an earlier attempt, or an earlier Start, says nothing about it.
 	r.forgetNotJudged(testSetID)
+	// The losses cut-short ends owned that keploy takes in this set name its
+	// test cases; any its end does not apply are no later set's by name.
+	defer r.unnameUnappliedOwnedLosses()
 	// Where the app's ports are published is this run's to say too: the
 	// agent container an attempt starts may publish them on other host ports.
 	publishedPortsOf(r.logger, r.instrumentation).newRun(testSetID)
