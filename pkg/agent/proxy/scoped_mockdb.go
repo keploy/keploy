@@ -18,12 +18,16 @@ import (
 
 // Per-PID (worker-keyed) mock scoping — "Design A".
 //
-// Parallel test runners (Playwright, jest, pytest-xdist, `go test` -parallel)
-// spawn WORKER PROCESSES that each run their tests sequentially. The scope API
-// (POST /agent/scope/begin|end) lets a worker mark its current test so replay
-// serves only that test's recorded mocks. With a single global filter, two
-// workers' begin/end calls stomp each other; keying the filter by the worker's
-// PID instead lets them run concurrently without a shared "current scope".
+// A test process (a worker) marks its current test through the scope API
+// (POST /agent/scope/begin|end) so replay serves only that test's recorded
+// mocks. Keying the filter by the worker's PID keeps two workers' begin/end
+// calls from overwriting one shared filter, but it does NOT isolate tests that
+// run at the same time: it narrows only the worker's own process tree, so a
+// process no registered worker started (an app server the tests share) is
+// served the whole pool (scopedFor), and at record such a process's calls, and every
+// call of two tests open at once in one process, are charged by time
+// (service/mock correlateScopes). Run scoped tests one at a time; a shared app
+// server needs a begin without a pid, which narrows the global pool.
 //
 // A worker self-reports its PID in the scope call (ScopeReq.Pid — e.g. Node
 // process.pid), which registers an allowlist of that test's mock names on the
