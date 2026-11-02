@@ -255,16 +255,36 @@ func TestOnlyOpenTestInTheRunServesAnAppUnderTheRunner(t *testing.T) {
 	r := New(f, 0)
 	r.SetTable("/r", map[string]models.SetTable{"web": {
 		Boots: map[string][]string{"server#1": {"boot"}},
-		Tests: map[string][]models.Owned{"login": {{Name: "auth", Start: "server#1"}}},
+		Tests: map[string][]models.Owned{"login": {{Name: "auth", Start: "server#1"}}, "cart": {{Name: "add", Start: "server#1"}}},
 	}})
 	f.spawn(10, 1, at(0), "node")
 	r.Begin(10, "web", "/r/web", true, at(1))
 	f.spawn(11, 10, at(5), "server")
 	f.spawn(20, 10, at(6), "node")
+	f.spawn(30, 10, at(7), "node")
 	r.Begin(20, "login", "/r/web", false, at(50))
 	rank, _, _, _ := r.View(11, at(60))
-	if rank["auth"] != 1 {
+	if rank["auth"] != 1 || hasAny(rank, "add") {
 		t.Fatalf("the app under the runner must see the test open in the worker: %v", rank)
+	}
+
+	// With two tests open in two workers, the runner's app cannot be told
+	// which one its call is for: it is served neither test's mocks, has the
+	// runner's scope, and owns no recording.
+	r.Begin(30, "cart", "/r/web", false, at(70))
+	if rank, _, ok, err := r.View(11, at(80)); err != nil || !ok || hasAny(rank, "auth", "add") {
+		t.Fatalf("with login and cart open the runner's app was shown %v (ok %v, err %v); want neither test's mocks", rank, ok, err)
+	}
+	if got := r.Scope(11); got != "w10" {
+		t.Fatalf("with login and cart open the runner's app has scope %q, want the runner's w10", got)
+	}
+	if owned, known := r.Owns(11, "auth"); owned || !known {
+		t.Fatalf("with login and cart open Owns(11, auth) = %v, %v; want false, true", owned, known)
+	}
+
+	r.End(20, "login", false, at(90))
+	if rank, _, _, _ := r.View(11, at(100)); rank["add"] != 1 || hasAny(rank, "auth") {
+		t.Fatalf("with cart alone open the runner's app must see cart's mocks: %v", rank)
 	}
 }
 

@@ -15,8 +15,9 @@ import (
 // never shown the whole pool while a test is open: while exactly one is, it is
 // that test's (its mocks, the runner's, and those mapped to no test; no boot,
 // which belongs to an app start), its scope and ownership that test's too;
-// while more than one is, it is refused, naming the pid. A call of a test
-// process keeps its own test.
+// while more than one is, it is refused, naming the pid; while none is, it
+// is no test's (every recording, no scope, nothing owned), as before the
+// first test. A call of a test process keeps its own test.
 func TestACallOfNoTestProcessIsTheOneOpenTestsOrRefused(t *testing.T) {
 	f := newFake()
 	r := New(f, 0)
@@ -33,11 +34,21 @@ func TestACallOfNoTestProcessIsTheOneOpenTestsOrRefused(t *testing.T) {
 	calls := []uint32{4321, 0}
 
 	r.Begin(7, "web", "/r/web", true, at(1))
-	for _, pid := range calls {
-		if _, _, ok, err := r.View(pid, at(10)); ok || err != nil {
-			t.Fatalf("pid %d, no test open: view ok %v err %v; want no view (every recording), as before", pid, ok, err)
+	noTestOpen := func(when string, ms int) {
+		t.Helper()
+		for _, pid := range calls {
+			if _, _, ok, err := r.View(pid, at(ms)); ok || err != nil {
+				t.Fatalf("pid %d, %s: view ok %v err %v; want no view (every recording), as before", pid, when, ok, err)
+			}
+			if got := r.Scope(pid); got != "" {
+				t.Fatalf("pid %d, %s: scope %q, want none", pid, when, got)
+			}
+			if owned, known := r.Owns(pid, "auth"); owned || known {
+				t.Fatalf("pid %d, %s: Owns(auth) = %v, %v; want false, false", pid, when, owned, known)
+			}
 		}
 	}
+	noTestOpen("no test open", 10)
 
 	r.Begin(7, "login", "/r/web", false, at(20))
 	for _, pid := range calls {
@@ -92,9 +103,5 @@ func TestACallOfNoTestProcessIsTheOneOpenTestsOrRefused(t *testing.T) {
 		}
 	}
 	r.End(8, "cart", false, at(80))
-	for _, pid := range calls {
-		if _, _, ok, err := r.View(pid, at(90)); ok || err != nil {
-			t.Fatalf("pid %d, no test open again: view ok %v err %v; want no view", pid, ok, err)
-		}
-	}
+	noTestOpen("no test open again", 90)
 }
