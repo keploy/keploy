@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -161,22 +162,17 @@ func (f *tidSource) ownWait() (time.Duration, bool) {
 func TestSampler_ReadsItsOwnWaitOnOneThread(t *testing.T) {
 	procs := max(runtime.GOMAXPROCS(0), 4)
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(procs))
-	stop := make(chan struct{})
+	var stopped atomic.Bool
 	spun := make(chan struct{}, procs)
 	for range procs {
 		go func() {
 			defer func() { spun <- struct{}{} }()
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-				}
+			for !stopped.Load() { // keeps its P busy until the row ends
 			}
 		}()
 	}
 	defer func() {
-		close(stop)
+		stopped.Store(true)
 		for range procs {
 			<-spun
 		}
