@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // setupExitInstr is a compose stack whose app exits while keploy sets a set
@@ -36,6 +37,8 @@ type setupExitInstr struct {
 	// gone: the agent went down with the app at "mock stats", and every
 	// later call to it is refused.
 	gone bool
+	// errLogs holds what keploy logged at error level.
+	errLogs *observer.ObservedLogs
 }
 
 // errAgentGone is a call to the agent of a stack that went down with its app.
@@ -43,8 +46,9 @@ var errAgentGone = errors.New("dial tcp 172.18.0.2:16789: connect: connection re
 
 // setupExitSteps are the setup's steps an exit lands in: the wait for the
 // agent of a stack the set brings up (its /health), the set's outgoing
-// options, and its mock filter.
-var setupExitSteps = []string{"agent health", "MockOutgoing", "UpdateMockParams"}
+// options (cut short by the set's end, or failed by the agent gone down
+// with the app), and its mock filter.
+var setupExitSteps = []string{"agent health", "MockOutgoing", "MockOutgoing to a gone agent", "UpdateMockParams"}
 
 // moreSetupExitSteps are the setup's steps of a set's first run an exit
 // lands in with no agent call of its staging in flight: the read of the
@@ -140,13 +144,24 @@ func (s *setupExitInstr) MockOutgoing(ctx context.Context, opts models.OutgoingO
 	if s.gone {
 		return errAgentGone
 	}
-	if s.at != "MockOutgoing" {
-		return s.composeInstr.MockOutgoing(ctx, opts)
+	switch s.at {
+	case "MockOutgoing":
+		s.at = ""
+		s.tell()
+		<-ctx.Done()
+		return ctx.Err()
+	case "MockOutgoing to a gone agent":
+		s.at = ""
+		s.tell()
+		<-s.known
+		return errAgentGone
 	}
-	s.at = ""
-	s.tell()
-	<-ctx.Done()
-	return ctx.Err()
+	// A call made once the set has ended fails with its end, as one to the
+	// agent does.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.composeInstr.MockOutgoing(ctx, opts)
 }
 
 func (s *setupExitInstr) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
@@ -225,6 +240,9 @@ func composeExitInSetup(t *testing.T, on, serving bool, at string) (*prRun, *hel
 		t.Cleanup(agent.Close)
 		h.replayer.config.Agent.AgentURI = agent.URL
 	}
+	core, logs := observer.New(zapcore.ErrorLevel)
+	h.replayer.logger = zap.New(zapcore.NewTee(h.replayer.logger.Core(), core))
+	s.errLogs = logs
 	h.replayer.instrumentation = s
 	app := &heldRequests{requests: map[string]int{}}
 	h.replayer.hookImpl = prHooks{onRequest: app.onRequest}
@@ -274,9 +292,10 @@ func haltedBeforeTests(t *testing.T, h *prRun, app *heldRequests, set string, st
 // its first test) halts the set as an exit during its tests does: the set is
 // APP_HALTED, its reason names the exit's code, its tests are counted and
 // none of them is sent. The set's setup, whose calls to the agent end with
-// the set's end, did not fail on its own: the repro's set returned "context
-// canceled" from staging its mocks, and the run stopped on "failed to run
-// test set: context canceled", the set unreported.
+// the set's end or fail on the agent gone down with the app, did not fail
+// on its own, and keploy logs no error of it: the repro's set returned
+// "context canceled" from staging its mocks, and the run stopped on "failed
+// to run test set: context canceled", the set unreported.
 func TestAnAppsExitInASetsSetupHaltsTheSet(t *testing.T) {
 	shapes := append(composeExitShapes[:len(composeExitShapes):len(composeExitShapes)], []struct {
 		name        string
@@ -295,6 +314,9 @@ func TestAnAppsExitInASetsSetupHaltsTheSet(t *testing.T) {
 				status, err := runSet(h, "test-set-0", tc.serving)
 				haltedBeforeTests(t, h, app, "test-set-0", status, err,
 					"application startup failed: it exited with code 3 - check application logs", nil)
+				if n := s.errLogs.FilterMessage("failed to mock outgoing").Len(); n != 0 {
+					t.Fatalf("the setup's failure was logged as an error %d times; it was the app's exit", n)
+				}
 			})
 		}
 	}
@@ -325,15 +347,25 @@ func TestAKeptAppsExitInALaterSetsSetupSaysItHadStarted(t *testing.T) {
 // A setup that fails while keploy knows of no exit of the app's own is not
 // the app's halt: its failure stands, as at main. Neither is the user's
 // stop (Ctrl+C), which compose's stop of the app follows, nor an error of
-// the app's runner itself (models.ErrInternal).
+// the app's runner itself (models.ErrInternal). Either one in the wait for
+// the set's agent ends the set USER_ABORT there, as at main, with nothing
+// staged on the agent: a run of a compose app goes on to its next set after
+// a USER_ABORT one, and stops on a FAILED one.
 func TestASetupFailureWithNoAppExitStands(t *testing.T) {
 	for _, tc := range composeExitShapes {
-		for _, why := range []string{"no exit told", "the user's stop", "the runner's own error"} {
-			t.Run(tc.name+", "+why, func(t *testing.T) {
-				at := "MockOutgoing"
-				if why == "no exit told" {
-					at = "UpdateMockParams"
-				}
+		for _, c := range []struct{ why, at string }{
+			{"no exit told", "UpdateMockParams"},
+			{"the user's stop", "MockOutgoing"},
+			{"the runner's own error", "MockOutgoing"},
+			{"the user's stop", "agent health"},
+			{"the runner's own error", "agent health"},
+		} {
+			why, at := c.why, c.at
+			name := tc.name + ", " + why
+			if at == "agent health" {
+				name += ", in the agent's wait"
+			}
+			t.Run(name, func(t *testing.T) {
 				h, _, s := composeExitInSetup(t, tc.on, tc.serving, at)
 				tell := s.tell
 				switch why {
@@ -357,6 +389,9 @@ func TestASetupFailureWithNoAppExitStands(t *testing.T) {
 				}
 				if rep := h.report.report; rep != nil && rep.Status == string(models.TestSetStatusAppHalted) {
 					t.Fatalf("report %s %q; the setup's failure is no exit of the app's own", rep.Status, rep.FailureReason)
+				}
+				if at == "agent health" && status != models.TestSetStatusUserAbort {
+					t.Fatalf("status %s, error %v; want USER_ABORT: the set ended in the wait for its agent", status, err)
 				}
 			})
 		}
