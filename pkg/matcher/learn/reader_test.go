@@ -1416,6 +1416,75 @@ func TestReaderFieldsWithNoKeyAtOnePathStandByTheirOrder(t *testing.T) {
 	}
 }
 
+// keyedPath keeps, of a text's keys, only those on the way to the latest:
+// a text with a thousand keys beside a dotted one holds a chain as long as
+// its nesting, not one entry a key.
+func TestReaderKeyedPathKeepsOnlyTheKeysOnTheWay(t *testing.T) {
+	v := map[string]any{"a.b": "x"}
+	for i := range 1000 {
+		v[fmt.Sprintf("k%04d", i)] = map[string]any{"c": map[string]any{"d": "v"}}
+	}
+	s, fields := textFields(v)
+	var keys []fieldAt
+	most := 0
+	for _, f := range fields {
+		keyedPath(&keys, s[f.start:f.end], f)
+		most = max(most, len(keys))
+	}
+	if most != 3 {
+		t.Errorf("keys held up to %d keys; want the 3 on the way to the deepest field", most)
+	}
+}
+
+// A text whose keys hold no '.' or '[' is spelled as textFields spells it,
+// with no chain of keys built: a thousand keys cost no allocation each.
+func TestReaderATextWithNoOddKeyBuildsNoKeyChain(t *testing.T) {
+	var sb strings.Builder
+	var fields []rawField
+	key := func(path, k string) {
+		fields = append(fields, rawField{start: sb.Len(), end: sb.Len() + len(k), path: path, key: true})
+		sb.WriteString(k + "\n")
+	}
+	key("a", "a")
+	for i := range 1000 {
+		k := fmt.Sprintf("k%04d", i)
+		key("a."+k, k)
+	}
+	s, n := sb.String(), 0
+	allocs := testing.AllocsPerRun(10, func() {
+		eachField(s, fields, func(f fieldAt, _ string) {
+			if n++; f.in != f.path {
+				t.Errorf("field at %s spelled %s; want its path", f.path, f.in)
+			}
+		})
+	})
+	if n != 11*len(fields) || allocs > 100 {
+		t.Errorf("%d fields read, %.0f allocations a call; want %d fields and none a field", n, allocs, 11*len(fields))
+	}
+}
+
+// keyedPath takes a field's key by its whole path, less array indices: a
+// key whose path only begins the field's parent's ("a" of "ab") is not its
+// key, whatever order its caller hands it the keys in.
+func TestReaderKeyedPathTakesAKeyByItsWholePath(t *testing.T) {
+	for _, c := range []struct {
+		f          rawField
+		text, want string
+	}{
+		{rawField{path: "a"}, "W", `["a"]`},
+		{rawField{path: "ab"}, "W", "ab"},
+		{rawField{path: "ab.c", key: true}, "c", "ab.c"},
+		{rawField{path: "a[2]"}, "W", `["a"][2]`},
+		{rawField{path: "a[2][0]"}, "W", `["a"][2][0]`},
+		{rawField{path: "a[2].b", key: true}, "b", `["a"][2].b`},
+	} {
+		keys := []fieldAt{{path: "a", in: `["a"]`}}
+		if in := keyedPath(&keys, c.text, c.f); in != c.want {
+			t.Errorf("field at %s spelled %s; want %s", c.f.path, in, c.want)
+		}
+	}
+}
+
 // An object glued to a value beside it ({"a":W,"b":x}"z") is two values, each
 // at its own index, as a stream is: a word that moved within the object, or
 // from it to the value beside it, is not at one place; one that stayed is.
