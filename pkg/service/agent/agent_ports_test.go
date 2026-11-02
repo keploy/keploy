@@ -1,11 +1,15 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"testing"
 
 	"go.keploy.io/server/v3/config"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 type portsHooks struct {
@@ -75,5 +79,59 @@ func TestTheProxysPortsMoveOnlyWhereTheHooksCanBeTold(t *testing.T) {
 	hk.refuse = errors.New("refused")
 	if err := px.move(61003, 61004); !errors.Is(err, hk.refuse) || c.Agent.ProxyPort != 61001 || c.DNSPort != 61002 {
 		t.Fatalf("a refused move: err %v; config agent %d/%d, root %d/%d", err, c.Agent.ProxyPort, c.Agent.DnsPort, c.ProxyPort, c.DNSPort)
+	}
+}
+
+// loadedPortsHooks loads, and can then be told the proxy's ports.
+type loadedPortsHooks struct {
+	loadedHooks
+	told [][2]uint32
+}
+
+func (h *loadedPortsHooks) SetProxyPorts(proxyPort, dnsPort uint32) error {
+	h.told = append(h.told, [2]uint32{proxyPort, dnsPort})
+	return nil
+}
+
+// movingProxy starts as a proxy whose ports another socket holds does: it
+// binds others and tells the port mover it was given before its start, if
+// any; with none, its start fails.
+type movingProxy struct {
+	startedProxy
+	move func(proxyPort, dnsPort uint32) error
+}
+
+func (p *movingProxy) SetPortMover(move func(proxyPort, dnsPort uint32) error) { p.move = move }
+
+func (p *movingProxy) StartProxy(ctx context.Context, opts coreAgent.ProxyOptions) error {
+	_ = p.startedProxy.StartProxy(ctx, opts)
+	if p.move == nil {
+		return errors.New("the proxy's ports are taken, and it was given no port mover by its start")
+	}
+	return p.move(61001, 61002)
+}
+
+// The agent's start lets the proxy move before it starts it: a native agent
+// whose ports another run holds starts, and its hooks and config get the
+// ports the proxy moved to.
+func TestHookLetsTheProxyMoveOffTakenPortsBeforeItStarts(t *testing.T) {
+	hk, px := &loadedPortsHooks{}, &movingProxy{}
+	a := &Agent{logger: zap.NewNop(), Hooks: hk, Proxy: px, config: &config.Config{}}
+	grp, ctx := errgroup.WithContext(context.Background())
+	ctx, cancel := context.WithCancel(context.WithValue(ctx, models.ErrGroupKey, grp))
+	defer func() {
+		cancel()
+		_ = grp.Wait()
+	}()
+
+	if err := a.Hook(ctx, models.HookOptions{Mode: models.MODE_RECORD}); err != nil {
+		t.Fatalf("the agent did not start: %v", err)
+	}
+	if px.opts == nil {
+		t.Fatal("the agent never started its proxy")
+	}
+	c := a.config
+	if len(hk.told) != 1 || hk.told[0] != [2]uint32{61001, 61002} || c.Agent.ProxyPort != 61001 || c.Agent.DnsPort != 61002 {
+		t.Fatalf("the hooks were told %v, the config holds %d/%d; want [[61001 61002]] in both", hk.told, c.Agent.ProxyPort, c.Agent.DnsPort)
 	}
 }
