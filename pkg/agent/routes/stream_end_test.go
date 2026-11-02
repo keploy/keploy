@@ -280,7 +280,9 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 // was recorded), however many sessions before it did. And its incoming stream
 // starts the session's ports: its first TLS connection to an app port is its
 // first, which the ingress says at WARN as it comes, though a session before
-// it relayed to that port.
+// it relayed to that port, or a connection relayed between the two sessions
+// (an agent that outlives its recordings, whose app is called over HTTPS in
+// between, by a health probe say): that one is neither session's.
 func TestEachRecordingSessionSaysItsOwnTLSConnectionsRelayedUnread(t *testing.T) {
 	syncmgr.Get().SetWatermark(nil) // no hold: test cases go at once
 	for session, relayed := range []int{1, 2} {
@@ -311,6 +313,10 @@ func TestEachRecordingSessionSaysItsOwnTLSConnectionsRelayedUnread(t *testing.T)
 		if len(sumLine) != 1 || sumLine[0].ContextMap()["connections_relayed_tls"] != uint64(relayed) {
 			t.Fatalf("session %d's summary is %v, want connections_relayed_tls=%d", session+1, sumLine, relayed)
 		}
+		// The session's stream has ended and the next one's has not opened:
+		// a TLS connection to 8443 now does not take the next session's
+		// first, and is not in its count.
+		syncmgr.Get().NoteTLSRelayedConn(8443)
 	}
 }
 

@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"sync"
 	"testing"
 
 	"go.uber.org/zap"
@@ -59,5 +60,63 @@ func TestEachSessionsFirstTLSConnectionToAPortIsItsFirst(t *testing.T) {
 		if got := m.TLSRelayedConns(); got != total {
 			t.Fatalf("after session %d the manager counted %d, want %d", s+1, got, total)
 		}
+	}
+}
+
+// The ingress relays each TLS connection on its own goroutine, and a client
+// opens several at once while a recording's stream may open: notes made at
+// once, and a session start among them, are safe together (the race detector
+// decides: the workers have no order between them but the manager's lock).
+// Every connection is counted, each port has exactly one first between two
+// session starts, and the start returns a count it saw.
+func TestTLSRelaysNotedAtOnceAndASessionStartAreSafeAndEachCounted(t *testing.T) {
+	m := New(zap.NewNop())
+	const n, ports = 64, 4
+	note := func(firsts map[uint16]int, mu *sync.Mutex) (start chan struct{}, wg *sync.WaitGroup) {
+		start, wg = make(chan struct{}), &sync.WaitGroup{}
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(port uint16) {
+				defer wg.Done()
+				<-start
+				if m.NoteTLSRelayedConn(port) && firsts != nil {
+					mu.Lock()
+					firsts[port]++
+					mu.Unlock()
+				}
+			}(uint16(8000 + i%ports))
+		}
+		return start, wg
+	}
+
+	var mu sync.Mutex
+	firsts := map[uint16]int{}
+	start, wg := note(firsts, &mu)
+	close(start)
+	wg.Wait()
+	if got := m.TLSRelayedConns(); got != n {
+		t.Fatalf("the manager counted %d of %d TLS connections noted at once", got, n)
+	}
+	if len(firsts) != ports {
+		t.Fatalf("%d of the %d ports had a first among TLS connections noted at once: %v", len(firsts), ports, firsts)
+	}
+	for p, c := range firsts {
+		if c != 1 {
+			t.Fatalf("port %d had %d firsts among TLS connections noted at once, want 1", p, c)
+		}
+	}
+
+	// A recording's stream opens among them.
+	start, wg = note(nil, nil)
+	var before uint64
+	wg.Add(1)
+	go func() { defer wg.Done(); <-start; before = m.StartTLSRelayedSession() }()
+	close(start)
+	wg.Wait()
+	if got := m.TLSRelayedConns(); got != 2*n {
+		t.Fatalf("the manager counted %d TLS connections, want %d: some noted as a session started were lost", got, 2*n)
+	}
+	if before < n || before > 2*n {
+		t.Fatalf("the session started at %d, want a count it saw, from %d to %d", before, n, 2*n)
 	}
 }
