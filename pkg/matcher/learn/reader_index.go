@@ -501,28 +501,58 @@ func formsHeld(text string) ([]string, int64) {
 // field's text: its recording's fields (fields, read with s), a value that
 // is wholly JSON (an HTTP body) by its own leaves below its path
 // (walkJSON), else s whole as one field. A value with no leaf (blank, a
-// null) is one field too. Its field's name is never read as JSON.
+// null) is one field too. Its field's name is never read as JSON. Two
+// fields textFields spells alike (a jsonb key "a.b" and key a's "b") stand
+// in their field by their order among them, the first by its path alone:
+// counted where spellsAlike says they may be.
 func eachField(s string, fields []rawField, yield func(fieldAt, string)) {
 	if len(fields) == 0 {
 		yield(fieldAt{}, s)
+	}
+	var seen map[fieldAt]int
+	if spellsAlike(s, fields) {
+		seen = map[fieldAt]int{}
 	}
 	for _, f := range fields {
 		if f.end > len(s) {
 			continue
 		}
-		text := s[f.start:f.end]
+		text, in := s[f.start:f.end], f.path
+		if at := (fieldAt{path: f.path, key: f.key}); seen != nil {
+			if seen[at]++; seen[at] > 1 {
+				in += "\x00" + strconv.Itoa(seen[at]-1)
+			}
+		}
 		values, leaves := 0, 0
 		if !f.key {
 			values = walkJSON(text, false, func(string, bool, string) { leaves++ })
 		}
 		if values == 0 || leaves == 0 {
-			yield(fieldAt{f.path, f.key, f.path}, text)
+			yield(fieldAt{f.path, f.key, in}, text)
 			continue
 		}
 		walkJSON(text, values > 1, func(path string, key bool, leaf string) {
-			yield(fieldAt{strings.TrimSuffix(f.path+"."+path, "."), key, f.path}, leaf)
+			yield(fieldAt{strings.TrimSuffix(f.path+"."+path, "."), key, in}, leaf)
 		})
 	}
+}
+
+// spellsAlike reports whether two of fields may share their path and side:
+// one is a key that path syntax reads as more than one key (holding '.' or
+// '['; a ']' reads so only beside a '['), or a key "" (textFields spells
+// one at the top as nothing), or none is a key, so no key tells. Else every
+// path textFields writes reads back one way.
+func spellsAlike(s string, fields []rawField) bool {
+	keys := false
+	for _, f := range fields {
+		if f.key && f.end <= len(s) {
+			if k := s[f.start:f.end]; k == "" || strings.ContainsAny(k, ".[") {
+				return true
+			}
+			keys = true
+		}
+	}
+	return !keys
 }
 
 // walkJSON walks text as JSON values token by token, each key and scalar to
@@ -532,11 +562,11 @@ func eachField(s string, fields []rawField, yield func(fieldAt, string)) {
 // text never share a path. several puts each value below its index, as an
 // array's element is (NDJSON, a streaming API's body). A repeated key's
 // values all stand at that key; a null is no leaf. It gives how many values
-// text holds, none where text is not wholly JSON values (a scalar glued to
-// a scalar, as in "007" or "2026-11-02", is text, not values; an object or
-// array glued to a value is still two values, each at its own index, so a
-// word that moved between them, or within the object, is not at one place)
-// or nests deeper than encoding/json reads (its Token refuses past its
+// text holds, none where text is not wholly JSON values (scalars glued with
+// no object or array in the text, as in "007" or "2026-11-02", are text, not
+// values; in a text that holds an object or array every value, glued or not,
+// stands at its own index, so a word that moved between them, or within the
+// object, is not at one place) or nests deeper than encoding/json reads (its Token refuses past its
 // depth, which bounds the walk's recursion).
 func walkJSON(text string, several bool, yield func(path string, key bool, leaf string)) (values int) {
 	d := json.NewDecoder(strings.NewReader(text))
@@ -577,13 +607,10 @@ func walkJSON(text string, several bool, yield func(path string, key bool, leaf 
 		_, err = d.Token()
 		return err == nil
 	}
-	scalar := func(i int) bool { return text[i] != '{' && text[i] != '[' }
-	for end, last := -1, 0; d.More(); values++ {
-		if start := int(d.InputOffset()); start == end && scalar(last) && scalar(start) {
-			return 0
-		} else {
-			last = start
-		}
+	glued, nested := false, false
+	for end := -1; d.More(); values++ {
+		start := int(d.InputOffset())
+		glued, nested = glued || start == end, nested || text[start] == '{' || text[start] == '['
 		if path = path[:0]; several {
 			index(values)
 		}
@@ -592,7 +619,7 @@ func walkJSON(text string, several bool, yield func(path string, key bool, leaf 
 		}
 		end = int(d.InputOffset())
 	}
-	if _, err := d.Token(); err != io.EOF {
+	if _, err := d.Token(); err != io.EOF || glued && !nested {
 		return 0
 	}
 	return values

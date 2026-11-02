@@ -1026,8 +1026,11 @@ func TestReaderAFieldViewIsBuiltOnlyWhereWhatIsLeftHasRoom(t *testing.T) {
 			if !c.view && x.peak > c.budget+stop {
 				t.Errorf("keeping %d, budget %d: no view, the question held %d bytes; want at most the budget and the forms of the field it stopped at, %d", kept, c.budget, x.peak, c.budget+stop)
 			}
-			if c.view && x.peak > c.budget {
-				t.Errorf("keeping %d, budget %d: the view held %d bytes as it was built; want at most the budget", kept, c.budget, x.peak)
+			if own := int64(len(p.text)); !c.view && x.peak < kept+own+stop {
+				t.Errorf("keeping %d, budget %d: no view, the question held %d bytes; want at least what the index keeps, the text and the largest field's forms, %d", kept, c.budget, x.peak, kept+own+stop)
+			}
+			if c.view && x.peak != c.budget {
+				t.Errorf("keeping %d, budget %d: the view held %d bytes as it was built; want what the index keeps and the view's own peak, the budget", kept, c.budget, x.peak)
 			}
 			answers[c.view] = at
 		}
@@ -1096,6 +1099,7 @@ func TestReaderWalkJSONReadsOnlyWhollyJSONValues(t *testing.T) {
 	}{
 		{`{"a":"w"}`, 1, 2}, {" \n{\"a\":\"w\"}\n", 1, 2}, {`{"a":1}{"b":2}`, 2, 4}, {"1 2 3", 3, 3}, {`"w" "x"`, 2, 2},
 		{`[1][2]`, 2, 2}, {`007`, 0, 0}, {`2026-11-02`, 0, 0}, {`truefalse`, 0, 0}, {`"w""x"`, 0, 0}, {`1{"a":1}`, 2, 3}, {`{"a":1}2`, 2, 3}, {"1 2\t3", 3, 3},
+		{`{"a":1}"z""z"`, 3, 4}, {`"z""z"{"a":1}`, 3, 4}, {`[1]truefalse`, 3, 3}, {`"z""z" "y"`, 0, 0}, {`"w" "x""y"`, 0, 0},
 		{`null`, 1, 0}, {`{}`, 1, 0}, {`[]`, 1, 0}, {" \n ", 0, 0}, {``, 0, 0},
 		{`{"a":"w"`, 0, 0}, {`{"a":"w"} tail`, 0, 0}, {`{"a":"w"} ]`, 0, 0}, {`[1,2`, 0, 0}, {`data: {"a":"w"}`, 0, 0}, {"\xef\xbb\xbf{\"a\":\"w\"}", 0, 0}, {`a=1&b=2`, 0, 0}, {`<a>w</a>`, 0, 0}, {`{"a":1,}`, 0, 0}, {`[1,]`, 0, 0}, {`{"a" 1}`, 0, 0}, {`]`, 0, 0}, {`plain text`, 0, 0},
 		{deep(maxJSONDepth), 1, 1}, {deep(maxJSONDepth + 1), 0, 0},
@@ -1266,6 +1270,97 @@ func TestReaderAWordMovedBetweenFieldsSpelledAlikeIsNotAtOnePlace(t *testing.T) 
 	}
 }
 
+// A Postgres jsonb value is a map (models/postgres_v3_cell.go), and
+// textFields spells its keys' paths by joining them: a key "a.b" and key
+// a's "b", a key "c[0]" and array c's first element, stand at one path. Each
+// stands in its field by its order among those the text spells alike, so a
+// word that moved between them is not at one place; one that stayed is.
+func TestReaderJsonbKeysSpelledAlikeAreNotOnePlace(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	const w = "ord7Kq2Xw9"
+	type m = map[string]any
+	pg := func(cell any) Raw {
+		return ePg("mock-6", 100*time.Millisecond, "SELECT doc FROM jobs", []models.PostgresV3Cells{{{Value: cell}}}, "SELECT 1")
+	}
+	for _, c := range []struct {
+		name   string
+		r, f   m
+		atOnce bool
+	}{
+		{"key a.b to a's b", m{"a.b": w, "a": m{"b": "x"}}, m{"a.b": "x", "a": m{"b": w}}, false},
+		{"a's b to key a.b", m{"a.b": "x", "a": m{"b": w}}, m{"a.b": w, "a": m{"b": "x"}}, false},
+		{"key c[0] to array c", m{"c[0]": w, "c": []any{"x"}}, m{"c[0]": "x", "c": []any{w}}, false},
+		{"key a.b.c to a's b's c", m{"a.b.c": w, "a": m{"b": m{"c": "x"}}}, m{"a.b.c": "x", "a": m{"b": m{"c": w}}}, false},
+		{"key user.id to user's id, the dotted key gone", m{"user.id": w, "user": m{"id": "x"}}, m{"user": m{"id": w}}, false},
+		{"key user.id stayed, user's id gone", m{"user.id": w, "user": m{"id": "x"}}, m{"user.id": w}, false},
+		{"key a.b stayed", m{"a.b": w, "a": m{"b": "x"}}, m{"a.b": w, "a": m{"b": "x"}}, true},
+		{"a's b stayed", m{"a.b": "x", "a": m{"b": w}}, m{"a.b": "y", "a": m{"b": w}}, true},
+		{"a's b stayed, the dotted key gone", m{"a.b": "x", "a": m{"b": w}}, m{"a": m{"b": w}}, true},
+		{"key c[0] stayed", m{"c[0]": w, "c": []any{"x"}}, m{"c[0]": w, "c": []any{"y"}}, true},
+		{"p to q's b", m{"p": w, "q": m{"b": "x"}}, m{"p": "x", "q": m{"b": w}}, false},
+		{"key a.b's c to key a.b.c, a's b.c beside", m{"a": m{"b.c": "y"}, "a.b": m{"c": w}, "a.b.c": "x"}, m{"a": m{"b.c": "y"}, "a.b": m{"c": "x"}, "a.b.c": w}, false},
+	} {
+		for _, budget := range []int64{0, 1} {
+			readerBudget = budget
+			x := newReaderIndex(NewDriftCache())
+			if same, read := inOneField(x.textOf(pg(c.r)), w, x.textOf(pg(c.f)), w); same != c.atOnce || !read {
+				t.Errorf("budget %d, %s: at one place %v read %v; want %v", budget, c.name, same, read, c.atOnce)
+			}
+		}
+	}
+}
+
+// textFields spells a key "" at its root's top as nothing, so its b stands
+// at b, the root's own b's path: the two stand apart by their order too.
+func TestReaderAnEmptyKeyAtTheTopIsNotItsSiblings(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	const w = "ord7Kq2Xw9"
+	of := func(v map[string]any) Raw {
+		x := Raw{mock: "mock-1", rRead: true}
+		x.rText, x.rFields = textFields(v)
+		return x
+	}
+	rec := of(map[string]any{"": map[string]any{"b": w}, "b": "x"})
+	moved := of(map[string]any{"": map[string]any{"b": "x"}, "b": w})
+	for _, budget := range []int64{0, 1} {
+		readerBudget = budget
+		x := newReaderIndex(NewDriftCache())
+		if same, read := inOneField(x.textOf(rec), w, x.textOf(moved), w); same || !read {
+			t.Errorf("budget %d: at one place %v read %v; want a word that moved to the top's b not at one place", budget, same, read)
+		}
+		if same, read := inOneField(x.textOf(rec), w, x.textOf(rec), w); !same || !read {
+			t.Errorf("budget %d: at one place %v read %v; want a word that stayed at one place", budget, same, read)
+		}
+	}
+}
+
+// A text whose fields name no key (an earlier answer read by its leaves) has
+// no key to tell two fields at one path apart: they stand by their order.
+func TestReaderFieldsWithNoKeyAtOnePathStandByTheirOrder(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	const w = "ord7Kq2Xw9"
+	leaves := func(vals ...string) Raw {
+		x := Raw{mock: "mock-1", rRead: true}
+		var sb strings.Builder
+		for _, v := range vals {
+			x.rFields = append(x.rFields, rawField{start: sb.Len(), end: sb.Len() + len(v), path: "Res.body.a.b"})
+			sb.WriteString(v + "\n")
+		}
+		x.rText = sb.String()
+		return x
+	}
+	for _, budget := range []int64{0, 1} {
+		readerBudget = budget
+		x := newReaderIndex(NewDriftCache())
+		if same, read := inOneField(x.textOf(leaves(w, "x")), w, x.textOf(leaves("x", w)), w); same || !read {
+			t.Errorf("budget %d: at one place %v read %v; want a word that moved to the second leaf not at one place", budget, same, read)
+		}
+		if same, read := inOneField(x.textOf(leaves("x", w)), w, x.textOf(leaves("y", w)), w); !same || !read {
+			t.Errorf("budget %d: at one place %v read %v; want a word that stayed at one place", budget, same, read)
+		}
+	}
+}
+
 // An object glued to a value beside it ({"a":W,"b":x}"z") is two values, each
 // at its own index, as a stream is: a word that moved within the object, or
 // from it to the value beside it, is not at one place; one that stayed is.
@@ -1278,6 +1373,12 @@ func TestReaderAnObjectGluedToAValueIsTwoValues(t *testing.T) {
 		{`"z"{"a":"` + w + `","b":"x"}`, `"z"{"a":"x","b":"` + w + `"}`},
 		{`{"a":"` + w + `"}"z"`, `{"a":"z"}"` + w + `"`},
 		{`[1,"` + w + `"]2`, `["` + w + `",1]2`},
+		{`{"a":"` + w + `","b":"x"}"z""z"`, `{"a":"x","b":"` + w + `"}"z""z"`},
+		{`"z""z"{"a":"` + w + `","b":"x"}`, `"z""z"{"a":"x","b":"` + w + `"}`},
+		{`{"a":"` + w + `","b":"x"}007`, `{"a":"x","b":"` + w + `"}007`},
+		{`[1,"` + w + `","x"]truefalse`, `[1,"x","` + w + `"]truefalse`},
+		{`{"a":"` + w + `","b":"x"} "z""z"`, `{"a":"x","b":"` + w + `"} "z""z"`},
+		{"{\"a\":\"" + w + "\",\"b\":\"x\"}\n\"z\"\"z\"\n", "{\"a\":\"x\",\"b\":\"" + w + "\"}\n\"z\"\"z\"\n"},
 	} {
 		for _, budget := range []int64{0, 1} {
 			readerBudget = budget
@@ -1331,12 +1432,23 @@ func TestReaderAQuestionPastTheBudgetCountsTheTextAndItsForms(t *testing.T) {
 	for _, f := range forms {
 		want += int64(len(f))
 	}
-	x := newReaderIndex(NewDriftCache())
-	if at, read := x.text(s).fieldsWith("cart_42"); len(at) != 1 || !read {
-		t.Fatalf("at %v read %v; want the one field", at, read)
-	}
-	if x.peak != want {
-		t.Errorf("held %d by the count; want the text, twice it and its forms, %d", x.peak, want)
+	for _, keep := range []string{"", `{"k":"zzzz kept beside it"}`} {
+		if readerBudget = 1; keep != "" {
+			readerBudget = int64(len(s))
+		}
+		x := newReaderIndex(NewDriftCache())
+		if keep != "" {
+			if x.textOf(RawOf(getAnswer("mock-2", "http://api/items/2", keep, eRecAt), false)).holdsWord("zzzz"); x.used == 0 || x.used+int64(len(s)) <= readerBudget {
+				t.Fatalf("fixture: the index keeps %d bytes; want some, and no room for the text", x.used)
+			}
+		}
+		kept := x.used
+		if at, read := x.text(s).fieldsWith("cart_42"); len(at) != 1 || !read {
+			t.Fatalf("at %v read %v; want the one field", at, read)
+		}
+		if x.peak != kept+want {
+			t.Errorf("keeping %d, held %d by the count; want what the index keeps, the text, twice it and its forms, %d", kept, x.peak, kept+want)
+		}
 	}
 }
 
