@@ -2353,13 +2353,13 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 			// stop could not reach it (the engine refused `kill`, or sudo -n),
 			// in which case cmd.Cancel killed the client and it may still run.
 			run.exited()
-			// The run's CA volume goes with its agent, once the engine has
-			// removed the agent's container. The engine keeps it while a
+			// The run's own volumes (its CA's, and an embedder's) go with its
+			// agent, once the engine has removed the agent's container. The engine keeps it while a
 			// container still mounts it: an agent the stop could not reach,
 			// or an application container run without --rm.
 			rmCtx, cancelRm := withRunnableBound(context.Background(), daemonAnswerStall, errDaemonSilent)
 			removal.Wait(rmCtx, a.logger)
-			kdocker.RemoveTLSVolume(rmCtx, a.logger, a.dockerClient, kdocker.TLSVolumeFor(opts.KeployContainer))
+			kdocker.RemoveRunVolumes(rmCtx, a.logger, a.dockerClient, opts.KeployContainer)
 			cancelRm()
 			// `docker run` exits with the agent's own status, so this carries
 			// the reason an agent that could not start gave for it.
@@ -3527,12 +3527,12 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			}
 			return fmt.Errorf("%w: the container engine's daemon at %s did not answer its version (GET /version) for %s of keploy's runnable time: %v", pkg.ErrAgentNotReady, a.dockerClient.DaemonHost(), daemonAnswerStall, err)
 		}
-		// Each run's agent writes its CA to a volume of its own
-		// (kdocker.TLSVolumeFor), removed when its agent's container goes.
+		// Each run has volumes of its own (kdocker.RunVolume: its CA's, and
+		// an embedder's), removed when its agent's container goes.
 		// Those earlier runs left (killed, or still mounted by an application
 		// container at their end) go now, all but those a container mounts.
 		sweepCtx, cancelSweep := withRunnableBound(ctx, daemonAnswerStall, errDaemonSilent)
-		kdocker.SweepTLSVolumes(sweepCtx, a.logger, a.dockerClient)
+		kdocker.SweepRunVolumes(sweepCtx, a.logger, a.dockerClient)
 		cancelSweep()
 
 		var appPorts, appNetworks, appHosts []string

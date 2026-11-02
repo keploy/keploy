@@ -5,7 +5,9 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // In mock mode the app container learns where the agent is, so a test can mark its own start and end.
@@ -47,6 +49,29 @@ func TestDockerRunMountsItsOwnRunsCAVolume(t *testing.T) {
 		}
 		if !strings.Contains(a.cmd, want) || strings.Count(a.cmd, ":/tmp/keploy-tls") != 1 {
 			t.Errorf("agent %s: want the one CA mount %q in: %s", agent, want, a.cmd)
+		}
+	}
+}
+
+// An embedder's run volume (docker.RunVolume) is the run's own in the
+// application's command too: added beside the CA's, or, in a command that
+// mounts it by the name every run shared, renamed to the run's.
+func TestDockerRunMountsItsOwnRunsEmbedderVolume(t *testing.T) {
+	prev := docker.DockerConfig.RunVolumes
+	docker.DockerConfig.RunVolumes = []docker.RunVolume{{Base: "keploy-sockets-vol", Target: "/tmp"}}
+	t.Cleanup(func() { docker.DockerConfig.RunVolumes = prev })
+	for cmd, warns := range map[string]int{"docker run --rm orders-e2e": 0, "docker run --rm -v keploy-sockets-vol:/tmp orders-e2e": 1} {
+		core, logs := observer.New(zap.WarnLevel)
+		a := NewApp(zap.New(core), cmd, nil, models.SetupOptions{})
+		a.keployContainer = "keploy-v3-0a1b2c3d4e5f6071"
+		if err := a.modifyDockerRun(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Count(a.cmd, "-v keploy-sockets-vol-0a1b2c3d4e5f6071:/tmp ") != 1 || strings.Count(a.cmd, ":/tmp ") != 1 {
+			t.Errorf("%q: want the one mount of the run's own volume at /tmp in: %s", cmd, a.cmd)
+		}
+		if n := logs.FilterMessageSnippet("the command mounts the volume keploy-sockets-vol,").Len(); n != warns {
+			t.Errorf("%q: %d WARNs naming the shared name, want %d", cmd, n, warns)
 		}
 	}
 }
