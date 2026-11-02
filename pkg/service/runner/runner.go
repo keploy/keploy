@@ -1009,22 +1009,40 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, e
 	// wait says every appSayEvery of them that it still waits, and on what,
 	// so a run held by an app that does not come up says why it is held.
 	unanswered := 1
+	// stopped is the error of a wait whose waitCtx ended, and appEnded that of
+	// one whose app's run ended before the app answered.
+	stopped := func() error {
+		if ctx.Err() != nil {
+			// The caller's ctx ended (a signal, the caller's own bound):
+			// no budget ran out.
+			return fmt.Errorf("stopped waiting for app at %s: %w", addr, ctx.Err())
+		}
+		if lastErr != nil {
+			return fmt.Errorf("timed out waiting for app at %s (last probe error: %v); check that the service is running and the ServiceURL is correct", addr, lastErr)
+		}
+		return fmt.Errorf("timed out waiting for app at %s; check that the service is running and the ServiceURL is correct", addr)
+	}
+	appEnded := func() error {
+		return fmt.Errorf("the app's run ended before the app at %s answered (last probe error: %v); see the app's output for why it stopped", addr, lastErr)
+	}
 	for {
 		select {
 		case <-waitCtx.Done():
-			if ctx.Err() != nil {
-				// The caller's ctx ended (a signal, the caller's own bound):
-				// no budget ran out.
-				return fmt.Errorf("stopped waiting for app at %s: %w", addr, ctx.Err())
-			}
-			if lastErr != nil {
-				return fmt.Errorf("timed out waiting for app at %s (last probe error: %v); check that the service is running and the ServiceURL is correct", addr, lastErr)
-			}
-			return fmt.Errorf("timed out waiting for app at %s; check that the service is running and the ServiceURL is correct", addr)
+			return stopped()
 		case <-ended:
 			// Never ready when ended is nil (a nil channel never receives).
-			return fmt.Errorf("the app's run ended before the app at %s answered (last probe error: %v); see the app's output for why it stopped", addr, lastErr)
+			return appEnded()
 		case <-ticker.C:
+			// A tick can be ready with waitCtx or the end (a probe that
+			// outlasted the tick leaves one ready), and select picks at
+			// random: they win over it, so no probe follows them.
+			select {
+			case <-waitCtx.Done():
+				return stopped()
+			case <-ended:
+				return appEnded()
+			default:
+			}
 			if fatal, err := probe(); err == nil {
 				logger.Debug("app is reachable", zap.String("addr", addr))
 				return nil

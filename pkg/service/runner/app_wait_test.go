@@ -28,7 +28,9 @@ import (
 // heldListener is an app whose start is held: it resets the first hold
 // connections it accepts, as the port compose publishes does while compose
 // waits on a dependency's health before it starts the app behind it, and
-// hands the rest to the app. onRefuse, if set, is told each refusal's count.
+// hands the rest to the app. A refusal is counted, and onRefuse (if set) is
+// told its count, before the reset: a probe the reset failed is counted, and
+// what onRefuse does is done, by the time the probe returns.
 type heldListener struct {
 	net.Listener
 	hold     int64
@@ -45,14 +47,14 @@ func (l *heldListener) Accept() (net.Conn, error) {
 		if l.refused.Load() >= l.hold {
 			return c, nil
 		}
-		if tc, ok := c.(*net.TCPConn); ok {
-			_ = tc.SetLinger(0) // a reset, as the CI's "connection reset by peer"
-		}
-		_ = c.Close()
 		n := l.refused.Add(1)
 		if l.onRefuse != nil {
 			l.onRefuse(n)
 		}
+		if tc, ok := c.(*net.TCPConn); ok {
+			_ = tc.SetLinger(0) // a reset, as the CI's "connection reset by peer"
+		}
+		_ = c.Close()
 	}
 }
 
@@ -229,6 +231,88 @@ func TestTheCallersContextEndsTheUnbudgetedWait(t *testing.T) {
 	}
 	if got := app.refused.Load(); got >= 1000 {
 		t.Fatalf("the wait went on after its ctx ended: %d refused probes", got)
+	}
+}
+
+// tickedWait has waitForApp tick every tick for the test, with no timeout of
+// its own on a probe, and say every say unanswered probes that it still waits.
+func tickedWait(t *testing.T, tick time.Duration, say int) {
+	t.Helper()
+	was, wasSay, wasTimeout := appProbeTick, appSayEvery, appProbeTimeout
+	appProbeTick, appSayEvery, appProbeTimeout = tick, say, 0
+	t.Cleanup(func() { appProbeTick, appSayEvery, appProbeTimeout = was, wasSay, wasTimeout })
+}
+
+// The end of the app's run wins over a tick that is ready with it (a probe
+// that outlasted the tick leaves one ready), so no probe follows the end. A
+// tick of a nanosecond is ready at every select, and the end has closed
+// before the wait starts: each of 400 waits makes its first probe and no
+// other. With no priority, select would pick the tick about half the time.
+func TestTheEndWinsOverATickReadyWithIt(t *testing.T) {
+	tickedWait(t, time.Nanosecond, 2)
+	appURL, app, _ := heldApp(t, 1<<40, nil)
+	ended := make(chan struct{})
+	close(ended)
+
+	for i := 0; i < 400; i++ {
+		before := app.refused.Load()
+		err := waitForApp(context.Background(), appURL, time.Hour, ended, zap.NewNop())
+		if err == nil || !strings.Contains(err.Error(), "the app's run ended before the app at") {
+			t.Fatalf("wait %d: err = %v; want the one that says the app's run ended", i, err)
+		}
+		if got := app.refused.Load() - before; got != 1 {
+			t.Fatalf("wait %d made %d probes; want its first only, as the app's run had ended", i, got)
+		}
+	}
+}
+
+// The caller's stop wins over a tick that is ready with it in the same way: a
+// wait whose ctx has ended probes no more, and so never says it still waits.
+// The ctx is cancelled before each of 400 waits, and the wait says it still
+// waits after every unanswered probe but its first.
+func TestTheCallersStopWinsOverATickReadyWithIt(t *testing.T) {
+	tickedWait(t, time.Nanosecond, 1)
+	core, logs := observer.New(zap.InfoLevel)
+	appURL, _, _ := heldApp(t, 1<<40, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for i := 0; i < 400; i++ {
+		err := waitForApp(ctx, appURL, time.Hour, make(chan struct{}), zap.New(core))
+		if err == nil || !strings.Contains(err.Error(), "stopped waiting for app at") || !errors.Is(err, context.Canceled) {
+			t.Fatalf("wait %d: err = %v; want the one that says the caller stopped the wait", i, err)
+		}
+	}
+	if said := logs.FilterMessageSnippet("still waiting for the app to answer").Len(); said != 0 {
+		t.Fatalf("the waits said %d times that they still wait after their ctx had ended; want none", said)
+	}
+}
+
+// Neither the end nor the caller's stop waits for the next tick: with the
+// tick an hour away, each ends the wait after its first probe. (A wait that
+// waited for the tick would hold the test until go test's own timeout.)
+func TestATickAnHourAwayHoldsNeitherTheEndNorTheCallersStop(t *testing.T) {
+	tickedWait(t, time.Hour, 2)
+	appURL, app, _ := heldApp(t, 1<<40, nil)
+
+	t.Run("the end", func(t *testing.T) {
+		ended := make(chan struct{})
+		close(ended)
+		err := waitForApp(context.Background(), appURL, time.Hour, ended, zap.NewNop())
+		if err == nil || !strings.Contains(err.Error(), "the app's run ended before the app at") {
+			t.Fatalf("err = %v; want the one that says the app's run ended", err)
+		}
+	})
+	t.Run("the caller's stop", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := waitForApp(ctx, appURL, time.Hour, make(chan struct{}), zap.NewNop())
+		if err == nil || !strings.Contains(err.Error(), "stopped waiting for app at") {
+			t.Fatalf("err = %v; want the one that says the caller stopped the wait", err)
+		}
+	})
+	if got := app.refused.Load(); got != 1 {
+		t.Fatalf("the waits made %d probes the app refused; want the first wait's one (the second's ctx had ended)", got)
 	}
 }
 
