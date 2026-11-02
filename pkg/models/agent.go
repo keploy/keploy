@@ -1063,6 +1063,11 @@ type StreamEndSummary struct {
 	// recorded as a test case. Connections, not calls: the agent relays them
 	// without reading the calls, so a keep-alive connection counts once.
 	UnnamedCallerConns uint64 `json:"connections_from_unnamed_callers,omitempty"`
+	// TLSRelayedConns: connections to the app that opened with a TLS
+	// handshake, which the agent relayed to the app's own TLS unread: their
+	// calls are encrypted, so none was recorded as a test case. Connections,
+	// not calls: a keep-alive connection counts once.
+	TLSRelayedConns uint64 `json:"connections_relayed_tls,omitempty"`
 	// Unsettled: test cases saved before the agent had parsed all the
 	// traffic they overlap.
 	Unsettled int `json:"tcs_released_unsettled"`
