@@ -415,10 +415,10 @@ func (p *markingProxy) StartProxy(ctx context.Context, opts coreAgent.ProxyOptio
 }
 
 // The agent has its proxy counted by the hooks, before it starts the proxy,
-// under the proven switch or when it was started settling reads, and only
-// when the hooks can count: otherwise the proxy is started exactly as before,
-// its listener untouched.
-func TestHookAsksTheProxyToMarkItsListenerUnderTheSwitchOrWhenSettlingReads(t *testing.T) {
+// whenever the hooks can count, switch or not, settling reads or not: each
+// connection is then routed by the kernel's pairing. Otherwise the proxy is
+// started exactly as before, its listener untouched.
+func TestHookAsksTheProxyToMarkItsListenerWheneverTheHooksCount(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		proven  string
@@ -426,7 +426,8 @@ func TestHookAsksTheProxyToMarkItsListenerUnderTheSwitchOrWhenSettlingReads(t *t
 		want    string
 		settles bool
 	}{
-		{"switch off, counting hooks", "", &connHooks{}, "[start]", false},
+		{"switch off, counting hooks", "", &connHooks{}, "[mark start]", false},
+		{"switch off, hooks that cannot count", "", loadedHooks{}, "[start]", false},
 		{"switch on, counting hooks", "1", &connHooks{}, "[mark start]", false},
 		{"switch on, hooks that cannot count", "1", loadedHooks{}, "[start]", false},
 		// An agent started for a run that learns noise (--settle-reads).

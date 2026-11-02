@@ -714,6 +714,12 @@ func (p *Proxy) PairedBytesErr() error {
 
 func (p *Proxy) pairedBytesUnsupported(err error) {
 	p.paired.fail(fmt.Errorf("%w: %v", models.ErrProxyConnsUnsupported, err))
+	if !p.holdsPairedBytes() {
+		// Nothing of this proxy's waits for those bytes: it only routes by
+		// the pairing (decideCounted).
+		p.logger.Debug("keploy cannot count the bytes on the connections its proxy pairs with the application's; no read of this run's waits for them", zap.Error(err))
+		return
+	}
 	p.logger.Warn("keploy cannot tell whether the bytes the application wrote to the connections its proxy holds have reached the proxy: while one is open, it cannot vouch that every call of a test is in its hands",
 		zap.Error(err),
 		zap.String("next_step", "the kernel needs sock_diag for TCP (inet_diag and tcp_diag) in the agent's network namespace"))

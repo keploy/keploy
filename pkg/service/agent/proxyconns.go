@@ -152,16 +152,17 @@ func (a *Agent) WaitProxyAccepted(ctx context.Context, n uint64) error {
 	return err
 }
 
-// markProxyListener hands the proxy the hooks' count of its listener, under
-// the proven switch or for an agent that settles its reads (settlesReads),
-// when the hooks can count and the proxy can take it: the proxy then listens
-// plain TCP, marks its socket before listen(), and reads each accepted
-// connection's number. Otherwise it does nothing, and the proxy's listener is
-// as it always was.
+// markProxyListener hands the proxy the hooks' count of its listener whenever
+// the hooks can count and the proxy can take it, switch or not: the proxy then
+// listens plain TCP, marks its socket before listen(), and reads each
+// accepted connection's number and pairing. The pairing, kept in the accepted
+// socket's own storage, is what routes each connection: the by-port map is
+// keyed by the application's source port, which another process's connection
+// can reuse while the first waits for the proxy, and then names that other
+// connection's destination. Only an agent under the switch, or one that
+// settles its reads (settlesReads), waits for the counted calls. Otherwise it
+// does nothing, and the proxy's listener is as it always was.
 func (a *Agent) markProxyListener() {
-	if !provenswitch.On() && !a.startedSettlingReads() {
-		return
-	}
 	h, ok := a.Hooks.(coreAgent.ProxyConnsReporter)
 	p, ok2 := a.Proxy.(coreAgent.ListenerCountTaker)
 	if !ok || !ok2 {

@@ -374,7 +374,8 @@ type Proxy struct {
 	// with a kept connection it is about to hand over, before it does.
 	handingOver func(net.Conn)
 	// pairs holds each accepted connection's pairing (countAccept) until
-	// handleConnection takes its destination (pairedDest).
+	// handleConnection takes its destination (pairedDest), keyed by the
+	// connection itself (pairKey).
 	pairs sync.Map
 	// untrackedConns counts the connections the proxy could not route
 	// (untracked.go).
@@ -394,10 +395,12 @@ type Proxy struct {
 	// a test's misses settle the test's calls first, with the switch off too.
 	settleReads bool
 	// countedFromStart: once the canary had run, before the proxy said it
-	// was ready, the kernel counted the connections to its listener and the
-	// bytes on its paired connections could be read (decideCounted). With
-	// the switch off it drops to false, for good, at the first connection
-	// the kernel tied to none of the application's (dropCounting).
+	// was ready, the kernel counted the connections to its listener and, for
+	// a proxy that holds its paired connections for their bytes, those bytes
+	// could be read (decideCounted). With the switch off it drops to false,
+	// for good, at the first connection the kernel tied to none of the
+	// application's (dropCounting); the proxy still routes every other
+	// connection by its pairing (usesPairing reads CountedFromStart).
 	countedFromStart atomic.Bool
 	// countingLost is why, with the switch off, the run's calls stopped
 	// being counted (dropCounting); nil while they are. countingLostCh is
@@ -2688,18 +2691,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
 	// When the proxy uses the kernel's pairing (the proven switch, or calls
 	// counted from its start: usesPairing), a connection the kernel paired
-	// with the application's carries its own destination; one it paired with
-	// none is refused under the switch, and with it off drops the count and
-	// is routed by its source port, as it always was. A paired one never
-	// takes a destination by source port, which another connection may share
-	// (accepts.go).
+	// with the application's carries its own destination, handed over with
+	// the connection itself (pairKey); one it paired with none is refused
+	// under the switch, and with it off is routed by its source port, as it
+	// always was. A paired one never takes a destination by source port,
+	// which another connection may share (accepts.go).
 	var err error
 	destInfo, counted := p.pairedDest(srcConn)
 	if counted && destInfo == nil && !provenswitch.On() && p.dropCounting(srcConn) {
 		// With the switch off a connection the kernel tied to none of the
 		// application's (a NAT between them) is routed by its source port,
 		// as it always was: the run is no longer counted, and every later
-		// read of its misses is unread (CountingLost).
+		// read of its misses is unread (CountingLost). Every other
+		// connection keeps its own pairing.
 		counted = false
 	}
 	if counted {

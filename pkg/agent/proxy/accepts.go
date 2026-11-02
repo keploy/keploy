@@ -27,8 +27,8 @@ var errListenerNotMarked = fmt.Errorf("%w: the proxy's listener is not marked fo
 var errListenerClosed = fmt.Errorf("%w: the proxy's listener has closed", models.ErrProxyConnsUnsupported)
 
 // SetListenerCounter makes the proxy have its listener counted by the hooks
-// (agent.ListenerCountTaker): the agent hands it the hooks under the proven
-// switch, or when it was started settling reads, before StartProxy. Unset,
+// (agent.ListenerCountTaker): the agent hands it hooks that can count, before
+// StartProxy, so each connection is routed by the kernel's pairing. Unset,
 // the listener is opened as it always was.
 func (p *Proxy) SetListenerCounter(c agent.ListenerCounter) {
 	p.listenerCounter = c
@@ -61,15 +61,16 @@ func (p *Proxy) listen(ctx context.Context, addr string) (net.Listener, error) {
 
 // decideCounted records, once the canary has run and before the proxy says it
 // is ready, whether the kernel counts the calls waiting for the proxy: the
-// listener is marked, the canary was counted, and the bytes on paired
-// connections can be read. A count lost later does not change it (a read that
-// then cannot vouch for every call says so: models.ErrProxyConnsUnsupported);
-// with the switch off a NAT'd connection does, for good (dropCounting).
+// listener is marked, the canary was counted, and, for a proxy that holds its
+// paired connections for their bytes (holdsPairedBytes), those bytes can be
+// read. A count lost later does not change it (a read that then cannot vouch
+// for every call says so: models.ErrProxyConnsUnsupported); with the switch
+// off a NAT'd connection does, for good (dropCounting).
 func (p *Proxy) decideCounted() {
 	if _, err := p.Accepted(); err != nil {
 		return
 	}
-	if p.PairedBytesErr() != nil {
+	if p.holdsPairedBytes() && p.PairedBytesErr() != nil {
 		return
 	}
 	p.countedFromStart.Store(true)
@@ -95,17 +96,22 @@ func (p *Proxy) CountingLost() (<-chan struct{}, error) {
 // dropCounting is, with the switch off, a counted proxy's answer to a
 // connection the kernel tied to none of the application's (a NAT between
 // them): it cannot be paired, and the application's connection it is the
-// proxy's side of will never settle. The proxy routes it, and every later
-// one, by its source port, as it always did, so the application's calls go
-// on working; the run is counted no more, and the agent answers every later
-// read unread (CountingLost), with one WARN saying why. It reports whether it
-// dropped the count (false for a proxy that was not counting).
+// proxy's side of will never settle. The proxy routes that connection by its
+// source port, as it always did, so the application's call goes on working;
+// every other connection still goes where its own pairing says (usesPairing).
+// The run is counted no more, and an agent that settles reads answers every
+// later read unread (CountingLost). The first such connection is said once,
+// a WARN where a read waits for the run's calls and an INFO otherwise; each
+// later one at DEBUG. It reports whether the connection is routed by its
+// source port (false for a proxy that was not counting).
 func (p *Proxy) dropCounting(conn net.Conn) bool {
 	// The count before the reason: the caller that drops it sets the reason
 	// first and clears the count after, so a count read as cleared here has
 	// its reason set by the time it is read below.
 	counted := p.countedFromStart.Load()
 	if p.countingLost.Load() != nil {
+		p.logger.Debug("keploy routes a connection to its proxy that the kernel could not tie to one of the application's by its source port",
+			zap.String("from", conn.RemoteAddr().String()))
 		return true
 	}
 	if !counted {
@@ -113,7 +119,8 @@ func (p *Proxy) dropCounting(conn net.Conn) bool {
 	}
 	// The reason first, and by one caller only: a connection that drops the
 	// count beside this one finds it set, and is routed too; and
-	// CountedFromStart, which reads either, never sees neither.
+	// CountedFromStart (so usesPairing), which reads either, never sees
+	// neither.
 	err := fmt.Errorf("%w: keploy found a connection to its proxy, from %s, that the kernel could not tie to one of the application's (a NAT between them?), so it cannot attribute this run's calls to its tests", models.ErrProxyConnsUnsupported, conn.RemoteAddr())
 	if !p.countingLost.CompareAndSwap(nil, &err) {
 		return true
@@ -122,13 +129,28 @@ func (p *Proxy) dropCounting(conn net.Conn) bool {
 	if p.countingLostCh != nil {
 		close(p.countingLostCh)
 	}
-	p.logger.Warn("keploy found a NAT'd connection it cannot attribute: this run's calls are routed as before, but every later read of a test's misses is unread, so no noise is learned for the test sets read after it",
+	if !p.holdsPairedBytes() {
+		// No read of this run's waits for its calls: nothing it learns
+		// depends on the count.
+		p.logger.Info("keploy found a connection to its proxy that the kernel could not tie to one of the application's (a NAT between them?): it routes each such connection by its source port, as before, and every other one by its own pairing",
+			zap.String("from", conn.RemoteAddr().String()),
+			zap.String("next_step", "keploy's proxy must see the application's own addresses: check for a NAT between the application and the agent"))
+		return true
+	}
+	p.logger.Warn("keploy found a NAT'd connection it cannot attribute: it routes each such connection by its source port, as before, and every other one by its own pairing, but every later read of a test's misses is unread, so no noise is learned for the test sets read after it",
 		zap.String("from", conn.RemoteAddr().String()),
 		zap.String("next_step", "keploy's proxy must see the application's own addresses: check for a NAT between the application and the agent"))
 	return true
 }
 
 func (p *Proxy) warnUncounted(err error) {
+	if !p.holdsPairedBytes() {
+		// No read of this run's waits for its calls: the proxy routes them
+		// by their source port, as it always did.
+		p.logger.Info("keploy's hooks cannot pair the connections to its proxy with the application's, so it routes them by their source port, as before",
+			zap.Error(err))
+		return
+	}
 	p.logger.Warn("keploy cannot count the connections waiting for its proxy, so it cannot tell that every call of a test is in its hands when the test's misses are read",
 		zap.Error(err),
 		zap.String("next_step", "check the agent's log for why its hooks could not count the proxy's listener, and report it"))
@@ -195,8 +217,9 @@ func (p *Proxy) canary(ctx context.Context, ln net.Listener) {
 			p.checkPairedBytes(c, conn)
 		}
 		_ = conn.Close()
-		// Never handled: nothing else would forget it, were it paired.
+		// Never handled: nothing else would forget it, or its pairing.
 		p.paired.remove(conn)
+		p.pairs.Delete(pairKey(conn))
 		if ok {
 			p.logger.Debug("the kernel counts the connections to the proxy's listener")
 		}
@@ -280,9 +303,11 @@ func (p *Proxy) countAccept(conn net.Conn) bool {
 	if p.usesPairing() {
 		p.pairs.Store(pairKey(conn), pairing)
 	}
-	if pairing.AppSeq != 0 && pairing.Dst != nil && p.usesPairing() {
+	if pairing.AppSeq != 0 && pairing.Dst != nil && p.keepsConnections() {
 		// Held until the proxy is done with it: a test's end waits for the
-		// bytes the application writes to it (pairbytes.go).
+		// bytes the application writes to it (pairbytes.go). A proxy that
+		// keeps no connection (an agent that settles no read) only routes
+		// by the pairing: nothing would wait for the bytes.
 		p.paired.add(tc, pairing.AppSeq)
 		p.proveAppVisible(tc)
 	}
@@ -294,19 +319,41 @@ func (p *Proxy) countAccept(conn net.Conn) bool {
 	return true
 }
 
-// pairKey names an accepted connection by its two addresses, unique while it
-// lives.
-func pairKey(conn net.Conn) string {
-	return conn.RemoteAddr().String() + "|" + conn.LocalAddr().String()
+// pairKey names an accepted connection by the connection itself, as the
+// listener gave it to the accept loop: the handler is handed that connection,
+// or the trackedConn that keeps it (inflight.go). Its two addresses would not
+// do. An application connection reset while it waited for the proxy, and one
+// the application then made from the same source port to the same proxy, are
+// two accepted connections with the same two addresses, both waiting for the
+// proxy; by them, the later one's pairing would replace the earlier one's
+// before its handler took it, and send it to the later one's destination.
+func pairKey(conn net.Conn) net.Conn {
+	if tc, ok := conn.(*trackedConn); ok {
+		return tc.Conn
+	}
+	return conn
 }
 
 // usesPairing reports whether the proxy takes its connections' destinations
-// from the kernel's pairing, and holds the paired ones for the bytes on them:
-// under the proven switch, and with it off for a proxy whose calls were
-// counted from its start (an agent settling reads; CountedFromStart). One
-// that was not counted is the proxy it always was.
+// from the kernel's pairing: under the proven switch, and with it off for a
+// proxy whose calls were counted from its start (CountedFromStart), whether
+// or not its agent settles reads, and whether or not a NAT'd connection has
+// since dropped the count (dropCounting): only that connection, which the
+// kernel paired with none of the application's, is routed by its source
+// port. One that was not counted is the proxy it always was, routing by
+// source port. Which paired connections it holds for the bytes on them is
+// keepsConnections'.
 func (p *Proxy) usesPairing() bool {
-	return provenswitch.On() || p.countedFromStart.Load()
+	return provenswitch.On() || p.CountedFromStart()
+}
+
+// holdsPairedBytes reports whether the proxy is one whose reads wait for the
+// bytes on its paired connections, so that whether those bytes can be read
+// decides whether it is counted: under the proven switch, or for an agent
+// that settles reads (settleReads). Any other proxy uses the pairing only to
+// route.
+func (p *Proxy) holdsPairedBytes() bool {
+	return provenswitch.On() || p.settleReads
 }
 
 // pairedDest is where an accepted connection of the counted listener is
@@ -314,8 +361,9 @@ func (p *Proxy) usesPairing() bool {
 // pairing (usesPairing): ok says the counter had it. A connection the kernel
 // tied to no application connection has no destination (dst nil): under the
 // switch the proxy refuses it, a capture loss, rather than guess one from a
-// key another connection may share; with it off it drops the run's count and
-// routes it by its source port (dropCounting). Taken once.
+// key another connection may share; with it off that one connection is
+// routed by its source port (dropCounting), and every other keeps its own
+// pairing. Taken once.
 func (p *Proxy) pairedDest(conn net.Conn) (dst *agent.NetworkAddress, ok bool) {
 	if p.listenerCounter == nil {
 		return nil, false

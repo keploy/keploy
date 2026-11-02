@@ -112,13 +112,14 @@ func TestAnAgentThatSettlesReadsWaitsForTheCallsNotYetAcceptedWithTheSwitchOff(t
 }
 
 // With the switch off, an agent that does not settle reads its misses at
-// once, as before: its listener is not marked, and it never asks the counts.
+// once, as before: its listener is marked, so each connection is routed by
+// the kernel's pairing, but it never waits for the counts.
 func TestAnAgentThatDoesNotSettleReadsAtOnceWithTheSwitchOff(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	a, p, h := realSettlingAgent(t, false)
-	require.Zero(t, h.marked, "the listener of an agent that does not settle is not marked")
+	require.Equal(t, 1, h.marked, "the listener of an agent that does not settle is marked, to route by the pairing")
 	_, err := p.Accepted()
-	require.Error(t, err, "its listener is not marked for the kernel's count")
+	require.NoError(t, err, "its listener is marked for the kernel's count")
 	h.count(100) // a count no accept reaches: a read that waited on it would never end
 	_, err = a.GetMockErrors(context.Background())
 	require.NoError(t, err)

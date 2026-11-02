@@ -168,9 +168,10 @@ type ProxyConnsReporter interface {
 
 // ListenerCountTaker is the optional extension implemented by proxies that can
 // have their listener counted by the hooks. The agent hands it the hooks
-// (ListenerCounter), under the proven switch only, before StartProxy; the
-// proxy then listens plain TCP, never MPTCP, marks its socket before
-// listen(), and reads each accepted connection's sequence number.
+// (ListenerCounter) whenever they can count, switch or not, before
+// StartProxy; the proxy then listens plain TCP, never MPTCP, marks its socket
+// before listen(), and reads each accepted connection's sequence number and
+// its pairing with the application's connection, which routes it.
 type ListenerCountTaker interface {
 	SetListenerCounter(c ListenerCounter)
 }
