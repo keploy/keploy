@@ -3140,7 +3140,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		m, merr := p.connManager(destInfo.Instance)
 		if merr != nil {
-			return refuseUnserved(destInfo, dstAddr, merr)
+			return p.refuseUnserved(destInfo, dstAddr, merr)
 		}
 		if m == nil {
 			utils.LogError(p.logger, nil, "failed to fetch the mock manager")
@@ -3756,7 +3756,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// workers, the manager of the worker whose process made the connection
 	m, merr := p.connManager(destInfo.Instance)
 	if merr != nil {
-		return refuseUnserved(destInfo, dstAddr, merr)
+		return p.refuseUnserved(destInfo, dstAddr, merr)
 	}
 	if m == nil {
 		utils.LogError(logger, err, "failed to fetch the mock manager")

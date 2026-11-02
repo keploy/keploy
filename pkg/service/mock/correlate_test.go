@@ -280,5 +280,5 @@ func TestEachTestOpenAtACallFromNoWorkerIsNotJudged(t *testing.T) {
 	_, notJudged := windows[1].Evidence.CannotCapture.Split()
 	require.Len(t, notJudged, 1, "the loss leaves the test without a verdict, never failed")
 	require.Contains(t, notJudged.NotJudgedRemedy(), models.UnattributedRemedy)
-	require.False(t, models.CaptureLossUnattributed.PerTest(), "the call may be any open test's, never the test's own alone")
+	require.True(t, models.CaptureLossUnattributed.PerTest(), "a replay's refused call is charged to each test open then, never every later test")
 }

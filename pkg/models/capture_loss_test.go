@@ -607,3 +607,36 @@ func TestAProgramWithoutTheShimLeavesItsTestsNotJudged(t *testing.T) {
 		t.Fatalf("NotJudgedRemedy = %q", r)
 	}
 }
+
+// A call a replay of test workers refused, as no served worker made it, is
+// the own loss of each test open when it was made: it leaves that test, and
+// no later one, not judged, and its text says the replay refused it and
+// what to do.
+func TestARefusedUnattributedCallLeavesOnlyTheTestsOpenThenNotJudged(t *testing.T) {
+	k := CaptureLossUnattributed
+	if !k.PerTest() || !k.NotJudged() || k.runScoped() || k.AppLife() || k.Evidence() {
+		t.Fatal("a call keploy cannot attribute is the open tests' own and not judged")
+	}
+	at := func(n uint64) CaptureLosses {
+		return CaptureLosses{{Kind: k, Count: n, What: "the latest: a connection to 10.0.0.9:5432, from process 41, in no test worker's keploy instance"}}
+	}
+	if got := at(3).Charged(SameBases(nil), at(2)); !reflect.DeepEqual(got, at(1)) {
+		t.Fatalf("Charged = %+v, want the one since the test began", got)
+	}
+	if got := at(3).Charged(SameBases(nil), at(3)); len(got) != 0 {
+		t.Fatalf("Charged = %+v: a later test is charged nothing", got)
+	}
+	judged, notJudged := at(1).Split()
+	if len(judged) != 0 || !reflect.DeepEqual(notJudged, at(1)) {
+		t.Fatalf("Split = %+v, %+v: not judged, never failed", judged, notJudged)
+	}
+	txt := notJudged.NotJudgedText()
+	for _, want := range []string{"the application made 1 call(s) from a process in no test worker's keploy instance, or in that of a worker keploy does not serve", "a replay refuses them unanswered", "(the latest: a connection to 10.0.0.9:5432, from process 41, in no test worker's keploy instance)"} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("%q lacks %q", txt, want)
+		}
+	}
+	if r := notJudged.NotJudgedRemedy(); !strings.Contains(r, "and stop it before its worker ends") {
+		t.Fatalf("remedy %q does not say to stop a worker's process before the worker ends", r)
+	}
+}

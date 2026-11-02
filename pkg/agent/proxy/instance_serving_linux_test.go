@@ -288,6 +288,68 @@ func TestACallNoServedWorkerMadeIsRefusedBeforeAnyMockAnswers(t *testing.T) {
 	}
 }
 
+// Each connection keploy refuses because no served worker made it is
+// counted as a call keploy cannot attribute, MySQL's too, naming the latest
+// one's destination and process, and the worker it was stamped with when
+// keploy does not serve that worker; a served worker's connection is not.
+func TestAConnectionKeployRefusedIsCountedACallItCannotAttribute(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	dest := ipv4Dest(t, "127.0.0.1:50064")
+	dest.KernelPid = uint32(os.Getpid())
+	p, sp := storeProxy(t, dest)
+	p.Integrations[integrations.MYSQL] = sp
+	unattributed := func() models.CaptureLoss {
+		t.Helper()
+		for _, l := range p.CaptureLosses() {
+			if l.Kind == models.CaptureLossUnattributed {
+				return l
+			}
+		}
+		return models.CaptureLoss{}
+	}
+	if _, err := p.ServeInstance(5); err != nil {
+		t.Fatal(err)
+	}
+	var count uint64
+	for _, port := range []uint32{50064, 3306} {
+		dest.Port = port
+		dest.Instance = 5
+		if err := handle(t, p); err != nil {
+			t.Fatalf("worker 5's connection to port %d: %v", port, err)
+		}
+		awaitEvent(t, sp.saw, "the parser being handed worker 5's connection")
+		if got := unattributed(); got.Count != count {
+			t.Fatalf("a served worker's connection to port %d was counted: %+v", port, got)
+		}
+		for _, c := range []struct {
+			inst uint32
+			what string
+		}{
+			{0, fmt.Sprintf("the latest: a connection to 127.0.0.1:%d, from process %d, in no test worker's keploy instance", port, dest.KernelPid)},
+			{9, fmt.Sprintf("the latest: a connection to 127.0.0.1:%d, from process %d of test worker instance 9, which keploy does not serve (the worker ended, or keploy never began serving it)", port, dest.KernelPid)},
+		} {
+			dest.Instance = c.inst
+			if err := handle(t, p); err == nil {
+				t.Fatalf("instance %d's connection to port %d was not refused", c.inst, port)
+			}
+			count++
+			if got := unattributed(); got.Count != count || got.What != c.what {
+				t.Fatalf("instance %d's refused connection to port %d counted %+v, want %d with %q", c.inst, port, got, count, c.what)
+			}
+		}
+	}
+	if err := p.StopServingInstance(5); err != nil {
+		t.Fatal(err)
+	}
+	dest.Port, dest.Instance = 50064, 5
+	if err := handle(t, p); err == nil {
+		t.Fatal("a stopped worker's connection was not refused")
+	}
+	if got := unattributed(); got.Count != count+1 || !strings.Contains(got.What, "test worker instance 5, which keploy does not serve") {
+		t.Fatalf("a stopped worker's refused connection counted %+v, want %d naming worker 5", got, count+1)
+	}
+}
+
 // Every staging of the set reaches each worker's manager and is kept, one
 // of each kind in the order they last came; a test's own window (the run's
 // test, not the set) is not kept.
