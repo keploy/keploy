@@ -422,13 +422,14 @@ func TestARecordsTestsFileCarriesWhatKeployCannotCapture(t *testing.T) {
 // verdict; a build that does not judge it keeps no recording, and fails.
 func TestARecordChargesEachTestOpenAtACallFromNoWorker(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	run := func(t *testing.T) (*mockService, string, error) {
+	passed := models.AppError{AppErrorType: models.ErrAppStopped}
+	run := func(t *testing.T, appErr models.AppError) (*mockService, string, error) {
 		dir := t.TempDir()
 		ws := []models.ScopeWindow{mark("orders::TestA", 0, 10*time.Millisecond), mark("orders::TestB", 2*time.Millisecond, 12*time.Millisecond), mark("orders::TestC", 20*time.Millisecond, 30*time.Millisecond)}
 		for i, inst := range []uint32{1, 2, 1} {
 			ws[i].Outcome, ws[i].Dir, ws[i].Instance = models.ScopeOutcomePassed, "orders", inst
 		}
-		instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped}), windows: ws}
+		instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, appErr), windows: ws}
 		shared, own := mockAt("shared-0", runnerT0.Add(5*time.Millisecond)), mockAt("own-c", runnerT0.Add(25*time.Millisecond))
 		shared.SourcePID, own.Instance = 4242, 1
 		instr.mocks = []*models.Mock{shared, own}
@@ -441,7 +442,7 @@ func TestARecordChargesEachTestOpenAtACallFromNoWorker(t *testing.T) {
 	}
 	t.Run("judged", func(t *testing.T) {
 		judgedBuild(t)
-		ms, dir, err := run(t)
+		ms, dir, err := run(t, passed)
 		require.NoError(t, err)
 		r, err := ReadRecordTestsReceipt(dir, ms.setName())
 		require.NoError(t, err)
@@ -455,11 +456,19 @@ func TestARecordChargesEachTestOpenAtACallFromNoWorker(t *testing.T) {
 		want := models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1, What: "the latest: mock mock-0, from process 4242"}} // named as recorded
 		require.Equal(t, map[string]models.CaptureLosses{"orders::TestA": want, "orders::TestB": want}, charged)
 	})
-	t.Run("not judged", func(t *testing.T) {
-		ms, dir, err := run(t)
+	notJudged := func(t *testing.T, appErr models.AppError, code int) {
+		ms, dir, err := run(t, appErr)
 		require.ErrorContains(t, err, "1 call(s) came from no test worker while workers' tests were open")
-		require.Equal(t, utils.ExitKeployError, utils.ErrCode)
+		require.Equal(t, code, utils.ErrCode)
 		_, statErr := os.Stat(filepath.Join(dir, ms.setName(), "mocks.yaml"))
 		require.True(t, os.IsNotExist(statErr), "the recording was kept: %v", statErr)
+		_, statErr = os.Stat(filepath.Join(dir, stagingSetID(ms.setName())))
+		require.True(t, os.IsNotExist(statErr), "the staging set was left behind: %v", statErr)
+	}
+	t.Run("not judged", func(t *testing.T) { notJudged(t, passed, utils.ExitKeployError) })
+	// A test command that failed on its own keeps its exit code: keploy's
+	// refusal does not hide the command's verdict.
+	t.Run("not judged, the test command failed", func(t *testing.T) {
+		notJudged(t, models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3, Err: errors.New("exit status 3")}, 3)
 	})
 }
