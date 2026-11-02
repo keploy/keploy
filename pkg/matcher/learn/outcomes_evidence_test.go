@@ -994,3 +994,128 @@ func TestOutcomeAnObjectGluedToAValueIsTwoValues(t *testing.T) {
 		iValue(t, c.name+", the word stayed at its field", call(fmt.Sprintf(c.f, "6c7d", "x")), "mock-6")
 	}
 }
+
+// tokenMock is a recording whose request alone holds word (an UPDATE that
+// sends a token; its answer is a tag), asked at req and answered at res.
+func tokenMock(name, word string, req, res time.Time) *models.Mock {
+	return &models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
+		ReqTimestampMock: req, ResTimestampMock: res,
+		PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
+			SQLNormalized: "UPDATE tokens SET t = '" + word + "' WHERE id = 1",
+			Response:      &models.PostgresV3Response{CommandComplete: "UPDATE 1"},
+		}},
+	}}
+}
+
+// requestWordInput is the call changing "82" to "6c7d" beside one
+// recording whose request alone holds "82" (tokenMock), asked at req and
+// answered at res: an exchange of the test whose request leaf round F sent
+// as "6c7d" (mock-6), or a start-up recording (mock-5) round F served with
+// a view whose request sent "6c7d", served as recorded, or never served.
+func requestWordInput(how string, req, res time.Time) Input {
+	const path = "bind.$8"
+	in := Input{Drifts: clockedDrifts(), Drift: []string{path}, At: eRecAt, Arrived: eRecAt, Raw: eStartup(), Test: "test-2", Mock: "mock-300",
+		Rec:  Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}},
+		Live: Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "6c7d"}}},
+		Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true}}
+	raw := func(word string, served bool) Raw { return RawOf(tokenMock("mock-5", word, req, res), served) }
+	switch how {
+	case "an exchange of the test":
+		m := tokenMock("mock-6", "82", req, res)
+		tr := NewTracker()
+		tr.Begin()
+		tr.ServedMock(m)
+		tr.Served(tr.Placed().Test, Earlier{Mock: m.Name, At: req, Own: true, Payload: RawOf(m, true),
+			Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "q.t", Type: String, Value: "82"}, Live: "6c7d"}}})
+		tr.ServedMockLive(m, "a", func() (*models.Mock, error) { return tokenMock("mock-6", "6c7d", req, res), nil })
+		pl := tr.Placed()
+		in.Earlier = InServeOrder(pl.Earlier, []*models.Mock{m}, pl.Order)
+	case "a start-up recording whose view sent the new value":
+		in.Raw = append(in.Raw, raw("82", true).ServedAs(6).ServedLive(raw("6c7d", true)))
+	case "a start-up recording served as recorded":
+		in.Raw = append(in.Raw, raw("82", true).ServedAs(6).ServedAsRecorded())
+	default:
+		in.Raw = append(in.Raw, raw("82", false))
+	}
+	return in
+}
+
+// requestWordHow are the ways requestWordInput hands its recording in.
+var requestWordHow = []string{"an exchange of the test", "a start-up recording whose view sent the new value",
+	"a start-up recording served as recorded", "a start-up recording never served"}
+
+// A word that stands only in a recording's request is what the recorded
+// application sent, so it is placed by the request's time, however the
+// recording is handed in, whenever it was answered: the application held
+// the word when it sent it. Asked a second before the call and answered two
+// seconds after it, or with no answer time keploy can read, the recording
+// is read as one asked and answered before the call: round F's view that
+// sent the new value at its field is where it came from (bound), one served
+// as recorded sets the word aside (fresh), and one never served may hold
+// round F's word (unknown, refused). Asked at the call's own instant, it is
+// unknown and refused naming that, as an exchange's request leaf is. Asked
+// after the call, it gave the application nothing before it, as now. Never
+// fresh by a request answered late, which would leave unchecked a word the
+// application sent before the call.
+func TestOutcomeAWordARecordingsRequestHoldsIsPlacedByWhenItWasSent(t *testing.T) {
+	ms := time.Millisecond
+	const fSide = "answered after the call, it shows nothing of the recorded value; round F gave, or may have given, the new value there"
+	mockOf := func(how string) string {
+		return map[bool]string{true: "mock-6", false: "mock-5"}[how == requestWordHow[0]]
+	}
+	sentBefore := func(what, how string, d Decision) {
+		t.Helper()
+		switch how {
+		case requestWordHow[0], requestWordHow[1]:
+			iValue(t, what, d, mockOf(how))
+		case requestWordHow[2]:
+			if d.Outcome != OutcomeFresh {
+				t.Errorf("%s: %s; want fresh (served as recorded, the word set aside)", what, oDescribe([]Decision{d}))
+			}
+		default:
+			oRefused(t, what, d, RefusalUnknown, "mock-5")
+		}
+	}
+	for _, c := range []struct {
+		name     string
+		req, res time.Time
+		check    func(what, how string, d Decision)
+	}{
+		{"asked a second before the call and answered 0.9s before it", eRecAt.Add(-time.Second), eRecAt.Add(-900 * ms), sentBefore},
+		{"asked a second before the call and answered two seconds after it", eRecAt.Add(-time.Second), eRecAt.Add(2 * time.Second), sentBefore},
+		{"asked a second before the call, with no answer time", eRecAt.Add(-time.Second), time.Time{}, sentBefore},
+		{"asked at the call's own instant and answered 1ms after it", eRecAt, eRecAt.Add(ms), func(what, how string, d Decision) {
+			t.Helper()
+			oRefused(t, what, d, RefusalUnknown, mockOf(how), atCallWhy)
+		}},
+		{"asked a second after the call", eRecAt.Add(time.Second), eRecAt.Add(time.Second + ms), func(what, how string, d Decision) {
+			t.Helper()
+			switch how {
+			case requestWordHow[0], requestWordHow[1]:
+				oRefused(t, what, d, RefusalUnknown, mockOf(how), fSide)
+			default:
+				if d.Outcome != OutcomeFresh {
+					t.Errorf("%s: %s; want fresh (it gave the application nothing before the call)", what, oDescribe([]Decision{d}))
+				}
+			}
+		}},
+	} {
+		for _, how := range requestWordHow {
+			c.check(how+" "+c.name, how, oWord(t, Decide(requestWordInput(how, c.req, c.res)), "82", "6c7d"))
+		}
+	}
+	// A start-up recording with no time keploy can read is unknown, refused
+	// naming that, never read as one made at the call's own instant.
+	for _, how := range requestWordHow[1:] {
+		d := oWord(t, Decide(requestWordInput(how, time.Time{}, time.Time{})), "82", "6c7d")
+		oRefused(t, how+" with no time keploy can read", d, RefusalUnknown, "mock-5", noAnswerAt)
+		if d.Refusal != nil && strings.Contains(d.Refusal.Why, atCallWhy) {
+			t.Errorf("%s with no time keploy can read: refused %q; want no instant named", how, d.Refusal.Why)
+		}
+	}
+	// One round F served only after the call reached keploy is no place
+	// before the call in F, whenever its request was sent: never bound.
+	in := requestWordInput(requestWordHow[1], eRecAt.Add(-time.Second), eRecAt.Add(2*time.Second))
+	in.Raw[len(in.Raw)-1].servedAfter = true
+	oRefused(t, "a start-up recording round F served after the call arrived", oWord(t, Decide(in), "82", "6c7d"), RefusalUnknown, "mock-5")
+}
