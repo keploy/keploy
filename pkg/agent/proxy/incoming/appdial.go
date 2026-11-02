@@ -57,17 +57,20 @@ import (
 // Where the table cannot be read (another platform: the bind keploy moves is
 // Linux's), a refusal is the last case.
 //
-// No dial leaves the host (dialHere): an address that is not the loopback's
-// is dialed only while the kernel says it is one of the namespace's own
-// (util.IsLocalAddr), as it is asked again before every dial there. An
-// interface's address can go (a laptop's Wi-Fi changes network), and a dial
-// there would then be routed off the host, to whichever one has the address
-// now. An address the app was found at that has gone is forgotten, and the
-// call is dialed at the address it was given; a call given such an address
-// (the redial of a connection first made there) fails at once, at ERROR.
-// Where the kernel cannot be asked (every platform but Linux, where no
-// address but the loopback's is ever found or dialed), only the loopback is
-// dialed.
+// No dial leaves the host (dialHere): the loopback's address and the
+// unspecified one (a connect there reaches the loopback) are dialed as they
+// are; any other is dialed only while it is one of the namespace's own
+// (util.IsLocalAddr: on Linux the kernel's route lookup, elsewhere an
+// address one of the host's interfaces has), as that is asked again before
+// every dial there. An interface's address can go (a laptop's Wi-Fi changes
+// network), and a dial there would then be routed off the host, to
+// whichever one has the address now. An address the app was found at that
+// has gone is forgotten, and the call is dialed at the address it was given;
+// a call given such an address (the redial of a connection first made
+// there) fails at once, at ERROR. Where the socket table is not read (every
+// platform but Linux), no address is found in it: only an address a call is
+// given is dialed, as the destination keploy mock's live handler is handed
+// (ServeLive), which is the address the test dialed.
 //
 // A call's wait ends when the app listens, when the recording begins to stop,
 // when the call's context ends (keploy's own end: ctx.Err()) or when its
@@ -172,16 +175,18 @@ func dialHere(ctx context.Context, d *net.Dialer, addr string) (net.Conn, error)
 }
 
 // offHost is nil for an address a connection to stays on the host: the
-// loopback's, or one the kernel says is the namespace's own now
-// (util.IsLocalAddr). For any other address, one it cannot be asked about
-// and one that is not an IP address, it is the appUnreachableError that
-// says why no dial is made there.
+// loopback's, the unspecified address (0.0.0.0 or ::, an IPv4-mapped one
+// too: a connect there is delivered to the loopback, on Linux and macOS
+// alike), or one that is the namespace's own now (util.IsLocalAddr). For
+// any other address, one that cannot be asked about and one that is not an
+// IP address, it is the appUnreachableError that says why no dial is made
+// there.
 func offHost(addr string) error {
 	ap, err := netip.ParseAddrPort(addr)
 	if err != nil {
 		return &appUnreachableError{dialed: addr, why: whyNotAnIP}
 	}
-	if ap.Addr().IsLoopback() {
+	if a := ap.Addr().Unmap(); a.IsLoopback() || a.IsUnspecified() {
 		return nil
 	}
 	local, err := util.IsLocalAddr(ap.Addr())

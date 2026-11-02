@@ -6,10 +6,12 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -372,4 +374,101 @@ func TestAPortProbeIsDialedThroughAtItsConnectionsFirstEOF(t *testing.T) {
 	if n := counted.prefaceEOFs.Load(); n != 1 {
 		t.Fatalf("the preface read read the probe's EOF %d times, want once: it hands the probe on at the first", n)
 	}
+}
+
+// A test's call to its app, handed to the live handler (ServeLive) with the
+// destination the test dialed, is answered at every address that the proxy's
+// ownIP hands it and a connect to which stays on the host: the loopback's, the
+// unspecified address (0.0.0.0 or ::, an IPv4-mapped one too: the kernel
+// delivers a connect there to the loopback), and an interface's address. It
+// is, with requests recorded and without (the relay). A form the app does
+// not answer a direct request at here either is skipped: the host, not
+// keploy, keeps it from the app.
+func TestServeLiveAnswersTheAppAtEveryAddressThatStaysOnTheHost(t *testing.T) {
+	ln, err := net.Listen("tcp", "[::]:0") // dual-stack: every form reaches it
+	if err != nil {
+		if ln, err = net.Listen("tcp4", "0.0.0.0:0"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "pong") })}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+	hosts := []string{"127.0.0.1", "::1", "0.0.0.0", "::", "::ffff:0.0.0.0", "::ffff:127.0.0.1"}
+	if ip := interfaceIPv4(t); ip != "" {
+		hosts = append(hosts, ip)
+	}
+	direct := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	for _, recorded := range []bool{false, true} {
+		for _, h := range hosts {
+			upstream := net.JoinHostPort(h, strconv.Itoa(port))
+			t.Run(fmt.Sprintf("recorded=%v/%s", recorded, upstream), func(t *testing.T) {
+				if resp, err := direct.Get("http://" + upstream + "/ping"); err != nil {
+					t.Skipf("the app does not answer a direct request at %s here either: %v", upstream, err)
+				} else {
+					_ = resp.Body.Close()
+				}
+				cfg := &config.Config{}
+				cfg.Agent.MockMode = recorded
+				cfg.Agent.RecordRequests = recorded
+				core, logs := observer.New(zapcore.DebugLevel)
+				pm := New(zap.New(core), nil, cfg)
+				client, proxied := tcpPairForWatch(t)
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				defer cancel()
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					pm.ServeLive(ctx, proxied, upstream, uint16(port))
+					_ = proxied.Close()
+				}()
+				if _, err := io.WriteString(client, "GET /ping HTTP/1.1\r\nHost: app\r\nConnection: close\r\n\r\n"); err != nil {
+					t.Fatal(err)
+				}
+				_ = client.SetReadDeadline(time.Now().Add(15 * time.Second))
+				resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+				if err != nil {
+					t.Errorf("ServeLive(%s): no answer from the app a direct request reaches: %v", upstream, err)
+				} else {
+					b, _ := io.ReadAll(resp.Body)
+					_ = resp.Body.Close()
+					if string(b) != "pong" {
+						t.Errorf("ServeLive(%s) answered %q, want the app's pong", upstream, b)
+					}
+				}
+				_ = client.Close()
+				cancel()
+				<-done
+				pm.captures.Wait()
+				if t.Failed() {
+					for _, e := range logs.All() {
+						t.Logf("logged %s %q %v", e.Level, e.Message, e.ContextMap())
+					}
+				}
+			})
+		}
+	}
+}
+
+// interfaceIPv4 is an IPv4 address of an interface that is up and is not
+// the loopback, or "" when there is none.
+func interfaceIPv4(t *testing.T) string {
+	t.Helper()
+	ifs, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ifc := range ifs {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := ifc.Addrs()
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil {
+				return n.IP.String()
+			}
+		}
+	}
+	return ""
 }
