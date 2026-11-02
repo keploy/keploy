@@ -35,6 +35,15 @@ func reservedPort(t *testing.T) int {
 	return port
 }
 
+// sharedPort is SharedPort on Windows: ReservedPort's port, claimed below
+// the dynamic port range, with no socket at it. A listener binds beside a
+// hold here only by setting SO_REUSEADDR, which lets any other socket that
+// sets it bind the port as well, and it binds beside no exclusive hold.
+func sharedPort(t *testing.T) int {
+	t.Helper()
+	return reservedPort(t)
+}
+
 // listenFree listens at port at every address and closes the listener: nil
 // when no other socket is at the port and it is not excluded from use.
 func listenFree(port int) error {

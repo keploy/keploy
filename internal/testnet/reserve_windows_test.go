@@ -27,3 +27,13 @@ func requireReserved(t *testing.T, port int) {
 	require.GreaterOrEqual(t, port, 1024, "the reserved port")
 	require.FileExists(t, claimFile(os.TempDir(), port), "the reserved port's claim")
 }
+
+// requireShared checks that port is claimed below the dynamic port range
+// (requireReserved), and that no socket is at it: a listener that sets no
+// option, as Go's here do, binds it at every address. On Windows SharedPort
+// holds no socket at the port; it claims it.
+func requireShared(t *testing.T, port int) {
+	t.Helper()
+	requireReserved(t, port)
+	require.NoError(t, listenFree(port), "listen at the shared port %d at every address", port)
+}

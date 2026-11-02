@@ -4,9 +4,11 @@ package testnet
 
 import "net"
 
-// connectHolder connects to peer from a port the system picks.
+// connectHolder connects to peer from a port the system picks, with
+// holdControl set on the socket.
 func connectHolder(peer string) (*net.TCPConn, error) {
-	c, err := net.Dial("tcp", peer)
+	d := net.Dialer{Control: holdControl}
+	c, err := d.Dial("tcp", peer)
 	if err != nil {
 		return nil, err
 	}

@@ -14,3 +14,10 @@ func requireReserved(t *testing.T, port int) {
 	t.Helper()
 	requireHeld(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 }
+
+// requireShared is requireReserved here, where ReservedPort's port is
+// SharedPort's.
+func requireShared(t *testing.T, port int) {
+	t.Helper()
+	requireReserved(t, port)
+}
