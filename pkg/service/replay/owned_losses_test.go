@@ -1,0 +1,93 @@
+package replay
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+)
+
+// ownedTaker is an instrumentation that hands keploy test, in turn, each of
+// takes's answers (OwnedLossTaker).
+type ownedTaker struct {
+	Instrumentation
+	takes []ownedTake
+}
+
+type ownedTake struct {
+	owned []models.OwnedCaptureLoss
+	err   error
+}
+
+func (o *ownedTaker) TakeOwnedCaptureLosses(context.Context) ([]models.OwnedCaptureLoss, error) {
+	if len(o.takes) == 0 {
+		return nil, nil
+	}
+	t := o.takes[0]
+	o.takes = o.takes[1:]
+	return t.owned, t.err
+}
+
+// A loss a cut-short end owned reaches a verdict in keploy test, never none
+// and never the test case open when it was counted: the gap's (a pool call
+// between test cases cut short), the run's, an earlier set's and a passing
+// test case's fail the set, naming it; a test case already failed, or with
+// no verdict, has it named in its report. A take that failed is the set's
+// error; an agent that has none to tell apart adds nothing.
+func TestKeployTestReadsTheLossesACutShortEndOwned(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	loss := func(test string) models.OwnedCaptureLoss {
+		return models.OwnedCaptureLoss{Test: test, Loss: models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1, What: "from 127.0.0.1:50912, written " + test}}
+	}
+	results := []models.TestResult{
+		{TestCaseID: "test-1", Status: models.TestStatusPassed},
+		{TestCaseID: "test-2", Status: models.TestStatusFailed},
+		{TestCaseID: "test-3", Status: models.TestStatusPassed, FailureInfo: models.FailureInfo{TestMocksUnread: true}},
+		{TestCaseID: "test-4", Status: models.TestStatusPassed},
+	}
+	instr := &ownedTaker{takes: []ownedTake{
+		{owned: []models.OwnedCaptureLoss{loss("between test cases"), loss("test-2")}},
+		{err: models.ErrCaptureLossesUnsupported},
+		{owned: []models.OwnedCaptureLoss{loss("test-1"), loss(""), loss("test-3"), loss("test-9")}},
+	}}
+	r := &Replayer{instrumentation: instr}
+	for range 3 {
+		r.takeOwnedLosses(context.Background())
+	}
+	set, err := r.applyOwnedLosses(results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := models.CaptureLosses{loss("between test cases").Loss, loss("test-1").Loss, loss("").Loss, loss("test-9").Loss}
+	if len(set) != len(want) {
+		t.Fatalf("the set's: %v, want %v", set, want)
+	}
+	for i := range want {
+		if set[i] != want[i] {
+			t.Fatalf("the set's: %v, want %v", set, want)
+		}
+	}
+	for i, n := range []int{0, 1, 1, 0} {
+		if got := len(results[i].FailureInfo.CaptureIncomplete); got != n {
+			t.Fatalf("%s's report names %d owned losses, want %d", results[i].TestCaseID, got, n)
+		}
+	}
+	if set, err := r.applyOwnedLosses(results); len(set) != 0 || err != nil {
+		t.Fatalf("applied again: %v, %v; want each once", set, err)
+	}
+
+	failed := &Replayer{instrumentation: &ownedTaker{takes: []ownedTake{{owned: []models.OwnedCaptureLoss{loss("between test cases")}, err: errors.New("connection reset")}}}}
+	failed.takeOwnedLosses(context.Background())
+	if set, err := failed.applyOwnedLosses(nil); err == nil || len(set) != 1 {
+		t.Fatalf("a take that failed: %v, %v; want its loss and the error", set, err)
+	}
+
+	t.Setenv(provenswitch.Env, "")
+	off := &Replayer{instrumentation: &ownedTaker{takes: []ownedTake{{owned: []models.OwnedCaptureLoss{loss("test-1")}}}}}
+	off.takeOwnedLosses(context.Background())
+	if set, _ := off.applyOwnedLosses(results); len(set) != 0 {
+		t.Fatalf("with the switch off: %v, want none taken", set)
+	}
+}

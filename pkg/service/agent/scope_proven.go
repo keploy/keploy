@@ -79,6 +79,10 @@ type provenWire struct {
 	// what it lost: the run's, naming the connection and the test, and
 	// no later test's (UnchargedCaptureLosses).
 	ownedRun models.CaptureLosses
+	// ownedLeft are losses cut-short ends owned that the session before
+	// counted and no read took: the run's, which the next read takes
+	// (takeOwnedLosses), never dropped.
+	ownedLeft []coreAgent.OwnedLoss
 	// claim is the live claim; zero when none.
 	claim claimant
 	// claims is every claim of the session, in order: from each one's time
@@ -297,10 +301,15 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	// What the run's tests count their capture losses from: read before
 	// provenMu, which is never held while calling into the hooks.
 	losses := a.markCaptureLosses(ctx)
-	// Losses an earlier session's cut-short ends owned are not this run's.
-	a.takeOwnedLosses()
+	// Losses an earlier session's cut-short ends owned that no read took
+	// are this session's to report, as the run's: none of its tests is the
+	// test that owned them, which only their words still name.
+	left := a.takeOwnedLosses()
+	for i := range left {
+		left[i].Test = ""
+	}
 	a.provenMu.Lock()
-	a.proven = provenWire{losses: losses}
+	a.proven = provenWire{losses: losses, ownedLeft: left}
 	a.provenMu.Unlock()
 	if provenswitch.On() {
 		// The listener's drops are counted from here too (openDrops).

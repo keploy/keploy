@@ -582,8 +582,14 @@ type Replayer struct {
 	// whether this run has taken one yet; lossLast is the latest per-test
 	// read, which the set's end counts what is left from, and lossLastAgent
 	// the agent process that answered it.
-	lossMark      captureLossMark
-	lossMarked    bool
+	lossMark   captureLossMark
+	lossMarked bool
+	// owned are, under the proven switch, the losses a cut-short end owned
+	// that keploy took from the agent since the last set's end applied them
+	// (takeOwnedLosses, applyOwnedLosses); ownedErr is a take that failed.
+	ownedMu       sync.Mutex
+	owned         []models.OwnedCaptureLoss
+	ownedErr      error
 	lossLast      models.CaptureLosses
 	lossLastRead  bool
 	lossLastAgent string
@@ -6174,6 +6180,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.String("next_step", "see the earlier test-set's report for where it was lost; each test charged with it says what to do"))
 	}
 	late, lateErr := r.endCaptureLosses(context.WithoutCancel(ctx))
+	// What a cut-short end owned that its loss was counted for after the
+	// end: named in its test case's report, or the set's (applyOwnedLosses).
+	r.takeOwnedLosses(context.WithoutCancel(ctx))
+	ownedBySet, ownedErr := r.applyOwnedLosses(testCaseResults)
+	late = append(late, ownedBySet...)
+	if lateErr == nil {
+		lateErr = ownedErr
+	}
 	// A call keploy cannot capture at all (decision 20) is no loss of what it
 	// saw: below, it leaves the set without a verdict, never failed.
 	lateJudged, lateNotJudged := late.Split()
@@ -9262,6 +9276,7 @@ func (r *Replayer) readMockErrors(ctx context.Context) testMisses {
 	read := testMisses{calls: calls, answers: answers, err: err, asked: true}
 	if provenswitch.On() {
 		read.lost, read.lostErr = r.testCaptureLosses(ctx)
+		r.takeOwnedLosses(ctx)
 	}
 	r.readRealTest(ctx, &read)
 	return read

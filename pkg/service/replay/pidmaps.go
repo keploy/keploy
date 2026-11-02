@@ -210,6 +210,76 @@ type CaptureLossReader interface {
 	GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 }
 
+// OwnedLossTaker is an optional Instrumentation extension: the losses a test
+// whose end was cut short owned, by test, each taken once
+// (models.OwnedCaptureLoss). They are in none of the counts
+// GetCaptureLosses gives.
+type OwnedLossTaker interface {
+	TakeOwnedCaptureLosses(ctx context.Context) ([]models.OwnedCaptureLoss, error)
+}
+
+// takeOwnedLosses takes, under the proven switch, the losses a cut-short end
+// owned that the agent counted, and keeps them for the set's end
+// (applyOwnedLosses). Made at each test case's end and at the set's end, so
+// the agent's bounded list keeps their names. A take that failed is kept: what
+// it took cannot be told. An agent that has none to tell apart counts every
+// loss.
+func (r *Replayer) takeOwnedLosses(ctx context.Context) {
+	t, ok := r.instrumentation.(OwnedLossTaker)
+	if !ok || r.noAgent || !provenswitch.On() {
+		return
+	}
+	owned, err := t.TakeOwnedCaptureLosses(ctx)
+	if errors.Is(err, models.ErrCaptureLossesUnsupported) {
+		return
+	}
+	r.ownedMu.Lock()
+	defer r.ownedMu.Unlock()
+	r.owned = append(r.owned, owned...)
+	if err != nil && r.ownedErr == nil {
+		r.ownedErr = err
+	}
+}
+
+// applyOwnedLosses applies, at a set's end, the losses cut-short ends owned
+// that keploy took since the last set's end: one owned by a test case of
+// results that is not reported as passing (failed, or with no verdict) is
+// named in that test case's report (FailureInfo.CaptureIncomplete); one owned
+// by a test case reported as passing, by the gap between test cases, or by
+// none of the set's test cases (the run's, an earlier set's) is the set's,
+// returned with its owner in its words, and fails the set. None is dropped,
+// and none is charged to the test case open when it was counted. err is a
+// take that failed: what it took cannot be told.
+func (r *Replayer) applyOwnedLosses(results []models.TestResult) (set models.CaptureLosses, err error) {
+	r.ownedMu.Lock()
+	owned, err := r.owned, r.ownedErr
+	r.owned, r.ownedErr = nil, nil
+	r.ownedMu.Unlock()
+	if err != nil {
+		err = fmt.Errorf("keploy could not take from the agent the capture losses a test case whose end was cut short owned: %w", err)
+	}
+	for _, o := range owned {
+		i := lastResultOf(results, o.Test)
+		if i < 0 || (results[i].Status == models.TestStatusPassed && len(results[i].VerdictUnknown()) == 0) {
+			set = append(set, o.Loss)
+			continue
+		}
+		results[i].FailureInfo.CaptureIncomplete = append(append(models.CaptureLosses(nil), results[i].FailureInfo.CaptureIncomplete...), o.Loss)
+	}
+	return set, err
+}
+
+// lastResultOf is the index in results of test's last result (a retried test
+// has one per run), -1 for none.
+func lastResultOf(results []models.TestResult, test string) int {
+	for i := len(results) - 1; i >= 0; i-- {
+		if test != "" && results[i].TestCaseID == test {
+			return i
+		}
+	}
+	return -1
+}
+
 // captureLossAgentReader is an optional CaptureLossReader extension: a read
 // of the counts that also names the agent process that answered it
 // (models.AgentInstanceHeader), "" where the answer names none (the keploy

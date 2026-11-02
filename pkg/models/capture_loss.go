@@ -534,6 +534,16 @@ type CaptureLoss struct {
 	What  string          `json:"what,omitempty"`
 }
 
+// OwnedCaptureLoss is a capture loss of bytes a test wrote to a connection,
+// which its end could not wait for, counted later, under another test or
+// none: Test's own (agent.OwnedLoss), in none of the agent's counts. Test is
+// "between test cases" for the gap's bytes in keploy test, and "" for the
+// run's (a bound passed, or a session's left to the next).
+type OwnedCaptureLoss struct {
+	Test string      `json:"test"`
+	Loss CaptureLoss `json:"loss"`
+}
+
 // CaptureLosses are the agent's counts of every kind of capture loss, each
 // only ever growing for the life of the agent.
 type CaptureLosses []CaptureLoss
