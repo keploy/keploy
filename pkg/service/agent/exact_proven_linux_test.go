@@ -1444,7 +1444,7 @@ func TestKeployTestRefusesATestCaseItCannotOpenWithItsVariables(t *testing.T) {
 	}
 	require.Zero(t, p.served, "a test case was opened apart from its variables")
 	a.scopeMu.Lock()
-	begun := a.testBegun["test-1"]
+	begun := a.testReached["test-1"]
 	a.scopeMu.Unlock()
 	require.False(t, begun, "the refused test case was marked begun: it was refused after it was settled and served the worker's scope")
 	got := p.postTo(t, "/own-1", "x-1")

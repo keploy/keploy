@@ -2291,6 +2291,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if r.exactServing() {
 			r.exact = newExactPlan(expectedTestMockMappings, workerScope, filtered, unfiltered)
 			r.exact.noteAhead(expectedTestMockMappings, testCases)
+			r.exact.order = passOrder(testCases)
 			if r.exact.share, err = newSharePlan(ctx, conc, workerScope, filtered, unfiltered); err != nil {
 				return nil, nil, err
 			}
@@ -3126,7 +3127,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			continue
 		}
 
-		if testCase != nil && testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase) {
+		if deferredStreaming(testCase) {
 			streamingTests = append(streamingTests, newStreamingTest(testCase, expectedTestMockMappings))
 			r.logger.Debug("deferring streaming test case",
 				zap.String("testcase", testCase.Name),
@@ -7468,7 +7469,7 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	// BaseTime) stages the set once, and the agent then serves its pool
 	// (exact.go).
 	if r.exact != nil && afterTime.Equal(models.BaseTime) && len(expectedMockMapping) == 0 {
-		params.Exact = &models.ExactServing{Stage: true, Pool: append([]string(nil), r.exact.pool...), Worker: r.exact.staged()}
+		params.Exact = &models.ExactServing{Stage: true, Pool: append([]string(nil), r.exact.pool...), Worker: r.exact.staged(), Order: r.exact.stagedOrder()}
 		if r.exact.background {
 			params.Exact.Background = models.RecordedWithS12Routing
 		}

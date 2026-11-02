@@ -64,7 +64,16 @@ type exactPlan struct {
 	idle map[string]bool
 	// begun names the test cases of the set's run that have begun: the
 	// worker-scope mocks placed after one of them are due by the set's end.
+	// One placed after a test case the run passed over without beginning it
+	// (order) is served if made, never due: its call may be the skipped test
+	// case's own doing.
 	begun map[string]bool
+	// order is every test case of the set in the order the run takes them up
+	// (passOrder), those it will not open among them. The staging hands it to
+	// the agent (models.ExactServing.Order) when the worker scope places a
+	// mock after a test case: the agent reaches that place once the run
+	// passes its test case, whether it ran or was skipped.
+	order []string
 	// unheld names the worker-scope mocks the agent does not hold: required
 	// all the same, never asked of the agent (staged).
 	unheld map[string]bool
@@ -159,6 +168,45 @@ func (p *exactPlan) begin(name string) {
 	}
 }
 
+// passOrder is the names of cases (recorded order) in the order keploy test's
+// run takes them up: recorded order, with the streaming test cases, which it
+// runs in a pass after the rest (deferredStreaming), last. It holds the test
+// cases the run will not open too: a selection leaves them out, verdicts.yaml
+// quarantines them, or they are refused. A streaming one the run skips is
+// last as well: the agent is told the run passed it no earlier than it did.
+func passOrder(cases []*models.TestCase) []string {
+	out := make([]string, 0, len(cases))
+	var streaming []string
+	for _, tc := range cases {
+		if deferredStreaming(tc) {
+			streaming = append(streaming, tc.Name)
+			continue
+		}
+		out = append(out, tc.Name)
+	}
+	return append(out, streaming...)
+}
+
+// deferredStreaming reports whether keploy test runs test case tc (not nil)
+// in the streaming pass after the set's other test cases: an HTTP streaming
+// one.
+func deferredStreaming(tc *models.TestCase) bool {
+	return tc.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(tc)
+}
+
+// stagedOrder is the run's order the staging hands the agent (order): only
+// when a mock of the worker scope it stages (staged) is placed after a test
+// case, the one thing the agent reads it for; nil otherwise, and with no plan
+// (staged is then empty).
+func (p *exactPlan) stagedOrder() []string {
+	for _, e := range p.staged() {
+		if e.Place != "" {
+			return append([]string(nil), p.order...)
+		}
+	}
+	return nil
+}
+
 // staged is the worker scope the agent stages: the entries of the mocks it
 // holds, in order.
 func (p *exactPlan) staged() []models.MockEntry {
@@ -210,7 +258,8 @@ func (p *exactPlan) takeWorker(counted, rearm []models.MockState) ([]models.Mock
 // unansweredWorker is, in recorded order, the worker-scope mocks the set's
 // end requires answered and consumed does not hold: those whose place the
 // run reached (a test case that has begun, or the set's start when keploy
-// started its application: bootSeen), but for the ones whose answer is idle
+// started its application: bootSeen; a test case it passed over without
+// beginning it makes none due, begun), but for the ones whose answer is idle
 // (D3, D4). One the recording made as keploy record stopped the application
 // (MockEntry.AtStop) is required only once keploy has stopped this set's
 // application and read what it consumed as it stopped (stopped).
