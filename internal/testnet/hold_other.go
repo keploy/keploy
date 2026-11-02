@@ -71,6 +71,22 @@ func SharedListenConfig() net.ListenConfig {
 	return net.ListenConfig{Control: shareControl}
 }
 
+// ReservedPort is a free TCP port for code under test that listens at it by
+// number with net.Listen, at any address, kept from every other socket that
+// is given a port without naming one for the test's life. On macOS it is
+// SharedPort's port: held by a connection at 127.0.0.1, at a port no bind to
+// port 0 is given, and Go's listeners there set SO_REUSEADDR, which binds
+// beside the connected socket; once the code's listener closes, a dial to the
+// port is refused again. On Windows, where Go's listeners set no option and
+// so cannot bind beside any socket that holds the port, it is a port below
+// the dynamic port range, which no bind to port 0 and no connect is given,
+// claimed for the test's life so that no other test is given it either. A
+// socket that names the port can still take it.
+func ReservedPort(t *testing.T) int {
+	t.Helper()
+	return reservedPort(t)
+}
+
 // BoundHere cannot tell here which sockets are bound at port: known is
 // false.
 func BoundHere(t *testing.T, port int) (n int, known bool) {

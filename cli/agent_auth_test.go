@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -61,12 +61,7 @@ type runningAgent struct {
 
 func startAgent(t *testing.T, logger *zap.Logger, args ...string) *runningAgent {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	_ = ln.Close()
+	port := testnet.ReservedPort(t) // no other socket is given it before the agent listens
 
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })

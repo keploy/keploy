@@ -17,6 +17,15 @@
 // OpenShared's listeners set SO_REUSEADDR. CI runs these tests on Linux, and
 // some packages' tests on Windows and macOS too.
 //
+// ReservedPort's port is for code under test that listens at it by number
+// with net.Listen. On Linux it is held by a socket that sets SO_REUSEADDR
+// and only binds, and Go's listeners, which set it too, bind beside it; on
+// macOS it is SharedPort's. On Windows, where Go's listeners set no option
+// and so bind beside no hold, it is a port below the dynamic port range,
+// which no bind to port 0 and no connect is given, claimed by a file in
+// os.TempDir so that no other test is given it (claimPort). UnlistedPort
+// (Linux) is a port the socket tables list no socket at.
+//
 // BoundHere counts the sockets of this process at a port, so a test can tell
 // a port its code still holds from one another process took once it was
 // free; GiveAway hands a listener's socket to another process, for a test of
