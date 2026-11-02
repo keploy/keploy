@@ -150,7 +150,8 @@ type Session struct {
 	// final handoff.
 	RouteMocksViaSyncMock bool
 	// peerEnds: how each side of the connection ended, and which ended
-	// first (MarkPeerEnded; peerEndFirstShift), and, from
+	// first (MarkPeerEnded; peerEndFirstShift), whether the server spoke
+	// unasked before the current request (ServerSpokeUnasked), and, from
 	// endedWithConnectionShift, one bit per fakeconn.Direction: that stream
 	// ended because its connection did (MarkEndedWithConnection). Internal;
 	// one word here, in the padding after the bools, so a Session stays in
@@ -462,6 +463,24 @@ const peerEndFirstShift = 4
 // endedWithConnectionShift: peerEnds holds, from this bit, one bit per
 // fakeconn.Direction (MarkEndedWithConnection), past every PeerEnd bit.
 const endedWithConnectionShift = 16
+
+// spokeUnaskedBit, in peerEnds, past the first ender's two bits:
+// ServerSpokeUnasked. Unlike the bits before it, it holds for one exchange:
+// NextRequest clears it.
+const spokeUnaskedBit = 1 << (peerEndFirstShift + 2)
+
+// ServerSpokeUnasked reports whether the server sent bytes that answer no
+// request before the current request's first chunk was captured: the floor
+// the request set (NextRequest) dropped a run of the server's stream that is
+// not an answer the capture lacks (dropped). An HTTP server's 408, or its
+// close after one, on a keep-alive connection that idled out as the client
+// sent this request is such a run. An end of the connection that follows,
+// with no answer to the request, is the server's idle close, not its answer.
+// It is set as the parser reads the server's stream for the request, and
+// cleared as the parser starts the next one. Nil-safe.
+func (s *Session) ServerSpokeUnasked() bool {
+	return s != nil && s.peerEnds.Load()&spokeUnaskedBit != 0
+}
 
 // MarkPeerEnded says dir's side of the connection ended, by a reset or by a FIN
 // (PeerReset, PeerClosed), as the relay's read of it found

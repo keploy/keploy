@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -57,6 +58,21 @@ func appRead(t *testing.T, app net.Conn) (string, error) {
 		if err != nil {
 			return string(got), err
 		}
+	}
+}
+
+// awaitPeerEnd waits until the relay has read dir's end of the connection
+// (Session.PeerEnded), so a close of the other side that follows is the
+// second end, as an application's reaction to an end the relay forwarded it
+// is: the relay marks an end before it forwards it.
+func awaitPeerEnd(t *testing.T, c *relayedConn, dir fakeconn.Direction) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for c.sess.PeerEnded(dir) == supervisor.PeerOpen {
+		if time.Now().After(deadline) {
+			t.Fatalf("the relay did not read the end of side %d within 10s", dir)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -243,6 +259,7 @@ func TestRecordV2_FaultUpstreamResetsACloseDelimitedBody(t *testing.T) {
 	write(t, c.dest, c.dst, head+"abc")
 	relayed(t, c.app, head+"abc")
 	resetConn(t, c.dest)
+	awaitPeerEnd(t, c, fakeconn.FromDest)
 	mocks, err := c.finish(t)
 	wantFault(t, oneMock(t, mocks, err), models.Fault{Kind: models.FaultReset, AfterHead: true, BodyBytes: 3})
 }
@@ -256,6 +273,7 @@ func TestRecordV2_FaultCloseDelimitedBodyClosedIsWhole(t *testing.T) {
 	write(t, c.dest, c.dst, resp)
 	relayed(t, c.app, resp)
 	_ = c.dest.Close()
+	awaitPeerEnd(t, c, fakeconn.FromDest)
 	mocks, err := c.finish(t)
 	m := oneMock(t, mocks, err)
 	if m.Spec.Fault != nil || m.Spec.HTTPResp.Body != "abc" {
@@ -302,9 +320,10 @@ func TestRecordV2_FaultChunkedBodyTruncatedKeepsItsFraming(t *testing.T) {
 	}
 }
 
-// A close or a reset before any answer on a reused connection is the
-// keep-alive idle-close race: the application's client retries on a new
-// connection, where the call is recorded. Nothing is recorded for it here.
+// A close or a reset from the upstream before any answer on a reused
+// connection is the keep-alive idle-close race: the application's client
+// retries on a new connection, where the call is recorded. Nothing is
+// recorded for it here.
 func TestRecordV2_FaultBeforeAnswerOnAReusedConnectionIsNotRecorded(t *testing.T) {
 	const resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
 	for _, reset := range []bool{false, true} {
@@ -318,11 +337,106 @@ func TestRecordV2_FaultBeforeAnswerOnAReusedConnectionIsNotRecorded(t *testing.T
 		relayed(t, c.dest, faultReq)
 		if reset {
 			resetConn(t, c.dest)
+		} else {
+			_ = c.dest.Close()
+		}
+		// The upstream's end reaches the application before it closes.
+		got, rerr := appRead(t, c.app)
+		if want := error(io.EOF); reset && !errors.Is(rerr, syscall.ECONNRESET) || !reset && rerr != want || got != "" {
+			t.Errorf("reset %v: the application read %q, %v; want nothing, then the upstream's end", reset, got, rerr)
 		}
 		mocks, err := c.finish(t)
 		if m := oneMock(t, mocks, err); m.Spec.Fault != nil {
 			t.Errorf("reset %v: the first call recorded with fault %v, want the answer it got", reset, m.Spec.Fault)
 		}
+	}
+}
+
+// The application gives up on a call on a reused connection (a pooled
+// client's timeout): it is recorded as a timeout, as on a first request. The
+// idle-close race is the upstream's end, not the application's.
+func TestRecordV2_FaultTimeoutOnAReusedConnectionIsRecorded(t *testing.T) {
+	const resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+	c := newRelayedConn(t)
+	c.start(t)
+	write(t, c.app, c.src, faultReq)
+	relayed(t, c.dest, faultReq)
+	write(t, c.dest, c.dst, resp)
+	relayed(t, c.app, resp)
+	write(t, c.app, c.src, faultReq)
+	relayed(t, c.dest, faultReq)
+	closeUnread(t, c)
+	mocks, err := c.finish(t)
+	if err != nil || len(mocks) != 2 {
+		t.Fatalf("recorded %d mocks, %v; want 2: the answered call, then the one the application gave up on", len(mocks), err)
+	}
+	if mocks[0].Spec.Fault != nil {
+		t.Errorf("the first call recorded with fault %v, want the answer it got", mocks[0].Spec.Fault)
+	}
+	wantFault(t, mocks[1], models.Fault{Kind: models.FaultTimeout})
+}
+
+// Server bytes no request asked for before a request (its 408 on a keep-alive
+// connection that idled out) mark that request only: the application's close
+// after them is the idle-close race, not a timeout, and a later request on the
+// connection the application gives up on is a timeout again.
+func TestRecordV2_FaultNotRecordedAfterServerBytesNoRequestAskedFor(t *testing.T) {
+	const resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+	t.Run("the request after them", func(t *testing.T) {
+		c := newRelayedConn(t)
+		c.start(t)
+		write(t, c.app, c.src, faultReq)
+		relayed(t, c.dest, faultReq)
+		write(t, c.dest, c.dst, resp)
+		relayed(t, c.app, resp)
+		write(t, c.dest, c.dst, idleTimeout)
+		relayed(t, c.app, idleTimeout)
+		write(t, c.app, c.src, faultReq)
+		relayed(t, c.dest, faultReq)
+		closeUnread(t, c)
+		mocks, err := c.finish(t)
+		if m := oneMock(t, mocks, err); m.Spec.Fault != nil {
+			t.Errorf("the first call recorded with fault %v, want the answer it got, and nothing for the second", m.Spec.Fault)
+		}
+	})
+	t.Run("a later request", func(t *testing.T) {
+		c := newRelayedConn(t)
+		c.start(t)
+		write(t, c.dest, c.dst, idleTimeout)
+		relayed(t, c.app, idleTimeout)
+		write(t, c.app, c.src, faultReq)
+		relayed(t, c.dest, faultReq)
+		write(t, c.dest, c.dst, resp)
+		relayed(t, c.app, resp)
+		write(t, c.app, c.src, faultReq)
+		relayed(t, c.dest, faultReq)
+		closeUnread(t, c)
+		mocks, err := c.finish(t)
+		if err != nil || len(mocks) != 2 {
+			t.Fatalf("recorded %d mocks, %v; want 2: the answered call, then the one the application gave up on", len(mocks), err)
+		}
+		wantFault(t, mocks[1], models.Fault{Kind: models.FaultTimeout})
+	})
+}
+
+// The answer in flight when the capture joined a connection partway answers a
+// request the capture lacks (it is left out), not no request: the
+// application's giving up on the next call is still a timeout.
+func TestRecordV2_FaultTimeoutAfterTheAnswerInFlightWhenTheCaptureJoined(t *testing.T) {
+	const resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+	c := newRelayedConn(t)
+	c.startRelay(t)
+	c.sess.JoinedMidConnection = true
+	c.startParser(t)
+	write(t, c.dest, c.dst, resp)
+	relayed(t, c.app, resp)
+	write(t, c.app, c.src, faultReq)
+	relayed(t, c.dest, faultReq)
+	closeUnread(t, c)
+	mocks, err := c.finish(t)
+	wantFault(t, oneMock(t, mocks, err), models.Fault{Kind: models.FaultTimeout})
+	if n := c.mgr.MocksLeftOut(); n != 1 {
+		t.Errorf("%d mocks left out, want 1: the answer in flight when the capture joined", n)
 	}
 }
 
@@ -370,6 +484,7 @@ func TestRecordV2_FaultNotRecordedWhenTheCaptureJoinedPartway(t *testing.T) {
 	write(t, c.app, c.src, faultReq)
 	relayed(t, c.dest, faultReq)
 	_ = c.dest.Close()
+	awaitPeerEnd(t, c, fakeconn.FromDest)
 	mocks, err := c.finish(t)
 	if err != nil || len(mocks) != 0 {
 		t.Errorf("recorded %d mocks, %v; want none for a capture that joined the connection partway", len(mocks), err)

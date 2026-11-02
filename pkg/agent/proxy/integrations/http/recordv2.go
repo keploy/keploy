@@ -72,8 +72,9 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 	// disarmed for a poll lane, so we don't re-parse and re-match every
 	// subsequent request on a keep-alive poll-poll-poll connection.
 	watchdogSuspended := false
-	// exchanges counts the requests read on this connection, so a fault
-	// before any answer is recorded on its first one only (noAnswerFault).
+	// exchanges counts the requests read on this connection, so the
+	// upstream's end before any answer is recorded on its first one only
+	// (noAnswerFault).
 	exchanges := 0
 
 	for {
@@ -138,16 +139,23 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		firstRespChunk, err := sess.DestStream.ReadChunk()
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
-				// The stream ended with nothing of a response, so there is
-				// no mock to lose and nothing is reported. The server
-				// closed without answering: the keep-alive idle-close race,
-				// in which the app's HTTP client retries the request on a
-				// new connection, where it is recorded. Or the client gave
-				// up and closed: in an observe-only capture, or where the
-				// relay kept from the parser an answer the closed client
-				// refused (Session.EndedWhereClientStopped; a call a Go
-				// http.Client timed out ends so). Or the session closed
-				// the stream: the supervisor's abort,
+				// The stream ended with nothing of a response. A side of the
+				// connection ended it (the relay's read found its FIN or its
+				// reset), and the call is recorded with that fault
+				// (noAnswerFault), so replay gives the application what the
+				// upstream gave it, or holds the call unanswered until the
+				// application gives up again: the client gave up and closed
+				// (a call a Go http.Client timed out ends so, where the relay
+				// kept from the parser a late answer the closed client
+				// refused: Session.EndedWhereClientStopped), or the upstream
+				// reset or closed the connection on its first request.
+				//
+				// Else there is no mock to lose and nothing is reported. The
+				// server closed without answering a later request, or after
+				// bytes no request asked for (its 408): the keep-alive
+				// idle-close race, in which the app's HTTP client retries
+				// the request on a new connection, where it is recorded. Or
+				// the session closed the stream: the supervisor's abort,
 				// whose fallthrough leaves out the rest of the connection,
 				// or the recording's stop.
 				//
@@ -160,12 +168,6 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				// make (write_error) is a request the server never got:
 				// the same race, when the app writes its request in more
 				// than one piece.
-				//
-				// Unless a side of the connection ended it (the relay's
-				// read found its FIN or its reset): the call is recorded
-				// with that fault (noAnswerFault), so replay gives the
-				// application what the upstream gave it, or holds the call
-				// unanswered until the application gives up again.
 				if fault := noAnswerFault(sess, err, exchanges); fault != nil {
 					return h.recordFault(ctx, sess, logger, &FinalHTTP{
 						Req:              finalReq,
@@ -323,16 +325,21 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 
 // noAnswerFault is the fault a call ended in that got no byte of an answer, as
 // the relay saw the connection end (Session.FirstPeerEnded), or nil when the
-// call is recorded as nothing, as before. Only on the connection's first
-// request: on a later one either side's end can be the keep-alive idle-close
-// race (the server's close, or its 408, met the request), in which the
-// application's HTTP client retries the request on a new connection, where it
-// is recorded; and a capture that joined the connection partway
-// (Session.JoinedMidConnection) does not know its first request. Then:
-//   - the destination's side ended first: it reset the connection
-//     (FaultReset) or closed it (FaultEOF);
+// call is recorded as nothing, as before:
+//   - the server sent bytes no request asked for before this request
+//     (Session.ServerSpokeUnasked: its 408 on a keep-alive connection that
+//     idled out as the client sent it): the end that follows is its idle
+//     close, which the application's HTTP client meets by retrying the
+//     request on a new connection, where it is recorded;
 //   - the client's side ended first: the application gave up on the call (its
-//     client's timeout) and closed, with no answer (FaultTimeout);
+//     client's timeout) and closed, with no answer (FaultTimeout), on any
+//     request of the connection;
+//   - the destination's side ended first: it reset the connection
+//     (FaultReset) or closed it (FaultEOF), on the connection's first request
+//     only. On a later one that is the keep-alive idle-close race (the
+//     server's close met the request), and the client retries as above; and
+//     a capture that joined the connection partway
+//     (Session.JoinedMidConnection) does not know its first request;
 //   - neither side ended it: the relay ended the stream (the recording's
 //     stop), the session closed it (err is not io.EOF: the supervisor's
 //     abort), or the capture lost part of it (Session.EndedAtHole).
@@ -343,15 +350,18 @@ func noAnswerFault(sess *supervisor.Session, err error, exchanges int) *models.F
 	if _, hole := sess.EndedAtHole(fakeconn.FromDest); hole {
 		return nil
 	}
+	if sess.ServerSpokeUnasked() {
+		return nil
+	}
 	first, ok := sess.FirstPeerEnded()
 	if !ok {
 		return nil
 	}
-	if exchanges != 1 || sess.JoinedMidConnection {
-		return nil
-	}
 	if first == fakeconn.FromClient {
 		return &models.Fault{Kind: models.FaultTimeout, Observed: "the application closed the connection with no answer"}
+	}
+	if exchanges != 1 || sess.JoinedMidConnection {
+		return nil
 	}
 	if sess.PeerEnded(fakeconn.FromDest) == supervisor.PeerReset {
 		return &models.Fault{Kind: models.FaultReset, Observed: "the upstream reset the connection with no answer"}

@@ -633,13 +633,14 @@ func (r *Relay) run(ctx context.Context) error {
 	}
 
 	// The destination reset the connection: the client is given a reset
-	// too, as the proxy closes its socket, so it reads ECONNRESET as it would
-	// from the destination, not the end of a stream it did not get. Both
-	// forwarders are gone, so nothing writes to the client any more.
+	// too, its socket closed here, under any TLS layer (no close_notify), so
+	// it reads ECONNRESET as it would from the destination, not the end of a
+	// stream it did not get. Both forwarders are gone, so nothing writes to
+	// the client any more.
 	if c := r.src.Load(); r.destReset.Load() && c != nil {
-		reset := resetClientOnClose(*c)
+		reset := resetClientOnClose(ctx, *c, r.cfg.HalfCloseGrace)
 		if log := r.cfg.Logger; log != nil {
-			log.Debug("relay: the destination reset the connection; the client's close is a reset as well",
+			log.Debug("relay: the destination reset the connection; the client's socket is reset as well",
 				zap.Bool("reset", reset))
 		}
 	}
