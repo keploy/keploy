@@ -1396,3 +1396,28 @@ func TestReaderTheViewAndTheScanPlaceEveryWordAlike(t *testing.T) {
 		}
 	}
 }
+
+// A kept field view counts what each part holds: a fieldAt by the list's
+// capacity, its path and its field's, and each word its map slot (a
+// string's header and a slice's, doubled for growth, 80 bytes), its
+// letters and its list of fields by capacity.
+func TestReaderAFieldViewCountsEachWordsSlotAndList(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	readerBudget = 1 << 40
+	x := newReaderIndex(nil)
+	r := x.textOf(RawOf(getAnswer("mock-1", "http://api/items/1", `{"a":"x y","b":["x",7]}`, eRecAt), false))
+	if at, read := r.fieldsWith("x"); len(at) < 2 || !read || !r.e.fields.ok {
+		t.Fatalf("fixture: at %v read %v kept %v; want x at two fields and the view kept", at, read, r.e.fields.ok)
+	}
+	v := r.e.fields.v
+	want := int64(48 + 40*cap(v.at))
+	for _, a := range v.at {
+		want += int64(len(a.path) + len(a.in))
+	}
+	for w, l := range v.of {
+		want += int64(80 + len(w) + 4*cap(l))
+	}
+	if got := fieldWordsBytes(v); got != want {
+		t.Errorf("a view of %d fields and %d words counts %d bytes; want %d", len(v.at), len(v.of), got, want)
+	}
+}
