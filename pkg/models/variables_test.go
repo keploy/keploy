@@ -1776,8 +1776,8 @@ func TestAnOffsetLearnedAtAStepHoldsByItsStepAndItsGuards(t *testing.T) {
 	if old.Narrow() || !old.Fine() || old.Holds(to.Truncate(sec).Add(-2*sec), sec, from, to) || old.CoarseCut() {
 		t.Errorf("an old recording's clock - 2s at the second reads unlike main: Narrow %v, Fine %v, CoarseCut %v", old.Narrow(), old.Fine(), old.CoarseCut())
 	}
-	if m := own.Meet(ClockOffset{Min: -2 * sec, Max: -sec, Res: time.Millisecond, Layout: LayoutTyped, Step: time.Millisecond}); m.Step != sec || m.Empty() {
-		t.Errorf("two offsets read at their own cuts meet as %+v, want at the coarser", m)
+	if m := own.Meet(ClockOffset{Min: -2 * sec, Max: -sec, Res: time.Millisecond, Layout: LayoutTyped, Step: time.Millisecond}); m.Step != StepApart || !m.Empty() {
+		t.Errorf("FALSE GREEN: two offsets read at their own cuts at two cuts meet as %+v, want StepApart, which holds nothing", m)
 	}
 	if m := own.Meet(lock); m.Step != StepApart {
 		t.Errorf("an own cut and a phase lock meet as %+v, want StepApart", m)
@@ -1994,8 +1994,12 @@ func TestAPhaseLockUpToZeroHoldsAndItsGuardsHoldNothingElse(t *testing.T) {
 // Two learnings of one place meet by the same rule in any order and any
 // grouping, and a phase lock (Step above Res) never turns into an offset
 // read at its values' own cut, which would drop the remainder it is locked
-// to. Two read at their own cuts meet at the coarser, as an offset learned
-// before Step meets.
+// to. Two read at their own cuts at two cuts meet as StepApart too: the
+// finer shows the place's values are not cut to the coarser, so neither cut
+// checks both (now - 75s in seconds, one recording's values on a whole
+// minute: clock - 1m at the minute; another's not: clock - 1m15s at the
+// second; read at the minute, the met offset would pass a look-back
+// changed by 28 s or 50 s at every phase).
 func TestMeetKeepsAPhaseLockAndIsTheSameInAnyOrder(t *testing.T) {
 	sec := time.Second
 	lock := ClockOffset{Min: -103 * sec, Max: -102 * sec, Res: sec, Step: time.Minute, Layout: LayoutTyped}
@@ -2008,8 +2012,25 @@ func TestMeetKeepsAPhaseLockAndIsTheSameInAnyOrder(t *testing.T) {
 		t.Errorf("an offset at a step's own cut met with a phase lock: %+v; want StepApart, which holds nothing", m)
 	}
 	for _, m := range []ClockOffset{ownSec.Meet(ownMin), ownMin.Meet(ownSec)} {
-		if m.Step != time.Minute || m.Res != time.Minute {
-			t.Errorf("two read at their own cuts: %+v; want read at the coarser", m)
+		if m.Step != StepApart || !m.Empty() {
+			t.Errorf("FALSE GREEN: two read at their own cuts at two cuts: %+v; want StepApart, which holds nothing", m)
+		}
+	}
+	// now - 75s in seconds: one pairing's two values on a whole minute, the
+	// other's at the second.
+	atMin := ClockOffset{Min: -75*sec - 149*time.Millisecond, Max: -15*sec - 143*time.Millisecond, Res: time.Minute, Step: time.Minute, Layout: LayoutTyped}
+	atSec := ClockOffset{Min: -75*sec - 204*time.Millisecond, Max: -74*sec - 688*time.Millisecond, Res: sec, Step: sec, Layout: LayoutTyped}
+	for _, m := range []ClockOffset{atMin.Meet(atSec), atSec.Meet(atMin)} {
+		if !m.Empty() {
+			t.Errorf("FALSE GREEN: clock - 1m at the minute met with clock - 1m15s at the second: %s (%+v); want StepApart, which holds nothing", m, m)
+		}
+		for ph := time.Duration(0); ph < time.Minute; ph += 1500 * time.Millisecond {
+			to := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC).Add(ph + 37*time.Millisecond)
+			for _, back := range []time.Duration{75 * sec, 47 * sec, 103 * sec, 125 * sec} {
+				if m.Holds(to.Add(-4*time.Millisecond-back).Truncate(sec), sec, to.Add(-61*time.Millisecond), to) {
+					t.Errorf("FALSE GREEN: the meet holds now - %s at %s into its minute", back, ph)
+				}
+			}
 		}
 	}
 	if m := lock.Meet(lock); m.Step != time.Minute || m.Res != sec || m.Empty() {

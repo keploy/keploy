@@ -1457,8 +1457,13 @@ func (o ClockOffset) signed() bool {
 // pairings came in. Two at different Steps meet as StepApart (Empty), and
 // so do a phase lock (Step above Res) and an offset read at its values' own
 // cut that is that step (Step is Res, the same Step): the second holds no
-// phase, and a meet read at its Res would drop the first's. Two each read
-// at its values' own cut meet at the coarser. Why
+// phase, and a meet read at its Res would drop the first's. So do two each
+// read at its values' own cut at two cuts (now - 75s in seconds, one
+// recording's two values on a whole minute, another's not): the finer
+// learning shows the place's values are not cut to the coarser cut, and a
+// meet read at the coarser would pass a look-back changed by most of it
+// (and one read at the finer would make Meet depend on how its learnings
+// are grouped), so it holds nothing. Why
 // is the lesser of the two that are set (nothing replays it): one learned
 // line, whatever the order.
 func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
@@ -1466,13 +1471,7 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 	if m.Why == "" || p.Why != "" && p.Why < m.Why {
 		m.Why = p.Why
 	}
-	switch own := func(x ClockOffset) bool { return x.Step > 0 && x.Step == x.Res }; {
-	case o.Step == p.Step && own(o) == own(p):
-	case own(o) && own(p):
-		// Both read at their values' own cuts: the met offset is read at
-		// the coarser (Res), as an offset learned before Step meets.
-		m.Step = m.Res
-	default:
+	if own := func(x ClockOffset) bool { return x.Step > 0 && x.Step == x.Res }; o.Step != p.Step || own(o) != own(p) {
 		m.Step = StepApart
 	}
 	// One read whole and one inside a text, or at two places of a text
