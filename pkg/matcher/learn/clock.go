@@ -58,6 +58,11 @@ type clockLayout struct {
 	timeWord func(match string, i int) bool
 	// wraps: the instant is a time of day, compared modulo a day.
 	wraps bool
+	// end, when not nil, is where a match of re that ends at s[b] ends,
+	// read with the bytes of s after it (matchEnd): re says what a match
+	// holds, end what may stand right after it, which a pattern of Go's
+	// regexp syntax cannot say.
+	end func(s string, b int) int
 }
 
 // Every layout reads its text in UTC where the text names no offset, and an
@@ -72,9 +77,13 @@ var clockLayouts = []clockLayout{
 	// ("2026-11-01 23:42:37.172 +05:30" of Sequelize's timezone option,
 	// "… +0530 IST" of Go's time.Time.String(), "… +0530" of Ruby's
 	// Time#to_s), as its one zone: the zone places the instant, as it does
-	// with no space. After a date alone, or as two digits, a signed number
-	// after a space ("2026-11-01 -1500.00") is no zone.
-	{re: regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?(?: [+-]\d{2}:?\d{2}|Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?|(?:T\d{2})?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?)`), read: readISO},
+	// with no space. Such a zone is one a place keeps (hours 00 to 14,
+	// minutes 00 to 59) that ends where its digits do (isoEnd: no letter,
+	// digit, "." or "," right after it). Any other signed number after a
+	// space, and any after a date alone or an hour, is no zone: the instant
+	// before it is read as it is with nothing after it ("2026-11-01
+	// 10:00:00 -1400.00" is a time, then a sum).
+	{re: regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?(?: [+-](?:0\d|1[0-4]):?[0-5]\d|Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?|(?:T\d{2})?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?)`), read: readISO, end: isoEnd},
 	{re: regexp.MustCompile(`\d{8}T\d{6}Z?`), read: readCompact},
 	{re: regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[17][0-9a-fA-F]{3}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`), read: readUUIDTime, timeWord: uuidTimeWord},
 	{re: regexp.MustCompile(`\d{10}\.\d{1,9}|\d{19}|\d{16}|\d{13}|\d{10}`), read: readEpoch},
@@ -509,9 +518,9 @@ func clockSeamAfter(s string, lo int) int {
 func clockReach(s string, a int) int {
 	end := a
 	t := s[a:min(len(s), a+clockWordMax)]
-	for _, re := range clockAnchored {
-		if m := re.FindStringIndex(t); m != nil && a+m[1] > end {
-			end = a + m[1]
+	for k, re := range clockAnchored {
+		if m := re.FindStringIndex(t); m != nil {
+			end = max(end, clockLayouts[k].matchEnd(s, a+m[1]))
 		}
 	}
 	return end
@@ -532,7 +541,7 @@ func clockPairsAfter(lay clockLayout, rec string, er int, s string, extra [][]in
 		if m == nil {
 			return true
 		}
-		a, b := at+m[0], at+m[1]
+		a, b := at+m[0], lay.matchEnd(rec, at+m[1])
 		at = b
 		if !atWordBounds(rec, a, b) {
 			continue
@@ -738,8 +747,7 @@ func (b byPlace) Swap(i, j int) {
 // across from or to (clockWordWindow).
 func clockMatches(lay clockLayout, s string, from, to int, taken []bool) [][]int {
 	var out [][]int
-	for _, m := range lay.re.FindAllStringIndex(s[from:to], -1) {
-		m[0], m[1] = m[0]+from, m[1]+from
+	for _, m := range lay.matches(lay.re, s, from, to) {
 		if !atWordBounds(s, m[0], m[1]) {
 			continue
 		}
@@ -755,6 +763,61 @@ func clockMatches(lay clockLayout, s string, from, to int, taken []bool) [][]int
 		}
 	}
 	return out
+}
+
+// matchEnd is where lay's match that its pattern ends at s[b] ends with
+// what stands after it in s (lay.end): b, or before b where that ends it
+// earlier.
+func (lay clockLayout) matchEnd(s string, b int) int {
+	if lay.end == nil {
+		return b
+	}
+	return lay.end(s, b)
+}
+
+// matches are lay's matches in s from from to to, in the order they stand:
+// re's (lay.re, or it compiled in either case), each ending where matchEnd
+// says and the next looked for from there, as a pattern that could say what
+// stands after a match would find them.
+func (lay clockLayout) matches(re *regexp.Regexp, s string, from, to int) [][]int {
+	var out [][]int
+	for at := from; at < to; {
+		m := re.FindStringIndex(s[at:to])
+		if m == nil {
+			break
+		}
+		a, b := at+m[0], lay.matchEnd(s, at+m[1])
+		out = append(out, []int{a, b})
+		at = b
+	}
+	return out
+}
+
+// isoEnd is where a match of the ISO 8601 layout that its pattern ends at
+// s[b] ends: before the zone it writes after a space where a letter, a
+// digit, "." or "," stands right after that zone (zoneRunsOn: "…
+// 10:00:00 -1400.00" is a time, then a sum), and at b otherwise. The
+// pattern reads such a zone whole, its hours and its minutes, so it is the
+// match's last seven bytes (" +05:30") or six (" +0530"), and no other
+// match of the layout, a date's ten bytes or more, ends in a space and a
+// sign there.
+func isoEnd(s string, b int) int {
+	if b >= len(s) || !zoneRunsOn(s[b]) {
+		return b
+	}
+	for _, n := range [...]int{7, 6} {
+		if z := b - n; s[z] == ' ' && (s[z+1] == '+' || s[z+1] == '-') {
+			return z
+		}
+	}
+	return b
+}
+
+// zoneRunsOn reports whether c, right after the digits of a zone written
+// after a space, says the signed number there runs on past them: a letter
+// or a digit, or a "." or a "," before more digits.
+func zoneRunsOn(c byte) bool {
+	return isWord(c) || c == '.' || c == ','
 }
 
 // atWordBounds reports whether s[a:b] stands at ASCII word boundaries of s:
