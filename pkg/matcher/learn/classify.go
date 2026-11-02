@@ -2163,6 +2163,13 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				}
 			}
 		}
+		// A client test's read of an instant whose zone after a space is
+		// UTC's says where a keploy that did not read such a zone learned
+		// it, a wall clock word of its date and time (withWallWord), so a
+		// mock that holds that learning meets this one as the one read.
+		if dc.clientTests {
+			ln = withWallWord(ln)
+		}
 		out = append(out, ln)
 	}
 	return out

@@ -33,6 +33,44 @@ func (ln Learned) Clock() (models.ClockOffset, bool) {
 	return models.ClockOffset{}, false
 }
 
+// withWallWord is ln, in keploy mock's client tests, with its plain read's
+// WallWord (models.ClockOffset.WallWord) where it reads an ISO 8601 text
+// (the value whole, or the word Word reads) that ends in its zone written
+// after a space as UTC's (utcZoneAfterSpace): the word of its date and time
+// alone, which a keploy that did not read such a zone learned as a wall
+// clock of no zone (wordRead), the zone in the text after it. ln
+// otherwise, as it is. A decoded word (ClockWordDecoded) stands at places
+// of the decoded value, not of Recorded's, so it gets none.
+func withWallWord(ln Learned) Learned {
+	if ln.Read == nil || ln.Read.Word.Form != "" || !strings.HasPrefix(ln.Read.Layout, "iso-") {
+		return ln
+	}
+	v, s, e := ln.Recorded.Value, 0, len(ln.Recorded.Value)
+	if !ln.Read.Word.IsZero() {
+		s, e = ln.Read.Word.Start, ln.Read.Word.End
+	}
+	if z := utcZoneAfterSpace(v[s:e]); z > 0 {
+		read := *ln.Read
+		read.WallWord = models.ClockWordOf(v, s, e-z)
+		ln.Read = &read
+	}
+	return ln
+}
+
+// utcZoneAfterSpace is the length of UTC's zone written after a space at
+// the end of t, the text of an ISO 8601 read (" +00:00", " -00:00",
+// " +0000", " -0000"); 0 where t ends otherwise. The ISO layout reads a
+// zone after a space only after a time to the minute or finer, so t's
+// bytes before it are that time.
+func utcZoneAfterSpace(t string) int {
+	for _, z := range [...]string{" +00:00", " -00:00", " +0000", " -0000"} {
+		if strings.HasSuffix(t, z) {
+			return len(z)
+		}
+	}
+	return 0
+}
+
 // clockReadUncheckedWhy is a KindClockRead's Why (read after "<field>
 // changed, and "): what a caller whose replay checks no read of the clock
 // refuses it with, where keploy learned it as noise before it learned a read
