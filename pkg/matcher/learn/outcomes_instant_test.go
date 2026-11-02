@@ -632,6 +632,12 @@ func TestOutcomeANumberThatDoesNotParseIsMatchedByItsText(t *testing.T) {
 	sent = []Earlier{iSent("mock-1", rAt.Add(-10*time.Millisecond), "body.seq", Number, rec, moved)}
 	d = oWord(t, Decide(iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 50*time.Millisecond), sent, nil)), rec, live)
 	oRefused(t, "an unparsed 10-digit number F moved at mock-1", d, "conflict", "mock-1")
+	// Round F's text standing in an answer given before the call, the same
+	// in both runs, is a pick, as a moment standing there is: keploy cannot
+	// read it as a finer time's cut, so it never sets the pick aside.
+	at := []Raw{oAnswer("mock-7", 20*time.Millisecond, live).ServedAs(1).ServedAsRecorded()}
+	d = oWord(t, Decide(iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 50*time.Millisecond), nil, at)), rec, live)
+	oRefused(t, "an unparsed 10-digit number round F's earlier answer held", d, RefusalPick, "mock-7")
 }
 
 // An epoch instant one run sent where the other run sent a number that is
@@ -1554,6 +1560,21 @@ func TestOutcomeAFinerTimeHoldingRoundFsSecondIsNoPick(t *testing.T) {
 				in.Mode, in.Landed = ModeElsewhere, Landed{Where: LandedOther, Test: "test-5"}
 			}
 			iClock(t, "a $date beside its day made "+off.String()+" into the call's second in round F", oWord(t, Decide(in), rec, live))
+		}
+	}
+	// A $date beside another time of seconds, the same in both runs (an
+	// expiry a day on): that time names no moment of the call's, at its cut
+	// or any other, so the $date alone holds F's second, and only as its
+	// finer cut: the call's own clock read.
+	expiry := `,"expires_at":"` + oAt.Add(24*time.Hour).UTC().Format(time.RFC3339) + `"`
+	for _, off := range []time.Duration{0, 100 * time.Millisecond} {
+		raw := []Raw{RawOf(find(date(rMade)+expiry), true).ServedAs(1).ServedLive(RawOf(find(date(fAt.Truncate(time.Second).Add(off))+expiry), true))}
+		for _, mode := range []Mode{ModeOwn, ModeElsewhere} {
+			in := iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), nil, raw)
+			if mode == ModeElsewhere {
+				in.Mode, in.Landed = ModeElsewhere, Landed{Where: LandedOther, Test: "test-5"}
+			}
+			iClock(t, "a $date beside another time of seconds made "+off.String()+" into the call's second in round F", oWord(t, Decide(in), rec, live))
 		}
 	}
 	// The call's second as a typed time of seconds, which the answer holds
