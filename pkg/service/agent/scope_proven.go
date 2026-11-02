@@ -1692,21 +1692,15 @@ func (a *Agent) chargeAttempt(t scopeTest, loss models.CaptureLosses) bool {
 
 // withUnread is ev (a copy, nil for none) with loss, mocks whose container the
 // Docker daemon did not answer the read of: what leaves the test not judged,
-// and said in its reason.
+// and said in its reason, one sentence with what it was charged before
+// (models.ScopeEvidence.ChargeNotJudged).
 func withUnread(ev *models.ScopeEvidence, loss models.CaptureLosses) *models.ScopeEvidence {
 	out := &models.ScopeEvidence{}
 	if ev != nil {
 		c := *ev
 		out = &c
 	}
-	out.CannotCapture = out.CannotCapture.Plus(loss)
-	text := loss.NotJudgedText()
-	switch {
-	case out.Reason == "":
-		out.Reason = "keploy: " + text + "."
-	default:
-		out.Reason = strings.TrimSpace(out.Reason + " Also " + text + ".")
-	}
+	out.ChargeNotJudged(loss)
 	return out
 }
 
