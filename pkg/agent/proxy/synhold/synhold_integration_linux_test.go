@@ -76,10 +76,11 @@ func freePort(t *testing.T, _ string) int {
 
 // localPorts gives each connection a test makes a local port that no earlier
 // connection in the test had. A test that tells its connections' decisions
-// apart by their port needs this, and freePort alone does not give it: the
-// kernel offers a port again once its socket is gone, and on the other
-// address family at once (127.0.0.1:p and [::1]:p never conflict). Two
-// connections would then be counted as one connection decided twice.
+// apart by their port needs this, or two connections would be counted as one
+// connection decided twice. freePort gives it already: each port it returns
+// stays held at every address, IPv4's and IPv6's, until the test ends, so no
+// later freePort in the test is given it. localPorts checks it anyway and
+// passes over a port offered twice (TestLocalPortsAreNeverHandedOutTwice).
 type localPorts struct {
 	offer func(t *testing.T, host string) int // freePort; a test scripts repeats
 	used  map[int]bool
