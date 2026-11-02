@@ -3,6 +3,7 @@ package learn
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1192,5 +1193,116 @@ func TestOutcomeAViewKeployCannotReadMayHoldFsMoment(t *testing.T) {
 		if got := dc.inAView(p, c); got != v.want {
 			t.Errorf("%s: inAView %v; want %v", v.what, got, v.want)
 		}
+	}
+}
+
+// A decision lists the recordings it set aside because they were answered
+// after the call (Decision.AnsweredAfter): each asked at or before the
+// call's own instant and answered after it, whose answer holds the recorded
+// word, however it is handed in, whatever round F gave there and whether or
+// not round F served it at all. An adapter reads the list to refuse a word
+// no replay would check. None other is listed: one asked and answered
+// before the call (it decides), one answered at the call's own instant
+// (unknown, refused), one asked after the call (after it by its request
+// too), one whose answer holds no recorded word, and one whose request
+// alone holds the word (placed by when it was sent). The verdicts are the
+// ones the rows above pin.
+func TestOutcomeADecisionListsTheRecordingsItSetAsideAsAnsweredAfterTheCall(t *testing.T) {
+	ms := time.Millisecond
+	placeOf := func(how string) []Place {
+		if how == answeredAtHow[0] {
+			return []Place{{Mock: "mock-6", Side: Response, Path: "row.0.id"}}
+		}
+		return []Place{{Mock: "mock-5", Side: Response}}
+	}
+	check := func(what string, d Decision, want []Place) {
+		t.Helper()
+		if !slices.Equal(d.AnsweredAfter, want) {
+			t.Errorf("%s: set aside as answered after the call %+v; want %+v (%s)", what, d.AnsweredAfter, want, oDescribe([]Decision{d}))
+		}
+	}
+	for _, c := range []struct {
+		name     string
+		req, res time.Time
+		listed   bool
+	}{
+		{"asked and answered before the call", eRecAt.Add(-20 * ms), eRecAt.Add(-19 * ms), false},
+		{"asked before the call and answered 10ms after it", eRecAt.Add(-10 * ms), eRecAt.Add(10 * ms), true},
+		{"asked before the call and answered a second after it", eRecAt.Add(-10 * ms), eRecAt.Add(time.Second), true},
+		{"asked at the call's own instant and answered after it", eRecAt, eRecAt.Add(ms), true},
+		{"asked before the call and answered at its own instant", eRecAt.Add(-10 * ms), eRecAt, false},
+		{"asked and answered at the call's own instant", eRecAt, eRecAt, false},
+		{"asked and answered after the call", eRecAt.Add(time.Second), eRecAt.Add(time.Second + ms), false},
+	} {
+		for _, how := range answeredAtHow {
+			for _, fView := range []bool{false, true} {
+				var want []Place
+				if c.listed {
+					want = placeOf(how)
+				}
+				what := fmt.Sprintf("%s %s, round F's view holding the new value %v", how, c.name, fView)
+				check(what, oWord(t, Decide(answeredAtInput(how, c.req, c.res, fView)), "82", "6c7d"), want)
+				// A recorded word its answer does not hold is not set aside there.
+				in := answeredAtInput(how, c.req, c.res, fView)
+				in.Rec.Leaves["bind.$8"] = Leaf{Path: "bind.$8", Type: String, Value: "91"}
+				check(what+", the recorded word another", oWord(t, Decide(in), "91", "6c7d"), nil)
+			}
+		}
+	}
+	// Never served: the recording on disk (an unserved pool read's shape).
+	for _, c := range []struct {
+		name   string
+		before time.Duration
+		res    time.Time
+		listed bool
+	}{
+		{"asked before the call and answered after it", 10 * ms, eRecAt.Add(time.Second), true},
+		{"asked at the call's own instant and answered after it", 0, eRecAt.Add(ms), true},
+		{"asked and answered after the call", -time.Second, eRecAt.Add(time.Second + ms), false},
+	} {
+		in := answeredAtInput(answeredAtHow[1], eRecAt, eRecAt, false)
+		in.Raw[len(in.Raw)-1] = ePgAnswered("mock-5", c.before, c.res, "SELECT id, n FROM jobs", []models.PostgresV3Cells{{{Value: "82"}, {Value: "5"}}}, "SELECT 1")
+		var want []Place
+		if c.listed {
+			want = placeOf(answeredAtHow[1])
+		}
+		check("a recording round F never served, "+c.name, oWord(t, Decide(in), "82", "6c7d"), want)
+	}
+	// A new value sent at two places is one value, or two keploy cannot
+	// tell apart: each place keeps what it set aside.
+	for _, f2 := range []string{"6c7d", "7e8f"} {
+		in := answeredAtInput(answeredAtHow[1], eRecAt.Add(-10*ms), eRecAt.Add(time.Second), false)
+		in.Drift = append(in.Drift, "bind.$9")
+		in.Rec.Leaves["bind.$9"] = Leaf{Path: "bind.$9", Type: String, Value: "82"}
+		in.Live.Leaves["bind.$9"] = Leaf{Path: "bind.$9", Type: String, Value: f2}
+		ds := Decide(in)
+		if len(ds) != 2 {
+			t.Fatalf("the value at two places, the second sent as %q: %s; want two decisions", f2, oDescribe(ds))
+		}
+		want := map[string][]WordOutcome{"6c7d": {OutcomeFresh, OutcomeValue}, "7e8f": {OutcomeRefused, OutcomeRefused}}[f2]
+		for i, d := range ds {
+			if d.Outcome != want[i] {
+				t.Errorf("the value at two places, the second sent as %q: %s; want %v", f2, oDescribe(ds), want)
+			}
+			check("the value at two places, the second sent as "+f2, d, placeOf(answeredAtHow[1]))
+		}
+	}
+	// Landed in another window, the word is refused and keeps the list.
+	in := answeredAtInput(answeredAtHow[1], eRecAt.Add(-10*ms), eRecAt.Add(time.Second), false)
+	in.Mode, in.Landed = ModeElsewhere, Landed{Where: LandedBetween}
+	d := oWord(t, Decide(in), "82", "6c7d")
+	if d.Refusal == nil || d.Refusal.Kind != RefusalLandedElsewhere {
+		t.Errorf("landed between tests: %s; want refused as landed elsewhere", oDescribe([]Decision{d}))
+	}
+	check("landed between tests", d, placeOf(answeredAtHow[1]))
+	// Another test's recording is read as a place and as an entry of the
+	// set: listed once.
+	in = answeredAtInput(answeredAtHow[1], eRecAt.Add(-10*ms), eRecAt.Add(time.Second), false)
+	in.Raw[len(in.Raw)-1] = in.Raw[len(in.Raw)-1].OfAnotherTest()
+	check("another test's recording", oWord(t, Decide(in), "82", "6c7d"), placeOf(answeredAtHow[1]))
+	// A word the recording's request alone holds is placed by when it was
+	// sent, so a late answer sets nothing aside.
+	for _, how := range requestWordHow {
+		check("a request word, "+how, oWord(t, Decide(requestWordInput(how, eRecAt.Add(-time.Second), eRecAt.Add(2*time.Second))), "82", "6c7d"), nil)
 	}
 }

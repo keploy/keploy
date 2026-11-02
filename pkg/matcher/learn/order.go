@@ -156,7 +156,8 @@ func decideWords(in Input, allScope bool) ([]Decision, []string) {
 // others, each use naming the first in its line, so a replay that sends
 // the places apart misses. A value recorded at several places that round F
 // sent as two different new values is two reads keploy cannot tell apart:
-// each such place is refused, naming the first.
+// each such place is refused, naming the first. Each keeps the recordings
+// it set aside as answered after the call.
 func (dc *decider) oneValue(out []Decision, fields []string) {
 	first := map[string]int{}
 	name := func(i int) string {
@@ -176,12 +177,15 @@ func (dc *decider) oneValue(out []Decision, fields []string) {
 				"used the value bound at "+name(j)+", made anew in this call and sent at both places in both runs", []string{name(j)})
 			out[i].From = Place{Mock: dc.in.Mock, Side: Request, Path: fields[j], Live: d.Full, Whole: out[j].At.Word < 0}
 			out[i].FromAt = out[j].At
+			out[i].AnsweredAfter = d.AnsweredAfter
 		default:
 			why := "the recorded value stands at " + name(j) + " and " + name(i) + ", and round F sent " + strconv.Quote(out[j].Full) + " and " + strconv.Quote(d.Full) + " there: two values, and keploy cannot tell which one the recording's is"
 			for _, k := range []int{j, i} {
 				if out[k].Outcome == OutcomeFresh {
+					aa := out[k].AnsweredAfter
 					out[k] = dc.refuse(fields[k], out[k].At, out[k].At.Word, out[k].Recorded, out[k].Full, RefusalTwoSources, why,
 						[]string{name(j), name(i)}, dc.wordNoise(fields[k], out[k].At.Word))
+					out[k].AnsweredAfter = aa
 				}
 			}
 		}
@@ -397,9 +401,47 @@ func (dc *decider) neverServed(mock string) bool {
 }
 
 // word decides one changed word that is no instant (any other word), at
-// its address (w.At) in text, the text the leaf at bare opens to. piece:
+// its address (w.At) in text, the text the leaf at bare opens to, and
+// lists the recordings it set aside as answered after the call. piece:
 // pieceOfAnId; under unreadFloorBits it is floor.
 func (dc *decider) word(path string, bare variables.Address, rec, live, text string, w readWord, piece bool) Decision {
+	d := dc.wordAt(path, bare, rec, live, text, w, piece)
+	d.AnsweredAfter = dc.answeredAfter(w.Rec)
+	return d
+}
+
+// answeredAfter are the recordings whose answer holds r that the
+// answer-time rule set aside, so r there decided nothing (evidenceAt,
+// setEvidence): each asked at or before the call's own instant and
+// answered after it. An exchange's place names its leaf, a recording's its
+// answer whole. One asked after the call is after it by its request too,
+// and a word its request holds is placed by when it was sent (placedFor):
+// neither is listed. A recording handed in twice is listed once.
+func (dc *decider) answeredAfter(r string) []Place {
+	var out []Place
+	add := func(p Place) {
+		if !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	for _, p := range dc.ps {
+		if p = placedFor(p, r); !p.recAfter || p.at.After(dc.in.At) {
+			continue
+		}
+		if hr, _ := p.t.rec.holdsWord(r); hr {
+			add(Place{Mock: p.mock, Side: p.side, Path: p.path})
+		}
+	}
+	for _, g := range dc.outside().words {
+		if !g.noTime && !g.at.After(dc.in.At) && g.answered.After(dc.in.At) && listsHold(g.answerLists, r) {
+			add(Place{Mock: g.mock, Side: Response})
+		}
+	}
+	return out
+}
+
+// wordAt is word's verdict.
+func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text string, w readWord, piece bool) Decision {
 	at, n := w.At, w.At.Word
 	ps := make([]evPlace, len(dc.ps))
 	for i, p := range dc.ps {
