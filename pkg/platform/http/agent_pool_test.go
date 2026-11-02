@@ -2,14 +2,19 @@ package http
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -94,4 +99,159 @@ func TestAnotherClientsCancelLeavesTheAgentClientsReadAlone(t *testing.T) {
 			}
 		})
 	}
+}
+
+// schemeSeq names each scheme a row registers: http.DefaultTransport keeps a
+// registration for the life of the process and refuses a second one of the
+// same name.
+var schemeSeq atomic.Int64
+
+// registerScheme registers a scheme of its own on http.DefaultTransport, as a
+// program that embeds keploy's client does for its agent URIs (k8s-proxy's
+// keploy-agent://), and returns its name. Its round tripper does what
+// k8s-proxy's does: it puts the embedder's token on the request, in place of
+// any Authorization the client set, and sends it on as http, on a transport
+// of the embedder's.
+func registerScheme(t *testing.T, token string) string {
+	t.Helper()
+	scheme := fmt.Sprintf("keploy-test-agent-%d", schemeSeq.Add(1))
+	embedders := &http.Transport{}
+	t.Cleanup(embedders.CloseIdleConnections)
+	http.DefaultTransport.(*http.Transport).RegisterProtocol(scheme, roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		out := req.Clone(req.Context())
+		u := *req.URL
+		u.Scheme = "http"
+		out.URL = &u
+		out.Header.Set("Authorization", "Bearer "+token)
+		return embedders.RoundTrip(out)
+	}))
+	return scheme
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// clientsOfTheAgentClient are the clients an AgentClient sends on: New's,
+// with no token and with the session's token (agentHTTPClient), and a client
+// on the default transport, as one built before the client had a pool of its
+// own was.
+var clientsOfTheAgentClient = map[string]func() http.Client{
+	"a client with no token":            func() http.Client { return agentHTTPClient("") },
+	"a client with the session's token": func() http.Client { return agentHTTPClient("session-token") },
+	"a client on the default transport": func() http.Client { return http.Client{Transport: &instanceTransport{}} },
+}
+
+// requestsOnBothPaths are a request on the client's pool and one on a
+// connection of its own (ownConnection).
+var requestsOnBothPaths = map[string]func(ctx context.Context, a *AgentClient) error{
+	"on the client's pool": func(ctx context.Context, a *AgentClient) error {
+		_, err := a.GetScopeWindows(ctx)
+		return err
+	},
+	"on a connection of its own": func(ctx context.Context, a *AgentClient) error {
+		return a.EndRecordingStreams(ctx, "rec-1")
+	},
+}
+
+// A program that embeds keploy's client and reaches its agent at a URI of a
+// scheme it registered on http.DefaultTransport has every request in that
+// scheme go to the round tripper it registered, on the client's pool and on a
+// connection of its own, whatever token the client carries (ownPool). That
+// round tripper's token is what reaches the agent, and the answer is noted for
+// the agent process that gave it (agent_instance.go). On a clone of the default
+// transport, which carries no registration, every one of these requests failed
+// before it left the process: k8s-proxy's sidecar recording ended with
+// unsupported protocol scheme "keploy-agent".
+func TestASchemeTheEmbedderRegisteredReachesItsRoundTripper(t *testing.T) {
+	for client, newClient := range clientsOfTheAgentClient {
+		for path, ask := range requestsOnBothPaths {
+			t.Run(client+", "+path, func(t *testing.T) {
+				var auth atomic.Value
+				auth.Store("")
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					auth.Store(r.Header.Get("Authorization"))
+					w.Header().Set(models.AgentInstanceHeader, "proc-1")
+					_, _ = w.Write([]byte("[]"))
+				}))
+				defer srv.Close()
+				scheme := registerScheme(t, "pod-token")
+				host := strings.TrimPrefix(srv.URL, "http://")
+				a := &AgentClient{logger: zap.NewNop(), client: newClient(), conf: &config.Config{Agent: config.Agent{AgentURI: scheme + "://" + host}}}
+				if err := ask(context.Background(), a); err != nil {
+					t.Fatalf("the request in the embedder's scheme failed: %v", err)
+				}
+				if got := auth.Load().(string); got != "Bearer pod-token" {
+					t.Fatalf("the agent saw Authorization %q, want the embedder's round tripper's token", got)
+				}
+				s := instancesAt(host)
+				s.mu.Lock()
+				latest := s.latest
+				s.mu.Unlock()
+				if latest != "proc-1" {
+					t.Fatalf("the agent process noted last is %q, want proc-1: this answer was not noted", latest)
+				}
+			})
+		}
+	}
+}
+
+// A scheme nothing registered fails as it did on the clone, on both paths and
+// on every client, before the request leaves the process.
+func TestASchemeNothingRegisteredFailsAsBefore(t *testing.T) {
+	for client, newClient := range clientsOfTheAgentClient {
+		for path, ask := range requestsOnBothPaths {
+			t.Run(client+", "+path, func(t *testing.T) {
+				a := &AgentClient{logger: zap.NewNop(), client: newClient(), conf: &config.Config{Agent: config.Agent{AgentURI: "keploy-test-unregistered://127.0.0.1:1"}}}
+				err := ask(context.Background(), a)
+				if err == nil || !strings.Contains(err.Error(), `unsupported protocol scheme "keploy-test-unregistered"`) {
+					t.Fatalf("got %v, want unsupported protocol scheme \"keploy-test-unregistered\"", err)
+				}
+			})
+		}
+	}
+}
+
+// A request on http or https goes on the pool of keploy's (ownPool), never to
+// the transport the pool was cloned from, whose connections are shared with
+// every other client on it (agentPool); and a request with no URL fails there
+// as it does on any transport.
+func TestHTTPAndHTTPSStayOnThePool(t *testing.T) {
+	onRegistered := errors.New("dialed on the transport the pool was cloned from")
+	registered := &http.Transport{
+		DialContext: func(context.Context, string, string) (net.Conn, error) { return nil, onRegistered },
+	}
+	answer := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	plain := httptest.NewServer(answer)
+	defer plain.Close()
+	tls := httptest.NewTLSServer(answer)
+	defer tls.Close()
+	for _, row := range []struct {
+		name string
+		url  string
+		pool *http.Transport
+	}{
+		{"http", plain.URL, &http.Transport{}},
+		{"https", tls.URL, tls.Client().Transport.(*http.Transport).Clone()},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			defer row.pool.CloseIdleConnections()
+			rt := &ownPool{pool: row.pool, registered: registered}
+			req, err := http.NewRequest(http.MethodGet, row.url, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := rt.RoundTrip(req)
+			if err != nil {
+				t.Fatalf("a request on %s left the pool: %v", row.name, err)
+			}
+			_ = res.Body.Close()
+		})
+	}
+	t.Run("no URL", func(t *testing.T) {
+		_, err := (&ownPool{pool: &http.Transport{}, registered: registered}).RoundTrip(&http.Request{Header: http.Header{}})
+		if err == nil || !strings.Contains(err.Error(), "nil Request.URL") {
+			t.Fatalf("got %v, want the transport's nil Request.URL error", err)
+		}
+	})
 }
