@@ -7,9 +7,11 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"syscall"
 	"testing"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -116,5 +118,73 @@ func TestAProxyThatOnlyRoutesByThePairingSaysWhyItCannotBelowAWarn(t *testing.T)
 				}
 			}
 		})
+	}
+}
+
+// oneNATCounter is fakeCounter whose kernel tied the application's nat-th
+// connection to none of the application's (a NAT between them), and paired
+// every other one with dst.
+type oneNATCounter struct {
+	fakeCounter
+	nat uint64
+}
+
+func (f *oneNATCounter) ProxyConnPair(rc syscall.RawConn) (agent.ProxyConnPairing, error) {
+	p, err := f.fakeCounter.ProxyConnPair(rc)
+	if err == nil && p.AppSeq == f.nat {
+		p.AppSeq, p.Dst = 0, nil
+	}
+	return p, err
+}
+
+// With the switch off, one NAT'd connection among paired ones costs only
+// itself its pairing: it is routed by its source port, as it always was, and
+// each connection before and after it still goes where its own pairing says,
+// never where the by-port map says. Whether or not the agent settles reads:
+// one that does loses its count (CountingLost) all the same, with its WARN;
+// one that does not says it once, below a WARN.
+func TestOneNATdConnectionAmongPairedOnesLosesOnlyItsOwnPairing(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	for _, settles := range []bool{false, true} {
+		right := namedUpstream(t, "right")
+		wrong := namedUpstream(t, "wrong")
+		f := &oneNATCounter{fakeCounter: fakeCounter{dst: ipv4Dest(t, right)}, nat: 2}
+		cfg := config.New()
+		cfg.ProxyPort = 0
+		cfg.Agent.Mode = models.MODE_RECORD // with no session yet: a call passes through
+		cfg.Agent.SettleReads = settles
+		core, logs := observer.New(zap.InfoLevel)
+		p := New(zap.New(core), fakeDestInfo{dest: ipv4Dest(t, wrong)}, cfg)
+		if err := p.InitIntegrations(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		p.SetListenerCounter(f)
+		ctx, cancel := context.WithCancel(context.Background())
+		ready, done := make(chan error, 1), make(chan error, 1)
+		go func() { done <- p.Serve(ctx, ready) }()
+		if err := <-ready; err != nil {
+			t.Fatal(err)
+		}
+		if !p.CountedFromStart() {
+			t.Fatalf("settles %v: not counted from the start", settles)
+		}
+		for i, want := range []string{"right", "wrong", "right", "right"} {
+			if got := callThrough(t, p.Listener.Addr().String()); got != want {
+				t.Fatalf("settles %v: call %d of 4 reached %q, want %q (the 2nd is the NAT'd one, routed by its source port)", settles, i+1, got, want)
+			}
+		}
+		if _, lost := p.CountingLost(); lost == nil {
+			t.Fatalf("settles %v: the NAT'd connection did not drop the run's count", settles)
+		}
+		nat := logs.FilterMessageSnippet("could not tie to one of the application's").Len() +
+			logs.FilterMessageSnippet("NAT'd connection it cannot attribute").Len()
+		warns := logs.FilterLevelExact(zap.WarnLevel).Filter(func(e observer.LoggedEntry) bool {
+			return !strings.Contains(e.Message, "no session yet")
+		}).Len()
+		if nat != 1 || (warns == 1) != settles {
+			t.Fatalf("settles %v: said the NAT %d times, %d WARNs; want it said once, a WARN only where a read waits", settles, nat, warns)
+		}
+		cancel()
+		<-done
 	}
 }
