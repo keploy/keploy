@@ -24,15 +24,17 @@ func (p *Proxy) SetPortMover(move func(proxyPort, dnsPort uint32) error) {
 	p.portMover = move
 }
 
-// bindOrMove binds the server's sockets on *port with bind. Where another
-// socket holds that port (EADDRINUSE), it says which port and what holds it
-// (utils.PortTaken). Where the port may move (SetPortMover), it binds the
-// first free port instead (utils.BindFreePort), keeps it in *port, says so,
-// and tells the port mover where the proxy and its DNS server then listen,
-// before the server serves: the hooks redirect to the ports they loaded
-// with, and are told before the agent says it is ready. A mover that refuses
-// fails the start, with the new port's sockets let go (release). Where the
-// port may not move, the error says what was taken.
+// bindOrMove binds the server's sockets on *port, which is &p.Port or
+// &p.DNSPort, with bind. Where another socket holds that port (EADDRINUSE),
+// it says which port and what holds it (utils.PortTaken). Where the port may
+// move (SetPortMover), it binds the first free port instead
+// (utils.BindFreePort) and tells the port mover where the proxy and its DNS
+// server then listen, before the server serves: the hooks redirect to the
+// ports they loaded with, and are told before the agent says it is ready.
+// Only once the mover accepts does *port take the new port, and the move is
+// said. A mover that refuses fails the start, with *port left as it was and
+// the new port's sockets let go (release). Where the port may not move, the
+// error says what was taken.
 func (p *Proxy) bindOrMove(server string, port *uint32, bind func(port uint32) error, release func()) error {
 	err := bind(*port)
 	if err == nil {
@@ -49,11 +51,17 @@ func (p *Proxy) bindOrMove(server string, port *uint32, bind func(port uint32) e
 	if err != nil {
 		return fmt.Errorf("%s, and no other port could be bound: %w", taken, err)
 	}
+	proxyPort, dnsPort := p.Port, p.DNSPort
+	if port == &p.Port {
+		proxyPort = moved
+	} else {
+		dnsPort = moved
+	}
+	if err := p.portMover(proxyPort, dnsPort); err != nil {
+		release()
+		return fmt.Errorf("%s, and the hooks could not be told of a move to port %d (proxy %d, DNS %d): %w", taken, moved, proxyPort, dnsPort, err)
+	}
 	*port = moved
 	p.logger.Warn(fmt.Sprintf("%s; the %s listens on port %d instead", taken, server, moved))
-	if err := p.portMover(p.Port, p.DNSPort); err != nil {
-		release()
-		return fmt.Errorf("failed to tell the hooks the proxy's ports (proxy %d, DNS %d): %w", p.Port, p.DNSPort, err)
-	}
 	return nil
 }

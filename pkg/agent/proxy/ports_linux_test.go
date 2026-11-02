@@ -101,8 +101,9 @@ func TestTwoProxiesStartedTogetherOnOnePortBothListen(t *testing.T) {
 	told = nil
 	refusing := New(zap.NewNop(), plainDestInfo{}, cfg)
 	recordMoves(refusing, &told, refused)
-	if ready, start := serve(refusing); !errors.Is(ready, refused) || !errors.Is(start, refused) || len(told) != 1 {
-		t.Fatalf("a mover that refuses: got ready %v, start %v, told %v", ready, start, told)
+	if ready, start := serve(refusing); !errors.Is(ready, refused) || !errors.Is(start, refused) || len(told) != 1 ||
+		told[0][0] == taken || refusing.Port != taken || !strings.Contains(ready.Error(), holder) {
+		t.Fatalf("a mover that refuses: want the start failed naming %q, port kept at %d; got ready %v, start %v, told %v, port %d", holder, taken, ready, start, told, refusing.Port)
 	}
 	freeAgain(t, "a refused move", told[0][0])
 
@@ -188,8 +189,8 @@ func TestTwoDNSServersStartedTogetherOnOnePortDoNotShareIt(t *testing.T) {
 	recordMoves(fourth, &told, refused)
 	stop4, err := startDNSOn(t, fourth)
 	defer stop4()
-	if !errors.Is(err, refused) || len(told) != 1 {
-		t.Fatalf("a mover that refuses: got %v, told %v", err, told)
+	if !errors.Is(err, refused) || len(told) != 1 || told[0][0] != fourth.Port || told[0][1] == want || fourth.DNSPort != want {
+		t.Fatalf("a mover that refuses: got %v, told %v, DNS port %d (want kept at %d)", err, told, fourth.DNSPort, want)
 	}
 	freeAgain(t, "a refused move", told[0][1])
 }
