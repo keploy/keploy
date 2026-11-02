@@ -58,20 +58,43 @@ func (a *Agent) exactServer() (coreAgent.ExactServer, error) {
 	return es, nil
 }
 
-// servePoolExactly serves the current claim's key's pool slice (before any
-// claim, models.PoolKeyNone's) while no test is open. It stages the replay's
-// mocks on the proxy the first time in a session, under exact serving with
-// no pool, so no staged mock is ever served outside it, and no mock still
-// staged from the previous session answers under one of this session's pool
-// names (names are unique only within a recording). Until the CLI sent the
-// pool slices, the slice is empty: no data-plane pool mock answers.
-func (a *Agent) servePoolExactly(ctx context.Context) error {
-	es, err := a.exactServer()
+// exactServerOf is how worker's tests are served exactly: the proxy's own
+// (exactServer) for worker 0, the run of one test process, and for a test
+// worker its own manager's, served at its claim (serveWorker). A worker that
+// is not served has none: one manager's serving cannot stand in for
+// another's.
+func (a *Agent) exactServerOf(worker uint32) (coreAgent.ExactServer, error) {
+	if worker == 0 {
+		return a.exactServer()
+	}
+	a.provenMu.Lock()
+	w, ok := a.proven.workers[worker]
+	a.provenMu.Unlock()
+	if !ok || w.es == nil {
+		return nil, fmt.Errorf("keploy does not serve test worker %d from mocks of its own: it ended, or its claim served none", worker)
+	}
+	return w.es, nil
+}
+
+// servePoolExactly serves worker's claim's key's pool slice (before any
+// claim, models.PoolKeyNone's) while none of its tests is open; worker 0 is
+// the run of one test process, served on the proxy's own manager. It stages
+// the replay's mocks on the proxy the first time in a session, under exact
+// serving with no pool, so no staged mock is ever served outside it, and no
+// mock still staged from the previous session answers under one of this
+// session's pool names (names are unique only within a recording). A staging
+// reaches every worker's manager too. Until the CLI sent the pool slices,
+// the slice is empty: no data-plane pool mock answers.
+func (a *Agent) servePoolExactly(ctx context.Context, worker uint32) error {
+	es, err := a.exactServerOf(worker)
 	if err != nil {
 		return err
 	}
 	a.provenMu.Lock()
 	key, slice, staged := a.proven.key, a.proven.pool, a.proven.staged
+	if worker != 0 {
+		key = a.proven.workers[worker].key
+	}
 	a.provenMu.Unlock()
 	if key == "" {
 		key = models.PoolKeyNone
@@ -294,8 +317,11 @@ func (a *Agent) restartKey(key string) error {
 // none bound, in the same step (openExactTest). A mapping that names a mock
 // the loaded recording does not have refuses: what the test owns cannot be
 // told.
+//
+// A test worker's test is served on its worker's manager (exactServerOf).
 func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
-	es, err := a.exactServer()
+	worker := a.scopeInstance(id)
+	es, err := a.exactServerOf(worker)
 	if err != nil {
 		return err
 	}
@@ -306,7 +332,7 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 		// A begin before the CLI sent its table: nothing is staged, and the
 		// pool serves nothing; the test owns what its mapping (none yet)
 		// lists.
-		if err := a.servePoolExactly(ctx); err != nil {
+		if err := a.servePoolExactly(ctx, worker); err != nil {
 			return err
 		}
 	}
@@ -325,7 +351,10 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 	// counts each as a recorded call the test did not make.
 	unservable := a.refusedOf(names)
 	a.provenMu.Lock()
-	a.proven.unservable = unservable
+	if a.proven.unservable == nil {
+		a.proven.unservable = map[string][]string{}
+	}
+	a.proven.unservable[id] = unservable
 	a.provenMu.Unlock()
 	// The key's worker scope answers in the test's window too: the last
 	// pool serve showed it (servePoolExactly). Every change of key serves
@@ -340,7 +369,10 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 		return err
 	}
 	a.provenMu.Lock()
-	a.proven.servedSince = time.Now()
+	if a.proven.servedSince == nil {
+		a.proven.servedSince = map[string]time.Time{}
+	}
+	a.proven.servedSince[id] = time.Now()
 	a.provenMu.Unlock()
 	return nil
 }

@@ -32,11 +32,14 @@ import (
 var MaxWorkers = func() int { return 1 }
 
 // workerClaim is a live worker's claim in a run of more than one worker: its
-// process, its key and directory, and the worker count it declared.
+// process, its key and directory, and the worker count it declared. In a
+// replay, es serves its tests and its calls outside them from a mock manager
+// of the worker's own (serveWorker); nil in a record.
 type workerClaim struct {
 	claimant
 	key, dir string
 	declared int
+	es       coreAgent.ExactServer
 }
 
 // declaredWorkers is how many test workers a claim of process caller says
@@ -60,17 +63,23 @@ func declaredWorkers(n, caller int) (int, *models.ScopeError) {
 	return n, nil
 }
 
+// replayWorkersRefusal refuses, in a replay, process pid's claim as one of
+// declared test workers: each worker's tests are served from its own
+// manager (serveWorker), but its misses still reach one run-wide list,
+// which cannot tell one worker's from another's.
+func (a *Agent) replayWorkersRefusal(pid, declared int) *models.ScopeError {
+	if !a.replaying() {
+		return nil
+	}
+	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrTooManyWorkers,
+		fmt.Sprintf("process %d declared %d test workers, but this keploy replays one test worker at a time", pid, declared),
+		"replay with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
+}
+
 // claimWorker claims an instance of the run for me, a worker of a run of
 // declared workers. With the wire held, after ClaimInstance's checks of the
 // caller and endGoneWorkers.
 func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me claimant, declared int) (models.InstanceResp, *models.ScopeError) {
-	if a.replaying() {
-		// Each worker's recorded calls are served from one staging today,
-		// which cannot tell one worker's connection from another's.
-		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrTooManyWorkers,
-			fmt.Sprintf("process %d declared %d test workers, but this keploy replays one test worker at a time", me.pid, declared),
-			"replay with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
-	}
 	stamper, ok := a.Hooks.(coreAgent.InstanceStamper)
 	if !ok {
 		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInInstance,
@@ -148,16 +157,64 @@ func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me clai
 			fmt.Sprintf("keploy could not give test worker process %d an instance of its own: processes of gone workers are still in every one of its %d instances", me.pid, coreAgent.MaxInstanceID),
 			"stop the processes earlier test workers left running")
 	}
-	now := time.Now()
+	es, serr := a.serveWorker(me.pid, id)
+	if serr != nil {
+		a.endInstances([]uint32{id})
+		return models.InstanceResp{}, serr
+	}
 	a.provenMu.Lock()
 	if a.proven.workers == nil {
 		a.proven.workers = map[uint32]workerClaim{}
 	}
-	a.proven.workers[id] = workerClaim{claimant: me, key: req.Key, dir: req.Dir, declared: declared}
+	a.proven.workers[id] = workerClaim{claimant: me, key: req.Key, dir: req.Dir, declared: declared, es: es}
+	a.provenMu.Unlock()
+	if es != nil {
+		// Calls the worker makes from now while none of its tests is open
+		// are its key's.
+		if err := a.servePoolExactly(ctx, id); err != nil {
+			a.dropWorker(id)
+			return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+				fmt.Sprintf("keploy could not arm the recorded calls of %s made outside its tests for test worker process %d: %v", req.Key, me.pid, err), "check the agent's log")
+		}
+	}
+	now := time.Now()
+	a.provenMu.Lock()
 	a.proven.claims = append(a.proven.claims, models.ScopeWindow{Claim: req.Key, Start: now, End: now, Worker: id})
 	a.provenMu.Unlock()
 	containerkey.Default.BeginInstance()
 	return models.InstanceResp{V: models.ScopeProtocolVersion, Instance: strconv.FormatUint(uint64(id), 10), TimeFile: TimeFile()}, nil
+}
+
+// serveWorker, in a replay, starts serving test worker id (process pid) from
+// a mock manager of its own (coreAgent.InstanceServer), and returns how its
+// tests are served there; nil in a record. A proxy that cannot is refused:
+// one manager for every worker would let one worker's call answer from, or
+// use up, another's mocks.
+func (a *Agent) serveWorker(pid int, id uint32) (coreAgent.ExactServer, *models.ScopeError) {
+	if !a.replaying() {
+		return nil, nil
+	}
+	is, ok := a.Proxy.(coreAgent.InstanceServer)
+	if !ok {
+		return nil, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInInstance,
+			fmt.Sprintf("test worker process %d claimed a replay, but keploy's proxy cannot serve each test worker's calls from mocks of its own", pid),
+			"replay with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
+	}
+	es, err := is.ServeInstance(id)
+	if err != nil {
+		return nil, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+			fmt.Sprintf("keploy could not serve test worker process %d's calls from mocks of its own: %v", pid, err), "check the agent's log")
+	}
+	return es, nil
+}
+
+// dropWorker takes back the claim of worker id, which no test of has begun:
+// it is no worker, and its instance ends. With the wire held.
+func (a *Agent) dropWorker(id uint32) {
+	a.provenMu.Lock()
+	delete(a.proven.workers, id)
+	a.provenMu.Unlock()
+	a.endInstances([]uint32{id})
 }
 
 // workerIDs are the live workers' instances, in order. With provenMu held.
@@ -197,8 +254,19 @@ func (a *Agent) endGoneWorkers(ctx context.Context) {
 
 // endInstances takes every process out of instances ids. One the kernel
 // could not end stays held: a later claim does not get it
-// (coreAgent.ErrInstanceHeld).
+// (coreAgent.ErrInstanceHeld). In a replay each one's manager goes first: a
+// call its processes make from then on is refused, never answered from
+// another worker's mocks.
 func (a *Agent) endInstances(ids []uint32) {
+	if is, ok := a.Proxy.(coreAgent.InstanceServer); ok && a.replaying() {
+		for _, id := range ids {
+			// A new session's proxy serves no worker any more: an id it
+			// does not serve is already stopped.
+			if err := is.StopServingInstance(id); err != nil {
+				a.logger.Debug("a test worker's instance was not served", zap.Uint32("instance", id), zap.Error(err))
+			}
+		}
+	}
 	stamper, ok := a.Hooks.(coreAgent.InstanceStamper)
 	if !ok {
 		return

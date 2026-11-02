@@ -140,12 +140,15 @@ func (p *Proxy) instanceManager(inst uint32) *MockManager {
 
 // ServeInstance implements agent.InstanceServer: it starts serving test
 // worker inst from a manager of its own, staged as the run's is, and
-// returns how the agent serves inst's tests on it.
+// returns how the agent serves inst's tests on it. While the run's manager
+// serves exactly, the worker's begins so, with nothing in its pool: a call
+// it makes before the agent serves it its pool answers nothing staged.
 func (p *Proxy) ServeInstance(inst uint32) (agent.ExactServer, error) {
 	if inst == 0 {
 		return nil, errors.New("test worker instance 0 is no worker: keploy gives each worker an instance id from 1")
 	}
-	if p.getMockManager() == nil {
+	run := p.getMockManager()
+	if run == nil {
 		return nil, errNoMockManager
 	}
 	s := &p.instances
@@ -160,6 +163,9 @@ func (p *Proxy) ServeInstance(inst uint32) (agent.ExactServer, error) {
 	wm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger.With(zap.Uint32("workerInstance", inst)))
 	for _, st := range s.staged {
 		st.apply(wm)
+	}
+	if run.exactView() != nil {
+		wm.ServeExactPool(models.PoolKeyNone, nil)
 	}
 	s.mu.Lock()
 	if s.mgrs == nil {
