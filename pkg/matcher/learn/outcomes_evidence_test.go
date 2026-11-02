@@ -1013,29 +1013,36 @@ func tokenMock(name, word string, req, res time.Time) *models.Mock {
 // as "6c7d" (mock-6), or a start-up recording (mock-5) round F served with
 // a view whose request sent "6c7d", served as recorded, or never served.
 func requestWordInput(how string, req, res time.Time) Input {
+	return requestWordInputOf(how, "82", "6c7d", "82", "6c7d", req, res)
+}
+
+// requestWordInputOf is requestWordInput's call changing rec to live, its
+// recording's request holding r where round F's view and exchange leaf
+// hold f.
+func requestWordInputOf(how, rec, live, r, f string, req, res time.Time) Input {
 	const path = "bind.$8"
 	in := Input{Drifts: clockedDrifts(), Drift: []string{path}, At: eRecAt, Arrived: eRecAt, Raw: eStartup(), Test: "test-2", Mock: "mock-300",
-		Rec:  Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}},
-		Live: Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "6c7d"}}},
+		Rec:  Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: rec}}},
+		Live: Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}},
 		Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true}}
 	raw := func(word string, served bool) Raw { return RawOf(tokenMock("mock-5", word, req, res), served) }
 	switch how {
 	case "an exchange of the test":
-		m := tokenMock("mock-6", "82", req, res)
+		m := tokenMock("mock-6", r, req, res)
 		tr := NewTracker()
 		tr.Begin()
 		tr.ServedMock(m)
 		tr.Served(tr.Placed().Test, Earlier{Mock: m.Name, At: req, Own: true, Payload: RawOf(m, true),
-			Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "q.t", Type: String, Value: "82"}, Live: "6c7d"}}})
-		tr.ServedMockLive(m, "a", func() (*models.Mock, error) { return tokenMock("mock-6", "6c7d", req, res), nil })
+			Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "q.t", Type: String, Value: r}, Live: f}}})
+		tr.ServedMockLive(m, "a", func() (*models.Mock, error) { return tokenMock("mock-6", f, req, res), nil })
 		pl := tr.Placed()
 		in.Earlier = InServeOrder(pl.Earlier, []*models.Mock{m}, pl.Order)
 	case "a start-up recording whose view sent the new value":
-		in.Raw = append(in.Raw, raw("82", true).ServedAs(6).ServedLive(raw("6c7d", true)))
+		in.Raw = append(in.Raw, raw(r, true).ServedAs(6).ServedLive(raw(f, true)))
 	case "a start-up recording served as recorded":
-		in.Raw = append(in.Raw, raw("82", true).ServedAs(6).ServedAsRecorded())
+		in.Raw = append(in.Raw, raw(r, true).ServedAs(6).ServedAsRecorded())
 	default:
-		in.Raw = append(in.Raw, raw("82", false))
+		in.Raw = append(in.Raw, raw(r, false))
 	}
 	return in
 }
@@ -1054,7 +1061,8 @@ var requestWordHow = []string{"an exchange of the test", "a start-up recording w
 // as recorded sets the word aside (fresh), and one never served may hold
 // round F's word (unknown, refused). Asked at the call's own instant, it is
 // unknown and refused naming that, as an exchange's request leaf is. Asked
-// after the call, it gave the application nothing before it, as now. Never
+// after the call, with or without an answer time, it gave the application
+// nothing before it, as now. Never
 // fresh by a request answered late, which would leave unchecked a word the
 // application sent before the call.
 func TestOutcomeAWordARecordingsRequestHoldsIsPlacedByWhenItWasSent(t *testing.T) {
@@ -1076,6 +1084,20 @@ func TestOutcomeAWordARecordingsRequestHoldsIsPlacedByWhenItWasSent(t *testing.T
 			oRefused(t, what, d, RefusalUnknown, "mock-5")
 		}
 	}
+	// Asked after the call, it gave the recorded application nothing
+	// before it, whether or not its answer time can be read: only round
+	// F's side decides.
+	sentAfter := func(what, how string, d Decision) {
+		t.Helper()
+		switch how {
+		case requestWordHow[0], requestWordHow[1]:
+			oRefused(t, what, d, RefusalUnknown, mockOf(how), fSide)
+		default:
+			if d.Outcome != OutcomeFresh {
+				t.Errorf("%s: %s; want fresh (it gave the application nothing before the call)", what, oDescribe([]Decision{d}))
+			}
+		}
+	}
 	for _, c := range []struct {
 		name     string
 		req, res time.Time
@@ -1088,17 +1110,8 @@ func TestOutcomeAWordARecordingsRequestHoldsIsPlacedByWhenItWasSent(t *testing.T
 			t.Helper()
 			oRefused(t, what, d, RefusalUnknown, mockOf(how), atCallWhy)
 		}},
-		{"asked a second after the call", eRecAt.Add(time.Second), eRecAt.Add(time.Second + ms), func(what, how string, d Decision) {
-			t.Helper()
-			switch how {
-			case requestWordHow[0], requestWordHow[1]:
-				oRefused(t, what, d, RefusalUnknown, mockOf(how), fSide)
-			default:
-				if d.Outcome != OutcomeFresh {
-					t.Errorf("%s: %s; want fresh (it gave the application nothing before the call)", what, oDescribe([]Decision{d}))
-				}
-			}
-		}},
+		{"asked a second after the call", eRecAt.Add(time.Second), eRecAt.Add(time.Second + ms), sentAfter},
+		{"asked a second after the call, with no answer time", eRecAt.Add(time.Second), time.Time{}, sentAfter},
 	} {
 		for _, how := range requestWordHow {
 			c.check(how+" "+c.name, how, oWord(t, Decide(requestWordInput(how, c.req, c.res)), "82", "6c7d"))
@@ -1118,4 +1131,66 @@ func TestOutcomeAWordARecordingsRequestHoldsIsPlacedByWhenItWasSent(t *testing.T
 	in := requestWordInput(requestWordHow[1], eRecAt.Add(-time.Second), eRecAt.Add(2*time.Second))
 	in.Raw[len(in.Raw)-1].servedAfter = true
 	oRefused(t, "a start-up recording round F served after the call arrived", oWord(t, Decide(in), "82", "6c7d"), RefusalUnknown, "mock-5")
+}
+
+// A word a recording's request holds is placed by when it was sent however
+// the call's value carries it, asked a second before the call and answered
+// two seconds after it as when answered before it: a whole URL-safe token
+// a start-up recording's view sent binds there, and an id of 32 bits a
+// never-served start-up recording's request holds, which the value carries
+// only in a decoded form, is refused naming that recording, which may hold
+// round F's id.
+func TestOutcomeARequestWordIsPlacedByWhenItWasSentInATokenAndADecodedForm(t *testing.T) {
+	const tr, tf = "Sfl-KxwRJ_SMeKKF2QT4fwpMeJf36POk6yJV_adQssw", "Q1x_Yp-9vTq3LmN0Rr4sWkHd2cJ7aBfE5gUoZ_iXyPq"
+	const r32, f32 = "a1b2c3d4", "e5f6a7b8"
+	enc := oEncoded()["a signed message"]
+	req := eRecAt.Add(-time.Second)
+	for _, c := range []struct {
+		name string
+		res  time.Time
+	}{
+		{"answered 0.9s before the call", eRecAt.Add(-900 * time.Millisecond)},
+		{"answered two seconds after the call", eRecAt.Add(2 * time.Second)},
+	} {
+		d := oWord(t, Decide(requestWordInputOf(requestWordHow[1], tr, tf, tr, tf, req, c.res)), tr, tf)
+		iValue(t, "a whole token a start-up recording's view sent, asked a second before the call and "+c.name, d, "mock-5")
+		ds := Decide(requestWordInputOf(requestWordHow[3], enc(r32), enc(f32), r32, f32, req, c.res))
+		if len(ds) == 0 {
+			t.Errorf("an id in a decoded form, %s: no decision", c.name)
+		}
+		for _, d := range ds {
+			oRefused(t, "an id a never-served start-up recording's request holds, in the value's decoded form, asked a second before the call and "+c.name, d, RefusalUnknown, "mock-5")
+		}
+	}
+}
+
+// A view round F served that keploy cannot read may hold F's moment, so it
+// counts as one that does (inAView, fail closed): an answer F served
+// changed stays a source, and an answer whose view keploy cannot tell
+// stays one it cannot tell, never one whose views hold nothing. Through
+// Decide a view is read when it is handed in (Raw.viewOf), and one that
+// cannot be read leaves the answer with no view at all, so this branch is
+// pinned here, at the view.
+func TestOutcomeAViewKeployCannotReadMayHoldFsMoment(t *testing.T) {
+	answer := func(body string) *models.Mock {
+		return getAnswer("mock-7", "http://api/jobs/1", body, eRecAt.Add(-time.Second))
+	}
+	var dr *DriftCache
+	x := newReaderIndex(dr)
+	dc := &decider{x: x, dr: dr}
+	c := changedInstant{r: "82", l: "6c7d"}
+	for _, v := range []struct {
+		what string
+		view Raw
+		want bool
+	}{
+		{"a view that holds F's value", RawOf(answer(`{"job":"6c7d"}`), true), true},
+		{"a view that holds another value", RawOf(answer(`{"job":"9a1e"}`), true), false},
+		{"a view keploy cannot read", dr.LazyRawOf(answer(`{"job":"9a1e"}`), true, func() (*models.Mock, error) { return nil, errors.New("gone") }), true},
+	} {
+		p := evPlace{name: "mock-7", t: &placeText{views: []*readerText{x.textOf(v.view)}}}
+		if got := dc.inAView(p, c); got != v.want {
+			t.Errorf("%s: inAView %v; want %v", v.what, got, v.want)
+		}
+	}
 }

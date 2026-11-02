@@ -1477,4 +1477,26 @@ func TestALookBackAPlaceHeldInAnotherFormIsNeverReadFromItsTestsBegin(t *testing
 	}
 	oRefused(t, "a look-back no replay compares beside a place in another form", call([]Earlier{held}), RefusalNoClockRead, "mock-9", "another form", "clock - 1m")
 	oRefused(t, "a look-back no replay compares", call(nil), RefusalCannotCheck, "clock - 1m")
+	// Only a place of the call's scope, sent before the call, is such a
+	// place: one sent at the call's own instant may have come after it, and
+	// one of another test is outside the scope. The look-back stays refused
+	// as one keploy cannot check, its line naming neither as a place that
+	// held the moment in another form.
+	after := held
+	after.At = rAt
+	other := held
+	other.Own, other.Run = false, true
+	for _, c := range []struct {
+		what string
+		e    Earlier
+	}{
+		{"beside a place in another form sent at the call's own instant", after},
+		{"beside another test's place in another form", other},
+	} {
+		d := call([]Earlier{c.e})
+		oRefused(t, "a look-back no replay compares "+c.what, d, RefusalCannotCheck, "clock - 1m")
+		if d.Refusal != nil && (strings.Contains(d.Refusal.Why, "another form") || strings.Contains(d.Line, "another form")) {
+			t.Errorf("a look-back no replay compares %s: refused %q (line %q); want no place named as holding the moment in another form", c.what, d.Refusal.Why, d.Line)
+		}
+	}
 }
