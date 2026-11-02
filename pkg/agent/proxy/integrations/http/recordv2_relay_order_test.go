@@ -48,6 +48,8 @@ type relayedConn struct {
 	// relay has ended.
 	sess      *supervisor.Session
 	relayDone chan struct{}
+	// stopRelay cancels the relay's context, as the recording's stop does.
+	stopRelay context.CancelFunc
 	// grace is the relay's HalfCloseGrace (0: its default).
 	grace time.Duration
 }
@@ -113,9 +115,10 @@ func (c *relayedConn) startRelay(t *testing.T) {
 	if c.wrapDst != nil {
 		dst = c.wrapDst(dst)
 	}
-	r := relay.New(relay.Config{Logger: zap.NewNop(), HalfCloseGrace: c.grace, ClientStopped: c.sess.MarkEndedWhereClientStopped}, src, dst)
+	r := relay.New(relay.Config{Logger: zap.NewNop(), HalfCloseGrace: c.grace, ClientStopped: c.sess.MarkEndedWhereClientStopped, PeerEnded: c.sess.MarkPeerEnded}, src, dst)
 	c.sess.ClientStream, c.sess.DestStream = r.ClientStream(), r.DestStream()
 	ctx, cancel := context.WithCancel(context.Background())
+	c.stopRelay = cancel
 	c.relayDone = make(chan struct{})
 	relayDone := c.relayDone
 	go func() { defer close(relayDone); _ = r.Run(ctx) }()

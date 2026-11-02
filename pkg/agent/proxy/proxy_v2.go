@@ -280,6 +280,11 @@ func (p *Proxy) recordViaSupervisor(
 		// of what reached the proxy before the client's FIN, only finished
 		// the message's framing).
 		ClientStopped: svSess.MarkEndedWhereClientStopped,
+		// How each side ended its side of the connection, and which ended
+		// first: a call the destination never answered is recorded with
+		// the fault it gave (its reset or its close), or as the client's
+		// giving up when the client closed first.
+		PeerEnded: svSess.MarkPeerEnded,
 		// User-tunable record-buffer caps. Snapshotted onto the Proxy
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via
