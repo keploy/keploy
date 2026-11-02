@@ -243,3 +243,111 @@ func TestARunsMockRealIsSeenByTheOverlapCheck(t *testing.T) {
 	require.NoError(t, a.KeepRealDeps(ctx, nil))
 	require.False(t, a.realDepsSet.Load())
 }
+
+// A given is the open test's of the worker whose process gave it, while
+// another worker's test is open too.
+func TestAGivenIsItsOwnWorkersOpenTests(t *testing.T) {
+	a, _ := workerAgent(t, models.MODE_RECORD, 4)
+	w1, w2 := child(t), child(t)
+	claimWorker(t, a, w1.Process.Pid, "a", 2)
+	claimWorker(t, a, w2.Process.Pid, "b", 2)
+	_, serr := a.ProvenBegin(as(w1.Process.Pid), begin("TestOne"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestTwo"))
+	require.Nil(t, serr)
+	resp, serr := a.ProvenGive(as(w2.Process.Pid), give("app", "app-2", "b_test.go:7"))
+	require.Nil(t, serr)
+	require.Equal(t, "given:app", resp.Variable)
+	resp, serr = a.ProvenGive(as(w1.Process.Pid), give("app", "app-1", "a_test.go:7"))
+	require.Nil(t, serr)
+	require.Equal(t, "given:app", resp.Variable, "each test numbers its own givens")
+	_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestTwo", Outcome: "passed"})
+	require.Nil(t, serr)
+	_, serr = a.ProvenGive(as(w2.Process.Pid), give("app", "app-3", ""))
+	require.NotNil(t, serr, "its worker has no test open")
+	require.Equal(t, models.ScopeErrNotOpen, serr.Code)
+	_, serr = a.ProvenEnd(as(w1.Process.Pid), models.ScopeReq{Name: "TestOne", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Equal(t, []models.GivenValue{{Name: "given:app", Value: "app-1", Source: "a_test.go:7"}}, windowOf(t, a, "a::TestOne").Given)
+	require.Equal(t, []models.GivenValue{{Name: "given:app", Value: "app-2", Source: "b_test.go:7"}}, windowOf(t, a, "b::TestTwo").Given)
+}
+
+// raise raises the proxy listener's drops by listener and its network
+// namespace's by net.
+func raise(p *wireProxy, listener, net uint64) {
+	p.smu.Lock()
+	p.drops, p.netDrops = p.drops+listener, p.netDrops+net
+	p.smu.Unlock()
+}
+
+// A begin while another worker's test is open closes that test's drops'
+// window, not a gap: what the window was carried from the gap and could not
+// pair pairs with nothing later, as at any test's end. A drop whose two
+// rises the gap after the tests sees is the next test's.
+func TestAnOverlappingBeginClosesATestsDropsWindow(t *testing.T) {
+	a, _ := workerAgent(t, models.MODE_RECORD, 4)
+	p := a.Proxy.(*wireProxy)
+	w1, w2 := child(t), child(t)
+	claimWorker(t, a, w1.Process.Pid, "a", 2)
+	claimWorker(t, a, w2.Process.Pid, "b", 2)
+	_, serr := a.ProvenBegin(as(w1.Process.Pid), begin("TestZero"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(as(w1.Process.Pid), models.ScopeReq{Name: "TestZero", Outcome: "passed"})
+	require.Nil(t, serr)
+	raise(p, 1, 0) // in the gap, unpaired: carried into TestOne's window
+	_, serr = a.ProvenBegin(as(w1.Process.Pid), begin("TestOne"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestTwo"))
+	require.Nil(t, serr)
+	raise(p, 0, 1) // pairs with nothing: the rise it would pair with was carried, unpaired, through a test's window
+	_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestTwo", Outcome: "passed"})
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(as(w1.Process.Pid), models.ScopeReq{Name: "TestOne", Outcome: "passed"})
+	require.Nil(t, serr)
+	raise(p, 1, 1) // in the gap: TestThree's
+	_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestThree"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestThree", Outcome: "passed"})
+	require.Nil(t, serr)
+
+	for _, id := range []string{"a::TestZero", "a::TestOne", "b::TestTwo"} {
+		require.Nil(t, windowOf(t, a, id).Evidence, "%s is charged nothing", id)
+	}
+	w := windowOf(t, a, "b::TestThree")
+	require.NotNil(t, w.Evidence)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1}}, w.Evidence.CannotCapture)
+}
+
+// An end that gives up on its test's calls while another worker's test is
+// open leaves the drops' window that test's: the run's read of what no test
+// was charged does not close it, and the open test's end charges it.
+func TestAGivenUpEndLeavesTheDropsWindowTheOpenTests(t *testing.T) {
+	a, h := workerAgent(t, models.MODE_RECORD, 4)
+	p := a.Proxy.(*wireProxy)
+	ctx := context.Background()
+	w1, w2 := child(t), child(t)
+	claimWorker(t, a, w1.Process.Pid, "a", 2)
+	claimWorker(t, a, w2.Process.Pid, "b", 2)
+	_, serr := a.ProvenBegin(as(w1.Process.Pid), begin("TestOne"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestTwo"))
+	require.Nil(t, serr)
+	fault := func(err error) {
+		h.mu.Lock()
+		h.countHooks.err = err
+		h.mu.Unlock()
+	}
+	fault(models.ErrProxyConnsUnsupported)
+	_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestTwo", Outcome: "passed"})
+	require.NotNil(t, serr, "keploy cannot count the calls still waiting for its proxy")
+	fault(nil)
+	raise(p, 1, 1) // in TestOne's window
+	un, err := a.UnchargedCaptureLosses(ctx)
+	require.NoError(t, err)
+	require.Empty(t, un, "the drop is the open test's")
+	_, serr = a.ProvenEnd(as(w1.Process.Pid), models.ScopeReq{Name: "TestOne", Outcome: "passed"})
+	require.Nil(t, serr)
+	w := windowOf(t, a, "a::TestOne")
+	require.NotNil(t, w.Evidence)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1}}, w.Evidence.CannotCapture)
+}
