@@ -204,6 +204,8 @@ func TestASiblingsRoleIsPassedOnOnlyWhereItsRuleHolds(t *testing.T) {
 		{"siblings that learned the place two ways", []Raw{insert("mock-16", token).Sibling(role(KindNoise, token)), insert("mock-17", token).Sibling(role(KindEcho, token))}, nil},
 		{"a reading that learns another kind than the sibling's", []Raw{insert("mock-16", token).Sibling(role(KindNoise, token))}, []Leaf{echoed}},
 		{"another recording that holds the value", []Raw{insert("mock-16", token).Sibling(role(KindNoise, token)), insert("mock-9", token)}, nil},
+		{"a sibling's place learned as a carried value, another recording holding the value", []Raw{insert("mock-16", token).Sibling(role(KindVariable, token)), insert("mock-9", token)}, nil},
+		{"siblings that learned the place two ways, the noise last", []Raw{insert("mock-16", token).Sibling(role(KindEcho, token)), insert("mock-17", token).Sibling(role(KindNoise, token))}, nil},
 	} {
 		if ln := nonce(row.raw, row.resp...); ln.Kind != KindVariable || ln.From.Mock != "mock-16" {
 			t.Errorf("%s: learned %s from %q (%s); want carried from mock-16, as before", row.what, ln.Kind, ln.From.Mock, ln.Why)
