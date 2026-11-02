@@ -280,3 +280,56 @@ func TestATestsRecordedBeginGivenWithItsRequestBoundsItsWindowInTheRecording(t *
 		t.Errorf("a client test's call once its test ended, a recorded begin given then: window %+v; want the recording's span from the previous recorded call, with no begin", w)
 	}
 }
+
+// A client test's learn step reads a plain value its call's window refuses
+// from each run's test begin, in both runs at once (Window.sinceBegin): a
+// server test's window widened from its test's begin
+// (Window.fromTestBegin), which keeps the full round's span from a serve
+// made before the test began, is not a client test's. On a clock that ran
+// as one from a serve made before its test began, a value the full round
+// read before its test began, recorded inside its test before the call
+// recorded before the upsert, is refused; read after its test began, the
+// same recorded value is learned as a read since its test began.
+func TestAClientTestsWindowTakesNoServerTestsSpanFromItsBegin(t *testing.T) {
+	base := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+	recBegin := time.Date(2026, 10, 31, 8, 53, 33, 933_485_077, time.UTC)
+	clock := &runClock{}
+	tr := NewTracker()
+	tr.SetClientTests(true)
+	tr.SetAppClock(clock.at)
+	tr.SetAppClockRun(clock.began)
+	tr.NewSetAt(base.Add(-time.Second))
+	tr.ServedMockAt(&models.Mock{Name: "mock-4", Kind: models.HTTP}, base)
+	tr.RecordedBegin(recBegin)
+	tr.BeginAt(base.Add(5 * time.Millisecond))
+	paired := &models.Mock{Name: "mock-5", Kind: models.Mongo}
+	paired.Spec.ReqTimestampMock = recBegin.Add(4 * time.Millisecond)
+	w := tr.CallWindowFrom(recBegin.Add(2*time.Millisecond), paired, base.Add(8*time.Millisecond))
+	if w == nil {
+		t.Fatal("no window for the upsert")
+	}
+	if !w.F.From.Equal(base) || !w.F.Began.Equal(base.Add(5*time.Millisecond)) || !w.Rec.From.Equal(recBegin.Add(2*time.Millisecond)) || !w.Rec.Began.Equal(recBegin) {
+		t.Fatalf("window %+v; want the full round's span from a serve made before its test's begin, and the recording's from the call recorded before the upsert, after its test's", w)
+	}
+	const p = "body.docs.msgs[].u.{}.created"
+	at := func(v time.Time) Leaf { return InstantLeaf(p, p, v, time.Millisecond) }
+	rec := at(recBegin.Add(time.Millisecond))
+	for _, c := range []struct {
+		what string
+		live time.Time
+		ok   bool
+	}{
+		{"read before its test began", base.Add(2 * time.Millisecond), false},
+		{"read after its test began", base.Add(6 * time.Millisecond), true},
+	} {
+		dc := clockedDrifts()
+		dc.clientTests = true
+		ln := ClassifyIn(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: at(c.live)}}, Shape{Leaves: map[string]Leaf{p: rec}}, paired.Spec.ReqTimestampMock, nil, nil, nil, w)[0]
+		learned := ln.Kind == KindClockRead && ln.Read != nil
+		if learned != c.ok || !c.ok && ln.Kind != KindUnaccounted {
+			t.Errorf("a client test's value %s (%s, recorded %s): learned %s (%s); want a read of the clock %v, else a refusal", c.what, at(c.live).Value, rec.Value, ln.Kind, ln.Why, c.ok)
+		} else if learned && ln.Read.Since != models.SinceTestBegin {
+			t.Errorf("a client test's value %s (%s, recorded %s): learned %s; want a read since its test began", c.what, at(c.live).Value, rec.Value, ln.Read)
+		}
+	}
+}
