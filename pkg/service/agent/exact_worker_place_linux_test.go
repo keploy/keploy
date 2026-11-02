@@ -94,6 +94,56 @@ func TestAWorkerPlaceIsReachedOnceTheRunPassesItsTestCase(t *testing.T) {
 	}
 }
 
+// As a pass of keploy test's run ends, the replay tells the agent how many
+// test cases of the run's order it has passed (models.ExactServing.Passed),
+// on a pool call: the test cases it skipped after the last one it opened
+// then reach the worker-scope recordings placed after them, and a call the
+// application makes after its last test case answers. Here test-4 is
+// quarantined (or left out by a selection with test-2 and test-3), or it is
+// the streaming test case whose pass has not run yet while test-2 and test-3
+// were quarantined: the main loop's end then passes the three before it
+// only. A pass end that names more than the order holds passes all of it, one
+// with no order reaches nothing, and one under what the run has passed
+// already takes back nothing.
+func TestTheEndOfAPassReachesThePlacesOfTheTestCasesItSkipped(t *testing.T) {
+	order := []string{"test-1", "test-2", "test-3", "test-4"}
+	all := []string{"/start", "/token", "/refresh", "/later"}
+	for _, tc := range []struct {
+		name   string
+		order  []string
+		steps  []string
+		passed int
+		want   []string
+	}{
+		{"a quarantined last test case", order,
+			[]string{"test-1", "", "test-2", "", "test-3", ""}, 4, all},
+		{"a quarantined last test case, no pass end", order,
+			[]string{"test-1", "", "test-2", "", "test-3", ""}, 0, []string{"/start", "/token", "/refresh"}},
+		{"a selection that ends before the set does", order,
+			[]string{"test-1", ""}, 4, all},
+		{"the main loop's end before the streaming pass", order,
+			[]string{"test-1", ""}, 3, []string{"/start", "/token", "/refresh"}},
+		{"more than the order holds", order,
+			[]string{"test-1", ""}, 9, all},
+		{"no order", nil,
+			[]string{"test-1", ""}, 4, []string{"/start", "/token"}},
+		{"under what the run has passed already", order,
+			[]string{"test-3", ""}, 1, []string{"/start", "/token", "/refresh"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, p := workerPlaceAgent(t, tc.order, tc.steps)
+			require.NoError(t, a.UpdateMockParams(context.Background(), models.MockFilterParams{Exact: &models.ExactServing{Passed: tc.passed}}))
+			var answered []string
+			for _, path := range all {
+				if code, _ := p.call(t, path); code == 200 {
+					answered = append(answered, path)
+				}
+			}
+			require.Equal(t, tc.want, answered, "after %v and a pass end of %d the worker scope answered", tc.steps, tc.passed)
+		})
+	}
+}
+
 // Under the background rules the view orders what it reaches by the order the
 // run reached each place in: a test case the run passed over (skipped) takes
 // its place in the run's order, before the test case whose opening passed it,

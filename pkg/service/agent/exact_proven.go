@@ -509,6 +509,9 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		return es.ServeExactTest(ex.Test, owned)
 	default:
 		a.scopeMu.Lock()
+		// A pass of the set's run that ended passed the test cases it
+		// skipped after the last one it opened (models.ExactServing.Passed).
+		a.passTests(ex.Passed)
 		pool := append([]string(nil), a.testPool...)
 		a.scopeMu.Unlock()
 		if err := a.serveWorkerExactly(es); err != nil {
@@ -695,22 +698,37 @@ func (a *Agent) serveWorkerExactly(es coreAgent.ExactServer) error {
 // (testReachAt): the passed ones, in the run's order, before name. Called
 // with scopeMu held.
 func (a *Agent) reachTest(name string) {
+	a.passTests(a.testOrderAt[name])
+	a.reach(name)
+}
+
+// passTests notes that the set's run has passed the first n test cases of
+// its order (testOrder), those it has not passed yet, in the order's turn:
+// as a test case opens (reachTest), and as a pass of the run ends
+// (models.ExactServing.Passed), when it has passed the test cases it skipped
+// after the last one it opened too. An n no greater than what the run has
+// passed passes none, and one greater than the order's length passes all of
+// it. Called with scopeMu held.
+func (a *Agent) passTests(n int) {
+	for ; a.testPassed < n && a.testPassed < len(a.testOrder); a.testPassed++ {
+		a.reach(a.testOrder[a.testPassed])
+	}
+}
+
+// reach notes that the set's run has reached test case test, giving it the
+// next place in the order the run reached them (testReachAt) the first time.
+// Called with scopeMu held.
+func (a *Agent) reach(test string) {
 	if a.testReached == nil {
 		a.testReached = map[string]bool{}
 	}
 	if a.testReachAt == nil {
 		a.testReachAt = map[string]int{}
 	}
-	reach := func(test string) {
-		if _, again := a.testReachAt[test]; !again {
-			a.testReachAt[test] = len(a.testReachAt) + 1
-		}
-		a.testReached[test] = true
+	if _, again := a.testReachAt[test]; !again {
+		a.testReachAt[test] = len(a.testReachAt) + 1
 	}
-	for at := a.testOrderAt[name]; a.testPassed < at; a.testPassed++ {
-		reach(a.testOrder[a.testPassed])
-	}
-	reach(name)
+	a.testReached[test] = true
 }
 
 // forgetReached forgets the set's run order and the test cases its run
