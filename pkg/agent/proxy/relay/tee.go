@@ -819,8 +819,10 @@ func (t *tee) firstAwaiting() (c fakeconn.Chunk, ok bool) {
 
 // doneAwaiting lets go of the oldest chunk waiting for the client's answer,
 // once it was pushed (it is on the queue now) or refused. The backing array
-// is let go of with the last one.
+// is let go of with the last one. One refused never comes on the stream, so a
+// reader waiting on it is told (Relay.StreamedBefore).
 func (t *tee) doneAwaiting() {
+	defer t.progress.changed.wake()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if len(t.awaiting) == 0 {

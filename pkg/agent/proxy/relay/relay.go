@@ -280,6 +280,9 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		cfg.OnMarkMockIncomplete,
 		cfg.Logger,
 	)
+	// A Read on the destination's conn beneath its layers is when no chunk
+	// read from it so far is left to be numbered (StreamedBefore).
+	r.order.OnRead(r.teeD2C.progress.changed.wake)
 
 	// Assigned after construction rather than threaded through newTee's
 	// positional signature, which is already at six arguments.
@@ -784,6 +787,7 @@ func (r *Relay) forward(
 				// before these bytes were forwarded to it.
 				chunk.ConnSeq, chunk.AfterClientClose = r.order.FromDest()
 			}
+			t.noteNumbered(chunk.ConnSeq)
 			chunk.Bytes = make([]byte, n)
 			copy(chunk.Bytes, buf[:n])
 		}

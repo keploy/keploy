@@ -315,6 +315,7 @@ func (p *Proxy) recordViaSupervisor(
 
 	svSess.ClientStream = r.ClientStream()
 	svSess.DestStream = r.DestStream()
+	svSess.Order = r.StreamedBefore
 	reads.follow(svSess.ClientStream, r.Teed)
 	svSess.Directives = r.Directives()
 	svSess.Acks = r.Acks()
