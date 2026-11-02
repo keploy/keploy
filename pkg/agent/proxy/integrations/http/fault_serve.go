@@ -16,7 +16,9 @@ import (
 // AnswerFault is the fault a served mock's answer ends in, for a mock whose
 // own (Spec.Fault) it overrides, or nil for the mock's own. keploy enterprise
 // sets one (SetAnswerFault) so the faults it writes on mocks are enacted the
-// way a recorded one is (serveFault).
+// way a recorded one is (serveFault). keploy mock replay's summary names each
+// served mock's own fault (Mock.FaultServed); a hook that serves another one
+// names it in its own output.
 type AnswerFault func(ctx context.Context, stub *models.Mock) *models.Fault
 
 // SetAnswerFault sets the fault hook replay asks before it serves a mock's

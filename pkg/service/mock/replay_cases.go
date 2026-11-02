@@ -55,6 +55,9 @@ type replayDetail struct {
 	// captured ("": it is not): a request it lost would read as one the app
 	// did not make.
 	actualShort string
+	// faults is the mocks the agent holds whose answer ends in a fault, by
+	// name: the summary names each one served (logFaultsServed).
+	faults map[string]*models.Mock
 }
 
 // actualCapture keeps the app's incoming requests during a replay, in memory only.

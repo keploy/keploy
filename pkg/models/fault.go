@@ -169,3 +169,13 @@ func (m *Mock) ValidateFault() error {
 	}
 	return nil
 }
+
+// FaultServed says, for a replay summary, the fault the mock's answer ends in,
+// as the application met it: "mock-12: upstream reset after 0 bytes, as
+// recorded". It is "" for a mock whose answer ends in none.
+func (m *Mock) FaultServed() string {
+	if m == nil || m.Spec.Fault == nil {
+		return ""
+	}
+	return m.Name + ": " + m.Spec.Fault.String() + ", as recorded"
+}

@@ -119,3 +119,22 @@ func TestDeepCopyCopiesTheFault(t *testing.T) {
 		t.Fatal("the copy shares its fault with the mock it was copied from")
 	}
 }
+
+// FaultServed names the mock and its fault as the application met it, for a
+// replay summary; a mock with a whole answer, or none, names nothing.
+func TestFaultServedNamesTheMockAndItsFault(t *testing.T) {
+	var none *Mock
+	for _, c := range []struct {
+		mock *Mock
+		want string
+	}{
+		{none, ""},
+		{&Mock{Name: "mock-1", Kind: HTTP}, ""},
+		{&Mock{Name: "mock-12", Kind: HTTP, Spec: MockSpec{Fault: &Fault{Kind: FaultReset}}}, "mock-12: upstream reset after 0 bytes, as recorded"},
+		{&Mock{Name: "mock-7", Kind: HTTP, Spec: MockSpec{Fault: &Fault{Kind: FaultTimeout}}}, "mock-7: no answer until the application closed, as recorded"},
+	} {
+		if got := c.mock.FaultServed(); got != c.want {
+			t.Errorf("FaultServed() = %q, want %q", got, c.want)
+		}
+	}
+}

@@ -567,6 +567,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		actual:   actual.list(),
 
 		actualShort: requestsShort,
+		faults:      faultMocks(filtered, unfiltered),
 	}
 	counts := m.reportOutcome(ctx, loaded, detail, func() bool { return parent.Err() != nil })
 	missesKnown := counts.missed >= 0
@@ -2198,6 +2199,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 			append(summary, zap.String("next_step", next))...)
 	}
 
+	logFaultsServed(m.logger, consumed, detail.faults)
 	for _, miss := range misses {
 		logMiss(m.logger, miss)
 	}
