@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -28,39 +29,32 @@ type dnsServer struct {
 	srv    *dns.Server
 	logger *zap.Logger
 
-	// settled is closed once srv has bound its socket, or once its serve call
-	// has returned without binding one. bound says which, and err why a serve
-	// call that did not bind returned. Both are written before settled is
+	// settled is closed once srv serves on its socket, or once its serve call
+	// has returned without serving. serving says which, and err why a serve
+	// call that did not serve returned. Both are written before settled is
 	// closed and read only after it is.
 	settled chan struct{}
 	settle  sync.Once
-	bound   bool
+	serving bool
 	err     error
 
 	stopOnce sync.Once
 	stopErr  error
-
-	// endBind ends the stage of the agent's start that is the bind (serve),
-	// on the goroutine that serves: nil until serve begins it.
-	endBind func()
 }
 
 // newDNSServer builds the DNS server for network ("tcp" or "udp") on
-// p.DNSPort. Nothing is bound until serve.
+// p.DNSPort. It serves (serve) on the socket it is handed bound, in
+// srv.Listener (TCP) or srv.PacketConn (UDP): startDNSServers binds both.
 func (p *Proxy) newDNSServer(network string) *dnsServer {
 	s := &dnsServer{logger: p.logger, settled: make(chan struct{})}
 	s.srv = &dns.Server{
-		Addr:      fmt.Sprintf(":%v", p.DNSPort),
-		Net:       network,
-		Handler:   p,
-		ReusePort: true,
-		// miekg/dns calls it once the socket is bound, just before it serves,
-		// on the goroutine that called ListenAndServe. A failed bind never
-		// calls it.
-		NotifyStartedFunc: func() {
-			s.bindOver()
-			s.settleAs(true, nil)
-		},
+		Addr:    fmt.Sprintf(":%v", p.DNSPort),
+		Net:     network,
+		Handler: p,
+		// miekg/dns calls it just before it serves on the socket, on the
+		// goroutine that called ActivateAndServe. A serve call that fails
+		// before it serves never calls it.
+		NotifyStartedFunc: func() { s.settleAs(true, nil) },
 	}
 	return s
 }
@@ -68,80 +62,47 @@ func (p *Proxy) newDNSServer(network string) *dnsServer {
 // name is s's network as its log lines and errors say it: TCP or UDP.
 func (s *dnsServer) name() string { return strings.ToUpper(s.srv.Net) }
 
-// settleAs settles s once: as bound, or as a serve call that returned with err
-// without binding.
-func (s *dnsServer) settleAs(bound bool, err error) {
+// settleAs settles s once: as serving, or as a serve call that returned with
+// err without serving.
+func (s *dnsServer) settleAs(serving bool, err error) {
 	s.settle.Do(func() {
-		s.bound, s.err = bound, err
+		s.serving, s.err = serving, err
 		close(s.settled)
 	})
 }
 
-// bindOver ends the bind's stage of the agent's start, once (endBind).
-func (s *dnsServer) bindOver() {
-	if s.endBind != nil {
-		s.endBind()
-	}
-}
-
-// serve binds s's socket and serves on it until s is stopped, and returns: nil
-// once stopped, else the error, a failed bind's included, which it also logs,
-// in one line that is true of both (the error says which). Return it, never
-// swallow it: a DNS listener that died silently looks healthy.
-//
-// The bind is the agent's start's own work, done here while startDNSServers
-// waits for it (settled): a stage of the start of its own, on this goroutine,
-// so the CLI that waits for the agent sees it make progress
-// (utils.BeginBootWork); the wait alone shows none. It ends as s settles, on
-// this goroutine either way: once bound, just before it serves
-// (NotifyStartedFunc), or as serve returns without binding.
+// serve serves s on the socket it was handed bound until s is stopped, and
+// returns: nil once stopped, else the error, which it also logs. Return it,
+// never swallow it: a DNS listener that died silently looks healthy. The
+// server closes its socket as it stops serving; serve closes it if the server
+// never started to.
 func (s *dnsServer) serve() (err error) {
-	s.endBind = beginBootWork(fmt.Sprintf("the %s DNS server's bind", s.name()))
-	// A serve call that bound has settled s already. This settles one that
-	// returned, or panicked, before it bound, so stop never waits on it.
-	defer func() {
-		s.bindOver()
-		s.settleAs(false, err)
-	}()
+	// A serve call that served has settled s already. This settles one that
+	// returned, or panicked, before it served, so stop never waits on it.
+	defer func() { s.settleAs(false, err) }()
+	if sock := preBound(s.srv); sock != nil {
+		defer func() { _ = sock.Close() }()
+	}
 	s.logger.Info(fmt.Sprintf("starting %s DNS server at addr %v", s.name(), s.srv.Addr))
-	err = s.listenAndServe()
+	err = s.srv.ActivateAndServe()
 	if err != nil {
-		utils.LogError(s.logger, err, fmt.Sprintf("the %s DNS server failed to bind or stopped serving", s.name()), zap.String("addr", s.srv.Addr))
+		utils.LogError(s.logger, err, fmt.Sprintf("the %s DNS server failed to serve or stopped serving", s.name()), zap.String("addr", s.srv.Addr))
 	}
 	return err
 }
 
-// listenAndServe binds s's socket and serves on it. The TCP server's socket
-// is bound here, as miekg/dns would bind it (SO_REUSEPORT where it sets that)
-// but plain TCP: miekg/dns binds TCP with a zero net.ListenConfig, which Go
-// makes MPTCP, on every interface. UDP has no MPTCP; miekg/dns binds it.
-func (s *dnsServer) listenAndServe() error {
-	if s.srv.Net != "tcp" {
-		return s.srv.ListenAndServe()
-	}
-	lc := plaintcp.Config(dnsReusePort)
-	ln, err := lc.Listen(context.Background(), "tcp", s.srv.Addr)
-	if err != nil {
-		return err
-	}
-	// Closed by the server as it stops serving; this closes it if the server
-	// never started to.
-	defer func() { _ = ln.Close() }()
-	s.srv.Listener = ln
-	return s.srv.ActivateAndServe()
-}
-
 // stop shuts s down. It is the one rule for that, followed by both of s's
-// stoppers, serveDNS as its context ends and stopDNSServers: wait until s has
-// bound or its serve call has returned without binding, and shut it down only
-// if it bound. miekg/dns refuses to shut down a server that has not bound yet
-// ("server not started"), and the bind that came after would then hold the
-// port for the life of the process. A server that never bound holds nothing.
-// Only the first call shuts s down; later ones return its result.
+// stoppers, serveDNS as its context ends and stopDNSServers: wait until s
+// serves or its serve call has returned without serving, and shut it down
+// only if it serves. miekg/dns refuses to shut down a server that has not
+// started yet ("server not started"), and the serve call that came after would
+// then hold the port for the life of the process. A serve call that returned
+// without serving closed the socket (serve). Only the first call shuts s
+// down; later ones return its result.
 func (s *dnsServer) stop() error {
 	s.stopOnce.Do(func() {
 		<-s.settled
-		if !s.bound {
+		if !s.serving {
 			return
 		}
 		if err := s.srv.Shutdown(); err != nil {
@@ -154,21 +115,27 @@ func (s *dnsServer) stop() error {
 	return s.stopErr
 }
 
-// startDNSServers builds the TCP and UDP DNS servers, serves each on g until
-// ctx ends, and returns once both are bound: nothing gated on StartProxy,
+// startDNSServers binds the TCP and UDP DNS servers' sockets, serves each on
+// g until ctx ends, and returns once both serve: nothing gated on StartProxy,
 // notably the agent's readiness that releases the depends_on'd app container
 // in docker-compose replay, may see an unbound DNS socket. Without the wait a
 // reconstructed replay app's eager boot-time resolve of a recorded name raced
 // an unbound socket and died with UnknownHostException, tearing down the
 // whole stack (intermittent cloud-replay flake, saas/selfhosted pipeline
-// 9847). A failed bind fails the wait at once with its error (e.g.
-// "bind: address already in use"); dnsBindTimeout is only a backstop for a
-// socket that neither binds nor fails, one deadline for both servers.
+// 9847). A failed bind fails the start at once with its error, which names
+// the port and what holds it; a serve call that fails before it serves fails
+// the wait with its error; dnsBindTimeout is only a backstop for a server
+// that neither serves nor fails, one deadline for both servers.
 //
 // p.tcpDNS and p.udpDNS are set here, before the goroutines that serve and
 // stop them start, and each goroutine is handed its server.
 func (p *Proxy) startDNSServers(ctx context.Context, g *errgroup.Group) error {
+	udpConn, tcpLn, err := p.bindDNS()
+	if err != nil {
+		return fmt.Errorf("DNS server failed to start: %w", err)
+	}
 	p.tcpDNS, p.udpDNS = p.newDNSServer("tcp"), p.newDNSServer("udp")
+	p.tcpDNS.srv.Listener, p.udpDNS.srv.PacketConn = tcpLn, udpConn
 	for _, s := range []*dnsServer{p.tcpDNS, p.udpDNS} {
 		g.Go(func() error {
 			defer utils.Recover(p.logger)
@@ -180,7 +147,7 @@ func (p *Proxy) startDNSServers(ctx context.Context, g *errgroup.Group) error {
 	for _, s := range []*dnsServer{p.udpDNS, p.tcpDNS} {
 		select {
 		case <-s.settled:
-			if !s.bound {
+			if !s.serving {
 				return fmt.Errorf("DNS server failed to start: %w", s.err)
 			}
 		case <-ctx.Done():
@@ -190,6 +157,32 @@ func (p *Proxy) startDNSServers(ctx context.Context, g *errgroup.Group) error {
 		}
 	}
 	return nil
+}
+
+// bindDNS binds the DNS servers' UDP and TCP sockets on one port: p.DNSPort,
+// or, where another socket holds it and the port may move (SetPortMover), a
+// free one. They bind it alone (no SO_REUSEPORT): with it, a second agent
+// bound the same port beside the first, and the kernel then shared each one's
+// DNS queries between the two. The bind is a stage of the agent's start of its
+// own, on the calling goroutine (utils.BeginBootWork), so that a bind that
+// stalls is named as the one in progress.
+func (p *Proxy) bindDNS() (udpConn net.PacketConn, tcpLn net.Listener, err error) {
+	defer beginBootWork("the DNS servers' bind")()
+	err = p.bindOrMove("DNS server", &p.DNSPort, func(port uint32) error {
+		addr := fmt.Sprintf(":%v", port)
+		pc, err := net.ListenPacket("udp", addr)
+		if err != nil {
+			return err
+		}
+		ln, err := plaintcp.Listen(context.Background(), "tcp", addr)
+		if err != nil {
+			_ = pc.Close()
+			return err
+		}
+		udpConn, tcpLn = pc, ln
+		return nil
+	}, func() { _ = udpConn.Close(); _ = tcpLn.Close() })
+	return udpConn, tcpLn, err
 }
 
 // serveDNS serves s until ctx ends, and then stops it.
@@ -1249,5 +1242,16 @@ func (p *Proxy) resetNsSwitchConfig() error {
 	}
 
 	p.logger.Debug("Successfully reset the nsswitch config of linux")
+	return nil
+}
+
+// preBound is the socket srv was handed bound (startDNSServers), or nil.
+func preBound(srv *dns.Server) io.Closer {
+	if srv.Listener != nil {
+		return srv.Listener
+	}
+	if srv.PacketConn != nil {
+		return srv.PacketConn
+	}
 	return nil
 }

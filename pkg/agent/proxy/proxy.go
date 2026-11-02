@@ -124,6 +124,10 @@ func probeDial(logger *zap.Logger, phase string, connID int64, addr string, durN
 type Proxy struct {
 	logger *zap.Logger
 
+	// portMover, set before StartProxy (SetPortMover), lets the proxy and its
+	// DNS server move off a taken port, and is told where they listen.
+	portMover func(proxyPort, dnsPort uint32) error
+
 	// learnTracker keeps what record's full round served in the running
 	// test, for the learn step (package matcher/learn): a test begins
 	// whenever its error capture window opens (openTestErrorCapture). Under
@@ -2335,8 +2339,14 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	endListen := beginBootWork("the proxy listener's start")
 	defer endListen() // a panic's path: its thread let go, the stage over
 
-	// It will listen on all the interfaces
-	listener, err := p.listen(ctx, fmt.Sprintf(":%v", p.Port))
+	// It will listen on all the interfaces: on p.Port, or, where that is
+	// taken and the port may move (SetPortMover), on a free one.
+	var listener net.Listener
+	err := p.bindOrMove("proxy", &p.Port, func(port uint32) error {
+		ln, err := p.listen(ctx, fmt.Sprintf(":%v", port))
+		listener = ln
+		return err
+	}, func() { _ = listener.Close() })
 	if err != nil {
 		utils.LogError(p.logger, err, fmt.Sprintf("failed to start proxy on port:%v", p.Port))
 		// What StartProxy installed before this -- the run's CA in the trust

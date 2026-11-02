@@ -56,6 +56,12 @@ type Hooks struct {
 	conf      *config.Config
 	m         sync.Mutex
 
+	// agentInfo is what SendAgentInfo last sent the kernel (agentInfoSent),
+	// for SetProxyPorts to send again with the proxy's ports.
+	agentInfoMu   sync.Mutex
+	agentInfo     structs.AgentInfo
+	agentInfoSent bool
+
 	// Linux-specific fields
 	objectsMutex sync.RWMutex // Protects eBPF objects during load/unload operations
 	// proxyMarked is set once MarkProxyListener has marked the proxy's
@@ -1096,4 +1102,21 @@ func ToIPv4MappedIPv6(ipv4 string) ([4]uint32, error) {
 	}
 
 	return result, nil
+}
+
+// SetProxyPorts tells the loaded hooks that the proxy listens on proxyPort and
+// its DNS server on dnsPort (agent.ProxyPortsSetter): the agent info Load
+// sent, sent again with those ports. Load's redirect to the proxy goes to
+// GetProxyInfo's port, the proxy's own unless a port override is set; the
+// agent moves no port where one is.
+func (h *Hooks) SetProxyPorts(proxyPort, dnsPort uint32) error {
+	h.agentInfoMu.Lock()
+	defer h.agentInfoMu.Unlock()
+	if !h.agentInfoSent {
+		return errors.New("the hooks have sent the kernel no agent info: they are not loaded")
+	}
+	info := h.agentInfo
+	info.Proxy.Port = proxyPort
+	info.DNSPort = int32(dnsPort)
+	return h.sendAgentInfoLocked(info)
 }

@@ -49,6 +49,15 @@ type ProxyAddressReporter interface {
 	ProxyIPv4() string
 }
 
+// ProxyPortsSetter is the optional extension implemented by hooks that can be
+// told, once loaded, that the proxy listens on another port than the one they
+// loaded with, or its DNS server does: the proxy moved off a port another
+// socket held when it bound it (proxy.SetPortMover). Hooks without it keep a
+// taken port a failed start.
+type ProxyPortsSetter interface {
+	SetProxyPorts(proxyPort, dnsPort uint32) error
+}
+
 // PIDMapReporter is the optional extension implemented by hooks that count
 // the inserts into their per-process maps the kernel refused, each of them a
 // process they could not track (models.PIDMapRefusals). The agent
