@@ -12,7 +12,9 @@ import (
 // the matcher's next step, when it happened, why it missed (the learn step's
 // reason, in record's full round), how an answered call was answered and the
 // process that made the call (UnmatchedCall.Answer, Source: names,
-// no value), and the call's shape
+// no value), the operation an HTTP call carries (Operation: names, no
+// value; one that is not a label validOperationLabel takes is dropped), and
+// the call's shape
 // (MissShape): for HTTP and gRPC the method and the target's shape,
 // for SQL the statement with its literals written "?", for MongoDB the
 // command, its namespace and its filter's keys. No body, no bound
@@ -27,7 +29,7 @@ import (
 // test, no value.
 func (m UnmatchedCall) Sanitized() UnmatchedCall {
 	out := UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, LiveDestination: m.LiveDestination, MatchPhase: m.MatchPhase,
-		ClosestMock: m.ClosestMock, NextSteps: m.SanitizedNextStep(), At: m.At, ActualSummary: MissShape(m), Differs: FieldShapes(m.Differs), FieldReasons: FieldReasonShapes(m.FieldReasons),
+		ClosestMock: m.ClosestMock, NextSteps: m.SanitizedNextStep(), At: m.At, ActualSummary: MissShape(m), Operation: SanitizedOperation(m.Operation), Differs: FieldShapes(m.Differs), FieldReasons: FieldReasonShapes(m.FieldReasons),
 		Kind: m.Kind, Recorded: m.Recorded, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
 		// An answered call stays one (UnmatchedCall.Answer): how it was
 		// answered and by which process, no value.

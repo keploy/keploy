@@ -358,7 +358,7 @@ func buildJUnitSuiteOf(name string, rep *models.TestReport, explained bool) juni
 			message = "a call outside every test got no recorded answer"
 		}
 		for _, c := range calls {
-			l := strings.TrimSpace(c.Protocol + " " + c.ActualSummary)
+			l := strings.TrimSpace(c.Protocol + " " + c.Named())
 			if c.Destination != "" {
 				l += " to " + c.Destination
 			}

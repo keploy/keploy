@@ -1313,3 +1313,38 @@ func TestAClockReadIsLearningASharedRecordingIsPairedBy(t *testing.T) {
 		t.Fatal("stripUnresolved changed the consumed state")
 	}
 }
+
+// A shared recording charged to a test names the operation its request
+// carries, beside its summary: from the recording the plan holds, or the one
+// a replay left on disk.
+func TestASharedCallNamesItsOperation(t *testing.T) {
+	unregister := models.RegisterHTTPOperation(func(r *models.HTTPReq) (models.HTTPOperation, bool) {
+		if r.Body == "" {
+			return models.HTTPOperation{}, false
+		}
+		return models.HTTPOperation{Label: "query " + r.Body}, true
+	})
+	t.Cleanup(unregister)
+	gql := func(op string) *models.Mock {
+		return &models.Mock{Name: "mock-" + op, Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{
+			Method: "POST", URL: "http://localhost:8083/query", Body: op}}}
+	}
+	held, onDisk := gql("GetAppLabels"), gql("GetSubscription")
+	s := &settlement{
+		lookup: map[string]mockDisplayInfo{
+			held.Name:   {protocol: "HTTP", summary: "POST http://localhost:8083/query"},
+			onDisk.Name: {protocol: "HTTP", onDisk: onDisk},
+		},
+		sp: &sharePlan{info: map[string]*shareInfo{held.Name: {mock: held}}},
+	}
+	for _, tc := range []struct{ mock, op string }{
+		{held.Name, "query GetAppLabels"},
+		{onDisk.Name, "query GetSubscription"},
+		{"mock-unknown", ""},
+	} {
+		c := s.call(tc.mock, "shared", nil, "why")
+		if c.Operation != tc.op || (tc.op != "" && c.ActualSummary != "POST http://localhost:8083/query") {
+			t.Fatalf("%s: summary %q operation %q; want operation %q", tc.mock, c.ActualSummary, c.Operation, tc.op)
+		}
+	}
+}

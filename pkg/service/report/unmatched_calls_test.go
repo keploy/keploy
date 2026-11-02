@@ -241,3 +241,13 @@ func TestRenderUnmatchedCalls_AVariableThatDidNotHold(t *testing.T) {
 		t.Errorf("the variable's value is rendered as the recording's:\n%s", out)
 	}
 }
+
+// A miss names the operation it carries after its call.
+func TestRenderUnmatchedCalls_NamesTheOperation(t *testing.T) {
+	var sb strings.Builder
+	miss := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /query", Operation: "query GetAppLabels"}
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{miss}}})
+	if !strings.Contains(sb.String(), "  [HTTP] POST /query {query GetAppLabels}") {
+		t.Fatalf("the miss does not name its operation:\n%s", sb.String())
+	}
+}

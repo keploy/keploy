@@ -2255,7 +2255,7 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 	}
 	fields := []zap.Field{
 		zap.String("protocol", miss.Protocol),
-		zap.String("call", miss.ActualSummary),
+		zap.String("call", miss.Named()),
 		zap.String("destination", miss.Destination),
 	}
 	if miss.Reason != "" {
@@ -2366,7 +2366,7 @@ func withRecordedIn(tests []TestReceipt, owners map[string][]string) []string {
 		for j := range ev.Misses {
 			c := &ev.Misses[j]
 			if c.NameRecordedIn(tests[i].Name, owners) {
-				named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", tests[i].Name, c.ActualSummary, c.ClosestMock, c.RecordedIn))
+				named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", tests[i].Name, c.Named(), c.ClosestMock, c.RecordedIn))
 			}
 		}
 	}

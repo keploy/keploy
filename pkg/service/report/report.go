@@ -1200,7 +1200,7 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 	// models.OutOfScopeDestinationCauses.
 	var outOfScope bool
 	for _, uc := range test.FailureInfo.UnmatchedCalls {
-		sb.WriteString(fmt.Sprintf("  [%s] %s", uc.Protocol, uc.ActualSummary))
+		fmt.Fprintf(sb, "  [%s] %s", uc.Protocol, uc.Named())
 		if uc.MatchPhase != "" {
 			sb.WriteString(fmt.Sprintf(" (match stopped at: %s", uc.MatchPhase))
 			if uc.CandidateCount > 0 {

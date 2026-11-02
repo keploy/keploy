@@ -511,7 +511,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					h.Logger.Debug("no matching http mock found for outgoing request",
 						zap.String("protocol", report.Protocol),
 						zap.String("destination", report.Destination),
-						zap.String("actual", report.ActualSummary),
+						zap.String("actual", models.WithHTTPOperation(report.ActualSummary, report.Operation)),
 						zap.String("match_phase", report.MatchPhase),
 						zap.Int("candidates", report.CandidateCount),
 						zap.String("closest", report.ClosestMock),
