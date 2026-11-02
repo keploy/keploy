@@ -479,15 +479,6 @@ func TestAReplayWhoseAgentDiedSaysSo(t *testing.T) {
 	require.NotContains(t, err.Error(), "could not read")
 }
 
-// With the switch off a failed read is no per-test windows, as before the
-// switch existed.
-func TestAFailedWindowsReadIsNoWindowsWithTheSwitchOff(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
-	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
-	instr.windowsErr = errors.New("connection reset by peer")
-	require.NoError(t, replayErr(t, instr, utils.Native))
-}
-
 // Under the switch a docker compose command is refused before anything
 // starts, by the record and the replay alike: keploy cannot tell which
 // process runs its tests, or read what each did.

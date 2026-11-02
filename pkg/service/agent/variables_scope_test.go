@@ -70,8 +70,8 @@ func orderAgent(t *testing.T) (*Agent, *orderProxy) {
 }
 
 // A test's variables' scope begins as its pool goes in: in the step that
-// opens it under exact serving (the run's pool, worker 0), or once a worker's
-// view is in (a worker pid, which the proven wire never sends).
+// opens it under exact serving, with a worker pid (which the proven wire
+// never sends) or without one.
 func TestATestsVariablesBeginAfterItsPool(t *testing.T) {
 	a, p := orderAgent(t)
 	a.clientMocks.Store(uint64(0), &ClientMockStorage{filtered: []*models.Mock{{Name: "m1", Kind: models.HTTP}, {Name: "m2", Kind: models.HTTP}}})
@@ -85,10 +85,13 @@ func TestATestsVariablesBeginAfterItsPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(p.events, ", ")
-	for _, want := range []string{"clock-begin pkg::TestA, stage, open pkg::TestA", "worker-pool, reset"} {
+	for _, want := range []string{"clock-begin pkg::TestA, stage, open pkg::TestA", "clock-begin pkg::TestW, open pkg::TestW"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("events %s; want %q in order", got, want)
 		}
+	}
+	if strings.Contains(got, "worker-pool") {
+		t.Fatalf("events %s: a worker view under exact serving", got)
 	}
 }
 

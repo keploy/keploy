@@ -296,6 +296,9 @@ func TestNoteUngatableWarnsOncePerSession(t *testing.T) {
 // A harness that said it can skip, was told to, and ran the test anyway is
 // called out once per session.
 func TestEndOfAGatedTestWarnsOnce(t *testing.T) {
+	// The scope API without the proven switch: under it a begin is served
+	// exactly, from a loaded recording, whatever its pid.
+	t.Setenv(provenswitch.Env, "")
 	core, logs := observer.New(zapcore.WarnLevel)
 	a := newReplayAgent()
 	a.logger = zap.New(core)

@@ -20,12 +20,10 @@ On a 404 claim() asks /agent/health whether the agent's switch is off (its
 X-Keploy-Proven header; an agent from before the switch sends none) and only
 then returns LEGACY: begin and end send the same bodies to the scope API as
 it was, whose answers carry no v. An agent whose switch is on and that has no
-claim route is an error. On LEGACY, begin and end send the worker's pid
-(this process's, unless the caller names another) as today's workers do: the
-agent then scopes this worker, and a test's end clears that scope instead of
-staging the whole pool again, which would put back the mocks the test
-consumed. pid=None sends none: a caller whose pid the agent cannot see (one
-in a container of its own) or that means the pid-less scope. v1 has no pid.
+claim route is an error. On LEGACY, begin and end send no pid unless the
+caller names one: a replay narrows a test begun with a pid only in a run with
+the suite mark or an app-start mark, and refuses one without (422), so only a
+caller that marks its suite passes its pid (pid=os.getpid()). v1 has no pid.
 The flip deletes LEGACY with the switch.
 
 Inert (every call returns at once and sends nothing) when KEPLOY_MOCK_AGENT is
@@ -217,18 +215,12 @@ def claim(key=".", dir=None):
     return _mode
 
 
-# WORKER, as begin's and end's pid: this process's on the legacy wire, none on v1.
-WORKER = object()
-
-
 def _body(name, file, project, pid):
     b = {"name": name}
     if file:
         b["file"] = file
     if project:
         b["project"] = project
-    if pid is WORKER:
-        pid = os.getpid() if _mode == LEGACY else None
     if pid is not None:
         if _mode != LEGACY:
             raise AgentError("keploy: a pid is not sent on scope protocol v1; only the scope API without the proven switch takes one")
@@ -242,7 +234,7 @@ def _ready():
     return _mode != INERT
 
 
-def begin(name, file=None, project=None, can_skip=True, pid=WORKER):
+def begin(name, file=None, project=None, can_skip=True, pid=None):
     """Opens a test. Returns the reason to skip it with, or None to run it."""
     if not _ready():
         return None
@@ -260,7 +252,7 @@ def begin(name, file=None, project=None, can_skip=True, pid=WORKER):
     return None
 
 
-def end(name, outcome, file=None, project=None, pid=WORKER):
+def end(name, outcome, file=None, project=None, pid=None):
     """Closes a test with its outcome. Returns keploy's reason to fail it,
     or None."""
     if not _ready():

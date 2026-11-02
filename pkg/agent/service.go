@@ -426,6 +426,11 @@ type Proxy interface {
 	// /proc tree, once, when it opens; what it sees then follows the nearest
 	// registered worker on that chain, read by read.
 	SetWorkerScope(pid uint32, names []string)
+	// RefuseWorker refuses, until ClearWorkerScope or the worker's next
+	// scope, every read of a connection the worker's process tree opens or
+	// opened while registered, naming why keploy refused its test at its
+	// begin.
+	RefuseWorker(pid uint32, why string)
 	ClearWorkerScope(pid uint32)
 	ClearAllWorkerScopes()
 	// SetMappedUniverse records the union of all tests' mapped mock names so a
