@@ -1421,3 +1421,60 @@ func TestOutcomeAMomentALaterRecordingGaveBeforeTheCallIsAPick(t *testing.T) {
 		}
 	}
 }
+
+// A value the clock reading takes for a look-back no replay of its call
+// compares, which a place of the same test held before the call only in
+// another form (the epoch nanoseconds of a name, beside the second): as
+// much a copy of that place as a look-back, it is refused naming the place
+// that held it, never as an offset keploy cannot check that names none.
+// Read as a look-back by either clock reading or by none, the decision is
+// the same.
+func TestALookBackAPlaceHeldInAnotherFormIsRefusedNamingThatPlace(t *testing.T) {
+	sec := func(x time.Time) string { return strconv.FormatInt(x.Unix(), 10) }
+
+	// A keploy test: the second 5 s before its call in both runs, beside
+	// an answer whose name holds the moment as epoch nanoseconds.
+	const p = "body.created_at"
+	rAt, fAt := oAt.Truncate(time.Second).Add(700*time.Millisecond), oAt.Truncate(time.Second).Add(102*time.Second+700*time.Millisecond)
+	before := oAt.Sub(rAt.Add(-300 * time.Millisecond))
+	name := func(x time.Time) string { return "[E2E] x-" + iEpochNs(x.Add(-300*time.Millisecond)) }
+	ans := []Raw{oAnswer("mock-1624", before, name(rAt)).ServedAs(1).ServedLive(oAnswer("mock-1624", before, name(fAt)))}
+	far := iWin(rAt.Add(5*time.Second), fAt.Add(5*time.Second), 100*time.Millisecond)
+	d := oWord(t, Decide(iCall(p, String, sec(rAt), sec(fAt), rAt, fAt, far, nil, ans)), sec(rAt), sec(fAt))
+	oRefused(t, "a keploy test's second 5 s before its call in both runs", d, RefusalNoClockRead, "mock-1624", "another form")
+
+	// A client test with no begin known: the second 1 s before its call in
+	// both runs, beside a name sent before it holding epoch nanoseconds.
+	const q = "body.docs.msgs.0.app.createdAt"
+	nanos := func(x time.Time) string { return "app-crud-" + strconv.FormatInt(x.UnixNano(), 10) }
+	r0, f0 := oAt.Add(6300*time.Millisecond), oAt.Add(61*time.Second+14800*time.Millisecond)
+	cAt, cfAt := r0.Add(900*time.Millisecond), f0.Add(1400*time.Millisecond)
+	rec, live := sec(r0.Add(100*time.Millisecond)), sec(f0.Add(200*time.Millisecond))
+	sent := iSent("mock-502", cAt.Add(-300*time.Millisecond), "body.cmd.query.app.name", String, nanos(r0.Add(90*time.Millisecond)), nanos(f0.Add(190*time.Millisecond)))
+	in := iCall(q, Number, rec, live, cAt, cfAt, iWin(cAt, cfAt, 100*time.Millisecond), []Earlier{sent}, nil)
+	in.Drifts = oClientDrifts()
+	oRefused(t, "a client test's second 1 s before its call, no begin known", oWord(t, Decide(in), rec, live), RefusalNoClockRead, "mock-502", "another form")
+}
+
+// Where a place held the moment in another form, a look-back no replay of
+// its call compares is never read from its test's begin: a client test's
+// milliseconds exactly a minute before its call in both runs, a minute
+// after its test began, are refused, never a plain read since the begin,
+// which a replay that dropped the look-back would pass. With no such place
+// they stay refused as one keploy cannot check.
+func TestALookBackAPlaceHeldInAnotherFormIsNeverReadFromItsTestsBegin(t *testing.T) {
+	const p = "body.since"
+	rAt := oAt.Add(2*time.Hour + 400*time.Millisecond)
+	fAt := rAt.Add(time.Hour + 130*time.Millisecond)
+	rT, fT := rAt.Add(-time.Minute).Truncate(time.Millisecond), fAt.Add(-time.Minute).Truncate(time.Millisecond)
+	w := iWin(rAt, fAt, 100*time.Millisecond)
+	w.Rec.Began, w.F.Began = rAt.Add(-2*time.Minute), fAt.Add(-2*time.Minute)
+	held := iSent("mock-9", rAt.Add(-30*time.Second), "body.name", String, "job-"+iEpochNs(rT), "job-"+iEpochNs(fT))
+	call := func(earlier []Earlier) Decision {
+		in := iCall(p, String, iMs(rT), iMs(fT), rAt, fAt, w, earlier, nil)
+		in.Drifts = oClientDrifts()
+		return oWord(t, Decide(in), iMs(rT), iMs(fT))
+	}
+	oRefused(t, "a look-back no replay compares beside a place in another form", call([]Earlier{held}), RefusalNoClockRead, "mock-9", "another form", "clock - 1m")
+	oRefused(t, "a look-back no replay compares", call(nil), RefusalCannotCheck, "clock - 1m")
+}
