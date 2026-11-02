@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -190,6 +191,17 @@ func TestOutcomeAPickFromAnAnswerIsRefused(t *testing.T) {
 		d := oWord(t, Decide(in), "01", "02")
 		oRefused(t, tc.what+": a departure F picked from mock-0's timetable", d, "pick", "mock-0", "body.departures[1]")
 	}
+	// Handed as one recording that also stamps the timetable with a finer
+	// time of another moment: the departure stands there at the call's
+	// cut, so the stamp makes it no less a pick.
+	body, _ := json.Marshal(map[string]any{"date": "2026-10-14", "departures": []string{"10:00", "10:02", "10:03"}, "generated_at": "2026-10-14T09:58:12.345Z"})
+	table := RawOf(&models.Mock{Name: "mock-0", Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq:          &models.HTTPReq{Method: "GET", URL: "http://rail.local/timetable"},
+		HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: string(body)},
+		ReqTimestampMock: rAt.Add(-100 * time.Millisecond), ResTimestampMock: rAt.Add(-99 * time.Millisecond),
+	}}, true).ServedAs(1).ServedAsRecorded()
+	in := iCall(p, String, "2026-10-14 10:01", "2026-10-14 10:02", rAt, fAt, iWin(rAt, fAt, time.Hour), nil, []Raw{table})
+	oRefused(t, "a time of day in a stamped timetable", oWord(t, Decide(in), "01", "02"), "pick", "mock-0")
 }
 
 // Two reads one database round trip apart that share a millisecond in both
