@@ -237,6 +237,69 @@ func TestAHandlersReadCostingAllTheSetsReadsInFlightRunsAlone(t *testing.T) {
 	}
 }
 
+// The set's staging (WarmSet) reserves each read's cost from the same
+// readInFlight as the calls: while one of its readers is held in a payload
+// costing all of it, the staging waits for room (inFlightWaiting) and hands
+// its other reader none, and once the held read is let go it reads every
+// payload, each once, and gives back all it reserved. The staging visits
+// its recordings in order and reserves a read before a reader has it, so
+// the held payload, the first, holds all of readInFlight before any other
+// is handed out: no other payload is read while it is held, whatever the
+// readers' order. Counted, not timed: the row sees the staging waiting.
+func TestAStagingReadCostingAllTheSetsReadsInFlightRunsAlone(t *testing.T) {
+	const n = 6
+	row := newHeldRow(n, 4)
+	was := stageReaders
+	stageReaders = func() int { return 2 }
+	t.Cleanup(func() { stageReaders = was })
+	for _, m := range row.mocks {
+		m.SetStoredSize(readInFlight / readCost)
+	}
+	raw := row.raw()
+	tr := NewTracker()
+	tr.NewSet()
+	s := tr.Drifts().set
+	if w := readWeight(tr.Drifts().LazyRawOf(row.mocks[0], false, withAnswer(row.mocks[0]))); w != readInFlight {
+		t.Fatalf("a recording of %d bytes costs %d of the %d in flight: want all of them", readInFlight/readCost, w, readInFlight)
+	}
+	waiting := func() int {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.inFlightWaiting
+	}
+	counts, reading, begun, release := heldUntil(t, raw, raw[0].payload().text)
+	done := tr.WarmSet(srcOf(row.mocks))
+	<-reading
+	for waiting() == 0 {
+		if _, d := decodesOf(counts); d != 0 {
+			t.Fatalf("%d payloads were read while the staging read one costing all the set's reads in flight: want none", d)
+		}
+		select {
+		case <-done:
+			t.Fatal("the set's staging ended while a payload's read was held: want it to wait for that read")
+		default:
+		}
+		runtime.Gosched()
+	}
+	if _, d := decodesOf(counts); d != 0 {
+		t.Fatalf("%d payloads were read while the staging read one costing all the set's reads in flight: want none", d)
+	}
+	release()
+	use := <-done
+	if b := begun.Load(); b != 1 {
+		t.Errorf("the held payload was read %d times: want once", b)
+	}
+	if use.Readers != 2 || use.Staged != n || use.Called != 0 {
+		t.Errorf("the set's staging reported %+v: want 2 readers, all %d payloads read by it, none by a call", use, n)
+	}
+	if payloads, decodes := decodesOf(counts); payloads != n || decodes != n {
+		t.Errorf("the staging's readers decoded %d of the set's %d payloads, %d times in all: want each once", payloads, n, decodes)
+	}
+	if !s.inFlight.TryAcquire(readInFlight) {
+		t.Errorf("the staging kept some of the set's reads in flight after it ended: want all given back")
+	}
+}
+
 // What a read reserves of the set's readInFlight (readWeight) is readCost
 // for each byte of its recording, known before its payload is read: a read
 // Raw's text; the agent store's count of a lazy one's (StoredSize); the
