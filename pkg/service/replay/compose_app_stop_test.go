@@ -66,7 +66,13 @@ func (c *composeInstr) MakeAgentReadyForDockerCompose(ctx context.Context) error
 // brings up afresh (run).
 func composeHarness(t *testing.T, c *composeInstr) *prRun {
 	t.Helper()
-	h := newPartialRunHarness(t, 2, 0)
+	return composeHarnessOf(t, c, 2)
+}
+
+// composeHarnessOf is composeHarness with a set of n tests.
+func composeHarnessOf(t *testing.T, c *composeInstr, n int) *prRun {
+	t.Helper()
+	h := newPartialRunHarness(t, n, 0)
 	h.replayer.config.CommandType = string(utils.DockerCompose)
 	// A set that brings its stack up afresh (run: serveTest false) waits for
 	// the agent in it to answer /health before anything else; with nothing

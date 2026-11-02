@@ -216,6 +216,12 @@ type runShape struct {
 	// (FailureInfo.LearningNotKept). Empty otherwise: a set not judged says
 	// it in notJudged.
 	staleWhy string
+	// appExit is how the application's own exit stopped the set: its exit
+	// code and the test it had not answered (appExitWhy). Empty otherwise.
+	appExit string
+	// heldTest is the test the application had not answered at its exit:
+	// it took the test's request, so it had started. Empty otherwise.
+	heldTest string
 }
 
 const partialRunReason = "replay stopped before every test ran - the tests missing from the totals were not " +
@@ -260,12 +266,17 @@ func describeTestSetVerdict(status models.TestSetStatus, testCaseResults []model
 		if shape.downgradedFromPassed {
 			return partialRunReason
 		}
-		if len(testCaseResults) == 0 {
-			return "application startup failed - check application logs in the app_logs field for details and next steps"
+		// The exit's code and the test it held, where keploy knows them:
+		// the reader goes to the app's logs for that test's request.
+		exit := ""
+		if shape.appExit != "" {
+			exit = ": " + shape.appExit
 		}
-		return withUnverifiedNote(
-			"application stopped during replay - check application logs in the app_logs field for details and next steps",
-			shape)
+		const nextStep = " - check application logs in the app_logs field for details and next steps"
+		if len(testCaseResults) == 0 && shape.heldTest == "" {
+			return "application startup failed" + exit + nextStep
+		}
+		return withUnverifiedNote("application stopped during replay"+exit+nextStep, shape)
 	case models.TestSetStatusFailed:
 		// A set that both failed a test AND stopped early said nothing at all
 		// about the second half: the report read `Total 4, passed 0, failed 1`
@@ -1523,7 +1534,18 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	if errCode != 0 {
 		utils.SetExitCodeOnce(errCode)
 	}
+	stopReason = replayEndStopReason(errCode)
 	return runErr
+}
+
+// replayEndStopReason is the reason the stop's log gives for a run that
+// reached its end with errCode (replayRunOutcome): a failed run did not
+// complete "successfully".
+func replayEndStopReason(errCode int) string {
+	if errCode != 0 {
+		return "replay completed, and the run failed"
+	}
+	return "replay completed successfully"
 }
 
 // replayRunOutcome decides how a replay run reports itself: the process exit
@@ -2058,6 +2080,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	testSetStatusByErrChan := models.TestSetStatusRunning
 	var testSetStatusByErrChanMu sync.RWMutex
 	var lastAppErr models.AppError
+	// unanswered is the test the app was sent last and has not answered;
+	// heldAtExit is that test when keploy first learned of an exit of the
+	// app's own (heldAtExitRead), which the report names (appExitWhy).
+	var unanswered unansweredTest
+	var heldAtExit string
+	var heldAtExitRead bool
 	setErrStatus := func(status models.TestSetStatus) {
 		testSetStatusByErrChanMu.Lock()
 		testSetStatusByErrChan = status
@@ -2066,6 +2094,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	setLastAppErr := func(appErr models.AppError) {
 		testSetStatusByErrChanMu.Lock()
 		lastAppErr = appErr
+		if !heldAtExitRead && appErr != (models.AppError{}) && appErr.AppErrorType != models.ErrCtxCanceled {
+			heldAtExit, heldAtExitRead = unanswered.held(), true
+		}
 		testSetStatusByErrChanMu.Unlock()
 	}
 	getErrStatus := func() models.TestSetStatus {
@@ -2077,6 +2108,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testSetStatusByErrChanMu.RLock()
 		defer testSetStatusByErrChanMu.RUnlock()
 		return lastAppErr
+	}
+	getHeldAtExit := func() string {
+		testSetStatusByErrChanMu.RLock()
+		defer testSetStatusByErrChanMu.RUnlock()
+		return heldAtExit
 	}
 	// stopAppBeforeSetEnd, under the proven switch, stops the application
 	// keploy started for this set as the set's teardown does (an interrupt,
@@ -3520,6 +3556,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			started := time.Now().UTC()
 			replayStarts[testCase.Name] = started
+			unanswered.sent(testCase.Name)
 
 			// What is sent: the request with this run's template values, on a
 			// copy. testCase stays as written.
@@ -3582,6 +3619,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					g.Trailers = sent.GrpcResp.TrailersAsRead()
 					heldOpen, loopErr = loopErr.Error(), nil
 				}
+			}
+			if loopErr == nil {
+				unanswered.answered(testCase.Name)
 			}
 
 			// The test case has its answer, or none: it ends here. Under exact
@@ -4732,6 +4772,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// continue after this call returns.
 			started := time.Now().UTC()
 			replayStarts[tc.Name] = started
+			unanswered.sent(tc.Name)
 			// Sent with this run's template values, on a copy; what it is
 			// expected to stream, likewise (a streamed response never
 			// captures).
@@ -4765,6 +4806,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						unreadDrain = "what " + tc.Name + " consumed before its connection reset"
 					}
 				}
+			}
+			if simErr == nil {
+				unanswered.answered(tc.Name)
 			}
 
 			if simErr != nil {
@@ -6425,7 +6469,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Ignored:       ignored,
 		Tests:         testCaseResults,
 		TimeTaken:     timeTaken.String(),
-		FailureReason: withUnchecked(uncheckedFirst, withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy, unclaimedWhy: unclaimedReason, staleWhy: staleWhy}))),
+		FailureReason: withUnchecked(uncheckedFirst, withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy, unclaimedWhy: unclaimedReason, staleWhy: staleWhy, appExit: appExitWhy(appFailure, getHeldAtExit()), heldTest: getHeldAtExit()}))),
 		AppLogs:       appLogs,
 		HighRisk:      riskHigh,
 		MediumRisk:    riskMed,

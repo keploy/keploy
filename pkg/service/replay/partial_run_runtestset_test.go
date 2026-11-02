@@ -451,9 +451,17 @@ type prHooks struct {
 	// consumedFailsOnStop fails GetConsumedMocks once the run's context is
 	// cancelled, as the real agent call does after the app exits.
 	consumedFailsOnStop bool
+	// onRequest, set, is the stand-in application taking each request
+	// first: a test it returns an error for gets no answer, with that error.
+	onRequest func(ctx context.Context, tc *models.TestCase) error
 }
 
-func (h prHooks) SimulateRequest(_ context.Context, tc *models.TestCase, _ string) (interface{}, error) {
+func (h prHooks) SimulateRequest(ctx context.Context, tc *models.TestCase, _ string) (interface{}, error) {
+	if h.onRequest != nil {
+		if err := h.onRequest(ctx, tc); err != nil {
+			return nil, err
+		}
+	}
 	if err := h.simErr[tc.Name]; err != nil {
 		return nil, err
 	}
