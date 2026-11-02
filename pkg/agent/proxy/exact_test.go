@@ -3834,3 +3834,37 @@ func TestAVariableCallPastItsRecordingsIsAnsweredNothingBetweenTests(t *testing.
 		}
 	}
 }
+
+// ExactTestServed names a test only while its view is in force: not as the
+// first view is installed, before it serves (a pool call ending then wrote
+// its bytes before the test began), and not once a pool view or a session
+// reset replaced it.
+func TestExactTestServedNamesATestOnlyWhileItsViewIsInForce(t *testing.T) {
+	a := exactMock("a", 0, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{a}, nil)
+	if got := mm.ExactTestServed(); got != "" {
+		t.Fatalf("before exact serving: %q, want none", got)
+	}
+	installing := "unread"
+	mm.exact.beforePublish = func(*exactView) {
+		if installing == "unread" {
+			installing = mm.ExactTestServed()
+		}
+	}
+	mm.ServeExactTest("T", []*models.Mock{a})
+	if installing != "" {
+		t.Fatalf("as T's view, the first, was installed: %q, want none: it was not serving yet", installing)
+	}
+	if got := mm.ExactTestServed(); got != "T" {
+		t.Fatalf("while T's view serves: %q, want T", got)
+	}
+	mm.ServeExactPool("-", nil)
+	if got := mm.ExactTestServed(); got != "" {
+		t.Fatalf("after T's end: %q, want none", got)
+	}
+	mm.ServeExactTest("U", []*models.Mock{a})
+	mm.ResetForReplaySession()
+	if got := mm.ExactTestServed(); got != "" {
+		t.Fatalf("after a session reset: %q, want none", got)
+	}
+}
