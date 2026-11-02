@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -878,6 +879,12 @@ func TestProbeHandsTheApplicationsOwnUpstreamBack(t *testing.T) {
 			}
 
 			if tc.want.appEndClosed {
+				// The probe and WatchUntilTaken close the application's end
+				// only when util.ReceivedNothing says it sent nothing, which
+				// it can tell on Linux only (predial_watch_others.go).
+				if runtime.GOOS != "linux" {
+					t.Skip("whether the application sent anything is known on Linux only")
+				}
 				_ = app.SetReadDeadline(time.Now().Add(2 * time.Second))
 				if _, err := app.Read(make([]byte, 1)); !errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET) {
 					t.Fatalf("read %v; the destination closed the application's connection while it was silent, and its end must close too", err)

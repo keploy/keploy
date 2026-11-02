@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -279,22 +280,28 @@ func (plainDestInfo) Delete(context.Context, uint16) error { return nil }
 
 // TestHandshakesAreNotHeldWhereTheyCannotBe: without a way to name a
 // connection during its handshake, without sock_diag, or without NFQUEUE,
-// the proxy accepts handshakes at once as it always did, and says why once.
+// the proxy accepts handshakes at once as it always did, and says why once:
+// at Info on Linux, and at Debug elsewhere, where holding handshakes is not
+// expected, so not holding them is no failure.
 func TestHandshakesAreNotHeldWhereTheyCannotBe(t *testing.T) {
+	wantLevel := zapcore.InfoLevel
+	if runtime.GOOS != "linux" {
+		wantLevel = zapcore.DebugLevel
+	}
 	for _, tc := range []struct {
 		name   string
 		dest   agent.DestInfo
 		port   uint32
-		reason string // "" when nothing is logged at Info
+		reason string // "" when no reason is logged
 	}{
 		{"hooks cannot name a handshake", plainDestInfo{}, 16789, "the connection hooks in use cannot name a connection's destination during its handshake"},
 		{"sock_diag does not answer", fakeHandshakeDest{checkErr: errors.New("no tcp_diag")}, 16789, "sock_diag cannot name a connecting socket"},
 		{"the queue cannot be set up", fakeHandshakeDest{}, 0, "could not start holding handshakes"},
-		// Turned off: nothing is even checked, and nothing is logged above Debug.
+		// Turned off: nothing is even checked, and no reason is logged.
 		{"turned off", fakeHandshakeDest{checkErr: errors.New("must not be checked")}, 16789, "off"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			core, logs := observer.New(zapcore.InfoLevel)
+			core, logs := observer.New(zapcore.DebugLevel)
 			p := &Proxy{logger: zap.New(core), DestInfo: tc.dest, Port: tc.port, DisableHandshakeHold: tc.reason == "off"}
 			if tc.reason == "off" {
 				tc.reason = ""
@@ -310,8 +317,8 @@ func TestHandshakesAreNotHeldWhereTheyCannotBe(t *testing.T) {
 				}
 				return
 			}
-			if len(infos) != 1 || infos[0].ContextMap()["reason"] != tc.reason {
-				t.Fatalf("logged %v, want one Info with reason %q", infos, tc.reason)
+			if len(infos) != 1 || infos[0].ContextMap()["reason"] != tc.reason || infos[0].Level != wantLevel {
+				t.Fatalf("logged %v, want one %s with reason %q", infos, wantLevel.CapitalString(), tc.reason)
 			}
 		})
 	}
@@ -353,8 +360,13 @@ func TestHoldStartsWithTheFirstSessionThatDials(t *testing.T) {
 	if n := attempts(); n != 2 {
 		t.Fatalf("a later session made %d attempts in all, want 2", n)
 	}
-	if n := infos(); n != 1 {
-		t.Fatalf("the reason was logged at Info %d times, want once", n)
+	// Off Linux the reason is said at Debug only (startHandshakeHold).
+	wantInfos := 1
+	if runtime.GOOS != "linux" {
+		wantInfos = 0
+	}
+	if n := infos(); n != wantInfos {
+		t.Fatalf("the reason was logged at Info %d times, want %d", n, wantInfos)
 	}
 
 	p.stopHandshakeHold()
