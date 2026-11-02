@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -398,3 +400,519 @@ func TestGetGitHubRelease_RefusesAnythingButARelease(t *testing.T) {
 		t.Errorf("getGitHubRelease = %+v, %v; want the release with its asset digest", got, err)
 	}
 }
+
+func TestReplaceHost(t *testing.T) {
+	cases := []struct {
+		name       string
+		currentURL string
+		ipAddress  string
+		want       string
+		wantErr    bool
+	}{
+		{
+			name:       "valid http URL",
+			currentURL: "http://example.com/api/v1",
+			ipAddress:  "192.168.1.100",
+			want:       "http://192.168.1.100/api/v1",
+			wantErr:    false,
+		},
+		{
+			name:       "valid http URL with port",
+			currentURL: "http://example.com:8080/api/v1",
+			ipAddress:  "10.0.0.1",
+			want:       "http://10.0.0.1:8080/api/v1",
+			wantErr:    false,
+		},
+		{
+			name:       "empty ip address",
+			currentURL: "http://example.com/api/v1",
+			ipAddress:  "",
+			want:       "http://example.com/api/v1",
+			wantErr:    true,
+		},
+		{
+			name:       "invalid URL",
+			currentURL: "://invalid-url",
+			ipAddress:  "10.0.0.1",
+			want:       "://invalid-url",
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReplaceHost(tc.currentURL, tc.ipAddress)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ReplaceHost(%q, %q) error = %v, wantErr = %v", tc.currentURL, tc.ipAddress, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ReplaceHost(%q, %q) = %q, want %q", tc.currentURL, tc.ipAddress, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReplaceGrpcHost(t *testing.T) {
+	cases := []struct {
+		name      string
+		authority string
+		ipAddress string
+		want      string
+		wantErr   bool
+	}{
+		{
+			name:      "valid authority with hostname",
+			authority: "localhost:50051",
+			ipAddress: "127.0.0.1",
+			want:      "127.0.0.1:50051",
+			wantErr:   false,
+		},
+		{
+			name:      "valid authority with ipv6",
+			authority: "[::1]:50051",
+			ipAddress: "10.0.0.1",
+			want:      "10.0.0.1:50051",
+			wantErr:   false,
+		},
+		{
+			name:      "empty ip address",
+			authority: "localhost:50051",
+			ipAddress: "",
+			want:      "localhost:50051",
+			wantErr:   true,
+		},
+		{
+			name:      "invalid authority format without port",
+			authority: "localhost",
+			ipAddress: "127.0.0.1",
+			want:      "localhost",
+			wantErr:   true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReplaceGrpcHost(tc.authority, tc.ipAddress)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ReplaceGrpcHost(%q, %q) error = %v, wantErr = %v", tc.authority, tc.ipAddress, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ReplaceGrpcHost(%q, %q) = %q, want %q", tc.authority, tc.ipAddress, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReplaceGrpcPort(t *testing.T) {
+	cases := []struct {
+		name      string
+		authority string
+		port      string
+		want      string
+		wantErr   bool
+	}{
+		{
+			name:      "authority with port",
+			authority: "localhost:50051",
+			port:      "9090",
+			want:      "localhost:9090",
+			wantErr:   false,
+		},
+		{
+			name:      "authority without port fallback",
+			authority: "localhost",
+			port:      "9090",
+			want:      "localhost:9090",
+			wantErr:   false,
+		},
+		{
+			name:      "empty port",
+			authority: "localhost:50051",
+			port:      "",
+			want:      "localhost:50051",
+			wantErr:   true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReplaceGrpcPort(tc.authority, tc.port)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ReplaceGrpcPort(%q, %q) error = %v, wantErr = %v", tc.authority, tc.port, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ReplaceGrpcPort(%q, %q) = %q, want %q", tc.authority, tc.port, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReplaceBaseURL(t *testing.T) {
+	cases := []struct {
+		name       string
+		currentURL string
+		baseURL    string
+		want       string
+		wantErr    bool
+	}{
+		{
+			name:       "valid baseURL replacement",
+			currentURL: "http://old-domain.com:8080/api/v1/resource?id=123",
+			baseURL:    "https://new-domain.com:9000",
+			want:       "https://new-domain.com:9000/api/v1/resource?id=123",
+			wantErr:    false,
+		},
+		{
+			name:       "empty baseURL",
+			currentURL: "http://old-domain.com/api",
+			baseURL:    "",
+			want:       "http://old-domain.com/api",
+			wantErr:    true,
+		},
+		{
+			name:       "invalid currentURL",
+			currentURL: "://invalid-url",
+			baseURL:    "http://new-domain.com",
+			want:       "://invalid-url",
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReplaceBaseURL(tc.currentURL, tc.baseURL)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ReplaceBaseURL(%q, %q) error = %v, wantErr = %v", tc.currentURL, tc.baseURL, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ReplaceBaseURL(%q, %q) = %q, want %q", tc.currentURL, tc.baseURL, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReplacePort(t *testing.T) {
+	cases := []struct {
+		name       string
+		currentURL string
+		port       string
+		want       string
+		wantErr    bool
+	}{
+		{
+			name:       "URL without port",
+			currentURL: "http://example.com/api",
+			port:       "8080",
+			want:       "http://example.com:8080/api",
+			wantErr:    false,
+		},
+		{
+			name:       "URL with existing port",
+			currentURL: "http://example.com:8080/api",
+			port:       "9090",
+			want:       "http://example.com:9090/api",
+			wantErr:    false,
+		},
+		{
+			name:       "empty port",
+			currentURL: "http://example.com/api",
+			port:       "",
+			want:       "http://example.com/api",
+			wantErr:    true,
+		},
+		{
+			name:       "invalid URL",
+			currentURL: "://invalid-url",
+			port:       "8080",
+			want:       "://invalid-url",
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReplacePort(tc.currentURL, tc.port)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ReplacePort(%q, %q) error = %v, wantErr = %v", tc.currentURL, tc.port, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ReplacePort(%q, %q) = %q, want %q", tc.currentURL, tc.port, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestKeys(t *testing.T) {
+	m := map[string][]string{
+		"header-a": {"val1", "val2"},
+		"header-b": {"val3"},
+		"header-c": {},
+	}
+	got := Keys(m)
+	sort.Strings(got)
+	want := []string{"header-a", "header-b", "header-c"}
+	if len(got) != len(want) {
+		t.Fatalf("Keys() returned %d keys, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Keys()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	emptyGot := Keys(nil)
+	if len(emptyGot) != 0 {
+		t.Errorf("Keys(nil) = %v, want empty slice", emptyGot)
+	}
+}
+
+func TestEnsureRmBeforeName(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+		want string
+	}{
+		{
+			name: "adds --rm before --name when absent",
+			cmd:  "docker run -d --name my-app nginx",
+			want: "docker run -d --rm --name my-app nginx",
+		},
+		{
+			name: "preserves command when --rm already present",
+			cmd:  "docker run -d --rm --name my-app nginx",
+			want: "docker run -d --rm --name my-app nginx",
+		},
+		{
+			name: "does nothing when --name is not present",
+			cmd:  "docker run -d nginx",
+			want: "docker run -d nginx",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EnsureRmBeforeName(tc.cmd); got != tc.want {
+				t.Errorf("EnsureRmBeforeName(%q) = %q, want %q", tc.cmd, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsDockerCmdAndHasUserCommand(t *testing.T) {
+	cases := []struct {
+		kind       CmdType
+		isDocker   bool
+		hasUserCmd bool
+	}{
+		{DockerRun, true, true},
+		{DockerStart, true, true},
+		{DockerCompose, true, true},
+		{FromContainer, true, false},
+		{Native, false, true},
+		{Empty, false, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(string(tc.kind), func(t *testing.T) {
+			if got := IsDockerCmd(tc.kind); got != tc.isDocker {
+				t.Errorf("IsDockerCmd(%q) = %v, want %v", tc.kind, got, tc.isDocker)
+			}
+			if got := HasUserCommand(tc.kind); got != tc.hasUserCmd {
+				t.Errorf("HasUserCommand(%q) = %v, want %v", tc.kind, got, tc.hasUserCmd)
+			}
+		})
+	}
+}
+
+func TestHash(t *testing.T) {
+	emptyHash := Hash([]byte(""))
+	wantEmpty := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	if emptyHash != wantEmpty {
+		t.Errorf("Hash(\"\") = %q, want %q", emptyHash, wantEmpty)
+	}
+
+	dataHash := Hash([]byte("keploy"))
+	if dataHash == emptyHash || len(dataHash) != 64 {
+		t.Errorf("Hash(\"keploy\") = %q, want valid 64-char sha256 string", dataHash)
+	}
+}
+
+func TestTrimSpaces(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "trims spaces around equal and comma",
+			input: "foo = bar , baz = qux",
+			want:  "foo=bar,baz=qux",
+		},
+		{
+			name:  "respects escaped comma and equal",
+			input: "foo\\,bar = 1",
+			want:  "foo\\,bar=1",
+		},
+		{
+			name:  "handles already trimmed string",
+			input: "a=1,b=2",
+			want:  "a=1,b=2",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := TrimSpaces(tc.input); got != tc.want {
+				t.Errorf("TrimSpaces(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseMetadata(t *testing.T) {
+	t.Run("empty string returns nil", func(t *testing.T) {
+		m, err := ParseMetadata("")
+		if err != nil || m != nil {
+			t.Fatalf("ParseMetadata(\"\") = %v, %v; want nil, nil", m, err)
+		}
+	})
+
+	t.Run("valid key-value string parses into map", func(t *testing.T) {
+		m, err := ParseMetadata("name=keploy,env=test")
+		if err != nil {
+			t.Fatalf("ParseMetadata failed: %v", err)
+		}
+		if m["name"] != "keploy" || m["env"] != "test" {
+			t.Errorf("ParseMetadata returned unexpected map: %v", m)
+		}
+	})
+}
+
+func TestExtractFlagsFromArgs(t *testing.T) {
+	t.Run("ExtractCmdTypeFromArgs", func(t *testing.T) {
+		cases := []struct {
+			args []string
+			want string
+		}{
+			{[]string{"keploy", "record", "--cmd-type", "Docker"}, "docker"},
+			{[]string{"keploy", "record", "--cmdType=DOCKER"}, "docker"},
+			{[]string{"keploy", "record", "--cmd-type", "Native"}, "native"},
+			{[]string{"keploy", "record"}, ""},
+			{[]string{"keploy", "record", "--", "--cmd-type", "Docker"}, ""},
+		}
+		for _, tc := range cases {
+			if got := ExtractCmdTypeFromArgs(tc.args); got != tc.want {
+				t.Errorf("ExtractCmdTypeFromArgs(%v) = %q, want %q", tc.args, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("ExtractFromContainerFromArgs", func(t *testing.T) {
+		cases := []struct {
+			args []string
+			want string
+		}{
+			{[]string{"keploy", "record", "--from-container", "MyContainer"}, "MyContainer"},
+			{[]string{"keploy", "record", "--fromContainer=App1"}, "App1"},
+			{[]string{"keploy", "record"}, ""},
+			{[]string{"keploy", "record", "--", "--from-container", "App1"}, ""},
+		}
+		for _, tc := range cases {
+			if got := ExtractFromContainerFromArgs(tc.args); got != tc.want {
+				t.Errorf("ExtractFromContainerFromArgs(%v) = %q, want %q", tc.args, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("ExtractCommandFromArgs", func(t *testing.T) {
+		cases := []struct {
+			args []string
+			want string
+		}{
+			{[]string{"keploy", "record", "-c", "python app.py"}, "python app.py"},
+			{[]string{"keploy", "record", "--command", "go run ."}, "go run ."},
+			{[]string{"keploy", "record", "-c=npm start"}, "npm start"},
+			{[]string{"keploy", "record", "--command=cargo run"}, "cargo run"},
+			{[]string{"keploy", "record"}, ""},
+		}
+		for _, tc := range cases {
+			if got := ExtractCommandFromArgs(tc.args); got != tc.want {
+				t.Errorf("ExtractCommandFromArgs(%v) = %q, want %q", tc.args, got, tc.want)
+			}
+		}
+	})
+}
+
+func TestIsXMLResponse(t *testing.T) {
+	cases := []struct {
+		name string
+		resp *models.HTTPResp
+		want bool
+	}{
+		{
+			name: "nil response",
+			resp: nil,
+			want: false,
+		},
+		{
+			name: "response with no headers",
+			resp: &models.HTTPResp{},
+			want: false,
+		},
+		{
+			name: "response with application/xml",
+			resp: &models.HTTPResp{
+				Header: map[string]string{"Content-Type": "application/xml; charset=utf-8"},
+			},
+			want: true,
+		},
+		{
+			name: "response with text/xml",
+			resp: &models.HTTPResp{
+				Header: map[string]string{"Content-Type": "text/xml"},
+			},
+			want: true,
+		},
+		{
+			name: "response with application/json",
+			resp: &models.HTTPResp{
+				Header: map[string]string{"Content-Type": "application/json"},
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsXMLResponse(tc.resp); got != tc.want {
+				t.Errorf("IsXMLResponse() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGetReqMeta(t *testing.T) {
+	req, err := http.NewRequest("GET", "http://example.com/api/v1/users?page=1&sort=desc", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest failed: %v", err)
+	}
+
+	meta := GetReqMeta(req)
+	if meta["method"] != "GET" {
+		t.Errorf("meta[method] = %q, want 'GET'", meta["method"])
+	}
+	if meta["host"] != "example.com" {
+		t.Errorf("meta[host] = %q, want 'example.com'", meta["host"])
+	}
+	if meta["path"] != "/api/v1/users" {
+		t.Errorf("meta[path] = %q, want '/api/v1/users'", meta["path"])
+	}
+	queryKeys := meta["query keys"]
+	if !strings.Contains(queryKeys, "page") || !strings.Contains(queryKeys, "sort") {
+		t.Errorf("meta[query keys] = %q, want query parameter names 'page' and 'sort'", queryKeys)
+	}
+	if strings.Contains(queryKeys, "desc") || strings.Contains(queryKeys, "1") {
+		t.Errorf("meta[query keys] = %q leaked query values", queryKeys)
+	}
+}
+
