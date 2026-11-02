@@ -113,7 +113,16 @@ func TestATestThatEndsEarlyLeavesNothingOfItsGroup(t *testing.T) {
 			helper := cmd.Process.Pid
 			reaped := make(chan struct{})
 			go func() { _ = cmd.Wait(); close(reaped) }()
-			t.Cleanup(func() { _ = syscall.Kill(-helper, syscall.SIGKILL); <-reaped })
+			// Whatever is left of its session, as a row that fails may leave
+			// it (the helper started in a group of its own, out of reach of
+			// its own group's kill), ends with the row.
+			t.Cleanup(func() {
+				_ = syscall.Kill(-helper, syscall.SIGKILL)
+				<-reaped
+				for _, p := range session(helper) {
+					_ = syscall.Kill(p, syscall.SIGKILL)
+				}
+			})
 			said := func() string { b, _ := os.ReadFile(filepath.Join(dir, "out")); return string(b) }
 
 			var pids []int
@@ -186,6 +195,29 @@ func TestATestThatEndsEarlyLeavesNothingOfItsGroup(t *testing.T) {
 			}
 		})
 	}
+}
+
+// session is every process of session sid (its stat's field 6).
+func session(sid int) []int {
+	ents, _ := os.ReadDir("/proc")
+	var pids []int
+	for _, e := range ents {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join("/proc", e.Name(), "stat"))
+		if err != nil {
+			continue
+		}
+		// The fields after the command, which is in parentheses and may hold
+		// any byte: state, ppid, pgrp, session.
+		f := strings.Fields(string(b[strings.LastIndexByte(string(b), ')')+1:]))
+		if len(f) > 3 && f[3] == strconv.Itoa(sid) {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
 }
 
 // exits reports whether the process behind pidfd exits before bound fires;
