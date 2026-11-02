@@ -287,6 +287,9 @@ type Proxy struct {
 	sessionMu   sync.RWMutex
 	session     *agent.Session
 	mockManager *MockManager
+	// instances serves each test worker of a replay from a manager of its
+	// own (instance_serving.go).
+	instances instanceServing
 
 	// workerScope holds per-test-worker mock allowlists for parallel replay
 	// (Design A). Key is the worker's self-reported PID (ScopeReq.Pid); value is
@@ -1985,6 +1988,9 @@ func (p *Proxy) setMockManager(m *MockManager) {
 	prev := p.mockManager
 	p.mockManager = m
 	p.sessionMu.Unlock()
+	// A new session: no test worker is served on until the agent serves it
+	// again, and nothing staged on prev is m's.
+	p.endInstances()
 	if prev != nil {
 		prev.Close()
 	}
@@ -3158,7 +3164,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				parserErrGrp, mysqlLogger, clientConnID, destConnID, outgoingOpts, mysqlUpgrader)
 		}
 
-		m := p.getMockManager()
+		m, merr := p.connManager(destInfo.Instance)
+		if merr != nil {
+			return refuseUnserved(destInfo, dstAddr, merr)
+		}
 		if m == nil {
 			utils.LogError(p.logger, nil, "failed to fetch the mock manager")
 			return err
@@ -3769,8 +3778,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// Start the shutdown goroutine now that dstConn is established.
 	startConnCloser()
 
-	// get the mock manager for the current app
-	m := p.getMockManager()
+	// get the mock manager for the current app: under a replay of test
+	// workers, the manager of the worker whose process made the connection
+	m, merr := p.connManager(destInfo.Instance)
+	if merr != nil {
+		return refuseUnserved(destInfo, dstAddr, merr)
+	}
 	if m == nil {
 		utils.LogError(logger, err, "failed to fetch the mock manager")
 		return err
@@ -4503,12 +4516,16 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	if mm := p.getMockManager(); mm == nil {
 		p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 	} else {
-		mm.ResetForReplaySession()
-		if opts.StartsTestSet {
-			// Another test set: what the previous set's pool was consumed
-			// of and nobody drained is that set's, never this one's.
-			mm.ArmSetFence()
-		}
+		// Every test worker's manager starts the session as the run's does.
+		p.stage(mm, "session", func(m *MockManager) {
+			m.ResetForReplaySession()
+			if opts.StartsTestSet {
+				// Another test set: what the previous set's pool was
+				// consumed of and nobody drained is that set's, never
+				// this one's.
+				m.ArmSetFence()
+			}
+		})
 	}
 	if provenswitch.On() {
 		// A new test set, as for the learn step above: its variables begin
@@ -4628,8 +4645,10 @@ func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered 
 	p.deriveMysqlPorts(filtered, unFiltered, p.seededDestinations())
 	recorded.add(filtered, unFiltered)
 	if m := p.getMockManager(); m != nil {
-		m.SetFilteredMocks(filtered)
-		m.SetUnFilteredMocks(unFiltered)
+		p.stage(m, "mocks", func(m *MockManager) {
+			m.SetFilteredMocks(filtered)
+			m.SetUnFilteredMocks(unFiltered)
+		})
 		p.dnsCache.Purge()
 	}
 	if p.asyncEngine != nil {
@@ -4646,7 +4665,7 @@ func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered 
 // single call so concurrent readers cannot observe a torn (newMocks,
 // oldWindow) view. Used to satisfy the WindowedProxy extension interface.
 func (p *Proxy) SetMocksWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error {
-	p.stageWithWindow(ctx, filtered, unFiltered, start, end, func(m *MockManager) {
+	p.stageWithWindow(ctx, filtered, unFiltered, start, end, "mocksWindow", func(m *MockManager) {
 		m.SetMocksWithWindow(filtered, unFiltered, start, end)
 	})
 	return nil
@@ -4661,7 +4680,7 @@ func (p *Proxy) OpenTestWithWindow(ctx context.Context, filtered, unFiltered []*
 	if p.getMockManager() == nil && len(given) > 0 {
 		return errNoMockManager
 	}
-	p.stageWithWindow(ctx, filtered, unFiltered, start, end, func(m *MockManager) {
+	p.stageWithWindow(ctx, filtered, unFiltered, start, end, "", func(m *MockManager) {
 		m.OpenTestWithWindow(filtered, unFiltered, start, end, given)
 	})
 	return nil
@@ -4669,11 +4688,18 @@ func (p *Proxy) OpenTestWithWindow(ctx context.Context, filtered, unFiltered []*
 
 // stageWithWindow is SetMocksWithWindow, the mock manager's part staged by
 // stage.
-func (p *Proxy) stageWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time, stage func(*MockManager)) {
+func (p *Proxy) stageWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time, key string, stage func(*MockManager)) {
 	p.deriveMysqlPorts(filtered, unFiltered, p.seededDestinations())
 	recorded.add(filtered, unFiltered)
 	if m := p.getMockManager(); m != nil {
-		stage(m)
+		// key names a staging of the set, which every test worker's
+		// manager is staged with too; "" a test's, the run's manager's
+		// alone.
+		if key == "" {
+			stage(m)
+		} else {
+			p.stage(m, key, stage)
+		}
 		p.dnsCache.Purge()
 	}
 	// A test set's staging (from models.BaseTime, the first since its Mock,
@@ -4747,27 +4773,21 @@ func (p *Proxy) FirstTestWindowStart() time.Time {
 // selection, an ignored test or the streaming deferral leaves it late and mocks
 // from a test that never runs are served as bootstrap traffic.
 func (p *Proxy) SeedStartupCutoff(start time.Time) {
-	if m := p.getMockManager(); m != nil {
-		m.SeedStartupCutoff(start)
-	}
+	_ = p.stageOn("startupCutoff", func(m *MockManager) { m.SeedStartupCutoff(start) })
 }
 
 // SeedStatementCatalog hands the underlying MockManager the stored set's
 // statement catalog (MockManager.SeedStatementCatalog). Satisfies the agent's
 // optional StatementCatalogSeeder extension interface.
 func (p *Proxy) SeedStatementCatalog(mocks []*models.Mock) {
-	if m := p.getMockManager(); m != nil {
-		m.SeedStatementCatalog(mocks)
-	}
+	_ = p.stageOn("catalog", func(m *MockManager) { m.SeedStatementCatalog(mocks) })
 }
 
 // SeedRecordedWindows hands the underlying MockManager the recorded window of
 // every test of the set being staged. Satisfies the agent's optional
 // RecordedWindowsSeeder extension interface.
 func (p *Proxy) SeedRecordedWindows(ws []models.TestWindow) {
-	if m := p.getMockManager(); m != nil {
-		m.SeedRecordedWindows(ws)
-	}
+	_ = p.stageOn("recordedWindows", func(m *MockManager) { m.SeedRecordedWindows(ws) })
 }
 
 // ResetStatefulCursors drops the mock manager's per-request stateful cursors so
@@ -4850,7 +4870,12 @@ func (p *Proxy) OpenExactTest(test string, owned []*models.Mock, given []models.
 // it (a part, a pick by the clock) is refused naming the given, never learned
 // as noise.
 func (p *Proxy) GiveExactTest(test string, b models.VariableBinding) error {
-	m := p.getMockManager()
+	return p.giveExactOn(p.getMockManager(), test, b)
+}
+
+// giveExactOn is GiveExactTest on manager m: the run's, or a test worker's
+// (instanceExact).
+func (p *Proxy) giveExactOn(m *MockManager, test string, b models.VariableBinding) error {
 	if m == nil {
 		return errNoMockManager
 	}
@@ -4865,7 +4890,12 @@ func (p *Proxy) GiveExactTest(test string, b models.VariableBinding) error {
 
 // openExact opens a test under exact serving on the mock manager (open).
 func (p *Proxy) openExact(open func(*MockManager)) error {
-	m := p.getMockManager()
+	return p.openExactOn(p.getMockManager(), open)
+}
+
+// openExactOn is openExact on manager m: the run's, or a test worker's
+// (instanceExact).
+func (p *Proxy) openExactOn(m *MockManager, open func(*MockManager)) error {
 	if m == nil {
 		return errNoMockManager
 	}
@@ -4883,16 +4913,14 @@ var _ agent.PoolNamesSetter = (*Proxy)(nil)
 // SetPoolNames implements agent.PoolNamesSetter: the mock manager's pool
 // membership (MockManager.SetPoolNames), the key of the test process whose
 // tests list each mock (MockManager.SetPoolOwners) and the mocks each test
-// lists (MockManager.SetPoolTests), the owners and tests first.
+// lists (MockManager.SetPoolTests), the owners and tests first. It is staged
+// (stageOn): every test worker's manager gets it, in staging order.
 func (p *Proxy) SetPoolNames(names []string, owners map[string]string, tests map[string][]string) error {
-	m := p.getMockManager()
-	if m == nil {
-		return errNoMockManager
-	}
-	m.SetPoolOwners(owners)
-	m.SetPoolTests(tests)
-	m.SetPoolNames(names)
-	return nil
+	return p.stageOn("poolNames", func(m *MockManager) {
+		m.SetPoolOwners(owners)
+		m.SetPoolTests(tests)
+		m.SetPoolNames(names)
+	})
 }
 
 // learnBoundary runs step (the learn tracker's Begin, End or NewSet) on the
@@ -5014,23 +5042,13 @@ func (p *Proxy) ServeExactWorker(names []string) error {
 // StageExactBackground implements agent.ExactBackgroundServer
 // (exact_background.go).
 func (p *Proxy) StageExactBackground(rules string) error {
-	m := p.getMockManager()
-	if m == nil {
-		return errNoMockManager
-	}
-	m.StageExactBackground(rules)
-	return nil
+	return p.stageOn("bgRules", func(m *MockManager) { m.StageExactBackground(rules) })
 }
 
 // ServeExactBackground implements agent.ExactBackgroundServer
 // (exact_background.go).
 func (p *Proxy) ServeExactBackground(rules string, pool, worker []string) error {
-	m := p.getMockManager()
-	if m == nil {
-		return errNoMockManager
-	}
-	m.ServeExactBackground(rules, pool, worker)
-	return nil
+	return p.stageOn("bg", func(m *MockManager) { m.ServeExactBackground(rules, pool, worker) })
 }
 
 var _ agent.ExactBackgroundServer = (*Proxy)(nil)
@@ -5038,36 +5056,21 @@ var _ agent.ExactBackgroundServer = (*Proxy)(nil)
 // SetRecordedOfKind implements agent.RecordedOfKindSetter
 // (exact_background.go).
 func (p *Proxy) SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
-	m := p.getMockManager()
-	if m == nil {
-		return errNoMockManager
-	}
-	m.SetRecordedOfKind(src)
-	return nil
+	return p.stageOn("recordedOfKind", func(m *MockManager) { m.SetRecordedOfKind(src) })
 }
 
 var _ agent.RecordedOfKindSetter = (*Proxy)(nil)
 
 // SetRecordingTimes implements agent.RecordingTimesSetter (exact.go).
 func (p *Proxy) SetRecordingTimes(src func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error) error {
-	m := p.getMockManager()
-	if m == nil {
-		return errNoMockManager
-	}
-	m.SetRecordingTimes(src)
-	return nil
+	return p.stageOn("recordingTimes", func(m *MockManager) { m.SetRecordingTimes(src) })
 }
 
 var _ agent.RecordingTimesSetter = (*Proxy)(nil)
 
 // SetRecordedBefore implements agent.RecordedBeforeSetter (exact.go).
 func (p *Proxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error {
-	m := p.getMockManager()
-	if m == nil {
-		return errNoMockManager
-	}
-	m.SetRecordedBefore(src)
-	return nil
+	return p.stageOn("recordedBefore", func(m *MockManager) { m.SetRecordedBefore(src) })
 }
 
 var _ agent.RecordedBeforeSetter = (*Proxy)(nil)
@@ -5205,12 +5208,7 @@ var _ agent.KeptLearningSetter = (*Proxy)(nil)
 
 // SetRecordingSource implements agent.RecordingSourceSetter (exact.go).
 func (p *Proxy) SetRecordingSource(src func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
-	m := p.getMockManager()
-	if m == nil {
-		return errNoMockManager
-	}
-	m.SetRecordingSource(src)
-	return nil
+	return p.stageOn("recordingSource", func(m *MockManager) { m.SetRecordingSource(src) })
 }
 
 // RestartExactKey implements agent.ExactKeyRestarter (exact.go).

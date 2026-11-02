@@ -980,6 +980,20 @@ type ExactKeyRestarter interface {
 	RestartExactKey(key string, names []string) error
 }
 
+// InstanceServer is an optional ExactServer capability of a proxy that serves
+// each test worker of a replay (the kernel's instance stamp on each of its
+// connections, structs.DestInfo.Instance) from a mock manager of the
+// worker's own, staged as the run's is: ServeInstance starts serving worker
+// inst and returns how the agent serves its tests there (the ExactServer
+// capabilities above, on inst's manager alone). From then until the next
+// session, a connection from no worker, or from a worker that is not served
+// (StopServingInstance, or never begun), is refused before anything answers
+// it.
+type InstanceServer interface {
+	ServeInstance(inst uint32) (ExactServer, error)
+	StopServingInstance(inst uint32) error
+}
+
 // ScopeStager is an optional Proxy capability: it stages the pool of a test
 // of keploy mock replay that its harness began (open) or ended (!open) without
 // a worker pid, with the proven switch off. Such a test is served the mocks
