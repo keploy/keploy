@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // windowTracker is r's tracker (concurrentRun.tracker) told the test's
@@ -437,5 +438,147 @@ func TestACallTheRequestReleasesReadsItsWindowWithItsRecordedBegin(t *testing.T)
 		case !w.Rec.TestFrom.Equal(c.want):
 			t.Errorf("%s: the released call's window in the recording carries the test's begin %v; want %v", c.what, w.Rec.TestFrom, c.want)
 		}
+	}
+}
+
+// serverStampRun is one run of a server test whose handler read its clock
+// for a .NET stamp (DateTime.UtcNow.ToString("O")) about a second after the
+// test began, after which another goroutine's call was served (prev) before
+// the handler's call reached keploy (call).
+type serverStampRun struct{ began, read, prev, call time.Time }
+
+// serverStampWindow is the handler's call's window in rec and in record's
+// full round f, each carrying where its test began (Span.TestFrom), as a
+// server test's window does.
+func serverStampWindow(rec, f serverStampRun) *Window {
+	return &Window{
+		Rec: Span{From: rec.prev, To: rec.call, TestFrom: rec.began},
+		F:   Span{From: f.prev, To: f.call, TestFrom: f.began},
+	}
+}
+
+// A server test's clock read made before another goroutine's call is
+// learned the same way whatever digits the clock gave it: as a plain read
+// of the clock that its window from the test's begin holds, which the
+// replay's check passes in the call's span carrying that begin. Its call's
+// window shows no read, so the value's changed words are searched as data,
+// and whether one of them, or a decoded or case-folded form of one, stands
+// as a token in an opaque payload is chance: "…55.3505371Z" ends in
+// "3505371Z", which decodes as base64 to a text whose word, case-folded, is
+// "y", a token a start-up Pulsar look-up's JSON holds; "…55.3805371Z"
+// decodes to no text. Read as a variable of the look-up, which no call can
+// bind, the first would be refused, so the same test's call would be kept
+// in one record and refused in the next. Where the window from the test's
+// begin does not hold the read (the recording's read made before its test
+// began, or its begin unknown there), the part found stays the value's
+// place. So does a part an earlier call F served field by field drifted
+// with, and a payload that holds the value whole (the application sent the
+// stamp in a Pulsar message before the call) stays its source, as the copy
+// rules read it, even where the window from the test's begin sets that
+// payload aside (under the proven flow, a payload F had not served before
+// the call is no source of a read that window holds).
+func TestAServerTestsReadPastAnotherGoroutinesServeIsLearnedWhateverPartAPayloadHoldsByChance(t *testing.T) {
+	recRun := serverStampRun{
+		began: time.Date(2026, 11, 2, 12, 48, 54, 330_000_000, time.UTC),
+		read:  time.Date(2026, 11, 2, 12, 48, 55, 350_537_100, time.UTC),
+		prev:  time.Date(2026, 11, 2, 12, 48, 55, 423_433_000, time.UTC),
+		call:  time.Date(2026, 11, 2, 12, 48, 55, 606_243_000, time.UTC),
+	}
+	fRun := serverStampRun{
+		began: time.Date(2026, 11, 2, 12, 49, 57, 215_000_000, time.UTC),
+		read:  time.Date(2026, 11, 2, 12, 49, 58, 275_116_400, time.UTC),
+		prev:  time.Date(2026, 11, 2, 12, 49, 58, 391_020_000, time.UTC),
+		call:  time.Date(2026, 11, 2, 12, 49, 58, 570_310_000, time.UTC),
+	}
+	stamp := func(v time.Time) string { return v.UTC().Format("2006-01-02T15:04:05.0000000Z") }
+	lookUpAt := recRun.began.Add(-3 * time.Second)
+	lookUp := []Raw{RawOf(&models.Mock{Name: "mock-1", Kind: "Pulsar", Spec: models.MockSpec{
+		Metadata:         map[string]string{"commandType": "LOOKUP", "type": "config"},
+		GenericRequests:  []models.Payload{{Origin: "client", Message: []models.OutputBinary{{Type: "json", Data: `{"commandType":"LOOKUP","requestId":0,"topic":"persistent://public/default/lead-events","body":{"authoritative":false,"topic":"persistent://public/default/lead-events"}}`}}}},
+		GenericResponses: []models.Payload{{Origin: "server", Message: []models.OutputBinary{{Type: "json", Data: `{"commandType":"LOOKUP_RESPONSE","requestId":0,"body":{"authoritative":true,"brokerServiceUrl":"pulsar://localhost:6650","proxyThroughServiceUrl":true,"response":"Connect"}}`}}}},
+		ReqTimestampMock: lookUpAt, ResTimestampMock: lookUpAt.Add(211 * time.Millisecond),
+	}}, false)}
+	const p = "body.Item.CreatedAt.S"
+	str := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	live := stamp(fRun.read)
+	learnAfter := func(earlier []Earlier, rec time.Time, w *Window, raw []Raw) Learned {
+		return ClassifyIn(clockedDrifts(), []string{p}, str(live), str(stamp(rec)), recRun.call, earlier, raw, nil, w)[0]
+	}
+	learn := func(rec time.Time, w *Window, raw []Raw) Learned { return learnAfter(nil, rec, w, raw) }
+	w := serverStampWindow(recRun, fRun)
+	if ln := learn(recRun.read, &Window{Rec: Span{From: recRun.prev, To: recRun.call}, F: Span{From: fRun.prev, To: fRun.call}}, lookUp); !partInPayload(ln) || ln.From.Mock != "mock-1" {
+		t.Fatalf("the call's window alone: %s from %q held %q (%s); want a part of the value the look-up holds", ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+	}
+	for _, c := range []struct {
+		what string
+		rec  time.Time
+		raw  []Raw
+	}{
+		{"a decoded word of it stands in the start-up look-up", recRun.read, lookUp},
+		{"no word of it stands in the look-up", recRun.read.Add(30 * time.Millisecond), lookUp},
+		{"no payload", recRun.read, nil},
+	} {
+		ln := learn(c.rec, w, c.raw)
+		if ln.Kind != KindClockRead || ln.Read == nil || ln.Read.Since == models.SinceTestBegin {
+			t.Errorf("%s: %s from %q held %q (%s); want a plain read of the clock checked in its call's span", c.what, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+			continue
+		}
+		s := Span{From: fRun.prev, To: fRun.call, TestFrom: fRun.began}
+		if ok, why := CheckClockRead(p, *ln.Read, str(live).Leaves[p], s, true); !ok {
+			t.Errorf("%s: learned as %s, which the replay's check refuses: %s", c.what, ln.Read, why)
+		}
+	}
+	early := recRun
+	early.began = recRun.read.Add(50 * time.Millisecond) // after the read, before the other goroutine's serve
+	fOnly := serverStampWindow(recRun, fRun)
+	fOnly.Rec.TestFrom = time.Time{}
+	for _, c := range []struct {
+		what string
+		w    *Window
+	}{
+		{"the recording's read made before its test began", serverStampWindow(early, fRun)},
+		{"the test's begin known in record's full round alone", fOnly},
+	} {
+		if ln := learn(recRun.read, c.w, lookUp); !partInPayload(ln) || ln.From.Mock != "mock-1" {
+			t.Errorf("%s: %s from %q held %q Read=%+v (%s); want the look-up's part to stay the value's place", c.what, ln.Kind, ln.From.Mock, ln.From.Held, ln.Read, ln.Why)
+		}
+	}
+	// An earlier call of the test that F served field by field (its
+	// adapter gives its payload), whose field drifted from the value's
+	// minute to F's: a place F saw move with it, never a token found by
+	// chance, though the window from the test's begin holds the read.
+	minute := []Earlier{{Mock: "mock-8", At: recRun.prev, Payload: payloadOf("mock-8", recRun.prev), Own: true, Seen: []Seen{
+		{Side: Request, Leaf: Leaf{Path: "body.minute", Noise: "body.minute", Type: String, Value: "48"}, Live: "49", Place: "body.minute"},
+	}}}
+	if ln := learnAfter(minute, recRun.read, w, nil); ln.Kind != KindVariable || ln.From.Mock != "mock-8" || ln.From.Side != Request || ln.From.Whole {
+		t.Errorf("a served call's field that drifted with it: %s from %q %s whole=%v Read=%+v (%s); want the variable of mock-8's request, a part", ln.Kind, ln.From.Mock, ln.From.Side, ln.From.Whole, ln.Read, ln.Why)
+	}
+	sent := func(served bool) []Raw {
+		at := recRun.read.Add(40 * time.Millisecond)
+		return []Raw{RawOf(&models.Mock{Name: "mock-9", Kind: "Pulsar", Spec: models.MockSpec{
+			GenericRequests:  []models.Payload{{Origin: "client", Message: []models.OutputBinary{{Type: "json", Data: `{"commandType":"SEND","payload":{"type":"lead.created","at":"` + stamp(recRun.read) + `"}}`}}}},
+			ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
+		}}, served)}
+	}
+	for _, c := range []struct {
+		what   string
+		raw    []Raw
+		proven bool
+	}{
+		{"sent whole in a payload F served before the call", sent(true), false},
+		{"sent whole in a payload F had not served before the call", sent(false), false},
+		{"the same, under the proven flow", sent(false), true},
+		{"served before the call, under the proven flow", sent(true), true},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			if c.proven {
+				t.Setenv(provenswitch.Env, "1")
+			}
+			if ln := learn(recRun.read, w, c.raw); ln.Kind != KindVariable || ln.From.Mock != "mock-9" || ln.From.Held != stamp(recRun.read) {
+				t.Fatalf("%s from %q held %q Read=%+v (%s); want the variable of mock-9 holding the stamp whole", ln.Kind, ln.From.Mock, ln.From.Held, ln.Read, ln.Why)
+			}
+		})
 	}
 }

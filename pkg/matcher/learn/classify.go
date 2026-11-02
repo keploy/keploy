@@ -2083,7 +2083,17 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// which passes it from the test's begin too (CheckClockRead): the
 		// wider window turns a refusal into a checked read, never into
 		// noise, a variable or a read plus an offset.
-		if wt := w.fromTestBegin(); ln.Kind == KindUnaccounted && wt != nil {
+		//
+		// So is a value its call's window learns only as a part found in a
+		// recording's payload (partInPayload): its call's window shows no
+		// read, so the search read the value's changed words, and their
+		// decoded and case-folded forms, as data, and whether one stands as
+		// a token in a payload keploy has no view of F's in is chance, which
+		// would decide, run by run, between that variable, which no call can
+		// bind, and the read the window from each run's test begin holds. A
+		// plain read that window learns is taken; anything else is not, and
+		// the variable stands.
+		if wt := w.fromTestBegin(); (ln.Kind == KindUnaccounted || partInPayload(ln)) && wt != nil {
 			if wide := leaf(r, l, wt, 0); wide.Kind == KindClockRead && wide.Read != nil {
 				ln = wide
 			}
@@ -2188,6 +2198,16 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		out = append(out, ln)
 	}
 	return out
+}
+
+// partInPayload reports whether ln is a variable whose place is in a raw
+// mock's payload (Place.Side "", where F gave no view of the value: appearedIn
+// reads its words as tokens there) and holds only a part of the recorded
+// value (Place.Held: a word, a piece, or a decoded or case-folded form of
+// one), never an echo's instant. A place that holds the value whole, or one
+// of a served call F saw drift with it, is not one.
+func partInPayload(ln Learned) bool {
+	return ln.Kind == KindVariable && ln.From.Side == "" && !ln.From.Echo && ln.From.Held != ln.Recorded.Value
 }
 
 // clockSourceWhy is why a value an earlier call of the run sent at from (the
