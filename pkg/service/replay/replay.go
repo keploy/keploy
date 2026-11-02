@@ -3094,6 +3094,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// afterwards so long-lived connections do not block the normal flow.
 	var activeTestCases []*models.TestCase
 	var streamingTests []streamingTest
+	// runOrder is the order the set runs and judges its tests in; the report
+	// lists them in it.
+	runOrder := newRunOrder()
 	// streamingOutOfOrder: a streaming test case was recorded before a test
 	// case that runs ahead of it (testCases are in recorded order), so the
 	// deferred streaming pass does not run in the recorded order.
@@ -3113,6 +3116,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 				SkipReason:   r.skipReasonFor(testSetID, testCase.Name),
 			}
+			runOrder.note(testCase.Name)
 			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 			if loopErr != nil {
 				utils.LogError(r.logger, loopErr, "failed to insert test case result")
@@ -3134,6 +3138,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			streamingOutOfOrder = true
 		}
 		activeTestCases = append(activeTestCases, testCase)
+	}
+	for _, tc := range activeTestCases {
+		runOrder.note(tc.Name)
+	}
+	for _, st := range streamingTests {
+		runOrder.note(st.testCase.Name)
 	}
 
 	testsToRun := activeTestCases
@@ -3197,7 +3207,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		noteLearnedAfterEnd(learnedLate, name, early)
 		r.exact.noteShares(name, early, nil)
 	}
-	finalTestCaseResults := make(map[string]*models.TestResult)
+	// finalTestCaseResults is each test's last judged row, in the order the
+	// loop first judged the tests: ranging a map of them wrote a report's tests
+	// in an order that changed on every run.
+	finalTestCaseResults := newJudgedRows()
 	// firstCycleLearned is, once a retry cycle of record's full round
 	// begins, every mock state the set's first cycle consumed: what the learn
 	// step learned there, the one cycle it learns in. nil while no retry
@@ -4377,7 +4390,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					if testStatus == models.TestStatusObsolete {
 						testCaseResult.FailureInfo.MappingStale = mappingStaleReason
 					}
-					finalTestCaseResults[testCase.Name] = testCaseResult
+					finalTestCaseResults.put(testCase.Name, testCaseResult)
 				} else {
 					utils.LogError(r.logger, nil, "test case result is nil")
 					// Finalize the capture window and persist a failed result so a
@@ -4439,7 +4452,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testsToRun = nextTestsToRun
 		r.logger.Info("Retrying passing test cases to validate mock consistency", zap.Int("replay", replay+1), zap.Int("remaining_tests", len(testsToRun)))
 	}
-	for _, tcResult := range finalTestCaseResults {
+	for _, tcResult := range finalTestCaseResults.inRunOrder() {
 		insertStart := time.Now()
 		err := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, tcResult)
 		if time.Since(insertStart) > 50*time.Millisecond {
@@ -5361,6 +5374,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 	}
+	// The store holds the rows in the order they were written, and the loop
+	// writes a test it judged without an answer (or IGNORED) at once but a
+	// judged answer only when its last cycle ends: put them back in the order
+	// the set ran its tests, for the hooks, the failure reason and the report.
+	runOrder.sort(testCaseResults)
 	// The prune's connection-error rule reads these back: unreadable or short of
 	// the verdicts, they cannot vouch for anything (fail closed). They are
 	// counted by test, as the verdicts count them (verdictCounts): a test
