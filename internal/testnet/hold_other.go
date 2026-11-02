@@ -3,7 +3,9 @@
 package testnet
 
 import (
+	"context"
 	"net"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -27,35 +29,46 @@ func RefusedAddr(t *testing.T, network string) string {
 	return ""
 }
 
-// SharedPort is a TCP port that nothing listened at when it was taken.
-// Nothing holds it here (see the package doc): it is one a listener left
-// when it closed, and another socket can take it meanwhile.
+// SharedPort is a TCP port nothing listens at, held for the test's life as
+// RefusedAddr's is, by a connection (holdByConnection), at 127.0.0.1 only.
+// ListenShared and OpenShared open a listener at 127.0.0.1 at the port beside
+// the hold, so a test can close its listener, find a dial to the port
+// refused, and listen there again. On macOS a listener that sets
+// SO_REUSEADDR, as Go's do, binds beside a connected socket; on Windows,
+// where Go's listeners set no option, SharedListenConfig sets SO_REUSEADDR.
+// A bind to port 0 is never given the port. A socket that names the port and
+// sets SO_REUSEADDR can still take it.
 func SharedPort(t *testing.T) int {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	_, p, err := net.SplitHostPort(holdByConnection(t))
 	require.NoError(t, err)
-	port := ln.Addr().(*net.TCPAddr).Port
-	require.NoError(t, ln.Close())
+	port, err := strconv.Atoi(p)
+	require.NoError(t, err)
 	return port
 }
 
-// ListenShared opens a TCP listener at addr, a port SharedPort gave, closed
-// when the test ends if the test has not closed it. The test is skipped when
-// another socket took the port.
+// ListenShared opens a TCP listener at addr, a port SharedPort holds, beside
+// the hold; it is closed when the test ends if the test has not closed it.
 func ListenShared(t *testing.T, network, addr string) net.Listener {
 	t.Helper()
 	ln, err := OpenShared(network, addr)
-	if err != nil {
-		t.Skipf("cannot listen at %s, another socket took the port: %v", addr, err)
-	}
+	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
 	return ln
 }
 
-// OpenShared opens a TCP listener at addr, a port SharedPort gave, and
-// returns its error instead of skipping the test; the caller closes it.
+// OpenShared is ListenShared that returns its error instead of failing the
+// test, for a goroutine the test starts; the caller closes the listener.
 func OpenShared(network, addr string) (net.Listener, error) {
-	return net.Listen(network, addr)
+	lc := SharedListenConfig()
+	return lc.Listen(context.Background(), network, addr)
+}
+
+// SharedListenConfig is the net.ListenConfig OpenShared listens with, for a
+// test that sets more on it before it listens at a port SharedPort holds:
+// its Control is shareControl, which lets the listener bind beside the hold.
+func SharedListenConfig() net.ListenConfig {
+	return net.ListenConfig{Control: shareControl}
 }
 
 // BoundHere cannot tell here which sockets are bound at port: known is
