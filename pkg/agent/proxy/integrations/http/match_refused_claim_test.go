@@ -2,12 +2,14 @@ package http
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // A store that hands out a recording and then refuses every claim of it (the
@@ -179,4 +181,150 @@ func TestAVariableRecordingTheStoreRefusesTheCallEndsIt(t *testing.T) {
 	if err != nil || ok || stub != nil {
 		t.Fatalf("match: ok %v, served %v, err %v; want a miss", ok, stub != nil, err)
 	}
+}
+
+// refusesNamed is varDb whose store hands out the recording named refused
+// and refuses every claim of it, in either tier, counting them; the others
+// it serves.
+type refusesNamed struct {
+	*varDb
+	refused string
+	claims  int
+}
+
+func (d *refusesNamed) DeleteFilteredMock(m models.Mock) bool {
+	return m.Name != d.refused && d.varDb.DeleteFilteredMock(m)
+}
+
+// UpdateUnFilteredMock is the door every claim the store refuses ends at
+// (a per-test recording's claim falls back to it): each refused claim is
+// counted once there.
+func (d *refusesNamed) UpdateUnFilteredMock(old, nw *models.Mock) bool {
+	if old.Name == d.refused {
+		d.claims++
+		return false
+	}
+	return d.varDb.UpdateUnFilteredMock(old, nw)
+}
+
+// Under the proven switch a call a recording with variables fits, but whose
+// variables do not hold, is left to an exact recording of the call alone. A
+// claim of that recording the store refuses leaves it out of the call's
+// later passes: the next copy answers the call, and with none the call
+// misses after the one refusal. Each waits for the match to return; a hang
+// ends in go test's own -timeout, which names the row.
+func TestAnExactRecordingRefusedAfterAVariableDidNotHoldIsLeftOut(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, tc := range []struct {
+		name   string
+		copies int
+		want   string
+	}{
+		{name: "only-copy", copies: 1},
+		{name: "next-copy", copies: 2, want: "exact-2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHTTP()
+			mocks := createAndReadBack("4f2a9c71")
+			for i := 1; i <= tc.copies; i++ {
+				mocks = append(mocks, at(varMock(fmt.Sprintf("exact-%d", i), "GET", "http://store/orders/77d01b3e", "", 200, `{"id":"77d01b3e"}`, nil), 2+i))
+			}
+			db := &refusesNamed{varDb: &varDb{perTest: mocks}, refused: "exact-1"}
+			if ok, stub, _, err := h.match(context.Background(), liveReq("POST", "/orders", `{"id":"9b0e66aa","item":"pen"}`), db, nil, nil, nil, true, false, false, true, true); err != nil || !ok || stub.Name != "mock-1" {
+				t.Fatalf("the create: ok %v, served %v, err %v; want mock-1", ok, stub, err)
+			}
+			ok, stub, diag, err := h.match(context.Background(), liveReq("GET", "/orders/77d01b3e", ""), db, nil, nil, nil, true, false, false, true, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if db.claims != 1 {
+				t.Fatalf("the store refused %d claims of exact-1; want the one", db.claims)
+			}
+			if tc.want == "" {
+				wantProblem(t, ok, diag, "this call sent")
+				return
+			}
+			if !ok || stub.Name != tc.want {
+				t.Fatalf("served %v (ok %v); want %s", stub, ok, tc.want)
+			}
+		})
+	}
+}
+
+// refusesNamedGen is the strict index's store (ownGenDb) refusing every
+// claim of the recording named refused, in either tier, counting them as
+// refusesNamed does, while it goes on handing it out (never reported spent).
+type refusesNamedGen struct {
+	*ownGenDb
+	refused string
+	claims  int
+}
+
+func (d *refusesNamedGen) DeleteFilteredMock(m models.Mock) bool {
+	return m.Name != d.refused && d.ownGenDb.DeleteFilteredMock(m)
+}
+
+func (d *refusesNamedGen) UpdateUnFilteredMock(old, nw *models.Mock) bool {
+	if old.Name == d.refused {
+		d.claims++
+		return false
+	}
+	return d.ownGenDb.UpdateUnFilteredMock(old, nw)
+}
+
+// refusesNamedGenVar is the strict index's store of recordings with
+// variables (genVarDb) refusing every claim of the recording named refused,
+// in either tier, counting them as refusesNamed does.
+type refusesNamedGenVar struct {
+	*genVarDb
+	refused string
+	claims  int
+}
+
+func (d *refusesNamedGenVar) DeleteFilteredMock(m models.Mock) bool {
+	return m.Name != d.refused && d.genVarDb.DeleteFilteredMock(m)
+}
+
+func (d *refusesNamedGenVar) UpdateUnFilteredMock(old, nw *models.Mock) bool {
+	if old.Name == d.refused {
+		d.claims++
+		return false
+	}
+	return d.genVarDb.UpdateUnFilteredMock(old, nw)
+}
+
+// A recording the strict index lists whose claim the store refuses is
+// claimed once through the index and once from the store, which the call
+// reads from then on and which leaves it out after its refusal: the call
+// misses after two refusals, never going back to the index. The strict pass
+// and the variable pass through the index, each with the store still
+// handing the recording out. Each waits for the match to return; a hang
+// ends in go test's own -timeout, which names the row.
+func TestARecordingRefusedThroughTheIndexIsClaimedOnceMoreFromTheStore(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	verifyOff(t)
+	t.Run("strict", func(t *testing.T) {
+		h := newHTTP()
+		db := &refusesNamedGen{ownGenDb: newOwnGenDb(strictItems("mock", 10), nil), refused: "mock-5"}
+		strictMatchOf(t, h, strictCall(0), db, db, nil)
+		strictMatchOf(t, h, strictCall(1), db, db, nil) // the generation's second call builds its index
+		if s := strictMatchOf(t, h, strictCall(5), db, db, nil); s != nil {
+			t.Fatalf("served %s, whose every claim the store refuses", s.Name)
+		}
+		if db.claims != 2 {
+			t.Fatalf("the store refused %d claims of mock-5; want 2, through the index and from the store", db.claims)
+		}
+	})
+	t.Run("variables", func(t *testing.T) {
+		h := newHTTP()
+		db := &refusesNamedGenVar{genVarDb: &genVarDb{varDb: &varDb{perTest: append(strictItems("mock", 10), orderBind())}, gen: 1}, refused: "bind"}
+		strictMatchOf(t, h, strictCall(0), db, db, nil)
+		strictMatchOf(t, h, strictCall(1), db, db, nil) // the generation's second call builds its index
+		if s := strictMatchOf(t, h, liveReq("POST", "http://"+strictIxHost+"/orders", `{"id":"ord-live-9"}`), db, db, nil); s != nil {
+			t.Fatalf("served %s, whose every claim the store refuses", s.Name)
+		}
+		if db.claims != 2 {
+			t.Fatalf("the store refused %d claims of bind; want 2, through the index and from the store", db.claims)
+		}
+	})
 }
