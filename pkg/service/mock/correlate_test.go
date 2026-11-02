@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -152,7 +153,7 @@ func TestCorrelateScopesByWorkerInstance(t *testing.T) {
 	require.Equal(t, []string{"solo-call"}, names(got["solo"]))
 	require.Equal(t, []string{"seq-call"}, names(got["seq"]), "a run of one worker's test inside workers' tests holds its call")
 	require.Len(t, got, 3, "a call from no worker, or from a worker outside its tests, is no test's")
-	require.Equal(t, map[string][]string{"nobody": {"a", "b"}}, unattributedCalls(windows, mocks),
+	require.Equal(t, []unattributedCall{{mock: "nobody", tests: []string{"a", "b"}}}, chargeUnattributed(windows, mocks),
 		"only the call from no worker made while workers' tests were open is named, with those tests")
 
 	cases := []capturedMock{{name: "both", ts: ts(20)}, {name: "only-a", ts: ts(12)}, {name: "only-solo", ts: ts(55)}}
@@ -239,4 +240,45 @@ func TestMockRecordWritesTheKindItCaptured(t *testing.T) {
 	startup, err := mapDB.GetStartup(context.Background(), "set")
 	require.NoError(t, err)
 	require.Equal(t, []models.MockEntry{{Name: "mock-1", Kind: string(models.Postgres)}}, startup)
+}
+
+// Each test open at a call from no test worker's instance, in a run of
+// workers, is charged with it as a loss that leaves it without a verdict
+// (models.CaptureLossUnattributed): counted per test, naming the latest such
+// call, on a copy of its evidence, after what its end already said. A test
+// open at no such call, a run of one worker's test, and a worker's own call
+// charge nothing.
+func TestEachTestOpenAtACallFromNoWorkerIsNotJudged(t *testing.T) {
+	agentEv := &models.ScopeEvidence{Reason: "keploy: a miss.", CannotCapture: models.CaptureLosses{{Kind: models.CaptureLossUnixSocket, Count: 1}}}
+	windows := []models.ScopeWindow{
+		{Name: "a", Start: ts(10), End: ts(30), Instance: 1, Evidence: agentEv},
+		{Name: "b", Start: ts(15), End: ts(35), Instance: 2},
+		{Name: "c", Start: ts(40), End: ts(45), Instance: 1},
+		{Name: "solo", Start: ts(50), End: ts(60)},
+	}
+	mocks := []capturedMock{
+		{name: "late", ts: ts(33), pid: 9},
+		{name: "early", ts: ts(20), pid: 4},
+		{name: "a-own", ts: ts(21), instance: 1},
+		{name: "c-other", ts: ts(42), instance: 2},
+		{name: "solo-nobody", ts: ts(55), pid: 5},
+		{name: "between", ts: ts(38), pid: 6},
+	}
+	got := chargeUnattributed(windows, mocks)
+	require.Equal(t, []unattributedCall{{mock: "late", pid: 9, tests: []string{"b"}}, {mock: "early", pid: 4, tests: []string{"a", "b"}}}, got)
+	require.Equal(t, models.CaptureLosses{
+		{Kind: models.CaptureLossUnattributed, Count: 1, What: "the latest: mock early, from process 4"},
+		{Kind: models.CaptureLossUnixSocket, Count: 1},
+	}, windows[0].Evidence.CannotCapture, "a: the call made in it, beside what its end charged")
+	require.True(t, strings.HasPrefix(windows[0].Evidence.Reason, "keploy: a miss. Also not judged: the application made 1 call(s) from a process in no test worker's keploy instance"), windows[0].Evidence.Reason)
+	require.Len(t, agentEv.CannotCapture, 1, "the agent's evidence is not written to")
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 2, What: "the latest: mock late, from process 9"}}, windows[1].Evidence.CannotCapture,
+		"b: both calls, the later named, whatever order they were captured in")
+	require.True(t, strings.HasPrefix(windows[1].Evidence.Reason, "keploy: not judged: the application made 2 call(s)"), windows[1].Evidence.Reason)
+	require.Nil(t, windows[2].Evidence, "c: another worker's call is no loss of its")
+	require.Nil(t, windows[3].Evidence, "a run of one worker's test holds the call from no worker")
+	_, notJudged := windows[1].Evidence.CannotCapture.Split()
+	require.Len(t, notJudged, 1, "the loss leaves the test without a verdict, never failed")
+	require.Contains(t, notJudged.NotJudgedRemedy(), models.UnattributedRemedy)
+	require.False(t, models.CaptureLossUnattributed.PerTest(), "the call may be any open test's, never the test's own alone")
 }

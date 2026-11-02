@@ -831,6 +831,33 @@ func (m *mockService) Record(ctx context.Context) error {
 		m.logger.Error(err.Error())
 		return err
 	}
+	// In a run of more than one test worker, a call from a process in no
+	// worker's keploy instance made while workers' tests were open is in
+	// none of their recordings (correlateScopes): keploy cannot tell whose
+	// it is. Each of those tests is charged with it
+	// (models.CaptureLossUnattributed), which leaves it without a verdict, so
+	// judging keeps its previous recording. A build that does not judge the
+	// record would keep their recordings short of the call, so it keeps none.
+	if calls := chargeUnattributed(windows, dataPlane(recorded)); len(calls) > 0 {
+		judging := provenswitch.On() && recordsJudged.Load()
+		for _, c := range calls {
+			m.logger.Error("a call came from a process in no test worker's keploy instance while test workers' tests were open, so keploy cannot tell which test made it: it is in none of their recordings, and those tests are not judged",
+				zap.String("mock", c.mock), zap.Uint32("pid", c.pid), zap.Strings("open_tests", c.tests),
+				zap.String("next_step", models.UnattributedRemedy))
+		}
+		if !judging {
+			if derr := m.mockDB.DiscardStagedSet(storeCtx, staging); derr != nil {
+				m.logger.Debug("failed to discard staging set after an unattributed call", zap.String("staging", staging), zap.Error(derr))
+			}
+			m.logger.Error("the recording was not kept: calls came from processes in no test worker's keploy instance while workers' tests were open, and this keploy does not judge the record test by test; the existing mock set (if any) was left unchanged",
+				zap.Int("calls", len(calls)), zap.String("mock-set", name), zap.String("next_step", models.UnattributedRemedy))
+			if parent.Err() == nil {
+				m.propagateExit(appErr, "record")
+			}
+			utils.SetExitCodeOnce(utils.ExitKeployError)
+			return fmt.Errorf("the recording is incomplete: %d call(s) came from no test worker while workers' tests were open", len(calls))
+		}
+	}
 	recordTests, recordJudged = windows, true
 	keep = runnerPassed(appErr)
 	judged := provenswitch.On() && recordsJudged.Load() && len(windows) > 0
@@ -864,11 +891,6 @@ func (m *mockService) Record(ctx context.Context) error {
 	if keep && m.mappingDB != nil {
 		if len(windows) > 0 {
 			byTest := correlateScopes(windows, dataPlane(recorded))
-			for mock, open := range unattributedCalls(windows, dataPlane(recorded)) {
-				m.logger.Warn("a call came from a process in no test worker's keploy instance while test workers' tests were open, so keploy cannot tell which test made it: it is in none of their mappings",
-					zap.String("mock", mock), zap.Strings("open_tests", open),
-					zap.String("next_step", "start the process the call came from inside the test worker (a worker fixture), or run one worker"))
-			}
 			owned := recorded
 			var plan bootPlan
 			if len(starts) > 0 {
@@ -1318,19 +1340,29 @@ func correlate(windows []models.ScopeWindow, mocks []capturedMock, byInstance bo
 	return byTest
 }
 
-// unattributedCalls are the calls from a process in no test worker's keploy
-// instance (instance 0) made while test workers' tests were open and no
-// test of a run of one worker was: each by name, with the tests open at its
-// time. No test's window holds one (correlateScopes), so keploy says it.
-func unattributedCalls(windows []models.ScopeWindow, mocks []capturedMock) map[string][]string {
-	out := map[string][]string{}
+// unattributedCall is a call from a process in no test worker's keploy
+// instance (instance 0) made while test workers' tests were open and no test
+// of a run of one worker was: no test's window holds it (correlateScopes).
+type unattributedCall struct {
+	mock  string
+	pid   uint32
+	tests []string // the tests open at its time
+}
+
+// chargeUnattributed charges each test open at an unattributed call with it
+// (models.CaptureLossUnattributed, What naming its latest such call), on a
+// copy of the test's evidence, and returns the calls in the order of mocks.
+func chargeUnattributed(windows []models.ScopeWindow, mocks []capturedMock) []unattributedCall {
+	var out []unattributedCall
+	charged := map[int]models.CaptureLoss{}
+	latest := map[int]time.Time{}
 	for _, mk := range mocks {
 		if mk.instance != 0 {
 			continue
 		}
-		var open []string
+		var open []int
 		mine := false
-		for _, w := range windows {
+		for i, w := range windows {
 			if mk.ts.Before(w.Start) || mk.ts.After(w.End) {
 				continue
 			}
@@ -1338,11 +1370,35 @@ func unattributedCalls(windows []models.ScopeWindow, mocks []capturedMock) map[s
 				mine = true
 				break
 			}
-			open = append(open, w.Name)
+			open = append(open, i)
 		}
-		if !mine && len(open) > 0 {
-			out[mk.name] = open
+		if mine || len(open) == 0 {
+			continue
 		}
+		c := unattributedCall{mock: mk.name, pid: mk.pid}
+		for _, i := range open {
+			c.tests = append(c.tests, windows[i].Name)
+			loss := charged[i]
+			loss.Kind, loss.Count = models.CaptureLossUnattributed, loss.Count+1
+			if !mk.ts.Before(latest[i]) {
+				loss.What, latest[i] = fmt.Sprintf("the latest: mock %s, from process %d", mk.name, mk.pid), mk.ts
+			}
+			charged[i] = loss
+		}
+		out = append(out, c)
+	}
+	for i, loss := range charged {
+		ev := models.ScopeEvidence{}
+		if windows[i].Evidence != nil {
+			ev = *windows[i].Evidence
+		}
+		ev.CannotCapture = ev.CannotCapture.Plus(models.CaptureLosses{loss})
+		if text := (models.CaptureLosses{loss}).NotJudgedText(); ev.Reason == "" {
+			ev.Reason = "keploy: " + text + "."
+		} else {
+			ev.Reason = strings.TrimSpace(ev.Reason + " Also " + text + ".")
+		}
+		windows[i].Evidence = &ev
 	}
 	return out
 }
