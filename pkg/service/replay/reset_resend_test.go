@@ -269,3 +269,41 @@ func TestRetryResetOnce_NotForAnUnreachableAppPort(t *testing.T) {
 		t.Fatalf("re-sent %d times; want none", got)
 	}
 }
+
+// exitDuringGateHook is an app that exits after its request was reset: the
+// gate's read of the agent says nothing was consumed, and the app's exit is
+// told (the set's end, models.WithAppExit) before the re-send.
+type exitDuringGateHook struct {
+	TestHooks
+	exited context.CancelFunc
+	calls  int32
+}
+
+func (h *exitDuringGateHook) SimulateRequest(_ context.Context, _ *models.TestCase, _ string) (interface{}, error) {
+	atomic.AddInt32(&h.calls, 1)
+	return &models.HTTPResp{StatusCode: 200}, nil
+}
+
+func (h *exitDuringGateHook) GetConsumedMocks(_ context.Context) ([]models.MockState, error) {
+	h.exited()
+	return nil, nil
+}
+
+// A reset whose app exits before the re-send is not re-sent: the readiness
+// wait ends on the set's end, which the app's exit brings on, and keploy then
+// re-sent anyway, a test begun against an app it knew was gone.
+func TestRetryResetOnce_NoReSendOnceTheAppHasExited(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hook := &exitDuringGateHook{exited: cancel}
+	r := newTestReplayer(hook)
+	tc := &models.TestCase{Name: "get-price-r0b-1", Kind: models.HTTP}
+
+	_, retried, _, _ := r.retryResetOnce(ctx, tc, "test-set-0", connResetURLErr())
+	if retried {
+		t.Fatal("a reset was recovered by a re-send to an app that had exited")
+	}
+	if got := atomic.LoadInt32(&hook.calls); got != 0 {
+		t.Fatalf("keploy re-sent the request %d time(s) after the app's exit; want none", got)
+	}
+}

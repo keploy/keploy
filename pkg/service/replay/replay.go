@@ -2348,12 +2348,34 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 		if !serveTest {
+			// The app's exit ends the set as soon as keploy learns of it
+			// (models.WithAppExit: its container's die), not once compose's
+			// up returns: that waits for every other service of the stack to
+			// stop, each within its own grace, and meanwhile keploy began
+			// re-sends and tests against an app that was gone, and lost its
+			// exit to the set's own end. The exit is told once: the watch's
+			// word, or the up's return, whichever comes first.
+			var exitTold sync.Once
+			var exitWasTold atomic.Bool
+			tellAppExit := func(e models.AppError) {
+				exitTold.Do(func() { appErrChan <- e })
+			}
+			appCtx := models.WithAppExit(runTestSetCtx, func(e models.AppError) {
+				setLastAppErr(e)
+				exitWasTold.Store(true)
+				if mappedStatus, ok := mapAppErrorToTestSetStatus(e); ok {
+					setErrStatus(mappedStatus)
+				}
+				tellAppExit(e)
+			})
 			runTestSetErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
-				appErr = r.RunApplication(runTestSetCtx, models.RunOptions{
+				appErr = r.RunApplication(appCtx, models.RunOptions{
 					AppCommand: conf.AppCommand,
 				})
-				if appErr != (models.AppError{}) {
+				// The end the told exit brought on (the set's cancel) does
+				// not replace the exit.
+				if appErr != (models.AppError{}) && (appErr.AppErrorType != models.ErrCtxCanceled || !exitWasTold.Load()) {
 					setLastAppErr(appErr)
 				}
 				if mappedStatus, ok := mapAppErrorToTestSetStatus(appErr); ok {
@@ -2362,7 +2384,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if appErr.AppErrorType == models.ErrCtxCanceled || appErr == (models.AppError{}) {
 					return nil
 				}
-				appErrChan <- appErr
+				tellAppExit(appErr)
 				return nil
 			})
 		}
@@ -8986,6 +9008,12 @@ func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase
 		// ready, not blindly. Best effort: if we can't determine a probeable
 		// target we proceed — the bounded attempts still protect us.
 		r.waitForResetResendReady(ctx, testCase, testSetID)
+		// The wait ends on the set's end too, which an exit of the app
+		// brings on (models.WithAppExit): nothing is re-sent to an app
+		// keploy knows is gone.
+		if ctx.Err() != nil {
+			return nil, false, nil, nil
+		}
 
 		r.logger.Warn("test request reset by app/proxy before any mock was consumed; re-sending — the request was never processed, so this is not a retry of an assertion",
 			zap.Int("attempt", attempt),

@@ -419,11 +419,42 @@ func (a *App) composeHaltEnd(ctx context.Context, halt chan struct{}, composeDow
 		once.Do(func() {
 			close(halt)
 			a.composeApp.stopping.Store(true)
+			// Told before the project's stop: that waits for every service
+			// to stop, each within its own grace, and the run's caller is
+			// not to take the app for running meanwhile.
+			a.tellComposeHalt(ctx)
 			if !a.stopComposeProject(context.WithoutCancel(ctx)) {
 				composeDown()
 			}
 		})
 	}
+}
+
+// watchComposeExit, with the switch off, watches the app's container for an
+// exit keploy did not ask for, to tell it to the run's caller
+// (models.WithAppExit) at its die. compose's abort stops the stack on the
+// app's exit, and its up returns only once every service has stopped, each
+// within its own grace: keploy took the app for running until then. The watch
+// stops nothing (the abort does). keploy's own stop is the end of the run's
+// ctx, which the watch takes for no exit (composeAppDied).
+func (a *App) watchComposeExit(ctx context.Context) (stop func()) {
+	a.composeApp.halted.Store(nil)
+	a.composeApp.stopping.Store(false)
+	a.composeApp.project.Store(nil)
+	return a.watchComposeApp(ctx, func() { a.tellComposeHalt(ctx) })
+}
+
+// tellComposeHalt tells the run's caller (models.WithAppExit) of the halt the
+// watch or the run has kept, with the app's exit code, as the run's own
+// return will say it. Its logs are not read here: a read of them waits on the
+// daemon, and the exit is told at once; the run's return carries them.
+func (a *App) tellComposeHalt(ctx context.Context) {
+	told := models.AppExitOf(ctx)
+	h := a.composeAppHalt()
+	if told == nil || h == nil {
+		return
+	}
+	told(h.appError(""))
 }
 
 // composeTeardownWait is how composeAwaitTeardown ended.

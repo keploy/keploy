@@ -2291,6 +2291,8 @@ func (a *App) run(ctx context.Context) models.AppError {
 			composeEnd = a.composeHaltEnd(ctx, halt, composeDown)
 			stopWatch := a.watchComposeApp(ctx, composeEnd)
 			defer stopWatch()
+		} else if models.AppExitOf(ctx) != nil {
+			defer a.watchComposeExit(ctx)()
 		}
 	}
 
