@@ -1864,6 +1864,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// A test case's calls to the agent's hooks are keploy's own, on the run's
 	// context (agentHookContext): the set's is cancelled when its app exits.
 	runTestSetCtx = withRunLife(runTestSetCtx, ctx)
+	if r.instrument {
+		// keploy started the set's application (for this set, or once for
+		// the run under --keep-app-alive), and its exit cancels
+		// runTestSetCtx (the app watchers below, or Start's group): a test
+		// request it refuses waits for its address to accept, and only
+		// that exit or keploy's stop ends the wait.
+		runTestSetCtx = pkg.EndsWithApp(runTestSetCtx)
+	}
 
 	// EVERY RECORDED VERDICT, for the reporter -- which is a different set from
 	// finalTestCaseResults.

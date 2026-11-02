@@ -654,13 +654,16 @@ func unreachableGRPCAuthority(ctx context.Context, reach AppPortReachability, au
 // SimulateGRPC simulates a gRPC call and returns the response
 // This is a simplified version using gRPC client instead of manual HTTP/2 frame handling
 // dialTCPWithConnRefusedRetry dials authority over TCP, retrying a pure
-// connection-refused (the app is still coming up) up to maxConnRefusedRetries
-// with the shared growing backoff. A refused dial sent zero bytes and consumed
-// zero mocks, so the re-dial is idempotent; any other dial error, exhaustion of
-// the attempts, or a cancelled context returns immediately, and so does a
-// refusal at an address reach says the app's server on appPort (the port the
-// test was recorded on, 0 when not known) can never be reached at.
+// connection-refused (the app is still coming up): on a context EndsWithApp
+// marked, once authority accepts a connection, with only the context ending
+// the wait; on any other, up to maxConnRefusedRetries with the shared growing
+// backoff. A refused dial sent zero bytes and consumed zero mocks, so the
+// re-dial is idempotent; any other dial error, exhaustion of the attempts, or
+// a cancelled context returns immediately, and so does a refusal at an
+// address reach says the app's server on appPort (the port the test was
+// recorded on, 0 when not known) can never be reached at.
 func dialTCPWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, authority string, reach AppPortReachability, appPort uint16) (net.Conn, error) {
+	said := false
 	for attempt := 0; ; attempt++ {
 		conn, err := net.Dial("tcp", authority)
 		if err == nil {
@@ -675,6 +678,12 @@ func dialTCPWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, author
 					return nil, unreachable
 				}
 			}
+		}
+		if AppExitEnds(ctx) {
+			if waitErr := waitToReSend(ctx, logger, "gRPC test's dial", authority, &said); waitErr != nil {
+				return nil, waitErr
+			}
+			continue
 		}
 		if attempt >= maxConnRefusedRetries {
 			return nil, err

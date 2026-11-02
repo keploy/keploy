@@ -964,7 +964,9 @@ func (b *connClosingBody) Close() error {
 }
 
 // maxConnRefusedRetries bounds how many times a replay test request is re-sent
-// when the connection is REFUSED before the app accepts it. A refused connection
+// when the connection is REFUSED before the app accepts it, on a context
+// EndsWithApp did not mark (an application keploy did not start); on one it
+// marked the request waits for its address to accept instead (waitToReSend). A refused connection
 // proves the app never received the request — zero bytes sent, zero single-use
 // mocks consumed — so re-sending is safe and does NOT fabricate a result: it
 // obtains the real response the suite must assert on instead of a false
@@ -978,6 +980,74 @@ const (
 	maxConnRefusedRetries   = 3
 	connRefusedRetryBackoff = 150 * time.Millisecond
 )
+
+type endsWithAppKey struct{}
+
+// EndsWithApp marks ctx as the run of an application keploy started: ctx is
+// cancelled when the application exits (or when keploy is stopped). A test
+// request refused on such a context waits for its address to accept a
+// connection and is then sent again, with no count of re-sends and no time
+// limit: the application's exit is what ends the wait. A context not marked
+// (keploy did not start the application, so nothing would end the wait)
+// keeps the bounded re-send, maxConnRefusedRetries.
+func EndsWithApp(ctx context.Context) context.Context {
+	return context.WithValue(ctx, endsWithAppKey{}, true)
+}
+
+// AppExitEnds reports whether EndsWithApp marked ctx: the exit of the
+// application the test requests go to ends it.
+func AppExitEnds(ctx context.Context) bool {
+	marked, _ := ctx.Value(endsWithAppKey{}).(bool)
+	return marked
+}
+
+// acceptPollInterval is how often WaitForAccept dials an address that has
+// not accepted yet.
+const acceptPollInterval = 250 * time.Millisecond
+
+// WaitForAccept dials addr over TCP until it accepts a connection, which it
+// closes at once. Only ctx ends the wait: it returns nil once addr accepted,
+// or ctx's error. refused, when not nil, is called once, with the first
+// dial's error, when that dial is not accepted.
+func WaitForAccept(ctx context.Context, addr string, refused func(error)) error {
+	dialer := net.Dialer{Timeout: 800 * time.Millisecond}
+	said := false
+	for {
+		conn, err := dialer.DialContext(ctx, "tcp", addr)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !said && refused != nil {
+			said = true
+			refused(err)
+		}
+		retry := time.NewTimer(acceptPollInterval)
+		select {
+		case <-ctx.Done():
+			retry.Stop()
+			return ctx.Err()
+		case <-retry.C:
+		}
+	}
+}
+
+// waitToReSend is the wait of a test request refused at addr on a context
+// EndsWithApp marked: until addr accepts a connection, or ctx ends. said
+// keeps the line that says so to one per request.
+func waitToReSend(ctx context.Context, logger *zap.Logger, what, addr string, said *bool) error {
+	return WaitForAccept(ctx, addr, func(err error) {
+		if *said {
+			return
+		}
+		*said = true
+		logger.Info(fmt.Sprintf("the %s was refused at %s: the application is not accepting connections there yet; waiting for it to accept a connection, then sending it again. The wait ends when it does, when the application exits, or when keploy is stopped", what, addr),
+			zap.Error(err))
+	})
+}
 
 // isPreResponseConnRefused reports whether err is a pure "connection refused".
 // errors.Is unwraps the *url.Error -> *net.OpError -> *os.SyscallError ->
@@ -1147,15 +1217,16 @@ func IsTransportConnReset(err error) bool {
 }
 
 // doRequestWithConnRefusedRetry executes client.Do, re-sending ONLY on a
-// pre-response connection-refused (bounded, ctx-aware backoff, request body
-// rewound via GetBody). Any other error, or a real response, returns
-// immediately — so a genuinely crashed/unreachable app still fails fast after
-// the bounded retries, and a mid-response reset is never retried. A refusal,
+// pre-response connection-refused (request body rewound via GetBody): on a
+// context EndsWithApp marked, once the request's address accepts a
+// connection, with only the context ending the wait; on any other, a bounded
+// number of times with a ctx-aware backoff. Any other error, or a real
+// response, returns immediately, and a mid-response reset is never retried. A refusal,
 // reset or drop at an address reach says the app's server on appPort (the port
 // the test was recorded on, 0 when not known) can never be reached at fails at
 // once, saying why, as an *UnreachableAppPortError.
 func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request, reach AppPortReachability, appPort uint16) (*http.Response, error) {
-	asked := false
+	asked, said := false, false
 	for attempt := 0; ; attempt++ {
 		resp, err := client.Do(req)
 		if err == nil {
@@ -1175,7 +1246,8 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 		if !refused {
 			return nil, err
 		}
-		if attempt >= maxConnRefusedRetries {
+		waits := AppExitEnds(ctx)
+		if !waits && attempt >= maxConnRefusedRetries {
 			return nil, err
 		}
 		// Only retry if we can faithfully re-send the body; otherwise stop so we
@@ -1189,6 +1261,13 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 				return nil, err
 			}
 			req.Body = body
+		}
+		if waits {
+			host, port := urlHostPort(req.URL)
+			if waitToReSend(ctx, logger, "test request", net.JoinHostPort(host, port), &said) != nil {
+				return nil, err
+			}
+			continue
 		}
 		logger.Warn("test request refused by app (app not yet accepting connections); re-sending — the request was never processed, so this is not a retry of an assertion",
 			zap.Int("attempt", attempt+1), zap.Int("maxRetries", maxConnRefusedRetries), zap.Error(err))

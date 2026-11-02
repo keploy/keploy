@@ -617,10 +617,6 @@ func gateOnAppAddress(ctx context.Context, logger *zap.Logger, cfg *config.Confi
 	}
 }
 
-// appAcceptPollInterval is how often waitForAccept tries the application's
-// port again.
-const appAcceptPollInterval = 250 * time.Millisecond
-
 // waitForAccept blocks until host:port accepts a TCP connection, or ctx ends
 // (the application exited, or the user stopped keploy): it has no ceiling, so
 // an application that starts slowly on a loaded machine is waited for however
@@ -628,30 +624,10 @@ const appAcceptPollInterval = 250 * time.Millisecond
 // and what for.
 func waitForAccept(ctx context.Context, logger *zap.Logger, label, host, port string) error {
 	addr := net.JoinHostPort(host, port)
-	dialer := net.Dialer{Timeout: 800 * time.Millisecond}
-	said := false
-	for {
-		conn, err := dialer.DialContext(ctx, "tcp", addr)
-		if err == nil {
-			_ = conn.Close()
-			return nil
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if !said {
-			said = true
-			logger.Info(fmt.Sprintf("waiting for the application to accept a connection on %s before the first test; the wait ends when it does, when the application exits, or when keploy is stopped", addr),
-				zap.String("gate", label), zap.Error(err))
-		}
-		retry := time.NewTimer(appAcceptPollInterval)
-		select {
-		case <-ctx.Done():
-			retry.Stop()
-			return ctx.Err()
-		case <-retry.C:
-		}
-	}
+	return pkg.WaitForAccept(ctx, addr, func(err error) {
+		logger.Info(fmt.Sprintf("waiting for the application to accept a connection on %s before the first test; the wait ends when it does, when the application exits, or when keploy is stopped", addr),
+			zap.String("gate", label), zap.Error(err))
+	})
 }
 
 // reportHTTPGate logs the outcome of gateOnAppAddress's HTTP stage against
