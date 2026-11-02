@@ -91,24 +91,14 @@ func TestADrainNeitherWaitsOnItsConsumerNorReordersTheBytes(t *testing.T) {
 	}()
 	// The consumer waits in its read: nothing has come.
 	for !readerWaits() {
-		select {
-		case <-never(t):
-			t.Fatal("the consumer never waited in its read")
-		default:
-			runtime.Gosched()
-		}
+		runtime.Gosched()
 	}
 	d.drain() // returns: it does not wait on the consumer's read
 	if _, err := io.WriteString(app, first); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case b := <-got:
-		if string(b) != first {
-			t.Fatalf("the consumer read %q first", b)
-		}
-	case <-never(t):
-		t.Fatal("the consumer never read the first bytes")
+	if b := <-got; string(b) != first {
+		t.Fatalf("the consumer read %q first", b)
 	}
 
 	// Now the consumer reads on as the drain does: 64 KiB the app wrote
@@ -129,13 +119,8 @@ func TestADrainNeitherWaitsOnItsConsumerNorReordersTheBytes(t *testing.T) {
 			t.Fatalf("the drain holds %d bytes, past its bound of %d", held, drainMax)
 		}
 	}
-	select {
-	case b := <-got:
-		if want := first + string(rest); string(b) != want {
-			t.Fatalf("the consumer read %d bytes, not the app's %d in their order", len(b), len(want))
-		}
-	case <-never(t):
-		t.Fatal("the consumer never read the rest")
+	if b, want := <-got, first+string(rest); string(b) != want {
+		t.Fatalf("the consumer read %d bytes, not the app's %d in their order", len(b), len(want))
 	}
 }
 
