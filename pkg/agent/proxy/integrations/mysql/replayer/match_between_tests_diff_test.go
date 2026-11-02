@@ -251,6 +251,7 @@ func btStageStrictWindow(s *diffSide, start, end time.Time) {
 // the parallel subtests (box .142). Under -race the row replays the 100 sets
 // and the 1k sets but their mock replays; the plain run replays all.
 func TestBetweenTestsCallsOfARecordedSetAreAnsweredWithTheirOwnRequestsRecording(t *testing.T) {
+	sideBySide(t)
 	for _, n := range []int{100, 1000, 10000} {
 		for _, engine := range []bool{false, true} {
 			for _, rp := range btReplays {

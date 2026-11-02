@@ -70,6 +70,7 @@ func (s *diffSide) matchBody(ctx context.Context, req mysql.Request, eng *mockno
 // the two to serve, consume, report and learn the same at every command
 // (replayCorpora).
 func TestLazyBodyServesReportsAndLearnsWhatTheEagerBodyDoes(t *testing.T) {
+	sideBySide(t)
 	seeds := int64(30)
 	sizes := []int{100, 1000, 10000}
 	if testing.Short() || raceEnabled {

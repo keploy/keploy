@@ -113,6 +113,7 @@ func TestAWholeSetsCommandReadsTheTestsMocksOnlyUpToItsOwnRecording(t *testing.T
 // the test does not own; the keyed pass settles each, reading the per-test
 // tier once). Both sides serve, consume and report the same.
 func TestAWholeSetServedThroughAPerTestRangerServesWhatTheFullScanServes(t *testing.T) {
+	sideBySide(t)
 	commands := 400
 	if raceEnabled {
 		commands = 104

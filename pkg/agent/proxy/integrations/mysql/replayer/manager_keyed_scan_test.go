@@ -72,6 +72,7 @@ func (s *diffSide) stageNoWindow() {
 // consume and report the same at every command: recorded reads, reads of a
 // row the set never recorded, and EXECUTEs whose parameters drifted.
 func TestNoWindowSetsServeWhatTheFullScanServes(t *testing.T) {
+	sideBySide(t)
 	sizes := []int{100, 1000, 10000}
 	if testing.Short() || raceEnabled {
 		sizes = sizes[:2]
@@ -353,51 +354,57 @@ func learnParameterNoise(pool []*models.Mock, query string) {
 // test's own FIFO candidate; statement 8's are a miss that names the drifted
 // parameter (a recording with another parameter is another call's rows).
 func TestExactServingWholeSetServesWhatTheFullScanServes(t *testing.T) {
+	sideBySide(t)
 	// Each kind of command 13 times under -race (see raceEnabled), 50 without.
 	commands := 400
 	if raceEnabled {
 		commands = 104
 	}
+	// The two strict settings run side by side (t.Parallel): each builds its
+	// own set, stores and engine.
 	for _, strict := range []bool{false, true} {
-		pool := keyedSet(1000, models.LifetimePerTest)
-		learnParameterNoise(pool, diffQueryA)
-		ref, fast := newDiffSide(t, pool), newDiffSide(t, pool)
-		var eng *mocknoise.Engine
-		if strict {
-			eng = replayer.StrictEngineForTest()
-		}
-		for _, s := range []*diffSide{ref, fast} {
-			s.stageNoWindow()
-			s.ownWholeSet()
-		}
-		for i := 0; i < commands; i++ {
-			var req mysql.Request
-			switch i % 8 {
-			case 0:
-				req = queryReq(keyedSetText(i))
-			case 1:
-				req = queryReq("SELECT id, name, payload FROM small WHERE id = 9999")
-			case 2, 4:
-				req = executeReq(7, fmt.Sprintf("k%d", i%500))
-			case 3:
-				req = executeReq(8, fmt.Sprintf("k%d", i%500))
-			default:
-				req = executeReq(uint32(7+i%2), fmt.Sprintf("app-made-%d", i))
+		t.Run(fmt.Sprintf("strict=%v", strict), func(t *testing.T) {
+			t.Parallel()
+			pool := keyedSet(1000, models.LifetimePerTest)
+			learnParameterNoise(pool, diffQueryA)
+			ref, fast := newDiffSide(t, pool), newDiffSide(t, pool)
+			defer ref.mm.Close()
+			defer fast.mm.Close()
+			var eng *mocknoise.Engine
+			if strict {
+				eng = replayer.StrictEngineForTest()
 			}
-			want := ref.match(context.Background(), req, eng, true)
-			got := fast.match(context.Background(), req, eng, false)
-			if want != got {
-				t.Fatalf("strict=%v command %d:\n full scan:  %s\n keyed pass: %s", strict, i, want, got)
+			for _, s := range []*diffSide{ref, fast} {
+				s.stageNoWindow()
+				s.ownWholeSet()
 			}
-			if i == 5 && (!strings.HasPrefix(want, "ok=false ") || !strings.Contains(want, "body.parameters.0.value")) {
-				t.Fatalf("strict=%v: statement 8's EXECUTE no recording binds was not a miss naming its parameter: %s", strict, want)
+			for i := 0; i < commands; i++ {
+				var req mysql.Request
+				switch i % 8 {
+				case 0:
+					req = queryReq(keyedSetText(i))
+				case 1:
+					req = queryReq("SELECT id, name, payload FROM small WHERE id = 9999")
+				case 2, 4:
+					req = executeReq(7, fmt.Sprintf("k%d", i%500))
+				case 3:
+					req = executeReq(8, fmt.Sprintf("k%d", i%500))
+				default:
+					req = executeReq(uint32(7+i%2), fmt.Sprintf("app-made-%d", i))
+				}
+				want := ref.match(context.Background(), req, eng, true)
+				got := fast.match(context.Background(), req, eng, false)
+				if want != got {
+					t.Fatalf("strict=%v command %d:\n full scan:  %s\n keyed pass: %s", strict, i, want, got)
+				}
+				if i == 5 && (!strings.HasPrefix(want, "ok=false ") || !strings.Contains(want, "body.parameters.0.value")) {
+					t.Fatalf("strict=%v: statement 8's EXECUTE no recording binds was not a miss naming its parameter: %s", strict, want)
+				}
+				if i == 6 && !strings.Contains(want, "ok=true") {
+					t.Fatalf("strict=%v: statement 7's FIFO candidate, its parameter learned noise, was not served: %s", strict, want)
+				}
 			}
-			if i == 6 && !strings.Contains(want, "ok=true") {
-				t.Fatalf("strict=%v: statement 7's FIFO candidate, its parameter learned noise, was not served: %s", strict, want)
-			}
-		}
-		ref.mm.Close()
-		fast.mm.Close()
+		})
 	}
 }
 

@@ -36,6 +36,7 @@ import (
 // statement IDs reused for another query, between-window and undated mocks,
 // and commands that arrive between tests.
 func TestFirstPassesServeWhatTheFullScanServes(t *testing.T) {
+	sideBySide(t)
 	seeds := int64(60)
 	if testing.Short() {
 		seeds = 10

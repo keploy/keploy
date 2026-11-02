@@ -38,6 +38,7 @@ func (s *diffSide) matchGate(ctx context.Context, req mysql.Request, dctx *wire.
 // replays that one both ways. The eager side compares every candidate, so the
 // sets stop at 1,000 recordings.
 func TestDeferredGateServesReportsAndLearnsWhatTheEagerGateDoes(t *testing.T) {
+	sideBySide(t)
 	seeds := int64(30)
 	sizes := []int{100, 1000}
 	btSizes := []int{100, 1000}
@@ -191,6 +192,7 @@ func btReplayBothWays(t *testing.T, n int, eng func() *mocknoise.Engine, staging
 // eager side still pays that cost hold at any size, so under -race, where the
 // eager side's n² comparisons of 1,000 calls took 54 s, the set is 200 calls.
 func TestAStrictMockReplayComparesTheRecordingsItsAnswersNeed(t *testing.T) {
+	sideBySide(t)
 	n := 1000
 	if raceEnabled {
 		n = 200
@@ -216,6 +218,7 @@ func TestAStrictMockReplayComparesTheRecordingsItsAnswersNeed(t *testing.T) {
 // that differs is noise, strict enforcement on or not (allowsDrift); in the
 // reversed order each command finds such recordings before its own.
 func TestDeferredGateServesExactServingAsTheEagerGateDoes(t *testing.T) {
+	sideBySide(t)
 	sizes := []int{100, 1000}
 	if testing.Short() || raceEnabled {
 		sizes = sizes[:1]
