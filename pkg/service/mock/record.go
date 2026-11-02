@@ -906,7 +906,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 
 	if keep {
-		if err := m.hooks.AfterRecordingComplete(persistCtx, &rec.RecordingCompleteContext{TestSetID: name, Path: m.config.Path}); err != nil {
+		if err := rec.RunAfterRecordingHook(persistCtx, m.logger, m.hooks, &rec.RecordingCompleteContext{TestSetID: name, Path: m.config.Path}, mockDrainNotice); err != nil {
 			m.logger.Warn("AfterRecordingComplete hook failed", zap.Error(err), zap.String("mock-set", name))
 		}
 	}
