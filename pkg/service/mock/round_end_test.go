@@ -33,14 +33,15 @@ type markerAgent struct {
 	transit    time.Duration
 	// endErr is what the request to end the streams returns; markerless
 	// ends the stream on that request without its marker (the agent went
-	// away); goneAtEnd is an agent that went away as it was asked: the
-	// request is refused and the stream ends without its marker; oldAgent
+	// away); goneAtEnd, when set, is an agent that went away as it was
+	// asked: the request is refused with it and the stream ends without its
+	// marker; oldAgent
 	// predates markers, and never says it can end its streams; notStarted is
 	// an agent this client did not start (compose, kubelet or the user runs
 	// it).
 	endErr     error
 	markerless bool
-	goneAtEnd  bool
+	goneAtEnd  error
 	oldAgent   bool
 	notStarted bool
 	gone       chan struct{}
@@ -74,9 +75,9 @@ func (a *markerAgent) BacklogBefore(context.Context, time.Time) (models.AgentBac
 func (a *markerAgent) EndRecordingStreams(_ context.Context, token string) error {
 	a.endCalls.Add(1)
 	a.token.Store(token)
-	if a.goneAtEnd {
+	if a.goneAtEnd != nil {
 		a.endOnce.Do(func() { close(a.gone) })
-		return refusedErr()
+		return a.goneAtEnd
 	}
 	if a.endErr != nil {
 		return a.endErr
@@ -207,7 +208,7 @@ func TestRecord_AnEndRequestTheAgentDoesNotTakeEndsTheRoundAsBefore(t *testing.T
 func TestRecord_AnAgentGoneAtTheEndRequestFailsTheRound(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		a := newMarkerAgent(time.Millisecond)
-		a.goneAtEnd = true
+		a.goneAtEnd = refusedErr(t)
 		_, promoted, err, code, logs := recordWithMarkerAgent(t, a)
 		require.Error(t, err, "run %d", i)
 		require.Equal(t, utils.ExitKeployError, code, "run %d", i)
@@ -348,11 +349,14 @@ func TestEndRound_TheUsersNextInterruptEndsIt(t *testing.T) {
 
 // goneEnder is an agent client whose agent died as it was asked to end the
 // round: the request is refused. Each stream of the kinds in ended had
-// already been sent its marker.
-type goneEnder struct{ ended map[models.FrameStream]bool }
+// already been sent its marker. refused is the refusal (refusedErr).
+type goneEnder struct {
+	ended   map[models.FrameStream]bool
+	refused error
+}
 
-func (goneEnder) EndRecordingStreams(context.Context, string) error { return refusedErr() }
-func (g goneEnder) StreamEnded(kind models.FrameStream) bool        { return g.ended[kind] }
+func (g goneEnder) EndRecordingStreams(context.Context, string) error { return g.refused }
+func (g goneEnder) StreamEnded(kind models.FrameStream) bool          { return g.ended[kind] }
 
 // An agent this client started that can no longer be reached to ask has
 // died: its stream is judged by its marker, whether it closed before the
@@ -380,8 +384,9 @@ func TestEndRound_AnAgentGoneIsJudgedByItsMarkersInEitherOrder(t *testing.T) {
 			core, logs := observer.New(zapcore.DebugLevel)
 			m := &mockService{logger: zap.New(core)}
 			lost := make(chan bool, 1)
+			ender := goneEnder{map[models.FrameStream]bool{models.MockStream: tc.marked}, refusedErr(t)}
 			go func() {
-				lost <- m.endRound(&roundEnd{ender: goneEnder{map[models.FrameStream]bool{models.MockStream: tc.marked}}, token: "t", endable: true}, always(true),
+				lost <- m.endRound(&roundEnd{ender: ender, token: "t", endable: true}, always(true),
 					[]roundStream{{kind: models.MockStream, done: done}}, recordDrainWords)
 			}()
 			if !tc.closeBefore {

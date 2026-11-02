@@ -2409,9 +2409,7 @@ func TestAgentHealthAnswer_IsOnlyAHealthyAnswersHeaders(t *testing.T) {
 	require.Nil(t, agentHealthAnswer(context.Background(), zap.NewNop(), &http.Client{}, answer(http.StatusServiceUnavailable)),
 		"the headers of a 503 were taken for the agent's")
 
-	gone := httptest.NewServer(http.NotFoundHandler())
-	goneURL := gone.URL
-	gone.Close()
+	goneURL := "http://" + testnet.RefusedAddr(t, "tcp") // nothing answers there, nor can come to
 	require.Nil(t, agentHealthAnswer(context.Background(), zap.NewNop(), &http.Client{}, goneURL+"/agent"),
 		"an address nothing answers on gave headers")
 }
