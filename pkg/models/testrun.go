@@ -789,6 +789,11 @@ type MockOutcome struct {
 	// incomplete (ErrUnmatchedCallsUnread, under the proven switch). Missed
 	// holds what was read.
 	MissedUnread string `json:"missed_unread,omitempty"`
+	// LearnedElsewhere is what record's full round's learn step taught
+	// recordings from calls made in other windows than theirs, for
+	// learning only (the agent's /mock/learned-elsewhere): none of it is
+	// consumption, so Consumed never holds it.
+	LearnedElsewhere []MockState `json:"learned_elsewhere,omitempty"`
 	// PIDMapRefusals are the inserts into the agent's PID maps the kernel
 	// refused over its life, which under compose is the replay's: processes
 	// its hooks could not track. nil when it cannot count them, which is
@@ -1176,3 +1181,13 @@ type (
 	GlobalNoise  map[string]map[string][]string
 	TestsetNoise map[string]map[string]map[string][]string
 )
+
+// TeachingWindow is a window in which a call taught a recording of another
+// window, for learning only (MockState.TaughtIn). Test is the test whose
+// window it was (the one open when the call came), "" between tests. At is
+// when the last such call of that window taught the recording: its learn
+// step, just after the call came. A window is named once per recording.
+type TeachingWindow struct {
+	Test string    `json:"test,omitempty" yaml:"test,omitempty"`
+	At   time.Time `json:"at" yaml:"at"`
+}

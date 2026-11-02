@@ -99,14 +99,23 @@ func isB64Byte(c byte) bool {
 // decode to text. Each text is read for escapes too (unescaped). clock are
 // the value's clock words: a part of a clock read ("456Z" of its
 // milliseconds) is read as the clock it is, not decoded.
-func b64Text(s string, clock map[string]bool) string {
+func b64Text(s string, clock map[string]bool) string { return b64Read(s, clock, false) }
+
+// b64Read is b64Text. A payload is mostly runs with nothing to split, and
+// reading them was half of the CPU of learning a big one, so it passes by
+// three reads whose answer it knows: the one part of a run with no '/' is
+// the run (no run holds a '.': nextB64Run ends one there), its glued spans
+// are none where it has no group of '-' or '_', and no word is in an empty
+// clock. everySplit makes those reads all the same: only the row that holds
+// b64Text to them sets it.
+func b64Read(s string, clock map[string]bool, everySplit bool) string {
 	var sb strings.Builder
 	seen := map[string]bool{}
 	level := []string{s}
 	for depth := 0; depth < maxDecodeLevels && len(level) > 0; depth++ {
 		var next []string
 		try := func(c string) bool {
-			if len(c) < minEncodedRun || seen[c] || allIn(tokensBy(c, isWord), clock) {
+			if len(c) < minEncodedRun || seen[c] || (everySplit || len(clock) > 0) && allIn(tokensBy(c, isWord), clock) {
 				return false
 			}
 			seen[c] = true
@@ -126,8 +135,10 @@ func b64Text(s string, clock map[string]bool) string {
 		}
 		tryRun := func(run string) bool {
 			whole := try(run)
-			for _, part := range strings.FieldsFunc(run, func(r rune) bool { return r == '/' || r == '.' }) {
-				try(part)
+			if everySplit || strings.Contains(run, "/") {
+				for _, part := range strings.FieldsFunc(run, func(r rune) bool { return r == '/' || r == '.' }) {
+					try(part)
+				}
 			}
 			if h, ok := strings.CutPrefix(run, "0x"); ok {
 				try(h)
@@ -136,6 +147,9 @@ func b64Text(s string, clock map[string]bool) string {
 			}
 			if whole {
 				return true
+			}
+			if !everySplit && !strings.ContainsAny(run, "-_") {
+				return false
 			}
 			// Its longest parts between groups of '-' and '_' that are text,
 			// none inside another that was.

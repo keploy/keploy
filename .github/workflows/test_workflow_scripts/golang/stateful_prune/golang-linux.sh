@@ -185,7 +185,7 @@ done
 line=$(results | awk -F'\t' -v t="$t6" '$1 == t')
 case "$STATES" in
 0) [ "$(echo "$line" | cut -f2)" = PASSED ] || fail "test 6 ($t6) did not pass after the prune, on a recording that states no lifetimes: $(echo "$line" | cut -f2-)" ;;
-*) echo "$line" | cut -f3 | grep -qE '"n":(7|8)' && fail "test 6 ($t6) was answered with another test's recording: $(echo "$line" | cut -f3)" ;;
+*) echo "$line" | cut -f3 | grep -E '"n":(7|8)' >/dev/null && fail "test 6 ($t6) was answered with another test's recording: $(echo "$line" | cut -f3)" ;;
 esac
 if grep -q 'WARNING: DATA RACE' ./*.log; then fail "data race in a keploy log"; fi
 

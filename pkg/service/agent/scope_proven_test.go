@@ -1565,6 +1565,34 @@ func TestTheReasonQuotesAnIDTheShellWouldSplit(t *testing.T) {
 	require.Equal(t, "orders::TestA", shellQuote("orders::TestA"))
 }
 
+// A harness shows the agent's text as it stands, so a build whose commands
+// need more than keploy's sets RunnableText, and both of the agent's answers
+// that print a command go through it: the reason of the test it failed, and a
+// refusal's remedy. Left as it is, it changes neither (the rows above pin that
+// text word for word).
+func TestWhatTheAgentTellsAHarnessGoesThroughRunnableText(t *testing.T) {
+	kept := RunnableText
+	t.Cleanup(func() { RunnableText = kept })
+	RunnableText = func(text string) string { return "[" + text + "]" }
+
+	a, p := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "orders"}, os.Getpid())
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(ctx, begin("TestPlaceOrder"))
+	require.Nil(t, serr)
+	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", Destination: "127.0.0.1:18282"}}
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestPlaceOrder", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Equal(t, "[keploy: GET /x to 127.0.0.1:18282 had no recorded answer. If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting orders::TestPlaceOrder>\".\n"+
+		"If it is flaky, not broken: keploy mock quarantine orders::TestPlaceOrder --reason \"<why>\".]", e.Reason)
+
+	refused := scopeErr(http.StatusConflict, models.ScopeErrNotInRun, "not in a run", "run it through keploy")
+	require.Equal(t, "not in a run", refused.Message)
+	require.Equal(t, "[run it through keploy]", refused.Remedy)
+}
+
 // A claim whose process exited is no claim: a begin under it is refused, so
 // a test is never given another process's key.
 func TestABeginUnderADeadClaimIsRefused(t *testing.T) {

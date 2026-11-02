@@ -342,7 +342,7 @@ replay changed SHUTDOWN_MSG=changed
 [ "$RC" -ne 0 ] || fail "2: keploy test exited 0, want non-zero"
 for s in test-set-0 test-set-1; do
   [ "$(set_status $s)" = FAILED ] || fail "2: $s is $(set_status $s), want FAILED"
-  sudo grep -A6 '^unclaimed_calls:' "$(report $s)" 2>/dev/null | grep -q '/shutdown' ||
+  sudo grep -A6 '^unclaimed_calls:' "$(report $s)" 2>/dev/null | grep '/shutdown' >/dev/null ||
     fail "2: $s does not name the publish among the calls made after its last test"
 done
 [ "$FAIL" -eq "$failed_before" ] || tail -80 changed.log
@@ -419,7 +419,7 @@ replay svckey-as-recorded
 replay svckey-changed SHUTDOWN_MSG=changed
 [ "$RC" -ne 0 ] || fail "5: a changed shutdown publish: keploy test exited 0, want non-zero: the set's end was read with the app running"
 [ "$(set_status test-set-0)" = FAILED ] || fail "5: a changed shutdown publish: test-set-0 is $(set_status test-set-0), want FAILED"
-sudo grep -A6 '^unclaimed_calls:' "$(report test-set-0)" 2>/dev/null | grep -q '/shutdown' ||
+sudo grep -A6 '^unclaimed_calls:' "$(report test-set-0)" 2>/dev/null | grep '/shutdown' >/dev/null ||
   fail "5: test-set-0 does not name the publish among the calls made after its last test"
 [ "$FAIL" -eq 0 ] || tail -60 svckey-changed.log
 

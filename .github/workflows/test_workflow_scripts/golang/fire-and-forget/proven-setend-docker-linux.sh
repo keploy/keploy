@@ -185,7 +185,7 @@ replay ignores -e IGNORE_INT=1
 if [ "$RC" -eq 0 ] || [ "$(set_status)" != INTERNAL_ERR ]; then
     fail "3: the set must not be judged, keploy test non-zero (exit $RC, status $(set_status))"
 fi
-grep -m1 '^failure_reason:' "$(REPORT)" | grep -q "made no progress on its way out" ||
+grep -m1 '^failure_reason:' "$(REPORT)" | grep "made no progress on its way out" >/dev/null ||
     fail "3: the report does not name the stall: $(grep -m1 '^failure_reason:' "$(REPORT)")"
 
 if [ "$FAIL" -ne 0 ]; then
