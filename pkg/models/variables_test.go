@@ -1991,6 +1991,53 @@ func TestAPhaseLockUpToZeroHoldsAndItsGuardsHoldNothingElse(t *testing.T) {
 	}
 }
 
+// A look-back read at its own cut of a second (Step == Res) whose range
+// holds a whole minute (Unit above Res) is a cut (CoarseCut) where that
+// range spans at most two cuts, from one cut wide up to exactly two: a
+// replay checks it against the whole seconds it holds (CutOffsets), within
+// one second on either side, so a look-back changed by two seconds or more
+// past them fails at every read. A range even a millisecond wider is no
+// cut: a replay checks it from Min to Max, within one second on either
+// side, as its learned line states (a read plus Max plus one second passes
+// at every read).
+func TestAnOwnCutLookBackIsACutUpToTwoCutsWide(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	own := func(min, max time.Duration) ClockOffset {
+		return ClockOffset{Min: min, Max: max, Res: sec, Step: sec, Layout: LayoutTyped}
+	}
+	at := time.Date(2026, 11, 2, 3, 53, 31, 0, time.UTC)
+	for _, c := range []struct {
+		name       string
+		o          ClockOffset
+		cut        bool
+		pass, fail []time.Duration // look-backs, in whole seconds, from the read's own second
+	}{
+		{"one cut wide", own(-60500*ms, -59500*ms), true, []time.Duration{-61, -60, -59}, []time.Duration{-62, -58}},
+		{"exactly two cuts wide", own(-61*sec, -59*sec), true, []time.Duration{-62, -61, -60, -59}, []time.Duration{-63, -58}},
+		{"a millisecond past two cuts", own(-61*sec-ms, -59*sec), false, []time.Duration{-61, -60, -59, -58}, []time.Duration{-57}},
+	} {
+		if got := c.o.CoarseCut(); got != c.cut {
+			t.Errorf("%s (%v): CoarseCut %v; want %v", c.name, c.o, got, c.cut)
+		}
+		// Calls 5 ms wide at four places in their second: every read
+		// stands in the second at holds.
+		for _, ph := range []time.Duration{0, 250 * ms, 500 * ms, 990 * ms} {
+			from := at.Add(ph)
+			to := from.Add(5 * ms)
+			for _, d := range c.pass {
+				if !c.o.Holds(at.Add(d*sec), sec, from, to) {
+					t.Errorf("%s (%v), a call %v into its second: a look-back of %v holds nothing; want it to pass", c.name, c.o, ph, -d*sec)
+				}
+			}
+			for _, d := range c.fail {
+				if c.o.Holds(at.Add(d*sec), sec, from, to) {
+					t.Errorf("%s (%v), a call %v into its second: a look-back of %v passes; want it to fail", c.name, c.o, ph, -d*sec)
+				}
+			}
+		}
+	}
+}
+
 // Two learnings of one place meet by the same rule in any order and any
 // grouping, and a phase lock (Step above Res) never turns into an offset
 // read at its values' own cut, which would drop the remainder it is locked
