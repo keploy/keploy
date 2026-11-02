@@ -273,3 +273,27 @@ func TestAWindowEndsAtARecordingPlacedAtItsAnswer(t *testing.T) {
 		}
 	}
 }
+
+// A mapping can list a recording the set did not decode (a mock file cut
+// short, or one with no request time): it has no place, and it moves no
+// test's window, wherever it sits in the test's list. Read as a zero place,
+// it would start a test with no begin at its next recording, or give it no
+// window at all.
+func TestARecordingWithNoPlaceMovesNoWindow(t *testing.T) {
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	at := func(s int) time.Time { return t0.Add(time.Duration(s) * time.Second) }
+	unstamped := &models.Mock{Name: "a-unstamped", Kind: models.HTTP}
+	decoded := []*models.Mock{windowMock("a-1", t0, 11, 12), windowMock("a-2", t0, 13, 14), unstamped}
+	want := []models.TestWindow{{TestCase: "o::TestA", Start: at(11), End: at(13)}}
+	for _, list := range [][]string{
+		{"a-1", "a-gone", "a-2"},
+		{"a-1", "a-2", "a-gone"},
+		{"a-1", "a-unstamped", "a-2"},
+		{"a-1", "a-2", "a-unstamped"},
+	} {
+		table := map[string][]string{"o::TestA": list}
+		if got := recordedTestWindows(nil, table, decoded); !slices.Equal(got, want) {
+			t.Errorf("%v: windows\n %v\nwant\n %v", list, got, want)
+		}
+	}
+}
