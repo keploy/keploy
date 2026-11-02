@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -698,7 +700,10 @@ func TestAMarkAfterTheLearnStepEndedTakesNoLockBeforeAStagingStartsItsEpoch(t *t
 // A staging lets the past staging's outside answers go before it starts its
 // epoch, and they are built only under swapMu: so at every instant they are
 // none or the current staging's, and a read that takes no lock never sees a
-// past staging's answers under the new epoch.
+// past staging's answers under the new epoch. The seam sits between the two
+// steps: there the past answers are gone and the epoch has not moved yet. A
+// staging that moved the epoch first fails there, wherever the seam sits, and
+// one that let nothing go fails after the staging too.
 func TestAStagingLetsThePastOutsideAnswersGoBeforeItStartsItsEpoch(t *testing.T) {
 	provenswitch.Pin(true)
 	t.Cleanup(provenswitch.Unpin)
@@ -709,12 +714,16 @@ func TestAStagingLetsThePastOutsideAnswersGoBeforeItStartsItsEpoch(t *testing.T)
 	if mm.outsideNow() == nil {
 		t.Fatal("precondition: the outside answers were not built")
 	}
+	before := mm.stagingEpoch.Load()
 	seen := false
 	mm.exact.outside.onLetGo = func() {
 		mm.exact.outside.onLetGo = nil
 		seen = true
-		if st := mm.exact.outside.cur.Load(); st != nil && st.epoch != mm.stagingEpoch.Load() {
-			t.Errorf("as the staging started its epoch, the outside answers held staging %d's under epoch %d", st.epoch, mm.stagingEpoch.Load())
+		if st := mm.exact.outside.cur.Load(); st != nil {
+			t.Errorf("as the staging started its epoch, the past answers (staging %d's) were not let go yet", st.epoch)
+		}
+		if e := mm.stagingEpoch.Load(); e != before {
+			t.Errorf("the epoch moved to %d before the staging let the past answers go; it was %d", e, before)
 		}
 	}
 	mm.SetMocksWithWindow(nil, []*models.Mock{m}, models.BaseTime, time.Now())
@@ -724,6 +733,73 @@ func TestAStagingLetsThePastOutsideAnswersGoBeforeItStartsItsEpoch(t *testing.T)
 	if st := mm.exact.outside.cur.Load(); st != nil && st.epoch != mm.stagingEpoch.Load() {
 		t.Fatalf("after the staging, the outside answers held staging %d's under epoch %d", st.epoch, mm.stagingEpoch.Load())
 	}
+}
+
+// The other half of the outside answers' invariant: a build reads the epoch
+// under swapMu. A build that waits for swapMu behind a staging labels its
+// answers with the epoch it finds once it holds swapMu, the one the staging
+// started. One that read the epoch before it waited would label the new
+// staging's trees with the past staging's epoch.
+func TestABuildWaitingBehindAStagingLabelsItsAnswersWithThatStagingsEpoch(t *testing.T) {
+	provenswitch.Pin(true)
+	t.Cleanup(provenswitch.Unpin)
+	m := exactMock("session", 0, models.LifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{m})
+	mm.SetLearnEnded(true)
+	if mm.exact.outside.cur.Load() != nil {
+		t.Fatal("precondition: the outside answers are built already")
+	}
+	mm.swapMu.Lock()
+	done := make(chan struct{})
+	go func() { mm.prepareOutside(); close(done) }()
+	for deadline := time.Now().Add(time.Minute); !waitsForSwapMuIn("(*MockManager).prepareOutside"); {
+		select {
+		case <-done:
+			mm.swapMu.Unlock()
+			t.Fatal("the build of the outside answers did not wait for a staging holding swapMu")
+		default:
+		}
+		if time.Now().After(deadline) {
+			mm.swapMu.Unlock()
+			<-done
+			t.Fatal("never saw the build of the outside answers waiting for swapMu")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	mm.bumpStagingEpoch() // the staging holding swapMu starts its epoch
+	mm.swapMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Minute):
+		t.Fatal("the build of the outside answers did not end once the staging let swapMu go")
+	}
+	st := mm.exact.outside.cur.Load()
+	if st == nil {
+		t.Fatal("the build stored no outside answers")
+	}
+	if e := mm.stagingEpoch.Load(); st.epoch != e {
+		t.Fatalf("the build labelled its answers staging %d's under epoch %d", st.epoch, e)
+	}
+}
+
+// waitsForSwapMuIn reports whether a goroutine waits to read-lock an RWMutex
+// (swapMu, here) inside fn, by the stack of every goroutine.
+func waitsForSwapMuIn(fn string) bool {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(g, fn) && strings.Contains(g, "sync.(*RWMutex).RLock") {
+			return true
+		}
+	}
+	return false
 }
 
 // A named read (a delete door's spend: noteExactSpent) builds the staging's
