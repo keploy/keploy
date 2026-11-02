@@ -587,13 +587,12 @@ func TestAServerTestsReadPastAnotherGoroutinesServeIsLearnedWhateverPartAPayload
 	}
 	// Fail closed: only a payload that holds the value whole (or its echo:
 	// the next row), made or served before the call, outranks the look-up's
-	// part. One that holds another
-	// stamp of the same minute (a part again), or the value whole but
-	// recorded after the call and not served before it, leaves the earliest
-	// part the value's place: where the window from the test's begin does
-	// not hold the read, its variable stands, and where it does, the value
-	// is learned as the plain read the replay's check passes, as with the
-	// look-up alone.
+	// part. One that holds another stamp of the same minute (a part again),
+	// or the value whole but recorded after the call and not served before
+	// it, leaves the earliest part the value's place: where the window from
+	// the test's begin does not hold the read, its variable stands, and where
+	// it does, the value is learned as the plain read the replay's check
+	// passes, as with the look-up alone.
 	other := func(v string, at time.Time, served bool) Raw {
 		return RawOf(&models.Mock{Name: "mock-10", Kind: "Pulsar", Spec: models.MockSpec{
 			GenericRequests:  []models.Payload{{Origin: "client", Message: []models.OutputBinary{{Type: "json", Data: `{"commandType":"SEND","payload":{"type":"lead.updated","at":"` + v + `"}}`}}}},
@@ -669,8 +668,9 @@ func TestAnEchoInALaterPayloadOutranksAnEarlierPayloadsPart(t *testing.T) {
 
 // A stamp its call's window holds, followed by a changed word with no ASCII
 // in it (a Russian weekday, the lead crossing midnight): the search reads
-// that word as data, as a part, since the clock's words are the ASCII ones. A payload holding the weekday by chance (a locale table)
-// comes first; a later payload made before the call holds the value whole.
+// that word as data, as a part, since the clock's words are the ASCII ones.
+// A payload holding the weekday by chance (a locale table) comes first; a
+// later payload made before the call holds the value whole.
 // The whole copy names the value's place; with no whole copy, or one
 // recorded after the call that F had not served, the weekday's part stays.
 func TestAStampWholeInALaterPayloadOutranksAnEarlierNonASCIIPart(t *testing.T) {
@@ -695,13 +695,13 @@ func TestAStampWholeInALaterPayloadOutranksAnEarlierNonASCIIPart(t *testing.T) {
 	learn := func(raw ...Raw) Learned {
 		return ClassifyIn(clockedDrifts(), []string{p}, str(live), str(rec), recAt, nil, raw, nil, w)[0]
 	}
-	if ln := learn(locale); !partInPayload(ln) || ln.From.Mock != "mock-1" {
+	if ln := learn(locale); !partInPayload(ln) || ln.From.Mock != "mock-1" || ln.From.Held != "понедельник" {
 		t.Fatalf("the locale table alone: %s from %q held %q (%s); want the weekday's part of mock-1", ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
 	}
 	if ln := learn(locale, sent(recAt.Add(-time.Second), true)); ln.Kind != KindVariable || ln.From.Mock != "mock-9" || ln.From.Held != rec {
 		t.Errorf("a later payload holding the value whole: %s from %q held %q (%s); want the variable of mock-9 holding it whole", ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
 	}
-	if ln := learn(locale, sent(recAt.Add(time.Second), false)); !partInPayload(ln) || ln.From.Mock != "mock-1" {
+	if ln := learn(locale, sent(recAt.Add(time.Second), false)); !partInPayload(ln) || ln.From.Mock != "mock-1" || ln.From.Held != "понедельник" {
 		t.Errorf("the whole copy recorded after the call, not served before it: %s from %q held %q (%s); want the weekday's part of mock-1", ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
 	}
 }
