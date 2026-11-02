@@ -127,10 +127,42 @@ func TestAKeployTestEndNamesItsTestCaseToTheBytesWait(t *testing.T) {
 		ends = append(ends, coreAgent.EndOf(ctx))
 		return nil
 	}
-	require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{}}, nil), "an end with no test case opened")
-	require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}}, nil))
-	require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{}}, nil))
-	require.Equal(t, []string{"the test case", "", "test-1"}, ends)
+	// A pool call before the set's first test case, a test case's open
+	// (which settles the gap's calls, marking nothing), its end, then two
+	// pool calls after it ended (a passed run's, a plain one), then the next
+	// test case and its end. Only an end whose view is in force names a
+	// test case: a pool call after test-1 ended is the gap's, never test-1's,
+	// which was verified.
+	for i, ex := range []models.ExactServing{{}, {Test: "test-1"}, {}, {Passed: 1}, {}, {Test: "test-2"}, {}} {
+		require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &ex}, nil), "call %d", i)
+	}
+	require.Equal(t, []string{coreAgent.BetweenTestCases, "", "test-1", coreAgent.BetweenTestCases, coreAgent.BetweenTestCases, "", "test-2"}, ends)
+}
+
+// A proxy that cannot say which view is in force names no test case: its
+// marks say "the test case", never a test case that may have ended.
+func TestAKeployTestEndWithNoServedReaderNamesNoTestCase(t *testing.T) {
+	require.Equal(t, "the test case", endingTestCase(outcomeOnly{"test-1"}))
+	a, _ := exactAgent(t, nil, map[string][]string{}, map[string][]string{})
+	es, err := a.exactServer()
+	require.NoError(t, err)
+	require.Equal(t, coreAgent.BetweenTestCases, endingTestCase(es), "no test case open")
+}
+
+// A drop counted in the gap says it was between test cases, never "while
+// between test cases ran" nor a test case's name.
+func TestADropBetweenTestCasesSaysSo(t *testing.T) {
+	require.Contains(t, dropped{what: coreAgent.BetweenTestCases, n: 2}.Error(), "listener between test cases (its SYN")
+	require.Contains(t, dropped{what: "test-1", n: 2}.Error(), "listener while test-1 ran (its SYN")
+}
+
+// outcomeOnly is an ExactServer that answers ExactTestOutcome alone.
+type outcomeOnly struct{ test string }
+
+func (outcomeOnly) ServeExactTest(string, []*models.Mock) error { return nil }
+func (outcomeOnly) ServeExactPool(string, []string) error       { return nil }
+func (o outcomeOnly) ExactTestOutcome() (string, []string, []string, bool) {
+	return o.test, nil, nil, true
 }
 
 // A test during which the kernel dropped, at the proxy's listener, what can

@@ -206,7 +206,7 @@ func (s *pairedConns) own(test string, app netip.AddrPort) {
 	s.owned = append(s.owned, agent.OwnedLoss{Test: test, Loss: models.CaptureLoss{
 		Kind:  models.CaptureLossAppBytesLost,
 		Count: 1,
-		What:  "from " + app.String() + ", written in " + test + ", whose end could not wait for them",
+		What:  "from " + app.String() + ", written " + agent.WrittenIn(test) + ", where keploy's wait for them was cut short",
 	}})
 }
 

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -84,5 +85,27 @@ func TestOwnedLossesPastTheBoundCountAsTheRuns(t *testing.T) {
 	}
 	if got := p.TakeOwnedLosses(); got != nil {
 		t.Fatalf("a second take = %+v, want none", got)
+	}
+}
+
+// TestAGapsOwnedLossSaysBetweenTestCases pins the words of an owned loss:
+// a test's bytes were written in it, the gap's between test cases, never in
+// a test case named for the gap.
+func TestAGapsOwnedLossSaysBetweenTestCases(t *testing.T) {
+	var s pairedConns
+	app := netip.MustParseAddrPort("127.0.0.1:50912")
+	s.own("test-1", app)
+	s.own(agent.BetweenTestCases, app)
+	want := []string{
+		"from 127.0.0.1:50912, written in test-1, where keploy's wait for them was cut short",
+		"from 127.0.0.1:50912, written between test cases, where keploy's wait for them was cut short",
+	}
+	if len(s.owned) != len(want) {
+		t.Fatalf("owned %d losses, want %d", len(s.owned), len(want))
+	}
+	for i, o := range s.owned {
+		if o.Loss.What != want[i] {
+			t.Errorf("loss %d says %q, want %q", i, o.Loss.What, want[i])
+		}
 	}
 }

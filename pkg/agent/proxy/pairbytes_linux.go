@@ -1125,7 +1125,11 @@ func (p *Proxy) pairLost(pc *pairedConn, low, top uint64, msg string, fields ...
 	if open {
 		p.losses.Add(models.CaptureLossAppBytesLost, "from "+pc.app.String())
 	} else {
-		next = "the bytes were written in " + strings.Join(owners, ", ") + ", whose end could not wait for them (that test is not verified), not in the test open now; check the agent's log for why that end was cut short"
+		where := make([]string, len(owners))
+		for i, test := range owners {
+			where[i] = agent.WrittenIn(test)
+		}
+		next = "the bytes were written " + strings.Join(where, ", ") + ", not in the test open now: keploy's wait for them was cut short there (a test whose end was cut short is not verified); check the agent's log for why"
 	}
 	p.logger.Warn(msg, append([]zap.Field{
 		zap.String("from", pc.app.String()),

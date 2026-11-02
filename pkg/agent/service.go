@@ -107,6 +107,21 @@ func EndOf(ctx context.Context) string {
 	return s
 }
 
+// BetweenTestCases is what a keploy test call that serves the pool with no
+// test case's view in force settles (WithEndOf): the gap between test
+// cases, before the set's first or after one ended. Its bytes are marked
+// with it, never with a test case that was verified.
+const BetweenTestCases = "between test cases"
+
+// WrittenIn says where the bytes an OwnedLoss's test owned were written:
+// "in <test>", or "between test cases" for the gap's.
+func WrittenIn(test string) string {
+	if test == BetweenTestCases {
+		return test
+	}
+	return "in " + test
+}
+
 // CaptureLossDrainer is the optional extension implemented by hooks whose
 // counts of capture losses are fed by reports the kernel makes: before a read
 // of them, DrainCaptureLosses waits until every report made before it has
@@ -762,6 +777,14 @@ type ExactServer interface {
 	// not (in recorded order); final once the test stops being served. ok is
 	// false when exact serving is off.
 	ExactTestOutcome() (test string, consumed, unconsumed []string, ok bool)
+}
+
+// ExactTestServedReader is an optional ExactServer capability: ExactTestServed
+// is the test whose view is in force now, "" when none is (the pool is
+// served: before a set's first test, or after a test ended). Unlike
+// ExactTestOutcome, it never names a test that has ended.
+type ExactTestServedReader interface {
+	ExactTestServed() string
 }
 
 // ExactTestOpener is an optional ExactServer capability of a proxy that keeps

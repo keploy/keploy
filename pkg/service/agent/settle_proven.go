@@ -454,6 +454,9 @@ type dropped struct {
 
 func (d dropped) Error() string {
 	when := "while " + d.what + " ran"
+	if d.what == coreAgent.BetweenTestCases {
+		when = d.what
+	}
 	if d.gap {
 		when += ", or before it while no test was open"
 	}

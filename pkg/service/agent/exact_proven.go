@@ -281,14 +281,21 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 	return nil
 }
 
-// endingTestCase names the test case a keploy test end is for: the latest one
-// exact serving opened, which it still serves (ExactTestOutcome; a set's test
-// cases run one at a time), or "the test case" when none was opened.
+// endingTestCase names what a keploy test call that serves the pool settles:
+// the test case whose view is in force, which the call ends (a set's test
+// cases run one at a time), or the gap between test cases when none is
+// (coreAgent.BetweenTestCases): a pool call before the set's first test case
+// or after one ended, which is no test case's. "the test case" from a proxy
+// that cannot say which view is in force.
 func endingTestCase(es coreAgent.ExactServer) string {
-	if test, _, _, _ := es.ExactTestOutcome(); test != "" {
+	r, ok := es.(coreAgent.ExactTestServedReader)
+	if !ok {
+		return "the test case"
+	}
+	if test := r.ExactTestServed(); test != "" {
 		return test
 	}
-	return "the test case"
+	return coreAgent.BetweenTestCases
 }
 
 // openExactTest opens test under exact serving, served exactly owned, and
@@ -399,7 +406,8 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		// found, and told it is not verified when keploy cannot tell its
 		// calls settled: the calls after it are the pool's either way.
 		// One cut short marks what it could not see reached with the test
-		// case's name (settledSince), which its owned losses then say.
+		// case's name, or the gap's for a pool call between test cases
+		// (endingTestCase, settledSince), which its owned losses then say.
 		unknown = a.settledSince(ctx, true, endingTestCase(es))
 	}
 	switch {
