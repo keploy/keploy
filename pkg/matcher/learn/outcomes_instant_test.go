@@ -1378,13 +1378,12 @@ func TestOutcomeAMillisecondCopyIsBoundToItsSource(t *testing.T) {
 // An answer recorded after the call that round F gave the application
 // before it, holding round F's moment: in round F the value may be a pick
 // from it, so it is refused naming it, as main refuses it, never read as
-// the call's clock read. So is one whose whole field is a finer instant F's
-// minute is a cut of (a SentAt, cut or rounded to the minute), and one that
-// holds the recorded minute too, by another cut: it was recorded after the
-// call, so the recorded application never read it. Where F never gave it,
-// or it holds F's minute only as a cut of a finer instant inside a longer
-// text (a UnixNano in a name: no pick, as at the answer step), the call's
-// window reads the clock.
+// the call's clock read. So is one that holds the recorded minute too, by
+// another cut: it was recorded after the call, so the recorded application
+// never read it. A pick needs round F's moment at the call's cut: where F
+// never gave it, or it holds F's minute only as a finer time cut or rounded
+// to it (a SentAt whole, or a UnixNano in a name), the call's window reads
+// the clock, checked at replay, where main refuses the SentAt.
 func TestOutcomeAMomentALaterRecordingGaveBeforeTheCallIsAPick(t *testing.T) {
 	const p = "body.sent_at"
 	minute := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04Z07:00") }
@@ -1408,8 +1407,8 @@ func TestOutcomeAMomentALaterRecordingGaveBeforeTheCallIsAPick(t *testing.T) {
 		}{
 			{"round F's minute, given before the call", later(live).WithServed(true).ServedAsRecorded(), true},
 			{"round F's minute at its first second, given before the call", later(fMinute.Format(time.RFC3339)).WithServed(true).ServedAsRecorded(), true},
-			{"round F's minute as a cut of a later second, given before the call", later(fMinute.Add(5 * time.Second).Format(time.RFC3339)).WithServed(true).ServedAsRecorded(), true},
-			{"round F's minute as a second before it, rounded, given before the call", later(fMinute.Add(-20 * time.Second).Format(time.RFC3339)).WithServed(true).ServedAsRecorded(), true},
+			{"round F's minute as a cut of a later second, given before the call", later(fMinute.Add(5 * time.Second).Format(time.RFC3339)).WithServed(true).ServedAsRecorded(), false},
+			{"round F's minute as a second before it, rounded, given before the call", later(fMinute.Add(-20 * time.Second).Format(time.RFC3339)).WithServed(true).ServedAsRecorded(), false},
 			{"round F's minute as a cut of a UnixNano in a name, given before the call", later("app-crud-" + iEpochNs(fMinute.Add(5*time.Second+123))).WithServed(true).ServedAsRecorded(), false},
 			{"round F's minute, never given", later(live), false},
 		} {
@@ -1419,6 +1418,84 @@ func TestOutcomeAMomentALaterRecordingGaveBeforeTheCallIsAPick(t *testing.T) {
 				oRefused(t, what, d, "pick", "mock-0")
 			} else {
 				iClock(t, what, d)
+			}
+		}
+	}
+}
+
+// A second the call reads from the clock in its own window, which round
+// F's view of an earlier answer holds only inside a finer time (an app's
+// name holding the UnixNano it was made at, a $date of milliseconds, or
+// both in one answer), is the call's own read of the clock, checked at
+// replay: that answer gave the application no value at the call's cut to
+// pick from. One that holds round F's second at the call's cut (as a
+// number of seconds, or a time of seconds) is a pick, refused naming it.
+// As a recording, leaf by leaf, and in a window the call landed in from
+// another test, the decision is the same.
+func TestOutcomeAFinerTimeHoldingRoundFsSecondIsNoPick(t *testing.T) {
+	const p = "body.cmd.query.dirtyAt.$lte.$numberLong"
+	sec := func(x time.Time) string { return strconv.FormatInt(x.Unix(), 10) }
+	rAt, fAt := oAt.Add(20400*time.Millisecond), oAt.Add(96400*time.Millisecond)
+	rec, live := sec(rAt), sec(fAt)
+	// The app was made 300 ms before the call in round F, in the call's
+	// second, and 37 s before it in the recording, in another minute.
+	rMade, fMade := rAt.Add(-37*time.Second), fAt.Add(-300*time.Millisecond)
+	find := func(fields string) *models.Mock {
+		return &models.Mock{Name: "mock-799", Kind: models.HTTP, Spec: models.MockSpec{
+			HTTPReq:          &models.HTTPReq{Method: "POST", URL: "http://db.local/apps/find", Body: `{"find":"apps"}`},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: `{"cursor":{"firstBatch":[{` + fields + `}]}}`},
+			ReqTimestampMock: oAt.Add(-time.Second), ResTimestampMock: oAt.Add(-time.Second + time.Millisecond),
+		}}
+	}
+	name := func(x time.Time) string { return `"app":{"name":"[E2E] page-queries-` + iEpochNs(x) + `"}` }
+	date := func(x time.Time) string { return `"created_at":{"$date":{"$numberLong":"` + iEpochMs(x) + `"}}` }
+	leaves := func(rm, lm *models.Mock) Earlier {
+		e := leafedOf(rm, true, 1)
+		e.Payload = e.Payload.ServedLive(RawOf(lm, true))
+		v, _ := DecodeJSON([]byte(lm.Spec.HTTPResp.Body))
+		ll := map[string]Leaf{}
+		JSONLeaves("body", v, ll)
+		for i := range e.Seen {
+			if s := &e.Seen[i]; s.Side == Response {
+				s.Live = ll[s.Leaf.Path].Value
+			}
+		}
+		return e
+	}
+	for _, tc := range []struct {
+		what   string
+		fields func(time.Time) string
+		pick   bool
+	}{
+		{"a name holding the UnixNano it was made at", name, false},
+		{"a $date of milliseconds", date, false},
+		{"a name and a $date beside it", func(x time.Time) string { return name(x) + "," + date(x) }, false},
+		{"the second, as a number of seconds", func(x time.Time) string { return `"claimedAt":{"$numberLong":"` + sec(x) + `"}` }, true},
+		{"the second, as a time of seconds", func(x time.Time) string { return `"claimed_at":"` + x.UTC().Format(time.RFC3339) + `"` }, true},
+		{"the second beside a name", func(x time.Time) string { return name(x) + `,"claimedAt":{"$numberLong":"` + sec(x) + `"}` }, true},
+	} {
+		rm, lm := find(tc.fields(rMade)), find(tc.fields(fMade))
+		for _, form := range []struct {
+			what    string
+			earlier []Earlier
+			raw     []Raw
+		}{
+			{"as a recording", nil, []Raw{RawOf(rm, true).ServedAs(1).ServedLive(RawOf(lm, true))}},
+			{"leaf by leaf", []Earlier{leaves(rm, lm)}, nil},
+		} {
+			for _, mode := range []Mode{ModeOwn, ModeElsewhere} {
+				in := iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), form.earlier, form.raw)
+				what := tc.what + ", " + form.what
+				if mode == ModeElsewhere {
+					in.Mode, in.Landed = ModeElsewhere, Landed{Where: LandedOther, Test: "test-5"}
+					what += ", landed from another test"
+				}
+				d := oWord(t, Decide(in), rec, live)
+				if tc.pick {
+					oRefused(t, what, d, RefusalPick, "mock-799")
+				} else {
+					iClock(t, what, d)
+				}
 			}
 		}
 	}
