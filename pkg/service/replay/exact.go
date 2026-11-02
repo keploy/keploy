@@ -926,12 +926,17 @@ func (r *Replayer) serveExactPool(ctx context.Context, plan *exactPlan, next str
 // serveExactPoolWith is serveExactPool, its filter carrying learned
 // (models.MockFilterParams.Learned) when it is not empty.
 func (r *Replayer) serveExactPoolWith(ctx context.Context, plan *exactPlan, next string, learned []models.MockState) error {
-	return r.serveExactPoolPassed(ctx, plan, next, learned, 0)
+	err := r.serveExactPoolPassed(ctx, plan, next, learned, 0)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to serve the test set's pool between test cases")
+	}
+	return err
 }
 
 // serveExactPoolPassed is serveExactPoolWith, its filter saying that the run
 // has passed the first passed test cases of its order when passed is not 0
-// (models.ExactServing.Passed, passExactRun).
+// (models.ExactServing.Passed, passExactRun). It logs nothing: its caller
+// says what the agent not taking the call means.
 func (r *Replayer) serveExactPoolPassed(ctx context.Context, plan *exactPlan, next string, learned []models.MockState, passed int) error {
 	if plan == nil {
 		return nil
@@ -941,13 +946,17 @@ func (r *Replayer) serveExactPoolPassed(ctx context.Context, plan *exactPlan, ne
 	plan.aheadNamed = ""
 	err := r.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Ahead: append([]string(nil), plan.ahead[next]...), Passed: passed}, LearnEnded: plan.learnEnded, Learned: learned})
 	if err != nil {
-		utils.LogError(r.logger, err, "failed to serve the test set's pool between test cases")
 		return err
 	}
 	plan.aheadNamed = next
 	plan.testView = ""
 	return nil
 }
+
+// passEndUnconfirmedMsg is the line keploy test logs when the agent does not
+// take the call that tells it a pass of the set's run passed the test cases
+// it skipped after the last one it ran (passExactRun).
+const passEndUnconfirmedMsg = "keploy could not confirm that the agent took the end of the test set's pass: the worker-scope recordings placed after the test cases the run skipped after the last one it ran may answer no call the application makes after its last test case"
 
 // passExactRun tells the agent, as a pass of the set's run ends with every
 // test case it meant to take up taken up, that the run has passed the test
@@ -975,9 +984,13 @@ func (r *Replayer) passExactRun(ctx context.Context, plan *exactPlan, streamingN
 	if n <= plan.passed {
 		return
 	}
+	// The agent's answer cannot tell a call it did not take from one it took
+	// whose settling it could not verify (the gap after the pass's last test
+	// case): it has passed the test cases then all the same. So the line says
+	// what may follow, once; the next pass end that comes (a retry cycle's,
+	// the streaming pass's) tells the agent again.
 	if err := r.serveExactPoolPassed(ctx, plan, "", nil, n); err != nil {
-		r.logger.Warn("keploy could not tell the agent that the test set's run passed the test cases it skipped after the last one it ran: the worker-scope recordings placed after them answer no call the application makes after its last test case",
-			zap.Int("passed", n), zap.Error(err))
+		r.logger.Warn(passEndUnconfirmedMsg, zap.Int("passed", n), zap.Error(err))
 		return
 	}
 	plan.passed = n

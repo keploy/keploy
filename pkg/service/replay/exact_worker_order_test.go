@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap/zapcore"
 )
 
 // keploy test hands the agent, on the set's staging, every test case of the
@@ -123,8 +124,12 @@ func passTrace(h *prRun) []string {
 // handed the agent no order is told nothing. A pass that ends on a stop
 // tells it nothing either: the application stopping part way, a result the
 // report store refuses, the compose stack halting (keploy's agent with it)
-// as the last test case ends, or the agent beginning no streaming test case.
-// A last test case that fails unsent ends its pass as any other.
+// as the last test case ends, the agent refusing a test case's opening, or
+// the agent beginning no streaming test case. A last test case that fails
+// unsent ends its pass as any other. A pass end the agent does not take is
+// said once, as one that may leave those places unreached, and the next
+// pass end (a retry cycle's) tells the agent again; a pool call between
+// test cases it does not take is said once, as before.
 func TestTheEndOfEachPassTellsTheAgentWhatTheRunPassed(t *testing.T) {
 	placed := []models.MockEntry{{Name: "mock-boot", Kind: string(models.HTTP)}, {Name: "mock-late", Kind: string(models.HTTP), Place: "test-4"}}
 	for _, tc := range []struct {
@@ -141,12 +146,18 @@ func TestTheEndOfEachPassTellsTheAgentWhatTheRunPassed(t *testing.T) {
 		unsendable string
 		// compose runs the application under docker compose: the set is
 		// served, its agent holding the set's mocks as the stack's bring-up
-		// left them. haltAt is the pool call (1 for the set's first) the
-		// stack's halt fails, keploy's agent going down with it.
-		compose    bool
-		haltAt     int
-		refuseOpen int // the agent opens no capture window at this one (1 for the set's first)
+		// left them.
+		compose bool
+		// refusePool is the pool call (1 for the set's first) the agent
+		// does not take: under compose, the stack's halt, keploy's agent
+		// going down with it.
+		refusePool int
+		refuseOpen int    // the agent opens no capture window at this one (1 for the set's first)
+		refuseTest string // the agent refuses this test case's opening
 		want       []string
+		// poolSaid and passEndSaid are how many times the run says that the
+		// agent did not take a pool call between test cases, and a pass end.
+		poolSaid, passEndSaid int
 	}{
 		{name: "a quarantined last test case", worker: placed, ignored: []string{"test-4"},
 			want: []string{"test-1", "test-2", "test-3", "passed 4"}},
@@ -172,8 +183,14 @@ func TestTheEndOfEachPassTellsTheAgentWhatTheRunPassed(t *testing.T) {
 			want: []string{"test-1", "test-2", "test-3"}},
 		{name: "under docker compose", worker: placed, ignored: []string{"test-4"}, compose: true,
 			want: []string{"test-1", "test-2", "test-3", "passed 4"}},
-		{name: "the compose stack halts as the last test case ends", worker: placed, ignored: []string{"test-4"}, compose: true, haltAt: 3,
+		{name: "the compose stack halts as the last test case ends", worker: placed, ignored: []string{"test-4"}, compose: true, refusePool: 3,
+			want: []string{"test-1", "test-2", "test-3"}, poolSaid: 1},
+		{name: "the agent refuses a test case's opening", worker: placed, refuseTest: "test-2",
+			want: []string{"test-1"}},
+		{name: "the agent refuses the last test case's opening", worker: placed, refuseTest: "test-4",
 			want: []string{"test-1", "test-2", "test-3"}},
+		{name: "the agent does not take the first cycle's pass end", worker: placed, ignored: []string{"test-4"}, retry: true, refusePool: 4,
+			want: []string{"test-1", "test-2", "test-3", "test-2", "test-3", "passed 4"}, passEndSaid: 1},
 		{name: "the agent does not begin the streaming test case", worker: placed, streaming: []string{"test-4"}, ignored: []string{"test-3"}, refuseOpen: 3,
 			want: []string{"test-1", "test-2", "passed 3"}},
 		{name: "no worker mock placed after a test case", worker: placed[:1], ignored: []string{"test-4"},
@@ -210,17 +227,19 @@ func TestTheEndOfEachPassTellsTheAgentWhatTheRunPassed(t *testing.T) {
 			}
 			h.mocks.filtered = []*models.Mock{httpAt("mock-boot", 500), httpAt("mock-a", 1010), httpAt("mock-late", 1050)}
 			s12MappingFile(t, h, nil, tc.worker...)
-			if tc.compose || tc.refuseOpen != 0 {
+			if tc.compose || tc.refusePool != 0 || tc.refuseOpen != 0 || tc.refuseTest != "" {
 				vi := &viewInstr{prInstr: h.instr,
-					failPool: func(n int) bool { return n == tc.haltAt },
-					poolErr:  errors.New("dial tcp 172.18.0.3:8086: connect: connection refused"),
-					failOpen: func(n int) bool { return n == tc.refuseOpen }}
+					failPool:   func(n int) bool { return n == tc.refusePool },
+					poolErr:    errors.New("dial tcp 172.18.0.3:8086: connect: connection refused"),
+					failOpen:   func(n int) bool { return n == tc.refuseOpen },
+					refuseTest: tc.refuseTest}
 				h.replayer.instrumentation = vi
 				if tc.compose {
 					h.replayer.config.CommandType = string(utils.DockerCompose)
 					vi.loaded = len(h.mocks.filtered)
 				}
 			}
+			logs := observeLog(h)
 			if tc.compose {
 				h.runServing(t)
 			} else {
@@ -228,6 +247,12 @@ func TestTheEndOfEachPassTellsTheAgentWhatTheRunPassed(t *testing.T) {
 			}
 			if got := passTrace(h); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("the run opened and passed %v; want %v", got, tc.want)
+			}
+			pool := logs.FilterMessage("failed to serve the test set's pool between test cases").Len()
+			passEnd := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(passEndUnconfirmedMsg).Len()
+			if pool != tc.poolSaid || passEnd != tc.passEndSaid {
+				t.Fatalf("the run said %d times that the agent did not take a pool call between test cases and %d times a pass end; want %d and %d",
+					pool, passEnd, tc.poolSaid, tc.passEndSaid)
 			}
 		})
 	}

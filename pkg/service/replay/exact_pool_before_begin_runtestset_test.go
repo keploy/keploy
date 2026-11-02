@@ -28,15 +28,18 @@ import (
 // their number (1 for the set's first), with poolErr when it is set.
 // failOpen fails the capture windows it answers true for ("begin-failed",
 // "continue-failed"), by their number (1 for the set's first test), with
-// openErr when it is set. loaded is the mocks it says it holds
+// openErr when it is set. refuseTest is a test case whose opening it refuses
+// ("test:<name>-failed"), as when it cannot serve that test case its own
+// mocks, with the run's context alive. loaded is the mocks it says it holds
 // (GetMockStats).
 type viewInstr struct {
 	*prInstr
-	failPool func(n int) bool
-	poolErr  error
-	failOpen func(n int) bool
-	openErr  error
-	loaded   int
+	failPool   func(n int) bool
+	poolErr    error
+	failOpen   func(n int) bool
+	openErr    error
+	refuseTest string
+	loaded     int
 
 	mu     sync.Mutex
 	pools  int
@@ -94,6 +97,10 @@ func (v *viewInstr) UpdateMockParams(ctx context.Context, params models.MockFilt
 		what = "stage"
 	case ex.Test != "":
 		what = "test:" + ex.Test
+		if ex.Test == v.refuseTest {
+			v.note(what + "-failed")
+			return errors.New("serve " + ex.Test + " its own mocks: mock-x is not in the agent's store")
+		}
 	default:
 		what = "pool"
 		v.mu.Lock()
