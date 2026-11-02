@@ -269,4 +269,14 @@ func TestATestsRecordedBeginGivenWithItsRequestBoundsItsWindowInTheRecording(t *
 			t.Errorf("%s: the recording's span carries the test's begin %v; want %v", c.what, got, c.want)
 		}
 	}
+	// A client test's window in the recording starts at its test's recorded
+	// begin where that came after the previous recorded call: one given once
+	// the test ended is dropped there too, so a call made after the test
+	// reads the recording's span from the previous recorded call.
+	ct := r.tracker(true)
+	ct.End()
+	ct.RecordedTestBegin(prevRec.Add(time.Microsecond))
+	if w := ct.CallWindowFrom(prevRec, paired, r.upTo); w == nil || !w.Rec.From.Equal(prevRec) || !w.Rec.Began.IsZero() {
+		t.Errorf("a client test's call once its test ended, a recorded begin given then: window %+v; want the recording's span from the previous recorded call, with no begin", w)
+	}
 }
