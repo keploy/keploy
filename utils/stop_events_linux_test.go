@@ -726,7 +726,7 @@ func (c *ExitClock) stretch() time.Duration {
 // Its way out goes into the kernel in turns, each wait a sixth of the stall
 // bound and ending as one on storage that serves it does, its storage
 // serving throughout. It waits there until it and keploy could run for
-// seven tenths of the kernel's hung-task time (ten times the bound) since
+// seven tenths of the kernel's hung-task time (five times the bound) since
 // the stop's first look, makes progress once (it closes a file), waits
 // there for as long again, and is let go: it exits, and the stop says no
 // kill, as its waits since its progress never outlasted the hung-task time.
@@ -736,8 +736,8 @@ func (c *ExitClock) stretch() time.Duration {
 // a clock of the test's, looking on its own, counted the same time in other
 // looks, and on a loaded host fell far behind the stop's.
 func TestAStopCreditsAnAppsWaitsInTheKernelAgainOnceItMakesProgress(t *testing.T) {
-	const bound = 300 * time.Millisecond
-	const hung = 10 * bound
+	const bound = 150 * time.Millisecond
+	const hung = 5 * bound
 	shortStall(t, bound)
 	storageFor(t, storageServing, hung)
 	dir := starvetest.MemDir(t)
