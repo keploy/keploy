@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/replayer"
 )
 
 // The exact view's verify mode is on in every row: each read the real
@@ -14,8 +15,13 @@ import (
 // it, and any difference panics. A row that counts the keys or reads a call
 // costs turns it off (withoutViewVerify), since the recomputation is the cost
 // it counts.
+//
+// So is the check of the recorded bodies the strict gate makes decoded
+// (replayer.CheckDecodedBodies): each recording every row compares is checked,
+// once per reading, against json.Unmarshal of its encoded body.
 func TestMain(m *testing.M) {
 	integrations.ExactViewVerify.Store(true)
+	replayer.CheckDecodedBodies()
 	os.Exit(m.Run())
 }
 

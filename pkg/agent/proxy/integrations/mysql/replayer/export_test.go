@@ -2,7 +2,9 @@ package replayer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -268,4 +270,50 @@ func ReplayCommandsForTest(t *testing.T, db integrations.MockMemDb, commands ...
 		}
 	}
 	return replies, done
+}
+
+// CheckDecodedBodies turns on, for the rest of the package's run, the check
+// of every recorded request body the strict gate makes decoded
+// (mysqlRequestJSONBody): it must be what json.Unmarshal makes of
+// mysqlRequestBody's bytes, or the check panics. A message is checked once
+// per reading (its statement parameter count and statement), as its body is
+// the same for each.
+func CheckDecodedBodies() {
+	decodedBodyCheck = checkDecodedBody
+}
+
+// DecodedBodiesChecked is how many decoded bodies the check compared.
+func DecodedBodiesChecked() int64 {
+	return decodedBodiesChecked.Load()
+}
+
+type decodedBodyReading struct {
+	message         any
+	statementParams int
+	query           string
+}
+
+var (
+	decodedBodiesSeen    sync.Map
+	decodedBodiesChecked atomic.Int64
+)
+
+func checkDecodedBody(message any, statementParams int, query string, doc map[string]any, decoded any) {
+	if message != nil && reflect.TypeOf(message).Comparable() {
+		if _, seen := decodedBodiesSeen.LoadOrStore(decodedBodyReading{message, statementParams, query}, struct{}{}); seen {
+			return
+		}
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		panic(fmt.Sprintf("a body made decoded does not encode: %v (decoded %#v)", err, decoded))
+	}
+	var want any
+	if err := json.Unmarshal(raw, &want); err != nil {
+		panic(fmt.Sprintf("a body made decoded encodes to %s, which does not decode: %v", raw, err))
+	}
+	if !reflect.DeepEqual(want, decoded) {
+		panic(fmt.Sprintf("a body made decoded is not what its bytes decode to:\nbytes   %s\ndecoded %#v\nwant    %#v", raw, decoded, want))
+	}
+	decodedBodiesChecked.Add(1)
 }

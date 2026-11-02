@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -359,10 +360,32 @@ func (g *strictGate) recordedQuery(mock *models.Mock, q string) {
 // recordedBody is mock's recorded request body as compared with the live one
 // (recordedStatementParams).
 func (g *strictGate) recordedBody(mock *models.Mock) ([]byte, bool) {
-	if mock == nil || len(mock.Spec.MySQLRequests) != 1 {
+	bundle, statementParams, query, ok := g.recordedReading(mock)
+	if !ok {
 		return nil, false
 	}
-	bundle := &mock.Spec.MySQLRequests[0].PacketBundle
+	return mysqlRequestBody(bundle, statementParams, query)
+}
+
+// recordedJSONBody is recordedBody as compare gives it to the engine
+// (mysqlRequestJSONBody): decoded as it is built, not encoded to be decoded
+// again, when its values allow it.
+func (g *strictGate) recordedJSONBody(mock *models.Mock) (*mocknoise.JSONBody, bool) {
+	bundle, statementParams, query, ok := g.recordedReading(mock)
+	if !ok {
+		return mocknoise.NewJSONBody(nil), false
+	}
+	return mysqlRequestJSONBody(bundle, statementParams, query)
+}
+
+// recordedReading is how recordedBody reads mock's recorded request: its
+// bundle, and the statement parameter count and statement mysqlRequestBody
+// reads it with. ok is false for a mock that is not one request.
+func (g *strictGate) recordedReading(mock *models.Mock) (bundle *mysql.PacketBundle, statementParams int, query string, ok bool) {
+	if mock == nil || len(mock.Spec.MySQLRequests) != 1 {
+		return nil, 0, "", false
+	}
+	bundle = &mock.Spec.MySQLRequests[0].PacketBundle
 	q := bundle.StoredQuery()
 	if q == "" {
 		q = g.queries[mock]
@@ -375,9 +398,9 @@ func (g *strictGate) recordedBody(mock *models.Mock) ([]byte, bool) {
 	// attributes, holds the ones it reads by name, as the live body does
 	// (executeBodyParameters): split by the live statement's count.
 	if e := sqlStatementIdentity(q); live != nil && g.liveParams >= 0 && readsQueryAttributes(g.liveQuery) && e != "" && strings.EqualFold(e, sqlStatementIdentity(g.liveQuery)) {
-		return mysqlRequestBody(bundle, g.liveParams, g.liveQuery)
+		return bundle, g.liveParams, g.liveQuery, true
 	}
-	return mysqlRequestBody(bundle, recordedStatementParams(bundle, live, q, g.liveQuery, g.liveParams), "")
+	return bundle, recordedStatementParams(bundle, live, q, g.liveQuery, g.liveParams), "", true
 }
 
 // allows reports whether the candidate mock survives strict enforcement,
@@ -474,8 +497,8 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 	}
 	body := g.bodyDocFor(mock)
 	if !seen {
-		recorded, recordedOK := g.recordedBody(mock)
-		v.allowed, v.drift = engine.StrictRejectRecordedBody(mock, recorded, recordedOK, body, noise)
+		recorded, recordedOK := g.recordedJSONBody(mock)
+		v.allowed, v.drift = engine.StrictRejectRecordedJSONBody(mock, recorded, recordedOK, body, noise)
 		if g.compared != nil {
 			*g.compared++
 		}
@@ -732,6 +755,136 @@ func mysqlRequestBodyJSON(bundle *mysql.PacketBundle) ([]byte, bool) {
 // the statement's own parameters, by position, and the attributes it
 // reads, by name (body.attributes, executeBodyParameters).
 func mysqlRequestBody(bundle *mysql.PacketBundle, statementParams int, query string) ([]byte, bool) {
+	doc, ok := mysqlRequestDoc(bundle, statementParams, query)
+	if !ok {
+		return nil, false
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+// mysqlRequestJSONBody is mysqlRequestBody as a mocknoise.JSONBody. When
+// every value in the body decodes as it is (decodedRequestValue), the body
+// is made decoded, as json.Unmarshal would decode mysqlRequestBody's bytes,
+// and those bytes are made only if the engine reads them: a recording a
+// replay compares with many commands is then not encoded and decoded again
+// for each. Any other body is mysqlRequestBody's bytes, decoded by the
+// engine as before.
+func mysqlRequestJSONBody(bundle *mysql.PacketBundle, statementParams int, query string) (*mocknoise.JSONBody, bool) {
+	doc, ok := mysqlRequestDoc(bundle, statementParams, query)
+	if !ok {
+		return mocknoise.NewJSONBody(nil), false
+	}
+	if value, plain := decodedRequestValue(doc); plain {
+		if check := decodedBodyCheck; check != nil {
+			check(bundle.Message, statementParams, query, doc, value)
+		}
+		return mocknoise.NewDecodedJSONBody(value, func() []byte {
+			out, _ := json.Marshal(doc)
+			return out
+		}), true
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return mocknoise.NewJSONBody(nil), false
+	}
+	return mocknoise.NewJSONBody(out), true
+}
+
+// decodedBodyCheck, when set (by the package's tests), is given each body
+// mysqlRequestJSONBody makes decoded, with the request's message and
+// reading it was made from, so a test can check it is what json.Unmarshal
+// makes of mysqlRequestBody's bytes. Nil on the replay path.
+var decodedBodyCheck func(message any, statementParams int, query string, doc map[string]any, decoded any)
+
+// decodedRequestValue is v, a value of a mysqlRequestDoc, as json.Unmarshal
+// decodes json.Marshal's encoding of it into an interface{}, made without
+// either: plain is false for a value whose encoding is not that plain (a
+// string or name that is not UTF-8, which json.Marshal rewrites; a float32,
+// encoded at its own precision; a NaN or infinity, which json.Marshal
+// refuses; []byte, time.Time and json.RawMessage, encoded as other values;
+// any other type). The caller then encodes and decodes it.
+func decodedRequestValue(v any) (decoded any, plain bool) {
+	switch x := v.(type) {
+	case nil, bool:
+		return x, true
+	case string:
+		return x, utf8.ValidString(x)
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			d, ok := decodedRequestValue(e)
+			if !ok || !utf8.ValidString(k) {
+				return nil, false
+			}
+			out[k] = d
+		}
+		return out, true
+	case map[string]string:
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			if !utf8.ValidString(k) || !utf8.ValidString(e) {
+				return nil, false
+			}
+			out[k] = e
+		}
+		return out, true
+	case map[string]mysql.Parameter:
+		out := make(map[string]any, len(x))
+		for k, p := range x {
+			d, ok := decodedParameter(p)
+			if !ok || !utf8.ValidString(k) {
+				return nil, false
+			}
+			out[k] = d
+		}
+		return out, true
+	case float64:
+		return x, !math.IsNaN(x) && !math.IsInf(x, 0)
+	case int:
+		return float64(x), true
+	case int8:
+		return float64(x), true
+	case int16:
+		return float64(x), true
+	case int32:
+		return float64(x), true
+	case int64:
+		return float64(x), true
+	case uint:
+		return float64(x), true
+	case uint8:
+		return float64(x), true
+	case uint16:
+		return float64(x), true
+	case uint32:
+		return float64(x), true
+	case uint64:
+		return float64(x), true
+	}
+	return nil, false
+}
+
+// decodedParameter is a parameter as decodedRequestValue decodes it: the
+// object mysql.Parameter's MarshalJSON writes (its name only when it has
+// one).
+func decodedParameter(p mysql.Parameter) (any, bool) {
+	value, ok := decodedRequestValue(p.Value)
+	if !ok || !utf8.ValidString(p.Name) {
+		return nil, false
+	}
+	out := map[string]any{"type": float64(p.Type), "unsigned": p.Unsigned, "value": value}
+	if p.Name != "" {
+		out["name"] = p.Name
+	}
+	return out, true
+}
+
+// mysqlRequestDoc is the document mysqlRequestBody encodes.
+func mysqlRequestDoc(bundle *mysql.PacketBundle, statementParams int, query string) (map[string]any, bool) {
 	if bundle == nil || bundle.Header == nil {
 		return nil, false
 	}
@@ -780,11 +933,7 @@ func mysqlRequestBody(bundle *mysql.PacketBundle, statementParams int, query str
 	default:
 		return nil, false
 	}
-	out, err := json.Marshal(doc)
-	if err != nil {
-		return nil, false
-	}
-	return out, true
+	return doc, true
 }
 
 // readsQueryAttributes reports whether a COM_QUERY's statement reads its query

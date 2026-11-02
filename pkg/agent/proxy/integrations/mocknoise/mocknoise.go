@@ -238,10 +238,19 @@ func (e *Engine) StrictRejectRecorded(m *models.Mock, recorded []byte, ok bool, 
 // JSONBody: compared with many recordings, it is validated and decoded once
 // when the adapter compares JSON bodies as they are (JSONBodyDiffer).
 func (e *Engine) StrictRejectRecordedBody(m *models.Mock, recorded []byte, ok bool, live *JSONBody, userNoise map[string][]string) (allowed bool, drift map[string][]string) {
+	return e.StrictRejectRecordedJSONBody(m, NewJSONBody(recorded), ok, live, userNoise)
+}
+
+// StrictRejectRecordedJSONBody is StrictRejectRecordedBody with the recorded
+// body as a JSONBody too: a parser that has a recording's body already
+// decoded (NewDecodedJSONBody) gives it as it is, so the engine neither
+// validates nor decodes it, and reads its bytes only where it compares
+// bytes (an adapter that is not a JSONBodyDiffer, or bodies that are not
+// both JSON).
+func (e *Engine) StrictRejectRecordedJSONBody(m *models.Mock, recorded *JSONBody, ok bool, live *JSONBody, userNoise map[string][]string) (allowed bool, drift map[string][]string) {
 	if e == nil {
 		return true, nil
 	}
-	liveBody := live.Raw()
 	stored := e.adapter.StoredNoise(m)
 	// Under strict enforcement every candidate is value-compared against its
 	// recorded body, even one with no learned req_body_noise — so a changed value
@@ -284,14 +293,14 @@ func (e *Engine) StrictRejectRecordedBody(m *models.Mock, recorded []byte, ok bo
 	var d map[string][]string
 	var comparable bool
 	if jd, isJSON := e.adapter.(JSONBodyDiffer); isJSON {
-		d, comparable = jd.DiffJSONBodies(m, NewJSONBody(recorded), live, e.KnownNoise(m, userNoise), typeStrict, false, e.adapter.RecordedValueIsNoise(m))
+		d, comparable = jd.DiffJSONBodies(m, recorded, live, e.KnownNoise(m, userNoise), typeStrict, false, e.adapter.RecordedValueIsNoise(m))
 	} else {
-		d, comparable = e.adapter.Diff(m, recorded, liveBody, e.KnownNoise(m, userNoise), typeStrict, false, e.adapter.RecordedValueIsNoise(m))
+		d, comparable = e.adapter.Diff(m, recorded.Raw(), live.Raw(), e.KnownNoise(m, userNoise), typeStrict, false, e.adapter.RecordedValueIsNoise(m))
 	}
 	if !comparable {
 		// No field structure to diff — fall back to byte equality so unequal
 		// opaque bodies are a real mismatch rather than a silent pass.
-		if string(recorded) == string(liveBody) {
+		if string(recorded.Raw()) == string(live.Raw()) {
 			return true, nil
 		}
 		return false, map[string][]string{"body": nil}
@@ -324,6 +333,10 @@ func DetectJSONDrift(recordedBody, liveBody []byte, known map[string][]string, t
 // concurrent use.
 type JSONBody struct {
 	raw []byte
+	// rawFrom, when set, makes raw on its first read (Raw): a body made
+	// decoded (NewDecodedJSONBody) has its bytes made only when compared
+	// as bytes.
+	rawFrom func() []byte
 	// checked, valid: json.Valid's answer, once asked. read, decoded,
 	// value: json.Unmarshal's, once asked (decoded false: a body that is
 	// JSON but does not decode, a number past float64's range).
@@ -339,8 +352,21 @@ func NewJSONBody(raw []byte) *JSONBody {
 	return &JSONBody{raw: raw}
 }
 
+// NewDecodedJSONBody is a JSON body given as the value json.Unmarshal
+// decodes its bytes into (an interface{}: map[string]any, []any, float64,
+// string, bool, nil) and a function that makes those bytes, called on the
+// first read of them (Raw), if any. The caller vouches that value is what
+// json.Unmarshal makes of raw's bytes, which are JSON: the body is neither
+// validated nor decoded (Reads stays 0).
+func NewDecodedJSONBody(value any, raw func() []byte) *JSONBody {
+	return &JSONBody{rawFrom: raw, checked: true, valid: true, read: true, decoded: true, value: value}
+}
+
 // Raw is the body's bytes.
 func (b *JSONBody) Raw() []byte {
+	if b.rawFrom != nil {
+		b.raw, b.rawFrom = b.rawFrom(), nil
+	}
 	return b.raw
 }
 

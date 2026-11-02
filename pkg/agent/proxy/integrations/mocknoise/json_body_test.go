@@ -225,3 +225,58 @@ func TestStrictEnforcementLeavesOutARecordedValueThatIsNoise(t *testing.T) {
 		}
 	})
 }
+
+// TestARecordedBodyGivenDecodedGetsTheVerdictsItsBytesGet: under strict
+// enforcement, through both of the engine's branches, a recorded body given
+// as its decoded value (NewDecodedJSONBody, StrictRejectRecordedJSONBody)
+// gets the verdict and drift its bytes get (StrictRejectRecordedBody), with
+// learned noise stored, user noise and a recorded value that is noise, over
+// every recorded body of jsonBodyCases that decodes, against a live body that
+// is JSON and one that is not. Its bytes are made once at most, and only
+// where they are compared as bytes: by an adapter's own Diff, or against a
+// live body that is not JSON. It is never validated or decoded.
+func TestARecordedBodyGivenDecodedGetsTheVerdictsItsBytesGet(t *testing.T) {
+	forEachStrictBranch(t, func(t *testing.T, newEngine func(a Adapter, detection, strict bool) *Engine) {
+		noise := func(*models.Mock) func(string) bool {
+			return func(v string) bool { return v == "b" }
+		}
+		e := newEngine(&fakeAdapter{stored: map[string][]string{"body.id": {}}, isNoiseFn: noise}, false, true)
+		_, viaDiff := e.adapter.(JSONBodyDiffer)
+		viaDiff = !viaDiff
+		user := map[string][]string{"tags": {}}
+		verdicts := map[bool]int{}
+		for _, liveRaw := range [][]byte{jsonBodyCases[0], []byte(`not json`)} {
+			for i, rec := range jsonBodyCases {
+				var value any
+				if !json.Valid(rec) || json.Unmarshal(rec, &value) != nil {
+					continue
+				}
+				made := 0
+				decoded := NewDecodedJSONBody(value, func() []byte { made++; return rec })
+				gotAllowed, gotDrift := e.StrictRejectRecordedJSONBody(&models.Mock{}, decoded, true, NewJSONBody(liveRaw), user)
+				wantAllowed, wantDrift := e.StrictRejectRecordedBody(&models.Mock{}, rec, true, NewJSONBody(liveRaw), user)
+				if gotAllowed != wantAllowed || !reflect.DeepEqual(gotDrift, wantDrift) {
+					t.Errorf("recorded %d (%s) against %s: given decoded %v, %v; as bytes %v, %v", i, rec, liveRaw, gotAllowed, gotDrift, wantAllowed, wantDrift)
+				}
+				verdicts[wantAllowed]++
+				wantMade := 0
+				if viaDiff || !json.Valid(liveRaw) {
+					wantMade = 1
+				}
+				if made != wantMade || decoded.Reads() != 0 {
+					t.Errorf("recorded %d against %s: its bytes made %d times (want %d), the body read %d times (want 0)", i, liveRaw, made, wantMade, decoded.Reads())
+				}
+				first, again := decoded.Raw(), decoded.Raw()
+				if string(first) != string(rec) || string(again) != string(rec) || made != 1 {
+					t.Errorf("recorded %d: Raw gives %s, then %s, its bytes made %d times; want %s, made once", i, first, again, made, rec)
+				}
+			}
+		}
+		if verdicts[true] == 0 || verdicts[false] == 0 {
+			t.Errorf("%d allowed and %d rejected; want both verdicts", verdicts[true], verdicts[false])
+		}
+		if allowed, drift := e.StrictRejectRecordedJSONBody(&models.Mock{}, NewJSONBody(nil), false, NewJSONBody(jsonBodyCases[0]), user); !allowed || drift != nil {
+			t.Errorf("a recording with no body: allowed %v, drift %v; want allowed", allowed, drift)
+		}
+	})
+}
