@@ -3,11 +3,18 @@
 package routes
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 func TestProcAddrPortReadsBothFamilies(t *testing.T) {
@@ -74,5 +81,23 @@ func TestTCPOwnerMatchesBothEnds(t *testing.T) {
 	}
 	if _, err := tcpOwner(netip.MustParseAddrPort("127.0.0.1:50003"), netip.MustParseAddrPort("127.0.0.1:16877")); err == nil || !strings.Contains(err.Error(), "held by processes") {
 		t.Fatalf("a socket two processes hold names no one caller: %v", err)
+	}
+}
+
+// A begin's caller, read while it is served (in a run of more than one test
+// worker), is the process that sent it: this test binary run again.
+func TestABeginsCallerIsReadFromItsConnection(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	svc := &wireSvc{readBegin: true, beginResp: models.ScopeBeginResp{V: 1, Status: "ok"}}
+	a := &Agent{logger: zap.NewNop(), svc: svc}
+	srv := httptest.NewServer(http.HandlerFunc(a.HandleScopeBegin))
+	defer srv.Close()
+	c := exec.Command(os.Args[0], "-test.run=^$")
+	c.Env = append(os.Environ(), envClaimFrom+"="+srv.URL, envBegin+"=1")
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("the beginning child failed: %v: %s", err, out)
+	}
+	if len(svc.begun) != 1 || svc.beginPID != c.Process.Pid {
+		t.Fatalf("begins %+v read as process %d, want one from the child %d", svc.begun, svc.beginPID, c.Process.Pid)
 	}
 }

@@ -85,6 +85,12 @@ type provenWire struct {
 	ownedLeft []coreAgent.OwnedLoss
 	// claim is the live claim; zero when none.
 	claim claimant
+	// workers is, in a run whose claims declared more than one test worker,
+	// each live worker's claim by its keploy instance (workers_proven.go);
+	// claim is then zero. openWorker is the instance whose test is open: 0
+	// when none is, or in a run of one worker.
+	workers    map[uint32]workerClaim
+	openWorker uint32
 	// claims is every claim of the session, in order: from each one's time
 	// on, until the next, a call made while no test is open belongs to the
 	// pool slice of its key (design v14 §5.2). Record reads them with the
@@ -315,8 +321,11 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	}
 	left = boundOwnedLeft(left)
 	a.provenMu.Lock()
+	workers := a.workerIDs()
 	a.proven = provenWire{losses: losses, ownedLeft: left}
 	a.provenMu.Unlock()
+	// The previous session's workers are no workers of this one.
+	a.endInstances(workers)
 	if provenswitch.On() {
 		// The listener's drops are counted from here too (openDrops).
 		a.openDrops()
@@ -386,8 +395,23 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 			fmt.Sprintf("process %d is not part of this keploy run, so keploy cannot capture or mock its calls", caller),
 			`run the test command through keploy, to record: keploy mock record -c "<command>"; to replay: keploy mock replay -c "<command>"`)
 	}
+	declared, serr := declaredWorkers(req.Workers, caller)
+	if serr != nil {
+		return models.InstanceResp{}, serr
+	}
+	a.endGoneWorkers(ctx)
 	me := claimant{pid: caller, start: start}
+	if declared > 1 {
+		return a.claimWorker(ctx, req, me, declared)
+	}
 	a.provenMu.Lock()
+	if ids := a.workerIDs(); len(ids) > 0 {
+		w := a.proven.workers[ids[0]]
+		a.provenMu.Unlock()
+		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrWorkersMismatch,
+			fmt.Sprintf("process %d declared one test worker while test worker %d (process %d), which declared %d, still runs this keploy run's tests", caller, ids[0], w.pid, w.declared),
+			"declare the same worker count from every test process the run starts at once")
+	}
 	prev, open := a.proven.claim, a.proven.open
 	switch {
 	case prev == me && open != "":
@@ -855,23 +879,38 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	if serr := oldWireFields(req); serr != nil {
 		return models.ScopeBeginResp{}, serr
 	}
+	worker, serr := a.callerWorker(ctx, "begin", req.Name)
+	if serr != nil {
+		return models.ScopeBeginResp{}, serr
+	}
 	at := time.Now()
 	a.provenMu.Lock()
 	if a.proven.closed {
 		a.provenMu.Unlock()
 		return models.ScopeBeginResp{}, errClosed()
 	}
-	// A claim whose process exited is no claim: its key would name another
-	// process's tests.
-	if c := a.proven.claim; c.pid == 0 || !procAlive(c.pid, c.start) {
+	key, dir := a.proven.key, a.proven.dir
+	if w, ok := a.proven.workers[worker]; ok {
+		key, dir = w.key, w.dir
+	} else if c := a.proven.claim; c.pid == 0 || !procAlive(c.pid, c.start) {
+		// A claim whose process exited is no claim: its key would name
+		// another process's tests.
 		a.provenMu.Unlock()
 		return models.ScopeBeginResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
 			req.Name+" began before its test process claimed this keploy run, so keploy cannot tell that its calls are captured or mocked",
 			"have the test process claim the run before its first test: go-sdk keploytest and @keploy/playwright do; a framework with neither claims it by hand (POST /agent/instance with its package folder, relative to the project, as key)")
 	}
-	id := models.TestID(req.Project, req.File, a.proven.key, req.Name)
+	id := models.TestID(req.Project, req.File, key, req.Name)
 	if open := a.proven.open; open != "" {
+		other := a.proven.openWorker
 		a.provenMu.Unlock()
+		if other != worker {
+			// Until each worker's tests keep their own windows, a run's
+			// workers run one test at a time between them.
+			return models.ScopeBeginResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrOneTestAtATime,
+				fmt.Sprintf("%s began in test worker %d while test worker %d's test %s was still open: this keploy runs one test at a time across a run's workers", id, worker, other, open),
+				"run one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
+		}
 		return models.ScopeBeginResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrOneTestAtATime,
 			fmt.Sprintf("%s began while %s was still open: two tests ran at once in one test process", id, open),
 			"run them one at a time: in Go, start parallel tests with keploytest.Parallel and subtests with keploytest.Run, which take turns; elsewhere, end each test before the next one begins; parallel test workers arrive in a later keploy release")
@@ -885,8 +924,12 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			reason, gated, outcome = n.Reason, true, models.ScopeOutcomeUnmet
 		}
 	}
-	dir := a.proven.dir
+	// The process whose hooks must carry the test is the one that claimed
+	// it: its worker's, or the run's.
 	claimer := a.proven.claim.pid
+	if w, ok := a.proven.workers[worker]; ok {
+		claimer = w.pid
+	}
 	a.provenMu.Unlock()
 	if a.replaying() && gated {
 		a.noteScopeNotRun(id, 0, at, outcome)
@@ -999,7 +1042,7 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		t.BeginTest()
 	}
 	a.provenMu.Lock()
-	a.proven.open = id
+	a.proven.open, a.proven.openWorker = id, worker
 	if a.proven.began == nil {
 		a.proven.began = map[string]bool{}
 	}
@@ -1109,10 +1152,22 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 	if req.Name == "" {
 		return models.ScopeEndResp{}, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest, "an end names its test", "send the name its begin sent")
 	}
+	worker, serr := a.callerWorker(ctx, "end", req.Name)
+	if serr != nil {
+		return models.ScopeEndResp{}, serr
+	}
 	at := time.Now()
 	a.provenMu.Lock()
-	id := models.TestID(req.Project, req.File, a.proven.key, req.Name)
+	key := a.proven.key
+	if w, ok := a.proven.workers[worker]; ok {
+		key = w.key
+	}
+	id := models.TestID(req.Project, req.File, key, req.Name)
 	open := a.proven.open
+	if a.proven.openWorker != worker {
+		// Another worker's open test is no test of this worker's to end.
+		open = ""
+	}
 	a.provenMu.Unlock()
 	if serr := oldWireFields(req); serr != nil {
 		// The test it names is failed and closed with keploy's reason:
@@ -1179,7 +1234,7 @@ func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time,
 		a.provenMu.Lock()
 		closed := a.proven.open == id
 		if closed {
-			a.proven.open = ""
+			a.proven.open, a.proven.openWorker = "", 0
 		}
 		a.provenMu.Unlock()
 		if closed {
@@ -1775,12 +1830,18 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 	// would never be read.
 	a.proven.closed = true
 	id, c := a.proven.open, a.proven.claim
-	if id == "" {
-		a.provenMu.Unlock()
-		return nil
+	if w, ok := a.proven.workers[a.proven.openWorker]; ok {
+		c = w.claimant
 	}
+	// Nothing more is claimed: the workers' processes are no worker's.
+	workers := a.workerIDs()
+	a.proven.workers = nil
 	a.proven.claim = claimant{}
 	a.provenMu.Unlock()
+	a.endInstances(workers)
+	if id == "" {
+		return nil
+	}
 	why := "the test process exited while the test was open"
 	if procAlive(c.pid, c.start) {
 		why = fmt.Sprintf("the test was still open when keploy read the run's results: its process %d outlived the test command", c.pid)

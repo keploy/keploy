@@ -33,10 +33,18 @@ type InstanceReq struct {
 	// run (a Go package's directory). Kept on each test's window, so the
 	// recording's mapping names the folder each test runs in.
 	Dir string `json:"dir,omitempty"`
+	// Workers is how many test workers of the run its framework runs at
+	// once (Playwright's workers, go test's -p), each claiming for itself.
+	// 0, sent by an integration that predates it, is one. The agent refuses
+	// more than it runs at once (ScopeErrTooManyWorkers), and a count other
+	// than a live worker's (ScopeErrWorkersMismatch), so whether a run is
+	// taken never depends on how its workers happen to overlap.
+	Workers int `json:"workers,omitempty"`
 }
 
 // InstanceResp answers POST /agent/instance. With one test process per run
-// the instance is the run itself. TimeFile is the clock file the test process
+// the instance is the run itself (InstanceRun); a worker of a run of more
+// gets its keploy instance's number. TimeFile is the clock file the test process
 // runs on, empty when the run is not frozen.
 type InstanceResp struct {
 	V        int    `json:"v"`
@@ -116,6 +124,16 @@ const (
 	// ScopeErrOneTestProcess: a test process claimed the run while another
 	// live one held it; the first release runs one at a time.
 	ScopeErrOneTestProcess = "one_test_process_at_a_time"
+	// ScopeErrTooManyWorkers: a claim declared more test workers
+	// (InstanceReq.Workers) than this keploy runs at once.
+	ScopeErrTooManyWorkers = "too_many_workers"
+	// ScopeErrWorkersMismatch: a claim declared another worker count than
+	// a live worker of the run did.
+	ScopeErrWorkersMismatch = "workers_mismatch"
+	// ScopeErrNotInInstance: a begin or end of a run of more than one worker
+	// came from a process that is no live worker's claimant, or keploy
+	// could not put a worker's processes in an instance of their own.
+	ScopeErrNotInInstance = "not_in_instance"
 	// ScopeErrNotOpen: an end for a test that is not open, or a given
 	// while no test is open.
 	ScopeErrNotOpen = "not_open"
