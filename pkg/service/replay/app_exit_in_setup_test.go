@@ -9,17 +9,21 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // setupExitInstr is a compose stack whose app exits while keploy sets a set
 // up, before the set's first test: tell is the exit, told at the setup's
-// step named at (setupExitSteps), and known is closed once the app's runner
-// has told it. The agent's call at that step, the stack going down with the
-// app, fails: one under the set's context ends with the set's end, one under
-// the run's (the set's mock filter) fails as a gone agent does, once the exit
-// is told.
+// step named at (setupExitSteps, moreSetupExitSteps), and known is closed
+// once keploy keeps it (the app's runner told it, or its returned exit was
+// read: returnsExit). The agent's call at that step, the stack going down
+// with the app, fails: one under the set's context ends with the set's end,
+// one under the run's (the set's mock filter) fails as a gone agent does,
+// once the exit is known.
 type setupExitInstr struct {
 	*composeInstr
 	at    string
@@ -27,14 +31,26 @@ type setupExitInstr struct {
 	known chan struct{}
 	tell  func()
 	// returns: the app's run returns its exit (compose's up returning, as
-	// at main) rather than telling it at its die.
+	// at main) rather than telling it at its die (returnsExit).
 	returns bool
+	// gone: the agent went down with the app at "mock stats", and every
+	// later call to it is refused.
+	gone bool
 }
+
+// errAgentGone is a call to the agent of a stack that went down with its app.
+var errAgentGone = errors.New("dial tcp 172.18.0.2:16789: connect: connection refused")
 
 // setupExitSteps are the setup's steps an exit lands in: the wait for the
 // agent of a stack the set brings up (its /health), the set's outgoing
 // options, and its mock filter.
 var setupExitSteps = []string{"agent health", "MockOutgoing", "UpdateMockParams"}
+
+// moreSetupExitSteps are the setup's steps of a set's first run an exit
+// lands in with no agent call of its staging in flight: the read of the
+// set's mocks from its store, the wait for its app's readiness (its health
+// URL), and the check that the agent holds the set's mocks (its mock stats).
+var moreSetupExitSteps = []string{"load mocks", "app ready", "mock stats"}
 
 // Run is the app of a stack a set brings up, which tells its exit at its
 // container's die (models.WithAppExit) and returns only at the set's end, or
@@ -43,7 +59,6 @@ func (s *setupExitInstr) Run(ctx context.Context, _ models.RunOptions) models.Ap
 	select {
 	case e := <-s.died:
 		if s.returns {
-			defer close(s.known)
 			return e
 		}
 		models.AppExitOf(ctx)(e)
@@ -71,7 +86,60 @@ func (s *setupExitInstr) WatchAgentStart(context.Context) <-chan error {
 	return failed
 }
 
+// returnsExit makes the app's run return its exit (returns), which keploy
+// keeps only once the run's return is read: known is then the reader of r's
+// app errors logging the exit (applicationFailedToRunLogMessage), which it
+// reads only once it is kept, so a call failing after known fails with the
+// exit known, as one to a stack compose's up had returned on does.
+func (s *setupExitInstr) returnsExit(r *Replayer) {
+	s.returns = true
+	known := make(chan struct{})
+	var once sync.Once
+	r.logger = zap.New(exitLoggedCore{r.logger.Core(), func() { once.Do(func() { close(known) }) }})
+	s.known = known
+}
+
+// exitLoggedCore calls logged at the log of an app's exit by the reader of
+// a set's app errors.
+type exitLoggedCore struct {
+	zapcore.Core
+	logged func()
+}
+
+func (c exitLoggedCore) Enabled(l zapcore.Level) bool {
+	return l >= zapcore.ErrorLevel || c.Core.Enabled(l)
+}
+
+func (c exitLoggedCore) With(f []zapcore.Field) zapcore.Core {
+	return exitLoggedCore{c.Core.With(f), c.logged}
+}
+
+func (c exitLoggedCore) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	if e.Message == applicationFailedToRunLogMessage {
+		c.logged()
+	}
+	return c.Core.Check(e, ce)
+}
+
+// GetMockStats, at "mock stats", is the agent's answer of the mocks it holds
+// once its stack went down with the app: the app's exit is told, and the
+// call is refused, as every later one is.
+func (s *setupExitInstr) GetMockStats(ctx context.Context) (models.MockStats, error) {
+	if s.at == "mock stats" {
+		s.at, s.gone = "", true
+		s.tell()
+		<-s.known
+	}
+	if s.gone {
+		return models.MockStats{}, errAgentGone
+	}
+	return s.composeInstr.GetMockStats(ctx)
+}
+
 func (s *setupExitInstr) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
+	if s.gone {
+		return errAgentGone
+	}
 	if s.at != "MockOutgoing" {
 		return s.composeInstr.MockOutgoing(ctx, opts)
 	}
@@ -88,7 +156,24 @@ func (s *setupExitInstr) UpdateMockParams(ctx context.Context, params models.Moc
 	s.at = ""
 	s.tell()
 	<-s.known
-	return errors.New("dial tcp 172.18.0.2:16789: connect: connection refused")
+	return errAgentGone
+}
+
+// exitReadMockDB is a set's mock store whose first read of the set's mocks
+// tells the app's exit and, once it is known, fails.
+type exitReadMockDB struct {
+	*prMockDB
+	once sync.Once
+	s    *setupExitInstr
+}
+
+func (m *exitReadMockDB) GetFilteredMocks(ctx context.Context, set string, after, before time.Time, mapped, needed map[string]bool) ([]*models.Mock, error) {
+	m.once.Do(func() {
+		m.s.tell()
+		<-m.s.known
+		m.failReads.Store(true)
+	})
+	return m.prMockDB.GetFilteredMocks(ctx, set, after, before, mapped, needed)
 }
 
 // composeExitInSetup is a compose set of three tests whose app exits with
@@ -109,6 +194,25 @@ func composeExitInSetup(t *testing.T, on, serving bool, at string) (*prRun, *hel
 		s.known = kept.told
 		// The first set of a kept stack waits for its agent too.
 		h.replayer.isFirstTestSet = true
+	}
+	switch at {
+	case "load mocks":
+		h.replayer.mockDB = &exitReadMockDB{prMockDB: h.mocks, s: s}
+	case "app ready":
+		// The wait for the app's readiness polls its health URL, which the
+		// app, exiting, never answers; only the set's end ends the wait.
+		var once sync.Once
+		health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			once.Do(s.tell)
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}))
+		t.Cleanup(health.Close)
+		h.replayer.config.Test.HealthURL = health.URL + "/health"
+		h.replayer.config.Test.HealthPollTimeout = 10 * prTimeout
+	case "mock stats":
+		// The agent holds what keploy stored for the set only where it
+		// stored some: a set with none is not checked.
+		h.mocks.filtered = []*models.Mock{{Name: "mock-a", Kind: models.HTTP}}
 	}
 	if at == "agent health" || at == "agent start" {
 		var once sync.Once
@@ -182,10 +286,12 @@ func TestAnAppsExitInASetsSetupHaltsTheSet(t *testing.T) {
 		{"a stack per set whose run returns the exit, switch on", true, false},
 	}...)
 	for _, tc := range shapes {
-		for _, at := range setupExitSteps {
+		for _, at := range append(setupExitSteps[:len(setupExitSteps):len(setupExitSteps)], moreSetupExitSteps...) {
 			t.Run(tc.name+", at "+at, func(t *testing.T) {
 				h, app, s := composeExitInSetup(t, tc.on, tc.serving, at)
-				s.returns = strings.Contains(tc.name, "returns")
+				if strings.Contains(tc.name, "returns") {
+					s.returnsExit(h.replayer)
+				}
 				status, err := runSet(h, "test-set-0", tc.serving)
 				haltedBeforeTests(t, h, app, "test-set-0", status, err,
 					"application startup failed: it exited with code 3 - check application logs", nil)
