@@ -57,6 +57,9 @@ type SetAnswersHook interface {
 // a set with no test case to run, a set ignored whole, a set refused when it
 // loaded) notes it before writing it.
 func (r *Replayer) noteSetEnd(rep *models.TestReport) {
+	share := models.ComparedShareOf(rep)
+	rep.SetAside = share.Capped()
+	r.noteComparedShare(rep.TestSet, share)
 	r.setEnd = &models.SetEnd{Status: models.TestSetStatus(rep.Status), Why: rep.FailureReason}
 	r.setEndCalls = rep.UnclaimedCalls
 	r.setEndAnswers = rep.SetAnswers

@@ -50,10 +50,12 @@ func (r *Replayer) noteQuarantined(testSetID, testCaseID, reason string) {
 		zap.String("reason", reason))
 }
 
-// forgetQuarantined starts a run with no quarantined tests.
+// forgetQuarantined starts a run with no quarantined tests, and no set's
+// share noted (noteComparedShare).
 func (r *Replayer) forgetQuarantined() {
 	r.quarantinedMu.Lock()
 	r.quarantined = nil
+	r.comparedShares = nil
 	r.quarantinedMu.Unlock()
 }
 

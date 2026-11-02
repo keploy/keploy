@@ -570,6 +570,9 @@ type Replayer struct {
 	// a reason, keyed by test set and test, for the run's summary.
 	quarantinedMu sync.Mutex
 	quarantined   map[[2]string]string
+	// comparedShares is each set's share of its last report that set tests
+	// aside (noteComparedShare), under quarantinedMu.
+	comparedShares map[string]*models.ComparedShare
 	// pidMark is where the next test set's refused PID map inserts are
 	// counted from (pidmaps.go).
 	pidMark pidMapMark
@@ -8173,6 +8176,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 		})
 
 		totalTestTimeTakenStr := timeWithUnits(totalTestTimeTakenSnapshot)
+		share := r.runComparedShare(totalTestPassedSnapshot+totalTestFailedSnapshot+totalTestObsoleteSnapshot, totalTestsSnapshot, totalTestIgnoredSnapshot)
 
 		if !r.config.DisableANSI {
 			summaryFormat := "\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n" +
@@ -8263,6 +8267,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 				utils.LogError(r.logger, err, "failed to print separator")
 				return
 			}
+			fmt.Print(comparedShareLine(share))
 
 		} else {
 			fmt.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %d\n"+"\tTotal test passed: %d\n"+"\tTotal test failed: %d\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot)
@@ -8325,6 +8330,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 
 			fmt.Print(r.quarantinedSummary())
 			fmt.Print("\n<=========================================> \n\n")
+			fmt.Print(comparedShareLine(share))
 		}
 	}
 }

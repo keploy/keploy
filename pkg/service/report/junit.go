@@ -312,6 +312,16 @@ func buildJUnitSuiteOf(name string, rep *models.TestReport, explained bool) juni
 			})
 		}
 	}
+	// A set that set tests aside says how many of its tests it compared, and
+	// why it set the rest aside: a suite whose cases all passed compared only
+	// that share of the set. Only such a set has the property, so the suite
+	// of a set that compared all it ran stays as it was.
+	if share := models.ComparedShareOf(rep); share != nil {
+		if suite.Properties == nil {
+			suite.Properties = &junitProperties{}
+		}
+		suite.Properties.Property = append(suite.Properties.Property, junitProperty{Name: "keploy.compared", Value: share.Line()})
+	}
 	// A set run under the switch that is INTERNAL_ERR for a reason no test
 	// carries (its capture count or its mock.real destinations could not be
 	// read, a result could not be written, its run ended part-way) has no

@@ -8,24 +8,29 @@ import (
 )
 
 type TestReport struct {
-	Version       Version      `json:"version" yaml:"version"`
-	Name          string       `json:"name" yaml:"name"`
-	Status        string       `json:"status" yaml:"status"`
-	FailureReason string       `json:"failureReason,omitempty" yaml:"failure_reason,omitempty"`
-	Success       int          `json:"success" yaml:"success"`
-	Failure       int          `json:"failure" yaml:"failure"`
-	Obsolete      int          `json:"obsolete,omitempty" yaml:"obsolete,omitempty"`
-	HighRisk      int          `json:"high_risk,omitempty" yaml:"high-risk,omitempty"`
-	MediumRisk    int          `json:"medium_risk,omitempty" yaml:"medium-risk,omitempty"`
-	LowRisk       int          `json:"low_risk,omitempty" yaml:"low-risk,omitempty"`
-	Ignored       int          `json:"ignored" yaml:"ignored"`
-	Total         int          `json:"total" yaml:"total"`
-	Tests         []TestResult `json:"tests" yaml:"tests,omitempty"`
-	TestSet       string       `json:"testSet" yaml:"test_set"`
-	CreatedAt     int64        `json:"created_at" yaml:"created_at"`
-	TimeTaken     string       `json:"time_taken" yaml:"time_taken"`
-	CmdUsed       string       `json:"cmdUsed,omitempty" yaml:"cmdUsed,omitempty"`
-	AppLogs       string       `json:"appLogs,omitempty" yaml:"app_logs,omitempty"`
+	Version       Version `json:"version" yaml:"version"`
+	Name          string  `json:"name" yaml:"name"`
+	Status        string  `json:"status" yaml:"status"`
+	FailureReason string  `json:"failureReason,omitempty" yaml:"failure_reason,omitempty"`
+	Success       int     `json:"success" yaml:"success"`
+	Failure       int     `json:"failure" yaml:"failure"`
+	Obsolete      int     `json:"obsolete,omitempty" yaml:"obsolete,omitempty"`
+	HighRisk      int     `json:"high_risk,omitempty" yaml:"high-risk,omitempty"`
+	MediumRisk    int     `json:"medium_risk,omitempty" yaml:"medium-risk,omitempty"`
+	LowRisk       int     `json:"low_risk,omitempty" yaml:"low-risk,omitempty"`
+	Ignored       int     `json:"ignored" yaml:"ignored"`
+	Total         int     `json:"total" yaml:"total"`
+	// SetAside is, when the run skipped any test of the set, how many it
+	// compared and why it set the rest aside (ComparedShareOf): a PASSED set
+	// that compared 6 of its 307 tests says so here, next to its status.
+	// Absent when the run skipped none.
+	SetAside  *ComparedShare `json:"setAside,omitempty" yaml:"set_aside,omitempty"`
+	Tests     []TestResult   `json:"tests" yaml:"tests,omitempty"`
+	TestSet   string         `json:"testSet" yaml:"test_set"`
+	CreatedAt int64          `json:"created_at" yaml:"created_at"`
+	TimeTaken string         `json:"time_taken" yaml:"time_taken"`
+	CmdUsed   string         `json:"cmdUsed,omitempty" yaml:"cmdUsed,omitempty"`
+	AppLogs   string         `json:"appLogs,omitempty" yaml:"app_logs,omitempty"`
 	// CaptureVerification is what keploy's check that its agent tracked every
 	// process of this test set found, when it found something: the capture
 	// was incomplete (a process went untracked; the set is FAILED, and its

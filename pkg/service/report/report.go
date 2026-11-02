@@ -454,6 +454,13 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	}
 
 	fmt.Fprintln(r.out, "<=========================================>")
+	// A run that set tests aside ends with how many it compared: a PASSED
+	// run compared only that share of its tests.
+	// A failed write is the writer's sticky error, which the Flush below
+	// returns.
+	if share := reportsShare(reports); share != nil {
+		_, _ = fmt.Fprintf(r.out, "\n%s\n", share.Line())
+	}
 	err := r.out.Flush()
 	if err != nil {
 		return fmt.Errorf("failed while flushing in printSummary: %w", err)
@@ -561,7 +568,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 			for name, rep := range reports {
 				explained[name] = slices.ContainsFunc(rep.Tests, redCase)
 				rep.Tests = r.filterTestsByIDs(rep.Tests, r.config.Report.TestCaseIDs)
-				rep.Total = len(rep.Tests)
+				recountShown(rep)
 				reports[name] = rep
 			}
 		}
@@ -592,29 +599,16 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to collect reports for json output: %w", err)
 		}
-		if len(r.config.Report.TestCaseIDs) > 0 {
-			for name, rep := range reports {
+		for name, rep := range reports {
+			if len(r.config.Report.TestCaseIDs) > 0 {
 				rep.Tests = r.filterTestsByIDs(rep.Tests, r.config.Report.TestCaseIDs)
 				// Recompute all counters to match filtered tests
-				rep.Total = len(rep.Tests)
-				rep.Success = 0
-				rep.Failure = 0
-				rep.Ignored = 0
-				rep.Obsolete = 0
-				for _, t := range rep.Tests {
-					switch t.Status {
-					case models.TestStatusPassed:
-						rep.Success++
-					case models.TestStatusFailed:
-						rep.Failure++
-					case models.TestStatusIgnored:
-						rep.Ignored++
-					case models.TestStatusObsolete:
-						rep.Obsolete++
-					}
-				}
-				reports[name] = rep
+				recountShown(rep)
 			}
+			// Its share as it is shown: of the tests --test-case left it,
+			// and for a report written before reports carried one.
+			rep.SetAside = models.ComparedShareOf(rep).Capped()
+			reports[name] = rep
 		}
 		// Through r.out, like every other branch: writing straight to
 		// os.Stdout races the buffered writer the rest of this service uses
