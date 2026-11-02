@@ -904,11 +904,41 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		return !c.text || asText(h.p.t.rec, r) && (h.p.fUnstated || asText(h.p.t.live, l))
 	}
 
+	// 4. and 6. A copy: requests of the call's scope or the start-up, sent
+	// before the call in both runs, holding the same moment in both runs.
+	// One that holds the other run's moment too (a range that grew in F to
+	// hold the recorded moment and F's) did not move with the value: no
+	// copy's source.
+	copies := func(fine bool) []evPlace {
+		return heldWhere(hs, func(h instantHold) bool {
+			p := h.p
+			if p.side != Request || p.given || !inScope(p) || !before(p) || !h.hr || !h.hl || (h.fr && h.fl) != fine || !byText(h) {
+				return false
+			}
+			rf, _, _ := dc.holds(p, p.t.live, r, c.rm, c.byText)
+			fr, _, _ := dc.holds(p, p.t.rec, l, c.lm, c.byText)
+			return !rf && !fr
+		})
+	}
+
 	// 0. Conflict: a place before in both runs that held R's value whole
 	// at a fine cut (or by the text of a number that does not parse), or a
 	// given that held its text, where round F gave another value and this
-	// one did not follow.
-	conflict := heldWhere(hs, func(h instantHold) bool { return before(h.p) && inScope(h.p) && h.hr && !h.hl && (h.fr || h.p.gave) })
+	// one did not follow. An answer whose view in round F still holds R's
+	// value (keploy served it as recorded for the moment) gave F's
+	// application R's value, which the call did not carry: where a send of
+	// the scope shows the moment in both runs at a fine cut (a copy, 4),
+	// the call followed that send, never the answer, so the answer is no
+	// conflict. With no such send it stays one, as does an answer whose
+	// view F moved to a third value.
+	asRecorded := func(h instantHold) bool {
+		held, _, _ := dc.holds(h.p, h.p.t.live, r, c.rm, c.byText)
+		return h.p.side == Response && held
+	}
+	copied := len(copies(true)) > 0
+	conflict := heldWhere(hs, func(h instantHold) bool {
+		return before(h.p) && inScope(h.p) && h.hr && !h.hl && (h.fr || h.p.gave) && !(copied && asRecorded(h))
+	})
 	if len(conflict) > 0 {
 		p := conflict[0]
 		return dc.refuse(path, at, n, r, l, RefusalConflict,
@@ -980,23 +1010,6 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	default:
 		return dc.refuse(path, at, n, r, l, RefusalTwoSources,
 			"the same moment was sent at "+slots[0].name+" and "+slots[1].name+", two separate reads", names(slots), dc.wordNoise(path, n))
-	}
-
-	// 4. and 6. A copy: requests of the call's scope or the start-up, sent
-	// before the call in both runs, holding the same moment in both runs.
-	// One that holds the other run's moment too (a range that grew in F to
-	// hold the recorded moment and F's) did not move with the value: no
-	// copy's source.
-	copies := func(fine bool) []evPlace {
-		return heldWhere(hs, func(h instantHold) bool {
-			p := h.p
-			if p.side != Request || p.given || !inScope(p) || !before(p) || !h.hr || !h.hl || (h.fr && h.fl) != fine || !byText(h) {
-				return false
-			}
-			rf, _, _ := dc.holds(p, p.t.live, r, c.rm, c.byText)
-			fr, _, _ := dc.holds(p, p.t.rec, l, c.lm, c.byText)
-			return !rf && !fr
-		})
 	}
 
 	// 3. Answer: an answer of the call's scope or the start-up, given

@@ -192,3 +192,43 @@ func TestOutcomeAPIAnotherTestsSameSecondReadIsNoSource(t *testing.T) {
 		t.Errorf("FALSE GREEN? authTime bound to %s, another test's place", d.From.Mock)
 	}
 }
+
+// api-server's TestListAppsPagination: the test creates "[E2E] page-2-<UnixNano>"
+// (its create sends the name), lists the apps (an answer that holds the
+// name, which keploy serves as recorded: the list's request changed nothing
+// keploy learns on), then deletes the app, whose audit insert carries the
+// name the delete read back. Round F's create sent its own name, the
+// answer F served still held the recorded one, and the audit carries F's
+// name: it followed the create, never the list. An answer keploy served as
+// recorded for the moment is keploy's own text, not a value the
+// application moved, so where another place shows the moment in both runs
+// it is no conflict: the moment binds at the create. Where no place shows
+// it, or F's view of the answer holds a third value, it stays a conflict.
+func TestOutcomeAFineCutAnAnswerServedAsRecordedIsNoConflictBesideItsCopy(t *testing.T) {
+	const p = "body.docs.msgs.0.delta.name"
+	rAt := oAt
+	fAt := oAt.Add(61 * time.Second)
+	recNs, liveNs := iEpochNs(rAt.Add(-3*time.Second)), iEpochNs(fAt.Add(-3*time.Second+250*time.Millisecond))
+	movedNs := iEpochNs(fAt.Add(-2 * time.Second))
+	name := func(ns string) string { return "[E2E] page-2-" + ns }
+	create := iSent("mock-328", rAt.Add(-3*time.Second+time.Millisecond), "body.cmd.query.app.name", String, name(recNs), name(liveNs))
+	list := func(fGave string) Raw {
+		rows := func(other string) []models.PostgresV3Cells {
+			return []models.PostgresV3Cells{{{Value: name(recNs)}}, {{Value: "[E2E] page-1-" + other}}}
+		}
+		recRows := rows("1793579499301234567")
+		view := rows("1793579499301234567")
+		view[0][0].Value = name(fGave)
+		view[1][0].Value = "[E2E] page-1-1793579567301234567"
+		return oPg("mock-346", time.Second, "SELECT name FROM apps LIMIT 2", recRows, "SELECT 2").ServedAs(1).
+			ServedLive(oPg("mock-346", time.Second, "SELECT name FROM apps LIMIT 2", view, "SELECT 2"))
+	}
+	call := func(earlier []Earlier, raw []Raw) Decision {
+		in := iCall(p, String, name(recNs), name(liveNs), rAt, fAt, iWin(rAt, fAt, 5*time.Second), earlier, raw)
+		in.Drifts = oClientDrifts()
+		return oWord(t, Decide(in), recNs, liveNs)
+	}
+	iValue(t, "the answer served as recorded beside the create that shows it", call([]Earlier{create}, []Raw{list(recNs)}), "mock-328")
+	oRefused(t, "the answer served as recorded, no place showing it", call(nil, []Raw{list(recNs)}), "conflict", "mock-346")
+	oRefused(t, "the answer F moved to a third value", call([]Earlier{create}, []Raw{list(movedNs)}), "conflict", "mock-346")
+}
