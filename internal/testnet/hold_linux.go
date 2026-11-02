@@ -119,8 +119,16 @@ func ListenShared(t *testing.T, network, addr string) net.Listener {
 // test, for a goroutine the test starts or a test that skips on it; the
 // caller closes the listener.
 func OpenShared(network, addr string) (net.Listener, error) {
-	lc := net.ListenConfig{Control: setReusePort}
+	lc := SharedListenConfig()
 	return lc.Listen(context.Background(), network, addr)
+}
+
+// SharedListenConfig is the net.ListenConfig OpenShared listens with, for a
+// test that sets more on it (SetMultipathTCP, KeepAlive) before it listens
+// at a port SharedPort holds: its Control sets SO_REUSEPORT, so the listener
+// binds beside the hold.
+func SharedListenConfig() net.ListenConfig {
+	return net.ListenConfig{Control: setReusePort}
 }
 
 // setReusePort is a net.ListenConfig Control that sets SO_REUSEPORT on the
