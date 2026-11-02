@@ -308,6 +308,54 @@ func TestOutcomeASetRecordingWithNoTimeBeforeTheCallShowsNothing(t *testing.T) {
 	}
 }
 
+// A recording round F served whose answer time keploy cannot read (none,
+// or one before its own request) is never after the call: answered at any
+// time, it may have given R's application the recorded word before the
+// call, so its state is unknown and the word is refused naming why (fail
+// closed), whether F served it as recorded or its view is not stated
+// (integrations' Postgres TestLearn_AValueThatFlowedIsRefusedNotNoise: a
+// token an HTTP answer held, its mock stamped with a request time alone).
+// One asked at the call's own instant and answered a millisecond after it
+// gave R's application nothing before the call; served as recorded, it
+// holds no source of F's value: fresh, the answer-time rule's stated cost
+// (that file's TestLearn_ARecordingTheLearnReplayServedInTheTest...'s
+// subcase at the call's own instant).
+func TestOutcomeAServedRecordingWithNoAnswerTimeIsNeverAfterTheCall(t *testing.T) {
+	served := func(req, res time.Time, asRecorded bool) Raw {
+		r := RawOf(&models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{
+			ReqTimestampMock: req, ResTimestampMock: res,
+			HTTPResp: &models.HTTPResp{StatusCode: 200, Body: "tok-7f3a"},
+		}}, true).ServedAs(1)
+		if asRecorded {
+			r = r.ServedAsRecorded()
+		}
+		return r
+	}
+	before := oAt.Add(-time.Second)
+	for _, c := range []struct {
+		what, why string
+		x         Raw
+	}{
+		{"asked a second before, no answer time, its view not stated", noAnswerAt, served(before, time.Time{}, false)},
+		{"asked a second before, no answer time, served as recorded", noAnswerAt, served(before, time.Time{}, true)},
+		{"asked at the call's instant, no answer time, served as recorded", noAnswerAt, served(oAt, time.Time{}, true)},
+		{"answered before its own request, served as recorded", noAnswerAt, served(before, before.Add(-time.Millisecond), true)},
+		{"asked at the call's instant, answered a millisecond after, served as recorded", "", served(oAt, oAt.Add(time.Millisecond), true)},
+	} {
+		d := oWord(t, Decide(oInput("bind.$1", "tok-7f3a", "tok-0c41", nil, []Raw{c.x})), "7f3a", "0c41")
+		if c.why == "" {
+			if d.Outcome != OutcomeFresh {
+				t.Errorf("%s: %s; want fresh (it gave the application nothing before the call)", c.what, oDescribe([]Decision{d}))
+			}
+			continue
+		}
+		oRefused(t, c.what, d, "unknown", "mock-1")
+		if d.Refusal != nil && !strings.Contains(d.Refusal.Why, c.why) {
+			t.Errorf("%s: %s; want it to say %q", c.what, d.Refusal.Why, c.why)
+		}
+	}
+}
+
 // A word glued to the bytes around it ("s17" of "BAs17") in a test case's
 // request body that declares no media type shows nothing: keploy cannot
 // tell a protobuf's printable tag and length from a word, so the word is
