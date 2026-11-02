@@ -607,11 +607,41 @@ type ExactServing struct {
 	// Worker is, on the staging call, the set's worker scope
 	// (Mapping.Worker): the mocks no test case owns, each with its place
 	// (MockEntry.Place). The agent stages them with the pool, and each
-	// answers from its place in the set's run on (once the test case it is
-	// placed after has begun; from the start for an empty place), whether a
-	// test case is open or not, after the open test case's own, at most one
-	// request in the staging.
+	// answers from its place in the set's run on (once the run has reached
+	// the test case it is placed after, see Order; from the start for an
+	// empty place), whether a test case is open or not, after the open test
+	// case's own, at most one request in the staging.
 	Worker []MockEntry `json:"worker,omitempty"`
+	// Order is, on the staging call, every test case of the set in the order
+	// the run takes them up: recorded order, with the streaming test cases
+	// (which the replay runs after the rest) last. It holds the ones the run
+	// will not open too: those a --testcase selection leaves out, quarantined
+	// or ignored ones, and those refused or failed unsent. When a test case
+	// opens, the run has passed every test case before it in Order, opened
+	// or not, so the worker-scope mocks placed after any of them answer from
+	// then on: a place at a test case the run skipped is reached all the
+	// same. A test case after the open one in Order is not passed until a
+	// later one opens or a pass of the run ends (Passed), and a test case
+	// that is not in Order is reached only as it opens. An agent that
+	// predates it ignores it and reaches a place only when its test case
+	// opens: a worker mock placed at a skipped test case then answers no
+	// call, as before.
+	Order []string `json:"order,omitempty"`
+	// Passed is, on a call that serves the pool (no Stage, no Test), how
+	// many test cases of Order, from its start, the run has passed. The
+	// replay sends it as a pass of the set's run ends: its main loop (the
+	// test cases before the streaming ones, or all of Order when no
+	// streaming pass follows), and its streaming pass (all of Order). So a
+	// test case the run skipped after the last one it opened (a quarantined
+	// last test case, a --testcase selection that ends before the set does,
+	// a skipped one before the streaming pass) reaches the worker-scope
+	// mocks placed after it, for the calls the application makes after its
+	// last test case. One no greater than what the run has passed already
+	// passes nothing more, and one greater than Order's length passes all
+	// of it. An agent that predates it ignores it and serves the pool
+	// again: a place at a test case skipped after the last one opened then
+	// answers no call, as before.
+	Passed int `json:"passed,omitempty"`
 	// Concurrent is, on a call that opens a test case (Test), the
 	// recordings it may answer with beside Owned: those recorded while its
 	// request and other tests' requests were open together, which keploy

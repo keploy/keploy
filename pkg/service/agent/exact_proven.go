@@ -401,8 +401,8 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		// once its mocks are in. The previous set's worker scope goes for
 		// the same reason, before that view is installed.
 		a.scopeMu.Lock()
-		a.testWorker, a.testBegun = nil, nil
-		a.testBegunAt, a.testBg = nil, nil
+		a.testWorker, a.testBg = nil, nil
+		a.forgetReached()
 		a.scopeMu.Unlock()
 		// The previous set's background rules go too, and the set's own
 		// rules come first: every view this staging installs reads the set
@@ -460,8 +460,14 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		a.scopeMu.Lock()
 		a.testPool = append([]string(nil), ex.Pool...)
 		a.testWorker = append([]models.MockEntry(nil), ex.Worker...)
-		a.testBegun = map[string]bool{}
-		a.testBegunAt = map[string]int{}
+		a.forgetReached()
+		a.testOrder = append([]string(nil), ex.Order...)
+		a.testOrderAt = make(map[string]int, len(ex.Order))
+		// From the end, so a name the order holds twice keeps its first
+		// index: its opening passes the fewer test cases.
+		for i := len(ex.Order) - 1; i >= 0; i-- {
+			a.testOrderAt[ex.Order[i]] = i
+		}
 		a.testBg = bg
 		a.scopeMu.Unlock()
 		// the background rules with the set's pool and whole worker scope; today's
@@ -489,16 +495,7 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 			owned = testMocks(ex.Owned, mocks)
 		}
 		a.scopeMu.Lock()
-		if a.testBegun == nil {
-			a.testBegun = map[string]bool{}
-		}
-		if a.testBegunAt == nil {
-			a.testBegunAt = map[string]int{}
-		}
-		if _, again := a.testBegunAt[ex.Test]; !again {
-			a.testBegunAt[ex.Test] = len(a.testBegunAt) + 1
-		}
-		a.testBegun[ex.Test] = true
+		a.reachTest(ex.Test)
 		a.scopeMu.Unlock()
 		if err := a.serveWorkerExactly(es); err != nil {
 			return err
@@ -512,6 +509,9 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		return es.ServeExactTest(ex.Test, owned)
 	default:
 		a.scopeMu.Lock()
+		// A pass of the set's run that ended passed the test cases it
+		// skipped after the last one it opened (models.ExactServing.Passed).
+		a.passTests(ex.Passed)
 		pool := append([]string(nil), a.testPool...)
 		a.scopeMu.Unlock()
 		if err := a.serveWorkerExactly(es); err != nil {
@@ -659,10 +659,10 @@ func (a *Agent) diskRecordedBefore() func(t time.Time, visit func(*models.Mock) 
 
 // serveWorkerExactly tells the proxy which of the set's worker-scope mocks
 // (testWorker) the set's run has reached the place of: those placed at the
-// set's start, and those placed after a test case that has begun since the
-// staging (testBegun). It is said before each view is installed, so the view
-// shows them. A proxy that has no worker scope (coreAgent.ExactWorkerServer)
-// cannot serve a set that has one.
+// set's start, and those placed after a test case the run has reached since
+// the staging (testReached: begun, or passed over, reachTest). It is said
+// before each view is installed, so the view shows them. A proxy that has no
+// worker scope (coreAgent.ExactWorkerServer) cannot serve a set that has one.
 //
 // Under the background rules (testBg) a worker-scope mock
 // with no identical sibling among the set's background answers from the set's
@@ -673,7 +673,7 @@ func (a *Agent) diskRecordedBefore() func(t time.Time, visit func(*models.Mock) 
 // Identical siblings stay gated by their places.
 func (a *Agent) serveWorkerExactly(es coreAgent.ExactServer) error {
 	a.scopeMu.Lock()
-	reachable := reachableWorker(a.testWorker, a.testBegun, a.testBegunAt, a.testBg)
+	reachable := reachableWorker(a.testWorker, a.testReached, a.testReachAt, a.testBg)
 	has := len(a.testWorker) > 0
 	a.scopeMu.Unlock()
 	ws, ok := es.(coreAgent.ExactWorkerServer)
@@ -684,6 +684,58 @@ func (a *Agent) serveWorkerExactly(es coreAgent.ExactServer) error {
 		return nil
 	}
 	return ws.ServeExactWorker(reachable)
+}
+
+// reachTest notes, as test case name opens, that the set's run has reached
+// it, and every test case before it in the run's order (testOrder,
+// models.ExactServing.Order) that it has not reached yet: the run passed
+// those whether they ran or not, so a test case it skipped (quarantined, left
+// out by a selection, refused) reaches the worker-scope mocks placed after it
+// as one that ran does. A test case after name in the order is not reached,
+// and a name the order does not hold passes none: it reads index 0, the
+// map's zero value, as the first test case of the order does. Each test case
+// reached is given its place in the order the run reached them
+// (testReachAt): the passed ones, in the run's order, before name. Called
+// with scopeMu held.
+func (a *Agent) reachTest(name string) {
+	a.passTests(a.testOrderAt[name])
+	a.reach(name)
+}
+
+// passTests notes that the set's run has passed the first n test cases of
+// its order (testOrder), those it has not passed yet, in the order's turn:
+// as a test case opens (reachTest), and as a pass of the run ends
+// (models.ExactServing.Passed), when it has passed the test cases it skipped
+// after the last one it opened too. An n no greater than what the run has
+// passed passes none, and one greater than the order's length passes all of
+// it. Called with scopeMu held.
+func (a *Agent) passTests(n int) {
+	for ; a.testPassed < n && a.testPassed < len(a.testOrder); a.testPassed++ {
+		a.reach(a.testOrder[a.testPassed])
+	}
+}
+
+// reach notes that the set's run has reached test case test, giving it the
+// next place in the order the run reached them (testReachAt) the first time.
+// Called with scopeMu held.
+func (a *Agent) reach(test string) {
+	if a.testReached == nil {
+		a.testReached = map[string]bool{}
+	}
+	if a.testReachAt == nil {
+		a.testReachAt = map[string]int{}
+	}
+	if _, again := a.testReachAt[test]; !again {
+		a.testReachAt[test] = len(a.testReachAt) + 1
+	}
+	a.testReached[test] = true
+}
+
+// forgetReached forgets the set's run order and the test cases its run
+// reached: the next staging's run starts afresh. Called with scopeMu held.
+func (a *Agent) forgetReached() {
+	a.testReached, a.testReachAt = nil, nil
+	a.testOrder, a.testOrderAt, a.testPassed = nil, nil, 0
 }
 
 // entryNames is the names of entries, in order.
@@ -856,13 +908,14 @@ func backgroundOf(worker []models.MockEntry, pool []string, byName map[string]*m
 }
 
 // reachableWorker is the worker-scope mocks of worker (in recorded order) the
-// set's run has reached: placed at the set's start, or after a test case that
-// has begun (begun); and, under the background rules (bg), each with no
-// identical sibling (testBackground.noSibling), wherever it is placed, in the
-// view's order: by place (the set's start for one with no sibling, else the
-// order its place's test case began in, begunAt), then a delivering answer
+// set's run has reached: placed at the set's start, or after a test case the
+// run has reached (reachedTest: begun, or passed over, reachTest); and, under
+// the background rules (bg), each with no identical sibling
+// (testBackground.noSibling), wherever it is placed, in the view's order: by
+// place (the set's start for one with no sibling, else the order the run
+// reached its place's test case in, reachedAt), then a delivering answer
 // before an idle one, then recorded order. With bg nil, in recorded order.
-func reachableWorker(worker []models.MockEntry, begun map[string]bool, begunAt map[string]int, bg *testBackground) []string {
+func reachableWorker(worker []models.MockEntry, reachedTest map[string]bool, reachedAt map[string]int, bg *testBackground) []string {
 	type reached struct {
 		name string
 		rank int
@@ -872,13 +925,13 @@ func reachableWorker(worker []models.MockEntry, begun map[string]bool, begunAt m
 	var rs []reached
 	for i, e := range worker {
 		early := bg != nil && bg.noSibling[e.Name]
-		if e.Place != "" && !begun[e.Place] && !early {
+		if e.Place != "" && !reachedTest[e.Place] && !early {
 			continue
 		}
 		r := reached{name: e.Name, at: i}
 		if bg != nil {
 			if e.Place != "" && !early {
-				r.rank = begunAt[e.Place]
+				r.rank = reachedAt[e.Place]
 			}
 			r.idle = bg.idle[e.Name]
 		}
