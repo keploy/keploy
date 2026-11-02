@@ -470,6 +470,13 @@ type MockSpec struct {
 	// recording without it loads as before, and an older keploy ignores it.
 	Clocks map[string]ClockOffset `json:"Clocks,omitempty" yaml:"clocks,omitempty" bson:"clocks,omitempty"`
 
+	// Authored says the mock was written, derived from a recorded mock or
+	// generated, rather than recorded, and why (see Authored). Kind-agnostic,
+	// carried on the doc envelope as a top-level `authored:` block like
+	// clocks; nil for a recorded mock. Additive / omitempty: an older keploy
+	// ignores it.
+	Authored *Authored `json:"Authored,omitempty" yaml:"authored,omitempty" bson:"authored,omitempty"`
+
 	// learned and learnedBinds are, on a mock the learn step of record's
 	// full round just paired (agent side, in memory), the variables it
 	// learned on the mock and those it learned that are bound at an earlier
@@ -1256,6 +1263,7 @@ func (m *Mock) DeepCopy() *Mock {
 
 	c.Spec.Variables = m.Spec.Variables.Clone()
 	c.Spec.Clocks = maps.Clone(m.Spec.Clocks)
+	c.Spec.Authored = m.Spec.Authored.Clone()
 
 	// 3. Deep copy all slices by creating new slices and copying the elements.
 	// This gives each copy its own separate backing array.

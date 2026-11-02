@@ -75,6 +75,11 @@ type NetworkTrafficDoc struct {
 	// block, like variables, kept off the per-kind spec.
 	Clocks map[string]models.ClockOffset `json:"clocks,omitempty" yaml:"clocks,omitempty"`
 
+	// Authored, when present, says the mock was written rather than
+	// recorded, how and why (models.MockSpec.Authored): a kind-agnostic
+	// top-level block, like clocks, kept off the per-kind spec.
+	Authored *models.Authored `json:"authored,omitempty" yaml:"authored,omitempty"`
+
 	// Real, on a test case, is the mock.real destinations its request used in
 	// its recording (models.TestCase.Real); written and read only under the
 	// proven switch.
