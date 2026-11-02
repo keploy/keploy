@@ -126,28 +126,6 @@ func validateHealthURL(s string) (string, bool) {
 	return "", true
 }
 
-// waitForAppReady gates the first test on the user-application being up.
-//
-// If Test.HealthURL is empty (or syntactically invalid) we keep the historical
-// behavior exactly: sleep for Test.Delay seconds or until ctx is canceled. An
-// invalid HealthURL also logs at ERROR so operators see the misconfig, but it
-// is NOT a fatal failure — the fixed-delay path runs so replay never regresses
-// vs the pre-health-url behavior.
-//
-// Otherwise we poll HealthURL every healthPollInterval (with a per-request cap
-// of healthProbeTimeout). The first 2xx unblocks immediately. If HealthPollTimeout
-// elapses with no 2xx, we log an INFO telling the operator what to tune and fall
-// back to the fixed Delay sleep so operators never get stuck worse than today.
-//
-// The poll cadence uses a single time.Ticker, and the overall poll ceiling is
-// enforced by a derived context with timeout observed through Done(). This
-// avoids per-iteration timer allocation from time.After and gives deterministic
-// teardown via defer Stop / defer cancel.
-//
-// Returns true when the caller should proceed to run tests, false only when ctx
-// was canceled (caller should treat as user abort). Specifically, an invalid
-// HealthURL does NOT cause a false return — callers rely on this contract to
-// disambiguate user abort from misconfiguration (see replay.go classification).
 // dockerPublishedHostPort returns the first host (ip, port) that a docker
 // `-p/--publish` mapping in cmd exposes on the host, so a docker-run replay can
 // gate on the app actually listening before firing requests. It handles the
@@ -592,39 +570,26 @@ func waitForHTTPServingPathOr(ctx context.Context, scheme, host, port, path stri
 // skipped entirely rather than burning the ceiling on a probe that can never
 // parse a response.
 //
-// Best-effort throughout, preserving the pre-existing contract: it can only ever
-// wait LONGER than --delay, never shorter; a timeout WARNS and proceeds rather
-// than failing the run; and it never weakens an assertion. Returns false only on
-// context cancellation (user abort).
+// Stage 1 has no ceiling: it ends when the address accepts, or when ctx ends
+// (the application exited, or the user stopped keploy). Stage 2 is bounded by
+// HealthPollTimeout, counted from the accept: past it the gate WARNS and
+// proceeds, as the application did accept. It can only ever wait LONGER than
+// --delay, never shorter, and never weakens an assertion. Returns false only
+// on context cancellation.
 func gateOnAppAddress(ctx context.Context, logger *zap.Logger, cfg *config.Config, host, port, label string, probe httpProbeTarget) bool {
-	ceiling := cfg.Test.HealthPollTimeout
-	if ceiling <= 0 {
-		ceiling = config.DefaultHealthPollTimeout
-	}
-	deadline := time.Now().Add(ceiling)
-
-	if err := pkg.WaitForPort(ctx, host, port, ceiling); err != nil {
-		if ctx.Err() != nil {
-			return false
-		}
-		logger.Warn("app address did not accept a connection within the ceiling; firing tests anyway (replay may see status_code got=0)",
-			zap.String("gate", label),
-			zap.String("host", host),
-			zap.String("port", port),
-			zap.Duration("ceiling", ceiling),
-			zap.Error(err))
-		return true
+	if waitForAccept(ctx, logger, label, host, port) != nil {
+		return false
 	}
 
 	if !probe.ok {
 		return true
 	}
 
-	remaining := time.Until(deadline)
-	if remaining <= 0 {
-		return true
+	ceiling := cfg.Test.HealthPollTimeout
+	if ceiling <= 0 {
+		ceiling = config.DefaultHealthPollTimeout
 	}
-	hctx, cancel := context.WithTimeout(ctx, remaining)
+	hctx, cancel := context.WithTimeout(ctx, ceiling)
 	defer cancel()
 
 	for {
@@ -652,6 +617,43 @@ func gateOnAppAddress(ctx context.Context, logger *zap.Logger, cfg *config.Confi
 	}
 }
 
+// appAcceptPollInterval is how often waitForAccept tries the application's
+// port again.
+const appAcceptPollInterval = 250 * time.Millisecond
+
+// waitForAccept blocks until host:port accepts a TCP connection, or ctx ends
+// (the application exited, or the user stopped keploy): it has no ceiling, so
+// an application that starts slowly on a loaded machine is waited for however
+// long it takes. When the first try is refused it says, once, that it waits
+// and what for.
+func waitForAccept(ctx context.Context, logger *zap.Logger, label, host, port string) error {
+	addr := net.JoinHostPort(host, port)
+	dialer := net.Dialer{Timeout: 800 * time.Millisecond}
+	said := false
+	for {
+		conn, err := dialer.DialContext(ctx, "tcp", addr)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !said {
+			said = true
+			logger.Info(fmt.Sprintf("waiting for the application to accept a connection on %s before the first test; the wait ends when it does, when the application exits, or when keploy is stopped", addr),
+				zap.String("gate", label), zap.Error(err))
+		}
+		retry := time.NewTimer(appAcceptPollInterval)
+		select {
+		case <-ctx.Done():
+			retry.Stop()
+			return ctx.Err()
+		case <-retry.C:
+		}
+	}
+}
+
 // reportHTTPGate logs the outcome of gateOnAppAddress's HTTP stage against
 // probe and returns what the gate returns.
 func reportHTTPGate(ctx context.Context, logger *zap.Logger, label string, cfg *config.Config, ceiling time.Duration, probe httpProbeTarget, err error) bool {
@@ -659,7 +661,7 @@ func reportHTTPGate(ctx context.Context, logger *zap.Logger, label string, cfg *
 		if ctx.Err() != nil {
 			return false
 		}
-		logger.Warn("app accepted TCP but never completed an HTTP round-trip within the ceiling; firing tests anyway (replay may see status_code got=0)",
+		logger.Warn("app accepted TCP but never completed an HTTP round-trip within --health-poll-timeout of the accept; firing tests anyway (replay may see status_code got=0)",
 			zap.String("gate", label),
 			zap.String("probeHost", probe.host),
 			zap.String("probePort", probe.port),
@@ -836,6 +838,28 @@ func appPortReachabilityOf(instrumentation Instrumentation) pkg.AppPortReachabil
 	return nil
 }
 
+// waitForAppReady gates the first test on the user-application being up.
+//
+// The wait for an application keploy started ends when the application
+// accepts a connection on its port, when it exits (its run's context is
+// cancelled), or when the user stops keploy: never at a fixed time. A slow
+// start on a loaded machine is waited for however long it takes, and one that
+// exits before it accepts fires no test.
+//
+// With Test.HealthURL set we poll it every healthPollInterval (with a
+// per-request cap of healthProbeTimeout); the first 2xx unblocks at once. If
+// HealthPollTimeout passes with no 2xx, keploy says so and waits instead for
+// the application to accept a connection on its port (gateOnAppAddresses).
+// HealthPollTimeout is how long keploy asks for an HTTP answer before it
+// settles for that accept, not a time after which it fires tests.
+//
+// With no (or an invalid) HealthURL, keploy waits Test.Delay seconds and then
+// for the application to accept a connection on its port.
+//
+// Returns true when the caller should proceed to run tests, false only when ctx
+// was canceled (the application exited, or the user stopped the run). An
+// invalid HealthURL does NOT cause a false return — callers rely on this
+// contract to tell a stop from a misconfiguration (see replay.go).
 func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config, probe httpProbeTarget) bool {
 	// The health poll's connection to the app ends with the wait.
 	defer healthClient.CloseIdleConnections()
@@ -866,212 +890,216 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 				zap.String("reason", reason),
 				zap.String("next_step", "--health-url must be a full URL with scheme (http:// or https://) and host — fix it or omit to use --delay only"),
 			)
-			healthURL = "" // fall through to the empty-URL / fixed-delay branch below
+			healthURL = "" // fall through to the --delay and address-gate branch below
 		}
 	}
 
-	if healthURL == "" {
-		// NewTimer + defer Stop so a ctx cancel releases the timer
-		// immediately instead of leaving it scheduled until `delay`
-		// fires — matters under large --delay and repeated aborts.
-		timer := time.NewTimer(delay)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			// --delay floor elapsed; fall through to the optional docker
-			// port-readiness gate below.
-		case <-ctx.Done():
-			return false
+	if healthURL != "" {
+		pollCeiling := cfg.Test.HealthPollTimeout
+		if pollCeiling <= 0 {
+			pollCeiling = config.DefaultHealthPollTimeout
 		}
-
-		// Docker apps with a published host port: after the --delay floor,
-		// additionally gate on the host port accepting a TCP connection so
-		// replay never fires at a not-yet-listening app (the "status_code
-		// got=0" flake) when the fixed --delay was too short under CI
-		// contention. Best-effort and bounded by a ceiling; native apps and
-		// container-only / unmapped publishes (ok==false) keep the pure
-		// --delay behavior. This can only ever wait LONGER than --delay, never
-		// shorter, and never weakens an assertion — a fast-ready port returns
-		// instantly.
-
-		// An embedder can state that probing is unsafe here. Honoured
-		// for every address-based gate below, not just the fallback,
-		// and for the reset-resend readiness re-gate in replay.go:
-		// the hazard is the connect-then-close itself, and all of these
-		// perform one. --health-url is untouched — that is an explicit
-		// operator request rather than an inferred probe.
-		//
-		// This is a stated intent, not an inferred one, because the
-		// inference is unreliable: a caller in this position still sets
-		// test.host (it rewrites recorded request URLs), so "no gate
-		// input was supplied" is simply false for it, and the
-		// resolved-test-target fallback would reach for that address
-		// and probe it anyway. See config.Test.DisableAppReadyProbe.
-		if cfg.Test.DisableAppReadyProbe {
-			// Info, not Debug: a safety gate being switched off should
-			// be visible at default verbosity, the way the health poll
-			// announces itself below.
-			logger.Info("app-readiness probing disabled by configuration; using the delay floor only",
-				zap.Duration("delay", delay),
+		logger.Info("polling application health endpoint before firing tests",
+			zap.String("healthUrl", sanitizeHealthURL(healthURL)),
+			zap.Duration("pollTimeout", pollCeiling),
+		)
+		if pollHealthURL(ctx, healthURL, pollCeiling) {
+			logger.Debug("health endpoint reported 2xx; proceeding",
+				zap.String("healthUrl", sanitizeHealthURL(healthURL)),
 			)
-			// The delay select above can take its timer branch even when
-			// ctx is already cancelled. Every other exit from here goes
-			// through gateOnAppAddress, which checks; this one must too,
-			// or a cancelled run reports ready and fires tests instead
-			// of reporting the abort.
-			if ctx.Err() != nil {
-				return false
-			}
 			return true
 		}
-
-		gated := false
-		if host, port, ok := dockerPublishedHostPort(cfg.Command); ok {
-			gated = true
-			if !gateOnAppAddress(ctx, logger, cfg, host, port, "docker-published-port", probe) {
-				return false
-			}
+		if ctx.Err() != nil {
+			return false
 		}
-
-		// docker-compose apps: the same gate, with the host port read from the
-		// compose file instead of the command line. Identical contract to the
-		// -p gate above — best-effort, bounded, can only ever wait longer.
-		if host, port, ok := composePublishedHostPort(cfg.Command, cfg.ContainerName); ok {
-			gated = true
-			if !gateOnAppAddress(ctx, logger, cfg, host, port, "compose-published-port", probe) {
-				return false
-			}
+		if cfg.Test.DisableAppReadyProbe {
+			// No probe of the app's address is allowed here, so the health
+			// URL, which the user asked for, stays what the wait is for.
+			logger.Info("the health URL has not answered 2xx within the poll timeout, and probing the app's address is disabled by configuration; the first test waits for the health URL to answer 2xx, the application to exit, or keploy to be stopped",
+				zap.String("healthUrl", sanitizeHealthURL(healthURL)),
+				zap.Duration("pollTimeout", pollCeiling),
+			)
+			return pollHealthURL(ctx, healthURL, 0)
 		}
-
-		// Non-docker apps whose ready address is known — a k8s replay pod's app
-		// Service, a remote host, a native app on a fixed host:port — gate on that
-		// address accepting a TCP connection. This is the TCP-accept analog of the
-		// docker published-port gate above (and of --health-url) for apps that
-		// expose no HTTP health endpoint. dockerPublishedHostPort only fires for a
-		// docker `-p` publish, so this covers everyone else who can name the app's
-		// address. Bounded by its own HealthPollTimeout ceiling (default 60s) and
-		// the same best-effort contract: it can only ever wait LONGER than --delay,
-		// never shorter, and a warn-not-fail on timeout so replay never regresses
-		// vs the pure --delay behavior. It is purely a readiness probe and never
-		// rewrites a request target (unlike test.port).
-		if addr := strings.TrimSpace(cfg.Test.AppReadyProbeAddr); addr != "" {
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil || port == "" {
-				logger.Error("invalid test.appReadyProbeAddr; expected host:port — skipping the readiness probe",
-					zap.String("addr", addr),
-					zap.Error(err))
-			} else {
-				if host == "" {
-					host = "127.0.0.1" // ":<port>" shorthand → localhost, parity with the docker gate
-				}
-				gated = true
-				if !gateOnAppAddress(ctx, logger, cfg, host, port, "app-ready-probe-addr", probe) {
-					return false
-				}
-			}
-		}
-
-		// Nothing above could name the app's address — a NATIVE app, the common
-		// case: no docker -p publish, no compose file, no operator-supplied
-		// appReadyProbeAddr. Until now that meant no readiness gate at all beyond
-		// the fixed --delay, so a native app slower than that delay had its first
-		// test fired into a socket nothing was listening on yet, producing exactly
-		// the status_code=0 this whole gate exists to prevent. Observed on the
-		// python-cred-expiry lane (`python3 recorded_app.py`, --delay 5): 2 of 4
-		// tests failed with expected=200 got=0.
-		//
-		// The recorded test set already told us where it dials, so use it. There
-		// is nothing to guess: probe.host/probe.port IS the app's address for the
-		// purposes of these tests, and the same best-effort contract holds —
-		// bounded by the ceiling, warn-and-proceed on timeout, only ever waits
-		// longer than --delay. Guarded on `gated` purely to avoid probing twice
-		// when a published address already covered it.
-		if !gated && probe.ok {
-			if !gateOnAppAddress(ctx, logger, cfg, probe.host, probe.port, "resolved-test-target", probe) {
-				return false
-			}
-		}
-		return true
-	}
-
-	pollCeiling := cfg.Test.HealthPollTimeout
-	if pollCeiling <= 0 {
-		pollCeiling = config.DefaultHealthPollTimeout
-	}
-
-	logger.Info("polling application health endpoint before firing tests",
-		zap.String("healthUrl", sanitizeHealthURL(cfg.Test.HealthURL)),
-		zap.Duration("pollTimeout", pollCeiling),
-	)
-
-	// Derive a single deadline ctx for the ENTIRE poll window. This is what
-	// makes pollCeiling a true upper bound: every probe — including the
-	// immediate one below and each ticker-driven retry — inherits the
-	// remaining ceiling via context. httpHealthPoll still applies its own
-	// healthProbeTimeout per request, but context.WithTimeout takes whichever
-	// expires first, so a small pollCeiling (e.g. 100ms) cannot be exceeded
-	// by a probe's 1s per-request cap. We keep the caller ctx as the parent
-	// so user-initiated cancel still unblocks instantly.
-	pollCtx, pollCancel := context.WithTimeout(ctx, pollCeiling)
-	defer pollCancel()
-
-	// Probe once immediately so a fast-ready app doesn't pay the first tick's
-	// healthPollInterval of latency. The probe inherits pollCtx, so even this
-	// first attempt is bounded by the remaining poll ceiling.
-	if healthPoller(pollCtx, cfg.Test.HealthURL) {
-		logger.Debug("health endpoint reported 2xx; proceeding",
-			zap.String("healthUrl", sanitizeHealthURL(cfg.Test.HealthURL)),
+		logger.Info("the health URL has not answered 2xx within the poll timeout; the first test waits instead for the application to accept a connection on its port — raise --health-poll-timeout (or test.healthPollTimeout in keploy.yml) to wait longer for the health URL",
+			zap.String("healthUrl", sanitizeHealthURL(healthURL)),
+			zap.Duration("pollTimeout", pollCeiling),
 		)
+		return gateOnAppAddresses(ctx, logger, cfg, probe, healthURL)
+	}
+
+	// NewTimer + defer Stop so a ctx cancel releases the timer
+	// immediately instead of leaving it scheduled until `delay`
+	// fires — matters under large --delay and repeated aborts.
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		// --delay floor elapsed; fall through to the optional docker
+		// port-readiness gate below.
+	case <-ctx.Done():
+		return false
+	}
+
+	// After the --delay floor, the first test waits for the application to
+	// accept a connection on its port (gateOnAppAddresses), so replay never
+	// fires at a not-yet-listening app (the "status_code got=0" failure)
+	// however slowly it starts. This can only ever wait LONGER than
+	// --delay, never shorter, and never weakens an assertion — a fast-ready
+	// port returns instantly.
+
+	// An embedder can state that probing is unsafe here. Honoured
+	// for every address-based gate below, not just the fallback,
+	// and for the reset-resend readiness re-gate in replay.go:
+	// the hazard is the connect-then-close itself, and all of these
+	// perform one. --health-url is untouched — that is an explicit
+	// operator request rather than an inferred probe.
+	//
+	// This is a stated intent, not an inferred one, because the
+	// inference is unreliable: a caller in this position still sets
+	// test.host (it rewrites recorded request URLs), so "no gate
+	// input was supplied" is simply false for it, and the
+	// resolved-test-target fallback would reach for that address
+	// and probe it anyway. See config.Test.DisableAppReadyProbe.
+	if cfg.Test.DisableAppReadyProbe {
+		// Info, not Debug: a safety gate being switched off should
+		// be visible at default verbosity, the way the health poll
+		// announces itself below.
+		logger.Info("app-readiness probing disabled by configuration; using the delay floor only",
+			zap.Duration("delay", delay),
+		)
+		// The delay select above can take its timer branch even when
+		// ctx is already cancelled. Every other exit from here goes
+		// through gateOnAppAddress, which checks; this one must too,
+		// or a cancelled run reports ready and fires tests instead
+		// of reporting the abort.
+		if ctx.Err() != nil {
+			return false
+		}
 		return true
 	}
 
+	return gateOnAppAddresses(ctx, logger, cfg, probe, "")
+}
+
+// pollHealthURL polls --health-url until it answers 2xx (true), or ctx ends,
+// or ceiling passes when it is positive (false: ctx tells the two apart). The
+// first poll is at once, so a ready app pays no interval.
+func pollHealthURL(ctx context.Context, healthURL string, ceiling time.Duration) bool {
+	var pollCtx context.Context
+	var cancel context.CancelFunc
+	if ceiling > 0 {
+		pollCtx, cancel = context.WithTimeout(ctx, ceiling)
+	} else {
+		pollCtx, cancel = context.WithCancel(ctx)
+	}
+	defer cancel()
+	if healthPoller(pollCtx, healthURL) {
+		return true
+	}
 	ticker := time.NewTicker(healthPollInterval)
 	defer ticker.Stop()
-
 	for {
 		select {
-		case <-ctx.Done():
-			// Parent ctx canceled by the user — treat as abort, distinct
-			// from the pollCtx deadline branch below which is a normal
-			// fallback-to-fixed-delay path.
-			return false
 		case <-pollCtx.Done():
-			// pollCtx is derived from ctx, so a user cancel also fires
-			// this branch. Since select picks a ready case
-			// non-deterministically, we cannot rely on the ctx.Done()
-			// branch above to win the race — explicitly disambiguate
-			// here. If the parent ctx is canceled we treat the wakeup
-			// as a user abort and return false instead of falling
-			// through to the fixed-delay fallback (which would return
-			// true and incorrectly proceed to run tests).
-			if ctx.Err() != nil {
-				return false
-			}
-			// pollCeiling elapsed with no 2xx. Downgraded from Warn per
-			// repo logging guidelines; the message still tells operators
-			// exactly which knobs to turn.
-			logger.Info("health probe timed out, falling back to fixed delay — raise --health-poll-timeout (or test.healthPollTimeout in keploy.yml) or point --health-url at an endpoint that returns 2xx sooner",
-				zap.String("healthUrl", sanitizeHealthURL(cfg.Test.HealthURL)),
-				zap.Duration("pollTimeout", pollCeiling),
-				zap.Duration("fallbackDelay", delay),
-			)
-			fallbackTimer := time.NewTimer(delay)
-			defer fallbackTimer.Stop()
-			select {
-			case <-fallbackTimer.C:
-				return true
-			case <-ctx.Done():
-				return false
-			}
+			return false
 		case <-ticker.C:
-			if healthPoller(pollCtx, cfg.Test.HealthURL) {
-				logger.Debug("health endpoint reported 2xx; proceeding",
-					zap.String("healthUrl", sanitizeHealthURL(cfg.Test.HealthURL)),
-				)
+			if healthPoller(pollCtx, healthURL) {
 				return true
 			}
 		}
 	}
+}
+
+// gateOnAppAddresses waits for the application to accept a connection at the
+// first address it knows for it: a docker -p publish, a compose publish,
+// test.appReadyProbeAddr, the address the set's first test dials, or, after
+// a --health-url that did not answer in time (healthURL), that URL's own
+// address. With none known, nothing is waited for: the first test's request
+// is the probe. True once accepted, false only when ctx ends (the application
+// exited, or the user stopped keploy).
+func gateOnAppAddresses(ctx context.Context, logger *zap.Logger, cfg *config.Config, probe httpProbeTarget, healthURL string) bool {
+	gated := false
+	if host, port, ok := dockerPublishedHostPort(cfg.Command); ok {
+		gated = true
+		if !gateOnAppAddress(ctx, logger, cfg, host, port, "docker-published-port", probe) {
+			return false
+		}
+	}
+
+	// docker-compose apps: the same gate, with the host port read from the
+	// compose file instead of the command line. Identical contract to the
+	// -p gate above: it can only ever wait longer.
+	if host, port, ok := composePublishedHostPort(cfg.Command, cfg.ContainerName); ok {
+		gated = true
+		if !gateOnAppAddress(ctx, logger, cfg, host, port, "compose-published-port", probe) {
+			return false
+		}
+	}
+
+	// Non-docker apps whose ready address is known — a k8s replay pod's app
+	// Service, a remote host, a native app on a fixed host:port — gate on that
+	// address accepting a TCP connection. This is the TCP-accept analog of the
+	// docker published-port gate above (and of --health-url) for apps that
+	// expose no HTTP health endpoint. dockerPublishedHostPort only fires for a
+	// docker `-p` publish, so this covers everyone else who can name the app's
+	// address. The same contract: it can only ever wait LONGER than --delay,
+	// never shorter. It is purely a readiness probe and never rewrites a
+	// request target (unlike test.port).
+	if addr := strings.TrimSpace(cfg.Test.AppReadyProbeAddr); addr != "" {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil || port == "" {
+			logger.Error("invalid test.appReadyProbeAddr; expected host:port — skipping the readiness probe",
+				zap.String("addr", addr),
+				zap.Error(err))
+		} else {
+			if host == "" {
+				host = "127.0.0.1" // ":<port>" shorthand → localhost, parity with the docker gate
+			}
+			gated = true
+			if !gateOnAppAddress(ctx, logger, cfg, host, port, "app-ready-probe-addr", probe) {
+				return false
+			}
+		}
+	}
+
+	// Nothing above could name the app's address — a NATIVE app, the common
+	// case: no docker -p publish, no compose file, no operator-supplied
+	// appReadyProbeAddr. The recorded test set already told us where it
+	// dials, so use it: probe.host/probe.port IS the app's address for the
+	// purposes of these tests (a native app slower than --delay otherwise had
+	// its first test fired into a socket nothing listened on yet: status_code
+	// got=0). Guarded on `gated` purely to avoid probing twice when a
+	// published address already covered it.
+	if !gated && probe.ok {
+		gated = true
+		if !gateOnAppAddress(ctx, logger, cfg, probe.host, probe.port, "resolved-test-target", probe) {
+			return false
+		}
+	}
+	// A --health-url that did not answer in time names the app's address too.
+	if !gated && healthURL != "" {
+		if host, port, ok := healthURLAddress(healthURL); ok {
+			return gateOnAppAddress(ctx, logger, cfg, host, port, "health-url-address", httpProbeTarget{})
+		}
+	}
+	return true
+}
+
+// healthURLAddress is the host and port a valid --health-url dials.
+func healthURLAddress(healthURL string) (host, port string, ok bool) {
+	u, err := url.Parse(strings.TrimSpace(healthURL))
+	if err != nil || u.Hostname() == "" {
+		return "", "", false
+	}
+	port = u.Port()
+	if port == "" {
+		port = "80"
+		if strings.EqualFold(u.Scheme, "https") {
+			port = "443"
+		}
+	}
+	return u.Hostname(), port, true
 }
 
 type TestReportVerdict struct {

@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 )
 
 // newCfg builds a minimal config.Config with the replay/health knobs set.
@@ -114,23 +115,24 @@ func TestWaitForAppReady_NeverOK(t *testing.T) {
 	ok := waitForAppReady(context.Background(), logger, cfg, httpProbeTarget{})
 	elapsed := time.Since(start)
 
+	// The health URL's own address accepts (it answers 500): past the poll
+	// timeout, that accept is what the first test waits for.
 	if !ok {
-		t.Fatalf("expected waitForAppReady to proceed via fallback, got false")
+		t.Fatalf("expected waitForAppReady to proceed on the app's accept, got false")
 	}
-	// Must have waited at least pollCeiling + fallback Delay.
-	if elapsed < 1200*time.Millisecond {
-		t.Fatalf("expected fallback to wait >=~1.2s (ceiling + delay), got %v", elapsed)
+	if elapsed < 300*time.Millisecond {
+		t.Fatalf("expected the health URL to be polled for its timeout (300ms), got %v", elapsed)
 	}
 
 	found := false
 	for _, entry := range logs.All() {
-		if strings.Contains(entry.Message, "health probe timed out") {
+		if strings.Contains(entry.Message, "has not answered 2xx within the poll timeout") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("expected INFO 'health probe timed out' log, entries=%v", logs.All())
+		t.Fatalf("expected INFO 'has not answered 2xx within the poll timeout' log, entries=%v", logs.All())
 	}
 }
 
@@ -168,15 +170,14 @@ func TestWaitForAppReady_EmptyURLUsesFixedDelay(t *testing.T) {
 // that branch we set HealthPollTimeout == cancel delay so the two wakeups
 // are tied; the assertion must hold regardless of which branch select
 // picks.
+//
+// Past the poll timeout the wait goes on for the app to accept a connection
+// on the health URL's own address, so the health URL here names an address
+// that refuses: only the cancel can end the wait.
 func TestWaitForAppReady_CtxCanceledAtCeiling(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer srv.Close()
-
 	// 50ms poll ceiling + 50ms cancel => both ctx.Done() and
 	// pollCtx.Done() become ready at ~the same moment.
-	cfg := newCfg(srv.URL, 50*time.Millisecond)
+	cfg := newCfg("http://"+testnet.RefusedAddr(t, "tcp")+"/healthz", 50*time.Millisecond)
 	cfg.Test.Delay = 10 // if the bug regresses, fallback sleep returns true after 10s
 
 	logger := zap.NewNop()

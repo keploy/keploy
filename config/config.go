@@ -443,8 +443,10 @@ type Normalize struct {
 	EditedBy      string          `json:"-" yaml:"-" mapstructure:"-"`
 }
 
-// DefaultHealthPollTimeout is the ceiling for every pre-test app-readiness gate
-// when test.healthPollTimeout is unset or non-positive.
+// DefaultHealthPollTimeout is how long the pre-test wait asks for an HTTP
+// answer when test.healthPollTimeout is unset or non-positive (see
+// Test.HealthPollTimeout). It never ends the wait for the app to accept a
+// connection on its port: only the app's exit or the user's stop does.
 //
 // It lives here, not beside the gate, because the yaml default in
 // config/default.go and the code fallback are two sources of truth for the same
@@ -457,10 +459,9 @@ type Normalize struct {
 // serving: a ready app satisfies the gate on its first probe, so raising it costs
 // a healthy run nothing. A cold application start on a loaded shared runner —
 // the condition the gate exists for — was measured at 17-28s for the process and
-// ~55s from spawn to first serve, against a previous 60s ceiling that therefore
-// expired and fired tests into a not-yet-listening app. Timing out only warns and
-// proceeds, so an over-generous ceiling can never fail a run that would otherwise
-// pass; an under-generous one can.
+// ~55s from spawn to first serve. Past it the wait settles for the app's TCP
+// accept and warns, so an over-generous value can never fail a run that would
+// otherwise pass.
 const DefaultHealthPollTimeout = 3 * time.Minute
 
 type Test struct {
@@ -468,8 +469,8 @@ type Test struct {
 	GlobalNoise       Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
 	ReplaceWith       ReplaceWith         `json:"replaceWith" yaml:"replaceWith" mapstructure:"replaceWith"`
 	Delay             uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
-	HealthURL         string              `json:"healthUrl" yaml:"healthUrl" mapstructure:"healthUrl"`                         // optional HTTP(S) URL polled before firing the first test; empty preserves the fixed --delay behavior
-	HealthPollTimeout time.Duration       `json:"healthPollTimeout" yaml:"healthPollTimeout" mapstructure:"healthPollTimeout"` // ceiling for the pre-test health poll loop before falling back to --delay
+	HealthURL         string              `json:"healthUrl" yaml:"healthUrl" mapstructure:"healthUrl"`                         // optional HTTP(S) URL polled before firing the first test; with no 2xx within healthPollTimeout the first test waits for the app to accept a connection on its port instead
+	HealthPollTimeout time.Duration       `json:"healthPollTimeout" yaml:"healthPollTimeout" mapstructure:"healthPollTimeout"` // how long the pre-test wait asks for an HTTP answer (healthUrl's 2xx, or any answer on the app's port once it accepts) before it settles for the app accepting a TCP connection on its port; that accept is waited for with no time limit, until the app exits or keploy is stopped
 	HealthPath        string              `json:"healthPath" yaml:"healthPath" mapstructure:"healthPath"`                      // optional request path probed on the app's OWN auto-detected address (docker/compose published port, or appReadyProbeAddr) before the first test. Unlike healthUrl it needs no host or port, so it works when the published port is assigned at runtime. Any completed HTTP response counts as ready — a health endpoint returning 503 has still proved the app is answering. Empty uses a keploy-reserved probe path.
 	HealthScheme      string              `json:"healthScheme" yaml:"healthScheme" mapstructure:"healthScheme"`                // optional override for the readiness probe scheme ("http" or "https"). Empty (the default) uses the scheme the recorded tests actually dial; only consulted when the app is probed over HTTP, and ignored entirely when healthUrl is set.
 	AppReadyProbeAddr string              `json:"appReadyProbeAddr" yaml:"appReadyProbeAddr" mapstructure:"appReadyProbeAddr"` // optional host:port TCP-polled after the --delay floor (bounded by healthPollTimeout) before firing the first test — the TCP-accept analog of healthUrl for apps with no HTTP health endpoint (e.g. a k8s replay pod's app Service, or a native app on a fixed port). Empty preserves the fixed --delay behavior. Unlike test.port it NEVER affects request routing; it is only a readiness probe.

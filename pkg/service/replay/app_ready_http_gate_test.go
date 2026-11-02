@@ -733,7 +733,7 @@ func TestWaitForAppReady_UnreachableTargetReportsWhatWasObserved(t *testing.T) {
 	// A port nothing listens on: TCP never accepts.
 	host, port, _ := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
 
-	core, logs := observer.New(zapcore.WarnLevel)
+	core, logs := observer.New(zapcore.InfoLevel)
 	logger := zap.New(core)
 
 	cfg := gateCfg(700 * time.Millisecond)
@@ -741,14 +741,17 @@ func TestWaitForAppReady_UnreachableTargetReportsWhatWasObserved(t *testing.T) {
 	cfg.CommandType = "native"
 	cfg.Test.Delay = 0
 
-	if !waitForAppReady(context.Background(), logger, cfg,
+	// The app's exit cancels its run's context: only that ends the wait.
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	if waitForAppReady(ctx, logger, cfg,
 		httpProbeTarget{scheme: "http", host: host, port: port, ok: true}) {
-		t.Fatal("the gate must stay best-effort and proceed, never fail the run")
+		t.Fatal("the gate fired at an address that never accepted")
 	}
 
 	var got string
 	for _, e := range logs.All() {
-		if strings.Contains(e.Message, "app address did not accept a connection") {
+		if strings.Contains(e.Message, "waiting for the application to accept a connection on "+net.JoinHostPort(host, port)) {
 			got = e.Message
 		}
 		if strings.Contains(e.Message, "app accepted TCP but never completed") {
