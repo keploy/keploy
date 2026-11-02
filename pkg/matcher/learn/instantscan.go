@@ -251,8 +251,28 @@ func rfc1123At(s string, i int) int {
 	return -1
 }
 
-// isoAt is layout 1:
-// \d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?(?: [+-]\d{2}:?\d{2}|Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?|(?:T\d{2})?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?)
+// spaceZoneAt is the end of the zone written after a space that begins at
+// s[j], " [+-](?:0\d|1[0-4]):?[0-5]\d" with no letter, digit, "." or ","
+// right after it (zoneRunsOn), or -1 where none does.
+func spaceZoneAt(s string, j int) int {
+	if !byteIs(s, j, " ") || !byteIs(s, j+1, "+-") || !(byteIs(s, j+2, "0") && digitsAt(s, j+3, 1) || byteIs(s, j+2, "1") && byteIs(s, j+3, "01234")) {
+		return -1
+	}
+	e := j + 4
+	if byteIs(s, e, ":") {
+		e++
+	}
+	if !byteIs(s, e, "012345") || !digitsAt(s, e+1, 1) {
+		return -1
+	}
+	if e += 2; e < len(s) && zoneRunsOn(s[e]) {
+		return -1
+	}
+	return e
+}
+
+// isoAt is layout 1, its match ending where isoEnd says:
+// \d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?(?: [+-](?:0\d|1[0-4]):?[0-5]\d|Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?|(?:T\d{2})?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?)
 func isoAt(s string, i int) int {
 	tried()
 	if !digitsAt(s, i, 4) || !byteIs(s, i+4, "-") || !digitsAt(s, i+5, 2) || !byteIs(s, i+7, "-") || !digitsAt(s, i+8, 2) {
@@ -270,15 +290,11 @@ func isoAt(s string, i int) int {
 				j += 1 + digitsFrom(s, j+1, 9)
 			}
 		}
-		// A zone after a space, whole (" +05:30", " +0530"): the
-		// instant's one zone.
-		if byteIs(s, j, " ") && byteIs(s, j+1, "+-") && digitsAt(s, j+2, 2) {
-			switch {
-			case byteIs(s, j+4, ":") && digitsAt(s, j+5, 2):
-				return j + 7
-			case digitsAt(s, j+4, 2):
-				return j + 6
-			}
+		// A zone after a space, whole (" +05:30", " +0530"), one a place
+		// keeps, that ends where its digits do (isoEnd): the instant's one
+		// zone.
+		if e := spaceZoneAt(s, j); e >= 0 {
+			return e
 		}
 	case byteIs(s, j, "Tt") && digitsAt(s, j+1, 2):
 		j += 3

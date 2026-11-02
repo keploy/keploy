@@ -4633,7 +4633,7 @@ func escapeClock(s string, set map[string]bool) {
 var clockSpans = func(text string) [][]int {
 	var spans [][]int
 	for _, lay := range clockLayouts {
-		spans = append(spans, lay.re.FindAllStringIndex(text, -1)...)
+		spans = append(spans, lay.matches(lay.re, text, 0, len(text))...)
 	}
 	return spans
 }

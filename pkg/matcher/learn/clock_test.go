@@ -230,7 +230,7 @@ func clockWordInWhole(rec, live string, w *Window) (before, rw, lw, after string
 	}
 	matches := func(lay clockLayout, s string, taken []bool) [][]int {
 		var out [][]int
-		for _, m := range lay.re.FindAllStringIndex(s, -1) {
+		for _, m := range lay.matches(lay.re, s, 0, len(s)) {
 			if m[0] > 0 && isWord(s[m[0]-1]) && isWord(s[m[0]]) || m[1] < len(s) && isWord(s[m[1]-1]) && isWord(s[m[1]]) {
 				continue
 			}
@@ -484,7 +484,7 @@ func TestAClockWordWindowsEdgesReadAsTheWholeTexts(t *testing.T) {
 	var pairs []pair
 	for k := 0; k <= 80; k++ {
 		pad := strings.Repeat("x", k)
-		for _, tail := range []string{"12:34", "12:34:56", " 12:34", "1793336961", "2026-10-30", "y12:34", "a1793336961"} {
+		for _, tail := range []string{"12:34", "12:34:56", " 12:34", "1793336961", "2026-10-30", "y12:34", "a1793336961", "2026-10-30 12:34 +05:30", "2026-10-30 12:34 -1400.00", "2026-10-30 12:34 +05301"} {
 			for _, sh := range [][2]string{
 				{"at 1793336961.5:00:00:00 " + pad + tail, "at 1793336961.55:00:00:00 " + pad + tail},
 				{"at 1793336961.55:00:00:00 " + pad + tail, "at 1793336961.5:00:00:00 " + pad + tail},
