@@ -279,3 +279,65 @@ func TestAKeptNativeAppsExitWhileKeployStagesASetHaltsTheSet(t *testing.T) {
 		}
 	}
 }
+
+// Start runs a compose app it keeps for every set (the default with mocking)
+// under the app's listener (listenedTo), with the proven switch off and on:
+// its runner tells the app's exit at the container's die, while compose's up
+// still waits out the rest of the stack, and the set running then halts on
+// it. The set is APP_HALTED, naming the exit's code and the test held; the
+// held test is not sent again and no test begins after it; the exit code is
+// 1. Without the listener on the app's context the die is told to no one:
+// the set runs on against the gone app, and fails its tests one by one.
+func TestStartTellsTheSetAKeptComposeAppsDie(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("switch on %v", on), func(t *testing.T) {
+			provenOn(t, on)
+			c := &composeInstr{}
+			h := composeHarnessOf(t, c, 3)
+			told := &toldExitInstr{composeInstr: c, died: make(chan models.AppError, 1), toldBack: make(chan struct{})}
+			h.replayer.instrumentation = told
+			exit := models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 3}
+			app := &heldRequests{exitAt: "test-2", exit: func() { told.died <- exit; <-told.toldBack }, requests: map[string]int{}}
+			h.replayer.hookImpl = prHooks{onRequest: app.onRequest}
+			core, logs := observer.New(zapcore.DebugLevel)
+			h.replayer.logger = zap.New(core)
+			h.replayer.config.Test.Mocking = true
+			h.replayer.config.Command = "docker compose up"
+			// What config/default.go sets, which the harness's bare config
+			// does not: Start runs each test set this many times at most.
+			h.replayer.config.Test.MaxFlakyChecks = 1
+			saved := utils.ErrCode
+			t.Cleanup(func() { utils.ErrCode = saved })
+			utils.ErrCode = 0
+			ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+			defer cancel()
+
+			err := h.replayer.Start(ctx)
+			t.Cleanup(func() {
+				if !t.Failed() {
+					return
+				}
+				t.Logf("Start: %v", err)
+				for _, e := range logs.All() {
+					t.Logf("%s %s %v", e.Level, e.Message, e.ContextMap())
+				}
+			})
+
+			rep := h.report.report
+			if rep == nil {
+				t.Fatal("the set wrote no report")
+			}
+			if rep.Status != string(models.TestSetStatusAppHalted) || !strings.Contains(rep.FailureReason, "it exited with code 3 before it answered test test-2") {
+				t.Fatalf("status %s, reason %q; want APP_HALTED naming the exit's code and test-2", rep.Status, rep.FailureReason)
+			}
+			for name, want := range map[string]int{"test-1": 1, "test-2": 1, "test-3": 0} {
+				if n := app.count(name); n != want {
+					t.Fatalf("%s was sent %d times, want %d: the app exited holding test-2", name, n, want)
+				}
+			}
+			if utils.ErrCode != 1 {
+				t.Fatalf("exit code %d, want 1: the kept app exited mid-set", utils.ErrCode)
+			}
+		})
+	}
+}

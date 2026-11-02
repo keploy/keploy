@@ -98,7 +98,22 @@ func TestAComposeRunWithTheSwitchOffTellsTheAppsDieBeforeItsUpReturns(t *testing
 	defer cancel()
 	ran := make(chan models.AppError, 1)
 	go func() { ran <- a.run(ctx) }()
+	// The up is waited for until the test's own deadline, less a margin to
+	// fail by name before the package's timeout does, or a minute when the
+	// test has none.
+	upBy := time.Now().Add(time.Minute)
+	if d, ok := t.Deadline(); ok {
+		upBy = d.Add(-5 * time.Second)
+	}
 	for !strings.Contains(recordedLog(t, argvLog), "ARG up") {
+		select {
+		case e := <-ran:
+			t.Fatalf("the run returned (%+v) before it ran compose's up", e)
+		default:
+		}
+		if time.Now().After(upBy) {
+			t.Fatal("the run did not run compose's up by the test's deadline")
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
 

@@ -613,9 +613,11 @@ func TestAKeptAppGoneBeforeTheFirstSetFailedToStart(t *testing.T) {
 }
 
 // A set halted before its first test counts the tests the run selected of it,
-// as a set that ran does, and its report carries the app's last logs: the
-// told exit carries none (its runner reads none at the die), so they are read
-// then, as at the end of a set that ran.
+// as a set that ran does, in its report and in the run's totals, and its
+// report carries the app's last logs: the told exit carries none (its runner
+// reads none at the die), so they are read then, as at the end of a set that
+// ran. A run whose every set halted so prints its summary, with those tests
+// in it: one with no test counted prints none.
 func TestASetHaltedBeforeItsTestsCountsTheSelectedOnesAndCarriesTheAppsLogs(t *testing.T) {
 	for _, on := range []bool{false, true} {
 		t.Run(fmt.Sprintf("switch on %v", on), func(t *testing.T) {
@@ -636,6 +638,16 @@ func TestASetHaltedBeforeItsTestsCountsTheSelectedOnesAndCarriesTheAppsLogs(t *t
 			}
 			if rep.AppLogs != h.instr.recentAppLogs {
 				t.Fatalf("app_logs %q; want the app's last logs, %q", rep.AppLogs, h.instr.recentAppLogs)
+			}
+			if total, passed, failed := h.replayer.GetTestRunTotals(); total != 2 || passed+failed != 0 {
+				t.Fatalf("the run's totals: %d, %d passed, %d failed; want the set's 2 tests, none run", total, passed, failed)
+			}
+			// Its plain form: the coloured one's printer keeps the stdout
+			// it began with, which captureStdout does not swap.
+			h.replayer.config.DisableANSI = true
+			out := captureStdout(t, func() { h.replayer.printSummary(t.Context(), false) })
+			if !strings.Contains(out, "COMPLETE TESTRUN SUMMARY") || !strings.Contains(out, "Total tests: 2\n") {
+				t.Fatalf("the run's summary, every set halted before its tests:\n%s", out)
 			}
 		})
 	}
