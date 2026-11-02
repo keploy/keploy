@@ -853,32 +853,41 @@ func TestAppWrittenTellsTheFINByLockOrder(t *testing.T) {
 // The close's read of what the application had written (wroteNow) is never
 // short of it, counts no byte twice, and takes one lookup when nothing is
 // unacknowledged. A lookup that fails (not a socket not found) gives no count,
-// and its error, which tells the close to drop the socket it read on.
+// and its error, which tells the close to drop the socket it read on. It says
+// the count holds the FIN only when the lookup before the counted one shows
+// the FIN sent: a close between a lookup's wqueue and its tcp_info shows the
+// FIN sent in a count without it.
 func TestTheClosesReadCountsWhatTheApplicationHadWritten(t *testing.T) {
 	look := func(st uint8, wq uint32, acked uint64) diagTCP {
 		return diagTCP{state: st, wqueue: wq, info: &unix.TCPInfo{State: st, Bytes_acked: acked}}
 	}
-	const e, f1 = tcpEstablished, tcpFinWait1
+	const e, f1, f2, la = tcpEstablished, tcpFinWait1, tcpFinWait2, tcpLastAck
 	const failedLookup = 0xff // a read whose lookup fails, with errLookupFailed
 	errLookupFailed := errors.New("sock_diag reply: bad file descriptor")
 	for _, tc := range []struct {
 		name  string
 		reads []diagTCP
 		want  uint64
+		fin   bool
 		ok    bool
 	}{
-		{"nothing unacknowledged: one lookup", []diagTCP{look(e, 0, 101)}, 100, true},
-		{"bytes unacknowledged, no ACK between the lookups", []diagTCP{look(e, 10, 101), look(e, 10, 101)}, 110, true},
-		{"an ACK between the first's wqueue and its tcp_info", []diagTCP{look(e, 5, 104), look(e, 2, 104)}, 105, true},
-		{"an ACK between a later lookup's wqueue and its tcp_info", []diagTCP{look(e, 5, 101), look(e, 5, 104), look(e, 2, 104)}, 105, true},
-		{"acknowledged by the second lookup", []diagTCP{look(e, 5, 101), look(e, 0, 106)}, 105, true},
-		{"an ACK between the lookups, then two that agree", []diagTCP{look(e, 5, 101), look(e, 3, 103), look(e, 3, 103)}, 105, true},
-		{"its FIN unacknowledged", []diagTCP{look(f1, 11, 101), look(f1, 11, 101)}, 111, true},
-		{"read in CLOSE", []diagTCP{look(tcpClose, 0, 101)}, 0, false},
-		{"a timewait socket (no tcp_info)", []diagTCP{{state: tcpTimeWait}}, 0, false},
-		{"gone between the lookups", []diagTCP{look(e, 5, 101)}, 0, false},
-		{"no byte counts", []diagTCP{look(e, 0, 0)}, 0, false},
-		{"a lookup that fails", []diagTCP{look(e, 5, 101), {state: failedLookup}}, 0, false},
+		{"nothing unacknowledged: one lookup", []diagTCP{look(e, 0, 101)}, 100, false, true},
+		{"bytes unacknowledged, no ACK between the lookups", []diagTCP{look(e, 10, 101), look(e, 10, 101)}, 110, false, true},
+		{"an ACK between the first's wqueue and its tcp_info", []diagTCP{look(e, 5, 104), look(e, 2, 104)}, 105, false, true},
+		{"an ACK between a later lookup's wqueue and its tcp_info", []diagTCP{look(e, 5, 101), look(e, 5, 104), look(e, 2, 104)}, 105, false, true},
+		{"acknowledged by the second lookup", []diagTCP{look(e, 5, 101), look(e, 0, 106)}, 105, false, true},
+		{"an ACK between the lookups, then two that agree", []diagTCP{look(e, 5, 101), look(e, 3, 103), look(e, 3, 103)}, 105, false, true},
+		{"its FIN unacknowledged", []diagTCP{look(f1, 11, 101), look(f1, 11, 101)}, 111, true, true},
+		{"its FIN unacknowledged after its peer's (LAST_ACK)", []diagTCP{look(la, 1, 11), look(la, 1, 11)}, 11, true, true},
+		{"its FIN acknowledged by the second lookup", []diagTCP{look(f1, 1, 11), look(f2, 0, 12)}, 11, true, true},
+		{"a close between the first's wqueue and its tcp_info", []diagTCP{look(f1, 5, 101), look(f1, 6, 101)}, 106, true, true},
+		{"a close between the second's wqueue and its tcp_info", []diagTCP{look(e, 5, 101), look(f1, 5, 101)}, 105, false, true},
+		{"its FIN acknowledged: one lookup", []diagTCP{look(f2, 0, 12)}, 11, false, true},
+		{"read in CLOSE", []diagTCP{look(tcpClose, 0, 101)}, 0, false, false},
+		{"a timewait socket (no tcp_info)", []diagTCP{{state: tcpTimeWait}}, 0, false, false},
+		{"gone between the lookups", []diagTCP{look(e, 5, 101)}, 0, false, false},
+		{"no byte counts", []diagTCP{look(e, 0, 0)}, 0, false, false},
+		{"a lookup that fails", []diagTCP{look(e, 5, 101), {state: failedLookup}}, 0, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			was := lookupWritten
@@ -894,9 +903,9 @@ func TestTheClosesReadCountsWhatTheApplicationHadWritten(t *testing.T) {
 				return tc.reads[n-1], nil
 			}
 			t.Cleanup(func() { lookupWritten = was })
-			want, ok, err := wroteNow(nil, nil)
-			if want != tc.want || ok != tc.ok {
-				t.Fatalf("wroteNow = %d, %v; want %d, %v", want, ok, tc.want, tc.ok)
+			w, ok, err := wroteNow(nil, nil)
+			if w.want != tc.want || w.fin != tc.fin || ok != tc.ok {
+				t.Fatalf("wroteNow = %+v, %v; want %d (FIN surely counted: %v), %v", w, ok, tc.want, tc.fin, tc.ok)
 			}
 			if failed := tc.reads[len(tc.reads)-1].state == failedLookup; failed != errors.Is(err, errLookupFailed) || !failed && err != nil {
 				t.Fatalf("wroteNow's error = %v; want the failed lookup's, and only after one", err)

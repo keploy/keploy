@@ -123,8 +123,8 @@ func TestAMissOfALearnedSocketDumpsForAWaitOnly(t *testing.T) {
 			t.Fatalf("the reset socket's exact lookup = %v, want it gone (this case's premise)", err)
 		}
 		dumps := countDumps(t)
-		if want, ok, err := wroteNow(ds, pc); ok || err != nil {
-			t.Fatalf("wroteNow of a learned socket gone = %d, %v, %v; want no count", want, ok, err)
+		if w, ok, err := wroteNow(ds, pc); ok || err != nil {
+			t.Fatalf("wroteNow of a learned socket gone = %+v, %v, %v; want no count", w, ok, err)
 		}
 		if got := dumps.Swap(0); got != 0 {
 			t.Fatalf("the close's read made %d dumps, want none", got)

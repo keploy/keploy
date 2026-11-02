@@ -105,10 +105,13 @@ func (pc *pairedConn) lostBy(low, top uint64) (owners []string, open bool) {
 }
 
 // appWrote is what the application had written to a connection, in bytes and
-// a FIN (noteWroteAtClose). Whether the count holds a FIN is not kept: no
-// answer turns on it (pairReached).
+// a FIN (noteWroteAtClose), and whether that count surely holds its FIN (fin):
+// a plaintext close does not wait for the FIN alone (finAloneOnItsWay), and
+// one byte short of a count that holds the FIN is that FIN. false says only
+// that the count may not hold it.
 type appWrote struct {
 	want uint64
+	fin  bool
 }
 
 // proxySide is what the wait reads of the proxy's side of a connection.

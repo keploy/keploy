@@ -412,22 +412,28 @@ func TestATLSClientsCloseNotifyAfterTheProxysCloseIsNoLoss(t *testing.T) {
 // unread ones are: a close_notify is no loss, and the read waits for it; data
 // is a loss. A fixture on loopback cannot hold bytes on their way on demand,
 // so the close's read is made to count 24 more than were written, and the
-// client writes them once the close has begun.
+// client writes them once the close has begun. Unlike a plaintext close, one
+// through the layer reads with only the client's FIN on its way too (the
+// count one more than was written, read with the FIN sent): the read ends at
+// that FIN and records it, so a bytes wait settles without an orphan to ask.
 func TestATLSClientsBytesOnTheirWayAtTheProxysCloseAreReadThrough(t *testing.T) {
 	for _, v := range tlsVersions {
-		for _, data := range []bool{false, true} {
-			name := v.name + ", its close_notify"
-			if data {
-				name = v.name + ", data"
-			}
-			t.Run(name, func(t *testing.T) {
-				p, _, _, _, srv, cli := tlsHeldPair(t, v.version)
+		for _, kind := range []string{"its close_notify", "data", "its FIN alone"} {
+			data := kind == "data"
+			t.Run(v.name+", "+kind, func(t *testing.T) {
+				p, _, _, tracked, srv, cli := tlsHeldPair(t, v.version)
 				pc := pairedConnOf(t, p, 1)
 				was := lookupWritten
 				lookupWritten = func(ds *diagSock, c *pairedConn, atClose bool) (diagTCP, error) {
 					d, err := was(ds, c, atClose)
 					if err == nil && d.info != nil {
-						d.wqueue += 24
+						if kind != "its FIN alone" {
+							d.wqueue += 24
+						} else {
+							info := *d.info
+							info.State = tcpFinWait1
+							d.wqueue, d.state, d.info = d.wqueue+1, tcpFinWait1, &info
+						}
 					}
 					return d, err
 				}
@@ -441,6 +447,14 @@ func TestATLSClientsBytesOnTheirWayAtTheProxysCloseAreReadThrough(t *testing.T) 
 					runtime.Gosched()
 				}
 				lookupWritten = was
+				for kind == "its FIN alone" && tracked.reading.Load() == 0 { // the close reads on through the layer
+					select {
+					case <-closed:
+						t.Fatal("the close did not read through the layer with the client's FIN alone on its way")
+					default:
+					}
+					runtime.Gosched()
+				}
 				if data {
 					if _, err := cli.Write([]byte("publish 2\n")); err != nil {
 						t.Fatal(err)
