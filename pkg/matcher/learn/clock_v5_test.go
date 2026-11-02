@@ -2065,13 +2065,19 @@ func TestAWholeMinuteLookBackInAWideWindowGetsOneVerdictAtEveryPhase(t *testing.
 // application that writes the start of its own hour plus two hours: its
 // values sit 30m past UTC's hour. A replay of the application's value
 // passes, and one whose time to live changed fails with main's reason,
-// naming no place within UTC's hour: the phase is a rule only of offsets
-// learned at a Step, and an old recording never learned where its values
-// sat.
+// word for word, naming no place within UTC's hour: the phase is a rule only
+// of offsets learned at a Step, and an old recording never learned where its
+// values sat.
 func TestAnOldRecordingsHourCutFailsNamingNoPhaseItNeverLearned(t *testing.T) {
 	ms, sec := time.Millisecond, time.Second
 	ist := time.FixedZone("+05:30", 5*3600+1800)
 	const p = "body.expires_at"
+	// Main's reason (CheckClockRead on main, the same offset and value),
+	// by the learned range each recording time gives.
+	mainWhy := func(learned string) string {
+		return p + " was learned as clock + 2h (" + learned + "), written as a number of seconds since the epoch, whole or with a fraction, a read of the application's clock plus that offset, and the value this call carries is not a read of the application's clock plus that offset made in this call's window: it changed (checked as standing for the whole 1h the learn step read it cut to, read here in UTC+05:30)"
+	}
+	want := map[string]string{"10:29": mainWhy("from 1h59m28.455s to 2h0m30.061s"), "11:29": mainWhy("from 1h59m8.455s to 2h0m10.061s")}
 	val := func(x time.Time, ttl time.Duration) time.Time { return models.ReadCut(x, time.Hour, ist).Add(ttl) }
 	for _, base := range []time.Time{time.Date(2026, 10, 26, 10, 29, 30, 0, time.UTC), time.Date(2026, 10, 26, 11, 29, 50, 0, time.UTC)} {
 		rec, f := v5Call(base, 61*ms, 20*ms), v5Call(base.Add(FullRoundLead), 61*ms, 20*ms)
@@ -2091,6 +2097,9 @@ func TestAnOldRecordingsHourCutFailsNamingNoPhaseItNeverLearned(t *testing.T) {
 			if strings.Contains(why, "UTC's whole hour") {
 				t.Errorf("FALSE REASON: recorded at %s, an old recording's replay of a time to live of %s names a place within UTC's hour it never learned: %q", base.Format("15:04"), ttl, why)
 			}
+			if ttl != 2*time.Hour && why != want[base.Format("15:04")] {
+				t.Errorf("recorded at %s, an old recording's replay of a time to live of %s fails with\n%q\nwant main's reason\n%q", base.Format("15:04"), ttl, why, want[base.Format("15:04")])
+			}
 		}
 	}
 }
@@ -2101,7 +2110,8 @@ func TestAnOldRecordingsHourCutFailsNamingNoPhaseItNeverLearned(t *testing.T) {
 // read at the hour on that phase. A replay passes the application's value
 // at every phase of its day, and fails one moved onto UTC's day (cut to
 // UTC's midnight, less 5h), which a lock read off its phase passed at every
-// replay.
+// replay; the failure names where the moved value sits and the hour the
+// learned values sat on.
 func TestADayLockCutToTheHourInAZoneOffTheHourHoldsOnlyItsPhase(t *testing.T) {
 	ms, sec := time.Millisecond, time.Second
 	ist := time.FixedZone("+05:30", 5*3600+1800)
@@ -2115,6 +2125,7 @@ func TestADayLockCutToTheHourInAZoneOffTheHourHoldsOnlyItsPhase(t *testing.T) {
 		t.Fatalf("cut_day_IST(now) - 5h across its midnight: %+v %q %v; want a lock at the day's step, read at the hour, 30m past UTC's", o, why, ok)
 	}
 	recText := strconv.FormatInt(app(rec.read).Unix(), 10)
+	const movedTail = ": it changed (checked as standing for the whole 1h the learn step read it cut to, read here in UTC) (it sits on UTC's whole hour, off the hour the learned values sat on, 30m past UTC's whole hour)"
 	for ph := time.Duration(0); ph < 24*time.Hour; ph += 37*time.Minute + 11*sec {
 		s := Span{Zone: ist, Own: true, From: call.Add(72*time.Hour + ph)}
 		s.To = s.From.Add(61 * ms)
@@ -2122,8 +2133,12 @@ func TestADayLockCutToTheHourInAZoneOffTheHourHoldsOnlyItsPhase(t *testing.T) {
 		if got, why := v5Check(p, o, recText, app(read), s); !got {
 			t.Errorf("FALSE RED: a replay %s into the day, the application's value: %s", ph, why)
 		}
-		if got, why := v5Check(p, o, recText, moved(read), s); got {
+		got, why := v5Check(p, o, recText, moved(read), s)
+		if got {
 			t.Errorf("FALSE GREEN: a replay %s into the day passes a value moved onto UTC's day, %s (%s)", ph, moved(read).UTC().Format(time.RFC3339), why)
+		}
+		if !strings.HasSuffix(why, movedTail) {
+			t.Errorf("a replay %s into the day fails a value moved onto UTC's day with\n%q\nwant it to end naming both hours:\n%q", ph, why, movedTail)
 		}
 	}
 }
@@ -2135,12 +2150,14 @@ func TestADayLockCutToTheHourInAZoneOffTheHourHoldsOnlyItsPhase(t *testing.T) {
 // value to (only an hour's carries a Phase): a replay passes the
 // application's value at every phase of its day and fails a time to live
 // changed by three days and a dropped one (one changed by a day is within
-// the cut's stated slack).
+// the cut's stated slack), with a reason that names no place within UTC's
+// hour, since an own cut of a day learned none.
 func TestAnOwnCutDayInAZoneOffTheHourPassesItsValueAtEveryPhase(t *testing.T) {
 	ms, sec, day := time.Millisecond, time.Second, 24*time.Hour
 	ist := time.FixedZone("+05:30", 5*3600+1800)
 	const p = "body.expires_at"
 	val := func(x time.Time, ttl time.Duration) time.Time { return models.ReadCut(x, day, ist).Add(ttl) }
+	const failTail = ": it changed (checked as standing for the whole 1d the learn step read it cut to, read here in UTC+05:30)"
 	for _, base := range []time.Time{time.Date(2026, 10, 26, 9, 40, 0, 0, time.UTC), time.Date(2026, 10, 26, 18, 10, 0, 0, time.UTC)} {
 		rec, f := v5Call(base, 61*ms, 20*ms), v5Call(base.Add(day+3*time.Hour), 61*ms, 20*ms)
 		o, why, ok := clockInWindow(p, v5Instant(val(rec.read, 30*day), sec), v5Instant(val(f.read, 30*day), sec), v5Window(rec, f), ist)
@@ -2157,8 +2174,12 @@ func TestAnOwnCutDayInAZoneOffTheHourPassesItsValueAtEveryPhase(t *testing.T) {
 				t.Errorf("FALSE RED: recorded at %s, a replay %s later, the application's value: %s", base.Format("15:04"), ph, why)
 			}
 			for _, ttl := range []time.Duration{27 * day, 33 * day, 0} {
-				if got, _ := v5Check(p, o, recText, val(read, ttl), s); got {
+				got, why := v5Check(p, o, recText, val(read, ttl), s)
+				if got {
 					t.Errorf("FALSE GREEN: recorded at %s, a replay %s later passes a time to live of %s", base.Format("15:04"), ph, ttl)
+				}
+				if !strings.HasSuffix(why, failTail) || strings.Contains(why, "UTC's whole hour") {
+					t.Errorf("recorded at %s, a replay %s later fails a time to live of %s with\n%q\nwant it to end %q, naming no place within UTC's hour", base.Format("15:04"), ph, ttl, why, failTail)
 				}
 			}
 		}
