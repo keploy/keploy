@@ -4,42 +4,39 @@ package testnet
 
 import (
 	"net"
-	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-// Nothing is held here (see the package doc): a port is one a listener left
-// when it closed, and another socket can take it meanwhile.
-
-// RefusedAddr is a loopback address, 127.0.0.1:P, that nothing listened at
-// when it was taken: with network "tcp" for a connect, with "udp" for a
-// datagram.
+// RefusedAddr is a loopback address, 127.0.0.1:P, that refuses every dial
+// for the test's life: with network "tcp" a connect, with "udp" a datagram.
+// P is the local end of a connection that stays open until the test ends
+// (holdByConnection, holdUDPByConnection): a socket that is only bound, as
+// RefusedAddr holds the port on Linux, does not refuse a connect on macOS.
+// P is held at 127.0.0.1 only.
 func RefusedAddr(t *testing.T, network string) string {
 	t.Helper()
-	if network == "udp" {
-		pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-		require.NoError(t, err)
-		addr := pc.LocalAddr().String()
-		require.NoError(t, pc.Close())
-		return addr
+	switch network {
+	case "tcp":
+		return holdByConnection(t)
+	case "udp":
+		return holdUDPByConnection(t)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := ln.Addr().String()
-	require.NoError(t, ln.Close())
-	return addr
+	t.Fatalf("RefusedAddr: network %q is neither tcp nor udp", network)
+	return ""
 }
 
 // SharedPort is a TCP port that nothing listened at when it was taken.
+// Nothing holds it here (see the package doc): it is one a listener left
+// when it closed, and another socket can take it meanwhile.
 func SharedPort(t *testing.T) int {
 	t.Helper()
-	_, port, err := net.SplitHostPort(RefusedAddr(t, "tcp"))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	p, err := strconv.Atoi(port)
-	require.NoError(t, err)
-	return p
+	port := ln.Addr().(*net.TCPAddr).Port
+	require.NoError(t, ln.Close())
+	return port
 }
 
 // ListenShared opens a TCP listener at addr, a port SharedPort gave, closed
