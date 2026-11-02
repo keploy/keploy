@@ -162,16 +162,23 @@ func TestAWordReadIsCheckedFromItsTestsBeginPastAnotherGoroutinesServes(t *testi
 // recording the test's own (the span starts at the consumer's serve), and
 // where it calls it another's (the span starts at the test's own serve). So
 // the test's read, and one made before the test's own serve, pass there.
-// Checked against a recording the store says is not the test's (a
-// worker:'s), the span starts at the consumer's serve and carries no begin:
-// both reads are refused, a read at the arrival passes. A value two cuts
-// before the test's begin is refused in each.
+// Where the store cannot say, a call checked against a worker:'s recording
+// gets the test's span too (a stated limit): the tracker reads a recording
+// only through the store's answer, so keploy cannot tell then that the call
+// is not the test's, and the test's begin still bounds it. Checked against a
+// recording the store says is not the test's (a worker:'s), the span starts
+// at the consumer's serve and carries no begin: both reads, and the test's
+// expiry read before the consumer's serve, are refused; a read and an expiry
+// read at the arrival pass. In each, a wrong value (two cuts before the
+// test's begin, more than a cut past the arrival) is refused, as is an
+// expiry whose time to live dropped, by a minute or to none.
 func TestARecordingsSpanCarriesItsTestsBeginUnlessTheStoreSaysItIsAnothers(t *testing.T) {
 	base := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
 	early, ownServe, read := base.Add(time.Millisecond), base.Add(2*time.Millisecond), base.Add(3*time.Millisecond)
 	consumer, arrival := base.Add(5*time.Millisecond), base.Add(6*time.Millisecond)
 	const p = "body.created"
 	clock := models.ClockOffset{Res: time.Millisecond, Layout: models.LayoutTyped}
+	ttl := models.ClockOffset{Min: 30 * time.Minute, Max: 30*time.Minute + time.Millisecond, Res: time.Millisecond, Layout: models.LayoutTyped}
 	at := func(v time.Time) Leaf { return InstantLeaf(p, p, v, time.Millisecond) }
 	upsert := &models.Mock{Name: "mock-5", Kind: models.Mongo}
 	worker := &models.Mock{Name: "mock-9", Kind: models.Mongo}
@@ -192,6 +199,9 @@ func TestARecordingsSpanCarriesItsTestsBeginUnlessTheStoreSaysItIsAnothers(t *te
 	}{
 		{"no owner told", nil, upsert, consumer, base},
 		{"the store cannot say", func(*models.Mock) ServeOwner { return OwnerUnknown }, upsert, consumer, base},
+		// The tracker reads a recording only through the store's answer, so
+		// this runs as the row above: the stated limit, made literal.
+		{"the store cannot say, checked against a worker's recording", func(*models.Mock) ServeOwner { return OwnerUnknown }, worker, consumer, base},
 		{"the consumer's recording the test's own", tests("mock-1", "mock-7", "mock-5"), upsert, consumer, base},
 		{"the consumer's recording another's", tests("mock-1", "mock-5"), upsert, ownServe, base},
 		{"an owner told, checked against no recording", tests("mock-1", "mock-5"), nil, consumer, base},
@@ -215,15 +225,21 @@ func TestARecordingsSpanCarriesItsTestsBeginUnlessTheStoreSaysItIsAnothers(t *te
 			testsCall := !c.testFrom.IsZero()
 			for _, v := range []struct {
 				what string
+				o    models.ClockOffset
 				at   time.Time
 				ok   bool
 			}{
-				{"a read before the test's own serve", early, testsCall},
-				{"the test's read, before the consumer's serve", read, testsCall},
-				{"a read at the arrival", arrival, true},
-				{"a value two cuts before the test's begin", base.Add(-2 * time.Millisecond), false},
+				{"a read before the test's own serve", clock, early, testsCall},
+				{"the test's read, before the consumer's serve", clock, read, testsCall},
+				{"a read at the arrival", clock, arrival, true},
+				{"a value two cuts before the test's begin", clock, base.Add(-2 * time.Millisecond), false},
+				{"a value more than a cut past the arrival", clock, arrival.Add(2 * time.Millisecond), false},
+				{"an expiry read at the arrival", ttl, arrival.Add(30 * time.Minute), true},
+				{"the test's expiry, read before the consumer's serve", ttl, read.Add(30 * time.Minute), testsCall},
+				{"an expiry whose time to live dropped by a minute", ttl, arrival.Add(29 * time.Minute), false},
+				{"an expiry whose time to live dropped to none", ttl, arrival, false},
 			} {
-				if ok, why := CheckClockRead(p, clock, at(v.at), s, true); ok != v.ok {
+				if ok, why := CheckClockRead(p, v.o, at(v.at), s, true); ok != v.ok {
 					t.Errorf("%s, client %v: %s (%s): ok %v (%s); want %v", c.what, client, v.what, at(v.at).Value, ok, why, v.ok)
 				}
 			}
@@ -318,6 +334,46 @@ func TestATestsBeginIsCarriedWithNoRunToldOnlyInAClientTest(t *testing.T) {
 	}
 }
 
+// A serve the store cannot say of (OwnerUnknown: no test's view in force as
+// it served) is not filed as the open test's own, so it starts no span of a
+// call checked against the test's own recording: that span starts at the
+// test's own serve before it, as one the store says is another's does. A
+// server test whose hooks tell no run carries no test's begin (so nothing
+// else widens the span here): the test's read, made after its own serve and
+// before the unsaid one, passes, and a read two cuts before its own serve is
+// refused.
+func TestAServeTheStoreCannotSayOfStartsNoSpanOfTheTestsOwnRecording(t *testing.T) {
+	base := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+	ownServe, read, unsaid, arrival := base.Add(3*time.Millisecond), base.Add(4*time.Millisecond), base.Add(6*time.Millisecond), base.Add(7*time.Millisecond)
+	const p = "body.created"
+	clock := models.ClockOffset{Res: time.Millisecond, Layout: models.LayoutTyped}
+	at := func(v time.Time) Leaf { return InstantLeaf(p, p, v, time.Millisecond) }
+	for _, unsaidOwner := range []ServeOwner{OwnerUnknown, OwnerOther} {
+		tr := NewTracker()
+		tr.SetServeOwnerOf(func(m *models.Mock) ServeOwner {
+			if m.Name == "mock-7" {
+				return unsaidOwner
+			}
+			return OwnerTest
+		})
+		tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+		tr.NewSetAt(base.Add(-time.Second))
+		tr.BeginAt(base)
+		tr.ServedMockAt(&models.Mock{Name: "mock-1", Kind: models.Mongo}, ownServe)
+		tr.ServedMockAt(&models.Mock{Name: "mock-7", Kind: models.Mongo}, unsaid)
+		s, ok := ClockSpanOf(WithTracker(context.Background(), tr), arrival, &models.Mock{Name: "mock-5", Kind: models.Mongo})
+		if !ok || !s.From.Equal(ownServe) || !s.TestFrom.IsZero() {
+			t.Fatalf("owner %d: span = %+v,%v; want from the test's own serve %v, no test's begin", unsaidOwner, s, ok, ownServe)
+		}
+		if ok, why := CheckClockRead(p, clock, at(read), s, true); !ok {
+			t.Errorf("owner %d: the test's read before the serve (%s): refused (%s); want it passed", unsaidOwner, at(read).Value, why)
+		}
+		if ok, _ := CheckClockRead(p, clock, at(base.Add(time.Millisecond)), s, true); ok {
+			t.Errorf("owner %d: a read two cuts before the test's own serve passed; want it refused", unsaidOwner)
+		}
+	}
+}
+
 // A read plus an offset is checked in the span from the last serve first:
 // a time to live checkable there may not be in the test's longer span
 // (models.ClockOffset.Checkable), where the replay would refuse it rather
@@ -379,7 +435,15 @@ func TestAReadPlusAnOffsetIsCheckedInTheSpanFromTheLastServeFirst(t *testing.T) 
 // goroutine's. A handler that read its clock as its test began and wrote
 // that value at its second call, after keploy served its first, passes
 // (a timestamp read once for a request); a value read before the test
-// began, or more than a cut after the call, is refused as before.
+// began, or more than a cut after the call, is refused as before. A read
+// plus an offset bears the same cost, bounded by the test's own span: an
+// expiry read as the test began passes, and so does one whose time to live
+// is shorter than the learned 30m by up to the time from the start of the
+// cut the test began in to its read, plus a cut (under two cuts more than
+// the time from the begin itself). The test here begins on a cut, so the
+// edge is exact: read 42 ms in, 43 ms shorter passes; one whose time to
+// live dropped by 44 ms, by a minute, or to none (the read itself) is
+// refused.
 func TestAReadEarlierInItsTestPassesAtALaterCallOfTheSameTest(t *testing.T) {
 	base := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
 	began, served, arrival := base, base.Add(40*time.Millisecond), base.Add(45*time.Millisecond)
@@ -395,18 +459,27 @@ func TestAReadEarlierInItsTestPassesAtALaterCallOfTheSameTest(t *testing.T) {
 	}
 	const p = "body.created"
 	read := models.ClockOffset{Res: time.Millisecond, Layout: models.LayoutTyped}
+	ttl := models.ClockOffset{Min: 30 * time.Minute, Max: 30*time.Minute + time.Millisecond, Res: time.Millisecond, Layout: models.LayoutTyped}
 	at := func(v time.Time) Leaf { return InstantLeaf(p, p, v, time.Millisecond) }
+	after := served.Add(2 * time.Millisecond)
 	for _, c := range []struct {
 		what string
+		o    models.ClockOffset
 		v    time.Time
 		ok   bool
 	}{
-		{"a read after the first call's serve", served.Add(2 * time.Millisecond), true},
-		{"a read as the test began, before the first call's serve", began.Add(time.Millisecond), true},
-		{"a read before the test began", began.Add(-5 * time.Millisecond), false},
-		{"a value more than a cut after the call", arrival.Add(2 * time.Millisecond), false},
+		{"a read after the first call's serve", read, after, true},
+		{"a read as the test began, before the first call's serve", read, began.Add(time.Millisecond), true},
+		{"a read before the test began", read, began.Add(-5 * time.Millisecond), false},
+		{"a value more than a cut after the call", read, arrival.Add(2 * time.Millisecond), false},
+		{"an expiry read after the first call's serve", ttl, after.Add(30 * time.Minute), true},
+		{"an expiry read as the test began", ttl, began.Add(time.Millisecond + 30*time.Minute), true},
+		{"an expiry whose time to live is 43 ms shorter, the time from the test's begin to its read plus a cut", ttl, after.Add(30*time.Minute - 43*time.Millisecond), true},
+		{"an expiry whose time to live dropped by 44 ms, past the test's span", ttl, after.Add(30*time.Minute - 44*time.Millisecond), false},
+		{"an expiry whose time to live dropped by a minute", ttl, after.Add(29 * time.Minute), false},
+		{"an expiry whose time to live dropped to none", ttl, after, false},
 	} {
-		if ok, why := CheckClockRead(p, read, at(c.v), s, true); ok != c.ok {
+		if ok, why := CheckClockRead(p, c.o, at(c.v), s, true); ok != c.ok {
 			t.Errorf("%s (%s): ok %v (%s); want %v", c.what, at(c.v).Value, ok, why, c.ok)
 		}
 	}
