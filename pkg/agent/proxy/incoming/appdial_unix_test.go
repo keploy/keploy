@@ -9,6 +9,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"runtime"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -296,5 +299,77 @@ func TestAConnectionHandedToACallThatHasEndedIsClosed(t *testing.T) {
 	_ = app.SetReadDeadline(time.Now().Add(30 * time.Second))
 	if n, err := app.Read(make([]byte, 1)); n != 0 || !errors.Is(err, io.EOF) {
 		t.Fatalf("the app's end of the handed connection read %d, %v; want EOF: it was not closed", n, err)
+	}
+}
+
+// eofCountingConn counts the reads of its connection's EOF that the preface
+// read (util.AppendRequiredBytes) makes, apart from the handler's reads after
+// it.
+type eofCountingConn struct {
+	net.Conn
+	prefaceEOFs atomic.Int32
+}
+
+func (c *eofCountingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if errors.Is(err, io.EOF) {
+		pcs := make([]uintptr, 32)
+		frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
+		for f, more := frames.Next(); ; f, more = frames.Next() {
+			if strings.HasSuffix(f.Function, "/pkg/agent/proxy/util.AppendRequiredBytes") {
+				c.prefaceEOFs.Add(1)
+				break
+			}
+			if !more {
+				break
+			}
+		}
+	}
+	return n, err
+}
+
+// A port probe (`echo >/dev/tcp/host/port`: one byte, then its close) is
+// handed on to the HTTP/1 handler, which dials the app, at the first EOF its
+// connection reads. The preface read used to read that EOF five times, 100
+// ms apart, so the probe's dial came 400 ms after its close: in CI, after the
+// recording had stopped the app.
+func TestAPortProbeIsDialedThroughAtItsConnectionsFirstEOF(t *testing.T) {
+	app, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = app.Close() }()
+	pm := New(zap.NewNop(), nil, &config.Config{})
+	client, proxied := tcpPairForWatch(t)
+	if _, err := client.Write([]byte("\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	counted := &eofCountingConn{Conn: proxied}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pm.handleConnection(context.Background(), counted, app.Addr().String(), pm.logger, make(chan *models.TestCase, 1), make(chan struct{}, 1), 8080)
+		pm.captures.Wait()
+	}()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if c, err := app.Accept(); err == nil {
+			accepted <- c
+		}
+	}()
+	select {
+	case c := <-accepted:
+		_ = c.Close()
+	case <-never(t):
+		t.Fatal("the app never saw the probe's connection")
+	}
+	select {
+	case <-done:
+	case <-never(t):
+		t.Fatal("the handler did not end after the probe and the app closed")
+	}
+	if n := counted.prefaceEOFs.Load(); n != 1 {
+		t.Fatalf("the preface read read the probe's EOF %d times, want once: it hands the probe on at the first", n)
 	}
 }
