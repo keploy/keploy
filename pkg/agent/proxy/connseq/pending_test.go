@@ -159,17 +159,20 @@ func (c readSignalConn) Read(p []byte) (int, error) {
 // OnRead's func is told once PendingBefore no longer holds the cut that a Read
 // on the conn beneath passes: a reader it wakes asks again at once. Told
 // before, the reader would find the cut still pending and wait for a wake that
-// does not come.
+// does not come. The row learns the Read reached the conn beneath from the
+// conn itself, so a Read that does not tell fails here.
 func TestOnReadIsToldOnceTheCutIsNoLongerPending(t *testing.T) {
 	t.Parallel()
 	proxyEnd, dest := net.Pipe()
 	t.Cleanup(func() { _ = proxyEnd.Close(); _ = dest.Close() })
-	u := NewUpstream(proxyEnd)
+	reached := make(chan struct{}, 4)
+	u := NewUpstream(readSignalConn{Conn: proxyEnd, reads: reached})
 	go func() { _, _ = dest.Write([]byte("abc")) }()
 	p := make([]byte, 16)
 	if n, err := u.Read(p); n != 3 || err != nil {
 		t.Fatalf("read %d, %v: want 3, nil", n, err)
 	}
+	<-reached
 	u.FromDest()
 	seq := u.FromClient()
 	if !u.PendingBefore(fakeconn.FromDest, seq) {
@@ -179,8 +182,14 @@ func TestOnReadIsToldOnceTheCutIsNoLongerPending(t *testing.T) {
 	u.OnRead(func() { pending <- u.PendingBefore(fakeconn.FromDest, seq) })
 	done := make(chan struct{})
 	go func() { defer close(done); _, _ = u.Read(p) }()
-	if <-pending {
-		t.Fatal("OnRead's func was told that a Read on the conn beneath began while PendingBefore still holds the cut")
+	<-reached // the Read is in the conn beneath until dest writes
+	select {
+	case stillPending := <-pending:
+		if stillPending {
+			t.Fatal("OnRead's func was told that a Read on the conn beneath began while PendingBefore still holds the cut")
+		}
+	default:
+		t.Fatal("a Read reached the conn beneath and OnRead's func was not told before it")
 	}
 	if _, err := dest.Write([]byte("x")); err != nil {
 		t.Fatal(err)
