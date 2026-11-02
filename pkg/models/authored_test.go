@@ -14,7 +14,8 @@ func TestDeepCopySharesNoAuthoredBlock(t *testing.T) {
 	m := &Mock{Kind: HTTP, Spec: MockSpec{Authored: &Authored{
 		How: AuthoredDerived, Reason: "declined card", Source: "TestCheckout/mock-7", Request: "sha256:0f1e",
 		Delta: &AuthoredDelta{Status: 402, Body: &body, JSONPatch: `[]`,
-			Header: map[string]string{"X-Decline-Code": "insufficient_funds"}, DropHeader: []string{"Etag"}},
+			Header: map[string]string{"X-Decline-Code": "insufficient_funds"}, DropHeader: []string{"Etag"},
+			Fault: &Fault{Kind: FaultTruncate, BodyBytes: 4}},
 	}}}
 	want := *m.Spec.Authored
 	wantDelta := *m.Spec.Authored.Delta
@@ -30,6 +31,7 @@ func TestDeepCopySharesNoAuthoredBlock(t *testing.T) {
 	*c.Spec.Authored.Delta.Body = "edited"
 	c.Spec.Authored.Delta.Header["X-Decline-Code"] = "edited"
 	c.Spec.Authored.Delta.DropHeader[0] = "edited"
+	c.Spec.Authored.Delta.Fault.BodyBytes = 9
 
 	if m.Spec.Authored.Reason != want.Reason || m.Spec.Authored.Delta.Status != wantDelta.Status {
 		t.Fatalf("writing the copy wrote the original: %+v", m.Spec.Authored)
@@ -41,11 +43,59 @@ func TestDeepCopySharesNoAuthoredBlock(t *testing.T) {
 		t.Fatalf("writing the copy's headers wrote the original's: %+v", m.Spec.Authored.Delta)
 	}
 
+	if m.Spec.Authored.Delta.Fault.BodyBytes != 4 {
+		t.Fatalf("writing the copy's fault wrote the original's: %+v", m.Spec.Authored.Delta.Fault)
+	}
+
 	if (&Mock{Kind: HTTP}).DeepCopy().Spec.Authored != nil {
 		t.Fatal("a recorded mock's copy has an authored block")
 	}
 	var nilAuthored *Authored
 	if nilAuthored.Clone() != nil {
 		t.Fatal("Clone of nil is not nil")
+	}
+}
+
+// A replay summary names a fault an authored mock served "as authored", and
+// one a recorded mock served "as recorded", also once the mock's payload is
+// left on disk (LeavePayloadOnDisk), as keploy test reads a set's mocks: a
+// reader never takes an answer someone wrote for one the upstream gave.
+func TestAFaultAnAuthoredMockServedIsNamedAsAuthored(t *testing.T) {
+	authored := &Authored{How: AuthoredGenerated, Reason: "provider times out"}
+	var none *Mock
+	if none.IsAuthored() {
+		t.Fatal("a nil mock is authored")
+	}
+	for _, c := range []struct {
+		authored *Authored
+		want     string
+	}{
+		{nil, "mock-4: no answer until the application closed, as recorded"},
+		{authored, "mock-4: no answer until the application closed, as authored"},
+	} {
+		m := &Mock{Name: "mock-4", Kind: HTTP, Spec: MockSpec{Fault: &Fault{Kind: FaultTimeout}, Authored: c.authored}}
+		if got := m.IsAuthored(); got != (c.authored != nil) {
+			t.Errorf("IsAuthored() = %v with block %+v", got, c.authored)
+		}
+		if got := m.FaultServed(); got != c.want {
+			t.Errorf("FaultServed() = %q, want %q", got, c.want)
+		}
+
+		recorded := payloadMocks()
+		d := recorded["http"]()
+		d.Name = "mock-4"
+		d.Spec.Fault = &Fault{Kind: FaultTimeout}
+		d.Spec.Authored = c.authored.Clone()
+		d.DeriveLifetime()
+		d.LeavePayloadOnDisk(&fileSource{recorded: recorded}, PayloadAt{Name: "http"})
+		if !d.PayloadOnDisk() || d.Spec.Authored != nil {
+			t.Fatalf("the payload stayed in memory: on disk %v, Spec.Authored %+v", d.PayloadOnDisk(), d.Spec.Authored)
+		}
+		if got := d.IsAuthored(); got != (c.authored != nil) {
+			t.Errorf("on disk: IsAuthored() = %v with block %+v", got, c.authored)
+		}
+		if got := d.FaultServed(); got != c.want {
+			t.Errorf("on disk: FaultServed() = %q, want %q", got, c.want)
+		}
 	}
 }
