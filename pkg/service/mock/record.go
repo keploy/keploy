@@ -866,7 +866,9 @@ func (m *mockService) Record(ctx context.Context) error {
 				plan = classify(windows, starts, suites, recorded)
 				byTest, owned = plan.tests, plan.perTest
 			}
-			byCase := correlateCases(windows, owned, capture.list(), stepWindows(windows))
+			listed := capture.list()
+			byCase, shared := correlateCases(windows, owned, listed, stepWindows(windows))
+			m.saySharedCharges(name, listed, shared)
 			for _, w := range windows {
 				if _, ok := byTest[w.Name]; !ok {
 					byTest[w.Name] = nil
@@ -1187,7 +1189,7 @@ type capturedMock struct {
 	// call is, for an HTTP mock or case, the call it is (mockCall,
 	// caseCall): a re-record hands it to the DeliveryCarrier, which carries
 	// a deliver: entry to the mock or case of the new recording that is
-	// the same call.
+	// the same call, and a case_mocks line names a left-out call by it.
 	call string
 }
 
@@ -1272,8 +1274,11 @@ func dataPlane(mocks []capturedMock) []capturedMock {
 	return out
 }
 
-// correlateCases lists each flow's test cases by the window their request fell in; a case outside every window stays unmapped.
-func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, steps []models.ScopeWindow) map[string]models.MappedTestCase {
+// correlateCases lists each flow's test cases by the window their request
+// fell in; a case outside every window stays unmapped. A call goes in the
+// case_mocks of the one case of its flow in flight when it was made. One
+// made while two or more were goes in none, and is in shared with them.
+func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, steps []models.ScopeWindow) (map[string]models.MappedTestCase, []sharedCall) {
 	byTest := make(map[string]models.MappedTestCase)
 	spans := make(map[string]models.ScopeWindow, len(cases))
 	for _, c := range cases {
@@ -1289,10 +1294,12 @@ func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, s
 	}
 	var own []capturedMock
 	at := make(map[string]time.Time, len(mocks))
+	byName := make(map[string]capturedMock, len(mocks))
 	for _, mk := range mocks {
 		if !mk.boot {
 			own = append(own, mk)
 			at[mk.name] = mk.ts
+			byName[mk.name] = mk
 		}
 	}
 	holder := make(map[string]string, len(cases))
@@ -1303,18 +1310,25 @@ func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, s
 			inFlow[flowOf(windows, test)] = append(inFlow[flowOf(windows, test)], spans[c])
 		}
 	}
+	var shared []sharedCall
 	for test, entries := range correlateScopes(windows, own) {
 		for _, e := range entries {
-			c := containing(inFlow[flowOf(windows, test)], at[e.Name])
-			if c == "" {
+			held := holding(inFlow[flowOf(windows, test)], at[e.Name])
+			if len(held) > 1 {
+				// Of two cases in flight (a provider's callback and the
+				// test's own request), the time alone cannot tell whose
+				// handler made it: charged to neither (sharedLines says so).
+				shared = append(shared, sharedCall{mock: byName[e.Name], cases: held})
 				continue
 			}
-			tc := byTest[holder[c]]
-			if tc.CaseMocks == nil {
-				tc.CaseMocks = map[string][]string{}
+			for _, c := range held {
+				tc := byTest[holder[c]]
+				if tc.CaseMocks == nil {
+					tc.CaseMocks = map[string][]string{}
+				}
+				tc.CaseMocks[c] = append(tc.CaseMocks[c], e.Name)
+				byTest[holder[c]] = tc
 			}
-			tc.CaseMocks[c] = append(tc.CaseMocks[c], e.Name)
-			byTest[holder[c]] = tc
 		}
 	}
 	for _, tc := range byTest {
@@ -1322,7 +1336,13 @@ func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, s
 			sort.SliceStable(names, func(i, j int) bool { return at[names[i]].Before(at[names[j]]) })
 		}
 	}
-	return byTest
+	sort.SliceStable(shared, func(i, j int) bool {
+		if !shared[i].mock.ts.Equal(shared[j].mock.ts) {
+			return shared[i].mock.ts.Before(shared[j].mock.ts)
+		}
+		return shared[i].mock.name < shared[j].mock.name
+	})
+	return byTest, shared
 }
 
 // stampBegins keeps, for each test, when it began in this recording: its

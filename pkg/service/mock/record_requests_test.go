@@ -198,10 +198,13 @@ func TestCorrelateCases(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, correlateCases(windows, tc.mocks, tc.cases, steps))
+			got, _ := correlateCases(windows, tc.mocks, tc.cases, steps)
+			require.Equal(t, tc.want, got)
 		})
 	}
-	require.Empty(t, correlateCases(nil, nil, cases, steps))
+	got, shared := correlateCases(nil, nil, cases, steps)
+	require.Empty(t, got)
+	require.Empty(t, shared)
 }
 
 func TestStartupMocks(t *testing.T) {
@@ -465,7 +468,7 @@ func TestCorrelateCasesPairsAMockWithACaseOfTheSameFlowAcrossEntries(t *testing.
 		{name: "mock-27", ts: at("2026-09-29T22:35:22.158056Z")},
 		{name: "mock-28", ts: at("2026-09-29T22:35:22.35Z")},
 	}
-	got := correlateCases(windows, mocks, cases, nil)
+	got, _ := correlateCases(windows, mocks, cases, nil)
 	require.Equal(t, map[string]models.MappedTestCase{
 		"orders/stats.TestOrderLifecycle": {
 			Cases:     []string{"get-orders-by-id-2"},
