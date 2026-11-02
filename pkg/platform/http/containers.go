@@ -89,7 +89,10 @@ func (a *AgentClient) agentTakesContainers(ctx context.Context, uri string) (tak
 	if err != nil {
 		return false, false, err
 	}
-	res, err := a.client.Do(req)
+	// Made beside the run's requests, and cancelled as the run ends
+	// (ownConnection).
+	client := a.ownConnection()
+	res, err := client.Do(req)
 	if err != nil {
 		return false, false, err
 	}
@@ -117,7 +120,10 @@ func (a *AgentClient) postContainers(ctx context.Context, uri string, s containe
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := a.client.Do(req)
+	// Made beside the run's requests, and cancelled as the run ends
+	// (ownConnection).
+	client := a.ownConnection()
+	res, err := client.Do(req)
 	if err != nil {
 		return err
 	}

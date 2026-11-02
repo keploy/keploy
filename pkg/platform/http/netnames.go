@@ -181,7 +181,10 @@ func (a *AgentClient) postNetworkNames(ctx context.Context, uri, agentContainer 
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := a.client.Do(req)
+	// Made beside the run's requests, and cancelled as the run ends
+	// (ownConnection).
+	client := a.ownConnection()
+	res, err := client.Do(req)
 	if err != nil {
 		return err
 	}

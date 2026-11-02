@@ -1852,6 +1852,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
 	runTestSetCtx, runTestSetCtxCancel := context.WithCancel(runTestSetCtx)
+	// A test case's calls to the agent's hooks are keploy's own, on the run's
+	// context (agentHookContext): the set's is cancelled when its app exits.
+	runTestSetCtx = withRunLife(runTestSetCtx, ctx)
 
 	startTime := time.Now()
 	pruneBefore := startTime.UTC()
