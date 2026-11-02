@@ -69,8 +69,8 @@ func (r *Replayer) notJudged(testSetID string) bool {
 }
 
 // markNeverReady records that testSetID ran no test because its application
-// never got ready: it was not judged (proven switch), or the app the run keeps
-// for every set had exited before the set began (reportKeptAppGone).
+// never got ready: it was not judged (proven switch), or the application's
+// exit halted it before its first test (reportHaltedBeforeTests).
 func (r *Replayer) markNeverReady(testSetID string) {
 	r.notJudgedMu.Lock()
 	defer r.notJudgedMu.Unlock()

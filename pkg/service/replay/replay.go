@@ -227,6 +227,10 @@ type runShape struct {
 	// (earlierExitWhy): the app was gone, it did not fail to start. Empty
 	// otherwise.
 	exitedEarlier string
+	// exitedInSetup is whether the application the run keeps for every set
+	// exited while keploy set the set up, before its first test, after it
+	// had served a set (setupEnd in RunTestSet): it had started.
+	exitedInSetup bool
 }
 
 const partialRunReason = "replay stopped before every test ran - the tests missing from the totals were not " +
@@ -280,6 +284,9 @@ func describeTestSetVerdict(status models.TestSetStatus, testCaseResults []model
 		const nextStep = " - check application logs in the app_logs field for details and next steps"
 		if shape.exitedEarlier != "" {
 			return "application exited before this test set began" + exit + " " + shape.exitedEarlier + nextStep
+		}
+		if shape.exitedInSetup {
+			return "application exited while keploy set this test set up, before its first test" + exit + nextStep
 		}
 		if len(testCaseResults) == 0 && shape.heldTest == "" {
 			return "application startup failed" + exit + nextStep
@@ -2042,7 +2049,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// kept.exit is set, for good, once gone is said.
 		if gone {
 			if status, ok := mapAppErrorToTestSetStatus(kept.exit); ok {
-				return r.reportKeptAppGone(runTestSetCtx, testRunID, testSetID, testCases, startTime, status, kept.exit, earlier)
+				return r.reportHaltedBeforeTests(runTestSetCtx, testRunID, testSetID, testCases, startTime, status, kept.exit,
+					runShape{exitedEarlier: earlier}, "the application had exited before this test set began, so keploy runs none of its tests")
 			}
 		}
 	}
@@ -2147,6 +2155,50 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testSetStatusByErrChanMu.RLock()
 		defer testSetStatusByErrChanMu.RUnlock()
 		return heldAtExit
+	}
+	// appExitKnown is the exit of the app's own keploy knows of now, its
+	// status (APP_HALTED or FAULT_USER_APP: mapAppErrorToTestSetStatus) and
+	// whether it came after the app had served a set (keptAppExit.toldExit),
+	// with ok; ok is false while keploy knows of none, and on the run's own
+	// end (the user's stop), which is no exit of the app's.
+	appExitKnown := func() (exit models.AppError, afterASet bool, halted models.TestSetStatus, ok bool) {
+		if ctx.Err() != nil {
+			return exit, false, "", false
+		}
+		exit = getLastAppErr()
+		if kept := r.keptExit; serveTest && kept != nil {
+			if e, told, after := kept.toldExit(); told {
+				exit, afterASet = e, after
+			}
+		}
+		if exit == (models.AppError{}) {
+			return exit, false, "", false
+		}
+		halted, ok = mapAppErrorToTestSetStatus(exit)
+		if !ok || (halted != models.TestSetStatusAppHalted && halted != models.TestSetStatusFaultUserApp) {
+			return exit, false, "", false
+		}
+		return exit, afterASet, halted, true
+	}
+	// setupEnd ends a set whose setup (its stack's start, its staging on
+	// keploy's agent, the wait for its app) failed or was cut short. Once
+	// keploy knows of an exit of the app's own, the setup's end is the
+	// exit's: the stack went down with the app, and the set's end the exit
+	// brought on cut the setup's calls short. The set halted on the exit
+	// before its first test (reportHaltedBeforeTests), and the run goes on as
+	// after any halted set. The app the run keeps for every set is read as
+	// its runner told it (keptAppExit), which the set's watch of it reads
+	// too, only later; the set's own app as its run's return or its die did.
+	// Otherwise the setup's failure stands.
+	setupEnd := func(status models.TestSetStatus, err error) (models.TestSetStatus, error) {
+		exit, afterASet, halted, ok := appExitKnown()
+		if !ok {
+			return status, err
+		}
+		r.logger.Debug("the test set's setup ended on the application's exit", zap.String("test-set", testSetID),
+			zap.String("setupStatus", string(status)), zap.Error(err))
+		return r.reportHaltedBeforeTests(runTestSetCtx, testRunID, testSetID, testCases, startTime, halted, exit,
+			runShape{exitedInSetup: afterASet}, "the application exited while keploy set this test set up, so keploy runs none of its tests")
 	}
 	// stopAppBeforeSetEnd, under the proven switch, stops the application
 	// keploy started for this set as the set's teardown does (an interrupt,
@@ -2461,7 +2513,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// The app the run started once for every set: its exit, told
 			// at once by its runner (keptAppExit), halts this set as the
 			// return of a run of the set's own does. A set that began
-			// with the exit told ran nothing (reportKeptAppGone).
+			// with the exit told ran nothing (reportHaltedBeforeTests).
 			runTestSetErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
 				select {
@@ -2517,13 +2569,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			go pkg.AgentHealthTicker(agentCtx, r.logger, string(r.config.Agent.AgentURI), agentReadyCh, 1*time.Second)
 			agentStart := pkg.WatchAgentStart(agentCtx, r.instrumentation)
 
+			// The set's end cuts the wait short: the user's stop (Ctrl+C),
+			// or the app's exit (setupEnd).
 			select {
 			case <-runTestSetCtx.Done():
-				// Parent context cancelled (user pressed Ctrl+C)
-				return models.TestSetStatusUserAbort, runTestSetCtx.Err()
+				return setupEnd(models.TestSetStatusUserAbort, runTestSetCtx.Err())
 			case err := <-agentStart:
 				if runTestSetCtx.Err() != nil {
-					return models.TestSetStatusUserAbort, runTestSetCtx.Err()
+					return setupEnd(models.TestSetStatusUserAbort, runTestSetCtx.Err())
 				}
 				// Tear down the compose stack we already created before returning,
 				// so a retry's `compose up` doesn't hit "container name already in
@@ -2533,12 +2586,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if downErr := r.instrumentation.ComposeDownOnSetupFailure(context.Background()); downErr != nil {
 					r.logger.Debug("composeDown after the agent did not come up failed", zap.Error(downErr))
 				}
-				return models.TestSetStatusFailed, fmt.Errorf("the keploy-agent docker compose started did not come up: %w", err)
+				return setupEnd(models.TestSetStatusFailed, fmt.Errorf("the keploy-agent docker compose started did not come up: %w", err))
 			case ready, ok := <-agentReadyCh:
 				// The ticker closes its channel unready only once the set's
 				// context ends.
 				if !ok || !ready {
-					return models.TestSetStatusUserAbort, runTestSetCtx.Err()
+					return setupEnd(models.TestSetStatusUserAbort, runTestSetCtx.Err())
 				}
 			}
 			cancel()
@@ -2587,15 +2640,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		err = r.mockOutgoingForTestSet(runTestSetCtx, outgoingOpts)
 		if err != nil {
-			if ctx.Err() != context.Canceled {
+			if _, _, _, exited := appExitKnown(); ctx.Err() != context.Canceled && !exited {
 				utils.LogError(r.logger, err, "failed to mock outgoing")
 			}
-			return models.TestSetStatusFailed, err
+			return setupEnd(models.TestSetStatusFailed, err)
 		}
 
 		filteredMocks, unfilteredMocks, err := loadMocksForAgent()
 		if err != nil {
-			return models.TestSetStatusFailed, err
+			return setupEnd(models.TestSetStatusFailed, err)
 		}
 
 		if !isMappingEnabled {
@@ -2605,7 +2658,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Send initial filtering parameters to set up mocks for test set
 		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, perTestRegion, useMappingBased, r.recordedSetShape(ctx, testSetID, testCases), nil)
 		if err != nil {
-			return models.TestSetStatusFailed, err
+			return setupEnd(models.TestSetStatusFailed, err)
 		}
 
 		// The compose agent is up and the app is still parked behind its
@@ -2685,7 +2738,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if !waitsForApp(serveTest, r.isFirstTestSet) {
 			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
 		} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, true, serveTest && !r.isFirstTestSet && composeRestart == nil); !ready && why == "" {
-			return models.TestSetStatusUserAbort, context.Canceled
+			return setupEnd(models.TestSetStatusUserAbort, context.Canceled)
 		} else if !ready {
 			notReady = why
 		}
@@ -2701,7 +2754,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// than proceeding mockless.
 		if err := r.ensureAgentHoldsStoredMocks(ctx, testRunID, testSetID, outgoingOpts, filteredMocks, unfilteredMocks,
 			totalConsumedMocks, useMappingBased, testCases); err != nil {
-			return models.TestSetStatusFailed, err
+			return setupEnd(models.TestSetStatusFailed, err)
 		}
 		// An agent the retry started in place of the one before, while the
 		// app had never started, holds all of this set's evidence; any

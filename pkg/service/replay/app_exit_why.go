@@ -128,6 +128,15 @@ func (k *keptAppExit) begin(set string) (gone bool, earlier string, end func()) 
 	}
 }
 
+// toldExit is the exit, once told (told false until then), and whether a
+// set had ended before it was told (afterASet): the app had served a set, so
+// an exit before a set's first test is not its startup failing.
+func (k *keptAppExit) toldExit() (e models.AppError, told, afterASet bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.exit, k.isTold, k.toldAfter != ""
+}
+
 // earlierExitWhy says when an exit told before set began was told: while the
 // set in ran, or after the set after had ended. A run that tries a set again
 // runs it twice, and the earlier try is said so. "" for an exit told before
@@ -153,20 +162,23 @@ func listenedTo(ctx context.Context) (context.Context, *keptAppExit) {
 	return models.WithAppExit(ctx, k.tell), k
 }
 
-// reportKeptAppGone ends a set that began after the exit of the app the run
-// keeps for every set was told (keptAppExit.begin): it ran none of its tests,
-// and its report says the app's exit, status (mapAppErrorToTestSetStatus) and
-// when it went (earlier, earlierExitWhy), or that it failed to start where no
-// set had begun before the exit. The set is counted in the run's totals as one
-// whose app halted before its first test is.
-func (r *Replayer) reportKeptAppGone(ctx context.Context, testRunID, testSetID string, testCases []*models.TestCase, startTime time.Time, status models.TestSetStatus, exit models.AppError, earlier string) (models.TestSetStatus, error) {
+// reportHaltedBeforeTests ends a set the application's exit halted before
+// its first test: it ran none of its tests, and its report says the app's
+// exit and status (mapAppErrorToTestSetStatus), as shape words it (why, the
+// log's message, says it in keploy's log): a set that began after the exit
+// of the app the run keeps for every set was told (keptAppExit.begin,
+// shape.exitedEarlier), or one whose setup the exit ended (setupEnd in
+// RunTestSet, shape.exitedInSetup), or the app's startup failing. The set is
+// counted in the run's totals as one whose app halted before its first test
+// is.
+func (r *Replayer) reportHaltedBeforeTests(ctx context.Context, testRunID, testSetID string, testCases []*models.TestCase, startTime time.Time, status models.TestSetStatus, exit models.AppError, shape runShape, why string) (models.TestSetStatus, error) {
 	total := len(testCases)
 	if selected := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID]); len(selected) != 0 {
 		total = len(selected)
 	}
-	reason := describeTestSetFailure(status, nil, runShape{appExit: appExitWhy(exit, ""), exitedEarlier: earlier})
-	r.logger.Error("the application had exited before this test set began, so keploy runs none of its tests",
-		zap.String("test-set", testSetID), zap.String("reason", reason))
+	shape.appExit = appExitWhy(exit, "")
+	reason := describeTestSetFailure(status, nil, shape)
+	r.logger.Error(why, zap.String("test-set", testSetID), zap.String("reason", reason))
 	appLogs := exit.AppLogs
 	if appLogs == "" && shouldIncludeAppLogs(status) {
 		logCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
