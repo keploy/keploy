@@ -522,15 +522,26 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	// 10. Summarise what was served and missed.
 	all, werr := m.replayWindows(ctx)
-	if werr != nil {
-		// Under the proven switch what each test did decides keploy's
-		// verdict: a replay that cannot read it did not complete. When keploy
-		// had already failed under the test command (its agent died), that is
-		// the reason, and the read failed because of it.
-		if appErr.AppErrorType == models.ErrInternal && appErr.Err != nil {
-			return fmt.Errorf("keploy did not complete the run: %w", appErr.Err)
-		}
+	// Under the proven switch what each test did decides keploy's verdict: a
+	// replay that cannot read it did not complete. When keploy had already
+	// failed under the test command (its agent died), that is the reason,
+	// and the read failed because of it. With the switch off the windows
+	// decide no test's verdict, but they carry the begins keploy refused
+	// (below), and keploy cannot know of a refusal it could not read: the
+	// run goes on to report what it served and missed, and fails at its end
+	// (step 11), as keploy's own failure when its agent died.
+	var windowsUnread error
+	agentFailed := appErr.AppErrorType == models.ErrInternal && appErr.Err != nil
+	switch {
+	case werr == nil:
+	case agentFailed && provenswitch.On():
+		return fmt.Errorf("keploy did not complete the run: %w", appErr.Err)
+	case agentFailed:
+		// The switch off: reported, and failed as keploy's own (step 11).
+	case provenswitch.On():
 		return fmt.Errorf("keploy could not read what each test did from its agent: %w", werr)
+	default:
+		windowsUnread = fmt.Errorf("keploy could not read what each test did from its agent: %w", werr)
 	}
 	// What the run saw of mock.real beyond its tests (proven switch only),
 	// once its last test ended: rule 4's reached destinations, and evidence
@@ -616,6 +627,20 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// A failure keploy already named keeps its name; the user's interrupt is
 	// no agent failure, and the run ends unjudged on it (below).
 	incomplete := requestsShort
+	if windowsUnread != nil {
+		// With the switch off: a test keploy refused at its begin fails the
+		// run (above), and this run's refusals could not be read, so it must
+		// not pass on the test command's exit (its exit is kept, and a
+		// passing one becomes 1).
+		m.logger.Error("replay failed: keploy could not read what each test did from its agent, so it cannot tell whether it refused a test at its begin",
+			zap.String("mock-set", name), zap.Error(windowsUnread),
+			zap.String("next_step", "check the agent logs for why the read failed, then replay again"))
+		utils.SetExitCodeOnce(utils.ExitKeployError)
+		if incomplete != "" {
+			incomplete += "; "
+		}
+		incomplete += windowsUnread.Error()
+	}
 	if counts.settleErr != nil && failedBy != FailedByKeploy && parent.Err() == nil {
 		m.logger.Error("replay failed: keploy's agent did not finish checking the run's tests, so they are not judged ("+provenswitch.Env+"=1)",
 			zap.String("mock-set", name), zap.Error(counts.settleErr),
@@ -1622,24 +1647,19 @@ func testBegins(mapping *models.Mapping) map[string]time.Time {
 
 // replayWindows are the per-test windows of this replay. Under docker compose
 // the agent was stopped with the runner, so they come from the account it left
-// as it stopped (see reportOutcome); otherwise from the agent itself.
-// With the proven switch on a failed read is an error; off, it is no windows.
+// as it stopped (see reportOutcome); otherwise from the agent itself, with
+// no deadline (readWindows). A failed read is an error whatever the proven
+// switch: they carry the begins keploy refused, which fail the run, so a
+// read that failed is never "no tests".
 func (m *mockService) replayWindows(ctx context.Context) ([]models.ScopeWindow, error) {
 	if r, ok := m.instrumentation.(ComposeOutcomeReader); ok && m.isDockerCompose() {
 		outcome, err := r.ComposeAgentOutcome()
 		if err != nil {
-			if provenswitch.On() {
-				return nil, err
-			}
-			m.logger.Debug("no per-test windows: the keploy-agent container left no replay outcome", zap.Error(err))
-			return nil, nil
+			return nil, err
 		}
 		return m.takeRunWindows(outcome.Windows), nil
 	}
-	if provenswitch.On() {
-		return m.readWindows(ctx)
-	}
-	return m.agentWindows(ctx), nil
+	return m.readWindows(ctx)
 }
 
 // ScopeGateRequest is what a ScopeGateSource is told about the replay it gates.

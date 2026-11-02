@@ -144,8 +144,10 @@ func (m *mockService) setName() string {
 
 // agentEpilogueTimeout bounds, with the proven switch off, every agent read
 // made AFTER the wrapped runner has exited: the consumed/missed outcome, the
-// PID-map count and the captured-on-miss drain (epilogueRead), and the
-// per-test scope windows (readWindows). Under the switch those reads are what
+// PID-map count and the captured-on-miss drain (epilogueRead), and a
+// record's per-test scope windows (agentWindows). A replay's windows are
+// never bounded: whatever the switch, they carry the begins keploy refused,
+// which fail the run (readWindows). Under the switch those reads are what
 // keploy's verdict rests on, and none has a deadline (design rule 15): the
 // agent's answer, the connection's close or the run's context ends each, and
 // the user ends the epilogueRead ones at a second interrupt.

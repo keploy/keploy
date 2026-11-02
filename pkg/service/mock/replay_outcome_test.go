@@ -344,12 +344,16 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 			unwantLogs: []string{"writes what it served and missed as compose stops it", "check the agent logs for why it stopped"},
 		},
 		{
-			name:       "no account: unknown, and why, and --strict fails as keploy's own error",
+			// With no account there are no per-test windows either, so keploy
+			// cannot tell whether it refused a test at its begin: the run
+			// fails on that, as keploy's own error, before --strict looks
+			// (the case above is --strict's own).
+			name:       "no account: unknown, and why, and the run fails as keploy's own error",
 			leftErr:    errors.New("the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json"),
 			wantExit:   1,
 			wantErr:    true,
 			wantFields: map[string]any{"consumed": "unknown", "missed": "unknown", "reason": "the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json"},
-			wantLogs:   []string{"incomplete", "writes what it served and missed as compose stops it", "could not be proven", "why:the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json"},
+			wantLogs:   []string{"incomplete", "writes what it served and missed as compose stops it", "cannot tell whether it refused a test at its begin", "error:keploy could not read what each test did from its agent: the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
