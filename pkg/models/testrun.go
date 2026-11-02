@@ -584,6 +584,14 @@ type UnmatchedCall struct {
 	// likely one that test recorded, such as a later exchange of a connection
 	// it opened, whose handshake was recorded there.
 	RecordedIn string `json:"recorded_in,omitempty" yaml:"recorded_in,omitempty"`
+	// OrderDependent says, under the proven switch, a test of one of a
+	// run's parallel test workers made the call RecordedIn's test recorded:
+	// a call a worker makes once (a token fetch, a pooled connection's
+	// handshake) lands in whichever of its tests it runs first, and the
+	// workers take tests in another order each run, so the call is no one
+	// test's. The test fails on it, named, as it fails on any miss: keploy
+	// never answers it with the other test's recording.
+	OrderDependent bool `json:"order_dependent,omitempty" yaml:"order_dependent,omitempty"`
 	// Reason is why the call missed, in judging's words (design v14 §5.3,
 	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall. Only
 	// record's full round, where the learn step runs, gives one; empty
