@@ -1,6 +1,7 @@
 package http
 
 import (
+	"errors"
 	"slices"
 	"strconv"
 	"testing"
@@ -47,6 +48,14 @@ func (d ownGateDb) FindStagedNotOwned(kind models.Kind, call integrations.CallRo
 		match(m)
 	}
 	return "", true
+}
+
+// readFailsDb is ownGateDb whose per-test read fails: the open test's own
+// recordings it has not answered are then unknown.
+type readFailsDb struct{ ownGateDb }
+
+func (d readFailsDb) GetPerTestMocksInWindow() ([]*models.Mock, error) {
+	return nil, errors.New("per-test read failed")
 }
 
 // secretPut is a recording of a PUT of a secret with check-and-set cas, made
@@ -183,5 +192,22 @@ func TestAChangedCallOfTheTestsOwnNamesTheEarlierTestsRecordingOfItsMethodAndPat
 				t.Fatalf("without the switch, a changed PUT names earlier %q; want none", r.Earlier)
 			}
 		})
+	}
+}
+
+// When the per-test read fails, keploy cannot place the test's own
+// recordings it has not answered, one of which may come before an earlier
+// test's: ownHTTPRecordings gives none, not even the ones it answered, so
+// earlierRecording names none. (The matcher reads the per-test pool first and
+// fails the call when that read fails, so only a read that fails between the
+// two reaches it.) Mutation: the failed read is ignored.
+func TestNoOwnRecordingIsPlacedWhenThePerTestReadFails(t *testing.T) {
+	own := secretPut("mock-own", "PUT", "/v1/secret/data/x", "localhost:8200", 2, time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC))
+	ok := ownGateDb{roundGateDb: roundGateDb{gateDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{}}, consumed: []*models.Mock{own}}}, lookups: new(int)}
+	if got := ownHTTPRecordings(ok); len(got) != 1 || got[0] != own {
+		t.Fatalf("with the per-test read working, the test's own are %v; want its answered mock-own", got)
+	}
+	if got := ownHTTPRecordings(readFailsDb{ok}); got != nil {
+		t.Fatalf("with the per-test read failing, the test's own are %v; want none", got)
 	}
 }
