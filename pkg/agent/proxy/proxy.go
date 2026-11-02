@@ -3112,7 +3112,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// did not happen. The other connections are listed below, past
 		// the last pass-through.
 		if proven {
-			p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
+			p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey, destInfo.Instance)
 		}
 		if rule.Mode != models.MODE_TEST {
 			// probeMysql already dialed when it had to read the
@@ -3857,10 +3857,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if httpParsed && callRulesAt(outgoingOpts.Rules, uint(destInfo.Port)) {
 			var listed sync.Once
 			parserCtx = integrations.WithCallServed(parserCtx, func() {
-				listed.Do(func() { p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey) })
+				listed.Do(func() { p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey, destInfo.Instance) })
 			})
 		} else {
-			p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
+			p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey, destInfo.Instance)
 		}
 	}
 
@@ -6608,7 +6608,7 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		// listed per test; one a process makes to its own listener (an
 		// in-process test server) is not.
 		if caller != owner {
-			srcConn = p.liveConn(srcConn, owner, dest.Port)
+			srcConn = p.liveConn(srcConn, owner, dest.Port, dest.Instance)
 		}
 	} else {
 		// Only app marking closes these (closeDependencyConns).

@@ -550,9 +550,12 @@ func (a *Agent) watchSettle(ctx context.Context, cancel context.CancelCauseFunc,
 // miss of the gap. The gap starts at the test before it's end, its process's
 // claim (which counts what came before it as the run's: closeDropsGapHeld),
 // or the session's start (openDrops). What the gap left unpaired, what the
-// test before it left included, is carried on whole (chargeDrops).
-func (a *Agent) markDrops(ctx context.Context, drops models.ListenDrops) {
-	n, why, _ := a.windowDrops(drops, true, true)
+// test before it left included, is carried on whole (chargeDrops). gap is
+// false when the window it closes is another worker's open test's, not a
+// gap: what it counts is then charged to that test, which is open across
+// it, and to every test open as the next loss read is made.
+func (a *Agent) markDrops(ctx context.Context, drops models.ListenDrops, gap bool) {
+	n, why, _ := a.windowDrops(drops, gap, true)
 	a.countDrops(ctx, n, why)
 }
 
@@ -697,9 +700,10 @@ func (a *Agent) settledSince(ctx context.Context, answers bool, worker uint32, w
 			a.logger.Warn("keploy's agent made no progress settling the test's calls at its end; it gave up on them, so the test is not judged", zap.String("test", what), zap.Strings("connections", g.held))
 		}
 		// Not read: the test's window goes on as the gap's, which the next
-		// begin, or the run's last read, closes. The test is not judged.
+		// begin, or the run's last read, closes, or as another worker's
+		// open test's, whose end closes it. The test is not judged.
 		a.provenMu.Lock()
-		a.proven.dropsInTest = false
+		a.proven.dropsInTest = a.proven.openBut(what)
 		a.provenMu.Unlock()
 		return err
 	}
@@ -708,7 +712,12 @@ func (a *Agent) settledSince(ctx context.Context, answers bool, worker uint32, w
 	if errors.As(err, &bl) {
 		bl.charge()
 	}
-	n, why, open := a.windowDrops(drops, false, false)
+	// With another worker's test still open, the window that opens is
+	// that test's, not a gap.
+	a.provenMu.Lock()
+	others := a.proven.openBut(what)
+	a.provenMu.Unlock()
+	n, why, open := a.windowDrops(drops, false, others)
 	if !open {
 		return err
 	}

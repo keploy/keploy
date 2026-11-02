@@ -324,12 +324,7 @@ func TestAWorkersTestIsTheWorkersWhoseProcessBeganIt(t *testing.T) {
 
 	_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestX"))
 	require.Nil(t, serr)
-	// Until each worker keeps its own windows, the run's workers run one
-	// test at a time between them; the other worker's end touches nothing.
-	_, serr = a.ProvenBegin(as(w1.Process.Pid), begin("TestX"))
-	require.NotNil(t, serr)
-	require.Equal(t, models.ScopeErrOneTestAtATime, serr.Code)
-	require.Contains(t, serr.Message, "a::TestX began in test worker 1 while test worker 2's test b::TestX was still open")
+	// Another worker's end touches nothing of worker 2's.
 	_, serr = a.ProvenEnd(as(w1.Process.Pid), models.ScopeReq{Name: "TestX", Outcome: "passed"})
 	require.NotNil(t, serr)
 	require.Equal(t, models.ScopeErrNotOpen, serr.Code)
@@ -342,7 +337,8 @@ func TestAWorkersTestIsTheWorkersWhoseProcessBeganIt(t *testing.T) {
 	require.Nil(t, serr, "worker 2's own test is still open, and it ends it")
 	_, serr = a.ProvenBegin(as(w1.Process.Pid), begin("TestX"))
 	require.Nil(t, serr)
-	require.Equal(t, uint32(1), a.proven.openWorker)
+	require.Equal(t, "a::TestX", a.proven.openOf(1))
+	require.Empty(t, a.proven.openOf(2))
 	require.Equal(t, models.ScopeOutcomePassed, windowOf(t, a, "b::TestX").Outcome)
 }
 

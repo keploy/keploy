@@ -42,7 +42,10 @@ func (a *Agent) NoteLive(row models.LiveRow) {
 		// The run's windows were read at its end: nothing more is.
 		return
 	}
-	row.Test = a.proven.open
+	// The test open in the instance whose process made the call: in a run
+	// of more than one worker, a call from no worker (instance 0) is no
+	// test's.
+	row.Test, row.Instance = a.proven.openOf(row.Instance), 0
 	t := &a.proven.topology
 	if _, seen := t.live[row]; seen {
 		return
@@ -63,7 +66,10 @@ func (a *Agent) NoteMocked(row models.MockedRow) {
 	if a.proven.closed {
 		return
 	}
-	row.Test = a.proven.open
+	// The test open in the instance whose process made the call: in a run
+	// of more than one worker, a call from no worker (instance 0) is no
+	// test's.
+	row.Test, row.Instance = a.proven.openOf(row.Instance), 0
 	t := &a.proven.topology
 	if _, seen := t.mocked[row]; seen {
 		return
