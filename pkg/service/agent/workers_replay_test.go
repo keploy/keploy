@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -29,10 +30,22 @@ type instanceWire struct {
 }
 
 // workerWire is a worker's manager: readOpen says its test's outcome was
-// read while the test was still served.
+// read while the test was still served; gave holds the values its tests
+// gave, bound on it.
 type workerWire struct {
 	*wireProxy
 	readOpen bool
+	gave     []models.VariableBinding
+}
+
+func (w *workerWire) GiveExactTest(test string, b models.VariableBinding) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if test != w.exactTest {
+		return fmt.Errorf("%s is not the test this manager serves now", test)
+	}
+	w.gave = append(w.gave, b)
+	return nil
 }
 
 func (w *workerWire) ExactTestOutcome() (string, []string, []string, bool) {
@@ -198,7 +211,85 @@ func TestAReplayWorkersTestIsServedAndReadOnItsWorkersManager(t *testing.T) {
 	require.Equal(t, models.ScopeOutcomePassed, windowOf(t, a, "b::TestTwo").Outcome)
 }
 
-// The CLI's pool slices reach each replay worker none of whose tests is
+// In a replay a value a worker's test gives is bound on the worker's own
+// manager, which serves the test; the other worker's holds none.
+func TestAReplayWorkersGivenIsBoundOnItsWorkersManager(t *testing.T) {
+	a, p, _ := instanceAgent(t, models.MODE_TEST)
+	a.proven.pool = map[string][]string{"a": {"pa"}, "b": {"pb"}}
+	w1, w2 := child(t), child(t)
+	_, serr := claimAsWorker(a, w1.Process.Pid, "a")
+	require.Nil(t, serr)
+	_, serr = claimAsWorker(a, w2.Process.Pid, "b")
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestTwo"))
+	require.Nil(t, serr)
+	resp, serr := a.ProvenGive(as(w2.Process.Pid), give("app", "app-1", "b_test.go:9"))
+	require.Nil(t, serr)
+	require.Equal(t, models.GivenVariable("app", 1), resp.Variable)
+	gave := p.worker(t, 2).gave
+	require.Len(t, gave, 1)
+	require.Equal(t, "app-1", gave[0].Value)
+	require.Equal(t, "test b::TestTwo", gave[0].Mock)
+	require.Empty(t, p.worker(t, 1).gave, "the other worker's manager holds the value")
+}
+
+// In a replay a worker's test opens its worker's misses window and is charged
+// the misses of its worker's processes alone, read on its worker's manager:
+// the run's, and the other worker's, are not its.
+func TestAReplayWorkersTestIsChargedOnlyItsWorkersMisses(t *testing.T) {
+	a, p, _ := instanceAgent(t, models.MODE_TEST)
+	a.proven.pool = map[string][]string{"a": {"pa"}, "b": {"pb"}}
+	w1, w2 := child(t), child(t)
+	_, serr := claimAsWorker(a, w1.Process.Pid, "a")
+	require.Nil(t, serr)
+	_, serr = claimAsWorker(a, w2.Process.Pid, "b")
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestTwo"))
+	require.Nil(t, serr)
+	one, two := p.worker(t, 1), p.worker(t, 2)
+	require.Equal(t, 1, two.continues, "worker 2's test opened no window of its worker's")
+	require.Zero(t, one.continues, "worker 2's test opened worker 1's window")
+	require.Zero(t, p.continues, "a worker's test opened the run's window")
+	one.mu.Lock()
+	one.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /one", Instance: 1}}
+	one.mu.Unlock()
+	two.mu.Lock()
+	two.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /two", Instance: 2}}
+	two.mu.Unlock()
+	p.mu.Lock()
+	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /run"}}
+	p.mu.Unlock()
+
+	_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestTwo", Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	w := windowOf(t, a, "b::TestTwo")
+	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
+	require.Len(t, w.Evidence.Misses, 1)
+	require.Equal(t, "GET /two", w.Evidence.Misses[0].ActualSummary)
+	one.mu.Lock()
+	require.Len(t, one.misses, 1, "worker 2's test read worker 1's misses")
+	one.mu.Unlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	require.Len(t, p.misses, 1, "a worker's test read the run's misses")
+}
+
+// A worker's test whose proxy cannot read its worker's misses apart is not
+// judged on the run's: its read fails, named.
+func TestAReplayWorkersMissesThatCannotBeReadApartFailTheRead(t *testing.T) {
+	a, _, _ := instanceAgent(t, models.MODE_TEST)
+	a.provenMu.Lock()
+	a.proven.workers = map[uint32]workerClaim{3: {es: opaqueServer{}}}
+	a.provenMu.Unlock()
+	_, err := a.missesOf(context.Background(), 3)
+	require.ErrorContains(t, err, "cannot read test worker 3's misses apart")
+	_, err = a.missesOf(context.Background(), 4)
+	require.ErrorContains(t, err, "does not serve test worker 4")
+}
+
+// opaqueServer is a worker's manager that reads no misses of its own.
+type opaqueServer struct{ coreAgent.ExactServer }
+
 // open, each its own key's: one with a test open keeps the test served.
 func TestTheCLIsPoolReachesEachIdleReplayWorker(t *testing.T) {
 	a, p, _ := instanceAgent(t, models.MODE_TEST)

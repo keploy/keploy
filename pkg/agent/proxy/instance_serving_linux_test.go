@@ -415,3 +415,90 @@ func TestAWorkerServedUnderExactServingBeginsWithAnEmptyPool(t *testing.T) {
 		t.Fatalf("worker 2 began serving pool %q %v, want nothing until the agent serves it its own", v.poolKey, v.pool)
 	}
 }
+
+// workerMisses is how the agent opens and reads a test worker's misses
+// window on the worker's own manager (instanceExact).
+type workerMisses interface {
+	ContinueTestErrorCapture()
+	GetMockErrors(context.Context) ([]models.UnmatchedCall, error)
+}
+
+// Each miss is filed in the window of the test worker whose process made
+// it, as the kernel stamped its connection: a worker's test reads its own
+// misses, never another worker's or the run's; one of a worker keploy no
+// longer serves is no test's; and a set's start cuts each worker's tail with
+// the run's.
+func TestEachTestWorkersMissesAreReadByItsOwnTestsAlone(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	p, _ := storeProxy(t, ipv4Dest(t, "127.0.0.1:50071"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.StartErrorDrain(ctx)
+	s1, err := p.ServeInstance(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := p.ServeInstance(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w1, w2 := s1.(workerMisses), s2.(workerMisses)
+	miss := func(call string, inst uint32) {
+		report := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: call}
+		p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, report), 0, inst, nil)
+	}
+	read := func(name string, r workerMisses) []string {
+		t.Helper()
+		got, err := r.GetMockErrors(ctx)
+		if err != nil {
+			t.Fatalf("%s's read: %v", name, err)
+		}
+		var calls []string
+		for _, m := range got {
+			calls = append(calls, fmt.Sprintf("%s@%d", m.ActualSummary, m.Instance))
+		}
+		return calls
+	}
+	w1.ContinueTestErrorCapture()
+	w2.ContinueTestErrorCapture()
+	p.ContinueTestErrorCapture()
+	miss("GET /one", 1)
+	miss("GET /two", 2)
+	miss("GET /run", 0)
+	if got := read("worker 1", w1); len(got) != 1 || got[0] != "GET /one@1" {
+		t.Fatalf("worker 1's test read %v, want only its own miss", got)
+	}
+	if got := read("worker 2", w2); len(got) != 1 || got[0] != "GET /two@2" {
+		t.Fatalf("worker 2's test read %v, want only its own miss", got)
+	}
+	if got := read("the run", p); len(got) != 1 || got[0] != "GET /run@0" {
+		t.Fatalf("the run read %v, want only its own miss", got)
+	}
+
+	// A worker keploy stopped serving has no window: its late miss is no
+	// test's, and reading it is an error.
+	if err := p.StopServingInstance(2); err != nil {
+		t.Fatal(err)
+	}
+	miss("GET /late", 2)
+	w1.ContinueTestErrorCapture()
+	p.ContinueTestErrorCapture()
+	if got := read("worker 1", w1); len(got) != 0 {
+		t.Fatalf("worker 1's test read %v, a stopped worker's miss", got)
+	}
+	if got := read("the run", p); len(got) != 0 {
+		t.Fatalf("the run read %v, a stopped worker's miss", got)
+	}
+	if _, err := w2.GetMockErrors(ctx); err == nil {
+		t.Fatal("a stopped worker's misses were read")
+	}
+
+	// A miss a worker made after its test's read is cut at the next set's
+	// start, as the run's are.
+	miss("GET /tail", 1)
+	p.cutMissesAtSetStart(ctx)
+	w1.ContinueTestErrorCapture()
+	if got := read("worker 1", w1); len(got) != 0 {
+		t.Fatalf("worker 1's next set's test read %v, the previous set's tail", got)
+	}
+}

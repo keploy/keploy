@@ -1027,11 +1027,18 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	// opened: a begin that fails leaves nothing behind.
 	var capture missCapturer
 	if a.replaying() {
-		if _, err := a.exactServerOf(worker); err != nil {
+		es, err := a.exactServerOf(worker)
+		if err != nil {
 			return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 				"keploy cannot judge "+id+": "+err.Error(), "run the keploy agent of this keploy version")
 		}
-		c, ok := a.Proxy.(missCapturer)
+		// A test worker's test's misses are its worker's window's, kept
+		// on the manager that serves it.
+		var src any = a.Proxy
+		if worker != 0 {
+			src = es
+		}
+		c, ok := src.(missCapturer)
 		if !ok {
 			return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 				"keploy cannot judge "+id+": this keploy agent's proxy cannot keep each test's misses apart", "run the keploy agent of this keploy version")
@@ -1744,6 +1751,31 @@ func (a *Agent) failClosedWindow(id, why string) {
 	}
 }
 
+// missReader reads the misses of a test worker's test (proxy's
+// instanceExact): its process tree's alone.
+type missReader interface {
+	GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error)
+}
+
+// missesOf reads the misses made since the last read by test worker
+// worker's processes (0: the run's, the proxy's own): a worker's test is
+// charged its worker's misses, never another's, which stay for that
+// worker's own test.
+func (a *Agent) missesOf(ctx context.Context, worker uint32) ([]models.UnmatchedCall, error) {
+	if worker == 0 {
+		return a.Proxy.GetMockErrors(ctx)
+	}
+	es, err := a.exactServerOf(worker)
+	if err != nil {
+		return nil, err
+	}
+	r, ok := es.(missReader)
+	if !ok {
+		return nil, fmt.Errorf("this keploy agent's proxy cannot read test worker %d's misses apart from the others'", worker)
+	}
+	return r.GetMockErrors(ctx)
+}
+
 // testEvidence is what fails the open test id at its end: its data-plane
 // misses (models.UnmatchedCall.CountsAgainstTest: DNS is protocol-phase, and
 // a connection that sent nothing made no call), and the test mocks it did not
@@ -1761,7 +1793,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 		return nil, errors.New("no proxy")
 	}
 	ev := &models.ScopeEvidence{}
-	all, err := a.Proxy.GetMockErrors(ctx)
+	all, err := a.missesOf(ctx, a.scopeInstance(id))
 	var misses, outside []models.UnmatchedCall
 	for _, m := range all {
 		if outsideEveryTest(m, beganAt) {
