@@ -369,13 +369,20 @@ func TestATestStillOpenAtTheFinalReadFails(t *testing.T) {
 }
 
 // A test begun before its process claimed the run is refused: keploy cannot
-// tell that the caller's calls are captured or mocked.
+// tell that the caller's calls are captured or mocked. The remedy names only
+// the integrations that exist. Mutation: name keploy-pytest or @keploy/jest
+// in it, or drop the by-hand claim or its key.
 func TestABeginWithoutAClaimIsRefused(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	_, serr := a.ProvenBegin(context.Background(), begin("TestOrphan"))
 	require.NotNil(t, serr)
 	require.Equal(t, models.ScopeErrNotInRun, serr.Code)
 	require.Equal(t, http.StatusUnprocessableEntity, serr.Status)
+	// The remedy says how to claim, with or without an integration.
+	require.Contains(t, serr.Remedy, "go-sdk keploytest and @keploy/playwright do; a framework with neither claims it by hand (POST /agent/instance with its package folder, relative to the project, as key)")
+	for _, never := range []string{"keploy-pytest", "@keploy/jest"} {
+		require.NotContains(t, serr.Remedy, never)
+	}
 	ws, err := a.FinalScopeWindows(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, ws, "the refused begin opened nothing")
@@ -479,7 +486,8 @@ func TestBeginWithoutCanSkipNeedsANewIntegration(t *testing.T) {
 	require.Equal(t, models.ScopeErrUpgradeIntegration, serr.Code)
 }
 
-// Every upgrade_integration refusal names only the integrations of the wire
+// Each upgrade_integration refusal of a harness that predates the wire (its
+// begin, or the old wire's fields) names only the integrations of the wire
 // that exist, go-sdk keploytest and @keploy/playwright, and what a framework
 // with none does: one test process at a time, its calls made by hand. It
 // used to tell users to upgrade keploy-pytest and @keploy/jest, which were
@@ -516,7 +524,7 @@ func requireOnlyRealIntegrations(t *testing.T, remedy, what string) {
 	for _, want := range []string{
 		"go-sdk keploytest for go test", "@keploy/playwright for Playwright",
 		"run one test process at a time", "makes the calls by hand",
-		"claims the run (POST /agent/instance) before its first test",
+		"claims the run (POST /agent/instance with its package folder, relative to the project, as key) before its first test",
 		"begin with canSkip true, skips the test when the begin answers action skip",
 		"never with pid, at, dir or suite",
 	} {

@@ -813,7 +813,7 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		a.provenMu.Unlock()
 		return models.ScopeBeginResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
 			req.Name+" began before its test process claimed this keploy run, so keploy cannot tell that its calls are captured or mocked",
-			"upgrade the keploy integration of your test framework: it claims the run (POST /agent/instance) before its first test")
+			"have the test process claim the run before its first test: go-sdk keploytest and @keploy/playwright do; a framework with neither claims it by hand (POST /agent/instance with its package folder, relative to the project, as key)")
 	}
 	id := models.TestID(req.Project, req.File, a.proven.key, req.Name)
 	if open := a.proven.open; open != "" {
