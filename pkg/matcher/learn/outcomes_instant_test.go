@@ -1480,6 +1480,11 @@ func TestOutcomeAFinerTimeHoldingRoundFsSecondIsNoPick(t *testing.T) {
 	isoAt := func(x time.Time) string {
 		return `"created_at":"` + x.In(time.FixedZone("", 19800)).Format("2006-01-02T15:04:05.000-07:00") + `"`
 	}
+	// A number of seconds with its milliseconds (Python's time.time(), a
+	// JavaScript Date.now()/1000) holds the second as a word of its own,
+	// before its fraction: that word is the finer time's cut, as inside
+	// any other finer time.
+	frac := func(x time.Time) string { return `"made":` + fmt.Sprintf("%d.%03d", x.Unix(), x.Nanosecond()/1e6) }
 	leaves := func(rm, lm *models.Mock) Earlier {
 		e := leafedOf(rm, true, 1)
 		e.Payload = e.Payload.ServedLive(RawOf(lm, true))
@@ -1503,10 +1508,12 @@ func TestOutcomeAFinerTimeHoldingRoundFsSecondIsNoPick(t *testing.T) {
 		{"a time of milliseconds", iso, false},
 		{"a time of milliseconds at an offset", isoAt, false},
 		{"a name and a $date beside it", func(x time.Time) string { return name(x) + "," + date(x) }, false},
+		{"a number of seconds with its milliseconds", frac, false},
 		{"the second, as a time of seconds, beside a $date", func(x time.Time) string { return date(x) + `,"claimed_at":"` + x.UTC().Format(time.RFC3339) + `"` }, true},
 		{"the second, as a number of seconds", func(x time.Time) string { return `"claimedAt":{"$numberLong":"` + sec(x) + `"}` }, true},
 		{"the second, as a time of seconds", func(x time.Time) string { return `"claimed_at":"` + x.UTC().Format(time.RFC3339) + `"` }, true},
 		{"the second beside a name", func(x time.Time) string { return name(x) + `,"claimedAt":{"$numberLong":"` + sec(x) + `"}` }, true},
+		{"the second beside a number of seconds with its milliseconds", func(x time.Time) string { return frac(x) + `,"claimedAt":{"$numberLong":"` + sec(x) + `"}` }, true},
 	} {
 		for _, made := range []struct {
 			what       string
@@ -1609,8 +1616,9 @@ func TestOutcomeAFinerTimeHoldingRoundFsSecondIsNoPick(t *testing.T) {
 		}
 	}
 	// A time of milliseconds its encoder writes without its trailing zeros
-	// (Go's RFC3339Nano, Java's Instant.toString, Python's isoformat): made
-	// at a second's first millisecond it shows no fraction at all. A place
+	// (Go's RFC3339Nano, Java's Instant.toString, Python's isoformat, a
+	// number of seconds written as a float): made at a second's first
+	// millisecond it shows no fraction at all. A place
 	// is judged at the finest unit either run's text there shows, so one
 	// run's whole second is still that finer time's cut, and the verdict is
 	// the one every other millisecond gives. Only where neither run shows a
@@ -1622,6 +1630,9 @@ func TestOutcomeAFinerTimeHoldingRoundFsSecondIsNoPick(t *testing.T) {
 		{"a time without its trailing zeros", func(x time.Time) string { return `"created_at":"` + x.UTC().Format(time.RFC3339Nano) + `"` }},
 		{"a time without its trailing zeros at an offset", func(x time.Time) string {
 			return `"created_at":"` + x.In(time.FixedZone("", 19800)).Format(time.RFC3339Nano) + `"`
+		}},
+		{"a number of seconds without its trailing zeros", func(x time.Time) string {
+			return `"made":` + strconv.FormatFloat(float64(x.UnixMilli())/1000, 'f', -1, 64)
 		}},
 	} {
 		offs := []time.Duration{0, time.Millisecond, 120 * time.Millisecond, 999 * time.Millisecond}
