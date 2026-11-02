@@ -47,8 +47,12 @@ type IngressProxyManager struct {
 	stopping atomic.Bool
 	// waits is the shared wait of the calls that found an app address
 	// refusing, by address (appdial.go), guarded by waitsMu.
-	waitsMu  sync.Mutex
-	waits    map[string]*appWait
+	waitsMu sync.Mutex
+	waits   map[string]*appWait
+	// listensAt is where the socket table found the app listening, by the
+	// address that refused (appdial.go), guarded by waitsMu.
+	listensAt map[string]string
+
 	mu       sync.Mutex
 	active   map[uint16]proxyStop
 	logger   *zap.Logger

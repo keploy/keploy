@@ -1508,9 +1508,9 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				// ends without a connection only when keploy's context ends,
 				// the client goes, the recording stops, or the dial fails
 				// otherwise. keploy mock says that at DEBUG, but for an app
-				// that listens only where the ingress does not dial.
-				var elsewhere *appListensElsewhereError
-				if pm.mockMode && !errors.As(err, &elsewhere) {
+				// that listens only where no connection reaches it.
+				var unreachable *appUnreachableError
+				if pm.mockMode && !errors.As(err, &unreachable) {
 					logger.Debug("the redial of a stale pooled connection to the app ended without a connection; closing the call as the app would", zap.String("upstream", upstreamAddr), zap.Error(err))
 				} else {
 					pm.logAppDialFailure(logger, "Upstream redial after stale-detect failed. Verify the application is still listening on the resolved address and that the network path between the agent and upstream is healthy.",

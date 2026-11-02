@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strconv"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -17,6 +18,7 @@ const (
 	listenDiagReqLen = 56 // inet_diag_req_v2: family, protocol, ext, pad, states, sockid
 	listenDiagMsgLen = 72 // inet_diag_msg: family, state, timer, retrans, sockid, expires, rqueue, wqueue, uid, inode
 	listenDiagSockid = 4  // idiag_id's offset in inet_diag_msg (and in inet_diag_req_v2, after states)
+	listenDiagIf     = 36 // idiag_if's offset in inet_diag_sockid: the device the socket is bound to
 	listenDiagCookie = 40 // idiag_cookie's offset in inet_diag_sockid
 	listenDiagBufLen = 32 << 10
 	listenDiagListen = 10 // TCP_LISTEN
@@ -28,6 +30,9 @@ const (
 // a dump of the listening sockets alone, which the kernel filters to port. An
 // IPv6 socket bound to a v4-mapped address is given as the IPv4 address it
 // takes; one on :: as ::, whether or not it also takes IPv4 (IPV6_V6ONLY).
+// An IPv6 link-local address carries, as its zone, the index of the device
+// the socket is bound to (the kernel binds one there only with a device), so
+// a dial to it names the link; it has no zone if the table gives no device.
 func TCPListeners(port uint16) ([]netip.Addr, error) {
 	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, unix.NETLINK_SOCK_DIAG)
 	if err != nil {
@@ -112,6 +117,9 @@ func dumpListeners(fd int, seq uint32, family uint8, port uint16) ([]netip.Addr,
 					a = netip.AddrFrom4([4]byte(sid[4:8]))
 				} else {
 					a = netip.AddrFrom16([16]byte(sid[4:20])).Unmap()
+					if dev := binary.NativeEndian.Uint32(sid[listenDiagIf:]); a.Is6() && a.IsLinkLocalUnicast() && dev != 0 {
+						a = a.WithZone(strconv.FormatUint(uint64(dev), 10))
+					}
 				}
 				out = append(out, a)
 			}

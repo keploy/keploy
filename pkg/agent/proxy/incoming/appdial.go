@@ -28,28 +28,34 @@ import (
 // only after the recording had stopped the app, and the refusal the stop
 // explains (logAppDialFailure, at DEBUG while stopping) was an ERROR instead.
 //
-// A refusal is the app not listening there. That is final only while the
-// recording is stopping (SetStopping, which the agent sets before its client
-// stops the app): the stop is what took the app's listener, and the dial
-// returns the refusal at once, as the refusal it is. At any other time the
-// kernel's socket table says which of three it is (util.TCPListeners, on the
-// port dialed, in the network namespace the dial is made in):
+// A refusal is the app not listening at the address dialed. The kernel's
+// socket table says where it listens instead (util.TCPListeners, on the port
+// dialed, in the network namespace the dial is made in, which is the app's):
+//   - The app listens on the port at another address of the namespace's own:
+//     [::1] (Node 17 and later often bind listen(port, "localhost") there),
+//     :: with IPV6_V6ONLY, another address of 127/8, or an interface's (a
+//     pod's or container's IP: Spring's server.address=${POD_IP}, a gRPC
+//     server bound to the pod IP). The bind keploy moved named that address.
+//     Every address the namespace has is local to the ingress, which shares
+//     the namespace, so the call is dialed there, and the address is
+//     remembered for the calls after it (listensAt) until a dial there is
+//     refused.
+//   - The app listens on the port only where no connection reaches it: at an
+//     address the namespace does not have (a socket bound with IP_FREEBIND or
+//     IP_TRANSPARENT, which a connection would leave the host for:
+//     util.IsLocalAddr), or at an IPv6 link-local address with no device to
+//     name. The call fails at once, with an error that names the address and
+//     why (appUnreachableError, at ERROR).
 //   - Nothing listens on the port: the app has not listened yet (keploy's
 //     hold serves a call from the app's bind, before its listen) or not again
 //     (an app that restarts in a recording: a watcher's rebuild, a
 //     supervisor, a container restart). The call waits for the listener: the
-//     event that answers it, not a time.
-//   - The app listens on the port at another loopback address: [::1] (Node
-//     17 and later often bind listen(port, "localhost") there), :: with
-//     IPV6_V6ONLY, or another address of 127/8. The bind keploy moved named
-//     that address, and the call is dialed there.
-//   - The app listens on the port only at addresses that are not the
-//     loopback's (an interface's, such as a pod's or container's IP): the
-//     ingress forwards over the loopback, so the call fails at once, with an
-//     error that names where the app listens and what to change
-//     (appListensElsewhereError, at ERROR).
+//     event that answers it, not a time. While the recording is stopping
+//     (SetStopping, which the agent sets before its client stops the app),
+//     the stop is what took the listener, and the refusal is returned at
+//     once, as the refusal it is.
 // Where the table cannot be read (another platform: the bind keploy moves is
-// Linux's), a refusal is waited out as the first case.
+// Linux's), a refusal is the last case.
 //
 // A call's wait ends when the app listens, when the recording begins to stop,
 // when the call's context ends (keploy's own end: ctx.Err()) or when its
@@ -59,7 +65,7 @@ import (
 // refused, because the app was not listening.
 //
 // Every call that finds the same address refusing shares one wait
-// (appWait): one dial and one look at the socket table every
+// (appWait): one dial, and after a refusal one look at the socket table, every
 // ingressTargetPollInterval, which is how the listener's coming is seen (no
 // kernel event tells it here: the socket's CLOSE->LISTEN tracepoint would
 // need the ebpf hooks), and which also checks each waiting call's client. The
@@ -73,21 +79,32 @@ import (
 // waited for the app to listen: nothing was sent on to the app.
 var errClientLeft = errors.New("the call's client closed its connection while keploy waited for the application to listen; nothing was sent on to the application")
 
-// appListensElsewhereError is a dial's end for a call to an app that, on the
-// port dialed, listens only at addresses the ingress does not dial: not a
-// readiness question (the app listens), and not one time answers.
-type appListensElsewhereError struct {
+// appUnreachableError is a dial's end for a call to an app that, on the port
+// dialed, listens only where no connection reaches it: not a readiness
+// question (the app listens), and not one time answers.
+type appUnreachableError struct {
 	dialed string
-	at     []netip.AddrPort
+	at     []unreachableListener
 }
 
-func (e *appListensElsewhereError) Error() string {
+// unreachableListener is a listener no connection reaches, and why.
+type unreachableListener struct {
+	at  netip.AddrPort
+	why string
+}
+
+const (
+	whyNotLocal = "an address this network namespace does not have (a socket can listen there only with IP_FREEBIND or IP_TRANSPARENT), so a connection to it would be routed off the host, not to the application"
+	whyNoDevice = "an IPv6 link-local address bound to no device, so no connection can name the link it is on"
+)
+
+func (e *appUnreachableError) Error() string {
 	at := make([]string, len(e.at))
-	for i, a := range e.at {
-		at[i] = a.String()
+	for i, l := range e.at {
+		at[i] = l.at.String() + ", " + l.why
 	}
-	return fmt.Sprintf("the application does not listen at %s: on that port it listens only at %s, which keploy's ingress does not forward calls to, since it reaches the application over the loopback. Make the application listen on all addresses (0.0.0.0 or ::) or on a loopback address (127.0.0.1 or ::1)",
-		e.dialed, strings.Join(at, ", "))
+	return fmt.Sprintf("the application does not listen at %s, and no connection from keploy's ingress, which shares the application's network namespace, reaches where it listens on that port: %s",
+		e.dialed, strings.Join(at, "; "))
 }
 
 // appWait is the one wait of every call that found addr refusing while the
@@ -113,11 +130,11 @@ type appWaiter struct {
 	target string
 }
 
-// appNetwork is the network a dial to addr uses: tcp6 for an IPv6 address,
-// else tcp4.
+// appNetwork is the network a dial to addr uses: tcp6 for an IPv6 address
+// (a link-local one with its zone too), else tcp4.
 func appNetwork(addr string) string {
 	if host, _, err := net.SplitHostPort(addr); err == nil {
-		if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+		if ip, err := netip.ParseAddr(host); err == nil && ip.Is6() && !ip.Is4In6() {
 			return "tcp6"
 		}
 	}
@@ -125,9 +142,10 @@ func appNetwork(addr string) string {
 }
 
 // dialApp dials the application at addr for a call from client (nil when
-// there is none to watch).
+// there is none to watch): first where it was found listening for addr, if
+// it was (listensAt), else at addr.
 func (pm *IngressProxyManager) dialApp(ctx context.Context, addr string, client net.Conn) (net.Conn, error) {
-	target := addr
+	target := pm.listenerFound(addr)
 	var d net.Dialer
 	for {
 		conn, err := d.DialContext(ctx, appNetwork(target), target)
@@ -139,20 +157,95 @@ func (pm *IngressProxyManager) dialApp(ctx context.Context, addr string, client 
 		}
 		// isConnRefused is platform-aware: on Windows a refused connect is
 		// WSAECONNREFUSED, not the POSIX ECONNREFUSED.
-		if !isConnRefused(err) || pm.stopping.Load() {
+		if !isConnRefused(err) {
 			return nil, err
+		}
+		if target != addr {
+			// The app no longer listens where it was found: forget that, and
+			// ask from addr again.
+			pm.forgetListener(addr, target)
+		}
+		if pm.stopping.Load() {
+			return pm.dialWhileStopping(ctx, &d, addr, target, err)
 		}
 		if clientLeft(client) {
 			return nil, errClientLeft
 		}
 		// The wait for addr, whether the refusal was addr's or that of an
-		// address an earlier wait found (its listener has gone since).
+		// address found earlier (its listener has gone since).
 		conn, target, err = pm.awaitListener(ctx, addr, client)
 		if conn != nil || err != nil {
 			return conn, err
 		}
 		// The app listens at target: dial it (the poll's connection went to
 		// another call).
+	}
+}
+
+// dialWhileStopping is dialApp's end for a refusal (refused, at tried) once
+// the recording is stopping: final, as the stop took the app's listener,
+// unless the socket table has the app still listening somewhere else (an app
+// on [::1] alone serves until it is stopped, as one on 127.0.0.1 does), where
+// one dial is made.
+func (pm *IngressProxyManager) dialWhileStopping(ctx context.Context, d *net.Dialer, addr, tried string, refused error) (net.Conn, error) {
+	at, err := pm.findListener(addr)
+	if err != nil || at == "" || at == tried {
+		return nil, refused
+	}
+	conn, err := d.DialContext(ctx, appNetwork(at), at)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, refused
+	}
+	pm.rememberListener(addr, at)
+	return conn, nil
+}
+
+// listenerFound is where the app was found listening for addr (listensAt),
+// or addr. An address found that is not the loopback's is asked again
+// whether it is still the namespace's own (an interface's address can go: a
+// laptop's Wi-Fi changes network), and forgotten if not: a dial there would
+// leave the host, and could reach another one that has the address now.
+func (pm *IngressProxyManager) listenerFound(addr string) string {
+	pm.waitsMu.Lock()
+	at, ok := pm.listensAt[addr]
+	pm.waitsMu.Unlock()
+	if !ok {
+		return addr
+	}
+	if ap, err := netip.ParseAddrPort(at); err == nil && !ap.Addr().IsLoopback() {
+		if local, err := util.IsLocalAddr(ap.Addr()); err != nil || !local {
+			pm.forgetListener(addr, at)
+			return addr
+		}
+	}
+	return at
+}
+
+// rememberListener has the calls to addr dialed at at from now on.
+func (pm *IngressProxyManager) rememberListener(addr, at string) {
+	pm.waitsMu.Lock()
+	defer pm.waitsMu.Unlock()
+	pm.rememberListenerLocked(addr, at)
+}
+
+// rememberListenerLocked is rememberListener with waitsMu held.
+func (pm *IngressProxyManager) rememberListenerLocked(addr, at string) {
+	if pm.listensAt == nil {
+		pm.listensAt = make(map[string]string)
+	}
+	pm.listensAt[addr] = at
+}
+
+// forgetListener drops at as where the app listens for addr, once a dial
+// there was refused.
+func (pm *IngressProxyManager) forgetListener(addr, at string) {
+	pm.waitsMu.Lock()
+	defer pm.waitsMu.Unlock()
+	if pm.listensAt[addr] == at {
+		delete(pm.listensAt, addr)
 	}
 }
 
@@ -174,7 +267,7 @@ func clientLeft(client net.Conn) bool {
 // returns the connection that found the listener, if it is this call's, or
 // nil, nil and the address to dial (addr, or the one the wait found the app
 // listening at). Its other ends are the refusal once the recording is
-// stopping, appListensElsewhereError, ctx.Err() and errClientLeft.
+// stopping, appUnreachableError, ctx.Err() and errClientLeft.
 func (pm *IngressProxyManager) awaitListener(ctx context.Context, addr string, client net.Conn) (net.Conn, string, error) {
 	w := &appWaiter{client: client, done: make(chan struct{})}
 	pm.waitsMu.Lock()
@@ -238,8 +331,8 @@ func endWaiterLocked(wait *appWait, w *appWaiter, conn net.Conn, target string, 
 
 // pollApp looks for the app's listener (probeApp) until the app listens,
 // the recording begins to stop, the socket table says the app listens only
-// where the ingress does not dial, or no call waits any more, and checks
-// each waiting call's client between looks.
+// where no connection reaches, or no call waits any more, and checks each
+// waiting call's client between looks.
 func (pm *IngressProxyManager) pollApp(wait *appWait) {
 	var d net.Dialer
 	tick := time.NewTicker(ingressTargetPollInterval)
@@ -256,14 +349,15 @@ func (pm *IngressProxyManager) pollApp(wait *appWait) {
 			}
 			return
 		}
-		var elsewhere *appListensElsewhereError
+		var unreachable *appUnreachableError
 		switch {
-		case err == nil, !isConnRefused(err) && !errors.As(err, &elsewhere):
+		case err == nil, !isConnRefused(err) && !errors.As(err, &unreachable):
 			// The app listens at target: the connection is one call's, and
 			// the others dial their own there. A dial that failed otherwise
 			// is each call's own to make, and to say.
 			if err == nil && target != wait.addr {
-				pm.logger.Debug("the application listens on its port at another loopback address than the one keploy dials; forwarding its calls there",
+				pm.rememberListenerLocked(wait.addr, target)
+				pm.logger.Debug("the application listens on its port at another address than the one keploy dials; forwarding its calls there",
 					zap.String("dialed", wait.addr), zap.String("application_listens_at", target))
 			}
 			for w := range wait.callers {
@@ -276,7 +370,7 @@ func (pm *IngressProxyManager) pollApp(wait *appWait) {
 			pm.dropWaitLocked(wait)
 			pm.waitsMu.Unlock()
 			return
-		case elsewhere != nil, pm.stopping.Load():
+		case unreachable != nil, pm.stopping.Load():
 			for w := range wait.callers {
 				endWaiterLocked(wait, w, nil, "", err)
 			}
@@ -304,41 +398,31 @@ func (pm *IngressProxyManager) pollApp(wait *appWait) {
 }
 
 // probeApp is one look of wait's poll for the app's listener: a dial to
-// wait's address and, when that is refused while the recording is not
-// stopping, the kernel's socket table on its port (listenerFor). It returns
-// the address it dialed last and that dial's connection or error, or an
-// appListensElsewhereError when the app listens on the port only where the
-// ingress does not dial. A refusal means the app listens nowhere the ingress
-// dials yet: the wait goes on.
+// wait's address and, when that is refused, the kernel's socket table on its
+// port (findListener). It returns the address it dialed last and that dial's
+// connection or error, or an appUnreachableError when the app listens on the
+// port only where no connection reaches. A refusal means the app listens
+// nowhere yet: the wait goes on, but once the recording is stopping.
 func (pm *IngressProxyManager) probeApp(wait *appWait, d *net.Dialer) (string, net.Conn, error) {
 	conn, err := d.DialContext(wait.ctx, wait.network, wait.addr)
-	if err == nil || !isConnRefused(err) || pm.stopping.Load() {
+	if err == nil || !isConnRefused(err) {
 		return wait.addr, conn, err
 	}
-	dialed, perr := netip.ParseAddrPort(wait.addr)
-	if perr != nil {
-		return wait.addr, nil, err
-	}
-	listeners, terr := util.TCPListeners(dialed.Port())
-	if terr != nil {
+	at, ferr := pm.findListener(wait.addr)
+	var unreachable *appUnreachableError
+	switch {
+	case at != "" && at != wait.addr:
+		conn, err := d.DialContext(wait.ctx, appNetwork(at), at)
+		return at, conn, err
+	case errors.As(ferr, &unreachable):
+		return wait.addr, nil, ferr
+	case ferr != nil && !wait.tableErr && !errors.Is(ferr, util.ErrNoSocketTable):
 		// Where the table is not read at all (ErrNoSocketTable: every
 		// platform but Linux), that is a stated limit, not news of this
 		// wait.
-		if !wait.tableErr && !errors.Is(terr, util.ErrNoSocketTable) {
-			wait.tableErr = true
-			pm.logger.Debug("could not read the kernel's socket table to see where the application listens; waiting for it to listen at the address keploy dials",
-				zap.String("dialed", wait.addr), zap.Error(terr))
-		}
-		return wait.addr, nil, err
-	}
-	target, ok, elsewhere := listenerFor(dialed, listeners)
-	switch {
-	case ok && target != dialed:
-		at := target.String()
-		conn, err := d.DialContext(wait.ctx, appNetwork(at), at)
-		return at, conn, err
-	case !ok && len(elsewhere) > 0:
-		return wait.addr, nil, &appListensElsewhereError{dialed: wait.addr, at: elsewhere}
+		wait.tableErr = true
+		pm.logger.Debug("could not read the kernel's socket table to see where the application listens; waiting for it to listen at the address keploy dials",
+			zap.String("dialed", wait.addr), zap.Error(ferr))
 	}
 	// No listener on the port, or one that takes the address dialed and
 	// refused it all the same (it listened since, or refuses a full accept
@@ -347,14 +431,49 @@ func (pm *IngressProxyManager) probeApp(wait *appWait, d *net.Dialer) (string, n
 	return wait.addr, nil, err
 }
 
+// findListener reads, in the kernel's tables, where the app listens on
+// addr's port (listenerFor): the address to dial, or "" and nil when nothing
+// listens there, an appUnreachableError when the app listens only where no
+// connection reaches, or the error that kept the tables from being read.
+func (pm *IngressProxyManager) findListener(addr string) (string, error) {
+	dialed, err := netip.ParseAddrPort(addr)
+	if err != nil {
+		return "", err
+	}
+	listeners, err := util.TCPListeners(dialed.Port())
+	if err != nil {
+		return "", err
+	}
+	var lerr error
+	local := func(a netip.Addr) bool {
+		ok, err := util.IsLocalAddr(a)
+		if err != nil && lerr == nil {
+			lerr = err
+		}
+		return ok
+	}
+	target, ok, unreachable := listenerFor(dialed, listeners, local)
+	switch {
+	case ok:
+		return target.String(), nil
+	case lerr != nil:
+		// Not known to be unreachable: it may be the namespace's own.
+		return "", lerr
+	case len(unreachable) > 0:
+		return "", &appUnreachableError{dialed: addr, at: unreachable}
+	}
+	return "", nil
+}
+
 // listenerFor picks, from the addresses listeners has a listener at on
 // dialed's port, the one to dial for dialed: an address that takes dialed
 // itself (its own, or the unspecified address of its family), else an IPv4
 // loopback one (all of 127/8 is the loopback's, and 0.0.0.0 takes
-// 127.0.0.1), else [::1] (which :: takes, with IPV6_V6ONLY or without). ok is
-// false when none is the loopback's; elsewhere is then every address there
-// is a listener at, in order, the ingress dialing none of them.
-func listenerFor(dialed netip.AddrPort, listeners []netip.Addr) (target netip.AddrPort, ok bool, elsewhere []netip.AddrPort) {
+// 127.0.0.1), else [::1] (which :: takes, with IPV6_V6ONLY or without), else
+// one of the namespace's own addresses (local), IPv4 first. ok is false when
+// there is none; unreachable is then every address there is a listener at,
+// in order, with why no connection reaches it.
+func listenerFor(dialed netip.AddrPort, listeners []netip.Addr, local func(netip.Addr) bool) (target netip.AddrPort, ok bool, unreachable []unreachableListener) {
 	h := dialed.Addr().Unmap()
 	best := 0
 	for _, l := range listeners {
@@ -372,9 +491,16 @@ func listenerFor(dialed netip.AddrPort, listeners []netip.Addr) (target netip.Ad
 			at, rank = l, 2
 		case l.IsLoopback():
 			at, rank = l, 3
-		default:
-			elsewhere = append(elsewhere, netip.AddrPortFrom(l, dialed.Port()))
+		case l.Is6() && l.IsLinkLocalUnicast() && l.Zone() == "":
+			unreachable = append(unreachable, unreachableListener{netip.AddrPortFrom(l, dialed.Port()), whyNoDevice})
 			continue
+		case !local(l):
+			unreachable = append(unreachable, unreachableListener{netip.AddrPortFrom(l, dialed.Port()), whyNotLocal})
+			continue
+		case l.Is4():
+			at, rank = l, 4
+		default:
+			at, rank = l, 5
 		}
 		c := netip.AddrPortFrom(at, dialed.Port())
 		if !ok || rank < best || rank == best && c.Compare(target) < 0 {
@@ -384,6 +510,6 @@ func listenerFor(dialed netip.AddrPort, listeners []netip.Addr) (target netip.Ad
 	if ok {
 		return target, true, nil
 	}
-	slices.SortFunc(elsewhere, netip.AddrPort.Compare)
-	return netip.AddrPort{}, false, slices.Compact(elsewhere)
+	slices.SortFunc(unreachable, func(a, b unreachableListener) int { return a.at.Compare(b.at) })
+	return netip.AddrPort{}, false, slices.CompactFunc(unreachable, func(a, b unreachableListener) bool { return a.at == b.at })
 }

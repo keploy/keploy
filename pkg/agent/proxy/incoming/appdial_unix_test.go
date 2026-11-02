@@ -140,6 +140,7 @@ func TestARedialWaitsForAnAppThatRestarts(t *testing.T) {
 	case <-never(t):
 		t.Fatal("never: the handler ended")
 	}
+	pm.captures.Wait() // the handler started its capture before it ended
 	if _, waits := waitersAt(pm, addr); waits != 0 {
 		t.Fatalf("the redial left %d waits", waits)
 	}
@@ -177,6 +178,7 @@ func TestAClientThatLeavesWhileItsCallWaitsEndsTheHandler(t *testing.T) {
 			go func() {
 				defer close(done)
 				pm.handleConnection(context.Background(), proxied, addr, pm.logger, make(chan *models.TestCase, 1), make(chan struct{}, 1), 8080)
+				pm.captures.Wait()
 			}()
 			awaitWaiters(t, pm, addr, 1)
 			_ = client.Close()
@@ -207,6 +209,7 @@ func TestServeLiveEndsForAClientThatLeavesWhileItWaits(t *testing.T) {
 	go func() {
 		defer close(done)
 		pm.ServeLive(context.Background(), proxied, addr, 8080)
+		pm.captures.Wait()
 	}()
 	awaitWaiters(t, pm, addr, 1)
 	_ = client.Close()
@@ -248,7 +251,7 @@ func TestARedialWaitsForAnAppThatRestartsForLongerThanTheOldBudget(t *testing.T)
 		serveApp(t, again, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "RESTARTED") })
 		t.Cleanup(func() { _ = again.Close() })
 	}()
-	_, client, served, _ := serveWatched(t, false, first, nil)
+	pm, client, served, _ := serveWatched(t, false, first, nil)
 	if _, err := client.Write([]byte("GET /jobs HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -263,6 +266,7 @@ func TestARedialWaitsForAnAppThatRestartsForLongerThanTheOldBudget(t *testing.T)
 	}
 	_ = client.Close()
 	<-served
+	pm.captures.Wait() // the handler started its capture before it ended
 }
 
 // A connection the poll hands to a call whose context ends at that moment

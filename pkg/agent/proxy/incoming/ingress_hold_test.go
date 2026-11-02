@@ -229,6 +229,16 @@ func freeAddr(t *testing.T) string {
 // a loaded host timed out against an app that listened, with a false WARN,
 // and opened and closed a connection to the app on each start.
 func TestAForwarderStartsAtOnceAndItsCallsWaitForTheApp(t *testing.T) {
+	stubIngressPaused(t, func() bool { return false })
+	// The call's capture is waited for below: the forwarder's goroutine,
+	// which nothing joins, starts it after it answers, and pm.captures.Wait
+	// in the cleanup counts only a capture that started before it.
+	captured := make(chan string, 1)
+	stubCaptureHook(t, func(_ context.Context, _ *zap.Logger, _ chan *models.TestCase,
+		req *http.Request, _ *http.Response, _ time.Time, _ time.Time,
+		_ models.IncomingOptions, _ bool, _ bool, _ uint16) {
+		captured <- req.URL.Path
+	})
 	holder := &fakePortHolder{held: true}
 	core, logs := observer.New(zapcore.WarnLevel)
 	pm := &IngressProxyManager{logger: zap.New(core), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
@@ -262,6 +272,11 @@ func TestAForwarderStartsAtOnceAndItsCallsWaitForTheApp(t *testing.T) {
 	t.Cleanup(func() { _ = srv.Close() })
 	if status := <-answered; status != "200 OK" {
 		t.Fatalf("a call that came before the app listened: %s, want the app's answer", status)
+	}
+	select {
+	case <-captured:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call was not recorded")
 	}
 	if all := logs.All(); len(all) != 0 {
 		t.Fatalf("logged %v, want nothing at WARN or above", all)
