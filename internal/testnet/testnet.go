@@ -24,7 +24,9 @@
 // and so bind beside no hold, it is a port below the dynamic port range,
 // which no bind to port 0 and no connect is given, claimed by a file in
 // os.TempDir so that no other test is given it (claimPort). UnlistedPort
-// (Linux) is a port the socket tables list no socket at.
+// (Linux) is a port the socket tables list no socket at, below the range a
+// bind to port 0 is given one from, held at TCP; a listener that sets
+// SO_REUSEADDR, as Go's do, binds beside the hold, and UDP is left free.
 //
 // BoundHere counts the sockets of this process at a port, so a test can tell
 // a port its code still holds from one another process took once it was
