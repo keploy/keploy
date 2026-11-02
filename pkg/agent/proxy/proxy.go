@@ -652,6 +652,13 @@ type Proxy struct {
 	// names the CA path, instead of silently verifying against roots that are
 	// missing the operator's anchor.
 	upstreamTLSLoadFailed bool
+
+	// peekChunkWindow is how long one of the opportunistic-TLS relay
+	// loop's reads or writes may block before the loop looks at its
+	// context again (peekChunkTimeout); zero is opportunisticPeekChunkTimeout.
+	// Only tests set it: a window longer than the test's own deadline
+	// turns "the stop never waited a window out" into "the stop returned".
+	peekChunkWindow time.Duration
 }
 
 // SetCBShim wires the eBPF channel-binding shim handle into the proxy.
