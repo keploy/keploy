@@ -173,7 +173,7 @@ func TestTee_HeldBefore(t *testing.T) {
 }
 
 // A chunk set aside for the client's answer is before the numbers after its own;
-// one let go of, refused, tells a reader waiting on it.
+// one let go of, refused, tells a reader waiting on it once it is gone.
 func TestTee_AwaitingBeforeAndToldWhenLetGo(t *testing.T) {
 	t.Parallel()
 	tt := newTee(fakeconn.FromDest, 1<<20, 4, time.Second, nil, zap.NewNop())
@@ -183,11 +183,14 @@ func TestTee_AwaitingBeforeAndToldWhenLetGo(t *testing.T) {
 		t.Fatal("chunks 7 and 9 set aside: want one before 8 and none before 7")
 	}
 	changed := tt.progress.changed.wait()
-	tt.doneAwaiting()
+	told, aside := seenAsTold(&tt.progress.changed, tt.doneAwaiting, func() bool { return tt.awaitingBefore(8) })
 	select {
 	case <-changed:
 	default:
 		t.Fatal("a chunk set aside was let go of: a reader waiting on it is not told")
+	}
+	if !told || aside {
+		t.Fatalf("chunk 7 set aside was let go of: a reader was told (%v) while it still saw it set aside before 8 (%v): want it told with the chunk gone", told, aside)
 	}
 	if tt.awaitingBefore(8) || !tt.awaitingBefore(10) {
 		t.Fatal("chunk 9 set aside: want it before 10 only")
@@ -220,18 +223,22 @@ func TestWaker(t *testing.T) {
 }
 
 // A forwarder that lets go of the chunk in its hand tells a reader waiting on
-// it: one refused or stashed never comes on the stream.
+// it, once it holds it no longer: one refused or stashed never comes on the
+// stream.
 func TestTee_ToldWhenTheChunkInHandIsLetGo(t *testing.T) {
 	t.Parallel()
 	tt := newTee(fakeconn.FromClient, 1<<20, 4, time.Second, nil, zap.NewNop())
 	tt.noteReading()
 	tt.noteNumbered(3)
 	changed := tt.progress.changed.wait()
-	tt.noteReleased()
+	told, held := seenAsTold(&tt.progress.changed, tt.noteReleased, func() bool { return tt.heldBefore(4) })
 	select {
 	case <-changed:
 	default:
 		t.Fatal("the chunk in hand was let go of: a reader waiting on it is not told")
+	}
+	if !told || held {
+		t.Fatalf("the chunk numbered 3 in hand was let go of: a reader was told (%v) while it still saw it held before 4 (%v): want it told with the chunk gone", told, held)
 	}
 }
 
@@ -417,19 +424,71 @@ func TestRelay_StreamedBeforeFindsAChunkThatMovesOnBetweenItsLooks(t *testing.T)
 	}
 }
 
+// StreamedBefore looks at the forwarder's hand before the place chunks are set
+// aside in: a server chunk numbered before the cut, in the hand as it looks,
+// is found there, though it would move on to set aside right after that place
+// was looked at.
+func TestRelay_StreamedBeforeLooksAtTheHandBeforeTheSetAsidePlace(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, Config{})
+	defer h.shutdown()
+	resp, cut := answeredThenCut(t, h)
+
+	tt := h.r.teeD2C
+	aside := fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: resp.ConnSeq, Bytes: []byte("zz")}
+	tt.noteReading()
+	tt.noteNumbered(aside.ConnSeq)
+	moved := false
+	tt.progress.afterLook = func(p place) {
+		if p == placeSetAside && !moved {
+			moved = true
+			tt.await(aside)
+			tt.noteReleased()
+		}
+	}
+	end, ok, changed := h.r.StreamedBefore(fakeconn.FromDest, cut.ConnSeq)
+	tt.progress.afterLook = nil
+	if moved {
+		tt.doneAwaiting() // refused: it never comes on the stream
+	} else {
+		tt.noteReleased() // refused from the hand
+	}
+	if ok || changed == nil {
+		t.Fatalf("StreamedBefore(dest, %d) = %d, %v with a chunk numbered %d in the forwarder's hand, set aside only after the set-aside place was looked at: want it to wait", cut.ConnSeq, end, ok, aside.ConnSeq)
+	}
+	if end, ok, _ := h.r.StreamedBefore(fakeconn.FromDest, cut.ConnSeq); !ok || end != 4 {
+		t.Fatalf("StreamedBefore(dest, %d) = %d, %v once the chunk is let go of: want 4, true", cut.ConnSeq, end, ok)
+	}
+}
+
+// seenAsTold runs step and reports whether it woke w's readers (told) and
+// whether look was true at any of those wakes, as a reader told then sees it.
+func seenAsTold(w *waker, step func(), look func() bool) (told, seen bool) {
+	w.woken = func() {
+		told = true
+		seen = seen || look()
+	}
+	step()
+	w.woken = nil
+	return told, seen
+}
+
 // A forwarder that numbers the chunk in its hand tells a reader waiting on it
-// while it was not numbered: numbered after the number asked of, it holds
-// nothing back.
+// while it was not numbered, and has noted the number by then: numbered after
+// the number asked of, it holds nothing back.
 func TestTee_ToldWhenTheChunkInHandIsNumbered(t *testing.T) {
 	t.Parallel()
 	tt := newTee(fakeconn.FromDest, 1<<20, 4, time.Second, nil, zap.NewNop())
 	tt.noteReading()
 	changed := tt.progress.changed.wait()
-	tt.noteNumbered(9)
+	told, held := seenAsTold(&tt.progress.changed, func() { tt.noteNumbered(9) }, func() bool { return tt.heldBefore(9) })
 	select {
 	case <-changed:
 	default:
 		t.Fatal("the chunk in hand was numbered: a reader waiting on it while it was not is not told")
+	}
+	if !told || held {
+		t.Fatalf("the chunk in hand was numbered 9: a reader was told (%v) while it still saw a chunk held before 9 (%v): want it told with the number noted", told, held)
 	}
 	if tt.heldBefore(9) {
 		t.Fatal("the chunk in hand is numbered 9: nothing held is before 9")

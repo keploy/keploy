@@ -147,6 +147,9 @@ const numbering = uint64(1) << 32
 type waker struct {
 	mu sync.Mutex
 	ch chan struct{}
+	// woken, when set, runs at each wake before a reader is told, so it sees
+	// what that reader, told, looks at. Tests set it.
+	woken func()
 }
 
 // wait returns a channel closed at the next wake. Asked before the state it
@@ -162,6 +165,9 @@ func (w *waker) wait() <-chan struct{} {
 
 // wake closes the channel wait gave, if any.
 func (w *waker) wake() {
+	if w.woken != nil {
+		w.woken()
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.ch != nil {
