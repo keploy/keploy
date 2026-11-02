@@ -230,20 +230,21 @@ func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
 	// assigned port back out and publish the bind event.
 	//
 	// Non-fatal on purpose, and both-or-nothing: the flag below is only
-	// set when both attach, and without the flag bind4/6 keep their old
-	// guess-a-port behaviour. So a cgroup setup that rejects them records
-	// exactly as it did before rather than failing startup, while everyone
-	// else stops hitting "That port is already in use" on the relocated
-	// port. This covers ATTACH failure only — a program the kernel refuses
-	// to LOAD already fails LoadAndAssign above and aborts the agent, the
-	// same as every other program in this object.
+	// set when both attach, and without the flag bind4/6 pick the port
+	// themselves, a free one outside the network namespace's ephemeral
+	// range, or leave the bind alone when there is none (warnBindFallback
+	// says which). So a cgroup setup that rejects them still starts,
+	// while everyone else stops hitting "That port is already in use" on
+	// the relocated port. This covers ATTACH failure only — a program the
+	// kernel refuses to LOAD already fails LoadAndAssign above and aborts
+	// the agent, the same as every other program in this object.
 	pb4, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCGroupInet4PostBind,
 		Program: objs.K_postBind4,
 	})
 	if err != nil {
-		h.logger.Warn("failed to attach the post_bind4 cgroup hook; falling back to BPF-side port selection for the application's relocated port (rare: the app may fail to start with 'address already in use')", zap.Error(err))
+		warnBindFallback(h.logger, "post_bind4", err, netSysctlDir)
 	} else {
 		pb6, err := link.AttachCgroup(link.CgroupOptions{
 			Path:    cGroupPath,
@@ -258,7 +259,7 @@ func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
 			if cerr := pb4.Close(); cerr != nil {
 				h.logger.Debug("failed to detach post_bind4 after post_bind6 failed", zap.Error(cerr))
 			}
-			h.logger.Warn("failed to attach the post_bind6 cgroup hook; falling back to BPF-side port selection for the application's relocated port (rare: the app may fail to start with 'address already in use')", zap.Error(err))
+			warnBindFallback(h.logger, "post_bind6", err, netSysctlDir)
 		} else {
 			h.cgPostBind4 = pb4
 			h.cgPostBind6 = pb6
