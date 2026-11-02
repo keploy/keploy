@@ -151,8 +151,8 @@ func anyReal(real map[string][]string) bool {
 // testClock is the build's TestClock when the proven switch is on and its
 // BeginTestClock moves the run's clock in this run (TestClockMover). A build
 // whose BeginTestClock moves nothing here holds no test on the clock: a
-// replay runs test workers' tests at once (overlapRefusal), and no test is
-// refused for another holding it (beginTestClock).
+// replay takes more than one test worker (clockWorkersRefusal), and no test
+// is refused for another holding it (beginTestClock).
 func testClock() (TestClock, bool) {
 	if !provenswitch.On() {
 		return nil, false

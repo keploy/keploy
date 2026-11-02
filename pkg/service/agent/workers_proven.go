@@ -81,6 +81,22 @@ func (a *Agent) learnWorkersRefusal(pid, declared int) *models.ScopeError {
 		"record with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand); keploy mock replay runs the workers at once")
 }
 
+// clockWorkersRefusal refuses process pid's claim as one of declared test
+// workers in a replay whose build moves the run's clock to each test's
+// recorded begin in this run (testClock): the run has one clock, so two
+// workers' tests open at once cannot each run at their own recorded begin.
+// It is refused at the claim, before any test runs, never at a begin that
+// happens to overlap another worker's test: whether a run is taken never
+// depends on how its workers' tests are scheduled.
+func (a *Agent) clockWorkersRefusal(pid, declared int) *models.ScopeError {
+	if _, moves := testClock(); !moves || !a.replaying() {
+		return nil
+	}
+	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrTooManyWorkers,
+		fmt.Sprintf("process %d declared %d test workers, but this replay moves the run's clock to each test's recorded begin, and a run has one clock, so two workers' tests open at once cannot each run at their own", pid, declared),
+		"replay with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
+}
+
 // claimWorker claims an instance of the run for me, a worker of a run of
 // declared workers. With the wire held, after ClaimInstance's checks of the
 // caller and endGoneWorkers.

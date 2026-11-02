@@ -478,31 +478,43 @@ func TestWorkersTestsOverlapAtReplay(t *testing.T) {
 }
 
 // A replay whose build moves the run's one clock to each test's recorded
-// begin refuses an overlap, named: two tests cannot each run on their own
-// recorded begin. A record moves no clock, and lets them overlap.
-func TestAnOverlapIsRefusedOnTheRunsOneClockOnlyInAReplay(t *testing.T) {
+// begin takes one test worker: a claim of two is refused at the claim,
+// named, before any test runs, so whether the run is taken never depends on
+// how its workers' tests happen to overlap. A claim of one is taken, and its
+// test moves the clock. A record moves no clock, and takes both workers,
+// whose tests overlap.
+func TestAClockMovingReplayRefusesMoreThanOneWorkerAtTheClaim(t *testing.T) {
 	for _, mode := range []models.Mode{models.MODE_TEST, models.MODE_RECORD} {
 		t.Run(string(mode), func(t *testing.T) {
-			a, _, _ := instanceAgent(t, mode)
+			a, p, h := instanceAgent(t, mode)
 			clock := &clockHooks{}
 			useHooks(t, clock)
 			w1, w2 := child(t), child(t)
-			claimWorker(t, a, w1.Process.Pid, "a", 2)
-			claimWorker(t, a, w2.Process.Pid, "b", 2)
-			_, serr := a.ProvenBegin(as(w1.Process.Pid), begin("TestOne"))
-			require.Nil(t, serr)
-			_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestTwo"))
 			if mode == models.MODE_RECORD {
+				claimWorker(t, a, w1.Process.Pid, "a", 2)
+				claimWorker(t, a, w2.Process.Pid, "b", 2)
+				_, serr := a.ProvenBegin(as(w1.Process.Pid), begin("TestOne"))
+				require.Nil(t, serr)
+				_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestTwo"))
 				require.Nil(t, serr, "a record moves no clock")
 				require.Equal(t, "b::TestTwo", a.proven.openOf(2))
 				require.Empty(t, clock.moves)
 				return
 			}
-			require.NotNil(t, serr)
-			require.Equal(t, models.ScopeErrOneTestAtATime, serr.Code)
-			require.Contains(t, serr.Message, "b::TestTwo began in test worker 2 while test worker 1's test a::TestOne was still open, but keploy moves the run's one clock to each test's recorded begin")
-			require.Empty(t, a.proven.openOf(2))
-			require.Len(t, clock.moves, 1, "the refused test moved the clock")
+			_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "a", Workers: 2}, w1.Process.Pid)
+			require.NotNil(t, serr, "a replay on the run's one clock takes no second worker")
+			require.Equal(t, models.ScopeErrTooManyWorkers, serr.Code)
+			require.Contains(t, serr.Message, fmt.Sprintf("process %d declared 2 test workers, but this replay moves the run's clock to each test's recorded begin, and a run has one clock", w1.Process.Pid))
+			require.Contains(t, serr.Remedy, "replay with one worker")
+			require.Empty(t, h.given(), "the refused claim was given no instance")
+			served, _ := p.log()
+			require.Empty(t, served, "the refused claim was served no manager")
+			require.Empty(t, a.proven.workers)
+
+			claimWorker(t, a, w1.Process.Pid, "a", 1)
+			_, serr = a.ProvenBegin(as(w1.Process.Pid), begin("TestOne"))
+			require.Nil(t, serr, "one worker runs on the run's one clock")
+			require.Len(t, clock.moves, 1)
 			require.Contains(t, clock.moves[0], "begin a::TestOne")
 		})
 	}
@@ -517,33 +529,33 @@ type moverClock struct {
 
 func (h *moverClock) MovesTestClock() bool { return h.here }
 
-// Whether a replay runs test workers' tests at once is what the build's
+// Whether a replay takes more than one test worker is what the build's
 // BeginTestClock does in this run (TestClockMover), not that the build has
-// a TestClock: one that moves the run's clock here refuses an overlap,
-// named, and one that moves no clock here (the enterprise build without a
-// clock record of the run's own) runs both tests at once, each to its own
-// end, and moves no clock for either.
-func TestAnOverlapIsRefusedOnlyWhereTheBuildMovesTheClockInThisRun(t *testing.T) {
+// a TestClock: one that moves the run's clock here refuses a claim of two
+// workers, named, and one that moves no clock here (the enterprise build
+// without a clock record of the run's own) takes both and runs their tests
+// at once, each to its own end, and moves no clock for either.
+func TestAReplayTakesWorkersOnlyWhereTheBuildMovesNoClockInThisRun(t *testing.T) {
 	for _, here := range []bool{true, false} {
 		t.Run(fmt.Sprintf("moves=%v", here), func(t *testing.T) {
-			a, _, _ := instanceAgent(t, models.MODE_TEST)
+			a, _, h := instanceAgent(t, models.MODE_TEST)
 			clock := &moverClock{here: here}
 			useHooks(t, clock)
 			w1, w2 := child(t), child(t)
+			if here {
+				_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "a", Workers: 2}, w1.Process.Pid)
+				require.NotNil(t, serr)
+				require.Equal(t, models.ScopeErrTooManyWorkers, serr.Code)
+				require.Contains(t, serr.Message, "this replay moves the run's clock to each test's recorded begin")
+				require.Empty(t, h.given())
+				require.Empty(t, clock.moves)
+				return
+			}
 			claimWorker(t, a, w1.Process.Pid, "a", 2)
 			claimWorker(t, a, w2.Process.Pid, "b", 2)
 			_, serr := a.ProvenBegin(as(w1.Process.Pid), begin("TestOne"))
 			require.Nil(t, serr)
 			_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestTwo"))
-			if here {
-				require.NotNil(t, serr)
-				require.Equal(t, models.ScopeErrOneTestAtATime, serr.Code)
-				require.Contains(t, serr.Message, "but keploy moves the run's one clock to each test's recorded begin")
-				require.Empty(t, a.proven.openOf(2))
-				require.Len(t, clock.moves, 1, "the first test alone moved the clock")
-				require.Contains(t, clock.moves[0], "begin a::TestOne")
-				return
-			}
 			require.Nil(t, serr, "a build that moves no clock in this run holds no test on it")
 			require.Equal(t, "a::TestOne", a.proven.openOf(1))
 			require.Equal(t, "b::TestTwo", a.proven.openOf(2))

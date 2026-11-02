@@ -36,9 +36,11 @@ type InstanceReq struct {
 	// Workers is how many test workers of the run its framework runs at
 	// once (Playwright's workers, go test's -p), each claiming for itself.
 	// 0, sent by an integration that predates it, is one. The agent refuses
-	// more than it runs at once (ScopeErrTooManyWorkers), and a count other
-	// than a live worker's (ScopeErrWorkersMismatch), so whether a run is
-	// taken never depends on how its workers happen to overlap.
+	// more than it runs at once (ScopeErrTooManyWorkers: more than its limit,
+	// or more than one in record's full round or in a replay that moves the
+	// run's one clock to each test's recorded begin), and a count other than
+	// a live worker's (ScopeErrWorkersMismatch), so whether a run is taken
+	// never depends on how its workers happen to overlap.
 	Workers int `json:"workers,omitempty"`
 }
 
@@ -125,7 +127,9 @@ const (
 	// live one held it; the first release runs one at a time.
 	ScopeErrOneTestProcess = "one_test_process_at_a_time"
 	// ScopeErrTooManyWorkers: a claim declared more test workers
-	// (InstanceReq.Workers) than this keploy runs at once.
+	// (InstanceReq.Workers) than this keploy runs at once, or more than one
+	// where the run runs one (record's full round, a replay that moves the
+	// run's one clock).
 	ScopeErrTooManyWorkers = "too_many_workers"
 	// ScopeErrWorkersMismatch: a claim declared another worker count than
 	// a live worker of the run did.
