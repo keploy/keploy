@@ -560,10 +560,12 @@ func TestMeter_AConsumerHeldOffSinceBeforeItsStallWasDueHoldsItsVerdict(t *testi
 	}
 }
 
-// The sampler sleeps in the kernel, a Tick at a time: a sleep ends once its
-// length has passed, and a release ends a long one at its next Tick. Each is
-// waited on for far more of the test's own short sleeps than a Tick takes,
-// so a sleep that does not end fails here, not on the test's timeout.
+// The sampler sleeps in the kernel: a sleep ends once its length has passed,
+// and a release (stop closed, then the waker woken) ends a long one: at once
+// with an eventfd, which the sleep then reads empty (it took the wake), and
+// at its next Tick without one. Each is waited on for far more of the test's
+// own short sleeps than a Tick takes, so a sleep that does not end fails
+// here, not on the test's timeout.
 func TestSleepForEndsAtItsLengthOrItsRelease(t *testing.T) {
 	const most = 10000 // the test's 1 ms sleeps: ten seconds and more
 	ends := func(t *testing.T, ended <-chan bool, want bool) {
@@ -583,16 +585,72 @@ func TestSleepForEndsAtItsLengthOrItsRelease(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 	}
-	t.Run("a sleep ends at its length", func(t *testing.T) {
-		ended := make(chan bool, 1)
-		go func() { ended <- sleepFor(5*time.Millisecond, make(chan struct{})) }()
-		ends(t, ended, false)
-	})
-	t.Run("a release ends a long sleep", func(t *testing.T) {
-		stop, ended := make(chan struct{}), make(chan bool, 1)
-		go func() { ended <- sleepFor(time.Hour, stop) }()
-		time.Sleep(2 * Tick) // most likely asleep by now; either way it must end
-		close(stop)
-		ends(t, ended, true)
-	})
+	ev := newWaker()
+	if ev.fd < 0 {
+		t.Fatal("the kernel made no eventfd")
+	}
+	for _, c := range []struct {
+		name string
+		w    *waker
+	}{{"an eventfd", ev}, {"no eventfd", &waker{fd: -1}}} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Run("a sleep ends at its length", func(t *testing.T) {
+				ended := make(chan bool, 1)
+				go func() { ended <- sleepFor(5*time.Millisecond, make(chan struct{}), c.w) }()
+				ends(t, ended, false)
+			})
+			t.Run("a release ends a long sleep", func(t *testing.T) {
+				stop, ended := make(chan struct{}), make(chan bool, 1)
+				go func() { ended <- sleepFor(time.Hour, stop, c.w) }()
+				time.Sleep(2 * Tick) // most likely asleep by now; either way it must end
+				close(stop)
+				c.w.wake()
+				ends(t, ended, true)
+				if c.w.fd >= 0 {
+					wakeTaken(t, c.w)
+				}
+			})
+		})
+	}
+}
+
+// wakeTaken fails the test unless w's eventfd reads empty: the sleep took the
+// wake, and the next one does not end at once.
+func wakeTaken(t *testing.T, w *waker) {
+	t.Helper()
+	var b [8]byte
+	if n, err := unix.Read(w.fd, b[:]); err != unix.EAGAIN {
+		t.Fatalf("the eventfd read %d bytes (%v) after the sleep ended; want none (EAGAIN): the sleep left its wake", n, err)
+	}
+}
+
+// The last release wakes the sampler's sleep, so it returns once the
+// sampling thread runs, not at the sampler's next look: a sampler that looks
+// once an hour still lets go at once (on a Go timer it did; the sleep in the
+// kernel must too, or every last release waits a Tick: a meter per chunk
+// that a closed tee stops, and the agent's boot reporter at its end). The
+// sleep takes the wake before the sampling ends, and the sampler keeps the
+// one eventfd for all its samplings.
+func TestSampler_TheLastReleaseWakesItsSleep(t *testing.T) {
+	s := &sampler{src: &fakeSource{}, tick: time.Hour}
+	fd := -1
+	for run := range 2 {
+		release := s.acquire()
+		released := make(chan struct{})
+		go func() { release(); close(released) }()
+		select {
+		case <-released:
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatalf("sampling %d: the release of a sampler that looks once an hour has not returned in a minute", run)
+		}
+		if s.wake.fd < 0 {
+			t.Fatal("the sampler made no eventfd")
+		}
+		if run == 0 {
+			fd = s.wake.fd
+		} else if s.wake.fd != fd {
+			t.Fatalf("sampling %d polled eventfd %d, the first %d; want one per sampler", run, s.wake.fd, fd)
+		}
+		wakeTaken(t, s.wake)
+	}
 }

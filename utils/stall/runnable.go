@@ -135,6 +135,7 @@ type sampler struct {
 	users int
 	stop  chan struct{}
 	done  chan struct{}
+	wake  *waker // ends the sampling's sleep at the last release; made at the first acquire
 	// The last sample: wall time, CPU time (cpuOK: it could be read).
 	lastWall time.Time
 	lastCPU  time.Duration
@@ -181,9 +182,12 @@ func (s *sampler) acquire() func() {
 	s.mu.Lock()
 	s.users++
 	if s.users == 1 {
+		if s.wake == nil {
+			s.wake = newWaker()
+		}
 		s.begin()
 		s.stop, s.done = make(chan struct{}), make(chan struct{})
-		go s.run(s.stop, s.done)
+		go s.run(s.stop, s.done, s.wake)
 	}
 	s.mu.Unlock()
 	var once sync.Once
@@ -196,9 +200,13 @@ func (s *sampler) acquire() func() {
 				stop, done = s.stop, s.done
 				s.stop, s.done = nil, nil
 			}
+			wake := s.wake
 			s.mu.Unlock()
 			if stop != nil {
+				// The sampling sleeps until its next look: woken, it
+				// ends now (sleepFor).
 				close(stop)
+				wake.wake()
 				<-done
 			}
 		})
@@ -216,8 +224,9 @@ func (s *sampler) acquire() func() {
 // 26 busy loops, where a thread could run about a seventh of the time, the
 // clock counted 2.7 s of 184 s, 83% of the wall time in late samples. Woken
 // in its own sleep, the thread's wait for a CPU is its run delay (ownWait),
-// and its samples are on time.
-func (s *sampler) run(stop, done chan struct{}) {
+// and its samples are on time. The last release wakes that sleep (wake), so
+// it returns as soon as the thread runs, as a release did on a Go timer.
+func (s *sampler) run(stop, done chan struct{}, wake *waker) {
 	defer close(done)
 	// One thread samples, so its wait for a CPU between two samples is read
 	// from its own account (ownWait).
@@ -226,7 +235,7 @@ func (s *sampler) run(stop, done chan struct{}) {
 	s.mu.Lock()
 	s.lastOwn, s.ownOK = s.src.ownWait()
 	s.mu.Unlock()
-	for !sleepFor(s.tick, stop) {
+	for !sleepFor(s.tick, stop, wake) {
 		s.sample()
 	}
 }

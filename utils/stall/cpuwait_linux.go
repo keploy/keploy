@@ -4,10 +4,12 @@ package stall
 
 import (
 	"bytes"
+	"encoding/binary"
 	"os"
 	"strconv"
-	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // taskDir holds a directory per thread of the process.
@@ -118,25 +120,68 @@ func (w *threadWaits) account(seen map[string]threadStat, steal map[string]int64
 	return most, heldFor
 }
 
-// sleepFor sleeps the calling thread in the kernel for d, a Tick at a time,
-// and says whether stop closed first (looked at between them). The thread
-// is woken where its sleep ends, so on a host that holds the process off
-// its wait for a CPU from then on is its own run delay (threadRunDelay).
-func sleepFor(d time.Duration, stop <-chan struct{}) (stopped bool) {
+// sleepFor sleeps the calling thread in the kernel for d, and says whether
+// stop closed first. The thread is woken where its sleep ends, so on a host
+// that holds the process off its wait for a CPU from then on is its own run
+// delay (threadRunDelay). It looks at stop only after a sleep: whoever closes
+// stop wakes w after it, so the sleep takes that wake before the sampling
+// ends, and the next sampling's first sleep does not end at once.
+func sleepFor(d time.Duration, stop <-chan struct{}, w *waker) (stopped bool) {
 	end := time.Now().Add(d)
 	for {
+		// Cut short by a signal, or by a wake left from an earlier
+		// release, it sleeps what is left.
+		w.sleep(time.Until(end))
 		select {
 		case <-stop:
 			return true
 		default:
 		}
-		left := time.Until(end)
-		if left <= 0 {
+		if time.Until(end) <= 0 {
 			return false
 		}
-		// Cut short by a signal, it sleeps what is left.
-		ts := syscall.NsecToTimespec(int64(min(left, Tick)))
-		_ = syscall.Nanosleep(&ts, nil)
+	}
+}
+
+// waker ends the sampler's sleep (sleepFor) at the release of its last user,
+// so the release returns once the sampling thread runs, not at its next
+// look: an eventfd the release writes to and the sleep polls along with its
+// timer. One per sampler, made at its first acquire and never closed, so no
+// sleep ever polls a number the process has since given another file. fd < 0:
+// the kernel made none, and the sleep wakes a Tick at a time to look.
+type waker struct{ fd int }
+
+// newWaker makes a sampler's waker.
+func newWaker() *waker {
+	fd, err := unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
+	if err != nil {
+		return &waker{fd: -1}
+	}
+	return &waker{fd: fd}
+}
+
+// wake ends the sleep in progress, or the next one. Without an eventfd it
+// writes to none (EBADF).
+func (w *waker) wake() {
+	var one [8]byte
+	binary.NativeEndian.PutUint64(one[:], 1)
+	_, _ = unix.Write(w.fd, one[:])
+}
+
+// sleep sleeps the calling thread in the kernel for d at most (none if d is
+// not positive: the kernel refuses a negative time), and ends at a wake,
+// which it takes. Without an eventfd it sleeps a Tick at most.
+func (w *waker) sleep(d time.Duration) {
+	if w.fd < 0 {
+		ts := unix.NsecToTimespec(int64(min(d, Tick)))
+		_ = unix.Nanosleep(&ts, nil)
+		return
+	}
+	ts := unix.NsecToTimespec(int64(d))
+	fds := []unix.PollFd{{Fd: int32(w.fd), Events: unix.POLLIN}}
+	if n, _ := unix.Ppoll(fds, &ts, nil); n > 0 {
+		var b [8]byte
+		_, _ = unix.Read(w.fd, b[:])
 	}
 }
 
