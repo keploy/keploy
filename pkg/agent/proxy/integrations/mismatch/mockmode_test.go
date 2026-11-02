@@ -49,7 +49,7 @@ func TestHintTextInMockMode(t *testing.T) {
 	want := map[string]string{
 		"no mocks":             "No recorded mocks were available to match against for this protocol in the selected mock set. Re-record the mock set with 'keploy mock record'.",
 		"body values drifted":  "Only values drifted (body.qty). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.global.requestbody in keploy.yml with root-relative keys (e.g. requestbody: {qty: []}); otherwise re-record the mock set with 'keploy mock record', or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'.",
-		"other values drifted": "Only values drifted (path). If these are dynamic (timestamps, ids, tokens), add them to the matching noise (test.globalNoise in keploy.yml); otherwise re-record the mock set with 'keploy mock record', or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'.",
+		"other values drifted": "Only values drifted (path). If these are dynamic (timestamps, ids, tokens), add a regex of the part of path that changes under test.globalNoise.global.url in keploy.yml (e.g. url: {\"<regex>\": []}); otherwise re-record the mock set with 'keploy mock record', or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'.",
 		"structure changed":    "Request structure changed since recording. Re-record the mock set with 'keploy mock record'.",
 	}
 	for name, r := range rerecordReports() {
@@ -63,15 +63,17 @@ func TestHintTextInMockMode(t *testing.T) {
 	// --on-miss is acted on by the HTTP parser alone; other protocols are told only to re-record.
 	other := NewReport(ProtocolGeneric, "opaque exchange").
 		WithClosest("mock-1", []models.MockFieldDiff{{Path: "payload", Kind: models.DiffKindValueChanged, Expected: "a", Actual: "b"}}).Build()
-	if want := "Only values drifted (payload). If these are dynamic (timestamps, ids, tokens), add them to the matching noise (test.globalNoise in keploy.yml); otherwise re-record the mock set with 'keploy mock record'."; other.NextSteps != want {
+	if want := "Only values drifted (payload). If the change is expected, re-record the mock set with 'keploy mock record'."; other.NextSteps != want {
 		t.Errorf("non-HTTP drift hint in mock mode:\n got  %q\n want %q", other.NextSteps, want)
 	}
 }
 
-// Everything that is not a mock run keeps the exact hint it had, including
-// after mock mode was on, so a flag left over from one setup cannot leak into
-// a later one.
-func TestHintsAreUnchangedOutsideMockMode(t *testing.T) {
+// A run that is not a mock run gets keploy test's hints (keploy record, the
+// test set, --update-test-mapping), also after mock mode was on, so a flag
+// left over from one setup cannot leak into a later one. It covers the HTTP
+// reports of rerecordReports; another protocol's value-drift hint is
+// TestValueDriftHintNamesOnlyANoiseBucketThatCoversIt's.
+func TestHintsOutsideMockModeAreKeployTests(t *testing.T) {
 	SetMockMode(true)
 	SetMockMode(false)
 	if got := RecordCommand(); got != "keploy record" || MockMode() {
@@ -80,12 +82,91 @@ func TestHintsAreUnchangedOutsideMockMode(t *testing.T) {
 	want := map[string]string{
 		"no mocks":             "No recorded mocks were available to match against for this protocol in the selected test set. Re-record the test set with 'keploy record'.",
 		"body values drifted":  "Only values drifted (body.qty). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.global.requestbody in keploy.yml with root-relative keys (e.g. requestbody: {qty: []}); otherwise re-record with 'keploy record'.",
-		"other values drifted": "Only values drifted (path). If these are dynamic (timestamps, ids, tokens), add them to the matching noise (test.globalNoise in keploy.yml); otherwise re-record with 'keploy record'.",
+		"other values drifted": "Only values drifted (path). If these are dynamic (timestamps, ids, tokens), add a regex of the part of path that changes under test.globalNoise.global.url in keploy.yml (e.g. url: {\"<regex>\": []}); otherwise re-record with 'keploy record'.",
 		"structure changed":    "Request structure changed since recording. Re-record the test set with 'keploy record', or, if you edited its mocks, remap it with --disable-mapping --update-test-mapping.",
 	}
 	for name, r := range rerecordReports() {
 		if r.NextSteps != want[name] {
 			t.Errorf("%s: hint changed outside mock mode:\n got  %q\n want %q", name, r.NextSteps, want[name])
+		}
+	}
+}
+
+// A value drift's hint names keploy.yml noise only in a bucket keploy hands
+// the matcher that reads that field (replay.PrepareMockNoiseConfig: header,
+// body, requestbody, url), at the path keploy.yml reads it from. An HTTP
+// drift no bucket covers (the method, the destination, a body that is no
+// JSON) is told that no noise covers it. Of another protocol, a body field
+// of MongoDB, MySQL or HBase names requestbody, which their matchers read;
+// any other drift names re-recording alone and claims nothing about noise,
+// in keploy test and in a mock run.
+func TestValueDriftHintNamesOnlyANoiseBucketThatCoversIt(t *testing.T) {
+	SetMockMode(false)
+	t.Cleanup(func() { SetMockMode(false) })
+	drift := func(paths ...string) []models.MockFieldDiff {
+		var d []models.MockFieldDiff
+		for _, p := range paths {
+			d = append(d, models.MockFieldDiff{Path: p, Kind: models.DiffKindValueChanged, Expected: "a", Actual: "b"})
+		}
+		return d
+	}
+	const rerecord = "re-record with 'keploy record'."
+	for _, c := range []struct {
+		name     string
+		protocol string
+		paths    []string
+		want     string
+	}{
+		{"a body field", ProtocolHTTP, []string{"body.qty"},
+			"Only values drifted (body.qty). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.global.requestbody in keploy.yml with root-relative keys (e.g. requestbody: {qty: []}); otherwise " + rerecord},
+		{"the path and a query value", ProtocolHTTP, []string{"path", "query.page"},
+			"Only values drifted (path, query.page). If these are dynamic (timestamps, ids, tokens), add a regex of the part of path, query.page that changes under test.globalNoise.global.url in keploy.yml (e.g. url: {\"<regex>\": []}); otherwise " + rerecord},
+		{"a header's value and a part of one", ProtocolHTTP, []string{"header.x-request-id", "header.authorization.signed_headers", "header.authorization.region"},
+			"Only values drifted (header.x-request-id, header.authorization.signed_headers, header.authorization.region). If these are dynamic (timestamps, ids, tokens), add the headers under test.globalNoise.global.header in keploy.yml (e.g. header: {x-request-id: [], authorization: []}); otherwise " + rerecord},
+		{"a body field, the path and a header", ProtocolHTTP, []string{"body.id", "path", "header.x-trace"},
+			"Only values drifted (body.id, path, header.x-trace). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.global.requestbody in keploy.yml with root-relative keys (e.g. requestbody: {id: []}), and a regex of the part of path that changes under test.globalNoise.global.url in keploy.yml (e.g. url: {\"<regex>\": []}), and the headers under test.globalNoise.global.header in keploy.yml (e.g. header: {x-trace: []}); otherwise " + rerecord},
+		{"the method", ProtocolHTTP, []string{"method"},
+			"Only values drifted (method). No noise keploy.yml can declare covers method: if the change is expected, " + rerecord},
+		{"the destination", ProtocolHTTP, []string{"host"},
+			"Only values drifted (host). No noise keploy.yml can declare covers host: if the change is expected, " + rerecord},
+		{"a body that is no JSON", ProtocolHTTP, []string{"body"},
+			"Only values drifted (body). No noise keploy.yml can declare covers body: if the change is expected, " + rerecord},
+		{"a body field beside the method", ProtocolHTTP, []string{"body.qty", "method"},
+			"Only values drifted (body.qty, method). No noise keploy.yml can declare covers method: if the change is expected, " + rerecord},
+		{"a MongoDB body field", ProtocolMongo, []string{"body.cmd.filter.tag"},
+			"Only values drifted (body.cmd.filter.tag). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.global.requestbody in keploy.yml with root-relative keys (e.g. requestbody: {cmd.filter.tag: []}); otherwise " + rerecord},
+		{"two MySQL body fields", ProtocolMySQL, []string{"body.parameters.0.value", "body.parameters.1.value"},
+			"Only values drifted (body.parameters.0.value, body.parameters.1.value). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.global.requestbody in keploy.yml with root-relative keys (e.g. requestbody: {parameters.0.value: [], parameters.1.value: []}); otherwise " + rerecord},
+		{"an HBase body field", "HBase", []string{"body.get.row"},
+			"Only values drifted (body.get.row). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.global.requestbody in keploy.yml with root-relative keys (e.g. requestbody: {get.row: []}); otherwise " + rerecord},
+		{"a MongoDB field outside the body", ProtocolMongo, []string{"header.opcode"},
+			"Only values drifted (header.opcode). If the change is expected, " + rerecord},
+		{"a MongoDB body field beside one outside it", ProtocolMongo, []string{"body.cmd.filter.tag", "header.opcode"},
+			"Only values drifted (body.cmd.filter.tag, header.opcode). If the change is expected, " + rerecord},
+		{"a body field of a protocol that reads no requestbody", ProtocolGeneric, []string{"body.qty"},
+			"Only values drifted (body.qty). If the change is expected, " + rerecord},
+		{"a Postgres body field", ProtocolPostgres, []string{"body.query"},
+			"Only values drifted (body.query). If the change is expected, " + rerecord},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := NewReport(c.protocol, "call").WithClosest("mock-1", drift(c.paths...)).Build()
+			if r.NextSteps != c.want {
+				t.Errorf("hint:\n got  %q\n want %q", r.NextSteps, c.want)
+			}
+			if c.protocol != ProtocolHTTP && strings.Contains(r.NextSteps, "No noise") {
+				t.Errorf("a %s drift's hint claims no noise covers it; this package cannot know that: %q", c.protocol, r.NextSteps)
+			}
+		})
+	}
+	// A mock run gets the same remedy, with the mock run's re-record.
+	SetMockMode(true)
+	for _, c := range []struct{ protocol, path, want string }{
+		{ProtocolMongo, "body.cmd.filter.tag", "Only values drifted (body.cmd.filter.tag). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.global.requestbody in keploy.yml with root-relative keys (e.g. requestbody: {cmd.filter.tag: []}); otherwise re-record the mock set with 'keploy mock record'."},
+		{ProtocolGeneric, "body.qty", "Only values drifted (body.qty). If the change is expected, re-record the mock set with 'keploy mock record'."},
+	} {
+		r := NewReport(c.protocol, "call").WithClosest("mock-1", drift(c.path)).Build()
+		if r.NextSteps != c.want {
+			t.Errorf("%s drift in mock mode:\n got  %q\n want %q", c.protocol, r.NextSteps, c.want)
 		}
 	}
 }

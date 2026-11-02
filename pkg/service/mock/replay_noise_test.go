@@ -4,10 +4,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -28,12 +30,12 @@ func TestMockReplayHandsTheAgentKeployYmlNoise(t *testing.T) {
 		"header":      {"X-Request-Id": {}},
 		"body":        {"ts": {}},
 		"requestbody": {"cmd.filter._id": {}},
-		// keploy test hands the agent the header, body and requestbody
-		// buckets only; the rest is for its own assertions.
-		"url": {"page": {}},
+		"url":         {"/users/[0-9]+": {}},
+		// No matcher reads another bucket: it is not handed.
+		"query": {"page": {}},
 	}
 	setNoise := config.TestsetNoise{
-		"set":   {"requestbody": {"docs.0.createdAt": {}}},
+		"set":   {"requestbody": {"docs.0.createdAt": {}}, "url": {"/orders/[a-f0-9-]+": {}}},
 		"other": {"requestbody": {"never": {}}},
 	}
 	for _, c := range []struct {
@@ -47,16 +49,19 @@ func TestMockReplayHandsTheAgentKeployYmlNoise(t *testing.T) {
 			"header":      {"X-Request-Id": {}},
 			"body":        {"ts": {}},
 			"requestbody": {"cmd.filter._id": {}},
+			"url":         {"/users/[0-9]+": {}},
 		}},
 		{"keploy mock replay, global and the set's noise", false, global, setNoise, map[string]map[string][]string{
 			"header":      {"X-Request-Id": {}},
 			"body":        {"ts": {}},
 			"requestbody": {"cmd.filter._id": {}, "docs.0.createdAt": {}},
+			"url":         {"/users/[0-9]+": {}, "/orders/[a-f0-9-]+": {}},
 		}},
 		{"keploy mock replay, the set's noise alone", false, nil, setNoise, map[string]map[string][]string{
 			"header":      {},
 			"body":        {},
 			"requestbody": {"docs.0.createdAt": {}},
+			"url":         {"/orders/[a-f0-9-]+": {}},
 		}},
 		{"keploy mock replay, noise of another set only", false, nil, config.TestsetNoise{"other": {"requestbody": {"never": {}}}}, map[string]map[string][]string{}},
 		{"keploy mock replay, no noise", false, nil, nil, map[string]map[string][]string{}},
@@ -64,6 +69,7 @@ func TestMockReplayHandsTheAgentKeployYmlNoise(t *testing.T) {
 			"header":      {"X-Request-Id": {}},
 			"body":        {"ts": {}},
 			"requestbody": {"cmd.filter._id": {}, "docs.0.createdAt": {}},
+			"url":         {"/users/[0-9]+": {}, "/orders/[a-f0-9-]+": {}},
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -100,6 +106,13 @@ func TestMockReplayHandsTheAgentKeployYmlNoise(t *testing.T) {
 				return
 			}
 			require.Equal(t, c.want, got)
+			// The HTTP request matcher reads the request-body and the URL
+			// noise from what it was handed.
+			rn := http.NewRequestNoise(zap.NewNop(), instr.got[0])
+			for k := range c.want["requestbody"] {
+				require.Contains(t, rn.Body, strings.ToLower(k), "request-body noise the HTTP matcher does not read")
+			}
+			require.ElementsMatch(t, keysOf(c.want["url"]), rn.URL, "URL noise the HTTP matcher does not read")
 			if len(got["requestbody"]) > 0 {
 				got["requestbody"]["added"] = []string{}
 				_, leaked := cfg.Test.GlobalNoise.Global["requestbody"]["added"]
@@ -108,4 +121,12 @@ func TestMockReplayHandsTheAgentKeployYmlNoise(t *testing.T) {
 			}
 		})
 	}
+}
+
+func keysOf(m map[string][]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }

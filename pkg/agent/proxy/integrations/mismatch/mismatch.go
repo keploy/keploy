@@ -23,6 +23,7 @@ package mismatch
 import (
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -338,23 +339,14 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 				rerecord += ", or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'"
 			}
 		}
-		// Body diffs are reported "body."-prefixed for readability, but HTTP
-		// request matching reads the request-body noise bucket with
-		// root-relative keys — so strip the prefix in the copy-paste hint to
-		// avoid pointing users at the response-noise (body) bucket, which the
-		// request matcher never consults.
-		bodyKeys := make([]string, 0, len(r.FieldDiffs))
-		for _, d := range r.FieldDiffs {
-			if k := strings.TrimPrefix(d.Path, "body."); k != d.Path {
-				bodyKeys = append(bodyKeys, k)
-			}
+		noise, uncovered, unknown := noiseRemedy(r)
+		switch {
+		case len(uncovered) > 0:
+			return fmt.Sprintf("Only values drifted (%s). No noise keploy.yml can declare covers %s: if the change is expected, %s.", strings.Join(paths, ", "), strings.Join(uncovered, ", "), rerecord)
+		case unknown:
+			return fmt.Sprintf("Only values drifted (%s). If the change is expected, %s.", strings.Join(paths, ", "), rerecord)
 		}
-		// The bucket's path is test.globalNoise.global.requestbody: a bucket
-		// written straight under test.globalNoise is no noise keploy reads.
-		if len(bodyKeys) > 0 {
-			return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.global.requestbody in keploy.yml with root-relative keys (e.g. requestbody: {%s: []}); otherwise %s.", strings.Join(paths, ", "), strings.Join(bodyKeys, ": [], "), rerecord)
-		}
-		return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add them to the matching noise (test.globalNoise in keploy.yml); otherwise %s.", strings.Join(paths, ", "), rerecord)
+		return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add %s; otherwise %s.", strings.Join(paths, ", "), noise, rerecord)
 	default:
 		// Not --update-test-mapping alone: it updates only a passing test's
 		// mapping, so a test this miss failed keeps its recorded one. With
@@ -365,6 +357,84 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 		}
 		return "Request structure changed since recording. Re-record the test set with '" + RecordCommand() + "', or, if you edited its mocks, remap it with --disable-mapping --update-test-mapping."
 	}
+}
+
+// requestBodyNoiseProtocols are the protocols besides HTTP whose request
+// matcher reads a "body."-prefixed field's noise from keploy.yml's
+// requestbody bucket, by its root-relative key: MongoDB (its matcher's
+// user request-body noise), MySQL (requestBodyNoise in its replayer) and
+// HBase (enterprise; it labels its reports "HBase" and has no constant
+// here). Another protocol's matcher reads no bucket this package can name.
+var requestBodyNoiseProtocols = []string{ProtocolMongo, ProtocolMySQL, "HBase"}
+
+// noiseRemedy names the keploy.yml noise that lets a call whose values alone
+// drifted match its mock: each drift in the bucket of test.globalNoise.global
+// the matcher reads for it, all of which keploy test and keploy mock replay
+// hand the agent (replay.PrepareMockNoiseConfig). Body diffs are reported
+// "body."-prefixed for readability, but a request matcher reads a body
+// field from requestbody by its root-relative key (the response "body"
+// bucket is never consulted to match a request).
+//
+// The HTTP request matcher's buckets are all known here: a body field from
+// requestbody; the path and query values from url, regexes that mask the
+// part that changes; and a header's value, compared by the strict
+// comparison alone, from header, by the header's name. uncovered names each
+// HTTP drift no bucket covers (the method, the destination, a whole body
+// that is no JSON): noise cannot make that call match, so the hint names
+// none when there is one.
+//
+// Of another protocol, only a body field of a protocol in
+// requestBodyNoiseProtocols is known to be covered, by requestbody. unknown
+// is set for any other drift of such a protocol, and for every drift of the
+// rest: this package cannot tell whether that matcher reads noise for it,
+// so the hint claims neither a remedy nor its absence and names
+// re-recording alone.
+func noiseRemedy(r *models.MockMismatchReport) (noise string, uncovered []string, unknown bool) {
+	var body, url, header []string
+	if r.Protocol != ProtocolHTTP {
+		for _, d := range r.FieldDiffs {
+			k, ok := strings.CutPrefix(d.Path, "body.")
+			if !ok || !slices.Contains(requestBodyNoiseProtocols, r.Protocol) {
+				return "", nil, true
+			}
+			body = append(body, k)
+		}
+		return requestBodyNoise(body), nil, false
+	}
+	for _, d := range r.FieldDiffs {
+		switch {
+		case strings.HasPrefix(d.Path, "body."):
+			body = append(body, strings.TrimPrefix(d.Path, "body."))
+		case d.Path == "path" || strings.HasPrefix(d.Path, "query."):
+			url = append(url, d.Path)
+		case strings.HasPrefix(d.Path, "header."):
+			// A header is noise by its name: a part of one ("header.
+			// authorization.signed_headers") is named by the header's.
+			name, _, _ := strings.Cut(strings.TrimPrefix(d.Path, "header."), ".")
+			if !slices.Contains(header, name) {
+				header = append(header, name)
+			}
+		default:
+			uncovered = append(uncovered, d.Path)
+		}
+	}
+	var parts []string
+	if len(body) > 0 {
+		parts = append(parts, requestBodyNoise(body))
+	}
+	if len(url) > 0 {
+		parts = append(parts, fmt.Sprintf("a regex of the part of %s that changes under test.globalNoise.global.url in keploy.yml (e.g. url: {\"<regex>\": []})", strings.Join(url, ", ")))
+	}
+	if len(header) > 0 {
+		parts = append(parts, fmt.Sprintf("the headers under test.globalNoise.global.header in keploy.yml (e.g. header: {%s: []})", strings.Join(header, ": [], ")))
+	}
+	return strings.Join(parts, ", and "), uncovered, false
+}
+
+// requestBodyNoise names the requestbody entries, by root-relative key, that
+// cover the body fields keys.
+func requestBodyNoise(keys []string) string {
+	return fmt.Sprintf("the request-body fields under test.globalNoise.global.requestbody in keploy.yml with root-relative keys (e.g. requestbody: {%s: []})", strings.Join(keys, ": [], "))
 }
 
 // JSONBodyDiffs computes field-level diffs between a recorded JSON body and
