@@ -77,8 +77,11 @@ import "go.keploy.io/server/v3/pkg/models"
 // protocol's sibling rule: the same statement, on the same connection or in
 // one recorded scope. The tracker asks it holding its own lock, of the
 // recordings the store served (servedInstant.m) and of those a learn step
-// sees (PreviousCall.See): it must read only the recording, never call back
-// into the tracker. A nil Siblings names no sibling.
+// sees (PreviousCall.See): it must read only the recording and what the
+// rule was built with (a protocol's recorded test windows, which keploy's
+// store reads without a lock), never take a lock the store holds while it
+// serves, and never call back into the tracker. A nil Siblings names no
+// sibling.
 type Siblings func(*models.Mock) bool
 
 // SiblingRole is what a sibling's learn step learned one of its places as
