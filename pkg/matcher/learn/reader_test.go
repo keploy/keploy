@@ -1292,7 +1292,7 @@ func TestReaderJsonbKeysSpelledAlikeAreNotOnePlace(t *testing.T) {
 		{"key c[0] to array c", m{"c[0]": w, "c": []any{"x"}}, m{"c[0]": "x", "c": []any{w}}, false},
 		{"key a.b.c to a's b's c", m{"a.b.c": w, "a": m{"b": m{"c": "x"}}}, m{"a.b.c": "x", "a": m{"b": m{"c": w}}}, false},
 		{"key user.id to user's id, the dotted key gone", m{"user.id": w, "user": m{"id": "x"}}, m{"user": m{"id": w}}, false},
-		{"key user.id stayed, user's id gone", m{"user.id": w, "user": m{"id": "x"}}, m{"user.id": w}, false},
+		{"key user.id stayed, user's id gone", m{"user.id": w, "user": m{"id": "x"}}, m{"user.id": w}, true},
 		{"key a.b stayed", m{"a.b": w, "a": m{"b": "x"}}, m{"a.b": w, "a": m{"b": "x"}}, true},
 		{"a's b stayed", m{"a.b": "x", "a": m{"b": w}}, m{"a.b": "y", "a": m{"b": w}}, true},
 		{"a's b stayed, the dotted key gone", m{"a.b": "x", "a": m{"b": w}}, m{"a": m{"b": w}}, true},
@@ -1310,26 +1310,81 @@ func TestReaderJsonbKeysSpelledAlikeAreNotOnePlace(t *testing.T) {
 	}
 }
 
-// textFields spells a key "" at its root's top as nothing, so its b stands
-// at b, the root's own b's path: the two stand apart by their order too.
-func TestReaderAnEmptyKeyAtTheTopIsNotItsSiblings(t *testing.T) {
+// A flat key in one run and the nested keys it spells in the other, neither
+// run holding both, are two places: each field is spelled by its keys, a
+// key path syntax reads as more than one quoted. A path no such key is on
+// is spelled as in a text with none, so a word that stayed beside one is
+// at one place.
+func TestReaderAFlatKeyAndTheNestedKeysItSpellsAreNotOnePlace(t *testing.T) {
 	defer func(b int64) { readerBudget = b }(readerBudget)
 	const w = "ord7Kq2Xw9"
-	of := func(v map[string]any) Raw {
+	type m = map[string]any
+	pg := func(cell any) Raw {
+		return ePg("mock-6", 100*time.Millisecond, "SELECT doc FROM jobs", []models.PostgresV3Cells{{{Value: cell}}}, "SELECT 1")
+	}
+	for _, c := range []struct {
+		name   string
+		r, f   m
+		atOnce bool
+	}{
+		{"flat a.b to nested a{b}", m{"a.b": w}, m{"a": m{"b": w}}, false},
+		{"nested a{b} to flat a.b", m{"a": m{"b": w}}, m{"a.b": w}, false},
+		{"flat c[0] to array c", m{"c[0]": w}, m{"c": []any{w}}, false},
+		{"array c to flat c[0]", m{"c": []any{w}}, m{"c[0]": w}, false},
+		{"flat a.b{c} to a{b.c}", m{"a.b": m{"c": w}}, m{"a": m{"b.c": w}}, false},
+		{"flat a.b{c} to nested a{b{c}}", m{"a.b": m{"c": w}}, m{"a": m{"b": m{"c": w}}}, false},
+		{"flat a.b's array to nested a{b}'s", m{"a.b": []any{w}}, m{"a": m{"b": []any{w}}}, false},
+		{"flat a.b's array's c to nested a{b}'s", m{"a.b": []any{m{"c": w}}}, m{"a": m{"b": []any{m{"c": w}}}}, false},
+		{"nested a{b} to a's key b.", m{"a": m{"b": w}}, m{"a": m{"b.": w}}, false},
+		{"flat a.b stayed", m{"a.b": w}, m{"a.b": w, "z": "y"}, true},
+		{"nested a{b} stayed, a flat key beside it", m{"a": m{"b": w}}, m{"a": m{"b": w}, "q.r": "y"}, true},
+		{"a key holding a quote stayed, a flat key beside it gone", m{"a.b": "x", `q"]\`: w}, m{`q"]\`: w}, true},
+		{"a key holding a quote to another", m{"a.b": "x", `q"`: w}, m{`q\`: w}, false},
+		{"a's key \"\"'s b to key a.'s b", m{"a": m{"": m{"b": w}}}, m{"a.": m{"b": w}}, false},
+		{"a's key \"\"'s b stayed, a flat key beside it gone", m{"a": m{"": m{"b": w}}, "q.r": "x"}, m{"a": m{"": m{"b": w}}}, true},
+	} {
+		for _, budget := range []int64{0, 1} {
+			readerBudget = budget
+			x := newReaderIndex(NewDriftCache())
+			if same, read := inOneField(x.textOf(pg(c.r)), w, x.textOf(pg(c.f)), w); same != c.atOnce || !read {
+				t.Errorf("budget %d, %s: at one place %v read %v; want %v", budget, c.name, same, read, c.atOnce)
+			}
+		}
+	}
+}
+
+// textFields spells a key "" at its root's top as nothing, so its object's
+// fields stand at the top's own paths, and two payloads write one text and
+// one set of fields ({"":{"b":W}} and {"":{},"b":W}): a text with one holds
+// no field, so no word in it is at one place, moved or stayed. A key ""
+// below the top is spelled by its keys.
+func TestReaderATextWithAnEmptyKeyAtTheTopHoldsNoField(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	const w = "ord7Kq2Xw9"
+	type m = map[string]any
+	of := func(v m) Raw {
 		x := Raw{mock: "mock-1", rRead: true}
 		x.rText, x.rFields = textFields(v)
 		return x
 	}
-	rec := of(map[string]any{"": map[string]any{"b": w}, "b": "x"})
-	moved := of(map[string]any{"": map[string]any{"b": "x"}, "b": w})
-	for _, budget := range []int64{0, 1} {
-		readerBudget = budget
-		x := newReaderIndex(NewDriftCache())
-		if same, read := inOneField(x.textOf(rec), w, x.textOf(moved), w); same || !read {
-			t.Errorf("budget %d: at one place %v read %v; want a word that moved to the top's b not at one place", budget, same, read)
-		}
-		if same, read := inOneField(x.textOf(rec), w, x.textOf(rec), w); !same || !read {
-			t.Errorf("budget %d: at one place %v read %v; want a word that stayed at one place", budget, same, read)
+	for _, c := range []struct {
+		name   string
+		r, f   m
+		atOnce bool
+	}{
+		{"moved to the top's b", m{"": m{"b": w}, "b": "x"}, m{"": m{"b": "x"}, "b": w}, false},
+		{"stayed", m{"": m{"b": w}, "b": "x"}, m{"": m{"b": w}, "b": "x"}, false},
+		{"moved out of the empty key's object", m{"": m{"b": w}}, m{"": m{}, "b": w}, false},
+		{"the empty key gone", m{"": m{"b": w}}, m{"b": w}, false},
+		{"below the top, moved to a's b", m{"a": m{"": m{"b": w}, "b": "x"}}, m{"a": m{"": m{"b": "x"}, "b": w}}, false},
+		{"below the top, stayed", m{"a": m{"": m{"b": w}, "b": "x"}}, m{"a": m{"": m{"b": w}, "b": "y"}}, true},
+	} {
+		for _, budget := range []int64{0, 1} {
+			readerBudget = budget
+			x := newReaderIndex(NewDriftCache())
+			if same, read := inOneField(x.textOf(of(c.r)), w, x.textOf(of(c.f)), w); same != c.atOnce || !read {
+				t.Errorf("budget %d, %s: at one place %v read %v; want %v", budget, c.name, same, read, c.atOnce)
+			}
 		}
 	}
 }

@@ -501,26 +501,37 @@ func formsHeld(text string) ([]string, int64) {
 // field's text: its recording's fields (fields, read with s), a value that
 // is wholly JSON (an HTTP body) by its own leaves below its path
 // (walkJSON), else s whole as one field. A value with no leaf (blank, a
-// null) is one field too. Its field's name is never read as JSON. Two
-// fields textFields spells alike (a jsonb key "a.b" and key a's "b") stand
-// in their field by their order among them, the first by its path alone:
-// counted where spellsAlike says they may be.
+// null) is one field too. Its field's name is never read as JSON. Each
+// stands in its recording's field (in) as no other place of s spells it:
+// textFields joins keys with dots, so a jsonb key "a.b" and key a's "b"
+// share a path. Where a key may read so (oddKey), every field is spelled by
+// its keys (keyedPath); where no field is a key, fields at one path stand
+// by their order among them, the first by its path alone. A text with a key
+// "" at its top holds no field: textFields writes that key's object's
+// fields as the top's own, so nothing in s tells the two apart.
 func eachField(s string, fields []rawField, yield func(fieldAt, string)) {
 	if len(fields) == 0 {
 		yield(fieldAt{}, s)
 	}
-	var seen map[fieldAt]int
-	if spellsAlike(s, fields) {
-		seen = map[fieldAt]int{}
+	var seen map[string]int
+	var keys []fieldAt
+	odd, keyed := keysOf(s, fields)
+	if !keyed {
+		seen = map[string]int{}
 	}
 	for _, f := range fields {
 		if f.end > len(s) {
 			continue
 		}
+		if f.key && f.path == "" {
+			return
+		}
 		text, in := s[f.start:f.end], f.path
-		if at := (fieldAt{path: f.path, key: f.key}); seen != nil {
-			if seen[at]++; seen[at] > 1 {
-				in += "\x00" + strconv.Itoa(seen[at]-1)
+		if odd {
+			in = keyedPath(&keys, text, f)
+		} else if seen != nil {
+			if seen[f.path]++; seen[f.path] > 1 {
+				in += "\x00" + strconv.Itoa(seen[f.path]-1)
 			}
 		}
 		values, leaves := 0, 0
@@ -537,22 +548,55 @@ func eachField(s string, fields []rawField, yield func(fieldAt, string)) {
 	}
 }
 
-// spellsAlike reports whether two of fields may share their path and side:
-// one is a key that path syntax reads as more than one key (holding '.' or
-// '['; a ']' reads so only beside a '['), or a key "" (textFields spells
-// one at the top as nothing), or none is a key, so no key tells. Else every
-// path textFields writes reads back one way.
-func spellsAlike(s string, fields []rawField) bool {
-	keys := false
+// keysOf reports whether one of fields is a key (keyed), and one an oddKey
+// (odd). With no oddKey every path textFields writes reads back one way.
+func keysOf(s string, fields []rawField) (odd, keyed bool) {
 	for _, f := range fields {
 		if f.key && f.end <= len(s) {
-			if k := s[f.start:f.end]; k == "" || strings.ContainsAny(k, ".[") {
-				return true
+			if oddKey(s[f.start:f.end]) {
+				return true, true
 			}
-			keys = true
+			keyed = true
 		}
 	}
-	return !keys
+	return false, keyed
+}
+
+// oddKey reports whether textFields' dotted path may read key k as more
+// than one key: it holds '.' or '[' (a ']' reads so only beside a '['). A
+// key "" below the top is the empty name between two dots ("a..b").
+func oddKey(k string) bool { return strings.ContainsAny(k, ".[") }
+
+// keyedPath is f's path as its keys spell it, an oddKey quoted in brackets
+// (["a.b"], as pathKey quotes it), which no other key or index spells, and
+// any other key as textFields writes it, so a path no oddKey is on is
+// spelled as in a text with none. textFields writes each key (text, its
+// name) before its value's fields, so the key a field stands below is the
+// latest one in keys whose path, less array indices, is the field's
+// parent's; keys are those on the way to f, each with its spelling.
+func keyedPath(keys *[]fieldAt, text string, f rawField) string {
+	p := f.path
+	if f.key {
+		p = strings.TrimSuffix(strings.TrimSuffix(p, text), ".")
+	}
+	c, i := *keys, len(*keys)-1
+	indices := func(r string) bool { return strings.Trim(r, "[]0123456789") == "" }
+	for i >= 0 && (!strings.HasPrefix(p, c[i].path) || !indices(p[len(c[i].path):])) {
+		i--
+	}
+	in := p
+	if i >= 0 {
+		in = c[i].in + p[len(c[i].path):]
+	}
+	if f.key {
+		if oddKey(text) {
+			in = string(pathKey([]byte(in), text))
+		} else {
+			in += f.path[len(p):] // the key as textFields wrote it below p
+		}
+		*keys = append(c[:i+1], fieldAt{path: f.path, in: in})
+	}
+	return in
 }
 
 // walkJSON walks text as JSON values token by token, each key and scalar to
