@@ -8,6 +8,8 @@ import (
 	"go.keploy.io/server/v3/config"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/models/postgres"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
@@ -27,15 +29,19 @@ func laxSessionMock(name, path string, at time.Time) *models.Mock {
 	return m
 }
 
-// A recording made before the HTTP recorder stated lifetimes, replayed with
-// the default window mode: its "mocks"-tagged HTTP calls are session mocks.
-// The pool with no test begun answers GET /q from the reusable tier, the
-// first recording of the cursor first. A begin without a pid stages the
-// test's mapping; a session mock is no test's own, so the begin leaves it
-// where the window staging puts it, in the reusable tier, and the call is
-// answered as with no begin. Before, the begin staged mock-b in the per-test
-// tier, where no claim of a session mock looks, and the matcher retried the
-// claim forever (99% CPU, no answer).
+// A store whose per-test region holds session mocks: the lax rule's
+// "mocks"-tagged HTTP calls of a recording made before the HTTP recorder
+// stated lifetimes, handed to StoreMocks in the per-test slice. No loader
+// keploy ships builds this store (mockdb files session and connection
+// lifetimes in the session region, and the lifetime the CLI derived travels
+// with each mock to the agent), so the row hands the slice in itself. The
+// pool with no test begun answers GET /q from the reusable tier, the first
+// recording of the cursor first. A begin without a pid stages the test's
+// mapping; a session mock is no test's own, so the begin files it where the
+// window staging does, in the reusable tier, the per-test tier holds no
+// session mock, and the call is answered as with no begin. Before, the begin
+// staged mock-b in the per-test tier, where no claim of a session mock
+// looks, and the matcher retried the claim forever (99% CPU, no answer).
 //
 // The calls wait for the answer or the parser's return, never a timer: a hang
 // ends in go test's own -timeout, which names this row.
@@ -51,6 +57,10 @@ func TestAPidlessBeginServesALaxSessionMockAsWithNoBegin(t *testing.T) {
 		if begin {
 			scopeBegin(t, a, "TestB")
 			defer scopeEnd(t, a, "TestB")
+			per, _ := p.mm.GetPerTestMocksInWindow()
+			if names := namesOf(per); hasName(names, "mock-a") || hasName(names, "mock-b") {
+				t.Fatalf("the per-test tier holds session mocks after the begin: %v", names)
+			}
 		}
 		var got []string
 		for i := 0; i < 3; i++ {
@@ -70,13 +80,13 @@ func TestAPidlessBeginServesALaxSessionMockAsWithNoBegin(t *testing.T) {
 	}
 }
 
-// A mock whose lifetime is its connection's (a MySQL statement's lifecycle
-// in a recording from before its recorder stated lifetimes, with the
-// connection it was recorded on) sits in the per-test region as a lax
-// session mock does, and a claim of one looks in the reusable tier as a
-// session mock's does. The row files an HTTP recording with that lifetime,
-// so the real HTTP claim reads it: a pid-less begin answers GET /c as no
-// begin does. The calls wait for the answer, never a timer.
+// A mock whose lifetime is its connection's, in the per-test region of a
+// store built as the row above builds it (mockdb files one, such as a MySQL
+// statement's lifecycle, in the session region): a claim of one looks in the
+// reusable tier as a session mock's does. The row files an HTTP recording
+// with that lifetime, so the real HTTP claim reads it: a pid-less begin
+// answers GET /c as no begin does. The calls wait for the answer, never a
+// timer.
 func TestAPidlessBeginServesAConnectionMockAsWithNoBegin(t *testing.T) {
 	served := func(t *testing.T, begin bool) []string {
 		conn := stageMock("conn-a", "/c", stageT0)
@@ -170,19 +180,130 @@ func TestAMappingStagingUnderTheSwitchServesALaxSessionMockAsTheSetStaged(t *tes
 	}
 }
 
-// The per-test region may hold a nil entry (the filters pass over one): the
-// split keeps it where it was and files only the session and connection
-// mocks in the reusable tier.
+// Either region may hold a nil entry (the filters pass over one): the split
+// keeps it where it was and files only the session and connection mocks in
+// the reusable tier, less those the session region holds already by name
+// (gob PostgresV2's dual-pool copies), which stay per-test.
 func TestReusableByLifetimeFilesOnlySessionAndConnectionMocks(t *testing.T) {
 	session := laxSessionMock("s", "/q", stageT0)
 	conn := stageMock("c", "/c", stageT0)
 	conn.TestModeInfo = models.TestModeInfo{Lifetime: models.LifetimeConnection}
 	own := stageMock("own", "/o", stageT0)
-	perTest, reusable := reusableByLifetime([]*models.Mock{nil, session, own, conn})
-	if len(perTest) != 2 || perTest[0] != nil || perTest[1] != own {
-		t.Fatalf("per-test %v; want [nil own]", perTest)
+	dual := laxSessionMock("dual", "/d", stageT0)
+	dualSession := laxSessionMock("dual", "/d", stageT0)
+	perTest, reusable := reusableByLifetime([]*models.Mock{nil, session, own, conn, dual}, []*models.Mock{nil, dualSession})
+	if len(perTest) != 3 || perTest[0] != nil || perTest[1] != own || perTest[2] != dual {
+		t.Fatalf("per-test %v; want [nil own dual]", perTest)
 	}
 	if len(reusable) != 2 || reusable[0] != session || reusable[1] != conn {
 		t.Fatalf("reusable %v; want [s c]", reusable)
+	}
+}
+
+// gobPostgresMock is a PostgresV2 call as the recorder wrote it to a
+// mocks.gob, tagged by md.
+func gobPostgresMock(query string, md map[string]string, at time.Time) *models.Mock {
+	return &models.Mock{
+		Version: models.GetVersion(), Kind: models.PostgresV2,
+		Spec: models.MockSpec{
+			Metadata: md,
+			PostgresRequestsV2: []postgres.Request{{PacketBundle: postgres.PacketBundle{
+				Packets: []postgres.Packet{{
+					Header:  &postgres.PacketInfo{Type: "Query", Header: &postgres.Header{PayloadLength: 9, PacketID: "Q"}},
+					Message: map[string]interface{}{"query": query},
+				}},
+			}}},
+			ReqTimestampMock: at,
+			ResTimestampMock: at.Add(time.Millisecond),
+		},
+	}
+}
+
+// mockdb's gob reader files a PostgresV2 call of session or connection
+// lifetime in both regions of the store: under the proven switch, and with
+// the switch off for a call recorded with no timestamps (the lax window
+// filter drops the per-test copy of the others). Staged by a test's mapping
+// (enterprise's sandbox runner under the switch, keploy test with mappings
+// with it off), the reusable tier holds each such recording once, the
+// session region's copy, and the per-test copy is narrowed by the mapping as
+// before the split filed session mocks of the per-test region reusable.
+// Filed reusable too, the recording was in the reusable tier twice.
+func TestAMappingStagingKeepsAGobPostgresRecordingOnceInTheReusableTier(t *testing.T) {
+	for _, proven := range []bool{true, false} {
+		name := "switch off, no timestamps"
+		if proven {
+			name = "switch on"
+		}
+		t.Run(name, func(t *testing.T) {
+			if proven {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			at := func(d time.Duration) time.Time {
+				if !proven {
+					return time.Time{}
+				}
+				return stageT0.Add(d)
+			}
+			ctx := context.Background()
+			ys := mockdb.New(zap.NewNop(), t.TempDir(), "mocks")
+			ys.MockFormat = "gob"
+			for _, m := range []*models.Mock{
+				gobPostgresMock("SELECT 1", map[string]string{"type": "config"}, at(0)),                                // mock-0: session
+				gobPostgresMock("PREPARE p", map[string]string{"type": "connection", "connID": "c1"}, at(time.Second)), // mock-1: connection
+				gobPostgresMock("SELECT 2", map[string]string{"type": "mocks"}, at(2*time.Second)),                     // mock-2: session (lax rule)
+			} {
+				if err := ys.InsertMock(ctx, m, "set-0"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := ys.Close(); err != nil { // the gob writer is asynchronous
+				t.Fatal(err)
+			}
+			set, err := ys.GetTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), map[string]bool{}, map[string]bool{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if per, session := namesOf(set.Filtered), namesOf(set.Unfiltered); !hasName(per, "mock-0") || !hasName(per, "mock-1") || !hasName(session, "mock-0") || !hasName(session, "mock-1") {
+				t.Fatalf("mockdb's gob reader: per-test %v, session %v; want mock-0 and mock-1 in both", per, session)
+			}
+			mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			p := &stageProxy{mm: mm}
+			cfg := &config.Config{}
+			cfg.Agent.Mode = models.MODE_TEST
+			a := New(zap.NewNop(), nil, p, nil, nil, cfg)
+			if err := a.StoreMocks(ctx, set.Filtered, set.Unfiltered); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.UpdateMockParams(ctx, models.MockFilterParams{
+				AfterTime: stageT0.Add(-time.Second), BeforeTime: stageT0.Add(3 * time.Second),
+				UseMappingBased: true, MockMapping: []string{"mock-0", "mock-1", "mock-2"}, StrictMockWindow: true,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			reusable, err := p.mm.GetUnFilteredMocks()
+			if err != nil {
+				t.Fatal(err)
+			}
+			count := map[string]int{}
+			for _, m := range reusable {
+				count[m.Name]++
+				if count[m.Name] > 1 {
+					t.Fatalf("reusable tier %v; want each recording once", namesOf(reusable))
+				}
+			}
+			if count["mock-0"] != 1 || count["mock-1"] != 1 {
+				t.Fatalf("reusable tier %v; want mock-0 and mock-1", namesOf(reusable))
+			}
+			per, err := p.mm.GetPerTestMocksInWindow()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if names := namesOf(per); !hasName(names, "mock-0") || !hasName(names, "mock-1") {
+				t.Fatalf("per-test tier %v; want the mapped per-test copies of mock-0 and mock-1, as before", names)
+			}
+		})
 	}
 }

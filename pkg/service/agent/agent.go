@@ -1835,10 +1835,23 @@ func (a *Agent) MockWindowOf(params models.MockFilterParams) models.MockWindowMo
 // runner; keploy test's exact serving never sends a mapping). Staged in the
 // per-test tier, no claim of one could take it. They are resident, never
 // parked on disk (EligibleForDisk), so a mapping's load does not need them.
-func reusableByLifetime(mocks []*models.Mock) (perTest, reusable []*models.Mock) {
+//
+// A recording the session region holds already, by name, stays where it was:
+// mockdb's gob reader files a PostgresV2 recording of session or connection
+// lifetime in both regions (its dual-pool rule), and the session region's
+// copy is in the reusable tier already, so filing the per-test copy there
+// too would put the recording in that tier twice. The per-test copy is
+// narrowed by the mapping as before.
+func reusableByLifetime(mocks, session []*models.Mock) (perTest, reusable []*models.Mock) {
+	inSession := make(map[string]bool, len(session))
+	for _, m := range session {
+		if m != nil {
+			inSession[m.Name] = true
+		}
+	}
 	perTest = make([]*models.Mock, 0, len(mocks))
 	for _, m := range mocks {
-		if m != nil && (m.TestModeInfo.Lifetime == models.LifetimeSession || m.TestModeInfo.Lifetime == models.LifetimeConnection) {
+		if m != nil && !inSession[m.Name] && (m.TestModeInfo.Lifetime == models.LifetimeSession || m.TestModeInfo.Lifetime == models.LifetimeConnection) {
 			reusable = append(reusable, m)
 			continue
 		}
@@ -2322,7 +2335,7 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 
 	// Apply filtering based on parameters
 	if params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping) {
-		perTest, reusable := reusableByLifetime(originalFiltered)
+		perTest, reusable := reusableByLifetime(originalFiltered, originalUnfiltered)
 		filteredMocks = pkg.FilterTcsMocksMappingInWindow(ctx, a.logger, perTest, params.MockMapping, params.AfterTime, params.BeforeTime)
 		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, append(originalUnfiltered[:len(originalUnfiltered):len(originalUnfiltered)], reusable...), params.MockMapping)
 	} else {

@@ -328,3 +328,109 @@ func TestARecordingRefusedThroughTheIndexIsClaimedOnceMoreFromTheStore(t *testin
 		}
 	})
 }
+
+// refilesOnce hands out its recording and, at the first claim, files a new
+// copy of it (same name, new pointer) in its place and refuses the claim of
+// the old one, as when another call's serve filed the session mock again
+// first. The copy's claim goes through.
+type refilesOnce struct {
+	*mockMemDb
+	refiled bool
+}
+
+func (d *refilesOnce) UpdateUnFilteredMock(old, _ *models.Mock) bool {
+	if !d.refiled {
+		d.refiled = true
+		cp := *old
+		for i, m := range d.mocks {
+			if m == old {
+				d.mocks[i] = &cp
+			}
+		}
+		return false
+	}
+	return true
+}
+
+// refilesOnceVar is refilesOnce over varDb's session region, which the
+// variable pass reads.
+type refilesOnceVar struct {
+	*varDb
+	refiled bool
+}
+
+func (d *refilesOnceVar) UpdateUnFilteredMock(old, _ *models.Mock) bool {
+	if !d.refiled {
+		d.refiled = true
+		cp := *old
+		for i, m := range d.session {
+			if m == old {
+				d.session[i] = &cp
+			}
+		}
+		return false
+	}
+	return true
+}
+
+// Two calls race on one session mock: the winner's serve files a new copy
+// under the same name, and the loser's claim of the old copy fails. The
+// failed claim leaves out that copy, by pointer, never the recording by
+// name, so the new copy answers the loser, as before a refused claim was
+// left out. One row per pass that claims; the variable pass under the
+// proven switch.
+func TestARefiledCopyOfARefusedRecordingAnswersTheCall(t *testing.T) {
+	for _, tc := range []struct {
+		name, recorded, live, contentType string
+		correlations                      []models.FieldCorrelation
+		proven                            bool
+	}{
+		{name: "exact-body", recorded: `{"a":1}`, live: `{"a":1}`, contentType: "application/json"},
+		{name: "correlation", recorded: `{"id":"r-1","a":1}`, live: `{"id":"l-1","a":1}`, contentType: "application/json",
+			correlations: []models.FieldCorrelation{{RequestPath: "body.id", ResponsePaths: []string{"body.id"}, RecordedValue: "r-1"}}},
+		{name: "json-body", recorded: `{"a":1}`, live: `{"a":2}`, contentType: "application/json"},
+		{name: "fuzzy", recorded: "a=1&b=xyz", live: "a=1&b=xyw", contentType: "text/plain"},
+		{name: "strict", recorded: `{"a":1}`, live: `{"a":1}`, contentType: "application/json", proven: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.proven {
+				t.Setenv("KEPLOY_PROVEN", "1")
+			} else {
+				t.Setenv("KEPLOY_PROVEN", "")
+			}
+			m := &models.Mock{
+				Name: "rec",
+				Kind: models.Kind(models.HTTP),
+				Spec: models.MockSpec{
+					HTTPReq: &models.HTTPReq{
+						Method: "POST", URL: "http://api/q", ProtoMajor: 1, ProtoMinor: 1,
+						Header: map[string]string{"Content-Type": tc.contentType, "Host": "api"},
+						Body:   tc.recorded,
+					},
+					HTTPResp:     &models.HTTPResp{StatusCode: 200, Body: "ok"},
+					Correlations: tc.correlations,
+				},
+				TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession},
+			}
+			db := &refilesOnce{mockMemDb: &mockMemDb{mocks: []*models.Mock{m}}}
+			h := http.Header{}
+			h.Set("Host", "api")
+			h.Set("Content-Type", tc.contentType)
+			live := &req{method: "POST", url: &url.URL{Path: "/q"}, header: h, body: []byte(tc.live), raw: []byte("POST /q HTTP/1.1\r\nHost: api\r\n\r\n" + tc.live)}
+			ok, stub, _, err := newHTTP().match(context.Background(), live, db, nil, nil, nil, true, false, false, true, true)
+			if err != nil || !ok || stub == nil || stub.Name != "rec" || !db.refiled {
+				t.Fatalf("match: ok %v, served %v, err %v, refiled %v; want the new copy of rec", ok, stub, err, db.refiled)
+			}
+		})
+	}
+	t.Run("variable", func(t *testing.T) {
+		t.Setenv("KEPLOY_PROVEN", "1")
+		create := createAndReadBack("ord-rec-1")[0]
+		create.TestModeInfo = models.TestModeInfo{Lifetime: models.LifetimeSession}
+		db := &refilesOnceVar{varDb: &varDb{session: []*models.Mock{create}}}
+		ok, stub, _, err := newHTTP().match(context.Background(), liveReq("POST", "/orders", `{"id":"l1","item":"pen"}`), db, nil, nil, nil, true, false, false, true, true)
+		if err != nil || !ok || stub == nil || stub.Name != create.Name || !db.refiled {
+			t.Fatalf("match: ok %v, served %v, err %v, refiled %v; want the new copy of %s", ok, stub, err, db.refiled, create.Name)
+		}
+	})
+}
