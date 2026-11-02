@@ -199,11 +199,10 @@ func TestAWedgedStartIsStillGivenUp(t *testing.T) {
 }
 
 // A stage of the start that waits for work another goroutine does for it --
-// StartProxy waiting on its listener's start and on its DNS servers' binds --
-// sees that work only as a stage of its own, begun on that goroutine: the
-// waiting stage's own thread sleeps throughout, which is no progress. So the
-// proxy begins one there (pkg/agent/proxy: the listener's start, each DNS
-// server's bind). Begun, the work's progress is the start's; and work that
+// StartProxy waiting on its listener's start -- sees that work only as a
+// stage of its own, begun on that goroutine: the waiting stage's own thread
+// sleeps throughout, which is no progress. So the proxy begins one there
+// (pkg/agent/proxy: the listener's start). Begun, the work's progress is the start's; and work that
 // wedges there still stops the start.
 func TestAStageWaitingForAnotherGoroutineCountsItsWorkAsAStageOfItsOwn(t *testing.T) {
 	const beat = 10 * time.Millisecond
@@ -265,9 +264,9 @@ func TestAStageWaitingForAnotherGoroutineCountsItsWorkAsAStageOfItsOwn(t *testin
 	t.Run("a stage of its own that wedges still stops the start", func(t *testing.T) {
 		path := startBootReport(t, beat)
 		wedgedWork(t, func() func() { return BeginBootWork("the proxy's start") })
-		wedgedWork(t, func() func() { return BeginBootWork("the UDP DNS server's bind") })
+		wedgedWork(t, func() func() { return BeginBootWork("the proxy listener's start") })
 		p := awaitBootReport(t, path, func(p BootProgress) bool { return p.Quiet >= TeardownStallChecks })
-		if len(p.Stages) != 2 || p.Stages[0].Name != "the UDP DNS server's bind" || p.Stages[1].Name != "the proxy's start" {
+		if len(p.Stages) != 2 || p.Stages[0].Name != "the proxy listener's start" || p.Stages[1].Name != "the proxy's start" {
 			t.Fatalf("report %+v: want both stages named, in order", p)
 		}
 	})
