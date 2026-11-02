@@ -2,12 +2,17 @@ package learn
 
 import (
 	"container/list"
+	"context"
+	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sync/semaphore"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -126,6 +131,13 @@ type setDerived struct {
 	// run is the bytes the tracker's run keeps of the set's tests' places
 	// (Tracker.keepRun), on budget (keepRun).
 	run int64
+	// inFlight is the bytes the set's readers (a call's warm, its staging's:
+	// warmSet) have in flight, within readInFlight: each reserves its read's
+	// (readWeight) before it reads (reserve).
+	inFlight *semaphore.Weighted
+	// inFlightWaiting is how many readers wait for room in inFlight now,
+	// for the rows.
+	inFlightWaiting int
 }
 
 // driftPart is what setDerived keeps of one drift (drifts).
@@ -496,6 +508,7 @@ func newSetDerived() *setDerived {
 	b := &budget{limit: setBudget()}
 	s := &setDerived{budget: b, held: newTier[heldParts](heldBudget, b, false), words: newTier[wordParts](derivedBudget, b, true), forms: newTier[formParts](formsBudget, b, false), drifts: newTier[driftPart](driftBudget, b, false), reading: map[readingKey]chan struct{}{}, reads: map[readTally]int{}, warming: map[string]chan struct{}{}, offsets: newOffsetIndex(offsetBudget)}
 	s.bodies = newSetBodyStore(&s.mu, b, bodyBudget)
+	s.inFlight = semaphore.NewWeighted(readInFlight)
 	// The words go first: a recording's words are read again from its
 	// payload, where one let go is decoded again (a JSON encode and decode
 	// of the whole recording) before any of its parts can be read.
@@ -1206,6 +1219,124 @@ var warmed = func() chan struct{} {
 	return ch
 }()
 
+// warmReaders is how many readers a call's own warm reads the set's
+// recordings with: readersFor the CPUs Go runs on (GOMAXPROCS), as the
+// set's staging reads with (stageReaders). A var for the rows that hold a
+// reader's read.
+var warmReaders = func() int { return readersFor(runtime.GOMAXPROCS(0)) }
+
+// readInFlight is the bytes the set's readers (a call's warm, its staging's:
+// warmSet) have in flight at once, whatever the CPU count: each reserves
+// its read's cost (readWeight) before it reads and gives it back after
+// (reserve), so more readers never take the set past its budget by more
+// than one reader did. A read that costs more than readInFlight reserves
+// all of it and runs alone, as one reader's did; small payloads (a few
+// KiB each, api-server's) are read by every reader at once.
+const readInFlight = 8 << 20
+
+// readCost is what a read of a payload costs in flight, per byte of its
+// recording: what the read allocates, since a collection running through
+// the read keeps all it allocated until the next one. A 1 MiB HTTP answer
+// measured 14 bytes per byte to load (bodyOf) and 9 more for the rules'
+// reads (warmOne); 32 leaves room for other kinds.
+const readCost = 32
+
+// readWeight is what x's read reserves of the set's readInFlight: readCost
+// for each byte of its recording (recordingBytes), or all of readInFlight
+// (a read alone) where that is not known before its payload is read.
+func readWeight(x Raw) int64 {
+	n := int64(len(x.rText))
+	if x.src != nil {
+		n = recordingBytes(x.src.mock)
+	}
+	if n < 0 {
+		return readInFlight
+	}
+	return min(readInFlight, readCost*n)
+}
+
+// recordingBytes is the bytes of m's recording, known before its payload is
+// read: the agent's store's count (models.Mock.StoredSize), or, of one no
+// store read whose answer is in memory, the bytes of its spec's text
+// (specBytes); -1 for one whose answer is parked and no store counted, or
+// a Raw made of no recording in hand (nil: a served view's).
+func recordingBytes(m *models.Mock) int64 {
+	if m == nil {
+		return -1
+	}
+	if n := m.StoredSize(); n > 0 {
+		return n
+	}
+	if m.HasSpilledResponse() {
+		return -1
+	}
+	return specBytes(reflect.ValueOf(m.Spec), 0)
+}
+
+// specBytes is the bytes of the text and bytes v holds (its strings' and
+// byte slices', through its fields, elements, map entries and pointers),
+// 8 more for each other value, no deeper than 32 levels: what a read of a
+// payload decodes, without encoding it. Times are their 8.
+func specBytes(v reflect.Value, depth int) int64 {
+	if depth > 32 {
+		return 0
+	}
+	switch v.Kind() {
+	case reflect.String:
+		return int64(v.Len())
+	case reflect.Pointer, reflect.Interface:
+		if v.IsNil() {
+			return 0
+		}
+		return specBytes(v.Elem(), depth+1)
+	case reflect.Slice:
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			return int64(v.Len())
+		}
+		fallthrough
+	case reflect.Array:
+		var n int64
+		for i := range v.Len() {
+			n += specBytes(v.Index(i), depth+1)
+		}
+		return n
+	case reflect.Map:
+		var n int64
+		for it := v.MapRange(); it.Next(); {
+			n += specBytes(it.Key(), depth+1) + specBytes(it.Value(), depth+1)
+		}
+		return n
+	case reflect.Struct:
+		if v.Type() == timeType {
+			return 8
+		}
+		var n int64
+		for i := range v.NumField() {
+			n += specBytes(v.Field(i), depth+1)
+		}
+		return n
+	}
+	return 8
+}
+
+var timeType = reflect.TypeOf(time.Time{})
+
+// reserve waits for w bytes of the set's readInFlight, counted among the
+// readers waiting (inFlightWaiting) while it waits; the reader gives them
+// back with s.inFlight.Release.
+func (s *setDerived) reserve(w int64) {
+	if s.inFlight.TryAcquire(w) {
+		return
+	}
+	s.mu.Lock()
+	s.inFlightWaiting++
+	s.mu.Unlock()
+	_ = s.inFlight.Acquire(context.Background(), w)
+	s.mu.Lock()
+	s.inFlightWaiting--
+	s.mu.Unlock()
+}
+
 // warm reads, for each recording of raw the set keeps (setOf), what the
 // rules of every call read of its payload (warmOne), once for the set. A
 // handler reads, in raw's order, each recording no other handler has
@@ -1217,6 +1348,21 @@ var warmed = func() chan struct{} {
 // time: a call waits for it only on a recording of its own the staging is
 // reading, and a call after the staging read the set's takes none, finding
 // each read under one look at the set.
+//
+// A handler reads with warmReaders readers at once, as the staging does,
+// each taking the next recording of raw none has taken, so a set's first
+// drifted call on two CPUs or more reads the recordings before it on more
+// than one while its client waits (a payload's read is one core's work).
+// Each reserves its read's cost (readWeight) of the set's readInFlight
+// before it takes a recording, and gives it back once read, so the
+// readers' reads in flight stay within readInFlight with the staging's.
+// Each stops at the first recording the set keeps no more of (take: nil);
+// held, the tier take reads, never has room again once it is full, so the
+// others stop at their next. A reader's panic is the handler's own once
+// the readers end (the others read on: what they read is the set's, for
+// its later calls, as with no panic), so the parser's recover
+// (integrations.RecoverCtx) ends the one connection, as it did with the
+// read on the handler's goroutine, and the agent goes on.
 func (dc *DriftCache) warm(raw []Raw) {
 	if dc == nil || dc.set == nil {
 		return
@@ -1234,19 +1380,59 @@ func (dc *DriftCache) warm(raw []Raw) {
 		left = append(left, x)
 	}
 	s.mu.Unlock()
-	var others []chan struct{}
-	for _, x := range left {
-		ch, mine := s.take(x)
-		if ch == nil {
-			break
-		}
-		if !mine {
-			if ch != warmed {
-				others = append(others, ch)
+	var (
+		mu       sync.Mutex
+		next     int
+		others   []chan struct{}
+		panicked any
+		wg       sync.WaitGroup
+	)
+	for range min(warmReaders(), len(left)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					mu.Lock()
+					panicked = r
+					mu.Unlock()
+				}
+			}()
+			for {
+				mu.Lock()
+				if next == len(left) {
+					mu.Unlock()
+					return
+				}
+				x := left[next]
+				next++
+				mu.Unlock()
+				w := readWeight(x)
+				s.reserve(w)
+				ch, mine := s.take(x)
+				if ch == nil {
+					s.inFlight.Release(w)
+					return
+				}
+				if !mine {
+					s.inFlight.Release(w)
+					if ch != warmed {
+						mu.Lock()
+						others = append(others, ch)
+						mu.Unlock()
+					}
+					continue
+				}
+				func() {
+					defer s.inFlight.Release(w)
+					dc.warmOne(s, x, ch, false)
+				}()
 			}
-			continue
-		}
-		dc.warmOne(s, x, ch, false)
+		}()
+	}
+	wg.Wait()
+	if panicked != nil {
+		panic(panicked)
 	}
 	for _, ch := range others {
 		select {
@@ -1280,19 +1466,26 @@ func (s *setDerived) take(x Raw) (ch chan struct{}, mine bool) {
 
 // warmOne reads what the rules of every call read of x's payload: its
 // decoded forms and instants (payloadMoments), its words' filter
-// (searchWords) and its searched instants (searchedKeys), then lets the
-// handlers waiting for it go, whatever the reads do. staged says the set's
-// staging read it (WarmSet), not a call. The staging also reads what a
-// set's first drifted call reads of every recording before it, whatever
-// its drift: its keyed places (setPlaces, the offset rule's), its answer's
-// stamps (stampTexts), and its fields' instants as the echo reads them
-// (fieldMoments, fieldForms), so no call reads a part of every recording
-// on its answer path (api-server's round: 15 589 recordings, read by the
-// set's first drifted call while its client waited). A call's own warm
-// reads only the three the rules read of every payload of every call; it
-// reads the rest where its rules reach them, as with no staging, and the
-// staging reads them where it comes to a recording a call took first
-// (stageRest).
+// (searchWords), its searched instants (searchedKeys) and its answer's
+// stamps (stampTexts, which a drifted value's search reads of every
+// payload before it searches one: stampsEchoed), then lets the handlers
+// waiting for it go, whatever the reads do. staged says the set's staging
+// read it (WarmSet), not a call. The staging also reads what a set's first
+// drifted call reads of every recording before it, whatever its drift: its
+// keyed places (setPlaces, the offset rule's) and its fields' instants as
+// the echo reads them (fieldMoments, fieldForms), so no call reads a part
+// of every recording on its answer path (api-server's round: 15 589
+// recordings, read by the set's first drifted call while its client
+// waited). A call's own warm reads only the four the rules read of every
+// payload of every call; it reads the rest where its rules reach them, as
+// with no staging, and the staging reads them where it comes to a
+// recording a call took first (stageRest).
+//
+// The stamps are read here, with the payload in hand, and not first by the
+// search: a set's payloads past its budget are let go as they are read
+// (bodyStore), so the search read each of them back once more for its
+// stamps alone (the bound row's 256 recordings of 1 MiB: a tenth of its
+// call's CPU).
 func (dc *DriftCache) warmOne(s *setDerived, x Raw, ch chan struct{}, staged bool) {
 	defer func() {
 		s.mu.Lock()
@@ -1308,27 +1501,27 @@ func (dc *DriftCache) warmOne(s *setDerived, x Raw, ch chan struct{}, staged boo
 	dc.payloadMoments(x)
 	dc.searchWords(x, false)
 	dc.searchedKeys(x)
+	dc.stampTexts(x)
 	if staged {
 		dc.stagedParts(x)
 	}
 }
 
 // stagedParts reads the parts of x's payload the staging reads beyond a
-// call's warm (warmOne): its keyed places, its answer's stamps and its
-// fields' instants as the echo reads them.
+// call's warm (warmOne): its keyed places and its fields' instants as the
+// echo reads them.
 func (dc *DriftCache) stagedParts(x Raw) {
 	dc.setPlaces(x)
-	dc.stampTexts(x)
 	dc.fieldMoments(x)
 	dc.fieldForms(x)
 }
 
 // stageRest is the staging's read (WarmSet) of a recording a call took
-// first (warm): the call read only the three parts every call's rules read
+// first (warm): the call read only the four parts every call's rules read
 // of it, and the staging reads the rest (stagedParts), so no later call
 // reads one of them on its answer path. Before, the staging passed over
-// such a recording, and the set's next drifted call read those four parts
-// of it while its client waited. It does not wait for the call's read to
+// such a recording, and the set's next drifted call read those parts of it
+// while its client waited. It does not wait for the call's read to
 // end: a part the call, or any other, is reading it waits for, and takes
 // what that read keeps (derive), so each part is read once.
 func (dc *DriftCache) stageRest(s *setDerived, x Raw) {

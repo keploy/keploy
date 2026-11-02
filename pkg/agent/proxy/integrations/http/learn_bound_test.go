@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +24,8 @@ import (
 func parkedBig(i int, at time.Duration, size int, sample func()) *models.Mock {
 	m := learnRecorded(fmt.Sprintf("big-%04d", i), at, "GET", "/v1/blobs/"+strconv.Itoa(i), "", nil, "")
 	m.Spec.HTTPResp = nil
+	// The agent's store counts the bytes it parked (models.Mock.StoredSize).
+	m.SetStoredSize(int64(size))
 	m.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
 		sample()
 		var b strings.Builder
@@ -64,14 +67,20 @@ func (d *streamedHTTPDisk) RangeRecordedBefore(t time.Time, visit func(*models.M
 }
 
 // heapPeak samples the heap above where it stood at start, every 16th call
-// (each after a collection), into the peak it returns.
+// (each after a collection), into the peak it returns. The learn step reads
+// the recordings before a call with more than one reader (learn's
+// warmReaders), each loading answers (their hydrators sample), so a sample
+// holds mu.
 type heapPeak struct {
+	mu          sync.Mutex
 	start, peak uint64
 	calls       int
 }
 
 // reset starts h over from the heap as it stands now.
 func (h *heapPeak) reset() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	runtime.GC()
 	var st runtime.MemStats
 	runtime.ReadMemStats(&st)
@@ -79,14 +88,24 @@ func (h *heapPeak) reset() {
 }
 
 func (h *heapPeak) sample() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.calls++
 	if h.calls%16 != 0 {
 		return
 	}
-	h.now()
+	h.read()
 }
 
+// now samples the heap as it stands now.
 func (h *heapPeak) now() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.read()
+}
+
+// read is a sample, h.mu held.
+func (h *heapPeak) read() {
 	runtime.GC()
 	var st runtime.MemStats
 	runtime.ReadMemStats(&st)
@@ -118,7 +137,7 @@ func largeStreamMiB(t *testing.T) (mib int, set bool) {
 // recording read in flight (1 MiB of text, its decoded forms and words) and
 // the tiers' bookkeeping, measured at 3, 4 and 6 MiB at these limits. A
 // large limit's legs (large) run only with KEPLOY_LARGE_STREAM_MIB set:
-// each takes 40-50 s on 4 CPUs, and the least limit's already streams four
+// each takes about 10 s on 4 CPUs, and the least limit's already streams four
 // times its budget. CI runs them in a step of their own
 // (.github/workflows/go-test.yaml).
 var boundLimits = []struct {
@@ -163,6 +182,12 @@ func TestLearnMatchReadsTheRecordingsBeforeACallWithinTheSetsBudget(t *testing.T
 				}
 				prev := debug.SetMemoryLimit(l.limit)
 				defer debug.SetMemoryLimit(prev)
+				// Eight CPUs to Go: the call reads the recordings before it
+				// with four readers (learn's readersFor), each reserving its
+				// read's cost of what the set's readers have in flight, so
+				// these large ones are read one at a time.
+				procs := runtime.GOMAXPROCS(8)
+				defer runtime.GOMAXPROCS(procs)
 				bound := l.budget + boundOverhead
 				h, n, opts := learnOn(t)
 				opts.LearnPool = true

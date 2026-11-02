@@ -29,6 +29,7 @@ func TestShallowCopyIsAnUnpooledCopy(t *testing.T) {
 	m.onDisk = &payloadOnDisk{at: PayloadAt{Offset: 5, Length: 9, Name: "m"}}
 	m.MarkPooled()
 
+	m.SetStoredSize(4096)
 	c := m.ShallowCopy()
 	if c == m {
 		t.Fatal("ShallowCopy returned the same object")
@@ -45,10 +46,13 @@ func TestShallowCopyIsAnUnpooledCopy(t *testing.T) {
 	if c.onDisk != m.onDisk {
 		t.Error("where the payload was left on disk was not carried over")
 	}
+	if c.StoredSize() != 4096 {
+		t.Error("the store's count of the mock's bytes was not carried over")
+	}
 	cv, mv := reflect.ValueOf(*c), reflect.ValueOf(*m)
 	for i := 0; i < cv.NumField(); i++ {
 		switch name := cv.Type().Field(i).Name; name {
-		case "pooled", "responseHydrator", "onDisk": // checked above
+		case "pooled", "responseHydrator", "onDisk", "storedSize": // checked above
 		default:
 			if !reflect.DeepEqual(cv.Field(i).Interface(), mv.Field(i).Interface()) {
 				t.Errorf("field %s was not copied", name)

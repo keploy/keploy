@@ -177,6 +177,12 @@ type Mock struct {
 	// Unexported so gob ignores it — never crosses the wire or a recording.
 	responseHydrator func() (*HTTPResp, []MongoResponse, error)
 
+	// storedSize is the bytes the agent's disk store keeps the mock in, its
+	// record and its parked response together, set by the store as it reads
+	// the mock (SetStoredSize); 0 where no store read it. Unexported so no
+	// encoder carries it.
+	storedSize int64
+
 	// onDisk is where a replay's read left the mock's payload, set only on
 	// the CLI side (LeavePayloadOnDisk); WithPayload reads it back to send
 	// the mock. Unexported so no encoder carries it.
@@ -200,6 +206,17 @@ func (m *Mock) MarkPooled() {
 func (m *Mock) SetResponseHydrator(fn func() (*HTTPResp, []MongoResponse, error)) {
 	m.responseHydrator = fn
 }
+
+// SetStoredSize records the bytes the agent's disk store keeps m in: its
+// record and its parked response together (StoredSize).
+func (m *Mock) SetStoredSize(n int64) { m.storedSize = n }
+
+// StoredSize is the bytes the agent's disk store keeps m in, its record and
+// its parked response together, as the store read it: what reading m's
+// whole payload back takes, known before its response is read back. 0
+// where no store read m (one made in memory): its size is not known before
+// its payload is read.
+func (m *Mock) StoredSize() int64 { return m.storedSize }
 
 // HasSpilledResponse reports whether the response is elided (needs hydration).
 func (m *Mock) HasSpilledResponse() bool { return m.responseHydrator != nil }
@@ -1186,6 +1203,7 @@ func (m *Mock) DeepCopy() *Mock {
 	// Carry the loader so tree copies can still hydrate their elided response.
 	c.responseHydrator = m.responseHydrator
 	c.onDisk = m.onDisk
+	c.storedSize = m.storedSize
 
 	// Where the call came from (proven switch): the copy's own, so a copy
 	// written later (the async gob writer's) holds what the mock held.

@@ -404,6 +404,7 @@ func (d *DiskMocks) readAt(e diskEntry) (*models.Mock, error) {
 	if f := d.onLoad.Load(); f != nil {
 		(*f)(m)
 	}
+	m.SetStoredSize(int64(e.length + e.respLen))
 	if e.respOff >= 0 {
 		respOff, respLen := e.respOff, e.respLen
 		m.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {

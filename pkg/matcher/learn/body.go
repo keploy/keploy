@@ -50,6 +50,9 @@ type rawSource struct {
 	name  string
 	load  func() (*models.Mock, error)
 	store *bodyStore
+	// mock is the recording as the Raw was made of it, its answer maybe
+	// parked: what its read's cost is told by (readWeight).
+	mock *models.Mock
 }
 
 // body is the payload of the recording s names: the store's, or loaded now.
@@ -271,6 +274,6 @@ func (dc *DriftCache) LazyRawOf(m *models.Mock, served bool, load func() (*model
 		}
 		return r
 	}
-	r.src = &rawSource{id: r.id, name: m.Name, load: load, store: dc.set.bodies}
+	r.src = &rawSource{id: r.id, name: m.Name, load: load, store: dc.set.bodies, mock: m}
 	return r
 }
