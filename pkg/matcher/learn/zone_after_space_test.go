@@ -31,6 +31,13 @@ var zoneAfterSpace = []struct {
 	{"2026-11-01 23:42:37 +0530", time.Date(2026, 11, 1, 18, 12, 37, 0, time.UTC), time.Second, 5*time.Hour + 30*time.Minute},
 	{"2026-11-01 23:42 +05:30", time.Date(2026, 11, 1, 18, 12, 0, 0, time.UTC), time.Minute, 5*time.Hour + 30*time.Minute},
 	{"2026-11-01T23:42:37.172 +05:30", time.Date(2026, 11, 1, 18, 12, 37, 172e6, time.UTC), time.Millisecond, 5*time.Hour + 30*time.Minute},
+	// Hours 10 to 14 east and west of UTC: Sydney, Chatham, Kiritimati,
+	// Honolulu, Baker Island.
+	{"2026-11-02 04:12:37.172 +10:00", time.Date(2026, 11, 1, 18, 12, 37, 172e6, time.UTC), time.Millisecond, 10 * time.Hour},
+	{"2026-11-02 06:57:37.172 +1245", time.Date(2026, 11, 1, 18, 12, 37, 172e6, time.UTC), time.Millisecond, 12*time.Hour + 45*time.Minute},
+	{"2026-11-02 08:12:37.172 +14:00", time.Date(2026, 11, 1, 18, 12, 37, 172e6, time.UTC), time.Millisecond, 14 * time.Hour},
+	{"2026-11-01 08:12:37.172 -10:00", time.Date(2026, 11, 1, 18, 12, 37, 172e6, time.UTC), time.Millisecond, -10 * time.Hour},
+	{"2026-11-01 06:12:37.172 -12:00", time.Date(2026, 11, 1, 18, 12, 37, 172e6, time.UTC), time.Millisecond, -12 * time.Hour},
 	// Z, written after the time as ISO 8601 writes it.
 	{"2026-11-01 18:12:37.172Z", time.Date(2026, 11, 1, 18, 12, 37, 172e6, time.UTC), time.Millisecond, 0},
 }
@@ -124,6 +131,8 @@ func TestASignedNumberAfterASpaceIsNoZoneUnlessItIsOne(t *testing.T) {
 		// Out of a zone's bounds.
 		{"2026-11-01 10:00:00 +2500", 19, time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC), time.Second, false, 1},
 		{"2026-11-01 10:00:00 +05:99", 19, time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC), time.Second, false, 1},
+		{"2026-11-01 10:00:00 +05:60", 19, time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC), time.Second, false, 1},
+		{"2026-11-01 10:00:00 +0560", 19, time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC), time.Second, false, 1},
 		{"2026-11-01 10:00:00 -1500", 19, time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC), time.Second, false, 1},
 		// A time, then a sum.
 		{"2026-11-01 10:00:00 -1500.00", 19, time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC), time.Second, false, 1},
