@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/utils/plaintcp"
 	"go.keploy.io/server/v3/utils/plaintcp/plaintcptest"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sync/errgroup"
 )
@@ -124,6 +126,38 @@ func TestADNSServerThatCannotServeSettlesWithItsError(t *testing.T) {
 	}
 	if err := s.stop(); err != nil {
 		t.Fatalf("stopping a server that never served: %v", err)
+	}
+}
+
+// A server whose serve call fails after the bind, before it serves, fails
+// the DNS servers' start with its own error: startDNSServers never returns
+// as if a server served that does not. Here the UDP server's socket is closed
+// as the server logs that it starts, on its serving goroutine, just before
+// miekg/dns sets the socket's options to serve on it.
+func TestADNSServerThatCannotServeFailsTheDNSServersStart(t *testing.T) {
+	core, _ := observer.New(zap.InfoLevel)
+	var p *Proxy
+	closeUDP := zap.Hooks(func(e zapcore.Entry) error {
+		if strings.HasPrefix(e.Message, "starting UDP DNS server") {
+			_ = p.udpDNS.srv.PacketConn.Close()
+		}
+		return nil
+	})
+	p = &Proxy{logger: zap.New(core, closeUDP), DNSPort: uint32(freeDNSPort(t))}
+	p.SetPortMover(func(uint32, uint32) error { return nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	var g errgroup.Group
+	t.Cleanup(func() { cancel(); _ = g.Wait() })
+
+	err := p.startDNSServers(ctx, &g)
+	if err == nil {
+		t.Fatal("startDNSServers returned nil while the UDP DNS server does not serve")
+	}
+	if p.udpDNS.serving || !errors.Is(p.udpDNS.err, net.ErrClosed) {
+		t.Fatalf("the UDP server settled as serving=%v err=%v; want not serving, failed on its closed socket", p.udpDNS.serving, p.udpDNS.err)
+	}
+	if !errors.Is(err, p.udpDNS.err) {
+		t.Fatalf("startDNSServers returned %v; want the UDP server's own error, %v", err, p.udpDNS.err)
 	}
 }
 
