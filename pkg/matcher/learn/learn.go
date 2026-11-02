@@ -148,6 +148,25 @@ func ExcusedLeaf(known Known, rec, live Leaf, inRec, inLive bool) (bool, bool) {
 	return known.Excused(rec)
 }
 
+// Declarer is a Known that tells, of the leaves it excuses, those noise
+// keploy.yml declares excuses: the user's noise stops the comparison at a
+// field, never the answer rewrite. Such a leaf whose value drifted is
+// compared as equal, yet still read as the use of a value an earlier place
+// sent, or one the call's answer echoes (Diff.Declared). A Known that is no
+// Declarer declares nothing.
+type Declarer interface {
+	// Declares reports whether keploy.yml's noise names leaf, whatever
+	// else excuses it. Compare asks it of the recorded leaf and of the
+	// live one, and reads a drift as declared only when both are.
+	Declares(leaf Leaf) bool
+}
+
+// declares reports whether known says keploy.yml's noise excuses leaf.
+func declares(known Known, leaf Leaf) bool {
+	d, ok := known.(Declarer)
+	return ok && d.Declares(leaf)
+}
+
 // None excuses nothing.
 var None Known = none{}
 
@@ -163,6 +182,14 @@ type Diff struct {
 	Structural string
 	// Drift are the paths of the leaves whose value drifted, sorted.
 	Drift []string
+	// Declared are the paths of the leaves whose value drifted where only
+	// the noise keploy.yml declares excuses the comparison (Declarer),
+	// sorted: never a drift, so a call that differs only there is exact,
+	// but the learn step still reads each as a variable's use or an echo,
+	// whose answer holds this run's value. A leaf on one side only, of
+	// another type, or that no path names alone is none: it holds no one
+	// value on both sides.
+	Declared []string
 	// Reordered are the arrays the order rule refuses (matcher.ArrayReordered),
 	// by path, sorted: they came back with the recorded elements in another
 	// order.
@@ -221,6 +248,9 @@ func Compare(live, rec Shape, known Known) Diff {
 		case leafDrifted:
 			d.Drift = append(d.Drift, p)
 			continue
+		case leafDeclared:
+			d.Declared = append(d.Declared, p)
+			continue
 		}
 		return d
 	}
@@ -253,11 +283,18 @@ const (
 	leafOnlyRec                      // missing from the request
 	leafRetyped                      // its type changed
 	leafUnnamedDrift                 // drifted where no path names it alone
+	leafDeclared                     // drifted where only keploy.yml's noise excuses it
 )
 
 // leafChange is how the leaf at p differs between live and rec, excusing
 // what known excuses: an untyped excuse lets it drift, change type or be
-// missing from either side; a typed one lets it drift only.
+// missing from either side; a typed one lets it drift only. A value that
+// drifted, on both sides as one type, where keploy.yml's noise names the
+// recorded leaf and the live one (declares: an entry with patterns names a
+// value one of them matches), no noise learned onto the recording excuses
+// it (a typed excuse: keploy found it carries no variable), and a path names
+// it alone, is leafDeclared: compared as equal, read as a drift by the learn
+// step's variables alone.
 func leafChange(p string, live, rec Shape, known Known) (c leafDiff, l, r Leaf) {
 	r, inRec := rec.Leaves[p]
 	l, inLive := live.Leaves[p]
@@ -276,7 +313,15 @@ func leafChange(p string, live, rec Shape, known Known) (c leafDiff, l, r Leaf) 
 			return leafSame, l, r
 		}
 		return leafRetyped, l, r
-	case l.Value == r.Value || excused:
+	case l.Value == r.Value:
+		return leafSame, l, r
+	case excused:
+		// Declared on both sides: a noise entry with patterns constrains
+		// the live value as well as the recorded one, so a live value no
+		// pattern matches is never read as a declared field's drift.
+		if !typed && !r.Unnamed && declares(known, r) && declares(known, l) {
+			return leafDeclared, l, r
+		}
 		return leafSame, l, r
 	case r.Unnamed:
 		return leafUnnamedDrift, l, r
@@ -329,7 +374,7 @@ func missPlaces(live, rec Shape, known Known) (d Diff, places []string) {
 	for _, p := range leafPaths(live, rec) {
 		c, l, r := leafChange(p, live, rec, known)
 		switch c {
-		case leafSame:
+		case leafSame, leafDeclared:
 			continue
 		case leafDrifted:
 			d.Drift = append(d.Drift, p)
