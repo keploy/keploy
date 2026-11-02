@@ -4079,11 +4079,7 @@ var payloadDecodes atomic.Int64
 func rawOfNow(m *models.Mock, served bool) Raw {
 	payloadDecodes.Add(1)
 	r := Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, answered: m.Spec.ResTimestampMock, served: served, call: callOf(m)}
-	b, err := json.Marshal(payloadSpec(m.Spec))
-	if err != nil {
-		return r
-	}
-	v, ok := DecodeJSON(b)
+	v, ok := payloadValue(payloadSpec(m.Spec))
 	if !ok {
 		return r
 	}
@@ -4151,6 +4147,77 @@ func callOf(m *models.Mock) string {
 		call += " " + string(r.Method) + " " + host + " /" + strconv.Itoa(len(strings.Split(strings.TrimPrefix(path, "/"), "/")))
 	}
 	return call
+}
+
+// payloadValue is spec as its JSON decodes (DecodeJSON of json.Marshal):
+// the payload rawOfNow reads. An HTTP request's or answer's body that is
+// valid UTF-8 stays out of that round trip (keepBodies) and is put back
+// after it where the round trip decodes it (putBack): JSON encodes a valid
+// UTF-8 string, whatever it escapes, and decodes it back to the same
+// string, so the value is the round trip's without encoding and decoding,
+// byte by byte, a body of megabytes. A body that is not valid UTF-8 goes
+// through the round trip, which reads each invalid byte as U+FFFD; and if
+// a kept body's place in the decoded value is not its field's empty string
+// (an encoding that left the field out or put it elsewhere), the whole
+// spec goes through the round trip as it is.
+func payloadValue(spec models.MockSpec) (interface{}, bool) {
+	out, kept := keepBodies(spec)
+	v, ok := roundTrip(out)
+	if ok && !putBack(v, kept) {
+		return roundTrip(spec)
+	}
+	return v, ok
+}
+
+// roundTrip is spec encoded as JSON and decoded (DecodeJSON).
+func roundTrip(spec models.MockSpec) (interface{}, bool) {
+	b, err := json.Marshal(spec)
+	if err != nil {
+		return nil, false
+	}
+	return DecodeJSON(b)
+}
+
+// keptBody is a body keepBodies kept out of a spec's round trip: the key
+// of its request or answer in the spec's JSON, and the body.
+type keptBody struct {
+	key, body string
+}
+
+// keepBodies is spec with the body of its HTTP request and of its answer
+// each emptied where it is valid UTF-8, and those bodies. spec is not
+// changed: the request and answer emptied are copies.
+func keepBodies(spec models.MockSpec) (models.MockSpec, []keptBody) {
+	var kept []keptBody
+	if r := spec.HTTPReq; r != nil && utf8.ValidString(r.Body) {
+		c := *r
+		kept = append(kept, keptBody{key: "Req", body: c.Body})
+		c.Body = ""
+		spec.HTTPReq = &c
+	}
+	if r := spec.HTTPResp; r != nil && utf8.ValidString(r.Body) {
+		c := *r
+		kept = append(kept, keptBody{key: "Res", body: c.Body})
+		c.Body = ""
+		spec.HTTPResp = &c
+	}
+	return spec, kept
+}
+
+// putBack writes each kept body into v, a round trip's value of the spec
+// keepBodies emptied them in, where the round trip decoded its emptied
+// body: v's object under the body's key, at "body". It reports false, and
+// v is not to be read, where that place does not hold the empty string.
+func putBack(v interface{}, kept []keptBody) bool {
+	for _, k := range kept {
+		top, _ := v.(map[string]interface{})
+		side, _ := top[k.key].(map[string]interface{})
+		if b, isString := side["body"].(string); !isString || b != "" {
+			return false
+		}
+		side["body"] = k.body
+	}
+	return true
 }
 
 // payloadSpec is spec without what says, below the spec's own fields
