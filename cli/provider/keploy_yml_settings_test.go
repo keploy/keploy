@@ -98,9 +98,9 @@ func wantBool(name string, get func(*config.Config) bool, want bool) func(*testi
 }
 
 // keploy.yml's retryPassing, test.disableAutoHeaderNoise and
-// record.globalPassthrough count on `keploy test` as their flags do, as does
-// the environment where a flag binds one; the flag, when given, wins, also set
-// false. Each flag's default was read over them on every run.
+// record.globalPassthrough count on `keploy test` as their flags do, as do
+// KEPLOY_RETRYPASSING and TEST_DISABLEAUTOHEADERNOISE; the flag, when given,
+// wins, also set false. Each flag's default was read over them on every run.
 func TestKeployTestKeepsKeployYmlSettings(t *testing.T) {
 	retry := func(c *config.Config) bool { return c.RetryPassing }
 	headers := func(c *config.Config) bool { return c.Test.DisableAutoHeaderNoise }
@@ -111,6 +111,11 @@ func TestKeployTestKeepsKeployYmlSettings(t *testing.T) {
 		{name: "retryPassing, --retry-passing-test=false", yml: "retryPassing: true\n", args: append(run, "--retry-passing-test=false"), check: wantBool("retryPassing", retry, false)},
 		{name: "retryPassing false, --retry-passing-test", yml: "retryPassing: false\n", args: append(run, "--retry-passing-test"), check: wantBool("retryPassing", retry, true)},
 		{name: "no retryPassing, no flag", yml: "test:\n  delay: 6\n", args: run, check: wantBool("retryPassing", retry, false)},
+		// KEPLOY_RETRYPASSING reaches retryPassing through AutomaticEnv, which
+		// viper consults only for a key it knows of: in a build without the
+		// viper_bind_struct tag (go test's), that takes keploy.yml naming it.
+		{name: "KEPLOY_RETRYPASSING over retryPassing false, no flag", yml: "retryPassing: false\n", env: map[string]string{"KEPLOY_RETRYPASSING": "true"}, args: run, check: wantBool("retryPassing", retry, true)},
+		{name: "KEPLOY_RETRYPASSING, --retry-passing-test=false", yml: "retryPassing: false\n", env: map[string]string{"KEPLOY_RETRYPASSING": "true"}, args: append(run, "--retry-passing-test=false"), check: wantBool("retryPassing", retry, false)},
 		{name: "disableAutoHeaderNoise, no flag", yml: "test:\n  disableAutoHeaderNoise: true\n", args: run, check: wantBool("test.disableAutoHeaderNoise", headers, true)},
 		{name: "disableAutoHeaderNoise, flag false", yml: "test:\n  disableAutoHeaderNoise: true\n", args: append(run, "--disableAutoHeaderNoise=false"), check: wantBool("test.disableAutoHeaderNoise", headers, false)},
 		{name: "disableAutoHeaderNoise false, flag", yml: "test:\n  disableAutoHeaderNoise: false\n", args: append(run, "--disableAutoHeaderNoise"), check: wantBool("test.disableAutoHeaderNoise", headers, true)},
@@ -128,6 +133,8 @@ func TestKeployTestKeepsKeployYmlSettings(t *testing.T) {
 // gets apply to it too: three flakiness checks, no coverage, and a refusal
 // without --test-sets. They used to look at the flag alone, so a committed
 // `mustPass: true` deleted failing test cases in every test set, unchecked.
+// keploy.yml's own test.selectedTests does not stand in for --test-sets: the
+// test sets a must-pass run may delete from are named on the command line.
 func TestKeployTestMustPassFromKeployYmlIsChecked(t *testing.T) {
 	mustPassRun := func(want bool) func(*testing.T, *config.Config) {
 		return func(t *testing.T, cfg *config.Config) {
@@ -153,6 +160,7 @@ func TestKeployTestMustPassFromKeployYmlIsChecked(t *testing.T) {
 		{name: "mustPass, --must-pass=false", yml: "test:\n  mustPass: true\n", args: append(run, "--must-pass=false"), check: mustPassRun(false)},
 		{name: "mustPass false, --must-pass, -t", yml: "test:\n  mustPass: false\n", args: append(run, "--must-pass", "-t", "test-set-1"), check: mustPassRun(true)},
 		{name: "mustPass false, --must-pass, no -t", yml: "test:\n  mustPass: false\n", args: append(run, "--must-pass"), refused: "--test-sets"},
+		{name: "mustPass and selectedTests, no -t", yml: "test:\n  mustPass: true\n  selectedTests:\n    test-set-1: []\n", args: run, refused: "--test-sets"},
 		{name: "mustPass, maxFailAttempts 0", yml: "test:\n  mustPass: true\n", args: append(run, "-t", "test-set-1", "--max-fail-attempts", "0"), refused: "maxFailAttempts"},
 		{name: "no mustPass", yml: "test:\n  delay: 6\n", args: run, check: mustPassRun(false)},
 		{name: "no mustPass, maxFailAttempts 0", yml: "test:\n  delay: 6\n", args: append(run, "--max-fail-attempts", "0"), check: mustPassRun(false)},
@@ -199,20 +207,25 @@ func TestKeployRecordKeepsKeployYmlSettings(t *testing.T) {
 		{name: "enableSampling, no flag", yml: "record:\n  enableSampling: 7\n", args: run, check: sampling(7)},
 		{name: "enableSampling, flag", yml: "record:\n  enableSampling: 7\n", args: append(run, "--enable-sampling=3"), check: sampling(3)},
 		{name: "enableSampling, bare flag", yml: "record:\n  enableSampling: 7\n", args: append(run, "--enable-sampling"), check: sampling(5)},
+		{name: "RECORD_ENABLESAMPLING, no flag", yml: "record:\n  metadata: \"\"\n", env: map[string]string{"RECORD_ENABLESAMPLING": "7"}, args: run, check: sampling(7)},
+		{name: "RECORD_ENABLESAMPLING, flag", yml: "record:\n  metadata: \"\"\n", env: map[string]string{"RECORD_ENABLESAMPLING": "7"}, args: append(run, "--enable-sampling=3"), check: sampling(3)},
 		{name: "no enableSampling, no flag", yml: "record:\n  metadata: \"\"\n", args: run, check: sampling(0)},
 	} {
 		t.Run(row.name, func(t *testing.T) { runVerbWithKeployYml(t, "record", row) })
 	}
 }
 
-// keploy.yml's normalize.allowHighRisk counts on `keploy normalize` as
-// --allow-high-risk does; the flag, when given, wins, also set false.
+// keploy.yml's normalize.allowHighRisk and NORMALIZE_ALLOWHIGHRISK count on
+// `keploy normalize` as --allow-high-risk does; the flag, when given, wins,
+// also set false.
 func TestKeployNormalizeKeepsKeployYmlAllowHighRisk(t *testing.T) {
 	risk := func(c *config.Config) bool { return c.Normalize.AllowHighRisk }
 	for _, row := range []settingRow{
 		{name: "allowHighRisk, no flag", yml: "normalize:\n  allowHighRisk: true\n", check: wantBool("normalize.allowHighRisk", risk, true)},
 		{name: "allowHighRisk, flag false", yml: "normalize:\n  allowHighRisk: true\n", args: []string{"--allow-high-risk=false"}, check: wantBool("normalize.allowHighRisk", risk, false)},
 		{name: "allowHighRisk false, flag", yml: "normalize:\n  allowHighRisk: false\n", args: []string{"--allow-high-risk"}, check: wantBool("normalize.allowHighRisk", risk, true)},
+		{name: "NORMALIZE_ALLOWHIGHRISK, no flag", yml: "path: \".\"\n", env: map[string]string{"NORMALIZE_ALLOWHIGHRISK": "true"}, check: wantBool("normalize.allowHighRisk", risk, true)},
+		{name: "NORMALIZE_ALLOWHIGHRISK, flag false", yml: "path: \".\"\n", env: map[string]string{"NORMALIZE_ALLOWHIGHRISK": "true"}, args: []string{"--allow-high-risk=false"}, check: wantBool("normalize.allowHighRisk", risk, false)},
 		{name: "no allowHighRisk, no flag", yml: "path: \".\"\n", check: wantBool("normalize.allowHighRisk", risk, false)},
 	} {
 		t.Run(row.name, func(t *testing.T) { runVerbWithKeployYml(t, "normalize", row) })

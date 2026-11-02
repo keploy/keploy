@@ -2220,7 +2220,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 		// normalize.allowHighRisk needs no read: --allow-high-risk is bound to
-		// it, and viper.Unmarshal has resolved it from the flag and keploy.yml.
+		// it, and viper.Unmarshal has resolved it from the flag,
+		// NORMALIZE_ALLOWHIGHRISK and keploy.yml.
 
 	case "templatize":
 		var err error
