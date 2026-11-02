@@ -128,7 +128,7 @@ func (a *Agent) ProvenGive(ctx context.Context, req models.GivenReq) (models.Giv
 	a.scopeMu.Unlock()
 
 	if a.replaying() {
-		es, err := a.exactServer()
+		es, err := a.exactServerOf(worker)
 		if err != nil {
 			return models.GivenResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 				"keploy cannot check "+variable+" in "+id+": "+err.Error(), "run the keploy agent of this keploy version")

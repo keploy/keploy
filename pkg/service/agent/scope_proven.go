@@ -123,16 +123,18 @@ type provenWire struct {
 	// recorded before it, and the pool by name. Zero when the CLI sent no
 	// window.
 	firstRecorded time.Time
-	// servedSince is when exact serving began serving the open test
-	// (serveTestExactly): a miss made before it is no call of the test's.
-	servedSince time.Time
+	// servedSince is when exact serving began serving each open test, by
+	// its ID (serveTestExactly): a miss made before it is no call of the
+	// test's.
+	servedSince map[string]time.Time
 	// realSaid names the recorded mocks already said to go to a mock.real
 	// destination (notReal).
 	realSaid map[string]bool
-	// unservable are the open test's mapped mocks the agent's store refused
-	// (variables this keploy cannot follow): nothing serves them, and its end
-	// counts each as a recorded call it did not make.
-	unservable []string
+	// unservable are each open test's mapped mocks, by its ID, that the
+	// agent's store refused (variables this keploy cannot follow): nothing
+	// serves them, and its end counts each as a recorded call it did not
+	// make.
+	unservable map[string][]string
 	// drops are the proxy listener's drops read when the window now open
 	// began (a test's begin, or the previous end); dropsKnown says they were
 	// read (settle); dropCarry is what the window before left unpaired
@@ -459,6 +461,9 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	a.endGoneWorkers(ctx)
 	me := claimant{pid: caller, start: start}
 	if declared > 1 {
+		if serr := a.replayWorkersRefusal(caller, declared); serr != nil {
+			return models.InstanceResp{}, serr
+		}
 		return a.claimWorker(ctx, req, me, declared)
 	}
 	a.provenMu.Lock()
@@ -854,15 +859,29 @@ func (a *Agent) recordedStart(id string, starts map[string]time.Time) (start tim
 }
 
 // applyPool serves the current key's pool slice exactly (servePoolExactly),
-// unless a test is open: its end serves it.
+// unless a test is open: its end serves it. In a run of test workers, each
+// served worker none of whose tests is open is served its own key's slice.
 func (a *Agent) applyPool(ctx context.Context) error {
 	a.provenMu.Lock()
-	open := len(a.proven.open) > 0
-	a.provenMu.Unlock()
-	if open {
-		return nil
+	var serve []uint32
+	if ids := a.workerIDs(); len(ids) == 0 {
+		serve = []uint32{0}
+	} else {
+		serve = ids
 	}
-	return a.servePoolExactly(ctx)
+	idle := serve[:0]
+	for _, w := range serve {
+		if _, open := a.proven.open[w]; !open {
+			idle = append(idle, w)
+		}
+	}
+	a.provenMu.Unlock()
+	for _, w := range idle {
+		if err := a.servePoolExactly(ctx, w); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // claimWindows is the session's claims, refusals and topology rows, as
@@ -1008,7 +1027,7 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	// opened: a begin that fails leaves nothing behind.
 	var capture missCapturer
 	if a.replaying() {
-		if _, err := a.exactServer(); err != nil {
+		if _, err := a.exactServerOf(worker); err != nil {
 			return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 				"keploy cannot judge "+id+": "+err.Error(), "run the keploy agent of this keploy version")
 		}
@@ -1398,7 +1417,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	uses, incomplete := real.Uses, real.Incomplete
 	// When exact serving began serving the test: a miss made before it is
 	// no call of the test's (evidenceReason).
-	beganAt := a.servedSince()
+	beganAt := a.servedSince(id)
 	if a.replaying() {
 		// The test stops being served before what it did is read: a call
 		// that lands after the read cannot consume one of its mocks, so the
@@ -1406,7 +1425,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		// A pool that cannot be served is keploy's failure to end the test,
 		// not to read it: the end serves the pool again below (EndScopeAt)
 		// and, failing again, makes it the run's refusal.
-		if err := a.servePoolExactly(ctx); err != nil {
+		if err := a.servePoolExactly(ctx, a.scopeInstance(id)); err != nil {
 			a.logger.Warn("keploy could not stop serving the test before reading it; its end serves the pool again", zap.String("test", id), zap.Error(err))
 		}
 		ev, readErr = a.testEvidence(ctx, id, outcome != models.ScopeOutcomeSkipped, beganAt)
@@ -1768,7 +1787,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 	}
 	// A read that fails from here keeps the misses already found: they are
 	// this test's whatever else could not be told.
-	es, err := a.exactServer()
+	es, err := a.exactServerOf(a.scopeInstance(id))
 	if err != nil {
 		return ev, err
 	}
@@ -1777,7 +1796,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 		return ev, fmt.Errorf("keploy's proxy was not serving %s exactly at its end (it was serving %q)", id, test)
 	}
 	a.provenMu.Lock()
-	unservable := append([]string(nil), a.proven.unservable...)
+	unservable := append([]string(nil), a.proven.unservable[id]...)
 	a.provenMu.Unlock()
 	ev.Unconsumed = append(unconsumed, unservable...)
 	return ev, nil
@@ -1851,12 +1870,12 @@ func (a *Agent) mocksByName(names []string) (map[string]*models.Mock, error) {
 	return out, nil
 }
 
-// servedSince is when exact serving began serving the open test; zero
-// when it does not.
-func (a *Agent) servedSince() time.Time {
+// servedSince is when exact serving began serving open test id; zero when
+// it does not.
+func (a *Agent) servedSince(id string) time.Time {
 	a.provenMu.Lock()
 	defer a.provenMu.Unlock()
-	return a.proven.servedSince
+	return a.proven.servedSince[id]
 }
 
 // refusedOf is, in order, the names of names the agent's store refused that

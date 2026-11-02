@@ -376,3 +376,42 @@ func TestASetStagingWithNoReplayIsRefusedAndKeptForNoWorker(t *testing.T) {
 		t.Fatalf("a refused staging was kept for later workers: %d kept", len(p.instances.staged))
 	}
 }
+
+// A worker served while the run's manager serves exactly begins so, with
+// nothing in its pool: a call it makes before the agent serves it its pool
+// answers no staged mock. One served while the run's does not serve
+// exactly is left as the run's is.
+func TestAWorkerServedUnderExactServingBeginsWithAnEmptyPool(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	dest := ipv4Dest(t, "127.0.0.1:50066")
+	p, _ := storeProxy(t, dest)
+	ctx := context.Background()
+	if err := p.SetMocks(ctx, nil, []*models.Mock{exactMock("a", 0, models.LifetimeSession)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetPoolNames([]string{"a"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if p.getMockManager().exactView() != nil {
+		t.Fatal("the run's manager serves exactly before the agent served it")
+	}
+	if _, err := p.ServeInstance(1); err != nil {
+		t.Fatal(err)
+	}
+	if v := instanceMgrOf(t, p, 1).exactView(); v != nil {
+		t.Fatalf("worker 1, served while the run's manager did not serve exactly, serves exactly (pool %v)", v.pool)
+	}
+	if err := p.ServeExactPool(models.PoolKeyNone, []string{"a"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.ServeInstance(2); err != nil {
+		t.Fatal(err)
+	}
+	v := instanceMgrOf(t, p, 2).exactView()
+	if v == nil {
+		t.Fatal("worker 2, served while the run's manager serves exactly, does not")
+	}
+	if len(v.pool) != 0 || v.poolKey != models.PoolKeyNone {
+		t.Fatalf("worker 2 began serving pool %q %v, want nothing until the agent serves it its own", v.poolKey, v.pool)
+	}
+}
