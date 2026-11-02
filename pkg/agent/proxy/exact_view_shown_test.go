@@ -549,6 +549,9 @@ func TestTheVerifyModeRefusesAKeyIndexChangeTheGenerationMissed(t *testing.T) {
 			if got := shownWalk(v, db, "k"); len(got) != 6 {
 				t.Fatalf("precondition: the first read gives %v; want the 6 protocol-phase mocks", got)
 			}
+			if got := v.shownOf(db, models.MySQL); len(got) != 6 {
+				t.Fatalf("precondition: the first unkeyed read gives %d mocks; want the 6 protocol-phase", len(got))
+			}
 			gen := db.gen
 			db.mu.Lock()
 			ok := tc.change(db, ms)
@@ -564,6 +567,61 @@ func TestTheVerifyModeRefusesAKeyIndexChangeTheGenerationMissed(t *testing.T) {
 				}()
 				shownWalk(v, db, "k")
 			}()
+			func() {
+				defer func() {
+					if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), "exact view verify") {
+						t.Fatalf("an unkeyed read after %s that left the generation: recovered %v; want the verify mode's panic", tc.name, r)
+					}
+				}()
+				v.shownOf(db, models.MySQL)
+			}()
 		})
+	}
+}
+
+// TestTheVerifyModeWalksAKindOncePerViewAndIndexVersion: an exact view's
+// unkeyed read of a tier (shownOf) is checked in the verify mode with the
+// walk of every entry the tree's kind index files under the kind, made once
+// per view, tree, kind and version of that index, where each read walked the
+// whole tree before. A removal walks nothing, and the next read leaves the
+// removed mock out; a store walks the kind again once; a new view, or
+// another kind, walks it for itself.
+func TestTheVerifyModeWalksAKindOncePerViewAndIndexVersion(t *testing.T) {
+	if !exactViewVerify.Load() {
+		t.Fatal("precondition: the rows run with the verify mode on")
+	}
+	db, ms := shownTree(300)
+	v := &exactView{test: "T", worker: nameSet("m005")}
+	walked := func(what string, kind models.Kind, reads, want int) []*models.Mock {
+		t.Helper()
+		before := verifyExamined.Load()
+		var got []*models.Mock
+		for i := 0; i < reads; i++ {
+			got = v.shownOf(db, kind)
+		}
+		if n := verifyExamined.Load() - before; n != uint64(want) {
+			t.Fatalf("%s: %d unkeyed reads made the verify mode examine %d entries; want %d", what, reads, n, want)
+		}
+		return got
+	}
+	if got := walked("one generation", models.MySQL, 41, 300); len(got) != 31 {
+		t.Fatalf("the reads give %d mocks; want 30 protocol-phase and one worker-scope", len(got))
+	}
+	if !db.delete(ms[9].TestModeInfo) {
+		t.Fatal("precondition: m010 was not removed")
+	}
+	if got := walked("after a removal", models.MySQL, 5, 0); len(got) != 30 || slices.ContainsFunc(got, func(m *models.Mock) bool { return m.Name == "m010" }) {
+		t.Fatalf("after m010's removal the reads give %d mocks; want the 30 others", len(got))
+	}
+	shownMock(db, 301, true, "k")
+	if got := walked("after a store", models.MySQL, 5, 300); len(got) != 31 || got[len(got)-1].Name != "m301" {
+		t.Fatalf("after m301's store the reads give %d mocks; want the 30 then m301", len(got))
+	}
+	if got := walked("every kind", "", 4, 300); len(got) != 31 {
+		t.Fatalf("the reads of every kind give %d mocks; want the 31", len(got))
+	}
+	v = &exactView{test: "T"}
+	if got := walked("a new view", models.MySQL, 3, 300); len(got) != 30 {
+		t.Fatalf("the new view's reads give %d mocks; want the 30 protocol-phase", len(got))
 	}
 }

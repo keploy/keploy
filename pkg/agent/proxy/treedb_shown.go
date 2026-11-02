@@ -423,8 +423,12 @@ var kindIndex = &integrations.MockIndex{Keys: func(mk *models.Mock) []string {
 // It examines the protocol-phase entries the tree split out at its generation
 // and the view's extras, built once per view and generation (extraLocked);
 // the tree's split is built once per generation, on the first read, by one
-// walk of the tree. In the verify mode the read is recomputed by that walk,
-// under the same lock, and a difference panics.
+// walk of the tree. In the verify mode the read is recomputed, under the same
+// lock, from the walk of every entry the tree's kind index files under kind
+// that v shows, and a difference panics. That walk is made once per view,
+// tree, kind and version of the kind index (walkedLocked), as a keyed read's
+// is (recomputeShownLocked): it does not read the generation the split
+// trusts, so a change that misses the generation still panics the next read.
 func (v *exactView) shownOf(db *TreeDb, kind models.Kind) []*models.Mock {
 	if db == nil {
 		return nil
@@ -461,10 +465,9 @@ func (v *exactView) shownOf(db *TreeDb, kind models.Kind) []*models.Mock {
 	var want []*models.Mock
 	verify := exactViewVerify.Load()
 	if verify {
-		it := db.rbt.Iterator()
-		for it.Next() {
-			if mk, ok := it.Value().(*models.Mock); ok && mk != nil && (kind == "" || mk.Kind == kind) && v.showsStatic(mk) {
-				want = append(want, mk)
+		for _, e := range v.walkedLocked(db, kindIndex, key) {
+			if db.liveLocked(e) {
+				want = append(want, e.mk)
 			}
 		}
 	}
