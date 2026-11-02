@@ -515,3 +515,111 @@ func TestLearnMatchAsksTheWrittenAnswerBeforeTheTake(t *testing.T) {
 		})
 	}
 }
+
+// exportBatch is a JSON SendMessageBatch to lead-events of one entry per
+// entries item: its Id, its FIFO message group ("" for none) and the message
+// exportSendBody(id, at) sends.
+type exportEntry struct {
+	id, group, lead string
+	at              time.Time
+}
+
+func exportBatch(entries ...exportEntry) string {
+	parts := make([]string, len(entries))
+	for i, e := range entries {
+		msg := strings.TrimSuffix(strings.TrimPrefix(exportSendBody(e.lead, e.at), `{"MessageBody":`), `,"QueueUrl":"http://127.0.0.1:9324/000000000000/lead-events"}`)
+		group := ""
+		if e.group != "" {
+			group = `,"MessageGroupId":"` + e.group + `"`
+		}
+		parts[i] = `{"Id":"` + e.id + `","MessageBody":` + msg + group + `}`
+	}
+	return `{"Entries":[` + strings.Join(parts, ",") + `],"QueueUrl":"http://127.0.0.1:9324/000000000000/lead-events"}`
+}
+
+// exportBatchHold is exportHold with a batch entry's message group held too:
+// a leaf of an array entry, which the caller names in keploy.yml's noise
+// dialect (body.Entries[].MessageGroupId), never by its place in the call.
+func exportBatchHold(leaf string) LearnHold {
+	if leaf == "body.Entries[].MessageGroupId" {
+		return LearnNever
+	}
+	return exportHold(leaf)
+}
+
+// The hold the caller gives the learn step is asked of every leaf the
+// learn step reads or learns:
+//   - an array entry's leaf by its noise name: a FIFO batch entry with a
+//     drifted message to another message group misses (request_changed),
+//     naming the entry's group, nothing taken;
+//   - every leaf it learned, not only the first: a batch whose first entry's
+//     message drifted (learned, held LearnAny) and whose second entry's Id is
+//     fresh with no answer carrying it back is refused, naming the second
+//     Id, nothing taken;
+//   - the caller's written answer is asked of the answer as the learn step
+//     renders it: a written answer that refuses one naming an entry the call
+//     did not send serves a fresh echoed entry Id, the recorded Id replaced.
+func TestLearnMatchAsksTheHoldOfEveryLeafAndTheRenderedAnswer(t *testing.T) {
+	const recEntry, liveEntry, otherEntry = "aaaaaaaa-1111-4222-8333-444455556666", "bbbbbbbb-1111-4222-8333-444455556666", "cccccccc-1111-4222-8333-444455556666"
+	target := map[string]string{"X-Amz-Target": "AmazonSQS.SendMessageBatch", "Content-Type": "application/x-amz-json-1.0"}
+	drifted := exportAt.Add(learn.FullRoundLead)
+	// sentOnly writes an answer only where every entry it names is one the
+	// call sent, as SQS does.
+	sentOnly := func(call string) func(*models.Mock) *models.Mock {
+		return func(a *models.Mock) *models.Mock {
+			if strings.Contains(a.Spec.HTTPResp.Body, `"Id":"`+recEntry+`"`) && !strings.Contains(call, `"Id":"`+recEntry+`"`) {
+				return nil
+			}
+			return a
+		}
+	}
+	for _, c := range []struct {
+		name, rec, call, answer string
+		hold                    func(string) LearnHold
+		written                 bool
+		refusal                 string // the start of the miss's next steps; "" where served
+	}{
+		{"an entry's held message group, by its noise name",
+			exportBatch(exportEntry{"e1", "tenant-a", exportRecID, exportAt}), exportBatch(exportEntry{"e1", "tenant-b", exportLiveID, drifted}),
+			`{"Failed":[],"Successful":[{"Id":"e1","MD5OfMessageBody":"x","MessageId":"m-1"}]}`, exportBatchHold, false,
+			"keploy's learn step: it differs from the closest recorded call in more than values: body.Entries[0].MessageGroupId differs. "},
+		{"an echo-only Id learned after another leaf",
+			exportBatch(exportEntry{"e0", "", exportRecID, exportAt}, exportEntry{recEntry, "", exportRecID, exportAt}),
+			exportBatch(exportEntry{"e0", "", exportLiveID, drifted}, exportEntry{otherEntry, "", exportRecID, exportAt}),
+			`{"Failed":[],"Successful":[{"Id":"e0","MD5OfMessageBody":"x","MessageId":"m-1"},{"MD5OfMessageBody":"x","MessageId":"m-2"}]}`, exportHold, false,
+			"keploy's learn step: body.Entries[1].Id changed, and keploy learns it only as a value the answer carries back, which the answer does not"},
+		{"the written answer asked as rendered",
+			exportBatch(exportEntry{recEntry, "", exportRecID, exportAt}), exportBatch(exportEntry{liveEntry, "", exportLiveID, drifted}),
+			`{"Failed":[],"Successful":[{"Id":"` + recEntry + `","MD5OfMessageBody":"x","MessageId":"m-1"}]}`, exportHold, true, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, _, opts := learnOn(t)
+			tr := clockedTracker()
+			tr.Begin()
+			db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-1", time.Second, "POST", "/", c.rec, target, c.answer)}}
+			ctx := learn.WithTracker(context.Background(), tr)
+			var written func(*models.Mock) *models.Mock
+			if c.written {
+				written = sentOnly(c.call)
+			}
+			served, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/", c.call, target)), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{}, written, c.hold)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.refusal == "" {
+				if miss != nil || served == nil || served.Name != "mock-1" || len(db.consumed) != 1 || !strings.Contains(served.Spec.HTTPResp.Body, `"Id":"`+liveEntry+`"`) {
+					t.Fatalf("served %v miss %+v, took %d; want mock-1 served with the call's entry Id echoed", served, miss, len(db.consumed))
+				}
+				return
+			}
+			if served != nil || miss == nil || len(db.consumed) != 0 || len(db.perTest) != 1 || db.perTest[0].Spec.ReqBodyNoise != nil {
+				t.Fatalf("served %v miss %+v, took %d; want a miss, nothing taken or learned", served, miss, len(db.consumed))
+			}
+			report := &models.MockMismatchReport{}
+			miss.Explain(report)
+			if report.Reason != models.MissRequestChanged || !strings.HasPrefix(report.NextSteps, c.refusal) {
+				t.Fatalf("the report says %q (%q), want request_changed: %s", report.NextSteps, report.Reason, c.refusal)
+			}
+		})
+	}
+}
