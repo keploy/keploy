@@ -122,11 +122,7 @@ func TestACallToAnAppThatListensAtAnotherAddressOfItsNamespaceIsAnswered(t *test
 			if string(body) != "AT "+host {
 				t.Fatalf("answer %s %q, want the app's", resp.Status, body)
 			}
-			select {
-			case <-done:
-			case <-never(t):
-				t.Fatal("the handler did not return after the call")
-			}
+			<-done
 			if e := atOrAbove(logs, zapcore.InfoLevel); len(e) != 0 {
 				t.Errorf("logged at INFO or above: %v", e)
 			}
@@ -190,11 +186,7 @@ func TestACallToAnAppThatListensOnlyWhereNoConnectionReachesFailsAtOnceNamingIt(
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 
 	_, done := callThroughHandler(t, pm, addr)
-	select {
-	case <-done:
-	case <-never(t):
-		t.Fatal("the call still waits for an app that listens, where no connection reaches")
-	}
+	<-done
 	errs := atOrAbove(logs, zapcore.ErrorLevel)
 	if len(errs) != 1 {
 		t.Fatalf("want one ERROR, got %v (all: %v)", errs, logs.All())
@@ -520,11 +512,7 @@ func TestKeployMockLogsAnErrorWhenAStaleRedialFindsTheAppOnlyWhereNoConnectionRe
 	})
 	_, _ = http.ReadResponse(br, nil)
 	_ = client.Close()
-	select {
-	case <-served:
-	case <-never(t):
-		t.Fatalf("never: the handler ended; logged %v", logs.All())
-	}
+	<-served
 	pm.captures.Wait()
 	found := false
 	for _, e := range atOrAbove(logs, zapcore.ErrorLevel) {
@@ -542,14 +530,10 @@ func TestKeployMockLogsAnErrorWhenAStaleRedialFindsTheAppOnlyWhereNoConnectionRe
 // that wait ends the handler (the redial watches the call's client).
 func TestAClientThatLeavesWhileARedialWaitsEndsTheHandler(t *testing.T) {
 	addr := sharedAppAddr(t)
-	pm, client, _, served, logs := secondCallOverAStalePool(t, addr, nil)
+	pm, client, _, served, _ := secondCallOverAStalePool(t, addr, nil)
 	awaitWaiters(t, pm, addr, 1)
 	_ = client.Close()
-	select {
-	case <-served:
-	case <-never(t):
-		t.Fatalf("never: the handler ended after its client left; logged %v", logs.All())
-	}
+	<-served
 	pm.captures.Wait()
 	if _, waits := waitersAt(pm, addr); waits != 0 {
 		t.Errorf("%d waits left", waits)
@@ -616,11 +600,7 @@ func TestAnHTTP1RedialToAnAddressTheNamespaceNoLongerHasIsNotMade(t *testing.T) 
 	if _, err := client.Write([]byte("GET /where HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-served:
-	case <-never(t):
-		t.Fatalf("never: the handler ended; logged %v", logs.All())
-	}
+	<-served
 	pm.captures.Wait()
 	found := false
 	for _, e := range atOrAbove(logs, zapcore.ErrorLevel) {

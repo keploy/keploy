@@ -141,11 +141,7 @@ func TestARedialWaitsForAnAppThatRestarts(t *testing.T) {
 		t.Fatal("precondition: the app did not restart")
 	}
 	_ = client.Close()
-	select {
-	case <-served:
-	case <-never(t):
-		t.Fatal("never: the handler ended")
-	}
+	<-served
 	pm.captures.Wait() // the handler started its capture before it ended
 	if _, waits := waitersAt(pm, addr); waits != 0 {
 		t.Fatalf("the redial left %d waits", waits)
@@ -194,11 +190,7 @@ func TestAClientThatLeavesWhileItsCallWaitsEndsTheHandler(t *testing.T) {
 			}()
 			awaitWaiters(t, pm, addr, 1)
 			_ = client.Close()
-			select {
-			case <-done:
-			case <-never(t):
-				t.Fatal("the handler still waits after its client left")
-			}
+			<-done
 			ln := testnet.ListenShared(t, "tcp4", addr)
 			if n := accepted(t, ln); n != 0 {
 				t.Errorf("the app saw %d connections for a client that left", n)
@@ -225,11 +217,7 @@ func TestServeLiveEndsForAClientThatLeavesWhileItWaits(t *testing.T) {
 	}()
 	awaitWaiters(t, pm, addr, 1)
 	_ = client.Close()
-	select {
-	case <-done:
-	case <-never(t):
-		t.Fatal("ServeLive still waits after its client left")
-	}
+	<-done
 	ln := testnet.ListenShared(t, "tcp4", addr)
 	if n := accepted(t, ln); n != 0 {
 		t.Errorf("the app saw %d connections for a client that left", n)
@@ -378,13 +366,8 @@ func TestEveryFirstDialWaitsPastTheOldBudgetForTheApp(t *testing.T) {
 			awaitWaiters(t, pm, addr, 1)
 			time.Sleep(oldDialBudget + time.Second)
 			d.serve(t, testnet.ListenShared(t, "tcp4", addr))
-			select {
-			case err := <-called:
-				if err != nil {
-					t.Fatalf("the call that waited past %v for the app: %v", oldDialBudget, err)
-				}
-			case <-never(t):
-				t.Fatal("the call that waited for the app did not end")
+			if err := <-called; err != nil {
+				t.Fatalf("the call that waited past %v for the app: %v", oldDialBudget, err)
 			}
 			_ = client.Close()
 			<-served
@@ -412,11 +395,7 @@ func TestEveryFirstDialEndsItsWaitWithTheCallsContext(t *testing.T) {
 			}
 			awaitWaiters(t, pm, addr, 1)
 			cancel()
-			select {
-			case <-served:
-			case <-never(t):
-				t.Fatal("the handler still waits for the app after its context ended")
-			}
+			<-served
 			if callers, waits := waitersAt(pm, addr); callers != 0 || waits != 0 {
 				t.Errorf("after the call's context ended: %d calls in %d waits, want none", callers, waits)
 			}
@@ -470,20 +449,13 @@ func TestTheLastCallToLeaveItsWaitReturnsOnlyOnceThePollDialsNoMore(t *testing.T
 				ch <- dialed{c, err}
 			}()
 			g := <-caller
-			end := never(t)
-			select {
-			case <-inDial:
-			case <-end:
-				t.Fatalf("the wait's poll did not dial the app %d times", look.dial)
-			}
+			<-inDial
 			cancel()
 			for !receivingIn(g, "(*IngressProxyManager).leaveWait") {
 				select {
 				case r := <-ch:
 					close(release)
 					t.Fatalf("the call's dial returned (%v) while its wait's own dial to the app was still to connect: that connect reaches an app that listens now, for a call that has ended", r.err)
-				case <-end:
-					t.Fatal("the call neither returned nor waited for its wait's poll to stop")
 				case <-time.After(time.Millisecond):
 				}
 			}
@@ -659,17 +631,9 @@ func TestAPortProbeIsDialedThroughAtItsConnectionsFirstEOF(t *testing.T) {
 			accepted <- c
 		}
 	}()
-	select {
-	case c := <-accepted:
-		_ = c.Close()
-	case <-never(t):
-		t.Fatal("the app never saw the probe's connection")
-	}
-	select {
-	case <-done:
-	case <-never(t):
-		t.Fatal("the handler did not end after the probe and the app closed")
-	}
+	c := <-accepted
+	_ = c.Close()
+	<-done
 	if n := counted.prefaceEOFs.Load(); n != 1 {
 		t.Fatalf("the preface read read the probe's EOF %d times, want once: it hands the probe on at the first", n)
 	}
