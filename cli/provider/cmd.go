@@ -3014,12 +3014,14 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		return err
 	}
 
-	local, err := cmd.Flags().GetBool("local")
-	if err != nil {
-		utils.LogError(c.logger, err, "failed to get the local flag")
-		return errors.New("failed to get the local flag")
-	}
-	c.cfg.Mock.Local = local
+	// --local, --strict and --on-miss are not read from their flags here:
+	// PreProcessFlags' viper.Unmarshal has already put the flag, when given
+	// (--local=false and --strict=false too), over the environment, over
+	// keploy.yml's mock.local, mock.strict and mock.onMiss, and over the
+	// flag's default. Reading a flag here again replaced keploy.yml's value
+	// with that default, captured from a zero config before keploy.yml was
+	// read: a committed `mock.local: true` still went to the registry, and a
+	// committed `mock.strict: true` never made a replay strict.
 
 	// The flag, when given, wins over keploy.yml's record.disableHandshakeHold.
 	if cmd.Flags().Changed("disable-handshake-hold") {
@@ -3045,26 +3047,15 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 			return err
 		}
 	case "replay":
-		onMiss, err := cmd.Flags().GetString("on-miss")
-		if err != nil {
-			utils.LogError(c.logger, err, "failed to get the on-miss flag")
-			return errors.New("failed to get the on-miss flag")
-		}
-		onMiss = strings.ToLower(strings.TrimSpace(onMiss))
+		// The miss policy as resolved above, from --on-miss or mock.onMiss.
+		onMiss := strings.ToLower(strings.TrimSpace(c.cfg.Mock.OnMiss))
 		if onMiss == "" {
 			onMiss = string(models.MissFail)
 		}
 		if !models.MissPolicy(onMiss).Valid() {
-			return fmt.Errorf("invalid --on-miss value %q: allowed values are fail, passthrough, record", onMiss)
+			return fmt.Errorf("invalid on-miss value %q (--on-miss, or mock.onMiss in keploy.yml): allowed values are fail, passthrough, record", onMiss)
 		}
 		c.cfg.Mock.OnMiss = onMiss
-
-		strict, err := cmd.Flags().GetBool("strict")
-		if err != nil {
-			utils.LogError(c.logger, err, "failed to get the strict flag")
-			return errors.New("failed to get the strict flag")
-		}
-		c.cfg.Mock.Strict = strict
 
 		// Guarded on Changed||!IsSet for the reason spelled out for
 		// schema-noise-detection above: AddFlags captured this flag's default
