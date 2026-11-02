@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -89,5 +90,75 @@ func TestKeployTestReadsTheLossesACutShortEndOwned(t *testing.T) {
 	off.takeOwnedLosses(context.Background())
 	if set, _ := off.applyOwnedLosses(results); len(set) != 0 {
 		t.Fatalf("with the switch off: %v, want none taken", set)
+	}
+}
+
+// prOwnedInstr is a run's instrumentation whose agent hands keploy test, at
+// its nth take, owned (OwnedLossTaker), and counts the takes.
+type prOwnedInstr struct {
+	*prLossInstr
+	at    int
+	owned []models.OwnedCaptureLoss
+	err   error
+	takes int
+}
+
+func (o *prOwnedInstr) TakeOwnedCaptureLosses(context.Context) ([]models.OwnedCaptureLoss, error) {
+	o.lmu.Lock()
+	defer o.lmu.Unlock()
+	o.takes++
+	if o.takes == o.at {
+		return o.owned, o.err
+	}
+	return nil, nil
+}
+
+// A pool call between test cases whose bytes wait was cut short, with those
+// bytes lost later: the agent puts the loss aside as the gap's, in no count
+// keploy test's per-test or set-end reads see. keploy test takes it at the
+// next test case's end, or at the set's end, and fails the set naming it.
+// The test case open when it was counted passes: it is not its loss.
+func TestKeployTestFailsTheSetOnTheGapsLostBytes(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	gap := models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1,
+		What: "from [::ffff:127.0.0.1]:50912, written between test cases, where keploy's wait for them was cut short"}
+	// Taken at test-2's end (the second take), and at the set's end (the
+	// fourth: three test cases' ends, then the set's).
+	for _, at := range []int{2, 4} {
+		h := newPartialRunHarness(t, 3, 0) // every test case passes
+		h.replayer.config.Test.Mocking = true
+		instr := &prOwnedInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil}},
+			at: at, owned: []models.OwnedCaptureLoss{{Test: "between test cases", Loss: gap}}}
+		h.replayer.instrumentation = instr
+		h.replayer.markPIDMaps(context.Background())
+		if status := h.run(t); status != models.TestSetStatusFailed {
+			t.Fatalf("taken at take %d: set %q, want FAILED: the gap's bytes were lost", at, status)
+		}
+		if instr.takes != 4 {
+			t.Fatalf("%d takes, want 4: one at each test case's end and one at the set's", instr.takes)
+		}
+		for _, r := range h.report.report.Tests {
+			if r.Status != models.TestStatusPassed || len(r.FailureInfo.CaptureIncomplete) != 0 {
+				t.Fatalf("taken at take %d: %s %s %+v; want PASSED, uncharged: the loss is the gap's", at, r.TestCaseID, r.Status, r.FailureInfo.CaptureIncomplete)
+			}
+		}
+		cv := h.report.report.CaptureVerification
+		if cv == nil || cv.Status != models.CaptureIncompleteStatus || !strings.Contains(cv.Reason, gap.What) {
+			t.Fatalf("taken at take %d: capture_verification %+v, want incomplete naming %q", at, cv, gap.What)
+		}
+	}
+
+	// The set end's take fails: what a cut-short end owned cannot be told,
+	// so the set is neither passed nor failed.
+	h := newPartialRunHarness(t, 3, 0)
+	h.replayer.config.Test.Mocking = true
+	h.replayer.instrumentation = &prOwnedInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil}},
+		at: 4, err: errors.New("connection reset")}
+	h.replayer.markPIDMaps(context.Background())
+	if status := h.run(t); status == models.TestSetStatusPassed || status == models.TestSetStatusFailed {
+		t.Fatalf("a failed take: set %q, want neither PASSED nor FAILED", status)
+	}
+	if cv := h.report.report.CaptureVerification; cv == nil || cv.Status != models.CaptureUnverifiedStatus {
+		t.Fatalf("a failed take: capture_verification %+v, want unverified", cv)
 	}
 }
