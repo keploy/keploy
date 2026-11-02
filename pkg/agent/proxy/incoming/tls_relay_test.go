@@ -27,8 +27,9 @@ import (
 // app's own certificate and gets the app's answer, and then the app's close,
 // nothing more, since the relay owns the connection to its end. Nothing on it
 // is recorded: each such connection is counted on the recording's manager,
-// for its session's summary, and the first to each app port is said at WARN,
-// the next at Debug. Before, the ingress took the ClientHello for an HTTP/1
+// for its session's summary, and the session's first to each app port is said
+// at WARN, the next at Debug; the next session's first to a port is said at
+// WARN again. Before, the ingress took the ClientHello for an HTTP/1
 // request and answered it with a plain-text 400 (or, synchronous, closed it),
 // and the client failed with "http: server gave HTTP response to HTTPS
 // client".
@@ -52,7 +53,15 @@ func TestATLSConnectionToTheAppIsRelayedToTheAppsTLS(t *testing.T) {
 			for i, call := range []struct {
 				port uint16
 				path string
-			}{{8443, "/user/1"}, {8443, "/user/2"}, {9443, "/user/3"}} {
+				// starts a new recording session first, as its incoming
+				// stream opens (routes/record.go)
+				session bool
+			}{{8443, "/user/1", false}, {8443, "/user/2", false}, {9443, "/user/3", false}, {8443, "/user/4", true}} {
+				if call.session {
+					if before := rec.StartTLSRelayedSession(); before != 3 {
+						t.Fatalf("the second session started at %d TLS connections relayed, want the first's 3", before)
+					}
+				}
 				srv := apps[call.port]
 				app, proxied := loopbackPair(t)
 				served := make(chan struct{})
@@ -67,8 +76,8 @@ func TestATLSConnectionToTheAppIsRelayedToTheAppsTLS(t *testing.T) {
 			if len(tcs) != 0 {
 				t.Fatalf("%d test cases recorded from TLS connections, want none", len(tcs))
 			}
-			if got := rec.TLSRelayedConns(); got != 3 {
-				t.Fatalf("the recording's manager counted %d TLS connections relayed unread, want all 3 (its session's summary says them)", got)
+			if got := rec.TLSRelayedConns(); got != 4 {
+				t.Fatalf("the recording's manager counted %d TLS connections relayed unread, want all 4 (each session's summary says its own)", got)
 			}
 			said := logs.FilterMessage(tlsRelayedWarning).All()
 			type line struct {
@@ -79,9 +88,9 @@ func TestATLSConnectionToTheAppIsRelayedToTheAppsTLS(t *testing.T) {
 			for i, e := range said {
 				got[i] = line{e.Level, e.ContextMap()["port"]}
 			}
-			want := []line{{zapcore.WarnLevel, uint16(8443)}, {zapcore.DebugLevel, uint16(8443)}, {zapcore.WarnLevel, uint16(9443)}}
+			want := []line{{zapcore.WarnLevel, uint16(8443)}, {zapcore.DebugLevel, uint16(8443)}, {zapcore.WarnLevel, uint16(9443)}, {zapcore.WarnLevel, uint16(8443)}}
 			if fmt.Sprint(got) != fmt.Sprint(want) {
-				t.Fatalf("the relays were said as %v, want %v: at WARN the first to each app port, then at Debug", got, want)
+				t.Fatalf("the relays were said as %v, want %v: at WARN each session's first to each app port, then at Debug", got, want)
 			}
 			// The relay owns the connection to its end: nothing after it
 			// reads the spent connection as HTTP/1.
@@ -91,6 +100,38 @@ func TestATLSConnectionToTheAppIsRelayedToTheAppsTLS(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// In OSS no context carries a recording's manager (nothing calls
+// syncMock.NewContext), so a TLS connection relayed there is counted on the
+// process's manager, the one the session's summary reads (routes/record.go).
+// And it is counted while it is still open, as its relay starts: most HTTPS
+// clients keep their connections alive, and one kept past its recording's end
+// is that recording's, whose summary would otherwise say 0. The app's
+// ServerHello comes through the relay, so the client's handshake completes
+// only after the relay started, and after the count.
+func TestAnOpenTLSConnectionRelayedInOSSIsCountedOnTheProcesssManager(t *testing.T) {
+	srv := startTLSApp(t)
+	cfg := &config.Config{}
+	cfg.Agent.RecordRequests = true
+	pm := New(zap.NewNop(), nil, cfg)
+	before := syncMock.Get().TLSRelayedConns()
+	app, proxied := loopbackPair(t)
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		pm.handleConnection(context.Background(), proxied, srv.Listener.Addr().String(), pm.logger, make(chan *models.TestCase, 1), make(chan struct{}, 1), 8443)
+	}()
+	_ = app.SetDeadline(time.Now().Add(time.Minute)) // only turns a hang into a failure
+	if err := tls.Client(app, clientTLSConfig(srv)).Handshake(); err != nil {
+		t.Fatalf("the TLS handshake with the app through the ingress: %v", err)
+	}
+	got := syncMock.Get().TLSRelayedConns() - before
+	_ = app.Close()
+	<-served
+	if got != 1 {
+		t.Fatalf("an open TLS connection relayed with no manager on its context counted %d on the process's manager, want 1", got)
 	}
 }
 

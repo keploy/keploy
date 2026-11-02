@@ -98,12 +98,6 @@ type IngressProxyManager struct {
 	semMu    sync.Mutex
 	portSems map[uint16]chan struct{}
 
-	// tlsRelayed holds the app ports (uint16) a TLS connection was relayed
-	// to unread (relayTLS): the first to each, over the manager's life, is
-	// said at WARN as it comes, the rest at Debug. Each recording session's
-	// summary says its own count at WARN (syncMock NoteTLSRelayedConn).
-	tlsRelayed sync.Map
-
 	// relocated maps an app port whose bind the record hooks moved (keploy's
 	// ingress forwarder then holds the port) to the port the app was moved
 	// to, for each forwarder that started with a known one. Guarded by mu.
@@ -687,8 +681,9 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 	}
 }
 
-// tlsRelayedWarning is what the ingress says, at WARN once per app port, of a
-// TLS connection it relayed to the app unread (relayTLS).
+// tlsRelayedWarning is what the ingress says of a TLS connection it relayed
+// to the app unread (relayTLS): at WARN for a recording session's first to
+// each app port, at Debug for the rest.
 const tlsRelayedWarning = "a TLS connection to the app was relayed to it unread, so the app's own certificate answers its client: keploy records the app's plain HTTP and gRPC calls as test cases, and NONE of the calls on a TLS connection was recorded"
 
 // relayTLS relays a connection whose client opened with a TLS ClientHello
@@ -699,8 +694,10 @@ const tlsRelayedWarning = "a TLS connection to the app was relayed to it unread,
 // HTTPS client"). Nothing on the connection is recorded: its calls are
 // encrypted. So each is counted on the recording's manager, whose session
 // summary and stream end marker say the session's count at WARN, as for a
-// connection whose caller the proxy could not name; and the agent's first
-// to each app port is said at WARN as it comes, the rest at Debug.
+// connection whose caller the proxy could not name; and the session's first
+// to each app port is said at WARN as it comes, the rest at Debug. It is
+// counted as the relay starts: a connection kept open past its recording's
+// end is that recording's.
 func (pm *IngressProxyManager) relayTLS(ctx context.Context, clientConn net.Conn, preface []byte, newAppAddr string, logger *zap.Logger, appPort uint16) {
 	finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 	upConn, err := dialIngressTarget(ctx, finalAppAddr, ingressTargetListenTimeout)
@@ -712,10 +709,9 @@ func (pm *IngressProxyManager) relayTLS(ctx context.Context, clientConn net.Conn
 	defer func() {
 		_ = upConn.Close()
 	}()
-	syncMock.FromContextOrGlobal(ctx).NoteTLSRelayedConn()
-	if _, said := pm.tlsRelayed.LoadOrStore(appPort, struct{}{}); !said {
+	if syncMock.FromContextOrGlobal(ctx).NoteTLSRelayedConn(appPort) {
 		logger.Warn(tlsRelayedWarning, zap.Uint16("port", appPort),
-			zap.String("note", "further TLS connections to this port are logged at debug, and each recording's summary counts its own"))
+			zap.String("note", "this recording's further TLS connections to this port are logged at debug, and its summary counts them all"))
 	} else {
 		logger.Debug(tlsRelayedWarning, zap.Uint16("port", appPort))
 	}

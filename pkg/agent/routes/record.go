@@ -596,8 +596,12 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	unnamedBefore := syncmgr.Get().UnnamedCallerConns()
 	// The connections to the app that opened with a TLS handshake, relayed to
 	// the app's TLS unread, none of whose calls was recorded as a test case
-	// (NoteTLSRelayedConn), counted the same way.
-	tlsRelayedBefore := syncmgr.Get().TLSRelayedConns()
+	// (NoteTLSRelayedConn), counted the same way. Their start here also
+	// starts the session's ports: its first TLS connection to each app port
+	// is said at WARN as it comes (a stream that opens while another is
+	// still open starts them again, so one may be said at WARN twice, never
+	// at Debug alone).
+	tlsRelayedBefore := syncmgr.Get().StartTLSRelayedSession()
 	// sessionLost reads, once, what this session lost to its ingress stopping
 	// (NoteNotHandedOn), to callers the agent could not name
 	// (NoteUnnamedCallerConn) and to TLS connections relayed unread
@@ -913,7 +917,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		}
 		if tlsRelayedConns > 0 {
 			// Each reached the app's TLS and none of its calls was
-			// recorded: the ingress warned of the agent's first to each
+			// recorded: the ingress warned of the session's first to each
 			// app port as it came; this is the session's count.
 			a.logger.Warn(tlsRelayedConnsSaid,
 				zap.Uint64("connections", tlsRelayedConns),

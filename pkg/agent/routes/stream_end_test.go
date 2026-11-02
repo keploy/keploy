@@ -127,7 +127,7 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 				markerSeen++
 				syncmgr.Get().NoteNotHandedOn()
 				syncmgr.Get().NoteUnnamedCallerConn()
-				syncmgr.Get().NoteTLSRelayedConn()
+				syncmgr.Get().NoteTLSRelayedConn(8443)
 			}
 			return nil
 		})
@@ -143,7 +143,7 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		syncmgr.Get().NoteUnnamedCallerConn()
 		// And a TLS connection of an earlier session the ingress relayed to
 		// the app unread.
-		syncmgr.Get().NoteTLSRelayedConn()
+		syncmgr.Get().NoteTLSRelayedConn(8443)
 		endPause := memoryguard.SetRecordingPausedForTest(true)
 		memoryguard.IngressRequest()
 		endPause()
@@ -168,8 +168,8 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		syncmgr.Get().NoteUnnamedCallerConn()
 		// Two TLS connections to the app this session, relayed to the app's
 		// TLS unread.
-		syncmgr.Get().NoteTLSRelayedConn()
-		syncmgr.Get().NoteTLSRelayedConn()
+		syncmgr.Get().NoteTLSRelayedConn(8443)
+		syncmgr.Get().NoteTLSRelayedConn(8443)
 		// The ingress requests of this session: one before its pause, two
 		// during it, one after.
 		memoryguard.IngressRequest()
@@ -277,9 +277,10 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 
 // Every recording session on an agent says, at WARN in its own summary, the
 // TLS connections to the app its ingress relayed unread (none of their calls
-// was recorded), however many sessions before it did: the ingress warns as
-// they come only of the agent's first to each app port, so a later session's
-// summary is the one place its own are said above Debug.
+// was recorded), however many sessions before it did. And its incoming stream
+// starts the session's ports: its first TLS connection to an app port is its
+// first, which the ingress says at WARN as it comes, though a session before
+// it relayed to that port.
 func TestEachRecordingSessionSaysItsOwnTLSConnectionsRelayedUnread(t *testing.T) {
 	syncmgr.Get().SetWatermark(nil) // no hold: test cases go at once
 	for session, relayed := range []int{1, 2} {
@@ -290,7 +291,9 @@ func TestEachRecordingSessionSaysItsOwnTLSConnectionsRelayedUnread(t *testing.T)
 		resp, done := openHeldStream(t, a.HandleIncoming, models.IncomingReq{}, tok)
 		svc.tc <- &models.TestCase{Name: "test-1"}
 		for i := 0; i < relayed; i++ {
-			syncmgr.Get().NoteTLSRelayedConn()
+			if first := syncmgr.Get().NoteTLSRelayedConn(8443); first != (i == 0) {
+				t.Fatalf("session %d's TLS connection %d to 8443: first=%v, want %v (the session's first is said at WARN as it comes)", session+1, i+1, first, i == 0)
+			}
 		}
 		endRecordingStreams(tok)
 		if _, err := io.ReadAll(resp.Body); err != nil {

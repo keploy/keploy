@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sync/errgroup"
 )
@@ -101,5 +102,18 @@ func TestTheClientSaysWhatTheSessionLostForAnAgentItDidNotStart(t *testing.T) {
 		if started && logs.Len() != 0 {
 			t.Fatalf("for an agent the client started, whose log is the user's own, it said %v", logs.All())
 		}
+	}
+}
+
+// A session that lost only TLS connections, relayed to the app's own TLS
+// unread, is said by the client on its own: no other loss in the summary is
+// what makes the client say it.
+func TestTheClientSaysASessionThatLostOnlyTLSConnections(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	a := &AgentClient{logger: zap.New(core)}
+	a.sayAgentSummary(models.StreamEndSummary{TLSRelayedConns: 2})
+	said := logs.FilterMessage(tlsRelayedConnsSaid).All()
+	if len(said) != 1 || said[0].Level != zapcore.WarnLevel || said[0].ContextMap()["connections"] != uint64(2) {
+		t.Fatalf("a session that lost only TLS connections was said %v, want once at WARN with its 2 connections", said)
 	}
 }
