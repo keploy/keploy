@@ -2,6 +2,7 @@ package replayer_test
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -94,7 +95,8 @@ func TestLazyBodyServesReportsAndLearnsWhatTheEagerBodyDoes(t *testing.T) {
 // some command exactly when strict is on, so a row cannot pass by never
 // reading the body. A setting is judged only when every one of its subtests
 // ran to its end: one that -run did not select, or -failfast did not start,
-// added nothing to its tally.
+// added nothing to its tally. A run that selected every subtest judges
+// every setting.
 func replayCorporaPerEngine(t *testing.T, seeds int64, sizes []int, sides [2]string, match func(s *diffSide, ctx context.Context, req mysql.Request, eng *mocknoise.Engine, ref bool) string) {
 	t.Helper()
 	type part struct {
@@ -111,16 +113,22 @@ func replayCorporaPerEngine(t *testing.T, seeds int64, sizes []int, sides [2]str
 		if t.Failed() {
 			return
 		}
+		judged := 0
 		for i, ne := range noiseEngines {
 			if tallies[i].ran.Load() != int64(len(parts)) {
 				continue
 			}
+			judged++
 			learned, rejected := tallies[i].learned.Load(), tallies[i].rejected.Load()
 			// Under strict, the drift detection learns from is a miss instead.
 			detects, stricts := ne.name == "detect", strings.Contains(ne.name, "strict")
 			if detects != (learned > 0) || stricts != (rejected > 0) {
 				t.Errorf("noise %s: %d commands learned noise and strict rejected candidates on %d", ne.name, learned, rejected)
 			}
+		}
+		// With no -run or -skip, every subtest ran: every setting is judged.
+		if judged != len(noiseEngines) && flag.Lookup("test.run").Value.String() == "" && flag.Lookup("test.skip").Value.String() == "" {
+			t.Errorf("%d of %d noise settings judged in a run that selected every subtest", judged, len(noiseEngines))
 		}
 	})
 	for i, ne := range noiseEngines {

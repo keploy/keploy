@@ -54,9 +54,6 @@ type mysqlNoiseAdapter struct {
 // candidates only through DiffJSONBodies.
 var _ mocknoise.JSONBodyDiffer = mysqlNoiseAdapter{}
 
-// The strict gate's live body is decoded once for all of a command's
-// candidates only through DiffJSONBodies.
-
 // DiffJSONBodies is the adapter's Diff (JSONDiffer's, DetectJSONDrift) over
 // the bodies as mocknoise.JSONBody, so the strict gate's live body, compared
 // with every candidate of a command, is decoded once (strictGate.bodyDocFor).
