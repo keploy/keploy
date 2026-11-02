@@ -231,4 +231,35 @@ func TestOutcomeAFineCutAnAnswerServedAsRecordedIsNoConflictBesideItsCopy(t *tes
 	iValue(t, "the answer served as recorded beside the create that shows it", call([]Earlier{create}, []Raw{list(recNs)}), "mock-328")
 	oRefused(t, "the answer served as recorded, no place showing it", call(nil, []Raw{list(recNs)}), "conflict", "mock-346")
 	oRefused(t, "the answer F moved to a third value", call([]Earlier{create}, []Raw{list(movedNs)}), "conflict", "mock-346")
+	// Only an answer is keploy's own text: a request of the scope whose
+	// text round F still sent with the recorded name is the application's
+	// send, which held R's value and which the call did not carry. It stays
+	// a conflict beside the create.
+	stale := iSent("mock-330", rAt.Add(-2*time.Second), "body.cmd.query.filter.name", String, name(recNs), name(recNs))
+	oRefused(t, "a request round F still sent with the recorded name, beside the create", call([]Earlier{create, stale}, []Raw{list(recNs)}), "conflict", "mock-330")
+}
+
+// A send that shows the moment only at a millisecond or coarser shares it
+// with the call by the runs' timing alone (two reads may share one
+// millisecond), so it is no copy that lets an answer served as recorded be
+// no conflict. A typed instant to the microsecond that falls on a whole
+// millisecond in both runs: an answer whose recorded text holds R's moment
+// to the microsecond, which round F served as recorded, stays a conflict
+// beside a send of that millisecond in both runs. With no such answer the
+// send is the value's coarse copy.
+func TestOutcomeACoarseCopyLeavesAnAnswerServedAsRecordedAConflict(t *testing.T) {
+	const p = "body.since"
+	rAt := oAt
+	fAt := oAt.Add(time.Hour + 300*time.Millisecond)
+	rT := rAt.Add(-2*time.Second - 123456*time.Nanosecond).Truncate(time.Millisecond)
+	fT := fAt.Add(-2*time.Second - 654321*time.Nanosecond).Truncate(time.Millisecond)
+	rec, live := iMicro(rT), iMicro(fT)
+	sent := iSent("mock-1", rAt.Add(-1900*time.Millisecond), "body.createdAt", String, iMs(rT), iMs(fT))
+	rows := []models.PostgresV3Cells{{{Value: iMicro(rT)}}}
+	ans := oPg("mock-7", time.Second, "SELECT seen_at FROM jobs LIMIT 1", rows, "SELECT 1").ServedAs(1).ServedAsRecorded()
+	call := func(raw []Raw) Decision {
+		return oWord(t, Decide(iCall(p, Instant, rec, live, rAt, fAt, iWin(rAt, fAt, 10*time.Millisecond), []Earlier{sent}, raw)), rec, live)
+	}
+	iValue(t, "a send of the same millisecond in both runs, no answer", call(nil), "mock-1")
+	oRefused(t, "an answer served as recorded holding R's microsecond, beside a send of the same millisecond", call([]Raw{ans}), "conflict", "mock-7")
 }
