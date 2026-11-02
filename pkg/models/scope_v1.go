@@ -215,12 +215,37 @@ func (e *ScopeEvidence) Empty() bool {
 
 // ChargeNotJudged charges the test with losses that leave it without a
 // verdict (CaptureLosses.Split's notJudged), never failed: on CannotCapture,
-// and in the reason, after what it already says.
+// and in the reason one sentence names all of CannotCapture with its summed
+// counts. The sentence the reason already holds for CannotCapture is written
+// again in its place; else the sentence goes after what the reason says.
+// What the agent charged (a worker's REAL use) and what the record charges
+// (a mock), or each late mock whose container keploy could not read, are one
+// count: a reader sees one number, and each What charged, once.
 func (e *ScopeEvidence) ChargeNotJudged(l CaptureLosses) {
-	e.CannotCapture = e.CannotCapture.Plus(l)
-	if text := l.NotJudgedText(); e.Reason == "" {
+	was := e.CannotCapture.NotJudgedText()
+	sum := e.CannotCapture.Plus(l)
+	for i := range sum {
+		for _, c := range e.CannotCapture {
+			if c.Kind != sum[i].Kind || c.What == "" {
+				continue
+			}
+			// Plus keeps the What charged last: each What charged is named,
+			// once.
+			if !strings.Contains(c.What, sum[i].What) {
+				sum[i].What = c.What + "; " + sum[i].What
+			} else {
+				sum[i].What = c.What
+			}
+		}
+	}
+	e.CannotCapture = sum
+	text := sum.NotJudgedText()
+	switch {
+	case was != "" && strings.Contains(e.Reason, was):
+		e.Reason = strings.Replace(e.Reason, was, text, 1)
+	case e.Reason == "":
 		e.Reason = "keploy: " + text + "."
-	} else {
+	default:
 		e.Reason = strings.TrimSpace(e.Reason + " Also " + text + ".")
 	}
 }
