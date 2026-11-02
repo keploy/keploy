@@ -44,6 +44,8 @@ type IngressProxyManager struct {
 	// stopping: the recording it serves is stopping, and its app is
 	// stopped on purpose (SetStopping, stopping.go).
 	stopping atomic.Bool
+	// attempt is one dial of the app (dialApp): nil, net.DialTimeout.
+	attempt  dialAttempt
 	mu       sync.Mutex
 	active   map[uint16]proxyStop
 	logger   *zap.Logger
@@ -565,7 +567,33 @@ func waitForIngressTarget(ctx context.Context, addr string, timeout time.Duratio
 	}
 }
 
-func dialIngressTarget(ctx context.Context, addr string, timeout time.Duration) (net.Conn, error) {
+// dialAttempt is one dial of the app: net.DialTimeout, or a test's.
+type dialAttempt func(network, addr string, timeout time.Duration) (net.Conn, error)
+
+// dialApp dials the app the ingress forwards to at addr (dialIngressTarget):
+// a refusal is final once the recording is stopping, as its client stops
+// the app then, on purpose (SetStopping, stopping.go).
+func (pm *IngressProxyManager) dialApp(ctx context.Context, addr string) (net.Conn, error) {
+	return dialIngressTarget(ctx, addr, ingressTargetListenTimeout, pm.stopping.Load, pm.attempt)
+}
+
+// dialIngressTarget dials the app at addr, and dials it again while it
+// refuses (it is not listening yet) until timeout has passed since the first
+// dial, the context ends, or refusalFinal says a refusal is the app's last
+// word: its recording is stopping, and its client stops the app on purpose.
+// attempt is one dial (nil: net.DialTimeout).
+//
+// Each dial has the whole timeout of its own. The deadline decides only
+// whether a refused dial is made again; it never cuts one short. A dial given
+// what was left of it, 1 ms to 25 ms after the last 25 ms wait, timed out on a
+// loaded host before the app's refusal came back: an app that had refused
+// every dial was reported as one that did not answer ("i/o timeout"), at
+// ERROR, while the recording stopped too, where a refusal is said at DEBUG
+// (the grpc-linux-debian11 lane, enterprise pipeline 12645).
+func dialIngressTarget(ctx context.Context, addr string, timeout time.Duration, refusalFinal func() bool, attempt dialAttempt) (net.Conn, error) {
+	if attempt == nil {
+		attempt = net.DialTimeout
+	}
 	deadline := time.Now().Add(timeout)
 	network := "tcp4"
 	if host, _, err := net.SplitHostPort(addr); err == nil {
@@ -574,13 +602,13 @@ func dialIngressTarget(ctx context.Context, addr string, timeout time.Duration) 
 		}
 	}
 	for {
-		conn, err := net.DialTimeout(network, addr, max(time.Until(deadline), time.Millisecond))
+		conn, err := attempt(network, addr, timeout)
 		// Retry only while the target refuses the connection (app not listening
 		// yet), bounded by the deadline. isConnRefused is platform-aware: on
 		// Windows a refused connect surfaces as WSAECONNREFUSED, not the POSIX
 		// ECONNREFUSED, so a bare errors.Is(err, syscall.ECONNREFUSED) never
 		// matched there and the dial gave up immediately instead of waiting.
-		if err == nil || !isConnRefused(err) || !time.Now().Before(deadline) {
+		if err == nil || !isConnRefused(err) || refusalFinal() || !time.Now().Before(deadline) {
 			return conn, err
 		}
 		select {
@@ -655,7 +683,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		// (the original) instead.
 		actualPort := appPort
 
-		upConn, err := dialIngressTarget(ctx, finalAppAddr, ingressTargetListenTimeout)
+		upConn, err := pm.dialApp(ctx, finalAppAddr)
 		if err != nil {
 			pm.logAppDialFailure(logger, "Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
 				err, zap.String("final_app_addr", finalAppAddr))
@@ -702,7 +730,7 @@ func (r *replayConn) CloseWrite() error {
 
 func (pm *IngressProxyManager) ServeLive(ctx context.Context, conn net.Conn, upstream string, port uint16) {
 	if !pm.requests {
-		up, err := dialIngressTarget(ctx, upstream, ingressTargetListenTimeout)
+		up, err := pm.dialApp(ctx, upstream)
 		if err != nil {
 			pm.logger.Debug("the app is not reachable", zap.String("upstream", upstream), zap.Error(err))
 			return
