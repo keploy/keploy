@@ -3574,12 +3574,36 @@ func TestAGenericMissIsAskedOfTheRoundItsRequestWasReadIn(t *testing.T) {
 		t.Fatalf("another test's exchange was not named: %+v", r)
 	}
 
-	// T1 ends between the request's first read and the matcher's.
+	// T1 ends between the request's first read and the matcher's. The
+	// matcher reads in T1's view and is offered ex-mine; its consume,
+	// settled in T2's view, is refused, and the matcher reads again, now in
+	// T2's view, which does not show ex-mine. A second consume of ex-mine is
+	// the matcher offered the refused recording again, which it would read
+	// and consume without end: the request's ctx ends at that consume, so
+	// the row fails by its own assertion rather than by the package's
+	// deadline.
 	mm.exact.onMarked = func() {
 		mm.exact.onMarked = nil
 		mm.ServeExactTest("T2", nil)
 	}
-	if r := genericMiss(t, mm, "AUTH step2"); r.NotOwned {
+	ctx, offeredAgain := context.WithCancel(context.Background())
+	defer offeredAgain()
+	var consumes atomic.Int32
+	mm.OnConsume(func(name string) {
+		if name == mine.Name && consumes.Add(1) == 2 {
+			t.Errorf("the matcher was offered %s again after the view in force refused its consume; want the view in force's read, without it: a matcher that reads again on a refused consume spins on it", name)
+			offeredAgain()
+		}
+	})
+	r := genericServeIn(t, ctx, mm, "AUTH step2")
+	mm.OnConsume(nil)
+	if n := consumes.Load(); n != 1 {
+		t.Fatalf("precondition: the matcher consumed %s %d times; want once, in T1's view, refused in T2's", mine.Name, n)
+	}
+	if r == nil {
+		t.Fatal(`"AUTH step2": no miss with a report: the parser answered it`)
+	}
+	if r.NotOwned {
 		t.Fatalf("the exchange the call's test owned when its request was read was named as made elsewhere: %+v", r)
 	}
 
