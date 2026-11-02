@@ -96,6 +96,18 @@ import (
 // of a recording made after the call, an echo in the answer) stays refused:
 // the rule reads the word rule's plain matches alone.
 //
+// A value the call's recorded answer holds whole (an echo, Echoes), which
+// the rule shows no copy of the places it went past, is learned as that
+// echo on the terms it would be noise on, and named so (follows.echoed, a
+// ruling of 2026-11-03): an echo is checked at every replay (the answer
+// carries what the application sent), so it is no looser than the noise
+// the rule would learn there. A bcrypt hash an INSERT ... RETURNING echoes,
+// whose random salt holds by chance a one-character word of the server's
+// version, is learned as the echo it is in every run, not refused in the
+// runs whose salt happens to hold it. Where an instant of it changed (a
+// read of the clock, which a replay checks against its call's clock), it
+// stays refused.
+//
 // A connection's recorded start-up (isStartUp) is no place the rule reads
 // where the start-ups differ (swapHolds: its backend pid and secret key, a
 // server parameter set per connection). F gives each connection the
@@ -159,6 +171,11 @@ type follows struct {
 	// words of (movedAway), names the first such place: what a value learned
 	// as noise says of it, where no place was refuted.
 	moved string
+	// letGo, where the word rule let a word of the value go (excused),
+	// names the first such word, where it stands, and why it is no source:
+	// what an echo learned past it says of it (echoed), where nothing else
+	// set aside names one.
+	letGo string
 	// chance, where the word rule let a word of the value go at a recording
 	// both runs gave the application that word at before the call, and no
 	// word that changed of the value lacking it (but for a read of the
@@ -384,7 +401,8 @@ const maxRefutedNamed = 8
 // candidate source (sources). A value then learned as noise, which no replay
 // checks, is noise only where the recording and F gave the application its
 // candidate sources in the same order (followed), and an echo of the call's
-// answer is refused, both naming the place; a value learned as a read of the
+// answer is learned on those terms, where no instant of it changed (echoed),
+// both naming the place; a value learned as a read of the
 // clock is checked against its call's clock at every replay, which no order
 // of its sources changes (classifyRead).
 //
@@ -470,6 +488,7 @@ func (f *follows) excused(t string, recGave bool, fv fView, followed, untimed, w
 	default:
 		if f.first == "" {
 			f.first = why
+			f.letGo = stands + ", which the recording and record's full round both gave the application there before the call, and only one of the two values holds: a copy moves with its source, so the value is no copy of it"
 		}
 		if fv == fMoved && f.moved == "" {
 			f.moved = stands + ", where record's full round gave the application another value, which the value took none of the words of: a copy moves with its source, so the value is no copy of it"
@@ -1084,8 +1103,14 @@ func (f *follows) olderRefused(ln Learned) Learned {
 	if f == nil || f.older == "" || ln.Kind != KindNoise {
 		return ln
 	}
-	ln.Kind, ln.Why, ln.Echo = KindUnaccounted, f.lead()+"; record's full round gave the application "+f.older+" only in an older test of the set, and what it gave there shows nothing of what the application did with the value in the tests since, so keploy cannot tell a copy from a varying value", nil
+	ln.Kind, ln.Why, ln.Echo = KindUnaccounted, f.lead()+"; "+f.olderWhy(), nil
 	return ln
+}
+
+// olderWhy is why a value past a place F gave the application only in an
+// older test of the set (noteOlder) is no value keploy can tell from a copy.
+func (f *follows) olderWhy() string {
+	return "record's full round gave the application " + f.older + " only in an older test of the set, and what it gave there shows nothing of what the application did with the value in the tests since, so keploy cannot tell a copy from a varying value"
 }
 
 // followed is the verdict on a drift record's full round would learn as
@@ -1097,6 +1122,16 @@ func (f *follows) olderRefused(ln Learned) Learned {
 // classifier was handed (the call's own and those F gave elsewhere in the
 // set); only the sources among them are ordered.
 func (fol *follows) followed(ln Learned, at time.Time, earlier []Earlier, raw []Raw) Learned {
+	if why := fol.unordered(at, earlier, raw); why != "" {
+		ln.Kind, ln.Why, ln.Echo = KindUnaccounted, fol.lead()+"; "+why, nil
+	}
+	return ln
+}
+
+// unordered is why the recording and F do not show they gave the
+// application the value's candidate sources before the call in the same
+// order (followed), "" where they do.
+func (fol *follows) unordered(at time.Time, earlier []Earlier, raw []Raw) string {
 	source := func(mock string) bool { return fol.sources[mock] }
 	raw = append(raw[:len(raw):len(raw)], fol.given...)
 	rec, untoldRec := recordedOrder(at, earlier, raw, source)
@@ -1112,10 +1147,65 @@ func (fol *follows) followed(ln Learned, at time.Time, earlier []Earlier, raw []
 			why = "the recording and record's full round gave the application the earlier answers in a different order (" + d + ")"
 		}
 	}
-	if why != "" {
-		ln.Kind, ln.Why, ln.Echo = KindUnaccounted, fol.lead()+"; "+why+", so keploy cannot tell a copy from a varying value", nil
+	if why == "" {
+		return ""
 	}
+	return why + ", so keploy cannot tell a copy from a varying value"
+}
+
+// echoed is the verdict on ln, an echo of the call's answer (KindEcho)
+// whose search for a source went past places the rule showed are no source
+// of it (refute, refuteSeen, excused: each a place both runs gave the
+// application before the call, which only one run's value took), other
+// than its own unserved siblings alone (pastSiblingsOnly). Past those alone
+// the echo stands, learned as an echo and naming the first (setAside), on
+// the terms noise stands on past them: the recording and F gave the value's
+// candidate sources in the same order (unordered), and F gave none of them
+// only in an older test of the set (olderWhy). An echo is a checked
+// relation (a replay answers the call with what the application sent),
+// stricter than the noise the rule lets stand at the same places, and a
+// value carried from a place holds what that place gave in both runs, which
+// the rule never sets aside. Every other refusal (classifyRead's, before
+// it) still refuses.
+//
+// Never where an instant of the value changed (valueDrift.instants): a read
+// of the clock, which a replay checks against its call's clock where it is
+// learned as one, would go unchecked as an echo. That leaves out a place F
+// had not served too (notServed), which the search goes past for a whole
+// read of the clock alone. Otherwise the echo is refused, naming the echo,
+// what was set aside, and why: never the word rule's own reason at the word
+// it let go, which says keploy cannot tell what the rule told.
+func (f *follows) echoed(ln Learned, v *valueDrift, at time.Time, earlier []Earlier, raw []Raw) Learned {
+	why := ""
+	switch {
+	case len(v.instants) > 0:
+		why = "an instant of it changed, and as an echo a read of the clock would go unchecked where every replay checks it"
+	default:
+		why = f.unordered(at, earlier, raw)
+		if why == "" && f.older != "" {
+			why = f.olderWhy()
+		}
+	}
+	if why != "" {
+		ln.Kind, ln.Why, ln.Echo = KindUnaccounted, f.setAside()+"; but the call's recorded answer holds it, an echo keploy cannot answer here: "+why, nil
+		return ln
+	}
+	ln.Why = f.setAside() + ", and keploy learns it as an echo of the call's answer"
 	return ln
+}
+
+// setAside names the first place the search for the value's source showed
+// is no source of it: one it went past (refuted), else one the word rule let
+// a word of it go at that F gave another value at (moved), else one where
+// the word stands by chance (chance), else a leaf set aside (aside), else
+// the first word let go (letGo).
+func (f *follows) setAside() string {
+	for _, why := range []string{f.refuted, f.moved, f.chance, f.aside} {
+		if why != "" {
+			return why
+		}
+	}
+	return f.letGo
 }
 
 // lead is what a refusal of a value the rule would learn as noise names

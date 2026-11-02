@@ -260,7 +260,8 @@ func TestASiblingSetAsideTakesItsMomentsWithIt(t *testing.T) {
 // aside, or, beside a sibling learned as an echo, the stamp was carried
 // from that sibling. It fails closed: an echo beside an unserved recording
 // that states no role, one that holds another value, one learned in another
-// role, or any other recording set aside, is refused as before.
+// role, or any other recording set aside, is refused as before, saying that
+// an echo of a read of the clock would leave it unchecked (follows.echoed).
 func TestAnEqualStampBesideASiblingFHadNotServedIsAnEcho(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	first := time.Date(2026, 11, 2, 3, 52, 27, 62_000_000, time.UTC)
@@ -314,7 +315,7 @@ func TestAnEqualStampBesideASiblingFHadNotServedIsAnEcho(t *testing.T) {
 		{"beside an unread sibling, an unserved recording that is none", []Raw{unserved16, unserved.Sibling(role("", same))}},
 	} {
 		for p, ln := range call(row.raw...) {
-			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "an echo keploy cannot answer beside a source it set aside") {
+			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, echoSetAside+"an instant of it changed") {
 				t.Errorf("FALSE GREEN? %s: %s learned %s from %q (%s); want the echo refused beside a source set aside, as before", row.what, p, ln.Kind, ln.From.Mock, ln.Why)
 			}
 		}

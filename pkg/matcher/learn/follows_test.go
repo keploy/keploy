@@ -405,9 +405,16 @@ func TestAVariableReadingFDidNotFollowIsNoise(t *testing.T) {
 		}
 	}
 	// The call's recorded answer echoes the value: an echo beside a source
-	// set aside is refused, as one beside a word the rule let go is.
-	if got := classifyF(t, "50", "7", nil, startup(eHistory(before, 6, true)), []Leaf{{Path: "rows[0][0]", Type: String, Value: "50"}}); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "in mock-5 at") {
-		t.Errorf("FALSE GREEN? 50 beside VARCHAR(50) F sent unchanged, echoed in the answer, 7 in F: %s (%q), want refused naming mock-5", got.Kind, got.Why)
+	// set aside is learned as the echo, naming it, as one beside a word the
+	// rule let go is; past a source F gave only in an older test of the set
+	// it is refused, naming the echo and why
+	// (TestAnEchoPastPlacesTheCopyRuleShowedNoSourceIsLearnedAsTheEcho).
+	echo := []Leaf{{Path: "rows[0][0]", Type: String, Value: "50"}}
+	if got := classifyF(t, "50", "7", nil, startup(eHistory(before, 6, true)), echo); got.Kind != KindEcho || !strings.Contains(got.Why, "in mock-5 at") || !strings.HasSuffix(got.Why, echoLearned) {
+		t.Errorf("50 beside VARCHAR(50) F sent unchanged, echoed in the answer, 7 in F: %s (%q), want an echo naming mock-5", got.Kind, got.Why)
+	}
+	if got := classifyF(t, "50", "7", nil, startup(eHistory(before, 6, true).ServedInAnOlderTest()), echo); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "in mock-5 at") || !strings.Contains(got.Why, echoSetAside+"record's full round gave the application mock-5 "+olderSetAside) {
+		t.Errorf("FALSE GREEN? 50 beside VARCHAR(50) F sent unchanged only in an older test, echoed in the answer, 7 in F: %s (%q), want refused naming mock-5 and why", got.Kind, got.Why)
 	}
 	// F served the CREATE TABLE before Flyway's seed row (mock-4), which the
 	// recording gave the application first. The seed row holds no word of
@@ -431,13 +438,20 @@ func TestAVariableReadingFDidNotFollowIsNoise(t *testing.T) {
 }
 
 // An echo (the call's recorded answer holds the recorded value) beside a
-// word the word rule let go is refused, naming the word's place, as
-// ClassifyGiven refuses it.
-func TestAnEchoBesideAWordFoundEarlierIsRefused(t *testing.T) {
+// word the word rule let go is learned as the echo, naming the word's place,
+// where the order of its candidate sources is shown; ClassifyGiven, the
+// rule's absence, still refuses it, naming the word's place. An echo beside
+// a word both values hold stays refused under the rule too
+// (TestAnEchoPastPlacesTheCopyRuleShowedNoSourceIsLearnedAsTheEcho).
+func TestAnEchoBesideAWordFoundEarlierIsLearnedAsTheEcho(t *testing.T) {
 	resp := []Leaf{{Path: "rows[0][0]", Type: String, Value: "82"}}
-	got := classifyF(t, "82", "1", nil, eStartup(), resp)
-	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "appears in an earlier recording, in mock-1") {
-		t.Errorf("82 echoed in the answer, 1 in F beside SELECT 1: %s (%q), want refused naming mock-1", got.Kind, got.Why)
+	if got := classifyF(t, "82", "1", nil, eStartup(), resp); got.Kind != KindEcho || !strings.Contains(got.Why, "stands in mock-1") {
+		t.Errorf("82 echoed in the answer, 1 in F beside SELECT 1: %s (%q), want an echo naming mock-1", got.Kind, got.Why)
+	}
+	path := "bind.$8"
+	today := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "1"}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}, eRecAt, nil, eStartup(), resp, nil, nil)
+	if today[0].Kind != KindUnaccounted || !strings.Contains(today[0].Why, "appears in an earlier recording, in mock-1") {
+		t.Errorf("ClassifyGiven, 82 echoed in the answer, 1 in F beside SELECT 1: %s (%q), want refused naming mock-1", today[0].Kind, today[0].Why)
 	}
 }
 

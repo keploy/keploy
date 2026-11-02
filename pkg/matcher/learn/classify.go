@@ -1748,7 +1748,8 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// Words the word rule let go in record's full round: noise only
 		// where the recording and F gave the application the places before
 		// the call in the same order (follows.followed); an echo they stood
-		// beside is refused as the word rule refuses them.
+		// beside stands on the same terms, and only where no instant of it
+		// changed (follows.echoed).
 		//
 		// A source the search went past (follows.refute) counts as such a
 		// word, whether or not the word rule let one go there: noise only
@@ -1772,19 +1773,16 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				if fol.pastSiblingsOnly(all, r, KindEcho) {
 					break
 				}
-				why := fol.first
-				if why == "" {
-					why = fol.refuted + "; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside"
-				}
-				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
+				ln = fol.echoed(ln, dc.ofIn(r.Value, l.Value, w, at), at, served, all)
 			}
 		}
 		// A leaf set aside as no source (follows.refuteSeen), and nothing
-		// else: an echo beside it is refused as beside any source set aside;
-		// a value left noise is ordered below, once its kind is final.
+		// else: an echo beside it stands as beside any source set aside
+		// (follows.echoed); a value left noise is ordered below, once its
+		// kind is final.
 		asideOnly := fol != nil && fol.first == "" && fol.refuted == "" && fol.aside != ""
 		if asideOnly && ln.Kind == KindEcho {
-			ln.Kind, ln.Why, ln.Echo = KindUnaccounted, fol.aside+"; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside", nil
+			ln = fol.echoed(ln, dc.ofIn(r.Value, l.Value, w, at), at, served, all)
 		}
 		// A time of day whole (textTimeOfDay), which names no day, is a
 		// read modulo a day (textTodRead), checked so at every replay.
