@@ -2384,11 +2384,22 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	// Under the proven switch a miss whose closest recording another test
 	// owns names that test, as keploy test's replay does (markRecordedIn):
 	// judging lists it as the root of the test's entry.
-	if named := withRecordedIn(counts.tests, m.mockOwners); len(named) > 0 {
+	named, orderDependent := withRecordedIn(counts.tests, m.mockOwners, detail.windows)
+	if len(named) > 0 {
 		m.logger.Warn("tests made a call that another test recorded: likely, at record time that test made it on a connection it opened, whose handshake was recorded there (KEPLOY_PROVEN=1); each is named under evidence.misses.recorded_in in "+TestsReceiptFile,
 			zap.String("mock-set", m.setName()),
 			zap.Strings("calls", named[:min(len(named), 20)]),
 			zap.String("next_step", "record the set again with keploy mock record so each test opens the connections it uses, or keep the application's connection reuse as it was when recording"))
+	}
+	// A test of a parallel test worker that made a call another test
+	// recorded fails as order-dependent: which of a worker's tests makes a
+	// call the worker makes once depends on the order the framework hands
+	// it tests, which changes from run to run.
+	if len(orderDependent) > 0 {
+		m.logger.Warn("tests of parallel test workers made a call another test recorded, and each fails as order-dependent: a call a worker makes once (a token fetch, a pooled connection's handshake) lands in whichever of its tests it runs first, and the framework hands the workers their tests in another order each run (KEPLOY_PROVEN=1); each is named under evidence.misses (order_dependent, recorded_in) in "+TestsReceiptFile,
+			zap.String("mock-set", m.setName()),
+			zap.Strings("calls", orderDependent[:min(len(orderDependent), 20)]),
+			zap.String("next_step", "make the call once in each worker before its tests (a worker-scoped fixture, or beforeAll) and record the set again, or record and replay with one worker"))
 	}
 	if provenswitch.On() {
 		// When each test began serves the proven flow's reading of a cut
@@ -2520,12 +2531,21 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 // withRecordedIn names, on each miss of tests' evidence that is a recording
 // its test does not own (NotOwned, ClosestMock), the other test that owns it
 // (owners: models.MockOwners of the table the replay pushed), as keploy
-// test's replay does (models.UnmatchedCall.NameRecordedIn). The evidence is
-// withEvidence's own copy, never the windows'. It returns
-// "test: call (closest mock, recorded in test)" for each it named. With the
-// switch off owners is nil and no miss is NotOwned: nothing changes.
-func withRecordedIn(tests []TestReceipt, owners map[string][]string) []string {
-	var named []string
+// test's replay does (models.UnmatchedCall.NameRecordedIn). A test a
+// parallel test worker ran (its window's Instance, in windows) made it out
+// of the order its worker recorded in: the miss is order-dependent
+// (models.UnmatchedCall.OrderDependent). The evidence is withEvidence's own
+// copy, never the windows'. It returns "test: call (closest mock, recorded
+// in test)" for each it named, a worker's test's in orderDependent and any
+// other's in named. With the switch off owners is nil and no miss is
+// NotOwned: nothing changes.
+func withRecordedIn(tests []TestReceipt, owners map[string][]string, windows []models.ScopeWindow) (named, orderDependent []string) {
+	workers := make(map[string]bool)
+	for _, w := range windows {
+		if w.Instance != 0 {
+			workers[w.Name] = true
+		}
+	}
 	for i := range tests {
 		ev := tests[i].Evidence
 		if ev == nil {
@@ -2533,12 +2553,19 @@ func withRecordedIn(tests []TestReceipt, owners map[string][]string) []string {
 		}
 		for j := range ev.Misses {
 			c := &ev.Misses[j]
-			if c.NameRecordedIn(tests[i].Name, owners) {
-				named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", tests[i].Name, c.Named(), c.ClosestMock, c.RecordedIn))
+			if !c.NameRecordedIn(tests[i].Name, owners) {
+				continue
 			}
+			line := fmt.Sprintf("%s: %s (%s, recorded in %s)", tests[i].Name, c.Named(), c.ClosestMock, c.RecordedIn)
+			if workers[tests[i].Name] {
+				c.OrderDependent = true
+				orderDependent = append(orderDependent, line)
+				continue
+			}
+			named = append(named, line)
 		}
 	}
-	return named
+	return named, orderDependent
 }
 
 // withBegan puts on each test's line when its latest run began: its latest
