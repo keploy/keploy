@@ -100,13 +100,10 @@ type reqPlace struct {
 // recording): made once per place and shared by its copies, so the index
 // finds each text's entry once, and the place keeps no recording's text.
 // same: whether round F gave the place as recorded (0: not asked yet).
-// of: the recording's own texts, where these are one half of them
-// (halves): a question of its fields reads them there.
 type placeText struct {
 	rec, live *readerText
 	views     []*readerText
 	same      int8
-	of        *placeText
 }
 
 // withTexts gives each of ps the handles its texts are read by, in x.
@@ -314,7 +311,7 @@ func textHalf(t *readerText, request bool) *readerText {
 func halves(p evPlace) (req, ans evPlace) {
 	half := func(request bool) evPlace {
 		h := p
-		h.t = &placeText{rec: textHalf(p.t.rec, request), live: textHalf(p.t.live, request), views: p.t.views, of: p.t}
+		h.t = &placeText{rec: textHalf(p.t.rec, request), live: textHalf(p.t.live, request), views: p.t.views}
 		return h
 	}
 	req, ans = half(true), half(false)
