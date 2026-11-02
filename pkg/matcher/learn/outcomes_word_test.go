@@ -738,10 +738,12 @@ func TestOutcomeAnInstantWordCopiedFromASendIsAnsweredWhereItsAnswerHoldsItWhole
 	oRefused(t, "an instant's read-back at a place keploy cannot name", oWord(t, Decide(unnamed), rw, lw), RefusalCannotCheck, "cannot name")
 }
 
-// A word only a recording made after the call holds decides nothing: it gave
-// the recorded application nothing before the call, and round F's value does
-// not stand there, so the value is made anew each run. One that round F's
-// value stands in, or one recorded at the call's own instant, stays refused.
+// A word only a recording answered after the call holds decides nothing: it
+// gave the recorded application nothing before the call, and round F's value
+// does not stand there, so the value is made anew each run, however its
+// request was timed (one asked at the call's own instant too). One that
+// round F's value stands in, or one answered at the call's own instant,
+// stays refused.
 func TestOutcomeARecordedWordOnlyALaterRecordingHoldsIsFresh(t *testing.T) {
 	const p = "body.msg_id"
 	const rec, live = "k1b2e4d70", "k5d0e8a33"
@@ -759,7 +761,12 @@ func TestOutcomeARecordedWordOnlyALaterRecordingHoldsIsFresh(t *testing.T) {
 		t.Errorf("FALSE RED: the recorded word in a recording made after the call: %s; want fresh", oDescribe([]Decision{d}))
 	}
 	oRefused(t, "round F's word in a recording made after the call", call(held(live, r1Insert.Add(30*time.Second))), RefusalUnknown, "mock-0")
-	oRefused(t, "the recorded word in a recording made at the call's own instant", call(held(rec, r1Insert)), RefusalUnknown, "mock-0")
+	if d := call(held(rec, r1Insert)); d.Outcome != OutcomeFresh {
+		t.Errorf("FALSE RED: the recorded word in a recording asked at the call's own instant and answered a second later: %s; want fresh", oDescribe([]Decision{d}))
+	}
+	at := held(rec, r1Insert)
+	at.answered = r1Insert
+	oRefused(t, "the recorded word in a recording answered at the call's own instant", call(at), RefusalUnknown, "mock-0", atCallWhy)
 }
 
 // The tracker's recorded begin is what an adapter fills Input.RecBegan with.

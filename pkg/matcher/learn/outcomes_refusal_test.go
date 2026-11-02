@@ -10,7 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// Rows for the lines keploy prints: each of the nine refusal kinds' line
+// Rows for the lines keploy prints: each of the ten refusal kinds' line
 // and its edits (RefusalLine), read back whole (ParseRefusal, which keploy's
 // explain and verdicts read), and each outcome's learned line: what and
 // where, both values, the rule and the undo.
@@ -21,7 +21,7 @@ func rfBase(kind RefusalKind, why string, places []string, edits ...Edit) Refusa
 		Recorded: "slot-17", Full: "slot-18", Why: why, Places: places, Edits: edits}
 }
 
-// Each of the nine kinds prints its line: the call, the word, both values,
+// Each of the ten kinds prints its line: the call, the word, both values,
 // the kind's clause, the places (at most three), and its edits in words a
 // person or an LLM acts on; and ParseRefusal reads the same Refusal back.
 func TestOutcomeRefusalLinesNameTheWordAndTheirEdits(t *testing.T) {
@@ -56,6 +56,8 @@ func TestOutcomeRefusalLinesNameTheWordAndTheirEdits(t *testing.T) {
 			[]string{"a word was added or dropped", "noise at body.slot"}},
 		{rfBase("cannot-check", "Mongo cannot bind a word inside this field yet", nil, field),
 			[]string{"keploy's limit", "noise at body.slot"}},
+		{rfBase("landed-elsewhere", "learned nothing: round F's call landed in TestB's window, which teaches clock reads only; word 1 of body.slot is a value bound to mock-4", nil, field),
+			[]string{"TestB's window", "noise at body.slot"}},
 	} {
 		line := RefusalLine(c.r)
 		if !strings.HasPrefix(line, prefix) || !strings.Contains(line, c.r.Why) {
