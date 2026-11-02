@@ -846,14 +846,11 @@ func (m *mockService) Record(ctx context.Context) error {
 				zap.String("next_step", models.UnattributedRemedy))
 		}
 		if !judging {
-			if derr := m.mockDB.DiscardStagedSet(storeCtx, staging); derr != nil {
-				m.logger.Debug("failed to discard staging set after an unattributed call", zap.String("staging", staging), zap.Error(derr))
-			}
+			// keep is false here, so the deferred DiscardStagedSet drops
+			// the staging set; a stop by the user returned above.
 			m.logger.Error("the recording was not kept: calls came from processes in no test worker's keploy instance while workers' tests were open, and this keploy does not judge the record test by test; the existing mock set (if any) was left unchanged",
 				zap.Int("calls", len(calls)), zap.String("mock-set", name), zap.String("next_step", models.UnattributedRemedy))
-			if parent.Err() == nil {
-				m.propagateExit(appErr, "record")
-			}
+			m.propagateExit(appErr, "record")
 			utils.SetExitCodeOnce(utils.ExitKeployError)
 			return fmt.Errorf("the recording is incomplete: %d call(s) came from no test worker while workers' tests were open", len(calls))
 		}
