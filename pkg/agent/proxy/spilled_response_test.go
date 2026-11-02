@@ -93,10 +93,17 @@ func stageSpilled(t *testing.T, at time.Time, mocks ...*models.Mock) (*DiskMocks
 // serveOne sends rawReq through the HTTP integration's replay path and returns
 // the response the application reads, or nil and the integration's error when
 // none arrives.
+//
+// The serve runs under the test's own context, with no deadline of its own: a
+// serve that is slow (a box stalled under load) still answers, and only an
+// answer the integration did not give is nil. A 10 s deadline here turned a
+// serve stalled past it into a miss after its recording was consumed, so a
+// stateful row read "MISS" and then the next recording. A serve that never
+// answers is go test's -timeout's to end, with every goroutine's stack.
 func serveOne(t *testing.T, h integrations.Integrations, mm integrations.MockMemDb, rawReq string) (*http.Response, []byte, error) {
 	t.Helper()
 	app, agent := net.Pipe()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	served := make(chan error, 1)
 	go func() {
@@ -134,6 +141,41 @@ func serveOne(t *testing.T, h integrations.Integrations, mm integrations.MockMem
 		}
 	}
 	return resp, body, nil
+}
+
+// deadlineSeer is an integration that answers any request with an empty 200
+// and reports whether the context it served under had a deadline.
+type deadlineSeer struct{ hadDeadline chan<- bool }
+
+func (deadlineSeer) MatchType(context.Context, []byte) bool { return true }
+
+func (deadlineSeer) RecordOutgoing(context.Context, *integrations.RecordSession) error { return nil }
+
+func (d deadlineSeer) MockOutgoing(ctx context.Context, src net.Conn, _ *models.ConditionalDstCfg, _ integrations.MockMemDb, _ models.OutgoingOptions) error {
+	_, has := ctx.Deadline()
+	d.hadDeadline <- has
+	if _, err := http.ReadRequest(bufio.NewReader(src)); err != nil {
+		return err
+	}
+	_, err := src.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"))
+	return err
+}
+
+// A row's serve (serveOne) has no deadline of its own, so how long a serve
+// takes never changes what a row reads. With one, a serve stalled past it on
+// a loaded box ended after its recording was consumed and before its answer
+// was written: TestStatefulCursor_PerTestRecordingsTakeTurnsWithinTheirTestOnly
+// read "a1 MISS a2,a3,a3 b2,b2" for "a1 b1 a2,a3,a3 b2,b2". The integration
+// reports the context it was given; no row waits on a clock.
+func TestServeOneGivesTheServeNoDeadlineOfItsOwn(t *testing.T) {
+	seen := make(chan bool, 1)
+	resp, _, err := serveOne(t, deadlineSeer{hadDeadline: seen}, nil, "GET /x HTTP/1.1\r\nHost: deps\r\n\r\n")
+	if err != nil || resp == nil || resp.StatusCode != 200 {
+		t.Fatalf("served %v (err %v), want the integration's 200", resp, err)
+	}
+	if <-seen {
+		t.Fatal("the serve ran under a deadline of its own: a serve stalled past it reads as a miss")
+	}
 }
 
 func wantRecordedBody(t *testing.T, resp *http.Response, body []byte) {
