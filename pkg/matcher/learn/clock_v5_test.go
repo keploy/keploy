@@ -1864,3 +1864,53 @@ func TestALookBackAReplayDoesNotCompareIsRefusedNeverReadFromItsTestsBegin(t *te
 		t.Errorf("a plain read in its call's window where a replay does not compare offsets: %+v %q %v; want it left to the plain read", o, why, ok)
 	}
 }
+
+// A look-back of whole hours from a read cut to its zone's hour (a Java
+// application in +05:30 truncating to its own hour, less two or three
+// hours) is learned at its own cut, the hour (Step == Res), and a replay
+// that reads the application's zone from its process checks it at that
+// cut, never on a step's grids as a phase lock is: it passes the
+// application's value at every phase of the hour and fails one 1h15m
+// earlier (a quarter past UTC's hour, on neither zone's), and a dropped
+// look-back, at every phase. Read on a step's grids, the 1h15m-earlier
+// value would pass at half of them. (A value shifted onto UTC's hour, 1h30m
+// earlier, is read in UTC as a value whole there and passes at half the
+// phases of the hour: the cut-zone rule's slack of up to two cuts, by
+// where in its cut the replay's read falls.)
+func TestAnOwnCutHourInTheAppsZoneIsCheckedOnlyAtThatZonesHour(t *testing.T) {
+	sec, ms, min := time.Second, time.Millisecond, time.Minute
+	const p = "body.cutoff.$lte"
+	for _, zn := range []*time.Location{time.FixedZone("+05:30", 5*3600+1800)} {
+		for _, back := range []time.Duration{2 * time.Hour, 3 * time.Hour} {
+			cut := func(x time.Time) time.Time { return models.ReadCut(x, time.Hour, zn).Add(-back) }
+			for _, base := range []time.Time{time.Date(2026, 10, 26, 9, 40, 0, 0, time.UTC), time.Date(2026, 10, 26, 9, 10, 0, 0, time.UTC)} {
+				rec := v5Call(base, 61*ms, 20*ms)
+				f := v5Call(base.Add(3*time.Hour+5*min), 61*ms, 20*ms)
+				o, why, ok := clockInWindow(p, v5Instant(cut(rec.read), sec), v5Instant(cut(f.read), sec), v5Window(rec, f), zn)
+				if !ok || o.Step != time.Hour || o.Res != time.Hour {
+					t.Errorf("FALSE RED: recorded at %s in %s, a cut to its hour less %s: %+v %q %v; want it learned at its own cut, the hour", base.Format("15:04"), zn, back, o, why, ok)
+					continue
+				}
+				recText := strconv.FormatInt(cut(rec.read).Unix(), 10)
+				for phase := time.Duration(0); phase < time.Hour; phase += 5*min + 7*sec {
+					s := Span{Zone: zn, Own: true, From: base.Add(48*time.Hour + phase)}
+					s.To = s.From.Add(61 * ms)
+					read := s.To.Add(-20 * ms)
+					for _, row := range []struct {
+						name string
+						at   time.Time
+						want bool
+					}{
+						{"the application's value", cut(read), true},
+						{"1h15m earlier", cut(read).Add(-75 * min), false},
+						{"a dropped look-back", read.Truncate(sec), false},
+					} {
+						if got, why := v5Check(p, o, recText, row.at, s); got != row.want {
+							t.Errorf("%s: recorded at %s in %s, a cut to its hour less %s, a replay %s into its hour, %s: %v (%s)", map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}[row.want], base.Format("15:04"), zn, back, phase, row.name, got, why)
+						}
+					}
+				}
+			}
+		}
+	}
+}
