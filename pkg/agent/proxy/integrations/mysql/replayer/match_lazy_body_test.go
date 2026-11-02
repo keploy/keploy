@@ -113,7 +113,7 @@ func replayCorpora(t *testing.T, name string, eng func() *mocknoise.Engine, seed
 		r := rand.New(rand.NewSource(seed))
 		windows := 4 + r.Intn(5)
 		pool := diffPool(r, windows)
-		ref, other := newDiffSide(pool), newDiffSide(pool)
+		ref, other := newDiffSide(t, pool), newDiffSide(t, pool)
 		for _, s := range []*diffSide{ref, other} {
 			s.stage(models.BaseTime, time.Now())
 		}
@@ -149,7 +149,7 @@ func replayCorpora(t *testing.T, name string, eng func() *mocknoise.Engine, seed
 	}
 	for _, n := range sizes {
 		pool := keyedSet(n, models.LifetimePerTest)
-		ref, other := newDiffSide(pool), newDiffSide(pool)
+		ref, other := newDiffSide(t, pool), newDiffSide(t, pool)
 		ref.stageNoWindow()
 		other.stageNoWindow()
 		for i := 0; i < n; i += n / 100 {
@@ -181,7 +181,7 @@ func replayCorpora(t *testing.T, name string, eng func() *mocknoise.Engine, seed
 // detection reads it, and then once, however many candidates strict compares
 // it with.
 func TestCommandBuildsItsBodyOnlyForStrictOrDetection(t *testing.T) {
-	s := newDiffSide(keyedSet(80, models.LifetimeSession))
+	s := newDiffSide(t, keyedSet(80, models.LifetimeSession))
 	s.stageNoWindow()
 	defer s.mm.Close()
 	for _, ne := range noiseEngines {
@@ -220,7 +220,7 @@ func TestCommandAllocationsDoNotGrowWithItsParametersWithoutNoise(t *testing.T) 
 		}
 		rec := req
 		rec.SetStoredQuery(diffQueryB)
-		s := newDiffSide([]*models.Mock{diffMock("m-0", "c1", []mysql.Request{rec}, diffBase, models.LifetimeSession, "config")})
+		s := newDiffSide(t, []*models.Mock{diffMock("m-0", "c1", []mysql.Request{rec}, diffBase, models.LifetimeSession, "config")})
 		s.mm.SetMocksWithWindow(nil, []*models.Mock{s.pool[0].DeepCopy()}, time.Time{}, time.Time{})
 		s.mm.SetCurrentTestWindow(time.Time{}, time.Time{})
 		defer s.mm.Close()

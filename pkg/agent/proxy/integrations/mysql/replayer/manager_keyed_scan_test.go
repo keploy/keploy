@@ -79,7 +79,7 @@ func TestNoWindowSetsServeWhatTheFullScanServes(t *testing.T) {
 	for _, n := range sizes {
 		for _, strict := range []bool{false, true} {
 			pool := keyedSet(n, models.LifetimePerTest)
-			ref, fast := newDiffSide(pool), newDiffSide(pool)
+			ref, fast := newDiffSide(t, pool), newDiffSide(t, pool)
 			ref.stageNoWindow()
 			fast.stageNoWindow()
 			var eng *mocknoise.Engine
@@ -118,7 +118,7 @@ func TestNoWindowSetsServeWhatTheFullScanServes(t *testing.T) {
 func TestExactServingServesWhatTheFullScanServes(t *testing.T) {
 	for _, strict := range []bool{false, true} {
 		pool := keyedSet(1000, models.LifetimePerTest)
-		ref, fast := newDiffSide(pool), newDiffSide(pool)
+		ref, fast := newDiffSide(t, pool), newDiffSide(t, pool)
 		ref.stageNoWindow()
 		fast.stageNoWindow()
 		var eng *mocknoise.Engine
@@ -201,7 +201,7 @@ func TestNoWindowCommandReadsOnlyItsStatement(t *testing.T) {
 		// only FIFO candidates, and they settle it too.
 		{"COM_STMT_EXECUTE, parameters no recording binds", pool, executeReq(8, "no-such-key"), ofB},
 	} {
-		s := newDiffSide(tc.pool)
+		s := newDiffSide(t, tc.pool)
 		s.stageNoWindow()
 		resp, ok, examined, err := replayer.MatchCommandExaminedForTest(context.Background(), tc.req, s.mm, s.dctx, nil, false)
 		if err != nil || !ok || resp == nil {
@@ -232,7 +232,7 @@ func TestNoWindowCommandAllocationsDoNotGrowWithOtherStatements(t *testing.T) {
 			}
 			pool = append(pool, m)
 		}
-		s := newDiffSide(pool)
+		s := newDiffSide(t, pool)
 		s.stageNoWindow()
 		defer s.mm.Close()
 		return testing.AllocsPerRun(20, func() {
@@ -272,7 +272,7 @@ func TestExactServedCommandReadsNoTierOfAOneCommandCandidate(t *testing.T) {
 		// never called.
 		pool := append([]*models.Mock{diffMock("bundle", "c1", []mysql.Request{queryReq("SET NAMES utf8mb4"), queryReq("SELECT @@version")},
 			diffBase.Add(-time.Millisecond), models.LifetimePerTest, "config")}, keyedSet(n, models.LifetimePerTest)...)
-		s := newDiffSide(pool)
+		s := newDiffSide(t, pool)
 		defer s.mm.Close()
 		s.stageNoWindow()
 		owned := make([]*models.Mock, len(pool))
@@ -350,7 +350,7 @@ func TestExactServingWholeSetServesWhatTheFullScanServes(t *testing.T) {
 	for _, strict := range []bool{false, true} {
 		pool := keyedSet(1000, models.LifetimePerTest)
 		learnParameterNoise(pool, diffQueryA)
-		ref, fast := newDiffSide(pool), newDiffSide(pool)
+		ref, fast := newDiffSide(t, pool), newDiffSide(t, pool)
 		var eng *mocknoise.Engine
 		if strict {
 			eng = replayer.StrictEngineForTest()
@@ -435,7 +435,7 @@ func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 				if tc.noise {
 					learnParameterNoise(pool, diffQueryB)
 				}
-				s := newDiffSide(pool)
+				s := newDiffSide(t, pool)
 				s.stageNoWindow()
 				s.ownWholeSet()
 				resp, ok, examined, err := replayer.MatchCommandExaminedForTest(context.Background(), tc.req, s.mm, s.dctx, nil, full)
@@ -461,7 +461,7 @@ func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 		// noise.
 		pool := keyedSet(n, models.LifetimePerTest)
 		learnParameterNoise(pool, diffQueryB)
-		s := newDiffSide(pool)
+		s := newDiffSide(t, pool)
 		s.stageNoWindow()
 		match := func(req mysql.Request) {
 			if _, ok, _, err := replayer.MatchCommandExaminedForTest(context.Background(), req, s.mm, s.dctx, nil, false); err != nil || !ok {
@@ -492,7 +492,7 @@ func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 		s.mm.Close()
 
 		// A fresh staging whose test opens before any keyed read.
-		cold := newDiffSide(keyedSet(n, models.LifetimePerTest))
+		cold := newDiffSide(t, keyedSet(n, models.LifetimePerTest))
 		cold.stageNoWindow()
 		cold.ownWholeSet()
 		computed = 0
@@ -538,14 +538,14 @@ func TestStagingsFirstUnsettledCommandComputesOnlyItsOwnKeys(t *testing.T) {
 			{"COM_QUERY, literal no recording has", queryReq("SELECT id, name, payload FROM small WHERE id = 100000"), "Q"},
 			{"EXECUTE, statement the set never prepared", executeReq(10, "k1"), "E"},
 		} {
-			ref := newDiffSide(keyedSet(n, models.LifetimePerTest))
+			ref := newDiffSide(t, keyedSet(n, models.LifetimePerTest))
 			ref.stageNoWindow()
 			ref.ownWholeSet()
 			want := ref.match(context.Background(), tc.req, nil, true)
 			want2 := ref.match(context.Background(), tc.req, nil, true)
 			ref.mm.Close()
 
-			s := newDiffSide(keyedSet(n, models.LifetimePerTest))
+			s := newDiffSide(t, keyedSet(n, models.LifetimePerTest))
 			s.stageNoWindow()
 			s.ownWholeSet()
 			got := ""
@@ -663,7 +663,7 @@ func TestNoWindowExecuteServesWhatTheFullScanServesAcrossTheStatementIndex(t *te
 		live:  executeReq(7, "k2"),
 		want:  "served named ",
 	}} {
-		ref, fast := newDiffSide(c.pool), newDiffSide(c.pool)
+		ref, fast := newDiffSide(t, c.pool), newDiffSide(t, c.pool)
 		for _, s := range []*diffSide{ref, fast} {
 			s.stageNoWindow()
 			if c.owned {

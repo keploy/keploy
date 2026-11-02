@@ -107,7 +107,7 @@ func btReplayBothWays(t *testing.T, n int, eng func() *mocknoise.Engine, staging
 		eager bool
 		dctxs map[string]*wire.DecodeContext
 	}
-	sides := []*side{{diffSide: newDiffSide(pool), eager: true}, {diffSide: newDiffSide(pool)}}
+	sides := []*side{{diffSide: newDiffSide(t, pool), eager: true}, {diffSide: newDiffSide(t, pool)}}
 	ctxs := map[string]context.Context{}
 	for _, s := range sides {
 		defer s.mm.Close()
@@ -298,7 +298,7 @@ func TestAMissReportsTheRecordingOfItsRequestStrictRejected(t *testing.T) {
 	}
 	var got [2]string
 	for k, eager := range []bool{true, false} {
-		s := newDiffSide(pool)
+		s := newDiffSide(t, pool)
 		s.stageNoWindow()
 		got[k], _ = s.matchGate(context.Background(), floatExec(float32(0)), s.dctx, replayer.StrictEngineForTest(), eager)
 		s.mm.Close()
@@ -330,7 +330,7 @@ func TestAnExecuteThatScoresOneIsAnsweredByItsScore(t *testing.T) {
 	live := executeReq(50, "z")
 	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "c1")
 	for _, eager := range []bool{true, false} {
-		s := newDiffSide(pool)
+		s := newDiffSide(t, pool)
 		s.stageNoWindow()
 		got, _ := s.matchGate(ctx, live, s.dctx, nil, eager)
 		s.mm.Close()
@@ -365,7 +365,7 @@ func TestAMockReplayEndsItsWalkAtItsRequestsFirstRecording(t *testing.T) {
 	for _, ti := range btReplayedTests(len(tests)) {
 		calls = append(append(calls, tests[ti]...), between[ti]...)
 	}
-	s := newDiffSide(pool)
+	s := newDiffSide(t, pool)
 	defer s.mm.Close()
 	s.stage(models.BaseTime, time.Now())
 	dctx := &wire.DecodeContext{PreparedStatements: map[uint32]*mysql.StmtPrepareOkPacket{}, StmtIDToQuery: btSetStatements(false), NextStmtID: 100}

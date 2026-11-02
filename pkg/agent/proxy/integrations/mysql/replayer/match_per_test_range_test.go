@@ -85,7 +85,7 @@ func TestAWholeSetsCommandReadsTheTestsMocksOnlyUpToItsOwnRecording(t *testing.T
 	}
 	const commands = 80
 	for _, n := range sizes {
-		s := newDiffSide(keyedSet(n, models.LifetimePerTest))
+		s := newDiffSide(t, keyedSet(n, models.LifetimePerTest))
 		s.stageNoWindow()
 		s.ownWholeSet()
 		db := &rangingStore{MockManager: s.mm}
@@ -120,7 +120,7 @@ func TestAWholeSetServedThroughAPerTestRangerServesWhatTheFullScanServes(t *test
 	for _, strict := range []bool{false, true} {
 		owned := keyedSet(1000, models.LifetimePerTest)
 		pool := append(owned[:len(owned):len(owned)], diffPrepareMock("prepare-a", "c1", diffQueryA, 7, diffBase.Add(-time.Millisecond)))
-		ref, fast := newDiffSide(pool), newDiffSide(pool)
+		ref, fast := newDiffSide(t, pool), newDiffSide(t, pool)
 		var eng *mocknoise.Engine
 		if strict {
 			eng = replayer.StrictEngineForTest()

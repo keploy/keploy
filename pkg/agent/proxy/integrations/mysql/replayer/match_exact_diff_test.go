@@ -234,7 +234,7 @@ func newSetReplay(t *testing.T, preps []*models.Mock, tests [][]setCommand, outs
 		s.mm = proxy.NewMockManager(nil, nil, zap.NewNop())
 		s.mm.SetMocksWithWindow(nil, pool, models.BaseTime, time.Now().Add(time.Hour))
 	} else {
-		s.side = newDiffSide(pool)
+		s.side = newDiffSide(t, pool)
 		s.mm = s.side.mm
 	}
 	t.Cleanup(s.mm.Close)

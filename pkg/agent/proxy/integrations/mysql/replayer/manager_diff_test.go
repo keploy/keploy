@@ -2,6 +2,7 @@ package replayer_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -47,7 +48,7 @@ func TestFirstPassesServeWhatTheFullScanServes(t *testing.T) {
 			r := rand.New(rand.NewSource(seed))
 			windows := 4 + r.Intn(5)
 			pool := diffPool(r, windows)
-			ref, fast := newDiffSide(pool), newDiffSide(pool)
+			ref, fast := newDiffSide(t, pool), newDiffSide(t, pool)
 			eng := func() *schemanoise.Engine {
 				if strict {
 					return replayer.StrictEngineForTest()
@@ -353,7 +354,9 @@ type diffSide struct {
 	dctx     *wire.DecodeContext
 }
 
-func newDiffSide(pool []*models.Mock) *diffSide {
+func newDiffSide(t testing.TB, pool []*models.Mock) *diffSide {
+	t.Helper()
+	unwrittenSpecs(t, pool)
 	return &diffSide{
 		mm:       proxy.NewMockManager(nil, nil, zap.NewNop()),
 		pool:     pool,
@@ -366,10 +369,53 @@ func newDiffSide(pool []*models.Mock) *diffSide {
 	}
 }
 
-// stage stages the window [start, end] as the agent does in lax mode: fresh
-// copies, per-test mocks inside the window in the per-test tier and the rest
-// promoted to the session pool after the reusable mocks, each part in recorded
-// order, and per-test mocks already consumed left out.
+// stagedCopy is the copy of a pool mock that a staging hands the mock
+// manager: a TestModeInfo of its own, which staging and serving write (the
+// tree ID, the sort order, the filtered and pooled marks), and the
+// recording's Spec shared, as the mock manager re-stages a pooled mock itself
+// (mockOwner.own, Mock.ShallowCopy). The agent hands it fresh deep copies;
+// the two serve alike while nothing writes through a staged mock's Spec. The
+// matcher does not: it updates and consumes value copies of a mock and merges
+// noise into new maps. unwrittenSpecs holds every row that stages through a
+// diffSide to that.
+func stagedCopy(m *models.Mock) *models.Mock { return m.ShallowCopy() }
+
+// unwrittenSpecs fails t, once it ends, for every mock of pool whose Spec
+// (requests, responses, metadata, noise, variables) is not what it was when
+// t staged it first: a staging or serving wrote through a copy stagedCopy
+// shares, and a later staging would serve what it wrote.
+func unwrittenSpecs(t testing.TB, pool []*models.Mock) {
+	t.Helper()
+	digest := func(m *models.Mock) [sha256.Size]byte {
+		b, err := json.Marshal(m.Spec)
+		if err != nil {
+			t.Fatalf("encode the Spec of %s: %v", m.Name, err)
+		}
+		return sha256.Sum256(b)
+	}
+	was := make([][sha256.Size]byte, len(pool))
+	for i, m := range pool {
+		was[i] = digest(m)
+	}
+	t.Cleanup(func() {
+		changed := 0
+		for i, m := range pool {
+			if digest(m) != was[i] {
+				if changed++; changed <= 3 {
+					t.Errorf("the Spec of pool mock %s changed while staged: a staging or serving wrote through a shared copy (stagedCopy)", m.Name)
+				}
+			}
+		}
+		if changed > 3 {
+			t.Errorf("%d pool mocks' Specs changed in all", changed)
+		}
+	})
+}
+
+// stage stages the window [start, end] as the agent does in lax mode: copies
+// (stagedCopy), per-test mocks inside the window in the per-test tier and the
+// rest promoted to the session pool after the reusable mocks, each part in
+// recorded order, and per-test mocks already consumed left out.
 func (s *diffSide) stage(start, end time.Time) {
 	for _, st := range s.mm.GetConsumedMocks() {
 		if st.Usage == models.Deleted {
@@ -378,7 +424,7 @@ func (s *diffSide) stage(start, end time.Time) {
 	}
 	var perTest, reusable, promoted []*models.Mock
 	for _, m := range s.pool {
-		c := m.DeepCopy()
+		c := stagedCopy(m)
 		if c.TestModeInfo.Lifetime != models.LifetimePerTest || c.Spec.Metadata["type"] == "config" {
 			reusable = append(reusable, c)
 			continue

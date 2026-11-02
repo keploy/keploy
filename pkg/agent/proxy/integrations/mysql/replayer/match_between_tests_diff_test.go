@@ -185,7 +185,7 @@ func btStageStrictWindow(s *diffSide, start, end time.Time) {
 	}
 	var perTest, reusable []*models.Mock
 	for _, m := range s.pool {
-		c := m.DeepCopy()
+		c := stagedCopy(m)
 		if c.TestModeInfo.Lifetime != models.LifetimePerTest || c.Spec.Metadata["type"] == "config" {
 			reusable = append(reusable, c)
 			continue
@@ -283,7 +283,7 @@ func btReplaySet(t *testing.T, n int, engine bool, staging btStaging, timing btT
 			}
 		}
 	}
-	side := newDiffSide(pool)
+	side := newDiffSide(t, pool)
 	defer side.mm.Close()
 	if staging != btMockReplay {
 		seedWindows(side.mm, len(tests))
