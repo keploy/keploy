@@ -321,21 +321,41 @@ func listedAt(t *testing.T, port int) []string {
 
 // An unlisted port is one the socket tables list nothing at, below the
 // range a bind to port 0 is given a port from, held at TCP at every address
-// for the test's life and free at UDP.
+// for the test's life and free at UDP. A socket that names it and sets no
+// option, as a search for an unlisted port in another test binary does, is
+// refused it at loopback, at every IPv4 address, at [::1] and at [::]. A
+// listener made by net.Listen, as the test's or its code's is, opens beside
+// the hold at each of those addresses in turn and answers a dial; once it
+// closes, a dial is refused again.
 func TestAnUnlistedPortIsInNoTableHeldAtTCPAndBelowTheEphemeralRange(t *testing.T) {
-	port := UnlistedPort(t)
+	p := UnlistedPort(t)
+	port := strconv.Itoa(p)
 	b, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
 	require.NoError(t, err)
 	first, err := strconv.Atoi(strings.Fields(string(b))[0])
 	require.NoError(t, err)
-	require.Less(t, port, first, "below the range a bind to port 0 is given a port from")
-	require.GreaterOrEqual(t, port, 1024)
-	require.Empty(t, listedAt(t, port), "no socket is listed at the port")
-	for _, b := range ipv4Binds(strconv.Itoa(port)) {
-		_, err := net.Listen(b.network, b.addr)
-		require.ErrorIs(t, err, syscall.EADDRINUSE, "a listener at %s %s", b.network, b.addr)
+	require.Less(t, p, first, "below the range a bind to port 0 is given a port from")
+	require.GreaterOrEqual(t, p, 1024)
+	require.Empty(t, listedAt(t, p), "no socket is listed at the port")
+	_, dials := foreignBinds(port)
+	addrs := []string{net.JoinHostPort("127.0.0.1", port), net.JoinHostPort("0.0.0.0", port)}
+	if len(dials) > 1 {
+		addrs = append(addrs, net.JoinHostPort("::1", port), net.JoinHostPort("::", port))
 	}
-	pc, err := net.ListenPacket("udp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	requireDialsRefused(t, dials, "before a listener opens")
+	for _, a := range addrs {
+		require.ErrorIs(t, plainBind(t, a), syscall.EADDRINUSE, "a bind with no option at %s", a)
+	}
+	for _, a := range addrs {
+		ln, err := net.Listen("tcp", a)
+		require.NoError(t, err, "a listener at %s", a)
+		c, err := net.Dial("tcp", ln.Addr().String())
+		require.NoError(t, err, "a dial to the listener at %s", a)
+		_ = c.Close()
+		require.NoError(t, ln.Close())
+		requireDialsRefused(t, dials, "after the listener at "+a+" closed")
+	}
+	pc, err := net.ListenPacket("udp4", net.JoinHostPort("127.0.0.1", port))
 	require.NoError(t, err, "the port is free at UDP")
 	require.NoError(t, pc.Close())
 }
