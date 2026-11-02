@@ -1144,9 +1144,26 @@ func (h *HTTP) variableMember(ctx context.Context, input *req, scope varScope, h
 // A bind refused over a binding the check read (varHit.read) is no race but
 // a disagreement of the check and the table: a problem, never a retry, which
 // would be refused again forever.
-func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrations.MockMemDb) (served *models.Mock, problem *varProblem, retry bool, err error) {
+func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrations.MockMemDb) (served *models.Mock, problem *varProblem, retry varRetry, err error) {
 	return h.serveVariablesBy(hit, mockDb, func(m *models.Mock) bool { return h.updateMock(ctx, m, mockDb, nil) })
 }
+
+// varRetry is why serveVariablesBy asks for the call to be checked again.
+type varRetry uint8
+
+const (
+	// varNoRetry: the call was served, or has a problem or an error.
+	varNoRetry varRetry = iota
+	// varRecheck: what the check read moved (a test began, another
+	// connection bound a variable or took a value): the next check reads
+	// it as it is now, and the hit may answer it again.
+	varRecheck
+	// varRefused: the store will not let this call take the hit's
+	// recording (its consume failed, or the store refuses the call the
+	// background's recording): checking the call again must leave the
+	// recording out.
+	varRefused
+)
 
 // serveVariablesBy is serveVariables with consume taking the mock from the
 // mock store (false: another connection took it first): the HTTP parser's
@@ -1155,17 +1172,17 @@ func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrati
 // one of the open test's own) binds nothing and is refused as at its consume
 // door: the call is checked again, and the recording's variables stay
 // unbound for the call it is the recording of.
-func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, consume func(*models.Mock) bool) (served *models.Mock, problem *varProblem, retry bool, err error) {
+func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, consume func(*models.Mock) bool) (served *models.Mock, problem *varProblem, retry varRetry, err error) {
 	if integrations.RefusesAnswer(mockDb, hit.mock) {
-		return nil, nil, true, nil
+		return nil, nil, varRefused, nil
 	}
 	loaded, err := withResponse(hit.mock)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, varNoRetry, err
 	}
 	rendered, problem := h.renderAnswers(loaded, hit, hit.table)
 	if problem != nil {
-		return nil, problem, false, nil
+		return nil, problem, varNoRetry, nil
 	}
 	if bad, with, stale, ok := hit.table.BindAll(hit.gen, hit.binds); !ok {
 		if !stale && hit.read(with) {
@@ -1176,18 +1193,18 @@ func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, cons
 				mock: hit.mock.Name, name: bad.Name, place: bad.Place, expected: "a value variable " + with.Name + " does not hold", actual: bad.Value,
 				why:  fmt.Sprintf("this call binds variable %s at %s to %q, which the test's variables refuse beside variable %s (bound at %s %s to %q), though the check of the call let it", bad.Name, bad.Place, bad.Value, with.Name, with.Mock, with.Place, with.Value),
 				next: "the check of the call and its bind disagree, which is a keploy bug: report it with this test set",
-			}, false, nil
+			}, varNoRetry, nil
 		}
-		return nil, nil, true, nil
+		return nil, nil, varRecheck, nil
 	}
 	for _, b := range hit.binds {
 		h.Logger.Debug("variable bound", zap.String("variable", b.Name), zap.String("value", b.Value),
 			zap.String("recorded", b.Recorded), zap.String("mock", b.Mock), zap.String("place", b.Place))
 	}
 	if !consume(hit.mock) {
-		return nil, nil, true, nil
+		return nil, nil, varRefused, nil
 	}
-	return rendered, nil, false, nil
+	return rendered, nil, varNoRetry, nil
 }
 
 // read reports whether b was in force when the call was checked, as the check
@@ -1591,17 +1608,17 @@ func routePathPlaces(request *http.Request, closest *models.Mock, pool []*models
 // exactOnly answers a call whose variables did not hold in the recording it
 // fit, with a recording of this very call (a mock without variables), if one
 // is in the pool: the strict comparison every other mock is matched with
-// (strictServe, row S1). No lenient pass runs. retry is true when another
-// connection took the mock first.
-func (h *HTTP) exactOnly(ctx context.Context, input *req, pool []*models.Mock, mockDb integrations.MockMemDb, headerNoise, userBodyNoise map[string][]string, urlNoise []string, statefulMocks bool) (*models.Mock, bool, bool, error) {
+// (strictServe, row S1). No lenient pass runs. refused is the recording
+// whose claim failed (strictServeFits).
+func (h *HTTP) exactOnly(ctx context.Context, input *req, pool []*models.Mock, mockDb integrations.MockMemDb, headerNoise, userBodyNoise map[string][]string, urlNoise []string, statefulMocks bool) (served *models.Mock, ok bool, refused *models.Mock, err error) {
 	if len(pool) == 0 {
-		return nil, false, false, nil
+		return nil, false, nil, nil
 	}
-	served, _, retry, err := h.strictServe(ctx, input, pool, pool, mockDb, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise), statefulMocks)
-	if err != nil || retry || served == nil {
-		return nil, false, retry, err
+	served, _, refused, err = h.strictServe(ctx, input, pool, pool, mockDb, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise), statefulMocks)
+	if err != nil || refused != nil || served == nil {
+		return nil, false, refused, err
 	}
-	return served, true, false, nil
+	return served, true, nil, nil
 }
 
 // asRecordedForDiff is the live call to diff against m, a mock with variables

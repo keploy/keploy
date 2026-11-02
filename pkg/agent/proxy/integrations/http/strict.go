@@ -212,20 +212,20 @@ func sameDestinationMocks(live destination, mocks []*models.Mock) []*models.Mock
 // with each of its recordings in turn (strictCursorPick). There is no lenient
 // pass, no closest match and no fuzzy fallback (design v14 row S1): a call
 // no recording is answers nothing, and the miss names what differs from the
-// closest recording (diag.closest, diag.differs). retry is true when another
-// connection took the recording first; comparedPool is the set the miss
+// closest recording (diag.closest, diag.differs). refused is the recording
+// whose claim failed (strictServeFits); comparedPool is the set the miss
 // report says was compared.
-func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool []*models.Mock, mockDb integrations.MockMemDb, n strictNoise, statefulMocks bool) (served *models.Mock, diag *matchDiag, retry bool, err error) {
+func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool []*models.Mock, mockDb integrations.MockMemDb, n strictNoise, statefulMocks bool) (served *models.Mock, diag *matchDiag, refused *models.Mock, err error) {
 	live := liveDestination(ctx, input)
 	fits, err := strictFits(ctx, input, live, pool, n)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, nil, err
 	}
 	if len(fits) == 0 {
 		// A miss: every recording is compared, for the closest.
 		_, near, err := strictCompare(ctx, input, live, pool, n)
 		if err != nil {
-			return nil, nil, false, err
+			return nil, nil, nil, err
 		}
 		closest, closestDiffs, routeMatched := near.mock, near.diffs, near.route
 		phase := models.MatchPhaseStrict
@@ -243,22 +243,22 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 		if closest != nil && routeMatched {
 			diag.schemaMatched = []*models.Mock{closest}
 		}
-		return nil, diag, false, nil
+		return nil, diag, nil, nil
 	}
-	served, answered, retry, err := h.strictServeFits(ctx, input, live, fits, ownedBy(ctx), mockDb, n, statefulMocks)
+	served, answered, refused, err := h.strictServeFits(ctx, input, live, fits, ownedBy(ctx), mockDb, n, statefulMocks)
 	if answered != nil {
-		return nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), pool: comparedPool, live: &live, answered: answered}, false, nil
+		return nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), pool: comparedPool, live: &live, answered: answered}, nil, nil
 	}
-	return served, nil, retry, err
+	return served, nil, refused, err
 }
 
 // strictServeFits serves the live request with the first of fits, the
 // recordings that are this very call in the pool's order, or with each in
 // turn for a request recorded several times (strictCursorPick), own telling
 // whose each is. answered is a stateful walk's miss (every recording of it
-// has answered); retry is true when another connection took the recording
-// first.
-func (h *HTTP) strictServeFits(ctx context.Context, input *req, live destination, fits []*models.Mock, own func(*models.Mock) bool, mockDb integrations.MockMemDb, n strictNoise, statefulMocks bool) (served *models.Mock, answered *answeredSequence, retry bool, err error) {
+// has answered); refused is the recording picked whose claim failed (another
+// connection took it first, or the store will not let this call take it).
+func (h *HTTP) strictServeFits(ctx context.Context, input *req, live destination, fits []*models.Mock, own func(*models.Mock) bool, mockDb integrations.MockMemDb, n strictNoise, statefulMocks bool) (served *models.Mock, answered *answeredSequence, refused *models.Mock, err error) {
 	// A stateful walk is fixed by every recording the store stages that is
 	// this very call, those spent included (servedWalk).
 	member := func(m *models.Mock) bool {
@@ -266,19 +266,19 @@ func (h *HTTP) strictServeFits(ctx context.Context, input *req, live destination
 	}
 	picked, commit, answered := h.strictCursorPick(fits, own, mockDb, statefulMocks, member)
 	if answered != nil {
-		return nil, answered, false, nil
+		return nil, answered, nil, nil
 	}
 	served, claimed, err := h.claim(ctx, picked, mockDb, nil, nil)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, nil, err
 	}
 	if !claimed {
-		return nil, nil, true, nil
+		return nil, nil, picked, nil
 	}
 	if commit != nil {
 		commit()
 	}
-	return served, nil, false, nil
+	return served, nil, nil, nil
 }
 
 // nearest is a recording the strict comparison found closest to a call: the

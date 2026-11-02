@@ -64,3 +64,50 @@ func TestAPidlessBeginServesALaxSessionMockAsWithNoBegin(t *testing.T) {
 		}
 	}
 }
+
+// A mock whose lifetime is its connection's (a MySQL statement's lifecycle
+// in a recording from before its recorder stated lifetimes, with the
+// connection it was recorded on) sits in the per-test region as a lax
+// session mock does, and a claim of one looks in the reusable tier as a
+// session mock's does. The row files an HTTP recording with that lifetime,
+// so the real HTTP claim reads it: a pid-less begin answers GET /c as no
+// begin does. The calls wait for the answer, never a timer.
+func TestAPidlessBeginServesAConnectionMockAsWithNoBegin(t *testing.T) {
+	served := func(t *testing.T, begin bool) []string {
+		conn := stageMock("conn-a", "/c", stageT0)
+		conn.Spec.Metadata["connID"] = "7"
+		conn.TestModeInfo = models.TestModeInfo{Lifetime: models.LifetimeConnection, LifetimeDerived: true}
+		a, p := newStageReplay(t, []*models.Mock{conn, laxSessionMock("mock-b", "/q", stageT0.Add(3*time.Second))},
+			[]*models.Mock{stageSessionMock("cfg", "/cfg")},
+			map[string][]string{"TestA": {"conn-a"}, "TestB": {"mock-b"}})
+		if begin {
+			scopeBegin(t, a, "TestB")
+			defer scopeEnd(t, a, "TestB")
+		}
+		return []string{answer(t, p.mm, "/c"), answer(t, p.mm, "/c")}
+	}
+	want := served(t, false)
+	if want[0] != "conn-a" || want[1] != "conn-a" {
+		t.Fatalf("no begin: GET /c twice answered %q; want conn-a both times", want)
+	}
+	if got := served(t, true); got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("pid-less begin of TestB: GET /c twice answered %q; want %q, as with no begin", got, want)
+	}
+}
+
+// The per-test region may hold a nil entry (the filters pass over one): the
+// split keeps it where it was and files only the session and connection
+// mocks in the reusable tier.
+func TestReusableByLifetimeFilesOnlySessionAndConnectionMocks(t *testing.T) {
+	session := laxSessionMock("s", "/q", stageT0)
+	conn := stageMock("c", "/c", stageT0)
+	conn.TestModeInfo = models.TestModeInfo{Lifetime: models.LifetimeConnection}
+	own := stageMock("own", "/o", stageT0)
+	perTest, reusable := reusableByLifetime([]*models.Mock{nil, session, own, conn})
+	if len(perTest) != 2 || perTest[0] != nil || perTest[1] != own {
+		t.Fatalf("per-test %v; want [nil own]", perTest)
+	}
+	if len(reusable) != 2 || reusable[0] != session || reusable[1] != conn {
+		t.Fatalf("reusable %v; want [s c]", reusable)
+	}
+}

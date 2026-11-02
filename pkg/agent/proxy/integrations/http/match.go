@@ -196,15 +196,19 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 	reread := false
 	// refused: the recordings a claim of this call's failed on (claim: the
 	// store no longer holds that copy where its claim looks, as when another
-	// call took it first). The loop ends by construction: each pass returns,
-	// or claims a candidate, or adds the candidate whose claim failed to
-	// refused, which every later pass's candidates leave out. So no pass
-	// retries a recording it failed to claim, and the passes are bounded by
-	// the copies the store hands out; it hands out a new one only when another
-	// call served the recording or the pool was staged again. Before, a store
-	// that kept handing out a recording it would not let a claim take (a
-	// session mock staged in the per-test tier) spun the call at full CPU,
-	// never answered.
+	// call took it first, or refuses this call the recording). The loop ends
+	// by construction: each pass returns, or claims a candidate, or adds the
+	// candidate whose claim failed to refused, which every later pass's
+	// candidates leave out, or reads again what moved under it since its read
+	// (the indexed read above, once; a test that began, scope.moved; another
+	// connection's bind, varRecheck), which moves again only on another such
+	// event of the run, never by this pass. So no pass retries a recording it
+	// failed to claim, and the passes are bounded by the copies the store
+	// hands out; it hands out a new one only when another call served the
+	// recording or the pool was staged again. Before, a store that kept
+	// handing out a recording it would not let a claim take (a session mock
+	// staged in the per-test tier) spun the call at full CPU, never
+	// answered.
 	var refused map[*models.Mock]struct{}
 	refuse := func(m *models.Mock) {
 		if refused == nil {
@@ -330,7 +334,11 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 					if err != nil {
 						return false, nil, nil, err
 					}
-					if retry {
+					if retry == varRefused {
+						refuse(hit.mock)
+						continue
+					}
+					if retry == varRecheck {
 						continue
 					}
 					if problem != nil {
@@ -350,11 +358,12 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 					// A recording fit this call but its variables did not
 					// hold: only an exact recording of this very call may
 					// still answer it, never a lenient pass.
-					served, ok, retry, err := h.exactOnly(ctx, input, rest, mockDb, headerNoise, userBodyNoise, urlNoise, statefulMocks)
+					served, ok, refusedM, err := h.exactOnly(ctx, input, rest, mockDb, headerNoise, userBodyNoise, urlNoise, statefulMocks)
 					if err != nil {
 						return false, nil, nil, err
 					}
-					if retry {
+					if refusedM != nil {
+						refuse(refusedM)
 						continue
 					}
 					if ok {
@@ -376,11 +385,12 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		// strict_compare.go): no lenient pass, no closest match and no fuzzy
 		// fallback below (design v14 row S1).
 		if provenswitch.On() {
-			served, diag, retry, err := h.strictServe(ctx, input, unfilteredMocks, comparedPool, mockDb, strict, statefulMocks)
+			served, diag, refusedM, err := h.strictServe(ctx, input, unfilteredMocks, comparedPool, mockDb, strict, statefulMocks)
 			if err != nil {
 				return false, nil, nil, err
 			}
-			if retry {
+			if refusedM != nil {
+				refuse(refusedM)
 				continue
 			}
 			if served == nil {

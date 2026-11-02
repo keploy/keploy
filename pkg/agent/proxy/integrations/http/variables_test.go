@@ -629,8 +629,12 @@ func TestVariables_ABindRefusedOverWhatTheCheckReadIsAMiss(t *testing.T) {
 		if err != nil || served != nil || consumed {
 			t.Fatalf("%s: served %v, consumed %v, err %v", c.name, served, consumed, err)
 		}
-		if retry != c.retry {
-			t.Fatalf("%s: retry %v, want %v (problem %+v)", c.name, retry, c.retry, problem)
+		want := varNoRetry
+		if c.retry {
+			want = varRecheck // another connection's bind: checked again, the hit kept
+		}
+		if retry != want {
+			t.Fatalf("%s: retry %v, want %v (problem %+v)", c.name, retry, want, problem)
 		}
 		if c.retry {
 			if problem != nil {
@@ -1234,10 +1238,10 @@ func TestVariables_ConcurrentCreatesOfOneShapeAreEachAnswered(t *testing.T) {
 	if hx.mock != first || hy.mock != first {
 		t.Fatalf("both checked before either bound should pick the first recording: %s, %s", hx.mock.Name, hy.mock.Name)
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hx, db); err != nil || p != nil || retry {
+	if _, p, retry, err := h.serveVariables(ctx, hx, db); err != nil || p != nil || retry != varNoRetry {
 		t.Fatalf("x: problem %+v retry %v err %v", p, retry, err)
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hy, db); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hy, db); err != nil || p != nil || retry != varRecheck {
 		t.Fatalf("y's collision should be checked again, not failed: problem %+v retry %v err %v", p, retry, err)
 	}
 	ok, stub, diag := matchVar(t, h, db, y)
@@ -1262,7 +1266,7 @@ func TestVariables_AStragglerBindsNothingInTheNextTest(t *testing.T) {
 		t.Fatal("the straggler should fit")
 	}
 	db.table.Reset() // the next test begins
-	if _, p, retry, err := h.serveVariables(ctx, hits[0], db); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hits[0], db); err != nil || p != nil || retry != varRecheck {
 		t.Fatalf("a straggler should be checked again: problem %+v retry %v err %v", p, retry, err)
 	}
 	if got := db.table.Snapshot(); len(got) != 0 {
@@ -1289,7 +1293,7 @@ func TestVariables_AMockAnotherCallTookIsCheckedAgain(t *testing.T) {
 	if ok, _, _ := matchVar(t, h, db, read); !ok {
 		t.Fatal("the read-back should match")
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hits[0], db); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hits[0], db); err != nil || p != nil || retry != varRefused {
 		t.Fatalf("a mock another call took: problem %+v retry %v err %v", p, retry, err)
 	}
 	if ok, _, _ := matchVar(t, h, db, read); ok {

@@ -37,6 +37,20 @@ import (
 // and ends with tests. Without it the match is as before.
 func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.Payload, error) {
 	serving := integrations.ServingIn(ctx, mockDb)
+	// refused: the recordings a claim of this exchange's failed on (another
+	// connection took that copy first, or the store will not let this call
+	// take it). Each pass returns, or claims a recording, or adds the one
+	// whose claim failed to refused, which every later pass leaves out: the
+	// passes end with the copies the store hands out, never retrying one
+	// claim. Before, a store that kept handing out a recording it refused
+	// spun the exchange at full CPU, never answered.
+	var refused map[*models.Mock]struct{}
+	refuse := func(m *models.Mock) {
+		if refused == nil {
+			refused = make(map[*models.Mock]struct{})
+		}
+		refused[m] = struct{}{}
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -52,6 +66,9 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 
 			for _, mock := range mocks {
 				if mock.Kind != "Generic" {
+					continue
+				}
+				if _, out := refused[mock]; out {
 					continue
 				}
 				if mock.TestModeInfo.IsFiltered {
@@ -89,6 +106,7 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 				isUpdated := serving.UpdateUnFilteredMock(filteredMocks[index], &updatedMock)
 				if !isUpdated {
+					refuse(filteredMocks[index])
 					continue
 				}
 				stateServed(ctx, filteredMocks[index], reqBuff)
@@ -109,6 +127,7 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 				isUpdated := serving.UpdateUnFilteredMock(unfilteredMocks[index], &updatedMock)
 				if !isUpdated {
+					refuse(unfilteredMocks[index])
 					continue
 				}
 				stateServed(ctx, unfilteredMocks[index], reqBuff)

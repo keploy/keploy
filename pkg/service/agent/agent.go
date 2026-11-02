@@ -2319,6 +2319,10 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 
 	// Apply filtering based on parameters
 	if params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping) {
+		// Under the proven switch a begin is served exactly, never staged by
+		// its mapping (stageScope is switch-off only), and the exact view
+		// settles the claim of a test's own recording by its name, not by
+		// its tier: its pool is left as it was.
 		perTest, reusable := originalFiltered, []*models.Mock(nil)
 		if !provenswitch.On() {
 			perTest, reusable = reusableByLifetime(originalFiltered)

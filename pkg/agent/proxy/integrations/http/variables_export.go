@@ -124,7 +124,7 @@ func (h *HTTP) VariableMatch(ctx context.Context, scope VariableScope, call Vari
 	switch {
 	case err != nil:
 		return VariableResult{}, err
-	case retry:
+	case retry != varNoRetry:
 		return VariableResult{Outcome: VariableRetry}, nil
 	case problem != nil:
 		if scope.Moved() {

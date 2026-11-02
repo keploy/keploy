@@ -322,8 +322,8 @@ func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrati
 				return nil, false, nil
 			}
 			served, problem, retry, err := h.serveVariables(ctx, hit, db)
-			if err != nil || retry || problem != nil {
-				return nil, retry, err
+			if err != nil || retry != varNoRetry || problem != nil {
+				return nil, retry != varNoRetry, err
 			}
 			if commitCursor != nil {
 				commitCursor()
@@ -351,11 +351,11 @@ func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrati
 	if len(fits) == 0 {
 		return nil, false, nil
 	}
-	served, answered, retry, err := h.strictServeFits(ctx, input, live, fits, own, db, n, statefulMocks)
+	served, answered, refused, err := h.strictServeFits(ctx, input, live, fits, own, db, n, statefulMocks)
 	if answered != nil {
 		return nil, false, err
 	}
-	return served, retry, err
+	return served, refused != nil, err
 }
 
 // verifyIndexedVariables compares the recordings the variable pass reads for
