@@ -651,11 +651,9 @@ func (a *Agent) noteScopeRandomDone(name string, pid int, random string) {
 
 // noteScopeInstance records, under the proven wire, that test name was begun
 // by the test worker with keploy instance inst, for the window its end
-// closes: record charges it only that worker's calls. inst 0 notes nothing.
+// closes: record charges it only that worker's calls. inst 0: the test of a
+// run of one worker, whose window holds the calls of no worker.
 func (a *Agent) noteScopeInstance(name string, inst uint32) {
-	if inst == 0 {
-		return
-	}
 	a.scopeMu.Lock()
 	defer a.scopeMu.Unlock()
 	if a.scopeMeta == nil {

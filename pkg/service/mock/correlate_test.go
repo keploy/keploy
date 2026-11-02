@@ -157,9 +157,9 @@ func TestCorrelateScopesByWorkerInstance(t *testing.T) {
 		"only the call from no worker made while workers' tests were open is named, with those tests")
 
 	cases := []capturedMock{{name: "both", ts: ts(20)}, {name: "only-a", ts: ts(12)}, {name: "only-solo", ts: ts(55)}}
-	byCase := correlate(windows, cases, false)
-	require.Equal(t, []string{"only-a"}, names(byCase["a"]))
-	require.Equal(t, []string{"only-solo"}, names(byCase["solo"]))
+	byCase := correlateCases(windows, nil, cases, nil)
+	require.Equal(t, []string{"only-a"}, byCase["a"].Cases, "a request inside one worker's test is that test's, though it carries no instance")
+	require.Equal(t, []string{"only-solo"}, byCase["solo"].Cases)
 	require.Len(t, byCase, 2, "a request inside two workers' tests is neither's")
 	require.Equal(t, "seq", testAt(windows, 0, 0, ts(28)), "a call from no worker is a run of one worker's test's")
 	require.Equal(t, "", testAt(windows, 0, 0, ts(20)), "a call from no worker is no worker's test's")
