@@ -590,6 +590,23 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// that passed.
 		runnerExit, failedBy = -1, FailedByKeploy
 	}
+	// A test keploy refused at its begin fails the run, whatever the test
+	// command exits: a harness that logs the refusal and runs the test
+	// anyway is served what the refusal could not narrow, so its pass proves
+	// nothing. A failing test command, which the refusal may be the cause
+	// of, keeps its exit code; a passing one becomes 1.
+	if refused := beginRefusals(all); len(refused) > 0 {
+		for _, w := range refused {
+			m.logger.Error("replay failed: keploy refused a test at its begin, so the test fails whatever its harness did next",
+				zap.String("mock-set", name), zap.String("test", w.Name), zap.Uint32("pid", w.PID), zap.String("reason", w.BeginRefused))
+		}
+		if utils.ErrCode == 0 {
+			utils.ErrCode = 1
+		}
+		if failedBy != FailedByKeploy {
+			failedBy = FailedByBeginRefused
+		}
+	}
 	// What the run compares is short of requests the agent captured, or,
 	// under the proven switch, the agent did not finish checking the run's
 	// tests (settleRun: its end-of-run hook refused, or the agent was gone),

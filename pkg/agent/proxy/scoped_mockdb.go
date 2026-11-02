@@ -101,6 +101,9 @@ type workerView struct {
 	allow    map[string]struct{}
 	universe map[string]struct{}
 	scope    string // the worker's current scope ("" for none); keys stateful cursors
+	// refused is why keploy refused the worker's open test at its begin
+	// (Proxy.RefuseWorker): every read of the view is refused with it.
+	refused string
 	// version is the proxy's scope sequence at the latest change to anything
 	// this view is made from: the scope of a worker on its chain, or the
 	// mapped universe. It only grows, and never returns to an earlier value.
@@ -152,6 +155,9 @@ func (s *scopedMockDb) keep(mocks []*models.Mock, err error) ([]*models.Mock, er
 		return without(shown, s.consumed(workerView{})), nil
 	}
 	v := s.current()
+	if v.refused != "" {
+		return nil, v.refusal()
+	}
 	gone := s.consumed(v)
 	if v.allow == nil || v.universe == nil {
 		return without(mocks, gone), nil
@@ -695,6 +701,9 @@ func (s *scopedMockDb) RangePerTestMocksInWindow(fn func(*models.Mock) bool) err
 		return nil
 	}
 	v := s.current()
+	if v.refused != "" {
+		return v.refusal()
+	}
 	gone := s.consumed(v)
 	return r.RangePerTestMocksInWindow(func(mk *models.Mock) bool {
 		return !visibleIn(v, mk) || (gone != nil && gone(mk.Name)) || fn(mk)
@@ -735,6 +744,9 @@ func (s *scopedMockDb) RangeSessionMocksWithKey(ix *integrations.MockIndex, key 
 			return r.RangeSessionMocksWithKey(ix, key, fn)
 		}
 		v := s.current()
+		if v.refused != "" {
+			return v.refusal()
+		}
 		gone := s.consumed(v)
 		shown := func(mk *models.Mock) bool { return visibleIn(v, mk) }
 		if s.live {
@@ -1111,6 +1123,32 @@ func (p *Proxy) SetWorkerScope(pid uint32, names []string) {
 	consumeRetained(ended)
 }
 
+// RefuseWorker refuses every read of a connection worker pid, or a process
+// it started, opened while it is registered, until its test ends
+// (ClearWorkerScope) or it registers its next one: keploy refused the
+// worker's test at its begin, for the reason why, and a harness that runs
+// the test anyway is never served the whole pool. A view made for the
+// worker's previous test follows it, so it is refused too.
+func (p *Proxy) RefuseWorker(pid uint32, why string) {
+	if pid == 0 {
+		return
+	}
+	p.workerScopeMu.Lock()
+	if p.workerScope == nil {
+		p.workerScope = make(map[uint32]workerScopeEntry)
+	}
+	ended := p.takeRetainedLocked(p.workerScope[pid].scope)
+	at := p.stampWorkerLocked(pid)
+	p.workerScope[pid] = workerScopeEntry{refused: why, scope: fmt.Sprintf("w%d.%d", pid, at)}
+	p.workerScopeMu.Unlock()
+	consumeRetained(ended)
+}
+
+// refusal is the error every read of a view of a refused worker returns.
+func (v workerView) refusal() error {
+	return fmt.Errorf("keploy serves no recording to a call of a test it refused at its begin, until that test ends: %s", v.refused)
+}
+
 // retainedUse is a per-test recording of a stateful dependency a worker's
 // scope was served and kept for the scope's repeats of the request (a cursor
 // mock, models.ConsumeCursorSaturate), and the store that holds it.
@@ -1255,6 +1293,9 @@ func (s *scopedMockDb) Spent(m *models.Mock) bool {
 type workerScopeEntry struct {
 	allow map[string]struct{}
 	scope string
+	// refused, set by RefuseWorker, is why keploy refused the test at its
+	// begin; allow is nil then.
+	refused string
 }
 
 // stampWorkerLocked records that pid's scope changed now, and returns the
@@ -1357,7 +1398,7 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 		return mgr // fast path: no worker scoped — no /proc walk, exact old behavior
 	}
 	chain := ancestorChain(kpid)
-	if p.workerViewFor(chain).allow == nil {
+	if v := p.workerViewFor(chain); v.allow == nil && v.refused == "" {
 		return mgr
 	}
 	p.workerScopeMu.Lock()
@@ -1401,8 +1442,8 @@ func (p *Proxy) workerViewFor(chain []uint32) workerView {
 		// Every worker on the chain counts, not only the nearest: one that
 		// ended its test changed this view as much as one that began.
 		v.version = max(v.version, p.workerScopeAt[pid])
-		if e, ok := p.workerScope[pid]; ok && v.allow == nil {
-			v.allow, v.scope = e.allow, e.scope
+		if e, ok := p.workerScope[pid]; ok && v.allow == nil && v.refused == "" {
+			v.allow, v.scope, v.refused = e.allow, e.scope, e.refused
 		}
 	}
 	return v

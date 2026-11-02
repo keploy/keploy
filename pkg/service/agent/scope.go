@@ -90,11 +90,16 @@ func (a *Agent) beginScopeAt(ctx context.Context, name string, pid int, at time.
 	}
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
 		if a.pidCannotScope(name, pid) {
-			// The test fails whatever its harness does with the refusal: a
-			// harness that runs it anyway is served the whole pool. Refused
-			// before the clock moves, so there is nothing to give back.
-			a.noteScopeFailed(name, pid, at)
-			return fmt.Errorf("%s began with the pid %d: %w.\n%s", name, pid, ErrPidBeginWithoutMarks, PidBeginRemedy)
+			// The test fails, and the replay with it, whatever its harness
+			// does with the refusal. A harness that runs it anyway is refused
+			// every call of the worker's that keploy can tell (RefuseWorker)
+			// until the test's end, which clears it (restorePool). Only with
+			// the switch off, where no begin moves the clock (testClock), so
+			// there is nothing to give back.
+			err := fmt.Errorf("%s began with the pid %d: %w.\n%s", name, pid, ErrPidBeginWithoutMarks, PidBeginRemedy)
+			a.noteScopeFailed(name, pid, at, err)
+			a.RefuseWorker(uint32(pid), err.Error())
+			return err
 		}
 		took, lost, err := a.beginTestClock(ctx, name, pid)
 		if lost.key.name != "" {
@@ -103,8 +108,9 @@ func (a *Agent) beginScopeAt(ctx context.Context, name string, pid int, at time.
 		if err != nil {
 			// The test fails whatever its harness does with the refusal: it
 			// cannot run on its recording's clock.
-			a.noteScopeFailed(name, pid, at)
-			return fmt.Errorf("keploy could not move the clock to when %s began in its recording: %w", name, err)
+			err = fmt.Errorf("keploy could not move the clock to when %s began in its recording: %w", name, err)
+			a.noteScopeFailed(name, pid, at, err)
+			return err
 		}
 		if onClock != nil {
 			onClock()
@@ -253,7 +259,7 @@ func (a *Agent) refuseBegin(ctx context.Context, name string, pid int, at time.T
 		return err
 	}
 	a.withdrawWindow(name, pid)
-	a.noteScopeFailed(name, pid, at)
+	a.noteScopeFailed(name, pid, at, err)
 	return errors.Join(err, a.endTestClock(ctx, name, pid))
 }
 
@@ -315,7 +321,7 @@ func (a *Agent) failLostScope(ctx context.Context, lost lostScope, at time.Time)
 		}
 	}
 	if len(open) == 0 {
-		a.noteScopeFailed(k.name, int(k.pid), at)
+		a.noteScopeFailed(k.name, int(k.pid), at, nil)
 	}
 }
 
@@ -633,13 +639,20 @@ func (a *Agent) noteScopeNotRun(name string, pid int, at time.Time, outcome stri
 	a.scopeMu.Unlock()
 }
 
-// noteScopeFailed records a test keploy failed at its begin, as a window with
-// no extent and the failed verdict, so the replay's outcome and receipt count
-// it failed even when its harness ignores the refusal and runs it.
-func (a *Agent) noteScopeFailed(name string, pid int, at time.Time) {
+// noteScopeFailed records a test keploy failed, as a window with no extent
+// and the failed verdict, so the replay's outcome and receipt count it failed
+// even when its harness ignores the refusal and runs it. refused is why
+// keploy refused the test at its begin (models.ScopeWindow.BeginRefused),
+// which fails the replay whatever the test's runner exits; nil for a test
+// keploy failed after it began (failLostScope).
+func (a *Agent) noteScopeFailed(name string, pid int, at time.Time, refused error) {
 	t := boundaryTime(at)
+	w := models.ScopeWindow{Name: name, Start: t, End: t, PID: uint32(pid), Outcome: models.ScopeOutcomeFailed}
+	if refused != nil {
+		w.BeginRefused = refused.Error()
+	}
 	a.scopeMu.Lock()
-	a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: t, End: t, PID: uint32(pid), Outcome: models.ScopeOutcomeFailed})
+	a.scopeWindows = append(a.scopeWindows, w)
 	a.scopeMu.Unlock()
 }
 

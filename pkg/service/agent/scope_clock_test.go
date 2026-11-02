@@ -303,6 +303,7 @@ type workerPool struct {
 	coreAgent.Proxy
 	settledProxy
 	narrowed, cleared []uint32
+	refused           []uint32
 	mu                sync.Mutex
 	exactTest         string
 	// exact is what exact serving put in, in order: "test <name>" for a
@@ -320,6 +321,7 @@ func (p *workerPool) SetMocks(context.Context, []*models.Mock, []*models.Mock) e
 }
 func (p *workerPool) SetWorkerScope(pid uint32, _ []string) { p.narrowed = append(p.narrowed, pid) }
 func (p *workerPool) ClearWorkerScope(pid uint32)           { p.cleared = append(p.cleared, pid) }
+func (p *workerPool) RefuseWorker(pid uint32, _ string)     { p.refused = append(p.refused, pid) }
 
 // The proven wire serves its single worker exactly (exact_proven.go).
 func (p *workerPool) ServeExactTest(test string, _ []*models.Mock) error {

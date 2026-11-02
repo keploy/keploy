@@ -122,11 +122,14 @@ type ScopeReq struct {
 	Name string `json:"name"`
 	// Pid is the calling test WORKER's PID (e.g. Node process.pid, os.Getpid()).
 	// It keys the per-worker scope so two workers never overwrite one filter;
-	// it does not keep parallel tests apart. At replay, unless the app starts
-	// are marked, it narrows only the connections the worker, or a process it
-	// started, opens while a test is open: a connection opened outside a test,
-	// and every connection of a process the worker did not start (a shared
-	// app server), keep the whole pool. Optional: 0/omitted falls back to the single global scope, which
+	// it does not keep parallel tests apart. A replay narrows by it only in a
+	// run with the marks: every connection's view is then resolved from the
+	// app starts on every read, and a connection of a process the worker did
+	// not start (a shared app server) is served the one open test's mocks, or
+	// refused while more than one test is open. Without the marks a replay
+	// refuses a mapped test that begins with a pid (422): the test fails, and
+	// the replay with it, whatever the harness does with the answer.
+	// Optional: 0/omitted falls back to the single global scope, which
 	// narrows every connection (a sequential run, a shared app, suite-level).
 	Pid int `json:"pid,omitempty"`
 	// At is the runner's own clock for this boundary; zero means the agent stamps its read time.
@@ -272,6 +275,11 @@ type ScopeWindow struct {
 	// Outcome is the verdict the test's harness reported when it ended the
 	// scope (ScopeReq.Outcome); "" when it reported none.
 	Outcome string `json:"outcome,omitempty"`
+	// BeginRefused is, in a replay, why keploy refused the test at its begin,
+	// on a window with no extent and the failed Outcome: the replay then
+	// fails, whatever the test's harness did with the refusal and whatever
+	// its runner exits. "" when keploy refused nothing.
+	BeginRefused string `json:"beginRefused,omitempty"`
 	// Evidence is, under the proven wire, what keploy saw that failed the
 	// test at its end in a replay; nil when nothing did.
 	Evidence *ScopeEvidence `json:"evidence,omitempty"`

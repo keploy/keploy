@@ -57,9 +57,22 @@ func TestAPidBeginWithoutMarksIsRefusedAndFailsTheTest(t *testing.T) {
 		if err.Error() != want {
 			t.Fatalf("%s's refusal:\n%s\nwant:\n%s", test, err, want)
 		}
-		// A harness that ignores the refusal runs the test and ends it.
+		// A harness that ignores the refusal runs the test: every call of
+		// the worker's that keploy can tell is refused, naming why, and the
+		// replay fails on the refusal (models.ScopeWindow.BeginRefused).
+		if got := p.refused[4242]; got != want {
+			t.Fatalf("%s's worker reads were refused with %q, want %q", test, got, want)
+		}
+		if got := beginRefusalsOf(t, a, test); !slices.Equal(got, []string{want}) {
+			t.Fatalf("%s's windows say keploy refused it with %q, want once with %q", test, got, want)
+		}
+		// Its end gives the worker's reads back.
+		cleared := len(p.cleared)
 		if err := a.EndScope(ctx, test, 4242); err != nil {
 			t.Fatal(err)
+		}
+		if !slices.Equal(p.cleared[cleared:], []uint32{4242}) {
+			t.Fatalf("%s's end cleared workers %v, want 4242", test, p.cleared[cleared:])
 		}
 	}
 	if len(p.workerScopes) != 0 || len(p.scoped) != 0 || len(p.windowed) != 0 {
@@ -114,4 +127,90 @@ func TestAPidBeginUnderTheSwitchIsServedExactly(t *testing.T) {
 			t.Fatalf("%s's outcomes %v, want it not failed", test, got)
 		}
 	}
+}
+
+// beginRefusalsOf is why keploy refused each begin of name, in order
+// (models.ScopeWindow.BeginRefused).
+func beginRefusalsOf(t *testing.T, a *Agent, name string) []string {
+	t.Helper()
+	ws, err := a.GetScopeWindows(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, w := range ws {
+		if w.Name == name && w.BeginRefused != "" {
+			out = append(out, w.BeginRefused)
+		}
+	}
+	return out
+}
+
+// A refused pid begin moves no clock, and its end moves none either: a pid
+// begin is refused only with the switch off, where no begin moves the clock
+// (testClock), so there is nothing to give back.
+func TestARefusedPidBeginMovesNoClock(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	starts.Default.Reset()
+	t.Cleanup(starts.Default.Reset)
+	h := &clockHooks{}
+	useHooks(t, h)
+	a := newClockAgent(t)
+	pool := &workerPool{}
+	a.Proxy = pool
+	ctx := context.Background()
+	if err := a.SetScopeTable(ctx, map[string][]string{"TestA": {"mock-a"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.BeginScope(ctx, "TestA", 4242); !errors.Is(err, ErrPidBeginWithoutMarks) {
+		t.Fatalf("got %v, want ErrPidBeginWithoutMarks", err)
+	}
+	if len(h.moves) != 0 {
+		t.Fatalf("a refused begin moved the clock: %v", h.moves)
+	}
+	if err := a.EndScope(ctx, "TestA", 4242); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.moves) != 0 {
+		t.Fatalf("the end of a refused begin moved the clock: %v", h.moves)
+	}
+	if !slices.Equal(pool.refused, []uint32{4242}) {
+		t.Fatalf("refused workers %v, want 4242", pool.refused)
+	}
+}
+
+// Every begin keploy refuses says why on its window, so the replay fails on
+// it whatever the harness does next: the clock that cannot move, and a
+// narrowing that fails after the clock moved, as the pid begin without marks
+// does (TestAPidBeginWithoutMarksIsRefusedAndFailsTheTest).
+func TestEveryBeginKeployRefusesSaysWhyOnItsWindow(t *testing.T) {
+	t.Run("the clock cannot move", func(t *testing.T) {
+		t.Setenv("KEPLOY_PROVEN", "1")
+		useHooks(t, &clockHooks{err: errors.New("disk full")})
+		a := newClockAgent(t)
+		err := a.BeginScope(context.Background(), "TestA", 0)
+		if err == nil {
+			t.Fatal("a begin whose clock could not move began")
+		}
+		if got := beginRefusalsOf(t, a, "TestA"); !slices.Equal(got, []string{err.Error()}) {
+			t.Fatalf("its window says %q, want %q", got, err.Error())
+		}
+	})
+	t.Run("the narrowing fails", func(t *testing.T) {
+		t.Setenv("KEPLOY_PROVEN", "1")
+		useHooks(t, &clockHooks{})
+		a := newClockAgent(t)
+		a.clientMocks.Delete(uint64(0))
+		ctx := context.Background()
+		if err := a.SetScopeTable(ctx, map[string][]string{"TestA": {"mock-1"}}); err != nil {
+			t.Fatal(err)
+		}
+		err := a.BeginScope(ctx, "TestA", 0)
+		if err == nil {
+			t.Fatal("a begin whose narrowing failed began")
+		}
+		if got := beginRefusalsOf(t, a, "TestA"); !slices.Equal(got, []string{err.Error()}) {
+			t.Fatalf("its window says %q, want %q", got, err.Error())
+		}
+	})
 }
