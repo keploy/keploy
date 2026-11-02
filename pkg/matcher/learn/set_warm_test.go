@@ -169,6 +169,114 @@ func TestACallsWarmReadsEachPayloadsStampsWithThePayload(t *testing.T) {
 	}
 }
 
+// A reader reads the parts of a recording it reads in turn (a call's warm
+// and the staging's, warmOne; the staging's read of what a call's read
+// left, stageRest) from one load of its payload, held until its last part
+// is read (Raw.holding). Here the set's store keeps no payload, as a store
+// past its budget lets go of one while other readers load theirs, so a
+// reader reading from the store found the payload gone at each part after
+// its first and loaded it again: one more decode of the whole recording
+// each time (the stamps row saw it once in some runs under load). Counted:
+// each reader loads each payload once, whatever the readers' count, and
+// reads the parts a store that keeps every payload gives.
+func TestAReaderReadsARecordingsPartsFromOneLoadOfItsPayload(t *testing.T) {
+	const n = 6
+	mocks := stampedAnswers(n, eRecAt)
+	for _, m := range mocks {
+		// A stamp: an HTTP-date of when its answer was recorded.
+		m.Spec.HTTPResp.Header["Date"] = m.Spec.ResTimestampMock.Format(http.TimeFormat)
+	}
+	type parts struct {
+		moments []moment
+		keys    []instantKey
+		stamps  []string
+		places  []keyedPlace
+		fields  [][]moment
+		forms   [][]moment
+	}
+	partsOf := func(dc *DriftCache, raw []Raw) []parts {
+		out := make([]parts, len(raw))
+		for i, x := range raw {
+			p := &out[i]
+			p.moments, p.stamps = dc.payloadMoments(x), dc.stampTexts(x)
+			p.keys, _ = dc.searchedKeys(x)
+			p.places, _ = dc.setPlaces(x)
+			p.fields, _ = dc.fieldMoments(x)
+			p.forms, _ = dc.fieldForms(x)
+		}
+		return out
+	}
+	lazy := func(dc *DriftCache) []Raw {
+		raw := make([]Raw, n)
+		for i, m := range mocks {
+			raw[i] = dc.LazyRawOf(m, false, nil)
+		}
+		return raw
+	}
+	keptAll := func() []parts {
+		tr := NewTracker()
+		tr.NewSet()
+		tr.Begin()
+		defer tr.End()
+		dc := tr.Drifts()
+		raw := lazy(dc)
+		if err := dc.warmSet(srcOf(mocks), 1); err != nil {
+			t.Fatal(err)
+		}
+		return partsOf(dc, raw)
+	}()
+	if len(keptAll[2].stamps) == 0 || len(keptAll[2].moments) == 0 || len(keptAll[2].places) == 0 {
+		t.Fatalf("a payload's parts are %+v: the row needs stamps, instants and places in each", keptAll[2])
+	}
+	defer func(b int64) { bodyBudget = b }(bodyBudget)
+	bodyBudget = 0
+	for _, readers := range []int{1, 3} {
+		t.Run(fmt.Sprintf("%d readers", readers), func(t *testing.T) {
+			warmReadersOf(t, readers)
+			tr := NewTracker()
+			tr.NewSet()
+			tr.Begin()
+			defer tr.End()
+			dc := tr.Drifts()
+			raw := lazy(dc)
+			dc.warm(raw)
+			if got := dc.Loads(); got != n {
+				t.Fatalf("a call's warm with %d readers loaded %d payloads of %d recordings, its set's store keeping none: want each once", readers, got, n)
+			}
+			if err := dc.warmSet(srcOf(mocks), readers); err != nil {
+				t.Fatal(err)
+			}
+			if staged, called, _ := readsOf(dc.set); staged != 0 || called != n || dc.set.finished != n {
+				t.Fatalf("the call read %d, the staging %d and read the rest of %d: want the call all %d, the staging the rest of each", called, staged, dc.set.finished, n)
+			}
+			if got := dc.Loads() - n; got != n {
+				t.Fatalf("the staging's read of what the call's read left loaded %d payloads of %d recordings: want each once", got, n)
+			}
+			if got := partsOf(dc, raw); !reflect.DeepEqual(got, keptAll) {
+				t.Errorf("the parts read from one load of each payload are %+v: a store that keeps every payload gives %+v", got, keptAll)
+			}
+
+			st := NewTracker()
+			st.NewSet()
+			st.Begin()
+			defer st.End()
+			sc := st.Drifts()
+			if err := sc.warmSet(srcOf(mocks), readers); err != nil {
+				t.Fatal(err)
+			}
+			if staged, _, _ := readsOf(sc.set); staged != n {
+				t.Fatalf("the staging read %d of %d payloads: want all", staged, n)
+			}
+			if got := sc.Loads(); got != n {
+				t.Fatalf("the staging with %d readers loaded %d payloads of %d recordings, its set's store keeping none: want each once", readers, got, n)
+			}
+			if got := partsOf(sc, lazy(sc)); !reflect.DeepEqual(got, keptAll) {
+				t.Errorf("the staging's parts read from one load of each payload are %+v: a store that keeps every payload gives %+v", got, keptAll)
+			}
+		})
+	}
+}
+
 // A read whose cost (readWeight) is all of the set's readInFlight runs
 // alone: while one reader is held in such a payload's read, the other
 // waits for room (inFlightWaiting) and begins none, and once the held read

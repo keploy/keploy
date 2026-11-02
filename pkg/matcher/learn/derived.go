@@ -1485,8 +1485,11 @@ func (s *setDerived) take(x Raw) (ch chan struct{}, mine bool) {
 // search: a set's payloads past its budget are let go as they are read
 // (bodyStore), so the search read each of them back once more for its
 // stamps alone (the bound row's 256 recordings of 1 MiB: a tenth of its
-// call's CPU).
+// call's CPU). Each part is read from one load of the payload, held until
+// the last part is read (Raw.holding), not from the store at each part,
+// which may have let it go to another reader's load in between.
 func (dc *DriftCache) warmOne(s *setDerived, x Raw, ch chan struct{}, staged bool) {
+	x = x.holding()
 	defer func() {
 		s.mu.Lock()
 		s.warming[x.id] = warmed
@@ -1523,9 +1526,10 @@ func (dc *DriftCache) stagedParts(x Raw) {
 // such a recording, and the set's next drifted call read those parts of it
 // while its client waited. It does not wait for the call's read to
 // end: a part the call, or any other, is reading it waits for, and takes
-// what that read keeps (derive), so each part is read once.
+// what that read keeps (derive), so each part is read once. Its parts are
+// read from one load of the payload, as warmOne's are (Raw.holding).
 func (dc *DriftCache) stageRest(s *setDerived, x Raw) {
-	dc.stagedParts(x)
+	dc.stagedParts(x.holding())
 	s.mu.Lock()
 	s.finished++
 	s.mu.Unlock()
