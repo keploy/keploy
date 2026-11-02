@@ -28,8 +28,11 @@ func parkedBig(i int, at time.Duration, size int, sample func()) *models.Mock {
 		var b strings.Builder
 		b.Grow(size + 64)
 		b.WriteString(`{"blob":"`)
+		var word []byte
 		for j := 0; b.Len() < size; j++ {
-			fmt.Fprintf(&b, "w%dx%d ", i, j)
+			word = strconv.AppendInt(append(word[:0], 'w'), int64(i), 10)
+			word = strconv.AppendInt(append(word, 'x'), int64(j), 10)
+			b.Write(append(word, ' '))
 		}
 		b.WriteString(`"}`)
 		return &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: b.String()}, nil, nil

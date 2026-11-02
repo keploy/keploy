@@ -725,6 +725,13 @@ func (h *HTTP) learnRules(mockDb integrations.MockMemDb, tracker *learn.Tracker)
 	// test's is learned onto a background recording. The pool is learned
 	// from between tests only.
 	r.exactBackground = r.open && integrations.S12Background(mockDb)
+	// With a test open, the background the view shows it (under the
+	// background rules the pool and the worker scope, under any rules the
+	// worker scope the run reached) never answers a call one more than the
+	// test recorded (learn.Candidate.Background).
+	if r.open {
+		r.background = func(name string) bool { return integrations.InBackground(mockDb, name) }
+	}
 	return r
 }
 
@@ -767,6 +774,7 @@ func (h *HTTP) learnScopeIn(snap integrations.RoundSnapshot, live httpParts, liv
 		perTest: snap.PerTest, session: snap.Session, open: snap.Open,
 		windows: snap, inFlight: snap, pools: snap,
 		exactBackground: snap.ExactBackground(),
+		background:      snap.InBackground,
 		answered:        func(name string) bool { return answered[name] != nil },
 		answeredMocks:   func() []*models.Mock { return order },
 	}
@@ -784,6 +792,10 @@ type scopeReads struct {
 	inFlight         integrations.InFlightOwner
 	pools            integrations.PoolMembership
 	exactBackground  bool
+	// background reports whether a recording, by name, is the background
+	// the view shows the open test (integrations.BackgroundMember); nil
+	// names none.
+	background func(name string) bool
 	// answered reports whether one of the test's own answered a request of
 	// it; answeredMocks are those, as recorded, read after the scope's
 	// mocks.
@@ -873,6 +885,10 @@ func (r scopeReads) candidateOf(m *models.Mock, perTestTier bool, rp httpParts, 
 	c := learn.Candidate{
 		Known:    n.known(m),
 		Pairable: !m.IsProtocolPhase() && (own || pool && poolsOwn && !r.exactBackground),
+		// The background's data-plane recordings (integrations.InBackground)
+		// never answer a call one more than the open test recorded
+		// (learn.Candidate.Background).
+		Background: !own && r.open && !m.IsProtocolPhase() && r.background != nil && r.background(m.Name),
 	}
 	if r.sieve.shapes(m, masked, spent) {
 		c.Shape = n.shape(rp, d)
@@ -1501,7 +1517,11 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 		}
 		retake = false
 		sc, windows, claimDb := read.sc, read.windows, read.claimDb
-		test, earlier, served, before, set, order := read.test, read.earlier, read.served, read.before, read.set, read.order
+		test, earlier, served, before, set := read.test, read.earlier, read.served, read.before, read.set
+		// F's serves the read saw made after the call reached keploy are
+		// none F made before it (learn.Order.ArrivedAt): a sibling served
+		// while the call waited for this read leaves the verdict as it was.
+		order := read.order.ArrivedAt(input.arrived)
 		if read.awaiting {
 			// The call came after the test's window opened and before the
 			// filter that opens it brought its test case's request: it
@@ -2057,10 +2077,11 @@ type pairing struct {
 //     answered where the recorded answer holds the value whole. Leaves of
 //     this call that drifted from the same recorded value are one variable.
 //   - A value the test case's request gave (given: its template keys, which
-//     keploy test binds for the test, #4789) is that key's variable, used
-//     here under the key's name with no bind, whatever else Classify found:
-//     the test case is earlier than any call it makes. Its name is the key's
-//     alone in the test: no other variable takes it.
+//     keploy test binds for the test, #4789), or the test gave keploy (a
+//     given, models.GivenPrefix), is that key's variable, used here under the
+//     key's name with no bind, whatever else Classify found: the test case is
+//     earlier than any call it makes. Its name is the key's alone in the
+//     test: no other variable takes it. A given's says why (learn.GivenWhy).
 func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (pairing, string) {
 	p := pairing{noise: map[string][]string{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}}
 	jsonReq := rec.Fixed["body"] == "json"
@@ -2088,13 +2109,17 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			place, placeable := learn.VarPlace(r, jsonReq)
 			switch {
 			case !placeable:
-				return p, r.Path + " carries the test case's " + g.Name + " at a place keploy cannot follow a variable to (a form or multipart field)"
+				return p, r.Path + " carries " + learn.GivenNamed(g.Name) + " at a place keploy cannot follow a variable to (a form or multipart field)"
 			case !own:
-				return p, r.Path + " carries the test case's " + g.Name + ", and only a test's own calls carry its variables"
+				return p, r.Path + " carries " + learn.GivenNamed(g.Name) + ", and only a test's own calls carry its variables"
 			}
 			v := p.vars[g.Name]
 			v.Recorded, v.Use = g.Recorded, appendNew(v.Use, place)
 			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
+			if models.IsGivenVariable(g.Name) {
+				// A value the test gave says where, and how to undo it.
+				v.Why = learn.GivenWhy(g.Name, g.Place, g.Recorded, g.Value)
+			}
 			p.vars[g.Name] = v
 			p.values[g.Name] = g
 			continue
@@ -2116,6 +2141,20 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		case learn.KindVariable:
 			from := l.From
 			switch {
+			case from.Given && from.Gave:
+				// A value made from one the test gave keploy
+				// (learn.Earlier.Gave): keploy follows a given only whole.
+				// One that was the given whole when recorded, but not
+				// what the test gave in record's full round (givenFor), is
+				// a given the application did not pass on there.
+				why := learn.GivenDerivedWhy(r.Path, from.Path, givenSource(given, from.Path))
+				if from.Whole {
+					why = learn.GivenNotPassedOnWhy(r.Path, from.Path, givenSource(given, from.Path))
+				}
+				if l.Why != "" {
+					why += "; " + l.Why
+				}
+				return p, why
 			case from.Given:
 				// The test case's own request (learn.Earlier.Given): what
 				// the application was given, which no variable binds at.
@@ -2247,6 +2286,17 @@ func givenBindings(mockDb integrations.MockMemDb) []variables.Binding {
 		}
 	}
 	return out
+}
+
+// givenSource is where the test gave the given named name (its binding's
+// Place, file:line), "" when the table holds none of that name.
+func givenSource(given []variables.Binding, name string) string {
+	for _, g := range given {
+		if g.Name == name {
+			return g.Place
+		}
+	}
+	return ""
 }
 
 // givenFor is the given value the drifted leaf carries: the key's value

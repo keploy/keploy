@@ -146,6 +146,9 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// per test. See pkg/agent/routes/scope.go.
 		r.Post("/scope/begin", a.HandleScopeBegin)
 		r.Post("/scope/end", a.HandleScopeEnd)
+		// A value the open test gave the application (scope_proven.go).
+		// Any method: with the proven switch off the plain 404.
+		r.HandleFunc("/scope/given", a.HandleScopeGiven)
 		r.Get("/scope/windows", a.HandleScopeWindows)
 		r.Post("/scope/table", a.HandleScopeTable)
 		r.Post("/replay/gate", a.HandleScopeGate)
@@ -198,6 +201,10 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// Pollable, non-draining view of which mocks have been served. Distinct
 		// from /consumedmocks, which drains and is read once at end of run.
 		r.Get("/mock/served", a.HandleServedMocks)
+		// What record's full round learned onto recordings from calls
+		// made in other windows than theirs: no consumption, read once
+		// at the round's end beside /consumedmocks.
+		r.Get("/mock/learned-elsewhere", a.HandleLearnedElsewhere)
 		r.Post("/agent/ready", a.MakeAgentReady)
 		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
 		// Long-lived streaming endpoints. /pcap/traffic emits a

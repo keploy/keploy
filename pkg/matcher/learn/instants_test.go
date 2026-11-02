@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"reflect"
 	"strconv"
 	"strings"
@@ -2164,5 +2165,104 @@ func TestAWallClockOfNoZoneFitOnOneSideIsNoEcho(t *testing.T) {
 	ln := ClassifyIn(clockedDrifts(), []string{p}, dt("2026-10-22 16:46:16"), dt("2026-10-22 16:44:01"), at, served, nil, nil, nil)[0]
 	if !noiseIn(ln, nil) {
 		t.Errorf("a wall clock F's side alone fits: %s from %+v (%s); want noise", ln.Kind, ln.From, ln.Why)
+	}
+}
+
+// cutsNone turns a pair of instants away only where no rule of cuts names
+// one by the other: of instants of every resolution and zone, whole at each
+// unit, standing apart by a unit, by a zone, by a zone and a unit, or by
+// days, no pair it turns away is one cutsEach finds a rule for.
+func TestCutsNoneTurnsAwayOnlyPairsNoRuleNames(t *testing.T) {
+	rng := rand.New(rand.NewPCG(5016, 1))
+	base := time.Date(2026, 10, 31, 19, 12, 30, 432877056, time.UTC).UnixNano()
+	zones := []int64{0, int64(5*time.Hour + 30*time.Minute), int64(-10 * time.Hour), int64(14 * time.Hour),
+		int64(-12 * time.Hour), int64(45 * time.Minute), int64(time.Second), int64(17 * time.Second), int64(90 * time.Second)}
+	unit := func() int64 { return int64(precisionUnits[rng.IntN(len(precisionUnits))]) }
+	zone := func() int64 {
+		if rng.IntN(3) == 0 {
+			return int64(rng.IntN(105)-48) * int64(15*time.Minute)
+		}
+		return zones[rng.IntN(len(zones))]
+	}
+	near := func(u int64) int64 { return rng.Int64N(2*u+1) - u }
+	mk := func(at, z int64) moment {
+		return moment{key: instantKey{at: at}, wall: timeOfDay(at + z), res: precisionUnits[rng.IntN(len(precisionUnits))],
+			zone: z, zoned: rng.IntN(2) == 0, typed: rng.IntN(2) == 0}
+	}
+	var turned, named int
+	for i := 0; i < 400000; i++ {
+		mz, hz := zone(), zone()
+		at := base + near(int64(3*24*time.Hour))
+		if rng.IntN(4) != 0 {
+			// Whole at a unit, as m's zone writes it.
+			u := unit()
+			at -= ((at+mz)%u + u) % u
+		}
+		m := mk(at, mz)
+		var hat int64
+		switch rng.IntN(5) {
+		case 0:
+			hat = at
+		case 1:
+			hat = at + near(unit())
+		case 2:
+			hat = at - hz + near(unit())
+		case 3:
+			hat = at + mz + near(unit())
+		default:
+			hat = at + near(int64(3*24*time.Hour))
+		}
+		if rng.IntN(3) == 0 {
+			u := unit()
+			hat -= ((hat+hz)%u + u) % u
+		}
+		h := mk(hat, hz)
+		some := cutsEach(h, m, func(cutRule) bool { return true })
+		if some {
+			named++
+		}
+		if cutsNone(h, m) {
+			turned++
+			if some {
+				t.Fatalf("cutsNone turned away %+v of %+v, which cutsEach names", h, m)
+			}
+		}
+	}
+	if turned < 100000 || named < 10000 {
+		t.Fatalf("the pairs do not test cutsNone: it turned away %d, cutsEach named %d", turned, named)
+	}
+	t.Logf("turned away %d of 400000 pairs, cutsEach named %d", turned, named)
+}
+
+// BenchmarkCuts is what cutsNone saves where it matters: a drifted value's
+// moment, read now, held against every instant a set's earlier places hold
+// (4,096 of them, recorded at millisecond resolution over 10 minutes or 3
+// days, half in UTC and half at +05:30), by cuts and by cutsEach alone.
+func BenchmarkCuts(b *testing.B) {
+	base := time.Date(2026, 10, 31, 19, 12, 30, 432000000, time.UTC).UnixNano()
+	m := moment{key: instantKey{at: base}, wall: timeOfDay(base), res: time.Millisecond}
+	accept := func(cutRule) bool { return true }
+	for _, span := range []time.Duration{10 * time.Minute, 3 * 24 * time.Hour} {
+		held := make([]moment, 0, 4096)
+		for i := 0; i < 4096; i++ {
+			at := base - int64(span)*int64(i)/4096 - 7*int64(time.Millisecond)*int64(i%13)
+			z := int64(0)
+			if i%2 == 1 {
+				z = int64(5*time.Hour + 30*time.Minute)
+			}
+			held = append(held, moment{key: instantKey{at: at}, wall: timeOfDay(at + z), res: time.Millisecond, zone: z, zoned: true})
+		}
+		for _, by := range []struct {
+			name string
+			cut  func(held, m moment, visit func(cutRule) bool) bool
+		}{{"cuts", cuts}, {"cutsEach", cutsEach}} {
+			b.Run("span="+span.String()+"/"+by.name, func(b *testing.B) {
+				for i := 0; i < b.N; i++ {
+					for _, h := range held {
+						by.cut(h, m, accept)
+					}
+				}
+			})
+		}
 	}
 }

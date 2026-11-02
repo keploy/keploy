@@ -76,6 +76,10 @@ type replayCase struct {
 	// losses: the agent counts what it could not capture (GET
 	// /agent/capturelosses).
 	losses *lossCounter
+	// pidMaps: the agent counts the processes it could not track (GET
+	// /agent/pidmaps). Its capture losses are counted too, by losses when
+	// set, else by an agent that lost none.
+	pidMaps *pidMapCounter
 	// captured: the calls the agent captured on miss (--on-miss record),
 	// which the mock store refuses with insertErr when it is set.
 	captured  []*models.Mock
@@ -144,6 +148,13 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	var run Instrumentation = instr
 	if c.losses != nil {
 		run = lossReplayInstr{instr, c.losses}
+	}
+	if c.pidMaps != nil {
+		losses := c.losses
+		if losses == nil {
+			losses = &lossCounter{}
+		}
+		run = pidLossReplayInstr{instr, losses, c.pidMaps}
 	}
 	if c.captured != nil {
 		run = missCaptureInstr{instr, c.captured}

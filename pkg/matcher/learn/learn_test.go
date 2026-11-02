@@ -897,6 +897,40 @@ func TestPairSpent(t *testing.T) {
 	})
 }
 
+// The background's recording (Candidate.Background) answers a request it
+// matches exactly, but never one a spent recording of the test matches
+// exactly: that is one call more than the test recorded, a miss, whatever
+// the background holds of it. The test's own next recording of the call
+// still answers it, wherever the background's stands.
+func TestPairBackgroundNeverAnswersOneCallMore(t *testing.T) {
+	spent := Candidate{Shape: body(t, "k", `{"id":"a"}`), Known: None, Spent: true}
+	bg := func(s Shape) Candidate { return Candidate{Shape: s, Known: None, Background: true} }
+	t.Run("a spent recording and the background's match exactly: one call more", func(t *testing.T) {
+		r := Pair(body(t, "k", `{"id":"a"}`), []Candidate{spent, bg(body(t, "k", `{"id":"a"}`))})
+		if r.Outcome != Miss || r.Index != 0 || r.Reason != "" || !strings.Contains(r.Why, "one call more") {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("the background's comes first: still one call more", func(t *testing.T) {
+		r := Pair(body(t, "k", `{"id":"a"}`), []Candidate{bg(body(t, "k", `{"id":"a"}`)), spent})
+		if r.Outcome != Miss || r.Index != 1 {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("the test's own next recording answers", func(t *testing.T) {
+		r := Pair(body(t, "k", `{"id":"a"}`), []Candidate{spent, bg(body(t, "k", `{"id":"a"}`)), cand(body(t, "k", `{"id":"a"}`), true)})
+		if r.Outcome != Exact || r.Index != 2 {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("a call the test did not record: the background answers", func(t *testing.T) {
+		r := Pair(body(t, "k", `{"id":"b"}`), []Candidate{spent, bg(body(t, "k", `{"id":"b"}`)), bg(body(t, "k", `{"id":"b"}`))})
+		if r.Outcome != Exact || r.Index != 1 {
+			t.Fatalf("%+v", r)
+		}
+	})
+}
+
 // A payload of another protocol has no live view: the value, or what of it
 // drifted, is searched there as a token, but for what drifted with F's
 // clock; a whole clock read the lead moved only where it stands whole.
@@ -981,7 +1015,7 @@ func TestUnaccounted(t *testing.T) {
 		{"text of a script with no spaces", "您的订单已创建", "您的订单已发货", true},
 	} {
 		dc := clockedDrifts()
-		why := unaccounted(dc, dc.of(tc.recorded, tc.now), at, earlier, raw, nil)
+		why := unaccounted(dc, dc.of(tc.recorded, tc.now), at, earlier, raw, nil, nil)
 		if (why != "") != tc.refused {
 			t.Errorf("%s: unaccounted %q, want refused %v", tc.name, why, tc.refused)
 		}

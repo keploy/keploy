@@ -31,6 +31,12 @@ import (
 type aheadReader struct {
 	conn     net.Conn
 	lastNano atomic.Int64
+	// taken is what the consumer has taken, counted as bytes with the
+	// close that ends the stream (io.EOF) as one more, as the conn's
+	// Arrived counts what has arrived (drainConn). Where an answer ends in
+	// the stream is taken less what the consumer's buffer still holds
+	// (watchClient).
+	taken atomic.Int64
 
 	mu      sync.Mutex
 	cond    *sync.Cond
@@ -39,6 +45,11 @@ type aheadReader struct {
 	err     error        // what ended the reads; with errAt, when
 	errAt   time.Time
 	closed  bool
+	eofRead bool // Read has returned io.EOF, counted in taken
+	// limit, when bounded, is the most Read takes (counted as taken): past
+	// it, Read returns errPastArrived (readTo).
+	bounded bool
+	limit   int64
 }
 
 // aheadPiece is what one or more reads brought, and when the last of them did.
@@ -160,6 +171,15 @@ func (a *aheadReader) charge(p *aheadPiece, cost int64) {
 func (a *aheadReader) Read(p []byte) (int, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.bounded {
+		left := a.limit - a.taken.Load()
+		if left <= 0 {
+			return 0, errPastArrived
+		}
+		if int64(len(p)) > left {
+			p = p[:left]
+		}
+	}
 	for len(a.queue) == 0 && a.err == nil && !a.closed {
 		a.cond.Wait()
 	}
@@ -167,6 +187,7 @@ func (a *aheadReader) Read(p []byte) (int, error) {
 		c := &a.queue[0]
 		n := copy(p, c.data)
 		a.lastNano.Store(c.readAt.UnixNano())
+		a.taken.Add(int64(n))
 		c.data = c.data[n:]
 		if len(c.data) == 0 {
 			a.charge(c, 0)
@@ -184,9 +205,26 @@ func (a *aheadReader) Read(p []byte) (int, error) {
 	}
 	if errors.Is(a.err, io.EOF) {
 		a.lastNano.Store(a.errAt.UnixNano())
+		if !a.eofRead {
+			a.eofRead = true
+			a.taken.Add(1)
+		}
 	}
 	return 0, a.err
 }
+
+// readTo bounds what Read takes from here at limit, counted as Taken counts:
+// past it, Read returns errPastArrived. What the conn's Arrived counted has
+// arrived, so a Read within a limit it gave does not wait on the app. Called
+// by the consumer.
+func (a *aheadReader) readTo(limit int64) {
+	a.mu.Lock()
+	a.bounded, a.limit = true, limit
+	a.mu.Unlock()
+}
+
+// Taken is what the consumer has taken by Read, counted as Arrived counts.
+func (a *aheadReader) Taken() int64 { return a.taken.Load() }
 
 // LastReadTime returns when what the latest Read returned arrived from the
 // connection (or when its end was found), the zero time before any.

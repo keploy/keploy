@@ -65,6 +65,14 @@ type Instrumentation interface {
 	NotifyGracefulShutdown(ctx context.Context) error
 }
 
+// RunSettler is an optional Instrumentation extension, which
+// pkg/platform/http.AgentClient has: the agent's end-of-run hook. Under the
+// proven switch Replay calls it once the test command has exited, before it
+// reads what the agent served (settleRun).
+type RunSettler interface {
+	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error
+}
+
 // ScopeReader is an optional Instrumentation extension: the per-test scope
 // windows the wrapped runner reported through the agent's /agent/scope/* API
 // during a record session. Record uses it to write mappings.yaml so replay can
@@ -131,9 +139,10 @@ type SetPusher interface {
 // ProvenTablePusher is the Instrumentation extension a replay under the
 // proven switch needs: it hands the agent the per-test table and each key's
 // pool slice (models.ScopeTableReq.Pool) in one request, with the recorded
-// window of every test of the set (models.ScopeTableReq.Windows).
+// window of every test of the set (models.ScopeTableReq.Windows) and the
+// values each test gave when it was recorded (models.ScopeTableReq.Given).
 type ProvenTablePusher interface {
-	PushProvenTable(ctx context.Context, table, pool map[string][]string, windows []models.TestWindow) error
+	PushProvenTable(ctx context.Context, table, pool map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) error
 }
 
 type MappingReader interface {

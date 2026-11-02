@@ -531,6 +531,9 @@ type UnmatchedCall struct {
 	// VariablePlaces mirrors MockMismatchReport.VariablePlaces: the URL path
 	// places of a test variable on this call, under the proven switch only.
 	VariablePlaces []string `json:"variable_places,omitempty" yaml:"variable_places,omitempty"`
+	// Given mirrors MockMismatchReport.Given: the given a variable miss is
+	// about, by its name, never its value.
+	Given string `json:"given,omitempty" yaml:"given,omitempty"`
 	// At is when the call missed, so a client can tell which test made it.
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
 	// Kind is where the call was made, under the proven switch (MissInTest,
@@ -786,6 +789,11 @@ type MockOutcome struct {
 	// incomplete (ErrUnmatchedCallsUnread, under the proven switch). Missed
 	// holds what was read.
 	MissedUnread string `json:"missed_unread,omitempty"`
+	// LearnedElsewhere is what record's full round's learn step taught
+	// recordings from calls made in other windows than theirs, for
+	// learning only (the agent's /mock/learned-elsewhere): none of it is
+	// consumption, so Consumed never holds it.
+	LearnedElsewhere []MockState `json:"learned_elsewhere,omitempty"`
 	// PIDMapRefusals are the inserts into the agent's PID maps the kernel
 	// refused over its life, which under compose is the replay's: processes
 	// its hooks could not track. nil when it cannot count them, which is
@@ -798,6 +806,16 @@ type MockOutcome struct {
 	// counts" (an older agent, or hooks without PID maps), which a nil
 	// PIDMapRefusals alone cannot.
 	PIDMapRefusalsError string `json:"pidMapRefusalsError,omitempty"`
+	// Settled says that, under the proven switch, the agent finished its end
+	// of the run (its hooks' AfterTestRun) before it read this account, as
+	// the CLI has it do where it can still reach the agent: an enterprise
+	// agent then writes the row of each process of the run it saw off the
+	// run's clock, the last test's among them. SettleError is why it could
+	// not. A CLI under the switch reads an account without Settled (an agent
+	// that failed it, or an older one) as a run the agent did not finish,
+	// and does not judge it. Without the switch neither is set.
+	Settled     bool   `json:"settled,omitempty"`
+	SettleError string `json:"settleError,omitempty"`
 }
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.
@@ -1163,3 +1181,13 @@ type (
 	GlobalNoise  map[string]map[string][]string
 	TestsetNoise map[string]map[string]map[string][]string
 )
+
+// TeachingWindow is a window in which a call taught a recording of another
+// window, for learning only (MockState.TaughtIn). Test is the test whose
+// window it was (the one open when the call came), "" between tests. At is
+// when the last such call of that window taught the recording: its learn
+// step, just after the call came. A window is named once per recording.
+type TeachingWindow struct {
+	Test string    `json:"test,omitempty" yaml:"test,omitempty"`
+	At   time.Time `json:"at" yaml:"at"`
+}

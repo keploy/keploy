@@ -640,10 +640,11 @@ type RecordedOfKindSetter interface {
 // reads, beside what is staged, the times of the set's recordings the agent
 // keeps on disk: a test's own are staged only as it opens, and the bound is
 // the latest of them. SetRecordingTimes sets where (src visits every on-disk
-// mock with its name, request and answer times and whether it is
-// protocol-phase, decoding none; nil for none).
+// mock with its name, request and answer times, whether it is
+// protocol-phase and its clock (models.Origin.Clock), decoding none; nil for
+// none).
 type RecordingTimesSetter interface {
-	SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error) error
+	SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error) error
 }
 
 // RecordingSourceSetter is implemented by a proxy whose miss diagnosis under
@@ -685,6 +686,14 @@ type LearnEndSetter interface {
 	SetLearnEnded(ended bool) error
 }
 
+// LearnHolder is implemented by a proxy whose learn step can be held for a
+// while and released, unlike LearnEndSetter's end, which lasts for the set:
+// the agent holds it while a test of record's full round whose recording the
+// round does not learn onto is open (models.OutgoingOptions.LearnTests).
+type LearnHolder interface {
+	SetLearnHeld(held bool) error
+}
+
 // KeptLearningSetter is implemented by a proxy that serves a test set's
 // retry cycles the staged recordings (the pool's, the worker scope's) with
 // what keploy record keeps of the set's first-cycle learning on them
@@ -718,6 +727,15 @@ type ExactServer interface {
 // test of the set reads.
 type ExactTestOpener interface {
 	OpenExactTest(test string, owned []*models.Mock, given []models.VariableBinding) error
+}
+
+// ExactTestGiver is an optional ExactServer capability of a proxy that keeps
+// the test variables a replay binds: GiveExactTest binds b, a value the open
+// test gave (POST /agent/scope/given), as a given variable of test's scope
+// (variables.Table.Give). It refuses when test is not the test served, or
+// when b's name is bound already.
+type ExactTestGiver interface {
+	GiveExactTest(test string, b models.VariableBinding) error
 }
 
 // AppClockSetter is an optional proxy capability: SetAppClock hands the
@@ -841,6 +859,14 @@ type FirstWindowStartReader interface {
 // every testcase — see models.MockFilterParams.AgentOwnsConsumed.
 type ConsumedStateReader interface {
 	GetPersistentConsumed() map[string]models.MockState
+}
+
+// LearnedElsewhereReader is an optional Proxy extension: what record's full
+// round's learn step taught recordings from calls made in other windows than
+// theirs, for learning only (integrations.LearnElsewhere), one state per
+// recording. None of it is consumption: GetConsumedMocks never holds it.
+type LearnedElsewhereReader interface {
+	LearnedElsewhere() []models.MockState
 }
 
 type IncomingProxy interface {

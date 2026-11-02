@@ -130,7 +130,7 @@ if [[ "$first_code" != "503" ]]; then
 fi
 
 # Somewhere in the log there must be a 200 (CA ready after delay).
-if ! awk '{print $2}' "$LOG" | grep -qx "200"; then
+if ! awk '{print $2}' "$LOG" | grep -x "200" >/dev/null; then
   echo "FAIL: no 200 observed after CAReady delay" >&2
   exit 3
 fi

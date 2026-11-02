@@ -669,6 +669,11 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 		}
 		if !in.At.IsZero() {
 			tc.At = in.At
+			// The values the test gave in this record's run of it (proven
+			// switch only, where every test that ran has its begin): they
+			// replace what an earlier record wrote, none included, as they
+			// pair with this record's calls.
+			tc.Given = in.Given
 		}
 		// The mock.real destinations this record's run of the test used
 		// (proven switch only): they replace what an earlier record wrote.

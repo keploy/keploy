@@ -87,6 +87,13 @@ type mockStatsReader interface {
 type servedMockReader interface {
 	ServedMocks(ctx context.Context) (map[string]models.MockState, error)
 }
+
+// learnedElsewhereReader is the agent service's optional read of what
+// record's full round learned onto recordings from calls made in other
+// windows than theirs (service/agent.Agent.LearnedElsewhere).
+type learnedElsewhereReader interface {
+	LearnedElsewhere(ctx context.Context) ([]models.MockState, error)
+}
 type capturedMockDrainer interface {
 	DrainCapturedMocks(ctx context.Context) ([]*models.Mock, error)
 }
@@ -249,6 +256,21 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if provenswitch.On() && req.Sets == nil {
+		// The values each test gave when it was recorded: a replay's given
+		// is bound with its recorded value. An agent that cannot take them
+		// says so when the recording has any: its givens would check
+		// nothing.
+		if s, ok := a.svc.(scopeGivenSetter); ok {
+			if err := s.SetScopeGiven(r.Context(), req.Given); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if len(req.Given) > 0 {
+			http.Error(w, "this keploy agent cannot take the values the tests gave when they were recorded", http.StatusNotImplemented)
+			return
+		}
+	}
 	if s, ok := a.svc.(scopeTableSetter); ok && req.Sets == nil {
 		if err := s.SetScopeTable(r.Context(), req.Mappings); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -285,6 +307,12 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})
+}
+
+// scopeGivenSetter installs the values each test gave when it was recorded
+// (proven wire, models.ScopeTableReq.Given).
+type scopeGivenSetter interface {
+	SetScopeGiven(ctx context.Context, given map[string][]models.GivenValue) error
 }
 
 // scopePoolSetter installs each key's pool slice (proven wire).
@@ -434,6 +462,34 @@ func (a *Agent) HandleServedMocks(w http.ResponseWriter, r *http.Request) {
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, served)
+}
+
+// HandleLearnedElsewhere answers what record's full round's learn step
+// taught recordings from calls made in other windows than theirs, for
+// learning only: one state per recording, none of it consumption (unlike
+// /consumedmocks). 501 from an agent that cannot say, so a caller tells
+// "this agent learns none" from "it learned none". keploy mock record and
+// keploy record's own full round (service/replay) both read it and write
+// it onto the recordings.
+func (a *Agent) HandleLearnedElsewhere(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	s, ok := a.svc.(learnedElsewhereReader)
+	if !ok {
+		render.Status(r, http.StatusNotImplemented)
+		render.JSON(w, r, map[string]string{"error": "this agent cannot report what it learned from calls made in other windows"})
+		return
+	}
+	learned, err := s.LearnedElsewhere(r.Context())
+	if err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": err.Error()})
+		return
+	}
+	if learned == nil {
+		learned = []models.MockState{}
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, learned)
 }
 
 func (a *Agent) HandleAppStart(w http.ResponseWriter, r *http.Request) {

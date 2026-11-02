@@ -149,6 +149,10 @@ type mockMiss struct {
 	// call is the command's first read of the round (matchCommand), for its
 	// report to say whether that read found a staging (integrations.StampMark).
 	call integrations.CallRound
+	// extraCall is, for a command one more than the open test recorded (its
+	// own recordings of it answered, ownRepeats), how many times the test
+	// recorded it (models.MissExtraCall); 0 for every other miss.
+	extraCall int
 }
 
 // maxUnknownStatementsNamed caps how many mocks a miss of an unknown statement

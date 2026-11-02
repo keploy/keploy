@@ -59,7 +59,7 @@ func TestUnderMockReplayTheRecordedWindowsKeepTheSetsTeardown(t *testing.T) {
 			if got := mm.testWindows.Load().Len(); got != len(c.windows) {
 				t.Fatalf("precondition: %d recorded windows installed, want %d", got, len(c.windows))
 			}
-			after := mm.teardownAfter("k")
+			after := mm.teardownAfter("k", "")
 			if after == nil || !after(end.Spec.ReqTimestampMock) {
 				t.Fatalf("end-sessions, sent after every test's recording, is not the set's teardown")
 			}
@@ -192,11 +192,11 @@ func TestUnderMockReplayTheTeardownBoundReadsTheRecordingOnDisk(t *testing.T) {
 	mm := stagedManager(t, []*models.Mock{early, boot, gap, end}, nil)
 	mm.SetPoolOwners(map[string]string{"owned-early": "k", "owned": "k", "owned-2": "k"})
 	mm.SetPoolNames(slice)
-	if after := mm.teardownAfter("k"); after == nil || !after(gap.Spec.ReqTimestampMock) {
+	if after := mm.teardownAfter("k", ""); after == nil || !after(gap.Spec.ReqTimestampMock) {
 		t.Fatal("precondition: the staged trees alone did not put the bound at the test's early call")
 	}
 	mm.SetRecordingTimes(disk.RangeTimes)
-	after := mm.teardownAfter("k")
+	after := mm.teardownAfter("k", "")
 	if after == nil || !after(end.Spec.ReqTimestampMock) {
 		t.Fatal("end-sessions, sent after every test's recording on disk, is not the set's teardown")
 	}
@@ -231,7 +231,7 @@ func TestUnderMockReplayTheTeardownBoundReadsTheRecordingOnDisk(t *testing.T) {
 	}
 	other.Finalize()
 	mm.SetRecordingTimes(other.RangeTimes)
-	if after := mm.teardownAfter("k"); after == nil || !after(gap.Spec.ReqTimestampMock) {
+	if after := mm.teardownAfter("k", ""); after == nil || !after(gap.Spec.ReqTimestampMock) {
 		t.Fatal("a new set's store was not read again: its bound is the first set's")
 	}
 
@@ -241,7 +241,7 @@ func TestUnderMockReplayTheTeardownBoundReadsTheRecordingOnDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 	mm.SetRecordingTimes(other.RangeTimes)
-	if mm.teardownAfter("k") != nil {
+	if mm.teardownAfter("k", "") != nil {
 		t.Fatal("FALSE GREEN? a store that cannot be read told a teardown bound from the trees alone")
 	}
 }
@@ -289,7 +289,7 @@ func TestUnderMockReplayEachProcessesTeardownIsBoundedByItsOwnTestsOnDisk(t *tes
 		mk   *models.Mock
 		want bool
 	}{{"a", aEnd, true}, {"b", bEnd, true}, {"b", aEnd, false}, {"a", aBoot, false}} {
-		after := mm.teardownAfter(tc.key)
+		after := mm.teardownAfter(tc.key, "")
 		if got := after != nil && after(tc.mk.Spec.ReqTimestampMock); got != tc.want {
 			t.Errorf("key %s: %s is the teardown = %v, want %v", tc.key, tc.mk.Name, got, tc.want)
 		}
@@ -311,11 +311,163 @@ func TestUnderMockReplayTheTeardownIsAfterTheTestsLastAnswerOnDisk(t *testing.T)
 	mm.SetPoolOwners(map[string]string{"owned": "k"})
 	mm.SetPoolNames([]string{"mid", "end"})
 	mm.SetRecordingTimes(disk.RangeTimes)
-	after := mm.teardownAfter("k")
+	after := mm.teardownAfter("k", "")
 	if after == nil || !after(end.Spec.ReqTimestampMock) {
 		t.Fatal("end, sent after the test's last answer, is not the teardown")
 	}
 	if after(mid.Spec.ReqTimestampMock) {
 		t.Fatal("FALSE GREEN? mid, sent before the test's last call was answered, reads as the teardown")
+	}
+}
+
+// onClock is mk on clock (models.Origin.Clock), "" for none.
+func onClock(clock string, mks ...*models.Mock) {
+	for _, mk := range mks {
+		mk.Origin = &models.Origin{Clock: clock}
+	}
+}
+
+// A partial record keeps the tests it did not record anew, with the start-up
+// and pool of the run that recorded them (run S, on its clock), beside the
+// test it did (run L, on another clock, recorded later). Under keploy mock
+// replay the call S's application makes after its last test (a Go
+// mongo-driver's endSessions at client.Disconnect, made before L's test was
+// ever recorded) is still the teardown: L's recording, on another clock, is no
+// bound of it (fakeconn.SetClockID: stamps on two clocks are never ordered).
+// Before, the bound was the latest recording of every clock, L's test, so
+// the endSessions after the whole replay's last test missed and the replay
+// failed while the partial record had judged it green. A recording on no
+// clock still bounds every one (an untrusted time fails closed), and a pool
+// call on no clock is still bounded by every recording.
+func TestUnderMockReplayAnOlderRunsTeardownIsBoundedByItsOwnClock(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const s, l = "proxy:5555", "proxy:1111"
+	sBoot := exactMongo("s-boot", 100*time.Millisecond, models.LifetimePerTest)
+	s1 := exactMongo("s1", time.Second, models.LifetimePerTest)
+	sGap := exactMongo("s-gap", 1500*time.Millisecond, models.LifetimePerTest)
+	s2 := exactMongo("s2", 2*time.Second, models.LifetimePerTest)
+	sEnd := exactMongo("s-end", 3*time.Second, models.LifetimePerTest)
+	onClock(s, sBoot, s1, sGap, s2, sEnd)
+	// L's test, recorded anew 42 s later by another agent run.
+	l1 := exactMongo("l1", 45*time.Second, models.LifetimePerTest)
+	onClock(l, l1)
+	slice := []string{"s-boot", "s-gap", "s-end"}
+	owners := map[string]string{"s1": "k", "s2": "k", "l1": "k"}
+
+	mm := stagedManager(t, []*models.Mock{sBoot, sGap, sEnd}, nil)
+	mm.SetPoolOwners(owners)
+	mm.SetPoolNames(slice)
+	mm.SetRecordingTimes(onDisk(t, sBoot, s1, sGap, s2, sEnd, l1).RangeTimes)
+	after := mm.teardownAfter("k", s)
+	if after == nil || !after(sEnd.Spec.ReqTimestampMock) {
+		t.Fatal("s-end, sent after every test S recorded, is not the teardown of S's clock: a newer run's test, on another clock, bounded it")
+	}
+	for _, mk := range []*models.Mock{sBoot, sGap} {
+		if after(mk.Spec.ReqTimestampMock) {
+			t.Errorf("FALSE GREEN? %s, sent before a test of its own clock, reads as the teardown", mk.Name)
+		}
+	}
+	// The replay: T1 and T2 (S's), then T3 (L's), then the client's
+	// disconnect.
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "before the first test")
+	for _, tc := range []struct {
+		name string
+		own  *models.Mock
+	}{{"T1", s1}, {"T2", s2}, {"T3", l1}} {
+		mm.ServeExactTest(tc.name, []*models.Mock{tc.own})
+		if !mm.DeleteFilteredMock(*tc.own) {
+			t.Fatalf("precondition: %s's own recording did not answer it", tc.name)
+		}
+		mm.ServeExactPool("k", slice)
+	}
+	perTestReads(t, mm, "after the last test", "s-end")
+	if !mm.DeleteFilteredMock(*sEnd) {
+		t.Fatal("the call after the last test (endSessions) was not answered by S's recording of it")
+	}
+
+	t.Run("a recording on no clock bounds every clock", func(t *testing.T) {
+		lu := exactMongo("l-untrusted", 44*time.Second, models.LifetimePerTest)
+		mm := stagedManager(t, []*models.Mock{sBoot, sGap, sEnd}, nil)
+		mm.SetPoolOwners(map[string]string{"s1": "k", "s2": "k", "l1": "k", "l-untrusted": "k"})
+		mm.SetPoolNames(slice)
+		mm.SetRecordingTimes(onDisk(t, sBoot, s1, sGap, s2, sEnd, l1, lu).RangeTimes)
+		if after := mm.teardownAfter("k", s); after != nil && after(sEnd.Spec.ReqTimestampMock) {
+			t.Fatal("FALSE GREEN? a recording on no clock, made after s-end by its time, did not bound S's clock")
+		}
+	})
+	t.Run("a pool call on no clock is bounded by every clock", func(t *testing.T) {
+		if after := mm.teardownAfter("k", ""); after == nil || after(sEnd.Spec.ReqTimestampMock) {
+			t.Fatal("FALSE GREEN? a pool call on no clock, sent before L's test by its time, reads as the teardown")
+		}
+	})
+	// A stated limit: where the test recorded anew (T2, s2 gone from the
+	// set) was its run's last, that run's pool call between its previous
+	// test and it is after every recording left on its clock, so it is the
+	// teardown too. A clock orders only its own run's stamps, and no
+	// recording of the set tells where S's T2 was.
+	t.Run("the stated limit: the gap before a run's last test recorded anew", func(t *testing.T) {
+		mm := stagedManager(t, []*models.Mock{sBoot, sGap, sEnd}, nil)
+		mm.SetPoolOwners(owners)
+		mm.SetPoolNames(slice)
+		mm.SetRecordingTimes(onDisk(t, sBoot, s1, sGap, sEnd, l1).RangeTimes)
+		after := mm.teardownAfter("k", s)
+		if after == nil || !after(sGap.Spec.ReqTimestampMock) || after(sBoot.Spec.ReqTimestampMock) {
+			t.Fatal("the stated limit changed: s-gap, after S's last test left in the set, is not S's teardown, or s-boot is")
+		}
+	})
+	t.Run("a clock none of whose tests remain tells no teardown", func(t *testing.T) {
+		if mm.teardownAfter("k", "proxy:9999") != nil {
+			t.Fatal("FALSE GREEN? a clock no remaining test is on told a teardown bound")
+		}
+	})
+}
+
+// A set recorded in one run is on one clock (the proxy's, or proxyless
+// capture's ktime) or, for an untrusted stamp, on none: its teardown is the
+// same with the clocks read as without them, every recording of the set
+// bounding every pool call, as before the bound was per clock.
+func TestUnderMockReplayOneRunsTeardownIsTheSameWithItsClock(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	mks := func() []*models.Mock {
+		return []*models.Mock{
+			exactMongo("boot", 100*time.Millisecond, models.LifetimePerTest),
+			exactMongo("owned", time.Second, models.LifetimePerTest),
+			exactMongo("owned-2", 1200*time.Millisecond, models.LifetimePerTest),
+			exactMongo("gap", 1500*time.Millisecond, models.LifetimePerTest),
+			// A test's recording on no clock, after the gap: the gap is
+			// before a test's recording, though not before one on its clock.
+			exactMongo("owned-2-untrusted", 2500*time.Millisecond, models.LifetimePerTest),
+			exactMongo("end", 3*time.Second, models.LifetimePerTest),
+			// A pool call on no clock, after every test.
+			exactMongo("end-untrusted", 3500*time.Millisecond, models.LifetimePerTest),
+		}
+	}
+	teardownOf := func(clocked bool) map[string]bool {
+		ms := mks()
+		if clocked {
+			for _, mk := range ms {
+				if mk.Name != "owned-2-untrusted" && mk.Name != "end-untrusted" {
+					onClock("ktime:b00t.1", mk)
+				}
+			}
+		}
+		pool := []*models.Mock{ms[0], ms[3], ms[5], ms[6]}
+		mm := stagedManager(t, pool, nil)
+		mm.SetPoolOwners(map[string]string{"owned": "k", "owned-2": "k", "owned-2-untrusted": "k"})
+		mm.SetPoolNames([]string{"boot", "gap", "end", "end-untrusted"})
+		mm.SetRecordingTimes(onDisk(t, ms...).RangeTimes)
+		got := map[string]bool{}
+		for _, mk := range mm.teardown("k", pool) {
+			got[mk.Name] = true
+		}
+		return got
+	}
+	plain, clocked := teardownOf(false), teardownOf(true)
+	if !plain["end"] || !plain["end-untrusted"] || plain["boot"] || plain["gap"] {
+		t.Fatalf("precondition: the teardown without clocks is %v, want end and end-untrusted", plain)
+	}
+	if len(clocked) != len(plain) || !clocked["end"] || !clocked["end-untrusted"] {
+		t.Fatalf("one run's teardown on its clock is %v, without it %v: the clock changed it", clocked, plain)
 	}
 }

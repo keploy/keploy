@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -186,6 +187,19 @@ func TestDockerIsAlwaysSupportedAndPodmanOnlyWhenRegistered(t *testing.T) {
 	Register(Podman, func(context.Context, *zap.Logger) (Runtime, error) { return Runtime{Name: Podman}, nil })
 	if !Supported(Podman) {
 		t.Fatal("a registered engine must be supported")
+	}
+}
+
+// The refusal for a Podman app names the install command keploy prints
+// everywhere, which writes nothing in the directory it runs in. The one it
+// named before saved the installer as ./install.sh first.
+func TestThePodmanRefusalNamesTheInstallCommand(t *testing.T) {
+	err := Unsupported(Podman)
+	if !strings.Contains(err.Error(), models.InstallCommand) {
+		t.Fatalf("the refusal must name the install command %q, got %q", models.InstallCommand, err)
+	}
+	if strings.Contains(err.Error(), "-O") {
+		t.Fatalf("the refusal names a command that saves the installer in the working directory: %q", err)
 	}
 }
 

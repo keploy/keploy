@@ -2,7 +2,9 @@ package replayer_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -492,5 +494,216 @@ func TestKeployMockReplayAnswersAnExecuteWithItsOwnParametersRecording(t *testin
 	}
 	if got := matchPayload(t, ctx, executeReq(7, "1"), side.mm, dctx); got != "rec-exec-1" {
 		t.Fatalf("the EXECUTE id=1 was answered with %s; want rec-exec-1", got)
+	}
+}
+
+// Under the proven switch, on a set served by the background rules, a command
+// identical to one the open test's own recording already answered is one
+// command more than the test recorded: the background never answers it,
+// though its pool (a recording made at start-up) or its worker scope (one a
+// worker made in an earlier test's window) holds a recording of it. It
+// misses as an extra call, recorded once, and the pool's recording stays the
+// background's: between tests it answers the command. Answered by the
+// background's copy, a test that ran a recorded write twice passed.
+func TestTheBackgroundNeverAnswersACommandOneMoreThanTheTestRecorded(t *testing.T) {
+	for _, scope := range []string{"pool", "worker"} {
+		t.Run(scope, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			s0, _ := diffWindow(0)
+			s1, _ := diffWindow(1)
+			prep, _, _ := betweenTestsRecording()
+			at := s0.Add(7 * time.Millisecond)
+			if scope == "pool" {
+				at = diffBase.Add(-500 * time.Microsecond)
+			}
+			bg := diffMock(scope+"-exec-1", "c1", []mysql.Request{executeReq(7, "1")}, at, models.LifetimePerTest, "mocks")
+			// other is the background's recording of the statement with other
+			// parameters: no call of the test's own, so it answers one.
+			other := diffMock(scope+"-exec-2", "c1", []mysql.Request{executeReq(7, "2")}, at.Add(time.Microsecond), models.LifetimePerTest, "mocks")
+			own := diffMock("t1-exec-1", "c1", []mysql.Request{executeReq(7, "1")}, s1.Add(time.Millisecond), models.LifetimePerTest, "mocks")
+			mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+			defer mm.Close()
+			mm.SetMocksWithWindow(nil, []*models.Mock{prep, bg, other, own}, models.BaseTime, time.Now().Add(time.Hour))
+			seedWindows(mm, 2)
+			var pool []string
+			if scope == "pool" {
+				pool = []string{bg.Name, other.Name}
+				mm.ServeExactBackground(models.RecordedWithS12Routing, pool, nil)
+			} else {
+				mm.ServeExactBackground(models.RecordedWithS12Routing, nil, []string{bg.Name, other.Name})
+				mm.ServeExactWorker([]string{bg.Name, other.Name})
+			}
+			mm.ServeExactTest("T1", []*models.Mock{own})
+			if !mm.ExactServing() {
+				t.Fatal("precondition: test T1 is not served exactly")
+			}
+			ctx, dctx := betweenTestsConn()
+
+			if got := matchPayload(t, ctx, executeReq(7, "1"), mm, dctx); got != own.Name {
+				t.Fatalf("T1's EXECUTE id=1 was answered with %s; want its own %s", got, own.Name)
+			}
+			resp, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), executeReq(7, "1"), mm, dctx)
+			if ok || err != nil {
+				payload := ""
+				if resp != nil {
+					payload = resp.Payload
+				}
+				t.Fatalf("T1's second EXECUTE id=1, one more than it recorded, was answered with %q (err %v)", payload, err)
+			}
+			if !strings.Contains(miss, "extraCall:1") {
+				t.Fatalf("the second EXECUTE id=1 missed with %s; want an extra call, recorded once", miss)
+			}
+			if got := matchPayload(t, ctx, executeReq(7, "2"), mm, dctx); got != other.Name {
+				t.Fatalf("T1's EXECUTE id=2, a call it never recorded, was answered with %s; want the background's %s", got, other.Name)
+			}
+
+			if scope != "pool" {
+				return
+			}
+			mm.ServeExactPool(models.PoolKeyNone, pool)
+			if got := matchPayload(t, ctx, executeReq(7, "1"), mm, dctx); got != bg.Name {
+				t.Fatalf("the EXECUTE id=1 between tests was answered with %s; want the pool's %s", got, bg.Name)
+			}
+		})
+	}
+}
+
+// Under the proven switch, two identical commands run at once on two
+// connections, of a command the open test recorded once, while the
+// background holds an identical recording (the pool's, or the worker
+// scope's): one is answered with the test's own recording, and the other
+// misses as one command more than the test recorded, recorded once. The
+// background's recording stays unspent. The interleave is fixed, not timed:
+// the first command matches the test's recording, and before its consume
+// settles the second runs to its end (MockManager.OnConsume), so the first
+// finds the recording taken and is matched again (matchCommand's retry).
+// Decided on what the test had answered so far, both commands read the
+// background, and the retry answered the first with the background's copy
+// every run: a write the app ran twice at once passed.
+func TestTwoIdenticalCommandsAtOnceOfACommandTheTestRecordedOnceAnswerOnlyOne(t *testing.T) {
+	for _, scope := range []string{"pool", "worker"} {
+		t.Run(scope, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			s0, _ := diffWindow(0)
+			s1, _ := diffWindow(1)
+			prep, _, _ := betweenTestsRecording()
+			at := s0.Add(7 * time.Millisecond)
+			if scope == "pool" {
+				at = diffBase.Add(-500 * time.Microsecond)
+			}
+			bg := diffMock(scope+"-exec-1", "c1", []mysql.Request{executeReq(7, "1")}, at, models.LifetimePerTest, "mocks")
+			own := diffMock("t1-exec-1", "c1", []mysql.Request{executeReq(7, "1")}, s1.Add(time.Millisecond), models.LifetimePerTest, "mocks")
+			mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+			defer mm.Close()
+			mm.SetMocksWithWindow(nil, []*models.Mock{prep, bg, own}, models.BaseTime, time.Now().Add(time.Hour))
+			seedWindows(mm, 2)
+			var pool []string
+			if scope == "pool" {
+				pool = []string{bg.Name}
+				mm.ServeExactBackground(models.RecordedWithS12Routing, pool, nil)
+			} else {
+				mm.ServeExactBackground(models.RecordedWithS12Routing, nil, []string{bg.Name})
+				mm.ServeExactWorker([]string{bg.Name})
+			}
+			mm.ServeExactTest("T1", []*models.Mock{own})
+			if !mm.ExactServing() {
+				t.Fatal("precondition: test T1 is not served exactly")
+			}
+			ctx, dctx := betweenTestsConn()
+			ctx2, dctx2 := betweenTestsConn()
+			ctx2 = context.WithValue(ctx2, models.ClientConnectionIDKey, "c2")
+
+			armed := true
+			var second string
+			mm.OnConsume(func(name string) {
+				if name != own.Name || !armed {
+					return
+				}
+				armed = false
+				second = matchPayload(t, ctx2, executeReq(7, "1"), mm, dctx2)
+			})
+			resp, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), executeReq(7, "1"), mm, dctx)
+			mm.OnConsume(nil)
+			if armed {
+				t.Fatalf("precondition: the first EXECUTE id=1 never came to consume T1's recording (ok %v, miss %s, err %v)", ok, miss, err)
+			}
+			if second != own.Name {
+				t.Fatalf("the EXECUTE id=1 run while the first was consuming was answered with %s; want T1's own %s", second, own.Name)
+			}
+			if ok || err != nil {
+				payload := ""
+				if resp != nil {
+					payload = resp.Payload
+				}
+				t.Fatalf("the first EXECUTE id=1, whose recording the second took, was answered with %q (err %v): two commands of one recorded once both passed", payload, err)
+			}
+			if !strings.Contains(miss, "extraCall:1") {
+				t.Fatalf("the first EXECUTE id=1 missed with %s; want an extra call, recorded once", miss)
+			}
+
+			if scope != "pool" {
+				return
+			}
+			mm.ServeExactPool(models.PoolKeyNone, pool)
+			if got := matchPayload(t, ctx, executeReq(7, "1"), mm, dctx); got != bg.Name {
+				t.Fatalf("the EXECUTE id=1 between tests was answered with %s; want the pool's %s, unspent", got, bg.Name)
+			}
+		})
+	}
+}
+
+// A command one more than the open test recorded ends its connection with a
+// miss that says so to the user: the mismatch report Replay returns names it
+// an extra call (models.MissExtraCall) and the times the test recorded the
+// command, as the HTTP and generic misses do. The rows above read only the
+// matcher's verdict (MatchForTest's miss); dropped from the report, the
+// user read a plain no-match for a test that made one call too many.
+func TestACommandOneMoreThanTheTestRecordedIsReportedAsAnExtraCall(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	s1, _ := diffWindow(1)
+	const sql = "DELETE FROM jobs WHERE id = 1"
+	recording := func(name string, at time.Time) *models.Mock {
+		m := diffMock(name, "c1", []mysql.Request{{PacketBundle: mysql.PacketBundle{
+			Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: uint32(1 + len(sql))}, Type: "COM_QUERY"},
+			Message: &mysql.QueryPacket{Command: mysql.COM_QUERY, Query: sql},
+		}}}, at, models.LifetimePerTest, "mocks")
+		m.Spec.MySQLResponses = []mysql.Response{{PacketBundle: mysql.PacketBundle{
+			Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 7, SequenceID: 1}, Type: mysql.StatusToString(mysql.OK)},
+			Message: &mysql.OKPacket{Header: mysql.OK, StatusFlags: 2},
+		}}}
+		return m
+	}
+	bg := recording("pool-delete-1", diffBase.Add(-500*time.Microsecond))
+	own := recording("t1-delete-1", s1.Add(time.Millisecond))
+	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SetMocksWithWindow(nil, []*models.Mock{replayer.NativeHandshakeForTest(), bg, own}, models.BaseTime, time.Now().Add(time.Hour))
+	seedWindows(mm, 2)
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{bg.Name}, nil)
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	if !mm.ExactServing() {
+		t.Fatal("precondition: test T1 is not served exactly")
+	}
+
+	cmd := append([]byte{mysql.COM_QUERY}, sql...)
+	replies, done := replayer.ReplayCommandsForTest(t, mm, cmd, cmd)
+	if len(replies[0]) == 0 || replies[0][0] != mysql.OK {
+		t.Fatalf("the client read % x for T1's command; want its own recording's OK", replies[0])
+	}
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("T1's command made once more was answered; want a miss that ends the connection")
+	}
+	var r interface {
+		MismatchReport() *models.MockMismatchReport
+	}
+	if !errors.Is(err, models.ErrNoMockMatched) || !errors.As(err, &r) || r.MismatchReport() == nil {
+		t.Fatalf("Replay returned %v for T1's command made once more; want a miss carrying a mismatch report", err)
+	}
+	if rep := r.MismatchReport(); rep.MissKind != models.MissExtraCall || rep.Recorded != 1 || mm.MockSpent(bg.Name) {
+		t.Fatalf("the report says kind %q, recorded %d (background spent %v); want %q, 1, the background unspent: one call more than the test recorded",
+			rep.MissKind, rep.Recorded, mm.MockSpent(bg.Name), models.MissExtraCall)
 	}
 }

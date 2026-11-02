@@ -342,3 +342,52 @@ func TestARefusedClaimOfAnIndexedRecordingRereadsTheStore(t *testing.T) {
 		t.Fatalf("the store refused %d claims of the call; want 1, then a read of the store", db.refused)
 	}
 }
+
+// learnTwinItem is a per-test recording of GET /item/<i>?size=small whose
+// X-Trace header is learned noise.
+func learnTwinItem(name string, i int) *models.Mock {
+	m := learnRecorded(name, time.Duration(i), "GET", "/item/"+strconv.Itoa(i)+"?size=small", "", map[string]string{"X-Trace": "t" + strconv.Itoa(i)}, `{"id":`+strconv.Itoa(i)+`}`)
+	m.Spec.ReqBodyNoise = map[string][]string{"header.x-trace": {}}
+	return m
+}
+
+// newLearnLandingDb is ten learned recordings and twins of GET /item/77.
+func newLearnLandingDb() landingDb {
+	var mocks []*models.Mock
+	for i := 0; i < 10; i++ {
+		mocks = append(mocks, learnTwinItem(fmt.Sprintf("mock-%d", i), i))
+	}
+	for i := 0; i < 2; i++ {
+		mocks = append(mocks, learnTwinItem(fmt.Sprintf("twin-%d", i), 77))
+	}
+	return &landingGenDb{ownGenDb: &ownGenDb{newGenDb(mocks, nil)}}
+}
+
+// learnLanding is a learning parser whose learned index the generation's
+// first two calls of db built, and its call of the twins' request.
+func learnLanding(t *testing.T) func(db landingDb) func() *models.Mock {
+	return func(db landingDb) func() *models.Mock {
+		h := newHTTP()
+		opts := models.OutgoingOptions{Learn: true}
+		n := h.newLearnNoise(opts, nil, nil)
+		call := func(i int) *models.Mock {
+			served, err := h.learnedMatch(context.Background(), live("GET", "/item/"+strconv.Itoa(i)+"?size=small", "", map[string]string{"X-Trace": "live"}), db, n, opts)
+			if err != nil {
+				t.Fatalf("call %d: %v", i, err)
+			}
+			return served
+		}
+		call(0)
+		call(1)
+		return func() *models.Mock { return call(77) }
+	}
+}
+
+// So too of a learned call's verify (learnedGroupOf): the other call's
+// consume of a twin, landing between any two of the call's reads of what is
+// spent, is no difference of the learned index's group.
+func TestAConsumeLandingInALearnedCallsVerifyIsNoDifference(t *testing.T) {
+	_, _, _ = learnOn(t)
+	verifyOff(t)
+	sweepLandings(t, newLearnLandingDb, learnLanding(t), consumeLanding, false, 8, otherTwin(t))
+}

@@ -920,7 +920,74 @@ const (
 // zone neither names is the echo's to read (echoedPairs). Of a time of day
 // only its time of day is cut, to less than a day, and an instant's time of
 // day is the one it writes in its zone or in UTC.
+//
+// Every place of a test set holds its instants, and each drifted value's
+// moment is held against all of them (holdsRecordedIn, holdsLiveIn), so most
+// pairs are two instants no rule can make one of the other: cutsNone turns
+// those away before any rule is tried.
 func cuts(held, m moment, visit func(cutRule) bool) bool {
+	if cutsNone(held, m) {
+		return false
+	}
+	return cutsEach(held, m, visit)
+}
+
+// cutsNone reports, of two instants (neither a time of day) each written in
+// a zone a whole number of minutes off UTC, that no rule of cuts names m by
+// held, from how far apart they stand alone; false where it cannot tell.
+//
+// Every rule cuts one of the two to a unit of precisionUnits and finds the
+// other: held cut to a unit m is whole at (coarser), or m to a unit held is
+// whole at that is longer than FullRoundLead (finer, of a moment read from a
+// text only), each as UTC, held's zone or m's writes it; or one read as the
+// other's wall clock, which moves it by the other's zone. A cut moves an
+// instant by at most its unit. In a zone of whole minutes an instant is whole
+// at a unit of a minute or less as it is in UTC, and whole at a longer one
+// only where it is whole at the minute. So:
+//
+//   - coarser: m stands within the longest unit it is whole at in UTC of held
+//     (of held moved by held's zone, as its wall clock); m whole at the
+//     minute, within a day;
+//   - finer: held, whole at the minute in UTC, stands within a day of m (of m
+//     moved by m's zone, as its wall clock); held not whole at the minute
+//     names no finer m.
+func cutsNone(held, m moment) bool {
+	if held.key.day || m.key.day {
+		return false
+	}
+	hz, mz := held.offset(), m.offset()
+	minute := int64(time.Minute)
+	if hz%minute != 0 || mz%minute != 0 {
+		return false
+	}
+	coarser := int64(nsPerDay)
+	if !whole(m.key.at, 0, minute) {
+		coarser = 0
+		for _, d := range precisionUnits {
+			if u := int64(d); u <= int64(time.Second) && whole(m.key.at, 0, u) {
+				coarser = u
+			}
+		}
+	}
+	var finer int64
+	if !m.typed && whole(held.key.at, 0, minute) {
+		finer = nsPerDay
+	}
+	d := held.key.at - m.key.at
+	within := func(d, u int64) bool { return d <= u && d >= -u }
+	switch {
+	case within(d, max(coarser, finer)):
+		return false
+	case !m.zoned && hz != 0 && within(d+hz, coarser):
+		return false
+	case !held.zoned && mz != 0 && within(d-mz, finer):
+		return false
+	}
+	return true
+}
+
+// cutsEach is cuts past cutsNone: it tries every rule.
+func cutsEach(held, m moment, visit func(cutRule) bool) bool {
 	finer := !m.typed
 	// coarser visits each unit m may be cut to in zone z: every unit m is
 	// whole at (below a day of a time of day), finer than its text's

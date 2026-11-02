@@ -361,22 +361,20 @@ func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrati
 // verifyIndexedVariables compares the recordings the variable pass reads for
 // a call through an indexed read of staging generation gen (withVars) with
 // those it reads from a read's pool (splitVariableMocks), both less what the
-// store reports spent after the read, while gen still holds, and panics on a
-// difference.
+// store reports spent after the read (strictUnspentOnce), while gen still holds,
+// and panics on a difference.
 func verifyIndexedVariables(db integrations.MockMemDb, gen uint64, withVars []*models.Mock) error {
 	_, _, pool, err := strictPool(db)
 	if err != nil {
 		return err
 	}
+	read, _ := splitVariableMocks(pool)
+	unspent := strictUnspentOnce(db)
+	got, want := unspent(withVars), unspent(read)
 	if again, _ := integrations.StagingGenerationOf(db, models.HTTP); again != gen {
 		return nil
 	}
-	read, _ := splitVariableMocks(pool)
-	mockSpent, spent := mockSpentOf(db), spentReaderOf(db)
-	unspent := func(ms []*models.Mock) []*models.Mock {
-		return slices.DeleteFunc(slices.Clone(ms), func(m *models.Mock) bool { return mockSpent(m.Name) || spent(m) })
-	}
-	if got, want := unspent(withVars), unspent(read); !slices.Equal(got, want) {
+	if !slices.Equal(got, want) {
 		panic(fmt.Sprintf("exact view verify: indexed variable recordings: indexed %v, read %v", strictNames(got), strictNames(want)))
 	}
 	return nil
@@ -384,28 +382,34 @@ func verifyIndexedVariables(db integrations.MockMemDb, gen uint64, withVars []*m
 
 // verifyStrictIndexed compares the fits a strict call found through an
 // indexed read of staging generation gen with those of a read's whole pool
-// (strictCompare), both less what the store reports spent after the read,
-// while gen still holds (a test's open or close moves it), and panics on a
-// difference.
+// (strictCompare), both less what the store reports spent after the read
+// (strictUnspentOnce), while gen still holds (a test's open or close moves it),
+// and panics on a difference.
 func verifyStrictIndexed(ctx context.Context, input *req, live destination, db integrations.MockMemDb, gen uint64, fits []*models.Mock, n strictNoise) error {
 	_, _, pool, err := strictPool(db)
 	if err != nil {
 		return err
-	}
-	if again, _ := integrations.StagingGenerationOf(db, models.HTTP); again != gen {
-		return nil
 	}
 	_, pool = splitVariableMocks(pool)
 	all, _, err := strictCompare(ctx, input, live, pool, n)
 	if err != nil {
 		return err
 	}
-	mockSpent, spent := mockSpentOf(db), spentReaderOf(db)
-	unspent := func(ms []*models.Mock) []*models.Mock {
-		return slices.DeleteFunc(slices.Clone(ms), func(m *models.Mock) bool { return mockSpent(m.Name) || spent(m) })
+	unspent := strictUnspentOnce(db)
+	got, want := unspent(fits), unspent(all)
+	if again, _ := integrations.StagingGenerationOf(db, models.HTTP); again != gen {
+		return nil
 	}
-	if got, want := unspent(fits), unspent(all); !slices.Equal(got, want) {
+	if !slices.Equal(got, want) {
 		panic(fmt.Sprintf("exact view verify: indexed strict fits of %s %s: indexed %v, read %v", input.method, newStrictSieve(input, n).path, strictNames(got), strictNames(want)))
 	}
 	return nil
+}
+
+// strictUnspentOnce is unspentOnce of what the strict pass's reads drop: what
+// db reports spent (MockSpent) and what a test kept for its repeats and is
+// over with (integrations.SpentReader).
+func strictUnspentOnce(db integrations.MockMemDb) func([]*models.Mock) []*models.Mock {
+	mockSpent, spent := mockSpentOf(db), spentReaderOf(db)
+	return unspentOnce(func(m *models.Mock) bool { return mockSpent(m.Name) || spent(m) })
 }

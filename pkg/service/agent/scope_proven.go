@@ -161,14 +161,27 @@ type provenWire struct {
 // the order of a test with no recorded begin (recordedStart). latest is the
 // latest recorded start among the tests the session began, and latestTest
 // the test that began there. ended: a test began out of that order, and the
-// session's learn step was ended for the rest of the session. A new session
-// starts a new order (resetSession).
+// session's learn step was ended for the rest of the session. tests, when
+// not nil, are the tests whose recordings the round learns onto
+// (models.OutgoingOptions.LearnTests, learnsOnto); held is the open test the
+// learn step is held for (holdLearn), "" when none is. A new session starts
+// a new order (resetSession).
 type recordedOrder struct {
 	learn      bool
 	starts     map[string]time.Time
 	latest     time.Time
 	latestTest string
 	ended      bool
+	tests      map[string]bool
+	held       string
+}
+
+// learnsOnto reports whether the round learns onto test id's recording:
+// every test's when the session was given no list (an older CLI), else
+// only a listed test's. An ID is matched whole, as the CLI keeps what was
+// learned (mock's learnsOnto).
+func (o recordedOrder) learnsOnto(id string) bool {
+	return o.tests == nil || o.tests[id]
 }
 
 // scopeTest is one attempt of a test: its ID, and its window's start, which
@@ -195,8 +208,16 @@ type missCapturer interface {
 	WithdrawTestErrorCapture()
 }
 
+// RunnableText makes the keploy commands in what the agent tells a developer
+// through a test harness runnable as printed: a harness (go-sdk keploytest,
+// @keploy/playwright) shows the agent's text as it stands, so nothing after
+// the agent can add what a build's commands need. keploy's own commands need
+// nothing, so here it changes nothing; enterprise, whose commands need its
+// staging switch, sets it once, before the agent serves.
+var RunnableText = func(text string) string { return text }
+
 func scopeErr(status int, code, msg, remedy string) *models.ScopeError {
-	return &models.ScopeError{Status: status, Code: code, Message: msg, Remedy: remedy}
+	return &models.ScopeError{Status: status, Code: code, Message: msg, Remedy: RunnableText(remedy)}
 }
 
 // wireLock serialises the wire's operations. A wait for it ends with the
@@ -326,7 +347,7 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		}
 		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
 			msg,
-			"run the test command natively: keploy mock record -c \"<command>\" or keploy mock replay -c \"<command>\"")
+			"run the test command natively, to record: keploy mock record -c \"<command>\"; to replay: keploy mock replay -c \"<command>\"")
 	}
 	if caller == agentPID {
 		return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrNoCaller,
@@ -341,7 +362,7 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	if !procDescends(caller, root) {
 		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
 			fmt.Sprintf("process %d is not part of this keploy run, so keploy cannot capture or mock its calls", caller),
-			`run the test command through keploy: keploy mock record -c "<command>" or keploy mock replay -c "<command>"`)
+			`run the test command through keploy, to record: keploy mock record -c "<command>"; to replay: keploy mock replay -c "<command>"`)
 	}
 	me := claimant{pid: caller, start: start}
 	a.provenMu.Lock()
@@ -560,14 +581,21 @@ func (a *Agent) SetRecordedWindows(_ context.Context, ws []models.TestWindow) er
 // What was learned before stays.
 //
 // A test the recording has no place for (not recorded: no begin, no
-// window) neither ends it nor moves the order. A proxy that cannot end the
-// learn step refuses the begin: its learn step would pair and learn out of
-// the recorded order.
+// window) neither ends it nor moves the order. Nor does a test whose
+// recording the round does not learn onto (learnsOnto): it keeps an earlier
+// record's recording, a partial record's test it did not run or one that
+// failed against real infra, so its times are that record's, and a test
+// recorded later in this record may well run before it. Its own recording
+// learns nothing while it is open (holdLearn), so no late call of the test
+// that ran first can be learned onto it, and the tests after it keep the
+// order of the tests that learn. A proxy that cannot end the learn step
+// refuses the begin: its learn step would pair and learn out of the
+// recorded order.
 func (a *Agent) keepRecordedOrder(id string) *models.ScopeError {
 	a.provenMu.Lock()
 	o := a.proven.order
 	a.provenMu.Unlock()
-	if !o.learn || o.ended || o.latestTest == "" {
+	if !o.learn || o.ended || o.latestTest == "" || !o.learnsOnto(id) {
 		return nil
 	}
 	if start, known := a.recordedStart(id, o.starts); !known || start.After(o.latest) {
@@ -594,11 +622,16 @@ func (a *Agent) keepRecordedOrder(id string) *models.ScopeError {
 
 // noteBegunInOrder moves the session's recorded order (keepRecordedOrder)
 // to test id, which began: to its recorded start (recordedStart), when that
-// is the latest begun.
+// is the latest begun. A test whose recording the round does not learn
+// onto moves nothing (learnsOnto).
 func (a *Agent) noteBegunInOrder(id string) {
 	a.provenMu.Lock()
 	starts := a.proven.order.starts
+	learns := a.proven.order.learnsOnto(id)
 	a.provenMu.Unlock()
+	if !learns {
+		return
+	}
 	start, known := a.recordedStart(id, starts)
 	if !known {
 		return
@@ -608,6 +641,62 @@ func (a *Agent) noteBegunInOrder(id string) {
 	o := &a.proven.order
 	if o.latestTest == "" || !start.Before(o.latest) {
 		o.latest, o.latestTest = start, id
+	}
+}
+
+// holdLearn holds the session's learn step while test id is open, when the
+// session runs it (record's full round) and id's recording is one the round
+// does not learn onto (learnsOnto: a test that keeps an earlier record's
+// recording). The round keeps nothing it would learn on such a recording
+// (the CLI's learnsOnto), so learned in memory it would judge the test on
+// learning no later replay has: a test that passes only here. And its times
+// are the earlier record's, so a late call of a test recorded later that ran
+// before it would be paired with its recording (keepRecordedOrder). Held,
+// the learn step pairs nothing and learns nothing, and the test is judged on
+// its recording as a later replay serves it; the test's close releases it
+// (releaseLearn). It is called at id's begin, before anything is settled or
+// opened. A proxy that cannot hold it refuses the begin.
+func (a *Agent) holdLearn(id string) *models.ScopeError {
+	a.provenMu.Lock()
+	o := a.proven.order
+	a.provenMu.Unlock()
+	if !o.learn || o.learnsOnto(id) {
+		return nil
+	}
+	lh, ok := a.Proxy.(coreAgent.LearnHolder)
+	if !ok {
+		return scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+			"keploy cannot judge "+id+": record's full round does not learn onto its recording, kept from an earlier record, and this keploy agent cannot hold its learn step while the test runs", "run the keploy agent of this keploy version")
+	}
+	if err := lh.SetLearnHeld(true); err != nil {
+		return scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+			"keploy cannot judge "+id+": record's full round does not learn onto its recording, kept from an earlier record, and keploy could not hold its learn step while the test runs: "+err.Error(), "check the agent's log")
+	}
+	a.provenMu.Lock()
+	a.proven.order.held = id
+	a.provenMu.Unlock()
+	a.logger.Debug("keploy runs this test without learning: its recording is kept from an earlier record, which this round does not learn onto", zap.String("test", id))
+	return nil
+}
+
+// releaseLearn releases the learn step holdLearn held for test id, which
+// closed or did not begin; a no-op when it holds none for id.
+func (a *Agent) releaseLearn(id string) {
+	a.provenMu.Lock()
+	held := a.proven.order.held == id && id != ""
+	if held {
+		a.proven.order.held = ""
+	}
+	a.provenMu.Unlock()
+	if !held {
+		return
+	}
+	lh, ok := a.Proxy.(coreAgent.LearnHolder)
+	if !ok {
+		return
+	}
+	if err := lh.SetLearnHeld(false); err != nil {
+		a.logger.Warn("keploy could not take record's full round's learn step back up after a test it held it for; the tests after it learn nothing", zap.String("test", id), zap.Error(err))
 	}
 }
 
@@ -764,11 +853,23 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		}
 		capture = c
 		// In record's full round, a test begun out of its recorded order
-		// ends the round's learn step before anything is settled or opened.
+		// ends the round's learn step before anything is settled or opened,
+		// and one whose recording the round does not learn onto holds it
+		// until its close.
 		if serr := a.keepRecordedOrder(id); serr != nil {
 			return models.ScopeBeginResp{}, serr
 		}
+		if serr := a.holdLearn(id); serr != nil {
+			return models.ScopeBeginResp{}, serr
+		}
 	}
+	// A begin that fails from here releases what holdLearn held.
+	begun := false
+	defer func() {
+		if !begun {
+			a.releaseLearn(id)
+		}
+	}()
 	// The previous test's calls are settled first (settleBegin): they are
 	// never this test's. Calls made since its end are this test's or
 	// background work, and do not hold the begin.
@@ -856,6 +957,7 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	}
 	a.proven.scopeTests[scope] = scopeTest{id: id, start: boundaryTime(at)} // its window's start (BeginScopeAt)
 	a.provenMu.Unlock()
+	begun = true
 	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
 }
 
@@ -972,6 +1074,9 @@ func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time,
 			// Connections from here on are the run's again, in a scope of
 			// their own until the next test (containerkey).
 			containerkey.Default.EndTest()
+			// The learn step it held, if any, is taken back up: calls from
+			// here are the next test's.
+			a.releaseLearn(id)
 		}
 	}()
 	return a.endTest(ctx, id, outcome, at, why)
@@ -1049,6 +1154,17 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	}
 	// Before why: why goes in front of whatever reason the evidence gives.
 	ev, outcome = a.chargeCaptureLosses(ctx, id, ev, outcome, readErr == nil, beganAt)
+	// A value the test gave that its recording does not hold checks
+	// nothing, and the call that carries it misses as a plain call, or
+	// leaves the recorded one unmade: said first, with the step that fixes
+	// it. After the losses, whose text writes the evidence's again. Misses
+	// and unmade calls are read in a replay only (testEvidence, above): a
+	// record has none, so the note is a replay's.
+	if readErr == nil && ev != nil && (len(ev.Misses) > 0 || len(ev.Unconsumed) > 0) {
+		if note := a.givensNotRecorded(id); note != "" {
+			ev.Reason = "keploy: " + note + ". " + strings.TrimPrefix(ev.Reason, "keploy: ")
+		}
+	}
 	if settleErr != nil {
 		note := "keploy could not tell that every call of " + id + " reached it: " + settleErr.Error()
 		if why == "" {
@@ -1652,8 +1768,8 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 	} else {
 		head += " "
 	}
-	return fmt.Sprintf("%sIf this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n"+
-		"If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", head, id, shellQuote(id))
+	return RunnableText(fmt.Sprintf("%sIf this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n"+
+		"If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", head, id, shellQuote(id)))
 }
 
 // missWhys are, for a failed test's reason, why its calls missed, in the

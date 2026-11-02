@@ -94,7 +94,7 @@ require_port_free() {
     echo "stale listener on $APP_PORT would be mistaken for this recording" >&2
     exit 1
   fi
-  if ss -lnt 2>/dev/null | grep -q ":$APP_PORT "; then
+  if ss -lnt 2>/dev/null | grep ":$APP_PORT " >/dev/null; then
     echo "port $APP_PORT is already in use; refusing to run so a stale" >&2
     echo "listener cannot be mistaken for this recording" >&2
     exit 1
@@ -219,7 +219,7 @@ grep -q "specVersion: 1"           "$CFG" || fail "specVersion is not 1"
 # to sit above it. The rule the recorder actually relies on for
 # observed-not-configured is unit-level: uiJoinPorts.observe() is fed
 # models.TestCase.AppPort and nothing else.
-grep -A2 "ingressPorts:" "$CFG" | grep -q -- "- $APP_PORT" \
+grep -A2 "ingressPorts:" "$CFG" | grep -- "- $APP_PORT" >/dev/null \
   || fail "ingressPorts does not contain the port traffic actually arrived on ($APP_PORT)"
 
 # A plausible epoch-ms span. Guards the seconds-vs-milliseconds mix-up

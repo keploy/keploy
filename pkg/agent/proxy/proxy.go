@@ -652,6 +652,13 @@ type Proxy struct {
 	// names the CA path, instead of silently verifying against roots that are
 	// missing the operator's anchor.
 	upstreamTLSLoadFailed bool
+
+	// peekChunkWindow is how long one of the opportunistic-TLS relay
+	// loop's reads or writes may block before the loop looks at its
+	// context again (peekChunkTimeout); zero is opportunisticPeekChunkTimeout.
+	// Only tests set it: a window longer than the test's own deadline
+	// turns "the stop never waited a window out" into "the stop returned".
+	peekChunkWindow time.Duration
 }
 
 // SetCBShim wires the eBPF channel-binding shim handle into the proxy.
@@ -1413,7 +1420,7 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 
 	// The replayer makes the client's TLS handshake itself, on its
 	// SSLRequest: charged as the proxy's own client handshakes are.
-	reportCtx := p.withClientTLS(parserCtx, dstAddr, outgoingOpts.SrcPid)
+	reportCtx := p.withClientTLS(parserCtx, dstAddr, srcProcess(outgoingOpts))
 	mysqlDst := &models.ConditionalDstCfg{Addr: dstAddr}
 	err := mysqlMocker.MockOutgoing(reportCtx, srcConn, mysqlDst, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 	p.countParserPanic(err, integrations.MYSQL, dstAddr)
@@ -1931,6 +1938,14 @@ func (p *Proxy) setMockManager(m *MockManager) {
 		// Each staging stages the tracker's running set, though the set
 		// may have begun before m was made (Mock).
 		m.SetTrackerSetAt(p.learnTracker.SetAt)
+		// Each serve is filed as the open test's own or the start-up's, or
+		// as neither (a worker: scope's, the background's), as m's view in
+		// force says: a call checked against the test's own recording is
+		// read in a span only those serves start (learn.Tracker.LiveSpanOf).
+		p.learnTracker.SetServeOwner(m.ServedAsOwnOrStartup)
+	} else if provenswitch.On() {
+		// No manager serves: the tracker keeps no hold on the one it drops.
+		p.learnTracker.SetServeOwner(nil)
 	}
 	p.sessionMu.Lock()
 	prev := p.mockManager
@@ -2768,6 +2783,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// copy so the mock-serve and record-capture paths can attribute the call to
 	// the test worker that made it (per-PID scoping). 0 when unavailable.
 	outgoingOpts.SrcPid = destInfo.KernelPid
+	outgoingOpts.SrcNsPid = destInfo.AgentNsPid
 	if p.mockMode {
 		starts.Default.Note(fmt.Sprint(clientConnID), outgoingOpts.SrcPid, time.Now())
 	}
@@ -3091,7 +3107,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// Built HERE, in handleConnection scope, so it holds pointers to
 			// the real srcConn/dstConn variables the deferred close uses —
 			// not to copies. See recordMySQLOutgoing's doc comment.
-			mysqlUpgrader := util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr, outgoingOpts.SrcPid))
+			mysqlUpgrader := util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr, srcProcess(outgoingOpts)))
 			return p.recordMySQLOutgoing(parserCtx, srcConn, dstConn, rule.MC,
 				parserErrGrp, mysqlLogger, clientConnID, destConnID, outgoingOpts, mysqlUpgrader)
 		}
@@ -3405,7 +3421,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		var tlsSrcConn net.Conn
 		// What the handshake, and the client just after it, lose is charged
 		// to the destination (clientTLS).
-		hsCtx = p.withClientTLS(hsCtx, dstAddr, outgoingOpts.SrcPid)
+		hsCtx = p.withClientTLS(hsCtx, dstAddr, srcProcess(outgoingOpts))
 		tlsSrcConn, isMTLS, err = pTls.HandleTLSConnection(hsCtx, p.logger, srcConn, rule.Backdate)
 		probeProxy(p.logger, "tls-handshake-done", clientConnID,
 			zap.Int("srcPort", sourcePort),
@@ -3855,7 +3871,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if parserType == integrations.MYSQL ||
 				parserType == integrations.POSTGRES_V2 ||
 				parserType == integrations.POSTGRES_V3 {
-				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr, outgoingOpts.SrcPid))
+				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr, srcProcess(outgoingOpts)))
 			}
 			session := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, upgrader)
 			err := matchedParser.RecordOutgoing(parserCtx, session)
@@ -3884,6 +3900,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// each miss and answer it takes (UnmatchedCall.Source).
 			srcPid := outgoingOpts.SrcPid
 			testCtx := models.WithMockMismatchReporter(parserCtx, func(err error) { p.sendMockNotFoundErrorFrom(err, srcPid, dstCfg) })
+			// A replayer that makes the client's TLS handshake itself, in
+			// band (Postgres's, on an SSLRequest), has it charged as the
+			// proxy's own client handshakes are, and a build's client TLS
+			// gate readied for it (withClientTLS), as mockMySQLOutgoing's.
+			testCtx = p.withClientTLS(testCtx, dstAddr, srcProcess(outgoingOpts))
 			// A test's end tells this connection's requests apart only if its
 			// parser answers before it reads again, or marks what it holds
 			// (inflight.go).
@@ -4471,6 +4492,10 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 		// a set's later cycle (SetLearnEnded).
 		p.getMockManager().SetLearnEnded(false)
 		p.learnTracker.SetLearnEnded(false)
+		// Nor is it held: a test that held it belongs to the previous
+		// session (SetLearnHeld).
+		p.getMockManager().SetLearnHeld(false)
+		p.learnTracker.SetLearnHeld(false)
 	}
 
 	// Drop any per-worker scopes from a prior session so a crashed worker that
@@ -4771,6 +4796,25 @@ func (p *Proxy) OpenExactTest(test string, owned []*models.Mock, given []models.
 	return p.openExact(func(m *MockManager) { m.OpenExactTest(test, owned, given) })
 }
 
+// GiveExactTest implements agent.ExactTestGiver (MockManager.GiveExactTest).
+// Under the proven switch the learn step also holds the value as an earlier
+// place of the test's calls (learn.Tracker.GiveValue), so a value made from
+// it (a part, a pick by the clock) is refused naming the given, never learned
+// as noise.
+func (p *Proxy) GiveExactTest(test string, b models.VariableBinding) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	if err := m.GiveExactTest(test, b); err != nil {
+		return err
+	}
+	if provenswitch.On() {
+		p.learnTracker.GiveValue(learn.TestGiven(b.Mock, b.Name, b.Recorded, b.Value))
+	}
+	return nil
+}
+
 // openExact opens a test under exact serving on the mock manager (open).
 func (p *Proxy) openExact(open func(*MockManager)) error {
 	m := p.getMockManager()
@@ -4949,7 +4993,7 @@ func (p *Proxy) SetRecordedOfKind(src func(kind models.Kind, visit func(name str
 var _ agent.RecordedOfKindSetter = (*Proxy)(nil)
 
 // SetRecordingTimes implements agent.RecordingTimesSetter (exact.go).
-func (p *Proxy) SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error) error {
+func (p *Proxy) SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error) error {
 	m := p.getMockManager()
 	if m == nil {
 		return errNoMockManager
@@ -5062,6 +5106,27 @@ func (p *Proxy) SetLearnEnded(ended bool) error {
 
 var _ agent.LearnEndSetter = (*Proxy)(nil)
 
+// SetLearnHeld implements agent.LearnHolder: the mock store holds the learn
+// step (MockManager.SetLearnHeld), and so does the learn tracker the parsers
+// find on their connection's context (learn.Tracker.SetLearnHeld). With no
+// mock manager there is no learn step to release; one to hold is refused
+// (errNoMockManager).
+func (p *Proxy) SetLearnHeld(held bool) error {
+	m := p.getMockManager()
+	if m == nil {
+		if held {
+			return errNoMockManager
+		}
+		p.learnTracker.SetLearnHeld(false)
+		return nil
+	}
+	m.SetLearnHeld(held)
+	p.learnTracker.SetLearnHeld(held)
+	return nil
+}
+
+var _ agent.LearnHolder = (*Proxy)(nil)
+
 // SetKeptLearning implements agent.KeptLearningSetter: the mock store puts
 // what keploy record keeps of the set's first-cycle learning on the staged
 // recordings it hands out (MockManager.SetKeptLearning). With no mock
@@ -5112,9 +5177,10 @@ func (p *Proxy) ExactTestOutcome() (string, []string, []string, bool) {
 }
 
 var (
-	_ agent.ExactServer        = (*Proxy)(nil)
-	_ agent.ExactTestOpener    = (*Proxy)(nil)
-	_ agent.WindowedTestOpener = (*Proxy)(nil)
+	_ agent.ExactServer            = (*Proxy)(nil)
+	_ agent.ExactTestOpener        = (*Proxy)(nil)
+	_ agent.WindowedTestOpener     = (*Proxy)(nil)
+	_ agent.LearnedElsewhereReader = (*Proxy)(nil)
 )
 
 // GetConsumedMocks returns the consumed filtered mocks.
@@ -5145,6 +5211,18 @@ func (p *Proxy) GetPersistentConsumed() map[string]models.MockState {
 		return nil
 	}
 	return m.GetPersistentConsumed()
+}
+
+// LearnedElsewhere forwards what the mock manager's learn step taught
+// recordings from calls made in other windows than theirs
+// (MockManager.LearnedElsewhere; implements coreAgent.LearnedElsewhereReader).
+// nil when no manager.
+func (p *Proxy) LearnedElsewhere() []models.MockState {
+	m := p.getMockManager()
+	if m == nil {
+		return nil
+	}
+	return m.LearnedElsewhere()
 }
 
 // testErrorAccumulator collects errors during an active test case.
@@ -5849,6 +5927,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					Differs:          parserErr.MismatchReport.Differs,
 					FieldReasons:     parserErr.MismatchReport.FieldReasons,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
+					Given:            parserErr.MismatchReport.Given,
 					NotOwned:         parserErr.MismatchReport.NotOwned,
 					// Why the call missed, when record's full round's learn
 					// step decided it: judging's evidence.

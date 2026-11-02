@@ -131,10 +131,10 @@ record() {
   sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "docker compose up" --container-name "$APP" \
     --disable-tele --disable-ansi > "$log" 2>&1 &
   pid=$!
-  # Once the app listens, keploy's agent moves its socket and listens on its
-  # port itself (ingress forwarding); a call before that is reset, so the
-  # calls wait for it.
-  if await "$log" "$pid" "APP LISTENING" 1 && await "$log" "$pid" "Started ingress forwarding" 1; then
+  # The calls go as soon as the app says it listens, as a user's would: keploy
+  # holds the app's port from its bind until its own forwarder listens there,
+  # so a call in between is answered and recorded, not reset.
+  if await "$log" "$pid" "APP LISTENING" 1; then
     for p in /hello/one /hello/two; do
       if curl -fsS -o /dev/null --max-time 10 "http://127.0.0.1:$hp$p"; then
         made=$((made + 1))

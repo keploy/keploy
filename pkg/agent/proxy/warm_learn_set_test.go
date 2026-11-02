@@ -72,7 +72,7 @@ func newWarmRow(t *testing.T, logger *zap.Logger) *warmRow {
 // The agent reads a staged set's recordings for the learn step (WarmLearnSet) in record's full
 // round alone, while the set's learn step is on, and there it reads every
 // recording of the set: those the manager stages and those of later tests
-// the on-disk store keeps. Any other session reads none of them, not one
+// the on-disk store keeps, held or not (SetLearnHeld). Any other session reads none of them, not one
 // read of the store: keploy test's replay, keploy mock's replay and a
 // retry cycle after the learn step ended (SetLearnEnded) learn nothing, so
 // a staging there would read the set's recordings, on every set, for
@@ -90,6 +90,14 @@ func TestAStagedSetIsReadForTheLearnStepInRecordsFullRoundAlone(t *testing.T) {
 			r.mm.SetPairing(true)
 			mustLearnEnded(t, r.p, true)
 			mustLearnEnded(t, r.p, false)
+		}, true},
+		// A held learn step (a kept test is open) still serves what is
+		// exactly a recording, so it reads the set's recordings too.
+		{"the learn step held", func(t *testing.T, r *warmRow) {
+			r.mm.SetPairing(true)
+			if err := r.p.SetLearnHeld(true); err != nil {
+				t.Fatal(err)
+			}
 		}, true},
 		{"proven switch off", func(t *testing.T, r *warmRow) {
 			r.mm.SetPairing(true)

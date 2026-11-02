@@ -1206,7 +1206,8 @@ var (
 // for as long as the agent serves it: until it answers, the agent this client
 // started exits (whileAgentRuns), the connection ends (an agent that dies
 // closes it; a host that is gone stops answering its keepalives), or ctx ends
-// (the run is stopped, or the test set's app exited). There is no deadline: on
+// (the run is stopped; replay calls a test case's hooks on the run's context,
+// not its test set's, which the set's app exit cancels). There is no deadline: on
 // a starved host a hook takes what it takes, and an agent that is alive but
 // never answers is for the user or the job's own limit to stop, as an app that
 // never answers a test is; while it waits keploy says so. The 50 s deadline
@@ -1858,6 +1859,40 @@ func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState,
 	}
 
 	return consumedMocks, nil
+}
+
+// GetLearnedElsewhere reads what record's full round's learn step taught
+// recordings from calls made in other windows than theirs, for learning
+// only (the agent's /mock/learned-elsewhere): one state per recording, none
+// of it consumption. An agent that cannot say (404, 501) learned none: nil.
+func (a *AgentClient) GetLearnedElsewhere(ctx context.Context) ([]models.MockState, error) {
+	url := fmt.Sprintf("%s/mock/learned-elsewhere", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %s", err.Error())
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to ask keploy's agent what it learned from calls made in other windows: %s", err.Error())
+	}
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for learned-elsewhere")
+		}
+	}()
+	switch res.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound, http.StatusNotImplemented:
+		return nil, nil
+	default:
+		rawBody, _ := readAgentBody(res)
+		return nil, agentRespErr("get what was learned from calls made in other windows", res, rawBody)
+	}
+	var learned []models.MockState
+	if err := json.NewDecoder(res.Body).Decode(&learned); err != nil {
+		return nil, fmt.Errorf("failed to decode what keploy's agent learned from calls made in other windows: %s", err.Error())
+	}
+	return learned, nil
 }
 
 // GetServedMocks returns the mocks served so far this session, keyed by name.
@@ -2735,8 +2770,7 @@ func (a *AgentClient) requestAgentStop() error {
 	// connection for being idle: a POST is not resent, so the request failed
 	// ("server closed idle connection") with an agent that was not going
 	// away, and that agent was signalled at once.
-	client := a.client
-	client.Transport = ownConnections(client.Transport)
+	client := a.ownConnection()
 	res, err := client.Do(req)
 	if err != nil {
 		return err
@@ -4382,7 +4416,10 @@ func (a *AgentClient) EndRecordingStreams(ctx context.Context, token string) err
 	if err != nil {
 		return err
 	}
-	resp, err := a.client.Do(req)
+	// A round's end cancels this request once the streams are read to their
+	// markers, which the agent sends just before it answers (ownConnection).
+	client := a.ownConnection()
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -4443,7 +4480,10 @@ func (a *AgentClient) awaitStopNotice(ctx context.Context) (answered bool, err e
 	if err != nil {
 		return false, err
 	}
-	resp, err := a.client.Do(req)
+	// Held open beside the run's requests, and cancelled as the run ends
+	// (ownConnection).
+	client := a.ownConnection()
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, err
 	}
@@ -4845,19 +4885,20 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // not run on an agent that serves its tests and pool otherwise.
 //
 // windows are the recorded window of every test of the set
-// (models.ScopeTableReq.Windows), sent with them: the agent installs them
-// before it serves the pool.
-func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[string][]string, windows []models.TestWindow) (retErr error) {
+// (models.ScopeTableReq.Windows), and given the values each test gave when
+// it was recorded (models.ScopeTableReq.Given), sent with them: the agent
+// installs both before it serves the pool.
+func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) (retErr error) {
 	if pool == nil {
 		pool = map[string][]string{}
 	}
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			t, p, w := maps.Clone(table), maps.Clone(pool), slices.Clone(windows)
-			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, w) })
+			t, p, w, g := maps.Clone(table), maps.Clone(pool), slices.Clone(windows), maps.Clone(given)
+			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, w, g) })
 		}
 	}()
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Windows: windows})
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Windows: windows, Given: given})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}

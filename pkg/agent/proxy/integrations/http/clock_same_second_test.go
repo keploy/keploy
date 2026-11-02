@@ -158,6 +158,59 @@ func TestASameSecondClockReadOfAnEarlierCallIsNoSourceWhereThatCallMovedApart(t 
 	}
 }
 
+// The HTTP learn step reads F's serves as of the call's arrival
+// (learn.Order.ArrivedAt(input.arrived)), as Mongo's and Postgres's do. A
+// start-up recording that sent the PUT's recorded second, which F serves only
+// while the PUT waits for its learn read (a sibling aloft beside it), is one F
+// had not served before the PUT: no source of its second, which is learned as
+// the PUT's own read of the clock. Served before the PUT arrived, it stays the
+// source, and the PUT is refused naming it, as before. Without the cut the
+// verdict would follow the wait, which grows with load.
+func TestLearnMatchASiblingServedAfterTheCallArrivedIsNoSourceOfItsClockRead(t *testing.T) {
+	recBegin := learnAt.Add(800 * time.Millisecond)
+	base := learnAt.Add(10 * time.Minute) // F's begin, on the real clock
+	late := recBegin.Add(4660 * time.Millisecond)
+	appClock := func(r time.Time) (time.Time, bool) { return late.Add(r.Sub(base)), true }
+	startUp := &models.Mock{Name: "mock-17", Kind: models.GENERIC, Spec: models.MockSpec{
+		ReqTimestampMock: learnAt.Add(297 * time.Millisecond), ResTimestampMock: learnAt.Add(298 * time.Millisecond),
+		GenericRequests: []models.Payload{{Origin: models.FromClient, Message: []models.OutputBinary{{Type: "utf-8",
+			Data: `{"find":"branches","filter":{"status":"merged","expires_at":{"$lte":{"$numberLong":"1791972000"}}}}`}}}}}}
+	for _, tc := range []struct {
+		name     string
+		servedAt time.Duration // past F's begin; the PUT arrives at 3 ms
+		learns   bool
+	}{
+		{"served while the PUT waited for its learn read", 4 * time.Millisecond, true},
+		{"served before the PUT arrived", 2500 * time.Microsecond, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			tr := learn.NewTracker()
+			tr.SetClientTests(true)
+			tr.SetAppClock(appClock)
+			tr.RecordedBegin(recBegin)
+			tr.BeginAt(base)
+			ctx := learn.WithTracker(context.Background(), tr)
+			put := learnRecorded("mock-199", 817800*time.Microsecond, "PUT", "/v1/secret/data/pat/e2e-go-key",
+				`{"data":{"lastUsedAt":1791972000,"name":"e2e-go"},"options":{"cas":1}}`, nil, `{"data":{"version":2}}`)
+			db := &learnDb{perTest: []*models.Mock{put}, pool: map[time.Time]bool{startUp.Spec.ReqTimestampMock: true}, staged: []*models.Mock{startUp}}
+			tr.ServedMockAt(startUp, base.Add(tc.servedAt))
+			in := live("PUT", "/v1/secret/data/pat/e2e-go-key", `{"data":{"lastUsedAt":1791972005,"name":"e2e-go"},"options":{"cas":1}}`, nil)
+			in.arrived = base.Add(3 * time.Millisecond)
+			got, miss, err := h.learnMatch(ctx, in, db, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.learns && (got == nil || !learnedClockRead(db.consumed[len(db.consumed)-1].Spec, "body.data.lastUsedAt")) {
+				t.Fatalf("served %v miss %+v; want body.data.lastUsedAt learned as the PUT's own read of the clock, mock-17 set aside", got != nil, miss)
+			}
+			if !tc.learns && (got != nil || miss == nil || !strings.Contains(miss.res.Why, "mock-17")) {
+				t.Fatalf("served %v miss %+v; want it refused, naming mock-17", got != nil, miss)
+			}
+		})
+	}
+}
+
 // A value test A's call sent where its learn step learned a plain read of the
 // clock (a vault PUT's lastUsedAt), which test B's call sends in the same
 // second, is B's own read of the clock where nothing else explains it, and

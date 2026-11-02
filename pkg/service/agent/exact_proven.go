@@ -207,10 +207,10 @@ func (a *Agent) readUnstagedFromDisk() error {
 }
 
 // diskRecordingTimes visits, of the set staged, every on-disk mock's name,
-// request and answer times and protocol phase (DiskMocks.RangeTimes), nil
+// request and answer times, protocol phase and clock (DiskMocks.RangeTimes), nil
 // when the set's mocks are all resident, and so all staged in the proxy's
 // trees.
-func (a *Agent) diskRecordingTimes() func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error {
+func (a *Agent) diskRecordingTimes() func(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error {
 	disk := a.stagedDisk()
 	if disk == nil {
 		return nil

@@ -321,3 +321,57 @@ func TestAfterTestRunWithoutAgentLeavesOutOnlyTheAgent(t *testing.T) {
 	require.NoError(t, h.AfterTestRun(withoutAgent(context.Background()), "test-run-0", nil, models.TestCoverage{}))
 	require.EqualValues(t, 1, agent.afterTestRuns.Load(), "the agent's hook was called with no agent left")
 }
+
+// afterRunRefusingAgent is an agent whose after-test-run hook fails, as an
+// enterprise agent's does when it could not write the row of a program it
+// saw off the run's clock.
+type afterRunRefusingAgent struct {
+	*bpNoAgent
+	err error
+}
+
+func (a *afterRunRefusingAgent) AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
+	_ = a.bpNoAgent.AfterTestRun(ctx, testRunID, testSetIDs, coverage)
+	return a.err
+}
+
+// Under the proven switch, the agent's failed after-test-run hook is the
+// run's hook's error, so a caller does not judge the run on the checks the
+// agent did not finish (keploy test reads it as not judged); the run's own
+// cancel cause is named beside it. Without the switch it is logged and the
+// hook returns nil, as before.
+func TestAfterTestRunHandsOnTheAgentsFailureUnderTheSwitch(t *testing.T) {
+	// The agent client's error for the enterprise agent's refusal.
+	refused := errors.New("agent hook failed: 500: the run's rows miss /usr/bin/curl (started without keploy's clock shim (LD_PRELOAD): it reads the real clock): keploy's agent could not write its row: open /run/keploy-clock/unfrozen.json: permission denied")
+	newRun := func() (*Hooks, *afterRunRefusingAgent, *observer.ObservedLogs) {
+		core, logs := observer.New(zap.DebugLevel)
+		agent := &afterRunRefusingAgent{bpNoAgent: &bpNoAgent{}, err: refused}
+		return newHooks(zap.New(core), &config.Config{}, agent, false), agent, logs
+	}
+
+	t.Setenv(provenswitch.Env, "1")
+	h, agent, logs := newRun()
+	err := h.AfterTestRun(context.Background(), "test-run-0", []string{"test-set-0"}, models.TestCoverage{})
+	require.ErrorIs(t, err, refused)
+	var unfinished *models.AgentRunUnfinishedError
+	require.ErrorAs(t, err, &unfinished, "the caller tells the agent's failure from any other hook's")
+	require.EqualError(t, err, "keploy's agent did not finish checking the run's tests: "+refused.Error())
+	require.EqualValues(t, 1, agent.afterTestRuns.Load())
+	require.Zero(t, logs.FilterMessage("failed to call AfterTestRun hook").Len(), "the caller logs the error it is handed; the hook does not log it too")
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(errors.New("the agent exited"))
+	err = h.AfterTestRun(ctx, "test-run-0", nil, models.TestCoverage{})
+	require.ErrorIs(t, err, refused)
+	require.ErrorContains(t, err, "(the agent exited)")
+
+	h, agent, _ = newRun()
+	require.NoError(t, h.AfterTestRun(withoutAgent(context.Background()), "test-run-0", nil, models.TestCoverage{}))
+	require.Zero(t, agent.afterTestRuns.Load(), "a run with no agent left calls none")
+
+	t.Setenv(provenswitch.Env, "")
+	h, agent, logs = newRun()
+	require.NoError(t, h.AfterTestRun(context.Background(), "test-run-0", nil, models.TestCoverage{}), "without the switch the agent's failure is only logged")
+	require.EqualValues(t, 1, agent.afterTestRuns.Load())
+	require.Equal(t, 1, logs.FilterMessage("failed to call AfterTestRun hook").Len())
+}

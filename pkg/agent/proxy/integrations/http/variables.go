@@ -346,6 +346,11 @@ type varProblem struct {
 	actual   string
 	why      string
 	next     string
+	// given is name when the problem is a given's own: the call carried
+	// another value than the test gave, or a value of another JSON type, or
+	// this run's test did not give it before the call. The miss names it
+	// (MockMismatchReport.Given).
+	given string
 }
 
 func (p *varProblem) diff() string {
@@ -524,6 +529,9 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 					why:  fmt.Sprintf("variable %s at %s: the call sent %s where the recording has %s, a value of another JSON type", d.name, vp.raw, l.raw, r.raw),
 					next: "the application changed the type of the value it sends at " + vp.raw + ": if that is intended, re-record the test; otherwise fix the application",
 				}
+				if models.IsGivenVariable(d.name) {
+					typeChange.given = d.name
+				}
 			}
 			if asRecorded, ok = asRecorded.putBack(vp.place, r); !ok {
 				return nil, nil
@@ -603,7 +611,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 		if bound, ok := table.Lookup(d.name); ok {
 			hit.saw[bound.Name] = bound.Value
 			if !variables.SameValue(bound.Recorded, d.recorded, false) {
-				if bound.Given {
+				if bound.Given && !models.IsGivenVariable(d.name) {
 					// A template key holds one recorded value for the whole
 					// set: a call that names it with another is no call of
 					// another test, but a declaration keploy cannot follow.
@@ -611,7 +619,9 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 				}
 				// Recorded with another value than the one the test bound: a
 				// call of another test (reusable mocks are seen by every
-				// test), not this one.
+				// test), not this one. A value a test gave (a given) is the
+				// test's alone, so one recorded with another value is
+				// another test's too.
 				return nil, nil
 			}
 			if p := holdsAt(m.Name, d, places, bound.Value, bound.Mock, bound.Place, liveAt); p != nil {
@@ -626,6 +636,14 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 				sent = liveAt[d.use[0].place.String()].value
 			} else {
 				place = d.answer[0].raw
+			}
+			if models.IsGivenVariable(d.name) {
+				// No call binds a given: the test gives it.
+				return nil, &varProblem{
+					mock: m.Name, name: d.name, place: place, actual: sent, given: d.name,
+					why:  fmt.Sprintf("the recording's test gave %s, which this call carries at %s; this run's test did not give it before this call", d.name, place),
+					next: fmt.Sprintf("give %s in the test before the application makes this call, as the test did when it was recorded; if the test no longer gives it, re-record the test", d.name),
+				}
 			}
 			why := fmt.Sprintf("variable %s is used at %s before the call that binds it was made in this test", d.name, place)
 			if models.RunVariable(d.name) {
@@ -687,6 +705,18 @@ func holdsAt(mock string, d varDecl, places []varPlace, want, boundMock, boundPl
 		verb := "sent"
 		if d.bind != nil && vp.raw == d.bind.raw {
 			verb = "sent, at a place that binds it,"
+		}
+		if models.IsGivenVariable(d.name) {
+			// The test gave the value (boundPlace: where, if it said).
+			where := ""
+			if boundPlace != "" {
+				where = " (" + boundPlace + ")"
+			}
+			return &varProblem{
+				mock: mock, name: d.name, place: vp.raw, kind: models.DiffKindVariable, expected: want, actual: l.value, given: d.name,
+				why:  fmt.Sprintf("the test gave %s = %q%s, and this call %s %q at %s: the application did not pass on the value the test gave", d.name, want, where, verb, l.value, vp.raw),
+				next: fmt.Sprintf("the application sent another value at %s than %s, the value the test gave: fix the application; if the call no longer carries the test's value, re-record the test", vp.raw, d.name),
+			}
 		}
 		return &varProblem{
 			mock: mock, name: d.name, place: vp.raw, kind: models.DiffKindVariable, expected: want, actual: l.value,
@@ -821,13 +851,20 @@ func (h *HTTP) variableMember(ctx context.Context, input *req, scope varScope, h
 // a disagreement of the check and the table: a problem, never a retry, which
 // would be refused again forever.
 func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrations.MockMemDb) (served *models.Mock, problem *varProblem, retry bool, err error) {
-	return h.serveVariablesBy(hit, func(m *models.Mock) bool { return h.updateMock(ctx, m, mockDb, nil) })
+	return h.serveVariablesBy(hit, mockDb, func(m *models.Mock) bool { return h.updateMock(ctx, m, mockDb, nil) })
 }
 
 // serveVariablesBy is serveVariables with consume taking the mock from the
 // mock store (false: another connection took it first): the HTTP parser's
-// updateMock, or another parser's own consume (VariableMatch).
-func (h *HTTP) serveVariablesBy(hit *varHit, consume func(*models.Mock) bool) (served *models.Mock, problem *varProblem, retry bool, err error) {
+// updateMock, or another parser's own consume (VariableMatch). A background
+// recording mockDb refuses the call (integrations.RefusesAnswer: the call is
+// one of the open test's own) binds nothing and is refused as at its consume
+// door: the call is checked again, and the recording's variables stay
+// unbound for the call it is the recording of.
+func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, consume func(*models.Mock) bool) (served *models.Mock, problem *varProblem, retry bool, err error) {
+	if integrations.RefusesAnswer(mockDb, hit.mock) {
+		return nil, nil, true, nil
+	}
 	loaded, err := withResponse(hit.mock)
 	if err != nil {
 		return nil, nil, false, err
@@ -1034,6 +1071,7 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 		b = b.WithRenderedRequests(renderMockRequest(closest.Spec.HTTPReq, closest.Noise), renderLiveRequest(request, liveBody, closest.Noise))
 	}
 	r := b.Build()
+	r.Given = p.given
 	// The problem's own place, the path places the closest mock and the
 	// mocks on this call's route declare, and the segments that hold a value
 	// the test bound (routePathPlaces) hold the application's values: the

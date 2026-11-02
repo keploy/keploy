@@ -208,7 +208,10 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				// The miss was decided where the command first read the
 				// round: whether that read found a staging is told from it.
 				integrations.StampMark(report, miss.call)
-				if miss.matchPhase == models.MatchPhaseNoMocks && !miss.restaged {
+				if miss.extraCall > 0 {
+					report.MissKind, report.Recorded = models.MissExtraCall, miss.extraCall
+				}
+				if miss.matchPhase == models.MatchPhaseNoMocks && !miss.restaged && miss.extraCall == 0 {
 					// The pool held no data mock for the command phase to compare
 					// against — at most handshake/config mocks survived the
 					// lifetime filter, or the pool was empty. That is a

@@ -894,6 +894,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			if provenswitch.On() {
 				stampBegins(byCase, windows)
 				stampReal(byCase, windows)
+				stampGiven(byCase, windows)
 			}
 			if len(starts) > 0 {
 				m.upsertCases(persistCtx, name, byCase, nil, suites)
@@ -1334,6 +1335,29 @@ func stampReal(byCase map[string]models.MappedTestCase, windows []models.ScopeWi
 		tc := byCase[w.Name]
 		tc.Real = mergeSorted(tc.Real, realDests(w.Real))
 		byCase[w.Name] = tc
+	}
+}
+
+// stampGiven writes into each test's mapping the values it gave while it was
+// open (models.ScopeWindow.Given), in the order it gave them: each replay
+// binds the value the test gives then with the recorded one. Of a name with
+// more than one window (a subtest run twice) the latest window's are kept,
+// none included, as a retried test keeps its last attempt's (foldRetries):
+// they pair with that attempt's calls.
+func stampGiven(byCase map[string]models.MappedTestCase, windows []models.ScopeWindow) {
+	last := make(map[string]int, len(windows))
+	for i, w := range windows {
+		if j, ok := last[w.Name]; !ok || !w.Start.Before(windows[j].Start) {
+			last[w.Name] = i
+		}
+	}
+	for name, i := range last {
+		tc, ok := byCase[name]
+		if !ok && len(windows[i].Given) == 0 {
+			continue
+		}
+		tc.Given = slices.Clone(windows[i].Given)
+		byCase[name] = tc
 	}
 }
 

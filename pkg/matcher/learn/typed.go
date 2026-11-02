@@ -433,7 +433,7 @@ const (
 // timeOfDayClientTestWhy is why a time of day (TimeOfDayLeaf) that changed
 // is refused in keploy mock's client tests: no window holds a time of day,
 // and the lead, the only rule that reads one, is not theirs.
-const timeOfDayClientTestWhy = "nothing shows it is a read of the application's clock: its protocol types it as a time of day, which keploy compares whole, and keploy mock's test harness gives the application its inputs, which keploy does not see, so keploy learns a changed instant as noise only where it lies within its call's window on the application's clock, and a time of day names no day, so no window holds it. If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it; if the application reads it from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+const timeOfDayClientTestWhy = "nothing shows it is a read of the application's clock: its protocol types it as a time of day, which keploy compares whole, and keploy mock's test harness gives the application its inputs, which keploy does not see, so keploy learns a changed instant as noise only where it lies within its call's window on the application's clock, and a time of day names no day, so no window holds it. If your test supplies this value, " + clientGiveWhy + "; if the application reads it from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 
 // what is what an Instant leaf of form n names, as a reason writes it.
 func (n instantNames) what() string {
@@ -498,6 +498,8 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		ln.Kind, ln.From = KindVariable, from
 		return ln
 	}
+	// No other rule reads a value the test gave (classifyRead).
+	served = withoutGave(served)
 	// The echo, before any provenance excuses the instant.
 	if echoed := echoedPairs([]driftedInstant{{rec: rec, live: live}}, dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw)); len(echoed) > 0 {
 		if from, ok := dc.instantEchoFrom(r, echoed, at, served, raw); ok {
@@ -1017,7 +1019,7 @@ func (dc *DriftCache) textClockOffset(r, l Leaf, v *valueDrift, w *Window, resp 
 // read matched it (learning legible), and adds the client test's own
 // correction, for a value the test's harness supplies.
 func clientCutAmbiguousWhy(cutWhy string) string {
-	return cutWhy + ". If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it"
+	return cutWhy + ". If your test supplies this value, " + clientGiveWhy
 }
 
 // fieldName is the leaf's name as keploy.yml's noise writes it (Leaf.Noise:
@@ -1270,7 +1272,8 @@ func clockOffsetEchoedWhy(path string, off models.ClockOffset) string {
 // neither on its other side (it drifted with it, rule 1). Whole, of the
 // place, is its recorded text's being r's: where the value can be bound. The
 // test case's own request is such a place too, where keploy test sent a part
-// of it with template values (Earlier.Given): nothing binds there.
+// of it with template values (Earlier.Given): nothing binds there. A value
+// the test gave keploy (Earlier.Gave) is one only where its text is r's.
 func (dc *DriftCache) instantServedFrom(r Leaf, rec, live moment, served []Earlier) (Place, bool) {
 	var best Place
 	rank := 7
@@ -1280,6 +1283,11 @@ func (dc *DriftCache) instantServedFrom(r Leaf, rec, live moment, served []Earli
 				continue
 			}
 			whole := s.Leaf.Value == r.Value
+			if !whole && e.Gave {
+				// A value the test gave is the instant's place only where
+				// it is its text whole, never by a moment it names.
+				continue
+			}
 			exact := whole || dc.isInstant(s.Leaf.Value, rec) || seenIs(s.Leaf, s.Leaf.Value, rec)
 			if !exact && !dc.instantCoDrifted(s.Leaf.Value, s.Live, rec, live) {
 				continue

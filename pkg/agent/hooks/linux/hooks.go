@@ -118,6 +118,15 @@ type Hooks struct {
 	// skips reads the runs of the hooks' programs the kernel skipped
 	// (skipwatch.go), from their load on.
 	skips *skipWatch
+
+	// ingress holds the application's moved ports from inside their bind
+	// (ingressport.go); nil when the kernel has no sk_lookup or a step
+	// failed, and keploy forwards as it did before. A call that uses its
+	// maps or park holds ingressMu's read lock throughout; the hold is set,
+	// cleared and closed under the write lock, so none of its maps is closed
+	// while a call uses it.
+	ingressMu sync.RWMutex
+	ingress   *ingressHold
 }
 
 func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
@@ -512,6 +521,11 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 				return err
 			}
 			h.logger.Warn("the ingress hooks did not attach; the app's incoming requests will not be recorded as test cases", zap.Error(err))
+		} else {
+			// The bind hooks now move the app's bind inside bind(2) and write
+			// app_port_info. Hold the moved ports from that moment, so a call
+			// to one before keploy's forwarder listens is served, not refused.
+			h.startIngressHold(ctx, cGroupPath)
 		}
 	}
 
@@ -662,6 +676,9 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		agentInfo.Flags |= structs.FlagKernelPortAlloc
 	}
 	agentInfo.Flags = classifyFlag(agentInfo.Flags, h.socket != nil)
+	// The bind hooks note what the app binds for the ingress hold only
+	// once both its programs are attached (ingressport.go).
+	agentInfo.Flags = ingressHoldFlag(agentInfo.Flags, h.IngressHeld())
 	// Under the proven switch, the application's non-DNS UDP is watched for
 	// replies, and QUIC refused (udpwatch.go).
 	udpFlags, err := h.startProvenUDP(cGroupPath)
@@ -836,6 +853,10 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		h.ready.close()
 	}
 	h.readyMu.Unlock()
+
+	// The ingress hold's program and park go before the objects it shares
+	// app_port_info with (ctx.Done already closes it; this is the backstop).
+	h.closeIngressHold()
 
 	// Close eBPF objects with proper synchronization
 	h.objectsMutex.Lock()

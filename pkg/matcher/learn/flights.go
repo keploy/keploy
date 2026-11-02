@@ -1,5 +1,7 @@
 package learn
 
+import "time"
+
 // Flight is one request of the application's on one of its connections to
 // keploy: aloft from the first bytes of it keploy read until keploy starts
 // to write the answer back (Land), or until keploy knows the application is
@@ -58,6 +60,11 @@ package learn
 // handshake none.
 type Flight struct {
 	t *Tracker
+	// at is the real instant it lifted (Lift): when its first bytes reached
+	// keploy, the instant a serve made in it is bounded from (servedIn).
+	// Zero for a request a serve caused (LiftCaused), which the application
+	// did not send, and for NoRequest.
+	at time.Time
 	// overlaps are the requests aloft at an instant this one was: those
 	// aloft when it lifted, and those lifted while it was aloft.
 	overlaps []*Flight
@@ -99,7 +106,7 @@ func (t *Tracker) Lift() *Flight {
 	if t == nil {
 		return nil
 	}
-	f := &Flight{t: t}
+	f := &Flight{t: t, at: time.Now()}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for g := range t.aloft {
@@ -136,6 +143,18 @@ var noRequest = &Flight{}
 // request of its tells. It never lifts or lands: Land on it is nothing, and
 // LiftCaused of it is it.
 func NoRequest() *Flight { return noRequest }
+
+// arrivedBy is the real instant the call a serve of t's made at the real
+// instant at answers reached keploy, where f is the request it was served
+// in: f's lift, where f is one of t's that lifted no later than at; else
+// at itself (no request said, NoRequest, a request a serve caused, or
+// another tracker's).
+func (f *Flight) arrivedBy(t *Tracker, at time.Time) time.Time {
+	if f == nil || f.t != t || f.at.IsZero() || f.at.After(at) {
+		return at
+	}
+	return f.at
+}
 
 // LiftCaused is the request of a serve f caused, made once f's own serve
 // was (a server push f's PUBLISH let go, consumed on the subscriber's
