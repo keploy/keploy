@@ -43,6 +43,23 @@ func (h *HTTP) answerFault(ctx context.Context, stub *models.Mock) *models.Fault
 	return stub.Spec.Fault
 }
 
+// EnactFault enacts the fault stub's answer ends in at this serve
+// (answerFault: the hook's, else the mock's own) on the application's
+// connection, as replay of an HTTP mock does (serveFault), for a parser that
+// serves an HTTP mock its own way: keploy enterprise's SQS replay, whose
+// calls are recorded by this parser, faults included. It reports whether the
+// call is over, the connection to be closed; false, with nothing written, for
+// a whole answer or a delay that ran its course, which the caller then
+// serves. Its error names why a fault cannot be enacted, with nothing served:
+// the caller must not serve the answer then.
+func (h *HTTP) EnactFault(ctx context.Context, clientConn net.Conn, stub *models.Mock) (over bool, err error) {
+	fault := h.answerFault(ctx, stub)
+	if fault == nil {
+		return false, nil
+	}
+	return h.serveFault(ctx, clientConn, stub, fault)
+}
+
 // faultResetGrace bounds how long replay waits for the application to
 // acknowledge the bytes sent before a reset (relay.ResetClientOnClose): as
 // long as the relay waits at record.
