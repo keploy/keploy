@@ -81,6 +81,16 @@ func MatchCommandExaminedForTest(ctx context.Context, req mysql.Request, db inte
 	return resp, ok, examined, err
 }
 
+// MatchCommandWalkForTest is MatchCommandExaminedForTest with whole walking a
+// COM_STMT_EXECUTE's candidates on past a definitive match no later candidate
+// can outrank (matchOptions.wholeWalk), as the matcher did before it ended
+// the walk there: the reference a row counts the ended walk against.
+func MatchCommandWalkForTest(ctx context.Context, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, whole bool) (*mysql.Response, bool, int, error) {
+	examined := 0
+	resp, ok, _, err := matchCommandWith(ctx, zap.NewNop(), req, db, dctx, nil, nil, matchOptions{wholeWalk: whole, examined: &examined})
+	return resp, ok, examined, err
+}
+
 // MatchCommandBodiesForTest is MatchCommandForTest that also returns how many
 // live request bodies the command built (matchOptions.bodiesBuilt). With eager
 // it builds the body before the scan, as the matcher did before it built the

@@ -409,3 +409,36 @@ func TestAStartUpExecuteTakesItsStartUpRecordingThoughALaterGapsComesFirst(t *te
 		}
 	}
 }
+
+// TestAStartUpExecuteEndsItsWalkAtItsStartUpRecording: before keploy test's
+// first test, with the recorded windows known, a call's start-up recording
+// of its request holds the best gap rank, so its walk ends there
+// (execDecided): of the pool, walked in order (the statement's PREPARE, a
+// recording of the request made between tests 0 and 1, the start-up one, one
+// made between tests 1 and 2, then the rest), it examines the first three and
+// not the later gap's recording after them. Walked whole, the call examines
+// all five and is answered the same. Counted, not timed.
+func TestAStartUpExecuteEndsItsWalkAtItsStartUpRecording(t *testing.T) {
+	_, end0 := diffWindow(0)
+	_, end1 := diffWindow(1)
+	prep, _, _ := betweenTestsRecording()
+	later := diffMock("gap0-exec-5", "c1", []mysql.Request{executeReq(7, "5")}, end0.Add(2*time.Millisecond), models.LifetimePerTest, "mocks")
+	startup := diffMock("startup-exec-5", "c1", []mysql.Request{executeReq(7, "5")}, diffBase.Add(-300*time.Microsecond), models.LifetimePerTest, "mocks")
+	after := diffMock("gap1-exec-5", "c1", []mysql.Request{executeReq(7, "5")}, end1.Add(2*time.Millisecond), models.LifetimePerTest, "mocks")
+	ctx, _ := betweenTestsConn()
+	examined := map[bool]int{}
+	for _, whole := range []bool{false, true} {
+		s := newDiffSide(t, []*models.Mock{prep, later, startup, after})
+		seedWindows(s.mm, 2)
+		s.stageNoWindow()
+		resp, ok, n, err := replayer.MatchCommandWalkForTest(ctx, executeReq(7, "5"), s.mm, s.dctx, whole)
+		s.mm.Close()
+		if err != nil || !ok || resp == nil || resp.Payload != "startup-exec-5" {
+			t.Fatalf("whole walk %v: ok=%v err=%v resp=%v, want startup-exec-5, the start-up gap's recording, served", whole, ok, err, resp)
+		}
+		examined[whole] = n
+	}
+	if examined[false] != 3 || examined[true] != 5 {
+		t.Fatalf("the walk examined %d candidates and the whole walk %d; want 3 (up to startup-exec-5) and 5 (the whole pool, gap1-exec-5 among them)", examined[false], examined[true])
+	}
+}
