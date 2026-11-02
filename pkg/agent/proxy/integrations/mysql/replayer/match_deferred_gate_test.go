@@ -264,3 +264,43 @@ func TestDeferredGateServesExactServingAsTheEagerGateDoes(t *testing.T) {
 		}
 	}
 }
+
+// TestAMissReportsTheRecordingOfItsRequestStrictRejected: a recording the
+// matcher takes for one of a live COM_STMT_EXECUTE's own request (a
+// definitive match) can still be one strict enforcement rejects: the matcher
+// compares a FLOAT parameter at float32 precision (paramValueEqual), so a
+// recorded 1e-300 equals a live 0, while strict compares the values as
+// recorded. Strict rejects that recording as the walk meets it, and a
+// recording of the statement with another value after it. Nothing answers, and the miss reports what the gate rejected in
+// walk order, with the gate deferred as with it eager: the field diffs are
+// the first's, the recording of the command's request, and it counts among
+// the two rejected.
+func TestAMissReportsTheRecordingOfItsRequestStrictRejected(t *testing.T) {
+	floatExec := func(v any) mysql.Request {
+		req := executeReq(8, "")
+		req.Message.(*mysql.StmtExecutePacket).Parameters[0] = mysql.Parameter{Type: 4 /* MYSQL_TYPE_FLOAT */, Value: v}
+		return req
+	}
+	own, other := floatExec(1e-300), floatExec(2.5)
+	own.SetStoredQuery(diffQueryB)
+	other.SetStoredQuery(diffQueryB)
+	pool := []*models.Mock{
+		diffMock("m-own", "c1", []mysql.Request{own}, diffBase, models.LifetimeSession, "mocks"),
+		diffMock("m-other", "c1", []mysql.Request{other}, diffBase.Add(time.Millisecond), models.LifetimeSession, "mocks"),
+	}
+	var got [2]string
+	for k, eager := range []bool{true, false} {
+		s := newDiffSide(pool)
+		s.stageNoWindow()
+		got[k], _ = s.matchGate(context.Background(), floatExec(float32(0)), s.dctx, replayer.StrictEngineForTest(), eager)
+		s.mm.Close()
+	}
+	if got[0] != got[1] {
+		t.Fatalf("the miss differs:\n eager gate:    %s\n deferred gate: %s", got[0], got[1])
+	}
+	for _, want := range []string{"ok=false", "fieldDiffs:[{Path:body.parameters.0.value Kind:value_changed Expected:1e-300 Actual:0}]", "strictRejected:2"} {
+		if !strings.Contains(got[1], want) {
+			t.Errorf("the miss does not say %q: %s", want, got[1])
+		}
+	}
+}
