@@ -306,7 +306,10 @@ func (w *Window) ComparesOffsets() *Window {
 // TestFrom is where the running test began on the app's clock, or where the
 // app's clock's run to the call began after it (SetAppClockRun), in a
 // replay's span (LiveSpan) whose From a serve made after the test began
-// set: zero otherwise, and in a Window's spans. Another goroutine of the
+// set, and in a server test's window (CallWindowFrom) in each run whose
+// From a call made after the test began set there (in the recording, after
+// its recorded begin): zero otherwise, and in a client test's window, which
+// reads from each run's test begin by Began. Another goroutine of the
 // application (a queue's consumer beside the test's handler) can make a
 // call keploy serves between a read of the clock and the call that carries
 // the read, so a serve made after the test began bounds no read of the
@@ -352,6 +355,29 @@ func (w *Window) sinceBegin() *Window {
 		return nil
 	}
 	return &Window{Rec: rec, F: f, offsets: w.offsets, begun: true}
+}
+
+// fromTestBegin is w, the window of a server test's call, with each run's
+// span from where the test began there where a call made after that begin
+// starts it (Span.TestFrom), the other run's span as w has it: the window
+// in which the learn step reads a read of the clock its call's window
+// refuses, as the replay's check passes a value its span refuses where it
+// holds from the test's begin (CheckClockRead). Another goroutine of the
+// application can make a call between the read and the call that carries
+// it, in either run, so that call bounds no read of this one. nil where
+// neither run's span knows such a begin.
+func (w *Window) fromTestBegin() *Window {
+	if w == nil || w.Rec.TestFrom.IsZero() && w.F.TestFrom.IsZero() {
+		return nil
+	}
+	from := func(s Span) Span {
+		if !s.TestFrom.IsZero() && s.TestFrom.Before(s.From) {
+			s.From = s.TestFrom
+		}
+		s.TestFrom = time.Time{}
+		return s
+	}
+	return &Window{Rec: from(w.Rec), F: from(w.F), offsets: w.offsets}
 }
 
 // clockWordIn finds the one instant that changed in a text, recorded as rec

@@ -779,6 +779,9 @@ func testRequestOf(run *templates.Run, tc *models.TestCase, keployPath string) *
 		return nil
 	}
 	out := &models.TestRequest{Test: tc.Name}
+	// Where the test began in its recording, whatever of its request keploy
+	// reads below.
+	out.RecordedAt, _ = recordReqResTimestamps(tc)
 	sent := toSend(run, tc)
 	var parts []models.TestRequestPart
 	size := 0

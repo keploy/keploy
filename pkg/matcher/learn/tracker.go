@@ -532,6 +532,24 @@ func (t *Tracker) RecordedBegin(at time.Time) {
 	t.mu.Unlock()
 }
 
+// RecordedTestBegin gives the instant the running test began at in its
+// recording, where none was given before it began (RecordedBegin): keploy
+// test gives it with its test case's request (the request's recorded time,
+// models.TestRequest.RecordedAt), after the test began awaiting it. In a
+// server test a call's window in the recording then knows where its test
+// began there (CallWindowFrom, Span.TestFrom). One given while no test is
+// open is tied to no test, and dropped.
+func (t *Tracker) RecordedTestBegin(at time.Time) {
+	if t == nil || at.IsZero() {
+		return
+	}
+	t.mu.Lock()
+	if t.open && t.recBegan.IsZero() {
+		t.recBegan = at
+	}
+	t.mu.Unlock()
+}
+
 // Begin starts the next test now (BeginAt).
 func (t *Tracker) Begin() { t.BeginAt(time.Now()) }
 
@@ -1963,6 +1981,17 @@ func (t *Tracker) CallWindow(paired *models.Mock, recorded []*models.Mock, arriv
 // previous serve, or the set's begin where that came later (setBound), or
 // where the clock's run began after it where the hooks tell that
 // (SetAppClockRun).
+//
+// In a server test each run's span also carries where the running test
+// began there (Span.TestFrom), where a call made after that begin starts
+// the span: in the recording the test's recorded begin (RecordedBegin, or
+// RecordedTestBegin with keploy test's request), where it came before
+// prevRec; in this run where liveClock.testFrom puts the replay's span's
+// (LiveSpan). Another goroutine of the application (a queue's consumer
+// beside the test's handler) can make a call between a read of the clock
+// and the call that carries it, in either run, so the learn step reads a
+// read from the test's begin too where the window refuses it
+// (Window.fromTestBegin), as the replay's check passes it (CheckClockRead).
 func (t *Tracker) CallWindowFrom(prevRec time.Time, paired *models.Mock, arrival time.Time) *Window {
 	return t.CallWindowFromSiblings(prevRec, paired, arrival, nil)
 }
@@ -2109,6 +2138,15 @@ func (lc liveClock) window(prevRec, recBegan time.Time, paired *models.Mock, arr
 	rec := Span{From: recFrom, To: paired.Spec.ReqTimestampMock}
 	if lc.client {
 		rec.Began = recBegan
+	} else {
+		// A server test's window carries where its test began in each run
+		// where a call made after that begin starts its span there
+		// (Span.TestFrom): the learn step reads a read from there too, as
+		// the replay's check does (Window.fromTestBegin, CheckClockRead).
+		if lc.open && !recBegan.IsZero() && recBegan.Before(recFrom) {
+			rec.TestFrom = recBegan
+		}
+		f.TestFrom = lc.testFrom(f.From, arrival)
 	}
 	return &Window{Rec: rec, F: f}
 }

@@ -4900,8 +4900,14 @@ func (p *Proxy) learnBoundary(step func(*learn.Tracker)) {
 // TakeTestRequest gives the learn step the running keploy test case's own
 // request (agent.TestRequestTaker; learn.Tracker.Give), under the proven
 // switch: the test's earliest place, which it reads as any earlier place.
+// Where the request carries when it was recorded, the learn step takes that
+// as where the test began in its recording (learn.Tracker.RecordedTestBegin)
+// first, before any call the request releases reads its window.
 func (p *Proxy) TakeTestRequest(req *models.TestRequest) {
 	if provenswitch.On() {
+		if req != nil {
+			p.learnTracker.RecordedTestBegin(req.RecordedAt)
+		}
 		p.learnTracker.Give(learn.GivenRequest(req))
 	}
 }

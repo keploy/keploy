@@ -158,8 +158,9 @@ func TestAWordReadIsCheckedFromItsTestsBeginPastAnotherGoroutinesServes(t *testi
 // with no run told is refused by that move; the run told itself is pinned
 // on a clock that ran as one by
 // TestATestsBeginIsCarriedWithNoRunToldOnlyInAClientTest. The span itself
-// still starts at the last serve, which the learn step's windows read
-// (CallWindowFrom), and the next set's begin clears it.
+// still starts at the last serve, as the learn step's window of the call
+// does (CallWindowFrom), which carries the test's begin too, and the next
+// set's begin clears it.
 func TestALiveSpanCarriesItsTestsBeginOnlyWhereALaterServeStartsIt(t *testing.T) {
 	r := newConcurrentRun()
 	want := Span{From: r.b.Add(r.move.offset), To: r.upTo.Add(r.move.offset), TestFrom: r.recBegin}
@@ -185,12 +186,15 @@ func TestALiveSpanCarriesItsTestsBeginOnlyWhereALaterServeStartsIt(t *testing.T)
 		}
 	}
 	// The learn step's window of the call reads the span from the serve,
-	// and carries no test's begin: only a replay's check reads it.
+	// and carries the test's begin as the replay's span does: the learn
+	// step reads a read from there too where the window refuses it
+	// (Window.fromTestBegin). The recording's span, whose previous call is
+	// the previous test's, carries none (no recorded begin was told).
 	paired := &models.Mock{Name: "mock-5", Kind: models.Mongo}
 	paired.Spec.ReqTimestampMock = r.recBegin.Add(500 * time.Microsecond)
 	w := r.tracker(false).CallWindowFrom(r.recBegin.Add(-150*time.Millisecond), paired, r.upTo)
-	if w == nil || !w.F.From.Equal(r.b.Add(r.move.offset)) || !w.F.TestFrom.IsZero() {
-		t.Fatalf("learn window = %+v; want F from the last serve, with no test's begin", w)
+	if w == nil || !w.F.From.Equal(r.b.Add(r.move.offset)) || !w.F.TestFrom.Equal(r.recBegin) || !w.Rec.TestFrom.IsZero() {
+		t.Fatalf("learn window = %+v; want F from the last serve, with the test's begin", w)
 	}
 }
 

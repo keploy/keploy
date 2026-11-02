@@ -1185,6 +1185,46 @@ func TestALearnStepRefusesAPickFromTheTestCasesRequest(t *testing.T) {
 	}
 }
 
+// The test case's request carries where the test began in its recording
+// (models.TestRequest.RecordedAt), which the agent hands the learn step with
+// it (learn.Tracker.RecordedTestBegin): a server test's call whose previous
+// recorded call came after that begin has its window in the recording carry
+// it. A request of none, none handed, or the switch off: none.
+func TestTheTestCasesRecordedBeginReachesTheLearnStepsWindow(t *testing.T) {
+	recBegin := time.Date(2026, 10, 31, 8, 53, 33, 933_485_077, time.UTC)
+	paired := &models.Mock{Name: "mock-5", Kind: models.Mongo}
+	paired.Spec.ReqTimestampMock = recBegin.Add(2 * time.Millisecond)
+	for _, c := range []struct {
+		name string
+		on   string
+		req  *models.TestRequest
+		want time.Time
+	}{
+		{"handed its recorded begin", "1", &models.TestRequest{Test: "test-1", RecordedAt: recBegin}, recBegin},
+		{"a request of none", "1", &models.TestRequest{Test: "test-1"}, time.Time{}},
+		{"handed none", "1", nil, time.Time{}},
+		{"the switch off", "0", &models.TestRequest{Test: "test-1", RecordedAt: recBegin}, time.Time{}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, c.on)
+			start := time.Now()
+			p := &Proxy{learnTracker: learn.NewTracker()}
+			p.learnTracker.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+			p.learnTracker.SetAppClockRun(func(time.Time) (time.Time, bool) { return start, true })
+			p.learnTracker.NewSetAt(start)
+			p.learnTracker.BeginAwaiting()
+			p.TakeTestRequest(c.req)
+			w := p.learnTracker.CallWindowFrom(recBegin.Add(time.Millisecond), paired, time.Now())
+			if w == nil {
+				t.Fatal("no window")
+			}
+			if !w.Rec.TestFrom.Equal(c.want) {
+				t.Fatalf("the recording's span carries the test's begin %v; want %v", w.Rec.TestFrom, c.want)
+			}
+		})
+	}
+}
+
 // An agent that serves keploy mock (its --mock-mode) learns its tests as a
 // test harness's client tests (learn.Tracker.SetClientTests); one that serves
 // keploy test does not.

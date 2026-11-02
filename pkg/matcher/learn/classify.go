@@ -2073,6 +2073,21 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln = word
 			}
 		}
+		// A read made before another goroutine's call: in keploy test's
+		// server tests, a value refused in its call's window is classified
+		// again in the window from where its test began in each run whose
+		// span a call made after that begin starts (Window.fromTestBegin: a
+		// queue's consumer beside the test's handler, served between the
+		// handler's read and its call). Only a plain read of the clock it
+		// learns there is taken, checked in its call's span at every replay,
+		// which passes it from the test's begin too (CheckClockRead): the
+		// wider window turns a refusal into a checked read, never into
+		// noise, a variable or a read plus an offset.
+		if wt := w.fromTestBegin(); ln.Kind == KindUnaccounted && wt != nil {
+			if wide := leaf(r, l, wt, 0); wide.Kind == KindClockRead && wide.Read != nil {
+				ln = wide
+			}
+		}
 		// A copy of an earlier read of the clock that is a read in its own
 		// call's window too: under the rule a copy follows its source
 		// (follow), in keploy mock's client tests (the only calls whose
