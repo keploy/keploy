@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -69,12 +69,7 @@ func (s *startWatchInstr) WatchAgentStart(context.Context) <-chan error {
 // a start that stopped ends it with that, where the health check never
 // answers; no budget of wall time does.
 func TestSetupTestSetEndsOnTheAgentsStalledStart(t *testing.T) {
-	closed, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	uri := "http://" + closed.Addr().String() + "/agent"
-	_ = closed.Close()
+	uri := "http://" + testnet.RefusedAddr(t, "tcp") + "/agent"
 	instr := &startWatchInstr{}
 	r := &Runner{
 		logger:          zap.NewNop(),

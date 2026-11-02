@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"

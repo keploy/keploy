@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
@@ -100,14 +101,16 @@ func (u *unpublishedPortInstr) UnreachableAppPort(_ context.Context, host string
 }
 
 // closedLocalPort is a loopback port nothing listens on, so a dial is refused.
+// It is held for the test's life, so no other socket can take it
+// (testnet.RefusedAddr).
 func closedLocalPort(t *testing.T) uint16 {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	_, p, err := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	port := l.Addr().(*net.TCPAddr).Port
-	if err := l.Close(); err != nil {
+	port, err := strconv.ParseUint(p, 10, 16)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return uint16(port)

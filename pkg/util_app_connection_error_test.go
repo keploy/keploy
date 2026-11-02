@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
@@ -114,15 +115,7 @@ func nxdomainResolver(t *testing.T) *net.Resolver {
 // An error that only says "connection refused", or "context deadline
 // exceeded", in its text is none of them.
 func TestAFailedTestRequestIsClassifiedByTheErrorNotItsText(t *testing.T) {
-	refusedAddr := func() string {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		addr := ln.Addr().String()
-		_ = ln.Close()
-		return addr
-	}
+	refusedAddr := func() string { return testnet.RefusedAddr(t, "tcp") }
 
 	for _, tt := range []struct {
 		name string

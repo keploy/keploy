@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"

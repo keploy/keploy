@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -651,12 +652,7 @@ func fastURILooks(t *testing.T) {
 // silence.
 func TestAnAgentURIWhereNothingAnswersIsGivenUpOn(t *testing.T) {
 	fastURILooks(t)
-	closed, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	uri := "http://" + closed.Addr().String() + "/agent"
-	_ = closed.Close()
+	uri := "http://" + testnet.RefusedAddr(t, "tcp") + "/agent"
 	core, logs := observer.New(zapcore.InfoLevel)
 	a := New(zap.New(core), nil, &config.Config{Agent: config.Agent{AgentURI: uri}})
 	select {
@@ -925,12 +921,7 @@ func TestTheWaitForARestartedAgentEndsOnItsFailedStart(t *testing.T) {
 	t.Cleanup(func() { utils.ErrCode = keepCode })
 	c := &scriptedContainer{}
 	c.install(t)
-	closed, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	uri := "http://" + closed.Addr().String() + "/agent"
-	_ = closed.Close()
+	uri := "http://" + testnet.RefusedAddr(t, "tcp") + "/agent"
 	a := clientFor(uri)
 	a.agentContainer = &namedContainer{name: "keploy-v3-test"}
 	c.set(true, utils.BootProgress{Beat: 2, Seq: 2, Failed: true, ExitCode: utils.ExitPrivilegeRequired, Failure: "failed to load eBPF"}, true)
