@@ -61,6 +61,8 @@ func TestLearnMatchRefusesAChangeInWhatNamesTheCall(t *testing.T) {
 		{name: "a form field naming the topic", method: "POST", recTarget: "/", liveTarget: "/",
 			recBody: "Action=Publish&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A1%3Aorders&Message=m", liveBody: "Action=Publish&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A1%3Aaudit&Message=m",
 			recHeader: form, liveHeader: form, answer: `{}`, leaf: "body.TopicArn"},
+		{name: "a query parameter naming the operation", method: "GET", recTarget: "/?Action=ReceiveMessage&MaxNumberOfMessages=1", liveTarget: "/?Action=PurgeQueue&MaxNumberOfMessages=1",
+			answer: `{}`, leaf: "url.query.Action"},
 		{name: "a GraphQL operation name", method: "POST", recTarget: "/graphql", liveTarget: "/graphql",
 			recBody: `{"operationName":"GetOrder","query":"q"}`, liveBody: `{"operationName":"CancelOrder","query":"q"}`,
 			answer: `{}`, leaf: "body.operationName"},
