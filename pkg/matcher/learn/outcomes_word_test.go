@@ -301,8 +301,8 @@ func TestOutcomeAWordInsideATokenIsJudgedByItsPlaces(t *testing.T) {
 	// Shown in another test: refused, naming the mappings edit.
 	d := oWord(t, Decide(oInput(p, "order-17", "order-18", seq(true, "17", "18"), nil)), "17", "18")
 	oRefused(t, "order-17 to order-18 beside another test's 17 to 18", d, "another-scope", "mock-231")
-	if !oEdits(d.Refusal, "move-to-mocks", "move-to-startup", "noise-at-word") {
-		t.Errorf("another scope's edits %+v; want move to mocks:, to startup:, or noise at the word", d.Refusal)
+	if !oEdits(d.Refusal, "move-to-mocks", "move-to-startup", "noise-at-field") {
+		t.Errorf("another scope's edits %+v; want move to mocks:, to startup:, or noise at its field", d.Refusal)
 	}
 	// Shown in the call's own test: a Value bound there.
 	d = oWord(t, Decide(oInput(p, "order-17", "order-18", seq(false, "17", "18"), nil)), "17", "18")

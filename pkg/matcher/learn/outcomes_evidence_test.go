@@ -46,8 +46,8 @@ func TestOutcomeASourceBetweenTestsIsRefusedNamingTheEdit(t *testing.T) {
 	between := oServed("mock-21", true, false, Response, oText("body.token", "tok-9a1"), "tok-9b2", time.Millisecond)
 	d := oWord(t, Decide(oInput("header.Authorization", "Bearer tok-9a1", "Bearer tok-9b2", between, nil)), "9a1", "9b2")
 	oRefused(t, "a token served between tests", d, "another-scope", "mock-21")
-	if !oEdits(d.Refusal, "move-to-mocks", "move-to-startup", "noise-at-word") {
-		t.Errorf("a source between tests: edits %+v; want move to mocks:, move to startup:, noise at the word", d.Refusal)
+	if !oEdits(d.Refusal, "move-to-mocks", "move-to-startup", "noise-at-field") {
+		t.Errorf("a source between tests: edits %+v; want move to mocks:, move to startup:, noise at its field", d.Refusal)
 	}
 	// The same served at the start-up binds.
 	startUp := oServed("mock-21", true, true, Response, oText("body.token", "tok-9a1"), "tok-9b2", time.Millisecond)
@@ -83,8 +83,8 @@ func TestOutcomeAWorkerSourceIsRefusedNamingTheEdit(t *testing.T) {
 	if d.Refusal != nil && !strings.Contains(d.Refusal.Why, "worker:") {
 		t.Errorf("a worker: source: why %q; want it to name worker:", d.Refusal.Why)
 	}
-	if !oEdits(d.Refusal, "move-to-mocks", "move-to-startup", "noise-at-word") {
-		t.Errorf("a worker: source: edits %+v; want move to mocks:, move to startup:, noise at the word", d.Refusal)
+	if !oEdits(d.Refusal, "move-to-mocks", "move-to-startup", "noise-at-field") {
+		t.Errorf("a worker: source: edits %+v; want move to mocks:, move to startup:, noise at its field", d.Refusal)
 	}
 	d = oWord(t, Decide(scoped(false, ScopeTest("test-1"))), "9a1", "9b2")
 	oRefused(t, "a token test-1's mock sent", d, "another-scope", "mock-22")

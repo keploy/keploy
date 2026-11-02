@@ -307,13 +307,13 @@ func TestOutcomeANoiseEditNamesWhatKeployYmlCanSay(t *testing.T) {
 		says []string
 	}{
 		{Edit{Kind: EditNoiseAtField, Mock: "mock-300", Field: "body.items[].id", Word: -1},
-			[]string{`in keploy.yml, test.globalNoise.global.requestbody: {"items[].id": []}, ` + every}},
+			[]string{`in keploy.yml, test.globalNoise.global.requestbody: {"items[].id": []} (the whole field: keploy.yml names no word), ` + every}},
 		{Edit{Kind: EditNoiseAtWord, Mock: "mock-300", Field: "body.slot", Word: 1},
-			[]string{`test.globalNoise.global.requestbody: {"slot": []}`, "the whole field, as keploy.yml names no word", every}},
+			[]string{`test.globalNoise.global.requestbody: {"slot": []} (the whole field: keploy.yml names no word), ` + every}},
 		{Edit{Kind: EditNoiseAtField, Mock: "mock-300", Field: "header.x-request-id", Word: -1},
-			[]string{`test.globalNoise.global.header: {"x-request-id": []}`, every}},
+			[]string{`test.globalNoise.global.header: {"x-request-id": []} (the whole field: keploy.yml names no word), ` + every}},
 		{Edit{Kind: EditNoiseAtWord, Mock: "mock-300", Field: "url.path.2", Word: 0},
-			[]string{`test.globalNoise.global.url: {"<regex>": []}`, "a regex of the part of url.path.2 that changes", every}},
+			[]string{`test.globalNoise.global.url: {"<regex>": []}, a regex of the part of url.path.2 that changes, ` + every}},
 		{Edit{Kind: EditNoiseAtField, Mock: "mock-300", Field: "bind.1", Word: -1},
 			[]string{"re-record: no keploy.yml noise names bind.1"}},
 		{Edit{Kind: EditNoiseAtField, Mock: "mock-300", Field: "body", Word: -1},
@@ -357,7 +357,7 @@ func TestOutcomeDecideNamesTheNoiseKeployYmlReads(t *testing.T) {
 		edit Edit
 	}{
 		{"an array's element", arr, `Undo: in keploy.yml, test.globalNoise.global.requestbody: {"items[].ref": []}`,
-			Edit{Kind: EditNoiseAtWord, Mock: "mock-300", Field: "body.items[].ref", Word: 1}},
+			Edit{Kind: EditNoiseAtField, Mock: "mock-300", Field: "body.items[].ref", Word: -1}},
 		{"a SQL bind", bind, "Undo: re-record.", Edit{Kind: EditReRecord}},
 	} {
 		d := oWord(t, Decide(c.in), "8c41f2", "e09b7d")
@@ -385,9 +385,9 @@ func TestOutcomeARefusalNoNoiseNamesOffersOneReRecord(t *testing.T) {
 		edits        []Edit
 	}{
 		{"bind.1", "", []Edit{{Kind: EditReRecord}}},
-		{"body.msg_id", "", []Edit{{Kind: EditReRecord}, {Kind: EditNoiseAtWord, Mock: "mock-300", Field: "body.msg_id", Word: 0}}},
-		{"body.at.$date.$numberLong", "body.at", []Edit{{Kind: EditReRecord}, {Kind: EditNoiseAtWord, Mock: "mock-300", Field: "body.at", Word: 0}}},
-		{"body.items[0].msg_id", "body.items[].msg_id", []Edit{{Kind: EditReRecord}, {Kind: EditNoiseAtWord, Mock: "mock-300", Field: "body.items[].msg_id", Word: 0}}},
+		{"body.msg_id", "", []Edit{{Kind: EditReRecord}, {Kind: EditNoiseAtField, Mock: "mock-300", Field: "body.msg_id", Word: -1}}},
+		{"body.at.$date.$numberLong", "body.at", []Edit{{Kind: EditReRecord}, {Kind: EditNoiseAtField, Mock: "mock-300", Field: "body.at", Word: -1}}},
+		{"body.items[0].msg_id", "body.items[].msg_id", []Edit{{Kind: EditReRecord}, {Kind: EditNoiseAtField, Mock: "mock-300", Field: "body.items[].msg_id", Word: -1}}},
 	} {
 		in := oInput(c.field, rec, live, nil, nil)
 		for _, sh := range []*Shape{&in.Rec, &in.Live} {
@@ -406,6 +406,8 @@ func TestOutcomeARefusalNoNoiseNamesOffersOneReRecord(t *testing.T) {
 }
 
 // A field one recording does not hold is named by its leaf in the other.
+// A key holding '.', '[' or ']' is named by no path alone: its line says
+// that its noise also names the field those would nest.
 func TestOutcomeANoiseEditNamesAFieldOneRecordingLacks(t *testing.T) {
 	const p = "body.items[0].ref"
 	leaf := Leaf{Path: p, Noise: "body.items[].ref", Type: String, Value: "ref-8c41f2", Unnamed: true}
@@ -419,6 +421,8 @@ func TestOutcomeANoiseEditNamesAFieldOneRecordingLacks(t *testing.T) {
 		ds := Decide(in)
 		if len(ds) != 1 || ds[0].Refusal == nil || !reflect.DeepEqual(ds[0].Refusal.Edits, want) {
 			t.Errorf("a leaf only the %s call holds: %s; want edits %+v", only, oDescribe(ds), want)
+		} else if !strings.Contains(ds[0].Line, "its key holds '.', '[' or ']', so its noise in keploy.yml also names the field those would nest. Edits: in keploy.yml") {
+			t.Errorf("a leaf only the %s call holds: %q; want it to say its noise also names a nested field", only, ds[0].Line)
 		}
 	}
 }
