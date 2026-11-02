@@ -217,3 +217,15 @@ func (r *Replayer) reportHaltedBeforeTests(ctx context.Context, testRunID, testS
 	r.completeTestReportMu.Unlock()
 	return status, nil
 }
+
+// statusOnExit is the status of a set whose watchers set theirs (set), once
+// keploy knows (exited) of an exit of the app's own whose status is exit: the
+// exit's. The app's listener keeps the exit as it is told, and the reader
+// that ends the set on it sets the set's status only after, so a set read
+// between the two reads as it does after.
+func statusOnExit(set, exit models.TestSetStatus, exited bool) models.TestSetStatus {
+	if exited {
+		return exit
+	}
+	return set
+}

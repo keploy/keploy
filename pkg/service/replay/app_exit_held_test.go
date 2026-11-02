@@ -328,7 +328,7 @@ func TestAnExitToldAfterTheHeldTestsRequestFailedNamesThatTest(t *testing.T) {
 				app.exitAt = ""
 				h.replayer.hookImpl = prHooks{onRequest: app.onRequest,
 					simErr: map[string]error{"test-3": errors.New("read tcp 172.18.0.3:8080: connection reset by peer")}}
-				h.report.afterInsert = func(name string) {
+				h.report.afterInsert = func(_ context.Context, name string) {
 					if name == "test-3" {
 						tell()
 					}
@@ -606,5 +606,90 @@ func TestTheKeptAppExitIsTheFirstWord(t *testing.T) {
 	}
 	if kept.exit.ExitCode != 3 {
 		t.Fatalf("kept exit %+v; want the first word, code 3", kept.exit)
+	}
+}
+
+// The status of a set keploy knows its app exited in is the exit's, whether
+// the set's watchers have set theirs yet or not: the app's listener keeps the
+// exit as it is told, and the reader that ends the set on it sets the status
+// only after. The user's stop is no exit: its status stands.
+func TestStatusOnExitIsTheExitsWhicheverWatcherRanFirst(t *testing.T) {
+	for _, set := range []models.TestSetStatus{models.TestSetStatusRunning, models.TestSetStatusAppHalted, models.TestSetStatusUserAbort} {
+		if got := statusOnExit(set, models.TestSetStatusAppHalted, true); got != models.TestSetStatusAppHalted {
+			t.Fatalf("watchers' status %s with the exit known: %s, want APP_HALTED", set, got)
+		}
+	}
+	if got := statusOnExit(models.TestSetStatusUserAbort, "", false); got != models.TestSetStatusUserAbort {
+		t.Fatalf("the user's stop with no exit known: %s, want USER_ABORT", got)
+	}
+}
+
+// A set whose app exits holding its last test, whose request failed on the
+// exit, ends the same whichever comes first once the exit is told: the reader
+// of the app's errors setting the set's status and ending it, or the set's
+// end reading its status after its last test. In every compose shape it is
+// APP_HALTED and names the exit's code and that test. The set's end read the
+// status only as the reader set it, so the listener and the kept app's watch
+// set it as well, before the reader: two writers of one status.
+func TestASetsOutcomeIsTheSameWhicheverOfItsExitsReadersRunsFirst(t *testing.T) {
+	for _, readerFirst := range []bool{true, false} {
+		for _, tc := range composeExitShapes {
+			t.Run(fmt.Sprintf("reader first %v, %s", readerFirst, tc.name), func(t *testing.T) {
+				r := runComposeExitMidTest(t, tc.on, tc.serving, func(h *prRun, app *heldRequests) {
+					tell := app.exit
+					app.exitAt = ""
+					h.replayer.hookImpl = prHooks{onRequest: app.onRequest,
+						simErr: map[string]error{"test-3": errors.New("read tcp 172.18.0.3:8080: connection reset by peer")}}
+					h.report.afterInsert = func(ctx context.Context, name string) {
+						if name != "test-3" {
+							return
+						}
+						tell()
+						if readerFirst {
+							// The reader ends the set's context once it has
+							// set the set's status.
+							<-ctx.Done()
+						}
+					}
+				})
+				if r.status != models.TestSetStatusAppHalted {
+					t.Fatalf("status %s, want APP_HALTED", r.status)
+				}
+				reason := r.h.report.report.FailureReason
+				if !strings.Contains(reason, "it exited with code 3 before it answered test test-3") {
+					t.Fatalf("reason %q; want it to name the exit's code and test-3, whose request failed on the exit", reason)
+				}
+			})
+		}
+	}
+}
+
+// An app's exit told while keploy readies a test case of the set's main loop
+// on its agent ends the set before that test's request is sent, with the
+// proven switch off and on: the set is APP_HALTED, its reason names the
+// exit's code and no test as held, and the test is not sent.
+func TestAnAppsExitWhileKeployReadiesATestSendsItNot(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("switch on %v", on), func(t *testing.T) {
+			provenOn(t, on)
+			h := newPartialRunHarness(t, 3, 0)
+			h.instr.stopErr = models.ErrUnExpected
+			h.instr.stopAppReadying = "test-3"
+			app := &heldRequests{requests: map[string]int{}}
+			h.replayer.hookImpl = prHooks{onRequest: app.onRequest}
+
+			if status := h.run(t); status != models.TestSetStatusAppHalted {
+				t.Fatalf("status %s, want APP_HALTED", status)
+			}
+			reason := h.report.report.FailureReason
+			if !strings.Contains(reason, "it exited with code 1") || strings.Contains(reason, "before it answered test") {
+				t.Fatalf("reason %q; want it to name the exit's code and no test held", reason)
+			}
+			for name, want := range map[string]int{"test-1": 1, "test-2": 1, "test-3": 0} {
+				if n := app.count(name); n != want {
+					t.Fatalf("%s was sent %d times, want %d: the app exited as keploy readied test-3", name, n, want)
+				}
+			}
+		})
 	}
 }

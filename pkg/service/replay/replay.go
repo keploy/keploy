@@ -2151,7 +2151,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		testSetStatusByErrChanMu.Unlock()
 	}
-	getErrStatus := func() models.TestSetStatus {
+	// watchersStatus is the status the set's watchers set: the reader of
+	// its app's errors, its app's run, its end. Read it as getErrStatus.
+	watchersStatus := func() models.TestSetStatus {
 		testSetStatusByErrChanMu.RLock()
 		defer testSetStatusByErrChanMu.RUnlock()
 		return testSetStatusByErrChan
@@ -2170,7 +2172,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// status (APP_HALTED or FAULT_USER_APP: mapAppErrorToTestSetStatus) and
 	// whether it came after the app had served a set (keptAppExit.toldExit),
 	// with ok; ok is false while keploy knows of none, and on the run's own
-	// end (the user's stop), which is no exit of the app's.
+	// end (the user's stop), which is no exit of the app's. A told exit of
+	// the kept app it reads is kept as the set's app's (setLastAppErr).
 	appExitKnown := func() (exit models.AppError, afterASet bool, halted models.TestSetStatus, ok bool) {
 		if ctx.Err() != nil {
 			return exit, false, "", false
@@ -2179,6 +2182,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if kept := r.keptExit; kept != nil {
 			if e, told, after := kept.toldExit(); told {
 				exit, afterASet = e, after
+				// keploy learns of the exit here, as the set's watch of it
+				// (watchKeptApp) does too, maybe only later: the set's
+				// report names it and the test it held (heldAtExit) as
+				// first read.
+				setLastAppErr(e)
 			}
 		}
 		if exit == (models.AppError{}) {
@@ -2189,6 +2197,33 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return exit, false, "", false
 		}
 		return exit, afterASet, halted, true
+	}
+	// getErrStatus is the set's status as its watchers set it, or, once
+	// keploy knows of an exit of the app's own (appExitKnown), the exit's
+	// (statusOnExit). The app's listener keeps the exit as it is told, and
+	// the reader that ends the set on it sets the status only after: read
+	// so, the set reads the same between the two as after, whichever of
+	// them ran first.
+	getErrStatus := func() models.TestSetStatus {
+		_, _, halted, exited := appExitKnown()
+		return statusOnExit(watchersStatus(), halted, exited)
+	}
+	// exitSignalled is whether the set has ended: its end is signalled
+	// (exitLoopChan: the app's exit, its user's stop), or keploy knows of an
+	// exit of the app's own (appExitKnown), which the app's listener keeps as
+	// it is told, before the reader signals it. It takes the set's status
+	// (getErrStatus) when it has. Every check of the test loops for the set's
+	// end reads it so: no test begins once keploy knows the app has exited.
+	exitSignalled := func() bool {
+		select {
+		case <-exitLoopChan:
+		default:
+			if _, _, _, exited := appExitKnown(); !exited {
+				return false
+			}
+		}
+		testSetStatus = getErrStatus()
+		return true
 	}
 	// setupEnd ends a set whose setup (its stack's start, its staging on
 	// keploy's agent, the wait for its app) failed or was cut short. Once
@@ -2224,9 +2259,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				return nil
 			}
 			setLastAppErr(kept.exit)
-			if mappedStatus, ok := mapAppErrorToTestSetStatus(kept.exit); ok {
-				setErrStatus(mappedStatus)
-			}
 			appErrChan <- kept.exit
 			return nil
 		})
@@ -2516,9 +2548,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			appCtx := models.WithAppExit(runTestSetCtx, func(e models.AppError) {
 				setLastAppErr(e)
 				exitWasTold.Store(true)
-				if mappedStatus, ok := mapAppErrorToTestSetStatus(e); ok {
-					setErrStatus(mappedStatus)
-				}
 				tellAppExit(e)
 			})
 			runTestSetErrGrp.Go(func() error {
@@ -2584,13 +2613,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			agentStart := pkg.WatchAgentStart(agentCtx, r.instrumentation)
 
 			// The set's end cuts the wait short: the user's stop (Ctrl+C),
-			// or the app's exit (setupEnd).
+			// or the app's exit (setupEnd). An agent's start that ended with
+			// the set's context is that end's, and the ticker closes its
+			// channel unready only once the set's context ends: each ends the
+			// wait as the set's end does, below.
+			agentUp := false
 			select {
 			case <-runTestSetCtx.Done():
-				return setupEnd(models.TestSetStatusUserAbort, runTestSetCtx.Err())
 			case err := <-agentStart:
 				if runTestSetCtx.Err() != nil {
-					return setupEnd(models.TestSetStatusUserAbort, runTestSetCtx.Err())
+					break
 				}
 				// Tear down the compose stack we already created before returning,
 				// so a retry's `compose up` doesn't hit "container name already in
@@ -2602,11 +2634,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				return setupEnd(models.TestSetStatusFailed, fmt.Errorf("the keploy-agent docker compose started did not come up: %w", err))
 			case ready, ok := <-agentReadyCh:
-				// The ticker closes its channel unready only once the set's
-				// context ends.
-				if !ok || !ready {
-					return setupEnd(models.TestSetStatusUserAbort, runTestSetCtx.Err())
-				}
+				agentUp = ok && ready
+			}
+			if !agentUp {
+				return setupEnd(models.TestSetStatusUserAbort, runTestSetCtx.Err())
 			}
 			cancel()
 		}
@@ -3543,11 +3574,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			// Stop early before the hook and URL mutations if an exit signal is
 			// already pending — avoids mutating test cases that will never run.
-			select {
-			case <-exitLoopChan:
-				testSetStatus = getErrStatus()
+			if exitSignalled() {
 				exitLoop = true
-			default:
 			}
 			if status, ended := endedPartWay(); ended {
 				testSetStatus, exitLoop = status, true
@@ -3685,13 +3713,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// agent (the calls above) ends the set before its request is
 			// sent: the test is not begun against an app keploy knows is
 			// gone, nor named as the one the app held.
-			select {
-			case <-exitLoopChan:
-				testSetStatus = getErrStatus()
+			if exitSignalled() {
 				exitLoop = true
-			default:
-			}
-			if exitLoop {
 				break
 			}
 
@@ -4664,11 +4687,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// last test the cancel cut short reads it here, and the mock-
 		// consistency retry is not begun against an app that is gone.
 		if !exitLoop {
-			select {
-			case <-exitLoopChan:
-				testSetStatus = getErrStatus()
+			if exitSignalled() {
 				exitLoop = true
-			default:
 			}
 			if status, ended := endedPartWay(); ended {
 				testSetStatus, exitLoop = status, true
@@ -4788,11 +4808,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			// Check for exit signals before each streaming test
-			select {
-			case <-exitLoopChan:
-				testSetStatus = testSetStatusByErrChan
+			if exitSignalled() {
 				exitLoop = true
-			default:
 			}
 			if status, ended := endedPartWay(); ended {
 				testSetStatus, exitLoop = status, true
@@ -4934,13 +4951,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// the set before its request is sent, so the test is not begun
 			// against an app keploy knows is gone, nor named as the one the
 			// app held.
-			select {
-			case <-exitLoopChan:
-				testSetStatus = getErrStatus()
+			if exitSignalled() {
 				exitLoop = true
-			default:
-			}
-			if exitLoop {
 				break
 			}
 

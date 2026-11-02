@@ -161,9 +161,10 @@ type prReportDB struct {
 	// dupOnRead returns the named test's result twice, as a store that kept
 	// an earlier cycle's row beside the last one does.
 	dupOnRead string
-	// afterInsert, set, runs with each test's name once its result is
-	// kept: a test acts there, after keploy filed the test.
-	afterInsert func(name string)
+	// afterInsert, set, runs with each test's name, and the context keploy
+	// filed it under, once its result is kept: a test acts there, after
+	// keploy filed the test.
+	afterInsert func(ctx context.Context, name string)
 }
 
 func (f *prReportDB) GetAllTestRunIDs(context.Context) ([]string, error) { return nil, nil }
@@ -197,7 +198,7 @@ func (f *prReportDB) ClearTestCaseResults(context.Context, string, string) {
 	defer f.mu.Unlock()
 	f.results = nil
 }
-func (f *prReportDB) InsertTestCaseResult(_ context.Context, _ string, _ string, r *models.TestResult) error {
+func (f *prReportDB) InsertTestCaseResult(ctx context.Context, _ string, _ string, r *models.TestResult) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failInserts {
@@ -210,7 +211,7 @@ func (f *prReportDB) InsertTestCaseResult(_ context.Context, _ string, _ string,
 	if after := f.afterInsert; after != nil {
 		f.mu.Unlock()
 		defer f.mu.Lock()
-		after(r.TestCaseID)
+		after(ctx, r.TestCaseID)
 	}
 	return nil
 }
