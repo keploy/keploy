@@ -1398,7 +1398,7 @@ func (m *mockService) refuseUnknownMocks(ctx context.Context, name string, mp *m
 		}
 	}
 	var absent, unchecked, skipped []string
-	var cutShort, edited, newer, connFailure, yamlOnly bool
+	var cutShort, edited, newer, connFailure, fault, yamlOnly bool
 	for _, n := range unknown {
 		where := ""
 		if w := places[n]; len(w) > 0 {
@@ -1423,6 +1423,9 @@ func (m *mockService) refuseUnknownMocks(ctx context.Context, name string, mp *m
 		case d.Why == models.MockSkipConnFailure:
 			connFailure = true
 			skipped = append(skipped, n+where+", a connection failure this keploy cannot replay")
+		case d.Why == models.MockSkipFault:
+			fault = true
+			skipped = append(skipped, n+where+", a call whose fault this keploy cannot enact")
 		case d.Why == models.MockSkipYAMLOnlyKind:
 			yamlOnly = true
 			skipped = append(skipped, fmt.Sprintf("%s%s, of kind %q, which keploy reads only from a YAML mock file", n, where, d.Kind))
@@ -1450,6 +1453,9 @@ func (m *mockService) refuseUnknownMocks(ctx context.Context, name string, mp *m
 		}
 		if connFailure {
 			fix = append(fix, fmt.Sprintf("If a newer keploy recorded a connection failure, upgrade keploy to replay it; if you edited one in %s, give it back the fields keploy wrote", mocks))
+		}
+		if fault {
+			fix = append(fix, fmt.Sprintf("If a newer keploy recorded a call's fault, upgrade keploy to replay it; if you edited one in %s, give its fault back the fields keploy wrote", mocks))
 		}
 		if yamlOnly {
 			fix = append(fix, fmt.Sprintf("Keploy reads a mock of such a kind only from a YAML mock file, and one with a \"-\" in its kind only with keploy enterprise: record the set again in YAML, not as %s", mocks))

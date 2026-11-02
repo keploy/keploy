@@ -2009,6 +2009,12 @@ func (ys *MockYaml) readMockPoolsVisiting(ctx context.Context, testSetID string,
 				}
 				connFailures++
 			}
+			// gob has no per-kind decoder either: a fault is validated here,
+			// as DecodeMocks and DecodeMocksJSON validate theirs.
+			if mock.Spec.Fault != nil && !faultSupported(mock, logger, false) {
+				addSkipped(&out, mock.Name, mock.Kind)
+				return nil
+			}
 			r.route(mock, true)
 			if visit == nil {
 				// After routing, which derives the mock's lifetime unless the

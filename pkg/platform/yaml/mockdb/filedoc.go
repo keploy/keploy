@@ -122,8 +122,9 @@ func (fr *MockFileReader) Next() (MockFileDoc, error) {
 
 // skipReason is why the decoders (decodeMocks, decodeMocksJSON) took no mock
 // from a document of kind that parsed and decoded without error: they skip
-// only a document with no kind, a kind they have no decoder for, and a
-// connection failure they cannot replay. Of an NDJSON document (json), a
+// only a document with no kind, a kind they have no decoder for, a
+// connection failure they cannot replay, and an HTTP call whose fault they
+// cannot enact (faultSupported). Of an NDJSON document (json), a
 // kind with a "-" in it, or one a registered mapper decodes, is one
 // decodeMocksJSON skips in every build: only the YAML decoder reads it, and
 // a "-" kind only with keploy enterprise's mapper.
@@ -133,6 +134,8 @@ func skipReason(kind models.Kind, json bool) models.MockSkip {
 		return models.MockSkipNoKind
 	case kind == models.ConnectionFailure:
 		return models.MockSkipConnFailure
+	case kind == models.HTTP:
+		return models.MockSkipFault
 	case json && (strings.Contains(string(kind), "-") || hasMapperForKind(kind)):
 		return models.MockSkipYAMLOnlyKind
 	}
@@ -152,7 +155,8 @@ func (fr *MockFileReader) Close() error { return fr.r.Close() }
 // (GetTestSetMocks: a mocks.gob first, else the YAML or NDJSON one), and by
 // name each named document of it the read skips, with why: of two such
 // documents with one name, the last, as TestSetMocks.Skipped lists it. A gob
-// file skips only a connection failure this keploy cannot replay. With no
+// file skips only a connection failure this keploy cannot replay and a mock
+// whose fault it cannot enact. With no
 // mock file, "" and none; nil when the file cannot be read.
 func (ys *MockYaml) SkippedMocks(ctx context.Context, testSetID string) (string, map[string]models.SkippedMock) {
 	mockFileName := ys.MockName
@@ -172,6 +176,9 @@ func (ys *MockYaml) SkippedMocks(ctx context.Context, testSetID string) (string,
 		for _, mock := range mocks {
 			if mock.Kind == models.ConnectionFailure && mock.Name != "" && !connFailureSupported(mock, zap.NewNop(), false) {
 				out[mock.Name] = models.SkippedMock{Name: mock.Name, Kind: mock.Kind, Why: models.MockSkipConnFailure}
+			}
+			if mock.Spec.Fault != nil && mock.Name != "" && !faultSupported(mock, zap.NewNop(), false) {
+				out[mock.Name] = models.SkippedMock{Name: mock.Name, Kind: mock.Kind, Why: models.MockSkipFault}
 			}
 		}
 		return gobPath, out

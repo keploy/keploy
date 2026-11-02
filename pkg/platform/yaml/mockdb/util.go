@@ -740,6 +740,9 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 				ResTimestampMock: httpSpec.ResTimestampMock,
 				Fault:            httpSpec.Fault,
 			}
+			if !faultSupported(&mock, logger, rewrite) {
+				continue
+			}
 		case models.DNS:
 			dnsSpec := models.DNSSchema{}
 			err := m.Spec.Decode(&dnsSpec)
@@ -1123,6 +1126,27 @@ func connFailureSupported(mock *models.Mock, logger *zap.Logger, rewrite bool) b
 		return true
 	}
 	skipConnFailure(logger, mock.Name, err, rewrite)
+	return false
+}
+
+// faultSupported validates a decoded mock's fault (Mock.ValidateFault), and
+// skips one this keploy cannot enact: a kind or a spelling from a newer
+// keploy, a hand edit, or a fault on a call of a protocol it enacts none for.
+// Skipped, it is never served (not its head, not as a whole answer), and the
+// read says why, as for a connection failure (skipConnFailure).
+func faultSupported(mock *models.Mock, logger *zap.Logger, rewrite bool) bool {
+	err := mock.ValidateFault()
+	if err == nil {
+		return true
+	}
+	if rewrite {
+		logger.Debug("kept as written: a mock whose fault this keploy cannot enact", zap.String("mock", mock.Name), zap.Error(err))
+		return false
+	}
+	utils.LogError(logger, err, "skipping a mock whose fault this keploy cannot enact",
+		zap.String("mock", mock.Name),
+		zap.String("keploy_version", keployVersion()),
+		zap.String("next_step", "if the error says to upgrade, the mock was recorded by a newer keploy: upgrade keploy to replay it; otherwise fix or re-record the mock"))
 	return false
 }
 
@@ -1695,6 +1719,9 @@ func decodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger, rew
 				ReqTimestampMock: s.ReqTimestampMock,
 				ResTimestampMock: s.ResTimestampMock,
 				Fault:            s.Fault,
+			}
+			if !faultSupported(&mock, logger, rewrite) {
+				continue
 			}
 		case models.DNS:
 			var s models.DNSSchema

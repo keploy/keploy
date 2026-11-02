@@ -73,6 +73,9 @@ type HTTP struct {
 	// what every handler the proxy makes does; a row gives a handler its
 	// own, so handlers in different modes run at once.
 	verify *atomic.Bool
+	// answerFaultHook is the fault hook replay asks before it serves a
+	// mock's answer (SetAnswerFault, answerFault); nil when none is set.
+	answerFaultHook atomic.Pointer[AnswerFault]
 }
 
 // verifying is whether h's reads run in the exact view's verify mode: each
