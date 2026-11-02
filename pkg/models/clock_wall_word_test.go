@@ -53,6 +53,10 @@ func TestAWallClockWordAndTheInstantItIsMeetAsTheWordInUTC(t *testing.T) {
 		{name: "a wall clock that names the word", a: wall(ZoneUTC, ""), b: ClockOffset{Res: ms, Zone: ZoneUTC, Layout: "iso-second-space", WallWord: word}, zoneApar: true},
 		{name: "two reads of the instant", a: instant, b: instant, want: instant},
 		{name: "a word that names a WallWord of its own", a: ClockOffset{Res: ms, Zone: ZoneUTC, Layout: "iso-second-space", Word: word, WallWord: other}, b: instant, apart: true},
+		// No learning names the word of its date and time at two places of
+		// the text (withWallWord's is the read's own), so a mock that does
+		// was written otherwise: its two reads stay two forms of the value.
+		{name: "two reads that name the word, read at two places", a: instant, b: ClockOffset{Res: ms, Layout: "iso-second-space", Word: other, WallWord: word}, apart: true},
 		{name: "a whole read and a word that names no WallWord", a: ClockOffset{Res: ms, Zone: ZoneUTC, Layout: "iso-second-space"}, b: ClockOffset{Res: time.Nanosecond, Layout: "iso-second-space", Word: goInstant.Word}, apart: true},
 	} {
 		for i, got := range []ClockOffset{row.a.Meet(row.b), row.b.Meet(row.a)} {
