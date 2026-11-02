@@ -122,7 +122,7 @@ func TestAStopDoesNotJudgeAnAppHeldOffTheCPU(t *testing.T) {
 	const bound = 300 * time.Millisecond
 	shortStall(t, bound)
 	var looks atomic.Uint64
-	looked := func() { looks.Add(1) }
+	looked := func(*ExitClock) { looks.Add(1) }
 	exitLooked.Store(&looked)
 	defer exitLooked.Store(nil)
 	dir := starvetest.MemDir(t)
@@ -196,7 +196,7 @@ func TestAStopDoesNotJudgeAnAppWaitingOnAChildHeldOffTheCPU(t *testing.T) {
 			const bound = 300 * time.Millisecond
 			shortStall(t, bound)
 			var looks atomic.Uint64
-			looked := func() { looks.Add(1) }
+			looked := func(*ExitClock) { looks.Add(1) }
 			exitLooked.Store(&looked)
 			defer exitLooked.Store(nil)
 			dir := starvetest.MemDir(t)
@@ -582,7 +582,7 @@ func stopOfAnAppHeldInTheKernel(t *testing.T, mode storageMode) {
 	// app's waits in the kernel, since its last progress, for no longer.
 	storageFor(t, mode, 100*bound)
 	var looks atomic.Uint64
-	looked := func() { looks.Add(1) }
+	looked := func(*ExitClock) { looks.Add(1) }
 	exitLooked.Store(&looked)
 	defer exitLooked.Store(nil)
 	dir := starvetest.MemDir(t)
@@ -711,6 +711,17 @@ func TestAStopJudgesAnAppInTheKernelInTurnsThatMakesNoProgress(t *testing.T) {
 	stopJudgingAnAppHeldInTheKernel(t, storageServing, bound, hung, bound/6, 2*(hung+bound))
 }
 
+// stretch is, by the clock's looks so far, the stall it counted since it was
+// made and what the processes' waits in the kernel withheld from it since
+// their last progress (credited). Across looks with no progress between
+// them it moves by the time the processes and keploy could both run; at
+// progress it falls by the credit forgotten.
+func (c *ExitClock) stretch() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ran + c.credited
+}
+
 // The credit of an app's waits in the kernel starts again at its progress.
 // Its way out goes into the kernel in turns, each wait a sixth of the stall
 // bound and ending as one on storage that serves it does, its storage
@@ -720,20 +731,33 @@ func TestAStopJudgesAnAppInTheKernelInTurnsThatMakesNoProgress(t *testing.T) {
 // there for as long again, and is let go: it exits, and the stop says no
 // kill, as its waits since its progress never outlasted the hung-task time.
 // Credited from the stop's start, they outlasted it in its second stretch,
-// and it was killed on the bound after, a step out it made forgotten.
+// and it was killed on the bound after, a step out it made forgotten. The
+// time they could run is the stop's own clock's, read as the stop looks:
+// a clock of the test's, looking on its own, counted the same time in other
+// looks, and on a loaded host fell far behind the stop's.
 func TestAStopCreditsAnAppsWaitsInTheKernelAgainOnceItMakesProgress(t *testing.T) {
 	const bound = 300 * time.Millisecond
 	const hung = 10 * bound
 	shortStall(t, bound)
 	storageFor(t, storageServing, hung)
-	var looks atomic.Uint64
-	looked := func() { looks.Add(1) }
-	exitLooked.Store(&looked)
-	defer exitLooked.Store(nil)
 	dir := starvetest.MemDir(t)
 	pid, reaped := startKernelHolder(t, dir, bound/6)
-	could, releaseClock := cpuExitClock(t, pid)
-	defer releaseClock()
+	// The looks of this stop at this app only: a stop another test left
+	// may still look.
+	var clock atomic.Pointer[ExitClock]
+	looks := make(chan struct{}, 1)
+	looked := func(c *ExitClock) {
+		if !slices.ContainsFunc(c.procs, func(p Reached) bool { return p.PID == pid }) {
+			return
+		}
+		clock.Store(c)
+		select {
+		case looks <- struct{}{}:
+		default:
+		}
+	}
+	exitLooked.Store(&looked)
+	defer exitLooked.Store(nil)
 	scope := &TeardownScope{}
 	type stopped struct {
 		killed string
@@ -744,28 +768,31 @@ func TestAStopCreditsAnAppsWaitsInTheKernelAgainOnceItMakesProgress(t *testing.T
 		killed, _, err := InterruptProcessTreeStop(zap.NewNop(), pid, syscall.SIGINT, scope)
 		done <- stopped{killed, err}
 	}()
-	// ended fails the test where the stop has ended, which it must not
-	// before the app is let go; else it waits a little.
-	ended := func(when string) {
+	// next fails the test where the stop has ended, which it must not
+	// before the app is let go; else it waits for the stop's next look.
+	next := func(when string) {
 		select {
 		case end := <-done:
 			t.Fatalf("the stop ended %s, the app in the kernel in turns, its storage serving: it said %q (%v)", when, end.killed, end.err)
-		case <-time.After(10 * time.Millisecond):
+		case <-looks:
 		}
 	}
-	for looks.Load() == 0 {
-		ended("before its first look")
-	}
+	next("before its first look")
 	// Each stretch is counted from the stop's last sight of the app's
 	// progress (its moves of the teardown): one it saw early on (a file
 	// the app wrote as it went into the kernel, closed) starts it again.
-	moves, from := scope.Moves(), could.Runnable()
+	// A move is noted once the clock's credit started again, so the
+	// stretch read after it is from there.
+	moves, from := scope.Moves(), clock.Load().stretch()
 	inTheKernel := func(when string) {
-		for could.Runnable()-from < 7*hung/10 {
+		for {
 			if m := scope.Moves(); m != moves {
-				moves, from = m, could.Runnable()
+				moves, from = m, clock.Load().stretch()
 			}
-			ended(when)
+			if clock.Load().stretch()-from >= 7*hung/10 {
+				return
+			}
+			next(when)
 		}
 	}
 	inTheKernel("before the app made progress")
@@ -773,9 +800,9 @@ func TestAStopCreditsAnAppsWaitsInTheKernelAgainOnceItMakesProgress(t *testing.T
 		t.Fatal(err)
 	}
 	for scope.Moves() == moves {
-		ended("before it saw the app's progress")
+		next("before it saw the app's progress")
 	}
-	moves, from = scope.Moves(), could.Runnable()
+	moves, from = scope.Moves(), clock.Load().stretch()
 	inTheKernel("after the app made progress")
 	if err := os.WriteFile(filepath.Join(dir, "released"), nil, 0o644); err != nil {
 		t.Fatal(err)
@@ -802,7 +829,7 @@ func stopJudgingAnAppHeldInTheKernel(t *testing.T, mode storageMode, bound, hung
 	shortStall(t, bound)
 	storageFor(t, mode, hung)
 	var looks atomic.Uint64
-	looked := func() { looks.Add(1) }
+	looked := func(*ExitClock) { looks.Add(1) }
 	exitLooked.Store(&looked)
 	defer exitLooked.Store(nil)
 	dir := starvetest.MemDir(t)
@@ -1582,7 +1609,7 @@ func TestAStopSaysItCountsDescriptorsFromTheLookThatDid(t *testing.T) {
 	exited := make(chan struct{})
 	var looks atomic.Int32
 	var atFirst, atSecond atomic.Int64
-	looked := func() {
+	looked := func(*ExitClock) {
 		switch looks.Add(1) {
 		case 1:
 			atFirst.Store(said())
@@ -2594,7 +2621,7 @@ func TestAProcessIsNamedByItsStart(t *testing.T) {
 func TestAStopsStepsOutMoveTheRunsTeardown(t *testing.T) {
 	shortStall(t, time.Hour)
 	var looks atomic.Uint64
-	looked := func() { looks.Add(1) }
+	looked := func(*ExitClock) { looks.Add(1) }
 	exitLooked.Store(&looked)
 	defer exitLooked.Store(nil)
 	dir := t.TempDir()
