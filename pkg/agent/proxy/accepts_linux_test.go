@@ -904,7 +904,9 @@ func TestNATdConnectionsHandledAtOnceAllDropTheCount(t *testing.T) {
 	}
 	defer c.Close()
 	core, logs := observer.New(zap.WarnLevel)
-	p := New(zap.New(core), fakeDestInfo{}, config.New())
+	cfg := config.New()
+	cfg.Agent.SettleReads = true // whose reads wait for the count: a WARN
+	p := New(zap.New(core), fakeDestInfo{}, cfg)
 	for i := 0; i < 20000; i++ {
 		// A counted proxy again, its drop undone.
 		p.countingLost.Store(nil)
