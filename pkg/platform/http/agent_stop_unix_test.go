@@ -404,7 +404,9 @@ func (r *removalAsked) ContainerInspect(context.Context, string) (container.Insp
 // the stop goes on -- the first SIGTERM, the escalation signal at a Ctrl+C
 // while the container is waited for, and the one sent to a compose agent a
 // stalled drain holds. A signal the daemon refuses at once (a container
-// already gone) is answered: no WARN.
+// already gone) is answered: no WARN. So is one it answers in the instant
+// before the bound ends, ended as keploy looks at the answer: the signal was
+// sent, and its answer is kept.
 func TestAStopsSignalToASilentDaemonDoesNotHoldIt(t *testing.T) {
 	defer func(d time.Duration) { dockerStopPoll = d }(dockerStopPoll)
 	dockerStopPoll = 5 * time.Millisecond
@@ -424,12 +426,14 @@ func TestAStopsSignalToASilentDaemonDoesNotHoldIt(t *testing.T) {
 		stop   func(*zap.Logger)
 		press  bool // the silent signal is the stop's answer to a Ctrl+C
 		refuse bool // the daemon refuses it at once instead
+		answer bool // the daemon answers it, and the bound ends as keploy looks
 		want   []string
 	}{
-		{"the stop's SIGTERM", sig("SIGTERM"), stopFor, false, false, []string{sig("SIGTERM")}},
-		{"the escalation at a Ctrl+C", sig("SIGUSR2"), stopFor, true, false, []string{sig("SIGTERM"), wait, sig("SIGUSR2")}},
-		{"a compose agent's release", sig("SIGUSR2"), endCompose, false, false, []string{sig("SIGUSR2"), wait}},
-		{"a SIGTERM refused", sig("SIGTERM"), stopFor, false, true, []string{sig("SIGTERM")}},
+		{"the stop's SIGTERM", sig("SIGTERM"), stopFor, false, false, false, []string{sig("SIGTERM")}},
+		{"the escalation at a Ctrl+C", sig("SIGUSR2"), stopFor, true, false, false, []string{sig("SIGTERM"), wait, sig("SIGUSR2")}},
+		{"a compose agent's release", sig("SIGUSR2"), endCompose, false, false, false, []string{sig("SIGUSR2"), wait}},
+		{"a SIGTERM refused", sig("SIGTERM"), stopFor, false, true, false, []string{sig("SIGTERM")}},
+		{"a SIGTERM answered as the bound ends", sig("SIGTERM"), stopFor, false, false, true, []string{sig("SIGTERM"), wait}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			utils.ResetInterruptedAgain()
@@ -439,11 +443,14 @@ func TestAStopsSignalToASilentDaemonDoesNotHoldIt(t *testing.T) {
 			}
 			asks := recordStopAsks(t)
 			log, release := fakeEngine(t)
-			mode := silence
-			if tc.refuse {
-				mode = refuse
+			switch {
+			case tc.answer:
+				asks.endAtLook()
+			case tc.refuse:
+				refuse(t, log, tc.silent)
+			default:
+				silence(t, log, tc.silent)
 			}
-			mode(t, log, tc.silent)
 			core, logs := observer.New(zap.DebugLevel)
 			returned := make(chan struct{})
 			go func() { tc.stop(zap.New(core)); close(returned) }()
@@ -451,7 +458,7 @@ func TestAStopsSignalToASilentDaemonDoesNotHoldIt(t *testing.T) {
 				awaitEngineWait(t, log, returned)
 				ctrlCWhileWaited(t)
 			}
-			if !tc.refuse {
+			if !tc.refuse && !tc.answer {
 				awaitCall(t, log, tc.silent, returned)
 				asks.runOut()
 			}
@@ -464,7 +471,7 @@ func TestAStopsSignalToASilentDaemonDoesNotHoldIt(t *testing.T) {
 				t.Errorf("engine calls %q, want %q", got, tc.want)
 			}
 			want := 1
-			if tc.refuse {
+			if tc.refuse || tc.answer {
 				want = 0
 			}
 			if n := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("did not answer keploy's `" + tc.silent + "`").Len(); n != want {
@@ -492,8 +499,9 @@ func awaitBoundArmed(t *testing.T, clk *stall.ManualClock, what string) {
 // daemon is an endingAsk, ended at its release, or by the test (runOut), as
 // keploy's bound ends one its daemon did not answer.
 type stopAsks struct {
-	mu   sync.Mutex
-	asks []*endingAsk
+	mu     sync.Mutex
+	asks   []*endingAsk
+	atLook bool
 }
 
 func recordStopAsks(t *testing.T) *stopAsks {
@@ -503,6 +511,7 @@ func recordStopAsks(t *testing.T) *stopAsks {
 	daemonAsk = func() (context.Context, func()) {
 		a := newEndingAsk()
 		s.mu.Lock()
+		a.atLook = s.atLook
 		s.asks = append(s.asks, a)
 		s.mu.Unlock()
 		return a, a.end
@@ -524,6 +533,17 @@ func (s *stopAsks) latest() *endingAsk {
 // runOut ends the question asked last, as keploy's bound would.
 func (s *stopAsks) runOut() { s.latest().end() }
 
+// endAtLook makes each question asked from now on end at keploy's first look
+// at whether it has ended (its Err), as keploy's bound would end it in the
+// instant between the daemon's answer and that look. os/exec reads a
+// command's context's Err only once its Done is closed, so the first look is
+// keploy's own, after the CLI's answer.
+func (s *stopAsks) endAtLook() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.atLook = true
+}
+
 // endingAsk is a question's context the test sees end. context.AfterFunc
 // registers on it through its AfterFunc method, and its end runs what is
 // still registered on the ender's goroutine and counts it (ran): whether the
@@ -536,6 +556,7 @@ type endingAsk struct {
 	next     int
 	isEnded  bool
 	ranAtEnd int
+	atLook   bool // ends at the first look at Err (stopAsks.endAtLook)
 }
 
 func newEndingAsk() *endingAsk {
@@ -547,6 +568,9 @@ func (a *endingAsk) Done() <-chan struct{}       { return a.done }
 func (a *endingAsk) Value(any) any               { return nil }
 
 func (a *endingAsk) Err() error {
+	if a.atLook {
+		a.end()
+	}
 	if a.ended() {
 		return context.Canceled
 	}
