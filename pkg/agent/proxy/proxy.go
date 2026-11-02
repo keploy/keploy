@@ -455,6 +455,7 @@ type Proxy struct {
 	appPIDNS   string
 	mockMode   bool
 	live       LiveHandler
+	appPort    func(orig uint16) (port uint16, ok bool)
 	treeMu     sync.Mutex
 	tree       map[net.Conn]int
 	caJavaHome string
@@ -6360,6 +6361,44 @@ func (p *Proxy) SetLiveHandler(h LiveHandler) {
 	starts.Default.OnMark(p.closeDependencyConns)
 }
 
+// SetAppListenPort gives the proxy where the app listens for each of its
+// ports (the ingress's AppListenPort). keploy mock's record moves the binds
+// of the run's processes so that its forwarder takes their ports and a
+// caller from outside the run is recorded too; a test's own call to one of
+// them still comes through the proxy, and is told and reached at the app's
+// socket (appAt), as it is without the forwarder. Reached at the forwarder,
+// the call was taken for a dependency: the forwarder is keploy's, outside
+// the run's tree.
+func (p *Proxy) SetAppListenPort(f func(orig uint16) (port uint16, ok bool)) {
+	p.appPort = f
+}
+
+// appAt is where the run's listener for port is, by its port and address:
+// port and dstAddr (host and port, as the test dialed them), unless a
+// record's ingress forwarder holds port and the app's socket is known to be
+// at another (SetAppListenPort): then that one, at host. While the forwarder
+// holds port and where the app went is not known yet, port is where the
+// listener is looked for, as without the forwarder.
+func (p *Proxy) appAt(host, dstAddr string, port uint32) (uint32, string) {
+	if p.appPort == nil {
+		return port, dstAddr
+	}
+	moved, ok := p.appPort(uint16(port))
+	if !ok {
+		return port, dstAddr
+	}
+	return uint32(moved), net.JoinHostPort(host, strconv.FormatUint(uint64(moved), 10))
+}
+
+// atPort is addr, a host and port, at port instead.
+func atPort(addr string, port uint32) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return net.JoinHostPort(host, strconv.FormatUint(uint64(port), 10))
+}
+
 func ownIP(ip net.IP) bool {
 	if ip == nil {
 		return false
@@ -6494,7 +6533,11 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 			ip = net.IPv6loopback
 		}
 	}
-	owner, listening := listenerOwner(ip, dest.Port)
+	// A record's ingress forwarder may hold the port the test dialed: the
+	// run's listener is then the app's socket at the port its bind was
+	// moved to, and it is found, and reached, there (appAt).
+	listenPort, appAddr := p.appAt(host, dstAddr, dest.Port)
+	owner, listening := listenerOwner(ip, listenPort)
 	if !listening && ip != nil && ip.IsLoopback() && (!recorded.has(dest.Port) || recorded.child(dest.Port)) {
 		if _, isReal := p.realLabelAt(dstAddr); isReal {
 			// A mock.real destination nothing listens at is mock.real's
@@ -6609,16 +6652,17 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 			// test's use, with no use point (Tracker.SentLive).
 			srcConn = &treeRealConn{Conn: srcConn, p: p, label: realLabel, id: realID, live: true}
 		}
-		p.live(ctx, srcConn, dstAddr, uint16(dest.Port))
+		p.live(ctx, srcConn, appAddr, uint16(dest.Port))
 		return true, nil, nil
 	}
-	dstConn, err := util.DialDestination(ctx, p.logger, "tcp", util.DialTarget{Addr: dstAddr})
+	dstConn, err := util.DialDestination(ctx, p.logger, "tcp", util.DialTarget{Addr: appAddr})
 	if isReal && err == nil {
 		// DialDestination falls back to the other loopback family when the
 		// app's address refuses: that reaches an address an IP-literal
 		// entry does not list, which relayReal, dialing exactly the app's
 		// address, never counts. A localhost entry lists both families.
-		if label, ok := p.realLabelAt(dstConn.RemoteAddr().String()); !ok || label != realLabel {
+		// The app's moved port is the destination's port (appAt).
+		if label, ok := p.realLabelAt(atPort(dstConn.RemoteAddr().String(), dest.Port)); !ok || label != realLabel {
 			isReal = false
 		}
 	}

@@ -2761,7 +2761,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 	switch cmd.Name() {
 	case "record":
 		cmd.Flags().Duration("record-timer", c.cfg.Mock.RecordTimer, "Optional upper bound on the record session (e.g. \"30s\"); the runner exiting ends it first")
-		cmd.Flags().Bool("record-requests", c.cfg.Mock.RecordRequests, "Record the app's incoming requests and responses as test cases (on by default; --record-requests=false turns it off); pass the app's port with --pass-through-ports so the tests reach it")
+		cmd.Flags().Bool("record-requests", c.cfg.Mock.RecordRequests, "Record the app's incoming requests and responses as test cases: the tests' own calls, and in a record, calls that reach the run's listening ports from outside the run, such as a provider's webhook callback (on by default; --record-requests=false turns both off)")
 	case "replay":
 		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
 		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if a call missed its recorded mock (dependency contract drift); a DNS lookup or a connection that sent nothing does not count")

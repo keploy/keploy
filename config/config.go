@@ -406,7 +406,8 @@ type MockCmd struct {
 	// it is not one of the runners' default locations. Relative to the
 	// directory keploy runs in.
 	CoverageReport string `json:"coverageReport" yaml:"coverageReport" mapstructure:"coverageReport"`
-	// RecordRequests captures the app's incoming requests as test cases, on by default; needs --pass-through-ports <app port>.
+	// RecordRequests captures the app's incoming requests as test cases, on by default: the tests' own calls, and in a
+	// record, calls that reach the run's listening ports from outside the run (a provider's webhook callback).
 	RecordRequests bool `json:"recordRequests" yaml:"recordRequests" mapstructure:"recordRequests"`
 	// RunOnly names the only tests a replay runs (a subtest of a named test
 	// runs with it); every other test's harness is told to skip it. Empty runs

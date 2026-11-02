@@ -199,8 +199,9 @@ disableMapping: false
 mock:
   name: "default"
   onMiss: "fail"
-  # Record the app's incoming requests and responses as test cases alongside the mocks, once the app's
-  # port is given with --pass-through-ports <app port>; without it none are recorded. Turn off with --record-requests=false.
+  # Record the app's incoming requests and responses as test cases alongside the mocks: the tests' own
+  # calls, and, while recording, calls that reach the run's listening ports from outside the run (a
+  # provider's webhook callback). On by default; --record-requests=false turns both off.
   recordRequests: true
   strict: false
   local: false

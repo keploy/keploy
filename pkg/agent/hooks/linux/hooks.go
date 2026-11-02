@@ -271,6 +271,26 @@ func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
 	return nil
 }
 
+// ingressOn says whether the agent attaches the ingress hooks, which move
+// each bind of the run's processes so that keploy's forwarder takes every
+// connection to its port, whoever makes it. A record does: the app's
+// incoming requests are its test cases. keploy mock's record does whenever
+// it records requests (mock.recordRequests, on by default): a caller from
+// outside the run, such as a provider's webhook callback, reaches the app
+// only through the forwarder, and its request is kept as a case of the test
+// it arrives in; the tests' own calls reach the app through the proxy as
+// they do without it. --record-requests=false turns it off. keploy mock's
+// replay does only for a pass-through port (--pass-through-ports <app
+// port>), whose calls bypass the proxy, so that they are compared all the
+// same; a replay sends a recorded callback itself (deliver:), and keeps no
+// call from outside the run.
+func ingressOn(mode models.Mode, mockMode, recordRequests bool, passThroughPorts int) bool {
+	if !mockMode {
+		return mode == models.MODE_RECORD
+	}
+	return recordRequests && (mode == models.MODE_RECORD || passThroughPorts > 0)
+}
+
 // hookLoadOptions are the options load() loads hookSpec() with: no verifier
 // log. The kernel formats the log while it verifies, and at the instruction
 // and branch level the agent asked for, that log (and verifying again each
@@ -517,11 +537,10 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		h.sockCreate = sc
 	}
 
-	// Ingress is captured while recording, and in mock mode whenever requests are on, so a replay can
-	// compare the app's actual responses with the recorded cases. In mock mode the wrapped process is a
-	// test runner, so a failure to attach here only means no requests are recorded; the egress capture
-	// the run depends on goes ahead.
-	if (opts.Mode == models.MODE_RECORD && !setupOpts.MockMode) || (setupOpts.MockMode && setupOpts.RecordRequests && len(agent.GetPortToSendToKernel(ctx, opts.Rules)) > 0) {
+	// Ingress is captured while recording (ingressOn). In mock mode the wrapped process is a test
+	// runner, so a failure to attach here only means no requests are recorded from outside the run;
+	// the egress capture the run depends on goes ahead.
+	if ingressOn(opts.Mode, setupOpts.MockMode, setupOpts.RecordRequests, len(agent.GetPortToSendToKernel(ctx, opts.Rules))) {
 		if err := h.attachIngress(cGroupPath, objs); err != nil {
 			if !setupOpts.MockMode {
 				return err

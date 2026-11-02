@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1665,5 +1667,178 @@ func TestHandleConnectionListsAnHTTPConnectionABypassRulePassesThroughOnlyForACa
 				}
 			}
 		})
+	}
+}
+
+// countingServer listens on loopback, answers each connection's four bytes
+// with answer, and counts the connections it takes. This test process owns
+// it.
+func countingServer(t *testing.T, answer string) (uint32, *atomic.Int64) {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	var n atomic.Int64
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			n.Add(1)
+			go func() {
+				defer func() { _ = c.Close() }()
+				if _, err := io.ReadFull(c, make([]byte, 4)); err != nil {
+					return
+				}
+				_, _ = c.Write([]byte(answer))
+			}()
+		}
+	}()
+	return uint32(l.Addr().(*net.TCPAddr).Port), &n
+}
+
+// listenIn starts a process that holds a loopback listener until the test
+// ends, and is its only owner: the app of a run whose tree is that process.
+// Nothing accepts on the listener; the kernel completes a connect to it.
+func listenIn(t *testing.T) (*exec.Cmd, uint32) {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := uint32(l.Addr().(*net.TCPAddr).Port)
+	f, err := l.(*net.TCPListener).File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := exec.Command("cat")
+	c.ExtraFiles = []*os.File{f}
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	in, err := c.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = in.Close()
+		_ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+		_ = c.Wait()
+	})
+	_ = f.Close()
+	_ = l.Close()
+	return c, port
+}
+
+// A record's ingress forwarder takes the run's listening port so that a
+// caller from outside the run is recorded too, and the app listens where its
+// bind was moved. A test's call to that port still comes through the proxy:
+// it is the run's own, found by the app's socket and handed to the live
+// handler at the app's port, not at the forwarder's. Found by the port the
+// test dialed, the forwarder's (keploy's, outside the run's tree), the call
+// was taken for a dependency's. Where the app went is not known yet: the
+// port dialed is where its listener is looked for.
+func TestACallToAPortTheIngressHoldsIsTheAppsAtItsMovedPort(t *testing.T) {
+	for _, proven := range []bool{false, true} {
+		t.Run("proven="+strconv.FormatBool(proven), func(t *testing.T) {
+			recorded.forget()
+			t.Cleanup(recorded.forget)
+			if proven {
+				t.Setenv("KEPLOY_PROVEN", "1")
+			}
+			app, moved := listenIn(t)
+			forwarder, taken := countingServer(t, "fwd!")
+			p := selfCallProxy()
+			p.appPID = uint32(app.Process.Pid)
+			var upstreams []string
+			p.live = func(_ context.Context, conn net.Conn, upstream string, port uint16) {
+				upstreams = append(upstreams, upstream)
+				if port != uint16(forwarder) {
+					t.Errorf("the live handler was handed port %d, want the port the test dialed, %d", port, forwarder)
+				}
+				if _, err := io.ReadFull(conn, make([]byte, 4)); err == nil {
+					_, _ = conn.Write([]byte("pong"))
+				}
+			}
+			p.SetAppListenPort(func(orig uint16) (uint16, bool) {
+				if orig == uint16(forwarder) {
+					return uint16(moved), true
+				}
+				return orig, true
+			})
+			// The test is this process: it started the app.
+			served, got, _ := callTree(t, p, forwarder, uint32(os.Getpid()))
+			want := fmt.Sprintf("127.0.0.1:%d", moved)
+			if !served || got != "pong" || len(upstreams) != 1 || upstreams[0] != want {
+				t.Fatalf("a test's call to a port the forwarder holds must go to the live handler at the app's port %s: served=%v answer=%q upstreams=%q", want, served, got, upstreams)
+			}
+			if n := taken.Load(); n != 0 {
+				t.Fatalf("the forwarder took %d of the test's calls; the live handler records them", n)
+			}
+
+			p.SetAppListenPort(func(uint16) (uint16, bool) { return 0, false })
+			if served, _, _ := callTree(t, p, forwarder, uint32(os.Getpid())); served {
+				t.Fatal("where the app went is not known: the listener at the port dialed, outside the run's tree, must stay on the mock path")
+			}
+			if len(upstreams) != 1 {
+				t.Fatalf("the live handler was handed a call the forwarder holds while the app's port is not known: %q", upstreams)
+			}
+		})
+	}
+}
+
+// A process's call to its own listener on a port the ingress forwarder holds
+// is relayed to its listener at the port its bind was moved to, as it is
+// without the forwarder: the forwarder would have recorded it as a case.
+func TestASelfCallToAPortTheIngressHoldsReachesItsOwnListener(t *testing.T) {
+	recorded.forget()
+	t.Cleanup(recorded.forget)
+	p := selfCallProxy()
+	moved := pingServer(t)
+	forwarder, taken := countingServer(t, "fwd!")
+	p.SetAppListenPort(func(orig uint16) (uint16, bool) {
+		if orig == uint16(forwarder) {
+			return uint16(moved), true
+		}
+		return orig, true
+	})
+	if served, got, _ := callTree(t, p, forwarder, uint32(os.Getpid())); !served || got != "pong" {
+		t.Fatalf("a self-call to a port the forwarder holds must reach the process's own listener: served=%v answer=%q", served, got)
+	}
+	if n := taken.Load(); n != 0 {
+		t.Fatalf("the forwarder took %d self-calls", n)
+	}
+}
+
+// Under the proven switch a mock.real destination on a port the ingress
+// forwarder holds, served by the tree's listener at the port its bind was
+// moved to, is counted reached, by the port dialed: the address the call
+// reached is the moved port's.
+func TestUnderTheSwitchAMockRealDestinationAtAMovedPortIsCountedReached(t *testing.T) {
+	p, _ := provenTreeProxy(t)
+	moved := pingServer(t)
+	forwarder, taken := countingServer(t, "fwd!")
+	listed := fmt.Sprintf("127.0.0.1:%d", forwarder)
+	if err := p.SetRealDeps(context.Background(), []string{listed}); err != nil {
+		t.Fatal(err)
+	}
+	p.SetAppListenPort(func(orig uint16) (uint16, bool) {
+		if orig == uint16(forwarder) {
+			return uint16(moved), true
+		}
+		return orig, true
+	})
+	if served, got, _ := callTree(t, p, forwarder, uint32(os.Getpid())); !served || got != "pong" {
+		t.Fatalf("precondition: the call reaches the tree's listener at its moved port: served=%v answer=%q", served, got)
+	}
+	if n := taken.Load(); n != 0 {
+		t.Fatalf("the forwarder took %d calls", n)
+	}
+	if run := p.RealRun(); !slices.Equal(run.Reached, []string{listed}) {
+		t.Fatalf("the mock.real destination served at the moved port did not reach %s: %+v", listed, run.Reached)
 	}
 }
