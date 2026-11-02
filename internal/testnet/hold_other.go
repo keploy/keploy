@@ -76,11 +76,11 @@ func SharedListenConfig() net.ListenConfig {
 // beside the connected socket; once the code's listener closes, a dial to the
 // port is refused again. On Windows, where no socket can hold the port for
 // the code's listener (an exclusive hold refuses the listener's bind, and
-// one that is not exclusive keeps no socket off the port), it is a port
-// below the dynamic port range, which no bind to port 0 and no connect is
-// given, claimed for the test's life so that no other test is given it
-// either, and SharedPort's port is the same. A socket that names the port
-// can still take it.
+// one at the wildcard address that is not exclusive does not keep a bind
+// that names 127.0.0.1 off the port), it is a port below the dynamic port
+// range, which no bind to port 0 and no connect is given, claimed for the
+// test's life so that no other test is given it either, and SharedPort's
+// port is the same. A socket that names the port can still take it.
 func ReservedPort(t *testing.T) int {
 	t.Helper()
 	return reservedPort(t)

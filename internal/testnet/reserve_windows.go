@@ -16,11 +16,11 @@ import (
 // range, IPv4's and IPv6's, that netsh reports, claimed in os.TempDir for
 // the test's life (claimPort) and free for a listener at every address when
 // it is returned. No socket can hold the port for the code's listener: an
-// exclusive hold refuses the listener's bind, and one that is not exclusive
-// keeps no socket off the port. Instead no bind to port 0 and no connect is
-// given a port below the range, and the claim keeps the port from
-// every other test that claims one. A socket that names the port can still
-// take it.
+// exclusive hold refuses the listener's bind, and one at the wildcard address
+// that is not exclusive does not keep a bind that names 127.0.0.1 off the
+// port. Instead no bind to port 0 and no connect is given a port below the
+// range, and the claim keeps the port from every other test that claims
+// one. A socket that names the port can still take it.
 func reservedPort(t *testing.T) int {
 	t.Helper()
 	var outs []string
