@@ -237,6 +237,13 @@ func TestOutcomeAFineCutAnAnswerServedAsRecordedIsNoConflictBesideItsCopy(t *tes
 	// a conflict beside the create.
 	stale := iSent("mock-330", rAt.Add(-2*time.Second), "body.cmd.query.filter.name", String, name(recNs), name(recNs))
 	oRefused(t, "a request round F still sent with the recorded name, beside the create", call([]Earlier{create, stale}, []Raw{list(recNs)}), "conflict", "mock-330")
+	// Only a send is a copy that lets the answer be no conflict: another
+	// answer that gave each run its own name (an exchange's answer leaf)
+	// is a second answer, so the application had both names before the
+	// call, and the answer served as recorded stays a conflict beside it.
+	got := Earlier{Mock: "mock-331", At: rAt.Add(-2 * time.Second), Own: true, Seen: []Seen{{Side: Response,
+		Leaf: Leaf{Path: "body.app.name", Noise: "body.app.name", Type: String, Value: name(recNs)}, Live: name(liveNs)}}}
+	oRefused(t, "the answer served as recorded beside another answer that shows the name", call([]Earlier{got}, []Raw{list(recNs)}), "conflict", "mock-346")
 }
 
 // A send that shows the moment only at a millisecond or coarser shares it
