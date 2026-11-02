@@ -34,15 +34,16 @@ const (
 	editSep      = "; or "
 )
 
-// editForms is each edit's words. %m is the mock, %f the field, %w the
-// word, %n a given's name; each kind carries only the fields its words
-// name (Edit's other fields are zero, Word -1 for a whole field).
+// editForms is each edit's words. %m is the mock, %f the field, %n a
+// given's name, %k the keploy.yml noise that names the field (noiseWords);
+// each kind carries only the fields its words name (Edit's other fields are
+// zero, Word -1 for a whole field).
 var editForms = map[EditKind]string{
 	EditMoveToMocks:   "move %m to this test's mocks: in mappings.yaml (it then binds)",
 	EditMoveToStartup: "move %m to startup: in mappings.yaml (it then binds)",
 	EditMoveToWorker:  "move %m to worker: in mappings.yaml (served, never required)",
-	EditNoiseAtWord:   "noise at word %w of %f in %m, in keploy.yml",
-	EditNoiseAtField:  "noise at %f in %m, in keploy.yml",
+	EditNoiseAtWord:   "%k: the whole field, as keploy.yml names no word",
+	EditNoiseAtField:  "%k",
 	EditGive:          "give it in the test: keploytest.Given(t, %n, v)",
 	EditReRecord:      "re-record",
 	EditFixApp:        "the app changed: fix it",
@@ -112,7 +113,47 @@ func editWords(e Edit) string {
 	if !ok {
 		return lineName(string(e.Kind))
 	}
-	return strings.NewReplacer("%m", lineName(e.Mock), "%f", lineName(e.Field), "%w", strconv.Itoa(e.Word), "%n", strconv.Quote(e.Name)).Replace(form)
+	if e.Kind == EditNoiseAtWord || e.Kind == EditNoiseAtField {
+		return noiseWords(e, form)
+	}
+	return strings.NewReplacer("%m", lineName(e.Mock), "%f", lineName(e.Field), "%n", strconv.Quote(e.Name)).Replace(form)
+}
+
+// noiseWords is the noise edit e in its kind's form: the keploy.yml entry
+// that names its field (noiseAt), or a re-record where none does.
+func noiseWords(e Edit, form string) string {
+	bucket, key, ok := noiseAt(e.Field)
+	if !ok {
+		return "re-record: no keploy.yml noise names " + lineName(e.Field)
+	}
+	entry := "in keploy.yml, test.globalNoise.global." + bucket + ": {" + key + ": []}"
+	if bucket == "url" {
+		entry += ", a regex of the part of " + lineName(e.Field) + " that changes"
+	}
+	return strings.Replace(form, "%k", entry+", or the same under test.globalNoise.test-sets.<the test set>: noise for every mock there", 1)
+}
+
+// noiseAt is the keploy.yml noise that names a field, given by its name in
+// keploy.yml's noise dialect (Leaf.Noise): the bucket of test.globalNoise
+// that keploy test and keploy mock replay hand the request matchers, and the
+// field's key there, quoted. A body field is keyed by its root-relative
+// path, a header by its name, and a part of the url by a regex of the part
+// that changes, which the person writes. keploy.yml's noise has no scope of
+// one mock and names no word, so it is noise for every mock of the set (or
+// of every set). ok is false where no bucket names the field (a whole body,
+// a field of a protocol keyed otherwise, as a SQL bind): noise cannot accept
+// it, and its edit is a re-record.
+func noiseAt(name string) (bucket, key string, ok bool) {
+	if k, found := strings.CutPrefix(name, "body."); found && k != "" {
+		return "requestbody", strconv.Quote(k), true
+	}
+	if k, found := strings.CutPrefix(name, "header."); found && k != "" {
+		return "header", strconv.Quote(k), true
+	}
+	if strings.HasPrefix(name, "url.") {
+		return "url", `"<regex>"`, true
+	}
+	return "", "", false
 }
 
 // printed is a why or a place as a line prints it: bare, or quoted where it

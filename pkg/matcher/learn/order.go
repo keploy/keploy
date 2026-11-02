@@ -1653,7 +1653,7 @@ func (dc *decider) learned(path string, at variables.Address, n int, r, f string
 	}
 	return Decision{At: at, Recorded: r, Full: f, Outcome: o, Line: learnedLine(learnedWord{
 		Test: dc.in.Test, Mock: dc.in.Mock, Field: path, Word: n, Recorded: r, Full: f,
-		Outcome: o, Rule: rule, Places: places, From: from,
+		Outcome: o, Rule: rule, Places: places, From: from, Noise: noiseName(dc.in, path),
 	})}
 }
 
@@ -1677,7 +1677,7 @@ func (dc *decider) unreadWhy() string {
 // refuse is a refused word and its line.
 func (dc *decider) refuse(path string, at variables.Address, n int, r, f string, kind RefusalKind, why string, places []string, edits ...Edit) Decision {
 	at.Word = n
-	rf := &Refusal{Kind: kind, Test: dc.in.Test, Mock: dc.in.Mock, Field: path, Word: n, Recorded: r, Full: f, Why: why, Places: places, Edits: edits}
+	rf := &Refusal{Kind: kind, Test: dc.in.Test, Mock: dc.in.Mock, Field: path, Word: n, Recorded: r, Full: f, Why: why, Places: places, Edits: onceEach(edits)}
 	hideSecrets(rf)
 	return Decision{At: at, Recorded: r, Full: f, Outcome: OutcomeRefused, Refusal: rf, Line: RefusalLine(*rf)}
 }
@@ -1687,16 +1687,49 @@ func (dc *decider) cannotCheck(path string, at variables.Address, n int, r, f, w
 	return dc.refuse(path, at, n, r, f, RefusalCannotCheck, why, nil, dc.fieldNoise(path))
 }
 
-func (dc *decider) fieldNoise(path string) Edit { return noiseEdit(dc.in.Mock, path, -1) }
+func (dc *decider) fieldNoise(path string) Edit {
+	return noiseEdit(dc.in.Mock, noiseName(dc.in, path), -1)
+}
 
-func (dc *decider) wordNoise(path string, n int) Edit { return noiseEdit(dc.in.Mock, path, n) }
+func (dc *decider) wordNoise(path string, n int) Edit {
+	return noiseEdit(dc.in.Mock, noiseName(dc.in, path), n)
+}
 
-// noiseEdit is noise at word n of field, or at the field where n is -1.
-func noiseEdit(mock, field string, n int) Edit {
-	if n < 0 {
-		return Edit{Kind: EditNoiseAtField, Mock: mock, Field: field, Word: -1}
+// noiseEdit is noise at word n of the field keploy.yml's noise names name,
+// or at the field where n is -1; a re-record where no keploy.yml noise
+// names it (noiseAt).
+func noiseEdit(mock, name string, n int) Edit {
+	if _, _, ok := noiseAt(name); !ok {
+		return Edit{Kind: EditReRecord}
 	}
-	return Edit{Kind: EditNoiseAtWord, Mock: mock, Field: field, Word: n}
+	if n < 0 {
+		return Edit{Kind: EditNoiseAtField, Mock: mock, Field: name, Word: -1}
+	}
+	return Edit{Kind: EditNoiseAtWord, Mock: mock, Field: name, Word: n}
+}
+
+// noiseName is the field at path as keploy.yml's noise names it
+// (fieldName: an array's element as "[]", a value's encoding left out): its
+// recorded leaf's name, else its leaf's in record's full round, else path.
+func noiseName(in Input, path string) string {
+	if l, ok := in.Rec.Leaves[path]; ok {
+		return fieldName(l)
+	}
+	if l, ok := in.Live.Leaves[path]; ok {
+		return fieldName(l)
+	}
+	return path
+}
+
+// onceEach is es with each edit named once, at its first place.
+func onceEach(es []Edit) []Edit {
+	out := es[:0:0]
+	for _, e := range es {
+		if !slices.Contains(out, e) {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // names are ps' line names, first three.
