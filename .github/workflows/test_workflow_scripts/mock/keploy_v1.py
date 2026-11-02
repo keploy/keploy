@@ -22,7 +22,7 @@ then returns LEGACY: begin and end send the same bodies to the scope API as
 it was, whose answers carry no v. An agent whose switch is on and that has no
 claim route is an error. On LEGACY, begin and end send no pid unless the
 caller names one: a replay narrows a test begun with a pid only in a run with
-the suite and app-start marks, and refuses one without them (422), so only a
+the suite mark or an app-start mark, and refuses one without (422), so only a
 caller that marks its suite passes its pid (pid=os.getpid()). v1 has no pid.
 The flip deletes LEGACY with the switch.
 

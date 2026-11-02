@@ -16,9 +16,9 @@
 # the same two tests one after the other, passes and records both.
 #
 # Without the switch (today's default, which the flip deletes), PER-PID mock
-# scoping, which keploy serves only in a run with the suite and app-start
-# marks: two named scopes recorded inside a suite mark (t1->/a, t2->/b), then
-# TWO CONCURRENT workers in one replay, inside a suite mark, that BOTH call
+# scoping, which keploy serves only in a run with the suite mark (or an
+# app-start mark): two named scopes recorded inside a suite mark (t1->/a,
+# t2->/b), then TWO CONCURRENT workers in one replay, inside a suite mark, that BOTH call
 # /b, each registered under its own pid: the worker scoped to t2 must be
 # SERVED /b, the worker scoped to t1 must MISS it (its scope allows only /a's
 # mock). Without per-PID scoping both would be served, so t1's MISS is the
@@ -27,7 +27,9 @@
 # the marks refuses a test that begins with a pid (422, naming the test, with
 # the marks and a pid-less begin as the two ways out), fails it, and so fails
 # the run: there a connection the app opened before the test began would be
-# served every test's mocks.
+# served every test's mocks. A harness that ignores the 422 and runs the test
+# anyway is served nothing in it, and the replay fails all the same, with an
+# ERROR naming the test, whatever the harness exits.
 #
 # And, with the marks, an app the tests did not start (an app server beside
 # them), whose connection was opened at boot, before any test began, as a
@@ -205,16 +207,40 @@ if status == 200:
 sys.exit(1)
 PY
 
+# Without the switch, in a run recorded without the marks, a harness that
+# does not check the begin's answer (as one that only logs a non-2xx does):
+# one worker begins t1 with its pid, prints IGN_STATUS=, runs t1 anyway,
+# calling t2's /b (IGN_B=SERVED:<body> or IGN_B=MISS), ends t1 as passed,
+# and exits 0.
+cat > ignore.py <<'PY'
+import os, sys, urllib.request
+import guard, keploy_v1 as k
+PORT = sys.argv[1]
+guard.check()
+mode = k.claim(".", os.getcwd())
+assert mode == k.LEGACY, "this check is the scope API without the proven switch, and the agent answered the claim: " + mode
+status, _ = k.post("/agent/scope/begin", {"name": "t1", "file": "ignore.py", "pid": os.getpid(), "canSkip": True})
+print("IGN_STATUS=%d" % status, flush=True)
+try:
+    print("IGN_B=SERVED:" + urllib.request.urlopen("http://127.0.0.1:%s/b" % PORT).read().decode(), flush=True)
+except Exception:
+    print("IGN_B=MISS", flush=True)
+k.post("/agent/scope/end", {"name": "t1", "file": "ignore.py", "pid": os.getpid(), "outcome": "passed"})
+sys.exit(0)
+PY
+
 # Without the switch, with the marks: an app the tests did not start (as an
 # app server is), which opened its connection at boot, before any test (as a
 # database pool does): mock/boot-pool takes a path on stdin and answers on
 # stdout. rpool.py records t1 (/a) and t2 (/b) through it, its own child.
-# At replay it is started beside shared.py, never under it, and reads
-# app.in and answers on app.out. Two workers
-# (sworker.py) begin t2, then t1, with their own pids and hold them open:
-# the driver has the app call /b on its boot connection with t2 alone open
-# (ONE_OPEN:), then /b with both open (TWO_OPEN:), then ends t1 and has it
-# call t1's /a with t2 alone open again (ONE_OPEN:), then ends t2.
+# At replay two of it are started beside shared.py, never under it: one
+# reads app.in and answers on app.out, the other app2.in and app2.out. Two
+# workers (sworker.py) begin t2, then t1, with their own pids and hold them
+# open: the driver has the app call /b on its boot connection with t2 alone
+# open (ONE_OPEN:), and the second app t1's /a on its own boot connection
+# (BOOT2_ONE_OPEN:), then the app /b with both open (TWO_OPEN:), then ends t1
+# and has the app call t1's /a with t2 alone open again (ONE_OPEN:), then
+# ends t2.
 cat > rpool.py <<'PY'
 import os, subprocess, sys
 import guard, keploy_v1 as k, marks
@@ -255,15 +281,17 @@ PY
 cat > shared.py <<'PY'
 import subprocess
 import marks
-app_in = open("app.in", "w")
-app_out = open("app.out")
-ready = app_out.readline().split()
-assert ready and ready[0] == "READY", "the app did not open its boot connection: %r" % ready
-print("APP_PID=" + ready[1], flush=True)
-def ask(tag, path):
-    app_in.write(path + "\n")
-    app_in.flush()
-    print(tag + app_out.readline().strip(), flush=True)
+def app(n):
+    i, o = open("app%s.in" % n, "w"), open("app%s.out" % n)
+    ready = o.readline().split()
+    assert ready and ready[0] == "READY", "the app did not open its boot connection: %r" % ready
+    print("APP%s_PID=%s" % (n, ready[1]), flush=True)
+    return i, o
+app1, app2 = app(""), app("2")
+def ask(tag, path, a=app1):
+    a[0].write(path + "\n")
+    a[0].flush()
+    print(tag + a[1].readline().strip(), flush=True)
 marks.mark("begin")
 def begin(n):
     w = subprocess.Popen(["python3", "sworker.py", n], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -275,13 +303,15 @@ def end(w):
     w.wait()
 w2 = begin("t2")
 ask("ONE_OPEN:", "/b")
+ask("BOOT2_ONE_OPEN:", "/a", app2)
 w1 = begin("t1")
 ask("TWO_OPEN:", "/b")
 end(w1)
 ask("ONE_OPEN:", "/a")
 end(w2)
 marks.mark("end")
-app_in.close()
+app1[0].close()
+app2[0].close()
 PY
 
 # Under the switch: two test processes, A and B, started side by side by a
@@ -465,23 +495,45 @@ RC=${PIPESTATUS[0]}
 BARE_PID=$(line_of bare.log BARE_PID)
 [ "$(line_of bare.log BARE_STATUS)" = 422 ] ||
   fail "a pid begin in a run without the marks was not refused with 422 (got '$(line_of bare.log BARE_STATUS)', $(grep -E '^BARE_(SERVED|MISS)' bare.log))"
-[ -n "$BARE_PID" ] && head -1 bare-body.txt | grep -F "t1 began with the pid $BARE_PID: keploy narrows a test to its own mocks by the pid of its test process only in a run with the suite and app-start marks" >/dev/null ||
+[ -n "$BARE_PID" ] && head -1 bare-body.txt | grep -F "t1 began with the pid $BARE_PID: keploy narrows a test to its own mocks by the pid of its test process only in a run recorded with the suite mark or an app-start mark" >/dev/null ||
   fail "the refusal does not name the test and its pid (pid $BARE_PID): $(head -c 400 bare-body.txt)"
-MARKS_WAY="Either add the marks, at record and at replay: begin a scope with \"suite\": true and the pid before the first test and end it after the last, and POST /agent/app/start {\"pid\": <the app's pid>} each time the tests start the app."
+MARKS_WAY="Either add the suite mark, at record and at replay: begin a scope with \"suite\": true and the pid before the first test and end it after the last; when the tests start the app, also POST /agent/app/start {\"pid\": <the app's pid>} each time they do."
 PIDLESS_WAY="Or send the begin without a pid, and run the tests one at a time: keploy then narrows every connection to the open test."
 grep -qxF -- "$MARKS_WAY" bare-body.txt ||
   fail "the refusal does not give the marks, with the calls to make, as one way out on a line of its own: $(cat bare-body.txt)"
 grep -qxF -- "$PIDLESS_WAY" bare-body.txt ||
   fail "the refusal does not give a pid-less begin, one test at a time, as the other way out on a line of its own: $(cat bare-body.txt)"
 [ "$RC" -ne 0 ] || fail "a replay whose test was refused passed (keploy exited 0)"
+
+echo "== 5b. without the switch, without the marks: a harness that ignores the refusal and runs the test is served nothing, and the replay fails =="
+sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "python3 ignore.py $PORT" --name p-bare --disable-tele 2>&1 | tee ignore.log
+RC=${PIPESTATUS[0]}
+sed 's/\x1b\[[0-9;]*m//g' ignore.log > ignore-plain.log
+[ "$(line_of ignore.log IGN_STATUS)" = 422 ] ||
+  fail "the ignoring harness's pid begin was not refused with 422 (got '$(line_of ignore.log IGN_STATUS)')"
+grep -qx "IGN_B=MISS" ignore.log ||
+  fail "the test keploy refused at its begin was served another test's recording: $(grep '^IGN_B=' ignore.log)"
+grep -F "keploy serves no recording to a call of a test it refused at its begin" ignore-plain.log >/dev/null ||
+  fail "the agent did not say why it refused the refused test's call"
+grep -P '\tWARN\tkeploy refused a test at its begin' ignore-plain.log | grep -F '"test": "t1"' >/dev/null ||
+  fail "the agent did not log the refusal of t1 at WARN"
+grep -P '\tERROR\treplay failed: keploy refused a test at its begin' ignore-plain.log | grep -F '"test": "t1"' >/dev/null ||
+  fail "keploy mock replay did not say, as an ERROR naming t1, that a test it refused fails the run"
+grep -qx "runnerExitCode: 0" keploy/p-bare/last-replay.yaml ||
+  fail "the ignoring harness should exit 0 (receipt: $(grep -E '^(exitCode|runnerExitCode|failedBy):' keploy/p-bare/last-replay.yaml | tr '\n' ' '))"
+grep -qx "failedBy: begin_refused" keploy/p-bare/last-replay.yaml ||
+  fail "the receipt does not say a test keploy refused at its begin failed the run: $(grep -E '^(exitCode|runnerExitCode|failedBy):' keploy/p-bare/last-replay.yaml | tr '\n' ' ')"
+[ "$RC" -ne 0 ] || fail "a replay whose harness ran a test keploy refused at its begin passed (keploy exited 0, as the harness did)"
 echo "== 6. without the switch, with the marks: an app's boot connection, of no test process, while one test is open and while two are =="
-rm -f app.in app.out && mkfifo app.in app.out || fail "could not make the boot-pool app's pipes"
+rm -f app.in app.out app2.in app2.out && mkfifo app.in app.out app2.in app2.out || fail "could not make the boot-pool apps' pipes"
 sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay \
-  -c "bash -c './bootpool 127.0.0.1:$PORT <app.in >app.out & python3 shared.py; rc=\$?; wait; exit \$rc'" \
+  -c "bash -c './bootpool 127.0.0.1:$PORT <app.in >app.out & ./bootpool 127.0.0.1:$PORT <app2.in >app2.out & python3 shared.py; rc=\$?; wait; exit \$rc'" \
   --name pb --disable-tele 2>&1 | tee shared.log
 APP_PID=$(line_of shared.log APP_PID)
 grep -qx "ONE_OPEN:/b=SERVED:BBB:boot" shared.log ||
   fail "with only t2 open, the app's call of t2's /b on its boot connection was not served: $(grep '^ONE_OPEN:/b' shared.log)"
+grep -qx "BOOT2_ONE_OPEN:/a=MISS:boot" shared.log ||
+  fail "with only t2 open, an app's boot connection was served t1's /a: $(grep '^BOOT2_ONE_OPEN:' shared.log)"
 grep -qx "TWO_OPEN:/b=MISS:boot" shared.log ||
   fail "with two tests open, the app's boot connection, of neither test's process, was not refused: $(grep '^TWO_OPEN:' shared.log)"
 [ -n "$APP_PID" ] && sed 's/\x1b\[[0-9;]*m//g' shared.log | grep -F "keploy cannot tell which test the call from pid $APP_PID belongs to: 2 tests are open" >/dev/null ||

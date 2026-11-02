@@ -9,7 +9,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/starts"
 )
 
-// In a run with the suite and app-start marks, a connection the app opened
+// In a run with the suite mark or an app-start mark, a connection the app opened
 // outside a test (its pool at boot, before the first begin, or one opened
 // between two tests) is served only the open test's mocks: its view is
 // resolved from the app starts on every read, whenever it opened. (Without

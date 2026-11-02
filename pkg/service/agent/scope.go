@@ -66,7 +66,7 @@ type scopeKey struct {
 //
 // pid is the calling worker's PID (ScopeReq.Pid). When > 0 the scope is keyed to
 // that worker, so two workers never overwrite one served view. A replay
-// narrows by it only with the suite and app-start marks: every connection's
+// narrows by it only with the suite mark or an app-start mark: every connection's
 // view is then resolved from the app starts on every read, and a connection
 // of no test process is served the one open test's mocks, or refused while
 // more than one test is open (starts.Unattributed). Without the marks a
@@ -214,18 +214,18 @@ func (a *Agent) beginScopeAt(ctx context.Context, name string, pid int, at time.
 }
 
 // ErrPidBeginWithoutMarks refuses a replayed test that begins with a worker
-// pid in a run with no suite and app-start marks (pidCannotScope). The
+// pid in a run with neither the suite mark nor an app-start mark (pidCannotScope). The
 // refusal names the test and its pid, then PidBeginRemedy.
-var ErrPidBeginWithoutMarks = errors.New("keploy narrows a test to its own mocks by the pid of its test process only in a run with the suite and app-start marks: without them, a connection the app opened before the test began (its database pool at boot, or one opened between two tests) is served every test's mocks, so the test could pass on another test's recording")
+var ErrPidBeginWithoutMarks = errors.New("keploy narrows a test to its own mocks by the pid of its test process only in a run recorded with the suite mark or an app-start mark: without one, a connection the app opened before the test began (its database pool at boot, or one opened between two tests) is served every test's mocks, so the test could pass on another test's recording")
 
 // PidBeginRemedy is the two ways out of ErrPidBeginWithoutMarks, one line
 // each: the marks, which keep the pid, or no pid and one test at a time.
-const PidBeginRemedy = "Either add the marks, at record and at replay: begin a scope with \"suite\": true and the pid before the first test and end it after the last, and POST /agent/app/start {\"pid\": <the app's pid>} each time the tests start the app.\n" +
+const PidBeginRemedy = "Either add the suite mark, at record and at replay: begin a scope with \"suite\": true and the pid before the first test and end it after the last; when the tests start the app, also POST /agent/app/start {\"pid\": <the app's pid>} each time they do.\n" +
 	"Or send the begin without a pid, and run the tests one at a time: keploy then narrows every connection to the open test."
 
 // pidCannotScope is whether a replayed test that begins with pid would be
 // served another test's mocks: it begins with a worker pid, in a run whose
-// replay has a mapping for it, with no suite and app-start marks
+// replay has a mapping for it, with neither the suite mark nor an app-start mark
 // (starts.Default.Active).
 //
 // A pid begin narrows only the connections the proxy wraps for the worker's

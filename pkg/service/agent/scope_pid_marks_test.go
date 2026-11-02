@@ -12,7 +12,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// marked makes the run one recorded with the suite and app-start marks
+// marked makes the run one recorded with the suite mark or an app-start mark
 // (starts.Default.Active) for the test, and undoes it after.
 func marked(t *testing.T, tests ...string) {
 	t.Helper()
@@ -25,7 +25,7 @@ func marked(t *testing.T, tests ...string) {
 }
 
 // A replayed test that begins with its test process's pid, in a run without
-// the suite and app-start marks, is refused, and fails whatever its harness
+// the suite mark or an app-start mark, is refused, and fails whatever its harness
 // does with the refusal. A pid begin narrows only connections the app opens
 // while the test is open: one it opened at boot or between two tests keeps
 // the bare manager, and would serve the test every test's mocks. (Without a
@@ -51,8 +51,8 @@ func TestAPidBeginWithoutMarksIsRefusedAndFailsTheTest(t *testing.T) {
 			t.Fatalf("%s began with a pid in a run without marks: got %v, want ErrPidBeginWithoutMarks", test, err)
 		}
 		// It names the test and its pid, then the two ways out, one line each.
-		want := test + " began with the pid 4242: " + ErrPidBeginWithoutMarks.Error() + ".\n" +
-			"Either add the marks, at record and at replay: begin a scope with \"suite\": true and the pid before the first test and end it after the last, and POST /agent/app/start {\"pid\": <the app's pid>} each time the tests start the app.\n" +
+		want := test + " began with the pid 4242: keploy narrows a test to its own mocks by the pid of its test process only in a run recorded with the suite mark or an app-start mark: without one, a connection the app opened before the test began (its database pool at boot, or one opened between two tests) is served every test's mocks, so the test could pass on another test's recording.\n" +
+			"Either add the suite mark, at record and at replay: begin a scope with \"suite\": true and the pid before the first test and end it after the last; when the tests start the app, also POST /agent/app/start {\"pid\": <the app's pid>} each time they do.\n" +
 			"Or send the begin without a pid, and run the tests one at a time: keploy then narrows every connection to the open test."
 		if err.Error() != want {
 			t.Fatalf("%s's refusal:\n%s\nwant:\n%s", test, err, want)

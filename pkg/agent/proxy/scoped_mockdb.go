@@ -23,7 +23,7 @@ import (
 // mocks. Keying the filter by the worker's PID keeps two workers' begin/end
 // calls from overwriting one shared filter, but it does NOT isolate tests that
 // run at the same time: it narrows only the worker's own process tree. So a
-// replay without the suite and app-start marks refuses a begin with a pid
+// replay without the suite mark or an app-start mark refuses a begin with a pid
 // (service/agent pidCannotScope); with them, a process no registered worker
 // started (an app server the tests share) is served the one open test's
 // mocks, or refused while more than one test is open (scopedFor,
@@ -1356,7 +1356,7 @@ func (p *Proxy) SetMappedUniverse(names []string) {
 }
 
 // scopedFor returns a mock view for an outgoing call from kpid. In a run with
-// the suite and app-start marks (starts.Default.Active) every call, kpid == 0
+// the suite mark or an app-start mark (starts.Default.Active) every call, kpid == 0
 // (non-eBPF platform / lookup miss) included, gets a view resolved from the
 // app starts on every read (scopedMockDb.live): a call of no test process is
 // the one open test's, or refused while more than one is open (starts
@@ -1373,7 +1373,7 @@ func (p *Proxy) SetMappedUniverse(names []string) {
 // Couchbase, HBase) would then split one app's state per connection. So a
 // pid begin cannot narrow a connection its app opened outside a test (its pool
 // at boot, or one opened between two tests), and keploy refuses a pid begin in
-// a run without the suite and app-start marks (service/agent pidCannotScope).
+// a run without the suite mark or an app-start mark (service/agent pidCannotScope).
 // Under exact serving (below) a begin with any pid is served exactly.
 func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.MockMemDb {
 	if mgr == nil {
