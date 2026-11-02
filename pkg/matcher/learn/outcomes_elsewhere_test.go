@@ -140,10 +140,10 @@ func TestOutcomeElsewhereLearnsAClocksWordsOnlyWhereTheBucketIsDeclared(t *testi
 	eNothing(t, "a 6-digit bucket", ds, "body.documents[0]._id")
 	noise := false
 	for _, d := range ds {
-		noise = noise || oEdits(d.Refusal, "noise-at-word")
+		noise = noise || oEdits(d.Refusal, "noise-at-field")
 	}
 	if !noise {
-		t.Errorf("a 6-digit bucket: %s; want the noise edit at its word", oDescribe(ds))
+		t.Errorf("a 6-digit bucket: %s; want the noise edit at its field", oDescribe(ds))
 	}
 	in.Declared = func(field string, word int) bool { return field == eID }
 	clocks := 0

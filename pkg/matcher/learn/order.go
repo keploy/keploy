@@ -96,7 +96,7 @@ func bothWays(in Input, ds []Decision, fields []string, as []Decision, afields [
 			ds[i] = dc.refuse(fields[i], d.At, d.At.Word, d.Recorded, d.Full, RefusalUnknown,
 				"an exchange recorded at the call's own instant read as an earlier place of the test makes it "+names[d.Outcome]+
 					", read as a recording made after the call "+names[a.Outcome]+": keploy cannot tell which the application did",
-				nil, dc.wordNoise(fields[i], d.At.Word))
+				nil, dc.fieldNoise(fields[i]))
 		}
 	}
 	return ds
@@ -186,13 +186,18 @@ func (dc *decider) oneValue(out []Decision, fields []string) {
 				if out[k].Outcome == OutcomeFresh {
 					aa := out[k].AnsweredAfter
 					out[k] = dc.refuse(fields[k], out[k].At, out[k].At.Word, out[k].Recorded, out[k].Full, RefusalTwoSources, why,
-						[]string{name(j), name(i)}, dc.wordNoise(fields[k], out[k].At.Word))
+						[]string{name(j), name(i)}, dc.fieldNoise(fields[k]))
 					out[k].AnsweredAfter = aa
 				}
 			}
 		}
 	}
 }
+
+// unnamedWhy refuses a leaf no path names alone (Leaf.Unnamed). Its
+// keploy.yml noise names it, and also the field its key's '.', '[' or ']'
+// would nest, which the line says.
+const unnamedWhy = "no path names this field alone: its key holds '.', '[' or ']', so its noise in keploy.yml also names the field those would nest"
 
 // leaf decides the changed words of the drifted leaf at path.
 func (dc *decider) leaf(path, unread string) []Decision {
@@ -204,7 +209,7 @@ func (dc *decider) leaf(path, unread string) []Decision {
 			"keploy could not read "+unread+", which came before this call", nil,
 			Edit{Kind: EditReRecord}, dc.fieldNoise(path))}
 	case rec.Unnamed || live.Unnamed:
-		return []Decision{dc.cannotCheck(path, at, -1, rec.Value, live.Value, "no path names this field alone")}
+		return []Decision{dc.cannotCheck(path, at, -1, rec.Value, live.Value, unnamedWhy)}
 	case rec.Type == Instant || live.Type == Instant:
 		r, okR := readTyped(rec)
 		l, okL := readTyped(live)
@@ -569,12 +574,12 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 		}
 		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalUnknown,
 			"keploy cannot tell what round F gave at "+p.name+" before this call ("+why+")", names(unknown),
-			Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
+			Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 	case len(outside) > 0:
 		p := outside[0]
 		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalAnotherScope,
 			"the value "+p.name+" sent in "+scopeName(p)+"; keploy binds only within a test and the start-up", names(outside),
-			Edit{Kind: EditMoveToMocks, Mock: p.mock}, Edit{Kind: EditMoveToStartup, Mock: p.mock}, dc.wordNoise(path, n))
+			Edit{Kind: EditMoveToMocks, Mock: p.mock}, Edit{Kind: EditMoveToStartup, Mock: p.mock}, dc.fieldNoise(path))
 	}
 	if why, p := dc.encoded(); p != nil {
 		if p.otherTest && !dc.allScope {
@@ -1152,7 +1157,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		untold := func(note string) Decision {
 			return dc.refuse(path, at, n, r, l, RefusalPick,
 				"the recorded moment stands in "+p.name+", whose state in round F keploy cannot tell ("+note+")", []string{p.name},
-				Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
+				Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 		}
 		// A pick needs round F's moment at the call's own cut. A place that
 		// holds it only as a finer time cut or rounded to it (a field's
@@ -1168,13 +1173,13 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			if !p.same() {
 				why = "round F's moment stands in " + p.name + ", which does not show it"
 			}
-			return dc.refuse(path, at, n, r, l, RefusalPick, why, []string{p.name}, dc.wordNoise(path, n))
+			return dc.refuse(path, at, n, r, l, RefusalPick, why, []string{p.name}, dc.fieldNoise(path))
 		// An answer recorded after the call that round F gave before it:
 		// in round F the value may be a pick from it, as main reads it.
 		// The recorded application never read it, so R's moment standing
 		// there too (by another cut) says nothing.
 		case p.fGave && p.state == stateNotBefore && p.side == Response && h.hl && !cut:
-			return dc.refuse(path, at, n, r, l, RefusalPick, "round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it", []string{p.name}, dc.wordNoise(path, n))
+			return dc.refuse(path, at, n, r, l, RefusalPick, "round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it", []string{p.name}, dc.fieldNoise(path))
 		case p.side == Response && p.state == stateUnknown && (h.hr || h.hl):
 			return untold(p.why)
 		case h.hr && dc.swappable(p, c):
@@ -1185,7 +1190,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		reqs := slices.DeleteFunc(slices.Clone(dc.in.Earlier), func(e Earlier) bool { return !e.Given || e.Gave || e.Unread != "" })
 		if where, _ := dc.dr.requestHolds([]moment{*c.rm}, []moment{*c.lm}, reqs); where != "" {
 			return dc.refuse(path, at, n, r, l, RefusalPick,
-				"the recorded moment stands in the test case at "+where+", and no cut there gives round F's", []string{where}, dc.wordNoise(path, n))
+				"the recorded moment stands in the test case at "+where+", and no cut there gives round F's", []string{where}, dc.fieldNoise(path))
 		}
 	}
 
@@ -1202,7 +1207,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		return dc.bound(path, at, n, c, slots, ": the test case's request holds it, templated, in both runs")
 	default:
 		return dc.refuse(path, at, n, r, l, RefusalTwoSources,
-			"the same moment was sent at "+slots[0].name+" and "+slots[1].name+", two separate reads", names(slots), dc.wordNoise(path, n))
+			"the same moment was sent at "+slots[0].name+" and "+slots[1].name+", two separate reads", names(slots), dc.fieldNoise(path))
 	}
 
 	// 3. Answer: an answer of the call's scope or the start-up, given
@@ -1247,7 +1252,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		}
 		if late != "" {
 			return dc.refuse(path, at, n, r, l, RefusalUnknown, why+", beside "+answers[0].name+": two sources", []string{late, answers[0].name},
-				Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
+				Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 		}
 		// A send before every such answer, at a fine cut, showing the same
 		// moment: the answer reads back what the application wrote, and
@@ -1283,11 +1288,11 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		gaveOutside, fine = append(gaveOutside, mock), fine || fineCut(c.rm.res) || fineCut(c.lm.res)
 	}
 	if len(gaveOutside) > 0 {
-		d := dc.refuse(path, at, n, r, l, RefusalPick, "round F's moment, or the recorded one, stands in an answer round F gave before the call outside its scope", nil, Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
+		d := dc.refuse(path, at, n, r, l, RefusalPick, "round F's moment, or the recorded one, stands in an answer round F gave before the call outside its scope", nil, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 		if m := gaveOutside[0]; m != "" {
 			d = dc.refuse(path, at, n, r, l, RefusalAnotherScope,
 				"the moment stands in "+m+"'s answer, which round F gave before the call outside its scope: a copy or a pick from it, never a read of the clock; keploy binds only within a test and the start-up", []string{m},
-				Edit{Kind: EditMoveToMocks, Mock: m}, Edit{Kind: EditMoveToStartup, Mock: m}, dc.wordNoise(path, n))
+				Edit{Kind: EditMoveToMocks, Mock: m}, Edit{Kind: EditMoveToStartup, Mock: m}, dc.fieldNoise(path))
 		}
 		if fine || len(untold) > 0 {
 			return d
@@ -1303,7 +1308,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		p := untold[0]
 		return dc.refuse(path, at, n, r, l, RefusalUnknown,
 			"keploy cannot tell what round F gave at "+p.name+" before this call (round F's moment may stand there, and the recorded one does not)", names(untold),
-			Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
+			Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 	}
 
 	// 5. Clock: the call's own window holds it, as a plain read or plus an
@@ -1490,7 +1495,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	if len(inOtherForm) > 0 {
 		why += "; " + strings.Join(inOtherForm, ", ") + " held the moment only in another form, which no variable holds as this text"
 	}
-	return dc.refuse(path, at, n, r, l, RefusalNoClockRead, why, append(append(outside, heldAt...), inOtherForm...), dc.wordNoise(path, n), Edit{Kind: EditReRecord})
+	return dc.refuse(path, at, n, r, l, RefusalNoClockRead, why, append(append(outside, heldAt...), inOtherForm...), dc.fieldNoise(path), Edit{Kind: EditReRecord})
 }
 
 // madeSinceBegin is why c, a changed instant of a client test's call that
@@ -1698,7 +1703,7 @@ func (dc *decider) copied(path string, at variables.Address, n int, c changedIns
 	first := earliest(src)
 	if i := slices.IndexFunc(src, func(p evPlace) bool { return p.clock && p.name != first.name }); i >= 0 {
 		return dc.refuse(path, at, n, c.r, c.l, RefusalTwoSources,
-			"the same moment was sent at "+first.name+" and "+src[i].name+", two separate reads", []string{first.name, src[i].name}, dc.wordNoise(path, n))
+			"the same moment was sent at "+first.name+" and "+src[i].name+", two separate reads", []string{first.name, src[i].name}, dc.fieldNoise(path))
 	}
 	return dc.bound(path, at, n, c, src, rule)
 }
@@ -1831,24 +1836,17 @@ func (dc *decider) cannotCheck(path string, at variables.Address, n int, r, f, w
 }
 
 func (dc *decider) fieldNoise(path string) Edit {
-	return noiseEdit(dc.in.Mock, noiseName(dc.in, path), -1)
+	return noiseEdit(dc.in.Mock, noiseName(dc.in, path))
 }
 
-func (dc *decider) wordNoise(path string, n int) Edit {
-	return noiseEdit(dc.in.Mock, noiseName(dc.in, path), n)
-}
-
-// noiseEdit is noise at word n of the field keploy.yml's noise names name,
-// or at the field where n is -1; a re-record where no keploy.yml noise
-// names it (noiseAt).
-func noiseEdit(mock, name string, n int) Edit {
+// noiseEdit is noise at the field keploy.yml's noise names name, for a
+// word of it too, as keploy.yml names no word; a re-record where no
+// keploy.yml noise names it (noiseAt).
+func noiseEdit(mock, name string) Edit {
 	if _, _, ok := noiseAt(name); !ok {
 		return Edit{Kind: EditReRecord}
 	}
-	if n < 0 {
-		return Edit{Kind: EditNoiseAtField, Mock: mock, Field: name, Word: -1}
-	}
-	return Edit{Kind: EditNoiseAtWord, Mock: mock, Field: name, Word: n}
+	return Edit{Kind: EditNoiseAtField, Mock: mock, Field: name, Word: -1}
 }
 
 // noiseName is the field at path as keploy.yml's noise names it

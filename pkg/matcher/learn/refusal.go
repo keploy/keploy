@@ -37,12 +37,13 @@ const (
 // editForms is each edit's words. %m is the mock, %f the field, %n a
 // given's name, %k the keploy.yml noise that names the field (noiseWords);
 // each kind carries only the fields its words name (Edit's other fields are
-// zero, Word -1 for a whole field).
+// zero, Word -1 for a whole field). Noise at a word prints as noise at its
+// field: keploy.yml names no word, so Decide gives only the field's.
 var editForms = map[EditKind]string{
 	EditMoveToMocks:   "move %m to this test's mocks: in mappings.yaml (it then binds)",
 	EditMoveToStartup: "move %m to startup: in mappings.yaml (it then binds)",
 	EditMoveToWorker:  "move %m to worker: in mappings.yaml (served, never required)",
-	EditNoiseAtWord:   "%k: the whole field, as keploy.yml names no word",
+	EditNoiseAtWord:   "%k",
 	EditNoiseAtField:  "%k",
 	EditGive:          "give it in the test: keploytest.Given(t, %n, v)",
 	EditReRecord:      "re-record",
@@ -129,6 +130,8 @@ func noiseWords(e Edit, form string) string {
 	entry := "in keploy.yml, test.globalNoise.global." + bucket + ": {" + key + ": []}"
 	if bucket == "url" {
 		entry += ", a regex of the part of " + lineName(e.Field) + " that changes"
+	} else {
+		entry += " (the whole field: keploy.yml names no word)"
 	}
 	return strings.Replace(form, "%k", entry+", or the same under test.globalNoise.test-sets.<the test set>: noise for every mock there", 1)
 }

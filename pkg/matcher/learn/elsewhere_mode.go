@@ -31,7 +31,7 @@ func elsewhere(in Input, ds []Decision, fields []string) []Decision {
 	g := ds[guard]
 	stop := "round F's call landed in " + in.Landed.String() + ", which teaches clock reads only; " +
 		wordWhere(in.Test, in.Mock, fields[guard], g.At.Word) + " is " + outcomeWords(g)
-	edit := noiseEdit(in.Mock, noiseName(in, fields[guard]), g.At.Word)
+	edit := noiseEdit(in.Mock, noiseName(in, fields[guard]))
 	out := make([]Decision, 0, len(ds))
 	for i, d := range ds {
 		kind, places := RefusalLandedElsewhere, []string(nil)

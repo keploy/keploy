@@ -63,7 +63,7 @@ func learnedLine(l learnedWord) string {
 	b.WriteString(placesPart(l.Places))
 	b.WriteString(". Undo: ")
 	sep := ""
-	for _, e := range onceEach([]Edit{noiseEdit(l.Mock, cmp.Or(l.Noise, l.Field), l.Word), {Kind: EditReRecord}}) {
+	for _, e := range onceEach([]Edit{noiseEdit(l.Mock, cmp.Or(l.Noise, l.Field)), {Kind: EditReRecord}}) {
 		b.WriteString(sep + editWords(e))
 		sep = editSep
 	}
