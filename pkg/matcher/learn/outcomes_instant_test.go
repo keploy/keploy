@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -1590,5 +1591,68 @@ func TestOutcomeASecondOnlyTheApplicationSentToALaterRecordingIsNoPick(t *testin
 		ans := oAnswer("mock-1624", time.Second, rec).ServedAs(1).ServedLive(oAnswer("mock-1624", time.Second, live))
 		iValue(t, proto.what+": the worker sends round F's second beside an answer that holds both runs' seconds",
 			decide(ans, recorded.ServedAs(2).ServedLive(proto.raw(later, live, ""))), "mock-1624")
+	}
+}
+
+// A recording keploy read once and cannot read again leaves the call
+// unread: which half of it holds round F's second (its answer, a pick; its
+// request, a send) is read again from the recording, never decided from
+// what an earlier read of the whole text kept, and a read that fails
+// refuses every change of the call, naming the recording keploy could not
+// read again (and not one it read). The recording is past the set's store
+// of payloads, so each read loads it again, and its load fails after the
+// first.
+func TestOutcomeARecordingReadOnceAndNotAgainLeavesTheCallUnread(t *testing.T) {
+	defer func(b int64) { bodyBudget = b }(bodyBudget)
+	bodyBudget = 0
+	const p = "body.cmd.documents.0.createdAt"
+	rAt := oAt.Truncate(time.Second).Add(7*time.Second + 400*time.Millisecond)
+	fAt := rAt.Add(time.Hour + 37*time.Second + 200*time.Millisecond)
+	sec := func(x time.Time) string { return strconv.FormatInt(x.Unix(), 10) }
+	rec, live := sec(rAt), sec(fAt)
+	later := rAt.Add(15 * time.Second)
+	worker := &models.Mock{Name: "mock-0", Kind: models.Mongo, Spec: models.MockSpec{
+		MongoRequests: []models.MongoRequest{{Header: &models.MongoHeader{Opcode: wiremessage.OpMsg}, Message: &models.MongoOpMessage{Sections: []string{
+			`{ SectionSingle msg: {"findAndModify":"ptw_endpoints","update":{"$set":{"claimedAt":{"$numberLong":"` + live + `"}}},"$db":"app"} }`,
+		}}}},
+		MongoResponses: []models.MongoResponse{{Header: &models.MongoHeader{Opcode: wiremessage.OpMsg}, Message: &models.MongoOpMessage{Sections: []string{
+			`{ SectionSingle msg: {"value":null,"ok":{"$numberDouble":"1.0"}} }`,
+		}}}},
+		ReqTimestampMock: later, ResTimestampMock: later.Add(time.Millisecond),
+	}}
+	for _, failFrom := range []int{1, 2} {
+		// A set of its own each: the store keeps whether a recording was
+		// read past its payload.
+		tr := NewTracker()
+		tr.NewSet()
+		tr.Begin()
+		dc := tr.Drifts()
+		dc.appClock = true
+		loads := 0
+		raw := dc.LazyRawOf(worker, true, func() (*models.Mock, error) {
+			if loads++; loads >= failFrom {
+				return nil, errors.New("the parked answer is gone")
+			}
+			return worker, nil
+		}).ServedAs(1).ServedAsRecorded()
+		read := RawOf(getAnswer("mock-9", "http://api/items/1", `{"note":"kept"}`, rAt.Add(-time.Second)), true).ServedAs(2).ServedAsRecorded()
+		in := iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), nil, []Raw{read, raw})
+		in.Drifts = dc
+		what := fmt.Sprintf("a recording whose load fails from its read %d on", failFrom)
+		d := oWord(t, Decide(in), rec, live)
+		tr.End()
+		if loads < failFrom {
+			t.Errorf("%s: loaded %d times; the row needs that read to happen", what, loads)
+		}
+		oRefused(t, what, d, RefusalUnread, "mock-0")
+		// The line names what keploy could not read, once, and neither a
+		// recording it read (mock-9) nor a budget the call did not pass.
+		if d.Refusal == nil {
+			continue
+		}
+		if why := d.Refusal.Why; strings.Contains(why, "budget") || strings.Contains(why, "mock-9") ||
+			failFrom > 1 && (!strings.Contains(why, "read mock-0 again") || strings.Count(why, "mock-0") != 1) {
+			t.Errorf("%s: refused %q; want it to say keploy could not read mock-0 again, naming it once", what, why)
+		}
 	}
 }

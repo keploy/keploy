@@ -141,10 +141,11 @@ func decideWords(in Input, allScope bool) ([]Decision, []string) {
 	}
 	dc.oneValue(out, fields)
 	if dc.x.unread() {
-		// A run past its budget: every change of the call is refused.
+		// A recording keploy could not read again: every change of the
+		// call is refused.
 		for i, d := range out {
 			out[i] = dc.refuse(fields[i], d.At, d.At.Word, d.Recorded, d.Full, RefusalUnread,
-				"keploy could not read the run's values past their budget, which came before this call", nil,
+				dc.unreadWhy(), nil,
 				Edit{Kind: EditReRecord}, dc.fieldNoise(fields[i]))
 		}
 	}
@@ -931,7 +932,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			}
 		}
 		if !okR || !okL {
-			return dc.refuse(path, at, n, r, l, RefusalUnread, "keploy could not read the run's values past their budget, which came before this call", nil, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
+			return dc.refuse(path, at, n, r, l, RefusalUnread, dc.unreadWhy(), nil, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 		}
 		if hr || hl {
 			hs = append(hs, instantHold{p: p, hr: hr, hl: hl, fr: fr, fl: fl, gl: gl, coarseR: hr && c.rm != nil && dc.coarserOnly(p.t.rec, r, *c.rm),
@@ -1661,6 +1662,23 @@ func (dc *decider) learned(path string, at variables.Address, n int, r, f string
 		Test: dc.in.Test, Mock: dc.in.Mock, Field: path, Word: n, Recorded: r, Full: f,
 		Outcome: o, Rule: rule, Places: places, From: from,
 	})}
+}
+
+// unreadWhy is why a call is refused where keploy read a recording of it
+// once and could not read it again (a lazy Raw whose payload the set's
+// store let go, and whose load then failed): the recordings, by name, so
+// the line names the place and its cause, never a budget it did not pass.
+func (dc *decider) unreadWhy() string {
+	var names []string
+	for _, p := range dc.ps {
+		for _, t := range append([]*readerText{p.t.rec, p.t.live}, p.t.views...) {
+			if n := unreadName(p.mock, Earlier{}); t.rawUnread && !slices.Contains(names, n) {
+				names = append(names, n)
+			}
+		}
+	}
+	return "keploy could not read " + cmp.Or(strings.Join(names, ", "), "a recording of the test") +
+		" again, an earlier place of the call it read before, so it cannot tell whether what changed came from there"
 }
 
 // refuse is a refused word and its line.
