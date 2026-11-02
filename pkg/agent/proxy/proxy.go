@@ -5919,6 +5919,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					At:            parserErr.MismatchReport.At,
 					Protocol:      parserErr.MismatchReport.Protocol,
 					ActualSummary: parserErr.MismatchReport.ActualSummary,
+					Operation:     parserErr.MismatchReport.Operation,
 					Destination:   parserErr.MismatchReport.Destination,
 					ClosestMock:   parserErr.MismatchReport.ClosestMock,
 					Diff:          parserErr.MismatchReport.Diff,
@@ -6223,7 +6224,7 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid uint32, dst *models.Con
 		fields := []zap.Field{
 			zap.String("protocol", r.Protocol),
 			zap.String("destination", r.Destination),
-			zap.String("actual", r.ActualSummary),
+			zap.String("actual", models.WithHTTPOperation(r.ActualSummary, r.Operation)),
 			zap.String("match_phase", r.MatchPhase),
 			zap.Int("candidates", r.CandidateCount),
 			zap.String("closest", r.ClosestMock),

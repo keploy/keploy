@@ -249,6 +249,10 @@ type MockMismatchReport struct {
 	Diff          string    // Human-readable diff (protocol-specific)
 	NextSteps     string    // Actionable suggestion for the user
 	MatchPhase    string    // how far the match cascade got (MatchPhase* constants)
+	// Operation is the label of the operation an HTTP call carries, as the
+	// registered reader names it (HTTPOperationLabel): "query GetAppLabels".
+	// "" when it carries none. ActualSummary never holds it.
+	Operation string
 	// DestinationScope is the verdict on whether any mock the matcher
 	// compared against targeted this call's upstream (DestinationScope*
 	// constants; empty means the question was never answered). It is a
