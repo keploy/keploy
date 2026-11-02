@@ -438,22 +438,9 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 			}
 		}
 	}
-	noiseCfg := map[string]map[string][]string{}
-	if headerNoise, ok := r.globalNoise["header"]; ok {
-		noiseCfg["header"] = headerNoise
-	}
-	if bodyNoise, ok := r.globalNoise["body"]; ok {
-		// "body" feeds outgoing-payload matchers (e.g. the Pulsar SEND matcher)
-		// and stays the response-assertion bucket — it intentionally does NOT
-		// drive HTTP request-body matching anymore.
-		noiseCfg["body"] = bodyNoise
-	}
-	if reqBodyNoise, ok := r.globalNoise["requestbody"]; ok {
-		// Dedicated HTTP request-body matching noise (drift-detection
-		// exclusion + strict-noise allowance). Separate from "body" so
-		// response-assertion noise can't silently soften request matching.
-		noiseCfg["requestbody"] = reqBodyNoise
-	}
+	// keploy.yml's matching noise, cut to the buckets the agent's mock
+	// matchers read, as keploy test cuts it (models.MockMatchingNoise).
+	noiseCfg := models.MockMatchingNoise(r.globalNoise)
 	if len(noiseCfg) > 0 {
 		outOpts.NoiseConfig = noiseCfg
 	}
