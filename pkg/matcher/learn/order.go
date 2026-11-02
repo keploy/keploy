@@ -316,7 +316,7 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 		return Decision{}, false
 	}
 	whole := readWord{At: bare, Rec: rec, Live: live, Tokens: []wholeToken{{Kind: tokenB64, Rec: rec, Live: live}}}
-	shown := slices.ContainsFunc(dc.ps, func(p evPlace) bool { return tokenShown(p, whole) })
+	shown := slices.ContainsFunc(dc.ps, func(p evPlace) bool { return tokenShown(placedFor(p, rec), whole) })
 	if !shown && slices.ContainsFunc(rd.Words, func(w readWord) bool {
 		return slices.ContainsFunc(dc.ps, func(p evPlace) bool {
 			return wordBits(w.Rec) >= chanceBits && evHolds(p.t.rec, w.Rec) || wordBits(w.Live) >= chanceBits && evHolds(p.t.live, w.Live)
@@ -401,7 +401,10 @@ func (dc *decider) neverServed(mock string) bool {
 // pieceOfAnId; under unreadFloorBits it is floor.
 func (dc *decider) word(path string, bare variables.Address, rec, live, text string, w readWord, piece bool) Decision {
 	at, n := w.At, w.At.Word
-	ps := append([]evPlace(nil), dc.ps...)
+	ps := make([]evPlace, len(dc.ps))
+	for i, p := range dc.ps {
+		ps[i] = placedFor(p, w.Rec)
+	}
 	cand := map[string]bool{}
 	floor := piece && wordBits(w.Rec) < unreadFloorBits && wordBits(w.Live) < unreadFloorBits
 	// moved: why a place that shows the word shows it at another field.
@@ -571,7 +574,7 @@ func (dc *decider) inDecodedForm(rds []textReading) (string, *evPlace) {
 					continue
 				}
 				for _, f := range fs {
-					if ev, read := evidenceAt(p, r, f, false); read && (ev == evShown || ev == evUnknown) {
+					if ev, read := evidenceAt(placedFor(p, r), r, f, false); read && (ev == evShown || ev == evUnknown) {
 						return p.name + " held " + strconv.Quote(r) + " and " + strconv.Quote(f) + " may be round F's there: this value carries it in a decoded form, where keploy binds no word", &p
 					}
 				}

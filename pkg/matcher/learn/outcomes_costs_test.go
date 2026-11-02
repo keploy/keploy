@@ -191,12 +191,16 @@ func TestOutcomeCostTheEvidenceTablesPinnedRowsStayRefused(t *testing.T) {
 }
 
 // Refused where main binds (stricter, a red only): a copy of a place F did
-// not serve, served changed with no view, that holds both values, or
-// answered at the call's own instant (follows_test.go:388-392); a value that
-// took part of a longer word F gave (:318); a row holding both 50 and a/b
-// (:401-405). A place recorded after the call (:391) gave R's application
-// nothing before it, so R's 50 there is no source, and F's text there holds
-// no 7: the value is made anew each run, where main binds it to that place.
+// not serve, served changed with no view, or that holds both values
+// (follows_test.go:388-390); a value that took part of a longer word F gave
+// (:318); a row holding both 50 and a/b (:401-405). A place recorded after
+// the call (:391) gave R's application nothing before it, so R's 50 there
+// is no source, and F's text there holds no 7: the value is made anew each
+// run, where main binds it to that place. One asked a millisecond before
+// the call and answered at its own instant (:392) holds 50 in its request,
+// which the application sent before the call: it is placed by when it was
+// sent, and round F sent it again as recorded while the value took 7, so
+// the value did not follow it: made anew, as where it was answered before.
 func TestOutcomeCostACopyOfAPlaceNotBeforeInBothRunsIsRefused(t *testing.T) {
 	before := eRecAt.Add(-150 * time.Millisecond)
 	startup := func(x Raw) []Raw { return append(eStartup(), x) }
@@ -207,12 +211,19 @@ func TestOutcomeCostACopyOfAPlaceNotBeforeInBothRunsIsRefused(t *testing.T) {
 		{"F did not serve the CREATE TABLE (follows_test.go:388)", "7", startup(eHistory(before, 0, false))},
 		{"F served the CREATE TABLE changed, no view (:389)", "7", startup(eHistory(before, 6, false))},
 		{"the CREATE TABLE holds F's value too (:390)", "200", startup(eHistory(before, 6, true))},
-		{"the CREATE TABLE was answered at the call's own instant (:392)", "7", startup(eHistory(eRecAt.Add(-time.Millisecond), 6, true))},
 	} {
 		costRefused(t, c.what, oWord(t, Decide(costF("50", c.live, nil, c.raw, nil)), "50", c.live), costUnknown, "mock-5")
 	}
-	if d := oWord(t, Decide(costF("50", "7", nil, startup(eHistory(eRecAt.Add(10*time.Millisecond), 6, true)), nil)), "50", "7"); d.Outcome != OutcomeFresh {
-		t.Errorf("the CREATE TABLE was recorded after the call (:391): %s; want a value made anew", oDescribe([]Decision{d}))
+	for _, c := range []struct {
+		what string
+		at   time.Time
+	}{
+		{"the CREATE TABLE was recorded after the call (:391)", eRecAt.Add(10 * time.Millisecond)},
+		{"the CREATE TABLE was asked a millisecond before the call and answered at its own instant (:392)", eRecAt.Add(-time.Millisecond)},
+	} {
+		if d := oWord(t, Decide(costF("50", "7", nil, startup(eHistory(c.at, 6, true)), nil)), "50", "7"); d.Outcome != OutcomeFresh {
+			t.Errorf("%s: %s; want a value made anew", c.what, oDescribe([]Decision{d}))
+		}
 	}
 	d := oWord(t, Decide(costF("k-48d1", "k-6c7d", nil, append(eStartup(), eRow("48d1 aaaa", "x", "y").ServedAs(6).ServedLive(eRow("6c7daaaa", "x", "y"))), nil)), "48d1", "6c7d")
 	costRefused(t, "the value took a part of a longer word F gave (follows_test.go:318)", d, costUnknown, "mock-6")

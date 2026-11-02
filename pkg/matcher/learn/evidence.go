@@ -74,13 +74,25 @@ type evPlace struct {
 	// read, so it may hold round F's new word: unknown for every word.
 	// fGave: round F gave the application this place before the call
 	// reached keploy, whenever it was recorded. recAfter: answered after
-	// the call (answerState), so it gave R's application nothing before
-	// it; R's word there decides nothing (setEvidence's rule for a set
-	// entry, one rule however a recording is handed in).
+	// the call (answerState), so its answer gave R's application nothing
+	// before it; R's word there decides nothing (setEvidence's rule for a
+	// set entry's answer). A word its request holds is placed by the
+	// request's time instead (req), as an exchange's request leaf is.
 	// views: the views round F's serves gave where they differ
 	// (Raw.ServedChanged); one that holds F's word leaves it unknown.
 	fUnstated, fMay, fGave, recAfter bool
 	views                            []*Raw
+	// req: a recording's state by its request's time, where that is not
+	// its state by its answer's (rawRequestState): a word its request
+	// holds is placed so (placedFor), as an exchange's request leaf is.
+	req *reqPlace
+}
+
+// reqPlace is a place's state, why and recAfter by its request's time.
+type reqPlace struct {
+	state placeState
+	why   string
+	after bool
 }
 
 // placeText is one place's text in each run, and each view round F served
@@ -217,15 +229,51 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		// (OfAnotherTest), is outside the call's scope.
 		other := r.olderTest || r.elsewhere
 		startUp, other, scope := inScope(in, r.Mock(), r.beforeTest && !other, other)
-		ps = append(ps, evPlace{
+		p := evPlace{
 			name: r.Mock(), mock: r.Mock(), src: src, fSrc: live, side: Response,
 			startUp: startUp, otherTest: other, scope: scope,
 			at: r.at, state: st, why: why, fUnstated: fUnstated, raw: i + 1,
 			fMay: fUnstated && len(views) == 0 && r.served && !r.servedAfter, views: views,
 			fGave: r.served && !r.servedAfter, recAfter: !r.noTime && (r.at.After(in.At) || r.answered.After(in.At)),
-		})
+		}
+		if rst, rwhy := rawRequestState(in, r); !r.noTime && (rst != st || rwhy != why) {
+			p.req = &reqPlace{state: rst, why: rwhy, after: r.at.After(in.At)}
+		}
+		ps = append(ps, p)
 	}
 	return ps, unread
+}
+
+// rawRequestState is a recording's state for a word its request holds:
+// the application held what it sent when it sent it, so the request is
+// placed by its own time, as earlierState places an exchange's request
+// leaf, whenever (or if ever) it was answered; and given the application
+// by F before the call reached keploy, as rawState asks.
+func rawRequestState(in Input, r Raw) (placeState, string) {
+	switch {
+	case r.at.Equal(in.At):
+		return stateUnknown, atCallWhy
+	case r.at.After(in.At):
+		return stateNotBefore, recordedAfterWhy
+	case !r.served || r.servedAfter:
+		return stateNotBefore, ""
+	}
+	return stateBefore, ""
+}
+
+// placedFor is p as it stands for the recorded word r: a recording whose
+// request holds r at one of its request's fields (requestPath) is placed
+// by its request's time (p.req); one whose answer alone holds r, or whose
+// fields keploy could not read, stays placed by its answer (rawState).
+func placedFor(p evPlace, r string) evPlace {
+	if p.req == nil {
+		return p
+	}
+	at, _ := p.t.rec.fieldsWith(r)
+	if slices.ContainsFunc(at, func(f fieldAt) bool { return requestPath(f.path) }) {
+		p.state, p.why, p.recAfter = p.req.state, p.req.why, p.req.after
+	}
+	return p
 }
 
 // notFromMock is why a recording's payload was not read, where its read
@@ -302,14 +350,15 @@ func rawState(in Input, r Raw) (placeState, string) {
 	return stateBefore, ""
 }
 
-// answerState places a recording by its answer, when the application got
-// its words: one rule for an exchange of the test, a start-up recording and
-// a set entry. Answered before the call, it is before; answered after it
-// (however its request was timed), it gave R's application nothing before
-// the call, so R's word there decides nothing (recAfter). The call's own
-// instant is neither before nor after: a recording answered at it is
-// unknown, refused (fail closed). One with no answer time keploy can read
-// is unknown.
+// answerState places a recording's answer by its answer's time, when the
+// application got its words: one rule for an exchange's answer, a start-up
+// recording's and a set entry's (a word a request holds is placed by the
+// request's: earlierState, rawRequestState). Answered before the call, it
+// is before; answered after it (however its request was timed), it gave
+// R's application nothing before the call, so R's word there decides
+// nothing (recAfter). The call's own instant is neither before nor after:
+// a recording answered at it is unknown, refused (fail closed). One with no
+// answer time keploy can read is unknown.
 func answerState(req, answered, at time.Time) (placeState, string) {
 	switch {
 	case untimedAnswer(req, answered):
