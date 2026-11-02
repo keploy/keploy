@@ -23,35 +23,64 @@ import (
 const diesEnv = "KEPLOY_TESTPROC_DIES"
 
 // TestDyingTestHelper starts a group (a shell that spins on a sleep, as the
-// stop tests' apps do, and, for a test that fails, a sleep the shell started)
-// and, once the test that runs it says so on its stdin, ends as diesEnv says:
-// "fails" fails a subtest that started the group, then waits for its stdin's
-// end; "panics" panics off the test's goroutine, as a test binary's timeout
-// does; "killed" waits to be killed, as at a job's end.
+// stop tests' apps do, and, for a test that fails, a child of the shell that
+// runs until it is killed), or for one that does not, a daemon in a session
+// of its own that runs until it is killed; and, once the test that runs it
+// says so on its stdin, ends as diesEnv says: "fails" fails a subtest that
+// started the group, then waits for its stdin's end; "panics" panics off the
+// test's goroutine, as a test binary's timeout does; "killed" waits to be
+// killed, as at a job's end. What runs until it is killed waits on this
+// process's lifeline (UntilTheTestEnds).
 func TestDyingTestHelper(t *testing.T) {
 	how, dir, ok := strings.Cut(os.Getenv(diesEnv), " ")
 	if !ok {
 		t.Skip("a process of TestATestThatEndsEarlyLeavesNothingOfItsGroup")
 	}
+	if err := SetLifeline(); err != nil {
+		t.Fatal(err)
+	}
 	stdin := bufio.NewReader(os.Stdin)
 	run := func(t *testing.T) {
 		script := `while :; do sleep 0.01; done`
 		if how == "fails" {
-			script = `sleep 600 & echo $! > "$1/member"; ` + script
+			script = UntilTheTestEnds + ` & echo $! > "$1/member"; ` + script
 		}
 		cmd := exec.Command("sh", "-c", script, "sh", dir)
 		Start(t, cmd)
 		pids := strconv.Itoa(cmd.Process.Pid)
-		if how == "fails" {
-			for {
-				b, err := os.ReadFile(filepath.Join(dir, "member"))
-				if err == nil && strings.HasSuffix(string(b), "\n") {
-					pids += " " + strings.TrimSpace(string(b))
-					break
-				}
-				time.Sleep(10 * time.Millisecond)
+		other := "member"
+		if how != "fails" {
+			// Started as a daemon is, by a child that exits: in a session
+			// of its own, reparented, out of reach of a kill of the group.
+			other = "daemon"
+			daemon := exec.Command("sh", "-c", `setsid sh -c "$0" sh "$1" >/dev/null 2>&1 </dev/null &`,
+				`echo $$ > "$1"; exec `+UntilTheTestEnds, filepath.Join(dir, other))
+			if out, err := daemon.CombinedOutput(); err != nil {
+				t.Fatalf("start the daemon: %v\n%s", err, out)
 			}
 		}
+		var pid string
+		for {
+			b, err := os.ReadFile(filepath.Join(dir, other))
+			if err == nil && strings.HasSuffix(string(b), "\n") {
+				pid = strings.TrimSpace(string(b))
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		// Each waits once it is cat: the shell that runs it has opened the
+		// lifeline, or it would have exited instead.
+		for {
+			stat, err := os.ReadFile("/proc/" + pid + "/stat")
+			if err != nil || strings.Contains(string(stat), ") Z ") {
+				t.Fatalf("the %s (%s) ended before it waited on the lifeline", other, pid)
+			}
+			if strings.Contains(string(stat), "(cat) ") {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		pids += " " + pid
 		// Whole once there: written, then renamed.
 		if err := os.WriteFile(filepath.Join(dir, "pids.part"), []byte(pids), 0o644); err != nil {
 			t.Fatal(err)
@@ -87,7 +116,9 @@ func TestDyingTestHelper(t *testing.T) {
 // the leader killed by the kernel. The stop tests' apps were started in a
 // group the cleanup killed, with no death signal: a test binary that timed
 // out, or was killed as its job ended, left an app's shell waking every
-// 10 ms for hours after.
+// 10 ms for hours after. And a daemon such a test started, in a session of
+// its own, that waits on the test process's lifeline ends with that process
+// too, as a sleep in its place did not.
 func TestATestThatEndsEarlyLeavesNothingOfItsGroup(t *testing.T) {
 	for _, how := range []string{"fails", "panics", "killed"} {
 		t.Run(how, func(t *testing.T) {
@@ -171,7 +202,7 @@ func TestATestThatEndsEarlyLeavesNothingOfItsGroup(t *testing.T) {
 			bound := beforeTheDeadline(t)
 			for i, fd := range fds {
 				if !exits(t, fd, bound) {
-					t.Fatalf("process %d of the group (of %v) outlived its test, which %s:\n%s", pids[i], pids, how, said())
+					t.Fatalf("process %d (of %v) outlived its test, which %s:\n%s", pids[i], pids, how, said())
 				}
 			}
 			select {

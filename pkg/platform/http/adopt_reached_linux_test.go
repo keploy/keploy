@@ -17,6 +17,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/internal/starvetest"
+	"go.keploy.io/server/v3/internal/testproc"
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -376,7 +377,7 @@ func TestAKilledDaemonHeldOffTheCPUIsWaitedForUntilGone(t *testing.T) {
 	defer stopLooked.Store(nil)
 	dir := starvetest.MemDir(t)
 	bin := stopHelperBinary(t, true)
-	client := newRunClient(fmt.Sprintf("(setsid %s &); exec sleep 600", helperCommand(bin, "mapped", dir, false)))
+	client := newRunClient(fmt.Sprintf("(setsid %s &); exec %s", helperCommand(bin, "mapped", dir, false), testproc.UntilTheTestEnds))
 	ctx, cancel := context.WithCancelCause(context.Background())
 	done := make(chan models.AppError, 1)
 	go func() { done <- client.Run(ctx, models.RunOptions{}) }()
@@ -554,7 +555,7 @@ func TestTheAppsKillIsSaidBeforeADaemonsStallKill(t *testing.T) {
 	t.Cleanup(func() { utils.StopStallBudget = budget })
 	dir := t.TempDir()
 	daemonPid, ready := filepath.Join(dir, "daemon"), filepath.Join(dir, "ready")
-	client := newRunClient(fmt.Sprintf(`(setsid sh -c 'trap "" INT TERM; echo $$ > %s; exec sleep 600' &); trap "" INT; touch %s; exec sleep 600`, daemonPid, ready))
+	client := newRunClient(fmt.Sprintf(`(setsid sh -c 'trap "" INT TERM; echo $$ > %s; exec %s' &); trap "" INT; touch %s; exec %s`, daemonPid, testproc.UntilTheTestEnds, ready, testproc.UntilTheTestEnds))
 	ctx, cancel := context.WithCancelCause(context.Background())
 	done := make(chan models.AppError, 1)
 	go func() { done <- client.Run(ctx, models.RunOptions{}) }()
@@ -668,7 +669,7 @@ while kill -0 "$DAEMON_OWNER"; do sleep 0.05; done
 		t.Fatal(err)
 	}
 	pidFile := filepath.Join(dir, "daemon.pid")
-	client := newRunClient(fmt.Sprintf("(setsid sh %s %s &); exec sleep 600", daemon, pidFile))
+	client := newRunClient(fmt.Sprintf("(setsid sh %s %s &); exec %s", daemon, pidFile, testproc.UntilTheTestEnds))
 	runCtx, scope := utils.NewTeardownScope(context.Background())
 	ctx, cancel := context.WithCancelCause(runCtx)
 	defer cancel(nil)

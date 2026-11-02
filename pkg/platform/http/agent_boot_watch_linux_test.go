@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/internal/testproc"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
@@ -544,7 +545,7 @@ func TestAnotherClientsContainerOfTheSameNameIsNotThisClients(t *testing.T) {
 		if err := syscall.Mkfifo(began, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		earlier.apps.Store(uint64(0), app.NewApp(zap.NewNop(), "echo begun > '"+began+"'; exec sleep 600", nil, models.SetupOptions{CommandType: string(utils.Native)}))
+		earlier.apps.Store(uint64(0), app.NewApp(zap.NewNop(), "echo begun > '"+began+"'; exec "+testproc.UntilTheTestEnds, nil, models.SetupOptions{CommandType: string(utils.Native)}))
 		ctx, cancel := context.WithCancel(context.Background())
 		ran := make(chan models.AppError, 1)
 		go func() { ran <- earlier.Run(ctx, models.RunOptions{}) }()
@@ -745,7 +746,7 @@ func TestTheReleaseWaitsForTheContainerOfARunBegunAgain(t *testing.T) {
 	if err := syscall.Mkfifo(began, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	a.apps.Store(uint64(0), app.NewApp(zap.NewNop(), "echo begun > '"+began+"'; exec sleep 600", nil, models.SetupOptions{CommandType: string(utils.Native)}))
+	a.apps.Store(uint64(0), app.NewApp(zap.NewNop(), "echo begun > '"+began+"'; exec "+testproc.UntilTheTestEnds, nil, models.SetupOptions{CommandType: string(utils.Native)}))
 	ctx, cancel := context.WithCancel(context.Background())
 	ran := make(chan models.AppError, 1)
 	go func() { ran <- a.Run(ctx, models.RunOptions{}) }()

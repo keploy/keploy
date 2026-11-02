@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testproc"
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -24,7 +25,7 @@ func TestRunSaysWhyTheSetEndHadToKillTheApp(t *testing.T) {
 	cfg.Agent.AgentURI = "http://127.0.0.1:1/agent"
 	client := New(zap.NewNop(), nil, cfg)
 	client.apps.Store(uint64(0), app.NewApp(zap.NewNop(),
-		"cd "+dir+` && trap "" INT; touch started; exec sleep 600`, nil,
+		"cd "+dir+` && trap "" INT; touch started; exec `+testproc.UntilTheTestEnds, nil,
 		models.SetupOptions{CommandType: string(utils.Native)}))
 
 	ctx, cancel := context.WithCancelCause(context.Background())

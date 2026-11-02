@@ -8,9 +8,12 @@
 //
 // A process it starts in turn is killed with its group by the cleanup, but
 // not by the kernel when the test's process dies: it ends on its own, as a
-// shell's short sleep does, or looks for its owner, as starvetest's spins
-// do. On other systems there is no such kill, and the started process
-// outlives a test's process that ends with no cleanup run.
+// shell's short sleep does, looks for its owner, as starvetest's spins do,
+// or, on Linux, waits on the test process's lifeline (UntilTheTestEnds),
+// which ends with that process however it ends, in whatever group or
+// session the waiting process runs. On other systems there is no such kill,
+// and the started process outlives a test's process that ends with no
+// cleanup run.
 package testproc
 
 import (
