@@ -166,6 +166,23 @@ func TestValidOperationLabel(t *testing.T) {
 	}
 }
 
+// Inside a label, every byte but a letter, a digit, '_', ' ', ',', ':' and
+// '.' (and braces that pair up) refuses it: ';', '=', '"', '/', a control
+// byte or a non-ASCII byte could carry a value the request sent.
+// Mutation: validOperationLabel allows one more byte.
+func TestValidOperationLabelRefusesEveryOtherByte(t *testing.T) {
+	const allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ ,:."
+	for c := 0; c < 256; c++ {
+		if c == '{' || c == '}' {
+			continue // a lone brace does not pair up: TestValidOperationLabel
+		}
+		l := "query a" + string([]byte{byte(c)}) + "b"
+		if want := strings.IndexByte(allowed, byte(c)) >= 0; validOperationLabel(l) != want {
+			t.Fatalf("validOperationLabel(%q) = %v; want %v", l, !want, want)
+		}
+	}
+}
+
 // One reader: a nil one, or a second, is refused; once removed, none reads.
 func TestRegisterHTTPOperation(t *testing.T) {
 	mustPanic := func(name string, f func()) {
