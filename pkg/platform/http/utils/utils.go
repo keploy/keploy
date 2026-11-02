@@ -84,8 +84,13 @@ func ExtractDNSFlags(cmd string) (cleanedCmd string, dns models.AppDNS) {
 	return dnsFlagRegex.ReplaceAllString(cmd, ""), dns
 }
 
+// GenerateRandomContainerName names a run's agent container. The 8 random
+// bytes keep two runs on one host from drawing the same name: with 2, one in
+// 65536 did, and a compose run force-removes any container of its agent's
+// name before its `up` (ensureContainerNameFreeWithin), which took the other
+// run's live agent. The run's CA volume is named from it too (TLSVolumeFor).
 func GenerateRandomContainerName(logger *zap.Logger, prefix string) string {
-	randomBytes := make([]byte, 2)
+	randomBytes := make([]byte, 8)
 	if _, err := rand.Read(randomBytes); err != nil {
 		logger.Fatal("Failed to generate random part for container name", zap.Error(err))
 	}

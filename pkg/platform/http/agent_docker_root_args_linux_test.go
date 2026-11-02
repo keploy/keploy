@@ -47,7 +47,7 @@ func TestStartInDocker_HandsTheAgentContainerTheCLIsRootSettings(t *testing.T) {
 		ProxyPort:       16789,
 		DnsPort:         26789,
 	}
-	if err := a.startInDocker(context.Background(), zap.NewNop(), opts, newAgentRun()); err != nil {
+	if err := a.startInDocker(context.Background(), zap.NewNop(), opts, newAgentRun(), nil); err != nil {
 		t.Fatalf("startInDocker: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestSetup_HandsTheAgentContainerTheAppsRunSettings(t *testing.T) {
 		ProxyPort:       16790,
 		DnsPort:         26790,
 	}, ports, networks, hosts, dns)
-	if err := a.startInDocker(context.Background(), zap.NewNop(), opts, newAgentRun()); err != nil {
+	if err := a.startInDocker(context.Background(), zap.NewNop(), opts, newAgentRun(), nil); err != nil {
 		t.Fatalf("startInDocker: %v", err)
 	}
 	run := " " + strings.Join(strings.Fields(agentContainerRun(t, calls)), " ") + " "
@@ -117,8 +117,16 @@ func fakeDockerForStartInDocker(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	calls := filepath.Join(dir, "calls")
+	fakeEngineForStartInDocker(t, dir, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '"+calls+"'\nexit 0\n")
+	return calls
+}
+
+// fakeEngineForStartInDocker is fakeDockerForStartInDocker's engine, with
+// docker the given script, in dir.
+func fakeEngineForStartInDocker(t *testing.T, dir, docker string) {
+	t.Helper()
 	fakes := map[string]string{
-		"docker": "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + calls + "'\nexit 0\n",
+		"docker": docker,
 		"sudo": `#!/bin/sh
 if [ "$1" = --version ]; then echo "Sudo version 1.9.15"; exit 0; fi
 while [ $# -gt 0 ]; do
@@ -138,7 +146,6 @@ exec "$@"
 	// DockerConfig; leave it as other tests found it.
 	envs := maps.Clone(kdocker.DockerConfig.Envs)
 	t.Cleanup(func() { kdocker.DockerConfig.Envs = envs })
-	return calls
 }
 
 // agentContainerRun returns the `docker container run` the fake logged.
@@ -158,4 +165,66 @@ func agentContainerRun(t *testing.T, calls string) string {
 		t.Fatalf("no `docker container run` among the calls:\n%s", b)
 	}
 	return run
+}
+
+// Two docker-run runs on one host: each agent container writes its CA to its
+// own run's volume. With one name for every run, the second run's agent
+// overwrote the first's ca.crt while the first ran, and the first's
+// application then refused its own agent's certificates. The row reads the
+// CA mount of the `docker run` startInDocker executes for each run.
+func TestStartInDocker_MountsEachRunsOwnCAVolume(t *testing.T) {
+	seen := map[string]string{}
+	for _, agent := range []string{"keploy-v3-0a1b2c3d4e5f6071", "keploy-v3-8899aabbccddeeff"} {
+		calls := fakeDockerForStartInDocker(t)
+		a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{InstallationID: "install-id"}}
+		opts := models.SetupOptions{KeployContainer: agent, Mode: models.MODE_RECORD, AgentPort: 43902, ProxyPort: 16791, DnsPort: 26791}
+		if err := a.startInDocker(context.Background(), zap.NewNop(), opts, newAgentRun(), nil); err != nil {
+			t.Fatalf("startInDocker: %v", err)
+		}
+		words := strings.Fields(agentContainerRun(t, calls))
+		var mounts []string
+		for i, w := range words {
+			if w == "-v" && i+1 < len(words) && strings.HasSuffix(words[i+1], ":/tmp/keploy-tls") {
+				mounts = append(mounts, strings.TrimSuffix(words[i+1], ":/tmp/keploy-tls"))
+			}
+		}
+		if len(mounts) != 1 {
+			t.Fatalf("agent %s: CA mounts %v, want one", agent, mounts)
+		}
+		seen[agent] = mounts[0]
+	}
+	if seen["keploy-v3-0a1b2c3d4e5f6071"] != "keploy-tls-certs-0a1b2c3d4e5f6071" ||
+		seen["keploy-v3-8899aabbccddeeff"] != "keploy-tls-certs-8899aabbccddeeff" {
+		t.Fatalf("the two runs' agents mount %v, want each its own run's volume", seen)
+	}
+}
+
+// An embedder's run volume (kdocker.RunVolume) is each run's own in its agent
+// container: two runs' agents mount two volumes at its target, whatever the
+// target.
+func TestStartInDocker_MountsEachRunsOwnEmbedderVolume(t *testing.T) {
+	prev := kdocker.DockerConfig.RunVolumes
+	t.Cleanup(func() { kdocker.DockerConfig.RunVolumes = prev })
+	for _, v := range []kdocker.RunVolume{{Base: "keploy-sockets-vol", Target: "/tmp"}, {Base: "keploy-embed-vol", Target: "/srv/keploy-embed"}} {
+		kdocker.DockerConfig.RunVolumes = []kdocker.RunVolume{v}
+		for _, agent := range []string{"keploy-v3-0a1b2c3d4e5f6071", "keploy-v3-8899aabbccddeeff"} {
+			calls := fakeDockerForStartInDocker(t)
+			a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{InstallationID: "install-id"}}
+			opts := models.SetupOptions{KeployContainer: agent, Mode: models.MODE_RECORD, AgentPort: 43902, ProxyPort: 16791, DnsPort: 26791}
+			if err := a.startInDocker(context.Background(), zap.NewNop(), opts, newAgentRun(), nil); err != nil {
+				t.Fatalf("startInDocker: %v", err)
+			}
+			words := strings.Fields(agentContainerRun(t, calls))
+			var mounts []string
+			for i, w := range words {
+				if w == "-v" && i+1 < len(words) && strings.HasSuffix(words[i+1], ":"+v.Target) {
+					mounts = append(mounts, words[i+1])
+				}
+			}
+			want := v.Base + "-" + strings.TrimPrefix(agent, "keploy-v3-") + ":" + v.Target
+			if len(mounts) != 1 || mounts[0] != want {
+				t.Errorf("agent %s: %s mounts %v, want only %s", agent, v.Target, mounts, want)
+			}
+		}
+	}
 }

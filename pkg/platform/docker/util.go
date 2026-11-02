@@ -25,6 +25,10 @@ type DockerConfigStruct struct {
 	DockerImage  string
 	Envs         map[string]string
 	VolumeMounts []string
+	// RunVolumes are an embedder's volumes of which each docker-run run has
+	// its own (RunVolume), mounted in the run's agent and application
+	// containers.
+	RunVolumes []RunVolume
 }
 
 var DockerConfig = DockerConfigStruct{
@@ -323,7 +327,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	}
 	appHostsStr += appDNSStr
 
-	tlsVolumeMount := fmt.Sprintf("-v %s:%s ", KeployTLSVolumeName, KeployTLSMountPath)
+	tlsVolumeMount := fmt.Sprintf("-v %s:%s ", TLSVolumeFor(opts.KeployContainer), KeployTLSMountPath)
 	agentMemoryLimitFlag := ""
 	if opts.MemoryLimit > 0 {
 		agentMemoryLimitFlag = " --memory-limit " + strconv.FormatUint(opts.MemoryLimit, 10)
@@ -376,6 +380,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	}
 
 	Volumes = Volumes + tlsVolumeMount
+	for _, v := range DockerConfig.RunVolumes {
+		Volumes += fmt.Sprintf("-v %s:%s ", RunVolumeFor(v.Base, opts.KeployContainer), v.Target)
+	}
 
 	// The agent's config path and its own arguments a caller hands it
 	// (ExtraArgs: the enterprise startup hook's, JSON among them), each one
