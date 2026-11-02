@@ -351,12 +351,21 @@ type Meter struct {
 	check   time.Duration
 	start   atomic.Int64 // Runnable at the stall's start, ns
 	release func()
-	// due is the read of the threads (sampler.owed) at the look that found
-	// the stall due, 0 while it is not.
-	due atomic.Uint64
+	// due marks the stall found due at a look, nil while none is. A mark
+	// taken from another start is none: the stall has started again since
+	// (Reset, ResetBy, which may land at any point of a look), and is due
+	// only once a look finds it due anew.
+	due atomic.Pointer[dueMark]
 
 	timerMu   sync.Mutex
 	stopTimer func() bool
+}
+
+// dueMark is a stall found due at a look: the start it was measured from
+// (Meter.start), and the read of the threads (sampler.owed) at that look.
+type dueMark struct {
+	start int64
+	read  uint64
 }
 
 // NewMeter starts measuring a stall of grace on clk; a nil clk is the
@@ -388,8 +397,11 @@ func (m *Meter) Reset() { m.start.Store(int64(m.clk.Runnable())) }
 func (m *Meter) ResetBy(d time.Duration) { m.start.Add(int64(d)) }
 
 // Stalled is how long the process could run since the stall began.
-func (m *Meter) Stalled() time.Duration {
-	return max(m.clk.Runnable()-time.Duration(m.start.Load()), 0)
+func (m *Meter) Stalled() time.Duration { return m.since(m.start.Load()) }
+
+// since is how long the process could run since start (a Meter.start).
+func (m *Meter) since(start int64) time.Duration {
+	return max(m.clk.Runnable()-time.Duration(start), 0)
 }
 
 // Expired reports whether the process has had the whole grace to run since
@@ -399,10 +411,12 @@ func (m *Meter) Stalled() time.Duration {
 // stall due only marks it, and a later look draws it, on a read of the
 // threads made since that finds none of those held off when it was due held
 // off still (sampler). So a stall is acted on a look or two after it is due,
-// once the threads that were waiting then have had their turn.
+// once the threads that were waiting then have had their turn. A stall that
+// starts again (Reset, ResetBy) is drawn the same way: the mark is of the
+// start it was found due from.
 func (m *Meter) Expired() bool {
-	if m.Stalled() < m.grace {
-		m.due.Store(0)
+	start := m.start.Load()
+	if m.since(start) < m.grace {
 		return false
 	}
 	c, ok := m.clk.(interface {
@@ -412,16 +426,19 @@ func (m *Meter) Expired() bool {
 		return true
 	}
 	owed, heldFrom, read := c.owed()
-	if m.Stalled()-owed < m.grace {
-		m.due.Store(0)
+	if m.since(start)-owed < m.grace {
+		// Not due after all: found due again, it is marked again, on a
+		// read from then.
+		m.due.Store(nil)
 		return false
 	}
-	due := m.due.Load()
-	if due == 0 {
+	mark := m.due.Load()
+	if mark == nil || mark.start != start {
 		// Due at this look: drawn at a later one.
-		m.due.Store(read)
+		m.due.Store(&dueMark{start: start, read: read})
 		return false
 	}
+	due := mark.read
 	// A thread first found held off at the read after the due one or before
 	// it may have been waiting when the stall was found due: it has not run
 	// since the read before that, and may have stopped just after it. Its

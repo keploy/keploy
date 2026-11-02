@@ -202,7 +202,7 @@ func overloadLooks(world func(int) (map[string]threadStat, map[string]int64), gr
 		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/2
 		s.sample()
 		e := m.Expired()
-		return e, m.due.Load() != 0
+		return e, m.due.Load() != nil
 	}, func() int { return src.n }
 }
 

@@ -234,7 +234,7 @@ func TestMeter_AVerdictWaitsForAThreadHeldOffNow(t *testing.T) {
 	src.holdOff(false)
 	src.held = 250 * time.Millisecond // back, and the steal shows
 	step()
-	if m.Expired() || m.due.Load() != 0 {
+	if m.Expired() || m.due.Load() != nil {
 		t.Fatalf("expired or due on %v on the samples, %v of it the host's", m.Stalled(), s.waitOwed)
 	}
 	// The stall goes on as what the process could run: 60 ms of the 100,
@@ -262,7 +262,7 @@ func TestMeter_AVerdictWaitsForAThreadHeldOffFromTheReadAfterItWasDue(t *testing
 		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/4
 		s.sample()
 	}
-	for n := 0; m.due.Load() == 0; n++ {
+	for n := 0; m.due.Load() == nil; n++ {
 		if n > 20 {
 			t.Fatal("never due")
 		}
@@ -281,8 +281,68 @@ func TestMeter_AVerdictWaitsForAThreadHeldOffFromTheReadAfterItWasDue(t *testing
 	src.holdOff(false)
 	src.held = 300 * time.Millisecond // back, and the steal shows: since 50 ms before it was due
 	step()
-	if m.Expired() || m.due.Load() != 0 {
+	if m.Expired() || m.due.Load() != nil {
 		t.Fatalf("expired or due on %v on the samples, %v of it the host's", m.Stalled(), s.waitOwed)
+	}
+}
+
+// A watcher resets its meter on progress and looks at it only when there was
+// none (utils/drain.go's waitWhileProgressing, the orphan looks of
+// pairbytes). A stall found due, then progress: the stall starts again, and
+// is drawn as one never found due before is, at a look after the one that
+// finds it due, on a read made since. Here that look comes late, the whole
+// grace on, while a thread is held off right now: it marks the stall and
+// defers it, and the verdict waits for that thread, whether the stall
+// started again by Reset or by ResetBy.
+func TestMeter_AStallThatStartsAgainIsFoundDueAgain(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		due   bool // found due before the progress
+		reset func(m *Meter)
+	}{
+		{"never due before", false, func(m *Meter) { m.Reset() }},
+		{"due, then Reset", true, func(m *Meter) { m.Reset() }},
+		{"due, then ResetBy", true, func(m *Meter) { m.ResetBy(m.Stalled()) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, src := newFakeSampler(0)
+			m := NewMeter(heldClock{s}, 100*time.Millisecond)
+			step := func() {
+				src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/4
+				s.sample()
+			}
+			if tc.due {
+				for n := 0; m.due.Load() == nil; n++ {
+					if n > 20 {
+						t.Fatal("never due")
+					}
+					step()
+					if m.Expired() {
+						t.Fatal("expired at the look that found it due")
+					}
+				}
+			}
+			for range 250 { // 2.5 s of progress, at every sample
+				step()
+				tc.reset(m)
+			}
+			src.holdOff(true) // a thread is held off from the next read on
+			for range 12 {    // the next look without progress comes 120 ms on
+				step()
+			}
+			if m.Expired() {
+				t.Fatal("expired at the look that found the stall due, while a thread is held off now")
+			}
+			step()
+			if m.Expired() {
+				t.Fatal("expired while the thread held off when the stall was found due is held off still")
+			}
+			src.holdOff(false)
+			step()
+			if !m.Expired() {
+				t.Fatal("not expired on a read that finds no thread held off")
+			}
+		})
 	}
 }
 
