@@ -508,6 +508,56 @@ func TestAnOverlapIsRefusedOnTheRunsOneClockOnlyInAReplay(t *testing.T) {
 	}
 }
 
+// moverClock is a build's clock that BeginTestClock moves in this run only
+// when here says so (TestClockMover).
+type moverClock struct {
+	clockHooks
+	here bool
+}
+
+func (h *moverClock) MovesTestClock() bool { return h.here }
+
+// Whether a replay runs test workers' tests at once is what the build's
+// BeginTestClock does in this run (TestClockMover), not that the build has
+// a TestClock: one that moves the run's clock here refuses an overlap,
+// named, and one that moves no clock here (the enterprise build without a
+// clock record of the run's own) runs both tests at once, each to its own
+// end, and moves no clock for either.
+func TestAnOverlapIsRefusedOnlyWhereTheBuildMovesTheClockInThisRun(t *testing.T) {
+	for _, here := range []bool{true, false} {
+		t.Run(fmt.Sprintf("moves=%v", here), func(t *testing.T) {
+			a, _, _ := instanceAgent(t, models.MODE_TEST)
+			clock := &moverClock{here: here}
+			useHooks(t, clock)
+			w1, w2 := child(t), child(t)
+			claimWorker(t, a, w1.Process.Pid, "a", 2)
+			claimWorker(t, a, w2.Process.Pid, "b", 2)
+			_, serr := a.ProvenBegin(as(w1.Process.Pid), begin("TestOne"))
+			require.Nil(t, serr)
+			_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestTwo"))
+			if here {
+				require.NotNil(t, serr)
+				require.Equal(t, models.ScopeErrOneTestAtATime, serr.Code)
+				require.Contains(t, serr.Message, "but keploy moves the run's one clock to each test's recorded begin")
+				require.Empty(t, a.proven.openOf(2))
+				require.Len(t, clock.moves, 1, "the first test alone moved the clock")
+				require.Contains(t, clock.moves[0], "begin a::TestOne")
+				return
+			}
+			require.Nil(t, serr, "a build that moves no clock in this run holds no test on it")
+			require.Equal(t, "a::TestOne", a.proven.openOf(1))
+			require.Equal(t, "b::TestTwo", a.proven.openOf(2))
+			_, serr = a.ProvenEnd(as(w1.Process.Pid), models.ScopeReq{Name: "TestOne", Outcome: models.ScopeOutcomePassed})
+			require.Nil(t, serr)
+			_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestTwo", Outcome: models.ScopeOutcomePassed})
+			require.Nil(t, serr)
+			require.Empty(t, a.proven.openOf(1))
+			require.Empty(t, a.proven.openOf(2))
+			require.Empty(t, clock.moves, "no clock is moved in this run")
+		})
+	}
+}
+
 // A call a replay of test workers refused while two workers' tests were
 // open is charged to both, and leaves each without a verdict.
 func TestAReplaysRefusedCallDuringAnOverlapIsChargedToEveryOpenTest(t *testing.T) {

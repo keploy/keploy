@@ -37,6 +37,15 @@ type TestClock interface {
 	EndTestClock(ctx context.Context, test string) error
 }
 
+// TestClockMover is an optional extension of TestClock, for a build whose
+// BeginTestClock moves the run's clock in some runs only (one that moves it
+// only on a clock record of the run's own): MovesTestClock reports whether
+// BeginTestClock moves it in this run. Its answer holds for the agent's
+// life. A TestClock without it moves the clock in every run.
+type TestClockMover interface {
+	MovesTestClock() bool
+}
+
 // RealTestClock is an optional extension of TestClock, for a build that can
 // put the run's clock on real time while a test is open: a test whose
 // recording lists a mock.real destination runs on the real clock, in every
@@ -139,13 +148,23 @@ func anyReal(real map[string][]string) bool {
 	return false
 }
 
-// testClock is the build's TestClock when the proven switch is on.
+// testClock is the build's TestClock when the proven switch is on and its
+// BeginTestClock moves the run's clock in this run (TestClockMover). A build
+// whose BeginTestClock moves nothing here holds no test on the clock: a
+// replay runs test workers' tests at once (overlapRefusal), and no test is
+// refused for another holding it (beginTestClock).
 func testClock() (TestClock, bool) {
 	if !provenswitch.On() {
 		return nil, false
 	}
 	c, ok := ActiveHooks.(TestClock)
-	return c, ok
+	if !ok {
+		return nil, false
+	}
+	if m, ok := c.(TestClockMover); ok && !m.MovesTestClock() {
+		return nil, false
+	}
+	return c, true
 }
 
 // ErrOneTestAtATime is beginTestClock's refusal of a test that begins while

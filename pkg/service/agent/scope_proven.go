@@ -1384,8 +1384,9 @@ func (a *Agent) reScope() {
 // open, "" when it can: what keploy keeps for the run as one, not per test
 // worker, would charge one worker's calls to another's test, or run one
 // worker's test on another's clock. A replay whose build moves the run's
-// one clock to each test's recorded begin (testClock) holds one test on it
-// at a time (beginTestClock).
+// one clock to each test's recorded begin in this run (testClock) holds one
+// test on it at a time (beginTestClock); one whose build moves no clock here
+// (no TestClock, or a TestClockMover that says so) runs them at once.
 func (a *Agent) overlapRefusal(ctx context.Context) string {
 	if _, moves := testClock(); moves && a.replaying() {
 		return "keploy moves the run's one clock to each test's recorded begin, so two tests open at once cannot each run on their own"
