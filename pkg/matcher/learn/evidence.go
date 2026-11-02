@@ -260,7 +260,7 @@ func rawRequestState(in Input, r Raw) (placeState, string) {
 	case r.at.Equal(in.At):
 		return stateUnknown, atCallWhy
 	case r.at.After(in.At):
-		return stateNotBefore, recordedAfterWhy
+		return stateNotBefore, askedAfterWhy
 	case !r.served || r.servedAfter:
 		return stateNotBefore, ""
 	}
@@ -379,7 +379,7 @@ func earlierState(in Input, e Earlier) (placeState, string) {
 	case e.At.Equal(in.At):
 		return stateUnknown, atCallWhy
 	case e.At.After(in.At):
-		return stateNotBefore, recordedAfterWhy
+		return stateNotBefore, askedAfterWhy
 	}
 	return stateBefore, ""
 }
@@ -423,6 +423,11 @@ func answerState(req, answered, at time.Time) (placeState, string) {
 // recordedAfterWhy is why a word is refused at a recording answered after
 // the call: R's word there decides nothing, so round F's side refuses it.
 const recordedAfterWhy = "answered after the call, it shows nothing of the recorded value; round F gave, or may have given, the new value there"
+
+// askedAfterWhy is recordedAfterWhy where a place's request time places
+// it (rawRequestState, earlierState): it was asked after the call, which
+// keploy knows where it can read no answer time too.
+const askedAfterWhy = "asked after the call, it shows nothing of the recorded value; round F gave, or may have given, the new value there"
 
 // untimedAnswer: a recording's answer time keploy cannot read, none or one
 // before its own request was recorded (follows.go's recordedGave), so it

@@ -958,8 +958,8 @@ func TestOutcomeAnExchangeAskedAfterTheCallIsPlacedAsARecordingIs(t *testing.T) 
 		switch {
 		case p.mock == "mock-77":
 			found++
-			if p.state != stateNotBefore || !p.recAfter || p.why != recordedAfterWhy {
-				t.Errorf("an exchange asked after the call: state %v, recorded after %v, why %q; want not before, R's word deciding nothing, why %q", p.state, p.recAfter, p.why, recordedAfterWhy)
+			if p.state != stateNotBefore || !p.recAfter || p.why != askedAfterWhy {
+				t.Errorf("an exchange asked after the call: state %v, recorded after %v, why %q; want not before, R's word deciding nothing, why %q", p.state, p.recAfter, p.why, askedAfterWhy)
 			}
 		case p.given:
 			found++
@@ -1068,7 +1068,9 @@ var requestWordHow = []string{"an exchange of the test", "a start-up recording w
 // application sent before the call.
 func TestOutcomeAWordARecordingsRequestHoldsIsPlacedByWhenItWasSent(t *testing.T) {
 	ms := time.Millisecond
-	const fSide = "answered after the call, it shows nothing of the recorded value; round F gave, or may have given, the new value there"
+	// The request's time places it, so its line says it was asked after
+	// the call, which keploy knows with no answer time too.
+	const fSide = "asked after the call, it shows nothing of the recorded value; round F gave, or may have given, the new value there"
 	mockOf := func(how string) string {
 		return map[bool]string{true: "mock-6", false: "mock-5"}[how == requestWordHow[0]]
 	}
