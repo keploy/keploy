@@ -787,6 +787,20 @@ func TestAReplayAnswersABeginWithTheSeedItsRecordingKept(t *testing.T) {
 	require.Empty(t, runSeeded(t, a, "history", "fedcba9876543210"), "a seed keploy cannot write back is none")
 	require.Empty(t, runSeeded(t, a, "tr renamed", ""), "a begin with seeding off is answered none")
 	require.Equal(t, "0123456789abcdef", windowOf(t, a, "ui::tr renamed").Seed)
+
+	// A second install (the next test set's begins) replaces the first: a
+	// test the new set's recordings name no seed for draws its own, never an
+	// earlier set's recording's numbers.
+	b, _ := wireAgent(t, models.MODE_TEST)
+	b.SetTestSeeds(ctx, map[string]string{"ui::tr renamed": "0123456789abcdef"})
+	_, serr = b.ClaimInstance(ctx, models.InstanceReq{Key: "ui", Dir: t.TempDir()}, os.Getpid())
+	require.Nil(t, serr)
+	require.Equal(t, "0123456789abcdef", runSeeded(t, b, "tr renamed", "fedcba9876543210"))
+	b.SetTestSeeds(ctx, map[string]string{"ui::deep link": "1111222233334444"})
+	require.Empty(t, runSeeded(t, b, "tr renamed", "fedcba9876543210"), "the first install's seed is gone")
+	require.Equal(t, "1111222233334444", runSeeded(t, b, "deep link", "fedcba9876543210"))
+	b.SetTestSeeds(ctx, nil)
+	require.Empty(t, runSeeded(t, b, "deep link", "fedcba9876543210"), "an install of none clears them all")
 }
 
 func TestAnEndOfATestThatIsNotOpenIsRefused(t *testing.T) {
