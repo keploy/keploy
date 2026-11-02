@@ -351,6 +351,18 @@ type MockMismatchReport struct {
 	// parser fills it: it stays empty on an answer (see Answer), and on a
 	// miss the replay names the owner (UnmatchedCall.RecordedIn).
 	RecordedIn string `json:"recorded_in,omitempty" yaml:"recorded_in,omitempty"`
+	// Earlier names, under the proven switch, for a call of the open test's
+	// own that changed (the test recorded the same method and path to the
+	// same destination, and no recording answered the call), the latest
+	// recording another test made of that method and path to that
+	// destination before the earliest of the test's own: an earlier test's
+	// window, which the replay passed. When that test made no such call at
+	// this replay (it was skipped), the call likely changed because that
+	// test's write is missing; judging reads the miss so. Never a recording
+	// the call is (NotOwned names that one), nor one keploy cannot place
+	// before the test's own (no request time). The replay names its owner
+	// (UnmatchedCall.EarlierIn).
+	Earlier string `json:"earlier,omitempty" yaml:"earlier,omitempty"`
 	// Mark is where the call's parser found it when the call first read the
 	// round (integrations.StampMark), under the proven switch: the miss was
 	// decided there, so the proxy says whether it was made while the set's

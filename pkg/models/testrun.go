@@ -601,6 +601,14 @@ type UnmatchedCall struct {
 	// test's. The test fails on it, named, as it fails on any miss: keploy
 	// never answers it with the other test's recording.
 	OrderDependent bool `json:"order_dependent,omitempty" yaml:"order_dependent,omitempty"`
+	// Earlier mirrors MockMismatchReport.Earlier: for a call of the test's
+	// own that changed, the latest recording another test made of the same
+	// method and path, to the same destination, before the test's own.
+	// EarlierIn names, under the proven switch, the other test of the set
+	// that owns it (NameEarlierIn): a test whose skip can explain the
+	// change.
+	Earlier   string `json:"earlier,omitempty" yaml:"earlier,omitempty"`
+	EarlierIn string `json:"earlier_in,omitempty" yaml:"earlier_in,omitempty"`
 	// Reason is why the call missed, in judging's words (design v14 §5.3,
 	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall, or
 	// MissViewReplaced for a call whose view a test's begin or end, or another

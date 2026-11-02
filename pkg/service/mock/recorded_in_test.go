@@ -21,7 +21,9 @@ import (
 // test (recorded_in), as keploy test's replay does: judging lists it as the
 // root of the test's entry. A recording no test owns (the pool's) names
 // none, nor does one the test owns itself, nor a miss that is not the
-// recording it is closest to (a changed request). With the switch off no
+// recording it is closest to (a changed request). A changed call that names
+// an earlier recording of its method and path (Earlier) names that
+// recording's test (earlier_in). With the switch off no
 // per-test table is pushed and the receipt names none, whatever the agent's
 // windows say.
 func TestTheTestsReceiptNamesTheTestThatRecordedAMiss(t *testing.T) {
@@ -43,6 +45,7 @@ func TestTheTestsReceiptNamesTheTestThatRecordedAMiss(t *testing.T) {
 				{Protocol: "HTTP", ActualSummary: "GET /pool", Destination: "api:80", NotOwned: true, ClosestMock: "mock-2"},
 				{Protocol: "HTTP", ActualSummary: "GET /own", Destination: "api:80", NotOwned: true, ClosestMock: "mock-1"},
 				{Protocol: "HTTP", ActualSummary: "GET /changed", Destination: "api:80", ClosestMock: "mock-0"},
+				{Protocol: "HTTP", ActualSummary: "PUT /secret", Destination: "api:80", ClosestMock: "mock-1", Earlier: "mock-0"},
 			}
 			instr.windows = []models.ScopeWindow{
 				{Name: "o::TestA", Outcome: models.ScopeOutcomePassed},
@@ -57,13 +60,16 @@ func TestTheTestsReceiptNamesTheTestThatRecordedAMiss(t *testing.T) {
 			tests, err := ReadTestsReceipt(keployDir, "set")
 			require.NoError(t, err)
 			require.NotNil(t, tests, "the replay writes what each test did")
-			var got []string
+			var got, earlier []string
 			for _, tr := range tests.Tests {
 				if tr.Evidence == nil {
 					continue
 				}
 				for _, c := range tr.Evidence.Misses {
 					got = append(got, tr.Name+" "+c.ActualSummary+" -> "+c.RecordedIn)
+					if c.Earlier != "" || c.EarlierIn != "" {
+						earlier = append(earlier, tr.Name+" "+c.ActualSummary+" after "+c.Earlier+" in "+c.EarlierIn)
+					}
 				}
 			}
 			said := logs.FilterMessageSnippet("tests made a call that another test recorded")
@@ -74,6 +80,7 @@ func TestTheTestsReceiptNamesTheTestThatRecordedAMiss(t *testing.T) {
 					require.True(t, strings.HasSuffix(line, " -> "), "with the switch off the receipt names no test: %s", line)
 				}
 				require.Zero(t, said.Len(), "with the switch off the replay says nothing of another test's recording")
+				require.Equal(t, []string{"o::TestB PUT /secret after mock-0 in "}, earlier, "with the switch off the receipt names no earlier recording's test")
 				return
 			}
 			require.Equal(t, []string{
@@ -81,12 +88,15 @@ func TestTheTestsReceiptNamesTheTestThatRecordedAMiss(t *testing.T) {
 				"o::TestB GET /pool -> ",
 				"o::TestB GET /own -> ",
 				"o::TestB GET /changed -> ",
+				"o::TestB PUT /secret -> ",
 			}, got, "only the miss that is another test's recording names that test")
+			require.Equal(t, []string{"o::TestB PUT /secret after mock-0 in o::TestA"}, earlier, "a changed call names the test whose window holds the earlier recording of its method and path")
 			require.Equal(t, 1, said.Len(), "the replay says once which calls another test recorded")
 			require.Equal(t, []any{"o::TestB: GET /a (mock-0, recorded in o::TestA)"}, said.All()[0].ContextMap()["calls"])
 			// The agent's windows are read, never written: the name is on the
 			// receipt's own copy.
 			require.Empty(t, instr.windows[1].Evidence.Misses[0].RecordedIn)
+			require.Empty(t, instr.windows[1].Evidence.Misses[4].EarlierIn)
 		})
 	}
 }

@@ -2570,14 +2570,16 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 // withRecordedIn names, on each miss of tests' evidence that is a recording
 // its test does not own (NotOwned, ClosestMock), the other test that owns it
 // (owners: models.MockOwners of the table the replay pushed), as keploy
-// test's replay does (models.UnmatchedCall.NameRecordedIn). A test a
-// parallel test worker ran (its window's Instance, in windows) made it out
-// of the order its worker recorded in: the miss is order-dependent
-// (models.UnmatchedCall.OrderDependent). The evidence is withEvidence's own
-// copy, never the windows'. It returns "test: call (closest mock, recorded
-// in test)" for each it named, a worker's test's in orderDependent and any
-// other's in named. With the switch off owners is nil and no miss is
-// NotOwned: nothing changes.
+// test's replay does (models.UnmatchedCall.NameRecordedIn), and on each that
+// names an earlier recording of its method and path (Earlier), that
+// recording's owner (models.UnmatchedCall.NameEarlierIn). A test a
+// parallel test worker ran (its window's Instance, in windows) made a
+// NotOwned call out of the order its worker recorded in: the miss is
+// order-dependent (models.UnmatchedCall.OrderDependent). The evidence is
+// withEvidence's own copy, never the windows'. It returns "test: call
+// (closest mock, recorded in test)" for each NotOwned call it named, a
+// worker's test's in orderDependent and any other's in named. With the
+// switch off owners is nil and no miss is NotOwned: nothing changes.
 func withRecordedIn(tests []TestReceipt, owners map[string][]string, windows []models.ScopeWindow) (named, orderDependent []string) {
 	workers := make(map[string]bool)
 	for _, w := range windows {
@@ -2592,6 +2594,11 @@ func withRecordedIn(tests []TestReceipt, owners map[string][]string, windows []m
 		}
 		for j := range ev.Misses {
 			c := &ev.Misses[j]
+			// A changed call of the test's own names the test whose window
+			// holds the latest recording of its method and path before the
+			// test's own (models.UnmatchedCall.NameEarlierIn): judging reads
+			// whether that test was skipped.
+			c.NameEarlierIn(tests[i].Name, owners)
 			if !c.NameRecordedIn(tests[i].Name, owners) {
 				continue
 			}

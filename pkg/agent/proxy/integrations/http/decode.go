@@ -602,6 +602,17 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if n == 0 && report != nil && (elsewhere != nil || lmiss == nil || lmiss.res.Reason == models.MissUnmockedCall) {
 					earlier, repeated = repeatNoteOf(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), n)
 				}
+				// A call of the test's own that changed (it is no
+				// recording made elsewhere, nor one call more than the test
+				// recorded) names the latest recording another test made of
+				// its method and path before the test's own
+				// (earlierRecording): judging reads whether the replay
+				// skipped that test, whose write the call's change then
+				// likely follows. The miss stays the test's own.
+				var earlierRec *models.Mock
+				if elsewhere == nil && !staged && n == 0 && report != nil && provenswitch.On() {
+					earlierRec = earlierRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
+				}
 				// The call's view went after the call was decided: a
 				// test's begin or end replaced it before the miss was
 				// diagnosed, or while it was, between any two of the
@@ -624,7 +635,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				if gone != "" {
 					viewless(report)
-					elsewhere, repeated = nil, false
+					elsewhere, repeated, earlierRec = nil, false, nil
+				}
+				if earlierRec != nil {
+					report.Earlier = earlierRec.Name
 				}
 				if elsewhere != nil {
 					markNotOwned(report, elsewhere)
