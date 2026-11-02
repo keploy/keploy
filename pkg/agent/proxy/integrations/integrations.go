@@ -558,6 +558,9 @@ type CallRound struct {
 	// worker is whether the read's view showed a test the worker scope
 	// (WithSequence's Worker, InWorkerView): ShowsBackgroundIn.
 	worker bool
+	// every is whether the read held every recording as its own because
+	// its store could not tell which are the call's (HoldingEvery).
+	every bool
 }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
@@ -573,7 +576,27 @@ func (c CallRound) Read() bool { return c.read }
 func (c CallRound) Epoch() uint64 { return c.epoch }
 
 // Held reports whether the read's view held the recording name as its own.
+// Of a read that held every recording (HoldsEveryRecording) it is true of
+// every name and tells nothing of whose a recording is.
 func (c CallRound) Held(name string) bool { return c.held != nil && c.held(name) }
+
+// HoldingEvery is c holding every recording as the call's own (HoldsEvery):
+// the mark of a call whose store cannot tell which recordings are the
+// call's, the learn tracker ahead of the store (RoundSnapshot.TrackerAhead)
+// or in a test set the store has not staged (RoundSnapshot.SetUnstaged).
+// HoldsEveryRecording says so.
+func (c CallRound) HoldingEvery() CallRound {
+	c.held, c.every = HoldsEvery, true
+	return c
+}
+
+// HoldsEveryRecording reports whether c's read held every recording as its
+// own because its store could not tell which are the call's (HoldingEvery).
+// Held then says nothing of whose a recording is: a parser that tells the
+// user a recording is the call's own (and that its differing fields may be
+// the test's noise) asks this first, and a read that holds every recording
+// tells it nothing is.
+func (c CallRound) HoldsEveryRecording() bool { return c.every }
 
 // WithSequence is c, read in the view whose sequence view is sv
 // (SequenceViewer): a store held to c's call (RoundHolder) walks the
