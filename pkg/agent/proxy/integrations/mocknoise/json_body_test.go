@@ -107,12 +107,44 @@ func TestALiveJSONBodyComparedWithManyIsReadOnce(t *testing.T) {
 	}
 }
 
-// jsonBodyAdapter is fakeAdapter saying its Diff is JSONDiffer's
-// (JSONBodyDiffer).
-type jsonBodyAdapter struct{ fakeAdapter }
+// bodyDiffer is an Adapter whose Diff is JSONDiffer's, saying so
+// (JSONBodyDiffer) as MySQL's adapter does, so the engine compares through
+// its DiffJSONBodies; calls counts the comparisons that reached it.
+type bodyDiffer struct {
+	Adapter
+	calls *int
+}
 
-func (a *jsonBodyAdapter) DiffJSONBodies(_ *models.Mock, recorded, live *JSONBody, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, valIsNoise func(string) bool) (map[string][]string, bool) {
+func (b bodyDiffer) DiffJSONBodies(_ *models.Mock, recorded, live *JSONBody, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, valIsNoise func(string) bool) (map[string][]string, bool) {
+	*b.calls++
 	return DetectJSONBodyDrift(recorded, live, known, typeStrict, valueChangesOnly, valIsNoise)
+}
+
+// forEachStrictBranch runs row once for each way the engine compares a
+// recording under strict enforcement: through the adapter's Diff, and
+// through DiffJSONBodies for the same adapter as a JSONBodyDiffer (bodyDiffer),
+// so a strict row holds on both. newEngine is New over the adapter row gives
+// it, as that branch takes it; on the second, a row whose comparisons never
+// reach DiffJSONBodies fails.
+func forEachStrictBranch(t *testing.T, row func(t *testing.T, newEngine func(a Adapter, detection, strict bool) *Engine)) {
+	t.Helper()
+	t.Run("Diff", func(t *testing.T) {
+		row(t, func(a Adapter, detection, strict bool) *Engine {
+			if _, isBodies := a.(JSONBodyDiffer); isBodies {
+				t.Fatalf("%T compares through DiffJSONBodies, not its Diff", a)
+			}
+			return New(a, detection, strict)
+		})
+	})
+	t.Run("DiffJSONBodies", func(t *testing.T) {
+		calls := 0
+		row(t, func(a Adapter, detection, strict bool) *Engine {
+			return New(bodyDiffer{a, &calls}, detection, strict)
+		})
+		if calls == 0 {
+			t.Errorf("no comparison reached DiffJSONBodies")
+		}
+	})
 }
 
 // ownDiffAdapter embeds JSONDiffer but has a Diff of its own, as HTTP's
@@ -126,20 +158,37 @@ func (a *ownDiffAdapter) Diff(*models.Mock, []byte, []byte, map[string][]string,
 // TestStrictEnforcementReadsALiveJSONBodyOnceThroughItsAdapter: under strict
 // enforcement, an adapter that says its Diff is JSONDiffer's
 // (JSONBodyDiffer) is given the live body as the JSONBody the caller holds,
-// so three candidates read it once, with the verdicts StrictRejectRecorded
-// gives; an adapter with a Diff of its own keeps it, whatever it embeds.
+// so the candidates read it once, and gives each the verdict the same
+// adapter gives through its Diff: with learned noise stored (type-strict),
+// user noise and a recorded value that is noise, over every recorded body
+// of jsonBodyCases. An adapter with a Diff of its own keeps it, whatever it
+// embeds.
 func TestStrictEnforcementReadsALiveJSONBodyOnceThroughItsAdapter(t *testing.T) {
-	e := New(&jsonBodyAdapter{}, false, true)
+	noise := func(*models.Mock) func(string) bool {
+		return func(v string) bool { return v == "b" }
+	}
+	adapter := func() *fakeAdapter {
+		return &fakeAdapter{stored: map[string][]string{"body.id": {}}, isNoiseFn: noise}
+	}
+	user := map[string][]string{"tags": {}}
+	calls := 0
+	bodies := New(bodyDiffer{adapter(), &calls}, false, true)
+	diff := New(adapter(), false, true)
 	live := NewJSONBody(jsonBodyCases[0])
-	for i, rec := range [][]byte{jsonBodyCases[0], jsonBodyCases[1], []byte(`not json`)} {
-		gotAllowed, gotDrift := e.StrictRejectRecordedBody(&models.Mock{}, rec, true, live, nil)
-		wantAllowed, wantDrift := e.StrictRejectRecorded(&models.Mock{}, rec, true, live.Raw(), nil)
+	verdicts := map[bool]int{}
+	for i, rec := range jsonBodyCases {
+		gotAllowed, gotDrift := bodies.StrictRejectRecordedBody(&models.Mock{}, rec, true, live, user)
+		wantAllowed, wantDrift := diff.StrictRejectRecorded(&models.Mock{}, rec, true, live.Raw(), user)
 		if gotAllowed != wantAllowed || !reflect.DeepEqual(gotDrift, wantDrift) {
-			t.Errorf("recorded %d: StrictRejectRecordedBody = %v, %v; StrictRejectRecorded = %v, %v", i, gotAllowed, gotDrift, wantAllowed, wantDrift)
+			t.Errorf("recorded %d (%s): through DiffJSONBodies %v, %v; through Diff %v, %v", i, rec, gotAllowed, gotDrift, wantAllowed, wantDrift)
 		}
+		verdicts[wantAllowed]++
+	}
+	if calls != len(jsonBodyCases) || verdicts[true] == 0 || verdicts[false] == 0 {
+		t.Errorf("%d of %d comparisons reached DiffJSONBodies, %d allowed and %d rejected; want every one, and both verdicts", calls, len(jsonBodyCases), verdicts[true], verdicts[false])
 	}
 	if live.reads != 2 {
-		t.Errorf("the live body was read %d times over three candidates, want 2 (validated once, decoded once)", live.reads)
+		t.Errorf("the live body was read %d times over %d candidates, want 2 (validated once, decoded once)", live.reads, len(jsonBodyCases))
 	}
 
 	own := New(&ownDiffAdapter{}, false, true)
@@ -147,4 +196,32 @@ func TestStrictEnforcementReadsALiveJSONBodyOnceThroughItsAdapter(t *testing.T) 
 	if allowed || !reflect.DeepEqual(drift, map[string][]string{"body.own": {}}) {
 		t.Errorf("an adapter with its own Diff: allowed %v, drift %v; want its Diff's body.own", allowed, drift)
 	}
+}
+
+// TestStrictEnforcementLeavesOutARecordedValueThatIsNoise: under strict
+// enforcement, through both of the engine's branches, a field whose recorded
+// value the mock's value noise covers (RecordedValueIsNoise: an obfuscated
+// secret) is not compared, whatever its live value; another field that
+// drifted beside it is rejected, named alone; and with no value noise the
+// same secret's change is rejected.
+func TestStrictEnforcementLeavesOutARecordedValueThatIsNoise(t *testing.T) {
+	forEachStrictBranch(t, func(t *testing.T, newEngine func(a Adapter, detection, strict bool) *Engine) {
+		recorded := []byte(`{"token":"obfuscated-1","a":1}`)
+		secret := func(*models.Mock) func(string) bool {
+			return func(v string) bool { return v == "obfuscated-1" }
+		}
+		e := newEngine(&fakeAdapter{body: recorded, hasBody: true, isNoiseFn: secret}, false, true)
+		if allowed, drift := e.StrictReject(&models.Mock{}, []byte(`{"token":"live-1","a":1}`), nil); !allowed {
+			t.Errorf("the secret changed: rejected, drift %v; want allowed", drift)
+		}
+		allowed, drift := e.StrictReject(&models.Mock{}, []byte(`{"token":"live-1","a":2}`), nil)
+		if allowed || !reflect.DeepEqual(drift, map[string][]string{"body.a": {}}) {
+			t.Errorf("the secret and a changed: allowed %v, drift %v; want rejected at body.a alone", allowed, drift)
+		}
+		plain := newEngine(&fakeAdapter{body: recorded, hasBody: true}, false, true)
+		allowed, drift = plain.StrictReject(&models.Mock{}, []byte(`{"token":"live-1","a":1}`), nil)
+		if allowed || !reflect.DeepEqual(drift, map[string][]string{"body.token": {}}) {
+			t.Errorf("no value noise, the token changed: allowed %v, drift %v; want rejected at body.token", allowed, drift)
+		}
+	})
 }
