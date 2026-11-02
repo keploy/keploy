@@ -142,10 +142,11 @@ type Session struct {
 	// / monotonic-timestamp normalisation — they only differ on the
 	// final handoff.
 	RouteMocksViaSyncMock bool
-	// endedWhereClientStopped: the destination's stream ended where the
-	// client stopped taking it (MarkEndedWhereClientStopped). Internal; here,
-	// in the padding after the bools, so a Session stays in its size class.
-	endedWhereClientStopped atomic.Bool
+	// endedWithConnection, one bit per fakeconn.Direction (1 << dir): that
+	// stream ended because its connection did (MarkEndedWithConnection).
+	// Internal; one word here, in the padding after the bools, so a Session
+	// stays in its size class with clientStopped.
+	endedWithConnection atomic.Uint32
 
 	// --- Backward-compatibility (populated by the migration shim) ---
 
@@ -237,9 +238,10 @@ type Session struct {
 
 	// exchanges is NextRequest's state.
 	exchanges exchanges
-	// endedWithConnection, per fakeconn.Direction: that stream ended because
-	// its connection did (MarkEndedWithConnection).
-	endedWithConnection [2]atomic.Bool
+	// clientStopped is nil until the destination's stream ended where the
+	// client stopped taking it (MarkEndedWhereClientStopped), and then what
+	// reads the start of what the client refused there.
+	clientStopped atomic.Pointer[func() []byte]
 	// endedAtHole, per fakeconn.Direction: that stream ended at a capture
 	// hole, and why (MarkEndedAtHole). nil while it has not.
 	endedAtHole      [2]atomic.Pointer[string]
@@ -343,19 +345,20 @@ func (s *Session) MarkMockIncomplete(reason string) {
 // known to be the client's (the rest may have been lost, or never captured),
 // and such a message is not recorded. Nil-safe.
 func (s *Session) MarkEndedWithConnection(dir fakeconn.Direction) {
-	if s == nil || int(dir) >= len(s.endedWithConnection) {
+	if s == nil {
 		return
 	}
-	s.endedWithConnection[dir].Store(true)
+	// A direction past FromDest sets a bit EndedWithConnection never reads.
+	s.endedWithConnection.Or(1 << dir)
 }
 
 // EndedWithConnection reports whether dir's stream ended because its
 // connection did (MarkEndedWithConnection). Nil-safe.
 func (s *Session) EndedWithConnection(dir fakeconn.Direction) bool {
-	if s == nil || int(dir) >= len(s.endedWithConnection) {
+	if s == nil || dir > fakeconn.FromDest {
 		return false
 	}
-	return s.endedWithConnection[dir].Load()
+	return s.endedWithConnection.Load()&(1<<dir) != 0
 }
 
 // MarkEndedWhereClientStopped says the destination's stream ended where the
@@ -371,17 +374,41 @@ func (s *Session) EndedWithConnection(dir fakeconn.Direction) bool {
 // never read, and a half-closed client that reset before its acknowledgement
 // went out may have read some of what was cut. The caller calls it before the
 // stream ends, so a parser that reaches the end sees it. Nil-safe.
-func (s *Session) MarkEndedWhereClientStopped() {
+//
+// notTaken returns the start of what the client refused from there on, which
+// the stream does not hold, up to what reached the proxy after the client's
+// FIN (relay.Config.ClientStopped): all of it once the stream has ended.
+// NotTakenWhereClientStopped calls it.
+func (s *Session) MarkEndedWhereClientStopped(notTaken func() []byte) {
 	if s == nil {
 		return
 	}
-	s.endedWhereClientStopped.Store(true)
+	s.clientStopped.Store(&notTaken)
 }
 
 // EndedWhereClientStopped reports whether the destination's stream ended where
 // the client stopped taking it (MarkEndedWhereClientStopped). Nil-safe.
 func (s *Session) EndedWhereClientStopped() bool {
-	return s != nil && s.endedWhereClientStopped.Load()
+	return s != nil && s.clientStopped.Load() != nil
+}
+
+// NotTakenWhereClientStopped is the start of what the client refused where the
+// destination's stream ended (MarkEndedWhereClientStopped): bytes the
+// destination sent that the client never took, and the stream never held, up
+// to the first that reached the proxy after the client's FIN, which may be the
+// destination's answer to the client's close. A parser that reached the end of
+// the stream in the middle of a message reads in it how the destination went
+// on before it could know the client had closed. Nil while the stream has not
+// ended so, when nothing was given to read it, and for a nil session. The
+// caller must not change it.
+func (s *Session) NotTakenWhereClientStopped() []byte {
+	if s == nil {
+		return nil
+	}
+	if p := s.clientStopped.Load(); p != nil && *p != nil {
+		return (*p)()
+	}
+	return nil
 }
 
 // MarkEndedAtHole says dir's stream ended at a capture hole: a chunk of it was

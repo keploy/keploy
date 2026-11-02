@@ -138,6 +138,9 @@ type Relay struct {
 	awaitingFrom []uint64
 	resolverDone chan struct{}
 	awaitingMark string
+	// notTaken is the start of what the client refused (refuse,
+	// notTakenSoFar): nil until it refused, stored under verdictMu.
+	notTaken atomic.Pointer[[]byte]
 	// lastLook is closed by run once both forwarders have returned and a
 	// waiting resolve has had HalfCloseGrace more (awaitClientVerdict): the
 	// next look at the client's socket is the last.
