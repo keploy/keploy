@@ -10,8 +10,11 @@ import (
 )
 
 // recordedDeliveries is, by test ID, each test's deliver: entries
-// (models.MappedTestCase.Deliver) with their cases' recorded requests and
-// answers, read from the set's test cases: what the replay's table carries to
+// (models.MappedTestCase.Deliver) with their cases' recorded requests,
+// answers, app ports and noise, and the replay's own judging settings
+// (test.globalNoise.global, test.ignoreOrdering, test.compareAll: a callback's
+// answer is judged as a replayed case's is), read from the set's test cases
+// and keploy.yml: what the replay's table carries to
 // the agent (models.ScopeTableReq.Deliver). Nil when no test has any. An
 // entry keploy cannot send as recorded is an error, never left out: its test
 // would wait for a callback that never comes and fail on its handler's
@@ -61,7 +64,12 @@ func (m *mockService) recordedDeliveries(ctx context.Context, name string, mp *m
 			if tc.Kind != models.HTTP {
 				return nil, cannot("case %q of test %q's deliver: is a %s request; keploy delivers recorded HTTP requests only", d.Case, test, tc.Kind)
 			}
-			out[test] = append(out[test], models.DeliveryCase{Delivery: d, Req: tc.HTTPReq, Resp: tc.HTTPResp})
+			out[test] = append(out[test], models.DeliveryCase{
+				Delivery: d, Req: tc.HTTPReq, Resp: tc.HTTPResp, AppPort: tc.AppPort, Noise: tc.Noise,
+				GlobalNoise:    m.config.Test.GlobalNoise.Global,
+				IgnoreOrdering: m.config.Test.IgnoreOrdering,
+				CompareAll:     m.config.Test.CompareAll,
+			})
 		}
 	}
 	return out, nil

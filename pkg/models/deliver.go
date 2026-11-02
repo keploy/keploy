@@ -86,13 +86,28 @@ func (e *DeliverError) Error() string {
 }
 
 // DeliveryCase is a deliver: entry as the replay hands it to the agent
-// (ScopeTableReq.Deliver): the entry, and its case's recorded request and
-// answer, read from the case's file. The entry's fields sit beside req and
-// resp on the wire (an embedded struct's fields are its own in JSON).
+// (ScopeTableReq.Deliver): the entry, its case's recorded request and
+// answer, read from the case's file, where the request reached the
+// application, and how the replay judges a replayed case's answer. The
+// entry's fields sit beside the others on the wire (an embedded struct's
+// fields are its own in JSON).
 type DeliveryCase struct {
 	Delivery
 	Req  HTTPReq  `json:"req"`
 	Resp HTTPResp `json:"resp"`
+	// AppPort is the application's port the case's request reached when it
+	// was recorded (TestCase.AppPort). The agent sends the case there, on
+	// the application's own address, never to the host its URL names (a
+	// tunnel's or an ingress's public name); 0, unknown, is not sent.
+	AppPort uint16 `json:"app_port,omitempty"`
+	// Noise is the case's own noise (TestCase.Noise).
+	Noise map[string][]string `json:"noise,omitempty"`
+	// GlobalNoise, IgnoreOrdering and CompareAll are the replay's
+	// test.globalNoise.global, test.ignoreOrdering and test.compareAll: the
+	// callback's answer is judged as a replayed case's is.
+	GlobalNoise    map[string]map[string][]string `json:"global_noise,omitempty"`
+	IgnoreOrdering bool                           `json:"ignore_ordering,omitempty"`
+	CompareAll     bool                           `json:"compare_all,omitempty"`
 }
 
 // errRecordedDeliver is a test entry whose deliver: is not a list of entries.

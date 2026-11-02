@@ -43,7 +43,7 @@ func TestRecordedDeliveriesCarryTheCasesRecordedRequests(t *testing.T) {
 	ctx := context.Background()
 	pay := models.MappedTestCase{ID: "pay::TestPaid", Cases: []string{"test-1", "test-2", "test-3"}, Deliver: []models.Delivery{
 		{Case: "test-3", After: "mock-4"},
-		{Case: "test-2", After: "mock-3", Sign: &models.SignSpec{Scheme: models.SignHMACSHA256Hex, Header: "X-Pay-Signature", SecretEnv: "PAY_WEBHOOK_SECRET"}},
+		{Case: "test-2", After: "mock-3"},
 	}}
 	refund := models.MappedTestCase{ID: "pay::TestRefund", Cases: []string{"test-5"}, Deliver: []models.Delivery{{Case: "test-5", After: "mock-9"}}}
 	plain := models.MappedTestCase{ID: "pay::TestList", Cases: []string{"test-4"}}
@@ -60,15 +60,23 @@ func TestRecordedDeliveriesCarryTheCasesRecordedRequests(t *testing.T) {
 
 	db := casesDB{cases: []*models.TestCase{nil, payCallback("test-2"), payCallback("test-3"), payCallback("test-5"), {Name: "test-4", Kind: models.HTTP}}}
 	db.cases[2].HTTPReq.Body = `{"order":"o-1","status":"captured"}`
-	got, err = svc(db).recordedDeliveries(ctx, "set", &models.Mapping{TestCases: []models.MappedTestCase{plain, pay, refund}})
+	// Each carries its case's app port and noise, and the replay's own
+	// judging settings.
+	db.cases[2].AppPort, db.cases[2].Noise = 18110, map[string][]string{"body.received_at": {}}
+	judged := svc(db)
+	judged.config.Test.GlobalNoise.Global = config.GlobalNoise{"header": {"X-Request-Id": {}}}
+	judged.config.Test.IgnoreOrdering, judged.config.Test.CompareAll = true, true
+	got, err = judged.recordedDeliveries(ctx, "set", &models.Mapping{TestCases: []models.MappedTestCase{plain, pay, refund}})
 	require.NoError(t, err)
+	as := func(d models.Delivery, tc *models.TestCase) models.DeliveryCase {
+		return models.DeliveryCase{Delivery: d, Req: tc.HTTPReq, Resp: tc.HTTPResp, AppPort: tc.AppPort, Noise: tc.Noise,
+			GlobalNoise: map[string]map[string][]string{"header": {"X-Request-Id": {}}}, IgnoreOrdering: true, CompareAll: true}
+	}
 	require.Equal(t, map[string][]models.DeliveryCase{
-		"pay::TestPaid": {
-			{Delivery: pay.Deliver[0], Req: db.cases[2].HTTPReq, Resp: db.cases[2].HTTPResp},
-			{Delivery: pay.Deliver[1], Req: db.cases[1].HTTPReq, Resp: db.cases[1].HTTPResp},
-		},
-		"pay::TestRefund": {{Delivery: refund.Deliver[0], Req: db.cases[3].HTTPReq, Resp: db.cases[3].HTTPResp}},
+		"pay::TestPaid":   {as(pay.Deliver[0], db.cases[2]), as(pay.Deliver[1], db.cases[1])},
+		"pay::TestRefund": {as(refund.Deliver[0], db.cases[3])},
 	}, got)
+	require.Equal(t, uint16(18110), got["pay::TestPaid"][0].AppPort)
 
 	for _, tt := range []struct {
 		name string
