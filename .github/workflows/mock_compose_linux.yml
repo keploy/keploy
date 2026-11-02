@@ -198,7 +198,10 @@ jobs:
   # APP_HALTED; an interrupted keploy leaves no container or network behind.
   # The app given by its service's key is the container compose made for it
   # (P101-b-n); under restart: always the daemon does not start it again
-  # after keploy's stop, which is one it takes for a stop (SF-3(b)).
+  # after keploy's stop, which is one it takes for a stop (SF-3(b)). With the
+  # switch off and on, an app that exits holding a test halts its set
+  # (APP_HALTED, naming that test) and the next, keploy begins no test after
+  # the exit, and the run exits 1.
   compose_proven_setend_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}

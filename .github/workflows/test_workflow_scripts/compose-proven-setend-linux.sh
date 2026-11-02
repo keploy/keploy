@@ -53,6 +53,17 @@
 #      call came while keploy staged the second set, which no set judged, and
 #      the second set passed, keploy test exit 0 (2 of 3 replays on
 #      a00bfa851).
+#   7. The app exits (code 3) holding the first set's second test: it reads
+#      the request and never answers it (EXIT_AT=/price/r0b). Run with the
+#      switch off, as keploy runs compose with --abort-on-container-exit,
+#      and on. The first set is APP_HALTED, its reason naming the exit's
+#      code and the test the app held; the second set is APP_HALTED and runs
+#      none of its tests, its reason saying the app exited while the first
+#      set ran; keploy begins nothing after the exit (no re-send of the held
+#      test, no mock-consistency retry), exits 1, and its stop does not say
+#      it completed successfully. With the switch off the first set read
+#      FAILED for its one failed test, the exit never said, and keploy's
+#      stop read "replay completed successfully".
 # After every run no container or network of the project is left.
 #
 # Every wait is on an event: a line in a log, a file, or keploy's own exit.
@@ -124,6 +135,7 @@ DEP = os.environ["DEP_URL"]
 MSG = os.environ.get("SHUTDOWN_MSG") or "bye"
 BOOT = os.environ.get("BOOT_MSG") or ""
 HALT_AFTER = int(os.environ.get("HALT_AFTER") or "0")
+EXIT_AT = os.environ.get("EXIT_AT") or ""
 answered = 0
 while BOOT:
     # A startup call, the app's first act (a fast boot), made once per
@@ -150,6 +162,10 @@ while True:
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         global answered
+        if EXIT_AT and self.path == EXIT_AT:
+            # The request read, and never answered: the app exits holding it.
+            print("APP EXITS HOLDING", self.path, flush=True)
+            os._exit(3)
         if self.path.startswith("/bulk/"):
             urllib.request.urlopen(DEP + "/blob/" + self.path.split("/")[2]).read()
         b = urllib.request.urlopen(DEP + self.path).read()
@@ -193,6 +209,7 @@ services:
       - SHUTDOWN_MSG=\${SHUTDOWN_MSG:-bye}
       - BOOT_MSG=\${BOOT_MSG:-}
       - HALT_AFTER=\${HALT_AFTER:-0}
+      - EXIT_AT=\${EXIT_AT:-}
     depends_on: [dep]
   dep:
     image: $DEP_IMAGE
@@ -262,6 +279,7 @@ no_orphans() {
 newest_run() { sudo sh -c 'ls -1d keploy/reports/test-run-* 2>/dev/null' | sort -V | tail -n1; }
 report() { echo "$(newest_run)/$1-report.yaml"; }
 set_status() { sudo grep -m1 '^status:' "$(report "$1")" 2>/dev/null | awk '{print $2}'; }
+set_reason() { sudo grep -m1 '^failure_reason:' "$(report "$1")" 2>/dev/null; }
 
 # record N [VAR=VALUE...]: a recording of /price/r<N>a and /price/r<N>b,
 # under the switch, and, with BULK set, of /bulk/$BULK (one dependency call
@@ -437,6 +455,43 @@ starts=$(app_starts "$since")
 [ "$RC" -ne 0 ] || fail "6: keploy test exited 0, want non-zero"
 [ "$FAIL" -eq 0 ] || tail -80 restart-boot-a.log
 cd "$WORK" || exit 1
+
+echo "== 7. the app exits holding a test, the switch off and on =="
+# The first two recordings, in the first project.
+PROJECT="cps$ID" KNAME="$APP"
+held_file=$(sudo sh -c 'grep -l "/price/r0b" keploy/test-set-0/tests/*.yaml' 2>/dev/null | head -n1)
+held=$(sudo awk '/^name:/ {print $2; exit}' "$held_file" 2>/dev/null)
+[ -n "$held" ] || fail "7: test-set-0 holds no test of /price/r0b"
+for sw in 0 1; do
+  failed_before=$FAIL
+  # The switch's value after replay's own KEPLOY_PROVEN=1: env takes the last.
+  replay "exits-holding-$sw" KEPLOY_PROVEN="$sw" EXIT_AT=/price/r0b
+  log="exits-holding-$sw.log"
+  grep -q "APP EXITS HOLDING /price/r0b" "$log" || fail "7 (switch $sw): the app was not sent /price/r0b"
+  [ "$RC" -eq 1 ] || fail "7 (switch $sw): keploy test exited $RC, want 1"
+  [ "$(set_status test-set-0)" = APP_HALTED ] || fail "7 (switch $sw): test-set-0 is $(set_status test-set-0), want APP_HALTED"
+  case "$(set_reason test-set-0)" in
+  *"exited with code 3 before it answered test $held"*) ;;
+  *) fail "7 (switch $sw): test-set-0's reason does not name the exit and the test it held ($held): $(set_reason test-set-0)" ;;
+  esac
+  [ "$(set_status test-set-1)" = APP_HALTED ] || fail "7 (switch $sw): test-set-1 is $(set_status test-set-1), want APP_HALTED"
+  case "$(set_reason test-set-1)" in
+  *"exited before this test set began: it exited with code 3 while test set test-set-0 ran"*) ;;
+  *) fail "7 (switch $sw): test-set-1's reason does not say the app exited while test-set-0 ran: $(set_reason test-set-1)" ;;
+  esac
+  # The two tests of test-set-0 begun, the second held at the exit; none
+  # after it: no test of test-set-1, no re-send, no retry.
+  begun=$(grep -a -c "starting test for" "$log")
+  [ "$begun" -eq 2 ] || fail "7 (switch $sw): keploy began $begun tests, want 2 (test-set-0's two, none after the app's exit)"
+  if grep -a -q -E "re-sending|Retrying passing test cases" "$log"; then
+    fail "7 (switch $sw): keploy sent a test again after the app's exit: $(grep -a -m1 -E 're-sending|Retrying passing test cases' "$log" | cut -c1-200)"
+  fi
+  stop=$(grep -a "stopping Keploy" "$log" | tail -n1)
+  case "$stop" in
+  "" | *successfully*) fail "7 (switch $sw): keploy's stop reads: ${stop:-no stop logged}" ;;
+  esac
+  [ "$FAIL" -eq "$failed_before" ] || tail -80 "$log"
+done
 
 # A race build reports a data race and carries on: fail on one in any run.
 if grep -l "WARNING: DATA RACE" ./*.log ./*/*.log 2>/dev/null; then
