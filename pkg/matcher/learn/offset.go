@@ -480,6 +480,10 @@ type GivenPlaces struct {
 	// answers: its recording holds an answer the word rule reads
 	// (holdsAnswer), where F may have given the application a word.
 	answers bool
+	// fView are the instants of the views of it that F's serves the read
+	// saw gave the application, read as answer is (Order.viewMoments):
+	// under the proven switch only, nil with it off.
+	fView []givenMoment
 }
 
 // PlacesOf is x as the offset rule and the word rule read it among the
@@ -1059,6 +1063,9 @@ type setPlaces struct {
 type viewLists struct {
 	answerLists
 	gave [][]string
+	// moments are its answer's instants (viewAnswerMoments), read with its
+	// words so that the set reads the view once (Order.viewMoments).
+	moments []givenMoment
 }
 
 // viewListsOf is the viewLists of lv, a view F gave of a recording, every
@@ -1097,6 +1104,7 @@ func (o Order) GivenPlaces(m *models.Mock) (GivenPlaces, error) {
 		return GivenPlaces{}, err
 	}
 	g.words = o.statedWords(m, g.words, g.answers)
+	g.fView, g.words.unread = o.viewMoments(m, g.words, g.answers)
 	return g, nil
 }
 
@@ -1167,6 +1175,7 @@ func (c *setPlaces) viewWords(m *models.Mock, id string, k int, load func() (*mo
 		return viewLists{}, false
 	}
 	words := NewDriftCache().viewListsOf(*lv)
+	words.moments = viewAnswerMoments(*lv)
 	if c != nil {
 		c.mu.Lock()
 		c.views[key] = words
