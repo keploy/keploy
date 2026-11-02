@@ -206,6 +206,51 @@ type ProxyConnPairing struct {
 	Dst *NetworkAddress
 }
 
+// MaxInstanceID is the highest keploy instance id the kernel keeps (its
+// instance_lost array holds ids 0 to MaxInstanceID; 0 is no instance).
+const MaxInstanceID uint32 = 1023
+
+// ErrInstanceHeld is SetInstance's refusal of an id a process is still in:
+// one that stayed in an ended instance, or that it forked as it ended. Its
+// connections still carry the id, so the id is not given again until the
+// last such process exits.
+var ErrInstanceHeld = errors.New("a process is still in this keploy instance")
+
+// InstanceStamper is the optional extension implemented by hooks whose
+// kernel programs stamp each redirected connection with the keploy instance
+// of the process that made it (NetworkAddress.Instance). An instance is a
+// test worker: the process given it and every process it forks from then on,
+// each until it exits. The agent type-asserts for it; with hooks that do not
+// implement it no connection is in an instance.
+type InstanceStamper interface {
+	// SetInstance puts the process tgid, by its kernel TGID, in instance id
+	// (1 to MaxInstanceID), and with it every process it forks from now
+	// on. It refuses an id a process is in (ErrInstanceHeld), a process
+	// already in an instance, a process that is gone or a zombie, and
+	// hooks whose agent is in a PID namespace of its own, which does not
+	// number processes by their kernel TGIDs.
+	SetInstance(tgid, id uint32) error
+	// EndInstance takes every process out of instance id and says how many
+	// were in it. A process the instance forks while it ends may stay in it;
+	// SetInstance refuses the id until that one exits.
+	EndInstance(id uint32) (int, error)
+	// InstanceLost is what the kernel could not put in instance id since
+	// SetInstance last gave it.
+	InstanceLost(id uint32) (InstanceLoss, error)
+}
+
+// InstanceLoss counts the processes an instance forked that the kernel
+// could not put in it (its membership map was full, or it could not read the
+// new process), so their connections carry no instance.
+type InstanceLoss struct {
+	// Forks is how many, since SetInstance last gave the id.
+	Forks uint64
+	// LastTgid is the latest one's kernel TGID, 0 when it could not be read.
+	LastTgid uint32
+	// LastErr is the error the kernel gave it, a negative errno.
+	LastErr int32
+}
+
 // ProxyConnsReporter is the optional extension implemented by hooks that
 // count, in the kernel, the connections completed to the proxy's listener
 // (models.ProxyConnCounts' Established). The agent type-asserts for it; with
@@ -1089,6 +1134,10 @@ type NetworkAddress struct {
 	// a process outside the agent's namespace (with KernelPid set), or none
 	// known (KernelPid 0 too).
 	AgentNsPid uint32
+	// Instance is the keploy instance (a test worker's, InstanceStamper) the
+	// source process was in when it connected, read by the kernel at the
+	// connect: 0 for none, and always 0 on hooks that stamp none.
+	Instance uint32
 }
 
 // Sessions provides a thread-safe store for Session objects, keyed by ID.

@@ -69,7 +69,12 @@ type DestInfo struct {
 	// KernelPid for an agent in the initial namespace; 0 for a process outside
 	// the agent's namespace, which the agent then cannot name.
 	AgentNsPid uint32
-	_          uint32 // dest_info_t's _pad: 8-byte sized
+	// Instance is the keploy instance (a test worker's) the connecting
+	// process was in when it connected, 0 for none: the kernel's
+	// instance_of_tgid entry for its TGID, which the agent writes for a
+	// worker (Hooks.SetInstance) and k_instance_fork copies to each process
+	// it forks. It also keeps the struct 8-byte sized.
+	Instance uint32
 }
 
 type ProxyInfo struct {
