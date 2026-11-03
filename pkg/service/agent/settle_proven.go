@@ -156,8 +156,10 @@ var errHoldsUnknown = errors.New("a connection's held requests are unknown")
 // holdsUnknown is errHoldsUnknown for the protocols it names.
 type holdsUnknown []string
 
+// Error gives the reasons a connection's held requests can be unknown: its
+// parser's, and the platform's own (holdsUnknownCounts).
 func (h holdsUnknown) Error() string {
-	return "keploy cannot tell whether " + strings.Join(h, ", ") + " on a connection still holds a request: its parser reads ahead of its answers and does not say which requests it holds, or says that for now it cannot tell"
+	return "keploy cannot tell whether " + strings.Join(h, ", ") + " on a connection still holds a request: its parser reads ahead of its answers and does not say which requests it holds, or says that for now it cannot tell" + holdsUnknownCounts
 }
 
 func (h holdsUnknown) Is(target error) bool { return target == errHoldsUnknown }
@@ -454,6 +456,9 @@ type dropped struct {
 
 func (d dropped) Error() string {
 	when := "while " + d.what + " ran"
+	if d.what == coreAgent.BetweenTestCases {
+		when = d.what
+	}
 	if d.gap {
 		when += ", or before it while no test was open"
 	}
@@ -672,7 +677,10 @@ func (a *Agent) settledSince(ctx context.Context, answers bool, what string) err
 	// What the window owned at its cut is what the next begin waits for
 	// (settleBegin).
 	var owned coreAgent.InFlightScope
-	drops, err := a.settleKeeping(ctx, answers, func(sc coreAgent.InFlightScope) { owned = sc })
+	// A bytes wait the end cuts short leaves what it could not see reached
+	// as this test's (coreAgent.WithEndOf): a loss of it counted later is
+	// charged here, or to the run, never to the test open then.
+	drops, err := a.settleKeeping(coreAgent.WithEndOf(ctx, what), answers, func(sc coreAgent.InFlightScope) { owned = sc })
 	a.provenMu.Lock()
 	a.proven.owned = owned
 	a.provenMu.Unlock()

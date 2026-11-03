@@ -303,7 +303,7 @@ func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrati
 	ctx = context.WithValue(ctx, ownedKey{}, own)
 	mockSpent, spent := mockSpentOf(db), spentReaderOf(db)
 	withVars := look.variables(mockSpent, spent)
-	if integrations.ExactViewVerify.Load() {
+	if h.verifying() {
 		if err := verifyIndexedVariables(db, look.gen, withVars); err != nil {
 			return nil, false, err
 		}
@@ -343,7 +343,7 @@ func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrati
 			fits = append(fits, m)
 		}
 	}
-	if integrations.ExactViewVerify.Load() {
+	if h.verifying() {
 		if err := verifyStrictIndexed(ctx, input, live, db, look.gen, fits, n); err != nil {
 			return nil, false, err
 		}

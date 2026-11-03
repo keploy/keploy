@@ -73,6 +73,9 @@ type HTTPSchema struct {
 	ReqTimestampMock time.Time                     `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
 	ResTimestampMock time.Time                     `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`
 	AppPort          uint16                        `json:"app_port" yaml:"app_port,omitempty"`
+	// Fault: how the call ended without its whole answer (see Fault); nil
+	// for a call that got one.
+	Fault *Fault `json:"fault,omitempty" yaml:"fault,omitempty"`
 }
 
 type FormData struct {

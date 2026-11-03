@@ -121,6 +121,14 @@ func TestMockReadsTheSameFromEitherCodec(t *testing.T) {
 			// A failure the reader accepts: it refuses a phase it does not know.
 			*m.Spec.ConnFailure = models.ConnFailureSpec{Address: "[2001:db8::10]:443", Host: "api.example.com",
 				Phase: models.ConnFailurePhaseConnect, Outcome: models.ConnFailureRefused, Cause: "connect: network is unreachable"}
+			// A fault the reader accepts: a valid one, on an HTTP mock only.
+			// The reader refuses a fault on any other kind (a call keploy
+			// cannot enact it on), so those kinds carry none.
+			m.Spec.Fault = nil
+			if kind == models.HTTP {
+				m.Spec.Fault = &models.Fault{Kind: models.FaultReset, AfterHead: true, BodyBytes: 10,
+					Observed: "read: connection reset by peer"}
+			}
 			read := map[yaml.Format]*models.Mock{}
 			for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
 				doc, err := mockdb.EncodeMock(m.DeepCopy(), logger)
@@ -135,6 +143,9 @@ func TestMockReadsTheSameFromEitherCodec(t *testing.T) {
 					t.Fatalf("%s: read %d mocks, want 1", format, len(mocks))
 				}
 				read[format] = mocks[0]
+				if got := read[format].Spec.Fault; !reflect.DeepEqual(got, m.Spec.Fault) {
+					t.Errorf("%s: Fault = %#v, want %#v", format, got, m.Spec.Fault)
+				}
 			}
 			if !reflect.DeepEqual(read[yaml.FormatJSON], read[yaml.FormatYAML]) {
 				t.Errorf("the mock read from JSON differs from the one read from YAML at %v",

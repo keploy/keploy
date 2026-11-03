@@ -12,7 +12,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -73,56 +72,28 @@ func tcpOwner(self, peer netip.AddrPort) (int, error) {
 	if len(holders) == 0 {
 		return 0, fmt.Errorf("no process holds the socket %s -> %s (inode %s)", self, peer, inode)
 	}
-	// A child the caller is starting (between its fork and its exec) holds
-	// a copy of the caller's socket for a moment: the holder every other one
-	// descends from is the caller. A socket processes share otherwise
-	// (passed, or inherited by a child that kept it) names no one caller.
-	for pid := range holders {
-		all := true
-		for other := range holders {
-			if other != pid && !descendsFrom(other, pid) {
-				all = false
-				break
-			}
-		}
-		if all {
-			return pid, nil
-		}
-	}
-	pids := make([]int, 0, len(holders))
-	for pid := range holders {
-		pids = append(pids, pid)
-	}
-	sort.Ints(pids)
-	return 0, fmt.Errorf("the socket %s -> %s is held by processes %v", self, peer, pids)
+	return soleHolder(self, peer, holders, procParent)
 }
 
-// descendsFrom reports whether pid is a descendant of ancestor, from the
-// parent chain in procRoot.
-func descendsFrom(pid, ancestor int) bool {
-	for i := 0; i < 64 && pid > 1; i++ {
-		raw, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
-		if err != nil {
-			return false
-		}
-		i := strings.LastIndexByte(string(raw), ')')
-		if i < 0 {
-			return false
-		}
-		f := strings.Fields(string(raw[i+1:]))
-		if len(f) < 2 {
-			return false
-		}
-		ppid, err := strconv.Atoi(f[1])
-		if err != nil {
-			return false
-		}
-		if ppid == ancestor {
-			return true
-		}
-		pid = ppid
+// procParent is pid's parent, from its stat in procRoot.
+func procParent(pid int) (int, bool) {
+	raw, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return 0, false
 	}
-	return false
+	i := strings.LastIndexByte(string(raw), ')')
+	if i < 0 {
+		return 0, false
+	}
+	f := strings.Fields(string(raw[i+1:]))
+	if len(f) < 2 {
+		return 0, false
+	}
+	ppid, err := strconv.Atoi(f[1])
+	if err != nil {
+		return 0, false
+	}
+	return ppid, true
 }
 
 // tcpInode is the inode of the TCP socket bound to self and connected to peer,
@@ -187,9 +158,4 @@ func procAddrPort(s string) (netip.AddrPort, bool) {
 		return netip.AddrPort{}, false
 	}
 	return netip.AddrPortFrom(addr, uint16(port)), true
-}
-
-// sameEndpoint compares two endpoints with IPv4-mapped IPv6 read as IPv4.
-func sameEndpoint(a, b netip.AddrPort) bool {
-	return a.Port() == b.Port() && a.Addr().Unmap() == b.Addr().Unmap()
 }

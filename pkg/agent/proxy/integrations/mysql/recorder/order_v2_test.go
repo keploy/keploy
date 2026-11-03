@@ -305,7 +305,7 @@ func TestRecordV2_TheServersOwnErrorCapturedBeforeTheNextCommandAnswersNone(t *t
 	h.pushDest(wrapPacket(append([]byte{0xff, 0xbf, 0x0f, '#'}, "HY000The client was disconnected by the server because of inactivity."...), 0), at)
 	h.pushClient(wrapPacket([]byte{mysql.COM_PING}, 0), at)
 	h.closeStreams()
-	if err := RecordV2(context.Background(), h.logger, h.sess); err != nil {
+	if err := recordV2NoPanic(t, context.Background(), h.logger, h.sess); err != nil {
 		t.Fatalf("RecordV2 = %v: the server's own ERR and its close end the connection", err)
 	}
 	var mocks []*models.Mock
@@ -414,7 +414,7 @@ func TestRecordV2_ACommandWithNoCaptureNumberIsRefused(t *testing.T) {
 			h.clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: cannedCOMQuery(t, 0, "SELECT 1"), ReadAt: sent, WrittenAt: sent}
 			h.pushDest(cannedOK(t, 1, greeting.CapabilityFlags), at())
 			h.closeStreams()
-			if err := RecordV2(context.Background(), h.logger, h.sess); !errors.Is(err, fakeconn.ErrUnnumbered) {
+			if err := recordV2NoPanic(t, context.Background(), h.logger, h.sess); !errors.Is(err, fakeconn.ErrUnnumbered) {
 				t.Fatalf("RecordV2 = %v, want fakeconn.ErrUnnumbered", err)
 			}
 			for len(h.mocks) > 0 {

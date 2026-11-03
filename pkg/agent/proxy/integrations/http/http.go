@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
@@ -67,6 +68,24 @@ type HTTP struct {
 	// strictIx is the strict pass's index of the last staging generation, or
 	// shared part of an open test's reads, a strict call read (strictIndex).
 	strictIx strictIndexes
+	// verify is the exact view's verify mode of this handler's own reads
+	// (verifying): nil follows the process's (integrations.ExactViewVerify),
+	// what every handler the proxy makes does; a row gives a handler its
+	// own, so handlers in different modes run at once.
+	verify *atomic.Bool
+	// answerFaultHook is the fault hook replay asks before it serves a
+	// mock's answer (SetAnswerFault, answerFault); nil when none is set.
+	answerFaultHook atomic.Pointer[AnswerFault]
+}
+
+// verifying is whether h's reads run in the exact view's verify mode: each
+// kept read (an index, a sieve's pass) is computed again the way it was
+// before it was kept, and a difference panics.
+func (h *HTTP) verifying() bool {
+	if h.verify != nil {
+		return h.verify.Load()
+	}
+	return integrations.ExactViewVerify.Load()
 }
 
 func New(logger *zap.Logger) integrations.Integrations {
@@ -95,6 +114,13 @@ type FinalHTTP struct {
 	// apart is a server that closed the connection partway through its
 	// response: the client read all there was, and it is recorded as that.
 	RespReadInPart bool
+	// Fault is how the call ended, when the upstream did not give its whole
+	// answer (recordV2's noAnswerFault and partAnswerFault): with no answer,
+	// the mock is built with no response and this fault. With part of one
+	// (Fault.SendsHead), the mock carries the fault only when the response
+	// is in fact unfinished: its body cut short of its framing, or a
+	// close-delimited body the upstream reset or the client gave up on.
+	Fault *models.Fault
 }
 
 // MatchType determines if the outgoing network call is HTTP by checking for

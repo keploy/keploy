@@ -195,7 +195,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	//    Without this the run dialled an agent that was never started, failed
 	//    to arm the capture, and ended having recorded nothing — while the app
 	//    itself never came up at all.
-	composeAppExit, err := m.startComposeApp(ctx, errGrp, "record")
+	composeAppExit, err := m.startComposeApp(ctx, errGrp, "record", parent)
 	if err != nil {
 		if parent.Err() != nil {
 			return nil
@@ -464,7 +464,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	if composeAppExit != nil {
 		appErr = <-composeAppExit
 	} else {
-		appErr = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
+		appErr = m.runStopNoted(parent, ctx)
 	}
 
 	// 8. Drain the trailing mocks, THEN stop capturing.

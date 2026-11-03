@@ -2136,6 +2136,45 @@ func (a *AgentClient) getUnchargedCaptureLosses(ctx context.Context) (models.Cap
 	return losses, nil
 }
 
+// TakeOwnedCaptureLosses takes from the agent, once each, the losses a test
+// whose end was cut short owned (POST /agent/capturelosses/owned): keploy
+// test's report of them, which no count it reads holds. An agent that has
+// none to tell apart (older than them) is ErrCaptureLossesUnsupported. The
+// read is bounded as GetCaptureLossesAndAgent's is (boundedAgentRead).
+func (a *AgentClient) TakeOwnedCaptureLosses(ctx context.Context) ([]models.OwnedCaptureLoss, error) {
+	return boundedAgentRead(ctx, "the take of the agent's capture losses a cut-short end owned", a.takeOwnedCaptureLosses)
+}
+
+// takeOwnedCaptureLosses is TakeOwnedCaptureLosses's exchange, unbounded.
+func (a *AgentClient) takeOwnedCaptureLosses(ctx context.Context) ([]models.OwnedCaptureLoss, error) {
+	url := fmt.Sprintf("%s/capturelosses/owned", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to take the capture losses a cut-short end owned from the agent: %w", err)
+	}
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for capturelosses/owned")
+		}
+	}()
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented || res.StatusCode == http.StatusMethodNotAllowed {
+		return nil, fmt.Errorf("%w: agent returned %d", models.ErrCaptureLossesUnsupported, res.StatusCode)
+	}
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return nil, agentRespErr("take the capture losses a cut-short end owned", res, rawBody)
+	}
+	var owned []models.OwnedCaptureLoss
+	if err := json.NewDecoder(res.Body).Decode(&owned); err != nil {
+		return nil, fmt.Errorf("failed to decode the capture losses a cut-short end owned: %w", err)
+	}
+	return owned, nil
+}
+
 // captureLossStall is how long, in time keploy could run (utils/stall), a
 // read of the agent's capture losses may go with no answer before keploy
 // gives it up: stall.HangBudget, as for a read of a container's
@@ -4556,6 +4595,33 @@ func (a *AgentClient) newStreamEnd(kind models.FrameStream) *atomic.Bool {
 	ended := new(atomic.Bool)
 	a.streamEnds.Store(kind, ended)
 	return ended
+}
+
+// NotifyStopBegun tells the agent that the recording's stop has begun, before
+// keploy stops the application: a call the stop cuts then records no fault
+// (the agent's /stop-begun). Unlike NotifyGracefulShutdown it changes nothing
+// else in the agent. It errors when the agent did not take it.
+func (a *AgentClient) NotifyStopBegun(ctx context.Context) error {
+	if a.conf.Agent.AgentURI == "" {
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.conf.Agent.AgentURI+"/stop-begun", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("the agent answered %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
 }
 
 // NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.

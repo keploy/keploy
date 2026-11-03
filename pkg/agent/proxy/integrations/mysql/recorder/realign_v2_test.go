@@ -485,6 +485,40 @@ func TestRecordV2_PostTLS_APrepareHeldWhenTheNextResponseCannotBeFramed(t *testi
 	}
 }
 
+// A PREPARE held on an assumed framing and then left out takes its statement
+// with it: an EXECUTE of that statement cannot replay without the PREPARE's
+// mock, so it is left out as well, a CLOSE of it is recorded without its
+// query, as for a statement prepared before the recording began, and the
+// command after them is recorded.
+func TestRecordV2_PostTLS_AnExecuteOfAHeldPrepareLeftOutIsLeftOut(t *testing.T) {
+	t.Parallel()
+	j := newJoinedMidStream(t)
+	leftOut := &orphanSpans{}
+	j.h.sess.Orphans = leftOut
+	// Columns only, no EOF (CLIENT_DEPRECATE_EOF): held, its framing open.
+	j.exchange(wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "SELECT id FROM t"...), 0),
+		prepareOK(true, nil, [][]byte{columnPayload(t, undecodableColumns[0])}))
+	// COM_FIELD_LIST: a reply it cannot frame, so the PREPARE is left out.
+	j.exchange(wrapPacket(append([]byte{0x04}, "t\x00"...), 0), frame([][]byte{columnPayload(t, undecodableColumns[0]), eofPayload}))
+	j.exchange(stmtExecuteCommand(0, undecodableStmtID), [][]byte{okResponseWithAffectedRows(1, 1)})
+	j.exchange(stmtCloseCommand(0, undecodableStmtID), nil)
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{cannedOK(t, 1, j.caps)})
+	mocks, err := j.run(t)
+	if err != nil {
+		t.Fatalf("RecordV2 = %v", err)
+	}
+	if n := len(mocksOf(mocks, "COM_STMT_EXECUTE")); n != 0 {
+		t.Fatalf("recorded %d executes of a PREPARE left out: they cannot replay", n)
+	}
+	requireStamped(t, mocks, []string{""})
+	if len(mocks) != 2 || len(mocksOf(mocks, "COM_QUERY")) != 1 {
+		t.Fatalf("%d mocks, want the CLOSE and SELECT 1's OK", len(mocks))
+	}
+	if leftOut.count() != 3 {
+		t.Fatalf("%d exchanges left out, want the PREPARE, the COM_FIELD_LIST and the EXECUTE", leftOut.count())
+	}
+}
+
 // The capture's clock stamped the next answer alike with the command it
 // answers: the rest of the response left out cannot be told from that answer,
 // and the recording stops, with the command's exchange left out.

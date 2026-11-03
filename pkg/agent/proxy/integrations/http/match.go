@@ -44,6 +44,15 @@ type req struct {
 	// arrived is when keploy had read the whole request (zero: unknown):
 	// the app sent it, and read whatever clock it carries, no later.
 	arrived time.Time
+	// written is, for a call of another parser that the learn step decides
+	// (LearnMatch), the answer that parser writes for a recording the learn
+	// step serves it: it may write another one than the learn step gives it
+	// (SQS sets a send's digests over the message sent), or none (nil),
+	// which the learn step asks before it takes the recording, and then
+	// refuses it. nil written: the answer served is the one written. The
+	// learn step states its view of a serve with the answer written
+	// (servedExchange).
+	written func(served *models.Mock) *models.Mock
 }
 
 // sentBody is the body as the client sent it: what a hash of the payload

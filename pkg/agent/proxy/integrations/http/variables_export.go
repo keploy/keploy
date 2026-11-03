@@ -98,10 +98,15 @@ func (c VariableCall) req() *req {
 // recording beside the variables' places, the mock's learned noise and the
 // obfuscator's values, as for an HTTP call. consume takes the answering mock
 // from mockDb as the parser consumes its recordings (false: another
-// connection took it first). ctx has the call's destination pinned
-// (PinLiveDestination). With the switch off nothing here runs: the outcome is
-// VariableNone and Rest is pool.
-func (h *HTTP) VariableMatch(ctx context.Context, scope VariableScope, call VariableCall, noise RequestNoise, pool []*models.Mock, mockDb integrations.MockMemDb, consume func(*models.Mock) bool) (VariableResult, error) {
+// connection took it first). written is the answer the parser writes for
+// the call from the answer the variables rendered (nil: that one), asked
+// before any bind or take: where it gives nil (the parser cannot answer the
+// call from it: SQS cannot set a send's digests over the message sent), the
+// call is a VariableMiss, nothing bound or taken. Served is the answer
+// written. ctx has the call's destination pinned (PinLiveDestination). With
+// the switch off nothing here runs: the outcome is VariableNone and Rest is
+// pool.
+func (h *HTTP) VariableMatch(ctx context.Context, scope VariableScope, call VariableCall, noise RequestNoise, pool []*models.Mock, mockDb integrations.MockMemDb, consume func(*models.Mock) bool, written func(*models.Mock) *models.Mock) (VariableResult, error) {
 	if !provenswitch.On() {
 		return VariableResult{Outcome: VariableNone, Rest: pool}, nil
 	}
@@ -120,7 +125,7 @@ func (h *HTTP) VariableMatch(ctx context.Context, scope VariableScope, call Vari
 		return VariableResult{Outcome: VariableNone, Rest: rest}, nil
 	}
 	hit, commitCursor, _ := h.pickHit(hits, nil, mockDb, false, nil)
-	served, problem, retry, err := h.serveVariablesBy(hit, mockDb, consume)
+	served, problem, retry, err := h.serveVariablesBy(hit, mockDb, consume, written)
 	switch {
 	case err != nil:
 		return VariableResult{}, err

@@ -207,10 +207,10 @@ func (a *Agent) readUnstagedFromDisk() error {
 }
 
 // diskRecordingTimes visits, of the set staged, every on-disk mock's name,
-// request and answer times, protocol phase and clock (DiskMocks.RangeTimes), nil
+// place, protocol phase and clock (DiskMocks.RangeTimes), nil
 // when the set's mocks are all resident, and so all staged in the proxy's
 // trees.
-func (a *Agent) diskRecordingTimes() func(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error {
+func (a *Agent) diskRecordingTimes() func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error {
 	disk := a.stagedDisk()
 	if disk == nil {
 		return nil
@@ -279,6 +279,23 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 	a.proven.servedSince = time.Now()
 	a.provenMu.Unlock()
 	return nil
+}
+
+// endingTestCase names what a keploy test call that serves the pool settles:
+// the test case whose view is in force, which the call ends (a set's test
+// cases run one at a time), or the gap between test cases when none is
+// (coreAgent.BetweenTestCases): a pool call before the set's first test case
+// or after one ended, which is no test case's. "the test case" from a proxy
+// that cannot say which view is in force.
+func endingTestCase(es coreAgent.ExactServer) string {
+	r, ok := es.(coreAgent.ExactTestServedReader)
+	if !ok {
+		return "the test case"
+	}
+	if test := r.ExactTestServed(); test != "" {
+		return test
+	}
+	return coreAgent.BetweenTestCases
 }
 
 // openExactTest opens test under exact serving, served exactly owned, and
@@ -388,7 +405,10 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		// A test case that ends is served the pool whatever its settling
 		// found, and told it is not verified when keploy cannot tell its
 		// calls settled: the calls after it are the pool's either way.
-		unknown = a.settledSince(ctx, true, "the test case")
+		// One cut short marks what it could not see reached with the test
+		// case's name, or the gap's for a pool call between test cases
+		// (endingTestCase, settledSince), which its owned losses then say.
+		unknown = a.settledSince(ctx, true, endingTestCase(es))
 	}
 	switch {
 	case ex.Stage:

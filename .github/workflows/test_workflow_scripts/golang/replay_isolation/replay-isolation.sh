@@ -60,7 +60,14 @@ SINKPID=""
 DOCKER_RESOLV=""
 FAILED=0
 PATHS="tcp bypass-tcp fork-tcp tfo imds-tcp udp-connected udp-sendto udp-quic icmp-raw icmp-dgram dns-udp dns-bare dns-other dns-tcp tcp6 udp6 dns-owned"
-APPARGS="app -sink 198.18.0.10 -sink6 fd00::10 -imds 198.18.0.11 -peer riso-peer"
+# The recording makes no metadata call (RECARGS has no -imds), so the replay's
+# is one no mock answers, as the IMDS rows need. keploy records a call that
+# ended with no answer as its fault: the probe writes its metadata request and
+# closes without reading, and the sink closes as it accepts, so a recorded one
+# would be a fault mock (whichever close came first) that the replay serves,
+# and the replay's report would not name the call.
+RECARGS="app -sink 198.18.0.10 -sink6 fd00::10 -peer riso-peer"
+APPARGS="$RECARGS -imds 198.18.0.11"
 # Native runs: as root, in a mount namespace of their own whose resolv.conf
 # names the sink and whose nsswitch.conf asks files then DNS (a runner's image
 # may list systemd-resolved first, which answers from outside the namespace).
@@ -114,19 +121,19 @@ docker_resolv_bind() {
 }
 docker_resolv_unbind() { $S umount "$DOCKER_RESOLV" && DOCKER_RESOLV=""; }
 
-# compose_yml NAME HOSTPORT [peer]: a compose file whose service is the probe,
-# container NAME, its 8080 published on HOSTPORT; with "peer", also riso-peer,
-# a container the probe resolves by name.
+# compose_yml NAME HOSTPORT ARGS [peer]: a compose file whose service is the
+# probe run with ARGS, container NAME, its 8080 published on HOSTPORT; with
+# "peer", also riso-peer, a container the probe resolves by name.
 compose_yml() {
 	cat > docker-compose.yml <<YML
 services:
   $1:
     image: riso-probe:local
     container_name: $1
-    command: [$(printf '"%s", ' $APPARGS | sed 's/, $//')]
+    command: [$(printf '"%s", ' $3 | sed 's/, $//')]
     ports: ["$2:8080"]
 YML
-	[ "${3:-}" != peer ] || cat >> docker-compose.yml <<YML
+	[ "${4:-}" != peer ] || cat >> docker-compose.yml <<YML
   riso-peer:
     image: riso-probe:local
     container_name: riso-peer
@@ -269,7 +276,7 @@ for mode in "${MODES[@]}"; do
 		bypass_yml
 		log "record-native"
 		sink_start record-native
-		"${SINKDNS[@]}" "$KEPLOY" record -c "$W/egressprobe $APPARGS" --disable-tele --disableANSI > "$W/out/record-native/keploy.log" 2>&1 &
+		"${SINKDNS[@]}" "$KEPLOY" record -c "$W/egressprobe $RECARGS" --disable-tele --disableANSI > "$W/out/record-native/keploy.log" 2>&1 &
 		KP=$!
 		waitfor 180 curl -sf localhost:8080/health || echo "record app not up"
 		fire http://localhost:8080 "$W/out/record-native/keploy.log"
@@ -302,11 +309,12 @@ for mode in "${MODES[@]}"; do
 		sink_stop
 
 		RUN="docker run -p 8080:8080 --net keploy-network --rm --name riso-app riso-probe:local $APPARGS"
+		RECRUN="docker run -p 8080:8080 --net keploy-network --rm --name riso-app riso-probe:local $RECARGS"
 		mkdir -p "$W/docker" && cd "$W/docker" || die cd
 		bypass_yml
 		log "record-docker"
 		sink_start record-docker
-		$S "$KEPLOY" record -c "$RUN" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-docker/keploy.log" 2>&1 &
+		$S "$KEPLOY" record -c "$RECRUN" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-docker/keploy.log" 2>&1 &
 		KP=$!
 		waitfor 300 curl -sf localhost:8080/health || { echo "record app not up"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}'; }
 		fire http://localhost:8080 "$W/out/record-docker/keploy.log"
@@ -334,7 +342,7 @@ for mode in "${MODES[@]}"; do
 		log "baseline-compose"
 		sink_start base-compose
 		mkdir -p "$W/compose-base" && cd "$W/compose-base" || die cd
-		compose_yml riso-cbase 18083 peer
+		compose_yml riso-cbase 18083 "$APPARGS" peer
 		docker compose up -d >/dev/null 2>&1 || die "baseline compose"
 		waitfor 30 curl -sf localhost:18083/health || echo "baseline compose app not up"
 		curl -s --max-time 120 localhost:18083/fire > /dev/null
@@ -344,7 +352,7 @@ for mode in "${MODES[@]}"; do
 		sink_stop
 
 		mkdir -p "$W/compose" && cd "$W/compose" || die cd
-		compose_yml riso-app 8080
+		compose_yml riso-app 8080 "$RECARGS"
 		bypass_yml
 		log "record-compose"
 		sink_start record-compose
@@ -363,7 +371,7 @@ for mode in "${MODES[@]}"; do
 
 		# The peer service joins only now, after the recording, so no DNS
 		# mock answers it (as in the docker phase).
-		compose_yml riso-app 8080 peer
+		compose_yml riso-app 8080 "$APPARGS" peer
 		RUNNER=($S)
 		replay replay-compose -c "docker compose up" --containerName riso-app --delay 10
 		replay replay-compose-dns -c "docker compose up" --containerName riso-app --delay 10 --allow-egress dns

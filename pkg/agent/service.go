@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/netip"
 	"sync"
 	"syscall"
@@ -76,6 +77,61 @@ type CaptureLossReporter interface {
 	CaptureLosses() models.CaptureLosses
 }
 
+// OwnedLoss is a capture loss counted after the end of the test that owned
+// it (Test): bytes that test wrote to a connection, which its end could not
+// wait for, and which were lost later, under another test. It is no capture
+// loss of that other test's, and is in no count CaptureLosses reports.
+type OwnedLoss struct {
+	Test string
+	Loss models.CaptureLoss
+}
+
+// OwnedLossTaker is the optional extension implemented by a proxy that tells
+// the losses a cut-short end owned apart from the test open when they are
+// counted (OwnedLoss). TakeOwnedLosses returns each once, oldest first.
+type OwnedLossTaker interface {
+	TakeOwnedLosses() []OwnedLoss
+}
+
+// MaxOwnedLosses bounds the owned losses a component keeps while nothing
+// takes them (a run that never reads them): past it, one entry of the run's,
+// naming no test and saying OwnedLossesPastTheBound, counts the rest.
+const MaxOwnedLosses = 64
+
+// OwnedLossesPastTheBound is the words of the entry that counts the owned
+// losses past MaxOwnedLosses.
+const OwnedLossesPastTheBound = "from connections each written in a test whose end could not wait for them"
+
+type endOfKey struct{}
+
+// WithEndOf is ctx carrying the test whose end waits under it: a wait of the
+// proxy's that ends short of what it waited for leaves what it could not see
+// reached marked as that test's (OwnedLoss).
+func WithEndOf(ctx context.Context, test string) context.Context {
+	return context.WithValue(ctx, endOfKey{}, test)
+}
+
+// EndOf is the test WithEndOf put in ctx: "" for none.
+func EndOf(ctx context.Context) string {
+	s, _ := ctx.Value(endOfKey{}).(string)
+	return s
+}
+
+// BetweenTestCases is what a keploy test call that serves the pool with no
+// test case's view in force settles (WithEndOf): the gap between test
+// cases, before the set's first or after one ended. Its bytes are marked
+// with it, never with a test case that was verified.
+const BetweenTestCases = "between test cases"
+
+// WrittenIn says where the bytes an OwnedLoss's test owned were written:
+// "in <test>", or "between test cases" for the gap's.
+func WrittenIn(test string) string {
+	if test == BetweenTestCases {
+		return test
+	}
+	return "in " + test
+}
+
 // CaptureLossDrainer is the optional extension implemented by hooks whose
 // counts of capture losses are fed by reports the kernel makes: before a read
 // of them, DrainCaptureLosses waits until every report made before it has
@@ -118,6 +174,19 @@ type ListenerCounter interface {
 	// the application connection it pairs with, with that one's original
 	// destination. A connection with no number is an error.
 	ProxyConnPair(rc syscall.RawConn) (ProxyConnPairing, error)
+}
+
+// AcceptedPeerPairer is the optional extension implemented by hooks that pair
+// an accepted connection by the address it came from (macOS: the source port
+// the shim pinned) rather than by what the kernel wrote into its socket. The
+// proxy hands it the peer address accept() returned: a connection the
+// application reset before the proxy took it still has that address, while
+// its socket no longer answers getpeername. Hooks that do not implement it
+// (Linux, whose kernel numbers the socket itself) are asked ProxyConnPair.
+type AcceptedPeerPairer interface {
+	// ProxyConnPairPeer is ProxyConnPair for the connection rc, accepted from
+	// peer.
+	ProxyConnPairPeer(rc syscall.RawConn, peer *net.TCPAddr) (ProxyConnPairing, error)
 }
 
 // ProxyConnPairing is an accepted connection of the proxy's marked listener,
@@ -164,6 +233,32 @@ type ProxyConnsReporter interface {
 	// WaitAppConnsSettled returns once AppConnsSettled() >= n, or with ctx's
 	// error, or when the count is unknown. No deadline of its own.
 	WaitAppConnsSettled(ctx context.Context, n uint64) error
+}
+
+// ShimReporter is the optional extension implemented by hooks whose
+// interception is a library each process of the run loads (macOS's shim,
+// which says HELLO from every process it arms in). Under the proven switch the
+// agent asks it at each begin whether the test process carries the shim: one
+// that does not is neither captured nor on the run's clock, and its tests are
+// refused rather than judged. With hooks that do not implement it (Linux,
+// whose kernel hooks see every process), nothing is asked.
+type ShimReporter interface {
+	// ShimArmed reports whether the program process pid runs now announced
+	// keploy's shim, and, when timeFile is not "", that the shim reads the
+	// clock of the run whose clock record timeFile is; why not, otherwise.
+	// It never waits: the shim announces itself before the program's own
+	// code runs, so a process that has begun a test has announced itself or
+	// never will.
+	ShimArmed(pid int, timeFile string) (bool, string)
+	// ShimClaimedBy tells the hooks that process pid claimed the run: a
+	// program the shim is not in is charged to the run's tests, or to the run
+	// outside them, only when this test process or one of its descendants
+	// started it, never when another process of the run did (the compiler or
+	// git the test command's toolchain runs alongside the test process). The
+	// agent tells it before it reads the counts the claim's first test is
+	// counted from, while pid is alive and waits for its claim's answer. It
+	// never waits.
+	ShimClaimedBy(pid int)
 }
 
 // ListenerCountTaker is the optional extension implemented by proxies that can
@@ -655,11 +750,11 @@ type RecordedOfKindSetter interface {
 // reads, beside what is staged, the times of the set's recordings the agent
 // keeps on disk: a test's own are staged only as it opens, and the bound is
 // the latest of them. SetRecordingTimes sets where (src visits every on-disk
-// mock with its name, request and answer times, whether it is
+// mock with its name, its place (models.PlaceOf), whether it is
 // protocol-phase and its clock (models.Origin.Clock), decoding none; nil for
 // none).
 type RecordingTimesSetter interface {
-	SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error) error
+	SetRecordingTimes(src func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error) error
 }
 
 // RecordingSourceSetter is implemented by a proxy whose miss diagnosis under
@@ -731,6 +826,14 @@ type ExactServer interface {
 	// not (in recorded order); final once the test stops being served. ok is
 	// false when exact serving is off.
 	ExactTestOutcome() (test string, consumed, unconsumed []string, ok bool)
+}
+
+// ExactTestServedReader is an optional ExactServer capability: ExactTestServed
+// is the test whose view is in force now, "" when none is (the pool is
+// served: before a set's first test, or after a test ended). Unlike
+// ExactTestOutcome, it never names a test that has ended.
+type ExactTestServedReader interface {
+	ExactTestServed() string
 }
 
 // ExactTestOpener is an optional ExactServer capability of a proxy that keeps
@@ -918,6 +1021,29 @@ type DestInfo interface {
 type ConnDestInfo interface {
 	GetForConn(ctx context.Context, app netip.AddrPort) (*NetworkAddress, error)
 	DeleteForConn(ctx context.Context, app netip.AddrPort) error
+}
+
+// AppConnEnd is how the application released its end of a connection the
+// hooks redirected to the proxy, as the kernel saw the release: by its
+// process while the process ran (Exiting false), or as the process exited
+// (Exiting true), with the signal that ended it (Signal): the one that
+// killed it, or a stop signal (SIGHUP, SIGINT, SIGQUIT, SIGTERM) another
+// process sent it that it handled before it exited; 0 for a process that
+// exited on its own.
+type AppConnEnd struct {
+	Exiting bool
+	Signal  uint32
+}
+
+// ConnEndInfo is the optional extension of a DestInfo that says how the
+// application released its end of a redirected connection, named as
+// ConnDestInfo names it, once the proxy has read that end. It forgets what it
+// read. ok is false where it holds nothing for the connection: one whose end
+// came before the application released it (a shutdown(2), or the proxy's end
+// first), a record the kernel's LRU evicted, or hooks that make no such
+// record.
+type ConnEndInfo interface {
+	TakeAppConnEnd(app netip.AddrPort) (end AppConnEnd, ok bool)
 }
 
 // ErrConnectingSocketGone is GetForHandshake's error when the application's

@@ -68,7 +68,7 @@ func TestVariableMatch_AnotherParsersCallIsServedByTheVariablePass(t *testing.T)
 	consume := func(x *models.Mock) bool { consumed = append(consumed, x.Name); return db.DeleteFilteredMock(*x) }
 	ctx := context.Background()
 
-	res, err := h.VariableMatch(ctx, ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, consume)
+	res, err := h.VariableMatch(ctx, ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, consume, nil)
 	if err != nil || res.Outcome != VariableServed || res.Served == nil || res.Served.Name != "mock-1" {
 		t.Fatalf("the call with a new deduplication id was not served by its recording: %+v, %v", res, err)
 	}
@@ -82,7 +82,7 @@ func TestVariableMatch_AnotherParsersCallIsServedByTheVariablePass(t *testing.T)
 	// The variable holds dedup-live in this test: a recording of it does not
 	// answer a call that sends another value.
 	again := sqsSend("mock-2", "dedup-rec", models.MockVariables{"dedup": useV("dedup-rec", []string{"body.MessageDeduplicationId"})})
-	res, err = h.VariableMatch(ctx, ReadVariableScope(db), sqsCall("dedup-other"), sdkNoise(), []*models.Mock{again}, db, consume)
+	res, err = h.VariableMatch(ctx, ReadVariableScope(db), sqsCall("dedup-other"), sdkNoise(), []*models.Mock{again}, db, consume, nil)
 	if err != nil || res.Outcome != VariableExactOnly || res.Problem == "" || len(res.Rest) != 0 {
 		t.Fatalf("a call breaking the bound variable was not left to an exact recording, with why: %+v, %v", res, err)
 	}
@@ -98,13 +98,13 @@ func TestVariableMatch_LeavesTheRestToTheCaller(t *testing.T) {
 	never := func(*models.Mock) bool { t.Fatal("consumed with the switch off"); return false }
 
 	t.Setenv(provenswitch.Env, "")
-	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("x"), sdkNoise(), []*models.Mock{plain, withVar}, db, never)
+	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("x"), sdkNoise(), []*models.Mock{plain, withVar}, db, never, nil)
 	if err != nil || res.Outcome != VariableNone || len(res.Rest) != 2 {
 		t.Fatalf("with the switch off the pass ran: %+v, %v", res, err)
 	}
 
 	t.Setenv(provenswitch.Env, "1")
-	res, err = h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("x"), sdkNoise(), []*models.Mock{plain}, db, never)
+	res, err = h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("x"), sdkNoise(), []*models.Mock{plain}, db, never, nil)
 	if err != nil || res.Outcome != VariableNone || len(res.Rest) != 1 || res.Rest[0] != plain {
 		t.Fatalf("a pool with no variables was not left whole to the caller: %+v, %v", res, err)
 	}
@@ -116,7 +116,7 @@ func TestVariableMatch_ARecordingTakenFirstIsCheckedAgain(t *testing.T) {
 	h := newHTTP()
 	m := sqsSend("mock-1", "dedup-rec", models.MockVariables{"dedup": bindV("dedup-rec", "body.MessageDeduplicationId")})
 	db := &varDb{perTest: []*models.Mock{m}}
-	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, func(*models.Mock) bool { return false })
+	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, func(*models.Mock) bool { return false }, nil)
 	if err != nil || res.Outcome != VariableRetry {
 		t.Fatalf("a recording taken first was not checked again: %+v, %v", res, err)
 	}
@@ -133,7 +133,7 @@ func TestVariableMatch_ARecordingThatCannotCarryItsVariableIsAMiss(t *testing.T)
 	}
 	m := bad()
 	db := &varDb{perTest: []*models.Mock{m}}
-	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, func(*models.Mock) bool { return true })
+	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, func(*models.Mock) bool { return true }, nil)
 	if err != nil || res.Outcome != VariableMiss || res.Problem == "" || res.Served != nil {
 		t.Fatalf("a recording that cannot carry its variable: %+v, %v; want a miss with why", res, err)
 	}
@@ -142,7 +142,7 @@ func TestVariableMatch_ARecordingThatCannotCarryItsVariableIsAMiss(t *testing.T)
 	db = &varDb{perTest: []*models.Mock{m}}
 	scope := ReadVariableScope(db)
 	db.table.Start(nil) // a test begins after the scope was read
-	res, err = h.VariableMatch(context.Background(), scope, sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, func(*models.Mock) bool { return true })
+	res, err = h.VariableMatch(context.Background(), scope, sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, func(*models.Mock) bool { return true }, nil)
 	if err != nil || res.Outcome != VariableRetry {
 		t.Fatalf("with a test begun since the scope was read: %+v, %v; want the call checked again", res, err)
 	}
@@ -157,11 +157,11 @@ func TestVariableMatch_AnSDKCallIsFittedOutsideTheRequestNoise(t *testing.T) {
 	h := newHTTP()
 	m := sqsSend("mock-1", "dedup-rec", models.MockVariables{"dedup": bindV("dedup-rec", "body.MessageDeduplicationId")})
 	db := &varDb{perTest: []*models.Mock{m}}
-	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), RequestNoise{}, []*models.Mock{m}, db, func(*models.Mock) bool { return true })
+	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), RequestNoise{}, []*models.Mock{m}, db, func(*models.Mock) bool { return true }, nil)
 	if err != nil || res.Outcome != VariableNone {
 		t.Fatalf("without the run's noise, an SDK call's headers fit the recording: %+v, %v", res, err)
 	}
-	res, err = h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, func(*models.Mock) bool { return true })
+	res, err = h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, func(*models.Mock) bool { return true }, nil)
 	if err != nil || res.Outcome != VariableServed {
 		t.Fatalf("with the run's noise, the SDK call was not served by its recording: %+v, %v", res, err)
 	}
@@ -226,5 +226,49 @@ func TestStrictFitsHoldsAnotherParsersRecordingsToTheStrictRule(t *testing.T) {
 		if fits(other(edit)) {
 			t.Fatalf("%s: the call fits the recording", name)
 		}
+	}
+}
+
+// The parser's written answer is asked of the answer the variables rendered,
+// before any bind or take: one it cannot write (nil) is a miss that binds and
+// takes nothing, so the recording still answers a later call; one it writes
+// is the answer served.
+func TestVariableMatch_AskTheWrittenAnswerBeforeTheTake(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := sqsSend("mock-1", "dedup-rec", models.MockVariables{"dedup": bindV("dedup-rec", "body.MessageDeduplicationId")})
+	db := &varDb{perTest: []*models.Mock{m}}
+	var consumed []string
+	consume := func(x *models.Mock) bool { consumed = append(consumed, x.Name); return db.DeleteFilteredMock(*x) }
+	var asked []string
+	refuse := func(a *models.Mock) *models.Mock { asked = append(asked, a.Name); return nil }
+
+	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, consume, refuse)
+	if err != nil || res.Outcome != VariableMiss || res.Served != nil || !strings.Contains(res.Problem, "cannot write an answer") {
+		t.Fatalf("an answer the parser cannot write was not a miss: %+v, %v", res, err)
+	}
+	if strings.Join(asked, ",") != "mock-1" || len(consumed) != 0 || len(db.perTest) != 1 {
+		t.Fatalf("asked %v, took %v, %d left; want mock-1 asked, nothing taken", asked, consumed, len(db.perTest))
+	}
+	if b, ok := db.table.Lookup("dedup"); ok {
+		t.Fatalf("a refused answer bound the variable: %+v", b)
+	}
+
+	written := func(a *models.Mock) *models.Mock {
+		out := *a
+		resp := *a.Spec.HTTPResp
+		resp.Body = "written"
+		out.Spec.HTTPResp = &resp
+		return &out
+	}
+	res, err = h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall("dedup-live"), sdkNoise(), []*models.Mock{m}, db, consume, written)
+	if err != nil || res.Outcome != VariableServed || res.Served == nil || res.Served.Spec.HTTPResp.Body != "written" || strings.Join(consumed, ",") != "mock-1" {
+		t.Fatalf("served %+v (took %v), %v; want the written answer, mock-1 taken", res, consumed, err)
+	}
+	if m.Spec.HTTPResp.Body == "written" {
+		t.Fatal("the recording itself was written")
+	}
+	if b, ok := db.table.Lookup("dedup"); !ok || b.Value != "dedup-live" {
+		t.Fatalf("the variable was not bound to the call's value: %+v %v", b, ok)
 	}
 }

@@ -74,6 +74,15 @@ type provenWire struct {
 	// what the run lost beyond it was charged to no test
 	// (UnchargedCaptureLosses).
 	lossesCharged models.CaptureLosses
+	// ownedRun are losses a test whose end was cut short owned
+	// (coreAgent.OwnedLoss) counted after that test's end had charged
+	// what it lost: the run's, naming the connection and the test, and
+	// no later test's (UnchargedCaptureLosses).
+	ownedRun models.CaptureLosses
+	// ownedLeft are losses cut-short ends owned that the session before
+	// counted and no read took: the run's, which the next read takes
+	// (takeOwnedLosses), never dropped.
+	ownedLeft []coreAgent.OwnedLoss
 	// claim is the live claim; zero when none.
 	claim claimant
 	// claims is every claim of the session, in order: from each one's time
@@ -292,8 +301,17 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	// What the run's tests count their capture losses from: read before
 	// provenMu, which is never held while calling into the hooks.
 	losses := a.markCaptureLosses(ctx)
+	// Losses an earlier session's cut-short ends owned that no read took
+	// are this session's to report, as the run's: none of its tests is the
+	// test that owned them, which only their words still name.
+	// Bounded, as the proxy's are, while no read takes them.
+	left := a.takeOwnedLosses()
+	for i := range left {
+		left[i].Test = ""
+	}
+	left = boundOwnedLeft(left)
 	a.provenMu.Lock()
-	a.proven = provenWire{losses: losses}
+	a.proven = provenWire{losses: losses, ownedLeft: left}
 	a.provenMu.Unlock()
 	if provenswitch.On() {
 		// The listener's drops are counted from here too (openDrops).
@@ -403,6 +421,14 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		}
 	}
 	if prev != me {
+		// The hooks that intercept through a library each process loads
+		// (macOS's shim) charge a program it is not in only when this
+		// process or one of its descendants started it: told before the
+		// read below, so a program this process started before its claim,
+		// still running, is in the counts its first test is counted from.
+		if h, ok := a.Hooks.(coreAgent.ShimReporter); ok {
+			h.ShimClaimedBy(caller)
+		}
 		// A failed TLS handshake before this claim is the run's -- charged
 		// to no test (UnchargedCaptureLosses), and in the run's own verdict,
 		// which counts every loss while the command ran -- as its misses
@@ -832,10 +858,14 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		}
 	}
 	dir := a.proven.dir
+	claimer := a.proven.claim.pid
 	a.provenMu.Unlock()
 	if a.replaying() && gated {
 		a.noteScopeNotRun(id, 0, at, outcome)
 		return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok", Action: models.ScopeActionSkip, Reason: reason}, nil
+	}
+	if serr := a.shimRefusal(id, claimer); serr != nil {
+		return models.ScopeBeginResp{}, serr
 	}
 
 	// What judging the test at its end needs is checked before anything is
@@ -959,6 +989,32 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	a.provenMu.Unlock()
 	begun = true
 	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
+}
+
+// shimRefusal refuses test id's begin when the hooks intercept through a
+// library each process loads (coreAgent.ShimReporter: macOS's shim) and the
+// test process pid that claimed the run does not carry it: its calls are not
+// captured or mocked, and on a frozen run (TimeFile) it reads another clock
+// than the run's. nil with any other hooks, whose kernel hooks see every
+// process.
+func (a *Agent) shimRefusal(id string, pid int) *models.ScopeError {
+	h, ok := a.Hooks.(coreAgent.ShimReporter)
+	if !ok {
+		return nil
+	}
+	timeFile := TimeFile()
+	armed, why := h.ShimArmed(pid, timeFile)
+	if armed {
+		return nil
+	}
+	if timeFile != "" {
+		return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrClockNotFrozen,
+			fmt.Sprintf("%s: keploy cannot tell that its test process %d runs on this keploy run's clock: %s", id, pid, why),
+			"run the tests through keploy mock record or keploy mock replay with a test binary that loads keploy's shim (not hardened-runtime or restricted)")
+	}
+	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
+		fmt.Sprintf("%s: keploy cannot capture or mock the calls of its test process %d: %s", id, pid, why),
+		"run the tests through keploy mock record or keploy mock replay with a test binary that loads keploy's shim (not hardened-runtime or restricted)")
 }
 
 // oldWireFields refuses a begin or an end that carries the old wire's
@@ -1230,6 +1286,20 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	mark, test := a.proven.losses, a.proven.testLosses
 	a.provenMu.Unlock()
 	lost, now, err := a.captureLossesSince(ctx, mark, test)
+	// What a cut-short end owned that was counted since: this test's when
+	// it is the owner (its own end was cut short, and the loss counted
+	// before this read), the run's otherwise. None is in the counts, so
+	// none is charged to this test by them.
+	var mine models.CaptureLosses
+	for _, o := range a.takeOwnedLosses() {
+		if o.Test == id && err == nil {
+			mine = mine.Plus(models.CaptureLosses{o.Loss})
+			continue
+		}
+		a.provenMu.Lock()
+		a.proven.ownedRun = a.proven.ownedRun.Plus(models.CaptureLosses{o.Loss})
+		a.provenMu.Unlock()
+	}
 	if !a.replaying() {
 		// A record charges a container read the daemon did not answer by
 		// the mock its stamp marked (unreadMock), its own test's whenever
@@ -1242,7 +1312,7 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 		a.proven.testLosses = now
 		a.provenMu.Unlock()
 	}
-	if err == nil && len(lost) == 0 {
+	if err == nil && len(lost) == 0 && len(mine) == 0 {
 		return ev, outcome
 	}
 	if err == nil {
@@ -1267,6 +1337,9 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 		a.provenMu.Lock()
 		a.proven.lossesCharged = a.proven.lossesCharged.Max(taint).Plus(own)
 		a.provenMu.Unlock()
+		// Charged after the counts' charge: lossesCharged follows the
+		// counts, which hold none of mine.
+		lost = lost.Plus(mine)
 	}
 	if ev == nil {
 		ev = &models.ScopeEvidence{}

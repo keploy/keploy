@@ -4,7 +4,6 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -106,8 +105,12 @@ func b64Text(s string, clock map[string]bool) string { return b64Read(s, clock, 
 // three reads whose answer it knows: the one part of a run with no '/' is
 // the run (no run holds a '.': nextB64Run ends one there), its glued spans
 // are none where it has no group of '-' or '_', and no word is in an empty
-// clock. everySplit makes those reads all the same: only the row that holds
-// b64Text to them sets it.
+// clock. And it keeps, of the runs it tried, only those that decoded
+// (seen): a run that did not decodes to nothing whenever it is tried again
+// (decodeText and the clock's words read c alone), and keeping each was
+// about a third of b64Read's CPU on a payload of words that are no text
+// (the bound row's). everySplit makes those reads all the same and keeps
+// every run tried: only the row that holds b64Text to them sets it.
 func b64Read(s string, clock map[string]bool, everySplit bool) string {
 	var sb strings.Builder
 	seen := map[string]bool{}
@@ -118,11 +121,14 @@ func b64Read(s string, clock map[string]bool, everySplit bool) string {
 			if len(c) < minEncodedRun || seen[c] || (everySplit || len(clock) > 0) && allIn(tokensBy(c, isWord), clock) {
 				return false
 			}
-			seen[c] = true
+			if everySplit {
+				seen[c] = true
+			}
 			t, ok := decodeText(c)
 			if !ok {
 				return false
 			}
+			seen[c] = true
 			raw := t
 			t = unescaped(raw)
 			if q := qpForm(raw); q != t {
@@ -134,8 +140,9 @@ func b64Read(s string, clock map[string]bool, everySplit bool) string {
 			return true
 		}
 		tryRun := func(run string) bool {
+			slash, glued := runSeparators(run)
 			whole := try(run)
-			if everySplit || strings.Contains(run, "/") {
+			if everySplit || slash {
 				for _, part := range strings.FieldsFunc(run, func(r rune) bool { return r == '/' || r == '.' }) {
 					try(part)
 				}
@@ -148,7 +155,7 @@ func b64Read(s string, clock map[string]bool, everySplit bool) string {
 			if whole {
 				return true
 			}
-			if !everySplit && !strings.ContainsAny(run, "-_") {
+			if !everySplit && !glued {
 				return false
 			}
 			// Its longest parts between groups of '-' and '_' that are text,
@@ -204,7 +211,7 @@ func b64Read(s string, clock map[string]bool, everySplit bool) string {
 						}
 					}
 				}
-				for _, part := range strings.FieldsFunc(tx, func(r rune) bool { return r == '.' }) {
+				for part := range strings.SplitSeq(tx, ".") {
 					if isB64Run(part) {
 						try(part)
 					}
@@ -214,6 +221,24 @@ func b64Read(s string, clock map[string]bool, everySplit bool) string {
 		level = next
 	}
 	return sb.String()
+}
+
+// runSeparators says whether run holds a '/' (slash: it is read by its
+// parts between '/' too) and a '-' or '_' (glued: by its parts between
+// groups of them, where it is no text whole), read in one pass of its
+// bytes. b64Read asks both of every run of a payload, mostly words of a few
+// bytes, and asking with strings.Contains and strings.IndexByte, three
+// calls each, was a quarter of what trying such a run cost.
+func runSeparators(run string) (slash, glued bool) {
+	for i := 0; i < len(run); i++ {
+		switch run[i] {
+		case '/':
+			slash = true
+		case '-', '_':
+			glued = true
+		}
+	}
+	return slash, glued
 }
 
 // maxGluedGroups bounds the groups of '-' and '_' a run is cut at every
@@ -472,14 +497,23 @@ func gluedSpans(run string) [][2]int {
 // characters or more and a multiple of four, before more of the alphabet.
 // A line starts after a key glued before the base64 by '=' ("data="), or
 // counts from after a prefix glued by '-' or '_' ("v1_").
+//
+// Until it takes a line break out, what it has read is s's own bytes, so it
+// copies s only from its first join (built): a text with none, a payload
+// of words, is s itself, read with no copy. b64Read reads each text it
+// decodes this way, and copying each in full was a sixth of its CPU on the
+// bound row's payloads.
 func joinWrapped(s string) (string, []int) {
 	var b strings.Builder
 	var joins []int
+	built := false
 	line, glued := 0, 0
 	for i := 0; i < len(s); {
 		c := s[i]
 		if b64Byte(c) {
-			b.WriteByte(c)
+			if built {
+				b.WriteByte(c)
+			}
 			line++
 			glued++
 			i++
@@ -501,20 +535,32 @@ func joinWrapped(s string) (string, []int) {
 				j++
 			}
 		default:
-			b.WriteByte(c)
+			if built {
+				b.WriteByte(c)
+			}
 			line, glued = 0, 0
 			i++
 			continue
 		}
 		if line >= 16 && (line%4 == 0 || glued >= 16 && glued%4 == 0) && j < len(s) && b64Byte(s[j]) {
+			if !built {
+				b.Grow(len(s))
+				b.WriteString(s[:i])
+				built = true
+			}
 			line, glued = 0, 0
 			i = j
 			joins = append(joins, b.Len())
 			continue
 		}
-		b.WriteString(s[i:j])
+		if built {
+			b.WriteString(s[i:j])
+		}
 		line, glued = 0, 0
 		i = j
+	}
+	if !built {
+		return s, nil
 	}
 	return b.String(), joins
 }
@@ -554,19 +600,75 @@ func qpDecoded(s string) string {
 }
 
 // qpForm is s read as quoted-printable (qpDecoded) after its escapes
-// (unescaped), with its soft line breaks taken out first, in their escaped
-// spellings too ("=\\r\\n" of a mail in a JSON string), which unescaping
-// would turn into separators.
+// (unescaped), with its soft line breaks taken out first (noSoftBreaks), in
+// their escaped spellings too ("=\\r\\n" of a mail in a JSON string), which
+// unescaping would turn into separators.
 func qpForm(s string) string {
-	if strings.Contains(s, "=") {
-		s = qpSoftBreaks.ReplaceAllString(s, "")
-	}
-	return qpDecoded(unescaped(s))
+	return qpDecoded(unescaped(noSoftBreaks(s)))
 }
 
-// qpSoftBreaks are a soft line break in any spelling: raw, or escaped once
-// or more ("=\\r\\n", "=\\\\r\\\\n" of a mail in a JSON string in a JSON string).
-var qpSoftBreaks = regexp.MustCompile(`=(?:\r?\n|(?:\\+r)?\\+n)`)
+// noSoftBreaks is s without its soft line breaks, each a "=" before a line
+// break in any spelling (softBreakAt), taken out from the left: s itself
+// where it holds none. It reads s byte by byte, as the pattern
+// `=(?:\r?\n|(?:\\+r)?\\+n)` read it before: that pattern's matcher took a
+// state of 37 KB from its pool for each text holding a "=" (a base64
+// text's padding), nearly half of what a small read of one allocated, and
+// took it again each time the pool had let it go.
+func noSoftBreaks(s string) string {
+	var b []byte
+	last := 0
+	for i := strings.IndexByte(s, '='); i >= 0; {
+		n := softBreakAt(s[i+1:])
+		if n > 0 {
+			b = append(b, s[last:i]...)
+			last = i + 1 + n
+		}
+		j := strings.IndexByte(s[i+1+n:], '=')
+		if j < 0 {
+			break
+		}
+		i += 1 + n + j
+	}
+	if last == 0 {
+		return s
+	}
+	return string(append(b, s[last:]...))
+}
+
+// softBreakAt is the bytes of the line break t starts with, t following a
+// "=": a raw one ("\n", "\r\n"), or one escaped once or more ("\\n",
+// "\\r\\n", "\\\\r\\\\n" of a mail in a JSON string in a JSON string); 0
+// where t starts with none.
+func softBreakAt(t string) int {
+	switch {
+	case strings.HasPrefix(t, "\n"):
+		return 1
+	case strings.HasPrefix(t, "\r\n"):
+		return 2
+	}
+	k := leadingBackslashes(t)
+	if k == 0 || k == len(t) {
+		return 0
+	}
+	switch t[k] {
+	case 'n':
+		return k + 1
+	case 'r':
+		if m := leadingBackslashes(t[k+1:]); m > 0 && k+1+m < len(t) && t[k+1+m] == 'n' {
+			return k + 1 + m + 1
+		}
+	}
+	return 0
+}
+
+// leadingBackslashes is how many backslashes t starts with.
+func leadingBackslashes(t string) int {
+	k := 0
+	for k < len(t) && t[k] == '\\' {
+		k++
+	}
+	return k
+}
 
 func upperHex(c byte) bool { return c >= '0' && c <= '9' || c >= 'A' && c <= 'F' }
 
@@ -583,7 +685,7 @@ func b64Byte(c byte) bool {
 // decodes otherwise is a word far more often than an encoded value (its
 // decode is garbage that would refuse fresh ids).
 func decodeText(c string) (string, bool) {
-	if hexRun.MatchString(c) && len(c)%2 == 0 {
+	if isHexRun(c) && len(c)%2 == 0 {
 		if b, err := hex.DecodeString(c); err == nil && isASCIIText(b) {
 			return string(b), true
 		}
@@ -596,7 +698,7 @@ func decodeText(c string) (string, bool) {
 
 // b32Decode decodes s as base32 in one case, padded or not.
 func b32Decode(s string) ([]byte, bool) {
-	if !b32Run.MatchString(s) && !b32Lower.MatchString(s) {
+	if !isB32Run(s, 'A', 'Z') && !isB32Run(s, 'a', 'z') {
 		return nil, false
 	}
 	b, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.TrimRight(strings.ToUpper(s), "="))
@@ -625,16 +727,43 @@ const minEncodedRun = 8
 // "ord-<id>" are words far more often than encoded values.
 const minGluedRun = 16
 
-var (
-	hexRun   = regexp.MustCompile(`^[0-9a-fA-F]+$`)
-	b32Run   = regexp.MustCompile(`^[A-Z2-7]+=*$`)
-	b32Lower = regexp.MustCompile(`^[a-z2-7]+=*$`)
-)
+// isHexRun is whether s is hex digits whole, one or more, of either case
+// (the pattern ^[0-9a-fA-F]+$). decodeText reads every run of a payload,
+// and the pattern's match was a tenth of learning a big one.
+func isHexRun(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if !isHex(s[i]) {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// isB32Run is whether s is a run of base32's alphabet in one case, its
+// letters from lo to hi ('A' to 'Z', or 'a' to 'z') and the digits 2 to 7,
+// one or more, then its padding, none or more '=' (the pattern
+// ^[A-Z2-7]+=*$, or ^[a-z2-7]+=*$).
+func isB32Run(s string, lo, hi byte) bool {
+	i := 0
+	for i < len(s) && (s[i] >= lo && s[i] <= hi || s[i] >= '2' && s[i] <= '7') {
+		i++
+	}
+	if i == 0 {
+		return false
+	}
+	for i < len(s) && s[i] == '=' {
+		i++
+	}
+	return i == len(s)
+}
 
 // b64Decode decodes s in any base64 variant to text: valid UTF-8 with no
 // control characters but whitespace, its padding read leniently. Binary (a
 // signature, a hash) is no text, and nothing is read in it.
 func b64Decode(s string) (string, bool) {
+	if !b64MayBeText(s) {
+		return "", false
+	}
 	b, ok := b64DecodeAny(s)
 	if !ok {
 		if t := strings.TrimRight(s, "="); t != s {
@@ -645,6 +774,64 @@ func b64Decode(s string) (string, bool) {
 		return "", false
 	}
 	return string(b), true
+}
+
+// b64MayBeText is false where no decode of s by any of b64Variants, nor of
+// s with its padding trimmed, is text (isText), told from s's first four
+// characters: where each is a letter or a digit, both alphabets read them
+// alike, every decode of s begins with the three bytes they make (a
+// decoder skips line breaks only, and there are four characters before
+// any), and isText refuses whatever begins with bytes no text begins with
+// (textBegins). A payload's runs are mostly words that decode to no text
+// ("w12x1000" of the bound row's), and decoding each whole, a copy each,
+// was most of what reading its runs (b64Read) cost.
+func b64MayBeText(s string) bool {
+	if len(s) < 4 {
+		return true
+	}
+	var v uint32
+	for k := 0; k < 4; k++ {
+		d, ok := b64Digit(s[k])
+		if !ok {
+			return true
+		}
+		v = v<<6 | d
+	}
+	first := [3]byte{byte(v >> 16), byte(v >> 8), byte(v)}
+	return textBegins(first[:])
+}
+
+// b64Digit is the value of c, a letter or a digit, in both base64
+// alphabets; ok is false for any other byte, which the two read apart or
+// not at all.
+func b64Digit(c byte) (d uint32, ok bool) {
+	switch {
+	case c >= 'A' && c <= 'Z':
+		return uint32(c - 'A'), true
+	case c >= 'a' && c <= 'z':
+		return uint32(c-'a') + 26, true
+	case c >= '0' && c <= '9':
+		return uint32(c-'0') + 52, true
+	}
+	return 0, false
+}
+
+// textBegins says whether some text (isText) begins with b: each whole
+// character of it valid UTF-8 and no control (textControl), and what is
+// left the start of a character. A character's bytes that are invalid
+// already (utf8.FullRune: no byte after them makes them valid) begin none.
+func textBegins(b []byte) bool {
+	for len(b) > 0 {
+		r, n := utf8.DecodeRune(b)
+		if r == utf8.RuneError && n == 1 {
+			return !utf8.FullRune(b)
+		}
+		if textControl(r) {
+			return false
+		}
+		b = b[n:]
+	}
+	return true
 }
 
 func isText(b []byte) bool {
@@ -713,10 +900,25 @@ func b64Runs(s string) map[string]bool {
 	return out
 }
 
+// b64Variants are the base64 variants b64DecodeAny tries, in its order:
+// padded at even places, raw (no padding) at odd ones.
+var b64Variants = [...]*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding}
+
 // b64DecodeAny reports whether s decodes in any base64 variant, to text or
-// not.
+// not: what the first of b64Variants that decodes it gives. It does not try
+// a variant whose length rule s breaks, which would fail: a padded variant
+// decodes whole quanta only (a length a multiple of four), and a raw one no
+// '=' and no last quantum of one character. The decoder skips '\r' and
+// '\n', so s holding either is tried in every variant. On a payload of
+// words that are no text (the HTTP bound row's), the variants tried and
+// failed were most of b64DecodeAny's CPU.
 func b64DecodeAny(s string) ([]byte, bool) {
-	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+	lines := strings.IndexByte(s, '\n') >= 0 || strings.IndexByte(s, '\r') >= 0
+	padded := strings.IndexByte(s, '=') >= 0
+	for i, enc := range b64Variants {
+		if raw := i%2 == 1; !lines && (!raw && len(s)%4 != 0 || raw && (padded || len(s)%4 == 1)) {
+			continue
+		}
 		if b, err := enc.DecodeString(s); err == nil {
 			return b, true
 		}

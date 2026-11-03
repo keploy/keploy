@@ -202,6 +202,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Get("/capturelosses", a.HandleCaptureLosses)
 		// What of it no test was charged with (a loss after the last test).
 		r.Get("/capturelosses/uncharged", a.HandleUnchargedCaptureLosses)
+		r.Post("/capturelosses/owned", a.HandleOwnedCaptureLosses)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)
 		// The application's listens and its start's progress, for keploy
 		// test's readiness under the proven switch (readiness.go).
@@ -217,6 +218,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Get("/mock/learned-elsewhere", a.HandleLearnedElsewhere)
 		r.Post("/agent/ready", a.MakeAgentReady)
 		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
+		r.Post("/stop-begun", a.HandleStopBegun)
 		// Long-lived streaming endpoints. /pcap/traffic emits a
 		// pcap-format byte stream (file header + one record per
 		// packet) over chunked transfer-encoding; /pcap/keylog
@@ -1536,6 +1538,23 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	a.logger.Debug("Keploy Agent is ready from the ...")
 	_, _ = w.Write([]byte("Agent is now ready\n"))
+}
+
+// HandleStopBegun tells the agent that the recording's stop has begun: the
+// recording client is about to stop the application, so the connection ends
+// read from now on are the stop's, and a call the stop cuts records no fault.
+// An agent that cannot note it answers 501, and the client says so.
+func (a *Agent) HandleStopBegun(w http.ResponseWriter, r *http.Request) {
+	s, ok := a.svc.(interface{ NoteStopBegun(context.Context) error })
+	if !ok {
+		http.Error(w, "this agent cannot note that a recording's stop has begun", http.StatusNotImplemented)
+		return
+	}
+	if err := s.NoteStopBegun(r.Context()); err != nil {
+		http.Error(w, fmt.Sprintf("failed to note the recording's stop: %v", err), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 // HandleGracefulShutdown sets a flag to indicate the application is shutting down gracefully.

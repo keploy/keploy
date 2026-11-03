@@ -240,7 +240,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//
 	//    Without this the run dialled an agent that was never started and
 	//    failed before serving a single mock.
-	composeAppExit, err := m.startComposeApp(ctx, errGrp, "replay")
+	composeAppExit, err := m.startComposeApp(ctx, errGrp, "replay", nil)
 	if err != nil {
 		if parent.Err() != nil {
 			// The user's Ctrl+C. An errgroup-derived cancel is NOT that: the
@@ -567,6 +567,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		actual:   actual.list(),
 
 		actualShort: requestsShort,
+		faults:      faultMocks(filtered, unfiltered),
 	}
 	counts := m.reportOutcome(ctx, loaded, detail, func() bool { return parent.Err() != nil })
 	missesKnown := counts.missed >= 0
@@ -1398,7 +1399,7 @@ func (m *mockService) refuseUnknownMocks(ctx context.Context, name string, mp *m
 		}
 	}
 	var absent, unchecked, skipped []string
-	var cutShort, edited, newer, connFailure, yamlOnly bool
+	var cutShort, edited, newer, connFailure, fault, yamlOnly bool
 	for _, n := range unknown {
 		where := ""
 		if w := places[n]; len(w) > 0 {
@@ -1423,6 +1424,9 @@ func (m *mockService) refuseUnknownMocks(ctx context.Context, name string, mp *m
 		case d.Why == models.MockSkipConnFailure:
 			connFailure = true
 			skipped = append(skipped, n+where+", a connection failure this keploy cannot replay")
+		case d.Why == models.MockSkipFault:
+			fault = true
+			skipped = append(skipped, n+where+", a call whose fault this keploy cannot enact")
 		case d.Why == models.MockSkipYAMLOnlyKind:
 			yamlOnly = true
 			skipped = append(skipped, fmt.Sprintf("%s%s, of kind %q, which keploy reads only from a YAML mock file", n, where, d.Kind))
@@ -1450,6 +1454,9 @@ func (m *mockService) refuseUnknownMocks(ctx context.Context, name string, mp *m
 		}
 		if connFailure {
 			fix = append(fix, fmt.Sprintf("If a newer keploy recorded a connection failure, upgrade keploy to replay it; if you edited one in %s, give it back the fields keploy wrote", mocks))
+		}
+		if fault {
+			fix = append(fix, fmt.Sprintf("If a newer keploy recorded a call's fault, upgrade keploy to replay it; if you edited one in %s, give its fault back the fields keploy wrote", mocks))
 		}
 		if yamlOnly {
 			fix = append(fix, fmt.Sprintf("Keploy reads a mock of such a kind only from a YAML mock file, and one with a \"-\" in its kind only with keploy enterprise: record the set again in YAML, not as %s", mocks))
@@ -1942,22 +1949,37 @@ func ranSets(windows []models.ScopeWindow) []string {
 	return sets
 }
 
+// setName names a test's folder relative to the project's root, so its
+// recording is the same on every checkout; a name left absolute is refused at
+// commit as not portable. Either path can arrive through a link: outside a
+// repository the root is the working folder as the shell names it ($PWD),
+// while a test's folder can arrive resolved (macOS's /tmp is a link to
+// /private/tmp). So each is compared as given and resolved: a link inside the
+// project keeps its own name, and a project under a linked folder is still
+// named relative.
 func setName(dir, root string) string {
 	if dir == "" || !filepath.IsAbs(dir) {
 		return filepath.ToSlash(dir)
 	}
 	if root != "" {
-		dirs := []string{dir}
-		if r, err := filepath.EvalSymlinks(dir); err == nil && r != dir {
-			dirs = append(dirs, r)
-		}
-		for _, d := range dirs {
-			if rel, err := filepath.Rel(root, d); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return filepath.ToSlash(rel)
+		dirs := givenAndResolved(dir)
+		for _, r := range givenAndResolved(root) {
+			for _, d := range dirs {
+				if rel, err := filepath.Rel(r, d); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+					return filepath.ToSlash(rel)
+				}
 			}
 		}
 	}
 	return filepath.ToSlash(dir)
+}
+
+// givenAndResolved is p, then p with its links resolved when that differs.
+func givenAndResolved(p string) []string {
+	if r, err := filepath.EvalSymlinks(p); err == nil && r != p {
+		return []string{p, r}
+	}
+	return []string{p}
 }
 
 func gitTop() string {
@@ -2192,6 +2214,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 			append(summary, zap.String("next_step", next))...)
 	}
 
+	logFaultsServed(m.logger, consumed, detail.faults)
 	for _, miss := range misses {
 		logMiss(m.logger, miss)
 	}

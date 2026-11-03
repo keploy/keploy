@@ -109,7 +109,8 @@ type Earlier struct {
 	// kind); of a Run place, that the run keeps no more of the set's tests'
 	// places, past its bound (Tracker.keepRun), the reason itself. It has
 	// no Seen, and every value that changed is refused (ClassifyIn,
-	// requestUnread), never learned as noise or an echo.
+	// requestUnread), never learned as noise or an echo, and names no late
+	// call (lateServes).
 	Unread string
 	// Gave, of a Given place, says it is a value the running test gave keploy
 	// (POST /agent/scope/given; TestGiven) rather than its test case's
@@ -160,7 +161,24 @@ type Earlier struct {
 	// recording F gave the application before the call (lateOf), as any
 	// recording F served is read (Order.ServedView). nil says nothing.
 	told *toldOf
+	// beforeTest: the read's order shows F gave the application the
+	// exchange's recording only before the call's test began, every serve
+	// of it in an order keploy can tell, none in the call's own test
+	// (InServeOrder: the mark Order.ServedView gives a Raw of it,
+	// Raw.ServedBeforeTheTest). The run's start-up exchange (Run, StartUp)
+	// a later test's call reads bears it; one a call made at the start-up
+	// reads does not: no test of the call's had begun. Only the copy rule
+	// reads it (outsideTest).
+	beforeTest bool
 }
+
+// outsideTest reports whether F gave the application e only before the
+// call's test began: the place an earlier test's call left the run
+// (ofEarlierTest), or an exchange the read's order shows F served only
+// before the test (beforeTest). The copy rule reads a word of it as one of
+// a recording of another test (follows.excusedSeen, olderTook), never as
+// one the order alone lets go.
+func (e Earlier) outsideTest() bool { return e.ofEarlierTest() || e.beforeTest }
 
 // toldOf is a read's Order and the recording of an exchange (Earlier.told):
 // Order.ServedView of that recording.
@@ -240,14 +258,24 @@ type Raw struct {
 	// aside as a value's source where F's view, stated, shows the value
 	// moved apart from it, as an instant the application sent is
 	// (appearedIn, follows.refute); one F gave the application anywhere else
-	// stays its source whatever F gave there.
+	// stays its source whatever F gave there. The copy rule reads it too
+	// (follows.outsideTest, olderTook), as beforeTest.
 	olderTest bool
+	// test and prev, of a Raw marked olderTest: the number in the set of
+	// the one older test F made every serve of it in (Order.testOf; 0 where
+	// they were made in more than one), and whether that test is the one
+	// F ran just before the call's (Order.previous). A late call's reason
+	// names such a serve that gave the application the value the call
+	// carries now (lateServes).
+	test int
+	prev bool
 	// beforeTest: F gave the application the mock only before the call's
 	// test began (ServedBeforeTheTest; Order.ServedView marks it by the
 	// serves' numbers): at the set's start-up, between tests, or in an older
 	// test, every serve in an order keploy can tell, none in the call's own
-	// test. Only the rule for a start-up's same-second read (classifyRead,
-	// ofSentBefore) reads it.
+	// test. The rule for a start-up's same-second read (classifyRead,
+	// ofSentBefore) reads it, and the copy rule (follows.outsideTest), which
+	// reads a word of the payload as one of a recording of another test.
 	beforeTest bool
 	// servedAfter: every serve of the mock's the read saw was made after the
 	// call reached keploy (Order.ArrivedAt, ServedView), so F had not served
@@ -446,6 +474,7 @@ func (r Raw) WithServed(served bool) Raw {
 	if !served {
 		r.first, r.last, r.asRecorded, r.live = 0, 0, false, nil
 		r.unseen, r.views, r.olderTest, r.servedAfter = false, nil, false, false
+		r.test, r.prev = 0, false
 	}
 	return r
 }
@@ -783,6 +812,14 @@ type Place struct {
 	// stands in the value, never by its text.
 	Field, Held string
 	Echo        bool
+	// SetAside, of a place found in a raw mock's payload (Side ""): the
+	// search found the recorded value there, and the rule a copy follows
+	// its source sets it aside, as F gave the application nothing there
+	// that holds the value the call carries now (notFromWhy), and keploy
+	// cannot name where that value came from. The place is no source of
+	// the value, and no binding gap: a caller's reason names it so, never
+	// as the place the value is held earlier, and the leaf's Why says why.
+	SetAside bool
 	// AtCall, of a place found in a raw mock's payload: the mock was
 	// recorded at the call's own instant (a fixture's whole second), which
 	// keploy reads as one the recording may have given the application
@@ -1559,6 +1596,21 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				}
 				if from.startUp {
 					ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, startUpWhy(dc.ofIn(r.Value, l.Value, w, at), from)
+				} else if from.Side == "" && !from.Echo {
+					// Nothing F gave at from holds what the call carries
+					// now: refused as before, naming the older test's
+					// serve that gave it (a late call), or saying keploy
+					// cannot name its source, never from (notFromWhy).
+					// Where keploy cannot name the source, the leaf stays a
+					// variable of from, as the search found it (the rule a
+					// copy follows its source is ClassifyFollowing's), set
+					// aside (Place.SetAside), and only its reason changes.
+					switch why, late := dc.notFromWhy(dc.ofIn(r.Value, l.Value, w, at), from, at, placed, raw, places); {
+					case late:
+						ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, why
+					case why != "":
+						ln.From.SetAside, ln.Why = true, why
+					}
 				}
 			} else if echo := Echoes(dc, r, resp); len(echo) > 0 {
 				ln.Kind, ln.Echo = KindEcho, echo
@@ -4079,11 +4131,7 @@ var payloadDecodes atomic.Int64
 func rawOfNow(m *models.Mock, served bool) Raw {
 	payloadDecodes.Add(1)
 	r := Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, answered: m.Spec.ResTimestampMock, served: served, call: callOf(m)}
-	b, err := json.Marshal(payloadSpec(m.Spec))
-	if err != nil {
-		return r
-	}
-	v, ok := DecodeJSON(b)
+	v, ok := payloadValue(payloadSpec(m.Spec))
 	if !ok {
 		return r
 	}
@@ -4151,6 +4199,81 @@ func callOf(m *models.Mock) string {
 		call += " " + string(r.Method) + " " + host + " /" + strconv.Itoa(len(strings.Split(strings.TrimPrefix(path, "/"), "/")))
 	}
 	return call
+}
+
+// payloadValue is spec as its JSON decodes (DecodeJSON of json.Marshal):
+// the payload rawOfNow reads. An HTTP request's or answer's body that is
+// valid UTF-8 stays out of that round trip (keepBodies) and is put back
+// after it where the round trip decodes it (putBack): JSON encodes a valid
+// UTF-8 string, whatever it escapes, and decodes it back to the same
+// string, so the value is the round trip's without encoding and decoding,
+// byte by byte, a body of megabytes. A body that is not valid UTF-8 goes
+// through the round trip, which reads each invalid byte as U+FFFD; and if
+// a kept body's place in the decoded value is not its field's empty string
+// (an encoding that left the field out or put it elsewhere), the whole
+// spec goes through the round trip as it is. With models' JSON tags today
+// that never happens: "Req" and "Res" are written whenever they are not
+// nil, and "body" has no omitempty, so dropping the fallback gives the same
+// value; it is there so that a tag changed later reads the plain round
+// trip, not a payload with a body missing.
+func payloadValue(spec models.MockSpec) (interface{}, bool) {
+	out, kept := keepBodies(spec)
+	v, ok := roundTrip(out)
+	if ok && !putBack(v, kept) {
+		return roundTrip(spec)
+	}
+	return v, ok
+}
+
+// roundTrip is spec encoded as JSON and decoded (DecodeJSON).
+func roundTrip(spec models.MockSpec) (interface{}, bool) {
+	b, err := json.Marshal(spec)
+	if err != nil {
+		return nil, false
+	}
+	return DecodeJSON(b)
+}
+
+// keptBody is a body keepBodies kept out of a spec's round trip: the key
+// of its request or answer in the spec's JSON, and the body.
+type keptBody struct {
+	key, body string
+}
+
+// keepBodies is spec with the body of its HTTP request and of its answer
+// each emptied where it is valid UTF-8, and those bodies. spec is not
+// changed: the request and answer emptied are copies.
+func keepBodies(spec models.MockSpec) (models.MockSpec, []keptBody) {
+	var kept []keptBody
+	if r := spec.HTTPReq; r != nil && utf8.ValidString(r.Body) {
+		c := *r
+		kept = append(kept, keptBody{key: "Req", body: c.Body})
+		c.Body = ""
+		spec.HTTPReq = &c
+	}
+	if r := spec.HTTPResp; r != nil && utf8.ValidString(r.Body) {
+		c := *r
+		kept = append(kept, keptBody{key: "Res", body: c.Body})
+		c.Body = ""
+		spec.HTTPResp = &c
+	}
+	return spec, kept
+}
+
+// putBack writes each kept body into v, a round trip's value of the spec
+// keepBodies emptied them in, where the round trip decoded its emptied
+// body: v's object under the body's key, at "body". It reports false, and
+// v is not to be read, where that place does not hold the empty string.
+func putBack(v interface{}, kept []keptBody) bool {
+	for _, k := range kept {
+		top, _ := v.(map[string]interface{})
+		side, _ := top[k.key].(map[string]interface{})
+		if b, isString := side["body"].(string); !isString || b != "" {
+			return false
+		}
+		side["body"] = k.body
+	}
+	return true
 }
 
 // payloadSpec is spec without what says, below the spec's own fields

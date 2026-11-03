@@ -14,7 +14,6 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
-	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -45,7 +44,7 @@ func collectPostTLSMocks(t *testing.T, h *v2Harness, ctx context.Context, want i
 	go func() {
 		cctx, cancel := context.WithTimeout(ctx, patience)
 		defer cancel()
-		done <- RecordV2(cctx, h.logger, h.sess)
+		done <- recordV2NoPanic(t, cctx, h.logger, h.sess)
 	}()
 	var got []*models.Mock
 	for len(got) < want {
@@ -240,7 +239,7 @@ func TestRecordV2_PostTLS_LostStash_FabricatedDest_NoDialCleanAbort(t *testing.T
 	go func() {
 		ctx, cancel := context.WithTimeout(postTLSCtxWithStore(store), 10*time.Second)
 		defer cancel()
-		done <- RecordV2(ctx, h.logger, h.sess)
+		done <- recordV2NoPanic(t, ctx, h.logger, h.sess)
 	}()
 
 	select {
@@ -451,11 +450,11 @@ func TestHandshakeLastKey_OnlyNamesResolvedDestinations(t *testing.T) {
 // port-scoped key.
 //
 // Regression: it previously seeded only the two CONSUMABLE keys. The only
-// RememberLast caller in the package was the legacy handleInitialHandshake,
-// which the proxyless V2 flow never runs — so resolvePreTLSGreeting's
-// cachedGreeting fallback was dead code on every proxyless MySQL-over-TLS
-// recording, and a connection whose own entry had been consumed lost its whole
-// command phase.
+// RememberLast caller in the package was the legacy capture's handshake
+// handler (since removed), which the proxyless V2 flow never ran — so
+// resolvePreTLSGreeting's cachedGreeting fallback was dead code on every
+// proxyless MySQL-over-TLS recording, and a connection whose own entry had been
+// consumed lost its whole command phase.
 func TestStorePreTLSHandshakeV2_SeedsLastGreetingCache(t *testing.T) {
 	store := models.NewTLSHandshakeStore()
 	h := newV2Harness(t)
@@ -798,7 +797,7 @@ func TestRecordV2_RawLegSeedsPortKeyFromGreeting(t *testing.T) {
 	defer cancel()
 	// The raw leg stops after stashing; RecordV2 returning is the success path.
 	done := make(chan error, 1)
-	go func() { done <- RecordV2(ctx, h.logger, h.sess) }()
+	go func() { done <- recordV2NoPanic(t, ctx, h.logger, h.sess) }()
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
@@ -853,7 +852,7 @@ func rawLeg(t *testing.T, store *models.TLSHandshakeStore, scope, connKey, addr,
 		context.WithValue(context.Background(), models.TLSHandshakeStoreKey, store), 10*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- RecordV2(ctx, h.logger, h.sess) }()
+	go func() { done <- recordV2NoPanic(t, ctx, h.logger, h.sess) }()
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
@@ -947,82 +946,6 @@ func TestResolvePreTLSGreeting_GateHandlesNilAndEmptyAddr(t *testing.T) {
 	noAddr := &models.ConditionalDstCfg{Port: 3306}
 	if _, _, source := resolvePreTLSGreeting(context.Background(), seed(), models.HandshakeOwner{}, 3306, scope, "", noAddr, false); source != greetingCached {
 		t.Errorf("empty Addr: source = %v, want the port key to answer", source)
-	}
-}
-
-// TestLegacyPostTLSUsesTheLastGreetingCacheInsteadOfDialling drives the LEGACY
-// post-TLS reader and asserts its BEHAVIOUR.
-//
-// It replaces a test that asserted on the SOURCE TEXT of conn.go: it read the
-// file and grepped for "hsStore.Last(lastKey)". That guard could only detect
-// textual deletion. Changing the surrounding condition to `if false` leaves the
-// string present, kills the entire fallback, and the whole suite stayed green --
-// verified. A write with no reader is the exact defect this fallback exists to
-// fix, so the guard for it must exercise the reader rather than look at it.
-//
-// The destination is a fabricated (capture-layer stand-in) address, which
-// separates the two paths cleanly: with the cache consulted the greeting comes
-// from the store and the connection's config mock is recorded from it; without
-// it, fetchServerGreeting REFUSES the address (it does not dial a stand-in) and
-// the call fails with "direct fetch failed".
-//
-// It asserts the success POSITIVELY as well as the failure negatively. A
-// one-sided check passes the moment the flow ends before the store lookup ever
-// happens — which is what this test did once the first client packet came to
-// be read before the lookup, while its stream sent none.
-func TestLegacyPostTLSUsesTheLastGreetingCacheInsteadOfDialling(t *testing.T) {
-	store := models.NewTLSHandshakeStore()
-	mocks := make(chan *models.Mock, 16)
-	mgr := syncMock.New(zap.NewNop())
-	mgr.SetOutputChannel(mocks)
-	ctx := syncMock.NewContext(context.WithValue(postTLSCtxWithStore(store),
-		models.ClientConnectionIDKey, "pooled-conn"), mgr)
-
-	scope := "ns/app/ts0"
-	// Port 1 is closed, so the direct-dial fallback cannot succeed.
-	dst := &models.ConditionalDstCfg{Addr: "127.0.0.1:1", Port: 1, AddrFabricated: true}
-	// As a raw leg caches it: the greeting and the client's SSLRequest.
-	store.RememberLast(models.HandshakeLastKey(scope, dst), models.TLSHandshakeEntry{
-		RespPackets: [][]byte{cannedHandshakeV10(t)},
-		ReqPackets:  [][]byte{cannedSSLRequest(t, 1)},
-	})
-
-	// A pooled connection: its first decrypted packet is a command, and then
-	// the stream ends. The greeting is looked up only once that packet is in,
-	// so it must be there; this test is about WHICH SOURCE the greeting came
-	// from, not about decoding traffic.
-	clientConn, peer := net.Pipe()
-	defer func() { _ = clientConn.Close() }()
-	destConn, destPeer := net.Pipe()
-	defer func() { _ = destConn.Close() }()
-	_ = destPeer.Close()
-	go func() {
-		_, _ = peer.Write(cannedCOMQuery(t, 0, "SELECT 1"))
-		_ = peer.Close()
-	}()
-
-	opts := models.OutgoingOptions{
-		DstCfg:           dst,
-		PassThroughScope: scope,
-		ConnKey:          "pooled-conn-whose-own-entry-was-consumed",
-	}
-	err := handlePostTLSRecord(ctx, zap.NewNop(), clientConn, destConn, mocks,
-		buildPostHandshakeDecodeCtx(clientConn), opts)
-
-	if err != nil && strings.Contains(err.Error(), "direct fetch failed") {
-		t.Fatalf("the legacy post-TLS reader ignored the last-greeting cache and fell through to "+
-			"fetchServerGreeting for %s — the seeding in handleInitialHandshake is then a write with "+
-			"no reader, and a pooled connection loses its whole command phase here: %v", dst.Addr, err)
-	}
-	// Positive assertion: the cached greeting was used, for the connection's
-	// config mock.
-	close(mocks)
-	var cfg bool
-	for m := range mocks {
-		cfg = cfg || (m != nil && m.Name == "config")
-	}
-	if !cfg {
-		t.Fatalf("no config mock from the cached greeting (err %v)", err)
 	}
 }
 
@@ -1188,7 +1111,8 @@ func TestResolvePreTLSGreeting_ConnKeyedEntryIsOwnNotShared(t *testing.T) {
 // entry does not age out; if it also carried its original ReqTimestamp it would
 // backdate the next connection's config mock. Config mocks are identified by
 // Name+Kind+ReqTimestampMock and ordered by it, so that is a replay break — the
-// same hazard the legacy path documents for borrowed greetings.
+// same hazard as a greeting borrowed from the last-greeting cache (staleEntry
+// in handlePostTLSHandshakeV2).
 func TestPostTLSHandshakeV2_RestoredGreetingCarriesNoTimestamp(t *testing.T) {
 	h := newV2Harness(t)
 	base := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
@@ -1259,6 +1183,38 @@ func TestPostTLSHandshakeV2_DoesNotRecycleUndecodableGreeting(t *testing.T) {
 	}
 }
 
+// A stored greeting that is a well-formed packet but not a HandshakeV10 (here
+// an OK packet, with real capability flags) is garbage too, and is not put back
+// for the same reason. The connection's decode context holds no greeting yet,
+// so it does not decode as a greeting: the handshake fails, and the entry is
+// dropped.
+func TestPostTLSHandshakeV2_DoesNotRecycleANonHandshakeGreeting(t *testing.T) {
+	h := newV2Harness(t)
+
+	store := models.NewTLSHandshakeStore()
+	portKey := models.HandshakeStoreKey("", 3306)
+	store.Push(portKey, models.TLSHandshakeEntry{
+		RespPackets: [][]byte{cannedOK(t, 1, 0x000FA68D)},
+	})
+	// The stream's own first packet, so it goes on to adopt the entry.
+	h.pushClient(cannedHandshakeResponse41(t, 2, false), time.Now())
+
+	decodeCtx := &wire.DecodeContext{
+		Mode:               models.MODE_RECORD,
+		LastOp:             wire.NewLastOpMap(),
+		ServerGreetings:    wire.NewGreetings(),
+		PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
+	}
+	var clientKey net.Conn = h.sess.ClientStream
+	if _, err := handlePostTLSHandshakeV2(postTLSCtxWithStore(store), h.logger, h.sess, decodeCtx, &clientKey); err == nil {
+		t.Fatal("expected a greeting that is not a HandshakeV10 to fail the handshake")
+	}
+	if _, ok := store.PopWait(portKey, 0); ok {
+		t.Fatal("a greeting that is not a HandshakeV10 was put back into the shared FIFO; Push re-stamps its " +
+			"expiry so it would never age out and would trip every later stream to this port")
+	}
+}
+
 // runPostTLSSession drives one RecordV2 session to want mocks without touching
 // t, so several can run concurrently.
 func runPostTLSSession(ctx context.Context, h *v2Harness, want int, patience time.Duration) ([]*models.Mock, error) {
@@ -1266,7 +1222,7 @@ func runPostTLSSession(ctx context.Context, h *v2Harness, want int, patience tim
 	go func() {
 		cctx, cancel := context.WithTimeout(ctx, patience)
 		defer cancel()
-		done <- RecordV2(cctx, h.logger, h.sess)
+		done <- recordV2NoPanic(nil, cctx, h.logger, h.sess)
 	}()
 	var got []*models.Mock
 	deadline := time.After(patience)
@@ -1392,7 +1348,7 @@ func TestRecordV2_PostTLS_TeardownDuringStashWaitNeverDials(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(postTLSCtxWithStore(models.NewTLSHandshakeStore()))
 	done := make(chan error, 1)
-	go func() { done <- RecordV2(ctx, h.logger, h.sess) }()
+	go func() { done <- recordV2NoPanic(t, ctx, h.logger, h.sess) }()
 	time.Sleep(300 * time.Millisecond) // inside the 5s stash wait
 	cancel()
 	select {
@@ -1739,7 +1695,7 @@ func TestRecordV2_RawLegRemembersTheServerGreeting(t *testing.T) {
 			ctx, cancel := context.WithTimeout(rawCtx, 5*time.Second)
 			defer cancel()
 			done := make(chan error, 1)
-			go func() { done <- RecordV2(ctx, h.logger, h.sess) }()
+			go func() { done <- recordV2NoPanic(t, ctx, h.logger, h.sess) }()
 			if !tls {
 				// Plaintext: the connection continues into its command phase.
 				select {

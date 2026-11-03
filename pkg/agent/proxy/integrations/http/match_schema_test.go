@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -266,41 +267,43 @@ func schemaCalls(t testing.TB, seed int64, pool []*models.Mock, n int) []schemaC
 // sameSchemaMatch fails t unless the new SchemaMatch and main's pick the same
 // mocks, in the same order, for each call, under each of: no url noise and
 // url noise, auto-dynamic matching off and on, the proven switch off and on.
+// The calls share no state but the pool, which both only read, so under each
+// switch they are matched in shards at once (inShards), each call in one.
 func sameSchemaMatch(t *testing.T, label string, pool []*models.Mock, calls []schemaCall) (matched int) {
 	t.Helper()
 	h := newHTTP()
 	ctx := context.Background()
 	headerNoise := map[string][]string{"x-trace": {}}
+	var picked atomic.Int64
 	for _, proven := range []bool{false, true} {
-		if proven {
-			t.Setenv(provenswitch.Env, "1")
-		} else {
-			t.Setenv(provenswitch.Env, "0")
-		}
-		for _, urlNoise := range [][]string{nil, {"/item/[0-9]+", "/a%20b"}} {
-			for _, auto := range []bool{false, true} {
-				for _, c := range calls {
-					want, werr := h.mainSchemaMatch(ctx, c.input, pool, headerNoise, urlNoise, auto)
-					got, gerr := h.SchemaMatch(ctx, c.input, pool, headerNoise, urlNoise, auto)
-					if (werr == nil) != (gerr == nil) {
-						t.Fatalf("%s, %s (proven %v, url noise %v, auto %v): error %v, main %v", label, c.name, proven, urlNoise, auto, gerr, werr)
-					}
-					if len(got) != len(want) {
-						t.Fatalf("%s, %s (proven %v, url noise %v, auto %v): %d mocks, main %d: %v vs %v", label, c.name, proven, urlNoise, auto, len(got), len(want), mockNamesOf(got), mockNamesOf(want))
-					}
-					for i := range want {
-						if got[i] != want[i] {
-							t.Fatalf("%s, %s (proven %v, url noise %v, auto %v): mock %d is %s, main %s", label, c.name, proven, urlNoise, auto, i, got[i].Name, want[i].Name)
+		t.Run(fmt.Sprintf("%s proven=%v", label, proven), func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[bool]string{false: "0", true: "1"}[proven])
+			inShards(t, len(calls), func(t *testing.T, i int) {
+				c := calls[i]
+				for _, urlNoise := range [][]string{nil, {"/item/[0-9]+", "/a%20b"}} {
+					for _, auto := range []bool{false, true} {
+						want, werr := h.mainSchemaMatch(ctx, c.input, pool, headerNoise, urlNoise, auto)
+						got, gerr := h.SchemaMatch(ctx, c.input, pool, headerNoise, urlNoise, auto)
+						if (werr == nil) != (gerr == nil) {
+							t.Fatalf("%s, %s (proven %v, url noise %v, auto %v): error %v, main %v", label, c.name, proven, urlNoise, auto, gerr, werr)
+						}
+						if len(got) != len(want) {
+							t.Fatalf("%s, %s (proven %v, url noise %v, auto %v): %d mocks, main %d: %v vs %v", label, c.name, proven, urlNoise, auto, len(got), len(want), mockNamesOf(got), mockNamesOf(want))
+						}
+						for j := range want {
+							if got[j] != want[j] {
+								t.Fatalf("%s, %s (proven %v, url noise %v, auto %v): mock %d is %s, main %s", label, c.name, proven, urlNoise, auto, j, got[j].Name, want[j].Name)
+							}
+						}
+						if len(want) > 0 {
+							picked.Add(1)
 						}
 					}
-					if len(want) > 0 {
-						matched++
-					}
 				}
-			}
-		}
+			})
+		})
 	}
-	return matched
+	return int(picked.Load())
 }
 
 // TestSchemaMatchPicksWhatMainPicks is the differential row: on generated
