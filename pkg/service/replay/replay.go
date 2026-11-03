@@ -217,16 +217,32 @@ func haltedRunReason(testSet string, status models.TestSetStatus, exit models.Ap
 	return fmt.Sprintf("the application exited during test-set %s%s: %v", testSet, code, exit)
 }
 
+// internalErrRunReason is the reason a set testSet that ended INTERNAL_ERR,
+// and so stopped the run, gives the run's stop: the set, and the error of
+// keploy's own failure that ended it (setErr), else the internal error the
+// application's runner reported (exit, when it is one). Never "replay
+// completed successfully".
+func internalErrRunReason(testSet string, setErr error, exit models.AppError) string {
+	if setErr == nil && exit.AppErrorType == models.ErrInternal {
+		setErr = exit
+	}
+	if setErr == nil {
+		return fmt.Sprintf("test-set %s ended %s", testSet, models.TestSetStatusInternalErr)
+	}
+	return fmt.Sprintf("test-set %s ended %s: %v", testSet, models.TestSetStatusInternalErr, setErr)
+}
+
 // runStopReason is the reason a run whose sets ended stops with: reason,
 // what stopped it, unless that is runCompletedReason and sets of the run
-// halted (halted, their haltedRunReason): then those, each set with its
-// exit. A run with a halted set never stops with "replay completed
+// halted or stopped it (sets, their haltedRunReason or
+// internalErrRunReason): then those, each with its set. A run with a set
+// that halted or stopped it never stops with "replay completed
 // successfully".
-func runStopReason(reason string, halted []string) string {
-	if reason != runCompletedReason || len(halted) == 0 {
+func runStopReason(reason string, sets []string) string {
+	if reason != runCompletedReason || len(sets) == 0 {
 		return reason
 	}
-	return strings.Join(halted, "; ")
+	return strings.Join(sets, "; ")
 }
 
 func resolveTestSetStatus(cmdType utils.CmdType, current, derived models.TestSetStatus, err error) (models.TestSetStatus, bool) {
@@ -738,6 +754,12 @@ type Replayer struct {
 	// that set's APP_HALTED or APP_FAULT names (haltedRunReason). Reset
 	// before each run of a set.
 	setAppExit models.AppError
+	// setInternalErr is the error of keploy's own failure that ended the set
+	// RunTestSet last ran to its end INTERNAL_ERR (nil when none did): what a
+	// run that stops on that set names (internalErrRunReason). Each run of a
+	// set that reaches its end sets it, so a set that ends INTERNAL_ERR, the
+	// only one it is read for, never reads an earlier set's.
+	setInternalErr error
 	// setCalls are the calls of the set RunTestSet is running that no mock
 	// answered and that are the set's, no test's (proven switch): those made
 	// before its first test (before_set_calls.go).
@@ -1186,11 +1208,12 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 	var testSetResult bool
 	abortTestRun := false
-	// haltedSets: the reasons of the run's sets whose application exited
-	// (haltedRunReason), in their order: the set that stopped the run, or
-	// those the run went on past (docker compose, a stack per set). The
+	// setStops: in their order, the reasons of the run's sets whose
+	// application exited (haltedRunReason), the one that stopped the run or
+	// those the run went on past (docker compose, a stack per set), and of
+	// the set whose internal error stopped it (internalErrRunReason). The
 	// run's stop names them (runStopReason).
-	var haltedSets []string
+	var setStops []string
 	r.afterTestRunCalled = false
 	var flakyTestSets []string
 	var testSets []string
@@ -1330,7 +1353,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 						"test set failed because the app exited; continuing to next test set",
 						zap.String("test-set", testSet),
 						zap.String("status", string(testSetStatus)))
-					haltedSets = append(haltedSets, haltedRunReason(testSet, testSetStatus, r.setAppExit, err))
+					setStops = append(setStops, haltedRunReason(testSet, testSetStatus, r.setAppExit, err))
 					testSetResult = false
 					testRunResult = false
 					break
@@ -1351,10 +1374,15 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				// too, whose halted set the run otherwise goes on past on a
 				// stack of its own. Either way the run's stop names the halt.
 				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType) || keptAppExit(ctx) != (models.AppError{})
-				haltedSets = append(haltedSets, haltedRunReason(testSet, testSetStatus, r.setAppExit, nil))
+				setStops = append(setStops, haltedRunReason(testSet, testSetStatus, r.setAppExit, nil))
 			case models.TestSetStatusInternalErr:
 				testSetResult = false
 				abortTestRun = abortAfterTestSet(testSetStatus, cmdType, r.notJudged(testSet))
+				// The run's stop names the internal error that stopped it. A
+				// set only not judged does not stop it: its report says why.
+				if abortTestRun {
+					setStops = append(setStops, internalErrRunReason(testSet, r.setInternalErr, r.setAppExit))
+				}
 			case models.TestSetStatusUserAbort:
 				// A Ctrl+C does not un-fail the tests that already ran, nor
 				// pass a test that got no verdict before it: the defer at
@@ -1501,7 +1529,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			}
 		}
 	}
-	stopReason = runStopReason(stopReason, haltedSets)
+	stopReason = runStopReason(stopReason, setStops)
 	verdictReached = true
 	// A run none of whose tests got a verdict (every test set, or every test,
 	// ignored or quarantined) verified nothing, so it does not pass, as a run
@@ -3094,6 +3122,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		exitLoop = true
 		testSetStatus = models.TestSetStatusInternalErr
 	}
+	// internalFailure is the error of keploy's own failure that ended the set
+	// INTERNAL_ERR in a way that stops the run (abortAfterTestSet), noted
+	// where keploy failed; the set's end hands it on (r.setInternalErr).
+	var internalFailure error
 	// endedPartWay reports whether the context of a run with no agent has
 	// ended before its tests did, and the status the set ends with if so:
 	// USER_ABORT when its user stopped it, INTERNAL_ERR for anything else (a
@@ -3109,6 +3141,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		case stoppedByItsUser(runTestSetCtx):
 			return models.TestSetStatusUserAbort, true
 		default:
+			internalFailure = fmt.Errorf("the run ended before the set's tests did: %w", context.Cause(runTestSetCtx))
 			return models.TestSetStatusInternalErr, true
 		}
 	}
@@ -4756,6 +4789,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to insert final test case result")
+			internalFailure = fmt.Errorf("failed to insert final test case result: %w", err)
 			testSetStatus = models.TestSetStatusInternalErr
 		}
 	}
@@ -5678,6 +5712,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				testSetStatus = resolvedStatus
 			} else {
 				utils.LogError(r.logger, resultsErr, "failed to get test case results")
+				internalFailure = fmt.Errorf("failed to get test case results: %w", resultsErr)
 				testSetStatus = models.TestSetStatusInternalErr
 			}
 		}
@@ -6213,6 +6248,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), loopErr); ok {
 			testSetStatus = resolvedStatus
 		} else {
+			internalFailure = loopErr
 			testSetStatus = models.TestSetStatusInternalErr
 		}
 	} else if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil); ok {
@@ -6653,6 +6689,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.String("reason", unchecked))
 		} else if err := r.persistLearned(runTestSetCtx, testSetID, learnedKept, r.learnedElsewhere(runTestSetCtx, testSetID), ownerOf(expectedTestMockMappings), actualTestMockMappings, r.exact.consumerOf()); err != nil {
 			utils.LogError(r.logger, err, "keploy did not complete the full round of this record: what its learn step learned was not kept", zap.String("testSetID", testSetID))
+			internalFailure = fmt.Errorf("what the learn step learned was not kept: %w", err)
 			testSetStatus = models.TestSetStatusInternalErr
 		}
 	}
@@ -6693,6 +6730,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			appLogs = r.instrumentation.GetRecentAppLogs(logCtx)
 		}
 	}
+	// The status is final here, and no error of keploy's that leaves the set
+	// INTERNAL_ERR is noted past this point (a failed report write returns
+	// it).
+	r.setInternalErr = internalFailure
 	testReport = &models.TestReport{
 		Version:       models.GetVersion(),
 		TestSet:       testSetID,
