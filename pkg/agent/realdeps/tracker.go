@@ -70,10 +70,13 @@ type Tracker struct {
 
 // Origin is who made a connection: the keploy instance (a test worker's) the
 // kernel stamped it with at its connect, 0 for none, and its process's
-// kernel PID, 0 when unknown.
+// kernel PID, 0 when unknown. Ended names the test worker of a stamp whose
+// worker had ended (Instance is then 0): its process is in no live worker,
+// and its uses are charged as a process's in no worker are, naming it.
 type Origin struct {
 	Instance uint32
 	Pid      uint32
+	Ended    string
 }
 
 // openTest is a test open on its worker's instance.
@@ -95,8 +98,9 @@ type openTest struct {
 
 // unattributedUse names a REAL use keploy cannot attribute to one test.
 type unattributedUse struct {
-	dest string
-	pid  uint32
+	dest  string
+	pid   uint32
+	ended string
 }
 
 type use struct {
@@ -243,6 +247,9 @@ func (t *Tracker) EndTestOf(instance uint32) TestEnd {
 		what := "the latest: a connection to mock.real destination " + o.latest.dest
 		if o.latest.pid != 0 {
 			what += fmt.Sprintf(", from process %d", o.latest.pid)
+		}
+		if o.latest.ended != "" {
+			what += " of ended test worker " + o.latest.ended
 		}
 		end.Unattributed = models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: uint64(n), What: what}}
 	}
@@ -419,7 +426,7 @@ func (t *Tracker) usesLocked(from Origin, id int64, dest string, failed bool) {
 			}
 			o.unattributed[id] = struct{}{}
 		}
-		o.latest = unattributedUse{dest: dest, pid: from.Pid}
+		o.latest = unattributedUse{dest: dest, pid: from.Pid, ended: from.Ended}
 	}
 }
 
@@ -608,7 +615,7 @@ func (t *Tracker) FailedUndecided(from Origin, dst string) (resolve func(label s
 			}
 			for _, o := range its {
 				o.unattributedFailed++
-				o.latest = unattributedUse{dest: label, pid: f.from.Pid}
+				o.latest = unattributedUse{dest: label, pid: f.from.Pid, ended: f.from.Ended}
 			}
 		}
 		if !unresolved && label != "" {

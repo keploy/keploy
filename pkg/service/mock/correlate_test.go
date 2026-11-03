@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.uber.org/zap"
@@ -281,4 +282,33 @@ func TestEachTestOpenAtACallFromNoWorkerIsNotJudged(t *testing.T) {
 	require.Len(t, notJudged, 1, "the loss leaves the test without a verdict, never failed")
 	require.Contains(t, notJudged.NotJudgedRemedy(), models.UnattributedRemedy)
 	require.True(t, models.CaptureLossUnattributed.PerTest(), "a replay's refused call is charged to each test open then, never every later test")
+}
+
+// A call whose connection was stamped with a test worker's instance that had
+// ended when it was captured (capturedMock.ended: the agent gave the id
+// again, under a new value, to the next claim) is in no window of the next
+// claim's test, and every test open at it is charged with it, naming the
+// ended worker, as for a call from a process in no worker: the next claim's
+// test is not judged, never passed on a call it may not have made.
+func TestAnEndedWorkersCallIsChargedToEveryOpenTestAndNamed(t *testing.T) {
+	gone, next := coreAgent.InstanceValue(1, 0), coreAgent.InstanceValue(1, 1)
+	windows := []models.ScopeWindow{
+		{Name: "gone", Start: ts(10), End: ts(20), Instance: gone},
+		{Name: "next", Start: ts(30), End: ts(50), Instance: next},
+		{Name: "other", Start: ts(35), End: ts(45), Instance: coreAgent.InstanceValue(2, 0)},
+	}
+	mocks := []capturedMock{
+		{name: "survivor", ts: ts(40), pid: 7, ended: gone},
+		{name: "own", ts: ts(41), pid: 8, instance: next},
+	}
+	require.Equal(t, map[string][]models.MockEntry{"next": {{Name: "own"}}}, correlateScopes(windows, mocks), "the ended worker's call is in no test's mapping")
+	require.Equal(t, []unattributedCall{{mock: "survivor", pid: 7, tests: []string{"next", "other"}}}, chargeUnattributed(windows, mocks))
+	for _, i := range []int{1, 2} {
+		require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1, What: "the latest: mock survivor, from process 7 of ended test worker 1"}}, windows[i].Evidence.CannotCapture, windows[i].Name)
+	}
+	require.Nil(t, windows[0].Evidence, "the ended worker's own test was closed before the call")
+
+	later := []models.ScopeWindow{{Name: "third", Start: ts(60), End: ts(70), Instance: coreAgent.InstanceValue(1, 2)}}
+	chargeUnattributed(later, []capturedMock{{name: "survivor2", ts: ts(65), pid: 7, ended: next}})
+	require.Equal(t, "the latest: mock survivor2, from process 7 of ended test worker 1 (claim 2 of that id)", later[0].Evidence.CannotCapture[0].What)
 }

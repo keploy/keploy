@@ -80,6 +80,9 @@ type Registry struct {
 	// dest is each connection's address, which every recorded mock names
 	// (dest.go).
 	dest destinations
+	// instances are the live test workers' keploy instances
+	// (instances.go).
+	instances liveInstances
 }
 
 func New(p Proc, slack time.Duration) *Registry {
