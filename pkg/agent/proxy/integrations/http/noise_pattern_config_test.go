@@ -147,44 +147,52 @@ func TestKeployYmlFormPatternDrift(t *testing.T) {
 	}
 }
 
-// keploy.yml's pattern on a header the static flaky list also names holds
+// keploy.yml's pattern on a header the static flaky lists also name holds
 // both its values in the learn step, as in the strict comparison: the user's
-// entry wins over the list's, which would excuse any value.
+// entry wins over the lists', which would excuse any value. One header from
+// the list kept with the switch off and one from the switch's own additions.
 func TestAUserHeaderPatternWinsOverTheFlakyList(t *testing.T) {
 	h, _, _ := learnOn(t)
-	opts := models.OutgoingOptions{Learn: true, NoiseConfig: map[string]map[string][]string{"header": {"X-Goog-Request-Params": {`^name=projects/p\d$`}}}}
-	noise := NewRequestNoise(zap.NewNop(), opts)
-	n := h.newLearnNoise(opts, noise.Body, noise.URL)
-	with := func(v string) map[string]string {
-		return map[string]string{"Content-Type": "application/json", "X-Goog-Request-Params": v}
-	}
-	for _, c := range []struct {
-		name, rec, live string
-		same            bool
+	for _, hd := range []struct {
+		name, pattern, inA, inB, out string
 	}{
-		{"both values inside", "name=projects/p1", "name=projects/p2", true},
-		{"the live value outside", "name=projects/p1", "name=projects/OTHER", false},
-		{"the recorded value outside", "name=projects/OTHER", "name=projects/p1", false},
+		{"X-Goog-Request-Params", `^name=projects/p\d$`, "name=projects/p1", "name=projects/p2", "name=projects/OTHER"},
+		{"Amz-Sdk-Retry", `^\d+/\d+/500$`, "0/0/500", "1/20/500", "1/20/495"},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			m := learnRecorded("m", 0, "POST", "/v1/x", `{}`, with(c.rec), `{}`)
-			in := live("POST", "/v1/x", `{}`, with(c.live))
-			d := learn.Compare(n.shape(liveParts(context.Background(), in), ""), n.shape(recordedParts(m), ""), n.known(m))
-			if same := d.Structural == "" && len(d.Drift) == 0; same != c.same {
-				t.Fatalf("learn step: same = %v (%+v), want %v", same, d, c.same)
-			}
-			got, diag := strictMatch(t, sent("/x", with(c.live), `{}`), noise.Header, noise.Body, noise.URL, recorded("m", "/x", with(c.rec), `{}`))
-			if (got != nil) != c.same {
-				t.Fatalf("strict: served %v (differs %v), want %v", got != nil, differs(diag), c.same)
-			}
-		})
-	}
-	// Without the user's entry the list still excuses any value.
-	plain := h.newLearnNoise(models.OutgoingOptions{Learn: true}, nil, nil)
-	m := learnRecorded("m", 0, "POST", "/v1/x", `{}`, with("name=projects/p1"), `{}`)
-	in := live("POST", "/v1/x", `{}`, with("name=projects/OTHER"))
-	if d := learn.Compare(plain.shape(liveParts(context.Background(), in), ""), plain.shape(recordedParts(m), ""), plain.known(m)); d.Structural != "" || len(d.Drift) > 0 {
-		t.Fatalf("the flaky list no longer excuses the header: %+v", d)
+		opts := models.OutgoingOptions{Learn: true, NoiseConfig: map[string]map[string][]string{"header": {hd.name: {hd.pattern}}}}
+		noise := NewRequestNoise(zap.NewNop(), opts)
+		n := h.newLearnNoise(opts, noise.Body, noise.URL)
+		with := func(v string) map[string]string {
+			return map[string]string{"Content-Type": "application/json", hd.name: v}
+		}
+		for _, c := range []struct {
+			name, rec, live string
+			same            bool
+		}{
+			{"both values inside", hd.inA, hd.inB, true},
+			{"the live value outside", hd.inA, hd.out, false},
+			{"the recorded value outside", hd.out, hd.inA, false},
+		} {
+			t.Run(hd.name+", "+c.name, func(t *testing.T) {
+				m := learnRecorded("m", 0, "POST", "/v1/x", `{}`, with(c.rec), `{}`)
+				in := live("POST", "/v1/x", `{}`, with(c.live))
+				d := learn.Compare(n.shape(liveParts(context.Background(), in), ""), n.shape(recordedParts(m), ""), n.known(m))
+				if same := d.Structural == "" && len(d.Drift) == 0; same != c.same {
+					t.Fatalf("learn step: same = %v (%+v), want %v", same, d, c.same)
+				}
+				got, diag := strictMatch(t, sent("/x", with(c.live), `{}`), noise.Header, noise.Body, noise.URL, recorded("m", "/x", with(c.rec), `{}`))
+				if (got != nil) != c.same {
+					t.Fatalf("strict: served %v (differs %v), want %v", got != nil, differs(diag), c.same)
+				}
+			})
+		}
+		// Without the user's entry the list still excuses any value.
+		plain := h.newLearnNoise(models.OutgoingOptions{Learn: true}, nil, nil)
+		m := learnRecorded("m", 0, "POST", "/v1/x", `{}`, with(hd.inA), `{}`)
+		in := live("POST", "/v1/x", `{}`, with(hd.out))
+		if d := learn.Compare(plain.shape(liveParts(context.Background(), in), ""), plain.shape(recordedParts(m), ""), plain.known(m)); d.Structural != "" || len(d.Drift) > 0 {
+			t.Fatalf("the flaky list no longer excuses %s: %+v", hd.name, d)
+		}
 	}
 }
 
