@@ -50,9 +50,10 @@ func TestKeployMockWorkerScopeNeverAnswersATestsExtraCall(t *testing.T) {
 // read (SetScopeSkippedReads). TestA now makes /x twice: its own, then the
 // read TestCRUD made. The skipped test's read answers the second once, and
 // TestA passes; a third /x is one past what TestCRUD recorded, and fails
-// TestA as an extra call. Without it, TestA failed on its second /x, judging
-// set it aside, and the read moved on to the test after it in every later
-// run.
+// TestA as an extra call, whose line counts every /x TestA made and says
+// which recording answered the one TestCRUD's read took. Without it, TestA
+// failed on its second /x, judging set it aside, and the read moved on to
+// the test after it in every later run.
 func TestKeployMockSkippedTestsReadAnswersATestsCallOnceMore(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -73,7 +74,7 @@ func TestKeployMockSkippedTestsReadAnswersATestsCallOnceMore(t *testing.T) {
 			}))
 			require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {"mock-2"}}))
 			require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{"o": {"mock-1"}}))
-			require.NoError(t, a.SetScopeSkippedReads(ctx, []string{"mock-1"}))
+			require.NoError(t, a.SetScopeSkippedReads(ctx, map[string]string{"mock-1": "o::TestCRUD"}))
 			require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-1"}}))
 			claimSelf(t, a)
 			got, e := runTest(t, a, p, "TestA", tc.calls...)
@@ -86,7 +87,7 @@ func TestKeployMockSkippedTestsReadAnswersATestsCallOnceMore(t *testing.T) {
 			}
 			require.True(t, strings.HasPrefix(got[2], "502"), "a /x past the skipped test's one recording was answered: %s", got[2])
 			require.Equal(t, models.ScopeActionFail, e.Action, "the call past the bound must fail the test")
-			require.Contains(t, e.Reason, "GET /x to ")
+			require.Contains(t, e.Reason, "GET /x to 127.0.0.1:18093 was called 3 times: 1 recorded, 1 answered by o::TestCRUD's read mock-1 (that test is skipped), 1 extra")
 		})
 	}
 }

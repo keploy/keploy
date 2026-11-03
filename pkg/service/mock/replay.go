@@ -1726,10 +1726,11 @@ func workerSlices(mp *models.Mapping, pool map[string][]string) map[string][]str
 // recorded the same read itself makes it once more than it recorded: the
 // skipped test's read answers that call too (ServeExactWorkerSkipped). A
 // write stays the skipped test's, served to no test: it changes state that
-// belongs to the test that makes it. moved is the names of the reads moved,
-// sorted; with none, mp and table are returned as they are. mp is never
-// changed.
-func skippedReads(mp *models.Mapping, table map[string][]string, skipped map[string]string, decoded []*models.Mock) (*models.Mapping, map[string][]string, []string) {
+// belongs to the test that makes it. moved is each read moved, by name,
+// with the skipped test that lists it (the first by name when two do), which
+// a test's extra-call line names; with none, mp and table are returned as
+// they are. mp is never changed.
+func skippedReads(mp *models.Mapping, table map[string][]string, skipped map[string]string, decoded []*models.Mock) (*models.Mapping, map[string][]string, map[string]string) {
 	if mp == nil || len(skipped) == 0 {
 		return mp, table, nil
 	}
@@ -1744,8 +1745,11 @@ func skippedReads(mp *models.Mapping, table map[string][]string, skipped map[str
 		keyOf[tc.ID] = tc.Key
 	}
 	var worker []models.MockEntry
+	moved := map[string]string{}
 	out := make(map[string][]string, len(table))
-	for test, names := range table {
+	// By name, so a read two skipped tests list is named with the first.
+	for _, test := range slices.Sorted(maps.Keys(table)) {
+		names := table[test]
 		out[test] = names
 		if _, skip := skipped[test]; !skip {
 			continue
@@ -1754,6 +1758,9 @@ func skippedReads(mp *models.Mapping, table map[string][]string, skipped map[str
 		for _, n := range names {
 			if reads[n] {
 				worker = append(worker, models.MockEntry{Name: n, Key: keyOf[test]})
+				if _, ok := moved[n]; !ok {
+					moved[n] = test
+				}
 				continue
 			}
 			kept = append(kept, n)
@@ -1766,10 +1773,6 @@ func skippedReads(mp *models.Mapping, table map[string][]string, skipped map[str
 	slices.SortFunc(worker, func(a, b models.MockEntry) int { return strings.Compare(a.Name, b.Name) })
 	served := *mp
 	served.Worker = append(slices.Clone(mp.Worker), worker...)
-	moved := make([]string, len(worker))
-	for i, e := range worker {
-		moved[i] = e.Name
-	}
 	return &served, out, moved
 }
 

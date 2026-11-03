@@ -384,10 +384,10 @@ type scopeWorkerSetter interface {
 }
 
 // scopeSkippedReadsSetter installs which of a replay's worker scope are the
-// reads of tests its gate skips (models.ScopeTableReq.SkippedReads, proven
-// wire).
+// reads of tests its gate skips, each with the skipped test that lists it
+// (models.ScopeTableReq.SkippedReads, proven wire).
 type scopeSkippedReadsSetter interface {
-	SetScopeSkippedReads(ctx context.Context, names []string) error
+	SetScopeSkippedReads(ctx context.Context, reads map[string]string) error
 }
 
 // scopeNotRequiredSetter installs, by test, the recordings keploy's judging

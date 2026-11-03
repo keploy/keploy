@@ -107,7 +107,7 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	}
 	// So do the names of the worker scope that are the reads of tests the
 	// replay's gate skips.
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, []string{"mock-2"}, nil, nil, nil, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, map[string]string{"mock-2": "o::TestCRUD"}, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -117,7 +117,7 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 		`{"mappings":{"o::TestA":["mock-3"]},"pool":{},"given":{"o::TestA":[{"name":"given:nonce","value":"1761","source":"a_test.go:9"}]}}`,
 		`{"mappings":{"o::TestA":["mock-3","mock-4"]},"pool":{},"repeatReads":{"o::TestA":[{"name":"onboarding","mocks":["mock-3","mock-4"]}]}}`,
 		`{"mappings":{"o::TestA":["mock-3"]},"pool":{},"notRequired":{"o::TestA":["mock-3"]}}`,
-		`{"mappings":{"o::TestA":[]},"pool":{"o":["mock-2"]},"worker":{"o":["mock-2"]},"skipped_reads":["mock-2"]}`,
+		`{"mappings":{"o::TestA":[]},"pool":{"o":["mock-2"]},"worker":{"o":["mock-2"]},"skipped_reads":{"mock-2":"o::TestCRUD"}}`,
 	}
 	if !slices.Equal(bodies, want) {
 		t.Fatalf("posted %q, want %q", bodies, want)

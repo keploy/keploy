@@ -557,6 +557,10 @@ type UnmatchedCall struct {
 	// out: the run of one test process, or no worker).
 	Instance uint32 `json:"instance,omitempty" yaml:"instance,omitempty"`
 	Recorded int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
+	// SkippedReads mirrors MockMismatchReport.SkippedReads: for an extra
+	// call, the reads of tests the replay's gate skips that answered the
+	// same call in the test's window, by name, never a value.
+	SkippedReads []string `json:"skipped_reads,omitempty" yaml:"skipped_reads,omitempty"`
 	// BeforeSet says, under the proven switch, that the call was made before
 	// its test set's first test began, with no test's window open: the
 	// application's startup. Its Kind is MissOutsideTest. It is the set's,

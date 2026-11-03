@@ -117,10 +117,11 @@ type provenWire struct {
 	// for one it did not make (testEvidence). Empty when the table had none.
 	notRequired map[string]map[string]bool
 	// skippedReads is, in a replay, the names of the worker scope that
-	// keploy mock replay moved there from the tests its gate skips
-	// (models.ScopeTableReq.SkippedReads, SetScopeSkippedReads). Empty when
-	// the table had none.
-	skippedReads map[string]bool
+	// keploy mock replay moved there from the tests its gate skips, each
+	// with the skipped test that lists it (models.ScopeTableReq.SkippedReads,
+	// SetScopeSkippedReads): a test's extra-call line names that test
+	// (evidenceReason). Empty when the table had none.
+	skippedReads map[string]string
 	// staged: the replay's mocks are staged on the proxy, which serves them
 	// exactly (exact_proven.go). Once per session, and again when the CLI
 	// sends a pool slice naming a recording the staging did not read.
@@ -632,24 +633,41 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 // required to make it. None leaves the set none, never the previous set's.
 // SetScopeSkippedReads installs, for a replay, the names of its worker scope
 // (SetScopeWorker) that keploy mock replay moved there from the tests its
-// gate skips (models.ScopeTableReq.SkippedReads): reads the app made once and
-// kept, recorded in a skipped test's window. serveKeyWorker shows each to
-// the proxy as a skipped test's read, which also answers a call one more
-// than the open test's own recordings of it, at most once in the staging's
-// windows. None leaves the set none, never the previous set's.
-func (a *Agent) SetScopeSkippedReads(ctx context.Context, names []string) error {
+// gate skips (models.ScopeTableReq.SkippedReads), each with the skipped test
+// that lists it: reads the app made once and kept, recorded in a skipped
+// test's window. serveKeyWorker shows each to the proxy as a skipped test's
+// read, which also answers a call one more than the open test's own
+// recordings of it, at most once in the staging's windows; a test's
+// extra-call line names the test of each that answered it (evidenceReason).
+// None leaves the set none, never the previous set's.
+func (a *Agent) SetScopeSkippedReads(ctx context.Context, reads map[string]string) error {
 	if err := a.wire.lock(ctx); err != nil {
 		return err
 	}
 	defer a.wire.unlock()
-	reads := make(map[string]bool, len(names))
-	for _, n := range names {
-		reads[n] = true
-	}
+	reads = maps.Clone(reads)
 	a.provenMu.Lock()
 	a.proven.skippedReads = reads
 	a.provenMu.Unlock()
 	return nil
+}
+
+// evidenceText is evidenceReason with what the agent holds for it: in a
+// replay, the recordings of the calls the test never made and the skipped
+// test of each read the replay's gate skips; in a record, neither.
+func (a *Agent) evidenceText(id string, ev *models.ScopeEvidence, beganAt time.Time) string {
+	if !a.replaying() {
+		return evidenceReason(id, ev, nil, beganAt, nil)
+	}
+	return evidenceReason(id, ev, a.mocksFound(ev.Unconsumed), beganAt, a.skippedReadTests())
+}
+
+// skippedReadTests is a copy of the skipped test of each read the replay's
+// gate skips (SetScopeSkippedReads); nil when it skips none.
+func (a *Agent) skippedReadTests() map[string]string {
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	return maps.Clone(a.proven.skippedReads)
 }
 
 func (a *Agent) SetScopeWorker(ctx context.Context, worker map[string][]string) error {
@@ -1501,13 +1519,13 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		ev.Unread = true
 		outcome = models.ScopeOutcomeFailed
 	case !ev.Empty() && a.replaying():
-		ev.Reason = evidenceReason(id, ev, a.mocksFound(ev.Unconsumed), beganAt)
+		ev.Reason = a.evidenceText(id, ev, beganAt)
 		outcome = models.ScopeOutcomeFailed
 	case !ev.Empty():
 		// A record never fails a test: what keploy could not capture is
 		// kept for judging, as R0's capture_incomplete (design v14 §7.4),
 		// and the test's outcome is its own against real infra.
-		ev.Reason = evidenceReason(id, ev, nil, beganAt)
+		ev.Reason = a.evidenceText(id, ev, beganAt)
 	}
 	if len(uses) > 0 {
 		a.noteScopeReal(id, uses)
@@ -1694,11 +1712,7 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 		// keploy's text for the evidence, written again with the losses
 		// first: the same text in a record (whose evidence is the
 		// connections keploy could not capture) as in a replay.
-		var mocks map[string]*models.Mock
-		if a.replaying() {
-			mocks = a.mocksFound(ev.Unconsumed)
-		}
-		ev.Reason = evidenceReason(id, ev, mocks, beganAt)
+		ev.Reason = a.evidenceText(id, ev, beganAt)
 	default:
 		ev.Reason = strings.TrimSpace("keploy: " + judged.Text() + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
 	}
@@ -2162,8 +2176,10 @@ func (a *Agent) takeChargedMisses() []models.UnmatchedCall {
 // test whose call was made at or after it was made as the test ended (its
 // last call in flight, filed once the test stopped being served); one made
 // before it, before the test began, an extra call of another test's
-// included.
-func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock, beganAt time.Time) string {
+// included. skippedOf is, in a replay, the skipped test that lists each read
+// the replay's gate skips (SetScopeSkippedReads): an extra call's line names
+// the test of each that answered the call (extraCallText).
+func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock, beganAt time.Time, skippedOf map[string]string) string {
 	var what []string
 	for _, c := range ev.Incomplete {
 		what = append(what, "keploy could not capture a connection to "+c.Destination+" ("+c.Why+")")
@@ -2175,11 +2191,21 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		return !beganAt.IsZero() && !m.At.IsZero() && m.At.Before(beganAt)
 	}
 	// One call made more often than recorded is said once: how often the
-	// test made it, and how often it was recorded.
+	// test made it, and how often it was recorded; and, of the calls no
+	// recording of its own answered, which reads of skipped tests answered
+	// (models.UnmatchedCall.SkippedReads). Each of its misses names those
+	// that answered before it: the line names every one.
 	extra := map[string]int{}
+	skippedBy := map[string][]string{}
 	for _, m := range ev.Misses {
 		if m.Kind == models.MissExtraCall && !before(m) {
-			extra[missText(m)]++
+			call := missText(m)
+			extra[call]++
+			for _, n := range m.SkippedReads {
+				if !slices.Contains(skippedBy[call], n) {
+					skippedBy[call] = append(skippedBy[call], n)
+				}
+			}
 		}
 	}
 	for _, m := range ev.Misses {
@@ -2193,7 +2219,7 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		case models.MissExtraCall:
 			call := missText(m)
 			if n, ok := extra[call]; ok {
-				what = append(what, fmt.Sprintf("%s was called %d times, recorded %d", call, m.Recorded+n, m.Recorded))
+				what = append(what, extraCallText(call, m.Recorded, n, skippedBy[call], skippedOf))
 				delete(extra, call)
 			}
 		case models.MissOutsideTest:
@@ -2291,6 +2317,45 @@ func shellQuote(s string) string {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// extraCallText says one call a test made more often than it recorded: how
+// often it made it and how often it recorded it ("GET /x to h was called 3
+// times, recorded 2"). When reads of tests the replay's gate skips answered
+// it too (skipped, by name), it counts every call the test made: those its
+// own recordings answered, those each skipped test's reads answered, named
+// with that test (skippedOf: "a skipped test's" for one it does not know),
+// and the extra calls nothing answered: "GET /x to h was called 3 times: 1
+// recorded, 1 answered by o::TestCRUD's read mock-1 (that test is skipped),
+// 1 extra".
+func extraCallText(call string, recorded, extra int, skipped []string, skippedOf map[string]string) string {
+	if len(skipped) == 0 {
+		return fmt.Sprintf("%s was called %d times, recorded %d", call, recorded+extra, recorded)
+	}
+	var tests []string
+	byTest := map[string][]string{}
+	for _, n := range skipped {
+		t := skippedOf[n]
+		if _, ok := byTest[t]; !ok {
+			tests = append(tests, t)
+		}
+		byTest[t] = append(byTest[t], n)
+	}
+	parts := []string{fmt.Sprintf("%d recorded", recorded)}
+	for _, t := range tests {
+		names := byTest[t]
+		reads := "read"
+		if len(names) > 1 {
+			reads = "reads"
+		}
+		if t == "" {
+			parts = append(parts, fmt.Sprintf("%d answered by a skipped test's %s %s", len(names), reads, strings.Join(names, ", ")))
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%d answered by %s's %s %s (that test is skipped)", len(names), t, reads, strings.Join(names, ", ")))
+	}
+	parts = append(parts, fmt.Sprintf("%d extra", extra))
+	return fmt.Sprintf("%s was called %d times: %s", call, recorded+len(skipped)+extra, strings.Join(parts, ", "))
 }
 
 // missText names a miss: an HTTP or gRPC call by its method and target

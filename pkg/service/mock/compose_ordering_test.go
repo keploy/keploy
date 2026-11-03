@@ -76,7 +76,7 @@ type composeInstr struct {
 	table, pool, worker map[string][]string
 	// skippedReads are the names of worker that push said are the reads of
 	// tests the gate skips.
-	skippedReads []string
+	skippedReads map[string]string
 	// recordedWindows are the recorded test windows that push sent.
 	recordedWindows []models.TestWindow
 	given           map[string][]models.GivenValue
@@ -233,7 +233,7 @@ func (f *composeInstr) PushScopeTable(context.Context, map[string][]string) erro
 // scope, the names of it that are skipped tests' reads, the recorded test
 // windows, the recorded givens, the named repeated reads and the
 // not-required marks (ProvenTablePusher), and keeps them.
-func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, skippedReads []string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string) error {
+func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, skippedReads map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string) error {
 	f.table, f.pool, f.worker, f.skippedReads, f.recordedWindows, f.given, f.repeats, f.notRequired = table, pool, worker, skippedReads, windows, given, repeats, notRequired
 	return nil
 }

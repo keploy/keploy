@@ -450,8 +450,10 @@ type ScopeTableReq struct {
 	// Worker does, and also a request one more than the open test's own
 	// recordings of it, which the rest never answers: so a read answers at
 	// most as many requests in the windows as the skipped test recorded it.
-	// Absent from an older CLI and when the gate skips no test.
-	SkippedReads []string `json:"skipped_reads,omitempty"`
+	// Each name maps to the skipped test that lists it, which a test's
+	// extra-call line names (UnmatchedCall.SkippedReads). Absent from an
+	// older CLI and when the gate skips no test.
+	SkippedReads map[string]string `json:"skipped_reads,omitempty"`
 }
 
 // RepeatRead is one repeated read of a test (ScopeTableReq.RepeatReads): its

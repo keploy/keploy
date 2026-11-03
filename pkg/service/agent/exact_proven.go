@@ -144,7 +144,7 @@ func (a *Agent) serveKeyWorker(es coreAgent.ExactServer, key string) error {
 		for _, n := range w {
 			if inSlice[n] {
 				names = append(names, n)
-				if a.proven.skippedReads[n] {
+				if _, ok := a.proven.skippedReads[n]; ok {
 					skipped = append(skipped, n)
 				}
 			}

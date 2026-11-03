@@ -550,6 +550,19 @@ func ConsumedInCallView(db MockMemDb) ([]*models.Mock, bool) {
 	return answered, true
 }
 
+// ExactSkippedReadsReader is an optional MockMemDb extension of a store that
+// serves each test its own mocks exactly (the proven switch).
+// SkippedReadsAnswered returns the reads of tests the replay's gate skips
+// (keploy mock replay's worker: entries, models.ScopeTableReq.SkippedReads)
+// that answered a call in the open test's window, in the order they did
+// (none while no test is open): calls of the test its own recordings do not
+// count, so a matcher's extra-call miss names them beside how often the test
+// recorded the call (MockMismatchReport.SkippedReads). A matcher must only
+// read them: they answer nothing.
+type ExactSkippedReadsReader interface {
+	SkippedReadsAnswered() []*models.Mock
+}
+
 // ExactServedReader is an optional MockMemDb extension of a store that
 // serves each test its own mocks exactly (the proven switch), with a served
 // observer (the learn tracker's ServedMock). ServedInOpenTest returns, of one

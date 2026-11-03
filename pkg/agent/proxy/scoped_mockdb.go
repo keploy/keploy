@@ -585,6 +585,16 @@ var (
 	_ integrations.CallViewGoneTeller = (*scopedMockDb)(nil)
 )
 
+// SkippedReadsAnswered forwards the store's skipped tests' reads that
+// answered in the open test's window (integrations.ExactSkippedReadsReader),
+// none when it keeps none.
+func (s *scopedMockDb) SkippedReadsAnswered() []*models.Mock {
+	if sr, ok := s.MockMemDb.(integrations.ExactSkippedReadsReader); ok {
+		return sr.SkippedReadsAnswered()
+	}
+	return nil
+}
+
 // ServedInOpenTest forwards the store's stamp of its open test and account of
 // what it was served (integrations.ExactServedReader), 0 and none when it
 // keeps none, so a learn step on a scoped view reads the store's account as

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -57,10 +58,62 @@ func TestASkippedTestsReadAnswersOneCallMoreThanTheTestRecordedOnce(t *testing.T
 	if miss.MissKind != models.MissExtraCall {
 		t.Fatalf("the third GET /x missed as %q; want %q", miss.MissKind, models.MissExtraCall)
 	}
+	// It counts every /x the test made: one it recorded, and one the
+	// skipped test's read answered, named.
+	if miss.Recorded != 1 || !slices.Equal(miss.SkippedReads, []string{skipped.Name}) {
+		t.Fatalf("the third GET /x says recorded %d and skipped reads %v; want 1 and [%s]", miss.Recorded, miss.SkippedReads, skipped.Name)
+	}
 
 	mm.ServeExactPool(models.PoolKeyNone, nil)
 	if got, miss := httpMissCall(t, mm, "/x"); got != "worker" && got != "skipped" {
 		t.Fatalf("the GET /x between tests was answered %q (miss %+v); want the worker scope's", got, miss)
+	}
+}
+
+// An extra call names only the skipped tests' reads of its own call that
+// answered in its test's window: a skipped read of another call the test
+// made is no call of this one, so the count of /x never takes it, and a
+// worker: recording that answered the test is no skipped test's read.
+func TestAnExtraCallNamesOnlyTheSkippedReadsOfItsOwnCall(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	skippedX := workerProbe("mock-skipped-x", time.Second, "/x", "skipped-x")
+	skippedY := workerProbe("mock-skipped-y", 2*time.Second, "/y", "skipped-y")
+	workerZ := workerProbe("mock-worker-z", 2500*time.Millisecond, "/z", "worker-z")
+	own := workerProbe("mock-own-x", 4*time.Second, "/x", "own")
+	mm := stagedManager(t, nil, []*models.Mock{skippedX, skippedY, workerZ, own})
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-a", Start: exactT0.Add(3 * time.Second), End: exactT0.Add(5 * time.Second)}})
+	reads := []string{skippedX.Name, skippedY.Name}
+	mm.ServeExactWorkerSkipped(append([]string{workerZ.Name}, reads...), reads)
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	mm.ServeExactTest("test-a", []*models.Mock{roundMock(mm, own.Name)})
+	if !mm.ExactServing() || integrations.S12Background(mm) {
+		t.Fatal("precondition: test-a is not served exactly, by today's rules")
+	}
+
+	for _, c := range []struct{ path, want string }{{"/y", "skipped-y"}, {"/z", "worker-z"}, {"/x", "own"}, {"/x", "skipped-x"}} {
+		if got, miss := httpMissCall(t, mm, c.path); got != c.want {
+			t.Fatalf("test-a's GET %s was answered %q (miss %+v); want %q", c.path, got, miss, c.want)
+		}
+	}
+	// The window's account, in the order they answered, read from the
+	// manager or through a connection's view of it.
+	for _, r := range []integrations.ExactSkippedReadsReader{mm, &scopedMockDb{MockMemDb: mm}} {
+		if got := exactNames(r.SkippedReadsAnswered()); !slices.Equal(got, []string{skippedY.Name, skippedX.Name}) {
+			t.Fatalf("%T says skipped reads %v answered in test-a's window; want [%s %s]", r, got, skippedY.Name, skippedX.Name)
+		}
+	}
+	got, miss := httpMissCall(t, mm, "/x")
+	if got != "" || miss == nil || miss.MissKind != models.MissExtraCall {
+		t.Fatalf("test-a's third GET /x was answered %q (miss %+v); want an extra call", got, miss)
+	}
+	if !slices.Equal(miss.SkippedReads, []string{skippedX.Name}) {
+		t.Fatalf("the extra GET /x names skipped reads %v; want only /x's, [%s]", miss.SkippedReads, skippedX.Name)
+	}
+	// The next test's window starts with none.
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	mm.ServeExactTest("test-b", nil)
+	if got := mm.SkippedReadsAnswered(); len(got) != 0 {
+		t.Fatalf("test-b's window starts with skipped reads %v answered; want none", got)
 	}
 }
 
@@ -101,5 +154,39 @@ func TestASkippedReadTheWorkerScopeDoesNotHoldStaysHidden(t *testing.T) {
 	mm.ServeExactPool(models.PoolKeyNone, poolNames)
 	if got, miss := genericCall(t, mm, "PING"); got != "POOL" {
 		t.Fatalf("the PING between tests was answered %q (miss %+v); want the pool's POOL", got, miss)
+	}
+}
+
+// The window's account of the skipped reads that answered (an extra call's
+// count) holds only reads its view spent: a consume the staging refuses
+// answered nothing (a copy of the read from another staging, or one another
+// connection spent first), and a call of the test in flight as it ended,
+// settled once no test is open, counts in no window's account.
+func TestASkippedReadsAccountHoldsOnlyWhatTheOpenWindowSpent(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	skippedX := workerProbe("mock-skipped-x", time.Second, "/x", "skipped-x")
+	own := workerProbe("mock-own-x", 4*time.Second, "/x", "own")
+	mm := stagedManager(t, nil, []*models.Mock{skippedX, own})
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-a", Start: exactT0.Add(3 * time.Second), End: exactT0.Add(5 * time.Second)}})
+	mm.ServeExactWorkerSkipped([]string{skippedX.Name}, []string{skippedX.Name})
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	mm.ServeExactTest("test-a", []*models.Mock{roundMock(mm, own.Name)})
+
+	stale := roundMock(mm, skippedX.Name).ShallowCopy()
+	stale.Spec.ReqTimestampMock = stale.Spec.ReqTimestampMock.Add(time.Hour)
+	if v := mm.exactConsume(stale, true); v != exactRefused {
+		t.Fatalf("a copy of the skipped read the staging does not hold was %v; want refused", v)
+	}
+	if got := exactNames(mm.SkippedReadsAnswered()); len(got) != 0 {
+		t.Fatalf("after a refused consume, skipped reads %v answered in test-a's window; want none", got)
+	}
+
+	inTest := mm.exactView()
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	if v := mm.exactConsumeAt(roundMock(mm, skippedX.Name), true, &roundGuard{free: true, readIn: inTest}, nil, nil); v != exactServed {
+		t.Fatalf("test-a's call in flight as it ended was %v; want the skipped read served for the windows", v)
+	}
+	if got := exactNames(mm.SkippedReadsAnswered()); len(got) != 0 {
+		t.Fatalf("with no test open, skipped reads %v answered; want none", got)
 	}
 }

@@ -278,6 +278,13 @@ type MockMismatchReport struct {
 	// made. Empty without the switch.
 	MissKind string
 	Recorded int
+	// SkippedReads names, for a MissExtraCall, the reads of tests the
+	// replay's gate skips (keploy mock replay's worker: entries,
+	// models.ScopeTableReq.SkippedReads) that answered the same call in the
+	// open test's window, in the order they did: calls of the test that
+	// Recorded does not count, which its extra-call line counts. Set by the
+	// HTTP matcher, the only one a skipped read answers.
+	SkippedReads []string
 	// Differs names the compared fields in which the call differs from the
 	// closest recording (host, header.<name>, body.<path>, ...), never a
 	// value: the reason keploy gives for a failed test names them (proven

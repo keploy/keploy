@@ -175,6 +175,10 @@ type exactView struct {
 	// mu (MockManager.AnswerRepeatRead).
 	repeats       map[models.RepeatReadMark][]int
 	answeredAgain map[models.RepeatReadMark]bool
+	// skippedSpent are, on a test view, the skipped tests' reads
+	// (skippedReads) that answered a call in its window, in the order they
+	// did (SkippedReadsAnswered). Written under mu.
+	skippedSpent []*models.Mock
 	// spent are the staged mocks this view shows that a parser consumed
 	// through a delete door in its test, or a protocol-phase mock one
 	// evicted outside every test: gone until the view changes. The staged
@@ -2090,6 +2094,21 @@ func consumedTestMocksIn(v *exactView) []*models.Mock {
 
 var _ integrations.ExactConsumedReader = (*MockManager)(nil)
 
+// SkippedReadsAnswered implements integrations.ExactSkippedReadsReader: the
+// skipped tests' reads that answered a call in the open test's window, in
+// the order they did; none while no test is open.
+func (m *MockManager) SkippedReadsAnswered() []*models.Mock {
+	v := m.exactView()
+	if v == nil || v.test == "" {
+		return nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return append([]*models.Mock(nil), v.skippedSpent...)
+}
+
+var _ integrations.ExactSkippedReadsReader = (*MockManager)(nil)
+
 // ServedInOpenTest implements integrations.ExactServedReader: the open
 // test's view's stamp (exactView.stamp) and every mock a parser was served
 // while the view was installed, of any lifetime and through any door, once
@@ -3473,6 +3492,16 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool,
 			return exactRefused, wait, nil
 		}
 		verdict := m.consumeOutside(mk, worker)
+		// A skipped test's read the open test's call spent is a call of
+		// that test's its own recordings do not count: its extra-call miss
+		// counts it (SkippedReadsAnswered). A skipped read is one of the
+		// worker scope's, so it is spent here only by a call read in a
+		// test's window (one read between tests spends nothing, above); a
+		// pool view's list, a call in flight as its test ended, is read by
+		// no one.
+		if verdict == exactServed && v.isSkippedRead(mk.Name) {
+			v.skippedSpent = append(v.skippedSpent, mk)
+		}
 		v.mu.Unlock()
 		if verdict != exactServed {
 			return verdict, nil, nil
