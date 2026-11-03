@@ -520,8 +520,9 @@ func TestMySQLLogsAnExecuteMatchedOnItsValuesAloneByThePoolsPlaces(t *testing.T)
 }
 
 // A strict miss on a statement of another template that keeps a literal
-// the rewriter does not reach (an INTO OUTFILE path) shows neither its
-// statement nor its template.
+// the parser's walk does not reach (an INTO OUTFILE path) shows its
+// template redacted, and its statement with every literal redacted where
+// it is written, the path included.
 func TestMySQLStrictMissRedactsATemplateThatKeepsALiteral(t *testing.T) {
 	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
 	// Of the same structure (sameQueryStructure): another path.
@@ -549,7 +550,8 @@ func TestMySQLStrictMissRedactsATemplateThatKeepsALiteral(t *testing.T) {
 	if !sawTemplate {
 		t.Fatalf("the diffs %+v: want the template redacted", miss.fieldDiffs)
 	}
-	if got := miss.places.liveStatement(req.Message.(*mysql.QueryPacket).Query); got != valueRedacted {
-		t.Fatalf("the summary shows %q; want the statement redacted whole", got)
+	const want = "SELECT name FROM users WHERE org = '(redacted)' AND api_key = '(redacted)' INTO OUTFILE '(redacted)'"
+	if got := miss.places.liveStatement(req.Message.(*mysql.QueryPacket).Query); got != want {
+		t.Fatalf("the summary shows %q; want %q", got, want)
 	}
 }

@@ -147,7 +147,7 @@ func TestRedactedPlacesOfAPool(t *testing.T) {
 	byKey := queryRecorded("by-key", "SELECT name FROM users WHERE api_key = 'xq7Lm2Pw9Rt4Zk' AND org = 'acme'", redactedNoise)
 	plain := queryRecorded("plain", "SELECT name FROM users WHERE api_key = 'k1' AND org = 'acme'", nil)
 	live := "SELECT name FROM users WHERE api_key = 'live' AND org = 'globex'"
-	want := "select `name` from users where api_key = '(redacted)' and org = 'globex'"
+	want := "SELECT name FROM users WHERE api_key = '(redacted)' AND org = 'globex'"
 	for _, pool := range [][]*models.Mock{{byKey, plain}, {plain, byKey}} {
 		if got := poolPlaces(pool).liveStatement(live); got != want {
 			t.Errorf("pool %s, %s: %q, want %q", pool[0].Name, pool[1].Name, got, want)
@@ -173,6 +173,14 @@ func TestRedactedPlacesOfTheLiveCommand(t *testing.T) {
 	const recorded = "SELECT /* app=web */ name FROM users WHERE org = 'acme' AND k = '" + redactedPlaceholder + "'"
 	p := queryPlaces(recorded, util.NewNoiseChecker(redactedNoise))
 	cast := queryPlaces("SELECT CAST(name AS CHAR(10)) FROM users WHERE org = 'acme' AND k = '"+redactedPlaceholder+"'", util.NewNoiseChecker(redactedNoise))
+	lowerP := queryPlaces("SELECT /* app=web */ name FROM users WHERE org = ? AND k = '"+redactedPlaceholder+"'", util.NewNoiseChecker(redactedNoise))
+	const liveNumber = "4111111111111111"
+	signed := queryPlaces("SELECT name FROM users WHERE org = 'acme' AND n = -1234567890123456", util.NewNoiseChecker([]string{"^1234567890123456$"}))
+	limit := queryPlaces("SELECT name FROM users LIMIT 10 OFFSET 7", util.NewNoiseChecker([]string{"^7$"}))
+	special := queryPlaces("SELECT name FROM users WHERE org = 'acme' /*!50000 AND k = '"+redactedPlaceholder+"' */", util.NewNoiseChecker(redactedNoise))
+	plainKey := queryPlaces("SELECT name FROM users WHERE org = 'acme' AND k = '"+redactedPlaceholder+"'", util.NewNoiseChecker(redactedNoise))
+	setVars := queryPlaces("SET @y = 'k1', @x = '"+redactedPlaceholder+"'", util.NewNoiseChecker(redactedNoise))
+	midComment := queryPlaces("SELECT name /* k="+redactedPlaceholder+" */ FROM users WHERE k = '"+redactedPlaceholder+"'", util.NewNoiseChecker(redactedNoise))
 	for _, tc := range []struct {
 		name   string
 		places redactedPlaces
@@ -183,27 +191,69 @@ func TestRedactedPlacesOfTheLiveCommand(t *testing.T) {
 		{"no statement", p, "", ""},
 		{"the recorded template: the redacted literal alone, comments kept", p,
 			"SELECT /* app=api */ name FROM users WHERE org = 'globex' AND k = '" + liveSecret + "'",
-			"select /* app=api */ `name` from users where org = 'globex' and k = '(redacted)'"},
+			"SELECT /* app=api */ name FROM users WHERE org = 'globex' AND k = '(redacted)'"},
 		{"another template: every literal, comments dropped", p,
 			"SELECT /* app=api */ name FROM users WHERE k = '" + liveSecret + "' AND org = 'globex'",
-			"select `name` from users where k = '(redacted)' and org = '(redacted)'"},
+			"SELECT   name FROM users WHERE k = '(redacted)' AND org = '(redacted)'"},
 		{"a live statement the parser cannot read", p, "SELEC name FRM users WHERE k = '" + liveSecret + "'", valueRedacted},
 		{"the recording's comment redacted", queryPlaces("SELECT /* u="+redactedPlaceholder+" */ name FROM users WHERE k = 'acme'", util.NewNoiseChecker(redactedNoise)),
-			"SELECT /* u=" + liveSecret + " */ name FROM users WHERE k = 'acme'", "select `name` from users where k = '(redacted)'"},
+			"SELECT /* u=" + liveSecret + " */ name FROM users WHERE k = 'acme'", "SELECT   name FROM users WHERE k = '(redacted)'"},
 		{"whole", redactedPlaces{statement: true, whole: true}, "SELECT name FROM t_" + liveSecret, valueRedacted},
 		{"another template: a string DEFAULT the rewriter does not reach", p,
-			"CREATE TABLE tokens (k TEXT DEFAULT '" + liveSecret + "')", valueRedacted},
+			"CREATE TABLE tokens (k TEXT DEFAULT '" + liveSecret + "')", "CREATE TABLE tokens (k TEXT DEFAULT '(redacted)')"},
 		{"another template: a hex DEFAULT the rewriter does not reach", p,
-			"CREATE TABLE tokens (k TEXT DEFAULT x'736b394c495645')", valueRedacted},
+			"CREATE TABLE tokens (k TEXT DEFAULT x'736b394c495645')", "CREATE TABLE tokens (k TEXT DEFAULT '(redacted)')"},
 		{"another template: a hex number DEFAULT the rewriter does not reach", p,
-			"CREATE TABLE tokens (k INT DEFAULT 0x736b394c)", valueRedacted},
+			"CREATE TABLE tokens (k INT DEFAULT 0x736b394c)", "CREATE TABLE tokens (k INT DEFAULT '(redacted)')"},
 		{"another template: a numeric DEFAULT the rewriter does not reach", p,
-			"CREATE TABLE tokens (k BIGINT DEFAULT 4111111111111111)", valueRedacted},
+			"CREATE TABLE tokens (k BIGINT DEFAULT 4111111111111111)", "CREATE TABLE tokens (k BIGINT DEFAULT '(redacted)')"},
 		{"another template: a decimal DEFAULT the rewriter does not reach", p,
-			"CREATE TABLE tokens (k DOUBLE DEFAULT 4111.1111)", valueRedacted},
+			"CREATE TABLE tokens (k DOUBLE DEFAULT 4111.1111)", "CREATE TABLE tokens (k DOUBLE DEFAULT '(redacted)')"},
 		{"the recorded template with a number in no literal: the redacted literal alone", cast,
 			"SELECT CAST(name AS CHAR(10)) FROM users WHERE org = 'globex' AND k = '" + liveSecret + "'",
-			"select cast(`name` as CHAR(10)) from users where org = 'globex' and k = '(redacted)'"},
+			"SELECT CAST(name AS CHAR(10)) FROM users WHERE org = 'globex' AND k = '(redacted)'"},
+		// The statement keeps the client's text: its keywords' case, its
+		// spacing, its ? markers and its comments, only the literal at the
+		// redacted place replaced where it is written.
+		{"the recorded template, written in another case", lowerP,
+			"select /* app=api */ name\n  from users where org = ? AND k='" + liveSecret + "'",
+			"select /* app=api */ name\n  from users where org = ? AND k='(redacted)'"},
+		{"another template: every literal where written, ? kept", p,
+			"Select name From users Where k = ? And org = \"" + liveSecret + "\" And n = -42 Limit 5",
+			"Select name From users Where k = ? And org = '(redacted)' And n = -'(redacted)' Limit '(redacted)'"},
+		{"another template: a comment between tokens dropped, the tokens kept apart", p,
+			"SELECT name FROM users WHERE k='" + liveSecret + "'/* u=" + liveSecret + " */AND org = 'acme'",
+			"SELECT name FROM users WHERE k='(redacted)' AND org = '(redacted)'"},
+		{"another template: a comment to the end of its line dropped", p,
+			"SELECT name FROM users -- u=" + liveSecret + "\nWHERE k = 'acme'",
+			"SELECT name FROM users  WHERE k = '(redacted)'"},
+		{"a literal written with a sign: redacted where written, the sign kept", signed,
+			"SELECT name FROM users WHERE org = 'globex' AND n = -" + liveNumber,
+			"SELECT name FROM users WHERE org = 'globex' AND n = -'(redacted)'"},
+		{"a literal the parser reads before one written ahead of it: redacted wherever its value is written", limit,
+			"SELECT name FROM users LIMIT 3 OFFSET 9",
+			"SELECT name FROM users LIMIT 3 OFFSET '(redacted)'"},
+		{"the recording's /*! */ comment redacted: every literal, the comment dropped", special,
+			"SELECT name FROM users WHERE org = 'globex' /*!50000 AND k = '" + liveSecret + "' */",
+			"SELECT name FROM users WHERE org = '(redacted)'  "},
+		{"the recorded template, the redacted literal in a /*! */ comment the parser reads: every literal, the comment dropped", plainKey,
+			"SELECT name FROM users WHERE org = 'globex' /*!50000 AND k = '" + liveSecret + "' */",
+			"SELECT name FROM users WHERE org = '(redacted)'  "},
+		{"the recorded template, the redacted literal in a /*! */ comment, its value written elsewhere: every literal", cast,
+			"SELECT CAST(name AS CHAR(10)) FROM users WHERE org = 'globex' /*!50000 AND k = 10 */",
+			"SELECT CAST(name AS CHAR('(redacted)')) FROM users WHERE org = '(redacted)'  "},
+		{"the recorded template, the redacted literal written as two strings, its value written elsewhere: every literal", setVars,
+			"SET @y = '" + liveSecret + "', @x = 'sk9LIVE' 'secret77'",
+			"SET @y = '(redacted)', @x = '(redacted)' '(redacted)'"},
+		{"another template: a national string DEFAULT the rewriter does not reach", p,
+			"CREATE TABLE tokens (k TEXT DEFAULT N'" + liveSecret + "')", "CREATE TABLE tokens (k TEXT DEFAULT '(redacted)')"},
+		{"another template: a float DEFAULT the rewriter does not reach", p,
+			"CREATE TABLE tokens (k DOUBLE DEFAULT 4.1e15)", "CREATE TABLE tokens (k DOUBLE DEFAULT '(redacted)')"},
+		{"another template: a bit DEFAULT the rewriter does not reach", p,
+			"CREATE TABLE tokens (k BIT DEFAULT b'10110111')", "CREATE TABLE tokens (k BIT DEFAULT '(redacted)')"},
+		{"a recorded comment after the first token redacted: every literal, comments dropped", midComment,
+			"SELECT name /* k=" + liveSecret + " */ FROM users WHERE k = '" + liveSecret + "'",
+			"SELECT name   FROM users WHERE k = '(redacted)'"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.places.liveStatement(tc.live); got != tc.want {
@@ -262,6 +312,9 @@ func TestRedactedPlacesOfFieldDiffs(t *testing.T) {
 		{"a literal, another template", literalAt1, "SELECT name FROM users WHERE k = 'x'",
 			[]string{"body.query.literals.0", "body.query.literals.1"},
 			[]string{"body.query.template"}},
+		{"a literal, a live statement the parser cannot read", literalAt1, "SELEC name FRM users WHERE k = 'x'",
+			[]string{"body.query.template", "body.query.literals.0"},
+			nil},
 		{"a literal, another template keeping a literal in it", literalAt1, "SELECT name FROM users WHERE k = 'x' INTO OUTFILE '/tmp/x'",
 			[]string{"body.query.template", "body.query.literals.0"},
 			nil},

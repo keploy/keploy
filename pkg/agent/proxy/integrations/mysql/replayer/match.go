@@ -390,6 +390,12 @@ type matchOptions struct {
 	// refused are the copies whose consume the store refused on this
 	// command's earlier matches (matchCommand): the scan passes over them.
 	refused map[*models.Mock]struct{}
+	// restaged reports whether the replay staged a test set again after the
+	// command's mark (integrations.HoldToRound): the store, held to the
+	// mark, then reads nothing, and the pool the command was decided against
+	// cannot be read for the places its logs show it by. Nil for a store
+	// that marks no round.
+	restaged func() bool
 }
 
 // matchCommand matches one live command-phase request against the mock pool.
@@ -423,7 +429,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		own = ownCommands.Of(held, commandType(req.PacketBundle))
 		return len(ownRepeats(ctx, req, held, own, decodeCtx, noiseEngine, userBodyNoise, 1)) > 0
 	})
-	var opts matchOptions
+	opts := matchOptions{restaged: restaged}
 	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, decodeCtx, noiseEngine, userBodyNoise, opts)
 	// A consume the store refused (integrations.ConsumeRefused: under exact
 	// serving, a test mock that already answered, perhaps on another
@@ -1062,9 +1068,14 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// (poolPlaces), so a line that compares the live statement with one
 	// candidate, or a report that names one recording, keeps hidden what
 	// another recording hid. Read once, by the first line that shows the
-	// live statement or its bound values, or by the miss; a pool that
-	// cannot be read redacts the command whole (everyPlace). The scan writes such lines for the
-	// commands that carry a statement alone, and reading the pool in the
+	// live statement or its bound values, or by the miss. A pool that
+	// cannot be read redacts the command whole (everyPlace): one whose read
+	// fails, one a store that could not hold the command to its mark reads
+	// nothing of (integrations.UnheldWhy), and one read after the replay
+	// staged a test set again under the mark, which the held store reads
+	// nothing of (opts.restaged, checked after the read, as a staging moves
+	// before it changes what a read shows). The scan writes such lines for
+	// the commands that carry a statement alone, and reading the pool in the
 	// scan would replace the tiers it walks: with debug lines on, those
 	// commands read it here, before the scan, and no other command does.
 	var placesLogged *redactedPlaces
@@ -1074,7 +1085,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				*opts.placesRead++
 			}
 			p := everyPlace
-			if pool != nil || loadPool() == nil {
+			if (pool != nil || loadPool() == nil) && integrations.UnheldWhy(mockDb) == "" && (opts.restaged == nil || !opts.restaged()) {
 				p = poolPlaces(pool)
 			}
 			placesLogged = &p

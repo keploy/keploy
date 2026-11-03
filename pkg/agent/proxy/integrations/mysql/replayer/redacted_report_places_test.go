@@ -347,6 +347,7 @@ func TestMySQLReadsThePoolsPlacesOnlyForACommandThatShowsItsStatement(t *testing
 		{"a COM_QUERY answered, debug off", query(recorded), false, true, 0},
 		{"a COM_QUERY answered, debug on", query(recorded), true, true, 1},
 		{"a COM_QUERY missed, debug off", query("SELECT name FROM users WHERE api_key = '" + liveSecret + "' AND id = 1"), false, false, 1},
+		{"a COM_QUERY missed, debug on", query("SELECT name FROM users WHERE api_key = '" + liveSecret + "' AND id = 1"), true, false, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := &fakeMockDb{session: []*models.Mock{pingMock, queryRecorded("mock-users", recorded, redactedNoise)}}
@@ -354,7 +355,7 @@ func TestMySQLReadsThePoolsPlacesOnlyForACommandThatShowsItsStatement(t *testing
 			if tc.debug {
 				level = zapcore.DebugLevel
 			}
-			core, _ := observer.New(level)
+			core, logs := observer.New(level)
 			ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
 			reads := 0
 			_, ok, miss, err := matchCommandWith(ctx, zap.New(core), tc.req, db, newDecodeCtx(), nil, nil, matchOptions{placesRead: &reads})
@@ -364,6 +365,101 @@ func TestMySQLReadsThePoolsPlacesOnlyForACommandThatShowsItsStatement(t *testing
 			if reads != tc.reads {
 				t.Errorf("the command read the pool's places %d time(s); want %d", reads, tc.reads)
 			}
+			// A store that marks no round is read as it is: the lines
+			// show the statement by the pool's places, not whole redacted.
+			const shown = "SELECT name FROM users WHERE api_key = '(redacted)' AND id = '(redacted)'"
+			if lt := logText(logs.All()); tc.debug && !tc.answered && !strings.Contains(lt, shown) {
+				t.Errorf("the miss's lines do not show %q:\n%s", shown, lt)
+			}
 		})
+	}
+}
+
+// A strict miss redacts the live command by the pool's places too when the
+// recording that redacted the value is none the miss names: neither the
+// closest, nor the one strict rejected first.
+func TestMySQLStrictMissRedactsByARecordingItDoesNotName(t *testing.T) {
+	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
+	keyed := func(key, org string) string {
+		return "SELECT name FROM users WHERE api_key = '" + key + "' AND org = '" + org + "'"
+	}
+	rejected := queryRecorded("mock-rejected", keyed("k0", "acme"), nil)
+	closest := queryRecorded("mock-closest", keyed("k1", "initech"), nil)
+	other := queryRecorded("mock-other", "SELECT email FROM accounts WHERE token = '"+redactedPlaceholder+"'", redactedNoise)
+	db := &fakeMockDb{session: []*models.Mock{rejected, closest, other}}
+	live := keyed(liveSecret, "globex")
+	req := mysql.Request{PacketBundle: mysql.PacketBundle{
+		Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 80}, Type: "COM_QUERY"},
+		Message: &mysql.QueryPacket{Query: live},
+	}}
+	_, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, newDecodeCtx(), mocknoise.New(mysqlNoiseAdapter{}, false, true), nil)
+	if err != nil || ok || miss == nil || miss.strictRejected == 0 {
+		t.Fatalf("ok %v, err %v, miss %+v: want a strict miss", ok, err, miss)
+	}
+	if miss.closestMock == other.Name || placesOf(rejected).redactsAny() || placesOf(closest).redactsAny() {
+		t.Fatalf("precondition: the miss names %q; want a recording that redacted nothing", miss.closestMock)
+	}
+	if shown := miss.places.liveStatement(live); strings.Contains(shown, liveSecret) {
+		t.Errorf("the report of a strict miss naming %q shows the live value %s redacted: %s", miss.closestMock, other.Name, shown)
+	}
+	for _, d := range miss.fieldDiffs {
+		if strings.Contains(d.Actual, liveSecret) {
+			t.Errorf("the field diff %s shows the live value: %q", d.Path, d.Actual)
+		}
+	}
+}
+
+// The miss of an EXECUTE no recording answers, whose statement every
+// recording keeps, shows its bound values by the pool's places: another
+// statement's recording redacted the value, and the one the miss names
+// none.
+func TestMySQLExecuteMissRedactsByAnotherStatementsRecording(t *testing.T) {
+	const update = "UPDATE orders SET created_at = ? WHERE idmp_key = ?"
+	plain := executedMock("mock-execute-plain", 1, stmtT0.Add(time.Millisecond), "A: 201", ordersInsert, "k1", "2026-10-14 12:00:10")
+	other := executedMock("mock-execute-other", 9, stmtT0.Add(2*time.Millisecond), "D: rows", "SELECT name FROM users WHERE api_key = ?", redactedPlaceholder)
+	other.Noise = redactedNoise
+	db := &fakeMockDb{session: []*models.Mock{plain, other}}
+	req := liveExecute(liveSecret, "k1")
+	dctx := newDecodeCtx()
+	dctx.StmtIDToQuery[33] = update
+	dctx.PreparedStatements[33] = &mysql.StmtPrepareOkPacket{StatementID: 33, NumParams: 2}
+	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
+	resp, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, nil, nil)
+	if err != nil || ok || miss == nil {
+		t.Fatalf("ok %v, err %v, resp %v: want a miss", ok, err, resp)
+	}
+	if miss.closestMock == other.Name || strings.Contains(miss.why, "lost") {
+		t.Fatalf("precondition: the miss %+v names %q; want the final miss, naming no recording that redacted", miss, miss.closestMock)
+	}
+	live := req.Message.(*mysql.StmtExecutePacket).Parameters
+	if shown := formatExecParams(miss.places.liveParams(live)); strings.Contains(shown, liveSecret) {
+		t.Errorf("the report of a miss naming %q shows the live bound value %s redacted: %s", miss.closestMock, other.Name, shown)
+	}
+}
+
+// The miss of an EXECUTE beside EXECUTEs that lost their statement shows its
+// bound values by the pool's places as well as by the lost recordings':
+// a lost recording redacted bound value 0, another statement's recording
+// bound value 1.
+func TestMySQLLostStatementMissRedactsByThePoolBesideTheLostRecordings(t *testing.T) {
+	db, execA, execB := orderTests("")
+	execB.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket).Parameters[0].Value = redactedPlaceholder
+	execB.Noise = redactedNoise
+	execD := executedMock("mock-execute-d", 9, execB.Spec.ReqTimestampMock.Add(time.Millisecond), "D: rows", "SELECT name FROM users WHERE org = ? AND api_key = ?", "acme", redactedPlaceholder)
+	execD.Noise = redactedNoise
+	db.session = append(db.session, execD)
+	const liveOther = "sk9LIVEother88"
+	params := []string{liveSecret, liveOther}
+	resp, ok, miss := matchLiveOrder(t, db, params...)
+	if ok {
+		t.Fatalf("served %v", resp)
+	}
+	if miss == nil || !strings.Contains(miss.why, "does not answer it with "+execA.Name) || !strings.Contains(miss.why, execB.Name) {
+		t.Fatalf("the miss %+v is not the one refusing %s, naming %s", miss, execA.Name, execB.Name)
+	}
+	live := liveExecute(params...).Message.(*mysql.StmtExecutePacket).Parameters
+	shown := formatExecParams(miss.places.liveParams(live))
+	if strings.Contains(shown, liveSecret) || strings.Contains(shown, liveOther) {
+		t.Errorf("the report of a miss naming %q shows a live bound value a recording of the pool redacted: %s", miss.closestMock, shown)
 	}
 }
