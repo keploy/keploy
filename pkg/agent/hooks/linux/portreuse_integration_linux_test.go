@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/agent/proxy"
 )
@@ -21,11 +22,16 @@ import (
 // listener ln (at port) from one source port, while nothing accepts: X, a
 // call to dstX, connects, writes "x" and resets (SO_LINGER 0); Y, a call to
 // dstY from another process's stamp, then connects from X's port and writes
-// "y". It returns that port.
+// "y". It returns that port, which testnet.SharedPort holds for both: no
+// other socket takes it while X has it or between X's reset and Y's bind.
 func reusedPortConns(t *testing.T, h *Hooks, port int, dstX, dstY structs.DestInfo) int {
 	t.Helper()
-	x, closeX := redirectedTo(t, h, false, 0, dstX)
-	p := connectTo(t, x, port)
+	p := testnet.SharedPort(t)
+	x, closeX := redirectedTo(t, h, false, p, dstX)
+	if got := connectTo(t, x, port); got != p {
+		t.Fatalf("X's source port %d, want the held %d", got, p)
+	}
+	noOtherSocketTakes(t, false, p)
 	if _, err := unix.Write(x, []byte("x")); err != nil {
 		t.Fatal(err)
 	}
@@ -33,6 +39,7 @@ func reusedPortConns(t *testing.T, h *Hooks, port int, dstX, dstY structs.DestIn
 		t.Fatal(err)
 	}
 	closeX()
+	noOtherSocketTakes(t, false, p)
 	y, _ := redirectedTo(t, h, false, p, dstY)
 	if got := connectTo(t, y, port); got != p {
 		t.Fatalf("Y's source port %d, want X's %d", got, p)
