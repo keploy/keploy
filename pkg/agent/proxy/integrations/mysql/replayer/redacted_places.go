@@ -2,6 +2,7 @@ package replayer
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -193,7 +194,30 @@ func (p redactedPlaces) liveStatement(sql string) (out string) {
 		}
 		return true
 	}, nil)
+	if all && literalTokens(parser, sql) > n+1 {
+		// A literal the rewriter does not reach (a column's DEFAULT) would
+		// be shown as the client sent it.
+		return valueRedacted
+	}
 	return sqlparser.String(rewritten)
+}
+
+// literalTokens is how many literals the tokenizer reads in sql (a number,
+// a string, a hex or bit value), the most there are when it cannot read it.
+func literalTokens(parser *sqlparser.Parser, sql string) int {
+	tkn := parser.NewStringTokenizer(sql)
+	n := 0
+	for {
+		switch typ, _ := tkn.Scan(); typ {
+		case 0:
+			return n
+		case sqlparser.LEX_ERROR:
+			return math.MaxInt
+		case sqlparser.STRING, sqlparser.NCHAR_STRING, sqlparser.INTEGRAL, sqlparser.FLOAT, sqlparser.DECIMAL,
+			sqlparser.HEXNUM, sqlparser.HEX, sqlparser.BIT_LITERAL:
+			n++
+		}
+	}
 }
 
 // liveParams is params as a report shows them: each value at a redacted
@@ -289,10 +313,31 @@ func liveStatementOf(b *mysql.PacketBundle, executeQuery string) string {
 	return executeQuery
 }
 
-// loggedLive is the live statement actual as a log of its comparison with
-// the recorded statement expected shows it: its value at each place of
-// expected the obfuscator redacted (by the recording's patterns noise) is
-// redacted.
-func loggedLive(expected, actual string, noise []string) string {
-	return queryPlaces(expected, util.NewNoiseChecker(noise)).liveStatement(actual)
+// poolPlaces are the places any recording of pool redacted (placesOf), all
+// of them together: the replay's logs show the live statement by these,
+// whichever candidate a line compares it with, so a log line carries no
+// value the recording it names left in but another recording hid.
+func poolPlaces(pool []*models.Mock) redactedPlaces {
+	var p redactedPlaces
+	for _, m := range pool {
+		p = p.or(placesOf(m))
+	}
+	return p
+}
+
+// everyPlace redacts a live statement whole: the places a log reads when
+// the pool's cannot be read.
+var everyPlace = redactedPlaces{statement: true, whole: true}
+
+// logPlaces reads the places a log line shows the live statement by
+// (poolPlaces), once per command.
+type logPlaces func() redactedPlaces
+
+// live is the live statement sql as a log line shows it: by the places r
+// reads, or whole redacted when there is no r.
+func (r logPlaces) live(sql string) string {
+	if r == nil {
+		return everyPlace.liveStatement(sql)
+	}
+	return r().liveStatement(sql)
 }

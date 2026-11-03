@@ -289,3 +289,144 @@ func TestMySQLStrictMissRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
 		}
 	})
 }
+
+// loggedAt is the field key of every log entry of message msg, as text.
+func loggedAt(entries []observer.LoggedEntry, msg, key string) []string {
+	var out []string
+	for _, e := range entries {
+		if e.Message == msg {
+			out = append(out, fmt.Sprint(e.ContextMap()[key]))
+		}
+	}
+	return out
+}
+
+// The replay's logs show the live statement by every place any recording
+// of the pool redacted, whichever recording a line compares it with: a
+// line of its comparison with a recording that redacted nothing, the
+// parser's error on it, an answer the replay made up for it.
+func TestMySQLLogsRedactTheLiveValueAtAPlaceAnyRecordingRedacted(t *testing.T) {
+	keyed := func(key, org string) string {
+		return "SELECT name FROM users WHERE api_key = '" + key + "' AND org = '" + org + "'"
+	}
+	redacting := func(m *models.Mock) *models.Mock {
+		m.Noise = redactedNoise
+		return m
+	}
+	for _, tc := range []struct {
+		name   string
+		pool   []*models.Mock
+		send   func(c mysqlClient)
+		strict bool
+		// lines are log lines of the live value: message, then key.
+		lines [][2]string
+	}{{
+		name: "its comparison with a recording that redacted nothing",
+		pool: []*models.Mock{
+			queryRecorded("mock-redacted", keyed(redactedPlaceholder, "acme"), redactedNoise),
+			queryRecorded("mock-plain", keyed("k1", "initech"), nil),
+		},
+		send: func(c mysqlClient) {
+			c.send(0, append([]byte{mysql.COM_QUERY}, keyed(liveSecret, "globex")...))
+		},
+		strict: true,
+		lines:  [][2]string{{"query matched with drifted inline literals", "actual query"}},
+	}, {
+		name: "the parser's error on it",
+		pool: []*models.Mock{
+			queryRecorded("mock-update", "UPDATE users SET api_key = '"+redactedPlaceholder+"' WHERE id = 1", redactedNoise),
+			queryRecorded("mock-select", "SELECT name FROM users WHERE id = 1", nil),
+		},
+		send: func(c mysqlClient) {
+			c.send(0, append([]byte{mysql.COM_QUERY}, "UPDATE users SET api_key = 1 '"+liveSecret+"'"...))
+		},
+		lines: [][2]string{{"failed to get actual query structure", "error"}, {"failed to get actual query structure", "actual Query"},
+			{"actual query is dml but expected is not", "actual query"}},
+	}, {
+		name: "an answer the replay made up for it",
+		pool: []*models.Mock{queryRecorded("mock-users", keyed(redactedPlaceholder, "acme"), redactedNoise)},
+		send: func(c mysqlClient) {
+			c.send(0, append([]byte{mysql.COM_QUERY}, "CREATE TABLE tokens (k VARCHAR(64) DEFAULT '"+liveSecret+"')"...))
+			if ok := c.read(); len(ok) == 0 || ok[0] != mysql.OK {
+				c.t.Fatalf("the CREATE was answered with %x, want the replay's OK", ok)
+			}
+			c.send(0, append([]byte{mysql.COM_QUERY}, "SELECT 1 FROM missing"...))
+		},
+		lines: [][2]string{{"Returning synthetic OK for unmocked control/DDL", "query"}},
+	}, {
+		name: "a prepared statement the replay answered",
+		pool: []*models.Mock{redacting(preparedMock("mock-prepare", "0", 1, keyed(redactedPlaceholder, "acme")+" AND id = ?", stmtT0))},
+		send: func(c mysqlClient) {
+			c.send(0, append([]byte{mysql.COM_STMT_PREPARE}, keyed(liveSecret, "acme")+" AND id = ?"...))
+			if ok := c.read(); len(ok) < 5 || ok[0] != 0x00 {
+				c.t.Fatalf("the PREPARE was answered with %x, want a COM_STMT_PREPARE_OK", ok)
+			}
+			c.send(0, append([]byte{mysql.COM_QUERY}, "SELECT 1 FROM missing"...))
+		},
+		lines: [][2]string{{"Recorded runtime PREP mapping with new statement ID", "query"}},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := &fakeMockDb{session: append([]*models.Mock{nativeHandshake()}, tc.pool...)}
+			rep, logs := missOf(t, db, models.OutgoingOptions{MockNoiseStrict: tc.strict}, tc.send)
+			if text := reportText(rep); strings.Contains(text, liveSecret) {
+				t.Errorf("the report carries the live value at a redacted place:\n%s", text)
+			}
+			if logged := logText(logs); strings.Contains(logged, liveSecret) {
+				t.Errorf("the replay logged the live value at a place a recording redacted:\n%s", logged)
+			}
+			for _, l := range tc.lines {
+				if got := loggedAt(logs, l[0], l[1]); len(got) == 0 || !strings.Contains(strings.Join(got, " "), valueRedacted) {
+					t.Errorf("the line %q shows %s %q; want the live value redacted", l[0], l[1], got)
+				}
+			}
+		})
+	}
+}
+
+// Where no recording of the pool redacted a place, the logs show the live
+// statement as it is.
+func TestMySQLLogsKeepTheLiveValueNoRecordingRedacted(t *testing.T) {
+	db := &fakeMockDb{session: []*models.Mock{nativeHandshake(),
+		queryRecorded("mock-users", "SELECT name FROM users WHERE api_key = 'k1'", nil),
+		queryRecorded("mock-update", "UPDATE users SET name = 'n' WHERE id = 1", nil)}}
+	_, logs := missOf(t, db, models.OutgoingOptions{}, func(c mysqlClient) {
+		c.send(0, append([]byte{mysql.COM_QUERY}, "UPDATE users SET api_key = 1 '"+liveSecret+"'"...))
+	})
+	for _, l := range []struct{ line, key string }{
+		{"actual query is dml but expected is not", "actual query"},
+		{"failed to get actual query structure", "actual Query"},
+		{"failed to get actual query structure", "error"},
+		{"mock miss", "actual_query"},
+	} {
+		if got := loggedAt(logs, l.line, l.key); len(got) == 0 || !strings.Contains(strings.Join(got, " "), liveSecret) {
+			t.Errorf("the line %q shows %s %q; want the live value, which no recording redacted", l.line, l.key, got)
+		}
+	}
+}
+
+// A strict miss names its closest recording and the first one strict
+// rejected: the report redacts the live value at a place either redacted,
+// the rejected one's when the closest redacted none.
+func TestMySQLStrictMissRedactsByEveryRecordingItNames(t *testing.T) {
+	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
+	keyed := func(key, org string) string {
+		return "SELECT name FROM users WHERE api_key = '" + key + "' AND org = '" + org + "'"
+	}
+	rejected := queryRecorded("mock-rejected", keyed(redactedPlaceholder, "acme"), redactedNoise)
+	closest := queryRecorded("mock-closest", keyed("k1", "initech"), nil)
+	db := &fakeMockDb{session: []*models.Mock{rejected, closest}}
+	req := mysql.Request{PacketBundle: mysql.PacketBundle{
+		Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 80}, Type: "COM_QUERY"},
+		Message: &mysql.QueryPacket{Query: keyed(liveSecret, "globex")},
+	}}
+	_, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, newDecodeCtx(), mocknoise.New(mysqlNoiseAdapter{}, false, true), nil)
+	if err != nil || ok || miss == nil {
+		t.Fatalf("strict served the COM_QUERY (%v, %v)", err, miss)
+	}
+	if miss.closestMock != closest.Name {
+		t.Fatalf("the miss names %q; want %q, the closest", miss.closestMock, closest.Name)
+	}
+	if !miss.places.literals[0] || miss.places.literals[1] {
+		t.Fatalf("the miss's places %+v: want the rejected recording's literal 0 alone", miss.places)
+	}
+}
