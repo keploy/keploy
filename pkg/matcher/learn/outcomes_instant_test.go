@@ -2078,9 +2078,11 @@ func TestOutcomeAPlaceNotReadAgainHoldsTheWordOutsideItsFinerTimes(t *testing.T)
 // a whole second, which the other run wrote with its milliseconds, stays a
 // second's (fail closed: it names the call's second), and is never judged
 // by a text not read, nor does the question crash. Read again, the place
-// is the other run's millisecond. Through
-// Decide each place's text is in hand by then, so the branch is pinned
-// here, at the question, on recordings read lazily.
+// is the other run's millisecond. Nor is work done that no answer needs:
+// the other run's text is not loaded again where the recording was not
+// read again, and no instant is scanned where the other run's were not
+// read. Through Decide each place's text is in hand by then, so the
+// branch is pinned here, at the question, on recordings read lazily.
 func TestOutcomeAPlaceNotReadAgainIsJudgedAtItsOwnUnit(t *testing.T) {
 	defer func(b, r int64) { bodyBudget, readerBudget = b, r }(bodyBudget, readerBudget)
 	bodyBudget, readerBudget = 0, 1
@@ -2126,6 +2128,7 @@ func TestOutcomeAPlaceNotReadAgainIsJudgedAtItsOwnUnit(t *testing.T) {
 		x := newReaderIndex(dr)
 		var nRec, nRun int
 		tx, ox := x.textOf(lazy(recorded, tc.failRec, &nRec)), x.textOf(lazy(given, tc.failRun, &nRun))
+		dc.passes = 0
 		spans, read := dc.atFinest(tx, ox)
 		if !read {
 			t.Errorf("%s: the place's instants not read; want them read as the first read gave them", tc.what)
@@ -2136,6 +2139,16 @@ func TestOutcomeAPlaceNotReadAgainIsJudgedAtItsOwnUnit(t *testing.T) {
 		// where the recording was read again.
 		if tc.failRun != 0 && nRec <= k || tc.failRec < 0 && tc.failRun != 0 && nRun <= k {
 			t.Fatalf("%s: loaded %d and %d times; the row needs each text read again after its instants", tc.what, nRec, nRun)
+		}
+		// No work no answer needs: where the recording is not read again,
+		// the other run's text is not loaded again, and where the other
+		// run's instants were not read, no instant of the place is scanned
+		// for a finer unit.
+		if tc.failRec >= 0 && nRun != k {
+			t.Errorf("%s: the other run's text loaded %d times; want %d, to read its instants alone", tc.what, nRun, k)
+		}
+		if tc.failRun == 0 && dc.passes != 0 {
+			t.Errorf("%s: %d instants scanned; want none, as the other run's instants were not read", tc.what, dc.passes)
 		}
 		var units []time.Duration
 		for _, sp := range spans {
@@ -2403,7 +2416,8 @@ func TestOutcomeARecordingsTwoHalvesAreNamedOnce(t *testing.T) {
 // the k-th of each are one time's; where a member's count differs (a list
 // that grew or shrank between runs), each takes the finest unit the other
 // run shows at that member. A time of no member (an element of a list of
-// times), or of a member named without quotes, pairs only by count; one at
+// times, one after a quoted word with no colon), or of a member named
+// without quotes, pairs only by count; one at
 // another member, offset or layout keeps its own unit. The recording is
 // read again only where the other run shows a finer unit in one of its
 // instants' layouts.
@@ -2455,6 +2469,7 @@ func TestOutcomeAPlaceIsJudgedAtTheFinestUnitItsMemberShowsInEitherRun(t *testin
 		{"a list of numbers of seconds that grew", `[{"t":` + n(at) + `},{"t":` + nf(ago(5)) + `}]`, `[{"t":` + nf(ago(60)) + `}]`, []time.Duration{ms, ms}, 1},
 		{"spaces about the colon, the list grew", `[{"a" : ` + s(at) + `}]`, `[{"a" : ` + f(ago(60)) + `},{"a" : ` + f(ago(61)) + `}]`, []time.Duration{ms}, 1},
 		{"a member named without quotes, the list grew", `[{a:` + s(at) + `},{a:` + f(ago(5)) + `}]`, `[{a:` + f(ago(60)) + `}]`, []time.Duration{sec, ms}, 1},
+		{"a time after a quoted word and no colon, the list grew", `["a" ` + s(at) + `]`, `["a" ` + f(ago(60)) + `,"a" ` + f(ago(61)) + `]`, []time.Duration{sec}, 1},
 	} {
 		loads := 0
 		recorded := answer(tc.rec)
