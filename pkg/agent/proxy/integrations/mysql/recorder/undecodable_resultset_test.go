@@ -3,7 +3,7 @@ package recorder
 import (
 	"context"
 	"encoding/binary"
-	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -365,22 +365,51 @@ func TestRecordV2_UndecodableResponseIsLeftOut(t *testing.T) {
 	}
 }
 
-// A COM_STMT_PREPARE whose reply did not decode takes the statement's executes
+// A COM_STMT_PREPARE whose exchange is left out takes the statement's executes
 // with it: an execute cannot replay without its prepare, so it is left out as
-// well, rather than saved to fail. The command after them is recorded.
+// well, rather than saved to fail. The command after them is recorded. The
+// prepare is left out when its reply did not decode, or when its command is of
+// 16 MiB or more (framed, so the recording goes on, but not replayable). An
+// exchange left out between a whole prepare and its execute that prepared
+// nothing (a query of 16 MiB or more) forgets no statement.
 func TestRecordV2_ExecuteOfALeftOutPrepareIsLeftOut(t *testing.T) {
 	t.Parallel()
-	for _, whole := range []bool{true, false} {
-		t.Run(fmt.Sprintf("prepare whole=%v", whole), func(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		whole, large bool
+		// largeQuery puts a query of 16 MiB or more, left out, between the
+		// prepare and its execute.
+		largeQuery bool
+	}{
+		{name: "a whole prepare", whole: true},
+		{name: "a prepare whose reply did not decode"},
+		{name: "a prepare of 16 MiB or more", whole: true, large: true},
+		{name: "a whole prepare, then a query of 16 MiB or more", whole: true, largeQuery: true},
+	} {
+		whole := c.whole && !c.large
+		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			col1 := columnPayload(t, undecodableColumns[1])
-			if !whole {
+			if !c.whole {
 				col1 = truncatedPrefixColumn
 			}
+			query := "SELECT id, email FROM users WHERE id > 0"
+			command := wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, query...), 0)
+			// The reply starts at the sequence id after the command's last packet.
+			shift := byte(0)
+			if c.large {
+				command = splitPacket(append([]byte{mysql.COM_STMT_PREPARE}, query+" AND email <> '"+strings.Repeat("x", 17<<20)+"'"...), 0)
+				shift = 1
+			}
 			got, leftOut, err := runRecordV2(t, func(h *v2Harness, at func() time.Time) {
-				h.pushClient(wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "SELECT id, email FROM users WHERE id > 0"...), 0), at())
+				h.pushClient(command, at())
 				for _, p := range prepareOK(false, nil, [][]byte{columnPayload(t, undecodableColumns[0]), col1}) {
+					p[3] += shift
 					h.pushDest(p, at())
+				}
+				if c.largeQuery {
+					h.pushClient(splitPacket(append([]byte{mysql.COM_QUERY}, "SELECT '"+strings.Repeat("y", 17<<20)+"'"...), 0), at())
+					h.pushDest(okResponseWithAffectedRows(2, 0), at())
 				}
 				h.pushClient(stmtExecuteCommand(0, undecodableStmtID), at())
 				for _, p := range resultSet(false, [][]byte{columnPayload(t, undecodableColumns[0]), columnPayload(t, undecodableColumns[1])},
@@ -398,8 +427,12 @@ func TestRecordV2_ExecuteOfALeftOutPrepareIsLeftOut(t *testing.T) {
 			}
 			prepares, executes := len(mocksOf(got, "COM_STMT_PREPARE")), len(mocksOf(got, "COM_STMT_EXECUTE"))
 			if whole {
-				if prepares != 1 || executes != 1 || leftOut.count() != 0 {
-					t.Fatalf("a whole prepare and its execute recorded %d and %d mocks, %d exchanges left out", prepares, executes, leftOut.count())
+				wantLeftOut := 0
+				if c.largeQuery {
+					wantLeftOut = 1
+				}
+				if prepares != 1 || executes != 1 || leftOut.count() != wantLeftOut {
+					t.Fatalf("a whole prepare and its execute recorded %d and %d mocks, %d exchanges left out, want %d", prepares, executes, leftOut.count(), wantLeftOut)
 				}
 				return
 			}

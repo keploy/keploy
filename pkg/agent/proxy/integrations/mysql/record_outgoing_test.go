@@ -7,7 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -17,10 +20,6 @@ import (
 // server sent are still on their sockets.
 func TestRecordOutgoingDeclinesASessionWithoutV2(t *testing.T) {
 	m := New(zap.NewNop())
-	if err := m.RecordOutgoing(context.Background(), nil); !errors.Is(err, integrations.ErrParserDeclined) {
-		t.Fatalf("RecordOutgoing(nil) = %v, want a decline", err)
-	}
-
 	app, clientSide := net.Pipe()
 	server, destSide := net.Pipe()
 	t.Cleanup(func() {
@@ -50,5 +49,31 @@ func TestRecordOutgoingDeclinesASessionWithoutV2(t *testing.T) {
 		if err := <-wrote; err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := m.RecordOutgoing(context.Background(), nil); !errors.Is(err, integrations.ErrParserDeclined) {
+		t.Fatalf("RecordOutgoing(nil) = %v, want a decline", err)
+	}
+}
+
+// A session with V2 chunk streams is recorded from them, not declined: here
+// the streams end before the server's greeting, so nothing is recorded.
+func TestRecordOutgoingRecordsASessionWithV2(t *testing.T) {
+	clientCh, destCh := make(chan fakeconn.Chunk), make(chan fakeconn.Chunk)
+	close(clientCh)
+	close(destCh)
+	mocks := make(chan *models.Mock, 1)
+	v2 := &supervisor.Session{
+		ClientStream: fakeconn.New(clientCh, nil, nil),
+		DestStream:   fakeconn.New(destCh, nil, nil),
+		Mocks:        mocks,
+		Logger:       zap.NewNop(),
+		Ctx:          context.Background(),
+	}
+	sess := &integrations.RecordSession{Logger: zap.NewNop(), V2: v2}
+	if err := New(zap.NewNop()).RecordOutgoing(context.Background(), sess); errors.Is(err, integrations.ErrParserDeclined) {
+		t.Fatalf("RecordOutgoing with V2 = %v: a session with V2 streams is recorded, not declined", err)
+	}
+	if n := len(mocks); n != 0 {
+		t.Fatalf("%d mocks from streams that ended before the greeting", n)
 	}
 }
