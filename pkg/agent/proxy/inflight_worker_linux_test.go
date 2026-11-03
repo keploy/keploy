@@ -7,11 +7,15 @@ import (
 )
 
 // newStreamParserOn is newStreamParser on a connection tr keeps beside
-// others.
+// others, returned once its frame reader is blocked reading the empty
+// socket: a handler that has not started reading may be handling a request
+// (a replay's end waits for it), so a connection not yet read holds every
+// scope that reaches it, whoever stamped it.
 func newStreamParserOn(t *testing.T, tr *inflight) *streamParser {
 	app, proxy := acceptedPair(t, tr)
 	p := &streamParser{t: t, tr: tr, app: app, proxy: proxy, got: make(chan string, 4)}
 	go readOnce(proxy, p.got)
+	waitSettled(t, tr, func() bool { return proxy.reading.Load() == 1 })
 	return p
 }
 
