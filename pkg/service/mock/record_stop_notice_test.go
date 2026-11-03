@@ -199,11 +199,13 @@ type heldNotifier struct {
 	Instrumentation
 	hold    chan struct{}
 	notices atomic.Int32
+	// exit is what the test command exits with.
+	exit models.AppError
 }
 
-// Run is a test command that exits at once.
+// Run is a test command that exits at once, with exit.
 func (h *heldNotifier) Run(context.Context, models.RunOptions) models.AppError {
-	return models.AppError{}
+	return h.exit
 }
 
 func (h *heldNotifier) NotifyStopBegun(context.Context) error {
@@ -220,7 +222,8 @@ func (h *heldNotifier) NotifyStopBegun(context.Context) error {
 //   - keploy's own failure (the recording's context ends, the user's does not):
 //     the command's context ends at once, and the agent is told nothing.
 //   - A user's stop after the command's run returned (runStopNoted) tells the
-//     agent nothing: no call of the command's is left to cut.
+//     agent nothing: no call of the command's is left to cut. runStopNoted
+//     returns the command's own exit, which keploy's exit code follows.
 func TestRunUntilStopNoted_EndsTheCommandOnlyAfterAUsersStopIsTold(t *testing.T) {
 	newRun := func() (*mockService, *heldNotifier, context.Context, context.CancelFunc, context.Context, context.CancelFunc) {
 		n := &heldNotifier{hold: make(chan struct{})}
@@ -272,7 +275,12 @@ func TestRunUntilStopNoted_EndsTheCommandOnlyAfterAUsersStopIsTold(t *testing.T)
 			m, n, parent, stop, ctx, fail := newRun()
 			defer fail()
 			close(n.hold)
-			m.runStopNoted(parent, ctx) // the command exits on its own
+			// The command exits on its own, failing, and runStopNoted returns
+			// that exit, which keploy's exit code follows.
+			n.exit = models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3}
+			if got := m.runStopNoted(parent, ctx); got != n.exit {
+				t.Fatalf("runStopNoted returned %#v, want the command's own exit %#v", got, n.exit)
+			}
 			stop()
 			synctest.Wait()
 			if got := n.notices.Load(); got != 0 {
