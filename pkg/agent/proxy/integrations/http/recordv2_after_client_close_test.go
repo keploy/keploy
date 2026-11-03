@@ -341,49 +341,63 @@ func TestRecordV2_ThroughTheRelayAResponseTheClientClosedPartwayIsRecordedAsFarA
 // than net/http's own limit (4096 bytes), which the recorder's framing reader
 // takes (up to 64 KiB). A response net/http cannot read is not recorded, as a
 // whole one is not: recordV2 says it could not read the body, and records
-// nothing. Only a body cut short, or one cut after its last chunk, is recorded
-// as far as the client read it: an answer recorded from any other error would
-// serve the app what it never saw.
+// nothing. A last chunk followed by a trailer field line ended by a bare LF,
+// which the RFC does not frame, is refused by the recorder's framing reader
+// itself, before any mock is built: recordV2 returns its framing error. Only a
+// body cut short, or one cut after its last chunk in a trailer framed by the
+// RFC (lastChunkRead), is recorded as far as the client read it: an answer
+// recorded from any other error would serve the app what it never saw.
 func TestRecordV2_ThroughTheRelayAResponseTheClientStoppedReadingThatDoesNotDecodeIsNotRecorded(t *testing.T) {
 	const head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n"
-	read := head + "1;note=" + strings.Repeat("x", 5000) + "\r\n{\r\n"
-	for _, proven := range []string{"", "1"} {
-		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) {
-			t.Setenv("KEPLOY_PROVEN", proven)
-			c := newRelayedConn(t)
-			c.start(t)
-			write(t, c.app, c.src, jdkRequest(7))
-			relayed(t, c.dest, jdkRequest(7))
-			if _, err := c.dest.Write([]byte(read)); err != nil {
-				t.Fatal(err)
-			}
-			relayed(t, c.app, read)
-			if err := c.app.Close(); err != nil {
-				t.Fatal(err)
-			}
-			awaitFIN(t, c.dest)
-			if _, err := c.dest.Write([]byte("1\r\n}\r\n0\r\n\r\n")); err != nil {
-				t.Fatal(err)
-			}
-			_ = c.dest.Close()
-			select {
-			case err := <-c.done:
-				if err == nil || !strings.Contains(err.Error(), "read response body") {
-					t.Fatalf("recordV2 = %v, want the error that it could not read the body", err)
+	for _, row := range []struct {
+		name, read, rest, err string
+		// cutByTheStream: recordV2 reads to the stream's end, where the
+		// relay ended it, before it finds it cannot read the body; a
+		// framing error ends the read where it is.
+		cutByTheStream bool
+	}{
+		{"a chunk-size line over net/http's limit", head + "1;note=" + strings.Repeat("x", 5000) + "\r\n{\r\n", "1\r\n}\r\n0\r\n\r\n", "read response body", true},
+		{"a trailer line ended by a bare LF", head + "1\r\n{\r\n0\r\nX-Checksum: 1\n", "\r\n", "a line ends with a bare LF", false},
+	} {
+		read := row.read
+		for _, proven := range []string{"", "1"} {
+			t.Run(row.name+"/KEPLOY_PROVEN="+proven, func(t *testing.T) {
+				t.Setenv("KEPLOY_PROVEN", proven)
+				c := newRelayedConn(t)
+				c.start(t)
+				write(t, c.app, c.src, jdkRequest(7))
+				relayed(t, c.dest, jdkRequest(7))
+				if _, err := c.dest.Write([]byte(read)); err != nil {
+					t.Fatal(err)
 				}
-			case <-time.After(10 * time.Second):
-				t.Fatal("recordV2 did not return within 10s of the connection's end")
-			}
-			if !c.sess.EndedWhereClientStopped() {
-				t.Fatal("the relay did not say the destination's stream ended where the client stopped")
-			}
-			select {
-			case m := <-c.mocks:
-				t.Fatalf("recorded a %d with the body %q (fault: %s); want nothing: net/http does not read it",
-					m.Spec.HTTPResp.StatusCode, m.Spec.HTTPResp.Body, m.Spec.Fault)
-			default:
-			}
-		})
+				relayed(t, c.app, read)
+				if err := c.app.Close(); err != nil {
+					t.Fatal(err)
+				}
+				awaitFIN(t, c.dest)
+				if _, err := c.dest.Write([]byte(row.rest)); err != nil {
+					t.Fatal(err)
+				}
+				_ = c.dest.Close()
+				select {
+				case err := <-c.done:
+					if err == nil || !strings.Contains(err.Error(), row.err) {
+						t.Fatalf("recordV2 = %v, want the error that it could not read the body (%q)", err, row.err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("recordV2 did not return within 10s of the connection's end")
+				}
+				if row.cutByTheStream && !c.sess.EndedWhereClientStopped() {
+					t.Fatal("the relay did not say the destination's stream ended where the client stopped")
+				}
+				select {
+				case m := <-c.mocks:
+					t.Fatalf("recorded a %d with the body %q (fault: %s); want nothing: net/http does not read it",
+						m.Spec.HTTPResp.StatusCode, m.Spec.HTTPResp.Body, m.Spec.Fault)
+				default:
+				}
+			})
+		}
 	}
 }
 
