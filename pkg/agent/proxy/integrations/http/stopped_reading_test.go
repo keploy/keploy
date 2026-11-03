@@ -27,16 +27,18 @@ import (
 
 // A response the app stopped reading at record, and closed the connection on
 // before its end came (models.FaultStoppedReading), is served at replay
-// as far as the app read it and no further: no Content-Length, as one chunk
-// with no last chunk after it (over HTTP/1.0, which has no chunks, as a body
-// the connection's close would end), and the connection held open until the
-// app closes it. The fault alone frames it: the mock's head is a whole
-// answer's, as the recorder writes it. The app sees what it saw at record. One
-// that had all it wanted (the JSON it decodes) closes as it did. One that
-// waits on the rest (an event stream it abandoned) waits, and its own timeout
-// fires, as it did. Nothing it sends meanwhile is answered: the answer before
-// it never ended. A whole response is served as before, with its length, and
-// the connection's next request is answered.
+// as far as the app read it and no further, framed as the upstream sent it
+// without its end (under its Content-Length, which the body served does not
+// reach; as one chunk with no last chunk after it; or as a body the
+// connection's close would end, as one is below HTTP/1.1, which has no
+// chunks), and the connection held open until the app closes it. The fault
+// alone frames it: the mock's head is a whole answer's, as the recorder
+// writes it. The app sees what it saw at record. One that had all it wanted
+// (the JSON it decodes) closes as it did. One that waits on the rest (an
+// event stream it abandoned) waits, and its own timeout fires, as it did.
+// Nothing it sends meanwhile is answered: the answer before it never ended.
+// A whole response is served as before, with its length, and the
+// connection's next request is answered.
 func TestDecodeHTTPServesAnAnswerTheAppStoppedReadingWithoutItsEnd(t *testing.T) {
 	const charge = `{"id":"ch_1","status":"pending"}`
 	for _, row := range []struct {
@@ -109,13 +111,31 @@ func TestDecodeHTTPServesAnAnswerTheAppStoppedReadingWithoutItsEnd(t *testing.T)
 				}
 				app, proxy := tcpPair(t)
 				boundAppReads(t, app)
-				served := &readsOnConn{Conn: proxy, readAgain: make(chan struct{}, 1)}
+				served := &readsOnConn{Conn: proxy, readAgain: make(chan struct{}, 1), afterWrite: make(chan struct{}, 1)}
 				h := &HTTP{Logger: zap.NewNop()}
 				done := runDecode(t, proxy, func(ctx context.Context) error {
 					return h.decodeHTTP(ctx, []byte(request), served, nil,
 						&mockMemDb{mocks: mocks, updateUnFilteredReturn: true}, models.OutgoingOptions{})
 				})
-				br := bufio.NewReader(app)
+				// What the serve wrote before it read on, alone, is the answer
+				// the app read at record: its body, then its end (a whole
+				// answer, or one framed by the close, which the bytes' end
+				// ends), or none (a length or a chunk the bytes do not finish).
+				raw := servedBytes(t, served, app, done)
+				wrote, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(raw)), nil)
+				if err != nil {
+					t.Fatalf("served %q, which does not parse as a response: %v", raw, err)
+				}
+				wantEnd := error(nil)
+				if row.held && (row.length != 0 || row.chunked) {
+					wantEnd = io.ErrUnexpectedEOF
+				}
+				if body, err := io.ReadAll(wrote.Body); string(body) != row.body || !errors.Is(err, wantEnd) {
+					t.Fatalf("served %q: its body %q, ended by %v; want %q, ended by %v", raw, body, err, row.body, wantEnd)
+				}
+				// The app reads it as the serve wrote it, then from the
+				// connection.
+				br := bufio.NewReader(io.MultiReader(bytes.NewReader(raw), app))
 				resp, err := http.ReadResponse(br, nil)
 				if err != nil {
 					t.Fatalf("the call was answered with no response that parses: %v", err)
@@ -236,18 +256,36 @@ func (w servedWay) suffix() string {
 }
 
 // readsOnConn is the proxy's side of a connection that says when its reader
-// comes back for more after a read that gave bytes: a hold that read what the
-// app sent, and holds on.
+// comes back for more: after a read that gave bytes (readAgain), a hold that
+// read what the app sent and holds on, or a serve that answered it and waits
+// for the next; and after a write (afterWrite, when not nil), a serve that
+// wrote its answer and holds the connection or waits for the next request. It
+// counts the bytes written to it (wrote), which tells a hold from an answer,
+// and is all a serve wrote before it read on.
 type readsOnConn struct {
 	net.Conn
-	gave      atomic.Bool
-	readAgain chan struct{}
+	gave       atomic.Bool
+	wrote      atomic.Int64
+	readAgain  chan struct{}
+	afterWrite chan struct{}
+}
+
+func (c *readsOnConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.wrote.Add(int64(n))
+	return n, err
 }
 
 func (c *readsOnConn) Read(p []byte) (int, error) {
 	if c.gave.Load() {
 		select {
 		case c.readAgain <- struct{}{}:
+		default:
+		}
+	}
+	if c.wrote.Load() > 0 {
+		select {
+		case c.afterWrite <- struct{}{}: // a nil afterWrite is never ready
 		default:
 		}
 	}
@@ -258,30 +296,30 @@ func (c *readsOnConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// answerConn is the proxy's end of a connection that counts the bytes the
-// serve writes and says when its reader comes back after a write: a held
-// answer is written, then the connection is read until the app closes it. A
-// row reads then exactly the bytes the serve wrote.
-type answerConn struct {
-	net.Conn
-	wrote   atomic.Int64
-	reading chan struct{}
-}
-
-func (c *answerConn) Write(p []byte) (int, error) {
-	n, err := c.Conn.Write(p)
-	c.wrote.Add(int64(n))
-	return n, err
-}
-
-func (c *answerConn) Read(p []byte) (int, error) {
-	if c.wrote.Load() > 0 {
-		select {
-		case c.reading <- struct{}{}:
-		default:
-		}
+// servedBytes waits until the serve on served has written its answer and
+// reads on, or has returned (done), and reads from the app's end exactly the
+// bytes it wrote. A row checks them as they are, so a serve that wrote other
+// bytes, or fewer, fails it at once, never by a wait on bytes that do not
+// come. A serve that returned fails the row: a held answer, and a whole one
+// on a connection that is not closed, read on. served needs an afterWrite.
+func servedBytes(t *testing.T, served *readsOnConn, app net.Conn, done <-chan error) []byte {
+	t.Helper()
+	returned, early := error(nil), false
+	select {
+	case <-served.afterWrite:
+	case returned = <-done:
+		early = true
+	case <-time.After(time.Minute): // the bound only turns a hang into a failure
+		t.Fatal("the serve neither read on after its answer nor returned")
 	}
-	return c.Conn.Read(p)
+	raw := make([]byte, served.wrote.Load())
+	if _, err := io.ReadFull(app, raw); err != nil {
+		t.Fatalf("read %q of the %d bytes the serve wrote: %v", raw, len(raw), err)
+	}
+	if early {
+		t.Fatalf("decodeHTTP returned %v once it served %q, want the connection read on until the app closes it", returned, raw)
+	}
+	return raw
 }
 
 // boundAppReads bounds the app's reads on its side of the connection. The
@@ -333,9 +371,10 @@ func TestDecodeHTTPServesAnAnswerTheAppStoppedReadingWithNoBodyWhole(t *testing.
 				}
 				app, proxy := tcpPair(t)
 				boundAppReads(t, app)
+				served := &readsOnConn{Conn: proxy, readAgain: make(chan struct{}, 1)}
 				h := &HTTP{Logger: zap.NewNop()}
-				runDecode(t, proxy, func(ctx context.Context) error {
-					return h.decodeHTTP(ctx, []byte(request), proxy, nil,
+				done := runDecode(t, proxy, func(ctx context.Context) error {
+					return h.decodeHTTP(ctx, []byte(request), served, nil,
 						&mockMemDb{mocks: mocks, updateUnFilteredReturn: true}, models.OutgoingOptions{})
 				})
 				br := bufio.NewReader(app)
@@ -354,9 +393,22 @@ func TestDecodeHTTPServesAnAnswerTheAppStoppedReadingWithNoBodyWhole(t *testing.
 						break
 					}
 					// The answer was whole: the connection's next request is
-					// answered, not read and dropped by a hold.
+					// answered, not read and dropped by a hold. The serve reads
+					// it, then reads on: having written the answer, or not (a
+					// hold), which fails the row at once.
+					before := served.wrote.Load()
 					if _, err := app.Write([]byte(request)); err != nil {
 						t.Fatal(err)
+					}
+					select {
+					case <-served.readAgain:
+					case err := <-done:
+						t.Fatalf("decodeHTTP returned %v before it answered the connection's next request, want it answered", err)
+					case <-time.After(time.Minute): // the bound only turns a hang into a failure
+						t.Fatal("the replay did not read on after the connection's next request")
+					}
+					if served.wrote.Load() == before {
+						t.Fatal("the connection's next request was read and not answered, want it answered: the answer before it was whole")
 					}
 				}
 			})
@@ -891,9 +943,7 @@ func TestAHeldAnswerServesOnlyTheBytesItsFaultSends(t *testing.T) {
 // app gets want on the wire, then nothing until it closes, and the serve ends
 // then. The app sends its request over HTTP/1.1 to a mock below HTTP/1.0 (one
 // written with no proto_major) or above HTTP/1.1. It reads exactly the bytes
-// the serve wrote before it held the connection or returned (answerConn): a
-// serve that writes other bytes than want, or fewer, fails the row at once,
-// never by a wait on bytes that do not come.
+// the serve wrote before it held the connection (servedBytes).
 func checkHeldWire(t *testing.T, proven string, pooled bool, major, minor int, body string, bodyBytes int, sent sentAs, want string) {
 	t.Helper()
 	t.Setenv("KEPLOY_PROVEN", proven)
@@ -913,25 +963,13 @@ func checkHeldWire(t *testing.T, proven string, pooled bool, major, minor int, b
 		appMinor = minor
 	}
 	request := "POST /v1/events HTTP/1." + strconv.Itoa(appMinor) + "\r\nHost: api.example\r\nContent-Length: 0\r\n\r\n"
-	served := &answerConn{Conn: proxy, reading: make(chan struct{}, 1)}
+	served := &readsOnConn{Conn: proxy, readAgain: make(chan struct{}, 1), afterWrite: make(chan struct{}, 1)}
 	done := runDecode(t, proxy, func(ctx context.Context) error {
 		return h.decodeHTTP(ctx, []byte(request), served, nil,
 			&mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true}, models.OutgoingOptions{})
 	})
-	returned, early := error(nil), false
-	select {
-	case <-served.reading:
-	case returned = <-done:
-		early = true
-	case <-time.After(time.Minute): // the bound only turns a hang into a failure
-		t.Fatal("the serve neither held the connection after its answer nor returned")
-	}
-	got := make([]byte, served.wrote.Load())
-	if _, err := io.ReadFull(app, got); err != nil || string(got) != want {
-		t.Fatalf("served %q (%v), want %q", got, err, want)
-	}
-	if early {
-		t.Fatalf("decodeHTTP returned %v once it served the answer, want the connection held until the app closes it", returned)
+	if got := servedBytes(t, served, app, done); string(got) != want {
+		t.Fatalf("served %q, want %q", got, want)
 	}
 	// Nothing more comes while the app holds the connection.
 	if err := app.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
