@@ -30,10 +30,11 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 		zap.Int("config_mocks", cfg),
 		zap.Int("data_mocks_available", data))
 
-	// Shared schema-noise engine for this connection's command phase. MySQL is
-	// a client of the same engine HTTP uses — mysqlNoiseAdapter owns only the
-	// MySQL-specific bit (canonicalizing command packets into diffable JSON).
-	noiseEngine := mocknoise.New(mysqlNoiseAdapter{}, opts.NoiseDetection(), opts.NoiseStrict())
+	// Shared mock-noise engine for this connection's command phase, built by the
+	// proxy from MySQL's declared adapter (MockNoise()) and handed in on ctx —
+	// so the declaration is what turns detection/strict on. Nil when the parser
+	// declares no adapter or noise is off; all Engine methods are nil-safe.
+	noiseEngine := mocknoise.EngineFrom(ctx)
 
 	// User request-body noise from test.globalNoise.requestBody — the same
 	// DEDICATED request-matching bucket HTTP consumes (see http/decode.go for

@@ -20,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/matcher"
@@ -194,10 +195,13 @@ func ownedBy(ctx context.Context) func(*models.Mock) bool {
 // matchCascade is match without its proven-switch report additions.
 func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
 
-	// Shared schema-noise engine for this match. HTTP is a full client of the
-	// same engine Pulsar (and any future parser) uses — httpNoiseAdapter owns
-	// only the HTTP-specific bits (body extraction, JSON/form diff).
-	noiseEngine := schemanoise.New(httpNoiseAdapter{}, schemaNoiseDetection, schemaNoiseStrict)
+	// Shared mock-noise engine for this match, built by the proxy from HTTP's
+	// declared adapter (MockNoise()) and handed in on ctx — so the declaration is
+	// what turns detection/strict on. Nil when noise is off; all Engine methods
+	// are nil-safe. (schemaNoiseDetection/schemaNoiseStrict are retained in the
+	// signature for callers/diagnostics; the flags now reach the engine through
+	// the proxy, which builds it from the same opts.NoiseDetection()/Strict().)
+	noiseEngine := mocknoise.EngineFrom(ctx)
 
 	// Under the proven switch no path segment or query value is relaxed for
 	// its shape (design v14 row S1): what may differ between record and

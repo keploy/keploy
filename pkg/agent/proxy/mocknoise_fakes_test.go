@@ -21,3 +21,12 @@ func (*feedProbe) MockNoise() mocknoise.Adapter            { return nil }
 func (*heldParser) MockNoise() mocknoise.Adapter           { return nil }
 func (*holdWantingParser) MockNoise() mocknoise.Adapter    { return nil }
 func (returnsAfterOneParser) MockNoise() mocknoise.Adapter { return nil }
+
+// These fakes embed the Integrations interface (a nil value) and override only
+// the methods they need; without an explicit MockNoise() the promoted method
+// would dispatch to the nil embedded interface and panic now that the proxy
+// calls MockNoise() on every dispatched parser.
+func (*brakeParser) MockNoise() mocknoise.Adapter  { return nil }
+func (bareParser) MockNoise() mocknoise.Adapter    { return nil }
+func (returnedMiss) MockNoise() mocknoise.Adapter  { return nil }
+func (pgSSLReplayer) MockNoise() mocknoise.Adapter { return nil }

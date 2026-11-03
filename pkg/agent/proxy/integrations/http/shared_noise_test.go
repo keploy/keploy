@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
@@ -84,6 +85,10 @@ func serveOne(t *testing.T, h *HTTP, db integrations.MockMemDb, opts models.Outg
 	t.Helper()
 	app, proxy := tcpPair(t)
 	done := runDecode(t, proxy, func(ctx context.Context) error {
+		// Mimic the proxy: build the mock-noise engine from the parser's declared
+		// adapter (MockNoise()) and hand it in on ctx, since this test drives
+		// decodeHTTP directly instead of going through the proxy dispatch.
+		ctx = mocknoise.WithEngine(ctx, mocknoise.New(h.MockNoise(), opts.NoiseDetection(), opts.NoiseStrict()))
 		return h.decodeHTTP(ctx, []byte(raw), proxy, nil, db, opts)
 	})
 	resp, err := http.ReadResponse(bufio.NewReader(app), nil)
