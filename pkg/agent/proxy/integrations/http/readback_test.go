@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // The store the rows below drive: a DynamoDB-shaped API whose PutItem writes
@@ -99,7 +100,7 @@ func (s rbStore) Access(read *models.Mock, calls []*models.Mock) models.HTTPStor
 }
 
 // rbRegister registers s as the store reader for the test.
-func rbRegister(t *testing.T, s rbStore) {
+func rbRegister(t *testing.T, s models.HTTPStoreReader) {
 	t.Helper()
 	t.Cleanup(models.RegisterHTTPStore(s))
 }
@@ -395,6 +396,15 @@ func TestReadBackPlanReadsBackOnlyTheTestsOwnWrites(t *testing.T) {
 	if b := p.values["lead-name"]; b.Value != liveName {
 		t.Fatalf("value %+v, want this run's", b)
 	}
+	// The variable holds this run's value already, bound where it was
+	// first sent: the read-back answers it and leaves that binding.
+	first := variables.Binding{Name: "lead-name", Value: liveName, Recorded: recName, Mock: "mock-9", Place: "body.Key.Name.S"}
+	p = newPairing()
+	p.vars["lead-name"] = models.MockVariable{Recorded: recName, Use: []string{"body.Key.Name.S"}}
+	p.values["lead-name"] = first
+	if p = h.readBackPlan(tr, test, get, []*models.Mock{put}, held, nil, p); !reflect.DeepEqual(p.values["lead-name"], first) {
+		t.Fatalf("value %+v, want the binding where the variable was first sent, %+v", p.values["lead-name"], first)
+	}
 
 	p = newPairing()
 	p.vars["key"] = models.MockVariable{Recorded: recName, Answer: []string{"body.Item.Name.S"}}
@@ -551,5 +561,39 @@ func TestReadBackLeavesThePoolsReadAsRecorded(t *testing.T) {
 	}
 	if got := served.Spec.HTTPResp.Body; got != `{"Item":`+rbItem("c-1", "Lead 1700000000000")+`}` {
 		t.Fatalf("the pool's read answered %s, want it as recorded", got)
+	}
+}
+
+// rbTextStore is a reader that links the whole of a text answer ("body") to
+// the record a text PutItem wrote whole.
+type rbTextStore struct{}
+
+func (rbTextStore) Reads(r *models.HTTPReq) bool { return rbTarget(r) == rbGet["X-Amz-Target"] }
+
+func (rbTextStore) Access(_ *models.Mock, calls []*models.Mock) models.HTTPStoreAccess {
+	a := models.HTTPStoreAccess{Written: make([]map[string]string, len(calls)), Read: map[string]string{"body": "Notes/1"}}
+	for i, c := range calls {
+		if rbTarget(c.Spec.HTTPReq) == rbPut["X-Amz-Target"] {
+			a.Written[i] = map[string]string{"body": "Notes/1"}
+		}
+	}
+	return a
+}
+
+// A leaf of the read's answer no variable place can name (a whole text
+// body) is answered as recorded, though the reader links it to what the
+// test's own write stored.
+func TestReadBackLeavesALeafNoPlaceNamesAsRecorded(t *testing.T) {
+	rbRegister(t, rbTextStore{})
+	put := learnRecorded("mock-0", 0, "POST", "/", "note 1700000000000", rbPut, `{}`)
+	get := learnRecorded("mock-1", time.Second, "POST", "/", rbGetBody("n-1"), rbGet, "note 1700000000000")
+	get.Spec.HTTPResp.Header = map[string]string{"Content-Type": "text/plain"}
+	e := []learn.Earlier{{Mock: "mock-0", At: put.Spec.ReqTimestampMock, Own: true, Seen: []learn.Seen{
+		{Side: learn.Request, Leaf: learn.Leaf{Path: "body", Noise: "body", Type: learn.String, Value: "note 1700000000000"}, Live: "note 1700000000417", Place: "body"},
+	}}}
+	tr := clockedTracker()
+	tr.Begin()
+	if p := newHTTP().readBackPlan(tr, tr.Placed().Test, get, []*models.Mock{put}, e, nil, newPairing()); len(p.vars) != 0 || len(p.binds) != 0 {
+		t.Fatalf("vars %+v binds %+v, want the text answered as recorded", p.vars, p.binds)
 	}
 }
