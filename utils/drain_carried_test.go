@@ -88,6 +88,7 @@ func TestARecordFrameDrainSaysOneOfferWhicheverNoticesFirst(t *testing.T) {
 // gives it up.
 func TestADrainWhoseOfferAnotherWaitMakesBeginsItsNoticesAtThatWaitsEnd(t *testing.T) {
 	drainStopNowTest(t)
+	drainNotice = 50 * time.Millisecond
 	var now atomic.Int64
 	now.Store(time.Now().UnixNano())
 	t.Cleanup(SetNoticeClockForTest(func() time.Time { return time.Unix(0, now.Load()) }))
@@ -104,10 +105,14 @@ func TestADrainWhoseOfferAnotherWaitMakesBeginsItsNoticesAtThatWaitsEnd(t *testi
 	}
 	// Ten notice periods pass while the other wait runs; then it ends.
 	now.Add(int64(10 * drainNotice))
+	closedAt := time.Now()
 	close(carrier)
 	said := awaitLog(t, logs, "made no progress", res)
 	if offersStanding() != 0 || strings.Contains(said.Message, drainOffer) {
 		t.Fatalf("the drain offered at its first notice after the other wait ended (%q, %d offers stand): want its offer a whole notice period after that end", said.Message, offersStanding())
+	}
+	if d := said.Time.Sub(closedAt); d < drainNotice {
+		t.Fatalf("the drain gave its first notice %v after the other wait ended, want a whole notice period (%v) on", d, drainNotice)
 	}
 	if MarkInterruptedAgain() {
 		t.Fatal("a press before the drain's offer ended a stop")
@@ -167,4 +172,35 @@ func TestADrainBesideAnotherWaitsOfferMakesNoOfferUnsaid(t *testing.T) {
 			t.Fatalf("run %d: the drain returned %+v, want its group joined", i, r)
 		}
 	}
+}
+
+// A stop that began on its own (the app exited, a record timer) is not
+// interrupted when the wait that made its drain's offer ends. The user's
+// interrupt that comes later is seen at the drain's next notice, and the
+// drain offers a whole notice period after that: a copy of the stop's signal
+// (sudo hands its own on) is never taken for the answer to an offer.
+func TestADrainWhoseOfferAnotherWaitMadeOffersAPeriodAfterTheInterruptIsSeen(t *testing.T) {
+	drainStopNowTestOnItsOwn(t)
+	var now atomic.Int64
+	now.Store(time.Now().UnixNano())
+	t.Cleanup(SetNoticeClockForTest(func() time.Time { return time.Unix(0, now.Load()) }))
+	carrier := make(chan struct{})
+	var g errgroup.Group
+	block := make(chan struct{})
+	defer close(block)
+	g.Go(func() error { <-block; return nil })
+	var looks atomic.Uint64
+	res, logs := startCarriedDrain(&stall.ManualClock{}, &g, 30*time.Second, func() uint64 { looks.Add(1); return 0 }, carrier)
+	awaitLooks(t, &looks, 0, 2)
+	close(carrier)
+	awaitLog(t, logs, "made no progress", res) // its notices have begun
+	now.Add(int64(10 * drainNotice))
+	MarkInterrupted()
+	at := looks.Load()
+	awaitLooks(t, &looks, at, 10)
+	if n := logs.FilterMessageSnippet(drainOffer).Len(); n != 0 || offersStanding() != 0 {
+		t.Fatalf("the drain offered (%d lines, %d offers stand) at the notice that first saw the interrupt: want a whole notice period after", n, offersStanding())
+	}
+	now.Add(int64(drainNotice))
+	awaitLog(t, logs, drainOffer, res)
 }
