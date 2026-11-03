@@ -32,13 +32,15 @@ import (
 // chunk only once the app's FIN, which the relay forwards, has reached it, as
 // a server whose handler returns late does. The app refuses that last chunk
 // with a reset, and the destination's stream ends where the app stopped
-// taking it. The exchange is recorded as far as the app took it, marked as
-// one the app stopped reading, with no Content-Length and still chunked, so
-// replay serves it without its end; nothing is left out. An app that read the
-// whole response before it closed has it recorded whole, unmarked. A server
-// that closes without ending the body, with nothing the app refused, cut the
-// response itself as far as the capture can tell: the exchange is left out,
-// and said so, as before. KEPLOY_PROVEN does not change any of it.
+// taking it. The exchange is recorded as far as the app took it, with a
+// stopped_reading fault and a whole answer's head (the Content-Length of what
+// it read, no Transfer-Encoding), so replay serves it without its end; nothing
+// is left out. An app that read the whole response before it closed has it
+// recorded whole, with no fault. A server that closes after the app's FIN
+// without the last chunk gives the same mock as one that sends it: what the
+// server does once the app closed is nothing the app saw. An app that closed
+// before the response's head came whole had no response: the exchange is left
+// out, and said so, as before. KEPLOY_PROVEN does not change any of it.
 func TestRecordViaSupervisor_AResponseTheAppStoppedReadingIsRecordedAsFarAsItRead(t *testing.T) {
 	const (
 		request = "GET /v1/charges/ch_1 HTTP/1.1\r\nHost: pay\r\n\r\n"
@@ -60,7 +62,8 @@ func TestRecordViaSupervisor_AResponseTheAppStoppedReadingIsRecordedAsFarAsItRea
 	}{
 		{name: "the last chunk after the app's FIN", beforeClose: head + data, afterFIN: end, stopped: true},
 		{name: "the app read the whole response", beforeClose: head + data + end},
-		{name: "the server closes without the last chunk", beforeClose: head + data, leftOut: true},
+		{name: "the server closes after the app's FIN, without the last chunk", beforeClose: head + data, stopped: true},
+		{name: "the app closes before the head came whole", beforeClose: head[:20], leftOut: true},
 	} {
 		for _, proven := range []bool{false, true} {
 			name := row.name

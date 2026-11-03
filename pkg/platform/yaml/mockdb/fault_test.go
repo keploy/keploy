@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ func TestAFaultRoundTrips(t *testing.T) {
 		{Kind: models.FaultTruncate, BodyBytes: 10, Observed: "unexpected EOF"},
 		{Kind: models.FaultReset, AfterHead: true, BodyBytes: 3},
 		{Kind: models.FaultDelay, Delay: 1500 * time.Millisecond},
+		{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: 5, Observed: "the application stopped reading partway through the answer and closed the connection"},
 	} {
 		m := variablesMock()
 		f := want
@@ -111,6 +113,64 @@ func TestAFaultRoundTrips(t *testing.T) {
 	}
 	if bytes.Contains(jm.Spec, []byte("fault")) || jm.Kind != models.HTTP {
 		t.Fatalf("a mock without a fault wrote the key in its JSON form: %s", jm.Spec)
+	}
+}
+
+// An event stream the app stopped reading partway is recorded as far as it
+// read, which may end inside an event. Its body goes into the mock file flat,
+// as an HttpFault mock, and comes back byte for byte: the chunk form an event
+// stream is written in otherwise would give back whole events only, adding an
+// end to the event the app read part of. The same body without the fault is
+// written as the stream's chunks, as before.
+func TestAStreamTheAppStoppedReadingRoundTripsByteForByte(t *testing.T) {
+	const body = "data: {\"n\":1}\n\ndata: {\"n\":2}\n\ndata: {\"n\""
+	stream := func(f *models.Fault) *models.Mock {
+		m := variablesMock()
+		m.Spec.Variables = nil
+		m.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, ProtoMajor: 1, ProtoMinor: 1,
+			Header: map[string]string{"Content-Type": "text/event-stream", "Content-Length": strconv.Itoa(len(body))}, Body: body}
+		m.Spec.Fault = f
+		return m
+	}
+	write := func(m *models.Mock) string {
+		t.Helper()
+		doc, err := EncodeMock(m, zap.NewNop())
+		if err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		var buf bytes.Buffer
+		enc := yamlLib.NewEncoder(&buf)
+		if err := enc.Encode(doc); err != nil {
+			t.Fatal(err)
+		}
+		_ = enc.Close()
+		return buf.String()
+	}
+	want := models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: int64(len(body)),
+		Observed: "the application stopped reading partway through the answer and closed the connection"}
+	f := want
+	text := write(stream(&f))
+	if !strings.Contains(text, "kind: HttpFault\n") || !strings.Contains(text, "        kind: stopped_reading\n") || strings.Contains(text, "- data:\n") {
+		t.Fatalf("not written as an HttpFault mock with its stopped_reading fault:\n%s", text)
+	}
+	var back yaml.NetworkTrafficDoc
+	if err := yamlLib.Unmarshal([]byte(text), &back); err != nil {
+		t.Fatal(err)
+	}
+	out, err := DecodeMocks([]*yaml.NetworkTrafficDoc{&back}, zap.NewNop())
+	if err != nil || len(out) != 1 || out[0].Kind != models.HTTP || out[0].Spec.Fault == nil || *out[0].Spec.Fault != want {
+		t.Fatalf("read back err=%v %+v, want an HTTP mock with %+v", err, out, want)
+	}
+	if got := out[0].Spec.HTTPResp.Body; got != body {
+		t.Fatalf("read back the body %q, want the %q the app read, byte for byte:\n%s", got, body, text)
+	}
+	if whole := write(stream(nil)); !strings.Contains(whole, "kind: Http\n") || !strings.Contains(whole, "- data:\n") {
+		t.Fatalf("the stream with no fault is not written as before (kind Http, its chunks):\n%s", whole)
+	}
+	// A delayed answer is whole: its stream is written as its chunks, as one
+	// with no fault is. Only a fault after the head cuts the body short.
+	if delayed := write(stream(&models.Fault{Kind: models.FaultDelay, Delay: time.Second})); !strings.Contains(delayed, "kind: HttpFault\n") || !strings.Contains(delayed, "- data:\n") {
+		t.Fatalf("a delayed stream is not written as its chunks:\n%s", delayed)
 	}
 }
 

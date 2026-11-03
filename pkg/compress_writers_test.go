@@ -163,3 +163,70 @@ func TestCompressKeepsItsWritersState(t *testing.T) {
 		}
 	}
 }
+
+// newWriterFlush is what CompressWithoutEnd gives with a new writer.
+func newWriterFlush(t *testing.T, encoding string, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	var w interface {
+		Write([]byte) (int, error)
+		Flush() error
+	}
+	switch encoding {
+	case "gzip":
+		w = gzip.NewWriter(&buf)
+	case "br":
+		w = brotli.NewWriter(&buf)
+	}
+	if _, err := w.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// A writer that CompressWithoutEnd flushed, and did not close, goes back to
+// its pool: every later Compress and CompressWithoutEnd still gives a new
+// writer's bytes, at every pair of sizes, both sides of brotli's 1 MiB pool
+// class, in either order of the two.
+func TestAFlushedWriterBackInItsPoolCompressesAsANewWriter(t *testing.T) {
+	logger := zap.NewNop()
+	sizes := []int{0, 1, 777, 64 << 10, 1<<20 - 1, 1 << 20, 2 << 20}
+	for _, enc := range []string{"gzip", "br"} {
+		bodies := make([][]byte, len(sizes))
+		whole := make([][]byte, len(sizes))
+		open := make([][]byte, len(sizes))
+		for i, n := range sizes {
+			bodies[i] = compressBody(n, uint64(100+i))
+			whole[i] = newWriterCompress(t, enc, bodies[i])
+			open[i] = newWriterFlush(t, enc, bodies[i])
+		}
+		walk := sizeWalk(len(sizes))
+		for step, k := range walk {
+			// Alternate: flushed, then closed, then flushed... and the reverse
+			// on a second lap, so each pair is seen in each mode order.
+			for lap := 0; lap < 2; lap++ {
+				flushed := (step+lap)%2 == 0
+				var got []byte
+				var err error
+				if flushed {
+					got, err = CompressWithoutEnd(logger, enc, bodies[k])
+				} else {
+					got, err = Compress(logger, enc, bodies[k])
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := whole[k]
+				if flushed {
+					want = open[k]
+				}
+				if !bytes.Equal(got, want) {
+					t.Fatalf("%s step %d lap %d: %d bytes (flushed %v) gave %d bytes, a new writer %d", enc, step, lap, sizes[k], flushed, len(got), len(want))
+				}
+			}
+		}
+	}
+}

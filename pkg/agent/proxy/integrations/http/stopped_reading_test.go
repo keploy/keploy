@@ -61,7 +61,8 @@ func TestDecodeHTTPServesAnAnswerTheAppStoppedReadingWithoutItsEnd(t *testing.T)
 		{name: "an answer the app read none of the body of", header: map[string]string{"Content-Length": "0"}, held: true, chunked: true},
 		{name: "an HTTP/1.0 answer", header: map[string]string{"Content-Type": "text/plain", "Content-Length": "10"}, body: "0123456789", held: true, http10: true},
 		// A mock file can carry a head its recorder never writes: its
-		// framing headers are not served for a held answer.
+		// framing headers are not served for an answer the app stopped
+		// reading.
 		{name: "an answer with a Content-Length not its body's and Transfer-Encoding", header: map[string]string{"Content-Type": "text/plain", "Content-Length": "2000", "Transfer-Encoding": "chunked"},
 			body: "0123456789", held: true, chunked: true},
 		{name: "a whole answer", header: map[string]string{"Content-Type": "application/json", "Content-Length": "32"}, body: `{"id":"ch_1","status":"pending"}`, json: true},
@@ -250,7 +251,7 @@ func boundAppReads(t *testing.T, app net.Conn) {
 // a HEAD's with the Content-Length it was sent with (the size of the body a
 // GET gets), and the connection's next request is answered. The recorder
 // never records one so (its end is its head's); a mock file can.
-func TestDecodeHTTPServesAMarkedAnswerWithNoBodyWhole(t *testing.T) {
+func TestDecodeHTTPServesAnAnswerTheAppStoppedReadingWithNoBodyWhole(t *testing.T) {
 	for _, row := range []struct {
 		name, method string
 		status       int

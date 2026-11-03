@@ -225,97 +225,108 @@ func TestRecordV2_ThroughTheRelayAResponseTheClientClosedPartwayIsRecordedAsFarA
 		{name: "a 304 with a length, then bytes the client did not take", noBody: true,
 			head: "HTTP/1.1 304 Not Modified\r\nContent-Length: 2000\r\n\r\n", read: "HTTP/1.1 304 Not Modified\r\nContent-Length: 2000\r\n\r\n"},
 	} {
-		for _, proven := range []string{"", "1"} {
-			t.Run(row.name+"/KEPLOY_PROVEN="+proven, func(t *testing.T) {
-				t.Setenv("KEPLOY_PROVEN", proven)
-				c := newRelayedConn(t)
-				c.startRelay(t)
-				if !row.behind {
-					c.startParser(t)
+		// silent: the server sends nothing after the client's FIN, so the
+		// relay never says the stream ended where the client stopped: the
+		// client's end came first, and the same rows hold.
+		for _, silent := range []bool{false, true} {
+			for _, proven := range []string{"", "1"} {
+				after := "the rest after the FIN"
+				if silent {
+					after = "the server silent after the FIN"
 				}
-				write(t, c.app, c.src, jdkRequest(7))
-				relayed(t, c.dest, jdkRequest(7))
-				head := row.head
-				if head == "" {
-					head = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2000\r\n\r\n"
-				}
-				whole := head + body
-				read := row.read
-				if read == "" {
-					read = head + body[:500]
-				}
-				if _, err := c.dest.Write([]byte(read)); err != nil {
-					t.Fatal(err)
-				}
-				relayed(t, c.app, read)
-				if row.mark != "" {
-					c.sess.MarkMockIncomplete(row.mark)
-				}
-				if err := c.app.Close(); err != nil {
-					t.Fatal(err)
-				}
-				awaitFIN(t, c.dest)
-				if _, err := c.dest.Write([]byte(whole[len(read):])); err != nil {
-					t.Fatal(err)
-				}
-				if row.behind {
-					_ = c.dest.Close()
-					select {
-					case <-c.relayDone:
-					case <-time.After(10 * time.Second):
-						t.Fatal("the relay did not end once both sides had closed")
+				t.Run(row.name+"/"+after+"/KEPLOY_PROVEN="+proven, func(t *testing.T) {
+					t.Setenv("KEPLOY_PROVEN", proven)
+					c := newRelayedConn(t)
+					c.startRelay(t)
+					if !row.behind {
+						c.startParser(t)
 					}
-					c.startParser(t)
-				}
-				mocks := c.end(t)
-				if !row.leftOut {
-					if len(mocks) != 1 {
-						t.Fatalf("recorded %d mocks, want the one exchange, as far as the client read it", len(mocks))
+					write(t, c.app, c.src, jdkRequest(7))
+					relayed(t, c.dest, jdkRequest(7))
+					head := row.head
+					if head == "" {
+						head = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2000\r\n\r\n"
 					}
-					if row.noBody {
-						got := mocks[0].Spec.HTTPResp
-						if got == nil || got.StatusCode != 304 || got.Body != "" || got.Header["Content-Length"] != "2000" {
-							t.Fatalf("recorded %+v, want the 304 with its Content-Length of 2000 and no body", got)
+					whole := head + body
+					read := row.read
+					if read == "" {
+						read = head + body[:500]
+					}
+					if _, err := c.dest.Write([]byte(read)); err != nil {
+						t.Fatal(err)
+					}
+					relayed(t, c.app, read)
+					if row.mark != "" {
+						c.sess.MarkMockIncomplete(row.mark)
+					}
+					if err := c.app.Close(); err != nil {
+						t.Fatal(err)
+					}
+					awaitFIN(t, c.dest)
+					if !silent {
+						if _, err := c.dest.Write([]byte(whole[len(read):])); err != nil {
+							t.Fatal(err)
 						}
-						if f := mocks[0].Spec.Fault; f != nil {
-							t.Fatalf("the 304 is recorded with the fault %s, want it whole: its head is all of it", f)
+					}
+					if row.behind {
+						_ = c.dest.Close()
+						select {
+						case <-c.relayDone:
+						case <-time.After(10 * time.Second):
+							t.Fatal("the relay did not end once both sides had closed")
 						}
-					} else {
-						wantStoppedReading(t, mocks[0], body[:500])
+						c.startParser(t)
 					}
-					if s := c.spans.all(); len(s) != 0 || c.mgr.MocksLeftOut() != 0 {
-						t.Fatalf("left out %v (%d counted), want nothing", s, c.mgr.MocksLeftOut())
+					mocks := c.end(t)
+					if !row.leftOut {
+						if len(mocks) != 1 {
+							t.Fatalf("recorded %d mocks, want the one exchange, as far as the client read it", len(mocks))
+						}
+						if row.noBody {
+							got := mocks[0].Spec.HTTPResp
+							if got == nil || got.StatusCode != 304 || got.Body != "" || got.Header["Content-Length"] != "2000" {
+								t.Fatalf("recorded %+v, want the 304 with its Content-Length of 2000 and no body", got)
+							}
+							if f := mocks[0].Spec.Fault; f != nil {
+								t.Fatalf("the 304 is recorded with the fault %s, want it whole: its head is all of it", f)
+							}
+						} else {
+							wantStoppedReading(t, mocks[0], body[:500])
+						}
+						if s := c.spans.all(); len(s) != 0 || c.mgr.MocksLeftOut() != 0 {
+							t.Fatalf("left out %v (%d counted), want nothing", s, c.mgr.MocksLeftOut())
+						}
+						if w := c.warnings(); len(w) != 0 {
+							t.Fatalf("logged at %v: %q", w[0].Level, w[0].Message)
+						}
+						return
 					}
-					if w := c.warnings(); len(w) != 0 {
-						t.Fatalf("logged at %v: %q", w[0].Level, w[0].Message)
+					if len(mocks) != 0 {
+						t.Fatalf("recorded %d mock(s), the first a %d with a %d-byte body; want none: what the client took is no response",
+							len(mocks), mocks[0].Spec.HTTPResp.StatusCode, len(mocks[0].Spec.HTTPResp.Body))
 					}
-					return
-				}
-				if len(mocks) != 0 {
-					t.Fatalf("recorded %d mock(s), the first a %d with a %d-byte body; want none: what the client took is no response",
-						len(mocks), mocks[0].Spec.HTTPResp.StatusCode, len(mocks[0].Spec.HTTPResp.Body))
-				}
-				if n := c.mgr.MocksLeftOut(); n != 1 || len(c.spans.all()) != 1 {
-					t.Fatalf("%d mocks left out, spans %v; want the one exchange, spanned", n, c.spans.all())
-				}
-				reason, step := supervisor.LeftOutClientClosedPartway, "the client closed partway"
-				if row.mark != "" {
-					reason, step = row.mark+": "+supervisor.LeftOutClientClosedPartway, "reason=per_conn_cap"
-				}
-				if l := c.leftOut(reason); len(l) != 1 {
-					t.Fatalf("%d left-out lines with the reason %q, want one", len(l), reason)
-				} else if l[0].Message == supervisor.LeftOutWarnMsg && !strings.Contains(l[0].ContextMap()["next_step"].(string), step) {
-					t.Fatalf("the left-out WARN's next_step is %q, want the one of its cause (%q)", l[0].ContextMap()["next_step"], step)
-				}
-				if m, ok := c.sess.TakeMockIncomplete(); ok {
-					t.Fatalf("the mark %q is still set: the exchange reported under it did not take it", m)
-				}
-				for _, w := range c.warnings() {
-					if w.Message != supervisor.LeftOutWarnMsg {
-						t.Fatalf("logged at %v: %q", w.Level, w.Message)
+					if n := c.mgr.MocksLeftOut(); n != 1 || len(c.spans.all()) != 1 {
+						t.Fatalf("%d mocks left out, spans %v; want the one exchange, spanned", n, c.spans.all())
 					}
-				}
-			})
+					reason, step := supervisor.LeftOutClientClosedPartway, "the client closed partway"
+					if row.mark != "" {
+						reason, step = row.mark+": "+supervisor.LeftOutClientClosedPartway, "reason=per_conn_cap"
+					}
+					if l := c.leftOut(reason); len(l) != 1 {
+						t.Fatalf("%d left-out lines with the reason %q, want one", len(l), reason)
+					} else if l[0].Message == supervisor.LeftOutWarnMsg && !strings.Contains(l[0].ContextMap()["next_step"].(string), step) {
+						t.Fatalf("the left-out WARN's next_step is %q, want the one of its cause (%q)", l[0].ContextMap()["next_step"], step)
+					}
+					if m, ok := c.sess.TakeMockIncomplete(); ok {
+						t.Fatalf("the mark %q is still set: the exchange reported under it did not take it", m)
+					}
+					for _, w := range c.warnings() {
+						if w.Message != supervisor.LeftOutWarnMsg {
+							t.Fatalf("logged at %v: %q", w.Level, w.Message)
+						}
+					}
+				})
+			}
 		}
 	}
 }

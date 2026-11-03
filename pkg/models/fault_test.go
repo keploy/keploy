@@ -26,6 +26,8 @@ func TestFaultValidate(t *testing.T) {
 		{"truncate", Fault{Kind: FaultTruncate, BodyBytes: 10}, ""},
 		{"truncate after no body bytes", Fault{Kind: FaultTruncate}, ""},
 		{"delay", Fault{Kind: FaultDelay, Delay: 3 * time.Second}, ""},
+		{"stopped reading after the head", Fault{Kind: FaultStoppedReading, AfterHead: true, BodyBytes: 5}, ""},
+		{"stopped reading after the head, no body read", Fault{Kind: FaultStoppedReading, AfterHead: true}, ""},
 
 		{"no kind", Fault{}, "no kind"},
 		{"unknown kind", Fault{Kind: "tls_alert"}, "upgrade keploy"},
@@ -41,6 +43,8 @@ func TestFaultValidate(t *testing.T) {
 		{"negative body bytes", Fault{Kind: FaultTruncate, BodyBytes: -1}, "not negative"},
 		{"reset with body bytes and no head", Fault{Kind: FaultReset, BodyBytes: 5}, "set after_head"},
 		{"timeout with body bytes and no head", Fault{Kind: FaultTimeout, BodyBytes: 5}, "set after_head"},
+		{"stopped reading with no head", Fault{Kind: FaultStoppedReading}, "write kind timeout"},
+		{"stopped reading with a delay", Fault{Kind: FaultStoppedReading, AfterHead: true, Delay: time.Second}, "only kind delay"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.f.Validate()
@@ -75,6 +79,7 @@ func TestFaultString(t *testing.T) {
 		{&Fault{Kind: FaultTimeout}, "no answer until the application closed"},
 		{&Fault{Kind: FaultTimeout, AfterHead: true, BodyBytes: 3}, "upstream sent the head and 3 body bytes, then nothing until the application closed"},
 		{&Fault{Kind: FaultTruncate, BodyBytes: 10}, "upstream sent the head and 10 body bytes, then closed"},
+		{&Fault{Kind: FaultStoppedReading, AfterHead: true, BodyBytes: 5}, "the application read the head and 5 body bytes, then stopped reading and closed"},
 		{&Fault{Kind: FaultDelay, Delay: 1500 * time.Millisecond}, "answer held 1.5s"},
 		{&Fault{Kind: "tls_alert"}, `fault "tls_alert"`},
 		{nil, ""},
