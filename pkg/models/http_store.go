@@ -53,10 +53,10 @@ type HTTPStoreReader interface {
 	// read and is not given to Access. It must follow every call Access may
 	// mark or stop on; following one more only costs a load.
 	Follows(read, call *HTTPReq) bool
-	// Access reads calls, the HTTP calls served earlier in the test in the
-	// order they were served, each with its recorded request and answer,
-	// then read, a call Reads takes, with its recorded answer. A call it
-	// does not read is no write and no read.
+	// Access reads calls, the HTTP calls served earlier in the test that
+	// Follows takes for read, in the order they were served, each with its
+	// recorded request and answer, then read, a call Reads takes, with its
+	// recorded answer. A call it does not read is no write and no read.
 	Access(read *Mock, calls []*Mock) HTTPStoreAccess
 }
 
