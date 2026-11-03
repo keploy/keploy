@@ -95,6 +95,7 @@ func TestEachConnectionsMocksCarryTheWorkerInstanceTheKernelStampedItWith(t *tes
 	paired := ipv4Dest(t, "127.0.0.1:50051")
 	paired.KernelPid = self
 	c := &instanceCounter{fakeCounter: fakeCounter{dst: paired}, inst: map[uint64]uint32{1: 7, 2: 9}}
+	liveInstances(t, 5, 7, 9)
 	p, w := instanceProxy(t, byPort, c)
 	ctx, cancel := context.WithCancel(context.Background())
 	ready, done := make(chan error, 1), make(chan error, 1)
@@ -156,7 +157,7 @@ func TestARelayedRealConnectionIsTheWorkerInstanceTheKernelStampedItWith(t *test
 		t.Fatal(err)
 	}
 	p.real.Store(&realState{list: list, book: &realdeps.Book{}})
-	twoWorkers(p)
+	twoWorkers(t, p)
 	app, src := acceptedConn(t)
 	hdone := make(chan error, 1)
 	go func() { hdone <- p.handleConnection(context.Background(), p.inflight.track(src)) }()

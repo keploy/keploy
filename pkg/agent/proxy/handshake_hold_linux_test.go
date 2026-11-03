@@ -130,7 +130,7 @@ func TestAGivenUpConnectToARealDestinationIsItsOwnWorkersFailure(t *testing.T) {
 	silent := unansweredAddr(t)
 	p := realProxy(t, []string{silent}, nil)
 	p.setSession(&agent.Session{Mode: models.MODE_RECORD})
-	twoWorkers(p)
+	twoWorkers(t, p)
 	dest := ipv4Dest(t, silent)
 	dest.Instance, dest.KernelPid = workerFour.Instance, workerFour.Pid
 	d := p.decideHandshake(&goneAfterFirstLookup{fakeHandshakeDest: fakeHandshakeDest{dest: dest}})(context.Background(), appEnd, proxyEnd)

@@ -630,4 +630,10 @@ func TestAnEndedWorkersConnectionStampsNoInstance(t *testing.T) {
 	if r.InstanceGone(0) {
 		t.Fatal("a connection stamped with no instance was read as an ended worker's")
 	}
+	stamped := &models.Mock{ConnectionID: "1", EndedInstance: 1025}
+	r.NoteOriginIn("1", 42, 2049)
+	r.StampInstance(stamped)
+	if stamped.Instance != 0 || stamped.EndedInstance != 1025 {
+		t.Fatalf("a mock stamped as an ended worker's got instance %d, ended %d once its connection id was noted in a live worker; want 0, 1025 (the first stamp is final)", stamped.Instance, stamped.EndedInstance)
+	}
 }

@@ -168,6 +168,8 @@ func TestCorrelateScopesByWorkerInstance(t *testing.T) {
 	require.Equal(t, "b", testAt(windows, 0, 2, ts(20)))
 	require.EqualValues(t, 2, capturedOf(&models.Mock{Name: "m", SourcePID: 8, Instance: 2}).instance,
 		"a recorded mock is correlated by the instance it carries")
+	require.EqualValues(t, 1025, capturedOf(&models.Mock{Name: "m", SourcePID: 8, EndedInstance: 1025}).ended,
+		"a recorded mock of an ended worker is charged naming that worker")
 }
 
 func names(entries []models.MockEntry) []string {
