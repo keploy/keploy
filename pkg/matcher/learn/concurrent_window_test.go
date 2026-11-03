@@ -1871,6 +1871,46 @@ func TestAnEncodedTextGetsThePlainTextsAnswerWhateverUnreadPayloadWasServedBefor
 									t.Errorf("plain, the runs' text after %q made %q, %s, window %+v: %s from %q held %q (%s); want noise of the word", before[0], before[1], pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
 								}
 							}
+							// So too in a run of the URL-safe alphabet whose
+							// encoder escapes its '_' ("%5F") and not its
+							// '-': the word the first "%5F" leaves runs on
+							// past the '-' in the reading that keeps '-' and
+							// '_' inside a word ("5FIGE-YiBs..." up to the
+							// next "%5F", the read's digits in it), and
+							// stops at the '-' in the others ("5FIGE", the
+							// same on both sides). That longer word, which
+							// the run before it spells too, is searched
+							// where the escape stands: refused after a ':'
+							// made ';', noise with the ':' kept.
+							urlRun := func(v time.Time, word string) string {
+								return strings.ReplaceAll(base64.URLEncoding.EncodeToString([]byte("ok? a>b lead "+dotNetStamp(v)+" ab? "+word)), "_", "%5F")
+							}
+							for _, v := range []time.Time{recRun.read, fRun.read} {
+								r := urlRun(v, "created.")
+								end := strings.LastIndex(r, "%5F")
+								if !strings.HasPrefix(r, "b2s%5FIGE-") || strings.Count(r, "%5F") != 2 || strings.Count(r, "-") != 1 || strings.ContainsAny(r, "=+/") || !strings.HasPrefix(urlRun(v, "updated."), r[:end+3]) {
+									t.Fatalf("the URL-safe runs at %v do not share a word that runs past their '-', so this row tells nothing: %q", v, r)
+								}
+							}
+							if a, b := urlRun(recRun.read, "created."), urlRun(fRun.read, "created."); a[:strings.LastIndex(a, "%5F")] == b[:strings.LastIndex(b, "%5F")] {
+								t.Fatalf("the word past the '-' holds none of the read's digits, the same on both sides, so this row tells nothing: %q", a)
+							}
+							for _, before := range [][2]string{{":", ";"}, {":", ":"}} {
+								of := func(v time.Time, sep string) string {
+									return "tok " + urlRun(v, "created.") + sep + urlRun(v, "updated.") + " ok"
+								}
+								if ln := learnOf(of(recRun.read, before[0]), of(fRun.read, before[1])); before[0] != before[1] && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11")) {
+									t.Errorf("encoded in the URL-safe alphabet, its '_' escaped, after %q made %q, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", before[0], before[1], pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+								} else if before[0] == before[1] && (ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "") {
+									t.Errorf("encoded in the URL-safe alphabet, its '_' escaped, after %q, %s, window %+v: %s from %q held %q (%s); want noise of the word", before[0], pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+								}
+								plainOf := func(v time.Time, sep string) string {
+									return "tok ok? a>b lead " + dotNetStamp(v) + " ab? created." + sep + "ok? a>b lead " + dotNetStamp(v) + " ab? updated. ok"
+								}
+								if ln := learnOf(plainOf(recRun.read, before[0]), plainOf(fRun.read, before[1])); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+									t.Errorf("plain, the URL-safe runs' text after %q made %q, %s, window %+v: %s from %q held %q (%s); want noise of the word", before[0], before[1], pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+								}
+							}
 							plainMid := func(v time.Time) string {
 								return "tok ok? a>b lead " + dotNetStamp(v) + " created. ok? a>b lead " + dotNetStamp(v) + " updated. ok"
 							}
