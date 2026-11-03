@@ -170,15 +170,27 @@ func (p *Proxy) realOrPassthroughLabels(tgid uint32) []string {
 // instance the kernel stamped it with (0 for none, and on hooks that stamp
 // none), and its process. A stamp whose worker has ended
 // (starts.Registry.InstanceGone) is no worker's: never a later claim's of
-// its id, and named as the ended worker's.
+// its id, and named as the ended worker's (realUseOrigin).
 func realOrigin(dest *agent.NetworkAddress) realdeps.Origin {
 	if dest == nil {
 		return realdeps.Origin{}
 	}
-	if starts.Default.InstanceGone(dest.Instance) {
-		return realdeps.Origin{Pid: dest.KernelPid, Ended: agent.InstanceLabel(dest.Instance)}
+	return realUseOrigin(realdeps.Origin{Instance: dest.Instance, Pid: dest.KernelPid})
+}
+
+// realUseOrigin is who a use of a mock.real connection from from is
+// charged to, decided as keploy reads it: from, unless from's worker has
+// ended by then (starts.Registry.InstanceGone), when the use is from no
+// live worker, named as the ended worker's. So bytes a process the worker
+// left behind sends after its end, on a connection it opened before, are
+// counted as a call keploy cannot attribute to each open test, as on a
+// connection it opens after the end; never kept as the ended worker's,
+// whose test is over and counts nothing more.
+func realUseOrigin(from realdeps.Origin) realdeps.Origin {
+	if starts.Default.InstanceGone(from.Instance) {
+		return realdeps.Origin{Pid: from.Pid, Ended: agent.InstanceLabel(from.Instance)}
 	}
-	return realdeps.Origin{Instance: dest.Instance, Pid: dest.KernelPid}
+	return from
 }
 
 // realList is the run's list when one is installed and the switch is on.
@@ -289,7 +301,9 @@ type treeRealConn struct {
 	p     *Proxy
 	label string
 	id    int64
-	from  realdeps.Origin
+	// from is the connection's origin at its accept; each use is charged
+	// by realUseOrigin(from), decided as keploy reads it.
+	from realdeps.Origin
 	// live: the live handler serves it, and may capture it as a test case
 	// (Tracker.SentLive).
 	live bool
@@ -298,10 +312,11 @@ type treeRealConn struct {
 func (c *treeRealConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
 	if n > 0 {
+		from := realUseOrigin(c.from)
 		if c.live {
-			c.p.realTracker.SentLive(c.from, c.id, c.label)
+			c.p.realTracker.SentLive(from, c.id, c.label)
 		} else {
-			c.p.realTracker.Sent(c.from, c.id, c.label)
+			c.p.realTracker.Sent(from, c.id, c.label)
 		}
 	}
 	return n, err
@@ -348,7 +363,7 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 			}
 		}
 	}
-	p.realTracker.Dialed(from, connID, dec.Label, err == nil)
+	p.realTracker.Dialed(realUseOrigin(from), connID, dec.Label, err == nil)
 	if err != nil {
 		logger.Debug("a mock.real destination refused or could not be reached; the app sees its connection reset", zap.Error(err))
 		if tc, ok := tcpConnOf(client); ok {
@@ -360,7 +375,7 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 	logger.Debug("relaying a connection to a mock.real destination")
 	r := &realdeps.Relay{
 		Client: client, In: br, Dest: dest, Check: dec.Check,
-		Sent:     func(int) { p.realTracker.Sent(from, connID, dec.Label) },
+		Sent:     func(int) { p.realTracker.Sent(realUseOrigin(from), connID, dec.Label) },
 		Answered: func() { p.realTracker.Answered(dec.Label) },
 		H2:       func() { p.realTracker.H2(from, dec.Label) },
 		Refused: func(why string) {
