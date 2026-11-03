@@ -402,23 +402,45 @@ func TestUnderMockReplayAnOlderRunsTeardownIsBoundedByItsOwnClock(t *testing.T) 
 	}
 	// The replay: T1 and T2 (S's), then T3 (L's), then the client's
 	// disconnect.
-	mm.ServeExactPool("k", slice)
-	perTestReads(t, mm, "before the first test")
-	for _, tc := range []struct {
-		name string
-		own  *models.Mock
-	}{{"T1", s1}, {"T2", s2}, {"T3", l1}} {
-		mm.ServeExactTest(tc.name, []*models.Mock{tc.own})
-		if !mm.DeleteFilteredMock(*tc.own) {
-			t.Fatalf("precondition: %s's own recording did not answer it", tc.name)
-		}
+	replay := func(t *testing.T, mm *MockManager) {
+		t.Helper()
 		mm.ServeExactPool("k", slice)
+		perTestReads(t, mm, "before the first test")
+		for _, tc := range []struct {
+			name string
+			own  *models.Mock
+		}{{"T1", s1}, {"T2", s2}, {"T3", l1}} {
+			mm.ServeExactTest(tc.name, []*models.Mock{tc.own})
+			if !mm.DeleteFilteredMock(*tc.own) {
+				t.Fatalf("precondition: %s's own recording did not answer it", tc.name)
+			}
+			mm.ServeExactPool("k", slice)
+		}
+		perTestReads(t, mm, "after the last test", "s-end")
+		if !mm.DeleteFilteredMock(*sEnd) {
+			t.Fatal("the call after the last test (endSessions) was not answered by S's recording of it")
+		}
 	}
-	perTestReads(t, mm, "after the last test", "s-end")
-	if !mm.DeleteFilteredMock(*sEnd) {
-		t.Fatal("the call after the last test (endSessions) was not answered by S's recording of it")
-	}
+	replay(t, mm)
 
+	// The same set with every test's recordings staged in the trees and
+	// none read from disk: the trees' recordings bound each clock apart
+	// too.
+	t.Run("the tests' recordings in the trees", func(t *testing.T) {
+		mm := stagedManager(t, []*models.Mock{sBoot, s1, sGap, s2, sEnd, l1}, nil)
+		mm.SetPoolOwners(owners)
+		mm.SetPoolNames(slice)
+		after := mm.teardownAfter("k", s)
+		if after == nil || !after(sEnd.Spec.ReqTimestampMock) {
+			t.Fatal("s-end, sent after every test S recorded, is not the teardown of S's clock: a newer run's test in the trees, on another clock, bounded it")
+		}
+		for _, mk := range []*models.Mock{sBoot, sGap} {
+			if after(mk.Spec.ReqTimestampMock) {
+				t.Errorf("FALSE GREEN? %s, sent before a test of its own clock in the trees, reads as the teardown", mk.Name)
+			}
+		}
+		replay(t, mm)
+	})
 	t.Run("a recording on no clock bounds every clock", func(t *testing.T) {
 		lu := exactMongo("l-untrusted", 44*time.Second, models.LifetimePerTest)
 		mm := stagedManager(t, []*models.Mock{sBoot, sGap, sEnd}, nil)
