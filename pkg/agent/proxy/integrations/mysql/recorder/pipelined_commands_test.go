@@ -56,7 +56,7 @@ func okResponseWithAffectedRows(seq byte, affectedRows byte) []byte {
 // server" (issue #4262).
 func TestRecordV2_PipelinedStreamedBlobExecuteIsRecorded(t *testing.T) {
 	t.Parallel()
-	blob := &mysql.ColumnDefinition41{Catalog: "def", Name: "?", CharacterSet: 0x3f, Type: byte(mysql.FieldTypeBLOB)}
+	blob := &mysql.ColumnDefinition41{Catalog: "def", Name: "?", FixedLength: 0x0c, CharacterSet: 0x3f, Type: byte(mysql.FieldTypeBLOB)}
 	execute := wrapPacket([]byte{
 		mysql.COM_STMT_EXECUTE,
 		byte(undecodableStmtID), 0x00, 0x00, 0x00,

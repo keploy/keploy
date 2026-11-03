@@ -1991,7 +1991,7 @@ func TestRecordV2_ACursorsFetchesAreFramedAndLeftOut(t *testing.T) {
 			if rs == nil || len(rs.Columns) != c.cols || len(rs.Rows) != 0 {
 				t.Fatalf("the EXECUTE recorded %s, want %d columns and no rows", describeBinary(rs), c.cols)
 			}
-			replayed, err := query.EncodeBinaryResultSet(context.Background(), zap.NewNop(), rs)
+			replayed, err := query.EncodeBinaryResultSet(context.Background(), zap.NewNop(), rs, 0)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -85,6 +85,10 @@ testdata
 !pkg/platform/yaml/testdb/testdata/**
 !pkg/platform/yaml/reportdb/testdata/
 !pkg/platform/yaml/reportdb/testdata/**
+# A mysqlclient connection to MariaDB as a relay captured it: recorded and
+# replayed, it must be served byte for byte as the server sent it.
+!pkg/agent/proxy/integrations/mysql/replayer/testdata/
+!pkg/agent/proxy/integrations/mysql/replayer/testdata/**
 
 #Ignore the c and header files
 *.c

@@ -429,9 +429,9 @@ func TestEncodeToBinaryOverARecordedCorpus(t *testing.T) {
 		}
 		if c := wireCacheOf(a.Message); c != nil {
 			sets++
-			n := len(c.Load())
+			n := len(c.Load(0))
 			payload += n
-			cost += int64(cap(c.Load())) + mysql.WireEntryCost
+			cost += int64(cap(c.Load(0))) + mysql.WireEntryCost
 			largest = max(largest, n)
 		}
 	}
