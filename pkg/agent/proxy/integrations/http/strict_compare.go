@@ -251,7 +251,12 @@ type strictField struct {
 	// keploy.yml's noise guards with patterns a side is outside of, that
 	// (matcher.PatternWhy).
 	why string
-	// clock: why is a refused read of the application's clock.
+	// clock: the field is a read of the application's clock a replay
+	// refused (clockDiffs), not a part the walk found differing. It says
+	// nothing of the call's route (routeMatches): the walk excuses a place
+	// the learn step learned as a read of the clock, a path segment too, so
+	// its recording is of the call's route whatever the read's check says.
+	// A recording of another route drops it (walkOnly).
 	clock bool
 }
 

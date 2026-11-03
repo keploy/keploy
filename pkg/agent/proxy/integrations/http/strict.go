@@ -406,8 +406,9 @@ var strictDiffs atomic.Int64
 
 // strictCompare compares the live request with each recording of pool, in
 // order (strictDiff): fits are those that are this very call, and near is
-// the closest of the others (closerThan), its mock nil when there is none,
-// and its fields given no reason of their own when it is of another route.
+// the closest of the others (closerThan), its mock nil when there is none.
+// A recording of another route is ranked and named by the walk's fields
+// alone (walkOnly).
 func strictCompare(ctx context.Context, input *req, live destination, pool []*models.Mock, n strictNoise) (fits []*models.Mock, near nearest, err error) {
 	for _, m := range pool {
 		if ctx.Err() != nil {
@@ -418,37 +419,49 @@ func strictCompare(ctx context.Context, input *req, live destination, pool []*mo
 			fits = append(fits, m)
 			continue
 		}
-		if c := (nearest{mock: m, diffs: d, route: routeMatches(d)}); c.closerThan(near) {
+		c := nearest{mock: m, diffs: d, route: routeMatches(d)}
+		if !c.route {
+			// A recording of another route (method, destination or path)
+			// is not this call: a read of the clock it learned is no read
+			// this call made, and checking it would blame the clock for a
+			// call no recording is. It is compared by the walk alone, which
+			// excuses a place learned as a read of the clock as it does one
+			// learned as noise, and no field of it is refused for a reason
+			// of its own.
+			c.diffs = walkOnly(d)
+		}
+		if c.closerThan(near) {
 			near = c
 		}
-	}
-	if !near.route {
-		// The closest recording is of another route (method, destination
-		// or path): it is not this call, so no field of it is refused for a
-		// reason of its own. A read of the clock it learned is no read this
-		// call made, and naming it would blame the clock for a call no
-		// recording is; the miss names only the fields that differ.
-		near.diffs = withoutReasons(near.diffs)
 	}
 	return fits, near, nil
 }
 
-// withoutReasons are fields with no reason of their own (strictField.why,
-// strictField.clock): each still differs, for no reason but its value.
-func withoutReasons(fields []strictField) []strictField {
-	out := make([]strictField, len(fields))
-	for i, f := range fields {
-		f.why, f.clock = "", false
-		out[i] = f
+// walkOnly are the fields of fields the walk found differing, not the
+// refused reads of the clock (strictField.clock), each with only its name
+// and how it differs (diff, shape): no reason of any kind a field may carry,
+// nor what kind it is.
+func walkOnly(fields []strictField) []strictField {
+	out := make([]strictField, 0, len(fields))
+	for _, f := range fields {
+		if !f.clock {
+			out = append(out, strictField{diff: f.diff, shape: f.shape})
+		}
 	}
 	return out
 }
 
 // routeMatches reports whether a recording that differs by diffs is of the
 // live request's route: the same method, destination (host or container)
-// and path.
+// and path. A refused read of the application's clock (strictField.clock)
+// is no part of the route, though one in a path segment is named "path":
+// the walk excused that segment, so it is of the call's route, and its
+// refusal keeps its reason.
 func routeMatches(diffs []strictField) bool {
 	for _, d := range diffs {
+		if d.clock {
+			continue
+		}
 		switch d.diff.Path {
 		case "method", "host", "container", "path":
 			return false
