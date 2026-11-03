@@ -24,6 +24,7 @@ func derivedAuthored() *models.Authored {
 		Reason:  "declined card",
 		Source:  "TestCheckout/mock-7",
 		Request: "sha256:0f1e",
+		Answer:  "sha256:7c2d",
 		Delta: &models.AuthoredDelta{
 			Status:     402,
 			Body:       &body,
@@ -44,7 +45,7 @@ func TestAnAuthoredBlockRoundTrips(t *testing.T) {
 	empty := ""
 	for _, a := range []*models.Authored{
 		derivedAuthored(),
-		{How: models.AuthoredGenerated, Reason: "provider times out", Request: "sha256:aa", Malformed: true},
+		{How: models.AuthoredGenerated, Reason: "provider times out", Request: "sha256:aa", Answer: "sha256:bb", Malformed: true},
 		{How: models.AuthoredDerived, Reason: "empty answer", Source: "TestA/mock-1", Delta: &models.AuthoredDelta{Body: &empty}},
 	} {
 		t.Run(a.Reason, func(t *testing.T) {
@@ -64,6 +65,9 @@ func TestAnAuthoredBlockRoundTrips(t *testing.T) {
 			text := buf.String()
 			if !strings.Contains(text, "\nauthored:\n") || !strings.Contains(text, "reason: "+a.Reason) {
 				t.Fatalf("the block is not a legible top-level key of the document:\n%s", text)
+			}
+			if a.Answer != "" && !strings.Contains(text, "answer: "+a.Answer) {
+				t.Fatalf("the answer's digest is not a legible key of the block:\n%s", text)
 			}
 			var back yaml.NetworkTrafficDoc
 			if err := yamlLib.Unmarshal(buf.Bytes(), &back); err != nil {

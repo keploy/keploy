@@ -27,7 +27,7 @@ func everyFieldDoc(t *testing.T) *NetworkTrafficDoc {
 		Clocks:       map[string]models.ClockOffset{"req.header.Date": {Min: time.Second, Max: 2 * time.Second, Zone: "UTC"}},
 		Real:         []string{"localhost:5432", "auth.example.com:443"},
 		Authored: &models.Authored{How: models.AuthoredDerived, Reason: "declined card", Source: "checkout::TestCheckout/mock-1",
-			Request: "sha256:5d1e", Malformed: true, Delta: &models.AuthoredDelta{Status: 402, Body: &body,
+			Request: "sha256:5d1e", Answer: "sha256:9a0b", Malformed: true, Delta: &models.AuthoredDelta{Status: 402, Body: &body,
 				JSONPatch: `[{"op":"add","path":"/code","value":"declined"}]`, Header: map[string]string{"Retry-After": "5"}, DropHeader: []string{"Etag"}}},
 		Origin: &models.Origin{Clock: "realtime", Comm: "app", Exe: "/usr/bin/app"},
 	}
