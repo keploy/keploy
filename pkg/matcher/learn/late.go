@@ -35,6 +35,9 @@ import (
 //     request or of a value the test gave (served: each Earlier.Seen's
 //     live value, as F gave it, the test sent it or the application sent
 //     it), holding live anywhere;
+//   - a place of served keploy cannot read (Earlier.Unread): the test
+//     case's own request, or the run's places past its bound, any of which
+//     may hold live;
 //   - a recording F gave earlier in the set that could not be read
 //     (offsetPlaces.unread).
 //
@@ -46,6 +49,9 @@ func (dc *DriftCache) lateServes(live string, served []Earlier, raw []Raw, op *o
 		return nil
 	}
 	for _, e := range served {
+		if e.Unread != "" {
+			return nil
+		}
 		for _, s := range e.Seen {
 			if strings.Contains(s.Live, live) {
 				return nil

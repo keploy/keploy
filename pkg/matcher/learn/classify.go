@@ -109,7 +109,8 @@ type Earlier struct {
 	// kind); of a Run place, that the run keeps no more of the set's tests'
 	// places, past its bound (Tracker.keepRun), the reason itself. It has
 	// no Seen, and every value that changed is refused (ClassifyIn,
-	// requestUnread), never learned as noise or an echo.
+	// requestUnread), never learned as noise or an echo, and names no late
+	// call (lateServes).
 	Unread string
 	// Gave, of a Given place, says it is a value the running test gave keploy
 	// (POST /agent/scope/given; TestGiven) rather than its test case's

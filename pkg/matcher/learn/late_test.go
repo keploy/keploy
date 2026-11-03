@@ -595,12 +595,15 @@ func TestALateCallNamesThePreviousTestsServeHandedToTheCall(t *testing.T) {
 // may hold it. Where a serve of the call's own test (as recorded, or by
 // F's view of it), a start-up serve, a recording F gave in more than one
 // test, a serve whose view keploy cannot tell, a leaf of an exchange F
-// served leaf by leaf, or the test case's own request holds it too, the
-// reason says keploy cannot name where the value came from, never that
-// the call is late or that mock-22 gave it. A recording F never served, or
-// served only after the call, gave the application nothing, and one F gave
-// with another value leaves mock-22 the one explanation. The verdict stays
-// a refusal either way.
+// served leaf by leaf (of the call's own test or the pool's), an earlier
+// test's call the application made, a value the test gave keploy, or the
+// test case's own request holds it too, or where keploy cannot read the
+// test case's request or the run's places past its bound, the reason says
+// keploy cannot name where the value came from, never that the call is
+// late or that mock-22 gave it. A recording F never served, or served only
+// after the call, gave the application nothing, and one F gave, the
+// application sent or the test sent or gave with another value leaves
+// mock-22 the one explanation. The verdict stays a refusal either way.
 func TestALateCallIsNamedOnlyWhereNothingElseGaveTheValue(t *testing.T) {
 	const path = "body.Key.Id.S"
 	asRecorded := func(x Raw) Raw { return x.ServedAsRecorded() }
@@ -624,9 +627,35 @@ func TestALateCallIsNamedOnlyWhereNothingElseGaveTheValue(t *testing.T) {
 			{Side: Response, Leaf: Leaf{Path: "body.ref", Type: String, Value: lateOtherID}, Live: gave},
 		}}
 	}
-	request := Earlier{Mock: "test-4", Given: true, Seen: []Seen{
-		{Side: Request, Leaf: Leaf{Path: "body.ref", Type: String, Value: lateOtherID}, Live: "ref " + lateLiveID},
-	}}
+	// request is the test case's own request, whose leaf keploy test sent
+	// holding sent.
+	request := func(sent string) Earlier {
+		return Earlier{Mock: "test-4", Given: true, Seen: []Seen{
+			{Side: Request, Leaf: Leaf{Path: "body.ref", Type: String, Value: lateOtherID}, Live: "ref " + sent},
+		}}
+	}
+	// pool is an exchange F served leaf by leaf from the pool, no
+	// recording of the call's own test, whose answer's leaf F gave as gave.
+	pool := func(gave string) Earlier {
+		x := exchange(gave)
+		x.Own = false
+		return x
+	}
+	// ran is an earlier test's call whose request leaf the application
+	// sent as sent (a place of the run's: Tracker's ranCalls).
+	ran := func(sent string) Earlier {
+		return Earlier{Mock: "mock-12", Run: true, Seen: []Seen{
+			{Side: Request, Leaf: Leaf{Path: "body.id", Type: String, Value: lateOtherID}, Live: sent, Place: "body.id"},
+		}}
+	}
+	// gave is a value the running test gave keploy, as it gave it.
+	gave := func(v string) Earlier { return TestGiven("test 4", "given:leadId", lateOtherID, v) }
+	// unreadRequest and runFull are places keploy cannot read: the test
+	// case's own request, and the run's places past its bound.
+	unreadRequest := Earlier{Mock: "test-4", Given: true, Unread: "its body declares no media type (no Content-Type) and its bytes are no text"}
+	runFull := Earlier{Mock: "mock-12", Run: true, Unread: runFullWhy("mock-12", 1<<20)}
+	// anotherID is an id none of the call, its recording or mock-22 holds.
+	const anotherID = "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f"
 	for _, c := range []struct {
 		name    string
 		raw     []Raw
@@ -644,7 +673,16 @@ func TestALateCallIsNamedOnlyWhereNothingElseGaveTheValue(t *testing.T) {
 			return x.ServedChanged(lateMsg("mock-33", 40*time.Second, lateLiveID), lateMsg("mock-33", 40*time.Second, lateRecID))
 		})}, false},
 		{"an exchange F served leaf by leaf gave it", nil, []Earlier{exchange(lateLiveID)}, []GivenPlaces{older}, false},
-		{"the test case's own request holds it", nil, []Earlier{request}, []GivenPlaces{older}, false},
+		{"the test case's own request holds it", nil, []Earlier{request(lateLiveID)}, []GivenPlaces{older}, false},
+		{"an exchange F served leaf by leaf from the pool gave it", nil, []Earlier{pool(lateLiveID)}, []GivenPlaces{older}, false},
+		{"an earlier test's call the application made carried it", nil, []Earlier{ran(lateLiveID)}, []GivenPlaces{older}, false},
+		{"a value the test gave keploy holds it", nil, []Earlier{gave(lateLiveID)}, []GivenPlaces{older}, false},
+		{"keploy could not read the test case's own request", nil, []Earlier{unreadRequest}, []GivenPlaces{older}, false},
+		{"the run keeps no more places, past its bound", nil, []Earlier{runFull}, []GivenPlaces{older}, false},
+		{"an earlier test's call the application made carried another id", nil, []Earlier{ran(anotherID)}, []GivenPlaces{older}, true},
+		{"a value the test gave keploy is another id", nil, []Earlier{gave(anotherID)}, []GivenPlaces{older}, true},
+		{"the test case's own request holds another id", nil, []Earlier{request(anotherID)}, []GivenPlaces{older}, true},
+		{"an exchange F served leaf by leaf from the pool gave another id", nil, []Earlier{pool(anotherID)}, []GivenPlaces{older}, true},
 		{"a serve of the call's own test gave another id", []Raw{own(lateOtherID, nil)}, nil, []GivenPlaces{older}, true},
 		{"a recording of the call's own test F never served holds it", []Raw{lateMsg("mock-58", 300*time.Millisecond, lateLiveID)}, nil, []GivenPlaces{older}, true},
 		{"a recording F served only after the call holds it", []Raw{after}, nil, []GivenPlaces{older}, true},
