@@ -292,7 +292,7 @@ type lostScope struct {
 // procStartTime is process pid's start time (/proc/<pid>/stat field 22), so a
 // pid another process took since is told apart; "" when the agent cannot see
 // a live process there: pid 0 (a harness that sends none) or 1, a process
-// that has exited (a zombie too), a kernel thread (a pid from another pid
+// every thread of which has exited (a zombie too), a kernel thread (a pid from another pid
 // namespace can name one), or not Linux. The scope API's pid is the worker's
 // in the agent's pid namespace: keploy's container flow puts the app in the
 // agent's.
@@ -325,7 +325,9 @@ func procStatStart(pid int) (string, error) {
 		return "", nil
 	}
 	// f[0] is the state, f[6] the flags (field 9); PF_KTHREAD is 0x00200000.
-	if f[0] == "Z" || f[0] == "X" || f[0] == "x" {
+	// A process that reads Z has exited only once every thread of it has
+	// (zombieExited): one whose main thread exited runs on.
+	if f[0] == "X" || f[0] == "x" || (f[0] == "Z" && zombieExited(pid)) {
 		return "", nil
 	}
 	if flags, err := strconv.ParseUint(f[6], 10, 64); err != nil || flags&0x00200000 != 0 {
@@ -335,7 +337,7 @@ func procStatStart(pid int) (string, error) {
 }
 
 // workerGone reports whether the worker at pid, whose start time was start at
-// its test's begin, is gone: it exited (a zombie too), or its pid is another
+// its test's begin, is gone: every thread of it exited (a zombie too), or its pid is another
 // process's now. A stat the agent could not read for any other reason (out of
 // file descriptors on a loaded machine, a denied read) tells nothing, and the
 // test of a worker that may be alive is never failed for it.

@@ -655,7 +655,8 @@ func TestGetOutgoingGivesTheHeldClockBack(t *testing.T) {
 }
 
 // A holder's worker is gone only when its stat is no longer there or names
-// another process (a zombie, a reused pid); a stat the agent cannot read for
+// another process (a zombie every thread of which exited, a reused pid): one
+// whose main thread exited while another thread of it runs is not; a stat the agent cannot read for
 // another reason, as when it is out of file descriptors under load, never
 // judges a worker that may be alive lost.
 func TestWorkerGoneOnlyWhenTheProcessIsNotThere(t *testing.T) {
@@ -671,27 +672,36 @@ func TestWorkerGoneOnlyWhenTheProcessIsNotThere(t *testing.T) {
 		name string
 		read func(int) ([]byte, error)
 		gone bool
+		// threadRuns: a thread of the process runs while its stat reads Z.
+		threadRuns bool
 	}{
-		{"alive, same start", func(int) ([]byte, error) { return stat("S", "100"), nil }, false},
-		{"another process on the pid", func(int) ([]byte, error) { return stat("S", "200"), nil }, true},
-		{"a zombie", func(int) ([]byte, error) { return stat("Z", "100"), nil }, true},
+		{"alive, same start", func(int) ([]byte, error) { return stat("S", "100"), nil }, false, false},
+		{"another process on the pid", func(int) ([]byte, error) { return stat("S", "200"), nil }, true, false},
+		{"a zombie", func(int) ([]byte, error) { return stat("Z", "100"), nil }, true, false},
+		{"its main thread exited, another runs", func(int) ([]byte, error) { return stat("Z", "100"), nil }, false, true},
 		{"exited", func(int) ([]byte, error) {
 			return nil, &fs.PathError{Op: "open", Path: "/proc/42/stat", Err: syscall.ENOENT}
-		}, true},
+		}, true, false},
 		{"exited mid-read", func(int) ([]byte, error) {
 			return nil, &fs.PathError{Op: "read", Path: "/proc/42/stat", Err: syscall.ESRCH}
-		}, true},
+		}, true, false},
 		{"out of file descriptors", func(int) ([]byte, error) {
 			return nil, &fs.PathError{Op: "open", Path: "/proc/42/stat", Err: syscall.EMFILE}
-		}, false},
+		}, false, false},
 		{"a denied read", func(int) ([]byte, error) {
 			return nil, &fs.PathError{Op: "open", Path: "/proc/42/stat", Err: syscall.EACCES}
-		}, false},
+		}, false, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			prev := readProcStat
+			prev, prevExited := readProcStat, zombieExited
 			readProcStat = c.read
-			t.Cleanup(func() { readProcStat = prev })
+			zombieExited = func(pid int) bool {
+				if pid != 42 {
+					t.Fatalf("asked whether process %d exited, not 42", pid)
+				}
+				return !c.threadRuns
+			}
+			t.Cleanup(func() { readProcStat, zombieExited = prev, prevExited })
 			if got := workerGone(42, "100"); got != c.gone {
 				t.Fatalf("workerGone = %v, want %v", got, c.gone)
 			}

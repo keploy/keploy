@@ -48,6 +48,10 @@ func procStart(pid int) (uint64, bool) {
 	return startTimeKey(t), true
 }
 
+// zombieExited is true: procStatStart reads a /proc, which XNU has not, so
+// it never asks.
+var zombieExited = func(int) bool { return true }
+
 // procDescends reports whether pid is ancestor or one of its descendants.
 func procDescends(pid, ancestor int) bool {
 	for i := 0; i < 64 && pid > 1; i++ {
