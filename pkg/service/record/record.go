@@ -1024,8 +1024,11 @@ const drainProgressEvery = 5 * time.Second
 // keploy a second time from sudo, as the first does, and taken for a second
 // Ctrl+C it gave the drain up at its start. A notice is given at the first
 // tick, whenever the drain moves, and at the tick that makes the offer, so the
-// user is told as soon as it is.
-func (r *Recorder) reportDrainProgress(every time.Duration) (stop func()) {
+// user is told as soon as it is. It returns the stop, and ended, closed once
+// it has ended (at the stop, or at the press that answered its offer), its
+// offer withdrawn first: the frame drain's offer is this one until then
+// (utils.DrainErrGroupProgressCarried).
+func (r *Recorder) reportDrainProgress(every time.Duration) (ended <-chan struct{}, stop func()) {
 	done := make(chan struct{})
 	exited := make(chan struct{})
 	start := r.frameProgress.Load()
@@ -1062,10 +1065,49 @@ func (r *Recorder) reportDrainProgress(every time.Duration) (stop func()) {
 			last, lastHolds = now, holds
 		}
 	}()
-	return func() {
+	return exited, func() {
 		close(done)
 		<-exited
 	}
+}
+
+// drainFrameStreams waits for the frame streams' group g to drain (the stop's
+// "record-req" drain), with its progress reported while it does: the
+// reporter's offer to end at the next interrupt is the drain's too, so one
+// offer stands at a time, and a press that answered it is not taken as the
+// drain's own. It notes how the drain ended (noteFrameDrainEnd) and returns
+// it.
+func (r *Recorder) drainFrameStreams(g *errgroup.Group) utils.DrainEnd {
+	reported, stopReport := r.reportDrainProgress(drainProgressEvery)
+	defer stopReport()
+	err, end := utils.DrainErrGroupProgressCarried(r.drainClock, r.logger, "record-req", g, teardownDrainStall, r.drainProgress, reported)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to stop request processing")
+	}
+	r.noteFrameDrainEnd(end)
+	return end
+}
+
+// drainBeforeComposeAgentEnds drains the frame streams of a compose agent
+// that compose is stopping (drain), reads what must be read while it is up
+// (reads), and then sees it to its end (composeAgentEnder), told how the
+// drain ended: one given up, at a stall or at the user's interrupt, may hold
+// its stream open, and the agent waits for that stream, so it is told to go.
+func (r *Recorder) drainBeforeComposeAgentEnds(drain func() utils.DrainEnd, reads func()) {
+	end := drain()
+	reads() // while the agent is up
+	if e, ok := r.instrumentation.(composeAgentEnder); ok {
+		e.EndComposeAgent(end)
+	}
+}
+
+// recordDrainGivenUp says why the record drain, which ended as end, gave its
+// group up: the user's interrupt after its offer, or a stall.
+func recordDrainGivenUp(end utils.DrainEnd) string {
+	if end == utils.DrainStopped {
+		return "the record drain was given up at the user's interrupt"
+	}
+	return "the record drain made no progress, so keploy gave it up"
 }
 
 // noteFrameDrainEnd notes how the drain of the frame streams ended. Only a
@@ -1737,13 +1779,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// stop killed nothing.
 	drainFrames := func() utils.DrainEnd {
 		reqCtxCancel()
-		defer r.reportDrainProgress(drainProgressEvery)()
-		err, end := utils.DrainErrGroupProgressOn(r.drainClock, r.logger, "record-req", reqErrGrp, teardownDrainStall, r.drainProgress)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to stop request processing")
-		}
-		r.noteFrameDrainEnd(end)
-		return end
+		return r.drainFrameStreams(reqErrGrp)
 	}
 	// Under docker compose the agent is a service of the app's own stack
 	// (keploy injects it), so taking the stack down takes the agent, and
@@ -1770,14 +1806,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					r.reportRealRun(ctx)
 					capWatch.afterTestCases(ctx)
 				}
-				end := drainFrames()
-				capWatch.waitForReads() // while the agent is up
-				if e, ok := r.instrumentation.(composeAgentEnder); ok {
-					// A drain given up (a stall, or the user's interrupt)
-					// may hold its stream open, and the agent waits for
-					// that stream: it is told to go.
-					e.EndComposeAgent(end)
-				}
+				r.drainBeforeComposeAgentEnds(drainFrames, capWatch.waitForReads)
 				return
 			}
 			drainFrames()
@@ -1890,14 +1919,16 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		}
 
 		// recordDrainedCleanly gates the end-of-recording hook below. It stays true
-		// only if this drain actually joined every persist goroutine; on the
-		// timeout path a mock/test-case writer may still be in flight (see below).
-		recordDrainedCleanly := true
+		// only if this drain actually joined every persist goroutine; on a drain
+		// given up (a stall, or the user's interrupt after its offer) a
+		// mock/test-case writer may still be in flight (see below).
+		recordDrain := utils.DrainJoined
 		if err, end := utils.DrainErrGroupProgressOn(r.drainClock, r.logger, "record", errGrp, teardownDrainStall, r.drainProgress); err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
-		} else if end.GaveUp() {
-			recordDrainedCleanly = false
+		} else {
+			recordDrain = end
 		}
+		recordDrainedCleanly := !recordDrain.GaveUp()
 		// A drain that gave the mock loop up (wedged in a save or a hook) left
 		// the mapping entries it would have settled held; one that gave the
 		// mapping consumer up (wedged in a write) left those handed back to it
@@ -1964,18 +1995,19 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// and mock is now drained to disk, so a cross-artifact pass can correlate
 		// them. Best-effort — a failure never invalidates the recording.
 		//
-		// Gated on a CLEAN drain. DrainErrGroupStatus reports timedOut when a
-		// persist goroutine ignored cancellation and may still be appending to the
-		// test-set files (the insert goroutines write on persistCtx =
-		// WithoutCancel, so they do NOT stop on the teardown cancel). The hook's
-		// consumer rewrites a whole mock file (read → rewrite → atomic rename), so
-		// a mock appended between its read and its rename would be silently dropped
-		// into a valid-but-short file. Skipping the pass on the timeout path costs
+		// Gated on a CLEAN drain. A record drain given up (DrainEnd.GaveUp: at a
+		// stall, or at the user's interrupt) left a persist goroutine that ignored
+		// cancellation, which may still be appending to the test-set files (the
+		// insert goroutines write on persistCtx = WithoutCancel, so they do NOT
+		// stop on the teardown cancel). The hook's consumer rewrites a whole mock
+		// file (read → rewrite → atomic rename), so a mock appended between its
+		// read and its rename would be silently dropped into a valid-but-short
+		// file. Skipping the pass on that path costs
 		// one recording's post-record work; running it risks a truncated mock set.
 		if recordingStarted && newTestSetID != "" {
 			switch {
 			case !recordDrainedCleanly:
-				r.logger.Warn("skipping the end-of-recording hook: the record drain timed out, so a mock or test-case write may still be in flight; the post-record pass is skipped to avoid racing an unfinished write. The recording itself is saved.",
+				r.logger.Warn("skipping the end-of-recording hook: "+recordDrainGivenUp(recordDrain)+", so a mock or test-case write may still be in flight; the post-record pass is skipped to avoid racing an unfinished write. The recording itself is saved.",
 					zap.String("testSetID", newTestSetID))
 			case !storeWrote:
 				r.logger.Warn("skipping the end-of-recording hook: the mock store could not write every mock, so the mock file is unfinished",

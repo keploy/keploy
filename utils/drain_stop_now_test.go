@@ -41,13 +41,26 @@ type drainResult struct {
 // startDrain runs the teardown drain of g on clk, at bound, logging to an
 // observer.
 func startDrain(clk stall.Clock, g *errgroup.Group, bound time.Duration, progress func() uint64) (<-chan drainResult, *observer.ObservedLogs) {
+	return startCarriedDrain(clk, g, bound, progress, nil)
+}
+
+// startCarriedDrain is startDrain for a drain whose offer another wait makes
+// until carrier is closed (DrainErrGroupProgressCarried).
+func startCarriedDrain(clk stall.Clock, g *errgroup.Group, bound time.Duration, progress func() uint64, carrier <-chan struct{}) (<-chan drainResult, *observer.ObservedLogs) {
 	core, logs := observer.New(zap.DebugLevel)
 	res := make(chan drainResult, 1)
 	go func() {
-		err, end := drainErrGroupProgress(clk, zap.New(core), "t", g, bound, progress)
+		err, end := drainErrGroupProgress(clk, zap.New(core), "t", g, bound, progress, carrier)
 		res <- drainResult{err, end}
 	}()
 	return res, logs
+}
+
+// offersStanding is how many stops offer to end at the next interrupt.
+func offersStanding() int {
+	repeatInterrupts.mu.Lock()
+	defer repeatInterrupts.mu.Unlock()
+	return repeatInterrupts.offers
 }
 
 // awaitLog waits for a line of logs whose message holds part, while the
@@ -245,7 +258,7 @@ func TestATeardownDrainWhoseGroupEndsAsTheUserInterruptsEndsAsDone(t *testing.T)
 			t.Fatal("the notice made no offer")
 		}
 		MarkInterruptedAgain()
-		end, _ := waitWhileProgressing(&stall.ManualClock{}, done, time.Second, func() uint64 { return 0 }, notice, func(time.Duration, bool) {})
+		end, _ := waitWhileProgressing(&stall.ManualClock{}, done, time.Second, func() uint64 { return 0 }, notice, nil, func(time.Duration, bool) {})
 		notice.Withdraw()
 		if end != DrainJoined {
 			t.Fatalf("run %d: the wait ended %v: its group had ended as the user interrupted, want it joined", i, end)

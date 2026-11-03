@@ -285,6 +285,19 @@ func (n *StopNowNotice) Next() (offering bool) {
 	return n.withdraw != nil
 }
 
+// restart begins n's notice period again, as NewStopNowNotice does, for a
+// stop whose notices begin later than it was made: one that has made no
+// offer (Next), and has not been withdrawn, offers a whole period after.
+func (n *StopNowNotice) restart() {
+	if n.withdraw != nil || n.withdrawn {
+		return
+	}
+	n.sawAt = time.Time{}
+	if Interrupted() {
+		n.sawAt = noticeNow()
+	}
+}
+
 // othersOffer reports whether a stop other than n's offers to end at the next
 // interrupt (OfferStopNow): n's own offer, while it stands, is not counted.
 func (n *StopNowNotice) othersOffer() bool {

@@ -174,7 +174,8 @@ func TestGetTestAndMockChans_AStopDeliveredTwiceSavesWhatTheAgentHeld(t *testing
 		}
 	}()
 	stop()
-	defer r.reportDrainProgress(20 * time.Millisecond)()
+	_, stopReport := r.reportDrainProgress(20 * time.Millisecond)
+	defer stopReport()
 	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
 	for logs.FilterMessageSnippet("Still saving").Len() == 0 {
 		if time.Now().After(deadline) {
@@ -222,7 +223,7 @@ func TestReportDrainProgress_OffersThroughItsNotices(t *testing.T) {
 	if utils.MarkInterruptedAgain() {
 		t.Fatal("the stop's copy ended it")
 	}
-	stop := r.reportDrainProgress(20 * time.Millisecond)
+	_, stop := r.reportDrainProgress(20 * time.Millisecond)
 	offered(1)
 	if !utils.MarkInterruptedAgain() {
 		t.Fatal("the user's press after the offer did not end the stop")
@@ -230,7 +231,7 @@ func TestReportDrainProgress_OffersThroughItsNotices(t *testing.T) {
 	stop()
 
 	utils.ResetInterruptedAgain()
-	stop = r.reportDrainProgress(20 * time.Millisecond)
+	_, stop = r.reportDrainProgress(20 * time.Millisecond)
 	offered(2)
 	stop()
 	if utils.MarkInterruptedAgain() {

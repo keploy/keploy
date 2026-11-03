@@ -93,7 +93,7 @@ func DrainErrGroupStatus(logger *zap.Logger, name string, g *errgroup.Group, tim
 // user's interrupt after the drain's offer to end at one. A caller that names
 // the cause uses DrainErrGroupProgressOn, whose DrainEnd tells them apart.
 func DrainErrGroupProgress(logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64) (err error, timedOut bool) {
-	err, end := drainErrGroupProgress(nil, logger, name, g, bound, progress)
+	err, end := drainErrGroupProgress(nil, logger, name, g, bound, progress, nil)
 	return err, end.GaveUp()
 }
 
@@ -102,7 +102,29 @@ func DrainErrGroupProgress(logger *zap.Logger, name string, g *errgroup.Group, b
 // stall is measured in, and says how the drain ended (DrainEnd): its group's
 // end, the stall verdict, or the user's interrupt after the drain's offer.
 func DrainErrGroupProgressOn(clk stall.Clock, logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64) (err error, end DrainEnd) {
-	return drainErrGroupProgress(clk, logger, name, g, bound, progress)
+	return drainErrGroupProgress(clk, logger, name, g, bound, progress, nil)
+}
+
+// DrainErrGroupProgressCarried is DrainErrGroupProgressOn for a drain whose
+// offer to end at the user's next interrupt another wait makes for it, until
+// carrier is closed: that wait's end, its offer withdrawn first (record's
+// frame drain, whose progress reporter offers, and whose group ends at the
+// press). Until then the drain says nothing and offers nothing, so one offer
+// stands at a time whichever of the two notices first. Once carrier is
+// closed, the drain's notices begin: its offer comes a whole notice period
+// after, so a press that answered the carrier's offer, or one right after
+// it, never answers the drain's.
+func DrainErrGroupProgressCarried(clk stall.Clock, logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64, carrier <-chan struct{}) (err error, end DrainEnd) {
+	return drainErrGroupProgress(clk, logger, name, g, bound, progress, carrier)
+}
+
+// SetDrainNoticeForTest sets how often a teardown drain gives its notices
+// (5 s), so a test of another package need not wait it out, and returns the
+// restore.
+func SetDrainNoticeForTest(every time.Duration) (restore func()) {
+	old := drainNotice
+	drainNotice = every
+	return func() { drainNotice = old }
 }
 
 // drainNotice is how often a teardown drain that has made no progress since
@@ -145,7 +167,9 @@ func (e DrainEnd) GaveUp() bool { return e != DrainJoined }
 // wait of the drain makes its own offer: a press answers only the offer that
 // stood when it was made, so after one the drain does not take it, nor one
 // made while an agent's stop held it, for the user's answer to a later offer.
-func drainErrGroupProgress(clk stall.Clock, logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64) (err error, end DrainEnd) {
+// A drain whose offer another wait makes (carrier, DrainErrGroupProgressCarried)
+// says and offers nothing until that wait ends; nil: none does.
+func drainErrGroupProgress(clk stall.Clock, logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64, carrier <-chan struct{}) (err error, end DrainEnd) {
 	done := make(chan struct{})
 	var werr error
 	go func() { werr = g.Wait(); close(done) }()
@@ -159,7 +183,7 @@ func drainErrGroupProgress(clk stall.Clock, logger *zap.Logger, name string, g *
 		logger.Info(msg, zap.String("group", name), zap.Duration("stalledFor", stalled), zap.Duration("bound", bound))
 	}
 	for {
-		end, stalled := waitWhileProgressing(clk, done, bound, progress, notice, say)
+		end, stalled := waitWhileProgressing(clk, done, bound, progress, notice, carrier, say)
 		if end == DrainJoined {
 			return werr, DrainJoined
 		}
@@ -205,12 +229,14 @@ func drainErrGroupProgress(clk stall.Clock, logger *zap.Logger, name string, g *
 // tenth of the bound, at most a second (stall.CheckEvery) of wall time,
 // before it looks at the stall: a change starts the stall again. Every
 // drainNotice of wall time with no change since the last one, unless another
-// stop's offer stands, it calls say, and asks notice whether that notice
-// offers to end at the next interrupt.
+// stop's offer stands, and once carrier (nil: none) is closed, it calls
+// say, and asks notice whether that notice offers to end at the next
+// interrupt. carrier's close begins the notices, and notice's period, again
+// (StopNowNotice.restart).
 // Only the teardown drain uses it: a consumer that writes what a run
 // captured is waited for until it ends (pkg/service/mock waitConsumers),
 // never cut off by a stall.
-func waitWhileProgressing(clk stall.Clock, done <-chan struct{}, bound time.Duration, progress func() uint64, notice *StopNowNotice, say func(stalled time.Duration, offering bool)) (end DrainEnd, stalled time.Duration) {
+func waitWhileProgressing(clk stall.Clock, done <-chan struct{}, bound time.Duration, progress func() uint64, notice *StopNowNotice, carrier <-chan struct{}, say func(stalled time.Duration, offering bool)) (end DrainEnd, stalled time.Duration) {
 	m := stall.NewMeter(clk, bound)
 	defer m.Stop()
 	notices := time.NewTicker(drainNotice)
@@ -228,10 +254,17 @@ func waitWhileProgressing(clk stall.Clock, done <-chan struct{}, bound time.Dura
 			default:
 			}
 			return DrainStopped, m.Stalled()
+		case <-carrier:
+			// The wait that made the drain's offer for it has ended, its
+			// offer withdrawn: the drain's own notices begin, the first a
+			// whole notice period on.
+			carrier = nil
+			notice.restart()
+			notices.Reset(drainNotice)
 		case <-notices.C:
 			if p := progress(); p != noticed {
 				noticed = p
-			} else if !notice.othersOffer() {
+			} else if carrier == nil && !notice.othersOffer() {
 				say(m.Stalled(), notice.Next())
 			}
 		case <-m.Wait():
