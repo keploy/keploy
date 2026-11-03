@@ -146,8 +146,11 @@ func TestRecordV2_ThroughTheRelayAnAnswerTheRecordingsStopCutIsLeftOut(t *testin
 // partAnswerFault: the relay's word that the stream ended where the client
 // stopped taking it (Session.EndedWhereClientStopped) makes the fault the
 // app's stop, whichever end the session has marked first, or none yet: the
-// upstream's close or reset can be marked before the client's, as their
-// forwarders race, and was the upstream's answer to the client's close.
+// upstream's close or reset is marked before the client's where it came on
+// its own before the relay read the client's end (a server with keep-alives
+// off closes once it has sent its last chunk). An upstream's end in answer to
+// the client's close comes only after the relay forwarded that close, which
+// it marks first.
 func TestPartAnswerFault_TheClientsStopWhicheverEndIsMarkedFirst(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -173,6 +176,34 @@ func TestPartAnswerFault_TheClientsStopWhicheverEndIsMarkedFirst(t *testing.T) {
 			s.MarkEndedWhereClientStopped()
 			if f := partAnswerFault(s); f == nil || f.Kind != models.FaultStoppedReading || !f.AfterHead {
 				t.Fatalf("partAnswerFault = %+v, want the app's stop (stopped_reading after the head)", f)
+			}
+		})
+	}
+}
+
+// partAnswerFault: an end read once the recording's stop had begun
+// (Session.EndFollowedStop) records no fault, though the relay said the
+// stream ended where the client stopped taking it: the stop, not the app, cut
+// the answer. recordV2 leaves a client's first end at the stop out before it
+// asks (partAnswerLeftOut), so through recordV2 only the upstream's end marked
+// first reaches this (one that came on its own before the relay read the
+// app's end, as a server with keep-alives off closes after its last chunk);
+// asked directly, either order records none.
+func TestPartAnswerFault_TheRecordingsStopRecordsNoFaultWhicheverEndIsMarkedFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		first fakeconn.Direction
+	}{
+		{"the upstream's close marked first", fakeconn.FromDest},
+		{"the client's end marked first", fakeconn.FromClient},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &supervisor.Session{}
+			s.MarkPeerEndedBy(tc.first, false, supervisor.EndAtStop)
+			s.MarkPeerEndedBy(1-tc.first, false, supervisor.EndAtStop)
+			s.MarkEndedWhereClientStopped()
+			if f := partAnswerFault(s); f != nil {
+				t.Fatalf("partAnswerFault = %+v, want none: the recording's stop, not the app, cut the answer", f)
 			}
 		})
 	}
