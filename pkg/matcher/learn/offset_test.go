@@ -1267,8 +1267,9 @@ func TestAPostgresQueryRecordingGaveTheApplicationOnlyItsAnswer(t *testing.T) {
 
 // The recordings F gave the application earlier in the set (GivenEarlier)
 // are read only when a changed instant reaches the offset rule or a word of
-// what changed the word rule, once for the call, and as places of those
-// rules alone: a word of a value in one is refused, naming it, never bound;
+// what changed the word rule, once for the call, or where a place of the
+// call's own test is one F gave without the value (notFromWhy, whose rows
+// read it), and as places of those rules alone: a word of a value in one is refused, naming it, never bound;
 // one that cannot be read refuses every changed instant or word that reaches
 // either rule, naming it, never noise.
 func TestClassifyGivenReadsTheSetOnlyForTheOffsetAndWordRules(t *testing.T) {

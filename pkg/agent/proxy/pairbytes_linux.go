@@ -4,22 +4,14 @@ package proxy
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
-	"math"
 	"net"
-	"os"
-	"strings"
-	"time"
 
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 
-	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/utils/stall"
 )
 
 // tcpFinWait2 is TCP_FIN_WAIT2: a socket closed by its owner whose FIN was
@@ -27,40 +19,10 @@ import (
 // sock_diag reports in this state, with no tcp_info.
 const tcpFinWait2 = 5
 
-// pairTarget is what the wait needs of one paired connection.
-type pairTarget struct {
-	pc *pairedConn
-	// want is how many bytes (and a FIN) the application had written to
-	// the connection when the wait began (appWritten). The proxy's side has
-	// received all of them once its own count (tcpi_bytes_received, which a
-	// FIN also moves) reaches it.
-	want uint64
-	// finCounted: want counts the application's FIN, which its socket had
-	// sent when the wait began (finSent): the last of want may be that FIN.
-	// Otherwise every byte of want is data.
-	finCounted bool
-	// gone: the application's socket was already gone (closed, or reset)
-	// when the wait began. Its FIN, after everything it wrote, or a reset,
-	// is what the proxy's side waits for.
-	gone bool
-	// seen is the most the proxy's side was seen to have received: more is
-	// progress, for the watchdog.
-	seen uint64
-	// orphan is, while the wait waits for the proxy's socket of a
-	// connection it closed one FIN short to take that FIN (pairReached),
-	// the socket's state at the last look (FIN_WAIT1, FIN_WAIT2, or
-	// ESTABLISHED for a close that has not reached the kernel); 0 when it
-	// does not.
-	orphan uint8
-	// done: the wait needs no more of it (pairReached).
-	done bool
-}
-
-// orphanFINBudget is how long, in time the agent could run, a bytes wait
-// waits with nothing moving for an orphan to take the application's FIN
-// (waitPairTargets) before it answers unknown: the one hang budget
-// (stall.HangBudget).
-const orphanFINBudget = stall.HangBudget
+// orphanEstablished is ESTABLISHED, the state a bytes wait finds a closed
+// connection's socket in while the proxy's close has not reached the kernel
+// (pairReached, orphansUnmoved).
+const orphanEstablished = tcpEstablished
 
 // WaitPairedBytes returns once the proxy's side of every connection it holds
 // that the kernel paired with an application connection numbered 1..n has
@@ -136,179 +98,6 @@ func (p *Proxy) pairTargets(n uint64) ([]*pairTarget, error) {
 		}
 	}
 	return pending, nil
-}
-
-// waitPairTargets waits until each of pending is reached (pairReached).
-//
-// An orphan's taking a FIN is no event of the proxy's: the proxy has closed
-// the socket, so no read or close of its own follows, and the kernel tells no
-// one when a timewait socket takes a FIN. While one waits for the
-// application's FIN, the wait looks at it again on looks of its own (the first
-// a stall.Tick on, then twice as far apart each time nothing moved, up to a
-// second), and answers unknown only once the agent could run for
-// orphanFINBudget with nothing it waits on moving: no connection received
-// more, was resolved, or saw its orphan change state. A starved agent accrues
-// that budget only as fast as it gets to run (stall.Meter). The looks only
-// say when to look: what ends the wait is what the orphan shows.
-//
-// A wait that ends first (ctx's end, or an answer of unknown) leaves each
-// connection it had not seen reached marked with the test whose end it is
-// (agent.EndOf) and what it waited for (pairedConn.cutShort): bytes written
-// before it that are lost later are that test's, not the one open then.
-func (p *Proxy) waitPairTargets(ctx context.Context, pending []*pairTarget) (err error) {
-	if len(pending) == 0 {
-		return nil
-	}
-	all := append([]*pairTarget(nil), pending...)
-	defer func() {
-		if err == nil {
-			return
-		}
-		for _, t := range all {
-			if !t.done {
-				t.pc.cutShort(agent.EndOf(ctx), t.want)
-			}
-		}
-	}()
-	looks := orphanLooks{clk: p.paired.clk}
-	defer looks.close()
-	for {
-		// Taken before looking, so a read or close after the look still
-		// wakes.
-		reads := p.inflight.Changed()
-		closes := p.paired.changes()
-		if err := p.paired.failure(); err != nil {
-			return err
-		}
-		moved := false
-		next := pending[:0]
-		for _, t := range pending {
-			seen, orphan := t.seen, t.orphan
-			reached, err := p.pairReached(t)
-			if err != nil {
-				return err
-			}
-			if reached {
-				t.done = true
-				p.paired.progress.Add(1)
-				moved = true
-				continue
-			}
-			moved = moved || t.seen != seen || t.orphan != orphan
-			next = append(next, t)
-		}
-		pending = next
-		if len(pending) == 0 {
-			return nil
-		}
-		if err := looks.arm(pending, moved); err != nil {
-			return err
-		}
-		select {
-		case <-reads:
-		case <-closes:
-		case <-looks.c:
-			looks.c, looks.stop = nil, nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-}
-
-// orphanLooks are a bytes wait's own looks at the orphans it waits on to take
-// the application's FIN (waitPairTargets), and its measure of how long the
-// agent could run with nothing the wait waits on moving.
-type orphanLooks struct {
-	clk   stall.Clock // nil: the process's (stall.Process)
-	meter *stall.Meter
-	c     <-chan time.Time // the next look's, nil when none is armed
-	stop  func() bool
-	every time.Duration // the last look's distance; 0 after a move
-}
-
-// arm, after a look at pending that saw them move or not (moved), arms the
-// next look while any of them waits for its orphan, unless the agent has
-// since run for orphanFINBudget with nothing moving: then it answers unknown,
-// saying what the wait waited for. The look after a move is a stall.Tick on
-// (one already armed stays), and each look that saw none puts the next twice
-// as far, up to stall.CheckEvery(orphanFINBudget). With none waiting for an
-// orphan, no look is armed, and the measure ends.
-func (o *orphanLooks) arm(pending []*pairTarget, moved bool) error {
-	if !awaitsOrphan(pending) {
-		o.disarm()
-		o.meter.Stop()
-		o.meter = nil
-		return nil
-	}
-	switch {
-	case o.meter == nil:
-		o.meter, o.every = stall.NewMeter(o.clk, orphanFINBudget), 0
-	case moved:
-		o.meter.Reset()
-		o.every = 0
-	case o.meter.Expired():
-		return orphansUnmoved(pending)
-	}
-	if o.c != nil {
-		return nil
-	}
-	if o.every == 0 {
-		o.every = stall.Tick
-	} else {
-		o.every = min(2*o.every, stall.CheckEvery(orphanFINBudget))
-	}
-	if o.clk == nil {
-		o.c, o.stop = stall.ProcessClock().After(o.every)
-	} else {
-		o.c, o.stop = o.clk.After(o.every)
-	}
-	return nil
-}
-
-// awaitsOrphan says whether any of pending waits for its orphan to take the
-// application's FIN.
-func awaitsOrphan(pending []*pairTarget) bool {
-	for _, t := range pending {
-		if t.orphan != 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// orphansUnmoved is the wait's answer once the agent could run for
-// orphanFINBudget with nothing moving: unknown, naming each connection whose
-// orphan it waited on, and the state the orphan was in.
-func orphansUnmoved(pending []*pairTarget) error {
-	var waited []string
-	for _, t := range pending {
-		switch t.orphan {
-		case 0:
-		case tcpEstablished:
-			waited = append(waited, fmt.Sprintf("%s (its socket still ESTABLISHED: the proxy's close had not reached the kernel, so it was no orphan yet)", t.pc.app))
-		default:
-			waited = append(waited, fmt.Sprintf("%s (its orphan in %s)", t.pc.app, tcpStateName(t.orphan)))
-		}
-	}
-	what := "the connection from " + waited[0]
-	if len(waited) > 1 {
-		what = "the connections from " + strings.Join(waited, ", ")
-	}
-	return fmt.Errorf("%w: keploy waited for the application's FIN to reach the proxy's socket of %s, which the proxy closed one FIN short of what the application wrote, and while keploy could run for %v nothing it waited on moved: the socket took neither that FIN nor a byte it would refuse", models.ErrProxyConnsUnsupported, what, orphanFINBudget)
-}
-
-// disarm releases the armed look, if any.
-func (o *orphanLooks) disarm() {
-	if o.stop != nil {
-		o.stop()
-	}
-	o.c, o.stop = nil, nil
-}
-
-// close releases the armed look and the meter.
-func (o *orphanLooks) close() {
-	o.disarm()
-	o.meter.Stop()
 }
 
 // tcpStateName names the TCP states a bytes wait reports.
@@ -502,6 +291,14 @@ func boundDevice(conn *net.TCPConn) uint32 {
 	return uint32(dev)
 }
 
+// targetBase is nothing on Linux: the proxy's side's count of what it
+// received (tcpi_bytes_received, which a FIN also moves) begins at the
+// connection's first byte.
+type targetBase struct{}
+
+// received is how much the proxy's side ps received, its FIN counted.
+func (targetBase) received(ps proxySide) uint64 { return ps.received }
+
 // pairReached says whether t needs no more waiting: the proxy's side received
 // what the application had written, or it never will (a capture loss).
 func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
@@ -525,12 +322,13 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 	if t.gone {
 		return p.pairEnded(t, ps, closed)
 	}
-	if ps.received > t.seen {
-		t.seen = ps.received
+	got := t.base.received(ps)
+	if got > t.seen {
+		t.seen = got
 		p.paired.progress.Add(1)
 	}
 	switch {
-	case ps.received >= t.want:
+	case got >= t.want:
 		return true, nil
 	case ps.state == tcpClose:
 		// A reset reached the proxy's side before the proxy closed it (a
@@ -673,27 +471,6 @@ func appFINAcknowledged(pc *pairedConn) bool {
 // (lookupTCPOrderedOn); a test replaces it to make the read fail.
 var lookupOrphan = lookupTCPOrderedOn
 
-// side is the proxy's side of pc: read from its socket while the proxy holds
-// it, or as it was when the proxy closed it (closed).
-func (pc *pairedConn) side() (proxySide, bool) {
-	select {
-	case <-pc.done:
-		if ps := pc.atClose.Load(); ps != nil {
-			return *ps, true
-		}
-		return proxySide{err: errors.New("the proxy closed its socket before it could be read")}, true
-	default:
-	}
-	ps := readProxySide(pc.conn)
-	if errors.Is(ps.err, net.ErrClosed) {
-		// Closed since: the close read it first.
-		if at := pc.atClose.Load(); at != nil {
-			return *at, true
-		}
-	}
-	return ps, false
-}
-
 // readProxySide reads the proxy's side of a connection from its own socket,
 // in whatever state it is (a reset one too, which sock_diag no longer finds).
 func readProxySide(conn *net.TCPConn) proxySide {
@@ -769,99 +546,6 @@ func (p *Proxy) proveAppVisible(conn *net.TCPConn) {
 	}
 	if _, err := lookupTCP(app, pr); err == nil {
 		p.paired.visible.Store(true)
-	}
-}
-
-// pairClosing is a paired connection's beforeClose: its side as the proxy
-// closes it (closing), and a capture loss when the close tosses bytes the
-// application wrote that the proxy never read. Its side counts those
-// received, so no wait would find them missing. Bytes held that cannot be
-// counted leave every wait unknown, and are a loss of this connection's
-// whether or not a wait holds it.
-//
-// Over TLS (tc's layer) what is unread is read through the layer first: a
-// TLS client's goodbye ends with a close_notify -- go-sql-driver/mysql's
-// Close (COM_QUIT, then close_notify, then FIN); pgx's Terminate and gRPC's
-// GOAWAY once the handler has read them -- which a handler done with the
-// connection never reads, and which carries no call. The socket's count
-// cannot tell it from data; only plaintext is a loss (tlsUnreadData), so a
-// Terminate or GOAWAY left unread still is one. Bytes the application had
-// written before the close that are still on their way to the socket
-// (noteWroteAtClose) are read through the layer the same way: a close_notify
-// sent before the close is no loss either, and the read waits for it.
-//
-// Plaintext still on its way at the close is waited for the same way: no wait
-// may hold the connection once the proxy is done with it, so the close itself
-// waits for those bytes, by reading the socket (plainOnItsWay). The first byte
-// of data that arrives is a loss; the application's FIN, or its reset, with
-// none before it, is none. A plaintext close with only the application's FIN
-// on its way reads nothing (finAloneOnItsWay): what ends a close's read is an
-// event (data, the FIN, a reset or keploy's stop), never a clock, and a FIN
-// held off would hold the close until the application's socket gives up on
-// it. A bytes wait that holds the connection waits for that FIN instead.
-//
-// keploy's own stop (ctx, the proxy's connections' context, done) closes
-// connections whatever they hold: nothing the application wrote is charged
-// then, as nothing more of the run is judged. Nor is anything on a
-// connection the proxy serves with no session (pairedConn.noSession): it
-// captures nothing on it by design -- closed unanswered, as an agent not
-// started in record or test mode closes it, or passed through -- and no test
-// is open on it.
-func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn) {
-	pc, unread, err := p.paired.closing(conn, func(pc *pairedConn) {
-		if ctx.Err() == nil && !pc.noSession.Load() {
-			noteWroteAtClose(pc)
-		}
-	})
-	tlsLayer := tc != nil && tc.tlsLayer.Load() != nil
-	switch {
-	case pc == nil, ctx.Err() != nil, pc.noSession.Load():
-	case err != nil:
-		p.paired.fail(fmt.Errorf("%w: read what the proxy's socket from %s held unread as the proxy closed it: %v", models.ErrProxyConnsUnsupported, pc.app, err))
-		p.pairLost(pc, 1, lostTop(pc), "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread: from now on it cannot vouch that every call of a test is in its hands", zap.Error(err))
-	case unread == 0 && !onItsWayAtClose(pc):
-	case unread == 0 && !tlsLayer && finAloneOnItsWay(pc):
-		// The application's FIN alone: it carries no call, and a bytes
-		// wait that holds the connection waits for it, as an orphan's FIN
-		// (pairReached). The close does not wait for it.
-	case unread == 0 && !tlsLayer:
-		// Data may be on its way. Taken before the read: what the side
-		// had received at the close, and what the application had
-		// written by then.
-		low, top := dataReceived(*pc.atClose.Load())+1, lostTop(pc)
-		data, err := plainOnItsWay(ctx, pc.conn)
-		ps := readProxySide(pc.conn)
-		pc.atClose.Store(&ps)
-		switch {
-		case ctx.Err() != nil:
-		case err != nil:
-			p.pairLost(pc, low, top, "keploy's proxy closed a connection with bytes the application wrote still on their way, and could not read whether they arrived: whether calls of the application's were among them cannot be told", zap.Error(err))
-		case data:
-			p.pairLost(pc, low, top, unreadLost)
-		}
-	case !tlsLayer:
-		// The bytes tossed are the last unread of what its side had
-		// received.
-		low := uint64(1)
-		if at := pc.atClose.Load(); at != nil && at.err == nil {
-			low = dataReceived(*at) - min(uint64(unread), dataReceived(*at)) + 1
-		}
-		p.pairLost(pc, low, lostTop(pc), unreadLost)
-	default:
-		// The layer may hold bytes it took from the socket that its reader
-		// never read: the bytes lost may begin anywhere (1).
-		data, err := tlsUnreadData(ctx, pc.conn, tc.tlsLayer.Load())
-		// Its side as the read left it: the application's FIN, if the read
-		// waited for it, is in, which the wait counts (pairReached).
-		ps := readProxySide(pc.conn)
-		pc.atClose.Store(&ps)
-		switch {
-		case ctx.Err() != nil:
-		case err != nil:
-			p.pairLost(pc, 1, lostTop(pc), "keploy's proxy closed a connection with bytes still unread that its TLS layer could not read: whether calls of the application's were among them cannot be told", zap.Error(err))
-		case data:
-			p.pairLost(pc, 1, lostTop(pc), unreadLost)
-		}
 	}
 }
 
@@ -966,103 +650,6 @@ func wroteNow(ds *diagSock, pc *pairedConn) (appWrote, bool, error) {
 	}
 }
 
-// onItsWayAtClose says whether, as the proxy began closing pc, bytes the
-// application had written to it were still on their way: written, and not yet
-// received by the proxy's side.
-func onItsWayAtClose(pc *pairedConn) bool {
-	w, ps := pc.wroteAtClose.Load(), pc.atClose.Load()
-	return w != nil && ps != nil && ps.err == nil && w.want > ps.received
-}
-
-// finAloneOnItsWay says, of a close with bytes on their way (onItsWayAtClose,
-// which it is asked only after), whether those were the application's FIN
-// alone: one byte short of a count that surely holds the FIN (appWrote.fin).
-// One byte short of a count that may not hold it may be a byte of data.
-func finAloneOnItsWay(pc *pairedConn) bool {
-	w, ps := pc.wroteAtClose.Load(), pc.atClose.Load()
-	return w.fin && w.want == ps.received+1
-}
-
-// tlsUnreadData reads, through layer, the TLS layer the proxy serves conn
-// over, what conn's socket still holds as the proxy closes it, and reports
-// whether any of it is data (plaintext). It reads until the first byte of data
-// (data), the close_notify or the application's FIN (none), or what the layer
-// cannot read (an error: the bytes cannot be told to be no data). It never
-// reads past the first byte of data: nothing more is needed to charge the
-// loss.
-//
-// Its write side is shut down first: the application, told the proxy is done
-// (its close_notify, if the layer's close sent one, then its FIN), ends its
-// own side, so a read that waits -- a record not all in yet -- ends at the
-// application's FIN, not on a clock. A read deadline its handler left (a
-// poll's, or a nudge's in the past) is cleared, and so is one another reader
-// of the connection sets while the read waits: either would end the read at
-// once, or on a clock, as a loss. If that FIN never comes, the read holds the
-// close until keploy's stop (ctx) ends it for good by shutting the read side
-// down, which no deadline another reader of the connection sets or clears
-// undoes; the stop charges nothing.
-func tlsUnreadData(ctx context.Context, conn *net.TCPConn, layer *tls.Conn) (data bool, err error) {
-	return unreadData(ctx, conn, layer)
-}
-
-// plainOnItsWay is how a close reads plaintext on its way (readPlainOnItsWay);
-// a test replaces it to have keploy stop as the read returns.
-var plainOnItsWay = readPlainOnItsWay
-
-// readPlainOnItsWay reads conn, a plaintext connection the proxy is closing
-// with nothing unread and bytes the application wrote before the close still
-// on their way to it (onItsWayAtClose), until the first of them arrives (data:
-// a loss, as unread bytes the close tosses are), or the application's FIN or
-// reset ends it first (none), as tlsUnreadData reads through a TLS layer. A
-// FIN comes after every byte written before it, so one with none before it
-// says the bytes on their way were that FIN. The kernel takes a reset only
-// at the sequence number it expects next, the application's snd_nxt (RFC
-// 5961): every byte it had sent had arrived, and what its abort dropped
-// unsent it would have dropped without keploy. The bytes on their way are
-// sent, or dropped by such an abort: the read ends on an event, not a clock.
-func readPlainOnItsWay(ctx context.Context, conn *net.TCPConn) (data bool, err error) {
-	data, err = unreadData(ctx, conn, conn)
-	if errors.Is(err, unix.ECONNRESET) {
-		return false, nil
-	}
-	return data, err
-}
-
-// unreadData reads r, conn or a layer over it, for tlsUnreadData and
-// plainOnItsWay, until the first byte of data (data), the end of what the
-// application sent (none), or what cannot be read (an error).
-func unreadData(ctx context.Context, conn *net.TCPConn, r io.Reader) (data bool, err error) {
-	_ = conn.CloseWrite()
-	_ = conn.SetReadDeadline(time.Time{})
-	defer context.AfterFunc(ctx, func() { _ = conn.CloseRead() })()
-	var b [1]byte
-	var n int
-	for {
-		n, err = r.Read(b[:])
-		// A deadline another reader of the connection set since (a
-		// parser's poll, re-armed before its next read, which waits behind
-		// this one) is no end of this read either: only the application's
-		// end or keploy's stop is. The layer keeps a record a timeout cut
-		// short.
-		if n == 0 && errors.Is(err, os.ErrDeadlineExceeded) && ctx.Err() == nil {
-			_ = conn.SetReadDeadline(time.Time{})
-			continue
-		}
-		break
-	}
-	switch {
-	case n > 0:
-		return true, nil
-	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
-		// The close_notify, or the application's FIN, at a record's end or
-		// in one's middle: the application ended there.
-		return false, nil
-	case err == nil:
-		return false, errors.New("the read gave nothing and said nothing")
-	}
-	return false, err
-}
-
 // readUnread is how many bytes conn's socket holds unread (SIOCINQ): received
 // in order, never read.
 func readUnread(conn *net.TCPConn) (int, error) {
@@ -1085,57 +672,6 @@ func dataReceived(ps proxySide) uint64 {
 		return ps.received - 1
 	}
 	return ps.received
-}
-
-// lostTop is the last byte the application wrote to pc before the proxy's
-// close of it, for a loss at that close: what its side had received when it
-// had taken the application's FIN or reset by then (nothing is written after
-// either), what the application had written as the close began
-// (noteWroteAtClose: bytes written after it are no capture loss), and any
-// byte when neither is known.
-func lostTop(pc *pairedConn) uint64 {
-	if at := pc.atClose.Load(); at != nil && at.err == nil && peerEnded(at.state) {
-		return dataReceived(*at)
-	}
-	if w := pc.wroteAtClose.Load(); w != nil {
-		return w.want
-	}
-	return math.MaxUint64
-}
-
-// unreadLost is pairLost's message for a close that tossed bytes unread.
-const unreadLost = "keploy's proxy closed a connection with bytes the application wrote still unread: what they carried was neither recorded nor mocked"
-
-// pairLost charges, once per connection, bytes the application wrote to pc
-// that the proxy never captured, or that it cannot tell it did, saying which
-// (msg): the bytes low..top, counted from 1 as the application wrote them. A
-// test whose end was cut short with some of them unsettled owns its share
-// (pairedConn.lostBy, TakeOwnedLosses): the loss is that test's, and the test
-// open now is charged only when some were written after the last such end.
-// With no end cut short on pc, they are the open test's.
-func (p *Proxy) pairLost(pc *pairedConn, low, top uint64, msg string, fields ...zap.Field) {
-	if pc.noSession.Load() || !pc.lost.CompareAndSwap(false, true) {
-		return
-	}
-	owners, open := pc.lostBy(low, top)
-	for _, test := range owners {
-		p.paired.own(test, pc.app)
-	}
-	next := "keploy cannot vouch for the calls of the test that was open (under the proven switch, that test is not verified); check the agent's log for why the connection ended"
-	if open {
-		p.losses.Add(models.CaptureLossAppBytesLost, "from "+pc.app.String())
-	} else {
-		where := make([]string, len(owners))
-		for i, test := range owners {
-			where[i] = agent.WrittenIn(test)
-		}
-		next = "the bytes were written " + strings.Join(where, ", ") + ", not in the test open now: keploy's wait for them was cut short there (a test whose end was cut short is not verified); check the agent's log for why"
-	}
-	p.logger.Warn(msg, append([]zap.Field{
-		zap.String("from", pc.app.String()),
-		zap.Strings("owned_by", owners),
-		zap.String("next_step", next),
-	}, fields...)...)
 }
 
 // checkPairedBytes proves, once, on the canary's connection, that this

@@ -109,3 +109,26 @@ func TestAGapsOwnedLossSaysBetweenTestCases(t *testing.T) {
 		}
 	}
 }
+
+// ownersOf takes p's owned losses and returns the test each names.
+func ownersOf(p *Proxy) []string {
+	var out []string
+	for _, o := range p.TakeOwnedLosses() {
+		out = append(out, o.Test)
+	}
+	return out
+}
+
+// pairedConnOf is p's paired connection appSeq.
+func pairedConnOf(t *testing.T, p *Proxy, appSeq uint64) *pairedConn {
+	t.Helper()
+	p.paired.mu.Lock()
+	defer p.paired.mu.Unlock()
+	for _, pc := range p.paired.byConn {
+		if pc.appSeq == appSeq {
+			return pc
+		}
+	}
+	t.Fatalf("no paired connection %d", appSeq)
+	return nil
+}

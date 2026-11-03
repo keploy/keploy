@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/netip"
 	"sync"
 	"syscall"
@@ -175,6 +176,19 @@ type ListenerCounter interface {
 	ProxyConnPair(rc syscall.RawConn) (ProxyConnPairing, error)
 }
 
+// AcceptedPeerPairer is the optional extension implemented by hooks that pair
+// an accepted connection by the address it came from (macOS: the source port
+// the shim pinned) rather than by what the kernel wrote into its socket. The
+// proxy hands it the peer address accept() returned: a connection the
+// application reset before the proxy took it still has that address, while
+// its socket no longer answers getpeername. Hooks that do not implement it
+// (Linux, whose kernel numbers the socket itself) are asked ProxyConnPair.
+type AcceptedPeerPairer interface {
+	// ProxyConnPairPeer is ProxyConnPair for the connection rc, accepted from
+	// peer.
+	ProxyConnPairPeer(rc syscall.RawConn, peer *net.TCPAddr) (ProxyConnPairing, error)
+}
+
 // ProxyConnPairing is an accepted connection of the proxy's marked listener,
 // as the kernel counted it.
 type ProxyConnPairing struct {
@@ -219,6 +233,32 @@ type ProxyConnsReporter interface {
 	// WaitAppConnsSettled returns once AppConnsSettled() >= n, or with ctx's
 	// error, or when the count is unknown. No deadline of its own.
 	WaitAppConnsSettled(ctx context.Context, n uint64) error
+}
+
+// ShimReporter is the optional extension implemented by hooks whose
+// interception is a library each process of the run loads (macOS's shim,
+// which says HELLO from every process it arms in). Under the proven switch the
+// agent asks it at each begin whether the test process carries the shim: one
+// that does not is neither captured nor on the run's clock, and its tests are
+// refused rather than judged. With hooks that do not implement it (Linux,
+// whose kernel hooks see every process), nothing is asked.
+type ShimReporter interface {
+	// ShimArmed reports whether the program process pid runs now announced
+	// keploy's shim, and, when timeFile is not "", that the shim reads the
+	// clock of the run whose clock record timeFile is; why not, otherwise.
+	// It never waits: the shim announces itself before the program's own
+	// code runs, so a process that has begun a test has announced itself or
+	// never will.
+	ShimArmed(pid int, timeFile string) (bool, string)
+	// ShimClaimedBy tells the hooks that process pid claimed the run: a
+	// program the shim is not in is charged to the run's tests, or to the run
+	// outside them, only when this test process or one of its descendants
+	// started it, never when another process of the run did (the compiler or
+	// git the test command's toolchain runs alongside the test process). The
+	// agent tells it before it reads the counts the claim's first test is
+	// counted from, while pid is alive and waits for its claim's answer. It
+	// never waits.
+	ShimClaimedBy(pid int)
 }
 
 // ListenerCountTaker is the optional extension implemented by proxies that can
@@ -981,6 +1021,29 @@ type DestInfo interface {
 type ConnDestInfo interface {
 	GetForConn(ctx context.Context, app netip.AddrPort) (*NetworkAddress, error)
 	DeleteForConn(ctx context.Context, app netip.AddrPort) error
+}
+
+// AppConnEnd is how the application released its end of a connection the
+// hooks redirected to the proxy, as the kernel saw the release: by its
+// process while the process ran (Exiting false), or as the process exited
+// (Exiting true), with the signal that ended it (Signal): the one that
+// killed it, or a stop signal (SIGHUP, SIGINT, SIGQUIT, SIGTERM) another
+// process sent it that it handled before it exited; 0 for a process that
+// exited on its own.
+type AppConnEnd struct {
+	Exiting bool
+	Signal  uint32
+}
+
+// ConnEndInfo is the optional extension of a DestInfo that says how the
+// application released its end of a redirected connection, named as
+// ConnDestInfo names it, once the proxy has read that end. It forgets what it
+// read. ok is false where it holds nothing for the connection: one whose end
+// came before the application released it (a shutdown(2), or the proxy's end
+// first), a record the kernel's LRU evicted, or hooks that make no such
+// record.
+type ConnEndInfo interface {
+	TakeAppConnEnd(app netip.AddrPort) (end AppConnEnd, ok bool)
 }
 
 // ErrConnectingSocketGone is GetForHandshake's error when the application's

@@ -82,7 +82,7 @@ jobs:
 
   record_native:
     if: ${{ inputs.legs == 'core' }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     name: upstream-refusal native (record_with_build)
     steps:
@@ -109,12 +109,44 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
         run: bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/upstream_refusal/upstream-refusal-linux.sh"
 
+      # The released keploy the faults leg holds to: it knows no faults, so it
+      # must skip a fault mock (kind HttpFault) and miss the call, never serve
+      # the recorded head as a whole answer.
+      - name: Download keploy v3.6.204 (knows no faults)
+        id: old
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/keploy-old"
+          gh release download v3.6.204 -R keploy/keploy -p keploy_linux_amd64.tar.gz -D "$RUNNER_TEMP/keploy-old"
+          tar -xzf "$RUNNER_TEMP/keploy-old/keploy_linux_amd64.tar.gz" -C "$RUNNER_TEMP/keploy-old"
+          echo "path=$RUNNER_TEMP/keploy-old/keploy" >> "$GITHUB_OUTPUT"
+
+      # The faults lane's JVM client (leg 16): a JVM handles SIGTERM itself
+      # and exits from its handler.
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # An upstream that resets, closes, never answers, cuts its body short and
+      # sends its own reason phrase: recorded, then replayed with the upstream
+      # gone, the application's own error handling seeing the same each time.
+      - name: Record and replay an upstream's faults
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          OLD_BIN: ${{ steps.old.outputs.path }}
+        run: bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/upstream_refusal/upstream-faults-linux.sh"
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: upstream-refusal-native-logs
-          path: .github/workflows/test_workflow_scripts/golang/upstream_refusal/record_logs.txt
+          path: |
+            .github/workflows/test_workflow_scripts/golang/upstream_refusal/record_logs.txt
+            .github/workflows/test_workflow_scripts/golang/upstream_refusal/*.log
           if-no-files-found: warn
           retention-days: 7
 

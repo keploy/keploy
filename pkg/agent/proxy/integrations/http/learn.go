@@ -775,7 +775,7 @@ func (h *HTTP) learnReads(mockDb integrations.MockMemDb, tracker *learn.Tracker)
 // whose a recording is, whether a test is open, and which of its own
 // answered.
 func (h *HTTP) learnRules(mockDb integrations.MockMemDb, tracker *learn.Tracker) scopeReads {
-	r := scopeReads{open: tracker.Open(), answered: tracker.Answered, answeredMocks: tracker.AnsweredMocks}
+	r := scopeReads{open: tracker.Open(), answered: tracker.Answered, answeredMocks: tracker.AnsweredMocks, verify: h.verifying()}
 	r.owner, _ = mockDb.(integrations.TestOwnership)
 	if integrations.ExactServing(mockDb) {
 		// Under exact serving the store alone says what the open test owns:
@@ -874,6 +874,9 @@ type scopeReads struct {
 	// request exactly and may answer it (learnSieve): the scope is then
 	// exactGroup's and owner's, not learn.Pair's.
 	sieve *learnSieve
+	// verify is the handler's verify mode (HTTP.verifying), for
+	// learnedGroup.
+	verify bool
 }
 
 // scope is the scope r reads.
@@ -1096,10 +1099,10 @@ var learnShapes atomic.Int64
 
 // learnedGroup is exactGroup over r's scope for the live request and that
 // scope's owner, for learnedMatch, with only the candidates sieve passes
-// shaped (learnSieve). In the exact view's verify mode every candidate is
-// shaped too, and a different group panics.
+// shaped (learnSieve). In the exact view's verify mode (r.verify) every
+// candidate is shaped too, and a different group panics.
 func (r scopeReads) learnedGroup(live httpParts, liveShape learn.Shape, n learnNoise, sieve *learnSieve) ([]*models.Mock, func(*models.Mock) bool) {
-	verify := integrations.ExactViewVerify.Load()
+	verify := r.verify
 	if verify {
 		// Both scopes read one account of what the test's own answered.
 		r = r.answersOnce()
@@ -1660,6 +1663,43 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			if stuck(picked, read.at) {
 				return refused(picked, res, sc)
 			}
+			if own && models.HTTPStoreReads(picked.Spec.HTTPReq) {
+				// A read of a record the test wrote (a store's API:
+				// readBackPlan) is answered with what this run wrote, though
+				// its request is exactly the recorded one (a Scan of a
+				// table).
+				answered, err := withResponse(picked)
+				if err != nil {
+					return nil, nil, err
+				}
+				plan := h.readBackPlan(tracker, test, answered, served, earlierThan(earlier, picked), givenBindings(mockDb), newPairing())
+				if len(plan.vars) > 0 {
+					if !tracker.Answer(test, picked) {
+						retake = true
+						continue
+					}
+					out, claimed, why, err := h.claimLearned(ctx, picked, claimDb, plan, sc.owner(), input.written)
+					if err != nil || why != "" || !claimed {
+						tracker.Unanswer(test, picked.Name)
+					}
+					if err != nil {
+						return nil, nil, err
+					}
+					if why != "" {
+						res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
+						return nil, &learnMiss{res: res, closest: picked, pool: sc.http}, nil
+					}
+					if !claimed {
+						unclaimed[picked] = read.at
+						retake = true
+						continue
+					}
+					if e, ok := n.servedExchange(tracker.Drifts(), picked, answered, rec, recordedParts(picked), liveShape, input, live, out, own, h.learnedView(picked, plan)); ok {
+						tracker.Served(test, learn.Named(e, plan.vars, plan.clocks))
+					}
+					return out, nil, nil
+				}
+			}
 			if input.written != nil {
 				// Asked before the take: an answer the caller cannot
 				// write is no answer, and nothing is taken or told.
@@ -1794,19 +1834,35 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			// earlier places streamed them. In keploy mock's client tests
 			// every call's are, a test's own too: there the lead shows no
 			// read of the application's clock (learn.DriftCache.ClientTests).
+			// A test's own call in keploy record's server tests is read in
+			// its own window too (learn.OwnCall), from the test's own and
+			// the start-up's calls, as a replay checks its reads: by the
+			// lead alone, a read made a second later in record's full round
+			// than recorded would be a word an earlier answer of the same
+			// minute holds.
 			var w *learn.Window
 			if !own || tracker.ClientTests() {
 				w = tracker.CallWindowFrom(prev.At(), m, input.arrived)
+			} else {
+				oc := tracker.NewOwnCall(m, nil, windows)
+				for _, s := range staged {
+					oc.See(s)
+				}
+				w = oc.Window(input.arrived)
 			}
 			learned := learn.ClassifyGiven(tracker.DriftsOf(ctx), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, classifiedAnswer(answered), w, givenEarlier(m, set, served, given, earlier, order))
 			if why := n.heldLearned(learned); why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
-			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb))
+			givenVars := givenBindings(mockDb)
+			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenVars)
 			if why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
+			}
+			if own {
+				plan = h.readBackPlan(tracker, test, answered, served, earlier, givenVars, plan)
 			}
 			if own && !tracker.Answer(test, m) {
 				retake = true
@@ -2169,6 +2225,11 @@ type pairing struct {
 	values map[string]variables.Binding
 }
 
+// newPairing is a pairing that learned nothing yet.
+func newPairing() pairing {
+	return pairing{noise: map[string][]string{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}}
+}
+
 // learnPlan turns what Classify learned about mock m (paired as rec; own: one
 // of the test's own mocks) into what is written onto the recording, or says
 // why the request cannot be answered (request_changed). A value never
@@ -2189,7 +2250,7 @@ type pairing struct {
 //     earlier than any call it makes. Its name is the key's alone in the
 //     test: no other variable takes it. A given's says why (learn.GivenWhy).
 func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (pairing, string) {
-	p := pairing{noise: map[string][]string{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}}
+	p := newPairing()
 	jsonReq := rec.Fixed["body"] == "json"
 	reserved := make(map[string]bool, len(given))
 	for _, g := range given {
@@ -2269,6 +2330,12 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 					why += "; " + l.Why
 				}
 				return p, why
+			case from.Side == "" && from.SetAside:
+				// The search found the recorded value there, and F gave the
+				// application nothing there that holds the value the call
+				// carries now: no source, and no binding gap. l.Why says
+				// keploy cannot name the source.
+				return p, r.Path + " carries a value keploy cannot name a source of: " + l.Why
 			case from.Side == "":
 				why := r.Path + " carries a value the test's recording holds earlier (in " + from.Mock + "), where keploy cannot bind it yet: a call of another protocol, or inside its payload"
 				if l.Why != "" {

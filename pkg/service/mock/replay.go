@@ -240,7 +240,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//
 	//    Without this the run dialled an agent that was never started and
 	//    failed before serving a single mock.
-	composeAppExit, err := m.startComposeApp(ctx, errGrp, "replay")
+	composeAppExit, err := m.startComposeApp(ctx, errGrp, "replay", nil)
 	if err != nil {
 		if parent.Err() != nil {
 			// The user's Ctrl+C. An errgroup-derived cancel is NOT that: the
@@ -567,6 +567,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		actual:   actual.list(),
 
 		actualShort: requestsShort,
+		faults:      faultMocks(filtered, unfiltered),
 	}
 	counts := m.reportOutcome(ctx, loaded, detail, func() bool { return parent.Err() != nil })
 	missesKnown := counts.missed >= 0
@@ -1269,10 +1270,13 @@ func recordedGivens(mp *models.Mapping) map[string][]models.GivenValue {
 // no mapping file or an all-empty one, owns none, so a dependency-free set
 // stays green and every other call misses with its reason. Every mock no
 // test lists is the pool's: under the key it was recorded with (mappings'
-// startup:), else models.PoolKeyNone. A mapping that cannot be read, or that
-// names a mock the recording does not have, refuses, and so does an agent
-// that refuses the table: nothing is served from a whole pool instead. The
-// values each test gave when it was recorded go in the same request.
+// startup: or worker:), else models.PoolKeyNone. Those worker: lists are
+// each key's worker scope too, which answers in a test's window as well,
+// each at most once, and is required of no test. A mapping that cannot be
+// read, or that names a mock the recording does not have, refuses, and so
+// does an agent that refuses the table: nothing is served from a whole pool
+// instead. The values each test gave when it was recorded go in the same
+// request.
 func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, decoded []*models.Mock) error {
 	refuse := func(why string) error {
 		return fmt.Errorf("keploy cannot judge each test of mock set %q: %s; record it again with keploy mock record", name, why)
@@ -1327,11 +1331,12 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 			zap.String("mock-set", name),
 			zap.String("next_step", "record the set again with this keploy: keploy mock record writes mappings.yaml"))
 	}
-	if err := pp.PushProvenTable(ctx, table, pool, windows, recordedGivens(mp)); err != nil {
+	worker := workerSlices(mp, pool)
+	if err := pp.PushProvenTable(ctx, table, pool, worker, windows, recordedGivens(mp)); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
-	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("recorded test windows", len(windows)), zap.String("mock-set", name))
+	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("worker scope mocks", countNames(worker)), zap.Int("recorded test windows", len(windows)), zap.String("mock-set", name))
 	return nil
 }
 
@@ -1398,7 +1403,7 @@ func (m *mockService) refuseUnknownMocks(ctx context.Context, name string, mp *m
 		}
 	}
 	var absent, unchecked, skipped []string
-	var cutShort, edited, newer, connFailure, yamlOnly bool
+	var cutShort, edited, newer, connFailure, fault, yamlOnly bool
 	for _, n := range unknown {
 		where := ""
 		if w := places[n]; len(w) > 0 {
@@ -1423,6 +1428,9 @@ func (m *mockService) refuseUnknownMocks(ctx context.Context, name string, mp *m
 		case d.Why == models.MockSkipConnFailure:
 			connFailure = true
 			skipped = append(skipped, n+where+", a connection failure this keploy cannot replay")
+		case d.Why == models.MockSkipFault:
+			fault = true
+			skipped = append(skipped, n+where+", a call whose fault this keploy cannot enact")
 		case d.Why == models.MockSkipYAMLOnlyKind:
 			yamlOnly = true
 			skipped = append(skipped, fmt.Sprintf("%s%s, of kind %q, which keploy reads only from a YAML mock file", n, where, d.Kind))
@@ -1450,6 +1458,9 @@ func (m *mockService) refuseUnknownMocks(ctx context.Context, name string, mp *m
 		}
 		if connFailure {
 			fix = append(fix, fmt.Sprintf("If a newer keploy recorded a connection failure, upgrade keploy to replay it; if you edited one in %s, give it back the fields keploy wrote", mocks))
+		}
+		if fault {
+			fix = append(fix, fmt.Sprintf("If a newer keploy recorded a call's fault, upgrade keploy to replay it; if you edited one in %s, give its fault back the fields keploy wrote", mocks))
 		}
 		if yamlOnly {
 			fix = append(fix, fmt.Sprintf("Keploy reads a mock of such a kind only from a YAML mock file, and one with a \"-\" in its kind only with keploy enterprise: record the set again in YAML, not as %s", mocks))
@@ -1515,10 +1526,14 @@ func heldOnly(table map[string][]string, loaded []*models.Mock) map[string][]str
 
 // poolSlices is each key's pool slice of a recording (design v14 §5.2): every
 // loaded mock no test's mapping lists, under the key its mappings' startup:
-// entry gives it, else models.PoolKeyNone (an older recording's, or one made
-// outside every claim). unknown lists, sorted, the names the table or the
-// startup entries give that no decoded mock has (a mock the agent never holds,
-// a connection failure, is decoded, and in no slice).
+// or worker: entry gives it, else models.PoolKeyNone (an older recording's,
+// or one made outside every claim). A call keploy mock record listed in
+// worker: (made between or after the tests), or one a reader moved there
+// from a test's list, is in its key's slice too, and its key's worker scope
+// (workerSlices) serves it in a test's window as well. unknown lists,
+// sorted, the names the table or those entries give that no decoded mock
+// has (a mock the agent never holds, a connection failure, is decoded, and
+// in no slice).
 func poolSlices(mp *models.Mapping, table map[string][]string, loaded, decoded []*models.Mock) (pool map[string][]string, unknown []string) {
 	have := make(map[string]bool, len(decoded))
 	for _, mk := range decoded {
@@ -1545,7 +1560,7 @@ func poolSlices(mp *models.Mapping, table map[string][]string, loaded, decoded [
 	pool = map[string][]string{}
 	keyed := map[string]bool{}
 	if mp != nil {
-		for _, e := range mp.Startup {
+		for _, e := range slices.Concat(mp.Startup, mp.Worker) {
 			if e.Name == "" || mapped[e.Name] || keyed[e.Name] {
 				continue
 			}
@@ -1576,6 +1591,47 @@ func poolSlices(mp *models.Mapping, table map[string][]string, loaded, decoded [
 	}
 	sort.Strings(unknown)
 	return pool, unknown
+}
+
+// workerSlices is each key's worker scope (models.ScopeTableReq.Worker): the
+// names of pool's slices that mappings' worker: lists, under the key whose
+// slice holds each, in worker:'s order. The agent serves them in a test's
+// window too, each at most once, and requires them of no test; the rest of
+// a slice answers between tests only. A worker: name no slice holds (a test
+// lists it, or the agent never holds it) is not one. nil when there is none.
+func workerSlices(mp *models.Mapping, pool map[string][]string) map[string][]string {
+	if mp == nil || len(mp.Worker) == 0 {
+		return nil
+	}
+	keyOf := map[string]string{}
+	for key, names := range pool {
+		for _, n := range names {
+			keyOf[n] = key
+		}
+	}
+	var out map[string][]string
+	seen := map[string]bool{}
+	for _, e := range mp.Worker {
+		key, ok := keyOf[e.Name]
+		if e.Name == "" || !ok || seen[e.Name] {
+			continue
+		}
+		seen[e.Name] = true
+		if out == nil {
+			out = map[string][]string{}
+		}
+		out[key] = append(out[key], e.Name)
+	}
+	return out
+}
+
+// countNames is how many names slices hold.
+func countNames(slices map[string][]string) int {
+	n := 0
+	for _, names := range slices {
+		n += len(names)
+	}
+	return n
 }
 
 // pushTestBegins hands the agent when each test of the recording began
@@ -1942,22 +1998,37 @@ func ranSets(windows []models.ScopeWindow) []string {
 	return sets
 }
 
+// setName names a test's folder relative to the project's root, so its
+// recording is the same on every checkout; a name left absolute is refused at
+// commit as not portable. Either path can arrive through a link: outside a
+// repository the root is the working folder as the shell names it ($PWD),
+// while a test's folder can arrive resolved (macOS's /tmp is a link to
+// /private/tmp). So each is compared as given and resolved: a link inside the
+// project keeps its own name, and a project under a linked folder is still
+// named relative.
 func setName(dir, root string) string {
 	if dir == "" || !filepath.IsAbs(dir) {
 		return filepath.ToSlash(dir)
 	}
 	if root != "" {
-		dirs := []string{dir}
-		if r, err := filepath.EvalSymlinks(dir); err == nil && r != dir {
-			dirs = append(dirs, r)
-		}
-		for _, d := range dirs {
-			if rel, err := filepath.Rel(root, d); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return filepath.ToSlash(rel)
+		dirs := givenAndResolved(dir)
+		for _, r := range givenAndResolved(root) {
+			for _, d := range dirs {
+				if rel, err := filepath.Rel(r, d); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+					return filepath.ToSlash(rel)
+				}
 			}
 		}
 	}
 	return filepath.ToSlash(dir)
+}
+
+// givenAndResolved is p, then p with its links resolved when that differs.
+func givenAndResolved(p string) []string {
+	if r, err := filepath.EvalSymlinks(p); err == nil && r != p {
+		return []string{p, r}
+	}
+	return []string{p}
 }
 
 func gitTop() string {
@@ -2192,6 +2263,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 			append(summary, zap.String("next_step", next))...)
 	}
 
+	logFaultsServed(m.logger, consumed, detail.faults)
 	for _, miss := range misses {
 		logMiss(m.logger, miss)
 	}

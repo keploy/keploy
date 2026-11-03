@@ -41,6 +41,10 @@ type mockDisplayInfo struct {
 	// rule gives to the test whose window or gap after it holds it.
 	carryOver bool
 	place     time.Time
+	// fault is the mock's models.Mock.FaultServed: the line the set's
+	// summary says of it when the replay served it (logFaultsServed), "" for
+	// a mock whose answer ends in no fault.
+	fault string
 }
 
 // summaryOf is the mock's summary (models.MockSummaryFromSpec).

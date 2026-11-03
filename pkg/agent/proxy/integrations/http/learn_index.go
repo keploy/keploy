@@ -95,11 +95,13 @@ type learnIndexKey struct {
 }
 
 // stagedKey is the key of db's reads at its staging generation now: false
-// where it keeps none, or is held to a staging that moved
-// (integrations.RestagedGeneration: it reads nothing).
+// where it keeps none, is held to a staging that moved
+// (integrations.RestagedGeneration: it reads nothing), or is held to a call
+// that reads in a view other than the one in force
+// (integrations.ElsewhereGeneration: no other call reads what it reads).
 func stagedKey(db integrations.MockMemDb) (learnIndexKey, bool) {
 	gen, ok := integrations.StagingGenerationOf(db, models.HTTP)
-	if !ok || gen == integrations.RestagedGeneration {
+	if !ok || !integrations.KeptGeneration(gen) {
 		return learnIndexKey{}, false
 	}
 	return learnIndexKey{gen: gen}, true
@@ -495,7 +497,7 @@ func (h *HTTP) learnedGroupOf(base, db integrations.MockMemDb, tracker *learn.Tr
 		return group, owner, nil
 	}
 	r := h.learnRules(db, tracker)
-	verify := integrations.ExactViewVerify.Load()
+	verify := h.verifying()
 	if verify {
 		r = r.answersOnce()
 	}

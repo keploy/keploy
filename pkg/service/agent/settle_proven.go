@@ -156,8 +156,10 @@ var errHoldsUnknown = errors.New("a connection's held requests are unknown")
 // holdsUnknown is errHoldsUnknown for the protocols it names.
 type holdsUnknown []string
 
+// Error gives the reasons a connection's held requests can be unknown: its
+// parser's, and the platform's own (holdsUnknownCounts).
 func (h holdsUnknown) Error() string {
-	return "keploy cannot tell whether " + strings.Join(h, ", ") + " on a connection still holds a request: its parser reads ahead of its answers and does not say which requests it holds, or says that for now it cannot tell"
+	return "keploy cannot tell whether " + strings.Join(h, ", ") + " on a connection still holds a request: its parser reads ahead of its answers and does not say which requests it holds, or says that for now it cannot tell" + holdsUnknownCounts
 }
 
 func (h holdsUnknown) Is(target error) bool { return target == errHoldsUnknown }

@@ -13,15 +13,6 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// ownersOf takes p's owned losses and returns the test each names.
-func ownersOf(p *Proxy) []string {
-	var out []string
-	for _, o := range p.TakeOwnedLosses() {
-		out = append(out, o.Test)
-	}
-	return out
-}
-
 // A loss a bytes wait finds once the proxy has closed its side short of what
 // the application wrote (pairReached) is the bytes past what the side
 // received, up to what the wait waited for, but for a FIN it counts. A test

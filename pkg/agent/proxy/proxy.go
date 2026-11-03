@@ -545,6 +545,11 @@ type Proxy struct {
 	// isGracefulShutdown indicates the application is shutting down gracefully
 	// When set, connection errors should be logged as debug instead of error
 	isGracefulShutdown atomic.Bool
+	// stopBegun: the recording's stop has begun (NoteStopBegun). A
+	// connection end read from then on is the stop's doing, not a fault of
+	// the upstream's or the application's (peerEndMarker). Reset with
+	// isGracefulShutdown as a recording or a mocking session starts.
+	stopBegun atomic.Bool
 
 	auxiliaryHook agent.AuxiliaryProxyHook
 	// teardownOnce guards runAuxTeardown so the auxiliary hook's
@@ -1292,9 +1297,9 @@ func shouldRecordViaSupervisor(parser integrations.Integrations) bool {
 // pointers it is given and writes the upgraded *tls.Conn back through
 // them, so that handleConnection's deferred close acts on the TLS conn
 // and sends close_notify. Constructing it here would alias this
-// function's PARAMETER COPIES: the legacy MySQL STARTTLS path
-// (recorder/conn.go UpgradeClientTLS/UpgradeDestTLS) would still
-// upgrade, but the caller's variables would keep pointing at the raw
+// function's PARAMETER COPIES: a parser's STARTTLS upgrade on the raw
+// sockets (session.TLSUpgrader's UpgradeClientTLS/UpgradeDestTLS) would
+// still upgrade, but the caller's variables would keep pointing at the raw
 // sockets and the deferred close would tear them down without
 // close_notify. proxy.go's matched-parser site carries the same warning.
 //
@@ -1672,6 +1677,9 @@ func (p *Proxy) ResetRecordedDNSMocks() {
 // When this flag is set, connection errors will be logged as debug instead of error
 func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
 	p.isGracefulShutdown.Store(true)
+	// keploy record's client sends this before it stops the application:
+	// the stop has begun (NoteStopBegun).
+	p.stopBegun.Store(true)
 	// A recording's stop: the requests in flight that began by now are the
 	// ones it found, which are no requests of the next recording
 	// (syncMock.NoteStop). keploy record's client sends this at its stop,
@@ -1718,6 +1726,22 @@ func (p *Proxy) SubscribePcap(w io.Writer, flush func()) (func(), error) {
 // IsGracefulShutdown returns whether the graceful shutdown flag is set
 func (p *Proxy) IsGracefulShutdown() bool {
 	return p.isGracefulShutdown.Load()
+}
+
+// NoteStopBegun says the recording's stop has begun: the recording client is
+// about to stop the application, and the connection ends read from now on are
+// the stop's doing, so a call the stop cuts records no fault (peerEndMarker).
+// keploy mock record's client says it before it stops the test command, and
+// does not set the graceful-shutdown flag then: that flag's other effects (the
+// stop noted for the requests in flight, the incoming drainer) belong after
+// its drain. keploy record's graceful-shutdown notice sets it too.
+func (p *Proxy) NoteStopBegun() {
+	p.stopBegun.Store(true)
+}
+
+// StopBegun reports whether the recording's stop has begun (NoteStopBegun).
+func (p *Proxy) StopBegun() bool {
+	return p.stopBegun.Load()
 }
 
 func (p *Proxy) SetAuxiliaryHook(h agent.AuxiliaryProxyHook) {
@@ -4305,6 +4329,7 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 	opts.NormalizeMockNoise()
 	// Reset graceful shutdown flag for a new recording session.
 	p.isGracefulShutdown.Store(false)
+	p.stopBegun.Store(false)
 	// Reset DNS mock deduplication tracker for fresh recording
 	p.ResetRecordedDNSMocks()
 	// The process's mock manager starts the recording before its first
@@ -4387,6 +4412,7 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	opts.NormalizeMockNoise()
 	// Reset graceful shutdown flag for a new mocking session.
 	p.isGracefulShutdown.Store(false)
+	p.stopBegun.Store(false)
 	// Forget the previous recording's MySQL ports before this test set derives
 	// its own. The agent is a single long-lived process and this registry is
 	// allocated once, so without the reset the derived port set — and the

@@ -655,6 +655,14 @@ func TestPoolSlices(t *testing.T) {
 	pool, unknown := poolSlices(mp, map[string][]string{"o::TestA": {"mock-0", "mock-9"}, "o::TestB": {"mock-cf"}}, held, decoded)
 	require.Equal(t, map[string][]string{"o": {"mock-1"}, models.PoolKeyNone: {"mock-2", "mock-3"}}, pool)
 	require.Equal(t, []string{"mock-8", "mock-9"}, unknown)
+
+	// A worker: entry (a call made between or after the tests, or one a
+	// reader moved there from a test's list) keeps its key as a startup:
+	// one does; one a test lists is still the test's.
+	mp.Worker = []models.MockEntry{{Name: "mock-3", Key: "o"}, {Name: "mock-0", Key: "o"}, {Name: "mock-7"}}
+	pool, unknown = poolSlices(mp, map[string][]string{"o::TestA": {"mock-0", "mock-9"}, "o::TestB": {"mock-cf"}}, held, decoded)
+	require.Equal(t, map[string][]string{"o": {"mock-1", "mock-3"}, models.PoolKeyNone: {"mock-2"}}, pool)
+	require.Equal(t, []string{"mock-7", "mock-8", "mock-9"}, unknown)
 	pool, unknown = poolSlices(nil, nil, nil, nil)
 	require.Empty(t, pool)
 	require.Empty(t, unknown)
@@ -766,6 +774,31 @@ func TestTheReplayPushesThePoolSlices(t *testing.T) {
 	require.NoError(t, New(zap.NewNop(), instr, named("mock-0", "mock-1", "mock-2", "mock-3", "mock-4"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
 	require.Equal(t, map[string][]string{"o": {"mock-1"}, models.PoolKeyNone: {"mock-2", "mock-4"}, "users": {"mock-3"}}, instr.pool, "a mock no test lists and no startup entry keys is the keyless slice's")
 	require.NotNil(t, instr.begins, "the replay sends the agent the tests' recorded begins")
+}
+
+// Under the switch the replay hands the agent, with the pool slices, each
+// key's worker scope: the names of its slice mappings' worker: lists, which
+// the agent serves in a test's window too. A worker: name a test lists is
+// that test's, not the scope's; a name startup: lists too is the scope's,
+// under the key startup: gives it.
+func TestTheReplayPushesTheWorkerScope(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-0\nstartup:\n    - name: mock-1\n      key: o\n    - name: mock-5\n      key: users\nworker:\n    - name: mock-3\n    - name: mock-2\n      key: o\n    - name: mock-0\n      key: o\n    - name: mock-5\n      key: o\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-0"}}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	require.NoError(t, New(zap.NewNop(), instr, named("mock-0", "mock-1", "mock-2", "mock-3", "mock-4", "mock-5"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	require.Equal(t, map[string][]string{"o": {"mock-1", "mock-2"}, models.PoolKeyNone: {"mock-3", "mock-4"}, "users": {"mock-5"}}, instr.pool)
+	require.Equal(t, map[string][]string{models.PoolKeyNone: {"mock-3"}, "o": {"mock-2"}, "users": {"mock-5"}}, instr.worker,
+		"each worker: name under the key whose slice holds it, in worker:'s order; mock-0 stays TestA's")
 }
 
 // Under the switch the replay hands the agent, with the table, the recorded
@@ -1085,6 +1118,24 @@ func TestARefusalGivesASkippedConnectionFailureAndAYAMLOnlyKindTheirOwnFix(t *te
 	require.Contains(t, err.Error(), `skips: mock-0, of kind "Redis-Ent", which keploy reads only from a YAML mock file.`)
 	require.Contains(t, err.Error(), `Keploy reads a mock of such a kind only from a YAML mock file, and one with a "-" in its kind only with keploy enterprise: record the set again in YAML, not as mocks.json; otherwise`)
 	for _, wrong := range []string{"upgrade", "use keploy enterprise", "correct those names"} {
+		require.NotContains(t, err.Error(), wrong)
+	}
+}
+
+// A recorded call whose fault this keploy cannot enact (a fault kind from a
+// newer keploy) is named as such, with its own fix: an upgrade or the fields
+// keploy wrote, never "use keploy enterprise" or a kind to correct.
+func TestARefusalNamesASkippedFaultWithItsOwnFix(t *testing.T) {
+	keployDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	doc := "version: api.keploy.io/v1beta1\nkind: Http\nname: mock-12\nspec:\n    req:\n        method: GET\n        url: http://pay.example/charge\n    fault:\n        kind: explode\n"
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte(doc), 0o644))
+	m := &mockService{config: &config.Config{Path: keployDir}, mockDB: mockdb.New(zap.NewNop(), keployDir, "mocks")}
+	err := m.refuseUnknownMocks(context.Background(), "set", &models.Mapping{}, []string{"mock-12"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "skips: mock-12, a call whose fault this keploy cannot enact.")
+	require.Contains(t, err.Error(), "If a newer keploy recorded a call's fault, upgrade keploy to replay it; if you edited one in mocks.yaml, give its fault back the fields keploy wrote; otherwise record")
+	for _, wrong := range []string{"enterprise", "kind and spec", "connection failure", "correct those names"} {
 		require.NotContains(t, err.Error(), wrong)
 	}
 }

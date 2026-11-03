@@ -217,7 +217,7 @@ func sameDestinationMocks(live destination, mocks []*models.Mock) []*models.Mock
 // report says was compared.
 func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool []*models.Mock, mockDb integrations.MockMemDb, n strictNoise, statefulMocks bool) (served *models.Mock, diag *matchDiag, retry bool, err error) {
 	live := liveDestination(ctx, input)
-	fits, err := strictFits(ctx, input, live, pool, n)
+	fits, err := strictFits(ctx, input, live, pool, n, h.verifying())
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -303,9 +303,9 @@ func (c nearest) closerThan(o nearest) bool {
 // in pool's order: strictCompare's fits, with only the recordings that may be
 // the call (strictSieve) compared, so a call that is one recording of a large
 // pool compares that one, not the pool. In the exact view's verify mode
-// (integrations.ExactViewVerify) every recording is compared too, and a
-// difference panics.
-func strictFits(ctx context.Context, input *req, live destination, pool []*models.Mock, n strictNoise) ([]*models.Mock, error) {
+// (verify, the handler's: HTTP.verifying) every recording is compared too,
+// and a difference panics.
+func strictFits(ctx context.Context, input *req, live destination, pool []*models.Mock, n strictNoise, verify bool) ([]*models.Mock, error) {
 	sieve := newStrictSieve(input, n)
 	strictVisits.Add(int64(len(pool)))
 	var fits []*models.Mock
@@ -317,7 +317,7 @@ func strictFits(ctx context.Context, input *req, live destination, pool []*model
 			fits = append(fits, m)
 		}
 	}
-	if integrations.ExactViewVerify.Load() {
+	if verify {
 		all, _, err := strictCompare(ctx, input, live, pool, n)
 		if err != nil {
 			return nil, err
@@ -501,19 +501,19 @@ func bandPick(group []*models.Mock, cs integrations.MockCursor, bg bool, mockDb 
 // recording can answer no more (a worker scope's answers once in the
 // staging) the call is a miss, never an earlier recording again. In a test,
 // a band of the set's worker scope (sv.Worker: every recording of it) is
-// walked the same way: on the cursor the calls between tests advance
-// (sv.Between) over every reached recording of it the store stages, by
-// placement, with no window. A worker-scope recording belongs to no test:
-// record files one in the worker scope when no test's window was open as it
-// was recorded, at its place in the gap it was made in, and an idle answer
-// wherever it was recorded; so its call is answered the same whether it lands
-// in a test or in the gap beside it, and the set's end finds none it reached
-// unanswered for want of a window. A test's own recordings are never walked
-// here (a test view serves them ConsumeReuse, each once), so under today's
-// rules a band in a test is the worker scope's; one that holds any other
-// recording keeps the test's window. Each worker-scope recording is spent as
-// it answers, so today the cursor's served marks only restate the spends:
-// what the band changes is the window.
+// walked the same way: on the windows' cursor (sv.Between), which the calls
+// between tests never advance, over every reached recording of it the store
+// stages, by placement, with no window. A worker-scope recording belongs to
+// no test: record files one in the worker scope when no test's window was
+// open as it was recorded, at its place in the gap it was made in, and an
+// idle answer wherever it was recorded; so its call is answered the same in
+// whichever test's window it lands, and how many calls landed between tests
+// before it moves nothing a window is answered. A test's own recordings are
+// never walked here (a test view serves them ConsumeReuse, each once), so
+// under today's rules a band in a test is the worker scope's; one that holds
+// any other recording keeps the test's window. Each worker-scope recording
+// is spent in the windows as it answers, so today the cursor's served marks
+// only restate the spends: what the band changes is the window.
 func bandWalk(group []*models.Mock, cs integrations.MockCursor, bg bool, sv integrations.SequenceView, mockDb integrations.MockMemDb, member func(*models.Mock) bool) (int, func(), *answeredSequence) {
 	switch {
 	case bg:

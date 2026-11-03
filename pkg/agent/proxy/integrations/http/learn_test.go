@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -3646,10 +3647,14 @@ func TestInServeOrderNumbersTheLeafedPayloadsByTheServedMocks(t *testing.T) {
 // ("at <instant>") alike, and the window, its provenance, decides: read in
 // the call's window (the receive served before it, its arrival, on the app's
 // clock) it is a clock read, learned as noise, whether the boot took 2 s or
-// 30 s longer; read by the lead alone (no app clock, or a test's own call,
-// which is read so: F sets each test's clock), nothing shows it is one, and
-// the minute and second that changed are words of the receive's Date header,
-// a value that may have flowed from the receive: refused, naming it.
+// 30 s longer. A test's own call is read in its own window (learn.OwnCall)
+// where the store tells whose each serve is, as the proxy's does under the
+// switch: the receive is the start-up's, so the window runs from it, and the
+// read is learned the same. Read by the lead alone (no app clock, or a
+// test's own call where no store tells whose a serve is), nothing shows it
+// is one, and the minute and second that changed are words of the receive's
+// Date header, a value that may have flowed from the receive: refused,
+// naming it.
 func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 	iso := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }
 	recRead := learnAt.Add(3 * time.Millisecond)
@@ -3665,12 +3670,16 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 			boot  time.Duration
 			clock bool
 			own   bool
+			// owner: the store tells whose each serve is (the test's own
+			// or the start-up's: learn.Tracker.SetServeOwner).
+			owner bool
 			noise bool
 		}{
-			{"a 2 s longer boot", 2 * time.Second, true, false, true},
-			{"a 30 s longer boot", 30 * time.Second, true, false, true},
-			{"no app clock", 2 * time.Second, false, false, false},
-			{"a test's own call", 2 * time.Second, true, true, false},
+			{"a 2 s longer boot", 2 * time.Second, true, false, false, true},
+			{"a 30 s longer boot", 30 * time.Second, true, false, false, true},
+			{"no app clock", 2 * time.Second, false, false, false, false},
+			{"a test's own call, the store tells whose a serve is", 2 * time.Second, true, true, true, true},
+			{"a test's own call, no store tells whose a serve is", 2 * time.Second, true, true, false, false},
 		} {
 			t.Run(form.name+", "+tc.name, func(t *testing.T) {
 				h, n, opts := learnOn(t)
@@ -3687,6 +3696,10 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 					db = &learnDb{perTest: []*models.Mock{event}, staged: []*models.Mock{receive}, pool: map[time.Time]bool{receive.Spec.ReqTimestampMock: true}}
 					tr.Begin()
 				}
+				if tc.owner {
+					// Both are the test's own or the start-up's.
+					tr.SetServeOwner(func(*models.Mock) bool { return true })
+				}
 				offset := learn.FullRoundLead + tc.boot - 40*time.Second
 				read := 0
 				if tc.clock {
@@ -3700,8 +3713,8 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if tc.own && read != 0 {
-					t.Fatalf("a test's own call read its window (the app's clock %d times)", read)
+				if tc.own && (read != 0) != tc.owner {
+					t.Fatalf("a test's own call read the app's clock %d times; want its window read only where the store tells whose a serve is (%v)", read, tc.owner)
 				}
 				if !tc.noise {
 					if got != nil || miss == nil || !strings.Contains(miss.res.Why, "earlier") || !strings.Contains(miss.res.Why, "mock-0") {
@@ -5185,5 +5198,158 @@ func TestLearnMatchATokenAnotherTestsServeMayHaveGivenIsRefusedUnlessItsAdapterS
 				t.Fatalf("FALSE REASON: refused %s (%q); want request_changed saying %q", miss.res.Reason, miss.res.Why, tc.why)
 			}
 		})
+	}
+}
+
+// A consumer that fell behind makes a call of an older test in a later
+// test's window (test 4's): it carries the id a serve of test 2 gave it
+// (mock-22, read as the word rule reads a recording F gave earlier in the
+// set: GivenPlaces of the tracker's order), while the call's recording holds
+// the id of a recording of the window's own test (mock-60), which F gave the
+// application as recorded. The refusal named mock-60 as where the value
+// came from ("holds earlier (in mock-60), where keploy cannot bind it yet"),
+// so the user could not act on it; it names the late call and mock-22, and
+// refuses as before. Where mock-22 gave another id, keploy cannot name the
+// value's source, and the refusal says so with the leaf's reason, never that
+// mock-60 holds it earlier where keploy cannot bind it. A serve of test 3,
+// the test F ran just before the call's, recorded in another recorded test's
+// window, is no earlier place of the call's own test (ofPairedTest): HTTP
+// reads it among the set's too (GivenPlaces), which says its test is the
+// one F ran just before the call's, and the refusal names it so.
+func TestALateCallsRefusalNamesTheOlderTestsServeNotTheWindowsRecording(t *testing.T) {
+	const (
+		path   = "body.Key.Id.S"
+		recID  = "fb77a0c2-5d1e-4c3b-9a8f-0e6d2c4b1a90"
+		liveID = "7f7e49f4-2b6c-4e1d-8f3a-5c9b0d7e6a12"
+		// otherID is an id neither the call nor its recording holds.
+		otherID = "0a0b0c0d-1e1f-4a4b-8c8d-9e9f0a0b0c0d"
+		// unnamed is HTTP's refusal where keploy cannot name the source,
+		// with the leaf's reason after it, which says so.
+		unnamed = path + " carries a value keploy cannot name a source of: its recorded value stands whole in mock-60"
+	)
+	for _, c := range []struct {
+		name, gave string
+		previous   bool
+		want       string
+		not        []string
+	}{
+		{"an older test's serve gave it", liveID, false, path + " changed, and the value it carries now is, whole, what record's full round gave the application in mock-22, in an older test than the call's", []string{"holds earlier (in mock-60)", "flowed from mock-60", "cannot name"}},
+		{"no older test's serve gave it", otherID, false, unnamed, []string{"holds earlier (in mock-60)", "flowed from mock-60", "cannot bind", "late call", "mock-22"}},
+		{"the previous test's serve gave it", liveID, true, path + " changed, and the value it carries now is, whole, what record's full round gave the application in mock-22, in the test record's full round ran just before the call's", []string{"holds earlier (in mock-60)", "flowed from mock-60", "cannot name", "an older test"}},
+		{"the previous test's serve gave another id", otherID, true, unnamed, []string{"holds earlier (in mock-60)", "flowed from mock-60", "cannot bind", "late call", "mock-22"}},
+	} {
+		t.Run(c.name, func(t *testing.T) { lateCallRefusal(t, path, recID, liveID, c.gave, c.previous, c.want, c.not) })
+	}
+}
+
+// lateCallRefusal is the refusal HTTP gives a call of test 4 that carries
+// liveID where its recording holds recID, which mock-60, served as recorded
+// in the call's own test, holds, where a serve of test 2 (mock-22; of test
+// 3, the test F ran just before the call's, where previous) gave the
+// application the id gave: it starts want, says none of not, and refuses
+// the call.
+func lateCallRefusal(t *testing.T, path, recID, liveID, gave string, previous bool, want string, not []string) {
+	t.Helper()
+	servedIn := 2
+	if previous {
+		servedIn = 3
+	}
+	lateCallRefusalIn(t, path, recID, liveID, gave, 4, servedIn, want, not)
+}
+
+// A test the replay skips (a selection, an ignored test) is never begun,
+// and a streaming test is run after the rest, so the order F ran its tests
+// in is no test case's number. The refusal names the serve by its
+// recording and says whether its test is the one F ran just before the
+// call's, by the order F ran them in; it never names a test by a number.
+func TestALateCallsRefusalNamesNoTestByTheOrderTheReplayRanThem(t *testing.T) {
+	const (
+		path   = "rows.0.0"
+		recID  = "evt-8Q2KX7MZ4PRDH5TB"
+		liveID = "evt-3N9WB5TJ6HCAQ8MV"
+		older  = path + " changed, and the value it carries now is, whole, what record's full round gave the application in mock-22, in an older test than the call's"
+		prev   = path + " changed, and the value it carries now is, whole, what record's full round gave the application in mock-22, in the test record's full round ran just before the call's"
+	)
+	for _, c := range []struct {
+		name           string
+		runs, servedIn int
+		want           string
+	}{
+		// Test cases 1 to 4, test 2 left out: F runs 1, 3, 4. mock-22,
+		// served in test case 3, is of the test F ran just before the
+		// call's (test case 4).
+		{"test case 3's serve, test case 2 left out", 3, 2, prev},
+		// Test case 2 streams, so F runs 1, 3, 4, then 2, where the call
+		// is. Test case 1 is the case before the call's, but F ran two
+		// tests between them.
+		{"test case 1's serve, the call in test case 2 run last", 4, 1, older},
+		// The same order: test case 4, whose number is after the call's,
+		// is the test F ran just before it.
+		{"test case 4's serve, the call in test case 2 run last", 4, 3, prev},
+	} {
+		t.Run(c.name, func(t *testing.T) { lateCallRefusalIn(t, path, recID, liveID, liveID, c.runs, c.servedIn, c.want, nil) })
+	}
+}
+
+// lateCallRefusalIn runs a late call in the window of the runs-th test F
+// begins in the set, which carries liveID; mock-22, served as recorded in
+// the servedIn-th, gave the application gave, and is read as HTTP reads a
+// recording of another recorded test's window F served earlier in the set
+// (GivenPlaces), whichever test F served it in. The refusal starts with
+// want, says keploy cannot name the value's source where want does, says
+// none of not, names no test by a number, and refuses the call.
+func lateCallRefusalIn(t *testing.T, path, recID, liveID, gave string, runs, servedIn int, want string, not []string) {
+	t.Helper()
+	at := time.Date(2026, 10, 24, 9, 55, 53, 938177550, time.UTC)
+	pg := func(name string, before time.Duration, id string) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
+			ReqTimestampMock: at.Add(-before),
+			ResTimestampMock: at.Add(-before + time.Millisecond),
+			PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
+				SQLNormalized: "SELECT id FROM lead_events",
+				Response:      &models.PostgresV3Response{Rows: []models.PostgresV3Cells{{{Value: id}}}, CommandComplete: "SELECT 1"},
+			}},
+		}}
+	}
+	older := pg("mock-22", 40*time.Second, gave)
+	tr := learn.NewTracker()
+	tr.SetAppClock(func(real time.Time) (time.Time, bool) { return real, true })
+	tr.NewSet()
+	for run := 1; run < runs; run++ {
+		tr.Begin()
+		if run == servedIn {
+			tr.ServedMock(older)
+			tr.ServedMockAsRecorded(older)
+		}
+		tr.End()
+	}
+	tr.Begin()
+	o := tr.Placed().Order
+	given := func() ([]learn.GivenPlaces, error) {
+		g, err := o.GivenPlaces(older)
+		return []learn.GivenPlaces{g}, err
+	}
+	window := learn.RawOf(pg("mock-60", 200*time.Millisecond, recID), false).ServedAs(9).ServedAsRecorded()
+	rec := learn.Shape{Leaves: map[string]learn.Leaf{path: {Path: path, Type: learn.String, Value: recID}}}
+	live := learn.Shape{Leaves: map[string]learn.Leaf{path: {Path: path, Type: learn.String, Value: liveID}}}
+	learned := learn.ClassifyGiven(tr.Drifts(), []string{path}, live, rec, at, nil, []learn.Raw{window}, nil, nil, given)
+	p, why := learnPlan(tr, uint64(runs), &models.Mock{Name: "mock-61"}, rec, true, learned, nil, nil)
+	if !strings.HasPrefix(why, want) {
+		t.Errorf("why %q; want it to start %q", why, want)
+	}
+	const cannot = "keploy cannot name where the value the call carries now came from"
+	if strings.Contains(want, "cannot name a source") && !strings.Contains(why, cannot) {
+		t.Errorf("why %q; want it to say %q", why, cannot)
+	}
+	for _, n := range not {
+		if strings.Contains(why, n) {
+			t.Errorf("why %q says %q", why, n)
+		}
+	}
+	if n := regexp.MustCompile(`\btests? \d`).FindString(why); n != "" {
+		t.Errorf("why %q names a test by a number (%q)", why, n)
+	}
+	if len(p.noise) != 0 || len(p.vars) != 0 {
+		t.Errorf("noise %v, variables %v; want the call refused", p.noise, p.vars)
 	}
 }

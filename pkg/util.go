@@ -4877,6 +4877,36 @@ func DecompressReserving(logger *zap.Logger, encoding string, data []byte, limit
 	}
 }
 
+// Compress keeps its writers between calls. A new writer builds its whole
+// state for each body it compresses: a brotli writer at the default
+// quality allocates and clears a hash table of 2 MiB (4 MiB from a 1 MiB
+// body on), a gzip writer about 1 MiB of flate state. A kept writer is
+// Reset to the new buffer, which makes it what a new writer is (both
+// packages' Reset), so the bytes are the same.
+// TestCompressWithAKeptWriterIsWhatANewWriterGives pins that.
+var gzipWriters = sync.Pool{New: func() any { return gzip.NewWriter(nil) }}
+
+// brotliWriters keeps brotli writers by the size of the bodies they
+// compress (brotliClass). A brotli writer picks its hash table's kind at its
+// first body, by that body's size: at the default quality one kind under
+// brotliLargeBody and another from it on (andybalholm/brotli's
+// chooseHasher). Reset keeps the table, so a kept writer takes only bodies
+// on the same side of brotliLargeBody as the one it was made for, and
+// compresses them as a new writer would.
+var brotliWriters [2]sync.Pool
+
+// brotliLargeBody is the body size from which a brotli writer at the
+// default quality and window hashes with its large table.
+const brotliLargeBody = 1 << 20
+
+// brotliClass is the brotliWriters pool for a body of n bytes.
+func brotliClass(n int) int {
+	if n >= brotliLargeBody {
+		return 1
+	}
+	return 0
+}
+
 // Compress deflates data per the given Content-Encoding. The encoding is
 // matched case-insensitively after trimming — symmetric with Decompress, so
 // a body stored decompressed at record time is re-compressed at replay even
@@ -4887,7 +4917,8 @@ func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) 
 	case "gzip":
 		logger.Debug("compressing data using gzip")
 		var compressedBuffer bytes.Buffer
-		gw := gzip.NewWriter(&compressedBuffer)
+		gw := gzipWriters.Get().(*gzip.Writer)
+		gw.Reset(&compressedBuffer)
 		_, err := gw.Write(data)
 		if err != nil {
 			utils.LogError(logger, err, "failed to write compressed data to gzip writer")
@@ -4898,11 +4929,17 @@ func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) 
 			utils.LogError(logger, err, "failed to close gzip writer")
 			return nil, err
 		}
+		gzipWriters.Put(gw)
 		return compressedBuffer.Bytes(), nil
 	case "br":
 		logger.Debug("compressing data using brotli")
 		var compressedBuffer bytes.Buffer
-		bw := brotli.NewWriter(&compressedBuffer)
+		pool := &brotliWriters[brotliClass(len(data))]
+		bw, _ := pool.Get().(*brotli.Writer)
+		if bw == nil {
+			bw = brotli.NewWriter(nil)
+		}
+		bw.Reset(&compressedBuffer)
 		_, err := bw.Write(data)
 		if err != nil {
 			utils.LogError(logger, err, "failed to write compressed data to brotli writer")
@@ -4913,6 +4950,7 @@ func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) 
 			utils.LogError(logger, err, "failed to close brotli writer")
 			return nil, err
 		}
+		pool.Put(bw)
 		return compressedBuffer.Bytes(), nil
 	}
 	return data, nil
