@@ -1,0 +1,426 @@
+package http
+
+import (
+	"context"
+	"reflect"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	"go.keploy.io/server/v3/pkg/matcher/learn"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+)
+
+// The store the rows below drive: a DynamoDB-shaped API whose PutItem writes
+// a lead into the record its Id names, read back by a GetItem of that Id or
+// by a Scan of the table. The reader is a stand-in for enterprise's: it marks
+// every leaf of a PutItem's Item Written into "Leads/<Id>", and links every
+// leaf of a read's item to the record its Id names.
+var (
+	rbPut  = map[string]string{"X-Amz-Target": "DynamoDB_20120810.PutItem", "Content-Type": "application/x-amz-json-1.0"}
+	rbGet  = map[string]string{"X-Amz-Target": "DynamoDB_20120810.GetItem", "Content-Type": "application/x-amz-json-1.0"}
+	rbScan = map[string]string{"X-Amz-Target": "DynamoDB_20120810.Scan", "Content-Type": "application/x-amz-json-1.0"}
+)
+
+func rbPutBody(id, name string) string {
+	return `{"Item":{"Id":{"S":"` + id + `"},"Name":{"S":"` + name + `"}},"TableName":"Leads"}`
+}
+
+func rbGetBody(id string) string { return `{"Key":{"Id":{"S":"` + id + `"}},"TableName":"Leads"}` }
+
+func rbItem(id, name string) string { return `{"Id":{"S":"` + id + `"},"Name":{"S":"` + name + `"}}` }
+
+// rbStore is the stand-in reader. calls, when set, is told each set of calls
+// Access is given; written, when set, replaces what Access marks.
+type rbStore struct {
+	calls   *[][]string
+	written func(n int) []map[string]string
+	unread  map[string]string
+}
+
+func rbTarget(r *models.HTTPReq) string { return r.Header["X-Amz-Target"] }
+
+func (rbStore) Reads(r *models.HTTPReq) bool {
+	t := rbTarget(r)
+	return t == rbGet["X-Amz-Target"] || t == rbScan["X-Amz-Target"]
+}
+
+// rbLeaves are the leaves of a JSON text under key, by path, each with its
+// value.
+func rbLeaves(body, key string) map[string]learn.Leaf {
+	out := map[string]learn.Leaf{}
+	if v, ok := learn.DecodeJSON([]byte(body)); ok {
+		if m, ok := v.(map[string]interface{}); ok && m[key] != nil {
+			learn.JSONLeaves("body."+key, m[key], out)
+		}
+	}
+	return out
+}
+
+func (s rbStore) Access(read *models.Mock, calls []*models.Mock) models.HTTPStoreAccess {
+	if s.calls != nil {
+		var names []string
+		for _, c := range calls {
+			names = append(names, c.Name)
+		}
+		*s.calls = append(*s.calls, names)
+	}
+	a := models.HTTPStoreAccess{Written: make([]map[string]string, len(calls)), Read: map[string]string{}, Unread: s.unread}
+	for i, c := range calls {
+		if c.Spec.HTTPReq == nil || rbTarget(c.Spec.HTTPReq) != rbPut["X-Amz-Target"] {
+			continue
+		}
+		leaves := rbLeaves(c.Spec.HTTPReq.Body, "Item")
+		a.Written[i] = map[string]string{}
+		for path := range leaves {
+			a.Written[i][path] = "Leads/" + leaves["body.Item.Id.S"].Value
+		}
+	}
+	if s.written != nil {
+		a.Written = s.written(len(calls))
+	}
+	switch rbTarget(read.Spec.HTTPReq) {
+	case rbGet["X-Amz-Target"]:
+		id := rbLeaves(read.Spec.HTTPReq.Body, "Key")["body.Key.Id.S"].Value
+		for path := range rbLeaves(read.Spec.HTTPResp.Body, "Item") {
+			a.Read[path] = "Leads/" + id
+		}
+	case rbScan["X-Amz-Target"]:
+		leaves := rbLeaves(read.Spec.HTTPResp.Body, "Items")
+		for path := range leaves {
+			item := path[:strings.Index(path, "]")+1]
+			a.Read[path] = "Leads/" + leaves[item+".Id.S"].Value
+		}
+	}
+	return a
+}
+
+// rbRegister registers s as the store reader for the test.
+func rbRegister(t *testing.T, s rbStore) {
+	t.Helper()
+	t.Cleanup(models.RegisterHTTPStore(s))
+}
+
+// rbRun is a test of the lead store: the recordings mocks (mock-0 the
+// PutItem), served to the calls in turn in record's full round, under the
+// proven switch as proven says. It returns the store with what each call
+// consumed, and the answers served.
+func rbRun(t *testing.T, proven string, mocks []*models.Mock, calls []*req) (*learnDb, []*models.Mock) {
+	t.Helper()
+	h, _, opts := learnOn(t)
+	t.Setenv(provenswitch.Env, proven)
+	if provenswitch.On() != (proven == "1") {
+		t.Fatalf("the proven switch reads %v under %s=%q", provenswitch.On(), provenswitch.Env, proven)
+	}
+	n := h.newLearnNoise(opts, nil, nil)
+	tr := learn.NewTracker()
+	tr.Begin()
+	ctx := learn.WithTracker(context.Background(), tr)
+	db := &learnDb{perTest: mocks, observe: tr.ServedMock}
+	var out []*models.Mock
+	for i, c := range calls {
+		served, miss, err := h.learnMatch(ctx, c, db, n, opts)
+		if err != nil || miss != nil || served == nil {
+			t.Fatalf("call %d: served %v miss %+v err %v", i, served, miss, err)
+		}
+		out = append(out, served)
+	}
+	return db, out
+}
+
+// The PoC's lead read-back: the test creates a lead whose name it stamps
+// with this run's time, then reads the lead back by its id and checks the
+// name. Its GetItem is exactly the recorded one (the id is the same), and
+// keploy answers it with the name this run's PutItem stored, bound at that
+// PutItem: a variable F binds there and answers at the read, under the
+// proven switch and without it.
+func TestReadBackAnswersAnExactReadWithWhatTheTestWrote(t *testing.T) {
+	for _, proven := range []string{"1", "0"} {
+		t.Run("proven="+proven, func(t *testing.T) {
+			rbRegister(t, rbStore{})
+			db, served := rbRun(t, proven, []*models.Mock{
+				learnRecorded("mock-0", 0, "POST", "/", rbPutBody("c-1", "Lead 1700000000000"), rbPut, `{}`),
+				learnRecorded("mock-1", time.Second, "POST", "/", rbGetBody("c-1"), rbGet, `{"Item":`+rbItem("c-1", "Lead 1700000000000")+`}`),
+			}, []*req{
+				live("POST", "/", rbPutBody("c-1", "Lead 1700000000417"), rbPut),
+				live("POST", "/", rbGetBody("c-1"), rbGet),
+			})
+			if got := served[1].Spec.HTTPResp.Body; got != `{"Item":`+rbItem("c-1", "Lead 1700000000417")+`}` {
+				t.Fatalf("the read answered %s, want the name this run wrote", got)
+			}
+			read := db.consumed[1]
+			vars := read.Spec.Learned()
+			if len(vars) != 1 {
+				t.Fatalf("the read learned %+v, want one variable", vars)
+			}
+			for name, v := range vars {
+				if v.Recorded != "Lead 1700000000000" || !reflect.DeepEqual(v.Answer, []string{"body.Item.Name.S"}) || len(v.Use) != 0 {
+					t.Fatalf("variable %s = %+v, want answered at body.Item.Name.S", name, v)
+				}
+				if want := (map[string]models.MockVariables{"mock-0": {name: {Recorded: "Lead 1700000000000", Bind: "body.Item.Name.S"}}}); !reflect.DeepEqual(read.Spec.LearnedBinds(), want) {
+					t.Fatalf("binds %+v, want %+v", read.Spec.LearnedBinds(), want)
+				}
+			}
+		})
+	}
+}
+
+// The read whose key drifted (an id the application made) is paired: its
+// key is the variable bound at the PutItem's Id, and the name it reads is
+// read back from the PutItem as well.
+func TestReadBackAnswersAPairedReadWithWhatTheTestWrote(t *testing.T) {
+	for _, proven := range []string{"1", "0"} {
+		t.Run("proven="+proven, func(t *testing.T) {
+			rbRegister(t, rbStore{})
+			db, served := rbRun(t, proven, []*models.Mock{
+				learnRecorded("mock-0", 0, "POST", "/", rbPutBody("c-1", "Lead 1700000000000"), rbPut, `{}`),
+				learnRecorded("mock-1", time.Second, "POST", "/", rbGetBody("c-1"), rbGet, `{"Item":`+rbItem("c-1", "Lead 1700000000000")+`}`),
+			}, []*req{
+				live("POST", "/", rbPutBody("c-9", "Lead 1700000000417"), rbPut),
+				live("POST", "/", rbGetBody("c-9"), rbGet),
+			})
+			if got := served[1].Spec.HTTPResp.Body; got != `{"Item":`+rbItem("c-9", "Lead 1700000000417")+`}` {
+				t.Fatalf("the read answered %s, want the id and name this run wrote", got)
+			}
+			var answered []string
+			for _, v := range db.consumed[1].Spec.Learned() {
+				answered = append(answered, v.Answer...)
+			}
+			sort.Strings(answered)
+			if !reflect.DeepEqual(answered, []string{"body.Item.Id.S", "body.Item.Name.S"}) {
+				t.Fatalf("the read answers %v, want its id and its name", answered)
+			}
+		})
+	}
+}
+
+// A Scan whose request is the recorded one answers each item the test wrote
+// with what it wrote, and an item it did not write as recorded.
+func TestReadBackAnswersAScanWithWhatTheTestWrote(t *testing.T) {
+	rbRegister(t, rbStore{})
+	_, served := rbRun(t, "1", []*models.Mock{
+		learnRecorded("mock-0", 0, "POST", "/", rbPutBody("c-1", "Lead 1700000000000"), rbPut, `{}`),
+		learnRecorded("mock-1", time.Second, "POST", "/", `{"ConsistentRead":true,"TableName":"Leads"}`, rbScan, `{"Count":2,"Items":[`+rbItem("c-0", "Lead 1600000000000")+`,`+rbItem("c-1", "Lead 1700000000000")+`]}`),
+	}, []*req{
+		live("POST", "/", rbPutBody("c-1", "Lead 1700000000417"), rbPut),
+		live("POST", "/", `{"ConsistentRead":true,"TableName":"Leads"}`, rbScan),
+	})
+	if got, want := served[1].Spec.HTTPResp.Body, `{"Count":2,"Items":[`+rbItem("c-0", "Lead 1600000000000")+`,`+rbItem("c-1", "Lead 1700000000417")+`]}`; got != want {
+		t.Fatalf("the scan answered %s, want %s", got, want)
+	}
+}
+
+// Where nothing reads the store, where the reader links the read to no
+// record, or where it marks nothing written, the read is answered as
+// recorded and learns nothing; and the reader is given the test's calls
+// served before the read, in the order served.
+func TestReadBackAnswersAsRecordedWhereNoWriteIsStated(t *testing.T) {
+	mocks := func() []*models.Mock {
+		return []*models.Mock{
+			learnRecorded("mock-0", 0, "POST", "/", rbPutBody("c-1", "Lead 1700000000000"), rbPut, `{}`),
+			learnRecorded("mock-1", time.Second, "POST", "/", rbGetBody("c-1"), rbGet, `{"Item":`+rbItem("c-1", "Lead 1700000000000")+`}`),
+		}
+	}
+	calls := func() []*req {
+		return []*req{live("POST", "/", rbPutBody("c-1", "Lead 1700000000417"), rbPut), live("POST", "/", rbGetBody("c-1"), rbGet)}
+	}
+	recorded := `{"Item":` + rbItem("c-1", "Lead 1700000000000") + `}`
+	asRecorded := func(t *testing.T, db *learnDb, served []*models.Mock) {
+		t.Helper()
+		if got := served[1].Spec.HTTPResp.Body; got != recorded {
+			t.Fatalf("the read answered %s, want it as recorded", got)
+		}
+		if vars := db.consumed[1].Spec.Learned(); len(vars) != 0 {
+			t.Fatalf("the read learned %+v, want nothing", vars)
+		}
+	}
+	t.Run("no reader", func(t *testing.T) {
+		db, served := rbRun(t, "1", mocks(), calls())
+		asRecorded(t, db, served)
+	})
+	t.Run("no write marked", func(t *testing.T) {
+		var given [][]string
+		rbRegister(t, rbStore{calls: &given, written: func(n int) []map[string]string { return make([]map[string]string, n) }})
+		db, served := rbRun(t, "1", mocks(), calls())
+		asRecorded(t, db, served)
+		if !reflect.DeepEqual(given, [][]string{{"mock-0"}}) {
+			t.Fatalf("the reader was given %v, want the PutItem alone", given)
+		}
+	})
+	t.Run("a mark per call or none", func(t *testing.T) {
+		rbRegister(t, rbStore{written: func(n int) []map[string]string {
+			return []map[string]string{{"body.Item.Name.S": "Leads/c-1"}, {"body.Item.Name.S": "Leads/c-1"}}
+		}})
+		db, served := rbRun(t, "1", mocks(), calls())
+		asRecorded(t, db, served)
+	})
+	t.Run("another record", func(t *testing.T) {
+		rbRegister(t, rbStore{written: func(n int) []map[string]string {
+			return []map[string]string{{"body.Item.Name.S": "Leads/c-2"}}
+		}})
+		db, served := rbRun(t, "1", mocks(), calls())
+		asRecorded(t, db, served)
+	})
+	t.Run("the write kept its value", func(t *testing.T) {
+		rbRegister(t, rbStore{})
+		c := calls()
+		c[0] = live("POST", "/", rbPutBody("c-1", "Lead 1700000000000"), rbPut)
+		db, served := rbRun(t, "1", mocks(), c)
+		asRecorded(t, db, served)
+	})
+}
+
+// What F learned replays: each consumed mock's variables written onto its
+// recording and its binds onto the PutItem, a later run's GetItem, exactly
+// the recorded one, is answered by the variable pass with the name that
+// run's PutItem stored; with no PutItem before it, it is a variable miss,
+// never the recorded name.
+func TestReadBackReplaysByTheVariablePass(t *testing.T) {
+	rbRegister(t, rbStore{})
+	recordings := []*models.Mock{
+		learnRecorded("mock-0", 0, "POST", "/", rbPutBody("c-1", "Lead 1700000000000"), rbPut, `{}`),
+		learnRecorded("mock-1", time.Second, "POST", "/", rbGetBody("c-1"), rbGet, `{"Item":`+rbItem("c-1", "Lead 1700000000000")+`}`),
+	}
+	f, _ := rbRun(t, "1", recordings, []*req{
+		live("POST", "/", rbPutBody("c-1", "Lead 1700000000417"), rbPut),
+		live("POST", "/", rbGetBody("c-1"), rbGet),
+	})
+	written := func() []*models.Mock {
+		out := map[string]*models.Mock{}
+		for _, m := range recordings {
+			c := *m
+			c.Spec.Variables = models.MockVariables{}
+			out[m.Name] = &c
+		}
+		for _, st := range f.consumed {
+			for vn, v := range st.Spec.Learned() {
+				out[st.Name].Spec.Variables[vn] = v
+			}
+			for target, vs := range st.Spec.LearnedBinds() {
+				for vn, v := range vs {
+					out[target].Spec.Variables[vn] = v
+				}
+			}
+		}
+		return []*models.Mock{out["mock-0"], out["mock-1"]}
+	}
+	h := newHTTP()
+	ci := &varDb{perTest: written()}
+	if ok, _, diag := matchVar(t, h, ci, live("POST", "/", rbPutBody("c-1", "Lead 1700000009999"), rbPut)); !ok {
+		t.Fatalf("the PutItem in CI: %+v", diag)
+	}
+	ok, stub, diag := matchVar(t, h, ci, live("POST", "/", rbGetBody("c-1"), rbGet))
+	if !ok || stub.Spec.HTTPResp.Body != `{"Item":`+rbItem("c-1", "Lead 1700000009999")+`}` {
+		t.Fatalf("the GetItem in CI: ok %v diag %+v", ok, diag)
+	}
+
+	ci = &varDb{perTest: written()}
+	ok, _, diag = matchVar(t, h, ci, live("POST", "/", rbGetBody("c-1"), rbGet))
+	if ok || diag == nil || diag.phase != models.MatchPhaseVariable {
+		t.Fatalf("the GetItem with no PutItem before it: ok %v diag %+v, want a variable miss", ok, diag)
+	}
+}
+
+// readBackPlan on the exchanges a test served, as the tracker keeps them: a
+// leaf is read back only from a write of the running test's own (never the
+// test case's request, an earlier test's, or the pool's), never at a place
+// answered already, never when the write was served twice, never past the
+// test's end; it answers a variable the write's place holds already, and a
+// clock read bound at the write carries its clock evidence.
+func TestReadBackPlanReadsBackOnlyTheTestsOwnWrites(t *testing.T) {
+	rbRegister(t, rbStore{})
+	rec := learnAt.Add(-time.Hour + 17*time.Second)
+	recName, liveName := rec.Format(time.RFC3339), rec.Add(learn.FullRoundLead).Format(time.RFC3339)
+	put := learnRecorded("mock-0", 0, "POST", "/", rbPutBody("c-1", recName), rbPut, `{}`)
+	get := learnRecorded("mock-1", time.Second, "POST", "/", rbGetBody("c-1"), rbGet, `{"Item":`+rbItem("c-1", recName)+`}`)
+	exchange := func(edit func(*learn.Earlier)) []learn.Earlier {
+		e := learn.Earlier{Mock: "mock-0", At: put.Spec.ReqTimestampMock, Own: true, Seen: []learn.Seen{
+			{Side: learn.Request, Leaf: learn.Leaf{Path: "body.Item.Id.S", Noise: "body.Item.Id.S", Type: learn.String, Value: "c-1"}, Live: "c-1", Place: "body.Item.Id.S"},
+			{Side: learn.Request, Leaf: learn.Leaf{Path: "body.Item.Name.S", Noise: "body.Item.Name.S", Type: learn.String, Value: recName}, Live: liveName, Place: "body.Item.Name.S"},
+		}}
+		if edit != nil {
+			edit(&e)
+		}
+		return []learn.Earlier{e}
+	}
+	h := newHTTP()
+	tr := clockedTracker()
+	tr.Begin()
+	test := tr.Placed().Test
+
+	p := h.readBackPlan(tr, test, get, []*models.Mock{put}, exchange(nil), nil, newPairing())
+	if len(p.vars) != 1 || len(p.binds["mock-0"]) != 1 {
+		t.Fatalf("the test's own write: vars %+v binds %+v, want one variable bound at mock-0", p.vars, p.binds)
+	}
+	for name, v := range p.binds["mock-0"] {
+		if v.Bind != "body.Item.Name.S" || len(v.Clock) != 1 || !v.Clock[0].At.Equal(rec) || v.Clock[0].Res != time.Second {
+			t.Fatalf("bind %s = %+v, want bound at body.Item.Name.S with the clock read it holds", name, v)
+		}
+		if b := p.values[name]; b.Value != liveName || b.Recorded != recName || b.Mock != "mock-0" {
+			t.Fatalf("value %+v, want this run's", b)
+		}
+	}
+	if len(exchange(nil)[0].Seen) != 2 || exchange(nil)[0].Seen[1].Written {
+		t.Fatal("the tracker's exchange is left as it was")
+	}
+
+	for _, c := range []struct {
+		name   string
+		served []*models.Mock
+		edit   func(*learn.Earlier)
+		test   uint64
+	}{
+		{"the test case's request", []*models.Mock{put}, func(e *learn.Earlier) { e.Given = true }, test},
+		{"an earlier test's", []*models.Mock{put}, func(e *learn.Earlier) { e.Run = true }, test},
+		{"the pool's", []*models.Mock{put}, func(e *learn.Earlier) { e.Own = false }, test},
+		{"served twice", []*models.Mock{put, put}, nil, test},
+		{"another call's", []*models.Mock{get}, nil, test},
+		{"past the test's end", []*models.Mock{put}, nil, test + 1},
+	} {
+		if p := h.readBackPlan(tr, c.test, get, c.served, exchange(c.edit), nil, newPairing()); len(p.vars) != 0 || len(p.binds) != 0 {
+			t.Fatalf("%s: vars %+v binds %+v, want the read answered as recorded", c.name, p.vars, p.binds)
+		}
+	}
+
+	held := exchange(func(e *learn.Earlier) { e.Seen[1].Name = "lead-name" })
+	p = newPairing()
+	p.vars["lead-name"] = models.MockVariable{Recorded: recName, Use: []string{"body.Key.Name.S"}}
+	p = h.readBackPlan(tr, test, get, []*models.Mock{put}, held, nil, p)
+	if want := (models.MockVariables{"lead-name": {Recorded: recName, Use: []string{"body.Key.Name.S"}, Answer: []string{"body.Item.Name.S"}}}); !reflect.DeepEqual(p.vars, want) || len(p.binds) != 0 {
+		t.Fatalf("vars %+v binds %+v, want the write's variable answered at the read, bound nowhere new", p.vars, p.binds)
+	}
+	if b := p.values["lead-name"]; b.Value != liveName {
+		t.Fatalf("value %+v, want this run's", b)
+	}
+
+	p = newPairing()
+	p.vars["key"] = models.MockVariable{Recorded: recName, Answer: []string{"body.Item.Name.S"}}
+	if p = h.readBackPlan(tr, test, get, []*models.Mock{put}, exchange(nil), nil, p); len(p.vars) != 1 || len(p.binds) != 0 {
+		t.Fatalf("a place answered already: vars %+v binds %+v", p.vars, p.binds)
+	}
+}
+
+// A read the pool keeps (no test's own) that is exactly its recording is
+// answered as recorded: only a test's own read reads back.
+func TestReadBackLeavesThePoolsReadAsRecorded(t *testing.T) {
+	rbRegister(t, rbStore{})
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.Begin()
+	ctx := learn.WithTracker(context.Background(), tr)
+	pool := learnRecorded("mock-1", time.Second, "POST", "/", rbGetBody("c-1"), rbGet, `{"Item":`+rbItem("c-1", "Lead 1700000000000")+`}`)
+	pool.TestModeInfo.Lifetime = models.LifetimeSession
+	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/", rbPutBody("c-1", "Lead 1700000000000"), rbPut, `{}`)}, mocks: []*models.Mock{pool}, observe: tr.ServedMock}
+	if served, miss, err := h.learnMatch(ctx, live("POST", "/", rbPutBody("c-1", "Lead 1700000000417"), rbPut), db, n, opts); served == nil || miss != nil || err != nil {
+		t.Fatalf("the PutItem: served %v miss %+v err %v", served, miss, err)
+	}
+	served, miss, err := h.learnMatch(ctx, live("POST", "/", rbGetBody("c-1"), rbGet), db, n, opts)
+	if err != nil || miss != nil || served == nil {
+		t.Fatalf("the read: served %v miss %+v err %v", served, miss, err)
+	}
+	if got := served.Spec.HTTPResp.Body; got != `{"Item":`+rbItem("c-1", "Lead 1700000000000")+`}` {
+		t.Fatalf("the pool's read answered %s, want it as recorded", got)
+	}
+}
