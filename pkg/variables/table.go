@@ -390,37 +390,45 @@ func TwoValues(held, b Binding) bool {
 // wordRunSep joins the words of a run: no word holds it (Words).
 const wordRunSep = "-"
 
-// WordRuns is, for each binding one call makes at a word address (at[i], with
-// its live and recorded words live[i] and recorded[i]), its run, live and
+// WordBind is a binding one call makes at a word of a value: Text names the
+// text that holds the word (its place and decode steps, as the adapter writes
+// a place: one name for one text), Word is the word's index in it (Words; -1
+// for a value whole), and Live and Recorded are the word.
+type WordBind struct {
+	Text           string
+	Word           int
+	Live, Recorded string
+}
+
+// WordRuns is, for each binding one call makes (ws[i]), its run, live and
 // recorded (Binding.WordRun): the words the call binds at consecutive words
-// of the same text (one place, one decode), its own among them, in word
-// order, joined. A binding of a value whole (Word -1) has none. Words the
-// call binds apart, with a word between them it does not bind, are two runs.
-func WordRuns(at []Address, live, recorded []string) (liveRun, recordedRun []string) {
-	liveRun, recordedRun = make([]string, len(at)), make([]string, len(at))
+// of the same text, its own among them, in word order, joined. A binding of
+// a value whole has none. Words the call binds apart, with a word between
+// them it does not bind, are two runs.
+func WordRuns(ws []WordBind) (liveRun, recordedRun []string) {
+	liveRun, recordedRun = make([]string, len(ws)), make([]string, len(ws))
 	byText := map[string][]int{}
 	var texts []string
-	for i, a := range at {
-		if a.Word < 0 {
+	for i, w := range ws {
+		if w.Word < 0 {
 			continue
 		}
-		k := Address{Place: a.Place, Steps: a.Steps, Word: -1}.String()
-		if _, seen := byText[k]; !seen {
-			texts = append(texts, k)
+		if _, seen := byText[w.Text]; !seen {
+			texts = append(texts, w.Text)
 		}
-		byText[k] = append(byText[k], i)
+		byText[w.Text] = append(byText[w.Text], i)
 	}
 	for _, k := range texts {
 		idx := byText[k]
-		sort.SliceStable(idx, func(x, y int) bool { return at[idx[x]].Word < at[idx[y]].Word })
+		sort.SliceStable(idx, func(x, y int) bool { return ws[idx[x]].Word < ws[idx[y]].Word })
 		for lo := 0; lo < len(idx); {
 			hi := lo + 1
-			for hi < len(idx) && at[idx[hi]].Word == at[idx[hi-1]].Word+1 {
+			for hi < len(idx) && ws[idx[hi]].Word == ws[idx[hi-1]].Word+1 {
 				hi++
 			}
 			lw, rw := make([]string, 0, hi-lo), make([]string, 0, hi-lo)
 			for _, i := range idx[lo:hi] {
-				lw, rw = append(lw, live[i]), append(rw, recorded[i])
+				lw, rw = append(lw, ws[i].Live), append(rw, ws[i].Recorded)
 			}
 			l, r := strings.Join(lw, wordRunSep), strings.Join(rw, wordRunSep)
 			for _, i := range idx[lo:hi] {
