@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -169,30 +171,67 @@ func TestPairCasesAndAttributeMocksPickTheInnermostWindow(t *testing.T) {
 	require.Equal(t, "mock-0", out[0].Consumed[0].Name)
 }
 
+// lateIncoming is a replay's agent that hands over the app's last request
+// only after `after`, saying until then that it still holds one from before
+// the run ended, and then that it holds nothing more; it ends its request
+// stream on request, with its marker, as today's agent does.
 type lateIncoming struct {
 	*runnerInstr
 	after time.Duration
 	tc    *models.TestCase
+
+	sent    atomic.Bool
+	ended   atomic.Bool
+	endOnce sync.Once
+	endReq  chan struct{}
 }
 
-func (l lateIncoming) GetIncoming(ctx context.Context, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
+func (l *lateIncoming) GetIncoming(ctx context.Context, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
 	out := make(chan *models.TestCase)
 	go func() {
 		defer close(out)
 		select {
 		case <-time.After(l.after):
-			out <- l.tc
 		case <-ctx.Done():
 			return
 		}
-		<-ctx.Done()
+		select {
+		case out <- l.tc:
+			l.sent.Store(true)
+		case <-ctx.Done():
+			return
+		}
+		select {
+		case <-l.endReq:
+			l.ended.Store(true)
+		case <-ctx.Done():
+		}
 	}()
 	return out, nil
 }
 
+func (l *lateIncoming) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	if !l.sent.Load() {
+		return models.AgentBacklog{Verdict: models.BacklogPending}, nil
+	}
+	return models.AgentBacklog{Verdict: models.BacklogClear, EndMarkers: true}, nil
+}
+
+func (l *lateIncoming) EndRecordingStreams(context.Context, string) error {
+	l.endOnce.Do(func() { close(l.endReq) })
+	return nil
+}
+
+func (l *lateIncoming) StreamEnded(kind models.FrameStream) bool {
+	return kind == models.TestCaseStream && l.ended.Load()
+}
+
+// A request the agent hands over after the runner exited, and after the
+// stream's quiet, is compared: the agent says it still holds one, and the
+// drain waits on its word.
 func TestReplayWaitsForTheLastRequestBeforeComparing(t *testing.T) {
 	instr := newRunnerInstr(t, sequentialMarks()...)
-	late := lateIncoming{runnerInstr: instr, after: 200 * time.Millisecond, tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))}
+	late := &lateIncoming{runnerInstr: instr, after: 2 * mockDrainQuiet, endReq: make(chan struct{}), tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))}
 	dir := t.TempDir()
 	mapDB := mapdb.New(zap.NewNop(), dir, "")
 	require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil, nil))
@@ -211,6 +250,7 @@ func TestReplayWaitsForTheLastRequestBeforeComparing(t *testing.T) {
 	require.Len(t, got.Cases, 1)
 	require.NotNil(t, got.Cases[0].Actual, "the request that arrived after the runner exited is still compared")
 	require.True(t, got.Cases[0].Passed)
+	require.True(t, late.ended.Load(), "the watch did not end on the agent's marker")
 }
 
 // heldIncoming is a replay whose agent still holds requests from before the

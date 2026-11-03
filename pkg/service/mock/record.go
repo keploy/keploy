@@ -492,9 +492,13 @@ func (m *mockService) Record(ctx context.Context) error {
 	// the agent died) promotes nothing, and "the recording is saved" would
 	// not be true of it.
 	sayUnconfirmed := func() {
-		if unconfirmed {
+		switch unconfirmed {
+		case tailStreamClosed:
 			m.logger.Warn(composeTailUnconfirmed, zap.String("mock-set", name), zap.Int("mocks", mockCount),
 				zap.String("next_step", composeTailUnconfirmedNext))
+		case tailQuiet:
+			m.logger.Warn(quietTailUnconfirmed, zap.String("mock-set", name), zap.Int("mocks", mockCount),
+				zap.Duration("quiet_for", mockDrainQuiet), zap.String("next_step", quietTailUnconfirmedNext))
 		}
 	}
 	// 8a's count, read while the recording's stream is still open: an agent
@@ -529,7 +533,15 @@ func (m *mockService) Record(ctx context.Context) error {
 			streams = append(streams, roundStream{kind: models.TestCaseStream, done: capture.done})
 		}
 		strict := agentHolds && startedAgent(m.instrumentation)
-		lost = m.endRound(round, func() bool { return strict }, streams, recordDrainWords)
+		var refused error
+		lost, refused = m.endRound(round, func() bool { return strict }, streams, recordDrainWords)
+		if refused != nil {
+			// The agent answered, and did not take the request: its streams
+			// are ended here, as before markers. A mock still on its way is
+			// lost, and the recording is still saved: a loss at record time
+			// does not fail the recording, the replay of it judges it.
+			m.logger.Warn(endRefused, zap.Error(refused), zap.String("next_step", recordDrainWords.endedHere))
+		}
 	}
 	stopCapture()
 	// 8''. The capture has stopped: its consumers write what the agent handed
@@ -1522,7 +1534,7 @@ func containing(windows []models.ScopeWindow, at time.Time) string {
 // reads the streams to the agent's markers (endRound), so that mock is read;
 // with any other agent, a stream ended once this returns loses it unseen
 // (models.BacklogClear), which the quiet before the drain asks has almost
-// always let through.
+// always let through, and the drain is unconfirmed (tailQuiet).
 // It is bounded by progress, not by a deadline: an agent still handing over a
 // backlog is waited for however long that takes, and so is one the user
 // interrupted (Ctrl+C stops the recording, not the handing over of what was
@@ -1539,10 +1551,17 @@ func containing(windows []models.ScopeWindow, at time.Time) string {
 // the user ends so did not get what the agent still held: it is lost (said
 // with words.gaveUp).
 //
-// unconfirmed is true when it ended because an agent that does not hold its
-// stream for the drain (docker compose stops it with the project) closed it:
-// nothing then says the caller has all it captured, nor that it does not.
-func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time.Time, agentHolds bool, held func() (progress uint64, busy bool), arrived func() uint64, words drainWords, round *roundEnd) (lost, unconfirmed bool) {
+// unconfirmed says why a drain that lost nothing still cannot say the caller
+// has every mock the agent captured before the run ended (tailConfirmed when
+// it can): an agent that does not hold its stream for the drain (docker
+// compose stops it with the project) closed it (tailStreamClosed), or the
+// drain ended on the stream's quiet with no word from the agent that ends it
+// (tailQuiet): an agent that cannot say what it still holds, or that said it
+// holds nothing more but cannot end its stream after what it already sent
+// (roundEnd.endsByMarkers). Quiet is then all the drain had to go by, and a
+// mock the agent was slower than that to hand over is not in the recording:
+// the caller says so once it has saved it, never in silence.
+func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time.Time, agentHolds bool, held func() (progress uint64, busy bool), arrived func() uint64, words drainWords, round *roundEnd) (lost bool, unconfirmed unconfirmedTail) {
 	quiet := time.NewTimer(mockDrainQuiet)
 	defer quiet.Stop()
 	notice := utils.NewStopNowNotice(mockDrainNotice)
@@ -1569,17 +1588,17 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 				// stream as it gives the drain up: the user's stop.
 				select {
 				case <-utils.StopNow():
-					return m.stoppedNow(words), false
+					return m.stoppedNow(words), tailConfirmed
 				default:
-					return m.agentEndedDrain(&looks, arrived() == lookedAt), false
+					return m.agentEndedDrain(&looks, arrived() == lookedAt), tailConfirmed
 				}
 			}
 			// The agent gave no word that it had handed over all it had:
 			// its stream just closed. What this caller saves cannot be
 			// confirmed whole: the caller says so if it saves it.
-			return false, true
+			return false, tailStreamClosed
 		case <-utils.StopNow():
-			return m.stoppedNow(words), false
+			return m.stoppedNow(words), tailConfirmed
 		case <-notices.C:
 			msg := words.saving
 			if notice.Next() {
@@ -1612,10 +1631,37 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 				quiet.Reset(mockDrainQuiet)
 				continue
 			}
-			return gaveUp, false
+			if gaveUp {
+				return true, tailConfirmed
+			}
+			// The agent said it holds nothing more and ends its streams on
+			// request: the caller reads them to its markers (endRound), every
+			// mock it put on them read. Any other end came on the stream's
+			// quiet alone.
+			if !round.endsByMarkers() {
+				return false, tailQuiet
+			}
+			return false, tailConfirmed
 		}
 	}
 }
+
+// unconfirmedTail is why a drain that lost nothing cannot confirm its caller
+// has every mock the agent captured before the run ended
+// (drainTrailingMocks).
+type unconfirmedTail int
+
+const (
+	// tailConfirmed: nothing says a mock is missing, or the drain was lost
+	// (and its caller saves nothing).
+	tailConfirmed unconfirmedTail = iota
+	// tailStreamClosed: an agent that does not hold its stream for the drain
+	// (docker compose stops it with the project) closed it.
+	tailStreamClosed
+	// tailQuiet: the drain ended on the stream's quiet, with no word from
+	// the agent that ends it.
+	tailQuiet
+)
 
 // drainWords is how drainTrailingMocks speaks to its caller's user: of what
 // it is still doing, and of what ending it at a second interrupt costs.
@@ -1681,6 +1727,41 @@ const (
 	composeTailUnconfirmed     = "the keploy agent closed its mock stream as docker compose stopped it with the project, without saying it had handed over every mock it captured: keploy cannot confirm this recording holds them all"
 	composeTailUnconfirmedNext = "the recording is saved; replay the set to check it: under --on-miss fail (the default) a call it is missing fails the replay. Or record the test command natively (keploy mock record -c \"<test command>\"), where keploy confirms it"
 )
+
+// quietTailUnconfirmed, with its next step, is said at WARN once keploy mock
+// record has saved a recording whose drain ended on the stream's quiet
+// (tailQuiet): the agent could not say what it still held, or could not end
+// its stream after what it had sent, so a mock it handed over later than the
+// quiet lasted is not in the recording, and nothing says whether there was
+// one.
+const (
+	quietTailUnconfirmed     = "the keploy agent could not confirm it had handed over every mock it captured before the run ended (it cannot say what it still holds, or cannot end its mock stream after what it sent), so keploy stopped reading the stream once it had gone quiet: keploy cannot confirm this recording holds them all"
+	quietTailUnconfirmedNext = "the recording is saved; replay the set to check it: under --on-miss fail (the default) a call it is missing fails the replay. Or run a keploy agent of this keploy's version, which says when it has handed over every mock it captured"
+)
+
+// quietRequestsUnconfirmed, with its next step, is said at ERROR when keploy
+// mock replay's request drain ended on the stream's quiet (tailQuiet): the
+// agent could not say what it still held, or could not end its request
+// stream after what it had sent, so a request it handed over later than the
+// quiet lasted is not in what the run compares, and would read as one the
+// app never made. Replay is the judge: such a run is not judged, and fails
+// as keploy's (requestsUnconfirmed).
+const (
+	quietRequestsUnconfirmed     = "replay failed: the keploy agent could not confirm it had handed over every request it captured before the run ended (it cannot say what it still holds, or cannot end its request stream after what it sent), so keploy stopped reading the stream once it had gone quiet: this run is not judged, since a request it handed over later would read as one the app never made"
+	quietRequestsUnconfirmedNext = "run a keploy agent of this keploy's version, which says when it has handed over every request it captured, then replay again"
+)
+
+// endRefused is said when the agent answered the request to end a round's
+// streams but did not take it (endRound's refused): the streams are ended
+// here, as before markers, and a frame still on its way is lost. keploy mock
+// record says it at WARN and saves the recording; keploy mock replay fails
+// the run as keploy's (replayEndRefused).
+const endRefused = "the keploy agent did not take the request to end its streams; ending them here, and what was still on its way is lost"
+
+// requestsUnconfirmed is why such a run is short of the requests the agent
+// captured (Replay's requestsShort): it names the agent's missing word and
+// the quiet keploy went by instead.
+var requestsUnconfirmed = "keploy could not confirm it read every request the app served: its agent gave no word that it had handed them all over, and keploy stopped reading after " + mockDrainQuiet.String() + " of quiet"
 
 // replayDrainWords are keploy mock replay's: it collects the requests the
 // agent captured, for the run's report. A run short of them is not judged
@@ -1790,8 +1871,8 @@ type backlogReader interface {
 // the stream has been quiet for mockDrainQuiet, so the drain waits at least
 // that times this on a backlog that does not move, well past the agent's own
 // hang bound (a parser that holds work and makes no progress is retired,
-// which is progress here).
-const mockDrainStallLooks = 180
+// which is progress here). A var only so a row can shorten it.
+var mockDrainStallLooks = 180
 
 // holdForBacklog decides, for the trailing drain once the stream has gone
 // quiet, whether it goes on waiting for what the agent still holds from
