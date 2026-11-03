@@ -18,10 +18,11 @@ import (
 // lateServes are the recordings F gave the application in an older test of
 // the set (givenWords.test) that hold live, the value a call carries now,
 // whole, as F gave it there (gaveWhole), in the order the word rule reads
-// them (offsetPlaces.words); none where a recording F gave earlier in the
-// set could not be read (offsetPlaces.unread), as it may hold the value too.
+// them (offsetPlaces.words); none where live is a value an answer may hold
+// by chance (lateID), or a recording F gave earlier in the set could not be
+// read (offsetPlaces.unread), as it may hold the value too.
 func lateServes(live string, op *offsetPlaces) []givenWords {
-	if op.unread != "" {
+	if !lateID(live) || op.unread != "" {
 		return nil
 	}
 	var out []givenWords
@@ -31,6 +32,32 @@ func lateServes(live string, op *offsetPlaces) []givenWords {
 		}
 	}
 	return out
+}
+
+// lateID reports whether a late call may be named by live, the value it
+// carries now: an id, a run of id bytes alone (idByte) of at least
+// minEncodedRun, that holds a letter and a digit (a UUID, a nanoid,
+// "ord-7K29Q4AB"), which no answer holds by chance. A count, a flag, a
+// status or a code ("4", "true", "pending", "201") stands in most answers,
+// so an older test's serve that holds one shows nothing of where the call's
+// value came from, and keploy says it cannot name it.
+func lateID(live string) bool {
+	if len(live) < minEncodedRun {
+		return false
+	}
+	letter, digit := false, false
+	for i := 0; i < len(live); i++ {
+		c := live[i]
+		switch {
+		case !idByte(c):
+			return false
+		case c >= '0' && c <= '9':
+			digit = true
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+			letter = true
+		}
+	}
+	return letter && digit
 }
 
 // gaveWhole reports whether keploy can tell that F gave the application
@@ -99,7 +126,9 @@ func (dc *DriftCache) notFromWhy(v *valueDrift, from Place, at time.Time, served
 // in an older test (late: lateServes), where its recorded value stands in
 // from, a recording of the call's own test (appearedIn), at which F did not
 // give it that value (notFromWhy): the call is late, and nothing of its own
-// test answers it; "" where no older test's serve gave it.
+// test answers it; "" where no older test's serve gave it. It names the
+// serves by their recordings, never by the order F ran its tests in, which
+// a selection or a deferred test makes no test case's number.
 func lateOf(v *valueDrift, from Place, late []givenWords) string {
 	if len(late) == 0 {
 		return ""
@@ -109,17 +138,19 @@ func lateOf(v *valueDrift, from Place, late []givenWords) string {
 	if from.Held != v.rec && from.Held != v.decRec {
 		found = "a part of the value it was recorded with (" + partOf(v.rec, from.Held) + ") stands in " + at
 	}
+	const tail = ", a recording of the call's own test, where record's full round did not give the application that value. "
+	const notFollowed = "no recording of the call's own test answers it, since keploy does not follow a value another test's recording gave the application. Look at why the application fell behind (a call of that test keploy did not answer, which the application retried)"
 	if len(late) > 1 {
 		names := make([]string, 0, 3)
 		for _, g := range late[:min(3, len(late))] {
-			names = append(names, g.mock+" (the set's test "+strconv.Itoa(g.test)+")")
+			names = append(names, g.mock)
 		}
 		more := ""
 		if len(late) > 3 {
 			more = " and " + strconv.Itoa(len(late)-3) + " more"
 		}
-		return "the value it carries now is, whole, what record's full round gave the application in each of " + strings.Join(names, ", ") + more + ", older tests than the call's, so keploy cannot tell which of them it carries; " + found + ", a recording of the call's own test, where record's full round did not give the application that value. The call is late: the application still works on what an older test gave it, and no recording of the call's own test answers it, since keploy follows no value of another test's. Look at why the application fell behind (a call of that test keploy did not answer, which the application retried)"
+		return "the value it carries now is, whole, what record's full round gave the application in each of " + strings.Join(names, ", ") + more + ", each in an older test than the call's, so keploy cannot tell which of them it carries; " + found + tail + "The call is late: the application still works on what an older test gave it, and " + notFollowed
 	}
 	g := late[0]
-	return "the value it carries now is, whole, what record's full round gave the application in " + g.mock + ", in the set's test " + strconv.Itoa(g.test) + ", an older test than the call's; " + found + ", a recording of the call's own test, where record's full round did not give the application that value. The call is a late call of test " + strconv.Itoa(g.test) + ": the application still works on what " + g.mock + " gave it there, and no recording of the call's own test answers it, since keploy follows no value of another test's. Look at why the application fell behind (a call of test " + strconv.Itoa(g.test) + " keploy did not answer, which the application retried)"
+	return "the value it carries now is, whole, what record's full round gave the application in " + g.mock + ", in an older test than the call's; " + found + tail + "The call is a late call of " + g.mock + "'s test: the application still works on what " + g.mock + " gave it there, and " + notFollowed
 }

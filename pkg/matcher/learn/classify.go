@@ -783,6 +783,14 @@ type Place struct {
 	// stands in the value, never by its text.
 	Field, Held string
 	Echo        bool
+	// SetAside, of a place found in a raw mock's payload (Side ""): the
+	// search found the recorded value there, and the rule a copy follows
+	// its source sets it aside, as F gave the application nothing there
+	// that holds the value the call carries now (notFromWhy), and keploy
+	// cannot name where that value came from. The place is no source of
+	// the value, and no binding gap: a caller's reason names it so, never
+	// as the place the value is held earlier, and the leaf's Why says why.
+	SetAside bool
 	// AtCall, of a place found in a raw mock's payload: the mock was
 	// recorded at the call's own instant (a fixture's whole second), which
 	// keploy reads as one the recording may have given the application
@@ -1566,13 +1574,13 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					// cannot name its source, never from (notFromWhy).
 					// Where keploy cannot name the source, the leaf stays a
 					// variable of from, as the search found it (the rule a
-					// copy follows its source is ClassifyFollowing's), and
-					// only its reason changes.
+					// copy follows its source is ClassifyFollowing's), set
+					// aside (Place.SetAside), and only its reason changes.
 					switch why, late := dc.notFromWhy(dc.ofIn(r.Value, l.Value, w, at), from, at, placed, raw, places); {
 					case late:
 						ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, why
 					case why != "":
-						ln.Why = why
+						ln.From.SetAside, ln.Why = true, why
 					}
 				}
 			} else if echo := Echoes(dc, r, resp); len(echo) > 0 {

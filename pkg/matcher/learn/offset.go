@@ -751,8 +751,8 @@ type givenWords struct {
 	pos      uint64
 	// test is the number in the set of the older test F gave the
 	// application the recording in, every serve of it, as the read
-	// numbered them (Order.testOf); 0 where keploy cannot name one. A
-	// reason names it where a call carries what F gave there (lateServes).
+	// numbered them (Order.testOf); 0 where keploy cannot name one. A call
+	// that carries what F gave there is late (lateServes).
 	test        int
 	first, last int
 	set         bool

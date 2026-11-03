@@ -51,7 +51,7 @@ func TestALateCallNamesTheOlderTestsServeNotTheWindowsRecording(t *testing.T) {
 	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: lateLiveID}}}
 	asRecorded := func(x Raw) Raw { return x.ServedAsRecorded() }
 	const (
-		late    = "late call of test 2"
+		late    = "late call of mock-22's test"
 		search  = "flowed from mock-60"
 		unnamed = "keploy cannot name where the value the call carries now came from"
 	)
@@ -97,7 +97,7 @@ func TestALateCallNamesTheOlderTestsServeNotTheWindowsRecording(t *testing.T) {
 			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, asRecorded), {}}, unnamed, []string{search, late}, "-"},
 		{"four older tests' serves gave it", lateMsg("mock-60", 200*time.Millisecond, lateRecID).ServedAs(9).ServedAsRecorded(),
 			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, asRecorded), lateSet("mock-33", 3, lateLiveID, asRecorded), lateSet("mock-44", 4, lateLiveID, asRecorded), lateSet("mock-55", 5, lateLiveID, asRecorded)},
-			"mock-44 (the set's test 4) and 1 more", []string{search, "mock-55"}, "appears in mock-22"},
+			"in each of mock-22, mock-33, mock-44 and 1 more", []string{search, "mock-55"}, "appears in mock-22"},
 		{"a part of the recorded id stands in the window's recording", lateMsg("mock-60", 200*time.Millisecond, lateRecID[:8]).ServedAs(9).ServedAsRecorded(),
 			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, asRecorded)}, "a part of the value it was recorded with (its characters 1 to 8) stands in mock-60", []string{search, "stands whole"}, "appears in mock-22"},
 		{"the window's recording not served yet, and no older serve gave it", lateMsg("mock-60", 200*time.Millisecond, lateRecID),
@@ -141,6 +141,15 @@ func TestALateCallNamesTheOlderTestsServeNotTheWindowsRecording(t *testing.T) {
 			}
 			if !strings.Contains(ln.Why, want) {
 				t.Errorf("%s: why %q; want it to say %q", at, ln.Why, want)
+			}
+			// A late call's leaf is no variable of any place; one whose
+			// source keploy cannot name stays a variable of the window's
+			// recording, set aside (Place.SetAside), and no other is.
+			if ln.Kind == KindUnaccounted && ln.From != (Place{}) {
+				t.Errorf("%s: unaccounted from %+v; want no place", at, ln.From)
+			}
+			if aside := strings.Contains(ln.Why, unnamed); ln.From.SetAside != aside || aside && (ln.Kind != KindVariable || ln.From.Mock != "mock-60") {
+				t.Errorf("%s: %s from %q set aside %v; want set aside %v", at, ln.Kind, ln.From.Mock, ln.From.SetAside, aside)
 			}
 			for _, n := range c.not {
 				if strings.Contains(ln.Why, n) {
@@ -230,7 +239,7 @@ func TestOrderNamesTheOlderTestOfAServe(t *testing.T) {
 		}
 	}
 	// The word rule reads the set's recordings so named (GivenPlaces).
-	for name, want := range map[string]int{"one": 1, "two": 2, "three": 0} {
+	for name, want := range map[string]int{"one": 1, "two": 2, "both": 0, "three": 0} {
 		g, err := o.GivenPlaces(m(name))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -262,8 +271,8 @@ func TestALateCallsReasonNamesTheDecodedRecordedValueWhole(t *testing.T) {
 		t.Fatalf("%d learned, want 1", len(got))
 	}
 	ln := got[0]
-	if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "late call of test 2") || !strings.Contains(ln.Why, "the value it was recorded with stands whole in mock-60") || strings.Contains(ln.Why, "a part of") {
-		t.Errorf("%s (%q); want refused as a late call of test 2, the recorded value whole in mock-60", ln.Kind, ln.Why)
+	if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "late call of mock-22's test") || !strings.Contains(ln.Why, "the value it was recorded with stands whole in mock-60") || strings.Contains(ln.Why, "a part of") {
+		t.Errorf("%s (%q); want refused as a late call of mock-22's test, the recorded value whole in mock-60", ln.Kind, ln.Why)
 	}
 }
 
@@ -338,5 +347,98 @@ func TestALateCallsReasonNamesNoServeByAWordOfItsDateStamp(t *testing.T) {
 	}
 	if ln := got[0]; ln.Kind != KindVariable || !strings.Contains(ln.Why, "keploy cannot name where the value the call carries now came from") || strings.Contains(ln.Why, "mock-22") || strings.Contains(ln.Why, "late call") {
 		t.Errorf("%s (%q); want refused, saying keploy cannot name the value's source, naming no serve of mock-22", ln.Kind, ln.Why)
+	}
+}
+
+// A late call is named only by a value no answer holds by chance (lateID):
+// an id. A count, a flag, a status or a code an older test's serve holds
+// shows nothing of where the call's value came from, so where F gave the
+// window's recording as recorded the reason says keploy cannot name the
+// source, never that the call is late; an id the older serve gave whole
+// names it.
+func TestALateCallIsNamedOnlyByAnID(t *testing.T) {
+	const path = "body.n"
+	for _, c := range []struct {
+		rec, live string
+		late      bool
+	}{
+		{"3", "4", false},
+		{"false", "true", false},
+		{"active", "pending", false},
+		{"200", "201", false},
+		{"20261103", "20261104", false},
+		{"ord-7K29Q3AB", "ord-7K29Q4AB", true},
+		{lateRecID, lateLiveID, true},
+	} {
+		rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: c.rec}}}
+		live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: c.live}}}
+		window := lateMsg("mock-60", 200*time.Millisecond, c.rec).ServedAs(9).ServedAsRecorded()
+		set := []GivenPlaces{lateSet("mock-22", 2, c.live, func(x Raw) Raw { return x.ServedAsRecorded() })}
+		got := ClassifyGiven(clockedDrifts(), []string{path}, live, rec, eRecAt, nil, append(eStartup(), window), nil, nil, func() ([]GivenPlaces, error) { return set, nil })
+		if len(got) != 1 {
+			t.Fatalf("%q to %q: %d learned, want 1", c.rec, c.live, len(got))
+		}
+		ln := got[0]
+		if ln.Kind != KindVariable && ln.Kind != KindUnaccounted || ln.Kind == KindVariable && ln.From.Side != "" {
+			t.Errorf("%q to %q: %s (%q); want refused", c.rec, c.live, ln.Kind, ln.Why)
+		}
+		named := strings.Contains(ln.Why, "late call of mock-22's test")
+		unnamed := strings.Contains(ln.Why, "keploy cannot name where the value the call carries now came from")
+		if named != c.late || unnamed == c.late || !c.late && strings.Contains(ln.Why, "mock-22") {
+			t.Errorf("%q to %q: why %q; want the late call named %v", c.rec, c.live, ln.Why, c.late)
+		}
+	}
+	for s, want := range map[string]bool{"a1b2c3d4": true, "A1B2C3D4": true, "a1b2c3d": false, "abcdefgh": false, "12345678": false, "ab-12_cd": true, "ab 12 cdef": false, "ab12cd.e": false} {
+		if got := lateID(s); got != want {
+			t.Errorf("lateID(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
+// Where the value moved as a word of one stamp to the same word of another
+// (stampsEchoed: the recorded "Wed" the day of mock-60's recorded Date, the
+// live "Sat" the day of a Date F served), the stamps are searched as any
+// text, and so where the late-call reason asks what F gave the application
+// at the window's recording. Where F gave mock-60 as recorded and mock-59
+// gave "Sat", mock-60's Date holds no "Sat", and the reason says keploy
+// cannot name where the value came from. Where mock-60's own Last-Modified,
+// which F gave as recorded, holds "Sat", or F's view of mock-60 gave its
+// Date as "Sat", F gave the value there, and the reason is the search's.
+func TestALateCallsReasonReadsTheWindowsStampsWhereTheyEcho(t *testing.T) {
+	const path = "body.day"
+	const unnamed = "keploy cannot name where the value the call carries now came from"
+	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "Wed"}}}
+	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "Sat"}}}
+	dated := func(name string, before time.Duration, date string, more ...string) Raw {
+		asked := eRecAt.Add(-before)
+		header := map[string]string{"Date": date}
+		if len(more) > 0 {
+			header["Last-Modified"] = more[0]
+		}
+		return RawOf(&models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "/status/" + name},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: header, Body: `{"ok":true}`},
+			ReqTimestampMock: asked, ResTimestampMock: asked.Add(time.Millisecond),
+		}}, false)
+	}
+	const wed, sat = "Wed, 21 Oct 2026 09:55:13 GMT", "Sat, 24 Oct 2026 09:55:13 GMT"
+	for _, c := range []struct {
+		name  string
+		raw   []Raw
+		aside bool
+	}{
+		{"F gave the window's recording as recorded", []Raw{dated("mock-59", 300*time.Millisecond, sat).ServedAs(8).ServedAsRecorded(), dated("mock-60", 200*time.Millisecond, wed).ServedAs(9).ServedAsRecorded()}, true},
+		{"the window's recording, given as recorded, holds Sat in another stamp", []Raw{dated("mock-60", 200*time.Millisecond, wed, sat).ServedAs(9).ServedAsRecorded()}, false},
+		{"F's view of the window's recording gave its Date as Sat", []Raw{dated("mock-60", 200*time.Millisecond, wed).ServedAs(9).ServedLive(dated("mock-60", 200*time.Millisecond, sat))}, false},
+	} {
+		got := ClassifyGiven(clockedDrifts(), []string{path}, live, rec, eRecAt, nil, append(eStartup(), c.raw...), nil, nil, func() ([]GivenPlaces, error) { return nil, nil })
+		if len(got) != 1 {
+			t.Fatalf("%s: %d learned, want 1", c.name, len(got))
+		}
+		ln := got[0]
+		if ln.Kind != KindVariable || ln.From.Mock != "mock-60" || ln.From.SetAside != c.aside || strings.Contains(ln.Why, unnamed) != c.aside {
+			t.Errorf("%s: %s from %q set aside %v (%q); want a variable of mock-60, set aside %v", c.name, ln.Kind, ln.From.Mock, ln.From.SetAside, ln.Why, c.aside)
+		}
 	}
 }
