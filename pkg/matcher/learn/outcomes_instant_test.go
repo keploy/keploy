@@ -1,9 +1,11 @@
 package learn
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1456,7 +1458,8 @@ func TestOutcomeAMomentALaterRecordingGaveBeforeTheCallIsAPick(t *testing.T) {
 // judged at the finest unit either run's text there shows. Only where
 // neither run shows a fraction is it a time of seconds. One that holds
 // round F's second at the call's cut (as a number
-// of seconds, or a time of seconds) is a pick, refused naming it. As a
+// of seconds, or a time of seconds, or inside an encoded text that decodes
+// to it) is a pick, refused naming it. As a
 // recording, leaf by leaf, and in a window the call landed in from another
 // test, the decision is the same.
 func TestOutcomeAFinerTimeHoldingRoundFsSecondIsNoPick(t *testing.T) {
@@ -1514,6 +1517,11 @@ func TestOutcomeAFinerTimeHoldingRoundFsSecondIsNoPick(t *testing.T) {
 		{"the second, as a time of seconds", func(x time.Time) string { return `"claimed_at":"` + x.UTC().Format(time.RFC3339) + `"` }, true},
 		{"the second beside a name", func(x time.Time) string { return name(x) + `,"claimedAt":{"$numberLong":"` + sec(x) + `"}` }, true},
 		{"the second beside a number of seconds with its milliseconds", func(x time.Time) string { return frac(x) + `,"claimedAt":{"$numberLong":"` + sec(x) + `"}` }, true},
+		// A page cursor holds the second in its decoded text, a word no
+		// instant of the answer is: the second stands outside the $date.
+		{"the second in a base64 page cursor beside a $date", func(x time.Time) string {
+			return date(x) + `,"cursor":"` + base64.StdEncoding.EncodeToString([]byte(`{"t":`+sec(x)+`}`)) + `"`
+		}, true},
 	} {
 		for _, made := range []struct {
 			what       string
@@ -1952,6 +1960,111 @@ func TestOutcomeARecordingReadOnceAndNotAgainLeavesTheCallUnread(t *testing.T) {
 		if why := d.Refusal.Why; strings.Contains(why, "budget") || strings.Contains(why, "mock-9") ||
 			failFrom > 1 && (!strings.Contains(why, "read mock-0 again") || strings.Count(why, "mock-0") != 1) {
 			t.Errorf("%s: refused %q; want it to say keploy could not read mock-0 again, naming it once", what, why)
+		}
+	}
+}
+
+// An answer keploy reads again for each question it asks of it, and that
+// it cannot read from some read on, leaves the call unread or decided as
+// if read whole, whichever read fails: never another verdict, and never a
+// crash. The answer, given before the call in both runs, holds the second
+// read as a number of seconds, beside a time of milliseconds of the day
+// before. Read whole, it is the second's source: a Value bound there. The
+// answer is past the set's store of payloads and the call's index keeps
+// none of its text, so each question loads it again.
+func TestOutcomeAnAnswerNotReadAgainIsUnreadOrReadWhole(t *testing.T) {
+	defer func(b, r int64) { bodyBudget, readerBudget = b, r }(bodyBudget, readerBudget)
+	bodyBudget, readerBudget = 0, 1
+	const p = "body.created_at"
+	rAt, fAt := oAt.Add(700*time.Millisecond), oAt.Add(102*time.Second+700*time.Millisecond)
+	before := oAt.Sub(rAt.Add(-300 * time.Millisecond))
+	sec := func(x time.Time) string { return strconv.FormatInt(x.Unix(), 10) }
+	cells := func(x time.Time) []models.PostgresV3Cells {
+		return []models.PostgresV3Cells{{{Value: sec(x)}, {Value: iMs(oAt.Add(-24*time.Hour + 123*time.Millisecond))}}}
+	}
+	run := func(failFrom int) (Decision, int) {
+		tr := NewTracker()
+		tr.NewSet()
+		tr.Begin()
+		defer tr.End()
+		dc := tr.Drifts()
+		m := oPgMock("mock-1624", before, "SELECT next_slot FROM mock-1624", cells(rAt), "SELECT 1")
+		loads := 0
+		raw := dc.LazyRawOf(m, true, func() (*models.Mock, error) {
+			if loads++; failFrom > 0 && loads >= failFrom {
+				return nil, errors.New("the parked answer is gone")
+			}
+			return m, nil
+		}).ServedAs(1).ServedLive(RawOf(oPgMock("mock-1624", before, "SELECT next_slot FROM mock-1624", cells(fAt), "SELECT 1"), true))
+		in := iCall(p, String, sec(rAt), sec(fAt), rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), nil, []Raw{raw})
+		in.Drifts = dc
+		return oWord(t, Decide(in), sec(rAt), sec(fAt)), loads
+	}
+	whole, all := run(0)
+	iValue(t, "the answer read whole", whole, "mock-1624")
+	if all < 4 {
+		t.Fatalf("read whole, the answer was loaded %d times; the row needs it read again for each question", all)
+	}
+	unread := 0
+	for failFrom := 1; failFrom <= all; failFrom++ {
+		what := fmt.Sprintf("an answer whose load fails from its read %d of %d", failFrom, all)
+		d, _ := run(failFrom)
+		if d.Outcome == OutcomeRefused && d.Refusal != nil && d.Refusal.Kind == RefusalUnread {
+			oRefused(t, what, d, RefusalUnread, "mock-1624")
+			unread++
+		} else if oDescribe([]Decision{d}) != oDescribe([]Decision{whole}) {
+			t.Errorf("%s: %s; want it refused as unread, or %s as read whole", what, oDescribe([]Decision{d}), oDescribe([]Decision{whole}))
+		}
+	}
+	if unread == 0 {
+		t.Errorf("no failed load left the call unread")
+	}
+}
+
+// A place whose text keploy cannot read again counts as holding the call's
+// word outside its times finer than the call's moment: never as a finer
+// time's cut alone (fail closed). Read, the text holds the second only
+// inside a number of seconds with its milliseconds. Through Decide each
+// place's text is in hand by then (a recording's halves are cut from its
+// text read once, a view is read when it is handed in), so the branch is
+// pinned here, at the question, on a recording read lazily.
+func TestOutcomeAPlaceNotReadAgainHoldsTheWordOutsideItsFinerTimes(t *testing.T) {
+	defer func(b, r int64) { bodyBudget, readerBudget = b, r }(bodyBudget, readerBudget)
+	bodyBudget, readerBudget = 0, 1
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dr := tr.Drifts()
+	at := oAt.Add(96*time.Second + 123*time.Millisecond)
+	w := strconv.FormatInt(at.Unix(), 10)
+	m := getAnswer("mock-7", "http://api/jobs/1", fmt.Sprintf(`{"made":%d.123}`, at.Unix()), oAt.Add(-time.Second))
+	gone := false
+	raw := dr.LazyRawOf(m, true, func() (*models.Mock, error) {
+		if gone {
+			return nil, errors.New("the parked answer is gone")
+		}
+		return m, nil
+	})
+	sec := moment{res: time.Second}
+	for _, tc := range []struct {
+		what string
+		gone bool
+		want bool
+	}{
+		{"read again", false, false},
+		{"not read again", true, true},
+	} {
+		x := newReaderIndex(dr)
+		tx := x.textOf(raw)
+		gone = false
+		spans, read := tx.spansOf()
+		if !read || !slices.ContainsFunc(spans, func(sp instant) bool { return sp.res < sec.res }) {
+			t.Fatalf("%s: read %v, %d instants; the row needs the number of seconds with its milliseconds read", tc.what, read, len(spans))
+		}
+		gone = tc.gone
+		if got := heldOutside(tx, spans, w, sec); got != tc.want {
+			t.Errorf("%s: the second held outside the finer time: %v; want %v", tc.what, got, tc.want)
 		}
 	}
 }
