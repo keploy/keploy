@@ -2492,6 +2492,17 @@ func TestOutcomeAPlaceIsJudgedAtTheFinestUnitItsMemberShowsInEitherRun(t *testin
 		{"a list in an object named by no key, the list grew", `{{"x":[{"at":` + s(at) + `}]}}`, `{{"x":[{"at":` + f(ago(60)) + `},{"at":` + f(ago(61)) + `}]}}`, []time.Duration{sec}, 1},
 		{"a list in an object named by a bare word (a Mongo section), the list grew", `{ SectionSingle msg: {"items":[{"at":` + s(at) + `}]} }`,
 			`{ SectionSingle msg: {"items":[{"at":` + f(ago(60)) + `},{"at":` + f(ago(61)) + `}]} }`, []time.Duration{ms}, 1},
+		{"a member with no container open, in a field of its own", `"at":` + s(at), `"at":` + f(ago(60)), []time.Duration{ms}, 1},
+		{"a quote alone on a line before a list that grew", "\"\n" + `{"items":[{"at":` + s(at) + `}]}`,
+			`{"items":[{"at":` + f(ago(60)) + `},{"at":` + f(ago(61)) + `}]}`, []time.Duration{ms}, 1},
+		{"a member after a list that grew, at another path", `{"a":[{"at":` + f(ago(40)) + `}],"b":{"at":` + s(at) + `}}`,
+			`{"a":[{"at":` + f(ago(80)) + `},{"at":` + f(ago(81)) + `}],"b":{"at":` + s(ago(-1)) + `}}`, []time.Duration{ms, sec}, 1},
+		{"a key holding [] beside the list it spells, which grew", `{"a":[{"at":` + f(ago(40)) + `}],"a[]":{"at":` + s(at) + `}}`,
+			`{"a":[{"at":` + f(ago(80)) + `},{"at":` + f(ago(81)) + `}],"a[]":{"at":` + s(ago(-1)) + `}}`, []time.Duration{ms, sec}, 1},
+		{"a key holding a dot beside the member it spells", `{"b.at":` + s(at) + `}`, `{"b.at":` + s(ago(-1)) + `,"b":{"at":` + f(ago(80)) + `}}`, []time.Duration{sec}, 1},
+		{"a key holding a quote beside the member its end spells", `{"x\"at":` + s(at) + `}`, `{"x\"at":` + s(ago(-1)) + `,"at":` + f(ago(80)) + `}`, []time.Duration{sec}, 1},
+		{"a list under a key holding a quote beside the list its end spells", `{"x\"items":[{"at":` + s(at) + `}]}`,
+			`{"x\"items":[{"at":` + s(ago(-1)) + `}],"items":[{"at":` + f(ago(80)) + `}]}`, []time.Duration{sec}, 1},
 	} {
 		loads := 0
 		recorded := answer(tc.rec)
