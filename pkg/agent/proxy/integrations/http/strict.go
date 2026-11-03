@@ -406,7 +406,8 @@ var strictDiffs atomic.Int64
 
 // strictCompare compares the live request with each recording of pool, in
 // order (strictDiff): fits are those that are this very call, and near is
-// the closest of the others (closerThan), its mock nil when there is none.
+// the closest of the others (closerThan), its mock nil when there is none,
+// and its fields given no reason of their own when it is of another route.
 func strictCompare(ctx context.Context, input *req, live destination, pool []*models.Mock, n strictNoise) (fits []*models.Mock, near nearest, err error) {
 	for _, m := range pool {
 		if ctx.Err() != nil {
@@ -421,7 +422,26 @@ func strictCompare(ctx context.Context, input *req, live destination, pool []*mo
 			near = c
 		}
 	}
+	if !near.route {
+		// The closest recording is of another route (method, destination
+		// or path): it is not this call, so no field of it is refused for a
+		// reason of its own. A read of the clock it learned is no read this
+		// call made, and naming it would blame the clock for a call no
+		// recording is; the miss names only the fields that differ.
+		near.diffs = withoutReasons(near.diffs)
+	}
 	return fits, near, nil
+}
+
+// withoutReasons are fields with no reason of their own (strictField.why,
+// strictField.clock): each still differs, for no reason but its value.
+func withoutReasons(fields []strictField) []strictField {
+	out := make([]strictField, len(fields))
+	for i, f := range fields {
+		f.why, f.clock = "", false
+		out[i] = f
+	}
+	return out
 }
 
 // routeMatches reports whether a recording that differs by diffs is of the

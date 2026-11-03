@@ -338,13 +338,19 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req, m *models.Mock)
 	sort.Strings(places)
 	var out []strictField
 	for _, p := range places {
-		live := leaves[p]
+		live, carried := leaves[p]
 		if k.userNoiseAt(p, recLeaves[p], live) {
 			continue
 		}
 		// The reason names the field as a failed test's reason does (its
 		// shape), never a value an object key of it may be.
 		f := clockField(p)
+		if !carried {
+			// The call carries nothing at the place: no value is checked.
+			f.why, f.clock = learn.ClockReadAbsent(f.shape, k.clocks[p]), true
+			out = append(out, f)
+			continue
+		}
 		if ok, why := learn.CheckClockRead(f.shape, k.clocks[p], live, span, known); !ok {
 			f.why, f.clock = why, true
 			out = append(out, f)
