@@ -666,13 +666,13 @@ func (r *Relay) run(ctx context.Context) error {
 	r.teeD2C.waitDone()
 
 	// Close the FakeConns. Their streams have ended by now (each drain
-	// ended its stream as it returned: tee.endStream), so a parser still
-	// reading takes what is left and then reads io.EOF, whether it gets
-	// there before this Close or after it: the Close changes nothing a
-	// reader sees. A stream whose FakeConn the session closed before its end
-	// was left open, and its reader reads fakeconn.ErrClosed, before this
-	// Close or after it. It closes FakeConn.Done, on which the tees, which
-	// have returned, selected.
+	// ended its stream as it returned: tee.endStream), but for one whose
+	// FakeConn the session closed before its end, which was left open. A
+	// parser still reading an ended stream takes what is left and then reads
+	// io.EOF; one reading a stream left open reads fakeconn.ErrClosed. Either
+	// way it reads the same whether it gets there before this Close or after
+	// it: the Close changes nothing a reader sees. It closes FakeConn.Done,
+	// on which the tees, which have returned, selected.
 	_ = r.clientStream.Close()
 	_ = r.destStream.Close()
 
