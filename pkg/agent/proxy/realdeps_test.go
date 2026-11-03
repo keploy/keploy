@@ -670,6 +670,7 @@ func TestKeepRealDepsKeepsTheRunsBookkeeping(t *testing.T) {
 // once it ends. One whose placing does not end is capture_incomplete: never a
 // silent miss.
 func TestARefusedDialToAContainerStillBeingPlacedCountsAgainstTheTest(t *testing.T) {
+	liveInstances(t, 4)
 	refused := testnet.RefusedAddr(t, "tcp")
 	saved := containerkey.Default
 	t.Cleanup(func() { containerkey.Default = saved })
@@ -773,6 +774,7 @@ func (f placedOnPending) AwaitReadsOf(ctx context.Context, _ []string) {
 // is found placed, and the failure counts at once: the placings are read
 // before the destination is looked up, so the end of one is never missed.
 func TestARefusedDialToAContainerPlacedMeanwhileCountsAtOnce(t *testing.T) {
+	liveInstances(t, 4)
 	refused := testnet.RefusedAddr(t, "tcp")
 	saved := containerkey.Default
 	t.Cleanup(func() { containerkey.Default = saved })
@@ -1010,6 +1012,7 @@ func sendAndRead(t *testing.T, app net.Conn, b string) string {
 // at the handshake, ended by a name check, or closed before naming itself.
 // Worker 9's test holds nothing of it, and nothing is unattributed.
 func TestARealConnectionIsItsOwnWorkersTestsWhicheverWayItGoes(t *testing.T) {
+	liveInstances(t, 4)
 	dst := realServer(t)
 	_, portText, _ := net.SplitHostPort(dst)
 	named := "api.test:" + portText

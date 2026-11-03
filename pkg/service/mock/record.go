@@ -16,6 +16,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -1250,6 +1251,10 @@ type capturedMock struct {
 	// connection was stamped with (models.Mock.Instance): only a window of
 	// that worker's (ScopeWindow.Instance) holds it. 0 for none.
 	instance uint32
+	// ended is the keploy instance of the ended test worker its connection
+	// was stamped with (models.Mock.EndedInstance; instance is then 0): a
+	// call from a process in no live worker. 0 for none.
+	ended uint32
 }
 
 // capturedOf is what record correlates of mk, a mock it recorded.
@@ -1258,7 +1263,7 @@ func capturedOf(mk *models.Mock) capturedMock {
 	// Under the proven switch a protocol-phase mock is the pool's, never
 	// a test's (design v14 §5.2): the mapping lists data-plane mocks only.
 	protocol := provenswitch.On() && mk.IsProtocolPhase()
-	return capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, instance: mk.Instance, boot: typ == "config" || typ == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef}
+	return capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, instance: mk.Instance, ended: mk.EndedInstance, boot: typ == "config" || typ == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef}
 }
 
 // stagingSetID returns the staging set name record captures into while recording
@@ -1348,8 +1353,9 @@ func correlate(windows []models.ScopeWindow, mocks []capturedMock, byInstance bo
 }
 
 // unattributedCall is a call from a process in no test worker's keploy
-// instance (instance 0) made while test workers' tests were open and no test
-// of a run of one worker was: no test's window holds it (correlateScopes).
+// instance (instance 0), or in an ended worker's (capturedMock.ended), made
+// while test workers' tests were open and no test of a run of one worker
+// was: no test's window holds it (correlateScopes).
 type unattributedCall struct {
 	mock  string
 	pid   uint32
@@ -1357,8 +1363,9 @@ type unattributedCall struct {
 }
 
 // chargeUnattributed charges each test open at an unattributed call with it
-// (models.CaptureLossUnattributed, What naming its latest such call), on a
-// copy of the test's evidence, and returns the calls in the order of mocks.
+// (models.CaptureLossUnattributed, What naming its latest such call and the
+// ended worker it came from, if any), on a copy of the test's evidence, and
+// returns the calls in the order of mocks.
 func chargeUnattributed(windows []models.ScopeWindow, mocks []capturedMock) []unattributedCall {
 	var out []unattributedCall
 	charged := map[int]models.CaptureLoss{}
@@ -1389,6 +1396,9 @@ func chargeUnattributed(windows []models.ScopeWindow, mocks []capturedMock) []un
 			loss.Kind, loss.Count = models.CaptureLossUnattributed, loss.Count+1
 			if !mk.ts.Before(latest[i]) {
 				loss.What, latest[i] = fmt.Sprintf("the latest: mock %s, from process %d", mk.name, mk.pid), mk.ts
+				if mk.ended != 0 {
+					loss.What += " of ended test worker " + coreAgent.InstanceLabel(mk.ended)
+				}
 			}
 			charged[i] = loss
 		}

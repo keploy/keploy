@@ -14,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -800,4 +801,41 @@ func refusedAlike(t *testing.T, a *Agent, req models.InstanceReq, pid int, want 
 	for _, p := range append(others, pid) {
 		require.NotContains(t, serr.Message, "process "+strconv.Itoa(p), "a refusal of the run's count names no claimant")
 	}
+}
+
+// A claim's value is live (starts.Registry.InstanceGone) from before the
+// kernel can stamp a connection with it until its worker ends: its gone
+// claimant read at the next claim, or the session's reset. One the hooks
+// refused, held or not, is not: a connection stamped with it is from no
+// live worker.
+func TestAClaimsValueIsLiveUntilItsWorkerEnds(t *testing.T) {
+	val := coreAgent.InstanceValue
+	gone := func(id, gen uint32) bool { return starts.Default.InstanceGone(val(id, gen)) }
+	for _, x := range []uint32{val(1, 0), val(1, 1), val(2, 0), val(3, 0)} {
+		starts.Default.InstanceEnded(x) // none left live by an earlier test
+	}
+	a, h := workerAgent(t, models.MODE_RECORD, 4)
+	w := child(t)
+	require.Equal(t, v(1, 0), claimWorker(t, a, w.Process.Pid, "a", 3))
+	require.False(t, gone(1, 0), "a live worker's value")
+	kill(t, w)
+	require.Equal(t, v(1, 1), claimWorker(t, a, os.Getpid(), "b", 3))
+	require.True(t, gone(1, 0), "the gone worker's value, once the next claim read it gone")
+	require.False(t, gone(1, 1))
+
+	h.held = map[uint32]bool{2: true}
+	w2 := child(t)
+	require.Equal(t, v(3, 0), claimWorker(t, a, w2.Process.Pid, "c", 3))
+	require.True(t, gone(2, 0), "a held id's value is not live")
+	require.False(t, gone(3, 0))
+
+	h.held = nil
+	require.NoError(t, a.resetSession(context.Background()))
+	require.True(t, gone(1, 1), "the session's reset ends every worker")
+	require.True(t, gone(3, 0))
+	h.err = errors.New("map busy")
+	_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "d", Workers: 3}, os.Getpid())
+	require.NotNil(t, serr)
+	require.Equal(t, []uint32{val(1, 0), val(1, 1), val(2, 0), val(3, 0), val(1, 2)}, h.triedIDs())
+	require.True(t, gone(1, 2), "a refused claim's value is not live")
 }

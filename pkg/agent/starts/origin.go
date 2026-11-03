@@ -217,10 +217,13 @@ func (r *Registry) StampOrigin(m *models.Mock) {
 
 // StampInstance gives m, a recorded mock, the keploy instance its
 // connection was stamped with (NoteOriginIn), which record charges it by
-// (models.Mock.Instance). A mock that carries one already, or whose
-// connection is not known, is left as it is.
+// (models.Mock.Instance). One whose worker had ended by now
+// (InstanceGone) is no live worker's: m gets it as its EndedInstance and no
+// instance, so record charges it as a call from a process in no worker. A
+// mock that carries either already, or whose connection is not known, is
+// left as it is.
 func (r *Registry) StampInstance(m *models.Mock) {
-	if m == nil || m.Instance != 0 {
+	if m == nil || m.Instance != 0 || m.EndedInstance != 0 {
 		return
 	}
 	id := m.ConnectionID
@@ -230,7 +233,12 @@ func (r *Registry) StampInstance(m *models.Mock) {
 	o := &r.origin
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if c := o.conns[id]; c != nil {
+	c := o.conns[id]
+	switch {
+	case c == nil:
+	case r.InstanceGone(c.instance):
+		m.EndedInstance = c.instance
+	default:
 		m.Instance = c.instance
 	}
 }

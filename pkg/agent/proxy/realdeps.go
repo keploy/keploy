@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -167,10 +168,15 @@ func (p *Proxy) realOrPassthroughLabels(tgid uint32) []string {
 
 // realOrigin is who made the connection to dest: the test worker's keploy
 // instance the kernel stamped it with (0 for none, and on hooks that stamp
-// none), and its process.
+// none), and its process. A stamp whose worker has ended
+// (starts.Registry.InstanceGone) is no worker's: never a later claim's of
+// its id, and named as the ended worker's.
 func realOrigin(dest *agent.NetworkAddress) realdeps.Origin {
 	if dest == nil {
 		return realdeps.Origin{}
+	}
+	if starts.Default.InstanceGone(dest.Instance) {
+		return realdeps.Origin{Pid: dest.KernelPid, Ended: agent.InstanceLabel(dest.Instance)}
 	}
 	return realdeps.Origin{Instance: dest.Instance, Pid: dest.KernelPid}
 }

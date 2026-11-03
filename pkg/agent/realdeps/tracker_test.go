@@ -531,3 +531,35 @@ func TestAFailedConnectChargedByAnEndOrAReadIsChargedOnce(t *testing.T) {
 	read("", true)
 	require.Empty(t, tr.Run().Incomplete, "told unresolved after a read held it")
 }
+
+// A connection from a process of an ended test worker (Origin.Ended: the
+// proxy gives it no instance) is a process's in no worker: while workers'
+// tests are open its REAL use is charged to each of them, never to the test
+// of a later claim of the ended worker's id, and the latest names the ended
+// worker, a failed dial's too.
+func TestARealUseFromAnEndedWorkerIsChargedToEveryOpenTestAndNamed(t *testing.T) {
+	tr := newTracker()
+	next, other := uint32(1<<10|1), uint32(2)
+	tr.BeginTestOf(next)
+	tr.BeginTestOf(other)
+	tr.Sent(Origin{Pid: 7, Ended: "1"}, 1, "db:5432")
+	for _, inst := range []uint32{next, other} {
+		end := tr.EndTestOf(inst)
+		require.Empty(t, end.Uses, "never the later claim's row")
+		require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1,
+			What: "the latest: a connection to mock.real destination db:5432, from process 7 of ended test worker 1"}}, end.Unattributed)
+	}
+	tr.BeginTestOf(next)
+	tr.Dialed(Origin{Pid: 8, Ended: "1 (claim 2 of that id)"}, 2, "auth:443", false)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1,
+		What: "the latest: a connection to mock.real destination auth:443, from process 8 of ended test worker 1 (claim 2 of that id)"}}, tr.EndTestOf(next).Unattributed)
+
+	// A failed connect told REAL only later (FailedUndecided) names it too.
+	tr.BeginTestOf(next)
+	tr.BeginTestOf(other)
+	tr.FailedUndecided(Origin{Pid: 9, Ended: "3"}, "10.0.0.9:443")("cache:6379", false)
+	for _, inst := range []uint32{next, other} {
+		require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1,
+			What: "the latest: a connection to mock.real destination cache:6379, from process 9 of ended test worker 3"}}, tr.EndTestOf(inst).Unattributed)
+	}
+}

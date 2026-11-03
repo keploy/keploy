@@ -2261,8 +2261,9 @@ func TestAddMockStampsTheAddressItsConnectionReached(t *testing.T) {
 // that connection is still open; without the switch it carries none.
 func TestAddMockStampsItsConnectionsWorkerInstance(t *testing.T) {
 	const conn = "add-mock-instance"
+	starts.Default.InstanceBegan(3)
 	starts.Default.NoteOriginIn(conn, 4242, 3)
-	t.Cleanup(func() { starts.Default.ForgetOrigin(conn) })
+	t.Cleanup(func() { starts.Default.ForgetOrigin(conn); starts.Default.InstanceEnded(3) })
 	for _, on := range []bool{true, false} {
 		want := uint32(0)
 		if on {

@@ -142,8 +142,16 @@ type Mock struct {
 	// for parallel runners). Runtime-only: never serialized (yaml/json/bson "-")
 	// — it is an in-process hint, not part of the recorded mock. 0 if unknown.
 	SourcePID uint32 `json:"-" yaml:"-" bson:"-"`
-	Start     string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
-	StartRef  string `json:"-" yaml:"-" bson:"-"`
+	// EndedInstance is, under the proven switch, the keploy instance the
+	// call's connection was stamped with when that test worker had ended by
+	// the time the call was captured (Instance is then 0): a value is given
+	// to one claim only, so the call is from a process in no live worker,
+	// and record charges it as it charges one from a process in no worker,
+	// naming the ended worker. 0 for none. Like SourcePID it only travels,
+	// and it sits in that field's padding, so a Mock is no bigger for it.
+	EndedInstance uint32 `json:"-" yaml:"-" bson:"-"`
+	Start         string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
+	StartRef      string `json:"-" yaml:"-" bson:"-"`
 	// Origin is, under the proven switch, where the call came from: the clock
 	// its ReqTimestampMock is on, and the process that made it. Only a record
 	// under the switch sets it; a file's is read and
@@ -1219,7 +1227,7 @@ func (m *Mock) DeepCopy() *Mock {
 	// written later (the async gob writer's) holds what the mock held.
 	c.Origin = m.Origin.clone()
 	// And the test worker it came from, which record charges it by.
-	c.Instance = m.Instance
+	c.Instance, c.EndedInstance = m.Instance, m.EndedInstance
 
 	// Deep copy the Noise slice so mutations to one copy don't affect the other.
 	if len(m.Noise) > 0 {

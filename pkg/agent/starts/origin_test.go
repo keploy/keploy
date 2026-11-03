@@ -535,6 +535,9 @@ func TestAMockCarriesItsConnectionsInstance(t *testing.T) {
 	c := newCommander()
 	c.comm[42], c.comm[43] = "w1", "w2"
 	r := New(c, 0)
+	for _, v := range []uint32{3, 4, 5} {
+		r.InstanceBegan(v)
+	}
 	r.NoteOriginIn("1", 42, 3)
 	r.NoteOriginIn("2", 43, 5)
 	r.NoteOrigin("3", 42)
@@ -570,5 +573,61 @@ func TestAMockCarriesItsConnectionsInstance(t *testing.T) {
 	}
 	if c := on.DeepCopy(); c.Instance != 5 {
 		t.Fatalf("a copy of the mock carries instance %d; want 5", c.Instance)
+	}
+}
+
+// A connection stamped with a test worker's keploy instance whose worker
+// has ended by the time its mock is stamped is from no live worker: the
+// mock gets no instance, so no window of a later claim of that id holds it,
+// and carries the ended one, which record names as it charges the call. A
+// stamp never made live is no worker's either. While the worker lives its
+// mocks carry its instance, and a mock stamped before the end keeps it.
+func TestAnEndedWorkersConnectionStampsNoInstance(t *testing.T) {
+	c := newCommander()
+	c.comm[42] = "app"
+	r := New(c, 0)
+	r.InstanceBegan(1025)
+	r.NoteOriginIn("1", 42, 1025)
+	r.NoteOriginIn("2", 42, 9)
+	before := &models.Mock{ConnectionID: "1"}
+	r.StampInstance(before)
+	if before.Instance != 1025 || before.EndedInstance != 0 {
+		t.Fatalf("a live worker's mock got instance %d, ended %d; want 1025, 0", before.Instance, before.EndedInstance)
+	}
+	r.InstanceEnded(1025)
+	r.StampInstance(before)
+	if before.Instance != 1025 || before.EndedInstance != 0 {
+		t.Fatalf("a mock stamped while its worker lived got instance %d, ended %d at a later stamp; want 1025, 0", before.Instance, before.EndedInstance)
+	}
+	r.Reset()
+	r.NoteOriginIn("1", 42, 1025)
+	for conn, want := range map[string]uint32{"1": 1025, "2": 0} {
+		if conn == "2" {
+			r.NoteOriginIn("2", 42, 9)
+			want = 9
+		}
+		after := &models.Mock{ConnectionID: conn}
+		r.StampInstance(after)
+		if after.Instance != 0 || after.EndedInstance != want {
+			t.Fatalf("connection %s's mock got instance %d, ended %d; want 0, %d", conn, after.Instance, after.EndedInstance, want)
+		}
+		r.StampInstance(after)
+		if after.Instance != 0 || after.EndedInstance != want {
+			t.Fatalf("connection %s's mock stamped again got instance %d, ended %d; want 0, %d", conn, after.Instance, after.EndedInstance, want)
+		}
+		if cp := after.DeepCopy(); cp.EndedInstance != want {
+			t.Fatalf("a copy of connection %s's mock carries ended %d; want %d", conn, cp.EndedInstance, want)
+		}
+	}
+	r.InstanceBegan(2049)
+	r.Reset()
+	r.NoteOriginIn("3", 42, 2049)
+	live := &models.Mock{ConnectionID: "3"}
+	r.StampInstance(live)
+	if live.Instance != 2049 || live.EndedInstance != 0 {
+		t.Fatalf("a worker live across a Reset: its mock got instance %d, ended %d; want 2049, 0", live.Instance, live.EndedInstance)
+	}
+	if r.InstanceGone(0) {
+		t.Fatal("a connection stamped with no instance was read as an ended worker's")
 	}
 }

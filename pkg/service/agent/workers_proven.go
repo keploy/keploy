@@ -12,6 +12,7 @@ import (
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -238,12 +239,17 @@ func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me clai
 			continue
 		}
 		v := coreAgent.InstanceValue(next, gen)
+		// Live before the kernel can stamp a connection with it, so none
+		// of the worker's calls is read as an ended worker's.
+		starts.Default.InstanceBegan(v)
 		err := stamper.SetInstance(uint32(me.pid), v)
 		if errors.Is(err, coreAgent.ErrInstanceHeld) {
+			starts.Default.InstanceEnded(v)
 			continue
 		}
 		a.instanceGen[next] = gen + 1
 		if err != nil {
+			starts.Default.InstanceEnded(v)
 			return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInInstance,
 				fmt.Sprintf("keploy could not give test worker process %d an instance of its own: %v", me.pid, err),
 				"run one worker, or run keploy's agent in the host's PID namespace")
@@ -356,12 +362,18 @@ func (a *Agent) endGoneWorkers(ctx context.Context) {
 	a.endInstances(gone)
 }
 
-// endInstances takes every process out of instances ids. One the kernel
-// could not end stays held: a later claim does not get it
-// (coreAgent.ErrInstanceHeld). In a replay each one's manager goes first: a
-// call its processes make from then on is refused, never answered from
-// another worker's mocks.
+// endInstances ends instances ids: a call stamped with one is from no live
+// worker from then on (starts.Registry.InstanceGone), and every process is
+// taken out of them. One the kernel could not end stays held: a later claim
+// does not get it (coreAgent.ErrInstanceHeld). In a replay each one's
+// manager goes first: a call its processes make from then on is refused,
+// never answered from another worker's mocks.
 func (a *Agent) endInstances(ids []uint32) {
+	// First: a call stamped with an ended worker's value is from no live
+	// worker from here on, whatever the proxy and hooks do next.
+	for _, id := range ids {
+		starts.Default.InstanceEnded(id)
+	}
 	if is, ok := a.Proxy.(coreAgent.InstanceServer); ok && a.replaying() {
 		for _, id := range ids {
 			// A new session's proxy serves no worker any more: an id it
