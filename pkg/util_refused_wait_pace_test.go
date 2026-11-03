@@ -2,6 +2,7 @@ package pkg
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -194,8 +195,8 @@ func TestAddressProbeAllowedUnlessMarked(t *testing.T) {
 
 // A refused request's wait, with or without probing its address, says on a
 // timer that it still waits, naming the address, from its first wait until
-// the request is answered, and not after.
-func TestARefusedRequestSaysItStillWaitsUntilItIsAnswered(t *testing.T) {
+// its address accepts, and not after.
+func TestARefusedRequestSaysItStillWaitsUntilItsAddressAccepts(t *testing.T) {
 	every := stillWaitingEvery
 	stillWaitingEvery = 50 * time.Millisecond
 	t.Cleanup(func() { stillWaitingEvery = every })
@@ -235,8 +236,154 @@ func TestARefusedRequestSaysItStillWaitsUntilItIsAnswered(t *testing.T) {
 			n := still()
 			time.Sleep(10 * stillWaitingEvery)
 			if after := still(); after != n {
-				t.Errorf("said %d more times that the request waits after it was answered", after-n)
+				t.Errorf("said %d more times that the request waits after its address accepted", after-n)
 			}
 		})
+	}
+}
+
+// Once a refused request's address accepts and the application takes the
+// re-sent request, keploy no longer waits for it to accept a connection: no
+// "still waiting for the application to accept a connection" line is said
+// while the application answers that request (a first answer slower than
+// the line's interval), with or without probing the address.
+func TestNoAcceptLineIsSaidWhileTheAppAnswersTheRequestItAccepted(t *testing.T) {
+	every := stillWaitingEvery
+	stillWaitingEvery = 50 * time.Millisecond
+	t.Cleanup(func() { stillWaitingEvery = every })
+	for _, probe := range []bool{true, false} {
+		t.Run(map[bool]string{true: "probing", false: "no probe"}[probe], func(t *testing.T) {
+			addr := refusingAddr(t)
+			core, logs := observer.New(zapcore.InfoLevel)
+			ctx, cancel := context.WithCancel(EndsWithApp(context.Background()))
+			defer cancel()
+			if !probe {
+				ctx = WithoutAddressProbe(ctx)
+			}
+			done := sendInBackground(ctx, zap.New(core), addr)
+			for deadline := time.Now().Add(30 * time.Second); logs.FilterMessageSnippet("was refused at "+addr).Len() == 0; time.Sleep(10 * time.Millisecond) {
+				if time.Now().After(deadline) {
+					t.Fatal("the request never said it was refused and waits")
+				}
+			}
+			var tookAt atomic.Int64
+			ln := testnet.ListenShared(t, "tcp", addr)
+			srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				tookAt.CompareAndSwap(0, time.Now().UnixNano())
+				time.Sleep(20 * stillWaitingEvery) // a slow first answer
+				w.WriteHeader(http.StatusOK)
+			}), ReadHeaderTimeout: 5 * time.Second}
+			go func() { _ = srv.Serve(ln) }()
+			t.Cleanup(func() { _ = srv.Close() })
+			select {
+			case r := <-done:
+				if r.err != nil {
+					t.Fatalf("request: %v", r.err)
+				}
+				_ = r.resp.Body.Close()
+			case <-time.After(30 * time.Second):
+				t.Fatal("the request was not answered once its address accepted")
+			}
+			took := time.Unix(0, tookAt.Load())
+			wrong := 0
+			for _, e := range logs.FilterMessageSnippet("still waiting for the application to accept a connection on " + addr).All() {
+				if e.Time.After(took) {
+					wrong++
+				}
+			}
+			if wrong > 0 {
+				t.Errorf("said %d times that keploy still waits for the application to accept a connection on %s after the application took the request", wrong, addr)
+			}
+		})
+	}
+}
+
+// A request refused again after its address accepted (a listener that
+// comes and goes) waits again for its address, and says again that it still
+// waits: the line is held only while the request does not wait.
+func TestARequestRefusedAgainAfterItsAddressAcceptedSaysItStillWaits(t *testing.T) {
+	every := stillWaitingEvery
+	stillWaitingEvery = 50 * time.Millisecond
+	t.Cleanup(func() { stillWaitingEvery = every })
+	addr := refusingAddr(t)
+	accepted := serveCounting(t, addr)
+	core, logs := observer.New(zapcore.InfoLevel)
+	ctx, cancel := context.WithCancel(EndsWithApp(context.Background()))
+	defer cancel()
+	client := &http.Client{Transport: &http.Transport{DialContext: newPacedDials(-1).dial}}
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://"+addr+"/a", strings.NewReader("body"))
+	done := make(chan sendResult, 1)
+	go func() {
+		resp, err := doRequestWithConnRefusedRetry(ctx, zap.New(core), client, req, nil, 0)
+		done <- sendResult{resp, err}
+	}()
+	still := func() int {
+		return logs.FilterMessageSnippet("still waiting for the application to accept a connection on " + addr).Len()
+	}
+	deadline := time.After(30 * time.Second)
+	for accepted.accepted.Load() < 1 {
+		select {
+		case r := <-done:
+			t.Fatalf("the request ended (%v, %v) while its own connection was refused", r.resp, r.err)
+		case <-deadline:
+			t.Fatal("the request's address was never probed")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	n := still()
+	for still() < n+2 {
+		select {
+		case r := <-done:
+			t.Fatalf("the request ended (%v, %v) while its own connection was refused", r.resp, r.err)
+		case <-deadline:
+			t.Fatalf("said %d times in 30 s after its address first accepted that the request still waits, want 2 or more", still()-n)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// Where the address may not be probed, a refused request that then fails
+// otherwise, its connection never made (here the host became unreachable),
+// stops its line: none is said after it returns.
+func TestARefusedRequestThatFailsOtherwiseStopsItsLine(t *testing.T) {
+	every := stillWaitingEvery
+	stillWaitingEvery = 50 * time.Millisecond
+	t.Cleanup(func() { stillWaitingEvery = every })
+	addr := refusingAddr(t)
+	core, logs := observer.New(zapcore.InfoLevel)
+	ctx, cancel := context.WithCancel(WithoutAddressProbe(EndsWithApp(context.Background())))
+	defer cancel()
+	var dials atomic.Int32
+	client := &http.Client{Transport: &http.Transport{DialContext: func(_ context.Context, network, _ string) (net.Conn, error) {
+		errno := syscall.ECONNREFUSED
+		if dials.Add(1) > 3 {
+			errno = syscall.EHOSTUNREACH
+		}
+		return nil, &net.OpError{Op: "dial", Net: network, Err: os.NewSyscallError("connect", errno)}
+	}}}
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://"+addr+"/a", strings.NewReader("body"))
+	done := make(chan sendResult, 1)
+	go func() {
+		resp, err := doRequestWithConnRefusedRetry(ctx, zap.New(core), client, req, nil, 0)
+		done <- sendResult{resp, err}
+	}()
+	still := func() int {
+		return logs.FilterMessageSnippet("still waiting for the application to accept a connection on " + addr).Len()
+	}
+	select {
+	case r := <-done:
+		if r.err == nil || !errors.Is(r.err, syscall.EHOSTUNREACH) {
+			t.Fatalf("want the unreachable host's error, got (%v, %v)", r.resp, r.err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the request did not fail once its host was unreachable")
+	}
+	if still() == 0 {
+		t.Fatal("the request never said it still waits while it was refused")
+	}
+	n := still()
+	time.Sleep(10 * stillWaitingEvery)
+	if after := still(); after != n {
+		t.Errorf("said %d more times that the request waits after it returned", after-n)
 	}
 }

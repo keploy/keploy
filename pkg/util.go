@@ -19,6 +19,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -1057,6 +1058,45 @@ var stillWaitingEvery = 30 * time.Second
 // line can no longer be said: a line that was being said as stop was called
 // is said before stop returns, never after.
 func SayStillWaiting(ctx context.Context, logger *zap.Logger, what, addr string, began time.Time) (stop func()) {
+	return sayStillWaiting(ctx, logger, what, addr, began, nil)
+}
+
+// stillGate holds a still-waiting line between the waits of one request: no
+// line is said while it is held. hold returns only once no line can be said
+// until open: a line that was being said as it was called is said before it
+// returns, never after. The zero value is open.
+type stillGate struct {
+	mu   sync.Mutex
+	held bool
+}
+
+func (g *stillGate) hold() { g.set(true) }
+func (g *stillGate) open() { g.set(false) }
+
+func (g *stillGate) set(held bool) {
+	g.mu.Lock()
+	g.held = held
+	g.mu.Unlock()
+}
+
+// sayIfOpen says line unless g holds it; a nil g holds nothing.
+func (g *stillGate) sayIfOpen(say func()) {
+	if g == nil {
+		say()
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.held {
+		say()
+	}
+}
+
+// sayStillWaiting is SayStillWaiting, with the line said only while gate is
+// open (always with a nil gate): its timer runs from began across the holds,
+// so a wait held and opened more often than stillWaitingEvery still says it
+// waits.
+func sayStillWaiting(ctx context.Context, logger *zap.Logger, what, addr string, began time.Time, gate *stillGate) (stop func()) {
 	if logger == nil {
 		return func() {}
 	}
@@ -1074,7 +1114,7 @@ func SayStillWaiting(ctx context.Context, logger *zap.Logger, what, addr string,
 			case <-done:
 				return
 			case now := <-tick.C:
-				logger.Info(stillWaitingLine(ctx, what, addr, now.Sub(began)))
+				gate.sayIfOpen(func() { logger.Info(stillWaitingLine(ctx, what, addr, now.Sub(began))) })
 			}
 		}
 	}()
@@ -1139,18 +1179,35 @@ func AddressProbeAllowed(ctx context.Context) bool {
 
 // reSendWait is what the waits of one test request (or gRPC dial) refused on
 // a context EndsWithApp marked share: when the first began (zero before it),
-// and the line that says every stillWaitingEvery that it still waits, from
-// the first wait until end.
+// and the line that says every stillWaitingEvery that it still waits for the
+// application to accept a connection. The line is said only while the
+// request waits for that: from each wait until its address accepted the
+// probe, or, where it may not be probed, until the request's own connection
+// was made (connMade); gate holds it in between. end stops it.
 type reSendWait struct {
 	began time.Time
+	gate  stillGate
 	still func()
 }
+
+// connMade holds the line: the request's own connection was made, so it no
+// longer waits for the application to accept one.
+func (w *reSendWait) connMade() { w.gate.hold() }
 
 // end stops the line that says the request still waits.
 func (w *reSendWait) end() {
 	if w.still != nil {
 		w.still()
 	}
+}
+
+// heldOnConnection returns req with a trace that holds w's line once req has
+// its connection (httptrace GotConn: called in client.Do's own goroutine,
+// before req is written, for a new connection or a reused one alike).
+func heldOnConnection(req *http.Request, w *reSendWait) *http.Request {
+	return req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { w.connMade() },
+	}))
 }
 
 // waitToReSend is the wait of a test request refused at addr on a context
@@ -1160,10 +1217,12 @@ func (w *reSendWait) end() {
 // wait says, once, that it waits and what for; every later one (the request
 // was refused again after its address accepted) begins with a pause of
 // acceptPollInterval, so that a request whose address accepts but whose own
-// connection is refused is sent again at that pace, never at once. keploy
-// waits here for an event of its own choosing, not on the application's
-// answer: under the proven switch the answer stall rule does not count the
-// wait (holdAnswerStall).
+// connection is refused is sent again at that pace, never at once. Its line
+// that says it still waits (w) is said from each wait until addr accepted;
+// where addr may not be probed, the caller holds it once the request's own
+// connection is made (heldOnConnection). keploy waits here for an event of
+// its own choosing, not on the application's answer: under the proven
+// switch the answer stall rule does not count the wait (holdAnswerStall).
 func waitToReSend(ctx context.Context, logger *zap.Logger, what, addr string, refusal error, w *reSendWait) error {
 	defer holdAnswerStall(ctx)()
 	probe := AddressProbeAllowed(ctx)
@@ -1177,7 +1236,9 @@ func waitToReSend(ctx context.Context, logger *zap.Logger, what, addr string, re
 			logger.Info(fmt.Sprintf("the %s was refused at %s: the application is not accepting connections there yet; sending it again every %s until it is accepted (probing the application's address is disabled by configuration). The wait ends when it is, when the application exits, or when keploy is stopped", what, addr, acceptPollInterval),
 				zap.Error(refusal))
 		}
-		w.still = SayStillWaiting(ctx, logger, "accept a connection", addr, w.began)
+		w.still = sayStillWaiting(ctx, logger, "accept a connection", addr, w.began, &w.gate)
+	} else {
+		w.gate.open()
 	}
 	if !first || !probe {
 		pause := time.NewTimer(acceptPollInterval)
@@ -1191,7 +1252,11 @@ func waitToReSend(ctx context.Context, logger *zap.Logger, what, addr string, re
 	if !probe {
 		return nil
 	}
-	return WaitForAccept(ctx, nil, addr, nil)
+	if err := WaitForAccept(ctx, nil, addr, nil); err != nil {
+		return err
+	}
+	w.gate.hold()
+	return nil
 }
 
 // isPreResponseConnRefused reports whether err is a pure "connection refused".
@@ -1375,6 +1440,9 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 	asked := false
 	var wait reSendWait
 	defer wait.end()
+	// The request's own connection ends its wait for the application to
+	// accept one: where the address may not be probed, nothing else does.
+	req = heldOnConnection(req, &wait)
 	for attempt := 0; ; attempt++ {
 		resp, err := client.Do(req)
 		if err == nil {

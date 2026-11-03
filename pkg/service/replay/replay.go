@@ -1925,10 +1925,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// it refuses, wait for its address to accept, and only that
 			// exit or keploy's stop ends the wait.
 			runTestSetCtx = pkg.EndsWithApp(runTestSetCtx)
-			if r.config.Test.DisableAppReadyProbe {
-				runTestSetCtx = pkg.WithoutAddressProbe(runTestSetCtx)
-			}
 		}
+	}
+	// --disable-app-ready-probe says keploy may not dial the application's
+	// address only to learn whether it accepts, whoever runs the
+	// application: an embedder's port-forward is torn down by such a dial.
+	if r.config.Test.DisableAppReadyProbe {
+		runTestSetCtx = pkg.WithoutAddressProbe(runTestSetCtx)
 	}
 
 	// EVERY RECORDED VERDICT, for the reporter -- which is a different set from

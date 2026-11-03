@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,8 +57,8 @@ func (h *probeMarksHooks) SimulateRequest(ctx context.Context, tc *models.TestCa
 // Only an instrumentation that says its Run runs the application's process
 // marks the set's test requests as ended by the application's exit: an
 // embedder's command (k8s-proxy sets "replay") runs no application whose exit
-// would end a wait. Where probing the address is disabled, the marked
-// requests may not probe it.
+// would end a wait. Where probing the address is disabled, no request may
+// probe it, whoever runs the application.
 func TestOnlyAnInstrumentationThatRunsTheAppEndsItsTestsWaitsByTheExit(t *testing.T) {
 	for _, c := range []struct {
 		name      string
@@ -69,7 +70,7 @@ func TestOnlyAnInstrumentationThatRunsTheAppEndsItsTestsWaitsByTheExit(t *testin
 		{name: "runs the app", wantMark: true, wantProbe: true},
 		{name: "runs the app, probing disabled", noProbe: true, wantMark: true, wantProbe: false},
 		{name: "embedder", embedder: func(i Instrumentation) Instrumentation { return embedderInstr{i} }, wantProbe: true},
-		{name: "embedder that says no", embedder: func(i Instrumentation) Instrumentation { return embedderSaysNoInstr{embedderInstr{i}} }, noProbe: true, wantProbe: true},
+		{name: "embedder that says no", embedder: func(i Instrumentation) Instrumentation { return embedderSaysNoInstr{embedderInstr{i}} }, noProbe: true, wantProbe: false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newPartialRunHarness(t, 2, 0)
@@ -187,23 +188,26 @@ type stillCall struct{ what, addr string }
 
 // recordStillWaiting replaces the line a wait with no time limit says every
 // so often with one that records what it was asked to say, and sends each
-// ask on the returned channel.
-func recordStillWaiting(t *testing.T) <-chan stillCall {
-	calls := make(chan stillCall, 16)
+// ask on the returned channel. stopped counts the lines whose stop was
+// called (each once, however often it is called).
+func recordStillWaiting(t *testing.T) (calls <-chan stillCall, stopped *atomic.Int32) {
+	asks := make(chan stillCall, 16)
+	stopped = new(atomic.Int32)
 	was := sayStillWaiting
 	sayStillWaiting = func(_ context.Context, _ *zap.Logger, what, addr string, _ time.Time) func() {
-		calls <- stillCall{what, addr}
-		return func() {}
+		asks <- stillCall{what, addr}
+		var once sync.Once
+		return func() { once.Do(func() { stopped.Add(1) }) }
 	}
 	t.Cleanup(func() { sayStillWaiting = was })
-	return calls
+	return asks, stopped
 }
 
 // The health URL's wait, with probing the address disabled, for an
 // application keploy runs, has no time limit, and says every so often that
 // it still waits, naming the URL and the address its request dials.
 func TestAHealthURLWaitWithProbingDisabledSaysItStillWaits(t *testing.T) {
-	calls := recordStillWaiting(t)
+	calls, _ := recordStillWaiting(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
@@ -247,9 +251,11 @@ func TestAHealthURLWaitWithProbingDisabledSaysItStillWaits(t *testing.T) {
 }
 
 // The reset re-send's wait for an application keploy runs says every so often
-// that it still waits, naming the address the request dials.
+// that it still waits, naming the address the request dials, and stops the
+// line by the time the wait returns: none is said once the application
+// answered.
 func TestAResetRequestsWaitSaysItStillWaits(t *testing.T) {
-	calls := recordStillWaiting(t)
+	calls, stopped := recordStillWaiting(t)
 	addr, serving := resettingApp(t)
 	r := &Replayer{config: &config.Config{Command: "node app.js"}, logger: zap.NewNop()}
 	ctx, cancel := context.WithCancel(pkg.EndsWithApp(context.Background()))
@@ -277,5 +283,50 @@ func TestAResetRequestsWaitSaysItStillWaits(t *testing.T) {
 	case <-done:
 	case <-time.After(prTimeout):
 		t.Fatal("the wait did not end once the application answered")
+	}
+	if asked, s := 1+len(calls), stopped.Load(); int(s) != asked {
+		t.Errorf("%d lines started, %d stopped by the time the wait returned", asked, s)
+	}
+}
+
+// The health URL's wait with probing the address disabled stops its line by
+// the time it returns, once the URL answers 2xx: none is said after it.
+func TestAHealthURLWaitStopsItsLineWhenTheURLAnswers2xx(t *testing.T) {
+	calls, stopped := recordStillWaiting(t)
+	var ok atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if ok.Load() {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	cfg := &config.Config{}
+	cfg.Test.HealthURL = srv.URL + "/health"
+	cfg.Test.HealthPollTimeout = 100 * time.Millisecond
+	cfg.Test.DisableAppReadyProbe = true
+	ctx, cancel := context.WithCancel(pkg.EndsWithApp(context.Background()))
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() { done <- waitForAppReady(ctx, zap.NewNop(), cfg, httpProbeTarget{}) }()
+	select {
+	case <-calls:
+	case ready := <-done:
+		t.Fatalf("the wait ended (%v) without saying it still waits", ready)
+	case <-time.After(prTimeout):
+		t.Fatal("the wait never said it still waits")
+	}
+	ok.Store(true)
+	select {
+	case ready := <-done:
+		if !ready {
+			t.Fatal("not ready once the health URL answered 2xx")
+		}
+	case <-time.After(prTimeout):
+		t.Fatal("the wait did not end once the health URL answered 2xx")
+	}
+	if asked, s := 1+len(calls), stopped.Load(); int(s) != asked {
+		t.Errorf("%d lines started, %d stopped by the time the wait returned", asked, s)
 	}
 }

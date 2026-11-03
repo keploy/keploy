@@ -339,6 +339,62 @@ func TestARefusedGRPCDialStopsWaitingWhenTheAppExits(t *testing.T) {
 	}
 }
 
+// A gRPC dial's wait stops its line when the dial connects, with or without
+// probing its address: no line is said after the dial returns.
+func TestAGRPCDialsStillWaitingLineEndsWithTheDial(t *testing.T) {
+	every := stillWaitingEvery
+	stillWaitingEvery = 50 * time.Millisecond
+	t.Cleanup(func() { stillWaitingEvery = every })
+	for _, probe := range []bool{true, false} {
+		t.Run(map[bool]string{true: "probing", false: "no probe"}[probe], func(t *testing.T) {
+			addr := refusingAddr(t)
+			core, logs := observer.New(zapcore.InfoLevel)
+			ctx, cancel := context.WithCancel(EndsWithApp(context.Background()))
+			defer cancel()
+			if !probe {
+				ctx = WithoutAddressProbe(ctx)
+			}
+			type dialResult struct {
+				conn net.Conn
+				err  error
+			}
+			done := make(chan dialResult, 1)
+			go func() {
+				conn, err := dialTCPWithConnRefusedRetry(ctx, zap.New(core), addr, nil, 0)
+				done <- dialResult{conn, err}
+			}()
+			still := func() int {
+				return logs.FilterMessageSnippet("still waiting for the application to accept a connection on " + addr).Len()
+			}
+			deadline := time.After(30 * time.Second)
+			for still() < 1 {
+				select {
+				case r := <-done:
+					t.Fatalf("the dial ended (%v, %v) while its address refused", r.conn, r.err)
+				case <-deadline:
+					t.Fatal("the dial never said it still waits")
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			serve(t, addr)
+			select {
+			case r := <-done:
+				if r.err != nil || r.conn == nil {
+					t.Fatalf("want a connection once the address accepted, got (%v, %v)", r.conn, r.err)
+				}
+				_ = r.conn.Close()
+			case <-time.After(30 * time.Second):
+				t.Fatal("the dial was not made once its address accepted")
+			}
+			n := still()
+			time.Sleep(10 * stillWaitingEvery)
+			if after := still(); after != n {
+				t.Errorf("said %d more times that the dial waits after it connected and returned", after-n)
+			}
+		})
+	}
+}
+
 // WaitForAccept says once that addr refused, however many tries it makes, and
 // waits with no one to tell as well; on a context already ended it says
 // nothing and tries no more.
