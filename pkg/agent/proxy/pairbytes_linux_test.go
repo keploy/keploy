@@ -105,7 +105,7 @@ func heldPairBound(t *testing.T, p *Proxy, appSeq uint64, network, addr, listenD
 			}
 		}
 	}
-	p.paired.add(proxySide, appSeq)
+	p.paired.add(proxySide, appSeq, 0)
 	tracked := p.inflight.track(proxySide)
 	tracked.beforeClose = func() { p.pairClosing(context.Background(), proxySide, tracked) }
 	t.Cleanup(func() { p.inflight.forget(tracked) })

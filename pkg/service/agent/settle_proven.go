@@ -683,9 +683,10 @@ func (a *Agent) settledSince(ctx context.Context, answers bool, worker uint32, w
 	// waits for (settleBegin).
 	var owned coreAgent.InFlightScope
 	// A bytes wait the end cuts short leaves what it could not see reached
-	// as this test's (coreAgent.WithEndOf): a loss of it counted later is
-	// charged here, or to the run, never to the test open then.
-	drops, err := a.settleKeeping(coreAgent.WithEndOf(ctx, what), answers, worker, func(sc coreAgent.InFlightScope) { owned = sc })
+	// on its worker's connections as this test's (coreAgent.WithEndOfWorker):
+	// a loss of it counted later is charged here, or to the run, never to
+	// the test open then. Another worker's are its open test's.
+	drops, err := a.settleKeeping(coreAgent.WithEndOfWorker(ctx, what, worker), answers, worker, func(sc coreAgent.InFlightScope) { owned = sc })
 	a.provenMu.Lock()
 	if a.proven.owned == nil {
 		a.proven.owned = map[uint32]coreAgent.InFlightScope{}

@@ -104,17 +104,40 @@ const OwnedLossesPastTheBound = "from connections each written in a test whose e
 
 type endOfKey struct{}
 
+// endOf is the end a wait runs under (WithEndOf, WithEndOfWorker).
+type endOf struct {
+	test   string
+	worker uint32
+}
+
 // WithEndOf is ctx carrying the test whose end waits under it: a wait of the
 // proxy's that ends short of what it waited for leaves what it could not see
-// reached marked as that test's (OwnedLoss).
+// reached marked as that test's (OwnedLoss). The test is of a run of one test
+// process: every connection the wait had not seen reached is marked.
 func WithEndOf(ctx context.Context, test string) context.Context {
-	return context.WithValue(ctx, endOfKey{}, test)
+	return context.WithValue(ctx, endOfKey{}, endOf{test: test})
+}
+
+// WithEndOfWorker is WithEndOf for a test of the test worker with keploy
+// instance worker: a wait cut short marks only that worker's connections
+// (the kernel's stamp of the process that made each). Another worker's bytes
+// are not this test's, and stay the test open when their loss is counted.
+// worker 0 is WithEndOf.
+func WithEndOfWorker(ctx context.Context, test string, worker uint32) context.Context {
+	return context.WithValue(ctx, endOfKey{}, endOf{test: test, worker: worker})
 }
 
 // EndOf is the test WithEndOf put in ctx: "" for none.
 func EndOf(ctx context.Context) string {
-	s, _ := ctx.Value(endOfKey{}).(string)
-	return s
+	e, _ := ctx.Value(endOfKey{}).(endOf)
+	return e.test
+}
+
+// EndWorkerOf is the worker WithEndOfWorker put in ctx: 0 for a test of a run
+// of one test process, or for none.
+func EndWorkerOf(ctx context.Context) uint32 {
+	e, _ := ctx.Value(endOfKey{}).(endOf)
+	return e.worker
 }
 
 // BetweenTestCases is what a keploy test call that serves the pool with no

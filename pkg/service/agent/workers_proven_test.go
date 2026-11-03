@@ -602,3 +602,36 @@ func TestAProxyThatCannotKeepWorkersApartCutsNoWorkersWindow(t *testing.T) {
 	require.Nil(t, serr)
 	require.Equal(t, []string{"window all"}, q.since(0), "a run of one test process cuts every connection")
 }
+
+// A test worker's end names its worker to the bytes wait with its test
+// (coreAgent.WithEndOfWorker): a wait cut short marks only that worker's
+// connections (the proxy's waitPairTargets), so bytes another worker wrote
+// and lost later stay its open test's, never charged to the ended test
+// alone. Each end names its own worker, whichever ends first.
+func TestAWorkersEndNamesItsWorkerToTheBytesWait(t *testing.T) {
+	a, _ := workerAgent(t, models.MODE_RECORD, 4)
+	p := a.Proxy.(*wireProxy)
+	w1, w2 := child(t), child(t)
+	require.Equal(t, "1", claimWorker(t, a, w1.Process.Pid, "a", 2))
+	require.Equal(t, "2", claimWorker(t, a, w2.Process.Pid, "b", 2))
+	type end struct {
+		test   string
+		worker uint32
+	}
+	var ends []end
+	p.bytesWait = func(ctx context.Context, _ uint64) error {
+		if test := coreAgent.EndOf(ctx); test != "" {
+			ends = append(ends, end{test, coreAgent.EndWorkerOf(ctx)})
+		}
+		return nil
+	}
+	_, serr := a.ProvenBegin(as(w2.Process.Pid), begin("TestTwo"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(as(w1.Process.Pid), begin("TestOne"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(as(w1.Process.Pid), models.ScopeReq{Name: "TestOne", Outcome: "passed"})
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestTwo", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Equal(t, []end{{"a::TestOne", 1}, {"b::TestTwo", 2}}, ends)
+}
