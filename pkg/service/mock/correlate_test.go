@@ -2,7 +2,9 @@ package mock
 
 import (
 	"context"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -388,6 +390,10 @@ func TestALaterClaimOfAnIdTakesItsOwnKey(t *testing.T) {
 	require.Equal(t, map[string]time.Time{"pA": ts(8), "pC": ts(25)}, byKey, "each claim's first test is its own")
 }
 
+// lateHandoverRuns numbers TestALiveWorkersCallHandedOverAfterItsEndIsItsOwn's
+// runs in this process.
+var lateHandoverRuns atomic.Uint64
+
 // A call a live worker made, whose mock is handed over only after the
 // worker ended (generic's preamble hold waits for another worker's longer
 // test), is the worker's own: it is listed in its worker: scope and charges
@@ -395,14 +401,17 @@ func TestALaterClaimOfAnIdTakesItsOwnKey(t *testing.T) {
 // live worker: charged to the open test, naming the ended worker.
 func TestALiveWorkersCallHandedOverAfterItsEndIsItsOwn(t *testing.T) {
 	a, b := coreAgent.InstanceValue(1, 0), coreAgent.InstanceValue(2, 0)
+	// Each run its own connection: a closed one's origin is kept, with its
+	// end mark, for its late mocks (starts.Registry.ForgetOrigin).
+	conn := "late-handover-a-" + strconv.FormatUint(lateHandoverRuns.Add(1), 10)
 	starts.Default.InstanceBegan(a)
 	starts.Default.InstanceBegan(b)
 	t.Cleanup(func() {
-		starts.Default.ForgetOrigin("late-handover-a")
+		starts.Default.ForgetOrigin(conn)
 		starts.Default.InstanceEnded(a)
 		starts.Default.InstanceEnded(b)
 	})
-	starts.Default.NoteOriginIn("late-handover-a", 4242, a)
+	starts.Default.NoteOriginIn(conn, 4242, a)
 	t0 := time.Now().Add(-time.Minute)
 	at := func(sec int) time.Time { return t0.Add(time.Duration(sec) * time.Second) }
 	claims := []models.ScopeWindow{{Claim: "pA", Start: at(5), Worker: a}, {Claim: "pB", Start: at(6), Worker: b}}
@@ -410,11 +419,11 @@ func TestALiveWorkersCallHandedOverAfterItsEndIsItsOwn(t *testing.T) {
 		{Name: "a1", Start: at(10), End: at(20), Instance: a},
 		{Name: "b1", Start: at(12), End: at(120), Instance: b},
 	}
-	between := &models.Mock{Name: "a-between", ConnectionID: "late-handover-a", SourcePID: 4242}
+	between := &models.Mock{Name: "a-between", ConnectionID: conn, SourcePID: 4242}
 	between.Spec.ReqTimestampMock = at(30)
 	starts.Default.InstanceEnded(a)
 	time.Sleep(time.Millisecond)
-	survivor := &models.Mock{Name: "a-survivor", ConnectionID: "late-handover-a", SourcePID: 4242}
+	survivor := &models.Mock{Name: "a-survivor", ConnectionID: conn, SourcePID: 4242}
 	survivor.Spec.ReqTimestampMock = time.Now()
 	for _, m := range []*models.Mock{between, survivor} {
 		starts.Default.StampInstance(m)

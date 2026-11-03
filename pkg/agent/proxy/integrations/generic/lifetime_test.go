@@ -2,7 +2,9 @@ package generic
 
 import (
 	"context"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -784,6 +786,10 @@ func TestLegacyAConnectionWhollyInsideATestIsThatTestsWhole(t *testing.T) {
 	}
 }
 
+// heldRuns numbers TestV2AHeldExchangeIsItsWorkersByWhenItsRequestWasRead's
+// runs in this process.
+var heldRuns atomic.Uint64
+
 // A test worker's connection opened while another worker's test is open is
 // held until that test's end (holdPreamble), by when the worker may have
 // ended. Each exchange is still its worker's or not by when the relay read
@@ -793,7 +799,9 @@ func TestLegacyAConnectionWhollyInsideATestIsThatTestsWhole(t *testing.T) {
 func TestV2AHeldExchangeIsItsWorkersByWhenItsRequestWasRead(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	a := coreAgent.InstanceValue(1, 0)
-	const conn = "held-past-its-worker"
+	// Each run its own connection: a closed one's origin is kept, with its
+	// end mark, for its late mocks (starts.Registry.ForgetOrigin).
+	conn := "held-past-its-worker-" + strconv.FormatUint(heldRuns.Add(1), 10)
 	starts.Default.InstanceBegan(a)
 	starts.Default.NoteOriginIn(conn, 4242, a)
 	t.Cleanup(func() {

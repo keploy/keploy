@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -366,6 +367,19 @@ func TestAStoppedWorkersMissIsCountedACallKeployCannotAttribute(t *testing.T) {
 	miss(2, &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /nowhere"}, &models.ConditionalDstCfg{Addr: "10.0.0.9:5432", AddrFabricated: true})
 	if n, what := unattributed(); n != 7 || what != "the latest: a call, from process 4242 of ended test worker 2, on a connection it made before keploy stopped serving that worker" {
 		t.Fatalf("a stopped worker's miss whose report names no destination, to a made-up address, counted %d, %q; want 7 naming no address", n, what)
+	}
+	// A later claim of the id (a worker that took id 2 after the first
+	// ended) is named as that claim, never by its raw value.
+	later := agent.InstanceValue(2, 1)
+	if _, err := p.ServeInstance(later); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.StopServingInstance(later); err != nil {
+		t.Fatal(err)
+	}
+	miss(later, &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /later", Destination: "orders:8080"}, nil)
+	if n, what := unattributed(); n != 8 || what != "the latest: a call to orders:8080, from process 4242 of ended test worker 2 (claim 2 of that id), on a connection it made before keploy stopped serving that worker" {
+		t.Fatalf("a stopped later claim's miss counted %d, %q; want 8 naming the claim", n, what)
 	}
 	if p.stoppedWorker(0) {
 		t.Fatal("instance 0, no worker's, was read as a stopped worker's")
