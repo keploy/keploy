@@ -660,6 +660,46 @@ func TestRecordV2_FaultNotRecordedWhenTheAppIsStoppedMidCall(t *testing.T) {
 	}
 }
 
+// A call that got no answer, whose first end is the client's and records no
+// fault: the hooks cannot judge the client's end (the macOS and Windows
+// hooks: nothing tells its giving up from its exit), its process exited on
+// its own, or the recording's stop closed the application. No fault is
+// recorded, and the call is not recorded at all, as before faults were
+// recorded. Nor is it left out: there is no answer to lose.
+func TestRecordV2_NoAnswerNotRecordedWhenTheClientsEndRecordsNoFault(t *testing.T) {
+	for _, e := range []struct {
+		name string
+		why  supervisor.NoFaultEnd
+	}{
+		{"the hooks cannot judge the client's end", supervisor.EndUnjudged},
+		{"the client's process exited on its own", supervisor.EndAtExit},
+		{"the recording's stop closed the application", supervisor.EndAtStop},
+	} {
+		t.Run(e.name, func(t *testing.T) {
+			c := newRelayedConn(t)
+			c.start(t)
+			write(t, c.app, c.src, faultReq)
+			relayed(t, c.dest, faultReq)
+			if e.why == supervisor.EndAtStop {
+				c.stopBegun.Store(true)
+			} else {
+				c.clientEnd.Store(uint32(e.why))
+			}
+			appClosed(t, c)
+			mocks, err := c.finish(t)
+			if err != nil {
+				t.Fatalf("recordV2 = %v, want nil", err)
+			}
+			for _, m := range mocks {
+				t.Errorf("recorded a mock, fault %v; want nothing: the call got no answer, and its end records no fault", m.Spec.Fault)
+			}
+			if n := c.mgr.MocksLeftOut(); n != 0 || len(c.spans.all()) != 0 {
+				t.Fatalf("%d mocks left out, spans %v; want none: there was no answer to lose", n, c.spans.all())
+			}
+		})
+	}
+}
+
 // A call whose first end is the client's, partway through the answer, where
 // that end records no fault: the recording's stop closed the application, its
 // process exited on its own, or the hooks cannot judge the client's end (the
@@ -716,8 +756,8 @@ func TestRecordV2_PartAnswerLeftOutWhenTheClientsEndRecordsNoFault(t *testing.T)
 					t.Errorf("recorded %d %q (Content-Length %q), fault %v; want nothing: the answer is not known to be whole",
 						m.Spec.HTTPResp.StatusCode, m.Spec.HTTPResp.Body, m.Spec.HTTPResp.Header["Content-Length"], m.Spec.Fault)
 				}
-				if n := c.mgr.MocksLeftOut(); n != 1 {
-					t.Fatalf("%d mocks left out, want the one exchange", n)
+				if n := c.mgr.MocksLeftOut(); n != 1 || len(c.spans.all()) != 1 {
+					t.Fatalf("%d mocks left out, spans %v; want the one exchange, spanned", n, c.spans.all())
 				}
 				if l := c.leftOut(e.reason); len(l) != 1 {
 					t.Fatalf("%d left-out lines with the reason %q, want one", len(l), e.reason)
