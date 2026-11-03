@@ -289,6 +289,37 @@ func TestOutcomeTheTestsOwnValueThatStoppedFollowingItsSourceIsAConflict(t *test
 	oRefused(t, "start-up o-1 sent, F moved it to o-9", d, "conflict", "mock-0")
 }
 
+// A conflict's give edit names the value as the line names its place: a
+// part of the url by its whole path (url.path.2, url.query.order), as a
+// path segment's index alone ("2") names nothing a person reads; a body or
+// header field by its last key. A word and an instant are named alike.
+func TestOutcomeAGiveEditNamesAUrlPartByItsWholePath(t *testing.T) {
+	gives := func(what string, d Decision, name string) {
+		t.Helper()
+		give := `keploytest.Given(t, ` + strconv.Quote(name) + `, v)`
+		if d.Refusal == nil || !slices.Contains(d.Refusal.Edits, Edit{Kind: EditGive, Name: name}) || !strings.Contains(d.Line, give) {
+			t.Errorf("%s: %s %q; want its give edit to say %s", what, oDescribe([]Decision{d}), d.Line, give)
+		}
+	}
+	sent := oServed("mock-0", false, false, Request, oText("body.order", "o-1"), "o-9", time.Millisecond)
+	for _, c := range [][2]string{{"url.path.2", "url.path.2"}, {"url.query.order", "url.query.order"}, {"body.ref", "ref"}, {"header.X-Order", "X-Order"}} {
+		d := oWord(t, Decide(oInput(c[0], "o-1", "o-5", sent, nil)), "1", "5")
+		oRefused(t, "a word at "+c[0], d, RefusalConflict, "mock-0")
+		gives("a word at "+c[0], d, c[1])
+	}
+	// A start-up recording served as recorded sent the recorded moment in
+	// round F too (TestOutcomeAMomentARecordingsRequestHoldsIsASend).
+	rAt := oAt.Add(2*time.Hour + 400*time.Millisecond + 123*time.Microsecond)
+	fAt := rAt.Add(time.Hour + 37*time.Second + 211*time.Millisecond + 7*time.Microsecond)
+	rec, live := iMicro(rAt.Add(-time.Second)), iMicro(fAt.Add(-time.Second))
+	raw := []Raw{RawOf(sentAtMock("mock-5", rec, "", rAt.Add(-time.Second), rAt.Add(-900*time.Millisecond)), true).ServedAs(1).ServedAsRecorded()}
+	for _, c := range [][2]string{{"url.path.3", "url.path.3"}, {"body.at", "at"}} {
+		d := oWord(t, Decide(iCall(c[0], String, rec, live, rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), nil, raw)), rec, live)
+		oRefused(t, "an instant at "+c[0], d, RefusalConflict, "mock-5")
+		gives("an instant at "+c[0], d, c[1])
+	}
+}
+
 // A word inside a longer token is a word: the "17" of "order-17", the "42" of
 // "cart_42". It is judged by the places that hold it, never fresh because the
 // token as a whole stands nowhere (90457abcd word_coincidence_test.go:140,
