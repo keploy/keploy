@@ -431,23 +431,28 @@ func TestOutcomeARefusalNoNoiseNamesOffersOneReRecord(t *testing.T) {
 }
 
 // A field one recording does not hold is named by its leaf in the other.
-// A key holding '.', '[' or ']' is named by no path alone: its line says
-// that its noise also names the field those would nest.
+// A key holding '.', '[' or ']', or one its document holds twice (a BSON
+// document may), is named by no path alone: its line says both, and that
+// its noise also names the other field its path spells.
 func TestOutcomeANoiseEditNamesAFieldOneRecordingLacks(t *testing.T) {
-	const p = "body.items[0].ref"
-	leaf := Leaf{Path: p, Noise: "body.items[].ref", Type: String, Value: "ref-8c41f2", Unnamed: true}
-	want := []Edit{{Kind: EditNoiseAtField, Mock: "mock-300", Field: "body.items[].ref", Word: -1}}
-	for _, only := range []string{"recorded", "full round"} {
-		in := oInput(p, "ref-8c41f2", "ref-e09b7d", nil, nil)
-		in.Rec.Leaves, in.Live.Leaves = map[string]Leaf{p: leaf}, map[string]Leaf{}
-		if only == "full round" {
-			in.Rec.Leaves, in.Live.Leaves = in.Live.Leaves, in.Rec.Leaves
-		}
-		ds := Decide(in)
-		if len(ds) != 1 || ds[0].Refusal == nil || !reflect.DeepEqual(ds[0].Refusal.Edits, want) {
-			t.Errorf("a leaf only the %s call holds: %s; want edits %+v", only, oDescribe(ds), want)
-		} else if !strings.Contains(ds[0].Line, "its key holds '.', '[' or ']', so its noise in keploy.yml also names the field those would nest. Edits: in keploy.yml") {
-			t.Errorf("a leaf only the %s call holds: %q; want it to say its noise also names a nested field", only, ds[0].Line)
+	for _, c := range []struct{ what, path, noise string }{
+		{"a key holding '.'", "body.items[0].ref", "body.items[].ref"},
+		{"a key its document holds twice", "body.cursor.firstBatch[0].ref", "body.cursor.firstBatch[].ref"},
+	} {
+		leaf := Leaf{Path: c.path, Noise: c.noise, Type: String, Value: "ref-8c41f2", Unnamed: true}
+		want := []Edit{{Kind: EditNoiseAtField, Mock: "mock-300", Field: c.noise, Word: -1}}
+		for _, only := range []string{"recorded", "full round"} {
+			in := oInput(c.path, "ref-8c41f2", "ref-e09b7d", nil, nil)
+			in.Rec.Leaves, in.Live.Leaves = map[string]Leaf{c.path: leaf}, map[string]Leaf{}
+			if only == "full round" {
+				in.Rec.Leaves, in.Live.Leaves = in.Live.Leaves, in.Rec.Leaves
+			}
+			ds := Decide(in)
+			if len(ds) != 1 || ds[0].Refusal == nil || !reflect.DeepEqual(ds[0].Refusal.Edits, want) {
+				t.Errorf("%s, a leaf only the %s call holds: %s; want edits %+v", c.what, only, oDescribe(ds), want)
+			} else if !strings.Contains(ds[0].Line, "its key holds '.', '[' or ']', or its document holds that key twice, so its noise in keploy.yml also names the other field its path spells. Edits: in keploy.yml") {
+				t.Errorf("%s, a leaf only the %s call holds: %q; want it to say either cause and that its noise also names the other field", c.what, only, ds[0].Line)
+			}
 		}
 	}
 }
