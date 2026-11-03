@@ -33,12 +33,17 @@ func TestDrainErrGroupProgressWaitsWhileProgressing(t *testing.T) {
 
 // A group that stops making progress is given up on once the process could
 // run for the bound with no progress, on its own runnable clock (stall), and
-// not before. The row reads that clock, never wall time: on a loaded host the
-// clock moves far slower than wall time (one thread in a four-CPU quota beside
-// 26 busy loops can run about a seventh of it), so no wall bound holds there.
-// A drain that never gives up fails here by assertion, not at the
-// test binary's timeout: once the clock has run hangRun with no verdict, the
-// row ends the group itself, and says so.
+// not before. The row reads the stall the drain itself measures, on the meter
+// the drain hands over before its first look, never wall time and never a
+// read of the clock of its own: the process clock is shared, so a holder
+// elsewhere in the package can move it between such a read and the meter's
+// start, and a stall counted from that read over-states the drain's by as
+// much, which hides a give-up that early. On a loaded host the clock moves far
+// slower than wall time (one thread in a four-CPU quota beside 26 busy loops
+// can run about a seventh of it), so no wall bound holds there. A drain that
+// never gives up fails here by assertion, not at the test binary's timeout:
+// once its stall has run hangRun with no verdict, the row ends the group
+// itself, and says so.
 func TestDrainErrGroupProgressGivesUpOnAStall(t *testing.T) {
 	const bound = 100 * time.Millisecond
 	// hangRun is run time no verdict waits for: the bound, and five times
@@ -46,37 +51,41 @@ func TestDrainErrGroupProgressGivesUpOnAStall(t *testing.T) {
 	// (about a second: stall.sampler.readWaits), which also covers the looks
 	// a verdict waits for a thread held off when the stall was due.
 	const hangRun = bound + 5*time.Second
-	clk := stall.ProcessClock()
 	var g errgroup.Group
 	block := make(chan struct{})
 	var once sync.Once
 	end := func() { once.Do(func() { close(block) }) }
 	defer end()
 	g.Go(func() error { <-block; return nil })
-	// progress runs on this goroutine (the drain calls it): first as the
-	// drain starts, its stall already begun, then at each of its looks.
-	var first time.Duration
+	// The drain hands each wait's meter over (watch), then calls progress on
+	// this goroutine: as the wait starts, then at each of its looks, before
+	// the look's verdict. A verdict is drawn only at a look after the one
+	// that found the stall due (stall.Meter.Expired), so the stall read at
+	// the verdict's look is the bound or more on a drain that waits for it.
+	var m *stall.Meter
+	var stalled time.Duration
 	looks, overdue := 0, false
+	watch := func(w *stall.Meter) { m = w }
 	progress := func() uint64 {
-		r := clk.Runnable()
-		if looks == 0 {
-			first = r
-		} else if r-first >= hangRun && !overdue {
+		looks++
+		if m == nil {
+			t.Errorf("look %d: the drain looked at progress before it handed its meter over", looks)
+			return 0
+		}
+		stalled = m.Stalled()
+		if stalled >= hangRun && !overdue {
 			overdue = true
 			end()
 		}
-		looks++
 		return 0
 	}
-	before := clk.Runnable() // no later than the stall's start
-	_, timedOut := DrainErrGroupProgress(zap.NewNop(), "t", &g, bound, progress)
-	ran := clk.Runnable() - before
+	_, timedOut := drainErrGroupProgress(nil, zap.NewNop(), "t", &g, bound, progress, watch)
 	switch {
 	case overdue:
-		t.Fatalf("no give-up after %v of run time with no progress, in %d looks: want one at about the bound, %v", ran, looks, bound)
+		t.Fatalf("no give-up after %v of the drain's stall, in %d looks: want one at about the bound, %v", stalled, looks, bound)
 	case !timedOut:
-		t.Fatalf("a group that made no progress was not given up on (%v of run time, %d looks)", ran, looks)
-	case ran < bound:
-		t.Fatalf("given up after %v of run time with no progress, in %d looks: want no earlier than the bound, %v", ran, looks, bound)
+		t.Fatalf("a group that made no progress was not given up on (%v of the drain's stall, %d looks)", stalled, looks)
+	case stalled < bound:
+		t.Fatalf("given up at a look that read %v of the drain's stall, in %d looks: want no earlier than the bound, %v", stalled, looks, bound)
 	}
 }
