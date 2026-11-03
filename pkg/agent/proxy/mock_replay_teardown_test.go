@@ -505,6 +505,45 @@ func TestUnderMockReplayOneRunsTeardownIsTheSameWithItsClock(t *testing.T) {
 	}
 }
 
+// A recording with no request time has no place (models.PlaceOf): under
+// keploy mock replay it bounds no teardown, read from the trees and from the
+// store on disk alike, so the call after the last test misses (fail closed).
+// On disk its place was kept as the zero time's UnixNano, which overflows to
+// a time in 1754, and read back as a place before every pool call: every
+// pool call, the application's boot among them, read as the teardown, while
+// the trees told none.
+func TestUnderMockReplayARecordingWithNoPlaceBoundsNoTeardown(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	boot := exactMongo("boot", 100*time.Millisecond, models.LifetimePerTest)
+	end := exactMongo("end", 3*time.Second, models.LifetimePerTest)
+	unplaced := exactMongo("unplaced", time.Second, models.LifetimePerTest)
+	unplaced.Spec.ReqTimestampMock = time.Time{}
+	if !models.PlaceOf(unplaced).IsZero() {
+		t.Fatal("precondition: the recording with no request time has a place")
+	}
+	slice := []string{"boot", "end"}
+	for _, c := range []struct {
+		name   string
+		staged []*models.Mock
+		disk   bool
+	}{
+		{"in the trees", []*models.Mock{boot, unplaced, end}, false},
+		{"on disk only", []*models.Mock{boot, end}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			mm := stagedManager(t, c.staged, nil)
+			mm.SetPoolOwners(map[string]string{"unplaced": "k"})
+			mm.SetPoolNames(slice)
+			if c.disk {
+				mm.SetRecordingTimes(onDisk(t, boot, unplaced, end).RangeTimes)
+			}
+			if after := mm.teardownAfter("k", ""); after != nil {
+				t.Fatalf("FALSE GREEN? a recording with no place bounded the set's teardown (the boot reads as the teardown: %v)", after(boot.Spec.ReqTimestampMock))
+			}
+		})
+	}
+}
+
 // keploy mock record stamps an answer once the relay's write of it to the
 // application returns, and the application can read it, end its test and
 // make its next call before that. The times are a loaded host's recording
