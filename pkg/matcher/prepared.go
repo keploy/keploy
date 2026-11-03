@@ -208,9 +208,11 @@ func sortFieldHashes(f []fieldHash) {
 	})
 }
 
-// compared is f's fields as bothSides leaves them against other: its fields,
-// and each scalar a pattern matched at a path f holds no other field at,
-// unless other too holds only such a scalar there.
+// compared is f's fields counted against other as bothSides leaves them:
+// its fields, and each scalar a pattern matched at a path f holds no other
+// field at, unless other also holds a matched scalar there. bothSides keeps
+// f's matched scalar too when other's path also holds an unmatched one; the
+// count is the same either way, one difference at that path.
 func (f JSONFields) compared(other JSONFields) []fieldHash {
 	if len(f.covered) == 0 {
 		return f.fields
@@ -219,17 +221,13 @@ func (f JSONFields) compared(other JSONFields) []fieldHash {
 	for _, h := range f.fields {
 		plain[h.path] = true
 	}
-	otherPlain := make(map[uint64]bool, len(other.fields))
-	for _, h := range other.fields {
-		otherPlain[h.path] = true
-	}
 	otherCovered := make(map[uint64]bool, len(other.covered))
 	for _, h := range other.covered {
 		otherCovered[h.path] = true
 	}
 	out := append(make([]fieldHash, 0, len(f.fields)+len(f.covered)), f.fields...)
 	for _, h := range f.covered {
-		if plain[h.path] || (otherCovered[h.path] && !otherPlain[h.path]) {
+		if plain[h.path] || otherCovered[h.path] {
 			continue
 		}
 		out = append(out, h)

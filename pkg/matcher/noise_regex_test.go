@@ -758,6 +758,12 @@ func TestCompareHeaders_RegexEnforced(t *testing.T) {
 		http.Header{"X-Trace": []string{"ord-3", "ord-4"}}, &[]models.HeaderResult{}, noise) {
 		t.Errorf("every value inside the pattern on both sides should be ignored")
 	}
+	// A recorded header with no values has none for the pattern to match.
+	if CompareHeaders(
+		http.Header{"X-Trace": []string{}},
+		http.Header{"X-Trace": []string{"ord-2"}}, &[]models.HeaderResult{}, noise) {
+		t.Errorf("a header recorded with no value must not be excused by a pattern")
+	}
 	// A header the recording lacks has no recorded value to match.
 	if CompareHeaders(
 		http.Header{},

@@ -1957,10 +1957,10 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 		regexArr, isNoisy := SubstringKeyMatch(k, loweredNoise)
 		val, ok := h1[k]
 		if isNoisy && len(regexArr) != 0 {
-			// The same rule as above. A header the recording lacks has no
-			// recorded value to match, so only an unconditional entry
-			// excuses it.
-			isNoisy = ok && allMatchAnyRegex(val, regexArr) && allMatchAnyRegex(v, regexArr)
+			// A header the recording lacks has no recorded value for a pattern
+			// to match, so only an unconditional entry excuses it. One both
+			// sides hold was judged, and recorded in res, by the loop above.
+			isNoisy = false
 		}
 		isNoisy = isNoisy || isHeaderNoisy
 		if isNoisy && checkKey(res, k) {
