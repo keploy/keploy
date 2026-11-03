@@ -75,8 +75,9 @@ func TestAWorkersClaimIsRefusedWhereNoCaptureLossIsCounted(t *testing.T) {
 	_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "a", Workers: 2}, w1.Process.Pid)
 	require.NotNil(t, serr, "no worker is taken where a drop could be charged to no test")
 	require.Equal(t, models.ScopeErrTooManyWorkers, serr.Code)
-	require.Contains(t, serr.Message, "process "+strconv.Itoa(w1.Process.Pid)+" declared 2 test workers, but keploy's hooks here count no capture losses, so a connection the kernel dropped while two workers' tests were open could not be charged to each of them")
+	require.Equal(t, "a test process declared 2 test workers, but keploy's hooks here count no capture losses, so a connection the kernel dropped while two workers' tests were open could not be charged to each of them", serr.Message)
 	require.Equal(t, "run one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)", serr.Remedy)
+	refusedAlike(t, a, models.InstanceReq{Key: "b", Workers: 2}, w2.Process.Pid, serr, w1.Process.Pid)
 	require.Empty(t, h.given(), "the refused claim was given no instance")
 	require.Empty(t, a.proven.workers)
 

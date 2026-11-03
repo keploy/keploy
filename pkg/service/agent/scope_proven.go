@@ -461,7 +461,7 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	a.endGoneWorkers(ctx)
 	me := claimant{pid: caller, start: start}
 	if declared > 1 {
-		if serr := a.workersRefusal(ctx, caller, declared); serr != nil {
+		if serr := a.workersRefusal(ctx, declared); serr != nil {
 			return models.InstanceResp{}, serr
 		}
 		return a.claimWorker(ctx, req, me, declared)

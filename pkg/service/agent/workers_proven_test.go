@@ -127,8 +127,10 @@ func claimWorker(t *testing.T, a *Agent, pid int, key string, workers int) strin
 
 // A claim that declares more workers than this keploy runs is refused at
 // once, with nothing else running: the run's outcome does not depend on
-// whether its workers would have overlapped. An integration that declares
-// none, or one, runs as before.
+// whether its workers would have overlapped. Every test process of the run
+// that claims is refused in the same words, naming none of them, so the
+// run's refusal is said once. An integration that declares none, or one,
+// runs as before.
 func TestAClaimOfMoreWorkersThanKeployRunsIsRefusedAtOnce(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_RECORD)
 	ctx := context.Background()
@@ -136,8 +138,9 @@ func TestAClaimOfMoreWorkersThanKeployRunsIsRefusedAtOnce(t *testing.T) {
 	require.NotNil(t, serr)
 	require.Equal(t, models.ScopeErrTooManyWorkers, serr.Code)
 	require.Equal(t, http.StatusUnprocessableEntity, serr.Status)
-	require.Contains(t, serr.Message, "declared 4 test workers, but this keploy runs one test worker at a time")
+	require.Equal(t, "a test process declared 4 test workers, but this keploy runs one test worker at a time", serr.Message)
 	require.Contains(t, serr.Remedy, "Playwright workers: 1")
+	refusedAlike(t, a, models.InstanceReq{Key: "o", Workers: 4}, child(t).Process.Pid, serr, os.Getpid())
 
 	for _, n := range []int{0, 1} {
 		resp, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "o", Workers: n}, os.Getpid())
@@ -374,8 +377,9 @@ func TestAWorkersTestIsTheWorkersWhoseProcessBeganIt(t *testing.T) {
 }
 
 // Record's full round refuses a run of more than one worker at its first
-// claim, named: its learn step keeps the set's tests to their recorded
-// order, which tests run at once in several workers do not keep. The fix
+// claim, named, and every other test process's claim in the same words: its
+// learn step keeps the set's tests to their recorded order, which tests run
+// at once in several workers do not keep. The fix
 // names only what works: a replay may move the run's one clock, and then
 // takes no workers either (clockWorkersRefusal).
 func TestAWorkerRunIsRefusedInRecordsFullRound(t *testing.T) {
@@ -384,8 +388,9 @@ func TestAWorkerRunIsRefusedInRecordsFullRound(t *testing.T) {
 	_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "a", Workers: 2}, os.Getpid())
 	require.NotNil(t, serr)
 	require.Equal(t, models.ScopeErrTooManyWorkers, serr.Code)
-	require.Contains(t, serr.Message, fmt.Sprintf("process %d declared 2 test workers, but record's full round replays one test worker at a time", os.Getpid()))
+	require.Contains(t, serr.Message, "a test process declared 2 test workers, but record's full round replays one test worker at a time")
 	require.Equal(t, "record with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)", serr.Remedy)
+	refusedAlike(t, a, models.InstanceReq{Key: "b", Workers: 2}, child(t).Process.Pid, serr, os.Getpid())
 	require.Empty(t, h.given())
 	require.Empty(t, a.proven.workers)
 }
@@ -398,7 +403,8 @@ func TestAWorkerKeployCannotGiveAnInstanceIsRefused(t *testing.T) {
 	_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "a", Workers: 2}, os.Getpid())
 	require.NotNil(t, serr)
 	require.Equal(t, models.ScopeErrNotInInstance, serr.Code)
-	require.Contains(t, serr.Message, "cannot tell one worker's calls from another's")
+	require.Equal(t, "a test process declared 2 test workers, but keploy's hooks cannot tell one worker's calls from another's", serr.Message)
+	refusedAlike(t, a, models.InstanceReq{Key: "b", Workers: 2}, child(t).Process.Pid, serr, os.Getpid())
 
 	b, h := workerAgent(t, models.MODE_RECORD, 4)
 	h.err = errors.New("keploy's agent runs in a PID namespace of its own")
@@ -634,4 +640,19 @@ func TestAWorkersEndNamesItsWorkerToTheBytesWait(t *testing.T) {
 	_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestTwo", Outcome: "passed"})
 	require.Nil(t, serr)
 	require.Equal(t, []end{{"a::TestOne", 1}, {"b::TestTwo", 2}}, ends)
+}
+
+// refusedAlike claims as process pid what a refused claim asked (req), and
+// requires the refusal it had (want), word for word: a refusal of the run's
+// worker count is the run's, not one process's, so it names no claimant
+// (neither pid nor any of others) and the claims of one run's test
+// processes are one refusal, which keploy's end of run says once.
+func refusedAlike(t *testing.T, a *Agent, req models.InstanceReq, pid int, want *models.ScopeError, others ...int) {
+	t.Helper()
+	_, serr := a.ClaimInstance(context.Background(), req, pid)
+	require.NotNil(t, serr, "another test process of the run is refused too")
+	require.Equal(t, want.Refusal(), serr.Refusal(), "another test process of the run is refused in the same words")
+	for _, p := range append(others, pid) {
+		require.NotContains(t, serr.Message, "process "+strconv.Itoa(p), "a refusal of the run's count names no claimant")
+	}
 }
