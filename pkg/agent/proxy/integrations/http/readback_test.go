@@ -552,32 +552,41 @@ func TestReadBackGivesUpARecordingAnotherConnectionTook(t *testing.T) {
 	}
 }
 
-// A read the pool keeps (no test's own) that the call is paired with (its
-// key drifted) never reads back what the test wrote: a test's write
-// answers only the test's own reads.
+// A read the pool keeps (no test's own) that the call is paired with (it
+// drifted in a leaf no write stored) never reads back what the test wrote:
+// a test's write answers only the test's own reads.
 func TestReadBackLeavesAPairedPoolReadAsRecorded(t *testing.T) {
 	rbRegister(t, rbStore{})
 	h, n, opts := learnOn(t)
+	// The pool's recordings are paired too (models.OutgoingOptions.LearnPool):
+	// without it the read is never paired with the pool's, and the row
+	// would hold whatever the pairing did.
+	opts.LearnPool = true
 	tr := learn.NewTracker()
 	tr.Begin()
 	ctx := learn.WithTracker(context.Background(), tr)
+	read := func(capacity string) string {
+		return `{"Key":{"Id":{"S":"c-1"}},"ReturnConsumedCapacity":"` + capacity + `","TableName":"Leads"}`
+	}
 	recorded := `{"Item":` + rbItem("c-1", "Lead 1700000000000") + `}`
-	pool := learnRecorded("mock-1", time.Second, "POST", "/", rbGetBody("c-1"), rbGet, recorded)
+	pool := learnRecorded("mock-1", time.Second, "POST", "/", read("NONE"), rbGet, recorded)
 	pool.TestModeInfo.Lifetime = models.LifetimeSession
 	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/", rbPutBody("c-1", "Lead 1700000000000"), rbPut, `{}`)}, mocks: []*models.Mock{pool}, observe: tr.ServedMock}
-	if served, miss, err := h.learnMatch(ctx, live("POST", "/", rbPutBody("c-9", "Lead 1700000000417"), rbPut), db, n, opts); served == nil || miss != nil || err != nil {
+	if served, miss, err := h.learnMatch(ctx, live("POST", "/", rbPutBody("c-1", "Lead 1700000000417"), rbPut), db, n, opts); served == nil || miss != nil || err != nil {
 		t.Fatalf("the PutItem: served %v miss %+v err %v", served, miss, err)
 	}
-	served, _, err := h.learnMatch(ctx, live("POST", "/", rbGetBody("c-9"), rbGet), db, n, opts)
-	if err != nil {
-		t.Fatalf("the read: %v", err)
+	// The read differs from the pool's recording in a leaf no write
+	// stored: it is paired with it, not taken exactly.
+	served, miss, err := h.learnMatch(ctx, live("POST", "/", read("TOTAL"), rbGet), db, n, opts)
+	if err != nil || miss != nil || served == nil || served.Name != pool.Name {
+		t.Fatalf("the read is not paired with the pool's: served %v miss %+v err %v", served, miss, err)
 	}
-	if served != nil && strings.Contains(served.Spec.HTTPResp.Body, "Lead 1700000000417") {
-		t.Fatalf("the pool's read answered %s, with the name this test wrote", served.Spec.HTTPResp.Body)
+	if got := served.Spec.HTTPResp.Body; got != recorded {
+		t.Fatalf("the pool's read answered %s, want it as recorded", got)
 	}
 	for _, m := range db.pooled {
-		if len(m.Spec.Learned()) != 0 || len(m.Spec.LearnedBinds()) != 0 {
-			t.Fatalf("the pool's read learned %+v binds %+v", m.Spec.Learned(), m.Spec.LearnedBinds())
+		if len(m.Spec.LearnedBinds()) != 0 {
+			t.Fatalf("the pool's read learned binds %+v", m.Spec.LearnedBinds())
 		}
 	}
 }
