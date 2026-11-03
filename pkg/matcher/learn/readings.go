@@ -4,7 +4,6 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -601,19 +600,75 @@ func qpDecoded(s string) string {
 }
 
 // qpForm is s read as quoted-printable (qpDecoded) after its escapes
-// (unescaped), with its soft line breaks taken out first, in their escaped
-// spellings too ("=\\r\\n" of a mail in a JSON string), which unescaping
-// would turn into separators.
+// (unescaped), with its soft line breaks taken out first (noSoftBreaks), in
+// their escaped spellings too ("=\\r\\n" of a mail in a JSON string), which
+// unescaping would turn into separators.
 func qpForm(s string) string {
-	if strings.Contains(s, "=") {
-		s = qpSoftBreaks.ReplaceAllString(s, "")
-	}
-	return qpDecoded(unescaped(s))
+	return qpDecoded(unescaped(noSoftBreaks(s)))
 }
 
-// qpSoftBreaks are a soft line break in any spelling: raw, or escaped once
-// or more ("=\\r\\n", "=\\\\r\\\\n" of a mail in a JSON string in a JSON string).
-var qpSoftBreaks = regexp.MustCompile(`=(?:\r?\n|(?:\\+r)?\\+n)`)
+// noSoftBreaks is s without its soft line breaks, each a "=" before a line
+// break in any spelling (softBreakAt), taken out from the left: s itself
+// where it holds none. It reads s byte by byte, as the pattern
+// `=(?:\r?\n|(?:\\+r)?\\+n)` read it before: that pattern's matcher took a
+// state of 37 KB from its pool for each text holding a "=" (a base64
+// text's padding), nearly half of what a small read of one allocated, and
+// took it again each time the pool had let it go.
+func noSoftBreaks(s string) string {
+	var b []byte
+	last := 0
+	for i := strings.IndexByte(s, '='); i >= 0; {
+		n := softBreakAt(s[i+1:])
+		if n > 0 {
+			b = append(b, s[last:i]...)
+			last = i + 1 + n
+		}
+		j := strings.IndexByte(s[i+1+n:], '=')
+		if j < 0 {
+			break
+		}
+		i += 1 + n + j
+	}
+	if last == 0 {
+		return s
+	}
+	return string(append(b, s[last:]...))
+}
+
+// softBreakAt is the bytes of the line break t starts with, t following a
+// "=": a raw one ("\n", "\r\n"), or one escaped once or more ("\\n",
+// "\\r\\n", "\\\\r\\\\n" of a mail in a JSON string in a JSON string); 0
+// where t starts with none.
+func softBreakAt(t string) int {
+	switch {
+	case strings.HasPrefix(t, "\n"):
+		return 1
+	case strings.HasPrefix(t, "\r\n"):
+		return 2
+	}
+	k := leadingBackslashes(t)
+	if k == 0 || k == len(t) {
+		return 0
+	}
+	switch t[k] {
+	case 'n':
+		return k + 1
+	case 'r':
+		if m := leadingBackslashes(t[k+1:]); m > 0 && k+1+m < len(t) && t[k+1+m] == 'n' {
+			return k + 1 + m + 1
+		}
+	}
+	return 0
+}
+
+// leadingBackslashes is how many backslashes t starts with.
+func leadingBackslashes(t string) int {
+	k := 0
+	for k < len(t) && t[k] == '\\' {
+		k++
+	}
+	return k
+}
 
 func upperHex(c byte) bool { return c >= '0' && c <= '9' || c >= 'A' && c <= 'F' }
 
