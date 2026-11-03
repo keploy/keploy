@@ -48,7 +48,7 @@ func TestWordRuns_ConsecutiveWordsOfOneTextAreOneRun(t *testing.T) {
 		}
 		return a
 	}
-	at := []Address{addr("body.what#3"), addr("body.what#1"), addr("body.id#0"), addr("body.what#2"), addr("body.code"), addr("body.what#5"), addr("header.X-Id|b64#0"), addr("header.X-Id#0")}
+	at := []Address{addr("body.what#3"), addr("body.what#1"), addr("body.id#0"), addr("body.what#2"), addr("body.code"), addr("body.what#5"), addr("header.X-Id|b64#1"), addr("header.X-Id#0")}
 	live := []string{"c", "a", "z", "b", "whole", "e", "y", "x"}
 	rec := []string{"C", "A", "Z", "B", "WHOLE", "E", "Y", "X"}
 	lr, rr := WordRuns(at, live, rec)

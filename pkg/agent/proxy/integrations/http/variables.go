@@ -1041,7 +1041,7 @@ func wordRunsOf(decls []varDecl, liveAt map[string]held) map[string][2]string {
 	var at []variables.Address
 	var live, recorded []string
 	for _, d := range decls {
-		if d.echo || d.bind == nil || d.bind.at.Word < 0 {
+		if d.echo || d.bind == nil {
 			continue
 		}
 		names = append(names, d.name)
