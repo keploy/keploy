@@ -637,3 +637,52 @@ func TestAnEndedWorkersConnectionStampsNoInstance(t *testing.T) {
 		t.Fatalf("a mock stamped as an ended worker's got instance %d, ended %d once its connection id was noted in a live worker; want 0, 1025 (the first stamp is final)", stamped.Instance, stamped.EndedInstance)
 	}
 }
+
+// Whether a call is an ended worker's is decided by when keploy read its
+// request, against its worker's end, never by when its parser hands it
+// over: a request read while the worker lived is the worker's, though
+// handed over after its end; one read at or after the end, or with no read
+// time, is from no live worker. Another worker's connection stays its own,
+// a second end does not move the first, and a connection noted after the
+// end is from no live worker whatever its calls' times.
+func TestACallIsAnEndedWorkersByWhenItsRequestWasRead(t *testing.T) {
+	c := newCommander()
+	c.comm[42], c.comm[43] = "a", "b"
+	r := New(c, 0)
+	r.InstanceBegan(1)
+	r.InstanceBegan(2)
+	r.NoteOriginIn("a", 42, 1)
+	r.NoteOriginIn("b", 43, 2)
+	live := time.Now()
+	time.Sleep(time.Millisecond)
+	r.InstanceEnded(1)
+	end := r.origin.conns["a"].endedAt
+	if end.IsZero() || !r.origin.conns["b"].endedAt.IsZero() {
+		t.Fatalf("worker 1's end marked its connection at %v and worker 2's at %v; want only worker 1's", end, r.origin.conns["b"].endedAt)
+	}
+	time.Sleep(time.Millisecond)
+	between := time.Now()
+	time.Sleep(time.Millisecond)
+	r.InstanceEnded(1)
+	r.NoteOriginIn("a-late", 42, 1)
+	for _, tc := range []struct {
+		what, conn          string
+		read                time.Time
+		instance, wantEnded uint32
+	}{
+		{"read while its worker lived, handed over after its end", "a", live, 1, 0},
+		{"read at the instant its worker ended", "a", end, 0, 1},
+		{"read after its worker ended, before a second end", "a", between, 0, 1},
+		{"read after its worker ended", "a", time.Now(), 0, 1},
+		{"with no read time", "a", time.Time{}, 0, 1},
+		{"of another, live, worker, read after the first's end", "b", time.Now(), 2, 0},
+		{"on a connection noted after its worker ended", "a-late", live, 0, 1},
+	} {
+		m := &models.Mock{ConnectionID: tc.conn}
+		m.Spec.ReqTimestampMock = tc.read
+		r.StampInstance(m)
+		if m.Instance != tc.instance || m.EndedInstance != tc.wantEnded {
+			t.Fatalf("a call %s got instance %d, ended %d; want %d, %d", tc.what, m.Instance, m.EndedInstance, tc.instance, tc.wantEnded)
+		}
+	}
+}

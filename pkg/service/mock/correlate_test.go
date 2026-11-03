@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.uber.org/zap"
@@ -328,6 +329,7 @@ func TestOverlappingWorkersSetScopesFollowEachCallsWorker(t *testing.T) {
 	single := []models.ScopeWindow{{Claim: "a", Start: ts(1)}, {Claim: "p1", Start: ts(5), Worker: w1}, {Claim: "b", Start: ts(40)}}
 	require.Equal(t, "a", claimKeyOf(single, 0, ts(4)), "a call from no worker before any worker's claim is the latest claim's")
 	require.Equal(t, "b", claimKeyOf(single, 0, ts(41)), "a single test process's claim after the workers' ended")
+	require.Equal(t, "", claimKeyOf(single, coreAgent.InstanceValue(3, 0), ts(41)), "a value no claim was given has no key, though a single test process's claim is the latest")
 
 	windows := []models.ScopeWindow{
 		{Name: "a1", Start: ts(14), End: ts(20), Instance: w1},
@@ -353,4 +355,74 @@ func TestOverlappingWorkersSetScopesFollowEachCallsWorker(t *testing.T) {
 	stampKeys(byCase, windows, claims)
 	require.Equal(t, map[string]string{"a1": "p1", "b1": "p2", "a2": "p1"}, map[string]string{"a1": byCase["a1"].Key, "b1": byCase["b1"].Key, "a2": byCase["a2"].Key},
 		"each test is its own worker's claim's, though it began after another worker's claim")
+}
+
+// Two claims of one id: the later claim's calls, set scopes and tests take
+// its own key, never the earlier claim's, and the earlier claim's ended
+// survivor keeps the earlier claim's key.
+func TestALaterClaimOfAnIdTakesItsOwnKey(t *testing.T) {
+	a, c := coreAgent.InstanceValue(1, 0), coreAgent.InstanceValue(1, 1)
+	claims := []models.ScopeWindow{{Claim: "pA", Start: ts(5), Worker: a}, {Claim: "pC", Start: ts(20), Worker: c}}
+	require.Equal(t, "pA", claimKeyOf(claims, a, ts(30)))
+	require.Equal(t, "pC", claimKeyOf(claims, c, ts(30)))
+	windows := []models.ScopeWindow{
+		{Name: "a1", Start: ts(8), End: ts(15), Instance: a},
+		{Name: "c1", Start: ts(25), End: ts(35), Instance: c},
+		{Name: "c2", Start: ts(45), End: ts(55), Instance: c},
+	}
+	mocks := []capturedMock{
+		{name: "a-init", ts: ts(6), instance: a},
+		{name: "c-init", ts: ts(22), instance: c},
+		{name: "c-between", ts: ts(40), instance: c},
+		{name: "a-survivor", ts: ts(41), ended: a},
+	}
+	startup, worker := setScopeMocks(windows, mocks, claims)
+	require.Equal(t, []models.MockEntry{{Name: "a-init", Key: "pA"}, {Name: "c-init", Key: "pC"}}, startup, "each claim's start-up is under its own key")
+	require.Equal(t, []models.MockEntry{{Name: "c-between", Key: "pC"}, {Name: "a-survivor", Key: "pA"}}, worker,
+		"the later claim's call between its tests is its own key's; the earlier claim's survivor keeps the earlier key")
+	require.Equal(t, []models.MockEntry{{Name: "a-init", Key: "pA"}, {Name: "c-init", Key: "pC"}, {Name: "c-between", Key: "pC"}, {Name: "a-survivor", Key: "pA"}}, startupMocks(windows, mocks, claims))
+	byCase := map[string]models.MappedTestCase{}
+	stampKeys(byCase, windows, claims)
+	require.Equal(t, map[string]string{"a1": "pA", "c1": "pC", "c2": "pC"}, map[string]string{"a1": byCase["a1"].Key, "c1": byCase["c1"].Key, "c2": byCase["c2"].Key})
+	_, byKey := firstWindowByKey(windows, claims)
+	require.Equal(t, map[string]time.Time{"pA": ts(8), "pC": ts(25)}, byKey, "each claim's first test is its own")
+}
+
+// A call a live worker made, whose mock is handed over only after the
+// worker ended (generic's preamble hold waits for another worker's longer
+// test), is the worker's own: it is listed in its worker: scope and charges
+// no other worker's test. Its survivor's call read after the end is from no
+// live worker: charged to the open test, naming the ended worker.
+func TestALiveWorkersCallHandedOverAfterItsEndIsItsOwn(t *testing.T) {
+	a, b := coreAgent.InstanceValue(1, 0), coreAgent.InstanceValue(2, 0)
+	starts.Default.InstanceBegan(a)
+	starts.Default.InstanceBegan(b)
+	t.Cleanup(func() {
+		starts.Default.ForgetOrigin("late-handover-a")
+		starts.Default.InstanceEnded(a)
+		starts.Default.InstanceEnded(b)
+	})
+	starts.Default.NoteOriginIn("late-handover-a", 4242, a)
+	t0 := time.Now().Add(-time.Minute)
+	at := func(sec int) time.Time { return t0.Add(time.Duration(sec) * time.Second) }
+	claims := []models.ScopeWindow{{Claim: "pA", Start: at(5), Worker: a}, {Claim: "pB", Start: at(6), Worker: b}}
+	windows := []models.ScopeWindow{
+		{Name: "a1", Start: at(10), End: at(20), Instance: a},
+		{Name: "b1", Start: at(12), End: at(120), Instance: b},
+	}
+	between := &models.Mock{Name: "a-between", ConnectionID: "late-handover-a", SourcePID: 4242}
+	between.Spec.ReqTimestampMock = at(30)
+	starts.Default.InstanceEnded(a)
+	time.Sleep(time.Millisecond)
+	survivor := &models.Mock{Name: "a-survivor", ConnectionID: "late-handover-a", SourcePID: 4242}
+	survivor.Spec.ReqTimestampMock = time.Now()
+	for _, m := range []*models.Mock{between, survivor} {
+		starts.Default.StampInstance(m)
+	}
+	mocks := []capturedMock{capturedOf(between), capturedOf(survivor)}
+	require.Equal(t, []unattributedCall{{mock: "a-survivor", pid: 4242, tests: []string{"b1"}}}, chargeUnattributed(windows, mocks),
+		"only the call read after the worker's end is from no live worker")
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1, What: "the latest: mock a-survivor, from process 4242 of ended test worker 1"}}, windows[1].Evidence.CannotCapture)
+	_, worker := setScopeMocks(windows, mocks, claims)
+	require.Equal(t, []models.MockEntry{{Name: "a-between", Key: "pA"}}, worker, "the live worker's own call is in its worker: scope; the survivor's, made in an open test, is that test's to answer for")
 }
