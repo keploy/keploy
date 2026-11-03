@@ -55,6 +55,12 @@ func TestARedactedRecordingHoldsTheLiveValueToKeployYmlPatterns(t *testing.T) {
 			field: "body.token", why: "the live value (a string of 4 bytes)"},
 		{name: "a form key, the live value inside", bodyNoise: token, header: form, recBody: `token=REDACTED_abc&x=a`, body: `token=t-1&x=a`, obfuscated: `^token=REDACTED_abc$`, served: true},
 		{name: "a form key no pattern guards", header: form, recBody: `token=REDACTED_abc&x=a`, body: `token=evil&x=a`, obfuscated: `^token=REDACTED_abc$`, served: true},
+		// A form of one key: the obfuscator's key pattern matches the whole
+		// recorded body, which the form reader still reads key by key.
+		{name: "a one-key form, the live value outside", bodyNoise: token, header: form, recBody: `token=REDACTED_abc`, body: `token=evil`, obfuscated: `^token=[^&]+$`,
+			field: "body.token", why: "the live value (a string of 4 bytes)"},
+		{name: "a one-key form, the live value inside", bodyNoise: token, header: form, recBody: `token=REDACTED_abc`, body: `token=t-1`, obfuscated: `^token=[^&]+$`, served: true},
+		{name: "a one-key form no pattern guards", header: form, recBody: `token=REDACTED_abc`, body: `token=evil`, obfuscated: `^token=[^&]+$`, served: true},
 		{name: "a multipart field, the live value outside", bodyNoise: token, header: mp, recBody: part("REDACTED_abc"), body: part("evil"),
 			field: "body.token", why: "the live value (a string of 4 bytes)"},
 		{name: "a multipart field, the live value inside", bodyNoise: token, header: mp, recBody: part("REDACTED_abc"), body: part("t-1"), served: true},

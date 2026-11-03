@@ -698,15 +698,19 @@ func (k strictKnown) bodyDiffs(r *models.HTTPReq, input *req) []strictField {
 	if bytes.Equal(rec, live) {
 		return nil
 	}
-	if k.redacted(r.Body) {
-		return nil // the whole recorded body is a redacted value
-	}
+	// A form is read key by key, each redacted value by its key (its
+	// readers), even where the obfuscator's pattern for a key's value
+	// matches a whole form of one key: the key is the recording's, and
+	// keploy.yml's patterns on it still hold the live value.
 	recCT := headerValue(r.Header, "Content-Type")
 	switch mediaTypeKey(recCT) {
 	case "application/x-www-form-urlencoded":
 		return k.formDiffs(r.Body, string(live))
 	case "multipart/form-data":
 		return k.multipartDiffs(recCT, r.Body, input.header.Get("Content-Type"), live)
+	}
+	if k.redacted(r.Body) {
+		return nil // the whole recorded body is a redacted value
 	}
 	rv, rok := decodeJSONDoc(rec)
 	lv, lok := decodeJSONDoc(live)
