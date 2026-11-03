@@ -55,6 +55,15 @@ func workerScopedOn(t *testing.T, p *Proxy, db integrations.MockMemDb, allow []s
 	return v
 }
 
+// skipUnlessParentsRead skips a test that needs parentOf to find this
+// process's parent, which it does on linux and darwin only.
+func skipUnlessParentsRead(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("a process's parent is read on linux and darwin only (parentOf)")
+	}
+}
+
 func TestScopedMockDbFiltersReads(t *testing.T) {
 	// m1,m2,m3 belong to tests (in the universe); "shared" belongs to no test.
 	db := &fakeMockDb{mocks: []*models.Mock{{Name: "m1"}, {Name: "m2"}, {Name: "m3"}, {Name: "shared"}}}
@@ -89,7 +98,7 @@ func TestScopedForResolvesWorkerAndFallsBack(t *testing.T) {
 		return scopedNames(got)
 	}
 
-	// No worker scoped: fast path, no /proc walk, the bare manager.
+	// No worker scoped: fast path, no process-tree walk, the bare manager.
 	p := &Proxy{}
 	require.Equal(t, integrations.MockMemDb(db), p.scopedFor(self, db), "no scopes ⇒ whole pool")
 
@@ -202,7 +211,7 @@ func TestScopedViewRevisionFollowsTheMappedUniverse(t *testing.T) {
 // take a new view at a recycled address for the one it knew.
 func TestScopedViewStartsAboveEveryEarlierView(t *testing.T) {
 	db := &fakeMockDb{}
-	self, other := uint32(os.Getpid()), uint32(4000000001) // no /proc entry: its chain is itself
+	self, other := uint32(os.Getpid()), uint32(4000000001) // no such process: its chain is itself
 	p := &Proxy{}
 	p.SetMappedUniverse([]string{"a1"})
 	p.SetWorkerScope(other, []string{"a1"}) // before everything the old view goes through
@@ -221,9 +230,7 @@ func TestScopedViewStartsAboveEveryEarlierView(t *testing.T) {
 // the outer worker's test, and when that one ends too, to the whole pool. Each
 // is a change a caching parser must hear of.
 func TestScopedViewFollowsEveryWorkerOnItsChain(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("the parent is found by walking /proc (linux only)")
-	}
+	skipUnlessParentsRead(t)
 	db := &fakeMockDb{mocks: []*models.Mock{{Name: "a"}, {Name: "b"}, {Name: "shared"}}}
 	self, parent := uint32(os.Getpid()), uint32(os.Getppid())
 	sees := func(v integrations.MockMemDb) []string {
@@ -268,9 +275,7 @@ func TestScopedViewRevisionFollowsAWipe(t *testing.T) {
 }
 
 func TestScopedForWalksUpProcessTree(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("process-tree walk is linux only")
-	}
+	skipUnlessParentsRead(t)
 	db := &fakeMockDb{mocks: []*models.Mock{{Name: "parents"}, {Name: "others"}, {Name: "shared"}}}
 	// Register the PARENT of this process; this process's call must resolve up to
 	// it (models a worker whose child/grandchild opened the socket).
@@ -287,15 +292,13 @@ func TestScopedForWalksUpProcessTree(t *testing.T) {
 	require.Equal(t, integrations.MockMemDb(db), p.scopedFor(uint32(os.Getpid()), db))
 }
 
-func TestPpidFromStat(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("/proc only on linux")
-	}
-	ppid, ok := ppidFromStat(uint32(os.Getpid()))
+func TestParentOf(t *testing.T) {
+	skipUnlessParentsRead(t)
+	ppid, ok := parentOf(uint32(os.Getpid()))
 	require.True(t, ok)
 	require.Equal(t, uint32(os.Getppid()), ppid)
 
-	_, ok = ppidFromStat(4000000000) // no such pid
+	_, ok = parentOf(4000000000) // no such pid
 	require.False(t, ok)
 }
 

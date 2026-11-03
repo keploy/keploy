@@ -292,7 +292,7 @@ type Proxy struct {
 	// (Design A). Key is the worker's self-reported PID (ScopeReq.Pid); value is
 	// the set of per-test mock names that worker's current test is allowed to
 	// see. An outgoing call's origin PID (OutgoingOptions.SrcPid) is resolved up
-	// the /proc tree to the nearest registered ancestor, and its per-test view
+	// its process tree to the nearest registered ancestor, and its per-test view
 	// is intersected with that worker's set — so concurrent workers never stomp
 	// each other's pool. Empty/absent ⇒ the worker serves the whole pool
 	// (backward compatible with suite-level and single-worker sequential scope).
