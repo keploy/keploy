@@ -3,8 +3,10 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -66,6 +68,34 @@ func (p *Proxy) missWindowOf(inst uint32) *missWindow {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.misses[inst]
+}
+
+// stoppedWorker reports whether a call of test worker inst is one keploy no
+// longer serves, as it is made: test workers are served, and inst, which
+// names one, is not among them (it ended). Its connection was made before
+// then: keploy refuses one made after (connManager).
+func (p *Proxy) stoppedWorker(inst uint32) bool {
+	if inst == 0 {
+		return false
+	}
+	s := &p.instances
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.on && s.mgrs[inst] == nil
+}
+
+// stoppedWorkerMissWhat names a miss of stopped test worker inst, made by
+// process pid, as a call keploy cannot attribute (stoppedWorker): where it
+// went, as its parser or its dial named it, and the ended worker.
+func stoppedWorkerMissWhat(r *models.MockMismatchReport, dst *models.ConditionalDstCfg, pid, inst uint32) string {
+	to := ""
+	switch {
+	case r != nil && r.Destination != "":
+		to = " to " + r.Destination
+	case dst != nil && dst.Addr != "" && !dst.AddrFabricated:
+		to = " to " + dst.Addr
+	}
+	return fmt.Sprintf("the latest: a call%s, from process %d of ended test worker %s, on a connection it made before keploy stopped serving that worker", to, pid, agent.InstanceLabel(inst))
 }
 
 // workerMissWindows is every served test worker's misses window.
