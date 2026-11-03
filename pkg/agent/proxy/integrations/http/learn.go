@@ -347,11 +347,10 @@ func (n learnNoise) patternWhy(drift []string, live, rec learn.Shape) string {
 }
 
 // leafShape names a leaf's value by its kind and length, as valueShape
-// names a JSON value: never its text.
+// names a JSON value: never its text. A string, a header's value and a
+// form's are text.
 func leafShape(l learn.Leaf) string {
 	switch l.Type {
-	case learn.String:
-		return valueShape(l.Value, true)
 	case learn.Number:
 		return valueShape(json.Number(l.Value), true)
 	case learn.Bool:

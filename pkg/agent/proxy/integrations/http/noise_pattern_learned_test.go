@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -54,6 +55,9 @@ func TestTheLearnStepNeverLearnsAValueOutsideKeployYmlPatterns(t *testing.T) {
 		{name: "a header the recording learned, the live value outside", cfg: map[string]map[string][]string{"header": {"X-Id": {`^a-\d$`}}},
 			rec: body("r-1"), call: body("r-1"), recHdr: map[string]string{"X-Id": "a-1"}, callHdr: map[string]string{"X-Id": "evil"}, learned: []string{"header.x-id"},
 			why: `keploy.yml's noise lets header.x-id vary only within "^a-\\d$"; the live value (a string of 4 bytes) is outside it`},
+		{name: "a number field, the live value outside", cfg: map[string]map[string][]string{"requestbody": {"seq": {`^\d$`}}},
+			rec: `{"seq":7,"item":"book"}`, call: `{"seq":123,"item":"book"}`,
+			why: `keploy.yml's noise lets body.seq vary only within "^\\d$"; the live value (a number of 3 characters) is outside it`},
 		{name: "a body field, both values inside", cfg: map[string]map[string][]string{"requestbody": {"request_id": {`^r-\d$`}}},
 			rec: body("r-1"), call: body("r-2"), served: true},
 		{name: "a header, both values inside", cfg: map[string]map[string][]string{"header": {"X-Id": {`^a-\d$`}}},
@@ -86,10 +90,59 @@ func TestTheLearnStepNeverLearnsAValueOutsideKeployYmlPatterns(t *testing.T) {
 			if miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, c.why) || !strings.Contains(miss.res.Why, "keploy learns nothing from this call") {
 				t.Fatalf("miss %q (%q); want %q", miss.res.Why, miss.res.Reason, c.why)
 			}
-			for _, secret := range []string{"evil", "r-1", "r-2", "a-1"} {
+			for _, secret := range []string{"evil", "r-1", "r-2", "a-1", "123"} {
 				if strings.Contains(miss.res.Why, secret) {
 					t.Fatalf("the miss carries the value %q: %q", secret, miss.res.Why)
 				}
+			}
+		})
+	}
+}
+
+// The learn step's reason names a leaf by its kind and length, never its
+// text, in the strict comparison's words, whatever the leaf's type.
+func TestLeafShapeNamesKindAndLength(t *testing.T) {
+	for _, c := range []struct {
+		l    learn.Leaf
+		want string
+	}{
+		{learn.Leaf{Type: learn.String, Value: "evil"}, "a string of 4 bytes"},
+		{learn.Leaf{Type: learn.Number, Value: "123"}, "a number of 3 characters"},
+		{learn.Leaf{Type: learn.Bool, Value: "false"}, "a boolean"},
+		{learn.Leaf{Type: learn.Null}, "null"},
+		{learn.Leaf{Type: learn.EmptyObj}, "an object"},
+		{learn.Leaf{Type: learn.EmptyArray}, "an array"},
+	} {
+		if got := leafShape(c.l); got != c.want {
+			t.Errorf("leafShape(%c %q) = %q; want %q", c.l.Type, c.l.Value, got, c.want)
+		}
+	}
+}
+
+// A keploy.yml entry with no patterns keeps main's rule in the learn step:
+// on a leaf the recording also learned, the learned entry decides first and
+// keeps the leaf's type, so a new value passes and a retype is still a
+// change. Only an entry with patterns sets learned noise aside.
+func TestAWholeFieldEntryOnALearnedLeafKeepsMainsRule(t *testing.T) {
+	for _, c := range []struct {
+		name, call string
+		served     bool
+	}{
+		{"a new value", `{"request_id":"r-2","item":"book"}`, true},
+		{"a retype", `{"request_id":2,"item":"book"}`, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, _, opts := learnOn(t)
+			opts.NoiseConfig = map[string]map[string][]string{"requestbody": {"request_id": {}}}
+			noise := NewRequestNoise(zap.NewNop(), opts)
+			n := h.newLearnNoise(opts, noise.Body, noise.URL)
+			db := &learnDb{perTest: []*models.Mock{learnedOn(learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"request_id":"r-1","item":"book"}`, nil, `{"ok":true}`), "body.request_id")}}
+			served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/orders", c.call, nil), db, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (served != nil) != c.served || (miss != nil) == c.served {
+				t.Fatalf("served %v, miss %v; want served %v", served != nil, miss != nil, c.served)
 			}
 		})
 	}
@@ -237,5 +290,24 @@ func TestKeployYmlPatternWinsOverDetectedNoise(t *testing.T) {
 				t.Fatalf("strict enforcement refused a value inside the pattern: %v", d)
 			}
 		})
+	}
+}
+
+// A keploy.yml entry with no patterns keeps main's rule under strict
+// enforcement: noise detection learned on a more specific path under it
+// (user.id, learned before the user wrote id) still type-enforces that
+// path, beside an entry with patterns elsewhere. Only an entry with
+// patterns sets learned noise aside.
+func TestAWholeFieldEntryKeepsLearnedTypeEnforcement(t *testing.T) {
+	ct := map[string]string{"Content-Type": "application/json"}
+	noise := requestBodyNoise(map[string][]string{"id": {}, "token": {`^t-\d$`}})
+	m := recorded("m", "/x", ct, `{"user":{"id":"u-1"},"token":"t-1"}`)
+	m.Spec.ReqBodyNoise = map[string][]string{"body.user.id": {}}
+	eng := mocknoise.New(httpNoiseAdapter{}, true, true)
+	if allowed, d := eng.StrictReject(m, []byte(`{"user":{"id":"u-2"},"token":"t-2"}`), noise.Body); !allowed {
+		t.Fatalf("strict enforcement refused a new value under a whole-field entry: %v", d)
+	}
+	if allowed, _ := eng.StrictReject(m, []byte(`{"user":{"id":2},"token":"t-2"}`), noise.Body); allowed {
+		t.Fatalf("strict enforcement allowed a retype of a learned path under a whole-field entry")
 	}
 }
