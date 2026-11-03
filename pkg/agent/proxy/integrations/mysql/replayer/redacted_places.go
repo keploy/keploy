@@ -32,12 +32,16 @@ type redactedPlaces struct {
 	template string
 	literals map[int]bool
 	// statement is set when which literal of the live statement stands at
-	// a redacted place cannot be told: the recording redacted a value its
-	// parser reads outside every literal (its template, its comments), or
-	// a statement it cannot parse, or two recorded statements of different
-	// templates hold redacted literals. Every literal of the live statement
-	// is redacted then, and its comments dropped.
+	// a redacted place cannot be told: the recording redacted a value in
+	// its comments, or two recorded statements of different templates hold
+	// redacted literals, or whole is set. Every literal of the live
+	// statement is redacted then, and its comments dropped.
 	statement bool
+	// whole is set when the redacted value stands in no literal or comment
+	// of the recorded statement (in its template, across its parts) or the
+	// parser cannot read it: the live statement is redacted whole then, as
+	// its text at that place is no literal the redaction could replace.
+	whole bool
 	// params are an EXECUTE's bound values by position.
 	params map[int]bool
 }
@@ -91,7 +95,7 @@ func queryPlaces(sql string, nc *util.NoiseChecker) redactedPlaces {
 	}
 	shape := extractQueryShape(sql)
 	if !shape.ok {
-		p.statement = true
+		p.statement, p.whole = true, true
 		return p
 	}
 	for i, lit := range shape.literals {
@@ -102,9 +106,14 @@ func queryPlaces(sql string, nc *util.NoiseChecker) redactedPlaces {
 			p.literals[i] = true
 		}
 	}
-	// A redacted value no literal holds (its template's, its comments')
-	// has no literal of the live statement standing for it.
-	if len(p.literals) == 0 || nc.IsNoisyWithin(shape.template) || nc.IsNoisyWithin(shape.comments) {
+	// A redacted value no literal holds has no literal of the live
+	// statement standing for it: its comments are dropped, and a value
+	// outside every literal and comment redacts the statement whole.
+	inComments := nc.IsNoisyWithin(shape.comments)
+	if nc.IsNoisyWithin(shape.template) || len(p.literals) == 0 && !inComments {
+		p.statement, p.whole = true, true
+	}
+	if inComments {
 		p.statement = true
 	}
 	p.template = shape.template
@@ -121,6 +130,7 @@ func (p redactedPlaces) or(q redactedPlaces) redactedPlaces {
 		p.literals = mergePositions(p.literals, q.literals)
 	}
 	p.statement = p.statement || q.statement
+	p.whole = p.whole || q.whole
 	p.params = mergePositions(p.params, q.params)
 	return p
 }
@@ -146,10 +156,14 @@ func (p redactedPlaces) inStatement() bool { return p.statement || len(p.literal
 // sql itself when the recording redacted no place of its statement; else
 // sql with the literal at each redacted place redacted, every literal (and
 // its comments dropped) when its template is not the recorded one or
-// p.statement is set, and sql whole redacted when it cannot be parsed.
+// p.statement is set, and sql whole redacted when p.whole is set or it
+// cannot be parsed.
 func (p redactedPlaces) liveStatement(sql string) (out string) {
 	if !p.inStatement() || sql == "" {
 		return sql
+	}
+	if p.whole {
+		return valueRedacted
 	}
 	// The rewriter panics on AST slots it cannot replace (computeQueryShape).
 	defer func() {
