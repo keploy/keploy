@@ -116,6 +116,11 @@ type provenWire struct {
 	// models.ScopeTableReq.NotRequired): its end does not charge the test
 	// for one it did not make (testEvidence). Empty when the table had none.
 	notRequired map[string]map[string]bool
+	// skippedReads is, in a replay, the names of the worker scope that
+	// keploy mock replay moved there from the tests its gate skips
+	// (models.ScopeTableReq.SkippedReads, SetScopeSkippedReads). Empty when
+	// the table had none.
+	skippedReads map[string]bool
 	// staged: the replay's mocks are staged on the proxy, which serves them
 	// exactly (exact_proven.go). Once per session, and again when the CLI
 	// sends a pool slice naming a recording the staging did not read.
@@ -625,6 +630,28 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 // at most once in the staging's windows, and between tests as the pool
 // slice's does (reused, or saturated on its last answer); no test is
 // required to make it. None leaves the set none, never the previous set's.
+// SetScopeSkippedReads installs, for a replay, the names of its worker scope
+// (SetScopeWorker) that keploy mock replay moved there from the tests its
+// gate skips (models.ScopeTableReq.SkippedReads): reads the app made once and
+// kept, recorded in a skipped test's window. serveKeyWorker shows each to
+// the proxy as a skipped test's read, which also answers a call one more
+// than the open test's own recordings of it, at most once in the staging's
+// windows. None leaves the set none, never the previous set's.
+func (a *Agent) SetScopeSkippedReads(ctx context.Context, names []string) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	reads := make(map[string]bool, len(names))
+	for _, n := range names {
+		reads[n] = true
+	}
+	a.provenMu.Lock()
+	a.proven.skippedReads = reads
+	a.provenMu.Unlock()
+	return nil
+}
+
 func (a *Agent) SetScopeWorker(ctx context.Context, worker map[string][]string) error {
 	if err := a.wire.lock(ctx); err != nil {
 		return err

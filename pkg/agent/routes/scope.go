@@ -328,6 +328,16 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this keploy agent cannot serve a set's worker: calls in a test's window", http.StatusNotImplemented)
 			return
 		}
+		// Which of the worker scope are the reads of tests the replay's gate
+		// skips, said by every table too. An agent that cannot tell them
+		// serves them as the rest of the worker scope, failing closed: they
+		// answer no call one more than the open test recorded.
+		if rs, ok := a.svc.(scopeSkippedReadsSetter); ok {
+			if err := rs.SetScopeSkippedReads(r.Context(), req.SkippedReads); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 		// The recordings keploy's judging marked served, not required, by test, before
 		// the pool is served. Every table says it, an empty one too: a set
 		// never keeps the previous set's. An agent that cannot take them
@@ -371,6 +381,13 @@ type scopePoolSetter interface {
 // (models.ScopeTableReq.Worker, proven wire).
 type scopeWorkerSetter interface {
 	SetScopeWorker(ctx context.Context, worker map[string][]string) error
+}
+
+// scopeSkippedReadsSetter installs which of a replay's worker scope are the
+// reads of tests its gate skips (models.ScopeTableReq.SkippedReads, proven
+// wire).
+type scopeSkippedReadsSetter interface {
+	SetScopeSkippedReads(ctx context.Context, names []string) error
 }
 
 // scopeNotRequiredSetter installs, by test, the recordings keploy's judging

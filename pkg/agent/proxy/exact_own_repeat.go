@@ -152,10 +152,13 @@ func (v *exactView) owns(name string) bool {
 // and door of h, and a parser's index that asks MockSpent by name, hide the
 // same recordings: a protocol-phase or async recording of the background is
 // hidden too, which no call that repeats a test's own data-plane recording
-// is answered by.
+// is answered by. A skipped test's read keploy mock replay moved to the
+// worker scope (isSkippedRead) is never hidden: the open test that holds its
+// own recording of the read now makes the skipped test's too, after its own,
+// and the read answers it once (ServeExactWorkerSkipped).
 func (h *heldScope) background(name string) bool {
 	v := h.exactView()
-	if v == nil || v.test == "" || !v.bg.has(name) && !v.isWorker(name) {
+	if v == nil || v.test == "" || !v.bg.has(name) && !v.isWorker(name) || v.isSkippedRead(name) {
 		return false
 	}
 	_, own := v.index[name]

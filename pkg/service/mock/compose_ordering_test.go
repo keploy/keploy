@@ -74,6 +74,9 @@ type composeInstr struct {
 	// the worker scope the last proven table push sent, and given the
 	// values each test gave when it was recorded that it sent with them.
 	table, pool, worker map[string][]string
+	// skippedReads are the names of worker that push said are the reads of
+	// tests the gate skips.
+	skippedReads []string
 	// recordedWindows are the recorded test windows that push sent.
 	recordedWindows []models.TestWindow
 	given           map[string][]models.GivenValue
@@ -227,11 +230,11 @@ func (f *composeInstr) GetScopeWindows(context.Context) ([]models.ScopeWindow, e
 func (f *composeInstr) PushScopeTable(context.Context, map[string][]string) error { return nil }
 
 // PushProvenTable takes the per-test table, the pool slices, the worker
-// scope, the recorded test windows, the recorded givens, the named
-// repeated reads and the not-required marks (ProvenTablePusher), and keeps
-// them.
-func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string) error {
-	f.table, f.pool, f.worker, f.recordedWindows, f.given, f.repeats, f.notRequired = table, pool, worker, windows, given, repeats, notRequired
+// scope, the names of it that are skipped tests' reads, the recorded test
+// windows, the recorded givens, the named repeated reads and the
+// not-required marks (ProvenTablePusher), and keeps them.
+func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, skippedReads []string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string) error {
+	f.table, f.pool, f.worker, f.skippedReads, f.recordedWindows, f.given, f.repeats, f.notRequired = table, pool, worker, skippedReads, windows, given, repeats, notRequired
 	return nil
 }
 

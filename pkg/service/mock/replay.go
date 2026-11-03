@@ -1334,8 +1334,11 @@ func (m *mockService) matchNoise(name string) models.OutgoingOptions {
 // (namedRepeatReads) and the names of each test's own list marked served,
 // not required (notRequired). The reads of each test the gate skips are the
 // worker scope's for this replay (skippedReads), so they answer whichever
-// test now makes them; a read moved so is no longer its test's, so no namer
-// names it and no mark marks it.
+// test now makes them, and the agent is told which they are
+// (models.ScopeTableReq.SkippedReads): each also answers a call one more than
+// the open test's own recordings of it, which the rest of the worker scope
+// never answers. A read moved so is no longer its test's, so no namer names
+// it and no mark marks it.
 func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, decoded []*models.Mock, skipped map[string]string) error {
 	refuse := func(why string) error {
 		return fmt.Errorf("keploy cannot judge each test of mock set %q: %s; record it again with keploy mock record", name, why)
@@ -1385,9 +1388,9 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	// the ones the agent never holds included: they were made in it.
 	windows := recordedTestWindows(mp, table, decoded)
 	served, table, moved := skippedReads(mp, table, skipped, decoded)
-	if moved > 0 {
+	if len(moved) > 0 {
 		pool, _ = poolSlices(served, table, loaded, decoded)
-		m.logger.Info("the reads that the tests this replay skips recorded answer whichever test makes them, each at most once, and no test is required to make them", zap.Int("reads", moved), zap.Int("skipped tests", len(skipped)), zap.String("mock-set", name))
+		m.logger.Info("the reads that the tests this replay skips recorded answer whichever test makes them, a test that recorded the same read included, each at most once, and no test is required to make them", zap.Int("reads", len(moved)), zap.Int("skipped tests", len(skipped)), zap.String("mock-set", name))
 	}
 	table = heldOnly(table, loaded)
 	if !ownsTestMocks(table, loaded) {
@@ -1397,7 +1400,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	}
 	worker := workerSlices(served, pool)
 	repeats := namedRepeatReads(name, httpint.NewRepeatReadNoise(m.matchNoise(name)), table, loaded)
-	if err := pp.PushProvenTable(ctx, table, pool, worker, windows, recordedGivens(mp), repeats, notRequired(mappings, table)); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, windows, recordedGivens(mp), repeats, notRequired(mappings, table)); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
@@ -1719,13 +1722,16 @@ func workerSlices(mp *models.Mapping, pool map[string][]string) map[string][]str
 // first once that one is skipped, where no recording of that test answers
 // it. As the worker scope it answers that test, at most once and after the
 // test's own, and no test is required to make it, so one skipped test does
-// not fail the next one and every test after it in turn. A write stays the
-// skipped test's, served to no test: it changes state that belongs to the
-// test that makes it. moved is how many reads moved; with none, mp and
-// table are returned as they are. mp is never changed.
-func skippedReads(mp *models.Mapping, table map[string][]string, skipped map[string]string, decoded []*models.Mock) (*models.Mapping, map[string][]string, int) {
+// not fail the next one and every test after it in turn. A test that
+// recorded the same read itself makes it once more than it recorded: the
+// skipped test's read answers that call too (ServeExactWorkerSkipped). A
+// write stays the skipped test's, served to no test: it changes state that
+// belongs to the test that makes it. moved is the names of the reads moved,
+// sorted; with none, mp and table are returned as they are. mp is never
+// changed.
+func skippedReads(mp *models.Mapping, table map[string][]string, skipped map[string]string, decoded []*models.Mock) (*models.Mapping, map[string][]string, []string) {
 	if mp == nil || len(skipped) == 0 {
-		return mp, table, 0
+		return mp, table, nil
 	}
 	reads := make(map[string]bool, len(decoded))
 	for _, mk := range decoded {
@@ -1755,12 +1761,16 @@ func skippedReads(mp *models.Mapping, table map[string][]string, skipped map[str
 		out[test] = kept
 	}
 	if len(worker) == 0 {
-		return mp, table, 0
+		return mp, table, nil
 	}
 	slices.SortFunc(worker, func(a, b models.MockEntry) int { return strings.Compare(a.Name, b.Name) })
 	served := *mp
 	served.Worker = append(slices.Clone(mp.Worker), worker...)
-	return &served, out, len(worker)
+	moved := make([]string, len(worker))
+	for i, e := range worker {
+		moved[i] = e.Name
+	}
+	return &served, out, moved
 }
 
 // readOnly reports whether mk records a call that only reads: an HTTP GET,

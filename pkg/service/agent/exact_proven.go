@@ -101,7 +101,7 @@ func (a *Agent) servePoolExactly(ctx context.Context, worker uint32) error {
 	}
 	if !staged {
 		// The staging's view shows nothing staged: no worker scope either.
-		if err := showWorker(es, nil); err != nil {
+		if err := showWorker(es, nil, nil); err != nil {
 			return err
 		}
 		if err := es.ServeExactPool(key, nil); err != nil {
@@ -135,7 +135,7 @@ func (a *Agent) servePoolExactly(ctx context.Context, worker uint32) error {
 // empty scope clears what the previous key or set showed.
 func (a *Agent) serveKeyWorker(es coreAgent.ExactServer, key string) error {
 	a.provenMu.Lock()
-	var names []string
+	var names, skipped []string
 	if w := a.proven.worker[key]; len(w) > 0 {
 		inSlice := make(map[string]bool, len(a.proven.pool[key]))
 		for _, n := range a.proven.pool[key] {
@@ -144,23 +144,33 @@ func (a *Agent) serveKeyWorker(es coreAgent.ExactServer, key string) error {
 		for _, n := range w {
 			if inSlice[n] {
 				names = append(names, n)
+				if a.proven.skippedReads[n] {
+					skipped = append(skipped, n)
+				}
 			}
 		}
 	}
 	a.provenMu.Unlock()
-	return showWorker(es, names)
+	return showWorker(es, names, skipped)
 }
 
 // showWorker has the proxy show names as the worker scope from its next view
-// on (coreAgent.ExactWorkerServer). A proxy that has no worker scope shows
-// none, and cannot serve a set that has one.
-func showWorker(es coreAgent.ExactServer, names []string) error {
+// on (coreAgent.ExactWorkerServer), skipped of them as the reads of tests the
+// replay's gate skips (coreAgent.ExactWorkerSkippedServer). A proxy that has
+// no worker scope shows none, and cannot serve a set that has one. A proxy
+// that cannot tell a skipped test's read shows it as the rest of the worker
+// scope: it then answers no call one more than the open test recorded, and
+// that call misses, failing closed.
+func showWorker(es coreAgent.ExactServer, names, skipped []string) error {
 	ws, ok := es.(coreAgent.ExactWorkerServer)
 	if !ok {
 		if len(names) > 0 {
 			return errors.New("this keploy agent's proxy cannot serve a set's worker: calls in a test's window")
 		}
 		return nil
+	}
+	if ss, ok := es.(coreAgent.ExactWorkerSkippedServer); ok {
+		return ss.ServeExactWorkerSkipped(names, skipped)
 	}
 	return ws.ServeExactWorker(names)
 }

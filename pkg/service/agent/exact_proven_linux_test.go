@@ -69,6 +69,10 @@ func (p *servingProxy) ServeExactWorker(names []string) error {
 	p.mm.ServeExactWorker(names)
 	return nil
 }
+func (p *servingProxy) ServeExactWorkerSkipped(names, skipped []string) error {
+	p.mm.ServeExactWorkerSkipped(names, skipped)
+	return nil
+}
 func (p *servingProxy) RestartExactKey(key string, names []string) error {
 	p.mm.RestartExactKey(key, names)
 	return nil

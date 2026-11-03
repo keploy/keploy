@@ -43,6 +43,54 @@ func TestKeployMockWorkerScopeNeverAnswersATestsExtraCall(t *testing.T) {
 	require.Equal(t, "200 worker", fmt.Sprintf("%d %s", code, body), "the worker recording stays unspent and answers between tests")
 }
 
+// The dress-rehearsal shape on the keploy mock path: TestCRUD, the first
+// test, made the app's token read (/x) and the app kept the answer; TestA
+// recorded its own /x as well. The replay's gate skips TestCRUD, so keploy
+// mock replay moves its read to the worker scope and names it a skipped
+// read (SetScopeSkippedReads). TestA now makes /x twice: its own, then the
+// read TestCRUD made. The skipped test's read answers the second once, and
+// TestA passes; a third /x is one past what TestCRUD recorded, and fails
+// TestA as an extra call. Without it, TestA failed on its second /x, judging
+// set it aside, and the read moved on to the test after it in every later
+// run.
+func TestKeployMockSkippedTestsReadAnswersATestsCallOnceMore(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		calls []string
+		pass  bool
+	}{
+		{"the skipped test's read answers the second /x", []string{"/x", "/x"}, true},
+		{"a third /x is one past what the skipped test recorded", []string{"/x", "/x", "/x"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := wireAgent(t, models.MODE_TEST)
+			p := newServingProxy()
+			a.Proxy = p
+			ctx := context.Background()
+			require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{
+				pingMock("mock-1", "/x", "skipped", t0),
+				pingMock("mock-2", "/x", "own", t0.Add(time.Second)),
+			}))
+			require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {"mock-2"}}))
+			require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{"o": {"mock-1"}}))
+			require.NoError(t, a.SetScopeSkippedReads(ctx, []string{"mock-1"}))
+			require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-1"}}))
+			claimSelf(t, a)
+			got, e := runTest(t, a, p, "TestA", tc.calls...)
+			t.Logf("TestA got %v action=%q reason=%q", got, e.Action, e.Reason)
+			require.Equal(t, "200 own", got[0])
+			require.Equal(t, "200 skipped", got[1], "the skipped test's read answers the test's second /x")
+			if tc.pass {
+				require.NotEqual(t, models.ScopeActionFail, e.Action, "TestA made only its own read and the skipped test's: %s", e.Reason)
+				return
+			}
+			require.True(t, strings.HasPrefix(got[2], "502"), "a /x past the skipped test's one recording was answered: %s", got[2])
+			require.Equal(t, models.ScopeActionFail, e.Action, "the call past the bound must fail the test")
+			require.Contains(t, e.Reason, "GET /x to ")
+		})
+	}
+}
+
 // A worker: list names only what its own key's pool slice holds: a name the
 // table lists under key o that only key p's slice holds (another test
 // process's recording, moved into o's worker: by an edit) answers none of

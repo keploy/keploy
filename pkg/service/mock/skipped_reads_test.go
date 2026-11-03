@@ -60,6 +60,7 @@ func TestASkippedTestsReadAnswersWhicheverTestMakesIt(t *testing.T) {
 	require.Equal(t, []string{"mock-put"}, instr.table["o::TestCRUD"], "the skipped test's write stays its own")
 	require.Equal(t, []string{"mock-own"}, instr.table["o::TestList"], "a test that runs keeps its reads")
 	require.Equal(t, map[string][]string{"o": {"mock-bg", "mock-pat"}}, instr.worker, "the skipped test's read answers whichever test makes it, beside worker:")
+	require.Equal(t, []string{"mock-pat"}, instr.skippedReads, "the agent is told which of worker: is a skipped test's read: it answers a test that recorded the read too")
 	require.ElementsMatch(t, []string{"mock-bg", "mock-pat"}, instr.pool["o"])
 
 	// A replay that skips no test serves the read to its own test alone.
@@ -72,6 +73,7 @@ func TestASkippedTestsReadAnswersWhicheverTestMakesIt(t *testing.T) {
 	require.NoError(t, New(zap.NewNop(), instr2, db, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg2).Replay(context.Background()))
 	require.Equal(t, []string{"mock-pat", "mock-put"}, instr2.table["o::TestCRUD"])
 	require.Equal(t, map[string][]string{"o": {"mock-bg"}}, instr2.worker)
+	require.Empty(t, instr2.skippedReads, "a replay that skips no test names no skipped read")
 }
 
 // readOnly knows a read by its HTTP method alone; a call of any other

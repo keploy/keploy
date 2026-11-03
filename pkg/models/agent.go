@@ -442,6 +442,16 @@ type ScopeTableReq struct {
 	// An agent that cannot take it refuses a table that has one. Absent
 	// when no entry is marked.
 	NotRequired map[string][]string `json:"notRequired,omitempty"`
+	// SkippedReads is, under the proven switch, the names of Worker that
+	// keploy mock replay moved there from the tests its gate skips: reads
+	// the app made once and kept (an HTTP GET, HEAD or OPTIONS a test
+	// recorded), made now in the window of whichever test runs first. Each
+	// answers at most one request in the staging's windows, as the rest of
+	// Worker does, and also a request one more than the open test's own
+	// recordings of it, which the rest never answers: so a read answers at
+	// most as many requests in the windows as the skipped test recorded it.
+	// Absent from an older CLI and when the gate skips no test.
+	SkippedReads []string `json:"skipped_reads,omitempty"`
 }
 
 // RepeatRead is one repeated read of a test (ScopeTableReq.RepeatReads): its

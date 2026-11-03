@@ -5138,21 +5138,22 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // it was recorded (models.ScopeTableReq.Given), sent with them: the agent
 // installs both before it serves the pool. worker is each key's worker scope
 // (models.ScopeTableReq.Worker): names of its pool slice served in a test's
-// window too. repeats are each test's repeated reads
-// (models.ScopeTableReq.RepeatReads). notRequired is, by test, the names of
-// its list keploy's judging marked served, not required
-// (models.ScopeTableReq.NotRequired).
-func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string) (retErr error) {
+// window too; skippedReads the names of it that are the reads of tests the
+// replay's gate skips (models.ScopeTableReq.SkippedReads). repeats are each
+// test's repeated reads (models.ScopeTableReq.RepeatReads). notRequired is,
+// by test, the names of its list keploy's judging marked served, not
+// required (models.ScopeTableReq.NotRequired).
+func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads []string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string) (retErr error) {
 	if pool == nil {
 		pool = map[string][]string{}
 	}
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			t, p, wk, w, g, r, nr := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), slices.Clone(windows), maps.Clone(given), maps.Clone(repeats), maps.Clone(notRequired)
-			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, wk, w, g, r, nr) })
+			t, p, wk, sr, w, g, r, nr := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), slices.Clone(skippedReads), slices.Clone(windows), maps.Clone(given), maps.Clone(repeats), maps.Clone(notRequired)
+			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, wk, sr, w, g, r, nr) })
 		}
 	}()
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired})
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}

@@ -5010,6 +5010,17 @@ func (p *Proxy) ServeExactWorker(names []string) error {
 	return nil
 }
 
+// ServeExactWorkerSkipped implements agent.ExactWorkerSkippedServer
+// (exact.go).
+func (p *Proxy) ServeExactWorkerSkipped(names, skipped []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.ServeExactWorkerSkipped(names, skipped)
+	return nil
+}
+
 // StageExactBackground implements agent.ExactBackgroundServer
 // (exact_background.go).
 func (p *Proxy) StageExactBackground(rules string) error {
