@@ -310,3 +310,33 @@ func TestALateCallsReasonLeavesASeenLeafAndAnEchoToTheSearch(t *testing.T) {
 		}
 	})
 }
+
+// An older test's serve names a late call only by the words of what it gave
+// the application, never by a word of its stamps (an HTTP-date its answer
+// holds, which the word rule reads as no word: a day, a minute, a second
+// that any value may equal by chance). A call that now carries "Sat", which
+// only the Date of mock-22's answer holds, is no late call of mock-22's test:
+// keploy cannot name where the value came from, and the reason says so.
+func TestALateCallsReasonNamesNoServeByAWordOfItsDateStamp(t *testing.T) {
+	const path = "body.day"
+	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "Wed"}}}
+	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "Sat"}}}
+	window := lateMsg("mock-60", 200*time.Millisecond, "Wed").ServedAs(9).ServedAsRecorded()
+	asked := eRecAt.Add(-40 * time.Second)
+	dated := RawOf(&models.Mock{Name: "mock-22", Kind: models.HTTP, Spec: models.MockSpec{
+		Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+		HTTPReq:          &models.HTTPReq{Method: "GET", URL: "/status"},
+		HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Date": "Sat, 24 Oct 2026 09:55:13 GMT"}, Body: `{"ok":true}`},
+		ReqTimestampMock: asked, ResTimestampMock: asked.Add(time.Millisecond),
+	}}, false)
+	g := PlacesOf(dated.ServedAs(3).ServedAsRecorded())
+	g.words.test = 2
+	set := []GivenPlaces{g}
+	got := ClassifyGiven(clockedDrifts(), []string{path}, live, rec, eRecAt, nil, append(eStartup(), window), nil, nil, func() ([]GivenPlaces, error) { return set, nil })
+	if len(got) != 1 {
+		t.Fatalf("%d learned, want 1", len(got))
+	}
+	if ln := got[0]; ln.Kind != KindVariable || !strings.Contains(ln.Why, "keploy cannot name where the value the call carries now came from") || strings.Contains(ln.Why, "mock-22") || strings.Contains(ln.Why, "late call") {
+		t.Errorf("%s (%q); want refused, saying keploy cannot name the value's source, naming no serve of mock-22", ln.Kind, ln.Why)
+	}
+}
