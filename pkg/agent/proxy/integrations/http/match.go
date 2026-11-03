@@ -1217,10 +1217,10 @@ func maskAndSort(vals []string, noiseRes []*regexp.Regexp) []string {
 // autoDynamic mirrors MatchURLPath's auto-detected dynamic path segments and is
 // the zero-config DEFAULT for values, set only on SchemaMatch's SECOND pass —
 // after an exact + url-noise pass over every mock found nothing, i.e. when the
-// alternative is a "no matching mock" 502. Without it a rotating value that
-// needs no config in the path (/items/<uuid>) would hard-fail in the query
-// (?id=<uuid>), which is the same non-deterministic-id 502 that pass 2 exists to
-// prevent. A differing member is tolerated only when it looks machine-generated
+// alternative is a "no matching mock" miss (answered 400 Bad Request). Without
+// it a rotating value that needs no config in the path (/items/<uuid>) would
+// hard-fail in the query (?id=<uuid>), which is the same non-deterministic-id
+// miss that pass 2 exists to prevent. A differing member is tolerated only when it looks machine-generated
 // AND shares the same dynamic type-class on BOTH sides (see
 // queryValueTypeClass), so deterministic queries, genuinely-distinct values, and
 // cross-type drift (a uuid vs a number) are never relaxed. Disable via
