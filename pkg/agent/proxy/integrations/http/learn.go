@@ -338,7 +338,7 @@ func (n learnNoise) heldLearned(learned []learn.Learned, given []variables.Bindi
 			if explained(l, given, hold) || hold == LearnExplainedOrEcho && l.Kind == learn.KindEcho {
 				continue
 			}
-			what := "a value the application sent in an earlier call, a value the test gave keploy, or a read of the clock"
+			what := "a value the application sent in an earlier call at a place keploy compares, a value the test gave keploy, or a read of the clock"
 			if hold == LearnExplainedOrEcho {
 				what += ", or a value the answer carries back"
 			}
@@ -346,7 +346,13 @@ func (n learnNoise) heldLearned(learned []learn.Learned, given []variables.Bindi
 			if class := identityOf(l); class != "" {
 				why += " (" + class + ")"
 			}
-			return why + ": keploy learns a change there only as " + what + ", and this one is none of them. If the application now makes another call, record it again; if the value there may really change, declare it in keploy.yml (" + declareHow(l.Recorded.Noise) + ")"
+			none := "this one is none of them"
+			if l.Kind == learn.KindVariable {
+				// Not explained (explained): its value came from a place a
+				// replay does not compare (comparedSource).
+				none = "this one carries a value from " + placeName(l.From) + ", which a replay does not compare, so the two may name any operation"
+			}
+			return why + ": keploy learns a change there only as " + what + ", and " + none + ". If the application now makes another call, record it again; if the value there may really change, declare it in keploy.yml (" + declareHow(l.Recorded.Noise) + ")"
 		}
 	}
 	return ""
@@ -1845,7 +1851,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			}
 			commit()
 			if e, ok := n.servedExchange(tracker.Drifts(), picked, answered, rec, recordedParts(picked), liveShape, input, live, out, own, h.learnedView(picked, plan)); ok {
-				tracker.Served(test, noiseMarked(learn.Named(e, plan.vars, plan.clocks), n.known(picked), plan.noise))
+				tracker.Served(test, noiseMarked(learn.Named(e, plan.vars, plan.clocks), n.known(picked), plan.noise, plan.vars))
 			}
 			return out, nil, nil
 
@@ -1950,7 +1956,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 					zap.String("type", string(l.Recorded.Type)), zap.String("fromMock", l.From.Mock), zap.String("fromField", l.From.Path), zap.Bool("fromSet", l.From.Run))
 			}
 			if e, ok := n.servedExchange(tracker.Drifts(), m, answered, c.Shape, recordedParts(m), liveShape, input, live, out, own, h.learnedView(m, plan)); ok {
-				tracker.Served(test, noiseMarked(learn.Named(e, plan.vars, plan.clocks), n.known(m), plan.noise))
+				tracker.Served(test, noiseMarked(learn.Named(e, plan.vars, plan.clocks), n.known(m), plan.noise, plan.vars))
 			}
 			return out, nil, nil
 		}

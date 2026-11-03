@@ -70,12 +70,14 @@ type Seen struct {
 	// (unaccounted), as one found there as a word is, never learned as
 	// noise. A body that declares a text media type is read by its words.
 	Undeclared bool
-	// Uncompared: the leaf, a request's, is one its call leaves uncompared
-	// as noise at a replay: keploy.yml declares it, or the learn step
-	// learned it so (in that call, or on the mock before). A value that
-	// follows it is checked against nothing but itself, so the HTTP parser
-	// does not take it to explain a change at a leaf naming the operation
-	// (its identity leaves). Its caller marks it, after Named.
+	// Uncompared: the leaf is one its call leaves uncompared at a replay: a
+	// request's that keploy.yml declares noise, or the learn step learned
+	// as noise (in that call, or on the mock before), or that an echo binds
+	// whatever the application sends there; or an answer's leaf such an
+	// echo writes that value into. A value that follows it is checked
+	// against nothing but itself, so the HTTP parser does not take it to
+	// explain a change at a leaf naming the operation (its identity leaves).
+	// Its caller marks it, after Named.
 	Uncompared bool
 }
 
@@ -777,7 +779,7 @@ type Place struct {
 	// Clock: the learn step learned the leaf as a plain read of the
 	// application's clock (Seen.Clock).
 	Clock bool
-	// Uncompared: the leaf's call leaves it uncompared as noise
+	// Uncompared: the leaf's call leaves it uncompared at a replay
 	// (Seen.Uncompared).
 	Uncompared bool
 	// InStartUp: the mock was served in the test set's start-up, before its
