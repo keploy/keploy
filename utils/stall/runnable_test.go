@@ -1,6 +1,9 @@
 package stall
 
 import (
+	"bytes"
+	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -1013,5 +1016,220 @@ func TestSampler_ARestartOwesNoWaitFromBeforeIt(t *testing.T) {
 	// read took the gap's waits.
 	if owed, _, _ := s.owed(); owed != 0 {
 		t.Fatalf("a verdict 10 ticks after a restart owes %v, for waits before it", owed)
+	}
+}
+
+// readHeldSource is a fakeSource whose read of the threads (heldOff) waits
+// for the test once blocked, as a read does whose thread is held off, and
+// which fails the test if two reads are made at once.
+type readHeldSource struct {
+	fakeSource
+	t       *testing.T
+	block   bool          // the next read waits for release
+	entered chan struct{} // closed as the blocked read starts
+	release chan struct{} // the blocked read ends when closed
+	inRead  atomic.Bool
+}
+
+func newReadHeldSource(t *testing.T) *readHeldSource {
+	return &readHeldSource{
+		fakeSource: fakeSource{wall: time.Unix(1_000_000, 0)},
+		t:          t,
+		entered:    make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+}
+
+func (f *readHeldSource) heldOff() (time.Duration, uint64) {
+	if !f.inRead.CompareAndSwap(false, true) {
+		f.t.Error("two reads of the threads at once")
+		return 0, 0
+	}
+	defer f.inRead.Store(false)
+	d, n := f.fakeSource.heldOff()
+	if f.block {
+		f.block = false
+		close(f.entered)
+		<-f.release
+	}
+	return d, n
+}
+
+// lockFree says whether s's lock is free; a read of the threads in flight
+// must not hold it.
+func lockFree(s *sampler) bool {
+	if !s.mu.TryLock() {
+		return false
+	}
+	s.mu.Unlock()
+	return true
+}
+
+// parkedIn waits until the goroutine that closes done as it returns has
+// returned (true), or a goroutine is in fn (false): "(*Mutex).lockSlow", one
+// waiting for a lock.
+func parkedIn(done <-chan struct{}, fn string) bool {
+	buf := make([]byte, 1<<20)
+	for {
+		select {
+		case <-done:
+			return true
+		default:
+		}
+		if n := runtime.Stack(buf, true); bytes.Contains(buf[:n], []byte(fn)) {
+			return false
+		}
+		time.Sleep(100 * time.Microsecond)
+	}
+}
+
+// A read of the threads opens a file per thread, and the thread making it may
+// be held off meanwhile, as long as the consumer is: the sampler does not wait
+// for it. A sample that waited came late by that wait, which its own thread's
+// account does not show, and counted the CPU every thread of the process used
+// as time the consumer, waiting, could run: the stall was judged on it.
+func TestMeter_ASampleDoesNotWaitForAVerdictsRead(t *testing.T) {
+	const grace = 300 * time.Millisecond
+	src := newReadHeldSource(t)
+	s := &sampler{src: src, tick: Tick}
+	s.lastWall, s.lastCPU, s.cpuOK = src.now()
+	s.waitWall = s.lastWall
+	m := NewMeter(heldClock{s}, grace)
+	// The process's other threads use half a CPU; the consumer waits behind
+	// busy loops from here on.
+	step := func() {
+		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/2
+		s.sample()
+	}
+	for range 30 {
+		step()
+	}
+	// The look that finds the stall due reads the threads, and its thread
+	// is held off 1.2 s, past heldEvery, while the sampler runs on time.
+	src.held, src.block = grace, true
+	look := make(chan bool)
+	go func() { look <- m.Expired() }()
+	<-src.entered
+	sampled := make(chan struct{})
+	if lockFree(s) {
+		go func() {
+			defer close(sampled)
+			for range 120 {
+				step()
+			}
+		}()
+		if !parkedIn(sampled, "(*Mutex).lockSlow") {
+			// Left waiting: a read that ended now would wait for it.
+			t.Fatal("a sample waited for a verdict's read of the threads")
+		}
+	} else {
+		t.Error("a read of the threads holds the sampler's lock: a sample waits for it")
+		src.wall, src.cpu = src.wall.Add(120*Tick), src.cpu+60*Tick
+		close(sampled)
+	}
+	close(src.release)
+	<-sampled
+	if <-look {
+		t.Fatal("expired at the look whose read found the whole stall a wait")
+	}
+	if s.reads != 1 {
+		t.Fatalf("read the threads %d times while a read was in flight, want once", s.reads)
+	}
+	// The sample after the read (the one that waited for it, if one did)
+	// reads the threads, past heldEvery since the last read, and finds the
+	// consumer's wait while the read was in flight. Then it runs.
+	src.held = 120 * Tick
+	s.sample()
+	could := time.Duration(0)
+	for range 40 {
+		if m.Expired() {
+			if could < grace {
+				t.Fatalf("expired with %v on the samples and %v owed, the consumer having had %v to run", m.Stalled(), s.waitOwed, could)
+			}
+			return
+		}
+		step()
+		could += Tick
+	}
+	t.Fatalf("not expired %v after the consumer's wait: %v on the samples, %v owed", could, m.Stalled(), s.waitOwed)
+}
+
+// A verdict that looks while a read of the threads is in flight takes what
+// that read finds, and reads again if a sample came while it was in flight:
+// without it, it would be drawn on what the samples counted with none of the
+// waits the reads find taken out.
+func TestSampler_AVerdictWaitsForTheReadInFlight(t *testing.T) {
+	src := newReadHeldSource(t)
+	s := &sampler{src: src, tick: Tick}
+	s.lastWall, s.lastCPU, s.cpuOK = src.now()
+	s.waitWall = s.lastWall
+	for range 10 {
+		src.wall = src.wall.Add(Tick)
+		s.sample()
+	}
+	src.held, src.block = 10*Tick, true
+	first := make(chan time.Duration, 1)
+	go func() { owed, _, _ := s.owed(); first <- owed }()
+	<-src.entered
+	if !lockFree(s) {
+		close(src.release)
+		<-first
+		t.Fatal("a read of the threads holds the sampler's lock")
+	}
+	// A sample while the read is in flight, the consumer waiting through it.
+	src.wall = src.wall.Add(Tick)
+	s.sample()
+	src.held = Tick
+	second, done := make(chan time.Duration, 1), make(chan struct{})
+	go func() {
+		defer close(done)
+		owed, _, _ := s.owed()
+		second <- owed
+	}()
+	if parkedIn(done, "(*Mutex).lockSlow") {
+		t.Errorf("a verdict looked past the read in flight, owing %v", <-second)
+		close(src.release)
+		return
+	}
+	close(src.release)
+	if a, b := <-first, <-second; a != 10*Tick || b != 11*Tick {
+		t.Fatalf("the reading verdict owes %v and the one that looked as it read %v, want %v and %v: the first read's find, then the sample's wait", a, b, 10*Tick, 11*Tick)
+	}
+	if src.heldN != 2 {
+		t.Fatalf("read the threads %d times, want twice: a sample came while the first read was in flight", src.heldN)
+	}
+}
+
+// A sampling that starts while a verdict reads the threads, on a clock no one
+// holds (ProcessClock), reads them (begin) after that read, not beside it.
+func TestSampler_ARestartWaitsForTheReadInFlight(t *testing.T) {
+	src := newReadHeldSource(t)
+	s := &sampler{src: src, tick: time.Hour} // the test samples, not the goroutine
+	s.acquire()()
+	src.wall = src.wall.Add(Tick)
+	s.sample()
+	src.block = true
+	read := make(chan struct{})
+	go func() { defer close(read); s.owed() }()
+	<-src.entered
+	if !lockFree(s) {
+		close(src.release)
+		<-read
+		t.Fatal("a read of the threads holds the sampler's lock")
+	}
+	// Long enough after the last read that the restart reads the threads.
+	src.wall = src.wall.Add(2 * heldEvery)
+	var release func()
+	done := make(chan struct{})
+	go func() { defer close(done); release = s.acquire() }()
+	if parkedIn(done, "(*Mutex).lockSlow") {
+		t.Error("a restart did not wait for the read in flight")
+	}
+	close(src.release)
+	<-read
+	<-done
+	release()
+	if src.heldN != 3 {
+		t.Fatalf("read the threads %d times, want 3: the first start's, the verdict's and the restart's", src.heldN)
 	}
 }

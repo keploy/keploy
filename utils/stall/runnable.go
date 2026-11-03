@@ -131,6 +131,10 @@ type sampler struct {
 	tick time.Duration
 	ran  atomic.Int64 // runnable time so far, ns
 
+	// readMu is held while the threads are read (readWaits, begin), one
+	// read at a time; taken before mu. The sampler does not wait for it.
+	readMu sync.Mutex
+
 	mu    sync.Mutex
 	users int
 	stop  chan struct{}
@@ -183,6 +187,7 @@ type source interface {
 // acquire adds a user, starting the sampling with the first, and returns the
 // func that removes it (idempotent), stopping the sampling with the last.
 func (s *sampler) acquire() func() {
+	s.readMu.Lock() // begin reads the threads
 	s.mu.Lock()
 	s.users++
 	if s.users == 1 {
@@ -194,6 +199,7 @@ func (s *sampler) acquire() func() {
 		go s.run(s.stop, s.done, s.wake)
 	}
 	s.mu.Unlock()
+	s.readMu.Unlock()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -244,7 +250,7 @@ func (s *sampler) run(stop, done chan struct{}, wake *waker) {
 	}
 }
 
-// begin starts the sampling's accounts. Called with mu held.
+// begin starts the sampling's accounts. Called with readMu and mu held.
 func (s *sampler) begin() {
 	s.lastWall, s.lastCPU, s.cpuOK = s.src.now()
 	// What the threads waited while nobody held the clock is not owed, and
@@ -284,8 +290,12 @@ func (s *sampler) sample() {
 	s.ahead = 0
 	s.ran.Add(int64(got))
 	s.lastWall, s.lastCPU, s.cpuOK = wall, cpu, cpuOK
-	if wall.Sub(s.waitWall) >= heldEvery {
+	// readMu held is a verdict's read in flight (owed), or a start's
+	// (acquire): the sampler does not wait for it, and reads at its next
+	// sample.
+	if wall.Sub(s.waitWall) >= heldEvery && s.readMu.TryLock() {
 		s.readWaits(false)
+		s.readMu.Unlock()
 	}
 }
 
@@ -336,20 +346,42 @@ func (s *sampler) read() (wall time.Time, cpu time.Duration, cpuOK bool, waited 
 // it is owed out of that sample (sampler.ahead). On a host whose busy loops
 // held the sampler and a consumer off one CPU for 200 ms, a look's read set
 // 57 ms of the consumer's 256 ms wait against what samples had counted, and
-// the next sample counted the rest as time the consumer could run. Called
-// with mu held.
+// the next sample counted the rest as time the consumer could run.
+//
+// The read opens a file per thread, and the thread making it may be held off
+// meanwhile, for as long as the rest of the process: it is made outside mu,
+// so the sampler does not wait for it, and one read is made at a time
+// (readMu). A sample that waited for a verdict's read came late by that
+// wait, which its own thread's account does not show, and counted the CPU
+// every thread of the process used as time the consumer could run: on a host
+// whose busy loops, in another cgroup, crowded two of the four CPUs of a
+// process's quota, five of the six late samples of a stall the tee abandoned
+// came right after a read, and the six counted 155 ms of the process's CPU
+// as time its consumer, waiting, could run. A sample that comes while the
+// read is in flight counts its interval by its own lateness, and the read,
+// accounted when it ends, takes its waits out of what the samples counted.
+// Called with readMu and mu held, and returns with them held.
 func (s *sampler) readWaits(ahead bool) {
+	s.waitWall = s.lastWall
+	before := s.onTime
+	s.mu.Unlock()
 	held, heldFor := s.src.heldOff()
+	var wall time.Time
+	if ahead {
+		// The wall clock after the threads were read: a wait the read
+		// found ended before it.
+		wall, _, _ = s.src.now()
+	}
+	s.mu.Lock()
 	took := min(held, s.onTime)
 	s.waitOwed += took
 	s.ahead = 0
 	if ahead {
-		// The wall clock after the threads were read: a wait the read
-		// found ended before it.
-		wall, _, _ := s.src.now()
 		s.ahead = min(held-took, max(wall.Sub(s.lastWall), 0))
 	}
-	s.onTime, s.waitWall = min(s.onTime-took, heldEvery), s.lastWall
+	// What samples counted while the read was in flight came after it
+	// began: the next read takes from it too, whatever the carry's bound.
+	s.onTime = min(before-took, heldEvery) + s.onTime - before
 	s.reads++
 	s.heldFrom = 0
 	if heldFor > 0 {
@@ -365,6 +397,8 @@ func (s *sampler) readWaits(ahead bool) {
 // their verdict on every connection of a starved process must not read every
 // thread at each of their looks, with the CPU it lacks.
 func (s *sampler) owed() (owed time.Duration, heldFrom, read uint64) {
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.lastWall.After(s.waitWall) {
@@ -399,7 +433,8 @@ func (realSource) now() (time.Time, time.Duration, bool) {
 	return time.Now(), cpu, ok
 }
 
-// procWaits is the process's threads' waits; the sampler's lock guards it.
+// procWaits is the process's threads' waits; the sampler reads it one read at
+// a time (sampler.readMu).
 var procWaits threadWaits
 
 func (realSource) heldOff() (time.Duration, uint64) { return procWaits.longest() }

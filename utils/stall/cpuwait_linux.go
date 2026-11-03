@@ -30,8 +30,8 @@ const userHZ = 100
 // adds a wait to the thread's run delay as the thread gets the CPU, and the
 // steal to the CPU's at its first tick back, so a read cannot see either
 // while it lasts; what it can see is a runnable thread that has not moved
-// since the last read (held). Not safe for concurrent use: the sampler reads
-// it under its lock.
+// since the last read (held). Not safe for concurrent use: the sampler makes
+// one read at a time (sampler.readMu).
 type threadWaits struct {
 	last  map[string]threadStat // each thread at the last read
 	steal map[string]int64      // each CPU's steal at the last read, in USER_HZ ticks
