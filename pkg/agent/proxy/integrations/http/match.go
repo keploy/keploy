@@ -2443,6 +2443,9 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).
 		WithClosest(closestMock.Name, fieldDiffs).
+		// The hint tells a body field keploy.yml declares with patterns the
+		// value is outside of from one it does not declare.
+		WithBodyNoise(userBodyNoise).
 		// Whole-request renders for the CLI side-by-side diff. Mock.Noise is
 		// passed so obfuscated values stay redacted on both sides.
 		WithRenderedRequests(

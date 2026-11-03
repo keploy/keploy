@@ -170,3 +170,46 @@ func TestValueDriftHintNamesOnlyANoiseBucketThatCoversIt(t *testing.T) {
 		}
 	}
 }
+
+// A body field keploy.yml declares with patterns (WithBodyNoise) is named
+// with its patterns, and the hint says to widen them or record again, in
+// keploy test and keploy mock alike; never to declare it. A diff that is
+// no body field keeps its own hint though a body entry's key names it, and
+// so does every diff of a miss whose closest mock is on another upstream.
+func TestHintNamesTheDeclaredPatternsAValueIsOutside(t *testing.T) {
+	t.Cleanup(func() { SetMockMode(false) })
+	noise := map[string][]string{"id": {"^o-", "^p-"}}
+	report := func(path string, kind models.MockFieldDiffKind) *Builder {
+		return NewReport(ProtocolHTTP, "POST /find").WithDestination("api.test:443").
+			WithClosest("mock-1", []models.MockFieldDiff{{Path: path, Kind: kind, Expected: "r-1", Actual: "x-9"}}).WithBodyNoise(noise)
+	}
+	for _, c := range []struct {
+		name  string
+		mock  bool
+		b     *Builder
+		want  string
+		never []string
+	}{
+		{"keploy test", false, report("body.id", models.DiffKindValueChanged),
+			"body.id is noise in keploy.yml only for a value matching ^o- or ^p-, and the live value is outside it. If the change is expected, widen the pattern under test.globalNoise.global.requestbody in keploy.yml, or re-record with 'keploy record'.", nil},
+		{"keploy mock", true, report("body.id", models.DiffKindMissingInLive),
+			"body.id is noise in keploy.yml only for a value matching ^o- or ^p-, and the recorded value is outside it. If the change is expected, widen the pattern under test.globalNoise.global.requestbody in keploy.yml, or re-record the mock set with 'keploy mock record', or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'.", nil},
+		{"a query value a body entry's key names", false, report("query.id", models.DiffKindValueChanged),
+			"Only values drifted (query.id).", []string{"is noise in keploy.yml only"}},
+		{"a closest mock on another upstream", false, report("body.id", models.DiffKindValueChanged).WithComparedDestinations([]string{"other.test:443"}),
+			"No recorded HTTP mock in the compared set targets api.test:443.", []string{"is noise in keploy.yml only"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			SetMockMode(c.mock)
+			got := c.b.Build().NextSteps
+			if !strings.Contains(got, c.want) {
+				t.Errorf("the hint\n%s\ndoes not say\n%s", got, c.want)
+			}
+			for _, n := range append(c.never, "{id:") {
+				if strings.Contains(got, n) {
+					t.Errorf("the hint says %q:\n%s", n, got)
+				}
+			}
+		})
+	}
+}

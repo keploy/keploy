@@ -222,6 +222,20 @@ func ChangedDecodedJSONFieldPaths(exp, act interface{}, known map[string][]strin
 	return out
 }
 
+// NoisePatterns returns the patterns of the entry of noise (path -> patterns)
+// that decides the JSON leaf at path where JSONFieldDiffs compares it (the
+// most specific entry first): the leaf is noise only for a value one of them
+// matches. It returns none where no entry decides the leaf, or where the
+// deciding entry has no patterns and so excuses any value.
+func NoisePatterns(noise map[string][]string, path string) []string {
+	regs, _, _ := buildNoiseIndex(noise, nil).matchKind(strings.ToLower(path))
+	out := make([]string, 0, len(regs))
+	for _, re := range regs {
+		out = append(out, re.String())
+	}
+	return out
+}
+
 // JSONFieldDiffs returns field-level diffs between two JSON documents with
 // recorded/live values attached, for mock-mismatch reporting. It walks both
 // documents with the same traversal as ComputeFailureAssessmentJSON (arrays

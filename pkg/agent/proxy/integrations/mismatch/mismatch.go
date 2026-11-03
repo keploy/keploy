@@ -62,6 +62,10 @@ type Builder struct {
 	// check in Build(). nil means "the question is undecidable" — see
 	// WithComparedDestinations.
 	comparedDests []string
+	// bodyNoise is keploy.yml's request-body noise the call was compared
+	// with (WithBodyNoise), by root-relative key: nil where the protocol
+	// passes none.
+	bodyNoise map[string][]string
 }
 
 // NewReport starts a report for one missed call. actualSummary should be the
@@ -180,6 +184,15 @@ func (b *Builder) WithDiff(diff string) *Builder {
 	return b
 }
 
+// WithBodyNoise records keploy.yml's request-body noise the call was
+// compared with (test.globalNoise.global.requestbody, by root-relative key),
+// so the default hint can tell a body field that entry already declares
+// with patterns the value is outside of from one it does not declare.
+func (b *Builder) WithBodyNoise(noise map[string][]string) *Builder {
+	b.bodyNoise = noise
+	return b
+}
+
 // WithNextSteps sets the remediation hint shown to the user.
 func (b *Builder) WithNextSteps(steps string) *Builder {
 	b.report.NextSteps = steps
@@ -222,7 +235,7 @@ func (b *Builder) Build() *models.MockMismatchReport {
 		r.Diff = RenderFieldDiffs(r.FieldDiffs)
 	}
 	if r.NextSteps == "" {
-		r.NextSteps = defaultNextSteps(&r)
+		r.NextSteps = defaultNextSteps(&r, b.bodyNoise)
 	}
 	return &r
 }
@@ -282,8 +295,33 @@ func RecordCommand() string {
 // defaultNextSteps derives an actionable hint from the report shape. The
 // wording deliberately never references commands that don't exist; the two
 // real remedies are noise (for drifting values) and re-recording (for
-// structural change).
-func defaultNextSteps(r *models.MockMismatchReport) string {
+// structural change). bodyNoise is keploy.yml's request-body noise the call
+// was compared with (Builder.WithBodyNoise).
+func defaultNextSteps(r *models.MockMismatchReport, bodyNoise map[string][]string) string {
+	// A body field keploy.yml declares with patterns is reported only where
+	// a value is outside them (matcher.JSONFieldDiffs): the hint names the
+	// field and its patterns, and says to widen them or record again, never
+	// to declare the field, which keploy.yml already does. The rest of the
+	// diffs get their own hint.
+	var outside []string
+	var rest []models.MockFieldDiff
+	for _, d := range r.FieldDiffs {
+		k, ok := strings.CutPrefix(d.Path, "body.")
+		pats := matcher.NoisePatterns(bodyNoise, k)
+		if !ok || len(pats) == 0 {
+			rest = append(rest, d)
+			continue
+		}
+		// A value a pattern matches is not compared, so the side whose value
+		// the diff holds is outside them: the recorded one where the live
+		// side holds none (the field is missing there, or its value
+		// matched), the live one otherwise.
+		side := "live"
+		if d.Kind == models.DiffKindMissingInLive {
+			side = "recorded"
+		}
+		outside = append(outside, fmt.Sprintf("%s is noise in keploy.yml only for a value matching %s, and the %s value is outside it", d.Path, strings.Join(pats, " or "), side))
+	}
 	onlyValueDrift := len(r.FieldDiffs) > 0
 	for _, d := range r.FieldDiffs {
 		if d.Kind != models.DiffKindValueChanged {
@@ -323,22 +361,22 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 			lead += " The closest mock is on a different upstream, so its differences are not evidence about this call."
 		}
 		return lead
+	case len(outside) > 0:
+		hint := fmt.Sprintf("%s. If the change is expected, widen the pattern under test.globalNoise.global.requestbody in keploy.yml, or %s.", strings.Join(outside, "; "), rerecordRemedy(r))
+		if len(rest) > 0 {
+			others := *r
+			others.FieldDiffs = rest
+			hint += " " + defaultNextSteps(&others, nil)
+		}
+		return hint
 	case onlyValueDrift:
 		paths := make([]string, 0, len(r.FieldDiffs))
 		for _, d := range r.FieldDiffs {
 			paths = append(paths, d.Path)
 		}
 		// keploy test and keploy mock replay alike hand the agent
-		// keploy.yml's test.globalNoise, so the noise is a remedy in both. A
-		// mock run is recorded again as a mock set, and only the HTTP parser
-		// acts on --on-miss, only when it can reach the real dependency.
-		rerecord := "re-record with '" + RecordCommand() + "'"
-		if mockMode.Load() {
-			rerecord = "re-record the mock set with '" + RecordCommand() + "'"
-			if r.Protocol == ProtocolHTTP {
-				rerecord += ", or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'"
-			}
-		}
+		// keploy.yml's test.globalNoise, so the noise is a remedy in both.
+		rerecord := rerecordRemedy(r)
 		noise, uncovered, unknown := noiseRemedy(r)
 		switch {
 		case len(uncovered) > 0:
@@ -357,6 +395,20 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 		}
 		return "Request structure changed since recording. Re-record the test set with '" + RecordCommand() + "', or, if you edited its mocks, remap it with --disable-mapping --update-test-mapping."
 	}
+}
+
+// rerecordRemedy is how the hint says to record r's call again: a mock run
+// is recorded again as a mock set, and only the HTTP parser acts on
+// --on-miss, only when it can reach the real dependency.
+func rerecordRemedy(r *models.MockMismatchReport) string {
+	if !mockMode.Load() {
+		return "re-record with '" + RecordCommand() + "'"
+	}
+	rerecord := "re-record the mock set with '" + RecordCommand() + "'"
+	if r.Protocol == ProtocolHTTP {
+		rerecord += ", or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'"
+	}
+	return rerecord
 }
 
 // requestBodyNoiseProtocols are the protocols besides HTTP whose request
