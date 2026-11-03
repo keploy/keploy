@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"sort"
 	"strings"
@@ -399,6 +400,134 @@ func TestReadBackPlanReadsBackOnlyTheTestsOwnWrites(t *testing.T) {
 	p.vars["key"] = models.MockVariable{Recorded: recName, Answer: []string{"body.Item.Name.S"}}
 	if p = h.readBackPlan(tr, test, get, []*models.Mock{put}, exchange(nil), nil, p); len(p.vars) != 1 || len(p.binds) != 0 {
 		t.Fatalf("a place answered already: vars %+v binds %+v", p.vars, p.binds)
+	}
+
+	// A call served twice that stored nothing (a read) leaves no mark
+	// whose serve is unknown: the write is read back all the same.
+	if p := h.readBackPlan(tr, test, get, []*models.Mock{put, get, get}, exchange(nil), nil, newPairing()); len(p.vars) != 1 || len(p.binds["mock-0"]) != 1 {
+		t.Fatalf("a read served twice: vars %+v binds %+v, want the write read back", p.vars, p.binds)
+	}
+
+	// A call served in the test whose recorded answer cannot be loaded:
+	// what it stored is unknown, so nothing is read back, though the reader
+	// would mark nothing of it.
+	lost := learnRecorded("mock-2", 2*time.Second, "POST", "/", rbGetBody("c-2"), rbGet, `{}`)
+	lost.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
+		return nil, nil, errors.New("the answer's file is gone")
+	})
+	if p := h.readBackPlan(tr, test, get, []*models.Mock{put, lost}, exchange(nil), nil, newPairing()); len(p.vars) != 0 || len(p.binds) != 0 {
+		t.Fatalf("a call whose answer cannot be read: vars %+v binds %+v, want the read answered as recorded", p.vars, p.binds)
+	}
+}
+
+// rbRaceDb is the lead store where another connection takes the recording
+// named take under this call's take of it, once armed: it answers it in the
+// tracker before this call does (answer), or consumes it from the store
+// before this call's claim does (claim). From then on the store no longer
+// shows it.
+type rbRaceDb struct {
+	*learnDb
+	tr     *learn.Tracker
+	take   string
+	race   string
+	armed  bool
+	gone   bool
+	others int
+}
+
+func (d *rbRaceDb) GetPerTestMocksInWindow() ([]*models.Mock, error) {
+	var out []*models.Mock
+	for _, m := range d.perTest {
+		if d.gone && m.Name == d.take {
+			continue
+		}
+		out = append(out, m)
+		if d.armed && d.race == "answer" && m.Name == d.take {
+			// The other connection answers it with the scope read: this
+			// call's take is refused, and the other's consume lands
+			// before this call reads again.
+			d.armed, d.gone = false, true
+			if d.tr.Answer(d.tr.Placed().Test, m) {
+				d.others++
+			}
+		}
+	}
+	return out, nil
+}
+
+func (d *rbRaceDb) DeleteFilteredMock(m models.Mock) bool {
+	if d.armed && d.race == "claim" && m.Name == d.take {
+		d.armed, d.gone = false, true
+		d.others++
+		return false
+	}
+	return d.learnDb.DeleteFilteredMock(m)
+}
+
+// A read the test's PutItem is read back into whose recording another
+// connection takes first, in the tracker or in the store, is never served
+// from it: the call reads the store again, no longer finds it, and misses;
+// and the tracker keeps no answer of this call's for it.
+func TestReadBackGivesUpARecordingAnotherConnectionTook(t *testing.T) {
+	for _, race := range []string{"answer", "claim"} {
+		t.Run(race, func(t *testing.T) {
+			rbRegister(t, rbStore{})
+			h, n, opts := learnOn(t)
+			tr := learn.NewTracker()
+			tr.Begin()
+			ctx := learn.WithTracker(context.Background(), tr)
+			db := &rbRaceDb{learnDb: &learnDb{perTest: []*models.Mock{
+				learnRecorded("mock-0", 0, "POST", "/", rbPutBody("c-1", "Lead 1700000000000"), rbPut, `{}`),
+				learnRecorded("mock-1", time.Second, "POST", "/", rbGetBody("c-1"), rbGet, `{"Item":`+rbItem("c-1", "Lead 1700000000000")+`}`),
+			}, observe: tr.ServedMock}, tr: tr, take: "mock-1", race: race}
+			if served, miss, err := h.learnMatch(ctx, live("POST", "/", rbPutBody("c-1", "Lead 1700000000417"), rbPut), db, n, opts); served == nil || miss != nil || err != nil {
+				t.Fatalf("the PutItem: served %v miss %+v err %v", served, miss, err)
+			}
+			db.armed = true
+			served, _, err := h.learnMatch(ctx, live("POST", "/", rbGetBody("c-1"), rbGet), db, n, opts)
+			if err != nil || served != nil {
+				t.Fatalf("the read: served %v err %v, want a miss", served, err)
+			}
+			if db.others != 1 {
+				t.Fatalf("the other connection took mock-1 %d times, want once", db.others)
+			}
+			if len(db.consumed) != 1 || db.consumed[0].Name != "mock-0" {
+				t.Fatalf("consumed %d mocks, want the PutItem alone", len(db.consumed))
+			}
+			if race == "claim" && tr.Answered("mock-1") {
+				t.Fatal("the tracker keeps this call's answer of a recording it could not claim")
+			}
+		})
+	}
+}
+
+// A read the pool keeps (no test's own) that the call is paired with (its
+// key drifted) never reads back what the test wrote: a test's write
+// answers only the test's own reads.
+func TestReadBackLeavesAPairedPoolReadAsRecorded(t *testing.T) {
+	rbRegister(t, rbStore{})
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.Begin()
+	ctx := learn.WithTracker(context.Background(), tr)
+	recorded := `{"Item":` + rbItem("c-1", "Lead 1700000000000") + `}`
+	pool := learnRecorded("mock-1", time.Second, "POST", "/", rbGetBody("c-1"), rbGet, recorded)
+	pool.TestModeInfo.Lifetime = models.LifetimeSession
+	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/", rbPutBody("c-1", "Lead 1700000000000"), rbPut, `{}`)}, mocks: []*models.Mock{pool}, observe: tr.ServedMock}
+	if served, miss, err := h.learnMatch(ctx, live("POST", "/", rbPutBody("c-9", "Lead 1700000000417"), rbPut), db, n, opts); served == nil || miss != nil || err != nil {
+		t.Fatalf("the PutItem: served %v miss %+v err %v", served, miss, err)
+	}
+	served, _, err := h.learnMatch(ctx, live("POST", "/", rbGetBody("c-9"), rbGet), db, n, opts)
+	if err != nil {
+		t.Fatalf("the read: %v", err)
+	}
+	if served != nil && strings.Contains(served.Spec.HTTPResp.Body, "Lead 1700000000417") {
+		t.Fatalf("the pool's read answered %s, with the name this test wrote", served.Spec.HTTPResp.Body)
+	}
+	for _, m := range db.pooled {
+		if len(m.Spec.Learned()) != 0 || len(m.Spec.LearnedBinds()) != 0 {
+			t.Fatalf("the pool's read learned %+v binds %+v", m.Spec.Learned(), m.Spec.LearnedBinds())
+		}
 	}
 }
 
