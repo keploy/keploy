@@ -3134,9 +3134,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// the run is what failed it, or cannot be told from what did. A run with an
 	// agent learns the same from the goroutine that watches its app, through
 	// exitLoopChan; one with no agent starts no app and has no such goroutine.
+	//
+	// Under the proven switch a run with an agent stops on it too, for its
+	// user's stop only: the run's context (ctx, never the set's, which the
+	// watch of a per-set app cancels as that app exits) ended by its user.
+	// A request that stop cut short gets no verdict, so the run exits 128+N
+	// (armStoppedRunExitCode), not 1 for a test it failed. Any other end of
+	// such a run's context is the watch's to name (APP_HALTED for the app's
+	// exit). With the switch off such a request still fails its test, as
+	// before, and the run exits 1.
 	endedPartWay := func() (models.TestSetStatus, bool) {
 		switch {
-		case !r.noAgent || runTestSetCtx.Err() == nil:
+		case runTestSetCtx.Err() == nil:
+			return "", false
+		case !r.noAgent:
+			if provenswitch.On() && stoppedByItsUser(ctx) {
+				return models.TestSetStatusUserAbort, true
+			}
 			return "", false
 		case stoppedByItsUser(runTestSetCtx):
 			return models.TestSetStatusUserAbort, true
@@ -5004,10 +5018,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// loop serves it once its test case has its answer), so the
 			// next test case never begins over this one's view. Every exit
 			// calls it once and leaves the iteration (continue or break).
-			// On the two endedPartWay exits, which only a run with no agent
-			// reaches, it does nothing: that run has no exact plan (r.exact
-			// is nil, exactServing). A failed pool call is returned, and
-			// served again at the next one's loop head (poolBeforeBegin).
+			// On the two endedPartWay exits it does nothing for a run with
+			// no agent, which has no exact plan (r.exact is nil,
+			// exactServing); a run with an agent reaches them only as its
+			// user stops it (proven switch), when the call fails on the
+			// ended context and no test case follows. A failed pool call is
+			// returned, and served again at the next one's loop head
+			// (poolBeforeBegin).
 			endStream := func() error {
 				rest := make([]*models.TestCase, 0, len(streamingTests)-i-1)
 				for _, s := range streamingTests[i+1:] {
