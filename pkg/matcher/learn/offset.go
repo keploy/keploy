@@ -31,7 +31,7 @@ import (
 //   - a moved place is an instant of one layout in one field of an answer
 //     (models.MockSpec's answer fields; every field of a kind whose spec
 //     holds its request and its answer in one), named by the word written
-//     before it (instantLabel: its key, "created_at" of a JSON object), as
+//     before it (instantLabels: its key, "created_at" of a JSON object), as
 //     two recordings of one call (callOf) hold it, at two moments, at any
 //     position in the field (a list F gave the application with another
 //     number of elements puts the instant a value is built on at another
@@ -132,7 +132,7 @@ func inRecordedOrder(a, b offsetPlace) bool {
 // offsetKey is a place of an answer, as two recordings of a kind each hold
 // it: the field (rawField.path), which of its forms (0: as it stands, 1: its
 // other declared forms, rawExtra), the instant's layout, and the word written
-// before it (instantLabel). Every instant of that layout and label in the
+// before it (instantLabels). Every instant of that layout and label in the
 // field stands at it, at any position.
 type offsetKey struct {
 	path         string
@@ -140,35 +140,43 @@ type offsetKey struct {
 	label        string
 }
 
-// instantLabel is the word written before the i-th of spans, the instants of
-// t: the last word before it that is no part of another instant ("at" of
+// instantLabels are the words written before each of spans, the instants
+// of t in order and none overlapping, as instantSpans gives them: of each,
+// the last word before it that is no part of another instant ("at" of
 // "created_at": "2026-…", "jobs" of each instant of "jobs": ["2026-…",
 // "2026-…"]), "" where none is. It names where in a field an instant stands
-// whatever its position: no value is read.
-func instantLabel(t string, spans []instant, i int) string {
-	j := spans[i].start - 1
-	for j >= 0 {
-		in := false
-		for _, sp := range spans {
-			if sp.start <= j && j < sp.end {
-				j, in = sp.start-1, true
-				break
-			}
+// whatever its position: no value is read. One pass over t: the walk back
+// from an instant that meets no word before the instant ahead of it goes on
+// from that one's start, as that one's own walk did, so it takes that
+// one's word. Before, each instant's walk tested each byte it passed
+// against every instant of t and went on past every instant before its
+// own, so a field holding a list of n instants took about n³ steps: a
+// recording's 31 KiB list of 2 884 times of day took 26 s of the staging's
+// CPU (its keyed places, setPlaces).
+func instantLabels(t string, spans []instant) []string {
+	out := make([]string, len(spans))
+	for i, sp := range spans {
+		lo := 0
+		if i > 0 {
+			lo = spans[i-1].end
 		}
-		if in {
-			continue
-		}
-		if !isWord(t[j]) {
+		j := sp.start - 1
+		for j >= lo && !isWord(t[j]) {
 			j--
+		}
+		if j < lo {
+			if i > 0 {
+				out[i] = out[i-1]
+			}
 			continue
 		}
 		end := j + 1
 		for j >= 0 && isWord(t[j]) {
 			j--
 		}
-		return t[j+1 : end]
+		out[i] = t[j+1 : end]
 	}
-	return ""
+	return out
 }
 
 // offsetPlaces are the places a call's offset rule reads (offsetPlacesOf):
@@ -409,11 +417,15 @@ func (dc *DriftCache) readPlaces(x Raw) []keyedPlace {
 		where := x.mock + " at " + f.describe()
 		for form, t := range []string{own, dc.rawExtra(own)} {
 			spans := dc.spansOf(t)
+			var labels []string
 			for si, sp := range spans {
 				if !sp.keyed {
 					continue
 				}
-				out = append(out, keyedPlace{k: offsetKey{path: f.path, form: form, layout: sp.layout, label: instantLabel(t, spans, si)}, m: sp.moment(), where: where})
+				if labels == nil {
+					labels = instantLabels(t, spans)
+				}
+				out = append(out, keyedPlace{k: offsetKey{path: f.path, form: form, layout: sp.layout, label: labels[si]}, m: sp.moment(), where: where})
 			}
 		}
 	}
@@ -451,11 +463,15 @@ func (dc *DriftCache) movePlaces(mock string, moves []servedMove) []keyedPlace {
 		where := mock + " at " + rawField{path: mv.path}.describe()
 		for form, ft := range []string{t, dc.rawExtra(t)} {
 			spans := dc.spansOf(ft)
+			var labels []string
 			for si, sp := range spans {
 				if !sp.keyed {
 					continue
 				}
-				out = append(out, keyedPlace{k: offsetKey{path: mv.in, form: form, layout: sp.layout, label: instantLabel(ft, spans, si)}, m: sp.moment(), where: where})
+				if labels == nil {
+					labels = instantLabels(ft, spans)
+				}
+				out = append(out, keyedPlace{k: offsetKey{path: mv.in, form: form, layout: sp.layout, label: labels[si]}, m: sp.moment(), where: where})
 			}
 		}
 	}
