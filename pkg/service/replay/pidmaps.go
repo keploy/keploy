@@ -269,13 +269,13 @@ func (r *Replayer) applyOwnedLosses(results []models.TestResult) (set models.Cap
 	return set, err
 }
 
-// unnameUnappliedOwnedLosses makes the run's what keploy took that no set's
-// end applied, as a session's reset does on the agent: a set that returned
-// before its end's applyOwnedLosses (a failed post-script) left losses
-// naming its test cases, whose names the next set's repeat (test-1,
+// unnameUnappliedOwnedLosses gives the run the losses keploy took that no
+// set's end applied, as a session's reset does on the agent: a set that
+// returned before its end's applyOwnedLosses (a failed post-script) left
+// losses naming its test cases, whose names the next set's repeat (test-1,
 // test-2), so a later set's end must not match them by name. They stay,
 // and that end fails its set on them, their words still naming the test
-// case; a take that failed stays the next end's error.
+// case.
 func (r *Replayer) unnameUnappliedOwnedLosses() {
 	r.ownedMu.Lock()
 	defer r.ownedMu.Unlock()
