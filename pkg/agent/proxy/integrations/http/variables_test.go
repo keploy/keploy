@@ -417,12 +417,12 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 	t.Run("a report with no closest mock", func(t *testing.T) {
 		read := at(varMock("mock-2", "GET", "http://store/orders/recval", "", 200, `{}`,
 			models.MockVariables{"orderId": useV("recval", []string{"url.path[1]"})}), 2)
-		r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /orders/kqzxwvbn"}, makeReq("GET", "/orders/kqzxwvbn"), nil, []*models.Mock{read}, nil)
+		r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /orders/kqzxwvbn"}, makeReq("GET", "/orders/kqzxwvbn"), nil, []*models.Mock{read}, nil, placesOf(nil))
 		if !slices.Equal(r.VariablePlaces, []string{"url.path[1]"}) {
 			t.Fatalf("places %v; want the route's url.path[1]", r.VariablePlaces)
 		}
 		for _, off := range []*http.Request{makeReq("GET", "/items/kqzxwvbn"), makeReq("DELETE", "/orders/kqzxwvbn"), makeReq("GET", "/orders/kqzxwvbn/lines")} {
-			r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: off.Method + " " + off.URL.Path}, off, nil, []*models.Mock{read}, nil)
+			r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: off.Method + " " + off.URL.Path}, off, nil, []*models.Mock{read}, nil, placesOf(nil))
 			if r.VariablePlaces != nil {
 				t.Fatalf("%s %s is off mock-2's route, yet carries places %v", off.Method, off.URL.Path, r.VariablePlaces)
 			}

@@ -3,9 +3,12 @@ package http
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
+	"maps"
 	"mime"
 	"mime/multipart"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
@@ -14,13 +17,16 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/pkg/variables"
+	"go.keploy.io/server/v3/utils"
 )
 
 // redactedPlaces are the places of a recorded request whose value the
 // obfuscator redacted: a header, a query parameter, a URL path segment, the
 // whole body, or a body field (a JSON field, a form key, a multipart field)
 // whose recorded value, or form segment ("key=value"), matches one of the
-// mock's patterns (Mock.Noise).
+// mock's patterns (Mock.Noise): a JSON string or number field, and a JSON
+// string, or a multipart field's data, that holds a value a pattern names
+// anywhere (holdsPattern).
 //
 // The live call's value at such a place is the secret the recording hid, and
 // it matches none of those patterns: they are anchored on the placeholder the
@@ -33,6 +39,8 @@ type redactedPlaces struct {
 	// values is the mock's patterns, which redact a value that matches
 	// one of them wherever it is.
 	values *util.NoiseChecker
+	// patterns are the mock's patterns as written (Mock.Noise).
+	patterns []string
 	// headers are lowercased header names.
 	headers map[string]bool
 	query   map[string]bool
@@ -67,15 +75,58 @@ type redactedPlaces struct {
 // redacted; none when m is nil or no HTTP call.
 func placesOf(m *models.Mock) redactedPlaces {
 	if m == nil {
-		return redactedPlaces{}
+		return redactedPlacesOf(nil, nil)
 	}
 	return redactedPlacesOf(m.Spec.HTTPReq, m.Noise)
+}
+
+// poolPlaces are the places closest's recorded request redacted, with those
+// of every recording of pool added: a miss report names the call redacted
+// by every place a recording it was compared with redacted, so a nearer
+// recording that redacted nothing does not show the secret another hid,
+// and the closest recording's places only add to them. The patterns, the
+// recorded path and how a body is read for its fields (fieldsIn) stay
+// closest's: a pattern names the placeholder a recording wrote, which no
+// call's secret is.
+func poolPlaces(closest *models.Mock, pool []*models.Mock) redactedPlaces {
+	p := placesOf(closest)
+	for _, m := range pool {
+		p.add(placesOf(m))
+	}
+	return p
+}
+
+// unreadPlaces are the places of a pool that cannot be read: any place may
+// be one a recording redacted, so the call's path, its query values and its
+// body are redacted whole.
+func unreadPlaces() redactedPlaces {
+	p := placesOf(nil)
+	p.urlUnread, p.body = true, true
+	return p
+}
+
+// shapeSummary is a miss's summary with no recording at hand, "METHOD
+// shape": the call's path named by its shape (utils.URLPathShape), as a log
+// made where no recording is at hand names it.
+func shapeSummary(request *http.Request) string {
+	return request.Method + " " + utils.URLPathShape(request.URL)
+}
+
+// add adds q's places to p's.
+func (p *redactedPlaces) add(q redactedPlaces) {
+	maps.Copy(p.headers, q.headers)
+	maps.Copy(p.query, q.query)
+	maps.Copy(p.segments, q.segments)
+	maps.Copy(p.fields, q.fields)
+	maps.Copy(p.keys, q.keys)
+	p.body = p.body || q.body
+	p.urlUnread = p.urlUnread || q.urlUnread
 }
 
 // redactedPlacesOf reads the places of r the obfuscator redacted, by the
 // mock's patterns noise.
 func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
-	p := redactedPlaces{values: util.NewNoiseChecker(noise), headers: map[string]bool{}, query: map[string]bool{}, segments: map[int]bool{}, fields: map[string]bool{}, keys: map[string]bool{}}
+	p := redactedPlaces{values: util.NewNoiseChecker(noise), patterns: noise, headers: map[string]bool{}, query: map[string]bool{}, segments: map[int]bool{}, fields: map[string]bool{}, keys: map[string]bool{}}
 	if r == nil || p.values == nil {
 		return p
 	}
@@ -142,8 +193,8 @@ func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
 		}
 	default:
 		p.fieldsIn = bodyJSON
-		var v interface{}
-		if json.Unmarshal([]byte(r.Body), &v) != nil {
+		v, err := decodeJSONNumbers(r.Body)
+		if err != nil {
 			// Not read for fields (XML, SOAP, text): a body that holds a
 			// value one of the mock's patterns names, at a place that
 			// cannot be found, is redacted whole.
@@ -152,7 +203,8 @@ func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
 		}
 		p.collectJSON(v, "")
 		// A redacted string at the root has no name of its own: the body
-		// is redacted whole.
+		// is redacted whole (a redacted number at the root is the whole
+		// body, which the patterns name above).
 		p.body = p.fields[""]
 	}
 	return p
@@ -216,7 +268,29 @@ func (p redactedPlaces) noisy(v string) bool {
 	return v != "" && p.values != nil && p.values.IsNoisy(v)
 }
 
-// collectJSON adds each string of v the obfuscator redacted, by its path.
+// decodeJSONNumbers is body decoded as one JSON value, each number read as
+// the literal the body writes (json.Number).
+func decodeJSONNumbers(body string) (interface{}, error) {
+	d := json.NewDecoder(strings.NewReader(body))
+	d.UseNumber()
+	var v interface{}
+	if err := d.Decode(&v); err != nil {
+		return nil, err
+	}
+	// One value, and nothing after it (json.Unmarshal's rule).
+	if _, err := d.Token(); err != io.EOF {
+		return nil, errors.New("invalid JSON: data after the value")
+	}
+	return v, nil
+}
+
+// collectJSON adds each string and number of v the obfuscator redacted, by
+// its path. The obfuscator redacts a number under a key it reads as a
+// secret's (a pin, an otp) or one a pattern names, writes another number in
+// its place and anchors a pattern on that number's literal. It redacts a
+// string that holds a URL in the URL's structure (a query value, a path
+// segment), anchoring a pattern on that part alone, so a string that holds
+// a value a pattern names anywhere (holdsPattern) is redacted whole.
 func (p redactedPlaces) collectJSON(v interface{}, path string) {
 	switch t := v.(type) {
 	case map[string]interface{}:
@@ -232,7 +306,11 @@ func (p redactedPlaces) collectJSON(v interface{}, path string) {
 			p.collectJSON(child, jsonElemPath(path))
 		}
 	case string:
-		if p.noisy(t) {
+		if p.noisy(t) || holdsPattern(p.patterns, t) {
+			p.addField(path)
+		}
+	case json.Number:
+		if p.noisy(t.String()) {
 			p.addField(path)
 		}
 	}
@@ -276,13 +354,17 @@ func (p redactedPlaces) segment(i int) bool {
 // (variables.ParseAddress: header.X, url.query.name, url.path[i],
 // body.items[0].id); a place a diff names in its own ("query.name", a
 // "[]" for an array's elements) reads as the matcher writes it. A diff
-// named "body" alone carries no value of the call: the strict comparison
-// writes it with none, or with the two JSON types.
+// named "body" alone names the body whole: the strict comparison writes it
+// with no values, with the two JSON types, or with the two values of a
+// body that is one JSON scalar (a root string), which is covered when the
+// recording redacted the body whole.
 func (p redactedPlaces) covers(path string) bool {
 	if a, err := variables.ParseAddress(path); err == nil && p.at(a.Place) {
 		return true
 	}
 	switch {
+	case path == "body":
+		return p.body
 	case strings.HasPrefix(path, "query."):
 		return p.queryKey(strings.TrimPrefix(path, "query."))
 	case strings.HasPrefix(path, "body."):

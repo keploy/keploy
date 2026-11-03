@@ -616,11 +616,12 @@ func statefulBand(first *models.Mock, group []*models.Mock, own func(*models.Moc
 // which is what keploy's reason for the failed test names ("(body.amount
 // differs)"). Only the fields the strict comparison found differ are named:
 // a field it excused, or found equal, is not.
-func strictMismatchReport(request *http.Request, liveBody []byte, dest string, diag *matchDiag, comparedDests []string, phase string, candidateCount int) *models.MockMismatchReport {
+//
+// places are those the report is redacted by: the pool's (poolPlaces).
+func strictMismatchReport(request *http.Request, liveBody []byte, dest string, diag *matchDiag, comparedDests []string, phase string, candidateCount int, places redactedPlaces) *models.MockMismatchReport {
 	closest := diag.closest
 	diffs := fieldDiffs(diag.differs)
 	differs := differsOf(diag.differs)
-	places := redactedPlacesOf(closest.Spec.HTTPReq, closest.Noise)
 	redactFieldDiffs(diffs, places, request.URL.EscapedPath())
 	r := mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.EscapedPath())).
 		WithDestination(dest).

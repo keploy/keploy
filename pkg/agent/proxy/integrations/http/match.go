@@ -1344,6 +1344,11 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 	// this call's method and path. Under url noise or auto-dynamic matching
 	// the path check is MatchURLPath's full compare, mock by mock, as before.
 	method := models.Method(input.method)
+	// The places of every recording of the pool (poolPlaces), read once
+	// and only for a debug line that names the call's path (so a call
+	// served with debug off allocates nothing for it): it is redacted by
+	// each, as a miss report is.
+	var logPlaces *redactedPlaces
 	for _, mock := range unfilteredMocks {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -1360,10 +1365,15 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		// URL path match
 		if !h.MatchURLPath(mock.Spec.HTTPReq.URL, input.url.Path, urlNoise, autoDynamic) {
 			if ce := h.Logger.Check(zap.DebugLevel, "The url path of mock and request aren't the same"); ce != nil {
-				// The call's path with the segments the mock redacted
-				// written valueRedacted: the call sent its secret there.
+				// The call's path with the segments a recording of the
+				// pool redacted written valueRedacted: the call sent its
+				// secret there.
 				mockPath, _ := recordedURLPath(mock.Spec.HTTPReq.URL)
-				livePath := redactedPlacesOf(mock.Spec.HTTPReq, mock.Noise).decodedPath(input.url.EscapedPath())
+				if logPlaces == nil {
+					p := poolPlaces(nil, unfilteredMocks)
+					logPlaces = &p
+				}
+				livePath := logPlaces.decodedPath(input.url.EscapedPath())
 				ce.Write(zap.String("mock name", mock.Name), zap.String("input path", livePath), zap.String("mock path", mockPath))
 			}
 			continue
@@ -2382,20 +2392,20 @@ func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // just the lowest-Levenshtein path. If httpMocks is nil, it fetches from
 // mockDb; otherwise it uses the pre-fetched slice to avoid a redundant read.
 func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) *models.MockMismatchReport {
-	r, closest := h.buildHTTPMismatchReportOf(request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, diag)
+	r, places := h.buildHTTPMismatchReportOf(request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, diag)
 	// Under the proven switch a test is served what its mapping names, and a
 	// declared call does not change that: the hint would not help.
 	if r != nil && !provenswitch.On() && statesHTTPLifetimes(mockDb, httpMocks) {
-		r.NextSteps = strings.TrimSpace(r.NextSteps + " " + sessionCallHint(request, placesOf(closest)))
+		r.NextSteps = strings.TrimSpace(r.NextSteps + " " + sessionCallHint(request, places))
 	}
 	return r
 }
 
 // sessionCallHint tells how to serve a call to every test, for a recording
 // that serves each test its own HTTP calls only: a test that never recorded
-// a call misses it though another test recorded it. places are the closest
-// recording's: the path prefix it names stops before the first segment that
-// recording redacted (redactedPlaces.pathPrefix).
+// a call misses it though another test recorded it. places are the report's
+// (poolPlaces): the path prefix it names stops before the first segment a
+// recording of the pool redacted (redactedPlaces.pathPrefix).
 func sessionCallHint(request *http.Request, places redactedPlaces) string {
 	host := request.Host
 	if host == "" && request.URL != nil {
@@ -2426,7 +2436,12 @@ func statesHTTPLifetimes(mockDb integrations.MockMemDb, compared []*models.Mock)
 // buildHTTPMismatchReportOf is buildHTTPMismatchReport without the hint for a
 // call shared across tests; closest is the recording the report names the
 // call against (nil: none), whose redacted places the report redacts.
-func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) (r *models.MockMismatchReport, closest *models.Mock) {
+//
+// places are those the report is redacted by (poolPlaces), for the hint
+// buildHTTPMismatchReport adds. When the pool cannot be read, the summary
+// names the call's path by its shape only (shapeSummary): keploy cannot tell
+// there which segment holds a secret.
+func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) (r *models.MockMismatchReport, places redactedPlaces) {
 	// Defensive: this diagnostic builder and its callees (pickClosestCandidate,
 	// renderLiveRequest) — plus decode.go's 502 error line — dereference
 	// request.URL throughout. http.ReadRequest always sets a non-nil URL on the
@@ -2453,15 +2468,15 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		// same order the matcher saw. Per-test FIRST, session second.
 		perTestMocks, err := mockDb.GetPerTestMocksInWindow()
 		if err != nil {
-			return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+			return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, shapeSummary(request)).
 				WithDestination(dest).
-				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build(), request, nil, nil, variableTable(mockDb)), nil
+				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build(), request, nil, nil, variableTable(mockDb), unreadPlaces()), unreadPlaces()
 		}
 		sessionMocks, err := mockDb.GetSessionMocks()
 		if err != nil {
-			return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+			return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, shapeSummary(request)).
 				WithDestination(dest).
-				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build(), request, nil, nil, variableTable(mockDb)), nil
+				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build(), request, nil, nil, variableTable(mockDb), unreadPlaces()), unreadPlaces()
 		}
 		mocks := make([]*models.Mock, 0, len(perTestMocks)+len(sessionMocks))
 		mocks = append(mocks, perTestMocks...)
@@ -2475,20 +2490,21 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		// the call is that recording's. Its path shows the segments that
 		// recording redacted redacted.
 		last := diag.answered.lastMock
-		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, placesOf(last).summary(request.Method, request.URL.EscapedPath())).
+		places := poolPlaces(last, diag.pool)
+		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.EscapedPath())).
 			WithDestination(dest).
 			WithComparedDestinations(comparedDestinations(diag.pool, diag.candidates)).
 			WithPhase(diag.phase, diag.candidates).
 			WithClosest(diag.answered.last, nil).
 			WithDiff(diag.answered.why()).
-			WithNextSteps(diag.answered.next()).Build(), request, last, diag.pool, variableTable(mockDb)), last
+			WithNextSteps(diag.answered.next()).Build(), request, last, diag.pool, variableTable(mockDb), places), places
 	}
 	if diag != nil && diag.variable != nil {
 		// A variable's place counts the segments of the escaped path
 		// (variables.go), so this miss names its path escaped too: a %2F
 		// stays inside its segment, and the place names the segment the
 		// miss's shape writes {} (models.MissShape).
-		return variableMismatchReport(request, liveBody, dest, request.Method+" "+request.URL.EscapedPath(), diag, httpMocks, variableTable(mockDb))
+		return variableMismatchReport(request, liveBody, dest, diag, httpMocks, variableTable(mockDb))
 	}
 
 	phase := models.MatchPhaseExhausted
@@ -2507,7 +2523,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	if candidateCount == 0 && len(schemaSurvivors) == 0 {
 		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 			WithDestination(dest).
-			WithPhase(models.MatchPhaseNoMocks, 0).Build(), request, nil, nil, variableTable(mockDb)), nil
+			WithPhase(models.MatchPhaseNoMocks, 0).Build(), request, nil, nil, variableTable(mockDb), placesOf(nil)), placesOf(nil)
 	}
 
 	// Does anything the matcher just compared against even target this
@@ -2535,8 +2551,9 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	if diag != nil && diag.closest != nil && diag.closest.Spec.HTTPReq != nil {
 		// Under the proven switch: the strict comparison's closest recording,
 		// and the fields it found differ.
-		return withRoutePlaces(strictMismatchReport(request, liveBody, dest, diag, comparedDests, phase, candidateCount),
-			request, diag.closest, comparedPool, variableTable(mockDb)), diag.closest
+		places := poolPlaces(diag.closest, comparedPool)
+		return withRoutePlaces(strictMismatchReport(request, liveBody, dest, diag, comparedDests, phase, candidateCount, places),
+			request, diag.closest, comparedPool, variableTable(mockDb), places), places
 	}
 	closestPool := httpMocks
 	if diag != nil && diag.live != nil {
@@ -2549,10 +2566,12 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	}
 	closestMock := pickClosestCandidate(request, liveOp, schemaSurvivors, closestPool)
 	if closestMock == nil || closestMock.Spec.HTTPReq == nil {
-		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+		// Named redacted by the places of every recording compared.
+		places := poolPlaces(nil, comparedPool)
+		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.EscapedPath())).
 			WithDestination(dest).
 			WithComparedDestinations(comparedDests).
-			WithPhase(phase, candidateCount).Build(), request, nil, comparedPool, variableTable(mockDb)), nil
+			WithPhase(phase, candidateCount).Build(), request, nil, comparedPool, variableTable(mockDb), places), places
 	}
 	// The call the field diffs are computed from: under the proven switch a
 	// closest mock with variables is diffed with its recorded values at their
@@ -2640,7 +2659,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	// Redact secret / obfuscated values out of the structured diffs before they
 	// are attached — they (and the Diff string derived from them) are persisted
 	// into the report YAML and the platform API.
-	places := redactedPlacesOf(mockReq, closestMock.Noise)
+	places = poolPlaces(closestMock, comparedPool)
 	redactFieldDiffs(fieldDiffs, places, diffReq.URL.EscapedPath())
 
 	b := mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.EscapedPath())).
@@ -2667,7 +2686,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	if r != nil {
 		r.FieldReasons = reasonsOf(guarded)
 	}
-	return withRoutePlaces(r, request, closestMock, comparedPool, variableTable(mockDb)), closestMock
+	return withRoutePlaces(r, request, closestMock, comparedPool, variableTable(mockDb), places), places
 }
 
 // patternRefusals are the fields of m's recorded request body that

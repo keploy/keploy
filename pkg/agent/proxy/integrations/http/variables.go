@@ -1661,7 +1661,7 @@ func variableTable(mockDb integrations.MockMemDb) *variables.Table {
 // the test and the one the call sent, and what to do.
 //
 // closest is the recording the problem names (nil: not in the pool).
-func variableMismatchReport(request *http.Request, liveBody []byte, dest, actualKey string, diag *matchDiag, httpMocks []*models.Mock, table *variables.Table) (*models.MockMismatchReport, *models.Mock) {
+func variableMismatchReport(request *http.Request, liveBody []byte, dest string, diag *matchDiag, httpMocks []*models.Mock, table *variables.Table) (*models.MockMismatchReport, redactedPlaces) {
 	p := diag.variable
 	var diffs []models.MockFieldDiff
 	if p.place != "" && p.kind != "" {
@@ -1682,13 +1682,12 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 			break
 		}
 	}
-	var places redactedPlaces
-	if closest != nil {
-		places = redactedPlacesOf(closest.Spec.HTTPReq, closest.Noise)
-		redactFieldDiffs(diffs, places, request.URL.EscapedPath())
-		// actualKey names the path escaped (buildHTTPMismatchReport).
-		actualKey = places.escapedSummary(request.Method, request.URL.EscapedPath())
-	}
+	// Redacted by every recording's places (poolPlaces), the closest's
+	// among them when it is still in the pool. The summary names the path
+	// escaped (buildHTTPMismatchReport).
+	places := poolPlaces(closest, pool)
+	redactFieldDiffs(diffs, places, request.URL.EscapedPath())
+	actualKey := places.escapedSummary(request.Method, request.URL.EscapedPath())
 	b := mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 		WithDestination(dest).
 		WithComparedDestinations(comparedDestinations(pool, diag.candidates)).
@@ -1713,7 +1712,7 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 			r.VariablePlaces = append(r.VariablePlaces, place)
 		}
 	}
-	return r, closest
+	return r, places
 }
 
 // withRoutePlaces is r carrying, under the proven switch, the URL path places
@@ -1722,16 +1721,16 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 // escaped, as a place counts segments, so its shape writes them {}
 // (models.MissShape). A place of the closest mock off its route only writes
 // more {}. With the switch off, r is as built.
-func withRoutePlaces(r *models.MockMismatchReport, request *http.Request, closest *models.Mock, pool []*models.Mock, table *variables.Table) *models.MockMismatchReport {
+func withRoutePlaces(r *models.MockMismatchReport, request *http.Request, closest *models.Mock, pool []*models.Mock, table *variables.Table, places redactedPlaces) *models.MockMismatchReport {
 	if !provenswitch.On() || r == nil || request.URL == nil {
 		return r
 	}
-	if places := routePathPlaces(request, closest, pool, table); len(places) > 0 {
-		// The path escaped, as a place counts it, with the segments the
-		// closest recording redacted written valueRedacted, as the report
-		// it replaces wrote them.
-		r.ActualSummary = placesOf(closest).escapedSummary(request.Method, request.URL.EscapedPath())
-		r.VariablePlaces = places
+	if route := routePathPlaces(request, closest, pool, table); len(route) > 0 {
+		// The path escaped, as a place counts it, with the segments a
+		// recording of the pool redacted written valueRedacted (places,
+		// the report's), as the report it replaces wrote them.
+		r.ActualSummary = places.escapedSummary(request.Method, request.URL.EscapedPath())
+		r.VariablePlaces = route
 	}
 	return r
 }

@@ -1029,12 +1029,13 @@ func passOneCallThrough(ctx context.Context, logger *zap.Logger, clientConn net.
 }
 
 // missedCall names a missed call in its error as its report does, with the
-// segments the closest recording redacted written redacted, or, with no
-// report, by its path's shape: the proxy logs the error at ERROR, and the
-// call may have sent its secret in its path.
+// segments a recording of the pool redacted written redacted, or by its
+// path's shape with no recording at hand or no report (shapeSummary): the
+// proxy logs the error at ERROR, and the call may have sent its secret in
+// its path.
 func missedCall(request *http.Request, report *models.MockMismatchReport) string {
 	if report != nil {
 		return report.ActualSummary
 	}
-	return request.Method + " " + utils.URLPathShape(request.URL)
+	return shapeSummary(request)
 }

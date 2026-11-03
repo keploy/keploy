@@ -113,6 +113,12 @@ func redactedLiveCases(t *testing.T) []redactedLiveCase {
 	// A part that holds the redacted value inside its data.
 	recDoc, recDocCT := redactedMultipart(t, [2]string{"doc", "<a>REDACTED_abc</a>"}, [2]string{"x", "alpha1"})
 	liveDoc, liveDocCT := redactedMultipart(t, [2]string{"doc", "<a>" + liveSecret + "</a>"}, [2]string{"x", "bravo2"})
+	// A part moved under another name that ends in the redacted part's.
+	liveMoved, liveMovedCT := redactedMultipart(t, [2]string{"data[assertion]", liveSecret}, [2]string{"x", "bravo2"})
+	// The obfuscator redacts a number under a key it reads as a secret's
+	// (otp, pin) as another number, and anchors a pattern on its literal.
+	const liveNumber = "739164"
+	number, numberSecret := []string{`^482913$`}, []string{liveNumber}
 	// With the switch off the request matcher serves a form or a multipart
 	// form whose field changed: those calls go to another path too, so
 	// they miss either way.
@@ -191,6 +197,21 @@ func redactedLiveCases(t *testing.T) []redactedLiveCase {
 		{name: "form-moved-field", url: "/x", liveURL: "/x/other", ctype: formCT, rec: `assertion=REDACTED_abc&x=alpha1`, live: `data.assertion=` + liveSecret + `&x=bravo2`, noise: value},
 		{name: "form-moved-bracket-key", url: "/x", liveURL: "/x/other", ctype: formCT, rec: `user[assertion]=REDACTED_abc&x=alpha1`, live: `data[assertion]=` + liveSecret + `&x=bravo2`, noise: value},
 		{name: "json-moved-string-array", url: "/x", ctype: jsonCT, rec: `{"tags":["REDACTED_abc"],"x":"alpha1"}`, live: `{"data":{"tags":["` + liveSecret + `"]},"x":"bravo2"}`, noise: value},
+		{name: "multipart-moved-field", url: "/x", liveURL: "/x/other", ctype: recMPCT, liveCtype: liveMovedCT, rec: recMP, live: liveMoved, noise: value},
+		{name: "json-number", url: "/x", ctype: jsonCT, rec: `{"otp":482913,"x":"alpha1"}`, live: `{"otp":` + liveNumber + `,"x":"bravo2"}`, noise: number, secrets: numberSecret},
+		{name: "json-number-nested", url: "/x", ctype: jsonCT, rec: `{"card":{"pin":482913},"x":"alpha1"}`, live: `{"card":{"pin":` + liveNumber + `},"x":"bravo2"}`, noise: number, secrets: numberSecret},
+		{name: "json-number-in-an-array", url: "/x", ctype: jsonCT, rec: `{"codes":[482913],"x":"alpha1"}`, live: `{"codes":[` + liveNumber + `],"x":"bravo2"}`, noise: number, secrets: numberSecret},
+		{name: "json-number-moved", url: "/x", ctype: jsonCT, rec: `{"otp":482913,"x":"alpha1"}`, live: `{"x":"bravo2","data":{"otp":` + liveNumber + `}}`, noise: number, secrets: numberSecret},
+		// The obfuscator redacts a URL a JSON string holds in the URL's
+		// structure (a query value, a path segment), anchoring a pattern
+		// on that part alone: the string is redacted whole.
+		{name: "json-url-query-value", url: "/x", ctype: jsonCT, rec: `{"callback":"https://h.example/cb?sig=REDACTED_abc","x":"alpha1"}`, live: `{"callback":"https://h.example/cb?sig=` + liveSecret + `","x":"bravo2"}`, noise: value},
+		{name: "json-url-path-segment", url: "/x", ctype: jsonCT, rec: `{"callback":"https://h.example/hooks/REDACTED_abc","x":"alpha1"}`, live: `{"callback":"https://h.example/hooks/` + liveSecret + `","x":"bravo2"}`, noise: value},
+		{name: "json-url-array-element", url: "/x", ctype: jsonCT, rec: `{"urls":["https://h.example/cb?sig=REDACTED_abc"],"x":"alpha1"}`, live: `{"urls":["https://h.example/cb?sig=` + liveSecret + `"],"x":"bravo2"}`, noise: value},
+		{name: "json-url-root-string", url: "/x", liveURL: "/x/other", ctype: jsonCT, hdr: other, liveHdr: liveOther, rec: `"https://h.example/cb?sig=REDACTED_abc"`, live: `"https://h.example/cb?sig=` + liveSecret + `"`, noise: value, wholeBody: true},
+		// A JSON body with data after its value does not read as JSON
+		// (json.Unmarshal's rule): it is not read for fields.
+		{name: "json-with-data-after-the-value", url: "/x", liveURL: "/x/other", ctype: jsonCT, hdr: other, liveHdr: liveOther, rec: `{"x":"alpha1"} REDACTED_abc`, live: `{"x":"bravo2"} ` + liveSecret, noise: value, wholeBody: true},
 		// A recorded URL that does not parse, at a mock that redacted
 		// something: its places cannot be found, so the call's path and
 		// query values are redacted whole.
@@ -793,4 +814,154 @@ func TestAPairedCallWithAnEmptyPathIsNamedSlash(t *testing.T) {
 	if len(got) != 1 || got[0].ActualSummary != "GET /" {
 		t.Fatalf("reports %+v", got)
 	}
+}
+
+// A miss report is redacted by the places of every recording of the pool it
+// was compared with, not only by its closest recording's: a recording the
+// report names as the closest (b, nearer by its path) that redacted nothing
+// does not show the secret another recording of the call (a) hid. Switch
+// off and on, and switch off at recordings that state their lifetime, whose
+// report tells how to serve the call to every test.
+func TestAMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
+	const jsonCT = "application/json"
+	value := []string{`^REDACTED_abc$`}
+	jsonHdr := map[string]string{"Content-Type": jsonCT}
+	text := map[string]string{"Content-Type": "text/plain", "X-Other": "alpha1"}
+	type pooled struct {
+		name               string
+		aURL, bURL, live   string
+		aHdr, bHdr, inHdr  map[string]string
+		aBody, bBody, body string
+	}
+	with := func(h map[string]string, k, v string) map[string]string {
+		out := map[string]string{k: v}
+		for hk, hv := range h {
+			out[hk] = hv
+		}
+		return out
+	}
+	cases := []pooled{
+		{name: "segment", aURL: "/x/REDACTED_abc/y", bURL: "/x/q9P/y", live: "/x/" + liveSecret + "/y", aHdr: jsonHdr, bHdr: jsonHdr, inHdr: jsonHdr, aBody: `{"x":"alpha1"}`, bBody: `{"x":"alpha1"}`, body: `{"x":"bravo2"}`},
+		{name: "query", aURL: "/x/aa?sig=REDACTED_abc", bURL: "/x", live: "/x?sig=" + liveSecret, aHdr: jsonHdr, bHdr: jsonHdr, inHdr: jsonHdr, aBody: `{"x":"alpha1"}`, bBody: `{"x":"alpha1"}`, body: `{"x":"bravo2"}`},
+		{name: "header", aURL: "/x/aa", bURL: "/x", live: "/x", aHdr: with(jsonHdr, "X-Sig", "REDACTED_abc"), bHdr: jsonHdr, inHdr: with(jsonHdr, "X-Sig", liveSecret), aBody: `{"x":"alpha1"}`, bBody: `{"x":"alpha1"}`, body: `{"x":"bravo2"}`},
+		{name: "json-field", aURL: "/x/aa", bURL: "/x", live: "/x", aHdr: jsonHdr, bHdr: jsonHdr, inHdr: jsonHdr, aBody: `{"assertion":"REDACTED_abc","x":"alpha1"}`, bBody: `{"x":"alpha1"}`, body: `{"assertion":"` + liveSecret + `","x":"bravo2"}`},
+		{name: "json-moved-field", aURL: "/x/aa", bURL: "/x", live: "/x", aHdr: jsonHdr, bHdr: jsonHdr, inHdr: jsonHdr, aBody: `{"assertion":"REDACTED_abc","x":"alpha1"}`, bBody: `{"x":"alpha1"}`, body: `{"data":{"assertion":"` + liveSecret + `"},"x":"bravo2"}`},
+		{name: "text-body", aURL: "/x/aa", bURL: "/x/otherz", live: "/x/other", aHdr: text, bHdr: text, inHdr: with(text, "X-Other", "bravo2"), aBody: `token REDACTED_abc`, bBody: `hello`, body: `token ` + liveSecret},
+		{name: "url-does-not-parse", aURL: "/x/%zz/REDACTED_abc", bURL: "/x/zz/q9P", live: "/x/zz/" + liveSecret, aHdr: jsonHdr, bHdr: jsonHdr, inHdr: jsonHdr, aBody: `{"x":"alpha1"}`, bBody: `{"x":"alpha1"}`, body: `{"x":"bravo2"}`},
+	}
+	for _, c := range cases {
+		for _, mode := range []string{"off", "off-stated-lifetime", "on"} {
+			t.Run(c.name+"/"+mode, func(t *testing.T) {
+				a := recorded("a", c.aURL, c.aHdr, c.aBody)
+				a.Noise = value
+				b := recorded("b", c.bURL, c.bHdr, c.bBody)
+				if mode == "off-stated-lifetime" {
+					for _, m := range []*models.Mock{a, b} {
+						m.Spec.Metadata = map[string]string{models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+					}
+				}
+				in := sent(c.live, c.inHdr, c.body)
+				request, _ := http.NewRequest("POST", "http://api.example"+c.live, strings.NewReader(c.body))
+				request.Header = in.header.Clone()
+				var diag *matchDiag
+				if mode == "on" {
+					got, d := strictMatch(t, in, nil, nil, nil, b, a)
+					if got != nil {
+						t.Fatal("served a call that differs in x")
+					}
+					diag = d
+				} else {
+					t.Setenv(provenswitch.Env, "")
+					ok, _, d, err := newHTTP().match(context.Background(), in, &mockMemDb{mocks: []*models.Mock{b, a}, updateUnFilteredReturn: true}, nil, nil, nil, true, false, true, true, true)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if ok {
+						t.Fatal("served a call that differs in x")
+					}
+					diag = d
+				}
+				r := newHTTP().buildHTTPMismatchReport(request, []byte(c.body), &mockMemDb{mocks: []*models.Mock{b, a}}, nil, nil, nil, diag)
+				if r == nil {
+					t.Fatal("no report")
+				}
+				// The row is of a report that names the recording that
+				// redacted nothing.
+				if mode != "on" && r.ClosestMock != "b" {
+					t.Fatalf("the report names %q, not the nearer recording b", r.ClosestMock)
+				}
+				all, err := json.Marshal(r)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(all), liveSecret) {
+					t.Errorf("the report at closest %q carries the live value at a place recording a redacted:\nsummary: %s\nDiff: %s\nReceivedReq:\n%s\nnext: %s", r.ClosestMock, r.ActualSummary, r.Diff, r.ReceivedReq, r.NextSteps)
+				}
+				if mode == "off-stated-lifetime" {
+					sessionHintMatchesTheCall(t, r, request)
+				}
+			})
+		}
+	}
+}
+
+// A miss whose pool cannot be read names the call's path by its shape only,
+// in its summary and in the error the proxy logs at ERROR (missedCall):
+// keploy cannot tell there which segment holds a secret. A miss with no
+// closest recording is named redacted by the places of every recording of
+// its pool: a variable's recording that left the pool, and under the proven
+// switch a test variable's route place (withRoutePlaces).
+func TestAMissWithNoClosestRecordingNamesNoSecret(t *testing.T) {
+	const live = "/x/" + liveSecret + "/y"
+	newReq := func() *http.Request {
+		r, _ := http.NewRequest("POST", "http://api.example"+live+"?q="+liveSecret, strings.NewReader(`{}`))
+		return r
+	}
+	check := func(t *testing.T, r *models.MockMismatchReport, request *http.Request, summary string) {
+		t.Helper()
+		if r == nil {
+			t.Fatal("no report")
+		}
+		all, _ := json.Marshal(r)
+		if r.ActualSummary != summary || strings.Contains(string(all), liveSecret) {
+			t.Errorf("summary %q, want %q, and no secret in the report: %s", r.ActualSummary, summary, all)
+		}
+		if got := missedCall(request, r); got != summary {
+			t.Errorf("the error names %q, want %q", got, summary)
+		}
+	}
+	// The recording of the pool that redacted the call's segment 1.
+	other := recorded("other", "/x/REDACTED_abc/y", map[string]string{"Content-Type": "application/json"}, `{}`)
+	other.Noise = []string{`^REDACTED_abc$`}
+	for _, mode := range []string{"off", "on"} {
+		t.Run("the-pool-cannot-be-read/"+mode, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[string]string{"off": "", "on": "1"}[mode])
+			request := newReq()
+			r := newHTTP().buildHTTPMismatchReport(request, []byte(`{}`), &mockMemDb{err: errors.New("read failed")}, nil, nil, nil, nil)
+			want := "POST /{}/{}/{}"
+			if mode == "on" && len(r.VariablePlaces) > 0 {
+				want = "POST /" + valueRedacted
+			}
+			check(t, r, request, want)
+		})
+		t.Run("variable-recording-gone/"+mode, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[string]string{"off": "", "on": "1"}[mode])
+			diag := &matchDiag{pool: []*models.Mock{other}, variable: &varProblem{mock: "gone", name: "v", place: "url.path[1]", kind: models.DiffKindVariable, expected: "REDACTED_abc", actual: liveSecret}}
+			request := newReq()
+			r, _ := variableMismatchReport(request, nil, "api.example", diag, nil, nil)
+			check(t, r, request, "POST /x/"+valueRedacted+"/y")
+		})
+	}
+	t.Run("route-place-with-no-closest", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "1")
+		read := recorded("read", "/x/recval/y", map[string]string{"Content-Type": "application/json"}, `{}`)
+		read.Spec.Variables = models.MockVariables{"v": {Recorded: "recval", Bind: "url.path[1]"}}
+		request := newReq()
+		pool := []*models.Mock{read, other}
+		r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: poolPlaces(nil, pool).summary(request.Method, request.URL.EscapedPath())}, request, nil, pool, nil, poolPlaces(nil, pool))
+		if len(r.VariablePlaces) == 0 {
+			t.Fatal("the row is of a call on the route of a declared path place")
+		}
+		check(t, r, request, "POST /x/"+valueRedacted+"/y")
+	})
 }
