@@ -31,6 +31,9 @@ type cutShortHooks struct {
 	// answered: the named test is answered as the harness's hooks answer
 	// it, and during is called after, not while its request is held.
 	answered bool
+	// ended, when set, is called once the held request's context has ended,
+	// before the request fails with that end.
+	ended func()
 }
 
 // sendLog is the tests a run sent, in order, and how many it had sent when
@@ -77,6 +80,9 @@ func (h cutShortHooks) SimulateRequest(ctx context.Context, tc *models.TestCase,
 	held := func() error {
 		h.during()
 		<-ctx.Done()
+		if h.ended != nil {
+			h.ended()
+		}
 		return fmt.Errorf("Get %q: %w", tc.HTTPReq.URL, ctx.Err())
 	}
 	if h.read {
@@ -194,44 +200,168 @@ func TestAStopThatCutsATestShortGivesItNoVerdict(t *testing.T) {
 
 // The application's exit while a test's request waits on it is the
 // application's, not its user's stop, under the proven switch too: the set
-// ends APP_HALTED, the run exits 1. The watch of an application run per set
-// cancels the set's context as it exits, and the exit of an application kept
-// across the sets cancels the run's with that exit: neither is the run's
-// context ended by its user (stoppedByItsUser).
+// ends APP_HALTED, the run exits 1, and no test is sent after the exit. The
+// watch of an application run per set cancels the set's context as it
+// exits, and the exit of an application kept across the sets cancels the
+// run's with that exit: neither is the run's context ended by its user
+// (stoppedByItsUser). Kept alive, at GOMAXPROCS=1, the next test was sent to
+// the application that had exited and the set ended FAILED: the set's watch
+// records the exit on a goroutine of its own, which nothing ordered before
+// the next test. Each case runs at GOMAXPROCS=1 and at the default, and with
+// the exit in the set's last test too.
 func TestAnAppExitThatCutsARequestShortIsNoUserStop(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		kept bool
-	}{{name: "run per set"}, {name: "kept alive", kept: true}} {
-		t.Run(c.name, func(t *testing.T) {
-			setSwitch(t, true)
-			h := newPartialRunHarness(t, 3, 0)
-			h.replayer.config.Command = "./app"
-			h.replayer.config.CommandType = string(utils.Native)
-			h.replayer.config.Test.MaxFlakyChecks = 1
-			h.replayer.config.Test.KeepAppAlive = c.kept
-			var once sync.Once
-			h.replayer.hookImpl = cutShortHooks{name: "test-2", during: func() { once.Do(func() { close(h.instr.appStopped) }) }}
-			saved := utils.ErrCode
-			utils.ErrCode = 0
-			t.Cleanup(func() { utils.ErrCode = saved })
-			t.Cleanup(utils.SetInterruptSignalForTest(0))
-			ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
-			defer cancel()
-			_ = h.replayer.Start(ctx)
-			h.report.mu.Lock()
-			rep := h.report.report
-			h.report.mu.Unlock()
-			if rep == nil {
-				t.Fatal("the set wrote no report")
+		cut  string
+	}{
+		{name: "run per set", cut: "test-2"},
+		{name: "kept alive", kept: true, cut: "test-2"},
+		{name: "run per set, the set's last test", cut: "test-3"},
+		{name: "kept alive, the set's last test", kept: true, cut: "test-3"},
+	} {
+		for _, procs := range []int{1, 0} {
+			name := c.name + ", GOMAXPROCS default"
+			if procs != 0 {
+				name = fmt.Sprintf("%s, GOMAXPROCS=%d", c.name, procs)
 			}
-			if rep.Status != string(models.TestSetStatusAppHalted) {
-				t.Errorf("the set ended %s, want %s", rep.Status, models.TestSetStatusAppHalted)
+			t.Run(name, func(t *testing.T) {
+				if procs != 0 {
+					defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(procs))
+				}
+				setSwitch(t, true)
+				h := newPartialRunHarness(t, 3, 0)
+				h.replayer.config.Command = "./app"
+				h.replayer.config.CommandType = string(utils.Native)
+				h.replayer.config.Test.MaxFlakyChecks = 1
+				h.replayer.config.Test.KeepAppAlive = c.kept
+				sent := &sendLog{stopAt: -1}
+				var once sync.Once
+				h.replayer.hookImpl = cutShortHooks{name: c.cut, sent: sent, during: func() {
+					once.Do(func() { sent.stop(); close(h.instr.appStopped) })
+				}}
+				saved := utils.ErrCode
+				utils.ErrCode = 0
+				t.Cleanup(func() { utils.ErrCode = saved })
+				t.Cleanup(utils.SetInterruptSignalForTest(0))
+				ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+				defer cancel()
+				_ = h.replayer.Start(ctx)
+				h.report.mu.Lock()
+				rep := h.report.report
+				h.report.mu.Unlock()
+				if rep == nil {
+					t.Fatal("the set wrote no report")
+				}
+				if rep.Status != string(models.TestSetStatusAppHalted) {
+					t.Errorf("the set ended %s, want %s", rep.Status, models.TestSetStatusAppHalted)
+				}
+				if utils.ErrCode != 1 {
+					t.Errorf("the run exits %d, want 1", utils.ErrCode)
+				}
+				if after := sent.afterStop(); len(after) > 0 {
+					t.Errorf("%v sent after the application exited in %s", after, c.cut)
+				}
+			})
+		}
+	}
+}
+
+// An application's exit that came before its user's stop decides the set:
+// APP_HALTED (APP_FAULT for a command error, INTERNAL_ERR for keploy's error
+// running it), and the test it cut short is filed as it is with no stop, in
+// both modes, run per set and kept alive, wherever keploy sees the stop.
+// The stop comes once the exit has ended the held request. Before, run per
+// set, the set ended USER_ABORT where a test loop saw the stop before its
+// next test, and under the switch as the cut request failed (no verdict for
+// it, exit 130), but APP_HALTED where the switch was off and the cut test was
+// the set's last: where keploy saw the stop decided the set.
+func TestAnAppExitBeforeItsUserStopKeepsTheSetHalted(t *testing.T) {
+	const sigint = 2
+	for _, c := range []struct {
+		name     string
+		on, kept bool
+		// cut is the test the application's exit cuts short.
+		cut string
+		// exit is how the application's run ends, and want the set's status
+		// for it: an exit (ErrAppStopped, APP_HALTED) where empty.
+		exit models.AppErrorType
+		want models.TestSetStatus
+	}{
+		{name: "switch off, run per set, a command error", cut: "test-2", exit: models.ErrCommandError, want: models.TestSetStatusFaultUserApp},
+		{name: "switch on, run per set, a command error", on: true, cut: "test-2", exit: models.ErrCommandError, want: models.TestSetStatusFaultUserApp},
+		{name: "switch off, run per set, keploy's error", cut: "test-2", exit: models.ErrInternal, want: models.TestSetStatusInternalErr},
+		{name: "switch on, run per set, keploy's error", on: true, cut: "test-2", exit: models.ErrInternal, want: models.TestSetStatusInternalErr},
+		{name: "switch off, run per set", cut: "test-2"},
+		{name: "switch on, run per set", on: true, cut: "test-2"},
+		{name: "switch off, run per set, the set's last test", cut: "test-3"},
+		{name: "switch on, run per set, the set's last test", on: true, cut: "test-3"},
+		{name: "switch off, kept alive", kept: true, cut: "test-2"},
+		{name: "switch on, kept alive", on: true, kept: true, cut: "test-2"},
+	} {
+		for _, procs := range []int{1, 0} {
+			name := c.name + ", GOMAXPROCS default"
+			if procs != 0 {
+				name = fmt.Sprintf("%s, GOMAXPROCS=%d", c.name, procs)
 			}
-			if utils.ErrCode != 1 {
-				t.Errorf("the run exits %d, want 1", utils.ErrCode)
-			}
-		})
+			t.Run(name, func(t *testing.T) {
+				if procs != 0 {
+					defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(procs))
+				}
+				setSwitch(t, c.on)
+				h := newPartialRunHarness(t, 3, 0)
+				h.replayer.config.Test.KeepAppAlive = c.kept
+				h.instr.stopErr = c.exit
+				want := c.want
+				if want == "" {
+					want = models.TestSetStatusAppHalted
+				}
+				sent := &sendLog{stopAt: -1}
+				h.replayer.config.Command = "./app"
+				h.replayer.config.CommandType = string(utils.Native)
+				h.replayer.config.Test.MaxFlakyChecks = 1
+				saved := utils.ErrCode
+				t.Cleanup(func() { utils.ErrCode = saved })
+				utils.ErrCode = 0
+				t.Cleanup(utils.SetInterruptSignalForTest(0))
+				ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+				defer cancel()
+				ctx, stop := context.WithCancel(ctx)
+				defer stop()
+				var exits, stops sync.Once
+				h.replayer.hookImpl = cutShortHooks{name: c.cut, sent: sent,
+					during: func() { exits.Do(func() { close(h.instr.appStopped) }) },
+					ended: func() {
+						stops.Do(func() {
+							sent.stop()
+							utils.SetInterruptSignalForTest(sigint)
+							stop()
+						})
+					}}
+				// Start returns the kept application's exit, and the stop's
+				// cancellation run per set.
+				_ = h.replayer.Start(ctx)
+				h.report.mu.Lock()
+				rep := h.report.report
+				h.report.mu.Unlock()
+				if rep == nil {
+					t.Fatal("the set wrote no report")
+				}
+				code, status := utils.ErrCode, models.TestSetStatus(rep.Status)
+				if status != want {
+					t.Errorf("the set ended %s, want %s", status, want)
+				}
+				if code != 1 {
+					t.Errorf("the run exits %d, want 1", code)
+				}
+				if got := failedTests(h); len(got) != 1 || got[0] != c.cut {
+					t.Errorf("the tests filed FAILED are %v, want [%s]", got, c.cut)
+				}
+				if after := sent.afterStop(); len(after) > 0 {
+					t.Errorf("%v sent after the user's stop in %s", after, c.cut)
+				}
+			})
+		}
 	}
 }
 
