@@ -250,6 +250,10 @@ type prInstr struct {
 	appStopped           chan struct{}
 	// stopErr is how the app exits; ErrAppStopped when empty.
 	stopErr models.AppErrorType
+	// stopErrs, when set, is how each of the app's exits is in turn (its
+	// first exit stopErrs[0]), stopErr past its end; exits counts them.
+	stopErrs []models.AppErrorType
+	exits    int
 	// lastParams is the filter-params payload of the most recent send, so a
 	// test can assert what the agent was actually told.
 	lastParams models.MockFilterParams
@@ -321,10 +325,16 @@ func (f *prInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError 
 		}
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, ExitCode: -1, LeftRunning: f.leftRunning}
 	case <-f.appStopped:
+		f.mu.Lock()
 		errType := models.ErrAppStopped
 		if f.stopErr != "" {
 			errType = f.stopErr
 		}
+		if f.exits < len(f.stopErrs) {
+			errType = f.stopErrs[f.exits]
+		}
+		f.exits++
+		f.mu.Unlock()
 		return models.AppError{
 			AppErrorType: errType,
 			ExitCode:     1,

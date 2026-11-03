@@ -189,12 +189,25 @@ func cancelledRunReason(testSet string, setErr, cause error) string {
 	}
 }
 
-// haltedRunReason is the reason a run stops with when its set testSet ended
-// status (APP_HALTED or APP_FAULT) and the run goes no further: the
-// application's exit, with its code when it has one, when keploy saw it
-// (exit), else the set's status. Never "replay completed successfully".
-func haltedRunReason(testSet string, status models.TestSetStatus, exit models.AppError) string {
+// runCompletedReason is the reason a run stops with when nothing stopped it
+// early and none of its sets halted.
+const runCompletedReason = "replay completed successfully"
+
+// haltedRunReason is the reason a set testSet that ended status (APP_HALTED
+// or APP_FAULT, or under docker compose USER_ABORT, when its application's
+// exit stopped it) gives the run's stop: the application's exit, with its
+// code when it has one, when keploy saw it (exit, else the exit the set's
+// error setErr wraps), else the set's status and its error. Never "replay
+// completed successfully".
+func haltedRunReason(testSet string, status models.TestSetStatus, exit models.AppError, setErr error) string {
 	if exit == (models.AppError{}) {
+		// errors.As leaves exit as it is when setErr wraps no exit.
+		_ = errors.As(setErr, &exit)
+	}
+	if exit == (models.AppError{}) {
+		if setErr != nil {
+			return fmt.Sprintf("test-set %s ended %s: %v", testSet, status, setErr)
+		}
 		return fmt.Sprintf("test-set %s ended %s", testSet, status)
 	}
 	code := ""
@@ -202,6 +215,18 @@ func haltedRunReason(testSet string, status models.TestSetStatus, exit models.Ap
 		code = fmt.Sprintf(" with exit code %d", exit.ExitCode)
 	}
 	return fmt.Sprintf("the application exited during test-set %s%s: %v", testSet, code, exit)
+}
+
+// runStopReason is the reason a run whose sets ended stops with: reason,
+// what stopped it, unless that is runCompletedReason and sets of the run
+// halted (halted, their haltedRunReason): then those, each set with its
+// exit. A run with a halted set never stops with "replay completed
+// successfully".
+func runStopReason(reason string, halted []string) string {
+	if reason != runCompletedReason || len(halted) == 0 {
+		return reason
+	}
+	return strings.Join(halted, "; ")
 }
 
 func resolveTestSetStatus(cmdType utils.CmdType, current, derived models.TestSetStatus, err error) (models.TestSetStatus, bool) {
@@ -865,7 +890,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	setupCtx = context.WithValue(setupCtx, models.ErrGroupKey, setupErrGrp)
 
 	var hookCancel context.CancelFunc
-	var stopReason = "replay completed successfully"
+	var stopReason = runCompletedReason
 	// summaryEmitted flips true once the normal TestRun summary fires. If the
 	// run stops gracefully before that (setup/instrument failure), the defer
 	// emits a TestRunAborted with the categorized reason instead.
@@ -1161,6 +1186,11 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 	var testSetResult bool
 	abortTestRun := false
+	// haltedSets: the reasons of the run's sets whose application exited
+	// (haltedRunReason), in their order: the set that stopped the run, or
+	// those the run went on past (docker compose, a stack per set). The
+	// run's stop names them (runStopReason).
+	var haltedSets []string
 	r.afterTestRunCalled = false
 	var flakyTestSets []string
 	var testSets []string
@@ -1300,6 +1330,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 						"test set failed because the app exited; continuing to next test set",
 						zap.String("test-set", testSet),
 						zap.String("status", string(testSetStatus)))
+					haltedSets = append(haltedSets, haltedRunReason(testSet, testSetStatus, r.setAppExit, err))
 					testSetResult = false
 					testRunResult = false
 					break
@@ -1318,11 +1349,9 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				// (--keep-app-alive, or the stack docker compose keeps) ended
 				// the run's context: no set can run after it, under compose
 				// too, whose halted set the run otherwise goes on past on a
-				// stack of its own.
+				// stack of its own. Either way the run's stop names the halt.
 				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType) || keptAppExit(ctx) != (models.AppError{})
-				if abortTestRun {
-					stopReason = haltedRunReason(testSet, testSetStatus, r.setAppExit)
-				}
+				haltedSets = append(haltedSets, haltedRunReason(testSet, testSetStatus, r.setAppExit, nil))
 			case models.TestSetStatusInternalErr:
 				testSetResult = false
 				abortTestRun = abortAfterTestSet(testSetStatus, cmdType, r.notJudged(testSet))
@@ -1472,6 +1501,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			}
 		}
 	}
+	stopReason = runStopReason(stopReason, haltedSets)
 	verdictReached = true
 	// A run none of whose tests got a verdict (every test set, or every test,
 	// ignored or quarantined) verified nothing, so it does not pass, as a run

@@ -204,19 +204,45 @@ func TestAnAppThatExitsMidSetFailsTheSetAndTheRunNamesItsExit(t *testing.T) {
 }
 
 // haltedRunReason names the application's exit, with its code when it has
-// one, and the set; with no exit seen, the set's status.
+// one, and the set: the exit keploy saw, else the one the set's error wraps;
+// with no exit known, the set's status and its error.
 func TestHaltedRunReasonNamesTheExitAndTheSet(t *testing.T) {
+	exit3 := models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3, Err: errors.New("exit status 3")}
 	for _, c := range []struct {
-		name string
-		exit models.AppError
-		want string
+		name   string
+		exit   models.AppError
+		setErr error
+		want   string
 	}{
-		{"an exit with a code", models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3, Err: errors.New("exit status 3")}, "the application exited during test-set s1 with exit code 3: exited due to command error: exit status 3"},
-		{"a signal", models.AppError{AppErrorType: models.ErrCommandError, ExitCode: -1, Err: errors.New("signal: killed")}, "the application exited during test-set s1: exited due to command error: signal: killed"},
-		{"no code known", models.AppError{AppErrorType: models.ErrAppStopped, Err: errors.New("stopped")}, "the application exited during test-set s1: app stopped: stopped"},
-		{"no exit seen", models.AppError{}, "test-set s1 ended APP_HALTED"},
+		{"an exit with a code", exit3, nil, "the application exited during test-set s1 with exit code 3: exited due to command error: exit status 3"},
+		{"a signal", models.AppError{AppErrorType: models.ErrCommandError, ExitCode: -1, Err: errors.New("signal: killed")}, nil, "the application exited during test-set s1: exited due to command error: signal: killed"},
+		{"no code known", models.AppError{AppErrorType: models.ErrAppStopped, Err: errors.New("stopped")}, nil, "the application exited during test-set s1: app stopped: stopped"},
+		{"no exit seen", models.AppError{}, nil, "test-set s1 ended APP_HALTED"},
+		{"the exit the set's error wraps", models.AppError{}, fmt.Errorf("the application exited before keploy's agent in its stack was ready: %w", exit3), "the application exited during test-set s1 with exit code 3: exited due to command error: exit status 3"},
+		{"the exit seen, not the set's error's", exit3, fmt.Errorf("wraps: %w", models.AppError{AppErrorType: models.ErrAppStopped, ExitCode: 9}), "the application exited during test-set s1 with exit code 3: exited due to command error: exit status 3"},
+		{"no exit known, the set's error", models.AppError{}, errors.New("the stack went away"), "test-set s1 ended APP_HALTED: the stack went away"},
 	} {
-		if got := haltedRunReason("s1", models.TestSetStatusAppHalted, c.exit); got != c.want {
+		if got := haltedRunReason("s1", models.TestSetStatusAppHalted, c.exit, c.setErr); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// A run whose sets ended stops with what stopped it; when nothing did, with
+// the halts of the sets it went on past, each with its exit, and only with
+// "replay completed successfully" when none halted.
+func TestRunStopReasonNamesTheSetsTheRunWentOnPast(t *testing.T) {
+	halted := []string{"the application exited during test-set s1 with exit code 3: x", "test-set s2 ended APP_HALTED"}
+	for _, c := range []struct {
+		name, reason string
+		halted       []string
+		want         string
+	}{
+		{"none halted", runCompletedReason, nil, runCompletedReason},
+		{"sets halted", runCompletedReason, halted, halted[0] + "; " + halted[1]},
+		{"stopped for another reason", "failed to run test set: boom", halted, "failed to run test set: boom"},
+	} {
+		if got := runStopReason(c.reason, c.halted); got != c.want {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)
 		}
 	}
@@ -311,9 +337,11 @@ func TestAKeptAppsExitBetweenStepsStopsTheRunNamingItsExit(t *testing.T) {
 
 // Under docker compose with keploy's mocks off, a stack runs per set and a
 // set whose application halts does not stop the run: the next set runs on a
-// stack of its own. That halt is its set's status, not the reason the run
-// stopped, so the run's reason does not name it.
-func TestAComposeSetsHaltDoesNotStopTheRunOrNameItsStop(t *testing.T) {
+// stack of its own. The run's stop names each set that halted, with its
+// own exit, never "replay completed successfully". Here the application
+// exits mid-way through the first set and, at once, on the second set's
+// stack before keploy's agent in it is ready, its command failing.
+func TestAComposeSetsHaltDoesNotStopTheRunButItsStopNamesIt(t *testing.T) {
 	h := newPartialRunHarness(t, 2, 0)
 	h.replayer.testDB = twoPRSetsDB{h.replayer.testDB.(*prTestDB)}
 	h.replayer.config.Command = "docker compose up"
@@ -325,6 +353,7 @@ func TestAComposeSetsHaltDoesNotStopTheRunOrNameItsStop(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
 	h.replayer.logger = zap.New(core)
 	h.instr.stopAppAfterNUpdates = 2
+	h.instr.stopErrs = []models.AppErrorType{models.ErrAppStopped, models.ErrCommandError}
 	saved := utils.ErrCode
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = saved })
@@ -344,8 +373,23 @@ func TestAComposeSetsHaltDoesNotStopTheRunOrNameItsStop(t *testing.T) {
 	if len(stops) != 1 {
 		t.Fatalf("%d \"stopping Keploy\" lines, want 1", len(stops))
 	}
-	if reason, _ := stops[0].ContextMap()["reason"].(string); strings.Contains(reason, "exited during test-set") || strings.Contains(reason, "ended "+string(models.TestSetStatusAppHalted)) {
-		t.Errorf("the run stops with the reason %q, which names a set's halt the run went on past", reason)
+	reason, _ := stops[0].ContextMap()["reason"].(string)
+	parts := strings.Split(reason, "; ")
+	if len(parts) != 2 {
+		t.Fatalf("the run stops with the reason %q, want one that names each of the 2 halted sets", reason)
+	}
+	for i, c := range []struct {
+		set  string
+		exit models.AppErrorType
+	}{{"test-set-0", models.ErrAppStopped}, {"test-set-1", models.ErrCommandError}} {
+		for _, want := range []string{"exited during test-set " + c.set, "exit code 1", string(c.exit)} {
+			if !strings.Contains(parts[i], want) {
+				t.Errorf("the run's reason names %q for its set %d, want it to say %q", parts[i], i, want)
+			}
+		}
+	}
+	if utils.ErrCode != 1 {
+		t.Errorf("exit code %d, want 1", utils.ErrCode)
 	}
 }
 
