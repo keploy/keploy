@@ -299,8 +299,9 @@ func TestARunStartedUnderNohupIgnoresHangUps(t *testing.T) {
 	}
 }
 
-// `keploy agent` opts out: DieOnHangup gives SIGHUP back its default action,
-// so a hang-up kills the agent, as its owners count on (see DieOnHangup).
+// A `keploy agent` no keploy client started opts out: DieOnHangup gives
+// SIGHUP back its default action, so a hang-up kills the agent, as its
+// owners count on (see DieOnHangup).
 func TestDieOnHangupLetsAHangUpKill(t *testing.T) {
 	catchHangups(t)
 	r := startHangupRun(t, true)

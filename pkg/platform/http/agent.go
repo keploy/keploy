@@ -2859,11 +2859,12 @@ func (a *AgentClient) stopAgent() {
 		a.logger.Debug("Stopping keploy agent", zap.Int("pid", pid))
 	}
 
-	// The PTY is never closed here: closing it hangs the agent up, and a
-	// hung-up agent dies where it stands. The agent's stop goroutine ends it
-	// (stopPTYAgent) -- SIGTERM to sudo, which also ends sudo at its password
-	// prompt -- and the PTY is closed once it has exited (PTYHandle.Wait). The
-	// terminal is the user's again at once, though.
+	// The PTY is never closed here: closing it would hang the agent up (a
+	// stop, or nothing once it is stopping: cli.Agent) and leave what it
+	// still writes unread. The agent's stop goroutine ends it (stopPTYAgent) --
+	// SIGTERM to sudo, which also ends sudo at its password prompt -- and the
+	// PTY is closed once it has exited (PTYHandle.Wait). The terminal is the
+	// user's again at once, though.
 	if a.agentPTY != nil {
 		a.agentPTY.RestoreTerminal()
 	}
