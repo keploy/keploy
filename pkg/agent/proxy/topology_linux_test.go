@@ -360,6 +360,7 @@ func TestUnderTheSwitchATreeServedRealCallIsItsOwnWorkersTests(t *testing.T) {
 	from := func(port, caller, inst uint32) *agent.NetworkAddress {
 		return &agent.NetworkAddress{Version: 4, Port: port, KernelPid: caller, AgentNsPid: caller, Instance: inst}
 	}
+	liveInstances(t, 3, 4)
 	tr.BeginTestOf(3)
 	tr.BeginTestOf(4)
 	if served, err := sendTreeAs(context.Background(), t, p, from(silent, self, 4)); !served || err != nil {

@@ -790,7 +790,7 @@ func TestARefusedDialToAContainerPlacedMeanwhileCountsAtOnce(t *testing.T) {
 	containerkey.Default = k
 	// Two test workers' tests open: the failure is worker 4's, whose
 	// instance the kernel stamped the connect with.
-	twoWorkers(p)
+	twoWorkers(t, p)
 	dest := ipv4Dest(t, refused)
 	dest.Instance = 4
 	d := p.decideHandshake(fakeHandshakeDest{dest: dest})(context.Background(), appEnd, proxyEnd)
@@ -968,7 +968,8 @@ func (c *readSignal) Read(p []byte) (int, error) {
 var workerFour = realdeps.Origin{Instance: 4, Pid: 1004}
 
 // twoWorkers opens test worker 9's test, then worker 4's, on p's tracker.
-func twoWorkers(p *Proxy) {
+func twoWorkers(t *testing.T, p *Proxy) {
+	liveInstances(t, 9, 4)
 	p.realTracker.BeginTestOf(9)
 	p.realTracker.BeginTestOf(4)
 }
@@ -1018,7 +1019,7 @@ func TestARealConnectionIsItsOwnWorkersTestsWhicheverWayItGoes(t *testing.T) {
 	named := "api.test:" + portText
 
 	p := realProxy(t, []string{dst}, nil)
-	twoWorkers(p)
+	twoWorkers(t, p)
 	app, accepted := realConnPair(t)
 	done := serveRealFrom(p, accepted, dst, workerFour)
 	require.Equal(t, "real:hello", sendAndRead(t, app, "hello"))
@@ -1030,7 +1031,7 @@ func TestARealConnectionIsItsOwnWorkersTestsWhicheverWayItGoes(t *testing.T) {
 	// so.
 	p = realProxy(t, []string{named}, map[string]string{"api.test": "127.0.0.1"})
 	p.real.Load().book.Answered("api.test", []netip.Addr{netip.MustParseAddr("127.0.0.1")})
-	twoWorkers(p)
+	twoWorkers(t, p)
 	app, accepted = realConnPair(t)
 	done = serveRealFrom(p, accepted, dst, workerFour)
 	preface := "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
@@ -1040,14 +1041,14 @@ func TestARealConnectionIsItsOwnWorkersTestsWhicheverWayItGoes(t *testing.T) {
 
 	refused := testnet.RefusedAddr(t, "tcp")
 	p = realProxy(t, []string{refused}, nil)
-	twoWorkers(p)
+	twoWorkers(t, p)
 	_, accepted = realConnPair(t)
 	require.True(t, (<-serveRealFrom(p, accepted, refused, workerFour)).handled)
 	require.Equal(t, []models.RealUse{{Dest: refused, Failed: 1}}, endWorkers(t, p).Uses, "refused at the dial")
 
 	p = realProxy(t, []string{refused}, nil)
 	p.setSession(&agent.Session{Mode: models.MODE_TEST, OutgoingOptions: models.OutgoingOptions{Mocking: true}})
-	twoWorkers(p)
+	twoWorkers(t, p)
 	dest := ipv4Dest(t, refused)
 	dest.Instance, dest.KernelPid = workerFour.Instance, workerFour.Pid
 	d := p.decideHandshake(fakeHandshakeDest{dest: dest})(context.Background(), appEnd, proxyEnd)
@@ -1057,7 +1058,7 @@ func TestARealConnectionIsItsOwnWorkersTestsWhicheverWayItGoes(t *testing.T) {
 	// Two names on the address: the first request's names it, the second's
 	// is one mock.real does not list, and keploy ends the connection.
 	p = realProxy(t, []string{named}, map[string]string{"api.test": "127.0.0.1", "web.test": "127.0.0.1"})
-	twoWorkers(p)
+	twoWorkers(t, p)
 	app, accepted = realConnPair(t)
 	done = serveRealFrom(p, accepted, dst, workerFour)
 	sendAndRead(t, app, "GET / HTTP/1.1\r\nHost: api.test\r\n\r\nGET / HTTP/1.1\r\nHost: web.test\r\n\r\n")
@@ -1068,7 +1069,7 @@ func TestARealConnectionIsItsOwnWorkersTestsWhicheverWayItGoes(t *testing.T) {
 	require.Contains(t, mine.Incomplete[0].Why, "web.test")
 
 	p = realProxy(t, []string{"db.test:3306"}, map[string]string{"db.test": "127.0.0.1"})
-	twoWorkers(p)
+	twoWorkers(t, p)
 	app, accepted = realConnPair(t)
 	done = serveRealFrom(p, accepted, "127.0.0.1:3306", workerFour)
 	require.NoError(t, app.Close())
