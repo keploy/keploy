@@ -144,6 +144,35 @@ func neverReadyStatus(appErr models.AppError) (status models.TestSetStatus, exit
 	return status, true
 }
 
+// keptAppExit is the exit of the application --keep-app-alive keeps across a
+// run's sets, when that exit is what ended ctx: Start runs it in the run's
+// errgroup, which cancels the run's context with the error the run returned
+// as the cause. The zero value when ctx has not ended, or ended for anything
+// else (the user's stop).
+func keptAppExit(ctx context.Context) models.AppError {
+	var appErr models.AppError
+	// errors.As leaves appErr as it is when the cause holds no exit.
+	_ = errors.As(context.Cause(ctx), &appErr)
+	return appErr
+}
+
+// cancelledRunReason is the reason a run stops with when its context ended
+// while a set ran and its user did not stop it: the set's error when it says
+// more than the cancellation (an application that exited before it accepted
+// a connection), else what ended the run (cause: the error of a goroutine of
+// the run's errgroup, such as the exit of the application --keep-app-alive
+// keeps). Never "replay completed successfully".
+func cancelledRunReason(setErr, cause error) string {
+	switch {
+	case setErr != nil && !errors.Is(setErr, context.Canceled):
+		return fmt.Sprintf("failed to run test set: %v", setErr)
+	case cause != nil && !errors.Is(cause, context.Canceled):
+		return fmt.Sprintf("the run stopped: %v", cause)
+	default:
+		return "the run was cancelled before its test sets ended"
+	}
+}
+
 func resolveTestSetStatus(cmdType utils.CmdType, current, derived models.TestSetStatus, err error) (models.TestSetStatus, bool) {
 	switch current {
 	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp, models.TestSetStatusInternalErr, models.TestSetStatusUserAbort:
@@ -1209,6 +1238,11 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			r.tellSetEnd(testSet, testSetStatus, err)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
+					// The user's stop ends parentCtx, and the defer names no
+					// reason then. Otherwise a goroutine of the run's
+					// errgroup ended ctx (the exit of the application
+					// --keep-app-alive keeps), and the reason names it.
+					stopReason = cancelledRunReason(err, context.Cause(ctx))
 					return err
 				}
 				// DockerCompose: when the user-app container exits,
@@ -2206,9 +2240,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// stack to answer healthy): the application keploy started for the set
 	// exited first (its run set lastAppErr before its exit cancelled
 	// runTestSetCtx), and the set fails as an exit does, saying so; else the
-	// user stopped keploy.
+	// user stopped keploy. An application --keep-app-alive keeps across the
+	// run's sets is run by Start, not by the set: its exit cancels the run's
+	// context with that exit as the cause (keptAppExit).
 	neverReady := func(before string) (models.TestSetStatus, error) {
 		appErr := getLastAppErr()
+		if appErr == (models.AppError{}) {
+			appErr = keptAppExit(ctx)
+		}
 		status, exited := neverReadyStatus(appErr)
 		if !exited {
 			return status, context.Canceled
