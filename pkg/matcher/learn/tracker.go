@@ -164,8 +164,8 @@ type Tracker struct {
 	// in the order of the real instants it served them at (servedIn), each
 	// with the instant its call reached keploy. NewSet forgets them.
 	servedAt []servedInstant
-	// serveOwner is SetServeOwner's f.
-	serveOwner atomic.Pointer[func(*models.Mock) bool]
+	// serveOwner is SetServeOwnerOf's f.
+	serveOwner atomic.Pointer[func(*models.Mock) ServeOwner]
 	// serveAt is the real instant each of the running set's serves was made
 	// at, by number (serveAt[n-1] of the n-th, ServedMockAt's at): what an
 	// Order cut at a call's arrival (Order.ArrivedAt) reads. NewSet forgets
@@ -631,7 +631,9 @@ func (t *Tracker) await() {
 // the running test's earliest place, read as any earlier place
 // (Earlier.Given), until the next test begins. The agent gives it as the
 // test case opens (its mock filter), after Begin and before the replay sends
-// the request: a call the test's request led to finds it. One given while no
+// the request: a call the test's request led to finds it. The agent gives
+// a models.TestRequest through GiveRequest, which takes its recorded begin
+// too; Give takes none. One given while no
 // test is open (the test's begin never reached the agent) is tied to no
 // test's calls: the calls made until the next test begins read a request
 // that could not be read, never the previous test's.
@@ -639,9 +641,40 @@ func (t *Tracker) Give(e Earlier) {
 	if t == nil {
 		return
 	}
+	t.give(e, time.Time{})
+}
+
+// GiveRequest gives req, the running keploy test case's own request, as
+// Give gives GivenRequest(req), and in the same step the instant it was
+// recorded at (models.TestRequest.RecordedAt) as where the test began in
+// its recording, where none was given before it began (RecordedBegin), as
+// keploy test gives it, after the test began awaiting it. In a server test
+// a call's window in the recording then knows where its test began there
+// (CallWindowFrom, Span.TestFrom); a call the request releases
+// (AwaitRequest) reads its window once both are taken, never between them.
+// A request given while no test is open is tied to no test (Give), and its
+// recorded begin is dropped.
+func (t *Tracker) GiveRequest(req *models.TestRequest) {
+	if t == nil {
+		return
+	}
+	var recBegan time.Time
+	if req != nil {
+		recBegan = req.RecordedAt
+	}
+	t.give(GivenRequest(req), recBegan)
+}
+
+// give is Give, and GiveRequest's step: recBegan, where it is not zero, is
+// where the open test began in its recording, taken under the same hold of
+// t.mu that releases the calls awaiting e (closeAwaiting).
+func (t *Tracker) give(e Earlier, recBegan time.Time) {
 	e.Given = true
 	e.Seen = append([]Seen(nil), e.Seen...)
 	t.mu.Lock()
+	if t.open && !recBegan.IsZero() && t.recBegan.IsZero() {
+		t.recBegan = recBegan
+	}
 	if t.open {
 		t.given = &e
 	} else {
@@ -860,10 +893,11 @@ func (t *Tracker) ServedHandshakeIn(m *models.Mock, chosen, in *Flight) {
 // recording m, made at the real instant at, to a call that reached keploy
 // at from (no later than at). upTo is the latest from of it and of every
 // serve made before it. mine says the store served the open test's own
-// recording or the start-up's (SetServeOwner), and mineUpTo is the latest
-// from of those serves among it and every serve made before it (zero for
-// none). m is what a protocol's sibling rule reads (Siblings): its
-// statement and its recorded connection or scope.
+// recording or the start-up's (SetServeOwnerOf's OwnerTest; a serve the
+// store cannot say of, or says is another's, is not), and mineUpTo is the
+// latest from of those serves among it and every serve made before it
+// (zero for none). m is what a protocol's sibling rule reads (Siblings):
+// its statement and its recorded connection or scope.
 type servedInstant struct {
 	m              *models.Mock
 	at, from, upTo time.Time
@@ -883,7 +917,7 @@ func (t *Tracker) servedIn(m *models.Mock, at, from time.Time, in *Flight, k ser
 	// install replaces under that lock, so it is the view that served m.
 	mine := false
 	if f := t.serveOwner.Load(); f != nil && !m.IsProtocolPhase() {
-		mine = (*f)(m)
+		mine = (*f)(m) == OwnerTest
 	}
 	t.mu.Lock()
 	if !m.IsProtocolPhase() {
@@ -1963,6 +1997,17 @@ func (t *Tracker) CallWindow(paired *models.Mock, recorded []*models.Mock, arriv
 // previous serve, or the set's begin where that came later (setBound), or
 // where the clock's run began after it where the hooks tell that
 // (SetAppClockRun).
+//
+// In a server test each run's span also carries where the running test
+// began there (Span.TestFrom), where a call made after that begin starts
+// the span: in the recording the test's recorded begin (RecordedBegin, or
+// GiveRequest with keploy test's request), where it came before
+// prevRec; in this run where liveClock.testFrom puts the replay's span's
+// (LiveSpan). Another goroutine of the application (a queue's consumer
+// beside the test's handler) can make a call between a read of the clock
+// and the call that carries it, in either run, so the learn step reads a
+// read from the test's begin too where the window refuses it
+// (Window.fromTestBegin), as the replay's check passes it (CheckClockRead).
 func (t *Tracker) CallWindowFrom(prevRec time.Time, paired *models.Mock, arrival time.Time) *Window {
 	return t.CallWindowFromSiblings(prevRec, paired, arrival, nil)
 }
@@ -2017,14 +2062,14 @@ type OwnCall struct {
 	paired  *models.Mock
 	sibling Siblings
 	tests   RecordedTests
-	owner   func(*models.Mock) bool
+	owner   func(*models.Mock) ServeOwner
 	prev    *PreviousCall
 }
 
 // NewOwnCall starts the window of the call paired with paired, a test's own
 // recording, whose siblings sibling tells (nil: none). nil, so the call has
 // no window (the lead alone shows a read, as before), where the tracker or
-// paired is nil, no store tells whose a serve is (SetServeOwner), or tests
+// paired is nil, no store tells whose a serve is (SetServeOwnerOf), or tests
 // do not place paired inside a recorded test's window (it lies outside every
 // one, or the store cannot tell: inside is false): each half would then
 // start where the other's does not.
@@ -2044,15 +2089,16 @@ func (t *Tracker) NewOwnCall(paired *models.Mock, sibling Siblings, tests Record
 
 // See considers m, a recording of the set, as the call's previous call in
 // the recording. One made in the call's recorded test that the store's view
-// in force files as neither the test's own nor the start-up's (a worker:
-// scope's, the background's) is none, as its serve starts no span of the
-// call in this run. One the store cannot place is not known to be in the
-// call's test (same is false), and stays a previous call.
+// in force does not file as the test's own or the start-up's (OwnerTest: a
+// worker: scope's, the background's, or one it cannot say of, as servedIn
+// files a serve) is none, as its serve starts no span of the call in this
+// run. One the store cannot place is not known to be in the call's test
+// (same is false), and stays a previous call.
 func (o *OwnCall) See(m *models.Mock) {
 	if o == nil || m == nil {
 		return
 	}
-	if same, _ := o.tests.SameRecordedTestWindow(m.Spec.ReqTimestampMock, o.paired.Spec.ReqTimestampMock); same && !o.owner(m) {
+	if same, _ := o.tests.SameRecordedTestWindow(m.Spec.ReqTimestampMock, o.paired.Spec.ReqTimestampMock); same && o.owner(m) != OwnerTest {
 		return
 	}
 	o.prev.See(m)
@@ -2070,16 +2116,19 @@ func (o *OwnCall) Window(arrival time.Time) *Window {
 	return lc.window(o.prev.At(), recBegan, o.paired, arrival)
 }
 
-// CallWindowIn is CallWindowFrom with the recording's half of a client
-// test's window bounded by recBegan, the recorded begin of the test whose
-// recorded window paired lies in, instead of the running test's: a
-// recording another test made (a timer's call recorded in an earlier test's
-// window, which a call of the running test pairs with) read the clock in
-// that test's run of it, which that test's begin moved the clock to, and
-// the running test's recorded begin, after the recording, bounds no span
-// of it (CallWindowFrom has none there). Zero recBegan is none given, as a
-// test begun with no recorded begin. keploy test reads no recorded begin,
-// so its window is CallWindowFrom's.
+// CallWindowIn is CallWindowFrom with recBegan, the recorded begin of the
+// test whose recorded window paired lies in, in place of the running
+// test's: a recording another test made (a timer's call recorded in an
+// earlier test's window, which a call of the running test pairs with) read
+// the clock in that test's run of it, which that test's begin moved the
+// clock to, and the running test's recorded begin, after the recording,
+// bounds no span of it (CallWindowFrom has none there). In a client test
+// recBegan bounds the recording's half of the window; in a server test that
+// half carries it as where its test began (Span.TestFrom) where a call
+// recorded after it starts the span, so the learn step reads a read the
+// window refuses from the begin of the recording's own test
+// (Window.fromTestBegin). Zero recBegan is none given, as a test begun with
+// no recorded begin.
 func (t *Tracker) CallWindowIn(prevRec, recBegan time.Time, paired *models.Mock, arrival time.Time) *Window {
 	if t == nil {
 		return nil
@@ -2090,7 +2139,8 @@ func (t *Tracker) CallWindowIn(prevRec, recBegan time.Time, paired *models.Mock,
 
 // window is the window of the call that reached keploy at arrival, paired
 // with paired, with the recording's half bounded by prevRec and, in a client
-// test, by recBegan (CallWindowFrom).
+// test, by recBegan, which in a server test that half carries as its test's
+// begin where it came before prevRec (CallWindowFrom).
 func (lc liveClock) window(prevRec, recBegan time.Time, paired *models.Mock, arrival time.Time) *Window {
 	if paired == nil || paired.Spec.ReqTimestampMock.IsZero() {
 		return nil
@@ -2109,6 +2159,15 @@ func (lc liveClock) window(prevRec, recBegan time.Time, paired *models.Mock, arr
 	rec := Span{From: recFrom, To: paired.Spec.ReqTimestampMock}
 	if lc.client {
 		rec.Began = recBegan
+	} else {
+		// A server test's window carries where its test began in each run
+		// where a call made after that begin starts its span there
+		// (Span.TestFrom): the learn step reads a read from there too, as
+		// the replay's check does (Window.fromTestBegin, CheckClockRead).
+		if lc.open && !recBegan.IsZero() && recBegan.Before(recFrom) {
+			rec.TestFrom = recBegan
+		}
+		f.TestFrom = lc.testFrom(f.From, arrival)
 	}
 	return &Window{Rec: rec, F: f}
 }
@@ -2137,16 +2196,14 @@ func (lc liveClock) window(prevRec, recBegan time.Time, paired *models.Mock, arr
 // The span carries the tracker's zone (SetAppZone, the agent's own;
 // Span.Zone), which ClockSpanFrom replaces by the zone of the call's own
 // process where the agent read it.
+//
+// Where a serve made after the running test began starts the span, the
+// span also carries where the test began on the app's clock (Span.TestFrom,
+// liveClock.testFrom): another goroutine's call can be served between a
+// read of the clock and the call that carries it, so the replay's check
+// passes a value that holds from the test's begin too (CheckClockRead).
 func (t *Tracker) LiveSpan(arrival time.Time) (Span, bool) {
-	if t == nil {
-		return Span{}, false
-	}
-	lc, _ := t.liveClockAt(arrival, nil)
-	s, ok := lc.span(arrival)
-	if ok {
-		s.Zone = lc.zone
-	}
-	return s, ok
+	return t.LiveSpanOf(arrival, nil)
 }
 
 // liveClock is what the tracker knows, at one moment, of this run's clock
@@ -2160,7 +2217,7 @@ type liveClock struct {
 	clock            func(time.Time) (time.Time, bool)
 	run              func(time.Time) (time.Time, bool)
 	prev, set, began time.Time
-	client           bool
+	client, open     bool
 	zone             *time.Location
 }
 
@@ -2188,7 +2245,7 @@ func (t *Tracker) liveClockAt(arrival time.Time, sibling Siblings) (liveClock, t
 func (t *Tracker) liveClockAtOf(arrival time.Time, own bool, sibling Siblings) (liveClock, time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	lc := liveClock{clock: t.appClock, run: t.appClockRun, client: t.clientTests, set: t.setBegan, began: t.beganAt, zone: t.appZone}
+	lc := liveClock{clock: t.appClock, run: t.appClockRun, client: t.clientTests, open: t.open, set: t.setBegan, began: t.beganAt, zone: t.appZone}
 	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].at.Before(arrival) })
 	lc.prev = t.latestFromLocked(i, false, sibling)
 	if i > 0 && own && t.open && !t.beganAt.IsZero() {
@@ -2236,14 +2293,30 @@ func (t *Tracker) latestFromLocked(i int, mine bool, sibling Siblings) time.Time
 	return latest
 }
 
-// SetServeOwner makes f say whether a recording is the open test's own (its
-// mapping) or the start-up's, as the store's view in force holds it (nil:
-// none, every serve is any flow's and every span LiveSpan's). The store
-// tells a serve holding its round lock (ServedMock and its forms), and the
-// tracker asks f then, before its own lock: f must read only the view in
-// force, never take a lock the store holds while it serves, and never call
-// back into the tracker.
-func (t *Tracker) SetServeOwner(f func(*models.Mock) bool) {
+// ServeOwner is whose a recording is, as the store's view in force holds it
+// (SetServeOwnerOf).
+type ServeOwner uint8
+
+const (
+	// OwnerUnknown: the store cannot say, as where no test's view is in
+	// force (none yet, or a pool view between tests).
+	OwnerUnknown ServeOwner = iota
+	// OwnerTest: the open test's own recording (its mapping's) or one of
+	// the set's start-up recordings.
+	OwnerTest
+	// OwnerOther: a test's view is in force and the recording is neither
+	// its own nor the start-up's (a worker: scope's, the background's,
+	// another test's).
+	OwnerOther
+)
+
+// SetServeOwnerOf makes f say whose a recording is, as the store's view in
+// force holds it (nil: none, every serve is any flow's and every span
+// LiveSpan's). The store tells a serve holding its round lock (ServedMock
+// and its forms), and the tracker asks f then, before its own lock: f must
+// read only the view in force, never take a lock the store holds while it
+// serves, and never call back into the tracker.
+func (t *Tracker) SetServeOwnerOf(f func(*models.Mock) ServeOwner) {
 	if t == nil {
 		return
 	}
@@ -2254,12 +2327,38 @@ func (t *Tracker) SetServeOwner(f func(*models.Mock) bool) {
 	t.serveOwner.Store(&f)
 }
 
+// SetServeOwner is SetServeOwnerOf for an f that always knows: true is
+// OwnerTest, false OwnerOther.
+func (t *Tracker) SetServeOwner(f func(*models.Mock) bool) {
+	if f == nil {
+		t.SetServeOwnerOf(nil)
+		return
+	}
+	t.SetServeOwnerOf(func(m *models.Mock) ServeOwner {
+		if f(m) {
+			return OwnerTest
+		}
+		return OwnerOther
+	})
+}
+
 // LiveSpanOf is LiveSpan for a call that judging or a replay checks against
 // the recording rec: from the test's own serves where rec is the open test's
 // own or the start-up's (liveClockAtOf), so a worker: or background serve
 // landing between the test's clock read and its send does not put the read
-// before its span. Record's learn step reads its windows from any flow's
-// serve (CallWindowFrom), never from this.
+// before its span. Record's learn step reads a test's own call's window the
+// same way (OwnCall), and every other window from any flow's serve
+// (CallWindowFrom). LiveSpan is this with no recording. The span carries
+// where the running test began as LiveSpan's does (Span.TestFrom), except
+// against a recording the store says is not the test's (OwnerOther): a call
+// in a test's window is that test's, so a value read earlier in the test
+// passes at it, but a call checked against a worker:'s recording is the
+// worker's, whose read the test's begin does not bound. Where the store
+// cannot say (OwnerUnknown: no test's view in force, as between the
+// tracker's begin and the test view's install, or once a pool view replaced
+// it before the tracker's end) keploy cannot tell the call is not the
+// test's, and the span carries the begin as LiveSpan's does: a stated limit,
+// bounded by the test's begin.
 func (t *Tracker) LiveSpanOf(arrival time.Time, rec *models.Mock) (Span, bool) {
 	return t.LiveSpanOfSiblings(arrival, rec, nil)
 }
@@ -2274,14 +2373,17 @@ func (t *Tracker) LiveSpanOfSiblings(arrival time.Time, rec *models.Mock, siblin
 	if t == nil {
 		return Span{}, false
 	}
-	own := false
+	owner := OwnerUnknown
 	if f := t.serveOwner.Load(); f != nil && rec != nil {
-		own = (*f)(rec)
+		owner = (*f)(rec)
 	}
-	lc, _ := t.liveClockAtOf(arrival, own, sibling)
+	lc, _ := t.liveClockAtOf(arrival, owner == OwnerTest, sibling)
 	s, ok := lc.span(arrival)
 	if ok {
 		s.Zone = lc.zone
+		if owner != OwnerOther {
+			s.TestFrom = lc.testFrom(s.From, arrival)
+		}
 	}
 	return s, ok
 }
@@ -2333,6 +2435,32 @@ func (lc liveClock) span(arrival time.Time) (Span, bool) {
 		}
 	}
 	return f, ok
+}
+
+// testFrom is where the running test began on the app's clock (Span.
+// TestFrom), or where the app's clock's run to arrival began after it
+// (runFrom), where that is before from, the start of the call's span to
+// arrival: a serve made after the test began started it. Zero where no test
+// is open, where the test began after arrival (a call of the previous test
+// checked late), where the app's clock did not run as one from there to
+// arrival, and in a server test where the hooks tell no run (the clock may
+// have left and come back to the same offset since the test began, as
+// setBound reads a set's begin). The app reads its clock for a call of the
+// test after the test began: a server test's request reaches the app after
+// keploy opened the test, and a client test's harness acts after its
+// begin. Whether the read came after another call keploy served since, it
+// cannot tell: the application's other goroutines (a queue's consumer)
+// make calls of their own beside the test's, whose serves fall between a
+// read and the call that carries it.
+func (lc liveClock) testFrom(from, arrival time.Time) time.Time {
+	if !lc.open || lc.began.IsZero() || (!lc.client && lc.run == nil) {
+		return time.Time{}
+	}
+	b, ok := lc.from(lc.runFrom(lc.began, arrival), arrival)
+	if !ok || !b.From.Before(from) {
+		return time.Time{}
+	}
+	return b.From
 }
 
 // setBound is the bound a span to arrival starts from: the previous serve;

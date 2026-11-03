@@ -589,6 +589,13 @@ type TestRequest struct {
 	// kind it reads no request of, a body kept apart from the test case),
 	// "" when it could. A request keploy could not read has no parts.
 	Unread string `json:"unread,omitempty"`
+	// RecordedAt is when the test case's request reached the application
+	// in its recording, the instant keploy test's begin moves the app's
+	// clock to: where the test began in its recording, which the learn step
+	// reads its calls' windows from too (learn.Tracker.GiveRequest).
+	// Zero where the recording holds none, or from a keploy older than its
+	// agent: the windows then start at each call's previous call alone.
+	RecordedAt time.Time `json:"recordedAt,omitzero"`
 }
 
 // TestRequestPart is one part of a test case's request, as recorded and as
