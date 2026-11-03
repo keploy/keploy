@@ -661,6 +661,10 @@ func withRunnableBound(ctx context.Context, d time.Duration, cause error) (conte
 	return ctx, func() { cancel(context.Canceled) }
 }
 
+// startClock is watchStart's clock: nil, keploy's own runnable time
+// (stall.Process). Tests set one they drive.
+var startClock stall.Clock
+
 // startJudgment is watchStart's word on a start it gave up on: its verdict
 // (bootFailed or bootStalled), why, and the last report read.
 type startJudgment struct {
@@ -695,7 +699,10 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 	out := make(chan startJudgment, 1)
 	// What the watch's goroutine reads of the package's settings is read
 	// here, on the caller's: the goroutine outlives the wait it serves.
-	clk, release := stall.Process()
+	clk, release := startClock, func() {}
+	if clk == nil {
+		clk, release = stall.Process()
+	}
 	judge := newBootJudge(clk)
 	look, silence, every := bootLook, bootSilence, stillWaitingLooks
 	go func() {
@@ -819,10 +826,11 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 }
 
 // startWaitLine is what a start's wait that has gone on says: what the latest
-// look found (cur). notAnswered: the engine has not answered the look out
+// look found (cur). notAnswered: the engine has not answered the look out on
 // whether the process runs for a whole line's worth of ticks, as an engine
-// still creating or starting a container may not until that is done. ""
-// for an agent that says its server listens: the ready rule bounds that wait.
+// still creating or starting a container may not until that is done. "" when
+// the latest look found the process running and its report says its server
+// listens (the ready rule bounds that wait), unless notAnswered.
 func startWaitLine(cur bootLookResult, notAnswered, inContainer bool) string {
 	what := "its process"
 	if inContainer {
