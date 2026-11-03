@@ -262,6 +262,10 @@ func TestASiblingSetAsideTakesItsMomentsWithIt(t *testing.T) {
 // that states no role, one that holds another value, one learned in another
 // role, or any other recording set aside, is refused as before, saying that
 // an echo of a read of the clock would leave it unchecked (follows.echoed).
+// So is an echo beside a sibling F DID serve before the call, as recorded,
+// stated unread or learned as an echo: Postgres states a sibling with
+// nothing learned unread whether or not F served it, so only F's serve tells
+// the two apart, and a served place is a source like any other.
 func TestAnEqualStampBesideASiblingFHadNotServedIsAnEcho(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	first := time.Date(2026, 11, 2, 3, 52, 27, 62_000_000, time.UTC)
@@ -283,6 +287,8 @@ func TestAnEqualStampBesideASiblingFHadNotServedIsAnEcho(t *testing.T) {
 	served := RawOf(insert("mock-16", "1", "user", first), true).ServedAs(1)
 	unserved := RawOf(insert("mock-17", "2", "moderator", first.Add(2*time.Millisecond)), false)
 	unserved16 := RawOf(insert("mock-16", "1", "user", first), false)
+	asRec := RawOf(insert("mock-16", "1", "user", first), true).ServedAsRecorded().ServedAs(1)
+	asRec17 := RawOf(insert("mock-17", "2", "moderator", first.Add(2*time.Millisecond)), true).ServedAsRecorded().ServedAs(2)
 	resp := []Leaf{{Path: "row.1.createdAt", Type: String, Value: same}, {Path: "row.1.updatedAt", Type: String, Value: same}}
 	live := sibLive(same, sequelize)
 	call := func(raw ...Raw) map[string]Learned {
@@ -313,8 +319,17 @@ func TestAnEqualStampBesideASiblingFHadNotServedIsAnEcho(t *testing.T) {
 		{"stated unread with another value", []Raw{unserved.Sibling(role("", other))}},
 		{"learned as noise", []Raw{unserved.Sibling(role(KindNoise, same))}},
 		{"beside an unread sibling, an unserved recording that is none", []Raw{unserved16, unserved.Sibling(role("", same))}},
+		{"a sibling F served as recorded, stated unread", []Raw{asRec.Sibling(role("", same))}},
+		{"a sibling F served as recorded, learned as an echo", []Raw{asRec.Sibling(role(KindEcho, same))}},
+		{"two siblings F served as recorded, both unread", []Raw{asRec.Sibling(role("", same)), asRec17.Sibling(role("", same))}},
 	} {
-		for p, ln := range call(row.raw...) {
+		got := call(row.raw...)
+		for _, p := range []string{"bind.$3", "bind.$4"} {
+			if _, ok := got[p]; !ok {
+				t.Errorf("%s: %s was not learned at all; want the echo refused beside a source set aside", row.what, p)
+			}
+		}
+		for p, ln := range got {
 			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, echoSetAside+"an instant of it changed") {
 				t.Errorf("FALSE GREEN? %s: %s learned %s from %q (%s); want the echo refused beside a source set aside, as before", row.what, p, ln.Kind, ln.From.Mock, ln.Why)
 			}
