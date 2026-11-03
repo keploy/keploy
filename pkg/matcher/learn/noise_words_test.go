@@ -75,7 +75,7 @@ func TestWordsAdmitChecksEveryWordButTheUncheckedOnes(t *testing.T) {
 		{"the last checked word changed", "lead r-9 created on s-9", []int{1, 4}, false},
 		{"a word came", "lead r-9 created at s-9 x", []int{1, 4}, false},
 		{"a separator changed", "lead r-9,created at s-9", []int{1, 4}, false},
-		{"a word past the last", "lead r-9 created at s-9", []int{1, 5}, false},
+		{"a word past the last", "lead r-9 created at s-1", []int{1, 5}, false},
 		{"no words", rec, nil, false},
 	} {
 		if got := WordsAdmit(rec, c.live, c.words); got != c.want {
