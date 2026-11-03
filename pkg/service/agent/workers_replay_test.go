@@ -343,6 +343,29 @@ func TestAGoneReplayWorkersOpenTestFails(t *testing.T) {
 	require.Contains(t, w.Evidence.Reason, "the test worker's process exited while the test was open")
 }
 
+// A gone replay worker's id, claimed again, is served under the id's next
+// generation: the proxy stops serving the gone worker's value and never
+// serves it again, so a call on a connection its processes left open is
+// refused (charged as unattributed), never answered from, or filed as a miss
+// of, the next worker's test.
+func TestAGoneReplayWorkersValueIsNotTheNextClaimsOfItsId(t *testing.T) {
+	a, p, _ := instanceAgent(t, models.MODE_TEST)
+	gone := child(t)
+	first, serr := claimAsWorker(a, gone.Process.Pid, "a")
+	require.Nil(t, serr)
+	kill(t, gone)
+	ctx := context.Background()
+	require.NoError(t, a.wire.lock(ctx))
+	a.endGoneWorkers(ctx)
+	a.wire.unlock()
+	next, serr := claimAsWorker(a, os.Getpid(), "b")
+	require.Nil(t, serr)
+	require.Equal(t, []string{v(1, 0), v(1, 1)}, []string{first.Instance, next.Instance})
+	served, stopped := p.log()
+	require.Equal(t, []uint32{coreAgent.InstanceValue(1, 0), coreAgent.InstanceValue(1, 1)}, served)
+	require.Equal(t, []uint32{coreAgent.InstanceValue(1, 0)}, stopped, "the gone worker's value stays unserved")
+}
+
 // lossWire is an instanceWire whose proxy counts the calls it refused, as
 // the proxy does each connection of no served worker's.
 type lossWire struct {

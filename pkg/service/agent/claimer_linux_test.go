@@ -123,7 +123,7 @@ func TestAWorkerIsLiveUntilEveryThreadOfItHasExited(t *testing.T) {
 
 	exitAll(t, execs)
 	exitAll(t, exited)
-	require.Equal(t, "1", claimWorker(t, a, os.Getpid(), "d", 3), "a worker every thread of which has exited is gone, reaped or not")
+	require.Equal(t, v(1, 1), claimWorker(t, a, os.Getpid(), "d", 3), "a worker every thread of which has exited is gone, reaped or not")
 	require.Equal(t, []uint32{1, 3}, h.endedIDs())
 	for _, id := range []string{"a::TestRuns", "c::TestRuns"} {
 		w := windowOf(t, a, id)

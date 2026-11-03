@@ -33,8 +33,9 @@ type instanceLost struct {
 
 var _ agent.InstanceStamper = (*Hooks)(nil)
 
-// SetInstance puts the process tgid (a kernel TGID) in instance id, and
-// every process it forks from then on (agent.InstanceStamper).
+// SetInstance puts the process tgid (a kernel TGID) in the instance of value
+// v (agent.InstanceValue), and every process it forks from then on
+// (agent.InstanceStamper).
 //
 // k_instance_fork is attached at the first call, so a host with no
 // instance runs no program at its forks; the process's entry is written
@@ -43,9 +44,10 @@ var _ agent.InstanceStamper = (*Hooks)(nil)
 // it), and checked after: a process that exited, or became a zombie, before
 // the write had its exit run before there was anything to delete, so its
 // entry is deleted here and the call refused.
-func (h *Hooks) SetInstance(tgid, id uint32) error {
-	if id == 0 || id > agent.MaxInstanceID {
-		return fmt.Errorf("keploy instance %d is not one the kernel keeps (1 to %d)", id, agent.MaxInstanceID)
+func (h *Hooks) SetInstance(tgid, v uint32) error {
+	id := agent.InstanceIDOf(v)
+	if id == 0 {
+		return fmt.Errorf("keploy instance %d is not one the kernel keeps (its id, the low 10 bits, 1 to %d)", v, agent.MaxInstanceID)
 	}
 	if tgid == 0 || tgid > math.MaxInt32 {
 		return fmt.Errorf("%d is not a process's TGID", tgid)
@@ -66,17 +68,18 @@ func (h *Hooks) SetInstance(tgid, id uint32) error {
 	if len(held) > 0 {
 		return fmt.Errorf("%w: instance %d still has %d processes (process %d among them)", agent.ErrInstanceHeld, id, len(held), held[0])
 	}
+	// instance_lost is kept by the id (k_instance_fork masks the value).
 	if err := lost.Update(id, instanceLost{}, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("clear instance %d's count of lost forks (instance_lost): %w", id, err)
 	}
 	if err := h.attachInstanceFork(); err != nil {
 		return err
 	}
-	if err := of.Update(tgid, id, ebpf.UpdateNoExist); err != nil {
+	if err := of.Update(tgid, v, ebpf.UpdateNoExist); err != nil {
 		if errors.Is(err, ebpf.ErrKeyExist) {
 			var cur uint32
 			if of.Lookup(tgid, &cur) == nil {
-				return fmt.Errorf("process %d is already in keploy instance %d", tgid, cur)
+				return fmt.Errorf("process %d is already in keploy instance %d", tgid, agent.InstanceIDOf(cur))
 			}
 		}
 		return fmt.Errorf("put process %d in keploy instance %d (instance_of_tgid): %w", tgid, id, err)
@@ -89,13 +92,15 @@ func (h *Hooks) SetInstance(tgid, id uint32) error {
 	return nil
 }
 
-// EndInstance takes every process out of instance id and says how many were
-// in it (agent.InstanceStamper). A member whose exit deleted its entry first
-// is counted all the same. A delete the kernel refuses leaves the process in
-// the instance, and SetInstance then refuses the id (agent.ErrInstanceHeld).
-func (h *Hooks) EndInstance(id uint32) (int, error) {
-	if id == 0 || id > agent.MaxInstanceID {
-		return 0, fmt.Errorf("keploy instance %d is not one the kernel keeps (1 to %d)", id, agent.MaxInstanceID)
+// EndInstance takes every process out of the instance of value v, every
+// process in its id, and says how many were in it (agent.InstanceStamper).
+// A member whose exit deleted its entry first is counted all the same. A
+// delete the kernel refuses leaves the process in the instance, and
+// SetInstance then refuses the id (agent.ErrInstanceHeld).
+func (h *Hooks) EndInstance(v uint32) (int, error) {
+	id := agent.InstanceIDOf(v)
+	if id == 0 {
+		return 0, fmt.Errorf("keploy instance %d is not one the kernel keeps (its id, the low 10 bits, 1 to %d)", v, agent.MaxInstanceID)
 	}
 	h.objectsMutex.RLock()
 	defer h.objectsMutex.RUnlock()
@@ -113,11 +118,12 @@ func (h *Hooks) EndInstance(id uint32) (int, error) {
 	return len(members), nil
 }
 
-// InstanceLost is what the kernel could not put in instance id since
-// SetInstance last gave it (agent.InstanceStamper).
-func (h *Hooks) InstanceLost(id uint32) (agent.InstanceLoss, error) {
-	if id == 0 || id > agent.MaxInstanceID {
-		return agent.InstanceLoss{}, fmt.Errorf("keploy instance %d is not one the kernel keeps (1 to %d)", id, agent.MaxInstanceID)
+// InstanceLost is what the kernel could not put in the instance of value v
+// since SetInstance last gave its id (agent.InstanceStamper).
+func (h *Hooks) InstanceLost(v uint32) (agent.InstanceLoss, error) {
+	id := agent.InstanceIDOf(v)
+	if id == 0 {
+		return agent.InstanceLoss{}, fmt.Errorf("keploy instance %d is not one the kernel keeps (its id, the low 10 bits, 1 to %d)", v, agent.MaxInstanceID)
 	}
 	h.objectsMutex.RLock()
 	defer h.objectsMutex.RUnlock()
@@ -125,20 +131,21 @@ func (h *Hooks) InstanceLost(id uint32) (agent.InstanceLoss, error) {
 	if lost == nil {
 		return agent.InstanceLoss{}, errors.New("the hooks are not loaded: instance_lost is not open")
 	}
-	var v instanceLost
-	if err := lost.Lookup(id, &v); err != nil {
+	var l instanceLost
+	if err := lost.Lookup(id, &l); err != nil {
 		return agent.InstanceLoss{}, fmt.Errorf("read instance %d's lost forks (instance_lost): %w", id, err)
 	}
-	return agent.InstanceLoss{Forks: v.Forks, LastTgid: v.LastTgid, LastErr: v.LastErr}, nil
+	return agent.InstanceLoss{Forks: l.Forks, LastTgid: l.LastTgid, LastErr: l.LastErr}, nil
 }
 
-// instanceMembers are the TGIDs instance_of_tgid holds in instance id.
+// instanceMembers are the TGIDs instance_of_tgid holds in instance id, of
+// any generation.
 func instanceMembers(of *ebpf.Map, id uint32) ([]uint32, error) {
 	var out []uint32
 	var k, v uint32
 	it := of.Iterate()
 	for it.Next(&k, &v) {
-		if v == id {
+		if agent.InstanceIDOf(v) == id {
 			out = append(out, k)
 		}
 	}

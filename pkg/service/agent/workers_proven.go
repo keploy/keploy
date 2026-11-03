@@ -194,13 +194,13 @@ func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me clai
 		if w.claimant == me {
 			a.provenMu.Unlock()
 			return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrOneTestProcess,
-				fmt.Sprintf("process %d claimed the run again: it is already test worker %d", me.pid, id),
+				fmt.Sprintf("process %d claimed the run again: it is already test worker %s", me.pid, coreAgent.InstanceLabel(id)),
 				"claim once per test worker, before its first test")
 		}
 		if w.declared != declared {
 			a.provenMu.Unlock()
 			return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrWorkersMismatch,
-				fmt.Sprintf("process %d declared %d test workers, but test worker %d (process %d) declared %d", me.pid, declared, id, w.pid, w.declared),
+				fmt.Sprintf("process %d declared %d test workers, but test worker %s (process %d) declared %d", me.pid, declared, coreAgent.InstanceLabel(id), w.pid, w.declared),
 				"declare the same worker count from every test process the run starts at once")
 		}
 		live = append(live, strconv.Itoa(w.pid))
@@ -212,8 +212,8 @@ func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me clai
 			"declare as many workers as the framework runs at once")
 	}
 	taken := make(map[uint32]bool, len(a.proven.workers))
-	for id := range a.proven.workers {
-		taken[id] = true
+	for v := range a.proven.workers {
+		taken[coreAgent.InstanceIDOf(v)] = true
 	}
 	a.provenMu.Unlock()
 	if stale != "" {
@@ -221,23 +221,40 @@ func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me clai
 	}
 	// The lowest id no live worker holds and no process is still in: one a
 	// gone worker's survivor is still in is refused (coreAgent.ErrInstanceHeld),
-	// and the next is tried.
+	// and the next is tried. The worker gets the id's next generation
+	// (coreAgent.InstanceValue): a connection an earlier claim's process
+	// made keeps that claim's value, never this one's. A value the kernel
+	// may have been given is never given again, whatever SetInstance said;
+	// an id whose generations are all given is not given at all.
 	var id uint32
+	spent := 0
 	for next := uint32(1); next <= coreAgent.MaxInstanceID; next++ {
 		if taken[next] {
 			continue
 		}
-		err := stamper.SetInstance(uint32(me.pid), next)
+		gen := a.instanceGen[next]
+		if gen > coreAgent.MaxInstanceGeneration {
+			spent++
+			continue
+		}
+		v := coreAgent.InstanceValue(next, gen)
+		err := stamper.SetInstance(uint32(me.pid), v)
 		if errors.Is(err, coreAgent.ErrInstanceHeld) {
 			continue
 		}
+		a.instanceGen[next] = gen + 1
 		if err != nil {
 			return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInInstance,
 				fmt.Sprintf("keploy could not give test worker process %d an instance of its own: %v", me.pid, err),
 				"run one worker, or run keploy's agent in the host's PID namespace")
 		}
-		id = next
+		id = v
 		break
+	}
+	if id == 0 && spent > 0 {
+		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInInstance,
+			fmt.Sprintf("keploy could not give test worker process %d an instance of its own: of its %d instances, %d were each given %d times, as many as keploy's agent tells apart, and the rest are live workers' or still hold processes gone workers left", me.pid, coreAgent.MaxInstanceID, spent, uint64(coreAgent.MaxInstanceGeneration)+1),
+			"restart keploy's agent")
 	}
 	if id == 0 {
 		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInInstance,

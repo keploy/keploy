@@ -37,7 +37,7 @@ var errNoWorkerInstance = errors.New("the call is not part of any test worker's 
 // instanceNotServed refuses a connection or a call of the agent's for a
 // worker that keploy does not serve (ended, or never begun).
 func instanceNotServed(inst uint32) error {
-	return fmt.Errorf("test worker instance %d is not served: it ended, or keploy never began serving it", inst)
+	return fmt.Errorf("test worker instance %s is not served: it ended, or keploy never began serving it", agent.InstanceLabel(inst))
 }
 
 // staging is one kind of staging of the run's manager, as last done.
@@ -161,7 +161,7 @@ func (p *Proxy) ServeInstance(inst uint32) (agent.ExactServer, error) {
 	_, dup := s.mgrs[inst]
 	s.mu.RUnlock()
 	if dup {
-		return nil, fmt.Errorf("test worker instance %d is served already", inst)
+		return nil, fmt.Errorf("test worker instance %s is served already", agent.InstanceLabel(inst))
 	}
 	wm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger.With(zap.Uint32("workerInstance", inst)))
 	for _, st := range s.staged {
@@ -313,8 +313,8 @@ var (
 func (p *Proxy) refuseUnserved(dest *agent.NetworkAddress, dst string, why error) error {
 	what := fmt.Sprintf("the latest: a connection to %s, from process %d, in no test worker's keploy instance", dst, dest.KernelPid)
 	if dest.Instance != 0 {
-		what = fmt.Sprintf("the latest: a connection to %s, from process %d of test worker instance %d, which keploy does not serve (the worker ended, or keploy never began serving it)", dst, dest.KernelPid, dest.Instance)
+		what = fmt.Sprintf("the latest: a connection to %s, from process %d of test worker instance %s, which keploy does not serve (the worker ended, or keploy never began serving it)", dst, dest.KernelPid, agent.InstanceLabel(dest.Instance))
 	}
 	p.losses.Add(models.CaptureLossUnattributed, what)
-	return fmt.Errorf("keploy refused a call of process %d (test worker instance %d) to %s: %w", dest.KernelPid, dest.Instance, dst, why)
+	return fmt.Errorf("keploy refused a call of process %d (test worker instance %s) to %s: %w", dest.KernelPid, agent.InstanceLabel(dest.Instance), dst, why)
 }

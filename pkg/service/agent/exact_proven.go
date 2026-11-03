@@ -71,7 +71,7 @@ func (a *Agent) exactServerOf(worker uint32) (coreAgent.ExactServer, error) {
 	w, ok := a.proven.workers[worker]
 	a.provenMu.Unlock()
 	if !ok || w.es == nil {
-		return nil, fmt.Errorf("keploy does not serve test worker %d from mocks of its own: it ended, or its claim served none", worker)
+		return nil, fmt.Errorf("keploy does not serve test worker %s from mocks of its own: it ended, or its claim served none", coreAgent.InstanceLabel(worker))
 	}
 	return w.es, nil
 }

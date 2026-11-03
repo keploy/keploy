@@ -472,7 +472,7 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		w := a.proven.workers[ids[0]]
 		a.provenMu.Unlock()
 		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrWorkersMismatch,
-			fmt.Sprintf("process %d declared one test worker while test worker %d (process %d), which declared %d, still runs this keploy run's tests", caller, ids[0], w.pid, w.declared),
+			fmt.Sprintf("process %d declared one test worker while test worker %s (process %d), which declared %d, still runs this keploy run's tests", caller, coreAgent.InstanceLabel(ids[0]), w.pid, w.declared),
 			"declare the same worker count from every test process the run starts at once")
 	}
 	prev, open := a.proven.claim, a.proven.openOf(0)
@@ -988,7 +988,7 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	if overlaps && otherTest == id {
 		a.provenMu.Unlock()
 		return models.ScopeBeginResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrOneTestAtATime,
-			fmt.Sprintf("%s began in test worker %d while test worker %d ran the same test: one test's calls cannot be told apart from another run of it", id, worker, other),
+			fmt.Sprintf("%s began in test worker %s while test worker %s ran the same test: one test's calls cannot be told apart from another run of it", id, coreAgent.InstanceLabel(worker), coreAgent.InstanceLabel(other)),
 			"give each test worker its own key, or run each test in one worker at a time")
 	}
 	a.provenMu.Unlock()
@@ -1764,7 +1764,7 @@ func (a *Agent) missesOf(ctx context.Context, worker uint32) ([]models.Unmatched
 	}
 	r, ok := es.(missReader)
 	if !ok {
-		return nil, fmt.Errorf("this keploy agent's proxy cannot read test worker %d's misses apart from the others'", worker)
+		return nil, fmt.Errorf("this keploy agent's proxy cannot read test worker %s's misses apart from the others'", coreAgent.InstanceLabel(worker))
 	}
 	return r.GetMockErrors(ctx)
 }
