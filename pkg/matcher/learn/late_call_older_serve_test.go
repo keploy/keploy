@@ -84,3 +84,34 @@ func TestALateCallsValueAnOlderServeGaveIsNeverLearnedAsNoise(t *testing.T) {
 		})
 	}
 }
+
+// A serve the fix reads as made before the call's test is one Order.ServedView
+// marks so. A serve of the late-call shape it leaves unmarked, read as a
+// place of the call's own test where the order decides, is refused by the
+// order: F made it before the test and again in the call's own test (the
+// full round's order lists it at its first and its last serve, which the
+// recording's, one place each, never matches), or keploy cannot tell where
+// F made it (ServedIn(0, 0): unordered beside b). The control is a served
+// once, before b, in the call's own test: noise, as the copy rule says.
+func TestALateCallsValueAServeLeftUnmarkedGaveIsRefusedByTheOrder(t *testing.T) {
+	b := func(n int) Raw { return eAnswer("mock-b", 200*time.Millisecond, "82").ServedAs(n).ServedAsRecorded() }
+	a := func(first, last int) Raw {
+		return eAnswer("mock-a", 300*time.Millisecond, "7").ServedIn(first, last).ServedAsRecorded()
+	}
+	for _, tc := range []struct {
+		name string
+		raw  []Raw
+		kind Kind
+	}{
+		{"a served at 1 and 3, b at 2", []Raw{a(1, 3), b(2)}, KindUnaccounted},
+		{"a served at 1 and 2, b at 3", []Raw{a(1, 2), b(3)}, KindUnaccounted},
+		{"a served in an order keploy cannot tell, b at 2", []Raw{a(0, 0), b(2)}, KindUnaccounted},
+		{"a served once at 1, b at 2", []Raw{a(1, 1), b(2)}, KindNoise},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyF(t, "slot 82", "slot 7", nil, tc.raw, nil); got.Kind != tc.kind {
+				t.Fatalf("slot 82 at record, slot 7 in F: %s (%q), want %s", got.Kind, got.Why, tc.kind)
+			}
+		})
+	}
+}
