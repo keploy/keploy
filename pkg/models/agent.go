@@ -372,6 +372,10 @@ type ScopeWindow struct {
 	// while no test is open belongs to the pool slice of that key (design
 	// v14 §5.2).
 	Claim string `json:"claim,omitempty"`
+	// Workers is, on a test worker's claim, how many test workers its
+	// process declared the run's framework runs at once
+	// (InstanceReq.Workers); 0 on a single test process's claim.
+	Workers int `json:"workers,omitempty"`
 	// Refused, under the proven wire, makes this no test's window but a
 	// refusal keploy made at Start (RunRefusal).
 	Refused *RunRefusal `json:"refused,omitempty"`

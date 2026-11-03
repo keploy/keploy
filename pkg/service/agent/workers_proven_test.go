@@ -226,10 +226,10 @@ func TestEachWorkerOfARunGetsAnInstanceOfItsOwn(t *testing.T) {
 	var claims []string
 	for _, w := range ws {
 		if w.Claim != "" {
-			claims = append(claims, w.Claim+"@"+strconv.Itoa(int(w.Worker)))
+			claims = append(claims, w.Claim+"@"+strconv.Itoa(int(w.Worker))+"/"+strconv.Itoa(w.Workers))
 		}
 	}
-	require.Equal(t, []string{"a@1", "b@2"}, claims)
+	require.Equal(t, []string{"a@1/2", "b@2/2"}, claims, "each claim names its worker and the count its process declared")
 }
 
 // Every worker live at once declares the same count; a single test process
