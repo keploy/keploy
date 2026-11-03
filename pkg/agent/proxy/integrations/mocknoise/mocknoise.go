@@ -124,6 +124,22 @@ func New(a Adapter, detection, strict bool) *Engine {
 	return &Engine{adapter: a, detection: detection, strict: strict}
 }
 
+// WithoutDetection returns a copy of e with auto-learning turned off, strict
+// enforcement unchanged. A matcher that must not learn on a particular call —
+// the proven-switch fallback and the dry own/extra-call matches, which pass
+// detection=false because record's learn step is the one noise learner — derives
+// one so a per-call "don't learn" still holds even though the connection-level
+// Engine on ctx was built with detection on. Returns e unchanged when it is nil
+// or already detection-off, so no allocation happens on the common path.
+func (e *Engine) WithoutDetection() *Engine {
+	if e == nil || !e.detection {
+		return e
+	}
+	cp := *e
+	cp.detection = false
+	return &cp
+}
+
 // DetectionEnabled reports whether auto-learning is on. nil-safe.
 func (e *Engine) DetectionEnabled() bool { return e != nil && e.detection }
 

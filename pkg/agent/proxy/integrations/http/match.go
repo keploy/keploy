@@ -198,10 +198,20 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 	// Shared mock-noise engine for this match, built by the proxy from HTTP's
 	// declared adapter (MockNoise()) and handed in on ctx — so the declaration is
 	// what turns detection/strict on. Nil when noise is off; all Engine methods
-	// are nil-safe. (schemaNoiseDetection/schemaNoiseStrict are retained in the
-	// signature for callers/diagnostics; the flags now reach the engine through
-	// the proxy, which builds it from the same opts.NoiseDetection()/Strict().)
+	// are nil-safe.
+	//
+	// The proxy builds the ctx engine from the connection-level
+	// opts.NoiseDetection()/Strict(). The per-call schemaNoiseDetection can still
+	// turn learning OFF for THIS match (it is never used to turn learning on):
+	// the proven-switch fallback and the dry own/extra-call matches pass false
+	// because record's learn step is the one noise learner — "no other replay
+	// learns noise". Honour that here by deriving a detection-off copy, so the
+	// per-call opt-out holds regardless of the connection-level flag. Strict is
+	// never force-disabled per call, so it is left to the ctx engine.
 	noiseEngine := mocknoise.EngineFrom(ctx)
+	if !schemaNoiseDetection {
+		noiseEngine = noiseEngine.WithoutDetection()
+	}
 
 	// Under the proven switch no path segment or query value is relaxed for
 	// its shape (design v14 row S1): what may differ between record and
