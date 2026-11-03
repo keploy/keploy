@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -5232,6 +5233,57 @@ func TestALateCallsRefusalNamesTheOlderTestsServeNotTheWindowsRecording(t *testi
 // it starts want, says none of not, and refuses the call.
 func lateCallRefusal(t *testing.T, path, recID, liveID, gave string, previous bool, want string, not []string) {
 	t.Helper()
+	servedIn := 2
+	if previous {
+		servedIn = 3
+	}
+	lateCallRefusalIn(t, path, recID, liveID, gave, 4, servedIn, want, not)
+}
+
+// A test the replay skips (a selection, an ignored test) is never begun,
+// and a streaming test is run after the rest, so the order F ran its tests
+// in is no test case's number. The refusal names the serve by its
+// recording and says whether its test is the one F ran just before the
+// call's, by the order F ran them in; it never names a test by a number.
+func TestALateCallsRefusalNamesNoTestByTheOrderTheReplayRanThem(t *testing.T) {
+	const (
+		path   = "rows.0.0"
+		recID  = "evt-8Q2KX7MZ4PRD"
+		liveID = "evt-3N9WB5TJ6HCA"
+		older  = path + " changed, and the value it carries now is, whole, what record's full round gave the application in mock-22, in an older test than the call's"
+		prev   = path + " changed, and the value it carries now is, whole, what record's full round gave the application in mock-22, in the test record's full round ran just before the call's"
+	)
+	for _, c := range []struct {
+		name           string
+		runs, servedIn int
+		want           string
+	}{
+		// Test cases 1 to 4, test 2 left out: F runs 1, 3, 4. mock-22,
+		// served in test case 3, is of the test F ran just before the
+		// call's (test case 4).
+		{"test case 3's serve, test case 2 left out", 3, 2, prev},
+		// Test case 2 streams, so F runs 1, 3, 4, then 2, where the call
+		// is. Test case 1 is the case before the call's, but F ran two
+		// tests between them.
+		{"test case 1's serve, the call in test case 2 run last", 4, 1, older},
+		// The same order: test case 4, whose number is after the call's,
+		// is the test F ran just before it.
+		{"test case 4's serve, the call in test case 2 run last", 4, 3, prev},
+	} {
+		t.Run(c.name, func(t *testing.T) { lateCallRefusalIn(t, path, recID, liveID, liveID, c.runs, c.servedIn, c.want, nil) })
+	}
+}
+
+// lateCallRefusalIn runs a late call in the window of the runs-th test F
+// begins in the set, which carries liveID; mock-22, served as recorded in
+// the servedIn-th, gave the application gave. A serve of the test F ran
+// just before the call's is handed to the call as F served it (earlierRaw,
+// Order.ServedView), an older one as the word rule reads it (GivenPlaces).
+// The refusal starts with want, says none of not, names no test by a number,
+// and refuses the call.
+func lateCallRefusalIn(t *testing.T, path, recID, liveID, gave string, runs, servedIn int, want string, not []string) {
+	t.Helper()
+	previous := servedIn == runs-1
 	at := time.Date(2026, 10, 24, 9, 55, 53, 938177550, time.UTC)
 	pg := func(name string, before time.Duration, id string) *models.Mock {
 		return &models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
@@ -5247,20 +5299,14 @@ func lateCallRefusal(t *testing.T, path, recID, liveID, gave string, previous bo
 	tr := learn.NewTracker()
 	tr.SetAppClock(func(real time.Time) (time.Time, bool) { return real, true })
 	tr.NewSet()
-	tr.Begin()
-	tr.End()
-	tr.Begin()
-	if !previous {
-		tr.ServedMock(older)
-		tr.ServedMockAsRecorded(older)
+	for run := 1; run < runs; run++ {
+		tr.Begin()
+		if run == servedIn {
+			tr.ServedMock(older)
+			tr.ServedMockAsRecorded(older)
+		}
+		tr.End()
 	}
-	tr.End()
-	tr.Begin()
-	if previous {
-		tr.ServedMock(older)
-		tr.ServedMockAsRecorded(older)
-	}
-	tr.End()
 	tr.Begin()
 	o := tr.Placed().Order
 	given := func() ([]learn.GivenPlaces, error) {
@@ -5276,7 +5322,7 @@ func lateCallRefusal(t *testing.T, path, recID, liveID, gave string, previous bo
 	rec := learn.Shape{Leaves: map[string]learn.Leaf{path: {Path: path, Type: learn.String, Value: recID}}}
 	live := learn.Shape{Leaves: map[string]learn.Leaf{path: {Path: path, Type: learn.String, Value: liveID}}}
 	learned := learn.ClassifyGiven(tr.Drifts(), []string{path}, live, rec, at, nil, append(raw, window), nil, nil, given)
-	p, why := learnPlan(tr, 4, &models.Mock{Name: "mock-61"}, rec, true, learned, nil, nil)
+	p, why := learnPlan(tr, uint64(runs), &models.Mock{Name: "mock-61"}, rec, true, learned, nil, nil)
 	if !strings.HasPrefix(why, want) {
 		t.Errorf("why %q; want it to start %q", why, want)
 	}
@@ -5284,6 +5330,9 @@ func lateCallRefusal(t *testing.T, path, recID, liveID, gave string, previous bo
 		if strings.Contains(why, n) {
 			t.Errorf("why %q says %q", why, n)
 		}
+	}
+	if n := regexp.MustCompile(`\btests? \d`).FindString(why); n != "" {
+		t.Errorf("why %q names a test by a number (%q)", why, n)
 	}
 	if len(p.noise) != 0 || len(p.vars) != 0 {
 		t.Errorf("noise %v, variables %v; want the call refused", p.noise, p.vars)
