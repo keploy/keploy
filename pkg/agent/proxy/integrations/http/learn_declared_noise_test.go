@@ -399,9 +399,7 @@ func TestLearnMatchReadsTheCursorsRecordingsLearnedNoise(t *testing.T) {
 // A keploy.yml body entry with patterns declares a field only where both
 // the recorded value and the live one match a pattern: a pattern constrains
 // the live value too. The echo then holds this run's value. A live value no
-// pattern matches is never followed into the answer, and an obfuscated
-// recorded value (one the recording's own noise excuses) is no value
-// keploy.yml declares, whatever the live value: each is answered as
+// pattern matches is never followed into the answer: it is answered as
 // recorded or refused, and learns nothing.
 func TestLearnMatchADeclaredPatternConstrainsBothSides(t *testing.T) {
 	h, _, opts := learnOn(t)
@@ -411,13 +409,11 @@ func TestLearnMatchADeclaredPatternConstrainsBothSides(t *testing.T) {
 	}{
 		{"both values match the pattern", "zeta", "kappa", `{"ref":"kappa"}`},
 		{"the live value matches no pattern", "zeta", "KAPPA-9", `{"ref":"zeta"}`},
-		{"an obfuscated recorded value", "OBF-1", "kappa", `{"ref":"OBF-1"}`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			tr := learn.NewTracker()
 			tr.Begin()
 			m := learnRecorded("mock-0", 0, "POST", "/v1/echo", `{"ref":"`+c.rec+`"}`, nil, `{"ref":"`+c.rec+`"}`)
-			m.Noise = []string{"^OBF-[0-9]+$"}
 			db := &learnDb{perTest: []*models.Mock{m}}
 			served, _, err := h.learnMatch(learn.WithTracker(context.Background(), tr), live("POST", "/v1/echo", `{"ref":"`+c.live+`"}`, nil), db, n, opts)
 			if err != nil {
@@ -432,6 +428,58 @@ func TestLearnMatchADeclaredPatternConstrainsBothSides(t *testing.T) {
 			for _, got := range db.consumed {
 				if c.want != `{"ref":"kappa"}` && (len(got.Spec.Learned()) != 0 || len(got.Spec.LearnedBinds()) != 0) || len(got.Spec.ReqBodyNoise) != 0 {
 					t.Fatalf("learned %+v binds %+v noise %v", got.Spec.Learned(), got.Spec.LearnedBinds(), got.Spec.ReqBodyNoise)
+				}
+			}
+		})
+	}
+}
+
+// A value the recording's own noise excuses (an obfuscated one) is no value
+// keploy.yml declares, though an entry with no patterns names its field: in
+// a body field, in a header only keploy.yml names, and in Authorization, a
+// credential keploy's own list leaves compared. keploy.yml's entry still
+// stops the comparison there, so the call is answered, but as recorded:
+// keploy never follows the obfuscated value as an echo or a variable's use,
+// so the answer never carries the live value (a live secret, in
+// Authorization), and nothing is learned.
+func TestLearnMatchNeverFollowsAnObfuscatedValueAtADeclaredField(t *testing.T) {
+	h, _, _ := learnOn(t)
+	for _, row := range []struct {
+		name   string
+		body   map[string][]string
+		header string
+	}{
+		{"a body field", map[string][]string{"ref": {}}, ""},
+		{"a header only keploy.yml names", nil, "X-Ref"},
+		{"Authorization", nil, "Authorization"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			opts := models.OutgoingOptions{Learn: true}
+			body := func(v string) string { return `{"ref":"` + v + `"}` }
+			var header func(v string) map[string]string
+			if row.header != "" {
+				opts.NoiseConfig = map[string]map[string][]string{"header": {row.header: {}}}
+				body = func(string) string { return `{"ref":"fixed"}` }
+				header = func(v string) map[string]string { return map[string]string{row.header: v} }
+			} else {
+				header = func(string) map[string]string { return nil }
+			}
+			n := h.newLearnNoise(opts, row.body, nil)
+			m := learnRecorded("mock-0", 0, "POST", "/v1/echo", body("OBF-1"), header("OBF-1"), `{"ref":"OBF-1"}`)
+			m.Noise = []string{"^OBF-[0-9]+$"}
+			db := &learnDb{perTest: []*models.Mock{m}}
+			tr := learn.NewTracker()
+			tr.Begin()
+			served, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), live("POST", "/v1/echo", body("kappa"), header("kappa")), db, n, opts)
+			if err != nil || miss != nil || served == nil {
+				t.Fatalf("keploy.yml's entry stops the comparison, so the call is answered: served %v miss %+v err %v", served, miss, err)
+			}
+			if served.Spec.HTTPResp.Body != `{"ref":"OBF-1"}` {
+				t.Fatalf("served %s, want the answer as recorded: an obfuscated value is never followed", served.Spec.HTTPResp.Body)
+			}
+			for _, got := range db.consumed {
+				if len(got.Spec.Learned()) != 0 || len(got.Spec.LearnedBinds()) != 0 || len(got.Spec.ReqBodyNoise) != 0 {
+					t.Fatalf("learned %+v binds %+v noise %v, want nothing", got.Spec.Learned(), got.Spec.LearnedBinds(), got.Spec.ReqBodyNoise)
 				}
 			}
 		})
