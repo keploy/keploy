@@ -382,7 +382,8 @@ func exportHold(leaf string) LearnHold {
 // (request_changed), naming the queue's leaf and the recording, and nothing
 // is taken or learned; so does a send of another operation. A drift outside
 // the held leaves is still learned, and keploy.yml's noise on a held leaf
-// still excuses it.
+// still excuses it, a pattern only when the recorded and the live value
+// each match it.
 func TestLearnMatchNeverLearnsALeafItsCallerHolds(t *testing.T) {
 	toQueue := func(body, queue string) string {
 		return strings.Replace(body, "http://127.0.0.1:9324/000000000000/lead-events", queue, 1)
@@ -393,16 +394,22 @@ func TestLearnMatchNeverLearnsALeafItsCallerHolds(t *testing.T) {
 		body    string
 		header  map[string]string
 		noise   map[string][]string
-		differs string // the held leaf the miss names; "" where served
+		differs string              // the held leaf the miss names; "" where served
+		hnoise  map[string][]string // keploy.yml's header noise
 	}{
-		{"the recorded message to another queue", toQueue(exportSendBody(exportRecID, exportAt), exportOtherQueue), exportSend, nil, "body.QueueUrl"},
-		{"a drifted message to another queue", toQueue(exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportOtherQueue), exportSend, nil, "body.QueueUrl"},
-		{"a drifted message as another operation", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), batchTarget, nil, "header.x-amz-target"},
-		{"a drifted message to the recorded queue", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportSend, nil, ""},
-		{"keploy.yml's noise on the queue", toQueue(exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportOtherQueue), exportSend, map[string][]string{"QueueUrl": {}}, ""},
+		{"the recorded message to another queue", toQueue(exportSendBody(exportRecID, exportAt), exportOtherQueue), exportSend, nil, "body.QueueUrl", nil},
+		{"a drifted message to another queue", toQueue(exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportOtherQueue), exportSend, nil, "body.QueueUrl", nil},
+		{"a drifted message as another operation", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), batchTarget, nil, "header.x-amz-target", nil},
+		{"a drifted message to the recorded queue", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportSend, nil, "", nil},
+		{"keploy.yml's noise on the queue", toQueue(exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportOtherQueue), exportSend, map[string][]string{"QueueUrl": {}}, "", nil},
+		{"a keploy.yml pattern on the queue both values match", toQueue(exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportOtherQueue), exportSend, map[string][]string{"QueueUrl": {`^http://127\.0\.0\.1:9324/`}}, "", nil},
+		{"a keploy.yml pattern on the queue the call is outside", toQueue(exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportOtherQueue), exportSend, map[string][]string{"QueueUrl": {`/lead-events$`}}, "body.QueueUrl", nil},
+		{"a keploy.yml pattern on the operation both values match", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), batchTarget, nil, "", map[string][]string{"X-Amz-Target": {`^AmazonSQS\.SendMessage`}}},
+		{"a keploy.yml pattern on the operation the call is outside", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), batchTarget, nil, "header.x-amz-target", map[string][]string{"X-Amz-Target": {`^AmazonSQS\.SendMessage$`}}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h, _, opts := learnOn(t)
+			opts.NoiseConfig = map[string]map[string][]string{"header": c.hnoise}
 			tr := clockedTracker()
 			tr.Begin()
 			db := &learnDb{perTest: []*models.Mock{exportSendRecording()}}

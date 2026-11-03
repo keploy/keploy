@@ -62,6 +62,10 @@ type learnNoise struct {
 	// headers are the header names never compared: keploy.yml's, and the
 	// static list's (models.FlakyHeaders) but the credentials.
 	headers map[string]bool
+	// headerPats are keploy.yml's header entries with patterns, by
+	// lowercased name: such a header is compared unless its recorded and
+	// its live value each match one (headerCovers).
+	headerPats map[string][]*regexp.Regexp
 	// body is keploy.yml's request-body noise, read by matcher.NoiseLookup:
 	// a path names whole fields, as the strict matcher reads it.
 	body matcher.NoiseLookup
@@ -78,12 +82,8 @@ type learnNoise struct {
 }
 
 func (h *HTTP) newLearnNoise(opts models.OutgoingOptions, bodyNoise map[string][]string, urlNoise []string) learnNoise {
-	n := learnNoise{headers: map[string]bool{}, body: matcher.NewNoiseLookup(bodyNoise), url: compileURLNoise(h.Logger, urlNoise)}
-	if opts.NoiseConfig != nil {
-		for k := range opts.NoiseConfig["header"] {
-			n.headers[strings.ToLower(k)] = true
-		}
-	}
+	n := learnNoise{body: matcher.NewNoiseLookup(bodyNoise), url: compileURLNoise(h.Logger, urlNoise)}
+	n.headers, n.headerPats = splitHeaderNoise(h.Logger, opts.NoiseConfig["header"])
 	if !opts.DisableAutoHeaderNoise {
 		for _, k := range models.FlakyHeaders {
 			if !credentialHeaders[k] {
@@ -287,15 +287,16 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 	return s
 }
 
-// declared reports whether keploy.yml's noise excuses the leaf l, as
-// httpKnown.Excused reads it.
+// declared reports whether keploy.yml's noise may excuse the leaf l as one
+// side holds it: an entry with no patterns, or one with a pattern l's value
+// matches. httpKnown.ExcusedPair holds such a pattern to both sides' values.
 func (n learnNoise) declared(l learn.Leaf) bool {
 	switch {
 	case strings.HasPrefix(l.Noise, "body."):
-		scalar := l.Type != 0 && l.Type != learn.EmptyObj && l.Type != learn.EmptyArray
-		return n.body.Covers(strings.TrimPrefix(l.Noise, "body."), l.Value, scalar)
+		return n.body.Covers(strings.TrimPrefix(l.Noise, "body."), noiseText(l), scalarLeaf(l))
 	case strings.HasPrefix(l.Noise, "header."):
-		return n.headers[strings.TrimPrefix(l.Noise, "header.")]
+		name := strings.TrimPrefix(l.Noise, "header.")
+		return n.headers[name] || matchesAny(n.headerPats[name], l.Value)
 	}
 	return false
 }
@@ -382,25 +383,72 @@ type httpKnown struct {
 	clocks map[string]models.ClockOffset
 }
 
-// Excused implements learn.Known. Learned noise keeps its type; keploy.yml's
-// noise and obfuscated values excuse type and presence.
+// Excused implements learn.Known: ExcusedPair of one value.
+func (k httpKnown) Excused(l learn.Leaf) (bool, bool) {
+	return k.ExcusedPair(l, l, true, true)
+}
+
+// ExcusedPair implements learn.PairKnown. Learned noise keeps its type;
+// keploy.yml's noise and obfuscated values excuse type and presence.
 // What the learn step learned names a leaf by its exact path, an array
 // position included; noise learned before it (by the request-body learner
 // it replaces) names it in the request matcher's dialect. A place learned as
 // a read of the application's clock (clocks) is no learned noise's to excuse.
-func (k httpKnown) Excused(l learn.Leaf) (bool, bool) {
-	_, clock := k.clocks[l.Path]
-	if !clock && (learnedCovers(k.learned, l.Path) || l.Noise != l.Path && hasKey(k.learned, l.Noise)) {
+// keploy.yml's entry with patterns excuses a leaf only when the recorded and
+// the live value each match one: a live value outside them is a change, and
+// so is a leaf one side lacks. An obfuscated value is the recorded one.
+func (k httpKnown) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, bool) {
+	ref := rec
+	if !inRec {
+		ref = live
+	}
+	_, clock := k.clocks[ref.Path]
+	if !clock && (learnedCovers(k.learned, ref.Path) || ref.Noise != ref.Path && hasKey(k.learned, ref.Noise)) {
 		return true, true
 	}
-	if k.n.declared(l) {
-		return true, false
+	both := inRec && inLive
+	switch {
+	case strings.HasPrefix(ref.Noise, "body."):
+		path := strings.TrimPrefix(ref.Noise, "body.")
+		if !both && k.n.body.Covers(path, "", false) ||
+			both && k.n.body.Covers(path, noiseText(rec), scalarLeaf(rec)) && k.n.body.Covers(path, noiseText(live), scalarLeaf(live)) {
+			return true, false
+		}
+	case strings.HasPrefix(ref.Noise, "header."):
+		if k.n.headerCovers(strings.TrimPrefix(ref.Noise, "header."), rec.Value, live.Value, both) {
+			return true, false
+		}
 	}
-	scalar := l.Type != 0 && l.Type != learn.EmptyObj && l.Type != learn.EmptyArray
-	if scalar && k.values != nil && k.values.IsNoisy(l.Value) {
+	if scalarLeaf(ref) && k.values != nil && k.values.IsNoisy(ref.Value) {
 		return true, false
 	}
 	return false, false
+}
+
+// scalarLeaf reports whether l holds a scalar, which a pattern may match.
+func scalarLeaf(l learn.Leaf) bool {
+	return l.Type != 0 && l.Type != learn.EmptyObj && l.Type != learn.EmptyArray
+}
+
+// noiseText is a leaf's value as keploy.yml's patterns read it: a JSON null
+// as "null", as the strict comparison reads it (scalarText).
+func noiseText(l learn.Leaf) string {
+	if l.Type == learn.Null {
+		return "null"
+	}
+	return l.Value
+}
+
+// headerCovers reports whether keploy.yml's header noise excuses the header
+// name: an entry with no patterns whatever its values, one with patterns
+// only when both sides hold it (both) and its recorded and live values each
+// match one.
+func (n learnNoise) headerCovers(name, rec, live string, both bool) bool {
+	if n.headers[name] {
+		return true
+	}
+	pats := n.headerPats[name]
+	return both && matchesAny(pats, rec) && matchesAny(pats, live)
 }
 
 func hasKey(m map[string][]string, k string) bool {
@@ -1969,7 +2017,8 @@ func exactlyElsewhere(input *req, mockDb integrations.MockMemDb, sc scope, live 
 			path = input.url.Path
 		}
 		target := strings.Join(input.header.Values(amzTargetHeader), ",")
-		loose := len(n.url) > 0 || n.headers[strings.ToLower(amzTargetHeader)]
+		_, targetPats := n.headerPats[strings.ToLower(amzTargetHeader)]
+		loose := len(n.url) > 0 || n.headers[strings.ToLower(amzTargetHeader)] || targetPats
 		err = r.RangeStagedRecordings(models.HTTP, RequestKeysOf(input.method, path, target, loose), try)
 	} else {
 		for _, m := range stagedOf(mockDb) {
@@ -2066,10 +2115,19 @@ type excusedAt struct {
 }
 
 func (k excusedAt) Excused(l learn.Leaf) (bool, bool) {
-	if k.at[l.Path] {
+	return k.ExcusedPair(l, l, true, true)
+}
+
+// ExcusedPair implements learn.PairKnown, as Known reads the pair.
+func (k excusedAt) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, bool) {
+	ref := rec
+	if !inRec {
+		ref = live
+	}
+	if k.at[ref.Path] {
 		return true, false
 	}
-	return k.Known.Excused(l)
+	return learn.ExcusedLeaf(k.Known, rec, live, inRec, inLive)
 }
 
 // elsewhereWhy is what the learn step says of a call that is exactly x, a

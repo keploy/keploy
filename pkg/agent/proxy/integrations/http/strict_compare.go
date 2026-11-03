@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math/big"
 	"mime"
@@ -21,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 // The strict comparison of S1 (design v14 §9, rows S1 and §7.2 item 8): under
@@ -61,8 +63,12 @@ import (
 // reads; each mock adds its own learned noise and obfuscated values.
 type strictNoise struct {
 	// header holds the lowercased header names never compared: keploy.yml's
-	// and the static list's.
+	// entries with no patterns and the static list's.
 	header map[string]bool
+	// headerPats are keploy.yml's header entries with patterns, by
+	// lowercased name: such a header is compared unless its recorded and
+	// its live value each match one.
+	headerPats map[string][]*regexp.Regexp
 	// body is keploy.yml's request-body noise.
 	body matcher.NoiseLookup
 	// url is keploy.yml's url noise: what a pattern matches in the path or
@@ -71,11 +77,101 @@ type strictNoise struct {
 }
 
 func (h *HTTP) newStrictNoise(headerNoise, bodyNoise map[string][]string, urlNoise []string) strictNoise {
-	n := strictNoise{header: make(map[string]bool, len(headerNoise)), body: matcher.NewNoiseLookup(bodyNoise), url: compileURLNoise(h.Logger, urlNoise)}
-	for k := range headerNoise {
-		n.header[strings.ToLower(k)] = true
-	}
+	n := strictNoise{body: matcher.NewNoiseLookup(bodyNoise), url: compileURLNoise(h.Logger, urlNoise)}
+	n.header, n.headerPats = splitHeaderNoise(h.Logger, headerNoise)
 	return n
+}
+
+// splitHeaderNoise reads keploy.yml's header noise (name -> patterns) by
+// lowercased name: whole holds the names an entry with no patterns names,
+// never compared; pats the patterns of the others, whose header may vary only
+// within them. A pattern that does not compile matches nothing, so its entry
+// excuses no value; an entry naming a header in any case with no patterns
+// wins.
+func splitHeaderNoise(logger *zap.Logger, noise map[string][]string) (whole map[string]bool, pats map[string][]*regexp.Regexp) {
+	whole = make(map[string]bool, len(noise))
+	for k, v := range noise {
+		if len(v) == 0 {
+			whole[strings.ToLower(k)] = true
+		}
+	}
+	for k, v := range noise {
+		lk := strings.ToLower(k)
+		if whole[lk] {
+			continue
+		}
+		if pats == nil {
+			pats = map[string][]*regexp.Regexp{}
+		}
+		res := pats[lk]
+		for _, p := range v {
+			re, err := regexp.Compile(p)
+			if err != nil {
+				logger.Warn("keploy.yml's header noise pattern does not compile; it excuses no value", zap.String("header", lk), zap.String("pattern", p), zap.Error(err))
+				continue
+			}
+			res = append(res, re)
+		}
+		pats[lk] = res
+	}
+	return whole, pats
+}
+
+// matchesAny reports whether a pattern of pats matches s.
+func matchesAny(pats []*regexp.Regexp, s string) bool {
+	for _, re := range pats {
+		if re.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// patternWhy is the reason a field keploy.yml's noise guards with patterns
+// was compared: side (the live value, else the recorded one) is outside
+// them, said by its shape, never the value itself, which may be a secret.
+func patternWhy(field string, pats []string, side, shape string) string {
+	return fmt.Sprintf("keploy.yml's noise lets %s vary only within %s; the %s value (%s) is outside it, so it is compared", field, strings.Join(quoteAll(pats), ", "), side, shape)
+}
+
+// patternStrings are pats as written.
+func patternStrings(pats []*regexp.Regexp) []string {
+	out := make([]string, len(pats))
+	for i, re := range pats {
+		out[i] = re.String()
+	}
+	return out
+}
+
+func quoteAll(ss []string) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = strconv.Quote(s)
+	}
+	return out
+}
+
+// valueShape names a value by its kind and length, never its text: a value
+// a noise pattern guards may be a secret. ok false: the side lacks it.
+func valueShape(v interface{}, ok bool) string {
+	if !ok {
+		return "absent"
+	}
+	switch t := v.(type) {
+	case nil:
+		return "null"
+	case string:
+		return "a string of " + strconv.Itoa(len(t)) + " bytes"
+	case json.Number:
+		return "a number of " + strconv.Itoa(len(t)) + " digits"
+	case bool:
+		return "a boolean"
+	case map[string]interface{}:
+		return "an object"
+	case []interface{}:
+		return "an array"
+	}
+	return "a value"
 }
 
 // strictKnown is what a comparison with one mock excuses.
@@ -139,8 +235,12 @@ type strictField struct {
 	diff  models.MockFieldDiff
 	shape string
 	// why is, of a read of the application's clock a replay refused
-	// (clockDiffs), the reason learn.CheckClockRead gives.
+	// (clockDiffs), the reason learn.CheckClockRead gives; of a field
+	// keploy.yml's noise guards with patterns a side is outside of, that
+	// (patternWhy).
 	why string
+	// clock: why is a refused read of the application's clock.
+	clock bool
 }
 
 // field is a strictField whose name holds no value (a fixed part, a header).
@@ -217,6 +317,7 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req, m *models.Mock)
 	if input.url != nil {
 		leaves = learnNoise{}.shape(liveParts(ctx, input), "").Leaves
 	}
+	recLeaves := learnNoise{}.shape(recordedParts(m), "").Leaves
 	span, known := learn.ClockSpanOf(ctx, input.arrived, m)
 	places := make([]string, 0, len(k.clocks))
 	for p := range k.clocks {
@@ -226,14 +327,14 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req, m *models.Mock)
 	var out []strictField
 	for _, p := range places {
 		live := leaves[p]
-		if k.userNoiseAt(p, live.Value) {
+		if k.userNoiseAt(p, recLeaves[p], live) {
 			continue
 		}
 		// The reason names the field as a failed test's reason does (its
 		// shape), never a value an object key of it may be.
 		f := clockField(p)
 		if ok, why := learn.CheckClockRead(f.shape, k.clocks[p], live, span, known); !ok {
-			f.why = why
+			f.why, f.clock = why, true
 			out = append(out, f)
 		}
 	}
@@ -241,16 +342,21 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req, m *models.Mock)
 }
 
 // userNoiseAt reports whether keploy.yml's noise reaches place, in the learn
-// step's dialect, holding value: its header names, a url pattern that
-// matches in a path segment or a query value, and its request-body paths.
-func (k strictKnown) userNoiseAt(place, value string) bool {
+// step's dialect, as the recording (rec) and the call (live) hold it: its
+// header names, a url pattern that matches in a path segment or a query
+// value, and its request-body paths. A pattern reaches it only when it
+// matches both values, as the walk excuses a field (jsonDiffs, headerDiffs).
+func (k strictKnown) userNoiseAt(place string, rec, live learn.Leaf) bool {
 	switch {
 	case strings.HasPrefix(place, "header."):
-		return k.n.header[strings.TrimPrefix(place, "header.")]
+		name := strings.TrimPrefix(place, "header.")
+		pats := k.n.headerPats[name]
+		return k.n.header[name] || matchesAny(pats, rec.Value) && matchesAny(pats, live.Value)
 	case strings.HasPrefix(place, "url."):
-		return maskURLNoise(value, k.n.url) != value
+		return maskURLNoise(rec.Value, k.n.url) != rec.Value && maskURLNoise(live.Value, k.n.url) != live.Value
 	case strings.HasPrefix(place, "body."):
-		return k.n.body.Covers(riskOf(strings.TrimPrefix(place, "body.")), value, true)
+		path := riskOf(strings.TrimPrefix(place, "body."))
+		return k.n.body.Covers(path, noiseText(rec), true) && k.n.body.Covers(path, noiseText(live), true)
 	}
 	return false
 }
@@ -429,15 +535,41 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 		rv, inRec := recH[name]
 		lvs, inLive := liveH[name]
 		path := "header." + name
+		// A header keploy.yml's noise guards with patterns is compared
+		// unless its recorded and its live value each match one; why says
+		// which side is outside them, by its length.
+		pats, guarded := k.n.headerPats[name]
+		why := func(side string, v string, ok bool) string {
+			if !guarded {
+				return ""
+			}
+			return patternWhy(path, patternStrings(pats), side, valueShape(v, ok))
+		}
 		switch {
 		case !inLive:
-			out = append(out, field(models.MockFieldDiff{Path: path, Kind: models.DiffKindMissingInLive, Expected: rv}))
+			f := field(models.MockFieldDiff{Path: path, Kind: models.DiffKindMissingInLive, Expected: rv})
+			f.why = why("live", "", false)
+			out = append(out, f)
 			continue
 		case !inRec:
-			out = append(out, field(models.MockFieldDiff{Path: path, Kind: models.DiffKindMissingInMock, Actual: strings.Join(lvs, ",")}))
+			f := field(models.MockFieldDiff{Path: path, Kind: models.DiffKindMissingInMock, Actual: strings.Join(lvs, ",")})
+			f.why = why("recorded", "", false)
+			out = append(out, f)
 			continue
 		}
 		lv := strings.Join(lvs, ",")
+		recOK, liveOK := guarded && matchesAny(pats, rv), guarded && matchesAny(pats, lv)
+		if recOK && liveOK {
+			continue
+		}
+		patternField := func(f strictField) strictField {
+			if liveOK {
+				f.why = why("recorded", rv, true)
+			} else {
+				f.why = why("live", lv, true)
+			}
+			return f
+		}
 		// A SigV4 Authorization is read by its parts before learned noise:
 		// its signature differs on every run, so a learner that reads the
 		// header whole (L, at record's full round) learns it, and that must
@@ -452,6 +584,9 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 					// second line): noise learned on a SigV4 recording was
 					// learned for its signature, and excuses nothing else.
 					parts = []strictField{field(valueDiff(path, rv, lv))}
+				}
+				for i := range parts {
+					parts[i] = patternField(parts[i])
 				}
 				out = append(out, parts...)
 				continue
@@ -470,7 +605,7 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 				continue
 			}
 		}
-		out = append(out, field(valueDiff(path, rv, lv)))
+		out = append(out, patternField(field(valueDiff(path, rv, lv))))
 	}
 	return out
 }
@@ -707,10 +842,22 @@ func decodeJSONDoc(b []byte) (interface{}, bool) {
 // only its type is compared.
 func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, learned bool, out *[]strictField) {
 	name := "body"
+	// why is, where keploy.yml's noise guards this field with patterns
+	// one side's value is outside of, the reason it is compared.
+	var why string
 	if risk != "" {
 		name = "body." + risk
-		if k.n.body.Covers(risk, scalarText(r), isScalar(r)) && k.n.body.Covers(risk, scalarText(l), isScalar(l)) {
+		recOK, liveOK := k.n.body.Covers(risk, scalarText(r), isScalar(r)), k.n.body.Covers(risk, scalarText(l), isScalar(l))
+		if recOK && liveOK {
 			return
+		}
+		// Not both covered: an entry that names the field has patterns.
+		if pats, ok := k.n.body.Patterns(risk); ok {
+			side, v := "live", l
+			if liveOK {
+				side, v = "recorded", r
+			}
+			why = patternWhy(shape, pats, side, valueShape(v, true))
 		}
 	}
 	if isScalar(r) && k.redacted(scalarText(r)) {
@@ -718,7 +865,9 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 	}
 	learned = learned || k.learnedAt(exact, name)
 	if jsonKind(r) != jsonKind(l) {
-		*out = append(*out, shaped(name, shape, models.DiffKindTypeChanged, jsonKind(r), jsonKind(l)))
+		f := shaped(name, shape, models.DiffKindTypeChanged, jsonKind(r), jsonKind(l))
+		f.why = why
+		*out = append(*out, f)
 		return
 	}
 	switch rv := r.(type) {
@@ -744,15 +893,17 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 				k.jsonDiffs(rc, lc, exact+"."+key, childRisk, childShape, learned, out)
 			case k.n.body.Covers(childRisk, scalarText(rc), false) || (inRec && isScalar(rc) && k.redacted(scalarText(rc))):
 			case !inLive:
-				*out = append(*out, shaped("body."+childRisk, childShape, models.DiffKindMissingInLive, "", ""))
+				*out = append(*out, k.oneSided(childRisk, childShape, models.DiffKindMissingInLive, "live", rc))
 			default:
-				*out = append(*out, shaped("body."+childRisk, childShape, models.DiffKindMissingInMock, "", ""))
+				*out = append(*out, k.oneSided(childRisk, childShape, models.DiffKindMissingInMock, "recorded", lc))
 			}
 		}
 	case []interface{}:
 		lv := l.([]interface{})
 		if len(rv) != len(lv) {
-			*out = append(*out, shaped(name, shape, models.DiffKindValueChanged, strconv.Itoa(len(rv))+" elements", strconv.Itoa(len(lv))+" elements"))
+			f := shaped(name, shape, models.DiffKindValueChanged, strconv.Itoa(len(rv))+" elements", strconv.Itoa(len(lv))+" elements")
+			f.why = why
+			*out = append(*out, f)
 			return
 		}
 		for i := range rv {
@@ -763,6 +914,7 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 			return
 		}
 		f := shaped(name, shape, models.DiffKindValueChanged, scalarText(r), scalarText(l))
+		f.why = why
 		if strings.Contains(risk, "[]") {
 			// Elements of an array share one name, so the values would not
 			// say which element changed: the field alone.
@@ -770,6 +922,18 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 		}
 		*out = append(*out, f)
 	}
+}
+
+// oneSided is the field at risk one side lacks (absent names it), the
+// other holding held: with the reason, where keploy.yml's noise guards it
+// with patterns, that a pattern excuses no absent value.
+func (k strictKnown) oneSided(risk, shape string, kind models.MockFieldDiffKind, absent string, held interface{}) strictField {
+	f := shaped("body."+risk, shape, kind, "", "")
+	// Reached only when no entry with no patterns names the field.
+	if pats, ok := k.n.body.Patterns(risk); ok {
+		f.why = patternWhy(shape, pats, absent, valueShape(held, false))
+	}
+	return f
 }
 
 func isScalar(v interface{}) bool {
