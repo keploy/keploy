@@ -334,7 +334,7 @@ func AttrQueryReqForTest(t *testing.T, tp, sql string) mysql.Request {
 // SetAttributeForTest gives m's recorded COM_QUERY the query attribute
 // traceparent tp, as record keeps it.
 func SetAttributeForTest(m *models.Mock, tp string) {
-	qp := m.Spec.MySQLRequests[0].PacketBundle.Message.(*mysql.QueryPacket)
+	qp := m.Spec.MySQLRequests[0].Message.(*mysql.QueryPacket)
 	qp.ParameterCount, qp.NewParamsBindFlag, qp.NullBitmap = 1, 1, []byte{0}
 	qp.Parameters = []mysql.Parameter{{Type: uint16(mysql.FieldTypeString), Name: "traceparent", Value: tp}}
 }

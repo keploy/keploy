@@ -46,8 +46,8 @@ func TestStrictGate_ExecuteTypesAreComparedOnlyWhenBothPacketsSentThem(t *testin
 			t.Errorf("%s: allowed = %v, want %v", tc.name, got, tc.allowed)
 			continue
 		}
-		if !tc.allowed && (len(gate.fieldDiffs) != 1 || gate.fieldDiffs[0].Path != tc.drift) {
-			t.Errorf("%s: the report names %+v, want only %s", tc.name, gate.fieldDiffs, tc.drift)
+		if diffs := gate.fieldDiffsFor(rec); !tc.allowed && (len(diffs) != 1 || diffs[0].Path != tc.drift) {
+			t.Errorf("%s: the report names %+v, want only %s", tc.name, diffs, tc.drift)
 		}
 	}
 }

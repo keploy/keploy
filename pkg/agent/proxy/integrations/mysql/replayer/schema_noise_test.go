@@ -340,6 +340,27 @@ func TestMatchCommand_ComQueryStrict(t *testing.T) {
 		}
 	})
 
+	t.Run("strict rejects two recordings, the diffs are the named one's", func(t *testing.T) {
+		// Each recording of the statement drifted at another literal: the
+		// scan names the last it turned away, so the diffs the miss shows
+		// are that recording's, never the first one's read as its.
+		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{
+			readbackMock("q1", recorded, "row-1", zeroTime()),
+			readbackMock("q2", "INSERT INTO events (id, name) VALUES ('replay-uuid', 'f')", "row-2", zeroTime()),
+		}}}
+		eng := StrictEngineForTest()
+		_, ok, miss, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), eng, nil)
+		if err == nil && ok {
+			t.Fatal("strict must reject unmarked literal drift in COM_QUERY text")
+		}
+		if miss == nil || miss.closestMock != "q2" || miss.strictRejected != 2 {
+			t.Fatalf("the miss should name q2 the closest of two strict-rejected recordings, got %+v", miss)
+		}
+		if len(miss.fieldDiffs) != 1 || miss.fieldDiffs[0].Path != "body.query.literals.1" || miss.fieldDiffs[0].Expected != "f" || miss.fieldDiffs[0].Actual != "e" {
+			t.Errorf("the miss names q2 but shows %+v; want only q2's literals.1 drift, f to e", miss.fieldDiffs)
+		}
+	})
+
 	t.Run("strict-rejected exact-text candidate still names closest query", func(t *testing.T) {
 		// Identical SQL text (exact match) but a drifting query attribute
 		// (CLIENT_QUERY_ATTRIBUTES) the statement reads — strict must

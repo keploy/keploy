@@ -217,17 +217,18 @@ type strictGate struct {
 	queries    map[*models.Mock]string
 
 	// Rejection diagnostics for the mismatch report:
-	//   rejected    — how many candidates strict enforcement ruled out.
-	//   closestMock — the FIRST strict-rejected candidate; it passed the
-	//                 lenient match, so it is the closest mock to name in
-	//                 the report.
-	//   fieldDiffs  — field-level drift vs that first candidate
-	//                 (noise-vocabulary "body."-paths with recorded vs live
-	//                 values via matcher.JSONFieldDiffs) so the report says
-	//                 exactly WHICH request fields drifted outside noise.
-	rejected    int
-	closestMock string
-	fieldDiffs  []models.MockFieldDiff
+	//   rejected   — how many candidates strict enforcement ruled out.
+	//   rejections — each strict-rejected candidate with the engine and
+	//                noise it was compared under, in the order compare met
+	//                them, from which fieldDiffsFor gives the field-level
+	//                drift of the recording a miss names (noise-vocabulary
+	//                "body."-paths with recorded vs live values via
+	//                matcher.JSONFieldDiffs), so the report says exactly
+	//                WHICH request fields of that recording drifted outside
+	//                noise. The scan names the recording (bestPartialMock):
+	//                each candidate it gates is one it can name.
+	rejected   int
+	rejections []strictRejection
 
 	// exactRejected is how many of rejected the rule of exact serving ruled
 	// out (allowsDrift without strict enforcement, allowsLiterals):
@@ -542,10 +543,9 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 	}
 	leftOut = g.clockLeftOut(mock, leftOut)
 	noise := g.bodyNoise(mock, leftOut)
-	body := g.bodyDocFor(mock)
 	if !seen {
 		recorded, recordedOK := g.recordedJSONBody(mock)
-		v.allowed, v.drift = engine.StrictRejectRecordedJSONBody(mock, recorded, recordedOK, body, noise)
+		v.allowed, v.drift = engine.StrictRejectRecordedJSONBody(mock, recorded, recordedOK, g.bodyDocFor(mock), noise)
 		if g.compared != nil {
 			*g.compared++
 		}
@@ -558,15 +558,7 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 		return true
 	}
 	g.rejected++
-	if g.closestMock == "" {
-		g.closestMock = mock.Name
-		if recorded, recordedOK := g.recordedBody(mock); recordedOK {
-			// KnownNoise is root-relative (user ∪ learned); JSONFieldDiffs
-			// skips those paths so the report shows only non-noise drift.
-			known := engine.KnownNoise(mock, noise)
-			g.fieldDiffs = maskAttributeDiffs(matcher.JSONFieldDiffs(string(recorded), string(body.Raw()), known, "body.", 96), mock, g.live)
-		}
-	}
+	g.rejections = append(g.rejections, strictRejection{mock: mock, engine: engine, noise: noise})
 	if ce := g.logger.Check(zap.DebugLevel, "schema-noise strict: rejected candidate mock (non-noise request field drifted)"); ce != nil && !seen {
 		paths := make([]string, 0, len(v.drift))
 		for p := range v.drift {
@@ -603,6 +595,38 @@ func (g *strictGate) bodyNoise(mock *models.Mock, leftOut []string) map[string][
 	return noise
 }
 
+// strictRejection is a candidate compare rejected, with the engine and the
+// noise it compared it under.
+type strictRejection struct {
+	mock   *models.Mock
+	engine *mocknoise.Engine
+	noise  map[string][]string
+}
+
+// fieldDiffsFor is the field-level drift of the live command from mock, as
+// compare rejected it: the request fields outside the noise it compared
+// under, with their recorded and live values. A miss gives the drift of the
+// recording it names: of two recordings of a statement turned away at other
+// literals, the scan names the last, and the first one's drift would read as
+// the named one's. A recording compare did not reject (one turned away only
+// at a literal learned as a read of the application's clock, allowsClocks,
+// or none) has none. It is made only for a miss, not for every rejection.
+func (g *strictGate) fieldDiffsFor(mock *models.Mock) []models.MockFieldDiff {
+	for _, r := range g.rejections {
+		if r.mock != mock {
+			continue
+		}
+		// A body recordedBody cannot give (nil) is no valid JSON, so
+		// JSONFieldDiffs gives no diffs for it. KnownNoise is root-relative
+		// (user ∪ learned); JSONFieldDiffs skips those paths so the report
+		// shows only non-noise drift.
+		recorded, _ := g.recordedBody(mock)
+		known := r.engine.KnownNoise(mock, r.noise)
+		return maskAttributeDiffs(matcher.JSONFieldDiffs(string(recorded), string(g.bodyDocFor(mock).Raw()), known, "body.", 96), mock, g.live)
+	}
+	return nil
+}
+
 // bodyNoiseKey names a noise set bodyNoise made: its parameter count and its
 // leftOut paths, joined by NUL (no path holds one).
 type bodyNoiseKey struct {
@@ -613,7 +637,7 @@ type bodyNoiseKey struct {
 // resetDiagnostics clears the rejection diagnostics for a scan that starts over
 // on the same command, keeping the verdicts: they still hold.
 func (g *strictGate) resetDiagnostics() {
-	g.rejected, g.closestMock, g.fieldDiffs, g.exactRejected = 0, "", nil, 0
+	g.rejected, g.rejections, g.exactRejected = 0, nil, 0
 }
 
 // queryShape is the literal-split view of a SQL text: the query with every

@@ -143,7 +143,10 @@ func TestALiteralLearnedAsAClockReadIsCheckedAsOne(t *testing.T) {
 // closest: of two recordings of the statement, each refused for its own
 // reason, the reason of the one it names. Where the named one was refused
 // for another reason, the reason of the one refused at a literal is given
-// with that recording's name, never as the named one's.
+// with that recording's name, never as the named one's. The field diffs
+// the miss shows are the named recording's too: none where it was turned
+// away only at its clock literal, though the scan turned away another
+// before it at another literal.
 func TestAMissGivesTheClockReasonOfTheRecordingItNames(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	recAt := diffBase.Add(time.Millisecond)
@@ -161,16 +164,25 @@ func TestAMissGivesTheClockReasonOfTheRecordingItNames(t *testing.T) {
 		// names the closest; its clocks, and the owner its statement names.
 		clocks map[string]models.ClockOffset
 		owner  string
-		// want is in the miss's reason, never is not.
-		want, never string
+		// firstOwner is the owner mock-note's statement names (empty: the
+		// live one's, a@x.io).
+		firstOwner string
+		// want is in the miss's reason, never is not; diffs starts the
+		// field diffs the miss shows.
+		want, never, diffs string
 	}{
-		{name: "both refused at the clock literal", clocks: map[string]models.ClockOffset{"body.query.literals.1": apart}, owner: "a@x.io", want: "why:body.query.literals.1 was learned at more than one call as " + noOne, never: "mock-note: "},
-		{name: "the named one refused at another literal", owner: "b@x.io", want: "why:mock-note: " + outside},
+		{name: "both refused at the clock literal", clocks: map[string]models.ClockOffset{"body.query.literals.1": apart}, owner: "a@x.io", want: "why:body.query.literals.1 was learned at more than one call as " + noOne, never: "mock-note: ", diffs: "fieldDiffs:[] "},
+		{name: "the named one refused at another literal", owner: "b@x.io", want: "why:mock-note: " + outside, diffs: "fieldDiffs:[{Path:body.query.literals.0 Kind:value_changed Expected:b@x.io Actual:a@x.io} "},
+		{name: "the named one refused at the clock literal alone, the first at another", clocks: map[string]models.ClockOffset{"body.query.literals.1": apart}, owner: "a@x.io", firstOwner: "b@x.io", want: "why:body.query.literals.1 was learned at more than one call as " + noOne, never: "mock-note: ", diffs: "fieldDiffs:[] "},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			first, _ := recordedClock(t, recAt, f, f.read().Format(literalForm))
 			first.Spec.Clocks = map[string]models.ClockOffset{"body.query.literals.1": o}
+			if tc.firstOwner != "" {
+				q := first.Spec.MySQLRequests[0].Message.(*mysql.QueryPacket)
+				q.Query = strings.Replace(q.Query, "a@x.io", tc.firstOwner, 1)
+			}
 			secondAt := recAt.Add(5 * time.Millisecond)
 			secondSQL := strings.Replace(strings.Replace(clockSQL, "%s", secondAt.Add(-1300*time.Microsecond).Format(literalForm), 1), "a@x.io", tc.owner, 1)
 			second := diffMock("mock-note-2", "c1", []mysql.Request{queryReq(secondSQL)}, secondAt, models.LifetimePerTest, "mocks")
@@ -189,6 +201,9 @@ func TestAMissGivesTheClockReasonOfTheRecordingItNames(t *testing.T) {
 			}
 			if !strings.Contains(miss, tc.want) || (tc.never != "" && strings.Contains(miss, tc.never)) {
 				t.Fatalf("the miss (%s) does not say %q, or says %q", miss, tc.want, tc.never)
+			}
+			if !strings.Contains(miss, tc.diffs) {
+				t.Fatalf("the miss (%s) does not show the named recording's field diffs %q", miss, tc.diffs)
 			}
 		})
 	}
@@ -356,7 +371,7 @@ func TestRecordsFullRoundAsksNothingWhereAQueryAttributeChangedToo(t *testing.T)
 	recAt := diffBase.Add(time.Millisecond)
 	f := newClockRun(time.Now().UTC())
 	m, o := recordedClock(t, recAt, f, f.read().Format(literalForm))
-	q := m.Spec.MySQLRequests[0].PacketBundle.Message.(*mysql.QueryPacket)
+	q := m.Spec.MySQLRequests[0].Message.(*mysql.QueryPacket)
 	q.Query += reads
 	replayer.SetAttributeForTest(m, recordedTP)
 	for _, tc := range []struct {

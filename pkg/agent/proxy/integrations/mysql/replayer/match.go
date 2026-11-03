@@ -1753,6 +1753,15 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						// scan, see paramsOnlyMockWindow.
 						fallbacks.addDefinitive(mock)
 						if !gate.allows(mock) {
+							// The first strict-rejected definitive candidate,
+							// a recording of the command's own request as the
+							// matcher compares it, is the closest mock for
+							// the mismatch report, which shows its field
+							// diffs (fieldDiffsFor), as the first
+							// strict-rejected exact-text COM_QUERY is.
+							if bestPartialMock == nil {
+								bestPartialMock, bestPartialQuery = mock, expectedQuery
+							}
 							continue
 						}
 						inWindow := testsOwn(mock)
@@ -2194,7 +2203,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 					zap.String("closest_mock", sldClosest.Name))
 				return nil, false, &mockMiss{
 					closestMock:    sldClosest.Name,
-					fieldDiffs:     gate.fieldDiffs,
+					fieldDiffs:     gate.fieldDiffsFor(sldClosest),
 					strictRejected: gate.rejected,
 					// Candidates existed and strict rejected them; leaving the
 					// count at zero would make query.go report this as a mock
@@ -2369,20 +2378,22 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				zap.String("actual_query", truncate(actualQuery, 200)))
 		}
 
-		bestPartialMockName := ""
-		if bestPartialMock != nil {
-			bestPartialMockName = bestPartialMock.Name
-		}
-		if bestPartialMockName == "" {
-			bestPartialMockName = gate.closestMock
-		}
+		// The recording the miss names the closest, and whose field diffs
+		// it shows (fieldDiffsFor): the scan's. The scan names a candidate
+		// wherever it gates one and has named none yet (a definitive
+		// EXECUTE one, an exact-text or query-exact one, one that scored).
+		named := bestPartialMock
 		// Last resort: no candidate scored and strict rejected nothing, but the
 		// pool is not necessarily empty. Name the nearest recorded statement so
 		// the report reads "this query drifted from <that one>" instead of
 		// claiming the mock was never recorded.
 		closestQuery := bestPartialQuery
-		if bestPartialMockName == "" && nearestMock != nil {
-			bestPartialMockName, closestQuery = nearestMock.Name, nearestQuery
+		if named == nil && nearestMock != nil {
+			named, closestQuery = nearestMock, nearestQuery
+		}
+		bestPartialMockName := ""
+		if named != nil {
+			bestPartialMockName = named.Name
 		}
 		phase := models.MatchPhaseExhausted
 		switch {
@@ -2394,7 +2405,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		miss := &mockMiss{
 			closestQuery:   closestQuery,
 			closestMock:    bestPartialMockName,
-			fieldDiffs:     gate.fieldDiffs,
+			fieldDiffs:     gate.fieldDiffsFor(named),
 			strictRejected: gate.rejected,
 			candidateCount: mysqlCandidates,
 			matchPhase:     phase,
@@ -3552,7 +3563,7 @@ func updateMockLearned(ctx context.Context, logger *zap.Logger, matchedMock *mod
 	// never the shared pooled mock.
 	attach := func(spec *models.MockSpec) {
 		if len(detectedNoise) > 0 {
-			spec.ReqBodyNoise = schemanoise.MergeLearned(spec.ReqBodyNoise, detectedNoise)
+			spec.ReqBodyNoise = mocknoise.MergeLearned(spec.ReqBodyNoise, detectedNoise)
 		}
 		if len(clocks) > 0 {
 			spec.Clocks = models.MergeClocks(spec.Clocks, clocks)
