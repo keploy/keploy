@@ -34,10 +34,13 @@ import (
 // The controls keep the rule a copy follows its source: a in the call's own
 // test, where the order alone decides (an application copying the last
 // answer took b's 82 in both runs, so F's 7 is a's by chance); and a word of
-// the older serve the value holds by chance, where the recorded value holds
-// no word of any place both runs gave (83), an older test's serve or one
-// before the test: noise, as a word of another test's recording is let go
-// on the same terms (excusedGiven).
+// a serve before the test, in no older test, that the value holds by chance,
+// where the recorded value holds no word of any place both runs gave (83):
+// noise, as a word of another test's recording is let go on the same terms
+// (excusedGiven). The same chance word of an older test's serve is refused,
+// naming the serve, not as a late call: a place F gave the application only
+// in an older test of the set excuses no word at all
+// (TestAPlaceServedOnlyInAnOlderTestExcusesNoWord).
 func TestALateCallsValueAnOlderServeGaveIsNeverLearnedAsNoise(t *testing.T) {
 	const (
 		late   = "record's full round gave the application mock-a only in an older test than the call's: the call may be a late call of that test"
@@ -78,8 +81,8 @@ func TestALateCallsValueAnOlderServeGaveIsNeverLearnedAsNoise(t *testing.T) {
 		{"a served changed in the call's own test, F's view kept 7 where the recording gave it", "slot 82", "slot 7", heldView, KindNoise, nil, ""},
 		{"the recording's call took a's word: a served as recorded in the call's own test", "slot 7", "slot 82", asRecorded, KindNoise, nil, ""},
 		{"the recording's call took a's word: a served changed in the call's own test, F's view gave 5", "slot 7", "slot 82", movedView, KindNoise, nil, ""},
-		{"a served as recorded in an older test, the recorded value took no word", "slot 83", "slot 7", older(asRecorded), KindNoise, nil, ""},
-		{"a served changed in an older test, the recorded value took no word", "slot 83", "slot 7", older(viewed), KindNoise, nil, ""},
+		{"a served as recorded in an older test, the recorded value took no word", "slot 83", "slot 7", older(asRecorded), KindUnaccounted, []string{"in mock-a at", "record's full round gave the application mock-a " + olderSetAside}, late},
+		{"a served changed in an older test, the recorded value took no word", "slot 83", "slot 7", older(viewed), KindUnaccounted, []string{"in mock-a at", "record's full round gave the application mock-a " + olderSetAside}, late},
 		{"a served as recorded before the test, the recorded value took no word", "slot 83", "slot 7", before(asRecorded), KindNoise, nil, ""},
 		{"a served changed before the test, the recorded value took no word", "slot 83", "slot 7", before(viewed), KindNoise, nil, ""},
 	} {

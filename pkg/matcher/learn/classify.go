@@ -379,6 +379,10 @@ type Raw struct {
 	// application, keyed as the payload's own are (movePlaces), never as
 	// places the recording gave it.
 	moves []servedMove
+	// roles are, of a recording of the same call as the one classified
+	// (Sibling), the roles its learn step learned at its places, by the
+	// call's leaf path; nil for any other.
+	roles map[string]SiblingRole
 }
 
 // Mock is the name of r's mock.
@@ -1541,42 +1545,60 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	}
 	unreadRaw := rawUnread(raw)
 	unreadReq := requestUnread(served)
-	// The moved places the offset rule reads (offset.go), read once for the
-	// call, and only where a changed instant or word reaches it or the word
-	// rule (givenWhy): another recorded test's too (OfAnotherTest), and
-	// those F gave earlier in the set (given), which no other rule reads.
 	all := raw
-	raw = ownPlaces(raw)
-	// The moments the call's earlier places hold (echoedIn), read once for
-	// the call: every leaf and window of every value it classifies holds
-	// its moments against the same places.
-	var eh earlierHeld
-	var op *offsetPlaces
-	places := func() *offsetPlaces {
-		if op == nil {
-			var unread string
-			var set []GivenPlaces
-			if given != nil {
-				more, err := given()
-				switch {
-				case err != nil:
-					unread = "keploy cannot read back a recording record's full round gave the application earlier in the test set, so it cannot tell whether what changed came from it or was built on it: " + err.Error()
-				default:
-					unread, set = placesUnread(more), more
-				}
-			}
-			op = dc.offsetPlacesOf(at, served, all, set)
-			if unread != "" {
-				op.unread = unread
+	// The places F gave the application earlier in the set (given), read
+	// once for the call, and only where the offset rule reads them.
+	givenRead, givenUnread, givenSet := false, "", []GivenPlaces(nil)
+	givenPlaces := func() (string, []GivenPlaces) {
+		if !givenRead && given != nil {
+			more, err := given()
+			switch {
+			case err != nil:
+				givenUnread = "keploy cannot read back a recording record's full round gave the application earlier in the test set, so it cannot tell whether what changed came from it or was built on it: " + err.Error()
+			default:
+				givenUnread, givenSet = placesUnread(more), more
 			}
 		}
-		return op
+		givenRead = true
+		return givenUnread, givenSet
 	}
+	// A reading is the recordings a leaf is read against: all of them, which
+	// the offset rule and the word rule read (another recorded test's too:
+	// OfAnotherTest), and raw, those every rule reads (ownPlaces); with the
+	// moments their earlier places hold (eh: echoedIn) and the moved places
+	// the offset rule reads (places: offset.go, with those F gave earlier in
+	// the set), each read once for the reading, and only where a changed
+	// instant or word reaches it: every leaf and window of every value read
+	// against it holds them against the same places.
+	type reading struct {
+		all, raw []Raw
+		eh       earlierHeld
+		places   func() *offsetPlaces
+	}
+	readingOf := func(all []Raw) *reading {
+		rd := &reading{all: all, raw: ownPlaces(all)}
+		var op *offsetPlaces
+		rd.places = func() *offsetPlaces {
+			if op == nil {
+				unread, set := givenPlaces()
+				op = dc.offsetPlacesOf(at, served, all, set)
+				if unread != "" {
+					op.unread = unread
+				}
+			}
+			return op
+		}
+		return rd
+	}
+	// The call's reading: every recording before it.
+	callReading := readingOf(all)
 	out := make([]Learned, 0, len(drift))
-	// leaf classifies one changed leaf, r as recorded and l as F saw it, as
-	// a value of the call whose window is w, without the rules skip names
-	// (skipRule), every other rule as it stands.
-	leaf := func(r, l Leaf, w *Window, skip skipRule) Learned {
+	// leafIn classifies one changed leaf, r as recorded and l as F saw it,
+	// as a value of the call whose window is w, against the recordings of
+	// rd, without the rules skip names (skipRule), every other rule as it
+	// stands.
+	leafIn := func(rd *reading, r, l Leaf, w *Window, skip skipRule) Learned {
+		raw, all, places, eh := rd.raw, rd.all, rd.places, &rd.eh
 		if unreadRaw != "" {
 			return Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw}
 		}
@@ -1589,7 +1611,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at, served: served, raw: raw, places: places}
 		}
 		if r.Value != "" {
-			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, placed, raw, fol, &eh); ok && skip&skipSource == 0 {
+			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, placed, raw, fol, eh); ok && skip&skipSource == 0 {
 				ln.Kind, ln.From = KindVariable, from
 				if from.Side == "" || from.Echo {
 					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w, at), from)
@@ -1634,7 +1656,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// any lead or window excuses its words (offset.go).
 				why = offsetWhy(m)
 				offWhy = why
-			} else if why = unaccounted(dc, v, at, served, raw, fol, &eh); why != "" {
+			} else if why = unaccounted(dc, v, at, served, raw, fol, eh); why != "" {
 				sourced = true
 				if fol != nil && fol.refused != "" {
 					why += "; " + fol.refused
@@ -1726,7 +1748,8 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// Words the word rule let go in record's full round: noise only
 		// where the recording and F gave the application the places before
 		// the call in the same order (follows.followed); an echo they stood
-		// beside is refused as the word rule refuses them.
+		// beside stands on the same terms, and only where no instant of it
+		// changed (follows.echoed).
 		//
 		// A source the search went past (follows.refute) counts as such a
 		// word, whether or not the word rule let one go there: noise only
@@ -1745,19 +1768,21 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					ln.Why = fol.chance + ", and keploy learns it as varying"
 				}
 			case KindEcho:
-				why := fol.first
-				if why == "" {
-					why = fol.refuted + "; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside"
+				// Past its own siblings alone, which F had not served
+				// before the call, the echo stands (sibling.go).
+				if fol.pastSiblingsOnly(all, r, KindEcho) {
+					break
 				}
-				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
+				ln = fol.echoed(ln, dc.ofIn(r.Value, l.Value, w, at), at, served, all)
 			}
 		}
 		// A leaf set aside as no source (follows.refuteSeen), and nothing
-		// else: an echo beside it is refused as beside any source set aside;
-		// a value left noise is ordered below, once its kind is final.
+		// else: an echo beside it stands as beside any source set aside
+		// (follows.echoed); a value left noise is ordered below, once its
+		// kind is final.
 		asideOnly := fol != nil && fol.first == "" && fol.refuted == "" && fol.aside != ""
 		if asideOnly && ln.Kind == KindEcho {
-			ln.Kind, ln.Why, ln.Echo = KindUnaccounted, fol.aside+"; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside", nil
+			ln = fol.echoed(ln, dc.ofIn(r.Value, l.Value, w, at), at, served, all)
 		}
 		// A time of day whole (textTimeOfDay), which names no day, is a
 		// read modulo a day (textTodRead), checked so at every replay.
@@ -1856,8 +1881,33 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln.Why = fol.aside + ", and keploy learns it as varying"
 			}
 		}
+		// No excuse from a place served only in an older test (a founder
+		// ruling, 2026-11-02): a value left noise past a place F gave the
+		// application only in an older test of the set is refused, naming
+		// it (follows.noteOlder); a read of the clock stands.
+		ln = fol.olderRefused(ln)
 		if ln.Kind == KindNoise || ln.Kind == KindClockRead {
 			ln.Refuted = fol.refutedAll()
+		}
+		return ln
+	}
+	// leaf is leafIn against the call's recordings, where a value found
+	// carried from a sibling's place learned in a role a sibling passes on
+	// is learned in that role (sibling.go): read again with those siblings
+	// set aside, and taken only where that reading learns their role. That
+	// reading is of the recordings left, its own (readingOf): no rule of it
+	// reads a sibling, nor the moments or moved places a sibling holds.
+	leaf := func(r, l Leaf, w *Window, skip skipRule) Learned {
+		ln := leafIn(callReading, r, l, w, skip)
+		if ln.Kind != KindVariable {
+			return ln
+		}
+		own, role, ok := siblingsAside(all, r, ln.From)
+		if !ok {
+			return ln
+		}
+		if same := leafIn(readingOf(own), r, l, w, skip); same.Kind == role {
+			return same
 		}
 		return ln
 	}
@@ -2112,6 +2162,13 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					}
 				}
 			}
+		}
+		// A client test's read of an instant whose zone after a space is
+		// UTC's says where a keploy that did not read such a zone learned
+		// it, a wall clock word of its date and time (withWallWord), so a
+		// mock that holds that learning meets this one as the one read.
+		if dc.clientTests {
+			ln = withWallWord(ln)
 		}
 		out = append(out, ln)
 	}
@@ -3892,9 +3949,15 @@ func correction(mock string, unserved bool) string {
 
 // partOf names where part stands in value, by its characters' places,
 // never by its text: "its characters 15 to 26", or "a part of it in another
-// form" (decoded, case-folded) where value holds it in none of its own.
+// form" (decoded, case-folded) where value holds it in none of its own. A
+// word stands where value first holds it as a word (tokenIndex), so the
+// word "0" of a hash "$2a$08$Kx9/0.…" is named at its own place, not at the
+// "0" of the word "08"; a part value holds as no word, at its first place.
 func partOf(value, part string) string {
-	i := strings.Index(value, part)
+	i := tokenIndex(value, part)
+	if i < 0 {
+		i = strings.Index(value, part)
+	}
 	if part == "" || i < 0 {
 		return "a part of it in another form"
 	}
@@ -4289,11 +4352,15 @@ func putBack(v interface{}, kept []keptBody) bool {
 // payload's length, its sequence id). The driver and the server count
 // them, the application never reads them, and a number of them that is a
 // word of a value (a 4-digit group of a minted UUID that is a reply's
-// requestId) is chance, never its source. spec is not changed: the copy is.
+// requestId) is chance, never its source. Nor the digits of a Postgres
+// statement's parameter markers ($1, $2 ...: pgMarkersBlanked), syntax that
+// says where each of its values goes: the "1" of "$1" is no word of data.
+// spec is not changed: the copy is.
 func payloadSpec(spec models.MockSpec) models.MockSpec {
-	if pg := spec.PostgresV3; pg != nil && pg.Query != nil && pg.Query.InvocationID != "" {
+	if pg := spec.PostgresV3; pg != nil && pg.Query != nil {
 		q := *pg.Query
 		q.InvocationID = ""
+		q.SQLNormalized = pgMarkersBlanked(q.SQLNormalized, len(q.BindValues)+len(q.Literals))
 		p := *pg
 		p.Query = &q
 		spec.PostgresV3 = &p
@@ -4756,7 +4823,7 @@ func escapeClock(s string, set map[string]bool) {
 var clockSpans = func(text string) [][]int {
 	var spans [][]int
 	for _, lay := range clockLayouts {
-		spans = append(spans, lay.re.FindAllStringIndex(text, -1)...)
+		spans = append(spans, lay.matches(lay.re, text, 0, len(text))...)
 	}
 	return spans
 }

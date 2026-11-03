@@ -3647,10 +3647,14 @@ func TestInServeOrderNumbersTheLeafedPayloadsByTheServedMocks(t *testing.T) {
 // ("at <instant>") alike, and the window, its provenance, decides: read in
 // the call's window (the receive served before it, its arrival, on the app's
 // clock) it is a clock read, learned as noise, whether the boot took 2 s or
-// 30 s longer; read by the lead alone (no app clock, or a test's own call,
-// which is read so: F sets each test's clock), nothing shows it is one, and
-// the minute and second that changed are words of the receive's Date header,
-// a value that may have flowed from the receive: refused, naming it.
+// 30 s longer. A test's own call is read in its own window (learn.OwnCall)
+// where the store tells whose each serve is, as the proxy's does under the
+// switch: the receive is the start-up's, so the window runs from it, and the
+// read is learned the same. Read by the lead alone (no app clock, or a
+// test's own call where no store tells whose a serve is), nothing shows it
+// is one, and the minute and second that changed are words of the receive's
+// Date header, a value that may have flowed from the receive: refused,
+// naming it.
 func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 	iso := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }
 	recRead := learnAt.Add(3 * time.Millisecond)
@@ -3666,12 +3670,16 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 			boot  time.Duration
 			clock bool
 			own   bool
+			// owner: the store tells whose each serve is (the test's own
+			// or the start-up's: learn.Tracker.SetServeOwner).
+			owner bool
 			noise bool
 		}{
-			{"a 2 s longer boot", 2 * time.Second, true, false, true},
-			{"a 30 s longer boot", 30 * time.Second, true, false, true},
-			{"no app clock", 2 * time.Second, false, false, false},
-			{"a test's own call", 2 * time.Second, true, true, false},
+			{"a 2 s longer boot", 2 * time.Second, true, false, false, true},
+			{"a 30 s longer boot", 30 * time.Second, true, false, false, true},
+			{"no app clock", 2 * time.Second, false, false, false, false},
+			{"a test's own call, the store tells whose a serve is", 2 * time.Second, true, true, true, true},
+			{"a test's own call, no store tells whose a serve is", 2 * time.Second, true, true, false, false},
 		} {
 			t.Run(form.name+", "+tc.name, func(t *testing.T) {
 				h, n, opts := learnOn(t)
@@ -3688,6 +3696,10 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 					db = &learnDb{perTest: []*models.Mock{event}, staged: []*models.Mock{receive}, pool: map[time.Time]bool{receive.Spec.ReqTimestampMock: true}}
 					tr.Begin()
 				}
+				if tc.owner {
+					// Both are the test's own or the start-up's.
+					tr.SetServeOwner(func(*models.Mock) bool { return true })
+				}
 				offset := learn.FullRoundLead + tc.boot - 40*time.Second
 				read := 0
 				if tc.clock {
@@ -3701,8 +3713,8 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if tc.own && read != 0 {
-					t.Fatalf("a test's own call read its window (the app's clock %d times)", read)
+				if tc.own && (read != 0) != tc.owner {
+					t.Fatalf("a test's own call read the app's clock %d times; want its window read only where the store tells whose a serve is (%v)", read, tc.owner)
 				}
 				if !tc.noise {
 					if got != nil || miss == nil || !strings.Contains(miss.res.Why, "earlier") || !strings.Contains(miss.res.Why, "mock-0") {

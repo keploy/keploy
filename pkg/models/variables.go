@@ -321,6 +321,19 @@ type ClockOffset struct {
 	// read Word checks the whole value as one read, which a text around the
 	// word is not, so it refuses it.
 	Word ClockWord `json:"word,omitzero" yaml:"word,omitempty" bson:"word,omitempty"`
+	// WallWord, of a read whose text writes its zone after a space as
+	// UTC's ("2026-11-01 18:12:37.172 +00:00" of Sequelize, "… +0000 UTC"
+	// of Go's time.Time.String(), "… +0000" of Ruby's Time#to_s), learned
+	// in keploy mock's client tests, is the word of its date and time
+	// alone (ClockWord), the zone left in the text after it: where a keploy
+	// that did not read a zone written after a space learned the place, as
+	// a read of that word as a wall clock of no zone. Meet meets such a
+	// learning with this one as that word read in UTC (meetWord), the
+	// instant both read, not as two forms of the value. Zero otherwise, and
+	// then omitted: a learning made outside client tests, or before
+	// WallWord was, names none (no keploy read such an instant before). A
+	// replay does not read it: it checks Word.
+	WallWord ClockWord `json:"wall_word,omitzero" yaml:"wall_word,omitempty" bson:"wall_word,omitempty"`
 	// Why is the line the learn step wrote for the read: what, where, both
 	// values, the rule and the undo, for a person or a tool reading the mock.
 	// Nothing replays it. Meet keeps the lesser of two that are set, so one
@@ -473,12 +486,62 @@ func isSHA256Hex(s string) bool {
 	return true
 }
 
-// meetWord is the Word two learnings of one place read it at, a and b, and
-// whether they share one: both whole (zero), or both the same word of the
-// same text. A read whole and one inside a text, or two at different places
-// of a text, are two forms of the value: their Meet is LayoutApart (Empty).
-func meetWord(a, b ClockWord) (ClockWord, bool) {
-	return a, a == b
+// meetWord is the Word, WallWord and Zone of the Meet of o and p, two
+// learnings of one place, and whether they read it at one place
+// (wordClass): both whole (zero Words) or the same word of the same text,
+// at the zone both hold (meetZones), as before WallWord was; or the word of
+// a wall clock's date and time and the instant that names it (WallWord),
+// whose zone after a space is UTC's: one read, the wall clock word in UTC,
+// the zone the instant names (classZone), so meetZones of the word's zone
+// and ZoneUTC (ZoneApart for a word read in the application's zone alone);
+// or two reads of that instant, as they are. A read whole and one inside a
+// text, or two at different places of a text, are two forms of the value
+// otherwise: their Meet is LayoutApart (Empty), its zone the one both
+// classZones hold, its Word and WallWord zero. Each field of the result is
+// one however the learnings are grouped: the place both read (one
+// wordClass, or none), the zone every classZone holds, and the instant's
+// form only where every learning read the instant. That holds over the
+// learnings the learn step makes (its withWallWord), where a read of an
+// instant names the WallWord of its own span: its Word (none where it
+// reads the value whole) is that WallWord with the zone after it, so two
+// reads that name one WallWord name one Word. Two that named it at two
+// Words would meet as Empty, though each meets the word read at that
+// WallWord as that read, and grouping would tell; no learning makes them.
+func meetWord(o, p ClockOffset) (word, wall ClockWord, zone string, ok bool) {
+	zone = meetZones(classZone(o), classZone(p))
+	switch {
+	case wordClass(o) != wordClass(p):
+		return ClockWord{}, ClockWord{}, zone, false
+	case o.WallWord.IsZero() != p.WallWord.IsZero():
+		return wordClass(o), ClockWord{}, zone, true
+	case o.Word != p.Word:
+		return ClockWord{}, ClockWord{}, zone, false
+	}
+	return o.Word, o.WallWord, meetZones(o.Zone, p.Zone), true
+}
+
+// wordClass is the word o reads its value at as a wall clock: WallWord,
+// the word of its date and time, for a read of an instant that names it;
+// Word otherwise.
+func wordClass(o ClockOffset) ClockWord {
+	if o.WallWord.IsZero() {
+		return o.Word
+	}
+	return o.WallWord
+}
+
+// classZone is the zone o reads its wordClass in: ZoneUTC for a read of an
+// instant that names its WallWord, whose zone after a space is UTC's, and
+// that names its moment (Zone ""), ZoneApart for one that names a WallWord
+// and a zone (no learning does); Zone otherwise.
+func classZone(o ClockOffset) string {
+	switch {
+	case o.WallWord.IsZero():
+		return o.Zone
+	case o.Zone == "":
+		return ZoneUTC
+	}
+	return ZoneApart
 }
 
 // AppZoneMatters reports whether what the learn step learned of o depends
@@ -1480,7 +1543,10 @@ func (o ClockOffset) signed() bool {
 // zones no one zone holds (UTC and the application's: ZoneApart,
 // meetZones), or that saw it written in different layouts (LayoutApart,
 // meetLayouts), whole at one and a word of a text at another, or at two
-// places of a text (meetWord), meet as an Empty one, which holds nothing; ZoneEither meets
+// places of a text (meetWord), meet as an Empty one, which holds nothing,
+// except a word read as a wall clock of the date and time of an instant
+// the other reads with its zone after a space, UTC's (WallWord), which
+// meet as that word read in UTC; ZoneEither meets
 // UTC or the application's zone as that one, the zone both hold, and a
 // Layout of "" (learned before Layout was) meets another as that one. Two
 // that read the application's zone as two zones (AppZoneApart: two named
@@ -1504,7 +1570,7 @@ func (o ClockOffset) signed() bool {
 // is the lesser of the two that are set (nothing replays it): one learned
 // line, whatever the order.
 func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
-	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout), Since: meetSince(o.Since, p.Since), Why: o.Why, Step: o.Step, Phase: max(o.Phase, p.Phase)}
+	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Layout: meetLayouts(o.Layout, p.Layout), Since: meetSince(o.Since, p.Since), Why: o.Why, Step: o.Step, Phase: max(o.Phase, p.Phase)}
 	if m.Why == "" || p.Why != "" && p.Why < m.Why {
 		m.Why = p.Why
 	}
@@ -1512,10 +1578,11 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 		m.Step = StepApart
 	}
 	// One read whole and one inside a text, or at two places of a text
-	// (meetWord), were written in two forms: no one layout holds both.
-	if word, ok := meetWord(o.Word, p.Word); ok {
-		m.Word = word
-	} else {
+	// (meetWord), were written in two forms: no one layout holds both. A
+	// wall clock word of an instant's date and time and that instant read
+	// with its zone after a space, UTC's, are one read in UTC.
+	var ok bool
+	if m.Word, m.WallWord, m.Zone, ok = meetWord(o, p); !ok {
 		m.Layout = LayoutApart
 	}
 	// A learning whose value a replay reads in no zone of the application's
