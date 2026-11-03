@@ -282,36 +282,48 @@ func placedFor(p evPlace, r string) evPlace {
 // textHalf is t, a recording's text, as its request alone (request) or
 // its answer alone: each field in or outside its request (requestPath),
 // laid out as textFields lays a text out; t itself where it is no
-// recording's (a leaf is one side already). What a recording's request
-// holds is what the application sent there, never what the recording gave
-// it. Where keploy could not read the recording, t itself, which its read
-// marked unread: every question of it is unread, and the call refused.
-func textHalf(t *readerText, request bool) *readerText {
+// recording's (a leaf is one side already), with where each of those
+// fields stands in it (laid). What a recording's request holds is what the
+// application sent there, never what the recording gave it. Where keploy
+// could not read the recording, t itself, which its read marked unread:
+// every question of it is unread, and the call refused.
+func textHalf(t *readerText, request bool) (half *readerText, laid []rawField) {
 	if t.raw == nil {
-		return t
+		return t, nil
 	}
 	s, fields, ok := t.read()
 	if !ok {
-		return t
+		return t, nil
 	}
 	var b strings.Builder
 	for _, f := range fields {
 		if requestPath(f.path) == request {
-			b.WriteString(s[f.start:f.end])
+			text := s[f.start:f.end]
+			f.start = b.Len()
+			b.WriteString(text)
+			f.end = b.Len()
+			laid = append(laid, f)
 			b.WriteByte('\n')
 		}
 	}
-	return t.x.text(b.String())
+	return t.x.text(b.String()), laid
 }
 
 // halves is p, a recording's place, as its two halves, each read in that
 // half of each run's text (textHalf): its request, what the application
 // sent there, a send placed by its request's time (p.req), and its answer,
-// what the recording gave it, placed by its answer's (rawState).
-func halves(p evPlace) (req, ans evPlace) {
+// what the recording gave it, placed by its answer's (rawState). Each
+// half's fields are kept in dc.laid, where atFinest reads them.
+func (dc *decider) halves(p evPlace) (req, ans evPlace) {
+	if dc.laid == nil {
+		dc.laid = map[*readerText][]rawField{}
+	}
 	half := func(request bool) evPlace {
 		h := p
-		h.t = &placeText{rec: textHalf(p.t.rec, request), live: textHalf(p.t.live, request), views: p.t.views}
+		rec, rf := textHalf(p.t.rec, request)
+		live, lf := textHalf(p.t.live, request)
+		dc.laid[rec], dc.laid[live] = rf, lf
+		h.t = &placeText{rec: rec, live: live, views: p.t.views}
 		return h
 	}
 	req, ans = half(true), half(false)

@@ -2421,11 +2421,12 @@ func TestOutcomeARecordingsTwoHalvesAreNamedOnce(t *testing.T) {
 }
 
 // A place's instants are each judged at the finest unit their place shows
-// in either run: the JSON member each is the value of, its layout, and its
-// text but for its fraction's digits. Where both runs hold as many there,
-// the k-th of each are one time's; where a member's count differs (a list
-// that grew or shrank between runs), each takes the finest unit the other
-// run shows at that member. A time of no member (an element of a list of
+// in either run: the JSON member each is the value of, named by its path
+// (each element of a list at one path), its layout, and its text but for
+// its fraction's digits. Where both runs hold as many there, the k-th of
+// each are one time's; where a member's count differs (a list that grew or
+// shrank between runs), each takes the finest unit the other run shows at
+// the member at that path. A time of no member (an element of a list of
 // times, one after a quoted word with no colon), or of a member named
 // without quotes, pairs only by count; one at
 // another member, offset or layout keeps its own unit. The recording is
@@ -2480,6 +2481,17 @@ func TestOutcomeAPlaceIsJudgedAtTheFinestUnitItsMemberShowsInEitherRun(t *testin
 		{"spaces about the colon, the list grew", `[{"a" : ` + s(at) + `}]`, `[{"a" : ` + f(ago(60)) + `},{"a" : ` + f(ago(61)) + `}]`, []time.Duration{ms}, 1},
 		{"a member named without quotes, the list grew", `[{a:` + s(at) + `},{a:` + f(ago(5)) + `}]`, `[{a:` + f(ago(60)) + `}]`, []time.Duration{sec, ms}, 1},
 		{"a time after a quoted word and no colon, the list grew", `["a" ` + s(at) + `]`, `["a" ` + f(ago(60)) + `,"a" ` + f(ago(61)) + `]`, []time.Duration{sec}, 1},
+		{"a member of the same name at another path, the list grew", `{"at":` + s(at) + `,"items":[{"at":` + f(ago(40)) + `}]}`,
+			`{"at":` + s(ago(-1)) + `,"items":[{"at":` + f(ago(80)) + `},{"at":` + f(ago(81)) + `}]}`, []time.Duration{sec, ms}, 1},
+		{"a member of the same name in a sibling object, the list grew", `{"job":{"at":` + s(at) + `},"history":[{"at":` + f(ago(40)) + `}]}`,
+			`{"job":{"at":` + s(ago(-1)) + `},"history":[{"at":` + f(ago(80)) + `},{"at":` + f(ago(81)) + `}]}`, []time.Duration{sec, ms}, 1},
+		{"an escaped quote and a brace in a string before the member", `{"note":"a \"{","at":` + s(at) + `}`, `{"note":"b","at":` + f(ago(60)) + `}`, []time.Duration{ms}, 1},
+		{"a quote alone on a line before the member", "\"\n" + `{"at":` + s(at) + `}`, `{"at":` + f(ago(60)) + `}`, []time.Duration{ms}, 1},
+		{"a colon, a comma and closers with nothing open before the list, which grew", "a: b, c]}\n" + `{"items":[{"at":` + s(at) + `}]}`,
+			`{"items":[{"at":` + f(ago(60)) + `},{"at":` + f(ago(61)) + `}]}`, []time.Duration{ms}, 1},
+		{"a list in an object named by no key, the list grew", `{{"x":[{"at":` + s(at) + `}]}}`, `{{"x":[{"at":` + f(ago(60)) + `},{"at":` + f(ago(61)) + `}]}}`, []time.Duration{sec}, 1},
+		{"a list in an object named by a bare word (a Mongo section), the list grew", `{ SectionSingle msg: {"items":[{"at":` + s(at) + `}]} }`,
+			`{ SectionSingle msg: {"items":[{"at":` + f(ago(60)) + `},{"at":` + f(ago(61)) + `}]} }`, []time.Duration{ms}, 1},
 	} {
 		loads := 0
 		recorded := answer(tc.rec)
@@ -2490,7 +2502,17 @@ func TestOutcomeAPlaceIsJudgedAtTheFinestUnitItsMemberShowsInEitherRun(t *testin
 		}
 		k := loads
 		loads = 0
-		spans, read := dc.atFinest(x.textOf(raw), x.textOf(RawOf(answer(tc.run), true)))
+		// A text of another kind must not crash the question: a crash
+		// fails the row by name.
+		spans, read, crashed := func() (spans []instant, read bool, crashed any) {
+			defer func() { crashed = recover() }()
+			spans, read = dc.atFinest(x.textOf(raw), x.textOf(RawOf(answer(tc.run), true)))
+			return spans, read, nil
+		}()
+		if crashed != nil {
+			t.Errorf("%s: the question crashed (%v)", tc.what, crashed)
+			continue
+		}
 		var units []time.Duration
 		for _, sp := range spans {
 			units = append(units, sp.res)
@@ -2505,10 +2527,12 @@ func TestOutcomeAPlaceIsJudgedAtTheFinestUnitItsMemberShowsInEitherRun(t *testin
 }
 
 // Judging a place's instants at the finest unit either run shows reads
-// each text's instants in a few passes, however many it holds: a list of
+// each text's instants a few times, however many it holds: a list of
 // 50,000 times that grew by one between runs, every time judged at the
-// other run's milliseconds, is read in at most four passes over each
-// text's instants and loaded again once.
+// other run's milliseconds, reads each instant at most five times, each
+// read counted where it is made (pairing them included), walks each
+// text's bytes at most once to name the members they stand at, and loads
+// the recording again once.
 func TestOutcomeAPlaceOfManyTimesIsReadInAFewPassesEach(t *testing.T) {
 	defer func(b, r int64) { bodyBudget, readerBudget = b, r }(bodyBudget, readerBudget)
 	bodyBudget, readerBudget = 0, 1
@@ -2537,7 +2561,8 @@ func TestOutcomeAPlaceOfManyTimesIsReadInAFewPassesEach(t *testing.T) {
 	loads := 0
 	raw := dr.LazyRawOf(recorded, true, func() (*models.Mock, error) { loads++; return recorded, nil })
 	x := newReaderIndex(dr)
-	tx, ox := x.textOf(raw), x.textOf(RawOf(getAnswer("mock-7", "http://api/jobs/1", list(n+1, fine), oAt.Add(-time.Second)), true))
+	other := RawOf(getAnswer("mock-7", "http://api/jobs/1", list(n+1, fine), oAt.Add(-time.Second)), true)
+	tx, ox := x.textOf(raw), x.textOf(other)
 	rs, read := tx.spansOf()
 	os, oread := ox.spansOf()
 	if !read || !oread || len(rs) != n || len(os) != n+1 || loads == 0 {
@@ -2556,8 +2581,11 @@ func TestOutcomeAPlaceOfManyTimesIsReadInAFewPassesEach(t *testing.T) {
 	if !read || finer != n {
 		t.Errorf("read %v, %d of %d times at the other run's milliseconds; want all", read, finer, n)
 	}
-	if bound := 4 * (len(rs) + len(os)); dc.passes > bound {
-		t.Errorf("read %d instants of the two texts' %d and %d; want at most %d, four passes over each", dc.passes, len(rs), len(os), bound)
+	if bound := 5 * (len(rs) + len(os)); dc.passes > bound {
+		t.Errorf("read %d instants of the two texts' %d and %d; want at most %d, five reads of each", dc.passes, len(rs), len(os), bound)
+	}
+	if bound := len(RawOf(recorded, true).Text()) + len(other.Text()); dc.walked > bound {
+		t.Errorf("walked %d bytes of the two texts' %d; want each walked at most once", dc.walked, bound)
 	}
 	if loads != k+1 {
 		t.Errorf("the recording loaded %d times; want %d to read its instants and 1 again", loads, k)
@@ -2648,4 +2676,177 @@ func TestOutcomeAListThatGrewBetweenRunsKeepsItsTimesVerdict(t *testing.T) {
 	in := iCall("body.cmd.query.dirtyAt.$lte.$numberLong", Number, sec(rAt), sec(fAt), rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), nil,
 		[]Raw{RawOf(rm, true).ServedAs(1).ServedLive(RawOf(lm, true))})
 	oRefused(t, "a picked second beside a finer time at the same member, in the same order in both runs", oWord(t, Decide(in), sec(rAt), sec(fAt)), RefusalPick, "mock-799")
+}
+
+// A time the application picks, or one an answer gives that the
+// application sends back, at a member whose name a member at another path
+// of the same answer shares (a top-level "at" beside each item's "at", a
+// job's "at" beside each history entry's "at"), is paired only with the
+// other run's times at the member at that path: a list at the other path
+// that grew or shrank between runs, or was empty when it was recorded,
+// lends it no finer unit. The pick stays refused, in either mode, and the
+// time sent back stays the answer's value (refused where the call landed
+// in another test's window, which teaches clock reads only), as where the
+// list's length did not change: neither is ever learned as the call's own
+// clock read.
+func TestOutcomeATimeIsPairedAtTheMemberAtItsPathAlone(t *testing.T) {
+	sec := func(x time.Time) string { return strconv.FormatInt(x.Unix(), 10) }
+	tsec := func(x time.Time) string { return x.UTC().Format(time.RFC3339) }
+	rAt, fAt := oAt.Add(20400*time.Millisecond), oAt.Add(96400*time.Millisecond)
+	answer := func(body string) *models.Mock {
+		return &models.Mock{Name: "mock-799", Kind: models.HTTP, Spec: models.MockSpec{
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "http://api.local/jobs/1", Body: ``},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: body},
+			ReqTimestampMock: oAt.Add(-time.Second), ResTimestampMock: oAt.Add(-time.Second + time.Millisecond),
+		}}
+	}
+	// items is n entries, each holding the time it was made, with its
+	// milliseconds, 40 s and more before end.
+	items := func(end time.Time, n int) string {
+		var s []string
+		for i := range n {
+			s = append(s, `{"at":"`+end.Add(-time.Duration(40+i)*time.Second+400*time.Millisecond).UTC().Format(time.RFC3339Nano)+`"}`)
+		}
+		return strings.Join(s, ",")
+	}
+	for _, sh := range []struct {
+		what string
+		body func(at string, list string) string
+	}{
+		{"a top-level at beside each item's at", func(at, list string) string { return `{"at":"` + at + `","items":[` + list + `]}` }},
+		{"a job's at beside each history entry's at", func(at, list string) string {
+			return `{"job":{"at":"` + at + `"},"history":[` + list + `]}`
+		}},
+	} {
+		for _, n := range [][2]int{{2, 2}, {2, 3}, {3, 2}, {1, 2}, {0, 1}} {
+			what := fmt.Sprintf("%s, %d entries then %d", sh.what, n[0], n[1])
+			for _, mode := range []Mode{ModeOwn, ModeElsewhere} {
+				elsewhere := func(in Input, what string) (Input, string) {
+					if mode == ModeElsewhere {
+						in.Mode, in.Landed = ModeElsewhere, Landed{Where: LandedOther, Test: "test-5"}
+						what += ", landed from another test"
+					}
+					return in, what
+				}
+				// The pick: round F's answer holds round F's second at the
+				// member, the recording's a second 37 s before its call.
+				rm := answer(sh.body(tsec(rAt.Add(-37*time.Second)), items(rAt, n[0])))
+				lm := answer(sh.body(tsec(fAt), items(fAt, n[1])))
+				in, w := elsewhere(iCall("body.cmd.query.dirtyAt.$lte.$numberLong", Number, sec(rAt), sec(fAt), rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), nil,
+					[]Raw{RawOf(rm, true).ServedAs(1).ServedLive(RawOf(lm, true))}), what+", round F's second picked")
+				if mode == ModeOwn {
+					oRefused(t, w, oWord(t, Decide(in), sec(rAt), sec(fAt)), RefusalPick, "mock-799")
+				} else {
+					oRefused(t, w, oWord(t, Decide(in), sec(rAt), sec(fAt)), RefusalPick)
+				}
+				// The answer: each run's call second at the member, sent
+				// back.
+				rm, lm = answer(sh.body(tsec(rAt), items(rAt, n[0]))), answer(sh.body(tsec(fAt), items(fAt, n[1])))
+				in, w = elsewhere(iCall("body.cmd.query.dirtyAt.$lte", Instant, tsec(rAt), tsec(fAt), rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), nil,
+					[]Raw{RawOf(rm, true).ServedAs(1).ServedLive(RawOf(lm, true))}), what+", the answer's time sent back")
+				if d := oWord(t, Decide(in), tsec(rAt), tsec(fAt)); mode == ModeOwn {
+					iValue(t, w, d, "mock-799")
+				} else {
+					oRefused(t, w, d, RefusalLandedElsewhere)
+				}
+			}
+		}
+	}
+}
+
+// Each document of a find answer holds the time it was made, with its
+// milliseconds (created_at), and a whole second the application picks
+// (claimed_at); round F's newest claimed_at is round F's second. Where the
+// list grew or shrank between runs, each claimed_at is judged at the
+// finest unit the other run's claimed_at shows, never at a finer
+// created_at's beside it: the pick stays refused, as where the list's
+// length did not change.
+func TestOutcomeAPickedSecondBesideAFinerMemberStaysRefusedInAListThatGrew(t *testing.T) {
+	sec := func(x time.Time) string { return strconv.FormatInt(x.Unix(), 10) }
+	tsec := func(x time.Time) string { return x.UTC().Format(time.RFC3339) }
+	rAt, fAt := oAt.Add(20400*time.Millisecond), oAt.Add(96400*time.Millisecond)
+	find := func(docs []string) *models.Mock {
+		return &models.Mock{Name: "mock-799", Kind: models.HTTP, Spec: models.MockSpec{
+			HTTPReq:          &models.HTTPReq{Method: "POST", URL: "http://db.local/apps/find", Body: `{"find":"apps"}`},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: `{"cursor":{"firstBatch":[` + strings.Join(docs, ",") + `]}}`},
+			ReqTimestampMock: oAt.Add(-time.Second), ResTimestampMock: oAt.Add(-time.Second + time.Millisecond),
+		}}
+	}
+	doc := func(made, claimed time.Time) string {
+		return `{"created_at":"` + made.UTC().Format(time.RFC3339Nano) + `","claimed_at":"` + tsec(claimed) + `"}`
+	}
+	// docs is n older documents, made 40 s and more before end, then the
+	// newest, claimed at claimed.
+	docs := func(end time.Time, n int, claimed time.Time) []string {
+		var out []string
+		for i := range n {
+			x := end.Add(-time.Duration(40+i)*time.Second + 400*time.Millisecond)
+			out = append(out, doc(x, x.Add(-3*time.Second)))
+		}
+		return append(out, doc(end.Add(-2*time.Second+473*time.Millisecond), claimed))
+	}
+	for _, c := range []struct {
+		what       string
+		rOld, fOld int
+	}{{"2 documents then 2", 1, 1}, {"2 documents then 3", 1, 2}, {"3 documents then 2", 2, 1}} {
+		rm, lm := find(docs(rAt, c.rOld, rAt.Add(-37*time.Second))), find(docs(fAt, c.fOld, fAt))
+		in := iCall("body.cmd.query.dirtyAt.$lte.$numberLong", Number, sec(rAt), sec(fAt), rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), nil,
+			[]Raw{RawOf(rm, true).ServedAs(1).ServedLive(RawOf(lm, true))})
+		oRefused(t, "a picked claimed_at beside a finer created_at, "+c.what, oWord(t, Decide(in), sec(rAt), sec(fAt)), RefusalPick, "mock-799")
+	}
+}
+
+// A recording's half keeps where each of its fields stands in it
+// (textHalf), so each time in it is placed as in the recording's whole
+// text: by the field that holds it and the member at its path in that
+// field. In the answer, the body's top-level time, its items' times and a
+// header's JSON time are three places, the items' one place.
+func TestOutcomeAHalfPlacesATimeAsItsRecordingDoes(t *testing.T) {
+	s := oAt.Add(96 * time.Second).UTC().Format(time.RFC3339)
+	m := &models.Mock{Name: "mock-7", Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq: &models.HTTPReq{Method: "POST", URL: "http://api/jobs", Body: `{"at":"` + s + `"}`},
+		HTTPResp: &models.HTTPResp{StatusCode: 200, Header: map[string]string{"X-Meta": `{"at":"` + s + `"}`},
+			Body: `{"at":"` + s + `","items":[{"at":"` + s + `"},{"at":"` + s + `"}]}`},
+		ReqTimestampMock: oAt.Add(-time.Second), ResTimestampMock: oAt.Add(-time.Second + time.Millisecond),
+	}}
+	var dc decider
+	places := func(t *readerText) []instantPlace {
+		spans, read := t.spansOf()
+		text, fields, ok := dc.laidOut(t)
+		if !read || !ok {
+			return nil
+		}
+		return dc.placesIn(text, fields, spans).at
+	}
+	// Each half's places, and the whole text's places of each half's
+	// fields, in order.
+	var halves, wholes [2][]instantPlace
+	crashed := func() (crashed any) {
+		defer func() { crashed = recover() }()
+		x := newReaderIndex(nil)
+		whole := x.textOf(RawOf(m, true))
+		req, ans := dc.halves(evPlace{t: &placeText{rec: whole, live: whole}})
+		halves = [2][]instantPlace{places(req.t.rec), places(ans.t.live)}
+		for _, p := range places(whole) {
+			field, _, _ := strings.Cut(p.field, "\x00")
+			if requestPath(field) {
+				wholes[0] = append(wholes[0], p)
+			} else {
+				wholes[1] = append(wholes[1], p)
+			}
+		}
+		return nil
+	}()
+	if crashed != nil {
+		t.Fatalf("the question crashed (%v)", crashed)
+	}
+	for i, what := range []string{"request", "answer"} {
+		if len(halves[i]) == 0 || !slices.Equal(halves[i], wholes[i]) {
+			t.Errorf("the %s half placed its times at %+v; want %+v, as the recording's whole text places them", what, halves[i], wholes[i])
+		}
+	}
+	if a := halves[1]; len(a) != 4 || slices.ContainsFunc(a, func(p instantPlace) bool { return p.field == "" }) ||
+		a[0] == a[1] || a[1] != a[2] || a[3] == a[0] || a[3] == a[1] {
+		t.Errorf("the answer's times placed at %+v; want the body's top-level time, its items' times and the header's time three named places, the items' one", a)
+	}
 }
