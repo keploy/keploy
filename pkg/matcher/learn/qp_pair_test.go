@@ -333,6 +333,35 @@ func TestAPayloadReadsEachQuotedPrintableEscape(t *testing.T) {
 	}
 }
 
+// A payload is read in the quoted-printable form with its JSON escapes read
+// before its quoted-printable ones: a JSON string may write each '=' as
+// "\u003d" (Gson does by default), and "\u003d23" is the escape of a
+// '#' only once it reads as "=23". An id an earlier call sent in a JSON
+// body behind it ("\u003d23A7K29Q") is found there, and the value it
+// flowed into is followed as a variable; read as written, or decoded before
+// its JSON escapes are read, the id stays glued to the "23". The control, a
+// payload without the id, is not.
+func TestAQuotedPrintablePayloadInAJSONStringIsReadUnescapedFirst(t *testing.T) {
+	at := time.Date(2026, 11, 2, 11, 48, 4, 0, time.UTC)
+	sent := func(text string) []Raw {
+		m := &models.Mock{Name: "mail-0", Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "POST", URL: "http://localhost:8025/api/send", Header: map[string]string{"Content-Type": "application/json"}, Body: `{"text":"` + text + `"}`},
+			HTTPResp:         &models.HTTPResp{StatusCode: 202, Header: map[string]string{}, Body: `{}`},
+			ReqTimestampMock: at.Add(-2 * time.Second), ResTimestampMock: at.Add(-2*time.Second + 20*time.Millisecond),
+		}}
+		return []Raw{RawOf(m, true)}
+	}
+	for _, text := range []string{`Order \u003d23ID placed. Thank you\u003d21`, `Order\u003d3D\u003d23ID`} {
+		if got := classifyOne("A7K29Q", "B8L30R", at, nil, sent(strings.ReplaceAll(text, "ID", "A7K29Q")), nil); got.Kind != KindVariable {
+			t.Errorf("%q: got %s (%s), want the id that flowed from the payload followed as a variable", text, got.Kind, got.Why)
+		}
+		if got := classifyOne("A7K29Q", "B8L30R", at, nil, sent(strings.ReplaceAll(text, "ID", "C9M41S")), nil); got.Kind == KindVariable {
+			t.Errorf("%q without the id: got a variable (%s)", text, got.Why)
+		}
+	}
+}
+
 // An id that flowed into a drifted value is followed as the variable it is
 // wherever quoted-printable hides it behind an escape of a character it
 // may write as itself ("=23" a '#', "=22" a '"', "=20" a space, "=09" a
