@@ -382,7 +382,8 @@ func exportHold(leaf string) LearnHold {
 // (request_changed), naming the queue's leaf and the recording, and nothing
 // is taken or learned; so does a send of another operation. A drift outside
 // the held leaves is still learned, and keploy.yml's noise on a held leaf
-// still excuses it.
+// still excuses it, a pattern only when the recorded and the live value
+// each match it.
 func TestLearnMatchNeverLearnsALeafItsCallerHolds(t *testing.T) {
 	toQueue := func(body, queue string) string {
 		return strings.Replace(body, "http://127.0.0.1:9324/000000000000/lead-events", queue, 1)
@@ -393,22 +394,29 @@ func TestLearnMatchNeverLearnsALeafItsCallerHolds(t *testing.T) {
 		body    string
 		header  map[string]string
 		noise   map[string][]string
-		differs string // the held leaf the miss names; "" where served
+		differs string              // the held leaf the miss names; "" where served
+		hnoise  map[string][]string // keploy.yml's header noise
 	}{
-		{"the recorded message to another queue", toQueue(exportSendBody(exportRecID, exportAt), exportOtherQueue), exportSend, nil, "body.QueueUrl"},
-		{"a drifted message to another queue", toQueue(exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportOtherQueue), exportSend, nil, "body.QueueUrl"},
-		{"a drifted message as another operation", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), batchTarget, nil, "header.x-amz-target"},
-		{"a drifted message to the recorded queue", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportSend, nil, ""},
-		{"keploy.yml's noise on the queue", toQueue(exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportOtherQueue), exportSend, map[string][]string{"QueueUrl": {}}, ""},
+		{"the recorded message to another queue", toQueue(exportSendBody(exportRecID, exportAt), exportOtherQueue), exportSend, nil, "body.QueueUrl", nil},
+		{"a drifted message to another queue", toQueue(exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportOtherQueue), exportSend, nil, "body.QueueUrl", nil},
+		{"a drifted message as another operation", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), batchTarget, nil, "header.x-amz-target", nil},
+		{"a drifted message to the recorded queue", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportSend, nil, "", nil},
+		{"keploy.yml's noise on the queue", toQueue(exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportOtherQueue), exportSend, map[string][]string{"QueueUrl": {}}, "", nil},
+		{"a keploy.yml pattern on the queue both values match", toQueue(exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportOtherQueue), exportSend, map[string][]string{"QueueUrl": {`^http://127\.0\.0\.1:9324/`}}, "", nil},
+		{"a keploy.yml pattern on the queue the call is outside", toQueue(exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportOtherQueue), exportSend, map[string][]string{"QueueUrl": {`/lead-events$`}}, "body.QueueUrl", nil},
+		{"a keploy.yml pattern on the operation both values match", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), batchTarget, nil, "", map[string][]string{"X-Amz-Target": {`^AmazonSQS\.SendMessage`}}},
+		{"a keploy.yml pattern on the operation the call is outside", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), batchTarget, nil, "header.x-amz-target", map[string][]string{"X-Amz-Target": {`^AmazonSQS\.SendMessage$`}}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h, _, opts := learnOn(t)
+			// keploy.yml's noise as a user writes it: NewRequestNoise reads
+			// its requestBody and header buckets, as decode does.
+			opts.NoiseConfig = map[string]map[string][]string{"header": c.hnoise, "requestbody": c.noise}
 			tr := clockedTracker()
 			tr.Begin()
 			db := &learnDb{perTest: []*models.Mock{exportSendRecording()}}
 			ctx := learn.WithTracker(context.Background(), tr)
 			noise := NewRequestNoise(zap.NewNop(), opts)
-			noise.Body = c.noise
 			served, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/", c.body, c.header)), noise, db, opts, integrations.CallRound{}, nil, exportHold)
 			if err != nil {
 				t.Fatal(err)
@@ -430,6 +438,52 @@ func TestLearnMatchNeverLearnsALeafItsCallerHolds(t *testing.T) {
 			}
 			if report.Reason != models.MissRequestChanged || !strings.HasPrefix(report.NextSteps, "keploy's learn step: it differs from the closest recorded call in more than values: "+c.differs+" differs. ") {
 				t.Fatalf("the report says %q (%q), want request_changed naming %s", report.NextSteps, report.Reason, c.differs)
+			}
+		})
+	}
+}
+
+// keploy.yml's pattern reads a held leaf recorded as JSON null as "null", as
+// the request matcher reads it: a pattern that admits null and the live queue
+// excuses a recording whose queue was null, and one that admits only a URL
+// leaves the recorded null a change the miss names.
+func TestLearnMatchReadsAHeldNullLeafAsNullUnderAKeployYmlPattern(t *testing.T) {
+	const recorded = `"http://127.0.0.1:9324/000000000000/lead-events"`
+	for _, c := range []struct {
+		name, pattern string
+		change        string // what the miss names; "" where served
+	}{
+		{"a pattern that admits null and the live queue", `^(null|http://127\.0\.0\.1:9324/.*)$`, ""},
+		{"a pattern that admits only a URL", `^http://127\.0\.0\.1:9324/`, "body.QueueUrl was null, is a string"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, _, opts := learnOn(t)
+			opts.NoiseConfig = map[string]map[string][]string{"requestbody": {"QueueUrl": {c.pattern}}}
+			tr := clockedTracker()
+			tr.Begin()
+			rec := learnRecorded("mock-1", time.Second, "POST", "/", strings.Replace(exportSendBody(exportRecID, exportAt), recorded, "null", 1), exportSend, `{"MD5OfMessageBody":"x","MessageId":"m-1"}`)
+			db := &learnDb{perTest: []*models.Mock{rec}}
+			ctx := learn.WithTracker(context.Background(), tr)
+			noise := NewRequestNoise(zap.NewNop(), opts)
+			call := live("POST", "/", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportSend)
+			served, miss, err := h.LearnMatch(ctx, exportCall(call), noise, db, opts, integrations.CallRound{}, nil, exportHold)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.change == "" {
+				if miss != nil || served == nil || served.Name != "mock-1" || len(db.consumed) != 1 ||
+					!reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.MessageBody": {}}) {
+					t.Fatalf("served %v miss %+v, took %+v; want mock-1 served with only its message body learned", served, miss, db.consumed)
+				}
+				return
+			}
+			if served != nil || miss == nil || len(db.consumed) != 0 || len(db.perTest) != 1 || db.perTest[0].Spec.ReqBodyNoise != nil {
+				t.Fatalf("served %v miss %+v, took %+v; want a miss, nothing taken or learned", served, miss, db.consumed)
+			}
+			report := &models.MockMismatchReport{}
+			miss.Explain(report)
+			if report.Reason != models.MissRequestChanged || !strings.HasPrefix(report.NextSteps, "keploy's learn step: it differs from the closest recorded call in more than values: "+c.change+". ") {
+				t.Fatalf("the report says %q (%q), want request_changed naming %s", report.NextSteps, report.Reason, c.change)
 			}
 		})
 	}

@@ -233,10 +233,15 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 			phase = models.MatchPhaseSchema
 		}
 		for _, f := range closestDiffs {
-			if f.why != "" {
+			switch {
+			case f.clock:
 				// A read of the application's clock the closest recording
 				// learned that this call does not hold: why, legibly.
 				h.Logger.Warn("a learned read of the application's clock does not hold", zap.String("mock", closest.Name), zap.String("field", f.shape), zap.String("reason", f.why))
+			case f.why != "":
+				// A field keploy.yml's noise lets vary only within
+				// patterns, one side's value outside them.
+				h.Logger.Warn("a keploy.yml noise pattern does not excuse a field", zap.String("mock", closest.Name), zap.String("field", f.shape), zap.String("reason", f.why))
 			}
 		}
 		diag = &matchDiag{phase: phase, candidates: len(comparedPool), pool: comparedPool, live: &live, closest: closest, differs: closestDiffs}

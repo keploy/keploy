@@ -141,7 +141,7 @@ func (e *Engine) KnownNoise(m *models.Mock, userNoise map[string][]string) map[s
 	if e == nil {
 		return userNoise
 	}
-	return MergeKnown(userNoise, StripBodyPrefix(e.adapter.StoredNoise(m)))
+	return MergeKnown(userNoise, userDecided(userNoise, StripBodyPrefix(e.adapter.StoredNoise(m))))
 }
 
 // Detect returns the new "body."-prefixed schema-noise to record on the mock for
@@ -275,9 +275,10 @@ func (e *Engine) StrictRejectRecordedJSONBody(m *models.Mock, recorded *JSONBody
 	// typeStrict, still fully exclude learned noise; typeStrict additionally marks
 	// them so a JSON parser type-enforces rather than fully ignores (collectJSON
 	// consults typeStrict first). User-configured noise stays full-ignore/regex.
-	learned := StripBodyPrefix(stored)
+	learned := userDecided(userNoise, StripBodyPrefix(stored))
 	known := knownWithLearned(userNoise, learned)
 	typeStrict := learnedTypeStrict(userNoise, learned)
+	guarded := e.userGuardedDrift(m, recorded, live, userNoise, learned)
 	var d map[string][]string
 	var comparable bool
 	if jd, isJSON := e.adapter.(JSONBodyDiffer); isJSON {
@@ -293,10 +294,60 @@ func (e *Engine) StrictRejectRecordedJSONBody(m *models.Mock, recorded *JSONBody
 		}
 		return false, map[string][]string{"body": nil}
 	}
+	for p, v := range guarded {
+		if d == nil {
+			d = map[string][]string{}
+		}
+		d[p] = v
+	}
 	if len(d) == 0 {
 		return true, nil
 	}
 	return false, d
+}
+
+// userGuardedDrift is the drift of every field keploy.yml's entry with
+// patterns guards that differs under userNoise alone: those patterns decide
+// such a field before any learned noise, and a learned container holding it
+// ("user" beside the user's "id", which userDecided keeps) would excuse it
+// whole. nil when nothing is learned or no entry has patterns.
+func (e *Engine) userGuardedDrift(m *models.Mock, recorded, live *JSONBody, userNoise, learned map[string][]string) map[string][]string {
+	if len(learned) == 0 || !hasPatterns(userNoise) {
+		return nil
+	}
+	return e.patternDrift(m, recorded, live, userNoise)
+}
+
+// PatternDrift is the drift of every field of m's recorded body and
+// liveBody that keploy.yml's entry with patterns guards and that differs
+// under userNoise alone: a value outside the patterns on either side (where
+// the obfuscator redacted the recorded value, the live one), or a field the
+// live body lacks. A pass that excuses the obfuscator's redacted values (the HTTP
+// parser's noise-aware exact body match) serves m only when it is empty.
+func (e *Engine) PatternDrift(m *models.Mock, liveBody []byte, userNoise map[string][]string) map[string][]string {
+	recorded, _ := e.adapter.RecordedBody(m)
+	return e.patternDrift(m, NewJSONBody(recorded), NewJSONBody(liveBody), userNoise)
+}
+
+// patternDrift is PatternDrift over bodies already read.
+func (e *Engine) patternDrift(m *models.Mock, recorded, live *JSONBody, userNoise map[string][]string) map[string][]string {
+	var ud map[string][]string
+	if jd, isJSON := e.adapter.(JSONBodyDiffer); isJSON {
+		ud, _ = jd.DiffJSONBodies(m, recorded, live, userNoise, nil, false, e.adapter.RecordedValueIsNoise(m))
+	} else {
+		ud, _ = e.adapter.Diff(m, recorded.Raw(), live.Raw(), userNoise, nil, false, e.adapter.RecordedValueIsNoise(m))
+	}
+	user := matcher.NewNoiseLookup(userNoise)
+	var out map[string][]string
+	for p, v := range ud {
+		if pats, ok := user.Patterns(strings.TrimPrefix(p, "body.")); ok && len(pats) > 0 {
+			if out == nil {
+				out = map[string][]string{}
+			}
+			out[p] = v
+		}
+	}
+	return out
 }
 
 // knownWithLearned is KnownNoise's set (userNoise ∪ learned, userNoise winning
@@ -307,6 +358,43 @@ func knownWithLearned(userNoise, learned map[string][]string) map[string][]strin
 		return userNoise
 	}
 	return MergeKnown(userNoise, learned)
+}
+
+// userDecided is learned without every path keploy.yml's entry with patterns
+// names (matcher.NoiseLookup: by whole fields, without case): the user's
+// patterns decide such a field, both its values. A learned entry there, a
+// case twin ("userId" beside the user's "userid") or a more specific path
+// ("user.id" under the user's "id"), would win the matcher's most specific
+// first, or case, tie-break and excuse a value the patterns refuse. learned
+// itself when it drops nothing.
+func userDecided(userNoise, learned map[string][]string) map[string][]string {
+	if len(learned) == 0 || !hasPatterns(userNoise) {
+		return learned
+	}
+	user := matcher.NewNoiseLookup(userNoise)
+	var out map[string][]string
+	for k := range learned {
+		if pats, ok := user.Patterns(k); ok && len(pats) > 0 {
+			if out == nil {
+				out = maps.Clone(learned)
+			}
+			delete(out, k)
+		}
+	}
+	if out == nil {
+		return learned
+	}
+	return out
+}
+
+// hasPatterns reports whether an entry of noise has patterns.
+func hasPatterns(noise map[string][]string) bool {
+	for _, pats := range noise {
+		if len(pats) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // learnedTypeStrict is the learned paths a JSON parser type-enforces: every

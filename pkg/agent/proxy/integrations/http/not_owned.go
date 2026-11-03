@@ -137,7 +137,8 @@ func RequestKeysOf(method, path, amzTarget string, loose bool) []string {
 // loose reports whether keploy.yml's noise reaches a call's path or its
 // X-Amz-Target (RequestKeysOf).
 func (n strictNoise) loose() bool {
-	return len(n.url) > 0 || n.header[strings.ToLower(amzTargetHeader)]
+	_, targetPats := n.headerPats[strings.ToLower(amzTargetHeader)]
+	return len(n.url) > 0 || n.header[strings.ToLower(amzTargetHeader)] || targetPats
 }
 
 // recordedRequestKeys are a recorded HTTP mock's request keys

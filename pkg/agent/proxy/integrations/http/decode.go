@@ -815,19 +815,15 @@ func NewRequestNoise(logger *zap.Logger, opts models.OutgoingOptions) RequestNoi
 	// matching if the user puts it under requestBody on purpose.
 	//
 	// Lowercased copy for the same reason as headerNoise: the matcher's
-	// noise index matches lowercased paths. Entries are normalized to
-	// presence-only (empty regex list): request-body mock matching and
-	// drift detection are path-based, so a value-regex cannot gate here.
+	// noise index matches lowercased paths. An entry keeps its patterns:
+	// it excuses a field only when the recorded and the live value each
+	// match one, and an entry with none excuses the field whatever it holds.
 	var bodyNoise map[string][]string
 	if opts.NoiseConfig != nil {
 		if bn, ok := opts.NoiseConfig["requestbody"]; ok {
 			bodyNoise = make(map[string][]string, len(bn))
 			for k, v := range bn {
-				if len(v) > 0 {
-					logger.Debug("body-noise value regexes are ignored for mock matching; the field is skipped by path",
-						zap.String("field", k))
-				}
-				bodyNoise[strings.ToLower(k)] = []string{}
+				bodyNoise[strings.ToLower(k)] = append([]string{}, v...)
 			}
 		}
 	}
@@ -838,8 +834,8 @@ func NewRequestNoise(logger *zap.Logger, opts models.OutgoingOptions) RequestNoi
 	// the recorded mock unmatchable and produced a "no matching mock -> 502"
 	// on replay. Each key here is a regex that wildcards the matching
 	// segment in both the mock and request paths (see MatchURLPath). The
-	// value slice is unused — like requestbody, matching is by pattern, not
-	// by a value-regex — so an entry is presence-only.
+	// value slice is unused: the key is the pattern, so an entry is
+	// presence-only.
 	var urlNoise []string
 	if opts.NoiseConfig != nil {
 		if un, ok := opts.NoiseConfig["url"]; ok {
