@@ -119,10 +119,16 @@ func TestALateCallsValueAnOlderServeGaveIsNeverLearnedAsNoise(t *testing.T) {
 // direction: refused, naming the start-up exchange. So too of the place an
 // earlier test's call left the run (Earlier.Run, not StartUp: its request
 // leaves, here one that held 7 in both runs), which the application sent in
-// an older test. The controls: the same exchange read by a call made at the
-// start-up, which no order marks (no test of the call's had begun), where
-// the order alone decides; and a word of it the value holds by chance (the
-// recorded value holds no word of a place both runs gave: 83), let go.
+// an older test. Where F's leaf moved (F gave 5 where the recording gave 7),
+// F's value, which holds no 5, is no copy of F's leaf, but the recording's
+// call may still have kept the 7 its run gave there: with the recording's
+// call the late one, the start-up exchange and the earlier test's place are
+// refused too, as each is where F's leaf stayed.
+// The controls: the same exchange read by a call made at the start-up,
+// which no order marks (no test of the call's had begun), where the order
+// alone decides; the moved exchange of the call's own test, which the copy
+// rule lets go; and a word of it the value holds by chance (the recorded
+// value holds no word of a place both runs gave: 83), let go.
 func TestALateCallsValueAnExchangeServedBeforeItsTestGaveIsNeverLearnedAsNoise(t *testing.T) {
 	const (
 		kept   = "record's full round gave the application mock-s only before the call's test began: the application may have kept what it gave there"
@@ -141,6 +147,17 @@ func TestALateCallsValueAnExchangeServedBeforeItsTestGaveIsNeverLearnedAsNoise(t
 	ran := Earlier{Mock: "mock-r", At: eRecAt.Add(-300 * time.Millisecond), Run: true,
 		Payload: Raw{mock: "mock-r", at: eRecAt.Add(-300 * time.Millisecond), answered: eRecAt.Add(-299 * time.Millisecond), ordered: true}.ServedAs(1),
 		Seen:    []Seen{{Side: Request, Leaf: Leaf{Path: "body.slot", Type: String, Value: "7 n1"}, Live: "7 n2", Place: "body.slot"}}}
+	// F gave 5 where the recording gave 7: at the start-up exchange's answer,
+	// and at the earlier test's call's request.
+	moved := startUp
+	moved.Seen = []Seen{
+		{Side: Response, Leaf: Leaf{Path: "body.token", Type: String, Value: "7"}, Live: "5"},
+		startUp.Seen[1],
+	}
+	movedOwn := moved
+	movedOwn.Run, movedOwn.StartUp, movedOwn.beforeTest = false, false, false
+	ranMoved := ran
+	ranMoved.Seen = []Seen{{Side: Request, Leaf: Leaf{Path: "body.slot", Type: String, Value: "7 n1"}, Live: "5 n2", Place: "body.slot"}}
 	for _, tc := range []struct {
 		name           string
 		recorded, live string
@@ -151,6 +168,10 @@ func TestALateCallsValueAnExchangeServedBeforeItsTestGaveIsNeverLearnedAsNoise(t
 		{"the start-up exchange, read in a later test", "slot 82", "slot 7", startUp, KindUnaccounted, kept},
 		{"the start-up exchange, read in a later test, the recording's call late", "slot 7", "slot 82", startUp, KindUnaccounted, kept},
 		{"an older test's call's request", "slot 82", "slot 7", ran, KindUnaccounted, sent},
+		{"an older test's call's request, the recording's call late", "slot 7", "slot 82", ran, KindUnaccounted, sent},
+		{"the start-up exchange, its answer moved in F, the recording's call late", "slot 7", "slot 82", moved, KindUnaccounted, kept},
+		{"an older test's call's request, moved in F, the recording's call late", "slot 7", "slot 82", ranMoved, KindUnaccounted, sent},
+		{"the call's own test's exchange, its answer moved in F, the recording's call late", "slot 7", "slot 82", movedOwn, KindNoise, ""},
 		{"the start-up exchange, read at the start-up", "slot 82", "slot 7", atStartUp, KindNoise, ""},
 		{"the start-up exchange, read at the start-up, the recording's call took its word", "slot 7", "slot 82", atStartUp, KindNoise, ""},
 		{"the start-up exchange, read in a later test, the recorded value took no word", "slot 83", "slot 7", startUp, KindNoise, ""},
