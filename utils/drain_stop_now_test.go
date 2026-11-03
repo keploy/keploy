@@ -38,20 +38,60 @@ func drainStopNowTestOnItsOwn(t *testing.T) {
 // that have not returned yet.
 var drainsRunning sync.WaitGroup
 
+// drainOutlivedItsRow is set once a drain was still running a minute after
+// its row and its group ended.
+var drainOutlivedItsRow atomic.Bool
+
 // awaitDrainsEnded waits until every drain a row started has returned, its
-// offer withdrawn, before the interrupts are reset. A row ends its group as
-// it returns (defer close(block)), so its drain may still be running then. A
-// withdraw that came after the reset took the next row's offer out of the
-// count, and that row's press after its drain's offer then ended no stop.
+// offer withdrawn, before the interrupts are reset. A row's group ends at
+// the latest as the row ends (holdGroup, groupEndsAtThePress), so its drain
+// may still be running then. A withdraw that came after the reset took the
+// next row's offer out of the count, and that row's press after its drain's
+// offer then ended no stop. A drain that did not end within a minute of its
+// group's end fails every later row at once, rather than holding each of
+// them a minute more.
 func awaitDrainsEnded(t *testing.T) {
 	t.Helper()
+	if drainOutlivedItsRow.Load() {
+		t.Error("a drain an earlier row started never ended after its group did")
+		return
+	}
 	ended := make(chan struct{})
 	go func() { drainsRunning.Wait(); close(ended) }()
 	select {
 	case <-ended:
 	case <-time.After(time.Minute): // only turns a hang into a failure
+		drainOutlivedItsRow.Store(true)
 		t.Error("a drain a row started was still running a minute after its row ended")
 	}
+}
+
+// holdGroup adds to g a goroutine that runs until release is called or the
+// row ends, whichever comes first. A row that fails before it ends its group
+// thus leaves no drain running past its end.
+func holdGroup(t *testing.T, g *errgroup.Group) (release func()) {
+	t.Helper()
+	block := make(chan struct{})
+	release = sync.OnceFunc(func() { close(block) })
+	t.Cleanup(release)
+	g.Go(func() error { <-block; return nil })
+	return release
+}
+
+// groupEndsAtThePress adds to g a goroutine that ends at the press that
+// ends a stop (StopNow), as record's frame forwarders do, or as the row
+// ends, should the row fail before that press.
+func groupEndsAtThePress(t *testing.T, g *errgroup.Group) {
+	t.Helper()
+	rowEnded := make(chan struct{})
+	t.Cleanup(func() { close(rowEnded) })
+	g.Go(func() error {
+		select {
+		case <-StopNow():
+		case <-rowEnded:
+		}
+		return nil
+	})
 }
 
 // drainResult is what a teardown drain returned.
@@ -167,9 +207,7 @@ func TestATeardownDrainWhoseVerdictCannotComeEndsAtTheUsersInterrupt(t *testing.
 	drainStopNowTest(t)
 	clk := &stall.ManualClock{}
 	var g errgroup.Group
-	block := make(chan struct{})
-	defer close(block)
-	g.Go(func() error { <-block; return nil })
+	holdGroup(t, &g)
 	var p atomic.Uint64
 	const bound = 30 * time.Second
 	res, logs := startDrain(clk, &g, bound, p.Load)
@@ -215,8 +253,7 @@ func TestATeardownDrainThatProgressesOffersNoStopNow(t *testing.T) {
 	drainStopNowTest(t)
 	clk := &stall.ManualClock{}
 	var g errgroup.Group
-	block := make(chan struct{})
-	g.Go(func() error { <-block; return nil })
+	release := holdGroup(t, &g)
 	var p atomic.Uint64
 	progress := func() uint64 { return p.Add(1) }
 	res, logs := startDrain(clk, &g, time.Second, progress)
@@ -233,7 +270,7 @@ func TestATeardownDrainThatProgressesOffersNoStopNow(t *testing.T) {
 	if n := logs.FilterMessageSnippet("made no progress").Len(); n != 0 {
 		t.Fatalf("a drain making progress said it made none: %v", logs.All())
 	}
-	close(block)
+	release()
 	select {
 	case r := <-res:
 		if r.err != nil || r.end != DrainJoined {
@@ -253,8 +290,7 @@ func TestATeardownDrainHeldByAnAgentStopIsNotGivenUpAtTheInterrupt(t *testing.T)
 	t.Cleanup(end)
 	clk := &stall.ManualClock{}
 	var g errgroup.Group
-	block := make(chan struct{})
-	g.Go(func() error { <-block; return nil })
+	release := holdGroup(t, &g)
 	var p atomic.Uint64
 	res, logs := startDrain(clk, &g, time.Second, p.Load)
 	awaitLog(t, logs, drainOffer, res)
@@ -263,7 +299,7 @@ func TestATeardownDrainHeldByAnAgentStopIsNotGivenUpAtTheInterrupt(t *testing.T)
 	if MarkInterruptedAgain() {
 		t.Fatal("the drain's offer stood while the agent's stop held it: the agent's stop makes its own")
 	}
-	close(block)
+	release()
 	if r := awaitEnd(t, res, "at its group's end"); r.err != nil || r.end != DrainJoined {
 		t.Fatalf("the drain returned %+v: its group ended, want no give-up", r)
 	}
@@ -299,9 +335,7 @@ func TestATeardownDrainOffersOnlyOnceTheOfferStands(t *testing.T) {
 	drainStopNowTestOnItsOwn(t)
 	clk := &stall.ManualClock{}
 	var g errgroup.Group
-	block := make(chan struct{})
-	defer close(block)
-	g.Go(func() error { <-block; return nil })
+	holdGroup(t, &g)
 	var p atomic.Uint64
 	res, logs := startDrain(clk, &g, time.Second, p.Load)
 	first := awaitLog(t, logs, "made no progress", res)
@@ -332,7 +366,7 @@ func TestATeardownDrainInsideAnotherWaitsOfferJoinsAGroupThatEndsAtThePress(t *t
 		drainStopNowTest(t)
 		_, withdraw := OfferStopNow() // the inner wait's own offer
 		var g errgroup.Group
-		g.Go(func() error { <-StopNow(); return nil })
+		groupEndsAtThePress(t, &g)
 		var looks atomic.Uint64
 		progress := func() uint64 { looks.Add(1); return 0 }
 		res, logs := startDrain(&stall.ManualClock{}, &g, 30*time.Second, progress)
@@ -357,7 +391,7 @@ func TestAPressThatAnsweredTheDrainsOfferAndAnothersIsNotTheDrainsAlone(t *testi
 	for i := 0; i < 50; i++ {
 		drainStopNowTest(t)
 		var g errgroup.Group
-		g.Go(func() error { <-StopNow(); return nil })
+		groupEndsAtThePress(t, &g)
 		var p atomic.Uint64
 		res, logs := startDrain(&stall.ManualClock{}, &g, 30*time.Second, p.Load)
 		awaitLog(t, logs, drainOffer, res)
@@ -372,9 +406,7 @@ func TestAPressThatAnsweredTheDrainsOfferAndAnothersIsNotTheDrainsAlone(t *testi
 
 	drainStopNowTest(t)
 	var g errgroup.Group
-	block := make(chan struct{})
-	defer close(block)
-	g.Go(func() error { <-block; return nil })
+	holdGroup(t, &g)
 	var p atomic.Uint64
 	res, logs := startDrain(&stall.ManualClock{}, &g, 30*time.Second, p.Load)
 	awaitLog(t, logs, drainOffer, res)
@@ -396,9 +428,7 @@ func TestAPressThatAnsweredOnlyAnotherWaitsOfferDoesNotGiveTheDrainUp(t *testing
 	drainStopNowTest(t)
 	_, withdraw := OfferStopNow()
 	var g errgroup.Group
-	block := make(chan struct{})
-	defer close(block)
-	g.Go(func() error { <-block; return nil })
+	holdGroup(t, &g)
 	var looks atomic.Uint64
 	progress := func() uint64 { looks.Add(1); return 0 }
 	res, logs := startDrain(&stall.ManualClock{}, &g, 30*time.Second, progress)
@@ -425,9 +455,7 @@ func TestAPressBeforeAnAgentStopsHoldEndsIsNotAnAnswerToTheDrainsLaterOffer(t *t
 	endStop := BeginAgentStop()
 	t.Cleanup(endStop)
 	var g errgroup.Group
-	block := make(chan struct{})
-	defer close(block)
-	g.Go(func() error { <-block; return nil })
+	holdGroup(t, &g)
 	var p atomic.Uint64
 	res, logs := startDrain(&stall.ManualClock{}, &g, 30*time.Second, p.Load)
 	awaitLog(t, logs, drainOffer, res)
@@ -458,9 +486,7 @@ func TestADrainGaveUpUnlessItJoined(t *testing.T) {
 func TestDrainErrGroupProgressSaysAGroupGivenUpAtThePressTimedOut(t *testing.T) {
 	drainStopNowTest(t)
 	var g errgroup.Group
-	block := make(chan struct{})
-	defer close(block)
-	g.Go(func() error { <-block; return nil })
+	holdGroup(t, &g)
 	var p atomic.Uint64
 	core, logs := observer.New(zap.DebugLevel)
 	type result struct {

@@ -2,6 +2,7 @@ package utils
 
 import (
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,8 +16,10 @@ import (
 // notice period; it ends at stop or at StopNow, its offer withdrawn before
 // exited is closed. pressAtOffer presses as soon as its notice offers (a
 // user who answers at once). offered counts the notices that offered;
-// endedAt, read once exited is closed, is the time just before it was.
-func reporterLike(pressAtOffer bool) (exited <-chan struct{}, offered *atomic.Int32, endedAt *time.Time, stop func()) {
+// endedAt, read once exited is closed, is the time just before it was. It
+// is stopped as the row ends if the row has not stopped it, so its offer
+// never outlives the row.
+func reporterLike(t *testing.T, pressAtOffer bool) (exited <-chan struct{}, offered *atomic.Int32, endedAt *time.Time, stop func()) {
 	n := NewStopNowNotice(drainNotice)
 	done := make(chan struct{})
 	out := make(chan struct{})
@@ -43,7 +46,9 @@ func reporterLike(pressAtOffer bool) (exited <-chan struct{}, offered *atomic.In
 			}
 		}
 	}()
-	return out, offered, endedAt, func() { close(done); <-out }
+	stop = sync.OnceFunc(func() { close(done); <-out })
+	t.Cleanup(stop)
+	return out, offered, endedAt, stop
 }
 
 // Record's frame drain runs inside its progress reporter's notices: the
@@ -60,9 +65,9 @@ func reporterLike(pressAtOffer bool) (exited <-chan struct{}, offered *atomic.In
 func TestARecordFrameDrainSaysOneOfferWhicheverNoticesFirst(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		drainStopNowTest(t)
-		exited, offered, endedAt, stop := reporterLike(true)
+		exited, offered, endedAt, stop := reporterLike(t, true)
 		var g errgroup.Group
-		g.Go(func() error { <-StopNow(); return nil })
+		groupEndsAtThePress(t, &g)
 		res, logs := startCarriedDrain(&stall.ManualClock{}, &g, 30*time.Second, func() uint64 { return 0 }, exited)
 		r := awaitEnd(t, res, "at its group's end, at the press")
 		stop()
@@ -94,9 +99,7 @@ func TestADrainWhoseOfferAnotherWaitMakesBeginsItsNoticesAtThatWaitsEnd(t *testi
 	t.Cleanup(SetNoticeClockForTest(func() time.Time { return time.Unix(0, now.Load()) }))
 	carrier := make(chan struct{})
 	var g errgroup.Group
-	block := make(chan struct{})
-	defer close(block)
-	g.Go(func() error { <-block; return nil })
+	holdGroup(t, &g)
 	var looks atomic.Uint64
 	res, logs := startCarriedDrain(&stall.ManualClock{}, &g, 30*time.Second, func() uint64 { looks.Add(1); return 0 }, carrier)
 	awaitLooks(t, &looks, 0, 10)
@@ -139,8 +142,7 @@ func TestADrainBesideAnotherWaitsOfferMakesNoOfferUnsaid(t *testing.T) {
 		drainStopNowTest(t)
 		_, withdraw := OfferStopNow() // the other wait's offer
 		var g errgroup.Group
-		block := make(chan struct{})
-		g.Go(func() error { <-block; return nil })
+		release := holdGroup(t, &g)
 		var looks atomic.Uint64
 		res, logs := startDrain(&stall.ManualClock{}, &g, 30*time.Second, func() uint64 { looks.Add(1); return 0 })
 		awaitLooks(t, &looks, 0, 10)
@@ -164,10 +166,10 @@ func TestADrainBesideAnotherWaitsOfferMakesNoOfferUnsaid(t *testing.T) {
 			if r.end != DrainStopped || logs.FilterMessageSnippet(drainOffer).Len() == 0 {
 				t.Fatalf("run %d: the drain ended %+v at a press it had made no offer for (said: %v)", i, r, logs.All())
 			}
-			close(block)
+			release()
 			continue
 		}
-		close(block)
+		release()
 		if r = awaitEnd(t, res, "at its group's end"); r.err != nil || r.end != DrainJoined {
 			t.Fatalf("run %d: the drain returned %+v, want its group joined", i, r)
 		}
@@ -186,9 +188,7 @@ func TestADrainWhoseOfferAnotherWaitMadeOffersAPeriodAfterTheInterruptIsSeen(t *
 	t.Cleanup(SetNoticeClockForTest(func() time.Time { return time.Unix(0, now.Load()) }))
 	carrier := make(chan struct{})
 	var g errgroup.Group
-	block := make(chan struct{})
-	defer close(block)
-	g.Go(func() error { <-block; return nil })
+	holdGroup(t, &g)
 	var looks atomic.Uint64
 	res, logs := startCarriedDrain(&stall.ManualClock{}, &g, 30*time.Second, func() uint64 { looks.Add(1); return 0 }, carrier)
 	awaitLooks(t, &looks, 0, 2)
@@ -218,8 +218,7 @@ func TestACarriedDrainsFirstNoticeComesAWholePeriodAfterItsCarrierEnds(t *testin
 		drainNotice = 100 * time.Millisecond
 		carrier := make(chan struct{})
 		var g errgroup.Group
-		block := make(chan struct{})
-		g.Go(func() error { <-block; return nil })
+		release := holdGroup(t, &g)
 		var looks atomic.Uint64
 		res, logs := startCarriedDrain(&stall.ManualClock{}, &g, 30*time.Second, func() uint64 { looks.Add(1); return 0 }, carrier)
 		awaitLooks(t, &looks, 0, 2) // its first look, then its first notice
@@ -228,10 +227,10 @@ func TestACarriedDrainsFirstNoticeComesAWholePeriodAfterItsCarrierEnds(t *testin
 		close(carrier)
 		said := awaitLog(t, logs, "made no progress", res)
 		if d := said.Time.Sub(closedAt); d < drainNotice {
-			close(block)
+			release()
 			t.Fatalf("run %d: the drain gave its first notice %v after its carrier ended, want a whole notice period (%v) on", i, d, drainNotice)
 		}
-		close(block)
+		release()
 		if r := awaitEnd(t, res, "at its group's end"); r.err != nil || r.end != DrainJoined {
 			t.Fatalf("run %d: the drain returned %+v, want its group joined", i, r)
 		}
