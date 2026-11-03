@@ -67,10 +67,11 @@ func reasonPhrase(resp *models.HTTPResp) string {
 // close, as it is, the close never coming. A compressed body's stream is
 // flushed, not ended. An app reads at replay the bytes it read at record and
 // waits on the rest as it did. Two framings are not the upstream's: an
-// HTTP/1.0 answer, which has no chunks, goes framed by the close; and a body
+// answer older than HTTP/1.1, which has no chunks (HTTP/1.0, or a mock with
+// no proto_major, served as HTTP/0.0), goes framed by the close; and a body
 // keploy's compressor makes as long as the upstream's Content-Length or
-// longer, which that length would end, goes chunked (by the close over
-// HTTP/1.0).
+// longer, which that length would end, goes chunked (by the close below
+// HTTP/1.1).
 func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite, held *models.Fault) ([]byte, error) {
 	resp := stub.Spec.HTTPResp
 	protoMajor, protoMinor := 1, 1
@@ -108,12 +109,12 @@ func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite, held *mode
 	if held != nil {
 		header.Del("Content-Length")
 		header.Del("Transfer-Encoding")
-		http10 := protoMajor == 1 && protoMinor == 0
+		noChunks := protoMajor < 1 || protoMajor == 1 && protoMinor < 1
 		switch {
 		case held.ContentLength > int64(len(respBody)):
 			length = strconv.AppendInt(lengthDigits[:0], held.ContentLength, 10)
 			header.Set("Content-Length", string(length))
-		case http10 || held.ContentLength == 0 && !held.Chunked:
+		case noChunks || held.ContentLength == 0 && !held.Chunked:
 			// Framed by the close.
 		default:
 			header.Set("Transfer-Encoding", "chunked")

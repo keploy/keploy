@@ -258,6 +258,32 @@ func (c *readsOnConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// answerConn is the proxy's end of a connection that counts the bytes the
+// serve writes and says when its reader comes back after a write: a held
+// answer is written, then the connection is read until the app closes it. A
+// row reads then exactly the bytes the serve wrote.
+type answerConn struct {
+	net.Conn
+	wrote   atomic.Int64
+	reading chan struct{}
+}
+
+func (c *answerConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.wrote.Add(int64(n))
+	return n, err
+}
+
+func (c *answerConn) Read(p []byte) (int, error) {
+	if c.wrote.Load() > 0 {
+		select {
+		case c.reading <- struct{}{}:
+		default:
+		}
+	}
+	return c.Conn.Read(p)
+}
+
 // boundAppReads bounds the app's reads on its side of the connection. The
 // bound only turns a hang into a failure of the row: a serve writes its whole
 // answer at once, so a row that waits for bytes a broken serve never sends
@@ -781,42 +807,54 @@ func wantStreamEnd(t *testing.T, decode func(io.Reader) (io.Reader, error), serv
 // Sent chunked, the body goes as one chunk, `<size in hex>\r\n<body>\r\n`,
 // with no last chunk; sent with a length, under that length, which it does not
 // reach; framed by the upstream's close, as it is, with no close after it.
-// Over HTTP/1.0, which has no chunks, a chunked body goes as one framed by
-// the close; and a length the body reaches, which would end it, is not sent:
-// the body goes chunked. An answer the app read none of the body of is its
+// Below HTTP/1.1, which has no chunks (HTTP/1.0, or a mock written with no
+// proto_major, whose answer goes as HTTP/0.0), a chunked body goes as one
+// framed by the close; and a length the body reaches, which would end it, is
+// not sent: the body goes chunked (framed by the close below HTTP/1.1). An
+// answer the app read none of the body of is its
 // head alone. The mock's head is a whole answer's, as the recorder writes it:
 // the fault alone frames the answer.
 func TestAHeldAnswerGoesOutFramedAsSentAndNothingAfterIt(t *testing.T) {
 	const events = "data: 1\n\ndata: 2\n\n"
 	for _, row := range []struct {
-		name  string
-		minor int
-		body  string
-		sent  sentAs
-		want  string
+		name         string
+		major, minor int
+		body         string
+		sent         sentAs
+		want         string
 	}{
-		{"a body sent chunked", 1, events, sentChunked,
+		{"a body sent chunked", 1, 1, events, sentChunked,
 			"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n12\r\n" + events + "\r\n"},
-		{"no body, sent chunked", 1, "", sentChunked, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"},
-		{"a body sent with a length", 1, events, sentAs{length: 1000},
+		{"no body, sent chunked", 1, 1, "", sentChunked, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"},
+		{"a body sent with a length", 1, 1, events, sentAs{length: 1000},
 			"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nContent-Type: text/event-stream\r\n\r\n" + events},
-		{"no body, sent with a length", 1, "", sentAs{length: 1000},
+		{"no body, sent with a length", 1, 1, "", sentAs{length: 1000},
 			"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nContent-Type: text/event-stream\r\n\r\n"},
-		{"a body its upstream's close was to end", 1, events, sentByClose,
+		{"a body its upstream's close was to end", 1, 1, events, sentByClose,
 			"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n" + events},
-		{"a body sent with a length it reaches", 1, events, sentAs{length: 18},
+		{"a body sent with a length it reaches", 1, 1, events, sentAs{length: 18},
 			"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n12\r\n" + events + "\r\n"},
-		{"a body over HTTP/1.0 sent chunked", 0, events, sentChunked,
+		{"a body over HTTP/1.0 sent chunked", 1, 0, events, sentChunked,
 			"HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n\r\n" + events},
-		{"a body over HTTP/1.0 sent with a length", 0, events, sentAs{length: 1000},
+		{"a body over HTTP/1.0 sent with a length", 1, 0, events, sentAs{length: 1000},
 			"HTTP/1.0 200 OK\r\nContent-Length: 1000\r\nContent-Type: text/event-stream\r\n\r\n" + events},
-		{"a body over HTTP/1.0 sent with a length it reaches", 0, events, sentAs{length: 18},
+		{"a body over HTTP/1.0 sent with a length it reaches", 1, 0, events, sentAs{length: 18},
 			"HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n\r\n" + events},
+		// A mock file with no proto_major: its answer goes as HTTP/0.0,
+		// which has no chunks either, never chunked.
+		{"a body with no protocol version sent chunked", 0, 0, events, sentChunked,
+			"HTTP/0.0 200 OK\r\nContent-Type: text/event-stream\r\n\r\n" + events},
+		{"a body with no protocol version sent with a length it reaches", 0, 0, events, sentAs{length: 18},
+			"HTTP/0.0 200 OK\r\nContent-Type: text/event-stream\r\n\r\n" + events},
+		{"a body over HTTP/0.9 sent chunked", 0, 9, events, sentChunked,
+			"HTTP/0.9 200 OK\r\nContent-Type: text/event-stream\r\n\r\n" + events},
+		{"a body over HTTP/2.0 sent chunked", 2, 0, events, sentChunked,
+			"HTTP/2.0 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n12\r\n" + events + "\r\n"},
 	} {
 		for _, way := range servedWays {
 			proven, pooled := way.proven, way.pooled
 			t.Run(row.name+way.suffix(), func(t *testing.T) {
-				checkHeldWire(t, proven, pooled, row.minor, row.body, len(row.body), row.sent, row.want)
+				checkHeldWire(t, proven, pooled, row.major, row.minor, row.body, len(row.body), row.sent, row.want)
 			})
 		}
 	}
@@ -842,20 +880,25 @@ func TestAHeldAnswerServesOnlyTheBytesItsFaultSends(t *testing.T) {
 		for _, way := range servedWays {
 			proven, pooled := way.proven, way.pooled
 			t.Run(row.name+way.suffix(), func(t *testing.T) {
-				checkHeldWire(t, proven, pooled, 1, events, len(read), row.sent, row.want)
+				checkHeldWire(t, proven, pooled, 1, 1, events, len(read), row.sent, row.want)
 			})
 		}
 	}
 }
 
-// checkHeldWire serves a mock of body, its stopped_reading fault sending
-// bodyBytes of it framed as sent, over HTTP/1.minor, and checks the app gets
-// want on the wire, then nothing until it closes, and the serve ends then.
-func checkHeldWire(t *testing.T, proven string, pooled bool, minor int, body string, bodyBytes int, sent sentAs, want string) {
+// checkHeldWire serves a mock of body, recorded over HTTP/major.minor, its
+// stopped_reading fault sending bodyBytes of it framed as sent, and checks the
+// app gets want on the wire, then nothing until it closes, and the serve ends
+// then. The app sends its request over HTTP/1.1 to a mock below HTTP/1.0 (one
+// written with no proto_major) or above HTTP/1.1. It reads exactly the bytes
+// the serve wrote before it held the connection or returned (answerConn): a
+// serve that writes other bytes than want, or fewer, fails the row at once,
+// never by a wait on bytes that do not come.
+func checkHeldWire(t *testing.T, proven string, pooled bool, major, minor int, body string, bodyBytes int, sent sentAs, want string) {
 	t.Helper()
 	t.Setenv("KEPLOY_PROVEN", proven)
 	m := recorded("events-1", "/v1/events", nil, "")
-	m.Spec.HTTPReq.ProtoMajor, m.Spec.HTTPReq.ProtoMinor = 1, minor
+	m.Spec.HTTPReq.ProtoMajor, m.Spec.HTTPReq.ProtoMinor = major, minor
 	m.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: body,
 		Header: map[string]string{"Content-Type": "text/event-stream", "Content-Length": strconv.Itoa(len(body))}}
 	m.Spec.Fault = stoppedReadingIf(true, bodyBytes, sent)
@@ -865,14 +908,30 @@ func checkHeldWire(t *testing.T, proven string, pooled bool, minor int, body str
 	app, proxy := tcpPair(t)
 	boundAppReads(t, app)
 	h := &HTTP{Logger: zap.NewNop()}
-	request := "POST /v1/events HTTP/1." + strconv.Itoa(minor) + "\r\nHost: api.example\r\nContent-Length: 0\r\n\r\n"
+	appMinor := 1
+	if major == 1 {
+		appMinor = minor
+	}
+	request := "POST /v1/events HTTP/1." + strconv.Itoa(appMinor) + "\r\nHost: api.example\r\nContent-Length: 0\r\n\r\n"
+	served := &answerConn{Conn: proxy, reading: make(chan struct{}, 1)}
 	done := runDecode(t, proxy, func(ctx context.Context) error {
-		return h.decodeHTTP(ctx, []byte(request), proxy, nil,
+		return h.decodeHTTP(ctx, []byte(request), served, nil,
 			&mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true}, models.OutgoingOptions{})
 	})
-	got := make([]byte, len(want))
+	returned, early := error(nil), false
+	select {
+	case <-served.reading:
+	case returned = <-done:
+		early = true
+	case <-time.After(time.Minute): // the bound only turns a hang into a failure
+		t.Fatal("the serve neither held the connection after its answer nor returned")
+	}
+	got := make([]byte, served.wrote.Load())
 	if _, err := io.ReadFull(app, got); err != nil || string(got) != want {
 		t.Fatalf("served %q (%v), want %q", got, err, want)
+	}
+	if early {
+		t.Fatalf("decodeHTTP returned %v once it served the answer, want the connection held until the app closes it", returned)
 	}
 	// Nothing more comes while the app holds the connection.
 	if err := app.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
