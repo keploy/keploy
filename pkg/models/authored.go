@@ -41,6 +41,12 @@ type Authored struct {
 	// at the time: a reader tells by it whether the request, or its
 	// source's, changed since.
 	Request string `json:"request,omitempty" yaml:"request,omitempty" bson:"request,omitempty"`
+	// Answer is the digest of the answer the mock serves as it was
+	// authored ("sha256:<hex>"): for a derived mock, its source's answer
+	// with Delta applied. A reader tells by it whether the answer was
+	// edited since it was written, by hand or by any writer other than
+	// keploy's authoring.
+	Answer string `json:"answer,omitempty" yaml:"answer,omitempty" bson:"answer,omitempty"`
 	// Delta is, for a derived mock, what it changed in its source's answer;
 	// nil for a generated one.
 	Delta *AuthoredDelta `json:"delta,omitempty" yaml:"delta,omitempty" bson:"delta,omitempty"`
