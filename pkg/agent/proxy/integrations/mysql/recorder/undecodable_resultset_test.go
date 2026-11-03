@@ -279,7 +279,7 @@ func runRecordV2(t *testing.T, push func(h *v2Harness, at func() time.Time)) ([]
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err = RecordV2(ctx, h.logger, h.sess)
+	err = recordV2NoPanic(t, ctx, h.logger, h.sess)
 	var got []*models.Mock
 	for {
 		select {

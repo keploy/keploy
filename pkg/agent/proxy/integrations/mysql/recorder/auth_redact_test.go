@@ -364,7 +364,7 @@ func recordConfigMock(t *testing.T, h *v2Harness, ctx context.Context) *models.M
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- RecordV2(ctx, h.logger, h.sess) }()
+	go func() { done <- recordV2NoPanic(t, ctx, h.logger, h.sess) }()
 	var cfg *models.Mock
 	select {
 	case cfg = <-h.mocks:
@@ -517,7 +517,7 @@ func TestAChangeOfUserKeepsNoCredential(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = RecordV2(ctx, logger, h.sess) // how it ends is not what this checks
+	_ = recordV2NoPanic(t, ctx, logger, h.sess) // how it ends is not what this checks
 	close(h.mocks)
 	var recorded []string
 	for m := range h.mocks {

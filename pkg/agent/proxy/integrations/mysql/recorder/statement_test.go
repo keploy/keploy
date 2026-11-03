@@ -126,7 +126,7 @@ func TestRecordV2_StatementCommandsKeepTheirQuery(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		done <- RecordV2(ctx, h.logger, h.sess)
+		done <- recordV2NoPanic(t, ctx, h.logger, h.sess)
 	}()
 	var got []*models.Mock
 	for len(got) < recorded {

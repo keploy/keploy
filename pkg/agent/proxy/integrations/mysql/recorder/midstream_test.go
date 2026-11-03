@@ -77,7 +77,7 @@ func TestRecordV2_MidStreamNoGreeting_SkipsGracefully(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		done <- RecordV2(ctx, logger, h.sess)
+		done <- recordV2NoPanic(t, ctx, logger, h.sess)
 	}()
 
 	select {

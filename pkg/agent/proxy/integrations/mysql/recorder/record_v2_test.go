@@ -44,7 +44,7 @@ func collectPostTLSMocks(t *testing.T, h *v2Harness, ctx context.Context, want i
 	go func() {
 		cctx, cancel := context.WithTimeout(ctx, patience)
 		defer cancel()
-		done <- RecordV2(cctx, h.logger, h.sess)
+		done <- recordV2NoPanic(t, cctx, h.logger, h.sess)
 	}()
 	var got []*models.Mock
 	for len(got) < want {
@@ -239,7 +239,7 @@ func TestRecordV2_PostTLS_LostStash_FabricatedDest_NoDialCleanAbort(t *testing.T
 	go func() {
 		ctx, cancel := context.WithTimeout(postTLSCtxWithStore(store), 10*time.Second)
 		defer cancel()
-		done <- RecordV2(ctx, h.logger, h.sess)
+		done <- recordV2NoPanic(t, ctx, h.logger, h.sess)
 	}()
 
 	select {
@@ -797,7 +797,7 @@ func TestRecordV2_RawLegSeedsPortKeyFromGreeting(t *testing.T) {
 	defer cancel()
 	// The raw leg stops after stashing; RecordV2 returning is the success path.
 	done := make(chan error, 1)
-	go func() { done <- RecordV2(ctx, h.logger, h.sess) }()
+	go func() { done <- recordV2NoPanic(t, ctx, h.logger, h.sess) }()
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
@@ -852,7 +852,7 @@ func rawLeg(t *testing.T, store *models.TLSHandshakeStore, scope, connKey, addr,
 		context.WithValue(context.Background(), models.TLSHandshakeStoreKey, store), 10*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- RecordV2(ctx, h.logger, h.sess) }()
+	go func() { done <- recordV2NoPanic(t, ctx, h.logger, h.sess) }()
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
@@ -1189,7 +1189,7 @@ func runPostTLSSession(ctx context.Context, h *v2Harness, want int, patience tim
 	go func() {
 		cctx, cancel := context.WithTimeout(ctx, patience)
 		defer cancel()
-		done <- RecordV2(cctx, h.logger, h.sess)
+		done <- recordV2NoPanic(nil, cctx, h.logger, h.sess)
 	}()
 	var got []*models.Mock
 	deadline := time.After(patience)
@@ -1315,7 +1315,7 @@ func TestRecordV2_PostTLS_TeardownDuringStashWaitNeverDials(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(postTLSCtxWithStore(models.NewTLSHandshakeStore()))
 	done := make(chan error, 1)
-	go func() { done <- RecordV2(ctx, h.logger, h.sess) }()
+	go func() { done <- recordV2NoPanic(t, ctx, h.logger, h.sess) }()
 	time.Sleep(300 * time.Millisecond) // inside the 5s stash wait
 	cancel()
 	select {
@@ -1662,7 +1662,7 @@ func TestRecordV2_RawLegRemembersTheServerGreeting(t *testing.T) {
 			ctx, cancel := context.WithTimeout(rawCtx, 5*time.Second)
 			defer cancel()
 			done := make(chan error, 1)
-			go func() { done <- RecordV2(ctx, h.logger, h.sess) }()
+			go func() { done <- recordV2NoPanic(t, ctx, h.logger, h.sess) }()
 			if !tls {
 				// Plaintext: the connection continues into its command phase.
 				select {

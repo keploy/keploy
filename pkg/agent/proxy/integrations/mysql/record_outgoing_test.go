@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -33,7 +34,7 @@ func TestRecordOutgoingDeclinesASessionWithoutV2(t *testing.T) {
 	go func() { _, err := app.Write([]byte("client")); wrote <- err }()
 	go func() { _, err := server.Write([]byte("server")); wrote <- err }()
 
-	if err := m.RecordOutgoing(context.Background(), sess); !errors.Is(err, integrations.ErrParserDeclined) {
+	if err := recordOutgoingNoPanic(m, sess); !errors.Is(err, integrations.ErrParserDeclined) {
 		t.Fatalf("RecordOutgoing without V2 = %v, want a decline", err)
 	}
 	for _, c := range []net.Conn{clientSide, destSide} {
@@ -50,7 +51,7 @@ func TestRecordOutgoingDeclinesASessionWithoutV2(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := m.RecordOutgoing(context.Background(), nil); !errors.Is(err, integrations.ErrParserDeclined) {
+	if err := recordOutgoingNoPanic(m, nil); !errors.Is(err, integrations.ErrParserDeclined) {
 		t.Fatalf("RecordOutgoing(nil) = %v, want a decline", err)
 	}
 }
@@ -70,10 +71,21 @@ func TestRecordOutgoingRecordsASessionWithV2(t *testing.T) {
 		Ctx:          context.Background(),
 	}
 	sess := &integrations.RecordSession{Logger: zap.NewNop(), V2: v2}
-	if err := New(zap.NewNop()).RecordOutgoing(context.Background(), sess); errors.Is(err, integrations.ErrParserDeclined) {
+	if err := recordOutgoingNoPanic(New(zap.NewNop()), sess); errors.Is(err, integrations.ErrParserDeclined) {
 		t.Fatalf("RecordOutgoing with V2 = %v: a session with V2 streams is recorded, not declined", err)
 	}
 	if n := len(mocks); n != 0 {
 		t.Fatalf("%d mocks from streams that ended before the greeting", n)
 	}
+}
+
+// recordOutgoingNoPanic runs RecordOutgoing and returns a panic in it as an
+// error, so a row fails by its own check of the result.
+func recordOutgoingNoPanic(m integrations.Integrations, sess *integrations.RecordSession) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("RecordOutgoing panicked: %v", r)
+		}
+	}()
+	return m.RecordOutgoing(context.Background(), sess)
 }
