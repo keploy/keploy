@@ -285,6 +285,13 @@ func RenderFieldDiffs(diffs []models.MockFieldDiff) string {
 		case models.DiffKindTypeChanged:
 			parts = append(parts, fmt.Sprintf("%s: type changed (recorded %s, live %s)", d.Path, d.Expected, d.Actual))
 		default:
+			if d.Expected == "" && d.Actual == "" {
+				// A diff that carries no values (a form field, an array
+				// element under the strict comparison) names the field
+				// alone: two empty values would read as values it had.
+				parts = append(parts, fmt.Sprintf("%s: differs (values not shown)", d.Path))
+				continue
+			}
 			parts = append(parts, fmt.Sprintf("%s: recorded %q, live %q", d.Path, d.Expected, d.Actual))
 		}
 	}

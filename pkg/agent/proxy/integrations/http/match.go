@@ -2622,9 +2622,10 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	// Redact secret / obfuscated values out of the structured diffs before they
 	// are attached — they (and the Diff string derived from them) are persisted
 	// into the report YAML and the platform API.
-	redactFieldDiffs(fieldDiffs, closestMock.Noise)
+	places := redactedPlacesOf(mockReq, closestMock.Noise)
+	redactFieldDiffs(fieldDiffs, places)
 
-	b := mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+	b := mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(actualKey, request.URL.Path)).
 		WithDestination(dest).
 		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).
@@ -2636,7 +2637,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		// passed so obfuscated values stay redacted on both sides.
 		WithRenderedRequests(
 			renderMockRequest(mockReq, closestMock.Noise),
-			renderLiveRequest(request, liveBody, closestMock.Noise),
+			renderLiveRequest(request, liveBody, places),
 		)
 	if len(fieldDiffs) == 0 {
 		// Nothing structurally differs vs the closest candidate, yet the

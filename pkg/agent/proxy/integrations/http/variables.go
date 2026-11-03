@@ -1626,8 +1626,11 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 			break
 		}
 	}
+	var places redactedPlaces
 	if closest != nil {
-		redactFieldDiffs(diffs, closest.Noise)
+		places = redactedPlacesOf(closest.Spec.HTTPReq, closest.Noise)
+		redactFieldDiffs(diffs, places)
+		actualKey = places.summary(actualKey, request.URL.Path)
 	}
 	b := mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 		WithDestination(dest).
@@ -1637,7 +1640,7 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 		WithDiff(p.diff()).
 		WithNextSteps(p.next)
 	if closest != nil {
-		b = b.WithRenderedRequests(renderMockRequest(closest.Spec.HTTPReq, closest.Noise), renderLiveRequest(request, liveBody, closest.Noise))
+		b = b.WithRenderedRequests(renderMockRequest(closest.Spec.HTTPReq, closest.Noise), renderLiveRequest(request, liveBody, places))
 	}
 	r := b.Build()
 	r.Given = p.given

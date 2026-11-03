@@ -82,20 +82,21 @@ func scrubSecretsInText(s string) string {
 }
 
 // redactFieldDiffs redacts the Expected/Actual values of structured field diffs
-// in place. A value is redacted when its path key looks sensitive or the value
-// matches the mock's noise patterns. These diffs — and the one-line Diff string
-// derived from them — are persisted into the report YAML and the platform API,
-// so raw secrets must never reach them (the whole-request renders are sanitized
-// separately).
-func redactFieldDiffs(diffs []models.MockFieldDiff, mockNoise []string) {
-	nc := util.NewNoiseChecker(mockNoise)
-	isNoisy := func(v string) bool { return v != "" && nc != nil && nc.IsNoisy(v) }
+// in place. Both values are redacted at a place the recording redacted
+// (places: by the place, as the live value matches none of the recording's
+// patterns), and a value is redacted when its path key looks sensitive, it
+// matches the mock's noise patterns or it is credential-shaped. These diffs —
+// and the one-line Diff string derived from them — are persisted into the
+// report YAML and the platform API, so raw secrets must never reach them (the
+// whole-request renders are sanitized separately).
+func redactFieldDiffs(diffs []models.MockFieldDiff, places redactedPlaces) {
 	for i := range diffs {
+		places.redactDiff(&diffs[i])
 		sensitive := isSensitiveHeader(diffs[i].Path)
-		if sensitive || isNoisy(diffs[i].Expected) || looksLikeSecretValue(diffs[i].Expected) {
+		if sensitive || places.noisy(diffs[i].Expected) || looksLikeSecretValue(diffs[i].Expected) {
 			diffs[i].Expected = valueRedacted
 		}
-		if sensitive || isNoisy(diffs[i].Actual) || looksLikeSecretValue(diffs[i].Actual) {
+		if sensitive || places.noisy(diffs[i].Actual) || looksLikeSecretValue(diffs[i].Actual) {
 			diffs[i].Actual = valueRedacted
 		}
 	}
@@ -113,7 +114,8 @@ func renderMockRequest(mockReq *models.HTTPReq, mockNoise []string) string {
 	for k, v := range mockReq.Header {
 		header[k] = v
 	}
-	return renderRequestPreview(string(mockReq.Method), mockURLPath(mockReq.URL), mockQueryString(mockReq), header, mockReq.Body, mockNoise)
+	places := redactedPlacesOf(mockReq, mockNoise)
+	return renderRequestPreview(string(mockReq.Method), places.path(mockURLPath(mockReq.URL)), mockQueryString(mockReq), header, mockReq.Body, places)
 }
 
 // mockQueryString returns the mock's query string, mirroring the matcher's
@@ -131,8 +133,9 @@ func mockQueryString(mockReq *models.HTTPReq) string {
 }
 
 // renderLiveRequest renders the live request for the RIGHT side, in the exact
-// same format as renderMockRequest so the two line up in the diff.
-func renderLiveRequest(request *http.Request, body []byte, mockNoise []string) string {
+// same format as renderMockRequest so the two line up in the diff. places are
+// the closest mock's (redactedPlacesOf): the live value at each is redacted.
+func renderLiveRequest(request *http.Request, body []byte, places redactedPlaces) string {
 	if request == nil {
 		return ""
 	}
@@ -140,7 +143,7 @@ func renderLiveRequest(request *http.Request, body []byte, mockNoise []string) s
 	for k := range request.Header {
 		header[k] = strings.Join(request.Header.Values(k), ", ")
 	}
-	return renderRequestPreview(request.Method, request.URL.Path, request.URL.RawQuery, header, string(body), mockNoise)
+	return renderRequestPreview(request.Method, places.path(request.URL.Path), request.URL.RawQuery, header, string(body), places)
 }
 
 // mockURLPath extracts just the path from a mock's URL (mocks store full URL
@@ -174,12 +177,10 @@ const (
 )
 
 // renderRequestPreview is the shared renderer behind both sides of the diff.
-// Sensitive header/query/body values (by key name or by the mock's noise
-// patterns) are redacted before they ever land in a report, and every value
-// and the body are length-capped.
-func renderRequestPreview(method, path, rawQuery string, header map[string]string, body string, noise []string) string {
-	nc := util.NewNoiseChecker(noise)
-	isObfuscated := func(v string) bool { return v != "" && nc != nil && nc.IsNoisy(v) }
+// Sensitive header/query/body values (by key name, by the place the recording
+// redacted, or by the mock's noise patterns) are redacted before they ever
+// land in a report, and every value and the body are length-capped.
+func renderRequestPreview(method, path, rawQuery string, header map[string]string, body string, places redactedPlaces) string {
 
 	var b strings.Builder
 	target := path
@@ -187,7 +188,7 @@ func renderRequestPreview(method, path, rawQuery string, header map[string]strin
 		// Canonicalize so semantically equal queries render identically on
 		// both sides, and redact sensitive / obfuscated parameter values so
 		// credentials in the query string never reach the report.
-		target += "?" + redactQuery(rawQuery, nc)
+		target += "?" + redactQuery(rawQuery, places.values, func(k string) bool { return places.query[k] })
 	}
 	fmt.Fprintf(&b, "%s %s", method, target)
 
@@ -205,7 +206,7 @@ func renderRequestPreview(method, path, rawQuery string, header map[string]strin
 	sort.Strings(keys)
 	for _, k := range keys {
 		v := header[k]
-		if isSensitiveHeader(k) || isObfuscated(v) || looksLikeSecretValue(v) {
+		if isSensitiveHeader(k) || places.headers[strings.ToLower(k)] || places.noisy(v) || looksLikeSecretValue(v) {
 			v = valueRedacted
 		} else {
 			v = truncateValue(v, maxRenderValueLen)
@@ -213,7 +214,7 @@ func renderRequestPreview(method, path, rawQuery string, header map[string]strin
 		fmt.Fprintf(&b, "\n%s: %s", textproto.CanonicalMIMEHeaderKey(k), v)
 	}
 	if body != "" {
-		fmt.Fprintf(&b, "\n\n%s", truncateValue(redactBody(body, headerValue(header, "content-type"), nc), maxRenderBodyLen))
+		fmt.Fprintf(&b, "\n\n%s", truncateValue(redactBody(body, headerValue(header, "content-type"), places), maxRenderBodyLen))
 	}
 	return b.String()
 }
@@ -241,17 +242,17 @@ func truncateValue(s string, max int) string {
 }
 
 // redactQuery canonicalizes a query string and redacts parameter values whose
-// key looks sensitive or whose value matches the mock's noise patterns. On a
-// parse failure it fails closed — the raw query is never emitted, since it
-// could carry credentials.
-func redactQuery(rawQuery string, nc *util.NoiseChecker) string {
+// key looks sensitive or the recording redacted (redacted, nil for none), or
+// whose value matches the mock's noise patterns. On a parse failure it fails
+// closed — the raw query is never emitted, since it could carry credentials.
+func redactQuery(rawQuery string, nc *util.NoiseChecker, redacted func(string) bool) string {
 	vals, err := url.ParseQuery(rawQuery)
 	if err != nil {
 		return valueRedacted
 	}
 	for k, vs := range vals {
 		for i, v := range vs {
-			if isSensitiveHeader(k) || (nc != nil && v != "" && nc.IsNoisy(v)) || looksLikeSecretValue(v) {
+			if isSensitiveHeader(k) || (redacted != nil && redacted(k)) || (nc != nil && v != "" && nc.IsNoisy(v)) || looksLikeSecretValue(v) {
 				vs[i] = valueRedacted
 			} else {
 				vs[i] = truncateValue(v, maxRenderValueLen)
@@ -262,29 +263,44 @@ func redactQuery(rawQuery string, nc *util.NoiseChecker) string {
 }
 
 // redactBody redacts secret / obfuscated fields in a request body before it is
-// rendered into a report. JSON bodies are walked field-by-field — a value is
-// redacted when its key looks sensitive (regardless of its type) or the value
-// matches the mock's noise patterns — and re-indented one field per line so
-// line diffs align. Form-urlencoded bodies are redacted per parameter. Other
+// rendered into a report. A body the recording redacted whole is redacted
+// whole. JSON bodies are walked field-by-field — a value is redacted when its
+// key looks sensitive or the recording redacted its place (regardless of its
+// type), or the value matches the mock's noise patterns — and re-indented one
+// field per line so line diffs align. Form-urlencoded and multipart bodies are
+// redacted per field, the same way; a multipart body that does not read as one
+// is redacted whole when the recording redacted any of its fields. Other
 // non-JSON bodies are redacted wholesale when they match a noise pattern, else
 // returned as-is (the caller length-caps them).
-func redactBody(body, contentType string, nc *util.NoiseChecker) string {
+func redactBody(body, contentType string, places redactedPlaces) string {
+	if places.body {
+		return valueRedacted
+	}
 	if pkg.IsJSON([]byte(body)) {
 		var v interface{}
 		if err := json.Unmarshal([]byte(body), &v); err != nil {
 			return body
 		}
-		redactJSONValue(v, nc)
+		redactJSONValue(v, places, "")
 		out, err := json.MarshalIndent(v, "", "  ")
 		if err != nil {
 			return body
 		}
 		return string(out)
 	}
-	if strings.Contains(strings.ToLower(contentType), "x-www-form-urlencoded") {
-		return redactQuery(body, nc)
+	ct := strings.ToLower(contentType)
+	if strings.Contains(ct, "x-www-form-urlencoded") {
+		return redactQuery(body, places.values, places.field)
 	}
-	if nc != nil && nc.IsNoisy(body) {
+	if strings.Contains(ct, "multipart/form-data") {
+		if out, ok := places.redactMultipart(body, contentType); ok {
+			return out
+		}
+		if len(places.fields) > 0 {
+			return valueRedacted
+		}
+	}
+	if places.noisy(body) {
 		return valueRedacted
 	}
 	// Opaque body (XML / SOAP / plain-text / proto / GraphQL): there's no field
@@ -293,35 +309,43 @@ func redactBody(body, contentType string, nc *util.NoiseChecker) string {
 	return scrubSecretsInText(body)
 }
 
-// redactJSONValue walks a decoded JSON value in place. A sensitive key's value
-// is redacted whatever its type (string, number, object, array); string scalars
-// — in objects and arrays — are redacted when they match a noise pattern.
-func redactJSONValue(v interface{}, nc *util.NoiseChecker) {
-	isNoisy := func(s string) bool { return s != "" && nc != nil && nc.IsNoisy(s) }
+// redactJSONValue walks a decoded JSON value in place, path its place in the
+// body (redactedPlaces.fields' dialect). A sensitive key's value, and the
+// value at a place the recording redacted, is redacted whatever its type
+// (string, number, object, array); string scalars — in objects and arrays —
+// are redacted when they match a noise pattern or are credential-shaped.
+func redactJSONValue(v interface{}, places redactedPlaces, path string) {
+	redactScalar := func(s string) bool { return places.noisy(s) || looksLikeSecretValue(s) }
 	switch t := v.(type) {
 	case map[string]interface{}:
 		for k, val := range t {
-			if isSensitiveHeader(k) {
+			cp := jsonChildPath(path, k)
+			if isSensitiveHeader(k) || places.field(cp) {
 				t[k] = valueRedacted
 				continue
 			}
 			if s, ok := val.(string); ok {
-				if isNoisy(s) || looksLikeSecretValue(s) {
+				if redactScalar(s) {
 					t[k] = valueRedacted
 				}
 				continue
 			}
-			redactJSONValue(val, nc)
+			redactJSONValue(val, places, cp)
 		}
 	case []interface{}:
+		ep := jsonElemPath(path)
 		for i, val := range t {
+			if ep != "" && places.field(ep) {
+				t[i] = valueRedacted
+				continue
+			}
 			if s, ok := val.(string); ok {
-				if isNoisy(s) || looksLikeSecretValue(s) {
+				if redactScalar(s) {
 					t[i] = valueRedacted
 				}
 				continue
 			}
-			redactJSONValue(val, nc)
+			redactJSONValue(val, places, ep)
 		}
 	}
 }

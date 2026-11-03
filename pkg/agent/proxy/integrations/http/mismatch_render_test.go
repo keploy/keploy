@@ -87,7 +87,7 @@ func TestRedactBody_JSON(t *testing.T) {
 	  "items": ["` + jwtSecret + `", "ok-value"],
 	  "trace_id": "` + benignUUID + `"
 	}`
-	out := redactBody(body, "application/json", nc)
+	out := redactBody(body, "application/json", redactedPlaces{values: nc})
 
 	mustNotContain(t, out, "hunter2", "keyword key (password)")
 	mustNotContain(t, out, "sess-deadbeef", "noise-value on non-keyword key (session)")
@@ -102,7 +102,7 @@ func TestRedactBody_JSON(t *testing.T) {
 func TestRedactBody_FormURLEncoded(t *testing.T) {
 	nc := util.NewNoiseChecker(nil)
 	body := "api_key=supersecretvalue123&token=" + ghToken + "&order=42"
-	out := redactBody(body, "application/x-www-form-urlencoded", nc)
+	out := redactBody(body, "application/x-www-form-urlencoded", redactedPlaces{values: nc})
 	mustNotContain(t, out, "supersecretvalue123", "form keyword key (api_key)")
 	mustNotContain(t, out, ghToken, "form value-shape backstop (token)")
 	mustContain(t, out, "order=42", "benign form param retained")
@@ -114,14 +114,14 @@ func TestRedactBody_OpaqueXML(t *testing.T) {
 	// embedded credential while leaving the surrounding structure readable.
 	body := `<soap:Header><wsse:Password>plaintextpw</wsse:Password>` +
 		`<Authorization>Bearer ` + jwtSecret + `</Authorization></soap:Header>`
-	out := redactBody(body, "text/xml", nc)
+	out := redactBody(body, "text/xml", redactedPlaces{values: nc})
 	mustNotContain(t, out, jwtSecret, "opaque-body bearer/JWT scrub")
 	mustContain(t, out, "<soap:Header>", "surrounding XML structure retained")
 }
 
 func TestRedactQuery(t *testing.T) {
 	nc := util.NewNoiseChecker(nil)
-	out := redactQuery("access_token="+jwtSecret+"&trace="+benignUUID+"&q=hello", nc)
+	out := redactQuery("access_token="+jwtSecret+"&trace="+benignUUID+"&q=hello", nc, nil)
 	mustNotContain(t, out, jwtSecret, "query keyword key + value-shape")
 	mustContain(t, out, benignUUID, "benign query param retained")
 	mustContain(t, out, "q=hello", "benign query param retained")
@@ -136,7 +136,7 @@ func TestRenderRequestPreview_RedactsEverywhere(t *testing.T) {
 		"X-Request-Id":  benignUUID, // benign, must remain
 	}
 	body := `{"password":"hunter2","trace_id":"` + benignUUID + `"}`
-	out := renderRequestPreview("POST", "/pay", "api_key="+ghToken+"&id="+benignUUID, header, body, nil)
+	out := renderRequestPreview("POST", "/pay", "api_key="+ghToken+"&id="+benignUUID, header, body, redactedPlaces{})
 
 	mustNotContain(t, out, jwtSecret, "header secret (keyword + non-keyword key)")
 	mustNotContain(t, out, "hunter2", "body keyword key")
@@ -152,7 +152,7 @@ func TestRedactFieldDiffs(t *testing.T) {
 		{Path: "body.assertion", Expected: jwtSecret, Actual: "x"},                   // value-shape backstop
 		{Path: "body.qty", Expected: "2", Actual: "5"},                               // benign -> must remain
 	}
-	redactFieldDiffs(diffs, nc)
+	redactFieldDiffs(diffs, redactedPlacesOf(nil, nc))
 	if diffs[0].Expected != valueRedacted || diffs[0].Actual != valueRedacted {
 		t.Errorf("keyword path not redacted: %+v", diffs[0])
 	}
