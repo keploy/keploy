@@ -23,6 +23,7 @@ import (
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/bodydigest"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -99,7 +100,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			utils.LogError(logger, err, "V2 HTTP record: initial request read failed")
 			return err
 		}
-		reqTs := firstChunk.ReadAt
+		reqTs, reqClock := firstChunk.ReadAt, firstChunk.ReadClock
 		finalReq := append([]byte(nil), firstChunk.Bytes...)
 
 		// Complete the request: read more chunks until headers + body
@@ -173,6 +174,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 						Req:              finalReq,
 						ReqTimestampMock: reqTs,
 						ResTimestampMock: reqTs,
+						ReqClock:         reqClock,
 						Fault:            fault,
 					}, destPort, reqTs)
 				}
@@ -291,6 +293,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			Resp:             finalResp,
 			ReqTimestampMock: reqTs,
 			ResTimestampMock: resTs,
+			ReqClock:         reqClock,
 			RespReadInPart:   streamEnded && sess.Opts.SkipTLSMITM && sess.EndedWithConnection(fakeconn.FromDest),
 			Fault:            fault,
 		}, destPort, sess.ClientConnID, sess.Opts)
@@ -1020,6 +1023,20 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			LifetimeDerived: true,
 		},
 	}
+	// Under the proven switch, the clock the request's stamp is on
+	// (FinalHTTP.ReqClock), as keploy/integrations' Mongo v2 recorder names
+	// its own: so a set that holds recordings of two record runs (a partial
+	// record keeps the tests it did not record anew) orders this call only
+	// against its own run's recordings (the replay's teardown bound). A
+	// stamp the producer did not take names none, and the mock gets no
+	// clock: an untrusted stamp never routes. Without the switch nothing is
+	// written. The origin is the mock's own: the agent adds the process that
+	// made the call to it, keeping its clock (starts.Registry.StampOrigin).
+	if provenswitch.On() {
+		if id := fakeconn.ClockID(m.ReqClock); id != "" {
+			mock.Origin = &models.Origin{Clock: id}
+		}
+	}
 	// recordOne dedup, committed only now that a mock is actually being emitted.
 	if ptRecordOne && h.ptRecorder != nil && !h.ptRecorder.shouldRecord(ptKey, respParsed.StatusCode) {
 		h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
@@ -1048,6 +1065,7 @@ func (h *HTTP) buildFaultAfterHead(m *FinalHTTP, req *http.Request, resp *http.R
 		Req:              m.Req,
 		ReqTimestampMock: m.ReqTimestampMock,
 		ResTimestampMock: m.ResTimestampMock,
+		ReqClock:         m.ReqClock,
 		Fault:            &models.Fault{Kind: models.FaultEOF},
 	}, destPort, connID, opts)
 	if mock == nil || err != nil {

@@ -66,6 +66,9 @@ type wireProxy struct {
 	// poolOwners are the owners handed with them (the key of each test-listed
 	// mock's process), nil until they were.
 	poolOwners map[string]string
+	// poolTests is the scope table handed with them (the mocks each test
+	// lists), nil until it was.
+	poolTests map[string][]string
 	// failPools fails that many pool serves, then serves again.
 	failPools int
 	// staged counts the stagings (SetMocks).
@@ -188,12 +191,17 @@ func (p *wireProxy) ServeExactTest(test string, owned []*models.Mock) error {
 	return nil
 }
 
-func (p *wireProxy) SetPoolNames(names []string, owners map[string]string) error {
+// The agent finds the capability by a type assertion: a signature that
+// drifts from it would leave the pool unnamed with no build error.
+var _ coreAgent.PoolNamesSetter = (*wireProxy)(nil)
+
+func (p *wireProxy) SetPoolNames(names []string, owners map[string]string, tests map[string][]string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.poolNames = append([]string{}, names...)
 	sort.Strings(p.poolNames)
 	p.poolOwners = owners
+	p.poolTests = tests
 	return nil
 }
 
@@ -1989,6 +1997,12 @@ func TestTheScopePoolTellsTheProxyWhoseTestsListEachMock(t *testing.T) {
 		"m-a1": "a", "m-a2": "a", "m-b": "b", "m-b2": "b",
 		"m-shared": "", "m-file": "", "m-c": "", "m-none": "", "m-bare": "",
 	}, p.poolOwners)
+	// And the table itself, which tells the run of a test's recording on no
+	// clock (the clock its other recordings are on): a copy, so a later
+	// table the agent installs never changes the one the proxy holds.
+	require.Equal(t, a.scopeTable, p.poolTests)
+	a.scopeTable["a::TestA1"] = []string{"m-later"}
+	require.Equal(t, []string{"m-a1", "m-shared"}, p.poolTests["a::TestA1"])
 }
 
 // Without the slices (a CLI that sent none) no data-plane pool mock answers

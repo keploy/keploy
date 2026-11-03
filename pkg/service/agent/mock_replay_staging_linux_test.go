@@ -22,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg"
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
@@ -56,14 +57,20 @@ func (p *diskServingProxy) SetRecordedOfKind(src func(kind models.Kind, visit fu
 	return nil
 }
 
-// SetPoolNames installs the pool's names and the key of each test's
-// recordings on the manager, as the agent's proxy does (Proxy.SetPoolNames):
-// they bound the set's teardown (MockManager.teardownAfter).
-func (p *diskServingProxy) SetPoolNames(names []string, owners map[string]string) error {
+// SetPoolNames installs the pool's names, the key of each test's recordings
+// and the scope table on the manager, as the agent's proxy does
+// (Proxy.SetPoolNames): they bound the set's teardown
+// (MockManager.teardownAfter).
+func (p *diskServingProxy) SetPoolNames(names []string, owners map[string]string, tests map[string][]string) error {
 	p.mm.SetPoolOwners(owners)
+	p.mm.SetPoolTests(tests)
 	p.mm.SetPoolNames(names)
 	return nil
 }
+
+// The agent finds the capability by a type assertion: a signature that
+// drifts from it would leave the pool unnamed with no build error.
+var _ coreAgent.PoolNamesSetter = (*diskServingProxy)(nil)
 
 func (p *diskServingProxy) SetRecordingTimes(src func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error) error {
 	p.mm.SetRecordingTimes(src)
@@ -563,7 +570,10 @@ func TestMockReplayAnswersTheCallAfterTheLastTest(t *testing.T) {
 // another clock is no bound of it (fakeconn.SetClockID). Before, the newer
 // run's test bounded it, the call missed, and the whole replay after a
 // partial record failed while that record had judged it green. The clocks
-// travel with the mocks as the CLI streams them to the agent.
+// travel with the mocks as the CLI streams them to the agent. TestB's second
+// call is on no clock, as an HTTP call's stamp is: TestB's other recording
+// names its run's clock, so it bounds that clock alone (the agent hands the
+// proxy the scope table), never the older run's.
 func TestMockReplayAnswersAnOlderRunsCallAfterTheLastTest(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	a, p := diskReplayAgent(t)
@@ -580,11 +590,12 @@ func TestMockReplayAnswersAnOlderRunsCallAfterTheLastTest(t *testing.T) {
 		on(s, ownMock("mock-c", "/c", "c", t0.Add(4*time.Second))),
 		on(s, ownMock("late", "/late", "late", t0.Add(5*time.Second))),
 		// TestB, recorded anew a minute later by another run.
-		on(l, ownMock("mock-b", "/b", "b", t0.Add(60*time.Second))))
+		on(l, ownMock("mock-b", "/b", "b", t0.Add(60*time.Second))),
+		ownMock("mock-b2", "/b2", "b2", t0.Add(60500*time.Millisecond)))
 	ctx := context.Background()
 	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{
 		"o::TestA": {"mock-a", "mock-a2"},
-		"o::TestB": {"mock-b"},
+		"o::TestB": {"mock-b", "mock-b2"},
 		"o::TestC": {"mock-c"},
 	}))
 	require.NoError(t, a.SetRecordedWindows(ctx, []models.TestWindow{
@@ -597,8 +608,8 @@ func TestMockReplayAnswersAnOlderRunsCallAfterTheLastTest(t *testing.T) {
 	got, e := runTest(t, a, p.servingProxy, "TestA", "/a", "/a2")
 	require.Equal(t, []string{"200 a", "200 a2"}, got)
 	require.Empty(t, e.Action, e.Reason)
-	got, e = runTest(t, a, p.servingProxy, "TestB", "/b")
-	require.Equal(t, []string{"200 b"}, got)
+	got, e = runTest(t, a, p.servingProxy, "TestB", "/b", "/b2")
+	require.Equal(t, []string{"200 b", "200 b2"}, got)
 	require.Empty(t, e.Action, e.Reason)
 	// TestC runs after TestB, though recorded before it.
 	got, e = runTest(t, a, p.servingProxy, "TestC", "/c")

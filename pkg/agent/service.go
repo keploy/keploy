@@ -880,9 +880,11 @@ type AppClockRunSetter interface {
 // integrations.PoolMembership. owners is, of the same table, the key of the
 // test process whose tests list each mock ("" where no one key is known),
 // which bounds each process's teardown, the calls it makes after its own last
-// test.
+// test. tests is the table itself (test ID -> the mocks it lists), which
+// tells the run of a test's recording on no clock, and so the clock it
+// bounds the teardown of.
 type PoolNamesSetter interface {
-	SetPoolNames(names []string, owners map[string]string) error
+	SetPoolNames(names []string, owners map[string]string, tests map[string][]string) error
 }
 
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
