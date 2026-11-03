@@ -375,7 +375,9 @@ func TestAWorkersTestIsTheWorkersWhoseProcessBeganIt(t *testing.T) {
 
 // Record's full round refuses a run of more than one worker at its first
 // claim, named: its learn step keeps the set's tests to their recorded
-// order, which tests run at once in several workers do not keep.
+// order, which tests run at once in several workers do not keep. The fix
+// names only what works: a replay may move the run's one clock, and then
+// takes no workers either (clockWorkersRefusal).
 func TestAWorkerRunIsRefusedInRecordsFullRound(t *testing.T) {
 	a, h := workerAgent(t, models.MODE_TEST, 4)
 	a.proven.order.learn = true
@@ -383,7 +385,7 @@ func TestAWorkerRunIsRefusedInRecordsFullRound(t *testing.T) {
 	require.NotNil(t, serr)
 	require.Equal(t, models.ScopeErrTooManyWorkers, serr.Code)
 	require.Contains(t, serr.Message, fmt.Sprintf("process %d declared 2 test workers, but record's full round replays one test worker at a time", os.Getpid()))
-	require.Contains(t, serr.Remedy, "record with one worker")
+	require.Equal(t, "record with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)", serr.Remedy)
 	require.Empty(t, h.given())
 	require.Empty(t, a.proven.workers)
 }

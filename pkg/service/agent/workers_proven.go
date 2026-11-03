@@ -104,7 +104,7 @@ func (a *Agent) learnWorkersRefusal(pid, declared int) *models.ScopeError {
 	}
 	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrTooManyWorkers,
 		fmt.Sprintf("process %d declared %d test workers, but record's full round replays one test worker at a time: its learn step pairs each call with a recording by the order the set's tests were recorded in, and tests that several workers run at once keep none", pid, declared),
-		"record with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand); keploy mock replay runs the workers at once")
+		"record with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
 }
 
 // clockWorkersRefusal refuses process pid's claim as one of declared test
