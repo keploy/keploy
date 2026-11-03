@@ -39,7 +39,10 @@ import (
 //     step, which names a field by its exact place (body.items[0].id,
 //     header.<name>, url.query.<name>, url.path.<i>), or by the request-body
 //     learner it replaces (body.items[].id). A learned field's value may
-//     change; its type and its presence may not;
+//     change; its type and its presence may not. Not at a field that names
+//     the call's operation (learnedNoiseHolds, the learn step's own rule):
+//     noise an earlier keploy learned there no longer excuses a change, and
+//     the miss says why (staleNoiseWhy);
 //   - a recorded value the obfuscator redacted (Mock.Noise).
 //
 // A place the learn step learned as a read of the application's clock
@@ -126,6 +129,37 @@ func (k strictKnown) learnedAt(exact, legacy string) bool {
 	return false
 }
 
+// noiseHolds reports whether what the mock learned at exact, a place a
+// learned entry covers (learnedAt), still excuses its change from recorded
+// to live there, and, where it does not, why, the field named shape. A read
+// of the application's clock learned there is checked apart (clockDiffs);
+// noise excuses by the learn step's rule (learnedNoiseHolds): never at a
+// leaf naming the call's operation.
+func (k strictKnown) noiseHolds(exact, shape, recorded, live string) (bool, string) {
+	if _, clock := k.clocks[exact]; clock {
+		return true, ""
+	}
+	if class := identityLeaf(exact, recorded, live); !learnedNoiseHolds(class) {
+		return false, staleNoiseWhy(shape, exact, class)
+	}
+	return true, ""
+}
+
+// learnedExcuses is noiseHolds at exact where the mock learned it
+// (learnedAt), and false where it did not.
+func (k strictKnown) learnedExcuses(exact, shape, recorded, live string) (bool, string) {
+	if !k.learnedAt(exact, "") {
+		return false, ""
+	}
+	return k.noiseHolds(exact, shape, recorded, live)
+}
+
+// staleNoise is f refused for why (noiseHolds), "" for none.
+func (f strictField) staleNoise(why string) strictField {
+	f.why, f.noise = why, why != ""
+	return f
+}
+
 // redacted reports whether a recorded value is one the obfuscator redacted.
 func (k strictKnown) redacted(recorded string) bool {
 	return recorded != "" && k.values != nil && k.values.IsNoisy(recorded)
@@ -139,8 +173,10 @@ type strictField struct {
 	diff  models.MockFieldDiff
 	shape string
 	// why is, of a read of the application's clock a replay refused
-	// (clockDiffs), the reason learn.CheckClockRead gives.
-	why string
+	// (clockDiffs), the reason learn.CheckClockRead gives; of a field whose
+	// learned noise no longer excuses it (noise), staleNoiseWhy's.
+	why   string
+	noise bool
 }
 
 // field is a strictField whose name holds no value (a fixed part, a header).
@@ -331,7 +367,12 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 	if len(rs) == len(ls) {
 		same := true
 		for i := range rs {
-			if rs[i] != ls[i] && !k.learnedAt("url.path."+strconv.Itoa(i), "") {
+			// A path segment holds an id, whose learned noise holds
+			// (learnedNoiseHolds): no reason of its own.
+			if rs[i] == ls[i] {
+				continue
+			}
+			if ok, _ := k.learnedExcuses("url.path."+strconv.Itoa(i), "path", rs[i], ls[i]); !ok {
 				same = false
 				break
 			}
@@ -384,10 +425,15 @@ func (k strictKnown) queryDiffs(rec, live url.Values) []strictField {
 		if sameMembers(maskValues(rv, k.n.url), maskValues(lv, k.n.url)) {
 			continue
 		}
-		if len(rv) == 1 && len(lv) == 1 && k.learnedAt("url.query."+name, "") {
-			continue
+		f := shaped(path, shape, models.DiffKindValueChanged, strings.Join(rv, ", "), strings.Join(lv, ", "))
+		if len(rv) == 1 && len(lv) == 1 {
+			ok, why := k.learnedExcuses("url.query."+name, shape, rv[0], lv[0])
+			if ok {
+				continue
+			}
+			f = f.staleNoise(why)
 		}
-		out = append(out, shaped(path, shape, models.DiffKindValueChanged, strings.Join(rv, ", "), strings.Join(lv, ", ")))
+		out = append(out, f)
 	}
 	return out
 }
@@ -457,7 +503,11 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 				continue
 			}
 		}
-		if k.learnedAt(path, "") || k.redacted(rv) {
+		if k.redacted(rv) {
+			continue
+		}
+		learned, why := k.learnedExcuses(path, path, rv, lv)
+		if learned {
 			continue
 		}
 		switch name {
@@ -470,7 +520,7 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 				continue
 			}
 		}
-		out = append(out, field(valueDiff(path, rv, lv)))
+		out = append(out, field(valueDiff(path, rv, lv)).staleNoise(why))
 	}
 	return out
 }
@@ -597,10 +647,14 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 			out = append(out, shaped(path, shape, models.DiffKindMissingInMock, "", ""))
 			continue
 		}
-		if sameMembers(rv, lv) || k.learnedAt(path, "") || redacted[key] {
+		if sameMembers(rv, lv) || redacted[key] {
 			continue
 		}
-		out = append(out, shaped(path, shape, models.DiffKindValueChanged, "", ""))
+		learned, why := k.learnedExcuses(path, shape, strings.Join(rv, ","), strings.Join(lv, ","))
+		if learned {
+			continue
+		}
+		out = append(out, shaped(path, shape, models.DiffKindValueChanged, "", "").staleNoise(why))
 	}
 	return out
 }
@@ -648,10 +702,18 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 			return append(out, bodyChanged())
 		case bytes.Equal(rp[i].data, lp[i].data):
 			continue
-		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || k.learnedAt(path, "") || k.redacted(string(rp[i].data))):
+		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || k.redacted(string(rp[i].data))):
 			continue
 		}
-		out = append(out, shaped(path, "body."+shapeKey(rp[i].name), models.DiffKindValueChanged, "", ""))
+		f := shaped(path, "body."+shapeKey(rp[i].name), models.DiffKindValueChanged, "", "")
+		if rp[i].file == "" {
+			learned, why := k.learnedExcuses(path, f.shape, string(rp[i].data), string(lp[i].data))
+			if learned {
+				continue
+			}
+			f = f.staleNoise(why)
+		}
+		out = append(out, f)
 	}
 	return out
 }
@@ -759,10 +821,17 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 			k.jsonDiffs(rv[i], lv[i], exact+"["+strconv.Itoa(i)+"]", risk+"[]", shape+"[]", learned, out)
 		}
 	default:
-		if learned || sameScalar(r, l) {
+		if sameScalar(r, l) {
 			return
 		}
 		f := shaped(name, shape, models.DiffKindValueChanged, scalarText(r), scalarText(l))
+		if learned {
+			holds, why := k.noiseHolds(exact, shape, scalarText(r), scalarText(l))
+			if holds {
+				return
+			}
+			f = f.staleNoise(why)
+		}
 		if strings.Contains(risk, "[]") {
 			// Elements of an array share one name, so the values would not
 			// say which element changed: the field alone.

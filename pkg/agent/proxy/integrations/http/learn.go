@@ -424,9 +424,11 @@ type httpKnown struct {
 // position included; noise learned before it (by the request-body learner
 // it replaces) names it in the request matcher's dialect. A place learned as
 // a read of the application's clock (clocks) is no learned noise's to excuse.
+// Nor is a leaf naming the call's operation (learnedNoiseHolds), or a field
+// that may hold a GraphQL document, whose class only what changed in it says:
+// the learn step reads either again, and its hold decides (heldLearned).
 func (k httpKnown) Excused(l learn.Leaf) (bool, bool) {
-	_, clock := k.clocks[l.Path]
-	if !clock && (learnedCovers(k.learned, l.Path) || l.Noise != l.Path && hasKey(k.learned, l.Noise)) {
+	if k.noiseAt(l) && learnedNoiseHolds(identityClass(l.Noise)) && !graphQLField(l.Noise) {
 		return true, true
 	}
 	if k.n.declared(l) {
@@ -437,6 +439,14 @@ func (k httpKnown) Excused(l learn.Leaf) (bool, bool) {
 		return true, false
 	}
 	return false, false
+}
+
+// noiseAt reports whether the noise learned onto the mock names leaf l: by
+// its exact path, a container of it, or the request matcher's dialect; never
+// a place learned as a read of the application's clock.
+func (k httpKnown) noiseAt(l learn.Leaf) bool {
+	_, clock := k.clocks[l.Path]
+	return !clock && (learnedCovers(k.learned, l.Path) || l.Noise != l.Path && hasKey(k.learned, l.Noise))
 }
 
 // Declares implements learn.Declarer: keploy.yml's request-body and header

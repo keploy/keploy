@@ -13,6 +13,8 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/replay"
 	"go.keploy.io/server/v3/pkg/variables"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // A change in a leaf that says which call this is (a path segment, an
@@ -461,5 +463,195 @@ func TestHeldLearnedExplains(t *testing.T) {
 	n.hold = func(string) LearnHold { return LearnExplainedOnly }
 	if why := n.heldLearned([]learn.Learned{{Kind: learn.KindNoise, Recorded: r, Live: l}}, nil); !strings.Contains(why, "body.note changed, and it says which call this is: ") {
 		t.Fatalf("noise at a leaf the caller holds explained-only: %q, want it refused naming no class", why)
+	}
+}
+
+// A recording an earlier keploy learned noise on, replayed: the noise still
+// excuses a change at a leaf holding an id (a path segment, a field naming
+// the resource) and at a leaf of no class, and no longer at one naming the
+// operation, which is refused with a reason naming the field and saying to
+// record the test again. keploy.yml's noise excuses either.
+func TestReplayOldLearnedNoiseExcusesAnIdNotAnOperation(t *testing.T) {
+	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	jsonCT := map[string]string{"Content-Type": "application/json"}
+	target := func(op string) map[string]string {
+		return map[string]string{"Content-Type": "application/x-amz-json-1.0", "X-Amz-Target": "AmazonSQS." + op}
+	}
+	type yml struct {
+		header, body map[string][]string
+		url          []string
+	}
+	for _, tc := range []struct {
+		name               string
+		path, livePath     string
+		header, liveHeader map[string]string
+		body, liveBody     string
+		learned            []string
+		refused            string // the field refused, by its shape; "" where served
+		declared           yml    // keploy.yml noise that excuses it
+	}{
+		{name: "a path segment", path: "/v1/queues/orders/messages", livePath: "/v1/queues/orders-dlq/messages",
+			learned: []string{"url.path.2"}},
+		{name: "a field naming the resource", path: "/", livePath: "/", header: jsonCT, liveHeader: jsonCT,
+			body: `{"QueueUrl":"http://q/1/orders"}`, liveBody: `{"QueueUrl":"http://q/1/orders-dlq"}`, learned: []string{"body.QueueUrl"}},
+		{name: "a field of no class", path: "/", livePath: "/", header: jsonCT, liveHeader: jsonCT,
+			body: `{"note":"a"}`, liveBody: `{"note":"b"}`, learned: []string{"body.note"}},
+		{name: "a GraphQL document whose operation is the same", path: "/graphql", livePath: "/graphql", header: jsonCT, liveHeader: jsonCT,
+			body: `{"query":"query GetOrder { order(id: 1) { id } }"}`, liveBody: `{"query":"query GetOrder { order(id: 2) { id } }"}`, learned: []string{"body.query"}},
+		{name: "an operation header", path: "/", livePath: "/", header: target("PurgeQueue"), liveHeader: target("DeleteQueue"),
+			body: `{}`, liveBody: `{}`, learned: []string{"header.x-amz-target"}, refused: "header.x-amz-target",
+			declared: yml{header: map[string][]string{"X-Amz-Target": {}}}},
+		{name: "a query parameter naming the operation", path: "/?Action=SendMessage", livePath: "/?Action=PurgeQueue",
+			learned: []string{"url.query.Action"}, refused: "query.Action", declared: yml{url: []string{"^[A-Za-z]+$"}}},
+		{name: "a form field naming the operation", path: "/", livePath: "/", header: form, liveHeader: form,
+			body: "Action=SendMessage&QueueUrl=q", liveBody: "Action=PurgeQueue&QueueUrl=q", learned: []string{"body.Action"},
+			refused: "body.Action", declared: yml{body: map[string][]string{"Action": {}}}},
+		{name: "a JSON field naming the operation", path: "/rpc", livePath: "/rpc", header: jsonCT, liveHeader: jsonCT,
+			body: `{"method":"orders.get","id":1}`, liveBody: `{"method":"orders.cancel","id":1}`, learned: []string{"body.method"},
+			refused: "body.method", declared: yml{body: map[string][]string{"method": {}}}},
+		{name: "a GraphQL document's operation", path: "/graphql", livePath: "/graphql", header: jsonCT, liveHeader: jsonCT,
+			body: `{"query":"query GetOrder { order { id } }"}`, liveBody: `{"query":"mutation CancelOrder { cancel { id } }"}`,
+			learned: []string{"body.query"}, refused: "body.query", declared: yml{body: map[string][]string{"query": {}}}},
+		{name: "a field naming the operation in a learned container", path: "/", livePath: "/", header: jsonCT, liveHeader: jsonCT,
+			body: `{"input":{"Action":"SendMessage","at":1}}`, liveBody: `{"input":{"Action":"PurgeQueue","at":2}}`, learned: []string{"body.input"},
+			refused: "body.input.Action", declared: yml{body: map[string][]string{"input.Action": {}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := recorded("old", tc.path, tc.header, tc.body)
+			rec.Spec.ReqBodyNoise = map[string][]string{}
+			for _, l := range tc.learned {
+				rec.Spec.ReqBodyNoise[l] = []string{}
+			}
+			in := func() *req { return sent(tc.livePath, tc.liveHeader, tc.liveBody) }
+			got, diag := strictMatch(t, in(), nil, nil, nil, rec)
+			if tc.refused == "" {
+				if got == nil {
+					t.Fatalf("not served: %v; the noise learned there still excuses it", differs(diag))
+				}
+				return
+			}
+			if got != nil {
+				t.Fatalf("served: noise learned at %s still excused it", tc.refused)
+			}
+			whys := reasonsOf(diag.differs)
+			if len(whys) != 1 || whys[0].Field != tc.refused || !strings.HasPrefix(whys[0].Why, tc.refused+" changed, and it says which call this is (") ||
+				!strings.Contains(whys[0].Why, "no longer excuses") || !strings.Contains(whys[0].Why, "Record the test again") {
+				t.Fatalf("reasons %+v; want %s's, saying its learned noise no longer excuses it and to record the test again", whys, tc.refused)
+			}
+			if got, diag := strictMatch(t, in(), tc.declared.header, tc.declared.body, tc.declared.url, rec); got == nil {
+				t.Fatalf("keploy.yml's noise did not excuse %s: %v", tc.refused, differs(diag))
+			}
+		})
+	}
+}
+
+// Of a multipart form, a part naming the operation is refused as any other
+// field is, its learned noise no longer excusing it.
+func TestReplayOldLearnedNoiseAtAMultipartOperation(t *testing.T) {
+	parts := func(boundary, action, note string) (string, string) {
+		part := func(name, v string) string {
+			return "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" + v + "\r\n"
+		}
+		return part("Action", action) + part("note", note) + "--" + boundary + "--\r\n", "multipart/form-data; boundary=" + boundary
+	}
+	body, ct := parts("rec-b", "SendMessage", "a")
+	rec := recorded("old", "/upload", map[string]string{"Content-Type": ct}, body)
+	rec.Spec.ReqBodyNoise = map[string][]string{"body.Action": {}, "body.note": {}}
+	note, noteCT := parts("b1", "SendMessage", "b")
+	if got, diag := strictMatch(t, sent("/upload", map[string]string{"Content-Type": noteCT}, note), nil, nil, nil, rec); got == nil {
+		t.Fatalf("a learned part of no class was not excused: %v", differs(diag))
+	}
+	op, opCT := parts("b2", "PurgeQueue", "a")
+	got, diag := strictMatch(t, sent("/upload", map[string]string{"Content-Type": opCT}, op), nil, nil, nil, rec)
+	if whys := reasonsOf(diagDiffers(diag)); got != nil || len(whys) != 1 || whys[0].Field != "body.Action" || !strings.Contains(whys[0].Why, "Record the test again") {
+		t.Fatalf("served %v, reasons %+v; want body.Action refused, saying to record the test again", got != nil, whys)
+	}
+}
+
+func diagDiffers(d *matchDiag) []strictField {
+	if d == nil {
+		return nil
+	}
+	return d.differs
+}
+
+// The refusal is said in the agent's log too: the mock, the field and why.
+func TestReplayOldLearnedNoiseAtAnOperationIsLogged(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	rec := recorded("old", "/", map[string]string{"X-Amz-Target": "AmazonSQS.PurgeQueue", "X-Tenant": "a"}, `{}`)
+	rec.Spec.ReqBodyNoise = map[string][]string{"header.x-amz-target": {}}
+	core, logs := observer.New(zap.WarnLevel)
+	h := &HTTP{Logger: zap.New(core)}
+	// Another header changed too, with no noise learned: a difference, and
+	// no reason of its own to log.
+	ok, _, _, err := h.match(context.Background(), sent("/", map[string]string{"X-Amz-Target": "AmazonSQS.DeleteQueue", "X-Tenant": "b"}, `{}`), &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true}, models.ProvenFlakyHeaderNoise(), nil, nil, true, false, false, true, true)
+	if err != nil || ok {
+		t.Fatalf("match ok=%v err=%v; want the operation refused", ok, err)
+	}
+	said := logs.FilterMessage("noise learned at a field naming the call's operation no longer excuses it").All()
+	if len(said) != 1 || said[0].ContextMap()["mock"] != "old" || said[0].ContextMap()["field"] != "header.x-amz-target" ||
+		!strings.Contains(said[0].ContextMap()["reason"].(string), "Record the test again") {
+		t.Fatalf("the log said %v; want the mock, the field and why", said)
+	}
+	if n := logs.FilterMessage("a learned read of the application's clock does not hold").Len(); n != 0 {
+		t.Fatalf("it was logged as a read of the clock too (%d)", n)
+	}
+}
+
+// A read of the application's clock learned at a leaf naming the operation
+// is no noise: the walk lets it change, and clockDiffs checks it.
+func TestNoiseHoldsAtAClockReadNamingTheOperation(t *testing.T) {
+	k := strictKnown{clocks: map[string]models.ClockOffset{"body.action": {Res: time.Second}}}
+	if ok, why := k.noiseHolds("body.action", "body.action", "1", "2"); !ok || why != "" {
+		t.Fatalf("noiseHolds = %v, %q; want a clock read left to clockDiffs", ok, why)
+	}
+	if ok, why := k.noiseHolds("body.Action", "body.Action", "1", "2"); ok || why == "" {
+		t.Fatalf("noiseHolds = %v, %q; want noise at the operation refused", ok, why)
+	}
+}
+
+// In record's full round too, noise a recording already holds at a leaf
+// naming the operation excuses no change there: the learn step reads the
+// leaf again, as its hold decides. At a leaf holding an id it still does.
+func TestLearnMatchOldLearnedNoiseExcusesAnIdNotAnOperation(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		target, liveTarget string
+		header, liveHeader map[string]string
+		body, liveBody     string
+		learned            string
+		refused            string // the leaf refused; "" where served
+	}{
+		{name: "a path segment", target: "/v1/queues/orders/messages", liveTarget: "/v1/queues/orders-dlq/messages",
+			body: `{}`, liveBody: `{}`, learned: "url.path.2"},
+		{name: "an operation header", target: "/", liveTarget: "/", body: `{}`, liveBody: `{}`,
+			header: map[string]string{"X-Amz-Target": "S.PurgeQueue"}, liveHeader: map[string]string{"X-Amz-Target": "S.DeleteQueue"},
+			learned: "header.x-amz-target", refused: "header.x-amz-target"},
+		{name: "a GraphQL document's operation", target: "/graphql", liveTarget: "/graphql",
+			body: `{"query":"query GetOrder { order { id } }"}`, liveBody: `{"query":"mutation CancelOrder { cancel { id } }"}`,
+			learned: "body.query", refused: "body.query"},
+		{name: "a GraphQL document whose operation is the same", target: "/graphql", liveTarget: "/graphql",
+			body: `{"query":"query GetOrder { order(id: 1) { id } }"}`, liveBody: `{"query":"query GetOrder { order(id: 2) { id } }"}`,
+			learned: "body.query"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			rec := learnRecorded("old", 0, "POST", tc.target, tc.body, tc.header, `{}`)
+			rec.Spec.ReqBodyNoise = map[string][]string{tc.learned: {}}
+			db := &learnDb{perTest: []*models.Mock{rec}}
+			served, miss, err := h.learnMatch(context.Background(), live("POST", tc.liveTarget, tc.liveBody, tc.liveHeader), db, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.refused == "" {
+				if served == nil || miss != nil {
+					t.Fatalf("miss %+v: the noise learned there still excuses it", miss)
+				}
+				return
+			}
+			if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, tc.refused+" changed, and it says which call this is") {
+				t.Fatalf("served %v miss %+v: want request_changed naming %s", served, miss, tc.refused)
+			}
+		})
 	}
 }

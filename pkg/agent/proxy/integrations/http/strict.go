@@ -233,7 +233,12 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 			phase = models.MatchPhaseSchema
 		}
 		for _, f := range closestDiffs {
-			if f.why != "" {
+			switch {
+			case f.noise:
+				// Noise the closest recording learned at a field naming the
+				// call's operation, which no longer excuses it: why, legibly.
+				h.Logger.Warn("noise learned at a field naming the call's operation no longer excuses it", zap.String("mock", closest.Name), zap.String("field", f.shape), zap.String("reason", f.why))
+			case f.why != "":
 				// A read of the application's clock the closest recording
 				// learned that this call does not hold: why, legibly.
 				h.Logger.Warn("a learned read of the application's clock does not hold", zap.String("mock", closest.Name), zap.String("field", f.shape), zap.String("reason", f.why))
@@ -601,7 +606,9 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest, actualKe
 
 // reasonsOf are, of fields, those refused for a reason of their own (a
 // learned read of the application's clock the call does not carry:
-// clockDiffs), each named by its shape, with that reason, once.
+// clockDiffs; learned noise that no longer excuses a field naming the
+// call's operation: noiseHolds), each named by its shape, with that reason,
+// once.
 func reasonsOf(fields []strictField) []models.FieldReason {
 	var out []models.FieldReason
 	for _, f := range fields {

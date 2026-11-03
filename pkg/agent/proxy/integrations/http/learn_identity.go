@@ -49,6 +49,13 @@ import (
 //     operationName says which operation it means only there.
 //
 // A leaf no class names keeps the learn step's own rules.
+//
+// The same rule reads noise a recording already holds at such a leaf, an
+// earlier keploy's (learnedNoiseHolds): at a leaf holding an id it still
+// excuses a change; at one naming the operation it no longer does, at
+// replay (strictKnown.noiseHolds) and in record's full round
+// (httpKnown.Excused), and the miss says to record the test again
+// (staleNoiseWhy).
 
 // The classes of leaf that say which call a request is, as a miss names
 // them.
@@ -164,20 +171,34 @@ func identityClass(leaf string) string {
 	return ""
 }
 
-// identityOf is the class (above) of drifted leaf l, by its name or, for a
-// GraphQL document, by what changed in it; "" for none.
+// identityOf is the class (above) of drifted leaf l (identityLeaf).
 func identityOf(l learn.Learned) string {
-	if c := identityClass(l.Recorded.Noise); c != "" {
+	return identityLeaf(l.Recorded.Noise, l.Recorded.Value, l.Live.Value)
+}
+
+// identityLeaf is the class (above) of the leaf named leaf (identityClass;
+// its exact path names it alike) whose value changed from recorded to live:
+// by its name or, for a GraphQL document, by what changed in it; "" for
+// none.
+func identityLeaf(leaf, recorded, live string) string {
+	if c := identityClass(leaf); c != "" {
 		return c
 	}
-	if strings.EqualFold(fieldOf(l.Recorded.Noise), "query") {
-		rec, ok := graphQLOperations(l.Recorded.Value)
-		live, liveOK := graphQLOperations(l.Live.Value)
-		if ok && liveOK && rec != live {
+	if graphQLField(leaf) {
+		rec, ok := graphQLOperations(recorded)
+		now, nowOK := graphQLOperations(live)
+		if ok && nowOK && rec != now {
 			return classGraphQL
 		}
 	}
 	return ""
+}
+
+// graphQLField reports whether leaf is a field that may hold a GraphQL
+// document (a field named query), whose class only what changed in it says
+// (identityLeaf).
+func graphQLField(leaf string) bool {
+	return strings.EqualFold(fieldOf(leaf), "query")
 }
 
 // identityHold is how the learn step may learn a leaf of class class:
@@ -191,6 +212,24 @@ func identityHold(class string) LearnHold {
 		return LearnExplainedOrEcho
 	}
 	return LearnExplainedOnly
+}
+
+// learnedNoiseHolds reports whether noise already learned at a leaf of
+// class class (identityLeaf), by an earlier keploy, still excuses a change
+// there: by the rule the learn step learns by (identityHold), at a leaf
+// holding an id (it may learn an echo there, and noise was the echo an
+// earlier keploy did not tell apart) and at a leaf of no class; never at a
+// leaf naming the operation, which only what explains a change there
+// excuses.
+func learnedNoiseHolds(class string) bool {
+	return identityHold(class) != LearnExplainedOnly
+}
+
+// staleNoiseWhy is why noise already learned at leaf, its field named shape
+// (no value in it), no longer excuses its change from the recording: the
+// leaf is of class class, naming the operation (learnedNoiseHolds).
+func staleNoiseWhy(shape, leaf, class string) string {
+	return shape + " changed, and it says which call this is (" + class + "): the noise an earlier keploy learned there no longer excuses a change, which only a value the application sent in an earlier call, a value the test gave keploy, or a read of the clock explains. Record the test again; if the value there may really change, declare it in keploy.yml (" + declareHow(leaf) + ")"
 }
 
 // holdOf is how the learn step may learn drifted leaf l: as the caller of
