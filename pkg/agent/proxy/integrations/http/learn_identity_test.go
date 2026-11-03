@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +79,9 @@ func TestLearnMatchRefusesAChangeInWhatNamesTheCall(t *testing.T) {
 		{name: "a GraphQL operation's type alone", method: "POST", recTarget: "/graphql", liveTarget: "/graphql",
 			recBody: `{"query":"query { orders { id } }"}`, liveBody: `{"query":"mutation { orders { id } }"}`,
 			answer: `{}`, leaf: "body.query"},
+		{name: "an anonymous GraphQL operation's root fields", method: "POST", recTarget: "/graphql", liveTarget: "/graphql",
+			recBody: `{"query":"query { order(id: 1) { id } }"}`, liveBody: `{"query":"query { users { password } }"}`,
+			answer: `{}`, leaf: "body.query"},
 		{name: "a GraphQL operation after a comment holding a brace", method: "POST", recTarget: "/graphql", liveTarget: "/graphql",
 			recBody: `{"query":"query GetOrder { order { id } }"}`, liveBody: `{"query":"mutation CancelOrder # {\n { cancel { ok } }"}`,
 			answer: `{}`, leaf: "body.query"},
@@ -142,15 +146,19 @@ func TestLearnMatchRefusesAChangeInWhatNamesTheCall(t *testing.T) {
 // was: the leaves that name it are the only ones held.
 func TestLearnMatchStillLearnsWhatDoesNotNameTheCall(t *testing.T) {
 	h, n, opts := learnOn(t)
-	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/queues/orders/messages?at=100", `{"QueueUrl":"http://q/orders","request_id":"r-1"}`,
+	// A field named query whose text only looks like a GraphQL selection
+	// set (a Loki selector, JSON text) holds no operation.
+	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/queues/orders/messages?at=100&query=%7B%22term%22%3A%22shoes%22%7D",
+		`{"QueueUrl":"http://q/orders","request_id":"r-1","query":"{app=\"foo\"} |= \"error\""}`,
 		map[string]string{"X-Amz-Target": "AmazonSQS.SendMessage", "X-Trace": "t1"}, `{}`)}}
-	served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/queues/orders/messages?at=200", `{"QueueUrl":"http://q/orders","request_id":"r-2"}`,
+	served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/queues/orders/messages?at=200&query=%7B%22term%22%3A%22boots%22%7D",
+		`{"QueueUrl":"http://q/orders","request_id":"r-2","query":"{app=\"foo\"}"}`,
 		map[string]string{"X-Amz-Target": "AmazonSQS.SendMessage", "X-Trace": "t2"}), db, n, opts)
 	if err != nil || miss != nil || served == nil {
 		t.Fatalf("served %v miss %+v err %v", served, miss, err)
 	}
 	got := db.consumed[0].Spec.ReqBodyNoise
-	for _, want := range []string{"url.query.at", "header.x-trace", "body.request_id"} {
+	for _, want := range []string{"url.query.at", "header.x-trace", "body.request_id", "body.query", "url.query.query"} {
 		if _, ok := got[want]; !ok {
 			t.Fatalf("learned %v, want %s among it", got, want)
 		}
@@ -398,8 +406,8 @@ func TestIdentityClassNamesEachLeaf(t *testing.T) {
 func TestGraphQLOperations(t *testing.T) {
 	for doc, want := range map[string]string{
 		"query GetOrder { order(id: 1) { id } }":                                         "query GetOrder",
-		"{ order(id: 1) { id } }":                                                        "query",
-		"mutation { cancel(id: \"}{\") { id } }":                                         "mutation",
+		"{ order(id: 1) { id } }":                                                        "query { order }",
+		"mutation { cancel(id: \"}{\") { id } }":                                         "mutation { cancel }",
 		"# a comment {\n subscription Watch($id: ID = \"x{\") { order(id: $id) { id } }": "subscription Watch",
 		"fragment F on Order { id }\nquery Get { order { ...F } }":                       "query Get",
 		"query A { a } mutation B { b(s: \"\"\"}\"\"\") }":                               "query A,mutation B",
@@ -419,6 +427,21 @@ func TestGraphQLOperations(t *testing.T) {
 		"query GetOrder { order # }\n { id } }": "query GetOrder",
 		// A byte order mark before the document.
 		"\ufeffquery GetOrder { order { id } }": "query GetOrder",
+		// An operation with no name is told apart by its root fields, as the
+		// server names them (an alias is the client's), each once, sorted:
+		// a fragment's spread by its name, an inline fragment's fields as
+		// the operation's own.
+		"query { order(id: 1) { id } }":                                "query { order }",
+		"query ($id: ID!) @live { order(id: $id) { id } }":             "query { order }",
+		"{ u: users(first: 2) { id } o: order(id: 1) @cached { id } }": "query { order users }",
+		"{ b a b }": "query { a b }",
+		"{ ...F ... on Query { users } ... @include(if: $x) { me } }": "query { ...F me users }",
+		"{ order(note: \")\" # )\n) # }\n { id } }":                   "query { order }",
+		"{ order { ... on Order @skip(if: true) { id } } }":           "query { order }",
+		"{ order { id } ...F @include(if: $x) }":                      "query { ...F order }",
+		"{ on }":                                                      "query { on }",
+		// Text that parses as a selection set reads as a shorthand query.
+		"{shoes}": "query { shoes }",
 	} {
 		if got, ok := graphQLOperations(doc); !ok || got != want {
 			t.Errorf("graphQLOperations(%q) = %q, %v; want %q", doc, got, ok, want)
@@ -426,7 +449,15 @@ func TestGraphQLOperations(t *testing.T) {
 	}
 	for _, doc := range []string{"", "shoes", "query", "query Get", "select * from t", "fragment F on O { id }", "{ a", "query Get { a",
 		"mutation CancelOrder { cancel { ok } } x", "\"Cancel it\" { a }", "\"Cancel it mutation C { a }", "\"\"\"Cancel it mutation C { a }",
-		"query Get { a(s: \"x) }", "query Get { a(s: \"\"\"x) }", "query Get($s: String = \"{) { a }", "query Get # { a }"} {
+		"query Get { a(s: \"x) }", "query Get { a(s: \"\"\"x) }", "query Get($s: String = \"{) { a }", "query Get # { a }",
+		// A brace whose text is no selection set: a Loki selector, JSON
+		// text, an empty set, a field's own empty set, an assignment, an
+		// argument list or a directive's that does not close, an inline
+		// fragment's missing type, a directive with no name, an alias with
+		// no field, a set that does not close.
+		"{app=\"foo\"}", "{app=\"foo\"} |= \"error\"", "{\"term\":\"shoes\"}", "{}", "{ a {} }", "query { a = 1 }",
+		"{ a(b: 1 }", "{ a @d(x: 1 }", "{ ... on { a } }", "{ ...F @ }", "{ a: }", "{ a", "{ a { b }", "query { a } x",
+		"{ ... }", "{ ... on T }", "mutation { a(\"x\") { b } }("} {
 		if got, ok := graphQLOperations(doc); ok {
 			t.Errorf("graphQLOperations(%q) = %q: want no GraphQL document", doc, got)
 		}
@@ -455,6 +486,11 @@ func TestIdentityOfAGraphQLDocument(t *testing.T) {
 		{learned("body.query", "query A { a }", "boots"), classGraphQL},
 		{learned("body.query", "query A { a }", "query A { a } x"), classGraphQL},
 		{learned("body.query", "shoes", "boots"), ""},
+		{learned("body.query", "query { order(id: 1) { id } }", "query { users { password } }"), classGraphQL},
+		{learned("body.query", "{ order(id: 1) { id } }", "query { order(id: 2) { id } }"), ""},
+		{learned("body.query", `{app="foo"} |= "error"`, `{app="foo"}`), ""},
+		{learned("url.query.query", `{"term":"shoes"}`, `{"term":"boots"}`), ""},
+		{learned("url.query.query", "shoes", "{shoes}"), classGraphQL},
 		{learned("body.text", "query A { a }", "query B { a }"), ""},
 		{learned("header.query", "query A { a }", "query B { a }"), ""},
 	} {
@@ -839,10 +875,11 @@ func TestExplainedAVariableFromAnUncomparedLeaf(t *testing.T) {
 
 // noiseMarked marks the leaves a replay leaves uncompared: a request leaf
 // learned as noise in the call, excused by the mock's comparison
-// (keploy.yml's noise, the noise learned onto the mock before), or bound by
-// an echo of the call's plan, and an answer's
-// leaf an echo writes into; never a compared one, nor another leaf of the
-// answer, whatever its name, nor a leaf a variable that is no echo binds.
+// (keploy.yml's noise, the noise learned onto the mock before), or named
+// (bound or used) by an echo of the call's plan or by a variable whose
+// value came from an uncompared place (unchecked), and an answer's leaf such
+// a variable writes into; never a compared one, nor another leaf of the
+// answer, whatever its name, nor a leaf another variable binds or uses.
 func TestNoiseMarkedMarksOnlyUncomparedLeaves(t *testing.T) {
 	h, _, opts := learnOn(t)
 	n := h.newLearnNoise(opts, map[string][]string{"declared": {}}, nil)
@@ -854,21 +891,25 @@ func TestNoiseMarkedMarksOnlyUncomparedLeaves(t *testing.T) {
 	e := learn.Earlier{Seen: []learn.Seen{
 		seen(learn.Request, "body.now"), seen(learn.Request, "body.before"), seen(learn.Request, "body.declared"),
 		seen(learn.Request, "body.compared"), seen(learn.Response, "body.now"),
-		seen(learn.Request, "body.echoed"), seen(learn.Response, "body.echoAnswer"), seen(learn.Request, "body.echoAnswer"),
-		seen(learn.Request, "body.bound"), seen(learn.Response, "body.boundAnswer"),
+		seen(learn.Request, "body.echoed"), seen(learn.Request, "body.echoUse"), seen(learn.Response, "body.echoAnswer"), seen(learn.Request, "body.echoAnswer"),
+		seen(learn.Request, "body.bound"), seen(learn.Request, "body.boundUse"), seen(learn.Response, "body.boundAnswer"),
+		seen(learn.Request, "body.fromNoise"), seen(learn.Response, "body.fromNoiseAnswer"),
+		{Side: learn.Request, Leaf: learn.Leaf{Path: "body.unplaced", Noise: "body.unplaced", Type: learn.String, Value: "a"}, Live: "b"},
 	}}
-	plan := models.MockVariables{
-		"id":   {Recorded: "a", Bind: "body.echoed", Answer: []string{"body.echoAnswer"}, Echo: true},
-		"kept": {Recorded: "a", Bind: "body.bound", Answer: []string{"body.boundAnswer"}},
-	}
+	p := pairing{noise: map[string][]string{"body.now": {}}, vars: models.MockVariables{
+		"id":    {Recorded: "a", Bind: "body.echoed", Use: []string{"body.echoUse"}, Answer: []string{"body.echoAnswer"}, Echo: true},
+		"kept":  {Recorded: "a", Bind: "body.bound", Use: []string{"body.boundUse"}, Answer: []string{"body.boundAnswer"}},
+		"noisy": {Recorded: "a", Use: []string{"body.fromNoise"}, Answer: []string{"body.fromNoiseAnswer"}},
+	}, unchecked: map[string]bool{"noisy": true}}
 	got := map[string]bool{}
-	for _, s := range noiseMarked(e, n.known(m), map[string][]string{"body.now": {}}, plan).Seen {
+	for _, s := range noiseMarked(e, n.known(m), p).Seen {
 		got[string(s.Side)+" "+s.Leaf.Path] = s.Uncompared
 	}
 	want := map[string]bool{"request body.now": true, "request body.before": true, "request body.declared": true,
 		"request body.compared": false, "response body.now": false,
-		"request body.echoed": true, "response body.echoAnswer": true, "request body.echoAnswer": false,
-		"request body.bound": false, "response body.boundAnswer": false}
+		"request body.echoed": true, "request body.echoUse": true, "response body.echoAnswer": true, "request body.echoAnswer": false,
+		"request body.bound": false, "request body.boundUse": false, "response body.boundAnswer": false,
+		"request body.fromNoise": true, "response body.fromNoiseAnswer": true, "request body.unplaced": false}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("marked %v, want %v", got, want)
 	}
@@ -933,10 +974,115 @@ func TestLearnMatchAVariableFromAnEchoExplainsNoOperation(t *testing.T) {
 	}
 }
 
+// Every leaf that takes whatever the application sends is marked, not only
+// the one a later call's value is found at first: an echo's bind, its other
+// places in the request (its uses) and its answer's, and each place of a
+// later call that carries such a value on (a variable from an uncompared
+// place). Each shape is learned, then its exchanges are handed to a second
+// tracker with their places in reverse order (the calls, in the order they
+// were served and recorded, and the leaves of each), so the place found
+// first is the one found last before: the call that changes the operation
+// header is still refused. Either half of the row fails where a leaf of
+// them is left unmarked.
+func TestLearnMatchAnUncomparedValueExplainsNoOperationInAnyPlaceOrder(t *testing.T) {
+	const rec, now = "AmazonSQS.PurgeQueue", "AmazonSQS.DeleteQueue"
+	jobs := func(name string, at time.Duration, target, body string, header map[string]string, answer string) func(v string) (*models.Mock, *req) {
+		return func(v string) (*models.Mock, *req) {
+			fill := func(s string) string { return strings.ReplaceAll(s, "$v", v) }
+			h := map[string]string{}
+			for k, x := range header {
+				h[k] = fill(x)
+			}
+			m := learnRecorded(name, at, "POST", fill(target), fill(body), h, fill(answer))
+			if strings.HasPrefix(answer, "header:") {
+				m = learnRecorded(name, at, "POST", fill(target), fill(body), h, `{}`)
+				m.Spec.HTTPResp.Header["X-Next"] = fill(strings.TrimPrefix(answer, "header:"))
+			}
+			return m, live("POST", fill(target), fill(body), h)
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		before []func(v string) (*models.Mock, *req)
+	}{
+		{"an echo at two body fields", []func(string) (*models.Mock, *req){
+			jobs("mock-0", 0, "/v1/jobs", `{"also":"$v","next":"$v"}`, nil, `{"next":"$v"}`)}},
+		{"an echo at two body fields, the bind last", []func(string) (*models.Mock, *req){
+			jobs("mock-0", 0, "/v1/jobs", `{"next":"$v","zlater":"$v"}`, nil, `{"next":"$v"}`)}},
+		{"an echo at a header and a body field", []func(string) (*models.Mock, *req){
+			jobs("mock-0", 0, "/v1/jobs", `{"next":"$v"}`, map[string]string{"X-Op": "$v"}, `{"next":"$v"}`)}},
+		{"an echo at a query value and a body field", []func(string) (*models.Mock, *req){
+			jobs("mock-0", 0, "/v1/jobs?op=$v", `{"next":"$v"}`, nil, `{"next":"$v"}`)}},
+		{"an echo at a header and a query value", []func(string) (*models.Mock, *req){
+			jobs("mock-0", 0, "/v1/jobs?op=$v", `{"m":"y"}`, map[string]string{"X-Op": "$v"}, `{"next":"$v"}`)}},
+		{"an echo answered in a header", []func(string) (*models.Mock, *req){
+			jobs("mock-0", 0, "/v1/jobs", `{"next":"$v"}`, map[string]string{"X-Op": "$v"}, "header:$v")}},
+		{"an echo at a header", []func(string) (*models.Mock, *req){
+			jobs("mock-0", 0, "/v1/jobs", `{"m":"y"}`, map[string]string{"X-Next-Op": "$v"}, `{"next":"$v"}`)}},
+		{"an echo, then a field of a second call", []func(string) (*models.Mock, *req){
+			jobs("mock-0", 0, "/v1/jobs", `{"next":"$v"}`, nil, `{"next":"$v"}`),
+			jobs("mock-1", time.Second, "/v1/stage", `{"op":"$v"}`, nil, `{}`)}},
+		{"noise, then a field of a second call", []func(string) (*models.Mock, *req){
+			jobs("mock-0", 0, "/v1/jobs", `{"desc":"$v"}`, nil, `{}`),
+			jobs("mock-1", time.Second, "/v1/stage", `{"op":"$v"}`, nil, `{}`)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			var recs []*models.Mock
+			var calls []*req
+			for _, f := range tc.before {
+				m, _ := f(rec)
+				_, c := f(now)
+				recs, calls = append(recs, m), append(calls, c)
+			}
+			at := time.Duration(len(recs)) * time.Second
+			recs = append(recs, learnRecorded("mock-op", at, "POST", "/", `{"m":"x"}`, map[string]string{"X-Amz-Target": rec}, `{}`))
+			first := learn.NewTracker()
+			first.Begin()
+			db := &learnDb{perTest: recs, observe: first.ServedMock}
+			for i, c := range calls {
+				if served, miss, err := h.learnMatch(learn.WithTracker(context.Background(), first), c, db, n, opts); err != nil || served == nil {
+					t.Fatalf("call %d: served %v miss %+v err %v", i, served, miss, err)
+				}
+			}
+			_, earlier, mocks, _ := first.Test()
+			for _, e := range earlier {
+				for _, s := range e.Seen {
+					if s.Live == now && !s.Uncompared {
+						t.Fatalf("%s's %s leaf %s carries the value the application sent at an uncompared place, and is not marked uncompared", e.Mock, s.Side, s.Leaf.Path)
+					}
+				}
+			}
+			second := learn.NewTracker()
+			second.Begin()
+			for i := len(mocks) - 1; i >= 0; i-- {
+				second.ServedMock(mocks[i])
+			}
+			test, _, _, _ := second.Test()
+			for i := len(earlier) - 1; i >= 0; i-- {
+				e := earlier[i]
+				e.At = earlier[len(earlier)-1-i].At
+				e.Seen = append([]learn.Seen(nil), e.Seen...)
+				slices.Reverse(e.Seen)
+				second.Served(test, e)
+			}
+			served, miss, err := h.learnMatch(learn.WithTracker(context.Background(), second), live("POST", "/", `{"m":"x"}`, map[string]string{"X-Amz-Target": now}), db, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged ||
+				!strings.Contains(miss.res.Why, "header.x-amz-target changed") || !strings.Contains(miss.res.Why, "which a replay does not compare") {
+				t.Fatalf("served %v miss %+v: want request_changed at the operation header, from a place a replay does not compare", served, miss)
+			}
+		})
+	}
+}
+
 // A value the application sent earlier in another protocol's payload (a
 // SQL text) names no leaf keploy compares by itself: at an operation header
-// the call is refused for the operation, its reason naming the payload,
-// before anything else is read of the value.
+// the call is refused for the operation, its reason naming the payload and
+// the field of the mock that holds it, before anything else is read of the
+// value.
 func TestLearnMatchAValueFromAPayloadExplainsNoOperation(t *testing.T) {
 	h, n, opts := learnOn(t)
 	tr := learn.NewTracker()
@@ -951,7 +1097,7 @@ func TestLearnMatchAValueFromAPayloadExplainsNoOperation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "header.x-amz-target changed, and it says which call this is (an operation header): keploy learns a change there only as a value the application sent in an earlier call at a place keploy compares, a value the test gave keploy, or a read of the clock, and this one carries a value from pg-0's payload, which a replay does not compare"
+	const want = "header.x-amz-target changed, and it says which call this is (an operation header): keploy learns a change there only as a value the application sent in an earlier call at a place keploy compares, a value the test gave keploy, or a read of the clock, and this one carries a value from pg-0's payload at spec.genericrequests[0].message[0].data, which a replay does not compare"
 	if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, want) {
 		t.Fatalf("served %v miss %+v: want request_changed saying %q", served, miss, want)
 	}

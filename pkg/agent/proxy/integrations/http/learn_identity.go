@@ -2,10 +2,11 @@ package http
 
 import (
 	"mime"
+	"slices"
+	"sort"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/matcher/learn"
-	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
 )
 
@@ -45,9 +46,10 @@ import (
 //     query, an array of them too: a protocol that posts every call to one
 //     URL names the operation and the resource there, where a REST call's
 //     path would.
-//   - A GraphQL document's operations, their types and names
-//     (graphQLOperations), in a field named query: a client that sends no
-//     operationName says which operation it means only there.
+//   - A GraphQL document's operations, their types and names, or an
+//     unnamed one's root fields (graphQLOperations), in a field named
+//     query: a client that sends no operationName says which operation it
+//     means only there.
 //
 // A leaf no class names keeps the learn step's own rules.
 //
@@ -246,7 +248,7 @@ func noiseExplains(hold LearnHold) bool {
 // (no value in it), no longer excuses its change from the recording: the
 // leaf is of class class, naming the operation (learnedNoiseHolds).
 func staleNoiseWhy(shape, leaf, class string) string {
-	return shape + " changed, and it says which call this is (" + class + "): the noise an earlier keploy learned there no longer excuses a change, which only a value the application sent in an earlier call, a value the test gave keploy, or a read of the clock explains. Record the test again; if the value there may really change, declare it in keploy.yml (" + declareHow(leaf) + ")"
+	return shape + " changed, and it says which call this is (" + class + "): the noise an earlier keploy learned there no longer excuses a change, which only a value the application sent in an earlier call at a place keploy compares, a value the test gave keploy, or a read of the clock explains. Record the test again; if the value there may really change, declare it in keploy.yml (" + declareHow(leaf) + ")"
 }
 
 // holdOf is how the learn step may learn drifted leaf l: as the caller of
@@ -295,12 +297,16 @@ func comparedSource(from learn.Place) bool {
 }
 
 // placeName names from, a variable's source place, for a miss: its mock
-// and leaf, or the mock alone for a place in its payload text.
+// and leaf, or, for a place in its payload text, the field of the mock that
+// holds it (learn.Place.Field), the payload alone where it stands across two.
 func placeName(from learn.Place) string {
-	if from.Path == "" {
-		return from.Mock + "'s payload"
+	switch {
+	case from.Path != "":
+		return from.Mock + " at " + from.Path
+	case from.Field != "":
+		return from.Mock + "'s payload at " + from.Field
 	}
-	return from.Mock + " at " + from.Path
+	return from.Mock + "'s payload"
 }
 
 // served is e, the exchange a call just served under p, as the tracker
@@ -310,31 +316,40 @@ func placeName(from learn.Place) string {
 // (noiseMarked). The learn step's two serving paths, a call whose
 // keploy.yml-declared fields drifted and a paired one, keep it alike.
 func (p pairing) served(e learn.Earlier, known learn.Known) learn.Earlier {
-	return noiseMarked(learn.Named(e, p.vars, p.clocks), known, p.noise, p.vars)
+	return noiseMarked(learn.Named(e, p.vars, p.clocks), known, p)
 }
 
-// noiseMarked is e, the exchange a call just served, with each leaf a
-// replay leaves uncompared marked so (learn.Seen.Uncompared), whatever left
-// it so:
-//   - a request leaf the call's learn step learned as noise (noise, by its
-//     exact path), or that the mock's comparison excuses (known: keploy.yml's
-//     noise, the noise learned onto the mock before, an obfuscated value);
-//   - a request leaf an echo of the call's plan binds (vars,
-//     models.MockVariable.Echo), which takes whatever the application sends
-//     there, and each leaf of the answer the echo writes that value into
-//     (its Answer places). The plan is the only place an echo can be: the
-//     learn step never takes a recording that declares variables, which
-//     the matcher's variable pass answers.
+// noiseMarked is e, the exchange a call just served under p, with each leaf
+// a replay leaves uncompared marked so (learn.Seen.Uncompared), whatever
+// left it so:
+//   - a request leaf the call's learn step learned as noise (p.noise, by
+//     its exact path), or that the mock's comparison excuses (known:
+//     keploy.yml's noise, the noise learned onto the mock before, an
+//     obfuscated value);
+//   - each leaf a variable of p's names that takes whatever the
+//     application sends: an echo's (models.MockVariable.Echo), bound here,
+//     and one whose value came from a place a replay does not compare
+//     (p.unchecked), its earlier call's. That is the request leaves it is
+//     bound at or used at, and each leaf of the answer it writes that
+//     value into (its Answer places). The plan is the only place an echo
+//     can be: the learn step never takes a recording that declares
+//     variables, which the matcher's variable pass answers.
 //
-// A later call's value that follows such a leaf explains no change at a
-// leaf naming the operation (explained, comparedSource).
-func noiseMarked(e learn.Earlier, known learn.Known, noise map[string][]string, vars models.MockVariables) learn.Earlier {
-	bound, answered := map[string]bool{}, map[string]bool{}
-	for _, v := range vars {
-		if !v.Echo {
+// Every leaf that holds such a value is marked, whichever of them a later
+// call's value is found at first (learn's placeRank), so a later call's
+// value that follows one explains no change at a leaf naming the operation
+// (explained, comparedSource).
+func noiseMarked(e learn.Earlier, known learn.Known, p pairing) learn.Earlier {
+	asked, answered := map[string]bool{}, map[string]bool{}
+	for name, v := range p.vars {
+		if !v.Echo && !p.unchecked[name] {
 			continue
 		}
-		bound[v.Bind] = true
+		for _, place := range append([]string{v.Bind}, v.Use...) {
+			if place != "" {
+				asked[place] = true
+			}
+		}
 		for _, a := range v.Answer {
 			answered[a] = true
 		}
@@ -342,7 +357,7 @@ func noiseMarked(e learn.Earlier, known learn.Known, noise map[string][]string, 
 	for i, s := range e.Seen {
 		switch s.Side {
 		case learn.Request:
-			if excused, _ := known.Excused(s.Leaf); excused || learnedCovers(noise, s.Leaf.Path) || bound[s.Place] {
+			if excused, _ := known.Excused(s.Leaf); excused || learnedCovers(p.noise, s.Leaf.Path) || asked[s.Place] {
 				e.Seen[i].Uncompared = true
 			}
 		case learn.Response:
@@ -368,13 +383,15 @@ func declareHow(leaf string) string {
 }
 
 // graphQLOperations is the operations GraphQL document doc defines, each
-// its type and its name ("query GetOrder"; "query" for a shorthand, the type
-// alone for an unnamed one), in order and joined by commas; "" and ok
-// false where doc is no GraphQL document keploy reads whole (a search text in a
-// field named query, a document with text after its last definition) or
-// defines no operation. A description string may stand before a
-// definition. Fragments are no operation, and what an operation selects is
-// not read.
+// its type and its name ("query GetOrder"), or, for one with no name (a
+// shorthand is a query), its type and the fields it selects at its root
+// ("query { order }", sorted: an anonymous operation is told apart only by
+// what it asks for), in order and joined by commas; "" and ok false where
+// doc is no GraphQL document keploy reads whole (a search text in a field
+// named query, a brace whose text is no selection set, a document with text
+// after its last definition) or defines no operation. A description string
+// may stand before a definition. Fragments are no operation, and what a
+// named operation selects is not read.
 func graphQLOperations(doc string) (string, bool) {
 	var ops []string
 	i := 0
@@ -384,11 +401,11 @@ func graphQLOperations(doc string) (string, bool) {
 			break
 		}
 		if doc[i] == '{' {
-			end, ok := skipGraphQLBlock(doc, i)
+			roots, end, ok := graphQLSelection(doc, i)
 			if !ok {
 				return "", false
 			}
-			ops, i = append(ops, "query"), end
+			ops, i = append(ops, "query "+roots), end
 			continue
 		}
 		if doc[i] == '"' {
@@ -402,9 +419,9 @@ func graphQLOperations(doc string) (string, bool) {
 		default:
 			return "", false
 		}
-		op := kw
-		if name, k := graphQLName(doc, skipGraphQLIgnored(doc, j)); name != "" {
-			op, j = kw+" "+name, k
+		name, k := graphQLName(doc, skipGraphQLIgnored(doc, j))
+		if name != "" {
+			j = k
 		}
 		// The selection set: the first brace outside the variables'
 		// parentheses, their strings and comments.
@@ -424,7 +441,13 @@ func graphQLOperations(doc string) (string, bool) {
 			}
 			j++
 		}
+		op := kw + " " + name
 		end, ok := skipGraphQLBlock(doc, j)
+		if name == "" {
+			var roots string
+			roots, end, ok = graphQLSelection(doc, j)
+			op = kw + " " + roots
+		}
 		if !ok {
 			return "", false
 		}
@@ -434,6 +457,100 @@ func graphQLOperations(doc string) (string, bool) {
 		i = end
 	}
 	return strings.Join(ops, ","), len(ops) > 0
+}
+
+// graphQLSelection reads the selection set that opens at doc[i]: the names
+// of the fields it selects ("{ order users }", sorted, each once; a
+// fragment's spread as "...Name", an inline fragment's fields as its own),
+// and the index past its closing brace. ok is false where its text is no
+// selection set (a Loki selector `{app="foo"}`, JSON text), so a value of a
+// field named query that only looks like one reads as no operation. An
+// argument list is read as balanced parentheses, its values unread.
+func graphQLSelection(doc string, i int) (string, int, bool) {
+	names, end, ok := readGraphQLSelection(doc, i)
+	if !ok {
+		return "", i, false
+	}
+	sort.Strings(names)
+	names = slices.Compact(names)
+	return "{ " + strings.Join(names, " ") + " }", end, true
+}
+
+// readGraphQLSelection is graphQLSelection's names, as they stand.
+func readGraphQLSelection(doc string, i int) ([]string, int, bool) {
+	if i >= len(doc) || doc[i] != '{' {
+		return nil, i, false
+	}
+	var names []string
+	ok := true
+	i = skipGraphQLIgnored(doc, i+1)
+	for ok && i < len(doc) && doc[i] != '}' {
+		if strings.HasPrefix(doc[i:], "...") {
+			// A fragment's spread, or an inline fragment (on a type, or
+			// on none) with its own selection set, then directives.
+			name, j := graphQLName(doc, skipGraphQLIgnored(doc, i+3))
+			if name != "" && name != "on" {
+				names = append(names, "..."+name)
+				i, ok = skipGraphQLDirectives(doc, j)
+				continue
+			}
+			i = skipGraphQLIgnored(doc, i+3)
+			if name == "on" {
+				var typ string
+				if typ, i = graphQLName(doc, skipGraphQLIgnored(doc, j)); typ == "" {
+					return nil, i, false
+				}
+			}
+			var inner []string
+			if i, ok = skipGraphQLDirectives(doc, i); ok {
+				inner, i, ok = readGraphQLSelection(doc, i)
+				names, i = append(names, inner...), skipGraphQLIgnored(doc, i)
+			}
+			continue
+		}
+		// A field: its alias and a colon, its name, its arguments, its
+		// directives, and the selection set it opens.
+		name, j := graphQLName(doc, i)
+		if k := skipGraphQLIgnored(doc, j); name != "" && k < len(doc) && doc[k] == ':' {
+			name, j = graphQLName(doc, skipGraphQLIgnored(doc, k+1))
+		}
+		if name == "" {
+			return nil, j, false
+		}
+		names = append(names, name)
+		i = skipGraphQLIgnored(doc, j)
+		if i < len(doc) && doc[i] == '(' {
+			i, ok = skipGraphQLPair(doc, i, '(', ')')
+		}
+		if ok {
+			i, ok = skipGraphQLDirectives(doc, i)
+		}
+		if ok && i < len(doc) && doc[i] == '{' {
+			_, i, ok = readGraphQLSelection(doc, i)
+			i = skipGraphQLIgnored(doc, i)
+		}
+	}
+	if !ok || i >= len(doc) || len(names) == 0 {
+		return nil, i, false
+	}
+	return names, i + 1, true
+}
+
+// skipGraphQLDirectives is the index of the first token past the
+// directives (@name, its arguments) at or after doc[i]; ok is false where
+// one names nothing or its arguments do not close.
+func skipGraphQLDirectives(doc string, i int) (int, bool) {
+	ok := true
+	for i = skipGraphQLIgnored(doc, i); ok && i < len(doc) && doc[i] == '@'; i = skipGraphQLIgnored(doc, i) {
+		var name string
+		if name, i = graphQLName(doc, skipGraphQLIgnored(doc, i+1)); name == "" {
+			return i, false
+		}
+		if i = skipGraphQLIgnored(doc, i); i < len(doc) && doc[i] == '(' {
+			i, ok = skipGraphQLPair(doc, i, '(', ')')
+		}
+	}
+	return i, ok
 }
 
 // skipGraphQLIgnored is the index of doc's first token at or after i,
@@ -493,19 +610,26 @@ func skipGraphQLString(doc string, i int) int {
 	return len(doc)
 }
 
-// skipGraphQLBlock is the index past the braces that open at doc[i], their
-// strings and comments read as such; ok is false where doc[i] is no brace
-// or they do not close.
+// skipGraphQLBlock is the index past the braces that open at doc[i]
+// (skipGraphQLPair).
 func skipGraphQLBlock(doc string, i int) (int, bool) {
-	if i >= len(doc) || doc[i] != '{' {
+	return skipGraphQLPair(doc, i, '{', '}')
+}
+
+// skipGraphQLPair is the index past the pair, open and shut (braces, or an
+// argument list's parentheses), that opens at doc[i], the pairs inside it,
+// its strings and its comments read as such; ok is false where doc[i] is no
+// open or the pair does not close.
+func skipGraphQLPair(doc string, i int, open, shut byte) (int, bool) {
+	if i >= len(doc) || doc[i] != open {
 		return i, false
 	}
 	depth := 0
 	for i < len(doc) {
 		switch doc[i] {
-		case '{':
+		case open:
 			depth++
-		case '}':
+		case shut:
 			depth--
 			if depth == 0 {
 				return i + 1, true

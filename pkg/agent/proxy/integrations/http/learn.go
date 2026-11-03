@@ -350,7 +350,7 @@ func (n learnNoise) heldLearned(learned []learn.Learned, given []variables.Bindi
 			if l.Kind == learn.KindVariable {
 				// Not explained (explained): its value came from a place a
 				// replay does not compare (comparedSource).
-				none = "this one carries a value from " + placeName(l.From) + ", which a replay does not compare, so the two may name any operation"
+				none = "this one carries a value from " + placeName(l.From) + ", which a replay does not compare, so the two may name any call"
 			}
 			return why + ": keploy learns a change there only as " + what + ", and " + none + ". If the application now makes another call, record it again; if the value there may really change, declare it in keploy.yml (" + declareHow(l.Recorded.Noise) + ")"
 		}
@@ -2280,6 +2280,10 @@ type pairing struct {
 	vars   models.MockVariables
 	binds  map[string]models.MockVariables
 	values map[string]variables.Binding
+	// unchecked names each of vars whose value came from a place a replay
+	// does not compare (comparedSource): a value it carries on is checked
+	// against nothing but that place, as there (noiseMarked).
+	unchecked map[string]bool
 }
 
 // learnPlan turns what Classify learned about mock m (paired as rec; own: one
@@ -2302,7 +2306,7 @@ type pairing struct {
 //     earlier than any call it makes. Its name is the key's alone in the
 //     test: no other variable takes it. A given's says why (learn.GivenWhy).
 func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (pairing, string) {
-	p := pairing{noise: map[string][]string{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}}
+	p := pairing{noise: map[string][]string{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}, unchecked: map[string]bool{}}
 	jsonReq := rec.Fixed["body"] == "json"
 	reserved := make(map[string]bool, len(given))
 	for _, g := range given {
@@ -2422,6 +2426,9 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			v.Recorded, v.Use = r.Value, appendNew(v.Use, use)
 			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
 			p.vars[name] = v
+			if !comparedSource(from) {
+				p.unchecked[name] = true
+			}
 			b := p.binds[from.Mock]
 			if b == nil {
 				b = models.MockVariables{}
