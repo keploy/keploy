@@ -1073,11 +1073,13 @@ func isText(b []byte) bool {
 // quoted-printable-escaped name), or in the text an encoded run of it
 // decodes to (b64Text: the base64 run "3505371Z" of a .NET stamp's fraction
 // decodes to such text). A value all in ASCII is never said to hold such
-// text itself.
+// text itself. Each names that text as scriptWhy does ("text of a script
+// keploy does not split into words"), so the three read as one refusal and
+// say where the text stands.
 const (
 	scriptWhy        = "it changed in text of a script keploy does not split into words"
-	escapedScriptWhy = "it changed in the text its escapes write, of a script keploy does not split into words"
-	encodedScriptWhy = "it changed in the text an encoded run of it decodes to, of a script keploy does not split into words"
+	escapedScriptWhy = "it changed in the text its escapes write, which is text of a script keploy does not split into words"
+	encodedScriptWhy = "it changed in the text an encoded run of it decodes to, which is text of a script keploy does not split into words"
 )
 
 // unparsed says what of a drifted value, read in form (recorded, live),
