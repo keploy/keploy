@@ -88,6 +88,30 @@ func TestRedactedPlacesTogether(t *testing.T) {
 	}
 }
 
+// The places of a pool are every place any recording of it redacted; a
+// log line with no places to read redacts the live statement whole.
+func TestRedactedPlacesOfAPool(t *testing.T) {
+	byKey := queryRecorded("by-key", "SELECT name FROM users WHERE api_key = 'xq7Lm2Pw9Rt4Zk' AND org = 'acme'", redactedNoise)
+	plain := queryRecorded("plain", "SELECT name FROM users WHERE api_key = 'k1' AND org = 'acme'", nil)
+	live := "SELECT name FROM users WHERE api_key = 'live' AND org = 'globex'"
+	want := "select `name` from users where api_key = '(redacted)' and org = 'globex'"
+	for _, pool := range [][]*models.Mock{{byKey, plain}, {plain, byKey}} {
+		if got := poolPlaces(pool).liveStatement(live); got != want {
+			t.Errorf("pool %s, %s: %q, want %q", pool[0].Name, pool[1].Name, got, want)
+		}
+	}
+	if got := poolPlaces([]*models.Mock{plain}).liveStatement(live); got != live {
+		t.Errorf("a pool that redacted nothing: %q, want the live statement", got)
+	}
+	if got := logPlaces(nil).live(live); got != valueRedacted {
+		t.Errorf("no places read: %q, want the statement whole redacted", got)
+	}
+	read := 0
+	if got := logPlaces(func() redactedPlaces { read++; return poolPlaces([]*models.Mock{byKey}) }).live(live); got != want || read != 1 {
+		t.Errorf("places read: %q (read %d times), want %q", got, read, want)
+	}
+}
+
 // The live statement and bound values as a report shows them.
 func TestRedactedPlacesOfTheLiveCommand(t *testing.T) {
 	const recorded = "SELECT /* app=web */ name FROM users WHERE org = 'acme' AND k = '" + redactedPlaceholder + "'"
