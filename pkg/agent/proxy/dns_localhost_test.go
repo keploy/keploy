@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"sync"
@@ -409,6 +410,66 @@ func TestARealNameNoUpstreamAnswersIsAWarnOncePerQuestion(t *testing.T) {
 	}
 	wantUnanswered(t, logs, msg, "auth.test.", "A", 1, 1)
 	noErrorLines(t, logs)
+}
+
+// A mock.real name keploy asked no upstream for is keploy's failure, not an
+// upstream's: for a type keploy does not forward (HTTPS here), or with no
+// upstream to ask, the app is answered SERVFAIL without the live answer it was
+// promised, so every such lookup stays an ERROR and no upstream is asked.
+func TestARealNameKeployAsksNoUpstreamForIsStillAnError(t *testing.T) {
+	const msg = "keploy could not resolve a mock.real name with the upstream resolver; the app is answered SERVFAIL"
+	up := newAskedUpstream(t)
+	for _, tc := range []struct {
+		name  string
+		p     *Proxy
+		qtype uint16
+	}{
+		{"a type keploy does not forward", newProxyWithUpstream(t, up.addr, time.Second), dns.TypeHTTPS},
+		{"no upstream to ask", &Proxy{}, dns.TypeA},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zapcore.DebugLevel)
+			tc.p.logger = zap.New(core)
+			tc.p.unansweredForwardLogged = newNodataRelayLogCache()
+			q := dns.Question{Name: "auth.test.", Qtype: tc.qtype, Qclass: dns.ClassINET}
+			for i := 0; i < 2; i++ {
+				if resp := tc.p.realDNS(q); resp.Rcode != dns.RcodeServerFailure {
+					t.Fatalf("answered %v, want SERVFAIL", resp.Msg)
+				}
+			}
+			all, errs := logs.FilterMessage(msg).Len(), logs.FilterMessage(msg).FilterLevelExact(zapcore.ErrorLevel).Len()
+			if all != 2 || errs != 2 {
+				t.Errorf("logged the failure %d times, %d at ERROR; want 2, both at ERROR", all, errs)
+			}
+		})
+	}
+	if got := up.asked(); len(got) != 0 {
+		t.Errorf("asked the upstream %v, want nothing", got)
+	}
+}
+
+// The forwarder's error says whether it asked: errNoUpstreamAnswered only
+// when it asked the upstream and none answered, not when it asked none.
+func TestForwardDNSMarksOnlyAnUnansweredAsk(t *testing.T) {
+	q := dns.Question{Name: "auth.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	refused := newProxyWithUpstream(t, testnet.RefusedAddr(t, "udp"), 200*time.Millisecond)
+	if _, err := refused.forwardDNSUpstream(q); !errors.Is(err, errNoUpstreamAnswered) {
+		t.Errorf("a refused upstream: err %v, want errNoUpstreamAnswered", err)
+	}
+	up := newAskedUpstream(t)
+	httpsQ := q
+	httpsQ.Qtype = dns.TypeHTTPS
+	for name, ask := range map[string]func() error{
+		"a type keploy does not forward": func() error {
+			_, err := newProxyWithUpstream(t, up.addr, time.Second).forwardDNSUpstream(httpsQ)
+			return err
+		},
+		"no upstream to ask": func() error { _, err := (&Proxy{}).forwardDNSUpstream(q); return err },
+	} {
+		if err := ask(); err == nil || errors.Is(err, errNoUpstreamAnswered) {
+			t.Errorf("%s: err %v, want an error that is not errNoUpstreamAnswered", name, err)
+		}
+	}
 }
 
 // The agent's proxy dedupes the WARN from its first query: New builds the
