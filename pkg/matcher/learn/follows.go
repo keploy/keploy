@@ -72,7 +72,21 @@ import (
 // word of the value F saw that F gave the application at fields of an
 // earlier payload it served changed, where the recording gave another value
 // that the recorded value took none of the words of (excusedLive), is let
-// go on the same terms. Everything else the classifier
+// go on the same terms.
+//
+// A payload handed as a place of the call's own test that F gave the
+// application only in an older test than the call's (Raw.InAnOlderTest: an
+// adapter reads the previous test's serves so) is read on the terms of a
+// recording of another test too (olderTook): a word there is let go only
+// where no word that changed of the value lacking it stands in a place the
+// rule reads. A consumer that fell behind makes a call of an older test in
+// a later test's window: F gives it the older test's answer (a token) and
+// then the window's recording, as the recording did, and it sends the older
+// token, while the recording's call sent the window's. Each value is a copy
+// of a place both runs gave, the two places in the same order, so neither
+// shows the other is no copy, and the call is refused: a value an older
+// serve gave the application is never read as one it made fresh. Within
+// the call's own test the order alone decides, as above. Everything else the classifier
 // refuses (an offset, an instant, a glued word of an undeclared body, a word
 // of a recording made after the call, an echo in the answer) stays refused:
 // the rule reads the word rule's plain matches alone.
@@ -410,9 +424,10 @@ const (
 // there (followed: of fFollowed, why the value follows it; of fElsewhere,
 // where); untimed, of a place the recording gave, says why keploy cannot
 // tell when it did ("" where it can); took, where the value that lacks t
-// holds a word of a place the word rule reads, says where (tookElsewhere: ""
-// where it holds none, or the rule reads no such evidence there).
-func (f *follows) excused(t string, recGave bool, fv fView, followed, untimed, why, stands, took string) bool {
+// holds a word of a place the word rule reads, says where (tookElsewhere,
+// olderTook: "" where it holds none; nil where the rule reads no such
+// evidence there), read only where nothing else refuses the word.
+func (f *follows) excused(t string, recGave bool, fv fView, followed, untimed, why, stands string, took func() string) bool {
 	if f == nil {
 		return false
 	}
@@ -429,8 +444,8 @@ func (f *follows) excused(t string, recGave bool, fv fView, followed, untimed, w
 		f.refused = "record's full round gave the application that word at " + followed + ", where the recording did not, so it cannot show the value does not follow it"
 	case f.dc.holdsWord(f.rec, t) && f.dc.holdsWord(f.live, t):
 		f.refused = "the recorded value and the value record's full round saw both hold that word, and both gave it there, so neither shows the value does not follow it"
-	case took != "":
-		f.refused = took + ", so each value may be a copy of a word its run picked from what both runs gave (one of two answers, or two places of one, by an order neither run shows), and the recording cannot show the value does not follow that word"
+	case took != nil && took() != "":
+		f.refused = took() + ", so each value may be a copy of a word its run picked from what both runs gave (one of two answers, or two places of one, by an order neither run shows), and the recording cannot show the value does not follow that word"
 	default:
 		if f.first == "" {
 			f.first = why
@@ -516,6 +531,23 @@ func (f *follows) tookElsewhere(v *valueDrift, t string) string {
 	})
 	f.tookRead[side] = true
 	return f.took[side]
+}
+
+// olderTook is tookElsewhere of word t of v, found in mock, a payload F gave
+// the application only in an older test than the call's
+// (Raw.InAnOlderTest), saying so: "" where no word that changed of the value
+// lacking t stands in a place the word rule reads. Such a payload is read
+// as a recording of another test is (excusedGiven): a value F saw that
+// holds an older test's word, while the recorded value holds a word of a
+// place both runs gave, is a late call's (an application that fell behind
+// still works on what the older test gave it), not a value made beside the
+// word.
+func (f *follows) olderTook(v *valueDrift, t, mock string) string {
+	took := f.tookElsewhere(v, t)
+	if took == "" {
+		return ""
+	}
+	return took + "; record's full round gave the application " + mock + " only in an older test than the call's: the call may be a late call of that test, by an application that fell behind"
 }
 
 // liveOf is what F gave the application at x, as tookElsewhere reads the
@@ -669,7 +701,7 @@ func (f *follows) excusedSeen(e Earlier, ed, v *valueDrift, i int, t string, at 
 			fv = fFollowed
 		}
 	}
-	if !f.excused(t, before && ed.recTok[i][t], fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+e.Mock+" at "+path, "") {
+	if !f.excused(t, before && ed.recTok[i][t], fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+e.Mock+" at "+path, nil) {
 		return false
 	}
 	f.source(e.Mock)
@@ -700,7 +732,11 @@ func (f *follows) excusedRaw(x Raw, v *valueDrift, i int, t string, at time.Time
 	case x.Live():
 		fv, followed = f.dc.liveAt(x, f.dc.searched(x, false)[0], false, v, func(own string) bool { return f.dc.rawTokens(own)[i][t] })
 	}
-	if !f.excused(t, before && held, fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+place, "") {
+	var took func() string
+	if x.InAnOlderTest() {
+		took = func() string { return f.olderTook(v, t, x.mock) }
+	}
+	if !f.excused(t, before && held, fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+place, took) {
 		return false
 	}
 	f.source(x.mock)
@@ -758,6 +794,9 @@ func (f *follows) excusedLive(x Raw, v *valueDrift, i int, t string, at time.Tim
 		return false
 	case f.dc.holdsWord(f.rec, t):
 		f.refused = "the recorded value holds that word too, so it cannot show the value does not follow it"
+		return false
+	case x.InAnOlderTest() && f.olderTook(v, t, x.mock) != "":
+		f.refused = f.olderTook(v, t, x.mock) + ", so each value may be a copy of a word its run picked from what both runs gave, and the recording cannot show the value does not follow that word"
 		return false
 	}
 	if f.first == "" {
@@ -915,12 +954,12 @@ func (f *follows) excusedGiven(g givenWords, v *valueDrift, i int, t string, at 
 		gat = time.Time{}
 	}
 	before, untimed := recordedGave(gat, g.answered, at, g.mock)
-	fv, took := fNone, ""
+	fv := fNone
 	if g.sameHolds(i, t) {
-		fv, took = fSame, f.tookElsewhere(v, t)
+		fv = fSame
 	}
 	stands := v.wordOf(t, v.recTok[i][t]) + " stands in " + g.mock
-	if !f.excused(t, before, fv, "", untimed, why, stands, took) {
+	if !f.excused(t, before, fv, "", untimed, why, stands, func() string { return f.tookElsewhere(v, t) }) {
 		return false
 	}
 	if f.chance == "" {
