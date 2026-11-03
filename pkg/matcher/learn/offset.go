@@ -771,7 +771,7 @@ type givenWords struct {
 
 // wordsOf is x's givenWords, every word a copy.
 func (dc *DriftCache) wordsOf(x Raw) givenWords {
-	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime, answered: x.answered, conn: strings.Clone(x.conn), pos: x.pos, first: x.first, last: x.last}
+	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime, answered: x.answered, conn: strings.Clone(x.conn), pos: x.pos, test: x.test, prev: x.prev, first: x.first, last: x.last}
 	lists, plain := dc.answerListsOf(x)
 	g.answerLists = lists
 	// Served unchanged, every word is one both gave: the same lists.

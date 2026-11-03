@@ -72,7 +72,7 @@ func TestALateCallNamesTheOlderTestsServeNotTheWindowsRecording(t *testing.T) {
 		{"the window's recording not served yet", lateMsg("mock-60", 200*time.Millisecond, lateRecID),
 			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, asRecorded)}, "never served before this call", []string{late, unnamed}, ""},
 		{"two older tests' serves gave it", lateMsg("mock-60", 200*time.Millisecond, lateRecID).ServedAs(9).ServedAsRecorded(),
-			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, asRecorded), lateSet("mock-33", 3, lateLiveID, asRecorded)}, "cannot tell which of them it carries", []string{search}, "appears in mock-22"},
+			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, asRecorded), lateSet("mock-33", 3, lateLiveID, asRecorded)}, "so keploy cannot tell which of them it carries; the value it was recorded with stands whole in mock-60 at spec.postgresV3.query.response.rows[0][0], a recording of the call's own test", []string{search}, "appears in mock-22"},
 		{"F gave it at the window's recording", lateMsg("mock-60", 200*time.Millisecond, lateRecID).ServedAs(9).ServedLive(lateMsg("mock-60", 200*time.Millisecond, lateLiveID)),
 			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, asRecorded)}, search, []string{late}, ""},
 		{"no adapter said what F gave at the window's recording", lateMsg("mock-60", 200*time.Millisecond, lateRecID).ServedAs(9),
@@ -369,10 +369,11 @@ func TestALateCallsReasonNamesNoServeByAWordOfItsDateStamp(t *testing.T) {
 }
 
 // A late call is named only by a value no answer holds by chance (lateID):
-// an id. A count, a flag, a status or a code an older test's serve holds
-// shows nothing of where the call's value came from, so where F gave the
-// window's recording as recorded the reason says keploy cannot name the
-// source, never that the call is late; an id the older serve gave whole
+// an id. A count, a flag, a status, a code, or a short name with a number
+// (a region, a worker, an instance type, a locale) an older test's serve
+// holds shows nothing of where the call's value came from, so where F gave
+// the window's recording as recorded the reason says keploy cannot name
+// the source, never that the call is late; an id the older serve gave whole
 // names it.
 func TestALateCallIsNamedOnlyByAnID(t *testing.T) {
 	const path = "body.n"
@@ -385,7 +386,14 @@ func TestALateCallIsNamedOnlyByAnID(t *testing.T) {
 		{"active", "pending", false},
 		{"200", "201", false},
 		{"20261103", "20261104", false},
-		{"ord-7K29Q3AB", "ord-7K29Q4AB", true},
+		{"ord-7K29Q3AB", "ord-7K29Q4AB", false},
+		{"us-west-2", "us-east-1", false},
+		{"worker-11", "worker-12", false},
+		{"t3-medium", "t3-xlarge", false},
+		{"sha256", "sha512", false},
+		{"en_US-v2", "en_GB-v2", false},
+		{"evt-8Q2KX7MZ4PRDH5TB", "evt-3N9WB5TJ6HCAQ8MV", true},
+		{"01HZX3K7Q9V2M4N8P6R5T0W1Y2", "01HZX3K8B4C6D2E7F9G1H3J5K7", true},
 		{lateRecID, lateLiveID, true},
 	} {
 		rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: c.rec}}}
@@ -406,7 +414,31 @@ func TestALateCallIsNamedOnlyByAnID(t *testing.T) {
 			t.Errorf("%q to %q: why %q; want the late call named %v", c.rec, c.live, ln.Why, c.late)
 		}
 	}
-	for s, want := range map[string]bool{"a1b2c3d4": true, "A1B2C3D4": true, "a1b2c3d": false, "abcdefgh": false, "12345678": false, "ab-12_cd": true, "ab 12 cdef": false, "ab12cd.e": false} {
+	for s, want := range map[string]bool{
+		lateLiveID:                              true,
+		strings.ToUpper(lateLiveID):             true,
+		"00000000-0000-0000-0000-000000000000":  false,
+		"ffffffff-ffff-ffff-ffff-ffffffffffff":  false,
+		"7f7e49f4-2b6c-4e1d-8f3a-5c9b0d7e6a1":   false,
+		"7f7e49f4-2b6c-4e1d-8f3a-5c9b0d7e6a120": false,
+		"7f7e49f42-b6c-4e1d-8f3a-5c9b0d7e6a12":  false,
+		"7f7e49f4-2b6c-4e1d-8f3a-5c9b0d7e6g12":  false,
+		"7f7e49f4_2b6c_4e1d_8f3a_5c9b0d7e6a12":  false,
+		"abcdefgh_12345678":                     false,
+		"abcdefgh-12345678":                     false,
+		"7f7e49f42b6c4e1d8f3a5c9b0d7e6a12":      true,
+		"7K29Q4ABX3M8P5RT":                      true,
+		"7K29Q4ABX3M8P5R":                       false,
+		"evt-7K29Q4ABX3M8P5RT":                  true,
+		"evt_7K29Q4ABX3M8P5RT-v2":               true,
+		"evt-7K29Q4ABX3M8P5R-v2":                false,
+		"abcdefghijklmnop":                      false,
+		"1234567890123456":                      false,
+		"abcdefghijklmnop-1234567890123456":     false,
+		"7K29Q4AB.X3M8P5RT":                     false,
+		"7K29Q4ABX3M8P5RT\u00e9":                false,
+		"7K29Q4ABX3M8 P5RTQ":                    false,
+	} {
 		if got := lateID(s); got != want {
 			t.Errorf("lateID(%q) = %v, want %v", s, got, want)
 		}
@@ -554,6 +586,146 @@ func TestALateCallNamesThePreviousTestsServeHandedToTheCall(t *testing.T) {
 			if strings.Contains(ln.Why, n) {
 				t.Errorf("%s: why %q says %q", at, ln.Why, n)
 			}
+		}
+	}
+}
+
+// A late call is named only where it is the one explanation of the value
+// the call carries: nothing else F gave the application before the call
+// may hold it. Where a serve of the call's own test (as recorded, or by
+// F's view of it), a start-up serve, a recording F gave in more than one
+// test, a serve whose view keploy cannot tell, a leaf of an exchange F
+// served leaf by leaf, or the test case's own request holds it too, the
+// reason says keploy cannot name where the value came from, never that
+// the call is late or that mock-22 gave it. A recording F never served, or
+// served only after the call, gave the application nothing, and one F gave
+// with another value leaves mock-22 the one explanation. The verdict stays
+// a refusal either way.
+func TestALateCallIsNamedOnlyWhereNothingElseGaveTheValue(t *testing.T) {
+	const path = "body.Key.Id.S"
+	asRecorded := func(x Raw) Raw { return x.ServedAsRecorded() }
+	// own is a recording of the call's own test holding id, served before
+	// the call (by serve, as recorded where nil).
+	own := func(id string, serve func(Raw) Raw) Raw {
+		x := lateMsg("mock-58", 300*time.Millisecond, id).ServedAs(8)
+		if serve == nil {
+			return x.ServedAsRecorded()
+		}
+		return serve(x)
+	}
+	view := func(id string) Raw { return lateMsg("mock-58", 300*time.Millisecond, id) }
+	older := lateSet("mock-22", 2, lateLiveID, asRecorded)
+	after := own(lateLiveID, nil)
+	after.servedAfter = true
+	// exchange is one F served leaf by leaf in the call's own test, whose
+	// answer's leaf F gave as gave.
+	exchange := func(gave string) Earlier {
+		return Earlier{Mock: "mock-57", At: eRecAt.Add(-400 * time.Millisecond), Own: true, Payload: lateMsg("mock-57", 400*time.Millisecond, lateOtherID), Seen: []Seen{
+			{Side: Response, Leaf: Leaf{Path: "body.ref", Type: String, Value: lateOtherID}, Live: gave},
+		}}
+	}
+	request := Earlier{Mock: "test-4", Given: true, Seen: []Seen{
+		{Side: Request, Leaf: Leaf{Path: "body.ref", Type: String, Value: lateOtherID}, Live: "ref " + lateLiveID},
+	}}
+	for _, c := range []struct {
+		name    string
+		raw     []Raw
+		earlier []Earlier
+		set     []GivenPlaces
+		named   bool
+	}{
+		{"a serve of the call's own test gave it as recorded", []Raw{own(lateLiveID, nil)}, nil, []GivenPlaces{older}, false},
+		{"F's view of a serve of the call's own test gave it", []Raw{own(lateOtherID, func(x Raw) Raw { return x.ServedLive(view(lateLiveID)) })}, nil, []GivenPlaces{older}, false},
+		{"a start-up serve gave it", []Raw{lateMsg("mock-5", 30*time.Second, lateLiveID).ServedAs(2).ServedAsRecorded().ServedBeforeTheTest()}, nil, []GivenPlaces{older}, false},
+		{"a recording F gave in two older tests gave it", nil, nil, []GivenPlaces{older, lateSet("mock-33", 0, lateLiveID, asRecorded)}, false},
+		{"no adapter said what a serve of the call's own test gave", []Raw{own(lateOtherID, func(x Raw) Raw { return x })}, nil, []GivenPlaces{older}, false},
+		{"no adapter said what another older test's serve gave", nil, nil, []GivenPlaces{older, lateSet("mock-33", 3, lateOtherID, func(x Raw) Raw { return x })}, false},
+		{"one of the differing views of another older test's serve gave it", nil, nil, []GivenPlaces{older, lateSet("mock-33", 3, lateOtherID, func(x Raw) Raw {
+			return x.ServedChanged(lateMsg("mock-33", 40*time.Second, lateLiveID), lateMsg("mock-33", 40*time.Second, lateRecID))
+		})}, false},
+		{"an exchange F served leaf by leaf gave it", nil, []Earlier{exchange(lateLiveID)}, []GivenPlaces{older}, false},
+		{"the test case's own request holds it", nil, []Earlier{request}, []GivenPlaces{older}, false},
+		{"a serve of the call's own test gave another id", []Raw{own(lateOtherID, nil)}, nil, []GivenPlaces{older}, true},
+		{"a recording of the call's own test F never served holds it", []Raw{lateMsg("mock-58", 300*time.Millisecond, lateLiveID)}, nil, []GivenPlaces{older}, true},
+		{"a recording F served only after the call holds it", []Raw{after}, nil, []GivenPlaces{older}, true},
+		{"F's view of a serve of the call's own test holding it gave another id", []Raw{own(lateLiveID, func(x Raw) Raw { return x.ServedLive(view(lateOtherID)) })}, nil, []GivenPlaces{older}, true},
+		{"the differing views of a serve of the call's own test holding it gave other ids", []Raw{own(lateLiveID, func(x Raw) Raw { return x.ServedChanged(view(lateOtherID), view(lateRecID)) })}, nil, []GivenPlaces{older}, true},
+		{"an exchange F served leaf by leaf gave another id", nil, []Earlier{exchange(lateOtherID)}, []GivenPlaces{older}, true},
+	} {
+		at := c.name
+		set := c.set
+		rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: lateRecID}}}
+		live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: lateLiveID}}}
+		window := lateMsg("mock-60", 200*time.Millisecond, lateRecID).ServedAs(9).ServedAsRecorded()
+		got := ClassifyGiven(clockedDrifts(), []string{path}, live, rec, eRecAt, c.earlier, append(append(eStartup(), c.raw...), window), nil, nil, func() ([]GivenPlaces, error) { return set, nil })
+		if len(got) != 1 {
+			t.Fatalf("%s: %d learned, want 1", at, len(got))
+		}
+		lateRefused(t, at, got[0], c.named)
+	}
+}
+
+// lateRefused checks ln, the leaf of a late call's row: refused, as before;
+// where named, the late call of mock-22's test, a leaf of no place; else
+// that keploy cannot name where the value came from, a variable of the
+// window's recording (mock-60) set aside, naming neither the late call nor
+// mock-22. Neither says the value flowed from mock-60.
+func lateRefused(t *testing.T, at string, ln Learned, named bool) {
+	t.Helper()
+	const (
+		late    = "late call of mock-22's test"
+		unnamed = "keploy cannot name where the value the call carries now came from"
+	)
+	switch {
+	case named && (ln.Kind != KindUnaccounted || ln.From != (Place{}) || !strings.Contains(ln.Why, late)):
+		t.Errorf("%s: %s from %+v, why %q; want unaccounted, from no place, the late call named", at, ln.Kind, ln.From, ln.Why)
+	case !named && (ln.Kind != KindVariable || ln.From.Mock != "mock-60" || ln.From.Side != "" || !ln.From.SetAside || !strings.Contains(ln.Why, unnamed)):
+		t.Errorf("%s: %s from %+v, why %q; want a variable of mock-60, set aside, the source unnamed", at, ln.Kind, ln.From, ln.Why)
+	case !named && (strings.Contains(ln.Why, late) || strings.Contains(ln.Why, "mock-22")):
+		t.Errorf("%s: why %q names the late call or mock-22", at, ln.Why)
+	}
+	if strings.Contains(ln.Why, "flowed from mock-60") {
+		t.Errorf("%s: why %q says the value flowed from mock-60", at, ln.Why)
+	}
+}
+
+// A late call whose id an older test's serve holds only as a word of
+// letters and digits (reading 0: glued to a byte no id carries) is named as
+// one whose serve holds it as an id is.
+func TestALateCallIsNamedByAWordOfItsFirstReading(t *testing.T) {
+	const path = "body.Key.Id.S"
+	const recID, liveID = "01HZX3K7Q9V2M4N8P6R5T0W1Y2", "01HZX3K8B4C6D2E7F9G1H3J5K7"
+	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recID}}}
+	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: liveID}}}
+	window := lateMsg("mock-60", 200*time.Millisecond, recID).ServedAs(9).ServedAsRecorded()
+	set := []GivenPlaces{lateSet("mock-22", 2, liveID+"\u00e9", func(x Raw) Raw { return x.ServedAsRecorded() })}
+	got := ClassifyGiven(clockedDrifts(), []string{path}, live, rec, eRecAt, nil, append(eStartup(), window), nil, nil, func() ([]GivenPlaces, error) { return set, nil })
+	if len(got) != 1 {
+		t.Fatalf("%d learned, want 1", len(got))
+	}
+	lateRefused(t, "an id glued to a non-ASCII byte", got[0], true)
+}
+
+// A value that is no id (lateID) never names a late call, so keploy reads
+// no recording F gave the application earlier in the set for its reason:
+// the call's leaf asks for none (GivenEarlier is not called).
+func TestALateCallsReasonReadsNoSetForAValueThatIsNoID(t *testing.T) {
+	const path = "body.n"
+	for _, c := range [][2]string{{"3", "4"}, {"worker-11", "worker-12"}} {
+		rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: c[0]}}}
+		live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: c[1]}}}
+		window := lateMsg("mock-60", 200*time.Millisecond, c[0]).ServedAs(9).ServedAsRecorded()
+		set := []GivenPlaces{lateSet("mock-22", 2, c[1], func(x Raw) Raw { return x.ServedAsRecorded() })}
+		asked := 0
+		got := ClassifyGiven(clockedDrifts(), []string{path}, live, rec, eRecAt, nil, append(eStartup(), window), nil, nil, func() ([]GivenPlaces, error) {
+			asked++
+			return set, nil
+		})
+		if len(got) != 1 || got[0].Kind != KindVariable || !got[0].From.SetAside {
+			t.Fatalf("%q to %q: %+v; want one variable of mock-60, set aside", c[0], c[1], got)
+		}
+		if asked != 0 {
+			t.Errorf("%q to %q: the set's recordings read %d times; want none", c[0], c[1], asked)
 		}
 	}
 }
