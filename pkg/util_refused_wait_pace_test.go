@@ -298,6 +298,69 @@ func TestNoAcceptLineIsSaidWhileTheAppAnswersTheRequestItAccepted(t *testing.T) 
 	}
 }
 
+// With probing, a refused request stops waiting for the application to
+// accept a connection once its address accepted the probe: no "still
+// waiting for the application to accept a connection" line is said while
+// the request's own connection is still being made (a slow dial).
+func TestNoAcceptLineIsSaidOnceTheProbeWasAccepted(t *testing.T) {
+	every := stillWaitingEvery
+	stillWaitingEvery = 50 * time.Millisecond
+	t.Cleanup(func() { stillWaitingEvery = every })
+	addr := refusingAddr(t)
+	core, logs := observer.New(zapcore.InfoLevel)
+	ctx, cancel := context.WithCancel(EndsWithApp(context.Background()))
+	defer cancel()
+	var dials atomic.Int32
+	var slowDialAt atomic.Int64
+	var d net.Dialer
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, network, a string) (net.Conn, error) {
+		if dials.Add(1) > 1 {
+			// The re-sent request's own dial, after the probe was
+			// accepted: slower than the line's interval.
+			slowDialAt.CompareAndSwap(0, time.Now().UnixNano())
+			time.Sleep(20 * stillWaitingEvery)
+		}
+		return d.DialContext(ctx, network, a)
+	}}}
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+addr+"/a", nil)
+	done := make(chan sendResult, 1)
+	go func() {
+		resp, err := doRequestWithConnRefusedRetry(ctx, zap.New(core), client, req, nil, 0)
+		done <- sendResult{resp, err}
+	}()
+	for deadline := time.Now().Add(30 * time.Second); logs.FilterMessageSnippet("was refused at "+addr).Len() == 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the request never said it was refused and waits")
+		}
+	}
+	ln := testnet.ListenShared(t, "tcp", addr)
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }), ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("request: %v", r.err)
+		}
+		_ = r.resp.Body.Close()
+	case <-time.After(30 * time.Second):
+		t.Fatal("the request was not answered once its address accepted")
+	}
+	if slowDialAt.Load() == 0 {
+		t.Fatal("the request was never sent again after its address accepted")
+	}
+	slow := time.Unix(0, slowDialAt.Load())
+	wrong := 0
+	for _, e := range logs.FilterMessageSnippet("still waiting for the application to accept a connection on " + addr).All() {
+		if e.Time.After(slow) {
+			wrong++
+		}
+	}
+	if wrong > 0 {
+		t.Errorf("said %d times that keploy still waits for the application to accept a connection on %s after its address accepted the probe", wrong, addr)
+	}
+}
+
 // A request refused again after its address accepted (a listener that
 // comes and goes) waits again for its address, and says again that it still
 // waits: the line is held only while the request does not wait.

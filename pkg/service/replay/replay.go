@@ -1314,7 +1314,12 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			switch testSetStatus {
 			case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp:
 				testSetResult = false
-				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
+				// The exit of the application kept across the run's sets
+				// (--keep-app-alive, or the stack docker compose keeps) ended
+				// the run's context: no set can run after it, under compose
+				// too, whose halted set the run otherwise goes on past on a
+				// stack of its own.
+				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType) || keptAppExit(ctx) != (models.AppError{})
 				if abortTestRun {
 					stopReason = haltedRunReason(testSet, testSetStatus, r.setAppExit)
 				}

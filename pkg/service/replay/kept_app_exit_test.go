@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
@@ -130,21 +132,38 @@ func TestCancelledRunReasonNamesWhatEndedTheRun(t *testing.T) {
 // An application that exits part-way through a set (on the set's second
 // test) fails the set as its exit does, never as a stop by its user, whether
 // keploy runs it for the set or keeps it across the run's sets
-// (--keep-app-alive), and the run stops naming the exit, its code and the
-// set: never "replay completed successfully". The exit code is 1.
+// (--keep-app-alive), or docker compose keeps its stack across them, and the
+// run stops naming the exit, its code and the set: never "replay completed
+// successfully". The exit code is 1.
 func TestAnAppThatExitsMidSetFailsTheSetAndTheRunNamesItsExit(t *testing.T) {
 	for _, c := range []struct {
 		name       string
 		kept       bool
+		compose    bool
+		exit       models.AppErrorType
 		wantStatus models.TestSetStatus
 	}{
 		{name: "run per set", wantStatus: models.TestSetStatusAppHalted},
 		{name: "kept alive", kept: true, wantStatus: models.TestSetStatusAppHalted},
+		{name: "run per set, its command fails", exit: models.ErrCommandError, wantStatus: models.TestSetStatusFaultUserApp},
+		{name: "a compose stack kept across sets", compose: true, wantStatus: models.TestSetStatusAppHalted},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newPartialRunHarness(t, 3, 0)
 			h.replayer.config.Command = "./app"
 			h.replayer.config.CommandType = string(utils.Native)
+			if c.compose {
+				// Compose keeps its stack across a run's sets when keploy
+				// mocks the dependencies; keploy waits for the agent in it
+				// to answer healthy first.
+				h.replayer.config.Command = "docker compose up"
+				h.replayer.config.CommandType = string(utils.DockerCompose)
+				h.replayer.config.Test.Mocking = true
+				agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+				defer agent.Close()
+				h.replayer.config.Agent.AgentURI = agent.URL
+			}
+			h.instr.stopErr = c.exit
 			h.replayer.config.Test.KeepAppAlive = c.kept
 			h.replayer.config.Test.MaxFlakyChecks = 1
 			ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
@@ -168,7 +187,11 @@ func TestAnAppThatExitsMidSetFailsTheSetAndTheRunNamesItsExit(t *testing.T) {
 				t.Fatalf("%d \"stopping Keploy\" lines, want 1", len(stops))
 			}
 			reason, _ := stops[0].ContextMap()["reason"].(string)
-			for _, want := range []string{"exited", "test-set-0", "exit code 1", string(models.ErrAppStopped)} {
+			exitType := models.ErrAppStopped
+			if c.exit != "" {
+				exitType = c.exit
+			}
+			for _, want := range []string{"exited", "test-set-0", "exit code 1", string(exitType)} {
 				if !strings.Contains(reason, want) {
 					t.Errorf("the run stops with the reason %q, want one that says %q", reason, want)
 				}
@@ -190,6 +213,7 @@ func TestHaltedRunReasonNamesTheExitAndTheSet(t *testing.T) {
 	}{
 		{"an exit with a code", models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3, Err: errors.New("exit status 3")}, "the application exited during test-set s1 with exit code 3: exited due to command error: exit status 3"},
 		{"a signal", models.AppError{AppErrorType: models.ErrCommandError, ExitCode: -1, Err: errors.New("signal: killed")}, "the application exited during test-set s1: exited due to command error: signal: killed"},
+		{"no code known", models.AppError{AppErrorType: models.ErrAppStopped, Err: errors.New("stopped")}, "the application exited during test-set s1: app stopped: stopped"},
 		{"no exit seen", models.AppError{}, "test-set s1 ended APP_HALTED"},
 	} {
 		if got := haltedRunReason("s1", models.TestSetStatusAppHalted, c.exit); got != c.want {
@@ -283,4 +307,51 @@ func TestAKeptAppsExitBetweenStepsStopsTheRunNamingItsExit(t *testing.T) {
 			t.Errorf("the run stops with the reason %q, want one that says %q", reason, want)
 		}
 	}
+}
+
+// Under docker compose with keploy's mocks off, a stack runs per set and a
+// set whose application halts does not stop the run: the next set runs on a
+// stack of its own. That halt is its set's status, not the reason the run
+// stopped, so the run's reason does not name it.
+func TestAComposeSetsHaltDoesNotStopTheRunOrNameItsStop(t *testing.T) {
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.testDB = twoPRSetsDB{h.replayer.testDB.(*prTestDB)}
+	h.replayer.config.Command = "docker compose up"
+	h.replayer.config.CommandType = string(utils.DockerCompose)
+	h.replayer.config.Test.MaxFlakyChecks = 1
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer agent.Close()
+	h.replayer.config.Agent.AgentURI = agent.URL
+	core, logs := observer.New(zapcore.DebugLevel)
+	h.replayer.logger = zap.New(core)
+	h.instr.stopAppAfterNUpdates = 2
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+	defer cancel()
+	_ = h.replayer.Start(ctx)
+	var ran []string
+	for _, e := range logs.FilterMessage("running").All() {
+		if set, ok := e.ContextMap()["test-set"].(string); ok {
+			ran = append(ran, set)
+		}
+	}
+	if len(ran) < 2 {
+		t.Fatalf("the run ran the sets %v, want it to go on past the halted set", ran)
+	}
+	stops := logs.FilterMessage("stopping Keploy").All()
+	if len(stops) != 1 {
+		t.Fatalf("%d \"stopping Keploy\" lines, want 1", len(stops))
+	}
+	if reason, _ := stops[0].ContextMap()["reason"].(string); strings.Contains(reason, "exited during test-set") || strings.Contains(reason, "ended "+string(models.TestSetStatusAppHalted)) {
+		t.Errorf("the run stops with the reason %q, which names a set's halt the run went on past", reason)
+	}
+}
+
+// twoPRSetsDB is the harness's test DB with two sets that hold the same tests.
+type twoPRSetsDB struct{ *prTestDB }
+
+func (twoPRSetsDB) GetAllTestSetIDs(context.Context) ([]string, error) {
+	return []string{"test-set-0", "test-set-1"}, nil
 }
