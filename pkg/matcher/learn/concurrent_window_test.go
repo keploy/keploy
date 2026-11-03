@@ -1048,6 +1048,13 @@ func TestARefusalForTextOfAScriptNamesWhereThatTextStands(t *testing.T) {
 		{"the text an encoded run decodes to", "lead 3505371Z created", "lead 2751164Z created", encodedScriptWhy},
 		{"the text an encoded run decodes to, escaped", "lead%203505371Z%20created", "lead%202751164Z%20created", encodedScriptWhy},
 		{"the text its quoted-printable escapes write", "day =D0=BF=D1=80", "day =D0=BF=D1=81", escapedScriptWhy},
+		// A value whose "=XX" shows no quoted-printable text ("v1=41" an
+		// 'A' a signature's hex spells as often) has that form searched
+		// but not checked, so the forms checked are fewer than those
+		// searched; one that reads as quoted-printable on both sides has
+		// it checked too. Either way the encoded run's text is named.
+		{"the text an encoded run decodes to, beside an escape that shows no quoted-printable", "v1=41 lead 3505371Z created", "v1=41 lead 2751164Z created", encodedScriptWhy},
+		{"the text an encoded run decodes to, in a value read as quoted-printable", "caf=C3=A9 lead 3505371Z created", "caf=C3=A9 lead 2751164Z created", encodedScriptWhy},
 	} {
 		if got := NewDriftCache().of(c.rec, c.live).unparsed; got != c.want {
 			t.Errorf("%s (%q -> %q): %q; want %q", c.what, c.rec, c.live, got, c.want)
