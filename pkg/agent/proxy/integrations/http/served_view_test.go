@@ -279,3 +279,42 @@ func TestATemplatedServesViewIsTheAnswerFRendered(t *testing.T) {
 		t.Fatal("a pairing that learned no variable renders no view of its own")
 	}
 }
+
+// The view of a serve whose answer the learn step's caller writes
+// (writtenView) is the answer av renders, then written: a learned variable's
+// value and the caller's change both stand in it, where av renders none the
+// recorded answer written, and the recording itself is never written. Its
+// key is not av's: a serve of the same request with av's answer unwritten
+// names another view.
+func TestAWrittenViewIsTheAnswerRenderedThenWritten(t *testing.T) {
+	rec := learnRecorded("mock-2", time.Second, "POST", "/v1/receive", `{"key":"k-1"}`, nil, `{"idempotency_key":"k-1","count":"9"}`)
+	replaced := func(m *models.Mock, old, new string) *models.Mock {
+		c := m.ShallowCopy()
+		rs := *m.Spec.HTTPResp
+		rs.Body = strings.ReplaceAll(rs.Body, old, new)
+		c.Spec.HTTPResp = &rs
+		return c
+	}
+	written := func(m *models.Mock) *models.Mock { return replaced(m, `"9"`, `"77"`) }
+	rendered := answerView{render: func(m *models.Mock) (*models.Mock, error) { return replaced(m, "k-1", "k-2"), nil }, key: "k-2"}
+	for _, tc := range []struct {
+		name string
+		av   answerView
+		want string
+	}{
+		{"a learned variable rendered", rendered, `{"idempotency_key":"k-2","count":"77"}`},
+		{"the recorded answer", answerView{}, `{"idempotency_key":"k-1","count":"77"}`},
+	} {
+		wv := writtenView(tc.av, written)
+		got, err := wv.render(rec)
+		if err != nil || got == nil || got.Spec.HTTPResp.Body != tc.want {
+			t.Fatalf("%s: the view answers %v (err %v); want %s", tc.name, got, err, tc.want)
+		}
+		if rec.Spec.HTTPResp.Body != `{"idempotency_key":"k-1","count":"9"}` {
+			t.Fatalf("%s: the recording was written: %s", tc.name, rec.Spec.HTTPResp.Body)
+		}
+		if wv.key == tc.av.key {
+			t.Fatalf("%s: the written view's key is av's (%q): a serve of the same request with the answer unwritten would share it", tc.name, wv.key)
+		}
+	}
+}
