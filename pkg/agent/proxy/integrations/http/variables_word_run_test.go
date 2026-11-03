@@ -172,3 +172,30 @@ func TestVariables_WordsApartAndAWholeBindStayTwoValues(t *testing.T) {
 		t.Fatalf("refused at %s, want noteId", p.name)
 	}
 }
+
+// An echo's word is the call's own, never bound: a bound word beside it is a
+// run of its own, and the application sending its value where another
+// variable was recorded with another value is refused.
+func TestVariables_AnEchoWordIsNoPartOfARun(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	db := &varDb{perTest: []*models.Mock{
+		at(varMock("mock-1", "POST", "http://store/charges", `{"key":"k1-ord7"}`, 201, `{"key":"k1"}`,
+			models.MockVariables{
+				"chargeKey": {Recorded: "k1", Bind: "body.key#0", Answer: []string{"body.key"}, Echo: true},
+				"orderId":   bindV("ord7", "body.key#1"),
+			}), 1),
+		at(varMock("mock-2", "POST", "http://store/refunds", `{"ref":"ref3"}`, 201, `{}`,
+			models.MockVariables{"refundId": bindV("ref3", "body.ref#0")}), 2),
+	}}
+	if ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/charges", `{"key":"k9-z9"}`)); !ok || stub.Name != "mock-1" {
+		t.Fatalf("the charge should be answered by mock-1: ok=%v stub=%v diag=%+v", ok, stub, diag)
+	}
+	if b, bound := db.table.Lookup("orderId"); !bound || b.WordRun != "z9" || b.RecordedWordRun != "ord7" {
+		t.Fatalf("orderId bound as %+v (%v), want its run alone", b, bound)
+	}
+	ok, _, diag := matchVar(t, h, db, liveReq("POST", "/refunds", `{"ref":"z9"}`))
+	if p := wantProblem(t, ok, diag, "they were two values when the test was recorded"); p.name != "refundId" {
+		t.Fatalf("refused at %s, want refundId", p.name)
+	}
+}
