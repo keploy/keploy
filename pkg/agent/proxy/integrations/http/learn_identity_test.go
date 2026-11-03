@@ -817,3 +817,33 @@ func TestSOAPActionReadsOnlySOAP12sMediaType(t *testing.T) {
 		}
 	}
 }
+
+// SOAP 1.2's action is a leaf only where the Content-Type carries one: an
+// action added or dropped is a part of the request that is not on both
+// sides, refused as such, never read as an action that changed to empty.
+func TestLearnMatchRefusesASOAP12ActionAddedOrDropped(t *testing.T) {
+	const soap, withAction = `application/soap+xml; charset=utf-8`, `application/soap+xml; charset=utf-8; action="urn:GetOrder"`
+	for _, tc := range []struct{ name, rec, live, why string }{
+		{"dropped", withAction, soap, "in more than values: header is missing"},
+		{"added", soap, withAction, "in more than values: header is not in the recording"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			tr := clockedTracker()
+			tr.Begin()
+			rec := learnRecorded("mock-1", 0, "POST", "/ws", `<e/>`, map[string]string{"Content-Type": tc.rec}, `{}`)
+			db := &learnDb{perTest: []*models.Mock{rec}}
+			served, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), live("POST", "/ws", `<e/>`, map[string]string{"Content-Type": tc.live}), db, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, tc.why) ||
+				strings.Contains(miss.res.Why, "says which call this is") {
+				t.Fatalf("served %v miss %+v: want request_changed saying %q, not an action changed to empty", served, miss, tc.why)
+			}
+			if len(db.consumed) != 0 || len(rec.Spec.ReqBodyNoise) != 0 {
+				t.Fatalf("the refused call took or learned something: consumed %d, noise %v", len(db.consumed), rec.Spec.ReqBodyNoise)
+			}
+		})
+	}
+}
