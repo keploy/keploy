@@ -2513,7 +2513,24 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		}
 		switch l.Kind {
 		case learn.KindNoise:
-			p.noise[r.Path] = []string{}
+			// A text whose words changed leaves those words alone
+			// unchecked, and the rest of it is still compared
+			// (learn.NoiseWords); a value that is one word, or no text,
+			// is noise whole. A text whose skeleton moved pins no word,
+			// and is refused rather than left unchecked whole.
+			if r.Type != learn.String {
+				p.noise[r.Path] = []string{}
+				break
+			}
+			words, whole, ok := learn.NoiseWords(r.Value, l.Live.Value)
+			switch {
+			case !ok:
+				return p, r.Path + " changed in more than its words (a separator moved, or a word came or went), so keploy cannot tell which words of it to leave unchecked, and does not leave the whole text unchecked"
+			case whole:
+				p.noise[r.Path] = []string{}
+			default:
+				p.noise[r.Path] = []string{learn.NoiseWordsPattern(words)}
+			}
 
 		case learn.KindVariable:
 			from := l.From

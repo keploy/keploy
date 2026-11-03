@@ -224,20 +224,31 @@ func (k strictKnown) learnedNoiseAt(exact, legacy string) bool {
 	if len(k.learned) == 0 {
 		return false
 	}
-	if _, ok := k.learned[exact]; ok {
+	// A place learned by its words (learn.UncheckedWords) is no noise
+	// whole: wordsAt reads it.
+	if patterns, ok := k.learned[exact]; ok && !learn.IsNoiseWords(patterns) {
 		return true
 	}
 	if legacy != "" && legacy != exact {
-		if _, ok := k.learned[legacy]; ok {
+		if patterns, ok := k.learned[legacy]; ok && !learn.IsNoiseWords(patterns) {
 			return true
 		}
 	}
-	for p := range k.learned {
-		if strings.HasPrefix(exact, p+".") || strings.HasPrefix(exact, p+"[") {
+	for p, patterns := range k.learned {
+		if (strings.HasPrefix(exact, p+".") || strings.HasPrefix(exact, p+"[")) && !learn.IsNoiseWords(patterns) {
 			return true
 		}
 	}
 	return false
+}
+
+// wordsAt reports whether the mock learned the text at exact by its words
+// (learn.UncheckedWords) and live, the call's text there, is rec, the
+// recording's, but for those words (learn.WordsAdmit): only the words that
+// changed when it was learned go unchecked, and the rest is compared.
+func (k strictKnown) wordsAt(exact, rec, live string) bool {
+	words, ok := learn.UncheckedWords(k.learned[exact])
+	return ok && learn.WordsAdmit(rec, live, words)
 }
 
 // redacted reports whether a recorded value is one the obfuscator redacted.
@@ -712,6 +723,11 @@ func (k strictKnown) segmentMayDiffer(i int, rec, live urlPath, read pathReading
 	if k.learnedNoiseAt(place, "") {
 		return true
 	}
+	if r, ok := rec.at(i); ok {
+		if l, ok := live.at(i); ok && k.wordsAt(place, r.masked, l.masked) {
+			return true
+		}
+	}
 	o, clock := k.clocks[place]
 	if !clock || read.of(i) == readOwn {
 		return k.ownClockAt(i, rec, live, read)
@@ -984,7 +1000,7 @@ func (k strictKnown) queryDiffs(rec, live url.Values) []strictField {
 		if sameMembers(maskValues(rv, k.n.url), maskValues(lv, k.n.url)) {
 			continue
 		}
-		if len(rv) == 1 && len(lv) == 1 && k.learnedAt("url.query."+name, "") {
+		if len(rv) == 1 && len(lv) == 1 && (k.learnedAt("url.query."+name, "") || k.wordsAt("url.query."+name, rv[0], lv[0])) {
 			continue
 		}
 		out = append(out, shaped(path, shape, models.DiffKindValueChanged, strings.Join(rv, ", "), strings.Join(lv, ", ")))
@@ -1090,7 +1106,7 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 		// learned on it excuses a value they refuse, and where the
 		// obfuscator redacted the recorded value, the live one alone is
 		// held to them.
-		if !guarded && (k.learnedAt(path, "") || k.redacted(rv)) {
+		if !guarded && (k.learnedAt(path, "") || k.wordsAt(path, rv, lv) || k.redacted(rv)) {
 			continue
 		}
 		if k.redacted(rv) {
@@ -1245,7 +1261,7 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 		// keploy.yml's patterns decide a key they guard (fieldCovers): no
 		// noise learned on it excuses a value they refuse.
 		guarded := k.guards(key)
-		if sameMembers(rv, lv) || !guarded && (k.learnedAt(path, "") || redacted[key]) {
+		if sameMembers(rv, lv) || !guarded && (k.learnedAt(path, "") || len(rv) == 1 && len(lv) == 1 && k.wordsAt(path, rv[0], lv[0]) || redacted[key]) {
 			continue
 		}
 		// A recorded value the obfuscator redacted is not held to the
@@ -1358,7 +1374,7 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 			return append(out, bodyChanged())
 		case bytes.Equal(rp[i].data, lp[i].data):
 			continue
-		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || !k.guards(rp[i].name) && (k.learnedAt(path, "") || k.redacted(string(rp[i].data)))):
+		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || !k.guards(rp[i].name) && (k.learnedAt(path, "") || k.wordsAt(path, string(rp[i].data), string(lp[i].data)) || k.redacted(string(rp[i].data)))):
 			continue
 		case rp[i].file == "":
 			// A recorded value the obfuscator redacted is not held to the
@@ -1507,6 +1523,11 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 	default:
 		if learned || sameScalar(r, l) {
 			return
+		}
+		if rs, ok := r.(string); ok {
+			if ls, ok := l.(string); ok && !guarded && k.wordsAt(exact, rs, ls) {
+				return
+			}
 		}
 		f := shaped(name, shape, models.DiffKindValueChanged, scalarText(r), scalarText(l))
 		f.why = why
