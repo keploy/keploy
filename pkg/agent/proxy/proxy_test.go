@@ -1121,3 +1121,32 @@ func TestSetAppClockIsTheLearnStepsClock(t *testing.T) {
 		t.Fatalf("span %+v,%v; want it from the run the agent handed the proxy", s, ok)
 	}
 }
+
+// currentIdentity is what a parser aliases a request to (identity.WithCurrent):
+// the identity of the test session armed when the request is read, so a
+// connection accepted under one test set and kept open into the next is
+// matched with the next set's recorded pod.
+func TestCurrentIdentityIsTheArmedTestSessionsOnly(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop()}
+	if _, ok := p.currentIdentity(); ok {
+		t.Fatal("no session armed, yet an identity was reported")
+	}
+	set1 := &models.IdentityAliasing{RecordedPods: []models.PodIdentity{{Name: "api-55f5fd9659-set1"}}}
+	set2 := &models.IdentityAliasing{RecordedPods: []models.PodIdentity{{Name: "api-55f5fd9659-set2"}}}
+	p.setSession(&agent.Session{Mode: models.MODE_TEST, OutgoingOptions: models.OutgoingOptions{Identity: set1}})
+	if id, ok := p.currentIdentity(); !ok || id != set1 {
+		t.Fatalf("first test set armed: got %v %v, want its identity", id, ok)
+	}
+	p.setSession(&agent.Session{Mode: models.MODE_TEST, OutgoingOptions: models.OutgoingOptions{Identity: set2}})
+	if id, ok := p.currentIdentity(); !ok || id != set2 {
+		t.Fatalf("second test set armed: got %v %v, want its identity", id, ok)
+	}
+	p.setSession(&agent.Session{Mode: models.MODE_TEST})
+	if id, ok := p.currentIdentity(); !ok || id != nil {
+		t.Fatalf("a test set without an identity: got %v %v, want none", id, ok)
+	}
+	p.setSession(&agent.Session{Mode: models.MODE_RECORD})
+	if _, ok := p.currentIdentity(); ok {
+		t.Fatal("a record session has no identity to alias to")
+	}
+}

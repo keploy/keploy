@@ -1,0 +1,291 @@
+package identity
+
+import (
+	"context"
+	"testing"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
+
+var (
+	recorded = models.PodIdentity{
+		Name: "api-55f5fd9659-fzsfr", UID: "0b1c4d6e-9f2a-4c3b-8d7e-1a2b3c4d5e6f",
+		IP: "10.244.1.17", HostIP: "192.168.1.9", Node: "worker-1",
+	}
+	live = models.PodIdentity{
+		Name: "api-rpl-1a2b3c", Hostname: "api-rpl-1a2b3c", UID: "7e6d5c4b-3a29-4817-a6f5-e4d3c2b1a0f9",
+		IP: "10.244.2.4", HostIP: "192.168.1.10", Node: "worker-2",
+	}
+)
+
+func TestRewriterReplacesWholeTokensOnly(t *testing.T) {
+	r := New([]models.PodIdentity{recorded}, live)
+	if r == nil {
+		t.Fatal("identities that differ must give a rewriter")
+	}
+	cases := map[string]string{
+		// name: a path segment, a query value, a JSON string, before a '.', at the end
+		"/api/v1/namespaces/ns/pods/api-rpl-1a2b3c":        "/api/v1/namespaces/ns/pods/api-55f5fd9659-fzsfr",
+		"fieldSelector=metadata.name%3Dapi-rpl-1a2b3c&x=1": "fieldSelector=metadata.name%3Dapi-55f5fd9659-fzsfr&x=1",
+		`{"holderIdentity":"api-rpl-1a2b3c_8f1c"}`:         `{"holderIdentity":"api-55f5fd9659-fzsfr_8f1c"}`,
+		"api-rpl-1a2b3c.api.ns.svc.cluster.local":          "api-55f5fd9659-fzsfr.api.ns.svc.cluster.local",
+		"instance api-rpl-1a2b3c":                          "instance api-55f5fd9659-fzsfr",
+		"api-rpl-1a2b3c api-rpl-1a2b3c":                    "api-55f5fd9659-fzsfr api-55f5fd9659-fzsfr",
+		// name inside a longer token: left alone
+		"api-rpl-1a2b3c-extra":  "api-rpl-1a2b3c-extra",
+		"xapi-rpl-1a2b3c":       "xapi-rpl-1a2b3c",
+		"api-rpl-1a2b3c2":       "api-rpl-1a2b3c2",
+		"api-rpl-1a2b3cd":       "api-rpl-1a2b3cd",
+		"api-rpl-1a2b3c_suffix": "api-55f5fd9659-fzsfr_suffix", // a pod name has no _: this one is whole
+		// IP: whole address only, dotted and dashed
+		"http://10.244.2.4:8080/x":            "http://10.244.1.17:8080/x",
+		"ip=10.244.2.4,":                      "ip=10.244.1.17,",
+		"10.244.2.40 110.244.2.4 10.244.2.4.": "10.244.2.40 110.244.2.4 10.244.1.17.",
+		"10-244-2-4.ns.pod.cluster.local":     "10-244-1-17.ns.pod.cluster.local",
+		"DD_AGENT_HOST=192.168.1.10":          "DD_AGENT_HOST=192.168.1.9",
+		// node, uid (any case), uid with underscores (cgroup)
+		"spec.nodeName=worker-2":               "spec.nodeName=worker-1",
+		"worker-20":                            "worker-20",
+		"7E6D5C4B-3A29-4817-A6F5-E4D3C2B1A0F9": "0b1c4d6e-9f2a-4c3b-8d7e-1a2b3c4d5e6f",
+		"/kubepods/pod7e6d5c4b_3a29_4817_a6f5_e4d3c2b1a0f9/abc": "/kubepods/pod0b1c4d6e_9f2a_4c3b_8d7e_1a2b3c4d5e6f/abc",
+		"7e6d5c4b-3a29-4817-a6f5-e4d3c2b1a0f9ab":                "7e6d5c4b-3a29-4817-a6f5-e4d3c2b1a0f9ab",
+		// nothing of the live pod: unchanged
+		"GET /healthz": "GET /healthz",
+		"":             "",
+	}
+	for in, want := range cases {
+		if got := r.String(in); got != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+	// Bytes returns the same slice when nothing changed.
+	b := []byte("GET /healthz")
+	if out := r.Bytes(b); &out[0] != &b[0] {
+		t.Error("an unchanged body must come back as the same slice")
+	}
+}
+
+// A UID is matched without case in bytes whose lower-casing changes their
+// length (an invalid UTF-8 byte, 'İ'): the offsets found are the body's own,
+// so a binary body does not panic and a JSON one is not cut at the wrong place.
+// A value that repeats itself across a '.' is not found again inside the text
+// that replaced it.
+func TestRewriterKeepsOffsetsInBodiesItDoesNotLowerAlike(t *testing.T) {
+	r := New([]models.PodIdentity{recorded}, live)
+	cases := map[string]string{
+		"\x0a\xff\xfe" + live.UID + "\x12":             "\x0a\xff\xfe" + recorded.UID + "\x12",
+		`{"city":"İstanbul","uid":"` + live.UID + `"}`: `{"city":"İstanbul","uid":"` + recorded.UID + `"}`,
+		"\xff7E6D5C4B-3A29-4817-A6F5-E4D3C2B1A0F9":     "\xff" + recorded.UID,
+	}
+	for in, want := range cases {
+		if got := r.String(in); got != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+	node := New([]models.PodIdentity{{Name: "api-rec-1", Node: "worker-1"}}, models.PodIdentity{Name: "api-live-1", Node: "k8s.edge.k8s"})
+	if got, want := node.String("node=k8s.edge.k8s.edge.k8s"), "node=worker-1.edge.k8s"; got != want {
+		t.Errorf("a self-overlapping value\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestRewriterReverseRestoresTheLiveIdentity(t *testing.T) {
+	r := New([]models.PodIdentity{recorded}, live)
+	rev := r.Reverse()
+	in := `{"metadata":{"name":"api-55f5fd9659-fzsfr","uid":"0b1c4d6e-9f2a-4c3b-8d7e-1a2b3c4d5e6f"},"status":{"podIP":"10.244.1.17","hostIP":"192.168.1.9"},"spec":{"nodeName":"worker-1"}}`
+	want := `{"metadata":{"name":"api-rpl-1a2b3c","uid":"7e6d5c4b-3a29-4817-a6f5-e4d3c2b1a0f9"},"status":{"podIP":"10.244.2.4","hostIP":"192.168.1.10"},"spec":{"nodeName":"worker-2"}}`
+	if got := rev.String(in); got != want {
+		t.Fatalf("reverse:\n got %s\nwant %s", got, want)
+	}
+	if rev.Reverse() != r {
+		t.Fatal("the reverse of the reverse is the rewriter")
+	}
+	// Forward then reverse is the identity on text that holds only live values.
+	if got := rev.String(r.String(want)); got != want {
+		t.Fatalf("round trip:\n got %s\nwant %s", got, want)
+	}
+}
+
+func TestRewriterSkipsWhatMustNotBeAliased(t *testing.T) {
+	// Nothing recorded, or nothing that differs: no rewriter.
+	if New(nil, live) != nil || New([]models.PodIdentity{{}}, live) != nil {
+		t.Fatal("no recorded identity must give no rewriter")
+	}
+	if New([]models.PodIdentity{live}, live) != nil {
+		t.Fatal("identical identities must give no rewriter")
+	}
+	// Local addresses are never a source or a target.
+	r := New([]models.PodIdentity{{Name: "rec-pod-1", IP: "10.0.0.9"}}, models.PodIdentity{Name: "live-pod-1", IP: "0.0.0.0"})
+	if got := r.String("bind 0.0.0.0:8080 live-pod-1"); got != "bind 0.0.0.0:8080 rec-pod-1" {
+		t.Fatalf("0.0.0.0 was aliased: %q", got)
+	}
+	// A same-node replay: node and host IP equal, only the pod half differs.
+	sameNode := live
+	sameNode.Node, sameNode.HostIP = recorded.Node, recorded.HostIP
+	r = New([]models.PodIdentity{recorded}, sameNode)
+	if got := r.String("worker-1 192.168.1.9 api-rpl-1a2b3c"); got != "worker-1 192.168.1.9 api-55f5fd9659-fzsfr" {
+		t.Fatalf("same-node values were touched: %q", got)
+	}
+	// A short or non-IP value is not a rule.
+	if New([]models.PodIdentity{{Name: "ab"}}, models.PodIdentity{Name: "cd"}) != nil {
+		t.Fatal("two-letter names are not aliased")
+	}
+	if New([]models.PodIdentity{{Name: "rec-pod-1", IP: "not-an-ip"}}, models.PodIdentity{Name: "rec-pod-1", IP: "10.0.0.1"}) != nil {
+		t.Fatal("a non-IP recorded address must not become a rule")
+	}
+}
+
+func TestRewriterAliasesToTheFirstRecordedPod(t *testing.T) {
+	second := recorded
+	second.Name = "api-55f5fd9659-q2x8m"
+	r := New([]models.PodIdentity{{}, recorded, second}, live)
+	if got := r.String("/pods/api-rpl-1a2b3c"); got != "/pods/api-55f5fd9659-fzsfr" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestLiveReadsTheDownwardAPIEnv(t *testing.T) {
+	t.Setenv(PodNameEnv, "api-rpl-1a2b3c")
+	t.Setenv(PodUIDEnv, "uid-1")
+	t.Setenv(PodIPEnv, "10.244.2.4")
+	t.Setenv(NodeEnv, "worker-2")
+	t.Setenv(HostIPEnv, "192.168.1.10")
+	got := Live()
+	if got.Name != "api-rpl-1a2b3c" || got.UID != "uid-1" || got.IP != "10.244.2.4" || got.Node != "worker-2" || got.HostIP != "192.168.1.10" {
+		t.Fatalf("Live() = %+v", got)
+	}
+	if got.Hostname == "" {
+		t.Fatal("the hostname comes from the UTS namespace")
+	}
+	t.Setenv(PodNameEnv, "")
+	t.Setenv(PresentedPodNameEnv, "")
+	if got := Live(); got.Name != "" || got.Hostname != "" {
+		t.Fatalf("without the pod's name in the env no name and no hostname is aliased: %+v", got)
+	}
+	// A cloud replay's compose presents the recorded pod to its app: the app
+	// container stands in for that pod, so its hostname is aliased (an app
+	// that names itself by HOSTNAME), its name still not.
+	t.Setenv(PresentedPodNameEnv, "api-55f5fd9659-fzsfr")
+	if got := Live(); got.Name != "" || got.Hostname == "" {
+		t.Fatalf("a replay that presents a pod aliases the hostname only: %+v", got)
+	}
+}
+
+// Outside a pod (docker run, compose) the hostname may be a plain word the
+// app's calls carry: with no pod env nothing is aliased, so a recorded pod's
+// set replayed there leaves /api/v1/users as it is.
+func TestOutsideAPodNothingIsAliased(t *testing.T) {
+	for _, env := range []string{PodNameEnv, PodUIDEnv, PodIPEnv, NodeEnv, HostIPEnv, PresentedPodNameEnv} {
+		t.Setenv(env, "")
+	}
+	if r := New([]models.PodIdentity{recorded}, Live()); r != nil {
+		t.Fatalf("a rewriter outside a pod: GET /api/v1/users -> %q", r.String("GET /api/v1/users"))
+	}
+	// The same plain-word hostname, as the live name: the hazard the env guard keeps out.
+	r := New([]models.PodIdentity{recorded}, models.PodIdentity{Name: "api", Hostname: "api"})
+	if got := r.String("GET /api/v1/users"); got == "GET /api/v1/users" {
+		t.Fatal("the probe must show what aliasing a plain-word hostname does")
+	}
+}
+
+// A presented identity that names only some fields (here only the name): the
+// app reads the others from the live pod, so a response gets the live values
+// back for them, not the recorded ones.
+func TestReverseFillsThePresentedIdentitysEmptyFieldsFromLive(t *testing.T) {
+	presented := models.PodIdentity{Name: "api-55f5fd9659-qq1aa"}
+	rev := New([]models.PodIdentity{recorded}, live, presented).Reverse()
+	in := `{"name":"api-55f5fd9659-fzsfr","uid":"` + recorded.UID + `","podIP":"` + recorded.IP + `","hostIP":"` + recorded.HostIP + `","node":"` + recorded.Node + `"}`
+	want := `{"name":"api-55f5fd9659-qq1aa","uid":"` + live.UID + `","podIP":"` + live.IP + `","hostIP":"` + live.HostIP + `","node":"` + live.Node + `"}`
+	if got := rev.String(in); got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+}
+
+func TestRewriterAliasesThePresentedIdentityAndPutsItBack(t *testing.T) {
+	// The copy presents another recorded pod's identity to its app (its env
+	// frozen to it), and replays a set this pod recorded: the app's calls carry
+	// the presented values, its sockets the live ones; both must read as the
+	// recorded pod's, and a response goes back in the presented terms.
+	presented := models.PodIdentity{
+		Name: "api-55f5fd9659-qq1aa", UID: "11111111-2222-4333-8444-555555555555",
+		IP: "10.244.3.3", HostIP: "192.168.1.11", Node: "worker-3",
+	}
+	r := New([]models.PodIdentity{recorded}, live, presented)
+	if r == nil {
+		t.Fatal("a presented identity that differs must give a rewriter")
+	}
+	cases := map[string]string{
+		"/api/v1/pods/api-55f5fd9659-qq1aa": "/api/v1/pods/api-55f5fd9659-fzsfr", // presented name
+		"/api/v1/pods/api-rpl-1a2b3c":       "/api/v1/pods/api-55f5fd9659-fzsfr", // live name
+		"from=10.244.3.3&via=10.244.2.4":    "from=10.244.1.17&via=10.244.1.17",  // presented and live IPs
+		"node=worker-3":                     "node=worker-1",
+	}
+	for in, want := range cases {
+		if got := r.String(in); got != want {
+			t.Errorf("String(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := r.Reverse().String(`{"name":"api-55f5fd9659-fzsfr","ip":"10.244.1.17"}`); got != `{"name":"api-55f5fd9659-qq1aa","ip":"10.244.3.3"}` {
+		t.Errorf("a served response must carry the presented identity back, got %q", got)
+	}
+	// A zero presented identity changes nothing: the reverse is to the live pod.
+	if got := New([]models.PodIdentity{recorded}, live, models.PodIdentity{}).Reverse().String("api-55f5fd9659-fzsfr"); got != "api-rpl-1a2b3c" {
+		t.Errorf("without a presented identity the reverse is to the live name, got %q", got)
+	}
+	// The presented identity IS the recorded one (the set of the presented pod):
+	// only the live values are aliased, and the reverse has nothing to put back
+	// for the name.
+	same := New([]models.PodIdentity{recorded}, live, recorded)
+	if same == nil || same.String("/pods/api-rpl-1a2b3c") != "/pods/api-55f5fd9659-fzsfr" {
+		t.Fatal("the live identity is still aliased when the presented one equals the recorded one")
+	}
+	if got := same.Reverse().String("api-55f5fd9659-fzsfr"); got != "api-55f5fd9659-fzsfr" {
+		t.Errorf("nothing to put back when the app was given the recorded name, got %q", got)
+	}
+}
+
+func TestPresentedReadsTheEnvAndDefaultsTheHostname(t *testing.T) {
+	if !Presented().IsZero() {
+		t.Fatal("no KEPLOY_PRESENTED_* env must give a zero identity")
+	}
+	t.Setenv(PresentedPodNameEnv, "api-55f5fd9659-fzsfr")
+	t.Setenv(PresentedPodIPEnv, "10.244.1.17")
+	t.Setenv(PresentedNodeEnv, "worker-1")
+	p := Presented()
+	if p.Name != "api-55f5fd9659-fzsfr" || p.IP != "10.244.1.17" || p.Node != "worker-1" || p.Hostname != "api-55f5fd9659-fzsfr" {
+		t.Errorf("Presented() = %+v", p)
+	}
+	t.Setenv(PresentedHostEnv, "api")
+	if got := Presented().Hostname; got != "api" {
+		t.Errorf("an explicit presented hostname wins, got %q", got)
+	}
+}
+
+// A connection keeps the options copied when it was accepted; Current is the
+// identity of the test set armed when a request is read, or that copy when
+// nothing says which set is armed.
+func TestCurrentIsTheArmedSetsIdentityElseTheConnectionsCopy(t *testing.T) {
+	connCopy := &models.IdentityAliasing{RecordedPods: []models.PodIdentity{{Name: "api-55f5fd9659-set1"}}}
+	armed := &models.IdentityAliasing{RecordedPods: []models.PodIdentity{{Name: "api-55f5fd9659-set2"}}}
+	lookup := func(id *models.IdentityAliasing, ok bool) func() (*models.IdentityAliasing, bool) {
+		return func() (*models.IdentityAliasing, bool) { return id, ok }
+	}
+	ctx := context.Background()
+	if got := Current(ctx, connCopy); got != connCopy {
+		t.Errorf("no lookup on the context: got %v, want the connection's copy", got)
+	}
+	if got := Current(WithCurrent(ctx, nil), connCopy); got != connCopy {
+		t.Errorf("a nil lookup is no lookup: got %v, want the connection's copy", got)
+	}
+	if got := Current(WithCurrent(ctx, lookup(armed, true)), connCopy); got != armed {
+		t.Errorf("a test set armed after the accept: got %v, want its identity", got)
+	}
+	if got := Current(WithCurrent(ctx, lookup(nil, true)), connCopy); got != nil {
+		t.Errorf("the armed set carries no identity: got %v, want none, whatever the connection copied", got)
+	}
+	if got := Current(WithCurrent(ctx, lookup(armed, false)), connCopy); got != connCopy {
+		t.Errorf("no test session armed: got %v, want the connection's copy", got)
+	}
+	if ForAliasing(nil) != nil {
+		t.Error("no identity, no rewriter")
+	}
+}

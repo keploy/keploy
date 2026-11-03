@@ -81,6 +81,8 @@ test:
   compareAll: false
   updateTestMapping: false
   disableAutoHeaderNoise: false
+  disableIdentityAliasing: false
+  identityAliasResponses: false
   # strictMockWindow enforces cross-test bleed prevention. Per-test
   # (LifetimePerTest) mocks whose request timestamp falls outside the
   # outer test window are dropped rather than promoted across tests.

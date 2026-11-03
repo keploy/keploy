@@ -103,13 +103,13 @@ type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string
 	TLSPrivateKey string
+	// Identity is the recorded pod identity the agent aliases its own to
+	// while matching, and the switch that turns the aliasing off; nil when a
+	// set carries none (IdentityAliasing). It holds a word the moved bools
+	// left (see Synchronous).
+	Identity *IdentityAliasing
 	// TODO: role of SQLDelay should be mentioned in the comments.
 	SQLDelay time.Duration // This is the same as Application delay.
-	// Synchronous sits with Mocking and SwapIDs, in one word: the word it
-	// took alone before SQLDelay holds LearnTests.
-	Synchronous bool
-	Mocking     bool // used to enable/disable mocking
-	SwapIDs     bool
 	// OnMiss selects what the proxy does in MODE_TEST when no recorded mock
 	// matches an outgoing call: "" / "fail" (deterministic hard miss, the
 	// default), "passthrough" (dial the real upstream, don't persist), or
@@ -312,6 +312,13 @@ type OutgoingOptions struct {
 	// is dropped). This is NOT a CA-bundle limitation: crypto/tls uses the
 	// system pool for free when RootCAs is nil.
 	UpstreamTLSVerify bool
+	// Synchronous, Mocking and SwapIDs sit in the padding after
+	// UpstreamTLSVerify: the two words they took before and after SQLDelay
+	// hold Identity and LearnTests, so every connection's Session stays in
+	// its size class (supervisor's exchange_test).
+	Synchronous bool
+	Mocking     bool // used to enable/disable mocking
+	SwapIDs     bool
 	// UpstreamTLSRootCAs is the trust anchor set for those verifying dials.
 	// nil means "use Go's default" (crypto/tls falls back to the platform
 	// root pool) — it never means "trust nothing".

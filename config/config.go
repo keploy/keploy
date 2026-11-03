@@ -535,6 +535,18 @@ type Test struct {
 	SchemaMatch            bool                `json:"schemaMatch" yaml:"schemaMatch" mapstructure:"schemaMatch"`
 	UpdateTestMapping      bool                `json:"updateTestMapping" yaml:"updateTestMapping" mapstructure:"updateTestMapping"`
 	DisableAutoHeaderNoise bool                `json:"disableAutoHeaderNoise" yaml:"disableAutoHeaderNoise" mapstructure:"disableAutoHeaderNoise"` // skip auto-noise for flaky headers (e.g. AWS SigV4)
+	// DisableIdentityAliasing turns off the replay agent's rewrite of its own
+	// pod identity (name, uid, IP, node, host IP, from the downward API) to
+	// the identity of the pod that recorded the test set (the set's config
+	// metadata), which lets an app that puts its own identity into a call find
+	// its mock from a replay pod. Default off: the rewrite is on whenever a
+	// set carries a recorded identity.
+	DisableIdentityAliasing bool `json:"disableIdentityAliasing" yaml:"disableIdentityAliasing" mapstructure:"disableIdentityAliasing"`
+	// IdentityAliasResponses also puts the replay pod's own identity back into
+	// the served responses (headers, textual bodies), for an app that compares
+	// a dependency's answer with itself. Default off: the app gets the
+	// response as recorded, which is what its test cases hold.
+	IdentityAliasResponses bool `json:"identityAliasResponses" yaml:"identityAliasResponses" mapstructure:"identityAliasResponses"`
 	// AutoReplay marks the run as auto-replay: the pass that replays a test set
 	// immediately after recording it, against the SAME application build.
 	//
