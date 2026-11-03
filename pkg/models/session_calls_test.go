@@ -145,3 +145,31 @@ func TestSessionCallRuleProblem(t *testing.T) {
 		}
 	}
 }
+
+// LifetimeUnder reads a mock apart from any run, so a pre-tag recording's
+// kind fallback it takes moves no legacy-fallback count, which operators
+// read as how many such mocks a replay loaded. The same mocks derived as a
+// replay loads them (DeriveLifetime) each count once.
+func TestLifetimeUnderCountsNoLegacyKindFallback(t *testing.T) {
+	untagged := func() []*Mock {
+		return []*Mock{
+			{Kind: Postgres, Spec: MockSpec{Metadata: map[string]string{}}},
+			{Kind: HTTP, Spec: MockSpec{Metadata: map[string]string{}, HTTPReq: &HTTPReq{Method: "GET", URL: "http://risk.test/score"}}},
+		}
+	}
+	before := LegacyKindFallbackFires()
+	for _, m := range untagged() {
+		m.LifetimeUnder(nil)
+		m.LifetimeUnder([]SessionCallRule{{Host: "risk.test"}})
+	}
+	if got := LegacyKindFallbackFires() - before; got != 0 {
+		t.Fatalf("LifetimeUnder counted %d legacy-fallback fires, want 0", got)
+	}
+	before = LegacyKindFallbackFires()
+	for _, m := range untagged() {
+		m.DeriveLifetime()
+	}
+	if got := LegacyKindFallbackFires() - before; got != 2 {
+		t.Fatalf("DeriveLifetime counted %d legacy-fallback fires, want 2", got)
+	}
+}
