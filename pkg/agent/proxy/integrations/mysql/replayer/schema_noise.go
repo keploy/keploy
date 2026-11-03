@@ -225,7 +225,11 @@ type strictGate struct {
 	//                 exactly WHICH request fields drifted outside noise.
 	rejected    int
 	closestMock string
-	fieldDiffs  []models.MockFieldDiff
+	// closestPlaces are the places of closestMock's recording the
+	// obfuscator redacted (placesOf): fieldDiffs show both values of each
+	// redacted.
+	closestPlaces redactedPlaces
+	fieldDiffs    []models.MockFieldDiff
 
 	// exactRejected is how many of rejected the rule of exact serving ruled
 	// out (allowsDrift without strict enforcement, allowsLiterals):
@@ -525,11 +529,12 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 	g.rejected++
 	if g.closestMock == "" {
 		g.closestMock = mock.Name
+		g.closestPlaces = placesOf(mock)
 		if recorded, recordedOK := g.recordedBody(mock); recordedOK {
 			// KnownNoise is root-relative (user ∪ learned); JSONFieldDiffs
 			// skips those paths so the report shows only non-noise drift.
 			known := engine.KnownNoise(mock, noise)
-			g.fieldDiffs = maskAttributeDiffs(matcher.JSONFieldDiffs(string(recorded), string(body.Raw()), known, "body.", 96), mock, g.live)
+			g.fieldDiffs = g.closestPlaces.fieldDiffs(maskAttributeDiffs(matcher.JSONFieldDiffs(string(recorded), string(body.Raw()), known, "body.", 96), mock, g.live), liveStatementOf(g.live, g.liveQuery))
 		}
 	}
 	if ce := g.logger.Check(zap.DebugLevel, "schema-noise strict: rejected candidate mock (non-noise request field drifted)"); ce != nil && !seen {
@@ -578,7 +583,7 @@ type bodyNoiseKey struct {
 // resetDiagnostics clears the rejection diagnostics for a scan that starts over
 // on the same command, keeping the verdicts: they still hold.
 func (g *strictGate) resetDiagnostics() {
-	g.rejected, g.closestMock, g.fieldDiffs, g.exactRejected = 0, "", nil, 0
+	g.rejected, g.closestMock, g.closestPlaces, g.fieldDiffs, g.exactRejected = 0, "", redactedPlaces{}, nil, 0
 }
 
 // queryShape is the literal-split view of a SQL text: the query with every

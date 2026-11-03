@@ -1469,7 +1469,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				lq = &liveLegacy
 			}
 		}
-		ok, c, id := matchQueryLive(logger, recorded, req.PacketBundle, lq, getQuery)
+		ok, c, id := matchQueryLive(logger, recorded, req.PacketBundle, lq, getQuery, mock.Noise)
 		if sameStatementOnly && !ok && c > 0 && maskSQLLiterals(id) != lq.maskedLiterals() {
 			c = 0
 		}
@@ -2350,6 +2350,14 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		} else if sp, spOk := req.Message.(*mysql.StmtPreparePacket); spOk {
 			actualQuery = sp.Query
 		}
+		// The recordings the report names: the live command's value at a
+		// place either redacted is shown redacted, in the report and here.
+		closest := bestPartialMock
+		if closest == nil && gate.closestMock == "" {
+			closest = nearestMock
+		}
+		places := placesOf(closest).or(gate.closestPlaces)
+		actualQuery = places.liveStatement(actualQuery)
 		if bestPartialMock != nil {
 			logger.Debug("mock miss",
 				zap.String("protocol", "MySQL"),
@@ -2393,6 +2401,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			strictRejected: gate.rejected,
 			candidateCount: mysqlCandidates,
 			matchPhase:     phase,
+			places:         places,
 		}
 		if len(lost) > 0 {
 			// The test's own mock may be one whose statement is lost: say so,
@@ -2625,7 +2634,7 @@ func (lq *liveQuery) structure() (string, error) {
 // facts are kept in live, so a caller comparing one live statement with many
 // candidates derives them once. The identity is empty only when the packet
 // types differ, which returns before it is derived.
-func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *liveQuery, getQuery func(packet mysql.PacketBundle) string) (bool, int, string) {
+func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *liveQuery, getQuery func(packet mysql.PacketBundle) string, noise []string) (bool, int, string) {
 	// Match the type and return zero if the types are not equal
 	if expected.Header.Type != actual.Header.Type {
 		return false, 0, ""
@@ -2726,14 +2735,14 @@ func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *
 
 	// check if any of them the query is dml and other is not, then there is no match.
 	if expectedIsDML && !actualIsDML {
-		log.Debug("expected query is dml but actual is not",
-			zap.String("expected query", expectedQuery),
-			zap.String("actual query", actualQuery))
+		if ce := log.Check(zap.DebugLevel, "expected query is dml but actual is not"); ce != nil {
+			ce.Write(zap.String("expected query", expectedQuery), zap.String("actual query", loggedLive(expectedQuery, actualQuery, noise)))
+		}
 		return false, 0, expectedQuery
 	} else if !expectedIsDML && actualIsDML {
-		log.Debug("actual query is dml but expected is not",
-			zap.String("expected query", expectedQuery),
-			zap.String("actual query", actualQuery))
+		if ce := log.Check(zap.DebugLevel, "actual query is dml but expected is not"); ce != nil {
+			ce.Write(zap.String("expected query", expectedQuery), zap.String("actual query", loggedLive(expectedQuery, actualQuery, noise)))
+		}
 		return false, 0, expectedQuery
 	}
 
@@ -2749,16 +2758,16 @@ func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *
 		// only scores, and only wins when nothing matched exactly.
 		if !isSessionControlStatement(expectedQuery) && !isSessionControlStatement(actualQuery) &&
 			maskSQLLiterals(expectedQuery) == live.maskedLiterals() {
-			log.Debug("query matched with drifted inline literals",
-				zap.String("expected query", expectedQuery),
-				zap.String("actual query", actualQuery))
+			if ce := log.Check(zap.DebugLevel, "query matched with drifted inline literals"); ce != nil {
+				ce.Write(zap.String("expected query", expectedQuery), zap.String("actual query", loggedLive(expectedQuery, actualQuery, noise)))
+			}
 			// The payload-length tie-break only ranks candidates already known to
 			// share every keyword, identifier and literal type.
 			return false, scoreQueryLiteralDrift + equalPayloadLength(expected, actual), expectedQuery
 		}
-		log.Debug("No Query is dml",
-			zap.String("expected query", expectedQuery),
-			zap.String("actual query", actualQuery))
+		if ce := log.Check(zap.DebugLevel, "No Query is dml"); ce != nil {
+			ce.Write(zap.String("expected query", expectedQuery), zap.String("actual query", loggedLive(expectedQuery, actualQuery, noise)))
+		}
 		return false, 0, expectedQuery
 	}
 

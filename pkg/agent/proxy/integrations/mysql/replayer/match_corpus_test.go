@@ -61,7 +61,7 @@ func TestMatchQuery_AgainstRecordedCorpus(t *testing.T) {
 	pick := func(live mysql.PacketBundle) int {
 		best, bestScore := -1, 0
 		for j := range pool {
-			ok, score, _ := matchQueryLive(logger, pool[j], live, &liveQuery{}, queryPacketText)
+			ok, score, _ := matchQueryLive(logger, pool[j], live, &liveQuery{}, queryPacketText, nil)
 			if ok {
 				return j
 			}
