@@ -102,7 +102,8 @@ func TestAClockReadTheCallDoesNotCarrySaysSo(t *testing.T) {
 	}
 	for _, f := range []string{"body.content", "body.since"} {
 		why := whys[f]
-		if !hasField(r.Differs, f) || !strings.HasPrefix(why, f+" was learned as ") || !strings.HasSuffix(why, ", and this call carries no value at "+f+": it changed") {
+		learned := f + " was learned as " + stampedSend().Spec.Clocks[f].String() + ", a read of the application's clock"
+		if !hasField(r.Differs, f) || !strings.HasPrefix(why, learned) || !strings.HasSuffix(why, ", and this call carries no value at "+f+": it changed") {
 			t.Fatalf("Differs %v, the reason of %s is %q; want it named, and that the call carries no value there", r.Differs, f, why)
 		}
 		if strings.Contains(why, "too short") {
@@ -275,5 +276,42 @@ func TestARecordingOfAnotherRouteGivesNoNoisePatternReason(t *testing.T) {
 	}
 	if n := logs.FilterMessage("a keploy.yml noise pattern does not excuse a field").Len(); n != 0 {
 		t.Fatalf("a recording of another route warned %d times that its pattern does not excuse a field", n)
+	}
+}
+
+// The miss names a field of a recording of another route by its shape, as
+// a failed test's reason does, never a value an object key of it may be.
+func TestARecordingOfAnotherRouteNamesAFieldByItsShape(t *testing.T) {
+	const key = "3f2b8c1e-9d4a-4b7e-8c1a-2e5f6a7b8c9d"
+	json := map[string]string{"Content-Type": "application/json"}
+	r, _ := clockMissOf(t, sent("/y", json, `{"u":{"`+key+`":2}}`), recorded("mock-x", "/x", json, `{"u":{"`+key+`":1}}`))
+	if r.ClosestMock != "mock-x" || !hasField(r.Differs, "body.u.{}") || strings.Contains(strings.Join(r.Differs, " "), key) {
+		t.Fatalf("closest %q, Differs %v; want mock-x, body.u.{} named, never the key", r.ClosestMock, r.Differs)
+	}
+}
+
+// A place learned as a read of the clock under an object key that may be a
+// value, which the call does not carry: the reason and the agent's warning
+// name it by its shape, never the key.
+func TestAnAbsentClockReadIsNamedByItsShape(t *testing.T) {
+	const key = "3f2b8c1e-9d4a-4b7e-8c1a-2e5f6a7b8c9d"
+	json := map[string]string{"Content-Type": "application/json"}
+	m := recorded("mock-k", "/send", json, `{"u":{"`+key+`":"2026-09-01T09:00:00Z"},"to":"a"}`)
+	m.Spec.Clocks = map[string]models.ClockOffset{"body.u." + key: {Res: time.Second}}
+	r, said := clockMissOf(t, sent("/send", json, `{"u":{},"to":"a"}`), m)
+	found := false
+	for _, fr := range r.FieldReasons {
+		if strings.Contains(fr.Field+fr.Why, key) {
+			t.Fatalf("a reason names the key: %+v", fr)
+		}
+		found = found || strings.HasSuffix(fr.Why, ", and this call carries no value at body.u.{}: it changed")
+	}
+	for _, e := range said {
+		if c := e.ContextMap(); strings.Contains(c["reason"].(string)+c["field"].(string), key) {
+			t.Fatalf("a warning names the key: %v", c)
+		}
+	}
+	if !found || len(said) != 1 {
+		t.Fatalf("FieldReasons %+v, %d clock warnings; want the absent reason at body.u.{}, logged once", r.FieldReasons, len(said))
 	}
 }
