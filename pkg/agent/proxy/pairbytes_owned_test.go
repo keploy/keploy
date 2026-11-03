@@ -75,7 +75,7 @@ func TestOwnedLossesPastTheBoundCountAsTheRuns(t *testing.T) {
 			t.Fatalf("owned loss %d = %+v, want one app_bytes_lost of %s", i, o, want)
 		}
 	}
-	if run := s.owned[maxOwned]; run.Test != "" || run.Loss.Count != past || run.Loss.Kind != models.CaptureLossAppBytesLost {
+	if run := s.owned[maxOwned]; run.Test != "" || run.Loss.Count != past || run.Loss.Kind != models.CaptureLossAppBytesLost || run.Loss.What != agent.OwnedLossesPastTheBound {
 		t.Fatalf("the run's owned loss = %+v, want %d app_bytes_lost of no test's", run, past)
 	}
 	p := &Proxy{}
