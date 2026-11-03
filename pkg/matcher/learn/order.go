@@ -1028,11 +1028,13 @@ func (p placed) of(i int) instantPlace {
 // named by its path: the field's, its list indices dropped
 // ("res.body", "MongoResponses[].Message.Sections[]"), then the keys of
 // the JSON containers open where its value starts, from the field's root,
-// an element of a list as "[]" (`{"at":…,"items":[{"at":…}]}` holds "at"
-// and "items[].at"), then its own (memberAt). It is of no member ("")
-// where no field holds it, where no container is open there, and where one
-// of them is named by no key (fail closed: such an instant pairs only by
-// count).
+// an element of a list as one (`{"at":…,"items":[{"at":…}]}` holds "at"
+// and "items[].at"), then its own (memberAt). Each step is joined by a
+// byte no JSON key holds (stepKey, stepElem), so a key holding '.', '['
+// or ']' ("a[]", "b.at") never spells another member's path. It is of no
+// member ("") where no field holds it, where no container is open there,
+// and where one of them is named by no key (fail closed: such an instant
+// pairs only by count).
 func (dc *decider) placesIn(text string, fields []rawField, spans []instant) placed {
 	at := make([]instantPlace, len(spans))
 	var w jsonWalk
@@ -1055,7 +1057,7 @@ func (dc *decider) placesIn(text string, fields []rawField, spans []instant) pla
 		dc.walked += w.to(text[:to], sp.start)
 		name := memberAt(text[from:], sp.start-from)
 		if top := len(w.open) - 1; name != "" && top >= 0 && !w.open[top].unnamed {
-			at[i].field = prefix + "\x00" + w.open[top].path + "." + name
+			at[i].field = prefix + stepKey + w.open[top].path + stepKey + name
 		}
 	}
 	return placed{at: at, n: &dc.passes}
@@ -1063,6 +1065,11 @@ func (dc *decider) placesIn(text string, fields []rawField, spans []instant) pla
 
 // listIndex is a list index in a field's path.
 var listIndex = regexp.MustCompile(`\[[0-9]+\]`)
+
+// stepKey and stepElem join a member's path (placesIn): a key, and an
+// element of a list. JSON writes no control byte in a key, so no key's own
+// text spells a step.
+const stepKey, stepElem = "\x00", "\x01"
 
 // jsonWalk reads a field's JSON structure, from its start (from) as far as
 // at: the containers open there (open) and whether at stands in a string
@@ -1105,9 +1112,9 @@ func (w *jsonWalk) to(text string, end int) (n int) {
 			o := jsonOpen{list: c == '['}
 			if top >= 0 {
 				p := w.open[top]
-				o.path, o.unnamed = p.path+"."+p.key, p.unnamed || !p.list && p.key == ""
+				o.path, o.unnamed = p.path+stepKey+p.key, p.unnamed || !p.list && p.key == ""
 				if p.list {
-					o.path = p.path + "[]"
+					o.path = p.path + stepElem
 				}
 			}
 			w.open = append(w.open, o)
@@ -1120,11 +1127,11 @@ func (w *jsonWalk) to(text string, end int) (n int) {
 
 // keyBefore is the key a member's colon closes, the end of text: a quoted
 // name, or a bare word (`{ SectionSingle msg: {…} }` names msg); "" where
-// none stands there.
+// none stands there, or where the quoted name holds a quote (quotedName).
 func keyBefore(text string) string {
 	s := strings.TrimRight(text, " \t\r\n")
 	if q, ok := strings.CutSuffix(s, `"`); ok {
-		return q[strings.LastIndexByte(q, '"')+1:]
+		return quotedName(q)
 	}
 	return s[strings.LastIndexAny(s, " \t\r\n{}[],:\"")+1:]
 }
@@ -1140,7 +1147,19 @@ func memberAt(text string, start int) string {
 	if s, ok = strings.CutSuffix(strings.TrimRight(s, " "), `"`); !ok {
 		return ""
 	}
-	return s[strings.LastIndexByte(s, '"')+1:]
+	return quotedName(s)
+}
+
+// quotedName is the name a quote opens at the end of s (its closing quote
+// cut off); "" where the last quote in s is escaped: the name holds a
+// quote, and read from it on it would spell another member's name
+// (`"x\"at"` is no "at"), so its member is named by no key (fail closed).
+func quotedName(s string) string {
+	i := strings.LastIndexByte(s, '"')
+	if i > 0 && s[i-1] == '\\' {
+		return ""
+	}
+	return s[i+1:]
 }
 
 // instantShape is an instant's text with its fraction left out and each
