@@ -746,9 +746,14 @@ type givenWords struct {
 	// candidate sources (follows.followed). set: a recording F gave the
 	// application earlier in the set (GivenEarlier), which no Raw handed to
 	// the call stands for.
-	answered    time.Time
-	conn        string
-	pos         uint64
+	answered time.Time
+	conn     string
+	pos      uint64
+	// test is the number in the set of the older test F gave the
+	// application the recording in, every serve of it, as the read
+	// numbered them (Order.testOf); 0 where keploy cannot name one. A
+	// reason names it where a call carries what F gave there (lateServes).
+	test        int
 	first, last int
 	set         bool
 	// unstated: F served it and no adapter said what it gave the
@@ -1105,6 +1110,11 @@ func (o Order) GivenPlaces(m *models.Mock) (GivenPlaces, error) {
 	}
 	g.words = o.statedWords(m, g.words, g.answers)
 	g.fView, g.words.unread = o.viewMoments(m, g.words, g.answers)
+	if o.t != nil {
+		o.t.mu.Lock()
+		g.words.test = o.testOf(g.first, g.last)
+		o.t.mu.Unlock()
+	}
 	return g, nil
 }
 

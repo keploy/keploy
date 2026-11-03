@@ -1559,6 +1559,14 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				}
 				if from.startUp {
 					ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, startUpWhy(dc.ofIn(r.Value, l.Value, w, at), from)
+				} else if from.Side == "" && !from.Echo {
+					// A late call: what it carries now F gave the
+					// application in an older test, not at from (lateOf).
+					// Refused as before, naming that serve, never from as
+					// the value's source.
+					if why := dc.lateOf(dc.ofIn(r.Value, l.Value, w, at), from, raw, lateServes(l.Value, places())); why != "" {
+						ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, why
+					}
 				}
 			} else if echo := Echoes(dc, r, resp); len(echo) > 0 {
 				ln.Kind, ln.Echo = KindEcho, echo
