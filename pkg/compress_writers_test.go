@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"runtime"
 	"testing"
+	"weak"
 
 	"github.com/andybalholm/brotli"
 	"go.uber.org/zap"
@@ -229,4 +230,49 @@ func TestAFlushedWriterBackInItsPoolCompressesAsANewWriter(t *testing.T) {
 			}
 		}
 	}
+}
+
+// A compressor goes back to its pool pointing at no buffer (compress resets it
+// to nil), so the pool keeps no call's compressed bytes reachable once the
+// call drops them. Without that, a flushed writer still points at the buffer
+// it wrote to, and so does a closed gzip one (gzip.Writer.Close keeps its
+// destination): the pool would hold each call's bytes until the writer is
+// reused or the pool is cleared. One GC moves a pool's writers to its victim
+// cache, where they are still reachable: the bytes are collected by it only
+// when no pooled writer points at them. So the row runs exactly one GC: a
+// second would drop the victim cache and collect the bytes either way.
+func TestACompressorBackInItsPoolHoldsNoCallsBytes(t *testing.T) {
+	for _, encoding := range []string{"gzip", "br"} {
+		for _, end := range []bool{false, true} {
+			name := encoding + "/flushed"
+			if end {
+				name = encoding + "/closed"
+			}
+			t.Run(name, func(t *testing.T) {
+				dropped := compressedAndDropped(t, encoding, end)
+				runtime.GC()
+				if dropped.Value() != nil {
+					t.Fatal("the compressed bytes the call dropped are still reachable after a GC: the writer back in its pool points at them")
+				}
+			})
+		}
+	}
+}
+
+// compressedAndDropped compresses a body as Compress (end) or
+// CompressWithoutEnd does and returns only a weak pointer to the bytes, so
+// nothing of the call but its pooled writer can keep them reachable.
+//
+//go:noinline
+func compressedAndDropped(t *testing.T, encoding string, end bool) weak.Pointer[byte] {
+	t.Helper()
+	fn := CompressWithoutEnd
+	if end {
+		fn = Compress
+	}
+	out, err := fn(zap.NewNop(), encoding, compressBody(4096, 3))
+	if err != nil || len(out) == 0 {
+		t.Fatalf("%s: compressed %d bytes (%v)", encoding, len(out), err)
+	}
+	return weak.Make(&out[0])
 }

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -685,6 +686,10 @@ func serveFrom(t *testing.T, m *models.Mock) (*http.Response, []byte, error) {
 // deflate body is neither: the mock keeps the bytes the app read, and they
 // are served as they are. The answer is served as the mock file (YAML) or the
 // mock store (BSON) gives it back. A whole answer's stream ends, as before.
+// The upstream's Content-Length is weighed against the bytes served, which
+// for gzip and br is keploy's compressor's stream, here longer than the text
+// decoded: a length those bytes reach would end the body, and it goes
+// chunked; a length one byte past them is sent.
 func TestDecodeHTTPServesACompressedAnswerTheAppStoppedReadingWithNoStreamEnd(t *testing.T) {
 	const request = "POST /v1/events HTTP/1.1\r\nHost: api.example\r\nContent-Length: 0\r\n\r\n"
 	text := "data: 1\n\ndata: 2\n\n"
@@ -748,6 +753,20 @@ func TestDecodeHTTPServesACompressedAnswerTheAppStoppedReadingWithNoStreamEnd(t 
 		{"br", func(bool) string { return text }, func(r io.Reader) (io.Reader, error) { return brotli.NewReader(r), nil }},
 		{"deflate", deflated, func(r io.Reader) (io.Reader, error) { return flate.NewReader(r), nil }},
 	} {
+		// served is how many body bytes a held answer is served with:
+		// keploy's compressor's flushed stream of the text for gzip and br,
+		// the bytes the app read for deflate, which is served as it is.
+		served := int64(len(enc.body(false)))
+		if enc.name != "deflate" {
+			b, err := pkg.CompressWithoutEnd(zap.NewNop(), enc.name, []byte(text))
+			if err != nil {
+				t.Fatal(err)
+			}
+			served = int64(len(b))
+		}
+		if enc.name != "deflate" && served <= int64(len(text)) {
+			t.Fatalf("%s: the bytes served (%d) are not longer than the text decoded (%d): the rows below would not tell a length weighed against the one from one weighed against the other", enc.name, served, len(text))
+		}
 		for _, row := range []struct {
 			name   string
 			header map[string]string
@@ -761,7 +780,8 @@ func TestDecodeHTTPServesACompressedAnswerTheAppStoppedReadingWithNoStreamEnd(t 
 		}{
 			{"held, sent chunked", map[string]string{"Content-Type": "text/event-stream", "Content-Length": "18"}, true, sentChunked, 0, true},
 			{"held, sent with a length", map[string]string{"Content-Type": "text/event-stream", "Content-Length": "18"}, true, sentAs{length: 1000}, 1000, false},
-			{"held, sent with a length the body served reaches", map[string]string{"Content-Type": "text/event-stream", "Content-Length": "18"}, true, sentAs{length: 5}, 0, true},
+			{"held, sent with a length the body served reaches", map[string]string{"Content-Type": "text/event-stream", "Content-Length": "18"}, true, sentAs{length: served}, 0, true},
+			{"held, sent with a length one byte past the body served", map[string]string{"Content-Type": "text/event-stream", "Content-Length": "18"}, true, sentAs{length: served + 1}, served + 1, false},
 			{"held, its upstream's close to end it", map[string]string{"Content-Type": "text/event-stream", "Content-Length": "18"}, true, sentByClose, 0, false},
 			{"whole", map[string]string{"Content-Type": "text/plain", "Content-Length": "18"}, false, sentAs{}, 0, false},
 		} {
@@ -948,6 +968,59 @@ func TestAHeldAnswerServesOnlyTheBytesItsFaultSends(t *testing.T) {
 			proven, pooled := way.proven, way.pooled
 			t.Run(row.name+way.suffix(), func(t *testing.T) {
 				checkHeldWire(t, proven, pooled, 1, 1, events, len(read), row.sent, row.want)
+			})
+		}
+	}
+}
+
+// A mock the agent's disk store read keeps its response apart until a serve
+// loads it (Mock.HasSpilledResponse, as diskmocks' readAt sets it).
+// decodeHTTP's match loads it as it claims the mock; a parser that enacts a
+// mock's fault itself (EnactFault: keploy enterprise's SQS replay) hands the
+// mock on as the store gave it. Its fault is served from the response loaded
+// back, as from one in the mock, and the mock handed in, which other
+// connections may be matching, keeps its response apart. A timeout after the
+// head (faultHead) is served so too.
+func TestAFaultAfterTheHeadIsServedFromAResponseKeptApart(t *testing.T) {
+	const events, read = "data: 1\n\ndata: 2\n\n", "data: 1\n"
+	whole := map[string]string{"Content-Type": "text/event-stream", "Content-Length": "18"}
+	for _, row := range []struct {
+		name   string
+		header map[string]string
+		fault  *models.Fault
+		want   string
+	}{
+		{"stopped_reading, sent chunked", whole, stoppedReadingIf(true, len(read), sentChunked),
+			"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n8\r\n" + read + "\r\n"},
+		{"stopped_reading, sent with a length", whole, stoppedReadingIf(true, len(read), sentAs{length: 1000}),
+			"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nContent-Type: text/event-stream\r\n\r\n" + read},
+		{"stopped_reading, its upstream's close to end it", whole, stoppedReadingIf(true, len(read), sentByClose),
+			"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n" + read},
+		{"a timeout after the head", map[string]string{"Content-Length": "1000"}, &models.Fault{Kind: models.FaultTimeout, AfterHead: true, BodyBytes: int64(len(read))},
+			"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n" + read},
+	} {
+		for _, proven := range []string{"", "1"} {
+			t.Run(row.name+"/KEPLOY_PROVEN="+proven, func(t *testing.T) {
+				t.Setenv("KEPLOY_PROVEN", proven)
+				m := recorded("events-1", "/v1/events", nil, "")
+				m.Spec.HTTPReq.ProtoMajor, m.Spec.HTTPReq.ProtoMinor = 1, 1
+				m.Spec.HTTPResp, m.Spec.Fault = nil, row.fault
+				m.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
+					return &models.HTTPResp{StatusCode: 200, Header: row.header, Body: events}, nil, nil
+				})
+				m.MarkPooled()
+				h := &HTTP{Logger: zap.NewNop()}
+				c := &wireConn{} // the app closes once the answer is out
+				over, err := h.EnactFault(context.Background(), c, m)
+				if err != nil || !over {
+					t.Fatalf("EnactFault = %v, %v; want the fault served, the call over", over, err)
+				}
+				if got := c.out.String(); got != row.want {
+					t.Fatalf("served %q, want %q", got, row.want)
+				}
+				if m.Spec.HTTPResp != nil || !m.HasSpilledResponse() {
+					t.Fatal("the serve loaded the response into the mock handed in, which other connections may be matching; want it loaded into a copy")
+				}
 			})
 		}
 	}

@@ -219,6 +219,11 @@ func TestRecordV2_ThroughTheRelayAResponseTheClientClosedPartwayIsRecordedAsFarA
 		{name: "a head the client did not read whole", read: "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n", leftOut: true},
 		{name: "a head the client did not read whole, the parser behind its capture", behind: true,
 			read: "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n", leftOut: true},
+		// The interim answer's head is whole; the final one's is not, and
+		// it is the final answer that is no response.
+		{name: "an interim answer, then a final head the client did not read whole",
+			head: "HTTP/1.1 103 Early Hints\r\nLink: </app.css>; rel=preload\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2000\r\n\r\n",
+			read: "HTTP/1.1 103 Early Hints\r\nLink: </app.css>; rel=preload\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n", leftOut: true},
 		// A 304's Content-Length is the size of the body a 200 would have
 		// had: the head is the whole answer, recorded with the length it
 		// was sent with, and served whole.

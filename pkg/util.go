@@ -5225,7 +5225,7 @@ func CompressWithoutEnd(logger *zap.Logger, encoding string, data []byte) ([]byt
 // does not. A writer goes back to its pool only once it compressed data
 // whole: Reset makes a flushed writer, as a closed one, what a new writer is.
 // It goes back Reset to no buffer, so the pool keeps no call's bytes
-// reachable: a flushed writer, unlike a closed one, still points at them.
+// reachable: else a flushed writer, and a closed gzip one, would point at them.
 func compress(logger *zap.Logger, encoding string, data []byte, end bool) ([]byte, error) {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "gzip":
