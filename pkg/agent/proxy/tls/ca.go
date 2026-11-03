@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -257,6 +258,9 @@ func SetupCA(ctx context.Context, logger *zap.Logger, isDocker bool) error {
 // app via -Djavax.net.ssl.trustStore=, so the "which keytool" problem
 // doesn't apply there.
 func SetupCAForApp(ctx context.Context, logger *zap.Logger, isDocker bool, appPID int, javaHomeOverride string) error {
+	// Before the native install adds keploy's CA to the system store, and
+	// before SSL_CERT_FILE is pointed at keploy's files.
+	loadOwnRoots()
 	// Establish this run's CA (fresh in memory, or reused from the per-pod /
 	// per-user backend) and publish it before anything signs or installs it.
 	ca, store, err := loadOrGenerateActiveCA(logger, isDocker)
@@ -291,6 +295,7 @@ func SetupCaCertEnv(logger *zap.Logger, certPEM []byte) error {
 	if len(certPEM) == 0 {
 		return fmt.Errorf("SetupCaCertEnv: no CA certificate provided (fetch it from the agent first)")
 	}
+	loadOwnRoots()
 	tempPath, err := extractCertToTemp(certPEM)
 	if err != nil {
 		utils.LogError(logger, err, "Failed to extract certificate to tmp folder")
@@ -466,6 +471,9 @@ func setEnvForSharedVolume(logger *zap.Logger, mergedPath, keployOnlyPath string
 
 func setEnvVars(logger *zap.Logger, envVars map[string]string) error {
 	for key, val := range envVars {
+		if key == envSSLCertFile {
+			noteKeployCertFile(val)
+		}
 		if err := os.Setenv(key, val); err != nil {
 			utils.LogError(logger, err, "Failed to set environment variable", zap.String("key", key))
 			return err
@@ -476,19 +484,20 @@ func setEnvVars(logger *zap.Logger, envVars map[string]string) error {
 
 // systemCABundleSearchPaths is the ranked list of well-known locations where
 // Linux/Unix distributions (and busybox/Alpine-derived images) place the OS
-// trust store. The first readable, non-empty file wins.
+// trust store. The first file holding a certificate wins.
 //
 // Ordering mirrors Go's crypto/x509 certFiles but is duplicated here because
-// we need the file BYTES (not the parsed roots) — the shared volume is
-// consumed by non-Go clients (curl, python/requests, node.js, rust/reqwest,
-// ...) that each parse PEM directly.
+// we need the certificates as PEM (re-encoded by appendTrustedCerts), not a
+// parsed pool — the shared volume is consumed by non-Go clients (curl,
+// python/requests, node.js, rust/reqwest, ...) that each parse PEM directly.
 var systemCABundleSearchPaths = []string{
-	"/etc/ssl/certs/ca-certificates.crt",     // Debian, Ubuntu, Alpine
-	"/etc/pki/tls/certs/ca-bundle.crt",       // RHEL, Fedora, CentOS
-	"/etc/ssl/ca-bundle.pem",                 // openSUSE
-	"/etc/pki/tls/cacert.pem",                // older RHEL
-	"/usr/local/share/certs/ca-root-nss.crt", // FreeBSD
-	"/etc/ssl/cert.pem",                      // Alpine alternate, macOS
+	"/etc/ssl/certs/ca-certificates.crt",                // Debian, Ubuntu, Alpine
+	"/etc/pki/tls/certs/ca-bundle.crt",                  // RHEL, Fedora, CentOS
+	"/etc/ssl/ca-bundle.pem",                            // openSUSE
+	"/etc/pki/tls/cacert.pem",                           // older RHEL
+	"/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", // CentOS/RHEL 7
+	"/usr/local/share/certs/ca-root-nss.crt",            // FreeBSD
+	"/etc/ssl/cert.pem",                                 // Alpine alternate, macOS
 }
 
 // loadSystemCABundleFn is an indirection seam for tests — production code uses
@@ -496,221 +505,371 @@ var systemCABundleSearchPaths = []string{
 // stub that reads from a tempdir-backed search list.
 var loadSystemCABundleFn = loadSystemCABundle
 
-// distroIndicatorPaths are filesystem signals that the container has a
-// "normal" Linux trust-store layout that the postinst trigger of the
-// `ca-certificates` package would have populated. If at least one of these
-// is present (as a directory or file), the absence of the expected bundle
-// file is a build/runtime regression — the image *should* have it. If none
-// of these is present, the image is almost certainly a deliberately
-// stripped distroless / scratch base, where the missing bundle is
-// expected. We use this signal to choose between ERROR (regression) and
-// INFO (intentional minimal image).
-//
-// Keep this list narrow: every entry needs to be something a distroless
-// image would lack. /etc/ssl/certs/ is the canonical Debian/Ubuntu/Alpine
-// directory; /etc/pki/tls/certs/ is the RHEL/Fedora analogue. Both are
-// created by the ca-certificates package at install time.
-var distroIndicatorPaths = []string{
-	"/etc/ssl/certs",
-	"/etc/pki/tls/certs",
+// The environment variables through which an operator names the trust store,
+// read as Go's crypto/x509 reads them on Linux: SSL_CERT_FILE is one PEM bundle
+// that replaces the default bundle paths, SSL_CERT_DIR a list of directories of
+// PEM files.
+const (
+	envSSLCertFile = "SSL_CERT_FILE"
+	envSSLCertDir  = "SSL_CERT_DIR"
+)
+
+// certEnv is the trust store an operator named through the environment.
+type certEnv struct {
+	file string // SSL_CERT_FILE
+	dir  string // SSL_CERT_DIR, or systemCABundleSearchDirs when it is unset
+	// defaultDir says dir is systemCABundleSearchDirs, not the operator's:
+	// a default directory that adds nothing is no misconfiguration.
+	defaultDir bool
 }
 
-// hasDistroTrustLayout reports whether the runtime image *appears* to have
-// the kind of base layout where the OS CA bundle would normally be
-// installed by `ca-certificates`. This is a heuristic — it can produce a
-// false-positive ERROR if an operator is intentionally running on a
-// non-distroless image without `ca-certificates` installed, and a
-// false-negative (silent INFO) if a distroless image happens to have an
-// empty /etc/ssl/certs directory. Both edge cases are rare and the
-// remediation message in both log paths is identical, so the cost of a
-// misclassification is low.
-//
-// Indirected via an fn-var so tests can stub the result without mocking
-// the filesystem.
-var hasDistroTrustLayoutFn = hasDistroTrustLayout
+// systemCABundleSearchDirs are the certificate directories crypto/x509 reads
+// when SSL_CERT_DIR is unset (crypto/x509/root_linux.go). A CA dropped into one
+// of them (with no bundle file rebuilt) is trusted by Go programs, so it must
+// reach the apps' bundle too. Elsewhere keploy reads no default directory.
+var systemCABundleSearchDirs = defaultCertDirs(runtime.GOOS)
 
-// Treat anything OTHER than "file not present" (ENOENT) as "indicator
-// present". A permission-denied / IO-error Stat result on /etc/ssl/certs
-// is overwhelmingly more likely on a distro-shaped image where the
-// bundle directory exists but the agent process can't traverse it
-// (SELinux, container-user-namespace remap, weird overlay) than on a
-// distroless image. Treating those errors as "absent" would silently
-// downgrade ERROR → INFO and let the misconfiguration that #375 was
-// raised against slip past alert pipelines.
-func hasDistroTrustLayout() bool {
-	for _, p := range distroIndicatorPaths {
-		if _, err := os.Stat(p); err == nil || !os.IsNotExist(err) {
-			return true
-		}
+func defaultCertDirs(goos string) []string {
+	if goos == "linux" {
+		return []string{"/etc/ssl/certs", "/etc/pki/tls/certs"}
 	}
-	return false
+	return nil
+}
+
+// certFileEnv tracks keploy's own writes of SSL_CERT_FILE in this process.
+//
+// keploy points SSL_CERT_FILE at files it wrote itself: the merged bundle in
+// the shared volume, or the lone keploy CA in native mode (SetEnvForPath). Read
+// back as "the operator's trust store", such a file would feed keploy's CA, or
+// nothing but keploy's CA, into the next bundle built in this process — the
+// client builds its Java truststore right after SetEnvForPath. So the value
+// keploy replaced is kept, and operatorCertEnv reads that one instead.
+var certFileEnv struct {
+	sync.Mutex
+	ours     map[string]bool // values keploy set SSL_CERT_FILE to
+	operator string          // the last value of SSL_CERT_FILE keploy did not set
+}
+
+// loadOwnRoots makes crypto/x509 load this process's system roots now, before
+// keploy changes what it would read. crypto/x509 reads SSL_CERT_FILE once, on
+// the process's first use of the system pool — on Linux, and since Go 1.27 on
+// macOS and Windows too — and on Linux reads the system bundle files then as
+// well. keploy points SSL_CERT_FILE at files meant for the app, and in native
+// mode adds its CA to the Linux system bundle. Loaded after that, keploy's own
+// TLS (its upstream verification, its calls to the keploy API) would trust
+// keploy's MITM CA, or with SSL_CERT_FILE at the lone keploy CA only it. (On
+// macOS and Windows with SSL_CERT_FILE unset, the platform verifier reads the
+// OS store at verify time; loading early does not change that.) main calls it
+// first thing; these calls cover other embedders. Later calls are a cheap copy
+// of the loaded pool.
+func loadOwnRoots() { _, _ = x509.SystemCertPool() }
+
+// noteKeployCertFile records that keploy is about to set SSL_CERT_FILE to path,
+// loading this process's own roots first (loadOwnRoots) in case no caller did.
+func noteKeployCertFile(path string) {
+	loadOwnRoots()
+	certFileEnv.Lock()
+	defer certFileEnv.Unlock()
+	if certFileEnv.ours == nil {
+		certFileEnv.ours = make(map[string]bool)
+	}
+	if cur := os.Getenv(envSSLCertFile); !certFileEnv.ours[cur] {
+		certFileEnv.operator = cur
+	}
+	certFileEnv.ours[path] = true
+}
+
+// operatorCertEnv returns SSL_CERT_FILE and SSL_CERT_DIR as the operator (or a
+// wrapper such as the enterprise agent's trust-root setup) set them: when
+// SSL_CERT_FILE currently names a file keploy wrote, the value it replaced.
+func operatorCertEnv() certEnv {
+	certFileEnv.Lock()
+	defer certFileEnv.Unlock()
+	file := os.Getenv(envSSLCertFile)
+	if certFileEnv.ours[file] {
+		file = certFileEnv.operator
+	}
+	return certEnv{file: file, dir: os.Getenv(envSSLCertDir)}
 }
 
 // systemCABundleSourceEmbedded is the sentinel returned in the source-path
-// position of loadSystemCABundle when the disk search produced no readable
-// bundle and we fell back to the embeddedFallbackRoots blob. Operators see
-// this string in startup logs and in the merged-bundle source field.
+// position of loadSystemCABundle when no CA bundle file was found and the
+// embeddedFallbackRoots blob stands in for one. Operators see this string in
+// startup logs and in the merged-bundle source field.
 const systemCABundleSourceEmbedded = "<embedded:mozilla-roots.pem>"
 
-// severity_reason values. These are stable, enum-like strings so alert
-// rules and downstream log parsers can key off them without breaking when
-// the human-readable wording in severity_explanation is tightened. Add a
-// new constant rather than reusing one with a different meaning.
-const (
-	severityReasonDistroLayoutPresent = "distro_layout_present"
-	severityReasonNoDistroLayout      = "no_distro_layout"
-)
+// corporateCAHint is how an operator adds a CA of their own to the bundle the
+// apps trust. It is a hint, not a fix: a missing system bundle needs none.
+const corporateCAHint = "to trust a corporate CA as well, mount it into the keploy agent container and " +
+	"set SSL_CERT_DIR to its directory (added to these roots), or set SSL_CERT_FILE to a complete PEM " +
+	"bundle that holds the public roots too (it replaces them)"
 
 // loadSystemCABundle returns trust-anchor PEM bytes for merging with the
-// Keploy MITM CA into the shared-volume bundle, plus a source identifier
-// for logging. Lookup order:
+// Keploy MITM CA into the shared-volume bundle (and the native Java
+// truststore), plus a source identifier for logging. It reads the trust store
+// the way Go's crypto/x509 does on Linux:
 //
-//  1. Disk paths in systemCABundleSearchPaths — the well-known Linux
-//     locations where `ca-certificates` (Debian/Ubuntu/Alpine) or
-//     equivalent (RHEL/Fedora/openSUSE/FreeBSD) installs the OS trust
-//     store. First readable, non-empty file wins.
-//  2. embeddedFallbackRoots — Mozilla NSS roots from x509roots/fallback,
-//     compiled into the agent binary. Used when every disk
-//     path was missing/empty.
+//  1. The bundle file: SSL_CERT_FILE when the operator set it, otherwise the
+//     first file in systemCABundleSearchPaths holding a certificate. When
+//     there is neither — an image that ships no CA bundle, like the keploy
+//     enterprise agent image — embeddedFallbackRoots, the Mozilla NSS roots
+//     compiled into the binary, stands in for it. That is the normal path for
+//     such an image, not a fault.
+//  2. Plus every certificate in the directories SSL_CERT_DIR names, or when it
+//     is unset in systemCABundleSearchDirs, not already in the bundle.
 //
-// This function used to return (nil, "") on miss, leaving the merged
-// bundle to contain only the Keploy MITM CA. That state was the tail
-// half of the failure mode in keploy/k8s-proxy#375: an orphan-mutated
-// pod whose agent had no system trust store served apps a trust bundle
-// that contained only Keploy's MITM root. Combined with an inactive
-// eBPF redirect (the head half of that incident), every public-endpoint
-// HTTPS call fell back to direct-to-internet routing and validated the
-// real cert chain against keploy-only roots, producing
-// CERTIFICATE_VERIFY_FAILED. The embedded fallback closes that failure
-// class regardless of disk state, distroless vs not, weird volume
-// mounts, SELinux denials, or future regressions in image builds.
+// Certificates read from files are re-encoded, without what appendTrustedCerts
+// leaves out: anything but a certificate, and keploy's own CAs.
 //
-// We still log when disk search comes up empty — that's a useful signal
-// for operators to investigate WHY the disk bundle is missing — but the
-// log severity differs:
-//
-//   - Distro-shaped image (presence of /etc/ssl/certs or similar)
-//     missing its bundle is a build/runtime regression. ERROR.
-//   - Distroless / scratch image with no trust-store layout is an
-//     intentional operator choice. INFO.
-//
-// In either case the embedded fallback is now used so the app's trust
-// store still works.
+// Three deliberate differences from crypto/x509: an SSL_CERT_FILE that cannot
+// be used is reported and skipped rather than leaving no bundle file; a fixed
+// bundle path holding no certificate (an empty file, say) is skipped where Go
+// stops at the first readable one; and the embedded roots stand in for a
+// missing bundle file even when the directories add certificates. Each way the
+// apps keep public roots: the merged bundle is never just the Keploy MITM CA,
+// which is what made every public-endpoint HTTPS call fail
+// CERTIFICATE_VERIFY_FAILED in keploy/k8s-proxy#375.
 func loadSystemCABundle(logger *zap.Logger) ([]byte, string) {
-	return loadSystemCABundleFromPathsAndFallback(logger, systemCABundleSearchPaths, embeddedFallbackRoots)
+	env := operatorCertEnv()
+	if env.dir == "" && len(systemCABundleSearchDirs) > 0 {
+		env.dir, env.defaultDir = strings.Join(systemCABundleSearchDirs, string(filepath.ListSeparator)), true
+	}
+	return loadCABundle(logger, env, systemCABundleSearchPaths, embeddedFallbackRoots)
 }
 
-// loadSystemCABundleFromPaths is retained as the disk-only path used by
-// existing tests. It does NOT consult the embedded fallback — those tests
-// assert disk-search behavior in isolation. Production code goes through
-// loadSystemCABundleFromPathsAndFallback.
+// loadSystemCABundleFromPaths is the disk-only path used by tests: no
+// environment and no embedded fallback, so they assert the disk search in
+// isolation. Production code goes through loadSystemCABundle.
 func loadSystemCABundleFromPaths(logger *zap.Logger, paths []string) ([]byte, string) {
-	return loadSystemCABundleFromPathsAndFallback(logger, paths, nil)
+	return loadCABundle(logger, certEnv{}, paths, nil)
 }
 
-// loadSystemCABundleFromPathsAndFallback is the testable core. fallback
-// may be nil to disable the embedded path (used by disk-only tests).
-func loadSystemCABundleFromPathsAndFallback(logger *zap.Logger, paths []string, fallback []byte) ([]byte, string) {
-	tried := make([]string, 0, len(paths))
-	for _, p := range paths {
-		tried = append(tried, p)
-		data, err := os.ReadFile(p)
-		if err != nil {
-			// ENOENT / EACCES / etc. — most hosts only have one of these
-			// candidates; silently try the next.
-			continue
+// loadCABundle is the testable core of loadSystemCABundle. fallback may be nil
+// to disable the embedded roots (the disk-only tests).
+func loadCABundle(logger *zap.Logger, env certEnv, paths []string, fallback []byte) ([]byte, string) {
+	var bundle []byte
+	var sources []string
+
+	if env.file != "" {
+		data, err := readCertBundleFile(env.file)
+		switch {
+		case err == nil:
+			bundle, sources = data, append(sources, env.file)
+		case errors.Is(err, errOnlyKeployCAs):
+			// keploy's own output, inherited from a keploy process (or left by
+			// an earlier run): not the operator's trust store.
+			logger.Debug("SSL_CERT_FILE names a file holding only keploy's own CA; leaving it out of the trust bundle",
+				zap.String("ssl_cert_file", env.file))
+		case warnOnce(envSSLCertFile + "=" + env.file):
+			logger.Warn("SSL_CERT_FILE names no usable CA bundle, so keploy leaves it out of the trust bundle it gives the app",
+				zap.String("ssl_cert_file", env.file),
+				zap.Error(err),
+				zap.String("next_step", "point SSL_CERT_FILE at a readable PEM bundle where keploy runs (for docker or k8s, mount it into the keploy agent container), or unset it to use the system bundle or keploy's built-in Mozilla roots"))
 		}
-		if len(data) == 0 {
-			// Present-but-empty is almost always a broken image build; fall
-			// through rather than silently producing a zero-trust bundle.
-			continue
+	}
+	if bundle == nil {
+		if data, p := firstCertBundle(paths); data != nil {
+			bundle, sources = data, append(sources, p)
 		}
-		return data, p
+	}
+	if bundle == nil && len(fallback) > 0 {
+		bundle, sources = fallback, append(sources, systemCABundleSourceEmbedded)
+		logger.Debug("no CA bundle file found; the app's trust bundle uses the Mozilla root list built into keploy",
+			zap.Strings("searched_paths", paths),
+			zap.Int("embedded_roots_bytes", len(fallback)),
+			zap.String("corporate_ca", corporateCAHint))
 	}
 
-	// Disk search exhausted. Decide log severity based on whether the
-	// image *should* have had a disk bundle (distro-shaped) vs whether
-	// the absence was expected (distroless / scratch). When fallback is
-	// non-nil (production code path) both severities continue with the
-	// embedded Mozilla NSS roots so apps still get real public roots.
-	// When fallback is nil (the disk-only test entry point and any
-	// future caller that explicitly opts out of the embedded blob) the
-	// log message must NOT claim a fallback happened — there isn't one
-	// — so we vary the body on len(fallback) > 0.
-	//
-	// Keeping the actionable remediation guidance identical across the
-	// two severities means operators don't have to learn two variants;
-	// only the level and the leading sentence differ.
-	const remediation = " To restore the disk path, ensure the Keploy " +
-		"AGENT container (the writer of this shared volume — not the " +
-		"app container) has access to an OS trust bundle at one of the " +
-		"searched paths: install `ca-certificates` in the agent image " +
-		"(`apt-get install -y ca-certificates` on Debian/Ubuntu, " +
-		"`apk add ca-certificates` on Alpine), mount the host's bundle " +
-		"into the agent pod, or rebuild from a base image that ships " +
-		"trust roots. Fixing this in the app image does NOT help: " +
-		"REQUESTS_CA_BUNDLE / SSL_CERT_FILE etc. are wired to this " +
-		"shared file, so they replace whatever the app image already " +
-		"trusts."
-
-	var msg string
-	if len(fallback) > 0 {
-		msg = "No system CA bundle found on any known disk path — falling " +
-			"back to the agent's embedded Mozilla NSS roots. The merged " +
-			"/tmp/keploy-tls/ca.crt will contain (embedded_roots ∪ " +
-			"Keploy MITM CA), so the app's trust store is still valid for " +
-			"public endpoints." + remediation
-	} else {
-		// fallback==nil: no embedded blob is being used (the disk-only
-		// test entry point loadSystemCABundleFromPaths takes this
-		// branch). Saying we "fell back to the embedded Mozilla NSS
-		// roots" here would be misleading — the merged bundle in this
-		// shape contains only the Keploy MITM CA.
-		msg = "No system CA bundle found on any known disk path and no " +
-			"embedded fallback configured — the merged " +
-			"/tmp/keploy-tls/ca.crt will contain only the Keploy MITM " +
-			"CA, which is NOT a valid trust store for public endpoints." +
-			remediation
+	if env.dir != "" {
+		extra, dirs, found, keploys := readCertDirs(env.dir, bundle)
+		if len(extra) > 0 {
+			bundle, sources = mergeCABundle(bundle, extra), append(sources, dirs...)
+		}
+		switch {
+		case found > 0, env.defaultDir:
+		case keploys > 0:
+			logger.Debug("SSL_CERT_DIR holds only keploy's own CA; it adds nothing to the trust bundle",
+				zap.String("ssl_cert_dir", env.dir))
+		case warnOnce(envSSLCertDir + "=" + env.dir):
+			logger.Warn("SSL_CERT_DIR names no directory holding a PEM certificate, so it adds nothing to the trust bundle keploy gives the app",
+				zap.String("ssl_cert_dir", env.dir),
+				zap.String("next_step", "put the CA certificates (PEM files) in a directory where keploy runs (for docker or k8s, mount it into the keploy agent container) and point SSL_CERT_DIR at it, or unset it"))
+		}
 	}
 
-	fields := []zap.Field{
-		zap.Strings("searched_paths", tried),
-		zap.Strings("distro_indicator_paths", distroIndicatorPaths),
-		zap.Int("embedded_fallback_bytes", len(fallback)),
+	if len(bundle) > 0 {
+		return bundle, strings.Join(sources, ",")
 	}
-
-	// severity_explanation describes WHY this severity was chosen — it
-	// must not claim the embedded fallback was used when it wasn't.
-	// Whether the fallback is in effect is already conveyed by the
-	// `embedded_fallback_bytes` structured field and by the leading
-	// sentence of `msg`, so the explanation stays focused on the
-	// distro-shape decision.
-	if hasDistroTrustLayoutFn() {
-		// Image looks distro-shaped (Debian/Ubuntu/Alpine/RHEL family) —
-		// missing disk bundle is a real misconfiguration. ERROR so
-		// alerting catches it. We still produce a working trust store
-		// via the embedded fallback; ERROR is the operator-facing signal
-		// to investigate the agent image / volume mounts / SELinux.
-		logger.Error(msg, append(fields,
-			zap.String("severity_reason", severityReasonDistroLayoutPresent),
-			zap.String("severity_explanation", "image looks distro-shaped (stat did not return ENOENT for at least one of the distro_indicator_paths — the entry exists, or stat hit a non-not-found error such as EACCES, which still implies a distro-shaped layer) so the missing disk bundle is a regression rather than an intentional minimal-image choice"),
-		)...)
-	} else {
-		// Truly distroless — the operator deliberately stripped the trust
-		// store; raising the level here would create alert fatigue.
-		logger.Info(msg, append(fields,
-			zap.String("severity_reason", severityReasonNoDistroLayout),
-			zap.String("severity_explanation", "image has no distro trust-store layout (distroless / scratch); the missing disk bundle is expected"),
-		)...)
-	}
-
-	if len(fallback) > 0 {
-		return fallback, systemCABundleSourceEmbedded
-	}
-	// fallback==nil only happens via the disk-only test entry point.
-	// Production callers always pass embeddedFallbackRoots which is
-	// always non-empty (built from the compiled-in NSS bundle).
+	// Reachable only with a nil fallback (the disk-only tests): production
+	// always passes embeddedFallbackRoots, which is never empty.
+	logger.Warn("no CA bundle found and no embedded fallback configured — the merged bundle will contain only the Keploy MITM CA, which is NOT a valid trust store for public endpoints",
+		zap.Strings("searched_paths", paths))
 	return nil, ""
+}
+
+// firstCertBundle returns the certificates (readCertBundleFile) of the first
+// file in paths that holds one, and its path.
+func firstCertBundle(paths []string) ([]byte, string) {
+	for _, p := range paths {
+		// A missing or unreadable candidate is normal — most hosts have only
+		// one of them. One holding no certificate (empty: almost always a
+		// broken image build) is skipped rather than produce a zero-trust
+		// bundle, and so is one holding only keploy's CA.
+		if data, err := readCertBundleFile(p); err == nil {
+			return data, p
+		}
+	}
+	return nil, ""
+}
+
+// certEnvWarned holds the SSL_CERT_FILE / SSL_CERT_DIR values already reported
+// as unusable: the bundle is built more than once in a process (the shared
+// volume, the upstream roots), and one Warn per value is enough.
+var certEnvWarned sync.Map
+
+// warnOnce reports whether key has not been warned about yet in this process.
+func warnOnce(key string) bool {
+	_, seen := certEnvWarned.LoadOrStore(key, true)
+	return !seen
+}
+
+// errOnlyKeployCAs is a bundle whose only certificates are keploy's own CAs.
+var errOnlyKeployCAs = errors.New("the bundle holds only keploy's own CA")
+
+// readCertBundleFile returns the certificates in a bundle file, as PEM (see
+// appendTrustedCerts for what is left out). A file Go's crypto/x509 would load
+// no root from is an error.
+func readCertBundleFile(path string) ([]byte, error) {
+	data, err := readRegularFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var out bytes.Buffer
+	found, keploys := appendTrustedCerts(&out, data, make(map[[32]byte]bool))
+	if found == 0 {
+		if keploys > 0 {
+			return nil, errOnlyKeployCAs
+		}
+		blocks, _ := countPEMCertificateBlocks(data)
+		return nil, fmt.Errorf("%s holds no certificate (%d bytes, %d PEM CERTIFICATE block(s), none of them a certificate)", path, len(data), blocks)
+	}
+	return out.Bytes(), nil
+}
+
+// readCertDirs returns, as PEM, every certificate in the files of the
+// directories in dirList (read as crypto/x509 and OpenSSL read SSL_CERT_DIR)
+// that is not already in have, plus the directories that contributed one, how
+// many certificates it found in all (those already in have included), and how
+// many of keploy's own it left out. A
+// directory such as /etc/ssl/certs holds each root several times over (the
+// bundle, the per-root file and its hash links), so certificates are
+// de-duplicated.
+func readCertDirs(dirList string, have []byte) ([]byte, []string, int, int) {
+	seen := make(map[[32]byte]bool)
+	forEachPEMCertificate(have, func(der []byte) { seen[sha256.Sum256(der)] = true })
+
+	var out bytes.Buffer
+	var used []string
+	total, keployTotal := 0, 0
+	for _, dir := range filepath.SplitList(dirList) {
+		if dir == "" {
+			continue
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		before := out.Len()
+		for _, ent := range entries {
+			data, err := readRegularFile(filepath.Join(dir, ent.Name()))
+			if err != nil {
+				continue // a subdirectory, a FIFO, or unreadable
+			}
+			found, keploys := appendTrustedCerts(&out, data, seen)
+			total += found
+			keployTotal += keploys
+		}
+		if out.Len() > before {
+			used = append(used, dir)
+		}
+	}
+	return out.Bytes(), used, total, keployTotal
+}
+
+// readRegularFile reads path, links followed, refusing anything that is not a
+// regular file: a FIFO would block the read forever.
+func readRegularFile(path string) ([]byte, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	return os.ReadFile(path)
+}
+
+// appendTrustedCerts PEM-encodes into out every certificate in data that is
+// not in seen, and adds it to seen. A certificate is a block crypto/x509
+// parses, or one with a certificate's shape that Go's stricter parser rejects
+// (looksLikeCertificate): a negative serial number, which OpenSSL and Java
+// accept and macOS's /etc/ssl/cert.pem ships — the apps' bundle must keep it,
+// as generateTrustStore does. It leaves out:
+//
+//   - every block that is not a certificate: a private key in a combined
+//     cert+key file must never reach the bundle, which is world-readable and
+//     mounted into every app container;
+//   - keploy's own CAs (this or an earlier run's MITM CA, or the retired static
+//     one): a bundle keploy wrote, read back through SSL_CERT_FILE, or the
+//     system bundle keploy's native install added its CA to, must not carry a
+//     stale MITM CA into the next one. This run's CA is added by the caller
+//     anyway. keploy's MITM CAs always parse; the retired one is matched by
+//     fingerprint.
+//
+// It returns how many certificates other than keploy's it found (those already
+// in seen included) and how many of keploy's it left out.
+func appendTrustedCerts(out *bytes.Buffer, data []byte, seen map[[32]byte]bool) (found, keploys int) {
+	legacy, legacyOK := legacyCAFingerprint()
+	forEachPEMCertificate(data, func(der []byte) {
+		sum := sha256.Sum256(der)
+		if legacyOK && sum == legacy {
+			keploys++
+			return
+		}
+		if seen[sum] {
+			// Only certificates that are not keploy's enter seen, so this one
+			// was already found; /etc/ssl/certs repeats every root this way.
+			found++
+			return
+		}
+		if cert, err := x509.ParseCertificate(der); err == nil {
+			if strings.HasPrefix(cert.Subject.CommonName, caCNPrefix) {
+				keploys++
+				return
+			}
+		} else if !looksLikeCertificate(der) {
+			return
+		}
+		found++
+		seen[sum] = true
+		_ = pem.Encode(out, &pem.Block{Type: "CERTIFICATE", Bytes: der})
+	})
+	return found, keploys
+}
+
+// forEachPEMCertificate calls fn with the DER of every block in data that
+// AppendCertsFromPEM would consider: type CERTIFICATE, no headers.
+func forEachPEMCertificate(data []byte, fn func(der []byte)) {
+	for {
+		var block *pem.Block
+		block, data = pem.Decode(data)
+		if block == nil {
+			return
+		}
+		if block.Type == "CERTIFICATE" && len(block.Headers) == 0 {
+			fn(block.Bytes)
+		}
+	}
 }
 
 func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string, ca *caState) error {
@@ -718,8 +877,9 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string,
 		return fmt.Errorf("failed to create export dir: %w", err)
 	}
 
-	// Load the OS-provided CA bundle (best-effort — returns (nil, "") if no
-	// standard path is populated, which is normal on distroless/scratch).
+	// Load the trust roots the apps need besides keploy's CA: the operator's
+	// SSL_CERT_FILE / SSL_CERT_DIR, the OS bundle, or — on an image that ships
+	// none — the Mozilla roots built into keploy.
 	systemBundle, sourcePath := loadSystemCABundleFn(logger)
 
 	// Build the merged PEM bundle that goes into <exportPath>/ca.crt.
@@ -766,10 +926,9 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string,
 			zap.String("keploy_only_output", keployOnlyPath),
 		)
 	}
-	// When len(systemBundle) == 0 we deliberately emit NO log here:
-	// loadSystemCABundleFromPaths already logged an Info entry with the full
-	// list of searched paths and actionable remediation steps, so a second
-	// "Wrote Keploy MITM CA only" message would be redundant noise.
+	// When len(systemBundle) == 0 we deliberately emit NO log here: the
+	// loader already logged why, so a second "Wrote Keploy MITM CA only"
+	// message would be redundant noise.
 
 	if err := setEnvForSharedVolume(logger, crtPath, keployOnlyPath); err != nil {
 		logger.Debug("Failed to set internal env vars for Agent", zap.Error(err))

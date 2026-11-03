@@ -25,11 +25,50 @@ import (
 // stubSystemCertPool replaces the x509.SystemCertPool seam for the duration of
 // a test. Not t.Parallel()-safe (package-level var), matching the other fn-var
 // swapping tests in this package.
+//
+// It also treats the stubbed pool as a platform pool (not file-backed), so a
+// test's outcome does not depend on the host's trust store; tests of the
+// file-backed rule call stubFileBackedPool after it.
 func stubSystemCertPool(t *testing.T, pool *x509.CertPool, err error) {
 	t.Helper()
 	orig := systemCertPoolFn
 	systemCertPoolFn = func() (*x509.CertPool, error) { return pool, err }
 	t.Cleanup(func() { systemCertPoolFn = orig })
+	stubFileBackedPool(t, false)
+}
+
+// stubFileBackedPool sets whether the system pool counts as file-backed.
+func stubFileBackedPool(t *testing.T, fileBacked bool) {
+	t.Helper()
+	orig := systemPoolIsFileBacked
+	systemPoolIsFileBacked = fileBacked
+	t.Cleanup(func() { systemPoolIsFileBacked = orig })
+}
+
+// stubConstrainedNSSRoot makes the NSS root set the single CA given, with the
+// constraint given (nil for none).
+func stubConstrainedNSSRoot(t *testing.T, ca *x509.Certificate, constraint func([]*x509.Certificate) error) {
+	t.Helper()
+	old := nssRoots
+	nssRoots = func() iter.Seq[nssbundle.Root] {
+		return func(yield func(nssbundle.Root) bool) {
+			yield(nssbundle.Root{Certificate: ca.Raw, Constraint: constraint})
+		}
+	}
+	t.Cleanup(func() { nssRoots = old })
+}
+
+// errDistrusted is the constraint error the tests' NSS roots return.
+var errDistrusted = errors.New("distrusted after date")
+
+// requireDistrusted fails unless verr is the NSS constraint rejecting the
+// chain — not merely any verification error (an unknown authority would pass
+// a plain verr != nil check without the constraint ever being consulted).
+func requireDistrusted(t *testing.T, verr error) {
+	t.Helper()
+	if verr == nil || !strings.Contains(verr.Error(), errDistrusted.Error()) {
+		t.Fatalf("expected the NSS constraint to reject the chain; got %v", verr)
+	}
 }
 
 // stubSystemCABundle replaces keploy's own disk-search + embedded-roots loader.
@@ -436,6 +475,107 @@ func TestLoadUpstreamRootCAs_RealEmbeddedRoots_EnforcesNSSConstraints(t *testing
 	}
 }
 
+// A platform pool that holds exactly the compiled-in Mozilla list is that list
+// read back from a PEM file (SSL_CERT_FILE naming the file an image without a
+// bundle had the roots written to), which drops the NSS constraints. keploy's
+// own upstream verification must use the constrained pool instead, and a
+// platform pool that is anything else is still left to crypto/tls.
+//
+// FAILS BEFORE THE FIX: the platform pool was returned as is (nil to the
+// caller), so a chain to a root whose NSS constraint rejects it verified.
+func TestLoadUpstreamRootCAs_SystemPoolIsTheEmbeddedList_EnforcesNSSConstraints(t *testing.T) {
+	ca, caKey := newTestCA(t, "nss-constrained-root")
+	leaf := newTestLeaf(t, ca, caKey, "upstream.example")
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.Raw})
+
+	t.Run("control: an unconstrained root verifies", func(t *testing.T) {
+		stubConstrainedNSSRoot(t, ca, nil)
+		stubSystemCertPool(t, poolWith(t, caPEM), nil)
+		pool, err := LoadUpstreamRootCAs(zap.NewNop(), "")
+		if err != nil || pool == nil {
+			t.Fatalf("expected the NSS pool; pool=%v err=%v", pool, err)
+		}
+		if _, verr := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: "upstream.example"}); verr != nil {
+			t.Fatalf("leaf.Verify: %v", verr)
+		}
+	})
+
+	t.Run("the platform pool is the embedded list", func(t *testing.T) {
+		stubConstrainedNSSRoot(t, ca, func([]*x509.Certificate) error { return errDistrusted })
+		stubSystemCertPool(t, poolWith(t, caPEM), nil)
+		pool, err := LoadUpstreamRootCAs(zap.NewNop(), "")
+		if err != nil || pool == nil {
+			t.Fatalf("expected the constrained pool; pool=%v err=%v", pool, err)
+		}
+		_, verr := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: "upstream.example"})
+		requireDistrusted(t, verr)
+	})
+
+	t.Run("an operator CA is added to the constrained pool", func(t *testing.T) {
+		stubConstrainedNSSRoot(t, ca, func([]*x509.Certificate) error { return errDistrusted })
+		stubSystemCertPool(t, poolWith(t, caPEM), nil)
+		userCA := makeSelfSignedPEM(t, "private-corp-root")
+		path := filepath.Join(t.TempDir(), "corp-ca.pem")
+		if err := os.WriteFile(path, userCA, 0600); err != nil {
+			t.Fatal(err)
+		}
+		pool, err := LoadUpstreamRootCAs(zap.NewNop(), path)
+		if err != nil || pool == nil {
+			t.Fatalf("pool=%v err=%v", pool, err)
+		}
+		if !verifiesAgainst(t, userCA, pool) {
+			t.Error("the configured CA is not in the pool")
+		}
+		_, verr := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: "upstream.example"})
+		requireDistrusted(t, verr)
+	})
+
+	t.Run("a platform pool with more roots is left to crypto/tls", func(t *testing.T) {
+		stubConstrainedNSSRoot(t, ca, func([]*x509.Certificate) error { return errDistrusted })
+		stubSystemCertPool(t, poolWith(t, caPEM, makeSelfSignedPEM(t, "distro-root")), nil)
+		pool, err := LoadUpstreamRootCAs(zap.NewNop(), "")
+		if err != nil || pool != nil {
+			t.Fatalf("expected nil (Go's default); pool=%v err=%v", pool, err)
+		}
+	})
+}
+
+// The real embedded list, read back from its PEM rendering (what an image with
+// no bundle gets when SSL_CERT_FILE names a file it was written to), is
+// recognised as that list.
+func TestLoadUpstreamRootCAs_SystemPoolIsTheRealEmbeddedList_UsesNSSRootPool(t *testing.T) {
+	stubSystemCertPool(t, poolWith(t, embeddedFallbackRoots), nil)
+
+	pool, err := LoadUpstreamRootCAs(zap.NewNop(), "")
+	if err != nil || pool == nil {
+		t.Fatalf("expected the NSS root pool; pool=%v err=%v", pool, err)
+	}
+	want, _ := nssRootPool(nssRoots())
+	if !pool.Equal(want) {
+		t.Error("upstream pool does not hold exactly the NSS roots")
+	}
+}
+
+// The last-resort error must not tell operators to install `ca-certificates`
+// in keploy's image; the fix it names is a bundle of their own.
+func TestLoadUpstreamRootCAs_NothingLoadable_NextStepNamesSSLCertFile(t *testing.T) {
+	stubSystemCertPool(t, x509.NewCertPool(), nil)
+	stubSystemCABundle(t, nil, "")
+
+	logger, logs := newObservedLogger(t)
+	if _, err := LoadUpstreamRootCAs(logger, ""); err != nil {
+		t.Fatal(err)
+	}
+	errs := logs.FilterLevelExact(zap.ErrorLevel).All()
+	if len(errs) != 1 {
+		t.Fatalf("expected one ERROR; got %v", logs.All())
+	}
+	next, _ := errs[0].ContextMap()["next_step"].(string)
+	if !strings.Contains(next, "SSL_CERT_FILE") || strings.Contains(next, "ca-certificates") {
+		t.Fatalf("next_step = %q", next)
+	}
+}
+
 func newTestCA(t *testing.T, cn string) (*x509.Certificate, *ecdsa.PrivateKey) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -486,4 +626,123 @@ func newTestLeaf(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey, dn
 		t.Fatal(err)
 	}
 	return cert
+}
+
+// With no platform pool, keploy's bundle can be the embedded roots followed by
+// certificates SSL_CERT_DIR added. The embedded part keeps its NSS constraints
+// — even when an added certificate repeats an NSS root, which must not replace
+// the constrained copy — and the added certificates are trusted too.
+//
+// FAILS BEFORE THE FIX: only a bundle exactly equal to the embedded roots got
+// the constrained pool; this one was read as plain PEM, so the repeated root
+// verified the chain unconstrained.
+func TestLoadUpstreamRootCAs_EmbeddedRootsPlusCertDir_KeepsConstraints(t *testing.T) {
+	ca, caKey := newTestCA(t, "nss-constrained-root")
+	leaf := newTestLeaf(t, ca, caKey, "upstream.example")
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.Raw})
+	corp := makeSelfSignedPEM(t, "corp-root")
+	bundle := concat(embeddedFallbackRoots, caPEM, corp)
+
+	for _, tc := range []struct {
+		name       string
+		constraint func([]*x509.Certificate) error
+	}{
+		{"control: an unconstrained root verifies", nil},
+		{"the constraint is enforced", func([]*x509.Certificate) error { return errDistrusted }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubConstrainedNSSRoot(t, ca, tc.constraint)
+			stubSystemCertPool(t, x509.NewCertPool(), nil)
+			stubSystemCABundle(t, bundle, systemCABundleSourceEmbedded+",/corp/certs")
+
+			pool, err := LoadUpstreamRootCAs(zap.NewNop(), "")
+			if err != nil || pool == nil {
+				t.Fatalf("pool=%v err=%v", pool, err)
+			}
+			if !verifiesAgainst(t, corp, pool) {
+				t.Error("the SSL_CERT_DIR certificate is not in the pool")
+			}
+			_, verr := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: "upstream.example"})
+			if tc.constraint == nil {
+				if verr != nil {
+					t.Fatalf("leaf.Verify: %v", verr)
+				}
+				return
+			}
+			requireDistrusted(t, verr)
+		})
+	}
+}
+
+// On Linux, Go's pool is the trust-store files' certificates. An agent with
+// no CA bundle file and SSL_CERT_DIR naming a corporate CA — what keploy's own
+// hint suggests — has a Go pool of that CA alone. keploy's upstream
+// verification must use what the apps' bundle uses: the embedded roots (with
+// their constraints) plus the corporate CA. A platform-verifier pool (macOS,
+// Windows) is left alone.
+//
+// FAILS BEFORE THE FIX: the corporate-only pool was handed back as "system",
+// so keploy rejected every public upstream while the app trusted them.
+func TestLoadUpstreamRootCAs_FileBackedPoolWithoutABundleFile_UsesTheEmbeddedRoots(t *testing.T) {
+	ca, caKey := newTestCA(t, "public-root-stand-in")
+	leaf := newTestLeaf(t, ca, caKey, "upstream.example")
+	corp := makeSelfSignedPEM(t, "corp-root")
+
+	for _, tc := range []struct {
+		name       string
+		fileBacked bool
+		wantPool   bool
+	}{
+		{"file-backed (Linux)", true, true},
+		{"platform verifier (macOS, Windows)", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubConstrainedNSSRoot(t, ca, nil)
+			stubSystemCertPool(t, poolWith(t, corp), nil)
+			stubFileBackedPool(t, tc.fileBacked)
+			stubSystemCABundle(t, concat(embeddedFallbackRoots, corp), systemCABundleSourceEmbedded+",/corp/certs")
+
+			pool, err := LoadUpstreamRootCAs(zap.NewNop(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.wantPool {
+				if pool != nil {
+					t.Fatal("a platform-verifier pool must be left to crypto/tls (nil)")
+				}
+				return
+			}
+			if pool == nil {
+				t.Fatal("expected the embedded roots plus the corporate CA; got nil, i.e. the corporate CA alone")
+			}
+			if _, verr := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: "upstream.example"}); verr != nil {
+				t.Fatalf("a public upstream does not verify: %v", verr)
+			}
+			if !verifiesAgainst(t, corp, pool) {
+				t.Error("the corporate CA is not in the pool")
+			}
+		})
+	}
+
+	t.Run("file-backed: the built-in roots keep their constraints", func(t *testing.T) {
+		stubConstrainedNSSRoot(t, ca, func([]*x509.Certificate) error { return errDistrusted })
+		stubSystemCertPool(t, poolWith(t, corp), nil)
+		stubFileBackedPool(t, true)
+		stubSystemCABundle(t, concat(embeddedFallbackRoots, corp), systemCABundleSourceEmbedded+",/corp/certs")
+		pool, err := LoadUpstreamRootCAs(zap.NewNop(), "")
+		if err != nil || pool == nil {
+			t.Fatalf("pool=%v err=%v", pool, err)
+		}
+		_, verr := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: "upstream.example"})
+		requireDistrusted(t, verr)
+	})
+
+	t.Run("an agent with a CA bundle file keeps Go's pool", func(t *testing.T) {
+		stubSystemCertPool(t, poolWith(t, corp), nil)
+		stubFileBackedPool(t, true)
+		stubSystemCABundle(t, corp, "/etc/ssl/certs/ca-certificates.crt")
+		if pool, err := LoadUpstreamRootCAs(zap.NewNop(), ""); err != nil || pool != nil {
+			t.Fatalf("expected nil (Go's default); pool=%v err=%v", pool, err)
+		}
+	})
 }

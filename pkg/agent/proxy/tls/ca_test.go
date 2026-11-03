@@ -9,11 +9,13 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
 	"math/big"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -26,10 +28,10 @@ import (
 )
 
 const (
-	// Small dummy PEM blocks. The tests verify byte-level merge behaviour,
-	// not x509 parsing, so self-signed strings are fine.
+	// Small dummy PEM blocks for the tests that stub the loader and verify
+	// byte-level merge behaviour, not x509 parsing. The loader itself keeps
+	// only certificates x509 parses, so its tests use makeSelfSignedPEM.
 	systemBundleA = "-----BEGIN CERTIFICATE-----\nSYSTEM-A\n-----END CERTIFICATE-----\n"
-	systemBundleB = "-----BEGIN CERTIFICATE-----\nSYSTEM-B\n-----END CERTIFICATE-----\n"
 )
 
 // newObservedLogger returns a zap logger backed by an observer so tests can
@@ -45,13 +47,15 @@ func newObservedLogger(t *testing.T) (*zap.Logger, *observer.ObservedLogs) {
 // TestLoadSystemCABundle_HappyPath verifies the first readable, non-empty
 // path in the ranked list wins.
 func TestLoadSystemCABundle_HappyPath(t *testing.T) {
+	systemA := makeSelfSignedPEM(t, "system-a")
+	systemB := makeSelfSignedPEM(t, "system-b")
 	dir := t.TempDir()
 	first := filepath.Join(dir, "first-ca.crt")
 	second := filepath.Join(dir, "second-ca.crt")
-	if err := os.WriteFile(first, []byte(systemBundleA), 0644); err != nil {
+	if err := os.WriteFile(first, systemA, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(second, []byte(systemBundleB), 0644); err != nil {
+	if err := os.WriteFile(second, systemB, 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -60,7 +64,7 @@ func TestLoadSystemCABundle_HappyPath(t *testing.T) {
 	if source != first {
 		t.Fatalf("expected first path to win, got %q", source)
 	}
-	if string(data) != systemBundleA {
+	if !bytes.Equal(data, systemA) {
 		t.Fatalf("wrong bytes: got %q", string(data))
 	}
 }
@@ -68,10 +72,11 @@ func TestLoadSystemCABundle_HappyPath(t *testing.T) {
 // TestLoadSystemCABundle_FallbackOnMissing verifies that a missing first path
 // is skipped and the next readable path wins.
 func TestLoadSystemCABundle_FallbackOnMissing(t *testing.T) {
+	systemB := makeSelfSignedPEM(t, "system-b")
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "does-not-exist.crt")
 	second := filepath.Join(dir, "real-ca.crt")
-	if err := os.WriteFile(second, []byte(systemBundleB), 0644); err != nil {
+	if err := os.WriteFile(second, systemB, 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -80,7 +85,7 @@ func TestLoadSystemCABundle_FallbackOnMissing(t *testing.T) {
 	if source != second {
 		t.Fatalf("expected fallback to second path, got %q", source)
 	}
-	if string(data) != systemBundleB {
+	if !bytes.Equal(data, systemB) {
 		t.Fatalf("wrong bytes: got %q", string(data))
 	}
 }
@@ -88,13 +93,14 @@ func TestLoadSystemCABundle_FallbackOnMissing(t *testing.T) {
 // TestLoadSystemCABundle_FallbackOnEmpty verifies that a present-but-empty
 // first path is skipped in favour of the next non-empty one.
 func TestLoadSystemCABundle_FallbackOnEmpty(t *testing.T) {
+	systemB := makeSelfSignedPEM(t, "system-b")
 	dir := t.TempDir()
 	empty := filepath.Join(dir, "empty-ca.crt")
 	second := filepath.Join(dir, "real-ca.crt")
 	if err := os.WriteFile(empty, []byte{}, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(second, []byte(systemBundleB), 0644); err != nil {
+	if err := os.WriteFile(second, systemB, 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -103,69 +109,8 @@ func TestLoadSystemCABundle_FallbackOnEmpty(t *testing.T) {
 	if source != second {
 		t.Fatalf("expected empty first path to be skipped, got %q", source)
 	}
-	if !bytes.Equal(data, []byte(systemBundleB)) {
+	if !bytes.Equal(data, systemB) {
 		t.Fatalf("wrong bytes: got %q", string(data))
-	}
-}
-
-// withDistroLayout temporarily forces the loader's "is this a distro-shaped
-// image?" probe to a fixed boolean. Restores the original on test cleanup.
-// Used by the no-sources tests to assert ERROR-vs-INFO selection.
-func withDistroLayout(t *testing.T, present bool) {
-	t.Helper()
-	orig := hasDistroTrustLayoutFn
-	hasDistroTrustLayoutFn = func() bool { return present }
-	t.Cleanup(func() { hasDistroTrustLayoutFn = orig })
-}
-
-// TestLoadSystemCABundle_NoSources_DistroImageErrors covers the regression
-// captured in keploy/k8s-proxy#375: a Debian/Ubuntu/Alpine/RHEL-shaped agent
-// image where the bundle should have been installed by the
-// `ca-certificates` package but isn't readable at runtime (build regression
-// or runtime overlay shadow). This is a real misconfiguration that causes
-// CERTIFICATE_VERIFY_FAILED on every public-endpoint HTTPS call from
-// any orphan-mutated app pod — log at ERROR so alert pipelines catch it.
-// (We intentionally do NOT abort the agent: the proxy still works for
-// redirected traffic; the loud log is the operator-facing signal.)
-func TestLoadSystemCABundle_NoSources_DistroImageErrors(t *testing.T) {
-	withDistroLayout(t, true)
-	dir := t.TempDir()
-	missing1 := filepath.Join(dir, "a.crt")
-	missing2 := filepath.Join(dir, "b.crt")
-
-	logger, logs := newObservedLogger(t)
-	data, source := loadSystemCABundleFromPaths(logger, []string{missing1, missing2})
-	if data != nil {
-		t.Fatalf("expected nil data, got %d bytes", len(data))
-	}
-	if source != "" {
-		t.Fatalf("expected empty source, got %q", source)
-	}
-	if logs.Len() != 1 {
-		t.Fatalf("expected exactly 1 log entry, got %d", logs.Len())
-	}
-	entry := logs.All()[0]
-	if entry.Level != zap.ErrorLevel {
-		t.Fatalf("expected error level (image looks distro-shaped → missing bundle is a regression), got %s", entry.Level)
-	}
-	if !strings.Contains(entry.Message, "No system CA bundle found") {
-		t.Fatalf("unexpected log message: %q", entry.Message)
-	}
-	// severity_reason is a stable enum string (alert rules key off it).
-	// Assert exact equality so an accidental wording change in production
-	// fails this test instead of slipping past — that's the whole reason
-	// the field exists separately from the human-readable explanation.
-	var sawReason bool
-	for _, f := range entry.Context {
-		if f.Key == "severity_reason" {
-			sawReason = true
-			if f.String != severityReasonDistroLayoutPresent {
-				t.Fatalf("severity_reason: expected exact %q, got %q", severityReasonDistroLayoutPresent, f.String)
-			}
-		}
-	}
-	if !sawReason {
-		t.Fatalf("expected a severity_reason field on the ERROR entry; got context=%+v", entry.Context)
 	}
 }
 
@@ -185,7 +130,7 @@ func TestLoadSystemCABundle_EmbeddedFallback_ReturnsBytes(t *testing.T) {
 	missing2 := filepath.Join(dir, "b.crt")
 
 	logger, _ := newObservedLogger(t)
-	data, source := loadSystemCABundleFromPathsAndFallback(logger, []string{missing1, missing2}, embeddedFallbackRoots)
+	data, source := loadCABundle(logger, certEnv{}, []string{missing1, missing2}, embeddedFallbackRoots)
 
 	if len(data) == 0 {
 		t.Fatalf("expected non-empty data from embedded fallback, got empty")
@@ -269,15 +214,16 @@ func TestLoadSystemCABundle_EmbeddedFallback_ExcludesDistrustedRoots(t *testing.
 // Otherwise operators who deliberately mount a custom CA store at one of
 // the search paths would see their override silently replaced.
 func TestLoadSystemCABundle_DiskTakesPrecedence(t *testing.T) {
+	systemA := makeSelfSignedPEM(t, "system-a")
 	dir := t.TempDir()
 	primary := filepath.Join(dir, "primary.crt")
-	if err := os.WriteFile(primary, []byte(systemBundleA), 0644); err != nil {
+	if err := os.WriteFile(primary, systemA, 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	logger, _ := newObservedLogger(t)
-	data, source := loadSystemCABundleFromPathsAndFallback(logger, []string{primary}, embeddedFallbackRoots)
-	if string(data) != systemBundleA {
+	data, source := loadCABundle(logger, certEnv{}, []string{primary}, embeddedFallbackRoots)
+	if !bytes.Equal(data, systemA) {
 		t.Fatalf("disk path should win over embedded fallback; got %q", string(data[:min(len(data), 40)]))
 	}
 	if source != primary {
@@ -285,166 +231,53 @@ func TestLoadSystemCABundle_DiskTakesPrecedence(t *testing.T) {
 	}
 }
 
-// TestLoadSystemCABundle_NoSources_DistrolessImageStaysInfo verifies that a
-// truly distroless / scratch agent image (no /etc/ssl/certs, no /etc/pki/tls)
-// still logs at INFO. Distroless deployments deliberately ship without a
-// trust store, and bumping severity there would create alert fatigue.
-func TestLoadSystemCABundle_NoSources_DistrolessImageStaysInfo(t *testing.T) {
-	withDistroLayout(t, false)
+// An image that ships no CA bundle (the keploy enterprise agent image, a
+// distroless one, a k8s sidecar whose /etc/ssl/certs is an emptyDir) uses the
+// embedded Mozilla roots as a matter of course. That is not a fault, so it must
+// log nothing at Info or above, and nothing it logs may tell the operator to
+// install `ca-certificates` in keploy's image: that package is the MPL-2.0
+// license the enterprise image dropped it for, and the embedded roots already
+// give the apps a full trust bundle. The one pointer it keeps, at Debug, is how
+// to add a corporate CA.
+func TestLoadSystemCABundle_NoSources_WithEmbeddedFallback_IsQuiet(t *testing.T) {
 	dir := t.TempDir()
-	missing1 := filepath.Join(dir, "a.crt")
-	missing2 := filepath.Join(dir, "b.crt")
+	missing := []string{filepath.Join(dir, "a.crt"), filepath.Join(dir, "b.crt")}
 
-	logger, logs := newObservedLogger(t)
-	data, source := loadSystemCABundleFromPaths(logger, []string{missing1, missing2})
-	if data != nil {
-		t.Fatalf("expected nil data, got %d bytes", len(data))
+	core, logs := observer.New(zap.DebugLevel)
+	data, source := loadCABundle(zap.New(core), certEnv{}, missing, embeddedFallbackRoots)
+
+	if !bytes.Equal(data, embeddedFallbackRoots) || source != systemCABundleSourceEmbedded {
+		t.Fatalf("expected the embedded roots; got %d bytes from %q", len(data), source)
 	}
-	if source != "" {
-		t.Fatalf("expected empty source, got %q", source)
+	if n := logs.Filter(func(e observer.LoggedEntry) bool { return e.Level >= zap.InfoLevel }).Len(); n != 0 {
+		t.Fatalf("the embedded-roots path is the normal one for an image without a bundle and must log nothing at Info or above; got %v", logs.All())
 	}
-	if logs.Len() != 1 {
-		t.Fatalf("expected exactly 1 log entry, got %d", logs.Len())
+	assertNoCACertificatesAdvice(t, logs)
+	entries := logs.FilterMessageSnippet("Mozilla root list built into keploy").All()
+	if len(entries) != 1 {
+		t.Fatalf("expected one Debug entry naming the embedded roots; got %v", logs.All())
 	}
-	entry := logs.All()[0]
-	if entry.Level != zap.InfoLevel {
-		t.Fatalf("expected info level (image is distroless → missing bundle is expected), got %s", entry.Level)
-	}
-	if !strings.Contains(entry.Message, "No system CA bundle found") {
-		t.Fatalf("unexpected log message: %q", entry.Message)
-	}
-	// Exact-equality assertion on the stable enum value — see the
-	// matching block in TestLoadSystemCABundle_NoSources_DistroImageErrors
-	// for the rationale.
-	var sawReason bool
-	for _, f := range entry.Context {
-		if f.Key == "severity_reason" {
-			sawReason = true
-			if f.String != severityReasonNoDistroLayout {
-				t.Fatalf("severity_reason: expected exact %q, got %q", severityReasonNoDistroLayout, f.String)
-			}
-		}
-	}
-	if !sawReason {
-		t.Fatalf("expected a severity_reason field on the INFO entry; got context=%+v", entry.Context)
+	if hint, _ := entries[0].ContextMap()["corporate_ca"].(string); !strings.Contains(hint, "SSL_CERT_FILE") || !strings.Contains(hint, "SSL_CERT_DIR") {
+		t.Fatalf("the corporate_ca hint must point at SSL_CERT_FILE / SSL_CERT_DIR; got %q", hint)
 	}
 }
 
-// TestLoadSystemCABundle_NoSources_WithEmbeddedFallback_DistroErrors mirrors
-// TestLoadSystemCABundle_NoSources_DistroImageErrors but exercises the
-// PRODUCTION entry shape — loadSystemCABundleFromPathsAndFallback with a
-// non-nil fallback — so that we cover the real outcome an operator sees
-// when /etc/ssl/certs is missing on a distro-shaped image: the agent
-// returns the embedded Mozilla NSS bytes and the source flips to the
-// "<embedded:...>" sentinel, on top of the same ERROR severity as the
-// disk-only test asserts. The disk-only twin remains so we keep the
-// no-fallback behaviour pinned for any future caller that opts out of
-// the embedded blob.
-func TestLoadSystemCABundle_NoSources_WithEmbeddedFallback_DistroErrors(t *testing.T) {
-	withDistroLayout(t, true)
-	dir := t.TempDir()
-	missing1 := filepath.Join(dir, "a.crt")
-	missing2 := filepath.Join(dir, "b.crt")
-
-	logger, logs := newObservedLogger(t)
-	data, source := loadSystemCABundleFromPathsAndFallback(logger, []string{missing1, missing2}, embeddedFallbackRoots)
-
-	if !bytes.Equal(data, embeddedFallbackRoots) {
-		t.Fatalf("expected embedded fallback bytes when fallback is supplied; got %d bytes vs %d", len(data), len(embeddedFallbackRoots))
-	}
-	if source != systemCABundleSourceEmbedded {
-		t.Fatalf("expected source=%q, got %q", systemCABundleSourceEmbedded, source)
-	}
-	if logs.Len() != 1 {
-		t.Fatalf("expected exactly 1 log entry, got %d", logs.Len())
-	}
-	entry := logs.All()[0]
-	if entry.Level != zap.ErrorLevel {
-		t.Fatalf("expected ERROR (distro layout present), got %s", entry.Level)
-	}
-	if !strings.Contains(entry.Message, "No system CA bundle found") {
-		t.Fatalf("unexpected log message: %q", entry.Message)
-	}
-	// The fallback-supplied branch's message must reference the embedded
-	// roots — that's the operator-facing distinction between this branch
-	// and the no-fallback one (see message-conditioning in
-	// loadSystemCABundleFromPathsAndFallback). Asserting on the
-	// "embedded Mozilla NSS roots" phrase pins the message body so a
-	// future refactor can't silently revert to the misleading "falling
-	// back to embedded" wording when fallback is empty.
-	if !strings.Contains(entry.Message, "embedded Mozilla NSS roots") {
-		t.Fatalf("expected message to mention embedded Mozilla NSS roots when fallback is supplied; got %q", entry.Message)
-	}
-	// severity_reason still pins to the distro_layout_present enum.
-	var sawReason bool
-	for _, f := range entry.Context {
-		if f.Key == "severity_reason" {
-			sawReason = true
-			if f.String != severityReasonDistroLayoutPresent {
-				t.Fatalf("severity_reason: expected exact %q, got %q", severityReasonDistroLayoutPresent, f.String)
+// assertNoCACertificatesAdvice fails if any logged message or field tells the
+// operator to install a CA package in keploy's image.
+func assertNoCACertificatesAdvice(t *testing.T, logs *observer.ObservedLogs) {
+	t.Helper()
+	for _, e := range logs.All() {
+		texts := []string{e.Message}
+		for _, v := range e.ContextMap() {
+			if s, ok := v.(string); ok {
+				texts = append(texts, s)
 			}
 		}
-	}
-	if !sawReason {
-		t.Fatalf("expected a severity_reason field on the ERROR entry; got context=%+v", entry.Context)
-	}
-	// embedded_fallback_bytes must report the supplied fallback length,
-	// not zero — otherwise a future regression that drops the fallback
-	// silently would still claim the production path was exercised.
-	var sawBytes bool
-	for _, f := range entry.Context {
-		if f.Key == "embedded_fallback_bytes" {
-			sawBytes = true
-			if f.Integer != int64(len(embeddedFallbackRoots)) {
-				t.Fatalf("embedded_fallback_bytes: got %d, want %d", f.Integer, len(embeddedFallbackRoots))
+		for _, s := range texts {
+			if strings.Contains(s, "ca-certificates") || strings.Contains(s, "apt-get") || strings.Contains(s, "apk add") {
+				t.Fatalf("log tells the operator to install a CA package in keploy's image: %q", s)
 			}
 		}
-	}
-	if !sawBytes {
-		t.Fatalf("expected embedded_fallback_bytes field; got context=%+v", entry.Context)
-	}
-}
-
-// TestLoadSystemCABundle_NoSources_WithEmbeddedFallback_DistrolessStaysInfo
-// is the INFO twin of the test above — distroless image, no disk bundle,
-// embedded fallback supplied. Production behaviour: log at INFO (no alert
-// fatigue), return embedded bytes + the "<embedded:...>" source.
-func TestLoadSystemCABundle_NoSources_WithEmbeddedFallback_DistrolessStaysInfo(t *testing.T) {
-	withDistroLayout(t, false)
-	dir := t.TempDir()
-	missing1 := filepath.Join(dir, "a.crt")
-	missing2 := filepath.Join(dir, "b.crt")
-
-	logger, logs := newObservedLogger(t)
-	data, source := loadSystemCABundleFromPathsAndFallback(logger, []string{missing1, missing2}, embeddedFallbackRoots)
-
-	if !bytes.Equal(data, embeddedFallbackRoots) {
-		t.Fatalf("expected embedded fallback bytes; got %d bytes vs %d", len(data), len(embeddedFallbackRoots))
-	}
-	if source != systemCABundleSourceEmbedded {
-		t.Fatalf("expected source=%q, got %q", systemCABundleSourceEmbedded, source)
-	}
-	if logs.Len() != 1 {
-		t.Fatalf("expected exactly 1 log entry, got %d", logs.Len())
-	}
-	entry := logs.All()[0]
-	if entry.Level != zap.InfoLevel {
-		t.Fatalf("expected INFO (distroless image), got %s", entry.Level)
-	}
-	if !strings.Contains(entry.Message, "embedded Mozilla NSS roots") {
-		t.Fatalf("expected message to mention embedded Mozilla NSS roots when fallback is supplied; got %q", entry.Message)
-	}
-	var sawReason bool
-	for _, f := range entry.Context {
-		if f.Key == "severity_reason" {
-			sawReason = true
-			if f.String != severityReasonNoDistroLayout {
-				t.Fatalf("severity_reason: expected exact %q, got %q", severityReasonNoDistroLayout, f.String)
-			}
-		}
-	}
-	if !sawReason {
-		t.Fatalf("expected a severity_reason field on the INFO entry; got context=%+v", entry.Context)
 	}
 }
 
@@ -455,12 +288,11 @@ func TestLoadSystemCABundle_NoSources_WithEmbeddedFallback_DistrolessStaysInfo(t
 // fallback to fall back to. A regression here would mislead operators
 // into thinking the agent self-healed when it didn't.
 func TestLoadSystemCABundle_NoSources_NilFallback_DoesNotClaimFallback(t *testing.T) {
-	withDistroLayout(t, true)
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "a.crt")
 
 	logger, logs := newObservedLogger(t)
-	data, source := loadSystemCABundleFromPathsAndFallback(logger, []string{missing}, nil)
+	data, source := loadCABundle(logger, certEnv{}, []string{missing}, nil)
 	if data != nil {
 		t.Fatalf("expected nil data when fallback is nil; got %d bytes", len(data))
 	}
@@ -472,7 +304,7 @@ func TestLoadSystemCABundle_NoSources_NilFallback_DoesNotClaimFallback(t *testin
 	}
 	entry := logs.All()[0]
 	// Must NOT claim a fallback happened.
-	if strings.Contains(entry.Message, "falling back to the agent's embedded Mozilla NSS roots") {
+	if strings.Contains(entry.Message, "built into keploy") {
 		t.Fatalf("nil-fallback path must not claim a fallback occurred; got %q", entry.Message)
 	}
 	// Must explicitly state the resulting bundle is incomplete so an
@@ -482,11 +314,304 @@ func TestLoadSystemCABundle_NoSources_NilFallback_DoesNotClaimFallback(t *testin
 	}
 }
 
+// writePEMFile writes the concatenated PEM blocks to a new file under dir.
+func writePEMFile(t *testing.T, dir, name string, pems ...[]byte) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, bytes.Join(pems, nil), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// pemCertCount is how many distinct certificates a bundle holds.
+func pemCertCount(data []byte) int {
+	seen := map[[32]byte]bool{}
+	forEachPEMCertificate(data, func(der []byte) { seen[sha256.Sum256(der)] = true })
+	return len(seen)
+}
+
+// An operator who mounts a corporate bundle into the agent and names it with
+// SSL_CERT_FILE must see the apps trust it. It replaces the default bundle
+// paths, as it does for crypto/x509 and OpenSSL: the bundle on disk is not
+// merged in, and neither are the embedded roots.
+//
+// FAILS BEFORE THE FIX: the loader searched only the fixed paths, so the
+// operator's bundle never reached the merged ca.crt.
+func TestLoadCABundle_SSLCertFile_ReplacesTheBundlePaths(t *testing.T) {
+	dir := t.TempDir()
+	corp := makeSelfSignedPEM(t, "corp-root")
+	envFile := writePEMFile(t, dir, "corp.pem", corp)
+	disk := writePEMFile(t, dir, "disk.crt", makeSelfSignedPEM(t, "disk-root"))
+
+	for _, tc := range []struct {
+		name     string
+		paths    []string
+		fallback []byte
+	}{
+		{"a bundle on disk", []string{disk}, embeddedFallbackRoots},
+		{"no bundle on disk (embedded roots otherwise)", []string{filepath.Join(dir, "none.crt")}, embeddedFallbackRoots},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zap.DebugLevel)
+			data, source := loadCABundle(zap.New(core), certEnv{file: envFile}, tc.paths, tc.fallback)
+			if !bytes.Equal(data, corp) {
+				t.Fatalf("expected exactly the SSL_CERT_FILE bundle; got %d bytes (%d certs)", len(data), pemCertCount(data))
+			}
+			if source != envFile {
+				t.Fatalf("source = %q, want %q", source, envFile)
+			}
+			if n := logs.Filter(func(e observer.LoggedEntry) bool { return e.Level >= zap.InfoLevel }).Len(); n != 0 {
+				t.Fatalf("a usable SSL_CERT_FILE is the normal case and must not be reported; got %v", logs.All())
+			}
+		})
+	}
+}
+
+// A file whose content is exactly the embedded list (what the enterprise agent
+// writes and points SSL_CERT_FILE at on an image with no bundle) is taken as
+// is: still the Mozilla roots, and no warning.
+func TestLoadCABundle_SSLCertFile_HoldingTheEmbeddedList(t *testing.T) {
+	dir := t.TempDir()
+	envFile := writePEMFile(t, dir, "keploy-trust-roots.pem", embeddedFallbackRoots)
+
+	core, logs := observer.New(zap.DebugLevel)
+	data, _ := loadCABundle(zap.New(core), certEnv{file: envFile}, []string{filepath.Join(dir, "none.crt")}, embeddedFallbackRoots)
+	if !bytes.Equal(data, embeddedFallbackRoots) {
+		t.Fatalf("expected the embedded list back; got %d bytes", len(data))
+	}
+	if n := logs.Filter(func(e observer.LoggedEntry) bool { return e.Level >= zap.InfoLevel }).Len(); n != 0 {
+		t.Fatalf("expected no Info+ logs; got %v", logs.All())
+	}
+}
+
+// An SSL_CERT_FILE that names nothing usable (a missing mount, an empty file,
+// a key instead of a certificate) is a real misconfiguration — the operator's
+// CA is not in the apps' trust bundle — so it is a Warn with a next step. The
+// apps still get a full bundle from the disk paths or the embedded roots,
+// never the Keploy MITM CA alone (keploy/k8s-proxy#375).
+func TestLoadCABundle_SSLCertFile_Unusable_WarnsAndFallsBack(t *testing.T) {
+	dir := t.TempDir()
+	disk := writePEMFile(t, dir, "disk.crt", makeSelfSignedPEM(t, "disk-root"))
+	empty := writePEMFile(t, dir, "empty.pem")
+	key := writePEMFile(t, dir, "key.pem", pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: []byte("junk")}))
+
+	for _, tc := range []struct {
+		name       string
+		envFile    string
+		paths      []string
+		want       []byte
+		wantSource string
+	}{
+		{"missing, disk bundle present", filepath.Join(dir, "missing.pem"), []string{disk}, mustRead(t, disk), disk},
+		{"empty, no disk bundle", empty, []string{filepath.Join(dir, "none.crt")}, embeddedFallbackRoots, systemCABundleSourceEmbedded},
+		{"no certificate, no disk bundle", key, []string{filepath.Join(dir, "none.crt")}, embeddedFallbackRoots, systemCABundleSourceEmbedded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zap.DebugLevel)
+			data, source := loadCABundle(zap.New(core), certEnv{file: tc.envFile}, tc.paths, embeddedFallbackRoots)
+			if !bytes.Equal(data, tc.want) || source != tc.wantSource {
+				t.Fatalf("got %d bytes from %q; want %d bytes from %q", len(data), source, len(tc.want), tc.wantSource)
+			}
+			warns := logs.FilterLevelExact(zap.WarnLevel).All()
+			if len(warns) != 1 {
+				t.Fatalf("expected one Warn naming SSL_CERT_FILE; got %v", logs.All())
+			}
+			fields := warns[0].ContextMap()
+			if fields["ssl_cert_file"] != tc.envFile {
+				t.Fatalf("the Warn must name the file; got %v", fields)
+			}
+			if next, _ := fields["next_step"].(string); !strings.Contains(next, "SSL_CERT_FILE") {
+				t.Fatalf("the Warn must say what to do; next_step=%q", next)
+			}
+			assertNoCACertificatesAdvice(t, logs)
+		})
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// SSL_CERT_DIR adds the certificates in its directories (':'-separated) to
+// the bundle file, as crypto/x509 does — on an image with no bundle file, to
+// the embedded roots, so the apps keep the public roots. A directory such as
+// /etc/ssl/certs holds a root several times (bundle, per-root file, hash
+// link), so the result holds each certificate once.
+func TestLoadCABundle_SSLCertDir_AddsDeduplicatedCertificates(t *testing.T) {
+	base := t.TempDir()
+	corpA := makeSelfSignedPEM(t, "corp-root-a")
+	corpB := makeSelfSignedPEM(t, "corp-root-b")
+	diskRoot := makeSelfSignedPEM(t, "disk-root")
+	disk := writePEMFile(t, base, "disk.crt", diskRoot)
+
+	dir1 := filepath.Join(base, "d1")
+	dir2 := filepath.Join(base, "d2")
+	for _, d := range []string{dir1, dir2, filepath.Join(dir1, "sub")} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writePEMFile(t, dir1, "corp-a.pem", corpA)
+	writePEMFile(t, dir1, "bundle.pem", corpA, corpB) // corpA again
+	writePEMFile(t, dir1, "disk-again.pem", diskRoot) // already in the bundle file
+	writePEMFile(t, dir1, "notes.txt", []byte("not a certificate\n"))
+	if runtime.GOOS != "windows" {
+		if err := os.Symlink(filepath.Join(dir1, "corp-a.pem"), filepath.Join(dir1, "abcd1234.0")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writePEMFile(t, dir2, "corp-b.pem", corpB)
+
+	t.Run("with a bundle file", func(t *testing.T) {
+		logger, logs := newObservedLogger(t)
+		sep := string(filepath.ListSeparator)
+		dirs := dir1 + sep + filepath.Join(base, "missing") + sep + sep + dir2
+		data, source := loadCABundle(logger, certEnv{dir: dirs}, []string{disk}, embeddedFallbackRoots)
+		if !bytes.HasPrefix(data, diskRoot) {
+			t.Fatal("the bundle file must come first, unchanged")
+		}
+		if got := pemCertCount(data); got != 3 || bytes.Count(data, []byte("BEGIN CERTIFICATE")) != 3 {
+			t.Fatalf("expected disk + corp-a + corp-b, each once; got %d distinct in %d blocks", got, bytes.Count(data, []byte("BEGIN CERTIFICATE")))
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(data) || !verifiesAgainst(t, corpA, pool) || !verifiesAgainst(t, corpB, pool) {
+			t.Fatal("the SSL_CERT_DIR certificates are not trusted by the merged bundle")
+		}
+		// dir2's only certificate (corp-b) was already added from dir1, so
+		// dir1 alone contributed.
+		if source != disk+","+dir1 {
+			t.Fatalf("source = %q", source)
+		}
+		if logs.Len() != 0 {
+			t.Fatalf("expected no Info+ logs; got %v", logs.All())
+		}
+	})
+
+	t.Run("no bundle file: added to the embedded roots", func(t *testing.T) {
+		logger, _ := newObservedLogger(t)
+		data, source := loadCABundle(logger, certEnv{dir: dir2}, []string{filepath.Join(base, "none.crt")}, embeddedFallbackRoots)
+		if !bytes.HasPrefix(data, embeddedFallbackRoots) {
+			t.Fatal("the embedded roots must stand in for the missing bundle file")
+		}
+		if got, want := pemCertCount(data), pemCertCount(embeddedFallbackRoots)+1; got != want {
+			t.Fatalf("got %d certificates, want %d", got, want)
+		}
+		if source != systemCABundleSourceEmbedded+","+dir2 {
+			t.Fatalf("source = %q", source)
+		}
+	})
+
+	t.Run("names nothing usable", func(t *testing.T) {
+		core, logs := observer.New(zap.DebugLevel)
+		data, _ := loadCABundle(zap.New(core), certEnv{dir: filepath.Join(base, "missing")}, []string{disk}, embeddedFallbackRoots)
+		if !bytes.Equal(data, diskRoot) {
+			t.Fatal("an SSL_CERT_DIR with nothing in it must leave the bundle as it was")
+		}
+		if logs.FilterLevelExact(zap.WarnLevel).FilterMessageSnippet("SSL_CERT_DIR").Len() != 1 {
+			t.Fatalf("expected a Warn naming SSL_CERT_DIR; got %v", logs.All())
+		}
+		assertNoCACertificatesAdvice(t, logs)
+	})
+}
+
+// The production entry point reads SSL_CERT_FILE from the environment.
+func TestLoadSystemCABundle_ReadsSSLCertFileFromTheEnvironment(t *testing.T) {
+	withSystemSearch(t, nil, nil) // the env file alone, whatever the host has
+	corp := makeSelfSignedPEM(t, "corp-root")
+	envFile := writePEMFile(t, t.TempDir(), "corp.pem", corp)
+	t.Setenv(envSSLCertFile, envFile)
+	t.Setenv(envSSLCertDir, "")
+
+	data, source := loadSystemCABundle(zap.NewNop())
+	if !bytes.Equal(data, corp) || source != envFile {
+		t.Fatalf("got %d bytes from %q; want the SSL_CERT_FILE bundle", len(data), source)
+	}
+}
+
+// isolateCertEnv restores, when the test ends, the trust-store variables keploy
+// sets and its record of which SSL_CERT_FILE values are its own.
+func isolateCertEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{"NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CARGO_HTTP_CAINFO", envSSLCertFile, envSSLCertDir} {
+		t.Setenv(k, os.Getenv(k))
+	}
+	certFileEnv.Lock()
+	ours := make(map[string]bool, len(certFileEnv.ours))
+	for k, v := range certFileEnv.ours {
+		ours[k] = v
+	}
+	hadOurs, operator := certFileEnv.ours != nil, certFileEnv.operator
+	certFileEnv.Unlock()
+	t.Cleanup(func() {
+		certFileEnv.Lock()
+		defer certFileEnv.Unlock()
+		certFileEnv.ours, certFileEnv.operator = nil, operator
+		if hadOurs {
+			certFileEnv.ours = ours
+		}
+	})
+}
+
+// keploy points SSL_CERT_FILE at files it wrote itself (SetEnvForPath, the
+// shared volume). Those must never be read back as the operator's trust store:
+// in native mode the client builds the Java truststore right after
+// SetEnvForPath pointed SSL_CERT_FILE at the lone keploy CA, and reading that
+// would leave Java apps trusting nothing but keploy. The operator's value
+// from before keploy replaced it is used instead.
+func TestOperatorCertEnv_IgnoresTheFilesKeployPointedSSLCertFileAt(t *testing.T) {
+	isolateCertEnv(t)
+	withSystemSearch(t, nil, nil) // the env file alone, whatever the host has
+	t.Setenv(envSSLCertDir, "")
+	dir := t.TempDir()
+	corp := makeSelfSignedPEM(t, "corp-root")
+	operatorFile := writePEMFile(t, dir, "corp.pem", corp)
+	keployOnly := writePEMFile(t, dir, "keploy-ca.crt", testCACertPEM())
+	merged := writePEMFile(t, dir, "ca.crt", corp, testCACertPEM())
+	t.Setenv(envSSLCertFile, operatorFile)
+
+	if got := operatorCertEnv().file; got != operatorFile {
+		t.Fatalf("before keploy sets it: %q, want %q", got, operatorFile)
+	}
+	if err := SetEnvForPath(zap.NewNop(), keployOnly); err != nil {
+		t.Fatal(err)
+	}
+	if os.Getenv(envSSLCertFile) != keployOnly {
+		t.Fatal("SetEnvForPath did not set SSL_CERT_FILE")
+	}
+	if got := operatorCertEnv().file; got != operatorFile {
+		t.Fatalf("after SetEnvForPath: %q, want the operator's %q", got, operatorFile)
+	}
+	if err := setEnvForSharedVolume(zap.NewNop(), merged, keployOnly); err != nil {
+		t.Fatal(err)
+	}
+	if got := operatorCertEnv().file; got != operatorFile {
+		t.Fatalf("after a second keploy write: %q, want the operator's %q", got, operatorFile)
+	}
+	data, source := loadSystemCABundle(zap.NewNop())
+	if !bytes.Equal(data, corp) || source != operatorFile {
+		t.Fatalf("the loader read %q (%d bytes), not the operator's bundle", source, len(data))
+	}
+
+	// Someone else changing SSL_CERT_FILE afterwards is honoured again.
+	other := writePEMFile(t, dir, "other.pem", makeSelfSignedPEM(t, "other-root"))
+	t.Setenv(envSSLCertFile, other)
+	if got := operatorCertEnv().file; got != other {
+		t.Fatalf("a value keploy did not set must be read as is: got %q, want %q", got, other)
+	}
+}
+
 // TestSetupSharedVolume_MergesSystemAndKeploy asserts that the output ca.crt
 // contains both the system bundle and the embedded Keploy MITM CA concatenated
 // (in that order, with an intervening newline if necessary), and that
 // keploy-ca.crt contains only the Keploy CA.
 func TestSetupSharedVolume_MergesSystemAndKeploy(t *testing.T) {
+	isolateCertEnv(t)
 	exportDir := t.TempDir()
 
 	// Stub the system-bundle loader with a system bundle that DOES have a
@@ -551,6 +676,7 @@ func TestSetupSharedVolume_MergesSystemAndKeploy(t *testing.T) {
 // when the system bundle does NOT end in a newline, the merge inserts one so
 // the BEGIN marker of the Keploy CA starts on a fresh line.
 func TestSetupSharedVolume_InsertsNewlineWhenSystemBundleLacksOne(t *testing.T) {
+	isolateCertEnv(t)
 	exportDir := t.TempDir()
 	orig := loadSystemCABundleFn
 	defer func() { loadSystemCABundleFn = orig }()
@@ -583,6 +709,7 @@ func TestSetupSharedVolume_InsertsNewlineWhenSystemBundleLacksOne(t *testing.T) 
 // just the Keploy CA (matches legacy behaviour) and no leading newline is
 // prepended.
 func TestSetupSharedVolume_FallsBackWhenSystemBundleMissing(t *testing.T) {
+	isolateCertEnv(t)
 	exportDir := t.TempDir()
 	orig := loadSystemCABundleFn
 	defer func() { loadSystemCABundleFn = orig }()
@@ -737,26 +864,14 @@ func TestSetEnvForSharedVolume_SplitsNodeFromReplaceVars(t *testing.T) {
 		keploy = "/tmp/keploy-tls/keploy-ca.crt"
 	)
 
-	// Snapshot + restore the env vars this test mutates so parallel / follow-up
-	// tests in the same binary don't see leaked state.
+	// Restore the env vars this test mutates (and keploy's record of its own
+	// SSL_CERT_FILE values) so follow-up tests in the same binary don't see
+	// leaked state.
+	isolateCertEnv(t)
 	keys := []string{"NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CARGO_HTTP_CAINFO"}
-	prev := make(map[string]string, len(keys))
-	prevSet := make(map[string]bool, len(keys))
 	for _, k := range keys {
-		v, ok := os.LookupEnv(k)
-		prev[k] = v
-		prevSet[k] = ok
 		_ = os.Unsetenv(k)
 	}
-	defer func() {
-		for _, k := range keys {
-			if prevSet[k] {
-				_ = os.Setenv(k, prev[k])
-			} else {
-				_ = os.Unsetenv(k)
-			}
-		}
-	}()
 
 	if err := setEnvForSharedVolume(zap.NewNop(), merged, keploy); err != nil {
 		t.Fatalf("setEnvForSharedVolume: %v", err)
@@ -947,5 +1062,471 @@ func TestCertForClient_NoSNINamesDestinationIP(t *testing.T) {
 	leaf = leafFor("", "", nil)
 	if leaf.Subject.CommonName != "" || len(leaf.IPAddresses) != 0 {
 		t.Errorf("no SNI, no CONNECT target, no destination: leaf CN %q, IP SANs %v, want neither (as before)", leaf.Subject.CommonName, leaf.IPAddresses)
+	}
+}
+
+// A file that holds only keploy's own CA, or keploy's own merged bundle from an
+// earlier run, can reach SSL_CERT_FILE from outside this process: a keploy
+// process the agent inherited its environment from, or an environment shared
+// with the app's. keploy's CAs in it must not be carried into the new bundle —
+// apps would keep trusting earlier runs' MITM CAs, and a keploy-only file would
+// leave them nothing else (keploy/k8s-proxy#375).
+func TestLoadCABundle_SSLCertFile_LeavesOutKeploysOwnCAs(t *testing.T) {
+	dir := t.TempDir()
+	corp := makeSelfSignedPEM(t, "corp-root")
+	missing := []string{filepath.Join(dir, "none.crt")}
+
+	t.Run("an earlier merged bundle", func(t *testing.T) {
+		merged := writePEMFile(t, dir, "ca.crt", corp, testCACertPEM())
+		logger, logs := newObservedLogger(t)
+		data, source := loadCABundle(logger, certEnv{file: merged}, missing, embeddedFallbackRoots)
+		if !bytes.Equal(data, corp) || source != merged {
+			t.Fatalf("expected the corporate root alone from %q; got %d certs from %q", merged, pemCertCount(data), source)
+		}
+		if logs.Len() != 0 {
+			t.Fatalf("expected no Info+ logs; got %v", logs.All())
+		}
+	})
+
+	t.Run("keploy's CA alone", func(t *testing.T) {
+		keployOnly := writePEMFile(t, dir, "keploy-ca.crt", testCACertPEM())
+		logger, logs := newObservedLogger(t)
+		data, source := loadCABundle(logger, certEnv{file: keployOnly}, missing, embeddedFallbackRoots)
+		if !bytes.Equal(data, embeddedFallbackRoots) || source != systemCABundleSourceEmbedded {
+			t.Fatalf("expected the embedded roots; got %d bytes from %q", len(data), source)
+		}
+		if logs.Len() != 0 {
+			t.Fatalf("keploy's own file is not an operator misconfiguration; expected no Info+ logs, got %v", logs.All())
+		}
+	})
+
+	t.Run("in SSL_CERT_DIR", func(t *testing.T) {
+		d := filepath.Join(dir, "certs")
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+		writePEMFile(t, d, "keploy-ca.crt", testCACertPEM())
+		writePEMFile(t, d, "corp.pem", corp)
+		logger, _ := newObservedLogger(t)
+		data, _ := loadCABundle(logger, certEnv{dir: d}, missing, embeddedFallbackRoots)
+		if bytes.Contains(data, testCACertPEM()) {
+			t.Fatal("keploy's CA from SSL_CERT_DIR reached the bundle")
+		}
+		if !bytes.HasSuffix(data, corp) {
+			t.Fatal("the corporate root from SSL_CERT_DIR is missing")
+		}
+	})
+}
+
+// A combined cert+key PEM is a common thing to point SSL_CERT_FILE at. Only its
+// certificates may reach the bundle: ca.crt is world-readable and mounted into
+// every app container.
+func TestLoadCABundle_SSLCertFile_LeavesOutPrivateKeys(t *testing.T) {
+	dir := t.TempDir()
+	corp := makeSelfSignedPEM(t, "corp-root")
+	key := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: []byte("secret key material")})
+	combined := writePEMFile(t, dir, "combined.pem", key, corp)
+
+	logger, _ := newObservedLogger(t)
+	data, source := loadCABundle(logger, certEnv{file: combined}, nil, embeddedFallbackRoots)
+	if source != combined {
+		t.Fatalf("source = %q", source)
+	}
+	if bytes.Contains(data, []byte("PRIVATE KEY")) || bytes.Contains(data, []byte("secret key material")) {
+		t.Fatal("the private key reached the trust bundle")
+	}
+	if !bytes.Equal(data, corp) {
+		t.Fatalf("expected the certificate alone; got %q", data)
+	}
+}
+
+// SSL_CERT_DIR=/etc/ssl/certs next to /etc/ssl/certs/ca-certificates.crt is a
+// normal setup: every certificate in the directory is already in the bundle,
+// so it adds nothing, and that is not a misconfiguration to warn about.
+func TestLoadCABundle_SSLCertDir_OnlyRepeatingTheBundle_DoesNotWarn(t *testing.T) {
+	dir := t.TempDir()
+	root := makeSelfSignedPEM(t, "distro-root")
+	bundle := writePEMFile(t, dir, "ca-certificates.crt", root)
+	writePEMFile(t, dir, "distro-root.pem", root)
+
+	core, logs := observer.New(zap.DebugLevel)
+	data, source := loadCABundle(zap.New(core), certEnv{dir: dir}, []string{bundle}, embeddedFallbackRoots)
+	if !bytes.Equal(data, root) || source != bundle {
+		t.Fatalf("got %d certs from %q; want the bundle unchanged", pemCertCount(data), source)
+	}
+	if n := logs.FilterLevelExact(zap.WarnLevel).Len(); n != 0 {
+		t.Fatalf("expected no Warn; got %v", logs.All())
+	}
+}
+
+// End to end through the shared volume: a corporate CA an operator names with
+// SSL_CERT_FILE ends up in the ca.crt the app containers read, next to keploy's
+// CA, and in the Java truststore built from it.
+func TestSetupSharedVolume_IncludesTheSSLCertFileBundle(t *testing.T) {
+	isolateCertEnv(t)
+	withSystemSearch(t, nil, nil) // the env file alone, whatever the host has
+	corp := makeSelfSignedPEM(t, "corp-root")
+	t.Setenv(envSSLCertFile, writePEMFile(t, t.TempDir(), "corp.pem", corp))
+	t.Setenv(envSSLCertDir, "")
+	orig := loadSystemCABundleFn
+	loadSystemCABundleFn = loadSystemCABundle
+	t.Cleanup(func() { loadSystemCABundleFn = orig })
+
+	exportDir := t.TempDir()
+	if err := setupSharedVolume(context.Background(), zap.NewNop(), exportDir, testCA); err != nil {
+		t.Fatalf("setupSharedVolume: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(exportDir, "ca.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append(append([]byte{}, corp...), testCACertPEM()...)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("ca.crt holds %d certs; want the corporate root then keploy's CA", pemCertCount(got))
+	}
+	ks := keystore.New()
+	f, err := os.Open(filepath.Join(exportDir, "truststore.jks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := ks.Load(f, []byte("changeit")); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(ks.Aliases()); n != 2 {
+		t.Fatalf("truststore holds %d entries; want the corporate root and keploy's CA", n)
+	}
+}
+
+// envPrimeChild marks the child process of
+// TestSetEnvForPath_KeepsTheProcessesOwnRoots.
+const envPrimeChild = "KEPLOY_TEST_PRIME_CHILD_CA"
+
+// crypto/x509 reads SSL_CERT_FILE once, on a process's first use of the system
+// pool — on Linux, and since Go 1.27 (x509sslcertoverrideplatform) on macOS and
+// Windows too. keploy sets it, in its own process, to files meant for the app —
+// the lone keploy CA in native mode, the merged bundle in docker/k8s. keploy's
+// own TLS must keep the roots the process started with, not trust keploy's MITM
+// CA (or only it). Run in a child process: the system pool is loaded once per
+// process.
+//
+// FAILS BEFORE THE FIX: with no TLS use before SetEnvForPath, the child's
+// system pool was keploy's file.
+func TestSetEnvForPath_KeepsTheProcessesOwnRoots(t *testing.T) {
+	if path := os.Getenv(envPrimeChild); path != "" {
+		if err := SetEnvForPath(zap.NewNop(), path); err != nil {
+			fmt.Println("SetEnvForPath:", err)
+			os.Exit(2)
+		}
+		pool, err := x509.SystemCertPool()
+		if err != nil {
+			fmt.Println("SystemCertPool:", err)
+			os.Exit(2)
+		}
+		// The parent's CA (each process generates its own testCA).
+		keployCA, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Println("read:", err)
+			os.Exit(2)
+		}
+		if own := x509.NewCertPool(); !own.AppendCertsFromPEM(keployCA) || !verifiesPEM(keployCA, own) {
+			fmt.Println("control: keploy's CA does not verify against itself")
+			os.Exit(2)
+		}
+		if verifiesPEM(keployCA, pool) {
+			fmt.Println("the process's system pool trusts keploy's MITM CA")
+			os.Exit(1)
+		}
+		fmt.Println(primeChildRan)
+		os.Exit(0)
+	}
+	switch runtime.GOOS {
+	case "linux", "darwin", "windows":
+	default:
+		t.Skip("crypto/x509 does not read SSL_CERT_FILE on " + runtime.GOOS)
+	}
+	path := writePEMFile(t, t.TempDir(), "keploy-ca.crt", testCACertPEM())
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSetEnvForPath_KeepsTheProcessesOwnRoots$", "-test.count=1")
+	cmd.Env = append(os.Environ(), envPrimeChild+"="+path, envSSLCertFile+"=", envSSLCertDir+"=")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child: %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte(primeChildRan)) {
+		t.Fatalf("the child ran no check (did -test.run stop matching?):\n%s", out)
+	}
+}
+
+// primeChildRan is what the child prints once its check passed.
+const primeChildRan = "prime-child-checked"
+
+// verifiesPEM reports whether the self-signed certificate in pemBytes chains
+// to a root in pool.
+func verifiesPEM(pemBytes []byte, pool *x509.CertPool) bool {
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return false
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false
+	}
+	_, err = cert.Verify(x509.VerifyOptions{Roots: pool})
+	return err == nil
+}
+
+// The disk bundle is filtered like the env-sourced ones. In native mode on
+// Linux keploy adds its own CA to the system bundle, so the client's Java
+// truststore, built from that bundle, would otherwise carry this run's CA twice
+// and a crashed run's stale one too. A bundle with nothing but keploy's CA is
+// no bundle.
+func TestLoadCABundle_DiskBundle_LeavesOutKeploysOwnCAs(t *testing.T) {
+	dir := t.TempDir()
+	root := makeSelfSignedPEM(t, "distro-root")
+	keployOnly := writePEMFile(t, dir, "keploy-only.crt", testCACertPEM())
+	withKeploy := writePEMFile(t, dir, "ca-certificates.crt", root, testCACertPEM())
+
+	logger, _ := newObservedLogger(t)
+	data, source := loadCABundle(logger, certEnv{}, []string{keployOnly, withKeploy}, embeddedFallbackRoots)
+	if source != withKeploy {
+		t.Fatalf("source = %q; the keploy-only file must be skipped", source)
+	}
+	if !bytes.Equal(data, root) {
+		t.Fatalf("expected the distro root alone; got %d certs", pemCertCount(data))
+	}
+}
+
+// withSystemSearch points the production loader's fixed bundle paths and
+// default directories at test locations.
+func withSystemSearch(t *testing.T, paths, dirs []string) {
+	t.Helper()
+	origPaths, origDirs := systemCABundleSearchPaths, systemCABundleSearchDirs
+	systemCABundleSearchPaths, systemCABundleSearchDirs = paths, dirs
+	t.Cleanup(func() { systemCABundleSearchPaths, systemCABundleSearchDirs = origPaths, origDirs })
+}
+
+// With SSL_CERT_DIR unset, crypto/x509 on Linux reads /etc/ssl/certs and
+// /etc/pki/tls/certs too, so a CA dropped into one of them (no bundle rebuilt)
+// is trusted by Go programs — and must reach the apps' bundle. A default
+// directory that adds nothing (the usual case: it repeats the bundle, or the
+// k8s sidecar's empty volume) is not reported.
+func TestLoadSystemCABundle_ReadsTheDefaultCertDirs(t *testing.T) {
+	isolateCertEnv(t)
+	t.Setenv(envSSLCertFile, "")
+	t.Setenv(envSSLCertDir, "")
+	base := t.TempDir()
+	root := makeSelfSignedPEM(t, "distro-root")
+	corp := makeSelfSignedPEM(t, "corp-root")
+	bundle := writePEMFile(t, base, "ca-certificates.crt", root)
+	certs := filepath.Join(base, "certs")
+	empty := filepath.Join(base, "empty")
+	for _, d := range []string{certs, empty} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writePEMFile(t, certs, "distro-root.pem", root)
+	writePEMFile(t, certs, "corp.pem", corp)
+
+	t.Run("a CA dropped into a default directory", func(t *testing.T) {
+		withSystemSearch(t, []string{bundle}, []string{certs, empty})
+		core, logs := observer.New(zap.DebugLevel)
+		data, source := loadSystemCABundle(zap.New(core))
+		if !bytes.Equal(data, concat(root, corp)) || source != bundle+","+certs {
+			t.Fatalf("got %d certs from %q; want the bundle and the dropped-in CA", pemCertCount(data), source)
+		}
+		if n := logs.Filter(func(e observer.LoggedEntry) bool { return e.Level >= zap.InfoLevel }).Len(); n != 0 {
+			t.Fatalf("expected no Info+ logs; got %v", logs.All())
+		}
+	})
+
+	t.Run("default directories adding nothing", func(t *testing.T) {
+		withSystemSearch(t, []string{filepath.Join(base, "none.crt")}, []string{empty})
+		core, logs := observer.New(zap.DebugLevel)
+		data, source := loadSystemCABundle(zap.New(core))
+		if !bytes.Equal(data, embeddedFallbackRoots) || source != systemCABundleSourceEmbedded {
+			t.Fatalf("got %d bytes from %q; want the embedded roots", len(data), source)
+		}
+		if n := logs.Filter(func(e observer.LoggedEntry) bool { return e.Level >= zap.InfoLevel }).Len(); n != 0 {
+			t.Fatalf("an empty default directory is no misconfiguration; got %v", logs.All())
+		}
+	})
+
+	t.Run("SSL_CERT_DIR replaces the default directories", func(t *testing.T) {
+		withSystemSearch(t, []string{bundle}, []string{certs})
+		t.Setenv(envSSLCertDir, empty)
+		data, _ := loadSystemCABundle(zap.NewNop())
+		if !bytes.Equal(data, root) {
+			t.Fatalf("got %d certs; the default directory must not be read when SSL_CERT_DIR is set", pemCertCount(data))
+		}
+	})
+}
+
+// crypto/x509 reads default certificate directories only on Linux.
+func TestDefaultCertDirs(t *testing.T) {
+	if got := defaultCertDirs("linux"); len(got) != 2 || got[0] != "/etc/ssl/certs" || got[1] != "/etc/pki/tls/certs" {
+		t.Fatalf("linux: %v", got)
+	}
+	for _, goos := range []string{"darwin", "windows"} {
+		if got := defaultCertDirs(goos); got != nil {
+			t.Fatalf("%s: %v", goos, got)
+		}
+	}
+}
+
+// The bundle is built more than once in a process (the shared volume, the
+// upstream roots, the native Java truststore): an unusable SSL_CERT_FILE or
+// SSL_CERT_DIR is reported once, not on every build.
+func TestLoadCABundle_WarnsOncePerValue(t *testing.T) {
+	dir := t.TempDir()
+	env := certEnv{file: filepath.Join(dir, "missing.pem"), dir: filepath.Join(dir, "missing-dir")}
+	core, logs := observer.New(zap.DebugLevel)
+	for i := 0; i < 3; i++ {
+		loadCABundle(zap.New(core), env, nil, embeddedFallbackRoots)
+	}
+	if n := logs.FilterLevelExact(zap.WarnLevel).Len(); n != 2 {
+		t.Fatalf("expected one Warn for SSL_CERT_FILE and one for SSL_CERT_DIR; got %d: %v", n, logs.All())
+	}
+}
+
+// negativeSerialCertPEM returns a self-signed CA certificate whose serial
+// number is negative: OpenSSL and Java accept it, Go's crypto/x509 rejects it
+// (macOS's /etc/ssl/cert.pem ships such a root). The serial is rewritten in a
+// generated certificate, so the signature no longer matches; nothing here
+// verifies one.
+func negativeSerialCertPEM(t *testing.T) []byte {
+	t.Helper()
+	block, _ := pem.Decode(makeSelfSignedPEM(t, "negative-serial-root"))
+	var cert struct {
+		TBS      asn1.RawValue
+		SigAlg   asn1.RawValue
+		SigValue asn1.BitString
+	}
+	if _, err := asn1.Unmarshal(block.Bytes, &cert); err != nil {
+		t.Fatal(err)
+	}
+	var fields []asn1.RawValue
+	for rest := cert.TBS.Bytes; len(rest) > 0; {
+		var v asn1.RawValue
+		var err error
+		if rest, err = asn1.Unmarshal(rest, &v); err != nil {
+			t.Fatal(err)
+		}
+		fields = append(fields, v)
+	}
+	serial, err := asn1.Marshal(big.NewInt(-12345))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields[1] = asn1.RawValue{FullBytes: serial} // fields[0] is the [0] version
+	var content []byte
+	for _, f := range fields {
+		content = append(content, f.FullBytes...)
+	}
+	tbs, err := asn1.Marshal(asn1.RawValue{Class: asn1.ClassUniversal, Tag: asn1.TagSequence, IsCompound: true, Bytes: content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert.TBS = asn1.RawValue{FullBytes: tbs}
+	der, err := asn1.Marshal(cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x509.ParseCertificate(der); err == nil {
+		t.Fatal("fixture: crypto/x509 parsed the negative-serial certificate")
+	}
+	if !looksLikeCertificate(der) {
+		t.Fatal("fixture: the negative-serial certificate lost its shape")
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+// A root Go's parser rejects but OpenSSL and Java accept (a negative serial)
+// stays in the bundle the apps trust, from every source: the disk bundle (the
+// native Java truststore on macOS is built from /etc/ssl/cert.pem, which ships
+// one), SSL_CERT_FILE and SSL_CERT_DIR. Dropping it would silently break the
+// apps' calls to whatever it signs.
+func TestLoadCABundle_KeepsCertificatesGoCannotParse(t *testing.T) {
+	dir := t.TempDir()
+	odd := negativeSerialCertPEM(t)
+	root := makeSelfSignedPEM(t, "ordinary-root")
+	bundle := writePEMFile(t, dir, "bundle.pem", root, odd)
+	missing := []string{filepath.Join(dir, "none.crt")}
+
+	for _, tc := range []struct {
+		name  string
+		env   certEnv
+		paths []string
+	}{
+		{"disk bundle", certEnv{}, []string{bundle}},
+		{"SSL_CERT_FILE", certEnv{file: bundle}, missing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, logs := newObservedLogger(t)
+			data, source := loadCABundle(logger, tc.env, tc.paths, embeddedFallbackRoots)
+			if source != bundle || !bytes.Equal(data, concat(root, odd)) {
+				t.Fatalf("got %d certs from %q; want both roots from %q", pemCertCount(data), source, bundle)
+			}
+			if logs.Len() != 0 {
+				t.Fatalf("expected no Info+ logs; got %v", logs.All())
+			}
+		})
+	}
+
+	t.Run("SSL_CERT_DIR", func(t *testing.T) {
+		d := filepath.Join(dir, "certs")
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+		writePEMFile(t, d, "odd.pem", odd)
+		writePEMFile(t, d, "odd-again.pem", odd)
+		logger, logs := newObservedLogger(t)
+		data, _ := loadCABundle(logger, certEnv{dir: d}, missing, embeddedFallbackRoots)
+		if !bytes.Equal(data, concat(embeddedFallbackRoots, odd)) {
+			t.Fatal("expected the embedded roots plus the negative-serial root, once")
+		}
+		if logs.Len() != 0 {
+			t.Fatalf("expected no Info+ logs; got %v", logs.All())
+		}
+	})
+
+	t.Run("an SSL_CERT_FILE holding only it", func(t *testing.T) {
+		only := writePEMFile(t, dir, "only-odd.pem", odd)
+		logger, _ := newObservedLogger(t)
+		data, source := loadCABundle(logger, certEnv{file: only}, missing, embeddedFallbackRoots)
+		if source != only || !bytes.Equal(data, odd) {
+			t.Fatalf("got %d bytes from %q; a bundle of one such root is still a bundle", len(data), source)
+		}
+	})
+}
+
+// keploy's loader must read every bundle file crypto/x509 reads on Linux:
+// keploy's own upstream verification swaps Go's pool for the built-in roots
+// when the loader finds no bundle file, so a file only Go knows would drop the
+// host's trust store (and any CA added to it) from keploy's verification.
+// The list is Go 1.27's crypto/x509/root_linux.go certFiles; update it with Go.
+func TestSystemCABundleSearchPaths_CoverGosLinuxFiles(t *testing.T) {
+	gos := []string{
+		"/etc/ssl/certs/ca-certificates.crt",
+		"/etc/pki/tls/certs/ca-bundle.crt",
+		"/etc/ssl/ca-bundle.pem",
+		"/etc/pki/tls/cacert.pem",
+		"/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+		"/etc/ssl/cert.pem",
+	}
+	pos := map[string]int{}
+	for i, p := range systemCABundleSearchPaths {
+		pos[p] = i
+	}
+	last := -1
+	for _, p := range gos {
+		i, ok := pos[p]
+		if !ok {
+			t.Fatalf("systemCABundleSearchPaths lacks %s, which crypto/x509 reads on Linux", p)
+		}
+		if i < last {
+			t.Fatalf("systemCABundleSearchPaths has %s out of crypto/x509's order", p)
+		}
+		last = i
 	}
 }
