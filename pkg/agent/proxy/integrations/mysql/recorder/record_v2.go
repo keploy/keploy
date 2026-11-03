@@ -2145,9 +2145,8 @@ func assembleTextResultSetV2(ctx context.Context, logger *zap.Logger, sess *supe
 				respType = mysql.StatusToString(mysql.OK)
 			}
 			rs.FinalResponse = &mysql.GenericResponse{Data: buf, Type: respType}
-			// Preserve the wire Header set by processFirstResponse via
-			// the initial DecodePayload; only the bundle Header needs
-			// the result-set type set.
+			// Preserve the wire Header the initial DecodePayload set;
+			// only the bundle Header needs the result-set type set.
 			headPkt.Header.Type = string(mysql.Text)
 			return ts, nil
 		}

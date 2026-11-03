@@ -450,11 +450,11 @@ func TestHandshakeLastKey_OnlyNamesResolvedDestinations(t *testing.T) {
 // port-scoped key.
 //
 // Regression: it previously seeded only the two CONSUMABLE keys. The only
-// RememberLast caller in the package was the legacy handleInitialHandshake,
-// which the proxyless V2 flow never runs — so resolvePreTLSGreeting's
-// cachedGreeting fallback was dead code on every proxyless MySQL-over-TLS
-// recording, and a connection whose own entry had been consumed lost its whole
-// command phase.
+// RememberLast caller in the package was the legacy capture's handshake
+// handler (since removed), which the proxyless V2 flow never ran — so
+// resolvePreTLSGreeting's cachedGreeting fallback was dead code on every
+// proxyless MySQL-over-TLS recording, and a connection whose own entry had been
+// consumed lost its whole command phase.
 func TestStorePreTLSHandshakeV2_SeedsLastGreetingCache(t *testing.T) {
 	store := models.NewTLSHandshakeStore()
 	h := newV2Harness(t)
@@ -1111,7 +1111,8 @@ func TestResolvePreTLSGreeting_ConnKeyedEntryIsOwnNotShared(t *testing.T) {
 // entry does not age out; if it also carried its original ReqTimestamp it would
 // backdate the next connection's config mock. Config mocks are identified by
 // Name+Kind+ReqTimestampMock and ordered by it, so that is a replay break — the
-// same hazard the legacy path documents for borrowed greetings.
+// same hazard as a greeting borrowed from the last-greeting cache (staleEntry
+// in handlePostTLSHandshakeV2).
 func TestPostTLSHandshakeV2_RestoredGreetingCarriesNoTimestamp(t *testing.T) {
 	h := newV2Harness(t)
 	base := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
