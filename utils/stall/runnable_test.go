@@ -483,6 +483,139 @@ func TestMeter_AVerdictReadsTheWaitsFirst(t *testing.T) {
 	}
 }
 
+// A look reads the threads, and the sampler may be held off itself then: a
+// wait the look reads can lie past the last sample, in time no sample has
+// counted yet, and the sample that comes next, on time behind its own wait,
+// counts it. On a host whose busy loops held the sampler and a consumer off
+// one CPU, a look read the consumer's 256 ms wait, set 57 ms of it against
+// what the samples had counted, and the next sample counted the other 199
+// ms as time the consumer could run: its stall was judged gone at 174 ms
+// counted, the consumer having run 40 ms.
+func TestMeter_AWaitPastTheLastSampleIsPaidByTheSampleThatCountsIt(t *testing.T) {
+	const grace = 150 * time.Millisecond
+	s, src := newFakeSampler(0)
+	m := NewMeter(heldClock{s}, grace)
+	step := func(n int) {
+		for range n {
+			src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/4
+			s.sample()
+		}
+	}
+	// The consumer waits behind the busy loops the whole grace: the look
+	// that finds the stall due reads it.
+	step(15)
+	src.held = grace
+	if m.Expired() {
+		t.Fatal("expired on 150 ms on time, all of it the consumer's wait")
+	}
+	step(4)
+	// The sampler is held off for 200 ms. The consumer waits 230 ms of the
+	// time since the last read, 200 ms of it past the last sample, gets the
+	// CPU, and a look reads its wait before the sampler runs.
+	src.wall = src.wall.Add(200 * time.Millisecond)
+	src.held = 230 * time.Millisecond
+	if m.Expired() {
+		t.Fatalf("expired at the look that read a wait past the last sample (%v on the samples)", m.Stalled())
+	}
+	// The sample: 212 ms after the last, 200 ms of it its own wait, so on
+	// time.
+	src.own += 200 * time.Millisecond
+	src.wall, src.cpu = src.wall.Add(12*time.Millisecond), src.cpu+Tick/4
+	s.sample()
+	// What the consumer could run since the stall began: 10 ms of the four
+	// samples, 12 ms of the held-off one, and each sample from here on.
+	could := 22 * time.Millisecond
+	for range 20 {
+		step(1)
+		could += Tick
+		if m.Expired() {
+			if could < grace {
+				t.Fatalf("expired with %v on the samples and %v owed, the consumer having had %v to run", m.Stalled(), s.waitOwed, could)
+			}
+			return
+		}
+	}
+	t.Fatalf("not expired %v after the consumer's wait: %v on the samples, %v owed", could, m.Stalled(), s.waitOwed)
+}
+
+// A wait a verdict's read finds past the last sample is owed only out of the
+// time since that sample, and only by the next sample, if it counts that
+// time: a late one counts only the CPU the process used, so the wait is paid
+// already and owes nothing more; an on-time one owes it out of what it
+// counts, and a later read takes only the rest.
+func TestSampler_AWaitPastTheLastSampleIsOwedOnlyByTheNextOnTimeSample(t *testing.T) {
+	// ahead: the samples count 50 ms, all of it a thread's wait, and one
+	// more 10 ms (5 ms under a limit of half a CPU); 100 ms after it, a read
+	// finds a thread waited 300 ms.
+	ahead := func(t *testing.T, limit float64) (*sampler, *fakeSource) {
+		s, src := newFakeSampler(limit)
+		share := time.Duration(1)
+		if limit > 0 {
+			share = 2 // a half CPU's limit
+		}
+		for range 5 * int(share) {
+			src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/4
+			s.sample()
+		}
+		src.held = 50 * time.Millisecond // all of what they counted, a wait
+		if owed, _, _ := s.owed(); owed != 50*time.Millisecond {
+			t.Fatalf("owes %v, want the 50 ms wait", owed)
+		}
+		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/4
+		s.sample()
+		src.wall = src.wall.Add(100 * time.Millisecond)
+		src.held = 300 * time.Millisecond
+		pastSample := 300*time.Millisecond - Tick/share
+		want := 50*time.Millisecond + min(pastSample, 100*time.Millisecond)
+		if owed, _, _ := s.owed(); owed != want {
+			t.Fatalf("owes %v, want %v: the 50 ms and no more of the wait than the 100 ms since the last sample", owed, want)
+		}
+		return s, src
+	}
+	t.Run("a late sample", func(t *testing.T) {
+		s, src := ahead(t, 0)
+		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+5*time.Millisecond
+		ran := s.ran.Load()
+		s.sample()
+		if got := time.Duration(s.ran.Load() - ran); got != 5*time.Millisecond {
+			t.Fatalf("a late sample counted %v, want the 5 ms the process ran", got)
+		}
+		ran = s.ran.Load()
+		for range 10 {
+			src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/4
+			s.sample()
+		}
+		if got := time.Duration(s.ran.Load() - ran); got != 50*time.Millisecond {
+			t.Fatalf("100 ms on time after it, owing 50 ms, counted %v, want 50 ms: the wait past the last sample is owed by no later one", got)
+		}
+	})
+	t.Run("an on-time sample", func(t *testing.T) {
+		s, src := ahead(t, 0)
+		src.own += 100 * time.Millisecond // its own wait: on time
+		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/4
+		ran := s.ran.Load()
+		s.sample()
+		if s.ran.Load() != ran || s.waitOwed != 40*time.Millisecond {
+			t.Fatalf("an on-time sample of 110 ms owing 150 ms counted %v and owes %v, want none and 40 ms", time.Duration(s.ran.Load()-ran), s.waitOwed)
+		}
+		src.held = 300 * time.Millisecond
+		if owed, _, _ := s.owed(); owed != 50*time.Millisecond {
+			t.Fatalf("owes %v, want 50 ms: a later read takes only the 10 ms the sample counted past the wait it paid", owed)
+		}
+	})
+	t.Run("an on-time sample under a CPU limit", func(t *testing.T) {
+		s, src := ahead(t, 0.5)
+		src.own += 100 * time.Millisecond
+		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/4
+		s.sample()
+		// It counts 55 ms of the 110: no more of the wait than that lies in
+		// what it counted.
+		if s.waitOwed != 50*time.Millisecond {
+			t.Fatalf("owes %v after a sample that counted 55 ms, want 50 ms", s.waitOwed)
+		}
+	})
+}
+
 // A thread held off right now (the host took its virtual CPU, or it waits on
 // a run queue) has a wait the kernel shows only once it ends. The verdict
 // waits for it: on a VM whose host took the consumer's CPU for 250 ms, while
@@ -864,7 +997,8 @@ func TestSampler_ARestartOwesNoWaitFromBeforeIt(t *testing.T) {
 	src := &fakeSource{wall: time.Unix(1_000_000, 0)}
 	s := &sampler{src: src, tick: time.Hour} // the test samples, not the goroutine
 	s.acquire()()
-	s.waitOwed = 300 * time.Millisecond
+	// Owed before it, and found past its last sample by a verdict's read.
+	s.waitOwed, s.ahead = 300*time.Millisecond, 200*time.Millisecond
 	src.wall, src.held = src.wall.Add(time.Minute), 30*time.Second
 	release := s.acquire()
 	defer release()

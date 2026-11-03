@@ -149,6 +149,10 @@ type sampler struct {
 	waitOwed time.Duration
 	heldFrom uint64
 	reads    uint64
+	// What a verdict's read (owed) found the threads waited past the last
+	// sample, in time no sample has counted yet: the next sample pays it if
+	// it counts that time (on time), and it goes either way.
+	ahead time.Duration
 	// The sampling thread's wait for a CPU so far, at the last sample
 	// (ownOK: it could be read).
 	lastOwn time.Duration
@@ -252,7 +256,7 @@ func (s *sampler) begin() {
 		s.waitWall = s.lastWall
 		s.reads++
 	}
-	s.onTime, s.waitOwed, s.heldFrom = 0, 0, 0
+	s.onTime, s.waitOwed, s.ahead, s.heldFrom = 0, 0, 0, 0
 }
 
 // sample adds what the process could run since the last sample.
@@ -268,15 +272,20 @@ func (s *sampler) sample() {
 	isLate := late(iv-waited, ok, s.tick)
 	got := accrue(iv, cpu-s.lastCPU, isLate, share)
 	if !isLate {
-		s.onTime += got
+		// The waits read past the last sample lie in this interval: they
+		// are owed out of it, and no later read takes them again.
+		ahead := min(got, s.ahead)
+		s.waitOwed += ahead
+		s.onTime += got - ahead
 		pay := min(got, s.waitOwed)
 		s.waitOwed -= pay
 		got -= pay
 	}
+	s.ahead = 0
 	s.ran.Add(int64(got))
 	s.lastWall, s.lastCPU, s.cpuOK = wall, cpu, cpuOK
 	if wall.Sub(s.waitWall) >= heldEvery {
-		s.readWaits()
+		s.readWaits(false)
 	}
 }
 
@@ -320,11 +329,26 @@ func (s *sampler) read() (wall time.Time, cpu time.Duration, cpuOK bool, waited 
 // carried over (at most heldEvery) and what came since. The rest of it was
 // never counted, so what is owed stays within about two reads' worth of
 // time, and a stall that is real goes on counting when the host quietens.
-// Called with mu held.
-func (s *sampler) readWaits() {
+// But a verdict's read (ahead: owed) comes between samples, and the sampler
+// may be held off then, while the threads it reads run: of the rest, what
+// fits in the time since the last sample may lie in it, which the next
+// sample counts if it comes on time (its own wait explains its lateness), so
+// it is owed out of that sample (sampler.ahead). On a host whose busy loops
+// held the sampler and a consumer off one CPU for 200 ms, a look's read set
+// 57 ms of the consumer's 256 ms wait against what samples had counted, and
+// the next sample counted the rest as time the consumer could run. Called
+// with mu held.
+func (s *sampler) readWaits(ahead bool) {
 	held, heldFor := s.src.heldOff()
 	took := min(held, s.onTime)
 	s.waitOwed += took
+	s.ahead = 0
+	if ahead {
+		// The wall clock after the threads were read: a wait the read
+		// found ended before it.
+		wall, _, _ := s.src.now()
+		s.ahead = min(held-took, max(wall.Sub(s.lastWall), 0))
+	}
 	s.onTime, s.waitWall = min(s.onTime-took, heldEvery), s.lastWall
 	s.reads++
 	s.heldFrom = 0
@@ -334,9 +358,9 @@ func (s *sampler) readWaits() {
 }
 
 // owed reads the waits, and says what on-time samples owe as of now (time on
-// the clock that the process could not run), the read since which a thread
-// held off right now has been (0: none is), and which read this is. It reads
-// them only if a sample came
+// the clock that the process could not run, the waits past the last sample
+// with it), the read since which a thread held off right now has been (0:
+// none is), and which read this is. It reads them only if a sample came
 // since the last read: the clock has not moved since then, and stalls at
 // their verdict on every connection of a starved process must not read every
 // thread at each of their looks, with the CPU it lacks.
@@ -344,9 +368,9 @@ func (s *sampler) owed() (owed time.Duration, heldFrom, read uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.lastWall.After(s.waitWall) {
-		s.readWaits()
+		s.readWaits(true)
 	}
-	return s.waitOwed, s.heldFrom, s.reads
+	return s.waitOwed + s.ahead, s.heldFrom, s.reads
 }
 
 // accrue is what a process could run in an interval iv between two samples,
