@@ -2069,6 +2069,176 @@ func TestOutcomeAPlaceNotReadAgainHoldsTheWordOutsideItsFinerTimes(t *testing.T)
 	}
 }
 
+// A place whose text, or the other run's text there, keploy cannot read
+// again, or the other run's text keploy could not read at all, keeps its
+// instants at its own text's unit, as read: a time the recording wrote as
+// a whole second, which the other run wrote with its milliseconds, stays a
+// second's (fail closed: it names the call's second), and is never judged
+// by a text not read, nor does the question crash. Read again, the place
+// is the other run's millisecond. Through
+// Decide each place's text is in hand by then, so the branch is pinned
+// here, at the question, on recordings read lazily.
+func TestOutcomeAPlaceNotReadAgainIsJudgedAtItsOwnUnit(t *testing.T) {
+	defer func(b, r int64) { bodyBudget, readerBudget = b, r }(bodyBudget, readerBudget)
+	bodyBudget, readerBudget = 0, 1
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dr := tr.Drifts()
+	at := oAt.Add(96 * time.Second)
+	body := func(x time.Time) string { return `{"made":"` + x.UTC().Format(time.RFC3339Nano) + `"}` }
+	// lazy is m read lazily, whose load fails past its first failAfter
+	// loads (none: never); loads counts them.
+	lazy := func(m *models.Mock, failAfter int, loads *int) Raw {
+		return dr.LazyRawOf(m, true, func() (*models.Mock, error) {
+			if *loads++; failAfter >= 0 && *loads > failAfter {
+				return nil, errors.New("the parked answer is gone")
+			}
+			return m, nil
+		})
+	}
+	recorded := getAnswer("mock-7", "http://api/jobs/1", body(at), oAt.Add(-time.Second))
+	given := getAnswer("mock-7", "http://api/jobs/1", body(at.Add(123*time.Millisecond)), oAt.Add(-time.Second))
+	// k is how many loads one read of the instants takes.
+	k := 0
+	if spans, read := newReaderIndex(dr).textOf(lazy(recorded, -1, &k)).spansOf(); !read ||
+		!slices.ContainsFunc(spans, func(sp instant) bool { return sp.keyed && sp.res == time.Second }) {
+		t.Fatalf("read %v, %d instants; the row needs the recording's time read as a second's", read, len(spans))
+	}
+	if k == 0 {
+		t.Fatalf("reading the recording loaded it %d times; the row needs it read lazily", k)
+	}
+	var dc decider
+	for _, tc := range []struct {
+		what             string
+		failRec, failRun int
+		want             time.Duration
+	}{
+		{"both read again", -1, -1, time.Millisecond},
+		{"the recording not read again", k, -1, time.Second},
+		{"the other run's text not read again", -1, k, time.Second},
+		{"the other run's text not read", -1, 0, time.Second},
+	} {
+		x := newReaderIndex(dr)
+		var nRec, nRun int
+		tx, ox := x.textOf(lazy(recorded, tc.failRec, &nRec)), x.textOf(lazy(given, tc.failRun, &nRun))
+		spans, read := dc.atFinest(tx, ox)
+		if !read {
+			t.Errorf("%s: the place's instants not read; want them read as the first read gave them", tc.what)
+			continue
+		}
+		// Each text whose instants were read is read again: the recording
+		// where the other run's instants were read, and the other run's
+		// where the recording was read again.
+		if tc.failRun != 0 && nRec <= k || tc.failRec < 0 && tc.failRun != 0 && nRun <= k {
+			t.Fatalf("%s: loaded %d and %d times; the row needs each text read again after its instants", tc.what, nRec, nRun)
+		}
+		var units []time.Duration
+		for _, sp := range spans {
+			if sp.keyed {
+				units = append(units, sp.res)
+			}
+		}
+		if len(units) != 1 || units[0] != tc.want {
+			t.Errorf("%s: the place's times at %v; want one, at %v", tc.what, units, tc.want)
+		}
+	}
+}
+
+// A place is read again only for a time the other run writes at a finer
+// unit, and then once (the founder's bounded work): a place whose time
+// both runs write at one unit (a whole second, another second in each) is
+// judged there with the recording loaded only to read its instants, and
+// one with two times the other run writes with their milliseconds is read
+// again once for both.
+func TestOutcomeAPlaceIsReadAgainOnceAndOnlyForAFinerTime(t *testing.T) {
+	defer func(b, r int64) { bodyBudget, readerBudget = b, r }(bodyBudget, readerBudget)
+	bodyBudget, readerBudget = 0, 1
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dr := tr.Drifts()
+	at := oAt.Add(96 * time.Second)
+	stamp := func(x time.Time) string { return `"` + x.UTC().Format(time.RFC3339Nano) + `"` }
+	one := func(made, _ time.Time) string { return `{"made":` + stamp(made) + `}` }
+	two := func(made, seen time.Time) string { return `{"made":` + stamp(made) + `,"seen":` + stamp(seen) + `}` }
+	answer := func(body string) *models.Mock {
+		return getAnswer("mock-7", "http://api/jobs/1", body, oAt.Add(-time.Second))
+	}
+	var dc decider
+	for _, tc := range []struct {
+		what      string
+		body      func(made, seen time.Time) string
+		rec, run  [2]time.Time
+		want      []time.Duration
+		readAgain int
+	}{
+		{"one time at the second in both runs", one, [2]time.Time{at}, [2]time.Time{at.Add(time.Second)}, []time.Duration{time.Second}, 0},
+		{"two times the other run writes with their milliseconds", two,
+			[2]time.Time{at, at.Add(2 * time.Second)}, [2]time.Time{at.Add(123 * time.Millisecond), at.Add(2*time.Second + 456*time.Millisecond)},
+			[]time.Duration{time.Millisecond, time.Millisecond}, 1},
+	} {
+		loads := 0
+		recorded := answer(tc.body(tc.rec[0], tc.rec[1]))
+		raw := dr.LazyRawOf(recorded, true, func() (*models.Mock, error) { loads++; return recorded, nil })
+		x := newReaderIndex(dr)
+		if _, read := x.textOf(raw).spansOf(); !read || loads == 0 {
+			t.Fatalf("%s: read %v, loaded %d times; the row needs the recording read lazily", tc.what, read, loads)
+		}
+		k := loads
+		loads = 0
+		spans, read := dc.atFinest(x.textOf(raw), x.textOf(RawOf(answer(tc.body(tc.run[0], tc.run[1])), true)))
+		var units []time.Duration
+		for _, sp := range spans {
+			if sp.keyed {
+				units = append(units, sp.res)
+			}
+		}
+		if !read || !slices.Equal(units, tc.want) {
+			t.Errorf("%s: read %v, the place's times at %v; want %v", tc.what, read, units, tc.want)
+		}
+		if loads != k+tc.readAgain {
+			t.Errorf("%s: the recording loaded %d times; want %d to read its instants and %d again", tc.what, loads, k, tc.readAgain)
+		}
+	}
+}
+
+// Judging a place's instants at the unit the other run's text there shows
+// leaves what the call's index keeps of the text as read: another place
+// that holds the same text, whose other run wrote the whole second as the
+// recording did, is a second's, and so is the text asked again.
+func TestOutcomeAPlaceJudgedAtTheOtherRunsUnitLeavesTheTextAsRead(t *testing.T) {
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	x := newReaderIndex(tr.Drifts())
+	at := oAt.Add(96 * time.Second)
+	body := func(x time.Time) string { return `{"made":"` + x.UTC().Format(time.RFC3339Nano) + `"}` }
+	rec, fine := body(at), body(at.Add(123*time.Millisecond))
+	unit := func(spans []instant, read bool) time.Duration {
+		if !read || len(spans) != 1 {
+			t.Fatalf("read %v, %d instants; want the one time read", read, len(spans))
+		}
+		return spans[0].res
+	}
+	var dc decider
+	if got := unit(dc.atFinest(x.text(rec), x.text(fine))); got != time.Millisecond {
+		t.Fatalf("the place the other run wrote with its milliseconds: at %v; want %v", got, time.Millisecond)
+	}
+	if got := unit(dc.atFinest(x.text(rec), x.text(rec))); got != time.Second {
+		t.Errorf("a second place of the same text, written as a whole second in both runs: at %v; want %v", got, time.Second)
+	}
+	if got := unit(x.text(rec).spansOf()); got != time.Second {
+		t.Errorf("the text asked again: at %v; want %v", got, time.Second)
+	}
+	if x.used == 0 {
+		t.Errorf("the index kept nothing; the row needs the text's instants kept")
+	}
+}
+
 // sentAtMock is a recording whose request sends the moment sent (an UPDATE
 // that stamps a row), asked at req and answered at res (none where res is
 // zero); its answer is the tag alone, or returns returned where it is set.
