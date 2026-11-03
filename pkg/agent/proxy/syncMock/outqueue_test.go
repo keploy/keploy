@@ -7,6 +7,8 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils/stall"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // stalledOutClock has m's out-queue drainer measure its stall on a clock on
@@ -565,6 +567,90 @@ func TestCloseOutChanGivesUpSoonOnAConsumerThatStopped(t *testing.T) {
 	if !m.WasMockDroppedForTC("test-a") {
 		t.Fatal("the mock given up at the close was not recorded for its test")
 	}
+}
+
+// A stop that waits on the out queue (CloseOutChan, a step of the agent's
+// teardown) ends at its consumer's exit, the stream that read the channel
+// ended, while the queue's stall verdict is still pending: here it can never
+// come, the clock frozen. On the verdict alone the stop waited for the
+// consumer to take nothing for the close bound of the time the process could
+// run, which on an overloaded host comes at a small fraction of wall time.
+// The mock is given up, recorded for its test, and the drop says why and how
+// much of the bound had passed.
+func TestCloseOutChanEndsAtItsConsumersExitWhileItsStallVerdictIsPending(t *testing.T) {
+	ch := make(chan *models.Mock, 1)
+	ch <- &models.Mock{Name: "filler"}
+	clk := &stall.ManualClock{} // never advanced
+	core, logs := observer.New(zap.ErrorLevel)
+	m := New(zap.New(core))
+	m.outClock, m.outStall, m.outCloseStall = clk, time.Hour, time.Second
+	gone := make(chan struct{})
+	// As the agent's outgoing stream does: its consumer first, then the
+	// channel, which each connection sets.
+	m.SetOutputConsumer(ch, gone)
+	m.SetOutputChannel(ch)
+	outcome := make(chan bool, 1)
+	m.send(&models.Mock{Name: "a"}, "test-a", func(d bool) { outcome <- d })
+	closed := make(chan struct{})
+	go func() { m.CloseOutChan(); close(closed) }()
+	waitClockPending(t, clk)
+	select {
+	case <-closed:
+		t.Fatal("CloseOutChan returned while its consumer still read and its stall verdict could not come")
+	case d := <-outcome:
+		t.Fatalf("the mock was decided (delivered: %v) before its consumer exited", d)
+	default:
+	}
+	close(gone)
+	select {
+	case <-closed:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("CloseOutChan still waits on a consumer that exited, its stall verdict pending")
+	}
+	if <-outcome {
+		t.Fatal("a mock no consumer took was said to be delivered")
+	}
+	if !m.WasMockDroppedForTC("test-a") {
+		t.Fatal("the mock given up at its consumer's exit was not recorded for its test")
+	}
+	const want = "the consumer stopped reading (the stream that read it ended), having taken no mock for 0s of the 1s stall bound of the time the process could run"
+	if got := logs.FilterField(zap.String("why", want)).Len(); got != 1 {
+		t.Fatalf("%d drop lines say why as %q; the lines: %v", got, want, logs.All())
+	}
+}
+
+// A consumer's exit ends only its own channel's wait: a channel set while
+// another's consumer is said to have exited waits on for its own consumer
+// (here, the clock frozen, for good). A nil manager takes the call.
+func TestAConsumersExitEndsOnlyItsOwnChannelsWait(t *testing.T) {
+	(*SyncMockManager)(nil).SetOutputConsumer(make(chan *models.Mock), make(chan struct{}))
+	clk := &stall.ManualClock{} // never advanced
+	m := New(nil)
+	m.outClock, m.outStall = clk, time.Hour
+	otherGone := make(chan struct{})
+	close(otherGone)
+	m.SetOutputConsumer(make(chan *models.Mock), otherGone)
+	ch := make(chan *models.Mock, 1)
+	ch <- &models.Mock{Name: "filler"}
+	m.SetOutputChannel(ch)
+	outcome := make(chan bool, 1)
+	m.send(&models.Mock{Name: "a"}, "test-a", func(d bool) { outcome <- d })
+	waitClockPending(t, clk)
+	select {
+	case d := <-outcome:
+		t.Fatalf("the mock was decided (delivered: %v) at another channel's consumer's exit", d)
+	case <-time.After(50 * time.Millisecond):
+	}
+	<-ch
+	select {
+	case d := <-outcome:
+		if !d {
+			t.Fatal("the mock its own consumer took was said to be dropped")
+		}
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("the mock was not delivered once its consumer took")
+	}
+	waitOutQueue(t, m)
 }
 
 // The byte bound is the process's, not each manager's: a DaemonSet agent runs

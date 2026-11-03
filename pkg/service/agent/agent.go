@@ -697,6 +697,13 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	if err := a.resetSession(ctx); err != nil {
 		return nil, err
 	}
+	// ctx is the outgoing stream's (its request's), done once the stream's
+	// handler, m's one reader, has returned: from then on nothing takes a
+	// mock from m, and the proxy's stop, which waits for what is queued for
+	// m (syncMock's CloseOutChan), need not wait for that queue's stall
+	// verdict. Set before the proxy records, so m's queue has it from its
+	// first connection on.
+	syncMock.Get().SetOutputConsumer(m, ctx.Done())
 	err := a.Proxy.Record(ctx, m, opts)
 	if err != nil {
 		return nil, err

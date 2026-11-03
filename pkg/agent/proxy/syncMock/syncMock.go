@@ -3,6 +3,7 @@ package manager
 import (
 	"container/heap"
 	"context"
+	"fmt"
 	"math/rand"
 	"slices"
 	"sort"
@@ -418,6 +419,11 @@ type SyncMockManager struct {
 	outQueueMu sync.Mutex
 	out        *outLane
 	outOld     map[*outLane]struct{}
+	// outGone is closed once outGoneOf's consumer has stopped reading it for
+	// good (SetOutputConsumer): a lane SetOutputChannel makes for that
+	// channel takes it. Guarded by outQueueMu.
+	outGoneOf chan<- *models.Mock
+	outGone   <-chan struct{}
 	// outClock, outStall and outCloseStall measure the drainer's stall
 	// (outChanStall, outCloseStall): the process's own runnable clock and
 	// those bounds unless a test sets them.
@@ -738,6 +744,27 @@ func (m *SyncMockManager) NextTestID() int64 {
 	return m.testCounter.Add(1)
 }
 
+// SetOutputConsumer says that gone is closed once out's consumer has stopped
+// reading out for good: the agent's outgoing stream, whose handler has
+// returned. Its drainer, waiting for that consumer to take a mock, then gives
+// up the mock in hand and every one queued at once, as it does at its stall
+// verdict, and the drop says so and how long the consumer had taken nothing.
+// So a stop that waits on the drainer (CloseOutChan) ends at the consumer's
+// exit. On the verdict alone it waited for the consumer to take nothing for
+// the stall bound of the time the process could run, which on an overloaded
+// host comes at a small fraction of wall time, and never on a frozen clock.
+// Call it before out is set (SetOutputChannel): a lane is told its
+// consumer's exit as it is made. With no gone set for a channel, only the
+// verdict ends that wait.
+func (m *SyncMockManager) SetOutputConsumer(out chan<- *models.Mock, gone <-chan struct{}) {
+	if m == nil {
+		return
+	}
+	m.outQueueMu.Lock()
+	defer m.outQueueMu.Unlock()
+	m.outGoneOf, m.outGone = out, gone
+}
+
 // SetOutputChannel plugs an outgoing mock channel into the manager.
 // Only resets outChanClosed when the channel pointer changes —
 // re-setting the same pointer after CloseOutChan must NOT reopen
@@ -795,6 +822,9 @@ func (m *SyncMockManager) SetOutputChannel(out chan<- *models.Mock) {
 		lane.closing = make(chan struct{})
 	}
 	lane.epoch = epoch
+	if out == m.outGoneOf {
+		lane.gone = m.outGone
+	}
 	m.out = lane
 	m.outQueueMu.Unlock()
 	// New session (distinct channel = re-record): drop any revokes still
@@ -1107,6 +1137,9 @@ type outLane struct {
 	drained  chan struct{}
 	// closing is nil once CloseOutChan has closed it.
 	closing chan struct{}
+	// gone is closed once ch's consumer has stopped reading it for good
+	// (SetOutputConsumer); nil: not known.
+	gone <-chan struct{}
 	// epoch is the revokeEpoch it was last the current channel's in.
 	epoch uint64
 }
@@ -1246,8 +1279,9 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 // channel before drained is closed, and a channel replaced (SetOutputChannel)
 // is never closed by the manager. It gives the mock in hand and every queued
 // one up once the consumer has taken nothing for outChanStall of runnable
-// time (outCloseStall once the channel is closing), and tells each drop
-// before it looks at the queue again: only finding it empty ends the lane's
+// time (outCloseStall once the channel is closing), or has stopped reading
+// for good (lane.gone, read with each mock it takes in hand), and tells each
+// drop before it looks at the queue again: only finding it empty ends the lane's
 // draining, so no reader of it sees the lane done with a drop untold. What
 // was queued meanwhile waits a stall bound of its own, as it would with a
 // drainer started for it.
@@ -1273,10 +1307,11 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 		lane.bytes -= q.size
 		lane.inHand = true
 		processOutQueued.Add(-q.size)
+		gone := lane.gone
 		m.outQueueMu.Unlock()
 
-		if !m.deliverQueued(lane.ch, q.mock, &meter, &closing) {
-			m.giveUpOutQueue(lane, q, "the consumer took no mock for the stall bound of the time the process could run")
+		if why := m.deliverQueued(lane.ch, q.mock, &meter, &closing, gone); why != "" {
+			m.giveUpOutQueue(lane, q, why)
 			meter.Reset() // what was queued since waits from now
 			continue
 		}
@@ -1288,22 +1323,26 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 	}
 }
 
-// deliverQueued sends mock on out, and reports false once out's consumer
-// has taken nothing for *meter's bound. Once the channel is closing (*closing
+// deliverQueued sends mock on out, and says why it gave it up ("": it was
+// taken): out's consumer took nothing for *meter's bound (the stall verdict),
+// or it stopped reading for good first (gone closed; nil: not known), with
+// how long it had taken nothing then. Once the channel is closing (*closing
 // fires), the bound is outCloseStall from then on: *meter is replaced, and
 // *closing is set nil. A look is armed only while the consumer is behind,
 // and once per look, not once per mock.
-func (m *SyncMockManager) deliverQueued(out chan<- *models.Mock, mock *models.Mock, meter **stall.Meter, closing *<-chan struct{}) bool {
+func (m *SyncMockManager) deliverQueued(out chan<- *models.Mock, mock *models.Mock, meter **stall.Meter, closing *<-chan struct{}, gone <-chan struct{}) (why string) {
 	select {
 	case out <- mock:
-		return true
+		return ""
 	default:
 	}
 	wait := (*meter).Wait()
 	for {
 		select {
 		case out <- mock:
-			return true
+			return ""
+		case <-gone:
+			return fmt.Sprintf("the consumer stopped reading (the stream that read it ended), having taken no mock for %s of the %s stall bound of the time the process could run", (*meter).Stalled(), (*meter).Grace())
 		case <-*closing:
 			*closing = nil
 			(*meter).Stop()
@@ -1311,7 +1350,7 @@ func (m *SyncMockManager) deliverQueued(out chan<- *models.Mock, mock *models.Mo
 			wait = (*meter).Wait()
 		case <-wait:
 			if (*meter).Expired() {
-				return false
+				return "the consumer took no mock for the stall bound of the time the process could run"
 			}
 			wait = (*meter).Wait()
 		}
@@ -1952,8 +1991,9 @@ func (m *SyncMockManager) CloseOutChan() {
 	// client's stop drains the stream until it closes): the channel is closed
 	// once the drainer has delivered it, or given it up on a consumer that
 	// took nothing for outCloseStall (a client that ended its streams, or is
-	// gone) and told each drop: a lane giving up is draining until it has, so
-	// a close that comes meanwhile waits for it too.
+	// gone), or at once on one that stopped reading for good
+	// (SetOutputConsumer), and told each drop: a lane giving up is draining
+	// until it has, so a close that comes meanwhile waits for it too.
 	m.outChanMu.Lock()
 	if m.outChanClosed {
 		m.outChanMu.Unlock()
