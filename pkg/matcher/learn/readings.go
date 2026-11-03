@@ -1267,9 +1267,11 @@ func (d *valueDrift) plainRunsOf(forms [][2]string, runs [2][]decodedRun, eLive 
 	if raw != nil && recRaw != nil {
 		paired = d.pairedRuns(recTops, liveTops)
 	}
+	kept := make([]bool, paired)
 	for k := 0; k < paired; k++ {
 		if sameEscapes(recRaw[k].esc, raw[k].esc, recTops[k].run) {
 			add(raw[k].run)
+			kept[k] = true
 		}
 	}
 	decLower, eLower := strings.ToLower(d.decLive), strings.ToLower(eLive)
@@ -1290,17 +1292,19 @@ func (d *valueDrift) plainRunsOf(forms [][2]string, runs [2][]decodedRun, eLive 
 		}
 	}
 	// An escape right before a run glues its remnant to the run's first
-	// word in the raw form ("20b2s" of "%20b2s"): that word is the run's
+	// word in the raw form ("20b2s" of "%20b2s"): that word is the runs'
 	// where the run pairs with the recorded value's run of the same rank,
 	// the same escape stands right before that one, and it stands after
 	// the run before it (or the value's start), so only the run changed
 	// the word. An escape that ends the run before it (a run ends after its
-	// padding: "Lg=%3D" right before the next) is that run's, read with it
-	// above.
+	// padding: "Lg=%3D" right before the next) is that run's spelling: the
+	// word is the runs' where that run writes its escapes as the recorded
+	// one does (kept), so neither run's escapes changed; else it is the
+	// value's own, as that run's other escaped words are.
 	pl := 0
 	for k := 0; k < paired; k++ {
 		r, q := raw[k], recRaw[k]
-		if e := escapeBefore(d.live, r.st); e != "" && r.st-len(e) >= pl && escapeBefore(d.rec, q.st) == e {
+		if e := escapeBefore(d.live, r.st); e != "" && (r.st-len(e) >= pl || k > 0 && kept[k-1]) && escapeBefore(d.rec, q.st) == e {
 			for _, rd := range readings {
 				if w := wordAcross(d.live, r.st, rd); w != "" {
 					words[w] = true

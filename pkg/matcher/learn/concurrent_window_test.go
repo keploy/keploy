@@ -1640,6 +1640,35 @@ func TestAnEncodedTextGetsThePlainTextsAnswerWhateverUnreadPayloadWasServedBefor
 							if ln := learnOf(strings.ReplaceAll(partLost(padded(recRun.read)), "=", "%3D"), partLost(padded(fRun.read))); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
 								t.Errorf("encoded, record's full round's value lost one of two escapes, %s, window %+v: %s from %q held %q (%s); want noise of the word", pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
 							}
+							// An escape gained in the run where the recorded
+							// run escapes another byte the same way ('/'
+							// written "%2F" beside a "%3D" both sides write):
+							// the recorded run holds that '/' raw, so it is
+							// the plain text's escape gained ("x/y" to
+							// "x%2Fy"): refused.
+							if ln := learnOf(escapePadding(padded(recRun.read)), escapePadding(slashOnly(padded(fRun.read)))); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+								t.Errorf("encoded, its padding escaped on both sides and its '/' by record's full round's value only, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+							}
+							// The escape that ends a run right before the
+							// next ("Lg=%3D<run>"), written so on both sides:
+							// the word its remnant glues to the next run
+							// ("3DbGVh...") is the runs', so the text is
+							// noise, as it is with that '=' raw. Where that
+							// run writes its padding otherwise than the
+							// recorded one ("%3D%3D" against "=%3D"), the
+							// word is the value's own: refused.
+							if ln := learnOf(adjacent(recRun.read, "%3D"), adjacent(fRun.read, "%3D")); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+								t.Errorf("encoded, an escape ending a run right before another, written so on both sides, %s, window %+v: %s from %q held %q (%s); want noise of the word", pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+							}
+							respelled := func(v time.Time, last string) string {
+								return strings.Replace(adjacent(v, "%3D"), "=%3D", last, 1)
+							}
+							if r, l := respelled(recRun.read, "%3D%3D"), respelled(fRun.read, "=%3D"); !strings.Contains(r, "%3D%3D") || !strings.Contains(l, "=%3D") || strings.Contains(r, "=%3D") {
+								t.Fatalf("%q and %q do not end the first run in \"%%3D%%3D\" and \"=%%3D\", so this row tells nothing", r, l)
+							}
+							if ln := learnOf(respelled(recRun.read, "%3D%3D"), respelled(fRun.read, "=%3D")); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+								t.Errorf("encoded, an escape ending a run right before another, that run's padding respelled, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+							}
 						}
 						if ln := learnOf(esc.rec(shapes[1].of(recRun.read, "created")), esc.live(shapes[1].of(fRun.read, "created"))); esc.liveOnly && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11")) {
 							t.Errorf("encoded%s, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", esc.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)

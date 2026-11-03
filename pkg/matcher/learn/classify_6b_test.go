@@ -2,6 +2,7 @@ package learn
 
 import (
 	"encoding/hex"
+	"maps"
 	"regexp"
 	"strconv"
 	"strings"
@@ -214,5 +215,60 @@ func BenchmarkUnescaped(b *testing.B) {
 				unescapedByPattern(tc.text)
 			}
 		})
+	}
+}
+
+// TestSameEscapesTakesAByteOnlyLiveHoldsByAnEncodersOneSpelling holds
+// sameEscapes to its rule for a byte only the live run holds: it is
+// written so where the recorded run writes another byte by one spelling of
+// that kind (its first byte and its length), and the live run writes all
+// its copies the same way; a mix of spellings says nothing of how the
+// recorded side's encoder writes it, even beside a recorded mix of the same
+// length. A byte the recorded run holds is written as the recorded run
+// writes it: as itself where it escapes it nowhere.
+func TestSameEscapesTakesAByteOnlyLiveHoldsByAnEncodersOneSpelling(t *testing.T) {
+	mixed := func(sps ...string) string { return "\x00 " + strings.Join(sps, " ") }
+	for _, c := range []struct {
+		what      string
+		rec, live map[byte]string
+		recRun    string
+		want      bool
+	}{
+		{"'/' only live holds, one spelling beside the recorded \"%3D\"", map[byte]string{'=': "%3D"}, map[byte]string{'/': "%2F"}, "YWI=", true},
+		{"'/' only live holds, mixed, beside the recorded \"%3D\"", map[byte]string{'=': "%3D"}, map[byte]string{'/': mixed("%2F", "%2f")}, "YWI=", false},
+		{"'/' only live holds, mixed, beside a recorded mix of the same length", map[byte]string{'=': mixed("%3D", "%3d")}, map[byte]string{'/': mixed("%2F", "%2f")}, "YWI==", false},
+		{"'/' only live holds, the recorded run escaping nothing", nil, map[byte]string{'/': "%2F"}, "YWI", false},
+		{"'/' the recorded run holds raw, escaped by live beside the recorded \"%3D\"", map[byte]string{'=': "%3D"}, map[byte]string{'/': "%2F", '=': "%3D"}, "YW/=", false},
+		{"'/' both escape alike", map[byte]string{'/': "%2F"}, map[byte]string{'/': "%2F"}, "YW/I", true},
+		{"'/' respelled", map[byte]string{'/': "%2F"}, map[byte]string{'/': "%2f"}, "YW/I", false},
+	} {
+		if got := sameEscapes(c.rec, c.live, c.recRun); got != c.want {
+			t.Errorf("%s: sameEscapes(%q, %q, %q) = %v; want %v", c.what, c.rec, c.live, c.recRun, got, c.want)
+		}
+	}
+}
+
+// TestRawImagesListsABytesSpellingsInOrderWhereTheyDiffer holds rawImages'
+// esc to its rule: a byte all of whose copies are written one way has that
+// spelling; one written two ways (its padding's '=' escaped once and raw
+// once) has each copy's, in order, so a run that respells a copy is told
+// from one that writes them all alike; a byte never escaped has none.
+func TestRawImagesListsABytesSpellingsInOrderWhereTheyDiffer(t *testing.T) {
+	for _, c := range []struct {
+		raw, run string
+		esc      map[byte]string
+	}{
+		{"tok YW%2FI%3D= ok", "YW%2FI%3D=", map[byte]string{'/': "%2F", '=': "\x00 %3D ="}},
+		{"tok YW%2FI=%3D ok", "YW%2FI=%3D", map[byte]string{'/': "%2F", '=': "\x00 = %3D"}},
+		{"tok YW%2FI%3D%3D ok", "YW%2FI%3D%3D", map[byte]string{'/': "%2F", '=': "%3D"}},
+		{"tok YW/I%3D%3D ok", "YW/I%3D%3D", map[byte]string{'=': "%3D"}},
+	} {
+		dec, _ := unescapedAt(c.raw)
+		st := strings.Index(dec, "YW")
+		en := strings.Index(dec, " ok")
+		got := rawImages(c.raw, []decodedRun{{run: dec[st:en], at: -1, st: st, en: en}})
+		if len(got) != 1 || got[0].run != c.run || !maps.Equal(got[0].esc, c.esc) {
+			t.Errorf("rawImages(%q) = %+v; want one run %q with esc %q", c.raw, got, c.run, c.esc)
+		}
 	}
 }
