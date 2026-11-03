@@ -181,6 +181,13 @@ func (h *Hooks) closeInstanceFork() error {
 	return err
 }
 
+// InstanceRefusal refuses every process an instance where the agent is
+// outside the initial PID namespace (hostPIDs), the one reason that holds
+// for the whole run (agent.InstanceStamper).
+func (h *Hooks) InstanceRefusal() error {
+	return hostPIDs()
+}
+
 // hostPIDs refuses an agent outside the initial PID namespace: the kernel's
 // instance entries are by kernel TGID, which such an agent cannot tell from
 // its own process numbers.
@@ -190,7 +197,7 @@ func hostPIDs() error {
 		return err
 	}
 	if st.Ino != initialPIDNSInode {
-		return fmt.Errorf("keploy instances need an agent in the host PID namespace: %w", errNotHostPIDs)
+		return fmt.Errorf("keploy's agent runs in a PID namespace of its own, and keeps test workers apart only in the host's (%w)", errNotHostPIDs)
 	}
 	return nil
 }

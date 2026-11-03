@@ -260,6 +260,10 @@ type InstanceStamper interface {
 	// InstanceLost is what the kernel could not put in instance id since
 	// SetInstance last gave it.
 	InstanceLost(id uint32) (InstanceLoss, error)
+	// InstanceRefusal is why these hooks can give no process an instance,
+	// the same for every process of the run, nil when they can: an agent in
+	// a PID namespace of its own cannot, as SetInstance refuses.
+	InstanceRefusal() error
 }
 
 // InstanceLoss counts the processes an instance forked that the kernel

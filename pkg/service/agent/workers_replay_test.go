@@ -118,7 +118,8 @@ func claimAsWorker(a *Agent, pid int, key string) (models.InstanceResp, *models.
 	}
 	defer a.wire.unlock()
 	start, _ := procStart(pid)
-	return a.claimWorker(ctx, models.InstanceReq{Key: key, Workers: 2}, claimant{pid: pid, start: start}, 2)
+	stamper, _ := a.Hooks.(coreAgent.InstanceStamper)
+	return a.claimWorker(ctx, models.InstanceReq{Key: key, Workers: 2}, claimant{pid: pid, start: start}, 2, stamper)
 }
 
 // In a replay each worker's claim serves it from a manager of its own, armed
