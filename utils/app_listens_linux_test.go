@@ -16,7 +16,12 @@ import (
 	"go.uber.org/zap"
 )
 
-const listenChildEnv = "KEPLOY_TEST_LISTEN_CHILD"
+const (
+	listenChildEnv = "KEPLOY_TEST_LISTEN_CHILD"
+	// listenChildAddrEnv is the address the child listens on, when not
+	// 127.0.0.1:0.
+	listenChildAddrEnv = "KEPLOY_TEST_LISTEN_CHILD_ADDR"
+)
 
 // TestListenChildHelper is the child process of
 // TestAppListenPortsAreTheAppsAndItsChildrensListeningPorts: it listens on a
@@ -25,7 +30,11 @@ func TestListenChildHelper(t *testing.T) {
 	if os.Getenv(listenChildEnv) == "" {
 		t.Skip("the child process of another row")
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	addr := os.Getenv(listenChildAddrEnv)
+	if addr == "" {
+		addr = "127.0.0.1:0"
+	}
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		os.Exit(2)
 	}
@@ -109,6 +118,45 @@ func TestAppListenPortsAreTheAppsAndItsChildrensListeningPorts(t *testing.T) {
 	// A room made again on a context that has one is the same room.
 	if AppPID(WithAppPID(ctx)) != child.Process.Pid {
 		t.Error("WithAppPID on a context with a room made a new, empty one")
+	}
+}
+
+// A child in a network namespace of its own, under a parent that holds no
+// socket: its listening port is read from its own namespace's table, where
+// its socket is, not from its parent's.
+func TestAppListenPortsReadAChildsPortInItsOwnNetworkNamespace(t *testing.T) {
+	if out, err := exec.Command("unshare", "-rn", "true").CombinedOutput(); err != nil {
+		t.Skipf("no unprivileged network namespace here (%v: %s)", err, out)
+	}
+	// sh forks unshare (the "; true" keeps sh from exec'ing it), and unshare
+	// execs the child in a new user and network namespace, where loopback is
+	// down: it listens on every address of that namespace.
+	parent := exec.Command("sh", "-c", `unshare -rn "$0" -test.run='^TestListenChildHelper$'; true`, os.Args[0])
+	parent.Env = append(os.Environ(), listenChildEnv+"=1", listenChildAddrEnv+"=:0")
+	parent.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	out, err := parent.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-parent.Process.Pid, syscall.SIGKILL)
+		_ = parent.Wait()
+	})
+	line, err := bufio.NewReader(out).ReadString('\n')
+	if err != nil {
+		t.Fatalf("the child did not say its port: %v", err)
+	}
+	kid, err := strconv.Atoi(line[:len(line)-1])
+	if err != nil {
+		t.Fatalf("the child said %q, not a port", line)
+	}
+	ctx := WithAppPID(context.Background())
+	NoteAppPID(ctx, parent.Process.Pid)
+	if got := AppListenPorts(ctx); !slices.Contains(got, kid) {
+		t.Errorf("ports %v lack %d, the port the child listens on in its own network namespace", got, kid)
 	}
 }
 
