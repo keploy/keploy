@@ -2070,4 +2070,13 @@ type VariableBinding struct {
 	// variable's binding whose reads were made in the same second
 	// (ReadInOneSecond), and with no other.
 	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty"`
+	// WordRun is, for a binding at a word of a value (a word address), the
+	// run of words its call binds there: the words bound at consecutive
+	// words of that text, its own among them, live, in word order, joined
+	// by "-" (variables.WordRuns). RecordedWordRun is the same words as
+	// recorded. A binding of a value whole has none. Two word bindings
+	// share a live value as two variables only when their runs are one
+	// live run and were two recorded ones (variables.TwoValues).
+	WordRun         string `json:"wordRun,omitempty" yaml:"wordRun,omitempty"`
+	RecordedWordRun string `json:"recordedWordRun,omitempty" yaml:"recordedWordRun,omitempty"`
 }
