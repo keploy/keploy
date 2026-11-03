@@ -163,8 +163,19 @@ type sampler struct {
 	// they counted.
 	lateGot time.Duration
 	lateGap time.Duration
-	// The sampling thread's wait for a CPU so far, at the last sample
-	// (ownOK: it could be read).
+}
+
+// sampling is one run of the sampler (run): the stop that ends it, and its
+// thread's wait for a CPU so far, at its last sample (ownOK: it could be
+// read). A run delay is a total since its thread began, so a wait is only
+// one thread's account against its own: one thread's set against another's
+// is any difference at all, and one past the interval passes a late sample
+// as on time, its whole interval counted however long the process was
+// frozen. Each run reads its own locked thread, and acquire does not wait
+// for the run the last release stopped (only that release does), so the
+// account is the run's own, never the sampler's.
+type sampling struct {
+	stop    chan struct{}
 	lastOwn time.Duration
 	ownOK   bool
 }
@@ -248,11 +259,12 @@ func (s *sampler) run(stop, done chan struct{}, wake *waker) {
 	// from its own account (ownWait).
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	r := &sampling{stop: stop}
 	s.mu.Lock()
-	s.lastOwn, s.ownOK = s.src.ownWait()
+	r.lastOwn, r.ownOK = s.src.ownWait()
 	s.mu.Unlock()
 	for !sleepFor(s.tick, stop, wake) {
-		s.sample()
+		s.sample(r)
 	}
 }
 
@@ -272,11 +284,18 @@ func (s *sampler) begin() {
 	s.lateGot, s.lateGap = 0, 0
 }
 
-// sample adds what the process could run since the last sample.
-func (s *sampler) sample() {
+// sample adds what the process could run since the last sample, as run r.
+func (s *sampler) sample(r *sampling) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	wall, cpu, cpuOK, waited := s.read()
+	if s.stop != r.stop {
+		// A release stopped r after its sleep ended, and an acquire may
+		// have begun the next sampling since: r's thread's wait runs from
+		// r's last sample, before that sampling began, and would be set
+		// against its interval. r samples for no one now.
+		return
+	}
+	wall, cpu, cpuOK, waited := s.read(r)
 	share := 1.0
 	if l, ok := s.src.cpuLimit(); ok && l > 0 && l < 1 {
 		share = l
@@ -321,7 +340,7 @@ func (s *sampler) sample() {
 const ownReads = 3
 
 // read reads the wall clock and the process's CPU time, and how long the
-// sampling thread waited for a CPU since the last sample (waited). A sample's
+// sampling thread waited for a CPU since r's last sample (waited). A sample's
 // interval runs from one wall read to the next, and the wait set against it
 // must have ended between them; a wait shows in the thread's account as it
 // ends. So the account is read just before the wall and just after it. A
@@ -333,7 +352,7 @@ const ownReads = 3
 // against this sample, those after it against the next, and one that ends
 // between the last two reads against neither, so the samples it lies between
 // can only look later. Called with mu held.
-func (s *sampler) read() (wall time.Time, cpu time.Duration, cpuOK bool, waited time.Duration) {
+func (s *sampler) read(r *sampling) (wall time.Time, cpu time.Duration, cpuOK bool, waited time.Duration) {
 	var own time.Duration
 	var ownOK bool
 	next, nextOK := s.src.ownWait()
@@ -344,10 +363,10 @@ func (s *sampler) read() (wall time.Time, cpu time.Duration, cpuOK bool, waited 
 			break
 		}
 	}
-	if ownOK && s.ownOK {
-		waited = max(own-s.lastOwn, 0)
+	if ownOK && r.ownOK {
+		waited = max(own-r.lastOwn, 0)
 	}
-	s.lastOwn, s.ownOK = next, nextOK
+	r.lastOwn, r.ownOK = next, nextOK
 	return wall, cpu, cpuOK, waited
 }
 

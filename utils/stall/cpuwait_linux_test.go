@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -512,7 +513,7 @@ func overloadLooks(world func(int) (map[string]threadStat, map[string]int64), gr
 	m := NewMeter(heldClock{s}, grace)
 	return func() (bool, bool) {
 		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/2
-		s.sample()
+		sampleByHand(s)
 		e := m.Expired()
 		return e, m.due.Load() != nil
 	}, func() int { return src.n }
@@ -718,5 +719,142 @@ func TestSampler_TheLastReleaseWakesItsSleep(t *testing.T) {
 			t.Fatalf("sampling %d polled eventfd %d, the first %d; want one per sampler", run, s.wake.fd, fd)
 		}
 		wakeTaken(t, s.wake)
+	}
+}
+
+// threadWaitSource is a frozen process (its CPU time never moves) whose wall
+// clock moves a second at each read, and each of whose threads has its own
+// run delay, as the kernel keeps one per thread since it began: far apart from
+// one thread to the next, and still unless the row adds to it (wait).
+type threadWaitSource struct {
+	mu   sync.Mutex
+	wall time.Time
+	own  map[int]time.Duration
+	next time.Duration
+}
+
+func (f *threadWaitSource) now() (time.Time, time.Duration, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.wall = f.wall.Add(time.Second)
+	return f.wall, 0, true
+}
+
+func (f *threadWaitSource) cpuLimit() (float64, bool) { return 0, false }
+
+func (f *threadWaitSource) heldOff() (time.Duration, uint64) { return 0, 0 }
+
+func (f *threadWaitSource) ownWait() (time.Duration, bool) {
+	tid := unix.Gettid()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d, ok := f.own[tid]
+	if !ok {
+		f.next += 100 * time.Second
+		d = f.next
+		f.own[tid] = d
+	}
+	return d, true
+}
+
+// wait adds d to thread tid's run delay: it waited d for a CPU.
+func (f *threadWaitSource) wait(tid int, d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.own[tid] += d
+}
+
+// lockedThread is a goroutine locked to its OS thread for the row's life: on
+// runs f on it, and tid is the thread's id.
+func lockedThread(t *testing.T) (on func(f func()), tid int) {
+	fs, ran := make(chan func()), make(chan struct{})
+	ids := make(chan int)
+	go func() {
+		runtime.LockOSThread() // never unlocked: the thread ends with the goroutine
+		ids <- unix.Gettid()
+		for f := range fs {
+			f()
+			ran <- struct{}{}
+		}
+	}()
+	t.Cleanup(func() { close(fs) })
+	return func(f func()) { fs <- f; <-ran }, <-ids
+}
+
+// A run that a release stopped after its sleep ended may take the sampler's
+// lock after the next acquire began a new run on another thread: acquire
+// waits for no run, only the release that stopped it does. That run must not
+// sample. Its thread's wait runs from its own last sample, before the new
+// sampling began, and a run delay set against another thread's is any
+// difference at all: either can pass a frozen process's late sample as on
+// time, and its whole interval counts. The order is forced on two locked
+// threads: the stopped run's thread waits 100 s across the restart, its
+// sample lands after the new run's start, and the new run samples on.
+func TestSampler_ARunStoppedBeforeARestartDoesNotSampleForTheNext(t *testing.T) {
+	src := &threadWaitSource{wall: time.Unix(1_000_000, 0), own: map[int]time.Duration{}}
+	s := &sampler{src: src, tick: Tick}
+	// start is acquire's start of a sampling, without its goroutine: the
+	// row runs it, on a thread of its own (runOn).
+	start := func() *sampling {
+		s.readMu.Lock()
+		defer s.readMu.Unlock()
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.begin()
+		s.stop = make(chan struct{})
+		return &sampling{stop: s.stop}
+	}
+	runOn := func(on func(func()), r *sampling) {
+		on(func() { // as run starts
+			s.mu.Lock()
+			r.lastOwn, r.ownOK = src.ownWait()
+			s.mu.Unlock()
+		})
+	}
+	onA, tidA := lockedThread(t)
+	onB, _ := lockedThread(t)
+	old := start()
+	runOn(onA, old)
+	onA(func() { s.sample(old) })
+	onA(func() { s.sample(old) })
+	if got := time.Duration(s.ran.Load()); got != 0 {
+		t.Fatalf("a frozen process's clock counted %v in two late samples", got)
+	}
+	// The last release, as it stops the run; then its thread waits for a
+	// CPU, through the next acquire and its run's start.
+	s.mu.Lock()
+	s.stop = nil
+	s.mu.Unlock()
+	src.wait(tidA, 100*time.Second)
+	next := start()
+	runOn(onB, next)
+	onA(func() { s.sample(old) }) // its sleep ended before the release
+	onB(func() { s.sample(next) })
+	onB(func() { s.sample(next) })
+	if got := time.Duration(s.ran.Load()); got != 0 {
+		t.Fatalf("a frozen process's clock counted %v once a stopped run's sample landed after a restart: a wait from before the restart, or another thread's, was set against its interval", got)
+	}
+}
+
+// The same left to the scheduler: three goroutines acquire and release one
+// sampler of a frozen process, each a fixed number of times, holding it 0,
+// 50 and 100 us at a time; the clock never counts.
+func TestSampler_RestartCyclesNeverCountAFrozenProcess(t *testing.T) {
+	src := &threadWaitSource{wall: time.Unix(1_000_000, 0), own: map[int]time.Duration{}}
+	s := &sampler{src: src, tick: 200 * time.Microsecond}
+	const cycles = 3_000 // acquires per goroutine
+	var wg sync.WaitGroup
+	for g := range 3 {
+		wg.Go(func() {
+			for range cycles {
+				release := s.acquire()
+				time.Sleep(time.Duration(g) * 50 * time.Microsecond)
+				release()
+			}
+		})
+	}
+	wg.Wait()
+	if got := time.Duration(s.ran.Load()); got != 0 {
+		t.Fatalf("a frozen process's clock counted %v in %d acquires from each of three goroutines: a sample set one thread's run delay against another's", got, cycles)
 	}
 }
