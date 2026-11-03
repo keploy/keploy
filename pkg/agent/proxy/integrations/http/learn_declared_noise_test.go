@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -416,6 +417,108 @@ func TestLearnMatchALaterCallReadsTheRunsVariableThroughADeclaredExchange(t *tes
 		use, binds := c.Spec.Learned(), c.Spec.LearnedBinds()
 		if len(use) != 1 || len(use[name].Use) != 1 || len(binds) != 1 || len(binds["mock-0"]) != 1 || binds["mock-0"][name].Bind != "body.order" {
 			t.Fatalf("test B's %s uses %+v and binds %+v, want only the run's %s, bound at test A's call", c.Name, use, binds, name)
+		}
+	}
+}
+
+// A declared field is read against the earlier places of the call's own
+// recorded test (ofPairedTest, recordedBeforeOf), as a paired call's drift
+// is. A test's own call inside its recorded test's window is no copy of
+// another recorded test's rows: a token that test's login answered, which
+// the store keeps on disk, is no place it reads, so the echo at the field
+// keploy.yml declares holds this run's value. A pool call inside a window
+// may carry a value of any recording made before it: the same token, there,
+// may have flowed from that login, and the call is served as recorded.
+func TestLearnMatchADeclaredFieldReadsTheEarlierPlacesOfTheCallsOwnTest(t *testing.T) {
+	h, _, opts := learnOn(t)
+	opts.LearnPool = true
+	n := h.newLearnNoise(opts, map[string][]string{"token": {}}, nil)
+	for _, row := range []struct {
+		name string
+		pool bool
+		want string
+	}{
+		{"a test's own call", false, `{"token":"tok-9d8e7f","ok":true}`},
+		{"a pool call inside a window", true, `{"token":"tok-0c41b2","ok":true}`},
+	} {
+		tr := learn.NewTracker()
+		tr.Begin()
+		ctx := learn.WithTracker(context.Background(), tr)
+		login := learnRecorded("mock-0", 0, "POST", "/v1/login", `{"user":"u-7"}`, nil, `{"token":"tok-0c41b2"}`)
+		check := learnRecorded("mock-1", 2*time.Second, "POST", "/v1/sessions/check", `{"token":"tok-0c41b2"}`, nil, `{"token":"tok-0c41b2","ok":true}`)
+		store := &recordedBeforeDb{learnDb: &learnDb{perTest: []*models.Mock{check}, otherTest: map[time.Time]bool{login.Spec.ReqTimestampMock: true}}, onDisk: []*models.Mock{login}}
+		var db integrations.MockMemDb = store
+		if row.pool {
+			db = poolView{store}
+		}
+		served, miss, err := h.learnMatch(ctx, live("POST", "/v1/sessions/check", `{"token":"tok-9d8e7f"}`, nil), db, n, opts)
+		if err != nil || miss != nil || served == nil {
+			t.Fatalf("%s: served %v miss %+v err %v", row.name, served, miss, err)
+		}
+		if served.Spec.HTTPResp.Body != row.want {
+			t.Fatalf("%s: served %s, want %s", row.name, served.Spec.HTTPResp.Body, row.want)
+		}
+	}
+}
+
+// A call the learn step follows, whose recording's answer the agent parked
+// on disk (diskmocks.go), has that answer read back by the learn step, which
+// hands what it read to the exchange it keeps for later calls, and by the
+// serve that writes this run's value into it (claimLearned): never a third
+// time. The exchange states the answer F gave the application, with this
+// run's value (learnedView), which a later test's call reads it by
+// (learn.Earlier.View). So on the paired path and on the declared one.
+func TestLearnMatchAFollowedCallsParkedAnswerIsNotReadAgainAndStatesItsView(t *testing.T) {
+	for _, row := range []struct {
+		name  string
+		noise map[string][]string
+	}{
+		{"paired", nil},
+		{"declared", map[string][]string{"q.id": {}}},
+	} {
+		h, _, opts := learnOn(t)
+		n := h.newLearnNoise(opts, row.noise, nil)
+		tr := learn.NewTracker()
+		tr.Begin()
+		ctx := learn.WithTracker(context.Background(), tr)
+		create := learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"order":"o-1"}`, nil, `{}`)
+		find := learnRecorded("mock-1", time.Second, "POST", "/v1/find", `{"q":{"id":"o-1"}}`, nil, "")
+		parked := *find.Spec.HTTPResp
+		parked.Body = `{"id":"o-1","state":"new"}`
+		find.Spec.HTTPResp = nil
+		reads := 0
+		find.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
+			reads++
+			r := parked
+			return &r, nil, nil
+		})
+		db := &learnDb{perTest: []*models.Mock{create, find}}
+		if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/orders", `{"order":"o-9"}`, nil), db, n, opts); served == nil || miss != nil {
+			t.Fatalf("%s: the create is paired: %+v", row.name, miss)
+		}
+		served, miss, err := h.learnMatch(ctx, live("POST", "/v1/find", `{"q":{"id":"o-9"}}`, nil), db, n, opts)
+		if err != nil || miss != nil || served == nil {
+			t.Fatalf("%s: served %v miss %+v err %v", row.name, served, miss, err)
+		}
+		if served.Spec.HTTPResp.Body != `{"id":"o-9","state":"new"}` {
+			t.Fatalf("%s: served %s: the answer holds this run's value", row.name, served.Spec.HTTPResp.Body)
+		}
+		if reads != 2 {
+			t.Fatalf("%s: the answer parked on disk was read back %d times, want twice (the learn step, the serve)", row.name, reads)
+		}
+		_, earlier, _, _ := tr.Test()
+		var view func() (*models.Mock, error)
+		for _, e := range earlier {
+			if e.Mock == "mock-1" {
+				view = e.View
+			}
+		}
+		if view == nil {
+			t.Fatalf("%s: the find's exchange states no view of the answer F gave", row.name)
+		}
+		got, err := view()
+		if err != nil || got.Spec.HTTPResp == nil || got.Spec.HTTPResp.Body != `{"id":"o-9","state":"new"}` {
+			t.Fatalf("%s: the find's view %+v err %v, want the answer F gave", row.name, got, err)
 		}
 	}
 }
