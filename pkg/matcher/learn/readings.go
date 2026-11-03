@@ -4,6 +4,7 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
+	"maps"
 	"regexp"
 	"sort"
 	"strconv"
@@ -117,115 +118,181 @@ func b64Text(s string, clock map[string]bool) string { return b64Read(s, clock, 
 // (the bound row's). everySplit makes those reads all the same and keeps
 // every run tried: only the row that holds b64Text to them sets it.
 func b64Read(s string, clock map[string]bool, everySplit bool) string {
-	var sb strings.Builder
-	seen := map[string]bool{}
-	level := []string{s}
-	for depth := 0; depth < maxDecodeLevels && len(level) > 0; depth++ {
-		var next []string
-		try := func(c string) bool {
-			if len(c) < minEncodedRun || seen[c] || (everySplit || len(clock) > 0) && allIn(tokensBy(c, isWord), clock) {
-				return false
-			}
-			if everySplit {
-				seen[c] = true
-			}
-			t, ok := decodeText(c)
-			if !ok {
-				return false
-			}
+	r := newB64Reader(s, clock, everySplit)
+	for depth := 0; depth < maxDecodeLevels && len(r.level) > 0; depth++ {
+		r.next()
+	}
+	return r.sb.String()
+}
+
+// b64Reader reads the encoded runs of a text one level at a time (b64Read):
+// level are the texts the last level decoded to (at first the text itself),
+// whose runs the next level decodes; sb holds every text decoded so far, each
+// on a line of its own; and a run all of whose words are in clock is a part
+// of a clock read, not decoded.
+type b64Reader struct {
+	sb         strings.Builder
+	seen       map[string]bool
+	level      []string
+	clock      map[string]bool
+	everySplit bool
+}
+
+func newB64Reader(s string, clock map[string]bool, everySplit bool) *b64Reader {
+	return &b64Reader{seen: map[string]bool{}, level: []string{s}, clock: clock, everySplit: everySplit}
+}
+
+// next decodes the runs of the texts of rd's level, writes each text it
+// finds to sb, and makes those texts rd's level (none where it finds none).
+func (rd *b64Reader) next() {
+	sb, seen, clock, everySplit := &rd.sb, rd.seen, rd.clock, rd.everySplit
+	var next []string
+	try := func(c string) bool {
+		if len(c) < minEncodedRun || seen[c] || (everySplit || len(clock) > 0) && allIn(tokensBy(c, isWord), clock) {
+			return false
+		}
+		if everySplit {
 			seen[c] = true
-			raw := t
-			t = unescaped(raw)
-			if q := qpForm(raw); q != t {
-				t += "\n" + q
+		}
+		t, ok := decodeText(c)
+		if !ok {
+			return false
+		}
+		seen[c] = true
+		raw := t
+		t = unescaped(raw)
+		if q := qpForm(raw); q != t {
+			t += "\n" + q
+		}
+		sb.WriteString(t)
+		sb.WriteByte('\n')
+		next = append(next, t)
+		return true
+	}
+	tryRun := func(run string) bool {
+		slash, glued := runSeparators(run)
+		whole := try(run)
+		if everySplit || slash {
+			for _, part := range strings.FieldsFunc(run, func(r rune) bool { return r == '/' || r == '.' }) {
+				try(part)
 			}
-			sb.WriteString(t)
-			sb.WriteByte('\n')
-			next = append(next, t)
+		}
+		if h, ok := strings.CutPrefix(run, "0x"); ok {
+			try(h)
+		} else if h, ok := strings.CutPrefix(run, "0X"); ok {
+			try(h)
+		}
+		if whole {
 			return true
 		}
-		tryRun := func(run string) bool {
-			slash, glued := runSeparators(run)
-			whole := try(run)
-			if everySplit || slash {
-				for _, part := range strings.FieldsFunc(run, func(r rune) bool { return r == '/' || r == '.' }) {
-					try(part)
+		if !everySplit && !glued {
+			return false
+		}
+		// Its longest parts between groups of '-' and '_' that are text,
+		// none inside another that was.
+		var read [][2]int
+		for _, sp := range gluedSpans(run) {
+			inside := false
+			for _, r := range read {
+				if sp[0] >= r[0] && sp[1] <= r[1] {
+					inside = true
+					break
 				}
 			}
-			if h, ok := strings.CutPrefix(run, "0x"); ok {
-				try(h)
-			} else if h, ok := strings.CutPrefix(run, "0X"); ok {
-				try(h)
+			if !inside && try(run[sp[0]:sp[1]]) {
+				read = append(read, sp)
 			}
-			if whole {
-				return true
-			}
-			if !everySplit && !glued {
-				return false
-			}
-			// Its longest parts between groups of '-' and '_' that are text,
-			// none inside another that was.
-			var read [][2]int
-			for _, sp := range gluedSpans(run) {
-				inside := false
-				for _, r := range read {
-					if sp[0] >= r[0] && sp[1] <= r[1] {
-						inside = true
+		}
+		return false
+	}
+	for _, text := range rd.level {
+		texts := []string{text}
+		j, joins := joinWrapped(text)
+		if j != text {
+			texts = append(texts, j)
+		}
+		for ti, tx := range texts {
+			for st, en, ok := nextB64Run(tx, 0); ok; st, en, ok = nextB64Run(tx, en) {
+				ix := [2]int{st, en}
+				if tryRun(tx[ix[0]:ix[1]]) || ti == 0 {
+					continue
+				}
+				// A run that joined lines and is no text: its lines up
+				// to a join may be (the last line of the base64 joined
+				// to the text on the next line), longest first; and so
+				// may its lines from its first join (the line before
+				// was no part of it: a header ending in an id).
+				starts := []int{ix[0]}
+				for _, c := range joins {
+					if c > ix[0] && c < ix[1] {
+						starts = append(starts, c)
 						break
 					}
 				}
-				if !inside && try(run[sp[0]:sp[1]]) {
-					read = append(read, sp)
-				}
-			}
-			return false
-		}
-		for _, text := range level {
-			texts := []string{text}
-			j, joins := joinWrapped(text)
-			if j != text {
-				texts = append(texts, j)
-			}
-			for ti, tx := range texts {
-				for st, en, ok := nextB64Run(tx, 0); ok; st, en, ok = nextB64Run(tx, en) {
-					ix := [2]int{st, en}
-					if tryRun(tx[ix[0]:ix[1]]) || ti == 0 {
-						continue
+			retry:
+				for _, st := range starts {
+					if st != ix[0] && try(tx[st:ix[1]]) {
+						break
 					}
-					// A run that joined lines and is no text: its lines up
-					// to a join may be (the last line of the base64 joined
-					// to the text on the next line), longest first; and so
-					// may its lines from its first join (the line before
-					// was no part of it: a header ending in an id).
-					starts := []int{ix[0]}
-					for _, c := range joins {
-						if c > ix[0] && c < ix[1] {
-							starts = append(starts, c)
-							break
-						}
-					}
-				retry:
-					for _, st := range starts {
-						if st != ix[0] && try(tx[st:ix[1]]) {
-							break
-						}
-						for k := len(joins) - 1; k >= 0; k-- {
-							if c := joins[k]; c > st && c < ix[1] && try(tx[st:c]) {
-								break retry
-							}
+					for k := len(joins) - 1; k >= 0; k-- {
+						if c := joins[k]; c > st && c < ix[1] && try(tx[st:c]) {
+							break retry
 						}
 					}
 				}
-				for part := range strings.SplitSeq(tx, ".") {
-					if isB64Run(part) {
-						try(part)
-					}
+			}
+			for part := range strings.SplitSeq(tx, ".") {
+				if isB64Run(part) {
+					try(part)
 				}
 			}
 		}
-		level = next
 	}
-	return sb.String()
+	rd.level = next
+}
+
+// b64Pair is b64Text of a drifted value's two sides, recorded and live
+// (clock their clock words), read one level at a time: after each level,
+// the text each side has decoded so far is read for clock words as the
+// value's own are, in the value's window (clockOf, of a recorded text and a
+// live one: newDrift's), before the runs of that level's texts are decoded
+// in turn, and a run all of whose words are those of a clock read found
+// there is not decoded either. So a clock read written in the text an
+// encoded run decodes to ("tok <base64 of 'lead <stamp> created'> ok"),
+// where the two sides hold each of the value's instants at the same depth,
+// is read as the clock it is, and its digits ("3505371Z" of the stamp's
+// fraction) are not decoded as data, which would decide by chance between
+// a token a payload holds, text of a script keploy reads only whole and
+// nothing. A word found here is a read the value's window (or the lead)
+// holds: that text is the start of the encoded form the caller reads for
+// clock words itself. Limit: where the sides hold an instant at different
+// depths (one side's text encoded once more), it pairs with the other's
+// only once both are decoded, so a run of a read decoded before that, on
+// either side and of any layout whose pairing it shifts, is decoded as it
+// was before (fail closed: its words are data), and the caller's read of
+// the whole may pair a layout otherwise (an earlier layout taking the
+// bytes of a later one's). The sets in clock are not changed: the caller
+// reads the clock words of the decoded text itself.
+func b64Pair(rec, live string, clock clockSet, clockOf func(rec, live string) clockSet) (string, string) {
+	r, l := newB64Reader(rec, clock.rec, false), newB64Reader(live, clock.live, false)
+	for depth := 0; depth < maxDecodeLevels && (len(r.level) > 0 || len(l.level) > 0); depth++ {
+		r.next()
+		l.next()
+		// Where neither side decoded more, nothing new is read.
+		if len(r.level) > 0 || len(l.level) > 0 {
+			c := clockOf(r.sb.String(), l.sb.String())
+			r.clock, l.clock = union(r.clock, c.rec), union(l.clock, c.live)
+		}
+	}
+	return r.sb.String(), l.sb.String()
+}
+
+// union is a new set of the words of a and of b.
+func union(a, b map[string]bool) map[string]bool {
+	u := make(map[string]bool, len(a)+len(b))
+	maps.Copy(u, a)
+	maps.Copy(u, b)
+	return u
 }
 
 // runSeparators says whether run holds a '/' (slash: it is read by its
@@ -1038,12 +1105,15 @@ func b64DecodeAny(s string) ([]byte, bool) {
 // beside the value as read raw: decoded (percent and backslash escapes),
 // case-folded; quoted-printable (qpForm, each escape that decodes to text
 // decoded), where it differs, itself case-folded; and the text its encoded
-// runs decode to (b64Text), itself case-folded; and that text, recorded and
-// live, on its own (encoded). The words of each form are searched for what
-// flowed into the value. qp is where forms holds the quoted-printable form
-// and its case-folded one (forms[qp[0]:qp[1]], empty where it holds none):
-// right after the value as written. The last encN forms are that text's
-// (none where there is none), in forms and in checked alike.
+// runs decode to (b64Pair: b64Text of each side, a clock read in a decoded
+// text not decoded again where both sides hold the value's instants at the
+// same depth), itself case-folded; and that text, recorded and live, on its
+// own (encoded). The words of each form are searched for what flowed into
+// the value. qp is where forms holds the quoted-printable form and its
+// case-folded one (forms[qp[0]:qp[1]], empty where it holds none): right
+// after the value as written. The last encN forms are that text's (none
+// where there is none), in forms and in checked alike. clockOf reads the
+// clock words of a decoded text's two sides in the value's window.
 //
 // checked are the forms unparsed reads, the same but for the
 // quoted-printable one: that is read only where both values read as
@@ -1054,7 +1124,7 @@ func b64DecodeAny(s string) ([]byte, bool) {
 // the base64 alphabet that does not decode, which unparsed refuses. The
 // search reads it in every value: a word only that reading shows
 // ("=23A7K29Q" a '#' and an id) is found where it flowed.
-func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms, checked [][2]string, qp [2]int, encoded [2]string, encN int) {
+func formsOf(rec, live, decRec, decLive string, clock clockSet, clockOf func(rec, live string) clockSet) (forms, checked [][2]string, qp [2]int, encoded [2]string, encN int) {
 	with := func(fs [][2]string, f [2]string) [][2]string {
 		fs = append(fs, f)
 		if lr, ll := strings.ToLower(f[0]), strings.ToLower(f[1]); lr != f[0] || ll != f[1] {
@@ -1075,7 +1145,7 @@ func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms, checked 
 			checked = with(checked, [2]string{qr, ql})
 		}
 	}
-	if br, bl := b64Text(decRec, clock.rec), b64Text(decLive, clock.live); br != "" || bl != "" {
+	if br, bl := b64Pair(decRec, decLive, clock, clockOf); br != "" || bl != "" {
 		n := len(forms)
 		encoded = [2]string{br, bl}
 		forms = with(forms, encoded)

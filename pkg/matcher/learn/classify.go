@@ -2088,9 +2088,13 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// as data, and a part the call's window finds there the window from
 		// the test's begin finds too: it learns no plain read for it. A text
 		// whose changed words are all reads there is noise of those words,
-		// as where no serve came between the read and its call. (A read
-		// inside an encoded run's text is still decoded again: b64Text reads
-		// that text's runs without its clock words, in every window.)
+		// as where no serve came between the read and its call. So is one
+		// written in the text an encoded run decodes to (b64Pair reads that
+		// text's clock words before decoding its runs), but where F served a
+		// payload before the call whose adapter stated no view of what it
+		// gave: the encoded run is itself a changed word that is no clock
+		// word, which such a payload may hold (unseenWhy), so it is refused,
+		// as any value holding such a word is there.
 		if wt := w.fromTestBegin(); ln.Kind == KindUnaccounted && wt != nil {
 			if wide := leaf(r, l, wt, 0); wide.Kind == KindClockRead && wide.Read != nil {
 				ln = wide
@@ -2722,7 +2726,7 @@ type valueDrift struct {
 	// go (clockChanged).
 	begun bool
 	// encodedRec is the text the recorded value's encoded runs decode to
-	// (b64Text), "" when none.
+	// (b64Pair), "" when none.
 	encodedRec string
 	// unparsed says what of its drift the declared readings cannot read
 	// (unparsed).
@@ -3059,12 +3063,13 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 	// (Window.fromTestBegin), the span in which the replay's check passes a
 	// read (CheckClockRead): another goroutine's call served between the
 	// read and the call that carries it bounds no read of this one, so its
-	// words are never read as data, decoded (b64Text: a read inside an
-	// encoded run's text is still decoded again, in every window) or
-	// searched as the parts of a payload (appearedIn, unaccounted), which
-	// would decide by
-	// chance, by the read's digits and by that serve, between noise of the
-	// word, a variable no call binds and a refusal. Whether the value is a
+	// words are not read as data, decoded (b64Pair, which reads the text an
+	// encoded run decodes to for clock words in this window too before
+	// decoding it again, where both sides hold the value's instants at the
+	// same depth) or searched as the parts of a payload (appearedIn,
+	// unaccounted), which would decide by chance, by the read's digits and
+	// by that serve, between noise of the word, a variable no call binds
+	// and a refusal. Whether the value is a
 	// read of the clock (reads, whole) stays its call's window's: whole, the
 	// window from the test's begin turns a refusal into a plain read alone
 	// (ClassifyIn).
@@ -3101,7 +3106,7 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 		dclock = clockWordsOf(d.decRec, d.decLive)
 		merge(dclock)
 	}
-	forms, checked, qp, encoded, encN := formsOf(rec, live, d.decRec, d.decLive, d.clock)
+	forms, checked, qp, encoded, encN := formsOf(rec, live, d.decRec, d.decLive, d.clock, clockWordsOf)
 	d.encodedRec = encoded[0]
 	// The clock reads of every other form searched (the first is the
 	// decoded value, read above).

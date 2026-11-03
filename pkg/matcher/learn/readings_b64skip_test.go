@@ -185,3 +185,81 @@ func TestB64TextPassesByOnlyReadsThatFindNothing(t *testing.T) {
 		t.Fatalf("too little read to tell: %d recorded texts, %d decoded, %d reads with a clock", len(recorded), found, clocked)
 	}
 }
+
+// b64Pair reads a drifted value's two sides as b64Text reads each, one
+// level at a time, the value's own clock words kept at every level (a run
+// of them is not decoded, however deep it stands), and the caller's sets
+// unchanged; and a run whose words are those of a clock read the value's
+// window finds in the text decoded so far, on that run's side, is not
+// decoded either, though b64Text of that side alone decodes it.
+func TestB64PairReadsEachSideAsB64TextKeepingClockWordsAtEveryLevel(t *testing.T) {
+	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	innerR, innerL := enc("lead created by the scheduler"), enc("lead created by the operator")
+	rec, live := "tok "+enc("note "+innerR+" end")+" ok", "tok "+enc("note "+innerL+" fin")+" ok"
+	wordsR, wordsL := tokensBy(innerR, isWord), tokensBy(innerL, isWord)
+	for _, side := range []struct{ s, inner, word string }{{rec, innerR, "scheduler"}, {live, innerL, "operator"}} {
+		if got := b64Text(side.s, nil); !strings.Contains(got, side.word) {
+			t.Fatalf("b64Text(%q) = %q: the inner run %q is not decoded, so this row tells nothing", side.s, got, side.inner)
+		}
+	}
+	nothing := func(string, string) clockSet { return clockSet{rec: map[string]bool{}, live: map[string]bool{}} }
+	for _, c := range []struct {
+		what   string
+		clock  clockSet
+		found  func(r, l string) clockSet
+		decode bool
+	}{
+		{"no clock word anywhere", clockSet{rec: map[string]bool{}, live: map[string]bool{}}, nothing, true},
+		{"the inner runs are the value's own clock words", clockSet{rec: wordsR, live: wordsL}, nothing, false},
+		{"the window finds the inner runs' words a clock read in the level's text", clockSet{rec: map[string]bool{}, live: map[string]bool{}}, func(r, l string) clockSet {
+			c := clockSet{rec: map[string]bool{}, live: map[string]bool{}}
+			if strings.Contains(r, innerR) && strings.Contains(l, innerL) {
+				c.rec, c.live = wordsR, wordsL
+			}
+			return c
+		}, false},
+	} {
+		nr, nl := len(c.clock.rec), len(c.clock.live)
+		r, l := b64Pair(rec, live, c.clock, c.found)
+		if len(c.clock.rec) != nr || len(c.clock.live) != nl {
+			t.Errorf("%s: the caller's clock sets changed: %v, %v", c.what, c.clock.rec, c.clock.live)
+		}
+		for _, side := range []struct {
+			name, got, word string
+		}{{"recorded", r, "scheduler"}, {"live", l, "operator"}} {
+			if strings.Contains(side.got, side.word) != c.decode {
+				t.Errorf("%s, %s: %q; want the inner run decoded %v", c.what, side.name, side.got, c.decode)
+			}
+		}
+		if c.decode || len(c.clock.rec) > 0 {
+			if wr, wl := b64Text(rec, c.clock.rec), b64Text(live, c.clock.live); r != wr || l != wl {
+				t.Errorf("%s: b64Pair = %q, %q; want b64Text of each side, %q, %q", c.what, r, l, wr, wl)
+			}
+		}
+	}
+	// One side nested deeper than the other: it is read to its last level,
+	// after the other side's levels end.
+	deep, flat := "tok "+enc("note "+enc("deep "+enc("the innermost scheduler text"))+" end")+" ok", "tok "+enc("note plain words end")+" ok"
+	if !strings.Contains(b64Text(deep, nil), "innermost") {
+		t.Fatalf("b64Text(%q) does not reach its innermost text, so this row tells nothing", deep)
+	}
+	for _, p := range [][2]string{{deep, flat}, {flat, deep}} {
+		empty := clockSet{rec: map[string]bool{}, live: map[string]bool{}}
+		if r, l := b64Pair(p[0], p[1], empty, nothing); r != b64Text(p[0], nil) || l != b64Text(p[1], nil) {
+			t.Errorf("b64Pair(%q, %q) = %q, %q; want b64Text of each side", p[0], p[1], r, l)
+		}
+	}
+	// A level only one side decoded more at is read for clock words too: a
+	// clock read found there is not decoded at the next level.
+	innermost := enc("the innermost scheduler text")
+	deepAt := func(r, l string) clockSet {
+		c := clockSet{rec: map[string]bool{}, live: map[string]bool{}}
+		if strings.Contains(r, "deep "+innermost) {
+			c.rec = tokensBy(innermost, isWord)
+		}
+		return c
+	}
+	if r, _ := b64Pair(deep, flat, clockSet{rec: map[string]bool{}, live: map[string]bool{}}, deepAt); !strings.Contains(r, "deep ") || strings.Contains(r, "innermost") {
+		t.Errorf("b64Pair(%q, %q), the innermost run a clock read where the recorded side alone decoded its level: %q; want it read to that level and the run not decoded", deep, flat, r)
+	}
+}

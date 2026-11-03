@@ -712,38 +712,127 @@ func TestAServerTestsStampWordOfATextPastAnotherGoroutinesServeIsNoiseOfThatWord
 	}
 	// The text base64-encoded in a token ("tok <base64 of the text> ok"):
 	// the words of its encoded run's text are read in the window from the
-	// test's begin too, so another goroutine's serve between the read and
-	// its call changes no answer. A read 30 ms later is noise of the word
-	// either way. Limit, pinned so that a fix shows here: the stamp's
-	// fraction inside the encoded run's text is decoded again (b64Text
-	// reads that text's runs without its clock words), so the digits still
-	// decide in every window: "3505371Z" is the look-up's part, or with no
-	// payload refused as text an encoded run decodes to. Both fail closed.
+	// test's begin too, and the clock read written there is read as the
+	// clock it is before that text's own runs are decoded again (b64Pair),
+	// so neither another goroutine's serve between the read and its call
+	// nor the digits the clock gave it changes the answer: noise of the
+	// word, under the proven flow too. On main, and before the decoded text
+	// was read for clock words, the stamp's fraction there was decoded as
+	// data, so its digits decided: "3505371Z" and "3609071Z" decode to text
+	// whose word, case-folded, is a token the look-up holds (its part), with
+	// no payload a text of a script keploy does not split into words
+	// (refused), "3510556Z" to such text with the look-up too (refused), and
+	// "3805371Z" to no text (noise); so did record's full round's: its read
+	// "2754275Z" decodes to such text (refused).
 	encodedText := func(v time.Time) Shape {
 		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: "tok " + base64.StdEncoding.EncodeToString([]byte("lead "+dotNetStamp(v)+" created")) + " ok"}}}
 	}
-	for _, rec := range []time.Time{recRun.read, recRun.read.Add(30 * time.Millisecond)} {
-		for _, raw := range [][]Raw{lookUp, nil} {
-			between := ClassifyIn(clockedDrifts(), []string{p}, encodedText(fRun.read), encodedText(rec), recRun.call, nil, raw, nil, serverStampWindow(recRun, fRun))[0]
-			none := ClassifyIn(clockedDrifts(), []string{p}, encodedText(fRun.read), encodedText(rec), recRun.call, nil, raw, nil, inSpan)[0]
-			if between.Kind != none.Kind || between.From.Mock != none.From.Mock || between.From.Held != none.From.Held || between.Why != none.Why {
-				t.Errorf("encoded, read at %s, look-up %v: %s from %q held %q (%s) with a serve between the read and its call, %s from %q held %q (%s) with none; want one answer", rec.Format("05.000000"), raw != nil, between.Kind, between.From.Mock, between.From.Held, between.Why, none.Kind, none.From.Mock, none.From.Held, none.Why)
+	learnEncodedOf := func(dc *DriftCache, rec, f time.Time, w *Window, raw []Raw) Learned {
+		return ClassifyIn(dc, []string{p}, encodedText(f), encodedText(rec), recRun.call, nil, raw, nil, w)[0]
+	}
+	learnEncoded := func(dc *DriftCache, rec time.Time, w *Window, raw []Raw) Learned {
+		return learnEncodedOf(dc, rec, fRun.read, w, raw)
+	}
+	// Each read's lag after the recording's read and record's full round's.
+	layouts := []struct{ rec, f time.Duration }{
+		{0, 0},
+		{518_500 * time.Nanosecond, 0},
+		{10_370 * time.Microsecond, 0},
+		{30 * time.Millisecond, 0},
+		{30 * time.Millisecond, 311_100 * time.Nanosecond},
+	}
+	for _, proven := range []bool{false, true} {
+		t.Run("encoded, proven "+strconv.FormatBool(proven), func(t *testing.T) {
+			if proven {
+				t.Setenv(provenswitch.Env, "1")
 			}
-			switch {
-			case rec.After(recRun.read):
-				if between.Kind != KindNoise || between.Read != nil {
-					t.Errorf("encoded, read at %s, look-up %v: %s (%s); want noise of the word", rec.Format("05.000000"), raw != nil, between.Kind, between.Why)
+			for _, d := range layouts {
+				rec, f := recRun.read.Add(d.rec), fRun.read.Add(d.f)
+				// The stamp the text carries, sent whole by the application
+				// in a payload after the read (a SEND record's full round
+				// served, or had not served, before the call), with the
+				// start-up look-up or without it.
+				sent := func(served bool) Raw {
+					at := rec.Add(40 * time.Millisecond)
+					return RawOf(&models.Mock{Name: "mock-9", Kind: "Pulsar", Spec: models.MockSpec{
+						GenericRequests:  []models.Payload{{Origin: "client", Message: []models.OutputBinary{{Type: "json", Data: `{"commandType":"SEND","payload":{"type":"lead.created","at":"` + dotNetStamp(rec) + `"}}`}}}},
+						ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
+					}}, served)
 				}
-			case raw != nil:
-				if !foundAsAPart(between) || between.From.Mock != "mock-1" {
-					t.Errorf("encoded, read at %s, the look-up: %s from %q (%s); want the look-up's part (the limit above)", rec.Format("05.000000"), between.Kind, between.From.Mock, between.Why)
-				}
-			default:
-				if between.Kind != KindUnaccounted || between.Why != encodedScriptWhy {
-					t.Errorf("encoded, read at %s, no payload: %s (%s); want it refused as %q (the limit above)", rec.Format("05.000000"), between.Kind, between.Why, encodedScriptWhy)
+				for _, rc := range []struct {
+					what   string
+					raw    []Raw
+					unseen bool
+				}{
+					{"the look-up", lookUp, false},
+					{"no payload", nil, false},
+					{"the stamp sent, not served", []Raw{sent(false)}, false},
+					{"the stamp sent, served", []Raw{sent(true)}, true},
+					{"the look-up and the stamp sent, served", append(append([]Raw{}, lookUp...), sent(true)), true},
+				} {
+					for _, w := range []*Window{serverStampWindow(recRun, fRun), inSpan} {
+						ln := learnEncodedOf(clockedDrifts(), rec, f, w, rc.raw)
+						switch {
+						case rc.unseen:
+							// Limit: the encoded run itself is a changed word
+							// that is no clock word, and a payload record's
+							// full round served whose adapter stated no view of
+							// what it gave may hold any such word, so the
+							// value is refused, as any value with such a word
+							// is there. It fails closed, with one answer.
+							if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-9, an earlier recording record's full round served, where its adapter did not say what it gave the application there") {
+								t.Errorf("encoded, read at %s and in record's full round at %s, %s, window %+v: %s from %q held %q (%s); want it refused as a word that may stand in mock-9", rec.Format("05.0000000"), f.Format("05.0000000"), rc.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+							}
+						case ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "":
+							t.Errorf("encoded, read at %s and in record's full round at %s, %s, window %+v: %s from %q held %q (%s); want noise of the word", rec.Format("05.0000000"), f.Format("05.0000000"), rc.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+						}
+					}
 				}
 			}
-		}
+			// Fail closed where no window of the value holds the read: made
+			// after its call (no read of the clock for it), made before the
+			// test began, its recording's begin unknown, the call's window
+			// alone, or a client test's call's window, which carries no
+			// test's begin and whose read made before another goroutine's
+			// serve is no read in it. Its digits are decoded as data, as on
+			// main: the look-up's part, or a refusal of the decoded text.
+			late := recRun
+			late.began = recRun.read.Add(50 * time.Millisecond) // after the read, before the other goroutine's serve
+			unknownRec := serverStampWindow(recRun, fRun)
+			unknownRec.Rec.TestFrom = time.Time{}
+			callOnly := &Window{Rec: Span{From: recRun.prev, To: recRun.call}, F: Span{From: fRun.prev, To: fRun.call}}
+			clientDrifts := func() *DriftCache {
+				dc := clockedDrifts()
+				dc.clientTests = true
+				return dc
+			}
+			for _, c := range []struct {
+				what string
+				dc   func() *DriftCache
+				rec  time.Duration
+				w    *Window
+				part bool
+			}{
+				{"read after its call", clockedDrifts, 291_708_100 * time.Nanosecond, serverStampWindow(recRun, fRun), false},
+				{"read after its call, no serve between", clockedDrifts, 291_708_100 * time.Nanosecond, inSpan, false},
+				{"read before its test began", clockedDrifts, 0, serverStampWindow(late, fRun), true},
+				{"the recording's begin unknown", clockedDrifts, 0, unknownRec, true},
+				{"the call's window alone", clockedDrifts, 0, callOnly, true},
+				{"a client test's call's window", clientDrifts, 0, callOnly, true},
+			} {
+				rec := recRun.read.Add(c.rec)
+				ln := learnEncoded(c.dc(), rec, c.w, lookUp)
+				switch {
+				case c.part && (!foundAsAPart(ln) || ln.From.Mock != "mock-1"):
+					t.Errorf("%s, read at %s, the look-up: %s from %q held %q (%s); want the look-up's part to stay the value's place", c.what, rec.Format("05.0000000"), ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+				case !c.part && (ln.Kind != KindUnaccounted || ln.Why != encodedScriptWhy):
+					t.Errorf("%s, read at %s, the look-up: %s from %q (%s); want it refused as %q", c.what, rec.Format("05.0000000"), ln.Kind, ln.From.Mock, ln.Why, encodedScriptWhy)
+				}
+				if ln := learnEncoded(c.dc(), rec, c.w, nil); ln.Kind != KindUnaccounted || ln.Why != encodedScriptWhy {
+					t.Errorf("%s, read at %s, no payload: %s (%s); want it refused as %q", c.what, rec.Format("05.0000000"), ln.Kind, ln.Why, encodedScriptWhy)
+				}
+			}
+		})
 	}
 	for _, c := range []struct {
 		what string
@@ -862,6 +951,82 @@ func TestAServerTestsStampWordOfATextPastAnotherGoroutinesServeIsNoiseOfThatWord
 		if (ln.Kind == KindNoise) != c.noise {
 			t.Errorf("one cache, %s: %s from %q (%s); want noise %v", c.what, ln.Kind, ln.From.Mock, ln.Why, c.noise)
 		}
+	}
+}
+
+// A clock read written in the text an encoded run of a value decodes to
+// ("tok <base64 of 'lead <stamp> created'> ok") is not decoded again where
+// the value's drift reads it as the clock's: moved by the lead, in a drift
+// bounded by no call (the one the set's tests share), or a read in its
+// call's window, with the lead or without it (a client test). Where neither
+// reads it, it is decoded as data, as on main: in a client test's drift
+// bounded by no call, a client test's read made before another call's serve
+// (outside its call's window), and an expiry thirty minutes after a read its
+// window holds (an offset, which no window reads). Its fraction "3505371Z"
+// decodes as base64 to a text of its own, which shows where it was decoded.
+func TestAnEncodedTextsStampIsDecodedAgainOnlyWhereNoReadingOfTheClockHoldsIt(t *testing.T) {
+	recRun, fRun := serverStampRuns()
+	enc := func(v time.Time) string {
+		return "tok " + base64.StdEncoding.EncodeToString([]byte("lead "+dotNetStamp(v)+" created")) + " ok"
+	}
+	frac := strings.TrimPrefix(dotNetStamp(recRun.read), dotNetStamp(recRun.read)[:20])
+	again := b64Text(frac, nil)
+	if frac != "3505371Z" || again == "" {
+		t.Fatalf("the recorded fraction %q decodes to %q: this row needs one that decodes to text", frac, again)
+	}
+	byLead := recRun.read.Add(FullRoundLead + 400*time.Microsecond)
+	spans := &Window{Rec: Span{From: recRun.began, To: recRun.call}, F: Span{From: fRun.began, To: fRun.call}}
+	afterServe := &Window{Rec: Span{From: recRun.prev, To: recRun.call}, F: Span{From: fRun.prev, To: fRun.call}}
+	const expiry = 30 * time.Minute
+	for _, c := range []struct {
+		what      string
+		rec, live time.Time
+		w         *Window
+		lead      bool
+		call      time.Time
+		decoded   bool
+	}{
+		{"moved by the lead, bounded by no call", recRun.read, byLead, nil, true, time.Time{}, false},
+		{"a read in its call's window", recRun.read, fRun.read, spans, true, recRun.call, false},
+		{"a client test's read in its call's window", recRun.read, fRun.read, spans, false, recRun.call, false},
+		{"moved by the lead, a client test's drift bounded by no call", recRun.read, byLead, nil, false, time.Time{}, true},
+		{"a client test's read before another call's serve", recRun.read, fRun.read, afterServe, false, recRun.call, true},
+		{"an expiry thirty minutes after a read its window holds", recRun.read.Add(expiry), fRun.read.Add(expiry), spans.ComparesOffsets(), true, recRun.call, true},
+	} {
+		d := newDrift(enc(c.rec), enc(c.live), c.w, c.lead, c.call, nil)
+		if !strings.Contains(d.encodedRec, "lead "+dotNetStamp(c.rec)+" created") {
+			t.Fatalf("%s: the encoded text %q was not decoded", c.what, d.encodedRec)
+		}
+		if got := strings.Contains(d.encodedRec, again); got != c.decoded {
+			t.Errorf("%s: the stamp's fraction decoded again %v (%q); want %v", c.what, got, d.encodedRec, c.decoded)
+		}
+	}
+	// The recording's text encoded twice, record's full round's once: the
+	// recorded stamp's text comes out of the second decode, where the text
+	// both sides decoded so far pairs it with the live one, so its fraction
+	// is not decoded. Record's full round's fraction ("2754275Z", which
+	// decodes to text) is decoded in that same second decode, a run of the
+	// text its first decode gave, before the recorded stamp was there to
+	// pair it with: the limit b64Pair states.
+	fLate := fRun.read.Add(311_100 * time.Nanosecond)
+	liveFrac := strings.TrimPrefix(dotNetStamp(fLate), dotNetStamp(fLate)[:20])
+	liveAgain := b64Text(liveFrac, nil)
+	if liveFrac != "2754275Z" || liveAgain == "" {
+		t.Fatalf("record's full round's fraction %q decodes to %q: this row needs one that decodes to text", liveFrac, liveAgain)
+	}
+	twice := "tok " + base64.StdEncoding.EncodeToString([]byte(base64.StdEncoding.EncodeToString([]byte("lead "+dotNetStamp(recRun.read)+" created")))) + " ok"
+	d := newDrift(twice, enc(fLate), spans, true, recRun.call, nil)
+	if !strings.Contains(d.encodedRec, "lead "+dotNetStamp(recRun.read)+" created") || strings.Contains(d.encodedRec, again) {
+		t.Errorf("encoded twice: the recorded text %q; want the stamp's text decoded and its fraction not decoded again", d.encodedRec)
+	}
+	liveDecoded := false
+	for _, f := range d.forms {
+		if strings.Contains(f[1], "lead "+dotNetStamp(fLate)+" created") && strings.Contains(f[1], liveAgain) {
+			liveDecoded = true
+		}
+	}
+	if !liveDecoded {
+		t.Errorf("encoded once in record's full round: its fraction was not decoded at the first level (forms %q); the stated limit no longer holds, so say so", d.forms)
 	}
 }
 
