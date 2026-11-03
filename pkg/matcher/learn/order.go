@@ -854,8 +854,10 @@ func (dc *decider) holds(p evPlace, t *readerText, w string, m *moment, byText b
 	if m == nil || p.gave {
 		return h, h && byText, true
 	}
-	hm, fm, ok := t.holdsMoment(*m)
+	at := *m
+	hm, fm, ok := t.holdsMoment(at)
 	if z, zok := dc.inZone(*m); ok && !hm && zok {
+		at = z
 		hm, fm, ok = t.holdsMoment(z)
 	}
 	if !ok {
@@ -864,16 +866,69 @@ func (dc *decider) holds(p evPlace, t *readerText, w string, m *moment, byText b
 	// A text with escapes is read as it opens: as written, the date alone
 	// of a percent-encoded time reads as a coarse instant, no hold of that
 	// time. A form that opens holds what holdsMoment found at a fine cut.
-	if hm && !fm {
-		if text, ok := t.textNow(); ok && decodeForms(text).hasDec {
-			hm = false
-		}
+	if hm && !fm && openedOnly(t, at) {
+		hm = false
 	}
 	if hm {
 		return true, fm, true
 	}
 	return h, h && fineCut(m.res), true
 }
+
+// openedOnly reports whether t holds m at a coarse cut only as a misread
+// of an escaped time: every instant of t as written that holds m changes
+// once the escapes around it are read (escapeMoves: the date alone of a
+// percent-encoded time, which opens to the whole time), and no instant of
+// t with its escapes read holds m. An escape elsewhere in the text (a
+// quote in a note, the "\/" a PHP encoder writes in a link) leaves an
+// instant that holds m as it stands, and so the hold; a hold no instant as
+// written gives is a form's that opens, and stands too. False where the
+// text was not read.
+func openedOnly(t *readerText, m moment) bool {
+	text, ok := t.textNow()
+	if !ok {
+		return false
+	}
+	spans, ok := t.spansOf()
+	if !ok {
+		return false
+	}
+	holds := func(sp instant) bool {
+		h, _ := byMoment(sp.moment(), m)
+		return sp.keyed && h
+	}
+	moved := false
+	for _, sp := range spans {
+		if !holds(sp) {
+			continue
+		}
+		if !escapeMoves(text, sp) {
+			return false
+		}
+		moved = true
+	}
+	return moved && !slices.ContainsFunc(t.x.dc.spansOf(unescaped(text)), holds)
+}
+
+// escapeMoves reports whether reading the escapes around sp, an instant of
+// text as written, changes it: the bytes escapeReach before and after it,
+// their escapes read (unescaped), hold no instant of sp's own text where it
+// stands (a percent-encoded time's date opens to the whole time).
+func escapeMoves(text string, sp instant) bool {
+	a, b := max(0, sp.start-escapeReach), min(len(text), sp.end+escapeReach)
+	if !strings.ContainsAny(text[a:b], `%\`) {
+		return false
+	}
+	own, at := text[sp.start:sp.end], len(unescaped(text[a:sp.start]))
+	near := unescaped(text[a:b])
+	return !slices.ContainsFunc(instantSpans(near), func(o instant) bool {
+		return o.start == at && near[o.start:o.end] == own
+	})
+}
+
+// escapeReach is how far around an instant escapeMoves reads: past the
+// longest time a percent-encoder writes twice over.
+const escapeReach = 128
 
 // coarserOnly reports whether t, which holds w (moment m), holds it only
 // as an instant of a coarser unit that m, cut to it, is (cutsEach's finer

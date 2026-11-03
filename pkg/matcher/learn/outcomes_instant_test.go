@@ -2696,7 +2696,8 @@ func TestOutcomeAListThatGrewBetweenRunsKeepsItsTimesVerdict(t *testing.T) {
 // application sends back, at a member whose name a member at another path
 // of the same answer shares (a top-level "at" beside each item's "at", a
 // job's "at" beside each history entry's "at", "a.b.at" beside each
-// element's "b.at"), is paired only with the
+// element's "b.at", and a top-level "at" after a note whose text ends in an
+// escaped backslash, which closes the note's string), is paired only with the
 // other run's times at the member at that path: a list at the other path
 // that grew or shrank between runs, or was empty when it was recorded,
 // lends it no finer unit. The pick stays refused, in either mode, and the
@@ -2736,6 +2737,9 @@ func TestOutcomeATimeIsPairedAtTheMemberAtItsPathAlone(t *testing.T) {
 		}},
 		{"a.b.at beside each element's b.at", func(at string) string { return `{"b":{"at":"` + at + `"}}` }, func(at, list string) string {
 			return `{"a":{"b":{"at":"` + at + `"}},"c":[` + list + `]}`
+		}},
+		{"a top-level at after a note ending in an escaped backslash", at, func(at, list string) string {
+			return `{"note":"x}]{[\"\\","at":"` + at + `","items":[` + list + `]}`
 		}},
 	} {
 		for _, n := range [][2]int{{2, 2}, {2, 3}, {3, 2}, {1, 2}, {0, 1}, {1, 0}} {
@@ -2941,4 +2945,64 @@ func TestOutcomeAnAnswersHalvesAreBuiltOnceAndHeldBoundedAcrossItsInstants(t *te
 			t.Errorf("%s: the call ended holding %d halves (%d bytes) of its last instant; want none", c.what, len(dc.laidNow), dc.halfNow)
 		}
 	}
+}
+
+// A second the application picks from an answer that holds an escape
+// beside round F's second (a quote or a backslash at a note's end, a
+// newline, the "\/" a PHP encoder writes in a link), before or after it:
+// reading the escape leaves the time as written, so the answer holds round
+// F's second, and the pick stays refused, never learned as the call's own
+// clock read.
+func TestOutcomeAPickBesideAnEscapeElsewhereInItsAnswerStaysRefused(t *testing.T) {
+	sec := func(x time.Time) string { return strconv.FormatInt(x.Unix(), 10) }
+	tsec := func(x time.Time) string { return x.UTC().Format(time.RFC3339) }
+	rAt, fAt := oAt.Add(20400*time.Millisecond), oAt.Add(96400*time.Millisecond)
+	answer := func(body string) *models.Mock {
+		return &models.Mock{Name: "mock-799", Kind: models.HTTP, Spec: models.MockSpec{
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "http://api.local/jobs/1", Body: ``},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: body},
+			ReqTimestampMock: oAt.Add(-time.Second), ResTimestampMock: oAt.Add(-time.Second + time.Millisecond),
+		}}
+	}
+	for _, note := range []string{`"x\""`, `"x\\"`, `"x\n"`, `"https:\/\/cdn.local\/a.png"`} {
+		for _, sh := range []struct {
+			what string
+			body func(at string) string
+		}{
+			{"before", func(at string) string { return `{"note":` + note + `,"at":"` + at + `"}` }},
+			{"after", func(at string) string { return `{"at":"` + at + `","note":` + note + `}` }},
+		} {
+			rm, lm := answer(sh.body(tsec(rAt.Add(-37*time.Second)))), answer(sh.body(tsec(fAt)))
+			in := iCall("body.cmd.query.dirtyAt.$lte.$numberLong", Number, sec(rAt), sec(fAt), rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), nil,
+				[]Raw{RawOf(rm, true).ServedAs(1).ServedLive(RawOf(lm, true))})
+			oRefused(t, "a picked second with the note "+note+" "+sh.what+" it", oWord(t, Decide(in), sec(rAt), sec(fAt)), RefusalPick, "mock-799")
+		}
+	}
+}
+
+// A time an answer holds percent-encoded ("09%3A50%3A20Z", a link's query):
+// as written its date alone reads as an instant of a day, which is no hold
+// of the time it opens to. Where it opens to round F's second, the
+// application picked that second from the answer: refused. Where it opens
+// to another time of the call's day, the call's second is its own clock
+// read.
+func TestOutcomeAPercentEncodedSecondHoldsOnlyTheTimeItOpensTo(t *testing.T) {
+	sec := func(x time.Time) string { return strconv.FormatInt(x.Unix(), 10) }
+	pct := func(x time.Time) string { return strings.ReplaceAll(x.UTC().Format(time.RFC3339), ":", "%3A") }
+	rAt, fAt := oAt.Add(20400*time.Millisecond), oAt.Add(96400*time.Millisecond)
+	answer := func(at time.Time) *models.Mock {
+		return &models.Mock{Name: "mock-799", Kind: models.HTTP, Spec: models.MockSpec{
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "http://api.local/jobs/1", Body: ``},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: `{"next":"/v1/events?since=` + pct(at) + `"}`},
+			ReqTimestampMock: oAt.Add(-time.Second), ResTimestampMock: oAt.Add(-time.Second + time.Millisecond),
+		}}
+	}
+	call := func(r, f time.Time) Input {
+		return iCall("body.cmd.query.dirtyAt.$lte.$numberLong", Number, sec(rAt), sec(fAt), rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), nil,
+			[]Raw{RawOf(answer(r), true).ServedAs(1).ServedLive(RawOf(answer(f), true))})
+	}
+	d := oWord(t, Decide(call(rAt.Add(-37*time.Second), fAt)), sec(rAt), sec(fAt))
+	oRefused(t, "round F's second picked from an answer that holds it percent-encoded", d, RefusalPick, "mock-799")
+	d = oWord(t, Decide(call(rAt.Add(-10*time.Minute), fAt.Add(-10*time.Minute))), sec(rAt), sec(fAt))
+	iClock(t, "the call's second beside a percent-encoded time ten minutes before it", d)
 }
