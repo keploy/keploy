@@ -20,8 +20,9 @@ const valueRedacted = "(redacted)"
 
 // redactedPlaces are the places of a recorded MySQL command whose value the
 // obfuscator redacted: a literal of its statement, a bound value of an
-// EXECUTE, or its statement whole, where the recorded value holds a match
-// of one of the mock's patterns (Mock.Noise, util.NoiseChecker.IsNoisyWithin).
+// EXECUTE, its statement whole, or a COM_STMT_SEND_LONG_DATA chunk, where
+// the recorded value holds a match of one of the mock's patterns
+// (Mock.Noise, util.NoiseChecker.IsNoisyWithin).
 //
 // The live command's value at such a place is the secret the recording hid,
 // and it matches none of those patterns: they are anchored on the value the
@@ -45,6 +46,11 @@ type redactedPlaces struct {
 	whole bool
 	// params are an EXECUTE's bound values by position.
 	params map[int]bool
+	// data is set when a COM_STMT_SEND_LONG_DATA chunk holds a redacted
+	// value. The obfuscator redacts within the chunk's text, which may no
+	// longer be the JSON document the live chunk is diffed as, so no place
+	// of it is told apart: each diff of a chunk is redacted.
+	data bool
 }
 
 // placesOf reads the places of m's recorded commands the obfuscator
@@ -81,6 +87,10 @@ func placesOf(m *models.Mock) redactedPlaces {
 					}
 					p.params[j] = true
 				}
+			}
+		case *mysql.StmtSendLongDataPacket:
+			if msg != nil && nc.IsNoisyWithin(string(msg.Data)) {
+				p.data = true
 			}
 		}
 	}
@@ -133,6 +143,7 @@ func (p redactedPlaces) or(q redactedPlaces) redactedPlaces {
 	p.statement = p.statement || q.statement
 	p.whole = p.whole || q.whole
 	p.params = mergePositions(p.params, q.params)
+	p.data = p.data || q.data
 	return p
 }
 
@@ -152,6 +163,9 @@ func mergePositions(a, b map[int]bool) map[int]bool {
 
 // inStatement reports whether p holds a place of a statement.
 func (p redactedPlaces) inStatement() bool { return p.statement || len(p.literals) > 0 }
+
+// redactsAny reports whether p holds any place.
+func (p redactedPlaces) redactsAny() bool { return p.inStatement() || len(p.params) > 0 || p.data }
 
 // liveStatement is the live statement sql as a report or a log shows it:
 // sql itself when the recording redacted no place of its statement; else
@@ -236,15 +250,16 @@ func (p redactedPlaces) liveParams(params []mysql.Parameter) []mysql.Parameter {
 	return out
 }
 
-// fieldDiffs redacts, in a strict miss's field diffs against the recording
-// p is read from, both values of each diff at a redacted place, liveQuery
-// being the live statement they were compared with: a literal at a
-// redacted position (every literal when the live template is not the
-// recorded one), the statement whole and every part of it when
-// p.statement, the template when the live statement is redacted whole, and
-// the value of a bound parameter at a redacted position.
+// fieldDiffs redacts, in place, both values of each of a strict miss's
+// field diffs at a place of p, the places of every recording its report
+// names, liveQuery being the live statement they were compared with: a
+// literal at a redacted position (every literal when the live template is
+// not the recorded one), the statement whole and every part of it when
+// p.statement, the template when the live statement is redacted whole, the
+// value of a bound parameter at a redacted position, and every diff of a
+// streamed chunk (body.data) when p holds any place.
 func (p redactedPlaces) fieldDiffs(diffs []models.MockFieldDiff, liveQuery string) []models.MockFieldDiff {
-	if !p.inStatement() && len(p.params) == 0 {
+	if !p.redactsAny() {
 		return diffs
 	}
 	allLiterals := p.statement || (len(p.literals) > 0 && extractQueryShape(liveQuery).template != p.template)
@@ -274,6 +289,10 @@ func (p redactedPlaces) fieldDiffs(diffs []models.MockFieldDiff, liveQuery strin
 			// Everything under the parameter but its type, unsigned flag
 			// and name is its value, an enveloped one ($bin) included.
 			redacted = err == nil && p.params[n] && field != "name" && field != "type" && field != "unsigned"
+		case path == "body.data" || strings.HasPrefix(path, "body.data."):
+			// A chunk's diff: the recording redacted a value somewhere, and
+			// which place of the chunk it was is not told (p.data).
+			redacted = true
 		}
 		if !redacted {
 			continue
@@ -341,8 +360,11 @@ var everyPlace = redactedPlaces{statement: true, whole: true}
 type logPlaces func() redactedPlaces
 
 // live is the live statement sql as a log line shows it: by the places r
-// reads, or whole redacted when there is no r.
+// reads, or whole redacted when there is no r. No statement reads none.
 func (r logPlaces) live(sql string) string {
+	if sql == "" {
+		return sql
+	}
 	if r == nil {
 		return everyPlace.liveStatement(sql)
 	}

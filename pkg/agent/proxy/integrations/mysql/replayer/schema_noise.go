@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -226,8 +227,9 @@ type strictGate struct {
 	rejected    int
 	closestMock string
 	// closestPlaces are the places of closestMock's recording the
-	// obfuscator redacted (placesOf): fieldDiffs show both values of each
-	// redacted.
+	// obfuscator redacted (placesOf). fieldDiffs hold both values as they
+	// were compared: a report shows them by reportDiffs only, by the places
+	// of every recording it names.
 	closestPlaces redactedPlaces
 	fieldDiffs    []models.MockFieldDiff
 
@@ -534,7 +536,7 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 			// KnownNoise is root-relative (user ∪ learned); JSONFieldDiffs
 			// skips those paths so the report shows only non-noise drift.
 			known := engine.KnownNoise(mock, noise)
-			g.fieldDiffs = g.closestPlaces.fieldDiffs(maskAttributeDiffs(matcher.JSONFieldDiffs(string(recorded), string(body.Raw()), known, "body.", 96), mock, g.live), liveStatementOf(g.live, g.liveQuery))
+			g.fieldDiffs = maskAttributeDiffs(matcher.JSONFieldDiffs(string(recorded), string(body.Raw()), known, "body.", 96), mock, g.live)
 		}
 	}
 	if ce := g.logger.Check(zap.DebugLevel, "schema-noise strict: rejected candidate mock (non-noise request field drifted)"); ce != nil && !seen {
@@ -578,6 +580,13 @@ func (g *strictGate) bodyNoise(mock *models.Mock, leftOut []string) map[string][
 type bodyNoiseKey struct {
 	params  int
 	leftOut string
+}
+
+// reportDiffs are fieldDiffs as a miss's report shows them: both values of
+// each at a place of places, the places of every recording the report names
+// (closestPlaces among them), redacted.
+func (g *strictGate) reportDiffs(places redactedPlaces) []models.MockFieldDiff {
+	return places.fieldDiffs(slices.Clone(g.fieldDiffs), liveStatementOf(g.live, g.liveQuery))
 }
 
 // resetDiagnostics clears the rejection diagnostics for a scan that starts over

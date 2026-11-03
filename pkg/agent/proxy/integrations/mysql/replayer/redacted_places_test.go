@@ -61,6 +61,16 @@ func TestRedactedPlacesOfARecording(t *testing.T) {
 		if p := placesOf(exec); p.inStatement() || !reflect.DeepEqual(p.params, map[int]bool{0: true, 1: true}) {
 			t.Fatalf("an EXECUTE's redacted values (one of them bytes): places %+v, want params 0 and 1 alone", p)
 		}
+		chunk := sldMockOf("c", []byte(`{"token":"`+redactedPlaceholder+`"}`))
+		chunk.Noise = redactedNoise
+		if p := placesOf(chunk); !p.data || p.inStatement() || len(p.params) > 0 {
+			t.Fatalf("a chunk's redacted value: places %+v, want the chunk alone", p)
+		}
+		plainChunk := sldMockOf("c", []byte(`{"token":"other"}`))
+		plainChunk.Noise = redactedNoise
+		if p := placesOf(plainChunk); p.redactsAny() {
+			t.Fatalf("a chunk holding no redacted value has places %+v", p)
+		}
 	})
 }
 
@@ -83,8 +93,11 @@ func TestRedactedPlacesTogether(t *testing.T) {
 	if got := a.or(redactedPlaces{statement: true, whole: true}); !got.whole {
 		t.Fatalf("with a whole statement: %+v", got)
 	}
-	if got := a.or(redactedPlaces{params: map[int]bool{0: true}}); !reflect.DeepEqual(got.params, map[int]bool{0: true, 2: true}) {
+	if got := a.or(redactedPlaces{params: map[int]bool{0: true}}); !reflect.DeepEqual(got.params, map[int]bool{0: true, 2: true}) || got.data {
 		t.Fatalf("params: %+v", got)
+	}
+	if got := a.or(redactedPlaces{data: true}); !got.data || !got.params[2] {
+		t.Fatalf("a chunk: %+v", got)
 	}
 }
 
@@ -109,6 +122,9 @@ func TestRedactedPlacesOfAPool(t *testing.T) {
 	read := 0
 	if got := logPlaces(func() redactedPlaces { read++; return poolPlaces([]*models.Mock{byKey}) }).live(live); got != want || read != 1 {
 		t.Errorf("places read: %q (read %d times), want %q", got, read, want)
+	}
+	if got := logPlaces(func() redactedPlaces { read++; return everyPlace }).live(""); got != "" || read != 1 {
+		t.Errorf("no statement: %q (read %d times in all), want none read", got, read)
 	}
 }
 
@@ -135,6 +151,16 @@ func TestRedactedPlacesOfTheLiveCommand(t *testing.T) {
 		{"the recording's comment redacted", queryPlaces("SELECT /* u="+redactedPlaceholder+" */ name FROM users WHERE k = 'acme'", util.NewNoiseChecker(redactedNoise)),
 			"SELECT /* u=" + liveSecret + " */ name FROM users WHERE k = 'acme'", "select `name` from users where k = '(redacted)'"},
 		{"whole", redactedPlaces{statement: true, whole: true}, "SELECT name FROM t_" + liveSecret, valueRedacted},
+		{"another template: a string DEFAULT the rewriter does not reach", p,
+			"CREATE TABLE tokens (k TEXT DEFAULT '" + liveSecret + "')", valueRedacted},
+		{"another template: a hex DEFAULT the rewriter does not reach", p,
+			"CREATE TABLE tokens (k TEXT DEFAULT x'736b394c495645')", valueRedacted},
+		{"another template: a hex number DEFAULT the rewriter does not reach", p,
+			"CREATE TABLE tokens (k INT DEFAULT 0x736b394c)", valueRedacted},
+		{"another template: a numeric DEFAULT the rewriter does not reach", p,
+			"CREATE TABLE tokens (k BIGINT DEFAULT 4111111111111111)", valueRedacted},
+		{"another template: a decimal DEFAULT the rewriter does not reach", p,
+			"CREATE TABLE tokens (k DOUBLE DEFAULT 4111.1111)", valueRedacted},
 		{"the recorded template with a number in no literal: the redacted literal alone", cast,
 			"SELECT CAST(name AS CHAR(10)) FROM users WHERE org = 'globex' AND k = '" + liveSecret + "'",
 			"select cast(`name` as CHAR(10)) from users where org = 'globex' and k = '(redacted)'"},
@@ -187,7 +213,7 @@ func TestRedactedPlacesOfFieldDiffs(t *testing.T) {
 		kept     []string
 	}{
 		{"bound values alone", redactedPlaces{params: map[int]bool{1: true}}, liveSame,
-			[]string{"body.parameters.1.value", "body.parameters.1.value.$bin"},
+			[]string{"body.parameters.1.value", "body.parameters.1.value.$bin", "body.data"},
 			[]string{"body.query", "body.query.literals", "body.query.literals.0", "body.query.template", "body.parameters.0.value",
 				"body.parameters.1.name", "body.parameters.1.type", "body.parameters.1.unsigned", "body.parameters.x.value"}},
 		{"a literal, the recorded template", literalAt1, liveSame,
@@ -199,6 +225,12 @@ func TestRedactedPlacesOfFieldDiffs(t *testing.T) {
 		{"a literal, another template keeping a literal in it", literalAt1, "SELECT name FROM users WHERE k = 'x' INTO OUTFILE '/tmp/x'",
 			[]string{"body.query.template", "body.query.literals.0"},
 			nil},
+		{"a chunk", redactedPlaces{data: true}, liveSame,
+			[]string{"body.data", "body.data.token", "body.data.n.0"},
+			[]string{"body.query", "body.query.literals.0", "body.query.template", "body.parameters.0.value", "body.database"}},
+		{"none", redactedPlaces{}, liveSame,
+			nil,
+			[]string{"body.data", "body.query", "body.query.literals.0", "body.parameters.0.value"}},
 		{"the statement", redactedPlaces{statement: true}, liveSame,
 			[]string{"body.query", "body.query.template", "body.query.comments", "body.query.literals.0"},
 			[]string{"body.parameters.0.value"}},

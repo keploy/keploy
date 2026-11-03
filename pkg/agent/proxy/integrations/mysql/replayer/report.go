@@ -168,7 +168,9 @@ const maxUnknownStatementsNamed = 5
 // recording holds EXECUTE mocks that lost their statement (unknown, in pool
 // order): refused because the mock it would have served instead (instead)
 // was recorded for another test, or, with instead nil, matched by no mock.
-// candidates is the scan's candidate count.
+// candidates is the scan's candidate count. Its places are those of every
+// recording of unknown, any of which may be the command's own, and of
+// instead.
 func unknownStatementsMiss(unknown []*models.Mock, instead *models.Mock, candidates int) *mockMiss {
 	names := make([]string, 0, min(len(unknown), maxUnknownStatementsNamed))
 	for _, m := range unknown[:min(len(unknown), maxUnknownStatementsNamed)] {
@@ -182,10 +184,15 @@ func unknownStatementsMiss(unknown []*models.Mock, instead *models.Mock, candida
 	if instead != nil {
 		why += fmt.Sprintf(", so keploy does not answer it with %s, which was recorded for another test", instead.Name)
 	}
+	places := placesOf(instead)
+	for _, m := range unknown {
+		places = places.or(placesOf(m))
+	}
 	return &mockMiss{
 		closestMock:    unknown[0].Name,
 		candidateCount: candidates,
 		matchPhase:     models.MatchPhaseExhausted,
+		places:         places,
 		why:            why,
 		nextSteps:      "The COM_STMT_PREPARE mocks these EXECUTEs need were most likely deleted by an older keploy's mock prune (--remove-unused-mocks, or the prune after an auto-replay), which did not keep the mocks a kept mock needs. Re-record the test set with '" + mismatch.RecordCommand() + "', or restore its mocks from a copy made before the prune.",
 	}
