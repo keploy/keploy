@@ -129,6 +129,11 @@ func TestComparedShareCapped(t *testing.T) {
 	if len(five.Reasons) != 5 || five.OtherReasons != 0 || five.OtherTests != 0 {
 		t.Fatalf("five reasons capped: %+v, want all five kept", five)
 	}
+	// One reason over the cap: MaxShareReasons kept, the one left counted.
+	six := NewComparedShare(0, 6, 6, map[string]int{"a": 1, "b": 1, "c": 1, "d": 1, "e": 1, "f": 1}).Capped()
+	if len(six.Reasons) != MaxShareReasons || six.OtherReasons != 1 || six.OtherTests != 1 || six.Reasons[MaxShareReasons-1].Reason != "e" {
+		t.Fatalf("six reasons capped: %+v, want a to e kept and f counted", six)
+	}
 	if got := cutUTF8("abc", 3); got != "abc" {
 		t.Fatalf("cutUTF8 of a fitting string = %q", got)
 	}

@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -81,5 +82,24 @@ func TestRunComparedShareCountsASetAsItsLastRun(t *testing.T) {
 	}
 	if got := comparedShareLine(nil); got != "" {
 		t.Fatalf("a run with no share ends with %q, want nothing more", got)
+	}
+}
+
+// The report a set's end writes carries its share capped: its first
+// MaxShareReasons reasons, the rest counted as other reasons, so the report's
+// head stays bounded however many reasons set its tests aside. The run's
+// share, which its last line reads, keeps every reason.
+func TestTheReportASetEndWritesCarriesItsShareCapped(t *testing.T) {
+	r := &Replayer{}
+	rep := &models.TestReport{TestSet: "test-set-0", Status: string(models.TestSetStatusPassed), Ignored: 7, Total: 7}
+	for i := 1; i <= 7; i++ {
+		rep.Tests = append(rep.Tests, models.TestResult{TestCaseID: fmt.Sprintf("test-%d", i), Status: models.TestStatusIgnored, SkipReason: fmt.Sprintf("reason-%d", i)})
+	}
+	r.noteSetEnd(rep)
+	if got := rep.SetAside; got == nil || len(got.Reasons) != models.MaxShareReasons || got.OtherReasons != 2 || got.OtherTests != 2 || got.SetAside != 7 {
+		t.Fatalf("the report's share: %+v, want %d reasons and 2 other reasons of 2 tests, of 7 set aside", got, models.MaxShareReasons)
+	}
+	if got := r.runComparedShare(0, 7, 7); len(got.Reasons) != 7 || got.OtherReasons != 0 {
+		t.Fatalf("the run's share: %+v, want all 7 reasons", got)
 	}
 }
