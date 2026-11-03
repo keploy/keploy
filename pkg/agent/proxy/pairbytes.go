@@ -26,6 +26,11 @@ import (
 // with one of the application's, while the proxy holds it.
 type pairedConn struct {
 	appSeq uint64
+	// instance is the keploy instance (a test worker's) the application's
+	// process was in when it connected, as the kernel stamped it: 0 for
+	// none. An end of a worker's test cut short marks only its worker's
+	// connections (waitPairTargets).
+	instance uint32
 	// app is the application's end of the connection (its remote end, as
 	// the proxy sees it), proxy the proxy's own.
 	app, proxy netip.AddrPort
@@ -232,8 +237,8 @@ func (p *Proxy) TakeOwnedLosses() []agent.OwnedLoss {
 func (p *Proxy) PairedBytesProgress() uint64 { return p.paired.progress.Load() }
 
 // add keeps an accepted connection the kernel paired with the application's
-// connection number appSeq.
-func (s *pairedConns) add(conn *net.TCPConn, appSeq uint64) {
+// connection number appSeq, made by a process in keploy instance instance.
+func (s *pairedConns) add(conn *net.TCPConn, appSeq uint64, instance uint32) {
 	app, ok1 := addrPortOf(conn.RemoteAddr())
 	proxy, ok2 := addrPortOf(conn.LocalAddr())
 	if !ok1 || !ok2 {
@@ -244,7 +249,7 @@ func (s *pairedConns) add(conn *net.TCPConn, appSeq uint64) {
 	if s.byConn == nil {
 		s.byConn = map[net.Conn]*pairedConn{}
 	}
-	s.byConn[conn] = &pairedConn{appSeq: appSeq, app: app, proxy: proxy, conn: conn, done: make(chan struct{})}
+	s.byConn[conn] = &pairedConn{appSeq: appSeq, instance: instance, app: app, proxy: proxy, conn: conn, done: make(chan struct{})}
 }
 
 // remove forgets conn once the proxy is done with it, its socket closed. A
