@@ -150,6 +150,34 @@ func TestGateOnAppAddress_ServingAppIsReadyImmediately(t *testing.T) {
 	}
 }
 
+// For an application whose process keploy does not run, both stages share
+// --health-poll-timeout, as on main. An address that accepts only as the
+// ceiling runs out leaves no time for the HTTP stage: the gate fires the tests
+// at once, starts no HTTP probe, and so says nothing about one.
+func TestGateOnAppAddress_AnAcceptThatSpendsTheCeilingStartsNoHTTPStage(t *testing.T) {
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	core, logs := observer.New(zapcore.DebugLevel)
+
+	// A ceiling of a nanosecond is spent by the time the address accepts the
+	// gate's first dial, which it makes whatever the ceiling.
+	if !gateOnAppAddress(context.Background(), zap.New(core), gateCfg(time.Nanosecond), host, port, "test",
+		httpProbeTarget{scheme: "http", host: host, port: port, ok: true}) {
+		t.Fatal("not ready, want the tests fired once the address accepted")
+	}
+	if n := requests.Load(); n != 0 {
+		t.Errorf("the gate sent %d HTTP probes with no time left for them, want none", n)
+	}
+	if n := logs.FilterMessageSnippet("never completed an HTTP round-trip").Len(); n != 0 {
+		t.Errorf("said %d times that no HTTP round-trip completed, when none was tried", n)
+	}
+}
+
 // An operator-supplied health path must actually be the path requested.
 func TestGateOnAppAddress_UsesConfiguredHealthPath(t *testing.T) {
 	got := make(chan string, 4)

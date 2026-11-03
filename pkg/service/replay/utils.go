@@ -1116,10 +1116,6 @@ func gateOnAppAddresses(ctx context.Context, logger *zap.Logger, cfg *config.Con
 	return true
 }
 
-// healthURLAddress is the host and port a valid --health-url dials; ok is
-// false without one. An empty host, as in "http://:8080/healthz", is the local
-// machine: the wait dials ":8080", the address the health poll's own request
-// reaches.
 // sayStillWaiting is pkg.SayStillWaiting, the line a wait with no time limit
 // says every so often; a var only so that a row can see what it is asked to
 // say.
@@ -1135,6 +1131,10 @@ func healthURLWaitAddr(healthURL string) string {
 	return sanitizeHealthURL(healthURL)
 }
 
+// healthURLAddress is the host and port a valid --health-url dials; ok is
+// false without one. An empty host, as in "http://:8080/healthz", is the local
+// machine: the wait dials ":8080", the address the health poll's own request
+// reaches.
 func healthURLAddress(healthURL string) (host, port string, ok bool) {
 	u, err := url.Parse(strings.TrimSpace(healthURL))
 	if err != nil || u.Host == "" {

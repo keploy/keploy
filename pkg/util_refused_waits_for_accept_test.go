@@ -293,12 +293,49 @@ func TestARefusedGRPCDialWaitsForItsAddressWhileTheAppRuns(t *testing.T) {
 	serve(t, addr)
 	select {
 	case r := <-done:
-		if r.err != nil {
-			t.Fatalf("want a connection once the address accepted, got %v", r.err)
+		if r.err != nil || r.conn == nil {
+			t.Fatalf("want a connection once the address accepted, got (%v, %v)", r.conn, r.err)
 		}
 		_ = r.conn.Close()
 	case <-time.After(10 * time.Second):
 		t.Fatal("the dial was not made again once its address accepted a connection")
+	}
+}
+
+// A gRPC test's dial that waits stops waiting when the application exits,
+// with an error and no connection.
+func TestARefusedGRPCDialStopsWaitingWhenTheAppExits(t *testing.T) {
+	addr := refusingAddr(t)
+	core, logs := observer.New(zapcore.InfoLevel)
+	ctx, appExited := context.WithCancel(EndsWithApp(context.Background()))
+	defer appExited()
+	type dialResult struct {
+		conn net.Conn
+		err  error
+	}
+	done := make(chan dialResult, 1)
+	go func() {
+		conn, err := dialTCPWithConnRefusedRetry(ctx, zap.New(core), addr, nil, 0)
+		done <- dialResult{conn, err}
+	}()
+	untilItSaysItWaits(t, logs, done)
+
+	select {
+	case r := <-done:
+		t.Fatalf("the dial ended (%v) before the application exited", r.err)
+	case <-time.After(refusedPastTheBound):
+	}
+	appExited()
+	select {
+	case r := <-done:
+		if r.err == nil || r.conn != nil {
+			if r.conn != nil {
+				_ = r.conn.Close()
+			}
+			t.Fatalf("want an error and no connection once the application exited, got (%v, %v)", r.conn, r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the dial's wait did not end when the application exited")
 	}
 }
 
