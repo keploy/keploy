@@ -226,7 +226,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		// record's restore just removed.
 		if recordJudged && provenswitch.On() && recordsJudged.Load() && m.config.Path != "" {
 			writeRecordTestsReceipt(m.logger, m.config.Path, TestsReceipt{
-				Set: name, At: started.UTC().Truncate(time.Second), Refusals: m.refusals, Live: m.live, Mocked: m.mocked, Real: recordReal,
+				Set: name, At: started.UTC().Truncate(time.Second), Refusals: m.refusals, Workers: claimedWorkers(m.claims), Live: m.live, Mocked: m.mocked, Real: recordReal,
 				CannotCapture: recordNotJudged, CaptureLosses: recordLosses, CaptureLossesUnread: recordLossesUnread,
 			}, recordTests)
 		}
@@ -1054,6 +1054,16 @@ func (m *mockService) takeRunWindows(all []models.ScopeWindow) []models.ScopeWin
 		}
 	}
 	return windows
+}
+
+// claimedWorkers is the most test workers any of claims declared
+// (models.ScopeWindow.Workers): 0 when none declared more than one.
+func claimedWorkers(claims []models.ScopeWindow) int {
+	most := 0
+	for _, c := range claims {
+		most = max(most, c.Workers)
+	}
+	return most
 }
 
 // claimKeyAt is the key of the claim a call made at at belongs to: the

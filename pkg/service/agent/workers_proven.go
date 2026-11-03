@@ -245,7 +245,7 @@ func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me clai
 	}
 	now := time.Now()
 	a.provenMu.Lock()
-	a.proven.claims = append(a.proven.claims, models.ScopeWindow{Claim: req.Key, Start: now, End: now, Worker: id})
+	a.proven.claims = append(a.proven.claims, models.ScopeWindow{Claim: req.Key, Start: now, End: now, Worker: id, Workers: declared})
 	a.provenMu.Unlock()
 	containerkey.Default.BeginInstance()
 	return models.InstanceResp{V: models.ScopeProtocolVersion, Instance: strconv.FormatUint(uint64(id), 10), TimeFile: TimeFile()}, nil
