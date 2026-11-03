@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 )
@@ -137,9 +138,10 @@ type mockMiss struct {
 	// hunt for a lost recording.
 	candidateCount int
 	matchPhase     string
-	// places are the places of the recorded commands the report names
-	// (its closest mock, the first one strict rejected) the obfuscator
-	// redacted: the report and the miss's log show the live command's
+	// places are the places the obfuscator redacted in the recordings of
+	// the pool and in those the report names (its closest mock, the first
+	// one strict rejected), every place when the pool cannot be read
+	// (everyPlace): the report and the miss's log show the live command's
 	// value at each as valueRedacted.
 	places redactedPlaces
 	// why and nextSteps, when set, are what the report says about the miss
@@ -158,6 +160,35 @@ type mockMiss struct {
 	// own recordings of it answered, ownRepeats), how many times the test
 	// recorded it (models.MissExtraCall); 0 for every other miss.
 	extraCall int
+}
+
+// liveCommand is the live command msg as the miss's report shows it, by
+// its places: its statement (an EXECUTE's prepared one, by decodeCtx) and
+// an EXECUTE's bound values, or a COM_STMT_SEND_LONG_DATA's parameter and
+// size.
+func (m *mockMiss) liveCommand(msg any, decodeCtx *wire.DecodeContext) string {
+	switch msg := msg.(type) {
+	case *mysql.QueryPacket:
+		return m.places.liveStatement(sqlStatementIdentity(msg.Query))
+	case *mysql.StmtPreparePacket:
+		return m.places.liveStatement(sqlStatementIdentity(msg.Query))
+	case *mysql.StmtExecutePacket:
+		// EXECUTE carries no SQL text of its own: the prepared query is
+		// resolved by the runtime stmtID map, and the bound values shown,
+		// so the report isn't a blank "COM_STMT_EXECUTE".
+		if msg != nil {
+			query := ""
+			if decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
+				query = m.places.liveStatement(sqlStatementIdentity(decodeCtx.StmtIDToQuery[msg.StatementID]))
+			}
+			return strings.TrimSpace(query + " " + formatExecParams(m.places.liveParams(msg.Parameters)))
+		}
+	case *mysql.StmtSendLongDataPacket:
+		if msg != nil {
+			return fmt.Sprintf("(param %d, %d streamed bytes)", msg.ParameterID, len(msg.Data))
+		}
+	}
+	return ""
 }
 
 // maxUnknownStatementsNamed caps how many mocks a miss of an unknown statement

@@ -135,8 +135,9 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				if miss == nil {
 					// Defensive: matchCommand always returns a miss alongside a
 					// nil error. matchPhase is set explicitly so an unexpected
-					// path cannot masquerade as an empty mock pool.
-					miss = &mockMiss{matchPhase: models.MatchPhaseExhausted}
+					// path cannot masquerade as an empty mock pool. It read no
+					// pool's places, so it shows the command redacted whole.
+					miss = &mockMiss{matchPhase: models.MatchPhaseExhausted, places: everyPlace}
 				}
 				// Report the STATEMENT, not the wire text. A Datadog DBM /
 				// sqlcommenter comment runs to a couple of hundred bytes in front
@@ -149,28 +150,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				// rendered bound parameters appended below: those are arbitrary
 				// user data, and a value containing "#" or "-- " would have the
 				// rest of the parameter list silently deleted from the report.
-				actualQuery := ""
-				switch msg := req.Message.(type) {
-				case *mysql.QueryPacket:
-					actualQuery = miss.places.liveStatement(sqlStatementIdentity(msg.Query))
-				case *mysql.StmtPreparePacket:
-					actualQuery = miss.places.liveStatement(sqlStatementIdentity(msg.Query))
-				case *mysql.StmtExecutePacket:
-					// EXECUTE carries no SQL text of its own — resolve the
-					// prepared query via the runtime stmtID map and show the
-					// bound parameter values, so the report isn't a blank
-					// "COM_STMT_EXECUTE".
-					if msg != nil {
-						if decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
-							actualQuery = miss.places.liveStatement(sqlStatementIdentity(decodeCtx.StmtIDToQuery[msg.StatementID]))
-						}
-						actualQuery = strings.TrimSpace(actualQuery + " " + formatExecParams(miss.places.liveParams(msg.Parameters)))
-					}
-				case *mysql.StmtSendLongDataPacket:
-					if msg != nil {
-						actualQuery = fmt.Sprintf("(param %d, %d streamed bytes)", msg.ParameterID, len(msg.Data))
-					}
-				}
+				actualQuery := miss.liveCommand(req.Message, decodeCtx)
 				closestQuery := sqlStatementIdentity(miss.closestQuery)
 				diff := ""
 				if actualQuery != "" || closestQuery != "" {

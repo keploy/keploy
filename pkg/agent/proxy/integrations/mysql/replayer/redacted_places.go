@@ -46,6 +46,9 @@ type redactedPlaces struct {
 	whole bool
 	// params are an EXECUTE's bound values by position.
 	params map[int]bool
+	// everyParam redacts every bound value of an EXECUTE, whatever its
+	// position: the places of the pool could not be read (everyPlace).
+	everyParam bool
 	// data is set when a COM_STMT_SEND_LONG_DATA chunk holds a redacted
 	// value. The obfuscator redacts within the chunk's text, which may no
 	// longer be the JSON document the live chunk is diffed as, so no place
@@ -143,6 +146,7 @@ func (p redactedPlaces) or(q redactedPlaces) redactedPlaces {
 	p.statement = p.statement || q.statement
 	p.whole = p.whole || q.whole
 	p.params = mergePositions(p.params, q.params)
+	p.everyParam = p.everyParam || q.everyParam
 	p.data = p.data || q.data
 	return p
 }
@@ -165,7 +169,9 @@ func mergePositions(a, b map[int]bool) map[int]bool {
 func (p redactedPlaces) inStatement() bool { return p.statement || len(p.literals) > 0 }
 
 // redactsAny reports whether p holds any place.
-func (p redactedPlaces) redactsAny() bool { return p.inStatement() || len(p.params) > 0 || p.data }
+func (p redactedPlaces) redactsAny() bool {
+	return p.inStatement() || len(p.params) > 0 || p.everyParam || p.data
+}
 
 // liveStatement is the live statement sql as a report or a log shows it:
 // sql itself when the recording redacted no place of its statement; else
@@ -237,13 +243,13 @@ func literalTokens(parser *sqlparser.Parser, sql string) int {
 // liveParams is params as a report shows them: each value at a redacted
 // place redacted. params itself when none is.
 func (p redactedPlaces) liveParams(params []mysql.Parameter) []mysql.Parameter {
-	if len(p.params) == 0 {
+	if len(p.params) == 0 && !p.everyParam {
 		return params
 	}
 	out := make([]mysql.Parameter, len(params))
 	copy(out, params)
 	for i := range out {
-		if p.params[i] && out[i].Value != nil {
+		if (p.everyParam || p.params[i]) && out[i].Value != nil {
 			out[i].Value = valueRedacted
 		}
 	}
@@ -288,7 +294,7 @@ func (p redactedPlaces) fieldDiffs(diffs []models.MockFieldDiff, liveQuery strin
 			n, err := strconv.Atoi(idx)
 			// Everything under the parameter but its type, unsigned flag
 			// and name is its value, an enveloped one ($bin) included.
-			redacted = err == nil && p.params[n] && field != "name" && field != "type" && field != "unsigned"
+			redacted = err == nil && (p.everyParam || p.params[n]) && field != "name" && field != "type" && field != "unsigned"
 		case path == "body.data" || strings.HasPrefix(path, "body.data."):
 			// A chunk's diff: the recording redacted a value somewhere, and
 			// which place of the chunk it was is not told (p.data).
@@ -340,9 +346,10 @@ func liveStatementOf(b *mysql.PacketBundle, executeQuery string) string {
 }
 
 // poolPlaces are the places any recording of pool redacted (placesOf), all
-// of them together: the replay's logs show the live statement by these,
-// whichever candidate a line compares it with, so a log line carries no
-// value the recording it names left in but another recording hid.
+// of them together: the replay's logs and its miss reports show the live
+// command by these, whichever candidate a line compares it with and
+// whichever recording a report names, so neither carries a value the
+// recording it names left in but another recording hid.
 func poolPlaces(pool []*models.Mock) redactedPlaces {
 	var p redactedPlaces
 	for _, m := range pool {
@@ -351,9 +358,10 @@ func poolPlaces(pool []*models.Mock) redactedPlaces {
 	return p
 }
 
-// everyPlace redacts a live statement whole: the places a log reads when
-// the pool's cannot be read.
-var everyPlace = redactedPlaces{statement: true, whole: true}
+// everyPlace redacts a live command whole: its statement, every bound
+// value and every streamed chunk. A log line and a miss report read it when
+// the pool's places cannot be read.
+var everyPlace = redactedPlaces{statement: true, whole: true, everyParam: true, data: true}
 
 // logPlaces reads the places a log line shows the live statement by
 // (poolPlaces), once per command.
