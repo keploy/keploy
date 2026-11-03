@@ -667,15 +667,15 @@ const maxErrPayload = 4096
 // whose client may frame otherwise (a second driver in the same app): framed
 // by it, a connection the recorder could settle would stop instead, so for it
 // the framing is assumed and settled (DecodeContext.FramingAssumed).
-func ownClientCaps(source preTLSGreetingSource, sslReq *mysql.PacketBundle) (uint32, bool) {
+func ownClientCaps(source preTLSGreetingSource, sslReq *mysql.PacketBundle) (caps, mariaDBCaps uint32, ok bool) {
 	if source != greetingOwn || sslReq == nil {
-		return 0, false
+		return 0, 0, false
 	}
 	req, ok := sslReq.Message.(*mysql.SSLRequestPacket)
 	if !ok {
-		return 0, false
+		return 0, 0, false
 	}
-	return req.CapabilityFlags, true
+	return req.CapabilityFlags, req.MariaDBCapabilities(), true
 }
 
 // leavesFramingOpen reports whether a PREPARE's response, read on a framing

@@ -76,6 +76,56 @@ jobs:
       # skipped here. See django-postgres job below for the instrumented
       # template; mirror it here only if flask-secret regresses on PG.
 
+  # An app on mysqlclient built on MariaDB Connector/C (Frappe's default
+  # driver), against MariaDB and MySQL: every exchange is recorded (a JSON
+  # column's extended type info and the metadata-follows byte are framed) and
+  # every handshake is served on replay (the greeting carries MariaDB's
+  # extended capabilities). The app is in this repo
+  # (test_workflow_scripts/python/mysqlclient_mariadb). Record and replay with
+  # the build only: a released keploy before this check is the bug.
+  mysqlclient_mariadb:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        db: ['mariadb:10.6', 'mysql:8.0']
+    name: mysqlclient on ${{ matrix.db }} (record_build_replay_build)
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install mysqlclient on MariaDB Connector/C
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/apt-install.sh" build-essential pkg-config libmariadb-dev
+          # mysqlclient ships no Linux wheel: it builds against the client
+          # library these flags name, MariaDB's and not libmysqlclient.
+          MYSQLCLIENT_CFLAGS="$(pkg-config --cflags libmariadb)" MYSQLCLIENT_LDFLAGS="$(pkg-config --libs libmariadb)" \
+            python3 -m pip install --no-cache-dir mysqlclient
+          python3 -c 'import MySQLdb, sys; v = MySQLdb.get_client_info(); print("client library", v); sys.exit(0 if v.startswith("3.") else 1)' ||
+            { echo "::error::mysqlclient is not built on MariaDB Connector/C (3.x)"; exit 1; }
+
+      - id: build
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Record and replay
+        env:
+          RECORD_BIN: ${{ steps.build.outputs.path }}
+          REPLAY_BIN: ${{ steps.build.outputs.path }}
+          DB_IMAGE: ${{ matrix.db }}
+        run: bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/mysqlclient_mariadb/python-linux.sh"
+
   python_linux_private:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ${{ inputs.runner }}
