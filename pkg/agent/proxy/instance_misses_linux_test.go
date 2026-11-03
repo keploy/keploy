@@ -290,3 +290,75 @@ func TestAWorkersParserMissIsFiledUnderTheWorkerTheKernelStamped(t *testing.T) {
 		t.Fatalf("the run's test read %v, a worker's miss", got)
 	}
 }
+
+// A miss of a test worker keploy had stopped serving as the call missed (a
+// process the worker left, on a connection it made before its end) is no
+// open test's to read, and is counted as a call keploy cannot attribute,
+// naming the ended worker, as record charges it. One made while the worker
+// was served, a miss of the run's, and one of an instance while no worker
+// is served are not.
+func TestAStoppedWorkersMissIsCountedACallKeployCannotAttribute(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	p, _ := storeProxy(t, ipv4Dest(t, "127.0.0.1:50079"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.StartErrorDrain(ctx)
+	unattributed := func() (n uint64, what string) {
+		for _, l := range p.CaptureLosses() {
+			if l.Kind == models.CaptureLossUnattributed {
+				n, what = n+l.Count, l.What
+			}
+		}
+		return n, what
+	}
+	miss := func(inst uint32, report *models.MockMismatchReport, dst *models.ConditionalDstCfg) {
+		var err error = models.NewMockMismatchError(models.ErrNoMockMatched, report)
+		if report == nil {
+			err = models.ErrNoMockMatched
+		}
+		p.sendMockNotFoundErrorFrom(err, 4242, inst, dst)
+	}
+	miss(7, &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /none"}, nil)
+	if n, _ := unattributed(); n != 0 {
+		t.Fatalf("a miss of an instance while keploy serves no worker counted %d calls keploy cannot attribute", n)
+	}
+	s1, err := p.ServeInstance(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.ServeInstance(2); err != nil {
+		t.Fatal(err)
+	}
+	w1 := s1.(workerMisses)
+	w1.ContinueTestErrorCapture()
+	miss(2, &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /served"}, nil)
+	miss(0, &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /run"}, nil)
+	if err := p.StopServingInstance(2); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := unattributed(); n != 0 {
+		t.Fatalf("a miss made while its worker was served, and the run's, counted %d calls keploy cannot attribute", n)
+	}
+	miss(2, &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /late", Destination: "orders:8080"}, nil)
+	if n, what := unattributed(); n != 1 || what != "the latest: a call to orders:8080, from process 4242 of ended test worker 2, on a connection it made before keploy stopped serving that worker" {
+		t.Fatalf("a stopped worker's miss counted %d, %q; want 1 naming its destination, process and worker", n, what)
+	}
+	miss(2, nil, &models.ConditionalDstCfg{Addr: "10.0.0.9:5432"})
+	if n, what := unattributed(); n != 2 || what != "the latest: a call to 10.0.0.9:5432, from process 4242 of ended test worker 2, on a connection it made before keploy stopped serving that worker" {
+		t.Fatalf("a stopped worker's miss with no report counted %d, %q; want 2 naming its dialled address", n, what)
+	}
+	miss(2, nil, &models.ConditionalDstCfg{Addr: "10.0.0.9:5432", AddrFabricated: true})
+	if n, what := unattributed(); n != 3 || what != "the latest: a call, from process 4242 of ended test worker 2, on a connection it made before keploy stopped serving that worker" {
+		t.Fatalf("a stopped worker's miss to a made-up address counted %d, %q; want 3 naming no address", n, what)
+	}
+	if p.stoppedWorker(0) {
+		t.Fatal("instance 0, no worker's, was read as a stopped worker's")
+	}
+	got, err := w1.GetMockErrors(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("worker 1's open test read %v, a stopped worker's misses", got)
+	}
+}

@@ -5597,7 +5597,7 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 					// a worker keploy no longer serves is no test's.
 					w := p.missWindowOf(missInstance(err))
 					if w == nil {
-						p.logDroppedMisses("mock mismatches of a test worker keploy no longer serves are not attributed to a test", []error{err})
+						p.logDroppedMisses("mock mismatches of a test worker keploy no longer serves are not attributed to a test (one made after keploy stopped serving it is counted as a call keploy cannot attribute)", []error{err})
 						continue
 					}
 					if w == &p.missWindow && p.markedBeforeSet(err) {
@@ -6269,6 +6269,14 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid, inst uint32, dst *mode
 			// so (stagingMissNote), told where its call was decided.
 			proxyErr.Staging = m.missMadeInStaging(proxyErr.MismatchReport)
 		}
+	} else if p.stoppedWorker(inst) {
+		// A miss of a test worker keploy had stopped serving as the call
+		// missed (decided here, at the call): a process the worker left
+		// behind, on a connection it made before its end. No test of it
+		// is open to read it, and any test open now may have made the
+		// call, as at record: it is counted as a call keploy cannot
+		// attribute, naming the ended worker.
+		p.losses.Add(models.CaptureLossUnattributed, stoppedWorkerMissWhat(proxyErr.MismatchReport, dst, pid, inst))
 	}
 	// Single, protocol-agnostic mock-mismatch log. EVERY parser's MockOutgoing
 	// miss funnels through here, so this one line covers HTTP, generic, MySQL,
