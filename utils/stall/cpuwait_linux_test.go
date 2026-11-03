@@ -837,24 +837,30 @@ func TestSampler_ARunStoppedBeforeARestartDoesNotSampleForTheNext(t *testing.T) 
 }
 
 // The same left to the scheduler: three goroutines acquire and release one
-// sampler of a frozen process, each a fixed number of times, holding it 0,
-// 50 and 100 us at a time; the clock never counts.
+// sampler of a frozen process, one at once again and the others after holding
+// it 300 and 600 us (its samples come every 200 us), for a fixed number of
+// acquires between them, or until the clock counts; it never does. Most
+// acquires find the sampling running; it starts again only when all three let
+// go at once, and the stopped run's sample landing after that restart takes
+// on the order of a million acquires to come.
 func TestSampler_RestartCyclesNeverCountAFrozenProcess(t *testing.T) {
 	src := &threadWaitSource{wall: time.Unix(1_000_000, 0), own: map[int]time.Duration{}}
 	s := &sampler{src: src, tick: 200 * time.Microsecond}
-	const cycles = 3_000 // acquires per goroutine
+	const acquires = 5_000_000
+	var left atomic.Int64
+	left.Store(acquires)
 	var wg sync.WaitGroup
 	for g := range 3 {
 		wg.Go(func() {
-			for range cycles {
+			for left.Add(-1) >= 0 && s.ran.Load() == 0 {
 				release := s.acquire()
-				time.Sleep(time.Duration(g) * 50 * time.Microsecond)
+				time.Sleep(time.Duration(g) * 300 * time.Microsecond)
 				release()
 			}
 		})
 	}
 	wg.Wait()
 	if got := time.Duration(s.ran.Load()); got != 0 {
-		t.Fatalf("a frozen process's clock counted %v in %d acquires from each of three goroutines: a sample set one thread's run delay against another's", got, cycles)
+		t.Fatalf("a frozen process's clock counted %v within %d acquires from three goroutines: a sample set one thread's run delay against another's", got, acquires)
 	}
 }
