@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
+
 	"go.keploy.io/server/v3/pkg/models"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -26,13 +29,15 @@ func TestRecordV2_ThroughTheRelayTheMockOfAnAnswerTheAppStoppedReadingIsTheSameW
 		// read is what the app reads before it closes; rest is the rest of
 		// the answer the upstream has to send; body is the body read.
 		read, rest, body string
+		// sent is how the upstream framed the body.
+		sent sentAs
 	}{
 		{name: "a length", read: "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 20\r\n\r\n01234",
-			rest: "56789abcdefghij", body: "01234"},
+			rest: "56789abcdefghij", body: "01234", sent: sentAs{length: 20}},
 		{name: "chunks", read: "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n14\r\n01234",
-			rest: "56789abcdefghij\r\n0\r\n\r\n", body: "01234"},
+			rest: "56789abcdefghij\r\n0\r\n\r\n", body: "01234", sent: sentChunked},
 		{name: "the upstream's close", read: "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n01234",
-			rest: "56789abcdefghij", body: "01234"},
+			rest: "56789abcdefghij", body: "01234", sent: sentByClose},
 	} {
 		for _, proven := range []string{"", "1"} {
 			t.Run(shape.name+"/KEPLOY_PROVEN="+proven, func(t *testing.T) {
@@ -77,7 +82,7 @@ func TestRecordV2_ThroughTheRelayTheMockOfAnAnswerTheAppStoppedReadingIsTheSameW
 					if len(mocks) != 1 {
 						t.Fatalf("%s: recorded %d mocks, want the one exchange, as far as the app read it", order, len(mocks))
 					}
-					wantStoppedReading(t, mocks[0], shape.body)
+					wantStoppedReading(t, mocks[0], shape.body, shape.sent)
 					got := mockShape(t, mocks[0])
 					if first == "" {
 						first = got
@@ -89,6 +94,87 @@ func TestRecordV2_ThroughTheRelayTheMockOfAnAnswerTheAppStoppedReadingIsTheSameW
 				}
 			})
 		}
+	}
+}
+
+// The recording's stop closed the app partway through an answer (keploy
+// stops the application once it has told the agent: Session.EndFollowedStop),
+// and the upstream sent the rest after the app's FIN, which the relay refused
+// for it (Session.EndedWhereClientStopped). The app did not stop reading of
+// its own: no fault is its, and what it read is no whole answer. The exchange
+// is left out, and said so with the stop's reason (LeftOutPartwayAtStop: the
+// client's end came first and records no fault, partAnswerLeftOut), with no
+// mock, and recordV2 returns nil.
+func TestRecordV2_ThroughTheRelayAnAnswerTheRecordingsStopCutIsLeftOut(t *testing.T) {
+	const read = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 20\r\n\r\n01234"
+	for _, proven := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", proven)
+			c := newRelayedConn(t)
+			c.start(t)
+			write(t, c.app, c.src, jdkRequest(7))
+			relayed(t, c.dest, jdkRequest(7))
+			if _, err := c.dest.Write([]byte(read)); err != nil {
+				t.Fatal(err)
+			}
+			relayed(t, c.app, read)
+			c.stopBegun.Store(true)
+			if err := c.app.Close(); err != nil {
+				t.Fatal(err)
+			}
+			awaitFIN(t, c.dest)
+			if _, err := c.dest.Write([]byte("56789abcdefghij")); err != nil {
+				t.Fatal(err)
+			}
+			awaitStopped := time.Now().Add(10 * time.Second)
+			for !c.sess.EndedWhereClientStopped() && time.Now().Before(awaitStopped) {
+				time.Sleep(time.Millisecond)
+			}
+			if !c.sess.EndedWhereClientStopped() {
+				t.Fatal("the relay did not end the stream where the client stopped taking it")
+			}
+			if mocks := c.end(t); len(mocks) != 0 {
+				t.Fatalf("recorded %d mocks, want none: the recording's stop, not the app, cut the answer (fault %v)", len(mocks), mocks[0].Spec.Fault)
+			}
+			if got := c.leftOut(supervisor.LeftOutPartwayAtStop); len(got) != 1 {
+				t.Fatalf("said %d times that the exchange was left out under %q, want once", len(got), supervisor.LeftOutPartwayAtStop)
+			}
+		})
+	}
+}
+
+// partAnswerFault: the relay's word that the stream ended where the client
+// stopped taking it (Session.EndedWhereClientStopped) makes the fault the
+// app's stop, whichever end the session has marked first, or none yet: the
+// upstream's close or reset can be marked before the client's, as their
+// forwarders race, and was the upstream's answer to the client's close.
+func TestPartAnswerFault_TheClientsStopWhicheverEndIsMarkedFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		marks func(s *supervisor.Session)
+	}{
+		{"no end marked", func(*supervisor.Session) {}},
+		{"the upstream's close marked first", func(s *supervisor.Session) {
+			s.MarkPeerEnded(fakeconn.FromDest, false)
+			s.MarkPeerEnded(fakeconn.FromClient, false)
+		}},
+		{"the upstream's reset marked first", func(s *supervisor.Session) {
+			s.MarkPeerEnded(fakeconn.FromDest, true)
+			s.MarkPeerEnded(fakeconn.FromClient, true)
+		}},
+		{"the client's end marked first", func(s *supervisor.Session) {
+			s.MarkPeerEnded(fakeconn.FromClient, false)
+			s.MarkPeerEnded(fakeconn.FromDest, true)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &supervisor.Session{}
+			tc.marks(s)
+			s.MarkEndedWhereClientStopped()
+			if f := partAnswerFault(s); f == nil || f.Kind != models.FaultStoppedReading || !f.AfterHead {
+				t.Fatalf("partAnswerFault = %+v, want the app's stop (stopped_reading after the head)", f)
+			}
+		})
 	}
 }
 

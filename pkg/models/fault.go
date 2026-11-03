@@ -17,7 +17,8 @@ import (
 // or AfterHead), is the mock's response as recorded: its status line, its
 // reason phrase and its headers, Content-Length as the upstream sent it, and
 // the BodyBytes of its body the upstream sent. A stopped_reading fault's is a
-// whole answer's instead (FaultStoppedReading).
+// whole answer's instead, the fault keeping how the upstream framed the body
+// (FaultStoppedReading).
 //
 // The format is closed: a kind this keploy does not know, or a field a kind
 // does not take, is refused by Validate with the reason named, never served
@@ -40,6 +41,15 @@ type Fault struct {
 	// BodyBytes is how many bytes of the body the upstream sent before the
 	// fault, once it had sent the head.
 	BodyBytes int64 `json:"body_bytes,omitempty" yaml:"body_bytes,omitempty" bson:"body_bytes,omitempty"`
+	// ContentLength, for stopped_reading, is the Content-Length the upstream
+	// sent the answer's head with, which replay sends it with: 0 for a head
+	// with none. The mock's response carries the length of what the
+	// application read instead, for a reader that drops the fault.
+	ContentLength int64 `json:"content_length,omitempty" yaml:"content_length,omitempty" bson:"content_length,omitempty"`
+	// Chunked, for stopped_reading: the upstream sent the body chunked,
+	// which replay sends it as. A head with neither this nor a
+	// ContentLength left the body to the connection's close to end.
+	Chunked bool `json:"chunked,omitempty" yaml:"chunked,omitempty" bson:"chunked,omitempty"`
 	// Delay, for a delay, is how long the whole answer is held before it is
 	// sent, bounded by the run. Only a delay takes one.
 	Delay time.Duration `json:"delay,omitempty" yaml:"delay,omitempty" bson:"delay,omitempty"`
@@ -74,11 +84,14 @@ const (
 	// all it had, its end never. Its mock's response is a whole answer's,
 	// the body as far as the application read it, decoded, with a
 	// Content-Length of its size and no Transfer-Encoding, so a reader of
-	// the mock that drops the fault serves it whole. Replay sends that head,
-	// without its Content-Length, and the body without its end (chunked,
-	// with no last chunk; a compressed body flushed, not ended), then holds
-	// the connection until the application closes it or the run ends: the
-	// application's close ends it, never a clock. AfterHead always.
+	// the mock that drops the fault serves it whole. The fault keeps how
+	// the upstream framed the body (ContentLength, Chunked). Replay sends
+	// that head framed so, and the body without its end: under the
+	// upstream's Content-Length, which it does not reach; as one chunk with
+	// no last chunk; or, framed by the close, as it is; a compressed body
+	// flushed, not ended. Then it holds the connection until the
+	// application closes it or the run ends: the application's close ends
+	// it, never a clock. AfterHead always.
 	FaultStoppedReading FaultKind = "stopped_reading"
 	// FaultDelay: the whole answer, sent once Delay has passed. A recording
 	// holds none (a record makes no verdict on wall-clock time); a delay is
@@ -109,6 +122,12 @@ func (f *Fault) Validate() error {
 		if !f.AfterHead {
 			return fmt.Errorf("fault stopped_reading without after_head: an application that closed before the head came had no answer; write kind timeout")
 		}
+		if f.ContentLength < 0 {
+			return fmt.Errorf("fault stopped_reading with content_length %d: a length sent is not negative; leave it out for a head that sent none", f.ContentLength)
+		}
+		if f.ContentLength > 0 && f.Chunked {
+			return fmt.Errorf("fault stopped_reading with content_length and chunked: a head frames its body one way; keep the one the upstream sent")
+		}
 	case FaultEOF:
 		if f.AfterHead {
 			return fmt.Errorf("fault eof with after_head: an upstream that closed after the head truncated the answer; write kind truncate")
@@ -121,8 +140,8 @@ func (f *Fault) Validate() error {
 		if f.Delay <= 0 {
 			return fmt.Errorf("fault delay of %s: a delay holds the answer for a positive duration", f.Delay)
 		}
-		if f.AfterHead || f.BodyBytes != 0 {
-			return fmt.Errorf("fault delay with after_head or body_bytes: a delay sends the whole answer")
+		if f.AfterHead || f.BodyBytes != 0 || f.ContentLength != 0 || f.Chunked {
+			return fmt.Errorf("fault delay with after_head, body_bytes, content_length or chunked: a delay sends the whole answer")
 		}
 		return nil
 	case "":
@@ -132,6 +151,9 @@ func (f *Fault) Validate() error {
 	}
 	if f.Delay != 0 {
 		return fmt.Errorf("fault %s with a delay: only kind delay takes one", f.Kind)
+	}
+	if f.Kind != FaultStoppedReading && (f.ContentLength != 0 || f.Chunked) {
+		return fmt.Errorf("fault %s with content_length or chunked: only kind stopped_reading takes them; its head is the mock's response as the upstream sent it", f.Kind)
 	}
 	if f.BodyBytes < 0 {
 		return fmt.Errorf("fault %s with body_bytes %d: a count of bytes sent is not negative", f.Kind, f.BodyBytes)

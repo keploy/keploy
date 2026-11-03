@@ -28,6 +28,8 @@ func TestFaultValidate(t *testing.T) {
 		{"delay", Fault{Kind: FaultDelay, Delay: 3 * time.Second}, ""},
 		{"stopped reading after the head", Fault{Kind: FaultStoppedReading, AfterHead: true, BodyBytes: 5}, ""},
 		{"stopped reading after the head, no body read", Fault{Kind: FaultStoppedReading, AfterHead: true}, ""},
+		{"stopped reading of a body sent with a length", Fault{Kind: FaultStoppedReading, AfterHead: true, BodyBytes: 5, ContentLength: 20}, ""},
+		{"stopped reading of a body sent chunked", Fault{Kind: FaultStoppedReading, AfterHead: true, BodyBytes: 5, Chunked: true}, ""},
 
 		{"no kind", Fault{}, "no kind"},
 		{"unknown kind", Fault{Kind: "tls_alert"}, "upgrade keploy"},
@@ -45,6 +47,14 @@ func TestFaultValidate(t *testing.T) {
 		{"timeout with body bytes and no head", Fault{Kind: FaultTimeout, BodyBytes: 5}, "set after_head"},
 		{"stopped reading with no head", Fault{Kind: FaultStoppedReading}, "write kind timeout"},
 		{"stopped reading with a delay", Fault{Kind: FaultStoppedReading, AfterHead: true, Delay: time.Second}, "only kind delay"},
+		{"stopped reading with a negative length", Fault{Kind: FaultStoppedReading, AfterHead: true, ContentLength: -1}, "not negative"},
+		{"stopped reading with a length and chunked", Fault{Kind: FaultStoppedReading, AfterHead: true, ContentLength: 20, Chunked: true}, "one way"},
+		{"timeout with a length", Fault{Kind: FaultTimeout, AfterHead: true, ContentLength: 20}, "only kind stopped_reading"},
+		{"truncate chunked", Fault{Kind: FaultTruncate, BodyBytes: 5, Chunked: true}, "only kind stopped_reading"},
+		{"reset with a length", Fault{Kind: FaultReset, AfterHead: true, ContentLength: 20}, "only kind stopped_reading"},
+		{"eof chunked", Fault{Kind: FaultEOF, Chunked: true}, "only kind stopped_reading"},
+		{"delay with a length", Fault{Kind: FaultDelay, Delay: time.Second, ContentLength: 20}, "a delay sends the whole answer"},
+		{"delay chunked", Fault{Kind: FaultDelay, Delay: time.Second, Chunked: true}, "a delay sends the whole answer"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.f.Validate()

@@ -38,15 +38,21 @@ import (
 // it never ended. A whole response is served as before, with its length, and
 // the connection's next request is answered.
 func TestDecodeHTTPServesAnAnswerTheAppStoppedReadingWithoutItsEnd(t *testing.T) {
+	const charge = `{"id":"ch_1","status":"pending"}`
 	for _, row := range []struct {
 		name   string
 		header map[string]string
 		body   string
 		held   bool
+		// sent is how the upstream framed the body at record, kept on the
+		// fault.
+		sent sentAs
 		// http10: the call and its recording are HTTP/1.0.
 		http10 bool
-		// chunked: served chunked; else held, it is ended only by the
-		// connection's close, and whole, by its length.
+		// length is the Content-Length served, 0 for none; chunked: served
+		// chunked. Neither: held, the body is ended only by the
+		// connection's close.
+		length  int64
 		chunked bool
 		// json: the app decodes the body's JSON and closes, as a Go
 		// http.Client with keep-alives off does on Body.Close; else it
@@ -54,18 +60,32 @@ func TestDecodeHTTPServesAnAnswerTheAppStoppedReadingWithoutItsEnd(t *testing.T)
 		// timeout, and closes.
 		json bool
 	}{
-		{name: "an answer the app decoded the JSON of", header: map[string]string{"Content-Type": "application/json", "Content-Length": "32"},
-			body: `{"id":"ch_1","status":"pending"}`, held: true, chunked: true, json: true},
-		{name: "an event stream the app abandoned", header: map[string]string{"Content-Type": "text/event-stream", "Content-Length": "18"},
-			body: "data: 1\n\ndata: 2\n\n", held: true, chunked: true},
-		{name: "an answer the app read none of the body of", header: map[string]string{"Content-Length": "0"}, held: true, chunked: true},
-		{name: "an HTTP/1.0 answer", header: map[string]string{"Content-Type": "text/plain", "Content-Length": "10"}, body: "0123456789", held: true, http10: true},
-		// A mock file can carry a head its recorder never writes: its
-		// framing headers are not served for an answer the app stopped
-		// reading.
+		{name: "a chunked answer the app decoded the JSON of", header: map[string]string{"Content-Type": "application/json", "Content-Length": "32"},
+			body: charge, held: true, sent: sentChunked, chunked: true, json: true},
+		{name: "an answer with a length the app decoded the JSON of", header: map[string]string{"Content-Type": "application/json", "Content-Length": "32"},
+			body: charge, held: true, sent: sentAs{length: 200}, length: 200, json: true},
+		{name: "a chunked event stream the app abandoned", header: map[string]string{"Content-Type": "text/event-stream", "Content-Length": "18"},
+			body: "data: 1\n\ndata: 2\n\n", held: true, sent: sentChunked, chunked: true},
+		{name: "an event stream its upstream's close was to end, the app abandoned", header: map[string]string{"Content-Type": "text/event-stream", "Content-Length": "18"},
+			body: "data: 1\n\ndata: 2\n\n", held: true, sent: sentByClose},
+		{name: "a chunked answer the app read none of the body of", header: map[string]string{"Content-Length": "0"}, held: true, sent: sentChunked, chunked: true},
+		{name: "an answer with a length the app read none of the body of", header: map[string]string{"Content-Length": "0"}, held: true, sent: sentAs{length: 50}, length: 50},
+		{name: "an HTTP/1.0 answer with a length", header: map[string]string{"Content-Type": "text/plain", "Content-Length": "10"}, body: "0123456789",
+			held: true, sent: sentAs{length: 100}, http10: true, length: 100},
+		// A mock file can carry what its recorder never writes: a chunked
+		// HTTP/1.0 answer, which HTTP/1.0 has no chunks for, and goes
+		// framed by the close; a length the body served reaches, which
+		// would end it, and it goes chunked; a head with framing headers of
+		// its own, which the fault's framing replaces.
+		{name: "an HTTP/1.0 answer sent chunked", header: map[string]string{"Content-Type": "text/plain", "Content-Length": "10"}, body: "0123456789",
+			held: true, sent: sentChunked, http10: true},
+		{name: "a length the body served reaches", header: map[string]string{"Content-Type": "text/plain", "Content-Length": "10"}, body: "0123456789",
+			held: true, sent: sentAs{length: 10}, chunked: true},
 		{name: "an answer with a Content-Length not its body's and Transfer-Encoding", header: map[string]string{"Content-Type": "text/plain", "Content-Length": "2000", "Transfer-Encoding": "chunked"},
-			body: "0123456789", held: true, chunked: true},
-		{name: "a whole answer", header: map[string]string{"Content-Type": "application/json", "Content-Length": "32"}, body: `{"id":"ch_1","status":"pending"}`, json: true},
+			body: "0123456789", held: true, sent: sentChunked, chunked: true},
+		{name: "an answer with Transfer-Encoding, sent with a length", header: map[string]string{"Content-Type": "text/plain", "Content-Length": "2000", "Transfer-Encoding": "chunked"},
+			body: "0123456789", held: true, sent: sentAs{length: 300}, length: 300},
+		{name: "a whole answer", header: map[string]string{"Content-Type": "application/json", "Content-Length": "32"}, body: charge, json: true},
 	} {
 		request := "POST /v1/charges HTTP/1.1\r\nHost: api.example\r\nContent-Length: 0\r\n\r\n"
 		minor := 1
@@ -81,7 +101,7 @@ func TestDecodeHTTPServesAnAnswerTheAppStoppedReadingWithoutItsEnd(t *testing.T)
 					m := recorded(name, "/v1/charges", nil, "")
 					m.Spec.HTTPReq.ProtoMajor, m.Spec.HTTPReq.ProtoMinor = 1, minor
 					m.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Header: row.header, Body: row.body}
-					m.Spec.Fault = stoppedReadingIf(row.held, len(row.body))
+					m.Spec.Fault = stoppedReadingIf(row.held, len(row.body), row.sent)
 					if pooled {
 						m.MarkPooled()
 					}
@@ -127,8 +147,12 @@ func TestDecodeHTTPServesAnAnswerTheAppStoppedReadingWithoutItsEnd(t *testing.T)
 					}
 					return
 				}
-				if resp.ContentLength != -1 {
-					t.Fatalf("served with a length of %d, which ends the answer the app never saw the end of", resp.ContentLength)
+				wantLength := int64(-1)
+				if row.length != 0 {
+					wantLength = row.length
+				}
+				if resp.ContentLength != wantLength {
+					t.Fatalf("served with a length of %d, want %d: the length the upstream sent, which the body served does not reach, or none", resp.ContentLength, wantLength)
 				}
 				if row.json {
 					var v map[string]any
@@ -275,7 +299,7 @@ func TestDecodeHTTPServesAnAnswerTheAppStoppedReadingWithNoBodyWhole(t *testing.
 					m.Spec.HTTPReq.Header = map[string]string{"Host": "api.example"}
 					m.Spec.HTTPReq.ProtoMajor, m.Spec.HTTPReq.ProtoMinor = 1, 1
 					m.Spec.HTTPResp = &models.HTTPResp{StatusCode: row.status, Header: row.header}
-					m.Spec.Fault = stoppedReadingIf(true, 0)
+					m.Spec.Fault = stoppedReadingIf(true, 0, sentAs{length: row.length})
 					if pooled {
 						m.MarkPooled()
 					}
@@ -343,7 +367,7 @@ func TestTheAsyncLaneServesAnAnswerTheAppStoppedReadingOpen(t *testing.T) {
 				e.Load([]*models.Mock{{Name: "w-1", Kind: models.HTTP, Spec: models.MockSpec{
 					HTTPReq:  &models.HTTPReq{Method: "GET", URL: "http://cfg.local/w", ProtoMajor: 1, ProtoMinor: 1},
 					HTTPResp: answer(),
-					Fault:    stoppedReadingIf(true, len(body)),
+					Fault:    stoppedReadingIf(true, len(body), sentChunked),
 					Async:    &models.AsyncMeta{Lane: "w", Seq: 1},
 				}}})
 				h.SetAsyncEngine(e)
@@ -412,19 +436,24 @@ func TestTheAsyncLaneServesAnAnswerTheAppStoppedReadingOpen(t *testing.T) {
 // wantStoppedReading fails t unless m is an exchange recorded as far as the
 // app read it (models.FaultStoppedReading): a 200 with body, a whole
 // answer's head (the Content-Length of the body the app read, no
-// Transfer-Encoding), no note of digests to recompute at replay (the app never
-// had the body's end, so it checked no digest, and its digest headers are
-// served as it saw them), and an answer whose body, served from it as the
-// mock file gives it back, has no end: its last chunk never comes. Given back
-// by a reader of the mock file that drops the fault (an older keploy's codec,
-// writing the mock back), it is served whole, with its length.
-func wantStoppedReading(t *testing.T, m *models.Mock, body string) {
+// Transfer-Encoding), the fault keeping the framing the upstream sent the body
+// with (sent), no note of digests to recompute at replay (the app never had
+// the body's end, so it checked no digest, and its digest headers are served
+// as it saw them), and an answer whose body, served from it as the mock file
+// gives it back, is framed as the upstream sent it and has no end: short of
+// its Content-Length, or its last chunk never coming; a body framed by the
+// close ends only by the close the replay never sends, here the end of the
+// bytes served. Given back by a reader of the mock file that drops the fault
+// (an older keploy's codec, writing the mock back), it is served whole, with
+// its length.
+func wantStoppedReading(t *testing.T, m *models.Mock, body string, sent sentAs) {
 	t.Helper()
 	got, f := m.Spec.HTTPResp, m.Spec.Fault
 	if got == nil || got.StatusCode != 200 || got.Body != body {
 		t.Fatalf("recorded %+v, want a 200 with the body %q the app read", got, body)
 	}
 	want := models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: int64(len(body)),
+		ContentLength: sent.length, Chunked: sent.chunked,
 		Observed: "the application stopped reading partway through the answer and closed the connection"}
 	if f == nil || *f != want {
 		t.Fatalf("recorded the fault %+v, want %+v", f, want)
@@ -451,8 +480,16 @@ func wantStoppedReading(t *testing.T, m *models.Mock, body string) {
 	read := *m
 	read.Spec.HTTPResp, read.Spec.Fault = &spec.Response, spec.Fault
 	resp, served, err := serveFrom(t, &read)
-	if string(served) != body || resp.ContentLength != -1 || !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("served %q with a length of %d, ending with %v; want %q, with no length and no end", served, resp.ContentLength, err, body)
+	wantLength, wantEnd := int64(-1), io.ErrUnexpectedEOF
+	if sent.length > 0 {
+		wantLength = sent.length
+	} else if !sent.chunked {
+		wantEnd = nil
+	}
+	if chunked := len(resp.TransferEncoding) == 1 && resp.TransferEncoding[0] == "chunked"; string(served) != body ||
+		resp.ContentLength != wantLength || chunked != sent.chunked || !errors.Is(err, wantEnd) {
+		t.Fatalf("served %q with a length of %d, chunked %v, ending with %v; want %q, with a length of %d, chunked %v, ending with %v",
+			served, resp.ContentLength, chunked, err, body, wantLength, sent.chunked, wantEnd)
 	}
 	// The mock file as a reader that drops the fault gives it back (an older
 	// codec writing the mock again): the spec's key gone, the file read again.
@@ -479,13 +516,26 @@ func wantStoppedReading(t *testing.T, m *models.Mock, body string) {
 	}
 }
 
+// sentAs is how the upstream framed an answer's body at record: by its
+// Content-Length (length), chunked, or, with neither, by its close.
+type sentAs struct {
+	length  int64
+	chunked bool
+}
+
+var (
+	sentChunked = sentAs{chunked: true}
+	sentByClose = sentAs{}
+)
+
 // stoppedReadingIf is the fault of an answer the app stopped reading after n
-// bytes of its body, when stopped, else nil.
-func stoppedReadingIf(stopped bool, n int) *models.Fault {
+// bytes of its body, its upstream having framed it as sent, when stopped,
+// else nil.
+func stoppedReadingIf(stopped bool, n int, sent sentAs) *models.Fault {
 	if !stopped {
 		return nil
 	}
-	return &models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: int64(n)}
+	return &models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: int64(n), ContentLength: sent.length, Chunked: sent.chunked}
 }
 
 // wireConn takes what is written to it, and reads as a connection the app
@@ -609,9 +659,18 @@ func TestDecodeHTTPServesACompressedAnswerTheAppStoppedReadingWithNoStreamEnd(t 
 			name   string
 			header map[string]string
 			held   bool
+			// sent is how the upstream framed the body; length, chunked:
+			// how it is served (length 0: none). A length the compressed
+			// body served reaches would end it: it goes chunked.
+			sent    sentAs
+			length  int64
+			chunked bool
 		}{
-			{"held", map[string]string{"Content-Type": "text/event-stream", "Content-Length": "18"}, true},
-			{"whole", map[string]string{"Content-Type": "text/plain", "Content-Length": "18"}, false},
+			{"held, sent chunked", map[string]string{"Content-Type": "text/event-stream", "Content-Length": "18"}, true, sentChunked, 0, true},
+			{"held, sent with a length", map[string]string{"Content-Type": "text/event-stream", "Content-Length": "18"}, true, sentAs{length: 1000}, 1000, false},
+			{"held, sent with a length the body served reaches", map[string]string{"Content-Type": "text/event-stream", "Content-Length": "18"}, true, sentAs{length: 5}, 0, true},
+			{"held, its upstream's close to end it", map[string]string{"Content-Type": "text/event-stream", "Content-Length": "18"}, true, sentByClose, 0, false},
+			{"whole", map[string]string{"Content-Type": "text/plain", "Content-Length": "18"}, false, sentAs{}, 0, false},
 		} {
 			for _, codec := range codecs {
 				for _, proven := range []string{"", "1"} {
@@ -622,12 +681,13 @@ func TestDecodeHTTPServesACompressedAnswerTheAppStoppedReadingWithNoStreamEnd(t 
 							header[k] = v
 						}
 						body := enc.body(!row.held)
-						resp, fault, err := codec.back(models.HTTPResp{StatusCode: 200, Header: header, Body: body}, stoppedReadingIf(row.held, len(body)))
+						atRecord := stoppedReadingIf(row.held, len(body), row.sent)
+						resp, fault, err := codec.back(models.HTTPResp{StatusCode: 200, Header: header, Body: body}, atRecord)
 						if err != nil {
 							t.Fatal(err)
 						}
-						if (fault != nil) != row.held || resp.Body != body {
-							t.Fatalf("the %s round trip gave back the fault %s and a body of %d bytes, want stopped reading %v and %d", codec.name, fault, len(resp.Body), row.held, len(body))
+						if (fault != nil) != row.held || fault != nil && *fault != *atRecord || resp.Body != body {
+							t.Fatalf("the %s round trip gave back the fault %+v and a body of %d bytes, want %+v and %d", codec.name, fault, len(resp.Body), atRecord, len(body))
 						}
 						var mocks []*models.Mock
 						for _, name := range []string{"events-1", "events-2"} {
@@ -648,6 +708,15 @@ func TestDecodeHTTPServesACompressedAnswerTheAppStoppedReadingWithNoStreamEnd(t 
 						served, err := http.ReadResponse(bufio.NewReader(app), nil)
 						if err != nil || served.StatusCode != 200 {
 							t.Fatalf("the call was answered %v (%v), want the recorded 200", served, err)
+						}
+						if row.held {
+							wantLength := int64(-1)
+							if row.length != 0 {
+								wantLength = row.length
+							}
+							if chunked := len(served.TransferEncoding) == 1 && served.TransferEncoding[0] == "chunked"; served.ContentLength != wantLength || chunked != row.chunked {
+								t.Fatalf("served with a length of %d, chunked %v; want %d, chunked %v", served.ContentLength, chunked, wantLength, row.chunked)
+							}
 						}
 						var wire bytes.Buffer
 						dec, err := enc.decode(io.TeeReader(served.Body, &wire))
@@ -707,24 +776,42 @@ func wantStreamEnd(t *testing.T, decode func(io.Reader) (io.Reader, error), serv
 	}
 }
 
-// A held answer's bytes on the wire: its head with no Content-Length, then its
-// body as one chunk, `<size in hex>\r\n<body>\r\n`, and nothing after it, no
-// last chunk, until the app closes. Over HTTP/1.0, which has no chunks, the
-// body as it is, with no close after it. An answer the app read none of the
-// body of is its head alone. The mock's head is a whole answer's, as the
-// recorder writes it: the fault alone frames the answer.
-func TestAHeldAnswerGoesOutAsOneChunkAndNothingAfterIt(t *testing.T) {
+// A held answer's bytes on the wire: its head framed as the upstream sent it,
+// then its body, without its end, and nothing after it until the app closes.
+// Sent chunked, the body goes as one chunk, `<size in hex>\r\n<body>\r\n`,
+// with no last chunk; sent with a length, under that length, which it does not
+// reach; framed by the upstream's close, as it is, with no close after it.
+// Over HTTP/1.0, which has no chunks, a chunked body goes as one framed by
+// the close; and a length the body reaches, which would end it, is not sent:
+// the body goes chunked. An answer the app read none of the body of is its
+// head alone. The mock's head is a whole answer's, as the recorder writes it:
+// the fault alone frames the answer.
+func TestAHeldAnswerGoesOutFramedAsSentAndNothingAfterIt(t *testing.T) {
+	const events = "data: 1\n\ndata: 2\n\n"
 	for _, row := range []struct {
 		name  string
 		minor int
 		body  string
+		sent  sentAs
 		want  string
 	}{
-		{"a body", 1, "data: 1\n\ndata: 2\n\n",
-			"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n12\r\ndata: 1\n\ndata: 2\n\n\r\n"},
-		{"no body", 1, "", "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"},
-		{"a body over HTTP/1.0", 0, "data: 1\n\ndata: 2\n\n",
-			"HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: 1\n\ndata: 2\n\n"},
+		{"a body sent chunked", 1, events, sentChunked,
+			"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n12\r\n" + events + "\r\n"},
+		{"no body, sent chunked", 1, "", sentChunked, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"},
+		{"a body sent with a length", 1, events, sentAs{length: 1000},
+			"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nContent-Type: text/event-stream\r\n\r\n" + events},
+		{"no body, sent with a length", 1, "", sentAs{length: 1000},
+			"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nContent-Type: text/event-stream\r\n\r\n"},
+		{"a body its upstream's close was to end", 1, events, sentByClose,
+			"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n" + events},
+		{"a body sent with a length it reaches", 1, events, sentAs{length: 18},
+			"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n12\r\n" + events + "\r\n"},
+		{"a body over HTTP/1.0 sent chunked", 0, events, sentChunked,
+			"HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n\r\n" + events},
+		{"a body over HTTP/1.0 sent with a length", 0, events, sentAs{length: 1000},
+			"HTTP/1.0 200 OK\r\nContent-Length: 1000\r\nContent-Type: text/event-stream\r\n\r\n" + events},
+		{"a body over HTTP/1.0 sent with a length it reaches", 0, events, sentAs{length: 18},
+			"HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n\r\n" + events},
 	} {
 		for _, way := range servedWays {
 			proven, pooled := way.proven, way.pooled
@@ -734,7 +821,7 @@ func TestAHeldAnswerGoesOutAsOneChunkAndNothingAfterIt(t *testing.T) {
 				m.Spec.HTTPReq.ProtoMajor, m.Spec.HTTPReq.ProtoMinor = 1, row.minor
 				m.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: row.body,
 					Header: map[string]string{"Content-Type": "text/event-stream", "Content-Length": strconv.Itoa(len(row.body))}}
-				m.Spec.Fault = stoppedReadingIf(true, len(row.body))
+				m.Spec.Fault = stoppedReadingIf(true, len(row.body), row.sent)
 				if pooled {
 					m.MarkPooled()
 				}

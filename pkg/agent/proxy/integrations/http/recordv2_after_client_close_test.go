@@ -291,7 +291,12 @@ func TestRecordV2_ThroughTheRelayAResponseTheClientClosedPartwayIsRecordedAsFarA
 								t.Fatalf("the 304 is recorded with the fault %s, want it whole: its head is all of it", f)
 							}
 						} else {
-							wantStoppedReading(t, mocks[0], body[:500])
+							// A row's own head is one the server's close ends.
+							sent := sentAs{length: 2000}
+							if row.head != "" {
+								sent = sentByClose
+							}
+							wantStoppedReading(t, mocks[0], body[:500], sent)
 						}
 						if s := c.spans.all(); len(s) != 0 || c.mgr.MocksLeftOut() != 0 {
 							t.Fatalf("left out %v (%d counted), want nothing", s, c.mgr.MocksLeftOut())
@@ -421,6 +426,12 @@ func TestRecordV2_ThroughTheRelayAGzipBodyTheClientStoppedReadingIsDecodedAsFarA
 			}
 			if cl := got.Header["Content-Length"]; cl != strconv.Itoa(len(got.Body)) {
 				t.Fatalf("recorded with a Content-Length of %q, want a whole answer's head: the %d bytes of body the app decoded", cl, len(got.Body))
+			}
+			// Replay serves the body decoded, compressed again: the fault
+			// counts the bytes it serves, not the compressed ones the app
+			// read; and the upstream's close was to end the body.
+			if f := mocks[0].Spec.Fault; f.BodyBytes != int64(len(got.Body)) || f.ContentLength != 0 || f.Chunked {
+				t.Fatalf("recorded the fault %+v, want %d body bytes (the body decoded), framed by the close", f, len(got.Body))
 			}
 		})
 	}

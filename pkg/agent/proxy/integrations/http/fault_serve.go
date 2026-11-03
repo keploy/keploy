@@ -212,7 +212,7 @@ func (h *HTTP) serveStoppedReading(ctx context.Context, clientConn net.Conn, stu
 	read := func(header http.Header, body string) (http.Header, string) {
 		return header, body[:fault.BodyBytes]
 	}
-	answer, err := h.encodeAnswer(loaded, read, true)
+	answer, err := h.encodeAnswer(loaded, read, fault)
 	if err != nil {
 		return true, err
 	}

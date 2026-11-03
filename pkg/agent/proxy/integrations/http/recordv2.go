@@ -925,7 +925,8 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			// The app stopped reading partway (partAnswerFault): its body is
 			// recorded as far as it read it, decoded, under a whole answer's
 			// head (the Content-Length set below), with the fault, which
-			// replay frames without the end (serveFault). Cut short of its
+			// keeps the upstream's framing of the body, and replay sends it
+			// so, without the end (serveFault). Cut short of its
 			// framing, or after its last chunk (in the trailer section, which
 			// net/http reads to its own error: it has all of its content), or
 			// close-delimited (a close is its end, which the app never saw),
@@ -935,6 +936,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			if errors.Is(err, io.ErrUnexpectedEOF) || err != nil && lastChunkRead(m.Resp) ||
 				err == nil && closeDelimited(respParsed, req.Method) {
 				f := *m.Fault
+				f.ContentLength, f.Chunked = max(respParsed.ContentLength, 0), len(respParsed.TransferEncoding) > 0
 				fault, cut, err = &f, true, nil
 			}
 		} else if m.Fault != nil && (errors.Is(err, io.ErrUnexpectedEOF) ||
@@ -981,8 +983,10 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
 		}
 		// The app read the head and this much of the body (decoded), the
-		// bytes replay sends before it holds the connection.
-		if fault != nil && fault.Kind == models.FaultStoppedReading {
+		// bytes replay sends before it holds the connection. A fault set by
+		// now is the stopped_reading one above: one before the head has no
+		// body to read.
+		if fault != nil {
 			fault.BodyBytes = int64(len(respBody))
 		}
 	}

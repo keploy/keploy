@@ -136,7 +136,7 @@ func TestRecordV2_ThroughTheRelayAChunkedResponseWhoseLastChunkTheClientDidNotTa
 					if len(mocks) != 1 {
 						t.Fatalf("recorded %d mocks, want the one exchange, as far as the client read it", len(mocks))
 					}
-					wantStoppedReading(t, mocks[0], row.body)
+					wantStoppedReading(t, mocks[0], row.body, sentChunked)
 					if s := c.spans.all(); len(s) != 0 || c.mgr.MocksLeftOut() != 0 {
 						t.Fatalf("left out %v (%d counted), want nothing", s, c.mgr.MocksLeftOut())
 					}

@@ -32,6 +32,8 @@ func TestAFaultRoundTrips(t *testing.T) {
 		{Kind: models.FaultReset, AfterHead: true, BodyBytes: 3},
 		{Kind: models.FaultDelay, Delay: 1500 * time.Millisecond},
 		{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: 5, Observed: "the application stopped reading partway through the answer and closed the connection"},
+		{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: 5, ContentLength: 20},
+		{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: 5, Chunked: true},
 	} {
 		m := variablesMock()
 		f := want
@@ -146,11 +148,11 @@ func TestAStreamTheAppStoppedReadingRoundTripsByteForByte(t *testing.T) {
 		_ = enc.Close()
 		return buf.String()
 	}
-	want := models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: int64(len(body)),
+	want := models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: int64(len(body)), Chunked: true,
 		Observed: "the application stopped reading partway through the answer and closed the connection"}
 	f := want
 	text := write(stream(&f))
-	if !strings.Contains(text, "kind: HttpFault\n") || !strings.Contains(text, "        kind: stopped_reading\n") || strings.Contains(text, "- data:\n") {
+	if !strings.Contains(text, "kind: HttpFault\n") || !strings.Contains(text, "        kind: stopped_reading\n") || !strings.Contains(text, "        chunked: true\n") || strings.Contains(text, "- data:\n") {
 		t.Fatalf("not written as an HttpFault mock with its stopped_reading fault:\n%s", text)
 	}
 	var back yaml.NetworkTrafficDoc
