@@ -345,6 +345,30 @@ func TestAWorkerClaimFailsAGoneTestProcesssOpenTest(t *testing.T) {
 	require.Contains(t, w.Evidence.Reason, "the test process exited while the test was open")
 }
 
+// The gone single test process's test is closed AT the worker's claim,
+// before the worker's first test begins, not at the run's final read. A
+// window of no worker (instance 0) left open across the worker's tests
+// would take every call from no worker made during them (record's
+// chargeUnattributed reads such a call as that window's), so the call would
+// not be charged call_unattributed to the worker's open test, and the test
+// could pass on calls no worker of the run made.
+func TestAGoneTestProcesssWindowEndsAtTheWorkersClaim(t *testing.T) {
+	a, _ := workerAgent(t, models.MODE_RECORD, 4)
+	gone := child(t)
+	claimWorker(t, a, gone.Process.Pid, "s", 1)
+	_, serr := a.ProvenBegin(as(gone.Process.Pid), begin("TestCrash"))
+	require.Nil(t, serr)
+	kill(t, gone)
+	require.Equal(t, "1", claimWorker(t, a, os.Getpid(), "a", 2))
+	_, serr = a.ProvenBegin(as(os.Getpid()), begin("TestNext"))
+	require.Nil(t, serr)
+	crash, next := windowOf(t, a, "s::TestCrash"), windowOf(t, a, "a::TestNext")
+	require.Zero(t, crash.Instance)
+	require.Equal(t, uint32(1), next.Instance)
+	require.False(t, crash.End.After(next.Start),
+		"the gone process's window ends at the claim (%v), not after the worker's test began (%v)", crash.End, next.Start)
+}
+
 // In a run of workers, a test is the worker's whose process sent its begin:
 // named by that worker's key. A process that is no worker is refused, and
 // so is a begin whose caller keploy cannot read.
