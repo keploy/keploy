@@ -1,0 +1,579 @@
+package proxy
+
+import (
+	"net"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/miekg/dns"
+	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/netnames"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+)
+
+// The resolver's negative answers are answers. A name that does not exist
+// (NXDOMAIN) or has no record of the asked type (NODATA: NOERROR with no
+// answer) is what the app saw while recording, with the SOA whose TTL tells
+// its resolver how long to keep that verdict. A replay is isolated from the
+// real network, so an answer the recording does not hold is a mock miss, and
+// the app is steered at the proxy instead of getting the answer it got live.
+//
+// The case that showed it: an app whose /etc/hosts gives its host name an IPv4
+// address only asks the resolver for AAAA of that name at each request. Each
+// answer is NXDOMAIN, and none was recorded, so every one of them was a miss
+// at replay, inside tests too.
+
+// The SOA a recursive resolver returns with a negative answer for a name under
+// a TLD that does not exist (.test), its TTL as the resolver counted it down.
+const negativeRootSOA = ". 86367 IN SOA a.root-servers.net. nstld.verisign-grs.com. 2026110300 1800 900 604800 86400"
+
+// The SOA of a zone that holds the name but no record of the asked type.
+const negativeZoneSOA = "example.com. 3600 IN SOA ns.icann.org. noc.dns.icann.org. 2026110301 7200 3600 1209600 3600"
+
+// negativeUpstream starts a resolver that answers every question with rcode,
+// no answer, and ns as its authority section, standing in for the real
+// resolver while keploy records.
+func negativeUpstream(t *testing.T, rcode int, ns ...string) (host, port string) {
+	t.Helper()
+	var authority []dns.RR
+	for _, s := range ns {
+		rr, err := dns.NewRR(s)
+		if err != nil {
+			t.Fatalf("parse %q: %v", s, err)
+		}
+		authority = append(authority, rr)
+	}
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetRcode(r, rcode)
+		m.RecursionAvailable = true
+		// A sentinel question (below) is answered: it orders the mock stream.
+		if len(r.Question) == 1 && r.Question[0].Name == sentinelName {
+			m.SetRcode(r, dns.RcodeSuccess)
+			m.Answer = []dns.RR{&dns.A{
+				Hdr: dns.RR_Header{Name: sentinelName, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+				A:   net.ParseIP("10.0.0.9"),
+			}}
+		} else {
+			m.Ns = authority
+		}
+		_ = w.WriteMsg(m)
+	})
+	t.Cleanup(stop)
+	h, p, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split %q: %v", addr, err)
+	}
+	return h, p
+}
+
+const sentinelName = "sentinel.keploy.test."
+
+// recordQuestions records qs through keploy's DNS server against the resolver
+// at host:port, then records the sentinel, and returns every DNS mock the
+// recording emitted before the sentinel's, with the answers the app got.
+//
+// A DNS mock reaches the session's channel before recordDNSMock returns while
+// the channel has room (SyncMockManager.sendFor's direct send), so the drain
+// below reads all of them without a wait. The sentinel, a NOERROR answer,
+// holds that: if its mock is not there, the stream did not deliver in order
+// and the row fails rather than read "no mock" from a stream it did not see.
+func recordQuestions(t *testing.T, host, port string, qs ...dns.Question) ([]*models.Mock, []dnsCacheEntry) {
+	t.Helper()
+	mc := make(chan *models.Mock, 64)
+	t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+	p := &Proxy{
+		logger:             zap.NewNop(),
+		dnsUpstreamServers: []string{host},
+		dnsUpstreamPort:    port,
+		recordedDNSMocks:   newRecordedDNSMocksCache(),
+	}
+	session := &agent.Session{Mode: models.MODE_RECORD, MC: mc}
+
+	var answers []dnsCacheEntry
+	for _, q := range qs {
+		answers = append(answers, p.resolveUncachedDNSResponse(q, models.MODE_RECORD, true, time.Now(), session))
+	}
+	p.resolveUncachedDNSResponse(dns.Question{Name: sentinelName, Qtype: dns.TypeA, Qclass: dns.ClassINET},
+		models.MODE_RECORD, true, time.Now(), session)
+
+	var mocks []*models.Mock
+	for {
+		select {
+		case m := <-mc:
+			if m.Kind == models.DNS && m.Spec.DNSReq != nil && m.Spec.DNSReq.Name == sentinelName {
+				return mocks, answers
+			}
+			mocks = append(mocks, m)
+		default:
+			t.Fatalf("the sentinel's NOERROR answer was not recorded; %d mock(s) came before the stream ended", len(mocks))
+			return nil, nil
+		}
+	}
+}
+
+// replayIsolated answers q as an isolated replay does, from mocks alone: it
+// has no resolver to forward a miss to. It returns the answer and the miss
+// reports the question raised.
+func replayIsolated(t *testing.T, mocks []*models.Mock, q dns.Question) (dnsCacheEntry, []models.MockMismatchReport) {
+	t.Helper()
+	mgr := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mgr.Close)
+	mgr.SetFilteredMocks(mocks)
+	p := &Proxy{
+		logger:      zap.NewNop(),
+		errChannel:  make(chan error, 4),
+		IP4:         "127.0.0.1",
+		IP6:         "::1",
+		mockManager: mgr,
+	}
+	got := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+	return got, collectMockMissReports(t, p)
+}
+
+func rrStrings(rrs []dns.RR) []string {
+	var out []string
+	for _, rr := range rrs {
+		out = append(out, rr.String())
+	}
+	return out
+}
+
+// Each negative answer the resolver gives is recorded once, with its rcode and
+// its authority section as given, and an isolated replay serves it back: the
+// same rcode, the same SOA with the same TTL, no answer, and no miss.
+func TestANegativeAnswerIsRecordedAndServedAtReplay(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		rcode int
+		ns    []string
+		q     dns.Question
+	}{
+		{
+			// The Frappe shape: crm.test is in /etc/hosts as IPv4 only.
+			name:  "NXDOMAIN with the root SOA, AAAA of a v4-only host",
+			rcode: dns.RcodeNameError,
+			ns:    []string{negativeRootSOA},
+			q:     dns.Question{Name: "crm.test.", Qtype: dns.TypeAAAA, Qclass: dns.ClassINET},
+		},
+		{
+			name:  "NXDOMAIN with no authority section",
+			rcode: dns.RcodeNameError,
+			q:     dns.Question{Name: "nosuch.internal.", Qtype: dns.TypeA, Qclass: dns.ClassINET},
+		},
+		{
+			name:  "NODATA with the zone's SOA",
+			rcode: dns.RcodeSuccess,
+			ns:    []string{negativeZoneSOA},
+			q:     dns.Question{Name: "example.com.", Qtype: dns.TypeAAAA, Qclass: dns.ClassINET},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, port := negativeUpstream(t, tc.rcode, tc.ns...)
+			// Asked twice, as an app asks at each request: one mock.
+			mocks, answers := recordQuestions(t, host, port, tc.q, tc.q)
+
+			for i, a := range answers {
+				if a.Msg == nil || a.Rcode != tc.rcode {
+					t.Fatalf("record answer %d to the app = %+v, want the resolver's rcode %s", i, a.Msg, dns.RcodeToString[tc.rcode])
+				}
+			}
+			if len(mocks) != 1 {
+				t.Fatalf("recorded %d DNS mocks for %s %s, want 1: %+v", len(mocks), dns.TypeToString[tc.q.Qtype], tc.q.Name, mocks)
+			}
+			m := mocks[0]
+			if m.Kind != models.DNS || m.Spec.DNSReq == nil || m.Spec.DNSResp == nil {
+				t.Fatalf("recorded mock is not a DNS mock: %+v", m)
+			}
+			if !dnsRequestMatches(m.Spec.DNSReq, tc.q) {
+				t.Fatalf("recorded question %+v, want %+v", *m.Spec.DNSReq, tc.q)
+			}
+			if got := m.Spec.DNSResp.Rcode; got != tc.rcode {
+				t.Fatalf("recorded rcode %s, want %s", dns.RcodeToString[got], dns.RcodeToString[tc.rcode])
+			}
+			if len(m.Spec.DNSResp.Answers) != 0 {
+				t.Fatalf("recorded answers %q for a negative answer", m.Spec.DNSResp.Answers)
+			}
+			if !equalStrings(m.Spec.DNSResp.Ns, rrStringsOf(t, tc.ns)) {
+				t.Fatalf("recorded authority %q, want the resolver's %q", m.Spec.DNSResp.Ns, tc.ns)
+			}
+
+			got, misses := replayIsolated(t, mocks, tc.q)
+			if len(misses) != 0 {
+				t.Fatalf("replay reported %d miss(es) for a recorded answer: %+v", len(misses), misses)
+			}
+			if got.Msg == nil || got.Rcode != tc.rcode {
+				t.Fatalf("replay answered %+v, want the recorded rcode %s", got.Msg, dns.RcodeToString[tc.rcode])
+			}
+			if len(got.Answer) != 0 {
+				t.Fatalf("replay answered %q, want no answer as recorded", rrStrings(got.Answer))
+			}
+			if !equalStrings(rrStrings(got.Ns), rrStringsOf(t, tc.ns)) {
+				t.Fatalf("replay authority %q, want the recorded %q", rrStrings(got.Ns), tc.ns)
+			}
+		})
+	}
+}
+
+// A resolver that could not or would not answer says nothing about the name:
+// SERVFAIL, REFUSED, NOTIMP and FORMERR are not recorded, so a replay never
+// serves a failure that was the resolver's at one moment.
+func TestAResolverFailureIsNotRecorded(t *testing.T) {
+	for _, rcode := range []int{dns.RcodeServerFailure, dns.RcodeRefused, dns.RcodeNotImplemented, dns.RcodeFormatError} {
+		t.Run(dns.RcodeToString[rcode], func(t *testing.T) {
+			host, port := negativeUpstream(t, rcode)
+			q := dns.Question{Name: "flaky.example.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+			mocks, answers := recordQuestions(t, host, port, q)
+			if a := answers[0]; a.Msg == nil || a.Rcode != rcode {
+				t.Fatalf("record answer to the app = %+v, want the resolver's %s", a.Msg, dns.RcodeToString[rcode])
+			}
+			if len(mocks) != 0 {
+				t.Fatalf("recorded %d mock(s) for a %s, want none: %+v", len(mocks), dns.RcodeToString[rcode], mocks[0].Spec.DNSResp)
+			}
+		})
+	}
+}
+
+// rrStringsOf is ns as keploy writes a record: miekg/dns's presentation form.
+func rrStringsOf(t *testing.T, ns []string) []string {
+	t.Helper()
+	var out []string
+	for _, s := range ns {
+		rr, err := dns.NewRR(s)
+		if err != nil {
+			t.Fatalf("parse %q: %v", s, err)
+		}
+		out = append(out, rr.String())
+	}
+	return out
+}
+
+// answerA is a resolved answer to q: one A record.
+func answerA(q dns.Question, ip string) []string {
+	return []string{(&dns.A{
+		Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+		A:   net.ParseIP(ip),
+	}).String()}
+}
+
+// sequenceUpstream answers the n-th question that is not the sentinel with
+// steps[n] (the last step from then on), standing in for a resolver whose
+// answer for a name changes during the recording.
+type answerStep struct {
+	rcode   int
+	answers []string
+	ns      []string
+}
+
+func sequenceUpstream(t *testing.T, steps ...answerStep) (host, port string) {
+	t.Helper()
+	parse := func(ss []string) []dns.RR {
+		var out []dns.RR
+		for _, s := range ss {
+			rr, err := dns.NewRR(s)
+			if err != nil {
+				t.Errorf("parse %q: %v", s, err)
+				continue
+			}
+			out = append(out, rr)
+		}
+		return out
+	}
+	var n atomic.Int32 // the handler runs on the server's goroutines
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		switch {
+		case len(r.Question) == 1 && r.Question[0].Name == sentinelName:
+			m.SetReply(r)
+			m.Answer = parse(answerA(r.Question[0], "10.0.0.9"))
+		case len(r.Question) == 1 && r.Question[0].Name == "probe.test.":
+			m.SetReply(r) // startFakeUpstream's readiness probe
+		default:
+			st := steps[min(int(n.Add(1))-1, len(steps)-1)]
+			m.SetRcode(r, st.rcode)
+			m.Answer = parse(st.answers)
+			m.Ns = parse(st.ns)
+		}
+		_ = w.WriteMsg(m)
+	})
+	t.Cleanup(stop)
+	h, p, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split %q: %v", addr, err)
+	}
+	return h, p
+}
+
+// A name's answer can change while recording: a service not up yet does not
+// resolve, then does. Its negative answer and its resolved one are each
+// recorded once, and the replay serves the resolved one in either order, as
+// it did when keploy recorded resolved answers only. A NODATA answer first
+// no longer keeps the later resolved one out of the recording.
+func TestANameThatResolvesLaterKeepsItsResolvedAnswer(t *testing.T) {
+	q := dns.Question{Name: "db.compose.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	resolved := answerStep{rcode: dns.RcodeSuccess, answers: answerA(q, "172.18.0.5")}
+	nxdomain := answerStep{rcode: dns.RcodeNameError, ns: []string{negativeRootSOA}}
+	nodata := answerStep{rcode: dns.RcodeSuccess, ns: []string{negativeZoneSOA}}
+	// A CNAME to a name that does not exist: NXDOMAIN with a record.
+	dangling := answerStep{rcode: dns.RcodeNameError, answers: []string{"db.compose. 60 IN CNAME db.gone.compose."}, ns: []string{negativeRootSOA}}
+	for _, tc := range []struct {
+		name  string
+		steps []answerStep
+	}{
+		{"NXDOMAIN, then resolved", []answerStep{nxdomain, nxdomain, resolved, resolved}},
+		{"NODATA, then resolved", []answerStep{nodata, resolved, resolved}},
+		{"resolved, then NXDOMAIN", []answerStep{resolved, nxdomain, nxdomain}},
+		{"NXDOMAIN through a dangling CNAME, then resolved", []answerStep{dangling, resolved}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, port := sequenceUpstream(t, tc.steps...)
+			qs := make([]dns.Question, len(tc.steps))
+			for i := range qs {
+				qs[i] = q
+			}
+			mocks, _ := recordQuestions(t, host, port, qs...)
+			if len(mocks) != 2 {
+				t.Fatalf("recorded %d DNS mocks, want 2 (the negative answer and the resolved one): %+v", len(mocks), mocks)
+			}
+			for _, order := range [][]*models.Mock{mocks, {mocks[1], mocks[0]}} {
+				got, misses := replayIsolated(t, order, q)
+				if len(misses) != 0 {
+					t.Fatalf("replay reported %d miss(es): %+v", len(misses), misses)
+				}
+				if dnsAnswerRank(got.Msg) != dnsRankResolved || !equalStrings(rrStrings(got.Answer), resolved.answers) {
+					t.Fatalf("replay answered %+v, want the resolved answer %q", got.Msg, resolved.answers)
+				}
+			}
+		})
+	}
+}
+
+// dnsMockOf is a recorded DNS mock of q with the given answer.
+func dnsMockOf(t *testing.T, q dns.Question, rcode int, answers []string, ns ...string) *models.Mock {
+	t.Helper()
+	return &models.Mock{Kind: models.DNS, Spec: models.MockSpec{
+		DNSReq:  &models.DNSReq{Name: q.Name, Qtype: q.Qtype, Qclass: q.Qclass},
+		DNSResp: &models.DNSResp{Rcode: rcode, Answers: answers, Ns: rrStringsOf(t, ns)},
+	}}
+}
+
+// With no resolved answer for a question, NODATA is served over NXDOMAIN in
+// either order: NODATA says the name exists, which it did once it answered
+// so. Of two answers of one kind, the first recorded is served.
+func TestReplayServesNODATAOverNXDOMAINInEitherOrder(t *testing.T) {
+	q := dns.Question{Name: "gone.example.", Qtype: dns.TypeAAAA, Qclass: dns.ClassINET}
+	nx := dnsMockOf(t, q, dns.RcodeNameError, nil, negativeRootSOA)
+	nodata := dnsMockOf(t, q, dns.RcodeSuccess, nil, negativeZoneSOA)
+	for _, order := range [][]*models.Mock{{nx, nodata}, {nodata, nx}} {
+		got, misses := replayIsolated(t, order, q)
+		if len(misses) != 0 || got.Msg == nil || dnsAnswerRank(got.Msg) != dnsRankNODATA ||
+			!equalStrings(rrStrings(got.Ns), rrStringsOf(t, []string{negativeZoneSOA})) {
+			t.Fatalf("replay answered %+v (misses %+v), want the recorded NODATA with its SOA", got.Msg, misses)
+		}
+	}
+
+	otherSOA := "example.org. 3600 IN SOA ns.example.org. host.example.org. 1 7200 3600 1209600 3600"
+	nx2 := dnsMockOf(t, q, dns.RcodeNameError, nil, otherSOA)
+	if got, _ := replayIsolated(t, []*models.Mock{nx, nx2}, q); got.Msg == nil ||
+		!equalStrings(rrStrings(got.Ns), rrStringsOf(t, []string{negativeRootSOA})) {
+		t.Fatalf("replay answered %+v, want the first recorded NXDOMAIN", got.Msg)
+	}
+
+	// A question of another type for the name has no recorded answer.
+	mgr := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mgr.Close)
+	mgr.SetFilteredMocks([]*models.Mock{nx, nodata})
+	p := &Proxy{logger: zap.NewNop(), mockManager: mgr}
+	other := dns.Question{Name: q.Name, Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	if got, ok := p.getMockedDNSResponse(other); ok {
+		t.Fatalf("served %+v for %s %s, which holds no recorded answer", got.Msg, dns.TypeToString[other.Qtype], other.Name)
+	}
+}
+
+// A v4-only service not up yet when the app first asks for it: its A question
+// answers NXDOMAIN, then resolves; its AAAA question answers NXDOMAIN, then
+// NODATA (docker's resolver and CoreDNS answer NOERROR with no record for a
+// name with no IPv6 address). NODATA and NXDOMAIN are each recorded, and the
+// replay serves A resolved and AAAA NODATA, what the app got once the service
+// was up: a stale AAAA NXDOMAIN fails musl's getaddrinfo for the name even
+// though its A question resolves.
+func TestAnAAAAThatBecomesNODATAIsServedAsNODATA(t *testing.T) {
+	const name = "db.compose."
+	qA := dns.Question{Name: name, Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	qAAAA := dns.Question{Name: name, Qtype: dns.TypeAAAA, Qclass: dns.ClassINET}
+	var nA, nAAAA atomic.Int32 // the handler runs on the server's goroutines
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		switch q := r.Question[0]; {
+		case q.Name == sentinelName:
+			m.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: sentinelName, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("10.0.0.9")}}
+		case q.Name != name: // startFakeUpstream's readiness probe
+		case q.Qtype == dns.TypeA && nA.Add(1) <= 2, q.Qtype == dns.TypeAAAA && nAAAA.Add(1) <= 2:
+			m.SetRcode(r, dns.RcodeNameError)
+		case q.Qtype == dns.TypeA:
+			m.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 600}, A: net.ParseIP("172.18.0.5")}}
+		}
+		_ = w.WriteMsg(m)
+	})
+	t.Cleanup(stop)
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var qs []dns.Question
+	for i := 0; i < 4; i++ { // the app retries until the service is up
+		qs = append(qs, qA, qAAAA)
+	}
+	mocks, _ := recordQuestions(t, host, port, qs...)
+	if len(mocks) != 4 {
+		t.Fatalf("recorded %d DNS mocks, want 4 (A NXDOMAIN and resolved, AAAA NXDOMAIN and NODATA): %+v", len(mocks), mocks)
+	}
+	gotA, missesA := replayIsolated(t, mocks, qA)
+	gotAAAA, missesAAAA := replayIsolated(t, mocks, qAAAA)
+	if len(missesA)+len(missesAAAA) != 0 {
+		t.Fatalf("replay reported misses: %+v %+v", missesA, missesAAAA)
+	}
+	if dnsAnswerRank(gotA.Msg) != dnsRankResolved {
+		t.Fatalf("replay A = %+v, want the resolved answer", gotA.Msg)
+	}
+	if dnsAnswerRank(gotAAAA.Msg) != dnsRankNODATA {
+		t.Fatalf("replay AAAA = %s with %d answers, want NODATA, what the app got once the name existed",
+			dns.RcodeToString[gotAAAA.Rcode], len(gotAAAA.Answer))
+	}
+}
+
+// A resolved answer among the unfiltered mocks is served over a negative one
+// among the filtered mocks, and of two resolved answers, the filtered one.
+func TestReplayPrefersAResolvedAnswerAcrossMockTiers(t *testing.T) {
+	q := dns.Question{Name: "api.example.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	negative := dnsMockOf(t, q, dns.RcodeNameError, nil)
+	resolved := dnsMockOf(t, q, dns.RcodeSuccess, answerA(q, "10.1.2.3"))
+	filteredResolved := dnsMockOf(t, q, dns.RcodeSuccess, answerA(q, "10.9.9.9"))
+	for _, tc := range []struct {
+		name               string
+		filtered, unfilter []*models.Mock
+		want               []string
+	}{
+		{"negative filtered, resolved unfiltered", []*models.Mock{negative}, []*models.Mock{resolved}, resolved.Spec.DNSResp.Answers},
+		{"resolved in both tiers", []*models.Mock{filteredResolved}, []*models.Mock{resolved}, filteredResolved.Spec.DNSResp.Answers},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mgr.Close)
+			mgr.SetFilteredMocks(tc.filtered)
+			mgr.SetUnFilteredMocks(tc.unfilter)
+			p := &Proxy{logger: zap.NewNop(), mockManager: mgr}
+			got, ok := p.getMockedDNSResponse(q)
+			if !ok || !equalStrings(rrStrings(got.Answer), tc.want) {
+				t.Fatalf("served %+v, want %q", got.Msg, tc.want)
+			}
+		})
+	}
+}
+
+// A recorded negative answer says what a name was while recording. A replay
+// asks its own network's resolver first, for a name that network owns and a
+// type it answers itself, and serves that answer when it is the better kind:
+// a container that was not up while recording resolves at replay, as it did
+// before keploy recorded negative answers. Every other question gets the
+// recorded answer and reaches no resolver, test.allowEgress "dns" or not: it
+// opens real egress for a question no mock answers, and these have one.
+func TestARecordedNegativeAnswerDoesNotShadowTheReplaysNetwork(t *testing.T) {
+	var mu sync.Mutex
+	asked := map[string]int{}
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		q := r.Question[0]
+		mu.Lock()
+		asked[dns.TypeToString[q.Qtype]+" "+q.Name]++
+		mu.Unlock()
+		m := new(dns.Msg)
+		m.SetReply(r)
+		switch {
+		case q.Name == "riso-peer." && q.Qtype == dns.TypeA, q.Name == "db." && q.Qtype == dns.TypeA:
+			m.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 600}, A: net.ParseIP("172.19.0.2")}}
+		case q.Name == "riso-peer." && q.Qtype == dns.TypeAAAA: // NODATA: no IPv6 address
+		case q.Name == "flaky.":
+			m.SetRcode(r, dns.RcodeServerFailure)
+		case q.Name != "probe.test.": // startFakeUpstream's readiness probe
+			m.SetRcode(r, dns.RcodeNameError)
+		}
+		_ = w.WriteMsg(m)
+	})
+	t.Cleanup(stop)
+	p := hostResolverProxy(t, addr)
+	p.IsDocker = true
+	p.dnsClusterDomain = "" // a container network: docker's resolver
+	p.dnsInNetworkServers = append([]string(nil), p.dnsUpstreamServers...)
+	p.netNames = netnames.New()
+	p.netNames.Apply(netnames.List{Networks: []string{"keploy-network"}, Names: []string{"riso-peer", "db", "gone", "flaky"}})
+
+	question := func(name string, qtype uint16) dns.Question {
+		return dns.Question{Name: name, Qtype: qtype, Qclass: dns.ClassINET}
+	}
+	peerA, peerAAAA, peerTXT := question("riso-peer.", dns.TypeA), question("riso-peer.", dns.TypeAAAA), question("riso-peer.", dns.TypeTXT)
+	dbA, goneAAAA, flakyA := question("db.", dns.TypeA), question("gone.", dns.TypeAAAA), question("flaky.", dns.TypeA)
+	crmAAAA := question("crm.test.", dns.TypeAAAA)
+	p.mockManager.SetFilteredMocks([]*models.Mock{
+		dnsMockOf(t, peerA, dns.RcodeNameError, nil, negativeRootSOA),
+		dnsMockOf(t, peerAAAA, dns.RcodeNameError, nil, negativeRootSOA),
+		dnsMockOf(t, peerTXT, dns.RcodeNameError, nil, negativeRootSOA),
+		dnsMockOf(t, dbA, dns.RcodeSuccess, answerA(dbA, "10.0.0.7")),
+		dnsMockOf(t, goneAAAA, dns.RcodeSuccess, nil, negativeZoneSOA),
+		dnsMockOf(t, flakyA, dns.RcodeNameError, nil, negativeRootSOA),
+		dnsMockOf(t, crmAAAA, dns.RcodeNameError, nil, negativeRootSOA),
+	})
+
+	for _, tc := range []struct {
+		name     string
+		q        dns.Question
+		asked    int
+		wantRank int
+		answer   string // the served A record's address, when it has one
+		live     bool   // the in-network resolver's answer, not the recording's
+	}{
+		{"an owned name that resolves now", peerA, 1, dnsRankResolved, "172.19.0.2", true},
+		{"an owned name that answers NODATA now", peerAAAA, 1, dnsRankNODATA, "", true},
+		{"a type docker's resolver recurses", peerTXT, 0, dnsRankNXDOMAIN, "", false},
+		{"a recorded resolved answer", dbA, 0, dnsRankResolved, "10.0.0.7", false},
+		{"recorded NODATA over the network's NXDOMAIN", goneAAAA, 1, dnsRankNODATA, "", false},
+		{"recorded NXDOMAIN over the network's SERVFAIL", flakyA, 1, dnsRankNXDOMAIN, "", false},
+		{"a name the network does not own", crmAAAA, 0, dnsRankNXDOMAIN, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, egress := range []bool{false, true} {
+				p.allowEgressDNS = egress
+				key := dns.TypeToString[tc.q.Qtype] + " " + tc.q.Name
+				mu.Lock()
+				before := asked[key]
+				mu.Unlock()
+				got := p.resolveUncachedDNSResponse(tc.q, models.MODE_TEST, true, time.Now(), nil)
+				mu.Lock()
+				n := asked[key] - before
+				mu.Unlock()
+				if n != tc.asked {
+					t.Errorf("allowEgress dns %v: %s was put to a resolver %d time(s), want %d", egress, key, n, tc.asked)
+				}
+				if got.Msg == nil || dnsAnswerRank(got.Msg) != tc.wantRank || !got.FromUpstream {
+					t.Fatalf("allowEgress dns %v: served %+v, want kind %d", egress, got.Msg, tc.wantRank)
+				}
+				if tc.answer != "" {
+					if a, ok := got.Answer[0].(*dns.A); !ok || !a.A.Equal(net.ParseIP(tc.answer)) {
+						t.Errorf("allowEgress dns %v: served %v, want %s", egress, got.Answer, tc.answer)
+					}
+				}
+				recordedSOA := len(got.Ns) == 1 && got.Ns[0].Header().Rrtype == dns.TypeSOA
+				if tc.wantRank != dnsRankResolved && recordedSOA == tc.live {
+					t.Errorf("allowEgress dns %v: served %+v; want the %s answer", egress, got.Msg, map[bool]string{true: "network's", false: "recorded"}[tc.live])
+				}
+			}
+		})
+	}
+	if misses := collectMockMissReports(t, p); len(misses) != 0 {
+		t.Fatalf("a question a mock answers was reported as a miss: %+v", misses)
+	}
+}
