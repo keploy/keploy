@@ -87,6 +87,9 @@ type payloadOnDisk struct {
 	// IsMySQLStatementLifecycle's and mysqlIsSessionReusableCommand's.
 	mysqlStatementLifecycle bool
 	mysqlSessionReusable    bool
+	// fault is a copy of the mock's Spec.Fault (FaultOf), nil for none: what
+	// a replay's summary names when the mock was served (FaultServed).
+	fault *Fault
 }
 
 // onDiskPredicates is every registry whose predicates read a mock's payload;
@@ -118,6 +121,11 @@ func (m *Mock) LeavePayloadOnDisk(src PayloadSource, at PayloadAt) {
 	d.fingerprint = requestFingerprint(m)
 	d.summary, d.longSummary = keptDisplay(MockSummaryFromSpec(m))
 	d.target, d.longTarget = keptDisplay(MockTargetFromSpec(m))
+	if f := m.Spec.Fault; f != nil {
+		kept := *f
+		kept.Observed = strings.Clone(f.Observed)
+		d.fault = &kept
+	}
 	for i, r := range onDiskPredicates {
 		if r.match(m) {
 			d.matched |= 1 << i
@@ -230,6 +238,9 @@ func (m *Mock) IndexEntryBytes() int64 {
 	d := m.onDisk
 	// d.at.Name is m.Name's string, not a copy.
 	n += str(d.summary) + str(d.target) + str(d.fingerprint)
+	if f := d.fault; f != nil {
+		n += int(unsafe.Sizeof(*f)) + str(f.Observed)
+	}
 	return int64(n)
 }
 

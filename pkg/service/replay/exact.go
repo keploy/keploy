@@ -64,7 +64,24 @@ type exactPlan struct {
 	idle map[string]bool
 	// begun names the test cases of the set's run that have begun: the
 	// worker-scope mocks placed after one of them are due by the set's end.
+	// One placed after a test case the run passed over without beginning it
+	// (order) is served if made, never due: its call may be the skipped test
+	// case's own doing.
 	begun map[string]bool
+	// order is every test case of the set in the order the run takes them up
+	// (passOrder), those it will not open among them. The staging hands it to
+	// the agent (models.ExactServing.Order) when the worker scope places a
+	// mock after a test case: the agent reaches that place once the run
+	// passes its test case, whether it ran or was skipped.
+	order []string
+	// mainPass is how many test cases of order, from its start, the set's
+	// main loop takes up: those before the streaming ones (passOrder).
+	mainPass int
+	// ordered says the staging handed the agent order (stagedOrder), and
+	// passed how many of order, from its start, the replay has told the
+	// agent the run passed as a pass of it ended (passExactRun).
+	ordered bool
+	passed  int
 	// unheld names the worker-scope mocks the agent does not hold: required
 	// all the same, never asked of the agent (staged).
 	unheld map[string]bool
@@ -159,6 +176,47 @@ func (p *exactPlan) begin(name string) {
 	}
 }
 
+// passOrder is the names of cases (recorded order) in the order keploy test's
+// run takes them up: recorded order, with the streaming test cases, which it
+// runs in a pass after the rest (deferredStreaming), last. It holds the test
+// cases the run will not open too: a selection leaves them out, verdicts.yaml
+// quarantines them, or they are refused. A streaming one the run skips is
+// last as well: the agent is told the run passed it no earlier than it did.
+// main is how many of the order, from its start, the main loop takes up:
+// the test cases that are not streaming ones.
+func passOrder(cases []*models.TestCase) (order []string, main int) {
+	out := make([]string, 0, len(cases))
+	var streaming []string
+	for _, tc := range cases {
+		if deferredStreaming(tc) {
+			streaming = append(streaming, tc.Name)
+			continue
+		}
+		out = append(out, tc.Name)
+	}
+	return append(out, streaming...), len(out)
+}
+
+// deferredStreaming reports whether keploy test runs test case tc (not nil)
+// in the streaming pass after the set's other test cases: an HTTP streaming
+// one.
+func deferredStreaming(tc *models.TestCase) bool {
+	return tc.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(tc)
+}
+
+// stagedOrder is the run's order the staging hands the agent (order): only
+// when a mock of the worker scope it stages (staged) is placed after a test
+// case, the one thing the agent reads it for; nil otherwise, and with no plan
+// (staged is then empty).
+func (p *exactPlan) stagedOrder() []string {
+	for _, e := range p.staged() {
+		if e.Place != "" {
+			return append([]string(nil), p.order...)
+		}
+	}
+	return nil
+}
+
 // staged is the worker scope the agent stages: the entries of the mocks it
 // holds, in order.
 func (p *exactPlan) staged() []models.MockEntry {
@@ -210,7 +268,8 @@ func (p *exactPlan) takeWorker(counted, rearm []models.MockState) ([]models.Mock
 // unansweredWorker is, in recorded order, the worker-scope mocks the set's
 // end requires answered and consumed does not hold: those whose place the
 // run reached (a test case that has begun, or the set's start when keploy
-// started its application: bootSeen), but for the ones whose answer is idle
+// started its application: bootSeen; a test case it passed over without
+// beginning it makes none due, begun), but for the ones whose answer is idle
 // (D3, D4). One the recording made as keploy record stopped the application
 // (MockEntry.AtStop) is required only once keploy has stopped this set's
 // application and read what it consumed as it stopped (stopped).
@@ -485,7 +544,7 @@ func (p *exactPlan) returnedMissed(results []models.TestResult) []string {
 	for _, r := range lastResultOfEachTest(results) {
 		for _, c := range r.FailureInfo.UnmatchedCalls {
 			if owner, ok := p.returned[c.ClosestMock]; ok && owner != r.TestCaseID {
-				out = append(out, fmt.Sprintf("%s: %s (%s, given back to %s)", r.TestCaseID, c.ActualSummary, c.ClosestMock, owner))
+				out = append(out, fmt.Sprintf("%s: %s (%s, given back to %s)", r.TestCaseID, c.Named(), c.ClosestMock, owner))
 			}
 		}
 	}
@@ -867,20 +926,74 @@ func (r *Replayer) serveExactPool(ctx context.Context, plan *exactPlan, next str
 // serveExactPoolWith is serveExactPool, its filter carrying learned
 // (models.MockFilterParams.Learned) when it is not empty.
 func (r *Replayer) serveExactPoolWith(ctx context.Context, plan *exactPlan, next string, learned []models.MockState) error {
+	err := r.serveExactPoolPassed(ctx, plan, next, learned, 0)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to serve the test set's pool between test cases")
+	}
+	return err
+}
+
+// serveExactPoolPassed is serveExactPoolWith, its filter saying that the run
+// has passed the first passed test cases of its order when passed is not 0
+// (models.ExactServing.Passed, passExactRun). It logs nothing: its caller
+// says what the agent not taking the call means.
+func (r *Replayer) serveExactPoolPassed(ctx context.Context, plan *exactPlan, next string, learned []models.MockState, passed int) error {
 	if plan == nil {
 		return nil
 	}
 	// Named only once the agent has them: a test case whose naming failed
 	// is named again at its loop head (serveExactAhead).
 	plan.aheadNamed = ""
-	err := r.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Ahead: append([]string(nil), plan.ahead[next]...)}, LearnEnded: plan.learnEnded, Learned: learned})
+	err := r.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Ahead: append([]string(nil), plan.ahead[next]...), Passed: passed}, LearnEnded: plan.learnEnded, Learned: learned})
 	if err != nil {
-		utils.LogError(r.logger, err, "failed to serve the test set's pool between test cases")
 		return err
 	}
 	plan.aheadNamed = next
 	plan.testView = ""
 	return nil
+}
+
+// passEndUnconfirmedMsg is the line keploy test logs when the agent does not
+// take the call that tells it a pass of the set's run passed the test cases
+// it skipped after the last one it ran (passExactRun).
+const passEndUnconfirmedMsg = "keploy could not confirm that the agent took the end of the test set's pass: the worker-scope recordings placed after the test cases the run skipped after the last one it ran may answer no call the application makes after its last test case"
+
+// passExactRun tells the agent, as a pass of the set's run ends with every
+// test case it meant to take up taken up, that the run has passed the test
+// cases of its order that pass holds (models.ExactServing.Passed): the main
+// loop's (those before the streaming ones) when the streaming pass runs after
+// it (streamingNext), else all of them. A test case the run skipped after the
+// last one it opened then reaches the worker-scope mocks placed after it, for
+// the calls the application makes after its last test case. Said on a pool
+// call, as between test cases, and naming no test case's calls in flight: a
+// later pass names its first test case's at its loop head
+// (serveExactAhead). A no-op with no plan, when the staging handed the agent
+// no order, when the agent was told as much already (a retry cycle's end),
+// or once the run's context has ended (the application stopped in the pass's
+// last test case, or the user stopped the run): no call comes after it. A
+// pass that stopped part way says nothing (its caller's check): the test
+// cases it did not take up stay unpassed.
+func (r *Replayer) passExactRun(ctx context.Context, plan *exactPlan, streamingNext bool) {
+	if plan == nil || !plan.ordered || ctx.Err() != nil {
+		return
+	}
+	n := len(plan.order)
+	if streamingNext {
+		n = plan.mainPass
+	}
+	if n <= plan.passed {
+		return
+	}
+	// The agent's answer cannot tell a call it did not take from one it took
+	// whose settling it could not verify (the gap after the pass's last test
+	// case): it has passed the test cases then all the same. So the line says
+	// what may follow, once; the next pass end that comes (a retry cycle's,
+	// the streaming pass's) tells the agent again.
+	if err := r.serveExactPoolPassed(ctx, plan, "", nil, n); err != nil {
+		r.logger.Warn(passEndUnconfirmedMsg, zap.Int("passed", n), zap.Error(err))
+		return
+	}
+	plan.passed = n
 }
 
 // endStreamOnFailure logs the pool call a streamed test case that failed

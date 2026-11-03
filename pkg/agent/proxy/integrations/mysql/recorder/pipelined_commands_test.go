@@ -1,15 +1,11 @@
 package recorder
 
 import (
-	"context"
 	"encoding/binary"
 	"testing"
 	"time"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
-	"go.uber.org/zap/zaptest"
 )
 
 func stmtResetCommand(seq byte, statementID uint32) []byte {
@@ -48,111 +44,65 @@ func okResponseWithAffectedRows(seq byte, affectedRows byte) []byte {
 	return wrapPacket(payload, seq)
 }
 
-// TestAsyncMySQLDecode_PipelinedResetLongDataExecute verifies that response-
-// bearing commands remain FIFO-ordered when a client pipelines them around a
-// no-response COM_STMT_SEND_LONG_DATA packet. Connector/J uses this sequence
-// for repeated streamed BLOB writes:
+// Connector/J writes a streamed BLOB as a pipeline:
 //
 //	COM_STMT_RESET -> COM_STMT_SEND_LONG_DATA -> COM_STMT_EXECUTE
 //
-// RESET and EXECUTE each receive an OK packet; SEND_LONG_DATA receives none.
-// The affected-row counts intentionally differ so the test catches both a
-// missing command and a response paired with the wrong request.
-func TestAsyncMySQLDecode_PipelinedResetLongDataExecute(t *testing.T) {
-	const statementID = uint32(7)
-
-	clientConn := newPipeConn()
-	decodeCtx := buildPostHandshakeDecodeCtx(clientConn)
-	decodeCtx.LastOp.Store(clientConn, wire.RESET)
-	decodeCtx.PreparedStatements[statementID] = &mysql.StmtPrepareOkPacket{
-		StatementID: statementID,
-	}
-
-	mocks := make(chan *models.Mock, 8)
-	wireSyncMockOutput(t, mocks)
-	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "pipelined-commands")
-
-	base := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
-	decodeItems := make(chan mysqlDecodeItem, 5)
-	decodeItems <- mysqlDecodeItem{
-		fromClient: true,
-		data:       stmtResetCommand(0, statementID),
-		ts:         base,
-	}
-	decodeItems <- mysqlDecodeItem{
-		fromClient: true,
-		data:       stmtSendLongDataCommand(0, statementID, 0, []byte("blob-chunk")),
-		ts:         base.Add(time.Millisecond),
-	}
-	decodeItems <- mysqlDecodeItem{
-		fromClient: true,
-		data:       stmtExecuteCommand(0, statementID),
-		ts:         base.Add(2 * time.Millisecond),
-	}
-	decodeItems <- mysqlDecodeItem{
-		data: okResponseWithAffectedRows(1, 0),
-		ts:   base.Add(3 * time.Millisecond),
-	}
-	decodeItems <- mysqlDecodeItem{
-		data: okResponseWithAffectedRows(1, 1),
-		ts:   base.Add(4 * time.Millisecond),
-	}
-	close(decodeItems)
-
-	asyncMySQLDecode(
-		ctx,
-		zaptest.NewLogger(t),
-		decodeItems,
-		mocks,
-		decodeCtx,
-		clientConn,
-		models.OutgoingOptions{DstCfg: &models.ConditionalDstCfg{Addr: "127.0.0.1:3306"}},
-	)
-
-	byOperation := make(map[string]*models.Mock)
-	for {
-		select {
-		case mock := <-mocks:
-			if mock != nil {
-				byOperation[mock.Spec.Metadata["requestOperation"]] = mock
-			}
-		default:
-			goto collected
+// RESET and EXECUTE each get an OK; SEND_LONG_DATA gets none. Each command is
+// recorded with its own answer, in order. The EXECUTE carries no value for the
+// BLOB, whose null bitmap still marks it NOT NULL: the value arrived by
+// SEND_LONG_DATA. Read without that, the EXECUTE does not decode, it is never
+// recorded, and at replay Connector/J reports "Can not read response from
+// server" (issue #4262).
+func TestRecordV2_PipelinedStreamedBlobExecuteIsRecorded(t *testing.T) {
+	t.Parallel()
+	blob := &mysql.ColumnDefinition41{Catalog: "def", Name: "?", CharacterSet: 0x3f, Type: byte(mysql.FieldTypeBLOB)}
+	execute := wrapPacket([]byte{
+		mysql.COM_STMT_EXECUTE,
+		byte(undecodableStmtID), 0x00, 0x00, 0x00,
+		0x00,                   // flags
+		0x01, 0x00, 0x00, 0x00, // iteration count
+		0x00,       // NULL bitmap: parameter 0 is NOT null
+		0x01,       // new params bind flag
+		0xfc, 0x00, // MYSQL_TYPE_BLOB, and no value: it came by SEND_LONG_DATA
+	}, 0)
+	got, leftOut, err := runRecordV2(t, func(h *v2Harness, at func() time.Time) {
+		h.pushClient(wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "INSERT INTO files (data) VALUES (?)"...), 0), at())
+		for _, p := range prepareOK(false, [][]byte{columnPayload(t, blob)}, nil) {
+			h.pushDest(p, at())
 		}
+		h.pushClient(stmtResetCommand(0, undecodableStmtID), at())
+		h.pushClient(stmtSendLongDataCommand(0, undecodableStmtID, 0, []byte("blob-bytes")), at())
+		h.pushClient(execute, at())
+		h.pushDest(okResponseWithAffectedRows(1, 0), at())
+		h.pushDest(okResponseWithAffectedRows(1, 1), at())
+	})
+	if err != nil {
+		t.Fatalf("RecordV2: %v", err)
 	}
-
-collected:
-	if len(byOperation) != 3 {
-		t.Fatalf("recorded operations = %v, want RESET, SEND_LONG_DATA, and EXECUTE", byOperation)
+	if leftOut.count() != 0 {
+		t.Fatalf("%d exchanges left out, want none", leftOut.count())
 	}
-
-	sendLongData := byOperation["COM_STMT_SEND_LONG_DATA"]
-	if sendLongData == nil {
-		t.Fatal("COM_STMT_SEND_LONG_DATA mock was not recorded")
+	if sld := mocksOf(got, "COM_STMT_SEND_LONG_DATA"); len(sld) != 1 || len(sld[0].Spec.MySQLResponses) != 0 {
+		t.Fatalf("COM_STMT_SEND_LONG_DATA recorded %d mocks, want 1 with no response", len(sld))
 	}
-	if got := len(sendLongData.Spec.MySQLResponses); got != 0 {
-		t.Fatalf("COM_STMT_SEND_LONG_DATA responses = %d, want 0", got)
-	}
-
-	assertOKAffectedRows := func(operation string, want uint64) {
+	answered := func(op string, affected uint64) {
 		t.Helper()
-		mock := byOperation[operation]
-		if mock == nil {
-			t.Fatalf("%s mock was not recorded", operation)
+		ms := mocksOf(got, op)
+		if len(ms) != 1 {
+			t.Fatalf("%s recorded %d mocks, want 1", op, len(ms))
 		}
-		if got := len(mock.Spec.MySQLResponses); got != 1 {
-			t.Fatalf("%s responses = %d, want 1", operation, got)
+		if len(ms[0].Spec.MySQLResponses) != 1 {
+			t.Fatalf("%s recorded %d responses, want 1", op, len(ms[0].Spec.MySQLResponses))
 		}
-		okPacket, ok := mock.Spec.MySQLResponses[0].PacketBundle.Message.(*mysql.OKPacket)
-		if !ok {
-			t.Fatalf("%s response type = %T, want *mysql.OKPacket",
-				operation, mock.Spec.MySQLResponses[0].PacketBundle.Message)
-		}
-		if okPacket.AffectedRows != want {
-			t.Fatalf("%s affected rows = %d, want %d", operation, okPacket.AffectedRows, want)
+		ok, isOK := ms[0].Spec.MySQLResponses[0].Message.(*mysql.OKPacket)
+		if !isOK || ok.AffectedRows != affected {
+			t.Fatalf("%s recorded %+v, want its own OK (%d affected rows)", op, ms[0].Spec.MySQLResponses[0].Message, affected)
 		}
 	}
-
-	assertOKAffectedRows("COM_STMT_RESET", 0)
-	assertOKAffectedRows("COM_STMT_EXECUTE", 1)
+	answered("COM_STMT_RESET", 0)
+	answered("COM_STMT_EXECUTE", 1)
+	if e, _ := mocksOf(got, "COM_STMT_EXECUTE")[0].Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket); e == nil || len(e.Parameters) != 1 {
+		t.Fatalf("the EXECUTE recorded %+v, want its one BLOB parameter", e)
+	}
 }

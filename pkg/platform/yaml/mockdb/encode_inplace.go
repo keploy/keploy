@@ -76,7 +76,7 @@ func encodeMockInPlace(mock *models.Mock) (any, bool) {
 	}
 	doc := inPlaceDoc{
 		Version:      mock.Version,
-		Kind:         mock.Kind,
+		Kind:         mock.DiskKind(),
 		Name:         mock.Name,
 		ConnectionID: mock.ConnectionID,
 		Async:        mock.Spec.Async,
@@ -128,6 +128,7 @@ func httpSpecOf(mock *models.Mock) models.HTTPSchema {
 		Created:          mock.Spec.Created,
 		ReqTimestampMock: mock.Spec.ReqTimestampMock,
 		ResTimestampMock: mock.Spec.ResTimestampMock,
+		Fault:            mock.Spec.Fault,
 	}
 }
 

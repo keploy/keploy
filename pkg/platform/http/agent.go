@@ -2151,6 +2151,45 @@ func logAppExit(logger *zap.Logger, appErr models.AppError, testCommand bool) {
 	utils.LogError(logger, appErr.Err, "error while running the app")
 }
 
+// TakeOwnedCaptureLosses takes from the agent, once each, the losses a test
+// whose end was cut short owned (POST /agent/capturelosses/owned): keploy
+// test's report of them, which no count it reads holds. An agent that has
+// none to tell apart (older than them) is ErrCaptureLossesUnsupported. The
+// read is bounded as GetCaptureLossesAndAgent's is (boundedAgentRead).
+func (a *AgentClient) TakeOwnedCaptureLosses(ctx context.Context) ([]models.OwnedCaptureLoss, error) {
+	return boundedAgentRead(ctx, "the take of the agent's capture losses a cut-short end owned", a.takeOwnedCaptureLosses)
+}
+
+// takeOwnedCaptureLosses is TakeOwnedCaptureLosses's exchange, unbounded.
+func (a *AgentClient) takeOwnedCaptureLosses(ctx context.Context) ([]models.OwnedCaptureLoss, error) {
+	url := fmt.Sprintf("%s/capturelosses/owned", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to take the capture losses a cut-short end owned from the agent: %w", err)
+	}
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for capturelosses/owned")
+		}
+	}()
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented || res.StatusCode == http.StatusMethodNotAllowed {
+		return nil, fmt.Errorf("%w: agent returned %d", models.ErrCaptureLossesUnsupported, res.StatusCode)
+	}
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return nil, agentRespErr("take the capture losses a cut-short end owned", res, rawBody)
+	}
+	var owned []models.OwnedCaptureLoss
+	if err := json.NewDecoder(res.Body).Decode(&owned); err != nil {
+		return nil, fmt.Errorf("failed to decode the capture losses a cut-short end owned: %w", err)
+	}
+	return owned, nil
+}
+
 // captureLossStall is how long, in time keploy could run (utils/stall), a
 // read of the agent's capture losses may go with no answer before keploy
 // gives it up: stall.HangBudget, as for a read of a container's
@@ -2356,13 +2395,24 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 		// This process's own privileges were checked before Setup changed
 		// anything (checkDockerModePrivileges).
 		// Start the agent in Docker container using errgroup
+		// Asked when the stop begins (dockerAgentCancel): the run's CA
+		// volume is freed only once the engine has removed the container.
+		removal := kdocker.NewRemovalWatch(a.dockerClient, opts.KeployContainer)
 		grp.Go(func() error {
 			defer cancel() // Cancel agent context when Docker agent stops
-			err := a.startInDocker(agentCtx, a.logger, opts, run)
+			err := a.startInDocker(agentCtx, a.logger, opts, run, removal)
 			// `docker run` has returned: the container has exited -- unless the
 			// stop could not reach it (the engine refused `kill`, or sudo -n),
 			// in which case cmd.Cancel killed the client and it may still run.
 			run.exited()
+			// The run's own volumes (its CA's, and an embedder's) go with its
+			// agent, once the engine has removed the agent's container. The engine keeps it while a
+			// container still mounts it: an agent the stop could not reach,
+			// or an application container run without --rm.
+			rmCtx, cancelRm := daemonAsk()
+			removal.Wait(rmCtx, a.logger)
+			kdocker.RemoveRunVolumes(rmCtx, a.logger, a.dockerClient, opts.KeployContainer)
+			cancelRm()
 			// `docker run` exits with the agent's own status, so this carries
 			// the reason an agent that could not start gave for it.
 			exited <- err
@@ -3510,7 +3560,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		var origCmd = cmd
 		a.logger.Debug("Application command provided :", zap.String("cmd", cmd))
 
-		opts.KeployContainer = agentUtils.GenerateRandomContainerName(a.logger, "keploy-v3-")
+		opts.KeployContainer = agentUtils.GenerateRandomContainerName(a.logger, kdocker.AgentContainerPrefix)
 		a.conf.KeployContainer = opts.KeployContainer
 		a.nameAgentContainer(opts.KeployContainer)
 		// The agent container maps host.docker.internal to the Docker host
@@ -3529,6 +3579,13 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			}
 			return fmt.Errorf("%w: the container engine's daemon at %s did not answer its version (GET /version) for %s of keploy's runnable time: %v", pkg.ErrAgentNotReady, a.dockerClient.DaemonHost(), daemonAnswerStall, err)
 		}
+		// Each run has volumes of its own (kdocker.RunVolume: its CA's, and
+		// an embedder's), removed when its agent's container goes.
+		// Those earlier runs left (killed, or still mounted by an application
+		// container at their end) go now, all but those a container mounts.
+		sweepCtx, cancelSweep := withRunnableBound(ctx, daemonAnswerStall, errDaemonSilent)
+		kdocker.SweepRunVolumes(sweepCtx, a.logger, a.dockerClient)
+		cancelSweep()
 
 		var appPorts, appNetworks, appHosts []string
 		var appDNS models.AppDNS
@@ -3907,7 +3964,7 @@ func (a *AgentClient) ComposeDownOnSetupFailure(_ context.Context) error {
 	return nil
 }
 
-func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, run *agentRun) error {
+func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, run *agentRun, removal *kdocker.RemovalWatch) error {
 	// The CLI's own config: the alias forwards the root flags the agent
 	// container must share with the CLI (agentargs.Root) from it.
 	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, a.conf, opts)
@@ -3922,7 +3979,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		return err
 	}
 
-	cmd.Cancel = dockerAgentCancel(logger, cmd, run, opts.KeployContainer)
+	cmd.Cancel = dockerAgentCancel(logger, cmd, run, opts.KeployContainer, removal)
 
 	logger.Debug("running the following command to start agent in docker", zap.String("command", redactToken(cmd.String())))
 
@@ -3955,9 +4012,17 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 
 // dockerAgentCancel is the `docker run` command's Cancel: it stops the agent's
 // container (stopAgentContainerFor) and then kills the client -- through
-// cmd.Process, not its raw pid, which cmd.Wait may have reaped already.
-func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name string) func() error {
+// cmd.Process, not its raw pid, which cmd.Wait may have reaped already. The
+// client was waiting for the container's removal (--rm), so the engine is
+// asked first to say when it is removed (removal), within keploy's bound on
+// an answer from its daemon (daemonAsk): a daemon that does not take that
+// question does not hold the stop, nor one that does not answer the stop's
+// signals (engineCLI.ask).
+func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name string, removal *kdocker.RemovalWatch) func() error {
 	return func() error {
+		ask, release := daemonAsk()
+		removal.Watch(ask)
+		release()
 		stopAgentContainerFor(logger, run, name)
 		if cmd.Process == nil {
 			return nil
@@ -3973,7 +4038,8 @@ func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name st
 // sent SIGTERM and waited for while its teardown makes progress
 // (stopAgentContainer), answered or not -- the agent attaches its TLS uprobes
 // before it answers (agentRun). The signal is sent synchronously, as `stop`
-// always was, so it has gone out before keploy can exit. An agent that never
+// always was, so it has gone out before keploy can exit -- unless the daemon
+// did not answer it within keploy's bound (engineCLI.ask). An agent that never
 // answered is sent SIGTERM again until it reports its teardown
 // (resendSIGTERM).
 func stopAgentContainerFor(logger *zap.Logger, run *agentRun, name string) {
@@ -4051,6 +4117,31 @@ func (e *engineCLI) combined(ctx context.Context, args ...string) ([]byte, error
 	return e.run(ctx, (*exec.Cmd).CombinedOutput, args...)
 }
 
+// daemonAsk is the context of one question of a stop to the container
+// engine's daemon -- the word on a container's removal, or a signal to it --
+// and the func that releases it: it ends once keploy has had
+// daemonAnswerStall of its own runnable time (withRunnableBound), so a
+// daemon that does not answer does not hold the stop. A variable for tests.
+var daemonAsk = func() (context.Context, func()) {
+	return withRunnableBound(context.Background(), daemonAnswerStall, errDaemonSilent)
+}
+
+// ask runs args, a question of a stop to the engine's daemon (a `kill`),
+// within daemonAsk's bound, and returns their output, stderr included. A
+// question the bound ended is said at WARN: what it asked may not have been
+// done, and the agent's container may still run.
+func (e *engineCLI) ask(args ...string) ([]byte, error) {
+	ctx, release := daemonAsk()
+	defer release()
+	out, err := e.combined(ctx, args...)
+	if err != nil && ctx.Err() != nil {
+		err = fmt.Errorf("%w: %v", context.Cause(ctx), err)
+		e.logger.Warn("The container engine's daemon did not answer keploy's `"+strings.Join(args, " ")+"` within keploy's bound: keploy goes on without its answer, and the keploy agent's container may still run",
+			zap.Duration("bound", daemonAnswerStall), zap.Error(err))
+	}
+	return out, err
+}
+
 // stdout runs args and returns their stdout alone.
 func (e *engineCLI) stdout(ctx context.Context, args ...string) ([]byte, error) {
 	return e.run(ctx, (*exec.Cmd).Output, args...)
@@ -4064,7 +4155,8 @@ var dockerStopPoll = time.Second
 // stopAgentContainer stops an agent's container, and returns once it has
 // exited, or once it killed it at once at the user's Ctrl+C (killedAtOnce).
 // It sends the agent SIGTERM
-// (`kill --signal SIGTERM`, synchronously) and waits for the container to stop
+// (`kill --signal SIGTERM`, synchronously; each `kill` within keploy's bound
+// on the daemon's answer, engineCLI.ask) and waits for the container to stop
 // (`wait`) while the agent's teardown makes progress, which it reports in its
 // container (readContainerProgress). It kills it only once it has stopped
 // making any, or has detached everything and not exited -- with the
@@ -4080,7 +4172,7 @@ var dockerStopPoll = time.Second
 func stopAgentContainer(logger *zap.Logger, name string, unanswered bool, moved *utils.TeardownScope) (killedAtOnce bool) {
 	logger = logger.With(zap.String("container", name))
 	cli := newEngineCLI(logger)
-	if out, err := cli.combined(context.Background(), "kill", "--signal", "SIGTERM", name); err != nil {
+	if out, err := cli.ask("kill", "--signal", "SIGTERM", name); err != nil {
 		logger.Debug("Could not signal the agent container. It may have already stopped.",
 			zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
 		return
@@ -4103,7 +4195,7 @@ func awaitAgentContainer(logger *zap.Logger, cli *engineCLI, name string, unansw
 		if now {
 			args = []string{"kill", name}
 		}
-		out, err := cli.combined(context.Background(), args...)
+		out, err := cli.ask(args...)
 		if err != nil {
 			logger.Debug("Could not kill the agent container. It may have already stopped.",
 				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
@@ -4167,7 +4259,7 @@ func (a *AgentClient) EndComposeAgent(release bool) {
 	cli := newEngineCLI(logger)
 	if release {
 		logger.Warn("a drain of the keploy agent's streams was given up on a stall; telling the agent to stop waiting for it")
-		if out, err := cli.combined(context.Background(), "kill", "--signal", "SIGUSR2", name); err != nil {
+		if out, err := cli.ask("kill", "--signal", "SIGUSR2", name); err != nil {
 			logger.Debug("Could not signal the agent container. It may have already stopped.",
 				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
 		}
@@ -4516,6 +4608,33 @@ func (a *AgentClient) newStreamEnd(kind models.FrameStream) *atomic.Bool {
 	ended := new(atomic.Bool)
 	a.streamEnds.Store(kind, ended)
 	return ended
+}
+
+// NotifyStopBegun tells the agent that the recording's stop has begun, before
+// keploy stops the application: a call the stop cuts then records no fault
+// (the agent's /stop-begun). Unlike NotifyGracefulShutdown it changes nothing
+// else in the agent. It errors when the agent did not take it.
+func (a *AgentClient) NotifyStopBegun(ctx context.Context) error {
+	if a.conf.Agent.AgentURI == "" {
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.conf.Agent.AgentURI+"/stop-begun", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("the agent answered %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
 }
 
 // NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.

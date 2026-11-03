@@ -776,8 +776,10 @@ func (h *heldPrepare) release(decodeCtx *wire.DecodeContext, eof []byte, at time
 // mock is left out all the same, and what follows from lost framing (the
 // exchange after it left out alone, or the connection's stop) is reported
 // apart from it, where it is decided (handleCommandsV2's fail). It then
-// records the mocks queued behind it, which do not depend on its framing.
-func (h *heldPrepare) leaveOut(sess *supervisor.Session, why error) {
+// records the mocks queued behind it, which do not depend on its framing. The
+// statement it prepared is forgotten (forgetPrepared).
+func (h *heldPrepare) leaveOut(sess *supervisor.Session, decodeCtx *wire.DecodeContext, why error) {
+	forgetPrepared(decodeCtx, h.sp)
 	leaveOut(sess, h.reqTs, h.resTs, why)
 	h.flush()
 }
@@ -826,17 +828,17 @@ func (h *heldPrepare) settle(ctx context.Context, logger *zap.Logger, sess *supe
 	if err != nil {
 		if errors.Is(err, ErrFramingLost) {
 			err = found("V2: mysql response packet out of sequence", err)
-			h.leaveOut(sess, err)
+			h.leaveOut(sess, decodeCtx, err)
 			return nil, err
 		}
-		h.leaveOut(sess, notRecorded("the recording stopped before a packet settled the %s response's framing: %v", h.what, err))
+		h.leaveOut(sess, decodeCtx, notRecorded("the recording stopped before a packet settled the %s response's framing: %v", h.what, err))
 		return nil, err
 	}
 	switch {
 	case buf[3] == h.eofSeq && mysqlUtils.IsEOFPacket(buf):
 		if h.eofSeq == respFirst && !answerNeverAnEOF[cmd] {
 			err := framingLostAt(logger, sess, "the packet after the definitions of the %s response is an EOF that may be its own or the answer to the next command", h.what)
-			h.leaveOut(sess, err)
+			h.leaveOut(sess, decodeCtx, err)
 			return nil, err
 		}
 		h.release(decodeCtx, buf, sess.DestStream.LastReadTime())
@@ -851,7 +853,7 @@ func (h *heldPrepare) settle(ctx context.Context, logger *zap.Logger, sess *supe
 		return nil, errServerDropped
 	default:
 		err := framingLostAt(logger, sess, "the packet after the definitions of the %s response has sequence id %d and is neither its EOF, the next answer nor an ERR of the server's own", h.what, buf[3])
-		h.leaveOut(sess, err)
+		h.leaveOut(sess, decodeCtx, err)
 		return nil, err
 	}
 }
@@ -873,10 +875,10 @@ func (h *heldPrepare) end(ctx context.Context, logger *zap.Logger, sess *supervi
 	switch {
 	case errors.Is(err, ErrFramingLost):
 		err = found("V2: mysql response packet out of sequence", err)
-		h.leaveOut(sess, err)
+		h.leaveOut(sess, decodeCtx, err)
 		return err
 	case err != nil:
-		h.leaveOut(sess, notRecorded("the connection ended before a packet settled the %s response's framing: %v", h.what, err))
+		h.leaveOut(sess, decodeCtx, notRecorded("the connection ended before a packet settled the %s response's framing: %v", h.what, err))
 		return nil
 	case buf[3] == h.eofSeq && mysqlUtils.IsEOFPacket(buf):
 		h.release(decodeCtx, buf, sess.DestStream.LastReadTime())
@@ -886,7 +888,7 @@ func (h *heldPrepare) end(ctx context.Context, logger *zap.Logger, sess *supervi
 		return nil
 	default:
 		err := framingLostAt(logger, sess, "the packet after the definitions of the %s response has sequence id %d and is neither its EOF nor an ERR of the server's own", h.what, buf[3])
-		h.leaveOut(sess, err)
+		h.leaveOut(sess, decodeCtx, err)
 		return err
 	}
 }

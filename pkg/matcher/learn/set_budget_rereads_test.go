@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -59,10 +60,10 @@ func TestASetPastItsBudgetReadsEachPayloadsInstantsOnce(t *testing.T) {
 	}
 	spans := instantSpans
 	defer func() { instantSpans = spans }()
-	read := 0
+	var read atomic.Int64
 	instantSpans = func(s string) []instant {
 		if strings.Contains(s, "filler") {
-			read++
+			read.Add(1)
 		}
 		return spans(s)
 	}
@@ -82,22 +83,22 @@ func TestASetPastItsBudgetReadsEachPayloadsInstantsOnce(t *testing.T) {
 	tr := NewTracker()
 	tr.NewSet()
 	tr.Begin()
-	read = 0
+	read.Store(0)
 	first := classify(tr.Drifts())
-	if read == 0 {
+	if read.Load() == 0 {
 		t.Fatalf("the first call read no payload's instants: the row reads nothing")
 	}
-	read = 0
+	read.Store(0)
 	second := classify(tr.Drifts())
-	if read != 0 {
-		t.Errorf("a second call of the test read earlier payloads' instants %d times again, want 0 (%d payloads): past its budget the set read every payload anew on every call", read, n)
+	if read.Load() != 0 {
+		t.Errorf("a second call of the test read earlier payloads' instants %d times again, want 0 (%d payloads): past its budget the set read every payload anew on every call", read.Load(), n)
 	}
 	tr.End()
 	tr.Begin()
-	read = 0
+	read.Store(0)
 	next := classify(tr.Drifts())
-	if read != 0 {
-		t.Errorf("the set's second test read earlier payloads' instants %d times again, want 0 (%d payloads): what is read of a recording's payload alone is read once for the set", read, n)
+	if read.Load() != 0 {
+		t.Errorf("the set's second test read earlier payloads' instants %d times again, want 0 (%d payloads): what is read of a recording's payload alone is read once for the set", read.Load(), n)
 	}
 	tr.End()
 	for i, got := range [][]Learned{first, second, next} {

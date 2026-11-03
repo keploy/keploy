@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !darwin
 
 package routes
 
@@ -7,8 +7,8 @@ import (
 	"net/http"
 )
 
-// callerPID is only read from the kernel on Linux; the single-worker wire's
-// instance claim is Linux-only in the first release.
+// callerPID is only read from the kernel on Linux and macOS; the
+// single-worker wire's instance claim is unsupported on other platforms.
 func callerPID(*http.Request) (int, error) {
-	return 0, errors.New("reading the calling process from the connection is supported on Linux only")
+	return 0, errors.New("reading the calling process from the connection is supported on Linux and macOS only")
 }

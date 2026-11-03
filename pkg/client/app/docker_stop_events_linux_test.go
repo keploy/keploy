@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -124,11 +126,81 @@ exec sleep 600`
 	}
 }
 
+// steppedProcess starts a process that holds seven files more than its
+// standard three, and returns it with step, which has it close the next of
+// them; once all seven are closed it sleeps. Its shutdown makes progress when
+// the test says, not on a timer of its own. (Single-digit descriptors: dash,
+// Debian's sh, takes no others.)
+func steppedProcess(t *testing.T) (cmd *exec.Cmd, step func()) {
+	t.Helper()
+	// Its standard input is the steps (a read that fails, as the test ends,
+	// closes nothing), and its standard output says it holds the seven.
+	const closing = `exec 3</dev/null 4</dev/null 5</dev/null 6</dev/null 7</dev/null 8</dev/null 9</dev/null
+echo ready
+for fd in 3 4 5 6 7 8 9; do read _ || exec sleep 600; eval "exec $fd<&-"; done
+exec sleep 600`
+	steps, stepsW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, readyW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stepsW.Close(); _ = ready.Close() })
+	cmd = exec.Command("sh", "-c", closing)
+	cmd.Stdin, cmd.Stdout = steps, readyW
+	start(t, cmd)
+	_, _ = steps.Close(), readyW.Close()
+	if line, err := bufio.NewReader(ready).ReadString('\n'); line != "ready\n" {
+		t.Fatalf("the process did not say it holds its files: %q (%v)", line, err)
+	}
+	return cmd, func() {
+		if _, err := stepsW.Write([]byte("\n")); err != nil {
+			t.Errorf("a step of the process: %v", err)
+		}
+	}
+}
+
+// paceSteps calls step n times, once every every of the process's runnable
+// time (stall's process clock, the one a stop's stall bound is measured on)
+// from now. The func it returns ends the pacing and waits for it to end.
+func paceSteps(t *testing.T, step func(), n int, every time.Duration) (end func()) {
+	t.Helper()
+	clk, release := stall.Process()
+	quit, done := make(chan struct{}), make(chan struct{})
+	from := clk.Runnable()
+	go func() {
+		defer close(done)
+		for i := 1; i <= n; i++ {
+			for clk.Runnable()-from < time.Duration(i)*every {
+				tick, stop := clk.After(stall.Tick)
+				select {
+				case <-quit:
+					stop()
+					return
+				case <-tick:
+				}
+			}
+			step()
+		}
+	}()
+	var once sync.Once
+	end = func() { once.Do(func() { close(quit); <-done; release() }) }
+	t.Cleanup(end)
+	return end
+}
+
 // started starts argv in a process group of its own, killed when the test
 // ends.
 func started(t *testing.T, argv ...string) *exec.Cmd {
 	t.Helper()
-	cmd := exec.Command(argv[0], argv[1:]...)
+	return start(t, exec.Command(argv[0], argv[1:]...))
+}
+
+// start starts cmd in a process group of its own, killed when the test ends.
+func start(t *testing.T, cmd *exec.Cmd) *exec.Cmd {
+	t.Helper()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -212,13 +284,21 @@ func TestADockerRunStopWaitsForTheContainersStopEvent(t *testing.T) {
 	})
 	t.Run("a pid the daemon names from another namespace", func(t *testing.T) {
 		shortStall(t, 2*time.Second)
-		other := progressing(t)
+		other, step := steppedProcess(t)
 		d := &eventDocker{seen: true, id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", pid: other.Process.Pid, stop: make(chan struct{})}
 		client := started(t, "sleep", "600")
 		a := &App{logger: zap.NewNop(), docker: d, container: "app"}
 		scope := &utils.TeardownScope{}
 		a.teardown.Store(scope)
+		// The other process closes a file every 0.8 s, for 5.6 s, of
+		// keploy's runnable time: the time the stall bound runs on, so the
+		// kill, 2 s of it on, comes before its last step however starved
+		// the host is. (Its steps on wall time raced the bound: on a
+		// starved host keploy's 2 s of runnable time outlast 5.6 s of
+		// wall time.)
+		paced := paceSteps(t, step, 7, 800*time.Millisecond)
 		killed, _ := a.stopDockerRunByEvents(client)
+		paced()
 		if killed == "" || strings.Join(d.kills, ",") != "SIGKILL" {
 			t.Fatalf("said %q after kills %v; want the stall kill", killed, d.kills)
 		}

@@ -85,6 +85,8 @@ type acceptingProxy struct {
 	// bytesWaited hears each WaitPairedBytes, bytesErr is its answer.
 	bytesWaited chan uint64
 	bytesErr    error
+	// onBytes, when set, is told each WaitPairedBytes' context and number.
+	onBytes func(ctx context.Context, n uint64)
 }
 
 func (p *acceptingProxy) Accepted() (uint64, error) {
@@ -111,7 +113,10 @@ func (p *acceptingProxy) WaitAccepted(ctx context.Context, n uint64) error {
 
 // WaitPairedBytes answers bytesErr, and hears each wait's number on
 // bytesWaited when that is set.
-func (p *acceptingProxy) WaitPairedBytes(_ context.Context, n uint64) error {
+func (p *acceptingProxy) WaitPairedBytes(ctx context.Context, n uint64) error {
+	if p.onBytes != nil {
+		p.onBytes(ctx, n)
+	}
 	if p.bytesWaited != nil {
 		p.bytesWaited <- n
 	}
@@ -383,6 +388,87 @@ func TestWaitProxySettledLastWaitsForTheBytesOnThePairedConnections(t *testing.T
 	}
 }
 
+// A test's end that ends before its wait for the bytes on the paired
+// connections began (its context's end in an earlier phase) still makes that
+// wait, given no time (a context already done), under the test's name
+// (coreAgent.EndOf), so the proxy marks what it could not see reached as that
+// test's: a loss of those bytes counted later is charged to it, not to the
+// test open then. One that failed in an earlier phase with its context live
+// (the counts could not be read) gives that wait no time either: it would wait
+// on for bytes no wait may then hold the end for. A wait of no test's makes
+// none, nor does a proxy that cannot wait for the bytes, and an end whose bytes
+// wait ran makes no second.
+func TestAnEndCutBeforeItsBytesWaitStillMarksThem(t *testing.T) {
+	type wait struct {
+		n    uint64
+		done bool
+		end  string
+	}
+	for _, tc := range []struct {
+		name    string
+		end     string // the test whose end it is; "" for none
+		cutAt   string // "apps": before the application's connections settle; "count": the counts unreadable after them; "" for none
+		bytes   error  // the bytes wait's answer
+		noBytes bool   // a proxy that cannot wait for the bytes
+		want    []wait
+	}{
+		{"cut before the bytes wait", "test-2", "apps", nil, false, []wait{{3, true, "test-2"}}},
+		{"cut, no test's", "", "apps", nil, false, nil},
+		{"failed before the bytes wait, its context live", "test-2", "count", nil, false, []wait{{3, true, "test-2"}}},
+		{"cut, a proxy that cannot wait for the bytes", "test-2", "apps", nil, true, nil},
+		{"the bytes wait ran and failed", "test-2", "", errors.New("unknown"), false, []wait{{3, false, "test-2"}}},
+		{"settled", "test-2", "", nil, false, []wait{{3, false, "test-2"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hooks := &connHooks{app: 3, appParked: make(chan uint64, 1)}
+			var got []wait
+			proxy := &acceptingProxy{bytesErr: tc.bytes, onBytes: func(ctx context.Context, n uint64) {
+				got = append(got, wait{n, ctx.Err() != nil, coreAgent.EndOf(ctx)})
+			}}
+			a := &Agent{logger: zap.NewNop(), Hooks: hooks, Proxy: proxy}
+			if tc.noBytes {
+				a.Proxy = &acceptingProxyNoBytes{p: proxy}
+			}
+			c, err := a.ProxyConns(context.Background())
+			if err != nil || c.AppConns != 3 {
+				t.Fatalf("ProxyConns = %+v, %v", c, err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.end != "" {
+				ctx = coreAgent.WithEndOf(ctx, tc.end)
+			}
+			done := make(chan error, 1)
+			go func() { done <- a.WaitProxySettled(ctx, c) }()
+			<-hooks.appParked
+			switch tc.cutAt {
+			case "apps":
+				cancel()
+			case "count":
+				hooks.mu.Lock()
+				hooks.err = errors.New("the kernel's count cannot be read")
+				hooks.mu.Unlock()
+				for i := 0; i < 3; i++ {
+					hooks.appSettled.Add(uint64(i + 1))
+				}
+			default:
+				hooks.count(1)
+				for i := 0; i < 3; i++ {
+					hooks.appSettled.Add(uint64(i + 1))
+				}
+				proxy.Add(1)
+			}
+			err = <-done
+			if (err == nil) != (tc.cutAt == "" && tc.bytes == nil) {
+				t.Fatalf("WaitProxySettled: %v", err)
+			}
+			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Fatalf("bytes waits %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
 // acceptingProxyNoBytes is an acceptingProxy without WaitPairedBytes.
 type acceptingProxyNoBytes struct {
 	coreAgent.Proxy
@@ -415,10 +501,10 @@ func (p *markingProxy) StartProxy(ctx context.Context, opts coreAgent.ProxyOptio
 }
 
 // The agent has its proxy counted by the hooks, before it starts the proxy,
-// under the proven switch or when it was started settling reads, and only
-// when the hooks can count: otherwise the proxy is started exactly as before,
-// its listener untouched.
-func TestHookAsksTheProxyToMarkItsListenerUnderTheSwitchOrWhenSettlingReads(t *testing.T) {
+// whenever the hooks can count, switch or not, settling reads or not: each
+// connection is then routed by the kernel's pairing. Otherwise the proxy is
+// started exactly as before, its listener untouched.
+func TestHookAsksTheProxyToMarkItsListenerWheneverTheHooksCount(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		proven  string
@@ -426,7 +512,8 @@ func TestHookAsksTheProxyToMarkItsListenerUnderTheSwitchOrWhenSettlingReads(t *t
 		want    string
 		settles bool
 	}{
-		{"switch off, counting hooks", "", &connHooks{}, "[start]", false},
+		{"switch off, counting hooks", "", &connHooks{}, "[mark start]", false},
+		{"switch off, hooks that cannot count", "", loadedHooks{}, "[start]", false},
 		{"switch on, counting hooks", "1", &connHooks{}, "[mark start]", false},
 		{"switch on, hooks that cannot count", "1", loadedHooks{}, "[start]", false},
 		// An agent started for a run that learns noise (--settle-reads).

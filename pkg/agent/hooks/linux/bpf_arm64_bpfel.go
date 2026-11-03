@@ -17,6 +17,7 @@ import (
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
 	bpfMapAppBindSocks                = "app_bind_socks"
+	bpfMapAppConnEnds                 = "app_conn_ends"
 	bpfMapAppConnEvents               = "app_conn_events"
 	bpfMapAppConnEventsDropped        = "app_conn_events_dropped"
 	bpfMapAppConns                    = "app_conns"
@@ -51,6 +52,7 @@ const (
 	bpfMapReadySocks                  = "ready_socks"
 	bpfMapRedirectProxyMap            = "redirect_proxy_map"
 	bpfMapSocketClassifyFailures      = "socket_classify_failures"
+	bpfMapStopSignals                 = "stop_signals"
 	bpfMapTargetNamespacePids         = "target_namespace_pids"
 	bpfMapUdpMemberAddrs              = "udp_member_addrs"
 	bpfMapUdpMemberSocks              = "udp_member_socks"
@@ -59,6 +61,7 @@ const (
 	bpfMapUdpReplyEpoch               = "udp_reply_epoch"
 	bpfMapUdpReplyEvents              = "udp_reply_events"
 	bpfMapUdpReplyEventsLost          = "udp_reply_events_lost"
+	bpfProgK_appConnRelease           = "k_app_conn_release"
 	bpfProgK_bind4                    = "k_bind4"
 	bpfProgK_bind6                    = "k_bind6"
 	bpfProgK_connect4                 = "k_connect4"
@@ -77,6 +80,7 @@ const (
 	bpfProgK_readyFork                = "k_ready_fork"
 	bpfProgK_sockCreate               = "k_sock_create"
 	bpfProgK_sockops                  = "k_sockops"
+	bpfProgK_stopSignal               = "k_stop_signal"
 	bpfProgK_udp4Recvmsg              = "k_udp4_recvmsg"
 	bpfProgK_udp4Sendmsg              = "k_udp4_sendmsg"
 	bpfProgK_udp6Recvmsg              = "k_udp6_recvmsg"
@@ -131,6 +135,7 @@ type bpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
+	K_appConnRelease        *ebpf.ProgramSpec `ebpf:"k_app_conn_release"`
 	K_bind4                 *ebpf.ProgramSpec `ebpf:"k_bind4"`
 	K_bind6                 *ebpf.ProgramSpec `ebpf:"k_bind6"`
 	K_connect4              *ebpf.ProgramSpec `ebpf:"k_connect4"`
@@ -149,6 +154,7 @@ type bpfProgramSpecs struct {
 	K_readyFork             *ebpf.ProgramSpec `ebpf:"k_ready_fork"`
 	K_sockCreate            *ebpf.ProgramSpec `ebpf:"k_sock_create"`
 	K_sockops               *ebpf.ProgramSpec `ebpf:"k_sockops"`
+	K_stopSignal            *ebpf.ProgramSpec `ebpf:"k_stop_signal"`
 	K_udp4Recvmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_recvmsg"`
 	K_udp4Sendmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_sendmsg"`
 	K_udp6Recvmsg           *ebpf.ProgramSpec `ebpf:"k_udp6_recvmsg"`
@@ -166,6 +172,7 @@ type bpfProgramSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
 	AppBindSocks                *ebpf.MapSpec `ebpf:"app_bind_socks"`
+	AppConnEnds                 *ebpf.MapSpec `ebpf:"app_conn_ends"`
 	AppConnEvents               *ebpf.MapSpec `ebpf:"app_conn_events"`
 	AppConnEventsDropped        *ebpf.MapSpec `ebpf:"app_conn_events_dropped"`
 	AppConns                    *ebpf.MapSpec `ebpf:"app_conns"`
@@ -200,6 +207,7 @@ type bpfMapSpecs struct {
 	ReadySocks                  *ebpf.MapSpec `ebpf:"ready_socks"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	SocketClassifyFailures      *ebpf.MapSpec `ebpf:"socket_classify_failures"`
+	StopSignals                 *ebpf.MapSpec `ebpf:"stop_signals"`
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
 	UdpMemberAddrs              *ebpf.MapSpec `ebpf:"udp_member_addrs"`
 	UdpMemberSocks              *ebpf.MapSpec `ebpf:"udp_member_socks"`
@@ -237,6 +245,7 @@ func (o *bpfObjects) Close() error {
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
 	AppBindSocks                *ebpf.Map `ebpf:"app_bind_socks"`
+	AppConnEnds                 *ebpf.Map `ebpf:"app_conn_ends"`
 	AppConnEvents               *ebpf.Map `ebpf:"app_conn_events"`
 	AppConnEventsDropped        *ebpf.Map `ebpf:"app_conn_events_dropped"`
 	AppConns                    *ebpf.Map `ebpf:"app_conns"`
@@ -271,6 +280,7 @@ type bpfMaps struct {
 	ReadySocks                  *ebpf.Map `ebpf:"ready_socks"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
 	SocketClassifyFailures      *ebpf.Map `ebpf:"socket_classify_failures"`
+	StopSignals                 *ebpf.Map `ebpf:"stop_signals"`
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
 	UdpMemberAddrs              *ebpf.Map `ebpf:"udp_member_addrs"`
 	UdpMemberSocks              *ebpf.Map `ebpf:"udp_member_socks"`
@@ -284,6 +294,7 @@ type bpfMaps struct {
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
 		m.AppBindSocks,
+		m.AppConnEnds,
 		m.AppConnEvents,
 		m.AppConnEventsDropped,
 		m.AppConns,
@@ -318,6 +329,7 @@ func (m *bpfMaps) Close() error {
 		m.ReadySocks,
 		m.RedirectProxyMap,
 		m.SocketClassifyFailures,
+		m.StopSignals,
 		m.TargetNamespacePids,
 		m.UdpMemberAddrs,
 		m.UdpMemberSocks,
@@ -339,6 +351,7 @@ type bpfVariables struct {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
+	K_appConnRelease        *ebpf.Program `ebpf:"k_app_conn_release"`
 	K_bind4                 *ebpf.Program `ebpf:"k_bind4"`
 	K_bind6                 *ebpf.Program `ebpf:"k_bind6"`
 	K_connect4              *ebpf.Program `ebpf:"k_connect4"`
@@ -357,6 +370,7 @@ type bpfPrograms struct {
 	K_readyFork             *ebpf.Program `ebpf:"k_ready_fork"`
 	K_sockCreate            *ebpf.Program `ebpf:"k_sock_create"`
 	K_sockops               *ebpf.Program `ebpf:"k_sockops"`
+	K_stopSignal            *ebpf.Program `ebpf:"k_stop_signal"`
 	K_udp4Recvmsg           *ebpf.Program `ebpf:"k_udp4_recvmsg"`
 	K_udp4Sendmsg           *ebpf.Program `ebpf:"k_udp4_sendmsg"`
 	K_udp6Recvmsg           *ebpf.Program `ebpf:"k_udp6_recvmsg"`
@@ -371,6 +385,7 @@ type bpfPrograms struct {
 
 func (p *bpfPrograms) Close() error {
 	return _BpfClose(
+		p.K_appConnRelease,
 		p.K_bind4,
 		p.K_bind6,
 		p.K_connect4,
@@ -389,6 +404,7 @@ func (p *bpfPrograms) Close() error {
 		p.K_readyFork,
 		p.K_sockCreate,
 		p.K_sockops,
+		p.K_stopSignal,
 		p.K_udp4Recvmsg,
 		p.K_udp4Sendmsg,
 		p.K_udp6Recvmsg,

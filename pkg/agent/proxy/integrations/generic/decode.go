@@ -50,13 +50,11 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			}
 
 			// To read the stream of request packets from the client. The
-			// connection's end is its EOF: read so that it is returned at once
-			// (ReadBytes retries an empty EOF, 50 ms apart, and under this 10
-			// ms deadline that retry comes back as a timeout, which hid the
-			// close and left the parser polling it for ever).
+			// connection's end is its EOF, which ReadBytes returns at the
+			// read that gets it.
 			ended := false
 			for {
-				buffer, err := pUtil.ReadBytesUntilEOF(ctx, logger, clientConn)
+				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
 				netErr, isNet := err.(net.Error)
 				timeout := isNet && netErr.Timeout()
 				atEOF := errors.Is(err, io.EOF) || (err != nil && err.Error() == "EOF")

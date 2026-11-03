@@ -44,6 +44,15 @@ type req struct {
 	// arrived is when keploy had read the whole request (zero: unknown):
 	// the app sent it, and read whatever clock it carries, no later.
 	arrived time.Time
+	// written is, for a call of another parser that the learn step decides
+	// (LearnMatch), the answer that parser writes for a recording the learn
+	// step serves it: it may write another one than the learn step gives it
+	// (SQS sets a send's digests over the message sent), or none (nil),
+	// which the learn step asks before it takes the recording, and then
+	// refuses it. nil written: the answer served is the one written. The
+	// learn step states its view of a serve with the answer written
+	// (servedExchange).
+	written func(served *models.Mock) *models.Mock
 }
 
 // sentBody is the body as the client sent it: what a hash of the payload
@@ -2243,7 +2252,7 @@ func statesHTTPLifetimes(mockDb integrations.MockMemDb, compared []*models.Mock)
 
 // buildHTTPMismatchReportOf is buildHTTPMismatchReport without the hint for a
 // call shared across tests.
-func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) *models.MockMismatchReport {
+func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) (r *models.MockMismatchReport) {
 	// Defensive: this diagnostic builder and its callees (pickClosestCandidate,
 	// renderLiveRequest) — plus decode.go's 502 error line — dereference
 	// request.URL throughout. http.ReadRequest always sets a non-nil URL on the
@@ -2252,6 +2261,11 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	if request.URL == nil {
 		request.URL = &url.URL{}
 	}
+	// The report names the operation the call carries in a field of its
+	// own (MockMismatchReport.Operation), never in its summary. Every
+	// return below builds a report.
+	liveOp := liveOperation(request, liveBody)
+	defer func() { r.Operation = liveOp }()
 	actualKey := request.Method + " " + request.URL.Path
 	// Destination identifies WHICH upstream this missed call targeted; the same
 	// method+path can hit several hosts. Host header first, URL authority next.
@@ -2357,7 +2371,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 			closestPool = same
 		}
 	}
-	closestMock := pickClosestCandidate(request, schemaSurvivors, closestPool)
+	closestMock := pickClosestCandidate(request, liveOp, schemaSurvivors, closestPool)
 	if closestMock == nil || closestMock.Spec.HTTPReq == nil {
 		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 			WithDestination(dest).
@@ -2507,16 +2521,30 @@ func comparedDestinations(pool []*models.Mock, candidateCount int) []string {
 
 // pickClosestCandidate prefers a schema-match survivor (already same
 // method/path/keys) and falls back to the lowest-Levenshtein "METHOD path"
-// candidate across the pool, same-method candidates first.
-func pickClosestCandidate(request *http.Request, schemaSurvivors, pool []*models.Mock) *models.Mock {
-	if len(schemaSurvivors) > 0 {
-		for _, m := range schemaSurvivors {
-			if m != nil && m.Spec.HTTPReq != nil {
-				return m
-			}
+// candidate across the pool, same-method candidates first. A call that
+// carries an operation (liveOp, its models.HTTPOperationLabel) is diffed
+// against a recording of the same operation where there is one: the first
+// survivor of it, else the first survivor; in the pool, each key is named
+// with its operation (models.WithHTTPOperation), so one of the same
+// operation is nearer. A recording's operation is read once
+// (recordedOperations).
+func pickClosestCandidate(request *http.Request, liveOp string, schemaSurvivors, pool []*models.Mock) *models.Mock {
+	var survivor *models.Mock
+	for _, m := range schemaSurvivors {
+		if m == nil || m.Spec.HTTPReq == nil {
+			continue
+		}
+		if liveOp == "" || recordedOperations.of(m.Spec.HTTPReq) == liveOp {
+			return m
+		}
+		if survivor == nil {
+			survivor = m
 		}
 	}
-	actualKey := request.Method + " " + request.URL.Path
+	if survivor != nil {
+		return survivor
+	}
+	actualKey := models.WithHTTPOperation(request.Method+" "+request.URL.Path, liveOp)
 	bestDist := -1
 	var closest *models.Mock
 	for pass := 0; pass < 2; pass++ {
@@ -2532,7 +2560,7 @@ func pickClosestCandidate(request *http.Request, schemaSurvivors, pool []*models
 			if parsed, err := url.Parse(mock.Spec.HTTPReq.URL); err == nil {
 				mockPath = parsed.Path
 			}
-			mockKey := string(mock.Spec.HTTPReq.Method) + " " + mockPath
+			mockKey := models.WithHTTPOperation(string(mock.Spec.HTTPReq.Method)+" "+mockPath, recordedOperations.of(mock.Spec.HTTPReq))
 			dist := levenshtein.ComputeDistance(actualKey, mockKey)
 			if bestDist < 0 || dist < bestDist {
 				bestDist = dist

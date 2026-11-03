@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
-	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent/proxy/synhold"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"

@@ -9,22 +9,25 @@ import (
 	"strconv"
 	"testing"
 
-	"golang.org/x/sys/unix"
+	"go.keploy.io/server/v3/internal/testnet"
 )
 
 // TCPListeners gives the addresses of the sockets that listen on the port,
 // IPv4 and IPv6, and nothing else: not a connection on the port (the
 // accepted one has it as its local port), not a socket bound to it that
 // never listened, and nothing once the listener has closed.
+//
+// The port is held for the test's life at every address (testnet.SharedPort)
+// and its listeners open beside the hold: once the IPv4 listener closes, a
+// socket another test or process binds to port 0 is not given the port, at
+// any address. The hold only binds: a socket bound to the port that never
+// listened.
 func TestTCPListenersGivesTheListenersOnThePortAlone(t *testing.T) {
-	ln, err := net.Listen("tcp4", "127.0.0.2:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ln.Close() }()
-	port := uint16(ln.Addr().(*net.TCPAddr).Port)
+	shared := testnet.SharedPort(t)
+	ln := testnet.ListenShared(t, "tcp4", net.JoinHostPort("127.0.0.2", strconv.Itoa(shared)))
+	port := uint16(shared)
 	want := []netip.Addr{netip.MustParseAddr("127.0.0.2")}
-	if v6, err := net.Listen("tcp6", net.JoinHostPort("::1", strconv.Itoa(int(port)))); err == nil {
+	if v6, err := testnet.OpenShared("tcp6", net.JoinHostPort("::1", strconv.Itoa(shared))); err == nil {
 		defer func() { _ = v6.Close() }()
 		want = append(want, netip.IPv6Loopback())
 	} else {
@@ -61,19 +64,17 @@ func TestTCPListenersGivesTheListenersOnThePortAlone(t *testing.T) {
 		}
 	}
 
-	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	// A port a socket that never listens holds at every address, so no
+	// other socket can listen there meanwhile.
+	_, bound, err := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = unix.Close(fd) }()
-	if err := unix.Bind(fd, &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
-		t.Fatal(err)
-	}
-	sa, err := unix.Getsockname(fd)
+	n, err := strconv.ParseUint(bound, 10, 16)
 	if err != nil {
 		t.Fatal(err)
 	}
-	boundPort := uint16(sa.(*unix.SockaddrInet4).Port)
+	boundPort := uint16(n)
 	if got, err := TCPListeners(boundPort); err != nil || len(got) != 0 {
 		t.Fatalf("TCPListeners of a port a socket is bound to but does not listen on = %v, %v", got, err)
 	}

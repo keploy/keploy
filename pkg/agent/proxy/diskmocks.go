@@ -246,7 +246,7 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 		return fmt.Errorf("disk mocks: write %q: %w", m.Name, err)
 	}
 	e := diskEntry{reqTsNano: m.Spec.ReqTimestampMock.UnixNano(), resTsNano: m.Spec.ResTimestampMock.UnixNano(),
-		placeTsNano: models.PlaceOf(m).UnixNano(), off: off, length: n, respOff: respOff, respLen: respLen}
+		placeTsNano: placeNano(models.PlaceOf(m)), off: off, length: n, respOff: respOff, respLen: respLen}
 	d.byName[m.Name] = e
 	d.entries = append(d.entries, e)
 	// Record's full round pairs by kind (RangeKind), under the proven
@@ -404,6 +404,7 @@ func (d *DiskMocks) readAt(e diskEntry) (*models.Mock, error) {
 	if f := d.onLoad.Load(); f != nil {
 		(*f)(m)
 	}
+	m.SetStoredSize(int64(e.length + e.respLen))
 	if e.respOff >= 0 {
 		respOff, respLen := e.respOff, e.respLen
 		m.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
@@ -813,16 +814,18 @@ func (d *DiskMocks) RangeKind(kind models.Kind, visit func(name string, load fun
 }
 
 // RangeTimes calls visit with every mock on disk, each once, in no order:
-// its name, its request and answer times, whether it is protocol-phase
-// (models.Mock.IsProtocolPhase) and its clock (models.Origin.Clock, "" for
-// none; both told under the proven switch only, the only one the teardown
-// bound reads them under), until visit returns false. Nothing is
-// decoded: the times are the store's own, kept as each mock was added. It
+// its name, its place (models.PlaceOf, as Add computed it; the zero time for
+// a mock with none, which bounds nothing), whether it is
+// protocol-phase (models.Mock.IsProtocolPhase) and its clock
+// (models.Origin.Clock, "" for none; both told under the proven switch
+// only, the only one the teardown bound reads them under), until visit
+// returns false. Nothing is decoded: the places are the store's own, kept
+// as each mock was added. It
 // is what bounds a set's teardown under keploy mock replay
 // (MockManager.SetRecordingTimes): the latest recording of the set's tests,
 // which the staging does not read. visit runs under the store's lock, so it
 // must not call the store.
-func (d *DiskMocks) RangeTimes(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error {
+func (d *DiskMocks) RangeTimes(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closed {
@@ -833,11 +836,29 @@ func (d *DiskMocks) RangeTimes(visit func(name string, req, res time.Time, proto
 		if i, ok := d.clockOf[name]; ok {
 			clock = d.clocks[i]
 		}
-		if !visit(name, time.Unix(0, e.reqTsNano), time.Unix(0, e.resTsNano), d.phase[name], clock) {
+		// A mock with no place (placeNano) is told the zero time, as the
+		// trees tell it, not the Unix epoch.
+		var place time.Time
+		if e.placeTsNano != 0 {
+			place = time.Unix(0, e.placeTsNano)
+		}
+		if !visit(name, place, d.phase[name], clock) {
 			return nil
 		}
 	}
 	return nil
+}
+
+// placeNano is place (models.PlaceOf) in Unix nanoseconds as the store keeps
+// it: 0 for the zero place of a mock with no request time, which RangeTimes
+// tells as the zero time, not the zero time's UnixNano, which overflows to a
+// time in 1754 that it told as a place. Like that time, 0 sorts before every
+// recorded place.
+func placeNano(place time.Time) int64 {
+	if place.IsZero() {
+		return 0
+	}
+	return place.UnixNano()
 }
 
 // noteClockLocked notes name's clock for RangeTimes, "" for none: a mock

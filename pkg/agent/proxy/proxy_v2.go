@@ -276,8 +276,16 @@ func (p *Proxy) recordViaSupervisor(
 		// (it closed its socket, and refused what came after): a parser
 		// that reaches that end mid-message knows the client's close cut
 		// the message there, not the destination (the HTTP recorder leaves
-		// that exchange out, and says why).
+		// that exchange out, and says why, unless what the client refused,
+		// of what reached the proxy before the client's FIN, only finished
+		// the message's framing).
 		ClientStopped: svSess.MarkEndedWhereClientStopped,
+		// How each side ended its side of the connection, and which ended
+		// first: a call the destination never answered is recorded with
+		// the fault it gave (its reset or its close), or as the client's
+		// giving up when the client closed first. An end that is the
+		// application's stop records no fault (peerEndMarker).
+		PeerEnded: p.peerEndMarker(svSess, appEndOf(srcConn)),
 		// User-tunable record-buffer caps. Snapshotted onto the Proxy
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via
@@ -315,6 +323,7 @@ func (p *Proxy) recordViaSupervisor(
 
 	svSess.ClientStream = r.ClientStream()
 	svSess.DestStream = r.DestStream()
+	svSess.Order = r.StreamedBefore
 	reads.follow(svSess.ClientStream, r.Teed)
 	svSess.Directives = r.Directives()
 	svSess.Acks = r.Acks()

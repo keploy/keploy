@@ -11,7 +11,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -588,9 +590,10 @@ func TestRecord_ALookTheAgentDoesNotAnswerDoesNotLoseAMock(t *testing.T) {
 // (killed, or crashed) without handing it over: its stream ends.
 type goneInstrumentation struct {
 	trickleInstrumentation
-	looked chan struct{}
-	once   sync.Once
-	asked  atomic.Int32
+	refused error // what a look gets once it has gone (refusedErr)
+	looked  chan struct{}
+	once    sync.Once
+	asked   atomic.Int32
 }
 
 func (g *goneInstrumentation) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
@@ -598,7 +601,7 @@ func (g *goneInstrumentation) BacklogBefore(context.Context, time.Time) (models.
 	if g.looked == nil {
 		// Gone before the drain asks: a look that comes anyway (a slow
 		// machine) finds it unreachable, and says nothing of what it held.
-		return models.AgentBacklog{}, refusedErr()
+		return models.AgentBacklog{}, g.refused
 	}
 	g.once.Do(func() { close(g.looked) })
 	// Its capture moving on every look: the drain never gives up on it, so
@@ -639,7 +642,7 @@ func recordGone(t *testing.T, lookFirst bool) (*goneInstrumentation, *observer.O
 	t.Helper()
 	defer func(code int) { utils.ErrCode = code }(utils.ErrCode)
 	utils.ErrCode = 0
-	inst := &goneInstrumentation{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)}}
+	inst := &goneInstrumentation{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)}, refused: refusedErr(t)}
 	if lookFirst {
 		inst.looked = make(chan struct{})
 	}
@@ -692,30 +695,24 @@ type gatedBacklog struct {
 	asked           atomic.Int32
 	err             error
 	// goneAtSecond, when set, runs at the second look, which then finds the
-	// agent unreachable: it ends the stream there.
+	// agent unreachable (refused): it ends the stream there.
 	goneAtSecond func()
+	refused      error
 }
 
 // refusedErr is the error of a real refused dial: the platform's own, as an
-// agent that is gone gives it.
-func refusedErr() error {
-	refusedOnce.Do(func() {
-		ln, err := net.Listen("tcp4", "127.0.0.1:0")
-		if err != nil {
-			refused = err
-			return
-		}
-		addr := ln.Addr().String()
-		_ = ln.Close()
-		_, refused = net.Dial("tcp4", addr)
-	})
-	return refused
+// agent that is gone gives it. The port dialled is held for the test's life
+// with nothing listening there (testnet.RefusedAddr), so no other socket can
+// take it and answer the dial.
+func refusedErr(t *testing.T) error {
+	t.Helper()
+	c, err := net.Dial("tcp", testnet.RefusedAddr(t, "tcp"))
+	if err == nil {
+		_ = c.Close()
+	}
+	require.True(t, neterr.IsConnRefused(err), "a dial to a held port nothing listens at was not refused: %v", err)
+	return err
 }
-
-var (
-	refusedOnce sync.Once
-	refused     error
-)
 
 func (g *gatedBacklog) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
 	n := g.asked.Add(1)
@@ -725,7 +722,7 @@ func (g *gatedBacklog) BacklogBefore(context.Context, time.Time) (models.AgentBa
 	})
 	if n >= 2 && g.goneAtSecond != nil {
 		g.goneAtSecond()
-		return models.AgentBacklog{}, refusedErr()
+		return models.AgentBacklog{}, g.refused
 	}
 	if g.err != nil {
 		return models.AgentBacklog{}, g.err
@@ -764,6 +761,7 @@ func gatedDrain(t *testing.T, lookErr error, frames *atomic.Uint64, whileLooking
 	if atSecond {
 		var end sync.Once                                                     // a later look, on a slow machine, finds it ended
 		inst.goneAtSecond = func() { end.Do(func() { close(consumerDone) }) } // the agent's stream ends
+		inst.refused = refusedErr(t)
 	}
 	wait(inst.entered, "the drain's look")
 	whileLooking()
@@ -808,7 +806,7 @@ func TestDrainTrailingMocks_AnAgentGoneAfterSayingItHeldAMockFailsTheRun(t *test
 func TestDrainTrailingMocks_AnAgentGoneAtTheFirstLookIsAWarning(t *testing.T) {
 	var frames atomic.Uint64
 	frames.Store(1)
-	lost, logs, code := gatedDrain(t, refusedErr(), &frames, func() {})
+	lost, logs, code := gatedDrain(t, refusedErr(t), &frames, func() {})
 	if lost || code != 0 || logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("ended its mock stream before it said").Len() != 1 {
 		t.Fatalf("want one WARN and the run not failed: lost=%v exit code %d: %v", lost, code, logs.All())
 	}
@@ -876,7 +874,7 @@ func TestDrainTrailingMocks_AnAgentGoneAtTheNextLookGoesByTheOneBefore(t *testin
 func TestDrainTrailingMocks_MocksStillComingBeforeAnyAnswerAreAWarning(t *testing.T) {
 	var frames atomic.Uint64
 	frames.Store(1)
-	lost, logs, code := gatedDrain(t, refusedErr(), &frames, func() { frames.Add(1) }, true)
+	lost, logs, code := gatedDrain(t, refusedErr(t), &frames, func() { frames.Add(1) }, true)
 	if lost || code != 0 || logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("ended its mock stream before it said").Len() != 1 {
 		t.Fatalf("want one WARN and the run not failed: lost=%v exit code %d: %v", lost, code, logs.All())
 	}
@@ -951,7 +949,7 @@ func (ownedGone) StartedAgent() bool { return true }
 func TestRecord_AnAgentThisClientStartedGoneBeforeTheDrainAsksFailsTheRun(t *testing.T) {
 	defer func(code int) { utils.ErrCode = code }(utils.ErrCode)
 	utils.ErrCode = 0
-	inst := &goneInstrumentation{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)}}
+	inst := &goneInstrumentation{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)}, refused: refusedErr(t)}
 	core, logs := observer.New(zapcore.WarnLevel)
 	cfg := &config.Config{}
 	cfg.Mock.Name = "owned-gone-test"
@@ -1042,7 +1040,7 @@ func TestRecord_AnAgentThatDiedUnderTheRunFailsWithItsExit(t *testing.T) {
 	defer func(code int) { utils.ErrCode = code }(utils.ErrCode)
 	utils.ErrCode = 0
 	inst := diedAgent{
-		ownedGone: ownedGone{&goneInstrumentation{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)}}},
+		ownedGone: ownedGone{&goneInstrumentation{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)}, refused: refusedErr(t)}},
 		exited:    make(chan struct{}),
 	}
 	cfg := &config.Config{}

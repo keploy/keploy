@@ -65,7 +65,7 @@ func (p *diskServingProxy) SetPoolNames(names []string, owners map[string]string
 	return nil
 }
 
-func (p *diskServingProxy) SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error) error {
+func (p *diskServingProxy) SetRecordingTimes(src func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error) error {
 	p.mm.SetRecordingTimes(src)
 	return nil
 }

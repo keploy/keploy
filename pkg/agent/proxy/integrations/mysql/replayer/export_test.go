@@ -2,7 +2,9 @@ package replayer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -81,6 +83,16 @@ func MatchCommandExaminedForTest(ctx context.Context, req mysql.Request, db inte
 	return resp, ok, examined, err
 }
 
+// MatchCommandWalkForTest is MatchCommandExaminedForTest with whole walking a
+// COM_STMT_EXECUTE's candidates on past a definitive match no later candidate
+// can outrank (matchOptions.wholeWalk), as the matcher did before it ended
+// the walk there: the reference a row counts the ended walk against.
+func MatchCommandWalkForTest(ctx context.Context, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, whole bool) (*mysql.Response, bool, int, error) {
+	examined := 0
+	resp, ok, _, err := matchCommandWith(ctx, zap.NewNop(), req, db, dctx, nil, nil, matchOptions{wholeWalk: whole, examined: &examined})
+	return resp, ok, examined, err
+}
+
 // MatchCommandBodiesForTest is MatchCommandForTest that also returns how many
 // live request bodies the command built (matchOptions.bodiesBuilt). With eager
 // it builds the body before the scan, as the matcher did before it built the
@@ -93,6 +105,36 @@ func MatchCommandBodiesForTest(ctx context.Context, logger *zap.Logger, req mysq
 		missText = fmt.Sprintf("%+v", *miss)
 	}
 	return resp, ok, missText, built, err
+}
+
+// MatchCommandGateForTest is MatchCommandForTest that also returns how many
+// candidates the strict gate compared with the live request
+// (matchOptions.compared). With eager the gate decides on each fallback of a
+// COM_STMT_EXECUTE as the walk meets it and walks on past a definitive match
+// no later candidate can outrank, as the matcher did before it deferred the
+// gate past the walk and ended the walk there (matchOptions.eagerGate,
+// matchOptions.wholeWalk).
+func MatchCommandGateForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *mocknoise.Engine, eager bool) (*mysql.Response, bool, string, int, error) {
+	compared := 0
+	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, dctx, eng, nil, matchOptions{compared: &compared, eagerGate: eager, wholeWalk: eager})
+	missText := ""
+	if miss != nil {
+		missText = fmt.Sprintf("%+v", *miss)
+	}
+	return resp, ok, missText, compared, err
+}
+
+// MatchCommandDocsForTest is MatchCommandGateForTest that also returns how
+// many live bodies the strict gate gave the engine to compare
+// (matchOptions.docsMade), and how many times the engine validated or
+// decoded them, summed (mocknoise.JSONBody.Reads).
+func MatchCommandDocsForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *mocknoise.Engine, eager bool) (compared, docs, reads int, err error) {
+	var made []*mocknoise.JSONBody
+	_, _, _, err = matchCommandWith(ctx, logger, req, db, dctx, eng, nil, matchOptions{compared: &compared, docsMade: &made, eagerGate: eager, wholeWalk: eager})
+	for _, d := range made {
+		reads += d.Reads()
+	}
+	return compared, len(made), reads, err
 }
 
 // NoiseEngineForTest is the schema-noise engine matchCommand runs with, with
@@ -228,4 +270,50 @@ func ReplayCommandsForTest(t *testing.T, db integrations.MockMemDb, commands ...
 		}
 	}
 	return replies, done
+}
+
+// CheckDecodedBodies turns on, for the rest of the package's run, the check
+// of every recorded request body the strict gate makes decoded
+// (mysqlRequestJSONBody): it must be what json.Unmarshal makes of
+// mysqlRequestBody's bytes, or the check panics. A message is checked once
+// per reading (its statement parameter count and statement), as its body is
+// the same for each.
+func CheckDecodedBodies() {
+	decodedBodyCheck = checkDecodedBody
+}
+
+// DecodedBodiesChecked is how many decoded bodies the check compared.
+func DecodedBodiesChecked() int64 {
+	return decodedBodiesChecked.Load()
+}
+
+type decodedBodyReading struct {
+	message         any
+	statementParams int
+	query           string
+}
+
+var (
+	decodedBodiesSeen    sync.Map
+	decodedBodiesChecked atomic.Int64
+)
+
+func checkDecodedBody(message any, statementParams int, query string, doc map[string]any, decoded any) {
+	if message != nil && reflect.TypeOf(message).Comparable() {
+		if _, seen := decodedBodiesSeen.LoadOrStore(decodedBodyReading{message, statementParams, query}, struct{}{}); seen {
+			return
+		}
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		panic(fmt.Sprintf("a body made decoded does not encode: %v (decoded %#v)", err, decoded))
+	}
+	var want any
+	if err := json.Unmarshal(raw, &want); err != nil {
+		panic(fmt.Sprintf("a body made decoded encodes to %s, which does not decode: %v", raw, err))
+	}
+	if !reflect.DeepEqual(want, decoded) {
+		panic(fmt.Sprintf("a body made decoded is not what its bytes decode to:\nbytes   %s\ndecoded %#v\nwant    %#v", raw, decoded, want))
+	}
+	decodedBodiesChecked.Add(1)
 }

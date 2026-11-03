@@ -68,6 +68,12 @@ func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req
 		if m == nil || m.Kind != models.HTTP || m.Spec.HTTPReq == nil || (m.Spec.HTTPResp == nil && !m.HasSpilledResponse()) {
 			continue
 		}
+		// A call that ended in a fault is no representative answer: its head
+		// would be served whole to every call. The next candidate serves, or
+		// the default 200.
+		if m.Spec.Fault != nil {
+			continue
+		}
 		if m.Spec.HTTPReq.Method != models.Method(input.method) {
 			continue
 		}

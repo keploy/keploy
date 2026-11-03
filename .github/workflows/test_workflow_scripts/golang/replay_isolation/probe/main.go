@@ -1,14 +1,15 @@
 // Command egressprobe is the replay-isolation repro (DESIGN.md section 2).
 //
 //	egressprobe sink  -dir OUT          counts what arrives, per path, into OUT/<path>.count
-//	egressprobe app   -sink IP [-sink6 IP6] [-listen :8080]
+//	egressprobe app   -sink IP [-sink6 IP6] [-imds IP] [-peer NAME] [-listen :8080]
 //	                                    GET /fire fires every path at the sink and answers
 //	                                    a constant body (so record and replay agree); the
 //	                                    per-path outcome goes to stderr only
 //	egressprobe fork1|fork2 ADDR        the double-forked child path (internal)
 //
-// The sink owns the test addresses on its own interface, among them
-// 169.254.169.254, so no path ever reaches a real cloud or metadata service.
+// The sink owns the test addresses on its own interface, among them the one
+// the app is given as -imds (the metadata address; with none it makes no
+// metadata call), so no path ever reaches a real cloud or metadata service.
 // Nothing here reads or prints a credential.
 package main
 
@@ -36,7 +37,7 @@ const (
 	portFork     = 7003 // TCP from a double-forked (reparented) child
 	portTFO      = 7004 // TCP fast open, sendto(MSG_FASTOPEN) with no connect()
 	portTCP6     = 7005 // TCP over IPv6
-	portIMDS     = 80   // TCP to 169.254.169.254 (an address of the sink)
+	portIMDS     = 80   // TCP to the metadata address (-imds, an address of the sink)
 	portUDP      = 9999 // UDP, connected and unconnected (payload names which)
 	portQUIC     = 443  // UDP to QUIC's port
 	portDNS      = 53   // DNS; the run points the resolver at the sink
@@ -92,7 +93,7 @@ func app(args []string) {
 	fs := flag.NewFlagSet("app", flag.ExitOnError)
 	sinkIP := fs.String("sink", "198.18.0.10", "the sink's IPv4 address")
 	sink6 := fs.String("sink6", "", "the sink's IPv6 address (empty: skip IPv6)")
-	imds := fs.String("imds", "169.254.169.254", "the metadata address the sink owns")
+	imds := fs.String("imds", "", "the metadata address the sink owns (empty: the app makes no metadata call)")
 	peer := fs.String("peer", "", "a container name the network holds, resolved through it (empty: skip)")
 	listen := fs.String("listen", ":8080", "")
 	_ = fs.Parse(args)
@@ -108,7 +109,9 @@ func app(args []string) {
 		outcome("icmp-dgram", icmpEcho(*sinkIP, syscall.SOCK_DGRAM))
 		// As a metadata client sends it (an AWS SDK names the address it
 		// dials in Host), so a replay's report can name the destination.
-		outcome("imds-tcp", dialWrite("tcp", net.JoinHostPort(*imds, strconv.Itoa(portIMDS)), "GET /latest/meta-data/ HTTP/1.1\r\nHost: "+*imds+"\r\nConnection: close\r\n\r\n"))
+		if *imds != "" {
+			outcome("imds-tcp", dialWrite("tcp", net.JoinHostPort(*imds, strconv.Itoa(portIMDS)), "GET /latest/meta-data/ HTTP/1.1\r\nHost: "+*imds+"\r\nConnection: close\r\n\r\n"))
+		}
 		outcome("tfo", fastOpen(*sinkIP, portTFO))
 		_, err := net.DefaultResolver.LookupHost(context.Background(), "leak-probe.invalid-replay-isolation.test")
 		outcome("dns-lookup", err)

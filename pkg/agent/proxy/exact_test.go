@@ -364,26 +364,32 @@ func TestAfterTheLastTestTheSetsTeardownRecordingAnswersAPerTestRead(t *testing.
 
 // keploy mock replay sends no recorded windows but stages the whole
 // recording and names the pool's recordings (SetPoolNames): there the set's
-// teardown is what was sent after every recording a test owns, consumed or
-// not, so after the tests a per-test read shows the pool's recording made
-// after the last test's, never one made before the first test or between two
-// tests. With neither windows nor pool names, or with pool names but no
-// recording a test owns, nothing tells the teardown, and a per-test read
-// after the test shows none.
+// teardown is what was sent after the place (models.PlaceOf) of every
+// recording a test owns, consumed or not, so after the tests a per-test read
+// shows the pool's recordings made after the last test's, never one made
+// before the first test or between two tests. A test's recording sent before
+// a pool recording bounds it by its place, where record charged it, though
+// its answer was stamped after: record charged the pool recording outside
+// the test's scope. With neither windows nor pool names, or with pool names
+// but no recording a test owns, nothing tells the teardown, and a per-test
+// read after the test shows none.
 func TestWithNoRecordedWindowsTheTeardownIsAfterEveryRecordingATestOwns(t *testing.T) {
 	boot := exactMongo("boot", 200*time.Millisecond, models.LifetimePerTest)
 	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
 	gap := exactMongo("gap", 1600*time.Millisecond, models.LifetimePerTest)
 	owned2 := exactMongo("owned-2", 2*time.Second, models.LifetimePerTest)
-	// A session-tier recording a test owns, answered later than its request.
+	// Sent after T2's own and before T2's unconsumed recording: no teardown.
+	beforeReused := exactMongo("before-reused", 2050*time.Millisecond, models.LifetimePerTest)
+	// A session-tier recording a test owns, never consumed, answered later
+	// than its request: placed at its request.
 	reused := exactMongo("reused", 2100*time.Millisecond, models.LifetimeSession)
 	reused.Spec.ResTimestampMock = exactT0.Add(2900 * time.Millisecond)
-	early := exactMongo("before-answer", 2800*time.Millisecond, models.LifetimePerTest)
+	beforeAnswer := exactMongo("before-answer", 2800*time.Millisecond, models.LifetimePerTest)
 	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
 	// A protocol-phase recording made later is no test's.
 	hs := configMock("handshake", 3500*time.Millisecond)
-	slice := []string{"boot", "gap", "before-answer", "end-sessions"}
-	mm := stagedManager(t, []*models.Mock{boot, owned, gap, owned2, early, end}, []*models.Mock{reused, hs})
+	slice := []string{"boot", "gap", "before-reused", "before-answer", "end-sessions"}
+	mm := stagedManager(t, []*models.Mock{boot, owned, gap, owned2, beforeReused, beforeAnswer, end}, []*models.Mock{reused, hs})
 	mm.SetPoolNames(slice)
 	mm.ServeExactPool("k", slice)
 	perTestReads(t, mm, "before the first test")
@@ -392,13 +398,13 @@ func TestWithNoRecordedWindowsTheTeardownIsAfterEveryRecordingATestOwns(t *testi
 		t.Fatal("precondition: the test's own recording did not answer it")
 	}
 	mm.ServeExactPool("k", slice)
-	perTestReads(t, mm, "between two tests", "end-sessions")
+	perTestReads(t, mm, "between two tests", "before-answer", "end-sessions")
 	mm.ServeExactTest("T2", []*models.Mock{owned2, reused})
 	if !mm.DeleteFilteredMock(*owned2) {
 		t.Fatal("precondition: the second test's own recording did not answer it")
 	}
 	mm.ServeExactPool("k", slice)
-	perTestReads(t, mm, "after the last test", "end-sessions")
+	perTestReads(t, mm, "after the last test", "before-answer", "end-sessions")
 
 	bare := stagedManager(t, []*models.Mock{owned, end}, nil)
 	bare.ServeExactPool("k", []string{"end-sessions"})
@@ -3832,5 +3838,50 @@ func TestAVariableCallPastItsRecordingsIsAnsweredNothingBetweenTests(t *testing.
 		if want := []string{"p0", "p1", "no answer", "no answer"}; !reflect.DeepEqual(got, want) {
 			t.Errorf("worker scope %v: ids r1 r2 r1 r1 answered %v; want %v: past its recordings, nothing", worker, got, want)
 		}
+	}
+}
+
+// ExactTestServed names a test only while its view is in force: not while
+// its view is being installed, before it serves (a pool call ending then
+// wrote its bytes before the test began), whichever view serves then (none
+// for the first, the pool's after a test ended, the test's before it), and
+// not once a pool view or a session reset replaced it.
+func TestExactTestServedNamesATestOnlyWhileItsViewIsInForce(t *testing.T) {
+	a := exactMock("a", 0, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{a}, nil)
+	if got := mm.ExactTestServed(); got != "" {
+		t.Fatalf("before exact serving: %q, want none", got)
+	}
+	installing := map[string]string{}
+	mm.exact.beforePublish = func(v *exactView) {
+		if _, ok := installing[v.test]; !ok && v.test != "" {
+			installing[v.test] = mm.ExactTestServed()
+		}
+	}
+	mm.ServeExactTest("T", []*models.Mock{a})
+	if got := installing["T"]; got != "" {
+		t.Fatalf("as T's view, the first, was installed: %q, want none: it was not serving yet", got)
+	}
+	if got := mm.ExactTestServed(); got != "T" {
+		t.Fatalf("while T's view serves: %q, want T", got)
+	}
+	mm.ServeExactPool("-", nil)
+	if got := mm.ExactTestServed(); got != "" {
+		t.Fatalf("after T's end: %q, want none", got)
+	}
+	mm.ServeExactTest("U", []*models.Mock{a})
+	if got := installing["U"]; got != "" {
+		t.Fatalf("as U's view was installed after the pool's: %q, want none: the pool served", got)
+	}
+	mm.ServeExactTest("V", []*models.Mock{a})
+	if got := installing["V"]; got != "U" {
+		t.Fatalf("as V's view was installed over U's: %q, want U: U's view served", got)
+	}
+	if got := mm.ExactTestServed(); got != "V" {
+		t.Fatalf("while V's view serves: %q, want V", got)
+	}
+	mm.ResetForReplaySession()
+	if got := mm.ExactTestServed(); got != "" {
+		t.Fatalf("after a session reset: %q, want none", got)
 	}
 }

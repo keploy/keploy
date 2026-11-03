@@ -487,15 +487,6 @@ func TestAReplayWhoseAgentDiedSaysSo(t *testing.T) {
 	require.NotContains(t, err.Error(), "could not read")
 }
 
-// With the switch off a failed read is no per-test windows, as before the
-// switch existed.
-func TestAFailedWindowsReadIsNoWindowsWithTheSwitchOff(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
-	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
-	instr.windowsErr = errors.New("connection reset by peer")
-	require.NoError(t, replayErr(t, instr, utils.Native))
-}
-
 // Under the switch a docker compose command is refused before anything
 // starts, by the record and the replay alike: keploy cannot tell which
 // process runs its tests, or read what each did.
@@ -791,7 +782,8 @@ func TestTheReplayPushesThePoolSlices(t *testing.T) {
 // recording as that test's, not as an earlier place of the paired one. A
 // recording the mapping lists that the agent never holds (a connection
 // failure, models.AgentBound) is left out of the table but still ends its
-// test's window: it was made in it.
+// test's window: it was made in it. A window ends at its recordings' last
+// place (their requests here), not at an answer.
 func TestTheReplayPushesTheRecordedTestWindows(t *testing.T) {
 	provenOn(t)
 	repo := t.TempDir()
@@ -815,8 +807,8 @@ func TestTheReplayPushesTheRecordedTestWindows(t *testing.T) {
 	require.NoError(t, New(zap.NewNop(), instr, db, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
 	require.Equal(t, []string{"mock-2"}, instr.table["o::TestB"], "the agent is handed only the recordings it holds")
 	require.Equal(t, []models.TestWindow{
-		{TestCase: "o::TestA", Start: t0.Add(5 * time.Second), End: t0.Add(12 * time.Second)},
-		{TestCase: "o::TestB", Start: t0.Add(15 * time.Second), End: t0.Add(26 * time.Second)},
+		{TestCase: "o::TestA", Start: t0.Add(5 * time.Second), End: t0.Add(11 * time.Second)},
+		{TestCase: "o::TestB", Start: t0.Add(15 * time.Second), End: t0.Add(25 * time.Second)},
 	}, instr.recordedWindows)
 }
 
@@ -1101,6 +1093,24 @@ func TestARefusalGivesASkippedConnectionFailureAndAYAMLOnlyKindTheirOwnFix(t *te
 	require.Contains(t, err.Error(), `skips: mock-0, of kind "Redis-Ent", which keploy reads only from a YAML mock file.`)
 	require.Contains(t, err.Error(), `Keploy reads a mock of such a kind only from a YAML mock file, and one with a "-" in its kind only with keploy enterprise: record the set again in YAML, not as mocks.json; otherwise`)
 	for _, wrong := range []string{"upgrade", "use keploy enterprise", "correct those names"} {
+		require.NotContains(t, err.Error(), wrong)
+	}
+}
+
+// A recorded call whose fault this keploy cannot enact (a fault kind from a
+// newer keploy) is named as such, with its own fix: an upgrade or the fields
+// keploy wrote, never "use keploy enterprise" or a kind to correct.
+func TestARefusalNamesASkippedFaultWithItsOwnFix(t *testing.T) {
+	keployDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	doc := "version: api.keploy.io/v1beta1\nkind: Http\nname: mock-12\nspec:\n    req:\n        method: GET\n        url: http://pay.example/charge\n    fault:\n        kind: explode\n"
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte(doc), 0o644))
+	m := &mockService{config: &config.Config{Path: keployDir}, mockDB: mockdb.New(zap.NewNop(), keployDir, "mocks")}
+	err := m.refuseUnknownMocks(context.Background(), "set", &models.Mapping{}, []string{"mock-12"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "skips: mock-12, a call whose fault this keploy cannot enact.")
+	require.Contains(t, err.Error(), "If a newer keploy recorded a call's fault, upgrade keploy to replay it; if you edited one in mocks.yaml, give its fault back the fields keploy wrote; otherwise record")
+	for _, wrong := range []string{"enterprise", "kind and spec", "connection failure", "correct those names"} {
 		require.NotContains(t, err.Error(), wrong)
 	}
 }

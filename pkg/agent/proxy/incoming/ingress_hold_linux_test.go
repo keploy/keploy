@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"testing"
 
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -49,9 +50,9 @@ func TestTheForwardersListenerIsPlainTCP(t *testing.T) {
 
 	holder := &fakePortHolder{held: true}
 	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
-	orig := portOf(t, freeAddr(t))
+	orig := uint16(testnet.ReservedPort(t))
 	g := newGoTCPIngressHook(pm)
-	if err := g.StartIngress(context.Background(), orig, portOf(t, freeAddr(t))); err != nil {
+	if err := g.StartIngress(context.Background(), orig, uint16(testnet.ReservedPort(t))); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = g.StopIngress(orig) })
@@ -105,19 +106,21 @@ func TestAForwarderYieldsAPortAListenerHoldsOnIPv6(t *testing.T) {
 			holder.ipv6 = map[uint16][]netip.Addr{orig: {netip.IPv6Unspecified()}}
 		}
 		g := newGoTCPIngressHook(pm)
-		err := g.StartIngress(context.Background(), orig, portOf(t, freeAddr(t)))
+		err := g.StartIngress(context.Background(), orig, uint16(testnet.ReservedPort(t)))
 		if err == nil {
 			_ = g.StopIngress(orig)
 		}
 		return holder, logs, err
 	}
-	for _, x := range []string{"[::1]:0", "[::]:0", "[fd00::5]:0"} {
+	for _, x := range []string{"::1", "::", "fd00::5"} {
 		t.Run(x, func(t *testing.T) {
 			// [fd00::5] is an address the host need not have (bound with
 			// IPV6_FREEBIND): another of the host's IPv6 addresses, which
-			// only a bind of [::] finds.
-			other := v6Listener(t, x)
-			orig := portOf(t, other.Addr().String())
+			// only a bind of [::] finds. The port is held at IPv4 meanwhile
+			// (testnet.ReservedPort), so the forwarder's own bind finds it
+			// free there and only the probe finds the IPv6 listener.
+			orig := uint16(testnet.ReservedPort(t))
+			other := v6Listener(t, net.JoinHostPort(x, strconv.Itoa(int(orig))))
 
 			holder, logs, err := start(t, orig, true, true)
 			if !errors.Is(err, errIngressPortYielded) || !errors.Is(err, syscall.EADDRINUSE) {
@@ -154,7 +157,7 @@ func TestAForwarderYieldsAPortAListenerHoldsOnIPv6(t *testing.T) {
 		savedProbe := ingressIPv6Probe
 		t.Cleanup(func() { ingressIPv6Probe = savedProbe })
 		ingressIPv6Probe = func(netip.Addr, uint16) error { return syscall.EAFNOSUPPORT }
-		orig := portOf(t, freeAddr(t))
+		orig := uint16(testnet.ReservedPort(t))
 		holder, logs, err := start(t, orig, true, true)
 		if err != nil || len(holder.yielded) != 0 || logs.Len() != 0 {
 			t.Fatalf("an IPv6 app's forwarder on a host whose IPv6 check fails (EAFNOSUPPORT): %v, yielded %v, logged %v; want it started, the port held", err, holder.yielded, logs.All())
@@ -162,7 +165,7 @@ func TestAForwarderYieldsAPortAListenerHoldsOnIPv6(t *testing.T) {
 	})
 	t.Run("nothing on IPv6", func(t *testing.T) {
 		v6Listener(t, "[::1]:0") // IPv6 is here
-		orig := portOf(t, freeAddr(t))
+		orig := uint16(testnet.ReservedPort(t))
 		holder, logs, err := start(t, orig, true, true)
 		if err != nil || len(holder.yielded) != 0 || logs.Len() != 0 {
 			t.Fatalf("an IPv6 app's forwarder, nothing else on its port: %v, yielded %v, logged %v; want it started (its own IPv4 bind is no IPv6 listener)", err, holder.yielded, logs.All())
@@ -190,22 +193,22 @@ func TestTheIPv6CheckMirrorsWhatTheAppsBindsTake(t *testing.T) {
 		err     error
 		yield   bool
 	}{
-		{"an app on ::ffff:127.0.0.1, a listener on [::1]", "[::1]:0", nil, nil, false},
-		{"an app on :: (dual-stack or IPV6_V6ONLY), a listener on [::1]", "[::1]:0", []netip.Addr{any6}, nil, true},
-		{"an app on ::1, a listener on [::1]", "[::1]:0", []netip.Addr{loop6}, nil, true},
-		{"an app on ::1, a listener on [fd00::5]", "[fd00::5]:0", []netip.Addr{loop6}, nil, false},
-		{"an app on ::1 and ::, a listener on [fd00::5]", "[fd00::5]:0", []netip.Addr{loop6, any6}, nil, true},
-		{"an app on ::1 and fd00::6, a listener on [::1]", "[::1]:0", []netip.Addr{loop6, netip.MustParseAddr("fd00::6")}, nil, true},
-		{"binds the hooks cannot read, a listener on [fd00::5]", "[fd00::5]:0", nil, errors.New("iteration aborted"), true},
+		{"an app on ::ffff:127.0.0.1, a listener on [::1]", "::1", nil, nil, false},
+		{"an app on :: (dual-stack or IPV6_V6ONLY), a listener on [::1]", "::1", []netip.Addr{any6}, nil, true},
+		{"an app on ::1, a listener on [::1]", "::1", []netip.Addr{loop6}, nil, true},
+		{"an app on ::1, a listener on [fd00::5]", "fd00::5", []netip.Addr{loop6}, nil, false},
+		{"an app on ::1 and ::, a listener on [fd00::5]", "fd00::5", []netip.Addr{loop6, any6}, nil, true},
+		{"an app on ::1 and fd00::6, a listener on [::1]", "::1", []netip.Addr{loop6, netip.MustParseAddr("fd00::6")}, nil, true},
+		{"binds the hooks cannot read, a listener on [fd00::5]", "fd00::5", nil, errors.New("iteration aborted"), true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			other := v6Listener(t, c.x)
-			orig := portOf(t, other.Addr().String())
+			orig := uint16(testnet.ReservedPort(t)) // held at IPv4, as above
+			v6Listener(t, net.JoinHostPort(c.x, strconv.Itoa(int(orig))))
 			holder := &fakePortHolder{held: true, ipv6: map[uint16][]netip.Addr{orig: c.binds}, ipv6Err: c.err}
 			core, logs := observer.New(zapcore.WarnLevel)
 			pm := &IngressProxyManager{logger: zap.New(core), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
 			g := newGoTCPIngressHook(pm)
-			err := g.StartIngress(context.Background(), orig, portOf(t, freeAddr(t)))
+			err := g.StartIngress(context.Background(), orig, uint16(testnet.ReservedPort(t)))
 			if err == nil {
 				_ = g.StopIngress(orig)
 			}
@@ -274,7 +277,7 @@ func TestAForwarderThatFindsItsPortTakenYieldsTheHold(t *testing.T) {
 		holder := &fakePortHolder{held: held}
 		core, logs := observer.New(zapcore.WarnLevel)
 		pm := &IngressProxyManager{logger: zap.New(core), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
-		err := newGoTCPIngressHook(pm).StartIngress(context.Background(), orig, portOf(t, freeAddr(t)))
+		err := newGoTCPIngressHook(pm).StartIngress(context.Background(), orig, uint16(testnet.ReservedPort(t)))
 		if !errors.Is(err, syscall.EADDRINUSE) {
 			t.Fatalf("held %v: StartIngress on a taken port: %v, want EADDRINUSE", held, err)
 		}
@@ -303,7 +306,7 @@ func TestAForwarderThatFindsItsPortTakenYieldsTheHold(t *testing.T) {
 	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := newGoTCPIngressHook(pm).StartIngress(ctx, portOf(t, freeAddr(t)), portOf(t, freeAddr(t))); err == nil {
+	if err := newGoTCPIngressHook(pm).StartIngress(ctx, uint16(testnet.ReservedPort(t)), uint16(testnet.ReservedPort(t))); err == nil {
 		t.Fatal("a forwarder started on a canceled context")
 	}
 	if len(holder.yielded) != 0 {
@@ -328,7 +331,7 @@ func TestAYieldedPortLogsOnlyItsWarn(t *testing.T) {
 		pm := &IngressProxyManager{logger: zap.New(core), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1),
 			active: make(map[uint16]proxyStop), portHolder: holder}
 		pm.ingressHook = newGoTCPIngressHook(pm)
-		pm.StartIngressProxy(context.Background(), orig, portOf(t, freeAddr(t)))
+		pm.StartIngressProxy(context.Background(), orig, uint16(testnet.ReservedPort(t)))
 		errs := logs.FilterLevelExact(zapcore.ErrorLevel).All()
 		warns := logs.FilterLevelExact(zapcore.WarnLevel).All()
 		if held && (len(errs) != 0 || len(warns) != 1) {

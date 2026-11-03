@@ -33,14 +33,15 @@ type markerAgent struct {
 	transit    time.Duration
 	// endErr is what the request to end the streams returns; markerless
 	// ends the stream on that request without its marker (the agent went
-	// away); goneAtEnd is an agent that went away as it was asked: the
-	// request is refused and the stream ends without its marker; oldAgent
+	// away); goneAtEnd, when set, is an agent that went away as it was
+	// asked: the request is refused with it and the stream ends without its
+	// marker; oldAgent
 	// predates markers, and never says it can end its streams; notStarted is
 	// an agent this client did not start (compose, kubelet or the user runs
 	// it).
 	endErr     error
 	markerless bool
-	goneAtEnd  bool
+	goneAtEnd  error
 	oldAgent   bool
 	notStarted bool
 	gone       chan struct{}
@@ -74,9 +75,9 @@ func (a *markerAgent) BacklogBefore(context.Context, time.Time) (models.AgentBac
 func (a *markerAgent) EndRecordingStreams(_ context.Context, token string) error {
 	a.endCalls.Add(1)
 	a.token.Store(token)
-	if a.goneAtEnd {
+	if a.goneAtEnd != nil {
 		a.endOnce.Do(func() { close(a.gone) })
-		return refusedErr()
+		return a.goneAtEnd
 	}
 	if a.endErr != nil {
 		return a.endErr
@@ -207,7 +208,7 @@ func TestRecord_AnEndRequestTheAgentDoesNotTakeEndsTheRoundAsBefore(t *testing.T
 func TestRecord_AnAgentGoneAtTheEndRequestFailsTheRound(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		a := newMarkerAgent(time.Millisecond)
-		a.goneAtEnd = true
+		a.goneAtEnd = refusedErr(t)
 		_, promoted, err, code, logs := recordWithMarkerAgent(t, a)
 		require.Error(t, err, "run %d", i)
 		require.Equal(t, utils.ExitKeployError, code, "run %d", i)
@@ -348,11 +349,14 @@ func TestEndRound_TheUsersNextInterruptEndsIt(t *testing.T) {
 
 // goneEnder is an agent client whose agent died as it was asked to end the
 // round: the request is refused. Each stream of the kinds in ended had
-// already been sent its marker.
-type goneEnder struct{ ended map[models.FrameStream]bool }
+// already been sent its marker. refused is the refusal (refusedErr).
+type goneEnder struct {
+	ended   map[models.FrameStream]bool
+	refused error
+}
 
-func (goneEnder) EndRecordingStreams(context.Context, string) error { return refusedErr() }
-func (g goneEnder) StreamEnded(kind models.FrameStream) bool        { return g.ended[kind] }
+func (g goneEnder) EndRecordingStreams(context.Context, string) error { return g.refused }
+func (g goneEnder) StreamEnded(kind models.FrameStream) bool          { return g.ended[kind] }
 
 // An agent this client started that can no longer be reached to ask has
 // died: its stream is judged by its marker, whether it closed before the
@@ -380,8 +384,9 @@ func TestEndRound_AnAgentGoneIsJudgedByItsMarkersInEitherOrder(t *testing.T) {
 			core, logs := observer.New(zapcore.DebugLevel)
 			m := &mockService{logger: zap.New(core)}
 			lost := make(chan bool, 1)
+			ender := goneEnder{map[models.FrameStream]bool{models.MockStream: tc.marked}, refusedErr(t)}
 			go func() {
-				lost <- m.endRound(&roundEnd{ender: goneEnder{map[models.FrameStream]bool{models.MockStream: tc.marked}}, token: "t", endable: true}, always(true),
+				lost <- m.endRound(&roundEnd{ender: ender, token: "t", endable: true}, always(true),
 					[]roundStream{{kind: models.MockStream, done: done}}, recordDrainWords)
 			}()
 			if !tc.closeBefore {
@@ -770,6 +775,37 @@ func (d *deadlineInstr) GetMockErrors(ctx context.Context) ([]models.UnmatchedCa
 func (d *deadlineInstr) DrainCapturedMocks(ctx context.Context) ([]*models.Mock, error) {
 	d.saw("captured", ctx)
 	return nil, nil
+}
+
+func (d *deadlineInstr) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error) {
+	d.saw("windows", ctx)
+	return nil, nil
+}
+
+// A replay's per-test windows carry the begins keploy refused, which fail
+// the run whatever the switch, and a failed read fails it: so the read has
+// no deadline either way (an agent slow to answer on a loaded host is no
+// failed read; its answer, the connection's close or the run's context ends
+// it). A record's, with the switch off, is a best-effort epilogue read and
+// keeps its bound (agentEpilogueTimeout).
+func TestAReplaysWindowsReadHasNoDeadline(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		t.Run(map[bool]string{true: "switch on", false: "switch off"}[on], func(t *testing.T) {
+			if on {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			inst := &deadlineInstr{}
+			m := &mockService{logger: zap.NewNop(), instrumentation: inst, config: &config.Config{}}
+			_, err := m.replayWindows(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, map[string]bool{"windows": false}, inst.deadlines, "the replay's read had a deadline")
+			inst.deadlines = nil
+			m.agentWindows(context.Background())
+			require.Equal(t, map[string]bool{"windows": true}, inst.deadlines, "the record's best-effort read had no bound")
+		})
+	}
 }
 
 // Under the proven switch replay's epilogue reads -- what the agent served

@@ -124,6 +124,10 @@ func probeDial(logger *zap.Logger, phase string, connID int64, addr string, durN
 type Proxy struct {
 	logger *zap.Logger
 
+	// portMover, set before StartProxy (SetPortMover), lets the proxy and its
+	// DNS server move off a taken port, and is told where they listen.
+	portMover func(proxyPort, dnsPort uint32) error
+
 	// learnTracker keeps what record's full round served in the running
 	// test, for the learn step (package matcher/learn): a test begins
 	// whenever its error capture window opens (openTestErrorCapture). Under
@@ -370,7 +374,8 @@ type Proxy struct {
 	// with a kept connection it is about to hand over, before it does.
 	handingOver func(net.Conn)
 	// pairs holds each accepted connection's pairing (countAccept) until
-	// handleConnection takes its destination (pairedDest).
+	// handleConnection takes its destination (pairedDest), keyed by the
+	// connection itself (pairKey).
 	pairs sync.Map
 	// untrackedConns counts the connections the proxy could not route
 	// (untracked.go).
@@ -390,10 +395,12 @@ type Proxy struct {
 	// a test's misses settle the test's calls first, with the switch off too.
 	settleReads bool
 	// countedFromStart: once the canary had run, before the proxy said it
-	// was ready, the kernel counted the connections to its listener and the
-	// bytes on its paired connections could be read (decideCounted). With
-	// the switch off it drops to false, for good, at the first connection
-	// the kernel tied to none of the application's (dropCounting).
+	// was ready, the kernel counted the connections to its listener and, for
+	// a proxy that holds its paired connections for their bytes, those bytes
+	// could be read (decideCounted). With the switch off it drops to false,
+	// for good, at the first connection the kernel tied to none of the
+	// application's (dropCounting); the proxy still routes every other
+	// connection by its pairing (usesPairing reads CountedFromStart).
 	countedFromStart atomic.Bool
 	// countingLost is why, with the switch off, the run's calls stopped
 	// being counted (dropCounting); nil while they are. countingLostCh is
@@ -538,6 +545,11 @@ type Proxy struct {
 	// isGracefulShutdown indicates the application is shutting down gracefully
 	// When set, connection errors should be logged as debug instead of error
 	isGracefulShutdown atomic.Bool
+	// stopBegun: the recording's stop has begun (NoteStopBegun). A
+	// connection end read from then on is the stop's doing, not a fault of
+	// the upstream's or the application's (peerEndMarker). Reset with
+	// isGracefulShutdown as a recording or a mocking session starts.
+	stopBegun atomic.Bool
 
 	auxiliaryHook agent.AuxiliaryProxyHook
 	// teardownOnce guards runAuxTeardown so the auxiliary hook's
@@ -1285,9 +1297,9 @@ func shouldRecordViaSupervisor(parser integrations.Integrations) bool {
 // pointers it is given and writes the upgraded *tls.Conn back through
 // them, so that handleConnection's deferred close acts on the TLS conn
 // and sends close_notify. Constructing it here would alias this
-// function's PARAMETER COPIES: the legacy MySQL STARTTLS path
-// (recorder/conn.go UpgradeClientTLS/UpgradeDestTLS) would still
-// upgrade, but the caller's variables would keep pointing at the raw
+// function's PARAMETER COPIES: a parser's STARTTLS upgrade on the raw
+// sockets (session.TLSUpgrader's UpgradeClientTLS/UpgradeDestTLS) would
+// still upgrade, but the caller's variables would keep pointing at the raw
 // sockets and the deferred close would tear them down without
 // close_notify. proxy.go's matched-parser site carries the same warning.
 //
@@ -1665,6 +1677,9 @@ func (p *Proxy) ResetRecordedDNSMocks() {
 // When this flag is set, connection errors will be logged as debug instead of error
 func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
 	p.isGracefulShutdown.Store(true)
+	// keploy record's client sends this before it stops the application:
+	// the stop has begun (NoteStopBegun).
+	p.stopBegun.Store(true)
 	// A recording's stop: the requests in flight that began by now are the
 	// ones it found, which are no requests of the next recording
 	// (syncMock.NoteStop). keploy record's client sends this at its stop,
@@ -1711,6 +1726,22 @@ func (p *Proxy) SubscribePcap(w io.Writer, flush func()) (func(), error) {
 // IsGracefulShutdown returns whether the graceful shutdown flag is set
 func (p *Proxy) IsGracefulShutdown() bool {
 	return p.isGracefulShutdown.Load()
+}
+
+// NoteStopBegun says the recording's stop has begun: the recording client is
+// about to stop the application, and the connection ends read from now on are
+// the stop's doing, so a call the stop cuts records no fault (peerEndMarker).
+// keploy mock record's client says it before it stops the test command, and
+// does not set the graceful-shutdown flag then: that flag's other effects (the
+// stop noted for the requests in flight, the incoming drainer) belong after
+// its drain. keploy record's graceful-shutdown notice sets it too.
+func (p *Proxy) NoteStopBegun() {
+	p.stopBegun.Store(true)
+}
+
+// StopBegun reports whether the recording's stop has begun (NoteStopBegun).
+func (p *Proxy) StopBegun() bool {
+	return p.stopBegun.Load()
 }
 
 func (p *Proxy) SetAuxiliaryHook(h agent.AuxiliaryProxyHook) {
@@ -2335,8 +2366,14 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	endListen := beginBootWork("the proxy listener's start")
 	defer endListen() // a panic's path: its thread let go, the stage over
 
-	// It will listen on all the interfaces
-	listener, err := p.listen(ctx, fmt.Sprintf(":%v", p.Port))
+	// It will listen on all the interfaces: on p.Port, or, where that is
+	// taken and the port may move (SetPortMover), on a free one.
+	var listener net.Listener
+	err := p.bindOrMove("proxy", &p.Port, func(port uint32) error {
+		ln, err := p.listen(ctx, fmt.Sprintf(":%v", port))
+		listener = ln
+		return err
+	}, func() { _ = listener.Close() })
 	if err != nil {
 		utils.LogError(p.logger, err, fmt.Sprintf("failed to start proxy on port:%v", p.Port))
 		// What StartProxy installed before this -- the run's CA in the trust
@@ -2678,18 +2715,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
 	// When the proxy uses the kernel's pairing (the proven switch, or calls
 	// counted from its start: usesPairing), a connection the kernel paired
-	// with the application's carries its own destination; one it paired with
-	// none is refused under the switch, and with it off drops the count and
-	// is routed by its source port, as it always was. A paired one never
-	// takes a destination by source port, which another connection may share
-	// (accepts.go).
+	// with the application's carries its own destination, handed over with
+	// the connection itself (pairKey); one it paired with none is refused
+	// under the switch, and with it off is routed by its source port, as it
+	// always was. A paired one never takes a destination by source port,
+	// which another connection may share (accepts.go).
 	var err error
 	destInfo, counted := p.pairedDest(srcConn)
 	if counted && destInfo == nil && !provenswitch.On() && p.dropCounting(srcConn) {
 		// With the switch off a connection the kernel tied to none of the
 		// application's (a NAT between them) is routed by its source port,
 		// as it always was: the run is no longer counted, and every later
-		// read of its misses is unread (CountingLost).
+		// read of its misses is unread (CountingLost). Every other
+		// connection keeps its own pairing.
 		counted = false
 	}
 	if counted {
@@ -4291,6 +4329,7 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 	opts.NormalizeMockNoise()
 	// Reset graceful shutdown flag for a new recording session.
 	p.isGracefulShutdown.Store(false)
+	p.stopBegun.Store(false)
 	// Reset DNS mock deduplication tracker for fresh recording
 	p.ResetRecordedDNSMocks()
 	// The process's mock manager starts the recording before its first
@@ -4373,6 +4412,7 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	opts.NormalizeMockNoise()
 	// Reset graceful shutdown flag for a new mocking session.
 	p.isGracefulShutdown.Store(false)
+	p.stopBegun.Store(false)
 	// Forget the previous recording's MySQL ports before this test set derives
 	// its own. The agent is a single long-lived process and this registry is
 	// allocated once, so without the reset the derived port set — and the
@@ -4993,7 +5033,7 @@ func (p *Proxy) SetRecordedOfKind(src func(kind models.Kind, visit func(name str
 var _ agent.RecordedOfKindSetter = (*Proxy)(nil)
 
 // SetRecordingTimes implements agent.RecordingTimesSetter (exact.go).
-func (p *Proxy) SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error) error {
+func (p *Proxy) SetRecordingTimes(src func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error) error {
 	m := p.getMockManager()
 	if m == nil {
 		return errNoMockManager
@@ -5165,6 +5205,15 @@ func (p *Proxy) RestartExactKey(key string, names []string) error {
 	}
 	m.RestartExactKey(key, names)
 	return nil
+}
+
+// ExactTestServed implements agent.ExactTestServedReader (exact.go).
+func (p *Proxy) ExactTestServed() string {
+	m := p.getMockManager()
+	if m == nil {
+		return ""
+	}
+	return m.ExactTestServed()
 }
 
 // ExactTestOutcome implements agent.ExactServer (exact.go).
@@ -5905,6 +5954,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					At:            parserErr.MismatchReport.At,
 					Protocol:      parserErr.MismatchReport.Protocol,
 					ActualSummary: parserErr.MismatchReport.ActualSummary,
+					Operation:     parserErr.MismatchReport.Operation,
 					Destination:   parserErr.MismatchReport.Destination,
 					ClosestMock:   parserErr.MismatchReport.ClosestMock,
 					Diff:          parserErr.MismatchReport.Diff,
@@ -6209,7 +6259,7 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid uint32, dst *models.Con
 		fields := []zap.Field{
 			zap.String("protocol", r.Protocol),
 			zap.String("destination", r.Destination),
-			zap.String("actual", r.ActualSummary),
+			zap.String("actual", models.WithHTTPOperation(r.ActualSummary, r.Operation)),
 			zap.String("match_phase", r.MatchPhase),
 			zap.Int("candidates", r.CandidateCount),
 			zap.String("closest", r.ClosestMock),

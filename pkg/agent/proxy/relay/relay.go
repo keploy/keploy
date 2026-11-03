@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
@@ -138,6 +139,9 @@ type Relay struct {
 	awaitingFrom []uint64
 	resolverDone chan struct{}
 	awaitingMark string
+	// notTaken is the start of what the client refused (refuse,
+	// notTakenSoFar): nil until it refused, stored under verdictMu.
+	notTaken atomic.Pointer[[]byte]
 	// lastLook is closed by run once both forwarders have returned and a
 	// waiting resolve has had HalfCloseGrace more (awaitClientVerdict): the
 	// next look at the client's socket is the last.
@@ -145,6 +149,10 @@ type Relay struct {
 	// notTakenChunks and notTakenBytes count the destination chunks the
 	// client did not take, which the parser was not given.
 	notTakenChunks, notTakenBytes atomic.Int64
+	// destReset: the destination's forwarder read a reset (ECONNRESET), so
+	// run makes the proxy's close of the client a reset too
+	// (resetClientOnClose).
+	destReset atomic.Bool
 
 	// runOnce ensures Run's one-time startup path executes exactly once.
 	runOnce sync.Once
@@ -280,6 +288,9 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		cfg.OnMarkMockIncomplete,
 		cfg.Logger,
 	)
+	// A Read on the destination's conn beneath its layers is when no chunk
+	// read from it so far is left to be numbered (StreamedBefore).
+	r.order.OnRead(r.teeD2C.progress.changed.wake)
 
 	// Assigned after construction rather than threaded through newTee's
 	// positional signature, which is already at six arguments.
@@ -621,6 +632,19 @@ func (r *Relay) run(ctx context.Context) error {
 		)
 	}
 
+	// The destination reset the connection: the client is given a reset
+	// too, its socket closed here, under any TLS layer (no close_notify), so
+	// it reads ECONNRESET as it would from the destination, not the end of a
+	// stream it did not get. Both forwarders are gone, so nothing writes to
+	// the client any more.
+	if c := r.src.Load(); r.destReset.Load() && c != nil {
+		reset := resetClientOnClose(ctx, *c, r.cfg.HalfCloseGrace)
+		if log := r.cfg.Logger; log != nil {
+			log.Debug("relay: the destination reset the connection; the client's socket is reset as well",
+				zap.Bool("reset", reset))
+		}
+	}
+
 	// Both forwarders are gone, so nothing can add to the hold stash
 	// any more. Anything still in it was read from the client and never
 	// delivered; flush it so "the relay forwards every byte it read"
@@ -784,6 +808,7 @@ func (r *Relay) forward(
 				// before these bytes were forwarded to it.
 				chunk.ConnSeq, chunk.AfterClientClose = r.order.FromDest()
 			}
+			t.noteNumbered(chunk.ConnSeq)
 			chunk.Bytes = make([]byte, n)
 			copy(chunk.Bytes, buf[:n])
 		}
@@ -1086,7 +1111,21 @@ func (r *Relay) forward(
 					// destination can answer it (client_took.go).
 					r.clientFINRead()
 				}
+				if r.cfg.PeerEnded != nil {
+					r.cfg.PeerEnded(dir, false)
+				}
 				return io.EOF
+			}
+			if errors.Is(err, syscall.ECONNRESET) {
+				// The peer reset the connection: told as its end, as a FIN
+				// is, before onForwarderExit tears the other direction down.
+				if r.cfg.PeerEnded != nil {
+					r.cfg.PeerEnded(dir, true)
+				}
+				if dir == fakeconn.FromDest {
+					r.destReset.Store(true)
+				}
+				return err
 			}
 			// A SetReadDeadline-driven timeout fired by beginPause
 			// (and cleared by endPause once the pause lifts) is the

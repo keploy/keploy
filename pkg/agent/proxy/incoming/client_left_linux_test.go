@@ -110,10 +110,11 @@ func TestAnAnswerThatArrivedWholeIsRecordedThoughItsForwardFails(t *testing.T) {
 					case nth == 0 && tc.unwatched:
 						// Nothing tells the app: the first write fails on
 						// the client's reset.
-						waitFor(t, "the client did not go", left)
+						<-left
 						waitReset(t, proxied)
 					case nth == 0:
-						waitFor(t, "the client did not go, or the app was not told of it", left, told)
+						<-left
+						<-told
 					case nth == 1:
 						// The first write reached a closed client: its reset
 						// comes back, and the next write fails on it.
@@ -125,8 +126,10 @@ func TestAnAnswerThatArrivedWholeIsRecordedThoughItsForwardFails(t *testing.T) {
 					gets = 2
 				}
 				pm, client, served, logs := serveGETs(t, synchronous, appLn, &proxied, gets)
+				letHookGo(t, client, left)
 				readHeaders(t, bufio.NewReader(client))
-				waitFor(t, "the app's answer did not reach the ingress", sent, readAll)
+				<-sent
+				<-readAll
 				if tc.queued && unsent.Load() == 0 {
 					t.Fatal("the app's send queue held none of its answer as its client went: this case tests nothing")
 				}
@@ -209,10 +212,11 @@ func TestAnAnswerWhoseEndHadNotArrivedIsNotRecordedThoughItsForwardFails(t *test
 				holdBodyReads(t, func(nth int) {
 					switch {
 					case nth == 0 && kind == "unwatched":
-						waitFor(t, "the client did not go", left)
+						<-left
 						waitReset(t, proxied)
 					case nth == 0:
-						waitFor(t, "the client did not go, or the app was not told of it", left, told)
+						<-left
+						<-told
 					case nth == 1:
 						waitReset(t, proxied)
 					}
@@ -222,8 +226,9 @@ func TestAnAnswerWhoseEndHadNotArrivedIsNotRecordedThoughItsForwardFails(t *test
 					gets = 2
 				}
 				pm, client, served, logs := serveGETs(t, synchronous, appLn, &proxied, gets)
+				letHookGo(t, client, left)
 				readHeaders(t, bufio.NewReader(client))
-				waitFor(t, "the app's half answer did not reach the ingress", sent)
+				<-sent
 				if kind == "unwatched" {
 					if err := client.(*net.TCPConn).SetLinger(0); err != nil {
 						t.Fatal(err)
@@ -289,7 +294,7 @@ func TestACloseDelimitedAnswerTheAppEndsOnlyOnceToldIsNotRecorded(t *testing.T) 
 			// All it was sent is read: its close is a FIN, and the app is
 			// told by a half-close.
 			_ = client.Close()
-			waitFor(t, "the app was not told its client went", told)
+			<-told
 			tcs, toldLeft := queuedOnceGone(t, pm, served, logs)
 			if len(tcs) != 0 || toldLeft != 1 {
 				t.Fatalf("%d test cases reached the queue from an exchange whose app ended its answer only once told its client had gone, and %d were told as ended by their client; want 0 and 1", len(tcs), toldLeft)
@@ -345,13 +350,14 @@ func TestACloseDelimitedAnswerWhoseCloseCameBeforeItsClientWentIsRecorded(t *tes
 			}
 			holdBodyReads(t, func(nth int) {
 				if nth == 0 {
-					waitFor(t, "the client did not go, or the app was not told of it", told)
+					<-told
 				}
 			})
 
 			pm, client, served, logs := serveOneGET(t, synchronous, appLn, nil)
 			readHeaders(t, bufio.NewReader(client))
-			waitFor(t, "the app's close never reached the ingress", acked, closeRead)
+			<-acked
+			<-closeRead
 			_ = client.Close()
 			tcs, toldLeft := queuedOnceGone(t, pm, served, logs)
 			if len(tcs) != 1 || toldLeft != 0 {
@@ -411,13 +417,15 @@ func TestWhatTheAppSentPastItsAnswerDoesNotMoveTheAnswersEnd(t *testing.T) {
 			moreRead := readAhead(t, synchronous, len(answer)+len(more))
 			holdBodyReads(t, func(nth int) {
 				if nth == 0 {
-					waitFor(t, "the client did not go, or the app was not told of it, or what it sent then did not reach the ingress", told, moreRead)
+					<-told
+					<-moreRead
 				}
 			})
 
 			pm, client, served, logs := serveOneGET(t, synchronous, appLn, nil)
 			readHeaders(t, bufio.NewReader(client))
-			waitFor(t, "the app's answer did not reach the ingress", sent, readAll)
+			<-sent
+			<-readAll
 			_ = client.Close()
 			tcs, toldLeft := queuedOnceGone(t, pm, served, logs)
 			if len(tcs) != 1 || toldLeft != 0 {
@@ -447,19 +455,6 @@ func holdBodyReads(t *testing.T, hold func(nth int)) {
 	saved := bodyReading
 	bodyReading = hold
 	t.Cleanup(func() { bodyReading = saved })
-}
-
-// waitFor waits for each of chans to close, and fails the test with what if
-// one does not by the test binary's deadline.
-func waitFor(t *testing.T, what string, chans ...chan struct{}) {
-	for _, c := range chans {
-		select {
-		case <-c:
-		case <-never(t):
-			t.Error(what)
-			return
-		}
-	}
 }
 
 // serveOneGET serves a GET from a new client to the app on appLn, as
@@ -498,6 +493,24 @@ func serveGETs(t *testing.T, synchronous bool, appLn net.Listener, proxied *net.
 	return pm, client, served, logs
 }
 
+// letHookGo, called right after serveGETs, lets a row's body-read hook go
+// at the row's end if the row did not (left is still open), as a row that
+// fails before its close(left) does. The client goes first, reset as the row
+// resets it: an unwatched exchange's hook waits after left for that reset,
+// and nothing else may send it. Cleanup runs last-in first, so this runs
+// ahead of serveGETs' wait for the handler.
+func letHookGo(t *testing.T, client net.Conn, left chan struct{}) {
+	t.Cleanup(func() {
+		select {
+		case <-left:
+		default:
+			_ = client.(*net.TCPConn).SetLinger(0)
+			_ = client.Close()
+			close(left)
+		}
+	})
+}
+
 // readHeaders reads an answer's headers from br, and nothing past them.
 func readHeaders(t *testing.T, br *bufio.Reader) {
 	t.Helper()
@@ -518,11 +531,7 @@ func readHeaders(t *testing.T, br *bufio.Reader) {
 // ended them.
 func queuedOnceGone(t *testing.T, pm *IngressProxyManager, served <-chan struct{}, logs *observer.ObservedLogs) (tcs []*models.TestCase, toldLeft int) {
 	t.Helper()
-	select {
-	case <-served:
-	case <-never(t):
-		t.Fatal("the exchange did not end once its client went")
-	}
+	<-served
 	pm.captures.Wait()
 	for len(pm.tcChan) > 0 {
 		tcs = append(tcs, <-pm.tcChan)
@@ -534,13 +543,7 @@ func queuedOnceGone(t *testing.T, pm *IngressProxyManager, served <-chan struct{
 // the ingress's side (SIOCOUTQ is 0): in its socket, if not read.
 func waitAcked(t *testing.T, conn net.Conn) {
 	for unsentOrUnacked(t, conn) > 0 {
-		select {
-		case <-never(t):
-			t.Error("what the app wrote was never acknowledged")
-			return
-		default:
-			runtime.Gosched()
-		}
+		runtime.Gosched()
 	}
 }
 
@@ -608,33 +611,40 @@ func unsentBy(t *testing.T, conn net.Conn) int {
 // tcpClose is TCP_CLOSE, the state a socket is in once reset.
 const tcpClose = 7
 
+// tcpUnread is no TCP state: what tcpState returns once it could not read
+// one, and has failed the test.
+const tcpUnread = 0
+
 // waitReset waits until conn's socket is reset (tcpClose): a write on it
-// fails from then.
+// fails from then. It ends too once its state cannot be read: it runs on the
+// product's goroutine, in a hook, where the test must not stop.
 func waitReset(t *testing.T, conn net.Conn) {
-	for tcpState(t, conn) != tcpClose {
-		select {
-		case <-never(t):
-			t.Error("the client's reset never came back")
+	for {
+		switch tcpState(t, conn) {
+		case tcpClose, tcpUnread:
 			return
-		default:
-			runtime.Gosched()
 		}
+		runtime.Gosched()
 	}
 }
 
-// tcpState is the TCP state of conn's socket (TCP_INFO).
+// tcpState is the TCP state of conn's socket (TCP_INFO), or tcpUnread once
+// it has failed the test for not reading it. It does not stop the test: it
+// is called on the product's goroutine.
 func tcpState(t *testing.T, conn net.Conn) uint8 {
 	t.Helper()
 	rc, err := conn.(syscall.Conn).SyscallConn()
 	if err != nil {
-		t.Fatal(err)
+		t.Error(err)
+		return tcpUnread
 	}
 	var info *unix.TCPInfo
 	var ierr error
 	if err := rc.Control(func(fd uintptr) {
 		info, ierr = unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO)
 	}); err != nil || ierr != nil {
-		t.Fatalf("TCP_INFO: %v %v", err, ierr)
+		t.Errorf("TCP_INFO: %v %v", err, ierr)
+		return tcpUnread
 	}
 	return info.State
 }
@@ -684,11 +694,7 @@ func TestTheWatchReadsWhatArrivedBeforeItTellsTheApp(t *testing.T) {
 				}
 			}
 			_ = client.Close()
-			select {
-			case <-read:
-			case <-never(t):
-				t.Fatal("the watch did not see the client go")
-			}
+			<-read
 			if !w.endedBefore(-1) {
 				t.Fatal("the client's going before the answer's end did not end the exchange")
 			}

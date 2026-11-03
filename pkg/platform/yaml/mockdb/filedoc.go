@@ -2,6 +2,7 @@ package mockdb
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -114,7 +115,7 @@ func (fr *MockFileReader) Next() (MockFileDoc, error) {
 		case d.separator:
 			continue // the start of a separator, ending the file: no document
 		case len(d.mocks) == 0:
-			out.Skip = skipReason(d.kind, fr.r.Format() == yaml.FormatJSON)
+			out.Skip = skipReason(d.kind, fr.r.Format() == yaml.FormatJSON, docSpecFault(d) != nil)
 		}
 		return out, nil
 	}
@@ -122,21 +123,41 @@ func (fr *MockFileReader) Next() (MockFileDoc, error) {
 
 // skipReason is why the decoders (decodeMocks, decodeMocksJSON) took no mock
 // from a document of kind that parsed and decoded without error: they skip
-// only a document with no kind, a kind they have no decoder for, and a
-// connection failure they cannot replay. Of an NDJSON document (json), a
-// kind with a "-" in it, or one a registered mapper decodes, is one
-// decodeMocksJSON skips in every build: only the YAML decoder reads it, and
-// a "-" kind only with keploy enterprise's mapper.
-func skipReason(kind models.Kind, json bool) models.MockSkip {
+// only a document with no kind, a kind they have no decoder for, a
+// connection failure they cannot replay, a document of kind HttpFault with
+// no fault, and a document whose spec holds a fault (fault, found as the
+// decoders find it: docSpecFault) of any kind but HTTP, of kind Http, or
+// that they cannot enact (faultKindSupported). Of an NDJSON
+// document (json), a kind with a "-" in it, or one a registered mapper
+// decodes, is one decodeMocksJSON skips in every build: only the YAML
+// decoder reads it, and a "-" kind only with keploy enterprise's mapper.
+func skipReason(kind models.Kind, json, fault bool) models.MockSkip {
 	switch {
+	case fault:
+		return models.MockSkipFault
 	case kind == "":
 		return models.MockSkipNoKind
 	case kind == models.ConnectionFailure:
 		return models.MockSkipConnFailure
+	case kind == models.HTTPFault:
+		return models.MockSkipFault
 	case json && (strings.Contains(string(kind), "-") || hasMapperForKind(kind)):
 		return models.MockSkipYAMLOnlyKind
 	}
 	return models.MockSkipUnknownKind
+}
+
+// docSpecFault is the fault under d's spec's `fault:` key (yamlSpecFault,
+// jsonSpecFault), nil for none, or for a document that does not parse.
+func docSpecFault(d fileDoc) *models.Fault {
+	if d.doc != nil {
+		return yamlSpecFault(&d.doc.Spec)
+	}
+	var j struct {
+		Spec json.RawMessage `json:"spec"`
+	}
+	_ = json.Unmarshal(d.raw, &j) // an error leaves j.Spec nil, which has none
+	return jsonSpecFault(j.Spec)
 }
 
 // Format is the format of the file it opened.
@@ -152,7 +173,8 @@ func (fr *MockFileReader) Close() error { return fr.r.Close() }
 // (GetTestSetMocks: a mocks.gob first, else the YAML or NDJSON one), and by
 // name each named document of it the read skips, with why: of two such
 // documents with one name, the last, as TestSetMocks.Skipped lists it. A gob
-// file skips only a connection failure this keploy cannot replay. With no
+// file skips only a connection failure this keploy cannot replay and a mock
+// whose fault it cannot enact. With no
 // mock file, "" and none; nil when the file cannot be read.
 func (ys *MockYaml) SkippedMocks(ctx context.Context, testSetID string) (string, map[string]models.SkippedMock) {
 	mockFileName := ys.MockName
@@ -172,6 +194,9 @@ func (ys *MockYaml) SkippedMocks(ctx context.Context, testSetID string) (string,
 		for _, mock := range mocks {
 			if mock.Kind == models.ConnectionFailure && mock.Name != "" && !connFailureSupported(mock, zap.NewNop(), false) {
 				out[mock.Name] = models.SkippedMock{Name: mock.Name, Kind: mock.Kind, Why: models.MockSkipConnFailure}
+			}
+			if mock.Name != "" && (mock.Kind == models.HTTPFault || mock.Spec.Fault != nil && !faultSupported(mock, zap.NewNop(), false)) {
+				out[mock.Name] = models.SkippedMock{Name: mock.Name, Kind: mock.Kind, Why: models.MockSkipFault}
 			}
 		}
 		return gobPath, out

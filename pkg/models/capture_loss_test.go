@@ -53,8 +53,8 @@ func TestChargedTaintsWithTheRunsKindsAndKeepsATestsOwnToIt(t *testing.T) {
 	if got := unix.Charged(LossBases{Set: unix, App: unix}, unix); !reflect.DeepEqual(got, unix) {
 		t.Fatalf("a Unix-socket call before the base: Charged = %+v, want %+v", got, unix)
 	}
-	if !CaptureLossTLSAbort.PerTest() || CaptureLossPIDMap.PerTest() || CaptureLossAppBytesLost.PerTest() {
-		t.Fatal("only a TLS client's rejection is a test's own")
+	if !CaptureLossTLSAbort.PerTest() || CaptureLossPIDMap.PerTest() {
+		t.Fatal("a TLS client's rejection is a test's own, a process keploy could not place is not")
 	}
 }
 
@@ -145,6 +145,27 @@ func TestCaptureLossesTextShapesWhatItNames(t *testing.T) {
 		if strings.Contains(shaped, v) {
 			t.Fatalf("text %q holds %q", shaped, v)
 		}
+	}
+}
+
+// Bytes lost with a connection that ended are that connection's, charged to
+// one test: the test the count grew in, never a later one. The same counts,
+// with the test's mark past them, charge nothing, and a kind whose later calls
+// may go with it still taints.
+func TestAppBytesLostChargeOneTest(t *testing.T) {
+	if !CaptureLossAppBytesLost.PerTest() {
+		t.Fatal("app_bytes_lost is not a test's own")
+	}
+	lost := CaptureLosses{{Kind: CaptureLossAppBytesLost, Count: 1, What: "from 127.0.0.1:40000"}}
+	if got := lost.Charged(LossBases{}, nil); !reflect.DeepEqual(got, lost) {
+		t.Fatalf("the test the loss landed in: Charged = %+v, want %+v", got, lost)
+	}
+	if got := lost.Charged(LossBases{}, lost); len(got) != 0 {
+		t.Fatalf("the test after it: Charged = %+v, want nothing", got)
+	}
+	dropped := CaptureLosses{{Kind: CaptureLossDropped, Count: 1}}
+	if got := dropped.Charged(LossBases{}, dropped); !reflect.DeepEqual(got, dropped) {
+		t.Fatalf("a kind that taints, the test after it: Charged = %+v, want %+v", got, dropped)
 	}
 }
 
@@ -552,5 +573,37 @@ func TestAnAgentStartedAgainLeavesTheTestsWithoutAVerdict(t *testing.T) {
 	}
 	if remedy := l.NotJudgedRemedy(); remedy != AgentStartedAgainRemedy {
 		t.Fatalf("NotJudgedRemedy = %q, want %q", remedy, AgentStartedAgainRemedy)
+	}
+}
+
+// A program of the run keploy's shim is not in (macOS: a platform binary
+// such as /usr/bin/curl) leaves each test it ran in without a verdict, named,
+// with the remedy, and taints no test after it ends: its count grows in each
+// test it runs in (PerTest), never from the run's base.
+func TestAProgramWithoutTheShimLeavesItsTestsNotJudged(t *testing.T) {
+	k := CaptureLossProcessUnshimmed
+	if !k.NotJudged() || !k.PerTest() || k.runScoped() || k.AppLife() || k.runLife() || k.Evidence() {
+		t.Fatal("a program without the shim is a test's own and not judged")
+	}
+	at := func(n uint64) CaptureLosses {
+		return CaptureLosses{{Kind: k, Count: n, What: "the latest: /usr/bin/curl (pid 7)"}}
+	}
+	b := SameBases(at(1))
+	if got := at(2).Charged(b, at(1)); len(got) != 1 || got[0].Count != 1 {
+		t.Fatalf("the test it ran in: charged %+v, want 1", got)
+	}
+	if got := at(2).Charged(b, at(2)); len(got) != 0 {
+		t.Fatalf("a test after it ended: charged %+v, want nothing", got)
+	}
+	judged, notJudged := at(1).Split()
+	if len(judged) != 0 || len(notJudged) != 1 {
+		t.Fatalf("Split = %+v, %+v: want it not judged", judged, notJudged)
+	}
+	text := notJudged.NotJudgedText()
+	if !strings.Contains(text, "keploy's shim is not in") || !strings.Contains(text, "/usr/bin/curl (pid 7)") || !strings.HasPrefix(text, "not judged: ") {
+		t.Fatalf("NotJudgedText = %q: want the program named, not judged", text)
+	}
+	if r := notJudged.NotJudgedRemedy(); r != ProcessUnshimmedRemedy {
+		t.Fatalf("NotJudgedRemedy = %q", r)
 	}
 }

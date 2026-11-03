@@ -582,8 +582,14 @@ type Replayer struct {
 	// whether this run has taken one yet; lossLast is the latest per-test
 	// read, which the set's end counts what is left from, and lossLastAgent
 	// the agent process that answered it.
-	lossMark      captureLossMark
-	lossMarked    bool
+	lossMark   captureLossMark
+	lossMarked bool
+	// owned are, under the proven switch, the losses a cut-short end owned
+	// that keploy took from the agent since the last set's end applied them
+	// (takeOwnedLosses, applyOwnedLosses); ownedErr is a take that failed.
+	ownedMu       sync.Mutex
+	owned         []models.OwnedCaptureLoss
+	ownedErr      error
 	lossLast      models.CaptureLosses
 	lossLastRead  bool
 	lossLastAgent string
@@ -1827,6 +1833,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Whether this run of the set is judged is this run's to say: a mark left
 	// by an earlier attempt, or an earlier Start, says nothing about it.
 	r.forgetNotJudged(testSetID)
+	// The losses cut-short ends owned that keploy takes in this set name its
+	// test cases; any its end does not apply are no later set's by name.
+	defer r.unnameUnappliedOwnedLosses()
 	// Where the app's ports are published is this run's to say too: the
 	// agent container an attempt starts may publish them on other host ports.
 	publishedPortsOf(r.logger, r.instrumentation).newRun(testSetID)
@@ -2291,6 +2300,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if r.exactServing() {
 			r.exact = newExactPlan(expectedTestMockMappings, workerScope, filtered, unfiltered)
 			r.exact.noteAhead(expectedTestMockMappings, testCases)
+			r.exact.order, r.exact.mainPass = passOrder(testCases)
 			if r.exact.share, err = newSharePlan(ctx, conc, workerScope, filtered, unfiltered); err != nil {
 				return nil, nil, err
 			}
@@ -3126,7 +3136,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			continue
 		}
 
-		if testCase != nil && testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase) {
+		if deferredStreaming(testCase) {
 			streamingTests = append(streamingTests, newStreamingTest(testCase, expectedTestMockMappings))
 			r.logger.Debug("deferring streaming test case",
 				zap.String("testcase", testCase.Name),
@@ -4448,6 +4458,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// simply absent from the report.
 		if cycleIncomplete(currentSuccess, currentFailures, currentObsolete, currentSkipped, len(testsToRun)) {
 			stoppedEarly = true
+		} else if loopErr == nil && !exitLoop {
+			// The cycle took up every test case it meant to: the run has
+			// passed the set's test cases the main loop holds, those it
+			// skipped after the last one it ran among them, or every test
+			// case when no streaming pass follows. A retry cycle's end
+			// tells the agent nothing more.
+			r.passExactRun(runTestSetCtx, r.exact, len(streamingTests) > 0)
 		}
 		failure += currentFailures
 		success = currentSuccess
@@ -5342,6 +5359,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				break
 			}
 		}
+		// The streaming pass took up every test case it meant to: the run
+		// has passed every test case of the set, those it skipped after the
+		// last one it ran among them.
+		if loopErr == nil && !exitLoop {
+			r.passExactRun(runTestSetCtx, r.exact, false)
+		}
 	}
 
 	// Prune and mappings only; the report and stoppedEarly are unchanged. Every
@@ -6160,6 +6183,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.String("next_step", "see the earlier test-set's report for where it was lost; each test charged with it says what to do"))
 	}
 	late, lateErr := r.endCaptureLosses(context.WithoutCancel(ctx))
+	// What a cut-short end owned that its loss was counted for after the
+	// end: named in its test case's report, or the set's (applyOwnedLosses).
+	r.takeOwnedLosses(context.WithoutCancel(ctx))
+	ownedBySet, ownedErr := r.applyOwnedLosses(testCaseResults)
+	late = append(late, ownedBySet...)
+	if lateErr == nil {
+		lateErr = ownedErr
+	}
 	// A call keploy cannot capture at all (decision 20) is no loss of what it
 	// saw: below, it leaves the set without a verdict, never failed.
 	lateJudged, lateNotJudged := late.Split()
@@ -7110,6 +7141,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		r.consumedMockNames[name] = struct{}{}
 	}
 	r.completeTestReportMu.Unlock()
+	logFaultsServed(r.logger, testSetID, allConsumedAcrossCycles, mockLookup)
 
 	return testSetStatus, nil
 }
@@ -7299,6 +7331,7 @@ func addMockDisplayInfo(lookup map[string]mockDisplayInfo, mocks []*models.Mock)
 			}
 		}
 		info.carryOver, info.place = models.IsCarryOver(mock), models.PlaceOf(mock)
+		info.fault = mock.FaultServed()
 		lookup[mock.Name] = info
 	}
 }
@@ -7468,7 +7501,7 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	// BaseTime) stages the set once, and the agent then serves its pool
 	// (exact.go).
 	if r.exact != nil && afterTime.Equal(models.BaseTime) && len(expectedMockMapping) == 0 {
-		params.Exact = &models.ExactServing{Stage: true, Pool: append([]string(nil), r.exact.pool...), Worker: r.exact.staged()}
+		params.Exact = &models.ExactServing{Stage: true, Pool: append([]string(nil), r.exact.pool...), Worker: r.exact.staged(), Order: r.exact.stagedOrder()}
 		if r.exact.background {
 			params.Exact.Background = models.RecordedWithS12Routing
 		}
@@ -7482,6 +7515,11 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	}
 	if ex := params.Exact; ex != nil && ex.Stage && ex.Background != "" {
 		r.confirmBackground(ex.Background)
+	}
+	// The agent holds the run's order from here: the ends of the run's
+	// passes tell it what the run passed (passExactRun).
+	if ex := params.Exact; ex != nil && ex.Stage {
+		r.exact.ordered = len(ex.Order) > 0
 	}
 
 	r.logger.Debug("Successfully sent mock filter parameters to agent",
@@ -9243,6 +9281,7 @@ func (r *Replayer) readMockErrors(ctx context.Context) testMisses {
 	read := testMisses{calls: calls, answers: answers, err: err, asked: true}
 	if provenswitch.On() {
 		read.lost, read.lostErr = r.testCaptureLosses(ctx)
+		r.takeOwnedLosses(ctx)
 	}
 	r.readRealTest(ctx, &read)
 	return read

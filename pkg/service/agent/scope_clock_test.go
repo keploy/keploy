@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -54,6 +55,16 @@ func newClockAgent(t *testing.T) *Agent {
 	a.Proxy = &workerPool{}
 	a.clientMocks.Store(uint64(0), &ClientMockStorage{})
 	return a
+}
+
+// loadMocks loads the recording of a replay whose mocks are names, so
+// exact serving finds each test's own (serveTestExactly).
+func loadMocks(a *Agent, names ...string) {
+	mocks := make([]*models.Mock, 0, len(names))
+	for _, n := range names {
+		mocks = append(mocks, &models.Mock{Name: n, Kind: models.HTTP})
+	}
+	a.clientMocks.Store(uint64(0), &ClientMockStorage{filtered: mocks})
 }
 
 func useHooks(t *testing.T, h AgentHooks) {
@@ -221,12 +232,14 @@ func TestAClockThatCannotMoveFailsTheTest(t *testing.T) {
 	h.err = nil
 	pool := &workerPool{}
 	a.Proxy = pool
+	loadMocks(a, "mock-1")
 	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"pkg::TestB": {"mock-1"}}))
 	require.NoError(t, a.BeginScopeAt(ctx, "pkg::TestB", 5, time.Now()))
-	require.Equal(t, []uint32{5}, pool.narrowed)
+	require.Equal(t, []string{"test pkg::TestB"}, pool.served(), "a worker pid's test is served exactly, as one without a pid is")
+	require.Empty(t, pool.narrowed, "no per-worker view under exact serving")
 	h.err = errors.New("disk full")
 	require.ErrorContains(t, a.EndScopeAt(ctx, "pkg::TestB", 5, time.Now()), "disk full")
-	require.Equal(t, []uint32{5}, pool.cleared, "the worker gets the whole pool back even when the clock cannot move back")
+	require.Equal(t, []string{"test pkg::TestB", "pool"}, pool.served(), "the run gets its pool back even when the clock cannot move back")
 }
 
 // Without the switch, and in a record, nothing moves the clock.
@@ -290,8 +303,12 @@ type workerPool struct {
 	coreAgent.Proxy
 	settledProxy
 	narrowed, cleared []uint32
+	refused           []uint32
 	mu                sync.Mutex
 	exactTest         string
+	// exact is what exact serving put in, in order: "test <name>" for a
+	// test's own mocks, "pool" for the pool between tests.
+	exact []string
 }
 
 func (p *workerPool) Mock(context.Context, models.OutgoingOptions) error { return nil }
@@ -304,15 +321,35 @@ func (p *workerPool) SetMocks(context.Context, []*models.Mock, []*models.Mock) e
 }
 func (p *workerPool) SetWorkerScope(pid uint32, _ []string) { p.narrowed = append(p.narrowed, pid) }
 func (p *workerPool) ClearWorkerScope(pid uint32)           { p.cleared = append(p.cleared, pid) }
+func (p *workerPool) RefuseWorker(pid uint32, _ string)     { p.refused = append(p.refused, pid) }
 
 // The proven wire serves its single worker exactly (exact_proven.go).
 func (p *workerPool) ServeExactTest(test string, _ []*models.Mock) error {
 	p.mu.Lock()
 	p.exactTest = test
+	p.exact = append(p.exact, "test "+test)
 	p.mu.Unlock()
 	return nil
 }
-func (p *workerPool) ServeExactPool(string, []string) error { return nil }
+func (p *workerPool) ServeExactPool(string, []string) error {
+	p.mu.Lock()
+	p.exact = append(p.exact, "pool")
+	p.mu.Unlock()
+	return nil
+}
+
+// served is what exact serving put in from the first test on: the pool a
+// session's first begin stages before its test's own (servePoolExactly) is
+// left out.
+func (p *workerPool) served() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	i := 0
+	for i < len(p.exact) && p.exact[i] == "pool" {
+		i++
+	}
+	return slices.Clone(p.exact[i:])
+}
 
 // ExactTestOutcome is the latest test opened, open or ended.
 func (p *workerPool) ExactTestOutcome() (string, []string, []string, bool) {
@@ -430,7 +467,7 @@ func TestSetTestBeginsRefusesABuildThatCannotMoveItsClock(t *testing.T) {
 }
 
 // A test refused the clock while another holds it undoes nothing at its end:
-// the holder's worker keeps its narrowed view, and the clock stays.
+// the holder keeps its exact view, and the clock stays.
 func TestARefusedTestsEndLeavesTheHoldersPool(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	h := &clockHooks{}
@@ -440,20 +477,22 @@ func TestARefusedTestsEndLeavesTheHoldersPool(t *testing.T) {
 	a.Proxy = pool
 	ctx := context.Background()
 	me := os.Getpid()
+	loadMocks(a, "m-a", "m-b")
 	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"pkg::TestA": {"m-a"}, "pkg::TestB": {"m-b"}}))
 	require.NoError(t, a.BeginScopeAt(ctx, "pkg::TestA", me, time.Now()))
 	require.ErrorIs(t, a.BeginScopeAt(ctx, "pkg::TestB", me, time.Now()), ErrOneTestAtATime)
 	require.NoError(t, a.EndScopeAt(ctx, "pkg::TestB", me, time.Now()))
 	require.NoError(t, a.EndScopeAt(ctx, "pkg::TestB", me, time.Now()), "an end sent twice")
-	require.Empty(t, pool.cleared, "the refused test's end gave the holder's worker the whole pool")
+	require.Equal(t, []string{"test pkg::TestA"}, pool.served(), "the refused test's end gave the holder the whole pool")
 	require.Equal(t, []string{"begin pkg::TestA 0001-01-01T00:00:00Z"}, h.moves)
 	require.NoError(t, a.EndScopeAt(ctx, "pkg::TestA", me, time.Now()))
-	require.Equal(t, []uint32{uint32(me)}, pool.cleared)
+	require.Equal(t, []string{"test pkg::TestA", "pool"}, pool.served())
 
 	// A refused test that later begins on its own runs as any other.
 	require.NoError(t, a.BeginScopeAt(ctx, "pkg::TestB", me, time.Now()))
 	require.NoError(t, a.EndScopeAt(ctx, "pkg::TestB", me, time.Now()))
-	require.Equal(t, []uint32{uint32(me), uint32(me)}, pool.cleared)
+	require.Equal(t, []string{"test pkg::TestA", "pool", "test pkg::TestB", "pool"}, pool.served())
+	require.Empty(t, pool.narrowed, "no per-worker view under exact serving")
 }
 
 // A harness that retries the end of a test whose move back failed moves the

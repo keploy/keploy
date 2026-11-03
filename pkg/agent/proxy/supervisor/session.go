@@ -59,6 +59,13 @@ type Session struct {
 	// The relay tees each chunk of server→client traffic onto its channel.
 	DestStream *fakeconn.FakeConn
 
+	// Order says how far the producer has put each stream in capture order
+	// (StreamedBefore). Set by the producer that numbers the chunks
+	// (fakeconn.Chunk.ConnSeq) and knows what it captured and has not handed
+	// on: the relay, which owns the capture order (relay.Relay.StreamedBefore).
+	// nil when the producer cannot say.
+	Order func(dir fakeconn.Direction, seq uint32) (end int64, ok bool, changed <-chan struct{})
+
 	// Directives is the parser's send channel for control messages to
 	// the relay/supervisor (TLS upgrade, abort, finalize, pause/resume).
 	Directives chan<- directive.Directive
@@ -142,10 +149,14 @@ type Session struct {
 	// / monotonic-timestamp normalisation — they only differ on the
 	// final handoff.
 	RouteMocksViaSyncMock bool
-	// endedWhereClientStopped: the destination's stream ended where the
-	// client stopped taking it (MarkEndedWhereClientStopped). Internal; here,
-	// in the padding after the bools, so a Session stays in its size class.
-	endedWhereClientStopped atomic.Bool
+	// peerEnds: how each side of the connection ended, and which ended
+	// first (MarkPeerEnded; peerEndFirstShift), whether the server spoke
+	// unasked before the current request (ServerSpokeUnasked), and, from
+	// endedWithConnectionShift, one bit per fakeconn.Direction: that stream
+	// ended because its connection did (MarkEndedWithConnection). Internal;
+	// one word here, in the padding after the bools, so a Session stays in
+	// its size class with clientStopped.
+	peerEnds atomic.Uint32
 
 	// --- Backward-compatibility (populated by the migration shim) ---
 
@@ -237,14 +248,17 @@ type Session struct {
 
 	// exchanges is NextRequest's state.
 	exchanges exchanges
-	// endedWithConnection, per fakeconn.Direction: that stream ended because
-	// its connection did (MarkEndedWithConnection).
-	endedWithConnection [2]atomic.Bool
+	// clientStopped is nil until the destination's stream ended where the
+	// client stopped taking it (MarkEndedWhereClientStopped), and then what
+	// reads the start of what the client refused there.
+	clientStopped atomic.Pointer[func() []byte]
 	// endedAtHole, per fakeconn.Direction: that stream ended at a capture
 	// hole, and why (MarkEndedAtHole). nil while it has not.
-	endedAtHole      [2]atomic.Pointer[string]
-	hookMu           sync.Mutex
-	lastReqMu        sync.Mutex
+	endedAtHole [2]atomic.Pointer[string]
+	// emitMu guards OnMockRecorded's chain (AddMockHook, EmitMock) and
+	// lastReqTimestamp (enforceReqMonotonic), each taken alone, never one
+	// inside the other. One mutex for both keeps a Session in its size class.
+	emitMu           sync.Mutex
 	lastReqTimestamp time.Time // most recent ReqTimestampMock emitted on this session
 
 	// incomplete is the incomplete-mock flag (MarkMockIncomplete): nil while
@@ -273,8 +287,8 @@ func (s *Session) AddPostRecordHook(h PostRecordHook) {
 	if s == nil || h == nil {
 		return
 	}
-	s.hookMu.Lock()
-	defer s.hookMu.Unlock()
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
 	prev := s.OnMockRecorded
 	if prev == nil {
 		s.OnMockRecorded = h
@@ -343,19 +357,21 @@ func (s *Session) MarkMockIncomplete(reason string) {
 // known to be the client's (the rest may have been lost, or never captured),
 // and such a message is not recorded. Nil-safe.
 func (s *Session) MarkEndedWithConnection(dir fakeconn.Direction) {
-	if s == nil || int(dir) >= len(s.endedWithConnection) {
+	if s == nil {
 		return
 	}
-	s.endedWithConnection[dir].Store(true)
+	// A direction past FromDest sets a bit EndedWithConnection never reads,
+	// or none.
+	s.peerEnds.Or(1 << (endedWithConnectionShift + uint32(dir)))
 }
 
 // EndedWithConnection reports whether dir's stream ended because its
 // connection did (MarkEndedWithConnection). Nil-safe.
 func (s *Session) EndedWithConnection(dir fakeconn.Direction) bool {
-	if s == nil || int(dir) >= len(s.endedWithConnection) {
+	if s == nil || dir > fakeconn.FromDest {
 		return false
 	}
-	return s.endedWithConnection[dir].Load()
+	return s.peerEnds.Load()&(1<<(endedWithConnectionShift+uint32(dir))) != 0
 }
 
 // MarkEndedWhereClientStopped says the destination's stream ended where the
@@ -371,17 +387,182 @@ func (s *Session) EndedWithConnection(dir fakeconn.Direction) bool {
 // never read, and a half-closed client that reset before its acknowledgement
 // went out may have read some of what was cut. The caller calls it before the
 // stream ends, so a parser that reaches the end sees it. Nil-safe.
-func (s *Session) MarkEndedWhereClientStopped() {
+//
+// notTaken returns the start of what the client refused from there on, which
+// the stream does not hold, up to what reached the proxy after the client's
+// FIN (relay.Config.ClientStopped): all of it once the stream has ended.
+// NotTakenWhereClientStopped calls it.
+func (s *Session) MarkEndedWhereClientStopped(notTaken func() []byte) {
 	if s == nil {
 		return
 	}
-	s.endedWhereClientStopped.Store(true)
+	s.clientStopped.Store(&notTaken)
 }
 
 // EndedWhereClientStopped reports whether the destination's stream ended where
 // the client stopped taking it (MarkEndedWhereClientStopped). Nil-safe.
 func (s *Session) EndedWhereClientStopped() bool {
-	return s != nil && s.endedWhereClientStopped.Load()
+	return s != nil && s.clientStopped.Load() != nil
+}
+
+// NotTakenWhereClientStopped is the start of what the client refused where the
+// destination's stream ended (MarkEndedWhereClientStopped): bytes the
+// destination sent that the client never took, and the stream never held, up
+// to the first that reached the proxy after the client's FIN, which may be the
+// destination's answer to the client's close. A parser that reached the end of
+// the stream in the middle of a message reads in it how the destination went
+// on before it could know the client had closed. Nil while the stream has not
+// ended so, when nothing was given to read it, and for a nil session. The
+// caller must not change it.
+func (s *Session) NotTakenWhereClientStopped() []byte {
+	if s == nil {
+		return nil
+	}
+	if p := s.clientStopped.Load(); p != nil && *p != nil {
+		return (*p)()
+	}
+	return nil
+}
+
+// StreamedBefore reports whether every chunk of dir captured before the chunk
+// numbered seq (fakeconn.Chunk.CapturedBefore), a number its producer gave on
+// this connection, has gone on dir's stream, or never will (Order): end is then
+// how far into the stream they all are, in the bytes FakeConn.Consumed counts,
+// and ok is true. While one may still go on it, ok is false and changed is
+// closed once that may have changed with nothing more on the stream. A
+// parser that reads the two streams apart, and has read dir's stream through
+// end, has seen every chunk of it captured before seq: none that comes after
+// that on it was. ok and changed are both unset when the producer cannot say
+// (no Order). Nil-safe.
+func (s *Session) StreamedBefore(dir fakeconn.Direction, seq uint32) (end int64, ok bool, changed <-chan struct{}) {
+	if s == nil || s.Order == nil {
+		return 0, false, nil
+	}
+	return s.Order(dir, seq)
+}
+
+// PeerEnd is how one side of a connection ended its side, as the relay's
+// read of it found.
+type PeerEnd uint32
+
+const (
+	// PeerOpen: the side has not ended its side, or the relay ended the
+	// read itself (the recording's stop, the other side's teardown).
+	PeerOpen PeerEnd = iota
+	// PeerClosed: the side sent its FIN.
+	PeerClosed
+	// PeerReset: the side reset the connection.
+	PeerReset
+)
+
+// peerEndFirstShift: peerEnds holds each direction's PeerEnd in two bits
+// (FromClient's in bits 0-1, FromDest's in bits 2-3), and, from this bit, the
+// direction whose side ended first, plus one (0: neither has).
+const peerEndFirstShift = 4
+
+// endedWithConnectionShift: peerEnds holds, from this bit, one bit per
+// fakeconn.Direction (MarkEndedWithConnection), past every PeerEnd bit.
+const endedWithConnectionShift = 16
+
+// spokeUnaskedBit, in peerEnds, past the first ender's two bits:
+// ServerSpokeUnasked. Unlike the bits before it, it holds for one exchange:
+// NextRequest clears it.
+const spokeUnaskedBit = 1 << (peerEndFirstShift + 2)
+
+// endFollowedStopBit, in peerEnds, after spokeUnaskedBit: EndFollowedStop.
+const endFollowedStopBit = 1 << (peerEndFirstShift + 3)
+
+// EndFollowedStop reports whether the first end of the connection
+// (FirstPeerEnded) was the application's stop (MarkPeerEndedStopping): read
+// after the recording's stop had begun (keploy stops the application only
+// once it has told the agent), or the client's end as its process exited.
+// The call it had in flight ended in no fault of the upstream's or the
+// application's. An end read before the stop began while the client's process
+// ran on (the application's own timeout, the upstream's reset) is not one,
+// however late the stop. Nil-safe.
+func (s *Session) EndFollowedStop() bool {
+	return s != nil && s.peerEnds.Load()&endFollowedStopBit != 0
+}
+
+// ServerSpokeUnasked reports whether the server sent bytes that answer no
+// request before the current request's first chunk was captured: the floor
+// the request set (NextRequest) dropped a run of the server's stream that is
+// not an answer the capture lacks (dropped). An HTTP server's 408, or its
+// close after one, on a keep-alive connection that idled out as the client
+// sent this request is such a run. An end of the connection that follows,
+// with no answer to the request, is the server's idle close, not its answer.
+// It is set as the parser reads the server's stream for the request, and
+// cleared as the parser starts the next one. Nil-safe.
+func (s *Session) ServerSpokeUnasked() bool {
+	return s != nil && s.peerEnds.Load()&spokeUnaskedBit != 0
+}
+
+// MarkPeerEnded says dir's side of the connection ended, by a reset or by a FIN
+// (PeerReset, PeerClosed), as the relay's read of it found
+// (relay.Config.PeerEnded): the client's for FromClient,
+// the destination's for FromDest. The first mark of a direction is kept, and
+// so is which direction was marked first: the side that ended the exchange.
+// The relay marks it as its read returns, before it forwards the end to the
+// other side, so the other side's end, which can come only after, is marked
+// after it. The caller marks it before the stream ends, so a parser that
+// reaches the end sees it. Nil-safe.
+func (s *Session) MarkPeerEnded(dir fakeconn.Direction, reset bool) {
+	s.MarkPeerEndedStopping(dir, reset, false)
+}
+
+// MarkPeerEndedStopping is MarkPeerEnded for a relay that knows whether the
+// end it read is the application's stop (stopBegun): the recording's stop had
+// begun (keploy record and keploy mock record tell the agent before they stop
+// the application), or the client's process was exiting as its end was read
+// (the proxy's peerEndMarker). Such an end is not a fault (EndFollowedStop).
+// Only the first end's is kept. Nil-safe.
+func (s *Session) MarkPeerEndedStopping(dir fakeconn.Direction, reset, stopBegun bool) {
+	if s == nil || dir > fakeconn.FromDest {
+		return
+	}
+	end := PeerClosed
+	if reset {
+		end = PeerReset
+	}
+	shift := 2 * uint32(dir)
+	for {
+		old := s.peerEnds.Load()
+		if (old>>shift)&3 != 0 {
+			return
+		}
+		next := old | uint32(end)<<shift
+		if (old>>peerEndFirstShift)&3 == 0 {
+			next |= (uint32(dir) + 1) << peerEndFirstShift
+			if stopBegun {
+				next |= endFollowedStopBit
+			}
+		}
+		if s.peerEnds.CompareAndSwap(old, next) {
+			return
+		}
+	}
+}
+
+// PeerEnded reports how dir's side of the connection ended (MarkPeerEnded):
+// PeerOpen while it has not been marked. Nil-safe.
+func (s *Session) PeerEnded(dir fakeconn.Direction) PeerEnd {
+	if s == nil || dir > fakeconn.FromDest {
+		return PeerOpen
+	}
+	return PeerEnd(s.peerEnds.Load() >> (2 * uint32(dir)) & 3)
+}
+
+// FirstPeerEnded reports which side of the connection ended its side first
+// (MarkPeerEnded), and ok false while neither has. Nil-safe.
+func (s *Session) FirstPeerEnded() (dir fakeconn.Direction, ok bool) {
+	if s == nil {
+		return 0, false
+	}
+	first := (s.peerEnds.Load() >> peerEndFirstShift) & 3
+	if first == 0 {
+		return 0, false
+	}
+	return fakeconn.Direction(first - 1), true
 }
 
 // MarkEndedAtHole says dir's stream ended at a capture hole: a chunk of it was
@@ -735,9 +916,9 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 	// across connections are independent.
 	s.enforceReqMonotonic(m)
 
-	s.hookMu.Lock()
+	s.emitMu.Lock()
 	hook := s.OnMockRecorded
-	s.hookMu.Unlock()
+	s.emitMu.Unlock()
 	if hook != nil {
 		hook(m)
 	}
@@ -1252,7 +1433,7 @@ func leftOutNextStep(class string, spanned bool) string {
 // s.lastReqTimestamp + 1ns when a regression is detected, and
 // updates the session's last-seen timestamp. In debug builds we
 // panic instead so regressions surface during testing. Thread-safe:
-// holds lastReqMu while comparing + writing back.
+// holds emitMu while comparing + writing back.
 //
 // Zero-valued ReqTimestampMock values pass through untouched
 // (parsers that haven't populated them, e.g. tests with pre-built
@@ -1262,8 +1443,8 @@ func (s *Session) enforceReqMonotonic(m *models.Mock) {
 	if req.IsZero() {
 		return
 	}
-	s.lastReqMu.Lock()
-	defer s.lastReqMu.Unlock()
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
 	if s.lastReqTimestamp.IsZero() {
 		s.lastReqTimestamp = req
 		return

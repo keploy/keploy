@@ -1144,6 +1144,22 @@ func checkReadIn(o models.ClockOffset, live Leaf, s Span, learned, read, hint st
 				in = ", read here in UTC"
 			}
 		}
+		if o.Step > o.Res {
+			// A phase-locked look-back's grid (models.ClockOffset
+			// holdsAtStep): a minute's or a finer step is one grid in every
+			// zone, read in UTC; an hour's or a day's is read in UTC and in
+			// the application's zone (s.Zone: its process's, else the one the
+			// learn step named), as the learn step reads it (phaseAt), and
+			// the value holds where either grid holds it.
+			var grid []time.Time
+			for _, at := range ats {
+				grid = append(grid, at.In(time.UTC))
+				if o.Step >= time.Hour && s.Zone != nil && s.Zone != time.UTC {
+					grid = append(grid, at.In(s.Zone))
+				}
+			}
+			ats = grid
+		}
 		// A read plus an offset fails closed near a wall time the
 		// application's zone shows twice as its clocks go back, at any cut
 		// finer than a day (models.ClockOffset.FallBack), read in that zone
@@ -1165,6 +1181,12 @@ func checkReadIn(o models.ClockOffset, live Leaf, s Span, learned, read, hint st
 		cut := ""
 		if c := o.CheckedAt(res); c > res {
 			cut = " (checked as standing for the whole " + models.ShortDuration(c) + " the learn step read it cut to" + in + ")"
+		}
+		if ph := hourPhase(ats[0]); o.Step > 0 && o.Res == time.Hour && ph != o.Phase {
+			// models.ClockOffset.Phase: off the hour the learned values sat
+			// on. An offset learned before Step never learned a Phase, and
+			// fails with main's reason.
+			cut += " (it sits " + phaseName(ph) + ", off the hour the learned values sat on, " + phaseName(o.Phase) + ")"
 		}
 		return false, o.CheckedAt(res), learned + ", and the value this call carries is not " + read + made + ": it changed" + cut + hint
 	}

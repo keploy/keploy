@@ -172,7 +172,13 @@ func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, t
 	if err := json.Unmarshal([]byte(actJSON), &act); err != nil {
 		return nil
 	}
+	return ChangedDecodedJSONFieldPaths(exp, act, known, typeStrict, valueChangesOnly, excludeRecordedValue)
+}
 
+// ChangedDecodedJSONFieldPaths is ChangedJSONFieldPaths over two bodies
+// already decoded, each by json.Unmarshal into an interface{}: a body
+// compared with many others is decoded once. It only reads exp and act.
+func ChangedDecodedJSONFieldPaths(exp, act interface{}, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, excludeRecordedValue func(string) bool) []string {
 	idx := buildNoiseIndex(known, nil)
 	// typeStrict paths are LEARNED-dynamic: their VALUE is ignored but their TYPE
 	// must match. Marked on the index so they resolve under the same
