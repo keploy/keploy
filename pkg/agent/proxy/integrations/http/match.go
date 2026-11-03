@@ -2517,7 +2517,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	if diag != nil && diag.closest != nil && diag.closest.Spec.HTTPReq != nil {
 		// Under the proven switch: the strict comparison's closest recording,
 		// and the fields it found differ.
-		return withRoutePlaces(strictMismatchReport(request, liveBody, dest, actualKey, diag, comparedDests, phase, candidateCount),
+		return withRoutePlaces(strictMismatchReport(request, liveBody, dest, diag, comparedDests, phase, candidateCount),
 			request, diag.closest, comparedPool, variableTable(mockDb))
 	}
 	closestPool := httpMocks
@@ -2625,7 +2625,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	places := redactedPlacesOf(mockReq, closestMock.Noise)
 	redactFieldDiffs(fieldDiffs, places)
 
-	b := mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(actualKey, request.URL.Path)).
+	b := mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.Path)).
 		WithDestination(dest).
 		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).

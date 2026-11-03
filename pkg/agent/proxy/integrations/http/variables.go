@@ -1630,7 +1630,8 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 	if closest != nil {
 		places = redactedPlacesOf(closest.Spec.HTTPReq, closest.Noise)
 		redactFieldDiffs(diffs, places)
-		actualKey = places.summary(actualKey, request.URL.Path)
+		// actualKey names the path escaped (buildHTTPMismatchReport).
+		actualKey = places.summary(request.Method, request.URL.EscapedPath())
 	}
 	b := mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 		WithDestination(dest).
@@ -1670,7 +1671,14 @@ func withRoutePlaces(r *models.MockMismatchReport, request *http.Request, closes
 		return r
 	}
 	if places := routePathPlaces(request, closest, pool, table); len(places) > 0 {
-		r.ActualSummary = request.Method + " " + request.URL.EscapedPath()
+		// The path escaped, as a place counts it, with the segments the
+		// closest recording redacted written valueRedacted, as the report
+		// it replaces wrote them.
+		var redacted redactedPlaces
+		if closest != nil {
+			redacted = redactedPlacesOf(closest.Spec.HTTPReq, closest.Noise)
+		}
+		r.ActualSummary = redacted.summary(request.Method, request.URL.EscapedPath())
 		r.VariablePlaces = places
 	}
 	return r

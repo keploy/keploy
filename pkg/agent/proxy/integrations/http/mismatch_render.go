@@ -242,8 +242,8 @@ func truncateValue(s string, max int) string {
 }
 
 // redactQuery canonicalizes a query string and redacts parameter values whose
-// key looks sensitive or the recording redacted (redacted, nil for none), or
-// whose value matches the mock's noise patterns. On a parse failure it fails
+// key looks sensitive or the recording redacted (redacted), or whose value
+// matches the mock's noise patterns. On a parse failure it fails
 // closed — the raw query is never emitted, since it could carry credentials.
 func redactQuery(rawQuery string, nc *util.NoiseChecker, redacted func(string) bool) string {
 	vals, err := url.ParseQuery(rawQuery)
@@ -252,7 +252,7 @@ func redactQuery(rawQuery string, nc *util.NoiseChecker, redacted func(string) b
 	}
 	for k, vs := range vals {
 		for i, v := range vs {
-			if isSensitiveHeader(k) || (redacted != nil && redacted(k)) || (nc != nil && v != "" && nc.IsNoisy(v)) || looksLikeSecretValue(v) {
+			if isSensitiveHeader(k) || redacted(k) || (nc != nil && v != "" && nc.IsNoisy(v)) || looksLikeSecretValue(v) {
 				vs[i] = valueRedacted
 			} else {
 				vs[i] = truncateValue(v, maxRenderValueLen)
@@ -335,7 +335,7 @@ func redactJSONValue(v interface{}, places redactedPlaces, path string) {
 	case []interface{}:
 		ep := jsonElemPath(path)
 		for i, val := range t {
-			if ep != "" && places.field(ep) {
+			if places.field(ep) {
 				t[i] = valueRedacted
 				continue
 			}

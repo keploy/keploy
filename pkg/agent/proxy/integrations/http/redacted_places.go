@@ -39,8 +39,9 @@ type redactedPlaces struct {
 	// body is a recorded body redacted whole.
 	body bool
 	// fields are body fields by the name a field diff gives them under
-	// "body.": a JSON field's path with each array position written "[]"
-	// (matcher.JSONFieldDiffs, strictKnown.jsonDiffs), a form key or a
+	// "body.": a JSON field's path with each array position written "[]",
+	// a root array's too ("[].id", as matcher.JSONFieldDiffs names it; the
+	// strict comparison's "body[].id" is read the same), a form key or a
 	// multipart field's name, decoded.
 	fields map[string]bool
 }
@@ -111,8 +112,8 @@ func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
 		if json.Unmarshal([]byte(r.Body), &v) == nil {
 			p.collectJSON(v, "")
 		}
-		// A redacted string at the root, or in an array at the root, has
-		// no name of its own: the body is redacted whole.
+		// A redacted string at the root has no name of its own: the body
+		// is redacted whole.
 		p.body = p.fields[""]
 	}
 	return p
@@ -135,12 +136,8 @@ func (p redactedPlaces) collectJSON(v interface{}, path string) {
 			p.collectJSON(child, cp)
 		}
 	case []interface{}:
-		cp := path
-		if cp != "" {
-			cp += "[]"
-		}
 		for _, child := range t {
-			p.collectJSON(child, cp)
+			p.collectJSON(child, jsonElemPath(path))
 		}
 	case string:
 		if p.noisy(t) {
@@ -176,6 +173,9 @@ func (p redactedPlaces) covers(path string) bool {
 		return p.body || len(p.fields) > 0
 	case strings.HasPrefix(path, "body."):
 		return p.field(strings.TrimPrefix(path, "body."))
+	case strings.HasPrefix(path, "body["):
+		// A root array's element under the strict comparison.
+		return p.field(strings.TrimPrefix(path, "body"))
 	}
 	return false
 }
@@ -227,6 +227,12 @@ func (p redactedPlaces) redactMultipart(body, contentType string) (string, bool)
 	if err != nil || params["boundary"] == "" {
 		return "", false
 	}
+	// A body cut before its close delimiter does not read as one, though
+	// the reader ends it as one that ended (io.EOF) when the cut is inside
+	// a part's header.
+	if !strings.Contains(body, "--"+params["boundary"]+"--") {
+		return "", false
+	}
 	mr := multipart.NewReader(strings.NewReader(body), params["boundary"])
 	var b bytes.Buffer
 	w := multipart.NewWriter(&b)
@@ -262,13 +268,11 @@ func (p redactedPlaces) redactMultipart(body, contentType string) (string, bool)
 	return b.String(), true
 }
 
-// summary is a miss's summary ("METHOD path") with the path's redacted
-// segments written valueRedacted.
-func (p redactedPlaces) summary(actualKey, path string) string {
-	if len(p.segments) == 0 || path == "" {
-		return actualKey
-	}
-	return strings.Replace(actualKey, " "+path, " "+p.path(path), 1)
+// summary is a miss's summary, "METHOD path", with the path's redacted
+// segments written valueRedacted. path is the live path in the form the
+// summary names it (escaped or not).
+func (p redactedPlaces) summary(method, path string) string {
+	return method + " " + p.path(path)
 }
 
 // jsonChildPath is the path of a JSON object's member key under path, in
@@ -280,10 +284,8 @@ func jsonChildPath(path, key string) string {
 	return path + "." + key
 }
 
-// jsonElemPath is the path of a JSON array's elements under path.
+// jsonElemPath is the path of a JSON array's elements under path ("[]" at
+// the root).
 func jsonElemPath(path string) string {
-	if path == "" {
-		return path
-	}
 	return path + "[]"
 }

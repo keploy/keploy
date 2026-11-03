@@ -50,6 +50,15 @@ type redactedLiveCase struct {
 	hdr, liveHdr     map[string]string
 	rec, live        string
 	noise            []string
+	// params, when set, are the recording's URLParams in place of those
+	// its URL's query gives (an empty map: none).
+	params map[string]string
+	// vars are the recording's test variables.
+	vars models.MockVariables
+	// wholeBody: the live body does not read as its type does, and the
+	// recording redacted a field of it, so the rendered body is redacted
+	// whole.
+	wholeBody bool
 }
 
 func redactedLiveCases(t *testing.T) []redactedLiveCase {
@@ -57,6 +66,18 @@ func redactedLiveCases(t *testing.T) []redactedLiveCase {
 	liveMP, liveMPCT := redactedMultipart(t, [2]string{"assertion", liveSecret}, [2]string{"x", "bravo2"})
 	const jsonCT, formCT = "application/json", "application/x-www-form-urlencoded"
 	value := []string{`^REDACTED_abc$`}
+	// A body that cannot show x shows it in a header.
+	other, liveOther := map[string]string{"X-Other": "alpha1"}, map[string]string{"X-Other": "bravo2"}
+	// A live multipart form cut inside its secret field's value, and one
+	// cut inside that field's header.
+	cutMP, _ := redactedMultipart(t, [2]string{"x", "bravo2"}, [2]string{"assertion", liveSecret})
+	cutInValue := cutMP[:strings.Index(cutMP, liveSecret)+len(liveSecret)]
+	cutInHeader := cutMP[:strings.Index(cutMP, `name="assertion"`)] + `name="assertion"; filename="` + liveSecret
+	// One whose secret field's header line is malformed, and one cut in a
+	// value that writes the close delimiter's text (not at a line's start).
+	badHeader := strings.Replace(cutMP, `Content-Disposition: form-data; name="assertion"`, `Content-Disposition form-data name assertion`, 1)
+	delimMP, _ := redactedMultipart(t, [2]string{"x", "bravo2"}, [2]string{"assertion", liveSecret + " --redacted-live-boundary-- tail"})
+	cutAfterDelim := delimMP[:strings.Index(delimMP, " tail")]
 	// With the switch off the request matcher serves a form or a multipart
 	// form whose field changed: those calls go to another path too, so
 	// they miss either way.
@@ -71,6 +92,24 @@ func redactedLiveCases(t *testing.T) []redactedLiveCase {
 		{name: "query", url: "/x?assertion=REDACTED_abc", liveURL: "/x?assertion=" + liveSecret, ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value},
 		{name: "header", url: "/x", ctype: jsonCT, hdr: map[string]string{"X-Assertion": "REDACTED_abc"}, liveHdr: map[string]string{"X-Assertion": liveSecret}, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value},
 		{name: "path-segment", url: "/x/REDACTED_abc/y", liveURL: "/x/" + liveSecret + "/y", ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value},
+		{name: "whole-body", url: "/x", liveURL: "/x/other", ctype: "text/plain", hdr: other, liveHdr: liveOther, rec: "REDACTED_abc", live: liveSecret, noise: value},
+		{name: "json-root-array", url: "/x", ctype: jsonCT, hdr: other, liveHdr: liveOther, rec: `["REDACTED_abc","alpha1"]`, live: `["` + liveSecret + `","bravo2"]`, noise: value},
+		{name: "json-root-string", url: "/x", liveURL: "/x/other", ctype: jsonCT, hdr: other, liveHdr: liveOther, rec: `"REDACTED_abc"`, live: `"` + liveSecret + `"`, noise: value},
+		{name: "json-root-array-of-objects", url: "/x", ctype: jsonCT, rec: `[{"assertion":"REDACTED_abc","x":"alpha1"}]`, live: `[{"assertion":"` + liveSecret + `","x":"bravo2"}]`, noise: value},
+		{name: "json-string-array", url: "/x", ctype: jsonCT, rec: `{"tags":["REDACTED_abc"],"x":"alpha1"}`, live: `{"tags":["` + liveSecret + `"],"x":"bravo2"}`, noise: value},
+		{name: "json-missing-in-live", url: "/x", ctype: jsonCT, hdr: map[string]string{"X-Assertion": "REDACTED_abc"}, liveHdr: map[string]string{"X-Assertion": liveSecret}, rec: `{"assertion":"REDACTED_abc","x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value},
+		{name: "form-escaped-value", url: "/x", liveURL: "/x/other", ctype: formCT, rec: `assertion=REDACTED%5Fabc&x=alpha1`, live: `assertion=` + liveSecret + `&x=bravo2`, noise: value},
+		{name: "form-key-pattern-only", url: "/x", liveURL: "/x/other", ctype: formCT, rec: `assertion=REDACTED_abc&x=alpha1`, live: `assertion=` + liveSecret + `&x=bravo2`, noise: []string{`^assertion=[^&]+$`}},
+		{name: "multipart-cut-in-a-value", url: "/x", liveURL: "/x/other", ctype: recMPCT, liveCtype: liveMPCT, hdr: other, liveHdr: liveOther, rec: recMP, live: cutInValue, noise: value, wholeBody: true},
+		{name: "multipart-cut-in-a-header", url: "/x", liveURL: "/x/other", ctype: recMPCT, liveCtype: liveMPCT, hdr: other, liveHdr: liveOther, rec: recMP, live: cutInHeader, noise: value, wholeBody: true},
+		{name: "multipart-malformed-header", url: "/x", liveURL: "/x/other", ctype: recMPCT, liveCtype: liveMPCT, hdr: other, liveHdr: liveOther, rec: recMP, live: badHeader, noise: value, wholeBody: true},
+		{name: "multipart-cut-after-delimiter-text", url: "/x", liveURL: "/x/other", ctype: recMPCT, liveCtype: liveMPCT, hdr: other, liveHdr: liveOther, rec: recMP, live: cutAfterDelim, noise: value, wholeBody: true},
+		{name: "query-in-urlparams-only", url: "/x", params: map[string]string{"assertion": "REDACTED_abc"}, liveURL: "/x?assertion=" + liveSecret, ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value},
+		{name: "query-in-url-only", url: "/x?assertion=REDACTED_abc", params: map[string]string{}, liveURL: "/x?assertion=" + liveSecret, ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value},
+		// A test variable's place on the path makes the report name the
+		// path escaped, as a place counts it.
+		{name: "path-segment-route-variable", url: "/x/REDACTED_abc/y", liveURL: "/x/" + liveSecret + "/y", ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value, vars: models.MockVariables{"v": {Recorded: "y", Bind: "url.path[2]"}}},
+		{name: "path-segment-escaped-route-variable", url: "/x/REDACTED_abc/y", liveURL: "/x/" + liveSecret + "%2B/y", ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value, vars: models.MockVariables{"v": {Recorded: "y", Bind: "url.path[2]"}}},
 	}
 }
 
@@ -81,6 +120,10 @@ func (c redactedLiveCase) mock() *models.Mock {
 	}
 	m := recorded("m", c.url, hdr, c.rec)
 	m.Noise = c.noise
+	if c.params != nil {
+		m.Spec.HTTPReq.URLParams = c.params
+	}
+	m.Spec.Variables = c.vars
 	return m
 }
 
@@ -150,6 +193,27 @@ func TestMissReportRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
 				}
 				if strings.Contains(string(all), liveSecret) {
 					t.Errorf("the report carries the live value at a place the recording redacted:\nDiff: %s\nReceivedReq:\n%s\nreport: %s", r.Diff, r.ReceivedReq, all)
+				}
+				// The rendered recording shows the place redacted too, so
+				// the two sides line up.
+				if strings.Contains(r.ClosestMockReq, "REDACTED") {
+					t.Errorf("the rendered recording shows the recorded placeholder, not the place redacted:\n%s", r.ClosestMockReq)
+				}
+				if !strings.HasPrefix(r.ReceivedReq, "POST /") {
+					t.Errorf("ReceivedReq does not name the path whole:\n%s", r.ReceivedReq)
+				}
+				for _, d := range r.FieldDiffs {
+					switch {
+					case d.Path == "path" && (!strings.HasPrefix(d.Expected, "/") || !strings.HasPrefix(d.Actual, "/")):
+						t.Errorf("the path diff does not name the paths whole: %+v", d)
+					case d.Kind == models.DiffKindMissingInLive && d.Actual != "":
+						t.Errorf("a field the live call does not have shows a live value: %+v", d)
+					case d.Kind == models.DiffKindMissingInMock && d.Expected != "":
+						t.Errorf("a field the recording does not have shows a recorded value: %+v", d)
+					}
+				}
+				if body := r.ReceivedReq[strings.Index(r.ReceivedReq, "\n\n")+2:]; c.wholeBody && body != valueRedacted {
+					t.Errorf("a live body that does not read, at a recording that redacted a field of it, is not redacted whole:\n%s", body)
 				}
 				if !strings.Contains(r.ReceivedReq, "bravo2") {
 					t.Errorf("ReceivedReq lost the rest of the call:\n%s", r.ReceivedReq)

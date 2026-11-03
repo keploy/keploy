@@ -121,7 +121,7 @@ func TestRedactBody_OpaqueXML(t *testing.T) {
 
 func TestRedactQuery(t *testing.T) {
 	nc := util.NewNoiseChecker(nil)
-	out := redactQuery("access_token="+jwtSecret+"&trace="+benignUUID+"&q=hello", nc, nil)
+	out := redactQuery("access_token="+jwtSecret+"&trace="+benignUUID+"&q=hello", nc, func(string) bool { return false })
 	mustNotContain(t, out, jwtSecret, "query keyword key + value-shape")
 	mustContain(t, out, benignUUID, "benign query param retained")
 	mustContain(t, out, "q=hello", "benign query param retained")
@@ -164,5 +164,18 @@ func TestRedactFieldDiffs(t *testing.T) {
 	}
 	if diffs[3].Expected != "2" || diffs[3].Actual != "5" {
 		t.Errorf("benign qty diff should remain visible: %+v", diffs[3])
+	}
+}
+
+// A multipart body that does not read as one is redacted whole only where
+// the recording redacted a field of it: else it is shown as an opaque body.
+func TestRedactBody_MultipartThatDoesNotRead(t *testing.T) {
+	const ct = "multipart/form-data; boundary=b"
+	body := "--b\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nplain words"
+	if out := redactBody(body, ct, redactedPlaces{fields: map[string]bool{"assertion": true}}); out != valueRedacted {
+		t.Errorf("at a recording that redacted a field: %q, want it redacted whole", out)
+	}
+	if out := redactBody(body, ct, redactedPlaces{}); out != body {
+		t.Errorf("at a recording that redacted none: %q, want the body as sent", out)
 	}
 }
