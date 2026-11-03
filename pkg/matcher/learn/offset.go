@@ -432,6 +432,36 @@ func (dc *DriftCache) readPlaces(x Raw) []keyedPlace {
 	return out
 }
 
+// copyPlaces makes each name of places (its field, label and where) a copy
+// that holds no part of the text it was read from, each name once: a name
+// that is the place before it's takes that one's copy. Each instant of a
+// list that meets no word before the instant ahead of it takes that one's
+// label, one string (instantLabels), so a list of n instants after one
+// long word (a base64 text's encoded run, ahead of its decoded form in
+// rawExtra) has n places of one label: a copy for each held n copies of
+// it, memory quadratic in the payload (the staging's read of a 128 KiB
+// base64 text of a JSON list of dates held about 1 GB). Go compares two
+// strings that share their bytes without reading them, so a name the
+// place before it shares costs no pass over it.
+func copyPlaces(places []keyedPlace) {
+	var path, label, where lastCopy
+	for i := range places {
+		k := &places[i]
+		k.k.path, k.k.label, k.where = path.of(k.k.path), label.of(k.k.label), where.of(k.where)
+	}
+}
+
+// lastCopy is the name it copied last and its copy (of).
+type lastCopy struct{ name, copy string }
+
+// of is a copy of name: the one it made last where name is that one's.
+func (c *lastCopy) of(name string) string {
+	if name != c.name {
+		c.name, c.copy = name, strings.Clone(name)
+	}
+	return c.copy
+}
+
 // servedMove is a leaf of an exchange's answer F served with another value
 // than recorded (a template value: Earlier.servedMoves): path, its field of
 // the mock's spec ("Res.body.Messages[0].SentAt"); in, the field of the
@@ -509,10 +539,7 @@ type GivenPlaces struct {
 func PlacesOf(x Raw) GivenPlaces {
 	dc := NewDriftCache()
 	places := dc.keyedPlaces(x)
-	for i := range places {
-		k := &places[i]
-		k.k.path, k.k.label, k.where = strings.Clone(k.k.path), strings.Clone(k.k.label), strings.Clone(k.where)
-	}
+	copyPlaces(places)
 	answer := dc.answerMoments(x)
 	for i := range answer {
 		a := &answer[i]

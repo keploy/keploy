@@ -355,10 +355,21 @@ func (g *offsetGroup) within(dated bool, lo, hi int64) (from, to int) {
 // placesBytes is the bytes the held part counts of places (setPlaces).
 func placesBytes(places []keyedPlace) int64 {
 	size := int64(headerBytes)
+	var before keyedPlace
 	for _, k := range places {
-		size += placeBytes + int64(len(k.k.path)+len(k.k.label)+len(k.where))
+		size += placeBytes + newBytes(k.k.path, before.k.path) + newBytes(k.k.label, before.k.label) + newBytes(k.where, before.where)
+		before = k
 	}
 	return size
+}
+
+// newBytes is the bytes of name a place's copy holds (copyPlaces): none
+// where the place before it held the same name, whose copy it shares.
+func newBytes(name, before string) int64 {
+	if name == before {
+		return 0
+	}
+	return int64(len(name))
 }
 
 // placesKept reports whether the set keeps x's places (setPlaces), which the

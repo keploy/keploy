@@ -741,7 +741,7 @@ func (dc *DriftCache) payloadMoments(x Raw) []moment {
 }
 
 // setPlaces is keyedPlaces(x), read once for the set where dc keeps x's
-// (setOf), each name a copy; ok is false where it does not.
+// (setOf), each name a copy (copyPlaces); ok is false where it does not.
 func (dc *DriftCache) setPlaces(x Raw) (out []keyedPlace, ok bool) {
 	s := dc.setOf(x)
 	if s == nil {
@@ -749,10 +749,7 @@ func (dc *DriftCache) setPlaces(x Raw) (out []keyedPlace, ok bool) {
 	}
 	return heldPart(s, x, partPlaces, func(e *heldParts) []keyedPlace { return e.places }, func(bool) []keyedPlace {
 		out := dc.readPlaces(x)
-		for i := range out {
-			k := &out[i]
-			k.k.path, k.k.label, k.where = strings.Clone(k.k.path), strings.Clone(k.k.label), strings.Clone(k.where)
-		}
+		copyPlaces(out)
 		return out
 	}, func(e *heldParts, v []keyedPlace) { e.places = v }, placesBytes), true
 }

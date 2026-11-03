@@ -1,12 +1,15 @@
 package learn
 
 import (
+	"encoding/base64"
 	"fmt"
 	"math/rand"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // instantLabelBefore is the word written before the i-th of spans as the
@@ -190,4 +193,143 @@ func TestTheKeyedPlacesOfALongListOfInstantsTakeTheListsWord(t *testing.T) {
 	if seen != n {
 		t.Errorf("%d of the list's %d instants were keyed in its field: want all", seen, n)
 	}
+}
+
+// A leaf F served is keyed in each of its forms as a payload holding it is
+// in that form (movePlaces, readPlaces): its other declared forms (rawExtra)
+// by the words that form writes before its instants, and as many as that
+// form holds, so the place F gave the application stands where another
+// recording's payload holds the recording's in every form. A key written in
+// capitals is case-folded in the other forms ("sentat"), and a value of
+// escaped JSON holds its instant once as served and twice more there (its
+// escapes read, and those case-folded).
+func TestAServedLeafIsKeyedInEachFormByThatFormsOwnWords(t *testing.T) {
+	keys := func(places []keyedPlace) []offsetKey {
+		out := make([]offsetKey, len(places))
+		for i, p := range places {
+			out[i] = p.k
+			out[i].path = ""
+		}
+		return out
+	}
+	for _, mv := range []servedMove{
+		{path: "Res.body.SentAt", in: "Res.body", name: "SentAt", live: "2025-03-14", quoted: true},
+		{path: "Res.body.Msg", in: "Res.body", name: "Msg", live: `{\"SentAt\":\"2025-03-14\"}`, quoted: true},
+	} {
+		dc := NewDriftCache()
+		served := keys(dc.movePlaces("m-0", []servedMove{mv}))
+		m := getAnswer("m-1", "http://api/x", `{"`+mv.name+`":"`+mv.live+`"}`, eRecAt)
+		held := keys(NewDriftCache().readPlaces(RawOf(m, true)))
+		if !reflect.DeepEqual(served, held) {
+			t.Errorf("%s served as %q is keyed %+v: want as a payload holding it is, %+v", mv.name, mv.live, served, held)
+		}
+		var own, other []string
+		for _, k := range served {
+			if k.form == 0 {
+				own = append(own, k.label)
+			} else {
+				other = append(other, k.label)
+			}
+		}
+		if !slices.Equal(own, []string{"SentAt"}) || !slices.Contains(other, "sentat") || len(other) <= len(own) && mv.name == "Msg" {
+			t.Errorf("%s served as %q is keyed %q in its own form and %q in its others: want SentAt, and sentat among more", mv.name, mv.live, own, other)
+		}
+	}
+}
+
+// The keyed places of a list of instants after one long word, copied for
+// the set to keep (copyPlaces), hold the word once: each place's names are
+// equal to those read and none is the text they were read from, every
+// place of the list shares one copy of its label, and the held part counts
+// the bytes the copies hold (placesBytes), each copy once. A base64 text
+// of a JSON list of dates is that list: the instants of its decoded form
+// (rawExtra) take its encoded run as their label.
+func TestTheCopiedPlacesOfAListAfterALongWordHoldTheWordOnce(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("[")
+	for i := range 300 {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`"` + time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC).AddDate(0, 0, i).Format("2006-01-02") + `"`)
+	}
+	b.WriteString("]")
+	m := getAnswer("blob-0", "http://api/blob", `{"blob":"`+base64.StdEncoding.EncodeToString([]byte(b.String()))+`"}`, eRecAt)
+	read := NewDriftCache().readPlaces(RawOf(m, true))
+	places := slices.Clone(read)
+	copyPlaces(places)
+	runs, longest := 0, 0
+	held := map[*byte]int{}
+	for i, p := range places {
+		r := read[i]
+		if p != r {
+			t.Fatalf("place %d was copied as %+v: want %+v", i, p, r)
+		}
+		for j, name := range [][2]string{{p.k.path, r.k.path}, {p.k.label, r.k.label}, {p.where, r.where}} {
+			if name[0] == "" {
+				continue
+			}
+			if unsafe.StringData(name[0]) == unsafe.StringData(name[1]) {
+				t.Fatalf("place %d's name %d is the text it was read from: want a copy", i, j)
+			}
+			held[unsafe.StringData(name[0])] = len(name[0])
+		}
+		if i == 0 || r.k.label != read[i-1].k.label {
+			runs++
+		}
+		longest = max(longest, len(r.k.label))
+	}
+	labels := map[*byte]bool{}
+	for _, p := range places {
+		labels[unsafe.StringData(p.k.label)] = true
+	}
+	if len(places) < 300 || longest < 1000 || len(labels) != runs {
+		t.Errorf("%d places with labels of up to %d bytes hold %d copies of their labels: want 300 or more after a word of 1000 or more, one copy for each of the %d runs of a label", len(places), longest, len(labels), runs)
+	}
+	want := int64(headerBytes + placeBytes*len(places))
+	for _, n := range held {
+		want += int64(n)
+	}
+	if got := placesBytes(places); got != want {
+		t.Errorf("the held part counts %d bytes of the copied places: want %d, each copy once", got, want)
+	}
+}
+
+// The places a set keeps of a recording (setPlaces) and those a recording
+// F gave the application earlier keeps (PlacesOf) are copies: none of
+// their names is part of the recording's payload, so they keep none of it
+// once the set's store lets it go.
+func TestTheKeptPlacesOfARecordingHoldNoPartOfItsPayload(t *testing.T) {
+	m := getAnswer("sent-0", "http://api/sent", `{"SentAt":"2025-03-14","jobs":["2025-03-15","2025-03-16"]}`, eRecAt)
+	inside := func(name, text string) bool {
+		p, base := uintptr(unsafe.Pointer(unsafe.StringData(name))), uintptr(unsafe.Pointer(unsafe.StringData(text)))
+		return name != "" && p >= base && p < base+uintptr(len(text))
+	}
+	check := func(who string, places []keyedPlace, text string) {
+		t.Helper()
+		if len(places) < 3 {
+			t.Fatalf("%s keeps %d places of the recording's three instants: want each", who, len(places))
+		}
+		for _, p := range places {
+			for _, name := range []string{p.k.path, p.k.label, p.where} {
+				if inside(name, text) {
+					t.Errorf("%s keeps %q of a place %+v as part of the recording's payload: want a copy", who, name, p.k)
+				}
+			}
+		}
+	}
+	x := RawOf(m, true)
+	check("PlacesOf", PlacesOf(x).places, x.payload().text)
+
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	y := dc.LazyRawOf(m, true, nil)
+	places, ok := dc.setPlaces(y)
+	if !ok {
+		t.Fatal("the set keeps no places of its recording: want them kept (setPlaces)")
+	}
+	check("the set", places, y.payload().text)
 }
