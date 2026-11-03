@@ -676,6 +676,53 @@ func TestSampler_AWaitPastTheLastSampleIsOwedOnlyByTheNextOnTimeSample(t *testin
 	})
 }
 
+// A wait is set against a late sample's count once: a read sets what lies
+// past the last sample against the next sample alone, and a late sample that
+// paid part of such a wait out of what it counted keeps only the rest of its
+// count for a later read to take.
+func TestSampler_AWaitIsSetAgainstALateSamplesCountOnce(t *testing.T) {
+	t.Run("a wait past the last sample", func(t *testing.T) {
+		s, src := newFakeSampler(0)
+		// Late: 40 ms after the last, its own wait none of it; the process
+		// ran 30 ms of it.
+		src.wall, src.cpu = src.wall.Add(4*Tick), src.cpu+30*time.Millisecond
+		s.sample()
+		// 30 ms later a verdict's read finds a thread waited 30 ms: no
+		// more than the time since the last sample, so all of it may lie
+		// there, and the next sample owes it if it counts that time.
+		src.wall, src.held = src.wall.Add(3*Tick), 30*time.Millisecond
+		if owed, _, _ := s.owed(); owed != 30*time.Millisecond {
+			t.Fatalf("owes %v, want the 30 ms past the last sample: the late sample's count owes none of it again", owed)
+		}
+	})
+	t.Run("a wait a late sample paid", func(t *testing.T) {
+		s, src := newFakeSampler(0)
+		src.wall = src.wall.Add(Tick) // on time
+		s.sample()
+		// 30 ms later a verdict's read finds a thread waited 40 ms: 10 ms
+		// out of the sample, 30 ms past it.
+		src.wall, src.held = src.wall.Add(3*Tick), 40*time.Millisecond
+		if owed, _, _ := s.owed(); owed != 40*time.Millisecond {
+			t.Fatalf("owes %v, want the 40 ms wait", owed)
+		}
+		// The next sample, 40 ms after the last, is late; the process ran
+		// 35 ms of it, so 25 ms of the 30 lie in what it counted: it pays
+		// them and keeps 10 ms.
+		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+35*time.Millisecond
+		ran := s.ran.Load()
+		s.sample()
+		if got := time.Duration(s.ran.Load() - ran); got != Tick {
+			t.Fatalf("a late sample counting 35 ms and owing 25 ms of them accrued %v, want 10 ms", got)
+		}
+		// A thread waited 50 ms more: only the 10 ms the late sample kept
+		// is owed out of it.
+		src.held = 50 * time.Millisecond
+		if owed, _, _ := s.owed(); owed != 20*time.Millisecond {
+			t.Fatalf("owes %v, want 20 ms (10 ms of the first wait, 10 ms of the second): the second took the 25 ms the late sample paid again", owed)
+		}
+	})
+}
+
 // A thread held off right now (the host took its virtual CPU, or it waits on
 // a run queue) has a wait the kernel shows only once it ends. The verdict
 // waits for it: on a VM whose host took the consumer's CPU for 250 ms, while
@@ -1073,6 +1120,33 @@ func TestSampler_ARestartOwesNoWaitFromBeforeIt(t *testing.T) {
 	// read took the gap's waits.
 	if owed, _, _ := s.owed(); owed != 0 {
 		t.Fatalf("a verdict 10 ticks after a restart owes %v, for waits before it", owed)
+	}
+}
+
+// Nor is a wait read after it set against what late samples counted before
+// it: that time is not on the clock since the restart.
+func TestSampler_ARestartSetsNoWaitAgainstLateSamplesBeforeIt(t *testing.T) {
+	s, src := newFakeSampler(0)
+	for range 3 { // late, 40 ms apart, the process running 36 ms of each
+		src.wall, src.cpu = src.wall.Add(4*Tick), src.cpu+36*time.Millisecond
+		s.sample()
+	}
+	if got, want := time.Duration(s.ran.Load()), 108*time.Millisecond; got != want {
+		t.Fatalf("three late samples accrued %v, want what the process ran: %v", got, want)
+	}
+	// It stops, and starts again a minute later; its goroutine sleeps past
+	// the test, which samples.
+	s.tick = time.Hour
+	src.wall = src.wall.Add(time.Minute)
+	release := s.acquire()
+	defer release()
+	src.wall = src.wall.Add(Tick)
+	s.sample()
+	// A thread waited 60 ms: 10 ms of it in what the sample since the
+	// restart counted, the rest in time the clock no longer holds.
+	src.held = 60 * time.Millisecond
+	if owed, _, _ := s.owed(); owed != Tick {
+		t.Fatalf("a read after a restart owes %v, want the %v the sample since counted: the rest came out of late samples before the restart", owed, Tick)
 	}
 }
 
