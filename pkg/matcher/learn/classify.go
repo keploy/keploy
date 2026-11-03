@@ -3030,15 +3030,30 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 	// The value whole in each form (each line of its decoded text) that
 	// drifted: the same value whole in another place, in any reading, is
 	// followed. A line both sides hold (a JWT's header) did not drift.
+	// A line of the quoted-printable form that the value holds as written
+	// is a line only where it is one as written: that form reads an "=0A"
+	// as a line break in one run where the other run's bytes spell none
+	// ("t=1730546884,v1=0A41..." splits at "v1" in one run only), and so
+	// cuts a line the value never holds, as it groups words (below). A
+	// line only that form shows (an id an escape hid) is one.
 	liveLines := map[string]bool{}
 	for _, f := range forms {
 		for _, w := range strings.Split(f[1], "\n") {
 			liveLines[w] = true
 		}
 	}
-	for _, f := range forms {
+	heldAsWritten := func(w string) bool {
+		for _, f := range forms[:qp[0]] {
+			if strings.Contains(f[0], w) {
+				return true
+			}
+		}
+		return false
+	}
+	for k, f := range forms {
+		inQP := k >= qp[0] && k < qp[1]
 		for _, w := range strings.Split(f[0], "\n") {
-			if w != "" && !liveLines[w] {
+			if w != "" && !liveLines[w] && (!inQP || !heldAsWritten(w)) {
 				if d.wholes == nil {
 					d.wholes = map[string]bool{}
 				}

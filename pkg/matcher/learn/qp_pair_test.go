@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"testing"
@@ -482,6 +483,48 @@ func TestAWordAnEscapeGluesInOneRunIsNoWordThatMoved(t *testing.T) {
 	}
 }
 
+// The quoted-printable form reads a signature that begins "0A" as a line
+// break, and so splits the value in that run only: "t=1730546884,v1" and
+// the rest. That line stands at its place, as written, in both runs, and
+// is no line of the value: an earlier test whose recorded signature also
+// begins "0A" holds the same line in its own quoted-printable form, and
+// shares no value with this one. A line only that form shows (an id an
+// escape hid) is still one (TestIDsAnEscapeHidesThatSwapMoved,
+// TestAnIDQuotedPrintableHidesIsFollowed).
+func TestALineAnEscapeBreaksInOneRunIsNoLineThatFlowed(t *testing.T) {
+	at := time.Date(2026, 11, 2, 11, 48, 4, 385340565, time.UTC)
+	for _, head := range []string{"t=1730546884,v1=", "sha256="} {
+		t.Run(head, func(t *testing.T) {
+			for _, earlierLive := range []bool{false, true} {
+				// The earlier test's signature that begins "0A", recorded
+				// or live.
+				erec, elive := head+"0A"+reversed(sigA[2:]), head+"E7"+reversed(sigB[2:])
+				if earlierLive {
+					erec, elive = elive, erec
+				}
+				earlier := []Earlier{{Mock: "mock-11", At: at.Add(-2 * time.Second), Run: true, Seen: []Seen{{
+					Side: Request, Leaf: Leaf{Path: "header.authorization", Noise: "header.authorization", Type: String, Value: erec},
+					Live: elive, Place: "header.authorization",
+				}}}}
+				const digits = "0123456789ABCDEF"
+				for _, hi := range digits {
+					for _, lo := range digits {
+						xy := string(hi) + string(lo)
+						if xy == "0A" {
+							continue
+						}
+						for _, p := range [][2]string{{head + "0A" + sigA[2:], head + xy + sigB[2:]}, {head + xy + sigA[2:], head + "0A" + sigB[2:]}} {
+							if got := classifyOne(p[0], p[1], at, earlier, nil, nil); got.Kind != KindNoise {
+								t.Errorf("earlier live %v: %q against %q: got %s (%s), want noise", earlierLive, p[0][len(head):len(head)+4], p[1][len(head):len(head)+4], got.Kind, got.Why)
+							}
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
 // reversed is s back to front.
 func reversed(s string) string {
 	b := []byte(s)
@@ -529,6 +572,79 @@ func TestIDsAnEscapeHidesThatSwapMoved(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// unparsed checks the quoted-printable form where both runs read as one,
+// and the text of a value's base64 runs: what only such a form shows, and
+// the readings cannot read whole, is refused, each way.
+//   - A soft line break joins a run of the standard base64 alphabet that
+//     does not decode ("ab+" and "cd"), where both runs are wrapped, where
+//     only one is and the other holds no '=', and where its escapes are all
+//     of characters quoted-printable may write as themselves ("=21" a '!').
+//   - Escapes of non-ASCII text only, which changed ("=C3=A9" an 'é').
+//   - A mail that says it is, whose escapes show it is ("=E2=80=94" a
+//     dash), is checked with every escape decoded, "=2B" a '+' too.
+//   - A '%' in the text a base64 run decodes to.
+func TestWhatOnlyACheckedFormShowsIsRefused(t *testing.T) {
+	at := time.Date(2026, 11, 2, 11, 48, 4, 0, time.UTC)
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	mail := func(tok string) string {
+		return "From: shop@test\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nToken: =2B" + tok + " =E2=80=94 ok\r\n"
+	}
+	const b64Run, script, escape = "a run of the base64 alphabet that does not decode", "text of a script keploy does not split into words", "a '%' or '\\'"
+	for _, tc := range []struct{ name, rec, live, why string }{
+		{"wrapped in both runs", "Token: ab+=\r\ncd ok", "Token: ab+=\r\nxy ok", b64Run},
+		{"wrapped in one run, no '=' in the other", "Token: ab+=\r\ncd ok", "Token: abzxy ok", b64Run},
+		{"wrapped, a '!' escaped", "Token: ab+=\r\ncd ok=21", "Token: ab+=\r\nxy ok=21", b64Run},
+		{"non-ASCII escapes only", "Commande =C3=A9t=C3=A9 ok", "Commande =C3=A8t=C3=A8 ok", script},
+		{"a mail that says it is, its escapes show it", mail("YmFy"), mail("YmFz"), b64Run},
+		{"a '%' in base64 text", "data " + b64("price 10% off a7k29q"), "data " + b64("price 10% off b8l30r"), escape},
+	} {
+		for _, p := range [][2]string{{tc.rec, tc.live}, {tc.live, tc.rec}} {
+			t.Run(tc.name+", "+p[0][len(p[0])-6:], func(t *testing.T) {
+				if got := classifyOne(p[0], p[1], at, nil, nil, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.why) {
+					t.Fatalf("got %s (%s), want refused: %s", got.Kind, got.Why, tc.why)
+				}
+			})
+		}
+	}
+}
+
+// What flowed is followed in every form searched:
+//   - an id held in upper case on one side only, flowed from an earlier
+//     test in lower case, in the case-folded form of a value that holds
+//     upper case in one run only;
+//   - ids swapped inside a base64 run's text, which the value also holds as
+//     written at their places, in a value with a quoted-printable form: the
+//     ids moved in that text, and an earlier test holds one.
+func TestWhatFlowedIsFollowedInEveryFormSearched(t *testing.T) {
+	at := time.Date(2026, 11, 2, 11, 48, 4, 0, time.UTC)
+	held := []Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Own: true, Seen: []Seen{
+		{Side: Request, Leaf: Leaf{Path: "body.id", Noise: "body.id", Type: String, Value: "a7k29qxm"}, Live: "q81lm0xz", Place: "body.id"},
+	}}}
+	for _, p := range [][2]string{{"ref A7K29QXM", "ref q81lm0xz"}, {"ref a7k29qxm", "ref Q81LM0XZ"}} {
+		t.Run("case-folded, "+p[0]+", "+p[1], func(t *testing.T) {
+			if got := classifyOne(p[0], p[1], at, held, nil, nil); got.Kind != KindVariable {
+				t.Fatalf("got %s (%s), want the id that flowed followed as a variable", got.Kind, got.Why)
+			}
+		})
+	}
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	const a, b = "A7K29QXM", "Zq81Lm0X"
+	rec := "ref " + a + " " + b + " =23 " + b64(`{"a":"`+a+`","b":"`+b+`"}`)
+	live := "ref " + a + " " + b + " =23 " + b64(`{"a":"`+b+`","b":"`+a+`"}`)
+	for _, h := range [][2]string{{"ref " + a, "ref " + a}, {"ref " + a, "ref other"}, {"ref other", "ref " + a}} {
+		earlier := []Earlier{{Mock: "mock-11", At: at.Add(-2 * time.Second), Run: true, Seen: []Seen{{
+			Side: Request, Leaf: Leaf{Path: "body.ref", Noise: "body.ref", Type: String, Value: h[0]}, Live: h[1], Place: "body.ref",
+		}}}}
+		for _, p := range [][2]string{{rec, live}, {live, rec}} {
+			t.Run(fmt.Sprintf("swapped in base64 text, earlier %q to %q", h[0], h[1]), func(t *testing.T) {
+				if got := classifyOne(p[0], p[1], at, earlier, nil, nil); got.Kind == KindNoise {
+					t.Fatalf("got noise (%s), want it refused: %s moved in the base64 text, and an earlier test holds it", got.Why, a)
+				}
+			})
 		}
 	}
 }
