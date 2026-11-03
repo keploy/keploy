@@ -93,7 +93,7 @@ func TestABeginOfAShimmedTestProcessOpensTheTest(t *testing.T) {
 	a.provenMu.Lock()
 	open := a.proven.open
 	a.provenMu.Unlock()
-	require.Equal(t, "o::TestShimmed", open)
+	require.Equal(t, "o::TestShimmed", open[0].id)
 }
 
 // The claim tells the shim's hooks which process claimed the run, before the
@@ -114,4 +114,42 @@ func TestAClaimTellsTheShimHooksItsProcessBeforeItReadsTheCounts(t *testing.T) {
 	_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "o2"}, os.Getpid())
 	require.Nil(t, serr)
 	require.NotContains(t, h.told, me)
+}
+
+// shimInstanceHooks are shim hooks (shimHooks) that also put each test
+// worker in a keploy instance of its own: asked holds each process the
+// agent asked about, in order.
+type shimInstanceHooks struct {
+	instanceHooks
+	armed map[int]bool
+	asked []int
+}
+
+func (h *shimInstanceHooks) ShimClaimedBy(int) {}
+
+func (h *shimInstanceHooks) ShimArmed(pid int, _ string) (bool, string) {
+	h.asked = append(h.asked, pid)
+	if h.armed[pid] {
+		return true, ""
+	}
+	return false, "it never said HELLO"
+}
+
+// In a run of test workers, a worker's begin asks whether that worker's own
+// process carries the shim: a worker without it is refused by its pid, and
+// one with it begins, whichever claimed first.
+func TestAWorkersBeginAsksWhetherItsOwnProcessCarriesTheShim(t *testing.T) {
+	a, _ := workerAgent(t, models.MODE_RECORD, 4)
+	unshimmed := child(t).Process.Pid
+	h := &shimInstanceHooks{armed: map[int]bool{os.Getpid(): true}}
+	a.Hooks = h
+	claimWorker(t, a, unshimmed, "a", 2)
+	claimWorker(t, a, os.Getpid(), "b", 2)
+	_, serr := a.ProvenBegin(as(os.Getpid()), begin("TestShimmed"))
+	require.Nil(t, serr, "the worker that carries the shim begins")
+	_, serr = a.ProvenBegin(as(unshimmed), begin("TestUnshimmed"))
+	require.NotNil(t, serr, "the worker without the shim is refused")
+	require.Equal(t, models.ScopeErrNotInRun, serr.Code)
+	require.Contains(t, serr.Message, strconv.Itoa(unshimmed))
+	require.Equal(t, []int{os.Getpid(), unshimmed}, h.asked)
 }
