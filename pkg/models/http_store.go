@@ -46,6 +46,13 @@ type HTTPStoreReader interface {
 	// leaves of): asked before the test's calls are read, so a call that
 	// reads none costs nothing more.
 	Reads(r *HTTPReq) bool
+	// Follows reports, from the two requests alone, whether Access, asked of
+	// read, may read call as a write or a stop: asked of each call served
+	// earlier in the test before its recorded answer is loaded, so a call it
+	// does not follow (another API, another table) is never loaded for the
+	// read and is not given to Access. It must follow every call Access may
+	// mark or stop on; following one more only costs a load.
+	Follows(read, call *HTTPReq) bool
 	// Access reads calls, the HTTP calls served earlier in the test in the
 	// order they were served, each with its recorded request and answer,
 	// then read, a call Reads takes, with its recorded answer. A call it
@@ -75,6 +82,13 @@ func RegisterHTTPStore(r HTTPStoreReader) (unregister func()) {
 func HTTPStoreReads(r *HTTPReq) bool {
 	p := httpStoreReader.Load()
 	return p != nil && r != nil && (*p).Reads(r)
+}
+
+// HTTPStoreFollows reports whether a reader is registered and follows call
+// for a read of read (HTTPStoreReader.Follows).
+func HTTPStoreFollows(read, call *HTTPReq) bool {
+	p := httpStoreReader.Load()
+	return p != nil && read != nil && call != nil && (*p).Follows(read, call)
 }
 
 // HTTPStoreAccessOf is what the registered reader reads in calls and read

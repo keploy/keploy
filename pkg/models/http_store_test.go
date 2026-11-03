@@ -7,10 +7,13 @@ import (
 
 type storeStub struct {
 	reads   bool
+	follows bool
 	written int
 }
 
 func (s storeStub) Reads(*HTTPReq) bool { return s.reads }
+
+func (s storeStub) Follows(_, _ *HTTPReq) bool { return s.follows }
 
 func (s storeStub) Access(*Mock, []*Mock) HTTPStoreAccess {
 	return HTTPStoreAccess{Written: make([]map[string]string, s.written), Read: map[string]string{"body.Item.Name.S": "Leads/c-1"}}
@@ -41,6 +44,9 @@ func TestHTTPStoreReader(t *testing.T) {
 	if _, ok := accessOf(t, read, calls); ok {
 		t.Fatal("no reader states an access")
 	}
+	if HTTPStoreFollows(read.Spec.HTTPReq, &HTTPReq{}) {
+		t.Fatal("no reader follows a call")
+	}
 
 	unregister := RegisterHTTPStore(storeStub{reads: true, written: 1})
 	if !HTTPStoreReads(read.Spec.HTTPReq) || HTTPStoreReads(nil) {
@@ -64,6 +70,21 @@ func TestHTTPStoreReader(t *testing.T) {
 		}()
 		RegisterHTTPStore(storeStub{})
 	}()
+	unregister()
+
+	// The reader decides which calls it follows; a nil request on either
+	// side is followed by none, and the reader is not asked.
+	for _, follows := range []bool{true, false} {
+		unregister := RegisterHTTPStore(storeStub{follows: follows})
+		if got := HTTPStoreFollows(&HTTPReq{}, &HTTPReq{}); got != follows {
+			t.Fatalf("a reader that follows %v: HTTPStoreFollows = %v", follows, got)
+		}
+		unregister()
+	}
+	unregister = RegisterHTTPStore(storeStub{follows: true})
+	if HTTPStoreFollows(nil, &HTTPReq{}) || HTTPStoreFollows(&HTTPReq{}, nil) {
+		t.Fatal("a nil read or call is followed")
+	}
 	unregister()
 
 	for _, s := range []storeStub{{reads: false, written: 1}, {reads: true, written: 0}, {reads: true, written: 2}} {

@@ -13,6 +13,8 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // The store the rows below drive: a DynamoDB-shaped API whose PutItem writes
@@ -45,6 +47,14 @@ type rbStore struct {
 }
 
 func rbTarget(r *models.HTTPReq) string { return r.Header["X-Amz-Target"] }
+
+// rbFollows follows the calls of the store's API (an X-Amz-Target of
+// DynamoDB's), as enterprise's reader does, and no other.
+func rbFollows(_, call *models.HTTPReq) bool {
+	return strings.HasPrefix(rbTarget(call), "DynamoDB_")
+}
+
+func (rbStore) Follows(read, call *models.HTTPReq) bool { return rbFollows(read, call) }
 
 func (rbStore) Reads(r *models.HTTPReq) bool {
 	t := rbTarget(r)
@@ -333,8 +343,7 @@ func TestReadBackReplaysByTheVariablePass(t *testing.T) {
 // readBackPlan on the exchanges a test served, as the tracker keeps them: a
 // leaf is read back only from a write of the running test's own (never the
 // test case's request, an earlier test's, or the pool's), never at a place
-// answered already, never when the write was served twice, never past the
-// test's end; it answers a variable the write's place holds already, and a
+// answered already, never past the test's end; it answers a variable the write's place holds already, and a
 // clock read bound at the write carries its clock evidence.
 func TestReadBackPlanReadsBackOnlyTheTestsOwnWrites(t *testing.T) {
 	rbRegister(t, rbStore{})
@@ -382,7 +391,6 @@ func TestReadBackPlanReadsBackOnlyTheTestsOwnWrites(t *testing.T) {
 		{"the test case's request", []*models.Mock{put}, func(e *learn.Earlier) { e.Given = true }, test},
 		{"an earlier test's", []*models.Mock{put}, func(e *learn.Earlier) { e.Run = true }, test},
 		{"the pool's", []*models.Mock{put}, func(e *learn.Earlier) { e.Own = false }, test},
-		{"served twice", []*models.Mock{put, put}, nil, test},
 		{"another call's", []*models.Mock{get}, nil, test},
 		{"past the test's end", []*models.Mock{put}, nil, test + 1},
 	} {
@@ -441,12 +449,6 @@ func TestReadBackPlanReadsBackOnlyTheTestsOwnWrites(t *testing.T) {
 		}
 	}
 
-	// A call served twice that stored nothing (a read) leaves no mark
-	// whose serve is unknown: the write is read back all the same.
-	if p := h.readBackPlan(tr, test, get, []*models.Mock{put, get, get}, exchange(nil), nil, newPairing()); len(p.vars) != 1 || len(p.binds["mock-0"]) != 1 {
-		t.Fatalf("a read served twice: vars %+v binds %+v, want the write read back", p.vars, p.binds)
-	}
-
 	// A call served in the test whose recorded answer cannot be loaded:
 	// what it stored is unknown, so nothing is read back, though the reader
 	// would mark nothing of it.
@@ -456,6 +458,91 @@ func TestReadBackPlanReadsBackOnlyTheTestsOwnWrites(t *testing.T) {
 	})
 	if p := h.readBackPlan(tr, test, get, []*models.Mock{put, lost}, exchange(nil), nil, newPairing()); len(p.vars) != 0 || len(p.binds) != 0 {
 		t.Fatalf("a call whose answer cannot be read: vars %+v binds %+v, want the read answered as recorded", p.vars, p.binds)
+	}
+	// A call the reader does not follow (another API's) is never loaded
+	// for the read: an answer of its that cannot be loaded does not stop
+	// the write's read-back.
+	elsewhere := learnRecorded("mock-3", 3*time.Second, "GET", "/obj/a", "", nil, `{}`)
+	elsewhere.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
+		return nil, nil, errors.New("the answer's file is gone")
+	})
+	if p := h.readBackPlan(tr, test, get, []*models.Mock{put, elsewhere}, exchange(nil), nil, newPairing()); len(p.vars) != 1 || len(p.binds["mock-0"]) != 1 {
+		t.Fatalf("another API's call: vars %+v binds %+v, want the write read back", p.vars, p.binds)
+	}
+}
+
+// A read loads the recorded answers of the calls the reader follows, and of
+// no other call: in a test of a PutItem, five GETs of another API whose
+// answers are kept on disk, and three GetItems of the item, each GET's answer
+// is loaded as often as with no reader registered, and the PutItem's once
+// more per read. So the loads grow with the calls the reader follows, not
+// with reads times calls.
+func TestReadBackLoadsOnlyTheAnswersOfCallsTheReaderFollows(t *testing.T) {
+	run := func(reader bool) (map[string]int, []*models.Mock) {
+		if reader {
+			rbRegister(t, rbStore{})
+		}
+		loads := map[string]int{}
+		spill := func(m *models.Mock) *models.Mock {
+			resp, name := *m.Spec.HTTPResp, m.Name
+			m.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
+				loads[name]++
+				r := resp
+				return &r, nil, nil
+			})
+			return m
+		}
+		recs := []*models.Mock{spill(learnRecorded("mock-0", 0, "POST", "/", rbPutBody("c-1", "Lead 1700000000000"), rbPut, `{}`))}
+		calls := []*req{live("POST", "/", rbPutBody("c-1", "Lead 1700000000417"), rbPut)}
+		for i := 1; i <= 5; i++ {
+			path := "/obj/" + string(rune('a'+i))
+			recs = append(recs, spill(learnRecorded("mock-"+string(rune('0'+i)), time.Duration(i)*100*time.Millisecond, "GET", path, "", nil, `{"b":"`+strings.Repeat("x", 1<<10)+`"}`)))
+			calls = append(calls, live("GET", path, "", nil))
+		}
+		for i := 6; i <= 8; i++ {
+			recs = append(recs, learnRecorded("mock-"+string(rune('0'+i)), time.Duration(i)*100*time.Millisecond, "POST", "/", rbGetBody("c-1"), rbGet, `{"Item":`+rbItem("c-1", "Lead 1700000000000")+`}`))
+			calls = append(calls, live("POST", "/", rbGetBody("c-1"), rbGet))
+		}
+		_, served := rbRun(t, "1", recs, calls)
+		return loads, served
+	}
+	without, _ := run(false)
+	with, served := run(true)
+	for i := 6; i <= 8; i++ {
+		if got := served[i].Spec.HTTPResp.Body; got != `{"Item":`+rbItem("c-1", "Lead 1700000000417")+`}` {
+			t.Fatalf("read %d answered %s, want the name this run wrote", i, got)
+		}
+	}
+	for i := 1; i <= 5; i++ {
+		name := "mock-" + string(rune('0'+i))
+		if without[name] == 0 || with[name] != without[name] {
+			t.Fatalf("%s, a GET the reader does not follow: loaded %d times with the reader, %d without, want as often", name, with[name], without[name])
+		}
+	}
+	if with["mock-0"] != without["mock-0"]+3 {
+		t.Fatalf("the PutItem: loaded %d times with the reader, %d without, want once more per read (3)", with["mock-0"], without["mock-0"])
+	}
+}
+
+// A read whose fields a write the reader cannot follow leaves as recorded is
+// logged once, naming how many fields and the first by path with its reason,
+// never once per field.
+func TestReadBackLogsAReadsUnreadFieldsOnce(t *testing.T) {
+	rbRegister(t, rbStore{unread: map[string]string{"body.Item.Name.S": "an ADD changed it", "body.Item.Id.S": "a 500 answered it"}})
+	put := learnRecorded("mock-0", 0, "POST", "/", rbPutBody("c-1", "Lead 1700000000000"), rbPut, `{}`)
+	get := learnRecorded("mock-1", time.Second, "POST", "/", rbGetBody("c-1"), rbGet, `{"Item":`+rbItem("c-1", "Lead 1700000000000")+`}`)
+	core, logs := observer.New(zap.InfoLevel)
+	h := &HTTP{Logger: zap.New(core)}
+	tr := clockedTracker()
+	tr.Begin()
+	h.readBackPlan(tr, tr.Placed().Test, get, []*models.Mock{put}, nil, nil, newPairing())
+	lines := logs.All()
+	if len(lines) != 1 {
+		t.Fatalf("%d log lines %+v, want one for the read", len(lines), lines)
+	}
+	f := lines[0].ContextMap()
+	if f["fields"] != int64(2) || f["first"] != "body.Item.Id.S" || f["why"] != "a 500 answered it" || f["mock"] != "mock-1" {
+		t.Fatalf("the read's line %+v, want 2 fields, the first body.Item.Id.S with its reason", f)
 	}
 }
 
@@ -619,6 +706,8 @@ func TestReadBackLeavesThePoolsReadAsRecorded(t *testing.T) {
 type rbTextStore struct{}
 
 func (rbTextStore) Reads(r *models.HTTPReq) bool { return rbTarget(r) == rbGet["X-Amz-Target"] }
+
+func (rbTextStore) Follows(read, call *models.HTTPReq) bool { return rbFollows(read, call) }
 
 func (rbTextStore) Access(_ *models.Mock, calls []*models.Mock) models.HTTPStoreAccess {
 	a := models.HTTPStoreAccess{Written: make([]map[string]string, len(calls)), Read: map[string]string{"body": "Notes/1"}}

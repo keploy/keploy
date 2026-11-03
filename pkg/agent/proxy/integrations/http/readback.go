@@ -27,21 +27,26 @@ import (
 
 // readBackPlan adds to p what the read answered (m's recorded call, with its
 // recorded answer) reads back: for each answer leaf the store reader links to
-// a record (models.HTTPStoreAccessOf, over served, the test's calls served
-// before it, in the order served), and p does not answer already, the place
-// learn.ReadBack finds in earlier with the reader's marks of what each call
-// stored, when the test's own call made it. A leaf whose write holds a
-// variable of the test already (bound or used there) answers that variable;
-// any other is a new variable bound at the write (p.binds). p is returned as
-// it was where no reader reads m, where a served call's answer cannot be read
-// back, or where a call the reader marks was served twice in the test (which
-// serve a mark is of is then unknown).
+// a record (models.HTTPStoreAccessOf, over the calls of served, the test's
+// calls served before it in the order served, that the reader follows for
+// the read), and p does not answer already, the place learn.ReadBack finds
+// in earlier with the reader's marks of what each call stored, when the
+// test's own call made it. A leaf whose write holds a variable of the test
+// already (bound or used there) answers that variable; any other is a new
+// variable bound at the write (p.binds). p is returned as it was where no
+// reader reads m, or where the answer of a call the reader follows cannot be
+// read back. Only the answers of the calls the reader follows are loaded
+// (models.HTTPStoreFollows decides from the requests alone), so a read loads
+// no answer of another API's call.
 func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *models.Mock, served []*models.Mock, earlier []learn.Earlier, given []variables.Binding, p pairing) pairing {
 	if answered == nil || !models.HTTPStoreReads(answered.Spec.HTTPReq) {
 		return p
 	}
 	calls := make([]*models.Mock, 0, len(served))
 	for _, s := range served {
+		if !models.HTTPStoreFollows(answered.Spec.HTTPReq, s.Spec.HTTPReq) {
+			continue
+		}
 		c, err := withResponse(s)
 		if err != nil {
 			h.Logger.Warn("keploy cannot read back the recorded answer of a call served earlier in the test, so it answers a later read of what the test stored as recorded",
@@ -55,31 +60,24 @@ func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *model
 		return p
 	}
 	if len(access.Unread) > 0 {
+		// One line per read: how many fields, and the first of them by
+		// path with its reason.
 		paths := make([]string, 0, len(access.Unread))
 		for path := range access.Unread {
 			paths = append(paths, path)
 		}
 		sort.Strings(paths)
-		for _, path := range paths {
-			h.Logger.Info("keploy answers a field of a read with its recorded value, not with what this run wrote, because of a write it cannot follow",
-				zap.String("mock", answered.Name), zap.String("field", path), zap.String("why", access.Unread[path]))
-		}
+		h.Logger.Info("keploy answers fields of a read with their recorded values, not with what this run wrote, because of a write it cannot follow",
+			zap.String("mock", answered.Name), zap.Int("fields", len(paths)), zap.String("first", paths[0]), zap.String("why", access.Unread[paths[0]]))
 	}
 	if len(access.Read) == 0 {
 		return p
 	}
+	// The tracker holds each mock it served once (Tracker.Placed), so a
+	// call's name names one serve.
 	written := map[string]map[string]string{}
-	twice := map[string]bool{}
 	for i, c := range calls {
-		if _, seen := written[c.Name]; seen {
-			twice[c.Name] = true
-		}
 		written[c.Name] = access.Written[i]
-	}
-	for name := range twice {
-		if len(written[name]) > 0 {
-			return p
-		}
 	}
 	marked := markWritten(earlier, written)
 	taken := map[string]bool{}
