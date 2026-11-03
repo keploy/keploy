@@ -363,6 +363,10 @@ func TestAStoppedWorkersMissIsCountedACallKeployCannotAttribute(t *testing.T) {
 	if n, what := unattributed(); n != 6 || what != "the latest: a call, from process 4242 of ended test worker 2, on a connection it made before keploy stopped serving that worker" {
 		t.Fatalf("a stopped worker's miss with neither a report nor a destination counted %d, %q; want 6 naming no address", n, what)
 	}
+	miss(2, &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /nowhere"}, &models.ConditionalDstCfg{Addr: "10.0.0.9:5432", AddrFabricated: true})
+	if n, what := unattributed(); n != 7 || what != "the latest: a call, from process 4242 of ended test worker 2, on a connection it made before keploy stopped serving that worker" {
+		t.Fatalf("a stopped worker's miss whose report names no destination, to a made-up address, counted %d, %q; want 7 naming no address", n, what)
+	}
 	if p.stoppedWorker(0) {
 		t.Fatal("instance 0, no worker's, was read as a stopped worker's")
 	}
