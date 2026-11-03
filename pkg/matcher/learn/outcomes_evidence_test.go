@@ -1203,6 +1203,41 @@ func TestOutcomeAViewKeployCannotReadMayHoldFsMoment(t *testing.T) {
 	}
 }
 
+// Whether a swap of start-ups could change a word at a place is asked only
+// of a connection's recorded start-up: a recording that is none is no
+// swap's, so the question loads nothing of it, for a word's evidence and an
+// instant's pick alike, even past the set's store of payloads, where each
+// read loads it again. A start-up is asked, and loaded to answer.
+func TestOutcomeASwapQuestionLoadsNoRecordingThatIsNoStartUp(t *testing.T) {
+	defer func(b int64) { bodyBudget = b }(bodyBudget)
+	bodyBudget = 0
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dr := tr.Drifts()
+	for _, tc := range []struct {
+		what    string
+		m       *models.Mock
+		startUp bool
+	}{
+		{"an answer", getAnswer("mock-7", "http://api/jobs/1", `{"pid":"82"}`, eRecAt.Add(-time.Second)), false},
+		{"a connection's start-up", eSession("mock-hs-82", time.Second, 82), true},
+	} {
+		loads := 0
+		raw := dr.LazyRawOf(tc.m, true, func() (*models.Mock, error) { loads++; return tc.m, nil })
+		x := newReaderIndex(dr)
+		p := evPlace{name: tc.m.Name, raw: 1, state: stateBefore, t: &placeText{rec: x.text(`{"pid":"82"}`), live: x.text(`{"pid":"83"}`)}}
+		ps := []evPlace{p}
+		swapUnknown(Input{Raw: []Raw{raw}}, ps, readWord{Rec: "82", Live: "83"})
+		dc := &decider{in: Input{Raw: []Raw{raw}}, x: x, dr: dr}
+		dc.swappable(p, changedInstant{r: "82", l: "83"})
+		if tc.startUp != (loads > 0) {
+			t.Errorf("%s: asked whether a swap could change its word, it was loaded %d times; want it loaded only where it is a start-up (%v)", tc.what, loads, tc.startUp)
+		}
+	}
+}
+
 // A decision lists the recordings it set aside because they were answered
 // after the call (Decision.AnsweredAfter): each asked at or before the
 // call's own instant and answered after it, whose answer holds the recorded

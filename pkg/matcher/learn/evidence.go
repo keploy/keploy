@@ -486,7 +486,8 @@ const (
 // have got another's, so keploy cannot tell what F gave there. A field every
 // start-up carries alike is no swap's, and reads as any recording's. Only
 // a place whose recorded text holds the word is asked: swapHolds reads a
-// match it finds in no one field as a swap's.
+// match it finds in no one field as a swap's. A recording that is no
+// start-up is no swap's, and is not loaded to ask.
 func swapUnknown(in Input, ps []evPlace, w readWord) {
 	holds := func(own string) bool {
 		return holdsToken(own, w.Rec) || slices.ContainsFunc(w.Tokens, func(t wholeToken) bool { return holdsToken(own, t.Rec) })
@@ -496,7 +497,7 @@ func swapUnknown(in Input, ps []evPlace, w readWord) {
 		if p.raw == 0 || p.state != stateBefore || !evHolds(p.t.rec, w.Rec) {
 			continue
 		}
-		if r := in.Raw[p.raw-1]; r.swapHolds(r.payload().text, in.Raw, holds) {
+		if r := in.Raw[p.raw-1]; r.startUp && r.swapHolds(r.payload().text, in.Raw, holds) {
 			p.state, p.why = stateUnknown, swapNote
 		}
 	}

@@ -1609,13 +1609,14 @@ func (dc *decider) rank(t *readerText, w string, m *moment, held bool) int64 {
 
 // swappable reports whether p is a connection's start-up keploy may swap
 // for another whose field holding the recorded value differs (Raw's
-// swapHolds): its state in round F keploy cannot tell.
+// swapHolds): its state in round F keploy cannot tell. A recording that is
+// no start-up is no swap's, and is not loaded to ask.
 func (dc *decider) swappable(p evPlace, c changedInstant) bool {
 	if p.raw == 0 {
 		return false
 	}
 	x := dc.in.Raw[p.raw-1]
-	return x.swapHolds(x.payload().text, dc.in.Raw, func(own string) bool {
+	return x.startUp && x.swapHolds(x.payload().text, dc.in.Raw, func(own string) bool {
 		h, _, _ := dc.holds(evPlace{}, dc.x.text(own), c.r, c.rm, c.byText)
 		return h
 	})
