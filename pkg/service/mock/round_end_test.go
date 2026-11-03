@@ -127,7 +127,8 @@ func (a *markerAgent) Run(context.Context, models.RunOptions) models.AppError {
 }
 
 // recordWithMarkerAgent records with a, and returns what was saved, whether
-// the set was promoted, the error, the exit code and the logs.
+// the set was promoted, the error, the exit code and the logs. A recording
+// that never returns fails the row (returnedWithin).
 func recordWithMarkerAgent(t *testing.T, a *markerAgent) ([]string, bool, error, int, *observer.ObservedLogs) {
 	t.Helper()
 	defer func(code int) { utils.ErrCode = code }(utils.ErrCode)
@@ -136,7 +137,9 @@ func recordWithMarkerAgent(t *testing.T, a *markerAgent) ([]string, bool, error,
 	cfg := &config.Config{}
 	cfg.Mock.Name = "marker-test"
 	core, logs := observer.New(zapcore.DebugLevel)
-	err := New(zap.New(core), a, db, nil, FileStore{}, nil, cfg).Record(context.Background())
+	returned := make(chan error, 1)
+	go func() { returned <- New(zap.New(core), a, db, nil, FileStore{}, nil, cfg).Record(context.Background()) }()
+	err := returnedWithin(t, returned)
 	a.wg.Wait()
 	return db.inserted(), db.promoted.Load(), err, utils.ErrCode, logs
 }
@@ -813,10 +816,11 @@ func (q quietIncoming) EndRecordingStreams(context.Context, string) error {
 func (quietIncoming) StreamEnded(models.FrameStream) bool { return false }
 
 // unconfirmedReplay replays the set "set" (TestA's one recorded request)
-// with agent, its requests compared (--record-requests), under cmdType: what
-// it said, whether it reported an outcome, its receipt, and what Replay
-// returned.
-func unconfirmedReplay(t *testing.T, instr *runnerInstr, agent Instrumentation, cmdType utils.CmdType) (*observer.ObservedLogs, bool, *Receipt, error) {
+// with agent, its requests compared (--record-requests), under cmdType and
+// ctx: what it said, whether it reported an outcome, its receipt (nil when it
+// wrote none), and what Replay returned. A replay that never returns fails
+// the row (returnedWithin).
+func unconfirmedReplay(t *testing.T, ctx context.Context, instr *runnerInstr, agent Instrumentation, cmdType utils.CmdType) (*observer.ObservedLogs, bool, *Receipt, error) {
 	t.Helper()
 	dir := t.TempDir()
 	mapDB := mapdb.New(zap.NewNop(), dir, "")
@@ -837,7 +841,9 @@ func unconfirmedReplay(t *testing.T, instr *runnerInstr, agent Instrumentation, 
 	reported := false
 	RegisterReplayOutcomeReporter(func(context.Context, ReplayOutcome) { reported = true })
 	t.Cleanup(func() { RegisterReplayOutcomeReporter(nil) })
-	err := svc.Replay(context.Background())
+	returned := make(chan error, 1)
+	go func() { returned <- svc.Replay(ctx) }()
+	err := returnedWithin(t, returned)
 	receipt, rerr := ReadReceipt(dir, "set")
 	require.NoError(t, rerr)
 	return logs, reported, receipt, err
@@ -876,7 +882,7 @@ func TestReplayADrainEndedOnQuietFailsAsKeploys(t *testing.T) {
 			if tc.says != nil {
 				agent = quietIncoming{quietStream: stream, says: *tc.says, endCalls: endCalls}
 			}
-			logs, reported, receipt, err := unconfirmedReplay(t, instr, agent, tc.cmdType)
+			logs, reported, receipt, err := unconfirmedReplay(t, context.Background(), instr, agent, tc.cmdType)
 			require.False(t, reported, "a run whose request drain ended on quiet was judged")
 			require.Error(t, err, "a run whose request drain ended on quiet was not keploy's failure")
 			require.Contains(t, err.Error(), requestsUnconfirmed)
@@ -910,7 +916,7 @@ func TestReplayAnEndRequestTheAgentRefusesFailsAsKeploys(t *testing.T) {
 	refusal := errors.New("the agent answered 500 Internal Server Error")
 	agent := quietIncoming{quietStream: quietStream{runnerInstr: instr, tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))},
 		says: models.AgentBacklog{Verdict: models.BacklogClear, EndMarkers: true}, endErr: refusal, endCalls: &atomic.Int32{}}
-	logs, reported, receipt, err := unconfirmedReplay(t, instr, agent, utils.Native)
+	logs, reported, receipt, err := unconfirmedReplay(t, context.Background(), instr, agent, utils.Native)
 	require.EqualValues(t, 1, agent.endCalls.Load(), "the agent was not asked once to end the watch's stream")
 	require.False(t, reported, "a run whose agent refused to end its request stream was judged")
 	require.Error(t, err, "a run whose agent refused to end its request stream was not keploy's failure")
@@ -945,6 +951,51 @@ func TestReplayEndRefused_AfterTheUsersStopIsNoFailure(t *testing.T) {
 	utils.MarkInterrupted()
 	require.Empty(t, m.replayEndRefused("set", refusal), "a refusal after the user's stop made the run short")
 	require.Zero(t, utils.ErrCode, "a refusal after the user's stop took the exit code from the stop")
+	require.Zero(t, logs.FilterLevelExact(zapcore.ErrorLevel).Len(), "%v", logs.All())
+	require.Equal(t, 1, logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(endRefused).Len(), "%v", logs.All())
+}
+
+// stoppedAtEnd is a quietIncoming whose end request comes as the user's first
+// Ctrl+C lands: stop marks the run interrupted and cancels its context, as
+// utils.NewCtx does, before the agent answers.
+type stoppedAtEnd struct {
+	quietIncoming
+	stop func()
+}
+
+func (q stoppedAtEnd) EndRecordingStreams(ctx context.Context, token string) error {
+	q.stop()
+	return q.quietIncoming.EndRecordingStreams(ctx, token)
+}
+
+// A replay whose agent refuses the end request as the user's first Ctrl+C
+// lands ends as one the user stopped, end to end: unjudged, 128+N, no
+// outcome reported and nothing said at ERROR; the refusal is said at WARN.
+// Failed as keploy's, it would exit 1 instead
+// (TestReplayEndRefused_AfterTheUsersStopIsNoFailure).
+func TestReplayARefusalAtTheUsersStopEndsUnjudged(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
+	t.Cleanup(utils.SetInterruptSignalForTest(0))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	instr := newRunnerInstr(t, sequentialMarks()...)
+	agent := stoppedAtEnd{
+		quietIncoming: quietIncoming{quietStream: quietStream{runnerInstr: instr, tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))},
+			says: models.AgentBacklog{Verdict: models.BacklogClear, EndMarkers: true}, endErr: errors.New("the agent answered 503 Service Unavailable"), endCalls: &atomic.Int32{}},
+		stop: func() {
+			utils.SetInterruptSignalForTest(2) // the user's Ctrl+C: SIGINT
+			utils.MarkInterrupted()
+			cancel()
+		},
+	}
+	logs, reported, receipt, err := unconfirmedReplay(t, ctx, instr, agent, utils.Native)
+	require.EqualValues(t, 1, agent.endCalls.Load(), "the agent was not asked once to end the watch's stream")
+	require.NoError(t, err, "a run the user stopped failed")
+	require.False(t, reported, "a run the user stopped was judged")
+	require.Equal(t, 130, utils.ErrCode, "a refusal at the user's stop did not end as the user's stop: %v", logs.All())
+	require.Nil(t, receipt, "a run the user stopped wrote a receipt")
 	require.Zero(t, logs.FilterLevelExact(zapcore.ErrorLevel).Len(), "%v", logs.All())
 	require.Equal(t, 1, logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(endRefused).Len(), "%v", logs.All())
 }

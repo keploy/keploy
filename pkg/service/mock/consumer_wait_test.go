@@ -440,6 +440,53 @@ func TestReplayGivenUpAtItsRequestStreamsWaitEndsUnjudged(t *testing.T) {
 	require.Equal(t, 130, utils.ErrCode, "a replay the user gave up did not exit as one the user stopped")
 }
 
+// A replay whose user gives up its wait for a request stream still open after
+// the watch stops (waitConsumers), at that wait's offer, ends unjudged too:
+// 128+N, and no outcome is reported. The stream is still open there when its
+// agent, one this client did not start, was gone when asked to end it
+// (TestReplayWaitsForARequestStreamStillOpenAfterTheWatchStops).
+func TestReplayGivenUpAtItsWaitAfterTheWatchStopsEndsUnjudged(t *testing.T) {
+	defer func(d time.Duration) { mockDrainNotice = d }(mockDrainNotice)
+	mockDrainNotice = 20 * time.Millisecond
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
+	t.Cleanup(utils.SetInterruptSignalForTest(0))
+	late := newAfterStopIncoming(t, refusedErr(t))
+	instr := late.runnerInstr
+	dir := t.TempDir()
+	mapDB := mapdb.New(zap.NewNop(), dir, "")
+	require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil, nil))
+	db := &memTestDB{existing: []*models.TestCase{httpCase("post-orders-1", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0)}}
+	var reported atomic.Bool
+	RegisterReplayOutcomeReporter(func(context.Context, ReplayOutcome) { reported.Store(true) })
+	t.Cleanup(func() { RegisterReplayOutcomeReporter(nil) })
+	cfg := instrConfig(instr.composeInstr, utils.Native, "./shop.test -test.v")
+	cfg.Path = dir
+	withRequests(cfg)
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	core, logs := observer.New(zapcore.InfoLevel)
+	svc := New(zap.New(core), late, stubMockDB{}, mapDB, nil, nil, cfg)
+	svc.(TestDBSetter).SetTestDB(db)
+	returned := make(chan error, 1)
+	go func() { returned <- svc.Replay(context.Background()) }()
+	if err, early := untilSaid(t, logs, replayDrainWords.writing, returned); early {
+		t.Fatalf("the replay returned (%v) with its request stream still open", err)
+	}
+	utils.SetInterruptSignalForTest(2) // the user's Ctrl+C: SIGINT
+	utils.MarkInterrupted()
+	if err, early := untilSaid(t, logs, replayDrainWords.writing+"; "+replayDrainWords.stopNow, returned); early {
+		t.Fatalf("the replay returned (%v) before it offered to stop now", err)
+	}
+	if !utils.MarkInterruptedAgain() { // the user, as told
+		t.Fatal("setup: no offer standing")
+	}
+	require.NoError(t, returnedWithin(t, returned))
+	require.False(t, reported.Load(), "a replay given up at its wait after the watch stops was judged")
+	require.Equal(t, 130, utils.ErrCode, "a replay the user gave up did not exit as one the user stopped")
+}
+
 // waitConsumers has no bound: a consumer that takes nothing for a day is
 // still waited for, and each notice says what it holds. The wait runs in a
 // synctest bubble, whose clock moves the day at once: a bound of any length
