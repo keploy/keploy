@@ -338,12 +338,12 @@ func TestALateCallsReasonLeavesASeenLeafAndAnEchoToTheSearch(t *testing.T) {
 	})
 }
 
-// An older test's serve names a late call only by the words of what it gave
-// the application, never by a word of its stamps (an HTTP-date its answer
-// holds, which the word rule reads as no word: a day, a minute, a second
-// that any value may equal by chance). A call that now carries "Sat", which
-// only the Date of mock-22's answer holds, is no late call of mock-22's test:
-// keploy cannot name where the value came from, and the reason says so.
+// An older test's serve never names a late call by a word of its stamps
+// (an HTTP-date its answer holds: a day, a month, digits, a time, "GMT",
+// which any value may equal by chance): no such word is an id (lateID),
+// which alone names one. A call that now carries "Sat", which only the Date
+// of mock-22's answer holds, is no late call of mock-22's test: keploy
+// cannot name where the value came from, and the reason says so.
 func TestALateCallsReasonNamesNoServeByAWordOfItsDateStamp(t *testing.T) {
 	const path = "body.day"
 	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "Wed"}}}
@@ -458,6 +458,22 @@ func TestALateCallsReasonReadsTheWindowsStampsWhereTheyEcho(t *testing.T) {
 		if ln.Kind != KindVariable || ln.From.Mock != "mock-60" || ln.From.SetAside != c.aside || strings.Contains(ln.Why, unnamed) != c.aside {
 			t.Errorf("%s: %s from %q set aside %v (%q); want a variable of mock-60, set aside %v", c.name, ln.Kind, ln.From.Mock, ln.From.SetAside, ln.Why, c.aside)
 		}
+	}
+	// Real stamps (each Date its answer's own instant, AnswerStamp): the
+	// value moved from "55", the minute of mock-60's Date, to "53", the
+	// minute of mock-57's, which F served (stampsEchoed). mock-60's own
+	// Date, which F gave as recorded, holds "53" too (its second): F gave
+	// the value there, and the reason is the search's, as the stamps are
+	// searched as any text there too.
+	minRec := Shape{Leaves: map[string]Leaf{"body.min": {Path: "body.min", Type: String, Value: "55"}}}
+	minLive := Shape{Leaves: map[string]Leaf{"body.min": {Path: "body.min", Type: String, Value: "53"}}}
+	raw := []Raw{
+		dated("mock-57", 2*time.Minute, "Sat, 24 Oct 2026 09:53:53 GMT").ServedAs(8).ServedAsRecorded(),
+		dated("mock-60", 200*time.Millisecond, "Sat, 24 Oct 2026 09:55:53 GMT").ServedAs(9).ServedAsRecorded(),
+	}
+	got := ClassifyGiven(clockedDrifts(), []string{"body.min"}, minLive, minRec, eRecAt, nil, append(eStartup(), raw...), nil, nil, func() ([]GivenPlaces, error) { return nil, nil })
+	if len(got) != 1 || got[0].Kind != KindVariable || got[0].From.Mock != "mock-60" || got[0].From.SetAside || strings.Contains(got[0].Why, unnamed) {
+		t.Errorf("a minute of the window's own Date that holds the value F saw: %+v; want a variable of mock-60, not set aside", got)
 	}
 }
 
