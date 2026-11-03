@@ -68,7 +68,12 @@ type learnNoise struct {
 	// its live value each match one (headerCovers).
 	headerPats map[string][]*regexp.Regexp
 	// declaredHeaders are keploy.yml's entries with no patterns alone, by
-	// lowercased name: the static lists' names are keploy's own noise.
+	// lowercased name, but those the static list already excuses:
+	// keploy.yml declaring one changes nothing, so it stays keploy's own
+	// noise (never a leaf, an earlier place: withExcused). A call whose
+	// trace or request id drifts is then exact, as before, and never read
+	// against every earlier exchange. An entry with patterns on such a
+	// header is the user's (headerPats), as the strict matcher reads it.
 	declaredHeaders map[string]bool
 	// body is keploy.yml's request-body noise, read by matcher.NoiseLookup:
 	// a path names whole fields, as the strict matcher reads it.
@@ -96,6 +101,7 @@ func (h *HTTP) newLearnNoise(opts models.OutgoingOptions, bodyNoise map[string][
 		for _, k := range models.FlakyHeaders {
 			if _, user := n.headerPats[k]; !credentialHeaders[k] && !user {
 				n.headers[k] = true
+				delete(n.declaredHeaders, k)
 			}
 		}
 		// The proven switch's own additions, as the strict matcher reads
@@ -104,6 +110,7 @@ func (h *HTTP) newLearnNoise(opts models.OutgoingOptions, bodyNoise map[string][
 		for _, k := range models.ProvenOnlyFlakyHeaders {
 			if _, user := n.headerPats[k]; !user {
 				n.headers[k] = true
+				delete(n.declaredHeaders, k)
 			}
 		}
 	}
