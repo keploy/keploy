@@ -644,7 +644,7 @@ func TestARealGRPCServersKeepalivesEndAStreamHeldOpen(t *testing.T) {
 			})
 			call := grpcTestCase(srv.Addr().String(), []models.GrpcLengthPrefixedMessage{{}})
 			call.GrpcResp = tc.recorded.GrpcResp
-			resp, err := heldOpenCall(t, call, srv.exhausted)
+			resp, err := heldOpenCall(t, call, nil)
 			if err != nil {
 				t.Fatalf("SimulateGRPC: %v; want the app's answer, judged", err)
 			}
