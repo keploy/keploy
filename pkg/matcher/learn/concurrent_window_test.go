@@ -1674,10 +1674,16 @@ func TestAnEncodedTextGetsThePlainTextsAnswerWhateverUnreadPayloadWasServedBefor
 							// next ("Lg=%3D<run>"), written so on both sides:
 							// the word its remnant glues to the next run
 							// ("3DbGVh...") is the runs', so the text is
-							// noise, as it is with that '=' raw. Where that
-							// run writes its padding otherwise than the
-							// recorded one ("%3D%3D" against "=%3D"), the
-							// word is the value's own: refused.
+							// noise, as it is with that '=' raw. So it is
+							// where record's full round's value lost the
+							// other escape of that run's padding ("=%3D"
+							// against the recorded "%3D%3D"), whatever was
+							// served before the call, as the plain text
+							// is: a lost escape leaves no word, and the
+							// glued word is the recorded one. Where it
+							// gained that escape ("%3D%3D" against "=%3D"),
+							// the escape leaves a word of its own ("3D"):
+							// refused.
 							if ln := learnOf(adjacent(recRun.read, "%3D"), adjacent(fRun.read, "%3D")); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
 								t.Errorf("encoded, an escape ending a run right before another, written so on both sides, %s, window %+v: %s from %q held %q (%s); want noise of the word", pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
 							}
@@ -1687,8 +1693,106 @@ func TestAnEncodedTextGetsThePlainTextsAnswerWhateverUnreadPayloadWasServedBefor
 							if r, l := respelled(recRun.read, "%3D%3D"), respelled(fRun.read, "=%3D"); !strings.Contains(r, "%3D%3D") || !strings.Contains(l, "=%3D") || strings.Contains(r, "=%3D") {
 								t.Fatalf("%q and %q do not end the first run in \"%%3D%%3D\" and \"=%%3D\", so this row tells nothing", r, l)
 							}
-							if ln := learnOf(respelled(recRun.read, "%3D%3D"), respelled(fRun.read, "=%3D")); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
-								t.Errorf("encoded, an escape ending a run right before another, that run's padding respelled, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+							plainAdjacent := func(v time.Time) string {
+								return "tok " + text(v, "created.") + " lead " + dotNetStamp(v) + " created ok"
+							}
+							for _, py := range []struct {
+								what string
+								raw  []Raw
+							}{payloads[0], payloads[1], pl} {
+								learnIn := func(rec, live string) Learned {
+									return ClassifyIn(clockedDrifts(), []string{p}, leaf(live), leaf(rec), recRun.call, nil, py.raw, nil, w)[0]
+								}
+								for _, c := range []struct{ what, rec, live string }{
+									{"encoded, an escape ending a run right before another, the other escape of that run's padding lost", respelled(recRun.read, "%3D%3D"), respelled(fRun.read, "=%3D")},
+									{"plain, the two runs' text", plainAdjacent(recRun.read), plainAdjacent(fRun.read)},
+								} {
+									if ln := learnIn(c.rec, c.live); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+										t.Errorf("%s, %s, window %+v: %s from %q held %q (%s); want noise of the word", c.what, py.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+									}
+								}
+							}
+							if ln := learnOf(respelled(recRun.read, "=%3D"), respelled(fRun.read, "%3D%3D")); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+								t.Errorf("encoded, an escape ending a run right before another, the other escape of that run's padding gained, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+							}
+							// An escape of a run's padding that record's full
+							// round's value gained ("%3D%3D" or "=%3D"
+							// against "==", "%3D%3D" against "=%3D") or
+							// respelled ("%3D" against "%3d") leaves a word
+							// of its own ("3D") where it stands, side
+							// by side with the next run or apart from it,
+							// whether or not another run that kept its
+							// escapes spells the same word ("%3D" ending a
+							// run after it): refused. Each escape is decided
+							// where it stands, not by its remnant's spelling.
+							g0 := func(v time.Time) string { return strings.TrimSuffix(enc(text(v, "created.")), "==") }
+							g1 := func(v time.Time) string { return strings.TrimSuffix(enc(text(v, "updated.")), "==") }
+							g2 := func(v time.Time) string { return strings.TrimSuffix(enc("lead "+dotNetStamp(v)+" created"), "=") }
+							for _, v := range []time.Time{recRun.read, fRun.read} {
+								if !strings.HasSuffix(enc(text(v, "created.")), "==") || !strings.HasSuffix(enc(text(v, "updated.")), "==") || strings.HasSuffix(enc("lead "+dotNetStamp(v)+" created"), "==") || !strings.HasSuffix(enc("lead "+dotNetStamp(v)+" created"), "=") {
+									t.Fatalf("the runs at %v are not padded as this row reads them, so it tells nothing", v)
+								}
+							}
+							two := func(between string) func(v time.Time, a, _, l string) string {
+								return func(v time.Time, a, _, l string) string { return "tok " + g0(v) + a + between + g2(v) + l + " ok" }
+							}
+							three := func(between string) func(v time.Time, a, b, l string) string {
+								return func(v time.Time, a, b, l string) string {
+									return "tok " + g0(v) + a + between + g1(v) + b + between + g2(v) + l + " ok"
+								}
+							}
+							for _, c := range []struct {
+								what      string
+								of        func(v time.Time, a, b, l string) string
+								rec, live [3]string
+							}{
+								{"two runs side by side, the next one's padding raw", two(""), [3]string{"=%3D", "", "="}, [3]string{"%3D%3D", "", "="}},
+								{"two runs side by side, the next one's padding escaped alike", two(""), [3]string{"=%3D", "", "%3D"}, [3]string{"%3D%3D", "", "%3D"}},
+								{"two runs with \"%20\" between, the next one's padding escaped alike", two("%20"), [3]string{"=%3D", "", "%3D"}, [3]string{"%3D%3D", "", "%3D"}},
+								{"two runs with a space between, the next one's padding escaped alike", two(" "), [3]string{"=%3D", "", "%3D"}, [3]string{"%3D%3D", "", "%3D"}},
+								{"two runs with a space between, the next one's padding raw", two(" "), [3]string{"=%3D", "", "="}, [3]string{"%3D%3D", "", "="}},
+								{"three runs side by side, the middle one's gained, the first one's alike", three(""), [3]string{"=%3D", "=%3D", "="}, [3]string{"=%3D", "%3D%3D", "="}},
+								{"three runs with \"%20\" between, the middle one's gained, the first one's alike", three("%20"), [3]string{"=%3D", "=%3D", "="}, [3]string{"=%3D", "%3D%3D", "="}},
+								{"three runs with \"%20\" between, the middle one's gained, the first one's raw", three("%20"), [3]string{"==", "=%3D", "="}, [3]string{"==", "%3D%3D", "="}},
+								{"both its '=' gained, a run after words escaping its padding alike", two(" ok "), [3]string{"==", "", "%3D"}, [3]string{"%3D%3D", "", "%3D"}},
+								{"both its '=' gained, a run after words with its padding raw", two(" ok "), [3]string{"==", "", "="}, [3]string{"%3D%3D", "", "="}},
+								{"its last '=' gained, a run after words escaping its padding alike", two(" ok "), [3]string{"==", "", "%3D"}, [3]string{"=%3D", "", "%3D"}},
+								{"its first '=' gained, a run after words escaping its padding alike", two(" ok "), [3]string{"=%3D", "", "%3D"}, [3]string{"%3D%3D", "", "%3D"}},
+								{"its last '=' respelled, a run after words escaping its padding alike", two(" ok "), [3]string{"=%3d", "", "%3D"}, [3]string{"=%3D", "", "%3D"}},
+								{"both its '=' respelled, a run after words escaping its padding alike", two(" ok "), [3]string{"%3d%3d", "", "%3D"}, [3]string{"%3D%3D", "", "%3D"}},
+							} {
+								rec, live := c.of(recRun.read, c.rec[0], c.rec[1], c.rec[2]), c.of(fRun.read, c.live[0], c.live[1], c.live[2])
+								if ln := learnOf(rec, live); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+									t.Errorf("encoded, a padding escape gained, %s, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", c.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+								}
+							}
+							// Three runs side by side, each join its padding:
+							// an escape written alike on both sides, or one
+							// that record's full round's value lost, leaves
+							// no word of its own: noise, as the plain text
+							// is. One it gained is refused.
+							for _, c := range []struct {
+								what                     string
+								rec0, live0, rec1, live1 string
+								noise                    bool
+							}{
+								{"all alike", "=%3D", "=%3D", "=%3D", "=%3D", true},
+								{"the first raw, the second escape-ended alike", "==", "==", "=%3D", "=%3D", true},
+								{"the first escape-ended alike, the second raw", "=%3D", "=%3D", "==", "==", true},
+								{"the first one's escape lost, the second alike", "%3D%3D", "=%3D", "=%3D", "=%3D", true},
+								{"the first alike, the second one's escape lost", "=%3D", "=%3D", "%3D%3D", "=%3D", true},
+								{"the first raw, the second one's escape lost", "==", "==", "%3D%3D", "=%3D", true},
+								{"all both escaped", "%3D%3D", "%3D%3D", "%3D%3D", "%3D%3D", true},
+								{"the first alike, the second one's escape gained", "=%3D", "=%3D", "==", "=%3D", false},
+								{"the first one's escape gained, the second alike", "==", "=%3D", "=%3D", "=%3D", false},
+							} {
+								of := three("")
+								ln := learnOf(of(recRun.read, c.rec0, c.rec1, "="), of(fRun.read, c.live0, c.live1, "="))
+								if c.noise && (ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "") {
+									t.Errorf("encoded, three runs side by side, %s, %s, window %+v: %s from %q held %q (%s); want noise of the word", c.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+								} else if !c.noise && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11")) {
+									t.Errorf("encoded, three runs side by side, %s, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", c.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+								}
 							}
 							// The stated limit: a run after text that changed
 							// in more than clock reads (a ':' made ';', a

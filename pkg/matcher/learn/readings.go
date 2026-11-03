@@ -149,11 +149,24 @@ type b64Reader struct {
 // decoded whole, or whole past its "0x" (or "0X") in any encoding it reads
 // (hex, base64), where it stands: at [st, en) of the text the reader was
 // given (at -1) or of its sb from at. esc is, for a run's text in a raw
-// value (rawImages), how it writes the bytes it escapes.
+// value (rawImages), how it writes the bytes it escapes, and escs each
+// escape in it, in order.
 type decodedRun struct {
 	run        string
 	at, st, en int
 	esc        map[byte]string
+	escs       []rawEscape
+}
+
+// rawEscape is one byte of a run's text in a raw value (rawImages) that the
+// text writes by an escape: the byte (c), its spelling (sp, "%3D"), where
+// that stands in the raw value ([st, en)), and which copy of c in the run
+// it is (n, from 0).
+type rawEscape struct {
+	c      byte
+	sp     string
+	st, en int
+	n      int
 }
 
 func newB64Reader(s string, clock map[string]bool, everySplit bool) *b64Reader {
@@ -1230,13 +1243,19 @@ func formsOf(rec, live, decRec, decLive string, clock clockSet, clockOf func(rec
 // it (rawImages), and that text is put out there too. Its words there
 // ("2FIGx" of "%2FIGx") are the run's only where it pairs with the recorded
 // value's run of the same rank and escapes each byte as that one does
-// (pairedRuns, sameEscapes), and the value's own otherwise. An escape
-// before it is no part of it: a word it glues to the run ("20b2s" of
-// "%20b2s") is the run's only where the run pairs and the same escape
-// stands before the recorded one, and the value's own otherwise, changed
-// where the escape did. Only those two searches skip these: a
-// run that stands in an earlier payload, as recorded or in a view of a serve
-// of it, is refused or followed there as any word is.
+// (pairedRuns, sameEscapes), and the value's own otherwise. Where it does
+// not, each of its escapes is decided where it stands: one written as the
+// recorded run writes that copy of its byte is the run's, and any other (a
+// gained "%3D" of its padding) leaves a word that is the value's own even
+// where another run's kept escapes spell the same word (keptEscape). An
+// escape before it is no part of it, whether it stands after the run
+// before it or ends that run (its padding's "%3D" right before the run): a
+// word it glues to the run ("20b2s" of "%20b2s", "3DbGVh" of "Lg=%3DbGVh")
+// is the run's only where the run pairs and the same escape stands before
+// the recorded one, and the value's own otherwise, changed where the escape
+// did. Only those two searches skip these: a run that stands in an earlier
+// payload, as recorded or in a view of a serve of it, is refused or
+// followed there as any word is.
 func (d *valueDrift) plainRunsOf(forms [][2]string, runs [2][]decodedRun, eLive string) map[string]bool {
 	liveRuns := runs[1]
 	if len(liveRuns) == 0 {
@@ -1267,11 +1286,27 @@ func (d *valueDrift) plainRunsOf(forms [][2]string, runs [2][]decodedRun, eLive 
 	if raw != nil && recRaw != nil {
 		paired = d.pairedRuns(recTops, liveTops)
 	}
-	kept := make([]bool, paired)
 	for k := 0; k < paired; k++ {
 		if sameEscapes(recRaw[k].esc, raw[k].esc, recTops[k].run) {
 			add(raw[k].run)
-			kept[k] = true
+		}
+	}
+	// The words are a set, so each escape is decided where it stands, not
+	// by its remnant's spelling: an escape of a run that pairs, written as
+	// the recorded run writes that copy of its byte (keptEscape: each
+	// escape of a run that kept its escapes is), is the run's and put out
+	// with it; every other one (gained or respelled, or one of a run that
+	// pairs with none) is left standing in the raw form (own), so its
+	// remnant ("3D" of a gained "%3D") is the value's own word and searched,
+	// even where a run that kept its escapes spells the same word. An escape
+	// the run lost leaves no remnant, and those it kept are the recorded
+	// run's.
+	var own [][2]int
+	for k, r := range raw {
+		for _, e := range r.escs {
+			if k >= paired || !keptEscape(recRaw[k], recTops[k].run, e) {
+				own = append(own, [2]int{e.st, e.en})
+			}
 		}
 	}
 	decLower, eLower := strings.ToLower(d.decLive), strings.ToLower(eLive)
@@ -1279,7 +1314,7 @@ func (d *valueDrift) plainRunsOf(forms [][2]string, runs [2][]decodedRun, eLive 
 		b := f[1]
 		switch {
 		case d.decoded && b == d.live:
-			b = blankAt(b, raw, false)
+			b = standing(blankAt(b, raw, false), d.live, own)
 		case b == d.decLive || b == decLower:
 			b = blankAt(b, liveRuns, false)
 		case b == eLive || b == eLower:
@@ -1293,25 +1328,26 @@ func (d *valueDrift) plainRunsOf(forms [][2]string, runs [2][]decodedRun, eLive 
 	}
 	// An escape right before a run glues its remnant to the run's first
 	// word in the raw form ("20b2s" of "%20b2s"): that word is the runs'
-	// where the run pairs with the recorded value's run of the same rank,
-	// the same escape stands right before that one, and it stands after
-	// the run before it (or the value's start), so only the run changed
-	// the word. An escape that ends the run before it (a run ends after its
-	// padding: "Lg=%3D" right before the next) is that run's spelling: the
-	// word is the runs' where that run writes its escapes as the recorded
-	// one does (kept), so neither run's escapes changed; else it is the
-	// value's own, as that run's other escaped words are.
-	pl := 0
+	// where the run pairs with the recorded value's run of the same rank
+	// and the same escape stands right before that one, so only the run
+	// changed the word. So too where the escape ends the run before it (a
+	// run ends after its padding: "Lg=%3D" right before the next): runs
+	// pair only where the text between them is the same on both sides,
+	// here none, so the recorded escape ends the recorded run before too.
+	// The word holds the escape's remnant, the same on both sides, and the
+	// run's own bytes, none of the run before it: an escape that run gained
+	// or respelled leaves a word of its own ("3D" of "%3D%3D" against
+	// "=%3D"), which is searched unless a run read above holds it, and one
+	// it lost leaves none.
 	for k := 0; k < paired; k++ {
 		r, q := raw[k], recRaw[k]
-		if e := escapeBefore(d.live, r.st); e != "" && (r.st-len(e) >= pl || k > 0 && kept[k-1]) && escapeBefore(d.rec, q.st) == e {
+		if e := escapeBefore(d.live, r.st); e != "" && escapeBefore(d.rec, q.st) == e {
 			for _, rd := range readings {
 				if w := wordAcross(d.live, r.st, rd); w != "" {
 					words[w] = true
 				}
 			}
 		}
-		pl = r.en
 	}
 	return words
 }
@@ -1401,6 +1437,51 @@ func sameEscapes(rec, live map[byte]string, recRun string) bool {
 	return true
 }
 
+// keptEscape says e, an escape of a live run's text in the raw value
+// (rawImages), writes its copy of its byte as the recorded run of the same
+// rank writes that copy (rec its text there, recRun what that decodes to):
+// sameEscapes, read one escape at a time. That is the one spelling every
+// recorded copy shares, or the spelling of the recorded copy of the same
+// rank where they differ (none where the recorded run holds fewer copies,
+// or writes that one as itself); for a byte the recorded run does not
+// hold, an escape of the kind by which it writes another byte.
+func keptEscape(rec decodedRun, recRun string, e rawEscape) bool {
+	if strings.IndexByte(recRun, e.c) < 0 {
+		for _, rs := range rec.esc {
+			if !mixedEscape(rs) && rs[0] == e.sp[0] && len(rs) == len(e.sp) {
+				return true
+			}
+		}
+		return false
+	}
+	rs, ok := rec.esc[e.c]
+	if !ok {
+		return false
+	}
+	if !mixedEscape(rs) {
+		return rs == e.sp
+	}
+	for _, q := range rec.escs {
+		if q.c == e.c && q.n == e.n {
+			return q.sp == e.sp
+		}
+	}
+	return false
+}
+
+// standing is b, the raw value s with runs put out (blankAt), with s's
+// bytes at each span of own written back where they stand.
+func standing(b, s string, own [][2]int) string {
+	if len(own) == 0 {
+		return b
+	}
+	out := []byte(b)
+	for _, sp := range own {
+		copy(out[sp[0]:sp[1]], s[sp[0]:sp[1]])
+	}
+	return string(out)
+}
+
 // mixedEscape says an esc spelling (rawImages) lists a byte's copies, in
 // order, because they are not all written the same way.
 func mixedEscape(sp string) bool { return sp[0] == 0 }
@@ -1458,6 +1539,8 @@ func rawImages(raw string, runs []decodedRun) []decodedRun {
 		// (more).
 		var first [256]string
 		var escaped, mixed [256]bool
+		var copies [256]int
+		var escs []rawEscape
 		for j := r.st; j < r.en; j++ {
 			c, sp := dec[j], raw[at[j]:at[j+1]]
 			escaped[c] = escaped[c] || len(sp) > 1
@@ -1465,6 +1548,10 @@ func rawImages(raw string, runs []decodedRun) []decodedRun {
 				first[c] = sp
 			}
 			mixed[c] = mixed[c] || sp != first[c]
+			if len(sp) > 1 {
+				escs = append(escs, rawEscape{c: c, sp: sp, st: at[j], en: at[j+1], n: copies[c]})
+			}
+			copies[c]++
 		}
 		var esc map[byte]string
 		for c := range escaped {
@@ -1488,7 +1575,7 @@ func rawImages(raw string, runs []decodedRun) []decodedRun {
 			}
 			esc[byte(c)] = sb.String()
 		}
-		out = append(out, decodedRun{run: raw[a:b], at: -1, st: a, en: b, esc: esc})
+		out = append(out, decodedRun{run: raw[a:b], at: -1, st: a, en: b, esc: esc, escs: escs})
 	}
 	return out
 }
