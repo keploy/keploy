@@ -536,7 +536,7 @@ func TestTee_PushRefusedAfterAbandon(t *testing.T) {
 		tt.push(mkChunk("x"))
 	}
 	close(gone) // parser departed → drain abandons and returns
-	tt.waitDone()
+	waitTeeDone(t, tt)
 
 	before := tt.dropCount()
 	accepted := 0

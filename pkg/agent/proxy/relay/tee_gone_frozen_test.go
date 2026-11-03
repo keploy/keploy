@@ -51,3 +51,17 @@ func TestTee_ClosedDrainEndsAtItsConsumersExitWhileItsVerdictIsPending(t *testin
 		t.Errorf("%d delivered + %d dropped = %d, want %d", delivered, tt.dropCount(), got, queued)
 	}
 }
+
+// waitTeeDone waits for tt's drain to return. A drain that misses its
+// consumer's exit never returns: the bound only turns that hang into a
+// failure.
+func waitTeeDone(t *testing.T, tt *tee) {
+	t.Helper()
+	ended := make(chan struct{})
+	go func() { tt.waitDone(); close(ended) }()
+	select {
+	case <-ended:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("the drain did not end at its consumer's exit")
+	}
+}
