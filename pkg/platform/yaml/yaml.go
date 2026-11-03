@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
 	"go.keploy.io/server/v3/utils"
@@ -94,6 +95,11 @@ type NetworkTrafficDoc struct {
 //   - Req   — request-body field paths to ignore during schema/strict matching
 //     (e.g. "body.tier_type"). A plain list of paths: the strict path only ever
 //     honoured "ignore this whole field", so per-path regex values are not kept.
+//   - Words — request-body texts learned by their words (package matcher/learn,
+//     NoiseWords): by path, the numbers, counted from 0, of the words left
+//     unchecked; every other word of the text is still compared. Kept apart
+//     from Req, so a keploy that does not read Words compares such a text
+//     whole rather than leave all of it unchecked.
 //   - Value — exact-match value regexes written by the enterprise obfuscator
 //     (the former top-level `noise:` list, models.Mock.Noise).
 //
@@ -101,30 +107,41 @@ type NetworkTrafficDoc struct {
 // where `noise:` was a bare string list — that decodes into Value. New writes
 // only emit this unified mapping.
 type DocNoise struct {
-	Req   []string `json:"req,omitempty" yaml:"req,omitempty"`
-	Value []string `json:"value,omitempty" yaml:"value,omitempty"`
+	Req   []string         `json:"req,omitempty" yaml:"req,omitempty"`
+	Words map[string][]int `json:"words,omitempty" yaml:"words,omitempty"`
+	Value []string         `json:"value,omitempty" yaml:"value,omitempty"`
 }
 
 // NewDocNoise builds the unified noise block for encoding from the in-memory
 // model fields: the obfuscator value-regex list (models.Mock.Noise) and the
-// kind-agnostic schema-noise map (models.MockSpec.ReqBodyNoise). Only the field
-// PATHS of the schema-noise map are persisted — the per-path regex values are
-// intentionally dropped (unused on the strict path). Returns nil when there is
-// nothing to write so `omitempty` drops the `noise:` key entirely. Req paths are
-// sorted for deterministic output.
+// kind-agnostic schema-noise map (models.MockSpec.ReqBodyNoise). A place
+// learned by its words (learn.UncheckedWords) is written under Words, with the
+// numbers of its unchecked words; a words pattern that names no word leaves
+// nothing unchecked and is not written, so the place is compared. Of any other
+// place only the field PATH is persisted, under Req — the per-path regex
+// values are intentionally dropped (unused on the strict path). Returns nil
+// when there is nothing to write so `omitempty` drops the `noise:` key
+// entirely. Req paths are sorted for deterministic output.
 func NewDocNoise(value []string, reqBodyNoise map[string][]string) *DocNoise {
 	var req []string
-	if len(reqBodyNoise) > 0 {
-		req = make([]string, 0, len(reqBodyNoise))
-		for path := range reqBodyNoise {
-			req = append(req, path)
+	var words map[string][]int
+	for path, patterns := range reqBodyNoise {
+		if w, ok := learn.UncheckedWords(patterns); ok {
+			if len(w) > 0 {
+				if words == nil {
+					words = make(map[string][]int)
+				}
+				words[path] = w
+			}
+			continue
 		}
-		sort.Strings(req)
+		req = append(req, path)
 	}
-	if len(req) == 0 && len(value) == 0 {
+	sort.Strings(req)
+	if len(req) == 0 && len(words) == 0 && len(value) == 0 {
 		return nil
 	}
-	return &DocNoise{Req: req, Value: value}
+	return &DocNoise{Req: req, Words: words, Value: value}
 }
 
 // ValueNoise returns the obfuscator value-regex list (models.Mock.Noise). nil-safe.
@@ -148,13 +165,25 @@ func pathsToNoiseMap(paths []string) map[string][]string {
 	return out
 }
 
-// ResolveReqBodyNoise returns the request-body schema noise for a decoded doc,
-// taken from the unified noise.req list. Returns nil when it is absent.
+// ResolveReqBodyNoise returns the request-body schema noise for a decoded doc:
+// each noise.req path whole, and each noise.words place as the words pattern
+// of its unchecked words (learn.NoiseWordsPattern), which overrides the same
+// path under req: the narrower reading leaves fewer words unchecked. A words
+// list that is no words pattern's (empty, out of order, repeated, negative)
+// reads back as one that unchecks no word (learn.UncheckedWords), so the
+// place is compared. Returns nil when both are absent.
 func ResolveReqBodyNoise(noise *DocNoise) map[string][]string {
-	if noise != nil && len(noise.Req) > 0 {
-		return pathsToNoiseMap(noise.Req)
+	if noise == nil {
+		return nil
 	}
-	return nil
+	out := pathsToNoiseMap(noise.Req)
+	for path, words := range noise.Words {
+		if out == nil {
+			out = make(map[string][]string, len(noise.Words))
+		}
+		out[path] = []string{learn.NoiseWordsPattern(words)}
+	}
+	return out
 }
 
 // UnmarshalYAML accepts both the new mapping shape ({req: [...], value: [...]})

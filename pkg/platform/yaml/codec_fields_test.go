@@ -17,7 +17,7 @@ func everyFieldDoc(t *testing.T) *NetworkTrafficDoc {
 		Kind:         models.HTTP,
 		Name:         "test-1",
 		Async:        &models.AsyncMeta{Lane: "poller", Seq: 2, AnchorAfter: "test-0", AnchorPos: 1, Poll: true},
-		Noise:        &DocNoise{Req: []string{"body.id"}, Value: []string{"^tok-.*$"}},
+		Noise:        &DocNoise{Req: []string{"body.id"}, Words: map[string][]int{"body.note": {1, 3}}, Value: []string{"^tok-.*$"}},
 		LastUpdated:  &models.LastUpdated{Author: "dev", Timestamp: time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC)},
 		Curl:         "curl http://localhost:8080/",
 		ConnectionID: "conn-7",
