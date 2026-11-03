@@ -28,6 +28,10 @@ func TestKeployYmlRequestBodyPatternHoldsBothValues(t *testing.T) {
 	}
 	ct := map[string]string{"Content-Type": "application/json"}
 	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	mp := map[string]string{"Content-Type": "multipart/form-data; boundary=XB"}
+	part := func(v string) string {
+		return "--XB\r\nContent-Disposition: form-data; name=\"id\"\r\n\r\n" + v + "\r\n--XB--\r\n"
+	}
 	for _, c := range []struct {
 		name, pattern string
 		header        map[string]string
@@ -45,6 +49,10 @@ func TestKeployYmlRequestBodyPatternHoldsBothValues(t *testing.T) {
 		{"a form, the call lacks the key", `^1$`, form, `id=1&x=a`, `x=a`, false, "live value (absent)", "body.id"},
 		{"a form, both values inside", `^[12]$`, form, `id=1`, `id=2`, true, "", ""},
 		{"a form, both encoded values inside", `^a b$|^a\+b$`, form, `id=a+b`, `id=a%2Bb`, true, "", ""},
+		{"a form field no entry names", `^1$`, form, `id=1&x=a`, `id=1&x=b`, false, "", "body.x"},
+		{"a multipart field, the live value outside", `^1$`, mp, part("1"), part("2"), false, "live value (a string of 1 bytes)", "body.id"},
+		{"a multipart field, the recorded value outside", `^2$`, mp, part("1"), part("2"), false, "recorded value (a string of 1 bytes)", "body.id"},
+		{"a multipart field, both values inside", `^[12]$`, mp, part("1"), part("2"), true, "", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			noise := requestBodyNoise(map[string][]string{"id": {c.pattern}})
@@ -54,6 +62,18 @@ func TestKeployYmlRequestBodyPatternHoldsBothValues(t *testing.T) {
 			}
 			if c.served {
 				return
+			}
+			if c.why == "" {
+				// A field no entry names is compared, and no pattern is named.
+				for _, f := range diag.differs {
+					if f.diff.Path == c.field {
+						if f.why != "" {
+							t.Fatalf("reason %q for a field no entry names", f.why)
+						}
+						return
+					}
+				}
+				t.Fatalf("differs %v; want %s", differs(diag), c.field)
 			}
 			why := whyOf(diag, c.field)
 			if !strings.Contains(why, c.field+` vary only within "`+c.pattern+`"`) || !strings.Contains(why, c.why) {
