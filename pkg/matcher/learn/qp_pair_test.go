@@ -1,18 +1,22 @@
 package learn
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // A value that holds an '=' no quoted-printable escape starts is no
 // quoted-printable text, in either run, whatever its other escapes show:
-// the "=XX" its signature happens to begin with in one run is no escape. An AWS SigV4 Authorization header, as
-// a .NET AWS SDK signed a DynamoDB UpdateItem in each run (the recorded
-// signature begins "09", an "=09" that reads as a tab; the live one "b1",
-// which reads as nothing), changed only in its signature: the change is the
-// signature's, which no reading refuses, never "a run of the base64 alphabet
-// that does not decode" that only a misread escape made.
+// the "=XX" its signature happens to begin with in one run is no escape.
+// An AWS SigV4 Authorization header, as a .NET AWS SDK signed a DynamoDB
+// UpdateItem in each run (the recorded signature begins "09", an "=09"
+// that reads as a tab; the live one "b1", which reads as nothing), changed
+// only in its signature: the change is the signature's, which no reading
+// refuses, never "a run of the base64 alphabet that does not decode" that
+// only a misread escape made.
 func TestAnEqualsSignNoEscapeStartsIsNoQuotedPrintableInEitherRun(t *testing.T) {
 	at := time.Date(2026, 11, 2, 11, 48, 4, 385340565, time.UTC)
 	const head = "AWS4-HMAC-SHA256 Credential=local/20261102/us-east-1/dynamodb/aws4_request, SignedHeaders=content-type;host;x-amz-api-version;x-amz-content-sha256;x-amz-date;x-amz-target, Signature="
@@ -159,24 +163,140 @@ func TestAMailInAnotherTransferEncodingIsNoQuotedPrintable(t *testing.T) {
 	}
 }
 
+// flowedID is an earlier call of the test whose id flowed from from, as
+// recorded, to to, live.
+func flowedID(at time.Time, from, to string) []Earlier {
+	return []Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Own: true, Seen: []Seen{
+		{Side: Request, Leaf: Leaf{Path: "body.id", Noise: "body.id", Type: String, Value: from}, Live: to, Place: "body.id"},
+	}}}
+}
+
 // Quoted-printable text whose escapes are all of characters it may write
 // as themselves (an encoder that escapes '!' for EBCDIC gateways) still
-// reads as such where a soft line break shows it is; and text whose only
-// escapes are of non-ASCII characters (French quotes around an id) reads
-// as such too: the id that flowed from an earlier call is followed.
+// reads as such where a soft line break shows it is, raw or in a JSON
+// string; text whose only escapes are of non-ASCII characters (French
+// quotes around an id) reads as such too, and so does text that holds one
+// such escape (an '=') anywhere: before a space escaped at a line's end, or
+// after an 'A' in the same run of escapes. A mail that says it is reads
+// with each of its escapes decoded, a '#' escaped for EBCDIC gateways too.
+// The id that flowed from an earlier call is followed, each way.
 func TestQuotedPrintableShownBySoftBreakOrNonASCIIEscape(t *testing.T) {
 	at := time.Date(2026, 11, 2, 11, 48, 4, 0, time.UTC)
-	earlier := []Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Own: true, Seen: []Seen{
-		{Side: Request, Leaf: Leaf{Path: "body.id", Noise: "body.id", Type: String, Value: "A7K29Q"}, Live: "B8L30R", Place: "body.id"},
-	}}}
-	for _, tc := range []struct{ name, rec, live string }{
-		{"soft breaks, '!' escaped", "order A7K=\r\n29Q placed. Thank you=21", "order B8L=\r\n30R placed. Thank you=21"},
-		{"french quotes", "Commande =C2=ABA7K29Q=C2=BB", "Commande =C2=ABB8L30R=C2=BB"},
+	mail := func(header, id string) string {
+		return "From: shop@test\r\nSubject: Your order\r\n" + header + "Content-Transfer-Encoding: quoted-printable\r\n\r\n" +
+			"Order =23" + id + " placed =E2=80=94 thank you\r\n"
+	}
+	for _, tc := range []struct {
+		name string
+		of   func(id string) string
+	}{
+		{"soft breaks, '!' escaped", func(id string) string { return "order " + id[:3] + "=\r\n" + id[3:] + " placed. Thank you=21" }},
+		{"soft breaks in a JSON string, '!' escaped", func(id string) string { return "order " + id[:3] + `=\r\n` + id[3:] + " placed. Thank you=21" }},
+		{"soft breaks in a JSON string, line feeds only", func(id string) string { return "order " + id[:3] + `=\n` + id[3:] + " placed. Thank you=21" }},
+		{"french quotes", func(id string) string { return "Commande =C2=AB" + id + "=C2=BB" }},
+		{"an '=' escaped, a space escaped at the line's end", func(id string) string { return "order=3D" + id + " placed=20" }},
+		{"an 'A' and an '=' in one run of escapes", func(id string) string { return "x=41=3D" + id }},
+		{"a mail that says it is, '#' escaped", func(id string) string { return mail("Content-Type: text/plain; charset=utf-8\r\n", id) }},
+		{"a mail that says it is, whole, '#' escaped", func(id string) string { return mail("", id) }},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := classifyOne(tc.rec, tc.live, at, earlier, nil, nil); got.Kind != KindVariable {
-				t.Fatalf("got %s (%s), want the id that flowed followed as a variable", got.Kind, got.Why)
+		for _, ids := range [][2]string{{"A7K29Q", "B8L30R"}, {"B8L30R", "A7K29Q"}} {
+			t.Run(tc.name+", "+ids[0], func(t *testing.T) {
+				if got := classifyOne(tc.of(ids[0]), tc.of(ids[1]), at, flowedID(at, ids[0], ids[1]), nil, nil); got.Kind != KindVariable {
+					t.Fatalf("got %s (%s), want the id that flowed followed as a variable", got.Kind, got.Why)
+				}
+			})
+		}
+	}
+}
+
+// Where a value reads as quoted-printable text only by a soft line break (a
+// line that ends in base64 padding reads as one) or by an "=3D" of its
+// own, an escape of a character quoted-printable may write as itself is
+// left as written: a signature in upper-case hex whose first two digits
+// happen to be one ("2B" a '+', "41" an 'A', "09" a tab) changes as the
+// signature it is, against any first two digits, "3D" and "41" too.
+func TestAnEscapeQuotedPrintableMayWriteAsItselfIsLeftAsWritten(t *testing.T) {
+	at := time.Date(2026, 11, 2, 11, 48, 4, 385340565, time.UTC)
+	const digits = "0123456789ABCDEF"
+	for _, pre := range []string{
+		"X-A: YWJj=\r\nX-Sig: v1=",
+		"X-A: YWJj=\r\nX-Sig: sha256=",
+		"X-A: YWJj=\nv1=",
+		"k=3Dv&v1=",
+		"k=3Dv&sha256=",
+		"keyId=3DA94F0C11B2,v1=",
+	} {
+		t.Run(pre, func(t *testing.T) {
+			pairs := [][2]string{{"2B", "41"}, {"41", "2B"}, {"2B", "09"}, {"09", "2B"}, {"3D", "41"}, {"41", "3D"}}
+			for _, hi := range digits {
+				for _, lo := range digits {
+					xy := string(hi) + string(lo)
+					pairs = append(pairs, [2]string{xy, "3D"}, [2]string{"3D", xy}, [2]string{xy, "41"}, [2]string{"41", xy})
+				}
+			}
+			for _, p := range pairs {
+				if got := classifyOne(pre+p[0]+sigA[2:], pre+p[1]+sigB[2:], at, nil, nil, nil); got.Kind != KindNoise {
+					t.Errorf("%s against %s: got %s (%s), want noise: its change is a signature's", p[0], p[1], got.Kind, got.Why)
+				}
 			}
 		})
+	}
+}
+
+// Two signatures in standard base64, unpadded (43 characters, each with a
+// '+' and a '/' after its first two): without its first two characters
+// either is no run that decodes.
+const (
+	b64A = "P9s2vq+DUT36EAWmlmTPl6OcG/wZPxMCvIKgmDvaYQQ"
+	b64B = "mHbGaHE14/+IG7iE81OzKCw31S1JCNAk0Hj1aqHBMdI"
+)
+
+// A signature in standard base64 that begins "3D" in one run reads as an
+// escaped '=' there: read in the quoted-printable form, it loses its first
+// two characters and is no run that decodes. So the two runs are read in
+// that form only where both read as quoted-printable text: whole (no '='
+// that starts no escape, no escape left as written) and shown (an escape
+// quoted-printable has to write, or a soft line break). Where either is
+// not, the signature's change is read raw, each way.
+func TestABase64SignatureThatBeginsAnEscapedEqualsSignInOneRun(t *testing.T) {
+	at := time.Date(2026, 11, 2, 11, 48, 4, 385340565, time.UTC)
+	for _, tc := range []struct{ name, pre string }{
+		{"the other run shows nothing", "sig="},
+		{"beside an '=' that starts no escape", "k=3Dv&a=b&sig="},
+		{"beside an escape of a '%'", "k=3Dv&p=25&sig="},
+		{"beside an escape of a '\\'", "k=3Dv&p=5C&sig="},
+		{"beside an escape that decodes to no text", "k=3Dv&caf=E9&sig="},
+		{"after a line that ends in base64 padding, beside an '=' that starts no escape", "X-A: YWJj=\r\nX-Sig: keyId=k1,sig="},
+	} {
+		for _, p := range [][2]string{{tc.pre + "3D" + b64A[2:], tc.pre + "41" + b64B[2:]}, {tc.pre + "41" + b64A[2:], tc.pre + "3D" + b64B[2:]}} {
+			t.Run(tc.name+", "+p[0][len(tc.pre):len(tc.pre)+2], func(t *testing.T) {
+				if got := classifyOne(p[0], p[1], at, nil, nil, nil); got.Kind != KindNoise {
+					t.Fatalf("got %s (%s), want noise: its change is a signature's, read raw", got.Kind, got.Why)
+				}
+			})
+		}
+	}
+}
+
+// A payload is read in the quoted-printable form with each of its escapes
+// decoded, those of characters quoted-printable may write as themselves
+// too: an id an earlier call sent in a mail's body behind a '#' an encoder
+// escaped for EBCDIC gateways ("=23A7K29Q") is found there, and the value
+// it flowed into is followed as a variable. The control, a payload without
+// the id, is not.
+func TestAPayloadReadsEachQuotedPrintableEscape(t *testing.T) {
+	at := time.Date(2026, 11, 2, 11, 48, 4, 0, time.UTC)
+	sent := func(body string) []Raw {
+		m := &models.Mock{Name: "smtp-0", Kind: models.GENERIC, Spec: models.MockSpec{ReqTimestampMock: at.Add(-2 * time.Second),
+			GenericRequests: []models.Payload{{Origin: models.FromClient, Message: []models.OutputBinary{{Type: "utf-8", Data: "DATA\r\n" + body + "\r\n.\r\n"}}}}}}
+		return []Raw{RawOf(m, true)}
+	}
+	for _, body := range []string{"Order =23ID placed. Thank you=21", "Order=3D=23ID"} {
+		if got := classifyOne("A7K29Q", "B8L30R", at, nil, sent(strings.ReplaceAll(body, "ID", "A7K29Q")), nil); got.Kind != KindVariable {
+			t.Errorf("%q: got %s (%s), want the id that flowed from the payload followed as a variable", body, got.Kind, got.Why)
+		}
+		if got := classifyOne("A7K29Q", "B8L30R", at, nil, sent(strings.ReplaceAll(body, "ID", "C9M41S")), nil); got.Kind == KindVariable {
+			t.Errorf("%q without the id: got a variable (%s)", body, got.Why)
+		}
 	}
 }
