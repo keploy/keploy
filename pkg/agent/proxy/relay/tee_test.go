@@ -1,7 +1,9 @@
 package relay
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"testing"
@@ -619,14 +621,114 @@ func TestTee_DeliversWhenOutHasRoomEvenIfConsumerGone(t *testing.T) {
 	tt.close()
 	tt.waitDone()
 
+	// The stream of a consumer that is gone is left open (endStream), so
+	// this takes what out holds without waiting for its end.
 	delivered := 0
-	for range tt.readCh() {
+	for len(tt.readCh()) > 0 {
+		<-tt.readCh()
 		delivered++
 	}
 	if delivered != n {
 		t.Errorf("delivered %d of %d chunks that out had room for; without the "+
 			"non-blocking pre-try the select coin-flips against a closed consumerGone "+
 			"and discards deliverable data", delivered, n)
+	}
+}
+
+// A stream whose reader was closed before the stream's end is left open, so
+// its reader reads fakeconn.ErrClosed after what it was handed, however late
+// it gets there: the session's close, not the connection's end. A reader
+// closed after the end, as the relay's teardown closes it, reads io.EOF
+// (tee.endStream).
+func TestTee_StreamClosedBeforeItsEndReadsTheClose(t *testing.T) {
+	t.Parallel()
+	for _, closedFirst := range []bool{true, false} {
+		tt := newTee(fakeconn.FromDest, 1<<20, 4, testStallGrace, nil, nil)
+		fc := fakeconn.New(tt.readCh(), nil, nil)
+		tt.start(fc.Done())
+		tt.push(mkChunk("answer"))
+		if closedFirst {
+			_ = fc.Close()
+		}
+		tt.close()
+		tt.waitDone()
+		if !closedFirst {
+			_ = fc.Close()
+		}
+		if c, err := fc.ReadChunk(); err != nil || string(c.Bytes) != "answer" {
+			t.Errorf("closed first %v: read %q, %v; want the chunk delivered before the end", closedFirst, c.Bytes, err)
+		}
+		want := io.EOF
+		if closedFirst {
+			want = fakeconn.ErrClosed
+		}
+		if _, err := fc.ReadChunk(); !errors.Is(err, want) {
+			t.Errorf("closed first %v: the stream's end read %v, want %v", closedFirst, err, want)
+		}
+	}
+}
+
+// A reader closed after tee.close but before the drain's end (the relay's
+// final flush, which a session abort can land in) was closed before the
+// stream's end too, so it reads fakeconn.ErrClosed after what it was handed.
+// The stream's end is decided as the drain returns, not when close is called
+// (tee.endStream). out has one slot and the drain holds two more chunks, so
+// it cannot end before the reader's close; the hour-long stall bound cannot
+// end it either.
+func TestTee_StreamClosedDuringTheFinalFlushReadsTheClose(t *testing.T) {
+	t.Parallel()
+	tt := newTee(fakeconn.FromDest, 1<<20, 1, time.Hour, nil, nil)
+	fc := fakeconn.New(tt.readCh(), nil, nil)
+	tt.start(fc.Done())
+	for _, s := range []string{"a", "b", "c"} {
+		if !tt.push(mkChunk(s)) {
+			t.Fatalf("push %q refused", s)
+		}
+	}
+	tt.close()
+	_ = fc.Close()
+	tt.waitDone()
+	if c, err := fc.ReadChunk(); err != nil || string(c.Bytes) != "a" {
+		t.Fatalf("read %q, %v; want the chunk delivered before the close", c.Bytes, err)
+	}
+	if _, err := fc.ReadChunk(); !errors.Is(err, fakeconn.ErrClosed) {
+		t.Errorf("a reader closed during the final flush read %v at the stream's end, want %v", err, fakeconn.ErrClosed)
+	}
+}
+
+// The relay's teardown waits on done and then closes the FakeConns, so the
+// drain decides the stream's end before it signals done: a close that waited
+// on done finds the stream ended, and its reader reads io.EOF after what it
+// was handed. The teardown's one close lands just before the stream's end is
+// decided if done is already signalled there, where a close that waited on
+// done could land, and after waitDone otherwise. It runs once
+// (sync.OnceFunc), and a second call returns only once the first has closed
+// the reader, so an end decided after done reads that close
+// (fakeconn.ErrClosed) on every run.
+func TestTee_CloseThatWaitedOnDoneFindsTheStreamEnded(t *testing.T) {
+	t.Parallel()
+	tt := newTee(fakeconn.FromDest, 1<<20, 4, testStallGrace, nil, nil)
+	fc := fakeconn.New(tt.readCh(), nil, nil)
+	teardownClose := sync.OnceFunc(func() { _ = fc.Close() })
+	tt.endingStream = func() {
+		select {
+		case <-tt.done:
+			teardownClose()
+		default:
+		}
+	}
+	tt.start(fc.Done())
+	if !tt.push(mkChunk("answer")) {
+		t.Fatal("push refused")
+	}
+	tt.close()
+	tt.waitDone()
+	teardownClose()
+	if c, err := fc.ReadChunk(); err != nil || string(c.Bytes) != "answer" {
+		t.Fatalf("read %q, %v; want the chunk delivered before the end", c.Bytes, err)
+	}
+	if _, err := fc.ReadChunk(); !errors.Is(err, io.EOF) {
+		t.Errorf("a reader closed after done read %v at the stream's end, want %v: the end was decided after done", err, io.EOF)
 	}
 }
 

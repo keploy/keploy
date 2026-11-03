@@ -667,7 +667,8 @@ func order(x, y stamp) (first, known bool) {
 // first send once stop has closed. The supervisor.Session's ctx is observed
 // indirectly: when the ctx is cancelled the relay ends the FakeConn streams
 // and closes them, which surfaces here as EOF (ErrClosed when the session's
-// abort closes them while the relay still captures). A panic of the main
+// abort closed a stream before its end, however late the reader gets to
+// it: relay's tee.endStream). A panic of the main
 // loop aborts the session too, and closes stop, and nothing drains events
 // after it, so every send to out, the end-of-stream error's included,
 // selects on stop: a reader waiting on a read with nothing queued reads the
