@@ -184,11 +184,10 @@ func TestPartAnswerFault_TheClientsStopWhicheverEndIsMarkedFirst(t *testing.T) {
 // partAnswerFault: an end read once the recording's stop had begun
 // (Session.EndFollowedStop) records no fault, though the relay said the
 // stream ended where the client stopped taking it: the stop, not the app, cut
-// the answer. recordV2 leaves a client's first end at the stop out before it
-// asks (partAnswerLeftOut), so through recordV2 only the upstream's end marked
-// first reaches this (one that came on its own before the relay read the
-// app's end, as a server with keep-alives off closes after its last chunk);
-// asked directly, either order records none.
+// the answer. recordV2 leaves out a client's end at the stop that the relay
+// read before it asks (partAnswerLeftOut), whichever end it read first, so
+// through recordV2 only an upstream's end at the stop with the client's end
+// never read reaches this; asked directly, either order records none.
 func TestPartAnswerFault_TheRecordingsStopRecordsNoFaultWhicheverEndIsMarkedFirst(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

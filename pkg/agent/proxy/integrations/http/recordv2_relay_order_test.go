@@ -65,6 +65,10 @@ type relayedConn struct {
 	// the client's process exit on its own, EndUnjudged where they cannot
 	// say how it released the connection (the macOS and Windows hooks).
 	clientEnd atomic.Uint32
+	// endHook, when set, runs as the relay reads a side's end, on that side's
+	// forwarder, and marks it on the session by calling mark: it orders the
+	// two ends' marks as a busy host's scheduler can.
+	endHook func(dir fakeconn.Direction, mark func())
 }
 
 // loopback returns the two ends of a loopback TCP connection.
@@ -128,7 +132,7 @@ func (c *relayedConn) startRelay(t *testing.T) {
 	if c.wrapDst != nil {
 		dst = c.wrapDst(dst)
 	}
-	r := relay.New(relay.Config{Logger: zap.NewNop(), HalfCloseGrace: c.grace, ClientStopped: c.sess.MarkEndedWhereClientStopped, PeerEnded: func(dir fakeconn.Direction, reset bool) {
+	mark := func(dir fakeconn.Direction, reset bool) {
 		why := supervisor.EndMayBeFault
 		if c.stopBegun.Load() {
 			why = supervisor.EndAtStop
@@ -136,6 +140,13 @@ func (c *relayedConn) startRelay(t *testing.T) {
 			why = supervisor.NoFaultEnd(c.clientEnd.Load())
 		}
 		c.sess.MarkPeerEndedBy(dir, reset, why)
+	}
+	r := relay.New(relay.Config{Logger: zap.NewNop(), HalfCloseGrace: c.grace, ClientStopped: c.sess.MarkEndedWhereClientStopped, PeerEnded: func(dir fakeconn.Direction, reset bool) {
+		if c.endHook == nil {
+			mark(dir, reset)
+			return
+		}
+		c.endHook(dir, func() { mark(dir, reset) })
 	}}, src, dst)
 	c.sess.ClientStream, c.sess.DestStream = r.ClientStream(), r.DestStream()
 	ctx, cancel := context.WithCancel(context.Background())

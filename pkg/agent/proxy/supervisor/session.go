@@ -151,14 +151,15 @@ type Session struct {
 	RouteMocksViaSyncMock bool
 	// peerEnds: how each side of the connection ended, which ended first
 	// (MarkPeerEndedBy; peerEndFirstShift), and whether that first end
-	// records no fault (EndFollowedStop) and, from noFaultEndShift, which
-	// such end it was (FirstEndNoFault); whether the server spoke unasked
+	// records no fault (EndFollowedStop); whether the server spoke unasked
 	// before the current request (ServerSpokeUnasked); whether the
 	// destination's stream ended where the client stopped taking it
-	// (endedWhereClientStoppedBit); and, from endedWithConnectionShift, one
-	// bit per fakeconn.Direction: that stream ended because its connection
-	// did (MarkEndedWithConnection). Internal; one word here, in the padding
-	// after the bools, so a Session stays in its size class.
+	// (endedWhereClientStoppedBit); from endedWithConnectionShift, one bit
+	// per fakeconn.Direction: that stream ended because its connection did
+	// (MarkEndedWithConnection); and, from clientEndShift, which end that
+	// records no fault the client's own end was, first or not
+	// (ClientEndNoFault). Internal; one word here, in the padding after the
+	// bools, so a Session stays in its size class.
 	peerEnds atomic.Uint32
 
 	// --- Backward-compatibility (populated by the migration shim) ---
@@ -452,7 +453,8 @@ const endedWhereClientStoppedBit = 1 << (peerEndFirstShift + 4)
 
 // EndFollowedStop reports whether the first end of the connection
 // (FirstPeerEnded) was the application's stop, which records no fault
-// (MarkPeerEndedBy, FirstEndNoFault says which): read after the recording's
+// (MarkPeerEndedBy; ClientEndNoFault says which, of the client's end): read
+// after the recording's
 // stop had begun (keploy stops the application only once it has told the
 // agent), the client's end as its process exited, or the client's end where
 // the hooks cannot say how the application released it (the proxy's
@@ -465,13 +467,13 @@ func (s *Session) EndFollowedStop() bool {
 	return s != nil && s.peerEnds.Load()&endFollowedStopBit != 0
 }
 
-// NoFaultEnd is which end that records no fault the first end of a
-// connection was (MarkPeerEndedBy, FirstEndNoFault), as the relay read it.
+// NoFaultEnd is which end that records no fault an end of a connection was
+// (MarkPeerEndedBy, ClientEndNoFault), as the relay read it.
 type NoFaultEnd uint32
 
 const (
-	// EndMayBeFault: the first end is none of the ones below (the
-	// application's giving up, the upstream's fault), or none has come.
+	// EndMayBeFault: the end is none of the ones below (the application's
+	// giving up, the upstream's fault), or none has come.
 	EndMayBeFault NoFaultEnd = iota
 	// EndAtStop: an end read once the recording's stop had begun.
 	EndAtStop
@@ -486,18 +488,24 @@ const (
 	EndUnjudged
 )
 
-// noFaultEndShift: peerEnds holds, from this bit, the first end's NoFaultEnd
-// in two bits, past MarkEndedWithConnection's bits.
-const noFaultEndShift = endedWithConnectionShift + 2
+// clientEndShift: peerEnds holds, from this bit, the client's own end's
+// NoFaultEnd in two bits, past MarkEndedWithConnection's bits.
+const clientEndShift = endedWithConnectionShift + 2
 
-// FirstEndNoFault reports which end that records no fault the connection's
-// first end was (MarkPeerEndedBy): EndMayBeFault where EndFollowedStop is
-// false. Nil-safe.
-func (s *Session) FirstEndNoFault() NoFaultEnd {
+// ClientEndNoFault reports which end that records no fault the client's own
+// end was (MarkPeerEndedBy, FromClient), whether or not it was the
+// connection's first: EndMayBeFault where it may be a fault, and while the
+// relay has not read it (PeerEnded(FromClient) is PeerOpen). A call the client
+// stopped taking is the client's to judge, by its own end, whichever end the
+// relay read first: an upstream that closes once it has sent its last bytes
+// (keep-alives off) closes on its own, and its forwarder can read that close
+// before the client's forwarder reads the client's FIN, which came before it.
+// Nil-safe.
+func (s *Session) ClientEndNoFault() NoFaultEnd {
 	if s == nil {
 		return EndMayBeFault
 	}
-	return NoFaultEnd(s.peerEnds.Load() >> noFaultEndShift & 3)
+	return NoFaultEnd(s.peerEnds.Load() >> clientEndShift & 3)
 }
 
 // ServerSpokeUnasked reports whether the server sent bytes that answer no
@@ -534,8 +542,8 @@ func (s *Session) MarkPeerEnded(dir fakeconn.Direction, reset bool) {
 // agent before they stop the application), the client's process was exiting
 // as its end was read (EndAtExit), or the hooks cannot say how the client
 // released its end (EndUnjudged), as the proxy's peerEndMarker reads it. Such
-// an end is not a fault (EndFollowedStop, FirstEndNoFault). Only the first
-// end's is kept. Nil-safe.
+// an end is not a fault: the first end's says so (EndFollowedStop), and the
+// client's, first or not, says which it was (ClientEndNoFault). Nil-safe.
 func (s *Session) MarkPeerEndedBy(dir fakeconn.Direction, reset bool, why NoFaultEnd) {
 	if s == nil || dir > fakeconn.FromDest {
 		return
@@ -551,10 +559,13 @@ func (s *Session) MarkPeerEndedBy(dir fakeconn.Direction, reset bool, why NoFaul
 			return
 		}
 		next := old | uint32(end)<<shift
+		if dir == fakeconn.FromClient {
+			next |= uint32(why) << clientEndShift
+		}
 		if (old>>peerEndFirstShift)&3 == 0 {
 			next |= (uint32(dir) + 1) << peerEndFirstShift
 			if why != EndMayBeFault {
-				next |= endFollowedStopBit | uint32(why)<<noFaultEndShift
+				next |= endFollowedStopBit
 			}
 		}
 		if s.peerEnds.CompareAndSwap(old, next) {
@@ -1376,16 +1387,19 @@ const (
 // head came whole (no response to record), the capture lost a chunk of it
 // (the mark comes before the reason), or the stream ended where the client
 // stopped taking it (EndedWhereClientStopped) with no fault of the client's
-// to record it with (a capture hole, or the recording's stop read first on
-// the server's side). A response the client read past its head, and
+// to record it with (a capture hole, or the recording's stop read on the
+// server's side where the relay never read the client's end). A response the
+// client read past its head, and
 // stopped reading, is recorded as far as it read it, with the fault
 // models.FaultStoppedReading, instead. The call itself did not complete, so
 // there is no whole exchange to record. Of class leftOutClientClosed.
 const LeftOutClientClosedPartway = "the client closed the connection partway through the response"
 
 // The reasons an HTTP/1 recorder leaves an exchange out for when the client's
-// end came first, partway through the response, and was an end that records
-// no fault (FirstEndNoFault): the response is not known to be whole (its
+// own end, partway through the response, was an end that records no fault
+// (ClientEndNoFault), whichever end the relay read first, where the client's
+// end came first or the destination's stream ended where the client stopped
+// taking it: the response is not known to be whole (its
 // framing had not ended, or its body is framed by the upstream's close, which
 // had not come), and no fault is known to record it with. Each is
 // LeftOutClientClosedPartway with a detail after its colon, so of its cause
