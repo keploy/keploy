@@ -1190,6 +1190,24 @@ func (o Order) beforeTestLocked(id string) bool {
 	return true
 }
 
+// beforeTests is, of each of ms (none nil), whether F made every serve of
+// it the read saw only before the running test began, each in an order
+// keploy can tell (beforeTestLocked): the mark ServedView gives a Raw of it
+// (Raw.ServedBeforeTheTest), which InServeOrder gives an exchange of it
+// (Earlier.beforeTest).
+func (o Order) beforeTests(ms []*models.Mock) []bool {
+	out := make([]bool, len(ms))
+	if o.t == nil {
+		return out
+	}
+	o.t.mu.Lock()
+	defer o.t.mu.Unlock()
+	for i, m := range ms {
+		out[i] = o.beforeTestLocked(MockID(m))
+	}
+	return out
+}
+
 // olderTestLocked reports whether F made every serve of the mock of
 // identity id the read saw (those numbered up to upTo), and one, in an older
 // test of the set than the running one: while a test was open (none
@@ -2268,7 +2286,12 @@ func (t *Tracker) State() (number uint64, open, began bool) {
 // after the serve (Tracker.ServedMockAsRecorded, Tracker.ServedMockLive)
 // tells it of the recording, not of the exchange, and a later call reads
 // the exchange as a recording F gave the application with what was told
-// (lateOf), never as one whose view no adapter stated. One said as recorded
+// (lateOf), never as one whose view no adapter stated. Where order shows F
+// served that recording only before the call's test began, the exchange is
+// marked so (Earlier.beforeTest), as Order.ServedView marks a Raw of it
+// (Raw.ServedBeforeTheTest): the copy rule then reads a word of it as one
+// of a recording of another test, never as one the order alone lets go
+// (follows.excusedSeen). One said as recorded
 // that its leaves do not bear out stays one whose view no adapter stated
 // (fail closed). A copy: earlier is the round's. Nothing is numbered where
 // no payload was read: the place an earlier test's call told in its own
@@ -2295,10 +2318,11 @@ func InServeOrder(earlier []Earlier, mocks []*models.Mock, order Order) []Earlie
 			list = append(list, m)
 		}
 	}
-	spans := order.Spans(list)
+	spans, befores := order.Spans(list), order.beforeTests(list)
 	span := make(map[*models.Mock][2]int, len(list))
+	before := make(map[*models.Mock]bool, len(list))
 	for k, m := range list {
-		span[m] = spans[k]
+		span[m], before[m] = spans[k], befores[k]
 	}
 	out := append([]Earlier(nil), earlier...)
 	for i, e := range out {
@@ -2312,6 +2336,7 @@ func InServeOrder(earlier []Earlier, mocks []*models.Mock, order Order) []Earlie
 		if span[m][0] > 0 {
 			out[i].Payload = e.Payload.ServedIn(span[m][0], span[m][1])
 		}
+		out[i].beforeTest = before[m]
 		if !e.AsRecorded && MockID(m) == e.Payload.id {
 			out[i].told = &toldOf{order: order, mock: m}
 		}

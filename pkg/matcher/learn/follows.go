@@ -78,7 +78,10 @@ import (
 // application only before the call's test began (outsideTest: in an older
 // test than the call's, Raw.InAnOlderTest, as an adapter reads the previous
 // test's serves; between tests or at the set's start-up,
-// Raw.BeforeTheTest) is read on the terms of a recording of another test
+// Raw.BeforeTheTest), and an exchange served leaf by leaf that F gave it
+// only before the call's test began (Earlier.outsideTest: the run's
+// start-up exchange a later test reads, or the place an earlier test's
+// call left the run), is read on the terms of a recording of another test
 // too (olderTook): a word there is let go only where no word that changed
 // of the value lacking it stands in a place the rule reads. A consumer that
 // fell behind makes a call of an older test in a later test's window: F
@@ -541,24 +544,28 @@ func (f *follows) tookElsewhere(v *valueDrift, t string) string {
 // (Raw.BeforeTheTest), never in the call's own test.
 func outsideTest(x Raw) bool { return x.InAnOlderTest() || x.BeforeTheTest() }
 
-// olderTook is tookElsewhere of word t of v, found in x's payload, which F
-// gave the application only before the call's test began (outsideTest),
-// saying so: "" where no word that changed of the value lacking t stands in
-// a place the word rule reads. Such a payload is read as a recording of
-// another test is (excusedGiven): a value F saw that holds a word of what F
-// gave before the test, while the recorded value holds a word of a place
-// both runs gave, may be a late call's (an application that fell behind
-// still works on what an older test gave it) or one the application kept
-// from before the test, not a value made beside the word.
-func (f *follows) olderTook(v *valueDrift, t string, x Raw) string {
+// olderTook is tookElsewhere of word t of v, found in mock, which F gave
+// the application only before the call's test began (outsideTest,
+// Earlier.outsideTest), saying so: in an older test than the call's
+// (older), or, of the place an earlier test's call left the run, sent by
+// the application there (sent); "" where no word that changed of the value
+// lacking t stands in a place the word rule reads. Such a place is read as
+// a recording of another test is (excusedGiven): a value F saw that holds a
+// word of what F gave before the test, while the recorded value holds a
+// word of a place both runs gave, may be a late call's (an application that
+// fell behind still works on what an older test gave it) or one the
+// application kept from before the test, not a value made beside the word.
+func (f *follows) olderTook(v *valueDrift, t, mock string, older, sent bool) string {
 	took := f.tookElsewhere(v, t)
-	if took == "" {
+	switch {
+	case took == "":
 		return ""
+	case sent:
+		return took + "; record's full round's application sent " + mock + "'s request only in an older test than the call's: the call may be a late call of that test, by an application that fell behind"
+	case older:
+		return took + "; record's full round gave the application " + mock + " only in an older test than the call's: the call may be a late call of that test, by an application that fell behind"
 	}
-	if x.InAnOlderTest() {
-		return took + "; record's full round gave the application " + x.mock + " only in an older test than the call's: the call may be a late call of that test, by an application that fell behind"
-	}
-	return took + "; record's full round gave the application " + x.mock + " only before the call's test began: the application may have kept what it gave there"
+	return took + "; record's full round gave the application " + mock + " only before the call's test began: the application may have kept what it gave there"
 }
 
 // liveOf is what F gave the application at x, as tookElsewhere reads the
@@ -693,7 +700,10 @@ func (dc *DriftCache) liveAt(x Raw, text string, keep bool, v *valueDrift, in fu
 // strictly before the call (recordedGave; the test case's own request:
 // before every call of the test), and F gave it what it served there
 // (Seen.Live): t where that holds it, else another value, which v took none
-// of the words of or did (movedAway).
+// of the words of or did (movedAway). An exchange F gave the application
+// only before the call's test began (Earlier.outsideTest) is read on the
+// terms of a recording of another test too (olderTook), as a Raw is
+// (excusedRaw): the order alone never lets a word of it go.
 func (f *follows) excusedSeen(e Earlier, ed, v *valueDrift, i int, t string, at time.Time, why, path string) bool {
 	if f == nil {
 		return false
@@ -712,7 +722,11 @@ func (f *follows) excusedSeen(e Earlier, ed, v *valueDrift, i int, t string, at 
 			fv = fFollowed
 		}
 	}
-	if !f.excused(t, before && ed.recTok[i][t], fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+e.Mock+" at "+path, nil) {
+	var took func() string
+	if e.outsideTest() {
+		took = func() string { return f.olderTook(v, t, e.Mock, false, e.ofEarlierTest()) }
+	}
+	if !f.excused(t, before && ed.recTok[i][t], fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+e.Mock+" at "+path, took) {
 		return false
 	}
 	f.source(e.Mock)
@@ -745,7 +759,7 @@ func (f *follows) excusedRaw(x Raw, v *valueDrift, i int, t string, at time.Time
 	}
 	var took func() string
 	if outsideTest(x) {
-		took = func() string { return f.olderTook(v, t, x) }
+		took = func() string { return f.olderTook(v, t, x.mock, x.InAnOlderTest(), false) }
 	}
 	if !f.excused(t, before && held, fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+place, took) {
 		return false
@@ -806,8 +820,8 @@ func (f *follows) excusedLive(x Raw, v *valueDrift, i int, t string, at time.Tim
 	case f.dc.holdsWord(f.rec, t):
 		f.refused = "the recorded value holds that word too, so it cannot show the value does not follow it"
 		return false
-	case outsideTest(x) && f.olderTook(v, t, x) != "":
-		f.refused = f.olderTook(v, t, x) + ", so each value may be a copy of a word its run picked from what both runs gave, and the recording cannot show the value does not follow that word"
+	case outsideTest(x) && f.olderTook(v, t, x.mock, x.InAnOlderTest(), false) != "":
+		f.refused = f.olderTook(v, t, x.mock, x.InAnOlderTest(), false) + ", so each value may be a copy of a word its run picked from what both runs gave, and the recording cannot show the value does not follow that word"
 		return false
 	}
 	if f.first == "" {

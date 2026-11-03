@@ -160,7 +160,24 @@ type Earlier struct {
 	// recording F gave the application before the call (lateOf), as any
 	// recording F served is read (Order.ServedView). nil says nothing.
 	told *toldOf
+	// beforeTest: the read's order shows F gave the application the
+	// exchange's recording only before the call's test began, every serve
+	// of it in an order keploy can tell, none in the call's own test
+	// (InServeOrder: the mark Order.ServedView gives a Raw of it,
+	// Raw.ServedBeforeTheTest). The run's start-up exchange (Run, StartUp)
+	// a later test's call reads bears it; one a call made at the start-up
+	// reads does not: no test of the call's had begun. Only the copy rule
+	// reads it (outsideTest).
+	beforeTest bool
 }
+
+// outsideTest reports whether F gave the application e only before the
+// call's test began: the place an earlier test's call left the run
+// (ofEarlierTest), or an exchange the read's order shows F served only
+// before the test (beforeTest). The copy rule reads a word of it as one of
+// a recording of another test (follows.excusedSeen, olderTook), never as
+// one the order alone lets go.
+func (e Earlier) outsideTest() bool { return e.ofEarlierTest() || e.beforeTest }
 
 // toldOf is a read's Order and the recording of an exchange (Earlier.told):
 // Order.ServedView of that recording.
@@ -240,14 +257,16 @@ type Raw struct {
 	// aside as a value's source where F's view, stated, shows the value
 	// moved apart from it, as an instant the application sent is
 	// (appearedIn, follows.refute); one F gave the application anywhere else
-	// stays its source whatever F gave there.
+	// stays its source whatever F gave there. The copy rule reads it too
+	// (follows.outsideTest, olderTook), as beforeTest.
 	olderTest bool
 	// beforeTest: F gave the application the mock only before the call's
 	// test began (ServedBeforeTheTest; Order.ServedView marks it by the
 	// serves' numbers): at the set's start-up, between tests, or in an older
 	// test, every serve in an order keploy can tell, none in the call's own
-	// test. Only the rule for a start-up's same-second read (classifyRead,
-	// ofSentBefore) reads it.
+	// test. The rule for a start-up's same-second read (classifyRead,
+	// ofSentBefore) reads it, and the copy rule (follows.outsideTest), which
+	// reads a word of the payload as one of a recording of another test.
 	beforeTest bool
 	// servedAfter: every serve of the mock's the read saw was made after the
 	// call reached keploy (Order.ArrivedAt, ServedView), so F had not served
