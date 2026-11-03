@@ -158,6 +158,37 @@ func TestAClaimOfMoreWorkersThanKeployRunsIsRefusedAtOnce(t *testing.T) {
 	require.Equal(t, models.ScopeErrNotInInstance, serr.Code)
 }
 
+// A second test process that claimed the run while the first still runs is
+// told to declare the run's test workers only where this run would take
+// them: a build that runs them, with nothing of the run refusing them.
+func TestASecondProcesssFixNamesWorkersOnlyWhereTheRunTakesThem(t *testing.T) {
+	const one = "run one test process at a time (go test -p 1, pytest without -n, jest --runInBand)"
+	for _, c := range []struct {
+		name string
+		set  func(*testing.T, *Agent, *instanceHooks)
+		fix  string
+	}{
+		{"taken", func(*testing.T, *Agent, *instanceHooks) {}, one + ", or declare, in every test process's claim, how many test workers the run starts at once"},
+		{"no capture-loss count", func(_ *testing.T, _ *Agent, h *instanceHooks) {
+			h.countingHooks.err = models.ErrPIDMapRefusalsUnsupported
+		}, one},
+		{"record's full round", func(_ *testing.T, a *Agent, _ *instanceHooks) { a.proven.order.learn = true }, one},
+		{"one worker", func(t *testing.T, _ *Agent, _ *instanceHooks) { setMaxWorkers(t, 1) }, one},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a, h := workerAgent(t, models.MODE_RECORD, 4)
+			c.set(t, a, h)
+			first := child(t)
+			_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "a"}, first.Process.Pid)
+			require.Nil(t, serr)
+			_, serr = a.ClaimInstance(context.Background(), models.InstanceReq{Key: "b"}, os.Getpid())
+			require.NotNil(t, serr)
+			require.Equal(t, models.ScopeErrOneTestProcess, serr.Code)
+			require.Equal(t, c.fix, serr.Remedy)
+		})
+	}
+}
+
 func TestANegativeWorkerCountIsABadRequest(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_RECORD)
 	_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "o", Workers: -1}, os.Getpid())

@@ -322,7 +322,8 @@ func TestAClaimWhileAnotherClaimerRunsIsRefused(t *testing.T) {
 	require.NotNil(t, serr)
 	require.Equal(t, models.ScopeErrOneTestProcess, serr.Code)
 	require.Equal(t, http.StatusUnprocessableEntity, serr.Status)
-	require.Contains(t, serr.Remedy, "go test -p 1")
+	require.Equal(t, "run one test process at a time (go test -p 1, pytest without -n, jest --runInBand)", serr.Remedy,
+		"this keploy runs one test worker: the fix names no worker count it would refuse")
 }
 
 // A claimer that exited with a test open: the test fails, and the next claim

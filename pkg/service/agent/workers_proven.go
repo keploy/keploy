@@ -55,12 +55,38 @@ func declaredWorkers(n, caller int) (int, *models.ScopeError) {
 		most, remedy := fmt.Sprintf("at most %d test workers at once", limit), fmt.Sprintf("run at most %d test workers", limit)
 		if limit <= 1 {
 			most = "one test worker at a time"
-			remedy = "run one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand); parallel test workers arrive in a later keploy release"
+			remedy = "run one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)"
 		}
 		return 0, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrTooManyWorkers,
 			fmt.Sprintf("process %d declared %d test workers, but this keploy runs %s", caller, n, most), remedy)
 	}
 	return n, nil
+}
+
+// workersRefusal is why this run takes no claim of declared test workers
+// (more than one) from process pid, nil when it takes one. Each reason holds
+// for the whole run, so it is checked at the claim, before any test runs,
+// never at a begin that happens to overlap another worker's test: whether a
+// run is taken never depends on how its workers' tests are scheduled.
+func (a *Agent) workersRefusal(ctx context.Context, pid, declared int) *models.ScopeError {
+	if serr := a.learnWorkersRefusal(pid, declared); serr != nil {
+		return serr
+	}
+	if serr := a.clockWorkersRefusal(pid, declared); serr != nil {
+		return serr
+	}
+	return a.lossWorkersRefusal(ctx, pid, declared)
+}
+
+// takesWorkers says this run would take a claim of more than one test
+// worker from process pid: the build runs them (MaxWorkers) and nothing of
+// the run refuses them (workersRefusal). A remedy names declaring the
+// workers only where it says so.
+func (a *Agent) takesWorkers(ctx context.Context, pid int) bool {
+	if _, serr := declaredWorkers(2, pid); serr != nil {
+		return false
+	}
+	return a.workersRefusal(ctx, pid, 2) == nil
 }
 
 // learnWorkersRefusal refuses process pid's claim as one of declared test
@@ -95,6 +121,21 @@ func (a *Agent) clockWorkersRefusal(pid, declared int) *models.ScopeError {
 	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrTooManyWorkers,
 		fmt.Sprintf("process %d declared %d test workers, but this replay moves the run's clock to each test's recorded begin, and a run has one clock, so two workers' tests open at once cannot each run at their own", pid, declared),
 		"replay with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
+}
+
+// lossWorkersRefusal refuses process pid's claim as one of declared test
+// workers where keploy's hooks count no capture losses
+// (countsCaptureLosses): a connection the kernel dropped while two workers'
+// tests were open could then be charged to neither, and a test it belonged
+// to could pass. One worker's test is open alone, and a drop in it is the
+// run's gap or the one test's own, as before.
+func (a *Agent) lossWorkersRefusal(ctx context.Context, pid, declared int) *models.ScopeError {
+	if a.countsCaptureLosses(ctx) {
+		return nil
+	}
+	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrTooManyWorkers,
+		fmt.Sprintf("process %d declared %d test workers, but keploy's hooks here count no capture losses, so a connection the kernel dropped while two workers' tests were open could not be charged to each of them", pid, declared),
+		"run one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
 }
 
 // claimWorker claims an instance of the run for me, a worker of a run of

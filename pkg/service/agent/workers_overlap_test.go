@@ -62,35 +62,41 @@ func TestOneTestOpenInTwoWorkersIsRefused(t *testing.T) {
 	require.Empty(t, a.proven.openOf(2))
 }
 
-// What keploy keeps for the run as one refuses an overlap, with its reason:
-// drops an agent counts as no capture loss.
-func TestAnOverlapIsRefusedWhereKeployKeepsTheRunAsOne(t *testing.T) {
-	for _, c := range []struct {
-		name, why string
-		set       func(*Agent, *instanceHooks)
-	}{
-		{"no capture-loss count", "keploy's hooks here count no capture losses",
-			func(_ *Agent, h *instanceHooks) { h.countingHooks.err = models.ErrPIDMapRefusalsUnsupported }},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			a, h := workerAgent(t, models.MODE_RECORD, 4)
-			w1, w2 := child(t), child(t)
-			claimWorker(t, a, w1.Process.Pid, "a", 2)
-			claimWorker(t, a, w2.Process.Pid, "b", 2)
-			c.set(a, h)
-			_, serr := a.ProvenBegin(as(w2.Process.Pid), begin("TestAlone"))
-			require.Nil(t, serr, "with no other test open it begins")
-			_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestAlone", Outcome: "passed"})
-			require.Nil(t, serr)
-			_, serr = a.ProvenBegin(as(w1.Process.Pid), begin("TestOne"))
-			require.Nil(t, serr)
-			_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestTwo"))
-			require.NotNil(t, serr)
-			require.Equal(t, models.ScopeErrOneTestAtATime, serr.Code)
-			require.Contains(t, serr.Message, "b::TestTwo began in test worker 2 while test worker 1's test a::TestOne was still open, but "+c.why)
-			require.Empty(t, a.proven.openOf(2))
-		})
-	}
+// Hooks that count no capture losses refuse a claim of more than one test
+// worker at the claim, before any test runs, named: a connection the kernel
+// dropped while two workers' tests were open could be charged to neither.
+// Whether the run is taken never depends on whether its workers' tests
+// happen to overlap. One worker is taken, and its tests run; hooks that
+// count the losses take the workers, whose tests overlap.
+func TestAWorkersClaimIsRefusedWhereNoCaptureLossIsCounted(t *testing.T) {
+	a, h := workerAgent(t, models.MODE_RECORD, 4)
+	h.countingHooks.err = models.ErrPIDMapRefusalsUnsupported
+	w1, w2 := child(t), child(t)
+	_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "a", Workers: 2}, w1.Process.Pid)
+	require.NotNil(t, serr, "no worker is taken where a drop could be charged to no test")
+	require.Equal(t, models.ScopeErrTooManyWorkers, serr.Code)
+	require.Contains(t, serr.Message, "process "+strconv.Itoa(w1.Process.Pid)+" declared 2 test workers, but keploy's hooks here count no capture losses, so a connection the kernel dropped while two workers' tests were open could not be charged to each of them")
+	require.Equal(t, "run one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)", serr.Remedy)
+	require.Empty(t, h.given(), "the refused claim was given no instance")
+	require.Empty(t, a.proven.workers)
+
+	claimWorker(t, a, w1.Process.Pid, "a", 1)
+	_, serr = a.ProvenBegin(as(w1.Process.Pid), begin("TestAlone"))
+	require.Nil(t, serr, "one worker's tests run")
+	_, serr = a.ProvenEnd(as(w1.Process.Pid), models.ScopeReq{Name: "TestAlone", Outcome: "passed"})
+	require.Nil(t, serr)
+	kill(t, w1)
+
+	h.countingHooks.err = nil
+	w3 := child(t)
+	claimWorker(t, a, w2.Process.Pid, "b", 2)
+	claimWorker(t, a, w3.Process.Pid, "c", 2)
+	_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestOne"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(as(w3.Process.Pid), begin("TestTwo"))
+	require.Nil(t, serr, "hooks that count the losses take the workers, whose tests overlap")
+	require.Equal(t, "b::TestOne", a.proven.openOf(1))
+	require.Equal(t, "c::TestTwo", a.proven.openOf(2))
 }
 
 // A test's own kind of capture loss (a failed TLS handshake) made while two
