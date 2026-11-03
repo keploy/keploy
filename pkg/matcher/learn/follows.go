@@ -187,8 +187,12 @@ type follows struct {
 	// sources are the mocks of the places the word rule let a word of the
 	// value go at (excused), and of the place the search for its source went
 	// past (refute): the value's candidate sources, the only places whose
-	// order the rule reads (followed).
+	// order the rule reads (followed). words are the words of the value
+	// found there (a word let go, or the part of the value a place set aside
+	// holds): what tells two sources apart where the recording does not
+	// show their order (alike).
 	sources map[string]bool
+	words   map[string]bool
 	// given are the recordings F gave the application earlier in the set
 	// (GivenEarlier) that the word rule let a word of the value go at
 	// (excusedGiven): candidate sources no Raw handed to the call stands
@@ -207,12 +211,14 @@ type follows struct {
 	tookRead [2]bool
 }
 
-// source notes mock as a candidate source of the value (follows.sources).
-func (f *follows) source(mock string) {
+// source notes mock as a candidate source of the value, found holding its
+// word w there (follows.sources, follows.words).
+func (f *follows) source(mock, w string) {
 	if f.sources == nil {
-		f.sources = map[string]bool{}
+		f.sources, f.words = map[string]bool{}, map[string]bool{}
 	}
 	f.sources[mock] = true
+	f.words[w] = true
 }
 
 // refute reports whether p, a place in x's payload (texts, as appearedIn
@@ -278,7 +284,7 @@ func (f *follows) refute(x Raw, texts [2]string, keep bool, v *valueDrift, p Pla
 	// The word rule reads the same word at the same place on the same terms
 	// and notes it there too (excusedRaw); a source set aside is noted here
 	// as well, so it is ordered should the two searches ever part.
-	f.source(x.mock)
+	f.source(x.mock, p.Held)
 	return true
 }
 
@@ -425,7 +431,7 @@ func (f *follows) refuteSeen(e Earlier, s Seen, whole bool, v *valueDrift) bool 
 		}
 		f.aside = "its recorded value stands whole in " + placeAt(seenPlace(e, s, true)) + saw + ": a copy moves with its source, so the value is no copy of it"
 	}
-	f.source(e.Mock)
+	f.source(e.Mock, v.rec)
 	return true
 }
 
@@ -764,7 +770,7 @@ func (f *follows) excusedSeen(e Earlier, ed, v *valueDrift, i int, t string, at 
 	if !f.excused(t, before && ed.recTok[i][t], fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+e.Mock+" at "+path, took) {
 		return false
 	}
-	f.source(e.Mock)
+	f.source(e.Mock, t)
 	return true
 }
 
@@ -801,7 +807,7 @@ func (f *follows) excusedRaw(x Raw, v *valueDrift, i int, t string, at time.Time
 	if !f.excused(t, before && held, fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+place, took) {
 		return false
 	}
-	f.source(x.mock)
+	f.source(x.mock, t)
 	f.noteOlder(x)
 	return true
 }
@@ -870,7 +876,7 @@ func (f *follows) excusedLive(x Raw, v *valueDrift, i int, t string, at time.Tim
 	if f.moved == "" {
 		f.moved = v.wordOf(t, false) + " stands in " + place + ", where the recording gave the application another value, which the recorded value took none of the words of: a copy moves with its source, so the value is no copy of it"
 	}
-	f.source(x.mock)
+	f.source(x.mock, t)
 	f.noteOlder(x)
 	return true
 }
@@ -1035,7 +1041,7 @@ func (f *follows) excusedGiven(g givenWords, v *valueDrift, i int, t string, at 
 		}
 		f.chance = stands + ", which the recording and record's full round both gave the application at the same fields before the call, and " + lacks + " lacks that word, and no word of it that changed, but for a read of the clock, stands in any place either run gave the application before the call: an application that copied the word would have copied it in both runs, so the value holds it by chance"
 	}
-	f.source(g.mock)
+	f.source(g.mock, t)
 	if g.set {
 		for _, x := range f.given {
 			if x.mock == g.mock && x.at.Equal(g.at) {
@@ -1134,7 +1140,7 @@ func (fol *follows) followed(ln Learned, at time.Time, earlier []Earlier, raw []
 func (fol *follows) unordered(at time.Time, earlier []Earlier, raw []Raw) string {
 	source := func(mock string) bool { return fol.sources[mock] }
 	raw = append(raw[:len(raw):len(raw)], fol.given...)
-	rec, untoldRec := recordedOrder(at, earlier, raw, source)
+	rec, tied, untoldRec := recordedOrder(at, earlier, raw, source, fol.alike)
 	f, untoldF := servedOrder(earlier, raw, source)
 	why := ""
 	switch {
@@ -1143,7 +1149,8 @@ func (fol *follows) unordered(at time.Time, earlier []Earlier, raw []Raw) string
 	case untoldF != "":
 		why = untoldF
 	default:
-		if d := orderDiff(rec, f); d != "" {
+		same := func(a, b string) bool { return a == b || tied[a] != "" && tied[a] == tied[b] }
+		if d := orderDiff(rec, f, same); d != "" {
 			why = "the recording and record's full round gave the application the earlier answers in a different order (" + d + ")"
 		}
 	}
@@ -1241,6 +1248,48 @@ func ClassifyFollowing(dc *DriftCache, drift []string, live, rec Shape, at time.
 	return classifyGiven(dc, drift, live, rec, at, earlier, raw, resp, w, given, true)
 }
 
+// alike is what each word of the value found at its candidate sources
+// (follows.words) stands at in x, a source record's full round served as
+// recorded (Raw.AsRecorded): for each word, the fields of x's text, as
+// searched, that hold it. Two sources alike (equal and not "") hold every
+// such word at the same fields, so an application that copies a field of the
+// last answer it got by its position takes the same words from either, and
+// their order cannot change the value it made (recordedOrder). "" where x
+// is no such source, or a word stands in x's text but in no one field of
+// it (across two): keploy cannot tell, and the order is read.
+func (f *follows) alike(x Raw) string {
+	if !x.AsRecorded() {
+		return ""
+	}
+	words := make([]string, 0, len(f.words))
+	for w := range f.words {
+		words = append(words, w)
+	}
+	sort.Strings(words)
+	texts := f.dc.searched(x, false)
+	var sb strings.Builder
+	for _, w := range words {
+		var at []string
+		eachFieldWith(x, texts, w, func(g rawField) bool {
+			p := g.path
+			if g.key {
+				p += " (key)"
+			}
+			at = append(at, p)
+			return true
+		})
+		if len(at) == 0 && (ContainsToken(texts[0], w) || ContainsToken(texts[1], w)) {
+			return ""
+		}
+		sort.Strings(at)
+		sb.WriteString(strconv.Quote(w))
+		sb.WriteByte('=')
+		sb.WriteString(strings.Join(slices.Compact(at), ","))
+		sb.WriteByte(';')
+	}
+	return sb.String()
+}
+
 // recordedOrder is the places the recording gave the application before a
 // call recorded at at, in the order it gave them their answers: the test
 // case's request first; then every candidate source (source: a place
@@ -1260,7 +1309,16 @@ func ClassifyFollowing(dc *DriftCache, drift []string, live, rec Shape, at time.
 // order of their answers is then the dependency's and the network's, which
 // the recording does not hold); a place whose recorded request or answer
 // time keploy cannot read.
-func recordedOrder(at time.Time, earlier []Earlier, raw []Raw, source func(mock string) bool) (order []string, untold string) {
+//
+// Two places whose order cannot be told need none where both are
+// recordings F served as recorded that hold each word of the value found
+// at its sources at the same fields (alike, a ruling of 2026-11-03): any
+// copy by position takes the same words from either. tied says so of
+// each: their mocks, each to what both hold, an order that differs only
+// in places tied alike is the same order (unordered). An exchange of the
+// call's own test, a recording given elsewhere in the set, one F served
+// changed, and two places holding a word at different fields still refuse.
+func recordedOrder(at time.Time, earlier []Earlier, raw []Raw, source func(mock string) bool, alike func(Raw) string) (order []string, tied map[string]string, untold string) {
 	var places []recPlace
 	add := func(p recPlace) string {
 		if !source(p.mock) {
@@ -1280,15 +1338,22 @@ func recordedOrder(at time.Time, earlier []Earlier, raw []Raw, source func(mock 
 			order = append(order, "the test case's request")
 			continue
 		}
-		if why := add(recPlace{e.Mock, e.recordedAt(), e.Payload.answered, e.Payload.conn, e.Payload.pos}); why != "" {
-			return nil, why
+		if why := add(recPlace{mock: e.Mock, at: e.recordedAt(), answered: e.Payload.answered, conn: e.Payload.conn, pos: e.Payload.pos}); why != "" {
+			return nil, nil, why
 		}
 	}
-	for _, x := range raw {
-		if why := add(recPlace{x.mock, x.recordedAt(), x.answered, x.conn, x.pos}); why != "" {
-			return nil, why
+	for i, x := range raw {
+		if why := add(recPlace{mock: x.mock, at: x.recordedAt(), answered: x.answered, conn: x.conn, pos: x.pos, raw: &raw[i]}); why != "" {
+			return nil, nil, why
 		}
 	}
+	alikeOf := func(p recPlace) string {
+		if p.raw == nil {
+			return ""
+		}
+		return alike(*p.raw)
+	}
+	tied = map[string]string{}
 	// By when each request was recorded, and among those recorded at one
 	// instant on one connection by position; the name only makes the sort
 	// stable, never an order: two places it alone orders are refused below.
@@ -1311,9 +1376,15 @@ func recordedOrder(at time.Time, earlier []Earlier, raw []Raw, source func(mock 
 	for j, p := range places {
 		if !latest.Before(p.at) {
 			for _, q := range places[:j] {
-				if why := answeredBefore(q, p); why != "" {
-					return nil, why
+				why := answeredBefore(q, p)
+				if why == "" {
+					continue
 				}
+				s := alikeOf(q)
+				if s == "" || s != alikeOf(p) {
+					return nil, nil, why
+				}
+				tied[q.mock], tied[p.mock] = s, s
 			}
 		}
 		if p.answered.After(latest) {
@@ -1321,17 +1392,19 @@ func recordedOrder(at time.Time, earlier []Earlier, raw []Raw, source func(mock 
 		}
 		order = append(order, p.mock)
 	}
-	return order, ""
+	return order, tied, ""
 }
 
 // recPlace is a place the recording gave the application before the call
 // (recordedOrder): its mock, when its request and its answer were recorded
-// (both read: recordedGave), and where its request was carried (Raw.SentOn).
+// (both read: recordedGave), where its request was carried (Raw.SentOn),
+// and, of a recording, its Raw (nil for an exchange).
 type recPlace struct {
 	mock         string
 	at, answered time.Time
 	conn         string
 	pos          uint64
+	raw          *Raw
 }
 
 // answeredBefore says why keploy cannot tell that the recording gave the
@@ -1453,15 +1526,16 @@ func servedOrder(earlier []Earlier, raw []Raw, source func(mock string) bool) (o
 
 // orderDiff says where the recording's order of the places it gave the
 // application (rec, recordedOrder) and record's full round's (f,
-// servedOrder) first differ; "" where they do not.
-func orderDiff(rec, f []string) string {
+// servedOrder) first differ, two places the same where same says so (one
+// mock, or two tied alike); "" where they do not.
+func orderDiff(rec, f []string, same func(a, b string) bool) string {
 	for i := 0; i < len(rec) || i < len(f); i++ {
 		switch {
 		case i >= len(rec):
 			return fmt.Sprintf("the recording gave %d earlier answers, record's full round more", len(rec))
 		case i >= len(f):
 			return fmt.Sprintf("record's full round gave %d earlier answers, the recording more", len(f))
-		case rec[i] != f[i]:
+		case !same(rec[i], f[i]):
 			return fmt.Sprintf("the %s earlier answer was %s in the recording and %s in record's full round", ordinal(i+1), rec[i], f[i])
 		}
 	}

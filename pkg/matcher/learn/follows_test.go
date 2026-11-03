@@ -734,27 +734,40 @@ func TestOnlyTheValuesCandidateSourcesAreOrdered(t *testing.T) {
 	}
 	// The pool's exchange in flight with the source itself (SELECT
 	// version(), 800 ms to 700 ms before the call, on connection 0): with no
-	// word of the value, read for nothing; holding the word, two candidate
-	// sources whose order the recording cannot show on two connections
-	// (refused), and shows on one at known positions (by the wire), unless
-	// the positions disagree with when the requests were recorded.
+	// word of the value, read for nothing; holding the word at another field
+	// (its second row), two candidate sources whose order the recording
+	// cannot show on two connections (refused), and shows on one at known
+	// positions (by the wire), unless the positions disagree with when the
+	// requests were recorded. Holding it at the same field as the source
+	// (its first row's cell), the two need no order: a copy of that field
+	// takes the same words from either (alike).
 	version := ePgAnswered("mock-2", 800*time.Millisecond, eRecAt.Add(-700*time.Millisecond), "SELECT version()", []models.PostgresV3Cells{{{Value: "PostgreSQL 16.4 (Debian 16.4-1.pgdg120+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14) 12.2.0, 64-bit"}}}, "SELECT 1").SentOn("0", 3).ServedAs(6).ServedAsRecorded()
-	inside := func(word, conn string, pos uint64) []Raw {
-		raw := startup(span("mock-p", 790*time.Millisecond, 750*time.Millisecond, "SHOW server_version", word).SentOn(conn, pos).ServedAs(7).ServedAsRecorded())
+	inside := func(rows []models.PostgresV3Cells, conn string, pos uint64) []Raw {
+		raw := startup(ePgAnswered("mock-p", 790*time.Millisecond, eRecAt.Add(-750*time.Millisecond), "SHOW server_version", rows, "SHOW").SentOn(conn, pos).ServedAs(7).ServedAsRecorded())
 		raw[2] = version
 		return raw
 	}
-	if got := classifyF(t, "82", "16", nil, inside("PostgreSQL JDBC Driver", "2", 1), nil); got.Kind != KindNoise {
+	sameField := []models.PostgresV3Cells{{{Value: "16"}}}
+	otherField := []models.PostgresV3Cells{{{Value: "x"}}, {{Value: "16"}}}
+	if got := classifyF(t, "82", "16", nil, inside([]models.PostgresV3Cells{{{Value: "PostgreSQL JDBC Driver"}}}, "2", 1), nil); got.Kind != KindNoise {
 		t.Errorf("the pool's exchange, no word of the value, in flight with the source: %s (%q), want noise", got.Kind, got.Why)
 	}
-	if got := classifyF(t, "82", "16", nil, inside("16", "2", 1), nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the recording's requests for mock-2 and mock-p were in flight together") {
+	if got := classifyF(t, "82", "16", nil, inside(otherField, "2", 1), nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the recording's requests for mock-2 and mock-p were in flight together") {
 		t.Errorf("FALSE GREEN? two candidate sources in flight together on two connections: %s (%q), want refused", got.Kind, got.Why)
 	}
-	if got := classifyF(t, "82", "16", nil, inside("16", "0", 4), nil); got.Kind != KindNoise {
+	if got := classifyF(t, "82", "16", nil, inside(otherField, "0", 4), nil); got.Kind != KindNoise {
 		t.Errorf("two candidate sources in flight together on one connection, positions in their order: %s (%q), want noise", got.Kind, got.Why)
 	}
-	if got := classifyF(t, "82", "16", nil, inside("16", "0", 2), nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "on one connection at positions that disagree") {
+	if got := classifyF(t, "82", "16", nil, inside(otherField, "0", 2), nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "on one connection at positions that disagree") {
 		t.Errorf("FALSE GREEN? two candidate sources on one connection, positions against their order: %s (%q), want refused", got.Kind, got.Why)
+	}
+	for _, at := range []struct {
+		conn string
+		pos  uint64
+	}{{"2", 1}, {"0", 2}} {
+		if got := classifyF(t, "82", "16", nil, inside(sameField, at.conn, at.pos), nil); got.Kind != KindNoise {
+			t.Errorf("two candidate sources in flight together holding the word at the same field (connection %s, position %d): %s (%q), want noise", at.conn, at.pos, got.Kind, got.Why)
+		}
 	}
 }
 
@@ -1008,5 +1021,174 @@ func TestAStartUpMatchInNoOneFieldIsReadAsASwapsWord(t *testing.T) {
 	other := RawOf(&models.Mock{Name: "mock-q", Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://deps.example/a"}}}, false)
 	if other.swapHolds(other.payload().text, raw, func(string) bool { return false }) {
 		t.Error("a recording that is no start-up is read as one")
+	}
+}
+
+// Two candidate sources the recording gave in an order it does not show (in
+// flight together on two connections) need no order where each word of the
+// value found at the sources stands at the same fields in both, and F served
+// both as recorded: an application that copies a field of the last answer
+// it got takes the same words from either, so the order cannot change the
+// value it made (a ruling of 2026-11-03). node-jwt's pool start-ups, each
+// holding the server version's "1", or one statement sent on two
+// connections. c, answered before both, holds the recorded 82; a and b, in
+// flight together, F's 7. Where a word stands at different fields of the two
+// (a copy of one field takes it from one and nothing from the other), where
+// one holds a found word the other lacks, or where F served one changed, the
+// order stays unread and the value refused.
+func TestTiedSourcesHoldingTheValuesWordsAtTheSameFieldsNeedNoOrder(t *testing.T) {
+	c := eAnswer("mock-c", 500*time.Millisecond, "82").ServedAs(1).ServedAsRecorded()
+	tied := func(name string, before, answered time.Duration, rows []models.PostgresV3Cells, tag string) Raw {
+		return ePgAnswered(name, before, eRecAt.Add(-answered), "SELECT next_slot FROM slots", rows, tag)
+	}
+	seven := []models.PostgresV3Cells{{{Value: "7"}}}
+	a := tied("mock-a", 300*time.Millisecond, 100*time.Millisecond, seven, "SELECT 1")
+	b := tied("mock-b", 250*time.Millisecond, 200*time.Millisecond, seven, "SELECT 1")
+	for _, tc := range []struct {
+		name string
+		raw  []Raw
+	}{
+		{"F served a then b", []Raw{c, a.ServedAs(2).ServedAsRecorded(), b.ServedAs(3).ServedAsRecorded()}},
+		{"F served b then a", []Raw{c, a.ServedAs(3).ServedAsRecorded(), b.ServedAs(2).ServedAsRecorded()}},
+		{"on two connections at positions", []Raw{c, a.SentOn("0", 1).ServedAs(3).ServedAsRecorded(), b.SentOn("1", 2).ServedAs(2).ServedAsRecorded()}},
+		{"at one instant on two connections", []Raw{c, a.SentOn("0", 1).ServedAs(3).ServedAsRecorded(), tied("mock-b", 300*time.Millisecond, 100*time.Millisecond, seven, "SELECT 1").SentOn("1", 1).ServedAs(2).ServedAsRecorded()}},
+	} {
+		if got := classifyF(t, "slot 82", "slot 7", nil, tc.raw, nil); got.Kind != KindNoise {
+			t.Errorf("%s, a and b holding 7 at the same field: %s (%q), want noise", tc.name, got.Kind, got.Why)
+		}
+	}
+	const inFlight = "the recording's requests for mock-a and mock-b were in flight together"
+	moved := tied("mock-b", 250*time.Millisecond, 200*time.Millisecond, []models.PostgresV3Cells{{{Value: "9"}}}, "SELECT 7")
+	for _, tc := range []struct {
+		name string
+		raw  []Raw
+		want string
+	}{
+		{"b holds 7 at another field", []Raw{c, a.ServedAs(2).ServedAsRecorded(), moved.ServedAs(3).ServedAsRecorded()}, inFlight},
+		{"b holds 7 at the same field and at another", []Raw{c, a.ServedAs(2).ServedAsRecorded(), tied("mock-b", 250*time.Millisecond, 200*time.Millisecond, seven, "SELECT 7").ServedAs(3).ServedAsRecorded()}, inFlight},
+		{"b holds the recorded 82 too", []Raw{c, a.ServedAs(2).ServedAsRecorded(), tied("mock-b", 250*time.Millisecond, 200*time.Millisecond, []models.PostgresV3Cells{{{Value: "7"}}, {{Value: "82"}}}, "SELECT 2").ServedAs(3).ServedAsRecorded()}, inFlight},
+		{"F served b changed, giving 7 where it was recorded", []Raw{c, a.ServedAs(2).ServedAsRecorded(), b.ServedAs(3).ServedLive(tied("mock-b", 250*time.Millisecond, 200*time.Millisecond, seven, "SELECT 2"))}, inFlight},
+		{"an exchange's leaf beside b", nil, "mock-8 and mock-b at one instant"},
+	} {
+		var earlier []Earlier
+		if tc.raw == nil {
+			at := eRecAt.Add(-300 * time.Millisecond)
+			e := eLeaf(at, 2, "7", "7")
+			e.Payload = RawOf(&models.Mock{Name: "mock-8", Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: eRecAt.Add(-100 * time.Millisecond)}}, true).ServedAs(2)
+			earlier = []Earlier{e}
+			tc.raw = []Raw{c, tied("mock-b", 300*time.Millisecond, 200*time.Millisecond, seven, "SELECT 1").ServedAs(3).ServedAsRecorded()}
+		}
+		got := classifyF(t, "slot 82", "slot 7", earlier, tc.raw, nil)
+		if got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.want) {
+			t.Errorf("FALSE GREEN? %s: %s (%q), want refused: %q", tc.name, got.Kind, got.Why, tc.want)
+		}
+	}
+	// Places tied alike are one place to the order alone: F giving c after
+	// them is still another order.
+	if got := classifyF(t, "slot 82", "slot 7", nil, []Raw{eAnswer("mock-c", 500*time.Millisecond, "82").ServedAs(3).ServedAsRecorded(), a.ServedAs(1).ServedAsRecorded(), b.ServedAs(2).ServedAsRecorded()}, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the 1st earlier answer was mock-c in the recording and mock-a in record's full round") {
+		t.Errorf("FALSE GREEN? F gave c after the tied pair: %s (%q), want refused for the order", got.Kind, got.Why)
+	}
+}
+
+// Only recordings tie alike (alike): two exchanges of the call's own test in
+// flight together, each holding F's 7 at the same leaf, stay refused, as
+// keploy reads an exchange's words at its leaves and not in its payload.
+// And a word a place holds as a key is not the word another holds as the
+// value at that key: two answers whose headers hold 7, as a name in one and
+// as that name's value in the other, stay refused; as a name in both, they
+// tie alike.
+func TestTiedExchangesAndKeysStayInTheirOrder(t *testing.T) {
+	c := eAnswer("mock-c", 500*time.Millisecond, "82").ServedAs(1).ServedAsRecorded()
+	exchange := func(name string, before, answered time.Duration, n int) Earlier {
+		at := eRecAt.Add(-before)
+		return Earlier{Mock: name, At: at, Payload: RawOf(&models.Mock{Name: name, Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: eRecAt.Add(-answered)}}, true).ServedAs(n), Seen: []Seen{
+			{Side: Response, Leaf: Leaf{Path: "body.retries", Type: Number, Value: "7"}, Live: "7"},
+		}}
+	}
+	earlier := []Earlier{exchange("mock-8", 300*time.Millisecond, 100*time.Millisecond, 2), exchange("mock-9", 250*time.Millisecond, 200*time.Millisecond, 3)}
+	if got := classifyF(t, "slot 82", "slot 7", earlier, []Raw{c}, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the recording's requests for mock-8 and mock-9 were in flight together") {
+		t.Errorf("FALSE GREEN? two exchanges in flight together: %s (%q), want refused", got.Kind, got.Why)
+	}
+	answer := func(name string, before, answered time.Duration, header map[string]string) Raw {
+		return RawOf(&models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			ReqTimestampMock: eRecAt.Add(-before), ResTimestampMock: eRecAt.Add(-answered),
+			HTTPReq:  &models.HTTPReq{Method: "GET", URL: "http://api/slots"},
+			HTTPResp: &models.HTTPResp{StatusCode: 200, Header: header},
+		}}, false)
+	}
+	a := answer("mock-a", 300*time.Millisecond, 100*time.Millisecond, map[string]string{"7": "x"}).ServedAs(2).ServedAsRecorded()
+	if got := classifyF(t, "slot 82", "slot 7", nil, []Raw{c, a, answer("mock-b", 250*time.Millisecond, 200*time.Millisecond, map[string]string{"7": "x"}).ServedAs(3).ServedAsRecorded()}, nil); got.Kind != KindNoise {
+		t.Errorf("7 a header's name in both: %s (%q), want noise", got.Kind, got.Why)
+	}
+	if got := classifyF(t, "slot 82", "slot 7", nil, []Raw{c, a, answer("mock-b", 250*time.Millisecond, 200*time.Millisecond, map[string]string{"7": "7"}).ServedAs(3).ServedAsRecorded()}, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the recording's requests for mock-a and mock-b were in flight together") {
+		t.Errorf("FALSE GREEN? 7 a header's name in one, and its value too in the other: %s (%q), want refused", got.Kind, got.Why)
+	}
+}
+
+// node-jwt's signup (the lane's leg r30F-2): the bcrypt hash an INSERT ...
+// RETURNING echoes held, as F saw it, a one-character run "1" that stands in
+// the test case's User-Agent (curl/8.14.1), in the server version every
+// start-up carries (10.5-2.pgdg90+1), and in the "$1" of Sequelize's
+// statements. Two pool start-ups opened together on two connections hold it
+// at the same fields: their order cannot change what a copy takes, and the
+// echo is learned. A statement's "$1" is no word of data. A start-up beside
+// a role INSERT whose bind holds 1 on another connection, in flight together,
+// holds it at other fields: the order is unread, and the echo stays refused
+// (a stated limit).
+func TestNodeJwtsSignupEchoPastStartUpsTiedAlike(t *testing.T) {
+	const rec = "$2a$08$naN9ja.m2B8b.yduH.xmdeNQdwsIyJPVq2bf1D9Ruy/NZ0T3Z8TRu"
+	const live = "$2a$08$Qx7mUu3rYkoT9pLkWw2zEe.aBcDeFgHiJkLmNoPqRsTuVwXyZ/1.z"
+	echo := []Leaf{{Path: "rows[0][3]", Noise: "rows[0][3]", Type: String, Value: rec}}
+	ua := []Earlier{{Mock: givenPlace("post-api-auth-signup-1"), Given: true, Seen: []Seen{
+		{Side: Request, Leaf: Leaf{Path: "header.User-Agent", Type: String, Value: "curl/8.14.1"}, Live: "curl/8.14.1"},
+	}}}
+	stmt := func(name string, before time.Duration, sql string, binds ...string) Raw {
+		var cells models.PostgresV3Cells
+		for _, v := range binds {
+			cells = append(cells, models.PostgresV3Cell{Value: v})
+		}
+		return RawOf(&models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
+			ReqTimestampMock: eRecAt.Add(-before), ResTimestampMock: eRecAt.Add(-before + 3*time.Millisecond),
+			PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
+				SQLNormalized: sql, BindValues: cells, Response: &models.PostgresV3Response{CommandComplete: "SET"},
+			}},
+		}}, false)
+	}
+	startup := func(name string, before, took time.Duration) Raw {
+		return RawOf(&models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
+			ReqTimestampMock: eRecAt.Add(-before), ResTimestampMock: eRecAt.Add(-before + took),
+			PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeSession, Session: &models.PostgresV3SessionSpec{
+				ProtocolVersion: "3.0", ServerVersion: "10.5 (Debian 10.5-2.pgdg90+1)",
+				ParameterStatus:  map[string]string{"server_version": "10.5 (Debian 10.5-2.pgdg90+1)", "TimeZone": "UTC"},
+				BackendProcessID: 80, BackendSecretKey: 12345,
+			}},
+		}}, false)
+	}
+	served := func(raw ...Raw) []Raw {
+		out := make([]Raw, len(raw))
+		for i, x := range raw {
+			out[i] = x.ServedAs(i + 1).ServedAsRecorded()
+		}
+		return out
+	}
+	set1 := stmt("mock-1", 700*time.Millisecond, "SET client_min_messages TO $1", "warning").SentOn("0", 1)
+	set2 := stmt("mock-2", 700*time.Millisecond, "SET TIME ZONE INTERVAL $1 HOUR TO MINUTE", "+00:00").SentOn("0", 2)
+	insert := func(id string) Raw {
+		return stmt("mock-16", 550*time.Millisecond, `INSERT INTO "roles" ("id","name","createdAt","updatedAt") VALUES ($1,$2,$3,$4) RETURNING "id"`, id, "user", "2026-10-24 09:55:53.388 +00:00", "2026-10-24 09:55:53.388 +00:00").SentOn("2", 7)
+	}
+	for _, tc := range []struct {
+		name string
+		raw  []Raw
+	}{
+		{"two pool start-ups in flight together", served(set1, set2, startup("mock-17", 548*time.Millisecond, 4*time.Millisecond), startup("mock-18", 547*time.Millisecond, 5*time.Millisecond))},
+		{"a role INSERT whose binds hold no 1 beside a pool start-up", served(set1, set2, insert("2"), startup("mock-17", 548*time.Millisecond, 4*time.Millisecond))},
+	} {
+		if got := classifyF(t, rec, live, ua, tc.raw, echo); got.Kind != KindEcho {
+			t.Errorf("%s: %s (%q), want the echo", tc.name, got.Kind, got.Why)
+		}
+	}
+	got := classifyF(t, rec, live, ua, served(set1, set2, insert("1"), startup("mock-17", 548*time.Millisecond, 4*time.Millisecond)), echo)
+	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the recording's requests for mock-16 and mock-17 were in flight together") {
+		t.Errorf("FALSE GREEN? a role INSERT whose bind holds 1 beside a pool start-up: %s (%q), want refused for the order", got.Kind, got.Why)
 	}
 }
