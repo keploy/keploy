@@ -852,6 +852,15 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	if mockFileName == "" {
 		mockFileName = "mocks"
 	}
+	// A fault on a call of any kind but HTTP is refused in every format
+	// (faultDropped): a text document of that kind, written by EncodeMock or
+	// in place, has no place for it, and a keploy that knows no faults
+	// reads a gob mock's fault as no field at all; each would serve the
+	// recorded answer whole. Refused, the call's test goes with it.
+	if err := faultDropped(mock); err != nil {
+		utils.LogError(ys.Logger, err, "refusing to write a mock whose fault would be dropped", zap.String("mock_name", mock.Name))
+		return fmt.Errorf("%w: %w", models.ErrMockEncode, err)
+	}
 	// An insert writes to the mock file the set already has, in that file's
 	// format; only a set with none takes the configured format (insertFormat).
 	// gob is the binary record-time format (async writer, ~28% CPU win over
@@ -1277,6 +1286,20 @@ func (ys *MockYaml) drainAndClose() {
 	}
 }
 
+// gobKinded is mock under the kind a mocks.gob holds it as (Mock.DiskKind),
+// on a copy when that differs: an HTTP mock with a fault as models.HTTPFault,
+// which no parser of a keploy that knows no faults takes, so its call misses
+// there instead of being served the head as a whole answer.
+// forEachGobMockCut reads it back as HTTP.
+func gobKinded(mock *models.Mock) *models.Mock {
+	if mock == nil || mock.DiskKind() == mock.Kind {
+		return mock
+	}
+	c := mock.ShallowCopy()
+	c.Kind = mock.DiskKind()
+	return c
+}
+
 // persisted is mock as a mocks.gob holds it: its origin as a file holds one
 // (models.Origin.Persisted, without what only travels), on a copy when that
 // differs; mock itself otherwise. gob writes every field a mock has.
@@ -1309,7 +1332,7 @@ func (ys *MockYaml) gobEncodeLocked(mock *models.Mock, mockPath, mockFileName st
 			return err
 		}
 	}
-	if err := ys.gobEnc.Encode(persisted(mock)); err != nil {
+	if err := ys.gobEnc.Encode(gobKinded(persisted(mock))); err != nil {
 		return err
 	}
 	ys.gobFileW.encoded(ys.gobFileW.took + uint64(ys.gobBufw.Buffered()))
@@ -1420,7 +1443,7 @@ func (ys *MockYaml) gobCarryOverLocked(filePath, tmpPath string) error {
 	carried := 0
 	cut, err := forEachGobMockCut(filePath, func(m *models.Mock) error {
 		carried++
-		return ys.gobEnc.Encode(m)
+		return ys.gobEnc.Encode(gobKinded(m))
 	})
 	if err != nil {
 		return err
@@ -2008,6 +2031,14 @@ func (ys *MockYaml) readMockPoolsVisiting(ctx context.Context, testSetID string,
 					return nil
 				}
 				connFailures++
+			}
+			// gob has no per-kind decoder either: a fault is validated here,
+			// as DecodeMocks and DecodeMocksJSON validate theirs. A mock
+			// forEachGobMockCut left of kind HttpFault has no fault.
+			if (mock.Kind == models.HTTPFault && !faultKindSupported(mock.Kind, mock, logger, false)) ||
+				(mock.Spec.Fault != nil && !faultSupported(mock, logger, false)) {
+				addSkipped(&out, mock.Name, mock.Kind)
+				return nil
 			}
 			r.route(mock, true)
 			if visit == nil {

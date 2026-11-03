@@ -73,6 +73,9 @@ type HTTP struct {
 	// what every handler the proxy makes does; a row gives a handler its
 	// own, so handlers in different modes run at once.
 	verify *atomic.Bool
+	// answerFaultHook is the fault hook replay asks before it serves a
+	// mock's answer (SetAnswerFault, answerFault); nil when none is set.
+	answerFaultHook atomic.Pointer[AnswerFault]
 }
 
 // verifying is whether h's reads run in the exact view's verify mode: each
@@ -111,6 +114,13 @@ type FinalHTTP struct {
 	// apart is a server that closed the connection partway through its
 	// response: the client read all there was, and it is recorded as that.
 	RespReadInPart bool
+	// Fault is how the call ended, when the upstream did not give its whole
+	// answer (recordV2's noAnswerFault and partAnswerFault): with no answer,
+	// the mock is built with no response and this fault. With part of one
+	// (Fault.SendsHead), the mock carries the fault only when the response
+	// is in fact unfinished: its body cut short of its framing, or a
+	// close-delimited body the upstream reset or the client gave up on.
+	Fault *models.Fault
 }
 
 // MatchType determines if the outgoing network call is HTTP by checking for

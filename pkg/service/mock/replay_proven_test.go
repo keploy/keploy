@@ -1089,6 +1089,24 @@ func TestARefusalGivesASkippedConnectionFailureAndAYAMLOnlyKindTheirOwnFix(t *te
 	}
 }
 
+// A recorded call whose fault this keploy cannot enact (a fault kind from a
+// newer keploy) is named as such, with its own fix: an upgrade or the fields
+// keploy wrote, never "use keploy enterprise" or a kind to correct.
+func TestARefusalNamesASkippedFaultWithItsOwnFix(t *testing.T) {
+	keployDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	doc := "version: api.keploy.io/v1beta1\nkind: Http\nname: mock-12\nspec:\n    req:\n        method: GET\n        url: http://pay.example/charge\n    fault:\n        kind: explode\n"
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte(doc), 0o644))
+	m := &mockService{config: &config.Config{Path: keployDir}, mockDB: mockdb.New(zap.NewNop(), keployDir, "mocks")}
+	err := m.refuseUnknownMocks(context.Background(), "set", &models.Mapping{}, []string{"mock-12"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "skips: mock-12, a call whose fault this keploy cannot enact.")
+	require.Contains(t, err.Error(), "If a newer keploy recorded a call's fault, upgrade keploy to replay it; if you edited one in mocks.yaml, give its fault back the fields keploy wrote; otherwise record")
+	for _, wrong := range []string{"enterprise", "kind and spec", "connection failure", "correct those names"} {
+		require.NotContains(t, err.Error(), wrong)
+	}
+}
+
 // unreadStore is a MockDB whose set's mock file cannot be read again.
 type unreadStore struct{ MockDB }
 

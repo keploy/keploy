@@ -74,6 +74,7 @@ func (s *Session) NextRequest(kind models.Kind, answerUnread bool) (fakeconn.Chu
 		s.exchanges.report = s.dropped
 	}
 	s.exchanges.kind = kind
+	s.peerEnds.And(^uint32(spokeUnaskedBit))
 	if !answerUnread {
 		s.DestStream.DropBefore(c.ConnSeq, s.exchanges.report)
 	}
@@ -89,8 +90,9 @@ func (s *Session) NextRequest(kind models.Kind, answerUnread bool) (fakeconn.Chu
 // times (with none, it is counted with no span), however late the parser
 // reads it, the recording's stop included: it was captured, and it is not
 // recorded, as is every exchange ReportLeftOut reports. Any other run is
-// dropped with a Debug line, with nothing left out for it here. It answers no
-// request at all: on a connection captured from its first byte, nothing was
+// dropped with a Debug line, with nothing left out for it here, and marks the
+// request whose floor dropped it (ServerSpokeUnasked). It answers no request
+// at all: on a connection captured from its first byte, nothing was
 // sent before the capture began, so bytes the server sent before the first
 // request (an HTTP server's 408 on a connection that idled out as the client
 // sent it) are the server's own, as are bytes captured after a request the
@@ -114,6 +116,7 @@ func (s *Session) NextRequest(kind models.Kind, answerUnread bool) (fakeconn.Chu
 // and the response is the exchange the recorder leaves out itself.
 func (s *Session) dropped(d fakeconn.Dropped) {
 	if !s.JoinedMidConnection || !d.AtStart {
+		s.peerEnds.Or(spokeUnaskedBit)
 		if s.Logger != nil {
 			s.Logger.Debug("dropped server bytes captured before the request after them: the server sent them on its "+
 				"own, or they are the rest of an answer the parser left out",

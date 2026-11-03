@@ -282,6 +282,17 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					}
 					out := keepAlive
 					if recorded != nil {
+						if fault := h.answerFault(ctx, recorded); fault != nil {
+							over, ferr := h.serveFault(ctx, clientConn, recorded, fault)
+							if ferr != nil {
+								failAsync(ferr, "async: failed to serve the recorded delivery's fault")
+								return
+							}
+							if over {
+								errCh <- nil
+								return
+							}
+						}
 						if out, derr = h.buildMockResponseBytes(recorded); derr != nil {
 							failAsync(derr, "async: failed to serialize recorded delivery")
 							return
@@ -588,6 +599,24 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				utils.LogError(h.Logger, nil, "matched mock is nil", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- errors.New("matched mock is nil")
 				return
+			}
+
+			// A mock whose call ended in a fault gets the fault, as the
+			// upstream gave it (serveFault), not its head as a whole answer.
+			if fault := h.answerFault(ctx, stub); fault != nil {
+				over, ferr := h.serveFault(ctx, clientConn, stub, fault)
+				if ferr != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					utils.LogError(h.Logger, ferr, "failed to serve the matched mock's fault; the connection is closed with no answer", zap.Any("metadata", utils.GetReqMeta(request)))
+					errCh <- ferr
+					return
+				}
+				if over {
+					errCh <- nil
+					return
+				}
 			}
 
 			// Serialize the matched mock's response to wire bytes (hydrates a

@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"weak"
@@ -23,6 +24,23 @@ type answerRewrite func(header http.Header, body string) (http.Header, string)
 // keptAnswers is given.
 func (h *HTTP) encodeRecordedAnswer(stub *models.Mock) ([]byte, error) {
 	return h.encodeAnswer(stub, nil)
+}
+
+// reasonPhrase is the reason phrase resp's status line is served with: the one
+// recorded (HTTPResp.StatusMessage, set when the upstream's was not the
+// standard one, "402 Card Declined"), else the standard one for its code. A
+// message written with its code in front ("402 Card Declined", as net/http's
+// Response.Status spells it) is served without it; one that would break the
+// status line (a CR or LF in it) is not served.
+func reasonPhrase(resp *models.HTTPResp) string {
+	if resp.StatusMessage == "" {
+		return http.StatusText(resp.StatusCode) // as recorded almost always: no allocation
+	}
+	reason := strings.TrimPrefix(resp.StatusMessage, strconv.Itoa(resp.StatusCode)+" ")
+	if reason == "" || strings.ContainsAny(reason, "\r\n") {
+		return http.StatusText(resp.StatusCode)
+	}
+	return reason
 }
 
 // encodeAnswer is a recorded answer's wire bytes: the status line, the header
@@ -66,7 +84,7 @@ func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, e
 	noBody := responseHasNoBody(method, resp.StatusCode)
 	var lengthDigits [20]byte
 	length := strconv.AppendInt(lengthDigits[:0], int64(len(respBody)), 10)
-	status := http.StatusText(resp.StatusCode)
+	status := reasonPhrase(resp)
 
 	// "HTTP/" major "." minor " " code " " text CRLF, each int at most 20 bytes.
 	size := len("HTTP/. \r\n ") + 3*20 + len(status) + len("\r\n") + len(respBody)

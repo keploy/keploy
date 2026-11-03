@@ -63,6 +63,10 @@ const (
 	MockSkipYAMLOnlyKind MockSkip = "yaml_only_kind"
 	// MockSkipConnFailure is a connection failure this keploy cannot replay.
 	MockSkipConnFailure MockSkip = "connection_failure"
+	// MockSkipFault is a mock whose call ended in a fault this keploy cannot
+	// enact (Mock.ValidateFault): never served as its head or as a whole
+	// answer.
+	MockSkipFault MockSkip = "fault"
 )
 
 // SkippedMock is a named document of a set's mock file that the set's read
