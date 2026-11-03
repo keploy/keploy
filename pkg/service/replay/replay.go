@@ -2193,21 +2193,27 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		defer testSetStatusByErrChanMu.RUnlock()
 		return lastAppErr
 	}
-	// neverReady is the set's end when the wait for its application to be
-	// ready ended without it (appReady, nothing said why): the application
-	// keploy started for the set exited first (its run set lastAppErr before
-	// its exit cancelled runTestSetCtx), and the set fails as an exit does,
-	// saying so; else the user stopped keploy.
-	neverReady := func() (models.TestSetStatus, error) {
+	// neverReady is the set's end when a wait before its first test ended
+	// with nothing ready (before says what it waited for: the application to
+	// accept a connection, or, under docker compose, keploy's agent in the
+	// stack to answer healthy): the application keploy started for the set
+	// exited first (its run set lastAppErr before its exit cancelled
+	// runTestSetCtx), and the set fails as an exit does, saying so; else the
+	// user stopped keploy.
+	neverReady := func(before string) (models.TestSetStatus, error) {
 		appErr := getLastAppErr()
 		status, exited := neverReadyStatus(appErr)
 		if !exited {
 			return status, context.Canceled
 		}
-		r.logger.Error("the application exited before it accepted a connection: no test of the test-set was sent",
+		r.logger.Error("the application exited before "+before+": no test of the test-set was sent",
 			zap.String("testSetID", testSetID), zap.String("exit", appErr.Error()))
-		return status, fmt.Errorf("the application exited before it accepted a connection: %w", appErr)
+		return status, fmt.Errorf("the application exited before %s: %w", before, appErr)
 	}
+	const (
+		beforeAccept     = "it accepted a connection"
+		beforeAgentReady = "keploy's agent in its stack was ready"
+	)
 	// stopAppBeforeSetEnd, under the proven switch, stops the application
 	// keploy started for this set as the set's teardown does (an interrupt,
 	// the runner's grace, then a kill) and waits for it to exit (P101-b). It
@@ -2537,14 +2543,26 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			go pkg.AgentHealthTicker(agentCtx, r.logger, string(r.config.Agent.AgentURI), agentReadyCh, 1*time.Second)
 			agentStart := pkg.WatchAgentStart(agentCtx, r.instrumentation)
 
+			// The wait ends when the agent answers healthy, when its start
+			// fails, or when the set's context ends: the user stopped keploy,
+			// or the application compose started exited before the agent was
+			// healthy. It is read once it ends, the set's context first
+			// (whichever case the select took): neverReady tells an exit from
+			// the user's stop, so an exit fails the set as that exit does, not
+			// as the user's stop. With the context live, the ticker has sent
+			// true (it closes its channel unready only once that context
+			// ends), or the start failed.
+			agentUp := false
+			var startErr error
 			select {
 			case <-runTestSetCtx.Done():
-				// Parent context cancelled (user pressed Ctrl+C)
-				return models.TestSetStatusUserAbort, runTestSetCtx.Err()
-			case err := <-agentStart:
-				if runTestSetCtx.Err() != nil {
-					return models.TestSetStatusUserAbort, runTestSetCtx.Err()
-				}
+			case startErr = <-agentStart:
+			case agentUp = <-agentReadyCh:
+			}
+			switch {
+			case runTestSetCtx.Err() != nil:
+				return neverReady(beforeAgentReady)
+			case !agentUp:
 				// Tear down the compose stack we already created before returning,
 				// so a retry's `compose up` doesn't hit "container name already in
 				// use" — an agent that did not come up otherwise leaves the
@@ -2553,13 +2571,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if downErr := r.instrumentation.ComposeDownOnSetupFailure(context.Background()); downErr != nil {
 					r.logger.Debug("composeDown after the agent did not come up failed", zap.Error(downErr))
 				}
-				return models.TestSetStatusFailed, fmt.Errorf("the keploy-agent docker compose started did not come up: %w", err)
-			case ready, ok := <-agentReadyCh:
-				// The ticker closes its channel unready only once the set's
-				// context ends.
-				if !ok || !ready {
-					return models.TestSetStatusUserAbort, runTestSetCtx.Err()
-				}
+				return models.TestSetStatusFailed, fmt.Errorf("the keploy-agent docker compose started did not come up: %w", startErr)
 			}
 			cancel()
 		}
@@ -2705,7 +2717,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if !waitsForApp(serveTest, r.isFirstTestSet) {
 			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
 		} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, true, serveTest && !r.isFirstTestSet && composeRestart == nil); !ready && why == "" {
-			return neverReady()
+			return neverReady(beforeAccept)
 		} else if !ready {
 			notReady = why
 		}
@@ -2900,7 +2912,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if !waitsForApp(serveTest, r.isFirstTestSet) {
 				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
 			} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, true, serveTest && !r.isFirstTestSet); !ready && why == "" {
-				return neverReady()
+				return neverReady(beforeAccept)
 			} else if !ready {
 				notReady = why
 			}

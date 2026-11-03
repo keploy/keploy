@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
@@ -112,6 +113,67 @@ func TestAnAppThatExitsBeforeItAcceptsFailsItsSetSayingSo(t *testing.T) {
 			}
 			if errors.Is(err, context.Canceled) {
 				t.Errorf("error %v reads as the user's stop", err)
+			}
+			if n := len(h.report.results); n != 0 {
+				t.Errorf("%d tests were sent, want none", n)
+			}
+		})
+	}
+}
+
+// A docker compose application that exits while keploy waits for its agent in
+// the stack to answer healthy ends the set as its exit does (the application
+// halted, or its command failed), saying so: not as the user's stop. The
+// user's own stop in that wait stays the user's stop.
+func TestAComposeAppThatExitsBeforeItsAgentIsHealthyFailsItsSetAsItsExit(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		// exit is how the application exits; "" when the user stops keploy
+		// instead.
+		exit   models.AppErrorType
+		status models.TestSetStatus
+	}{
+		{"the app halts", models.ErrAppStopped, models.TestSetStatusAppHalted},
+		{"the app's command fails", models.ErrCommandError, models.TestSetStatusFaultUserApp},
+		{"the user stops keploy", "", models.TestSetStatusUserAbort},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newPartialRunHarness(t, 2, 0)
+			h.replayer.config.CommandType = string(utils.DockerCompose)
+			h.instr.stopErr = c.exit
+			ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+			defer cancel()
+			// keploy's agent never answers healthy. The application exits, or
+			// the user stops keploy, at the agent's first health check: while
+			// keploy waits for it.
+			var once sync.Once
+			agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				once.Do(func() {
+					if c.exit == "" {
+						cancel()
+					} else {
+						close(h.instr.appStopped)
+					}
+				})
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}))
+			defer agent.Close()
+			h.replayer.config.Agent.AgentURI = agent.URL + "/agent"
+			status, err := h.replayer.RunTestSet(ctx, "test-set-0", "test-run-0", false)
+			if status != c.status {
+				t.Errorf("status %q, want %q", status, c.status)
+			}
+			if c.exit == "" {
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("error %v, want the user's stop (context.Canceled)", err)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), "the application exited before keploy's agent in its stack was ready") {
+					t.Errorf("error %v, want one saying the application exited before keploy's agent was ready", err)
+				}
+				if errors.Is(err, context.Canceled) {
+					t.Errorf("error %v reads as the user's stop", err)
+				}
 			}
 			if n := len(h.report.results); n != 0 {
 				t.Errorf("%d tests were sent, want none", n)
