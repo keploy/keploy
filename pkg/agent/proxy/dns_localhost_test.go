@@ -25,9 +25,11 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
-// askedUpstream is a fake upstream resolver that answers every question with
-// an address no loopback answer can be mistaken for, and keeps what it was
-// asked (startFakeUpstream's readiness probe left out).
+// askedUpstream is a fake upstream resolver that keeps what it was asked.
+// newAskedUpstream's answers A, AAAA and TXT questions with records no
+// loopback or local answer can be mistaken for, and others with no record
+// (startFakeUpstream's readiness probe left out); newSilentUpstream's
+// answers none.
 type askedUpstream struct {
 	addr string
 	mu   sync.Mutex
@@ -68,6 +70,63 @@ func (u *askedUpstream) asked() []string {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return append([]string(nil), u.qs...)
+}
+
+// wantAsked checks that u was asked n questions. The asks are over when it
+// is called, but u's reader may not have read the last of them yet on a
+// loaded machine, so it waits up to 5 s for n before it compares.
+func wantAsked(t *testing.T, u *askedUpstream, n int, what string) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); len(u.asked()) < n && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := u.asked(); len(got) != n {
+		t.Errorf("%s was asked %v, want %d question(s)", what, got, n)
+	}
+}
+
+// newSilentUpstream is an upstream resolver that reads every question and
+// answers none, so every exchange with it times out. It keeps what it was
+// asked.
+func newSilentUpstream(t *testing.T) *askedUpstream {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := &askedUpstream{addr: pc.LocalAddr().String()}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 4096)
+		for {
+			n, _, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			m := new(dns.Msg)
+			if m.Unpack(buf[:n]) != nil || len(m.Question) == 0 {
+				continue
+			}
+			u.mu.Lock()
+			u.qs = append(u.qs, dns.TypeToString[m.Question[0].Qtype]+" "+m.Question[0].Name)
+			u.mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = pc.Close()
+		<-done
+	})
+	return u
+}
+
+// shortRecordTimeout makes a recording's upstream exchange give up after
+// 200 ms for the test, so a silent upstream costs that, not 5 s.
+func shortRecordTimeout(t *testing.T) {
+	t.Helper()
+	prev := recordDNSTimeout
+	recordDNSTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { recordDNSTimeout = prev })
 }
 
 // localhostTestProxy is a proxy forwarding to up, with a proxy address that is
@@ -129,6 +188,11 @@ func TestLocalhostNamesAreAnsweredByKeployAndNeverAskedUpstream(t *testing.T) {
 			up := newAskedUpstream(t)
 			p, logs := localhostTestProxy(t, up, s)
 			p.allowEgressDNS = mode == "replay with DNS egress"
+			// The answer cache is not asked for a localhost name either: an
+			// answer it held for one (none is put there) is not the app's.
+			stale := new(dns.Msg)
+			stale.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: "localhost.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("192.0.2.99")}}
+			p.dnsCache.Add(generateCacheKey("localhost.", dns.TypeA), dnsCacheEntry{Msg: stale, FromUpstream: true})
 			server := serveDNSOn(t, p, "udp")
 
 			for _, c := range []struct {
@@ -205,36 +269,12 @@ func TestNamesThatOnlyContainLocalhostAreAskedUpstream(t *testing.T) {
 // addresses over; keploy answers it itself, so the upstream is never asked,
 // nothing is logged as an error, and the client's call goes through.
 func TestARecordedGRPCClientOfLocalhostAsksNoUpstream(t *testing.T) {
-	silent, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = silent.Close() })
-	var mu sync.Mutex
-	var silentAsked int
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, _, err := silent.ReadFrom(buf)
-			if err != nil {
-				return
-			}
-			// Only localhost names are counted: the Go resolver grpc-go uses
-			// goes on to the host's search list after a negative answer, and
-			// those are ordinary names keploy rightly asks upstream.
-			m := new(dns.Msg)
-			if m.Unpack(buf[:n]) != nil || len(m.Question) == 0 {
-				continue
-			}
-			if name := strings.ToLower(m.Question[0].Name); name == "localhost." || strings.HasSuffix(name, ".localhost.") {
-				mu.Lock()
-				silentAsked++
-				mu.Unlock()
-			}
-		}
-	}()
-
-	up := &askedUpstream{addr: silent.LocalAddr().String()}
+	// The Go resolver goes on to the host's search names (after a negative
+	// answer, or first when ndots is above 1), and keploy rightly forwards
+	// those to the silent upstream: a short timeout keeps that from using up
+	// grpc-go's resolving time on a host with a long search list.
+	shortRecordTimeout(t)
+	up := newSilentUpstream(t)
 	p, logs := localhostTestProxy(t, up, &agent.Session{Mode: models.MODE_RECORD})
 	var txtMu sync.Mutex
 	var txtAnswers []*dns.Msg
@@ -296,11 +336,13 @@ func TestARecordedGRPCClientOfLocalhostAsksNoUpstream(t *testing.T) {
 	if first == nil || first.Rcode != dns.RcodeSuccess || len(first.Answer) != 0 {
 		t.Errorf("TXT _grpc_config.localhost answered %v, want NOERROR with no record", first)
 	}
-	mu.Lock()
-	n := silentAsked
-	mu.Unlock()
-	if n != 0 {
-		t.Errorf("keploy asked the upstream %d time(s) for a localhost name", n)
+	// Only localhost names count: the Go resolver grpc-go uses goes on to the
+	// host's search list after a negative answer, and those are ordinary
+	// names keploy rightly asks upstream.
+	for _, q := range up.asked() {
+		if name := strings.ToLower(q[strings.IndexByte(q, ' ')+1:]); name == "localhost." || strings.HasSuffix(name, ".localhost.") {
+			t.Errorf("keploy asked the upstream %s, a localhost name", q)
+		}
 	}
 	noErrorLines(t, logs)
 }
@@ -318,7 +360,9 @@ func (w *recordingWriter) WriteMsg(m *dns.Msg) error {
 
 // A run whose mock.real lists a localhost name still has it answered by
 // keploy: the list is asked after the localhost check, so its live lookup
-// never takes the name upstream.
+// never takes the name upstream. keploy's answer is still booked as the
+// listed name's, so a connection to 127.0.0.1 on the listed port is that
+// name's, made REAL at its handshake.
 func TestALocalhostNameOnTheMockRealListIsAnsweredByKeploy(t *testing.T) {
 	up := newAskedUpstream(t)
 	p, logs := localhostTestProxy(t, up, &agent.Session{Mode: models.MODE_TEST, OutgoingOptions: models.OutgoingOptions{Mocking: true}})
@@ -331,6 +375,9 @@ func TestALocalhostNameOnTheMockRealListIsAnsweredByKeploy(t *testing.T) {
 	server := serveDNSOn(t, p, "udp")
 	if r := askKeploy(t, server, "svc.localhost.", dns.TypeA); len(r.Answer) != 1 || r.Answer[0].(*dns.A).A.String() != "127.0.0.1" {
 		t.Errorf("A svc.localhost.: answered %v, want [127.0.0.1]", r.Answer)
+	}
+	if label, ok := p.realAtHandshake(ipv4Dest(t, "127.0.0.1:443")); !ok || label != "svc.localhost:443" {
+		t.Errorf("a connection to 127.0.0.1:443 is REAL %v as %q, want REAL as svc.localhost:443: keploy's answer was not booked as the listed name's", ok, label)
 	}
 	// The list is still asked for its other names: auth.test is looked up live.
 	if r := askKeploy(t, server, "auth.test.", dns.TypeA); len(r.Answer) != 1 || r.Answer[0].(*dns.A).A.String() != "192.0.2.53" {
@@ -362,54 +409,112 @@ func wantUnanswered(t *testing.T, logs *observer.ObservedLogs, msg, name, qtype 
 	}
 }
 
-// An upstream that does not answer a query a recording forwards is not keploy
-// failing: keploy answers the app SERVFAIL, as a recursive resolver answers
-// when the servers it asks do not, and a failed answer is never recorded. So
-// it is a WARN, once per (name, qtype) a session, then Debug, never an ERROR
-// (an ERROR line fails CI lanes that read the agent's log, and enterprise CI
-// had to filter this one out by hand).
+// An upstream of the app's that does not answer a query a recording forwards,
+// by refusing it or by staying silent until the exchange times out (CI's
+// case), is not keploy failing: keploy answers the app SERVFAIL, as a
+// recursive resolver answers when the servers it asks do not, and a failed
+// answer is never recorded. So it is a WARN once per (name, qtype) every 30
+// minutes, and again in a new session, Debug in between, never an ERROR (an
+// ERROR line fails CI lanes that read the agent's log, and enterprise CI had
+// to filter this one out by hand).
 func TestAnUpstreamThatDoesNotAnswerARecordingIsAWarnOncePerQuestion(t *testing.T) {
 	const msg = "DNS resolution failed in record mode"
-	p := newProxyWithUpstream(t, testnet.RefusedAddr(t, "udp"), time.Second)
-	core, logs := observer.New(zapcore.DebugLevel)
-	p.logger = zap.New(core)
-	p.unansweredForwardLogged = newNodataRelayLogCache()
-	ask := func(name string, qtype uint16) {
-		t.Helper()
-		resp := p.resolveUncachedDNSResponse(dns.Question{Name: name, Qtype: qtype, Qclass: dns.ClassINET}, models.MODE_RECORD, true, time.Now(), nil)
-		if resp.Msg == nil || resp.Rcode != dns.RcodeServerFailure || len(resp.Answer) != 0 {
-			t.Fatalf("%s %s: answered %v, want SERVFAIL", dns.TypeToString[qtype], name, resp.Msg)
-		}
-	}
-	ask("svc.example.", dns.TypeA)
-	ask("svc.example.", dns.TypeA)
-	ask("svc.example.", dns.TypeAAAA)
-	wantUnanswered(t, logs, msg, "svc.example.", "A", 1, 1)
-	wantUnanswered(t, logs, msg, "svc.example.", "AAAA", 1, 0)
-	noErrorLines(t, logs)
+	shortRecordTimeout(t)
+	silent := newSilentUpstream(t)
+	for kind, addr := range map[string]string{
+		"a refused upstream": testnet.RefusedAddr(t, "udp"),
+		"a silent upstream":  silent.addr,
+	} {
+		t.Run(kind, func(t *testing.T) {
+			p := newProxyWithUpstream(t, addr, time.Second)
+			core, logs := observer.New(zapcore.DebugLevel)
+			p.logger = zap.New(core)
+			p.unansweredForwardLogged = newNodataRelayLogCache()
+			ask := func(name string, qtype uint16) {
+				t.Helper()
+				resp := p.resolveUncachedDNSResponse(dns.Question{Name: name, Qtype: qtype, Qclass: dns.ClassINET}, models.MODE_RECORD, true, time.Now(), nil)
+				if resp.Msg == nil || resp.Rcode != dns.RcodeServerFailure || len(resp.Answer) != 0 {
+					t.Fatalf("%s %s: answered %v, want SERVFAIL", dns.TypeToString[qtype], name, resp.Msg)
+				}
+			}
+			ask("svc.example.", dns.TypeA)
+			ask("svc.example.", dns.TypeA)
+			ask("svc.example.", dns.TypeAAAA)
+			wantUnanswered(t, logs, msg, "svc.example.", "A", 1, 1)
+			wantUnanswered(t, logs, msg, "svc.example.", "AAAA", 1, 0)
+			noErrorLines(t, logs)
 
-	// A new session says it again.
-	p.ResetRecordedDNSMocks()
-	ask("svc.example.", dns.TypeA)
-	wantUnanswered(t, logs, msg, "svc.example.", "A", 2, 1)
+			// A new session says it again.
+			p.ResetRecordedDNSMocks()
+			ask("svc.example.", dns.TypeA)
+			wantUnanswered(t, logs, msg, "svc.example.", "A", 2, 1)
+		})
+	}
+	// The silent upstream was asked each time, so each failure was its timeout.
+	wantAsked(t, silent, 4, "the silent upstream")
 }
 
-// The same holds for a mock.real name's live lookup: SERVFAIL to the app, a
-// WARN once per (name, qtype), never an ERROR.
-func TestARealNameNoUpstreamAnswersIsAWarnOncePerQuestion(t *testing.T) {
-	const msg = "keploy could not resolve a mock.real name with the upstream resolver; the app is answered SERVFAIL"
-	p := newProxyWithUpstream(t, testnet.RefusedAddr(t, "udp"), 200*time.Millisecond)
+// A recording with no upstream resolver of the app's captured at startup
+// asks public resolvers keploy picked (recordDNSFallback), which the app's own
+// resolver would not have asked. When none of them answers, the SERVFAIL is
+// keploy's own, not the one the app's resolver gives, so every such failure
+// stays an ERROR.
+func TestARecordingWithNoUpstreamOfTheAppsIsStillAnError(t *testing.T) {
+	const msg = "DNS resolution failed in record mode"
+	shortRecordTimeout(t)
+	silent := newSilentUpstream(t)
+	prev := recordDNSFallback
+	recordDNSFallback = []string{testnet.RefusedAddr(t, "udp"), silent.addr}
+	t.Cleanup(func() { recordDNSFallback = prev })
+
 	core, logs := observer.New(zapcore.DebugLevel)
-	p.logger = zap.New(core)
-	p.unansweredForwardLogged = newNodataRelayLogCache()
-	q := dns.Question{Name: "auth.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	p := &Proxy{logger: zap.New(core), unansweredForwardLogged: newNodataRelayLogCache()}
+	q := dns.Question{Name: "svc.example.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	for i := 0; i < 2; i++ {
-		if resp := p.realDNS(q); resp.Rcode != dns.RcodeServerFailure {
+		resp := p.resolveUncachedDNSResponse(q, models.MODE_RECORD, true, time.Now(), nil)
+		if resp.Msg == nil || resp.Rcode != dns.RcodeServerFailure || len(resp.Answer) != 0 {
 			t.Fatalf("answered %v, want SERVFAIL", resp.Msg)
 		}
 	}
-	wantUnanswered(t, logs, msg, "auth.test.", "A", 1, 1)
-	noErrorLines(t, logs)
+	all, errs := logs.FilterMessage(msg).Len(), logs.FilterMessage(msg).FilterLevelExact(zapcore.ErrorLevel).All()
+	if all != 2 || len(errs) != 2 {
+		t.Errorf("logged the failure %d times, %d at ERROR; want 2, both at ERROR", all, len(errs))
+	}
+	for _, e := range errs {
+		if f := e.ContextMap(); f["query"] != "svc.example." || f["qtype"] != "A" || f["error"] == nil {
+			t.Errorf("the ERROR logs %v, want the question (query svc.example., qtype A) and the error", f)
+		}
+	}
+	wantAsked(t, silent, 2, "the fallback resolver")
+}
+
+// The same holds for a mock.real name's live lookup, with an upstream that
+// refuses it or stays silent until the forward times out: SERVFAIL to the
+// app, a WARN once per (name, qtype) every 30 minutes, never an ERROR.
+func TestARealNameNoUpstreamAnswersIsAWarnOncePerQuestion(t *testing.T) {
+	const msg = "keploy could not resolve a mock.real name with the upstream resolver; the app is answered SERVFAIL"
+	silent := newSilentUpstream(t)
+	for name, addr := range map[string]string{
+		"a refused upstream": testnet.RefusedAddr(t, "udp"),
+		"a silent upstream":  silent.addr,
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newProxyWithUpstream(t, addr, 200*time.Millisecond)
+			core, logs := observer.New(zapcore.DebugLevel)
+			p.logger = zap.New(core)
+			p.unansweredForwardLogged = newNodataRelayLogCache()
+			q := dns.Question{Name: "auth.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+			for i := 0; i < 2; i++ {
+				if resp := p.realDNS(q); resp.Rcode != dns.RcodeServerFailure {
+					t.Fatalf("answered %v, want SERVFAIL", resp.Msg)
+				}
+			}
+			wantUnanswered(t, logs, msg, "auth.test.", "A", 1, 1)
+			noErrorLines(t, logs)
+		})
+	}
+	// The silent upstream was asked each time, so each failure was its timeout.
+	wantAsked(t, silent, 2, "the silent upstream")
 }
 
 // A mock.real name keploy asked no upstream for is keploy's failure, not an
@@ -449,13 +554,35 @@ func TestARealNameKeployAsksNoUpstreamForIsStillAnError(t *testing.T) {
 }
 
 // The forwarder's error says whether it asked: errNoUpstreamAnswered only
-// when it asked the upstream and none answered, not when it asked none.
+// when it asked the upstream and none answered (refused, timed out, or the
+// forward's deadline spent before the next server), not when it asked none.
 func TestForwardDNSMarksOnlyAnUnansweredAsk(t *testing.T) {
 	q := dns.Question{Name: "auth.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	refused := newProxyWithUpstream(t, testnet.RefusedAddr(t, "udp"), 200*time.Millisecond)
 	if _, err := refused.forwardDNSUpstream(q); !errors.Is(err, errNoUpstreamAnswered) {
 		t.Errorf("a refused upstream: err %v, want errNoUpstreamAnswered", err)
 	}
+
+	// A silent upstream: the error is the exchange's own timeout, marked.
+	silent := newSilentUpstream(t)
+	_, err := newProxyWithUpstream(t, silent.addr, 200*time.Millisecond).forwardDNSUpstream(q)
+	var ne net.Error
+	if !errors.Is(err, errNoUpstreamAnswered) || !errors.As(err, &ne) || !ne.Timeout() {
+		t.Errorf("a silent upstream: err %v, want errNoUpstreamAnswered over a timeout", err)
+	}
+	wantAsked(t, silent, 1, "the silent upstream")
+
+	// Two silent upstreams: the first one's timeout spends the forward's
+	// deadline, so the second is never asked. The error is the forward's
+	// own deadline, not an exchange's timeout, and it is marked too.
+	silent2 := newSilentUpstream(t)
+	two := newProxyWithUpstream(t, silent2.addr, 200*time.Millisecond)
+	two.dnsUpstreamServers = []string{"127.0.0.1", "127.0.0.1"}
+	if _, err := two.forwardDNSUpstream(q); !errors.Is(err, errNoUpstreamAnswered) || errors.As(err, &ne) {
+		t.Errorf("two silent upstreams: err %v, want errNoUpstreamAnswered over the forward's deadline, not an exchange's error", err)
+	}
+	wantAsked(t, silent2, 1, "two silent upstreams (the first only)")
+
 	up := newAskedUpstream(t)
 	httpsQ := q
 	httpsQ.Qtype = dns.TypeHTTPS
@@ -473,7 +600,8 @@ func TestForwardDNSMarksOnlyAnUnansweredAsk(t *testing.T) {
 }
 
 // The agent's proxy dedupes the WARN from its first query: New builds the
-// tracker, so a long upstream outage is one WARN per (name, qtype).
+// tracker, so a long upstream outage is one WARN per (name, qtype) every 30
+// minutes.
 func TestTheAgentsProxyDedupesTheUnansweredForwardWarn(t *testing.T) {
 	p := New(zap.NewNop(), nil, config.New())
 	key := generateCacheKey("svc.example.", dns.TypeA)
