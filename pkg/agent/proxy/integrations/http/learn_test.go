@@ -5187,3 +5187,61 @@ func TestLearnMatchATokenAnotherTestsServeMayHaveGivenIsRefusedUnlessItsAdapterS
 		})
 	}
 }
+
+// A consumer that fell behind makes a call of an older test in a later
+// test's window (test 3's): it carries the id a serve of test 2 gave it
+// (mock-22), while the call's recording holds the id of a recording of the
+// window's own test (mock-60), which F gave the application as recorded.
+// The refusal named mock-60 as where the value came from ("holds earlier
+// (in mock-60), where keploy cannot bind it yet"), so the user could not act
+// on it; it names the late call and mock-22, and refuses as before.
+func TestALateCallsRefusalNamesTheOlderTestsServeNotTheWindowsRecording(t *testing.T) {
+	const (
+		path   = "body.Key.Id.S"
+		recID  = "fb77a0c2-5d1e-4c3b-9a8f-0e6d2c4b1a90"
+		liveID = "7f7e49f4-2b6c-4e1d-8f3a-5c9b0d7e6a12"
+	)
+	at := time.Date(2026, 10, 24, 9, 55, 53, 938177550, time.UTC)
+	pg := func(name string, before time.Duration, id string) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
+			ReqTimestampMock: at.Add(-before),
+			ResTimestampMock: at.Add(-before + time.Millisecond),
+			PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
+				SQLNormalized: "SELECT id FROM lead_events",
+				Response:      &models.PostgresV3Response{Rows: []models.PostgresV3Cells{{{Value: id}}}, CommandComplete: "SELECT 1"},
+			}},
+		}}
+	}
+	older := pg("mock-22", 40*time.Second, liveID)
+	tr := learn.NewTracker()
+	tr.SetAppClock(func(real time.Time) (time.Time, bool) { return real, true })
+	tr.NewSet()
+	tr.Begin()
+	tr.End()
+	tr.Begin()
+	tr.ServedMock(older)
+	tr.ServedMockAsRecorded(older)
+	tr.End()
+	tr.Begin()
+	o := tr.Placed().Order
+	given := func() ([]learn.GivenPlaces, error) {
+		g, err := o.GivenPlaces(older)
+		return []learn.GivenPlaces{g}, err
+	}
+	window := learn.RawOf(pg("mock-60", 200*time.Millisecond, recID), false).ServedAs(9).ServedAsRecorded()
+	rec := learn.Shape{Leaves: map[string]learn.Leaf{path: {Path: path, Type: learn.String, Value: recID}}}
+	live := learn.Shape{Leaves: map[string]learn.Leaf{path: {Path: path, Type: learn.String, Value: liveID}}}
+	learned := learn.ClassifyGiven(tr.Drifts(), []string{path}, live, rec, at, nil, []learn.Raw{window}, nil, nil, given)
+	p, why := learnPlan(tr, 3, &models.Mock{Name: "mock-61"}, rec, true, learned, nil, nil)
+	if want := path + " changed, and the value it carries now is, whole, what record's full round gave the application in mock-22, in the set's test 2"; !strings.HasPrefix(why, want) {
+		t.Errorf("why %q; want it to start %q", why, want)
+	}
+	for _, n := range []string{"holds earlier (in mock-60)", "flowed from mock-60"} {
+		if strings.Contains(why, n) {
+			t.Errorf("why %q says %q", why, n)
+		}
+	}
+	if len(p.noise) != 0 || len(p.vars) != 0 {
+		t.Errorf("noise %v, variables %v; want the call refused", p.noise, p.vars)
+	}
+}
