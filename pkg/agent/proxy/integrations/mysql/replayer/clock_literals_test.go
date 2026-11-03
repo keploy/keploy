@@ -122,6 +122,9 @@ func TestALiteralLearnedAsAClockReadIsCheckedAsOne(t *testing.T) {
 			if tc.mention != "" && !strings.Contains(miss, tc.mention) {
 				t.Fatalf("the miss (%s) does not name %s", miss, tc.mention)
 			}
+			if tc.mention != "" && !strings.Contains(miss, "closestMock:mock-note") {
+				t.Fatalf("the miss (%s) does not name mock-note the closest", miss)
+			}
 		})
 	}
 }
@@ -131,12 +134,22 @@ func TestALiteralLearnedAsAClockReadIsCheckedAsOne(t *testing.T) {
 type learnerCalls struct {
 	n      int
 	learns map[string]models.ClockOffset
-	call   replayer.LiteralCall
+	// echo learns, at every path it is asked about, the read learns holds
+	// at body.query.literals.1.
+	echo bool
+	call replayer.LiteralCall
 }
 
 func (l *learnerCalls) learner(_ context.Context, c replayer.LiteralCall) (map[string]models.ClockOffset, string) {
 	l.n++
 	l.call = c
+	if l.echo {
+		out := make(map[string]models.ClockOffset, len(c.Drift))
+		for _, p := range c.Drift {
+			out[p] = l.learns["body.query.literals.1"]
+		}
+		return out, ""
+	}
 	if l.learns == nil {
 		return nil, "body.query.literals.1 changed, and keploy cannot tell where its value came from"
 	}
@@ -150,7 +163,12 @@ func (l *learnerCalls) learner(_ context.Context, c replayer.LiteralCall) (map[s
 // MockSpec.Clocks, never as noise. A learner that learns none, or not all,
 // leaves the call refused with its reason. A call that is not one of the
 // full round, a replay without the proven switch, and a replay with no
-// learner registered ask nothing, and are refused as before.
+// learner registered ask nothing, and are refused as before; so does a call
+// after the set's learn step ended, and one whose recording already holds
+// the literal as a read of the clock (it is checked as one, and a read
+// outside the call's span is refused, whatever the learner would say).
+// Detection never learns a literal learned as a read of the clock as noise,
+// and the learner is asked once a recording.
 func TestRecordsFullRoundLearnsAChangedLiteralOnlyAsAClockRead(t *testing.T) {
 	recAt := diffBase.Add(time.Millisecond)
 	f := newClockRun(time.Now().UTC())
@@ -166,8 +184,18 @@ func TestRecordsFullRoundLearnsAChangedLiteralOnlyAsAClockRead(t *testing.T) {
 		asked    bool
 		served   bool
 		mention  string
+		// ended: the set's learn step has ended; held: the recording holds
+		// the literal as a read of the clock already, and the live one was
+		// read an hour before the span; echo: the learner learns a read at
+		// every path it is asked about; detect: detection learns noise.
+		// strict: strict enforcement compares the request body.
+		ended, held, echo, detect, strict bool
 	}{
 		{name: "learns the read", proven: true, fullRnd: true, register: true, learns: map[string]models.ClockOffset{"body.query.literals.1": o}, asked: true, served: true},
+		{name: "learns the read, detection on", proven: true, fullRnd: true, register: true, detect: true, learns: map[string]models.ClockOffset{"body.query.literals.1": o}, asked: true, served: true},
+		{name: "learns the read, strict enforcement on", proven: true, fullRnd: true, register: true, strict: true, learns: map[string]models.ClockOffset{"body.query.literals.1": o}, asked: true, served: true},
+		{name: "the learn step ended", proven: true, fullRnd: true, register: true, ended: true, learns: map[string]models.ClockOffset{"body.query.literals.1": o}, mention: "body.query.literals.1"},
+		{name: "held as a read, read outside the span", proven: true, fullRnd: true, register: true, held: true, echo: true, learns: map[string]models.ClockOffset{"body.query.literals.1": o}, mention: "body.query.literals.1"},
 		{name: "learns none", proven: true, fullRnd: true, register: true, asked: true, mention: "keploy cannot tell where its value came from"},
 		{name: "learns one of two changed", proven: true, fullRnd: true, register: true, learns: map[string]models.ClockOffset{"body.query.literals.1": o}, sql: twoChanged, asked: true, mention: "body.query.literals.0"},
 		{name: "not the full round", proven: true, register: true, learns: map[string]models.ClockOffset{"body.query.literals.1": o}, mention: "body.query.literals.1"},
@@ -177,24 +205,38 @@ func TestRecordsFullRoundLearnsAChangedLiteralOnlyAsAClockRead(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, map[bool]string{false: "0", true: "1"}[tc.proven])
-			l := &learnerCalls{learns: tc.learns}
+			l := &learnerCalls{learns: tc.learns, echo: tc.echo}
 			if tc.register {
 				replayer.RegisterLiteralLearner(l.learner)
 				t.Cleanup(func() { replayer.RegisterLiteralLearner(nil) })
 			}
 			m, _ := recordedClock(t, recAt, f, f.read().Format(literalForm))
-			mm := stageOwn(t, []*models.Mock{m}, []*models.Mock{m}, true)
 			sql := tc.sql
 			if sql == "" {
 				sql = strings.Replace(clockSQL, "%s", f.read().Format(literalForm), 1)
 			}
+			if tc.held {
+				m.Spec.Clocks = map[string]models.ClockOffset{"body.query.literals.1": o}
+				sql = strings.Replace(clockSQL, "%s", f.read().Add(-time.Hour).Format(literalForm), 1)
+			}
+			mm := stageOwn(t, []*models.Mock{m}, []*models.Mock{m}, true)
+			ctx := f.ctx(tc.fullRnd)
+			if tc.ended {
+				g := newClockRun(f.began)
+				g.tr.SetLearnEnded(true)
+				ctx = g.ctx(tc.fullRnd)
+			}
+			eng := replayer.NoiseEngineForTest(tc.detect, tc.strict)
+			if !tc.detect && !tc.strict {
+				eng = nil
+			}
 			_, dctx := poolConn("c1")
-			_, ok, miss, err := replayer.MatchForTest(f.ctx(tc.fullRnd), zap.NewNop(), queryReq(sql), mm, dctx)
+			_, ok, miss, err := replayer.MatchWithEngineForTest(ctx, zap.NewNop(), queryReq(sql), mm, dctx, eng)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if (l.n > 0) != tc.asked {
-				t.Fatalf("the learner was asked %d times; want asked %v", l.n, tc.asked)
+			if (l.n > 0) != tc.asked || l.n > 1 {
+				t.Fatalf("the learner was asked %d times; want asked %v, once", l.n, tc.asked)
 			}
 			if ok != tc.served {
 				t.Fatalf("served %v (miss %s); want %v", ok, miss, tc.served)
@@ -228,6 +270,46 @@ func TestRecordsFullRoundLearnsAChangedLiteralOnlyAsAClockRead(t *testing.T) {
 				if strings.Contains(p, "literals") {
 					t.Fatalf("the consumed mock learned %s as noise", p)
 				}
+			}
+		})
+	}
+}
+
+// A COM_QUERY whose recording differs from it at a query attribute the
+// statement reads as well as at an inline literal is no call that differs
+// only at literals: record's full round asks the learner nothing about it,
+// whatever the learner would learn, and refuses it.
+func TestRecordsFullRoundAsksNothingWhereAQueryAttributeChangedToo(t *testing.T) {
+	const reads = " AND mysql_query_attribute_string('traceparent') IS NOT NULL"
+	const recordedTP, liveTP = "00-a5ff4ff820b14ad28693c1b155015340-0000000000000001-01", "00-60de6a56e2b8444e8e403145868fca9f-0000000000000001-01"
+	t.Setenv(provenswitch.Env, "1")
+	recAt := diffBase.Add(time.Millisecond)
+	f := newClockRun(time.Now().UTC())
+	m, o := recordedClock(t, recAt, f, f.read().Format(literalForm))
+	q := m.Spec.MySQLRequests[0].PacketBundle.Message.(*mysql.QueryPacket)
+	q.Query += reads
+	replayer.SetAttributeForTest(m, recordedTP)
+	for _, tc := range []struct {
+		name   string
+		tp     string
+		served bool
+	}{
+		{name: "the attribute changed too", tp: liveTP},
+		{name: "the literal alone changed", tp: recordedTP, served: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := &learnerCalls{learns: map[string]models.ClockOffset{"body.query.literals.1": o}, echo: true}
+			replayer.RegisterLiteralLearner(l.learner)
+			t.Cleanup(func() { replayer.RegisterLiteralLearner(nil) })
+			mm := stageOwn(t, []*models.Mock{m}, []*models.Mock{m}, true)
+			sql := strings.Replace(clockSQL, "%s", f.read().Format(literalForm), 1) + reads
+			_, dctx := poolConn("c1")
+			_, ok, miss, err := replayer.MatchForTest(f.ctx(true), zap.NewNop(), replayer.AttrQueryReqForTest(t, tc.tp, sql), mm, dctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok != tc.served || (l.n == 1) != tc.served {
+				t.Fatalf("served %v, the learner asked %d times (miss %s); want served and asked %v", ok, l.n, miss, tc.served)
 			}
 		})
 	}
