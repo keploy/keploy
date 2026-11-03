@@ -421,6 +421,14 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		}
 	}
 	if prev != me {
+		// The hooks that intercept through a library each process loads
+		// (macOS's shim) charge a program it is not in only when this
+		// process or one of its descendants started it: told before the
+		// read below, so a program this process started before its claim,
+		// still running, is in the counts its first test is counted from.
+		if h, ok := a.Hooks.(coreAgent.ShimReporter); ok {
+			h.ShimClaimedBy(caller)
+		}
 		// A failed TLS handshake before this claim is the run's -- charged
 		// to no test (UnchargedCaptureLosses), and in the run's own verdict,
 		// which counts every loss while the command ran -- as its misses
@@ -850,10 +858,14 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		}
 	}
 	dir := a.proven.dir
+	claimer := a.proven.claim.pid
 	a.provenMu.Unlock()
 	if a.replaying() && gated {
 		a.noteScopeNotRun(id, 0, at, outcome)
 		return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok", Action: models.ScopeActionSkip, Reason: reason}, nil
+	}
+	if serr := a.shimRefusal(id, claimer); serr != nil {
+		return models.ScopeBeginResp{}, serr
 	}
 
 	// What judging the test at its end needs is checked before anything is
@@ -977,6 +989,32 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	a.provenMu.Unlock()
 	begun = true
 	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
+}
+
+// shimRefusal refuses test id's begin when the hooks intercept through a
+// library each process loads (coreAgent.ShimReporter: macOS's shim) and the
+// test process pid that claimed the run does not carry it: its calls are not
+// captured or mocked, and on a frozen run (TimeFile) it reads another clock
+// than the run's. nil with any other hooks, whose kernel hooks see every
+// process.
+func (a *Agent) shimRefusal(id string, pid int) *models.ScopeError {
+	h, ok := a.Hooks.(coreAgent.ShimReporter)
+	if !ok {
+		return nil
+	}
+	timeFile := TimeFile()
+	armed, why := h.ShimArmed(pid, timeFile)
+	if armed {
+		return nil
+	}
+	if timeFile != "" {
+		return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrClockNotFrozen,
+			fmt.Sprintf("%s: keploy cannot tell that its test process %d runs on this keploy run's clock: %s", id, pid, why),
+			"run the tests through keploy mock record or keploy mock replay with a test binary that loads keploy's shim (not hardened-runtime or restricted)")
+	}
+	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
+		fmt.Sprintf("%s: keploy cannot capture or mock the calls of its test process %d: %s", id, pid, why),
+		"run the tests through keploy mock record or keploy mock replay with a test binary that loads keploy's shim (not hardened-runtime or restricted)")
 }
 
 // oldWireFields refuses a begin or an end that carries the old wire's

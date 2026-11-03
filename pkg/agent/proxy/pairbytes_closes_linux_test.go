@@ -1251,20 +1251,6 @@ func answerOrLook(clk *stall.ManualClock, done <-chan error) (bool, error) {
 	return false, nil
 }
 
-// pairedConnOf is p's paired connection appSeq.
-func pairedConnOf(t *testing.T, p *Proxy, appSeq uint64) *pairedConn {
-	t.Helper()
-	p.paired.mu.Lock()
-	defer p.paired.mu.Unlock()
-	for _, pc := range p.paired.byConn {
-		if pc.appSeq == appSeq {
-			return pc
-		}
-	}
-	t.Fatalf("no paired connection %d", appSeq)
-	return nil
-}
-
 // orphanIn waits until the proxy's orphaned socket of pc is in state, and
 // reports false, or until the kernel has destroyed it, and reports true. With
 // state 0 it waits for the latter only. It reads the orphan as the wait does
