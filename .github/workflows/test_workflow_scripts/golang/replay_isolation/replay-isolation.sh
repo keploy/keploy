@@ -184,7 +184,6 @@ rows_reach() {
 }
 # row_log NAME FILE REGEX: FILE has a line matching REGEX.
 row_log() { row "$1" "$(grep -qE -- "$3" "$2" 2>/dev/null && echo 1)" "/$3/ in $(basename "$(dirname "$2")")"; }
-# row_nolog NAME FILE REGEX: FILE has no line matching REGEX.
 # rows_recorded_nx MODE: the recording holds an NXDOMAIN for recorded-nx.*
 # (and, under docker, for the peer, which was not up yet); the replay serves
 # it, so the app's lookup fails as it did while recording, the name is not
@@ -203,6 +202,7 @@ rows_recorded_nx() {
 		row_nolog "$p does not report the recorded name as a miss" "$W/out/$p/keploy.log" "${KEPT}DNS recorded-nx"
 	done
 }
+# row_nolog NAME FILE REGEX: FILE has no line matching REGEX.
 row_nolog() { row "$1" "$(grep -qE -- "$3" "$2" 2>/dev/null || echo 1)" "no /$3/ in $(basename "$(dirname "$2")")"; }
 
 # replay PHASE CMD...: one keploy test run in the current dir, its log and exit.

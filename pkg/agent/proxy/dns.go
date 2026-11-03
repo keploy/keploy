@@ -215,8 +215,18 @@ const (
 	// Entries expire automatically after this duration.
 	dnsCacheTTL = 30 * time.Second
 
-	// recordedDNSMocksMaxSize is the maximum number of entries in the DNS deduplication tracker.
+	// recordedDNSMocksMaxSize is the maximum number of questions with a
+	// resolved answer in the DNS deduplication tracker.
 	recordedDNSMocksMaxSize = 1024
+	// recordedDNSNegativesMaxSize is the maximum number of negative answers,
+	// NXDOMAIN or NODATA, in the DNS deduplication tracker. An app asks many
+	// more names that do not exist than names that do: under k8s ndots:5 an
+	// external name is asked under each of four search domains first, so its
+	// A and AAAA questions add 8 NXDOMAINs, and its AAAA a NODATA, to its one
+	// resolved answer. Four times the resolved bound holds those 9 negative
+	// answers of 455 names, near the 512 names (A and AAAA) the one shared
+	// tracker of 1024 held before negative answers were recorded.
+	recordedDNSNegativesMaxSize = 4 * recordedDNSMocksMaxSize
 	// recordedDNSMocksTTL is the TTL for recorded DNS mock entries.
 	// Recording sessions typically don't last longer than this.
 	recordedDNSMocksTTL = 30 * time.Minute
@@ -266,9 +276,45 @@ func shouldCacheDNSResponse(mode models.Mode, resp dnsCacheEntry) bool {
 	return mode == models.MODE_TEST || mode == models.MODE_RECORD
 }
 
-// newRecordedDNSMocksCache creates a bounded, TTL-expiring cache for DNS mock deduplication.
-func newRecordedDNSMocksCache() *expirable.LRU[string, bool] {
-	return expirable.NewLRU[string, bool](recordedDNSMocksMaxSize, nil, recordedDNSMocksTTL)
+// dnsRecordDedupe holds the questions recordDNSMock has recorded an answer of
+// each kind (dnsAnswerRank) for, so each is recorded once while it stays here.
+// Resolved answers and negative ones, NXDOMAIN and NODATA, are kept in bounded,
+// TTL-expiring trackers of their own: the many names an app asks that do not
+// exist (search-list expansions) never evict a resolved answer, which would be
+// recorded again each time its question leaves the dnsCache.
+type dnsRecordDedupe struct {
+	resolved *expirable.LRU[string, bool]
+	negative *expirable.LRU[string, bool]
+}
+
+// newRecordedDNSMocksCache creates the bounded, TTL-expiring trackers for DNS
+// mock deduplication.
+func newRecordedDNSMocksCache() *dnsRecordDedupe {
+	return &dnsRecordDedupe{
+		resolved: expirable.NewLRU[string, bool](recordedDNSMocksMaxSize, nil, recordedDNSMocksTTL),
+		negative: expirable.NewLRU[string, bool](recordedDNSNegativesMaxSize, nil, recordedDNSMocksTTL),
+	}
+}
+
+// firstAnswer reports whether question's answer of kind rank is not held yet,
+// holding it when so, with the key it is held under. Non-atomic Get-then-Add:
+// two concurrent first answers can both record, as before.
+func (d *dnsRecordDedupe) firstAnswer(question dns.Question, rank int) (string, bool) {
+	tracker, key := d.resolved, generateDNSDedupeKey(question)
+	if rank != dnsRankResolved {
+		tracker, key = d.negative, key+dnsDedupeSuffix[rank]
+	}
+	if _, held := tracker.Get(key); held {
+		return key, false
+	}
+	tracker.Add(key, true)
+	return key, true
+}
+
+// Purge empties both trackers in place (see ResetRecordedDNSMocks).
+func (d *dnsRecordDedupe) Purge() {
+	d.resolved.Purge()
+	d.negative.Purge()
 }
 
 // newNodataRelayLogCache creates the bounded, TTL-expiring tracker that dedupes
@@ -879,22 +925,24 @@ func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool
 
 	// A question may hold up to three recorded answers, one of each kind
 	// (recordDNSMock): resolved, NODATA and NXDOMAIN. The replay serves the
-	// best (dnsAnswerRank), the first recorded of that kind, filtered mocks
-	// before unfiltered ones.
-	var best dnsCacheEntry
+	// best (dnsMockRank), the first recorded of that kind, filtered mocks
+	// before unfiltered ones. Only that one's records are decoded.
+	var best *models.Mock
 	bestRank := -1
 	for _, mocks := range [][]*models.Mock{filteredMocks, unfilteredMocks} {
 		for _, mock := range mocks {
-			resp, ok := dnsMockAnswer(mock, question, p.logger)
-			if !ok {
+			if mock == nil || !dnsRequestMatches(mock.Spec.DNSReq, question) {
 				continue
 			}
-			if rank := dnsAnswerRank(resp.Msg); rank > bestRank {
-				best, bestRank = resp, rank
+			if rank := dnsMockRank(mock.Spec.DNSResp); rank > bestRank {
+				best, bestRank = mock, rank
 			}
 		}
 	}
-	return best, best.Msg != nil
+	if best == nil {
+		return dnsCacheEntry{}, false
+	}
+	return dnsMockAnswer(best, p.logger), true
 }
 
 // replayDNSAnswer is a replay's answer to question, whose best recorded answer
@@ -924,15 +972,8 @@ func (p *Proxy) replayDNSAnswer(question dns.Question, recorded dnsCacheEntry) d
 	return dnsCacheEntry{Msg: live, FromUpstream: true}
 }
 
-// dnsMockAnswer is mock's recorded answer, when mock is a DNS mock of question.
-func dnsMockAnswer(mock *models.Mock, question dns.Question, logger *zap.Logger) (dnsCacheEntry, bool) {
-	if mock == nil || mock.Spec.DNSReq == nil {
-		return dnsCacheEntry{}, false
-	}
-	if !dnsRequestMatches(mock.Spec.DNSReq, question) {
-		return dnsCacheEntry{}, false
-	}
-
+// dnsMockAnswer is the answer recorded in mock, a DNS mock.
+func dnsMockAnswer(mock *models.Mock, logger *zap.Logger) dnsCacheEntry {
 	resp := dnsCacheEntry{
 		Msg: &dns.Msg{
 			MsgHdr: dns.MsgHdr{
@@ -955,7 +996,7 @@ func dnsMockAnswer(mock *models.Mock, question dns.Question, logger *zap.Logger)
 		resp.Extra = decodeDNSRRs(logger, mock.Spec.DNSResp.Extra)
 	}
 
-	return resp, true
+	return resp
 }
 
 func dnsRequestMatches(recorded *models.DNSReq, question dns.Question) bool {
@@ -1032,20 +1073,35 @@ const (
 	dnsRankResolved
 )
 
-// dnsAnswerRank is m's kind. NXDOMAIN is negative even with records (a CNAME
-// to a name that does not exist). Another rcode, which keploy does not record,
-// ranks with NXDOMAIN.
+// dnsAnswerRank is m's kind.
 func dnsAnswerRank(m *dns.Msg) int {
-	if m.Rcode != dns.RcodeSuccess {
+	return dnsRank(m.Rcode, len(m.Answer))
+}
+
+// dnsMockRank is the kind of the answer recorded in resp, read from its rcode
+// and its count of answer records without decoding them. A mock with no
+// response is served as NOERROR with no answer (dnsMockAnswer): NODATA.
+func dnsMockRank(resp *models.DNSResp) int {
+	if resp == nil {
+		return dnsRankNODATA
+	}
+	return dnsRank(resp.Rcode, len(resp.Answers))
+}
+
+// dnsRank is the kind of an answer with rcode and that many answer records.
+// NXDOMAIN is negative even with records (a CNAME to a name that does not
+// exist). Another rcode, which keploy does not record, ranks with NXDOMAIN.
+func dnsRank(rcode, answers int) int {
+	if rcode != dns.RcodeSuccess {
 		return dnsRankNXDOMAIN
 	}
-	if len(m.Answer) == 0 {
+	if answers == 0 {
 		return dnsRankNODATA
 	}
 	return dnsRankResolved
 }
 
-// dnsDedupeSuffix keeps a question's answers of each kind apart in
+// dnsDedupeSuffix keeps a question's negative answers of each kind apart in
 // recordedDNSMocks, so each kind is recorded once.
 var dnsDedupeSuffix = [...]string{dnsRankNXDOMAIN: ":nxdomain", dnsRankNODATA: ":nodata", dnsRankResolved: ""}
 
@@ -1187,12 +1243,10 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	// not resolve at first (a service not up yet) and did later keeps its
 	// later answer, which a replay serves before the earlier one
 	// (getMockedDNSResponse).
-	dedupeKey := generateDNSDedupeKey(question) + dnsDedupeSuffix[dnsAnswerRank(in)]
-	if _, alreadyRecorded := p.recordedDNSMocks.Get(dedupeKey); alreadyRecorded {
+	dedupeKey, first := p.recordedDNSMocks.firstAnswer(question, dnsAnswerRank(in))
+	if !first {
 		return resp, nil
 	}
-	// Mark as recorded
-	p.recordedDNSMocks.Add(dedupeKey, true)
 	// ============================================
 
 	resTime := time.Now().UTC()
@@ -1225,8 +1279,8 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		},
 	}
 
-	// One log per UNIQUE (name, qtype) — bounded by recordedDNSMocksMaxSize
-	// (1024) so this is naturally rate-limited. Keep counts only; full
+	// One log per UNIQUE (name, qtype, kind) — bounded by the dedupe
+	// trackers' sizes so this is naturally rate-limited. Keep counts only; full
 	// answer/ns/extra string dumps would balloon log size for chatty clients.
 	p.logger.Debug("Recording new DNS mock",
 		append(dnsQuestionFields(question),
