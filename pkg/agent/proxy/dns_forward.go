@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -484,8 +485,14 @@ func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, e
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no upstream DNS server returned a response for %s", question.Name)
 	}
-	return nil, lastErr
+	return nil, fmt.Errorf("%w: %w", errNoUpstreamAnswered, lastErr)
 }
+
+// errNoUpstreamAnswered marks forwardDNS's error when it asked the upstream
+// resolvers and none answered in time (a timeout, a refused or a failed
+// exchange), as against the errors where it asked none: no upstream to ask,
+// or a question type it does not forward.
+var errNoUpstreamAnswered = errors.New("no upstream DNS server answered")
 
 // isForwardableQType is the allowlist of DNS query types the
 // forwarder will relay. See forwardDNSUpstream for the rationale.

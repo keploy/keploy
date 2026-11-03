@@ -20,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -366,11 +367,22 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 // answer cache (design v14 §4). An upstream that cannot be asked is answered
 // SERVFAIL, so the app's resolver sees the failure as it is and is never
 // steered to keploy's own address.
+//
+// The failure's level says whose it is. keploy asked and no upstream
+// answered: the SERVFAIL is the one the app's own resolver gives, so it is
+// logUnansweredForward's WARN. keploy asked none (no upstream to ask, or a
+// type it does not forward): the SERVFAIL is keploy's own and the app did not
+// get the live answer it was promised, so it stays an ERROR.
 func (p *Proxy) realDNS(question dns.Question) dnsCacheEntry {
 	fwd, err := p.forwardDNSUpstream(question)
 	if err != nil || fwd == nil {
-		p.logUnansweredForward(question, "keploy could not resolve a mock.real name with the upstream resolver; the app is answered SERVFAIL",
-			append(dnsQuestionFields(question), zap.Error(err), zap.String("next_step", "check the upstream DNS resolver keploy's agent forwards to"))...)
+		const msg = "keploy could not resolve a mock.real name with the upstream resolver; the app is answered SERVFAIL"
+		fields := append(dnsQuestionFields(question), zap.String("next_step", "check the upstream DNS resolver keploy's agent forwards to"))
+		if errors.Is(err, errNoUpstreamAnswered) {
+			p.logUnansweredForward(question, msg, append(fields, zap.Error(err))...)
+		} else {
+			utils.LogError(p.logger, err, msg, fields...)
+		}
 		return dnsCacheEntry{Msg: &dns.Msg{MsgHdr: dns.MsgHdr{Rcode: dns.RcodeServerFailure, RecursionAvailable: true}}}
 	}
 	return dnsCacheEntry{Msg: fwd, FromUpstream: true}
