@@ -18,8 +18,30 @@ import (
 func TestDialTCPWithConnRefusedRetry_RetriesBoundedOnPersistentRefusal(t *testing.T) {
 	addr := testnet.RefusedAddr(t, "tcp")
 
+	// The row's own stop ends a dial that waits with no bound (one that
+	// took this context for an application keploy started), so the row
+	// fails by its own check, not by the test binary's timeout.
+	ctx, cancel := context.WithCancel(context.Background())
+	type dialResult struct {
+		conn net.Conn
+		err  error
+	}
+	done := make(chan dialResult, 1)
+	t.Cleanup(cancel)
 	start := time.Now()
-	conn, err := dialTCPWithConnRefusedRetry(context.Background(), zap.NewNop(), addr, nil, 0)
+	go func() {
+		conn, err := dialTCPWithConnRefusedRetry(ctx, zap.NewNop(), addr, nil, 0)
+		done <- dialResult{conn, err}
+	}()
+	var conn net.Conn
+	var err error
+	select {
+	case r := <-done:
+		conn, err = r.conn, r.err
+	// Four refused dials take about 9 s on Windows, under a second on Linux.
+	case <-time.After(30 * time.Second):
+		t.Fatal("the bounded re-dials did not end on a port with no listener")
+	}
 	elapsed := time.Since(start)
 	if err == nil {
 		_ = conn.Close()

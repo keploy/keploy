@@ -162,3 +162,17 @@ func TestARefusedRequestsWaitIsNotTheAppsStallUnderTheProvenSwitch(t *testing.T)
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// A wait on a context that carries no answer watch (no stall rule is on)
+// holds nothing and releases nothing: holding the stall there is a no-op,
+// not a crash.
+func TestHoldingTheStallWithoutAWatchIsANoOp(t *testing.T) {
+	defer func() {
+		if p := recover(); p != nil {
+			t.Fatalf("holding the stall on a context with no answer watch panicked: %v", p)
+		}
+	}()
+	release := holdAnswerStall(context.Background())
+	release()
+	release()
+}

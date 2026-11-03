@@ -3,6 +3,7 @@ package pkg
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -27,9 +29,28 @@ import (
 // when the row says so (serve), long after every re-send the bounded path
 // would have made (connRefusedRetryBackoff * (1+2+3) = 900 ms).
 
-// refusedPastTheBound is how long a row holds the address refused: past
-// every re-send of the bounded path, with room for a loaded host.
+// refusedPastTheBound is how long a row holds the address refused once the
+// wait has said it waits: past every re-send of the bounded path, with room
+// for a loaded host.
 const refusedPastTheBound = 2 * time.Second
+
+// untilItSaysItWaits returns once the wait has said it waits for its
+// address. It waits for the line, not for a time: a refused dial takes the
+// platform's time (at once on Linux, about 2 s on Windows) before the wait
+// begins. The request ending first fails the row.
+func untilItSaysItWaits[T any](t *testing.T, logs *observer.ObservedLogs, done <-chan T) {
+	t.Helper()
+	deadline := time.After(30 * time.Second)
+	for waitingLines(logs) == 0 {
+		select {
+		case r := <-done:
+			t.Fatalf("the request ended (%+v) before it said it waits for its address", r)
+		case <-deadline:
+			t.Fatal("the request never said it waits for its address")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
 
 func refusingAddr(t *testing.T) string {
 	return net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t)))
@@ -78,6 +99,7 @@ func TestARefusedTestRequestWaitsForItsAddressWhileTheAppRuns(t *testing.T) {
 	ctx, cancel := context.WithCancel(EndsWithApp(context.Background()))
 	defer cancel()
 	done := sendInBackground(ctx, zap.New(core), addr)
+	untilItSaysItWaits(t, logs, done)
 
 	select {
 	case r := <-done:
@@ -110,9 +132,11 @@ func TestARefusedTestRequestWaitsForItsAddressWhileTheAppRuns(t *testing.T) {
 // ends at once, with the refusal, and is not sent.
 func TestARefusedTestRequestStopsWaitingWhenTheAppExits(t *testing.T) {
 	addr := refusingAddr(t)
+	core, logs := observer.New(zapcore.InfoLevel)
 	ctx, appExited := context.WithCancel(EndsWithApp(context.Background()))
 	defer appExited()
-	done := sendInBackground(ctx, zap.NewNop(), addr)
+	done := sendInBackground(ctx, zap.New(core), addr)
+	untilItSaysItWaits(t, logs, done)
 
 	select {
 	case r := <-done:
@@ -122,7 +146,7 @@ func TestARefusedTestRequestStopsWaitingWhenTheAppExits(t *testing.T) {
 	appExited()
 	select {
 	case r := <-done:
-		if r.err == nil || !errors.Is(r.err, syscall.ECONNREFUSED) {
+		if r.err == nil || !isPreResponseConnRefused(r.err) {
 			t.Fatalf("want the refusal once the application exited, got (%v, %v)", r.resp, r.err)
 		}
 	case <-time.After(5 * time.Second):
@@ -163,7 +187,19 @@ func TestARefusedTestRequestIsSentAgainPastTheBoundedCountWhileTheAppRuns(t *tes
 	refusals := &refusingDials{n: maxConnRefusedRetries + 2}
 	client := &http.Client{Transport: &http.Transport{DialContext: refusals.dial}}
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://"+addr+"/a", strings.NewReader("body"))
-	resp, err := doRequestWithConnRefusedRetry(ctx, zap.NewNop(), client, req, nil, 0)
+	done := make(chan sendResult, 1)
+	go func() {
+		resp, err := doRequestWithConnRefusedRetry(ctx, zap.NewNop(), client, req, nil, 0)
+		done <- sendResult{resp, err}
+	}()
+	var resp *http.Response
+	var err error
+	select {
+	case r := <-done:
+		resp, err = r.resp, r.err
+	case <-time.After(20 * time.Second):
+		t.Fatal("the request was not answered although its address accepts")
+	}
 	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("want the application's 200 after %d refusals, got (%v, %v)", maxConnRefusedRetries+2, resp, err)
 	}
@@ -184,10 +220,11 @@ func TestARefusedTestRequestIsReSentABoundedNumberOfTimesWithoutAnAppKeployStart
 	done := sendInBackground(context.Background(), zap.NewNop(), addr)
 	select {
 	case r := <-done:
-		if r.err == nil || !errors.Is(r.err, syscall.ECONNREFUSED) {
+		if r.err == nil || !isPreResponseConnRefused(r.err) {
 			t.Fatalf("want the refusal after the bounded re-sends, got (%v, %v)", r.resp, r.err)
 		}
-	case <-time.After(10 * time.Second):
+	// Four refused dials take about 9 s on Windows, under a second on Linux.
+	case <-time.After(30 * time.Second):
 		t.Fatal("the bounded re-sends did not end")
 	}
 }
@@ -200,14 +237,31 @@ func TestARefusalAtAnUnreachableAddressFailsAtOnceWhileTheAppRuns(t *testing.T) 
 	defer cancel()
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+addr+"/a", nil)
 	reach := &answerReach{reason: "it is not published on the host"}
-	start := time.Now()
-	_, err := doRequestWithConnRefusedRetry(ctx, zap.NewNop(), &http.Client{}, req, reach, 0)
+	// The request's dials are counted, not timed: a refused dial takes the
+	// platform's time (about 2 s on Windows).
+	var dials atomic.Int32
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, network, a string) (net.Conn, error) {
+		dials.Add(1)
+		var d net.Dialer
+		return d.DialContext(ctx, network, a)
+	}}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := doRequestWithConnRefusedRetry(ctx, zap.NewNop(), client, req, reach, 0)
+		done <- err
+	}()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the request waited at an address the application can never be reached at")
+	}
 	var unreachable *UnreachableAppPortError
 	if !errors.As(err, &unreachable) {
 		t.Fatalf("want an UnreachableAppPortError, got %v", err)
 	}
-	if took := time.Since(start); took > connRefusedRetryBackoff {
-		t.Errorf("waited %v before failing at an unreachable address", took)
+	if n := dials.Load(); n != 1 {
+		t.Errorf("dialed %d times before failing at an unreachable address, want once", n)
 	}
 }
 
@@ -226,6 +280,7 @@ func TestARefusedGRPCDialWaitsForItsAddressWhileTheAppRuns(t *testing.T) {
 		conn, err := dialTCPWithConnRefusedRetry(ctx, zap.New(core), addr, nil, 0)
 		done <- dialResult{conn, err}
 	}()
+	untilItSaysItWaits(t, logs, done)
 
 	select {
 	case r := <-done:
@@ -252,10 +307,34 @@ func TestARefusedGRPCDialWaitsForItsAddressWhileTheAppRuns(t *testing.T) {
 // nothing and tries no more.
 func TestWaitForAcceptSaysOnceAndEndsOnlyByAcceptOrContext(t *testing.T) {
 	addr := refusingAddr(t)
-	said := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var said atomic.Int32
 	done := make(chan error, 2)
-	go func() { done <- WaitForAccept(context.Background(), zap.NewNop(), addr, func(error) { said++ }) }()
-	go func() { done <- WaitForAccept(context.Background(), nil, addr, nil) }()
+	go func() { done <- WaitForAccept(ctx, zap.NewNop(), addr, func(error) { said.Add(1) }) }()
+	go func() {
+		// No one to tell is no one to call: a panic here is the row's
+		// failure, not the test binary's crash.
+		defer func() {
+			if p := recover(); p != nil {
+				done <- fmt.Errorf("panicked with no one to tell: %v", p)
+			}
+		}()
+		done <- WaitForAccept(ctx, nil, addr, nil)
+	}()
+	// The address is served only once the first wait said it was refused (a
+	// refused dial takes the platform's time), and after a second more of
+	// tries.
+	deadline := time.After(30 * time.Second)
+	for said.Load() == 0 {
+		select {
+		case err := <-done:
+			t.Fatalf("the wait ended (%v) before %s accepted a connection", err, addr)
+		case <-deadline:
+			t.Fatalf("the wait never said that %s refused", addr)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 	select {
 	case err := <-done:
 		t.Fatalf("the wait ended (%v) before %s accepted a connection", err, addr)
@@ -272,8 +351,8 @@ func TestWaitForAcceptSaysOnceAndEndsOnlyByAcceptOrContext(t *testing.T) {
 			t.Fatal("the wait did not end once the address accepted a connection")
 		}
 	}
-	if said != 1 {
-		t.Errorf("said %d times that %s refused, want once", said, addr)
+	if n := said.Load(); n != 1 {
+		t.Errorf("said %d times that %s refused, want once", n, addr)
 	}
 
 	ended, cancel := context.WithCancel(context.Background())
@@ -293,12 +372,29 @@ func TestWaitToReSendSaysOncePerRequest(t *testing.T) {
 	core, logs := observer.New(zapcore.InfoLevel)
 	logger := zap.New(core)
 	addr := refusingAddr(t)
+	var first time.Duration
 	said := false
 	for i := 0; i < 2; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
-		err := waitToReSend(ctx, logger, "test request", addr, &said)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- waitToReSend(ctx, logger, "test request", addr, &said) }()
+		// The first wait is ended once it said it waits; the second after
+		// as long, and a second more, so that a line it said is seen.
+		began := time.Now()
+		if i == 0 {
+			untilItSaysItWaits(t, logs, done)
+			first = time.Since(began)
+		} else {
+			time.Sleep(first + time.Second)
+		}
 		cancel()
-		if !errors.Is(err, context.DeadlineExceeded) {
+		var err error
+		select {
+		case err = <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("wait %d did not end at its context's end", i+1)
+		}
+		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("wait %d: want the context's end, got %v", i+1, err)
 		}
 	}

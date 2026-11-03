@@ -126,9 +126,21 @@ func TestAResetRequestsWaitEndsWhenTheAppExits(t *testing.T) {
 func TestAResetRequestWaitsABoundedTimeWithoutAnAppKeployStarted(t *testing.T) {
 	addr, _ := resettingApp(t)
 	r := &Replayer{config: &config.Config{Command: "node app.js"}, logger: zap.NewNop()}
-	began := time.Now()
-	r.waitForResetResendReady(context.Background(), resetTestCase(addr), "test-set-0", new(bool))
-	if waited := time.Since(began); waited > resetResendReadyTimeout+3*time.Second {
-		t.Fatalf("waited %s, want at most about %s", waited, resetResendReadyTimeout)
+	// The row's own stop ends a wait that has no bound, so the row fails by
+	// its own check, not by the test binary's timeout.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	go func() {
+		defer close(done)
+		r.waitForResetResendReady(ctx, resetTestCase(addr), "test-set-0", new(bool))
+	}()
+	select {
+	case <-done:
+	case <-time.After(resetResendReadyTimeout + 3*time.Second):
+		t.Fatalf("still waiting after %s, want at most about %s", resetResendReadyTimeout+3*time.Second, resetResendReadyTimeout)
 	}
 }
