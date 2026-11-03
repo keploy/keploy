@@ -382,7 +382,7 @@ func (a *Agent) HandleScopeGate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	case proven:
-		if err := p.SetScopeSkips(r.Context(), req.Skip, req.Needs, req.SetFlags); err != nil {
+		if err := p.SetScopeSkips(r.Context(), req.Skip, req.Needs, req.SetFlags, req.CloudSet); err != nil {
 			writeScopeError(w, r, &models.ScopeError{Status: http.StatusInternalServerError, Code: models.ScopeErrInternal, Message: err.Error()})
 			return
 		}
