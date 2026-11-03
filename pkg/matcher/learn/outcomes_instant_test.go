@@ -2540,6 +2540,108 @@ func TestOutcomeAPlaceIsJudgedAtTheFinestUnitItsMemberShowsInEitherRun(t *testin
 	}
 }
 
+// Each run's times are placed in that run's own layout: where a field
+// before the time's (a request's url, laid out before its answer) is
+// longer in one run, the other run's member still pairs with it. The
+// recording's whole second takes the millisecond the other run shows at
+// that member, whichever run's field is longer, and by however much: past
+// the time's own start, and past the rest of the other run's answer after
+// it.
+func TestOutcomeEachRunsTimesArePlacedInItsOwnLayout(t *testing.T) {
+	defer func(b, r int64) { bodyBudget, readerBudget = b, r }(bodyBudget, readerBudget)
+	bodyBudget, readerBudget = 0, 1
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dr := tr.Drifts()
+	at := oAt.Add(96 * time.Second).Truncate(time.Second)
+	s := func(x time.Time) string { return `"` + x.UTC().Format(time.RFC3339) + `"` }
+	f := func(x time.Time) string {
+		return `"` + x.Add(473*time.Millisecond).UTC().Format(time.RFC3339Nano) + `"`
+	}
+	ago := func(d int) time.Time { return at.Add(-time.Duration(d) * time.Second) }
+	short, long := "http://api/jobs/1", "http://api/jobs/1?page=2&cursor=b3JkZXJzLzEyMzQ1Njc4OTA"
+	var dc decider
+	for _, tc := range []struct {
+		what, recURL, runURL, rec, run string
+	}{
+		{"the recording's url longer", long, short, `{"at":` + s(at) + `}`, `{"at":` + f(ago(60)) + `}`},
+		{"round F's url longer", short, long, `{"at":` + s(at) + `}`, `{"at":` + f(ago(60)) + `}`},
+		{"the recording's url longer, a list before the time", long, short,
+			`{"items":[{"at":` + f(ago(40)) + `}],"at":` + s(at) + `}`, `{"items":[{"at":` + f(ago(80)) + `}],"at":` + f(ago(60)) + `}`},
+		{"round F's url longer, a list before the time", short, long,
+			`{"items":[{"at":` + f(ago(40)) + `}],"at":` + s(at) + `}`, `{"items":[{"at":` + f(ago(80)) + `}],"at":` + f(ago(60)) + `}`},
+	} {
+		x := newReaderIndex(dr)
+		rec, run := x.textOf(RawOf(getAnswer("mock-7", tc.recURL, tc.rec, oAt.Add(-time.Second)), true)), x.textOf(RawOf(getAnswer("mock-7", tc.runURL, tc.run, oAt.Add(-time.Second)), true))
+		spans, read := dc.atFinest(rec, run)
+		var units []time.Duration
+		for _, sp := range spans {
+			units = append(units, sp.res)
+		}
+		if want := slices.Repeat([]time.Duration{time.Millisecond}, strings.Count(tc.rec, `"at"`)); !read || !slices.Equal(units, want) {
+			t.Errorf("%s: read %v, the place's times at %v; want %v", tc.what, read, units, want)
+		}
+	}
+}
+
+// A member in each element of a field's list is one member: a Mongo
+// answer's responses (MongoResponses[0], [1], ... [10]) each holding "at",
+// two or eleven in the recording and fewer in round F, pair at one member
+// whatever their index, so the recording's whole second, in a response
+// round F has no such index for, takes the millisecond round F shows there.
+func TestOutcomeAMemberInEachElementOfAFieldsListIsOneMember(t *testing.T) {
+	defer func(b, r int64) { bodyBudget, readerBudget = b, r }(bodyBudget, readerBudget)
+	bodyBudget, readerBudget = 0, 1
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dr := tr.Drifts()
+	at := oAt.Add(96 * time.Second).Truncate(time.Second)
+	s := func(x time.Time) string { return `"` + x.UTC().Format(time.RFC3339) + `"` }
+	f := func(x time.Time) string {
+		return `"` + x.Add(473*time.Millisecond).UTC().Format(time.RFC3339Nano) + `"`
+	}
+	ago := func(d int) time.Time { return at.Add(-time.Duration(d) * time.Second) }
+	// answer is a Mongo answer of one response per time, each a section
+	// whose document holds it at "at".
+	answer := func(times []string) Raw {
+		var rs []models.MongoResponse
+		for _, x := range times {
+			rs = append(rs, models.MongoResponse{Header: &models.MongoHeader{Opcode: wiremessage.OpMsg}, Message: &models.MongoOpMessage{Sections: []string{
+				`{ SectionSingle msg: {"cursor":{"at":` + x + `},"ok":{"$numberDouble":"1.0"}} }`,
+			}}})
+		}
+		return RawOf(&models.Mock{Name: "mock-7", Kind: models.Mongo, Spec: models.MockSpec{
+			MongoRequests: []models.MongoRequest{{Header: &models.MongoHeader{Opcode: wiremessage.OpMsg}, Message: &models.MongoOpMessage{Sections: []string{
+				`{ SectionSingle msg: {"find":"jobs","$db":"app"} }`,
+			}}}},
+			MongoResponses:   rs,
+			ReqTimestampMock: oAt.Add(-time.Second), ResTimestampMock: oAt.Add(-time.Second + time.Millisecond),
+		}}, true)
+	}
+	var dc decider
+	for _, tc := range []struct {
+		what     string
+		rec, run []string
+	}{
+		{"two responses then one", []string{f(ago(40)), s(at)}, []string{f(ago(80))}},
+		{"eleven responses then three", append(slices.Repeat([]string{f(ago(40))}, 10), s(at)), []string{f(ago(80)), f(ago(81)), f(ago(82))}},
+	} {
+		x := newReaderIndex(dr)
+		spans, read := dc.atFinest(x.textOf(answer(tc.rec)), x.textOf(answer(tc.run)))
+		var units []time.Duration
+		for _, sp := range spans {
+			units = append(units, sp.res)
+		}
+		if want := slices.Repeat([]time.Duration{time.Millisecond}, len(tc.rec)); !read || !slices.Equal(units, want) {
+			t.Errorf("%s: read %v, the place's times at %v; want %v", tc.what, read, units, want)
+		}
+	}
+}
+
 // Judging a place's instants at the finest unit either run shows reads
 // each text's instants a few times, however many it holds: a list of
 // 50,000 times that grew by one between runs, every time judged at the
@@ -2997,7 +3099,8 @@ func TestOutcomeAPickBesideAnEscapeElsewhereInItsAnswerStaysRefused(t *testing.T
 // of the time it opens to. Where it opens to round F's second, the
 // application picked that second from the answer: refused. Where it opens
 // to another time of the call's day, the call's second is its own clock
-// read.
+// read. A hold finer than a millisecond as written stands, its escapes
+// read or not.
 func TestOutcomeAPercentEncodedSecondHoldsOnlyTheTimeItOpensTo(t *testing.T) {
 	sec := func(x time.Time) string { return strconv.FormatInt(x.Unix(), 10) }
 	pct := func(x time.Time) string { return strings.ReplaceAll(x.UTC().Format(time.RFC3339), ":", "%3A") }
@@ -3017,4 +3120,19 @@ func TestOutcomeAPercentEncodedSecondHoldsOnlyTheTimeItOpensTo(t *testing.T) {
 	oRefused(t, "round F's second picked from an answer that holds it percent-encoded", d, RefusalPick, "mock-799")
 	d = oWord(t, Decide(call(rAt.Add(-10*time.Minute), fAt.Add(-10*time.Minute))), sec(rAt), sec(fAt))
 	iClock(t, "the call's second beside a percent-encoded time ten minutes before it", d)
+	// A time the answer writes at a cut finer than a millisecond, its
+	// zone percent-encoded after it ("09:00:23.654321%2B05:30", a link's
+	// query): as written it holds the call's microsecond, and a hold that
+	// fine stands, however its escapes open: the application copied its
+	// digits.
+	micro := func(x time.Time) string { return x.UTC().Format("2006-01-02T15:04:05.000000Z07:00") }
+	rT, fT := rAt.Add(-37*time.Second+123456*time.Microsecond), fAt.Add(-37*time.Second+654321*time.Microsecond)
+	zoned := func(x time.Time) *models.Mock {
+		m := answer(x)
+		m.Spec.HTTPResp.Body = `{"next":"/v1/events?since=` + x.UTC().Format("2006-01-02T15:04:05.000000") + `%2B05:30"}`
+		return m
+	}
+	d = oWord(t, Decide(iCall("body.cmd.query.dirtyAt.$lte", Instant, micro(rT), micro(fT), rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), nil,
+		[]Raw{RawOf(zoned(rT), true).ServedAs(1).ServedLive(RawOf(zoned(fT), true))})), micro(rT), micro(fT))
+	iValue(t, "a microsecond the answer writes before a percent-encoded zone", d, "mock-799")
 }
