@@ -117,9 +117,11 @@ type decider struct {
 	// encoded is the leaf's inDecodedForm, read once and only where a word
 	// of it would be learned fresh.
 	encoded func() (string, *evPlace)
-	// passes counts the instants atFinest reads, each pass over a text's
-	// instants counted whole: what keeps its work linear in them.
-	passes int
+	// passes counts the instants atFinest reads, each read counted where
+	// it is made, and walked the bytes it walks to place them: what keeps
+	// its work linear in them. laid: the fields of each half (halves).
+	passes, walked int
+	laid           map[*readerText][]rawField
 }
 
 // decideWords decides every changed word of in, and the field each
@@ -895,17 +897,18 @@ func (dc *decider) cutOfFinerOnly(t, other *readerText, w string, m moment) bool
 // Instant.toString, Python's isoformat, a JavaScript number) writes a time
 // made at a second's first millisecond as a whole second, and the same
 // field's time in the other run with its fraction. An instant's place is
-// the JSON member it is the value of (memberAt), its layout, and its text
-// but for its fraction's digits (instantShape). Where both texts hold as
-// many instants at a place, the k-th of each are one time's; where a
-// member's count differs (a list that grew between runs), each takes the
-// finest unit the other run shows there. An instant of no member (an
-// element of a list of times, a field of its own) pairs only where both
-// texts hold as many; any other is judged at its own text's unit, and so
-// is one of no unit (a time-ordered UUID's). Each text's instants are read
-// in a few passes, each counted whole in dc.passes, and the texts are read
-// again only where the other run shows a unit finer than one of t's
-// instants of its layout. read is false where keploy could not read t.
+// the JSON member it is the value of, named by its path (placesIn), its
+// layout, and its text but for its fraction's digits (instantShape). Where
+// both texts hold as many instants at a place, the k-th of each are one
+// time's; where a member's count differs (a list that grew between runs),
+// each takes the finest unit the other run shows at that member. An
+// instant of no member (an element of a list of times, a field of its own)
+// pairs only where both texts hold as many; any other is judged at its
+// own text's unit, and so is one of no unit (a time-ordered UUID's). Each
+// read of an instant is counted in dc.passes, each byte walked to place
+// them in dc.walked, and the texts are read again only where the other run
+// shows a unit finer than one of t's instants of its layout. read is false
+// where keploy could not read t.
 func (dc *decider) atFinest(t, other *readerText) (spans []instant, read bool) {
 	spans, read = t.spansOf()
 	if !read || other == nil || other == t {
@@ -928,17 +931,19 @@ func (dc *decider) atFinest(t, other *readerText) (spans []instant, read bool) {
 	}) {
 		return spans, true
 	}
-	var text, otext string
-	var ok1, ok2 bool
-	if text, ok1 = t.textNow(); ok1 {
-		otext, ok2 = other.textNow()
+	text, fields, ok1 := dc.laidOut(t)
+	var otext string
+	var ofields []rawField
+	var ok2 bool
+	if ok1 {
+		otext, ofields, ok2 = dc.laidOut(other)
 	}
 	if !ok1 || !ok2 {
 		return spans, true
 	}
-	theirs := map[instantPlace]placeUnits{}
-	for _, o := range os {
-		at := instantPlaceOf(otext, o)
+	theirs, oat := map[instantPlace]placeUnits{}, dc.placesIn(otext, ofields, os)
+	for j, o := range os {
+		at := oat.of(j)
 		u, ok := theirs[at]
 		if !ok {
 			u.finest = o.res
@@ -946,26 +951,25 @@ func (dc *decider) atFinest(t, other *readerText) (spans []instant, read bool) {
 		u.res, u.finest = append(u.res, o.res), min(u.finest, o.res)
 		theirs[at] = u
 	}
-	at, ours := make([]instantPlace, len(spans)), map[instantPlace]int{}
-	for i, sp := range spans {
-		at[i] = instantPlaceOf(text, sp)
-		ours[at[i]]++
+	ours, at := map[instantPlace]int{}, dc.placesIn(text, fields, spans)
+	for i := range spans {
+		ours[at.of(i)]++
 	}
-	dc.passes += len(os) + 2*len(spans)
 	kth, cloned := map[instantPlace]int{}, false
 	for i, sp := range spans {
-		u, ok := theirs[at[i]]
+		p := at.of(i)
+		u, ok := theirs[p]
 		if !ok {
 			continue
 		}
 		res := sp.res
-		switch k := kth[at[i]]; {
-		case len(u.res) == ours[at[i]]:
+		switch k := kth[p]; {
+		case len(u.res) == ours[p]:
 			res = u.res[k]
-		case at[i].field != "":
+		case p.field != "":
 			res = u.finest
 		}
-		kth[at[i]]++
+		kth[p]++
 		if res >= sp.res {
 			continue
 		}
@@ -978,9 +982,20 @@ func (dc *decider) atFinest(t, other *readerText) (spans []instant, read bool) {
 	return spans, true
 }
 
+// laidOut is t's text and the fields it is laid out in (textFields): a
+// recording's, a half's (textHalf, dc.laid), or none for a text handed
+// whole, which is one field (a leaf's value); ok false where the recording
+// was not read.
+func (dc *decider) laidOut(t *readerText) (text string, fields []rawField, ok bool) {
+	if text, fields, ok = t.read(); t.raw == nil {
+		fields = dc.laid[t]
+	}
+	return text, fields, ok
+}
+
 // instantPlace is where an instant stands in its text, as atFinest pairs
-// it with the other run's: the JSON member it is the value of ("" where
-// none), its layout, and its text but for its fraction's digits.
+// it with the other run's: the JSON member it is the value of, by its path
+// ("" where none), its layout, and its text but for its fraction's digits.
 type instantPlace struct {
 	field, shape string
 	layout       int
@@ -993,9 +1008,125 @@ type placeUnits struct {
 	finest time.Duration
 }
 
-// instantPlaceOf is where sp stands in text.
-func instantPlaceOf(text string, sp instant) instantPlace {
-	return instantPlace{field: memberAt(text, sp.start), shape: instantShape(text[sp.start:sp.end]), layout: sp.layout}
+// placed are a text's instants' places, in its instants' order, each read
+// through of alone, which counts the read in n: a read the work's count
+// sees, wherever it is made.
+type placed struct {
+	at []instantPlace
+	n  *int
+}
+
+// of is the i-th instant's place, counted.
+func (p placed) of(i int) instantPlace {
+	*p.n++
+	return p.at[i]
+}
+
+// placesIn are spans' places in text (spans in its order, as instantSpans
+// gives them; fields: how text is laid out, none for one field), in one
+// walk over the fields that hold them and spans. An instant's member is
+// named by its path: the field's, its list indices dropped
+// ("res.body", "MongoResponses[].Message.Sections[]"), then the keys of
+// the JSON containers open where its value starts, from the field's root,
+// an element of a list as "[]" (`{"at":…,"items":[{"at":…}]}` holds "at"
+// and "items[].at"), then its own (memberAt). It is of no member ("")
+// where no field holds it, where no container is open there, and where one
+// of them is named by no key (fail closed: such an instant pairs only by
+// count).
+func (dc *decider) placesIn(text string, fields []rawField, spans []instant) placed {
+	at := make([]instantPlace, len(spans))
+	var w jsonWalk
+	f, field, from, to, prefix := 0, -1, 0, len(text), ""
+	for i, sp := range spans {
+		dc.passes++
+		at[i] = instantPlace{shape: instantShape(text[sp.start:sp.end]), layout: sp.layout}
+		if len(fields) > 0 {
+			for f < len(fields) && fields[f].end <= sp.start {
+				f++
+			}
+			if f == len(fields) || fields[f].start > sp.start {
+				continue
+			}
+			if f != field {
+				field, from, to, prefix = f, fields[f].start, fields[f].end, listIndex.ReplaceAllString(fields[f].path, "[]")
+				w = jsonWalk{from: from, at: from}
+			}
+		}
+		dc.walked += w.to(text[:to], sp.start)
+		name := memberAt(text[from:], sp.start-from)
+		if top := len(w.open) - 1; name != "" && top >= 0 && !w.open[top].unnamed {
+			at[i].field = prefix + "\x00" + w.open[top].path + "." + name
+		}
+	}
+	return placed{at: at, n: &dc.passes}
+}
+
+// listIndex is a list index in a field's path.
+var listIndex = regexp.MustCompile(`\[[0-9]+\]`)
+
+// jsonWalk reads a field's JSON structure, from its start (from) as far as
+// at: the containers open there (open) and whether at stands in a string
+// (str, esc: just after its backslash). A newline ends a string, as no
+// JSON string holds one, so a quote in a text of another kind misleads the
+// walk for that line alone.
+type jsonWalk struct {
+	from, at int
+	open     []jsonOpen
+	str, esc bool
+}
+
+// jsonOpen is a JSON container open in a walk: its path from the field's
+// root, whether it is a list, and of an object, the key whose value is
+// read now. unnamed: it, or a container it stands in, is the value of a
+// member named by no key keploy reads.
+type jsonOpen struct {
+	path, key     string
+	list, unnamed bool
+}
+
+// to walks text from w.at to end, and reports how many bytes it walked.
+func (w *jsonWalk) to(text string, end int) (n int) {
+	n = end - w.at
+	for ; w.at < end; w.at++ {
+		c, top := text[w.at], len(w.open)-1
+		switch {
+		case w.esc:
+			w.esc = false
+		case w.str:
+			w.esc, w.str = c == '\\', c != '"' && c != '\n'
+		case c == '"':
+			w.str = true
+		case top < 0 && (c == ':' || c == ','):
+		case c == ':':
+			w.open[top].key = keyBefore(text[w.from:w.at])
+		case c == ',':
+			w.open[top].key = ""
+		case c == '{' || c == '[':
+			o := jsonOpen{list: c == '['}
+			if top >= 0 {
+				p := w.open[top]
+				o.path, o.unnamed = p.path+"."+p.key, p.unnamed || !p.list && p.key == ""
+				if p.list {
+					o.path = p.path + "[]"
+				}
+			}
+			w.open = append(w.open, o)
+		case (c == '}' || c == ']') && top >= 0:
+			w.open = w.open[:top]
+		}
+	}
+	return n
+}
+
+// keyBefore is the key a member's colon closes, the end of text: a quoted
+// name, or a bare word (`{ SectionSingle msg: {…} }` names msg); "" where
+// none stands there.
+func keyBefore(text string) string {
+	s := strings.TrimRight(text, " \t\r\n")
+	if q, ok := strings.CutSuffix(s, `"`); ok {
+		return q[strings.LastIndexByte(q, '"')+1:]
+	}
+	return s[strings.LastIndexAny(s, " \t\r\n{}[],:\"")+1:]
 }
 
 // memberAt is the name of the JSON member whose value starts at start in
@@ -1113,7 +1244,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		// the application, placed by when it was answered (halves).
 		ps := []evPlace{q}
 		if q.raw > 0 && held(q) {
-			req, ans := halves(q)
+			req, ans := dc.halves(q)
 			ps = []evPlace{req, ans}
 		}
 		for _, p := range ps {
