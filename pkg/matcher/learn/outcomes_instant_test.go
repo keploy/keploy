@@ -2129,7 +2129,17 @@ func TestOutcomeAPlaceNotReadAgainIsJudgedAtItsOwnUnit(t *testing.T) {
 		var nRec, nRun int
 		tx, ox := x.textOf(lazy(recorded, tc.failRec, &nRec)), x.textOf(lazy(given, tc.failRun, &nRun))
 		dc.passes = 0
-		spans, read := dc.atFinest(tx, ox)
+		// The question must not crash: a text not read again is no text
+		// to index, so a crash here fails the row by name.
+		spans, read, crashed := func() (spans []instant, read bool, crashed any) {
+			defer func() { crashed = recover() }()
+			spans, read = dc.atFinest(tx, ox)
+			return spans, read, nil
+		}()
+		if crashed != nil {
+			t.Errorf("%s: the question crashed (%v); want the place judged at its own text's unit", tc.what, crashed)
+			continue
+		}
 		if !read {
 			t.Errorf("%s: the place's instants not read; want them read as the first read gave them", tc.what)
 			continue
