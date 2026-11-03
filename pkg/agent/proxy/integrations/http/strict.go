@@ -238,6 +238,10 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 				// A read of the application's clock the closest recording
 				// learned that this call does not hold: why, legibly.
 				h.Logger.Warn("a learned read of the application's clock does not hold", zap.String("mock", closest.Name), zap.String("field", f.shape), zap.String("reason", f.why))
+			case f.noise:
+				// A text an older keploy learned as noise whole, which
+				// keploy compares now, changed: why, and to record again.
+				h.Logger.Warn("noise an older keploy learned no longer leaves a text unchecked", zap.String("mock", closest.Name), zap.String("field", f.shape), zap.String("reason", f.why))
 			case f.why != "":
 				// A field keploy.yml's noise lets vary only within
 				// patterns, one side's value outside them.
@@ -643,11 +647,12 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest string, d
 
 // guardedPaths are the report paths of fields keploy.yml's noise guards with
 // patterns that a side's value is outside of: those with a reason that is no
-// refused read of the application's clock (strictField.why).
+// refused read of the application's clock and no text an older keploy
+// learned as noise whole (strictField.why).
 func guardedPaths(fields []strictField) []string {
 	var out []string
 	for _, f := range fields {
-		if f.why != "" && !f.clock {
+		if f.why != "" && !f.clock && !f.noise {
 			out = append(out, f.diff.Path)
 		}
 	}
@@ -670,7 +675,8 @@ func payloadHashPaths() []string {
 
 // reasonsOf are, of fields, those refused for a reason of their own (a
 // learned read of the application's clock the call does not carry:
-// clockDiffs), each named by its shape, with that reason, once.
+// clockDiffs; a text an older keploy learned as noise whole that changed:
+// staleWholeWhy), each named by its shape, with that reason, once.
 func reasonsOf(fields []strictField) []models.FieldReason {
 	var out []models.FieldReason
 	for _, f := range fields {

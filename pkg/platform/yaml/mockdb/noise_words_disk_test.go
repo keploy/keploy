@@ -170,3 +170,36 @@ func TestASecondLearningAddsItsWordsToTheFilesWords(t *testing.T) {
 		}
 	}
 }
+
+// A file an older keploy wrote names a text of more than one word as noise
+// whole, under noise.req. A learning that finds the words of it that changed
+// writes those words in its place: the text leaves noise.req for
+// noise.words, and reads back as that words pattern alone.
+func TestALearningReplacesAnOlderKeploysWholeNoiseOnDiskByItsWords(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, f := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		t.Run(string(f), func(t *testing.T) {
+			ys := NewWithFormat(zap.NewNop(), t.TempDir(), "mocks", f)
+			set := "test-set-0"
+			if err := ys.InsertMock(context.Background(), noiseTestMock(`{"note":"lead r-1 created","id":"a1"}`), set); err != nil {
+				t.Fatal(err)
+			}
+			if err := ys.Close(); err != nil {
+				t.Fatal(err)
+			}
+			m, file := persistAndRead(t, ys, set, f, map[string][]string{"body.note": {}, "body.id": {}})
+			if want := map[string][]string{"body.note": {}, "body.id": {}}; !reflect.DeepEqual(m.Spec.ReqBodyNoise, want) {
+				t.Fatalf("the older keploy's file read back %#v, want %#v\n%s", m.Spec.ReqBodyNoise, want, file)
+			}
+			m, file = persistAndRead(t, ys, set, f, map[string][]string{"body.note": {"^keploy:words 1$"}})
+			if want := map[string][]string{"body.note": {"^keploy:words 1$"}, "body.id": {}}; !reflect.DeepEqual(m.Spec.ReqBodyNoise, want) {
+				t.Fatalf("read back %#v, want %#v\n%s", m.Spec.ReqBodyNoise, want, file)
+			}
+			for _, bad := range []string{"- body.note", `"body.note"]`, `"req":["body.id","body.note"]`, `"req":["body.note"`} {
+				if strings.Contains(file, bad) {
+					t.Fatalf("the mock file still names the text as whole noise (%q):\n%s", bad, file)
+				}
+			}
+		})
+	}
+}

@@ -102,10 +102,12 @@ func TestMergeNoiseUnionsTheWordsOfTwoWordsPatterns(t *testing.T) {
 		{"shared words once", w(1, 3), w(0, 3), w(0, 1, 3)},
 		{"the detected tail", w(0), w(2, 4), w(0, 2, 4)},
 		{"the existing tail", w(2, 4), w(0), w(0, 2, 4)},
-		{"whole stays whole", []string{}, w(1), []string{}},
+		{"an older keploy's whole is read as the words that changed", []string{}, w(1), w(1)},
 		{"words beside whole", w(1), []string{}, w(1)},
 		{"words beside a pattern", w(1), []string{"^r-[0-9]+$"}, w(1)},
-		{"a pattern beside words", []string{"^r-[0-9]+$"}, w(1), []string{"^r-[0-9]+$"}},
+		{"a pattern of another kind is read as the words that changed", []string{"^r-[0-9]+$"}, w(1), w(1)},
+		{"whole beside whole", []string{}, []string{}, []string{}},
+		{"a pattern of another kind beside whole", []string{}, []string{"^r-[0-9]+$"}, []string{}},
 		{"an existing pattern that does not read back", []string{"^keploy:words 01$"}, w(1), []string{"^keploy:words 01$"}},
 		{"a detected pattern that does not read back", w(1), []string{"^keploy:words x$"}, w(1)},
 	} {
@@ -181,6 +183,27 @@ func TestCompareReadsATextLearnedByItsWordsWordByWord(t *testing.T) {
 	} {
 		if d := Compare(body(t, "k", c.live), rec, c.known); d.Structural != "" || !reflect.DeepEqual(d.Drift, c.drift) {
 			t.Errorf("%s: structural %q drift %v, want drift %v", c.name, d.Structural, d.Drift, c.drift)
+		}
+	}
+}
+
+// A text is one word where it holds no separator: noise whole is honoured
+// only there.
+func TestOneWordIsATextWithNoSeparator(t *testing.T) {
+	for text, want := range map[string]bool{
+		"":                            true,
+		"r-1":                         true,
+		"2026-10-14T09:02:20.5+05:30": true,
+		"/v1/leads/r-1":               true,
+		"lead r-1 created":            false,
+		"r-1,v2":                      false,
+		" r-1":                        false,
+		"r-1\n":                       false,
+		`"r-1"`:                       false,
+		"a=b":                         false,
+	} {
+		if got := OneWord(text); got != want {
+			t.Errorf("OneWord(%q) = %v, want %v", text, got, want)
 		}
 	}
 }

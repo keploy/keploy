@@ -93,6 +93,21 @@ func NoiseWords(rec, live string) (words []int, whole, ok bool) {
 	return words, len(rw) == 1, true
 }
 
+// OneWord reports whether text is one word: it holds no separator
+// (isWordSep). Keploy learns a text of more than one word by its words
+// (NoiseWords), so noise whole at such a text is an older keploy's, and no
+// longer leaves it unchecked: noise whole is honoured only at a text of one
+// word (founder, 2026-11-03). Elsewhere the text is compared, and a change
+// in it asks for the test to be recorded again.
+func OneWord(text string) bool {
+	for i := 0; i < len(text); i++ {
+		if isWordSep(text[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 // NoiseWordsPattern is the learned noise pattern that leaves words of a text
 // (their numbers, counted from 0, in order: NoiseWords) unchecked, and
 // nothing else: "^keploy:words 1,3$".
@@ -174,12 +189,21 @@ func WordsAdmit(rec, live string, words []int) bool {
 // words either does, their union: both name words of the place's one
 // recorded text, and the learn step learns words only where a run kept that
 // text's skeleton (NoiseWords), so a word's number names the same word in
-// both. Anything else keeps existing (learned noise is monotonic): noise
-// whole stays whole, and a words pattern stays as it is beside noise of
-// another kind or one that does not read back (UncheckedWords), which
-// unchecks no word.
+// both. A words pattern detected where existing is noise whole, or noise of
+// another kind, takes its place: the learn step learns words only at a text
+// of more than one word (OneWord), where keploy no longer honours noise
+// whole, so that noise is an older keploy's, and the text is read by the
+// words that changed now. Anything else keeps existing (learned noise is
+// monotonic): a words pattern stays as it is beside noise whole or of
+// another kind, and beside one that does not read back (UncheckedWords),
+// which unchecks no word.
 func MergeNoise(existing, detected []string) []string {
-	ew, _ := UncheckedWords(existing)
+	ew, existingWords := UncheckedWords(existing)
+	if _, detectedWords := UncheckedWords(detected); !existingWords && detectedWords {
+		out := make([]string, len(detected))
+		copy(out, detected)
+		return out
+	}
 	if len(ew) == 0 {
 		out := make([]string, len(existing))
 		copy(out, existing)

@@ -269,7 +269,7 @@ func TestLearnKnownReadsAWordsPatternByItsWordsAlone(t *testing.T) {
 	}{
 		{"its word changed", httpKnown{learned: map[string][]string{"body.note": w(1)}}, "body.note", "body.note", "lead r-2 created", false},
 		{"another word changed", httpKnown{learned: map[string][]string{"body.note": w(1)}}, "body.note", "body.note", "deal r-1 created", true},
-		{"whole noise", httpKnown{learned: map[string][]string{"body.note": {}}}, "body.note", "body.note", "deal r-2 deleted", false},
+		{"an older keploy's whole noise", httpKnown{learned: map[string][]string{"body.note": {}}}, "body.note", "body.note", "deal r-2 deleted", true},
 		{"in the matcher's dialect", httpKnown{learned: map[string][]string{"body.items[].note": w(1)}}, "body.items[0].note", "body.items[].note", "deal r-1 created", true},
 		{"as a container", httpKnown{learned: map[string][]string{"body.items": w(0)}}, "body.items[0].note", "body.items[].note", "deal r-1 created", true},
 		{"through a variable's places", excusedAt{Known: httpKnown{learned: map[string][]string{"body.note": w(1)}}, at: map[string]bool{"body.id": true}}, "body.note", "body.note", "lead r-2 created", false},

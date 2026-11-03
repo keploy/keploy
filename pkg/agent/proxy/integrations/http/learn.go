@@ -483,7 +483,10 @@ func (k httpKnown) Excused(l learn.Leaf) (bool, bool) {
 // it replaces) names it in the request matcher's dialect. A place learned as
 // a read of the application's clock (clocks) is no learned noise's to excuse.
 // A text learned by its words (learn.NoiseWords) is not excused whole: Words
-// names its unchecked words, and the learn step compares the rest.
+// names its unchecked words, and the learn step compares the rest. Nor is a
+// text of more than one word an older keploy learned as noise whole
+// (staleWhole): the learn step reads it as any value, and learns the words
+// of it that changed.
 // keploy.yml's entry with patterns excuses a leaf only when the recorded and
 // the live value each match one: a live value outside them is a change, and
 // so is a leaf one side lacks. An obfuscated value is the recorded one.
@@ -496,7 +499,8 @@ func (k httpKnown) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, 
 	// noise learned there excuses a value its patterns refuse.
 	_, guarded := k.n.userPatterns(ref.Noise)
 	_, clock := k.clocks[ref.Path]
-	if !guarded && !clock && (learnedCovers(k.learned, ref.Path) || ref.Noise != ref.Path && learnedWhole(k.learned, ref.Noise)) {
+	if !guarded && !clock && (learnedCovers(k.learned, ref.Path) || ref.Noise != ref.Path && learnedWhole(k.learned, ref.Noise)) &&
+		!(ref.Type == learn.String && staleWhole(k.learned, ref.Path, ref.Noise, ref.Value)) {
 		return true, true
 	}
 	both := inRec && inLive
@@ -587,6 +591,32 @@ func (k httpKnown) Words(l learn.Leaf) ([]int, bool) {
 func learnedWhole(m map[string][]string, k string) bool {
 	v, ok := m[k]
 	return ok && !learn.IsNoiseWords(v)
+}
+
+// staleWhole reports whether the learned noise that names the text at exact
+// whole names it alone (at exact, or at legacy, the request-body learner's
+// dialect), not a container of it, and text, its recorded value, is more
+// than one word (learn.OneWord). Keploy learns such a text by its words, so
+// that noise is an older keploy's, and keploy honours noise whole only at a
+// text of one word (founder, 2026-11-03): the text is compared, and a change
+// in it asks for the test to be recorded again (staleWholeWhy). Noise at a
+// container of the text is honoured as before.
+func staleWhole(learned map[string][]string, exact, legacy, text string) bool {
+	if learn.OneWord(text) || !learnedWhole(learned, exact) && !learnedWhole(learned, legacy) {
+		return false
+	}
+	for p, v := range learned {
+		if (strings.HasPrefix(exact, p+".") || strings.HasPrefix(exact, p+"[")) && !learn.IsNoiseWords(v) {
+			return false
+		}
+	}
+	return true
+}
+
+// staleWholeWhy is why a replay refuses a change in the text named shape
+// that an older keploy learned as noise whole (staleWhole).
+func staleWholeWhy(shape string) string {
+	return shape + " was learned as noise whole by an older keploy, and it is a text of more than one word: keploy now leaves only the words of a text that changed unchecked, and compares the rest, so it compares this text, which changed. Record the test again, and keploy learns which of its words change"
 }
 
 // learnedCovers reports whether learned noise names the leaf at path whole:

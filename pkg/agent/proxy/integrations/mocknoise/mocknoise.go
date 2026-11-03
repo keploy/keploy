@@ -576,9 +576,10 @@ func DetectJSONBodyDrift(recorded, live *JSONBody, known map[string][]string, ty
 // MergeLearned returns a fresh map combining already-recorded noise with newly
 // detected noise, as learn.MergeReqBodyNoise does: learned noise is monotonic
 // (once a field is noise it stays noise), so existing entries win on key
-// collision but for two words patterns, which leave unchecked the words either
-// does (learn.MergeNoise); every value slice is deep-copied so the result
-// shares no backing storage with its inputs. This is the single merge helper
+// collision but for a words pattern: two leave unchecked the words either
+// does, and one detected where existing is noise whole, an older keploy's,
+// takes its place (learn.MergeNoise); every value slice is deep-copied so
+// the result shares no backing storage with its inputs. This is the single merge helper
 // behind HTTP's HTTPReq.ReqBodyNoise, the kind-agnostic MockSpec.ReqBodyNoise,
 // and the on-disk persistence in mockdb.
 func MergeLearned(existing, detected map[string][]string) map[string][]string {
