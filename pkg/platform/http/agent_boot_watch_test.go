@@ -1314,8 +1314,8 @@ func TestALookTheEngineDoesNotAnswerIsSaidWhileItIsOut(t *testing.T) {
 // sampler running in the bubble, synctest's deadlock panic. The process
 // clock, sampled outside, is the one real clock the rows leave: the silence
 // bound runs on it, and the rows set that to an hour, past any run, or to 0,
-// which every look is past at once; one row sets it to 200 ms and waits for
-// that clock to pass it (runnableWaiter).
+// which every look is past at once; the two rows that place the warning
+// against the bound give the watch a clock they drive instead (startClock).
 func inBubble(t *testing.T, f func(t *testing.T)) {
 	t.Helper()
 	defer stall.Hold()()
@@ -1670,99 +1670,190 @@ func TestALookOutPastTheSilenceBoundIsWarnedOnce(t *testing.T) {
 	})
 }
 
-// runnableWaiter returns a func that waits, from a synctest bubble, until
-// keploy's runnable time (stall.ProcessClock) has reached a value. Call it
-// outside the bubble, before inBubble: it holds that clock for the test, so
-// the clock moves, and a goroutine it starts there reads it on real time.
-// The row's goroutine then waits on channels from outside the bubble, which
-// synctest does not count as durably blocked: the bubble's clock holds while
-// keploy's runs. The goroutine and the hold end with the test.
-func runnableWaiter(t *testing.T) func(time.Duration) {
-	t.Cleanup(stall.Hold())
-	req, done := make(chan time.Duration), make(chan struct{})
-	go func() {
-		for target := range req {
-			for stall.ProcessClock().Runnable() < target {
-				time.Sleep(2 * time.Millisecond)
-			}
-			done <- struct{}{}
-		}
-	}()
-	t.Cleanup(func() { close(req) })
-	return func(target time.Duration) {
-		req <- target
-		<-done
+// The silence bound's warning comes at a look's first line due once the look
+// has been out for the bound of keploy's own runnable time, counted from the
+// look's own start, and not before; it names the bound, and whether the agent
+// runs in a container. Here the first look's first line, a nanosecond short
+// of the bound, is said at INFO, its next, at the bound, is the warning, and
+// the one after is INFO again; that look is out on whether the process runs.
+// It comes back that the process runs, with a report, and the second look
+// begins a quarter of the bound later and is out at its read of the next
+// report: its first line, a nanosecond short of the bound into it, is INFO,
+// and its next, half the bound after that line, is the warning. The
+// row gives the watch a clock it drives (startClock), moved only while every
+// other goroutine in the bubble (inBubble) is blocked, for an agent in a
+// container and a native one.
+func TestTheSilenceWarningComesAtTheFirstLineOnceTheBoundIsReached(t *testing.T) {
+	const bound = 10 * time.Second
+	look, silence, every, sclk := bootLook, bootSilence, stillWaitingLooks, startClock
+	bootLook, bootSilence, stillWaitingLooks = time.Second, bound, 3
+	t.Cleanup(func() { bootLook, bootSilence, stillWaitingLooks, startClock = look, silence, every, sclk })
+	for _, inContainer := range []bool{true, false} {
+		t.Run(fmt.Sprintf("inContainer=%v", inContainer), func(t *testing.T) {
+			clk := &stall.ManualClock{}
+			startClock = clk
+			inBubble(t, func(t *testing.T) {
+				const warning = "keploy's look at the agent's start has not come back for a while"
+				notAnswered := "waiting on the keploy agent's start: keploy's look at it has not come back"
+				noNewReport := "still waiting for the keploy agent: its process runs, and keploy has read no new report"
+				if inContainer {
+					notAnswered = "waiting on the container engine: it has not answered"
+					noNewReport = "still waiting for the keploy agent: its container runs, and keploy has read no new report"
+				}
+				core, logs := observer.New(zapcore.InfoLevel)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				// The first look is out on whether the process runs until
+				// the row answers it: it runs, and its report is read. The
+				// second says at once that it runs, and its read is out for
+				// good.
+				answer := make(chan struct{})
+				var looks atomic.Int32
+				running := func(ctx context.Context) bool {
+					if looks.Add(1) == 1 {
+						select {
+						case <-answer:
+						case <-ctx.Done():
+						}
+					}
+					return true
+				}
+				read := func(ctx context.Context) (utils.BootProgress, bool) {
+					if looks.Load() == 1 {
+						return utils.BootProgress{Step: "loading eBPF", CountsQuiet: true}, true
+					}
+					<-ctx.Done()
+					return utils.BootProgress{}, false
+				}
+				judged := watchStart(ctx, zap.New(core), read, running, nil, inContainer, false)
+				start := time.Now()
+				// warnedAt fails unless the nth line, by the tick, is the
+				// warning, naming the bound and where the agent runs.
+				warnedAt := func(tick, n int, why string) {
+					t.Helper()
+					e := saidBy(t, logs, judged, tick, n, zapcore.WarnLevel, warning, why)
+					if got := e.ContextMap()["runnable_time"]; got != bound {
+						t.Fatalf("the warning at tick %d says runnable_time %v; want the silence bound, %v", tick, got, bound)
+					}
+					if got := e.ContextMap()["in_a_container"]; got != inContainer {
+						t.Fatalf("the warning at tick %d says in_a_container %v; want %v", tick, got, inContainer)
+					}
+				}
+				// The first look begins at the 1st tick, the clock at 0.
+				tickTo(start, 1)
+				clk.Advance(bound - time.Nanosecond)
+				tickTo(start, 3)
+				saidBy(t, logs, judged, 3, 1, zapcore.InfoLevel, notAnswered, "the first look's first line, a nanosecond short of the bound")
+				clk.Advance(time.Nanosecond)
+				tickTo(start, 6)
+				warnedAt(6, 2, "the first look's second line, at the bound")
+				clk.Advance(bound)
+				tickTo(start, 9)
+				saidBy(t, logs, judged, 9, 3, zapcore.InfoLevel, notAnswered, "the first look's third line, warned of already")
+				// It comes back, the clock at twice the bound, with the
+				// agent's first report: progress, so the wait's count
+				// begins again. The clock moves a quarter of the bound,
+				// and the second look begins at the 10th tick.
+				close(answer)
+				synctest.Wait()
+				clk.Advance(bound / 4)
+				tickTo(start, 10)
+				clk.Advance(bound - time.Nanosecond)
+				tickTo(start, 12)
+				saidBy(t, logs, judged, 12, 4, zapcore.InfoLevel, noNewReport, "the second look's first line, a nanosecond short of the bound into it")
+				clk.Advance(bound / 2)
+				tickTo(start, 15)
+				warnedAt(15, 5, "the second look's second line, half the bound after its first")
+				if n := looks.Load(); n != 2 {
+					t.Fatalf("%d looks begun by tick 15; want 2", n)
+				}
+				// Each look's lines are counted from the wait's last
+				// progress: the watch's start, then the first report.
+				lines := logs.All()
+				checkStartLineTicks(t, lines[:3], 3*bootLook)
+				checkStartLineTicks(t, lines[3:], 3*bootLook)
+			})
+		})
 	}
 }
 
-// The silence bound's warning comes at a look's first line due once the look
-// has been out for the bound of keploy's own runnable time, and not before:
-// here the look's first line comes at least three quarters of the bound in, at
-// INFO unless keploy's runnable time had moved the whole bound since the look
-// began when the watch read it there, and the look's first line past the bound
-// is the warning, which names the bound. The row waits, the bubble's clock
-// held, for keploy's runnable time to pass each mark (runnableWaiter), and
-// reads that runnable time before the watch starts, after its first tick, and
-// after its first line's tick: the look began between r0 and r1, and the first
-// line's read of keploy's runnable time comes after the wait before its tick
-// and before the row's read after that tick. keploy's runnable time moves on
-// past each mark, and through the bubble's own steps, so where the reads cannot
-// place the first line short of the bound, the row does not check that line's
-// level and takes the one warning at either line, and correct code never fails
-// the row.
-func TestTheSilenceWarningComesAtTheFirstLinePastTheBound(t *testing.T) {
-	const bound = 200 * time.Millisecond
-	look, silence, every := bootLook, bootSilence, stillWaitingLooks
+// An agent that has said its server listens still has its wait said once the
+// latest look found its process not running (a container paused, or one
+// docker compose starts again), and then a look out past the silence bound is
+// warned of; the ready rule bounds no wait on a process that does not run.
+// While its process runs, its wait is said only once a look has gone a whole
+// line without saying whether it runs. Each case runs on a clock the row
+// drives (startClock), in a bubble (inBubble), for an agent in a container
+// and, where its process runs on, a native one: a native agent's process
+// that has run does not stop and go on, its exit ends the wait. The first
+// look finds the process running and reads that its server listens, and the
+// count of the wait begins again there.
+func TestAnAgentThatSaidItListensHasItsWaitSaidWhenItsLooksStopSayingSo(t *testing.T) {
+	const bound = 10 * time.Second
+	look, silence, every, sclk := bootLook, bootSilence, stillWaitingLooks, startClock
 	bootLook, bootSilence, stillWaitingLooks = time.Second, bound, 3
-	t.Cleanup(func() { bootLook, bootSilence, stillWaitingLooks = look, silence, every })
-	waitRunnable := runnableWaiter(t)
-	inBubble(t, func(t *testing.T) {
-		const warning = "keploy's look at the agent's start has not come back for a while"
-		const notAnswered = "waiting on the container engine: it has not answered"
-		clk := stall.ProcessClock()
-		core, logs := observer.New(zapcore.InfoLevel)
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		running := func(ctx context.Context) bool { <-ctx.Done(); return false }
-		read := func(context.Context) (utils.BootProgress, bool) { return utils.BootProgress{}, false }
-		r0 := clk.Runnable()
-		judged := watchStart(ctx, zap.New(core), read, running, nil, true, false)
-		start := time.Now()
-		tickTo(start, 1)
-		r1 := clk.Runnable()
-		// Three quarters of the bound into the look, its first line, at the
-		// 3rd tick.
-		waitRunnable(r1 + bound*3/4)
-		tickTo(start, 3)
-		if in := clk.Runnable() - r0; in < bound {
-			saidBy(t, logs, judged, 3, 1, zapcore.InfoLevel, notAnswered, fmt.Sprintf("the look's first line, at most %v into it", in))
-		} else {
-			t.Logf("the look's first line not checked: the reads place it up to %v into the look, not short of the %v bound", in, bound)
-		}
-		// Past the bound, its next line, at the 6th: the one warning, but
-		// for a first line the reads could not place short of the bound.
-		waitRunnable(r1 + bound)
-		tickTo(start, 6)
-		notJudged(t, judged)
-		lines := logs.All()
-		if len(lines) != 2 {
-			t.Fatalf("%d lines said by tick 6; want 2", len(lines))
-		}
-		want := [2]zapcore.Level{zapcore.InfoLevel, zapcore.WarnLevel}
-		if lines[0].Level == zapcore.WarnLevel {
-			want = [2]zapcore.Level{zapcore.WarnLevel, zapcore.InfoLevel}
-		}
-		for i, e := range lines {
-			text := notAnswered
-			if want[i] == zapcore.WarnLevel {
-				text = warning
+	t.Cleanup(func() { bootLook, bootSilence, stillWaitingLooks, startClock = look, silence, every, sclk })
+	for _, inContainer := range []bool{true, false} {
+		for _, stops := range []bool{true, false} {
+			if stops && !inContainer {
+				continue
 			}
-			if e.Level != want[i] || !strings.HasPrefix(e.Message, text) {
-				t.Fatalf("line %d says %s %q; want %s %q: one warning, at the look's first line past the bound", i, e.Level.CapitalString(), e.Message, want[i].CapitalString(), text)
-			}
-			if got := e.ContextMap()["runnable_time"]; e.Level == zapcore.WarnLevel && got != bound {
-				t.Fatalf("the warning says runnable_time %v; want the silence bound, %v", got, bound)
-			}
+			t.Run(fmt.Sprintf("inContainer=%v,stops=%v", inContainer, stops), func(t *testing.T) {
+				clk := &stall.ManualClock{}
+				startClock = clk
+				inBubble(t, func(t *testing.T) {
+					notAnswered := "waiting on the keploy agent's start: keploy's look at it has not come back"
+					notRun := "still waiting for the keploy agent: its process has not begun to run"
+					if inContainer {
+						notAnswered = "waiting on the container engine: it has not answered"
+						notRun = "still waiting for the keploy agent: the container engine does not run its container"
+					}
+					core, logs := observer.New(zapcore.InfoLevel)
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					// The first look finds the process running; the second
+					// finds it not running where it stops, else running; the
+					// third is out on whether it runs for good. Each read
+					// finds the report that says the server listens.
+					var looks atomic.Int32
+					running := func(ctx context.Context) bool {
+						switch looks.Add(1) {
+						case 1:
+							return true
+						case 2:
+							return !stops
+						}
+						<-ctx.Done()
+						return false
+					}
+					read := func(context.Context) (utils.BootProgress, bool) {
+						return utils.BootProgress{Seq: 1, Beat: 1, Ready: true, CountsQuiet: true}, true
+					}
+					judged := watchStart(ctx, zap.New(core), read, running, nil, inContainer, false)
+					start := time.Now()
+					// The count begins again at the 1st tick's report: the
+					// line at the 4th tick has the third look out 2 ticks.
+					tickTo(start, 4)
+					if !stops {
+						if n := logs.Len(); n != 0 {
+							t.Fatalf("%d lines by tick 4, with the process running and its server listening; want none, the first %q", n, logs.All()[0].Message)
+						}
+						notJudged(t, judged)
+						tickTo(start, 7)
+						saidBy(t, logs, judged, 7, 1, zapcore.InfoLevel, notAnswered, "with the third look out on whether the process runs for a whole line")
+						checkStartLineTicks(t, logs.All(), 6*bootLook)
+						return
+					}
+					saidBy(t, logs, judged, 4, 1, zapcore.InfoLevel, notRun, "with the second look's process not running")
+					clk.Advance(bound)
+					tickTo(start, 7)
+					e := saidBy(t, logs, judged, 7, 2, zapcore.WarnLevel, "keploy's look at the agent's start has not come back for a while", "with the third look out for the bound")
+					if got := e.ContextMap()["runnable_time"]; got != bound {
+						t.Fatalf("the warning says runnable_time %v; want the silence bound, %v", got, bound)
+					}
+					checkStartLineTicks(t, logs.All(), 3*bootLook)
+				})
+			})
 		}
-	})
+	}
 }
