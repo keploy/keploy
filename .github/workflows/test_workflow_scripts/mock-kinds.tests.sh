@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Tests for mock-kinds.sh's http_mocks_are. Run by linux-ci-scripts.yml, or
+# locally (it needs only bash and awk, and leaves nothing behind):
+#
+#   bash .github/workflows/test_workflow_scripts/mock-kinds.tests.sh
+#
+# Each case writes a mocks.yaml of the kinds it names, in keploy's layout (one
+# YAML document per mock, its kind at the top level), every mock with an
+# indented `kind:` in its spec, which is not a mock's kind. It checks the
+# verdict and the line http_mocks_are prints.
+#
+# aws-runner is the recording of the busy --sync pass of the repeated-headers
+# lane on an AWS runner: the DNS mocks (A, AAAA, PTR) of the runner's own
+# name, which app.py's HTTPServer looks up at start, then 200 Http mocks. It
+# passes, as the same recording without them does, or with them last; one
+# Http mock more (duplicated) or fewer (lost) fails with them as without them.
+# A mock of any other kind fails, Http2 included, and so does an empty file or
+# a missing one.
+set -u
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source-path=SCRIPTDIR
+source "$here/mock-kinds.sh"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+fails=0
+
+# mocks FILE KIND:COUNT...: writes FILE with COUNT mocks of each KIND, in the
+# order given. An empty KIND writes a `kind:` line with no kind.
+mocks() {
+    local f=$1 spec kind n i id=0
+    shift
+    : > "$f"
+    for spec in "$@"; do
+        kind=${spec%:*} n=${spec##*:}
+        for ((i = 0; i < n; i++)); do
+            [ "$id" -gt 0 ] && echo --- >> "$f"
+            printf 'version: api.keploy.io/v1beta1\nkind:%s\nname: mock-%d\nspec:\n    metadata:\n        kind: Generic\n        type: config\n' \
+                "${kind:+ $kind}" "$id" >> "$f"
+            id=$((id + 1))
+        done
+    done
+}
+
+# check NAME WANT_RC N WANT_LINE [KIND:COUNT...]: http_mocks_are FILE N, FILE
+# written by mocks from the KIND:COUNTs (with none, FILE is not there), must
+# return WANT_RC (0, or 1 for any failure) and print "FILE: WANT_LINE".
+check() {
+    local name=$1 want_rc=$2 n=$3 want=$4 f="$tmp/$1.yaml" out rc
+    shift 4
+    [ $# -gt 0 ] && mocks "$f" "$@"
+    out=$(http_mocks_are "$f" "$n")
+    rc=$?
+    [ "$rc" -eq 0 ] || rc=1
+    if [ "$rc" -ne "$want_rc" ] || [ "$out" != "$f: $want" ]; then
+        echo "FAIL $name: http_mocks_are FILE $n returned $rc, want $want_rc"
+        echo "     printed: $out"
+        echo "     want:    $f: $want"
+        fails=$((fails + 1))
+    else
+        echo "ok   $name (rc $rc): $want"
+    fi
+}
+
+check http-only            0 3   "3 Http mocks, 0 DNS, 0 of other kinds"                 Http:3
+check aws-runner           0 200 "200 Http mocks, 3 DNS, 0 of other kinds"               DNS:3 Http:200
+check dns-last             0 200 "200 Http mocks, 3 DNS, 0 of other kinds"               Http:200 DNS:3
+check duplicated-http      1 200 "201 Http mocks, 0 DNS, 0 of other kinds"               Http:201
+check duplicated-http-dns  1 200 "201 Http mocks, 3 DNS, 0 of other kinds"               Http:201 DNS:3
+check lost-http            1 200 "199 Http mocks, 0 DNS, 0 of other kinds"               Http:199
+check lost-http-dns        1 200 "199 Http mocks, 3 DNS, 0 of other kinds"               Http:199 DNS:3
+check dns-in-place-of-http 1 3   "2 Http mocks, 1 DNS, 0 of other kinds"                 Http:2 DNS:1
+check other-kind           1 200 "200 Http mocks, 0 DNS, 1 of other kinds (MySQL=1)"     Http:200 MySQL:1
+check other-kind-dns       1 200 "200 Http mocks, 3 DNS, 2 of other kinds (Generic=2)"   Http:200 DNS:3 Generic:2
+check http2-is-not-http    1 3   "2 Http mocks, 0 DNS, 1 of other kinds (Http2=1)"       Http:2 Http2:1
+check no-kind              1 3   "3 Http mocks, 0 DNS, 1 of other kinds ((none)=1)"      Http:3 :1
+check no-mocks             1 3   "0 Http mocks, 0 DNS, 0 of other kinds"                 Http:0
+check no-file              1 3   "0 Http mocks, 0 DNS, 0 of other kinds"
+
+if [ "$fails" -ne 0 ]; then
+    echo "mock-kinds.tests.sh: $fails case(s) failed"
+    exit 1
+fi
+echo "mock-kinds.tests.sh: all cases passed"
