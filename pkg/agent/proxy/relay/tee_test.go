@@ -668,6 +668,34 @@ func TestTee_StreamClosedBeforeItsEndReadsTheClose(t *testing.T) {
 	}
 }
 
+// A reader closed after tee.close but before the drain's end (the relay's
+// final flush, which a session abort can land in) was closed before the
+// stream's end too, so it reads fakeconn.ErrClosed after what it was handed.
+// The stream's end is decided as the drain returns, not when close is called
+// (tee.endStream). out has one slot and the drain holds two more chunks, so
+// it cannot end before the reader's close; the hour-long stall bound cannot
+// end it either.
+func TestTee_StreamClosedDuringTheFinalFlushReadsTheClose(t *testing.T) {
+	t.Parallel()
+	tt := newTee(fakeconn.FromDest, 1<<20, 1, time.Hour, nil, nil)
+	fc := fakeconn.New(tt.readCh(), nil, nil)
+	tt.start(fc.Done())
+	for _, s := range []string{"a", "b", "c"} {
+		if !tt.push(mkChunk(s)) {
+			t.Fatalf("push %q refused", s)
+		}
+	}
+	tt.close()
+	_ = fc.Close()
+	tt.waitDone()
+	if c, err := fc.ReadChunk(); err != nil || string(c.Bytes) != "a" {
+		t.Fatalf("read %q, %v; want the chunk delivered before the close", c.Bytes, err)
+	}
+	if _, err := fc.ReadChunk(); !errors.Is(err, fakeconn.ErrClosed) {
+		t.Errorf("a reader closed during the final flush read %v at the stream's end, want %v", err, fakeconn.ErrClosed)
+	}
+}
+
 // TestDrainingAChunkReturnsCapacity pins the queue's core accounting invariant.
 //
 // qBytes must fall when a chunk leaves the queue. Without that, PerConnCap
