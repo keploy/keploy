@@ -93,11 +93,14 @@ const minLateRun = 16
 // digit. That is a UUID (8-4-4-4-12 hex digits), or ASCII letters, digits,
 // '-' and '_' alone, one of whose runs between the '-' and '_' is
 // minLateRun or longer and holds a letter and a digit itself (a ULID, a
-// nanoid, a hex, base32 or base64url token: "evt-3N9WB5TJ6HCAQ8MV"). A
-// count, a flag, a status, a code or a short name ("4", "true", "pending", "201",
+// hex or unpadded base32 token: "evt-3N9WB5TJ6HCAQ8MV"; a nanoid or
+// base64url token only where its '-' and '_' leave such a run). A count, a
+// flag, a status, a code or a short name ("4", "true", "pending", "201",
 // "us-west-2", "worker-11", "t3-medium", "en_US-v2") stands in many
 // answers, so an older test's serve that holds one shows nothing of where
-// the call's value came from, and keploy says it cannot name it.
+// the call's value came from, and keploy says it cannot name it. lateID
+// reads the shape alone: a compact timestamp ("20261103T100512Z") or a
+// long name with a digit ("ProductCatalogV3Service") passes too.
 func lateID(live string) bool {
 	for i := 0; i < len(live); i++ {
 		if c := live[i]; !isWord(c) && c != '-' && c != '_' {

@@ -424,6 +424,7 @@ func TestALateCallIsNamedOnlyByAnID(t *testing.T) {
 		"7f7e49f42-b6c-4e1d-8f3a-5c9b0d7e6a12":  false,
 		"7f7e49f4-2b6c-4e1d-8f3a-5c9b0d7e6g12":  false,
 		"7f7e49f4_2b6c_4e1d_8f3a_5c9b0d7e6a12":  false,
+		"7f7e49f4-2b6c-4e1d-8f3a-5c9b0d7e-a12":  false,
 		"abcdefgh_12345678":                     false,
 		"abcdefgh-12345678":                     false,
 		"7f7e49f42b6c4e1d8f3a5c9b0d7e6a12":      true,
