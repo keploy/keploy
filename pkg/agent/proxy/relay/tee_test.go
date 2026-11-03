@@ -1,7 +1,9 @@
 package relay
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"testing"
@@ -619,14 +621,50 @@ func TestTee_DeliversWhenOutHasRoomEvenIfConsumerGone(t *testing.T) {
 	tt.close()
 	tt.waitDone()
 
+	// The stream of a consumer that is gone is left open (endStream), so
+	// this takes what out holds without waiting for its end.
 	delivered := 0
-	for range tt.readCh() {
+	for len(tt.readCh()) > 0 {
+		<-tt.readCh()
 		delivered++
 	}
 	if delivered != n {
 		t.Errorf("delivered %d of %d chunks that out had room for; without the "+
 			"non-blocking pre-try the select coin-flips against a closed consumerGone "+
 			"and discards deliverable data", delivered, n)
+	}
+}
+
+// A stream whose reader was closed before the stream's end is left open, so
+// its reader reads fakeconn.ErrClosed after what it was handed, however late
+// it gets there: the session's close, not the connection's end. A reader
+// closed after the end, as the relay's teardown closes it, reads io.EOF
+// (tee.endStream).
+func TestTee_StreamClosedBeforeItsEndReadsTheClose(t *testing.T) {
+	t.Parallel()
+	for _, closedFirst := range []bool{true, false} {
+		tt := newTee(fakeconn.FromDest, 1<<20, 4, testStallGrace, nil, nil)
+		fc := fakeconn.New(tt.readCh(), nil, nil)
+		tt.start(fc.Done())
+		tt.push(mkChunk("answer"))
+		if closedFirst {
+			_ = fc.Close()
+		}
+		tt.close()
+		tt.waitDone()
+		if !closedFirst {
+			_ = fc.Close()
+		}
+		if c, err := fc.ReadChunk(); err != nil || string(c.Bytes) != "answer" {
+			t.Errorf("closed first %v: read %q, %v; want the chunk delivered before the end", closedFirst, c.Bytes, err)
+		}
+		want := io.EOF
+		if closedFirst {
+			want = fakeconn.ErrClosed
+		}
+		if _, err := fc.ReadChunk(); !errors.Is(err, want) {
+			t.Errorf("closed first %v: the stream's end read %v, want %v", closedFirst, err, want)
+		}
 	}
 }
 

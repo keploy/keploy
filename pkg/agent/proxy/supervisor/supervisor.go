@@ -97,8 +97,10 @@ type Supervisor struct {
 	// SessionOnAbort is invoked exactly once when the supervisor
 	// aborts the run (hang, panic, mem-cap, outer cancel). The relay
 	// sets this to a closure that closes the FakeConns so the
-	// parser's blocked reads unblock: with ErrClosed while the relay
-	// still captures, or io.EOF once it has ended the stream.
+	// parser's blocked reads unblock: with ErrClosed, however long the
+	// connection goes on after (the relay leaves the stream of a FakeConn
+	// closed before its end open), or io.EOF when the relay had ended the
+	// stream before the close.
 	//
 	// Set it before calling Run. The supervisor calls it synchronously
 	// on the abort path, so the callback must not block. It calls it

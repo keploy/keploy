@@ -553,7 +553,7 @@ func (t *tee) drop(reason string) {
 }
 
 // drain moves chunks from the queue to the FakeConn-facing channel in FIFO
-// order, then closes out and signals done.
+// order, then ends the stream (endStream) and signals done.
 //
 // Delivery is a blocking send. That is the point: a parser that is merely
 // slow — the boot burst this path exists for, or a node under load — must
@@ -579,7 +579,7 @@ func (t *tee) drop(reason string) {
 // accepted into a queue that no drain is left to serve.
 func (t *tee) drain() {
 	defer close(t.done)
-	defer close(t.out)
+	defer t.endStream()
 	for {
 		t.mu.Lock()
 		if len(t.q) == 0 {
@@ -772,6 +772,30 @@ func (t *tee) abandon(held fakeconn.Chunk) {
 			zap.String("dir", t.dir.String()),
 			zap.Int("chunks", lost),
 		)
+	}
+}
+
+// endStream ends the FakeConn's stream as drain returns: it closes out, so
+// its reader reads io.EOF once it has taken what out holds, unless the reader
+// was closed first (consumerGone). That stream is left open, so its reader
+// reads fakeconn.ErrClosed there instead: the session closed it (the
+// supervisor's abort, or the dispatcher once its parser has returned) while
+// the capture could still send, and what the connection did after is not the
+// stream's. Closing it would make the session's close read as the
+// connection's end to a reader behind its capture, one that gets to the end
+// only after the connection has ended, while a reader that waited there read
+// ErrClosed: the HTTP parser records a call that got no answer with the fault
+// its end says the upstream gave (noAnswerFault). The two events are ordered
+// here, on the one goroutine that ends the stream: a close seen before the
+// end leaves the stream open, and one that comes after the end finds it
+// ended, and its reader reads io.EOF, as a reader closed by the relay's
+// teardown does. A closed FakeConn never waits on its channel, so nothing
+// blocks on one left open.
+func (t *tee) endStream() {
+	select {
+	case <-t.consumerGone:
+	default:
+		close(t.out)
 	}
 }
 
