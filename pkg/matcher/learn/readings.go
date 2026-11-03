@@ -24,7 +24,9 @@ import (
 //   - case-folded: the decoded form in lower case;
 //   - quoted-printable: its soft line breaks taken out and its "=XX"
 //     escapes decoded, where they decode to text (qpDecoded), and that in
-//     lower case;
+//     lower case. A payload is read in it always; a drifted value only
+//     where it and the value it is compared with read as quoted-printable
+//     text, whole or as a mail that says it is (formsOf);
 //   - encoded: each run of eight characters or more that decodes to text:
 //     of the standard or URL-safe base64 alphabet, padded or not, whole,
 //     joined across the line breaks of wrapped base64 (indented or escaped
@@ -572,25 +574,35 @@ func joinWrapped(s string) (string, []int) {
 // or '\' (which the readings would take for escapes keploy cannot read).
 // A value with no such escape is itself.
 func qpDecoded(s string) string {
-	d, _ := qpRead(s)
+	d, _, _ := qpRead(s)
 	return d
 }
 
-// qpRead is qpDecoded(s), and whether s reads as quoted-printable whole:
-// each '=' it holds starts a soft line break or a run of escapes that
-// qpDecoded decodes. Quoted-printable writes every '=' of its text as
+// qpRead is qpDecoded(s), whether s reads as quoted-printable whole, and
+// whether its escapes show it is quoted-printable.
+//
+// Whole: each '=' it holds starts a soft line break or a run of escapes
+// that qpDecoded decodes. Quoted-printable writes every '=' of its text as
 // "=3D", so a value that holds any other '=' ("Credential=local/...,
-// Signature=09bb..." of an AWS signature, "sig=B1CD") is no
-// quoted-printable text, and an "=XX" in it only looks like an escape. A
-// value with no '=' reads whole; one whose escapes decode to no text (a
-// Latin-1 "caf=E9") does not.
-func qpRead(s string) (string, bool) {
-	if !strings.Contains(s, "=") {
-		return s, true
-	}
+// Signature=09bb..." of an AWS signature) is no quoted-printable text, and
+// an "=XX" in it only looks like an escape. Nor is one with a run of
+// escapes qpDecoded leaves as written: one that decodes to no text (a
+// Latin-1 "caf=E9"), or to a '%' or a '\'.
+//
+// Shown: it holds an escape of a character quoted-printable has to write
+// as one (qpMustEscape), or no escape at all once its soft line breaks are
+// out (it reads the same either way). Every other escape ("=41" an 'A',
+// "=2B" a '+', "=09" a tab) is of a character quoted-printable may write
+// as itself, so a value whose escapes are all of that kind shows nothing:
+// a signature in upper-case hex whose first two digits happen to be an
+// escape ("sha256=2BC4...", "v1=41F0...") is no '+' or 'A' and its hex.
+func qpRead(s string) (d string, whole, shown bool) {
 	s = strings.ReplaceAll(strings.ReplaceAll(s, "=\r\n", ""), "=\n", "")
+	if !strings.Contains(s, "=") {
+		return s, true, true
+	}
 	var b strings.Builder
-	whole := true
+	whole = true
 	for i := 0; i < len(s); {
 		j := i
 		var bytes []byte
@@ -609,13 +621,26 @@ func qpRead(s string) (string, bool) {
 		}
 		if isText(bytes) && !strings.ContainsAny(string(bytes), "%\\") {
 			b.Write(bytes)
+			shown = shown || qpMustEscape(bytes)
 		} else {
 			whole = false
 			b.WriteString(s[i:j])
 		}
 		i = j
 	}
-	return b.String(), whole
+	return b.String(), whole, shown
+}
+
+// qpMustEscape reports whether text, what a run of escapes decodes to,
+// holds a character quoted-printable has to write as an escape (RFC 2045):
+// an '=', or a non-ASCII one.
+func qpMustEscape(text []byte) bool {
+	for _, c := range text {
+		if c == '=' || c >= utf8.RuneSelf {
+			return true
+		}
+	}
+	return false
 }
 
 // qpForm is s read as quoted-printable (qpDecoded) after its escapes
@@ -628,12 +653,15 @@ func qpForm(s string) string {
 }
 
 // qpFormRead is qpForm(s), and whether s reads as quoted-printable text:
-// whole (qpRead), or as a mail or a MIME part that says it is
-// (qpDeclared), whose header lines hold an '=' of their own
-// ("charset=utf-8") that starts no escape.
+// whole, where a soft line break or its escapes show it is (qpRead); or
+// as a mail or a MIME part that says it is (qpDeclared), whose header
+// lines hold an '=' of their own ("charset=utf-8") that starts no escape.
 func qpFormRead(s string) (string, bool) {
-	u := unescaped(noSoftBreaks(s))
-	q, qp := qpRead(u)
+	t := noSoftBreaks(s)
+	soft := t != s
+	u := unescaped(t)
+	q, whole, shown := qpRead(u)
+	qp := whole && (shown || soft)
 	if !qp {
 		qp = qpDeclared.MatchString(u)
 	}
@@ -965,8 +993,10 @@ func b64DecodeAny(s string) ([]byte, bool) {
 
 // formsOf are the declared forms of a drifted value, recorded and live,
 // beside the value as read raw: decoded (percent and backslash escapes),
-// case-folded, and the text its encoded runs decode to (b64Text), itself
-// case-folded; and that text, recorded and live, on its own (encoded).
+// case-folded; quoted-printable, where both values read as
+// quoted-printable text (qpFormRead), itself case-folded; and the text its
+// encoded runs decode to (b64Text), itself case-folded; and that text,
+// recorded and live, on its own (encoded).
 func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms [][2]string, encoded [2]string) {
 	forms = [][2]string{{decRec, decLive}}
 	fold := func(f [2]string) {
@@ -977,7 +1007,7 @@ func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms [][2]stri
 	fold(forms[0])
 	// The quoted-printable form only where both values read as
 	// quoted-printable text (qpFormRead): one that does not is none, and
-	// reading its other value's "=XX" as an escape would make the two
+	// reading the other value's "=XX" as an escape would make the two
 	// differ in this form where the value did not ("Signature=09bb..." a
 	// tab in one run, "Signature=b17d..." as written in the other: an '='
 	// that changed in a run of the base64 alphabet, which unparsed
