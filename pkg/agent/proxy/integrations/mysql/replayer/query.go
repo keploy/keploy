@@ -268,8 +268,10 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			// But we need to remove the corresponding mock from the mockDb for no response commands.
 			if wire.IsNoResponseCommand(commandPkt.Header.Type) {
 				// No response for COM_STMT_CLOSE and COM_STMT_SEND_LONG_DATA
+				// Its type and size, not its bytes: a SEND_LONG_DATA's are a
+				// bound value, a secret wherever a recording redacted one.
 				if ce := logger.Check(zap.DebugLevel, "No response for the command"); ce != nil {
-					ce.Write(zap.Any("command", command))
+					ce.Write(zap.String("command_type", commandPkt.Header.Type), zap.Int("command_size_bytes", len(command)))
 				}
 				continue
 			}

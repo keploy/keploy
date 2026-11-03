@@ -116,6 +116,7 @@ func TestRedactedPlacesOfAPool(t *testing.T) {
 func TestRedactedPlacesOfTheLiveCommand(t *testing.T) {
 	const recorded = "SELECT /* app=web */ name FROM users WHERE org = 'acme' AND k = '" + redactedPlaceholder + "'"
 	p := queryPlaces(recorded, util.NewNoiseChecker(redactedNoise))
+	cast := queryPlaces("SELECT CAST(name AS CHAR(10)) FROM users WHERE org = 'acme' AND k = '"+redactedPlaceholder+"'", util.NewNoiseChecker(redactedNoise))
 	for _, tc := range []struct {
 		name   string
 		places redactedPlaces
@@ -134,6 +135,9 @@ func TestRedactedPlacesOfTheLiveCommand(t *testing.T) {
 		{"the recording's comment redacted", queryPlaces("SELECT /* u="+redactedPlaceholder+" */ name FROM users WHERE k = 'acme'", util.NewNoiseChecker(redactedNoise)),
 			"SELECT /* u=" + liveSecret + " */ name FROM users WHERE k = 'acme'", "select `name` from users where k = '(redacted)'"},
 		{"whole", redactedPlaces{statement: true, whole: true}, "SELECT name FROM t_" + liveSecret, valueRedacted},
+		{"the recorded template with a number in no literal: the redacted literal alone", cast,
+			"SELECT CAST(name AS CHAR(10)) FROM users WHERE org = 'globex' AND k = '" + liveSecret + "'",
+			"select cast(`name` as CHAR(10)) from users where org = 'globex' and k = '(redacted)'"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.places.liveStatement(tc.live); got != tc.want {
@@ -192,6 +196,9 @@ func TestRedactedPlacesOfFieldDiffs(t *testing.T) {
 		{"a literal, another template", literalAt1, "SELECT name FROM users WHERE k = 'x'",
 			[]string{"body.query.literals.0", "body.query.literals.1"},
 			[]string{"body.query.template"}},
+		{"a literal, another template keeping a literal in it", literalAt1, "SELECT name FROM users WHERE k = 'x' INTO OUTFILE '/tmp/x'",
+			[]string{"body.query.template", "body.query.literals.0"},
+			nil},
 		{"the statement", redactedPlaces{statement: true}, liveSame,
 			[]string{"body.query", "body.query.template", "body.query.comments", "body.query.literals.0"},
 			[]string{"body.parameters.0.value"}},
