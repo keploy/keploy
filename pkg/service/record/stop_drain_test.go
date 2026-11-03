@@ -12,6 +12,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	agenthttp "go.keploy.io/server/v3/pkg/platform/http"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -662,8 +663,16 @@ type stoppingComposeAgent struct {
 	released atomic.Bool
 }
 
-func (s *stoppingComposeAgent) EndComposeAgent(release bool) {
-	s.released.Store(release)
+// The recording finds its compose agent's ender by its method set (an
+// optional interface): a signature that drifts from it is skipped without a
+// word, so the fake and the real client are each held to it here.
+var (
+	_ composeAgentEnder = (*stoppingComposeAgent)(nil)
+	_ composeAgentEnder = (*agenthttp.AgentClient)(nil)
+)
+
+func (s *stoppingComposeAgent) EndComposeAgent(drain utils.DrainEnd) {
+	s.released.Store(drain.GaveUp())
 	close(s.ending)
 	<-s.stackDown
 }
