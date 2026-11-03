@@ -160,9 +160,9 @@ func isSudo(cmd *exec.Cmd) bool {
 
 // TerminatePTYCommand is TerminateCommand for a command started on a PTY: it
 // sends SIGTERM to the command (sudo, which hands it to the agent) and leaves
-// the PTY open. Closing the PTY hangs the agent up, and a hung-up agent dies
-// where it stands instead of finishing its shutdown; the PTY is closed once
-// the command has exited (PTYHandle.Wait).
+// the PTY open. Closing the PTY would hang the agent up (a stop, or nothing
+// once it is stopping: cli.Agent) and leave what its shutdown still writes
+// unread; the PTY is closed once the command has exited (PTYHandle.Wait).
 func TerminatePTYCommand(handle *PTYHandle, logger *zap.Logger) error {
 	if handle == nil || handle.cmd == nil || handle.cmd.Process == nil {
 		return nil
