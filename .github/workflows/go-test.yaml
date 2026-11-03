@@ -163,10 +163,10 @@ jobs:
       # the set's handlers, the rows whose readers read a set's recordings
       # at once (a call's warm, the staging), and the rows that wait on the
       # tracker, not the whole package: under -race the package takes about
-      # 9 minutes on 12 CPUs, these 36 rows about 25 seconds on 4 (the size of
+      # 9 minutes on 12 CPUs, these 38 rows about 25 seconds on 4 (the size of
       # ubuntu-latest).
       - name: Running Race Detector (learn tracker)
-        run: go test -race -count=1 -run '^Test(Tracker|Order)|DriftCache|Handlers|^TestACallInTheGapWaitsForTheRequest$|^TestAWindowClosedWithoutItsRequestIsSaid$|^TestA(StagingReadCostingAllTheSetsReadsInFlightRunsAlone|ReadTheSetHasNoRoomForGivesBackWhatItReserved|CallsWarmReadsEachPayloadsStampsWithThePayload|CallsWarmGivesBackWhatItReservedForARecordingAnotherReaderHolds|ReaderReadsARecordingsPartsFromOneLoadOfItsPayload)$' ./pkg/matcher/learn/
+        run: go test -race -count=1 -run '^Test(Tracker|Order)|DriftCache|Handlers|^TestACallInTheGapWaitsForTheRequest$|^TestAWindowClosedWithoutItsRequestIsSaid$|^TestA(StagingReadCostingAllTheSetsReadsInFlightRunsAlone|ReadTheSetHasNoRoomForGivesBackWhatItReserved|CallsWarmReadsEachPayloadsStampsWithThePayload|CallsWarmGivesBackWhatItReservedForARecordingAnotherReaderHolds|ReaderReadsARecordingsPartsFromOneLoadOfItsPayload|ReadReservesItsRecordingsLiteralCost)$|^TestTheRawsACallWarmsHoldNoPayloadOnceItsWarmEnds$' ./pkg/matcher/learn/
 
       # The HTTP learn step's bound row holds its peak heap to the set's
       # budget, a quarter of the agent's memory limit, at three limits. The

@@ -151,7 +151,7 @@ func (dc *DriftCache) warmSet(src func(visit func(*models.Mock) bool) error, rea
 		}
 		<-free
 		x := dc.LazyRawOf(m, false, withAnswer(m))
-		w := readWeight(x)
+		w := readWeight(x, stageCost)
 		s.reserve(w)
 		ch, mine := s.take(x)
 		if ch == nil {

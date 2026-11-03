@@ -277,6 +277,49 @@ func TestAReaderReadsARecordingsPartsFromOneLoadOfItsPayload(t *testing.T) {
 	}
 }
 
+// The payload a reader holds for a recording's parts (Raw.holding) is its
+// copy's alone: the Raws a call gives its warm hold none once it ends, so
+// what the set's store lets go of is let go for them too. A warm that held
+// it in the Raw it was given would keep every payload it read alive for as
+// long as the call keeps its Raws, past the set's budget. Counted: with a
+// store that keeps no payload, each of the call's Raws read after its warm
+// loads its payload again.
+func TestTheRawsACallWarmsHoldNoPayloadOnceItsWarmEnds(t *testing.T) {
+	const n = 4
+	mocks := stampedAnswers(n, eRecAt)
+	defer func(b int64) { bodyBudget = b }(bodyBudget)
+	bodyBudget = 0
+	for _, readers := range []int{1, 3} {
+		t.Run(fmt.Sprintf("%d readers", readers), func(t *testing.T) {
+			warmReadersOf(t, readers)
+			tr := NewTracker()
+			tr.NewSet()
+			tr.Begin()
+			defer tr.End()
+			dc := tr.Drifts()
+			raw := make([]Raw, n)
+			for i, m := range mocks {
+				raw[i] = dc.LazyRawOf(m, false, nil)
+			}
+			dc.warm(raw)
+			if _, called, _ := readsOf(dc.set); called != n || dc.Loads() != n {
+				t.Fatalf("the call's warm read %d of %d payloads, loading %d: want each once", called, n, dc.Loads())
+			}
+			for i, x := range raw {
+				if x.src.held != nil {
+					t.Errorf("the call's Raw of recording %d holds a payload after its warm: want the reader's copy alone to", i)
+				}
+				if len(x.payload().text) == 0 {
+					t.Fatalf("recording %d read no payload", i)
+				}
+			}
+			if got := dc.Loads() - n; got != n {
+				t.Errorf("reading the call's %d Raws after its warm loaded %d payloads, its set's store keeping none: want each again", n, got)
+			}
+		})
+	}
+}
+
 // A read whose cost (readWeight) is all of the set's readInFlight runs
 // alone: while one reader is held in such a payload's read, the other
 // waits for room (inFlightWaiting) and begins none, and once the held read
@@ -297,7 +340,7 @@ func TestAHandlersReadCostingAllTheSetsReadsInFlightRunsAlone(t *testing.T) {
 		m.SetStoredSize(readInFlight / readCost)
 		raw[i] = dc.LazyRawOf(m, true, nil)
 	}
-	if w := readWeight(raw[0]); w != readInFlight {
+	if w := readWeight(raw[0], readCost); w != readInFlight {
 		t.Fatalf("a recording of %d bytes costs %d of the %d in flight: want all of them", readInFlight/readCost, w, readInFlight)
 	}
 	waiting := func() int {
@@ -361,14 +404,14 @@ func TestAStagingReadCostingAllTheSetsReadsInFlightRunsAlone(t *testing.T) {
 	stageReaders = func() int { return 2 }
 	t.Cleanup(func() { stageReaders = was })
 	for _, m := range row.mocks {
-		m.SetStoredSize(readInFlight / readCost)
+		m.SetStoredSize(readInFlight / stageCost)
 	}
 	raw := row.raw()
 	tr := NewTracker()
 	tr.NewSet()
 	s := tr.Drifts().set
-	if w := readWeight(tr.Drifts().LazyRawOf(row.mocks[0], false, withAnswer(row.mocks[0]))); w != readInFlight {
-		t.Fatalf("a recording of %d bytes costs %d of the %d in flight: want all of them", readInFlight/readCost, w, readInFlight)
+	if w := readWeight(tr.Drifts().LazyRawOf(row.mocks[0], false, withAnswer(row.mocks[0])), stageCost); w != readInFlight {
+		t.Fatalf("a recording of %d bytes costs the staging %d of the %d in flight: want all of them", readInFlight/stageCost, w, readInFlight)
 	}
 	waiting := func() int {
 		s.mu.Lock()
@@ -408,8 +451,9 @@ func TestAStagingReadCostingAllTheSetsReadsInFlightRunsAlone(t *testing.T) {
 	}
 }
 
-// What a read reserves of the set's readInFlight (readWeight) is readCost
-// for each byte of its recording, known before its payload is read: a read
+// What a read reserves of the set's readInFlight (readWeight) is readBase
+// and its cost (a call's readCost, the staging's stageCost) for each byte
+// of its recording, known before its payload is read: a read
 // Raw's text; the agent store's count of a lazy one's (StoredSize); the
 // bytes of the spec of one no store counted whose answer is in memory
 // (specBytes); and all of readInFlight, a read alone, for one whose answer
@@ -431,25 +475,27 @@ func TestAReadReservesWhatItsRecordingsBytesCost(t *testing.T) {
 	big.SetStoredSize(readInFlight)
 	inMemory := newHeldRow(1, 4).mocks[0]
 	spec := specBytes(reflect.ValueOf(inMemory.Spec), 0)
-	for _, c := range []struct {
-		name string
-		x    Raw
-		want int64
-	}{
-		{"a read Raw, by its text", read, readCost * int64(len(read.rText))},
-		{"a lazy one the store counted", dc.LazyRawOf(counted, true, nil), readCost * 1000},
-		{"a lazy one in memory no store counted, by its spec", dc.LazyRawOf(inMemory, true, nil), readCost * spec},
-		{"a lazy one parked no store counted, alone", dc.LazyRawOf(parked, true, nil), readInFlight},
-		{"one costing more than readInFlight, alone", dc.LazyRawOf(big, true, nil), readInFlight},
-	} {
-		if got := readWeight(c.x); got != c.want {
-			t.Errorf("%s reserves %d: want %d", c.name, got, c.want)
+	for _, cost := range []int64{readCost, stageCost} {
+		for _, c := range []struct {
+			name string
+			x    Raw
+			want int64
+		}{
+			{"a read Raw, by its text", read, readBase + cost*int64(len(read.rText))},
+			{"a lazy one the store counted", dc.LazyRawOf(counted, true, nil), readBase + cost*1000},
+			{"a lazy one in memory no store counted, by its spec", dc.LazyRawOf(inMemory, true, nil), readBase + cost*spec},
+			{"a lazy one parked no store counted, alone", dc.LazyRawOf(parked, true, nil), readInFlight},
+			{"one costing more than readInFlight, alone", dc.LazyRawOf(big, true, nil), readInFlight},
+		} {
+			if got := readWeight(c.x, cost); got != c.want {
+				t.Errorf("%s reserves %d at %d a byte: want %d", c.name, got, cost, c.want)
+			}
 		}
 	}
 	if n := recordingBytes(nil); n != -1 {
 		t.Errorf("a nil recording counts %d bytes: want -1, not known", n)
 	}
-	if spec <= 0 || readCost*spec >= readInFlight {
+	if spec <= 0 || readBase+stageCost*spec >= readInFlight {
 		t.Errorf("a small in-memory recording's spec counts %d bytes: want some, under what runs alone", spec)
 	}
 
@@ -483,165 +529,119 @@ func TestAReadReservesWhatItsRecordingsBytesCost(t *testing.T) {
 	}
 }
 
-// A read the set has no room for (take: nil, its held tier full) gives back
-// what it reserved of the set's readInFlight before it took the recording,
-// in a call's warm and in the set's staging alike: a read that kept it
-// would leave the set's later reads (its next call's, the staging's)
-// waiting for room no read gives back. Counted: all of readInFlight is free
-// once each ends, and each reserved some.
-func TestAReadTheSetHasNoRoomForGivesBackWhatItReserved(t *testing.T) {
-	const n = 6
-	row := newHeldRow(n, 4)
-	warmReadersOf(t, 2)
-	was := stageReaders
-	stageReaders = func() int { return 2 }
-	t.Cleanup(func() { stageReaders = was })
-	tr := NewTracker()
-	tr.NewSet()
-	keepsNoMoreHeld(tr)
-	s := tr.derived
-	free := func(who string) {
-		t.Helper()
-		if !s.inFlight.TryAcquire(readInFlight) {
-			t.Fatalf("%s kept some of the set's reads in flight after it ended: want all given back", who)
-		}
-		s.inFlight.Release(readInFlight)
-	}
-
-	tr.Begin()
-	dc := tr.Drifts()
-	raw := make([]Raw, n)
-	for i, m := range row.mocks {
-		raw[i] = dc.LazyRawOf(m, true, nil)
-		if w := readWeight(raw[i]); w <= 0 || w >= readInFlight {
-			t.Fatalf("a recording's read reserves %d of the %d in flight: want some, under all of them", w, readInFlight)
-		}
-	}
-	dc.warm(raw)
-	tr.End()
-	free("a call's warm")
-
-	if w := readWeight(dc.LazyRawOf(row.mocks[0], false, withAnswer(row.mocks[0]))); w <= 0 || w >= readInFlight {
-		t.Fatalf("a staged recording's read reserves %d of the %d in flight: want some, under all of them", w, readInFlight)
-	}
-	if use := <-tr.WarmSet(srcOf(row.mocks)); use.Staged != 0 || !use.HeldFull {
-		t.Fatalf("the set's staging reported %+v: want none read, its held tier full", use)
-	}
-	free("the set's staging")
-}
-
-// A call's warm that comes to a recording another reader holds (take: not
-// the call's, here the set's staging reading it) gives back what it
-// reserved for it before it goes on, as it does once it has read one of
-// its own: a reader that kept it would leave its reservation (up to all of
-// readInFlight) taken after the call, and once none is left every later
-// read of the set (the next call's, the staging's) waits for room no read
-// gives back, and the learn step hangs. This is the common way a call's
-// warm meets the staging. Counted: the staging's one reader holds the
-// first recording, the call reads every other one and waits for the held
-// one (a wait the set counts), and all of readInFlight is free once both
-// end.
-func TestACallsWarmGivesBackWhatItReservedForARecordingAnotherReaderHolds(t *testing.T) {
-	const n = 6
-	row := newHeldRow(n, 4)
-	raw := row.raw()
-	warmReadersOf(t, 2)
-	oneStageReader(t)
-	_, reading, _, release := heldUntil(t, raw, raw[0].payload().text)
-	tr := NewTracker()
-	tr.NewSet()
-	s := tr.derived
-	staged := tr.WarmSet(srcOf(row.mocks))
-	<-reading
-
-	tr.Begin()
-	dc := tr.Drifts()
-	call := make([]Raw, n)
-	for i, m := range row.mocks {
-		call[i] = dc.LazyRawOf(m, true, nil)
-		if w := readWeight(call[i]); w <= 0 || w*n >= readInFlight {
-			t.Fatalf("a recording's read reserves %d of the %d in flight: want some, %d of them under all", w, readInFlight, n)
-		}
-	}
-	ended := make(chan struct{})
-	go func() {
-		defer close(ended)
-		dc.warm(call)
-	}()
-	for {
-		if _, _, waits := readsOf(s); waits > 0 {
-			break
-		}
-		select {
-		case <-ended:
-			t.Fatal("the call's warm ended while the staging held a recording of its: want it to wait for that read")
-		default:
-		}
-		runtime.Gosched()
-	}
-	release()
-	<-ended
-	tr.End()
-	if use := <-staged; use.Staged != 1 || use.Err != nil {
-		t.Fatalf("the set's staging reported %+v: want the held recording alone read by it", use)
-	}
-	if st, called, waits := readsOf(s); st != 1 || called != n-1 || waits != 1 || s.finished != n-1 {
-		t.Fatalf("the staging read %d and the rest of %d, the call %d, waiting %d times: want 1, the rest of the call's %d, and one wait, for the held one", st, s.finished, called, waits, n-1)
-	}
-	if !s.inFlight.TryAcquire(readInFlight) {
-		t.Fatal("the call's warm and the staging kept some of the set's reads in flight after they ended: want all given back")
-	}
-	s.inFlight.Release(readInFlight)
-}
-
 // What a read reserves of the set's readInFlight, at literal sizes: 8 MiB
-// in flight at once; a recording of 1 MiB the agent's store counted
-// reserves all of it, a read alone, as the bound row's are read; one of
-// 16 KiB reserves 4 MiB (256 bytes for each of its bytes), so two such
-// reads run at once; one of 4 KiB, 1 MiB; one of 40 KiB would reserve
-// 10 MiB, past what is in flight, so all of it. Literal, so that a cost or
-// a cap changed in the code fails here and not only in the rows that
-// follow the constants.
+// in flight at once; a call's read of a recording of 4 KiB the agent's
+// store counted reserves 1 216 KiB (64 KiB and 288 bytes for each of its
+// bytes), so six run at once, the staging's 3 136 KiB (64 KiB and 768 a
+// byte), two at once; of 16 KiB, a call's 4 672 KiB, one at a time, the
+// staging's all of it; of 1 MiB or 40 KiB, all of it on either path, a
+// read alone, as the bound row's are read. Literal, so that a cost or a
+// cap changed in the code fails here and not only in the rows that follow
+// the constants. And each path is seen to reserve its own: while its one
+// reader is held in a 4 KiB recording's read, what is left of readInFlight
+// is all but that read's literal cost, not a byte more or less.
 func TestAReadReservesItsRecordingsLiteralCost(t *testing.T) {
 	if readInFlight != 8<<20 {
 		t.Fatalf("the set's readers have %d bytes in flight at once: want 8 MiB", readInFlight)
 	}
+	const callOf4KiB, stagedOf4KiB = 1216 << 10, 3136 << 10
 	tr := NewTracker()
 	tr.NewSet()
 	tr.Begin()
 	defer tr.End()
 	dc := tr.Drifts()
 	for _, c := range []struct {
-		stored, want int64
+		stored, call, staged int64
 	}{
-		{1 << 20, 8 << 20},
-		{16 << 10, 4 << 20},
-		{4 << 10, 1 << 20},
-		{1000, 256000},
-		{40 << 10, 8 << 20},
+		{1 << 20, 8 << 20, 8 << 20},
+		{40 << 10, 8 << 20, 8 << 20},
+		{16 << 10, 4672 << 10, 8 << 20},
+		{4 << 10, callOf4KiB, stagedOf4KiB},
+		{1000, 353536, 833536},
 	} {
 		m := newHeldRow(1, 4).mocks[0]
 		m.SetStoredSize(c.stored)
-		if got := readWeight(dc.LazyRawOf(m, true, nil)); got != c.want {
-			t.Errorf("a recording of %d bytes the store counted reserves %d of the set's reads in flight: want %d", c.stored, got, c.want)
+		x := dc.LazyRawOf(m, true, nil)
+		if got := readWeight(x, readCost); got != c.call {
+			t.Errorf("a call's read of a recording of %d bytes the store counted reserves %d of the set's reads in flight: want %d", c.stored, got, c.call)
+		}
+		if got := readWeight(x, stageCost); got != c.staged {
+			t.Errorf("the staging's read of a recording of %d bytes the store counted reserves %d of the set's reads in flight: want %d", c.stored, got, c.staged)
 		}
 	}
+
+	row := newHeldRow(2, 4)
+	for _, m := range row.mocks {
+		m.SetStoredSize(4 << 10)
+	}
+	raw := row.raw()
+	leftWhileHeld := func(t *testing.T, s *setDerived, who string, want int64) {
+		t.Helper()
+		if !s.inFlight.TryAcquire(readInFlight - want) {
+			t.Errorf("%s reserved more than %d of the set's reads in flight for its held read of 4 KiB", who, want)
+			return
+		}
+		if s.inFlight.TryAcquire(1) {
+			s.inFlight.Release(1)
+			t.Errorf("%s reserved less than %d of the set's reads in flight for its held read of 4 KiB", who, want)
+		}
+		s.inFlight.Release(readInFlight - want)
+	}
+	t.Run("a call's warm", func(t *testing.T) {
+		warmReadersOf(t, 1)
+		_, reading, _, release := heldUntil(t, raw, raw[0].payload().text)
+		tr := NewTracker()
+		tr.NewSet()
+		tr.Begin()
+		defer tr.End()
+		dc := tr.Drifts()
+		call := []Raw{dc.LazyRawOf(row.mocks[0], true, nil), dc.LazyRawOf(row.mocks[1], true, nil)}
+		ended := make(chan struct{})
+		go func() {
+			defer close(ended)
+			dc.warm(call)
+		}()
+		<-reading
+		leftWhileHeld(t, dc.set, "a call's warm", callOf4KiB)
+		release()
+		<-ended
+	})
+	t.Run("the staging", func(t *testing.T) {
+		oneStageReader(t)
+		_, reading, _, release := heldUntil(t, raw, raw[0].payload().text)
+		tr := NewTracker()
+		tr.NewSet()
+		s := tr.derived
+		staged := tr.WarmSet(srcOf(row.mocks))
+		<-reading
+		leftWhileHeld(t, s, "the staging", stagedOf4KiB)
+		release()
+		if use := <-staged; use.Staged != len(row.mocks) || use.Err != nil {
+			t.Errorf("the set's staging reported %+v: want both recordings read by it", use)
+		}
+	})
 }
 
-// What one read of a payload allocates (a call's warm of one recording:
-// its load, bodyOf, and the parts every call's rules read of it,
-// warmOne), per byte of its recording as the agent's store counts it
-// (models.Mock.StoredSize), is at most what its read reserves for each
-// byte (readCost): a collection running through a read keeps all it
-// allocated until the next one, so the reservation is what bounds the
-// readers' memory in flight whatever their count. Read on 1 MiB payloads
-// from the sparsest in instants (the HTTP bound row's words) to the
-// densest (a list of dates, each a candidate read in several layouts); a
-// read that came to cost more, or a cost set lower, fails here.
-func TestAReadAllocatesNoMoreThanItsReservationPerByte(t *testing.T) {
-	const size = 1 << 20
+// What one read of a payload allocates (its load, bodyOf, and the parts
+// its reader reads of it), with its recording counted by the agent's store
+// (models.Mock.StoredSize), is at most the cost its reader reserves for it
+// before it reads: readBase and, for each byte, readCost on a call's warm
+// (warmOne: the parts every call's rules read) and stageCost on the
+// staging's, whether it reads the whole payload (warmOne staged: those
+// parts and stagedParts) or the rest of one a call read first (stageRest).
+// A collection running through a read keeps all it allocated until the
+// next one, so the reservation is what bounds the readers' memory in
+// flight whatever their count. The set's store keeps no payload here, so
+// each read loads its own, as past the set's budget. Read on payloads from
+// the sparsest in instants (the HTTP bound row's words) to the densest (a
+// list of dates, each a candidate read in several layouts): at 16 bytes,
+// 256 and 1 KiB, where readBase counts most; at 16 KiB and 31 KiB, under
+// the sizes read alone, where the cost decides how many reads run at once;
+// and a call's at 1 MiB. A read that came to cost more, or a cost set
+// lower, fails here; the per-byte figures are logged.
+func TestAReadAllocatesNoMoreThanItsCost(t *testing.T) {
 	at := time.Date(2026, 10, 24, 9, 55, 53, 0, time.UTC)
-	list := func(open, close string, item func(i int) string) string {
+	list := func(size int, open, close string, item func(i int) string) string {
 		var b strings.Builder
 		b.WriteString(open)
 		for i := 0; b.Len() < size; i++ {
@@ -653,7 +653,7 @@ func TestAReadAllocatesNoMoreThanItsReservationPerByte(t *testing.T) {
 		b.WriteString(close)
 		return b.String()
 	}
-	words := func() string {
+	words := func(size int) string {
 		var b strings.Builder
 		b.WriteString(`{"blob":"`)
 		for i := 0; b.Len() < size; i++ {
@@ -661,47 +661,86 @@ func TestAReadAllocatesNoMoreThanItsReservationPerByte(t *testing.T) {
 		}
 		b.WriteString(`"}`)
 		return b.String()
-	}()
+	}
 	quoted := func(layout string, step time.Duration) func(i int) string {
 		return func(i int) string { return `"` + at.Add(time.Duration(i)*step).Format(layout) + `"` }
 	}
-	warmReadersOf(t, 1)
-	for _, c := range []struct{ name, body string }{
+	shapes := []struct {
+		name string
+		body func(size int) string
+	}{
 		{"words", words},
-		{"items with an instant each", list(`{"items":[`, `]}`, func(i int) string {
-			return fmt.Sprintf(`{"id":"it-%d","n":%d,"made":"%s"}`, i, i, at.Add(time.Duration(i)*time.Second).Format(time.RFC3339))
-		})},
-		{"uuids", list("[", "]", func(i int) string { return fmt.Sprintf(`"%08x-1234-4abc-8def-%012x"`, i, i*7) })},
-		{"RFC 3339 instants", list("[", "]", quoted(time.RFC3339, time.Second))},
-		{"HTTP-dates", list("[", "]", quoted(time.RFC1123, time.Second))},
-		{"epoch seconds", list("[", "]", func(i int) string { return fmt.Sprint(1792656120 + i) })},
-		{"epoch milliseconds", list("[", "]", func(i int) string { return fmt.Sprint(int64(1792656120000) + int64(i)) })},
-		{"times of day", list("[", "]", quoted("15:04:05", time.Second))},
-		{"dates", list("[", "]", quoted("2006-01-02", 24*time.Hour))},
-	} {
-		m := getAnswer("big-0", "http://api/blobs/0", c.body, eRecAt)
-		m.SetStoredSize(int64(len(c.body)))
+		{"items with an instant each", func(n int) string {
+			return list(n, `{"items":[`, `]}`, func(i int) string {
+				return fmt.Sprintf(`{"id":"it-%d","n":%d,"made":"%s"}`, i, i, at.Add(time.Duration(i)*time.Second).Format(time.RFC3339))
+			})
+		}},
+		{"uuids", func(n int) string {
+			return list(n, "[", "]", func(i int) string { return fmt.Sprintf(`"%08x-1234-4abc-8def-%012x"`, i, i*7) })
+		}},
+		{"RFC 3339 instants", func(n int) string { return list(n, "[", "]", quoted(time.RFC3339, time.Second)) }},
+		{"HTTP-dates", func(n int) string { return list(n, "[", "]", quoted(time.RFC1123, time.Second)) }},
+		{"epoch seconds", func(n int) string { return list(n, "[", "]", func(i int) string { return fmt.Sprint(1792656120 + i) }) }},
+		{"epoch milliseconds", func(n int) string {
+			return list(n, "[", "]", func(i int) string { return fmt.Sprint(int64(1792656120000) + int64(i)) })
+		}},
+		{"times of day", func(n int) string { return list(n, "[", "]", quoted("15:04:05", time.Second)) }},
+		{"dates", func(n int) string { return list(n, "[", "]", quoted("2006-01-02", 24*time.Hour)) }},
+	}
+	warmReadersOf(t, 1)
+	oneStageReader(t)
+	defer func(b int64) { bodyBudget = b }(bodyBudget)
+	bodyBudget = 0
+	// read is one read of body's recording on path, and what it allocated.
+	read := func(path, body string) int64 {
+		m := getAnswer("big-0", "http://api/blobs/0", body, eRecAt)
+		m.SetStoredSize(int64(len(body)))
 		tr := NewTracker()
 		tr.NewSet()
 		tr.Begin()
+		defer tr.End()
 		dc := tr.Drifts()
 		x := dc.LazyRawOf(m, true, nil)
+		loads := 1
+		if path == "rest" {
+			dc.warm([]Raw{x})
+			loads = 2
+		}
 		var before, after runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&before)
-		dc.warm([]Raw{x})
+		if path == "call" {
+			dc.warm([]Raw{x})
+		} else if err := dc.warmSet(srcOf([]*models.Mock{m}), 1); err != nil {
+			t.Fatal(err)
+		}
 		runtime.ReadMemStats(&after)
-		tr.End()
-		if _, called, _ := readsOf(dc.set); called != 1 || dc.Loads() != 1 {
-			t.Fatalf("%s: the warm read %d payloads, loading %d: want the one, once", c.name, called, dc.Loads())
+		staged, called, _ := readsOf(dc.set)
+		if ok := map[string]bool{"call": staged == 0 && called == 1, "staged": staged == 1 && called == 0,
+			"rest": staged == 0 && called == 1 && dc.set.finished == 1}[path]; !ok || dc.Loads() != loads {
+			t.Fatalf("%s read of %d bytes: the staging read %d, a call %d, the rest of %d, loading %d: want the one read, %d loads", path, len(body), staged, called, dc.set.finished, dc.Loads(), loads)
 		}
-		perByte := float64(after.TotalAlloc-before.TotalAlloc) / float64(len(c.body))
-		t.Logf("%s: a read of a %d-byte recording allocated %.1f bytes for each byte (it reserves %d)", c.name, len(c.body), perByte, readCost)
-		if perByte > readCost {
-			t.Errorf("%s: a read of a %d-byte recording allocated %.1f bytes for each of its bytes: past the %d it reserves for each", c.name, len(c.body), perByte, readCost)
-		}
-		if perByte < 4 {
-			t.Fatalf("%s: a read allocated %.1f bytes for each byte of its recording: the row reads none of it", c.name, perByte)
+		return int64(after.TotalAlloc - before.TotalAlloc)
+	}
+	// A first read sets up what every read after it shares (its tables).
+	read("staged", shapes[len(shapes)-1].body(1<<10))
+	for _, size := range []int{16, 256, 1 << 10, 16 << 10, 31 << 10, 1 << 20} {
+		for _, sh := range shapes {
+			body := sh.body(size)
+			for _, c := range []struct {
+				path string
+				cost int64
+			}{{"call", readCost}, {"staged", stageCost}, {"rest", stageCost}} {
+				if size == 1<<20 && c.path != "call" {
+					continue
+				}
+				began := time.Now()
+				alloc := read(c.path, body)
+				t.Logf("%s, %s read of %d bytes: allocated %d, %.1f a byte past readBase (its cost: %d a byte) in %v", sh.name, c.path, len(body), alloc, float64(alloc-readBase)/float64(len(body)), c.cost, time.Since(began).Round(time.Millisecond))
+				if want := readBase + c.cost*int64(len(body)); alloc > want {
+					t.Errorf("%s: a %s read of a %d-byte recording allocated %d bytes: past the %d it costs (readBase and %d a byte)", sh.name, c.path, len(body), alloc, want, c.cost)
+				}
+			}
 		}
 	}
 }

@@ -1231,25 +1231,42 @@ var warmReaders = func() int { return readersFor(runtime.GOMAXPROCS(0)) }
 // (reserve), so more readers never take the set past its budget by more
 // than one reader did. A read that costs more than readInFlight reserves
 // all of it and runs alone, as one reader's did; small payloads (a few
-// KiB each, api-server's) are read by every reader at once.
+// KiB each, api-server's) are read by several readers at once.
 const readInFlight = 8 << 20
 
-// readCost is what a read of a payload costs in flight, per byte of its
-// recording: what the read allocates (its load, bodyOf, and the parts
-// every call's rules read, warmOne), since a collection running through
-// the read keeps all it allocated until the next one. It follows how dense
-// the payload's instants are: 1 MiB of words (the HTTP bound row's
-// answers) allocates 10 bytes for each byte; of JSON items with an
-// instant each, 42; of epoch seconds, 174; of dates alone, 228. 256 holds
-// each of those (TestAReadAllocatesNoMoreThanItsReservationPerByte), so a
-// recording of 32 KiB or more is read alone, and those of a few KiB
-// (api-server's) eight at once.
-const readCost = 256
+// A read of a payload costs in flight what it allocates (its load, bodyOf,
+// and the parts it reads), since a collection running through the read
+// keeps all it allocated until the next one: readBase whatever its size,
+// and for each byte of its recording what its reader reads of it. Measured
+// (TestAReadAllocatesNoMoreThanItsCost, its store keeping no payload, so
+// each read loads it), the most is a list of dates', each a candidate read
+// in several layouts:
+//   - readBase, what a read allocates whatever its size: one of a payload
+//     of 16 to 27 bytes allocates 27-58 KB;
+//   - readCost, a call's warm (warmOne: the parts every call's rules
+//     read): past readBase, 259 bytes for each byte of dates at 31 KiB,
+//     228 at 1 MiB; 10 of words (the HTTP bound row's answers), 42 of JSON
+//     items with an instant each;
+//   - stageCost, the staging's (warmSet: a call's parts and those the
+//     staging reads beyond them, stagedParts; or those alone, after a call
+//     read the rest, stageRest, which loads the payload again): 650 for
+//     each byte of dates, 391 of the rest of them.
+//
+// So a call's read of 4 KiB reserves 1.2 MiB and six run at once, and one
+// of 29 KiB or more reserves all of readInFlight, a read alone; the
+// staging's of 4 KiB reserves 3.1 MiB, two at once, and one of 11 KiB or
+// more reserves all of it.
+const (
+	readBase  = 64 << 10
+	readCost  = 288
+	stageCost = 768
+)
 
-// readWeight is what x's read reserves of the set's readInFlight: readCost
-// for each byte of its recording (recordingBytes), or all of readInFlight
-// (a read alone) where that is not known before its payload is read.
-func readWeight(x Raw) int64 {
+// readWeight is what x's read reserves of the set's readInFlight: readBase
+// and cost (readCost for a call's warm, stageCost for the staging's) for
+// each byte of its recording (recordingBytes), or all of readInFlight (a
+// read alone) where that is more or not known before its payload is read.
+func readWeight(x Raw, cost int64) int64 {
 	n := int64(len(x.rText))
 	if x.src != nil {
 		n = recordingBytes(x.src.mock)
@@ -1257,7 +1274,7 @@ func readWeight(x Raw) int64 {
 	if n < 0 {
 		return readInFlight
 	}
-	return min(readInFlight, readCost*n)
+	return min(readInFlight, readBase+cost*n)
 }
 
 // recordingBytes is the bytes of m's recording, known before its payload is
@@ -1413,7 +1430,7 @@ func (dc *DriftCache) warm(raw []Raw) {
 				x := left[next]
 				next++
 				mu.Unlock()
-				w := readWeight(x)
+				w := readWeight(x, readCost)
 				s.reserve(w)
 				ch, mine := s.take(x)
 				if ch == nil {
