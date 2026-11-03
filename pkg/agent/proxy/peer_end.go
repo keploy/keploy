@@ -9,21 +9,25 @@ import (
 )
 
 // peerEndMarker marks, for a recorded connection, how each side ended its side
-// (Session.MarkPeerEndedStopping), and whether the connection's first end
-// records no fault (Session.EndFollowedStop), rather than being the
-// application's giving up or the upstream's fault:
+// (Session.MarkPeerEndedBy), and whether the connection's first end records no
+// fault, and which such end it is (Session.EndFollowedStop,
+// Session.FirstEndNoFault), rather than being the application's giving up or
+// the upstream's fault:
 //   - any end read once the recording's stop began (Proxy.StopBegun): keploy
-//     record and keploy mock record say so before they stop the application;
+//     record and keploy mock record say so before they stop the application
+//     (supervisor.EndAtStop);
 //   - the client's end when the kernel saw the client's process release its
 //     end of the connection (app, its address and port) as it exited on its
 //     own: the command's own exit, or a test process's, with the call still
-//     open, which is the run's end;
+//     open, which is the run's end (supervisor.EndAtExit);
 //   - the client's end where the hooks make no record of how the application
 //     releases its connections (not an agent.ConnEndInfo: the macOS and
 //     Windows hooks): nothing tells its giving up from its process's exit,
-//     and a fault is recorded only on what says it was one. A call such an
-//     application gives up on records no fault, and is recorded as it was
-//     before faults were recorded: one that got no answer is not recorded.
+//     and a fault is recorded only on what says it was one
+//     (supervisor.EndUnjudged). A call such an application gives up on
+//     records no fault: one that got no answer is not recorded, as before
+//     faults were recorded, and one it closed partway through the answer is
+//     left out, as nothing tells a whole answer from a cut one.
 //
 // The client's end while its process ran (it closed the socket: it gave up on
 // the call), or as a signal ended it while the run went on, is a fault: a
@@ -35,25 +39,29 @@ import (
 // upstream's end before the stop is the upstream's, whatever the hooks say.
 func (p *Proxy) peerEndMarker(sess *supervisor.Session, app netip.AddrPort) func(fakeconn.Direction, bool) {
 	return func(dir fakeconn.Direction, reset bool) {
-		stopped := p.StopBegun()
-		if !stopped && dir == fakeconn.FromClient {
-			stopped = p.clientEndIsNoFault(app)
+		why := supervisor.EndMayBeFault
+		if p.StopBegun() {
+			why = supervisor.EndAtStop
+		} else if dir == fakeconn.FromClient {
+			why = p.clientEndNoFault(app)
 		}
-		sess.MarkPeerEndedStopping(dir, reset, stopped)
+		sess.MarkPeerEndedBy(dir, reset, why)
 	}
 }
 
-// clientEndIsNoFault reports whether the client's end of the connection whose
-// application end is app records no fault: the hooks make no record of how
-// the application releases its connections (not an agent.ConnEndInfo), or
-// the kernel saw it release app as its process exited on its own, ended by no
-// signal (agent.AppConnEnd). False where hooks that make such records hold
-// none of it.
-func (p *Proxy) clientEndIsNoFault(app netip.AddrPort) bool {
+// clientEndNoFault reports which end that records no fault the client's end of
+// the connection whose application end is app is: EndUnjudged where the hooks
+// make no record of how the application releases its connections (not an
+// agent.ConnEndInfo), EndAtExit where the kernel saw it release app as its
+// process exited on its own, ended by no signal (agent.AppConnEnd), and
+// EndMayBeFault where hooks that make such records hold none of it.
+func (p *Proxy) clientEndNoFault(app netip.AddrPort) supervisor.NoFaultEnd {
 	ce, ok := p.DestInfo.(agent.ConnEndInfo)
 	if !ok {
-		return true
+		return supervisor.EndUnjudged
 	}
-	end, ok := ce.TakeAppConnEnd(app)
-	return ok && end.Exiting && end.Signal == 0
+	if end, ok := ce.TakeAppConnEnd(app); ok && end.Exiting && end.Signal == 0 {
+		return supervisor.EndAtExit
+	}
+	return supervisor.EndMayBeFault
 }

@@ -23,7 +23,8 @@ func (f *fakeConnEnds) TakeAppConnEnd(app netip.AddrPort) (agent.AppConnEnd, boo
 	return e, ok
 }
 
-// The connection's first end records no fault (Session.EndFollowedStop) when
+// The connection's first end records no fault (Session.EndFollowedStop), and
+// says which such end it is (Session.FirstEndNoFault), when
 // the recording's stop had begun, when it is the client's end and the kernel
 // saw the client's process release that connection as it exited on its own,
 // or when it is the client's end and the hooks make no record of how the
@@ -46,21 +47,23 @@ func TestPeerEndMarkerTellsTheApplicationsStopFromItsGivingUp(t *testing.T) {
 		noEnds    bool // hooks that say nothing of the release (not an agent.ConnEndInfo)
 		ends      map[netip.AddrPort]agent.AppConnEnd
 		first     fakeconn.Direction
-		wantStop  bool
+		want      supervisor.NoFaultEnd
 	}{
-		{"the client gives up while its process runs on", false, false, map[netip.AddrPort]agent.AppConnEnd{app: running}, fakeconn.FromClient, false},
-		{"the client's process exits on its own with the call open", false, false, map[netip.AddrPort]agent.AppConnEnd{app: ownExit}, fakeconn.FromClient, true},
-		{"the client's process is killed by a signal while the run goes on", false, false, map[netip.AddrPort]agent.AppConnEnd{app: killed}, fakeconn.FromClient, false},
-		{"the client's process is stopped by SIGTERM", false, false, map[netip.AddrPort]agent.AppConnEnd{app: {Exiting: true, Signal: 15}}, fakeconn.FromClient, false},
-		{"the hooks hold no record of the client's release", false, false, nil, fakeconn.FromClient, false},
-		{"the hooks hold only another connection's release", false, false, map[netip.AddrPort]agent.AppConnEnd{other: ownExit}, fakeconn.FromClient, false},
-		{"the hooks say nothing of releases: the client's end", false, true, nil, fakeconn.FromClient, true},
-		{"the hooks say nothing of releases: the upstream ends first", false, true, nil, fakeconn.FromDest, false},
-		{"the hooks say nothing of releases: the upstream's end after the stop began", true, true, nil, fakeconn.FromDest, true},
-		{"the client's end after the stop began", true, false, map[netip.AddrPort]agent.AppConnEnd{app: running}, fakeconn.FromClient, true},
-		{"the upstream's end after the stop began", true, false, nil, fakeconn.FromDest, true},
-		{"the upstream ends first, the client's process exiting on its own", false, false, map[netip.AddrPort]agent.AppConnEnd{app: ownExit}, fakeconn.FromDest, false},
-		{"the upstream ends first, no record", false, false, nil, fakeconn.FromDest, false},
+		{"the client gives up while its process runs on", false, false, map[netip.AddrPort]agent.AppConnEnd{app: running}, fakeconn.FromClient, supervisor.EndMayBeFault},
+		{"the client's process exits on its own with the call open", false, false, map[netip.AddrPort]agent.AppConnEnd{app: ownExit}, fakeconn.FromClient, supervisor.EndAtExit},
+		{"the client's process is killed by a signal while the run goes on", false, false, map[netip.AddrPort]agent.AppConnEnd{app: killed}, fakeconn.FromClient, supervisor.EndMayBeFault},
+		{"the client's process is stopped by SIGTERM", false, false, map[netip.AddrPort]agent.AppConnEnd{app: {Exiting: true, Signal: 15}}, fakeconn.FromClient, supervisor.EndMayBeFault},
+		{"the hooks hold no record of the client's release", false, false, nil, fakeconn.FromClient, supervisor.EndMayBeFault},
+		{"the hooks hold only another connection's release", false, false, map[netip.AddrPort]agent.AppConnEnd{other: ownExit}, fakeconn.FromClient, supervisor.EndMayBeFault},
+		{"the hooks say nothing of releases: the client's end", false, true, nil, fakeconn.FromClient, supervisor.EndUnjudged},
+		{"the hooks say nothing of releases: the upstream ends first", false, true, nil, fakeconn.FromDest, supervisor.EndMayBeFault},
+		{"the hooks say nothing of releases: the upstream's end after the stop began", true, true, nil, fakeconn.FromDest, supervisor.EndAtStop},
+		{"the client's end after the stop began", true, false, map[netip.AddrPort]agent.AppConnEnd{app: running}, fakeconn.FromClient, supervisor.EndAtStop},
+		{"the client's process exits on its own after the stop began", true, false, map[netip.AddrPort]agent.AppConnEnd{app: ownExit}, fakeconn.FromClient, supervisor.EndAtStop},
+		{"the hooks say nothing of releases: the client's end after the stop began", true, true, nil, fakeconn.FromClient, supervisor.EndAtStop},
+		{"the upstream's end after the stop began", true, false, nil, fakeconn.FromDest, supervisor.EndAtStop},
+		{"the upstream ends first, the client's process exiting on its own", false, false, map[netip.AddrPort]agent.AppConnEnd{app: ownExit}, fakeconn.FromDest, supervisor.EndMayBeFault},
+		{"the upstream ends first, no record", false, false, nil, fakeconn.FromDest, supervisor.EndMayBeFault},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ends := &fakeConnEnds{ends: tc.ends}
@@ -75,8 +78,11 @@ func TestPeerEndMarkerTellsTheApplicationsStopFromItsGivingUp(t *testing.T) {
 			mark := p.peerEndMarker(sess, app)
 			mark(tc.first, false)
 			mark(1-tc.first, false)
-			if got := sess.EndFollowedStop(); got != tc.wantStop {
-				t.Fatalf("EndFollowedStop = %v, want %v", got, tc.wantStop)
+			if got, want := sess.EndFollowedStop(), tc.want != supervisor.EndMayBeFault; got != want {
+				t.Fatalf("EndFollowedStop = %v, want %v", got, want)
+			}
+			if got := sess.FirstEndNoFault(); got != tc.want {
+				t.Fatalf("FirstEndNoFault = %d, want %d", got, tc.want)
 			}
 			if dir, ok := sess.FirstPeerEnded(); !ok || dir != tc.first {
 				t.Fatalf("first end = %d, %v; want %d", dir, ok, tc.first)

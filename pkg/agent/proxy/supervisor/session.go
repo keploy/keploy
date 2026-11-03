@@ -473,17 +473,53 @@ const spokeUnaskedBit = 1 << (peerEndFirstShift + 2)
 const endFollowedStopBit = 1 << (peerEndFirstShift + 3)
 
 // EndFollowedStop reports whether the first end of the connection
-// (FirstPeerEnded) was the application's stop (MarkPeerEndedStopping): read
-// after the recording's stop had begun (keploy stops the application only
-// once it has told the agent), the client's end as its process exited, or
-// the client's end where the hooks cannot say how the application released
-// it (the proxy's peerEndMarker).
+// (FirstPeerEnded) was the application's stop, which records no fault
+// (MarkPeerEndedBy, FirstEndNoFault says which): read after the recording's
+// stop had begun (keploy stops the application only once it has told the
+// agent), the client's end as its process exited, or the client's end where
+// the hooks cannot say how the application released it (the proxy's
+// peerEndMarker).
 // The call it had in flight ended in no fault of the upstream's or the
 // application's. An end read before the stop began while the client's process
 // ran on (the application's own timeout, the upstream's reset) is not one,
 // however late the stop. Nil-safe.
 func (s *Session) EndFollowedStop() bool {
 	return s != nil && s.peerEnds.Load()&endFollowedStopBit != 0
+}
+
+// NoFaultEnd is which end that records no fault the first end of a
+// connection was (MarkPeerEndedBy, FirstEndNoFault), as the relay read it.
+type NoFaultEnd uint32
+
+const (
+	// EndMayBeFault: the first end is none of the ones below (the
+	// application's giving up, the upstream's fault), or none has come.
+	EndMayBeFault NoFaultEnd = iota
+	// EndAtStop: an end read once the recording's stop had begun.
+	EndAtStop
+	// EndAtExit: the client's end as its process exited on its own, ended
+	// by no signal (agent.AppConnEnd).
+	EndAtExit
+	// EndUnjudged: the client's end where the hooks make no record of how
+	// the application releases its connections (not an agent.ConnEndInfo:
+	// the macOS and Windows hooks). Nothing tells its giving up from its
+	// process's exit, so no fault is recorded, and nothing tells an answer
+	// it had whole from one it closed partway through.
+	EndUnjudged
+)
+
+// noFaultEndShift: peerEnds holds, from this bit, the first end's NoFaultEnd
+// in two bits, past MarkEndedWithConnection's bits.
+const noFaultEndShift = endedWithConnectionShift + 2
+
+// FirstEndNoFault reports which end that records no fault the connection's
+// first end was (MarkPeerEndedBy): EndMayBeFault where EndFollowedStop is
+// false. Nil-safe.
+func (s *Session) FirstEndNoFault() NoFaultEnd {
+	if s == nil {
+		return EndMayBeFault
+	}
+	return NoFaultEnd(s.peerEnds.Load() >> noFaultEndShift & 3)
 }
 
 // ServerSpokeUnasked reports whether the server sent bytes that answer no
@@ -513,13 +549,24 @@ func (s *Session) MarkPeerEnded(dir fakeconn.Direction, reset bool) {
 }
 
 // MarkPeerEndedStopping is MarkPeerEnded for a relay that knows whether the
-// end it read is the application's stop (stopBegun): the recording's stop had
-// begun (keploy record and keploy mock record tell the agent before they stop
-// the application), the client's process was exiting as its end was read, or
-// the hooks cannot say how the client released its end (the proxy's
-// peerEndMarker). Such an end is not a fault (EndFollowedStop).
-// Only the first end's is kept. Nil-safe.
+// recording's stop had begun as it read the end (stopBegun): keploy record and
+// keploy mock record tell the agent before they stop the application. Such an
+// end is EndAtStop (MarkPeerEndedBy). Nil-safe.
 func (s *Session) MarkPeerEndedStopping(dir fakeconn.Direction, reset, stopBegun bool) {
+	why := EndMayBeFault
+	if stopBegun {
+		why = EndAtStop
+	}
+	s.MarkPeerEndedBy(dir, reset, why)
+}
+
+// MarkPeerEndedBy is MarkPeerEnded for a relay that knows which end that
+// records no fault the end it read is, if it is one (why): the recording's
+// stop had begun, the client's process was exiting as its end was read, or
+// the hooks cannot say how the client released its end (the proxy's
+// peerEndMarker). Such an end is not a fault (EndFollowedStop,
+// FirstEndNoFault). Only the first end's is kept. Nil-safe.
+func (s *Session) MarkPeerEndedBy(dir fakeconn.Direction, reset bool, why NoFaultEnd) {
 	if s == nil || dir > fakeconn.FromDest {
 		return
 	}
@@ -536,8 +583,8 @@ func (s *Session) MarkPeerEndedStopping(dir fakeconn.Direction, reset, stopBegun
 		next := old | uint32(end)<<shift
 		if (old>>peerEndFirstShift)&3 == 0 {
 			next |= (uint32(dir) + 1) << peerEndFirstShift
-			if stopBegun {
-				next |= endFollowedStopBit
+			if why != EndMayBeFault {
+				next |= endFollowedStopBit | uint32(why)<<noFaultEndShift
 			}
 		}
 		if s.peerEnds.CompareAndSwap(old, next) {
@@ -1306,6 +1353,26 @@ const (
 // leftOutClientClosed.
 const LeftOutClientClosedPartway = "the client closed the connection partway through the response"
 
+// The reasons an HTTP/1 recorder leaves an exchange out for when the client's
+// end came first, partway through the response, and was an end that records
+// no fault (FirstEndNoFault): the response is not known to be whole (its
+// framing had not ended, or its body is framed by the upstream's close, which
+// had not come), and no fault is known to record it with. Each is
+// LeftOutClientClosedPartway with a detail after its colon, so of its cause
+// and class.
+const (
+	// LeftOutPartwayAtStop: EndAtStop, the recording's stop closed the
+	// application with the call in flight.
+	LeftOutPartwayAtStop = LeftOutClientClosedPartway + ": the recording's stop closed the application"
+	// LeftOutPartwayAtExit: EndAtExit, the application's process exited on
+	// its own with the call in flight.
+	LeftOutPartwayAtExit = LeftOutClientClosedPartway + ": its process exited"
+	// LeftOutPartwayUnjudged: EndUnjudged, the hooks cannot say whether the
+	// application gave up on the call or exited.
+	LeftOutPartwayUnjudged = LeftOutClientClosedPartway + ": the client's end cannot be judged on this platform " +
+		"(its hooks do not say how the application released the connection), so keploy cannot tell a whole answer from a cut one"
+)
+
 // maxLeftOutCause is the longest cause leftOutCause keeps of a reason.
 const maxLeftOutCause = 64
 
@@ -1425,7 +1492,8 @@ func leftOutNextStep(class string, spanned bool) string {
 			"its deadline: raise it and re-record. A server's reset is a call it failed or abandoned: its logs say why"
 	case leftOutClientClosed:
 		return next + "reason=the client closed partway: the app closed the connection before it had read the whole " +
-			"response (its timeout, a cancelled call, or it wanted only the start), so there is no whole exchange to " +
+			"response (its timeout, a cancelled call, or it wanted only the start; or its process exited, or the " +
+			"recording's stop closed it, with the call in flight), so there is no whole exchange to " +
 			"record, and a replay cannot reproduce the cut; the capture lost nothing. If the call timed out, raise the " +
 			"app's timeout for it and re-record"
 	}
