@@ -272,7 +272,9 @@ func newRecordedDNSMocksCache() *expirable.LRU[string, bool] {
 }
 
 // newNodataRelayLogCache creates the bounded, TTL-expiring tracker that dedupes
-// the "relayed NODATA" Info log to once per (name, qtype).
+// the "relayed NODATA" Info log to once per (name, qtype). The unanswered
+// forward WARN (logUnansweredForward) is deduped by another of the same shape:
+// its key space is the same app-controlled (name, qtype).
 func newNodataRelayLogCache() *expirable.LRU[string, bool] {
 	return expirable.NewLRU[string, bool](nodataRelayLogMaxSize, nil, nodataRelayLogTTL)
 }
@@ -290,13 +292,20 @@ func newNodataRelayLogCache() *expirable.LRU[string, bool] {
 // DNS server down mid-resolution. (It also keeps the bare &Proxy{} literals in
 // this package's tests exercising the surrounding DNS logic.)
 func (p *Proxy) shouldLogNodataRelay(key string) bool {
-	if p.nodataRelayLogged == nil {
+	return firstNotice(p.nodataRelayLogged, key)
+}
+
+// firstNotice reports whether key has not been seen by tracker yet, recording
+// it as seen when it returns true: the once-per-key gate of a log line. A nil
+// tracker sees nothing, so every sighting is a first one.
+func firstNotice(tracker *expirable.LRU[string, bool], key string) bool {
+	if tracker == nil {
 		return true
 	}
-	if _, dup := p.nodataRelayLogged.Get(key); dup {
+	if _, dup := tracker.Get(key); dup {
 		return false
 	}
-	p.nodataRelayLogged.Add(key, true)
+	tracker.Add(key, true)
 	return true
 }
 
@@ -365,7 +374,12 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 		var resp dnsCacheEntry
 		found := false
-		if _, listed := rd.listedNameOf(question.Name); listed {
+		if isLocalhostName(question.Name) {
+			// Before the mock.real list, the cache, a mock or an upstream:
+			// keploy's DNS answers a localhost name itself, the same in a
+			// recording and a replay (localhostDNSResponse).
+			resp, found = localhostDNSResponse(question), true
+		} else if _, listed := rd.listedNameOf(question.Name); listed {
 			resp, found = p.realDNS(question), true
 		} else {
 			resp, found = p.dnsCache.Get(key)
@@ -736,8 +750,10 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 	case models.MODE_RECORD:
 		resp, err := p.recordDNSMock(question, reqTime, session)
 		if err != nil {
-			utils.LogError(p.logger, err, "DNS resolution failed in record mode",
-				dnsQuestionFields(question)...,
+			// recordDNSMock fails only when no upstream answered.
+			p.logUnansweredForward(question, "DNS resolution failed in record mode",
+				append(dnsQuestionFields(question), zap.Error(err),
+					zap.String("app_answer", "SERVFAIL, as a recursive resolver answers when the servers it asks do not; nothing is recorded for the name"))...,
 			)
 			return dnsCacheEntry{
 				Msg: &dns.Msg{
@@ -751,6 +767,66 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		// any other mode -> best-effort defaults
 		return p.defaultDNSResponse(question)
 	}
+}
+
+// isLocalhostName reports whether name is a localhost name (RFC 6761 6.3):
+// localhost. itself or any name under it, in any letter case.
+func isLocalhostName(name string) bool {
+	n := strings.ToLower(dns.Fqdn(name))
+	return n == "localhost." || strings.HasSuffix(n, ".localhost.")
+}
+
+// localhostDNSResponse is keploy's own answer to a localhost name, the one RFC
+// 6761 6.3 asks of a resolver: the loopback address for an address query
+// (127.0.0.1 for A, ::1 for AAAA) and, for any other type, NOERROR with no
+// record (NODATA: the name exists, it has addresses, but no record of that
+// type). It never asks another server, so it is the same in a recording and in
+// a replay, needs no mock and is never recorded.
+//
+// The names never leave the machine they are asked on, so no upstream can
+// answer them better, and asking one only costs: grpc-go asks TXT
+// _grpc_config.<host> before a client's first connection, and for a localhost
+// target that went upstream, where a resolver that did not answer held the
+// client back for its timeout. The addresses are the ones an app's own
+// resolver gives (a hosts file's localhost entries; systemd-resolved for every
+// name under localhost.); ::1 is the loopback address whether or not keploy
+// redirects IPv6, as it is in a hosts file.
+func localhostDNSResponse(question dns.Question) dnsCacheEntry {
+	resp := dnsCacheEntry{Msg: &dns.Msg{MsgHdr: dns.MsgHdr{
+		Rcode:              dns.RcodeSuccess,
+		Authoritative:      true,
+		RecursionAvailable: true,
+	}}}
+	hdr := dns.RR_Header{Name: question.Name, Rrtype: question.Qtype, Class: dns.ClassINET, Ttl: 3600}
+	switch question.Qtype {
+	case dns.TypeA:
+		resp.Answer = []dns.RR{&dns.A{Hdr: hdr, A: net.IPv4(127, 0, 0, 1)}}
+	case dns.TypeAAAA:
+		resp.Answer = []dns.RR{&dns.AAAA{Hdr: hdr, AAAA: net.IPv6loopback}}
+	}
+	return resp
+}
+
+// logUnansweredForward logs msg for a query keploy forwarded for the app that
+// no upstream resolver answered (a timeout, a refused or a failed exchange),
+// and that keploy then answered SERVFAIL.
+//
+// At WARN, not ERROR, because keploy did not fail: it answered as a recursive
+// resolver answers when the servers it asks do not (SERVFAIL), so the app got
+// the failure its own resolver would have given it, and nothing keploy keeps
+// is lost: a failed answer is never a mock (recordDNSMock records NOERROR
+// answers only), and a mock.real name is never recorded. The app did see a
+// DNS failure, which can shape what it did while it was recorded, so the line
+// is said at the level an operator reads. The first per (name, qtype) is a
+// WARN and the rest Debug: a failed answer is not cached, so every retry of an
+// app comes back here, and an upstream that stays down would otherwise repeat
+// the line for as long.
+func (p *Proxy) logUnansweredForward(question dns.Question, msg string, fields ...zap.Field) {
+	if firstNotice(p.unansweredForwardLogged, generateCacheKey(question.Name, question.Qtype)) {
+		p.logger.Warn(msg, fields...)
+		return
+	}
+	p.logger.Debug(msg, fields...)
 }
 
 // isGrpcServiceConfigProbe reports whether q is grpc-go's service-config

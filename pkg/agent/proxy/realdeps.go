@@ -20,7 +20,6 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
-	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -370,8 +369,8 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 func (p *Proxy) realDNS(question dns.Question) dnsCacheEntry {
 	fwd, err := p.forwardDNSUpstream(question)
 	if err != nil || fwd == nil {
-		utils.LogError(p.logger, err, "keploy could not resolve a mock.real name with the upstream resolver; the app is answered SERVFAIL",
-			append(dnsQuestionFields(question), zap.String("next_step", "check the upstream DNS resolver keploy's agent forwards to"))...)
+		p.logUnansweredForward(question, "keploy could not resolve a mock.real name with the upstream resolver; the app is answered SERVFAIL",
+			append(dnsQuestionFields(question), zap.Error(err), zap.String("next_step", "check the upstream DNS resolver keploy's agent forwards to"))...)
 		return dnsCacheEntry{Msg: &dns.Msg{MsgHdr: dns.MsgHdr{Rcode: dns.RcodeServerFailure, RecursionAvailable: true}}}
 	}
 	return dnsCacheEntry{Msg: fwd, FromUpstream: true}
