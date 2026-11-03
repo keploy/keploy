@@ -774,7 +774,8 @@ func TestTheReplayPushesThePoolSlices(t *testing.T) {
 // recording as that test's, not as an earlier place of the paired one. A
 // recording the mapping lists that the agent never holds (a connection
 // failure, models.AgentBound) is left out of the table but still ends its
-// test's window: it was made in it.
+// test's window: it was made in it. A window ends at its recordings' last
+// place (their requests here), not at an answer.
 func TestTheReplayPushesTheRecordedTestWindows(t *testing.T) {
 	provenOn(t)
 	repo := t.TempDir()
@@ -798,8 +799,8 @@ func TestTheReplayPushesTheRecordedTestWindows(t *testing.T) {
 	require.NoError(t, New(zap.NewNop(), instr, db, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
 	require.Equal(t, []string{"mock-2"}, instr.table["o::TestB"], "the agent is handed only the recordings it holds")
 	require.Equal(t, []models.TestWindow{
-		{TestCase: "o::TestA", Start: t0.Add(5 * time.Second), End: t0.Add(12 * time.Second)},
-		{TestCase: "o::TestB", Start: t0.Add(15 * time.Second), End: t0.Add(26 * time.Second)},
+		{TestCase: "o::TestA", Start: t0.Add(5 * time.Second), End: t0.Add(11 * time.Second)},
+		{TestCase: "o::TestB", Start: t0.Add(15 * time.Second), End: t0.Add(25 * time.Second)},
 	}, instr.recordedWindows)
 }
 

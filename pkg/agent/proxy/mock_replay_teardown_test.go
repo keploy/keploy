@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -12,10 +13,10 @@ import (
 // keploy mock replay sends, with the pool's names (SetPoolNames), the
 // recorded window of every test of its set, as it derives them from the
 // set's mappings (pkg/service/mock recordedTestWindows): from the test's
-// recorded begin to the last request or answer of the recordings its mapping
-// lists. The pool's names still decide the set's teardown bound
-// (teardownAfter): after every staged data-plane recording outside the pool;
-// the windows serve the learn step. Of a set of one test process keploy
+// recorded begin to the last place (models.PlaceOf) of the recordings its
+// mapping lists. The pool's names still decide the set's teardown bound
+// (teardownAfter): after the place of every staged data-plane recording
+// outside the pool; the windows serve the learn step. Of a set of one test process keploy
 // test's bound (every window's end, WindowSchedule.After) tells the same
 // teardown, since under keploy mock replay every staged recording is a
 // test's or the pool's (poolSlices): after the last test a per-test read
@@ -23,26 +24,29 @@ import (
 // mongo-driver's endSessions at client.Disconnect), and it answers; the same
 // call made once more misses (fail closed), and neither a pool recording
 // made before the first test or in a gap between two tests nor a test's own
-// recording is shown.
+// recording is shown. A pool recording sent after T2's last call, before
+// that call's answer was stamped, is the teardown too: record charged it to
+// the pool, by its place, after T2's scope.
 func TestUnderMockReplayTheRecordedWindowsKeepTheSetsTeardown(t *testing.T) {
 	boot := exactMongo("boot", 200*time.Millisecond, models.LifetimePerTest)
 	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
 	gap := exactMongo("gap", 1600*time.Millisecond, models.LifetimePerTest)
 	owned2 := exactMongo("owned-2", 2*time.Second, models.LifetimePerTest)
 	// T2's own, sent in its window and answered later: its window ends at
-	// that answer, so a pool recording sent before it is no teardown.
+	// its place, its request, so a pool recording sent after it is the
+	// teardown though sent before that answer's stamp.
 	late := exactMongo("owned-2-late", 2200*time.Millisecond, models.LifetimePerTest)
 	late.Spec.ResTimestampMock = exactT0.Add(2600 * time.Millisecond)
-	inFlight := exactMongo("pool-while-t2-waits", 2400*time.Millisecond, models.LifetimePerTest)
+	inFlight := exactMongo("pool-before-the-answer", 2400*time.Millisecond, models.LifetimePerTest)
 	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
 	// A protocol-phase recording made later is no test's, and no bound's.
 	hs := configMock("handshake", 3500*time.Millisecond)
-	slice := []string{"boot", "gap", "pool-while-t2-waits", "end-sessions"}
+	slice := []string{"boot", "gap", "pool-before-the-answer", "end-sessions"}
 	// What keploy mock replay derives: T began at +0.5s and T2 at +1.7s;
-	// each ends at the last request or answer of the recordings it owns.
+	// each ends at the last place of the recordings it owns.
 	windows := []models.TestWindow{
-		{TestCase: "T", Start: exactT0.Add(500 * time.Millisecond), End: owned.Spec.ResTimestampMock},
-		{TestCase: "T2", Start: exactT0.Add(1700 * time.Millisecond), End: late.Spec.ResTimestampMock},
+		{TestCase: "T", Start: exactT0.Add(500 * time.Millisecond), End: owned.Spec.ReqTimestampMock},
+		{TestCase: "T2", Start: exactT0.Add(1700 * time.Millisecond), End: late.Spec.ReqTimestampMock},
 	}
 	for _, c := range []struct {
 		name    string
@@ -60,10 +64,10 @@ func TestUnderMockReplayTheRecordedWindowsKeepTheSetsTeardown(t *testing.T) {
 				t.Fatalf("precondition: %d recorded windows installed, want %d", got, len(c.windows))
 			}
 			after := mm.teardownAfter("k", "")
-			if after == nil || !after(end.Spec.ReqTimestampMock) {
-				t.Fatalf("end-sessions, sent after every test's recording, is not the set's teardown")
+			if after == nil || !after(end.Spec.ReqTimestampMock) || !after(inFlight.Spec.ReqTimestampMock) {
+				t.Fatalf("end-sessions or pool-before-the-answer, sent after every test's recording, is not the set's teardown")
 			}
-			for _, mk := range []*models.Mock{boot, owned, gap, owned2, late, inFlight} {
+			for _, mk := range []*models.Mock{boot, owned, gap, owned2, late} {
 				if after(mk.Spec.ReqTimestampMock) {
 					t.Errorf("FALSE GREEN? %s, sent before a test's last recording, reads as the set's teardown", mk.Name)
 				}
@@ -75,17 +79,17 @@ func TestUnderMockReplayTheRecordedWindowsKeepTheSetsTeardown(t *testing.T) {
 				t.Fatal("precondition: the test's own recording did not answer it")
 			}
 			mm.ServeExactPool("k", slice)
-			perTestReads(t, mm, "between two tests", "end-sessions")
+			perTestReads(t, mm, "between two tests", "pool-before-the-answer", "end-sessions")
 			mm.ServeExactTest("T2", []*models.Mock{owned2, late})
 			if !mm.DeleteFilteredMock(*owned2) || !mm.DeleteFilteredMock(*late) {
 				t.Fatal("precondition: the second test's own recordings did not answer it")
 			}
 			mm.ServeExactPool("k", slice)
-			perTestReads(t, mm, "after the last test", "end-sessions")
+			perTestReads(t, mm, "after the last test", "pool-before-the-answer", "end-sessions")
 			if !mm.DeleteFilteredMock(*end) {
 				t.Fatal("the pool's recording of the call after the last test (endSessions) did not answer it")
 			}
-			perTestReads(t, mm, "after it answered")
+			perTestReads(t, mm, "after it answered", "pool-before-the-answer")
 			again := *end
 			if mm.DeleteFilteredMock(*end) || mm.DeleteStartupMock(*end) || mm.UpdateUnFilteredMock(end, &again) || mm.MarkMockAsUsed(*end) {
 				t.Fatal("FALSE GREEN: the call after the last test, made once more, was answered by the recording that already answered it")
@@ -296,27 +300,56 @@ func TestUnderMockReplayEachProcessesTeardownIsBoundedByItsOwnTestsOnDisk(t *tes
 	}
 }
 
-// The bound a test's recording on disk sets is its answer's time, not its
-// request's: a pool recording sent while the test's last call waited for its
-// answer is no teardown (the test was still running), one sent after the
-// answer is.
-func TestUnderMockReplayTheTeardownIsAfterTheTestsLastAnswerOnDisk(t *testing.T) {
+// The bound a test's recording on disk sets is its place (models.PlaceOf),
+// where record charged it to the test: its request, or its answer for one
+// placed at its answer (a consumer's poll). A pool recording sent after the
+// test's last call is the teardown though that call's answer was stamped
+// after it (record charged the pool recording outside the test's scope, by
+// its place); one sent before the test's last call is not, and neither is
+// one sent before a poll placed at its answer was answered. Read from the
+// store on disk and from the trees alike.
+func TestUnderMockReplayTheTeardownIsAfterTheTestsLastPlaceOnDisk(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
+	t.Cleanup(models.RegisterAnswerPlaced(models.Mongo, func(m *models.Mock) bool { return m.Name == "poll" }))
+	before := exactMongo("before", 500*time.Millisecond, models.LifetimePerTest)
 	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
 	owned.Spec.ResTimestampMock = exactT0.Add(2 * time.Second)
+	poll := exactMongo("poll", time.Second, models.LifetimePerTest)
+	poll.Spec.ResTimestampMock = exactT0.Add(2 * time.Second)
 	mid := exactMongo("mid", 1500*time.Millisecond, models.LifetimePerTest)
 	end := exactMongo("end", 3*time.Second, models.LifetimePerTest)
-	disk := onDisk(t, owned, mid, end)
-	mm := stagedManager(t, []*models.Mock{mid, end}, nil)
-	mm.SetPoolOwners(map[string]string{"owned": "k"})
-	mm.SetPoolNames([]string{"mid", "end"})
-	mm.SetRecordingTimes(disk.RangeTimes)
-	after := mm.teardownAfter("k", "")
-	if after == nil || !after(end.Spec.ReqTimestampMock) {
-		t.Fatal("end, sent after the test's last answer, is not the teardown")
-	}
-	if after(mid.Spec.ReqTimestampMock) {
-		t.Fatal("FALSE GREEN? mid, sent before the test's last call was answered, reads as the teardown")
+	for _, c := range []struct {
+		name    string
+		last    *models.Mock
+		midIsTD bool
+	}{
+		{"a call placed at its request", owned, true},
+		{"a poll placed at its answer", poll, false},
+	} {
+		for _, onDiskOnly := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s, on disk only %v", c.name, onDiskOnly), func(t *testing.T) {
+				staged := []*models.Mock{before, mid, end}
+				if !onDiskOnly {
+					staged = append(staged, c.last)
+				}
+				mm := stagedManager(t, staged, nil)
+				mm.SetPoolOwners(map[string]string{c.last.Name: "k"})
+				mm.SetPoolNames([]string{"before", "mid", "end"})
+				if onDiskOnly {
+					mm.SetRecordingTimes(onDisk(t, before, c.last, mid, end).RangeTimes)
+				}
+				after := mm.teardownAfter("k", "")
+				if after == nil || !after(end.Spec.ReqTimestampMock) {
+					t.Fatal("end, sent after the test's last answer, is not the teardown")
+				}
+				if after(before.Spec.ReqTimestampMock) {
+					t.Fatal("FALSE GREEN? before, sent before the test's last call, reads as the teardown")
+				}
+				if got := after(mid.Spec.ReqTimestampMock); got != c.midIsTD {
+					t.Fatalf("mid, sent after the test's last call was sent and before its answer, is the teardown = %v, want %v", got, c.midIsTD)
+				}
+			})
+		}
 	}
 }
 
@@ -369,23 +402,45 @@ func TestUnderMockReplayAnOlderRunsTeardownIsBoundedByItsOwnClock(t *testing.T) 
 	}
 	// The replay: T1 and T2 (S's), then T3 (L's), then the client's
 	// disconnect.
-	mm.ServeExactPool("k", slice)
-	perTestReads(t, mm, "before the first test")
-	for _, tc := range []struct {
-		name string
-		own  *models.Mock
-	}{{"T1", s1}, {"T2", s2}, {"T3", l1}} {
-		mm.ServeExactTest(tc.name, []*models.Mock{tc.own})
-		if !mm.DeleteFilteredMock(*tc.own) {
-			t.Fatalf("precondition: %s's own recording did not answer it", tc.name)
-		}
+	replay := func(t *testing.T, mm *MockManager) {
+		t.Helper()
 		mm.ServeExactPool("k", slice)
+		perTestReads(t, mm, "before the first test")
+		for _, tc := range []struct {
+			name string
+			own  *models.Mock
+		}{{"T1", s1}, {"T2", s2}, {"T3", l1}} {
+			mm.ServeExactTest(tc.name, []*models.Mock{tc.own})
+			if !mm.DeleteFilteredMock(*tc.own) {
+				t.Fatalf("precondition: %s's own recording did not answer it", tc.name)
+			}
+			mm.ServeExactPool("k", slice)
+		}
+		perTestReads(t, mm, "after the last test", "s-end")
+		if !mm.DeleteFilteredMock(*sEnd) {
+			t.Fatal("the call after the last test (endSessions) was not answered by S's recording of it")
+		}
 	}
-	perTestReads(t, mm, "after the last test", "s-end")
-	if !mm.DeleteFilteredMock(*sEnd) {
-		t.Fatal("the call after the last test (endSessions) was not answered by S's recording of it")
-	}
+	replay(t, mm)
 
+	// The same set with every test's recordings staged in the trees and
+	// none read from disk: the trees' recordings bound each clock apart
+	// too.
+	t.Run("the tests' recordings in the trees", func(t *testing.T) {
+		mm := stagedManager(t, []*models.Mock{sBoot, s1, sGap, s2, sEnd, l1}, nil)
+		mm.SetPoolOwners(owners)
+		mm.SetPoolNames(slice)
+		after := mm.teardownAfter("k", s)
+		if after == nil || !after(sEnd.Spec.ReqTimestampMock) {
+			t.Fatal("s-end, sent after every test S recorded, is not the teardown of S's clock: a newer run's test in the trees, on another clock, bounded it")
+		}
+		for _, mk := range []*models.Mock{sBoot, sGap} {
+			if after(mk.Spec.ReqTimestampMock) {
+				t.Errorf("FALSE GREEN? %s, sent before a test of its own clock in the trees, reads as the teardown", mk.Name)
+			}
+		}
+		replay(t, mm)
+	})
 	t.Run("a recording on no clock bounds every clock", func(t *testing.T) {
 		lu := exactMongo("l-untrusted", 44*time.Second, models.LifetimePerTest)
 		mm := stagedManager(t, []*models.Mock{sBoot, sGap, sEnd}, nil)
@@ -469,5 +524,107 @@ func TestUnderMockReplayOneRunsTeardownIsTheSameWithItsClock(t *testing.T) {
 	}
 	if len(clocked) != len(plain) || !clocked["end"] || !clocked["end-untrusted"] {
 		t.Fatalf("one run's teardown on its clock is %v, without it %v: the clock changed it", clocked, plain)
+	}
+}
+
+// A recording with no request time has no place (models.PlaceOf): under
+// keploy mock replay it bounds no teardown, read from the trees and from the
+// store on disk alike, so the call after the last test misses (fail closed).
+// On disk its place was kept as the zero time's UnixNano, which overflows to
+// a time in 1754, and read back as a place before every pool call: every
+// pool call, the application's boot among them, read as the teardown, while
+// the trees told none.
+func TestUnderMockReplayARecordingWithNoPlaceBoundsNoTeardown(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	boot := exactMongo("boot", 100*time.Millisecond, models.LifetimePerTest)
+	end := exactMongo("end", 3*time.Second, models.LifetimePerTest)
+	unplaced := exactMongo("unplaced", time.Second, models.LifetimePerTest)
+	unplaced.Spec.ReqTimestampMock = time.Time{}
+	if !models.PlaceOf(unplaced).IsZero() {
+		t.Fatal("precondition: the recording with no request time has a place")
+	}
+	slice := []string{"boot", "end"}
+	for _, c := range []struct {
+		name   string
+		staged []*models.Mock
+		disk   bool
+	}{
+		{"in the trees", []*models.Mock{boot, unplaced, end}, false},
+		{"on disk only", []*models.Mock{boot, end}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			mm := stagedManager(t, c.staged, nil)
+			mm.SetPoolOwners(map[string]string{"unplaced": "k"})
+			mm.SetPoolNames(slice)
+			if c.disk {
+				mm.SetRecordingTimes(onDisk(t, boot, unplaced, end).RangeTimes)
+			}
+			if after := mm.teardownAfter("k", ""); after != nil {
+				t.Fatalf("FALSE GREEN? a recording with no place bounded the set's teardown (the boot reads as the teardown: %v)", after(boot.Spec.ReqTimestampMock))
+			}
+		})
+	}
+}
+
+// keploy mock record stamps an answer once the relay's write of it to the
+// application returns, and the application can read it, end its test and
+// make its next call before that. The times are a loaded host's recording
+// of a Go Mongo suite: its last test's delete was sent at .613347922 and its
+// answer stamped at .615503334, 270 us after keploy read the driver's
+// endSessions (.61523347), sent at client.Disconnect after that test, on the
+// same connection (so after the app had the answer). Record charged the
+// endSessions to the pool, by its place, after the last test's scope. Under
+// keploy mock replay the set's teardown is bounded by the last place
+// (models.PlaceOf) of the recordings outside the pool, as record charged
+// them, read from the trees and from the store on disk alike: the
+// endSessions is the teardown and answers the call after the last test.
+// Bounded by the late answer instead, it was no teardown, the call missed
+// outside every test, and the record failed with every test passing.
+func TestUnderMockReplayAnAnswerStampedAfterTheNextCallKeepsTheTeardown(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	at := func(nsec int) time.Time { return time.Date(2026, 11, 2, 21, 56, 15, nsec, time.UTC) }
+	boot := exactMongo("boot", 0, models.LifetimePerTest)
+	boot.Spec.ReqTimestampMock, boot.Spec.ResTimestampMock = at(300000000), at(301000000)
+	find := exactMongo("find", 0, models.LifetimePerTest)
+	find.Spec.ReqTimestampMock, find.Spec.ResTimestampMock = at(612000000), at(612900000)
+	del := exactMongo("delete", 0, models.LifetimePerTest)
+	del.Spec.ReqTimestampMock, del.Spec.ResTimestampMock = at(613347922), at(615503334)
+	end := exactMongo("end-sessions", 0, models.LifetimePerTest)
+	end.Spec.ReqTimestampMock, end.Spec.ResTimestampMock = at(615233470), at(616645021)
+	slice := []string{"boot", "end-sessions"}
+	owners := map[string]string{"find": "items", "delete": "items"}
+	for _, c := range []struct {
+		name   string
+		staged []*models.Mock
+		disk   bool
+	}{
+		{"the test's recordings in the trees", []*models.Mock{boot, find, del, end}, false},
+		{"the test's recordings on disk only", []*models.Mock{boot, end}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			mm := stagedManager(t, c.staged, nil)
+			mm.SetPoolOwners(owners)
+			mm.SetPoolNames(slice)
+			if c.disk {
+				mm.SetRecordingTimes(onDisk(t, boot, find, del, end).RangeTimes)
+			}
+			after := mm.teardownAfter("items", "")
+			if after == nil || !after(end.Spec.ReqTimestampMock) {
+				t.Fatal("endSessions, sent after the last test's delete was answered (same connection), is not the set's teardown: the delete's late answer stamp bounded it")
+			}
+			if after(boot.Spec.ReqTimestampMock) || after(del.Spec.ReqTimestampMock) {
+				t.Fatal("FALSE GREEN? a recording sent before the last test's own reads as the set's teardown")
+			}
+			mm.ServeExactPool("items", slice)
+			mm.ServeExactTest("items::TestCrossTestFind", []*models.Mock{find, del})
+			if !mm.DeleteFilteredMock(*find) || !mm.DeleteFilteredMock(*del) {
+				t.Fatal("precondition: the last test's own recordings did not answer it")
+			}
+			mm.ServeExactPool("items", slice)
+			perTestReads(t, mm, "after the last test", "end-sessions")
+			if !mm.DeleteFilteredMock(*end) {
+				t.Fatal("the call after the last test (endSessions) was not answered by its recording")
+			}
+		})
 	}
 }
