@@ -781,3 +781,19 @@ func TestNoiseMarkedMarksOnlyUncomparedRequestLeaves(t *testing.T) {
 		t.Fatalf("marked %v, want %v", got, want)
 	}
 }
+
+// soapAction reads the action parameter of SOAP 1.2's media type only: the
+// same parameter on another media type names no operation.
+func TestSOAPActionReadsOnlySOAP12sMediaType(t *testing.T) {
+	for ct, want := range map[string]string{
+		`application/soap+xml; charset=utf-8; action="urn:GetOrder"`: "urn:GetOrder",
+		`application/json; action="urn:GetOrder"`:                    "",
+		`text/xml; action="urn:GetOrder"`:                            "",
+		`application/soap+xml; charset=utf-8`:                        "",
+		`application/soap+xml; action`:                               "",
+	} {
+		if got := soapAction(ct); got != want {
+			t.Errorf("soapAction(%q) = %q, want %q", ct, got, want)
+		}
+	}
+}
