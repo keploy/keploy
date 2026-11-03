@@ -1165,15 +1165,15 @@ func (fol *follows) unordered(at time.Time, earlier []Earlier, raw []Raw) string
 // of it (refute, refuteSeen, excused: each a place both runs gave the
 // application before the call, which only one run's value took), other
 // than its own unserved siblings alone (pastSiblingsOnly). Past those alone
-// the echo stands, learned as an echo and naming the first (setAside), on
-// the terms noise stands on past them: the recording and F gave the value's
-// candidate sources in the same order (unordered), and F gave none of them
-// only in an older test of the set (olderWhy). An echo is a checked
-// relation (a replay answers the call with what the application sent),
-// stricter than the noise the rule lets stand at the same places, and a
-// value carried from a place holds what that place gave in both runs, which
-// the rule never sets aside. Every other refusal (classifyRead's, before
-// it) still refuses.
+// the echo stands, learned as an echo and naming the first, and any leaf
+// set aside (setAside), on the terms noise stands on past them: the
+// recording and F gave the value's candidate sources in the same order
+// (unordered), and F gave none of them only in an older test of the set
+// (olderWhy). An echo is a checked relation (a replay answers the call with
+// what the application sent), stricter than the noise the rule lets stand
+// at the same places, and a value carried from a place holds what that
+// place gave in both runs, which the rule never sets aside. Every other
+// refusal (classifyRead's, before it) still refuses.
 //
 // Never where an instant of the value changed (valueDrift.instants): a read
 // of the clock, which a replay checks against its call's clock where it is
@@ -1205,12 +1205,22 @@ func (f *follows) echoed(ln Learned, v *valueDrift, at time.Time, earlier []Earl
 // is no source of it: one it went past (refuted), else one the word rule let
 // a word of it go at that F gave another value at (moved), else one where
 // the word stands by chance (chance), else a leaf set aside (aside), else
-// the first word let go (letGo).
+// the first word let go (letGo). A leaf set aside is named after the first
+// place wherever that is another one: past an unserved sibling it is what
+// refuses the echo (pastSiblingsOnly), so a reason naming only the sibling
+// would say the echo was refused for a place the sibling rule lets stand.
 func (f *follows) setAside() string {
-	for _, why := range []string{f.refuted, f.moved, f.chance, f.aside} {
-		if why != "" {
-			return why
+	for _, why := range []string{f.refuted, f.moved, f.chance} {
+		if why == "" {
+			continue
 		}
+		if f.aside != "" {
+			return why + "; and " + f.aside
+		}
+		return why
+	}
+	if f.aside != "" {
+		return f.aside
 	}
 	return f.letGo
 }

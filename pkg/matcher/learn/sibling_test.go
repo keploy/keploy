@@ -53,6 +53,12 @@ func sibCall(at time.Time, rec, live map[string]string, raw []Raw, resp ...Leaf)
 
 // sibCallBy is sibCall by classify: ClassifyGiven, or ClassifyFollowing.
 func sibCallBy(classify func(*DriftCache, []string, Shape, Shape, time.Time, []Earlier, []Raw, []Leaf, *Window, GivenEarlier) []Learned, at time.Time, rec, live map[string]string, raw []Raw, resp ...Leaf) map[string]Learned {
+	return sibCallIn(classify, at, rec, live, nil, raw, resp...)
+}
+
+// sibCallIn is sibCallBy past the exchanges record's full round served
+// before the call (earlier).
+func sibCallIn(classify func(*DriftCache, []string, Shape, Shape, time.Time, []Earlier, []Raw, []Leaf, *Window, GivenEarlier) []Learned, at time.Time, rec, live map[string]string, earlier []Earlier, raw []Raw, resp ...Leaf) map[string]Learned {
 	r, l := Shape{Leaves: map[string]Leaf{}}, Shape{Leaves: map[string]Leaf{}}
 	var drift []string
 	for p, v := range rec {
@@ -62,7 +68,7 @@ func sibCallBy(classify func(*DriftCache, []string, Shape, Shape, time.Time, []E
 	}
 	slices.Sort(drift)
 	out := map[string]Learned{}
-	for _, ln := range classify(clockedDrifts(), drift, l, r, at, nil, raw, resp, nil, nil) {
+	for _, ln := range classify(clockedDrifts(), drift, l, r, at, earlier, raw, resp, nil, nil) {
 		out[ln.Recorded.Path] = ln
 	}
 	return out
@@ -265,7 +271,10 @@ func TestASiblingSetAsideTakesItsMomentsWithIt(t *testing.T) {
 // So is an echo beside a sibling F DID serve before the call, as recorded,
 // stated unread or learned as an echo: Postgres states a sibling with
 // nothing learned unread whether or not F served it, so only F's serve tells
-// the two apart, and a served place is a source like any other.
+// the two apart, and a served place is a source like any other. So is an
+// echo beside an unserved sibling and a leaf set aside (an answer F served
+// before the call that held the stamp whole where F saw another value):
+// the exemption covers siblings alone, and the reason names the leaf.
 func TestAnEqualStampBesideASiblingFHadNotServedIsAnEcho(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	first := time.Date(2026, 11, 2, 3, 52, 27, 62_000_000, time.UTC)
@@ -291,9 +300,17 @@ func TestAnEqualStampBesideASiblingFHadNotServedIsAnEcho(t *testing.T) {
 	asRec17 := RawOf(insert("mock-17", "2", "moderator", first.Add(2*time.Millisecond)), true).ServedAsRecorded().ServedAs(2)
 	resp := []Leaf{{Path: "row.1.createdAt", Type: String, Value: same}, {Path: "row.1.updatedAt", Type: String, Value: same}}
 	live := sibLive(same, sequelize)
-	call := func(raw ...Raw) map[string]Learned {
-		return sibCallBy(ClassifyFollowing, at, map[string]string{"bind.$3": same, "bind.$4": same}, map[string]string{"bind.$3": live, "bind.$4": live}, raw, resp...)
+	// mock-8, an exchange F served before the call, whose answer held the
+	// recorded stamp whole where F saw another value: a leaf set aside
+	// (refuteSeen), which no sibling rule covers.
+	t8 := first.Add(-50 * time.Millisecond)
+	asideLeaf := Earlier{Mock: "mock-8", At: t8, Payload: RawOf(&models.Mock{Name: "mock-8", Spec: models.MockSpec{ReqTimestampMock: t8, ResTimestampMock: t8.Add(time.Millisecond)}}, true).ServedAs(1), Seen: []Seen{
+		{Side: Response, Leaf: Leaf{Path: "body.at", Type: String, Value: same}, Live: other},
+	}}
+	callIn := func(earlier []Earlier, raw ...Raw) map[string]Learned {
+		return sibCallIn(ClassifyFollowing, at, map[string]string{"bind.$3": same, "bind.$4": same}, map[string]string{"bind.$3": live, "bind.$4": live}, earlier, raw, resp...)
 	}
+	call := func(raw ...Raw) map[string]Learned { return callIn(nil, raw...) }
 	want := []string{"row.1.createdAt", "row.1.updatedAt"}
 	for _, row := range []struct {
 		what string
@@ -311,19 +328,27 @@ func TestAnEqualStampBesideASiblingFHadNotServedIsAnEcho(t *testing.T) {
 			}
 		}
 	}
+	// A leaf set aside is named in the refusal wherever it stands, beside
+	// the sibling the search went past first too: it is what refuses the
+	// echo there.
+	const asideWhy = "its recorded value stands whole in mock-8 at body.at"
 	for _, row := range []struct {
-		what string
-		raw  []Raw
+		what    string
+		earlier []Earlier
+		raw     []Raw
 	}{
-		{"no role stated", []Raw{unserved}},
-		{"stated unread with another value", []Raw{unserved.Sibling(role("", other))}},
-		{"learned as noise", []Raw{unserved.Sibling(role(KindNoise, same))}},
-		{"beside an unread sibling, an unserved recording that is none", []Raw{unserved16, unserved.Sibling(role("", same))}},
-		{"a sibling F served as recorded, stated unread", []Raw{asRec.Sibling(role("", same))}},
-		{"a sibling F served as recorded, learned as an echo", []Raw{asRec.Sibling(role(KindEcho, same))}},
-		{"two siblings F served as recorded, both unread", []Raw{asRec.Sibling(role("", same)), asRec17.Sibling(role("", same))}},
+		{"no role stated", nil, []Raw{unserved}},
+		{"stated unread with another value", nil, []Raw{unserved.Sibling(role("", other))}},
+		{"learned as noise", nil, []Raw{unserved.Sibling(role(KindNoise, same))}},
+		{"beside an unread sibling, an unserved recording that is none", nil, []Raw{unserved16, unserved.Sibling(role("", same))}},
+		{"a sibling F served as recorded, stated unread", nil, []Raw{asRec.Sibling(role("", same))}},
+		{"a sibling F served as recorded, learned as an echo", nil, []Raw{asRec.Sibling(role(KindEcho, same))}},
+		{"two siblings F served as recorded, both unread", nil, []Raw{asRec.Sibling(role("", same)), asRec17.Sibling(role("", same))}},
+		{"a leaf set aside alone", []Earlier{asideLeaf}, nil},
+		{"an unserved sibling stated unread, beside a leaf set aside", []Earlier{asideLeaf}, []Raw{unserved.Sibling(role("", same))}},
+		{"an unserved sibling learned as an echo, beside a leaf set aside", []Earlier{asideLeaf}, []Raw{unserved.Sibling(role(KindEcho, same))}},
 	} {
-		got := call(row.raw...)
+		got := callIn(row.earlier, row.raw...)
 		for _, p := range []string{"bind.$3", "bind.$4"} {
 			if _, ok := got[p]; !ok {
 				t.Errorf("%s: %s was not learned at all; want the echo refused beside a source set aside", row.what, p)
@@ -332,6 +357,9 @@ func TestAnEqualStampBesideASiblingFHadNotServedIsAnEcho(t *testing.T) {
 		for p, ln := range got {
 			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, echoSetAside+"an instant of it changed") {
 				t.Errorf("FALSE GREEN? %s: %s learned %s from %q (%s); want the echo refused beside a source set aside, as before", row.what, p, ln.Kind, ln.From.Mock, ln.Why)
+			}
+			if row.earlier != nil && !strings.Contains(ln.Why, asideWhy) {
+				t.Errorf("%s: %s refused (%s); want the reason to name the leaf set aside (%q)", row.what, p, ln.Why, asideWhy)
 			}
 		}
 	}
