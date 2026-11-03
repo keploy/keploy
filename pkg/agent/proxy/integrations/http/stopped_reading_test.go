@@ -113,7 +113,7 @@ func TestDecodeHTTPServesAnAnswerTheAppStoppedReadingWithoutItsEnd(t *testing.T)
 				boundAppReads(t, app)
 				served := &readsOnConn{Conn: proxy, readAgain: make(chan struct{}, 1), afterWrite: make(chan struct{}, 1)}
 				h := &HTTP{Logger: zap.NewNop()}
-				done := runDecode(t, proxy, func(ctx context.Context) error {
+				done := runServe(t, proxy, func(ctx context.Context) error {
 					return h.decodeHTTP(ctx, []byte(request), served, nil,
 						&mockMemDb{mocks: mocks, updateUnFilteredReturn: true}, models.OutgoingOptions{})
 				})
@@ -322,6 +322,21 @@ func servedBytes(t *testing.T, served *readsOnConn, app net.Conn, done <-chan er
 	return raw
 }
 
+// runServe runs decode as runDecode does, then closes the proxy's end of the
+// connection once decode returns, as the proxy closes the application's
+// connection once its parser is done. A serve that returns without the answer
+// a row waits on (an error, no hold) ends the app's read at once, by that
+// close, and fails the row by its own assertion, never by the app's bound on
+// its reads or the package's timeout.
+func runServe(t *testing.T, proxy net.Conn, decode func(ctx context.Context) error) <-chan error {
+	t.Helper()
+	return runDecode(t, proxy, func(ctx context.Context) error {
+		err := decode(ctx)
+		_ = proxy.Close()
+		return err
+	})
+}
+
 // boundAppReads bounds the app's reads on its side of the connection. The
 // bound only turns a hang into a failure of the row: a serve writes its whole
 // answer at once, so a row that waits for bytes a broken serve never sends
@@ -373,7 +388,7 @@ func TestDecodeHTTPServesAnAnswerTheAppStoppedReadingWithNoBodyWhole(t *testing.
 				boundAppReads(t, app)
 				served := &readsOnConn{Conn: proxy, readAgain: make(chan struct{}, 1)}
 				h := &HTTP{Logger: zap.NewNop()}
-				done := runDecode(t, proxy, func(ctx context.Context) error {
+				done := runServe(t, proxy, func(ctx context.Context) error {
 					return h.decodeHTTP(ctx, []byte(request), served, nil,
 						&mockMemDb{mocks: mocks, updateUnFilteredReturn: true}, models.OutgoingOptions{})
 				})
@@ -461,7 +476,7 @@ func TestTheAsyncLaneServesAnAnswerTheAppStoppedReadingOpen(t *testing.T) {
 				if row.setup != nil {
 					row.setup(h)
 				}
-				done := runDecode(t, proxy, func(ctx context.Context) error {
+				done := runServe(t, proxy, func(ctx context.Context) error {
 					return h.decodeHTTP(ctx, []byte(row.call), proxy, row.dst, &mockMemDb{mocks: row.mocks}, row.opts)
 				})
 				br := bufio.NewReader(app)
@@ -779,7 +794,7 @@ func TestDecodeHTTPServesACompressedAnswerTheAppStoppedReadingWithNoStreamEnd(t 
 						app, proxy := tcpPair(t)
 						boundAppReads(t, app)
 						h := &HTTP{Logger: zap.NewNop()}
-						done := runDecode(t, proxy, func(ctx context.Context) error {
+						done := runServe(t, proxy, func(ctx context.Context) error {
 							return h.decodeHTTP(ctx, []byte(request), proxy, nil,
 								&mockMemDb{mocks: mocks, updateUnFilteredReturn: true}, models.OutgoingOptions{})
 						})
@@ -964,7 +979,7 @@ func checkHeldWire(t *testing.T, proven string, pooled bool, major, minor int, b
 	}
 	request := "POST /v1/events HTTP/1." + strconv.Itoa(appMinor) + "\r\nHost: api.example\r\nContent-Length: 0\r\n\r\n"
 	served := &readsOnConn{Conn: proxy, readAgain: make(chan struct{}, 1), afterWrite: make(chan struct{}, 1)}
-	done := runDecode(t, proxy, func(ctx context.Context) error {
+	done := runServe(t, proxy, func(ctx context.Context) error {
 		return h.decodeHTTP(ctx, []byte(request), served, nil,
 			&mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true}, models.OutgoingOptions{})
 	})
