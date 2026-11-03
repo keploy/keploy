@@ -82,6 +82,18 @@ func TestLearnMatchRefusesAChangeInWhatNamesTheCall(t *testing.T) {
 		{name: "an anonymous GraphQL operation's root fields", method: "POST", recTarget: "/graphql", liveTarget: "/graphql",
 			recBody: `{"query":"query { order(id: 1) { id } }"}`, liveBody: `{"query":"query { users { password } }"}`,
 			answer: `{}`, leaf: "body.query"},
+		{name: "an anonymous GraphQL operation's root fields through a fragment", method: "POST", recTarget: "/graphql", liveTarget: "/graphql",
+			recBody: `{"query":"{ ...F } fragment F on Query { order { id } }"}`, liveBody: `{"query":"{ ...F } fragment F on Query { users { id } }"}`,
+			answer: `{}`, leaf: "body.query"},
+		{name: "an anonymous GraphQL query's root fields through a fragment", method: "POST", recTarget: "/graphql", liveTarget: "/graphql",
+			recBody: `{"query":"query { ...F } fragment F on Query { order { id } }"}`, liveBody: `{"query":"query { ...F } fragment F on Query { users { id } }"}`,
+			answer: `{}`, leaf: "body.query"},
+		{name: "an anonymous GraphQL mutation's root fields through a fragment", method: "POST", recTarget: "/graphql", liveTarget: "/graphql",
+			recBody: `{"query":"mutation { ...M } fragment M on Mutation { createOrder { id } }"}`, liveBody: `{"query":"mutation { ...M } fragment M on Mutation { deleteAllOrders { id } }"}`,
+			answer: `{}`, leaf: "body.query"},
+		{name: "an anonymous GraphQL operation spreading a fragment it does not define", method: "POST", recTarget: "/graphql", liveTarget: "/graphql",
+			recBody: `{"query":"{ ...F } fragment F on Query { order { id } }"}`, liveBody: `{"query":"{ ...F }"}`,
+			answer: `{}`, leaf: "body.query"},
 		{name: "a GraphQL operation after a comment holding a brace", method: "POST", recTarget: "/graphql", liveTarget: "/graphql",
 			recBody: `{"query":"query GetOrder { order { id } }"}`, liveBody: `{"query":"mutation CancelOrder # {\n { cancel { ok } }"}`,
 			answer: `{}`, leaf: "body.query"},
@@ -162,6 +174,23 @@ func TestLearnMatchStillLearnsWhatDoesNotNameTheCall(t *testing.T) {
 		if _, ok := got[want]; !ok {
 			t.Fatalf("learned %v, want %s among it", got, want)
 		}
+	}
+}
+
+// What a fragment an anonymous GraphQL operation spreads at its root asks of
+// its fields (their arguments, what they select) does not name the call: a
+// change there is learned as noise, as one in the operation's own fields is.
+func TestLearnMatchLearnsAnArgumentChangeInAFragment(t *testing.T) {
+	h, n, opts := learnOn(t)
+	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/graphql",
+		`{"query":"{ ...F } fragment F on Query { order(id: 1) { id } }"}`, nil, `{"data":{}}`)}}
+	served, miss, err := h.learnMatch(context.Background(), live("POST", "/graphql",
+		`{"query":"{ ...F } fragment F on Query { order(id: 2) { id total } }"}`, nil), db, n, opts)
+	if err != nil || miss != nil || served == nil {
+		t.Fatalf("served %v miss %+v err %v", served, miss, err)
+	}
+	if _, ok := db.consumed[0].Spec.ReqBodyNoise["body.query"]; !ok {
+		t.Fatalf("learned %v, want body.query", db.consumed[0].Spec.ReqBodyNoise)
 	}
 }
 
@@ -429,17 +458,30 @@ func TestGraphQLOperations(t *testing.T) {
 		"\ufeffquery GetOrder { order { id } }": "query GetOrder",
 		// An operation with no name is told apart by its root fields, as the
 		// server names them (an alias is the client's), each once, sorted:
-		// a fragment's spread by its name, an inline fragment's fields as
-		// the operation's own.
+		// an inline fragment's fields, and a fragment's spread's (the
+		// fields the fragment selects at its root, spread in turn), as the
+		// operation's own.
 		"query { order(id: 1) { id } }":                                "query { order }",
 		"query ($id: ID!) @live { order(id: $id) { id } }":             "query { order }",
 		"{ u: users(first: 2) { id } o: order(id: 1) @cached { id } }": "query { order users }",
 		"{ b a b }": "query { a b }",
-		"{ ...F ... on Query { users } ... @include(if: $x) { me } }": "query { ...F me users }",
-		"{ order(note: \")\" # )\n) # }\n { id } }":                   "query { order }",
-		"{ order { ... on Order @skip(if: true) { id } } }":           "query { order }",
-		"{ order { id } ...F @include(if: $x) }":                      "query { ...F order }",
-		"{ on }":                                                      "query { on }",
+		"{ ...F ... on Query { users } ... @include(if: $x) { me } } fragment F on Query { order }": "query { me order users }",
+		"{ order(note: \")\" # )\n) # }\n { id } }":                                                 "query { order }",
+		"{ order { ... on Order @skip(if: true) { id } } }":                                         "query { order }",
+		"{ order { id } ...F @include(if: $x) } fragment F on Query { users }":                      "query { order users }",
+		"{ ...F } fragment F on Query { order { id } }":                                             "query { order }",
+		"query { ...F } fragment F on Query { users { id } }":                                       "query { users }",
+		"mutation { ...M } fragment M on Mutation { createOrder { id } }":                           "mutation { createOrder }",
+		"fragment F on Query @d { order(id: 1) { id } }\n{ ...F }":                                  "query { order }",
+		"{ a ...F } fragment F on Query { ...G b } fragment G on Query { c }":                       "query { a b c }",
+		// A fragment spread twice reads once; a cycle (no valid document)
+		// ends where it comes back; a spread below the root is not read.
+		"{ ...F ... on Query { ...F } } fragment F on Query { order }":             "query { order }",
+		"{ a ...F } fragment F on Query { b ...G } fragment G on Query { c ...F }": "query { a b c }",
+		"{ order { ...F } }": "query { order }",
+		"query Q { ...F }":   "query Q",
+		"query Q { ...F } fragment F on Query { order } mutation { ...G } fragment G on Mutation { cancel }": "query Q,mutation { cancel }",
+		"{ on }": "query { on }",
 		// Text that parses as a selection set reads as a shorthand query.
 		"{shoes}": "query { shoes }",
 	} {
@@ -456,8 +498,17 @@ func TestGraphQLOperations(t *testing.T) {
 		// fragment's missing type, a directive with no name, an alias with
 		// no field, a set that does not close.
 		"{app=\"foo\"}", "{app=\"foo\"} |= \"error\"", "{\"term\":\"shoes\"}", "{}", "{ a {} }", "query { a = 1 }",
-		"{ a(b: 1 }", "{ a @d(x: 1 }", "{ ... on { a } }", "{ ...F @ }", "{ a: }", "{ a", "{ a { b }", "query { a } x",
-		"{ ... }", "{ ... on T }", "mutation { a(\"x\") { b } }("} {
+		"{ a(b: 1 }", "{ a @d(x: 1 }", "{ ... on { a } }", "{ ...F @ } fragment F on Query { a }", "{ a: }", "{ a", "{ a @ }", "{ a { b }", "query { a } x",
+		"{ ... }", "{ ... on T }", "mutation { a(\"x\") { b } }(",
+		// A nested set that does not read, the outer brace missing.
+		"{ a {}",
+		// An operation with no name that spreads a fragment the document
+		// does not define, one whose selection set does not read, or
+		// one that selects nothing but itself.
+		"{ ...F }", "{ order ...F }", "query { ...F } fragment G on Query { a }", "{ a ...F } fragment F on Query { b {} }",
+		"{ ...F } fragment F on Query { ...F }", "query Q { a } { ...F }",
+		// A fragment with no name whose text is no selection set.
+		"fragment { a = 1 }\nquery Get { a }"} {
 		if got, ok := graphQLOperations(doc); ok {
 			t.Errorf("graphQLOperations(%q) = %q: want no GraphQL document", doc, got)
 		}
@@ -491,6 +542,9 @@ func TestIdentityOfAGraphQLDocument(t *testing.T) {
 		{learned("body.query", `{app="foo"} |= "error"`, `{app="foo"}`), ""},
 		{learned("url.query.query", `{"term":"shoes"}`, `{"term":"boots"}`), ""},
 		{learned("url.query.query", "shoes", "{shoes}"), classGraphQL},
+		{learned("body.query", "{ ...F } fragment F on Query { order { id } }", "{ ...F } fragment F on Query { users { id } }"), classGraphQL},
+		{learned("body.query", "{ ...F } fragment F on Query { order(id: 1) { id } }", "{ ...F } fragment F on Query { order(id: 2) { id } }"), ""},
+		{learned("body.query", "{ ...F } fragment F on Query { order { id } }", "{ ...F }"), classGraphQL},
 		{learned("body.text", "query A { a }", "query B { a }"), ""},
 		{learned("header.query", "query A { a }", "query B { a }"), ""},
 	} {
@@ -585,6 +639,18 @@ func TestReplayOldLearnedNoiseExcusesAnIdNotAnOperation(t *testing.T) {
 			refused: "body.method", declared: yml{body: map[string][]string{"method": {}}}},
 		{name: "a GraphQL document's operation", path: "/graphql", livePath: "/graphql", header: jsonCT, liveHeader: jsonCT,
 			body: `{"query":"query GetOrder { order { id } }"}`, liveBody: `{"query":"mutation CancelOrder { cancel { id } }"}`,
+			learned: []string{"body.query"}, refused: "body.query", declared: yml{body: map[string][]string{"query": {}}}},
+		{name: "a GraphQL fragment's argument", path: "/graphql", livePath: "/graphql", header: jsonCT, liveHeader: jsonCT,
+			body: `{"query":"{ ...F } fragment F on Query { order(id: 1) { id } }"}`, liveBody: `{"query":"{ ...F } fragment F on Query { order(id: 2) { id } }"}`,
+			learned: []string{"body.query"}},
+		{name: "an anonymous GraphQL operation's root fields through a fragment", path: "/graphql", livePath: "/graphql", header: jsonCT, liveHeader: jsonCT,
+			body: `{"query":"{ ...F } fragment F on Query { order { id } }"}`, liveBody: `{"query":"{ ...F } fragment F on Query { users { id } }"}`,
+			learned: []string{"body.query"}, refused: "body.query", declared: yml{body: map[string][]string{"query": {}}}},
+		{name: "an anonymous GraphQL mutation's root fields through a fragment", path: "/graphql", livePath: "/graphql", header: jsonCT, liveHeader: jsonCT,
+			body: `{"query":"mutation { ...M } fragment M on Mutation { createOrder { id } }"}`, liveBody: `{"query":"mutation { ...M } fragment M on Mutation { deleteAllOrders { id } }"}`,
+			learned: []string{"body.query"}, refused: "body.query", declared: yml{body: map[string][]string{"query": {}}}},
+		{name: "an anonymous GraphQL operation spreading a fragment it does not define", path: "/graphql", livePath: "/graphql", header: jsonCT, liveHeader: jsonCT,
+			body: `{"query":"query { ...F } fragment F on Query { order { id } }"}`, liveBody: `{"query":"query { ...F }"}`,
 			learned: []string{"body.query"}, refused: "body.query", declared: yml{body: map[string][]string{"query": {}}}},
 		{name: "a GraphQL document's operation after a comment holding a brace", path: "/graphql", livePath: "/graphql", header: jsonCT, liveHeader: jsonCT,
 			body: `{"query":"query GetOrder { order { id } }"}`, liveBody: `{"query":"mutation CancelOrder # {\n { cancel { ok } }"}`,
@@ -1075,6 +1141,79 @@ func TestLearnMatchAnUncomparedValueExplainsNoOperationInAnyPlaceOrder(t *testin
 				t.Fatalf("served %v miss %+v: want request_changed at the operation header, from a place a replay does not compare", served, miss)
 			}
 		})
+	}
+}
+
+// A value carried on from a place a replay compares (a read of the
+// application's clock, learned as the read it is) stays compared at each
+// place a later call carries it to: the variable that follows it is no
+// unchecked one, so none of its places is marked uncompared, and a third
+// call that carries it into an operation header is served, its places
+// handed over in either order.
+func TestLearnMatchAComparedValueCarriedOnStaysCompared(t *testing.T) {
+	// A whole second, no whole minute (TestLearnMatchMarksAClockReadAtItsBind).
+	at := learnAt.Add(-time.Hour + 17*time.Second)
+	rec, now := at.Format(time.RFC3339), at.Add(learn.FullRoundLead).Format(time.RFC3339)
+	h, n, opts := learnOn(t)
+	recs := []*models.Mock{
+		learnRecorded("mock-0", 0, "POST", "/v1/events", `{"at":"`+rec+`"}`, nil, `{}`),
+		learnRecorded("mock-1", time.Second, "POST", "/v1/stage", `{"since":"`+rec+`"}`, nil, `{}`),
+	}
+	op := func() *models.Mock {
+		return learnRecorded("mock-op", 2*time.Second, "POST", "/", `{"m":"x"}`, map[string]string{"X-Amz-Target": rec}, `{}`)
+	}
+	first := clockedTracker()
+	first.Begin()
+	db := &learnDb{perTest: recs, observe: first.ServedMock}
+	for i, c := range []*req{live("POST", "/v1/events", `{"at":"`+now+`"}`, nil), live("POST", "/v1/stage", `{"since":"`+now+`"}`, nil)} {
+		if served, miss, err := h.learnMatch(learn.WithTracker(context.Background(), first), c, db, n, opts); err != nil || served == nil {
+			t.Fatalf("call %d: served %v miss %+v err %v", i, served, miss, err)
+		}
+	}
+	if v := db.consumed[1].Spec.LearnedBinds()["mock-0"]; len(v) != 1 {
+		t.Fatalf("the second call learned %+v, want a variable bound at mock-0", db.consumed[1].Spec.LearnedBinds())
+	}
+	_, earlier, mocks, _ := first.Test()
+	carried := 0
+	for _, e := range earlier {
+		for _, s := range e.Seen {
+			if s.Live != now {
+				continue
+			}
+			carried++
+			if s.Uncompared {
+				t.Fatalf("%s's %s leaf %s carries a value from a place a replay compares, and is marked uncompared", e.Mock, s.Side, s.Leaf.Path)
+			}
+		}
+	}
+	if carried != 2 {
+		t.Fatalf("%d leaves hold the carried value, want the two calls'", carried)
+	}
+	for _, reversed := range []bool{false, true} {
+		second := clockedTracker()
+		second.Begin()
+		for i := range mocks {
+			if reversed {
+				i = len(mocks) - 1 - i
+			}
+			second.ServedMock(mocks[i])
+		}
+		test, _, _, _ := second.Test()
+		for i := range earlier {
+			e := earlier[i]
+			if reversed {
+				e = earlier[len(earlier)-1-i]
+				e.At = earlier[i].At
+				e.Seen = append([]learn.Seen(nil), e.Seen...)
+				slices.Reverse(e.Seen)
+			}
+			second.Served(test, e)
+		}
+		served, miss, err := h.learnMatch(learn.WithTracker(context.Background(), second), live("POST", "/", `{"m":"x"}`, map[string]string{"X-Amz-Target": now}),
+			&learnDb{perTest: []*models.Mock{op()}}, n, opts)
+		if err != nil || served == nil || miss != nil {
+			t.Fatalf("places reversed %v: served %v miss %+v err %v; want the operation header explained by the compared value", reversed, served, miss, err)
+		}
 	}
 }
 

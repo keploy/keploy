@@ -385,15 +385,24 @@ func declareHow(leaf string) string {
 // graphQLOperations is the operations GraphQL document doc defines, each
 // its type and its name ("query GetOrder"), or, for one with no name (a
 // shorthand is a query), its type and the fields it selects at its root
-// ("query { order }", sorted: an anonymous operation is told apart only by
-// what it asks for), in order and joined by commas; "" and ok false where
-// doc is no GraphQL document keploy reads whole (a search text in a field
-// named query, a brace whose text is no selection set, a document with text
-// after its last definition) or defines no operation. A description string
-// may stand before a definition. Fragments are no operation, and what a
-// named operation selects is not read.
+// (graphQLRoots: "query { order }", a fragment's spread there read as the
+// fields the fragment selects at its root), in order and joined by commas;
+// "" and ok false where doc is no GraphQL document keploy reads whole (a
+// search text in a field named query, a brace whose text is no selection
+// set, a document with text after its last definition, an operation with no
+// name that spreads a fragment the document does not define) or defines no
+// operation. A description string may stand before a definition. Fragments
+// are no operation, and what a named operation selects is not read.
 func graphQLOperations(doc string) (string, bool) {
-	var ops []string
+	type operation struct {
+		kw, name string
+		// roots: an operation with no name, the selection it opens, as
+		// it stands (readGraphQLSelection), read once the document's
+		// fragments are known.
+		roots []string
+	}
+	var ops []operation
+	frags := map[string]int{} // each fragment's name: where its selection set opens
 	i := 0
 	for {
 		i = skipGraphQLIgnored(doc, i)
@@ -401,11 +410,11 @@ func graphQLOperations(doc string) (string, bool) {
 			break
 		}
 		if doc[i] == '{' {
-			roots, end, ok := graphQLSelection(doc, i)
+			roots, end, ok := readGraphQLSelection(doc, i)
 			if !ok {
 				return "", false
 			}
-			ops, i = append(ops, "query "+roots), end
+			ops, i = append(ops, operation{kw: "query", roots: roots}), end
 			continue
 		}
 		if doc[i] == '"' {
@@ -441,12 +450,15 @@ func graphQLOperations(doc string) (string, bool) {
 			}
 			j++
 		}
-		op := kw + " " + name
+		op := operation{kw: kw, name: name}
 		end, ok := skipGraphQLBlock(doc, j)
-		if name == "" {
-			var roots string
-			roots, end, ok = graphQLSelection(doc, j)
-			op = kw + " " + roots
+		switch {
+		case name == "":
+			// An operation with no name, or a fragment with none (no
+			// valid document): its selection set must read.
+			op.roots, end, ok = readGraphQLSelection(doc, j)
+		case kw == "fragment":
+			frags[name] = j
 		}
 		if !ok {
 			return "", false
@@ -456,27 +468,67 @@ func graphQLOperations(doc string) (string, bool) {
 		}
 		i = end
 	}
-	return strings.Join(ops, ","), len(ops) > 0
-}
-
-// graphQLSelection reads the selection set that opens at doc[i]: the names
-// of the fields it selects ("{ order users }", sorted, each once; a
-// fragment's spread as "...Name", an inline fragment's fields as its own),
-// and the index past its closing brace. ok is false where its text is no
-// selection set (a Loki selector `{app="foo"}`, JSON text), so a value of a
-// field named query that only looks like one reads as no operation. An
-// argument list is read as balanced parentheses, its values unread.
-func graphQLSelection(doc string, i int) (string, int, bool) {
-	names, end, ok := readGraphQLSelection(doc, i)
-	if !ok {
-		return "", i, false
+	read := make([]string, len(ops))
+	for k, op := range ops {
+		if op.name != "" {
+			read[k] = op.kw + " " + op.name
+			continue
+		}
+		roots, ok := graphQLRoots(doc, op.roots, frags)
+		if !ok {
+			return "", false
+		}
+		read[k] = op.kw + " " + roots
 	}
-	sort.Strings(names)
-	names = slices.Compact(names)
-	return "{ " + strings.Join(names, " ") + " }", end, true
+	return strings.Join(read, ","), len(read) > 0
 }
 
-// readGraphQLSelection is graphQLSelection's names, as they stand.
+// graphQLRoots is the fields an operation with no name selects at its root,
+// sorted and each once ("{ order users }"), from names, the selection it
+// opens as it stands: a fragment's spread there ("...F") stands for the
+// fields F selects at its root, read at frags[F] (where its selection set
+// opens) and spread in turn, each fragment once (a cycle ends there). ok is
+// false where a spread names a fragment the document does not define, or
+// one whose selection set keploy does not read, or the operation selects no
+// field: such a document is no document keploy reads whole (fail closed: it
+// may ask for anything).
+func graphQLRoots(doc string, names []string, frags map[string]int) (string, bool) {
+	var roots []string
+	spread := map[string]bool{}
+	for queue := slices.Clone(names); len(queue) > 0; queue = queue[1:] {
+		f, isSpread := strings.CutPrefix(queue[0], "...")
+		if !isSpread {
+			roots = append(roots, f)
+			continue
+		}
+		if spread[f] {
+			continue
+		}
+		spread[f] = true
+		at, defined := frags[f]
+		if !defined {
+			return "", false
+		}
+		inner, _, ok := readGraphQLSelection(doc, at)
+		if !ok {
+			return "", false
+		}
+		queue = append(queue, inner...)
+	}
+	if len(roots) == 0 {
+		return "", false
+	}
+	sort.Strings(roots)
+	return "{ " + strings.Join(slices.Compact(roots), " ") + " }", true
+}
+
+// readGraphQLSelection reads the selection set that opens at doc[i]: the
+// names of the fields it selects, as they stand (a fragment's spread as
+// "...Name", an inline fragment's fields as its own), and the index past its
+// closing brace. ok is false where its text is no selection set (a Loki
+// selector `{app="foo"}`, JSON text), so a value of a field named query that
+// only looks like one reads as no operation. An argument list is read as
+// balanced parentheses, its values unread.
 func readGraphQLSelection(doc string, i int) ([]string, int, bool) {
 	if i >= len(doc) || doc[i] != '{' {
 		return nil, i, false

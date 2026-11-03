@@ -57,11 +57,11 @@ const (
 	// LearnExplainedOnly: only as a value the application sent in an
 	// earlier call at a place keploy compares, a value the test gave
 	// keploy, or a read of the application's clock (with or without an
-	// offset), never as noise or an echo. The HTTP parser holds so a leaf
-	// naming the call's operation (an operation header, SOAP 1.2's action,
-	// a field naming the operation, a GraphQL document's operation:
-	// identityOf); a caller may hold any leaf that says which call a
-	// request is so. A change nothing explains is the request's.
+	// offset), never as noise or an echo. The HTTP parser holds each leaf
+	// that names the call's operation this way (an operation header, SOAP
+	// 1.2's action, a field naming the operation, a GraphQL document's
+	// operation: identityOf). A caller may hold this way any leaf that says
+	// which call a request is. A change nothing explains is the request's.
 	LearnExplainedOnly
 	// LearnExplainedOrEcho: as LearnExplainedOnly, or as a value the answer
 	// carries back. The leaf holds the id of what the call acts on (a path
