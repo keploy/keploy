@@ -275,6 +275,11 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	headersMatched := matcherUtils.CompareHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header), pkg.ToHTTPHeader(actualResponse.Header), hRes, headerNoise)
 	res.HeadersResult = *hRes
 	if !headersMatched {
+		// A header keploy.yml's noise lets vary only within patterns, a
+		// side's value outside them: why it is compared, legibly.
+		for _, why := range matcherUtils.HeaderPatternWhys(*hRes, headerNoise) {
+			logger.Warn("a keploy.yml noise pattern does not excuse a field", zap.String("testCase", tc.Name), zap.String("reason", why))
+		}
 
 		// Forgive a VALUE difference on a header the server mints fresh per call.
 		//

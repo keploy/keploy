@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"math/big"
 	"mime"
@@ -127,26 +126,11 @@ func matchesAny(pats []*regexp.Regexp, s string) bool {
 	return false
 }
 
-// patternWhy is the reason a field keploy.yml's noise guards with patterns
-// was compared: side (the live value, else the recorded one) is outside
-// them, said by its shape, never the value itself, which may be a secret.
-func patternWhy(field string, pats []string, side, shape string) string {
-	return fmt.Sprintf("keploy.yml's noise lets %s vary only within %s; the %s value (%s) is outside it, so it is compared", field, strings.Join(quoteAll(pats), ", "), side, shape)
-}
-
 // patternStrings are pats as written.
 func patternStrings(pats []*regexp.Regexp) []string {
 	out := make([]string, len(pats))
 	for i, re := range pats {
 		out[i] = re.String()
-	}
-	return out
-}
-
-func quoteAll(ss []string) []string {
-	out := make([]string, len(ss))
-	for i, s := range ss {
-		out[i] = strconv.Quote(s)
 	}
 	return out
 }
@@ -237,7 +221,7 @@ type strictField struct {
 	// why is, of a read of the application's clock a replay refused
 	// (clockDiffs), the reason learn.CheckClockRead gives; of a field
 	// keploy.yml's noise guards with patterns a side is outside of, that
-	// (patternWhy).
+	// (matcher.PatternWhy).
 	why string
 	// clock: why is a refused read of the application's clock.
 	clock bool
@@ -543,7 +527,7 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 			if !guarded {
 				return ""
 			}
-			return patternWhy(path, patternStrings(pats), side, valueShape(v, ok))
+			return matcher.PatternWhy(path, patternStrings(pats), side, valueShape(v, ok))
 		}
 		switch {
 		case !inLive:
@@ -857,7 +841,7 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 			if liveOK {
 				side, v = "recorded", r
 			}
-			why = patternWhy(shape, pats, side, valueShape(v, true))
+			why = matcher.PatternWhy(shape, pats, side, valueShape(v, true))
 		}
 	}
 	if isScalar(r) && k.redacted(scalarText(r)) {
@@ -931,7 +915,7 @@ func (k strictKnown) oneSided(risk, shape string, kind models.MockFieldDiffKind,
 	f := shaped("body."+risk, shape, kind, "", "")
 	// Reached only when no entry with no patterns names the field.
 	if pats, ok := k.n.body.Patterns(risk); ok {
-		f.why = patternWhy(shape, pats, absent, valueShape(held, false))
+		f.why = matcher.PatternWhy(shape, pats, absent, valueShape(held, false))
 	}
 	return f
 }

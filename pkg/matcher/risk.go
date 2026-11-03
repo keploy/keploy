@@ -3,6 +3,7 @@ package matcher
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -90,7 +91,16 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 
 	idx := buildNoiseIndex(bodyNoise, nil) // already in matcher/utils.go
 
-	expMaps, actMaps := collectBoth(exp, act, idx)
+	// collectBoth, reading first where the live side holds only values a
+	// pattern matched: the reasons below name the other side there.
+	expMaps, actMaps := newPathMaps(), newPathMaps()
+	collectJSON(exp, "", idx, &expMaps)
+	collectJSON(act, "", idx, &actMaps)
+	liveIn := map[string]bool{}
+	for p := range actMaps.coveredTypes {
+		liveIn[p] = actMaps.coveredOnly(p)
+	}
+	bothSides(&expMaps, &actMaps)
 
 	added, removed, typeChanges, valueChanges := diffMaps(expMaps, actMaps)
 
@@ -186,6 +196,12 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 		assess.Category = []models.FailureCategory{models.SchemaAdded}
 		assess.Risk = models.Medium
 	}
+
+	// A field keploy.yml's noise lets vary only within patterns is compared
+	// when a side's value is outside them: name the field, the patterns and
+	// that side, as mock matching does.
+	changed := slices.Concat(removed, typeChanges, valueChanges, added)
+	assess.Reasons = append(assess.Reasons, bodyPatternWhys(idx, bodyNoise, expMaps, actMaps, liveIn, changed)...)
 
 	return assess, nil
 }
