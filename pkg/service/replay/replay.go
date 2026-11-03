@@ -3242,6 +3242,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		return stoppedSetStatus(ctx, setLastAppErr), true
 	}
+	// watchEnded is the status the set takes at a test loop's head once its
+	// watch has ended it (exitLoopChan): an end of the set's own recorded
+	// before that head (endedFirst; keploy's error writing the set's results,
+	// say) is kept, as resolveTestSetStatus keeps it at the set's end, else
+	// the watch's (its application's exit, or the user's stop). Before, the
+	// watch's replaced it whenever the watch had sent by the time the loop
+	// read exitLoopChan, so which end the set took was down to scheduling.
+	watchEnded := func(status models.TestSetStatus) models.TestSetStatus {
+		if ended, first := endedFirst(status); first {
+			return ended
+		}
+		return getErrStatus()
+	}
 	// endedPartWay reports whether the context of a run with no agent has
 	// ended before its tests did, and the status the set ends with if so:
 	// USER_ABORT when its user stopped it, INTERNAL_ERR for anything else (a
@@ -3789,7 +3802,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// already pending — avoids mutating test cases that will never run.
 			select {
 			case <-exitLoopChan:
-				testSetStatus = getErrStatus()
+				testSetStatus = watchEnded(testSetStatus)
 				exitLoop = true
 			default:
 			}
@@ -5018,7 +5031,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Check for exit signals before each streaming test
 			select {
 			case <-exitLoopChan:
-				testSetStatus = getErrStatus()
+				testSetStatus = watchEnded(testSetStatus)
 				exitLoop = true
 			default:
 			}

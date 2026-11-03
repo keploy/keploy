@@ -151,6 +151,9 @@ type prReportDB struct {
 	failInserts bool
 	// failInsertOf fails only the named test's result insert, with that error.
 	failInsertOf map[string]error
+	// onFailInsert, when set, is called with the insert's context as a
+	// failInsertOf insert fails, before it returns its error.
+	onFailInsert func(context.Context)
 	// Read-back faults: onRead runs first (a test cancels the run from it),
 	// dropOnRead leaves the named test's result out, as a store that lost or
 	// paged away a result does, and readErr fails the read alongside whatever it
@@ -194,16 +197,22 @@ func (f *prReportDB) ClearTestCaseResults(context.Context, string, string) {
 	defer f.mu.Unlock()
 	f.results = nil
 }
-func (f *prReportDB) InsertTestCaseResult(_ context.Context, _ string, _ string, r *models.TestResult) error {
+func (f *prReportDB) InsertTestCaseResult(ctx context.Context, _ string, _ string, r *models.TestResult) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.failInserts {
+		f.mu.Unlock()
 		return fmt.Errorf("report store is unwritable")
 	}
 	if err := f.failInsertOf[r.TestCaseID]; err != nil {
+		onFail := f.onFailInsert
+		f.mu.Unlock()
+		if onFail != nil {
+			onFail(ctx)
+		}
 		return err
 	}
 	f.results = append(f.results, *r)
+	f.mu.Unlock()
 	return nil
 }
 func (f *prReportDB) InsertReport(_ context.Context, _ string, _ string, rep *models.TestReport) error {

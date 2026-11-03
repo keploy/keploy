@@ -2,11 +2,14 @@ package replay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
@@ -359,6 +362,103 @@ func TestAnAppExitBeforeItsUserStopKeepsTheSetHalted(t *testing.T) {
 				}
 				if after := sent.afterStop(); len(after) > 0 {
 					t.Errorf("%v sent after the user's stop in %s", after, c.cut)
+				}
+			})
+		}
+	}
+}
+
+// keploy's error writing a set's results, before its streamed tests, is an
+// end of the set's own: the set ends INTERNAL_ERR and names that error when
+// its application's exit, the user's stop or the exit of the application kept
+// across the sets comes after it, before the first streamed test, and no
+// streamed test is sent. Each later end comes in the failed write, which
+// returns once the set's context has ended and the set's watch has had a
+// moment to record it (the moment matters only to what the case shows
+// before the fix: the fixed set's end does not depend on it). Before, the
+// watch's status replaced the set's at the streamed loop's head whenever the
+// watch had sent on exitLoopChan by then: run per set, the application's exit
+// ended the set APP_HALTED in every run (that watch sends before it ends the
+// set's context), and the stop and the kept application's exit ended it
+// USER_ABORT or APP_HALTED by scheduling.
+func TestAnErrorWritingResultsBeforeTheStreamedTestsKeepsTheSetInternalErr(t *testing.T) {
+	const sigint = 2
+	const unwritable = "failed to insert final test case result: report store is unwritable"
+	for _, c := range []struct {
+		name     string
+		on, kept bool
+		// stop: the later end is the user's stop; else the application's
+		// exit.
+		stop bool
+	}{
+		{name: "switch off, run per set, the application's exit"},
+		{name: "switch on, run per set, the application's exit", on: true},
+		{name: "switch off, run per set, the user's stop", stop: true},
+		{name: "switch on, run per set, the user's stop", on: true, stop: true},
+		{name: "switch off, kept alive, the application's exit", kept: true},
+		{name: "switch on, kept alive, the application's exit", on: true, kept: true},
+		{name: "switch off, kept alive, the user's stop", kept: true, stop: true},
+		{name: "switch on, kept alive, the user's stop", on: true, kept: true, stop: true},
+	} {
+		for _, procs := range []int{1, 0} {
+			name := c.name + ", GOMAXPROCS default"
+			if procs != 0 {
+				name = fmt.Sprintf("%s, GOMAXPROCS=%d", c.name, procs)
+			}
+			t.Run(name, func(t *testing.T) {
+				if procs != 0 {
+					defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(procs))
+				}
+				setSwitch(t, c.on)
+				h := newPartialRunHarness(t, 3, 0)
+				h.streaming("test-3")
+				h.replayer.config.Test.KeepAppAlive = c.kept
+				h.replayer.config.Command = "./app"
+				h.replayer.config.CommandType = string(utils.Native)
+				h.replayer.config.Test.MaxFlakyChecks = 1
+				saved := utils.ErrCode
+				t.Cleanup(func() { utils.ErrCode = saved })
+				utils.ErrCode = 0
+				t.Cleanup(utils.SetInterruptSignalForTest(0))
+				ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+				defer cancel()
+				ctx, stop := context.WithCancel(ctx)
+				defer stop()
+				sent := &sendLog{stopAt: -1}
+				h.replayer.hookImpl = cutShortHooks{sent: sent}
+				var ends sync.Once
+				h.report.failInsertOf = map[string]error{"test-1": errors.New("report store is unwritable")}
+				h.report.onFailInsert = func(setCtx context.Context) {
+					ends.Do(func() {
+						sent.stop()
+						if c.stop {
+							utils.SetInterruptSignalForTest(sigint)
+							stop()
+						} else {
+							close(h.instr.appStopped)
+						}
+						<-setCtx.Done()
+						time.Sleep(20 * time.Millisecond)
+					})
+				}
+				_ = h.replayer.Start(ctx)
+				h.report.mu.Lock()
+				rep := h.report.report
+				h.report.mu.Unlock()
+				if rep == nil {
+					t.Fatal("the set wrote no report")
+				}
+				if status := models.TestSetStatus(rep.Status); status != models.TestSetStatusInternalErr {
+					t.Errorf("the set ended %s, want %s", status, models.TestSetStatusInternalErr)
+				}
+				if got := h.replayer.setInternalErr; got == nil || !strings.Contains(got.Error(), unwritable) {
+					t.Errorf("the set's end hands on %v, want an error saying %q", got, unwritable)
+				}
+				if utils.ErrCode != 1 {
+					t.Errorf("the run exits %d, want 1", utils.ErrCode)
+				}
+				if after := sent.afterStop(); len(after) > 0 {
+					t.Errorf("%v sent after the set's results could not be written", after)
 				}
 			})
 		}
