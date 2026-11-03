@@ -2272,6 +2272,12 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 					why += "; " + l.Why
 				}
 				return p, why
+			case from.Side == "" && from.SetAside:
+				// The search found the recorded value there, and F gave the
+				// application nothing there that holds the value the call
+				// carries now: no source, and no binding gap. l.Why says
+				// keploy cannot name the source.
+				return p, r.Path + " carries a value keploy cannot name a source of: " + l.Why
 			case from.Side == "":
 				why := r.Path + " carries a value the test's recording holds earlier (in " + from.Mock + "), where keploy cannot bind it yet: a call of another protocol, or inside its payload"
 				if l.Why != "" {

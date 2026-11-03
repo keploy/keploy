@@ -109,7 +109,8 @@ type Earlier struct {
 	// kind); of a Run place, that the run keeps no more of the set's tests'
 	// places, past its bound (Tracker.keepRun), the reason itself. It has
 	// no Seen, and every value that changed is refused (ClassifyIn,
-	// requestUnread), never learned as noise or an echo.
+	// requestUnread), never learned as noise or an echo, and names no late
+	// call (lateServes).
 	Unread string
 	// Gave, of a Given place, says it is a value the running test gave keploy
 	// (POST /agent/scope/given; TestGiven) rather than its test case's
@@ -260,6 +261,14 @@ type Raw struct {
 	// stays its source whatever F gave there. The copy rule reads it too
 	// (follows.outsideTest, olderTook), as beforeTest.
 	olderTest bool
+	// test and prev, of a Raw marked olderTest: the number in the set of
+	// the one older test F made every serve of it in (Order.testOf; 0 where
+	// they were made in more than one), and whether that test is the one
+	// F ran just before the call's (Order.previous). A late call's reason
+	// names such a serve that gave the application the value the call
+	// carries now (lateServes).
+	test int
+	prev bool
 	// beforeTest: F gave the application the mock only before the call's
 	// test began (ServedBeforeTheTest; Order.ServedView marks it by the
 	// serves' numbers): at the set's start-up, between tests, or in an older
@@ -465,6 +474,7 @@ func (r Raw) WithServed(served bool) Raw {
 	if !served {
 		r.first, r.last, r.asRecorded, r.live = 0, 0, false, nil
 		r.unseen, r.views, r.olderTest, r.servedAfter = false, nil, false, false
+		r.test, r.prev = 0, false
 	}
 	return r
 }
@@ -802,6 +812,14 @@ type Place struct {
 	// stands in the value, never by its text.
 	Field, Held string
 	Echo        bool
+	// SetAside, of a place found in a raw mock's payload (Side ""): the
+	// search found the recorded value there, and the rule a copy follows
+	// its source sets it aside, as F gave the application nothing there
+	// that holds the value the call carries now (notFromWhy), and keploy
+	// cannot name where that value came from. The place is no source of
+	// the value, and no binding gap: a caller's reason names it so, never
+	// as the place the value is held earlier, and the leaf's Why says why.
+	SetAside bool
 	// AtCall, of a place found in a raw mock's payload: the mock was
 	// recorded at the call's own instant (a fixture's whole second), which
 	// keploy reads as one the recording may have given the application
@@ -1578,6 +1596,21 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				}
 				if from.startUp {
 					ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, startUpWhy(dc.ofIn(r.Value, l.Value, w, at), from)
+				} else if from.Side == "" && !from.Echo {
+					// Nothing F gave at from holds what the call carries
+					// now: refused as before, naming the older test's
+					// serve that gave it (a late call), or saying keploy
+					// cannot name its source, never from (notFromWhy).
+					// Where keploy cannot name the source, the leaf stays a
+					// variable of from, as the search found it (the rule a
+					// copy follows its source is ClassifyFollowing's), set
+					// aside (Place.SetAside), and only its reason changes.
+					switch why, late := dc.notFromWhy(dc.ofIn(r.Value, l.Value, w, at), from, at, placed, raw, places); {
+					case late:
+						ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, why
+					case why != "":
+						ln.From.SetAside, ln.Why = true, why
+					}
 				}
 			} else if echo := Echoes(dc, r, resp); len(echo) > 0 {
 				ln.Kind, ln.Echo = KindEcho, echo

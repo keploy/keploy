@@ -789,9 +789,16 @@ type givenWords struct {
 	// candidate sources (follows.followed). set: a recording F gave the
 	// application earlier in the set (GivenEarlier), which no Raw handed to
 	// the call stands for.
-	answered    time.Time
-	conn        string
-	pos         uint64
+	answered time.Time
+	conn     string
+	pos      uint64
+	// test is the number in the set of the older test F gave the
+	// application the recording in, every serve of it, as the read
+	// numbered them (Order.testOf); 0 where keploy cannot name one. A call
+	// that carries what F gave there is late (lateServes). prev: that test
+	// is the one F ran just before the call's (Order.previous).
+	test        int
+	prev        bool
 	first, last int
 	set         bool
 	// unstated: F served it and no adapter said what it gave the
@@ -807,7 +814,7 @@ type givenWords struct {
 
 // wordsOf is x's givenWords, every word a copy.
 func (dc *DriftCache) wordsOf(x Raw) givenWords {
-	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime, answered: x.answered, conn: strings.Clone(x.conn), pos: x.pos, first: x.first, last: x.last}
+	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime, answered: x.answered, conn: strings.Clone(x.conn), pos: x.pos, test: x.test, prev: x.prev, first: x.first, last: x.last}
 	lists, plain := dc.answerListsOf(x)
 	g.answerLists = lists
 	// Served unchanged, every word is one both gave: the same lists.
@@ -1148,6 +1155,12 @@ func (o Order) GivenPlaces(m *models.Mock) (GivenPlaces, error) {
 	}
 	g.words = o.statedWords(m, g.words, g.answers)
 	g.fView, g.words.unread = o.viewMoments(m, g.words, g.answers)
+	if o.t != nil {
+		o.t.mu.Lock()
+		g.words.test = o.testOf(g.first, g.last)
+		g.words.prev = o.previous(g.words.test)
+		o.t.mu.Unlock()
+	}
 	return g, nil
 }
 

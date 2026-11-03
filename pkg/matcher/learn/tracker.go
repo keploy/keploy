@@ -60,6 +60,11 @@ type Tracker struct {
 	// Order reads it under the lock, so it reads what its read saw.
 	testFrom   int
 	outsideSeq map[int]bool
+	// starts are the numbers the first serve of each test of the set took
+	// or takes (testFrom at each Begin), in the order the tests began:
+	// Order.testOf names by them the test of the set F served a mock in.
+	// NewSet forgets them with serves.
+	starts []int
 	// asRecorded are, of each mock F served in the set (by mockID), the
 	// statements its adapters made that a serve of it gave the application
 	// its recording byte for byte (ServedMockAsRecorded, Served of an
@@ -254,7 +259,7 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	t.served = nil
 	t.mocks, t.kept, t.before = nil, nil, nil
 	t.set, t.serves, t.seq, t.asRecorded, t.lives = nil, nil, 0, nil, nil
-	t.testFrom, t.outsideSeq = 0, nil
+	t.testFrom, t.outsideSeq, t.starts = 0, nil, nil
 	t.flights, t.lifts, t.handshakes = nil, nil, nil
 	// The earlier set's derived data is let go now, not when its last
 	// handler is done with it, so the agent holds one set's budget at a time.
@@ -584,6 +589,7 @@ func (t *Tracker) beginAt(at time.Time) func() {
 	t.beganAt = at
 	t.recBegan, t.nextRecBegan = t.nextRecBegan, time.Time{}
 	t.testFrom = t.seq + 1
+	t.starts = append(t.starts, t.testFrom)
 	return say
 }
 
@@ -789,7 +795,7 @@ func (t *Tracker) Placed() Placed {
 // orderLocked is the order of the set's serves as a read now sees it
 // (Placed.Order). t.mu is held.
 func (t *Tracker) orderLocked() Order {
-	return Order{t: t, serves: t.serves, asRecorded: t.asRecorded, lives: t.lives, upTo: t.seq, testFrom: t.testFrom, outside: t.outsideSeq, places: t.places, flights: t.flights, handshakes: t.handshakes, set: t.setEpoch, landings: t.landings, flying: t.flying, serveAt: t.serveAt[:len(t.serveAt):len(t.serveAt)]}
+	return Order{t: t, serves: t.serves, asRecorded: t.asRecorded, lives: t.lives, upTo: t.seq, testFrom: t.testFrom, outside: t.outsideSeq, starts: t.starts[:len(t.starts):len(t.starts)], places: t.places, flights: t.flights, handshakes: t.handshakes, set: t.setEpoch, landings: t.landings, flying: t.flying, serveAt: t.serveAt[:len(t.serveAt):len(t.serveAt)]}
 }
 
 // ServedMock notes a mock any parser served in the running test: an earlier
@@ -963,7 +969,10 @@ type Order struct {
 	// was open (Tracker.outsideSeq).
 	testFrom int
 	outside  map[int]bool
-	places   *setPlaces
+	// starts are the set's tests' first serve numbers as the read saw them
+	// (Tracker.starts).
+	starts []int
+	places *setPlaces
 	// flights, landings and flying are the set's requests of each serve,
 	// the landings the read saw and whether F's order is read by flights
 	// (Order.told).
@@ -1074,7 +1083,9 @@ func (o Order) Spans(ms []*models.Mock) [][2]int {
 // Where F made every serve of m the read saw in an older test of the set
 // (olderTestLocked), r is also marked so (Raw.ServedInAnOlderTest): F gave
 // the application m's answer there, never at the start-up, between tests or
-// in the call's own test. One serve there, or one in an order keploy cannot
+// in the call's own test; and with the one older test F made them all in
+// (Raw.test, Raw.prev: testOf), where they were made in one, which a late
+// call's reason names it by (lateServes). One serve there, or one in an order keploy cannot
 // tell, leaves it unmarked: the answer then stays where a value may have
 // come from, whatever F gave there (fail closed). A Raw not served, or of
 // another mock, is returned as it is.
@@ -1088,12 +1099,14 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 	var loads []func() (*models.Mock, error)
 	o.t.mu.Lock()
 	older, before, after := o.olderTestLocked(id), o.beforeTestLocked(id), o.servedAfterLocked(id)
+	test := o.testOf(o.ofLocked(id))
 	if unstated {
 		recorded, _, loads, unread, ok = o.viewsLocked(id)
 	}
 	o.t.mu.Unlock()
 	if older {
 		r = r.ServedInAnOlderTest()
+		r.test, r.prev = test, o.previous(test)
 	}
 	if before {
 		r = r.ServedBeforeTheTest()
@@ -1225,6 +1238,34 @@ func (o Order) olderTestLocked(id string) bool {
 		}
 	}
 	return true
+}
+
+// testOf is the number in the set (1 its first test) of the test, older
+// than the running one, in whose window F made the serves first to last
+// (Of: first <= last, (0, 0) where o cannot tell, as no serve or an order
+// not known) of a mock, as o's read numbered them: 0 where they were not
+// all made in one such test (one made at the start-up or between tests,
+// two tests', the running test's) or o cannot tell. The running test began
+// at testFrom, the last of starts; a serve at the start-up stands before
+// the first of them (k 0), and one between tests in the window of none, as
+// the last such serve (outside) says: where the first is too, so is the
+// last, or a later test began between them.
+func (o Order) testOf(first, last int) int {
+	if last >= o.testFrom || o.outside[last] {
+		return 0
+	}
+	k := sort.SearchInts(o.starts, first+1)
+	if k < len(o.starts) && last >= o.starts[k] {
+		return 0
+	}
+	return k
+}
+
+// previous reports whether test, a number testOf gave, is the test of the
+// set F began just before the running one (the last of starts): the test
+// F ran before the call's.
+func (o Order) previous(test int) bool {
+	return test > 0 && test == len(o.starts)-1
 }
 
 // ofLocked is Of of the mock of identity id, o.t.mu held (the running set's
