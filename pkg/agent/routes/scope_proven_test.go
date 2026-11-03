@@ -38,6 +38,7 @@ type wireSvc struct {
 	skips     map[string]string
 	needs     map[string][]models.ScopeNeed
 	setFlags  []string
+	cloudSet  bool
 	beginResp models.ScopeBeginResp
 	beginErr  *models.ScopeError
 	endResp   models.ScopeEndResp
@@ -65,8 +66,8 @@ func (s *wireSvc) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Sc
 	return s.endResp, s.endErr
 }
 
-func (s *wireSvc) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, setFlags []string) error {
-	s.skips, s.needs, s.setFlags = skip, needs, setFlags
+func (s *wireSvc) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, setFlags []string, cloudSet bool) error {
+	s.skips, s.needs, s.setFlags, s.cloudSet = skip, needs, setFlags, cloudSet
 	return nil
 }
 
@@ -190,12 +191,17 @@ func TestTheGateTakesTheSkipMapAndAcknowledgesIt(t *testing.T) {
 	// The set's flags ride the same push, for the commands a failed
 	// test's reason names.
 	rec = call(t, a.HandleScopeGate, `{"run":null,"set_flags":["--local","--name","checkout"]}`)
-	if rec.Code != http.StatusOK || !reflect.DeepEqual(svc.setFlags, []string{"--local", "--name", "checkout"}) {
-		t.Fatalf("set flags: %d %s, flags %q", rec.Code, rec.Body.String(), svc.setFlags)
+	if rec.Code != http.StatusOK || !reflect.DeepEqual(svc.setFlags, []string{"--local", "--name", "checkout"}) || svc.cloudSet {
+		t.Fatalf("set flags: %d %s, flags %q, cloud %v", rec.Code, rec.Body.String(), svc.setFlags, svc.cloudSet)
+	}
+	// So does whether the set is Keploy Cloud's recordings.
+	rec = call(t, a.HandleScopeGate, `{"run":null,"set_flags":["--name","checkout","--branch","b"],"cloud_set":true}`)
+	if rec.Code != http.StatusOK || !reflect.DeepEqual(svc.setFlags, []string{"--name", "checkout", "--branch", "b"}) || !svc.cloudSet {
+		t.Fatalf("cloud set: %d %s, flags %q, cloud %v", rec.Code, rec.Body.String(), svc.setFlags, svc.cloudSet)
 	}
 	// A push without a map (an empty one is left out of the JSON) skips nothing.
 	rec = call(t, a.HandleScopeGate, `{"run":null}`)
-	if rec.Code != http.StatusOK || svc.skips != nil || svc.needs != nil || svc.setFlags != nil {
+	if rec.Code != http.StatusOK || svc.skips != nil || svc.needs != nil || svc.setFlags != nil || svc.cloudSet {
 		t.Fatalf("empty gate: %d %s, skips %v", rec.Code, rec.Body.String(), svc.skips)
 	}
 }
