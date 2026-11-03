@@ -2384,8 +2384,9 @@ func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.
 			sess.Logger.Debug("V2: emit mock failed", zap.Error(err))
 		}
 	}
-	// Note: EmitMock auto-clears the incomplete flag when it drops a
-	// partial mock (see supervisor.Session.EmitMock). On the healthy-
+	// Note: EmitMock takes the incomplete flag when it drops a partial
+	// mock, clearing it unless the session was retired for a hang, whose
+	// mark stays set (see supervisor.Session.EmitMock). On the healthy-
 	// emit path the flag should already be false. We deliberately do
 	// NOT call MarkMockComplete here because the relay may have set
 	// the flag for memory-guard reasons we must respect.
