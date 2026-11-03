@@ -52,6 +52,7 @@ const (
 	bpfMapReadySocks                  = "ready_socks"
 	bpfMapRedirectProxyMap            = "redirect_proxy_map"
 	bpfMapSocketClassifyFailures      = "socket_classify_failures"
+	bpfMapStopSignals                 = "stop_signals"
 	bpfMapTargetNamespacePids         = "target_namespace_pids"
 	bpfMapUdpMemberAddrs              = "udp_member_addrs"
 	bpfMapUdpMemberSocks              = "udp_member_socks"
@@ -79,6 +80,7 @@ const (
 	bpfProgK_readyFork                = "k_ready_fork"
 	bpfProgK_sockCreate               = "k_sock_create"
 	bpfProgK_sockops                  = "k_sockops"
+	bpfProgK_stopSignal               = "k_stop_signal"
 	bpfProgK_udp4Recvmsg              = "k_udp4_recvmsg"
 	bpfProgK_udp4Sendmsg              = "k_udp4_sendmsg"
 	bpfProgK_udp6Recvmsg              = "k_udp6_recvmsg"
@@ -152,6 +154,7 @@ type bpfProgramSpecs struct {
 	K_readyFork             *ebpf.ProgramSpec `ebpf:"k_ready_fork"`
 	K_sockCreate            *ebpf.ProgramSpec `ebpf:"k_sock_create"`
 	K_sockops               *ebpf.ProgramSpec `ebpf:"k_sockops"`
+	K_stopSignal            *ebpf.ProgramSpec `ebpf:"k_stop_signal"`
 	K_udp4Recvmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_recvmsg"`
 	K_udp4Sendmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_sendmsg"`
 	K_udp6Recvmsg           *ebpf.ProgramSpec `ebpf:"k_udp6_recvmsg"`
@@ -204,6 +207,7 @@ type bpfMapSpecs struct {
 	ReadySocks                  *ebpf.MapSpec `ebpf:"ready_socks"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	SocketClassifyFailures      *ebpf.MapSpec `ebpf:"socket_classify_failures"`
+	StopSignals                 *ebpf.MapSpec `ebpf:"stop_signals"`
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
 	UdpMemberAddrs              *ebpf.MapSpec `ebpf:"udp_member_addrs"`
 	UdpMemberSocks              *ebpf.MapSpec `ebpf:"udp_member_socks"`
@@ -276,6 +280,7 @@ type bpfMaps struct {
 	ReadySocks                  *ebpf.Map `ebpf:"ready_socks"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
 	SocketClassifyFailures      *ebpf.Map `ebpf:"socket_classify_failures"`
+	StopSignals                 *ebpf.Map `ebpf:"stop_signals"`
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
 	UdpMemberAddrs              *ebpf.Map `ebpf:"udp_member_addrs"`
 	UdpMemberSocks              *ebpf.Map `ebpf:"udp_member_socks"`
@@ -324,6 +329,7 @@ func (m *bpfMaps) Close() error {
 		m.ReadySocks,
 		m.RedirectProxyMap,
 		m.SocketClassifyFailures,
+		m.StopSignals,
 		m.TargetNamespacePids,
 		m.UdpMemberAddrs,
 		m.UdpMemberSocks,
@@ -364,6 +370,7 @@ type bpfPrograms struct {
 	K_readyFork             *ebpf.Program `ebpf:"k_ready_fork"`
 	K_sockCreate            *ebpf.Program `ebpf:"k_sock_create"`
 	K_sockops               *ebpf.Program `ebpf:"k_sockops"`
+	K_stopSignal            *ebpf.Program `ebpf:"k_stop_signal"`
 	K_udp4Recvmsg           *ebpf.Program `ebpf:"k_udp4_recvmsg"`
 	K_udp4Sendmsg           *ebpf.Program `ebpf:"k_udp4_sendmsg"`
 	K_udp6Recvmsg           *ebpf.Program `ebpf:"k_udp6_recvmsg"`
@@ -397,6 +404,7 @@ func (p *bpfPrograms) Close() error {
 		p.K_readyFork,
 		p.K_sockCreate,
 		p.K_sockops,
+		p.K_stopSignal,
 		p.K_udp4Recvmsg,
 		p.K_udp4Sendmsg,
 		p.K_udp6Recvmsg,
