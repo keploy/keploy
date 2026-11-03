@@ -302,4 +302,19 @@ func TestB64TextReadsARunDecodedWholeOnce(t *testing.T) {
 	if got := b64Read("/v1/"+path, nil, false); !strings.Contains(got, "first part") || !strings.Contains(got, "second part") {
 		t.Errorf("b64Read(%q) = %q; want each part's text", path, got)
 	}
+	// A run decoded whole whose part after its '/' decodes, in another
+	// encoding (base32), to text that is no piece of the run's text: that
+	// part holds words the run's text does not, so it is read too.
+	id := "isgT8ISmv3"
+	part := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString([]byte(id))
+	run := "b2s/" + part
+	whole, ok := decodeText(run)
+	if pt, pok := decodeText(part); !ok || !pok || pt != id || strings.Contains(whole, id) {
+		t.Fatalf("decodeText(%q) = %q, %v and decodeText(%q) = %q, %v; this row needs a run decoded whole and a part decoding to %q, outside it", run, whole, ok, part, pt, pok, id)
+	}
+	for _, every := range []bool{false, true} {
+		if got, want := b64Read("tok "+run+" ok", nil, every), whole+"\n"+id+"\n"; got != want {
+			t.Errorf("b64Read(%q, every split %v) = %q; want the run's text and its part's, %q", run, every, got, want)
+		}
+	}
 }

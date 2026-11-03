@@ -1628,6 +1628,27 @@ func TestAnEncodedTextGetsThePlainTextsAnswerWhateverUnreadPayloadWasServedBefor
 							if ln := learnOf(stamped(recRun.read), stamped(fRun.read)); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
 								t.Errorf("encoded after a clock read, escaped the same way, %s, window %+v: %s from %q held %q (%s); want noise of the word", pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
 							}
+							// The stated limit: where the recorded text holds
+							// a stamp outside the test's span there (two
+							// days stale, its fraction 0000000Z, which
+							// decodes to no text), it is no clock read on
+							// the recorded side, so the run after it pairs
+							// with none and its escapes' words are the
+							// value's own: refused, red, where the same
+							// text with a plain run is noise.
+							staleAt := recRun.read.Add(-48 * time.Hour).Truncate(time.Second)
+							if _, ok := decodeText(strings.TrimPrefix(dotNetStamp(staleAt), dotNetStamp(staleAt)[:20])); ok || !strings.HasSuffix(dotNetStamp(staleAt), ".0000000Z") {
+								t.Fatalf("%q's fraction decodes to text, so this row tells nothing", dotNetStamp(staleAt))
+							}
+							staleBefore := func(ts string, run string) string {
+								return "ts " + strings.ReplaceAll(ts, ":", "%3A") + " tok " + run + " ok"
+							}
+							if ln := learnOf(staleBefore(dotNetStamp(staleAt), escapePadding(slashOnly(enc(text(recRun.read, "created."))))), stamped(fRun.read)); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+								t.Errorf("encoded after a stamp the recording holds stale, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+							}
+							if ln := learnOf(staleBefore(dotNetStamp(staleAt), text(recRun.read, "created.")), staleBefore(dotNetStamp(fRun.read), text(fRun.read, "created."))); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+								t.Errorf("plain after a stamp the recording holds stale, %s, window %+v: %s from %q held %q (%s); want noise of the word", pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+							}
 							// An escape record's full round's value lost is
 							// no word of its own, while the others are
 							// written as recorded: the recorded run's '/'
@@ -1668,6 +1689,29 @@ func TestAnEncodedTextGetsThePlainTextsAnswerWhateverUnreadPayloadWasServedBefor
 							}
 							if ln := learnOf(respelled(recRun.read, "%3D%3D"), respelled(fRun.read, "=%3D")); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
 								t.Errorf("encoded, an escape ending a run right before another, that run's padding respelled, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+							}
+							// The stated limit: a run after text that changed
+							// in more than clock reads (a ':' made ';', a
+							// space gained before the escape before it)
+							// pairs with none, so the word that escape
+							// glues to it is the value's own: refused,
+							// red, where the plain text laid out the same
+							// way is noise. With nothing changed before it,
+							// the run is noise.
+							oneRun := func(v time.Time) string { return enc("lead " + dotNetStamp(v) + " created") }
+							plainRun := func(v time.Time) string {
+								return strings.ReplaceAll("lead "+dotNetStamp(v)+" created", " ", "%20")
+							}
+							for _, before := range [][2]string{{":", ";"}, {"", " "}, {":", ":"}} {
+								rec, live := "tok"+before[0]+"%20", "tok"+before[1]+"%20"
+								if ln := learnOf(rec+oneRun(recRun.read)+"%20ok", live+oneRun(fRun.read)+"%20ok"); before[0] != before[1] && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11")) {
+									t.Errorf("encoded, %q before the escape before it made %q, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", before[0], before[1], pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+								} else if before[0] == before[1] && (ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "") {
+									t.Errorf("encoded, %q before the escape before it, %s, window %+v: %s from %q held %q (%s); want noise of the word", before[0], pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+								}
+								if ln := learnOf(rec+plainRun(recRun.read)+"%20ok", live+plainRun(fRun.read)+"%20ok"); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+									t.Errorf("plain, %q before the escape before it made %q, %s, window %+v: %s from %q held %q (%s); want noise of the word", before[0], before[1], pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+								}
 							}
 						}
 						if ln := learnOf(esc.rec(shapes[1].of(recRun.read, "created")), esc.live(shapes[1].of(fRun.read, "created"))); esc.liveOnly && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11")) {
