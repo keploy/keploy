@@ -404,3 +404,48 @@ func TestWaitToReSendSaysOncePerRequest(t *testing.T) {
 		t.Errorf("said %d times for one request, want once", n)
 	}
 }
+
+// A refused request whose body cannot be sent again (a body with no GetBody)
+// fails at once with the refusal, also while the application keploy started
+// runs: no wait, and no second send, which could go out with a body already
+// read and so fabricate an answer. The address accepts from the start, so a
+// wait would end at once and send the request again.
+func TestARefusedRequestWhoseBodyCannotBeSentAgainFailsAtOnceWhileTheAppRuns(t *testing.T) {
+	addr := refusingAddr(t)
+	serve(t, addr)
+	ctx, cancel := context.WithCancel(EndsWithApp(context.Background()))
+	defer cancel()
+	refusals := &refusingDials{n: 1}
+	var dials atomic.Int32
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, network, a string) (net.Conn, error) {
+		dials.Add(1)
+		return refusals.dial(ctx, network, a)
+	}}}
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://"+addr+"/a", io.NopCloser(strings.NewReader("body")))
+	req.GetBody = nil
+	core, logs := observer.New(zapcore.DebugLevel)
+	done := make(chan sendResult, 1)
+	go func() {
+		resp, err := doRequestWithConnRefusedRetry(ctx, zap.New(core), client, req, nil, 0)
+		done <- sendResult{resp, err}
+	}()
+	var r sendResult
+	select {
+	case r = <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the request did not end")
+	}
+	if r.resp != nil {
+		_ = r.resp.Body.Close()
+		t.Fatalf("the request was sent again and answered %d: a body that cannot be sent again must fail at once", r.resp.StatusCode)
+	}
+	if r.err == nil || !isPreResponseConnRefused(r.err) {
+		t.Fatalf("want the refusal, got %v", r.err)
+	}
+	if n := dials.Load(); n != 1 {
+		t.Errorf("%d dials, want the one the refusal ended", n)
+	}
+	if n := waitingLines(logs); n != 0 {
+		t.Errorf("%d waiting lines, want none: nothing is waited for", n)
+	}
+}

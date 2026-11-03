@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -175,4 +176,69 @@ func TestHoldingTheStallWithoutAWatchIsANoOp(t *testing.T) {
 	release := holdAnswerStall(context.Background())
 	release()
 	release()
+}
+
+// sayingCore is a logger core whose first line is said only once release is
+// closed: a line being said as its wait's stop is called.
+type sayingCore struct {
+	mu      sync.Mutex
+	said    int
+	entered chan struct{}
+	release chan struct{}
+	first   sync.Once
+}
+
+func (c *sayingCore) Enabled(zapcore.Level) bool        { return true }
+func (c *sayingCore) With([]zapcore.Field) zapcore.Core { return c }
+func (c *sayingCore) Sync() error                       { return nil }
+func (c *sayingCore) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	return ce.AddCore(e, c)
+}
+func (c *sayingCore) Write(zapcore.Entry, []zapcore.Field) error {
+	c.first.Do(func() {
+		close(c.entered)
+		<-c.release
+	})
+	c.mu.Lock()
+	c.said++
+	c.mu.Unlock()
+	return nil
+}
+func (c *sayingCore) lines() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.said
+}
+
+// The stop of a wait's progress line returns only once the line can no
+// longer be said: a line being said as stop is called is said before stop
+// returns, and none after, so no line says the wait goes on once it ended.
+func TestTheStillWaitingLinesStopReturnsOnlyOnceNoLineCanFollow(t *testing.T) {
+	every := stillWaitingEvery
+	stillWaitingEvery = 5 * time.Millisecond
+	t.Cleanup(func() { stillWaitingEvery = every })
+	core := &sayingCore{entered: make(chan struct{}), release: make(chan struct{})}
+	stop := SayStillWaiting(context.Background(), zap.New(core), "accept a connection", "127.0.0.1:1", time.Now())
+	<-core.entered
+	stopped := make(chan int, 1)
+	go func() {
+		stop()
+		stopped <- core.lines()
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("stop returned while a line was still being said")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(core.release)
+	// A tick that came while the line was being said may be said too
+	// before stop returns: select takes either of two ready cases.
+	n := <-stopped
+	if n < 1 {
+		t.Fatalf("%d lines said when stop returned, want the one being said", n)
+	}
+	time.Sleep(20 * stillWaitingEvery)
+	if after := core.lines(); after != n {
+		t.Errorf("%d lines said after stop returned", after-n)
+	}
 }

@@ -1053,14 +1053,19 @@ var stillWaitingEvery = 30 * time.Second
 // application's exit or keploy's stop ends says what it waits on. A log
 // line, never a verdict. When the application keploy started listens on
 // other ports but not on addr's (utils.AppListenPorts), the line names them,
-// so a wrong port is plain. A nil logger says nothing.
+// so a wrong port is plain. A nil logger says nothing. stop returns once the
+// line can no longer be said: a line that was being said as stop was called
+// is said before stop returns, never after.
 func SayStillWaiting(ctx context.Context, logger *zap.Logger, what, addr string, began time.Time) (stop func()) {
 	if logger == nil {
 		return func() {}
 	}
 	done := make(chan struct{})
+	exited := make(chan struct{})
+	every := stillWaitingEvery
 	go func() {
-		tick := time.NewTicker(stillWaitingEvery)
+		defer close(exited)
+		tick := time.NewTicker(every)
 		defer tick.Stop()
 		for {
 			select {
@@ -1074,7 +1079,10 @@ func SayStillWaiting(ctx context.Context, logger *zap.Logger, what, addr string,
 		}
 	}()
 	var once sync.Once
-	return func() { once.Do(func() { close(done) }) }
+	return func() {
+		once.Do(func() { close(done) })
+		<-exited
+	}
 }
 
 // stillWaitingLine is SayStillWaiting's line.
