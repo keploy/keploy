@@ -182,6 +182,20 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-stateful-linux.sh"
 
+      # A call keploy refuses (no mock matches it) is answered 400 Bad
+      # Request, which no client's retry policy sends again, so it is made
+      # once, in the window of the test that made it. Answered 502, as it was,
+      # an app whose one process serves every test made it again in a later
+      # test's window (its client's backoff outlasted the test), and a queue
+      # consumer's repeats held up the next tests' own calls. Without the
+      # switch: OSS mock replay under it needs a build that judges each test.
+      - name: Run mock-mode refused-call-made-once e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-late-retry-linux.sh"
+
       # A test command that runs more short-lived processes than the agent's
       # PID map holds (10240) must still have the calls of every later process
       # recorded, and replayed without reaching the real dependency. The map
