@@ -243,6 +243,59 @@ func TestAnIdsLostForksAreZeroedWhenItIsGiven(t *testing.T) {
 	}
 }
 
+// A later claim of an id is the id with the claim's generation
+// (agent.InstanceValue): the worker and each process it forks are in that
+// whole value, which their connections carry. A process of the id's earlier
+// claim still in it holds the id whatever the generation asked; the end
+// takes out the id's processes; the kernel's count of lost forks is the
+// id's, read and zeroed by the value of any of its claims.
+func TestALaterClaimOfAnIdCarriesItsGeneration(t *testing.T) {
+	h := instanceHooks(t)
+	first, later := agent.InstanceValue(7, 1), agent.InstanceValue(7, 2)
+	w := startWorker(t)
+	if err := h.SetInstance(w.tgid(), first); err != nil {
+		t.Fatal(err)
+	}
+	child := w.fork(t)
+	for _, p := range []uint32{w.tgid(), child} {
+		if got := instanceOf(t, h, p); got != first {
+			t.Errorf("process %d (the worker %d or its fork) holds %d, want the whole value %d", p, w.tgid(), got, first)
+		}
+	}
+	other := startWorker(t)
+	if err := h.SetInstance(other.tgid(), later); !errors.Is(err, agent.ErrInstanceHeld) {
+		t.Errorf("SetInstance of id 7's later claim %d while the earlier one's processes are in it: %v, want ErrInstanceHeld", later, err)
+	}
+	was := instanceLost{Forks: 2, LastTgid: 42, LastErr: -7}
+	if err := h.objects.InstanceLost.Update(uint32(7), was, ebpf.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := h.InstanceLost(first); err != nil || got != (agent.InstanceLoss{Forks: 2, LastTgid: 42, LastErr: -7}) {
+		t.Errorf("InstanceLost(%d) = %+v, %v; want id 7's count", first, got, err)
+	}
+	n, err := h.EndInstance(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 2 {
+		t.Errorf("EndInstance(%d) took %d processes out, want the worker and its fork", first, n)
+	}
+	for _, p := range []uint32{w.tgid(), child} {
+		if got := instanceOf(t, h, p); got != 0 {
+			t.Errorf("after its end process %d holds %d, want none", p, got)
+		}
+	}
+	if err := h.SetInstance(other.tgid(), later); err != nil {
+		t.Fatalf("SetInstance of id 7's later claim %d once it ended: %v, want it given", later, err)
+	}
+	if got := instanceOf(t, h, other.tgid()); got != later {
+		t.Errorf("the later claim's worker holds %d, want %d", got, later)
+	}
+	if got, err := h.InstanceLost(later); err != nil || got != (agent.InstanceLoss{}) {
+		t.Errorf("after the later claim InstanceLost(%d) = %+v, %v; want id 7's count zeroed", later, got, err)
+	}
+}
+
 // Two workers' instances are live at once, and each process either forks is
 // in its own worker's, never the other's.
 func TestTwoWorkersForksAreEachInItsOwnInstance(t *testing.T) {

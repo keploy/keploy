@@ -24,11 +24,11 @@ import (
 type instanceHooks struct {
 	countHooks
 	imu  sync.Mutex
-	in   map[uint32]uint32 // id -> the tgid given it
-	held map[uint32]bool   // ids a gone worker's survivor is still in
+	in   map[uint32]uint32 // instance value -> the tgid given it
+	held map[uint32]bool   // ids a gone worker's survivor is still in, by id
 	// allHeld: every id is still held.
 	allHeld bool
-	tried   []uint32 // every id SetInstance was asked for
+	tried   []uint32 // every instance value SetInstance was asked for
 	ended   []uint32
 	err     error
 	endErr  error
@@ -47,7 +47,7 @@ func (h *instanceHooks) SetInstance(tgid, id uint32) error {
 	if h.err != nil {
 		return h.err
 	}
-	if h.allHeld || h.held[id] {
+	if h.allHeld || h.held[coreAgent.InstanceIDOf(id)] {
 		return fmt.Errorf("%w: instance %d", coreAgent.ErrInstanceHeld, id)
 	}
 	if _, ok := h.in[id]; ok {
@@ -242,6 +242,94 @@ func TestEachWorkerOfARunGetsAnInstanceOfItsOwn(t *testing.T) {
 	require.Equal(t, []string{"a@1/2", "b@2/2"}, claims, "each claim names its worker and the count its process declared")
 }
 
+// v is the instance string a claim answers for the claim of id with
+// generation gen (coreAgent.InstanceValue).
+func v(id, gen uint32) string {
+	return strconv.FormatUint(uint64(coreAgent.InstanceValue(id, gen)), 10)
+}
+
+// A gone worker's id is given again, never its value: the next claim of the
+// id gets the id's next generation, so a call on a connection the gone
+// worker's processes made, which keeps its value, is never the new worker's.
+// The windows carry the values apart, and so do the topology rows (a call
+// stamped with the gone worker's value is no test's). The generation
+// outlives a new session: its claim of the id is a value no earlier claim
+// had either.
+func TestAGoneWorkersIdIsGivenAgainUnderANewValue(t *testing.T) {
+	a, h := workerAgent(t, models.MODE_RECORD, 4)
+	gone := child(t)
+	first := claimWorker(t, a, gone.Process.Pid, "a", 2)
+	_, serr := a.ProvenBegin(as(gone.Process.Pid), begin("TestGone"))
+	require.Nil(t, serr)
+	kill(t, gone)
+	second := claimWorker(t, a, os.Getpid(), "b", 2)
+	require.Equal(t, []string{v(1, 0), v(1, 1)}, []string{first, second}, "the gone worker's id, under its next generation")
+	_, serr = a.ProvenBegin(as(os.Getpid()), begin("TestNext"))
+	require.Nil(t, serr)
+	a.NoteLive(models.LiveRow{Exe: "survivor", Port: 1, Instance: coreAgent.InstanceValue(1, 0)})
+	a.NoteLive(models.LiveRow{Exe: "next", Port: 2, Instance: coreAgent.InstanceValue(1, 1)})
+	_, serr = a.ProvenEnd(as(os.Getpid()), models.ScopeReq{Name: "TestNext", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Equal(t, coreAgent.InstanceValue(1, 0), windowOf(t, a, "a::TestGone").Instance)
+	require.Equal(t, coreAgent.InstanceValue(1, 1), windowOf(t, a, "b::TestNext").Instance)
+	ws, err := a.FinalScopeWindows(context.Background())
+	require.NoError(t, err)
+	live := map[string]string{}
+	for _, w := range ws {
+		if w.Live != nil {
+			live[w.Live.Exe] = w.Live.Test
+		}
+	}
+	require.Equal(t, map[string]string{"survivor": "", "next": "b::TestNext"}, live, "the gone worker's call is not the next claim's test's")
+
+	require.NoError(t, a.resetSession(context.Background()))
+	require.Equal(t, v(1, 2), claimWorker(t, a, os.Getpid(), "c", 2), "a new session's claim of id 1 is a value no earlier claim had")
+	require.Equal(t, []uint32{coreAgent.InstanceValue(1, 0), coreAgent.InstanceValue(1, 1), coreAgent.InstanceValue(1, 2)}, h.triedIDs())
+}
+
+// A claim the hooks refused other than as held may have reached the kernel:
+// its value is never given again. A held id's value never reached it, and
+// is given at the id's next claim. An id is given up to its last
+// generation, and then never again: the claim takes the next id, and with
+// every id spent or held it is refused, named, with what to do.
+func TestAnInstanceValueIsGivenAtMostOnce(t *testing.T) {
+	a, h := workerAgent(t, models.MODE_RECORD, 4)
+	h.err = errors.New("map busy")
+	_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "a", Workers: 2}, os.Getpid())
+	require.NotNil(t, serr)
+	require.Contains(t, serr.Message, "map busy")
+	h.err = nil
+	h.held = map[uint32]bool{2: true}
+	require.Equal(t, v(1, 1), claimWorker(t, a, os.Getpid(), "a", 2), "the refused claim's value is spent")
+	w := child(t)
+	require.Equal(t, v(3, 0), claimWorker(t, a, w.Process.Pid, "b", 2), "held id 2 is passed over")
+	require.NoError(t, a.resetSession(context.Background()))
+	h.held = nil
+	require.Equal(t, v(1, 2), claimWorker(t, a, os.Getpid(), "a", 2))
+	require.Equal(t, v(2, 0), claimWorker(t, a, w.Process.Pid, "b", 2), "a held id's value was never given: its next claim is its first")
+
+	b, hb := workerAgent(t, models.MODE_RECORD, 4)
+	b.instanceGen[1] = coreAgent.MaxInstanceGeneration
+	b.instanceGen[2] = coreAgent.MaxInstanceGeneration + 1
+	require.Equal(t, strconv.FormatUint(uint64(coreAgent.InstanceValue(1, coreAgent.MaxInstanceGeneration)), 10), claimWorker(t, b, os.Getpid(), "a", 2), "the last generation is given")
+	require.Equal(t, v(3, 0), claimWorker(t, b, w.Process.Pid, "b", 2), "a spent id is passed over")
+	require.NotContains(t, hb.triedIDs(), coreAgent.InstanceValue(2, 0), "a spent id's generation does not wrap to its first")
+
+	c, hc := workerAgent(t, models.MODE_RECORD, 4)
+	for id := range c.instanceGen {
+		c.instanceGen[id] = coreAgent.MaxInstanceGeneration + 1
+	}
+	hc.held = map[uint32]bool{5: true}
+	c.instanceGen[5] = 0
+	_, serr = c.ClaimInstance(context.Background(), models.InstanceReq{Key: "a", Workers: 2}, os.Getpid())
+	require.NotNil(t, serr)
+	require.Equal(t, models.ScopeErrNotInInstance, serr.Code)
+	require.Contains(t, serr.Message, "of its 1023 instances, 1022 were each given 4194304 times")
+	require.Equal(t, "restart keploy's agent", serr.Remedy)
+	require.Equal(t, []uint32{coreAgent.InstanceValue(5, 0)}, hc.triedIDs())
+	require.Empty(t, c.proven.workers)
+}
+
 // Every worker live at once declares the same count; a single test process
 // and a worker never run at once either.
 func TestAWorkerCountOtherThanALiveWorkersIsRefused(t *testing.T) {
@@ -278,7 +366,7 @@ func TestAGoneWorkersInstanceEndsAndItsOpenTestFails(t *testing.T) {
 	require.Nil(t, serr)
 	kill(t, gone)
 
-	require.Equal(t, "1", claimWorker(t, a, os.Getpid(), "c", 2), "the gone worker's id is free again")
+	require.Equal(t, v(1, 1), claimWorker(t, a, os.Getpid(), "c", 2), "the gone worker's id is free again, under its next generation")
 	require.Equal(t, []uint32{1}, h.endedIDs())
 	w := windowOf(t, a, "a::TestCrash")
 	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
@@ -294,7 +382,7 @@ func TestAGoneWorkerLeavesAnotherWorkersOpenTestOpen(t *testing.T) {
 	_, serr := a.ProvenBegin(as(stays.Process.Pid), begin("TestKeep"))
 	require.Nil(t, serr)
 	kill(t, gone)
-	require.Equal(t, "1", claimWorker(t, a, os.Getpid(), "c", 2))
+	require.Equal(t, v(1, 1), claimWorker(t, a, os.Getpid(), "c", 2))
 	require.Equal(t, []uint32{1}, h.endedIDs())
 	_, serr = a.ProvenEnd(as(stays.Process.Pid), models.ScopeReq{Name: "TestKeep", Outcome: "passed"})
 	require.Nil(t, serr, "the live worker's test is still open")
@@ -516,16 +604,16 @@ func TestANewSessionAndTheFinalReadEndTheWorkersInstances(t *testing.T) {
 	require.Equal(t, []uint32{1, 2}, h.endedIDs())
 	require.Empty(t, a.proven.workers)
 
-	require.Equal(t, "1", claimWorker(t, a, w1.Process.Pid, "a", 2))
+	require.Equal(t, v(1, 1), claimWorker(t, a, w1.Process.Pid, "a", 2))
 	_, serr := a.ProvenBegin(as(w1.Process.Pid), begin("TestOpen"))
 	require.Nil(t, serr)
 	_, err := a.FinalScopeWindows(ctx)
 	require.NoError(t, err)
-	require.Equal(t, []uint32{1, 2, 1}, h.endedIDs())
+	require.Equal(t, []uint32{1, 2, coreAgent.InstanceValue(1, 1)}, h.endedIDs())
 	w := windowOf(t, a, "a::TestOpen")
 	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
 	require.Contains(t, w.Evidence.Reason, fmt.Sprintf("its process %d outlived the test command", w1.Process.Pid))
-	require.Equal(t, []uint32{1, 2, 1}, h.endedIDs(), "a second read ends nothing again")
+	require.Equal(t, []uint32{1, 2, coreAgent.InstanceValue(1, 1)}, h.endedIDs(), "a second read ends nothing again")
 }
 
 // Each worker's test window carries that worker's keploy instance, by which

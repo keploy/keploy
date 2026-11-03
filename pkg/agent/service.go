@@ -3,9 +3,11 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -233,10 +235,44 @@ type ProxyConnPairing struct {
 // instance_lost array holds ids 0 to MaxInstanceID; 0 is no instance).
 const MaxInstanceID uint32 = 1023
 
+// An instance value is what the kernel stamps a member's connection with:
+// InstanceValue(id, generation), the id in its low 10 bits and, above them,
+// the generation: how many times the agent gave the id before. No two claims
+// get the same value, so a connection a gone worker's process made, which
+// keeps its stamp after the instance ends, is never a later claim's of the
+// same id.
+const (
+	instanceIDBits = 10
+	// MaxInstanceGeneration is the highest generation a value carries.
+	MaxInstanceGeneration uint32 = 1<<(32-instanceIDBits) - 1
+)
+
+// InstanceValue is the value of the generation-th claim of instance id.
+func InstanceValue(id, generation uint32) uint32 {
+	return generation<<instanceIDBits | id
+}
+
+// InstanceIDOf is the instance id of value v: the worker slot a person
+// reads ("test worker N"), and the kernel's instance_lost key.
+func InstanceIDOf(v uint32) uint32 {
+	return v & MaxInstanceID
+}
+
+// InstanceLabel is how a message names the instance of value v: its id and,
+// for a later claim of the id, which claim, so two claims of one id never
+// read as the same worker.
+func InstanceLabel(v uint32) string {
+	id, gen := InstanceIDOf(v), v>>instanceIDBits
+	if gen == 0 {
+		return strconv.FormatUint(uint64(id), 10)
+	}
+	return fmt.Sprintf("%d (claim %d of that id)", id, uint64(gen)+1)
+}
+
 // ErrInstanceHeld is SetInstance's refusal of an id a process is still in:
-// one that stayed in an ended instance, or that it forked as it ended. Its
-// connections still carry the id, so the id is not given again until the
-// last such process exits.
+// one that stayed in an ended instance, or that it forked as it ended. A
+// process in it would stamp its new connections with the old value, so the
+// id is not given again until the last such process exits.
 var ErrInstanceHeld = errors.New("a process is still in this keploy instance")
 
 // InstanceStamper is the optional extension implemented by hooks whose
@@ -246,20 +282,23 @@ var ErrInstanceHeld = errors.New("a process is still in this keploy instance")
 // each until it exits. The agent type-asserts for it; with hooks that do not
 // implement it no connection is in an instance.
 type InstanceStamper interface {
-	// SetInstance puts the process tgid, by its kernel TGID, in instance id
-	// (1 to MaxInstanceID), and with it every process it forks from now
-	// on. It refuses an id a process is in (ErrInstanceHeld), a process
-	// already in an instance, a process that is gone or a zombie, and
-	// hooks whose agent is in a PID namespace of its own, which does not
-	// number processes by their kernel TGIDs.
-	SetInstance(tgid, id uint32) error
-	// EndInstance takes every process out of instance id and says how many
-	// were in it. A process the instance forks while it ends may stay in it;
-	// SetInstance refuses the id until that one exits.
-	EndInstance(id uint32) (int, error)
-	// InstanceLost is what the kernel could not put in instance id since
-	// SetInstance last gave it.
-	InstanceLost(id uint32) (InstanceLoss, error)
+	// SetInstance puts the process tgid, by its kernel TGID, in the
+	// instance of value v (InstanceValue: an id 1 to MaxInstanceID and its
+	// generation), and with it every process it forks from now on; each
+	// stamps its connections with v. It refuses an id a process is in,
+	// whatever its generation (ErrInstanceHeld), a process already in an
+	// instance, a process that is gone or a zombie, and hooks whose agent is
+	// in a PID namespace of its own, which does not number processes by
+	// their kernel TGIDs.
+	SetInstance(tgid, v uint32) error
+	// EndInstance takes every process out of the instance of value v (every
+	// process in its id) and says how many were in it. A process the
+	// instance forks while it ends may stay in it; SetInstance refuses the
+	// id until that one exits.
+	EndInstance(v uint32) (int, error)
+	// InstanceLost is what the kernel could not put in the instance of
+	// value v since SetInstance last gave its id.
+	InstanceLost(v uint32) (InstanceLoss, error)
 	// InstanceRefusal is why these hooks can give no process an instance,
 	// the same for every process of the run, nil when they can: an agent in
 	// a PID namespace of its own cannot, as SetInstance refuses.
