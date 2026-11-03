@@ -1981,6 +1981,95 @@ func (t *Tracker) CallWindowFromSiblings(prevRec time.Time, paired *models.Mock,
 	return lc.window(prevRec, recBegan, paired, arrival)
 }
 
+// RecordedTests tells, of an instant of the recording, whether it lies in a
+// recorded test's window, and whether two instants lie in the same one
+// (integrations.TestWindows); known is false where the store cannot tell.
+type RecordedTests interface {
+	InRecordedTestWindow(at time.Time) (inside, known bool)
+	SameRecordedTestWindow(a, b time.Time) (same, known bool)
+}
+
+// OwnCall reads the window (Window) of a test's own call in keploy record's
+// server tests: a call paired with a recording the store places inside a
+// recorded test's window, the open test's own, which a replay checks a read
+// of the clock of in the span only the test's own and the start-up's serves
+// start (LiveSpanOfSiblings). Its window is read the same way, so learn and
+// replay read one span of it:
+//
+//   - in this run, from the later of the latest serve of any flow made
+//     before the test began and the latest serve filed as the test's own or
+//     the start-up's (liveClockAtOf), no serve of a sibling of the call
+//     (Siblings) among them;
+//   - in the recording, from the call's previous call (PreviousCall, its
+//     siblings left out) among the recordings made before the call's
+//     recorded test began and those made in it that the store's view in
+//     force files as the test's own or the start-up's (SetServeOwner).
+//
+// A worker: scope's or the background's call that lands between the read
+// and the send, in either run, starts neither half. Without a window a
+// test's own call shows a read of the clock by the lead alone, which is a
+// verdict decided by how late record's full round ran: a round a second
+// slower leaves the read's minute a word, found in an earlier answer of the
+// same minute, and refuses a real read of the clock. The window adds what it
+// holds to what the lead shows (clockAt), so a read the lead shows stays one.
+type OwnCall struct {
+	t       *Tracker
+	paired  *models.Mock
+	sibling Siblings
+	tests   RecordedTests
+	owner   func(*models.Mock) bool
+	prev    *PreviousCall
+}
+
+// NewOwnCall starts the window of the call paired with paired, a test's own
+// recording, whose siblings sibling tells (nil: none). nil, so the call has
+// no window (the lead alone shows a read, as before), where the tracker or
+// paired is nil, no store tells whose a serve is (SetServeOwner), or tests
+// do not place paired inside a recorded test's window (it lies outside every
+// one, or the store cannot tell: inside is false): each half would then
+// start where the other's does not.
+func (t *Tracker) NewOwnCall(paired *models.Mock, sibling Siblings, tests RecordedTests) *OwnCall {
+	if t == nil || paired == nil || tests == nil {
+		return nil
+	}
+	f := t.serveOwner.Load()
+	if f == nil {
+		return nil
+	}
+	if inside, _ := tests.InRecordedTestWindow(paired.Spec.ReqTimestampMock); !inside {
+		return nil
+	}
+	return &OwnCall{t: t, paired: paired, sibling: sibling, tests: tests, owner: *f, prev: NewPreviousCallOf(paired, sibling)}
+}
+
+// See considers m, a recording of the set, as the call's previous call in
+// the recording. One made in the call's recorded test that the store's view
+// in force files as neither the test's own nor the start-up's (a worker:
+// scope's, the background's) is none, as its serve starts no span of the
+// call in this run. One the store cannot place is not known to be in the
+// call's test (same is false), and stays a previous call.
+func (o *OwnCall) See(m *models.Mock) {
+	if o == nil || m == nil {
+		return
+	}
+	if same, _ := o.tests.SameRecordedTestWindow(m.Spec.ReqTimestampMock, o.paired.Spec.ReqTimestampMock); same && !o.owner(m) {
+		return
+	}
+	o.prev.See(m)
+}
+
+// Window is the window of the call that reached keploy at the real instant
+// arrival (OwnCall); nil where the call has none (CallWindowFrom's rules:
+// paired has no recorded time, no previous call is recorded, and the
+// rest), and for a nil o.
+func (o *OwnCall) Window(arrival time.Time) *Window {
+	if o == nil {
+		return nil
+	}
+	lc, recBegan := o.t.liveClockAtOf(arrival, true, o.sibling)
+	return lc.window(o.prev.At(), recBegan, o.paired, arrival)
+}
+
 // CallWindowIn is CallWindowFrom with the recording's half of a client
 // test's window bounded by recBegan, the recorded begin of the test whose
 // recorded window paired lies in, instead of the running test's: a

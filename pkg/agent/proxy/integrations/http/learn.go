@@ -1834,9 +1834,21 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			// earlier places streamed them. In keploy mock's client tests
 			// every call's are, a test's own too: there the lead shows no
 			// read of the application's clock (learn.DriftCache.ClientTests).
+			// A test's own call in keploy record's server tests is read in
+			// its own window too (learn.OwnCall), from the test's own and
+			// the start-up's calls, as a replay checks its reads: by the
+			// lead alone, a read made a second later in record's full round
+			// than recorded would be a word an earlier answer of the same
+			// minute holds.
 			var w *learn.Window
 			if !own || tracker.ClientTests() {
 				w = tracker.CallWindowFrom(prev.At(), m, input.arrived)
+			} else {
+				oc := tracker.NewOwnCall(m, nil, windows)
+				for _, s := range staged {
+					oc.See(s)
+				}
+				w = oc.Window(input.arrived)
 			}
 			learned := learn.ClassifyGiven(tracker.DriftsOf(ctx), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, classifiedAnswer(answered), w, givenEarlier(m, set, served, given, earlier, order))
 			if why := n.heldLearned(learned); why != "" {
