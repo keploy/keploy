@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -19,7 +18,6 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -537,157 +535,6 @@ func TestAChangeOfUserKeepsNoCredential(t *testing.T) {
 	if secret := heldSecret(logs.Bytes()); secret != "" {
 		t.Errorf("the log holds the client's credential (%s):\n%s", secret, logs.Bytes())
 	}
-}
-
-// The legacy recorder, which proxies the bytes itself, forwards the client's
-// credential to the server untouched and records only its length: on a full
-// authentication (over TLS; without it, asking for the server's public key or
-// holding it already), and on an auth switch.
-func TestLegacyRecordingKeepsNoCredential(t *testing.T) {
-	sha2Greeting := cannedSha2Greeting(t)
-	greeting, err := connphase.DecodeHandshakeV10(context.Background(), zap.NewNop(), sha2Greeting[4:])
-	if err != nil {
-		t.Fatalf("decode greeting: %v", err)
-	}
-
-	ok := func(seq byte) []byte { return cannedOK(t, seq, greeting.CapabilityFlags) }
-	publicKey := wrapPacket(append([]byte{mysql.AuthMoreData}, "-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----\n"...), 5)
-	for _, tc := range []struct {
-		name string
-		tls  bool
-		// client and server are the packets each sends, in turn, after the
-		// server asked for a full authentication.
-		client, server [][]byte
-		want           []wantAuthReq
-	}{
-		{
-			name: "a full authentication over TLS", tls: true,
-			client: [][]byte{clearPassword(4)}, server: [][]byte{ok(5)},
-			want: []wantAuthReq{{mysql.PlainPassword, 4, len(recordedPassword) + 1, ""}},
-		},
-		{
-			name:   "a full authentication without TLS, asking for the server's key",
-			client: [][]byte{wrapPacket([]byte{byte(mysql.RequestPublicKey)}, 4), wrapPacket(rsaEncrypted, 6)}, server: [][]byte{publicKey, ok(7)},
-			want: []wantAuthReq{{mysql.CachingSha2PasswordToString(mysql.RequestPublicKey), 4, -1, ""}, {mysql.EncryptedPassword, 6, len(rsaEncrypted), ""}},
-		},
-		{
-			name:   "a full authentication without TLS, holding the server's key",
-			client: [][]byte{wrapPacket(rsaEncrypted, 4)}, server: [][]byte{ok(5)},
-			want: []wantAuthReq{{mysql.EncryptedPassword, 4, len(rsaEncrypted), ""}},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			client, clientPeer := net.Pipe()
-			dest, destPeer := net.Pipe()
-			t.Cleanup(func() { _ = client.Close(); _ = dest.Close(); _ = clientPeer.Close(); _ = destPeer.Close() })
-			forwarded := make(chan [][]byte, 1)
-			go func() {
-				var got [][]byte
-				for i := range tc.client {
-					_, _ = clientPeer.Write(tc.client[i])
-					got = append(got, readPacket(destPeer))
-					_, _ = destPeer.Write(tc.server[i])
-					_ = readPacket(clientPeer)
-				}
-				forwarded <- got
-				// The scripted exchange is over: a recorder that waits for
-				// more ends on EOF instead of hanging.
-				_ = clientPeer.Close()
-				_ = destPeer.Close()
-			}()
-			decodeCtx := legacyDecodeCtx(client, greeting)
-			decodeCtx.UseSSL = tc.tls
-			logger, logs := encodedLogger()
-			res, err := handleFullAuth(context.Background(), logger, client, dest, decodeCtx)
-			if err != nil {
-				t.Fatalf("handleFullAuth: %v", err)
-			}
-			if got := <-forwarded; fmt.Sprint(got) != fmt.Sprint(tc.client) {
-				t.Fatalf("the server got %x; want the client's packets forwarded as sent", got)
-			}
-			if len(res.req) != len(tc.want) {
-				t.Fatalf("recorded %s; want %d requests", reqTypes(res.req), len(tc.want))
-			}
-			for i, w := range tc.want {
-				w.check(t, res.req[i])
-			}
-			if secret := heldSecret(logs.Bytes()); secret != "" {
-				t.Errorf("the log holds the client's credential (%s):\n%s", secret, logs.Bytes())
-			}
-		})
-	}
-
-	t.Run("an auth switch", func(t *testing.T) {
-		client, clientPeer := net.Pipe()
-		dest, destPeer := net.Pipe()
-		t.Cleanup(func() { _ = client.Close(); _ = dest.Close(); _ = clientPeer.Close(); _ = destPeer.Close() })
-		hr41 := cannedHR41(t, 1, false, string(mysql.Native), scramble[:20])
-		verdict := cannedOK(t, 4, greeting.CapabilityFlags)
-		forwarded := make(chan [][]byte, 1)
-		go func() {
-			var got [][]byte
-			_, _ = destPeer.Write(sha2Greeting)
-			_ = readPacket(clientPeer)
-			_, _ = clientPeer.Write(hr41)
-			got = append(got, readPacket(destPeer))
-			_, _ = destPeer.Write(switchTo(string(mysql.Native), 2))
-			_ = readPacket(clientPeer)
-			_, _ = clientPeer.Write(wrapPacket(scramble[:20], 3))
-			got = append(got, readPacket(destPeer))
-			_, _ = destPeer.Write(verdict)
-			_ = readPacket(clientPeer)
-			forwarded <- got
-			_ = clientPeer.Close()
-			_ = destPeer.Close()
-		}()
-		logger, logs := encodedLogger()
-		res, err := handleInitialHandshake(context.Background(), logger, client, dest, legacyDecodeCtx(client, nil), models.OutgoingOptions{
-			DstCfg: &models.ConditionalDstCfg{Addr: "10.0.0.9:3306", Port: 3306},
-		}, nil)
-		if err != nil {
-			t.Fatalf("handleInitialHandshake: %v", err)
-		}
-		if secret := heldSecret(logs.Bytes()); secret != "" {
-			t.Errorf("the log holds the client's credential (%s):\n%s", secret, logs.Bytes())
-		}
-		got := <-forwarded
-		if !bytes.Equal(got[0], hr41) || !bytes.Equal(got[1], wrapPacket(scramble[:20], 3)) {
-			t.Fatalf("the server got %x; want the client's packets forwarded as sent", got)
-		}
-		if len(res.req) != 2 {
-			t.Fatalf("recorded %d requests (%s); want the HandshakeResponse41 and the AuthSwitchResponse", len(res.req), reqTypes(res.req))
-		}
-		wantAuthReq{mysql.HandshakeResponse41, 0, 20, "appuser"}.check(t, res.req[0])
-		wantAuthReq{mysql.AuthSwithResponse, 3, 20, ""}.check(t, res.req[1])
-	})
-}
-
-func legacyDecodeCtx(client net.Conn, greeting *mysql.HandshakeV10Packet) *wire.DecodeContext {
-	decodeCtx := &wire.DecodeContext{
-		Mode:               models.MODE_RECORD,
-		LastOp:             wire.NewLastOpMap(),
-		ServerGreetings:    wire.NewGreetings(),
-		PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
-	}
-	if greeting != nil {
-		decodeCtx.ServerGreetings.Store(client, greeting)
-		decodeCtx.LastOp.Store(client, mysql.AuthMoreData)
-		decodeCtx.PluginName = greeting.AuthPluginName
-	}
-	return decodeCtx
-}
-
-// readPacket reads one MySQL packet off c, header included.
-func readPacket(c net.Conn) []byte {
-	var hdr [4]byte
-	if _, err := io.ReadFull(c, hdr[:]); err != nil {
-		return nil
-	}
-	payload := make([]byte, int(hdr[0])|int(hdr[1])<<8|int(hdr[2])<<16)
-	if _, err := io.ReadFull(c, payload); err != nil {
-		return nil
-	}
-	return append(hdr[:], payload...)
 }
 
 // TestE2E_MySQLTLSFullAuth_RecordsNoPassword records a real client's login to

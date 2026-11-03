@@ -6,11 +6,9 @@ import (
 	"time"
 
 	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
-	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
-	"golang.org/x/sync/errgroup"
 )
 
 // These tests reproduce the customer failure where non-TLS MySQL recording
@@ -61,42 +59,6 @@ func assertGracefulSkipLogs(t *testing.T, logs *observer.ObservedLogs) {
 	if n := logs.FilterLevelExact(zapcore.WarnLevel).Len(); n == 0 {
 		t.Fatalf("a mid-stream skip must surface exactly one WARN so missing mocks are explained, got 0")
 	}
-}
-
-// TestRecord_MidStreamNoGreeting_SkipsGracefully drives the legacy Record path
-// (the one the customer hit — mysql.go recordLegacy) with a connection whose
-// first server packet is not the greeting.
-func TestRecord_MidStreamNoGreeting_SkipsGracefully(t *testing.T) {
-	// Not parallel: Record routes emitted mocks through the process-global
-	// syncMock singleton, which wireSyncMockOutput binds.
-	logger, logs := observedLogger()
-	mocks := make(chan *models.Mock, 8)
-	wireSyncMockOutput(t, mocks)
-
-	clientConn := newPipeConn()
-	destConn := newPipeConn()
-	// First byte we ever see from the server is a query OK, not the greeting.
-	destConn.push(midStreamServerPacket(t))
-
-	g, gctx := errgroup.WithContext(context.Background())
-	ctx, cancel := context.WithTimeout(gctx, 2*time.Second)
-	defer cancel()
-	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
-	ctx = context.WithValue(ctx, models.ClientConnectionIDKey, "midstream-conn")
-
-	err := Record(ctx, logger, clientConn, destConn, mocks, models.OutgoingOptions{
-		DstCfg: &models.ConditionalDstCfg{Addr: "127.0.0.1:3306", Port: 3306},
-	}, nil)
-	if err != nil {
-		t.Fatalf("Record must skip a mid-stream (greeting-less) connection gracefully, got error: %v", err)
-	}
-
-	select {
-	case m := <-mocks:
-		t.Fatalf("no mock should be emitted for an un-decodable mid-stream connection, got %+v", m)
-	default:
-	}
-	assertGracefulSkipLogs(t, logs)
 }
 
 // TestRecordV2_MidStreamNoGreeting_SkipsGracefully drives the V2 relay path

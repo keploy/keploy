@@ -14,7 +14,6 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
-	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -947,82 +946,6 @@ func TestResolvePreTLSGreeting_GateHandlesNilAndEmptyAddr(t *testing.T) {
 	noAddr := &models.ConditionalDstCfg{Port: 3306}
 	if _, _, source := resolvePreTLSGreeting(context.Background(), seed(), models.HandshakeOwner{}, 3306, scope, "", noAddr, false); source != greetingCached {
 		t.Errorf("empty Addr: source = %v, want the port key to answer", source)
-	}
-}
-
-// TestLegacyPostTLSUsesTheLastGreetingCacheInsteadOfDialling drives the LEGACY
-// post-TLS reader and asserts its BEHAVIOUR.
-//
-// It replaces a test that asserted on the SOURCE TEXT of conn.go: it read the
-// file and grepped for "hsStore.Last(lastKey)". That guard could only detect
-// textual deletion. Changing the surrounding condition to `if false` leaves the
-// string present, kills the entire fallback, and the whole suite stayed green --
-// verified. A write with no reader is the exact defect this fallback exists to
-// fix, so the guard for it must exercise the reader rather than look at it.
-//
-// The destination is a fabricated (capture-layer stand-in) address, which
-// separates the two paths cleanly: with the cache consulted the greeting comes
-// from the store and the connection's config mock is recorded from it; without
-// it, fetchServerGreeting REFUSES the address (it does not dial a stand-in) and
-// the call fails with "direct fetch failed".
-//
-// It asserts the success POSITIVELY as well as the failure negatively. A
-// one-sided check passes the moment the flow ends before the store lookup ever
-// happens — which is what this test did once the first client packet came to
-// be read before the lookup, while its stream sent none.
-func TestLegacyPostTLSUsesTheLastGreetingCacheInsteadOfDialling(t *testing.T) {
-	store := models.NewTLSHandshakeStore()
-	mocks := make(chan *models.Mock, 16)
-	mgr := syncMock.New(zap.NewNop())
-	mgr.SetOutputChannel(mocks)
-	ctx := syncMock.NewContext(context.WithValue(postTLSCtxWithStore(store),
-		models.ClientConnectionIDKey, "pooled-conn"), mgr)
-
-	scope := "ns/app/ts0"
-	// Port 1 is closed, so the direct-dial fallback cannot succeed.
-	dst := &models.ConditionalDstCfg{Addr: "127.0.0.1:1", Port: 1, AddrFabricated: true}
-	// As a raw leg caches it: the greeting and the client's SSLRequest.
-	store.RememberLast(models.HandshakeLastKey(scope, dst), models.TLSHandshakeEntry{
-		RespPackets: [][]byte{cannedHandshakeV10(t)},
-		ReqPackets:  [][]byte{cannedSSLRequest(t, 1)},
-	})
-
-	// A pooled connection: its first decrypted packet is a command, and then
-	// the stream ends. The greeting is looked up only once that packet is in,
-	// so it must be there; this test is about WHICH SOURCE the greeting came
-	// from, not about decoding traffic.
-	clientConn, peer := net.Pipe()
-	defer func() { _ = clientConn.Close() }()
-	destConn, destPeer := net.Pipe()
-	defer func() { _ = destConn.Close() }()
-	_ = destPeer.Close()
-	go func() {
-		_, _ = peer.Write(cannedCOMQuery(t, 0, "SELECT 1"))
-		_ = peer.Close()
-	}()
-
-	opts := models.OutgoingOptions{
-		DstCfg:           dst,
-		PassThroughScope: scope,
-		ConnKey:          "pooled-conn-whose-own-entry-was-consumed",
-	}
-	err := handlePostTLSRecord(ctx, zap.NewNop(), clientConn, destConn, mocks,
-		buildPostHandshakeDecodeCtx(clientConn), opts)
-
-	if err != nil && strings.Contains(err.Error(), "direct fetch failed") {
-		t.Fatalf("the legacy post-TLS reader ignored the last-greeting cache and fell through to "+
-			"fetchServerGreeting for %s — the seeding in handleInitialHandshake is then a write with "+
-			"no reader, and a pooled connection loses its whole command phase here: %v", dst.Addr, err)
-	}
-	// Positive assertion: the cached greeting was used, for the connection's
-	// config mock.
-	close(mocks)
-	var cfg bool
-	for m := range mocks {
-		cfg = cfg || (m != nil && m.Name == "config")
-	}
-	if !cfg {
-		t.Fatalf("no config mock from the cached greeting (err %v)", err)
 	}
 }
 

@@ -1,3 +1,4 @@
+// Package recorder records MySQL traffic from keploy's V2 chunk streams.
 package recorder
 
 import (
@@ -1510,7 +1511,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	var held *heldPrepare
 	defer func() {
 		if held != nil {
-			held.leaveOut(sess, notRecorded("the recording stopped before a packet settled the %s response's framing", held.what))
+			held.leaveOut(sess, decodeCtx, notRecorded("the recording stopped before a packet settled the %s response's framing", held.what))
 		}
 	}()
 	// carry is the first packet of the response about to be read, read by
@@ -1590,7 +1591,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			// with the rest of this exchange: nothing settles its framing.
 			h := held
 			held = nil
-			h.leaveOut(sess, notRecorded("the response after the %s response was not framed, so nothing settles its framing", h.what))
+			h.leaveOut(sess, decodeCtx, notRecorded("the response after the %s response was not framed, so nothing settles its framing", h.what))
 		}
 		carry = nil
 		decodeCtx.LastOp.Store(clientKey, wire.RESET)
@@ -1848,6 +1849,10 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			err = oversizedNotRecorded(cmdPkt.Header.Type, what)
 		}
 		if errors.Is(err, errNotRecorded) {
+			if respBundle != nil {
+				sp, _ := respBundle.Message.(*mysql.StmtPrepareOkPacket)
+				forgetPrepared(decodeCtx, sp)
+			}
 			decodeCtx.LastOp.Store(clientKey, wire.RESET)
 			leaveOut(sess, reqTs, resTs, err)
 			lastEnd = later(reqTs, resTs)
@@ -1962,6 +1967,7 @@ func collectResponseV2(ctx context.Context, logger *zap.Logger, sess *supervisor
 		}
 		ts, err := assembleStmtPrepareV2(ctx, logger, sess, decodeCtx, sp, seq)
 		if err != nil {
+			forgetPrepared(decodeCtx, sp)
 			return nil, ts, err
 		}
 		decodeCtx.LastOp.Store(clientKey, mysql.OK)

@@ -49,3 +49,19 @@ func stampStatementQuery(decodeCtx *wire.DecodeContext, cmd *mysql.PacketBundle)
 		delete(decodeCtx.StmtIDToQuery, stmtID)
 	}
 }
+
+// forgetPrepared forgets the statement sp named when its COM_STMT_PREPARE's
+// exchange is left out (sp nil forgets nothing). The wire decoder learns a
+// statement from its COM_STMT_PREPARE_OK head, before the rest of the reply
+// is read; kept, a later COM_STMT_EXECUTE of it would decode and be recorded,
+// and it cannot replay without the PREPARE's mock. Forgotten, the EXECUTE does
+// not decode, so its exchange is left out with the test cases over it, as one
+// of a statement prepared before the recording began is. A later PREPARE the
+// server answers with the same ID makes it known again.
+func forgetPrepared(decodeCtx *wire.DecodeContext, sp *mysql.StmtPrepareOkPacket) {
+	if decodeCtx == nil || sp == nil {
+		return
+	}
+	delete(decodeCtx.PreparedStatements, sp.StatementID)
+	delete(decodeCtx.StmtIDToQuery, sp.StatementID)
+}
