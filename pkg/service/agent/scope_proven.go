@@ -59,8 +59,8 @@ type provenWire struct {
 	// open is, by test worker's instance (0: the run's, in a run of one
 	// test process), the attempt of the test that instance has open; an
 	// instance with none open has no entry. Each worker runs one test at a
-	// time; in a record, different workers' tests may be open at once
-	// (overlapRefusal).
+	// time; different workers' tests may be open at once, in a run that
+	// takes its workers (workersRefusal).
 	open map[uint32]scopeTest
 	// openFrom is, by test ID, the capture-loss counts read as a test began
 	// while another worker's test was open: the test's own kinds
@@ -461,10 +461,7 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	a.endGoneWorkers(ctx)
 	me := claimant{pid: caller, start: start}
 	if declared > 1 {
-		if serr := a.learnWorkersRefusal(caller, declared); serr != nil {
-			return models.InstanceResp{}, serr
-		}
-		if serr := a.clockWorkersRefusal(caller, declared); serr != nil {
+		if serr := a.workersRefusal(ctx, caller, declared); serr != nil {
 			return models.InstanceResp{}, serr
 		}
 		return a.claimWorker(ctx, req, me, declared)
@@ -488,7 +485,7 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		a.provenMu.Unlock()
 		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrOneTestProcess,
 			fmt.Sprintf("process %d asked to run tests while process %d still runs this keploy run's tests: two test processes ran at once", caller, prev.pid),
-			"run one test process at a time (go test -p 1, pytest without -n, jest --runInBand); parallel test workers arrive in a later keploy release")
+			a.oneProcessRemedy(ctx, caller))
 	}
 	// The previous claimer is gone: a test it left open can no longer end,
 	// and fails. (A test is begun only under a claim, so with no previous
@@ -984,7 +981,7 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		a.provenMu.Unlock()
 		return models.ScopeBeginResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrOneTestAtATime,
 			fmt.Sprintf("%s began while %s was still open: two tests ran at once in one test process", id, open),
-			"run them one at a time: in Go, start parallel tests with keploytest.Parallel and subtests with keploytest.Run, which take turns; elsewhere, end each test before the next one begins; parallel test workers arrive in a later keploy release")
+			"run them one at a time: in Go, start parallel tests with keploytest.Parallel and subtests with keploytest.Run, which take turns; elsewhere, end each test before the next one begins")
 	}
 	other, otherTest, overlaps := a.proven.openBesides(worker)
 	if overlaps && otherTest == id {
@@ -994,13 +991,6 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			"give each test worker its own key, or run each test in one worker at a time")
 	}
 	a.provenMu.Unlock()
-	if overlaps {
-		if why := a.overlapRefusal(ctx); why != "" {
-			return models.ScopeBeginResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrOneTestAtATime,
-				fmt.Sprintf("%s began in test worker %d while test worker %d's test %s was still open, but %s", id, worker, other, otherTest, why),
-				"run one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
-		}
-	}
 	a.provenMu.Lock()
 	reason, gated := a.proven.skip[id]
 	outcome := models.ScopeOutcomeGated
@@ -1383,16 +1373,16 @@ func (a *Agent) reScope() {
 	a.provenMu.Unlock()
 }
 
-// overlapRefusal is why a test cannot begin while another worker's test is
-// open, "" when it can: what keploy keeps for the run as one, not per test
-// worker, would charge one worker's calls to another's test. (A replay whose
-// build moves the run's one clock in this run takes no second worker at all:
-// clockWorkersRefusal refuses its claim.)
-func (a *Agent) overlapRefusal(ctx context.Context) string {
-	if !a.countsCaptureLosses(ctx) {
-		return "keploy's hooks here count no capture losses, so a connection the kernel dropped could not be charged to every test open across it"
+// oneProcessRemedy is the fix for a second test process that claimed the
+// run, from process pid, while the first still runs its tests: run one at a
+// time, or, where this run would take them (takesWorkers), declare the
+// processes as the run's test workers.
+func (a *Agent) oneProcessRemedy(ctx context.Context, pid int) string {
+	remedy := "run one test process at a time (go test -p 1, pytest without -n, jest --runInBand)"
+	if a.takesWorkers(ctx, pid) {
+		remedy += ", or declare, in every test process's claim, how many test workers the run starts at once"
 	}
-	return ""
+	return remedy
 }
 
 // failOpen ends, as failed, a test whose harness can no longer end it. With
