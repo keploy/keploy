@@ -117,6 +117,9 @@ type decider struct {
 	// encoded is the leaf's inDecodedForm, read once and only where a word
 	// of it would be learned fresh.
 	encoded func() (string, *evPlace)
+	// passes counts the instants atFinest reads, each pass over a text's
+	// instants counted whole: what keeps its work linear in them.
+	passes int
 }
 
 // decideWords decides every changed word of in, and the field each
@@ -194,10 +197,11 @@ func (dc *decider) oneValue(out []Decision, fields []string) {
 	}
 }
 
-// unnamedWhy refuses a leaf no path names alone (Leaf.Unnamed). Its
-// keploy.yml noise names it, and also the field its key's '.', '[' or ']'
-// would nest, which the line says.
-const unnamedWhy = "no path names this field alone: its key holds '.', '[' or ']', so its noise in keploy.yml also names the field those would nest"
+// unnamedWhy refuses a leaf no path names alone (Leaf.Unnamed): its key
+// holds '.', '[' or ']', or its document holds its key twice (a BSON
+// document may). Its keploy.yml noise names it, and also the other field
+// its path spells, which the line says.
+const unnamedWhy = "no path names this field alone: its key holds '.', '[' or ']', or its document holds that key twice, so its noise in keploy.yml also names the other field its path spells"
 
 // leaf decides the changed words of the drifted leaf at path.
 func (dc *decider) leaf(path, unread string) []Decision {
@@ -873,8 +877,8 @@ func (dc *decider) coarserOnly(t *readerText, w string, m moment) bool {
 // same as any other of m's finer instants, and so does one an encoder
 // writes without its trailing zeros, which then shows m's own text in one
 // run, and a number of seconds with its fraction, whose whole seconds are
-// a word: only where neither run's text there shows a unit finer than m is
-// it m.
+// a word: only where neither run's text shows a unit finer than m at that
+// place, as atFinest pairs them, is it m.
 func (dc *decider) cutOfFinerOnly(t, other *readerText, w string, m moment) bool {
 	h, ok := t.holdsWord(w)
 	if !ok {
@@ -890,11 +894,18 @@ func (dc *decider) cutOfFinerOnly(t, other *readerText, w string, m moment) bool
 // leaves out a fraction's trailing zeros (Go's RFC3339Nano, Java's
 // Instant.toString, Python's isoformat, a JavaScript number) writes a time
 // made at a second's first millisecond as a whole second, and the same
-// field's time in the other run with its fraction. Two instants are one
-// place's, written alike, where each is the k-th of its layout in its
-// text, both texts hold as many of that layout, and the two read the same
-// but for their fraction's digits; any other is judged at its own text's
-// unit. read is false where keploy could not read t.
+// field's time in the other run with its fraction. An instant's place is
+// the JSON member it is the value of (memberAt), its layout, and its text
+// but for its fraction's digits (instantShape). Where both texts hold as
+// many instants at a place, the k-th of each are one time's; where a
+// member's count differs (a list that grew between runs), each takes the
+// finest unit the other run shows there. An instant of no member (an
+// element of a list of times, a field of its own) pairs only where both
+// texts hold as many; any other is judged at its own text's unit, and so
+// is one of no unit (a time-ordered UUID's). Each text's instants are read
+// in a few passes, each counted whole in dc.passes, and the texts are read
+// again only where the other run shows a unit finer than one of t's
+// instants of its layout. read is false where keploy could not read t.
 func (dc *decider) atFinest(t, other *readerText) (spans []instant, read bool) {
 	spans, read = t.spansOf()
 	if !read || other == nil || other == t {
@@ -904,69 +915,101 @@ func (dc *decider) atFinest(t, other *readerText) (spans []instant, read bool) {
 	if !ok {
 		return spans, true
 	}
+	finest := map[int]time.Duration{}
+	for _, o := range os {
+		if f, ok := finest[o.layout]; !ok || o.res < f {
+			finest[o.layout] = o.res
+		}
+	}
+	dc.passes += len(os) + len(spans)
+	if !slices.ContainsFunc(spans, func(sp instant) bool {
+		f, ok := finest[sp.layout]
+		return ok && f < sp.res
+	}) {
+		return spans, true
+	}
 	var text, otext string
-	cloned := false
+	var ok1, ok2 bool
+	if text, ok1 = t.textNow(); ok1 {
+		otext, ok2 = other.textNow()
+	}
+	if !ok1 || !ok2 {
+		return spans, true
+	}
+	theirs := map[instantPlace]placeUnits{}
+	for _, o := range os {
+		at := instantPlaceOf(otext, o)
+		u, ok := theirs[at]
+		if !ok {
+			u.finest = o.res
+		}
+		u.res, u.finest = append(u.res, o.res), min(u.finest, o.res)
+		theirs[at] = u
+	}
+	at, ours := make([]instantPlace, len(spans)), map[instantPlace]int{}
 	for i, sp := range spans {
-		o, n := kthOfLayout(os, sp.layout, ordinalOf(spans, i))
-		if !sp.keyed || n < 0 || !o.keyed || o.res >= sp.res || n != kthCount(spans, sp.layout) {
+		at[i] = instantPlaceOf(text, sp)
+		ours[at[i]]++
+	}
+	dc.passes += len(os) + 2*len(spans)
+	kth, cloned := map[instantPlace]int{}, false
+	for i, sp := range spans {
+		u, ok := theirs[at[i]]
+		if !ok {
 			continue
 		}
-		if !cloned {
-			var ok1, ok2 bool
-			if text, ok1 = t.textNow(); ok1 {
-				otext, ok2 = other.textNow()
-			}
-			if !ok1 || !ok2 {
-				return spans, true
-			}
+		res := sp.res
+		switch k := kth[at[i]]; {
+		case len(u.res) == ours[at[i]]:
+			res = u.res[k]
+		case at[i].field != "":
+			res = u.finest
 		}
-		if instantShape(text[sp.start:sp.end]) != instantShape(otext[o.start:o.end]) {
+		kth[at[i]]++
+		if res >= sp.res {
 			continue
 		}
 		if !cloned {
 			spans, cloned = slices.Clone(spans), true
+			dc.passes += len(spans)
 		}
-		spans[i].res = o.res
+		spans[i].res = res
 	}
 	return spans, true
 }
 
-// ordinalOf is how many instants of spans[i]'s layout come before it.
-func ordinalOf(spans []instant, i int) int {
-	k := 0
-	for _, sp := range spans[:i] {
-		if sp.layout == spans[i].layout {
-			k++
-		}
-	}
-	return k
+// instantPlace is where an instant stands in its text, as atFinest pairs
+// it with the other run's: the JSON member it is the value of ("" where
+// none), its layout, and its text but for its fraction's digits.
+type instantPlace struct {
+	field, shape string
+	layout       int
 }
 
-// kthOfLayout is the k-th instant of layout lay in spans, and how many of
-// that layout spans holds; n is -1 where it holds no k-th.
-func kthOfLayout(spans []instant, lay, k int) (sp instant, n int) {
-	n = kthCount(spans, lay)
-	for _, s := range spans {
-		if s.layout != lay {
-			continue
-		}
-		if k == 0 {
-			return s, n
-		}
-		k--
-	}
-	return instant{}, -1
+// placeUnits are the units of the instants a text holds at one place, in
+// order, and the finest of them.
+type placeUnits struct {
+	res    []time.Duration
+	finest time.Duration
 }
 
-// kthCount is how many instants of layout lay spans holds.
-func kthCount(spans []instant, lay int) int {
-	n := 0
-	for _, s := range spans {
-		if s.layout == lay {
-			n++
-		}
+// instantPlaceOf is where sp stands in text.
+func instantPlaceOf(text string, sp instant) instantPlace {
+	return instantPlace{field: memberAt(text, sp.start), shape: instantShape(text[sp.start:sp.end]), layout: sp.layout}
+}
+
+// memberAt is the name of the JSON member whose value starts at start in
+// text, read back over the value's quote and the colon (`"created_at":"…`
+// is created_at); "" where no member's name stands just before it.
+func memberAt(text string, start int) string {
+	s, ok := strings.CutSuffix(strings.TrimRight(strings.TrimSuffix(text[:start], `"`), " "), ":")
+	if !ok {
+		return ""
 	}
-	return n
+	if s, ok = strings.CutSuffix(strings.TrimRight(s, " "), `"`); !ok {
+		return ""
+	}
+	return s[strings.LastIndexByte(s, '"')+1:]
 }
 
 // instantShape is an instant's text with its fraction left out and each
@@ -1171,10 +1214,13 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		// application no value at that cut to pick, as at step 3: the later
 		// steps read it, where the call's own window reads the clock,
 		// checked at replay. One keploy cannot read is a pick (fail closed).
+		// It is asked only where round F's text there holds the moment.
 		finer := func(h, m moment) bool { return h.res < m.res && covers(h, m) }
-		cut := c.lm != nil && dc.cutOfFinerOnly(p.t.live, p.t.rec, l, *c.lm) && dc.namedFiner(p.t.live, p.t.rec, *c.lm, finer)
+		cut := func() bool {
+			return c.lm != nil && dc.cutOfFinerOnly(p.t.live, p.t.rec, l, *c.lm) && dc.namedFiner(p.t.live, p.t.rec, *c.lm, finer)
+		}
 		switch {
-		case before(p) && h.hl && !cut && (!h.hr || p.same()):
+		case before(p) && h.hl && (!h.hr || p.same()) && !cut():
 			why := "round F's moment stands unchanged in " + p.name
 			if !p.same() {
 				why = "round F's moment stands in " + p.name + ", which does not show it"
@@ -1184,7 +1230,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		// in round F the value may be a pick from it, as main reads it.
 		// The recorded application never read it, so R's moment standing
 		// there too (by another cut) says nothing.
-		case p.fGave && p.state == stateNotBefore && p.side == Response && h.hl && !cut:
+		case p.fGave && p.state == stateNotBefore && p.side == Response && h.hl && !cut():
 			return dc.refuse(path, at, n, r, l, RefusalPick, "round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it", []string{p.name}, dc.fieldNoise(path))
 		case p.side == Response && p.state == stateUnknown && (h.hr || h.hl):
 			return untold(p.why)
