@@ -39,8 +39,8 @@ func TestADrainStarvedOfCPUDoesNotGiveUp(t *testing.T) {
 	type result struct{ timedOut bool }
 	res := make(chan result, 1)
 	go func() {
-		_, timedOut := drainErrGroupProgress(clk, zap.NewNop(), "t", &g, bound, p.Load)
-		res <- result{timedOut}
+		_, end := drainErrGroupProgress(clk, zap.NewNop(), "t", &g, bound, p.Load)
+		res <- result{end == DrainStalled}
 	}()
 	// Four bounds of real wall time, no CPU: neither the clock's wall time
 	// (its timers) nor the host's may count.
@@ -74,8 +74,8 @@ func TestADrainThatProgressesIsWaitedForPastItsBound(t *testing.T) {
 	var p atomic.Uint64
 	res := make(chan bool, 1)
 	go func() {
-		_, timedOut := drainErrGroupProgress(clk, zap.NewNop(), "t", &g, time.Second, p.Load)
-		res <- timedOut
+		_, end := drainErrGroupProgress(clk, zap.NewNop(), "t", &g, time.Second, p.Load)
+		res <- end == DrainStalled
 	}()
 	for i := 0; i < 20; i++ { // 10 bounds of run time, progressing
 		waitArmed(t, clk)

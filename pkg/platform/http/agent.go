@@ -4232,20 +4232,25 @@ func awaitAgentContainer(logger *zap.Logger, cli *engineCLI, name string, unansw
 // killed, keploy saying so at WARN (stopWatch). Compose then finishes stopping
 // the project. Nothing is sent to an agent that is already going: compose's
 // stop signal is its stop. But the agent waits, before it goes, for the
-// recording's streams to close (its stop's hold), and release says that a
-// drain was given up on a stall, whose stream may stay open: the agent is then
-// sent the escalation signal, which ends that wait (utils.DieOnEscalation),
-// so that its teardown begins, and is judged as any other. Otherwise it would
-// report no teardown, which is waited for until it exits.
-func (a *AgentClient) EndComposeAgent(release bool) {
+// recording's streams to close (its stop's hold), and a drain that was given
+// up (drain.GaveUp: on a stall, or at the user's interrupt after its offer)
+// may leave its stream open: the agent is then sent the escalation signal,
+// which ends that wait (utils.DieOnEscalation), so that its teardown begins,
+// and is judged as any other. Otherwise it would report no teardown, which is
+// waited for until it exits. The warning names the cause the drain had.
+func (a *AgentClient) EndComposeAgent(drain utils.DrainEnd) {
 	name := a.conf.KeployContainer
 	if name == "" {
 		return
 	}
 	logger := a.logger.With(zap.String("container", name))
 	cli := newEngineCLI(logger)
-	if release {
-		logger.Warn("a drain of the keploy agent's streams was given up on a stall; telling the agent to stop waiting for it")
+	if drain.GaveUp() {
+		cause := "on a stall"
+		if drain == utils.DrainStopped {
+			cause = "at the user's interrupt"
+		}
+		logger.Warn("a drain of the keploy agent's streams was given up " + cause + "; telling the agent to stop waiting for it")
 		if out, err := cli.ask("kill", "--signal", "SIGUSR2", name); err != nil {
 			logger.Debug("Could not signal the agent container. It may have already stopped.",
 				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))

@@ -740,7 +740,7 @@ type agentStopWatcher interface {
 // recording has drained it: its exit waited for while its teardown makes
 // progress, and a wedged one killed and said (AgentClient.EndComposeAgent).
 type composeAgentEnder interface {
-	EndComposeAgent(release bool)
+	EndComposeAgent(drain utils.DrainEnd)
 }
 
 // drainStallLooks is how many looks in a row a drain makes at a backlog the
@@ -1719,19 +1719,22 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// The frame streams drain through the stop until what the agent held at
 	// it is through (forwardUntilDrained): wait for them while they make
 	// progress, however long that takes, and give up only on a stall.
-	// It reports whether it joined every frame drain: one it gave up on, a
-	// stall, may still hold its stream to the agent open.
-	drainFrames := func() (joined bool) {
+	// It reports how it ended: one it gave up on (a stall, or the user's
+	// interrupt after its offer) may still hold its stream to the agent open.
+	// A press is no stall: it closed StopNow, which cuts the recording as
+	// incomplete (captureLost) as at reportDrainProgress's own offer, and the
+	// stop killed nothing.
+	drainFrames := func() utils.DrainEnd {
 		reqCtxCancel()
 		defer r.reportDrainProgress(drainProgressEvery)()
-		err, timedOut := utils.DrainErrGroupProgressOn(r.drainClock, r.logger, "record-req", reqErrGrp, teardownDrainStall, r.drainProgress)
+		err, end := utils.DrainErrGroupProgressOn(r.drainClock, r.logger, "record-req", reqErrGrp, teardownDrainStall, r.drainProgress)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop request processing")
 		}
-		if timedOut {
+		if end == utils.DrainStalled {
 			r.noteEndCut("keploy's drain of what the agent captured made no progress at the recording's end, so keploy gave it up, and what the agent still held is not in the recording")
 		}
-		return !timedOut
+		return end
 	}
 	// Under docker compose the agent is a service of the app's own stack
 	// (keploy injects it), so taking the stack down takes the agent, and
@@ -1758,12 +1761,13 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					r.reportRealRun(ctx)
 					capWatch.afterTestCases(ctx)
 				}
-				joined := drainFrames()
+				end := drainFrames()
 				capWatch.waitForReads() // while the agent is up
 				if e, ok := r.instrumentation.(composeAgentEnder); ok {
-					// A drain given up on a stall may hold its stream open,
-					// and the agent waits for that stream: it is told to go.
-					e.EndComposeAgent(!joined)
+					// A drain given up (a stall, or the user's interrupt)
+					// may hold its stream open, and the agent waits for
+					// that stream: it is told to go.
+					e.EndComposeAgent(end)
 				}
 				return
 			}
@@ -1880,9 +1884,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// only if this drain actually joined every persist goroutine; on the
 		// timeout path a mock/test-case writer may still be in flight (see below).
 		recordDrainedCleanly := true
-		if err, timedOut := utils.DrainErrGroupProgressOn(r.drainClock, r.logger, "record", errGrp, teardownDrainStall, r.drainProgress); err != nil {
+		if err, end := utils.DrainErrGroupProgressOn(r.drainClock, r.logger, "record", errGrp, teardownDrainStall, r.drainProgress); err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
-		} else if timedOut {
+		} else if end.GaveUp() {
 			recordDrainedCleanly = false
 		}
 		// A drain that gave the mock loop up (wedged in a save or a hook) left

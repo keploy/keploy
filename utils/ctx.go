@@ -182,15 +182,24 @@ func init() { ResetInterruptedAgain() }
 // offer does not stand for a later wait it did not tell the user of. With no
 // signal yet, nothing is offered: next is nil.
 func OfferStopNow() (next <-chan struct{}, withdraw func()) {
+	next, _, withdraw = offerStopNow()
+	return next, withdraw
+}
+
+// offerStopNow is OfferStopNow, and the record of the interrupt that answers
+// the offer: once next is closed, it says how many offers that interrupt
+// answered (pressRecord).
+func offerStopNow() (next <-chan struct{}, press *pressRecord, withdraw func()) {
 	if !Interrupted() {
-		return nil, func() {}
+		return nil, nil, func() {}
 	}
 	repeatInterrupts.mu.Lock()
 	repeatInterrupts.offers++
 	next = repeatInterrupts.next
+	press = repeatInterrupts.press
 	repeatInterrupts.mu.Unlock()
 	var once sync.Once
-	return next, func() {
+	return next, press, func() {
 		once.Do(func() {
 			repeatInterrupts.mu.Lock()
 			repeatInterrupts.offers--
@@ -219,8 +228,9 @@ type StopNowNotice struct {
 	// sawAt is when the stop's first signal was first seen to have come
 	// (zero: not yet).
 	sawAt time.Time
-	// next and withdraw are the offer's, once made (OfferStopNow).
+	// next, press and withdraw are the offer's, once made (offerStopNow).
 	next     <-chan struct{}
+	press    *pressRecord
 	withdraw func()
 	// withdrawn: the stop no longer waits (Withdraw); nothing more is
 	// offered.
@@ -270,9 +280,33 @@ func (n *StopNowNotice) Next() (offering bool) {
 			n.sawAt = noticeNow()
 		}
 	case noticeNow().Sub(n.sawAt) >= n.period:
-		n.next, n.withdraw = OfferStopNow()
+		n.next, n.press, n.withdraw = offerStopNow()
 	}
 	return n.withdraw != nil
+}
+
+// othersOffer reports whether a stop other than n's offers to end at the next
+// interrupt (OfferStopNow): n's own offer, while it stands, is not counted.
+func (n *StopNowNotice) othersOffer() bool {
+	own := 0
+	if n.withdraw != nil && !n.withdrawn {
+		own = 1
+	}
+	repeatInterrupts.mu.Lock()
+	defer repeatInterrupts.mu.Unlock()
+	return repeatInterrupts.offers > own
+}
+
+// answeredOthers reports whether the interrupt that answered n's offer (its
+// Interrupt closed) answered another stop's offer too: it was made while
+// more than n's stood.
+func (n *StopNowNotice) answeredOthers() bool {
+	if n.press == nil {
+		return false
+	}
+	repeatInterrupts.mu.Lock()
+	defer repeatInterrupts.mu.Unlock()
+	return n.press.offers > 1
 }
 
 // Interrupt returns a channel closed by the first interrupt after the offer:
@@ -310,17 +344,25 @@ func MarkInterruptedAgain() (stoppedNow bool) {
 		l.once.Do(func() { close(l.ch) })
 	}
 	repeatInterrupts.n++
+	repeatInterrupts.press.offers = repeatInterrupts.offers
 	close(repeatInterrupts.next)
 	repeatInterrupts.next = make(chan struct{})
+	repeatInterrupts.press = &pressRecord{}
 	return stoppedNow
 }
 
+// pressRecord is what one interrupt after the first found when it came
+// (MarkInterruptedAgain): how many stops offered to end at it (OfferStopNow).
+type pressRecord struct{ offers int }
+
 // repeatInterrupts counts the interrupts after the first
-// (MarkInterruptedAgain); next is closed, and replaced, at each.
+// (MarkInterruptedAgain); next is closed, and replaced, at each, and press,
+// the record of the interrupt that closes next, with it.
 var repeatInterrupts struct {
-	mu   sync.Mutex
-	n    uint64
-	next chan struct{}
+	mu    sync.Mutex
+	n     uint64
+	next  chan struct{}
+	press *pressRecord
 	// offers is how many stops offer to end at the next one (OfferStopNow).
 	offers int
 }
@@ -356,6 +398,7 @@ func ResetInterruptedAgain() {
 	stopNow.Store(&interruptLatch{ch: make(chan struct{})})
 	repeatInterrupts.n = 0
 	repeatInterrupts.next = make(chan struct{})
+	repeatInterrupts.press = &pressRecord{}
 	repeatInterrupts.offers = 0
 	repeatInterrupts.mu.Unlock()
 }

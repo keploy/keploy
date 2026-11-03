@@ -416,7 +416,7 @@ func TestAStopsSignalToASilentDaemonDoesNotHoldIt(t *testing.T) {
 		stopAgentContainerFor(logger, run, stopTestContainer)
 	}
 	endCompose := func(logger *zap.Logger) {
-		(&AgentClient{logger: logger, conf: &config.Config{KeployContainer: stopTestContainer}}).EndComposeAgent(true)
+		(&AgentClient{logger: logger, conf: &config.Config{KeployContainer: stopTestContainer}}).EndComposeAgent(utils.DrainStalled)
 	}
 	for _, tc := range []struct {
 		name   string
@@ -1605,7 +1605,7 @@ func TestEndComposeAgentReleasesAnAgentAStalledDrainHolds(t *testing.T) {
 	log, _ := fakeEngine(t)
 	a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{KeployContainer: stopTestContainer}}
 	returned := make(chan struct{})
-	go func() { a.EndComposeAgent(true); close(returned) }()
+	go func() { a.EndComposeAgent(utils.DrainStalled); close(returned) }()
 	within(t, "EndComposeAgent", func() { <-returned })
 	calls := engineLines(t, log)
 	sig, wait := slices.Index(calls, "kill --signal SIGUSR2 "+stopTestContainer), slices.Index(calls, "wait "+stopTestContainer)
@@ -1643,7 +1643,7 @@ func TestEndComposeAgentKillsOnlyAWedgedAgent(t *testing.T) {
 			core, logs := observer.New(zap.WarnLevel)
 			a := &AgentClient{logger: zap.New(core), conf: &config.Config{KeployContainer: stopTestContainer}}
 			returned := make(chan struct{})
-			go func() { a.EndComposeAgent(false); close(returned) }()
+			go func() { a.EndComposeAgent(utils.DrainJoined); close(returned) }()
 			awaitEngineWait(t, log, returned)
 			for beat := uint64(0); ; beat++ {
 				if !returnsWithin(returned, 0) && !tc.wedged && beat == 4*stallChecks {

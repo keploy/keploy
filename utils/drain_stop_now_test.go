@@ -34,8 +34,8 @@ func drainStopNowTestOnItsOwn(t *testing.T) {
 
 // drainResult is what a teardown drain returned.
 type drainResult struct {
-	err      error
-	timedOut bool
+	err error
+	end DrainEnd
 }
 
 // startDrain runs the teardown drain of g on clk, at bound, logging to an
@@ -44,8 +44,8 @@ func startDrain(clk stall.Clock, g *errgroup.Group, bound time.Duration, progres
 	core, logs := observer.New(zap.DebugLevel)
 	res := make(chan drainResult, 1)
 	go func() {
-		err, timedOut := drainErrGroupProgress(clk, zap.New(core), "t", g, bound, progress)
-		res <- drainResult{err, timedOut}
+		err, end := drainErrGroupProgress(clk, zap.New(core), "t", g, bound, progress)
+		res <- drainResult{err, end}
 	}()
 	return res, logs
 }
@@ -54,11 +54,19 @@ func startDrain(clk stall.Clock, g *errgroup.Group, bound time.Duration, progres
 // drain has not returned, and returns it.
 func awaitLog(t *testing.T, logs *observer.ObservedLogs, part string, res <-chan drainResult) observer.LoggedEntry {
 	t.Helper()
+	e, _ := awaitLogAfter(t, logs, part, -1, res)
+	return e
+}
+
+// awaitLogAfter is awaitLog for a line after the after'th (counted from 0),
+// and returns its place too.
+func awaitLogAfter(t *testing.T, logs *observer.ObservedLogs, part string, after int, res <-chan drainResult) (observer.LoggedEntry, int) {
+	t.Helper()
 	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
 	for {
-		for _, e := range logs.All() {
-			if strings.Contains(e.Message, part) {
-				return e
+		for i, e := range logs.All() {
+			if i > after && strings.Contains(e.Message, part) {
+				return e, i
 			}
 		}
 		select {
@@ -68,6 +76,42 @@ func awaitLog(t *testing.T, logs *observer.ObservedLogs, part string, res <-chan
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("the drain never said %q; it said %v", part, logs.All())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// awaitEnd waits for the drain's end, and fails the test if it does not
+// come (a minute only turns a hang into a failure).
+func awaitEnd(t *testing.T, res <-chan drainResult, what string) drainResult {
+	t.Helper()
+	select {
+	case r := <-res:
+		return r
+	case <-time.After(time.Minute):
+		t.Fatalf("the drain did not end: %s", what)
+	}
+	return drainResult{}
+}
+
+// notReturned fails the test if the drain has returned.
+func notReturned(t *testing.T, res <-chan drainResult, what string) {
+	t.Helper()
+	select {
+	case r := <-res:
+		t.Fatalf("the drain returned %+v: %s", r, what)
+	default:
+	}
+}
+
+// awaitLooks waits until progress has been looked at n more times than
+// at, the drain's notices each looking once.
+func awaitLooks(t *testing.T, looks *atomic.Uint64, at, n uint64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for looks.Load() < at+n {
+		if time.Now().After(deadline) {
+			t.Fatal("the drain stopped looking at its progress")
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -105,8 +149,11 @@ func TestATeardownDrainWhoseVerdictCannotComeEndsAtTheUsersInterrupt(t *testing.
 	case <-time.After(time.Minute): // only turns a hang into a failure
 		t.Fatal("the drain did not end at the user's interrupt after its offer, its verdict pending")
 	}
-	if r.err != nil || !r.timedOut {
-		t.Fatalf("the drain returned %+v: want it given up (timedOut), with no error", r)
+	if r.err != nil || r.end != DrainStopped {
+		t.Fatalf("the drain returned %+v: want it given up at the user's interrupt (DrainStopped), with no error", r)
+	}
+	if MarkInterruptedAgain() {
+		t.Fatal("the drain's offer outlived it: a later interrupt ended a stop that never offered")
 	}
 	gaveUp := logs.FilterMessageSnippet("given up at the user's interrupt").All()
 	if len(gaveUp) != 1 {
@@ -149,7 +196,7 @@ func TestATeardownDrainThatProgressesOffersNoStopNow(t *testing.T) {
 	close(block)
 	select {
 	case r := <-res:
-		if r.err != nil || r.timedOut {
+		if r.err != nil || r.end != DrainJoined {
 			t.Fatalf("the drain returned %+v: want the group's end", r)
 		}
 	case <-time.After(time.Minute): // only turns a hang into a failure
@@ -173,55 +220,32 @@ func TestATeardownDrainHeldByAnAgentStopIsNotGivenUpAtTheInterrupt(t *testing.T)
 	awaitLog(t, logs, drainOffer, res)
 	MarkInterruptedAgain()
 	awaitLog(t, logs, stopWaitedFor(), res)
+	if MarkInterruptedAgain() {
+		t.Fatal("the drain's offer stood while the agent's stop held it: the agent's stop makes its own")
+	}
 	close(block)
-	select {
-	case r := <-res:
-		if r.err != nil || r.timedOut {
-			t.Fatalf("the drain returned %+v: its group ended, want no give-up", r)
-		}
-	case <-time.After(time.Minute): // only turns a hang into a failure
-		t.Fatal("the drain did not end at its group's end")
+	if r := awaitEnd(t, res, "at its group's end"); r.err != nil || r.end != DrainJoined {
+		t.Fatalf("the drain returned %+v: its group ended, want no give-up", r)
 	}
 }
 
 // A group that ends as the user's interrupt comes is the drain's end, not a
-// give-up: the drain finds both at its next look, its group's end first. Its
-// progress look, at a notice, ends the group and gives the interrupt after
-// the drain's offer, each run.
+// give-up: a wait that finds both its group's end and the press after its
+// offer ends joined, whichever it reads first.
 func TestATeardownDrainWhoseGroupEndsAsTheUserInterruptsEndsAsDone(t *testing.T) {
-	for i := 0; i < 20; i++ {
-		drainStopNowTest(t)
-		clk := &stall.ManualClock{}
-		var g errgroup.Group
-		block := make(chan struct{})
-		g.Go(func() error { <-block; return nil })
-		seen := make(chan struct{})
-		f := func(ended *errgroup.Group) {
-			if ended == &g { // not a group of an earlier row, ending late
-				close(seen)
-			}
+	drainStopNowTest(t)
+	done := make(chan struct{})
+	close(done)
+	for i := 0; i < 100; i++ {
+		notice := NewStopNowNotice(0)
+		if !notice.Next() {
+			t.Fatal("the notice made no offer")
 		}
-		drainGroupEnded.Store(&f)
-		t.Cleanup(func() { drainGroupEnded.Store(nil) })
-		var both atomic.Bool
-		progress := func() uint64 {
-			if both.CompareAndSwap(true, false) {
-				close(block)
-				<-seen // the drain has seen its group end
-				MarkInterruptedAgain()
-			}
-			return 0
-		}
-		res, logs := startDrain(clk, &g, time.Second, progress)
-		awaitLog(t, logs, drainOffer, res)
-		both.Store(true)
-		select {
-		case r := <-res:
-			if r.err != nil || r.timedOut {
-				t.Fatalf("run %d: the drain returned %+v: its group ended as the user interrupted, want no give-up", i, r)
-			}
-		case <-time.After(time.Minute): // only turns a hang into a failure
-			t.Fatal("the drain did not end at its group's end")
+		MarkInterruptedAgain()
+		end, _ := waitWhileProgressing(&stall.ManualClock{}, done, time.Second, func() uint64 { return 0 }, notice, func(time.Duration, bool) {})
+		notice.Withdraw()
+		if end != DrainJoined {
+			t.Fatalf("run %d: the wait ended %v: its group had ended as the user interrupted, want it joined", i, end)
 		}
 	}
 }
@@ -251,10 +275,128 @@ func TestATeardownDrainOffersOnlyOnceTheOfferStands(t *testing.T) {
 	}
 	select {
 	case r := <-res:
-		if !r.timedOut {
+		if r.end != DrainStopped {
 			t.Fatalf("the drain returned %+v: want it given up at the press", r)
 		}
 	case <-time.After(time.Minute): // only turns a hang into a failure
 		t.Fatal("the drain did not end at the press after its offer")
+	}
+}
+
+// A drain inside another wait's offer (record's frame drain, inside its
+// notices' offer) says nothing and offers nothing while that offer stands,
+// and its group, which ends at the press that answers it (StopNow, as
+// record's frame forwarders do), is joined, never given up or named a stall.
+func TestATeardownDrainInsideAnotherWaitsOfferJoinsAGroupThatEndsAtThePress(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		drainStopNowTest(t)
+		_, withdraw := OfferStopNow() // the inner wait's own offer
+		var g errgroup.Group
+		g.Go(func() error { <-StopNow(); return nil })
+		var looks atomic.Uint64
+		progress := func() uint64 { looks.Add(1); return 0 }
+		res, logs := startDrain(&stall.ManualClock{}, &g, 30*time.Second, progress)
+		awaitLooks(t, &looks, 0, 10)
+		if n := logs.FilterMessageSnippet("made no progress").Len(); n != 0 {
+			t.Fatalf("run %d: the drain spoke, and offered, while another wait's offer stood: %v", i, logs.All())
+		}
+		MarkInterruptedAgain()
+		r := awaitEnd(t, res, "at its group's end, at the press")
+		withdraw()
+		if r.err != nil || r.end != DrainJoined {
+			t.Fatalf("run %d: the drain returned %+v: its group ended at the press, want it joined", i, r)
+		}
+	}
+}
+
+// A press that answered the drain's offer and another wait's together (the
+// two made at once) is not the drain's alone: the group, which ends at it,
+// is joined; one that does not end is waited for, the drain then saying so,
+// until the drain's own later offer is answered.
+func TestAPressThatAnsweredTheDrainsOfferAndAnothersIsNotTheDrainsAlone(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		drainStopNowTest(t)
+		var g errgroup.Group
+		g.Go(func() error { <-StopNow(); return nil })
+		var p atomic.Uint64
+		res, logs := startDrain(&stall.ManualClock{}, &g, 30*time.Second, p.Load)
+		awaitLog(t, logs, drainOffer, res)
+		_, withdraw := OfferStopNow() // another wait's, made as the drain's stood
+		MarkInterruptedAgain()
+		r := awaitEnd(t, res, "at its group's end, at the press")
+		withdraw()
+		if r.err != nil || r.end != DrainJoined {
+			t.Fatalf("run %d: the drain returned %+v: its group ended at the press, want it joined", i, r)
+		}
+	}
+
+	drainStopNowTest(t)
+	var g errgroup.Group
+	block := make(chan struct{})
+	defer close(block)
+	g.Go(func() error { <-block; return nil })
+	var p atomic.Uint64
+	res, logs := startDrain(&stall.ManualClock{}, &g, 30*time.Second, p.Load)
+	awaitLog(t, logs, drainOffer, res)
+	_, withdraw := OfferStopNow()
+	MarkInterruptedAgain()
+	_, at := awaitLogAfter(t, logs, "answered another wait's offer as well", -1, res)
+	withdraw() // that wait ends at the press
+	awaitLogAfter(t, logs, drainOffer, at, res)
+	MarkInterruptedAgain()
+	if r := awaitEnd(t, res, "at the press after its own later offer"); r.end != DrainStopped {
+		t.Fatalf("the drain returned %+v: want it given up at the press after its own offer", r)
+	}
+}
+
+// A press that answers only another wait's offer (StopNow) does not give the
+// drain up: the drain had told the user nothing. Once that wait ends, the
+// drain makes its own offer, and the press after it ends the drain.
+func TestAPressThatAnsweredOnlyAnotherWaitsOfferDoesNotGiveTheDrainUp(t *testing.T) {
+	drainStopNowTest(t)
+	_, withdraw := OfferStopNow()
+	var g errgroup.Group
+	block := make(chan struct{})
+	defer close(block)
+	g.Go(func() error { <-block; return nil })
+	var looks atomic.Uint64
+	progress := func() uint64 { looks.Add(1); return 0 }
+	res, logs := startDrain(&stall.ManualClock{}, &g, 30*time.Second, progress)
+	awaitLooks(t, &looks, 0, 2)
+	if !MarkInterruptedAgain() {
+		t.Fatal("the other wait's offer did not stand")
+	}
+	awaitLooks(t, &looks, looks.Load(), 20)
+	notReturned(t, res, "a press that answered another wait's offer gave the drain up")
+	withdraw()
+	awaitLog(t, logs, drainOffer, res)
+	MarkInterruptedAgain()
+	if r := awaitEnd(t, res, "at the press after its own offer"); r.end != DrainStopped {
+		t.Fatalf("the drain returned %+v: want it given up at the press after its own offer", r)
+	}
+}
+
+// A press while an agent's stop holds the drain answered the offer that
+// stood then: once the hold ends, the drain does not take it for an answer
+// to a later one. It makes its own offer again, and the press after that
+// gives it up.
+func TestAPressBeforeAnAgentStopsHoldEndsIsNotAnAnswerToTheDrainsLaterOffer(t *testing.T) {
+	drainStopNowTest(t)
+	endStop := BeginAgentStop()
+	t.Cleanup(endStop)
+	var g errgroup.Group
+	block := make(chan struct{})
+	defer close(block)
+	g.Go(func() error { <-block; return nil })
+	var p atomic.Uint64
+	res, logs := startDrain(&stall.ManualClock{}, &g, 30*time.Second, p.Load)
+	awaitLog(t, logs, drainOffer, res)
+	MarkInterruptedAgain()
+	_, held := awaitLogAfter(t, logs, stopWaitedFor(), -1, res)
+	endStop()
+	awaitLogAfter(t, logs, drainOffer, held, res)
+	MarkInterruptedAgain()
+	if r := awaitEnd(t, res, "at the press after its later offer"); r.end != DrainStopped {
+		t.Fatalf("the drain returned %+v: want it given up at the press after its later offer", r)
 	}
 }

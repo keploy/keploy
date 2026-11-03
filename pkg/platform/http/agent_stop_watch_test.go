@@ -1171,8 +1171,8 @@ func TestATeardownDrainWaitsForAnAgentStopThatReportsProgress(t *testing.T) {
 			clk := &stall.ManualClock{}
 			res := make(chan bool, 1)
 			go func() {
-				_, timedOut := utils.DrainErrGroupProgressOn(clk, zap.NewNop(), "replay", &g, bound, scope.Moves)
-				res <- timedOut
+				_, end := utils.DrainErrGroupProgressOn(clk, zap.NewNop(), "replay", &g, bound, scope.Moves)
+				res <- end.GaveUp()
 			}()
 			// Two minutes of runnable time, four bounds, the teardown going
 			// on every 10 s of it.
@@ -1213,8 +1213,8 @@ func TestATeardownDrainWaitsForAnAgentStopThatReportsProgress(t *testing.T) {
 		clk := &stall.ManualClock{}
 		res := make(chan bool, 1)
 		go func() {
-			_, timedOut := utils.DrainErrGroupProgressOn(clk, zap.NewNop(), "replay", &g, bound, scope.Moves)
-			res <- timedOut
+			_, end := utils.DrainErrGroupProgressOn(clk, zap.NewNop(), "replay", &g, bound, scope.Moves)
+			res <- end.GaveUp()
 		}()
 		f.set(unstepped(5, 1))
 		awaitMoves(t, scope, 1)

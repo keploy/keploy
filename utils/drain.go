@@ -89,15 +89,19 @@ func DrainErrGroupStatus(logger *zap.Logger, name string, g *errgroup.Group, tim
 // draining (a recording's sinks writing what the agent held at the stop) is
 // never cut off for taking long; one that is wedged costs bound. Same contract
 // as DrainErrGroupStatus otherwise: timedOut means a goroutine may still be
-// running.
+// running -- the drain gave the group up, at the stall verdict or at the
+// user's interrupt after the drain's offer to end at one. A caller that names
+// the cause uses DrainErrGroupProgressOn, whose DrainEnd tells them apart.
 func DrainErrGroupProgress(logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64) (err error, timedOut bool) {
-	return drainErrGroupProgress(nil, logger, name, g, bound, progress)
+	err, end := drainErrGroupProgress(nil, logger, name, g, bound, progress)
+	return err, end.GaveUp()
 }
 
 // DrainErrGroupProgressOn is DrainErrGroupProgress on clk (nil: the
 // process's own runnable clock), for a test that drives the time a drain's
-// stall is measured in.
-func DrainErrGroupProgressOn(clk stall.Clock, logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64) (err error, timedOut bool) {
+// stall is measured in, and says how the drain ended (DrainEnd): its group's
+// end, the stall verdict, or the user's interrupt after the drain's offer.
+func DrainErrGroupProgressOn(clk stall.Clock, logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64) (err error, end DrainEnd) {
 	return drainErrGroupProgress(clk, logger, name, g, bound, progress)
 }
 
@@ -106,22 +110,24 @@ func DrainErrGroupProgressOn(clk stall.Clock, logger *zap.Logger, name string, g
 // to end at the user's next Ctrl+C (StopNowNotice). A test sets it shorter.
 var drainNotice = 5 * time.Second
 
-// drainGroupEnded, when set, is called with a teardown drain's group once
-// the drain has seen it end. Tests only.
-var drainGroupEnded atomic.Pointer[func(*errgroup.Group)]
-
-// drainEnd is how a teardown drain's wait ended (waitWhileProgressing).
-type drainEnd int
+// DrainEnd is how a teardown drain (DrainErrGroupProgress) ended.
+type DrainEnd int
 
 const (
-	// drainDone: the group ended.
-	drainDone drainEnd = iota
-	// drainStalled: the stall verdict came, no progress for the bound.
-	drainStalled
-	// drainStopped: the user's interrupt after the drain's offer to end at
-	// one, its verdict still pending.
-	drainStopped
+	// DrainJoined: the group ended; every goroutine of it was joined.
+	DrainJoined DrainEnd = iota
+	// DrainStalled: the stall verdict came, the group having made no
+	// progress for the bound. A goroutine may still be running.
+	DrainStalled
+	// DrainStopped: the user's interrupt that answered the drain's own offer
+	// to end at one (StopNowNotice), the verdict still pending. Not a stall:
+	// the verdict never came. A goroutine may still be running.
+	DrainStopped
 )
+
+// GaveUp reports whether the drain ended before its group did, so a
+// goroutine of it may still be running.
+func (e DrainEnd) GaveUp() bool { return e != DrainJoined }
 
 // drainErrGroupProgress is DrainErrGroupProgress on clk (nil: the process's
 // own runnable clock). The verdict may never come while the drain waits: on
@@ -130,66 +136,81 @@ const (
 // hours. So the drain also ends at the user's interrupt after its own offer
 // (StopNowNotice), which it makes once it has said it made no progress; the
 // line then says how much of the bound had passed.
-func drainErrGroupProgress(clk stall.Clock, logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64) (err error, timedOut bool) {
+//
+// One offer stands at a time: while another stop's offer stands (record's
+// frame drain runs inside its own notices', whose press its group ends at),
+// the drain says nothing and offers nothing, and a press that answered such
+// an offer as well as the drain's (the two were made together) is not the
+// drain's alone: the group may end at it (StopNow), and is waited for. Each
+// wait of the drain makes its own offer: a press answers only the offer that
+// stood when it was made, so after one the drain does not take it, nor one
+// made while an agent's stop held it, for the user's answer to a later offer.
+func drainErrGroupProgress(clk stall.Clock, logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64) (err error, end DrainEnd) {
 	done := make(chan struct{})
 	var werr error
-	go func() {
-		werr = g.Wait()
-		close(done)
-		if f := drainGroupEnded.Load(); f != nil {
-			(*f)(g)
-		}
-	}()
+	go func() { werr = g.Wait(); close(done) }()
 	notice := NewStopNowNotice(drainNotice)
-	defer notice.Withdraw()
+	defer func() { notice.Withdraw() }()
+	say := func(stalled time.Duration, offering bool) {
+		msg := "keploy's stop is waiting for its goroutines to end, and they made no progress since the last notice"
+		if offering {
+			msg += "; press Ctrl+C again to stop now: keploy then stops waiting for them"
+		}
+		logger.Info(msg, zap.String("group", name), zap.Duration("stalledFor", stalled), zap.Duration("bound", bound))
+	}
 	for {
-		end, stalled := waitWhileProgressing(clk, done, bound, progress, notice, func(stalled time.Duration, offering bool) {
-			msg := "keploy's stop is waiting for its goroutines to end, and they made no progress since the last notice"
-			if offering {
-				msg += "; press Ctrl+C again to stop now: keploy then stops waiting for them"
-			}
-			logger.Info(msg, zap.String("group", name), zap.Duration("stalledFor", stalled), zap.Duration("bound", bound))
-		})
-		if end == drainDone {
-			return werr, false
+		end, stalled := waitWhileProgressing(clk, done, bound, progress, notice, say)
+		if end == DrainJoined {
+			return werr, DrainJoined
+		}
+		if end == DrainStopped && notice.answeredOthers() {
+			logger.Info("the user's interrupt answered another wait's offer as well as this drain's; waiting for the goroutines, which may end at it",
+				zap.String("group", name))
+			notice.Withdraw()
+			notice = NewStopNowNotice(drainNotice)
+			continue
 		}
 		// An agent stop still in progress is waited for; once it ends, the
 		// rest of the group gets the bound again.
 		idle, inProgress := agentStopsIdle()
 		if !inProgress {
-			if end == drainStopped {
+			if end == DrainStopped {
 				logger.Error("teardown drain given up at the user's interrupt, its stall verdict still pending; a goroutine may still be running",
 					zap.String("group", name),
 					zap.Duration("stalledFor", stalled),
 					zap.Duration("bound", bound))
-				return nil, true
+				return nil, DrainStopped
 			}
 			logger.Error("teardown drain made no progress; forcing shutdown so stop/SIGINT isn't swallowed — a goroutine is ignoring context cancellation",
 				zap.String("group", name),
 				zap.Duration("stalledFor", bound))
-			return nil, true
+			return nil, DrainStalled
 		}
+		// The agent's stop makes its own offers while it holds the drain.
+		notice.Withdraw()
 		logger.Info(stopWaitedFor(), zap.String("group", name))
 		select {
 		case <-done:
 		case <-idle:
 		}
+		notice = NewStopNowNotice(drainNotice)
 	}
 }
 
 // waitWhileProgressing waits for done for as long as progress() keeps
-// changing, and ends drainStalled once it has not changed for bound, in the
+// changing, and ends DrainStalled once it has not changed for bound, in the
 // time this process could run on clk (nil: the process's own runnable clock),
-// or drainStopped at the user's interrupt after notice's offer (drainDone:
+// or DrainStopped at the user's interrupt after notice's offer (DrainJoined:
 // done closed); stalled is the stall it had then. It looks at progress every
 // tenth of the bound, at most a second (stall.CheckEvery) of wall time,
 // before it looks at the stall: a change starts the stall again. Every
-// drainNotice of wall time with no change since the last one, it calls say,
-// and asks notice whether that notice offers to end at the next interrupt.
+// drainNotice of wall time with no change since the last one, unless another
+// stop's offer stands, it calls say, and asks notice whether that notice
+// offers to end at the next interrupt.
 // Only the teardown drain uses it: a consumer that writes what a run
 // captured is waited for until it ends (pkg/service/mock waitConsumers),
 // never cut off by a stall.
-func waitWhileProgressing(clk stall.Clock, done <-chan struct{}, bound time.Duration, progress func() uint64, notice *StopNowNotice, say func(stalled time.Duration, offering bool)) (end drainEnd, stalled time.Duration) {
+func waitWhileProgressing(clk stall.Clock, done <-chan struct{}, bound time.Duration, progress func() uint64, notice *StopNowNotice, say func(stalled time.Duration, offering bool)) (end DrainEnd, stalled time.Duration) {
 	m := stall.NewMeter(clk, bound)
 	defer m.Stop()
 	notices := time.NewTicker(drainNotice)
@@ -199,18 +220,18 @@ func waitWhileProgressing(clk stall.Clock, done <-chan struct{}, bound time.Dura
 	for {
 		select {
 		case <-done:
-			return drainDone, m.Stalled()
+			return DrainJoined, m.Stalled()
 		case <-notice.Interrupt():
 			select {
 			case <-done: // it ended as it was given up
-				return drainDone, m.Stalled()
+				return DrainJoined, m.Stalled()
 			default:
 			}
-			return drainStopped, m.Stalled()
+			return DrainStopped, m.Stalled()
 		case <-notices.C:
 			if p := progress(); p != noticed {
 				noticed = p
-			} else {
+			} else if !notice.othersOffer() {
 				say(m.Stalled(), notice.Next())
 			}
 		case <-m.Wait():
@@ -218,7 +239,7 @@ func waitWhileProgressing(clk stall.Clock, done <-chan struct{}, bound time.Dura
 				last = p
 				m.Reset()
 			} else if m.Expired() {
-				return drainStalled, m.Stalled()
+				return DrainStalled, m.Stalled()
 			}
 		}
 	}
