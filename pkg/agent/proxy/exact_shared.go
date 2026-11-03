@@ -127,8 +127,9 @@ func (m *MockManager) SharedMocks() (perTest, session []*models.Mock, ok bool) {
 	m.treesMu.RUnlock()
 	m.swapMu.RUnlock()
 	// A test's view reads no teardown (afterTests): its per-test read is its
-	// own then what it shows of the per-test tier (exactPerTest).
-	perTest = v.keepWith(v.shownOf(filtered, ""), v.showsStatic)
+	// own then what it shows of the per-test tier and of the worker scope in
+	// the startup tier (exactPerTest, windowWorker).
+	perTest = v.keepWith(append(v.shownOf(filtered, ""), v.windowWorker(v.shownOf(startup, ""))...), v.showsStatic)
 	// GetSessionMocks: GetStartupMocks, what the view shows of the startup
 	// tier then the session tier, then GetSessionScopedMocks, what it shows
 	// of the session tier then the startup tier, each mock once: the second
@@ -177,11 +178,14 @@ func (m *MockManager) OwnedUnansweredAt(view uint64, at []int) ([]int, bool) {
 var _ integrations.SharedReads = (*MockManager)(nil)
 
 // SharedGeneration, SharedMocks and the owned reads are the manager's while
-// the staging is still h's call's after they were read, and report false
-// once it moved, when h reads nothing (heldScope.held).
+// the staging is still h's call's after they were read and h reads in the
+// view in force; they report false once the staging moved, when h reads
+// nothing (heldScope.held), and while h reads in another view
+// (heldScope.elsewhere): they are the view in force's open test's, which h's
+// reads are not.
 func (h *heldScope) SharedGeneration(kind models.Kind) (integrations.SharedGen, bool) {
 	g, ok := h.MockManager.SharedGeneration(kind)
-	if !ok || h.moved() {
+	if !ok || h.moved() || h.elsewhere() {
 		return integrations.SharedGen{}, false
 	}
 	return g, true
@@ -189,7 +193,7 @@ func (h *heldScope) SharedGeneration(kind models.Kind) (integrations.SharedGen, 
 
 func (h *heldScope) SharedMocks() (perTest, session []*models.Mock, ok bool) {
 	perTest, session, ok = h.MockManager.SharedMocks()
-	if !ok || h.moved() {
+	if !ok || h.moved() || h.elsewhere() {
 		return nil, nil, false
 	}
 	return perTest, session, true
@@ -197,7 +201,7 @@ func (h *heldScope) SharedMocks() (perTest, session []*models.Mock, ok bool) {
 
 func (h *heldScope) OwnedUnanswered() ([]*models.Mock, bool) {
 	owned, ok := h.MockManager.OwnedUnanswered()
-	if !ok || h.moved() {
+	if !ok || h.moved() || h.elsewhere() {
 		return nil, false
 	}
 	return owned, true
@@ -205,7 +209,7 @@ func (h *heldScope) OwnedUnanswered() ([]*models.Mock, bool) {
 
 func (h *heldScope) OwnedRecordings() (uint64, []*models.Mock, bool) {
 	view, owned, ok := h.MockManager.OwnedRecordings()
-	if !ok || h.moved() {
+	if !ok || h.moved() || h.elsewhere() {
 		return 0, nil, false
 	}
 	return view, owned, true
@@ -213,7 +217,7 @@ func (h *heldScope) OwnedRecordings() (uint64, []*models.Mock, bool) {
 
 func (h *heldScope) OwnedUnansweredAt(view uint64, at []int) ([]int, bool) {
 	live, ok := h.MockManager.OwnedUnansweredAt(view, at)
-	if !ok || h.moved() {
+	if !ok || h.moved() || h.elsewhere() {
 		return nil, false
 	}
 	return live, true
