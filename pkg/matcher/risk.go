@@ -3,6 +3,7 @@ package matcher
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -223,17 +224,16 @@ func ChangedDecodedJSONFieldPaths(exp, act interface{}, known map[string][]strin
 }
 
 // NoisePatterns returns the patterns of the entry of noise (path -> patterns)
-// that decides the JSON leaf at path where JSONFieldDiffs compares it (the
-// most specific entry first): the leaf is noise only for a value one of them
-// matches. It returns none where no entry decides the leaf, or where the
-// deciding entry has no patterns and so excuses any value.
-func NoisePatterns(noise map[string][]string, path string) []string {
+// that decides the JSON leaf at path as the request matcher reads it with the
+// proven switch off (ChangedJSONFieldPaths, JSONFieldDiffs: an entry as a
+// substring of the path, the most specific entry first): the leaf is noise
+// only for a value one of them matches. It returns none where no entry
+// decides the leaf, or where the deciding entry has no patterns and so
+// excuses any value. The strict comparison reads whole fields instead
+// (NoiseLookup.Patterns).
+func NoisePatterns(noise map[string][]string, path string) []*regexp.Regexp {
 	regs, _, _ := buildNoiseIndex(noise, nil).matchKind(strings.ToLower(path))
-	out := make([]string, 0, len(regs))
-	for _, re := range regs {
-		out = append(out, re.String())
-	}
-	return out
+	return regs
 }
 
 // JSONFieldDiffs returns field-level diffs between two JSON documents with

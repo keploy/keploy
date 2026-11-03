@@ -23,6 +23,7 @@ package mismatch
 import (
 	"fmt"
 	"net"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -62,11 +63,19 @@ type Builder struct {
 	// check in Build(). nil means "the question is undecidable" — see
 	// WithComparedDestinations.
 	comparedDests []string
-	// bodyNoise is keploy.yml's request-body noise the call was compared
-	// with (WithBodyNoise), by root-relative key: nil where the protocol
+	// bodyNoise is keploy.yml's request-body noise as the matcher that
+	// judged the call reads it (WithBodyNoise): nil where the protocol
 	// passes none.
-	bodyNoise map[string][]string
+	bodyNoise BodyNoise
 }
+
+// BodyNoise is keploy.yml's request-body noise as the matcher that judged a
+// call reads it: for a body field, by its root-relative key in the report's
+// dialect (a FieldDiff's path without "body."), the patterns of the entry
+// that matcher applies there. The field is then noise only for a value one
+// of them matches. It returns none where that matcher applies no entry at
+// the field, or one with no patterns, which excuses any value.
+type BodyNoise func(field string) []*regexp.Regexp
 
 // NewReport starts a report for one missed call. actualSummary should be the
 // shortest string that identifies the live call ("POST /orders", "SELECT
@@ -184,11 +193,12 @@ func (b *Builder) WithDiff(diff string) *Builder {
 	return b
 }
 
-// WithBodyNoise records keploy.yml's request-body noise the call was
-// compared with (test.globalNoise.global.requestbody, by root-relative key),
-// so the default hint can tell a body field that entry already declares
-// with patterns the value is outside of from one it does not declare.
-func (b *Builder) WithBodyNoise(noise map[string][]string) *Builder {
+// WithBodyNoise records keploy.yml's request-body noise
+// (test.globalNoise.global.requestbody) as the matcher that judged the call
+// reads it, so the default hint can tell a body field an entry of it
+// declares with patterns a value is outside of from one it does not
+// declare. An entry that matcher never applies at the field is none.
+func (b *Builder) WithBodyNoise(noise BodyNoise) *Builder {
 	b.bodyNoise = noise
 	return b
 }
@@ -238,6 +248,64 @@ func (b *Builder) Build() *models.MockMismatchReport {
 		r.NextSteps = defaultNextSteps(&r, b.bodyNoise)
 	}
 	return &r
+}
+
+// RedactedValue stands in a FieldDiff for a value a report must not show
+// (a credential, an obfuscated value).
+const RedactedValue = "(redacted)"
+
+// outsideOf names the side of d whose value is outside pats, the patterns of
+// the entry the judging matcher applies at d's field, read from the values
+// themselves, never from the diff's kind (each protocol's diff encodes the
+// sides its own way): "the live value is", "the recorded value is" or "the
+// recorded and live values are". A value the diff does not show whole (cut
+// at maxFieldDiffValueLen, or redacted) is not read: where both sides hold a
+// value and none shown is outside, the side not shown is named, or "a value
+// there is" where neither is shown. It returns "" with no patterns, and
+// where no value is outside them: a side that holds none (the field is
+// missing there) is a change no pattern excuses.
+func outsideOf(d models.MockFieldDiff, pats []*regexp.Regexp) string {
+	if len(pats) == 0 {
+		return ""
+	}
+	read := func(v string, held bool) (out, hidden bool) {
+		if !held {
+			return false, false
+		}
+		if d.Kind == models.DiffKindTypeChanged {
+			// A type change shows each side as "<type>: <value>".
+			_, v, _ = strings.Cut(v, ": ")
+		}
+		if v == RedactedValue || strings.HasSuffix(v, "…") && len(v) >= maxFieldDiffValueLen {
+			return false, true
+		}
+		for _, re := range pats {
+			if re.MatchString(v) {
+				return false, false
+			}
+		}
+		return true, false
+	}
+	recHeld, liveHeld := d.Kind != models.DiffKindMissingInMock, d.Kind != models.DiffKindMissingInLive
+	recOut, recHidden := read(d.Expected, recHeld)
+	liveOut, liveHidden := read(d.Actual, liveHeld)
+	switch {
+	case recOut && liveOut:
+		return "the recorded and live values are"
+	case liveOut:
+		return "the live value is"
+	case recOut:
+		return "the recorded value is"
+	case !recHeld || !liveHeld:
+		return ""
+	case recHidden && liveHidden:
+		return "a value there is"
+	case liveHidden:
+		return "the live value is"
+	case recHidden:
+		return "the recorded value is"
+	}
+	return ""
 }
 
 // RenderFieldDiffs renders field diffs as a compact single-string summary for
@@ -295,32 +363,32 @@ func RecordCommand() string {
 // defaultNextSteps derives an actionable hint from the report shape. The
 // wording deliberately never references commands that don't exist; the two
 // real remedies are noise (for drifting values) and re-recording (for
-// structural change). bodyNoise is keploy.yml's request-body noise the call
-// was compared with (Builder.WithBodyNoise).
-func defaultNextSteps(r *models.MockMismatchReport, bodyNoise map[string][]string) string {
-	// A body field keploy.yml declares with patterns is reported only where
-	// a value is outside them (matcher.JSONFieldDiffs): the hint names the
-	// field and its patterns, and says to widen them or record again, never
-	// to declare the field, which keploy.yml already does. The rest of the
-	// diffs get their own hint.
+// structural change). bodyNoise is keploy.yml's request-body noise as the
+// matcher that judged the call reads it (Builder.WithBodyNoise).
+func defaultNextSteps(r *models.MockMismatchReport, bodyNoise BodyNoise) string {
+	// A body field where the judging matcher applies a keploy.yml entry with
+	// patterns, and a value is outside them: the hint names the field, its
+	// patterns and the side whose value is outside, and says to widen them
+	// or record again, never to declare the field, which keploy.yml already
+	// does. The rest of the diffs get their own hint.
 	var outside []string
 	var rest []models.MockFieldDiff
 	for _, d := range r.FieldDiffs {
 		k, ok := strings.CutPrefix(d.Path, "body.")
-		pats := matcher.NoisePatterns(bodyNoise, k)
-		if !ok || len(pats) == 0 {
+		var pats []*regexp.Regexp
+		if ok && bodyNoise != nil {
+			pats = bodyNoise(k)
+		}
+		side := outsideOf(d, pats)
+		if side == "" {
 			rest = append(rest, d)
 			continue
 		}
-		// A value a pattern matches is not compared, so the side whose value
-		// the diff holds is outside them: the recorded one where the live
-		// side holds none (the field is missing there, or its value
-		// matched), the live one otherwise.
-		side := "live"
-		if d.Kind == models.DiffKindMissingInLive {
-			side = "recorded"
+		names := make([]string, 0, len(pats))
+		for _, re := range pats {
+			names = append(names, re.String())
 		}
-		outside = append(outside, fmt.Sprintf("%s is noise in keploy.yml only for a value matching %s, and the %s value is outside it", d.Path, strings.Join(pats, " or "), side))
+		outside = append(outside, fmt.Sprintf("%s is noise in keploy.yml only for a value matching %s, and %s outside it", d.Path, strings.Join(names, " or "), side))
 	}
 	onlyValueDrift := len(r.FieldDiffs) > 0
 	for _, d := range r.FieldDiffs {

@@ -1,6 +1,7 @@
 package mismatch
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -171,6 +172,76 @@ func TestValueDriftHintNamesOnlyANoiseBucketThatCoversIt(t *testing.T) {
 	}
 }
 
+// The side whose value is outside the declared patterns is read from the
+// values, never from the diff's kind: a protocol's diff may keep a value a
+// pattern matches (MongoDB's under the proven switch keeps both sides of a
+// changed value), so a value_changed whose live value matches names the
+// recorded one. A value the diff does not show whole (redacted, or cut) is
+// not read against the patterns; a field missing on one side whose other
+// value matches, and a field the judging matcher applies no entry at (the
+// lookup returns none, though an entry's key is in the field's name), get
+// the hint of a field keploy.yml does not declare.
+func TestHintReadsTheSideOutsideTheDeclaredPatternsFromTheValues(t *testing.T) {
+	const lead = "body.note is noise in keploy.yml only for a value matching ^n-, and "
+	pattern := []*regexp.Regexp{regexp.MustCompile("^n-")}
+	noise := func(field string) []*regexp.Regexp {
+		if field == "note" {
+			return pattern
+		}
+		return nil
+	}
+	// A value JSONFieldDiffs cut, at its shortest: it matches the pattern
+	// whole, and is still not read.
+	long := "n-" + strings.Repeat("a", maxFieldDiffValueLen-5) + "…"
+	whole := "n-" + strings.Repeat("a", 2*maxFieldDiffValueLen)
+	for _, c := range []struct {
+		name string
+		diff models.MockFieldDiff
+		want string
+	}{
+		{"the recorded value outside, the live one inside, as value_changed", models.MockFieldDiff{Path: "body.note", Kind: models.DiffKindValueChanged, Expected: "x-1", Actual: "n-2"},
+			lead + "the recorded value is outside it."},
+		{"the live value outside, the recorded one inside", models.MockFieldDiff{Path: "body.note", Kind: models.DiffKindValueChanged, Expected: "n-1", Actual: "x-2"},
+			lead + "the live value is outside it."},
+		{"both values outside", models.MockFieldDiff{Path: "body.note", Kind: models.DiffKindValueChanged, Expected: "x-1", Actual: "y-2"},
+			lead + "the recorded and live values are outside it."},
+		{"a type change", models.MockFieldDiff{Path: "body.note", Kind: models.DiffKindTypeChanged, Expected: "string: n-1", Actual: "number: 7"},
+			lead + "the live value is outside it."},
+		{"the live value redacted, the recorded one inside", models.MockFieldDiff{Path: "body.note", Kind: models.DiffKindValueChanged, Expected: "n-1", Actual: RedactedValue},
+			lead + "the live value is outside it."},
+		{"the recorded value cut, the live one inside", models.MockFieldDiff{Path: "body.note", Kind: models.DiffKindValueChanged, Expected: long, Actual: "n-2"},
+			lead + "the recorded value is outside it."},
+		{"the recorded value redacted, the live one outside", models.MockFieldDiff{Path: "body.note", Kind: models.DiffKindValueChanged, Expected: RedactedValue, Actual: "x-2"},
+			lead + "the live value is outside it."},
+		{"both values redacted", models.MockFieldDiff{Path: "body.note", Kind: models.DiffKindValueChanged, Expected: RedactedValue, Actual: RedactedValue},
+			lead + "a value there is outside it."},
+		{"a long value shown whole, inside, beside one inside", models.MockFieldDiff{Path: "body.note", Kind: models.DiffKindValueChanged, Expected: whole, Actual: "n-2"},
+			"Only values drifted (body.note)"},
+		{"missing in live, the recorded value cut", models.MockFieldDiff{Path: "body.note", Kind: models.DiffKindMissingInLive, Expected: long},
+			"Request structure changed"},
+		{"missing in the recording, the live value inside", models.MockFieldDiff{Path: "body.note", Kind: models.DiffKindMissingInMock, Actual: "n-2"},
+			"Request structure changed"},
+		{"missing in the recording, the live value outside", models.MockFieldDiff{Path: "body.note", Kind: models.DiffKindMissingInMock, Actual: "x-2"},
+			lead + "the live value is outside it."},
+		{"missing in live, the recorded value outside", models.MockFieldDiff{Path: "body.note", Kind: models.DiffKindMissingInLive, Expected: "x-1"},
+			lead + "the recorded value is outside it."},
+		{"missing in live, the recorded value inside", models.MockFieldDiff{Path: "body.note", Kind: models.DiffKindMissingInLive, Expected: "n-1"},
+			"Request structure changed"},
+		{"a field the judging matcher applies no entry at", models.MockFieldDiff{Path: "body.denote", Kind: models.DiffKindValueChanged, Expected: "x-1", Actual: "y-2"},
+			"requestbody: {denote: []}"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := NewReport(ProtocolMongo, "find").WithClosest("mock-1", []models.MockFieldDiff{c.diff}).WithBodyNoise(noise).Build().NextSteps
+			if !strings.Contains(got, c.want) {
+				t.Errorf("the hint\n%s\ndoes not say\n%s", got, c.want)
+			}
+			if !strings.HasPrefix(c.want, lead) && strings.Contains(got, "is noise in keploy.yml only") {
+				t.Errorf("the hint names a pattern no value is outside of, or an entry the judging matcher never applies:\n%s", got)
+			}
+		})
+	}
+}
+
 // A body field keploy.yml declares with patterns (WithBodyNoise) is named
 // with its patterns, and the hint says to widen them or record again, in
 // keploy test and keploy mock alike; never to declare it. A diff that is
@@ -178,7 +249,14 @@ func TestValueDriftHintNamesOnlyANoiseBucketThatCoversIt(t *testing.T) {
 // so does every diff of a miss whose closest mock is on another upstream.
 func TestHintNamesTheDeclaredPatternsAValueIsOutside(t *testing.T) {
 	t.Cleanup(func() { SetMockMode(false) })
-	noise := map[string][]string{"id": {"^o-", "^p-"}}
+	// As the request matcher reads an entry with the proven switch off: a
+	// substring of the path.
+	noise := func(field string) []*regexp.Regexp {
+		if !strings.Contains(field, "id") {
+			return nil
+		}
+		return []*regexp.Regexp{regexp.MustCompile("^o-"), regexp.MustCompile("^p-")}
+	}
 	report := func(path string, kind models.MockFieldDiffKind) *Builder {
 		return NewReport(ProtocolHTTP, "POST /find").WithDestination("api.test:443").
 			WithClosest("mock-1", []models.MockFieldDiff{{Path: path, Kind: kind, Expected: "r-1", Actual: "x-9"}}).WithBodyNoise(noise)
@@ -191,7 +269,7 @@ func TestHintNamesTheDeclaredPatternsAValueIsOutside(t *testing.T) {
 		never []string
 	}{
 		{"keploy test", false, report("body.id", models.DiffKindValueChanged),
-			"body.id is noise in keploy.yml only for a value matching ^o- or ^p-, and the live value is outside it. If the change is expected, widen the pattern under test.globalNoise.global.requestbody in keploy.yml, or re-record with 'keploy record'.", nil},
+			"body.id is noise in keploy.yml only for a value matching ^o- or ^p-, and the recorded and live values are outside it. If the change is expected, widen the pattern under test.globalNoise.global.requestbody in keploy.yml, or re-record with 'keploy record'.", nil},
 		{"keploy mock", true, report("body.id", models.DiffKindMissingInLive),
 			"body.id is noise in keploy.yml only for a value matching ^o- or ^p-, and the recorded value is outside it. If the change is expected, widen the pattern under test.globalNoise.global.requestbody in keploy.yml, or re-record the mock set with 'keploy mock record', or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'.", nil},
 		{"a query value a body entry's key names", false, report("query.id", models.DiffKindValueChanged),

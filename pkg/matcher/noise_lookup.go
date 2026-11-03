@@ -49,6 +49,15 @@ func (l NoiseLookup) Covers(path, value string, scalar bool) bool {
 	return scalar && anyRegexpMatchStr(value, regs)
 }
 
+// Patterns returns the patterns of the entry that decides the leaf at path
+// (the most specific entry naming whole fields): the leaf is noise only for a
+// scalar value one of them matches. It returns none where no entry names the
+// leaf, or where the deciding entry has no patterns and so excuses any value.
+func (l NoiseLookup) Patterns(path string) []*regexp.Regexp {
+	regs, _ := l.idx.matchWholeFields(strings.ToLower(path))
+	return regs
+}
+
 // matchWholeFields is match with entries naming whole fields (namesWholeFields):
 // the first, most specific, entry that does wins.
 func (ni noiseIndex) matchWholeFields(keyLower string) (regs []*regexp.Regexp, isNoisy bool) {

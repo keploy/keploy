@@ -11,12 +11,14 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// valueRedacted replaces sensitive/obfuscated values in the rendered requests.
-const valueRedacted = "(redacted)"
+// valueRedacted replaces sensitive/obfuscated values in the rendered requests
+// and the field diffs; the hint knows it as a value it cannot read.
+const valueRedacted = mismatch.RedactedValue
 
 // sensitiveKeyTokens marks header / query / body key names whose values must
 // never be printed into a report (they commonly carry credentials).

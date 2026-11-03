@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -2202,6 +2203,17 @@ func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 	return schemanoise.MergeLearned(existing, detected)
 }
 
+// bodyNoiseAsJudged is keploy.yml's request-body noise as the comparison
+// that refused the call reads an entry: under the proven switch the strict
+// comparison's whole fields (matcher.NoiseLookup: "id" never names "paid"),
+// else the request matcher's substring of the path (matcher.NoisePatterns).
+func bodyNoiseAsJudged(noise map[string][]string) mismatch.BodyNoise {
+	if provenswitch.On() {
+		return matcher.NewNoiseLookup(noise).Patterns
+	}
+	return func(field string) []*regexp.Regexp { return matcher.NoisePatterns(noise, field) }
+}
+
 // buildHTTPMismatchReport finds the closest HTTP mock to the given request
 // and returns a structured field-level diff report. liveBody is the live
 // request body (may be nil for body-less requests); headerNoise/userBodyNoise
@@ -2444,8 +2456,9 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		WithPhase(phase, candidateCount).
 		WithClosest(closestMock.Name, fieldDiffs).
 		// The hint tells a body field keploy.yml declares with patterns the
-		// value is outside of from one it does not declare.
-		WithBodyNoise(userBodyNoise).
+		// value is outside of from one it does not declare, reading an entry
+		// as the comparison that refused the call does.
+		WithBodyNoise(bodyNoiseAsJudged(userBodyNoise)).
 		// Whole-request renders for the CLI side-by-side diff. Mock.Noise is
 		// passed so obfuscated values stay redacted on both sides.
 		WithRenderedRequests(
