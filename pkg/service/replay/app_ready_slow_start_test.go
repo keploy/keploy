@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/internal/testnet"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
 
@@ -186,4 +187,128 @@ func TestTheWaitForASlowAppEndsWhenTheAppExits(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the wait did not end when the application exited")
 	}
+}
+
+// The health URL's own address is waited on only when keploy knows no other
+// address of the application: once the address the set's tests dial, or
+// test.appReadyProbeAddr, accepts, the first test is fired, though the health
+// URL names an address that refuses.
+func TestAHealthURLsAddressIsWaitedOnOnlyWhenNoOtherAddressIsKnown(t *testing.T) {
+	for _, viaProbeAddr := range []bool{false, true} {
+		name := "the tests' address"
+		if viaProbeAddr {
+			name = "test.appReadyProbeAddr"
+		}
+		t.Run(name, func(t *testing.T) {
+			app := newSlowApp(t)
+			app.start()
+			refusing := newSlowApp(t) // never started: its port refuses
+			cfg := &config.Config{}
+			cfg.Test.Delay = 0
+			cfg.Test.HealthURL = "http://" + refusing.addr() + "/healthz"
+			cfg.Test.HealthPollTimeout = 200 * time.Millisecond
+			probe := httpProbeTarget{scheme: "http", host: "127.0.0.1", port: app.port, ok: true}
+			if viaProbeAddr {
+				cfg.Test.AppReadyProbeAddr = app.addr()
+				probe = httpProbeTarget{}
+			}
+
+			// A wait on the refusing address would never end by itself: the
+			// row ends it the moment the wait says it waits there.
+			waitsThere := "waiting for the application to accept a connection on " + refusing.addr()
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			core, logs := observer.New(zap.InfoLevel)
+			logger := zap.New(zapcore.RegisterHooks(core, func(e zapcore.Entry) error {
+				if strings.Contains(e.Message, waitsThere) {
+					cancel()
+				}
+				return nil
+			}))
+
+			requireReady(t, slowWaitResult(ctx, logger, cfg, probe))
+			if logs.FilterMessageSnippet(waitsThere).Len() != 0 {
+				t.Fatalf("the first test waited on the health URL's address after the app's own address accepted: %v", logs.All())
+			}
+		})
+	}
+}
+
+// A health URL with no host, "http://:<port>/healthz", is the local machine's
+// port: past its poll timeout the first test waits for that address to accept,
+// as it does for a health URL that names its host.
+func TestAHealthURLWithNoHostWaitsForTheLocalAppToAccept(t *testing.T) {
+	app := newSlowApp(t)
+	cfg := &config.Config{}
+	cfg.Test.Delay = 0
+	cfg.Test.HealthURL = "http://:" + app.port + "/healthz"
+	cfg.Test.HealthPollTimeout = 200 * time.Millisecond
+
+	done := slowWaitResult(context.Background(), zap.NewNop(), cfg, httpProbeTarget{})
+
+	requireStillWaiting(t, done, 2*time.Second)
+	app.start()
+	requireReady(t, done)
+}
+
+// healthURLAddress is the address the health URL's request dials: its port,
+// or the scheme's default port when it names none; no address without a URL.
+func TestTheHealthURLsAddressIsTheOneItsRequestDials(t *testing.T) {
+	for _, c := range []struct {
+		url, host, port string
+		ok              bool
+	}{
+		{"", "", "", false},
+		{"http://127.0.0.1:8080/healthz", "127.0.0.1", "8080", true},
+		{"http://127.0.0.1/healthz", "127.0.0.1", "80", true},
+		{"https://127.0.0.1/healthz", "127.0.0.1", "443", true},
+		{"https://127.0.0.1:8443/healthz", "127.0.0.1", "8443", true},
+		{"http://[::1]:8080/healthz", "::1", "8080", true},
+		{"http://:8080/healthz", "", "8080", true},
+	} {
+		host, port, ok := healthURLAddress(c.url)
+		if host != c.host || port != c.port || ok != c.ok {
+			t.Errorf("healthURLAddress(%q) = (%q, %q, %v), want (%q, %q, %v)", c.url, host, port, ok, c.host, c.port, c.ok)
+		}
+	}
+}
+
+// An unset --health-poll-timeout is the default, not zero.
+func TestAnUnsetHealthPollTimeoutIsItsDefault(t *testing.T) {
+	// The health URL is polled for the default time, and the poll says so.
+	t.Run("the health URL's poll", func(t *testing.T) {
+		app := newSlowApp(t)
+		app.start()
+		cfg := &config.Config{}
+		cfg.Test.Delay = 0
+		cfg.Test.HealthURL = "http://" + app.addr() + "/healthz"
+
+		core, logs := observer.New(zap.InfoLevel)
+		requireReady(t, slowWaitResult(context.Background(), zap.New(core), cfg, httpProbeTarget{}))
+		polled := logs.FilterMessageSnippet("polling application health endpoint before firing tests").All()
+		if len(polled) != 1 {
+			t.Fatalf("the health URL's poll was announced %d times, want once: %v", len(polled), logs.All())
+		}
+		if got := polled[0].ContextMap()["pollTimeout"]; got != config.DefaultHealthPollTimeout {
+			t.Fatalf("the health URL is polled for %v, want the default %v", got, config.DefaultHealthPollTimeout)
+		}
+	})
+	// The address gate's HTTP check after the accept gets the default time:
+	// an app that answers at once is confirmed, not warned about.
+	t.Run("the address gate's HTTP check", func(t *testing.T) {
+		app := newSlowApp(t)
+		app.start()
+		cfg := &config.Config{}
+		cfg.Test.Delay = 0
+
+		core, logs := observer.New(zap.DebugLevel)
+		probe := httpProbeTarget{scheme: "http", host: "127.0.0.1", port: app.port, ok: true}
+		requireReady(t, slowWaitResult(context.Background(), zap.New(core), cfg, probe))
+		if logs.FilterMessageSnippet("never completed an HTTP round-trip").Len() != 0 {
+			t.Fatalf("an app that answered at once was warned about as never answering: %v", logs.All())
+		}
+		if logs.FilterMessageSnippet("confirmed by a completed HTTP round-trip").Len() != 1 {
+			t.Fatalf("the app's answer was not confirmed once: %v", logs.All())
+		}
+	})
 }

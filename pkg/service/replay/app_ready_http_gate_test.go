@@ -564,19 +564,25 @@ func TestWaitForAppReady_NativeAppGatesOnTheResolvedTarget(t *testing.T) {
 }
 
 // ...and it must not gate when the test set gave no resolvable HTTP target,
-// preserving the pure --delay behaviour for non-HTTP native apps.
+// preserving the pure --delay behaviour for non-HTTP native apps. The wait
+// runs under the row's own bound: a gate on some address would have no end.
 func TestWaitForAppReady_NativeAppWithoutEvidenceIsNotGated(t *testing.T) {
 	cfg := gateCfg(10 * time.Second)
 	cfg.Command = "python3 recorded_app.py"
 	cfg.Test.Delay = 0
 
-	start := time.Now()
-	if !waitForAppReady(context.Background(), zap.NewNop(), cfg, httpProbeTarget{}) {
-		t.Fatal("must proceed")
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("waited %v with no resolvable target; a non-HTTP native app must keep the "+
-			"pure --delay behaviour", elapsed)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() { done <- waitForAppReady(ctx, zap.NewNop(), cfg, httpProbeTarget{}) }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("must proceed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("still waiting after 2s with no resolvable target; a non-HTTP native app must keep the " +
+			"pure --delay behaviour")
 	}
 }
 

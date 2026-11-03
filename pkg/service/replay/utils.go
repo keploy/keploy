@@ -1054,7 +1054,7 @@ func gateOnAppAddresses(ctx context.Context, logger *zap.Logger, cfg *config.Con
 		}
 	}
 	// A --health-url that did not answer in time names the app's address too.
-	if !gated && healthURL != "" {
+	if !gated {
 		if host, port, ok := healthURLAddress(healthURL); ok {
 			return gateOnAppAddress(ctx, logger, cfg, host, port, "health-url-address", httpProbeTarget{})
 		}
@@ -1062,10 +1062,13 @@ func gateOnAppAddresses(ctx context.Context, logger *zap.Logger, cfg *config.Con
 	return true
 }
 
-// healthURLAddress is the host and port a valid --health-url dials.
+// healthURLAddress is the host and port a valid --health-url dials; ok is
+// false without one. An empty host, as in "http://:8080/healthz", is the local
+// machine: the wait dials ":8080", the address the health poll's own request
+// reaches.
 func healthURLAddress(healthURL string) (host, port string, ok bool) {
 	u, err := url.Parse(strings.TrimSpace(healthURL))
-	if err != nil || u.Hostname() == "" {
+	if err != nil || u.Host == "" {
 		return "", "", false
 	}
 	port = u.Port()
