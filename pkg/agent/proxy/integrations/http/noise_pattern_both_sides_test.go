@@ -152,7 +152,7 @@ func TestStrictBodyNoisePatternSaysWhy(t *testing.T) {
 	noise := map[string][]string{"id": {`^1$`}}
 	for _, c := range []struct{ name, rec, live, want string }{
 		{"the live value", `{"id":1}`, `{"id":"tok-123"}`, "live value (a string of 7 bytes)"},
-		{"the recorded value", `{"id":5}`, `{"id":1}`, "recorded value (a number of 1 digits)"},
+		{"the recorded value", `{"id":5}`, `{"id":1}`, "recorded value (a number of 1 characters)"},
 		{"the live side lacks it", `{"id":1}`, `{}`, "live value (absent)"},
 		{"the recorded side lacks it", `{}`, `{"id":1}`, "recorded value (absent)"},
 		{"a value of another kind", `{"id":1}`, `{"id":{"a":1}}`, "live value (an object)"},
@@ -195,6 +195,7 @@ func TestAClockReadKeployYmlPatternHoldsBothSides(t *testing.T) {
 		{"a header only the live one matches", "later", `{}`, map[string][]string{"x-sent-at": stamp}, nil, "header.x-sent-at", true},
 		{"a body value only the recorded one matches", old, `{"at":"` + old + `"}`, nil, map[string][]string{"at": stamp}, "body.at", true},
 		{"a header only the recorded one matches", old, `{}`, map[string][]string{"x-sent-at": stamp}, nil, "header.x-sent-at", true},
+		{"a body value recorded as null, a pattern that admits null", old, `{"at":null}`, nil, map[string][]string{"at": {`^(null|\d{4}-\d{2}-\d{2}T.*)$`}}, "body.at", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			m := recorded("m", "/v1/u", map[string]string{"Content-Type": "application/json", "X-Sent-At": c.recHeader}, c.recBody)

@@ -409,13 +409,14 @@ func TestLearnMatchNeverLearnsALeafItsCallerHolds(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h, _, opts := learnOn(t)
-			opts.NoiseConfig = map[string]map[string][]string{"header": c.hnoise}
+			// keploy.yml's noise as a user writes it: NewRequestNoise reads
+			// its requestBody and header buckets, as decode does.
+			opts.NoiseConfig = map[string]map[string][]string{"header": c.hnoise, "requestbody": c.noise}
 			tr := clockedTracker()
 			tr.Begin()
 			db := &learnDb{perTest: []*models.Mock{exportSendRecording()}}
 			ctx := learn.WithTracker(context.Background(), tr)
 			noise := NewRequestNoise(zap.NewNop(), opts)
-			noise.Body = c.noise
 			served, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/", c.body, c.header)), noise, db, opts, integrations.CallRound{}, nil, exportHold)
 			if err != nil {
 				t.Fatal(err)
@@ -457,13 +458,13 @@ func TestLearnMatchReadsAHeldNullLeafAsNullUnderAKeployYmlPattern(t *testing.T) 
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h, _, opts := learnOn(t)
+			opts.NoiseConfig = map[string]map[string][]string{"requestbody": {"QueueUrl": {c.pattern}}}
 			tr := clockedTracker()
 			tr.Begin()
 			rec := learnRecorded("mock-1", time.Second, "POST", "/", strings.Replace(exportSendBody(exportRecID, exportAt), recorded, "null", 1), exportSend, `{"MD5OfMessageBody":"x","MessageId":"m-1"}`)
 			db := &learnDb{perTest: []*models.Mock{rec}}
 			ctx := learn.WithTracker(context.Background(), tr)
 			noise := NewRequestNoise(zap.NewNop(), opts)
-			noise.Body = map[string][]string{"QueueUrl": {c.pattern}}
 			call := live("POST", "/", exportSendBody(exportLiveID, exportAt.Add(learn.FullRoundLead)), exportSend)
 			served, miss, err := h.LearnMatch(ctx, exportCall(call), noise, db, opts, integrations.CallRound{}, nil, exportHold)
 			if err != nil {

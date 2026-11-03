@@ -147,7 +147,7 @@ func valueShape(v interface{}, ok bool) string {
 	case string:
 		return "a string of " + strconv.Itoa(len(t)) + " bytes"
 	case json.Number:
-		return "a number of " + strconv.Itoa(len(t)) + " digits"
+		return "a number of " + strconv.Itoa(len(t)) + " characters"
 	case bool:
 		return "a boolean"
 	case map[string]interface{}:
@@ -710,18 +710,47 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 		lv, inLive := lf[key]
 		switch {
 		case !inLive:
-			out = append(out, shaped(path, shape, models.DiffKindMissingInLive, "", ""))
+			out = append(out, k.oneSided(key, shape, models.DiffKindMissingInLive, "live", nil))
 			continue
 		case !inRec:
-			out = append(out, shaped(path, shape, models.DiffKindMissingInMock, "", ""))
+			out = append(out, k.oneSided(key, shape, models.DiffKindMissingInMock, "recorded", nil))
 			continue
 		}
 		if sameMembers(rv, lv) || k.learnedAt(path, "") || redacted[key] {
 			continue
 		}
-		out = append(out, shaped(path, shape, models.DiffKindValueChanged, "", ""))
+		covered, why := k.fieldCovers(key, shape, rv, lv)
+		if covered {
+			continue
+		}
+		f := shaped(path, shape, models.DiffKindValueChanged, "", "")
+		f.why = why
+		out = append(out, f)
 	}
 	return out
+}
+
+// fieldCovers reports whether keploy.yml's noise excuses the form or
+// multipart field key, which both bodies hold, with the values rec and live:
+// an entry with patterns does only when each value of each side matches one
+// (an entry with none is read before). why is, where such an entry does
+// not, the reason it is compared: the live side's value outside them first.
+func (k strictKnown) fieldCovers(key, shape string, rec, live []string) (covered bool, why string) {
+	pats, ok := k.n.body.Patterns(key)
+	if !ok {
+		return false, ""
+	}
+	for _, side := range []struct {
+		name   string
+		values []string
+	}{{"live", live}, {"recorded", rec}} {
+		for _, v := range side.values {
+			if !k.n.body.Covers(key, v, true) {
+				return false, matcher.PatternWhy(shape, pats, side.name, valueShape(v, true))
+			}
+		}
+	}
+	return true, ""
 }
 
 // redactedFormKeys are the keys of a recorded form one of whose "key=value"
@@ -761,7 +790,8 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 	}
 	var out []strictField
 	for i := range rp {
-		path := "body." + rp[i].name
+		path, shape := "body."+rp[i].name, "body."+shapeKey(rp[i].name)
+		var why string
 		switch {
 		case rp[i].name != lp[i].name || rp[i].file != lp[i].file:
 			return append(out, bodyChanged())
@@ -769,8 +799,15 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 			continue
 		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || k.learnedAt(path, "") || k.redacted(string(rp[i].data))):
 			continue
+		case rp[i].file == "":
+			var covered bool
+			if covered, why = k.fieldCovers(rp[i].name, shape, []string{string(rp[i].data)}, []string{string(lp[i].data)}); covered {
+				continue
+			}
 		}
-		out = append(out, shaped(path, "body."+shapeKey(rp[i].name), models.DiffKindValueChanged, "", ""))
+		f := shaped(path, shape, models.DiffKindValueChanged, "", "")
+		f.why = why
+		out = append(out, f)
 	}
 	return out
 }

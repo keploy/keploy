@@ -85,8 +85,11 @@ func (h *HTTP) newLearnNoise(opts models.OutgoingOptions, bodyNoise map[string][
 	n := learnNoise{body: matcher.NewNoiseLookup(bodyNoise), url: compileURLNoise(h.Logger, urlNoise)}
 	n.headers, n.headerPats = splitHeaderNoise(h.Logger, opts.NoiseConfig["header"])
 	if !opts.DisableAutoHeaderNoise {
+		// keploy.yml's own entry on a name the static lists hold wins, as
+		// NewRequestNoise keeps it for the strict matcher: a pattern the user
+		// gave such a header still holds both its values.
 		for _, k := range models.FlakyHeaders {
-			if !credentialHeaders[k] {
+			if _, user := n.headerPats[k]; !credentialHeaders[k] && !user {
 				n.headers[k] = true
 			}
 		}
@@ -94,7 +97,9 @@ func (h *HTTP) newLearnNoise(opts models.OutgoingOptions, bodyNoise map[string][
 		// them (models.ProvenFlakyHeaderNoise): the learn step runs under the
 		// switch only.
 		for _, k := range models.ProvenOnlyFlakyHeaders {
-			n.headers[k] = true
+			if _, user := n.headerPats[k]; !user {
+				n.headers[k] = true
+			}
 		}
 	}
 	return n

@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -2083,8 +2084,11 @@ func isFormURLEncoded(header map[string]string) bool {
 }
 
 // formReqBodyNoise diffs two form-encoded bodies key-by-key and returns the
-// drifted/removed keys as body.<key> field-path noise. Keys already known or
-// covered by the obfuscator value-regexes are skipped.
+// drifted/removed keys as body.<key> field-path noise. Keys covered by the
+// obfuscator value-regexes are skipped, and so are keys known with no
+// patterns. A key known with patterns is skipped only when both bodies hold
+// it and each of its values, on each side, matches one (formValuesMatch):
+// otherwise it is compared as any other key.
 func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObfuscated func(string) bool) map[string][]string {
 	// Split on raw bytes (Split on '&', IndexByte on '=') rather than via
 	// url.ParseQuery so the "key=value" segment handed to isObfuscated carries
@@ -2112,8 +2116,13 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 	out := map[string][]string{}
 	for rawKey, mv := range mockVals {
 		key := "body." + rawKey
-		if _, ok := known[key]; ok {
-			continue
+		if pats, ok := known[key]; ok {
+			if len(pats) == 0 {
+				continue
+			}
+			if rv, inLive := reqVals[rawKey]; inLive && formValuesMatch(mv, pats) && formValuesMatch(rv, pats) {
+				continue
+			}
 		}
 		// Obfuscator exclusion is per-occurrence on the full raw key=value
 		// segment, matching how Mock.Noise is evaluated for form bodies.
@@ -2153,6 +2162,21 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 		return nil
 	}
 	return out
+}
+
+// formValuesMatch reports whether each of a form key's raw values, read as
+// the application sent it (URL-decoded), matches one of patterns. A pattern
+// that does not compile matches nothing.
+func formValuesMatch(raw []string, patterns []string) bool {
+	for _, v := range raw {
+		if d, err := url.QueryUnescape(v); err == nil {
+			v = d
+		}
+		if ok, _ := matcher.MatchesAnyRegex(v, patterns); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // mergeReqBodyNoise returns a fresh map combining existing and newly-detected
