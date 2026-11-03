@@ -394,7 +394,7 @@ func TestAPairedHTTPCallIsAnsweredAndReported(t *testing.T) {
 	}
 
 	status, _, reported, db = serve(t, false)
-	if status != http.StatusBadGateway || len(reported) != 1 || errors.Is(reported[0], models.ErrAnswered) || len(db.claimed) != 0 {
+	if status != http.StatusBadRequest || len(reported) != 1 || errors.Is(reported[0], models.ErrAnswered) || len(db.claimed) != 0 {
 		t.Fatalf("without Learn: %d, %d reports (%v), claims %v; want a miss and no pairing", status, len(reported), reported, db.claimed)
 	}
 }

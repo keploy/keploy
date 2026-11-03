@@ -21,7 +21,7 @@ import (
 )
 
 // On-miss policy for `keploy mock replay` (models.OutgoingOptions.OnMiss):
-//   - fail (default): the miss is a hard 502; nothing reaches the real upstream.
+//   - fail (default): the miss is a hard 400; nothing reaches the real upstream.
 //   - passthrough: dial the real dependency, relay the exchange, don't persist.
 //   - record: passthrough AND capture the exchange so the CLI appends it to the
 //     mock set at end-of-run (VCR "new_episodes" — incremental refresh).
@@ -63,8 +63,8 @@ func appendCaptured(m *models.Mock) {
 // dials the real upstream, relays the request and response, writes the response
 // back to the client, and (for record) captures a mock. It returns true when it
 // handled the exchange (the caller then continues the keep-alive loop), or false
-// when the policy is fail (the caller sends the 502). An error means the
-// upstream dial/relay failed and the caller should fall back to the 502.
+// when the policy is fail (the caller sends the 400). An error means the
+// upstream dial/relay failed and the caller should fall back to the 400.
 func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []byte, request *http.Request, reqBody []byte, dstCfg *models.ConditionalDstCfg, opts models.OutgoingOptions) (bool, error) {
 	if !opts.OnMiss.PassesThroughOnMiss() {
 		return false, nil
@@ -174,7 +174,7 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 // certificate is verified against the system trust store (ServerName carried
 // over from the client's SNI). A dependency with a self-signed / untrusted cert
 // therefore fails the handshake here and the caller falls back to the hard miss
-// (502) rather than the proxy silently trusting an unverified upstream — this
+// (400) rather than the proxy silently trusting an unverified upstream — this
 // on-miss path dials the real network, so it must not disable verification.
 func (h *HTTP) dialUpstream(ctx context.Context, dstCfg *models.ConditionalDstCfg) (net.Conn, error) {
 	d := &net.Dialer{Timeout: 30 * time.Second}

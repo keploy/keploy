@@ -18,7 +18,7 @@ import (
 
 // httpMiss sends one unrecorded GET through the HTTP integration in test mode,
 // with the proxy's miss reporter as the proxy installs it, and returns once
-// the app has read the 502. done yields what the integration returned.
+// the app has read its answer. done yields what the integration returned.
 func httpMiss(t *testing.T, p *Proxy) (done <-chan error) {
 	t.Helper()
 	mm := NewMockManager(nil, nil, zap.NewNop())
@@ -31,7 +31,7 @@ func httpMiss(t *testing.T, p *Proxy) (done <-chan error) {
 	// reported, nothing may have been written to the app yet.
 	ctx := models.WithMockMismatchReporter(context.Background(), func(err error) {
 		if agentEnd.wrote.Load() {
-			t.Errorf("the 502 reached the app before its miss was reported")
+			t.Errorf("the answer reached the app before its miss was reported")
 		}
 		p.sendMockNotFoundError(err)
 	})
@@ -49,8 +49,8 @@ func httpMiss(t *testing.T, p *Proxy) (done <-chan error) {
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("the app got %d, want 502", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("the app got %d, want 400", resp.StatusCode)
 	}
 	return returned
 }
@@ -67,9 +67,9 @@ func (c *writeSeen) Write(b []byte) (int, error) {
 }
 
 // An HTTP miss is queued for the test that made it before the app reads its
-// 502, with the proven switch on or off: a test that ends as soon as it has
-// the 502 has its miss, and the next test is never charged with it. With the
-// switch off the miss was queued only after the 502, from the miss the
+// answer, with the proven switch on or off: a test that ends as soon as it has
+// the answer has its miss, and the next test is never charged with it. With the
+// switch off the miss was queued only after the answer, from the miss the
 // integration returned, and a test that ended first had it charged to the test
 // after it (enterprise pipeline 11651: get-quote-1's GET /fx filed under
 // get-rates-1, and get-quote-1's difference then learned as noise).
@@ -77,7 +77,7 @@ func (c *writeSeen) Write(b []byte) (int, error) {
 // Under the switch the integration then returns nothing. With it off it
 // returns the miss marked reported, as the connection's end and its log
 // always took it, and the proxy (mockFailed) does not queue it a second time.
-func TestAnHTTPMissIsQueuedBeforeTheAppSeesIts502(t *testing.T) {
+func TestAnHTTPMissIsQueuedBeforeTheAppSeesItsAnswer(t *testing.T) {
 	for _, on := range []bool{true, false} {
 		name := "switch off"
 		if on {
@@ -94,7 +94,7 @@ func TestAnHTTPMissIsQueuedBeforeTheAppSeesIts502(t *testing.T) {
 
 			p.ContinueTestErrorCapture() // test N begins
 			returned := httpMiss(t, p)
-			// Test N ends: its harness read the 502 and the app answered.
+			// Test N ends: its harness read the answer and the app answered.
 			// What the integration returns reaches the connection's handler
 			// only now, after the read, as it did in pipeline 11651.
 			gotN, err := p.GetMockErrors(ctx)

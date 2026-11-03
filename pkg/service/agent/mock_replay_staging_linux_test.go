@@ -239,7 +239,7 @@ func TestMockReplayStagesOnlyWhatNoTestOwns(t *testing.T) {
 	require.Equal(t, "boot", body)
 	got, e := runTest(t, a, p.servingProxy, "TestA", "/a", "/a2", "/b")
 	require.Equal(t, []string{"200 a", "200 a2"}, got[:2])
-	require.True(t, strings.HasPrefix(got[2], "502"), "test B's recording answered test A: %s", got[2])
+	require.True(t, strings.HasPrefix(got[2], "400"), "test B's recording answered test A: %s", got[2])
 	require.Equal(t, models.ScopeActionFail, e.Action)
 	ev := evidenceOf(t, a, "o::TestA")
 	require.Len(t, ev.Misses, 1)

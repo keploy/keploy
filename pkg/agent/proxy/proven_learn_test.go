@@ -85,8 +85,8 @@ func TestALearnStepMissCarriesItsReason(t *testing.T) {
 	p.learnTracker = learn.NewTracker()
 	p.ContinueTestErrorCapture()
 	resp, _, _ := learnCall(t, p, batchMock(), post(`{"rid":"r-1","ids":[3,1,2]}`))
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("the app got %d, want 502", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("the app got %d, want 400", resp.StatusCode)
 	}
 	misses, err := p.GetMockErrors(context.Background())
 	if err != nil {
@@ -1163,8 +1163,8 @@ func TestALearnStepRefusesAPickFromTheTestCasesRequest(t *testing.T) {
 			p.TakeTestRequest(tc.req)
 			req := `{"slot":"11:15"}`
 			resp, _, _ := learnCall(t, p, book(), "POST /book HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(req))+"\r\n\r\n"+req)
-			if resp.StatusCode != http.StatusBadGateway {
-				t.Fatalf("the app got %d, want 502", resp.StatusCode)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("the app got %d, want 400", resp.StatusCode)
 			}
 			misses, err := p.GetMockErrors(context.Background())
 			if err != nil {

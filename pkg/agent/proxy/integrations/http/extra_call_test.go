@@ -201,8 +201,8 @@ func TestAMissIsDiagnosedWhereItsRequestCame(t *testing.T) {
 		t.Fatalf("the app got no answer: %v", err)
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("answered %d, want the miss's 502", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("answered %d, want the miss's 400", resp.StatusCode)
 	}
 	_ = app.Close()
 	select {

@@ -381,7 +381,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		// Pass 2 (zero-config DEFAULT): only when nothing matched the URL exactly
 		// or under url-noise, retry allowing auto-detected dynamic id segments
 		// (numeric/uuid/hex/long token) to vary — so a non-deterministic path id
-		// doesn't 502 with no config. Disable via OutgoingOptions.DisableAutoURLDynamic.
+		// doesn't miss with no config. Disable via OutgoingOptions.DisableAutoURLDynamic.
 		if len(schemaMatched) == 0 && autoURLDynamic {
 			schemaMatched, err = h.SchemaMatch(ctx, input, unfilteredMocks, headerNoise, urlNoise, true)
 			if err != nil {
@@ -2254,7 +2254,7 @@ func statesHTTPLifetimes(mockDb integrations.MockMemDb, compared []*models.Mock)
 // call shared across tests.
 func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) (r *models.MockMismatchReport) {
 	// Defensive: this diagnostic builder and its callees (pickClosestCandidate,
-	// renderLiveRequest) — plus decode.go's 502 error line — dereference
+	// renderLiveRequest) — plus decode.go's miss error line — dereference
 	// request.URL throughout. http.ReadRequest always sets a non-nil URL on the
 	// live path, but normalize here so a hand-built request (tests / future
 	// callers) can never panic the agent on the error path.

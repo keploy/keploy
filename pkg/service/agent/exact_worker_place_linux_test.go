@@ -177,7 +177,7 @@ func TestTheNextSetsStagingPassesItsTestCasesAfresh(t *testing.T) {
 		}},
 	}))
 	code, _ := p.call(t, "/token")
-	require.Equal(t, 502, code, "the previous set's run reached a place of the next set's")
+	require.Equal(t, 400, code, "the previous set's run reached a place of the next set's")
 	require.NoError(t, a.UpdateMockParams(context.Background(), models.MockFilterParams{Exact: &models.ExactServing{Test: "test-2"}}))
 	code, _ = p.call(t, "/token")
 	require.Equal(t, 200, code, "the next set's test-2 did not pass its test-1")

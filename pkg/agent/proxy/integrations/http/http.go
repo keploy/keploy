@@ -216,7 +216,7 @@ func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.Co
 	err = h.decodeHTTP(ctx, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
 		if errors.Is(err, ErrMockNotMatched) {
-			h.Logger.Debug("mock miss — 502 already sent to client", zap.Error(err))
+			h.Logger.Debug("mock miss — 400 already sent to client", zap.Error(err))
 			return err
 		}
 		utils.LogError(h.Logger, err, "failed to decode the http message from the yaml")

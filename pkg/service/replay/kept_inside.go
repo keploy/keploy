@@ -10,7 +10,7 @@ import (
 )
 
 // A replay answers the app's outgoing calls from its mocks, and a call no mock
-// answers is not sent anywhere: the proxy answers it itself (an HTTP 502, a
+// answers is not sent anywhere: the proxy answers it itself (an HTTP 400, a
 // closed connection, a synthetic DNS answer). keptInside collects, for the
 // whole run, each destination the app called that way, so the run's output
 // names each one once, with how many calls it took and how real egress would

@@ -34,7 +34,7 @@ type MissPolicy string
 
 const (
 	// MissFail is the historical, deterministic behaviour: a miss is a hard
-	// failure (HTTP 502 / protocol error, connection torn down) and never
+	// failure (HTTP 400 / protocol error, connection torn down) and never
 	// reaches the real dependency. This is the default.
 	MissFail MissPolicy = "fail"
 	// MissPassthrough dials the real upstream on a miss, relays the exchange,

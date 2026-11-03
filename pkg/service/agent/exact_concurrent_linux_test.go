@@ -117,7 +117,7 @@ func TestKeployTestServesATestCaseTheRecordingsItShares(t *testing.T) {
 	end()
 	open("test-a", nil, shared)
 	code, _ = p.call(t, "/ping?n=b")
-	require.Equal(t, 502, code, "a shared recording another test answered with answered again")
+	require.Equal(t, 400, code, "a shared recording another test answered with answered again")
 	code, body = p.call(t, "/ping?n=a")
 	require.Equal(t, 200, code)
 	require.Equal(t, "for-a", strings.TrimSpace(body))

@@ -5818,7 +5818,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 	// has been routed into the window — so closing the window below cannot
 	// strand an in-flight miss (the remaining race the previous fix left open).
 	// The app has already responded by now, and every parser queues a miss
-	// before the app can see it (an HTTP 502 included), so the pushes of every
+	// before the app can see it (an HTTP 400 included), so the pushes of every
 	// miss decided before the app answered precede the marker. A miss decided
 	// after it (the app answered without waiting for the call, on its own
 	// client timeout) is not ordered by this: with the proven switch on,
@@ -6106,7 +6106,7 @@ func (p *Proxy) mockFailedFrom(logger *zap.Logger, err error, pid uint32, dst *m
 	} else {
 		utils.LogError(logger, err, "failed to mock the outgoing message")
 	}
-	// A miss its parser reported before answering the app (an HTTP 502) is
+	// A miss its parser reported before answering the app (an HTTP 400) is
 	// queued for its test already; queued again it would count twice, the
 	// second time possibly against the next test.
 	if !models.IsMismatchReported(err) {

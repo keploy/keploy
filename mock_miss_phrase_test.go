@@ -47,7 +47,7 @@ var missLines = map[missLiteral]missLine{
 	{"pkg/agent/proxy/dns.go", "(*Proxy).resolveUncachedDNSResponse", "DNS mock miss: upstream returned negative answer; falling back to synthetic DNS response"}:                                                                   {1, "mocking on, no DNS mock answered, upstream could not answer (SERVFAIL, REFUSED, ...)"},
 	{"pkg/agent/proxy/dns.go", "(*Proxy).resolveUncachedDNSResponse", "DNS mock miss + upstream forward failed; falling back to synthetic response"}:                                                                                {1, "mocking on, no DNS mock answered, and the forward got no answer"},
 	{"pkg/agent/proxy/dns.go", "(*Proxy).resolveUncachedDNSResponse", "mock miss"}:                                                                                                                                                  {1, "mocking on, no DNS mock answered: the reported miss"},
-	{"pkg/agent/proxy/integrations/http/http.go", "(*HTTP).MockOutgoing", "mock miss — 502 already sent to client"}:                                                                                                                 {1, "no HTTP mock matched the request"},
+	{"pkg/agent/proxy/integrations/http/http.go", "(*HTTP).MockOutgoing", "mock miss — 400 already sent to client"}:                                                                                                                 {1, "no HTTP mock matched the request"},
 	{"pkg/agent/proxy/integrations/mysql/replayer/match.go", "matchCommandWith", "mock miss"}:                                                                                                                                       {2, "no MySQL mock matched the command"},
 }
 

@@ -38,6 +38,11 @@ func debugOn(l *zap.Logger) bool { return l.Core().Enabled(zapcore.DebugLevel) }
 // from a real proxy error.
 var ErrMockNotMatched = models.ErrNoMockMatched
 
+// missStatus is the status of keploy's answer to an outgoing HTTP call no
+// mock matches: a client error, which no standard retry policy sends again
+// (decodeHTTP says why).
+const missStatus = http.StatusBadRequest
+
 // Decodes the mocks in test mode so that they can be sent to the user application.
 //
 // The requests are read and answered on a goroutine, and decodeHTTP returns
@@ -547,27 +552,37 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					}
 				}
 
-				// No mock matched — send a 502 so the application gets a
-				// proper HTTP error instead of a silent connection close.
+				// No mock matched: the application gets a proper HTTP error
+				// instead of a silent connection close, and one its HTTP
+				// client does not send again. A client's retry policy repeats
+				// a 5xx, a 408 and a 429 (the AWS SDKs up to 11 attempts,
+				// .NET's resilience handler, Polly, urllib3's Retry), and
+				// keploy's miss is no passing fault: the same call is refused
+				// again. Answered 502 Bad Gateway, as it was, the miss of a
+				// test that had already ended was made again, after the
+				// client's backoff, in a later test's window, and that test
+				// was failed for a call it never made. 400 Bad Request is
+				// retried by no standard client policy.
 				noMockBody := "keploy: no matching mock found for this HTTP request\n"
-				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
-					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)
+				noMock := fmt.Sprintf("HTTP/%d.%d %d %s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+					request.ProtoMajor, request.ProtoMinor, missStatus, http.StatusText(missStatus), len(noMockBody), noMockBody)
 				baseErr := fmt.Errorf("%w for %s %s", ErrMockNotMatched, request.Method, request.URL.Path)
 				missErr := models.NewMockMismatchError(baseErr, report)
 				// The miss is queued for the test that made it before the app
-				// sees the 502. The replay reads a test's misses once the app
-				// has answered it (proxy.GetMockErrors), and the app answers
-				// only after it has read the 502, so a test that ends as soon
-				// as it reads the 502 still has its miss, and the next test is
-				// never charged with it. That holds with the proven switch off
-				// as well. Queued after the 502, as it was there, the miss
-				// raced the app's answer: an app that answered first had its
-				// miss charged to the test after it (enterprise pipeline
-				// 11651: get-quote-1's GET /fx filed under get-rates-1, and
-				// get-quote-1's difference learned as noise).
+				// sees the answer. The replay reads a test's misses once the
+				// app has answered it (proxy.GetMockErrors), and the app
+				// answers only after it has read the miss's answer, so a test
+				// that ends as soon as it reads that answer still has its
+				// miss, and the next test is never charged with it. That holds
+				// with the proven switch off as well. Queued after the answer,
+				// as it once was, the miss raced the app's answer: an app that
+				// answered first had its miss charged to the test after it
+				// (enterprise pipeline 11651: get-quote-1's GET /fx filed
+				// under get-rates-1, and get-quote-1's difference learned as
+				// noise).
 				reported := models.ReportMockMismatch(ctx, missErr)
 				if _, err := clientConn.Write([]byte(noMock)); err != nil {
-					h.Logger.Debug("failed to write 502 response to client", zap.Error(err), zap.Any("metadata", utils.GetReqMeta(request)))
+					h.Logger.Debug("failed to write the miss's answer to client", zap.Error(err), zap.Any("metadata", utils.GetReqMeta(request)))
 				}
 				switch {
 				case reported && provenswitch.On():

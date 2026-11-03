@@ -172,20 +172,20 @@ func TestNoServedCallWritesTheSharedRequestNoise(t *testing.T) {
 		// the mock-noise row both recordings pass the body-schema match and
 		// the strict filter, and the fuzzy match picks one.
 		{"recordings with learned noise", learnedRecs, []call{
-			{orderCallOf("18", `{"order":"2-5"}`, "r-9"), map[string]int{"off": 200, "on": 502, "learn": 502, "mock noise": 502}},
+			{orderCallOf("18", `{"order":"2-5"}`, "r-9"), map[string]int{"off": 200, "on": 400, "learn": 400, "mock noise": 400}},
 			{orderCall("18", 2, 5, "r-9"), map[string]int{"off": 200, "on": 200, "learn": 200, "mock noise": 200}}}},
 		{"a call that differs in its noise", orderRec, []call{
 			{orderCall("18", 2, 2, "r-9"), map[string]int{"off": 200, "on": 200, "learn": 200, "mock noise": 200}}}},
 		{"a call that differs in a field", orderRec, []call{
-			{orderCall("18", 2, 3, "r-9"), map[string]int{"off": 200, "on": 502, "learn": 200, "mock noise": 502}}}},
+			{orderCall("18", 2, 3, "r-9"), map[string]int{"off": 200, "on": 400, "learn": 200, "mock noise": 400}}}},
 		{"an unrecorded call", orderRec, []call{
-			{"GET /none HTTP/1.1\r\nHost: api.test\r\nX-Request-Id: r-9\r\n\r\n", map[string]int{"off": 502, "on": 502, "learn": 502, "mock noise": 502}}}},
+			{"GET /none HTTP/1.1\r\nHost: api.test\r\nX-Request-Id: r-9\r\n\r\n", map[string]int{"off": 400, "on": 400, "learn": 400, "mock noise": 400}}}},
 		{"a variable bound and used", varRecs, []call{
-			{createCall("ord-liv-9"), map[string]int{"off": 201, "on": 201, "learn": 201, "mock noise": 502}},
-			{readBackCall("ord-liv-9"), map[string]int{"off": 502, "on": 200, "learn": 200, "mock noise": 502}}}},
+			{createCall("ord-liv-9"), map[string]int{"off": 201, "on": 201, "learn": 201, "mock noise": 400}},
+			{readBackCall("ord-liv-9"), map[string]int{"off": 400, "on": 200, "learn": 200, "mock noise": 400}}}},
 		{"a variable used with another value", varRecs, []call{
-			{createCall("ord-liv-9"), map[string]int{"off": 201, "on": 201, "learn": 201, "mock noise": 502}},
-			{readBackCall("ord-oth-7"), map[string]int{"off": 502, "on": 502, "learn": 200, "mock noise": 502}}}},
+			{createCall("ord-liv-9"), map[string]int{"off": 201, "on": 201, "learn": 201, "mock noise": 400}},
+			{readBackCall("ord-oth-7"), map[string]int{"off": 400, "on": 400, "learn": 200, "mock noise": 400}}}},
 	}
 	for _, row := range []struct {
 		name, proven     string

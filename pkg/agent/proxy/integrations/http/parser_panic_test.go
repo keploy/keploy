@@ -183,7 +183,7 @@ func TestAReplayWhoseParserPanicsAsTheContextEndsReturnsThePanic(t *testing.T) {
 	}()
 	// The bounds below only turn a hang into a failure.
 	select {
-	case <-conn.writing: // the 502 to the call no mock answers
+	case <-conn.writing: // the 400 to the call no mock answers
 	case <-time.After(time.Minute):
 		t.Fatal("the parser did not write to the app")
 	}

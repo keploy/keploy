@@ -9,7 +9,7 @@
 // ..."mtls":"pong:ptp-client"}. With HTTP10_ADDR, it also sends that address
 // an HTTP/1.0 GET /v10 with no Host header, as an HTTP/1.0 client or an
 // instance-metadata probe does, and adds the answer's status line, or the
-// error: ..."http10":"HTTP/1.0 502 Bad Gateway"}.
+// error: ..."http10":"HTTP/1.0 400 Bad Request"}.
 package main
 
 import (

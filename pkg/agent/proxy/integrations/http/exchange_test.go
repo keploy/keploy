@@ -75,11 +75,11 @@ func readUntil(c net.Conn, want string, d time.Duration) string {
 	return string(out)
 }
 
-const noMockAnswer = "HTTP/1.1 502 Bad Gateway"
+const noMockAnswer = "HTTP/1.1 400 Bad Request"
 
 // startDecode runs decodeHTTP, as replay does, on the first bytes the proxy
 // read (first) and the proxy's end of the app's connection, with no mocks:
-// a request that is read whole gets the 502 "no matching mock" answer, and
+// a request that is read whole gets the 400 "no matching mock" answer, and
 // decodeHTTP returns ErrMockNotMatched.
 func startDecode(t *testing.T, first string, proxy net.Conn) <-chan error {
 	t.Helper()

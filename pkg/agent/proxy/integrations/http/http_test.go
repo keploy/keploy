@@ -21,7 +21,7 @@ import (
 // its context and the proven switch off (TestMain), so the miss comes back to
 // MockOutgoing, which logs it.
 func TestMockOutgoingSaysMockMissOnlyOnAMiss(t *testing.T) {
-	const line = "mock miss — 502 already sent to client"
+	const line = "mock miss — 400 already sent to client"
 	cases := []struct {
 		name, request string
 		miss          bool
@@ -45,7 +45,7 @@ func TestMockOutgoingSaysMockMissOnlyOnAMiss(t *testing.T) {
 			if _, err := io.WriteString(app, tc.request); err != nil {
 				t.Fatal(err)
 			}
-			// The app reads what it is sent (the 502 on a miss), so the
+			// The app reads what it is sent (the 400 on a miss), so the
 			// parser's write never blocks on the pipe.
 			go func() { _, _ = io.Copy(io.Discard, app) }()
 			err := <-done

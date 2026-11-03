@@ -55,7 +55,7 @@ func TestAMissIsQuietUnderTheSwitchOnly(t *testing.T) {
 }
 
 // A miss its parser already queued for its test, before answering the app
-// (an HTTP 502), comes back marked reported (models.MismatchReported): it is
+// (an HTTP 400), comes back marked reported (models.MismatchReported): it is
 // logged as any miss is with the switch off, and returned for the connection
 // to end, but not queued a second time, where it could count against the next
 // test.

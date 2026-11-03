@@ -1728,7 +1728,7 @@ func TestACallInATestCasesGapIsLearnedThroughTheRoundAsOneAfterItsRequest(t *tes
 		return ok && snap.Learn.Awaiting
 	}
 	install := func(mm *MockManager) { mm.ServeExactTest("test-2", nil) }
-	want := map[string]string{"books": "200 {\"order\":0}, learned true", "apple": "502 keploy: no matching mock found for this HTTP request\n, learned false"}
+	want := map[string]string{"books": "200 {\"order\":0}, learned true", "apple": "400 keploy: no matching mock found for this HTTP request\n, learned false"}
 	for _, q := range []string{"books", "apple"} {
 		for i := 0; i < 200; i++ {
 			// The request first, then the call, in the gap.

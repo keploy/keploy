@@ -242,7 +242,7 @@ func TestOneCallMoreThanRecordedIsAnExtraCall(t *testing.T) {
 	got, e := runTest(t, a, p, "TestCounter", "/n", "/n", "/n")
 	require.Equal(t, "200 one", got[0], "recorded order, whatever the mapping's")
 	require.Equal(t, "200 two", got[1])
-	require.True(t, strings.HasPrefix(got[2], "502"), "the third call has no recorded answer: %s", got[2])
+	require.True(t, strings.HasPrefix(got[2], "400"), "the third call has no recorded answer: %s", got[2])
 	require.Equal(t, models.ScopeActionFail, e.Action)
 	require.Contains(t, e.Reason, "GET /n to 127.0.0.1:18093 was called 3 times, recorded 2")
 	ev := windowOf(t, a, "o::TestCounter").Evidence
@@ -265,7 +265,7 @@ func TestAMissAfterItsRecordingAnsweredNamesWhatDiffers(t *testing.T) {
 		map[string][]string{"o::TestMiss": {"mock-1"}}, map[string][]string{})
 	got, e := runTest(t, a, p, "TestMiss", "/stock/book", "/reserve/book")
 	require.Equal(t, "200 3", got[0])
-	require.True(t, strings.HasPrefix(got[1], "502"), "the changed call has no recorded answer: %s", got[1])
+	require.True(t, strings.HasPrefix(got[1], "400"), "the changed call has no recorded answer: %s", got[1])
 	require.Equal(t, models.ScopeActionFail, e.Action)
 	require.Contains(t, e.Reason, "GET /reserve/book to 127.0.0.1:18093 had no recorded answer (path differs)")
 	ev := windowOf(t, a, "o::TestMiss").Evidence
@@ -303,10 +303,10 @@ func TestARepeatedTestIDIsServedItsOwnMocksAfreshEachAttempt(t *testing.T) {
 	}{
 		{calls: []string{"/n", "/n"}, want: []string{"200 one", "200 two"}},
 		{calls: []string{"/n", "/n"}, want: []string{"200 one", "200 two"}},
-		{calls: []string{"/n", "/n", "/n"}, want: []string{"200 one", "200 two", "502"}, fails: "GET /n to 127.0.0.1:18093 was called 3 times, recorded 2", kind: models.MissExtraCall},
+		{calls: []string{"/n", "/n", "/n"}, want: []string{"200 one", "200 two", "400"}, fails: "GET /n to 127.0.0.1:18093 was called 3 times, recorded 2", kind: models.MissExtraCall},
 		{calls: []string{"/n"}, want: []string{"200 one"}, fails: "recorded call GET 127.0.0.1:18093/n (mock-2) was never made"},
-		{calls: []string{"/n", "/n", "/o"}, want: []string{"200 one", "200 two", "502"}, fails: "GET /o to 127.0.0.1:18093 had no recorded answer", kind: models.MissInTest},
-		{calls: []string{"/n", "/n", "/n"}, want: []string{"200 one", "200 two", "502"}, fails: "was called 3 times, recorded 2", kind: models.MissExtraCall},
+		{calls: []string{"/n", "/n", "/o"}, want: []string{"200 one", "200 two", "400"}, fails: "GET /o to 127.0.0.1:18093 had no recorded answer", kind: models.MissInTest},
+		{calls: []string{"/n", "/n", "/n"}, want: []string{"200 one", "200 two", "400"}, fails: "was called 3 times, recorded 2", kind: models.MissExtraCall},
 		{calls: []string{"/n", "/n"}, want: []string{"200 one", "200 two"}},
 	} {
 		got, e := runTest(t, a, p, "TestCounter", step.calls...)
@@ -340,7 +340,7 @@ func TestAnotherTestsMockNeverAnswers(t *testing.T) {
 		map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {"mock-2"}}, map[string][]string{})
 	got, e := runTest(t, a, p, "TestA", "/a", "/b")
 	require.Equal(t, "200 a", got[0])
-	require.True(t, strings.HasPrefix(got[1], "502"), got[1])
+	require.True(t, strings.HasPrefix(got[1], "400"), got[1])
 	require.Equal(t, models.ScopeActionFail, e.Action)
 	require.Contains(t, e.Reason, "GET /b to 127.0.0.1:18093 had no recorded answer")
 	ev := evidenceOf(t, a, "o::TestA")
@@ -362,10 +362,10 @@ func TestThePoolAnswersOnlyBetweenTests(t *testing.T) {
 		require.Equal(t, "ok", body)
 	}
 	code, _ := p.call(t, "/a")
-	require.Equal(t, 502, code, "a test's mock answered between tests")
+	require.Equal(t, 400, code, "a test's mock answered between tests")
 	got, e := runTest(t, a, p, "TestA", "/a", "/health")
 	require.Equal(t, "200 a", got[0])
-	require.True(t, strings.HasPrefix(got[1], "502"), "a data-plane pool mock answered inside a test: %s", got[1])
+	require.True(t, strings.HasPrefix(got[1], "400"), "a data-plane pool mock answered inside a test: %s", got[1])
 	require.Equal(t, models.ScopeActionFail, e.Action)
 	ev := windowOf(t, a, "o::TestA").Evidence
 	var kinds []string
@@ -558,7 +558,7 @@ func TestASkippedTestsRecordingNeverShiftsToTheNextTest(t *testing.T) {
 	require.Equal(t, models.ScopeActionSkip, b.Action)
 	got, e := runTest(t, a, p, "TestNext", "/n", "/n")
 	require.Equal(t, "200 next", got[0])
-	require.True(t, strings.HasPrefix(got[1], "502"), "the skipped test's recording answered the next test: %s", got[1])
+	require.True(t, strings.HasPrefix(got[1], "400"), "the skipped test's recording answered the next test: %s", got[1])
 	require.Equal(t, models.ScopeActionFail, e.Action)
 	require.Contains(t, e.Reason, "was called 2 times, recorded 1")
 }
@@ -582,7 +582,7 @@ func TestOverlappingRecordedWindowsNeverReServe(t *testing.T) {
 			for _, name := range order {
 				got, e := runTest(t, a, p, name, "/bucket/set-1/mocks.yaml", "/bucket/set-1/mocks.yaml")
 				require.Equal(t, want[name], got[0], name)
-				require.True(t, strings.HasPrefix(got[1], "502"), "%s's second call was served again: %s", name, got[1])
+				require.True(t, strings.HasPrefix(got[1], "400"), "%s's second call was served again: %s", name, got[1])
 				require.Equal(t, models.ScopeActionFail, e.Action, name)
 				ev := evidenceOf(t, a, "o::"+name)
 				require.Len(t, ev.Misses, 1, name)
@@ -610,13 +610,13 @@ func TestPastItsRecordingsATestIsServedNothingElse(t *testing.T) {
 	got, e := runTest(t, a, p, "test2", "/obj", "/obj", "/obj")
 	require.Equal(t, "200 test2-a", got[0], "test1 never ran; its recording is not test2's")
 	require.Equal(t, "200 test2-b", got[1])
-	require.True(t, strings.HasPrefix(got[2], "502"), "past its recordings test2 was served %s", got[2])
+	require.True(t, strings.HasPrefix(got[2], "400"), "past its recordings test2 was served %s", got[2])
 	require.Equal(t, models.ScopeActionFail, e.Action)
 	require.Contains(t, e.Reason, "was called 3 times, recorded 2")
 	require.Equal(t, models.MissExtraCall, evidenceOf(t, a, "o::test2").Misses[0].Kind)
 
 	got, e = runTest(t, a, p, "test3", "/obj")
-	require.True(t, strings.HasPrefix(got[0], "502"), "test3 recorded no such call and was served %s", got[0])
+	require.True(t, strings.HasPrefix(got[0], "400"), "test3 recorded no such call and was served %s", got[0])
 	require.Equal(t, models.ScopeActionFail, e.Action)
 	require.Equal(t, models.MissInTest, evidenceOf(t, a, "o::test3").Misses[0].Kind)
 
@@ -667,9 +667,9 @@ func TestAMidSetStagingLeavesTheOpenTestItsPerTestMocks(t *testing.T) {
 	require.Empty(t, servedNames(pt), "after the staging, TestA's consumed mock is back in the per-test tier")
 	require.True(t, p.mm.IsTestWindowActive(), "the staging closed TestA's window")
 	code, _ = p.call(t, "/a")
-	require.Equal(t, 502, code, "the staging re-armed TestA's consumed mock")
+	require.Equal(t, 400, code, "the staging re-armed TestA's consumed mock")
 	code, _ = p.call(t, "/b")
-	require.Equal(t, 502, code, "the staging showed TestB's mock inside TestA")
+	require.Equal(t, 400, code, "the staging showed TestB's mock inside TestA")
 	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
 	require.Nil(t, serr)
 	require.Equal(t, models.ScopeActionFail, e.Action)
@@ -741,7 +741,7 @@ func TestKeployTestServesEachTestCaseExactlyItsOwnMocks(t *testing.T) {
 
 	got, misses := keployTestCase(t, a, p, "test-2", []string{"mock-2"}, "/ping", "/ping")
 	require.Equal(t, "200 second", got[0], "a test case run out of recorded order is answered by its own mock")
-	require.True(t, strings.HasPrefix(got[1], "502"), got[1])
+	require.True(t, strings.HasPrefix(got[1], "400"), got[1])
 	require.Len(t, misses, 1)
 	require.Equal(t, models.MissExtraCall, misses[0].Kind)
 
@@ -750,7 +750,7 @@ func TestKeployTestServesEachTestCaseExactlyItsOwnMocks(t *testing.T) {
 	require.Empty(t, misses)
 
 	got, misses = keployTestCase(t, a, p, "test-3", nil, "/ping", "/health")
-	require.True(t, strings.HasPrefix(got[0], "502") && strings.HasPrefix(got[1], "502"), "a test case that owns nothing was answered: %v", got)
+	require.True(t, strings.HasPrefix(got[0], "400") && strings.HasPrefix(got[1], "400"), "a test case that owns nothing was answered: %v", got)
 	require.Len(t, misses, 2)
 
 	for i := 0; i < 2; i++ {
@@ -759,7 +759,7 @@ func TestKeployTestServesEachTestCaseExactlyItsOwnMocks(t *testing.T) {
 		require.Equal(t, "ok", body)
 	}
 	code, _ := p.call(t, "/ping")
-	require.Equal(t, 502, code, "a test case's mock answered between test cases")
+	require.Equal(t, 400, code, "a test case's mock answered between test cases")
 }
 
 // keploy test under the switch: a call in flight when test-2 began (recorded
@@ -782,13 +782,13 @@ func TestKeployTestAnswersAGapCallInFlightAsTheNextTestCases(t *testing.T) {
 	require.Equal(t, 200, code, "the call in flight when test-2 began is answered in the gap before it")
 	require.Equal(t, "o2", body)
 	code, _ = p.call(t, "/fetch")
-	require.Equal(t, 502, code, "the call in flight answered twice in the gap")
+	require.Equal(t, 400, code, "the call in flight answered twice in the gap")
 	code, _ = p.call(t, "/health")
 	require.Equal(t, 200, code, "the pool still answers beside it")
 
 	got, _ := keployTestCase(t, a, p, "test-2", []string{"fetch", "own-2"}, "/own", "/fetch")
 	require.Equal(t, "200 two", got[0])
-	require.True(t, strings.HasPrefix(got[1], "502"), "the call in flight answered again in test-2: %s", got[1])
+	require.True(t, strings.HasPrefix(got[1], "400"), "the call in flight answered again in test-2: %s", got[1])
 	test, consumed, unconsumed, ok := p.mm.ExactTestOutcome()
 	require.True(t, ok)
 	require.Equal(t, "test-2", test)
@@ -796,7 +796,7 @@ func TestKeployTestAnswersAGapCallInFlightAsTheNextTestCases(t *testing.T) {
 	require.Empty(t, unconsumed)
 
 	code, _ = p.call(t, "/fetch")
-	require.Equal(t, 502, code, "a pool call that names nothing ahead answers no test case's mock")
+	require.Equal(t, 400, code, "a pool call that names nothing ahead answers no test case's mock")
 }
 
 // keploy test runs a test case again (a retry) afresh: each run is served
@@ -817,7 +817,7 @@ func TestKeployTestRunsATestCaseAgainAfresh(t *testing.T) {
 			require.Empty(t, misses, "run %d", run)
 			continue
 		}
-		require.True(t, strings.HasPrefix(got[2], "502"), "run %d: %s", run, got[2])
+		require.True(t, strings.HasPrefix(got[2], "400"), "run %d: %s", run, got[2])
 		require.Len(t, misses, 1, "run %d", run)
 		require.Equal(t, models.MissExtraCall, misses[0].Kind, "run %d", run)
 	}
@@ -848,7 +848,7 @@ func TestAMockTheStoreRefusedIsOwnedByNoTest(t *testing.T) {
 	s.mu.Unlock()
 	got, e := runTest(t, a, p, "TestA", "/a", "/b")
 	require.Equal(t, "200 a", got[0])
-	require.True(t, strings.HasPrefix(got[1], "502"), got[1])
+	require.True(t, strings.HasPrefix(got[1], "400"), got[1])
 	require.Equal(t, models.ScopeActionFail, e.Action)
 	require.Contains(t, e.Reason, "GET /b to 127.0.0.1:18093 had no recorded answer")
 	got, e = runTest(t, a, p, "TestA", "/a")
@@ -880,7 +880,7 @@ func TestATestThatRecordedNoCallIsServedNoOtherTestsMock(t *testing.T) {
 			require.Equal(t, []string{"200 c"}, got)
 			require.Empty(t, e.Action, e.Reason)
 			got, e = runTest(t, a, p, "t2", "/c")
-			require.True(t, strings.HasPrefix(got[0], "502"), "t2 recorded no call and was served %s", got[0])
+			require.True(t, strings.HasPrefix(got[0], "400"), "t2 recorded no call and was served %s", got[0])
 			require.Equal(t, models.ScopeActionFail, e.Action)
 			require.Contains(t, e.Reason, "GET /c to 127.0.0.1:18093 had no recorded answer")
 			require.Equal(t, models.MissInTest, evidenceOf(t, a, "o::t2").Misses[0].Kind)
@@ -930,7 +930,7 @@ func TestACallLandingAsTheTestEndsIsSaidToBeMadeThen(t *testing.T) {
 	require.NotContains(t, e.Reason, "before this one began")
 
 	code, _ = p.call(t, "/zzz") // between tests
-	require.Equal(t, 502, code)
+	require.Equal(t, 400, code)
 	got, e := runTest(t, a, p.servingProxy, "TestB", "/c")
 	require.Equal(t, []string{"200 c"}, got)
 	require.Equal(t, models.ScopeActionFail, e.Action)
@@ -1017,7 +1017,7 @@ func TestAnExtraCallFiledAsTheTestEndsStaysAnExtraCall(t *testing.T) {
 	<-p.built
 	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
 	require.Nil(t, serr)
-	require.Equal(t, 502, <-done)
+	require.Equal(t, 400, <-done)
 	require.Equal(t, models.ScopeActionFail, e.Action)
 	require.Contains(t, e.Reason, "GET /a to 127.0.0.1:18093 was called 2 times, recorded 1")
 	require.NotContains(t, e.Reason, "before this one began")
@@ -1136,7 +1136,7 @@ func TestServedMarksComposeWithExactServing(t *testing.T) {
 		require.Nil(t, serr)
 		require.Equal(t, `200 {"echo":"x-1","n":"mock-a"}`, got[0])
 		require.Equal(t, `200 {"echo":"x-2","n":"mock-b"}`, got[1])
-		require.True(t, strings.HasPrefix(got[2], "502"), "a third charge was answered: %s", got[2])
+		require.True(t, strings.HasPrefix(got[2], "400"), "a third charge was answered: %s", got[2])
 		require.Equal(t, models.ScopeActionFail, e.Action)
 		require.Contains(t, e.Reason, "called 3 times, recorded 2")
 	})
@@ -1240,7 +1240,7 @@ func TestAnEarlierTestsLateCallIsNotTheNextTests(t *testing.T) {
 				close(release)
 				<-filed
 			}
-			require.Equal(t, 502, <-done)
+			require.Equal(t, 400, <-done)
 			code, _ = rp.call(t, "/b")
 			require.Equal(t, 200, code)
 			e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestB", CanSkip: true, Outcome: models.ScopeOutcomePassed})
@@ -1293,7 +1293,7 @@ func TestKeployTestServesTheWorkerScopeFromItsPlaces(t *testing.T) {
 		Exact: &models.ExactServing{Stage: true, Worker: []models.MockEntry{{Name: "mock-boot"}, {Name: "mock-late", Place: "test-1"}}},
 	}))
 	code, _ := p.call(t, "/late")
-	require.Equal(t, 502, code, "a worker mock answered before its place")
+	require.Equal(t, 400, code, "a worker mock answered before its place")
 	before, err := p.GetMockErrors(ctx)
 	require.NoError(t, err)
 	require.Len(t, before, 1)
@@ -1302,7 +1302,7 @@ func TestKeployTestServesTheWorkerScopeFromItsPlaces(t *testing.T) {
 	got, misses := keployTestCase(t, a, p, "test-1", []string{"mock-own"}, "/own", "/boot", "/boot")
 	require.Equal(t, "200 own", got[0])
 	require.Equal(t, "200 boot", got[1], "a worker mock placed at the set's start answers in a test case")
-	require.True(t, strings.HasPrefix(got[2], "502"), "a worker mock answered twice: %v", got)
+	require.True(t, strings.HasPrefix(got[2], "400"), "a worker mock answered twice: %v", got)
 	require.Len(t, misses, 1)
 	require.Equal(t, models.MissInTest, misses[0].Kind, "the worker mock's second call is a miss in the test")
 
@@ -1311,9 +1311,9 @@ func TestKeployTestServesTheWorkerScopeFromItsPlaces(t *testing.T) {
 	require.Equal(t, 200, code, "a worker mock placed after a begun test case does not answer between test cases")
 	require.Equal(t, "late", body)
 	code, _ = p.call(t, "/late")
-	require.Equal(t, 502, code, "a worker mock answered twice in the set")
+	require.Equal(t, 400, code, "a worker mock answered twice in the set")
 	code, _ = p.call(t, "/own")
-	require.Equal(t, 502, code, "a test case's mock answered between test cases")
+	require.Equal(t, 400, code, "a test case's mock answered between test cases")
 }
 
 // keyMock is a test's recording of POST path with body {"key":"k-1"}: its

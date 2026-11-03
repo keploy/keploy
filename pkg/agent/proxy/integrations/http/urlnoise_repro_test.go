@@ -26,7 +26,7 @@ func TestURLMatch_S3Receipt(t *testing.T) {
 	replay := putReq("/order-receipts/receipts/zara_1781999999999_q9zzz1/9f7c1e22-0000-1111-2222-aaaabbbbcccc.txt")
 
 	// autoDynamic OFF (old behaviour / DisableAutoURLDynamic): exact mismatch ->
-	// 0 candidates -> the 502.
+	// 0 candidates -> the miss.
 	if got, _ := h.SchemaMatch(ctx, replay, []*models.Mock{recorded}, nil, nil, false); len(got) != 0 {
 		t.Fatalf("autoDynamic=false: expected 0 candidates, got %d", len(got))
 	}
