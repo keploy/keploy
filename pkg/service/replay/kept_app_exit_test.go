@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
@@ -114,14 +115,172 @@ func TestCancelledRunReasonNamesWhatEndedTheRun(t *testing.T) {
 		want          string
 	}{
 		{"the set's error", setErr, exit, "failed to run test set: " + setErr.Error()},
-		{"a cancelled set, the cause", context.Canceled, exit, "the run stopped: " + exit.Error()},
-		{"a wrapped cancellation, the cause", fmt.Errorf("send: %w", context.Canceled), exit, "the run stopped: " + exit.Error()},
-		{"no set error, the cause", nil, exit, "the run stopped: " + exit.Error()},
+		{"a cancelled set, the cause", context.Canceled, exit, "the run stopped during test-set s1: " + exit.Error()},
+		{"a wrapped cancellation, the cause", fmt.Errorf("send: %w", context.Canceled), exit, "the run stopped during test-set s1: " + exit.Error()},
+		{"no set error, the cause", nil, exit, "the run stopped during test-set s1: " + exit.Error()},
 		{"nothing said", context.Canceled, context.Canceled, "the run was cancelled before its test sets ended"},
 		{"no cause", context.Canceled, nil, "the run was cancelled before its test sets ended"},
 	} {
-		if got := cancelledRunReason(c.setErr, c.cause); got != c.want {
+		if got := cancelledRunReason("s1", c.setErr, c.cause); got != c.want {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// An application that exits part-way through a set (on the set's second
+// test) fails the set as its exit does, never as a stop by its user, whether
+// keploy runs it for the set or keeps it across the run's sets
+// (--keep-app-alive), and the run stops naming the exit, its code and the
+// set: never "replay completed successfully". The exit code is 1.
+func TestAnAppThatExitsMidSetFailsTheSetAndTheRunNamesItsExit(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		kept       bool
+		wantStatus models.TestSetStatus
+	}{
+		{name: "run per set", wantStatus: models.TestSetStatusAppHalted},
+		{name: "kept alive", kept: true, wantStatus: models.TestSetStatusAppHalted},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newPartialRunHarness(t, 3, 0)
+			h.replayer.config.Command = "./app"
+			h.replayer.config.CommandType = string(utils.Native)
+			h.replayer.config.Test.KeepAppAlive = c.kept
+			h.replayer.config.Test.MaxFlakyChecks = 1
+			ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+			defer cancel()
+			core, logs := observer.New(zapcore.DebugLevel)
+			h.replayer.logger = zap.New(core)
+			h.instr.stopAppAfterNUpdates = 2
+			saved := utils.ErrCode
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = saved })
+			_ = h.replayer.Start(ctx)
+			rep := h.report.report
+			if rep == nil {
+				t.Fatal("no report was persisted")
+			}
+			if rep.Status != string(c.wantStatus) {
+				t.Errorf("the set ended %s, want %s", rep.Status, c.wantStatus)
+			}
+			stops := logs.FilterMessage("stopping Keploy").All()
+			if len(stops) != 1 {
+				t.Fatalf("%d \"stopping Keploy\" lines, want 1", len(stops))
+			}
+			reason, _ := stops[0].ContextMap()["reason"].(string)
+			for _, want := range []string{"exited", "test-set-0", "exit code 1", string(models.ErrAppStopped)} {
+				if !strings.Contains(reason, want) {
+					t.Errorf("the run stops with the reason %q, want one that says %q", reason, want)
+				}
+			}
+			if utils.ErrCode != 1 {
+				t.Errorf("exit code %d, want 1", utils.ErrCode)
+			}
+		})
+	}
+}
+
+// haltedRunReason names the application's exit, with its code when it has
+// one, and the set; with no exit seen, the set's status.
+func TestHaltedRunReasonNamesTheExitAndTheSet(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		exit models.AppError
+		want string
+	}{
+		{"an exit with a code", models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3, Err: errors.New("exit status 3")}, "the application exited during test-set s1 with exit code 3: exited due to command error: exit status 3"},
+		{"a signal", models.AppError{AppErrorType: models.ErrCommandError, ExitCode: -1, Err: errors.New("signal: killed")}, "the application exited during test-set s1: exited due to command error: signal: killed"},
+		{"no exit seen", models.AppError{}, "test-set s1 ended APP_HALTED"},
+	} {
+		if got := haltedRunReason("s1", models.TestSetStatusAppHalted, c.exit); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// A set whose context ended before an application keploy started for it
+// exited fails as the exit of the application --keep-app-alive keeps does
+// when that exit ended the run, handing the exit on; the user's stop, or a
+// run still going, is USER_ABORT and hands on nothing.
+func TestStoppedSetStatusIsTheKeptExitsOrTheUsersStop(t *testing.T) {
+	exit := models.AppError{AppErrorType: models.ErrAppStopped, ExitCode: 1}
+	running, stopRunning := context.WithCancel(context.Background())
+	defer stopRunning()
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+	ended, end := context.WithCancelCause(context.Background())
+	end(exit)
+	for _, c := range []struct {
+		name       string
+		ctx        context.Context
+		wantStatus models.TestSetStatus
+		wantExit   models.AppError
+	}{
+		{"the kept application's exit", ended, models.TestSetStatusAppHalted, exit},
+		{"the user's stop", stopped, models.TestSetStatusUserAbort, models.AppError{}},
+		{"a run still going", running, models.TestSetStatusUserAbort, models.AppError{}},
+	} {
+		var handed []models.AppError
+		status := stoppedSetStatus(c.ctx, func(e models.AppError) { handed = append(handed, e) })
+		if status != c.wantStatus {
+			t.Errorf("%s: %s, want %s", c.name, status, c.wantStatus)
+		}
+		switch {
+		case c.wantExit == (models.AppError{}) && len(handed) != 0:
+			t.Errorf("%s: handed on %+v, want nothing", c.name, handed)
+		case c.wantExit != (models.AppError{}) && (len(handed) != 1 || handed[0] != c.wantExit):
+			t.Errorf("%s: handed on %+v, want %+v once", c.name, handed, c.wantExit)
+		}
+	}
+}
+
+// insertCancelledReportDB is the harness's report store, whose first report
+// insert ends the application --keep-app-alive keeps and then fails with the
+// set's context's error, as a store that fails on a cancelled context does.
+type insertCancelledReportDB struct {
+	*prReportDB
+	once sync.Once
+	exit chan struct{}
+}
+
+func (f *insertCancelledReportDB) InsertReport(ctx context.Context, runID, setID string, rep *models.TestReport) error {
+	first := false
+	f.once.Do(func() { first = true })
+	if !first {
+		return f.prReportDB.InsertReport(ctx, runID, setID, rep)
+	}
+	close(f.exit)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(prTimeout):
+		return errors.New("the kept application's exit never ended the set's context")
+	}
+}
+
+// A kept application that exits between a set's steps, where the step under
+// way returns the set's cancellation as its error, stops the run with a
+// reason that names the exit (the run's cause) and the set.
+func TestAKeptAppsExitBetweenStepsStopsTheRunNamingItsExit(t *testing.T) {
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.config.Command = "./app"
+	h.replayer.config.CommandType = string(utils.Native)
+	h.replayer.config.Test.KeepAppAlive = true
+	h.replayer.config.Test.MaxFlakyChecks = 1
+	h.replayer.reportDB = &insertCancelledReportDB{prReportDB: h.report, exit: h.instr.appStopped}
+	core, logs := observer.New(zapcore.DebugLevel)
+	h.replayer.logger = zap.New(core)
+	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+	defer cancel()
+	_ = h.replayer.Start(ctx)
+	stops := logs.FilterMessage("stopping Keploy").All()
+	if len(stops) != 1 {
+		t.Fatalf("%d \"stopping Keploy\" lines, want 1", len(stops))
+	}
+	reason, _ := stops[0].ContextMap()["reason"].(string)
+	for _, want := range []string{"test-set-0", string(models.ErrAppStopped)} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("the run stops with the reason %q, want one that says %q", reason, want)
 		}
 	}
 }

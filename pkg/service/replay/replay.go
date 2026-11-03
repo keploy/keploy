@@ -144,6 +144,21 @@ func neverReadyStatus(appErr models.AppError) (status models.TestSetStatus, exit
 	return status, true
 }
 
+// stoppedSetStatus is the status of a set whose context ended before the
+// application keploy started for it exited (ctx is the run's, the set's
+// parent): when the exit of the application --keep-app-alive keeps across
+// the run's sets ended the run (keptAppExit), the status that exit maps to,
+// as for an application run per set, which it hands to setAppErr; else the
+// user's stop.
+func stoppedSetStatus(ctx context.Context, setAppErr func(models.AppError)) models.TestSetStatus {
+	exit := keptAppExit(ctx)
+	status, exited := neverReadyStatus(exit)
+	if exited {
+		setAppErr(exit)
+	}
+	return status
+}
+
 // keptAppExit is the exit of the application --keep-app-alive keeps across a
 // run's sets, when that exit is what ended ctx: Start runs it in the run's
 // errgroup, which cancels the run's context with the error the run returned
@@ -161,16 +176,32 @@ func keptAppExit(ctx context.Context) models.AppError {
 // more than the cancellation (an application that exited before it accepted
 // a connection), else what ended the run (cause: the error of a goroutine of
 // the run's errgroup, such as the exit of the application --keep-app-alive
-// keeps). Never "replay completed successfully".
-func cancelledRunReason(setErr, cause error) string {
+// keeps), with the set testSet it stopped in. Never "replay completed
+// successfully".
+func cancelledRunReason(testSet string, setErr, cause error) string {
 	switch {
 	case setErr != nil && !errors.Is(setErr, context.Canceled):
 		return fmt.Sprintf("failed to run test set: %v", setErr)
 	case cause != nil && !errors.Is(cause, context.Canceled):
-		return fmt.Sprintf("the run stopped: %v", cause)
+		return fmt.Sprintf("the run stopped during test-set %s: %v", testSet, cause)
 	default:
 		return "the run was cancelled before its test sets ended"
 	}
+}
+
+// haltedRunReason is the reason a run stops with when its set testSet ended
+// status (APP_HALTED or APP_FAULT) and the run goes no further: the
+// application's exit, with its code when it has one, when keploy saw it
+// (exit), else the set's status. Never "replay completed successfully".
+func haltedRunReason(testSet string, status models.TestSetStatus, exit models.AppError) string {
+	if exit == (models.AppError{}) {
+		return fmt.Sprintf("test-set %s ended %s", testSet, status)
+	}
+	code := ""
+	if exit.ExitCode > 0 {
+		code = fmt.Sprintf(" with exit code %d", exit.ExitCode)
+	}
+	return fmt.Sprintf("the application exited during test-set %s%s: %v", testSet, code, exit)
 }
 
 func resolveTestSetStatus(cmdType utils.CmdType, current, derived models.TestSetStatus, err error) (models.TestSetStatus, bool) {
@@ -677,6 +708,11 @@ type Replayer struct {
 	setEnd        *models.SetEnd
 	setEndCalls   []models.UnmatchedCall
 	setEndAnswers []models.UnmatchedCall
+	// setAppExit is the exit of the application seen as the set RunTestSet
+	// ran ended (the zero value when none was): what a run that stops on
+	// that set's APP_HALTED or APP_FAULT names (haltedRunReason). Reset
+	// before each run of a set.
+	setAppExit models.AppError
 	// setCalls are the calls of the set RunTestSet is running that no mock
 	// answered and that are the set's, no test's (proven switch): those made
 	// before its first test (before_set_calls.go).
@@ -1230,6 +1266,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			// historical per-test-set restart behaviour is preserved
 			// whenever the one-shot spawn didn't fire.
 			r.setEnd, r.setEndCalls, r.setEndAnswers = nil, nil, nil
+			r.setAppExit = models.AppError{}
 			// The set's exact plan is this run's: a run that ends before it
 			// makes one tells its end hooks no earlier set's shares.
 			r.exact = nil
@@ -1242,7 +1279,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 					// reason then. Otherwise a goroutine of the run's
 					// errgroup ended ctx (the exit of the application
 					// --keep-app-alive keeps), and the reason names it.
-					stopReason = cancelledRunReason(err, context.Cause(ctx))
+					stopReason = cancelledRunReason(testSet, err, context.Cause(ctx))
 					return err
 				}
 				// DockerCompose: when the user-app container exits,
@@ -1275,15 +1312,15 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				return fmt.Errorf("failed to run test set: %w", err)
 			}
 			switch testSetStatus {
-			case models.TestSetStatusAppHalted:
+			case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp:
 				testSetResult = false
 				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
+				if abortTestRun {
+					stopReason = haltedRunReason(testSet, testSetStatus, r.setAppExit)
+				}
 			case models.TestSetStatusInternalErr:
 				testSetResult = false
 				abortTestRun = abortAfterTestSet(testSetStatus, cmdType, r.notJudged(testSet))
-			case models.TestSetStatusFaultUserApp:
-				testSetResult = false
-				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
 			case models.TestSetStatusUserAbort:
 				// A Ctrl+C does not un-fail the tests that already ran, nor
 				// pass a test that got no verdict before it: the defer at
@@ -2566,7 +2603,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				utils.LogError(r.logger, err, applicationFailedToRunLogMessage)
 			case <-runTestSetCtx.Done():
-				setErrStatus(models.TestSetStatusUserAbort)
+				setErrStatus(stoppedSetStatus(ctx, setLastAppErr))
 			}
 			exitLoopChan <- true
 			runTestSetCtxCancel()
@@ -2940,7 +2977,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 					utils.LogError(r.logger, err, applicationFailedToRunLogMessage)
 				case <-runTestSetCtx.Done():
-					setErrStatus(models.TestSetStatusUserAbort)
+					setErrStatus(stoppedSetStatus(ctx, setLastAppErr))
 				}
 				exitLoopChan <- true
 				runTestSetCtxCancel()
@@ -6262,6 +6299,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	appFailure := getLastAppErr()
+	r.setAppExit = appFailure
 	appLogs := appFailure.AppLogs
 
 	// A set that stopped part-way is not a pass. scoredNothing below catches
