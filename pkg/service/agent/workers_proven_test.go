@@ -32,6 +32,12 @@ type instanceHooks struct {
 	ended   []uint32
 	err     error
 	endErr  error
+	// refusal: why these hooks give no process an instance (InstanceRefusal).
+	refusal error
+}
+
+func (h *instanceHooks) InstanceRefusal() error {
+	return h.refusal
 }
 
 func (h *instanceHooks) SetInstance(tgid, id uint32) error {
@@ -177,6 +183,10 @@ func TestASecondProcesssFixNamesWorkersOnlyWhereTheRunTakesThem(t *testing.T) {
 		}, one},
 		{"record's full round", func(_ *testing.T, a *Agent, _ *instanceHooks) { a.proven.order.learn = true }, one},
 		{"one worker", func(t *testing.T, _ *Agent, _ *instanceHooks) { setMaxWorkers(t, 1) }, one},
+		{"an agent in a PID namespace of its own", func(_ *testing.T, _ *Agent, h *instanceHooks) {
+			h.refusal = errors.New("keploy's agent runs in a PID namespace of its own")
+		}, one},
+		{"hooks that stamp no connection", func(_ *testing.T, a *Agent, _ *instanceHooks) { a.Hooks = &countHooks{} }, one},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			a, h := workerAgent(t, models.MODE_RECORD, 4)
@@ -413,6 +423,29 @@ func TestAWorkerKeployCannotGiveAnInstanceIsRefused(t *testing.T) {
 	require.Equal(t, models.ScopeErrNotInInstance, serr.Code)
 	require.Contains(t, serr.Message, "PID namespace of its own")
 	require.Empty(t, b.proven.workers, "a refused claim is no worker")
+}
+
+// Hooks that can give no process of the run an instance (an agent in a PID
+// namespace of its own) refuse the run's count at the claim, before any
+// instance is asked for, in the same words for every test process of the
+// run, naming none of them, with the fix.
+func TestAWorkerRunIsRefusedOnceWhereNoProcessCanHaveAnInstance(t *testing.T) {
+	a, h := workerAgent(t, models.MODE_RECORD, 4)
+	h.refusal = errors.New("keploy's agent runs in a PID namespace of its own, and keeps test workers apart only in the host's")
+	_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "a", Workers: 4}, os.Getpid())
+	require.NotNil(t, serr)
+	require.Equal(t, models.ScopeErrNotInInstance, serr.Code)
+	require.Equal(t, http.StatusUnprocessableEntity, serr.Status)
+	require.Equal(t, "a test process declared 4 test workers, but keploy's agent runs in a PID namespace of its own, and keeps test workers apart only in the host's", serr.Message)
+	require.Equal(t, "run one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand), or run keploy's agent in the host's PID namespace", serr.Remedy)
+	refusedAlike(t, a, models.InstanceReq{Key: "b", Workers: 4}, child(t).Process.Pid, serr, os.Getpid())
+	require.Empty(t, h.triedIDs(), "no instance is asked for")
+	require.Empty(t, a.proven.workers, "a refused claim is no worker")
+
+	// One test process claims the run as before.
+	resp, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "a", Workers: 1}, os.Getpid())
+	require.Nil(t, serr)
+	require.Equal(t, models.InstanceRun, resp.Instance)
 }
 
 // An id a gone worker's survivor is still in is not given: the next is.

@@ -60,7 +60,7 @@ type provenWire struct {
 	// test process), the attempt of the test that instance has open; an
 	// instance with none open has no entry. Each worker runs one test at a
 	// time; different workers' tests may be open at once, in a run that
-	// takes its workers (workersRefusal).
+	// takes its workers (workerHooks).
 	open map[uint32]scopeTest
 	// openFrom is, by test ID, the capture-loss counts read as a test began
 	// while another worker's test was open: the test's own kinds
@@ -461,10 +461,11 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	a.endGoneWorkers(ctx)
 	me := claimant{pid: caller, start: start}
 	if declared > 1 {
-		if serr := a.workersRefusal(ctx, declared); serr != nil {
+		stamper, serr := a.workerHooks(ctx, declared)
+		if serr != nil {
 			return models.InstanceResp{}, serr
 		}
-		return a.claimWorker(ctx, req, me, declared)
+		return a.claimWorker(ctx, req, me, declared, stamper)
 	}
 	a.provenMu.Lock()
 	if ids := a.workerIDs(); len(ids) > 0 {

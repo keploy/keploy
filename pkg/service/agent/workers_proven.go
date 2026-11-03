@@ -65,32 +65,37 @@ func declaredWorkers(n, caller int) (int, *models.ScopeError) {
 	return n, nil
 }
 
-// workersRefusal is why this run takes no claim of declared test workers
-// (more than one), nil when it takes one. Each reason holds for the whole
-// run, so it is checked at the claim, before any test runs, never at a begin
-// that happens to overlap another worker's test: whether a run is taken
-// never depends on how its workers' tests are scheduled. For the same
-// reason a refusal names no process: every test process of the run that
-// claims is refused in the same words, one refusal said once.
-func (a *Agent) workersRefusal(ctx context.Context, declared int) *models.ScopeError {
+// workerHooks is the hooks that put each of the run's declared test
+// workers (more than one) in an instance of their own, or why this run takes
+// no claim of declared test workers. Each reason holds for the whole run, so
+// it is checked at the claim, before any test runs, never at a begin that
+// happens to overlap another worker's test: whether a run is taken never
+// depends on how its workers' tests are scheduled. For the same reason a
+// refusal names no process: every test process of the run that claims is
+// refused in the same words, one refusal said once.
+func (a *Agent) workerHooks(ctx context.Context, declared int) (coreAgent.InstanceStamper, *models.ScopeError) {
 	if serr := a.learnWorkersRefusal(declared); serr != nil {
-		return serr
+		return nil, serr
 	}
 	if serr := a.clockWorkersRefusal(declared); serr != nil {
-		return serr
+		return nil, serr
 	}
-	return a.lossWorkersRefusal(ctx, declared)
+	if serr := a.lossWorkersRefusal(ctx, declared); serr != nil {
+		return nil, serr
+	}
+	return a.workerStamper(declared)
 }
 
 // takesWorkers says this run would take a claim of more than one test
 // worker from process pid: the build runs them (MaxWorkers) and nothing of
-// the run refuses them (workersRefusal). A remedy names declaring the
+// the run refuses them (workerHooks). A remedy names declaring the
 // workers only where it says so.
 func (a *Agent) takesWorkers(ctx context.Context, pid int) bool {
 	if _, serr := declaredWorkers(2, pid); serr != nil {
 		return false
 	}
-	return a.workersRefusal(ctx, 2) == nil
+	_, serr := a.workerHooks(ctx, 2)
+	return serr == nil
 }
 
 // learnWorkersRefusal refuses a claim as one of declared test
@@ -142,16 +147,32 @@ func (a *Agent) lossWorkersRefusal(ctx context.Context, declared int) *models.Sc
 		"run one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
 }
 
-// claimWorker claims an instance of the run for me, a worker of a run of
-// declared workers. With the wire held, after ClaimInstance's checks of the
-// caller and endGoneWorkers.
-func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me claimant, declared int) (models.InstanceResp, *models.ScopeError) {
+// workerStamper is the hooks that put each of the run's declared test
+// workers in an instance of its own (coreAgent.InstanceStamper), or why
+// they cannot for any worker of the run: hooks that stamp no connection
+// with an instance, or an agent in a PID namespace of its own, which cannot
+// read the host's process ids the kernel keeps instances by. Like
+// workerHooks's other reasons, it holds for the whole run and names no
+// process.
+func (a *Agent) workerStamper(declared int) (coreAgent.InstanceStamper, *models.ScopeError) {
 	stamper, ok := a.Hooks.(coreAgent.InstanceStamper)
 	if !ok {
-		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInInstance,
+		return nil, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInInstance,
 			fmt.Sprintf("a test process declared %d test workers, but keploy's hooks cannot tell one worker's calls from another's", declared),
 			"run one worker")
 	}
+	if err := stamper.InstanceRefusal(); err != nil {
+		return nil, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInInstance,
+			fmt.Sprintf("a test process declared %d test workers, but %v", declared, err),
+			"run one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand), or run keploy's agent in the host's PID namespace")
+	}
+	return stamper, nil
+}
+
+// claimWorker claims an instance of the run for me, a worker of a run of
+// declared workers, from the hooks workerHooks gave. With the wire held,
+// after ClaimInstance's checks of the caller and endGoneWorkers.
+func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me claimant, declared int, stamper coreAgent.InstanceStamper) (models.InstanceResp, *models.ScopeError) {
 	a.provenMu.Lock()
 	stale := ""
 	if c := a.proven.claim; c.pid != 0 {

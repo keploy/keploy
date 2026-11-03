@@ -267,12 +267,20 @@ func TestTwoWorkersForksAreEachInItsOwnInstance(t *testing.T) {
 
 // An agent in a PID namespace of its own numbers processes by its own
 // namespace's PIDs, not the kernel's TGIDs instance_of_tgid holds: it gives
-// no instance, and says why.
+// no instance, and says why, both for the whole run (InstanceRefusal) and
+// to a process it is asked to put in one. An agent in the host's refuses
+// none for the whole run.
 func TestAnAgentInAPIDNamespaceOfItsOwnGivesNoInstance(t *testing.T) {
+	h := NewHooks(zap.NewNop(), &config.Config{})
 	if !inOwnPIDNamespace(t) {
+		if err := h.InstanceRefusal(); err != nil {
+			t.Errorf("InstanceRefusal in the host's PID namespace: %v, want none", err)
+		}
 		return
 	}
-	h := NewHooks(zap.NewNop(), &config.Config{})
+	if err := h.InstanceRefusal(); !errors.Is(err, errNotHostPIDs) {
+		t.Errorf("InstanceRefusal in a PID namespace of its own: %v, want errNotHostPIDs", err)
+	}
 	if err := h.SetInstance(uint32(os.Getpid()), 3); !errors.Is(err, errNotHostPIDs) {
 		t.Errorf("SetInstance from a PID namespace of its own: %v, want errNotHostPIDs", err)
 	}
