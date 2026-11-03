@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"go.uber.org/zap"
@@ -255,6 +256,296 @@ func TestTheProxysCloseThenTheApplicationsUnacknowledgedFINIsNoLoss(t *testing.T
 	}
 }
 
+// closeBegunNotDone begins the proxy's close of a pair held by a new Proxy,
+// after it read the 10 bytes the application wrote, and leaves it short of the
+// kernel: the close is read (atClose), the descriptor is marked closing, so
+// the wait reads the proxy's side as closed, but the close(2) has not run. A
+// reference a stalled goroutine holds is what holds it here, as one more step
+// of Close's own on a loaded host does: an epoll removal, a thread not given a
+// CPU. let lets the close finish.
+func closeBegunNotDone(t *testing.T) (p *Proxy, pc *pairedConn, app *net.TCPConn, at proxySide, let func()) {
+	t.Helper()
+	p, app, proxySide, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+	if _, err := app.Write([]byte("publish 1\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(reader, make([]byte, 10)); err != nil {
+		t.Fatal(err)
+	}
+	pc = pairedConnOf(t, p, 1)
+	rc, err := proxySide.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, release := make(chan struct{}), make(chan struct{})
+	refDone := make(chan struct{})
+	go func() {
+		defer close(refDone)
+		_ = rc.Read(func(uintptr) bool {
+			close(held)
+			<-release
+			return true
+		})
+	}()
+	<-held
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
+		_ = reader.Close()
+	}()
+	for !errors.Is(readProxySide(proxySide).err, net.ErrClosed) {
+		runtime.Gosched()
+	}
+	var once sync.Once
+	let = func() {
+		once.Do(func() {
+			close(release)
+			<-refDone
+			<-closeDone
+		})
+	}
+	t.Cleanup(let)
+	at, closed := pc.side()
+	if !closed || at.state != tcpEstablished {
+		t.Fatalf("the proxy's side as its close began: %+v closed %v, want the close's own read of an established socket", at, closed)
+	}
+	if d, err := lookupTCP(pc.proxy, pc.app); err != nil || d.state != tcpEstablished {
+		t.Fatalf("the proxy's socket before its close reached the kernel: %+v %v, want it established", d, err)
+	}
+	return p, pc, app, at, let
+}
+
+// wroteBeforeTheClose makes pc's record of what the application had written
+// as the proxy began closing it (noteWroteAtClose) n bytes past what its side
+// had received then (at), a FIN the last of them when the row's application
+// had closed: what that read finds when they were written before the close
+// and were still on their way, which this fixture on loopback cannot hold
+// back on demand (the root rows hold them with a socket filter instead). Without it the
+// record is the read's own, and bytes written after closeBegunNotDone came
+// after the close began: no loss, and nothing to wait for
+// (TestBytesTheApplicationWritesAfterTheProxysCloseBeganAreNoLoss).
+func wroteBeforeTheClose(pc *pairedConn, at proxySide, n uint64) {
+	pc.wroteAtClose.Store(&appWrote{want: at.received + n})
+}
+
+// proxySocketIn waits until the proxy's socket of pc shows state.
+func proxySocketIn(t *testing.T, pc *pairedConn, state uint8) {
+	t.Helper()
+	for {
+		d, err := lookupTCP(pc.proxy, pc.app)
+		if err != nil {
+			t.Fatalf("the proxy's socket: %v", err)
+		}
+		if d.state == state {
+			return
+		}
+		runtime.Gosched()
+	}
+}
+
+// The proxy answered, began closing the connection, and the application's FIN
+// came in before the close reached the kernel. What was written counts that
+// FIN, which the close's own read of the proxy's side, made before it, does
+// not, so the wait is one FIN short, and the socket it finds is no orphan: it
+// took the FIN in sequence (CLOSE_WAIT), so nothing was refused. No test ends
+// up charged with bytes nobody lost (a 502 Connection: close that the
+// application closed on at once, under load: mock-pins-e2e's first-use row).
+func TestAFINTakenBeforeTheProxysCloseReachedTheKernelIsNoLoss(t *testing.T) {
+	p, pc, app, at, let := closeBegunNotDone(t)
+	wroteBeforeTheClose(pc, at, 1)
+	_ = app.Close()
+	proxySocketIn(t, pc, tcpCloseWait)
+	target := &pairTarget{pc: pc, want: at.received + 1, finCounted: true}
+	reached, err := p.pairReached(target)
+	if err != nil || !reached {
+		t.Fatalf("pairReached = %v, %v, want settled: the proxy's socket took the application's FIN in sequence", reached, err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d app_bytes_lost charged, want none: every byte the application wrote, and its FIN, reached the proxy", l)
+	}
+	let()
+}
+
+// The same close, read only once it reached the kernel: the socket that took
+// the FIN closed from CLOSE_WAIT to LAST_ACK and went as the application
+// acknowledged its own FIN, so no orphan is left to tell. The application's
+// socket, in TIME_WAIT, tells: its FIN was acknowledged, so nothing was refused.
+func TestAnOrphanGoneAfterItTookTheFINIsToldByTheApplicationsSocket(t *testing.T) {
+	p, pc, app, at, let := closeBegunNotDone(t)
+	wroteBeforeTheClose(pc, at, 1)
+	_ = app.Close()
+	proxySocketIn(t, pc, tcpCloseWait)
+	let()
+	if gone := orphanIn(t, pc, 0); !gone {
+		t.Fatal("the proxy's socket stayed after it took the application's FIN and closed")
+	}
+	target := &pairTarget{pc: pc, want: at.received + 1, finCounted: true}
+	d, err := lookupTCPOrdered(pc.app, pc.proxy)
+	if errors.Is(err, errNoSocket) {
+		// TIME_WAIT takes a bucket from the network namespace's budget,
+		// which a loaded runner's earlier connections can have used up:
+		// with neither socket left nothing tells, and the wait says so.
+		if _, err := p.pairReached(target); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+			t.Fatalf("pairReached with neither socket left: %v, want unknown", err)
+		}
+		return
+	}
+	if err != nil || d.state != tcpTimeWait {
+		t.Fatalf("the application's socket: %+v %v, want TIME_WAIT", d, err)
+	}
+	if reached, err := p.pairReached(target); err != nil || !reached {
+		t.Fatalf("pairReached = %v, %v, want settled: the application's FIN was acknowledged", reached, err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d app_bytes_lost charged, want none", l)
+	}
+	// That FIN speaks for itself alone: bytes short of it stay a loss.
+	wroteBeforeTheClose(pc, at, 2)
+	target = &pairTarget{pc: pc, want: at.received + 2, finCounted: true}
+	if reached, err := p.pairReached(target); err != nil || !reached {
+		t.Fatalf("pairReached two short = %v, %v, want settled as a loss", reached, err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+		t.Fatalf("two short: %d app_bytes_lost charged, want 1", l)
+	}
+}
+
+// An orphan gone with the application's socket showing no acknowledged FIN
+// says nothing: the kernel destroys one it has no room for as it destroys one
+// that refused a byte. Only an acknowledged FIN speaks for the bytes before it.
+func TestAnOrphanGoneWithTheApplicationsFINUnacknowledgedIsUnknown(t *testing.T) {
+	p, app, _, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+	if _, err := app.Write([]byte("publish 1\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(reader, make([]byte, 10)); err != nil {
+		t.Fatal(err)
+	}
+	_ = reader.Close()
+	if _, err := app.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("the application's read after the proxy's close: %v, want EOF", err)
+	}
+	pc := pairedConnOf(t, p, 1)
+	ps, closed := pc.side()
+	if !closed {
+		t.Fatal("the proxy's side is not closed")
+	}
+	was := lookupOrphan
+	lookupOrphan = func(dev uint32, local, remote netip.AddrPort) (diagTCP, error) {
+		if local == pc.proxy {
+			return diagTCP{}, errNoSocket
+		}
+		return was(dev, local, remote)
+	}
+	t.Cleanup(func() { lookupOrphan = was })
+	wroteBeforeTheClose(pc, ps, 1)
+	_, err := p.pairReached(&pairTarget{pc: pc, want: ps.received + 1, finCounted: true})
+	if !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "is gone") {
+		t.Fatalf("pairReached: %v, want unknown: the application's socket, in CLOSE_WAIT, says nothing of its FIN", err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d app_bytes_lost charged, want none", l)
+	}
+}
+
+// The same close with the application's FIN still on its way: the socket, not
+// yet an orphan, still ESTABLISHED, will take it or refuse a byte in its turn.
+// The wait waits, as it does for an orphan one FIN short, and settles when the
+// FIN comes in. It charges nothing on the way.
+func TestAFINOnItsWayToACloseNotYetInTheKernelIsWaitedFor(t *testing.T) {
+	p, pc, app, at, let := closeBegunNotDone(t)
+	wroteBeforeTheClose(pc, at, 1)
+	target := &pairTarget{pc: pc, want: at.received + 1, finCounted: true}
+	reached, err := p.pairReached(target)
+	if err != nil || reached {
+		t.Fatalf("pairReached = %v, %v, want a wait: the FIN is on its way", reached, err)
+	}
+	if target.orphan != tcpEstablished {
+		t.Fatalf("the wait looks for state %d, want the socket's own, ESTABLISHED", target.orphan)
+	}
+	if got := orphansUnmoved([]*pairTarget{target}).Error(); !strings.Contains(got, "ESTABLISHED") {
+		t.Fatalf("a wait that ends on it says %q, want the socket's state named", got)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d app_bytes_lost charged while the FIN was on its way, want none", l)
+	}
+	_ = app.Close()
+	proxySocketIn(t, pc, tcpCloseWait)
+	if reached, err := p.pairReached(target); err != nil || !reached {
+		t.Fatalf("pairReached after the FIN = %v, %v, want settled", reached, err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d app_bytes_lost charged, want none", l)
+	}
+	let()
+}
+
+// A close that has not reached the kernel loses bytes all the same: nothing
+// reads the descriptor again, so bytes written before the close began that
+// come in now go with the close (a real loss of the application's request:
+// it stays one). The
+// FIN taken after them says nothing for them, one byte short with no FIN
+// counted (a byte of data, the wait's count of what was written having no FIN
+// in it) as two short with one: each is a loss.
+func TestBytesThatMissedTheCloseAreALossBeforeItReachesTheKernel(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		short      uint64
+		finCounted bool
+	}{
+		{"two short with the FIN", 2, true},
+		{"one short with no FIN counted", 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, pc, app, at, let := closeBegunNotDone(t)
+			wroteBeforeTheClose(pc, at, tc.short)
+			if _, err := app.Write([]byte("x")); err != nil {
+				t.Fatal(err)
+			}
+			_ = app.Close()
+			proxySocketIn(t, pc, tcpCloseWait)
+			target := &pairTarget{pc: pc, want: at.received + tc.short, finCounted: tc.finCounted}
+			if reached, err := p.pairReached(target); err != nil || !reached {
+				t.Fatalf("pairReached = %v, %v, want settled as a loss", reached, err)
+			}
+			if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+				t.Fatalf("%d app_bytes_lost charged, want 1: the byte went with the close", l)
+			}
+			let()
+		})
+	}
+	// A byte on its way as the close began, and the FIN written after it:
+	// what the close's read counts (no FIN) is what is judged, and the byte
+	// short of it is data, a loss, whatever the FIN the wait reads later.
+	t.Run("a byte short of the close's count, the FIN after it", func(t *testing.T) {
+		p, pc, app, at, let := closeBegunNotDone(t)
+		wroteBeforeTheClose(pc, at, 1)
+		_ = app.Close()
+		proxySocketIn(t, pc, tcpCloseWait)
+		target := &pairTarget{pc: pc, want: at.received + 2, finCounted: true}
+		if reached, err := p.pairReached(target); err != nil || !reached {
+			t.Fatalf("pairReached = %v, %v, want settled as a loss", reached, err)
+		}
+		if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+			t.Fatalf("%d app_bytes_lost charged, want 1: the byte written before the close never reached the proxy", l)
+		}
+		let()
+	})
+	// Bytes short with the socket still ESTABLISHED are no FIN on its way.
+	t.Run("two short before anything came in", func(t *testing.T) {
+		p, pc, _, at, let := closeBegunNotDone(t)
+		wroteBeforeTheClose(pc, at, 2)
+		target := &pairTarget{pc: pc, want: at.received + 2, finCounted: true}
+		if reached, err := p.pairReached(target); err != nil || !reached {
+			t.Fatalf("pairReached = %v, %v, want settled as a loss", reached, err)
+		}
+		if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+			t.Fatalf("%d app_bytes_lost charged, want 1", l)
+		}
+		let()
+	})
+}
+
 // pairReached on a connection the proxy closed one short of what the
 // application wrote (what appWritten reads once the application has closed,
 // its FIN not yet acknowledged: the bytes and the FIN), on the kernel's own
@@ -313,6 +604,11 @@ func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
 		if !closed || ps.err != nil || ps.received != 10 {
 			t.Fatalf("the proxy's side: closed %v, received %d (%v), want closed after 10", closed, ps.received, ps.err)
 		}
+		// The rows judge the targets they give the wait, as written
+		// before the close began: no record of the close's own read
+		// caps them, as none does when that read fails
+		// (noteWroteAtClose).
+		pc.wroteAtClose.Store(nil)
 		return pc, app, ps
 	}
 	// closedPairOn is closedPairWith closing the proxy's side as the proxy
@@ -483,7 +779,7 @@ func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
 	t.Run("its orphan unreadable, one short is unknown", func(t *testing.T) {
 		p, pc, _, ps := closedPair(t, 120)
 		was := lookupOrphan
-		lookupOrphan = func(netip.AddrPort, netip.AddrPort) (diagTCP, error) {
+		lookupOrphan = func(uint32, netip.AddrPort, netip.AddrPort) (diagTCP, error) {
 			return diagTCP{}, fmt.Errorf("sock_diag socket: %w", unix.EMFILE)
 		}
 		t.Cleanup(func() { lookupOrphan = was })
@@ -866,7 +1162,7 @@ func TestAConnectionServedWithoutASessionAfterTheWaitTookItHoldsNothing(t *testi
 			case "gone after the close":
 				// pairTarget's read raced the mark: it found the socket gone.
 				for {
-					if _, _, err := appWritten(ds, pc.app, pc.proxy); errors.Is(err, errNoSocket) {
+					if _, _, _, err := appWritten(ds, pc); errors.Is(err, errNoSocket) {
 						break
 					}
 					runtime.Gosched()
@@ -1029,12 +1325,55 @@ func goneStill(t *testing.T, pc *pairedConn) bool {
 	return false
 }
 
+// heldTOS is the IP TOS an application's socket marks its segments with to
+// have heldFINFilter hold its FIN off.
+const heldTOS = 0x10
+
+// heldFINFilter is a socket filter that drops a segment that carries a FIN and
+// heldTOS, and takes every other: a FIN sent before the proxy's close is held
+// on its way while the ACKs sent with it are not, and the application's
+// socket lets it through by clearing the mark (its next send of the FIN). A
+// TCP socket's filter sees the segment from its TCP header (tcp_v4_rcv), the
+// IP header at SKF_NET_OFF.
+func heldFINFilter() []unix.SockFilter {
+	return []unix.SockFilter{
+		{Code: unix.BPF_LD | unix.BPF_B | unix.BPF_ABS, K: 0xfff00001}, // SKF_NET_OFF (-0x100000) + 1: the TOS
+		{Code: unix.BPF_ALU | unix.BPF_AND | unix.BPF_K, K: 0xfc},      // less ECN
+		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: heldTOS, Jt: 0, Jf: 3},
+		{Code: unix.BPF_LD | unix.BPF_B | unix.BPF_ABS, K: 13}, // the TCP flags
+		{Code: unix.BPF_JMP | unix.BPF_JSET | unix.BPF_K, K: 0x01, Jt: 0, Jf: 1},
+		{Code: unix.BPF_RET | unix.BPF_K, K: 0},
+		{Code: unix.BPF_RET | unix.BPF_K, K: 0xffffffff},
+	}
+}
+
+// appSocketIn waits until the application's socket c shows state.
+func appSocketIn(t *testing.T, c *net.TCPConn, state uint8) {
+	t.Helper()
+	local, remote := mustAddrPort(t, c.LocalAddr()), mustAddrPort(t, c.RemoteAddr())
+	for {
+		d, err := lookupTCP(local, remote)
+		if err != nil {
+			t.Fatalf("the application's socket: %v", err)
+		}
+		if d.state == state {
+			return
+		}
+		runtime.Gosched()
+	}
+}
+
 // An orphan's own move is the wait moving: the proxy's orphan in FIN_WAIT1
 // (its FIN not acknowledged: a drop-all filter on the application's socket
 // holds it off) that reaches FIN_WAIT2 once the filter is gone restarts the
-// wait's budget, and the wait then settles on the FIN it takes. A root test:
-// Linux 7 refuses an unprivileged filter on a TCP socket, and CI's root step
-// runs it, failing on a skip.
+// wait's budget, and the wait then settles on the FIN it takes. That FIN was
+// sent before the close began (the application's half-close), so the close's
+// read counts it, and the wait waits for it: a filter on the proxy's socket
+// holds it off, dropping a FIN that comes with the IP TOS the application
+// marks its segments with (heldFINFilter), and lets the ACK of the orphan's
+// own FIN through. Clearing the mark lets the FIN, sent again, through. A root
+// test: Linux 7 refuses an unprivileged filter on a TCP socket, and CI's root
+// step runs it, failing on a skip.
 func TestAnOrphansMoveRestartsTheBytesWaitsBudget(t *testing.T) {
 	p, app, proxySide, reader := heldPair(t, "tcp4", "127.0.0.1:0")
 	clk := &stall.ManualClock{}
@@ -1055,13 +1394,9 @@ func TestAnOrphansMoveRestartsTheBytesWaitsBudget(t *testing.T) {
 	if _, err := io.ReadFull(reader, make([]byte, 10)); err != nil {
 		t.Fatal(err)
 	}
-	arc, err := app.SyscallConn()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := arc.Control(func(fd uintptr) {
-		drop := []unix.SockFilter{{Code: unix.BPF_RET | unix.BPF_K, K: 0}}
-		serr = unix.SetsockoptSockFprog(int(fd), unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &unix.SockFprog{Len: 1, Filter: &drop[0]})
+	if err := rc.Control(func(fd uintptr) {
+		held := heldFINFilter()
+		serr = unix.SetsockoptSockFprog(int(fd), unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &unix.SockFprog{Len: uint16(len(held)), Filter: &held[0]})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1069,13 +1404,32 @@ func TestAnOrphansMoveRestartsTheBytesWaitsBudget(t *testing.T) {
 		t.Skipf("this kernel refuses an unprivileged socket filter on a TCP socket: %v", serr)
 	}
 	if serr != nil {
-		t.Fatalf("attach a drop-all filter to the application's socket: %v", serr)
+		t.Fatalf("attach the held-FIN filter to the proxy's socket: %v", serr)
 	}
-	_ = reader.Close() // its FIN, which the application's socket drops
+	arc, err := app.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := arc.Control(func(fd uintptr) {
+		drop := []unix.SockFilter{{Code: unix.BPF_RET | unix.BPF_K, K: 0}}
+		if serr = unix.SetsockoptSockFprog(int(fd), unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &unix.SockFprog{Len: 1, Filter: &drop[0]}); serr == nil {
+			serr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_TOS, heldTOS)
+		}
+	}); err != nil || serr != nil {
+		t.Fatalf("attach a drop-all filter to the application's socket, and mark its segments: %v %v", err, serr)
+	}
+	if err := app.CloseWrite(); err != nil { // its FIN, which the proxy's socket drops
+		t.Fatal(err)
+	}
+	appSocketIn(t, app, tcpFinWait1)
+	_ = reader.Close() // the proxy's FIN, which the application's socket drops
 	pc := pairedConnOf(t, p, 1)
 	ps, closed := pc.side()
 	if !closed || ps.err != nil || ps.received != 10 {
 		t.Fatalf("the proxy's side: closed %v, received %d (%v), want closed after 10", closed, ps.received, ps.err)
+	}
+	if w := pc.wroteAtClose.Load(); w == nil || w.want != ps.received+1 {
+		t.Fatalf("the close's read of the application's socket: %+v, want the 10 bytes and the FIN written before it", w)
 	}
 	if orphanIn(t, pc, tcpFinWait1) {
 		// Its orphan or memory limits took it at the close: judged gone.
@@ -1115,7 +1469,10 @@ func TestAnOrphansMoveRestartsTheBytesWaitsBudget(t *testing.T) {
 	}
 	clk.Advance(orphanFINBudget - stall.Tick)
 	awaitLook(t, clk, done, "short of the budget that began at the orphan's move")
-	_ = app.Close() // the FIN
+	// The FIN, sent again unmarked, gets through.
+	if err := arc.Control(func(fd uintptr) { serr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_TOS, 0) }); err != nil || serr != nil {
+		t.Fatalf("clear the application's mark: %v %v", err, serr)
+	}
 	gone = orphanIn(t, pc, tcpTimeWait)
 	clk.Pass()
 	err = <-done
@@ -1133,19 +1490,21 @@ func TestAnOrphansMoveRestartsTheBytesWaitsBudget(t *testing.T) {
 	}
 }
 
-// Close to the CI's shape (E-C6 12078), through WaitPairedBytes: the
-// application read the proxy's FIN and closed, its socket in LAST_ACK, its FIN
-// on its way to the proxy's closed side, which a drop-all filter on the
-// proxy's socket holds off. The wait reads the FIN counted in what was
-// written, and waits on the proxy's socket instead of answering at once; once
-// the filter goes, the FIN is taken and the wait settles with no loss. The
+// Through WaitPairedBytes: the proxy had shut its write side (its FIN), the
+// application read that FIN and closed, its socket in LAST_ACK, and its FIN,
+// sent before the proxy's close began, was still on its way to the proxy's
+// side, which a drop-all filter on the proxy's socket holds off. The close's
+// read counts that FIN, and so does what the wait reads as written, so the
+// wait waits on the proxy's socket instead of answering at once; once the
+// filter goes, the FIN is taken and the wait settles with no loss. (A FIN the
+// application sends after the close began, as it does on reading the FIN of
+// the close itself, is no loss, and the close's read settles it at once.) The
 // handler's close is the proxy's (read first, as the accept loop's), but a dup
-// of the socket's descriptor keeps it open so the filter can be taken off, and
-// the proxy's FIN is sent by shutting its write side. So the proxy's socket is
-// a full one in FIN_WAIT1 (the filter drops the application's ACK too), not
-// the timewait socket in FIN_WAIT2 that a real orphan most likely is; the wait
-// reads only its state, which is the same. A root test, as the other filter
-// tests.
+// of the socket's descriptor keeps it open so the filter can be taken off. So
+// the proxy's socket is a full one in FIN_WAIT1 (the filter drops the
+// application's ACK too), not the timewait socket in FIN_WAIT2 that a real
+// orphan most likely is; the wait reads only its state, which is the same. A
+// root test, as the other filter tests.
 func TestAFINStillOnItsWayToAClosedConnectionIsWaitedFor(t *testing.T) {
 	p, app, proxySide, reader := heldPair(t, "tcp4", "127.0.0.1:0")
 	clk := &stall.ManualClock{}
@@ -1176,26 +1535,20 @@ func TestAFINStillOnItsWayToAClosedConnectionIsWaitedFor(t *testing.T) {
 		t.Fatalf("attach a drop-all filter to the proxy's socket, and dup it: %v", serr)
 	}
 	t.Cleanup(func() { _ = unix.Close(dfd) })
-	_ = reader.Close() // the handler's close, read first
 	if err := unix.Shutdown(dfd, unix.SHUT_WR); err != nil {
 		t.Fatalf("the proxy's FIN: %v", err)
 	}
 	if _, err := app.Read(make([]byte, 1)); err != io.EOF {
 		t.Fatalf("the application's read after the proxy's FIN: %v, want EOF", err)
 	}
-	local, remote := mustAddrPort(t, app.LocalAddr()), mustAddrPort(t, app.RemoteAddr())
+	appSocketIn(t, app, tcpCloseWait)
 	_ = app.Close() // its FIN, which the proxy's socket drops
-	for {
-		d, err := lookupTCP(local, remote)
-		if err != nil {
-			t.Fatalf("the application's socket after its close: %v", err)
-		}
-		if d.state == tcpLastAck {
-			break
-		}
-		runtime.Gosched()
-	}
+	appSocketIn(t, app, tcpLastAck)
+	_ = reader.Close() // the handler's close, read first
 	pc := pairedConnOf(t, p, 1)
+	if w := pc.wroteAtClose.Load(); w == nil || w.want != 11 {
+		t.Fatalf("the close's read of the application's socket: %+v, want the 10 bytes and the FIN written before it", w)
+	}
 	done := make(chan error, 1)
 	go func() { done <- p.WaitPairedBytes(context.Background(), 1) }()
 	awaitLook(t, clk, done, "while the application's FIN was still on its way")
@@ -1235,4 +1588,422 @@ func TestAFINStillOnItsWayToAClosedConnectionIsWaitedFor(t *testing.T) {
 	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
 		t.Fatalf("%d app_bytes_lost charged, want none", l)
 	}
+}
+
+// Bytes the application writes once the proxy has begun closing the
+// connection are no capture loss: keploy's close, not a capture it missed,
+// ended the connection under them, as a server's close would. The close's own
+// read of the application's socket (noteWroteAtClose) bounds what the wait
+// waits for, so a byte that comes in before the close reaches the kernel, and
+// goes with it, is none; nor is the reset the close answers it with, which
+// leaves the application's socket gone when a later wait begins.
+func TestBytesTheApplicationWritesAfterTheProxysCloseBeganAreNoLoss(t *testing.T) {
+	p, pc, app, at, let := closeBegunNotDone(t)
+	if w := pc.wroteAtClose.Load(); w == nil || w.want != at.received {
+		t.Fatalf("the close's read of the application's socket: %+v, want the %d bytes written before it", w, at.received)
+	}
+	if _, err := app.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	_ = app.Close()
+	proxySocketIn(t, pc, tcpCloseWait)
+	// What a wait reads of the application's socket now: the byte and the FIN.
+	target := &pairTarget{pc: pc, want: at.received + 2, finCounted: true}
+	if reached, err := p.pairReached(target); err != nil || !reached {
+		t.Fatalf("pairReached = %v, %v, want settled: nothing written before the close was missed", reached, err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d app_bytes_lost charged for a byte written after the proxy's close began, want none", l)
+	}
+	let() // the close tosses the byte unread: a reset to the application
+	for {
+		if _, err := lookupTCP(pc.app, pc.proxy); errors.Is(err, errNoSocket) {
+			break
+		}
+		runtime.Gosched()
+	}
+	if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
+		t.Fatalf("WaitPairedBytes with the application's socket reset after the close: %v, want settled: the reset refused only a byte written after the close", err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d app_bytes_lost charged, want none", l)
+	}
+}
+
+// The close-gap of TestAFINTakenBeforeTheProxysCloseReachedTheKernelIsNoLoss
+// with the application's half-close (shutdown of its write side) before the
+// close began: its socket stays a full socket in FIN_WAIT2 once the FIN is
+// acknowledged, and what it wrote counts that FIN. The wait reads it through
+// the product's pairTarget, which counts a FIN there as it does in FIN_WAIT1.
+func TestAHalfCloseAcknowledgedBeforeTheProxysCloseReachedTheKernelIsNoLoss(t *testing.T) {
+	p, pc, app, at, let := closeBegunNotDone(t)
+	wroteBeforeTheClose(pc, at, 1)
+	if err := app.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	proxySocketIn(t, pc, tcpCloseWait)
+	for {
+		d, err := lookupTCP(pc.app, pc.proxy)
+		if err != nil {
+			t.Fatalf("the application's socket: %v", err)
+		}
+		if d.state == tcpFinWait2 && d.info != nil {
+			break
+		}
+		runtime.Gosched()
+	}
+	ds, err := openDiag()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ds.close()
+	target, err := p.pairTarget(ds, pc)
+	if err != nil || target == nil {
+		t.Fatalf("pairTarget = %+v, %v", target, err)
+	}
+	if target.want != at.received+1 || !target.finCounted {
+		t.Fatalf("pairTarget: want %d, finCounted %v; want %d with the FIN counted: the application's socket in FIN_WAIT2 has sent it", target.want, target.finCounted, at.received+1)
+	}
+	if reached, err := p.pairReached(target); err != nil || !reached {
+		t.Fatalf("pairReached = %v, %v, want settled", reached, err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d app_bytes_lost charged, want none: the application wrote 10 bytes and its FIN was acknowledged in sequence", l)
+	}
+	let()
+}
+
+// appFINAcknowledged reads the application's socket as orphanTookFIN reads the
+// orphan, by the read ordered against its move to the timewait table
+// (lookupOrphan): an exact lookup made as it moves can miss it, or find the
+// full socket it leaves. Here that read finds it in TIME_WAIT, its FIN
+// acknowledged, while the socket an exact lookup finds is still the full one,
+// in FIN_WAIT2.
+func TestTheApplicationsAcknowledgedFINIsReadAsTheOrphanIs(t *testing.T) {
+	p, pc, app, at, let := closeBegunNotDone(t)
+	wroteBeforeTheClose(pc, at, 1)
+	_ = app.Close()
+	proxySocketIn(t, pc, tcpCloseWait)
+	for {
+		d, err := lookupTCP(pc.app, pc.proxy)
+		if err != nil {
+			t.Fatalf("the application's socket: %v", err)
+		}
+		if d.state == tcpFinWait2 {
+			break
+		}
+		runtime.Gosched() // its FIN's ACK can be a delayed one
+	}
+	was := lookupOrphan
+	lookupOrphan = func(_ uint32, local, _ netip.AddrPort) (diagTCP, error) {
+		if local == pc.proxy {
+			return diagTCP{}, errNoSocket
+		}
+		return diagTCP{state: tcpTimeWait}, nil
+	}
+	t.Cleanup(func() { lookupOrphan = was })
+	if reached, err := p.pairReached(&pairTarget{pc: pc, want: at.received + 1, finCounted: true}); err != nil || !reached {
+		t.Fatalf("pairReached = %v, %v, want settled: the ordered read finds the application's FIN acknowledged", reached, err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d app_bytes_lost charged, want none", l)
+	}
+	lookupOrphan = was
+	let()
+}
+
+// Bytes written before the proxy's close began and still on their way, which
+// the orphan then refuses with a reset that ends the application's socket,
+// are never settled: the wait, finding that socket gone, cannot tell this
+// reset from one that refused only bytes written after the close, and answers
+// unknown. The record says they were written before the close (a fixture on
+// loopback cannot hold them back: wroteBeforeTheClose); one byte short is the
+// boundary.
+func TestBytesOnTheirWayAtTheCloseThatAResetEndedAreNeverSettled(t *testing.T) {
+	for _, n := range []uint64{5, 1} {
+		t.Run(fmt.Sprintf("%d bytes", n), func(t *testing.T) {
+			p, pc, app, at, let := closeBegunNotDone(t)
+			wroteBeforeTheClose(pc, at, n)
+			let()
+			if _, err := app.Write(make([]byte, n)); err != nil { // the orphan refuses them
+				t.Fatal(err)
+			}
+			for {
+				if _, err := lookupTCP(pc.app, pc.proxy); errors.Is(err, errNoSocket) {
+					break
+				}
+				runtime.Gosched()
+			}
+			err := p.WaitPairedBytes(context.Background(), 1)
+			if !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "cannot be told") {
+				t.Fatalf("WaitPairedBytes = %v; want unknown: bytes written before the close may be what the reset refused", err)
+			}
+		})
+	}
+}
+
+// The close reads the application's socket before its own side: a byte its
+// read counts that the side has not received was written before the close
+// (noteWroteAtClose), which holds only in that order.
+func TestTheCloseReadsTheApplicationsSocketBeforeItsOwnSide(t *testing.T) {
+	p, app, _, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+	if _, err := app.Write([]byte("publish 1\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(reader, make([]byte, 10)); err != nil {
+		t.Fatal(err)
+	}
+	pc := pairedConnOf(t, p, 1)
+	was := lookupWritten
+	var reads, afterSide int
+	lookupWritten = func(ds *diagSock, c *pairedConn, atClose bool) (diagTCP, error) {
+		reads++
+		if pc.atClose.Load() != nil {
+			afterSide++
+		}
+		return was(ds, c, atClose)
+	}
+	t.Cleanup(func() { lookupWritten = was })
+	_ = reader.Close()
+	if reads == 0 || afterSide != 0 {
+		t.Fatalf("the close read the application's socket %d times, %d of them after its own side; want it read, and before the side", reads, afterSide)
+	}
+	if w := pc.wroteAtClose.Load(); w == nil || w.want != 10 {
+		t.Fatalf("the close's record: %+v, want the 10 bytes written", w)
+	}
+}
+
+// A proxy's side that has taken the application's FIN or its reset needs no
+// read of the application's socket at the close: nothing is written after
+// either, so a wait's own read counts what was written before the close. The
+// close makes none, and the wait still settles: on the application's FIN
+// (CLOSE_WAIT), its reset (CLOSE: it closed with SO_LINGER 0), its FIN after
+// the proxy's FIN that the application has not acknowledged (LAST_ACK), and
+// its FIN sent before the proxy's reached it (CLOSING). The last two hold the
+// proxy's FIN unacknowledged with a drop-all filter (on the proxy's socket,
+// on the application's), so they are root cases, as the other filter tests,
+// and CI's root step runs them, failing on a skip.
+func TestACloseAfterTheApplicationsFINReadsNoMore(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state uint8
+		end   func(t *testing.T, app, proxySide *net.TCPConn)
+	}{
+		{"CLOSE_WAIT", tcpCloseWait, // its FIN
+			func(t *testing.T, app, _ *net.TCPConn) { _ = app.Close() }},
+		{"CLOSE", tcpClose, // its reset
+			func(t *testing.T, app, _ *net.TCPConn) {
+				if err := app.SetLinger(0); err != nil {
+					t.Fatal(err)
+				}
+				_ = app.Close()
+			}},
+		{"LAST_ACK", tcpLastAck, // its FIN, then the proxy's, unacknowledged
+			func(t *testing.T, app, proxySide *net.TCPConn) {
+				_ = app.Close()
+				sideIn(t, proxySide, tcpCloseWait)
+				dropAll(t, proxySide)
+				if err := proxySide.CloseWrite(); err != nil {
+					t.Fatalf("the proxy's FIN: %v", err)
+				}
+			}},
+		{"CLOSING", tcpClosing, // its FIN, sent before the proxy's reached it
+			func(t *testing.T, app, proxySide *net.TCPConn) {
+				dropAll(t, app)
+				if err := proxySide.CloseWrite(); err != nil {
+					t.Fatalf("the proxy's FIN: %v", err)
+				}
+				sideIn(t, proxySide, tcpFinWait1)
+				if err := app.CloseWrite(); err != nil {
+					t.Fatalf("the application's FIN: %v", err)
+				}
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, app, proxySide, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+			if _, err := app.Write([]byte("publish 1\n")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.ReadFull(reader, make([]byte, 10)); err != nil {
+				t.Fatal(err)
+			}
+			tc.end(t, app, proxySide)
+			sideIn(t, proxySide, tc.state)
+			pc := pairedConnOf(t, p, 1)
+			was := lookupWritten
+			reads := 0
+			lookupWritten = func(ds *diagSock, c *pairedConn, atClose bool) (diagTCP, error) {
+				reads++
+				return was(ds, c, atClose)
+			}
+			t.Cleanup(func() { lookupWritten = was })
+			_ = reader.Close()
+			if reads != 0 || pc.wroteAtClose.Load() != nil {
+				t.Fatalf("the close read the application's socket %d times (record %+v); want none after its FIN or reset", reads, pc.wroteAtClose.Load())
+			}
+			lookupWritten = was
+			if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
+				t.Fatalf("WaitPairedBytes = %v, want settled", err)
+			}
+			if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+				t.Fatalf("%d app_bytes_lost charged, want none", l)
+			}
+		})
+	}
+}
+
+// sideIn waits until the proxy's socket c, read by its own descriptor as the
+// close reads it (readProxySide), shows state: a socket a reset ended is in no
+// table a lookup reads.
+func sideIn(t *testing.T, c *net.TCPConn, state uint8) {
+	t.Helper()
+	for {
+		ps := readProxySide(c)
+		if ps.err != nil {
+			t.Fatalf("the proxy's side: %v", ps.err)
+		}
+		if ps.state == state {
+			return
+		}
+		runtime.Gosched()
+	}
+}
+
+// dropAll attaches a filter to c's socket that drops every segment it would
+// take, and skips the test where the kernel refuses it unprivileged; the
+// filter goes when the test ends, before c is closed.
+func dropAll(t *testing.T, c *net.TCPConn) {
+	t.Helper()
+	rc, err := c.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var serr error
+	if err := rc.Control(func(fd uintptr) {
+		drop := []unix.SockFilter{{Code: unix.BPF_RET | unix.BPF_K, K: 0}}
+		serr = unix.SetsockoptSockFprog(int(fd), unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &unix.SockFprog{Len: 1, Filter: &drop[0]})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if errors.Is(serr, unix.EPERM) {
+		t.Skipf("this kernel refuses an unprivileged socket filter on a TCP socket: %v", serr)
+	}
+	if serr != nil {
+		t.Fatalf("attach a drop-all filter: %v", serr)
+	}
+	t.Cleanup(func() {
+		_ = rc.Control(func(fd uintptr) { _ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_DETACH_FILTER, 0) })
+	})
+}
+
+// A sock_diag socket on the free list (diagFree) that has gone bad is
+// dropped, and the close reads on a new one: its record is the one a close
+// that found the list empty makes, and the list then holds the new socket,
+// never the bad one, which is closed if it is a descriptor, not left open.
+// One that works is taken and given back. A socket whose lookup fails is
+// never given back, though it is new.
+func TestACloseDropsAFreeSockDiagSocketThatFails(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		bad  func(t *testing.T) *diagSock // nil: one that works
+	}{
+		{"a lookup that fails on a new socket", nil},
+		{"one that works", nil},
+		{"its descriptor closed", func(t *testing.T) *diagSock {
+			ds, err := openDiag()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ds.close()
+			ds.fd = -1 // closed, and no number another open could take
+			return ds
+		}},
+		{"a descriptor that is no sock_diag socket", func(t *testing.T) *diagSock {
+			fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return &diagSock{fd: fd, buf: make([]byte, diagRecvBufLen)}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			emptyDiagFree(t)
+			p, app, _, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+			if _, err := app.Write([]byte("publish 1\n")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.ReadFull(reader, make([]byte, 10)); err != nil {
+				t.Fatal(err)
+			}
+			pc := pairedConnOf(t, p, 1)
+			if tc.name == "a lookup that fails on a new socket" {
+				was := lookupWritten
+				lookupWritten = func(*diagSock, *pairedConn, bool) (diagTCP, error) {
+					return diagTCP{}, fmt.Errorf("sock_diag reply: %w", unix.ENOBUFS)
+				}
+				t.Cleanup(func() { lookupWritten = was })
+				_ = reader.Close()
+				if w := pc.wroteAtClose.Load(); w != nil {
+					t.Fatalf("the close's record: %+v, want none from a lookup that failed", w)
+				}
+				if n := len(diagFree); n != 0 {
+					t.Fatalf("the free list holds %d sockets after a close whose lookup failed, want none", n)
+				}
+				return
+			}
+			var listed *diagSock
+			badLink := ""
+			if tc.bad != nil {
+				if listed = tc.bad(t); listed.fd >= 0 {
+					badLink = socketLink(t, listed.fd)
+				}
+			} else {
+				var err error
+				if listed, err = openDiag(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			diagFree <- listed
+			_ = reader.Close()
+			if w := pc.wroteAtClose.Load(); w == nil || w.want != 10 {
+				t.Fatalf("the close's record: %+v, want the 10 bytes written", w)
+			}
+			if n := len(diagFree); n != 1 {
+				t.Fatalf("the free list holds %d sockets after the close, want 1", n)
+			}
+			ds := <-diagFree
+			defer ds.close()
+			if tc.bad == nil && ds != listed {
+				t.Fatal("the close gave back a socket other than the one it took")
+			}
+			if tc.bad != nil && ds == listed {
+				t.Fatal("the close gave back the socket that failed")
+			}
+			for _, l := range fdLinks(t) {
+				if badLink != "" && l == badLink {
+					t.Fatalf("the listed socket that failed, %s, is still open after the close dropped it", badLink)
+				}
+			}
+			if _, err := ds.lookup(pc.app, pc.proxy); err != nil && !errors.Is(err, errNoSocket) {
+				t.Fatalf("the socket given back fails a lookup: %v", err)
+			}
+		})
+	}
+}
+
+// emptyDiagFree closes every socket on the free list, now and as the test
+// ends.
+func emptyDiagFree(t *testing.T) {
+	empty := func() {
+		for {
+			select {
+			case ds := <-diagFree:
+				ds.close()
+			default:
+				return
+			}
+		}
+	}
+	empty()
+	t.Cleanup(empty)
 }

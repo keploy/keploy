@@ -53,8 +53,8 @@ func TestChargedTaintsWithTheRunsKindsAndKeepsATestsOwnToIt(t *testing.T) {
 	if got := unix.Charged(LossBases{Set: unix, App: unix}, unix); !reflect.DeepEqual(got, unix) {
 		t.Fatalf("a Unix-socket call before the base: Charged = %+v, want %+v", got, unix)
 	}
-	if !CaptureLossTLSAbort.PerTest() || CaptureLossPIDMap.PerTest() || CaptureLossAppBytesLost.PerTest() {
-		t.Fatal("only a TLS client's rejection is a test's own")
+	if !CaptureLossTLSAbort.PerTest() || CaptureLossPIDMap.PerTest() {
+		t.Fatal("a TLS client's rejection is a test's own, a process keploy could not place is not")
 	}
 }
 
@@ -145,6 +145,27 @@ func TestCaptureLossesTextShapesWhatItNames(t *testing.T) {
 		if strings.Contains(shaped, v) {
 			t.Fatalf("text %q holds %q", shaped, v)
 		}
+	}
+}
+
+// Bytes lost with a connection that ended are that connection's, charged to
+// one test: the test the count grew in, never a later one. The same counts,
+// with the test's mark past them, charge nothing, and a kind whose later calls
+// may go with it still taints.
+func TestAppBytesLostChargeOneTest(t *testing.T) {
+	if !CaptureLossAppBytesLost.PerTest() {
+		t.Fatal("app_bytes_lost is not a test's own")
+	}
+	lost := CaptureLosses{{Kind: CaptureLossAppBytesLost, Count: 1, What: "from 127.0.0.1:40000"}}
+	if got := lost.Charged(LossBases{}, nil); !reflect.DeepEqual(got, lost) {
+		t.Fatalf("the test the loss landed in: Charged = %+v, want %+v", got, lost)
+	}
+	if got := lost.Charged(LossBases{}, lost); len(got) != 0 {
+		t.Fatalf("the test after it: Charged = %+v, want nothing", got)
+	}
+	dropped := CaptureLosses{{Kind: CaptureLossDropped, Count: 1}}
+	if got := dropped.Charged(LossBases{}, dropped); !reflect.DeepEqual(got, dropped) {
+		t.Fatalf("a kind that taints, the test after it: Charged = %+v, want %+v", got, dropped)
 	}
 }
 

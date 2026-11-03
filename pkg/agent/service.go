@@ -76,6 +76,61 @@ type CaptureLossReporter interface {
 	CaptureLosses() models.CaptureLosses
 }
 
+// OwnedLoss is a capture loss counted after the end of the test that owned
+// it (Test): bytes that test wrote to a connection, which its end could not
+// wait for, and which were lost later, under another test. It is no capture
+// loss of that other test's, and is in no count CaptureLosses reports.
+type OwnedLoss struct {
+	Test string
+	Loss models.CaptureLoss
+}
+
+// OwnedLossTaker is the optional extension implemented by a proxy that tells
+// the losses a cut-short end owned apart from the test open when they are
+// counted (OwnedLoss). TakeOwnedLosses returns each once, oldest first.
+type OwnedLossTaker interface {
+	TakeOwnedLosses() []OwnedLoss
+}
+
+// MaxOwnedLosses bounds the owned losses a component keeps while nothing
+// takes them (a run that never reads them): past it, one entry of the run's,
+// naming no test and saying OwnedLossesPastTheBound, counts the rest.
+const MaxOwnedLosses = 64
+
+// OwnedLossesPastTheBound is the words of the entry that counts the owned
+// losses past MaxOwnedLosses.
+const OwnedLossesPastTheBound = "from connections each written in a test whose end could not wait for them"
+
+type endOfKey struct{}
+
+// WithEndOf is ctx carrying the test whose end waits under it: a wait of the
+// proxy's that ends short of what it waited for leaves what it could not see
+// reached marked as that test's (OwnedLoss).
+func WithEndOf(ctx context.Context, test string) context.Context {
+	return context.WithValue(ctx, endOfKey{}, test)
+}
+
+// EndOf is the test WithEndOf put in ctx: "" for none.
+func EndOf(ctx context.Context) string {
+	s, _ := ctx.Value(endOfKey{}).(string)
+	return s
+}
+
+// BetweenTestCases is what a keploy test call that serves the pool with no
+// test case's view in force settles (WithEndOf): the gap between test
+// cases, before the set's first or after one ended. Its bytes are marked
+// with it, never with a test case that was verified.
+const BetweenTestCases = "between test cases"
+
+// WrittenIn says where the bytes an OwnedLoss's test owned were written:
+// "in <test>", or "between test cases" for the gap's.
+func WrittenIn(test string) string {
+	if test == BetweenTestCases {
+		return test
+	}
+	return "in " + test
+}
+
 // CaptureLossDrainer is the optional extension implemented by hooks whose
 // counts of capture losses are fed by reports the kernel makes: before a read
 // of them, DrainCaptureLosses waits until every report made before it has
@@ -731,6 +786,14 @@ type ExactServer interface {
 	// not (in recorded order); final once the test stops being served. ok is
 	// false when exact serving is off.
 	ExactTestOutcome() (test string, consumed, unconsumed []string, ok bool)
+}
+
+// ExactTestServedReader is an optional ExactServer capability: ExactTestServed
+// is the test whose view is in force now, "" when none is (the pool is
+// served: before a set's first test, or after a test ended). Unlike
+// ExactTestOutcome, it never names a test that has ended.
+type ExactTestServedReader interface {
+	ExactTestServed() string
 }
 
 // ExactTestOpener is an optional ExactServer capability of a proxy that keeps

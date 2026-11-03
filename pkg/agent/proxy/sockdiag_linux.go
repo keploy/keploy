@@ -33,6 +33,7 @@ const (
 	diagMsgLen     = 72 // family, state, timer, retrans, sockid, expires, rqueue, wqueue, uid, inode
 	diagMsgWqueue  = 60 // idiag_wqueue's offset in inet_diag_msg
 	diagSockidLen  = 48
+	diagIfOff      = 36 // idiag_if's offset in inet_diag_sockid
 	diagCookieOff  = 40 // idiag_cookie's offset in inet_diag_sockid
 	diagInfo       = 2  // INET_DIAG_INFO: the attribute that carries struct tcp_info
 	diagRecvBufLen = 8192
@@ -48,6 +49,9 @@ type diagTCP struct {
 	wqueue uint32
 	// info is its tcp_info; nil for a socket that has none (TIME_WAIT).
 	info *unix.TCPInfo
+	// dev is idiag_if, the index of the device the socket is bound to: 0
+	// for none.
+	dev uint32
 }
 
 // errNoSocket is lookupTCP's error when no socket has those two ends.
@@ -71,6 +75,46 @@ func openDiag() (*diagSock, error) {
 
 func (d *diagSock) close() { _ = unix.Close(d.fd) }
 
+// diagFree holds sock_diag sockets that closes have done with, for the next
+// close to take: opening and closing one is most of what a close's read of the
+// application's socket costs (noteWroteAtClose). Neither taking nor giving
+// back waits, and no lock is held across a close: a close that finds none free
+// opens one, and one that finds the list full closes its own, so the list
+// holds at most diagFreeMax descriptors. A socket on it holds nothing that
+// changes a later lookup's answer: a lookup that succeeds has read every
+// reply to its requests (an exact lookup's one, a dump's to its end), and a
+// socket a lookup failed on is never given back. Each socket is in the
+// process's network namespace, as the proxy's connections are.
+var diagFree = make(chan *diagSock, diagFreeMax)
+
+const diagFreeMax = 4
+
+// takeDiag is a socket from diagFree, or a new one when none is free; listed
+// says which.
+func takeDiag() (ds *diagSock, listed bool, err error) {
+	select {
+	case ds = <-diagFree:
+		return ds, true, nil
+	default:
+		ds, err = openDiag()
+		return ds, false, err
+	}
+}
+
+// giveDiag puts ds back on diagFree when its last lookup succeeded (failed is
+// nil) and the list has room, and closes it otherwise.
+func giveDiag(ds *diagSock, failed error) {
+	if failed != nil {
+		ds.close()
+		return
+	}
+	select {
+	case diagFree <- ds:
+	default:
+		ds.close()
+	}
+}
+
 // lookupTCP is one lookup on a socket of its own.
 func lookupTCP(local, remote netip.AddrPort) (diagTCP, error) {
 	d, err := openDiag()
@@ -81,14 +125,21 @@ func lookupTCP(local, remote netip.AddrPort) (diagTCP, error) {
 	return d.lookup(local, remote)
 }
 
-// lookupTCPOrdered is lookupOrdered on a socket of its own.
+// lookupTCPOrdered is lookupOrdered on a socket of its own, asked with no
+// device.
 func lookupTCPOrdered(local, remote netip.AddrPort) (diagTCP, error) {
+	return lookupTCPOrderedOn(0, local, remote)
+}
+
+// lookupTCPOrderedOn is lookupOrdered on a socket of its own, its exact
+// lookup asked with the device dev (exactOn).
+func lookupTCPOrderedOn(dev uint32, local, remote netip.AddrPort) (diagTCP, error) {
 	d, err := openDiag()
 	if err != nil {
 		return diagTCP{}, err
 	}
 	defer d.close()
-	return d.lookupOrdered(local, remote)
+	return d.lookupOrdered(dev, local, remote)
 }
 
 // lookupOrdered is lookup for a socket that may be moving between the
@@ -117,18 +168,22 @@ func lookupTCPOrdered(local, remote netip.AddrPort) (diagTCP, error) {
 // timewait socket be taken, a gap no read from user space can close: a dump
 // in it answers gone, which a bytes wait reads as unknown, never as
 // settled.)
-func (d *diagSock) lookupOrdered(local, remote netip.AddrPort) (diagTCP, error) {
-	s, err := lookupExact(d, local, remote)
+//
+// Its exact lookup is asked with the device dev (exactOn): one bound to a
+// device is missed by an exact lookup asked with none, which a dump then
+// follows (lookup); asked with its device, it is found by the exact lookup.
+func (d *diagSock) lookupOrdered(dev uint32, local, remote netip.AddrPort) (diagTCP, error) {
+	s, err := lookupExact(d, dev, local, remote)
 	if (err == nil && s.state != tcpClose) || (err != nil && !errors.Is(err, errNoSocket)) {
 		return s, err
 	}
-	return d.dumpOne(local, remote)
+	return lookupDump(d, local, remote)
 }
 
-// lookupExact is how lookupOrdered makes its exact lookup: exact, not lookup,
-// whose dump after a miss lookupOrdered's own dump would repeat. A test
-// replaces it to miss as the kernel's lockless lookup can.
-var lookupExact = (*diagSock).exact
+// lookupExact is how lookupOrdered makes its exact lookup: exactOn, not
+// lookup, whose dump after a miss lookupOrdered's own dump would repeat. A
+// test replaces it to miss as the kernel's lockless lookup can.
+var lookupExact = (*diagSock).exactOn
 
 // lookup finds the TCP socket whose local end is local and remote end is
 // remote in this network namespace, with its tcp_info: by an exact sock_diag
@@ -142,13 +197,19 @@ var lookupExact = (*diagSock).exact
 // keploy's to ask, so it asks with none, and misses every socket bound to
 // one. A dump does not filter on the device. A miss so costs a dump, a walk
 // of the established hash: for a socket that is gone, or bound to a device.
+// lookupApp, which reads one connection's application socket, asks with the
+// device it learns, and dumps less.
 func (d *diagSock) lookup(local, remote netip.AddrPort) (diagTCP, error) {
 	s, err := d.exact(local, remote)
 	if !errors.Is(err, errNoSocket) {
 		return s, err
 	}
-	return d.dumpOne(local, remote)
+	return lookupDump(d, local, remote)
 }
+
+// lookupDump is how lookups make the dump after a miss: dumpOne. A test
+// replaces it to count the dumps a close makes.
+var lookupDump = (*diagSock).dumpOne
 
 // dumpStates are the states dumpOne asks for: those of a socket in the
 // established hash, which is where the exact lookup finds one. With SYN_RECV
@@ -210,7 +271,7 @@ func (d *diagSock) dumpOne(local, remote netip.AddrPort) (diagTCP, error) {
 // socket found with the two ends, and how many were.
 func (d *diagSock) dumpFamily(family uint8, local, remote netip.AddrPort) (diagTCP, int, error) {
 	d.seq++
-	req := diagRequest(d.seq, unix.NLM_F_REQUEST|unix.NLM_F_DUMP, family, dumpStates, local, remote)
+	req := diagRequest(d.seq, unix.NLM_F_REQUEST|unix.NLM_F_DUMP, family, dumpStates, 0, local, remote)
 	if err := unix.Sendto(d.fd, req, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
 		return diagTCP{}, 0, fmt.Errorf("sock_diag dump request: %w", err)
 	}
@@ -296,9 +357,9 @@ func diagFamilyAddr(family uint8, a netip.Addr) netip.Addr {
 // diagRequest is a sock_diag request for TCP sockets of family in states
 // (a bit per TCP state) whose ends are local and remote, with their
 // tcp_info: an exact lookup with flags NLM_F_REQUEST, a dump (which filters
-// on the two ports alone) with NLM_F_DUMP too. Both ask with no device
-// (idiag_if 0).
-func diagRequest(seq uint32, flags uint16, family uint8, states uint32, local, remote netip.AddrPort) []byte {
+// on the two ports alone, not on dev) with NLM_F_DUMP too. An exact lookup
+// is asked with the device dev (idiag_if; 0 for none).
+func diagRequest(seq uint32, flags uint16, family uint8, states uint32, dev uint32, local, remote netip.AddrPort) []byte {
 	req := make([]byte, unix.NLMSG_HDRLEN+diagReqV2Len)
 	binary.NativeEndian.PutUint32(req[0:], uint32(len(req)))
 	binary.NativeEndian.PutUint16(req[4:], unix.SOCK_DIAG_BY_FAMILY)
@@ -314,6 +375,7 @@ func diagRequest(seq uint32, flags uint16, family uint8, states uint32, local, r
 	binary.BigEndian.PutUint16(id[2:], remote.Port())
 	putDiagAddr(id[4:20], diagFamilyAddr(family, local.Addr()))
 	putDiagAddr(id[20:36], diagFamilyAddr(family, remote.Addr()))
+	binary.NativeEndian.PutUint32(id[diagIfOff:], dev)
 	binary.NativeEndian.PutUint32(id[diagCookieOff:], ^uint32(0)) // INET_DIAG_NOCOOKIE
 	binary.NativeEndian.PutUint32(id[diagCookieOff+4:], ^uint32(0))
 	return req
@@ -321,13 +383,22 @@ func diagRequest(seq uint32, flags uint16, family uint8, states uint32, local, r
 
 // exact finds the TCP socket whose local end is local and remote end is
 // remote, by an exact sock_diag lookup in this network namespace, with its
-// tcp_info, among the sockets bound to no device (lookup). An IPv4 pair
-// also finds an IPv6 socket connected over v4-mapped addresses: the kernel's
-// exact lookup goes through the same hash that socket's IPv4 packets do. A
-// listener on the local port, which the kernel's lookup falls back to, is
-// not the socket: errNoSocket. Each request has exactly one reply (the
-// socket, or an error), matched by its sequence number.
+// tcp_info, among the sockets bound to no device (lookup): exactOn asked
+// with no device.
 func (d *diagSock) exact(local, remote netip.AddrPort) (diagTCP, error) {
+	return d.exactOn(0, local, remote)
+}
+
+// exactOn is exact asked with the device dev: it finds a socket bound to dev
+// or one bound to none (the kernel's inet_bound_dev_eq, asked with no second
+// device), never one bound to another, and of two that match, the first in
+// its hash chain. An IPv4 pair also finds an IPv6 socket connected over
+// v4-mapped addresses: the kernel's exact lookup goes through the same hash
+// that socket's IPv4 packets do. A listener on the local port, which the
+// kernel's lookup falls back to, is not the socket: errNoSocket. Each
+// request has exactly one reply (the socket, or an error), matched by its
+// sequence number.
+func (d *diagSock) exactOn(dev uint32, local, remote netip.AddrPort) (diagTCP, error) {
 	local = netip.AddrPortFrom(local.Addr().Unmap(), local.Port())
 	remote = netip.AddrPortFrom(remote.Addr().Unmap(), remote.Port())
 	family := uint8(unix.AF_INET6)
@@ -337,7 +408,7 @@ func (d *diagSock) exact(local, remote netip.AddrPort) (diagTCP, error) {
 		return diagTCP{}, fmt.Errorf("mixed address families %s -> %s", local, remote)
 	}
 	d.seq++
-	req := diagRequest(d.seq, unix.NLM_F_REQUEST, family, ^uint32(0), local, remote) // every state
+	req := diagRequest(d.seq, unix.NLM_F_REQUEST, family, ^uint32(0), dev, local, remote) // every state
 	if err := unix.Sendto(d.fd, req, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
 		return diagTCP{}, fmt.Errorf("sock_diag request: %w", err)
 	}
@@ -386,7 +457,12 @@ func parseDiagMsg(b []byte) (diagTCP, error) {
 	if len(b) < diagMsgLen {
 		return diagTCP{}, errors.New("short sock_diag reply")
 	}
-	d := diagTCP{state: b[1], wqueue: binary.NativeEndian.Uint32(b[diagMsgWqueue:])}
+	id := b[4 : 4+diagSockidLen]
+	d := diagTCP{
+		state:  b[1],
+		wqueue: binary.NativeEndian.Uint32(b[diagMsgWqueue:]),
+		dev:    binary.NativeEndian.Uint32(id[diagIfOff:]),
+	}
 	if d.state == tcpListen {
 		return diagTCP{}, errNoSocket
 	}

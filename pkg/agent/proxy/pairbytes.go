@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils/stall"
 )
 
@@ -38,11 +40,84 @@ type pairedConn struct {
 	// from its socket while it still could be: after the close nothing
 	// reads it (a reset socket is unhashed, sock_diag no longer finds it).
 	atClose atomic.Pointer[proxySide]
+	// wroteAtClose is what the application had written to the connection
+	// as the proxy began closing it, read from its socket before atClose
+	// (pairClosing): bytes past it it wrote after keploy's close, which are
+	// no capture loss. nil when it could not be read.
+	wroteAtClose atomic.Pointer[appWrote]
 	// noSession: the proxy serves it with no session (serveWithoutSession):
 	// it closes it unanswered, or passes it through, and records and mocks
 	// nothing on it by design, so nothing the application wrote to it is a
 	// capture loss, and no bytes wait holds it.
 	noSession atomic.Bool
+	// appDev is the index of the device the application's socket is bound
+	// to (0 for none), as the first lookup of the connection to find it
+	// read it (lookupApp): nil before one has.
+	appDev atomic.Pointer[uint32]
+	// proxyDev is the index of the device the proxy's socket is bound to (0
+	// for none), read as the proxy began closing it (noteWroteAtClose), for
+	// a wait's later reads of its orphan (orphanTookFIN): after the close,
+	// nothing reads it from the socket. A close whose side had taken the
+	// application's FIN or reset leaves it 0: no wait reads that orphan.
+	proxyDev atomic.Uint32
+	// cuts are the ends cut short on the connection, oldest first: each a
+	// test whose bytes wait ended before the proxy's side had received what
+	// the application had written when the wait began (cutShort). Bytes up
+	// to its want, past the one before it, are that test's: their loss is
+	// its own, never the test open when the loss is counted (lostBy).
+	cutMu sync.Mutex
+	cuts  []cutEnd
+}
+
+// cutEnd is a test's end cut short on a connection: what the application had
+// written to it when the end's wait began (want), and the test.
+type cutEnd struct {
+	want uint64
+	test string
+}
+
+// cutShort marks pc with test's end, which waited for want and was cut short
+// first. An end that names no test marks nothing.
+func (pc *pairedConn) cutShort(test string, want uint64) {
+	if test == "" {
+		return
+	}
+	pc.cutMu.Lock()
+	defer pc.cutMu.Unlock()
+	pc.cuts = append(pc.cuts, cutEnd{want: want, test: test})
+}
+
+// lostBy is who owns the bytes low..top (counted from 1, as the application
+// wrote them to pc) that were lost: each test whose end was cut short with
+// some of them written before its wait and after the wait of the cut end
+// before it (owners), and the test open as they are counted (open) when
+// some were written after the last such wait, or when no end was cut short.
+// A wait's want only grows (the application's count of what it wrote does),
+// so the cuts split the bytes in order; an end whose want is no more than
+// the one before it wrote nothing more, and owns none.
+func (pc *pairedConn) lostBy(low, top uint64) (owners []string, open bool) {
+	low = max(low, 1)
+	top = max(top, low)
+	pc.cutMu.Lock()
+	defer pc.cutMu.Unlock()
+	var prev uint64
+	for _, c := range pc.cuts {
+		if c.want > prev && low <= c.want && top > prev {
+			owners = append(owners, c.test)
+		}
+		prev = max(prev, c.want)
+	}
+	return owners, top > prev
+}
+
+// appWrote is what the application had written to a connection, in bytes and
+// a FIN (noteWroteAtClose), and whether that count surely holds its FIN (fin):
+// a plaintext close does not wait for the FIN alone (finAloneOnItsWay), and
+// one byte short of a count that holds the FIN is that FIN. false says only
+// that the count may not hold it.
+type appWrote struct {
+	want uint64
+	fin  bool
 }
 
 // proxySide is what the wait reads of the proxy's side of a connection.
@@ -66,13 +141,17 @@ func (s *pairedConns) holds(conn net.Conn) bool {
 // connection (nil for one it does not keep, or whose close was noted) and how
 // many bytes its socket holds unread, read after its side: the close tosses
 // them with a reset (tcp_close), bytes the application wrote that its side
-// counts received and the proxy never read.
-func (s *pairedConns) closing(conn net.Conn) (*pairedConn, int, error) {
+// counts received and the proxy never read. first, when set, runs before its
+// side is read.
+func (s *pairedConns) closing(conn net.Conn, first func(*pairedConn)) (*pairedConn, int, error) {
 	s.mu.Lock()
 	pc := s.byConn[conn]
 	s.mu.Unlock()
 	if pc == nil || pc.atClose.Load() != nil {
 		return nil, 0, nil
+	}
+	if first != nil {
+		first(pc)
 	}
 	ps := readProxySide(pc.conn)
 	pc.atClose.Store(&ps)
@@ -101,6 +180,46 @@ type pairedConns struct {
 	// clk is the runnable clock a bytes wait measures its wait for an
 	// orphan on (orphanLooks); nil is the process's. A test sets it.
 	clk stall.Clock
+	// owned are the losses counted on a connection that a test whose end
+	// was cut short owned (pairLost), under mu, until the agent takes them
+	// (TakeOwnedLosses).
+	owned []agent.OwnedLoss
+}
+
+// maxOwned bounds the owned losses the proxy keeps untaken.
+const maxOwned = agent.MaxOwnedLosses
+
+// own notes a loss of the bytes test wrote to the connection from app, which
+// its end could not wait for.
+func (s *pairedConns) own(test string, app netip.AddrPort) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Bounded while no agent takes them (a run that never reads them):
+	// past maxOwned, one entry of no test's, the run's, counts the rest.
+	if n := len(s.owned); n >= maxOwned {
+		if s.owned[n-1].Test != "" {
+			s.owned = append(s.owned, agent.OwnedLoss{Loss: models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, What: agent.OwnedLossesPastTheBound}})
+		}
+		s.owned[len(s.owned)-1].Loss.Count++
+		return
+	}
+	s.owned = append(s.owned, agent.OwnedLoss{Test: test, Loss: models.CaptureLoss{
+		Kind:  models.CaptureLossAppBytesLost,
+		Count: 1,
+		What:  "from " + app.String() + ", written " + agent.WrittenIn(test) + ", where keploy's wait for them was cut short",
+	}})
+}
+
+// TakeOwnedLosses returns, once, the losses counted on a connection that a
+// test whose end was cut short owned (agent.OwnedLossTaker): bytes it
+// wrote before that end that were lost later. None is in CaptureLosses'
+// counts, so none is charged to the test open when it was counted.
+func (p *Proxy) TakeOwnedLosses() []agent.OwnedLoss {
+	p.paired.mu.Lock()
+	defer p.paired.mu.Unlock()
+	out := p.paired.owned
+	p.paired.owned = nil
+	return out
 }
 
 // PairedBytesProgress counts the bytes waits' progress, for the agent's

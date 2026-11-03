@@ -74,6 +74,15 @@ type provenWire struct {
 	// what the run lost beyond it was charged to no test
 	// (UnchargedCaptureLosses).
 	lossesCharged models.CaptureLosses
+	// ownedRun are losses a test whose end was cut short owned
+	// (coreAgent.OwnedLoss) counted after that test's end had charged
+	// what it lost: the run's, naming the connection and the test, and
+	// no later test's (UnchargedCaptureLosses).
+	ownedRun models.CaptureLosses
+	// ownedLeft are losses cut-short ends owned that the session before
+	// counted and no read took: the run's, which the next read takes
+	// (takeOwnedLosses), never dropped.
+	ownedLeft []coreAgent.OwnedLoss
 	// claim is the live claim; zero when none.
 	claim claimant
 	// claims is every claim of the session, in order: from each one's time
@@ -292,8 +301,17 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	// What the run's tests count their capture losses from: read before
 	// provenMu, which is never held while calling into the hooks.
 	losses := a.markCaptureLosses(ctx)
+	// Losses an earlier session's cut-short ends owned that no read took
+	// are this session's to report, as the run's: none of its tests is the
+	// test that owned them, which only their words still name.
+	// Bounded, as the proxy's are, while no read takes them.
+	left := a.takeOwnedLosses()
+	for i := range left {
+		left[i].Test = ""
+	}
+	left = boundOwnedLeft(left)
 	a.provenMu.Lock()
-	a.proven = provenWire{losses: losses}
+	a.proven = provenWire{losses: losses, ownedLeft: left}
 	a.provenMu.Unlock()
 	if provenswitch.On() {
 		// The listener's drops are counted from here too (openDrops).
@@ -1230,6 +1248,20 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	mark, test := a.proven.losses, a.proven.testLosses
 	a.provenMu.Unlock()
 	lost, now, err := a.captureLossesSince(ctx, mark, test)
+	// What a cut-short end owned that was counted since: this test's when
+	// it is the owner (its own end was cut short, and the loss counted
+	// before this read), the run's otherwise. None is in the counts, so
+	// none is charged to this test by them.
+	var mine models.CaptureLosses
+	for _, o := range a.takeOwnedLosses() {
+		if o.Test == id && err == nil {
+			mine = mine.Plus(models.CaptureLosses{o.Loss})
+			continue
+		}
+		a.provenMu.Lock()
+		a.proven.ownedRun = a.proven.ownedRun.Plus(models.CaptureLosses{o.Loss})
+		a.provenMu.Unlock()
+	}
 	if !a.replaying() {
 		// A record charges a container read the daemon did not answer by
 		// the mock its stamp marked (unreadMock), its own test's whenever
@@ -1242,7 +1274,7 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 		a.proven.testLosses = now
 		a.provenMu.Unlock()
 	}
-	if err == nil && len(lost) == 0 {
+	if err == nil && len(lost) == 0 && len(mine) == 0 {
 		return ev, outcome
 	}
 	if err == nil {
@@ -1267,6 +1299,9 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 		a.provenMu.Lock()
 		a.proven.lossesCharged = a.proven.lossesCharged.Max(taint).Plus(own)
 		a.provenMu.Unlock()
+		// Charged after the counts' charge: lossesCharged follows the
+		// counts, which hold none of mine.
+		lost = lost.Plus(mine)
 	}
 	if ev == nil {
 		ev = &models.ScopeEvidence{}
