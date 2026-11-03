@@ -39,6 +39,13 @@ name: Linux CI scripts
 # mocks of a lane that records other kinds beside them. All three match the
 # kind whole: an Http2 or HttpFault mock is not an Http one, though a
 # `^kind: Http` prefix counts it.
+#
+# And golang/gin_mongo/golang-docker.tests.sh: the gin-mongo lane of
+# golang_docker.yml, sourced by `bash -e` as its step runs it, against a fake
+# keploy. A keploy record or keploy test that exits non-zero has to fail the
+# lane with a line naming that command and its exit, the failed test sets and
+# tests, and the command's log; under `bash -e` the lane ended at that command
+# with none of them.
 
 on:
   push:
@@ -55,6 +62,8 @@ on:
       - '.github/workflows/test_workflow_scripts/keploy-installer.tests.sh'
       - '.github/workflows/test_workflow_scripts/mock-kinds.sh'
       - '.github/workflows/test_workflow_scripts/mock-kinds.tests.sh'
+      - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.sh'
+      - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.tests.sh'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
     paths:
@@ -68,6 +77,8 @@ on:
       - '.github/workflows/test_workflow_scripts/keploy-installer.tests.sh'
       - '.github/workflows/test_workflow_scripts/mock-kinds.sh'
       - '.github/workflows/test_workflow_scripts/mock-kinds.tests.sh'
+      - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.sh'
+      - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.tests.sh'
       - '.github/workflows/linux-ci-scripts.yml'
 
 permissions:
@@ -211,3 +222,13 @@ jobs:
 
       - name: Test mock-kinds.sh (DNS mocks beside the Http ones pass; an Http mock lost or duplicated, or another kind, fails)
         run: bash .github/workflows/test_workflow_scripts/mock-kinds.tests.sh
+
+  gin-mongo-docker-lane:
+    # Five cases against fakes, under a second; each is bounded at 60 s.
+    timeout-minutes: 8
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test gin_mongo/golang-docker.sh (a keploy record or keploy test that exits non-zero is named, with its reports and log)
+        run: bash .github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.tests.sh

@@ -28,6 +28,32 @@ docker logs mongoDb &
 docker_build_retry docker build -t gin-mongo .
 docker rm -f ginApp 2>/dev/null || true
 
+# The step runs this script under `bash -e`, so a keploy command that exited
+# non-zero ended the step at that line, before the checks below it could print
+# its log: the step failed with no line saying what had failed. Each keploy
+# command's exit status is taken instead, and keploy_exited names a non-zero
+# one, with the test-set reports of the newest test run and the command's log.
+keploy_exited() {
+    local rc=$1 what=$2 log=$3 run f
+    echo "::error::${what} exited ${rc}; the test-set reports and its log (${log}) follow"
+    run="$(ls -td ./keploy/reports/test-run-* 2>/dev/null | head -n 1 || true)"
+    for f in "$run"/test-set-*-report.yaml "$run"/test-set-*-report.json; do
+        [ -f "$f" ] || continue
+        case "$f" in
+        *.json)
+            echo "$f: $(jq -r '.status' "$f" 2>/dev/null || echo '<unreadable>')"
+            jq -r '.tests[]? | select(.status == "FAILED") | "  failed: " + .testCaseID' "$f" 2>/dev/null || true
+            ;;
+        *)
+            echo "$f: $(grep -m 1 'status:' "$f" | awk '{print $2}')"
+            awk '/^ +status: FAILED/ {f = 1} f && /test_case_id:/ {print "  failed: " $2; f = 0}' "$f"
+            ;;
+        esac
+    done
+    cat "$log"
+    exit "$rc"
+}
+
 container_kill() {
     # pid=$(pgrep -f "keploy record")
     # echo "$pid Keploy PID" 
@@ -88,8 +114,9 @@ do_record_iteration() {
     local container_name="ginApp_${i}${label}"
     local log="${container_name}.txt"
     send_request &
+    local rc=0
     # shellcheck disable=SC2086
-    $RECORD_BIN record $extra_flags -c "docker run -p 8080:8080 --net keploy-network --rm --name $container_name gin-mongo" --container-name "$container_name"    &> "$log"
+    $RECORD_BIN record $extra_flags -c "docker run -p 8080:8080 --net keploy-network --rm --name $container_name gin-mongo" --container-name "$container_name"    &> "$log" || rc=$?
 
     if grep "WARNING: DATA RACE" "$log"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -100,6 +127,9 @@ do_record_iteration() {
         echo "Error found in pipeline..."
         cat "$log"
         exit 1
+    fi
+    if [ "$rc" -ne 0 ]; then
+        keploy_exited "$rc" "keploy record (iteration ${i}${label:+, json})" "$log"
     fi
     sleep 5
     echo "Recorded test case and mocks for iteration ${i}${label:+ (json)}"
@@ -125,7 +155,8 @@ fi
 
 # Start the keploy in test mode.
 test_container="ginApp_test"
-$REPLAY_BIN test -c 'docker run --rm -p 8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+rc=0
+$REPLAY_BIN test -c 'docker run --rm -p 8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt" || rc=$?
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
@@ -137,6 +168,10 @@ if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
     cat "${test_container}.txt"
     exit 1
+fi
+
+if [ "$rc" -ne 0 ]; then
+    keploy_exited "$rc" "keploy test" "${test_container}.txt"
 fi
 
 all_passed=true
@@ -169,7 +204,8 @@ else
 fi
 
 if json_pass_supported; then
-    $REPLAY_BIN test --storage-format json -c 'docker run --rm -p 8080:8080 --net keploy-network --name ginApp_test_json gin-mongo' --containerName "ginApp_test_json" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}_json.txt"
+    rc=0
+    $REPLAY_BIN test --storage-format json -c 'docker run --rm -p 8080:8080 --net keploy-network --name ginApp_test_json gin-mongo' --containerName "ginApp_test_json" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}_json.txt" || rc=$?
     if grep "ERROR" "${test_container}_json.txt"; then
         cat "${test_container}_json.txt"
         exit 1
@@ -177,6 +213,9 @@ if json_pass_supported; then
     if grep "WARNING: DATA RACE" "${test_container}_json.txt"; then
         cat "${test_container}_json.txt"
         exit 1
+    fi
+    if [ "$rc" -ne 0 ]; then
+        keploy_exited "$rc" "keploy test --storage-format json" "${test_container}_json.txt"
     fi
     if ! json_scan_reports; then
         cat "${test_container}_json.txt"
@@ -207,14 +246,14 @@ echo "===== --keep-app-alive regression run ====="
 prev_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
 
 ka_container="ginApp_test_keep_app_alive"
+replay_status=0
 $REPLAY_BIN test -c "docker run --rm -p 8080:8080 --net keploy-network --name $ka_container gin-mongo" \
     --containerName "$ka_container" \
     --apiTimeout 60 \
     --delay 20 \
     --keep-app-alive \
     --test-sets test-set-0 \
-    --generate-github-actions=false &> "${ka_container}.txt"
-replay_status=$?
+    --generate-github-actions=false &> "${ka_container}.txt" || replay_status=$?
 
 if [ "$replay_status" -ne 0 ]; then
     echo "::error::--keep-app-alive replay failed with exit code ${replay_status}"
