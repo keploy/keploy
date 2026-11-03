@@ -110,6 +110,13 @@ type OutgoingOptions struct {
 	Synchronous bool
 	Mocking     bool // used to enable/disable mocking
 	SwapIDs     bool
+	// SrcInstance is the test worker instance the kernel stamped THIS
+	// connection with (0: none). Runtime, per-connection: json:"-" like
+	// SrcPid. It sits in the word the three bools above leave four bytes
+	// of: supervisor.Session holds these options by value, once per
+	// connection, and stays in the 640 B size class only so
+	// (TestASessionStaysInThe640ByteSizeClass).
+	SrcInstance uint32 `json:"-"`
 	// OnMiss selects what the proxy does in MODE_TEST when no recorded mock
 	// matches an outgoing call: "" / "fail" (deterministic hard miss, the
 	// default), "passthrough" (dial the real upstream, don't persist), or
@@ -340,10 +347,6 @@ type OutgoingOptions struct {
 	// agent's namespace or unknown. Runtime, per-connection: json:"-" like
 	// SrcPid.
 	SrcNsPid uint32 `json:"-"`
-	// SrcInstance is the test worker instance the kernel stamped THIS
-	// connection with (0: none). Runtime, per-connection: json:"-" like
-	// SrcPid.
-	SrcInstance uint32 `json:"-"`
 	// NetNS names the network namespace THIS connection was made from, as an
 	// opaque token. It exists because some destination addresses name a
 	// different server in every network namespace: 127.0.0.0/8, ::1, link-local
