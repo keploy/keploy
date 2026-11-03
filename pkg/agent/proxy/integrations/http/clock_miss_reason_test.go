@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -246,5 +247,33 @@ func TestAnAnsweredRecordingOfAnotherRouteGivesNoClockReason(t *testing.T) {
 	r := newHTTP().buildHTTPMismatchReport(&http.Request{Method: in.method, URL: in.url, Host: "api.example", Header: in.header}, in.body, db, nil, nil, nil, diag)
 	if r == nil || r.ClosestMock != "mock-6" || len(r.FieldReasons) != 0 || !hasField(r.Differs, "path") || !hasField(r.Differs, "body.content") {
 		t.Fatalf("report %+v; want mock-6 closest, path and body.content named, no field reasons", r)
+	}
+}
+
+// A recording of another route gives no reason of a keploy.yml noise
+// pattern either. A body field the user's pattern guards, whose value in the
+// call is outside it, is still named, but the miss neither warns that the
+// pattern does not excuse the field nor gives the pattern as its reason: the
+// recording is not the call, so its pattern's verdict is not why the call
+// missed. Of the call's own route the same field keeps its reason
+// (TestStrictNoisePatternMissWarnsItsReason).
+func TestARecordingOfAnotherRouteGivesNoNoisePatternReason(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	body := map[string][]string{"id": {`^1$`}}
+	rec := recorded("mock-x", "/x", map[string]string{"Content-Type": "application/json"}, `{"id":1}`)
+	in := sent("/y", map[string]string{"Content-Type": "application/json"}, `{"id":2}`)
+	core, logs := observer.New(zap.WarnLevel)
+	h := &HTTP{Logger: zap.New(core)}
+	db := &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true}
+	ok, _, diag, err := h.match(context.Background(), in, db, models.ProvenFlakyHeaderNoise(), body, nil, true, false, false, true, true)
+	if err != nil || ok || diag == nil {
+		t.Fatalf("match ok=%v diag=%v err=%v; want a miss", ok, diag, err)
+	}
+	r := newHTTP().buildHTTPMismatchReport(&http.Request{Method: in.method, URL: in.url, Host: "api.example", Header: in.header}, in.body, db, nil, nil, body, diag)
+	if r == nil || r.ClosestMock != "mock-x" || !hasField(r.Differs, "path") || !hasField(r.Differs, "body.id") || len(r.FieldReasons) != 0 {
+		t.Fatalf("report %+v; want mock-x closest, path and body.id named, no field reasons", r)
+	}
+	if n := logs.FilterMessage("a keploy.yml noise pattern does not excuse a field").Len(); n != 0 {
+		t.Fatalf("a recording of another route warned %d times that its pattern does not excuse a field", n)
 	}
 }
