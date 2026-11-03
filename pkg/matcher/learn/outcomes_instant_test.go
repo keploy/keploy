@@ -2695,7 +2695,8 @@ func TestOutcomeAListThatGrewBetweenRunsKeepsItsTimesVerdict(t *testing.T) {
 // A time the application picks, or one an answer gives that the
 // application sends back, at a member whose name a member at another path
 // of the same answer shares (a top-level "at" beside each item's "at", a
-// job's "at" beside each history entry's "at"), is paired only with the
+// job's "at" beside each history entry's "at", "a.b.at" beside each
+// element's "b.at"), is paired only with the
 // other run's times at the member at that path: a list at the other path
 // that grew or shrank between runs, or was empty when it was recorded,
 // lends it no finer unit. The pick stays refused, in either mode, and the
@@ -2714,25 +2715,30 @@ func TestOutcomeATimeIsPairedAtTheMemberAtItsPathAlone(t *testing.T) {
 			ReqTimestampMock: oAt.Add(-time.Second), ResTimestampMock: oAt.Add(-time.Second + time.Millisecond),
 		}}
 	}
-	// items is n entries, each holding the time it was made, with its
-	// milliseconds, 40 s and more before end.
-	items := func(end time.Time, n int) string {
+	// items is n entries (item), each holding the time it was made, with
+	// its milliseconds, 40 s and more before end.
+	items := func(item func(at string) string, end time.Time, n int) string {
 		var s []string
 		for i := range n {
-			s = append(s, `{"at":"`+end.Add(-time.Duration(40+i)*time.Second+400*time.Millisecond).UTC().Format(time.RFC3339Nano)+`"}`)
+			s = append(s, item(end.Add(-time.Duration(40+i)*time.Second+400*time.Millisecond).UTC().Format(time.RFC3339Nano)))
 		}
 		return strings.Join(s, ",")
 	}
+	at := func(at string) string { return `{"at":"` + at + `"}` }
 	for _, sh := range []struct {
 		what string
+		item func(at string) string
 		body func(at string, list string) string
 	}{
-		{"a top-level at beside each item's at", func(at, list string) string { return `{"at":"` + at + `","items":[` + list + `]}` }},
-		{"a job's at beside each history entry's at", func(at, list string) string {
+		{"a top-level at beside each item's at", at, func(at, list string) string { return `{"at":"` + at + `","items":[` + list + `]}` }},
+		{"a job's at beside each history entry's at", at, func(at, list string) string {
 			return `{"job":{"at":"` + at + `"},"history":[` + list + `]}`
 		}},
+		{"a.b.at beside each element's b.at", func(at string) string { return `{"b":{"at":"` + at + `"}}` }, func(at, list string) string {
+			return `{"a":{"b":{"at":"` + at + `"}},"c":[` + list + `]}`
+		}},
 	} {
-		for _, n := range [][2]int{{2, 2}, {2, 3}, {3, 2}, {1, 2}, {0, 1}} {
+		for _, n := range [][2]int{{2, 2}, {2, 3}, {3, 2}, {1, 2}, {0, 1}, {1, 0}} {
 			what := fmt.Sprintf("%s, %d entries then %d", sh.what, n[0], n[1])
 			for _, mode := range []Mode{ModeOwn, ModeElsewhere} {
 				elsewhere := func(in Input, what string) (Input, string) {
@@ -2744,8 +2750,8 @@ func TestOutcomeATimeIsPairedAtTheMemberAtItsPathAlone(t *testing.T) {
 				}
 				// The pick: round F's answer holds round F's second at the
 				// member, the recording's a second 37 s before its call.
-				rm := answer(sh.body(tsec(rAt.Add(-37*time.Second)), items(rAt, n[0])))
-				lm := answer(sh.body(tsec(fAt), items(fAt, n[1])))
+				rm := answer(sh.body(tsec(rAt.Add(-37*time.Second)), items(sh.item, rAt, n[0])))
+				lm := answer(sh.body(tsec(fAt), items(sh.item, fAt, n[1])))
 				in, w := elsewhere(iCall("body.cmd.query.dirtyAt.$lte.$numberLong", Number, sec(rAt), sec(fAt), rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), nil,
 					[]Raw{RawOf(rm, true).ServedAs(1).ServedLive(RawOf(lm, true))}), what+", round F's second picked")
 				if mode == ModeOwn {
@@ -2755,7 +2761,7 @@ func TestOutcomeATimeIsPairedAtTheMemberAtItsPathAlone(t *testing.T) {
 				}
 				// The answer: each run's call second at the member, sent
 				// back.
-				rm, lm = answer(sh.body(tsec(rAt), items(rAt, n[0]))), answer(sh.body(tsec(fAt), items(fAt, n[1])))
+				rm, lm = answer(sh.body(tsec(rAt), items(sh.item, rAt, n[0]))), answer(sh.body(tsec(fAt), items(sh.item, fAt, n[1])))
 				in, w = elsewhere(iCall("body.cmd.query.dirtyAt.$lte", Instant, tsec(rAt), tsec(fAt), rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), nil,
 					[]Raw{RawOf(rm, true).ServedAs(1).ServedLive(RawOf(lm, true))}), what+", the answer's time sent back")
 				if d := oWord(t, Decide(in), tsec(rAt), tsec(fAt)); mode == ModeOwn {
@@ -2823,7 +2829,8 @@ func TestOutcomeAHalfPlacesATimeAsItsRecordingDoes(t *testing.T) {
 			Body: `{"at":"` + s + `","items":[{"at":"` + s + `"},{"at":"` + s + `"}]}`},
 		ReqTimestampMock: oAt.Add(-time.Second), ResTimestampMock: oAt.Add(-time.Second + time.Millisecond),
 	}}
-	var dc decider
+	x := newReaderIndex(nil)
+	dc := decider{x: x}
 	places := func(t *readerText) []instantPlace {
 		spans, read := t.spansOf()
 		text, fields, ok := dc.laidOut(t)
@@ -2837,9 +2844,8 @@ func TestOutcomeAHalfPlacesATimeAsItsRecordingDoes(t *testing.T) {
 	var halves, wholes [2][]instantPlace
 	crashed := func() (crashed any) {
 		defer func() { crashed = recover() }()
-		x := newReaderIndex(nil)
 		whole := x.textOf(RawOf(m, true))
-		req, ans := dc.halves(evPlace{t: &placeText{rec: whole, live: whole}})
+		req, ans := dc.halves(0, evPlace{t: &placeText{rec: whole, live: whole}})
 		halves = [2][]instantPlace{places(req.t.rec), places(ans.t.live)}
 		for _, p := range places(whole) {
 			field, _, _ := strings.Cut(p.field, "\x00")
@@ -2862,5 +2868,77 @@ func TestOutcomeAHalfPlacesATimeAsItsRecordingDoes(t *testing.T) {
 	if a := halves[1]; len(a) != 4 || slices.ContainsFunc(a, func(p instantPlace) bool { return p.field == "" }) ||
 		a[0] == a[1] || a[1] != a[2] || a[3] == a[0] || a[3] == a[1] {
 		t.Errorf("the answer's times placed at %#v; want the body's top-level time, its items' times and the header's time three named places, the items' one", a)
+	}
+}
+
+// One call sends back n times one earlier answer listed (each document's
+// updated_at, the shape of an optimistic lock or a bulk sync), each a
+// changed instant that answer holds. The answer's halves are built once
+// for the call and kept while the index's budget holds them; past the
+// budget each instant builds them again and lets go of them once it is
+// decided. Either way the halves the call holds at once never grow with
+// the instants it decides: at most one place's two halves in each run.
+// Each time is the answer's value sent back.
+func TestOutcomeAnAnswersHalvesAreBuiltOnceAndHeldBoundedAcrossItsInstants(t *testing.T) {
+	defer func(b, r int64) { bodyBudget, readerBudget = b, r }(bodyBudget, readerBudget)
+	rAt, fAt := oAt.Add(20400*time.Millisecond), oAt.Add(96400*time.Millisecond)
+	const n = 120
+	var rDocs, fDocs, drift []string
+	leaves, live := map[string]Leaf{}, map[string]Leaf{}
+	for i := range n {
+		r := rAt.Add(-50*time.Second + time.Duration(i)*7*time.Millisecond + 123*time.Microsecond).UTC().Format(time.RFC3339Nano)
+		f := fAt.Add(-50*time.Second + time.Duration(i)*7*time.Millisecond + 456*time.Microsecond).UTC().Format(time.RFC3339Nano)
+		rDocs = append(rDocs, fmt.Sprintf(`{"id":%d,"updated_at":"%s"}`, i, r))
+		fDocs = append(fDocs, fmt.Sprintf(`{"id":%d,"updated_at":"%s"}`, i, f))
+		p := fmt.Sprintf("body.docs[%d].updated_at", i)
+		drift = append(drift, p)
+		leaves[p], live[p] = Leaf{Path: p, Noise: p, Type: Instant, Value: r}, Leaf{Path: p, Noise: p, Type: Instant, Value: f}
+	}
+	mock := func(docs []string) *models.Mock {
+		return &models.Mock{Name: "mock-799", Kind: models.HTTP, Spec: models.MockSpec{
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "http://api.local/docs", Body: ``},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: `{"docs":[` + strings.Join(docs, ",") + `]}`},
+			ReqTimestampMock: oAt.Add(-time.Second), ResTimestampMock: oAt.Add(-time.Second + time.Millisecond),
+		}}
+	}
+	rm, lm := RawOf(mock(rDocs), true), RawOf(mock(fDocs), true)
+	// One place's two halves in both runs: each run's text once, a byte
+	// more per field, and its fields.
+	bound := int64(len(rm.Text())+len(lm.Text())) + 4*int64(len(rm.payload().fields)+len(lm.payload().fields))*(rawFieldBytes+64)
+	for _, c := range []struct {
+		what   string
+		budget int64
+		builds int
+	}{{"within the budget", 0, 1}, {"past the budget", 1, n}} {
+		readerBudget = c.budget
+		in := Input{
+			Drifts: oDrifts(), Drift: drift,
+			Live: Shape{Leaves: live}, Rec: Shape{Leaves: leaves},
+			At: rAt, Arrived: fAt, Raw: []Raw{rm.ServedAs(1).ServedLive(lm)},
+			Window: iWin(rAt, fAt, 100*time.Millisecond), Test: "test-2", Mock: "mock-300",
+			Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true},
+		}
+		x := newReaderIndex(in.Drifts)
+		dc := newDecider(in, false, x)
+		ds, _ := dc.decide()
+		x.release()
+		values := 0
+		for _, d := range ds {
+			if d.Outcome == OutcomeValue {
+				values++
+			}
+		}
+		if values != n || len(ds) != n {
+			t.Errorf("%s: %d decisions, %d of them the answer's value; want %d, each the answer's value: %s", c.what, len(ds), values, n, oDescribe(ds[:min(len(ds), 3)]))
+		}
+		if dc.halfBuilds != c.builds {
+			t.Errorf("%s: the answer halved %d times for %d instants; want %d", c.what, dc.halfBuilds, n, c.builds)
+		}
+		if dc.halfPeak == 0 || dc.halfPeak > bound {
+			t.Errorf("%s: the call held %d bytes of halves at once; want some, and at most %d, one place's halves in both runs", c.what, dc.halfPeak, bound)
+		}
+		if dc.laidNow != nil || dc.halfNow != 0 {
+			t.Errorf("%s: the call ended holding %d halves (%d bytes) of its last instant; want none", c.what, len(dc.laidNow), dc.halfNow)
+		}
 	}
 }

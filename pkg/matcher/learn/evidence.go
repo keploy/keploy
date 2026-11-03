@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"go.keploy.io/server/v3/pkg/variables"
 )
@@ -309,20 +310,30 @@ func textHalf(t *readerText, request bool) (half *readerText, laid []rawField) {
 	return t.x.text(b.String()), laid
 }
 
-// halves is p, a recording's place, as its two halves, each read in that
-// half of each run's text (textHalf): its request, what the application
-// sent there, a send placed by its request's time (p.req), and its answer,
-// what the recording gave it, placed by its answer's (rawState). Each
-// half's fields are kept in dc.laid, where atFinest reads them.
-func (dc *decider) halves(p evPlace) (req, ans evPlace) {
-	if dc.laid == nil {
-		dc.laid = map[*readerText][]rawField{}
+// halves is p, the i-th of the call's places, a recording's, as its two
+// halves, each read in that half of each run's text (textHalf): its
+// request, what the application sent there, a send placed by its request's
+// time (p.req), and its answer, what the recording gave it, placed by its
+// answer's (rawState). A place's halves are built once per call
+// (dc.halfBuilds counts each build) and kept to its end where the index's
+// budget holds their bytes (claimed there, with what the index keeps, and
+// given back with it); past the budget they are the instant's that asks
+// alone, built again for each instant and let go when it is decided
+// (letGoHalves): what the call holds of them is bounded by the budget and
+// one instant's halves, however many instants it decides (dc.halfPeak).
+// Each half's fields are kept beside it (dc.laid, dc.laidNow), where
+// atFinest reads them.
+func (dc *decider) halves(i int, p evPlace) (req, ans evPlace) {
+	if h, ok := dc.halved[i]; ok {
+		return h[0], h[1]
 	}
+	var texts []*readerText
+	var fields [][]rawField
 	half := func(request bool) evPlace {
 		h := p
 		rec, rf := textHalf(p.t.rec, request)
 		live, lf := textHalf(p.t.live, request)
-		dc.laid[rec], dc.laid[live] = rf, lf
+		texts, fields = append(texts, rec, live), append(fields, rf, lf)
 		h.t = &placeText{rec: rec, live: live, views: p.t.views}
 		return h
 	}
@@ -331,8 +342,43 @@ func (dc *decider) halves(p evPlace) (req, ans evPlace) {
 	if p.req != nil {
 		req.state, req.why, req.recAfter = p.req.state, p.req.why, p.req.after
 	}
+	dc.halfBuilds++
+	var n int64
+	for j, t := range texts {
+		n += int64(len(t.text))
+		for _, f := range fields[j] {
+			n += rawFieldBytes + int64(len(f.path))
+		}
+	}
+	laid := &dc.laidNow
+	if dc.x.claim(n) {
+		if dc.halved == nil {
+			dc.halved = map[int][2]evPlace{}
+		}
+		dc.halved[i] = [2]evPlace{req, ans}
+		laid = &dc.laid
+		dc.halfKept += n
+	} else {
+		dc.halfNow += n
+	}
+	dc.halfPeak = max(dc.halfPeak, dc.halfKept+dc.halfNow)
+	if *laid == nil {
+		*laid = map[*readerText][]rawField{}
+	}
+	for j, t := range texts {
+		(*laid)[t] = fields[j]
+	}
 	return req, ans
 }
+
+// letGoHalves lets go of the halves built past the budget for the instant
+// just decided (halves).
+func (dc *decider) letGoHalves() {
+	dc.laidNow, dc.halfNow = nil, 0
+}
+
+// rawFieldBytes is about the bytes a half's field takes, but for its path.
+const rawFieldBytes = int64(unsafe.Sizeof(rawField{}))
 
 // notFromMock is why a recording's payload was not read, where its read
 // gave none.

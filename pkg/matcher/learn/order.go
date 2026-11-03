@@ -108,6 +108,8 @@ type decider struct {
 	ps       []evPlace
 	x        *readerIndex
 	allScope bool
+	// unread names what of the call keploy could not read, "" where none.
+	unread string
 	// dr is the call's drift cache, or an empty one.
 	dr *DriftCache
 	// set: the recordings the set read once (Input.Given); op: what each
@@ -119,28 +121,47 @@ type decider struct {
 	encoded func() (string, *evPlace)
 	// passes counts the instants atFinest reads, each read counted where
 	// it is made, and walked the bytes it walks to place them: what keeps
-	// its work linear in them. laid: the fields of each half (halves).
+	// its work linear in them.
 	passes, walked int
-	laid           map[*readerText][]rawField
+	// halved: each place's halves, by its index in ps, kept for the call
+	// (halves); laid: the fields of each half kept, laidNow of each built
+	// past the budget for the instant being decided. halfBuilds counts the
+	// places halved, halfKept and halfNow are the bytes of the halves kept
+	// and of the instant's, and halfPeak the most of both at once.
+	halved                      map[int][2]evPlace
+	laid, laidNow               map[*readerText][]rawField
+	halfBuilds                  int
+	halfKept, halfNow, halfPeak int64
 }
 
 // decideWords decides every changed word of in, and the field each
 // decision is of; allScope reads every earlier place of the run as the
 // call's scope (Mode Elsewhere).
 func decideWords(in Input, allScope bool) ([]Decision, []string) {
-	ps, unread := placesOf(in)
-	set, setNotRead := setUnread(in)
-	unread = cmp.Or(unread, setNotRead)
 	x := newReaderIndex(in.Drifts)
 	defer x.release() // what the index keeps goes back to the set's budget
-	dc := &decider{in: in, ps: withTexts(x, ps), x: x, allScope: allScope, set: set, dr: in.Drifts}
+	return newDecider(in, allScope, x).decide()
+}
+
+// newDecider is the decider of the call in, reading its texts through x;
+// allScope as decideWords takes it.
+func newDecider(in Input, allScope bool, x *readerIndex) *decider {
+	ps, unread := placesOf(in)
+	set, setNotRead := setUnread(in)
+	dc := &decider{in: in, ps: withTexts(x, ps), x: x, allScope: allScope, set: set, dr: in.Drifts, unread: cmp.Or(unread, setNotRead)}
 	if dc.dr == nil {
 		dc.dr = NewDriftCache()
 	}
+	return dc
+}
+
+// decide decides every changed word of dc's call, and the field each
+// decision is of (decideWords).
+func (dc *decider) decide() ([]Decision, []string) {
 	var out []Decision
 	var fields []string // fields[i] is the field out[i] decides
-	for _, path := range in.Drift {
-		out = append(out, dc.leaf(path, unread)...)
+	for _, path := range dc.in.Drift {
+		out = append(out, dc.leaf(path, dc.unread)...)
 		for len(fields) < len(out) {
 			fields = append(fields, path)
 		}
@@ -983,12 +1004,15 @@ func (dc *decider) atFinest(t, other *readerText) (spans []instant, read bool) {
 }
 
 // laidOut is t's text and the fields it is laid out in (textFields): a
-// recording's, a half's (textHalf, dc.laid), or none for a text handed
-// whole, which is one field (a leaf's value); ok false where the recording
-// was not read.
+// recording's, a half's (textHalf, dc.laid, dc.laidNow), or none for a text
+// handed whole, which is one field (a leaf's value); ok false where the
+// recording was not read.
 func (dc *decider) laidOut(t *readerText) (text string, fields []rawField, ok bool) {
 	if text, fields, ok = t.read(); t.raw == nil {
-		fields = dc.laid[t]
+		var kept bool
+		if fields, kept = dc.laid[t]; !kept {
+			fields = dc.laidNow[t]
+		}
 	}
 	return text, fields, ok
 }
@@ -1244,6 +1268,7 @@ func (dc *decider) namedIn(spans []instant, m moment, by func(h, m moment) bool)
 // call's window holds (5), a coarse copy (6), a read since its test began
 // (7), a client test's own value (8); else refused.
 func (dc *decider) instant(path string, at variables.Address, n int, c changedInstant) Decision {
+	defer dc.letGoHalves()
 	r, l := c.r, c.l
 	inScope := func(p evPlace) bool { return dc.allScope || !p.otherTest || p.given }
 	// untold: answers of the scope before the call, whose view in round F
@@ -1255,7 +1280,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		hl, _, _ := dc.holds(p, p.t.live, l, c.lm, c.byText)
 		return hr || hl
 	}
-	for _, q := range dc.ps {
+	for i, q := range dc.ps {
 		// A moment a recording's request holds is what the application
 		// sent there: a send, placed by when it was sent and decided by the
 		// send rules (4, 5, 6), as an exchange's request leaf is, whenever
@@ -1263,7 +1288,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		// the application, placed by when it was answered (halves).
 		ps := []evPlace{q}
 		if q.raw > 0 && held(q) {
-			req, ans := dc.halves(q)
+			req, ans := dc.halves(i, q)
 			ps = []evPlace{req, ans}
 		}
 		for _, p := range ps {
