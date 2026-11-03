@@ -1,6 +1,7 @@
 package replayer
 
 import (
+	"cmp"
 	"context"
 	"maps"
 	"sort"
@@ -126,7 +127,7 @@ func (g *strictGate) clockLeftOut(mock *models.Mock, leftOut []string) []string 
 // checked whatever its value: a value equal to its recording is a read of
 // this run's clock only where the clock showed it in the span. A literal
 // the statement does not carry, or a span keploy cannot tell, refuses it.
-// The first refusal's reason is kept for the miss (clockWhy). Each
+// A refusal's reason is kept for the miss (refusedOnClock). Each
 // recording is checked once a command.
 func (g *strictGate) clocksHold(mock *models.Mock) bool {
 	held := literalClocks(mock)
@@ -141,24 +142,53 @@ func (g *strictGate) clocksHold(mock *models.Mock) bool {
 		g.clockVerdicts = make(map[*models.Mock]bool)
 	}
 	g.clockVerdicts[mock] = ok
-	if !ok && g.clockWhy == "" {
-		g.clockWhy = why
+	if !ok {
+		g.refusedOnClock(mock, why)
 	}
 	return ok
 }
 
 // allowsClocks is clocksHold for a recording of the live COM_QUERY's very
-// text (no literal compared differs), counted with the rejected ones, and
-// named as the closest, where it is no.
+// text (no literal compared differs), counted with the rejected ones where
+// it is no. It names no closest recording: the exact-text scan names the
+// one it turns away (bestPartialMock), and the first recording strict
+// enforcement rejects, if any, still gives its field diffs.
 func (g *strictGate) allowsClocks(mock *models.Mock) bool {
 	if g.clocksHold(mock) {
 		return true
 	}
 	g.rejected++
-	if g.closestMock == "" {
-		g.closestMock = mock.Name
-	}
 	return false
+}
+
+// clockRefusal is why the gate turned the recording named mock away at its
+// literals: a literal learned as a read of the application's clock that
+// holds no read of the call's span (clocksHold), or a changed one the learn
+// step learned no read at (learnsClocks).
+type clockRefusal struct {
+	mock, why string
+}
+
+// refusedOnClock keeps the reason the gate turned mock away at its literals,
+// in the order the scan met them, for the miss (clockWhyFor).
+func (g *strictGate) refusedOnClock(mock *models.Mock, why string) {
+	g.clockRefusals = append(g.clockRefusals, clockRefusal{mock: mock.Name, why: why})
+}
+
+// clockWhyFor is the reason a miss that names closest the recording nearest
+// the command gives for a refusal at literals: that recording's own, or,
+// where it has none, the first another gave, prefixed with that one's name,
+// so the reason never reads as the named recording's when it is another's.
+func (g *strictGate) clockWhyFor(closest string) string {
+	for _, r := range g.clockRefusals {
+		if r.mock == closest {
+			return r.why
+		}
+	}
+	if len(g.clockRefusals) == 0 {
+		return ""
+	}
+	return g.clockRefusals[0].mock + ": " + g.clockRefusals[0].why
 }
 
 func (g *strictGate) checkClocks(mock *models.Mock, held map[string]models.ClockOffset) (bool, string) {
@@ -208,9 +238,7 @@ func (g *strictGate) learnsClocks(mock *models.Mock, drift map[string][]string) 
 	clocks, why := (*fn)(g.ctx, LiteralCall{MockDb: g.mockDb, Recorded: mock, Live: liveLiterals(g.live), Rec: rec, Drift: paths, Arrived: call.arrived})
 	for _, p := range paths {
 		if _, ok := clocks[p]; !ok {
-			if g.clockWhy == "" {
-				g.clockWhy = why
-			}
+			g.refusedOnClock(mock, cmp.Or(why, p+" changed, and the learn step learned no read of the application's clock there"))
 			return false
 		}
 	}

@@ -274,13 +274,14 @@ type strictGate struct {
 	// the application's clock (clocksHold, learnsClocks). learned are the
 	// reads the learn step learned for this command, by recording;
 	// learnTried the recordings it was asked about; clockVerdicts
-	// clocksHold's answers; clockWhy the first reason one of them gave no.
+	// clocksHold's answers; clockRefusals the recordings turned away at their
+	// literals, with why (refusedOnClock).
 	ctx           context.Context
 	mockDb        integrations.MockMemDb
 	learned       map[*models.Mock]map[string]models.ClockOffset
 	learnTried    map[*models.Mock]bool
 	clockVerdicts map[*models.Mock]bool
-	clockWhy      string
+	clockRefusals []clockRefusal
 }
 
 // bodyFor is the live request body mock's recorded one is compared with: the
@@ -530,11 +531,14 @@ func (g *strictGate) strictEngine() *mocknoise.Engine {
 
 // compare is strict enforcement's verdict on mock by engine, cached in
 // verdicts, recording the rejection diagnostics when it is no. The paths in
-// leftOut are not compared, whatever their values.
+// leftOut are not compared, whatever their values. A recording whose body
+// is allowed but whose literals learned as reads of the application's clock
+// do not hold (clocksHold) is a rejection too, counted on every scan that
+// meets it, as one at another field is.
 func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Mock]gateVerdict, mock *models.Mock, leftOut ...string) bool {
 	v, seen := (*verdicts)[mock]
-	if seen && v.allowed {
-		return g.clocksHold(mock)
+	if seen && v.allowed && g.clocksHold(mock) {
+		return true
 	}
 	leftOut = g.clockLeftOut(mock, leftOut)
 	noise := g.bodyNoise(mock, leftOut)

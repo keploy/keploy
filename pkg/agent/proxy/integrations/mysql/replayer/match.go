@@ -2411,9 +2411,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		// A recording turned away because a literal the learn step learned
 		// as a read of the application's clock holds no read of this call's
 		// span, or because the learn step learned none at a literal that
-		// differs, says why (clocksHold, learnsClocks).
-		if miss.why == "" && gate.clockWhy != "" {
-			miss.why = gate.clockWhy
+		// differs, says why (clocksHold, learnsClocks): the named closest
+		// recording's reason, or another's, named (clockWhyFor).
+		if miss.why == "" {
+			miss.why = gate.clockWhyFor(miss.closestMock)
 		}
 		if miss.nextSteps == "" && gate.exactRejected > 0 {
 			miss.nextSteps = exactDriftNextSteps

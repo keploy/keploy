@@ -79,7 +79,8 @@ func recordedClock(t *testing.T, recAt time.Time, f clockRun, live string) (*mod
 // though its text differs there; one whose literal lies outside it, or
 // whose span keploy cannot tell, is refused, and the miss names the
 // literal. The other literals are still compared, and without the switch
-// the literal is compared as before it.
+// the literal is compared as before it. The scan that starts in the open
+// test's window and the one over the whole pool give the same answer.
 func TestALiteralLearnedAsAClockReadIsCheckedAsOne(t *testing.T) {
 	recAt := diffBase.Add(time.Millisecond)
 	f := newClockRun(time.Now().UTC().Add(-time.Minute))
@@ -92,38 +93,102 @@ func TestALiteralLearnedAsAClockReadIsCheckedAsOne(t *testing.T) {
 		noSpan  bool
 		served  bool
 		mention string
+		// noWhy: refused at a literal that is no read of the clock, the
+		// miss gives no reason of one.
+		noWhy bool
 	}{
 		{name: "a read in the call's span", proven: true, sql: strings.Replace(clockSQL, "%s", later.read().Format(literalForm), 1), served: true},
 		{name: "the recorded value, no read of this run", proven: true, sql: strings.Replace(clockSQL, "%s", recAt.Add(-1300*time.Microsecond).Format(literalForm), 1), mention: "body.query.literals.1"},
 		{name: "a read an hour before the span", proven: true, sql: strings.Replace(clockSQL, "%s", later.read().Add(-time.Hour).Format(literalForm), 1), mention: "body.query.literals.1"},
 		{name: "a read in the span, no span known", proven: true, noSpan: true, sql: strings.Replace(clockSQL, "%s", later.read().Format(literalForm), 1), mention: "body.query.literals.1"},
-		{name: "a read in the span, another literal changed", proven: true, sql: strings.Replace(strings.Replace(clockSQL, "%s", later.read().Format(literalForm), 1), "a@x.io", "b@x.io", 1), mention: "body.query.literals.0"},
+		{name: "a read in the span, another literal changed", proven: true, sql: strings.Replace(strings.Replace(clockSQL, "%s", later.read().Format(literalForm), 1), "a@x.io", "b@x.io", 1), mention: "body.query.literals.0", noWhy: true},
 		{name: "a read in the span, the switch off", proven: false, sql: strings.Replace(clockSQL, "%s", later.read().Format(literalForm), 1)},
 	}
 	for _, tc := range cases {
+		for _, fullScan := range []bool{false, true} {
+			t.Run(tc.name+map[bool]string{false: "", true: ", the whole pool's scan"}[fullScan], func(t *testing.T) {
+				t.Setenv(provenswitch.Env, map[bool]string{false: "0", true: "1"}[tc.proven])
+				m, _ := recordedClock(t, recAt, f, f.read().Format(literalForm))
+				m.Spec.Clocks = map[string]models.ClockOffset{"body.query.literals.1": o}
+				mm := stageOwn(t, []*models.Mock{m}, []*models.Mock{m}, true)
+				ctx := later.ctx(false)
+				if tc.noSpan {
+					ctx, _ = poolConn("c1")
+					ctx = replayer.WithCommandForTest(ctx, later.arrived, false)
+				}
+				_, dctx := poolConn("c1")
+				_, ok, miss, err := replayer.MatchCommandForTest(ctx, zap.NewNop(), queryReq(tc.sql), mm, dctx, nil, fullScan)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ok != tc.served {
+					t.Fatalf("served %v (miss %s); want %v", ok, miss, tc.served)
+				}
+				if tc.mention != "" && !strings.Contains(miss, tc.mention) {
+					t.Fatalf("the miss (%s) does not name %s", miss, tc.mention)
+				}
+				if tc.mention != "" && (!strings.Contains(miss, "closestMock:mock-note") || !strings.Contains(miss, "matchPhase:strict_noise_reject")) {
+					t.Fatalf("the miss (%s) does not name mock-note the closest, rejected by strict comparison", miss)
+				}
+				if tc.noWhy && !strings.Contains(miss, " why: nextSteps:") {
+					t.Fatalf("the miss (%s) gives a reason; want none", miss)
+				}
+			})
+		}
+	}
+}
+
+// A miss that turned recordings away at literals learned as reads of the
+// application's clock gives the reason of the recording it names the
+// closest: of two recordings of the statement, each refused for its own
+// reason, the reason of the one it names. Where the named one was refused
+// for another reason, the reason of the one refused at a literal is given
+// with that recording's name, never as the named one's.
+func TestAMissGivesTheClockReasonOfTheRecordingItNames(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	recAt := diffBase.Add(time.Millisecond)
+	f := newClockRun(time.Now().UTC().Add(-time.Minute))
+	_, o := recordedClock(t, recAt, f, f.read().Format(literalForm))
+	later := newClockRun(time.Now().UTC())
+	// A read an hour before the call's span: outside it.
+	sql := strings.Replace(clockSQL, "%s", later.read().Add(-time.Hour).Format(literalForm), 1)
+	apart := o
+	apart.Zone = models.ZoneApart
+	const outside, noOne = "body.query.literals.1 was learned as", "clock reads in no one zone"
+	cases := []struct {
+		name string
+		// second is the recording the scan meets after mock-note, which it
+		// names the closest; its clocks, and the owner its statement names.
+		clocks map[string]models.ClockOffset
+		owner  string
+		// want is in the miss's reason, never is not.
+		want, never string
+	}{
+		{name: "both refused at the clock literal", clocks: map[string]models.ClockOffset{"body.query.literals.1": apart}, owner: "a@x.io", want: "why:body.query.literals.1 was learned at more than one call as " + noOne, never: "mock-note: "},
+		{name: "the named one refused at another literal", owner: "b@x.io", want: "why:mock-note: " + outside},
+	}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(provenswitch.Env, map[bool]string{false: "0", true: "1"}[tc.proven])
-			m, _ := recordedClock(t, recAt, f, f.read().Format(literalForm))
-			m.Spec.Clocks = map[string]models.ClockOffset{"body.query.literals.1": o}
-			mm := stageOwn(t, []*models.Mock{m}, []*models.Mock{m}, true)
-			ctx := later.ctx(false)
-			if tc.noSpan {
-				ctx, _ = poolConn("c1")
-				ctx = replayer.WithCommandForTest(ctx, later.arrived, false)
-			}
+			first, _ := recordedClock(t, recAt, f, f.read().Format(literalForm))
+			first.Spec.Clocks = map[string]models.ClockOffset{"body.query.literals.1": o}
+			secondAt := recAt.Add(5 * time.Millisecond)
+			secondSQL := strings.Replace(strings.Replace(clockSQL, "%s", secondAt.Add(-1300*time.Microsecond).Format(literalForm), 1), "a@x.io", tc.owner, 1)
+			second := diffMock("mock-note-2", "c1", []mysql.Request{queryReq(secondSQL)}, secondAt, models.LifetimePerTest, "mocks")
+			second.Spec.Clocks = tc.clocks
+			mm := stageOwn(t, []*models.Mock{first, second}, []*models.Mock{first, second}, true)
 			_, dctx := poolConn("c1")
-			_, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), queryReq(tc.sql), mm, dctx)
+			_, ok, miss, err := replayer.MatchForTest(later.ctx(false), zap.NewNop(), queryReq(sql), mm, dctx)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if ok != tc.served {
-				t.Fatalf("served %v (miss %s); want %v", ok, miss, tc.served)
+			if ok {
+				t.Fatal("served; want a miss")
 			}
-			if tc.mention != "" && !strings.Contains(miss, tc.mention) {
-				t.Fatalf("the miss (%s) does not name %s", miss, tc.mention)
+			if !strings.Contains(miss, "closestMock:mock-note-2") || !strings.Contains(miss, "matchPhase:strict_noise_reject") {
+				t.Fatalf("the miss (%s) does not name mock-note-2 the closest, rejected by strict comparison", miss)
 			}
-			if tc.mention != "" && !strings.Contains(miss, "closestMock:mock-note") {
-				t.Fatalf("the miss (%s) does not name mock-note the closest", miss)
+			if !strings.Contains(miss, tc.want) || (tc.never != "" && strings.Contains(miss, tc.never)) {
+				t.Fatalf("the miss (%s) does not say %q, or says %q", miss, tc.want, tc.never)
 			}
 		})
 	}
@@ -135,9 +200,9 @@ type learnerCalls struct {
 	n      int
 	learns map[string]models.ClockOffset
 	// echo learns, at every path it is asked about, the read learns holds
-	// at body.query.literals.1.
-	echo bool
-	call replayer.LiteralCall
+	// at body.query.literals.1. noWhy gives no reason where it learns none.
+	echo, noWhy bool
+	call        replayer.LiteralCall
 }
 
 func (l *learnerCalls) learner(_ context.Context, c replayer.LiteralCall) (map[string]models.ClockOffset, string) {
@@ -150,6 +215,9 @@ func (l *learnerCalls) learner(_ context.Context, c replayer.LiteralCall) (map[s
 		}
 		return out, ""
 	}
+	if l.learns == nil && l.noWhy {
+		return nil, ""
+	}
 	if l.learns == nil {
 		return nil, "body.query.literals.1 changed, and keploy cannot tell where its value came from"
 	}
@@ -161,7 +229,8 @@ func (l *learnerCalls) learner(_ context.Context, c replayer.LiteralCall) (map[s
 // recording only where it learns a read of the application's clock at
 // every literal that changed: the consumed copy then carries them as its
 // MockSpec.Clocks, never as noise. A learner that learns none, or not all,
-// leaves the call refused with its reason. A call that is not one of the
+// leaves the call refused with its reason, or, where it gives none, with
+// the literal it learned none at. A call that is not one of the
 // full round, a replay without the proven switch, and a replay with no
 // learner registered ask nothing, and are refused as before; so does a call
 // after the set's learn step ended, and one whose recording already holds
@@ -189,7 +258,7 @@ func TestRecordsFullRoundLearnsAChangedLiteralOnlyAsAClockRead(t *testing.T) {
 		// read an hour before the span; echo: the learner learns a read at
 		// every path it is asked about; detect: detection learns noise.
 		// strict: strict enforcement compares the request body.
-		ended, held, echo, detect, strict bool
+		ended, held, echo, detect, strict, noWhy bool
 	}{
 		{name: "learns the read", proven: true, fullRnd: true, register: true, learns: map[string]models.ClockOffset{"body.query.literals.1": o}, asked: true, served: true},
 		{name: "learns the read, detection on", proven: true, fullRnd: true, register: true, detect: true, learns: map[string]models.ClockOffset{"body.query.literals.1": o}, asked: true, served: true},
@@ -197,6 +266,7 @@ func TestRecordsFullRoundLearnsAChangedLiteralOnlyAsAClockRead(t *testing.T) {
 		{name: "the learn step ended", proven: true, fullRnd: true, register: true, ended: true, learns: map[string]models.ClockOffset{"body.query.literals.1": o}, mention: "body.query.literals.1"},
 		{name: "held as a read, read outside the span", proven: true, fullRnd: true, register: true, held: true, echo: true, learns: map[string]models.ClockOffset{"body.query.literals.1": o}, mention: "body.query.literals.1"},
 		{name: "learns none", proven: true, fullRnd: true, register: true, asked: true, mention: "keploy cannot tell where its value came from"},
+		{name: "learns none, gives no reason", proven: true, fullRnd: true, register: true, noWhy: true, asked: true, mention: "why:body.query.literals.1 changed, and the learn step learned no read of the application's clock there"},
 		{name: "learns one of two changed", proven: true, fullRnd: true, register: true, learns: map[string]models.ClockOffset{"body.query.literals.1": o}, sql: twoChanged, asked: true, mention: "body.query.literals.0"},
 		{name: "not the full round", proven: true, register: true, learns: map[string]models.ClockOffset{"body.query.literals.1": o}, mention: "body.query.literals.1"},
 		{name: "the switch off", fullRnd: true, register: true, learns: map[string]models.ClockOffset{"body.query.literals.1": o}},
@@ -205,7 +275,7 @@ func TestRecordsFullRoundLearnsAChangedLiteralOnlyAsAClockRead(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, map[bool]string{false: "0", true: "1"}[tc.proven])
-			l := &learnerCalls{learns: tc.learns, echo: tc.echo}
+			l := &learnerCalls{learns: tc.learns, echo: tc.echo, noWhy: tc.noWhy}
 			if tc.register {
 				replayer.RegisterLiteralLearner(l.learner)
 				t.Cleanup(func() { replayer.RegisterLiteralLearner(nil) })
