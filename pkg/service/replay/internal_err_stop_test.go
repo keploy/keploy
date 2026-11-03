@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -32,18 +33,30 @@ func startTwoSets(t *testing.T, h *prRun) ([]string, string, int) {
 	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
 	defer cancel()
 	_ = h.replayer.Start(ctx)
-	var ran []string
-	for _, e := range logs.FilterMessage("running").All() {
-		if set, ok := e.ContextMap()["test-set"].(string); ok {
-			ran = append(ran, set)
-		}
-	}
+	ran := setsRan(logs)
 	stops := logs.FilterMessage("stopping Keploy").All()
 	if len(stops) != 1 {
 		t.Fatalf("%d \"stopping Keploy\" lines, want 1", len(stops))
 	}
 	reason, _ := stops[0].ContextMap()["reason"].(string)
 	return ran, reason, utils.ErrCode
+}
+
+// sgrCode is one colour or style code of a terminal.
+var sgrCode = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+// setsRan is the sets the run's "running" lines name, in order, with their
+// colour codes removed. Whether the set's name is coloured is the process's
+// global colour switch (fatih/color's NoColor), which any JSON diff keploy
+// prints turns on, so an earlier row in the package can turn it on.
+func setsRan(logs *observer.ObservedLogs) []string {
+	var ran []string
+	for _, e := range logs.FilterMessage("running").All() {
+		if set, ok := e.ContextMap()["test-set"].(string); ok {
+			ran = append(ran, sgrCode.ReplaceAllString(set, ""))
+		}
+	}
+	return ran
 }
 
 // A set that ends INTERNAL_ERR and so stops the run is what the run's stop

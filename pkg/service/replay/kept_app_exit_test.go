@@ -360,12 +360,7 @@ func TestAComposeSetsHaltDoesNotStopTheRunButItsStopNamesIt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
 	defer cancel()
 	_ = h.replayer.Start(ctx)
-	var ran []string
-	for _, e := range logs.FilterMessage("running").All() {
-		if set, ok := e.ContextMap()["test-set"].(string); ok {
-			ran = append(ran, set)
-		}
-	}
+	ran := setsRan(logs)
 	if len(ran) < 2 {
 		t.Fatalf("the run ran the sets %v, want it to go on past the halted set", ran)
 	}
