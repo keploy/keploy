@@ -68,16 +68,23 @@ func mariaDBGreeting(t *testing.T, caps, ext uint32) []byte {
 // it leaves out, and its capture clock.
 func mariaDBLogin(t *testing.T) (*v2Harness, *orphanSpans, func() time.Time) {
 	t.Helper()
+	return mariaDBLoginWith(t, mariaDBExtCaps)
+}
+
+// mariaDBLoginWith is mariaDBLogin with ext the extended capabilities both
+// sides send.
+func mariaDBLoginWith(t *testing.T, ext uint32) (*v2Harness, *orphanSpans, func() time.Time) {
+	t.Helper()
 	h := newV2Harness(t)
 	leftOut := &orphanSpans{}
 	h.sess.Orphans = leftOut
 	tick := 0
 	at := func() time.Time { tick++; return wireBase.Add(time.Duration(tick) * time.Millisecond) }
 	caps := mariaDBLoginCaps
-	h.pushDest(mariaDBGreeting(t, caps, mariaDBExtCaps), at())
+	h.pushDest(mariaDBGreeting(t, caps, ext), at())
 	hr := &mysql.HandshakeResponse41Packet{CapabilityFlags: caps, MaxPacketSize: 1 << 24, CharacterSet: 0x2d,
 		Username: "root", AuthResponse: bytes.Repeat([]byte{0xAB}, 20), AuthPluginName: string(mysql.Native)}
-	binary.LittleEndian.PutUint32(hr.Filler[19:], mariaDBExtCaps)
+	binary.LittleEndian.PutUint32(hr.Filler[19:], ext)
 	hb, err := connphase.EncodeHandshakeResponse41(context.Background(), zap.NewNop(), hr)
 	if err != nil {
 		t.Fatal(err)
@@ -203,6 +210,83 @@ func TestRecordV2_AMariaDBResultSetWithoutItsDefinitionsIsLeftOut(t *testing.T) 
 	}
 	if n := len(mocksOf(got, "COM_QUERY")); n != 1 {
 		t.Errorf("recorded %d COM_QUERYs after it, want 1", n)
+	}
+}
+
+// A multi-statement query on MariaDB answers with several results. A mock
+// holds one, so the exchange is framed whole and left out for that, and the
+// next command is recorded. Each further result's column count is framed as
+// the first one's, as the connection negotiated: under the metadata cache it
+// carries the metadata-follows byte, and with extended type information alone
+// (MariaDB 10.5) it does not. A further result without its definitions cannot
+// be framed by reading them, so the framing is lost there and the recording
+// goes on from the next command.
+func TestRecordV2_AMariaDBResponseOfSeveralResultsIsLeftOutForWhatItIs(t *testing.T) {
+	t.Parallel()
+	more := []byte{0xfe, 0x00, 0x00, 0x0a, 0x00} // EOF: SERVER_STATUS_AUTOCOMMIT | SERVER_MORE_RESULTS_EXISTS
+	extCol := mariaDBColumn("n", []byte{0x00}, 0x3f, 1, byte(mysql.FieldTypeLongLong))
+	plainCol := mariaDBColumn("n", nil, 0x3f, 1, byte(mysql.FieldTypeLongLong))
+	for _, c := range []struct {
+		name  string
+		ext   uint32
+		reply [][]byte
+		why   []string // each is in the one reason
+	}{
+		{"under the metadata cache", mariaDBExtCaps,
+			[][]byte{{0x01, 0x01}, extCol, eofPayload, lenencStr("1"), more, {0x01, 0x01}, extCol, eofPayload, lenencStr("2"), eofPayload},
+			[]string{"holds more than one result"}},
+		// MariaDB 10.5: extended type information without the metadata
+		// cache, so no metadata-follows byte after either count.
+		{"extended type information without the metadata cache", mysql.MARIADB_CLIENT_EXTENDED_METADATA,
+			[][]byte{{0x01}, extCol, eofPayload, lenencStr("1"), more, {0x01}, extCol, eofPayload, lenencStr("2"), eofPayload},
+			[]string{"holds more than one result"}},
+		{"without MariaDB's metadata extensions", 0,
+			[][]byte{{0x01}, plainCol, eofPayload, lenencStr("1"), more, {0x01}, plainCol, eofPayload, lenencStr("2"), eofPayload},
+			[]string{"holds more than one result"}},
+		// The framing is lost there: its rows are not read as definitions.
+		{"a further result without its definitions", mariaDBExtCaps,
+			[][]byte{{0x01, 0x01}, extCol, eofPayload, lenencStr("1"), more, {0x01, 0x00}, lenencStr("2"), eofPayload},
+			[]string{"cannot be framed", "leaves out its column definitions (MariaDB's metadata cache)"}},
+		// A byte past the count and its metadata-follows byte: not a column
+		// count packet, whatever its first bytes say.
+		{"a further result's head longer than its column count", mariaDBExtCaps,
+			[][]byte{{0x01, 0x01}, extCol, eofPayload, lenencStr("1"), more, {0x01, 0x01, 0x00}, extCol, eofPayload, lenencStr("2"), eofPayload},
+			[]string{"cannot be framed", "is not a column count"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			h, leftOut, at := mariaDBLoginWith(t, c.ext)
+			core, logs := observer.New(zapcore.DebugLevel)
+			h.logger = zap.New(core)
+			h.sess.Logger = h.logger
+			h.pushClient(cannedCOMQuery(t, 0, "SELECT 1; SELECT 2"), at())
+			for _, p := range frame(c.reply) {
+				h.pushDest(p, at())
+			}
+			h.pushClient(cannedCOMQuery(t, 0, "SELECT 3"), at())
+			h.pushDest(cannedOK(t, 1, mariaDBLoginCaps), at())
+			got := recordAll(t, h)
+			if n := leftOut.count(); n != 1 {
+				t.Errorf("%d exchanges left out, want the multi-statement query's", n)
+			}
+			reasons := logs.FilterFieldKey("reason").All()
+			var rs []string
+			for _, e := range reasons {
+				rs = append(rs, e.ContextMap()["reason"].(string))
+			}
+			if len(rs) != 1 {
+				t.Errorf("left out for %q, want once for %q", rs, c.why)
+			} else {
+				for _, why := range c.why {
+					if !strings.Contains(rs[0], why) {
+						t.Errorf("left out for %q, want %q in it", rs[0], why)
+					}
+				}
+			}
+			if n := len(mocksOf(got, "COM_QUERY")); n != 1 {
+				t.Errorf("recorded %d COM_QUERYs, want the one after the multi-statement query", n)
+			}
+		})
 	}
 }
 

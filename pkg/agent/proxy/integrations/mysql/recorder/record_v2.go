@@ -2008,9 +2008,21 @@ func moreResults(ctx context.Context, logger *zap.Logger, sess *supervisor.Sessi
 		case mysql.EOF, mysql.LocalInFile:
 			return framingLostAt(logger, sess, "a %#x packet where a further result of the %s response must start", head[4], command)
 		}
+		// The head is the result's column count, framed as the connection
+		// negotiated: under MariaDB's metadata cache the count is followed by
+		// its metadata-follows byte (rowscols.DecodeColumnCount), and a result
+		// without its definitions cannot be framed by reading them.
+		framing := decodeCtx.MetadataFraming()
 		cols, isNull, n := mysqlUtils.ReadLengthEncodedInteger(head[4:])
-		if isNull || n == 0 || 4+n != len(head) || cols == 0 {
+		size := 4 + n
+		if framing.MetadataFollows() {
+			size++
+		}
+		if isNull || n == 0 || size != len(head) || cols == 0 {
 			return framingLostAt(logger, sess, "the head of a further result of the %s response is not a column count", command)
+		}
+		if _, err := rowscols.DecodeColumnCount(ctx, logger, head[4:], framing); err != nil {
+			return framingLostAt(logger, sess, "the head of a further result of the %s response: %v", command, err)
 		}
 		for i := uint64(0); i < cols; i++ {
 			if _, err := readResponsePacket(ctx, logger, sess, seq, "column definition"); err != nil {

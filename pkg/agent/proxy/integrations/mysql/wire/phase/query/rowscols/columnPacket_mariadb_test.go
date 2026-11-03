@@ -111,6 +111,11 @@ func TestDecodeColumn_ExtendedMetadataOverrunsPacket(t *testing.T) {
 		// The JSON column with its extended type information's length
 		// raised from 6 to 0x40: past the end of the packet.
 		{"length past the packet", "036465660464656d6f01740174046461746104646174614001046a736f6e0c2d00fffffffffc9000000000", "(64 bytes) overruns the packet"},
+		// The bound's edge: 0x14 is one byte more than the 19 left after
+		// the length, and 0x13 runs exactly to the packet's end (it fits,
+		// and its entries then do not decode).
+		{"length one byte past the packet", "036465660464656d6f01740174046461746104646174611401046a736f6e0c2d00fffffffffc9000000000", "(20 bytes) overruns the packet"},
+		{"length to the packet's end", "036465660464656d6f01740174046461746104646174611301046a736f6e0c2d00fffffffffc9000000000", "extended type information does not decode"},
 		// An entry whose value's length runs past the information's own.
 		{"entry past its information", "036465660464656d6f0174017404646174610464617461030105" + "0c2d00fffffffffc9000000000", "extended type information does not decode"},
 		// The packet ends after org_name, where the information belongs.
