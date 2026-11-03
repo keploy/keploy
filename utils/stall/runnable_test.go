@@ -1406,3 +1406,57 @@ func TestSampler_ARestartWaitsForTheReadInFlight(t *testing.T) {
 		t.Fatalf("read the threads %d times, want 3: the first start's, the verdict's and the restart's", src.heldN)
 	}
 }
+
+// A verdict's read sets the wait it finds against what on-time samples
+// counted, those counted while it was in flight included (readWaits): 10 ms
+// counted before it and 40 ms while it waited for the threads, a 50 ms wait
+// found, and all 50 ms owed. Set against only what was counted before it, the
+// read owes 10 ms, and the other 40 ms count as time the consumer could run.
+func TestSampler_AReadSetsItsWaitAgainstOnTimeSamplesTakenWhileInFlight(t *testing.T) {
+	src := newReadHeldSource(t)
+	s := &sampler{src: src, tick: Tick}
+	s.lastWall, s.lastCPU, s.cpuOK = src.now()
+	s.waitWall = s.lastWall
+	onTime := func() { src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick; sampleByHand(s) }
+	onTime()
+	src.held, src.block = 5*Tick, true
+	got := make(chan time.Duration, 1)
+	go func() { owed, _, _ := s.owed(); got <- owed }()
+	<-src.entered
+	for range 4 {
+		onTime()
+	}
+	close(src.release)
+	if owed := <-got; owed != 5*Tick {
+		t.Fatalf("a read that found a 50 ms wait owes %v, want 50ms: 10 ms was counted on time before it and 40 ms while it was in flight", owed)
+	}
+}
+
+// What a late sample counted while a read was in flight is carried whole to
+// the next read, which sets a wait against the time late samples left
+// uncounted first and only then against what they counted. Dropped, a wait
+// the next read finds is owed only out of on-time samples' count.
+func TestSampler_ALateSamplesCountWhileAReadIsInFlightIsLeftForTheNextRead(t *testing.T) {
+	src := newReadHeldSource(t)
+	s := &sampler{src: src, tick: Tick}
+	s.lastWall, s.lastCPU, s.cpuOK = src.now()
+	s.waitWall = s.lastWall
+	src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick
+	sampleByHand(s) // on time, 10 ms
+	src.block = true
+	got := make(chan time.Duration, 1)
+	go func() { owed, _, _ := s.owed(); got <- owed }()
+	<-src.entered
+	src.wall, src.cpu = src.wall.Add(10*Tick), src.cpu+3*Tick
+	sampleByHand(s) // late: 100 ms, 30 ms of CPU
+	close(src.release)
+	if owed := <-got; owed != 0 {
+		t.Fatalf("a read that found no wait owes %v", owed)
+	}
+	src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick
+	sampleByHand(s) // on time, 10 ms
+	src.held = 10 * Tick
+	if owed, _, _ := s.owed(); owed != 3*Tick {
+		t.Fatalf("a 100 ms wait owes %v, want 30ms: the 20 ms counted on time, then of the other 80 ms the 70 ms the late sample left uncounted first, and 10 ms of its 30 ms count", owed)
+	}
+}
