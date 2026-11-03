@@ -1099,6 +1099,27 @@ func TestSampler_RestartsReadTheThreadsOncePerHeldEvery(t *testing.T) {
 	}
 }
 
+// A restart reads the threads again once heldEvery has passed since their
+// last read, and not a nanosecond before.
+func TestSampler_ARestartReadsTheThreadsOnceHeldEveryHasPassed(t *testing.T) {
+	src := &fakeSource{wall: time.Unix(1_000_000, 0)}
+	s := &sampler{src: src, tick: time.Hour} // the test samples, not the goroutine
+	s.acquire()()
+	if src.heldN != 1 {
+		t.Fatalf("the first start read the threads %d times, want once", src.heldN)
+	}
+	src.wall = src.wall.Add(heldEvery - time.Nanosecond)
+	s.acquire()()
+	if src.heldN != 1 {
+		t.Fatalf("a restart %v after the last read read the threads again (%d reads), want none before %v", heldEvery-time.Nanosecond, src.heldN, heldEvery)
+	}
+	src.wall = src.wall.Add(time.Nanosecond)
+	s.acquire()()
+	if src.heldN != 2 {
+		t.Fatalf("a restart %v after the last read did not read the threads (%d reads), want a read once %v has passed", heldEvery, src.heldN, heldEvery)
+	}
+}
+
 // Nor is what the threads waited in the gap owed, or what was owed before it.
 func TestSampler_ARestartOwesNoWaitFromBeforeIt(t *testing.T) {
 	src := &fakeSource{wall: time.Unix(1_000_000, 0)}
