@@ -57,44 +57,42 @@ func (g givenWords) gaveWhole(live string) bool {
 
 // notFromWhy is the reason of a drifted value v whose recorded value the
 // search found at from (appearedIn), a recording's payload of the call's own
-// test, where nothing F gave the application there holds the value the call
-// carries now: F served from as the rule a copy follows its source sets
+// test, where F served from as the rule a copy follows its source sets
 // aside (follows.refute: as recorded, byte for byte, or by a view the value
-// did not move with), or had not served it before the call
-// (Place.unserved). It names the serves of older tests that gave the
-// application that value whole (lateServes, lateOf). Where none did and F
-// served from, it says plainly that keploy cannot name where the value came
-// from, never that it flowed from from. "" where F's view of from may hold
-// the value, or keploy cannot tell what F gave there, or every word of the
-// value that changed is a read of the clock (clockSet.whole: the clock's
-// rules read it, and an answer's instant is followed whole whatever F gave
-// there), which leaves the search's reason (evidence); and where F had not
-// served from and no older test's serve gave the value, whose reason
-// (correction) already says F never served it.
-func (dc *DriftCache) notFromWhy(v *valueDrift, from Place, at time.Time, served []Earlier, raw []Raw, places func() *offsetPlaces) string {
+// did not move with): nothing F gave the application there holds the value
+// the call carries now. It names the serves of older tests that gave the
+// application that value whole (lateServes, lateOf), and late is true: the
+// leaf is no variable of from then. Where none did, it says plainly that
+// keploy cannot name where the value came from, never that it flowed from
+// from. "" where F's view of from may hold the value, keploy cannot tell what
+// F gave there, or F had not served it before the call (Place.unserved,
+// whose reason says so: correction), and where every word of the value that
+// changed is a read of the clock (clockSet.whole: the clock's rules read it,
+// and an answer's instant is followed whole whatever F gave there), which
+// leaves the search's reason (evidence). Only past those does it read the
+// recordings F gave the application earlier in the set (places).
+func (dc *DriftCache) notFromWhy(v *valueDrift, from Place, at time.Time, served []Earlier, raw []Raw, places func() *offsetPlaces) (why string, late bool) {
 	if v.clock.whole {
-		return ""
+		return "", false
 	}
 	aside := ""
-	if !from.unserved {
-		for _, x := range raw {
-			if x.mock != from.Mock {
-				continue
-			}
-			keep := dc.stampsEchoed(v, served, raw)
-			if f := (&follows{dc: dc, rec: v.rec, live: v.live, at: at}); f.refute(x, dc.searched(x, keep), keep, v, from) {
-				aside = f.refuted
-			}
-			break
+	for _, x := range raw {
+		if x.mock != from.Mock {
+			continue
 		}
-		if aside == "" {
-			return ""
+		keep := dc.stampsEchoed(v, served, raw)
+		if f := (&follows{dc: dc, rec: v.rec, live: v.live, at: at}); f.refute(x, dc.searched(x, keep), keep, v, from) {
+			aside = f.refuted
 		}
+		break
 	}
-	if why := lateOf(v, from, lateServes(v.live, places())); why != "" || aside == "" {
-		return why
+	if aside == "" {
+		return "", false
 	}
-	return aside + "; " + notClock(v) + ", and keploy cannot name where the value the call carries now came from, so it cannot follow it. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+	if why := lateOf(v, from, lateServes(v.live, places())); why != "" {
+		return why, true
+	}
+	return aside + "; " + notClock(v) + ", and keploy cannot name where the value the call carries now came from, so it cannot follow it. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it", false
 }
 
 // lateOf is the reason of a call that carries what F gave the application

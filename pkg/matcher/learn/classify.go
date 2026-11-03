@@ -1564,8 +1564,15 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					// now: refused as before, naming the older test's
 					// serve that gave it (a late call), or saying keploy
 					// cannot name its source, never from (notFromWhy).
-					if why := dc.notFromWhy(dc.ofIn(r.Value, l.Value, w, at), from, at, placed, raw, places); why != "" {
+					// Where keploy cannot name the source, the leaf stays a
+					// variable of from, as the search found it (the rule a
+					// copy follows its source is ClassifyFollowing's), and
+					// only its reason changes.
+					switch why, late := dc.notFromWhy(dc.ofIn(r.Value, l.Value, w, at), from, at, placed, raw, places); {
+					case late:
 						ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, why
+					case why != "":
+						ln.Why = why
 					}
 				}
 			} else if echo := Echoes(dc, r, resp); len(echo) > 0 {

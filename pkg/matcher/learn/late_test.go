@@ -43,8 +43,8 @@ func lateSet(name string, n int, id string, serve func(Raw) Raw) GivenPlaces {
 // name gave the value, and F gave mock-60 without it, that keploy cannot
 // name where it came from. The verdict stays a refusal. Where keploy cannot
 // tell what F gave at mock-60, or F gave the value there, the reason is the
-// search's, as before, and so where F never served mock-60 and no older
-// serve gave the value (the reason says F never served it).
+// search's, as before, and so where F never served mock-60, whether an
+// older serve gave the value or not (the reason says F never served it).
 func TestALateCallNamesTheOlderTestsServeNotTheWindowsRecording(t *testing.T) {
 	const path = "body.Key.Id.S"
 	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: lateRecID}}}
@@ -70,7 +70,7 @@ func TestALateCallNamesTheOlderTestsServeNotTheWindowsRecording(t *testing.T) {
 		{"an older test's serve gave it", lateMsg("mock-60", 200*time.Millisecond, lateRecID).ServedAs(9).ServedAsRecorded(),
 			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, asRecorded)}, late, []string{search, "follows it as a value from there", "a part of the value"}, "appears in mock-22"},
 		{"the window's recording not served yet", lateMsg("mock-60", 200*time.Millisecond, lateRecID),
-			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, asRecorded)}, late, []string{search}, ""},
+			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, asRecorded)}, "never served before this call", []string{late, unnamed}, ""},
 		{"two older tests' serves gave it", lateMsg("mock-60", 200*time.Millisecond, lateRecID).ServedAs(9).ServedAsRecorded(),
 			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, asRecorded), lateSet("mock-33", 3, lateLiveID, asRecorded)}, "cannot tell which of them it carries", []string{search}, "appears in mock-22"},
 		{"F gave it at the window's recording", lateMsg("mock-60", 200*time.Millisecond, lateRecID).ServedAs(9).ServedLive(lateMsg("mock-60", 200*time.Millisecond, lateLiveID)),
