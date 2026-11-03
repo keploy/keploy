@@ -177,3 +177,30 @@ func TestChangedJSONFieldPathsHoldsTheLiveValueUnderARedactedRecording(t *testin
 		})
 	}
 }
+
+// Under a redacted recorded value, every recorded value of the guarded path
+// the obfuscator did not redact is held to the patterns too, wherever it
+// stands in an array; a mixed-case key is named by the lowercase entry
+// keploy.yml's keys are read as.
+func TestChangedJSONFieldPathsHoldsEveryUnredactedRecordedValue(t *testing.T) {
+	redacted := func(v string) bool { return v == "REDACTED_abc" }
+	guarded := map[string][]string{"token": {`^t-\d$`}}
+	for _, c := range []struct {
+		name, rec, live string
+		want            []string
+	}{
+		{"an unredacted value outside, the redacted one last", `{"items":[{"token":"bbbbbb"},{"token":"REDACTED_abc"}]}`, `{"items":[{"token":"t-1"},{"token":"t-2"}]}`, []string{"items[].token"}},
+		{"an unredacted value outside, the redacted one first", `{"items":[{"token":"REDACTED_abc"},{"token":"bbbbbb"}]}`, `{"items":[{"token":"t-1"},{"token":"t-2"}]}`, []string{"items[].token"}},
+		{"an unredacted value inside, the redacted one last", `{"items":[{"token":"t-3"},{"token":"REDACTED_abc"}]}`, `{"items":[{"token":"t-1"},{"token":"t-2"}]}`, nil},
+		{"a mixed-case key, the live value outside", `{"Token":"REDACTED_abc","n":1}`, `{"Token":"evil","n":1}`, []string{"Token"}},
+		{"a mixed-case key, the live value inside", `{"Token":"REDACTED_abc","n":1}`, `{"Token":"t-1","n":1}`, nil},
+		{"a mixed-case array, an unredacted value inside", `{"Items":[{"Token":"t-3"},{"Token":"REDACTED_abc"}]}`, `{"Items":[{"Token":"t-1"},{"Token":"t-2"}]}`, nil},
+		{"a mixed-case array, an unredacted value outside", `{"Items":[{"Token":"bbbbbb"},{"Token":"REDACTED_abc"}]}`, `{"Items":[{"Token":"t-1"},{"Token":"t-2"}]}`, []string{"Items[].Token"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ChangedJSONFieldPaths(c.rec, c.live, guarded, nil, false, redacted); !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("changed %v; want %v", got, c.want)
+			}
+		})
+	}
+}

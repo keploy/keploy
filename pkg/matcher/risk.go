@@ -269,6 +269,22 @@ func ChangedDecodedJSONFieldPaths(exp, act interface{}, known map[string][]strin
 		collectJSON(act, "", idx, &m)
 		return m
 	})
+	// heldRecorded is the paths where the recorded document, read alone,
+	// holds a scalar outside a pattern-guarded entry's patterns that the
+	// obfuscator did not redact: wherever it stands in an array, which the
+	// path maps, holding one value per path, do not tell. Read on first
+	// need.
+	heldRecorded := sync.OnceValue(func() map[string]bool {
+		out := map[string]bool{}
+		eachJSONScalar(exp, "", func(path string, v interface{}) {
+			regs, _, _ := idx.matchKind(strings.ToLower(path))
+			str, _ := jsonScalarToString(v)
+			if _, val := scalarTypeValue(v); !anyRegexpMatchStr(str, regs) && !excludeRecordedValue(val) {
+				out[path] = true
+			}
+		})
+		return out
+	})
 	keep := func(path string) bool {
 		if excludeRecordedValue == nil {
 			return true
@@ -279,10 +295,13 @@ func ChangedDecodedJSONFieldPaths(exp, act interface{}, known map[string][]strin
 		}
 		// The obfuscator redacted the recorded value, so it is not
 		// compared. Where an entry with patterns guards the path, the live
-		// value alone is held to them: one outside them, or none, is a
-		// change.
+		// value alone is held to them, and so is every recorded value
+		// there it did not redact: one outside them, or none, is a change.
 		if regs, _, _ := idx.matchKind(strings.ToLower(path)); len(regs) == 0 {
 			return false
+		}
+		if heldRecorded()[path] {
+			return true
 		}
 		m := live()
 		return !m.coveredOnly(path)
@@ -452,6 +471,27 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 		}
 	default:
 		// other JSON forms won't appear here
+	}
+}
+
+// eachJSONScalar calls fn with every scalar of v and its path, as collectJSON
+// names it (object keys dot-joined, an array's elements under "[]").
+func eachJSONScalar(v interface{}, path string, fn func(path string, v interface{})) {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, child := range t {
+			p := k
+			if path != "" {
+				p = path + "." + k
+			}
+			eachJSONScalar(child, p, fn)
+		}
+	case []interface{}:
+		for _, e := range t {
+			eachJSONScalar(e, path+"[]", fn)
+		}
+	case string, float64, bool, nil:
+		fn(path, t)
 	}
 }
 

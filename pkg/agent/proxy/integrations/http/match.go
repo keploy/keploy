@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -2141,7 +2142,11 @@ func unobfuscated(mv []string, isObfuscated func(string) bool) []string {
 // obfuscator value-regexes are skipped, and so are keys known with no
 // patterns. A key known with patterns is skipped only when both bodies hold
 // it and each of its values, on each side, matches one (formValuesMatch):
-// otherwise it is compared as any other key.
+// otherwise it is compared as any other key. The entry with patterns that
+// decides a key is found as the strict comparison and PatternDrift find it
+// (formGuards: on the decoded key, without case, whole fields at any depth),
+// and that key's drift is named by its decoded key, which PatternDrift's
+// filter reads.
 func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObfuscated func(string) bool) map[string][]string {
 	// Split on raw bytes (Split on '&', IndexByte on '=') rather than via
 	// url.ParseQuery so the "key=value" segment handed to isObfuscated carries
@@ -2169,10 +2174,14 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 		isObfuscated = func(string) bool { return false } // no value-regex noise on the mock
 	}
 
+	guards := formGuards(known)
 	out := map[string][]string{}
 	for rawKey, mv := range mockVals {
 		key := "body." + rawKey
 		pats, ok := known[key]
+		if gp := guards(rawKey); len(gp) > 0 {
+			pats, ok, key = gp, true, "body."+formKeyName(rawKey)
+		}
 		if ok && len(pats) == 0 {
 			continue
 		}
@@ -2210,6 +2219,32 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 		return nil
 	}
 	return out
+}
+
+// formGuards returns, for a raw form key, the patterns of the entry of known
+// ("body."-prefixed) that names its decoded key as matcher.NoiseLookup reads
+// it; none where no entry does, or the one that does has none (an entry with
+// none is read by its exact key, as before).
+func formGuards(known map[string][]string) func(rawKey string) []string {
+	for _, pats := range known {
+		if len(pats) > 0 {
+			lookup := matcher.NewNoiseLookup(stripBodyPrefix(known))
+			return func(rawKey string) []string {
+				pats, _ := lookup.Patterns(formKeyName(rawKey))
+				return pats
+			}
+		}
+	}
+	return func(string) []string { return nil }
+}
+
+// formKeyName is a raw form key as the application named it (URL-decoded),
+// or as written when it does not decode.
+func formKeyName(rawKey string) string {
+	if d, err := url.QueryUnescape(rawKey); err == nil {
+		return d
+	}
+	return rawKey
 }
 
 // formValuesMatch reports whether each of a form key's raw values, read as
@@ -2470,6 +2505,21 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		fieldDiffs = append(fieldDiffs, mismatch.JSONBodyDiffs(mockReq.Body, string(diffBody), ignore)...)
 	}
 
+	// A refusal under strict enforcement without the switch (the switch's
+	// own is reported above) can be of a field keploy.yml's request-body
+	// patterns guard, a side's value outside them (PatternDrift,
+	// StrictReject): the miss names it, the patterns and that side, as the
+	// switch's does.
+	var guarded []strictField
+	if phase == models.MatchPhaseStrict {
+		guarded = patternRefusals(closestMock, request.Header, liveBody, userBodyNoise)
+		for _, f := range guarded {
+			if !slices.ContainsFunc(fieldDiffs, func(d models.MockFieldDiff) bool { return d.Path == f.diff.Path }) {
+				fieldDiffs = append(fieldDiffs, f.diff)
+			}
+		}
+	}
+
 	// Redact secret / obfuscated values out of the structured diffs before they
 	// are attached — they (and the Diff string derived from them) are persisted
 	// into the report YAML and the platform API.
@@ -2492,7 +2542,27 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		// of the misleading legacy "headers or body differ".
 		b = b.WithDiff(fmt.Sprintf("closest mock %q has no field-level differences; match stopped at phase %q", closestMock.Name, phase))
 	}
-	return withRoutePlaces(b.Build(), request, closestMock, comparedPool, variableTable(mockDb))
+	r = b.Build()
+	if r != nil {
+		r.FieldReasons = reasonsOf(guarded)
+	}
+	return withRoutePlaces(r, request, closestMock, comparedPool, variableTable(mockDb))
+}
+
+// patternRefusals are the fields of m's recorded request body that
+// keploy.yml's request-body entry with patterns (userBodyNoise) guards and a
+// side's value is outside of, each with its reason (matcher.PatternWhy), as
+// the strict comparison reads them: a recorded value the obfuscator redacted
+// is not held to the patterns, the live one is.
+func patternRefusals(m *models.Mock, header http.Header, liveBody []byte, userBodyNoise map[string][]string) []strictField {
+	k := strictKnown{n: strictNoise{body: matcher.NewNoiseLookup(userBodyNoise)}, values: util.NewNoiseChecker(m.Noise)}
+	var out []strictField
+	for _, f := range k.bodyDiffs(m.Spec.HTTPReq, &req{header: header, body: liveBody}) {
+		if f.why != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // comparedDestinations returns the upstream authority of every mock in the
