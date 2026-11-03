@@ -1634,6 +1634,12 @@ func TestOutcomeAFinerTimeHoldingRoundFsSecondIsNoPick(t *testing.T) {
 		{"a number of seconds without its trailing zeros", func(x time.Time) string {
 			return `"made":` + strconv.FormatFloat(float64(x.UnixMilli())/1000, 'f', -1, 64)
 		}},
+		// Beside an expiry a day on, the same in both runs: a time of
+		// another layout, which keploy reads first. Each run's number is
+		// paired with the other's, the k-th of its own layout.
+		{"a number of seconds without its trailing zeros beside an expiry", func(x time.Time) string {
+			return `"expires_at":"` + oAt.Add(24*time.Hour).UTC().Format(time.RFC3339) + `","made":` + strconv.FormatFloat(float64(x.UnixMilli())/1000, 'f', -1, 64)
+		}},
 	} {
 		offs := []time.Duration{0, time.Millisecond, 120 * time.Millisecond, 999 * time.Millisecond}
 		forms := func(rm, lm *models.Mock) []struct {
