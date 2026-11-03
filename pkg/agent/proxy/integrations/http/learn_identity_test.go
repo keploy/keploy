@@ -415,6 +415,8 @@ func TestGraphQLOperations(t *testing.T) {
 		"query GetOrder { order(note: \"\"\"a\\\"\"\"}\"\"\") { id } }": "query GetOrder",
 		// A string in the variables' defaults, holding a parenthesis.
 		"query GetOrder($n: String = \"(\") { order(n: $n) { id } }": "query GetOrder",
+		// A comment in a selection set, holding a closing brace.
+		"query GetOrder { order # }\n { id } }": "query GetOrder",
 		// A byte order mark before the document.
 		"\ufeffquery GetOrder { order { id } }": "query GetOrder",
 	} {
