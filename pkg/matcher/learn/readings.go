@@ -1860,7 +1860,7 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			// A word of an encoded run read as its text is (plainRuns) is
 			// no word F may have given there unread, as the same text
 			// unencoded holds none: only a view that holds it refuses it.
-			if !recorded && (x.unseen || x.viewUnstated()) && !(v.plainRuns[t] && len(x.views) == 0) {
+			if !recorded && (x.unseen || x.viewUnstated()) && (!v.plainRuns[t] || len(x.views) != 0) {
 				if why := unseenWhy(dc, x, held.of(j).unseen[changedWord{i, t}], keep, word(t, recorded), t, at); why != "" {
 					return why + "; " + notClock(v) + ". " + correction(x.mock, false)
 				}
