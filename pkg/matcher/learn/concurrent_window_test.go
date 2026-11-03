@@ -3,8 +3,10 @@ package learn
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -759,31 +761,32 @@ func TestAServerTestsStampWordOfATextPastAnotherGoroutinesServeIsNoiseOfThatWord
 						ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
 					}}, served)
 				}
+				// The stamp sent in a payload record's full round served
+				// whose adapter stated no view of what it gave, or one it
+				// served changed with a view keploy could not read, and an
+				// answer so served, of the call's own test or another
+				// test's: the encoded run is a changed word, yet one read as
+				// the text it decodes to, so no such payload may hold it, as
+				// the same text unencoded holds none: whether another
+				// goroutine's call was served before this one does not
+				// change the answer.
 				for _, rc := range []struct {
-					what   string
-					raw    []Raw
-					unseen bool
+					what string
+					raw  []Raw
 				}{
-					{"the look-up", lookUp, false},
-					{"no payload", nil, false},
-					{"the stamp sent, not served", []Raw{sent(false)}, false},
-					{"the stamp sent, served", []Raw{sent(true)}, true},
-					{"the look-up and the stamp sent, served", append(append([]Raw{}, lookUp...), sent(true)), true},
+					{"the look-up", lookUp},
+					{"no payload", nil},
+					{"the stamp sent, not served", []Raw{sent(false)}},
+					{"the stamp sent, served", []Raw{sent(true)}},
+					{"the look-up and the stamp sent, served", append(append([]Raw{}, lookUp...), sent(true))},
+					{"the stamp sent, served changed with a view keploy could not read", []Raw{sent(true).ServedChanged()}},
+					{"an answer served", []Raw{answerServed(rec, false)}},
+					{"an answer served changed with a view keploy could not read", []Raw{answerServed(rec, false).ServedChanged()}},
+					{"another test's answer served", []Raw{answerServed(rec, true)}},
+					{"another test's answer served changed with a view keploy could not read", []Raw{answerServed(rec, true).ServedChanged()}},
 				} {
 					for _, w := range []*Window{serverStampWindow(recRun, fRun), inSpan} {
-						ln := learnEncodedOf(clockedDrifts(), rec, f, w, rc.raw)
-						switch {
-						case rc.unseen:
-							// Limit: the encoded run itself is a changed word
-							// that is no clock word, and a payload record's
-							// full round served whose adapter stated no view of
-							// what it gave may hold any such word, so the
-							// value is refused, as any value with such a word
-							// is there. It fails closed, with one answer.
-							if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-9, an earlier recording record's full round served, where its adapter did not say what it gave the application there") {
-								t.Errorf("encoded, read at %s and in record's full round at %s, %s, window %+v: %s from %q held %q (%s); want it refused as a word that may stand in mock-9", rec.Format("05.0000000"), f.Format("05.0000000"), rc.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
-							}
-						case ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "":
+						if ln := learnEncodedOf(clockedDrifts(), rec, f, w, rc.raw); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
 							t.Errorf("encoded, read at %s and in record's full round at %s, %s, window %+v: %s from %q held %q (%s); want noise of the word", rec.Format("05.0000000"), f.Format("05.0000000"), rc.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
 						}
 					}
@@ -1137,4 +1140,667 @@ func TestAStampWholeInALaterPayloadOutranksAnEarlierNonASCIIPart(t *testing.T) {
 // or case-folded form of one), never an echo's instant.
 func foundAsAPart(ln Learned) bool {
 	return ln.Kind == KindVariable && ln.From.Side == "" && !ln.From.Echo && ln.From.Held != ln.Recorded.Value
+}
+
+// answerServed is a recording record's full round served before the call,
+// whose adapter stated no view of what it gave the application there: an
+// answer (a Pulsar MESSAGE) recorded 20 ms after rec, a read of the clock,
+// that holds no changed word of the value; of another test (OfAnotherTest)
+// where other holds. keploy cannot tell what record's full round gave the
+// application there, so a changed word that is no clock word may stand
+// there (unseenWhy, servedWhy).
+func answerServed(rec time.Time, other bool) Raw {
+	x := RawOf(answerMock(rec, `{"type":"lead.seen","count":3}`), true)
+	if other {
+		x = x.OfAnotherTest()
+	}
+	return x
+}
+
+// answerMock is answerServed's recording, its MESSAGE's payload body (a
+// view of it F's serve gave, where it differs).
+func answerMock(rec time.Time, body string) *models.Mock {
+	at := rec.Add(20 * time.Millisecond)
+	return &models.Mock{Name: "mock-11", Kind: "Pulsar", Spec: models.MockSpec{
+		GenericRequests:  []models.Payload{{Origin: "client", Message: []models.OutputBinary{{Type: "json", Data: `{"commandType":"FLOW","consumerId":7}`}}}},
+		GenericResponses: []models.Payload{{Origin: "server", Message: []models.OutputBinary{{Type: "json", Data: `{"commandType":"MESSAGE","payload":` + body + `}`}}}},
+		ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
+	}}
+}
+
+// A server test's text holding a clock read ("ok? lead <.NET stamp>
+// created") gets one answer, plain or encoded in a token (base64 once or
+// twice, with its '/', '+' and '=' percent-escaped, URL-safe and
+// percent-escaped, hex after "0x" or "0X"), whether or not record's full
+// round served before the call a payload whose view keploy cannot read (no
+// adapter stated one, or one could not be read), of the call's own test or
+// another test's: noise of the word, whatever another goroutine's serve
+// came between the read and its call, whatever digits the clock gave the
+// read, under the proven flow too. An encoded run is read as the text it
+// decodes to, whose words are searched themselves, so it is no word of its
+// own such a payload may hold, as the plain text holds none (plainRunsOf);
+// before, the encoded text alone was refused where one had been served
+// before the call, which another goroutine's serve decides. Under such a
+// payload so are the text with only its padding escaped, a text that lost
+// words the recording held, one whose run record's full round spells in
+// the other base64 alphabet, and one split over two runs: noise, as the
+// plain text is. It fails closed otherwise, plain and encoded alike: a data
+// word of the text changed, a read no window of the call holds (made before
+// its test began, its begin unknown, the call's window alone, a client
+// test's call), an expiry thirty minutes after the read, a word of a run
+// that stands outside the runs too or in a longer run that does not decode,
+// a second copy of a decoded run, a case-folded copy that does not decode,
+// a word after a hex run, a hash after "0x", an escape on one side only
+// that leaves a word of its own or one that changed, and a run whose
+// case-folded form a shorter capital letter moves are refused there, and a
+// view of what record's full round served that holds the encoded run whole
+// refuses it.
+func TestAnEncodedTextGetsThePlainTextsAnswerWhateverUnreadPayloadWasServedBeforeItsCall(t *testing.T) {
+	recRun, fRun := serverStampRuns()
+	const p = "body.Item.Note.S"
+	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	text := func(v time.Time, word string) string { return "ok? lead " + dotNetStamp(v) + " " + word }
+	coop := func(v time.Time, word string) string { return "ok coöperate lead " + dotNetStamp(v) + " " + word }
+	escape := strings.NewReplacer(" ", "%20", "/", "%2F", "+", "%2B", "=", "%3D").Replace
+	shapes := []struct {
+		what string
+		of   func(v time.Time, word string) string
+	}{
+		{"plain", text},
+		{"encoded", func(v time.Time, word string) string { return "tok " + enc(text(v, word)) + " ok" }},
+		// " a>b" gives the run a '+' and its padding, both escaped too.
+		{"encoded, percent-escaped", func(v time.Time, word string) string {
+			return escape("tok " + enc(text(v, word)+" a>b") + " ok")
+		}},
+		// The URL-safe alphabet's '-' and '_' need no escape: its runs
+		// stand glued to the "%20" before them in the readings that keep
+		// '-' and '_' inside a word.
+		{"encoded in the URL-safe alphabet, percent-escaped", func(v time.Time, word string) string {
+			return strings.NewReplacer(" ", "%20", "=", "%3D").Replace("tok " + base64.URLEncoding.EncodeToString([]byte(text(v, word)+" a>b")) + " ok")
+		}},
+		{"encoded twice", func(v time.Time, word string) string { return "tok " + enc("note "+enc(text(v, word))+" end") + " ok" }},
+		// The run encoded twice decoded from the second of two runs, so the
+		// text it stands in is not the first the reader decoded (the first
+		// run under 16 characters, which is not read as wrapped base64).
+		{"encoded twice, after another run", func(v time.Time, word string) string {
+			return "tok " + enc("a note") + " " + enc("note "+enc(text(v, word))+" end") + " ok"
+		}},
+		{"hex-encoded after 0x", func(v time.Time, word string) string {
+			return "tok 0x" + hex.EncodeToString([]byte(text(v, word))) + " ok"
+		}},
+		{"hex-encoded after 0X", func(v time.Time, word string) string {
+			return "tok 0X" + hex.EncodeToString([]byte(text(v, word))) + " ok"
+		}},
+		// A JSON writer that escapes '/' (PHP's, by default) writes the
+		// run's '/' as "\/", here one that does not end a group of four,
+		// so the run's parts after it do not decode on their own; and the
+		// text it encodes, plain.
+		{"encoded, its '/' JSON-escaped", func(v time.Time, word string) string {
+			return "tok " + strings.ReplaceAll(enc(coop(v, word)), "/", `\/`) + " ok"
+		}},
+		{"plain, the JSON-escaped run's text", coop},
+	}
+	for _, word := range []string{"created", "deleted", "now then created"} {
+		if e := enc(coop(fRun.read, word)); !regexp.MustCompile(`^(.{4})*.{0,2}/`).MatchString(e) {
+			t.Fatalf("%q holds no '/' that does not end a group of four, so the JSON-escaped rows tell nothing", e)
+		}
+		if e := shapes[2].of(fRun.read, word); !strings.Contains(e, "%2F") || !strings.Contains(e, "%2B") || !strings.Contains(e, "%3D") {
+			t.Fatalf("%q holds no escaped '/', '+' and '=' inside its run, so the escaped rows tell nothing", e)
+		}
+		if e := shapes[3].of(fRun.read, word); !strings.Contains(e, "%20b2s_") || !strings.Contains(e, "-") || !strings.Contains(e, "%3D") {
+			t.Fatalf("%q holds no URL-safe run glued to an escape, so the URL-safe rows tell nothing", e)
+		}
+	}
+	learn := func(dc *DriftCache, of func(time.Time, string) string, rec, f time.Time, recWord, fWord string, w *Window, raw []Raw) Learned {
+		leaf := func(v string) Shape {
+			return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+		}
+		return ClassifyIn(dc, []string{p}, leaf(of(f, fWord)), leaf(of(rec, recWord)), recRun.call, nil, raw, nil, w)[0]
+	}
+	inSpan := &Window{Rec: Span{From: recRun.began, To: recRun.call}, F: Span{From: fRun.began, To: fRun.call}}
+	unread := []struct {
+		what string
+		raw  []Raw
+	}{
+		{"an answer served, no view stated", []Raw{answerServed(recRun.read, false)}},
+		{"an answer served changed, a view keploy could not read", []Raw{answerServed(recRun.read, false).ServedChanged()}},
+		{"another test's answer served, no view stated", []Raw{answerServed(recRun.read, true)}},
+		{"another test's answer served changed, a view keploy could not read", []Raw{answerServed(recRun.read, true).ServedChanged()}},
+	}
+	payloads := append([]struct {
+		what string
+		raw  []Raw
+	}{{"no payload", nil}, {"the answer not served", []Raw{answerServed(recRun.read, false).WithServed(false)}}}, unread...)
+	layouts := []struct{ rec, f time.Duration }{
+		{0, 0},
+		{518_500 * time.Nanosecond, 0},
+		{10_370 * time.Microsecond, 0},
+		{30 * time.Millisecond, 0},
+		{30 * time.Millisecond, 311_100 * time.Nanosecond},
+	}
+	for _, proven := range []bool{false, true} {
+		t.Run("proven "+strconv.FormatBool(proven), func(t *testing.T) {
+			if proven {
+				t.Setenv(provenswitch.Env, "1")
+			}
+			for _, sh := range shapes {
+				for _, d := range layouts {
+					rec, f := recRun.read.Add(d.rec), fRun.read.Add(d.f)
+					for _, pl := range payloads {
+						for _, w := range []*Window{serverStampWindow(recRun, fRun), inSpan} {
+							if ln := learn(clockedDrifts(), sh.of, rec, f, "created", "created", w, pl.raw); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+								t.Errorf("%s, read at %s and in record's full round at %s, %s, window %+v: %s from %q held %q (%s); want noise of the word", sh.what, rec.Format("05.0000000"), f.Format("05.0000000"), pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+							}
+						}
+					}
+				}
+				// Fail closed: a data word of the text changed is refused
+				// as one such a payload may hold.
+				for _, pl := range unread {
+					for _, w := range []*Window{serverStampWindow(recRun, fRun), inSpan} {
+						if ln := learn(clockedDrifts(), sh.of, recRun.read, fRun.read, "created", "deleted", w, pl.raw); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+							t.Errorf("%s, a data word changed, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", sh.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+						}
+					}
+				}
+				// Fail closed where no window of the call holds the read, and
+				// for an expiry thirty minutes after it: refused.
+				early := recRun
+				early.began = recRun.read.Add(50 * time.Millisecond)
+				unknown := serverStampWindow(recRun, fRun)
+				unknown.Rec.TestFrom = time.Time{}
+				callOnly := &Window{Rec: Span{From: recRun.prev, To: recRun.call}, F: Span{From: fRun.prev, To: fRun.call}}
+				clientDrifts := func() *DriftCache {
+					dc := clockedDrifts()
+					dc.clientTests = true
+					return dc
+				}
+				for _, c := range []struct {
+					what string
+					dc   func() *DriftCache
+					rec  time.Time
+					w    *Window
+				}{
+					{"read before its test began", clockedDrifts, recRun.read, serverStampWindow(early, fRun)},
+					{"the recording's begin unknown", clockedDrifts, recRun.read, unknown},
+					{"the call's window alone", clockedDrifts, recRun.read, callOnly},
+					{"a client test's call's window", clientDrifts, recRun.read, callOnly},
+					{"an expiry thirty minutes after the read", clockedDrifts, recRun.read.Add(30 * time.Minute), serverStampWindow(recRun, fRun)},
+				} {
+					for _, pl := range unread {
+						f := fRun.read
+						if c.rec.After(recRun.read) {
+							f = f.Add(30 * time.Minute)
+						}
+						if ln := learn(c.dc(), sh.of, c.rec, f, "created", "created", c.w, pl.raw); ln.Kind != KindUnaccounted {
+							t.Errorf("%s, %s, %s: %s from %q held %q (%s); want it refused", sh.what, c.what, pl.what, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+						}
+					}
+				}
+			}
+			// Words the recording held, gone from F's text, are no word F
+			// gave: noise, plain and encoded alike. (Nine bytes, so each
+			// level's run is padded alike on both sides: a run padded on one
+			// side only is read joined with the word after it as wrapped
+			// base64, a limit of its own.)
+			for _, sh := range shapes {
+				for _, pl := range unread {
+					for _, w := range []*Window{serverStampWindow(recRun, fRun), inSpan} {
+						if ln := learn(clockedDrifts(), sh.of, recRun.read, fRun.read, "now then created", "created", w, pl.raw); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+							t.Errorf("%s, a recorded word gone, %s, window %+v: %s from %q held %q (%s); want noise of the word", sh.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+						}
+					}
+				}
+			}
+			// Fail closed: a view of what F served that holds F's encoded
+			// run whole refuses it, as a view refuses any word it holds,
+			// of the call's own test or another test's.
+			liveEnc := shapes[1].of(fRun.read, "created")
+			run := strings.Fields(liveEnc)[1]
+			seen := func() Raw { return RawOf(answerMock(recRun.read, `{"type":"lead.seen","count":3}`), false) }
+			holding := func() Raw { return RawOf(answerMock(recRun.read, `{"type":"lead.seen","note":"`+run+`"}`), false) }
+			for _, v := range []struct {
+				what string
+				x    Raw
+			}{
+				{"served changed, one of two views holds the run", RawOf(answerMock(recRun.read, `{"type":"lead.seen","count":3}`), true).ServedChanged(seen(), holding())},
+				{"another test's, served changed, one of two views holds the run", RawOf(answerMock(recRun.read, `{"type":"lead.seen","count":3}`), true).ServedChanged(seen(), holding()).OfAnotherTest()},
+				{"another test's, served with a view that holds the run", RawOf(answerMock(recRun.read, `{"type":"lead.seen","count":3}`), true).ServedLive(holding()).OfAnotherTest()},
+			} {
+				for _, w := range []*Window{serverStampWindow(recRun, fRun), inSpan} {
+					if ln := learn(clockedDrifts(), shapes[1].of, recRun.read, fRun.read, "created", "created", w, []Raw{v.x}); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "mock-11") || !strings.Contains(ln.Why, "record's full round gave it") {
+						t.Errorf("encoded, %s, window %+v: %s from %q (%s); want it refused as a word F's view of mock-11 holds", v.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+					}
+				}
+			}
+			// The run's padding percent-escaped and its '/' not (a query
+			// escaped by a library that keeps '/'): a word of the run stands
+			// in the value as written, glued to no escape, and is read as
+			// the run's, so the text is noise, as the plain text is.
+			escapePadding := strings.NewReplacer(" ", "%20", "=", "%3D").Replace
+			padded := func(v time.Time) string { return "tok " + enc(text(v, "created.")) + " ok" }
+			if e := escapePadding(padded(fRun.read)); !strings.Contains(e, "%3D") || !strings.Contains(e, "/") {
+				t.Fatalf("%q holds no escaped padding beside an unescaped '/', so this row tells nothing", e)
+			}
+			// Fail closed: a word of record's full round's run that stands
+			// outside the runs too ("eHk" of "YWI/eHk/", the run of
+			// "ab?xy?", its text the recording's but for a word it lost) is
+			// searched as any word of the value, and refused there, as the
+			// plain word is; so is one that stands in a longer run that
+			// holds the decoded run whole and does not decode
+			// ("YWI/eHk/x"); and so is one of a value with no capital
+			// letter, which has no case-folded form ("enk" of "eng/enk/",
+			// the run of "zx?zy?").
+			outside := func(rec bool) string {
+				if rec {
+					return "tok " + enc("ab?cd? xy") + " ok zzz"
+				}
+				return "tok " + enc("ab?xy?") + " ok eHk"
+			}
+			inLonger := func(rec bool) string {
+				if rec {
+					return "tok " + enc("ab?xy?") + " ok ref:YWI/zzz/x"
+				}
+				return "tok " + enc("ab?xy?") + " ok ref:YWI/eHk/x"
+			}
+			lower := func(rec bool) string {
+				if rec {
+					return "tok " + enc("zx{zx{zy") + " ok zzz"
+				}
+				return "tok " + enc("zx?zy?") + " ok enk"
+			}
+			// A second copy of a decoded run, which the reader does not
+			// decode again ("YWI/eHk/" twice, the second once "YWI/Y2Q/"),
+			// and a run the run's case-folding spells that does not decode
+			// ("ywi/ehk/"): searched where they stand, and refused.
+			second := func(rec bool) string {
+				if rec {
+					return "tok " + enc("ab?xy?") + " ok ref:" + enc("ab?cd?")
+				}
+				return "tok " + enc("ab?xy?") + " ok ref:" + enc("ab?xy?")
+			}
+			folded := func(rec bool) string {
+				if rec {
+					return "tok " + enc("ab?xy?") + " ok ywi/zzz/"
+				}
+				return "tok " + enc("ab?xy?") + " ok ywi/ehk/"
+			}
+			// A decoded run's words that stand, at the place it stands in
+			// the text it decodes from, in the value itself inside a longer
+			// run that does not decode ("YWI/eHk/x"): searched there.
+			deepPlace := func(rec bool) string {
+				if rec {
+					return "YWI/zzz/x " + enc("YWI/eHk/ text")
+				}
+				return "YWI/eHk/x " + enc("YWI/eHk/ text")
+			}
+			// A word after a run of hex after "0x" is no word of that run.
+			afterHex := func(rec bool) string {
+				if rec {
+					return "tok 0x" + hex.EncodeToString([]byte("ab?xy? text")) + " zzz"
+				}
+				return "tok 0x" + hex.EncodeToString([]byte("ab?xy? text")) + " eHk"
+			}
+			if !strings.Contains(outside(false), "/eHk/") || !strings.Contains(inLonger(false), "tok YWI/eHk/ ok") || lower(false) != strings.ToLower(lower(false)) || lower(true) != strings.ToLower(lower(true)) || !strings.Contains(lower(false), "eng/enk/") {
+				t.Fatalf("%q, %q, %q: the runs are not as this row reads them, so it tells nothing", outside(false), inLonger(false), lower(false))
+			}
+			// Each with escapes on both sides, on one side only (the
+			// recorded value's or record's full round's), or none: the raw
+			// form of a value with escapes is read apart, and the decoded
+			// form of the side with none is still read for the words outside
+			// the runs. An escape only record's full round's value holds is
+			// a change of its own, glued to a run's word too, as in a plain
+			// text: refused.
+			same := func(v string) string { return v }
+			escapeOne := func(v string) string { return strings.Replace(v, " ", "%20", 1) }
+			escapeBoth := func(v string) string { return strings.ReplaceAll(v, " ", "%20") }
+			for _, esc := range []struct {
+				what           string
+				rec, live      func(string) string
+				padRec, padLiv func(string) string
+				oneSide        bool
+				liveOnly       bool
+			}{
+				{"", same, same, escapePadding, escapePadding, false, false},
+				{", both escaped", escapeBoth, escapeBoth, escapePadding, escapePadding, false, false},
+				{", the recorded value's escaped", escapeOne, same, escapePadding, same, true, false},
+				{", record's full round's escaped", same, escapeOne, same, escapePadding, true, true},
+			} {
+				for _, pl := range unread {
+					for _, w := range []*Window{serverStampWindow(recRun, fRun), inSpan} {
+						leaf := func(v string) Shape {
+							return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+						}
+						learnOf := func(rec, live string) Learned {
+							return ClassifyIn(clockedDrifts(), []string{p}, leaf(live), leaf(rec), recRun.call, nil, pl.raw, nil, w)[0]
+						}
+						// Escapes on one side only that leave a word of their
+						// own (the padding's "%3D" and the spaces' "%20" on
+						// record's full round's side, or "ok" where the
+						// recorded side's "%20ok" glued it) change the value,
+						// as an escape a plain text gained does
+						// ("created%2E"): refused.
+						if ln := learnOf(esc.padRec(padded(recRun.read)), esc.padLiv(padded(fRun.read))); esc.oneSide && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11")) {
+							t.Errorf("encoded, its padding escaped%s, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", esc.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+						} else if !esc.oneSide && (ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "") {
+							t.Errorf("encoded, its padding escaped%s, %s, window %+v: %s from %q held %q (%s); want noise of the word", esc.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+						}
+						if esc.what == "" {
+							if ln := learnOf(text(recRun.read, "created."), text(fRun.read, "created%2E")); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+								t.Errorf("plain, an escape gained, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+							}
+							// An escape inside the run alone (its padding's
+							// '=' or its '/', the spaces around it raw):
+							// written so on both sides it is the run's
+							// spelling, noise; gained by record's full
+							// round's value, the plain text's answer for
+							// that escape gained ("x=y" to "x%3Dy"): refused
+							// where it leaves a word of its own ("3Dy"), and
+							// noise for a JSON "\/", which leaves none. Lost
+							// by it, record's full round's run is written as
+							// itself, every word of it the run's, which F
+							// reads as its text: noise, as a run respelled
+							// in its padding is (a plain text's word after an
+							// escape it lost, "y" of "x%3Dy", is a word of
+							// the value, not of a run).
+							for _, in := range []struct {
+								what, from, to string
+								refused        bool
+							}{{"its padding", "=", "%3D", true}, {"its '/'", "/", "%2F", true}, {"its '/' JSON-escaped", "/", `\/`, false}} {
+								escIn := func(v string) string { return strings.ReplaceAll(v, in.from, in.to) }
+								gained := learnOf(text(recRun.read, "x"+in.from+"y"), text(fRun.read, "x"+in.to+"y"))
+								if refused := gained.Kind == KindUnaccounted && strings.Contains(gained.Why, "may stand in mock-11"); refused != in.refused {
+									t.Errorf("plain, %s gained, %s, window %+v: %s (%s); want it refused %v", in.what, pl.what, *w, gained.Kind, gained.Why, in.refused)
+								}
+								if e := escIn(padded(fRun.read)); !strings.Contains(e, in.to) || strings.Contains(e, "%20") || !strings.Contains(e, " ") {
+									t.Fatalf("%q holds no %s escaped beside raw spaces, so this row tells nothing", e, in.what)
+								}
+								if ln := learnOf(escIn(padded(recRun.read)), escIn(padded(fRun.read))); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+									t.Errorf("encoded, %s escaped on both sides, %s, window %+v: %s from %q held %q (%s); want noise of the word", in.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+								}
+								if ln := learnOf(padded(recRun.read), escIn(padded(fRun.read))); ln.Kind != gained.Kind || ln.Kind == KindUnaccounted && !strings.Contains(ln.Why, "may stand in mock-11") {
+									t.Errorf("encoded, %s escaped by record's full round's value only, %s, window %+v: %s from %q (%s); want the plain text's answer for that escape gained, %s", in.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.Why, gained.Kind)
+								}
+								if ln := learnOf(escIn(padded(recRun.read)), padded(fRun.read)); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+									t.Errorf("encoded, %s escaped by the recorded value only, %s, window %+v: %s from %q held %q (%s); want noise of the word", in.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+								}
+							}
+							// Both sides escape one of the run's two '/' but
+							// not the same one ("?" before the word puts a
+							// second '/' in the run): a change of its own,
+							// refused, as "a/b%2Fc" to "a%2Fb/c" is.
+							twoSlashes := func(v time.Time, nth int) string {
+								e := enc(text(v, "? created"))
+								if strings.Count(e, "/") != 2 {
+									t.Fatalf("%q holds no two '/', so this row tells nothing", e)
+								}
+								i := strings.Index(e, "/")
+								if nth == 2 {
+									i += 1 + strings.Index(e[i+1:], "/")
+								}
+								return "tok " + e[:i] + "%2F" + e[i+1:] + " ok"
+							}
+							if ln := learnOf(twoSlashes(recRun.read, 1), twoSlashes(fRun.read, 2)); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+								t.Errorf("encoded, another of its '/' escaped, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+							}
+							if ln := learnOf(text(recRun.read, "a/b%2Fc"), text(fRun.read, "a%2Fb/c")); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+								t.Errorf("plain, another '/' escaped, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+							}
+							// An escape gained at the end of a run, right
+							// before the next run ("Lg=%3D<run>"), glues its
+							// remnant to the next run's first word: it is
+							// the first run's, which changed its escapes,
+							// not the next run's: refused.
+							adjacent := func(v time.Time, last string) string {
+								return "tok " + strings.TrimSuffix(enc(text(v, "created.")), "=") + last + enc("lead "+dotNetStamp(v)+" created") + " ok"
+							}
+							if ln := learnOf(adjacent(recRun.read, "="), adjacent(fRun.read, "%3D")); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+								t.Errorf("encoded, an escape gained at the end of a run right before another, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+							}
+							// A run pairs by rank only where the text before
+							// it, from the run before it, is the recorded
+							// one's: record's full round's value that dropped
+							// the recorded value's first run ("a <R0> ") has
+							// its '/' escaped where the recorded run of its
+							// rank, R1, holds it raw. That R0 escapes its
+							// '/' the same way says nothing: refused, as
+							// the same value is without R0.
+							slashOnly := func(e string) string { return strings.ReplaceAll(e, "/", "%2F") }
+							r0 := slashOnly(strings.TrimRight(enc(text(recRun.read.Add(-time.Second), "x")), "="))
+							r1, l1 := enc(text(recRun.read, "created")), slashOnly(enc(text(fRun.read, "created")))
+							if !strings.Contains(r0, "%2F") || !strings.Contains(l1, "%2F") || !strings.Contains(r1, "/") {
+								t.Fatalf("%q, %q or %q holds no '/', so this row tells nothing", r0, r1, l1)
+							}
+							for _, rec := range []string{"a " + r0 + " b " + r1 + " ok", "b " + r1 + " ok"} {
+								if ln := learnOf(rec, "b "+l1+" ok"); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+									t.Errorf("encoded, its '/' escaped by record's full round's value only, recorded %q, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", rec[:2], pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+								}
+							}
+							// Each byte is compared by the one spelling all
+							// its copies share, so a run whose length moved
+							// its padding and its '?' (Go's stamp trims a
+							// trailing 0: 41 bytes, one '=' and no '/',
+							// recorded; 40, "==" and a '/', live) is
+							// escaped the same way: noise, as its text is
+							// plain. A byte only one side holds ('/') is
+							// written so where the recorded run escapes
+							// another the same way ("%3D"); where it
+							// escapes none, nothing says how it would write
+							// it: refused (fail closed).
+							goText := func(v time.Time, tail string) string {
+								return enc("lead " + v.UTC().Format(time.RFC3339Nano) + " ok? yes" + tail)
+							}
+							queryEsc := strings.NewReplacer("/", "%2F", "=", "%3D", "+", "%2B").Replace
+							recE, liveE := goText(recRun.read, ""), goText(fRun.read.Truncate(time.Microsecond), "")
+							if strings.ContainsAny(recE, "/+") || strings.Count(recE, "=") != 1 || !strings.Contains(liveE, "/") || !strings.HasSuffix(liveE, "==") || strings.Contains(liveE, "+") {
+								t.Fatalf("%q and %q are not one '=' and no '/' against a '/' and \"==\", so this row tells nothing", recE, liveE)
+							}
+							if ln := learnOf("tok "+queryEsc(recE)+" ok", "tok "+queryEsc(liveE)+" ok"); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+								t.Errorf("encoded, escaped the same way, its length moving a '/' and its padding, %s, window %+v: %s from %q held %q (%s); want noise of the word", pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+							}
+							if ln := learnOf("tok "+recE+" ok", "tok "+liveE+" ok"); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+								t.Errorf("encoded raw, its length moving a '/' and its padding, %s, window %+v: %s from %q held %q (%s); want noise of the word", pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+							}
+							recBare := goText(recRun.read, "!")
+							if strings.ContainsAny(recBare, "/+=") {
+								t.Fatalf("%q holds a byte an escape writes, so this row tells nothing", recBare)
+							}
+							if ln := learnOf("tok "+queryEsc(recBare)+" ok", "tok "+queryEsc(goText(fRun.read.Truncate(time.Microsecond), "!"))+" ok"); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+								t.Errorf("encoded, escaped by record's full round's value only where the recorded run escapes nothing, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+							}
+							// Another kind of escape for the byte only one
+							// side holds ('/' escaped twice, "%252F", beside
+							// the recorded run's "%3D"): refused.
+							twice := strings.ReplaceAll(queryEsc(liveE), "%2F", "%252F")
+							if ln := learnOf("tok "+queryEsc(recE)+" ok", "tok "+twice+" ok"); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+								t.Errorf("encoded, a byte only record's full round's run holds escaped twice, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+							}
+							// A clock read in the text before the run
+							// ("ts <stamp> tok <run>") does not unpair it:
+							// the run escaped the same way on both sides
+							// is noise, wherever the clock moved before it.
+							stamped := func(v time.Time) string {
+								return "ts " + strings.ReplaceAll(dotNetStamp(v), ":", "%3A") + " tok " + escapePadding(slashOnly(enc(text(v, "created.")))) + " ok"
+							}
+							if s := stamped(fRun.read); !strings.Contains(s, "%2F") || !strings.Contains(s, "%3D") || strings.Contains(s, "%20") {
+								t.Fatalf("%q holds no escaped '/' or padding, so this row tells nothing", s)
+							}
+							if ln := learnOf(stamped(recRun.read), stamped(fRun.read)); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+								t.Errorf("encoded after a clock read, escaped the same way, %s, window %+v: %s from %q held %q (%s); want noise of the word", pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+							}
+							// An escape record's full round's value lost is
+							// no word of its own, while the others are
+							// written as recorded: the recorded run's '/'
+							// and '=' escaped, the live run's '/' only:
+							// noise, as when it lost them all.
+							partLost := strings.NewReplacer("/", "%2F").Replace
+							if pe := padded(fRun.read); strings.Count(pe, "=") == 0 || !strings.Contains(pe, "/") {
+								t.Fatalf("%q holds no '=' and '/', so this row tells nothing", pe)
+							}
+							if ln := learnOf(strings.ReplaceAll(partLost(padded(recRun.read)), "=", "%3D"), partLost(padded(fRun.read))); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+								t.Errorf("encoded, record's full round's value lost one of two escapes, %s, window %+v: %s from %q held %q (%s); want noise of the word", pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+							}
+						}
+						if ln := learnOf(esc.rec(shapes[1].of(recRun.read, "created")), esc.live(shapes[1].of(fRun.read, "created"))); esc.liveOnly && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11")) {
+							t.Errorf("encoded%s, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", esc.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+						} else if !esc.liveOnly && (ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "") {
+							t.Errorf("encoded%s, %s, window %+v: %s from %q held %q (%s); want noise of the word", esc.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+						}
+						// The same escape before a run whose first word
+						// changed (a text with no '/' or '+' in its base64,
+						// one word "bGVhZC..."): the word the escape's
+						// remnant glues to it ("20bGVhZC...") is the run's,
+						// so the text is noise, as the plain text is.
+						if esc.what == ", both escaped" {
+							oneWord := func(v time.Time) string { return "tok " + enc("lead "+dotNetStamp(v)+" created") + " ok" }
+							if strings.ContainsAny(enc("lead "+dotNetStamp(recRun.read)+" created")+enc("lead "+dotNetStamp(fRun.read)+" created"), "+/") {
+								t.Fatalf("the one-word run holds a '+' or '/', so this row tells nothing")
+							}
+							if ln := learnOf(esc.rec(oneWord(recRun.read)), esc.live(oneWord(fRun.read))); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+								t.Errorf("encoded in one word, both escaped, %s, window %+v: %s from %q held %q (%s); want noise of the word", pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+							}
+							// So with a JSON string's "\n" before the run.
+							jsonLine := func(v time.Time) string { return strings.Replace(oneWord(v), " ", `\n`, 1) }
+							if ln := learnOf(jsonLine(recRun.read), jsonLine(fRun.read)); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+								t.Errorf("encoded in one word after a JSON \\n, %s, window %+v: %s from %q held %q (%s); want noise of the word", pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+							}
+							// Two runs that each changed, the second's first
+							// word glued to the escape before it: the text
+							// from the first run to it is the same, so that
+							// word is the second run's too.
+							twoRuns := func(v time.Time) string { return "tok " + enc(text(v, "created")) + " ok " + oneWord(v) }
+							if ln := learnOf(esc.rec(twoRuns(recRun.read)), esc.live(twoRuns(fRun.read))); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+								t.Errorf("encoded in two runs that both changed, both escaped, %s, window %+v: %s from %q held %q (%s); want noise of the word", pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+							}
+							// A letter beyond ASCII glued to the run with no
+							// escape between them ("é<run>") is no escape's
+							// remnant: the word that holds both is the
+							// value's own, in the raw value as in its
+							// decoded form, and refused (fail closed), with
+							// an escape after the run or none at all, in
+							// base64 and in hex after "0x" (no capital
+							// letter, so its case-folded form is itself).
+							for _, after := range []string{"%20ok", " ok"} {
+								for _, encode := range []func(string) string{enc, func(s string) string { return "0x" + hex.EncodeToString([]byte(s)) }} {
+									glued := func(at time.Time) string { return "tok é" + encode("lead "+dotNetStamp(at)+" created") + after }
+									if ln := learnOf(glued(recRun.read), glued(fRun.read)); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+										t.Errorf("encoded in one word glued to a letter beyond ASCII (%q), %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", glued(fRun.read), pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+									}
+								}
+							}
+						}
+						// The same escape changed before the run ("%20" to
+						// "%3A", or a JSON string's "\n" to "\t") is a change
+						// of its own too: refused.
+						if esc.what == ", both escaped" {
+							encRec, encLive := shapes[1].of(recRun.read, "created"), shapes[1].of(fRun.read, "created")
+							runA := func(v time.Time) string { return enc(text(v, "created")) }
+							runB := enc("second note text")
+							for _, ch := range []struct{ what, rec, live string }{
+								{"a percent escape", esc.rec(encRec), strings.Replace(esc.live(encLive), "%20", "%3A", 1)},
+								{"a backslash escape", strings.Replace(encRec, " ", `\n`, 1), strings.Replace(encLive, " ", `\t`, 1)},
+								// The escape record's full round's value has
+								// before the run stands elsewhere in the
+								// recorded value, not before its run.
+								{"a percent escape, the recorded value holding it elsewhere", "a%3Ab " + esc.rec(encRec), "a%3Ab " + strings.Replace(esc.live(encLive), "%20", "%3A", 1)},
+								{"a backslash escape, the recorded value holding it elsewhere", strings.Replace(encRec, " ", `\n`, 1) + `\tend`, strings.Replace(encLive, " ", `\t`, 1) + `\tend`},
+								// The escape record's full round's value has
+								// before the run stands before another run
+								// of the recorded value, which did not
+								// change: only the escape before the run of
+								// the same rank, with the same text from
+								// the run before it, makes the glued word
+								// the run's.
+								{"a percent escape, the recorded value holding it before another run", "tok%20" + runA(recRun.read) + "%20ok%3A" + runB + "%20end", "tok%3A" + runA(fRun.read) + "%20ok%3A" + runB + "%20end"},
+								{"a percent escape gained, the recorded value holding it before another run", "x " + runA(recRun.read) + " y%20" + runB, "x%20" + runA(fRun.read) + " y%20" + runB},
+								{"a backslash escape, the recorded value holding it before another run", `tok\n` + runA(recRun.read) + ` ok\t` + runB, `tok\t` + runA(fRun.read) + ` ok\t` + runB},
+								{"a backslash escape gained, the recorded value holding it before another run", "x " + runA(recRun.read) + ` y\n` + runB, `x\n` + runA(fRun.read) + ` y\n` + runB},
+							} {
+								if ln := learnOf(ch.rec, ch.live); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+									t.Errorf("encoded, %s before the run changed, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", ch.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+								}
+							}
+						}
+						for _, c := range []struct {
+							what string
+							of   func(rec bool) string
+						}{
+							{"a word of the run outside it too", outside},
+							{"a word of the run in a longer run that does not decode", inLonger},
+							{"a word of the run outside it, no capital letter", lower},
+							{"a second copy of the run changed", second},
+							{"a word of the run case-folded, outside it", folded},
+							{"a word after a run of hex", afterHex},
+							{"a word of a run decoded deeper, at its place in the value", deepPlace},
+						} {
+							if ln := learnOf(esc.rec(c.of(true)), esc.live(c.of(false))); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+								t.Errorf("%s%s, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", c.what, esc.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+							}
+						}
+						// A hash after "0x" (hex that decodes to no text)
+						// changed is refused, as the plain hash is.
+						hash := func(v string) string {
+							return "tok 0x" + hex.EncodeToString([]byte(v+"\x00\x01\x02\x03\x04\x05\x06\x07")) + " ok"
+						}
+						if ln := learnOf(esc.rec(hash("recorded")), esc.live(hash("replayed"))); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+							t.Errorf("a hash after 0x%s, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", esc.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+						}
+					}
+				}
+			}
+			// A capital letter whose case-folding is shorter ("ẞ", "ß")
+			// before the run shifts the case-folded form, where the run then
+			// does not stand where the reader read it: it is put out nowhere
+			// there, so its case-folded words are searched (fail closed),
+			// and nothing reads past the form's end.
+			for _, pl := range unread {
+				for _, after := range []string{"", " ok"} {
+					shifted := func(v time.Time) string { return "ẞ tok " + enc(text(v, "created")) + after }
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								t.Errorf("a shorter case-folding before the run, then %q, %s: panic %v", after, pl.what, r)
+							}
+						}()
+						leaf := func(v string) Shape {
+							return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+						}
+						ln := ClassifyIn(clockedDrifts(), []string{p}, leaf(shifted(fRun.read)), leaf(shifted(recRun.read)), recRun.call, nil, pl.raw, nil, serverStampWindow(recRun, fRun))[0]
+						if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11") {
+							t.Errorf("a shorter case-folding before the run, then %q, %s: %s from %q (%s); want it refused as a word that may stand in mock-11", after, pl.what, ln.Kind, ln.From.Mock, ln.Why)
+						}
+					}()
+				}
+			}
+			// A run F's side spells in the other base64 alphabet, and the
+			// same text split over two runs, beside the stamp's run: their
+			// text, which is all a run holds, is the recording's, so they
+			// are noise, as the plain text is.
+			fixed := "ab?ab?ab?" // "YWI/YWI/YWI/", "YWI_YWI_YWI_" in the URL-safe alphabet
+			for _, c := range []struct {
+				what      string
+				rec, live func(v time.Time) string
+			}{
+				{"a run respelled", func(v time.Time) string { return "tok " + enc(text(v, "created")) + " ok " + enc(fixed) }, func(v time.Time) string {
+					return "tok " + enc(text(v, "created")) + " ok " + base64.URLEncoding.EncodeToString([]byte(fixed))
+				}},
+				{"a text split over two runs", func(v time.Time) string {
+					return "tok " + enc(text(v, "created")) + " ok " + enc("lead created by the scheduler\nsecond line of the note") + " end"
+				}, func(v time.Time) string {
+					return "tok " + enc(text(v, "created")) + " ok " + enc("lead created by the scheduler") + " " + enc("second line of the note") + " end"
+				}},
+			} {
+				for _, pl := range payloads {
+					for _, w := range []*Window{serverStampWindow(recRun, fRun), inSpan} {
+						leaf := func(v string) Shape {
+							return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+						}
+						if ln := ClassifyIn(clockedDrifts(), []string{p}, leaf(c.live(fRun.read)), leaf(c.rec(recRun.read)), recRun.call, nil, pl.raw, nil, w)[0]; ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+							t.Errorf("%s, %s, window %+v: %s from %q held %q (%s); want noise of the word", c.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+						}
+					}
+				}
+			}
+		})
+	}
 }

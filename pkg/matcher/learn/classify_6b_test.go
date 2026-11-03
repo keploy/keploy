@@ -61,6 +61,8 @@ func unescapedByPattern(s string) string {
 			switch {
 			case m == `\\`:
 				return `\`
+			case m == `\/`:
+				return "/"
 			case m[1] == 'u':
 				if r, err := strconv.ParseUint(m[2:], 16, 16); err == nil {
 					return string(rune(r))
@@ -112,6 +114,49 @@ func TestUnescapedReadsWhatThePatternsRead(t *testing.T) {
 	}
 }
 
+// TestUnescapedAtPlacesEachPartOfTheTextWhereItStands holds unescapedAt's
+// places to unescaped on the texts above and some with a JSON "\/" (a
+// base64 text a JSON writer escaped), as the fuzzer does on any text of up
+// to 64 bytes: what stands between any two places it gives reads as what
+// stands between them in the text (from the start: the text before a
+// place), the ends are the value's, and only a place inside a character an
+// escape names is not given. A text with no escape costs no allocation.
+func TestUnescapedAtPlacesEachPartOfTheTextWhereItStands(t *testing.T) {
+	for _, c := range append(unescapedCases, "YWI#/eHk#/", "x%5C%2FYWI%5C/eHk", "#/#u00e9#/") {
+		unescapedAtHolds(t, esc(c))
+	}
+	if got := unescaped(esc("YWI#/eHk#/")); got != "YWI/eHk/" {
+		t.Errorf(`unescaped reads a JSON "\/" as %q, not "/"`, got)
+	}
+	// A text with no escape costs no allocation.
+	if n := testing.AllocsPerRun(100, func() { _ = unescaped("tok YWI/eHk/ ok, no escape at all") }); n != 0 {
+		t.Errorf("unescaped of a text with no escape allocates %.0f times; want none", n)
+	}
+}
+
+// unescapedAtHolds checks unescapedAt(c) against unescaped on every two of
+// its places.
+func unescapedAtHolds(t *testing.T, c string) {
+	t.Helper()
+	got, at := unescapedAt(c)
+	if got != unescaped(c) || len(at) != len(got)+1 || at[0] != 0 || at[len(got)] != len(c) {
+		t.Fatalf("unescapedAt(%q) = %q, %v; want unescaped's %q, placed from 0 to %d", c, got, at, unescaped(c), len(c))
+	}
+	for j := range at {
+		if at[j] < 0 && got[j]&0xC0 != 0x80 {
+			t.Errorf("unescapedAt(%q) gives no place at %d, which splits no character (%q)", c, j, got)
+		}
+		for k := j; k < len(at); k++ {
+			if at[j] < 0 || at[k] < 0 {
+				continue
+			}
+			if at[k] < at[j] || unescaped(c[at[j]:at[k]]) != got[j:k] {
+				t.Errorf("unescapedAt(%q): %d..%d (of %d..%d) does not read as %q", c, at[j], at[k], j, k, got[j:k])
+			}
+		}
+	}
+}
+
 // TestUnescapedReadsEveryByteOfASurrogatePairAsThePatterns holds the
 // surrogate pair check to the patterns on every byte at every position of
 // four pairs (lower case, upper case, mixed, and one whose backslashes are
@@ -143,6 +188,9 @@ func FuzzUnescaped(f *testing.F) {
 	f.Fuzz(func(t *testing.T, c string) {
 		if got, want := unescaped(c), unescapedByPattern(c); got != want {
 			t.Fatalf("unescaped(%q) = %q, the patterns read %q", c, got, want)
+		}
+		if len(c) <= 64 {
+			unescapedAtHolds(t, c)
 		}
 	})
 }

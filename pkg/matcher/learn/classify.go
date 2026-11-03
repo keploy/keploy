@@ -2090,11 +2090,11 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// whose changed words are all reads there is noise of those words,
 		// as where no serve came between the read and its call. So is one
 		// written in the text an encoded run decodes to (b64Pair reads that
-		// text's clock words before decoding its runs), but where F served a
-		// payload before the call whose adapter stated no view of what it
-		// gave: the encoded run is itself a changed word that is no clock
-		// word, which such a payload may hold (unseenWhy), so it is refused,
-		// as any value holding such a word is there.
+		// text's clock words before decoding its runs), also where F served
+		// a payload before the call whose view keploy cannot read: the
+		// encoded run is read as its text is (plainRuns), so it is no word
+		// such a payload may hold (unseenWhy, servedWhy), as that text
+		// unencoded holds none.
 		if wt := w.fromTestBegin(); ln.Kind == KindUnaccounted && wt != nil {
 			if wide := leaf(r, l, wt, 0); wide.Kind == KindClockRead && wide.Read != nil {
 				ln = wide
@@ -2728,6 +2728,10 @@ type valueDrift struct {
 	// encodedRec is the text the recorded value's encoded runs decode to
 	// (b64Pair), "" when none.
 	encodedRec string
+	// plainRuns are the words, as F saw them, of the value's encoded runs
+	// that the word rule reads as it reads their text (plainRunsOf), nil
+	// where none.
+	plainRuns map[string]bool
 	// unparsed says what of its drift the declared readings cannot read
 	// (unparsed).
 	unparsed string
@@ -3106,7 +3110,7 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 		dclock = clockWordsOf(d.decRec, d.decLive)
 		merge(dclock)
 	}
-	forms, checked, qp, encoded, encN := formsOf(rec, live, d.decRec, d.decLive, d.clock, clockWordsOf)
+	forms, checked, qp, encoded, encN, runs := formsOf(rec, live, d.decRec, d.decLive, d.clock, clockWordsOf)
 	d.encodedRec = encoded[0]
 	// The clock reads of every other form searched (the first is the
 	// decoded value, read above).
@@ -3245,6 +3249,7 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 		}
 		d.movedRec, d.movedLive = append(d.movedRec, movedRec), append(d.movedLive, movedLive)
 	}
+	d.plainRuns = d.plainRunsOf(forms, runs, encoded[1])
 	d.readIDParts(forms)
 	// Pieces of the value in every form.
 	for _, f := range forms {
@@ -3283,34 +3288,156 @@ func clockWord(t string, recorded bool, d *valueDrift, cs ...clockSet) bool {
 
 // unescaped is s with its percent-escapes decoded and its backslash escapes
 // read: "\uXXXX" (and an escaped surrogate pair) as the character it names,
-// "\\" as "\", and the others of a JSON string ("\n", "\t", "\"", "\/") as
-// a space, a separator: a value right after one ("uploads%2F<id>",
-// "\n<id>") is a word of its own there.
+// "\\" as "\", "\/" as the "/" it escapes (a JSON writer's escape of a
+// URL's or a base64 text's '/'), and the others of a JSON string ("\n",
+// "\t", "\"") as a space, a separator: a value right after one
+// ("uploads%2F<id>", "\n<id>") is a word of its own there.
 //
 // It scans by hand (every text form of every value read goes through it,
 // most of them holding no escape at all); unescapedByPattern in the tests is
 // the regular-expression reading it must agree with on every text.
 func unescaped(s string) string {
+	t, _ := unescapedBy(s, false)
+	return t
+}
+
+// unescapedAt is unescaped(s) and, for each place j of it (0 to its
+// length), the place in s where the text before j ends: s[:at[j]] reads as
+// its first j bytes, and s[at[j]:at[k]] as those from j to k; -1 where j
+// falls inside what an escape reads as (between two bytes of a character
+// "\u00e9" names), at any pass. It costs a pass over s for each pass of
+// unescaped, however many places are looked up.
+func unescapedAt(s string) (string, []int) {
+	return unescapedBy(s, true)
+}
+
+// unescapedBy is unescaped(s), and its places (unescapedAt) where track is
+// set (else nil).
+func unescapedBy(s string, track bool) (string, []int) {
+	var at []int
+	if track {
+		at = make([]int, len(s)+1)
+		for i := range at {
+			at[i] = i
+		}
+	}
 	// Each escape on its own (a stray '%' leaves the others to decode), and
 	// again while that changes anything, a few times at most (a value
 	// encoded inside a value encoded again: "%252F", "\\\\n"). Every escape
 	// read is shorter than its text, so a pass that reads one changes s.
 	for i := 0; i < 4; i++ {
-		d := backslashesRead(surrogatesRead(percentsDecoded(s)))
+		d := s
+		for step := range 3 {
+			// Called directly on a value of this frame: a text with no
+			// escape costs no allocation.
+			e := escapes{s: d, track: track}
+			switch step {
+			case 0:
+				percentsDecoded(&e)
+			case 1:
+				surrogatesRead(&e)
+			default:
+				backslashesRead(&e)
+			}
+			var pos []int
+			d, pos = e.text()
+			// What this step read is placed in s by where its text
+			// stands in what the steps before it gave.
+			if pos != nil {
+				for j, k := range pos {
+					if k >= 0 {
+						pos[j] = at[k]
+					}
+				}
+				at = pos
+			}
+		}
 		if d == s {
 			break
 		}
 		s = d
 	}
-	return s
+	return s, at
 }
 
-// percentsDecoded is s with each "%XX" (two hex digits, either case) the
-// byte it names, read left to right, none overlapping; s itself when it
-// holds none.
-func percentsDecoded(s string) string {
-	var b []byte
-	last := 0
+// escapes is a text built from s with some of its escapes read, left to
+// right, none overlapping: b holds it from where something was first read
+// (nil: none was, the text is s), last is where in s what is not yet
+// copied starts, and where track is set pos[j] is where in s byte j of the
+// text starts (-1 for each byte but the first of what an escape reads as).
+type escapes struct {
+	s     string
+	b     []byte
+	last  int
+	track bool
+	pos   []int
+}
+
+// readByte writes c, what the escape of n bytes at i of s reads as.
+func (e *escapes) readByte(i, n int, c byte) {
+	k := e.begin(i)
+	e.b = append(e.b, c)
+	e.read(i, n, k)
+}
+
+// readRune writes r, what the escape of n bytes at i of s reads as, in
+// UTF-8 (the replacement character where r is none).
+func (e *escapes) readRune(i, n int, r rune) {
+	k := e.begin(i)
+	e.b = utf8.AppendRune(e.b, r)
+	e.read(i, n, k)
+}
+
+// begin copies s as it is up to i, where an escape starts, and is where
+// in the text what it reads as starts.
+func (e *escapes) begin(i int) int {
+	if e.b == nil {
+		e.b = make([]byte, 0, len(e.s))
+	}
+	e.copyTo(i)
+	return len(e.b)
+}
+
+// read places what the escape of n bytes at i reads as, written from k of
+// the text on: its first byte at i, the others nowhere (-1).
+func (e *escapes) read(i, n, k int) {
+	if e.track {
+		e.pos = append(e.pos, i)
+		for range len(e.b) - k - 1 {
+			e.pos = append(e.pos, -1)
+		}
+	}
+	e.last = i + n
+}
+
+// copyTo copies s as it is up to i.
+func (e *escapes) copyTo(i int) {
+	if e.track {
+		for k := e.last; k < i; k++ {
+			e.pos = append(e.pos, k)
+		}
+	}
+	e.b = append(e.b, e.s[e.last:i]...)
+}
+
+// text is the text built and, where track is set and something was read,
+// its places in s (pos, and len(s) for its end); s itself and nil where
+// nothing was read.
+func (e *escapes) text() (string, []int) {
+	if e.b == nil {
+		return e.s, nil
+	}
+	e.copyTo(len(e.s))
+	if e.track {
+		e.pos = append(e.pos, len(e.s))
+	}
+	return string(e.b), e.pos
+}
+
+// percentsDecoded reads each "%XX" (two hex digits, either case) of e.s as
+// the byte it names, left to right, none overlapping.
+func percentsDecoded(e *escapes) {
+	s := e.s
 	for i := 0; ; {
 		j := strings.IndexByte(s[i:], '%')
 		if j < 0 {
@@ -3321,27 +3448,16 @@ func percentsDecoded(s string) string {
 			i++
 			continue
 		}
-		if b == nil {
-			b = make([]byte, 0, len(s))
-		}
-		b = append(b, s[last:i]...)
-		b = append(b, byte(hexValue(s[i+1:i+3])))
+		e.readByte(i, 3, byte(hexValue(s[i+1:i+3])))
 		i += 3
-		last = i
 	}
-	if b == nil {
-		return s
-	}
-	return string(append(b, s[last:]...))
 }
 
-// surrogatesRead is s with each high and low surrogate escaped as two
-// \uXXXX ("😀") the one character beyond the basic plane they
-// name (an emoji), read left to right, none overlapping; s itself when it
-// holds none.
-func surrogatesRead(s string) string {
-	var b []byte
-	last := 0
+// surrogatesRead reads each high and low surrogate of e.s escaped as two
+// \uXXXX ("😀") as the one character beyond the basic plane they
+// name (an emoji), left to right, none overlapping.
+func surrogatesRead(e *escapes) {
+	s := e.s
 	for i := 0; ; {
 		j := strings.IndexByte(s[i:], '\\')
 		if j < 0 {
@@ -3352,19 +3468,10 @@ func surrogatesRead(s string) string {
 			i++
 			continue
 		}
-		if b == nil {
-			b = make([]byte, 0, len(s))
-		}
-		b = append(b, s[last:i]...)
 		// Four hex digits each: 16 bits.
-		b = utf8.AppendRune(b, utf16.DecodeRune(rune(hexValue(s[i+2:i+6])), rune(hexValue(s[i+8:i+12]))))
+		e.readRune(i, 12, utf16.DecodeRune(rune(hexValue(s[i+2:i+6])), rune(hexValue(s[i+8:i+12]))))
 		i += 12
-		last = i
 	}
-	if b == nil {
-		return s
-	}
-	return string(append(b, s[last:]...))
 }
 
 // escapedSurrogatePairAt reports whether s holds at i a high surrogate
@@ -3377,14 +3484,13 @@ func escapedSurrogatePairAt(s string, i int) bool {
 		s[i+7] == 'u' && s[i+8]|0x20 == 'd' && strings.IndexByte("cdefCDEF", s[i+9]) >= 0 && hexAt(s, i+10, 2)
 }
 
-// backslashesRead is s with each backslash escape of a JSON string read,
-// left to right, none overlapping: "\uXXXX" as the character it names (a
-// JSON writer's escape of what is beyond ASCII; a lone surrogate names
-// none: the replacement character), "\\" as "\", and "\n", "\r", "\t",
-// "\b", "\f", "\"" and "\/" as a space; s itself when it holds none.
-func backslashesRead(s string) string {
-	var b []byte
-	last := 0
+// backslashesRead reads each backslash escape of a JSON string in e.s, left
+// to right, none overlapping: "\uXXXX" as the character it names (a JSON
+// writer's escape of what is beyond ASCII; a lone surrogate names none: the
+// replacement character), "\\" as "\", "\/" as "/", and "\n", "\r",
+// "\t", "\b", "\f" and "\"" as a space.
+func backslashesRead(e *escapes) {
+	s := e.s
 	for i := 0; ; {
 		j := strings.IndexByte(s[i:], '\\')
 		if j < 0 || i+j+1 >= len(s) {
@@ -3397,26 +3503,17 @@ func backslashesRead(s string) string {
 		case c == 'u' && hexAt(s, i+2, 4):
 			// Four hex digits: 16 bits.
 			r, n = rune(hexValue(s[i+2:i+6])), 6
-		case c == '\\':
-			r = '\\'
-		case strings.IndexByte(`nrtbf"/`, c) >= 0:
+		case c == '\\' || c == '/':
+			r = rune(c)
+		case strings.IndexByte(`nrtbf"`, c) >= 0:
 			r = ' '
 		default:
 			i++
 			continue
 		}
-		if b == nil {
-			b = make([]byte, 0, len(s))
-		}
-		b = append(b, s[last:i]...)
-		b = utf8.AppendRune(b, r)
+		e.readRune(i, n, r)
 		i += n
-		last = i
 	}
-	if b == nil {
-		return s
-	}
-	return string(append(b, s[last:]...))
 }
 
 // hexValue is the number the hex digits h (either case, checked by the

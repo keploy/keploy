@@ -220,7 +220,7 @@ func TestB64PairReadsEachSideAsB64TextKeepingClockWordsAtEveryLevel(t *testing.T
 		}, false},
 	} {
 		nr, nl := len(c.clock.rec), len(c.clock.live)
-		r, l := b64Pair(rec, live, c.clock, c.found)
+		r, l, _ := b64Pair(rec, live, c.clock, c.found)
 		if len(c.clock.rec) != nr || len(c.clock.live) != nl {
 			t.Errorf("%s: the caller's clock sets changed: %v, %v", c.what, c.clock.rec, c.clock.live)
 		}
@@ -243,9 +243,23 @@ func TestB64PairReadsEachSideAsB64TextKeepingClockWordsAtEveryLevel(t *testing.T
 	if !strings.Contains(b64Text(deep, nil), "innermost") {
 		t.Fatalf("b64Text(%q) does not reach its innermost text, so this row tells nothing", deep)
 	}
-	for _, p := range [][2]string{{deep, flat}, {flat, deep}} {
+	// Nested maxDecodeLevels deep on both sides, the last level's text
+	// differing: b64Pair reads as many levels as b64Text, and no more (a
+	// fifth level is not decoded by either).
+	nest := func(last string) string {
+		return "tok " + enc("outer "+enc("note "+enc("deep "+enc(last))+" end")) + " ok"
+	}
+	fourR, fourL := nest("the fourth level scheduler text"), nest("the fourth level operator text")
+	fiveR, fiveL := nest("five "+enc("the fifth level scheduler text")), nest("five "+enc("the fifth level operator text"))
+	if got := b64Text(fourR, nil); !strings.Contains(got, "fourth level scheduler") {
+		t.Fatalf("b64Text(%q) = %q does not reach its fourth level, so this row tells nothing", fourR, got)
+	}
+	if got := b64Text(fiveR, nil); !strings.Contains(got, "five ") || strings.Contains(got, "fifth level") {
+		t.Fatalf("b64Text(%q) = %q: want its fourth level read and its fifth not, so this row tells nothing", fiveR, got)
+	}
+	for _, p := range [][2]string{{deep, flat}, {flat, deep}, {fourR, fourL}, {fourR, flat}, {flat, fourL}, {fiveR, fiveL}} {
 		empty := clockSet{rec: map[string]bool{}, live: map[string]bool{}}
-		if r, l := b64Pair(p[0], p[1], empty, nothing); r != b64Text(p[0], nil) || l != b64Text(p[1], nil) {
+		if r, l, _ := b64Pair(p[0], p[1], empty, nothing); r != b64Text(p[0], nil) || l != b64Text(p[1], nil) {
 			t.Errorf("b64Pair(%q, %q) = %q, %q; want b64Text of each side", p[0], p[1], r, l)
 		}
 	}
@@ -259,7 +273,33 @@ func TestB64PairReadsEachSideAsB64TextKeepingClockWordsAtEveryLevel(t *testing.T
 		}
 		return c
 	}
-	if r, _ := b64Pair(deep, flat, clockSet{rec: map[string]bool{}, live: map[string]bool{}}, deepAt); !strings.Contains(r, "deep ") || strings.Contains(r, "innermost") {
+	if r, _, _ := b64Pair(deep, flat, clockSet{rec: map[string]bool{}, live: map[string]bool{}}, deepAt); !strings.Contains(r, "deep ") || strings.Contains(r, "innermost") {
 		t.Errorf("b64Pair(%q, %q), the innermost run a clock read where the recorded side alone decoded its level: %q; want it read to that level and the run not decoded", deep, flat, r)
+	}
+}
+
+// A run of base64 decoded whole is read once: a part of it between '/'
+// (or '.') that decodes to a piece of its text is not read again, in a
+// text read twice (a run read again in its line-joined text) and with
+// every split, so a '/' the encoder happened to write adds no copy of the
+// text's words. A part that is no piece of the run's text is still read.
+func TestB64TextReadsARunDecodedWholeOnce(t *testing.T) {
+	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	for _, text := range []string{"lead 2026-11-02T12:49:58.275116Z ok? yes", "lead 2026-11-02T12:49:58.275116Z ok? a.b yes"} {
+		run := enc(text)
+		if !strings.Contains(run, "/") {
+			t.Fatalf("%q holds no '/', so this row tells nothing", run)
+		}
+		for _, every := range []bool{false, true} {
+			if got := b64Read("tok "+run+" ok", nil, every); got != text+"\n" {
+				t.Errorf("b64Read(%q, every split %v) = %q; want its text once, %q", run, every, got, text+"\n")
+			}
+		}
+	}
+	// Two runs joined by a '/' (a path of two tokens): the whole is no
+	// text, so each part is read.
+	path := enc("first part") + "/" + enc("second part")
+	if got := b64Read("/v1/"+path, nil, false); !strings.Contains(got, "first part") || !strings.Contains(got, "second part") {
+		t.Errorf("b64Read(%q) = %q; want each part's text", path, got)
 	}
 }
