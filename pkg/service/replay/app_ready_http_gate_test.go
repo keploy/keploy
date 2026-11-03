@@ -17,6 +17,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/internal/testnet"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -748,7 +749,7 @@ func TestWaitForAppReady_UnreachableTargetReportsWhatWasObserved(t *testing.T) {
 	cfg.Test.Delay = 0
 
 	// The app's exit cancels its run's context: only that ends the wait.
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(pkg.EndsWithApp(context.Background()), 1500*time.Millisecond)
 	defer cancel()
 	if waitForAppReady(ctx, logger, cfg,
 		httpProbeTarget{scheme: "http", host: host, port: port, ok: true}) {

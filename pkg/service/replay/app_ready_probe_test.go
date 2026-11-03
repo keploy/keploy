@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 )
 
 // An app whose ready-probe address is already listening must return immediately
@@ -51,7 +52,7 @@ func TestWaitForAppReady_ProbeAddrGate_DeadAddrWaitsUntilTheAppExits(t *testing.
 	cfg.Test.HealthPollTimeout = 200 * time.Millisecond // no ceiling on the accept
 
 	// The app's exit cancels its run's context: only that ends the wait.
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(pkg.EndsWithApp(context.Background()), 1500*time.Millisecond)
 	defer cancel()
 	start := time.Now()
 	if waitForAppReady(ctx, zap.NewNop(), cfg, httpProbeTarget{}) {

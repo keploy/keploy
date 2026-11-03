@@ -663,7 +663,8 @@ func unreachableGRPCAuthority(ctx context.Context, reach AppPortReachability, au
 // address reach says the app's server on appPort (the port the test was
 // recorded on, 0 when not known) can never be reached at.
 func dialTCPWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, authority string, reach AppPortReachability, appPort uint16) (net.Conn, error) {
-	said := false
+	var wait reSendWait
+	defer wait.end()
 	for attempt := 0; ; attempt++ {
 		conn, err := net.Dial("tcp", authority)
 		if err == nil {
@@ -680,7 +681,7 @@ func dialTCPWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, author
 			}
 		}
 		if AppExitEnds(ctx) {
-			if waitErr := waitToReSend(ctx, logger, "gRPC test's dial", authority, &said); waitErr != nil {
+			if waitErr := waitToReSend(ctx, logger, "gRPC test's dial", authority, err, &wait); waitErr != nil {
 				return nil, waitErr
 			}
 			continue

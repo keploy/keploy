@@ -491,8 +491,17 @@ type Test struct {
 	// DisableAppReadyProbe turns off the app-readiness probing that
 	// runs before the first test fires — the docker/compose
 	// published-port gates, AppReadyProbeAddr, and the resolved
-	// test-target fallback. --health-url is unaffected: that is an
-	// explicit operator request, not an inferred probe.
+	// test-target fallback — and every other connect-then-close dial
+	// of the app's address: the reset re-send's readiness re-gate, and
+	// the wait of a test request the app refused. --health-url is still
+	// polled, as an explicit operator request rather than an inferred
+	// probe. For an app whose process keploy runs, its exit ends the
+	// waits, so they have no time limit: past HealthPollTimeout the
+	// health URL is polled on until it answers 2xx, saying every so
+	// often that it still waits, and a refused test request is sent
+	// again every so often instead of being preceded by a probe. For
+	// any other, the waits stay bounded: past HealthPollTimeout the
+	// fixed Delay, and the bounded re-sends of a refused request.
 	//
 	// It exists for embedders that drive replay as a library in an
 	// environment where a connect-then-close probe is DESTRUCTIVE.

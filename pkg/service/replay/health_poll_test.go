@@ -14,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/internal/testnet"
+	"go.keploy.io/server/v3/pkg"
 )
 
 // newCfg builds a minimal config.Config with the replay/health knobs set.
@@ -32,7 +33,8 @@ func newCfg(healthURL string, pollTimeout time.Duration) *config.Config {
 // test binary's timeout.
 func readyWithin(t *testing.T, bound time.Duration, logger *zap.Logger, cfg *config.Config, probe httpProbeTarget) bool {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
+	// An application keploy runs: its exit cancels its run's context.
+	ctx, cancel := context.WithCancel(pkg.EndsWithApp(context.Background()))
 	done := make(chan bool, 1)
 	t.Cleanup(cancel)
 	go func() { done <- waitForAppReady(ctx, logger, cfg, probe) }()

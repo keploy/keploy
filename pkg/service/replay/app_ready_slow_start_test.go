@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/internal/testnet"
+	"go.keploy.io/server/v3/pkg"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -46,7 +47,8 @@ func (a *slowApp) start() {
 // slowWaitResult runs waitForAppReady in the background and reports its answer.
 func slowWaitResult(ctx context.Context, logger *zap.Logger, cfg *config.Config, probe httpProbeTarget) <-chan bool {
 	done := make(chan bool, 1)
-	go func() { done <- waitForAppReady(ctx, logger, cfg, probe) }()
+	// An application keploy runs: its exit cancels its run's context.
+	go func() { done <- waitForAppReady(pkg.EndsWithApp(ctx), logger, cfg, probe) }()
 	return done
 }
 

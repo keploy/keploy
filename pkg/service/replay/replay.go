@@ -1882,12 +1882,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// context (agentHookContext): the set's is cancelled when its app exits.
 	runTestSetCtx = withRunLife(runTestSetCtx, ctx)
 	if r.instrument {
-		// keploy started the set's application (for this set, or once for
-		// the run under --keep-app-alive), and its exit cancels
-		// runTestSetCtx (the app watchers below, or Start's group): a test
-		// request it refuses waits for its address to accept, and only
-		// that exit or keploy's stop ends the wait.
-		runTestSetCtx = utils.WithAppPID(pkg.EndsWithApp(runTestSetCtx))
+		runTestSetCtx = utils.WithAppPID(runTestSetCtx)
+		if runsAppProcess(r.instrumentation) {
+			// keploy runs the set's application's process (for this set,
+			// or once for the run under --keep-app-alive), and its exit
+			// cancels runTestSetCtx (the app watchers below, or Start's
+			// group): the wait before the first test, and a test request
+			// it refuses, wait for its address to accept, and only that
+			// exit or keploy's stop ends the wait.
+			runTestSetCtx = pkg.EndsWithApp(runTestSetCtx)
+			if r.config.Test.DisableAppReadyProbe {
+				runTestSetCtx = pkg.WithoutAddressProbe(runTestSetCtx)
+			}
+		}
 	}
 
 	// EVERY RECORDED VERDICT, for the reporter -- which is a different set from
@@ -9278,7 +9285,7 @@ func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models
 				r.logger.Info(fmt.Sprintf("the test request was reset at %s before the application took it: waiting for the application to answer HTTP there, then sending it again. The wait ends when it does, when the application exits, or when keploy is stopped", addr),
 					zap.String("testSetID", testSetID), zap.String("testCaseID", testCase.Name))
 			}
-			defer pkg.SayStillWaiting(ctx, r.logger, "answer HTTP", addr, time.Now())()
+			defer sayStillWaiting(ctx, r.logger, "answer HTTP", addr, time.Now())()
 		}
 		if err := waitForHTTPServing(serveCtx, scheme, host, port); err != nil {
 			r.logger.Debug("app not serving HTTP before reset re-send; re-sending anyway",

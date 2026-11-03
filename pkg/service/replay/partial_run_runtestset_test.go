@@ -235,6 +235,10 @@ func (prTelemetry) MockTestRun(int)                                            {
 // prInstr fails UpdateMockParams from the Nth call onwards, which is exactly
 // how a replaced agent behaves: it refuses the per-test filter params for the
 // rest of the set (#4614 → #4618).
+// RunsAppProcess: the harness's application is one keploy runs, whose exit
+// (appStopped) ends Run.
+func (f *prInstr) RunsAppProcess() bool { return true }
+
 type prInstr struct {
 	mu                sync.Mutex
 	updateCalls       int

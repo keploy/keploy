@@ -373,11 +373,13 @@ func TestWaitToReSendSaysOncePerRequest(t *testing.T) {
 	logger := zap.New(core)
 	addr := refusingAddr(t)
 	var first time.Duration
-	said := false
+	var wait reSendWait
+	defer wait.end()
+	refusal := &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
 	for i := 0; i < 2; i++ {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
-		go func() { done <- waitToReSend(ctx, logger, "test request", addr, &said) }()
+		go func() { done <- waitToReSend(ctx, logger, "test request", addr, refusal, &wait) }()
 		// The first wait is ended once it said it waits; the second after
 		// as long, and a second more, so that a line it said is seen.
 		began := time.Now()

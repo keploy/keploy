@@ -570,26 +570,50 @@ func waitForHTTPServingPathOr(ctx context.Context, scheme, host, port, path stri
 // skipped entirely rather than burning the ceiling on a probe that can never
 // parse a response.
 //
-// Stage 1 has no ceiling: it ends when the address accepts, or when ctx ends
-// (the application exited, or the user stopped keploy). Stage 2 is bounded by
-// HealthPollTimeout, counted from the accept: past it the gate WARNS and
-// proceeds, as the application did accept. It can only ever wait LONGER than
-// --delay, never shorter, and never weakens an assertion. Returns false only
-// on context cancellation.
+// For an application whose process keploy runs (ctx marked pkg.EndsWithApp),
+// stage 1 has no ceiling: it ends when the address accepts, or when ctx ends
+// (the application exited, or the user stopped keploy), and stage 2 is
+// bounded by HealthPollTimeout counted from the accept. For any other, both
+// stages share HealthPollTimeout counted from the gate's start, as nothing
+// but the caller's stop would end a wait with no limit. Past the ceiling the
+// gate WARNS and proceeds. It can only ever wait LONGER than --delay, never
+// shorter, and never weakens an assertion. Returns false only on context
+// cancellation.
 func gateOnAppAddress(ctx context.Context, logger *zap.Logger, cfg *config.Config, host, port, label string, probe httpProbeTarget) bool {
-	if waitForAccept(ctx, logger, label, host, port) != nil {
-		return false
-	}
-
-	if !probe.ok {
-		return true
-	}
-
 	ceiling := cfg.Test.HealthPollTimeout
 	if ceiling <= 0 {
 		ceiling = config.DefaultHealthPollTimeout
 	}
-	hctx, cancel := context.WithTimeout(ctx, ceiling)
+	httpCeiling := ceiling
+	if pkg.AppExitEnds(ctx) {
+		if waitForAccept(ctx, logger, label, host, port) != nil {
+			return false
+		}
+	} else {
+		// keploy does not run the application's process, so no exit of it
+		// would end a wait with no limit: both stages share the ceiling,
+		// and past it the gate warns and fires the tests.
+		deadline := time.Now().Add(ceiling)
+		if err := pkg.WaitForPort(ctx, host, port, ceiling); err != nil {
+			if ctx.Err() != nil {
+				return false
+			}
+			logger.Warn("app address did not accept a connection within the ceiling; firing tests anyway (replay may see status_code got=0)",
+				zap.String("gate", label),
+				zap.String("host", host),
+				zap.String("port", port),
+				zap.Duration("ceiling", ceiling),
+				zap.Error(err))
+			return true
+		}
+		httpCeiling = time.Until(deadline)
+	}
+
+	if !probe.ok || httpCeiling <= 0 {
+		return true
+	}
+
+	hctx, cancel := context.WithTimeout(ctx, httpCeiling)
 	defer cancel()
 
 	for {
@@ -637,7 +661,7 @@ func reportHTTPGate(ctx context.Context, logger *zap.Logger, label string, cfg *
 		if ctx.Err() != nil {
 			return false
 		}
-		logger.Warn("app accepted TCP but never completed an HTTP round-trip within --health-poll-timeout of the accept; firing tests anyway (replay may see status_code got=0)",
+		logger.Warn("app accepted TCP but never completed an HTTP round-trip within --health-poll-timeout; firing tests anyway (replay may see status_code got=0)",
 			zap.String("gate", label),
 			zap.String("probeHost", probe.host),
 			zap.String("probePort", probe.port),
@@ -816,21 +840,30 @@ func appPortReachabilityOf(instrumentation Instrumentation) pkg.AppPortReachabil
 
 // waitForAppReady gates the first test on the user-application being up.
 //
-// The wait for an application keploy started ends when the application
-// accepts a connection on its port, when it exits (its run's context is
-// cancelled), or when the user stops keploy: never at a fixed time. A slow
-// start on a loaded machine is waited for however long it takes, and one that
-// exits before it accepts fires no test.
+// The wait for an application whose process keploy runs (ctx marked
+// pkg.EndsWithApp) ends when the application accepts a connection on its
+// port, when it exits (its run's context is cancelled), or when the user
+// stops keploy: never at a fixed time. A slow start on a loaded machine is
+// waited for however long it takes, and one that exits before it accepts
+// fires no test.
 //
 // With Test.HealthURL set we poll it every healthPollInterval (with a
 // per-request cap of healthProbeTimeout); the first 2xx unblocks at once. If
 // HealthPollTimeout passes with no 2xx, keploy says so and waits instead for
-// the application to accept a connection on its port (gateOnAppAddresses).
-// HealthPollTimeout is how long keploy asks for an HTTP answer before it
-// settles for that accept, not a time after which it fires tests.
+// the application to accept a connection on its port (gateOnAppAddresses),
+// or, with probing the address disabled, for the health URL's 2xx, saying
+// every so often that it still waits. HealthPollTimeout is how long keploy
+// asks for an HTTP answer before it settles for that accept, not a time
+// after which it fires tests.
 //
 // With no (or an invalid) HealthURL, keploy waits Test.Delay seconds and then
 // for the application to accept a connection on its port.
+//
+// For an application whose process keploy does not run, nothing but the
+// caller's stop would end a wait with no limit, so the bounded waits stay: a
+// health URL that does not answer 2xx within HealthPollTimeout falls back to
+// the fixed Test.Delay, and an address gate warns and fires the tests past
+// HealthPollTimeout (gateOnAppAddress).
 //
 // Returns true when the caller should proceed to run tests, false only when ctx
 // was canceled (the application exited, or the user stopped the run). An
@@ -879,6 +912,7 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 			zap.String("healthUrl", sanitizeHealthURL(healthURL)),
 			zap.Duration("pollTimeout", pollCeiling),
 		)
+		began := time.Now()
 		if pollHealthURL(ctx, healthURL, pollCeiling) {
 			logger.Debug("health endpoint reported 2xx; proceeding",
 				zap.String("healthUrl", sanitizeHealthURL(healthURL)),
@@ -888,13 +922,33 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 		if ctx.Err() != nil {
 			return false
 		}
+		if !pkg.AppExitEnds(ctx) {
+			// keploy does not run the application's process, so no exit of
+			// it would end a wait with no limit: the fixed --delay, then
+			// the first test.
+			logger.Info("health probe timed out, falling back to fixed delay — raise --health-poll-timeout (or test.healthPollTimeout in keploy.yml) or point --health-url at an endpoint that returns 2xx sooner",
+				zap.String("healthUrl", sanitizeHealthURL(healthURL)),
+				zap.Duration("pollTimeout", pollCeiling),
+				zap.Duration("fallbackDelay", delay),
+			)
+			fallbackTimer := time.NewTimer(delay)
+			defer fallbackTimer.Stop()
+			select {
+			case <-fallbackTimer.C:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
 		if cfg.Test.DisableAppReadyProbe {
 			// No probe of the app's address is allowed here, so the health
-			// URL, which the user asked for, stays what the wait is for.
+			// URL, which the user asked for, stays what the wait is for,
+			// and it says every so often that it still waits.
 			logger.Info("the health URL has not answered 2xx within the poll timeout, and probing the app's address is disabled by configuration; the first test waits for the health URL to answer 2xx, the application to exit, or keploy to be stopped",
 				zap.String("healthUrl", sanitizeHealthURL(healthURL)),
 				zap.Duration("pollTimeout", pollCeiling),
 			)
+			defer sayStillWaiting(ctx, logger, "answer 2xx at "+sanitizeHealthURL(healthURL), healthURLWaitAddr(healthURL), began)()
 			return pollHealthURL(ctx, healthURL, 0)
 		}
 		logger.Info("the health URL has not answered 2xx within the poll timeout; the first test waits instead for the application to accept a connection on its port — raise --health-poll-timeout (or test.healthPollTimeout in keploy.yml) to wait longer for the health URL",
@@ -1066,6 +1120,21 @@ func gateOnAppAddresses(ctx context.Context, logger *zap.Logger, cfg *config.Con
 // false without one. An empty host, as in "http://:8080/healthz", is the local
 // machine: the wait dials ":8080", the address the health poll's own request
 // reaches.
+// sayStillWaiting is pkg.SayStillWaiting, the line a wait with no time limit
+// says every so often; a var only so that a row can see what it is asked to
+// say.
+var sayStillWaiting = pkg.SayStillWaiting
+
+// healthURLWaitAddr is the address a wait on healthURL names: the one its
+// request dials (healthURLAddress), so that the line can name the ports the
+// application listens on instead, or the URL as given when it names none.
+func healthURLWaitAddr(healthURL string) string {
+	if host, port, ok := healthURLAddress(healthURL); ok {
+		return net.JoinHostPort(host, port)
+	}
+	return sanitizeHealthURL(healthURL)
+}
+
 func healthURLAddress(healthURL string) (host, port string, ok bool) {
 	u, err := url.Parse(strings.TrimSpace(healthURL))
 	if err != nil || u.Host == "" {
