@@ -312,7 +312,7 @@ func TestAStoppedWorkersMissIsCountedACallKeployCannotAttribute(t *testing.T) {
 		return n, what
 	}
 	miss := func(inst uint32, report *models.MockMismatchReport, dst *models.ConditionalDstCfg) {
-		var err error = models.NewMockMismatchError(models.ErrNoMockMatched, report)
+		err := models.NewMockMismatchError(models.ErrNoMockMatched, report)
 		if report == nil {
 			err = models.ErrNoMockMatched
 		}
