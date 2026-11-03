@@ -700,15 +700,14 @@ func readShapes() []readShape {
 
 // readAllocation is one read of body's recording on path (a call's warm:
 // "call"; the staging's whole read: "staged"; the staging's rest of one a
-// call read first: "rest") and what it allocated. The row sets one reader
-// on each path (warmReadersOf, oneStageReader) and bodyBudget 0, so each
-// read loads its own payload, as past the set's budget. Two collections
-// before it empty the pools a read takes state from (sync.Pool keeps what
-// it held through one), so each read allocates that state again, as the
-// first read after a collection does: the most it allocates, the same in
-// every run.
+// call read first: "rest") and what it allocated (allocatedOnOneCPU). The
+// row sets one reader on each path (warmReadersOf, oneStageReader) and
+// bodyBudget 0, so each read loads its own payload, as past the set's
+// budget. The call's read before the rest runs on one CPU too, so the
+// two are read alike in every run.
 func readAllocation(t *testing.T, path, body string) int64 {
 	t.Helper()
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 	m := getAnswer("big-0", "http://api/blobs/0", body, eRecAt)
 	m.SetStoredSize(int64(len(body)))
 	tr := NewTracker()
@@ -722,21 +721,54 @@ func readAllocation(t *testing.T, path, body string) int64 {
 		dc.warm([]Raw{x})
 		loads = 2
 	}
-	var before, after runtime.MemStats
-	runtime.GC()
-	runtime.GC()
-	runtime.ReadMemStats(&before)
-	if path == "call" {
-		dc.warm([]Raw{x})
-	} else if err := dc.warmSet(srcOf([]*models.Mock{m}), 1); err != nil {
+	var err error
+	alloc := allocatedOnOneCPU(func() {
+		if path == "call" {
+			dc.warm([]Raw{x})
+		} else {
+			err = dc.warmSet(srcOf([]*models.Mock{m}), 1)
+		}
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	runtime.ReadMemStats(&after)
 	staged, called, _ := readsOf(dc.set)
 	if ok := map[string]bool{"call": staged == 0 && called == 1, "staged": staged == 1 && called == 0,
 		"rest": staged == 0 && called == 1 && dc.set.finished == 1}[path]; !ok || dc.Loads() != loads {
 		t.Fatalf("%s read of %d bytes: the staging read %d, a call %d, the rest of %d, loading %d: want the one read, %d loads", path, len(body), staged, called, dc.set.finished, dc.Loads(), loads)
 	}
+	return alloc
+}
+
+// allocatedOnOneCPU is what read allocates, run after two collections with
+// Go on one CPU (GOMAXPROCS 1, set back after). The collections empty the
+// pools a read takes state from (sync.Pool keeps what it held through
+// one), so read allocates that state again, as the first read after a
+// collection does: the most it allocates. On one CPU, what it allocates
+// is its own, whatever the CPUs of the machine it runs on:
+//   - a pool's first use after a collection also allocates an entry of 128
+//     bytes for each CPU Go runs on, about 290 bytes a CPU over the pools a
+//     read takes state from (37 KB at 128 CPUs). Those are the pool's,
+//     allocated once after a collection whatever the readers' count, not
+//     the read's: on one CPU there is one of each;
+//   - a read that moves to another CPU finds the pool's entry there empty
+//     and allocates its state again: on one CPU it never moves.
+//
+// The race build's pools also drop at random what they are given back, so
+// a read that takes a pool's state more than once allocates it again at
+// random. The soft line breaks' pattern took its 37 KB state for each
+// text holding a "=", several in a read of a base64 text, and is read
+// byte by byte now (noSoftBreaks); in ten race runs of each small read,
+// in processes started at 4 and at 128 CPUs and each read measured on
+// one, a read varied by 64 bytes at most.
+func allocatedOnOneCPU(read func()) int64 {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	read()
+	runtime.ReadMemStats(&after)
 	return int64(after.TotalAlloc - before.TotalAlloc)
 }
 
@@ -760,8 +792,10 @@ var readCosts = []struct {
 // 256 and 1 KiB, where readBase counts most; at 4, 6, 16 and 19 KiB, where
 // the cost decides how many reads run at once (the staging's read runs
 // alone from 6.3 KiB, a call's from 19.5 KiB); at 31 KiB; and a call's at
-// 1 MiB. A read that came to cost more, or a cost set lower, fails here;
-// the per-byte figures are logged.
+// 1 MiB. Each is measured with Go on one CPU (allocatedOnOneCPU), so what
+// it allocates is the same at any GOMAXPROCS and in the race build. A read
+// that came to cost more, or a cost set lower, fails here; the per-byte
+// figures are logged.
 func TestAReadAllocatesNoMoreThanItsCost(t *testing.T) {
 	warmReadersOf(t, 1)
 	oneStageReader(t)
@@ -802,18 +836,13 @@ func TestAReadAllocatesNoMoreThanItsCost(t *testing.T) {
 // read allocates bounds the most its heap grows by while it reads, and it
 // is counted, so the row holds whatever the machine's load. A copy of the
 // label for each place allocated 1,401 bytes a byte at 16 KiB and 8,037 at
-// 128 KiB, about 1 GB.
+// 128 KiB, about 1 GB, so the row stops at the first size past its cost.
 func TestAStagingsReadGrowsTheHeapWithItsPayloadNotItsSquare(t *testing.T) {
 	warmReadersOf(t, 1)
 	oneStageReader(t)
 	defer func(b int64) { bodyBudget = b }(bodyBudget)
 	bodyBudget = 0
-	var b64 readShape
-	for _, sh := range readShapes() {
-		if strings.HasPrefix(sh.name, "base64") {
-			b64 = sh
-		}
-	}
+	b64 := readShapeNamed(t, "base64 of a JSON list of dates")
 	readAllocation(t, "staged", b64.body(1<<10))
 	for size := 8 << 10; size <= 128<<10; size *= 2 {
 		body := b64.body(size)
@@ -821,8 +850,59 @@ func TestAStagingsReadGrowsTheHeapWithItsPayloadNotItsSquare(t *testing.T) {
 			alloc := readAllocation(t, path, body)
 			t.Logf("%s read of %d bytes: allocated %d, %.1f a byte past readBase", path, len(body), alloc, float64(alloc-readBase)/float64(len(body)))
 			if want := readBase + stageCost*int64(len(body)); alloc > want {
-				t.Errorf("a %s read of a %d-byte base64 text of a JSON list of dates allocated %d bytes: past the %d it costs (readBase and %d a byte)", path, len(body), alloc, want, stageCost)
+				t.Fatalf("a %s read of a %d-byte base64 text of a JSON list of dates allocated %d bytes: past the %d it costs (readBase and %d a byte)", path, len(body), alloc, want, stageCost)
 			}
 		}
 	}
+}
+
+// The places a recording F gave the application earlier keeps (PlacesOf)
+// grow the heap with its payload, not its square, as the staging's read
+// does: PlacesOf copies the names of its keyed places once each
+// (copyPlaces). On a base64 text of a JSON list of dates, whose places all
+// take the encoded run as their label, as its size doubles from 8 to 128
+// KiB, PlacesOf allocates at most readBase and stageCost a byte, the
+// staging's cost: the places, words and answer instants it reads are parts
+// the staging reads. A copy of the label for each place (a place for each
+// 17 bytes or so of the payload, each label about the payload's size) went
+// past that cost from 32 KiB, so the row stops at the first size past it.
+func TestAGivenRecordingsPlacesGrowTheHeapWithItsPayloadNotItsSquare(t *testing.T) {
+	b64 := readShapeNamed(t, "base64 of a JSON list of dates")
+	if x, err := ReadRaw(getAnswer("blob-0", "http://api/blob", b64.body(1<<10), eRecAt), true); err != nil {
+		t.Fatal(err)
+	} else {
+		PlacesOf(x)
+	}
+	for size := 8 << 10; size <= 128<<10; size *= 2 {
+		body := b64.body(size)
+		x, err := ReadRaw(getAnswer("blob-0", "http://api/blob", body, eRecAt), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var g GivenPlaces
+		alloc := allocatedOnOneCPU(func() { g = PlacesOf(x) })
+		longest := 0
+		for _, p := range g.places {
+			longest = max(longest, len(p.k.label))
+		}
+		t.Logf("PlacesOf of %d bytes: %d places, labels of up to %d bytes, allocated %d, %.1f a byte past readBase", len(body), len(g.places), longest, alloc, float64(alloc-readBase)/float64(len(body)))
+		if len(g.places) < len(body)/20 || longest < len(body)/2 {
+			t.Fatalf("PlacesOf of a %d-byte base64 text of a JSON list of dates kept %d places with labels of up to %d bytes: want one for each 20 bytes or more, after the encoded run", len(body), len(g.places), longest)
+		}
+		if want := readBase + stageCost*int64(len(body)); alloc > want {
+			t.Fatalf("PlacesOf of a %d-byte base64 text of a JSON list of dates allocated %d bytes: past the %d the staging's read of it costs (readBase and %d a byte)", len(body), alloc, want, stageCost)
+		}
+	}
+}
+
+// readShapeNamed is the shape of readShapes named name.
+func readShapeNamed(t *testing.T, name string) readShape {
+	t.Helper()
+	for _, sh := range readShapes() {
+		if sh.name == name {
+			return sh
+		}
+	}
+	t.Fatalf("no read shape is named %q", name)
+	return readShape{}
 }

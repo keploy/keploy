@@ -238,12 +238,10 @@ func TestAServedLeafIsKeyedInEachFormByThatFormsOwnWords(t *testing.T) {
 }
 
 // The keyed places of a list of instants after one long word, copied for
-// the set to keep (copyPlaces), hold the word once: each place's names are
-// equal to those read and none is the text they were read from, every
-// place of the list shares one copy of its label, and the held part counts
-// the bytes the copies hold (placesBytes), each copy once. A base64 text
-// of a JSON list of dates is that list: the instants of its decoded form
-// (rawExtra) take its encoded run as their label.
+// the set to keep (copyPlaces), hold the word once (copiedPlaces): every
+// place of the list shares one copy of its label. A base64 text of a JSON
+// list of dates is that list: the instants of its decoded form (rawExtra)
+// take its encoded run as their label.
 func TestTheCopiedPlacesOfAListAfterALongWordHoldTheWordOnce(t *testing.T) {
 	var b strings.Builder
 	b.WriteString("[")
@@ -254,11 +252,46 @@ func TestTheCopiedPlacesOfAListAfterALongWordHoldTheWordOnce(t *testing.T) {
 		b.WriteString(`"` + time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC).AddDate(0, 0, i).Format("2006-01-02") + `"`)
 	}
 	b.WriteString("]")
-	m := getAnswer("blob-0", "http://api/blob", `{"blob":"`+base64.StdEncoding.EncodeToString([]byte(b.String()))+`"}`, eRecAt)
+	read := copiedPlaces(t, `{"blob":"`+base64.StdEncoding.EncodeToString([]byte(b.String()))+`"}`)
+	longest := 0
+	for _, r := range read {
+		longest = max(longest, len(r.k.label))
+	}
+	if len(read) < 300 || longest < 1000 {
+		t.Errorf("%d places with labels of up to %d bytes: want 300 or more after a word of 1000 or more", len(read), longest)
+	}
+}
+
+// The copied places (copyPlaces) of instants each after a key of its own,
+// the keys of one length ("made", "sent", "seen"), hold each key's own
+// label, and the held part counts each of the three (copiedPlaces). A
+// copy taken over from the place before it where the names are as long,
+// not where they are equal, would label all three "made"; a count by
+// length would count one of the three.
+func TestTheCopiedPlacesOfKeysOfOneLengthHoldEachKeysOwnLabel(t *testing.T) {
+	read := copiedPlaces(t, `{"made":"2026-10-24","sent":"2026-10-25","seen":"2026-10-26"}`)
+	var labels []string
+	for _, r := range read {
+		labels = append(labels, r.k.label)
+	}
+	if !slices.Equal(labels, []string{"made", "sent", "seen"}) {
+		t.Errorf("the places read are labelled %q: want made, sent and seen, one place each", labels)
+	}
+}
+
+// copiedPlaces is the keyed places read of a recording answering body,
+// after it holds their copies for the set to keep (copyPlaces): each
+// place's names are equal to those read and none is the text they were
+// read from, each run of places that share a label shares one copy of it,
+// and the held part counts the bytes the copies hold (placesBytes), each
+// copy once.
+func copiedPlaces(t *testing.T, body string) []keyedPlace {
+	t.Helper()
+	m := getAnswer("blob-0", "http://api/blob", body, eRecAt)
 	read := NewDriftCache().readPlaces(RawOf(m, true))
 	places := slices.Clone(read)
 	copyPlaces(places)
-	runs, longest := 0, 0
+	runs := 0
 	held := map[*byte]int{}
 	for i, p := range places {
 		r := read[i]
@@ -277,14 +310,13 @@ func TestTheCopiedPlacesOfAListAfterALongWordHoldTheWordOnce(t *testing.T) {
 		if i == 0 || r.k.label != read[i-1].k.label {
 			runs++
 		}
-		longest = max(longest, len(r.k.label))
 	}
 	labels := map[*byte]bool{}
 	for _, p := range places {
 		labels[unsafe.StringData(p.k.label)] = true
 	}
-	if len(places) < 300 || longest < 1000 || len(labels) != runs {
-		t.Errorf("%d places with labels of up to %d bytes hold %d copies of their labels: want 300 or more after a word of 1000 or more, one copy for each of the %d runs of a label", len(places), longest, len(labels), runs)
+	if len(labels) != runs {
+		t.Errorf("%d places hold %d copies of their labels: want one for each of the %d runs of a label", len(places), len(labels), runs)
 	}
 	want := int64(headerBytes + placeBytes*len(places))
 	for _, n := range held {
@@ -293,6 +325,7 @@ func TestTheCopiedPlacesOfAListAfterALongWordHoldTheWordOnce(t *testing.T) {
 	if got := placesBytes(places); got != want {
 		t.Errorf("the held part counts %d bytes of the copied places: want %d, each copy once", got, want)
 	}
+	return read
 }
 
 // The places a set keeps of a recording (setPlaces) and those a recording

@@ -1236,29 +1236,37 @@ const readInFlight = 8 << 20
 // keeps all it allocated until the next one: readBase whatever its size,
 // and for each byte of its recording what its reader reads of it. Measured
 // (TestAReadAllocatesNoMoreThanItsCost, its store keeping no payload, so
-// each read loads it) on twelve shapes: nine from words to a list of dates,
-// and the list as recordings nest it: written as a JSON string (SQS and
-// SNS bodies), base64 of a JSON list (Kafka and Pulsar payloads), and
-// comma-separated values. The most is the JSON string's, each date a
-// candidate read in several layouts in each of its forms:
+// each read loads it, after a collection emptied the pools it takes state
+// from) on twelve shapes: nine from words to a list of dates, and the list
+// as recordings nest it: written as a JSON string (SQS and SNS bodies),
+// base64 of a JSON list (Kafka and Pulsar payloads), and comma-separated
+// values. The most is the JSON string's, each date a candidate read in
+// several layouts in each of its forms:
 //   - readBase, what a read allocates whatever its size: one of a payload
-//     of 15 to 30 bytes allocates 37-87 KB after a collection emptied the
-//     pools it takes state from, the most where it holds a "=" (the soft
-//     line break's regexp, qpForm);
+//     of 15 to 61 bytes allocates 33-57 KB, measured with Go on one CPU.
+//     On more CPUs a read allocates more only through the pools it takes
+//     state from: a pool's first use after a collection allocates an
+//     entry for each CPU (about 290 bytes a CPU over those pools, 37 KB
+//     at 128 CPUs), but once a pool whatever the readers' count, so not
+//     counted to a read; and a read that moves to another CPU, whose entry
+//     is empty, allocates a pool's state again (up to 2.9 KB more in one
+//     run than in another at 128 CPUs), which readBase's margin covers;
 //   - readCost, a call's warm (warmOne: the parts every call's rules
-//     read): past readBase, 344 bytes for each byte of the JSON string at
-//     16 KiB and 354 at 31 KiB, 308 at 1 MiB; 326 of the comma-separated
-//     dates, 266 of the plain list, 114 of its base64, 10 of words (the
+//     read): past readBase, 343 bytes for each byte of the JSON string at
+//     16 KiB and 353 at 31 KiB, 308 at 1 MiB; 326 of the comma-separated
+//     dates, 266 of the plain list, 110 of its base64, 10 of words (the
 //     HTTP bound row's answers), 41 of JSON items with an instant each;
 //   - stageCost, the staging's (warmSet: a call's parts and those the
 //     staging reads beyond them, stagedParts; or those alone, after a call
-//     read the rest, stageRest, which loads the payload again): 975 for
+//     read the rest, stageRest, which loads the payload again): 971 for
 //     each byte of the JSON string at 1 KiB and 1,066 at 31 KiB, 712 of the
 //     rest of it; 808 of the comma-separated dates, 666 of the plain list,
-//     457 of its base64.
+//     438 of its base64.
 //
-// Each is an eighth or more past the most measured (readBase 13% past 87
-// KB, readCost 18% past 354, stageCost 20% past 1,066). Deeper nesting can
+// Each is an eighth or more past the most measured (readCost 18% past 353,
+// stageCost 20% past 1,066, readBase 73% past 57 KB: it was set when a
+// read of a text holding a "=" also took the 37 KB state of the soft line
+// breaks' pattern, which noSoftBreaks replaced). Deeper nesting can
 // cost more: an escaped JSON string holding comma-separated dates
 // allocates up to 1.18 times a call's cost and 1.01 times the staging's
 // under the sizes from which each runs alone, so readers running together
