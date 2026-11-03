@@ -1053,3 +1053,50 @@ func TestARevokeOfAnEarlierChannelIsNotSentOnALaterOne(t *testing.T) {
 		t.Fatal("a revoke of the current channel's epoch was not sent")
 	}
 }
+
+// A channel set again while its replaced lane still delivers to it gets that
+// lane back, and the lane keeps its consumer's exit: a SetOutputConsumer call
+// in between forgot that exit, its consumer having gone, and the lane took
+// the record's nothing for it. A mock sent to the channel then waited on its
+// stall verdict, which a starved host may not give for hours, though no one
+// would ever take it.
+func TestALaneTakenBackKeepsItsConsumersExit(t *testing.T) {
+	clk := &stall.ManualClock{} // never advanced
+	m := New(nil)
+	m.outClock, m.outStall = clk, time.Hour
+	a := make(chan *models.Mock, 1)
+	a <- &models.Mock{Name: "filler"}
+	goneA := make(chan struct{})
+	m.SetOutputConsumer(a, goneA)
+	m.SetOutputChannel(a)
+	// The first mock's drop is told while the test holds it: the lane still
+	// delivers (drains) meanwhile.
+	first := make(chan bool)
+	m.send(&models.Mock{Name: "first"}, "test-first", func(d bool) { first <- d })
+	close(goneA)
+	m.SetOutputChannel(make(chan *models.Mock, 1))
+	m.SetOutputConsumer(make(chan *models.Mock), make(chan struct{})) // forgets a's exit
+	m.outQueueMu.Lock()
+	_, kept := m.outGone[a]
+	m.outQueueMu.Unlock()
+	if kept {
+		t.Fatal("the record kept a's exit: this row needs it forgotten")
+	}
+	m.SetOutputChannel(a)
+	second := make(chan bool, 1)
+	m.send(&models.Mock{Name: "second"}, "test-second", func(d bool) { second <- d })
+	for _, o := range []struct {
+		name    string
+		outcome chan bool
+	}{{"first", first}, {"second", second}} { // in order: the first's drop holds the lane
+		name, outcome := o.name, o.outcome
+		select {
+		case d := <-outcome:
+			if d {
+				t.Fatalf("mock %s, which no consumer took, was said to be delivered", name)
+			}
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatalf("mock %s on a lane taken back waited on its stall verdict, its consumer gone", name)
+		}
+	}
+}

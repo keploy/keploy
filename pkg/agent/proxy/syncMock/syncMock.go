@@ -836,7 +836,11 @@ func (m *SyncMockManager) SetOutputChannel(out chan<- *models.Mock) {
 		lane.closing = make(chan struct{})
 	}
 	lane.epoch = epoch
-	lane.gone = m.outGone[out]
+	// A lane taken back keeps a consumer exit it was told, which a later
+	// SetOutputConsumer forgets once that exit has come.
+	if gone := m.outGone[out]; gone != nil {
+		lane.gone = gone
+	}
 	m.out = lane
 	m.outQueueMu.Unlock()
 	// New session (distinct channel = re-record): drop any revokes still
