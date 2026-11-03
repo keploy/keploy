@@ -6,8 +6,8 @@ import (
 )
 
 // A value that holds an '=' no quoted-printable escape starts is no
-// quoted-printable text, in either run: the "=XX" its signature happens to
-// begin with in one run is no escape. An AWS SigV4 Authorization header, as
+// quoted-printable text, in either run, whatever its other escapes show:
+// the "=XX" its signature happens to begin with in one run is no escape. An AWS SigV4 Authorization header, as
 // a .NET AWS SDK signed a DynamoDB UpdateItem in each run (the recorded
 // signature begins "09", an "=09" that reads as a tab; the live one "b1",
 // which reads as nothing), changed only in its signature: the change is the
@@ -28,6 +28,12 @@ func TestAnEqualsSignNoEscapeStartsIsNoQuotedPrintableInEitherRun(t *testing.T) 
 		// The other way round: each run's reading counts, not the
 		// recorded one's only.
 		{"one token, live escape-like", "Signature=B1CDEF0123456789AB", "Signature=09ABCDEF0123456789"},
+		// An "=3D" in both runs shows quoted-printable, but the run whose
+		// signature begins "=b1" holds an '=' that starts no escape: that
+		// run is still no quoted-printable text, so neither is read in that
+		// form.
+		{"escaped '=' in both runs, recorded escape-like", "k=3Dv&Signature=09bbdba4c503009bffa4d5df085bfc64", "k=3Dv&Signature=b17da81317308f9dc505ba7b017f223e"},
+		{"escaped '=' in both runs, live escape-like", "k=3Dv&Signature=b17da81317308f9dc505ba7b017f223e", "k=3Dv&Signature=09bbdba4c503009bffa4d5df085bfc64"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := classifyOne(tc.rec, tc.live, at, nil, nil, nil); got.Kind != KindNoise {
