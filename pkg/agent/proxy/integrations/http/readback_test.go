@@ -48,8 +48,9 @@ type rbStore struct {
 
 func rbTarget(r *models.HTTPReq) string { return r.Header["X-Amz-Target"] }
 
-// rbFollows follows the calls of the store's API (an X-Amz-Target of
-// DynamoDB's), as enterprise's reader does, and no other.
+// rbFollows follows every call of the store's API (an X-Amz-Target of
+// DynamoDB's) and no other: more than enterprise's reader follows, which
+// only costs loads.
 func rbFollows(_, call *models.HTTPReq) bool {
 	return strings.HasPrefix(rbTarget(call), "DynamoDB_")
 }

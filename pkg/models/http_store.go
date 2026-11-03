@@ -47,11 +47,12 @@ type HTTPStoreReader interface {
 	// reads none costs nothing more.
 	Reads(r *HTTPReq) bool
 	// Follows reports, from the two requests alone, whether Access, asked of
-	// read, may read call as a write or a stop: asked of each call served
-	// earlier in the test before its recorded answer is loaded, so a call it
-	// does not follow (another API, another table) is never loaded for the
-	// read and is not given to Access. It must follow every call Access may
-	// mark or stop on; following one more only costs a load.
+	// read, needs call: asked of each call served earlier in the test before
+	// its recorded answer is loaded, so a call it does not follow (another
+	// API, another table) is never loaded for the read and is not given to
+	// Access. Leaving out the calls it does not follow must change neither
+	// what Access gives for read's answer (Read, Unread) nor any mark of a
+	// record Read holds; following one more only costs a load.
 	Follows(read, call *HTTPReq) bool
 	// Access reads calls, the HTTP calls served earlier in the test that
 	// Follows takes for read, in the order they were served, each with its
