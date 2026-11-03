@@ -77,6 +77,9 @@ type provenWire struct {
 	skip  map[string]string
 	needs map[string][]models.ScopeNeed
 	began map[string]bool
+	// setFlags name the replayed set in the commands a failed test's
+	// reason names (models.ScopeGateReq.SetFlags); set with skip.
+	setFlags []string
 	// charged holds the misses the ends drained from the proxy, until the
 	// CLI's own end-of-run read (GetMockErrors) collects them, so charging a
 	// miss to a test never hides it from the run's totals.
@@ -974,13 +977,14 @@ func (a *Agent) SetScopeBackground(ctx context.Context, names []string) error {
 }
 
 // evidenceText is evidenceReason with what the agent holds for it: in a
-// replay, the recordings of the calls the test never made and the skipped
-// test of each read the replay's gate skips; in a record, neither.
+// replay, the recordings of the calls the test never made, the skipped
+// test of each read the replay's gate skips, and the set's flags; in a
+// record, none.
 func (a *Agent) evidenceText(id string, ev *models.ScopeEvidence, beganAt time.Time) string {
 	if !a.replaying() {
-		return evidenceReason(id, ev, nil, beganAt, nil)
+		return evidenceReason(id, ev, nil, beganAt, nil, nil)
 	}
-	return evidenceReason(id, ev, a.mocksFound(ev.Unconsumed), beganAt, a.skippedReadTests())
+	return evidenceReason(id, ev, a.mocksFound(ev.Unconsumed), beganAt, a.skippedReadTests(), a.scopeSetFlags())
 }
 
 // skippedReadTests is a copy of the skipped test of each read the replay's
@@ -1301,12 +1305,22 @@ func (a *Agent) NoteRefusal(r models.RunRefusal) {
 
 // SetScopeSkips installs the proven gate: the tests a replay skips, by ID,
 // with their reasons, and the tests that must begin before each test that
-// needs them. nil skips nothing.
-func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) error {
+// needs them. nil skips nothing. setFlags name the replayed set in the
+// commands a failed test's reason names (evidenceReason).
+func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, setFlags []string) error {
 	a.provenMu.Lock()
 	a.proven.skip, a.proven.needs = maps.Clone(skip), maps.Clone(needs)
+	a.proven.setFlags = slices.Clone(setFlags)
 	a.provenMu.Unlock()
 	return nil
+}
+
+// scopeSetFlags are the flags the replay's gate named its set with
+// (SetScopeSkips); nil in a record, and in a replay that named none.
+func (a *Agent) scopeSetFlags() []string {
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	return a.proven.setFlags
 }
 
 func (a *Agent) replaying() bool {
@@ -1967,7 +1981,8 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	case !ev.Empty():
 		// A record never fails a test: what keploy could not capture is
 		// kept for judging, as R0's capture_incomplete (design v14 §7.4),
-		// and the test's outcome is its own against real infra.
+		// and the test's outcome is its own against real infra. Only a
+		// replay's gate names set flags.
 		ev.Reason = a.evidenceText(id, ev, beganAt)
 	}
 	if len(uses) > 0 {
@@ -2879,8 +2894,11 @@ func (a *Agent) takeChargedMisses() []models.UnmatchedCall {
 // before it, before the test began, an extra call of another test's
 // included. skippedOf is, in a replay, the skipped test that lists each read
 // the replay's gate skips (SetScopeSkippedReads): an extra call's line names
-// the test of each that answered the call (extraCallText).
-func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock, beganAt time.Time, skippedOf map[string]string) string {
+// the test of each that answered the call (extraCallText). setFlags name the
+// replayed set in each command it names (keploy mock quarantine, keploy mock
+// derive --remove), so the command acts on the set that failed (SetScopeSkips);
+// none, and they carry no flags.
+func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock, beganAt time.Time, skippedOf map[string]string, setFlags []string) string {
 	var what []string
 	for _, c := range ev.Incomplete {
 		what = append(what, "keploy could not capture a connection to "+c.Destination+" ("+c.Why+")")
@@ -2981,14 +2999,15 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 	} else {
 		head += " "
 	}
-	quarantine := fmt.Sprintf("If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", shellQuote(id))
+	flags := quoteFlags(setFlags)
+	quarantine := fmt.Sprintf("If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\"%s.", shellQuote(id), flags)
 	if len(ev.Misses) == 0 && len(authored) == len(ev.Unconsumed) {
 		// Only authored mocks were left unmade: a re-record keeps them.
-		return RunnableText(head + authoredFix(id, authored) + "\n" + quarantine)
+		return RunnableText(head + authoredFix(id, authored, flags) + "\n" + quarantine)
 	}
 	fix := ""
 	if len(authored) > 0 {
-		fix = authoredFix(id, authored) + "\n"
+		fix = authoredFix(id, authored, flags) + "\n"
 	}
 	return RunnableText(fmt.Sprintf("%sIf this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n%s%s",
 		head, id, fix, quarantine))
@@ -2996,11 +3015,12 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 
 // authoredFix is what a test (id) that never called its authored mocks
 // (names) is told: a re-record keeps them, the command that takes each out,
-// and that a call the test now makes differently is authored again.
-func authoredFix(id string, names []string) string {
+// with the set's flags (quoteFlags), and that a call the test now makes
+// differently is authored again.
+func authoredFix(id string, names []string, flags string) string {
 	cmds := make([]string, 0, len(names))
 	for _, n := range names {
-		cmds = append(cmds, "keploy mock derive --remove "+shellQuote(id+"/"+n))
+		cmds = append(cmds, "keploy mock derive --remove "+shellQuote(id+"/"+n)+flags)
 	}
 	return "A re-record keeps an authored mock. If the test no longer makes its call, remove it: " + strings.Join(cmds, "; ") +
 		". If the call changed, derive or generate it again into this test."
@@ -3045,6 +3065,16 @@ func missWhys(misses []models.UnmatchedCall, before func(models.UnmatchedCall) b
 
 // shellQuote quotes s for a POSIX shell unless it is made of characters a
 // shell reads as one plain word.
+// quoteFlags is flags as a command's trailing words, each quoted for a
+// shell and led by a space; "" for none.
+func quoteFlags(flags []string) string {
+	var b strings.Builder
+	for _, f := range flags {
+		b.WriteString(" " + shellQuote(f))
+	}
+	return b.String()
+}
+
 func shellQuote(s string) string {
 	plain := s != "" && !strings.ContainsFunc(s, func(r rune) bool {
 		return !(r == '/' || r == ':' || r == '.' || r == '_' || r == '-' || r == '+' || r == '=' || r == ',' || r == '@' ||

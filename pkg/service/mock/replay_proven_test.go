@@ -29,11 +29,12 @@ type skipPusher struct {
 	pushed bool
 	skip   map[string]string
 	needs  map[string][]models.ScopeNeed
+	flags  []string
 	err    error
 }
 
-func (s *skipPusher) PushScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) error {
-	s.pushed, s.skip, s.needs = true, skip, needs
+func (s *skipPusher) PushScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, setFlags []string) error {
+	s.pushed, s.skip, s.needs, s.flags = true, skip, needs, setFlags
 	return s.err
 }
 
@@ -67,6 +68,19 @@ func TestPushScopeSkips(t *testing.T) {
 	require.Equal(t, ScopeGateRequest{Set: "t2-go", MocksDigest: "d1", Path: m.config.Path}, asked)
 	require.Equal(t, map[string]string{"orders::TestToken": "flaky: replay_only"}, p.skip)
 	require.Equal(t, needs, p.needs, "the needs ride the same push")
+	require.Nil(t, p.flags, "no set-flags source installed: the commands carry no flags")
+
+	// The set-flags source is asked about the same replay, and its flags
+	// ride the same push.
+	var flagsAsked ScopeGateRequest
+	RegisterScopeSetFlagsSource(func(req ScopeGateRequest) []string {
+		flagsAsked = req
+		return []string{"--local", "--name", req.Set}
+	})
+	t.Cleanup(func() { RegisterScopeSetFlagsSource(nil) })
+	require.NoError(t, m.pushScopeSkips(context.Background(), "t2-go", "d1"))
+	require.Equal(t, asked, flagsAsked)
+	require.Equal(t, []string{"--local", "--name", "t2-go"}, p.flags)
 
 	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
 		return nil, nil, nil
