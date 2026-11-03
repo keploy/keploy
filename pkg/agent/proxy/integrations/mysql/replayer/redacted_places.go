@@ -2,7 +2,6 @@ package replayer
 
 import (
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 
@@ -122,8 +121,14 @@ func queryPlaces(sql string, nc *util.NoiseChecker) redactedPlaces {
 	}
 	// A redacted value no literal holds has no literal of the live
 	// statement standing for it: its comments are dropped, and a value
-	// outside every literal and comment redacts the statement whole.
-	inComments := nc.IsNoisyWithin(shape.comments)
+	// outside every literal and comment redacts the statement whole. A
+	// comment is read as written, wherever it stands (the template keeps
+	// none, and the shape the leading ones alone).
+	lits, _ := readSQLLiterals(sql)
+	inComments := false
+	for _, t := range lits.tokens {
+		inComments = inComments || t.comment && nc.IsNoisyWithin(sql[t.start:t.end])
+	}
 	if nc.IsNoisyWithin(shape.template) || len(p.literals) == 0 && !inComments {
 		p.statement, p.whole = true, true
 	}
@@ -175,67 +180,132 @@ func (p redactedPlaces) redactsAny() bool {
 
 // liveStatement is the live statement sql as a report or a log shows it:
 // sql itself when the recording redacted no place of its statement; else
-// sql with the literal at each redacted place redacted, every literal (and
-// its comments dropped) when its template is not the recorded one or
-// p.statement is set, and sql whole redacted when p.whole is set or it
-// cannot be parsed.
-func (p redactedPlaces) liveStatement(sql string) (out string) {
+// sql as the client sent it with the literal at each redacted place
+// redacted, every literal (and every comment dropped) when its template is
+// not the recorded one, p.statement is set or its literals cannot be told
+// apart as the parser reads them (sqlLiterals), and sql whole redacted when
+// p.whole is set or it cannot be parsed. A literal is redacted where the
+// client wrote it (its byte span), so the rest of the statement keeps the
+// client's text: its keywords' case, its spacing and its ? markers.
+func (p redactedPlaces) liveStatement(sql string) string {
 	if !p.inStatement() || sql == "" {
 		return sql
 	}
 	if p.whole {
 		return valueRedacted
 	}
-	// The rewriter panics on AST slots it cannot replace (computeQueryShape).
-	defer func() {
-		if r := recover(); r != nil {
-			out = valueRedacted
+	lits, ok := readSQLLiterals(sql)
+	if !ok {
+		return valueRedacted
+	}
+	all := p.statement || !lits.placed || extractQueryShape(sql).template != p.template
+	// The literal at a redacted place is redacted wherever the client
+	// wrote its value: the parser's order of literals need not be the
+	// order they are written in (LIMIT n OFFSET m reads m first).
+	hidden := map[string]bool{}
+	for i, v := range lits.parsed {
+		if p.literals[i] {
+			hidden[v] = true
 		}
-	}()
+	}
+	var b strings.Builder
+	last := 0
+	for _, t := range lits.tokens {
+		switch {
+		case t.comment:
+			if !all {
+				continue
+			}
+			// A space keeps the tokens on either side apart.
+			b.WriteString(sql[last:t.start] + " ")
+		case all || hidden[t.val]:
+			b.WriteString(sql[last:t.start] + "'" + valueRedacted + "'")
+		default:
+			continue
+		}
+		last = t.end
+	}
+	b.WriteString(sql[last:])
+	return b.String()
+}
+
+// sqlLiterals are the literals of a statement, as the parser reads them
+// and as the tokenizer reads them where the client wrote them.
+type sqlLiterals struct {
+	// parsed are the values of the statement's literals in the parser's
+	// walk order (extractQueryShape's positions).
+	parsed []string
+	// tokens are its literals and comments as written, with their byte
+	// spans, in the order written.
+	tokens []sqlToken
+	// placed is set when each literal the parser reads stands written as
+	// a literal of tokens of its own, so a literal at a place is redacted
+	// where the client wrote it: each value read is written as many times
+	// as it is read at least (a number the walk does not reach, CHAR(10),
+	// is written and not read), and no literal stands in a comment (a /*!
+	// */ comment, which the parser reads as part of the statement).
+	placed bool
+	// unreached is set when the tokenizer reads a literal the parser's
+	// walk does not reach (a column's DEFAULT, an INTO OUTFILE path): the
+	// statement's template keeps it as the client sent it.
+	unreached bool
+}
+
+// sqlToken is a literal or a comment of a statement: sql[start:end] as
+// written, and a literal's value as the tokenizer reads it.
+type sqlToken struct {
+	start, end int
+	val        string
+	comment    bool
+}
+
+// readSQLLiterals reads the literals of sql (sqlLiterals); false when the
+// parser or the tokenizer cannot read it.
+func readSQLLiterals(sql string) (out sqlLiterals, ok bool) {
 	parser, err := sqlparser.New(sqlparser.Options{})
 	if err != nil {
-		return valueRedacted
+		return out, false
 	}
 	stmt, err := parser.Parse(sql)
 	if err != nil {
-		return valueRedacted
+		return out, false
 	}
-	all := p.statement || extractQueryShape(sql).template != p.template
-	if c, ok := stmt.(sqlparser.Commented); ok && all {
-		c.SetComments(nil)
-	}
-	n := -1
-	rewritten := sqlparser.Rewrite(stmt, func(cursor *sqlparser.Cursor) bool {
-		if _, isLit := cursor.Node().(*sqlparser.Literal); isLit {
-			n++
-			if all || p.literals[n] {
-				cursor.Replace(sqlparser.NewStrLiteral(valueRedacted))
-			}
+	_ = sqlparser.Walk(func(node sqlparser.SQLNode) (bool, error) {
+		if lit, isLit := node.(*sqlparser.Literal); isLit {
+			out.parsed = append(out.parsed, lit.Val)
 		}
-		return true
-	}, nil)
-	if all && literalTokens(parser, sql) > n+1 {
-		// A literal the rewriter does not reach (a column's DEFAULT) would
-		// be shown as the client sent it.
-		return valueRedacted
-	}
-	return sqlparser.String(rewritten)
-}
-
-// literalTokens is how many literals the tokenizer reads in sql (a number,
-// a string, a hex or bit value), the most there are when it cannot read it.
-func literalTokens(parser *sqlparser.Parser, sql string) int {
+		return true, nil
+	}, stmt)
+	// A /*! */ comment is read as a comment: its text is the statement's
+	// to the parser, and no span of it can be told apart.
 	tkn := parser.NewStringTokenizer(sql)
-	n := 0
+	tkn.SkipSpecialComments = true
+	written := map[string]int{}
+	special := false
+	nLits := 0
 	for {
-		switch typ, _ := tkn.Scan(); typ {
+		// A token starts past the blanks the scan skips first.
+		at := len(sql) - len(strings.TrimLeft(sql[tkn.Pos:], " \n\r\t"))
+		typ, val := tkn.Scan()
+		switch typ {
 		case 0:
-			return n
+			out.placed = !special
+			for _, v := range out.parsed {
+				out.placed = out.placed && written[v] > 0
+				written[v]--
+			}
+			out.unreached = nLits > len(out.parsed)
+			return out, true
 		case sqlparser.LEX_ERROR:
-			return math.MaxInt
+			return out, false
+		case sqlparser.COMMENT:
+			special = special || strings.HasPrefix(sql[at:], "/*!")
+			out.tokens = append(out.tokens, sqlToken{start: at, end: tkn.Pos, comment: true})
 		case sqlparser.STRING, sqlparser.NCHAR_STRING, sqlparser.INTEGRAL, sqlparser.FLOAT, sqlparser.DECIMAL,
 			sqlparser.HEXNUM, sqlparser.HEX, sqlparser.BIT_LITERAL:
-			n++
+			nLits++
+			written[val]++
+			out.tokens = append(out.tokens, sqlToken{start: at, end: tkn.Pos, val: val})
 		}
 	}
 }
@@ -284,10 +354,11 @@ func (p redactedPlaces) fieldDiffs(diffs []models.MockFieldDiff, liveQuery strin
 				redacted = allLiterals || p.literals[n]
 			case path == "body.query.template":
 				// A template of the same structure (sameQueryStructure)
-				// keeps a literal the rewriter does not reach (an INTO
-				// OUTFILE path) as the client sent it: the live statement is
-				// redacted whole then (liveStatement), and so is this.
-				redacted = p.liveStatement(liveQuery) == valueRedacted
+				// keeps a literal the parser's walk does not reach (an
+				// INTO OUTFILE path) as the client sent it: it is redacted
+				// then, as it is when the statement cannot be read.
+				lits, ok := readSQLLiterals(liveQuery)
+				redacted = !ok || lits.unreached
 			}
 		case strings.HasPrefix(path, "body.parameters."):
 			idx, field, _ := strings.Cut(strings.TrimPrefix(path, "body.parameters."), ".")
