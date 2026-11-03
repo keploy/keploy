@@ -20,8 +20,22 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/utils/plaintcp"
 )
+
+// unlistedAddr is ":P", every address at a port P the socket tables list no
+// socket at and that no other socket is given for the test's life
+// (testnet.UnlistedPort): free at UDP, and at TCP to a listener that sets
+// SO_REUSEADDR, as the proxy's and the DNS server's do. A port a bind to port
+// 0 gave could be taken by another process once it is let go, or be at
+// another process's socket in another table, which the holder the start
+// names would then include.
+func unlistedAddr(t *testing.T) (string, uint32) {
+	t.Helper()
+	port := testnet.UnlistedPort(t)
+	return fmt.Sprintf(":%d", port), uint32(port)
+}
 
 // recordMoves sets p's port mover to one that keeps what it was told and
 // returns refuse.
@@ -57,12 +71,12 @@ func freeAgain(t *testing.T, what string, port uint32) {
 // start fails naming both; where the mover refuses, the start fails and the
 // new port is let go. A port that is free is kept, and no mover is told.
 func TestTwoProxiesStartedTogetherOnOnePortBothListen(t *testing.T) {
-	first, err := plaintcp.Listen(context.Background(), "tcp", ":0")
+	addr, taken := unlistedAddr(t)
+	first, err := plaintcp.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = first.Close() }()
-	taken := uint32(first.Addr().(*net.TCPAddr).Port)
 	holder := fmt.Sprintf("the proxy's port %d is taken by pid %d (", taken, os.Getpid())
 
 	core, logs := observer.New(zap.WarnLevel)
@@ -108,7 +122,7 @@ func TestTwoProxiesStartedTogetherOnOnePortBothListen(t *testing.T) {
 	freeAgain(t, "a refused move", told[0][0])
 
 	told = nil
-	free := uint32(freeDNSPort(t))
+	_, free := unlistedAddr(t)
 	kept, _ := startListening(t, nil, func(p *Proxy) { p.Port = free; recordMoves(p, &told, nil) })
 	if len(told) != 0 || kept.Port != free || uint32(kept.Listener.Addr().(*net.TCPAddr).Port) != free {
 		t.Fatalf("free port %d: the mover was told %v; listens on %v, keeps port %d", free, told, kept.Listener.Addr(), kept.Port)
@@ -142,7 +156,7 @@ func startDNSOn(t *testing.T, p *Proxy) (func(), error) {
 // now moves to a port of its own and tells the port mover, or, where it may
 // not move, fails; where the mover refuses, it fails and lets the new port go.
 func TestTwoDNSServersStartedTogetherOnOnePortDoNotShareIt(t *testing.T) {
-	want := uint32(freeDNSPort(t))
+	_, want := unlistedAddr(t)
 	first := dnsProxy(0, want)
 	stop, err := startDNSOn(t, first)
 	defer stop()
@@ -198,12 +212,12 @@ func TestTwoDNSServersStartedTogetherOnOnePortDoNotShareIt(t *testing.T) {
 // The DNS servers bind UDP and TCP on one port: where only TCP is taken, the
 // UDP socket bound there is let go, and both move to a port of their own.
 func TestADNSPortTakenOnTCPOnlyLetsItsUDPGo(t *testing.T) {
-	ln, err := plaintcp.Listen(context.Background(), "tcp", ":0")
+	addr, taken := unlistedAddr(t)
+	ln, err := plaintcp.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = ln.Close() }()
-	taken := uint32(ln.Addr().(*net.TCPAddr).Port)
 	var told [][2]uint32
 	p := dnsProxy(0, taken)
 	recordMoves(p, &told, nil)

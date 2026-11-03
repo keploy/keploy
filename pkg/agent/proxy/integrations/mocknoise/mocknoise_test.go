@@ -255,116 +255,120 @@ func TestEngineKnownNoiseMergesStoredAndUser(t *testing.T) {
 }
 
 func TestEngineStrictAllows(t *testing.T) {
-	mock := &models.Mock{}
-	// No learned noise, value drift => rejected under strict. Strict now
-	// value-checks every candidate, not just ones carrying learned noise.
-	noneDrift := New(&fakeAdapter{body: []byte(`{"a":1}`), hasBody: true}, false, true)
-	if noneDrift.StrictAllows(mock, []byte(`{"a":2}`), nil) {
-		t.Fatalf("value drift on an un-learned, un-noised field must be rejected under strict")
-	}
+	forEachStrictBranch(t, func(t *testing.T, newEngine func(a Adapter, detection, strict bool) *Engine) {
+		mock := &models.Mock{}
+		// No learned noise, value drift => rejected under strict. Strict now
+		// value-checks every candidate, not just ones carrying learned noise.
+		noneDrift := newEngine(&fakeAdapter{body: []byte(`{"a":1}`), hasBody: true}, false, true)
+		if noneDrift.StrictAllows(mock, []byte(`{"a":2}`), nil) {
+			t.Fatalf("value drift on an un-learned, un-noised field must be rejected under strict")
+		}
 
-	// No learned noise, identical body => allowed (nothing drifted).
-	noneSame := New(&fakeAdapter{body: []byte(`{"a":1}`), hasBody: true}, false, true)
-	if !noneSame.StrictAllows(mock, []byte(`{"a":1}`), nil) {
-		t.Fatalf("identical body must be allowed under strict even with no learned noise")
-	}
+		// No learned noise, identical body => allowed (nothing drifted).
+		noneSame := newEngine(&fakeAdapter{body: []byte(`{"a":1}`), hasBody: true}, false, true)
+		if !noneSame.StrictAllows(mock, []byte(`{"a":1}`), nil) {
+			t.Fatalf("identical body must be allowed under strict even with no learned noise")
+		}
 
-	// No learned noise but the drift is on a user-configured noise field => allowed.
-	noneUserNoise := New(&fakeAdapter{body: []byte(`{"a":1}`), hasBody: true}, false, true)
-	if !noneUserNoise.StrictAllows(mock, []byte(`{"a":2}`), map[string][]string{"a": {}}) {
-		t.Fatalf("drift on a user-noised field must be allowed under strict even with no learned noise")
-	}
+		// No learned noise but the drift is on a user-configured noise field => allowed.
+		noneUserNoise := newEngine(&fakeAdapter{body: []byte(`{"a":1}`), hasBody: true}, false, true)
+		if !noneUserNoise.StrictAllows(mock, []byte(`{"a":2}`), map[string][]string{"a": {}}) {
+			t.Fatalf("drift on a user-noised field must be allowed under strict even with no learned noise")
+		}
 
-	// Without strict enforcement an un-learned mock is left alone (lenient).
-	lenient := New(&fakeAdapter{body: []byte(`{"a":1}`), hasBody: true}, false, false)
-	if !lenient.StrictAllows(mock, []byte(`{"a":2}`), nil) {
-		t.Fatalf("non-strict engine must keep lenient behaviour for un-learned mocks")
-	}
+		// Without strict enforcement an un-learned mock is left alone (lenient).
+		lenient := newEngine(&fakeAdapter{body: []byte(`{"a":1}`), hasBody: true}, false, false)
+		if !lenient.StrictAllows(mock, []byte(`{"a":2}`), nil) {
+			t.Fatalf("non-strict engine must keep lenient behaviour for un-learned mocks")
+		}
 
-	// Learned noise covers the only drifting field => allowed.
-	okAdapter := &fakeAdapter{
-		body:    []byte(`{"a":1,"updatedAt":1}`),
-		hasBody: true,
-		stored:  map[string][]string{"body.updatedAt": {}},
-	}
-	if !New(okAdapter, false, true).StrictAllows(mock, []byte(`{"a":1,"updatedAt":2}`), nil) {
-		t.Fatalf("drift confined to learned noise must be allowed under strict")
-	}
+		// Learned noise covers the only drifting field => allowed.
+		okAdapter := &fakeAdapter{
+			body:    []byte(`{"a":1,"updatedAt":1}`),
+			hasBody: true,
+			stored:  map[string][]string{"body.updatedAt": {}},
+		}
+		if !newEngine(okAdapter, false, true).StrictAllows(mock, []byte(`{"a":1,"updatedAt":2}`), nil) {
+			t.Fatalf("drift confined to learned noise must be allowed under strict")
+		}
 
-	// A field OUTSIDE the learned set drifted => rejected.
-	rejAdapter := &fakeAdapter{
-		body:    []byte(`{"a":1,"updatedAt":1}`),
-		hasBody: true,
-		stored:  map[string][]string{"body.updatedAt": {}},
-	}
-	if New(rejAdapter, false, true).StrictAllows(mock, []byte(`{"a":99,"updatedAt":2}`), nil) {
-		t.Fatalf("drift on a non-noise field must be rejected under strict")
-	}
+		// A field OUTSIDE the learned set drifted => rejected.
+		rejAdapter := &fakeAdapter{
+			body:    []byte(`{"a":1,"updatedAt":1}`),
+			hasBody: true,
+			stored:  map[string][]string{"body.updatedAt": {}},
+		}
+		if newEngine(rejAdapter, false, true).StrictAllows(mock, []byte(`{"a":99,"updatedAt":2}`), nil) {
+			t.Fatalf("drift on a non-noise field must be rejected under strict")
+		}
 
-	// Non-JSON bodies that differ are a real mismatch (no field structure).
-	binAdapter := &fakeAdapter{
-		body:    []byte("bin-v1"),
-		hasBody: true,
-		stored:  map[string][]string{"body.x": {}},
-	}
-	if New(binAdapter, false, true).StrictAllows(mock, []byte("bin-v2"), nil) {
-		t.Fatalf("differing non-JSON bodies must be rejected under strict")
-	}
+		// Non-JSON bodies that differ are a real mismatch (no field structure).
+		binAdapter := &fakeAdapter{
+			body:    []byte("bin-v1"),
+			hasBody: true,
+			stored:  map[string][]string{"body.x": {}},
+		}
+		if newEngine(binAdapter, false, true).StrictAllows(mock, []byte("bin-v2"), nil) {
+			t.Fatalf("differing non-JSON bodies must be rejected under strict")
+		}
+	})
 }
 
 // StrictReject must name the offending non-noise field(s) so the rejection can
 // be logged with the drifted path (e.g. "body.content") — callers and CI rely
 // on that detail, not just the boolean verdict.
 func TestEngineStrictReject(t *testing.T) {
-	mock := &models.Mock{}
+	forEachStrictBranch(t, func(t *testing.T, newEngine func(a Adapter, detection, strict bool) *Engine) {
+		mock := &models.Mock{}
 
-	// Allowed => no drift reported.
-	allowAdapter := &fakeAdapter{
-		body:    []byte(`{"a":1,"updatedAt":1}`),
-		hasBody: true,
-		stored:  map[string][]string{"body.updatedAt": {}},
-	}
-	if allowed, drift := New(allowAdapter, false, true).StrictReject(mock, []byte(`{"a":1,"updatedAt":2}`), nil); !allowed || drift != nil {
-		t.Fatalf("allowed mock must report no drift; got allowed=%v drift=%v", allowed, drift)
-	}
+		// Allowed => no drift reported.
+		allowAdapter := &fakeAdapter{
+			body:    []byte(`{"a":1,"updatedAt":1}`),
+			hasBody: true,
+			stored:  map[string][]string{"body.updatedAt": {}},
+		}
+		if allowed, drift := newEngine(allowAdapter, false, true).StrictReject(mock, []byte(`{"a":1,"updatedAt":2}`), nil); !allowed || drift != nil {
+			t.Fatalf("allowed mock must report no drift; got allowed=%v drift=%v", allowed, drift)
+		}
 
-	// Rejected => the non-noise field that drifted is reported, prefixed.
-	rejAdapter := &fakeAdapter{
-		body:    []byte(`{"a":1,"updatedAt":1}`),
-		hasBody: true,
-		stored:  map[string][]string{"body.updatedAt": {}},
-	}
-	allowed, drift := New(rejAdapter, false, true).StrictReject(mock, []byte(`{"a":99,"updatedAt":2}`), nil)
-	if allowed {
-		t.Fatalf("non-noise drift must be rejected")
-	}
-	if _, ok := drift["body.a"]; !ok {
-		t.Fatalf("rejection drift must name body.a; got %v", drift)
-	}
+		// Rejected => the non-noise field that drifted is reported, prefixed.
+		rejAdapter := &fakeAdapter{
+			body:    []byte(`{"a":1,"updatedAt":1}`),
+			hasBody: true,
+			stored:  map[string][]string{"body.updatedAt": {}},
+		}
+		allowed, drift := newEngine(rejAdapter, false, true).StrictReject(mock, []byte(`{"a":99,"updatedAt":2}`), nil)
+		if allowed {
+			t.Fatalf("non-noise drift must be rejected")
+		}
+		if _, ok := drift["body.a"]; !ok {
+			t.Fatalf("rejection drift must name body.a; got %v", drift)
+		}
 
-	// Opaque (non-JSON) byte mismatch => rejected with the "body" sentinel.
-	binAdapter := &fakeAdapter{
-		body:    []byte("bin-v1"),
-		hasBody: true,
-		stored:  map[string][]string{"body.x": {}},
-	}
-	allowed, drift = New(binAdapter, false, true).StrictReject(mock, []byte("bin-v2"), nil)
-	if allowed || len(drift) == 0 {
-		t.Fatalf("opaque byte mismatch must be rejected with non-empty drift; got allowed=%v drift=%v", allowed, drift)
-	}
+		// Opaque (non-JSON) byte mismatch => rejected with the "body" sentinel.
+		binAdapter := &fakeAdapter{
+			body:    []byte("bin-v1"),
+			hasBody: true,
+			stored:  map[string][]string{"body.x": {}},
+		}
+		allowed, drift = newEngine(binAdapter, false, true).StrictReject(mock, []byte("bin-v2"), nil)
+		if allowed || len(drift) == 0 {
+			t.Fatalf("opaque byte mismatch must be rejected with non-empty drift; got allowed=%v drift=%v", allowed, drift)
+		}
 
-	// No learned noise: strict still value-compares and names the drifted field.
-	noNoiseAdapter := &fakeAdapter{
-		body:    []byte(`{"a":1,"tier_type":"STANDARD_LARGE"}`),
-		hasBody: true,
-	}
-	allowed, drift = New(noNoiseAdapter, false, true).StrictReject(mock, []byte(`{"a":1,"tier_type":"regular"}`), nil)
-	if allowed {
-		t.Fatalf("value drift must be rejected under strict even with no learned noise")
-	}
-	if _, ok := drift["body.tier_type"]; !ok {
-		t.Fatalf("rejection drift must name body.tier_type; got %v", drift)
-	}
+		// No learned noise: strict still value-compares and names the drifted field.
+		noNoiseAdapter := &fakeAdapter{
+			body:    []byte(`{"a":1,"tier_type":"STANDARD_LARGE"}`),
+			hasBody: true,
+		}
+		allowed, drift = newEngine(noNoiseAdapter, false, true).StrictReject(mock, []byte(`{"a":1,"tier_type":"regular"}`), nil)
+		if allowed {
+			t.Fatalf("value drift must be rejected under strict even with no learned noise")
+		}
+		if _, ok := drift["body.tier_type"]; !ok {
+			t.Fatalf("rejection drift must name body.tier_type; got %v", drift)
+		}
+	})
 }
 
 // jsonAdapter is a JSON parser adapter for exercising the engine's type-strict
@@ -385,42 +389,56 @@ func (a *jsonAdapter) RecordedValueIsNoise(*models.Mock) func(string) bool   { r
 // ignores a value change but a TYPE change is rejected; a non-learned field stays
 // strict; a USER full-ignore field tolerates any change (including a type change).
 func TestLearnedFieldTypeStrict(t *testing.T) {
-	recorded := []byte(`{"id":1,"name":"a"}`)
-	a := &jsonAdapter{body: recorded, stored: map[string][]string{"body.id": {}}} // id learned-dynamic
-	strict := func() *Engine { return New(a, false, true) }
+	forEachStrictBranch(t, func(t *testing.T, newEngine func(a Adapter, detection, strict bool) *Engine) {
+		recorded := []byte(`{"id":1,"name":"a"}`)
+		a := &jsonAdapter{body: recorded, stored: map[string][]string{"body.id": {}}} // id learned-dynamic
+		strict := func() *Engine { return newEngine(a, false, true) }
 
-	if !strict().StrictAllows(&models.Mock{}, []byte(`{"id":2,"name":"a"}`), nil) {
-		t.Fatalf("learned field value drift (number->number) must be allowed")
-	}
-	if strict().StrictAllows(&models.Mock{}, []byte(`{"id":"1","name":"a"}`), nil) {
-		t.Fatalf("learned field TYPE drift (number->string) must be rejected")
-	}
-	if strict().StrictAllows(&models.Mock{}, []byte(`{"id":1,"name":"b"}`), nil) {
-		t.Fatalf("a non-learned field drift must be rejected under strict")
-	}
-	// User full-ignore of name tolerates both a value change and a type change —
-	// user noise stays full-ignore, it is NOT type-strict.
-	userIgnoreName := map[string][]string{"name": {}}
-	if !strict().StrictAllows(&models.Mock{}, []byte(`{"id":1,"name":"b"}`), userIgnoreName) {
-		t.Fatalf("user full-ignore field must tolerate a value change")
-	}
-	if !strict().StrictAllows(&models.Mock{}, []byte(`{"id":1,"name":123}`), userIgnoreName) {
-		t.Fatalf("user full-ignore field must tolerate a type change (not type-strict)")
-	}
+		if !strict().StrictAllows(&models.Mock{}, []byte(`{"id":2,"name":"a"}`), nil) {
+			t.Fatalf("learned field value drift (number->number) must be allowed")
+		}
+		if strict().StrictAllows(&models.Mock{}, []byte(`{"id":"1","name":"a"}`), nil) {
+			t.Fatalf("learned field TYPE drift (number->string) must be rejected")
+		}
+		if strict().StrictAllows(&models.Mock{}, []byte(`{"id":1,"name":"b"}`), nil) {
+			t.Fatalf("a non-learned field drift must be rejected under strict")
+		}
+		// User full-ignore of name tolerates both a value change and a type change —
+		// user noise stays full-ignore, it is NOT type-strict.
+		userIgnoreName := map[string][]string{"name": {}}
+		if !strict().StrictAllows(&models.Mock{}, []byte(`{"id":1,"name":"b"}`), userIgnoreName) {
+			t.Fatalf("user full-ignore field must tolerate a value change")
+		}
+		if !strict().StrictAllows(&models.Mock{}, []byte(`{"id":1,"name":123}`), userIgnoreName) {
+			t.Fatalf("user full-ignore field must tolerate a type change (not type-strict)")
+		}
 
-	// A path that is BOTH auto-learned AND user-configured keeps the USER's
-	// full-ignore intent: a type change on it is tolerated (user wins over
-	// type-strict). Here id is learned (stored) and also user-configured.
-	if !strict().StrictAllows(&models.Mock{}, []byte(`{"id":"1","name":"a"}`), map[string][]string{"id": {}}) {
-		t.Fatalf("a user-configured path must keep full-ignore even when it was also learned")
-	}
+		// A path that is BOTH auto-learned AND user-configured keeps the USER's
+		// full-ignore intent: a type change on it is tolerated (user wins over
+		// type-strict). Here id is learned (stored) and also user-configured.
+		if !strict().StrictAllows(&models.Mock{}, []byte(`{"id":"1","name":"a"}`), map[string][]string{"id": {}}) {
+			t.Fatalf("a user-configured path must keep full-ignore even when it was also learned")
+		}
 
-	// camelCase collision: user body noise is lowercased at ingest ("userid"),
-	// learned noise keeps the JSON case ("userId"). The user-exclusion must be
-	// case-insensitive, so a user-ignored camelCase field stays full-ignore (a type
-	// change is tolerated), not type-enforced.
-	ca := &jsonAdapter{body: []byte(`{"userId":1}`), stored: map[string][]string{"body.userId": {}}}
-	if !New(ca, false, true).StrictAllows(&models.Mock{}, []byte(`{"userId":"1"}`), map[string][]string{"userid": {}}) {
-		t.Fatalf("a user-ignored camelCase field must keep full-ignore (case-insensitive exclusion)")
-	}
+		// A user value regex on a path that was also learned keeps the user's
+		// regex: the regex is a constraint the user set, and the learned
+		// full-ignore must not erase it. The recorded id is 1. A regex that
+		// covers neither 1 nor the live 2 leaves the change to be judged, so
+		// it is rejected; one that covers both lets it through.
+		if strict().StrictAllows(&models.Mock{}, []byte(`{"id":2,"name":"a"}`), map[string][]string{"id": {"^3$"}}) {
+			t.Fatalf("a value change the user's regex does not cover must be rejected even when the path was also learned")
+		}
+		if !strict().StrictAllows(&models.Mock{}, []byte(`{"id":2,"name":"a"}`), map[string][]string{"id": {"^[12]$"}}) {
+			t.Fatalf("a value change the user's regex covers must be allowed when the path was also learned")
+		}
+
+		// camelCase collision: user body noise is lowercased at ingest ("userid"),
+		// learned noise keeps the JSON case ("userId"). The user-exclusion must be
+		// case-insensitive, so a user-ignored camelCase field stays full-ignore (a type
+		// change is tolerated), not type-enforced.
+		ca := &jsonAdapter{body: []byte(`{"userId":1}`), stored: map[string][]string{"body.userId": {}}}
+		if !newEngine(ca, false, true).StrictAllows(&models.Mock{}, []byte(`{"userId":"1"}`), map[string][]string{"userid": {}}) {
+			t.Fatalf("a user-ignored camelCase field must keep full-ignore (case-insensitive exclusion)")
+		}
+	})
 }

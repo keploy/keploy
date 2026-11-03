@@ -754,3 +754,61 @@ func TestExpectsContinueIgnoresCase(t *testing.T) {
 		}
 	}
 }
+
+// chunkedEndRefused: what a client that closed the connection refused, after a
+// chunked response its stream ended in the middle of, ends that response with
+// framing alone (the rest of a chunk's CRLF, the last chunk, the empty line),
+// so the client had every byte of content and the response is whole; or it
+// holds content the client never had (chunk data, a trailer field), or does
+// not end the body, and the exchange stays left out.
+func TestChunkedEndRefused(t *testing.T) {
+	const head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+	const chunk = "5\r\nhello\r\n"
+	for _, row := range []struct {
+		name, resp, refused string
+		// whole is the response recorded; "" when it is left out.
+		whole string
+	}{
+		{name: "the last chunk and the empty line", resp: head + chunk, refused: "0\r\n\r\n", whole: head + chunk + "0\r\n\r\n"},
+		{name: "bytes after the end are not the response's", resp: head + chunk, refused: "0\r\n\r\nHTTP/1.1 200 OK\r\n", whole: head + chunk + "0\r\n\r\n"},
+		{name: "a last chunk with an extension", resp: head + chunk, refused: "0;done=1\r\n\r\n", whole: head + chunk + "0;done=1\r\n\r\n"},
+		{name: "the CRLF after the data the client had", resp: head + "5\r\nhello", refused: "\r\n0\r\n\r\n", whole: head + chunk + "0\r\n\r\n"},
+		{name: "the rest of the last chunk's line", resp: head + chunk + "0", refused: "\r\n\r\n", whole: head + chunk + "0\r\n\r\n"},
+		{name: "the empty line alone", resp: head + chunk + "0\r\n", refused: "\r\n", whole: head + chunk + "0\r\n\r\n"},
+		{name: "after a trailer field the client had", resp: head + chunk + "0\r\nX-A: 1\r\n", refused: "\r\n", whole: head + chunk + "0\r\nX-A: 1\r\n\r\n"},
+		{name: "after a trailer field the client had all but the CRLF of", resp: head + chunk + "0\r\nX-A: 1", refused: "\r\n\r\n", whole: head + chunk + "0\r\nX-A: 1\r\n\r\n"},
+		{name: "an empty body", resp: head, refused: "0\r\n\r\n", whole: head + "0\r\n\r\n"},
+		{name: "chunked among other codings, in any case", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, Chunked\r\n\r\n" + chunk, refused: "0\r\n\r\n",
+			whole: "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, Chunked\r\n\r\n" + chunk + "0\r\n\r\n"},
+		{name: "after an interim response", resp: "HTTP/1.1 100 Continue\r\n\r\n" + head + chunk, refused: "0\r\n\r\n", whole: "HTTP/1.1 100 Continue\r\n\r\n" + head + chunk + "0\r\n\r\n"},
+		{name: "a data chunk", resp: head + chunk, refused: "3\r\nabc\r\n0\r\n\r\n"},
+		{name: "the rest of a chunk's data", resp: head + "5\r\nhel", refused: "lo\r\n0\r\n\r\n"},
+		{name: "the data of a chunk whose size line the client had", resp: head + "5\r\n", refused: "hello\r\n0\r\n\r\n"},
+		{name: "a trailer field", resp: head + chunk, refused: "0\r\nX-A: 1\r\n\r\n"},
+		{name: "the rest of a trailer field", resp: head + chunk + "0\r\nX-A", refused: ": 1\r\n\r\n"},
+		{name: "no empty line", resp: head + chunk, refused: "0\r\n"},
+		{name: "nothing refused", resp: head + chunk, refused: ""},
+		{name: "cut short, as the relay keeps only the start", resp: head + chunk, refused: "0;" + strings.Repeat("x", 100)},
+		{name: "a bare LF", resp: head + chunk, refused: "0\n\n"},
+		{name: "a head the client did not have whole", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n", refused: "\r\n0\r\n\r\n"},
+		{name: "a Content-Length body", resp: "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n", refused: "0\r\n\r\n"},
+		{name: "a body read to the connection's end", resp: "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", refused: "0\r\n\r\n"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			resp := []byte(row.resp)
+			got, ok := chunkedEndRefused(resp, []byte(row.refused))
+			if row.whole == "" {
+				if ok {
+					t.Fatalf("whole %q, want it left out: the client did not have it all", got)
+				}
+				return
+			}
+			if !ok || string(got) != row.whole {
+				t.Fatalf("got %q, %v; want %q, whole", got, ok, row.whole)
+			}
+			if string(resp) != row.resp {
+				t.Fatalf("resp changed to %q", resp)
+			}
+		})
+	}
+}

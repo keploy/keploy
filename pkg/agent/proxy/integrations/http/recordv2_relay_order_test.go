@@ -41,8 +41,9 @@ type relayedConn struct {
 	logs      *observer.ObservedLogs
 	done      chan error
 	// wrapSrc, when set, is the proxy's end of the client connection as
-	// the relay is handed it, over src.
-	wrapSrc func(net.Conn) net.Conn
+	// the relay is handed it, over src; wrapDst, the destination's, over
+	// the connseq.Upstream the relay reads dst through.
+	wrapSrc, wrapDst func(net.Conn) net.Conn
 	// sess is the session recordV2 records; relayDone is closed once the
 	// relay has ended.
 	sess      *supervisor.Session
@@ -108,7 +109,11 @@ func (c *relayedConn) startRelay(t *testing.T) {
 	if c.wrapSrc != nil {
 		src = c.wrapSrc(src)
 	}
-	r := relay.New(relay.Config{Logger: zap.NewNop(), HalfCloseGrace: c.grace, ClientStopped: c.sess.MarkEndedWhereClientStopped}, src, connseq.NewUpstream(c.dst))
+	var dst net.Conn = connseq.NewUpstream(c.dst)
+	if c.wrapDst != nil {
+		dst = c.wrapDst(dst)
+	}
+	r := relay.New(relay.Config{Logger: zap.NewNop(), HalfCloseGrace: c.grace, ClientStopped: c.sess.MarkEndedWhereClientStopped}, src, dst)
 	c.sess.ClientStream, c.sess.DestStream = r.ClientStream(), r.DestStream()
 	ctx, cancel := context.WithCancel(context.Background())
 	c.relayDone = make(chan struct{})

@@ -533,16 +533,6 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 	return initialBuf, nil
 }
 
-// handshakeEOFRetryBudget caps the number of EOF retry attempts for
-// empty-buffer handshake reads. Kept small so the worst-case wall time is
-// HandshakeEOFRetryMax * HandshakeEOFRetrySleep (3 * 50ms = 150ms) — ~3x
-// better than the pre-Track-D 500ms loop while still giving a slow
-// upstream time to finish its first write.
-const (
-	HandshakeEOFRetryMax   = 3
-	HandshakeEOFRetrySleep = 50 * time.Millisecond
-)
-
 // ReadBytes returns the bytes of the reader's next Read that returns any: what
 // has arrived, up to ReadChunkSize, sized to what was read. It never waits for
 // more than that one Read: a caller that needs a whole message (a header, a
@@ -555,36 +545,28 @@ const (
 // that streams faster than 1 KiB reads grew the buffer without bound (one relay
 // held 69 MB). Each Read is now handed on as it comes, so neither can happen.
 //
-// History:
-//   - Pre Track D: a 100ms x 5 retry loop sat on EOF unconditionally, adding
-//     up to 500ms of pure wait on every connection close during record.
-//   - Track D (96df8446): the loop and sleep were removed, so EOF was
-//     returned immediately. This regressed listmonk's Postgres handshake:
-//     during replay boot, the v3 replayer is still finishing its startup
-//     response when the app issues its first Read on the proxied conn. A
-//     0-byte EOF surfaces before the response lands, and listmonk halts
-//     with "error connecting to DB: EOF" before any test runs.
-//
-// Current behaviour:
-//   - Mid-stream fast-return is preserved: once any bytes have been read
-//     inside a given ReadBytes call (the common "short-data-then-EOF" and
-//     "mid-stream peer close after a message" cases), EOF returns
-//     immediately with whatever was collected.
-//   - Handshake-phase EOF (zero bytes collected in this call) is treated
-//     as potentially spurious and retried up to HandshakeEOFRetryMax
-//     times with HandshakeEOFRetrySleep between attempts. This window
-//     is bounded at 150ms — substantially tighter than the 500ms sleep
-//     Track D removed — so the record hot path perf win is preserved.
-//   - Non-EOF errors are always authoritative and surface immediately.
+// An io.EOF is believed at the Read that returns it, with the bytes that Read
+// gave or with none. Every reader handed to ReadBytes, ReadBytesWaiting,
+// ReadInitialBuf and ReadHTTPHeadersUntilEnd returns io.EOF only at its end: a
+// TCP connection (its EOF is the peer's FIN, and every later read returns it
+// again), TLS over one (its EOF error is kept), the prefix, multi and SafeConn
+// readers in front of one, a capture's fakeconn stream (its EOF is its
+// producer closing the channel), and enterprise's proxyless SimulatedConn (its
+// EOF is its Close or a capture hole, and a closed conn refuses every later
+// push). An empty EOF used to be read again three times, 50 ms apart, in case
+// bytes followed it. None can, so that only delayed every close on an empty
+// read by 150 ms, and under a read deadline shorter than 50 ms the retry came
+// back as the deadline's timeout and hid the close.
 //
 // It reads on the calling goroutine, as ReadRequiredBytes does. It used to start
 // a goroutine per Read and wait for it over a channel, which could not return
 // any earlier on a cancelled context (its deferred errgroup Wait still waited
 // for the Read), and a Read that panicked was recovered on that goroutine and
-// never answered, so the caller waited forever. ctx is checked before every
-// Read; a panic in Read ends the read with an error.
+// never answered, so the caller waited forever. ctx is checked before the
+// Read, and a Read that returns after ctx ended is not taken; a panic in Read
+// ends the read with an error.
 func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
-	return readBytes(ctx, logger, reader, HandshakeEOFRetryMax, &readScratch)
+	return readBytes(ctx, logger, reader, &readScratch)
 }
 
 // ReadBytesWaiting is ReadBytes for a read that may wait long for the
@@ -593,18 +575,10 @@ func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byt
 // WaitReadSize, so a connection that waits holds that much while it waits,
 // not ReadChunkSize.
 func ReadBytesWaiting(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
-	return readBytes(ctx, logger, reader, HandshakeEOFRetryMax, &waitScratch)
+	return readBytes(ctx, logger, reader, &waitScratch)
 }
 
-// ReadBytesUntilEOF is ReadBytes for a reader whose end is its peer's close:
-// an EOF on an empty buffer is returned at once, never retried. ReadBytes'
-// retry, under a read deadline shorter than its sleep, comes back as the
-// deadline's timeout, which hides that the peer closed.
-func ReadBytesUntilEOF(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
-	return readBytes(ctx, logger, reader, 0, &readScratch)
-}
-
-// ReadChunkSize is the most one ReadBytes or ReadBytesUntilEOF returns. It is
+// ReadChunkSize is the most one ReadBytes returns. It is
 // the size the relay that records a connection reads with
 // (relay.DefaultForwardBuf), so a replay reads a request in the pieces its
 // recording read: the generic parser's similarity compares a request with a
@@ -628,50 +602,24 @@ var (
 	waitScratch = sync.Pool{New: func() any { b := make([]byte, WaitReadSize); return &b }}
 )
 
-func readBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, eofRetryMax int, scratchPool *sync.Pool) ([]byte, error) {
+// readBytes is ReadBytes reading one Read into scratchPool's buffers. What the
+// Read gave is returned with its error: an EOF after data is returned with the
+// data (short-data-then-EOF, a peer's close on a message boundary), and a Read
+// that gave nothing returns nil with its error, or with none, as an empty Read
+// always was (appending no bytes to a nil slice gives nil).
+func readBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, scratchPool *sync.Pool) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	scratch := scratchPool.Get().(*[]byte)
 	defer scratchPool.Put(scratch)
-	emptyEOFRetries := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		n, err := readContained(logger, reader, *scratch)
-		if ctx.Err() != nil {
-			// As before: a read that returns after the context ended is not
-			// taken.
-			return nil, ctx.Err()
-		}
-		var buffer []byte
-		if n > 0 {
-			buffer = append([]byte(nil), (*scratch)[:n]...)
-		}
-		if n > 0 || err == nil {
-			// Bytes, with or without the error that ended the Read: an EOF
-			// after data is authoritative (short-data-then-EOF, a peer's
-			// close on a message boundary). A Read of nothing with no error
-			// is returned as it is, as an empty Read always was.
-			return buffer, err
-		}
-		// Non-EOF errors always surface immediately.
-		if err != io.EOF {
-			return nil, err
-		}
-		// Zero-byte EOF: apply the bounded handshake retry budget. This
-		// protects the Postgres v3 handshake race where the replayer's
-		// startup response is still being written when the app issues its
-		// first Read. Budget is capped so mid-stream closes surface within
-		// 150ms.
-		if emptyEOFRetries >= eofRetryMax {
-			return nil, err
-		}
-		emptyEOFRetries++
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(HandshakeEOFRetrySleep):
-		}
+	n, err := readContained(logger, reader, *scratch)
+	if ctx.Err() != nil {
+		// As before: a read that returns after the context ended is not
+		// taken.
+		return nil, ctx.Err()
 	}
+	return append([]byte(nil), (*scratch)[:n]...), err
 }
 
 // ReadRequiredBytes reads exactly numBytes from reader, returning fewer only

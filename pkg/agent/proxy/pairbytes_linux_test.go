@@ -21,6 +21,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -253,6 +254,155 @@ func TestBytesThatCanNoLongerArriveAreACaptureLoss(t *testing.T) {
 			}
 			if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
 				t.Fatalf("%d app_bytes_lost after a second look, want still 1", l)
+			}
+		})
+	}
+}
+
+// A pooled connection (pgxpool, database/sql) carries the calls of several
+// tests, one test after another, and a loss on it is charged to the test whose
+// bytes were lost: not to an earlier test that used the connection, nor to a
+// later one. Each test's end waits for every byte written to the connection
+// before it (WaitPairedBytes), and the agent reads what the test is charged
+// only after that wait (settledSince, then chargeCaptureLosses): a test's
+// bytes have reached the proxy by its end, or their loss was counted before
+// its charge was read. Each test here is charged what the count grew by
+// across its end. The proxy closes the pooled connection in test lostIn,
+// short of what that test wrote, and the pool dials a new one for the tests
+// after it.
+//
+// A test whose end could not wait (here its context ended) is not verified,
+// and the bytes it wrote stay unsettled: its wait marks the connection with
+// the test and what it waited for. A loss of them counted later, at the
+// proxy's close in the next test, is that test's (TakeOwnedLosses), and no
+// count's: the test open then is not charged with it. It is charged too only
+// when bytes it wrote after the cut end were lost with them; bytes of the cut
+// end's that reached the proxy and were read since make it no owner of a later
+// loss.
+func TestAPooledConnectionsLossIsChargedToTheTestThatWroteIt(t *testing.T) {
+	call := func(t *testing.T, p *Proxy, app *net.TCPConn, reader net.Conn, seq uint64) error {
+		t.Helper()
+		msg := []byte("Q\x00\x00\x00\x0eSELECT 1;\x00")
+		if _, err := app.Write(msg); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.ReadFull(reader, make([]byte, len(msg))); err != nil {
+			t.Fatal(err)
+		}
+		return p.WaitPairedBytes(context.Background(), seq)
+	}
+	// More than the proxy's side takes before it reads: some of it waits in
+	// the application's socket.
+	const big = 64 << 10
+	for _, tc := range []struct {
+		name   string
+		lostIn int
+		// cutShort: test lostIn's end cannot wait, and the proxy closes the
+		// connection in the next test.
+		cutShort bool
+		// readFirst: in the next test, the proxy reads all the cut end's
+		// bytes before that test writes; then the next test writes on the
+		// connection before the proxy closes it (alsoWrote).
+		readFirst, alsoWrote bool
+		want                 []uint64
+		// owned is, by test, the tests whose owned losses were counted
+		// while it ran.
+		owned [][]string
+	}{
+		{"lost in the first test", 1, false, false, false, []uint64{1, 0, 0, 0}, nil},
+		{"lost in the second test", 2, false, false, false, []uint64{0, 1, 0, 0}, nil},
+		{"lost in the third test", 3, false, false, false, []uint64{0, 0, 1, 0}, nil},
+		{"its test's end could not wait", 2, true, false, false, []uint64{0, 0, 0, 0}, [][]string{nil, nil, {"test 2"}, nil}},
+		{"its test's end could not wait, and the next test wrote too", 2, true, false, true, []uint64{0, 0, 1, 0}, [][]string{nil, nil, {"test 2"}, nil}},
+		{"its test's end could not wait, and its bytes were read since", 2, true, true, true, []uint64{0, 0, 1, 0}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, app, proxySide, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+			seq := uint64(1)
+			redial := func() {
+				seq++
+				app, proxySide, reader = heldPairOn(t, p, seq, "tcp4", "127.0.0.1:0")
+			}
+			var charged []uint64
+			var owned [][]string
+			var was uint64
+			var cutAt uint64
+			for test := 1; test <= 4; test++ {
+				var end error
+				switch {
+				case test == tc.lostIn && tc.cutShort:
+					if _, err := app.Write(make([]byte, big)); err != nil {
+						t.Fatal(err)
+					}
+					cutAt = big
+					ctx, cancel := context.WithCancel(agent.WithEndOf(context.Background(), "test "+strconv.Itoa(test)))
+					cancel()
+					if end = p.WaitPairedBytes(ctx, seq); !errors.Is(end, context.Canceled) {
+						t.Fatalf("test %d's end = %v, want it cut short", test, end)
+					}
+				case test == tc.lostIn:
+					// The test's end waits for it, and the proxy closes the
+					// connection first.
+					queue(t, app)
+					targets, err := p.pairTargets(seq)
+					if err != nil || len(targets) != 1 {
+						t.Fatalf("pairTargets = %d, %v; want the pooled connection", len(targets), err)
+					}
+					done := waitOn(p, targets...)
+					_ = reader.Close()
+					p.paired.remove(proxySide)
+					end = <-done
+				case test == tc.lostIn+1 && tc.cutShort:
+					// The proxy closes the pooled connection with bytes
+					// unread, and the pool dials a new one.
+					if tc.readFirst {
+						if _, err := io.ReadFull(reader, make([]byte, cutAt)); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if tc.alsoWrote {
+						msg := []byte("Q\x00\x00\x00\x0eSELECT 2;\x00")
+						if _, err := app.Write(msg); err != nil {
+							t.Fatal(err)
+						}
+						if tc.readFirst {
+							unreadArrived(t, proxySide, len(msg))
+						}
+					}
+					_ = reader.Close()
+					p.paired.remove(proxySide)
+					redial()
+					end = call(t, p, app, reader, seq)
+				case test == tc.lostIn+1:
+					redial()
+					end = call(t, p, app, reader, seq)
+				default:
+					end = call(t, p, app, reader, seq)
+				}
+				if end != nil && (!tc.cutShort || test != tc.lostIn) {
+					t.Fatalf("test %d's end: %v", test, end)
+				}
+				now := lossesOf(p, models.CaptureLossAppBytesLost)
+				charged = append(charged, now-was)
+				was = now
+				var by []string
+				for _, o := range p.TakeOwnedLosses() {
+					if o.Loss.Kind != models.CaptureLossAppBytesLost || o.Loss.Count != 1 || !strings.Contains(o.Loss.What, "written in "+o.Test) {
+						t.Fatalf("owned loss %+v, want one app_bytes_lost naming its test", o)
+					}
+					by = append(by, o.Test)
+				}
+				owned = append(owned, by)
+			}
+			if !slices.Equal(charged, tc.want) {
+				t.Fatalf("app_bytes_lost charged by test = %v, want %v", charged, tc.want)
+			}
+			want := tc.owned
+			if want == nil {
+				want = make([][]string, 4)
+			}
+			if !slices.EqualFunc(owned, want, slices.Equal) {
+				t.Fatalf("owned losses by test = %q, want %q", owned, want)
 			}
 		})
 	}
@@ -643,5 +793,126 @@ func TestTheCanaryProvesTheByteCountsReadable(t *testing.T) {
 	p.checkPairedBytes(c, s)
 	if err := p.paired.failure(); err != nil {
 		t.Fatalf("checkPairedBytes on a plain connection: %v", err)
+	}
+}
+
+// appWritten tells whether its count holds the application's FIN by the order
+// of the socket's lock, not by a state read without it. Each sequence is what
+// consecutive lookups can read of one socket (idiag_state, idiag_wqueue,
+// tcpi_state, tcpi_bytes_acked) as its owner closes it, or does not; a close
+// that runs within a lookup must not make the FIN a byte of data, nor a byte
+// of data the FIN. A read past a sequence fails: each holds the reads the lock
+// order needs, and no more.
+func TestAppWrittenTellsTheFINByLockOrder(t *testing.T) {
+	look := func(hdr uint8, wq uint32, st uint8, acked uint64) diagTCP {
+		return diagTCP{state: hdr, wqueue: wq, info: &unix.TCPInfo{State: st, Bytes_acked: acked}}
+	}
+	const e, f1, f2, la = tcpEstablished, tcpFinWait1, tcpFinWait2, tcpLastAck
+	for _, tc := range []struct {
+		name    string
+		reads   []diagTCP
+		want    uint64
+		fin     bool
+		errGone bool
+	}{
+		{"closed after its peer's FIN (LAST_ACK)", []diagTCP{look(la, 11, la, 101), look(la, 11, la, 101)}, 111, true, false},
+		{"open throughout", []diagTCP{look(e, 10, e, 101), look(e, 10, e, 101), look(e, 10, e, 101)}, 110, false, false},
+		{"closed before the reads", []diagTCP{look(f1, 11, f1, 101), look(f1, 11, f1, 101)}, 111, true, false},
+		{"half-closed, the FIN acknowledged (FIN_WAIT2, a full socket)", []diagTCP{look(f2, 0, f2, 112), look(f2, 0, f2, 112)}, 111, true, false},
+		{"the close between idiag_state and idiag_wqueue", []diagTCP{look(e, 10, e, 101), look(e, 11, f1, 101), look(f1, 11, f1, 101)}, 111, true, false},
+		{"the close between idiag_wqueue and tcpi_state", []diagTCP{look(e, 10, e, 101), look(e, 10, f1, 101), look(f1, 11, f1, 101)}, 111, true, false},
+		{"the close's FIN seen before its state", []diagTCP{look(e, 10, e, 101), look(e, 11, e, 101), look(f1, 11, f1, 101), look(f1, 11, f1, 101)}, 111, true, false},
+		{"an ACK between the lookups", []diagTCP{look(e, 10, e, 101), look(e, 5, e, 106), look(e, 5, e, 106), look(e, 5, e, 106)}, 110, false, false},
+		{"read in CLOSE", []diagTCP{look(e, 10, e, 101), look(tcpClose, 0, tcpClose, 101), look(tcpClose, 0, tcpClose, 101), look(tcpClose, 0, tcpClose, 101)}, 0, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			was := lookupWritten
+			n := 0
+			lookupWritten = func(*diagSock, *pairedConn, bool) (diagTCP, error) {
+				if n == len(tc.reads) {
+					return diagTCP{}, errors.New("read past the sequence")
+				}
+				n++
+				return tc.reads[n-1], nil
+			}
+			t.Cleanup(func() { lookupWritten = was })
+			want, fin, _, err := appWritten(nil, nil)
+			if tc.errGone {
+				if !errors.Is(err, errNoSocket) {
+					t.Fatalf("appWritten = %d, %v, %v; want the socket gone", want, fin, err)
+				}
+				return
+			}
+			if err != nil || want != tc.want || fin != tc.fin {
+				t.Fatalf("appWritten = %d, FIN %v, %v; want %d, FIN %v", want, fin, err, tc.want, tc.fin)
+			}
+		})
+	}
+}
+
+// The close's read of what the application had written (wroteNow) is never
+// short of it, counts no byte twice, and takes one lookup when nothing is
+// unacknowledged. A lookup that fails (not a socket not found) gives no count,
+// and its error, which tells the close to drop the socket it read on. It says
+// the count holds the FIN only when the lookup before the counted one shows
+// the FIN sent: a close between a lookup's wqueue and its tcp_info shows the
+// FIN sent in a count without it.
+func TestTheClosesReadCountsWhatTheApplicationHadWritten(t *testing.T) {
+	look := func(st uint8, wq uint32, acked uint64) diagTCP {
+		return diagTCP{state: st, wqueue: wq, info: &unix.TCPInfo{State: st, Bytes_acked: acked}}
+	}
+	const e, f1, f2, la = tcpEstablished, tcpFinWait1, tcpFinWait2, tcpLastAck
+	const failedLookup = 0xff // a read whose lookup fails, with errLookupFailed
+	errLookupFailed := errors.New("sock_diag reply: bad file descriptor")
+	for _, tc := range []struct {
+		name  string
+		reads []diagTCP
+		want  uint64
+		fin   bool
+		ok    bool
+	}{
+		{"nothing unacknowledged: one lookup", []diagTCP{look(e, 0, 101)}, 100, false, true},
+		{"bytes unacknowledged, no ACK between the lookups", []diagTCP{look(e, 10, 101), look(e, 10, 101)}, 110, false, true},
+		{"an ACK between the first's wqueue and its tcp_info", []diagTCP{look(e, 5, 104), look(e, 2, 104)}, 105, false, true},
+		{"an ACK between a later lookup's wqueue and its tcp_info", []diagTCP{look(e, 5, 101), look(e, 5, 104), look(e, 2, 104)}, 105, false, true},
+		{"acknowledged by the second lookup", []diagTCP{look(e, 5, 101), look(e, 0, 106)}, 105, false, true},
+		{"an ACK between the lookups, then two that agree", []diagTCP{look(e, 5, 101), look(e, 3, 103), look(e, 3, 103)}, 105, false, true},
+		{"its FIN unacknowledged", []diagTCP{look(f1, 11, 101), look(f1, 11, 101)}, 111, true, true},
+		{"its FIN unacknowledged after its peer's (LAST_ACK)", []diagTCP{look(la, 1, 11), look(la, 1, 11)}, 11, true, true},
+		{"its FIN acknowledged by the second lookup", []diagTCP{look(f1, 1, 11), look(f2, 0, 12)}, 11, true, true},
+		{"a close between the first's wqueue and its tcp_info", []diagTCP{look(f1, 5, 101), look(f1, 6, 101)}, 106, true, true},
+		{"a close between the second's wqueue and its tcp_info", []diagTCP{look(e, 5, 101), look(f1, 5, 101)}, 105, false, true},
+		{"its FIN acknowledged: one lookup", []diagTCP{look(f2, 0, 12)}, 11, false, true},
+		{"read in CLOSE", []diagTCP{look(tcpClose, 0, 101)}, 0, false, false},
+		{"a timewait socket (no tcp_info)", []diagTCP{{state: tcpTimeWait}}, 0, false, false},
+		{"gone between the lookups", []diagTCP{look(e, 5, 101)}, 0, false, false},
+		{"no byte counts", []diagTCP{look(e, 0, 0)}, 0, false, false},
+		{"a lookup that fails", []diagTCP{look(e, 5, 101), {state: failedLookup}}, 0, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			was := lookupWritten
+			n := 0
+			lookupWritten = func(*diagSock, *pairedConn, bool) (diagTCP, error) {
+				if n == len(tc.reads) {
+					return diagTCP{}, errNoSocket
+				}
+				n++
+				if tc.reads[n-1].state == failedLookup {
+					return diagTCP{}, errLookupFailed
+				}
+				return tc.reads[n-1], nil
+			}
+			t.Cleanup(func() { lookupWritten = was })
+			w, ok, err := wroteNow(nil, nil)
+			if w.want != tc.want || w.fin != tc.fin || ok != tc.ok {
+				t.Fatalf("wroteNow = %+v, %v; want %d (FIN surely counted: %v), %v", w, ok, tc.want, tc.fin, tc.ok)
+			}
+			if failed := tc.reads[len(tc.reads)-1].state == failedLookup; failed != errors.Is(err, errLookupFailed) || !failed && err != nil {
+				t.Fatalf("wroteNow's error = %v; want the failed lookup's, and only after one", err)
+			}
+			if tc.ok && n != len(tc.reads) {
+				t.Fatalf("wroteNow made %d lookups, want %d", n, len(tc.reads))
+			}
+		})
 	}
 }

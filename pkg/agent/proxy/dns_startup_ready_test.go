@@ -23,8 +23,9 @@ import (
 // free on UDP too, found by allocation. A free TCP port says nothing of UDP:
 // on a busy host another process's UDP socket (a resolver's ephemeral port)
 // can hold the same number. The port is released for the servers to bind, so
-// another process can still take it first: startDNSForTest's servers move
-// then.
+// another process can still take it first: its callers' servers move then,
+// their port mover accepting every move. A row whose servers must stay at
+// the port takes one no other socket is given (testnet.UnlistedPort).
 func freeDNSPort(t *testing.T) int {
 	t.Helper()
 	for range 1000 {

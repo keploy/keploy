@@ -33,6 +33,27 @@ type answerView struct {
 	key    string
 }
 
+// writtenView is av with the answer the caller of the learn step writes
+// (req.written) in place of the one av renders (the recorded one where av
+// renders none): the view of the answer the application read. Its key is
+// av's, marked as written's: written's answer is a function of the request
+// and the answer it is given, which the view's key names already.
+func writtenView(av answerView, written func(*models.Mock) *models.Mock) answerView {
+	render := av.render
+	return answerView{
+		render: func(rec *models.Mock) (*models.Mock, error) {
+			if render != nil {
+				var err error
+				if rec, err = render(rec); err != nil {
+					return nil, err
+				}
+			}
+			return written(rec), nil
+		},
+		key: "written\x00" + av.key,
+	}
+}
+
 // servedView is F's view of m, which F served to the request in with the
 // answer av gives (servedLiveView where it gave the recorded one): m as the
 // application sent in and F answered it, read back where a later call's rule

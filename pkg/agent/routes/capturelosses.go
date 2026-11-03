@@ -22,6 +22,37 @@ type unchargedLossReader interface {
 	UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 }
 
+// ownedLossTaker is the agent service's take of the losses a test whose end
+// was cut short owned, by test.
+type ownedLossTaker interface {
+	TakeOwnedCaptureLosses(ctx context.Context) ([]models.OwnedCaptureLoss, error)
+}
+
+// HandleOwnedCaptureLosses answers POST /agent/capturelosses/owned: the
+// losses a test whose end was cut short owned, each taken once
+// (models.OwnedCaptureLoss). 501 from an agent that has none to tell apart:
+// its counts hold every loss.
+func (a *Agent) HandleOwnedCaptureLosses(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	s, ok := a.svc.(ownedLossTaker)
+	if !ok {
+		render.Status(r, http.StatusNotImplemented)
+		render.JSON(w, r, map[string]string{"error": models.ErrCaptureLossesUnsupported.Error()})
+		return
+	}
+	owned, err := s.TakeOwnedCaptureLosses(r.Context())
+	if err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": err.Error()})
+		return
+	}
+	if owned == nil {
+		owned = []models.OwnedCaptureLoss{}
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, owned)
+}
+
 // HandleUnchargedCaptureLosses answers GET /agent/capturelosses/uncharged:
 // what the agent could not capture since the run began that no test's end
 // charged, by kind (what was lost after the last test ended). 501 from an

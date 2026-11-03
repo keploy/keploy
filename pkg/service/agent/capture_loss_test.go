@@ -321,6 +321,289 @@ func TestATLSAbortFailsTheReplayedTest(t *testing.T) {
 	require.Contains(t, e.Reason, "1 TLS handshake(s) with keploy's proxy failed")
 }
 
+// One connection's lost bytes are charged to one test: the test the loss
+// landed in. A test that ran clean after it is not failed with it, and is not
+// set aside: keploy answered 502 Connection: close on a read the test had no
+// recording for, one such connection's loss failed that test and the next,
+// which made no failing call, and the read's move was never seen. One between
+// two tests is the next test's, as a miss between tests is. The run's count
+// holds each loss once.
+func TestLostBytesAreChargedToOneTest(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode models.Mode
+		// fails: the test charged fails (a replay); a record keeps the
+		// evidence on the window alone.
+		fails bool
+	}{
+		{"replay", models.MODE_TEST, true},
+		{"record", models.MODE_RECORD, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, p := wireAgent(t, tc.mode)
+			lp := lossProxy{wireProxy: p}
+			a.Proxy = lp
+			a.proven.losses = a.markCaptureLosses(context.Background())
+			claimSelf(t, a)
+			lost := func(n uint64) {
+				lp.losses = models.CaptureLosses{{Kind: models.CaptureLossAppBytesLost, Count: n, What: "from [::ffff:127.0.0.1]:50912"}}
+				a.Proxy = lp
+			}
+			charged := func(name string, want bool) {
+				t.Helper()
+				w := windowOf(t, a, "o::"+name)
+				var got models.CaptureLosses
+				if want {
+					got = models.CaptureLosses{{Kind: models.CaptureLossAppBytesLost, Count: 1, What: "from [::ffff:127.0.0.1]:50912"}}
+				}
+				if w.Evidence == nil {
+					require.False(t, want, "%s holds no evidence", name)
+					return
+				}
+				require.Equal(t, got, w.Evidence.CaptureIncomplete, name)
+			}
+			action := ""
+			if tc.fails {
+				action = models.ScopeActionFail
+			}
+			ctx := context.Background()
+			_, serr := a.ProvenBegin(ctx, begin("TestNext"))
+			require.Nil(t, serr)
+			lost(1)
+			e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestNext", Outcome: "failed"})
+			require.Nil(t, serr)
+			require.Equal(t, action, e.Action, "the test the loss landed in")
+			require.Empty(t, endPassed(t, a, "TestLast").Action, "a later test is not charged with it")
+
+			lost(2) // between two tests
+			require.Equal(t, action, endPassed(t, a, "TestAfter").Action, "a loss between tests is the next test's")
+			require.Empty(t, endPassed(t, a, "TestEnd").Action)
+
+			charged("TestNext", true)
+			charged("TestLast", false)
+			charged("TestAfter", true)
+			charged("TestEnd", false)
+		})
+	}
+}
+
+// ownedLossProxy is lossProxy whose proxy tells the losses a cut-short end
+// owned (coreAgent.OwnedLossTaker): it hands each once.
+type ownedLossProxy struct {
+	lossProxy
+	owned *[]coreAgent.OwnedLoss
+}
+
+func (p ownedLossProxy) TakeOwnedLosses() []coreAgent.OwnedLoss {
+	out := *p.owned
+	*p.owned = nil
+	return out
+}
+
+// A loss a test whose end was cut short owned (bytes it wrote that its end
+// could not wait for, lost later) is never the test open when it is counted:
+// that test's own end charges it when the loss came before its read, and the
+// run's read of what no test was charged with has it otherwise, naming the
+// connection and the test. It is in no count, so no later test is charged
+// with it by the counts either.
+func TestALossACutShortEndOwnedIsNeverTheOpenTests(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode models.Mode
+		// fails: the test charged fails (a replay); a record keeps the
+		// evidence on the window alone.
+		fails bool
+	}{
+		{"replay", models.MODE_TEST, true},
+		{"record", models.MODE_RECORD, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, p := wireAgent(t, tc.mode)
+			var owned []coreAgent.OwnedLoss
+			a.Proxy = ownedLossProxy{lossProxy: lossProxy{wireProxy: p}, owned: &owned}
+			a.proven.losses = a.markCaptureLosses(context.Background())
+			claimSelf(t, a)
+			from := "from [::ffff:127.0.0.1]:50912, written in o::TestCut, whose end could not wait for them"
+			loss := models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1, What: from}
+			action := ""
+			if tc.fails {
+				action = models.ScopeActionFail
+			}
+			// Counted before TestCut's own end read its losses: its own.
+			owned = []coreAgent.OwnedLoss{{Test: "o::TestCut", Loss: loss}}
+			require.Equal(t, action, endPassed(t, a, "TestCut").Action, "a test charged with what it owned")
+
+			// Counted after: while TestNext is open. TestNext is not
+			// charged, and the run is.
+			owned = []coreAgent.OwnedLoss{{Test: "o::TestCut", Loss: loss}}
+			require.Empty(t, endPassed(t, a, "TestNext").Action, "the test open when the owned loss was counted")
+			require.Empty(t, endPassed(t, a, "TestLast").Action)
+			// The run's: once, though TestCut's own end had one too. The
+			// read is the same however often it is made.
+			for range 2 {
+				un, err := a.UnchargedCaptureLosses(context.Background())
+				require.NoError(t, err)
+				require.Equal(t, models.CaptureLosses{loss}, un, "the run's")
+			}
+			require.Equal(t, models.CaptureLosses{loss}, windowOf(t, a, "o::TestCut").Evidence.CaptureIncomplete)
+			require.Nil(t, windowOf(t, a, "o::TestNext").Evidence)
+			require.Nil(t, windowOf(t, a, "o::TestLast").Evidence)
+		})
+	}
+}
+
+// A loss a cut-short end owned, counted before that test's own end, whose read
+// of the losses then failed, is the run's: the test is one keploy could not
+// judge, and charges nothing, so the run's read of what no test was charged
+// with has it. It is never dropped.
+func TestALossAnEndOwnedWhoseReadFailedIsTheRuns(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mode   models.Mode
+		action string
+	}{
+		{"replay", models.MODE_TEST, models.ScopeActionFail},
+		{"record", models.MODE_RECORD, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, p := wireAgent(t, tc.mode)
+			var owned []coreAgent.OwnedLoss
+			a.Proxy = ownedLossProxy{lossProxy: lossProxy{wireProxy: p}, owned: &owned}
+			a.proven.losses = a.markCaptureLosses(context.Background())
+			claimSelf(t, a)
+			loss := models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1,
+				What: "from [::ffff:127.0.0.1]:50912, written in o::TestCut, whose end could not wait for them"}
+			owned = []coreAgent.OwnedLoss{{Test: "o::TestCut", Loss: loss}}
+			hooks := a.Hooks
+			a.Hooks = blindHooks{err: errors.New("the count cannot be read")}
+			require.Equal(t, tc.action, endPassed(t, a, "TestCut").Action, "a test whose losses could not be read")
+			a.Hooks = hooks
+			w := windowOf(t, a, "o::TestCut")
+			require.True(t, w.Evidence.Unread)
+			require.Empty(t, w.Evidence.CaptureIncomplete)
+			un, err := a.UnchargedCaptureLosses(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, models.CaptureLosses{loss}, un, "the run's")
+		})
+	}
+}
+
+// A test's end cut short in its wait for the bytes on the paired connections
+// (ProvenEnd, endTest, settledSince) makes that wait under the test's window
+// id (coreAgent.WithEndOf): the proxy marks what it could not see reached with
+// that id, so a loss of those bytes it counts later names the test, and is
+// charged to that test, or to the run, never to the test open then. Counted
+// before the end reads its losses, it is on that test's evidence, and the next
+// test and the run are not charged with it.
+func TestAnEndCutShortNamesItsTestToTheBytesWait(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode models.Mode
+	}{
+		{"replay", models.MODE_TEST},
+		{"record", models.MODE_RECORD},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, p := wireAgent(t, tc.mode)
+			var owned []coreAgent.OwnedLoss
+			a.Proxy = ownedLossProxy{lossProxy: lossProxy{wireProxy: p}, owned: &owned}
+			a.proven.losses = a.markCaptureLosses(context.Background())
+			claimSelf(t, a)
+			ctx := context.Background()
+			_, serr := a.ProvenBegin(ctx, begin("TestCut"))
+			require.Nil(t, serr)
+			var ends []string
+			var loss models.CaptureLoss
+			p.bytesWait = func(ctx context.Context, _ uint64) error {
+				// As the proxy does: what the cut wait could not see
+				// reached is marked with the end it names, and a loss
+				// of it counted later is that test's.
+				end := coreAgent.EndOf(ctx)
+				ends = append(ends, end)
+				loss = models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1,
+					What: "from [::ffff:127.0.0.1]:50912, written in " + end + ", whose end could not wait for them"}
+				owned = append(owned, coreAgent.OwnedLoss{Test: end, Loss: loss})
+				return errors.New("keploy cannot tell whether the bytes reached its proxy")
+			}
+			_, _ = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestCut", Outcome: models.ScopeOutcomePassed})
+			p.bytesWait = nil
+			require.Equal(t, []string{"o::TestCut"}, ends, "the end's bytes wait names the test's window")
+			require.Empty(t, endPassed(t, a, "TestNext").Action)
+
+			w := windowOf(t, a, "o::TestCut")
+			require.True(t, w.Evidence.Unread, "cut short: not verified")
+			require.Equal(t, models.CaptureLosses{loss}, w.Evidence.CaptureIncomplete, "the test charged with what it owned")
+			require.Nil(t, windowOf(t, a, "o::TestNext").Evidence)
+			un, err := a.UnchargedCaptureLosses(context.Background())
+			require.NoError(t, err)
+			require.Empty(t, un, "charged to its test, not the run")
+		})
+	}
+}
+
+// A loss a cut-short end owned, counted after the run's last end, is in no
+// test's charge: the run's read of what no test was charged with takes it from
+// the proxy, and holds it however often it is made. One no read took before a
+// new session's reset is never dropped: it is the new run's, and no test of
+// the new run is charged with it, not even one of the owner's name.
+func TestALossOwnedAfterTheLastEndIsTheRunsAndOneLeftUnreadTheNextRuns(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	var owned []coreAgent.OwnedLoss
+	a.Proxy = ownedLossProxy{lossProxy: lossProxy{wireProxy: p}, owned: &owned}
+	a.proven.losses = a.markCaptureLosses(context.Background())
+	claimSelf(t, a)
+	loss := models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1,
+		What: "from [::ffff:127.0.0.1]:50912, written in o::TestLast, whose end could not wait for them"}
+	require.Empty(t, endPassed(t, a, "TestLast").Action)
+	owned = []coreAgent.OwnedLoss{{Test: "o::TestLast", Loss: loss}}
+	for range 2 {
+		un, err := a.UnchargedCaptureLosses(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, models.CaptureLosses{loss}, un, "the run's, once")
+	}
+
+	owned = []coreAgent.OwnedLoss{{Test: "o::TestLast", Loss: loss}}
+	require.NoError(t, a.resetSession(context.Background()))
+	claimSelf(t, a)
+	require.Empty(t, endPassed(t, a, "TestLast").Action, "a test of the next session, of the owner's name")
+	require.Nil(t, windowOf(t, a, "o::TestLast").Evidence)
+	un, err := a.UnchargedCaptureLosses(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, models.CaptureLosses{loss}, un, "the next session's run")
+}
+
+// keploy test takes, at each test case's end and at its set's end, what a
+// cut-short end owned, by test, each once: a pool call's between test cases
+// too, which reached no verdict before. None is in the counts its per-test
+// reads charge the open test case from. One the session before left unread
+// is the run's.
+func TestKeployTestTakesTheLossesACutShortEndOwned(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	var owned []coreAgent.OwnedLoss
+	a.Proxy = ownedLossProxy{lossProxy: lossProxy{wireProxy: p}, owned: &owned}
+	ctx := context.Background()
+	gap := models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1,
+		What: "from [::ffff:127.0.0.1]:50912, written between test cases, where keploy's wait for them was cut short"}
+	owned = []coreAgent.OwnedLoss{{Test: coreAgent.BetweenTestCases, Loss: gap}}
+	got, err := a.TakeOwnedCaptureLosses(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []models.OwnedCaptureLoss{{Test: coreAgent.BetweenTestCases, Loss: gap}}, got)
+	got, err = a.TakeOwnedCaptureLosses(ctx)
+	require.NoError(t, err)
+	require.Empty(t, got, "each once")
+	counts, err := a.CaptureLosses(ctx)
+	require.NoError(t, err)
+	for _, c := range counts {
+		require.NotEqual(t, models.CaptureLossAppBytesLost, c.Kind, "in no count")
+	}
+
+	owned = []coreAgent.OwnedLoss{{Test: "test-1", Loss: gap}}
+	require.NoError(t, a.resetSession(ctx))
+	got, err = a.TakeOwnedCaptureLosses(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []models.OwnedCaptureLoss{{Loss: gap}}, got, "the session before's, the run's")
+}
+
 // A TLS client's rejection of keploy's certificate is the test's it happened
 // in, not a taint of every later test: the client's other calls are captured,
 // or rejected, on their own. One between two tests is the next test's, as a

@@ -108,7 +108,7 @@ func TestACloseOfAStatementThePoolClosedIsThePoolsThoughTheTestOwnsAnotherClose(
 				t.Fatal("precondition: test T1 is not served exactly")
 			}
 			ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "c1")
-			dctx := &wire.DecodeContext{PreparedStatements: map[uint32]*mysql.StmtPrepareOkPacket{}, StmtIDToQuery: btStatements, NextStmtID: 100}
+			dctx := &wire.DecodeContext{PreparedStatements: map[uint32]*mysql.StmtPrepareOkPacket{}, StmtIDToQuery: btSetStatements(false), NextStmtID: 100}
 			if ownsCloseA {
 				if _, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), closeReq(7), mm, dctx); !ok || err != nil {
 					t.Fatalf("T1's CLOSE of statement A, which it recorded: ok=%v err=%v miss=%s", ok, err, miss)

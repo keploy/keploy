@@ -5007,7 +5007,7 @@ func (p *Proxy) SetRecordedOfKind(src func(kind models.Kind, visit func(name str
 var _ agent.RecordedOfKindSetter = (*Proxy)(nil)
 
 // SetRecordingTimes implements agent.RecordingTimesSetter (exact.go).
-func (p *Proxy) SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error) error {
+func (p *Proxy) SetRecordingTimes(src func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error) error {
 	m := p.getMockManager()
 	if m == nil {
 		return errNoMockManager
@@ -5179,6 +5179,15 @@ func (p *Proxy) RestartExactKey(key string, names []string) error {
 	}
 	m.RestartExactKey(key, names)
 	return nil
+}
+
+// ExactTestServed implements agent.ExactTestServedReader (exact.go).
+func (p *Proxy) ExactTestServed() string {
+	m := p.getMockManager()
+	if m == nil {
+		return ""
+	}
+	return m.ExactTestServed()
 }
 
 // ExactTestOutcome implements agent.ExactServer (exact.go).

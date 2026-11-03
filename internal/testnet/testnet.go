@@ -1,17 +1,36 @@
-// Package testnet gives the tests of the proxy tree the loopback ports they
-// expect refused or free, held for the test's life. go test ./... tests
+// Package testnet gives this module's tests the loopback ports they expect
+// refused or free, held for the test's life. go test ./... tests
 // packages side by side, and a port a test took from a listener it then
 // closed is free at once: a socket of another test, in this binary or in a
 // package tested beside it, can take the port and answer the dial the test
 // expects refused, or hold the port the test means to listen at again.
 //
-// On Linux the port is held with a socket that never listens (RefusedAddr).
-// On macOS and Windows nothing is held: macOS drops a SYN sent to a bound
-// socket that is not listening, by XNU's source, instead of refusing it, so a
-// hold cannot give the refusal the tests expect there, and Windows is not
-// checked. There the helpers give a port a listener left when it closed, as
-// the tests took one before, and another socket can take it meanwhile. CI
-// runs these tests on Linux, and those of package incoming on Windows too.
+// RefusedAddr's port is held for the test's life on every platform. On
+// Linux it is held with a socket that never listens, at every address and
+// in both families. macOS drops a SYN sent to a bound socket that is not
+// listening, by XNU's source, instead of refusing it, so on macOS and
+// Windows the port is held as the local end of a connection that is never
+// accepted, at 127.0.0.1 (holdByConnection). On Windows that socket binds
+// the port exclusively (SO_EXCLUSIVEADDRUSE): Go binds it at the wildcard
+// address, and a listener that names 127.0.0.1 binds beside a wildcard bind
+// that is not exclusive. SharedPort's port is held the same way on Linux and
+// macOS, and the test's own listeners bind beside the hold: on Linux the
+// hold and they set SO_REUSEPORT; on macOS Go's listeners set SO_REUSEADDR,
+// which binds beside a connected socket. On Windows a listener binds beside
+// no exclusive hold, so SharedPort's port is ReservedPort's there. CI runs
+// these tests on Linux, and some packages' tests on Windows and macOS too.
+//
+// ReservedPort's port is for code under test that listens at it by number
+// with net.Listen. On Linux it is held by a socket that sets SO_REUSEADDR
+// and only binds, and Go's listeners, which set it too, bind beside it; on
+// macOS it is SharedPort's. On Windows, where Go's listeners set no option
+// and so cannot bind every address beside a hold, it is a port below the
+// dynamic port range, which no bind to port 0 and no connect is given,
+// claimed by a file in os.TempDir so that no other test is given it
+// (claimPort). UnlistedPort (Linux) is a port the socket tables list no
+// socket at, below the range a bind to port 0 is given one from, held at
+// TCP; a listener that sets SO_REUSEADDR, as Go's do, binds beside the hold,
+// and UDP is left free.
 //
 // BoundHere counts the sockets of this process at a port, so a test can tell
 // a port its code still holds from one another process took once it was
