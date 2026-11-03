@@ -279,6 +279,88 @@ func TestARecordingOfAnotherRouteGivesNoNoisePatternReason(t *testing.T) {
 	}
 }
 
+// A call whose path is one recording's, beside a recording whose path
+// segment the learn step learned as a read of the clock and the call fills
+// with no instant ("me"): that segment is no read of any clock, so the path
+// differs there as it would with nothing learned, and the recording is of
+// another route. The recording whose path is the call's stays closest,
+// compared first or last, and so where it differs in more fields, and no
+// read of the clock is blamed for the miss.
+func TestALiteralSegmentBesideAClockSegmentKeepsItsRecordingClosest(t *testing.T) {
+	json := map[string]string{"Content-Type": "application/json"}
+	clk := func() *models.Mock {
+		m := recorded("mock-p2", "/v1/u/2026-09-01T09:00:00Z", json, `{"a":2}`)
+		m.Spec.Clocks = map[string]models.ClockOffset{"url.path.2": {Res: time.Second}}
+		return m
+	}
+	for _, c := range []struct {
+		name, lit string
+		want      []string
+		lastFirst bool
+	}{
+		{"one field, compared last", `{"a":1}`, []string{"body.a"}, false},
+		{"one field, compared first", `{"a":1}`, []string{"body.a"}, true},
+		{"two fields", `{"a":1,"b":1}`, []string{"body.a", "body.b"}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			pool := []*models.Mock{clk(), recorded("mock-me", "/v1/u/me", json, c.lit)}
+			if c.lastFirst {
+				pool[0], pool[1] = pool[1], pool[0]
+			}
+			r, said := clockMissOf(t, sent("/v1/u/me", json, `{"a":2}`), pool...)
+			if r.ClosestMock != "mock-me" || r.MatchPhase != models.MatchPhaseStrict || strings.Join(r.Differs, " ") != strings.Join(c.want, " ") {
+				t.Fatalf("closest %q, phase %q, Differs %v; want mock-me, whose path is the call's, phase %q, Differs %v", r.ClosestMock, r.MatchPhase, r.Differs, models.MatchPhaseStrict, c.want)
+			}
+			if len(r.FieldReasons) != 0 || len(said) != 0 {
+				t.Fatalf("FieldReasons %+v, %d clock warnings; want no read of the clock blamed", r.FieldReasons, len(said))
+			}
+		})
+	}
+}
+
+// A path segment the learn step learned as a word read of the clock in a
+// longer text ("user-<ms>"): a call that carries a stale word there, the
+// text beside it the recorded one, is of the recording's route and refused
+// for the read; one whose text beside the word changed ("team-<ms>"), or
+// whose word is no instant ("user-me"), carries no read of the clock there,
+// so its path differs as with nothing learned: another route, no reason, no
+// warning.
+func TestAWordReadInAPathSegmentIsOfTheRouteOnlyInItsForm(t *testing.T) {
+	json := map[string]string{"Content-Type": "application/json"}
+	const seg = "user-1730000000000"
+	m := func() *models.Mock {
+		m := recorded("mock-w", "/v1/u/"+seg, json, `{}`)
+		m.Spec.Clocks = map[string]models.ClockOffset{"url.path.2": {Res: time.Millisecond, Layout: "epoch-ms", Word: models.ClockWordOf(seg, 5, len(seg))}}
+		return m
+	}
+	r, said := clockMissOf(t, sent("/v1/u/user-1730000000999", json, `{}`), m())
+	if r.MatchPhase != models.MatchPhaseStrict || !strings.HasPrefix(reportWhy(r, "path"), "path was learned as ") || len(said) != 1 {
+		t.Fatalf("phase %q, the reason of path %q, %d clock warnings; want the stale word refused on the call's route, logged once", r.MatchPhase, reportWhy(r, "path"), len(said))
+	}
+	for _, other := range []string{"team-1730000000999", "user-me"} {
+		r, said := clockMissOf(t, sent("/v1/u/"+other, json, `{}`), m())
+		if r.MatchPhase == models.MatchPhaseStrict || len(r.Differs) != 1 || r.Differs[0] != "path" || len(r.FieldReasons) != 0 || len(said) != 0 {
+			t.Fatalf("%s: phase %q, Differs %v, FieldReasons %+v, %d clock warnings; want another route, the path alone, no reason, no warning", other, r.MatchPhase, r.Differs, r.FieldReasons, len(said))
+		}
+	}
+}
+
+// keploy.yml's url noise that reaches a path segment learned as a read of
+// the clock, in the recording's value and the call's, leaves the segment
+// unchecked, as at the clock check (clockDiffs): the call is answered
+// though its segment, the noise masked, differs and is no instant whole.
+func TestAClockSegmentKeployYmlUrlNoiseReachesIsNotChecked(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	m := recorded("mock-n", "/v1/u/2026-09-01T09:00:00Z", map[string]string{"Content-Type": "application/json"}, `{}`)
+	m.Spec.Clocks = map[string]models.ClockOffset{"url.path.2": {Res: time.Second}}
+	in := sent("/v1/u/me-T09:00:00Z", map[string]string{"Content-Type": "application/json"}, `{}`)
+	in.arrived = base.Add(2 * time.Second)
+	if got, diag := strictMatchIn(t, clockConn(true, base), in, nil, nil, []string{`T[0-9:]+Z`}, m); got == nil {
+		t.Fatalf("refused (%v); want the segment keploy.yml's noise reaches left unchecked", differs(diag))
+	}
+}
+
 // The miss names a field of a recording of another route by its shape, as
 // a failed test's reason does, never a value an object key of it may be.
 func TestARecordingOfAnotherRouteNamesAFieldByItsShape(t *testing.T) {

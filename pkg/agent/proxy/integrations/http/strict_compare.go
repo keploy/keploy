@@ -215,6 +215,12 @@ func (k strictKnown) learnedAt(exact, legacy string) bool {
 	if _, clock := k.clocks[exact]; clock {
 		return true
 	}
+	return k.learnedNoiseAt(exact, legacy)
+}
+
+// learnedNoiseAt is learnedAt of the learned noise alone, not the learned
+// reads of the clock.
+func (k strictKnown) learnedNoiseAt(exact, legacy string) bool {
 	if len(k.learned) == 0 {
 		return false
 	}
@@ -450,7 +456,7 @@ func recordedURL(r *models.HTTPReq) (string, url.Values) {
 
 // pathDiffs compares two paths segment by segment, after keploy.yml's url
 // noise is masked in both; a segment the mock learned (url.path.<i>) may
-// differ.
+// differ (segmentMayDiffer).
 func (k strictKnown) pathDiffs(rec, live string) []strictField {
 	if rec == live {
 		return nil
@@ -458,9 +464,10 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 	rs := strings.Split(strings.TrimPrefix(maskURLNoise(rec, k.n.url), "/"), "/")
 	ls := strings.Split(strings.TrimPrefix(maskURLNoise(live, k.n.url), "/"), "/")
 	if len(rs) == len(ls) {
+		recSegs, liveSegs := learnNoise{}.segments(rec), learnNoise{}.segments(live)
 		same := true
 		for i := range rs {
-			if rs[i] != ls[i] && !k.learnedAt("url.path."+strconv.Itoa(i), "") {
+			if rs[i] != ls[i] && !k.segmentMayDiffer(i, recSegs, liveSegs) {
 				same = false
 				break
 			}
@@ -470,6 +477,37 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 		}
 	}
 	return []strictField{field(valueDiff("path", rec, live))}
+}
+
+// segmentMayDiffer reports whether the path segment at i may differ from its
+// recording's: the mock learned it as noise, or as a read of the
+// application's clock and the call's segment (rec and live are the two
+// paths' segments, as clockDiffs reads them) is a value of that read's form
+// (learn.ReadsAsClockRead), whose instant clockDiffs checks, or keploy.yml's
+// noise reaches it, where clockDiffs checks none. A segment of no such form
+// ("me" where an instant was) is no read of any clock: it differs as one
+// with nothing learned does, and its recording is of another route.
+func (k strictKnown) segmentMayDiffer(i int, rec, live []string) bool {
+	place := "url.path." + strconv.Itoa(i)
+	if k.learnedNoiseAt(place, "") {
+		return true
+	}
+	o, clock := k.clocks[place]
+	if !clock {
+		return false
+	}
+	r, l := segmentLeaf(rec, i), segmentLeaf(live, i)
+	return k.userNoiseAt(place, r, l) || learn.ReadsAsClockRead(o, l)
+}
+
+// segmentLeaf is the leaf of the path segment at i of segs, as the learn
+// step shapes it (learnNoise.shape); the zero leaf where segs has none.
+func segmentLeaf(segs []string, i int) learn.Leaf {
+	if i >= len(segs) {
+		return learn.Leaf{}
+	}
+	place := "url.path." + strconv.Itoa(i)
+	return learn.Leaf{Path: place, Noise: place, Type: learn.String, Value: segs[i]}
 }
 
 // queryDiffs compares two queries: the same parameters, each with the same
