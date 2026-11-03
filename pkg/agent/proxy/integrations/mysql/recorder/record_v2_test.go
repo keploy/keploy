@@ -1182,6 +1182,38 @@ func TestPostTLSHandshakeV2_DoesNotRecycleUndecodableGreeting(t *testing.T) {
 	}
 }
 
+// A stored greeting that is a well-formed packet but not a HandshakeV10 (here
+// an OK packet, with real capability flags) is garbage too, and is not put back
+// for the same reason. The connection's decode context holds no greeting yet,
+// so it does not decode as a greeting: the handshake fails, and the entry is
+// dropped.
+func TestPostTLSHandshakeV2_DoesNotRecycleANonHandshakeGreeting(t *testing.T) {
+	h := newV2Harness(t)
+
+	store := models.NewTLSHandshakeStore()
+	portKey := models.HandshakeStoreKey("", 3306)
+	store.Push(portKey, models.TLSHandshakeEntry{
+		RespPackets: [][]byte{cannedOK(t, 1, 0x000FA68D)},
+	})
+	// The stream's own first packet, so it goes on to adopt the entry.
+	h.pushClient(cannedHandshakeResponse41(t, 2, false), time.Now())
+
+	decodeCtx := &wire.DecodeContext{
+		Mode:               models.MODE_RECORD,
+		LastOp:             wire.NewLastOpMap(),
+		ServerGreetings:    wire.NewGreetings(),
+		PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
+	}
+	var clientKey net.Conn = h.sess.ClientStream
+	if _, err := handlePostTLSHandshakeV2(postTLSCtxWithStore(store), h.logger, h.sess, decodeCtx, &clientKey); err == nil {
+		t.Fatal("expected a greeting that is not a HandshakeV10 to fail the handshake")
+	}
+	if _, ok := store.PopWait(portKey, 0); ok {
+		t.Fatal("a greeting that is not a HandshakeV10 was put back into the shared FIFO; Push re-stamps its " +
+			"expiry so it would never age out and would trip every later stream to this port")
+	}
+}
+
 // runPostTLSSession drives one RecordV2 session to want mocks without touching
 // t, so several can run concurrently.
 func runPostTLSSession(ctx context.Context, h *v2Harness, want int, patience time.Duration) ([]*models.Mock, error) {
