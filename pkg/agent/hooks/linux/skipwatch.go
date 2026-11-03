@@ -121,6 +121,7 @@ var programSkips = map[string]programSkip{
 	"k_post_bind4":       guardFree,
 	"k_post_bind6":       guardFree,
 	"k_sock_create":      guardFree,
+	"k_app_conn_release": guardFree,
 	"k_sockops":          guardFree,
 	"k_udp4_recvmsg":     guardFree,
 	"k_udp4_sendmsg":     guardFree,

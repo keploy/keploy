@@ -126,6 +126,10 @@ type Hooks struct {
 	// sockCreate is k_sock_create's link: sys_enter_socket's backstop,
 	// attached where it is.
 	sockCreate link.Link
+	// appConnRelease is k_app_conn_release's link: it writes how the
+	// application released each connection redirected to the proxy
+	// (TakeAppConnEnd).
+	appConnRelease link.Link
 	// skips reads the runs of the hooks' programs the kernel skipped
 	// (skipwatch.go), from their load on.
 	skips *skipWatch
@@ -550,6 +554,21 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	// socket's creation, classifies by the same rule before the process's
 	// first connect, send or bind reaches pid_filter (keploy/ebpf
 	// keploy_ebpf.c).
+	// How the application released each connection redirected to the
+	// proxy: while its process ran, or as it exited, and by what signal
+	// (TakeAppConnEnd). The recorder tells by it the application's giving
+	// up on a call, a fault, from its exit cutting the call, the run's end.
+	acr, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCgroupInetSockRelease,
+		Program: objs.K_appConnRelease,
+	})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the sock_release cgroup hook that says how the application released its connections")
+		return err
+	}
+	h.appConnRelease = acr
+
 	if h.socket != nil {
 		sc, err := link.AttachCgroup(link.CgroupOptions{
 			Path:    cGroupPath,
@@ -865,6 +884,11 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if h.sockCreate != nil {
 		if err := h.sockCreate.Close(); err != nil {
 			utils.LogError(h.logger, err, "failed to close the sock_create hook")
+		}
+	}
+	if h.appConnRelease != nil {
+		if err := h.appConnRelease.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the sock_release hook of the application's connections")
 		}
 	}
 	// What each program skipped in the session, read before they close.

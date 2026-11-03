@@ -983,6 +983,26 @@ type ConnDestInfo interface {
 	DeleteForConn(ctx context.Context, app netip.AddrPort) error
 }
 
+// AppConnEnd is how the application released its end of a connection the
+// hooks redirected to the proxy, as the kernel saw the release: by its
+// process while the process ran (Exiting false), or as the process exited
+// (Exiting true), with the signal that killed it (Signal), 0 for a process
+// that exited on its own.
+type AppConnEnd struct {
+	Exiting bool
+	Signal  uint32
+}
+
+// ConnEndInfo is the optional extension of a DestInfo that says how the
+// application released its end of a redirected connection, named as
+// ConnDestInfo names it, once the proxy has read that end. It forgets what it
+// read. ok is false where it holds nothing for the connection: a socket ended
+// with shutdown(2) and not released, a record the kernel's LRU evicted, or
+// hooks that make no such record.
+type ConnEndInfo interface {
+	TakeAppConnEnd(app netip.AddrPort) (end AppConnEnd, ok bool)
+}
+
 // ErrConnectingSocketGone is GetForHandshake's error when the application's
 // connecting socket no longer exists: it gave up on the connection.
 var ErrConnectingSocketGone = errors.New("the application's connecting socket is gone")

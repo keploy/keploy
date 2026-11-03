@@ -43,6 +43,38 @@ func redirectKeyFor(app netip.AddrPort) redirectKey {
 	return k
 }
 
+// appConnEnd is app_conn_ends' value (struct app_conn_end_t): whether the
+// releasing task was exiting (PF_EXITING), and its exit_code, the killing
+// signal in its low 7 bits.
+type appConnEnd struct {
+	Exiting  uint32
+	ExitCode uint32
+}
+
+// TakeAppConnEnd implements agent.ConnEndInfo: how the application released
+// its end app of a redirected connection, as k_app_conn_release wrote it
+// into app_conn_ends at the release, before the kernel sent the FIN or reset
+// the proxy read; the entry is deleted as it is read. ok is false where the
+// map holds none (keploy/ebpf's app_conn_ends says when) or the hooks are not
+// loaded.
+func (h *Hooks) TakeAppConnEnd(app netip.AddrPort) (agent.AppConnEnd, bool) {
+	h.objectsMutex.RLock()
+	defer h.objectsMutex.RUnlock()
+	m := h.objects.AppConnEnds
+	if m == nil {
+		return agent.AppConnEnd{}, false
+	}
+	k := redirectKeyFor(app)
+	var e appConnEnd
+	if err := m.Lookup(k, &e); err != nil {
+		return agent.AppConnEnd{}, false
+	}
+	if err := m.Delete(k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		h.logger.Debug("could not delete the application's release of its connection", zap.String("application end", app.String()), zap.Error(err))
+	}
+	return agent.AppConnEnd{Exiting: e.Exiting != 0, Signal: e.ExitCode & 0x7f}, true
+}
+
 // GetForConn is the original destination of the connection whose application
 // end is app (agent.ConnDestInfo), used by the proxy.
 func (h *Hooks) GetForConn(_ context.Context, app netip.AddrPort) (*agent.NetworkAddress, error) {

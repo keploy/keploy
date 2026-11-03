@@ -68,3 +68,13 @@ func TestRedirectKeyBytesAreTheKernels(t *testing.T) {
 		}
 	}
 }
+
+// Hooks whose objects never loaded hold no record of how the application
+// released a connection: TakeAppConnEnd says so, rather than failing, and the
+// proxy records the call's end as a fault.
+func TestHooksWithNoObjectsHoldNoReleaseOfAConnection(t *testing.T) {
+	h := &Hooks{}
+	if end, ok := h.TakeAppConnEnd(netip.MustParseAddrPort("127.0.0.1:4000")); ok {
+		t.Fatalf("TakeAppConnEnd on hooks with no objects = %+v, true; want false", end)
+	}
+}

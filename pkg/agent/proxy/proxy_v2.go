@@ -285,7 +285,7 @@ func (p *Proxy) recordViaSupervisor(
 		// the fault it gave (its reset or its close), or as the client's
 		// giving up when the client closed first. An end that is the
 		// application's stop records no fault (peerEndMarker).
-		PeerEnded: p.peerEndMarker(svSess, opts.SrcNsPid),
+		PeerEnded: p.peerEndMarker(svSess, appEndOf(srcConn)),
 		// User-tunable record-buffer caps. Snapshotted onto the Proxy
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via

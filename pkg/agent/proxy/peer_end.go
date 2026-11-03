@@ -1,15 +1,12 @@
 package proxy
 
 import (
+	"net/netip"
+
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
-	"go.keploy.io/server/v3/pkg/matcher/learn"
 )
-
-// peerEndProcRoot is where peerEndMarker reads the client's process: the
-// agent's own /proc, where the eBPF redirect named it (SrcNsPid). A var for
-// the rows.
-var peerEndProcRoot = "/proc"
 
 // peerEndMarker marks, for a recorded connection, how each side ended its side
 // (Session.MarkPeerEndedStopping), and whether the connection's first end is
@@ -17,21 +14,34 @@ var peerEndProcRoot = "/proc"
 // rather than the application's giving up or the upstream's fault:
 //   - any end read once the recording's stop began (Proxy.StopBegun): keploy
 //     record and keploy mock record say so before they stop the application;
-//   - the client's end when the client's process (clientPid, in the agent's
-//     PID namespace) is exiting or gone: its exit closed the socket, a stop of
-//     keploy's or the command's own exit alike. The kernel flags a process
-//     exiting (PF_EXITING) before it closes the process's files, so an exit's
-//     close is never read while the process still shows as running. A client
-//     keploy cannot read (clientPid 0, a process outside the agent's PID
-//     namespace) is taken as one: a call it gave up on is not recorded as a
-//     fault the run never showed. The client's end while its process runs on
-//     is its own giving up on the call.
-func (p *Proxy) peerEndMarker(sess *supervisor.Session, clientPid uint32) func(fakeconn.Direction, bool) {
+//   - the client's end when the kernel saw the client's process release its
+//     end of the connection (app, its address and port) as it exited on its
+//     own (appEndedByItsExit): the command's own exit, or a test process's,
+//     with the call still open, which is the run's end.
+//
+// The client's end while its process ran (it closed the socket: it gave up on
+// the call), or as a signal killed it while the run went on, is a fault. So is
+// one the hooks hold no record of (agent.ConnEndInfo): nothing says it was the
+// run's end, and a call the application never got an answer to is recorded as
+// one it gave up on.
+func (p *Proxy) peerEndMarker(sess *supervisor.Session, app netip.AddrPort) func(fakeconn.Direction, bool) {
 	return func(dir fakeconn.Direction, reset bool) {
 		stopped := p.StopBegun()
 		if !stopped && dir == fakeconn.FromClient {
-			stopped = learn.ProcExiting(peerEndProcRoot, clientPid)
+			stopped = p.appEndedByItsExit(app)
 		}
 		sess.MarkPeerEndedStopping(dir, reset, stopped)
 	}
+}
+
+// appEndedByItsExit reports whether the kernel saw the application release its
+// end app of a connection as its process exited on its own, killed by no
+// signal (agent.AppConnEnd); false where the hooks hold no record of it.
+func (p *Proxy) appEndedByItsExit(app netip.AddrPort) bool {
+	ce, ok := p.DestInfo.(agent.ConnEndInfo)
+	if !ok {
+		return false
+	}
+	end, ok := ce.TakeAppConnEnd(app)
+	return ok && end.Exiting && end.Signal == 0
 }
