@@ -168,8 +168,9 @@ func TestLearnMatchLearnsEveryPartOfARequest(t *testing.T) {
 		t.Fatalf("served %v miss %+v err %v", served, miss, err)
 	}
 	// The path segment, the query value, the header, and the credential the
-	// static noise list names: it leaves that list in the learn step.
-	want := map[string][]string{"url.path.2": {}, "url.query.at": {}, "header.x-trace": {}, "header.authorization": {}}
+	// static noise list names: it leaves that list in the learn step. Of the
+	// credential only its token changed: its scheme is still compared.
+	want := map[string][]string{"url.path.2": {}, "url.query.at": {}, "header.x-trace": {}, "header.authorization": {learn.NoiseWordsPattern([]int{1})}}
 	if got := db.consumed[0].Spec.ReqBodyNoise; !reflect.DeepEqual(got, want) {
 		t.Fatalf("learned %v, want %v", got, want)
 	}
@@ -3729,14 +3730,15 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 				if tc.own {
 					learned = db.consumed
 				}
-				// A read of the clock inside a longer value stays noise; one
-				// that is an instant whole is still compared, in its call's
-				// window at every replay (MockSpec.Clocks).
+				// A read of the clock inside a longer value stays noise of
+				// that word, the rest of the text compared; one that is an
+				// instant whole is still compared, in its call's window at
+				// every replay (MockSpec.Clocks).
 				ok := len(learned) == 1
 				if ok && form.name == "one instant whole" {
 					ok = learnedClockRead(learned[0].Spec, "body.processed_at")
 				} else if ok {
-					ok = reflect.DeepEqual(learned[0].Spec.ReqBodyNoise, map[string][]string{"body.processed_at": {}}) && len(learned[0].Spec.Clocks) == 0
+					ok = reflect.DeepEqual(learned[0].Spec.ReqBodyNoise, map[string][]string{"body.processed_at": {learn.NoiseWordsPattern([]int{1})}}) && len(learned[0].Spec.Clocks) == 0
 				}
 				if got == nil || miss != nil || !ok {
 					t.Fatalf("served %v miss %+v learned %+v; want body.processed_at learned (%s)", got, miss, learned, form.name)
