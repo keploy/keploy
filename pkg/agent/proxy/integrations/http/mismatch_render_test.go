@@ -1,6 +1,7 @@
 package http
 
 import (
+	"mime/multipart"
 	"strings"
 	"testing"
 
@@ -177,5 +178,50 @@ func TestRedactBody_MultipartThatDoesNotRead(t *testing.T) {
 	}
 	if out := redactBody(body, ct, redactedPlaces{}); out != body {
 		t.Errorf("at a recording that redacted none: %q, want the body as sent", out)
+	}
+	// A whole body whose quoted-printable part does not decode.
+	badPart := "--b\r\nContent-Disposition: form-data; name=\"note\"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nplain \x01 words\r\n--b--\r\n"
+	if out := redactBody(badPart, ct, redactedPlaces{fields: map[string]bool{"assertion": true}}); out != valueRedacted {
+		t.Errorf("a part that does not read, at a recording that redacted a field: %q, want it redacted whole", out)
+	}
+	// A content type that names no boundary, before a body that reads as
+	// one with an empty boundary.
+	noBoundary := "--\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nplain words\r\n----\r\n"
+	if out := redactBody(noBoundary, "multipart/form-data", redactedPlaces{fields: map[string]bool{"assertion": true}}); out != valueRedacted {
+		t.Errorf("a content type with no boundary, at a recording that redacted a field: %q, want it redacted whole", out)
+	}
+	// A boundary longer than RFC 2046 allows (70 characters).
+	long := strings.Repeat("b", 71)
+	longBody := "--" + long + "\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nplain words\r\n--" + long + "--\r\n"
+	if out := redactBody(longBody, "multipart/form-data; boundary="+long, redactedPlaces{fields: map[string]bool{"assertion": true}}); out != valueRedacted {
+		t.Errorf("a boundary over 70 characters, at a recording that redacted a field: %q, want it redacted whole", out)
+	}
+}
+
+// A multipart body is redacted field by field the way the other bodies are:
+// a field with a sensitive name, a value that matches one of the mock's
+// patterns and a credential-shaped value are each redacted, wherever the
+// recording put them; the other fields show.
+func TestRedactBody_MultipartRedactsEachSecretField(t *testing.T) {
+	const ghToken = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789"
+	var b strings.Builder
+	w := multipart.NewWriter(&b)
+	for _, f := range [][2]string{{"password", "hunter2-pw"}, {"note", "tok-123456"}, {"ref", ghToken}, {"x", "bravo2"}} {
+		if err := w.WriteField(f[0], f[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	places := redactedPlaces{values: util.NewNoiseChecker([]string{`^tok-[0-9]{6}$`}), fields: map[string]bool{}}
+	out := redactBody(b.String(), w.FormDataContentType(), places)
+	for _, secret := range []string{"hunter2-pw", "tok-123456", ghToken} {
+		if strings.Contains(out, secret) {
+			t.Errorf("the rendered body carries %q:\n%s", secret, out)
+		}
+	}
+	if !strings.Contains(out, "bravo2") || strings.Count(out, valueRedacted) != 3 {
+		t.Errorf("want the three secret fields redacted and the rest shown:\n%s", out)
 	}
 }

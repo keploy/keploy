@@ -42,9 +42,8 @@ type redactedPlaces struct {
 	body bool
 	// fields are body fields by the name a field diff gives them under
 	// "body.": a JSON field's path with each array position written "[]",
-	// a root array's too ("[].id", as matcher.JSONFieldDiffs names it; the
-	// strict comparison's "body[].id" is read the same), a form key or a
-	// multipart field's name, decoded.
+	// a root array's too ("[].id", as matcher.JSONFieldDiffs and the strict
+	// comparison name it), a form key or a multipart field's name, decoded.
 	fields map[string]bool
 }
 
@@ -175,9 +174,9 @@ func (p redactedPlaces) field(name string) bool {
 // test variable's place, or a word of one, reads in the variables grammar
 // (variables.ParseAddress: header.X, url.query.name, url.path[i],
 // body.items[0].id); a place a diff names in its own ("query.name", a
-// "[]" for an array's elements) reads as the matcher writes it. A diff of
-// the whole body is covered when any part of the body was redacted: its
-// values would carry that part.
+// "[]" for an array's elements) reads as the matcher writes it. A diff
+// named "body" alone carries no value of the call: the strict comparison
+// writes it with none, or with the two JSON types.
 func (p redactedPlaces) covers(path string) bool {
 	if a, err := variables.ParseAddress(path); err == nil && p.at(a.Place) {
 		return true
@@ -185,13 +184,8 @@ func (p redactedPlaces) covers(path string) bool {
 	switch {
 	case strings.HasPrefix(path, "query."):
 		return p.query[strings.TrimPrefix(path, "query.")]
-	case path == "body":
-		return p.body || len(p.fields) > 0
 	case strings.HasPrefix(path, "body."):
 		return p.field(strings.TrimPrefix(path, "body."))
-	case strings.HasPrefix(path, "body["):
-		// A root array's element under the strict comparison.
-		return p.field(strings.TrimPrefix(path, "body"))
 	}
 	return false
 }
@@ -270,7 +264,7 @@ func (p redactedPlaces) redactDiff(d *models.MockFieldDiff) {
 // It reports false when the body does not read as one.
 func (p redactedPlaces) redactMultipart(body, contentType string) (string, bool) {
 	_, params, err := mime.ParseMediaType(contentType)
-	if err != nil || params["boundary"] == "" {
+	if err != nil {
 		return "", false
 	}
 	// A body cut before its close delimiter does not read as one, though
@@ -282,6 +276,8 @@ func (p redactedPlaces) redactMultipart(body, contentType string) (string, bool)
 	mr := multipart.NewReader(strings.NewReader(body), params["boundary"])
 	var b bytes.Buffer
 	w := multipart.NewWriter(&b)
+	// SetBoundary refuses a boundary RFC 2046 does not allow: none, or one
+	// longer than 70 characters.
 	if err := w.SetBoundary(params["boundary"]); err != nil {
 		return "", false
 	}

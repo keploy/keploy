@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // liveSecret is what the app sends where the recording holds a value the
@@ -111,6 +112,8 @@ func redactedLiveCases(t *testing.T) []redactedLiveCase {
 		// path escaped, as a place counts it.
 		{name: "path-segment-route-variable", url: "/x/REDACTED_abc/y", liveURL: "/x/" + liveSecret + "/y", ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value, vars: models.MockVariables{"v": {Recorded: "y", Bind: "url.path[2]"}}},
 		{name: "path-segment-escaped-route-variable", url: "/x/REDACTED_abc/y", liveURL: "/x/" + liveSecret + "%2B/y", ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value, vars: models.MockVariables{"v": {Recorded: "y", Bind: "url.path[2]"}}},
+		// The variable's place is the segment the recording redacted.
+		{name: "path-segment-at-its-route-variable", url: "/x/REDACTED_abc/y", liveURL: "/x/" + liveSecret + "/y", ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value, vars: models.MockVariables{"v": {Recorded: "REDACTED_abc", Bind: "url.path[1]"}}},
 	}
 }
 
@@ -305,6 +308,10 @@ func TestAnsweredAndPairedReportsRedactTheLiveValueAtARedactedSegment(t *testing
 				if r != nil && !strings.HasPrefix(r.ActualSummary, "POST /x/") {
 					t.Errorf("the summary does not name the call's path: %s", r.ActualSummary)
 				}
+				// A route variable's place is named on the miss.
+				if on && len(c.vars) > 0 && len(r.VariablePlaces) == 0 {
+					t.Errorf("the miss names no route variable's place: %+v", r)
+				}
 			})
 			t.Run("paired/"+c.name+"/"+mode, func(t *testing.T) {
 				t.Setenv(provenswitch.Env, env)
@@ -349,8 +356,10 @@ func TestVariableMissRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
 		name  string
 		mocks func() []*models.Mock
 		first *req
-		live  step
-		why   string
+		// give, when set, is a value the test gave before the call.
+		give *variables.Binding
+		live step
+		why  string
 	}{
 		{name: "use-at-a-path-segment", why: "this call sent", mocks: func() []*models.Mock {
 			m := at(varMock("mock-2", "GET", "http://store/orders/"+rec, "", 200, `{}`, models.MockVariables{"orderId": useV(rec, []string{"url.path[1]"})}), 2)
@@ -381,10 +390,28 @@ func TestVariableMissRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
 			m.Noise = noise
 			return []*models.Mock{bind(), m}
 		}, first: bindLive, live: step{method: "POST", path: "/carts", body: `{"cart":"` + liveBound + `"}`}},
+		{name: "a-given-not-passed-on", why: "the application did not pass on the value the test gave", mocks: func() []*models.Mock {
+			m := at(varMock("mock-1", "POST", "http://store/apps", `{"name":"`+rec+`"}`, 201, `{}`, models.MockVariables{"given:app": useV(rec, []string{"body.name"})}), 1)
+			m.Noise = noise
+			return []*models.Mock{m}
+		}, give: &variables.Binding{Name: "given:app", Value: liveBound, Recorded: rec, Mock: "test o::TestApps", Place: "apps_test.go:20"},
+			live: step{method: "POST", path: "/apps", body: `{"name":"` + liveSecret + `"}`}},
+		// One of the mock's patterns matches the whole recorded note.
+		{name: "a-worded-text", why: "A word is read where the rest of that text places it", mocks: func() []*models.Mock {
+			ms := wordedCreate()
+			ms[0].Noise = []string{`appRec7`}
+			return ms
+		}, live: step{method: "PUT", path: "/secrets/app", body: `{"data":{"note":"made by ` + liveSecret + ` at noon"}}`}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newHTTP()
 			db := &varDb{perTest: c.mocks()}
+			if c.give != nil {
+				db.table.Start(nil)
+				if _, ok := db.table.Give(*c.give); !ok {
+					t.Fatal("the test's given did not bind")
+				}
+			}
 			if c.first != nil {
 				if ok, _, _ := matchVar(t, h, db, c.first); !ok {
 					t.Fatal("the binding call should match")
