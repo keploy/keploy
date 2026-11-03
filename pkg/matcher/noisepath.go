@@ -279,16 +279,19 @@ func (w *noiseCandidateWalk) alreadySilenced(lowerKey string, ancestryLower []st
 // this value of a leaf, applying patterns the way noisyForValues does — an
 // entry with patterns only excuses the values those patterns match, so treating
 // it as an unconditional skip would make the producer return nothing for a live
-// drift. A drift is excused when both its values are (noisyForValues).
+// drift. knownCoversPair of one value.
 func (w *noiseCandidateWalk) knownCoversLeaf(key string, actual interface{}) bool {
-	value, isScalar := jsonScalarToString(actual)
-	if regs, noisy := w.knownPath.match(strings.ToLower(key)); noisy {
-		if len(regs) == 0 {
-			return true
-		}
-		if isScalar && anyRegexpMatchStr(value, regs) {
-			return true
-		}
+	return w.knownCoversPair(key, actual, actual)
+}
+
+// knownCoversPair reports whether one entry of the test case's existing noise
+// excuses both values of a leaf, as the matcher reads them: the path entry
+// that names it, or the global entry on its field (noisyForValues), each
+// value matching one of that entry's patterns. Each side excused by another
+// entry is not excused: the matcher holds one entry to both values.
+func (w *noiseCandidateWalk) knownCoversPair(key string, exp, act interface{}) bool {
+	if regs, noisy := w.knownPath.match(strings.ToLower(key)); noisy && leafCovered(regs, exp) && leafCovered(regs, act) {
+		return true
 	}
 	if !w.hasKnownGlobal {
 		return false
@@ -299,13 +302,17 @@ func (w *noiseCandidateWalk) knownCoversLeaf(key string, actual interface{}) boo
 		field = key[i+1:]
 	}
 	regs, isGlobal := w.knownGlobalRegs[strings.ToLower(field)]
-	if !isGlobal {
-		return false
-	}
+	return isGlobal && leafCovered(regs, exp) && leafCovered(regs, act)
+}
+
+// leafCovered reports whether an entry's patterns regs excuse a leaf's value
+// v: an entry with none any value, one with patterns a scalar one matches.
+func leafCovered(regs []*regexp.Regexp, v interface{}) bool {
 	if len(regs) == 0 {
 		return true
 	}
-	return isScalar && anyRegexpMatchStr(value, regs)
+	s, ok := jsonScalarToString(v)
+	return ok && anyRegexpMatchStr(s, regs)
 }
 
 // knownCoversSubtree mirrors the walker's container early-return: only an entry
@@ -375,12 +382,13 @@ func (w *noiseCandidateWalk) walk(key, id string, exp, act interface{}, ambiguou
 				continue
 			}
 			// A global entry on a key that IS present skips the child subtree
-			// wholesale, structure included — and with containersCovered=true, so
-			// even a pattern-guarded one does when both values are containers or
-			// match it. Walking into it anyway invented refusals for differences
-			// the matcher already excuses, and derived redundant entries for
-			// values it had already stopped comparing.
-			if w.globalCoversSubtree(k, ev) && w.globalCoversSubtree(k, av) {
+			// wholesale, structure included, as the matcher does
+			// (globalCoversPair): even a pattern-guarded one does when both
+			// values are containers or both match it. Walking into it anyway
+			// invented refusals for differences the matcher already excuses,
+			// and derived redundant entries for values it had already stopped
+			// comparing.
+			if w.globalCoversPair(k, ev, av) {
 				continue
 			}
 			w.walk(child, childNodeID(id, k), ev, av, ambiguous || strings.Contains(k, "."), ancestorNoisy)
@@ -484,7 +492,7 @@ func (w *noiseCandidateWalk) walk(key, id string, exp, act interface{}, ambiguou
 		if key != "" {
 			w.drifted[id] = true
 		}
-		if ancestorNoisy || (w.knownCoversLeaf(key, exp) && w.knownCoversLeaf(key, act)) {
+		if ancestorNoisy || w.knownCoversPair(key, exp, act) {
 			return
 		}
 		switch {
@@ -573,6 +581,17 @@ func (w *noiseCandidateWalk) acceptedByMatcher(exp, act interface{}, known map[s
 	}
 	res, err := JSONDiffWithNoiseControl(ValidatedJSON{expected: exp, actual: act}, effective, ignoreOrdering, nil)
 	return err == nil && res.IsExact()
+}
+
+// globalCoversPair reports whether a global entry on field excuses the pair
+// of values a key present in both documents holds, as the matcher's
+// present-key branch reads it (globalCoversPair).
+func (w *noiseCandidateWalk) globalCoversPair(field string, exp, act interface{}) bool {
+	if !w.hasKnownGlobal {
+		return false
+	}
+	regs, ok := w.knownGlobalRegs[strings.ToLower(field)]
+	return ok && globalCoversPair(regs, exp, act)
 }
 
 // globalCoversSubtree reports whether a global entry covers a key that is present

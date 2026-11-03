@@ -75,6 +75,15 @@ func TestFailureAssessmentNamesTheNoisePatternAndTheSide(t *testing.T) {
 			},
 		},
 		{
+			// A failed test that adds a field besides changing a value names
+			// the added field's pattern too: the recording lacks it.
+			name:  "a field only the live side holds, besides a changed value",
+			exp:   `{"n":1}`,
+			act:   `{"n":2,"id":1}`,
+			noise: map[string][]string{"id": {"^1$"}},
+			want:  []string{PatternWhy("id", []string{"^1$"}, "recorded", "absent")},
+		},
+		{
 			name:  "the recorded null is outside the pattern",
 			exp:   `{"v":null}`,
 			act:   `{"v":"x"}`,

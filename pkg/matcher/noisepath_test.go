@@ -531,6 +531,30 @@ func TestBodyNoiseFromJSONDiff_PatternGuardedKnownDoesNotSwallowDrift(t *testing
 	}
 }
 
+// The walker holds one entry of the known noise to both values, as the
+// matcher does: a path entry the recorded value matches and a global entry
+// the replayed one matches do not, together, excuse a drift; and a global
+// pattern does not excuse a scalar replaced by a container.
+func TestBodyNoiseFromJSONDiff_OneEntryCoversBothValues(t *testing.T) {
+	exp, act := `{"o":{"ts":"2024-1"}}`, `{"o":{"ts":"2025-1"}}`
+	split := map[string][]string{"o.ts": {"^2024-"}, "ts": {"^2025-"}}
+	if bodyMatches(t, exp, act, split) {
+		t.Fatal("control failed: the matcher excuses a drift no one entry covers")
+	}
+	if paths, skipped := BodyNoiseFromJSONDiff(exp, act, split, false); len(paths) != 1 || paths[0] != "o.ts" {
+		t.Errorf("paths = %v, skipped = %+v; want [o.ts]", paths, skipped)
+	}
+
+	exp, act = `{"id":1}`, `{"id":{"evil":true}}`
+	retype := map[string][]string{"id": {`^\d+$`}}
+	if bodyMatches(t, exp, act, retype) {
+		t.Fatal("control failed: the matcher excuses a scalar replaced by an object under a pattern")
+	}
+	if paths, skipped := BodyNoiseFromJSONDiff(exp, act, retype, false); len(paths) != 0 || len(skipped) != 1 || skipped[0].Path != "id" || skipped[0].Reason != NoiseSkipStructural {
+		t.Errorf("paths = %v skipped = %+v, want no path and id skipped as structural", paths, skipped)
+	}
+}
+
 // An empty object or array contributes no LEAF, so a coverage index built only
 // from leaves cannot see it — and a candidate that is a string-prefix of its key
 // then silences the whole subtree, including the assertion that it stayed empty.

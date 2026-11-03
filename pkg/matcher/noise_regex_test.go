@@ -169,6 +169,15 @@ func TestRegexNoise_EnforcesPattern(t *testing.T) {
 			want:     false,
 		},
 		{
+			// A dotted entry reaches the number itself: the recorded side is
+			// read, not only the live one.
+			name:     "number under a dotted entry: a recorded value outside the pattern is a real difference",
+			expected: `{"a":{"n":5}}`,
+			actual:   `{"a":{"n":1}}`,
+			noise:    map[string][]string{"a.n": {"^1$"}},
+			want:     false,
+		},
+		{
 			name:     "several patterns: matching none of them is a real difference",
 			expected: `{"order":{"status":"PENDING"}}`,
 			actual:   `{"order":{"status":"CANCELLED"}}`,
@@ -341,6 +350,45 @@ func TestRegexNoise_GlobalKeyEnforcesPattern(t *testing.T) {
 			actual:   `{"status":"PAID"}`,
 			noise:    map[string][]string{"status": {"^(PENDING|PAID)$"}},
 			want:     false,
+		},
+		{
+			// A scalar replaced by a container is a retype: the live value
+			// is outside the pattern, whichever way round.
+			name:     "a recorded scalar the pattern matches, a live object",
+			expected: `{"id":1}`,
+			actual:   `{"id":{"evil":true}}`,
+			noise:    map[string][]string{"id": {`^\d+$`}},
+			want:     false,
+		},
+		{
+			name:     "a recorded object, a live scalar the pattern matches",
+			expected: `{"id":{"a":1}}`,
+			actual:   `{"id":"7"}`,
+			noise:    map[string][]string{"id": {`^\d+$`}},
+			want:     false,
+		},
+		{
+			name:     "a recorded null the pattern matches, a live object",
+			expected: `{"id":null}`,
+			actual:   `{"id":{"x":1}}`,
+			noise:    map[string][]string{"id": {`^(null|\d+)$`}},
+			want:     false,
+		},
+		{
+			name:     "nested: a recorded scalar the pattern matches, a live array",
+			expected: `{"o":{"id":1}}`,
+			actual:   `{"o":{"id":[9,9]}}`,
+			noise:    map[string][]string{"id": {`^\d+$`}},
+			want:     false,
+		},
+		{
+			// Two containers hold no single value for a pattern to match:
+			// the entry named the field, which it excuses whole.
+			name:     "a container on both sides is excused by a pattern naming it",
+			expected: `{"id":{"a":1}}`,
+			actual:   `{"id":[2]}`,
+			noise:    map[string][]string{"id": {`^\d+$`}},
+			want:     true,
 		},
 		{
 			// A pattern has no value to match against, and a field disappearing

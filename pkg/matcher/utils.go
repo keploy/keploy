@@ -682,8 +682,8 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 			}
 
 			// A pattern-guarded entry excuses the field only when the recorded
-			// and the replayed value each match it.
-			if regs, isGlobal := globalKeys[strings.ToLower(k)]; isGlobal && noisyForRegexps(regs, v, true) && noisyForRegexps(regs, val, true) {
+			// and the replayed value each match it (globalCoversPair).
+			if regs, isGlobal := globalKeys[strings.ToLower(k)]; isGlobal && globalCoversPair(regs, v, val) {
 				continue
 			}
 
@@ -915,6 +915,25 @@ func noisyForRegexps(regs []*regexp.Regexp, value interface{}, containersCovered
 		return containersCovered
 	}
 	return anyRegexpMatchStr(s, regs)
+}
+
+// globalCoversPair reports whether a global entry's patterns regs excuse a
+// field present on both sides with the recorded value rec and the live value
+// live: an entry with no patterns whatever they are; one with patterns two
+// scalars that each match one, or two containers, which hold no single value
+// for a pattern to match (the entry named the field). A scalar on one side
+// and a container on the other is a retype, which no pattern excuses: the
+// live value is outside the pattern, or the recorded one is.
+func globalCoversPair(regs []*regexp.Regexp, rec, live interface{}) bool {
+	if len(regs) == 0 {
+		return true
+	}
+	rs, recScalar := jsonScalarToString(rec)
+	ls, liveScalar := jsonScalarToString(live)
+	if recScalar != liveScalar {
+		return false
+	}
+	return !recScalar || anyRegexpMatchStr(rs, regs) && anyRegexpMatchStr(ls, regs)
 }
 
 // allJSONScalars reports whether every element is a JSON scalar, i.e. the array
