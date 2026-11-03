@@ -427,20 +427,26 @@ func noSecret(t *testing.T, r *models.MockMismatchReport, wantSummary bool) {
 // A stateful walk's miss (each recording of the call has answered) names the
 // call's path with the segments its last recording redacted redacted, and so
 // does the report of a call paired with a recording: the call sent its secret
-// there. Switch off and on.
+// there. Switch off and on; with the switch off the walk's miss at a
+// recording that states its lifetime (the request matcher's walk under exact
+// serving) also tells how to serve the call to every test, by a path prefix
+// that names no redacted segment.
 func TestAnsweredAndPairedReportsRedactTheLiveValueAtARedactedSegment(t *testing.T) {
 	for _, c := range redactedLiveCases(t) {
 		if !strings.HasPrefix(c.name, "path-segment") {
 			continue
 		}
-		for _, on := range []bool{false, true} {
-			mode, env := "off", ""
+		for _, mode := range []string{"off", "off-stated-lifetime", "on"} {
+			on, env := mode == "on", ""
 			if on {
-				mode, env = "on", "1"
+				env = "1"
 			}
 			t.Run("answered/"+c.name+"/"+mode, func(t *testing.T) {
 				t.Setenv(provenswitch.Env, env)
 				m := c.mock()
+				if mode == "off-stated-lifetime" {
+					m.Spec.Metadata = map[string]string{models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+				}
 				_, request := c.sent()
 				i, _, answered := servedWalk(nil, []*models.Mock{m}, integrations.SequenceView{Cursor: &mockMemDb{}})
 				if i != -1 || answered == nil || answered.last != m.Name {
@@ -462,7 +468,13 @@ func TestAnsweredAndPairedReportsRedactTheLiveValueAtARedactedSegment(t *testing
 				if on && len(c.vars) > 0 && len(r.VariablePlaces) == 0 {
 					t.Errorf("the miss names no route variable's place: %+v", r)
 				}
+				if mode == "off-stated-lifetime" && r != nil {
+					sessionHintMatchesTheCall(t, r, request)
+				}
 			})
+			if mode == "off-stated-lifetime" {
+				continue // a paired call's report has no next steps to serve it
+			}
 			t.Run("paired/"+c.name+"/"+mode, func(t *testing.T) {
 				t.Setenv(provenswitch.Env, env)
 				m := c.mock()

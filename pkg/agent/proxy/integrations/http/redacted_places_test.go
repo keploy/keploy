@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // A body field is redacted when the recording redacted it, a field inside
@@ -72,6 +73,31 @@ func TestRedactedPathKeepsWhatHoldsNoValue(t *testing.T) {
 	redactFieldDiffs(kept, redactedPlacesOf(&models.HTTPReq{URL: "http://store/%zz"}, nil), "/x")
 	if kept[0].Expected != "http://store/%zz" || kept[0].Actual != "/x" {
 		t.Errorf("a recording with no segments counted, at a mock that redacted nothing, got %q, %q", kept[0].Expected, kept[0].Actual)
+	}
+}
+
+// A recorded URL that does not parse, at a mock that redacted something,
+// has its places read as all redacted by every reader: a path segment and a
+// query value named in the variables' grammar, as in the matcher's, and a
+// variable's place. At a mock that redacted nothing they are not.
+func TestAnUnreadRecordedURLHasEveryPathAndQueryPlaceRedacted(t *testing.T) {
+	unread := redactedPlacesOf(&models.HTTPReq{URL: "/x/%zz/REDACTED_abc"}, []string{`^REDACTED_abc$`})
+	kept := redactedPlacesOf(&models.HTTPReq{URL: "/x/%zz/REDACTED_abc"}, nil)
+	for _, path := range []string{"url.path[0]", "url.path[2]", "url.query.q", "query.q"} {
+		if !unread.covers(path) {
+			t.Errorf("covers(%q) at an unread recorded URL is false", path)
+		}
+		if kept.covers(path) {
+			t.Errorf("covers(%q) at a mock that redacted nothing is true", path)
+		}
+	}
+	for _, place := range []variables.Place{{Part: variables.PartPath, Index: 1}, {Part: variables.PartQuery, Name: "q"}} {
+		if !unread.at(place) {
+			t.Errorf("at(%+v) at an unread recorded URL is false", place)
+		}
+		if kept.at(place) {
+			t.Errorf("at(%+v) at a mock that redacted nothing is true", place)
+		}
 	}
 }
 
