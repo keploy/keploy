@@ -109,13 +109,15 @@ func TestResolveReqBodyNoise(t *testing.T) {
 // A place learned by its words (learn.NoiseWordsPattern) is written under
 // Words with the numbers of its unchecked words, never under Req; a words
 // pattern that names no word is not written, so the place is compared.
+// Every words place of a mock is written, not only one of them.
 func TestNewDocNoiseWritesATextsUncheckedWordsUnderWords(t *testing.T) {
 	got := NewDocNoise(nil, map[string][]string{
-		"body.note": {learn.NoiseWordsPattern([]int{1, 3})},
-		"body.a":    {},
-		"body.bad":  {"^keploy:words x$"},
+		"body.note":            {learn.NoiseWordsPattern([]int{1, 3})},
+		"header.Authorization": {learn.NoiseWordsPattern([]int{1})},
+		"body.a":               {},
+		"body.bad":             {"^keploy:words x$"},
 	})
-	want := &DocNoise{Req: []string{"body.a"}, Words: map[string][]int{"body.note": {1, 3}}}
+	want := &DocNoise{Req: []string{"body.a"}, Words: map[string][]int{"body.note": {1, 3}, "header.Authorization": {1}}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("NewDocNoise = %#v, want %#v", got, want)
 	}
