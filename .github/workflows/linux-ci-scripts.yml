@@ -28,6 +28,12 @@ name: Linux CI scripts
 # never source a local install.sh in place of a failed download, and delete
 # nothing there. With --oss it must download and extract in a temp directory
 # of its own too, and touch no fixed /tmp path, nor anyone else's files.
+#
+# And mock-kinds.tests.sh: http_mocks_are, the check of a lane that counts
+# the Http mocks its own calls make (repeated-headers' busy --sync pass). DNS
+# mocks of the runner's own name, which only some runners' resolvers answer,
+# pass beside them; an Http mock lost or duplicated, or a mock of any other
+# kind, fails.
 
 on:
   push:
@@ -42,6 +48,8 @@ on:
       - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh'
       - 'keploy.sh'
       - '.github/workflows/test_workflow_scripts/keploy-installer.tests.sh'
+      - '.github/workflows/test_workflow_scripts/mock-kinds.sh'
+      - '.github/workflows/test_workflow_scripts/mock-kinds.tests.sh'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
     paths:
@@ -53,6 +61,8 @@ on:
       - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh'
       - 'keploy.sh'
       - '.github/workflows/test_workflow_scripts/keploy-installer.tests.sh'
+      - '.github/workflows/test_workflow_scripts/mock-kinds.sh'
+      - '.github/workflows/test_workflow_scripts/mock-kinds.tests.sh'
       - '.github/workflows/linux-ci-scripts.yml'
 
 permissions:
@@ -186,3 +196,13 @@ jobs:
           REQUIRE_ZSH: '1'
           REQUIRE_PTY: '1'
         run: bash .github/workflows/test_workflow_scripts/keploy-installer.tests.sh
+
+  mock-kinds:
+    # Fourteen cases on files the script writes; under a second.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test mock-kinds.sh (DNS mocks beside the Http ones pass; an Http mock lost or duplicated, or another kind, fails)
+        run: bash .github/workflows/test_workflow_scripts/mock-kinds.tests.sh
