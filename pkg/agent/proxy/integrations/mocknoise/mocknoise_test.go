@@ -431,6 +431,12 @@ func TestLearnedFieldTypeStrict(t *testing.T) {
 		if !strict().StrictAllows(&models.Mock{}, []byte(`{"id":2,"name":"a"}`), map[string][]string{"id": {"^[12]$"}}) {
 			t.Fatalf("a value change the user's regex covers must be allowed when the path was also learned")
 		}
+		// A regex that covers the recorded 1 but not the live 2 constrains
+		// the live value too: the id may vary within the pattern, and 2 is
+		// outside it.
+		if strict().StrictAllows(&models.Mock{}, []byte(`{"id":2,"name":"a"}`), map[string][]string{"id": {"^1$"}}) {
+			t.Fatalf("a live value outside a regex the recorded value matches must be rejected")
+		}
 
 		// camelCase collision: user body noise is lowercased at ingest ("userid"),
 		// learned noise keeps the JSON case ("userId"). The user-exclusion must be
@@ -439,6 +445,32 @@ func TestLearnedFieldTypeStrict(t *testing.T) {
 		ca := &jsonAdapter{body: []byte(`{"userId":1}`), stored: map[string][]string{"body.userId": {}}}
 		if !newEngine(ca, false, true).StrictAllows(&models.Mock{}, []byte(`{"userId":"1"}`), map[string][]string{"userid": {}}) {
 			t.Fatalf("a user-ignored camelCase field must keep full-ignore (case-insensitive exclusion)")
+		}
+	})
+}
+
+// TestUserPatternConstrainsBothSides pins keploy.yml's pattern-guarded noise on
+// a mock's request body under strict serving: the field may vary only within
+// the pattern, so the recorded and the live value must each match it.
+func TestUserPatternConstrainsBothSides(t *testing.T) {
+	forEachStrictBranch(t, func(t *testing.T, newEngine func(a Adapter, detection, strict bool) *Engine) {
+		a := &jsonAdapter{body: []byte(`{"id":1,"name":"a"}`)}
+		strict := newEngine(a, false, true)
+		for _, c := range []struct {
+			live    string
+			pattern string
+			allowed bool
+		}{
+			{`{"id":2,"name":"a"}`, "^1$", false},    // the recorded value matches, the live does not
+			{`{"id":2,"name":"a"}`, "^2$", false},    // the live value matches, the recorded does not
+			{`{"id":2,"name":"a"}`, "^[12]$", true},  // both match
+			{`{"name":"a"}`, "^1$", false},           // the live body lacks it
+			{`{"id":"1","name":"a"}`, "^1$", true},   // both texts match; the user's entry ignores type
+			{`{"id":1,"name":"b"}`, "^[12]$", false}, // another field still compared
+		} {
+			if got := strict.StrictAllows(&models.Mock{}, []byte(c.live), map[string][]string{"id": {c.pattern}}); got != c.allowed {
+				t.Errorf("live %s under id %q: allowed = %v, want %v", c.live, c.pattern, got, c.allowed)
+			}
 		}
 	})
 }

@@ -818,7 +818,11 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	// What the learn step learned as noise at one exact place of this call
 	// (a path segment, a query value, a header value, one element of an
 	// array) is not compared either: its recorded value is put back there
-	// too, the place's presence and JSON type still required.
+	// too, the place's presence and JSON type still required. A place
+	// keploy.yml's entry with patterns names is left as the call sent it:
+	// those patterns decide it in the comparison below, and no noise
+	// learned there excuses a value they refuse.
+	user := h.newStrictNoise(headerNoise, userBodyNoise, urlNoise)
 	for k := range m.Spec.ReqBodyNoise {
 		raw, ok := learn.VarPlace(learn.Leaf{Path: k}, jsonBody)
 		if !ok {
@@ -836,6 +840,9 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 			// never excused by noise on the same place.
 			continue
 		}
+		if user.guardsPlace(place) {
+			continue
+		}
 		r, ok := rec.leaf(place)
 		if !ok {
 			continue
@@ -850,7 +857,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	}
 
 	// 1. The call, with the recorded values put back, is the recording.
-	if !h.fitsRecording(ctx, asRecorded.asReq(input), m, headerNoise, userBodyNoise, urlNoise) {
+	if !h.fitsRecording(ctx, asRecorded.asReq(input), m, user) {
 		return nil, nil
 	}
 	if typeChange != nil {
@@ -1063,8 +1070,8 @@ func sameRoute(live, rec reqView, m *models.Mock) bool {
 // body field by field. Known noise widens only this comparison: the
 // variables are checked at their places apart from it, so a noise entry over
 // a variable's place never excuses a wrong value there.
-func (h *HTTP) fitsRecording(ctx context.Context, asRecorded *req, m *models.Mock, headerNoise, userBodyNoise map[string][]string, urlNoise []string) bool {
-	return len(strictDiff(ctx, asRecorded, liveDestination(ctx, asRecorded), m, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise))) == 0
+func (h *HTTP) fitsRecording(ctx context.Context, asRecorded *req, m *models.Mock, user strictNoise) bool {
+	return len(strictDiff(ctx, asRecorded, liveDestination(ctx, asRecorded), m, user)) == 0
 }
 
 // varStage is the variable pass's decision of a call in one attempt

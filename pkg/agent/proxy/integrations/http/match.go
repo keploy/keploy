@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -367,7 +369,11 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		}
 
 		// Exact body match
-		ok, bestMatch := h.ExactBodyMatch(input.body, schemaMatched)
+		// A value the obfuscator redacted is excused there, but one that
+		// keploy.yml's request-body patterns guard holds the live value.
+		ok, bestMatch := h.exactBodyMatch(input.body, schemaMatched, func(m *models.Mock) bool {
+			return len(noiseEngine.PatternDrift(m, input.body, userBodyNoise)) == 0
+		})
 		if ok {
 			// Stateful dependency: when several recorded responses share this
 			// exact request (a counter, a created-then-read row), serve them in
@@ -474,6 +480,21 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 
 			// More than one match, perform fuzzy match
 			shortListed = bodyMatched
+		} else if schemaNoiseStrict {
+			// A body that is not JSON (a form) is value-checked only where
+			// keploy.yml's request-body patterns guard a field: they hold
+			// both values, or the live one where the obfuscator redacted
+			// the recorded one.
+			var held []*models.Mock
+			for _, m := range shortListed {
+				if len(noiseEngine.PatternDrift(m, input.body, userBodyNoise)) == 0 {
+					held = append(held, m)
+				}
+			}
+			if len(held) == 0 {
+				return false, nil, &matchDiag{phase: models.MatchPhaseStrict, candidates: len(comparedPool), schemaMatched: schemaMatched, pool: comparedPool}, nil
+			}
+			shortListed = held
 		}
 
 		h.Logger.Debug("Performing fuzzy match for req buffer")
@@ -1413,6 +1434,13 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 //     produce byte-identical request bodies at replay.
 //  3. JSON — field-by-field comparison via JSONBodyMatchScore.
 func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, *models.Mock) {
+	return h.exactBodyMatch(body, schemaMatched, func(*models.Mock) bool { return true })
+}
+
+// exactBodyMatch is ExactBodyMatch whose second pass, which excuses the
+// values the obfuscator redacted, matches a mock only when held allows it:
+// the replay holds keploy.yml's request-body patterns there (PatternDrift).
+func (h *HTTP) exactBodyMatch(body []byte, schemaMatched []*models.Mock, held func(*models.Mock) bool) (bool, *models.Mock) {
 	// Log all mock names in a single line for better readability
 	if ce := h.Logger.Check(zap.DebugLevel, "mocks under consideration for exact body match"); ce != nil {
 		ce.Write(zap.Strings("mock names", mockNamesOf(schemaMatched)), zap.Int("req body bytes", len(body)))
@@ -1455,7 +1483,7 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 
 		// If the entire body is a single noisy value, auto-match
 		// (schema match already filtered by URL, method, headers)
-		if nc.IsNoisy(mockBody) {
+		if nc.IsNoisy(mockBody) && held(mock) {
 			if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
 				ce.Write(zap.String("mock", mock.Name),
 					zap.Float64("match_percentage", 100.0),
@@ -1470,7 +1498,7 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 		// segment. The remaining keys must be the same set on both sides
 		// and each non-wildcarded value(s) must be byte-equal.
 		if reqIsForm && looksLikeFormEncoded(mockBody) {
-			if formBodiesMatchModuloNoise(mockBody, reqBodyStr, nc) {
+			if formBodiesMatchModuloNoise(mockBody, reqBodyStr, nc) && held(mock) {
 				if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
 					ce.Write(zap.String("mock", mock.Name),
 						zap.Float64("match_percentage", 100.0),
@@ -1510,7 +1538,7 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 		if matched == total {
 			// Verify the request has no extra non-noisy keys beyond
 			// what the mock defines — otherwise this isn't truly exact.
-			if !util.HasExtraNonNoisyKeys(mockData, reqData, nc) {
+			if !util.HasExtraNonNoisyKeys(mockData, reqData, nc) && held(mock) {
 				return true, mock
 			}
 		}
@@ -2082,9 +2110,47 @@ func isFormURLEncoded(header map[string]string) bool {
 	return false
 }
 
+// obfuscatedKey reports whether one of a recorded form key's raw values is in
+// a "key=value" segment the obfuscator's patterns match: per occurrence, on
+// the full raw segment, as Mock.Noise is read for form bodies.
+func obfuscatedKey(rawKey string, mv []string, isObfuscated func(string) bool) bool {
+	for _, v := range mv {
+		if isObfuscated(rawKey + "=" + v) {
+			return true
+		}
+	}
+	return false
+}
+
+// unobfuscated are the raw form values of mv the obfuscator did not redact,
+// in their order: each value it redacts matches a pattern of its own, as
+// it reads decoded.
+func unobfuscated(mv []string, isObfuscated func(string) bool) []string {
+	var out []string
+	for _, v := range mv {
+		// A value that does not unescape reads "", which no value the
+		// obfuscator redacted is.
+		if d, _ := url.QueryUnescape(v); !isObfuscated(d) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // formReqBodyNoise diffs two form-encoded bodies key-by-key and returns the
-// drifted/removed keys as body.<key> field-path noise. Keys already known or
-// covered by the obfuscator value-regexes are skipped.
+// drifted/removed keys as body.<key> field-path noise. Keys covered by the
+// obfuscator value-regexes are skipped, and so are keys known with no
+// patterns. A key known with patterns is skipped only when both bodies hold
+// it and each of its values, on each side, matches one (formValuesMatch):
+// otherwise its values are compared. The entry with patterns that decides a
+// key is found as the strict comparison and PatternDrift find it
+// (formGuards: on the decoded key, without case, whole fields at any depth).
+// Such a key is read on both sides by its decoded key, raw spellings that
+// decode alike as one key, their values read in body order and compared as
+// the strict comparison compares them (sameFormValues: decoded, in any
+// order, where both bodies parse), and its drift is named by it, which
+// PatternDrift's filter reads. Any other key is read by its raw text and its
+// raw values are compared in order, as before.
 func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObfuscated func(string) bool) map[string][]string {
 	// Split on raw bytes (Split on '&', IndexByte on '=') rather than via
 	// url.ParseQuery so the "key=value" segment handed to isObfuscated carries
@@ -2092,7 +2158,8 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 	// (^<raw_key>=[^&]+$) — exactly as formBodiesMatchModuloNoise does. Passing
 	// only the decoded value here would never match a key-anchored regex, so
 	// obfuscated form fields would be wrongly re-flagged as schema noise.
-	rawValuesByKey := func(body string) map[string][]string {
+	// The raw values of each key, in body order, the key as name gives it.
+	rawValuesByKey := func(body string, name func(string) string) map[string][]string {
 		out := map[string][]string{}
 		for _, seg := range strings.Split(body, "&") {
 			if seg == "" {
@@ -2102,37 +2169,64 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 			if i := strings.IndexByte(seg, '='); i >= 0 {
 				key, val = seg[:i], seg[i+1:]
 			}
-			out[key] = append(out[key], val)
+			out[name(key)] = append(out[name(key)], val)
 		}
 		return out
 	}
-	mockVals := rawValuesByKey(mockBody)
-	reqVals := rawValuesByKey(reqBody)
+	asWritten := func(k string) string { return k }
+	mockVals := rawValuesByKey(mockBody, asWritten)
+	reqVals := rawValuesByKey(reqBody, asWritten)
+	// By decoded key, built for the first key an entry with patterns guards.
+	var mockByName, reqByName map[string][]string
+	if isObfuscated == nil {
+		isObfuscated = func(string) bool { return false } // no value-regex noise on the mock
+	}
 
+	guards := formGuards(known)
+	read := map[string]bool{} // decoded keys a guarded key was read under
 	out := map[string][]string{}
 	for rawKey, mv := range mockVals {
 		key := "body." + rawKey
-		if _, ok := known[key]; ok {
-			continue
-		}
-		// Obfuscator exclusion is per-occurrence on the full raw key=value
-		// segment, matching how Mock.Noise is evaluated for form bodies.
-		// isObfuscated may be nil (no value-regex noise on the mock).
-		obfuscated := false
-		if isObfuscated != nil {
-			for _, v := range mv {
-				if isObfuscated(rawKey + "=" + v) {
-					obfuscated = true
-					break
-				}
+		pats, ok := known[key]
+		rv, inLive := reqVals[rawKey]
+		gp := guards(rawKey)
+		if len(gp) > 0 {
+			name := formKeyName(rawKey)
+			if read[name] {
+				continue
 			}
+			read[name] = true
+			if mockByName == nil {
+				mockByName, reqByName = rawValuesByKey(mockBody, formKeyName), rawValuesByKey(reqBody, formKeyName)
+			}
+			pats, ok, key = gp, true, "body."+name
+			mv = mockByName[name]
+			rv, inLive = reqByName[name]
 		}
-		if obfuscated {
+		if ok && len(pats) == 0 {
 			continue
 		}
-		rv, ok := reqVals[rawKey]
-		if !ok {
+		if len(pats) > 0 {
+			// The patterns decide the key, before the obfuscator's
+			// exclusion: a recorded value it redacted is not held to them
+			// (it matches a pattern of its own), the key's other recorded
+			// values and the live ones are.
+			if inLive && formValuesMatch(unobfuscated(mv, isObfuscated), pats) && formValuesMatch(rv, pats) {
+				continue
+			}
+		} else if obfuscatedKey(rawKey, mv, isObfuscated) {
+			continue
+		}
+		if !inLive {
 			out[key] = []string{} // key dropped on replay
+			continue
+		}
+		if len(gp) > 0 {
+			// A key the patterns guard is compared as the strict
+			// comparison compares it, so a miss and the switch agree.
+			if !sameFormValues(mv, rv, mockBody, reqBody) {
+				out[key] = []string{} // value drifted
+			}
 			continue
 		}
 		// Compare occurrences element-wise (order-sensitive) rather than
@@ -2153,6 +2247,81 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 		return nil
 	}
 	return out
+}
+
+// sameFormValues reports whether a form key's raw values a, of the form
+// body rec, and b, of live, are the same values as the strict comparison
+// reads them (formDiffs). Where url.ParseQuery reads both bodies, they are
+// compared as the application sent them (URL-decoded), in any order
+// (sameMembers): a value escaped another way ("+" or "%20" for a space) or a
+// repeated key's values in another order are the same values. Otherwise
+// (the strict comparison reads such a body, changed, as changed whole) they
+// are the same only as written, in order.
+func sameFormValues(a, b []string, rec, live string) bool {
+	if slices.Equal(a, b) {
+		return true
+	}
+	return formParses(rec) && formParses(live) && sameMembers(decodedFormValues(a), decodedFormValues(b))
+}
+
+// decodedFormValues are raw form values of a body url.ParseQuery reads,
+// URL-decoded (each does), in their order.
+func decodedFormValues(raw []string) []string {
+	out := make([]string, len(raw))
+	for i, v := range raw {
+		out[i], _ = url.QueryUnescape(v)
+	}
+	return out
+}
+
+// formParses reports whether url.ParseQuery reads body, as the strict
+// comparison reads a form; it does not where, for example, a segment holds
+// a ';', a key or a value does not decode, or the body holds more
+// parameters than it reads.
+func formParses(body string) bool {
+	_, err := url.ParseQuery(body)
+	return err == nil
+}
+
+// formGuards returns, for a raw form key, the patterns of the entry of known
+// ("body."-prefixed) that names its decoded key as matcher.NoiseLookup reads
+// it; none where no entry does, or the one that does has none (an entry with
+// none is read by its exact key, as before).
+func formGuards(known map[string][]string) func(rawKey string) []string {
+	for _, pats := range known {
+		if len(pats) > 0 {
+			lookup := matcher.NewNoiseLookup(stripBodyPrefix(known))
+			return func(rawKey string) []string {
+				pats, _ := lookup.Patterns(formKeyName(rawKey))
+				return pats
+			}
+		}
+	}
+	return func(string) []string { return nil }
+}
+
+// formKeyName is a raw form key as the application named it (URL-decoded),
+// or as written when it does not decode.
+func formKeyName(rawKey string) string {
+	if d, err := url.QueryUnescape(rawKey); err == nil {
+		return d
+	}
+	return rawKey
+}
+
+// formValuesMatch reports whether each of a form key's raw values, read as
+// the application sent it (URL-decoded), matches one of patterns. A pattern
+// that does not compile matches nothing.
+func formValuesMatch(raw []string, patterns []string) bool {
+	for _, v := range raw {
+		if d, err := url.QueryUnescape(v); err == nil {
+			v = d
+		}
+		if ok, _ := matcher.MatchesAnyRegex(v, patterns); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // mergeReqBodyNoise returns a fresh map combining existing and newly-detected
@@ -2390,10 +2559,27 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	fieldDiffs = append(fieldDiffs, mismatch.HeaderKeyDiffs(mockReq.Header, diffReq.Header, headerNoise)...)
 
 	// Body diffs: JSON bodies get field-level diffs excluding everything the
-	// matcher itself ignores (learned req_body_noise + user body noise).
+	// matcher itself ignores (learned req_body_noise + user body noise). The
+	// user's entry wins on a key both name: its patterns decide that field,
+	// so a value outside them stays in the diffs.
 	if len(diffBody) > 0 && pkg.IsJSON([]byte(mockReq.Body)) && pkg.IsJSON(diffBody) {
-		ignore := mergeNoiseMaps(stripBodyPrefix(closestMock.Spec.ReqBodyNoise), userBodyNoise)
+		ignore := mergeNoiseMaps(userBodyNoise, stripBodyPrefix(closestMock.Spec.ReqBodyNoise))
 		fieldDiffs = append(fieldDiffs, mismatch.JSONBodyDiffs(mockReq.Body, string(diffBody), ignore)...)
+	}
+
+	// A refusal under strict enforcement without the switch (the switch's
+	// own is reported above) can be of a field keploy.yml's request-body
+	// patterns guard, a side's value outside them (PatternDrift,
+	// StrictReject): the miss names it, the patterns and that side, as the
+	// switch's does.
+	var guarded []strictField
+	if phase == models.MatchPhaseStrict {
+		guarded = patternRefusals(closestMock, request.Header, liveBody, userBodyNoise)
+		for _, f := range guarded {
+			if !slices.ContainsFunc(fieldDiffs, func(d models.MockFieldDiff) bool { return d.Path == f.diff.Path }) {
+				fieldDiffs = append(fieldDiffs, f.diff)
+			}
+		}
 	}
 
 	// Redact secret / obfuscated values out of the structured diffs before they
@@ -2418,7 +2604,27 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		// of the misleading legacy "headers or body differ".
 		b = b.WithDiff(fmt.Sprintf("closest mock %q has no field-level differences; match stopped at phase %q", closestMock.Name, phase))
 	}
-	return withRoutePlaces(b.Build(), request, closestMock, comparedPool, variableTable(mockDb))
+	r = b.Build()
+	if r != nil {
+		r.FieldReasons = reasonsOf(guarded)
+	}
+	return withRoutePlaces(r, request, closestMock, comparedPool, variableTable(mockDb))
+}
+
+// patternRefusals are the fields of m's recorded request body that
+// keploy.yml's request-body entry with patterns (userBodyNoise) guards and a
+// side's value is outside of, each with its reason (matcher.PatternWhy), as
+// the strict comparison reads them: a recorded value the obfuscator redacted
+// is not held to the patterns, the live one is.
+func patternRefusals(m *models.Mock, header http.Header, liveBody []byte, userBodyNoise map[string][]string) []strictField {
+	k := strictKnown{n: strictNoise{body: matcher.NewNoiseLookup(userBodyNoise)}, values: util.NewNoiseChecker(m.Noise)}
+	var out []strictField
+	for _, f := range k.bodyDiffs(m.Spec.HTTPReq, &req{header: header, body: liveBody}) {
+		if f.why != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // comparedDestinations returns the upstream authority of every mock in the
