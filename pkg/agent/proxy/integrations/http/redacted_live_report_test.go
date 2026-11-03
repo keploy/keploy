@@ -212,6 +212,11 @@ func redactedLiveCases(t *testing.T) []redactedLiveCase {
 		// A JSON body with data after its value does not read as JSON
 		// (json.Unmarshal's rule): it is not read for fields.
 		{name: "json-with-data-after-the-value", url: "/x", liveURL: "/x/other", ctype: jsonCT, hdr: other, liveHdr: liveOther, rec: `{"x":"alpha1"} REDACTED_abc`, live: `{"x":"bravo2"} ` + liveSecret, noise: value, wholeBody: true},
+		// A pattern is read as written (the matcher's rule), not only with
+		// its anchors dropped: "^+" is one or more starts of the text, a
+		// pattern that names the value it anchors, and "+" alone does not
+		// compile.
+		{name: "json-pattern-with-a-repeated-anchor", url: "/x", ctype: jsonCT, rec: `{"assertion":"REDACTED_abc","x":"alpha1"}`, live: `{"assertion":"` + liveSecret + `","x":"bravo2"}`, noise: []string{`^+REDACTED_abc$`}},
 		// A recorded URL that does not parse, at a mock that redacted
 		// something: its places cannot be found, so the call's path and
 		// query values are redacted whole.
@@ -846,6 +851,9 @@ func TestAMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 		{name: "header", aURL: "/x/aa", bURL: "/x", live: "/x", aHdr: with(jsonHdr, "X-Sig", "REDACTED_abc"), bHdr: jsonHdr, inHdr: with(jsonHdr, "X-Sig", liveSecret), aBody: `{"x":"alpha1"}`, bBody: `{"x":"alpha1"}`, body: `{"x":"bravo2"}`},
 		{name: "json-field", aURL: "/x/aa", bURL: "/x", live: "/x", aHdr: jsonHdr, bHdr: jsonHdr, inHdr: jsonHdr, aBody: `{"assertion":"REDACTED_abc","x":"alpha1"}`, bBody: `{"x":"alpha1"}`, body: `{"assertion":"` + liveSecret + `","x":"bravo2"}`},
 		{name: "json-moved-field", aURL: "/x/aa", bURL: "/x", live: "/x", aHdr: jsonHdr, bHdr: jsonHdr, inHdr: jsonHdr, aBody: `{"assertion":"REDACTED_abc","x":"alpha1"}`, bBody: `{"x":"alpha1"}`, body: `{"data":{"assertion":"` + liveSecret + `"},"x":"bravo2"}`},
+		// A root array's elements are a field with no key ("[]"): found by
+		// the field's name alone.
+		{name: "json-root-array", aURL: "/x/aa", bURL: "/x", live: "/x", aHdr: jsonHdr, bHdr: jsonHdr, inHdr: jsonHdr, aBody: `["REDACTED_abc","alpha1"]`, bBody: `["q9P","alpha1"]`, body: `["` + liveSecret + `","bravo2"]`},
 		{name: "text-body", aURL: "/x/aa", bURL: "/x/otherz", live: "/x/other", aHdr: text, bHdr: text, inHdr: with(text, "X-Other", "bravo2"), aBody: `token REDACTED_abc`, bBody: `hello`, body: `token ` + liveSecret},
 		{name: "url-does-not-parse", aURL: "/x/%zz/REDACTED_abc", bURL: "/x/zz/q9P", live: "/x/zz/" + liveSecret, aHdr: jsonHdr, bHdr: jsonHdr, inHdr: jsonHdr, aBody: `{"x":"alpha1"}`, bBody: `{"x":"alpha1"}`, body: `{"x":"bravo2"}`},
 	}
@@ -905,6 +913,57 @@ func TestAMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 	}
 }
 
+// A miss whose stateful walk has answered each recording of the call is
+// named by the last, and redacted by every recording of the pool: the last
+// (b) redacted nothing, and another recording of the call (a) redacted the
+// segment the call sent its secret in.
+func TestAnAnsweredMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
+	jsonHdr := map[string]string{"Content-Type": "application/json"}
+	const live = "/x/" + liveSecret + "/y"
+	for _, mode := range []string{"off", "off-stated-lifetime", "on"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[string]string{"on": "1"}[mode])
+			a := recorded("a", "/x/REDACTED_abc/y", jsonHdr, `{"x":"alpha1"}`)
+			a.Noise = []string{`^REDACTED_abc$`}
+			b := recorded("b", "/x/q9P/y", jsonHdr, `{"x":"alpha1"}`)
+			if mode == "off-stated-lifetime" {
+				for _, m := range []*models.Mock{a, b} {
+					m.Spec.Metadata = map[string]string{models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+				}
+			}
+			i, _, answered := servedWalk(nil, []*models.Mock{b}, integrations.SequenceView{Cursor: &mockMemDb{}})
+			if i != -1 || answered == nil || answered.last != b.Name {
+				t.Fatalf("the walk answered %d (%+v); want the miss naming b", i, answered)
+			}
+			request, _ := http.NewRequest("POST", "http://api.example"+live, strings.NewReader(`{"x":"bravo2"}`))
+			request.Header.Set("Content-Type", "application/json")
+			diag := &matchDiag{phase: models.MatchPhaseExhausted, candidates: 2, pool: []*models.Mock{b, a}, answered: answered}
+			r := newHTTP().buildHTTPMismatchReport(request, []byte(`{"x":"bravo2"}`), &mockMemDb{mocks: []*models.Mock{b, a}}, nil, nil, nil, diag)
+			if r == nil || r.ClosestMock != "b" {
+				t.Fatalf("the report %+v does not name the walk's last recording b", r)
+			}
+			all, _ := json.Marshal(r)
+			if strings.Contains(string(all), liveSecret) {
+				t.Errorf("the report carries the live value at a place recording a redacted: %s", all)
+			}
+			if want := "POST /x/" + valueRedacted + "/y"; r.ActualSummary != want {
+				t.Errorf("summary %q, want %q", r.ActualSummary, want)
+			}
+			if mode == "off-stated-lifetime" {
+				sessionHintMatchesTheCall(t, r, request)
+			}
+		})
+	}
+}
+
+// reusableReadFails is a mock db whose reusable mocks (startup and session
+// scoped) cannot be read, while the test's own mocks can.
+type reusableReadFails struct{ *mockMemDb }
+
+func (reusableReadFails) GetSessionMocks() ([]*models.Mock, error) {
+	return nil, errors.New("read failed")
+}
+
 // A miss whose pool cannot be read names the call's path by its shape only,
 // in its summary and in the error the proxy logs at ERROR (missedCall):
 // keploy cannot tell there which segment holds a secret. A miss with no
@@ -943,6 +1002,41 @@ func TestAMissWithNoClosestRecordingNamesNoSecret(t *testing.T) {
 				want = "POST /" + valueRedacted
 			}
 			check(t, r, request, want)
+		})
+		// The pool's mocks are read in two parts: the reusable ones too.
+		t.Run("the-reusable-mocks-cannot-be-read/"+mode, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[string]string{"off": "", "on": "1"}[mode])
+			request := newReq()
+			r := newHTTP().buildHTTPMismatchReport(request, []byte(`{}`), reusableReadFails{&mockMemDb{mocks: []*models.Mock{other}}}, nil, nil, nil, nil)
+			if !strings.Contains(r.NextSteps, "Failed to read mock database") {
+				t.Fatalf("the row is of a pool that cannot be read: %+v", r)
+			}
+			check(t, r, request, "POST /{}/{}/{}")
+		})
+		// A recording that states its mocks' lifetimes is told how to serve
+		// the call to every test: the hint names no segment of a pool that
+		// cannot be read.
+		if mode == "off" {
+			t.Run("the-pool-cannot-be-read/off-stated-lifetime", func(t *testing.T) {
+				t.Setenv(provenswitch.Env, "")
+				request := newReq()
+				r := newHTTP().buildHTTPMismatchReport(request, []byte(`{}`), statedDb{MockMemDb: &mockMemDb{err: errors.New("read failed")}, states: true}, nil, nil, nil, nil)
+				check(t, r, request, "POST /{}/{}/{}")
+				sessionHintMatchesTheCall(t, r, request)
+			})
+		}
+		// The db read again for the report holds none of the pool the
+		// matcher compared (another connection consumed them since): the
+		// miss names no closest recording, and the pool's places redact it.
+		t.Run("the-pool-read-again-is-empty/"+mode, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[string]string{"off": "", "on": "1"}[mode])
+			request := newReq()
+			diag := &matchDiag{phase: models.MatchPhaseExhausted, candidates: 1, pool: []*models.Mock{other}}
+			r := newHTTP().buildHTTPMismatchReport(request, []byte(`{}`), &mockMemDb{}, nil, nil, nil, diag)
+			if r.ClosestMock != "" {
+				t.Fatalf("the row is of a miss with no closest recording, not %q", r.ClosestMock)
+			}
+			check(t, r, request, "POST /x/"+valueRedacted+"/y")
 		})
 		t.Run("variable-recording-gone/"+mode, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, map[string]string{"off": "", "on": "1"}[mode])
