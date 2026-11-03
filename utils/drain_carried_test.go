@@ -204,3 +204,36 @@ func TestADrainWhoseOfferAnotherWaitMadeOffersAPeriodAfterTheInterruptIsSeen(t *
 	now.Add(int64(drainNotice))
 	awaitLog(t, logs, drainOffer, res)
 }
+
+// The drain's own notices begin at its carrier's end, wherever in the
+// drain's notice period that end comes: its first notice is a whole period
+// after it. Each run ends the carrier about half a period after one of the
+// drain's looks, so a notice kept on the period the drain began with would
+// come about half a period after that end, sooner than the scheduler's delay
+// could hide. The drain is not interrupted here, so its notices only say it
+// made no progress.
+func TestACarriedDrainsFirstNoticeComesAWholePeriodAfterItsCarrierEnds(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		drainStopNowTestOnItsOwn(t)
+		drainNotice = 100 * time.Millisecond
+		carrier := make(chan struct{})
+		var g errgroup.Group
+		block := make(chan struct{})
+		g.Go(func() error { <-block; return nil })
+		var looks atomic.Uint64
+		res, logs := startCarriedDrain(&stall.ManualClock{}, &g, 30*time.Second, func() uint64 { looks.Add(1); return 0 }, carrier)
+		awaitLooks(t, &looks, 0, 2) // its first look, then its first notice
+		time.Sleep(drainNotice / 2)
+		closedAt := time.Now()
+		close(carrier)
+		said := awaitLog(t, logs, "made no progress", res)
+		if d := said.Time.Sub(closedAt); d < drainNotice {
+			close(block)
+			t.Fatalf("run %d: the drain gave its first notice %v after its carrier ended, want a whole notice period (%v) on", i, d, drainNotice)
+		}
+		close(block)
+		if r := awaitEnd(t, res, "at its group's end"); r.err != nil || r.end != DrainJoined {
+			t.Fatalf("run %d: the drain returned %+v, want its group joined", i, r)
+		}
+	}
+}
