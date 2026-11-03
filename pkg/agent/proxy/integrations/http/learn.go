@@ -1918,7 +1918,8 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 // show. Such a call is read as that recording's, made outside where it was
 // recorded, and is never paired with another recording. A recording that
 // declares variables is compared with its variables' request places excused
-// (variablePlaces): a call of it differs there on every run.
+// (variablePlaces): a call of it differs there on every run. An authored
+// mock (models.Mock.IsAuthored) is no recording of a call and is not read.
 //
 // The store visits its recordings of the call's request keys
 // (integrations.StagedRecordingReader), those it keeps on disk too; a store
@@ -1939,7 +1940,11 @@ func exactlyElsewhere(input *req, mockDb integrations.MockMemDb, sc scope, live 
 	var found *models.Mock
 	var placeErr error
 	try := func(m *models.Mock) bool {
-		if m == nil || m.Kind != models.HTTP || m.Spec.HTTPReq == nil || offered[m.Name] || !counts(m) {
+		// An authored mock (keploy mock derive or generate) was written,
+		// never recorded: no evidence of where the application made a call.
+		// A derived one is its source's request byte for byte, so the
+		// source test's own call is always exactly it.
+		if m == nil || m.Kind != models.HTTP || m.Spec.HTTPReq == nil || m.IsAuthored() || offered[m.Name] || !counts(m) {
 			return true
 		}
 		rp := recordedParts(m)
