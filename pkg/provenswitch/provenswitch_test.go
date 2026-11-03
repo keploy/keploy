@@ -123,7 +123,7 @@ func TestCheckAgent(t *testing.T) {
 		{"1", "on", true},
 		{"", "", true},      // switch off, an agent that predates the switch: today's pairing
 		{"1", "", false},    // switch on, an agent that cannot have it
-		{"1", "off", false}, // an agent started without --proven (k8s-proxy today)
+		{"1", "off", false}, // an agent started without --proven (by an older k8s-proxy)
 		{"", "on", false},   // an agent running paths this keploy does not
 	} {
 		t.Setenv(Env, tc.local)
