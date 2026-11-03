@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -518,4 +519,20 @@ func TestUserPatternConstrainsBothSides(t *testing.T) {
 			}
 		}
 	})
+}
+
+// The merge behind a mock's learned noise keeps what is there, but for two
+// words patterns of one place: those leave unchecked the words either does
+// (learn.MergeNoise), so a pairing that changed another word of a text adds
+// it. Its inputs are not changed.
+func TestMergeLearnedUnionsTwoWordsPatterns(t *testing.T) {
+	w := func(words ...int) []string { return []string{learn.NoiseWordsPattern(words)} }
+	existing := map[string][]string{"body.note": w(1), "body.a": {}}
+	got := MergeLearned(existing, map[string][]string{"body.note": w(3), "body.a": w(0), "body.b": {}})
+	if want := map[string][]string{"body.note": w(1, 3), "body.a": {}, "body.b": {}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("MergeLearned = %v, want %v", got, want)
+	}
+	if !reflect.DeepEqual(existing, map[string][]string{"body.note": w(1), "body.a": {}}) {
+		t.Fatalf("MergeLearned changed its input: %v", existing)
+	}
 }

@@ -196,3 +196,89 @@ func changedWords(rec, f string) []int {
 	words, _, _ := learn.NoiseWords(rec, f)
 	return words
 }
+
+// A text an earlier pairing learned by its words is read word by word by
+// record's full round too, as the replay reads it, never excused whole: a
+// call that changed only those words is served and learns nothing more; one
+// that changed another word is served and learns that word too, both runs'
+// words then unchecked (learn.MergeNoise) and the rest still compared; one
+// whose skeleton moved is refused, as at the first learning.
+func TestLearnMatchATextLearnedByItsWordsIsReadWordByWord(t *testing.T) {
+	w := func(words ...int) []string { return []string{learn.NoiseWordsPattern(words)} }
+	body := func(note string) string { return `{"note":"` + note + `","item":"book"}` }
+	for _, c := range []struct {
+		name, f string
+		want    []string // learned at body.note; nil: refused
+		ok, bad string
+	}{
+		{"its word changed", "lead r-2 created", w(1), "lead r-3 created", "deal r-3 created"},
+		{"another word changed", "deal r-2 created", w(0, 1), "deal r-3 created", "deal r-3 deleted"},
+		{"its skeleton moved", "lead r-2 created now", nil, "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			tr := learn.NewTracker()
+			tr.Begin()
+			ctx := learn.WithTracker(context.Background(), tr)
+			rec := learnRecorded("mock-0", 0, "POST", "/v1/leads", body("lead r-1 created"), nil, `{"ok":true}`)
+			rec.Spec.ReqBodyNoise = map[string][]string{"body.note": w(1)}
+			db := &learnDb{perTest: []*models.Mock{rec}}
+			served, miss, err := h.learnMatch(ctx, live("POST", "/v1/leads", body(c.f), nil), db, n, opts)
+			if c.want == nil {
+				if served != nil || miss == nil || !strings.HasPrefix(miss.res.Why, "body.note changed in more than its words") {
+					t.Fatalf("served %v miss %+v err %v; want body.note refused, naming why", served, miss, err)
+				}
+				return
+			}
+			if err != nil || served == nil {
+				t.Fatalf("record's full round refused: %+v %v", miss, err)
+			}
+			if got := db.consumed[0].Spec.ReqBodyNoise; !reflect.DeepEqual(got, map[string][]string{"body.note": c.want}) {
+				t.Fatalf("learned noise %v; want body.note %v alone", got, c.want)
+			}
+			mocks := learnedOnto([]*models.Mock{rec}, db.consumed)
+			for _, r := range []struct {
+				note string
+				want bool
+			}{{c.ok, true}, {c.bad, false}} {
+				ok, _, diag := matchVarIn(t, context.Background(), newHTTP(), &varDb{perTest: append([]*models.Mock(nil), mocks...)}, live("POST", "/v1/leads", body(r.note), nil))
+				if ok != r.want {
+					t.Fatalf("replay of %q answered %v (differs %v); want %v", r.note, ok, differs(diag), r.want)
+				}
+			}
+		})
+	}
+}
+
+// The learn step's known noise leaves a text learned by its words to Words,
+// and excuses it whole nowhere: not at its key, not named in the request
+// matcher's dialect, not as a container of another leaf. A variable's
+// comparison (excusedAt) reads it by words too, and a place learned as a
+// read of the application's clock is no learned noise's, word or whole.
+func TestLearnKnownReadsAWordsPatternByItsWordsAlone(t *testing.T) {
+	w := func(words ...int) []string { return []string{learn.NoiseWordsPattern(words)} }
+	shape := func(path, noise, note string) learn.Shape {
+		return learn.Shape{Key: "k", Leaves: map[string]learn.Leaf{path: {Path: path, Noise: noise, Type: learn.String, Value: note}}}
+	}
+	for _, c := range []struct {
+		name        string
+		known       learn.Known
+		path, noise string
+		live        string
+		drift       bool
+	}{
+		{"its word changed", httpKnown{learned: map[string][]string{"body.note": w(1)}}, "body.note", "body.note", "lead r-2 created", false},
+		{"another word changed", httpKnown{learned: map[string][]string{"body.note": w(1)}}, "body.note", "body.note", "deal r-1 created", true},
+		{"whole noise", httpKnown{learned: map[string][]string{"body.note": {}}}, "body.note", "body.note", "deal r-2 deleted", false},
+		{"in the matcher's dialect", httpKnown{learned: map[string][]string{"body.items[].note": w(1)}}, "body.items[0].note", "body.items[].note", "deal r-1 created", true},
+		{"as a container", httpKnown{learned: map[string][]string{"body.items": w(0)}}, "body.items[0].note", "body.items[].note", "deal r-1 created", true},
+		{"through a variable's places", excusedAt{Known: httpKnown{learned: map[string][]string{"body.note": w(1)}}, at: map[string]bool{"body.id": true}}, "body.note", "body.note", "lead r-2 created", false},
+		{"a variable's other word", excusedAt{Known: httpKnown{learned: map[string][]string{"body.note": w(1)}}, at: map[string]bool{"body.id": true}}, "body.note", "body.note", "deal r-1 created", true},
+		{"a clock read", httpKnown{learned: map[string][]string{"body.note": w(1)}, clocks: map[string]models.ClockOffset{"body.note": {}}}, "body.note", "body.note", "lead r-2 created", true},
+	} {
+		d := learn.Compare(shape(c.path, c.noise, c.live), shape(c.path, c.noise, "lead r-1 created"), c.known)
+		if d.Structural != "" || (len(d.Drift) > 0) != c.drift {
+			t.Errorf("%s: structural %q drift %v; want drift %v", c.name, d.Structural, d.Drift, c.drift)
+		}
+	}
+}

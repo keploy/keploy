@@ -323,6 +323,8 @@ func leafChange(p string, live, rec Shape, known Known) (c leafDiff, l, r Leaf) 
 			return leafDeclared, l, r
 		}
 		return leafSame, l, r
+	case wordsSame(known, l, r):
+		return leafSame, l, r
 	case r.Unnamed:
 		return leafUnnamedDrift, l, r
 	}

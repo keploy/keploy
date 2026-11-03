@@ -1,6 +1,8 @@
 package learn
 
 import (
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -165,4 +167,56 @@ func WordsAdmit(rec, live string, words []int) bool {
 		}
 	}
 	return true
+}
+
+// MergeNoise is the learned noise of one place two learnings each learned
+// noise at: existing, and detected. Two words patterns leave unchecked the
+// words either does, their union: both name words of the place's one
+// recorded text, and the learn step learns words only where a run kept that
+// text's skeleton (NoiseWords), so a word's number names the same word in
+// both. Anything else keeps existing (learned noise is monotonic): noise
+// whole stays whole, and a words pattern stays as it is beside noise of
+// another kind or one that does not read back (UncheckedWords), which
+// unchecks no word.
+func MergeNoise(existing, detected []string) []string {
+	ew, _ := UncheckedWords(existing)
+	if len(ew) == 0 {
+		out := make([]string, len(existing))
+		copy(out, existing)
+		return out
+	}
+	dw, _ := UncheckedWords(detected)
+	words := append(append(make([]int, 0, len(ew)+len(dw)), ew...), dw...)
+	sort.Ints(words)
+	return []string{NoiseWordsPattern(slices.Compact(words))}
+}
+
+// WordsKnown is a Known that learned some texts by their words (NoiseWords).
+// Words says which words the noise learned at path leaves unchecked
+// (UncheckedWords), and true where it learned the text there so. Such a
+// text is not Excused: Compare reads its leaf as the same where the live
+// text is the recorded one but for those words (WordsAdmit), and as drifted
+// otherwise, so the learn step reads the rest of the text as it reads any
+// value.
+type WordsKnown interface {
+	Words(l Leaf) ([]int, bool)
+}
+
+// WordsOf is known's Words at the leaf l where it is a WordsKnown; none
+// otherwise.
+func WordsOf(known Known, l Leaf) ([]int, bool) {
+	if wk, ok := known.(WordsKnown); ok {
+		return wk.Words(l)
+	}
+	return nil, false
+}
+
+// wordsSame reports whether known learned the text at the recorded leaf r
+// by its words and the live leaf l's text is r's but for those words.
+func wordsSame(known Known, l, r Leaf) bool {
+	if r.Type != String {
+		return false
+	}
+	words, _ := WordsOf(known, r)
+	return WordsAdmit(r.Value, l.Value, words)
 }

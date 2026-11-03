@@ -482,6 +482,8 @@ func (k httpKnown) Excused(l learn.Leaf) (bool, bool) {
 // position included; noise learned before it (by the request-body learner
 // it replaces) names it in the request matcher's dialect. A place learned as
 // a read of the application's clock (clocks) is no learned noise's to excuse.
+// A text learned by its words (learn.NoiseWords) is not excused whole: Words
+// names its unchecked words, and the learn step compares the rest.
 // keploy.yml's entry with patterns excuses a leaf only when the recorded and
 // the live value each match one: a live value outside them is a change, and
 // so is a leaf one side lacks. An obfuscated value is the recorded one.
@@ -494,7 +496,7 @@ func (k httpKnown) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, 
 	// noise learned there excuses a value its patterns refuse.
 	_, guarded := k.n.userPatterns(ref.Noise)
 	_, clock := k.clocks[ref.Path]
-	if !guarded && !clock && (learnedCovers(k.learned, ref.Path) || ref.Noise != ref.Path && hasKey(k.learned, ref.Noise)) {
+	if !guarded && !clock && (learnedCovers(k.learned, ref.Path) || ref.Noise != ref.Path && learnedWhole(k.learned, ref.Noise)) {
 		return true, true
 	}
 	both := inRec && inLive
@@ -562,21 +564,42 @@ func (k httpKnown) Declares(l learn.Leaf) bool {
 	return !k.values.IsNoisy(l.Value) && k.n.declared(l)
 }
 
-func hasKey(m map[string][]string, k string) bool {
-	_, ok := m[k]
-	return ok
+// Words implements learn.WordsKnown: the words of the text at the leaf l its
+// learned noise leaves unchecked (learn.UncheckedWords), where it learned
+// that text by its words. A read of the application's clock is no learned
+// noise's to excuse, word or whole, and neither is a leaf keploy.yml's
+// patterns guard.
+func (k httpKnown) Words(l learn.Leaf) ([]int, bool) {
+	if _, clock := k.clocks[l.Path]; clock {
+		return nil, false
+	}
+	// keploy.yml's entry with patterns is the user's word on the leaf: no
+	// noise learned there excuses a value its patterns refuse, a word of it
+	// included (ExcusedPair).
+	if _, guarded := k.n.userPatterns(l.Noise); guarded {
+		return nil, false
+	}
+	return learn.UncheckedWords(k.learned[l.Path])
 }
 
-// learnedCovers reports whether learned noise names the leaf at path: the
-// leaf itself, or a container holding it. Unlike keploy.yml's noise, a
+// learnedWhole reports whether learned noise names the place k whole: noise
+// at k that is no words pattern (learn.IsNoiseWords).
+func learnedWhole(m map[string][]string, k string) bool {
+	v, ok := m[k]
+	return ok && !learn.IsNoiseWords(v)
+}
+
+// learnedCovers reports whether learned noise names the leaf at path whole:
+// the leaf itself, or a container holding it. Unlike keploy.yml's noise, a
 // learned entry names exactly the field that drifted, never a field whose
-// name it happens to contain, nor another element of its array.
+// name it happens to contain, nor another element of its array. A words
+// pattern names the words of its one text, and covers nothing whole.
 func learnedCovers(learned map[string][]string, path string) bool {
-	if _, ok := learned[path]; ok {
+	if learnedWhole(learned, path) {
 		return true
 	}
-	for p := range learned {
-		if strings.HasPrefix(path, p+".") || strings.HasPrefix(path, p+"[") {
+	for p, v := range learned {
+		if (strings.HasPrefix(path, p+".") || strings.HasPrefix(path, p+"[")) && !learn.IsNoiseWords(v) {
 			return true
 		}
 	}
@@ -2280,6 +2303,12 @@ func (k excusedAt) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, 
 		return true, false
 	}
 	return learn.ExcusedLeaf(k.Known, rec, live, inRec, inLive)
+}
+
+// Words implements learn.WordsKnown: Known's words (a leaf at is excused
+// whole first).
+func (k excusedAt) Words(l learn.Leaf) ([]int, bool) {
+	return learn.WordsOf(k.Known, l)
 }
 
 // elsewhereWhy is what the learn step says of a call that is exactly x, a
