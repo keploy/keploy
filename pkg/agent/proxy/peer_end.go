@@ -20,10 +20,12 @@ import (
 //     with the call still open, which is the run's end.
 //
 // The client's end while its process ran (it closed the socket: it gave up on
-// the call), or as a signal killed it while the run went on, is a fault. So is
-// one the hooks hold no record of (agent.ConnEndInfo): nothing says it was the
-// run's end, and a call the application never got an answer to is recorded as
-// one it gave up on.
+// the call), or as a signal ended it while the run went on, is a fault: a
+// signal that killed it, or a stop signal another process sent it that it
+// handled and exited from (a JVM's or .NET's default). So is one the hooks
+// hold no record of (agent.ConnEndInfo), a client that shut its end down
+// before it exited included: nothing says it was the run's end, and a call
+// the application never got an answer to is recorded as one it gave up on.
 func (p *Proxy) peerEndMarker(sess *supervisor.Session, app netip.AddrPort) func(fakeconn.Direction, bool) {
 	return func(dir fakeconn.Direction, reset bool) {
 		stopped := p.StopBegun()
@@ -35,7 +37,7 @@ func (p *Proxy) peerEndMarker(sess *supervisor.Session, app netip.AddrPort) func
 }
 
 // appEndedByItsExit reports whether the kernel saw the application release its
-// end app of a connection as its process exited on its own, killed by no
+// end app of a connection as its process exited on its own, ended by no
 // signal (agent.AppConnEnd); false where the hooks hold no record of it.
 func (p *Proxy) appEndedByItsExit(app netip.AddrPort) bool {
 	ce, ok := p.DestInfo.(agent.ConnEndInfo)

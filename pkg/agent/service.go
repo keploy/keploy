@@ -986,8 +986,10 @@ type ConnDestInfo interface {
 // AppConnEnd is how the application released its end of a connection the
 // hooks redirected to the proxy, as the kernel saw the release: by its
 // process while the process ran (Exiting false), or as the process exited
-// (Exiting true), with the signal that killed it (Signal), 0 for a process
-// that exited on its own.
+// (Exiting true), with the signal that ended it (Signal): the one that
+// killed it, or a stop signal (SIGHUP, SIGINT, SIGQUIT, SIGTERM) another
+// process sent it that it handled before it exited; 0 for a process that
+// exited on its own.
 type AppConnEnd struct {
 	Exiting bool
 	Signal  uint32
@@ -996,9 +998,10 @@ type AppConnEnd struct {
 // ConnEndInfo is the optional extension of a DestInfo that says how the
 // application released its end of a redirected connection, named as
 // ConnDestInfo names it, once the proxy has read that end. It forgets what it
-// read. ok is false where it holds nothing for the connection: a socket ended
-// with shutdown(2) and not released, a record the kernel's LRU evicted, or
-// hooks that make no such record.
+// read. ok is false where it holds nothing for the connection: one whose end
+// came before the application released it (a shutdown(2), or the proxy's end
+// first), a record the kernel's LRU evicted, or hooks that make no such
+// record.
 type ConnEndInfo interface {
 	TakeAppConnEnd(app netip.AddrPort) (end AppConnEnd, ok bool)
 }

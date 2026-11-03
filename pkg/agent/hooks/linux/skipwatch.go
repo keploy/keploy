@@ -56,8 +56,8 @@ import (
 //     (models.CaptureLossKernelSkip, models.CaptureLossKind.Evidence): the
 //     count is the kernel's recursion_misses (5.12+), so it fails no test
 //     and leaves none not judged, and a kernel without it (5.10) judges the
-//     same. No program of keploy's own is in it today; one the map does not
-//     name is (skipOf);
+//     same. k_stop_signal is in it; so is a program the map does not name
+//     (skipOf);
 //   - unsupported: the program reports what keploy does not support (the
 //     unixconn report: Unix sockets). Its skips are said at INFO in the
 //     session's summary, and charge nothing.
@@ -149,6 +149,14 @@ var programSkips = map[string]programSkip{
 		does:     "removes an exited process's PID-map entries",
 		backstop: "every entry keploy's kernel programs make records its process's start time (pid_start_times; one whose start time cannot be read, or that finds the map full, is taken as it is), so none of pid_filter, its parent check and the readiness watch takes a dead process's entry for the next process the kernel gives its TGID, whose own classification replaces it; and an agent in the initial PID namespace deletes the entries of processes that are gone (sweepGonePIDs). An entry user space wrote without a start time is taken as it is",
 		by:       []string{"pid_start_times"},
+	},
+	// The kernel generates a signal with its target's siglock held and
+	// interrupts off, so a run is neither preempted nor nested on its CPU,
+	// and none is expected to be skipped. Nothing else notes the signal: a
+	// skipped run is said as the loss it may be.
+	"k_stop_signal": {
+		class: skipLoses,
+		does:  "notes a stop signal another process sent the application's process (stop_signals), so that its exit from a handler of it reads as the signal's end, not its own (after a skipped run, the calls it had open record no fault)",
 	},
 	"k_ready_fork": {class: skipCovered, does: "counts a member's fork as progress of the application's start", backstop: readinessBackstop},
 	"k_ready_exec": {class: skipCovered, does: "counts a member's exec as progress of the application's start, and records a container's main process", backstop: readinessBackstop},

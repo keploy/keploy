@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
@@ -38,7 +39,10 @@ const heldConnHelperEnv = "KEPLOY_HELD_CONN_TEST_HELPER"
 // and prints its cookie; once a line on stdin says keploy redirected it, it
 // connects it to 127.0.0.1:port and prints its local port; then it holds the
 // connection open until a line "exit N" (it exits with status N, the socket
-// still open, which its exit releases) or a signal kills it.
+// still open, which its exit releases) or a signal kills it. Before that, a
+// line "shutdown" shuts its end down (it prints "shut"), and a line "trap"
+// makes it handle SIGTERM by exiting with status 143, as a JVM does (it
+// prints "trapped").
 func runHeldConnHelper(port string) int {
 	p, err := strconv.Atoi(port)
 	if err != nil {
@@ -70,24 +74,46 @@ func runHeldConnHelper(port string) int {
 		return 3
 	}
 	fmt.Println(sa.(*unix.SockaddrInet4).Port)
-	line, err := in.ReadString('\n')
-	if err != nil {
-		return 3
+	for {
+		line, err := in.ReadString('\n')
+		if err != nil {
+			return 3
+		}
+		switch line = strings.TrimSpace(line); line {
+		case "shutdown":
+			if err := unix.Shutdown(fd, unix.SHUT_WR); err != nil {
+				fmt.Println("helper:", err)
+				return 3
+			}
+			fmt.Println("shut")
+		case "trap":
+			term := make(chan os.Signal, 1)
+			signal.Notify(term, syscall.SIGTERM)
+			go func() {
+				<-term
+				os.Exit(143)
+			}()
+			fmt.Println("trapped")
+		default:
+			code, err := strconv.Atoi(strings.TrimPrefix(line, "exit "))
+			if err != nil {
+				fmt.Println("helper:", err)
+				return 3
+			}
+			return code
+		}
 	}
-	code, err := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(line), "exit "))
-	if err != nil {
-		fmt.Println("helper:", err)
-		return 3
-	}
-	return code
 }
 
 // The hooks say how the application released its end of a connection they
 // redirected (TakeAppConnEnd), as k_app_conn_release wrote it at the release,
 // and the proxy reads it once it has read that end: closed while its process
 // ran; released as its process exited on its own, with a status of 0 or not;
-// released as a signal killed it. Each record is read once, and a connection
-// the hooks did not redirect leaves none.
+// released as a signal killed it, or as it exited from its handler of a
+// SIGTERM another process sent (the signal's end, k_stop_signal). Each record
+// is read once. A connection the hooks did not redirect leaves none, and so
+// does one whose end the proxy read before its release: shut down, then
+// released as its process exited.
 func TestTheHooksSayHowTheApplicationReleasedItsConnection(t *testing.T) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Fatal(err)
@@ -114,6 +140,11 @@ func TestTheHooksSayHowTheApplicationReleasedItsConnection(t *testing.T) {
 		t.Fatalf("attach k_app_conn_release to %s: %v", cg, err)
 	}
 	t.Cleanup(func() { _ = rel.Close() })
+	stop, err := link.AttachRawTracepoint(link.RawTracepointOptions{Name: "signal_generate", Program: h.objects.K_stopSignal})
+	if err != nil {
+		t.Fatalf("attach k_stop_signal: %v", err)
+	}
+	t.Cleanup(func() { _ = stop.Close() })
 
 	// The proxy's side: each connection accepted and read to its end, as the
 	// relay reads the application's end before it asks how it ended.
@@ -132,20 +163,27 @@ func TestTheHooksSayHowTheApplicationReleasedItsConnection(t *testing.T) {
 			accepted <- c
 		}
 	}()
-	readEnd := func(t *testing.T) netip.AddrPort {
+	// readEndHeld reads the application's end and leaves the proxy's open.
+	readEndHeld := func(t *testing.T) (netip.AddrPort, net.Conn) {
 		t.Helper()
 		select {
 		case c := <-accepted:
-			defer c.Close()
+			t.Cleanup(func() { _ = c.Close() })
 			_ = c.SetReadDeadline(time.Now().Add(30 * time.Second))
 			if _, err := io.Copy(io.Discard, c); err != nil && !errors.Is(err, syscall.ECONNRESET) {
 				t.Fatalf("read the application's end: %v", err)
 			}
-			return c.RemoteAddr().(*net.TCPAddr).AddrPort()
+			return c.RemoteAddr().(*net.TCPAddr).AddrPort(), c
 		case <-time.After(30 * time.Second):
 			t.Fatal("the application's connection never reached the listener")
 		}
-		return netip.AddrPort{}
+		return netip.AddrPort{}, nil
+	}
+	readEnd := func(t *testing.T) netip.AddrPort {
+		t.Helper()
+		app, c := readEndHeld(t)
+		_ = c.Close()
+		return app
 	}
 	lnPort := ln.Addr().(*net.TCPAddr).Port
 	take := func(t *testing.T, app netip.AddrPort, want agent.AppConnEnd) {
@@ -182,15 +220,18 @@ func TestTheHooksSayHowTheApplicationReleasedItsConnection(t *testing.T) {
 		}
 	})
 	for _, tc := range []struct {
-		name string
-		kill syscall.Signal // 0: the helper exits on its own, with status
-		exit int
-		want agent.AppConnEnd
+		name  string
+		first string         // a step before the end: "trap" or "shutdown"
+		kill  syscall.Signal // 0: the helper exits on its own, with status
+		exit  int
+		want  *agent.AppConnEnd // nil: no record
 	}{
-		{"its process exits on its own", 0, 0, agent.AppConnEnd{Exiting: true}},
-		{"its process exits on its own with a failure status", 0, 3, agent.AppConnEnd{Exiting: true}},
-		{"a SIGKILL kills its process", syscall.SIGKILL, 0, agent.AppConnEnd{Exiting: true, Signal: 9}},
-		{"a SIGTERM kills its process", syscall.SIGTERM, 0, agent.AppConnEnd{Exiting: true, Signal: 15}},
+		{"its process exits on its own", "", 0, 0, &agent.AppConnEnd{Exiting: true}},
+		{"its process exits on its own with a failure status", "", 0, 3, &agent.AppConnEnd{Exiting: true}},
+		{"a SIGKILL kills its process", "", syscall.SIGKILL, 0, &agent.AppConnEnd{Exiting: true, Signal: 9}},
+		{"a SIGTERM kills its process", "", syscall.SIGTERM, 0, &agent.AppConnEnd{Exiting: true, Signal: 15}},
+		{"its process exits from its handler of a SIGTERM another process sent", "trap", syscall.SIGTERM, 0, &agent.AppConnEnd{Exiting: true, Signal: 15}},
+		{"its process shuts its end down, then exits on its own", "shutdown", 0, 0, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=^$")
@@ -232,6 +273,30 @@ func TestTheHooksSayHowTheApplicationReleasedItsConnection(t *testing.T) {
 			if _, err := strconv.Atoi(line()); err != nil {
 				t.Fatal(err)
 			}
+			if tc.first != "" {
+				if _, err := io.WriteString(stdin, tc.first+"\n"); err != nil {
+					t.Fatal(err)
+				}
+				if got := line(); got != map[string]string{"trap": "trapped", "shutdown": "shut"}[tc.first] {
+					t.Fatalf("the helper answered %q to %q", got, tc.first)
+				}
+			}
+			if tc.want == nil {
+				// The proxy reads the shut end first and holds its own end,
+				// as the relay does, while the process exits; its release,
+				// done once Wait returns, is after the end the proxy read.
+				app, _ := readEndHeld(t)
+				if _, err := fmt.Fprintf(stdin, "exit %d\n", tc.exit); err != nil {
+					t.Fatal(err)
+				}
+				if err := cmd.Wait(); err != nil {
+					t.Fatalf("the helper: %v", err)
+				}
+				if got, ok := h.TakeAppConnEnd(app); ok {
+					t.Fatalf("TakeAppConnEnd(%s) = %+v for a connection whose end the proxy read before its release", app, got)
+				}
+				return
+			}
 			if tc.kill != 0 {
 				if err := cmd.Process.Signal(tc.kill); err != nil {
 					t.Fatal(err)
@@ -239,7 +304,7 @@ func TestTheHooksSayHowTheApplicationReleasedItsConnection(t *testing.T) {
 			} else if _, err := fmt.Fprintf(stdin, "exit %d\n", tc.exit); err != nil {
 				t.Fatal(err)
 			}
-			take(t, readEnd(t), tc.want)
+			take(t, readEnd(t), *tc.want)
 		})
 	}
 }

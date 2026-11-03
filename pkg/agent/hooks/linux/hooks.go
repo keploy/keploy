@@ -130,6 +130,9 @@ type Hooks struct {
 	// application released each connection redirected to the proxy
 	// (TakeAppConnEnd).
 	appConnRelease link.Link
+	// stopSignal is k_stop_signal's link: it notes the stop signals other
+	// processes send, which appConnRelease's records carry.
+	stopSignal link.Link
 	// skips reads the runs of the hooks' programs the kernel skipped
 	// (skipwatch.go), from their load on.
 	skips *skipWatch
@@ -554,21 +557,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	// socket's creation, classifies by the same rule before the process's
 	// first connect, send or bind reaches pid_filter (keploy/ebpf
 	// keploy_ebpf.c).
-	// How the application released each connection redirected to the
-	// proxy: while its process ran, or as it exited, and by what signal
-	// (TakeAppConnEnd). The recorder tells by it the application's giving
-	// up on a call, a fault, from its exit cutting the call, the run's end.
-	acr, err := link.AttachCgroup(link.CgroupOptions{
-		Path:    cGroupPath,
-		Attach:  ebpf.AttachCgroupInetSockRelease,
-		Program: objs.K_appConnRelease,
-	})
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the sock_release cgroup hook that says how the application released its connections")
-		return err
-	}
-	h.appConnRelease = acr
-
 	if h.socket != nil {
 		sc, err := link.AttachCgroup(link.CgroupOptions{
 			Path:    cGroupPath,
@@ -581,6 +569,36 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		}
 		h.sockCreate = sc
 	}
+
+	// How the application released each connection redirected to the
+	// proxy: while its process ran, or as it exited, and by what signal
+	// (TakeAppConnEnd). The recorder tells by it the application's giving
+	// up on a call, a fault, from its exit cutting the call, the run's end.
+	// A process that handles a stop signal another process sent and exits
+	// from its handler (a JVM's or .NET's default) exits with no signal in
+	// its status: k_stop_signal notes the signal as it is sent, and the
+	// release carries it. It is required, as the release is: without it a
+	// stopped client's exit would read as the run's end, and the calls it
+	// had open would record no fault.
+	ss, err := link.AttachRawTracepoint(link.RawTracepointOptions{
+		Name:    "signal_generate",
+		Program: objs.K_stopSignal,
+	})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the signal_generate hook that notes the stop signals sent to the application")
+		return err
+	}
+	h.stopSignal = ss
+	acr, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCgroupInetSockRelease,
+		Program: objs.K_appConnRelease,
+	})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the sock_release cgroup hook that says how the application released its connections")
+		return err
+	}
+	h.appConnRelease = acr
 
 	// Ingress is captured while recording, and in mock mode whenever requests are on, so a replay can
 	// compare the app's actual responses with the recorded cases. In mock mode the wrapped process is a
@@ -889,6 +907,11 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if h.appConnRelease != nil {
 		if err := h.appConnRelease.Close(); err != nil {
 			utils.LogError(h.logger, err, "failed to close the sock_release hook of the application's connections")
+		}
+	}
+	if h.stopSignal != nil {
+		if err := h.stopSignal.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the signal_generate hook of the stop signals sent to the application")
 		}
 	}
 	// What each program skipped in the session, read before they close.
