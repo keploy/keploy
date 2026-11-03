@@ -157,6 +157,7 @@ func TestRecord_AMockStillOnItsWayWhenTheAgentSaysClearIsSaved(t *testing.T) {
 	require.NotEmpty(t, tok, "the round's stream carried no token for the agent to end it by")
 	require.Equal(t, tok, a.token.Load(), "the agent was asked to end streams of another token than the round's")
 	require.Equal(t, 1, logs.FilterMessage("read the stream to the keploy agent's end marker").Len())
+	require.Zero(t, logs.FilterMessage(quietTailUnconfirmed).Len(), "a round read to the agent's marker was said to be unconfirmed")
 }
 
 // Each round has its own token, and asks the agent to end the streams of
@@ -232,15 +233,18 @@ func TestRecord_AnAgentThisClientDidNotStartEndingBeforeItsMarkerIsAWarning(t *t
 }
 
 // An agent that predates markers is never asked to end the streams: the
-// round ends as it did, on the drain's quiet and the agent's clear.
+// round ends as it did, on the drain's quiet and the agent's clear. A mock
+// still on its way then is lost unseen, so the saved recording is said at
+// WARN to be unconfirmed.
 func TestRecord_AnAgentWithoutMarkersIsNotAskedToEndTheRound(t *testing.T) {
 	a := newMarkerAgent(time.Millisecond)
 	a.oldAgent = true
-	_, promoted, err, code, _ := recordWithMarkerAgent(t, a)
+	_, promoted, err, code, logs := recordWithMarkerAgent(t, a)
 	require.NoError(t, err)
 	require.Zero(t, code)
 	require.True(t, promoted)
 	require.Zero(t, a.endCalls.Load())
+	require.Equal(t, 1, logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(quietTailUnconfirmed).Len(), "%v", logs.All())
 }
 
 // kindEnder is an agent client whose end request is taken, and whose streams
