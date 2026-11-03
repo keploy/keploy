@@ -78,6 +78,19 @@ type HTTPSchema struct {
 	Fault *Fault `json:"fault,omitempty" yaml:"fault,omitempty"`
 }
 
+// MarshalYAML writes s as its fields are tagged, with the response's body
+// flat, never as a stream's chunks, when its answer ends in a fault after the
+// head (Fault.SendsHead): that body is what the upstream sent, or the app
+// read, before the fault, and replay serves it byte for byte.
+func (s HTTPSchema) MarshalYAML() (interface{}, error) {
+	type plain HTTPSchema
+	p := plain(s)
+	if s.Fault != nil && s.Fault.SendsHead() {
+		p.Response.flatBody = true
+	}
+	return p, nil
+}
+
 type FormData struct {
 	Key       string   `json:"key" bson:"key" yaml:"key"`
 	Values    []string `json:"values" bson:"values,omitempty" yaml:"values,omitempty"`
@@ -117,6 +130,10 @@ type HTTPResp struct {
 	// HeaderLineLengths: as on HTTPReq. Recorded for a mock's response, the
 	// one recorded response keploy sends back out at replay.
 	HeaderLineLengths HeaderLineLengths `json:"header_line_lengths,omitempty" yaml:"header_line_lengths,omitempty"`
+
+	// flatBody: MarshalYAML writes Body flat, never as a stream's chunks
+	// (HTTPSchema.MarshalYAML). Not written.
+	flatBody bool
 }
 
 // HTTPResponseHasNoBody reports whether a response carries no body whatever

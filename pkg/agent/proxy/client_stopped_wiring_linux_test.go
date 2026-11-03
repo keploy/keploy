@@ -55,8 +55,8 @@ func (p *destEndProbe) RecordOutgoing(ctx context.Context, s *integrations.Recor
 // refuses it, and the parser is not given it: its destination stream ends
 // there, and the session says it ended where the client stopped taking it
 // (relay.Config.ClientStopped, wired to Session.MarkEndedWhereClientStopped),
-// which the HTTP recorder reads to leave out, and say so, a response cut
-// there.
+// which the HTTP recorder reads to record a response cut there as far as the
+// client took it, marked so.
 func TestRecordViaSupervisor_TheDestStreamEndsWhereTheClientStopped(t *testing.T) {
 	t.Parallel()
 	pair := func() (net.Conn, net.Conn) {

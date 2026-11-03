@@ -744,7 +744,7 @@ func (h *HTTP) buildAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, er
 	if stub == nil || stub.Spec.HTTPResp == nil {
 		return nil, fmt.Errorf("http: mock %q has no response to serialize", name)
 	}
-	return h.encodeAnswer(stub, rewrite)
+	return h.encodeAnswer(stub, rewrite, false)
 }
 
 // RequestNoise is what of a request may differ from its recording when it is

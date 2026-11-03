@@ -105,7 +105,7 @@ func TestEndFollowedStopIsTheFirstEndReadAfterTheStopBegan(t *testing.T) {
 		{"the server spoke unasked", func(s *Session) { s.dropped(fakeconn.Dropped{}) }, (*Session).ServerSpokeUnasked},
 		{"the client's stream ended with its connection", func(s *Session) { s.MarkEndedWithConnection(fakeconn.FromClient) }, func(s *Session) bool { return s.EndedWithConnection(fakeconn.FromClient) }},
 		{"the destination's stream ended with its connection", func(s *Session) { s.MarkEndedWithConnection(fakeconn.FromDest) }, func(s *Session) bool { return s.EndedWithConnection(fakeconn.FromDest) }},
-		{"the stream ended where the client stopped", func(s *Session) { s.MarkEndedWhereClientStopped(func() []byte { return nil }) }, (*Session).EndedWhereClientStopped},
+		{"the stream ended where the client stopped", func(s *Session) { s.MarkEndedWhereClientStopped() }, (*Session).EndedWhereClientStopped},
 	} {
 		s := &Session{}
 		other.set(s)
@@ -157,7 +157,7 @@ func TestFirstEndNoFaultIsTheFirstEndsOwn(t *testing.T) {
 		{"the server spoke unasked", func(s *Session) { s.dropped(fakeconn.Dropped{}) }, (*Session).ServerSpokeUnasked},
 		{"the client's stream ended with its connection", func(s *Session) { s.MarkEndedWithConnection(fakeconn.FromClient) }, func(s *Session) bool { return s.EndedWithConnection(fakeconn.FromClient) }},
 		{"the destination's stream ended with its connection", func(s *Session) { s.MarkEndedWithConnection(fakeconn.FromDest) }, func(s *Session) bool { return s.EndedWithConnection(fakeconn.FromDest) }},
-		{"the stream ended where the client stopped", func(s *Session) { s.MarkEndedWhereClientStopped(func() []byte { return nil }) }, (*Session).EndedWhereClientStopped},
+		{"the stream ended where the client stopped", func(s *Session) { s.MarkEndedWhereClientStopped() }, (*Session).EndedWhereClientStopped},
 	} {
 		s := &Session{}
 		other.set(s)

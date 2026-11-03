@@ -3,10 +3,12 @@
 package http
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -203,10 +205,17 @@ func TestReplayFault_TheApplicationSeesWhatItSawAtRecord(t *testing.T) {
 			h := &HTTP{Logger: zap.NewNop()}
 			app, returned := replaying(t, h, throughDisk(t, m))
 			atReplay := tc.app(t, app)
-			if atReplay != atRecord {
+			if m.Spec.Fault.Kind == models.FaultStoppedReading {
+				// Recorded under a whole answer's head, the body as far as the
+				// app read it is served without its end, chunked: the same
+				// answer, read the same way, framed otherwise.
+				if a, b := readAnswer(t, atReplay.got), readAnswer(t, atRecord.got); a != b || atReplay.end != atRecord.end {
+					t.Errorf("at replay the application read %q and %s; at record %q and %s", a, atReplay.end, b, atRecord.end)
+				}
+			} else if atReplay != atRecord {
 				t.Errorf("at replay the application saw %+v; at record %+v (the mock's fault: %s)", atReplay, atRecord, m.Spec.Fault)
 			}
-			if m.Spec.Fault.Kind == models.FaultTimeout {
+			if m.Spec.Fault.Kind == models.FaultTimeout || m.Spec.Fault.Kind == models.FaultStoppedReading {
 				// Held until the application closed: the connection is
 				// its client's to end, not a clock's.
 				select {
@@ -468,4 +477,19 @@ func TestReplayFault_AnAsyncDeliveryGetsItsFault(t *testing.T) {
 	if err := awaitReturn(t, returned); err != nil {
 		t.Errorf("decodeHTTP = %v, want nil", err)
 	}
+}
+
+// readAnswer is the status line and the body an HTTP client reads from got,
+// an answer that never ended: "200 OK: 01234".
+func readAnswer(t *testing.T, got string) string {
+	t.Helper()
+	resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader(got)), nil)
+	if err != nil {
+		t.Fatalf("the answer %q does not parse: %v", got, err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("the body of %q read to %v, want the answer's end never to come", got, err)
+	}
+	return resp.Status + ": " + string(body)
 }

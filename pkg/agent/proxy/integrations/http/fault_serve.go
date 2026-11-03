@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -76,6 +77,9 @@ const faultResetGrace = relay.DefaultHalfCloseGrace
 //   - timeout: the head and BodyBytes when after the head, then nothing more,
 //     the connection held until the application closes it or ctx ends: its
 //     own client's timeout ends it, never a clock here;
+//   - stopped_reading: the head and BodyBytes of the body, framed without
+//     the end (serveStoppedReading), then nothing more, the connection held
+//     as for a timeout;
 //   - delay: the whole answer once Delay has passed, or nothing when ctx ends
 //     first.
 //
@@ -98,6 +102,9 @@ func (h *HTTP) serveFault(ctx context.Context, clientConn net.Conn, stub *models
 		case <-ctx.Done():
 			return true, nil
 		}
+	}
+	if fault.Kind == models.FaultStoppedReading {
+		return h.serveStoppedReading(ctx, clientConn, stub, fault)
 	}
 	if fault.SendsHead() {
 		head, err := h.faultHead(stub, fault)
@@ -171,6 +178,53 @@ func (h *HTTP) faultHead(stub *models.Mock, fault *models.Fault) ([]byte, error)
 	}
 	out = append(out, "\r\n"...)
 	return append(out, resp.Body[:fault.BodyBytes]...), nil
+}
+
+// serveStoppedReading enacts a stopped_reading fault (models.FaultStoppedReading)
+// on the application's connection: stub's head and the first BodyBytes of its
+// body, framed without the end (encodeAnswer, held), as far as the app read
+// them at record, then nothing more, the connection held until the app closes
+// it or ctx ends (holdUntilClosed), as the app closed it at record. An app
+// that had all it wanted closes again; one that gave up on the rest (a stream
+// it abandoned, its own timeout) waits on it again. An answer with no body by
+// rule (to a HEAD, a 1xx, 204 or 304) is whole once its head is: nothing is
+// written, and false tells the caller to serve it whole.
+func (h *HTTP) serveStoppedReading(ctx context.Context, clientConn net.Conn, stub *models.Mock, fault *models.Fault) (bool, error) {
+	name := stub.Name
+	loaded, err := withResponse(stub)
+	if err != nil {
+		return true, err
+	}
+	resp := loaded.Spec.HTTPResp
+	if resp == nil || resp.StatusCode == 0 {
+		return true, fmt.Errorf("http: mock %q has a fault after the head (%s) and no recorded head", name, fault)
+	}
+	method := ""
+	if loaded.Spec.HTTPReq != nil {
+		method = string(loaded.Spec.HTTPReq.Method)
+	}
+	if responseHasNoBody(method, resp.StatusCode) {
+		return false, nil
+	}
+	if fault.BodyBytes > int64(len(resp.Body)) {
+		return true, fmt.Errorf("http: mock %q: its fault sends %d body bytes and its body holds %d", name, fault.BodyBytes, len(resp.Body))
+	}
+	read := func(header http.Header, body string) (http.Header, string) {
+		return header, body[:fault.BodyBytes]
+	}
+	answer, err := h.encodeAnswer(loaded, read, true)
+	if err != nil {
+		return true, err
+	}
+	if _, err := clientConn.Write(answer); err != nil {
+		if ctx.Err() != nil {
+			return true, nil
+		}
+		return true, fmt.Errorf("http: write what the app read of mock %q, cut short: %w", name, err)
+	}
+	h.Logger.Info("served a mock's fault", zap.String("mock", name), zap.String("fault", fault.String()))
+	holdUntilClosed(ctx, clientConn)
+	return true, nil
 }
 
 // holdUntilClosed reads, and drops, what the application sends on c until it

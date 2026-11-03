@@ -275,10 +275,9 @@ func (p *Proxy) recordViaSupervisor(
 		// The destination's stream ends where the client stopped taking it
 		// (it closed its socket, and refused what came after): a parser
 		// that reaches that end mid-message knows the client's close cut
-		// the message there, not the destination (the HTTP recorder leaves
-		// that exchange out, and says why, unless what the client refused,
-		// of what reached the proxy before the client's FIN, only finished
-		// the message's framing).
+		// the message there, not the destination (the HTTP recorder records
+		// that response as far as the client took it, marked so, and leaves
+		// out, saying why, one whose head the client did not have whole).
 		ClientStopped: svSess.MarkEndedWhereClientStopped,
 		// How each side ended its side of the connection, and which ended
 		// first: a call the destination never answered is recorded with

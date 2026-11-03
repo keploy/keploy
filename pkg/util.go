@@ -5208,22 +5208,35 @@ func brotliClass(n int) int {
 // when the recorded header used a non-canonical spelling (e.g. "GZIP").
 // An unsupported encoding is returned uncompressed, mirroring Decompress.
 func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {
+	return compress(logger, encoding, data, true)
+}
+
+// CompressWithoutEnd is Compress for a body served without its end (an
+// answer the app stopped reading at record, models.FaultStoppedReading):
+// the compressor is flushed, not closed, so all of data decodes and the
+// stream does not end. Closed, it ends (gzip's trailer, brotli's last
+// meta-block), and a decoder that stops at a stream's end would see an end
+// the app never saw.
+func CompressWithoutEnd(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {
+	return compress(logger, encoding, data, false)
+}
+
+// compress is Compress, which ends the stream, or CompressWithoutEnd, which
+// does not. A writer goes back to its pool only once it compressed data
+// whole: Reset makes a flushed writer, as a closed one, what a new writer is.
+// It goes back Reset to no buffer, so the pool keeps no call's bytes
+// reachable: a flushed writer, unlike a closed one, still points at them.
+func compress(logger *zap.Logger, encoding string, data []byte, end bool) ([]byte, error) {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "gzip":
 		logger.Debug("compressing data using gzip")
 		var compressedBuffer bytes.Buffer
 		gw := gzipWriters.Get().(*gzip.Writer)
 		gw.Reset(&compressedBuffer)
-		_, err := gw.Write(data)
-		if err != nil {
-			utils.LogError(logger, err, "failed to write compressed data to gzip writer")
+		if err := compressInto(logger, gw, "gzip", data, end); err != nil {
 			return nil, err
 		}
-		err = gw.Close()
-		if err != nil {
-			utils.LogError(logger, err, "failed to close gzip writer")
-			return nil, err
-		}
+		gw.Reset(nil)
 		gzipWriters.Put(gw)
 		return compressedBuffer.Bytes(), nil
 	case "br":
@@ -5235,20 +5248,37 @@ func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) 
 			bw = brotli.NewWriter(nil)
 		}
 		bw.Reset(&compressedBuffer)
-		_, err := bw.Write(data)
-		if err != nil {
-			utils.LogError(logger, err, "failed to write compressed data to brotli writer")
+		if err := compressInto(logger, bw, "brotli", data, end); err != nil {
 			return nil, err
 		}
-		err = bw.Close()
-		if err != nil {
-			utils.LogError(logger, err, "failed to close brotli writer")
-			return nil, err
-		}
+		bw.Reset(nil)
 		pool.Put(bw)
 		return compressedBuffer.Bytes(), nil
 	}
 	return data, nil
+}
+
+// compressInto writes data through w, a compressor named name, and then
+// closes w, which ends its stream, or, without end, flushes it, so all of
+// data decodes and the stream does not end.
+func compressInto(logger *zap.Logger, w interface {
+	io.Writer
+	Flush() error
+	Close() error
+}, name string, data []byte, end bool) error {
+	if _, err := w.Write(data); err != nil {
+		utils.LogError(logger, err, "failed to write compressed data to "+name+" writer")
+		return err
+	}
+	finish, how := w.Close, "close"
+	if !end {
+		finish, how = w.Flush, "flush"
+	}
+	if err := finish(); err != nil {
+		utils.LogError(logger, err, "failed to "+how+" "+name+" writer")
+		return err
+	}
+	return nil
 }
 
 // LooksLikeJSON checks if a string appears to be JSON by checking for opening and closing brackets/braces.

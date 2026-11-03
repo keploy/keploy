@@ -23,7 +23,7 @@ type answerRewrite func(header http.Header, body string) (http.Header, string)
 // encodeRecordedAnswer is stub's answer as recorded: the only encoder
 // keptAnswers is given.
 func (h *HTTP) encodeRecordedAnswer(stub *models.Mock) ([]byte, error) {
-	return h.encodeAnswer(stub, nil)
+	return h.encodeAnswer(stub, nil, false)
 }
 
 // reasonPhrase is the reason phrase resp's status line is served with: the one
@@ -55,7 +55,18 @@ func reasonPhrase(resp *models.HTTPResp) string {
 // answer built twice is the same bytes. Built in the header map's order, an
 // answer built again (its kept bytes gone with a collected entry, or a table
 // with no room) could be other bytes than its serves before.
-func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, error) {
+//
+// held frames the answer without its end, for an answer the app stopped
+// reading at record (models.FaultStoppedReading, served by serveFault, which
+// then holds the connection until the app closes it). Its recorded head is a
+// whole answer's (buildHTTPMock), so a reader of the mock that drops the fault
+// serves it whole; held, its Content-Length is not sent, a compressed body's
+// stream is flushed, not ended, and the body goes as one chunk with no last
+// chunk after it, or, over HTTP/1.0, which has no chunks, as a body the
+// connection's close would end, which never comes. An app reads at replay
+// the bytes it read at record and waits on the rest as it did; a body its
+// server ended by the close at record comes chunked.
+func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite, held bool) ([]byte, error) {
 	resp := stub.Spec.HTTPResp
 	protoMajor, protoMinor := 1, 1
 	method := ""
@@ -70,7 +81,11 @@ func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, e
 	}
 	respBody := body
 	if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
-		compressed, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
+		compress := pkg.Compress
+		if held {
+			compress = pkg.CompressWithoutEnd
+		}
+		compressed, err := compress(h.Logger, encoding[0], []byte(body))
 		if err != nil {
 			return nil, err
 		}
@@ -82,12 +97,23 @@ func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, e
 	// server's. Those it did not match are sent as recorded.
 	bodydigest.Apply(stub.Spec.Metadata[models.MetadataBodyDigestsKey], header, body, respBody)
 	noBody := responseHasNoBody(method, resp.StatusCode)
+	var chunkHead []byte
+	if held {
+		header.Del("Content-Length")
+		if http10 := protoMajor == 1 && protoMinor == 0; !http10 {
+			header.Set("Transfer-Encoding", "chunked")
+			if respBody != "" {
+				chunkHead = strconv.AppendInt(make([]byte, 0, 18), int64(len(respBody)), 16)
+				chunkHead = append(chunkHead, "\r\n"...)
+			}
+		}
+	}
 	var lengthDigits [20]byte
 	length := strconv.AppendInt(lengthDigits[:0], int64(len(respBody)), 10)
 	status := reasonPhrase(resp)
 
 	// "HTTP/" major "." minor " " code " " text CRLF, each int at most 20 bytes.
-	size := len("HTTP/. \r\n ") + 3*20 + len(status) + len("\r\n") + len(respBody)
+	size := len("HTTP/. \r\n ") + 3*20 + len(status) + len("\r\n") + len(chunkHead) + len(respBody) + len("\r\n")
 	var nameSpace [32]string
 	names := nameSpace[:0]
 	for key, values := range header {
@@ -125,6 +151,11 @@ func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, e
 		}
 	}
 	out = append(out, "\r\n"...)
+	if chunkHead != nil {
+		out = append(out, chunkHead...)
+		out = append(out, respBody...)
+		return append(out, "\r\n"...), nil
+	}
 	out = append(out, respBody...)
 	return out, nil
 }

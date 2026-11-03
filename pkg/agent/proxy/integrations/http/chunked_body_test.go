@@ -755,59 +755,76 @@ func TestExpectsContinueIgnoresCase(t *testing.T) {
 	}
 }
 
-// chunkedEndRefused: what a client that closed the connection refused, after a
-// chunked response its stream ended in the middle of, ends that response with
-// framing alone (the rest of a chunk's CRLF, the last chunk, the empty line),
-// so the client had every byte of content and the response is whole; or it
-// holds content the client never had (chunk data, a trailer field), or does
-// not end the body, and the exchange stays left out.
-func TestChunkedEndRefused(t *testing.T) {
+// lastChunkRead: a chunked response its stream ended in the middle of holds
+// every byte of content but trailer fields once its last chunk is in, and
+// before that it does not; a response not chunked, or not framed by the RFC,
+// holds no last chunk.
+func TestLastChunkRead(t *testing.T) {
 	const head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
 	const chunk = "5\r\nhello\r\n"
 	for _, row := range []struct {
-		name, resp, refused string
-		// whole is the response recorded; "" when it is left out.
-		whole string
+		name, resp string
+		want       bool
 	}{
-		{name: "the last chunk and the empty line", resp: head + chunk, refused: "0\r\n\r\n", whole: head + chunk + "0\r\n\r\n"},
-		{name: "bytes after the end are not the response's", resp: head + chunk, refused: "0\r\n\r\nHTTP/1.1 200 OK\r\n", whole: head + chunk + "0\r\n\r\n"},
-		{name: "a last chunk with an extension", resp: head + chunk, refused: "0;done=1\r\n\r\n", whole: head + chunk + "0;done=1\r\n\r\n"},
-		{name: "the CRLF after the data the client had", resp: head + "5\r\nhello", refused: "\r\n0\r\n\r\n", whole: head + chunk + "0\r\n\r\n"},
-		{name: "the rest of the last chunk's line", resp: head + chunk + "0", refused: "\r\n\r\n", whole: head + chunk + "0\r\n\r\n"},
-		{name: "the empty line alone", resp: head + chunk + "0\r\n", refused: "\r\n", whole: head + chunk + "0\r\n\r\n"},
-		{name: "after a trailer field the client had", resp: head + chunk + "0\r\nX-A: 1\r\n", refused: "\r\n", whole: head + chunk + "0\r\nX-A: 1\r\n\r\n"},
-		{name: "after a trailer field the client had all but the CRLF of", resp: head + chunk + "0\r\nX-A: 1", refused: "\r\n\r\n", whole: head + chunk + "0\r\nX-A: 1\r\n\r\n"},
-		{name: "an empty body", resp: head, refused: "0\r\n\r\n", whole: head + "0\r\n\r\n"},
-		{name: "chunked among other codings, in any case", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, Chunked\r\n\r\n" + chunk, refused: "0\r\n\r\n",
-			whole: "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, Chunked\r\n\r\n" + chunk + "0\r\n\r\n"},
-		{name: "after an interim response", resp: "HTTP/1.1 100 Continue\r\n\r\n" + head + chunk, refused: "0\r\n\r\n", whole: "HTTP/1.1 100 Continue\r\n\r\n" + head + chunk + "0\r\n\r\n"},
-		{name: "a data chunk", resp: head + chunk, refused: "3\r\nabc\r\n0\r\n\r\n"},
-		{name: "the rest of a chunk's data", resp: head + "5\r\nhel", refused: "lo\r\n0\r\n\r\n"},
-		{name: "the data of a chunk whose size line the client had", resp: head + "5\r\n", refused: "hello\r\n0\r\n\r\n"},
-		{name: "a trailer field", resp: head + chunk, refused: "0\r\nX-A: 1\r\n\r\n"},
-		{name: "the rest of a trailer field", resp: head + chunk + "0\r\nX-A", refused: ": 1\r\n\r\n"},
-		{name: "no empty line", resp: head + chunk, refused: "0\r\n"},
-		{name: "nothing refused", resp: head + chunk, refused: ""},
-		{name: "cut short, as the relay keeps only the start", resp: head + chunk, refused: "0;" + strings.Repeat("x", 100)},
-		{name: "a bare LF", resp: head + chunk, refused: "0\n\n"},
-		{name: "a head the client did not have whole", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n", refused: "\r\n0\r\n\r\n"},
-		{name: "a Content-Length body", resp: "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n", refused: "0\r\n\r\n"},
-		{name: "a body read to the connection's end", resp: "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", refused: "0\r\n\r\n"},
+		{name: "the last chunk, without the empty line", resp: head + chunk + "0\r\n", want: true},
+		{name: "the last chunk with an extension", resp: head + chunk + "0;done=1\r\n", want: true},
+		{name: "a trailer field after the last chunk", resp: head + chunk + "0\r\nX-A: 1\r\n", want: true},
+		{name: "part of a trailer field", resp: head + chunk + "0\r\nX-A", want: true},
+		{name: "the last chunk of an empty body", resp: head + "0\r\n", want: true},
+		{name: "after an interim response", resp: "HTTP/1.1 100 Continue\r\n\r\n" + head + chunk + "0\r\n", want: true},
+		{name: "the last chunk's line cut short", resp: head + chunk + "0"},
+		{name: "a whole chunk", resp: head + chunk},
+		{name: "a chunk cut short", resp: head + "5\r\nhel"},
+		{name: "a head alone", resp: head},
+		{name: "a head cut short", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"},
+		{name: "a bare LF", resp: head + chunk + "0\n"},
+		{name: "a size line that is not hex", resp: head + "zz\r\nhello\r\n0\r\n"},
+		{name: "a Content-Length body that reads as a last chunk", resp: "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n0\r\n"},
+		{name: "a body the connection's close ends that reads as a last chunk", resp: "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n0\r\n"},
+		{name: "chunked among other codings, in any case", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, Chunked\r\n\r\n" + chunk + "0\r\n", want: true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			resp := []byte(row.resp)
-			got, ok := chunkedEndRefused(resp, []byte(row.refused))
-			if row.whole == "" {
-				if ok {
-					t.Fatalf("whole %q, want it left out: the client did not have it all", got)
+			if got := lastChunkRead([]byte(row.resp)); got != row.want {
+				t.Fatalf("lastChunkRead = %v, want %v", got, row.want)
+			}
+		})
+	}
+}
+
+// A body cut after its last chunk (in its trailer section, which net/http
+// reads to its own error, not io.ErrUnexpectedEOF) is recorded as far as the
+// app read it only when the app stopped reading it. One the observe-only
+// capture read in part (the stream carries only what the client read) is not
+// recorded, as before: its client may have had the trailer's end.
+func TestABodyCutInItsTrailerIsRecordedOnlyWhenTheAppStoppedReading(t *testing.T) {
+	req := []byte("GET /events HTTP/1.1\r\nHost: api\r\n\r\n")
+	resp := []byte("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nX-A")
+	for _, row := range []struct {
+		name                       string
+		readInPart, stoppedReading bool
+		recorded                   bool
+	}{
+		{name: "the app stopped reading", stoppedReading: true, recorded: true},
+		{name: "the observe-only capture read it in part", readInPart: true},
+		{name: "a whole response"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			h := &HTTP{Logger: zaptest.NewLogger(t)}
+			var fault *models.Fault
+			if row.stoppedReading {
+				fault = &models.Fault{Kind: models.FaultStoppedReading, AfterHead: true}
+			}
+			m, err := h.buildHTTPMock(&FinalHTTP{Req: req, Resp: resp, RespReadInPart: row.readInPart, Fault: fault,
+				ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()}, 80, "test-conn", models.OutgoingOptions{})
+			if !row.recorded {
+				if err == nil {
+					t.Fatalf("recorded %+v, want the body's read error", m)
 				}
 				return
 			}
-			if !ok || string(got) != row.whole {
-				t.Fatalf("got %q, %v; want %q, whole", got, ok, row.whole)
-			}
-			if string(resp) != row.resp {
-				t.Fatalf("resp changed to %q", resp)
+			if err != nil || m == nil || m.Spec.HTTPResp.Body != "hello" || m.Spec.Fault == nil ||
+				m.Spec.Fault.Kind != models.FaultStoppedReading || m.Spec.Fault.BodyBytes != 5 {
+				t.Fatalf("buildHTTPMock = (%+v, %v), want the body %q, with a stopped_reading fault after 5 bytes", m, err, "hello")
 			}
 		})
 	}

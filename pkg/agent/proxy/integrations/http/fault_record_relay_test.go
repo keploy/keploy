@@ -296,7 +296,9 @@ func TestRecordV2_FaultUpstreamGoesSilentAfterTheHeadAndTheAppGivesUp(t *testing
 		t.Fatalf("the upstream read %v; want the application's close forwarded (EOF)", err)
 	}
 	mocks, err := c.finish(t)
-	wantFault(t, oneMock(t, mocks, err), models.Fault{Kind: models.FaultTimeout, AfterHead: true, BodyBytes: 5})
+	m := oneMock(t, mocks, err)
+	wantFault(t, m, models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: 5})
+	wantStoppedReading(t, m, "01234")
 }
 
 func TestRecordV2_FaultChunkedBodyTruncatedKeepsItsFraming(t *testing.T) {
@@ -879,7 +881,7 @@ func TestRecordV2_FaultTimeoutRecordedWhenTheAppGaveUpBeforeTheStop(t *testing.T
 		if afterHead {
 			write(t, c.dest, c.dst, head+"01234")
 			relayed(t, c.app, head+"01234")
-			want = models.Fault{Kind: models.FaultTimeout, AfterHead: true, BodyBytes: 5}
+			want = models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: 5}
 		}
 		appClosed(t, c)
 		awaitPeerEnd(t, c, fakeconn.FromClient)

@@ -16,7 +16,8 @@ import (
 // The answer's head, when the upstream sent one before the fault (truncate,
 // or AfterHead), is the mock's response as recorded: its status line, its
 // reason phrase and its headers, Content-Length as the upstream sent it, and
-// the BodyBytes of its body the upstream sent.
+// the BodyBytes of its body the upstream sent. A stopped_reading fault's is a
+// whole answer's instead (FaultStoppedReading).
 //
 // The format is closed: a kind this keploy does not know, or a field a kind
 // does not take, is refused by Validate with the reason named, never served
@@ -33,8 +34,8 @@ type Fault struct {
 	Kind FaultKind `json:"kind" yaml:"kind" bson:"kind"`
 	// AfterHead: the upstream sent the answer's head (status line and
 	// headers) and BodyBytes of its body before the fault. For reset and
-	// timeout only: a truncate always sends the head, an eof never does
-	// (an eof after the head is a truncate).
+	// timeout, and always for stopped_reading: a truncate always sends the
+	// head, an eof never does (an eof after the head is a truncate).
 	AfterHead bool `json:"after_head,omitempty" yaml:"after_head,omitempty" bson:"after_head,omitempty"`
 	// BodyBytes is how many bytes of the body the upstream sent before the
 	// fault, once it had sent the head.
@@ -67,6 +68,18 @@ const (
 	// FaultTruncate: the upstream sent the head, with the Content-Length it
 	// sent, and BodyBytes of the body, then closed the connection.
 	FaultTruncate FaultKind = "truncate"
+	// FaultStoppedReading: the application read the answer's head and
+	// BodyBytes of its body, then stopped reading and closed the connection,
+	// whether the upstream sent more after that or nothing: what it read is
+	// all it had, its end never. Its mock's response is a whole answer's,
+	// the body as far as the application read it, decoded, with a
+	// Content-Length of its size and no Transfer-Encoding, so a reader of
+	// the mock that drops the fault serves it whole. Replay sends that head,
+	// without its Content-Length, and the body without its end (chunked,
+	// with no last chunk; a compressed body flushed, not ended), then holds
+	// the connection until the application closes it or the run ends: the
+	// application's close ends it, never a clock. AfterHead always.
+	FaultStoppedReading FaultKind = "stopped_reading"
 	// FaultDelay: the whole answer, sent once Delay has passed. A recording
 	// holds none (a record makes no verdict on wall-clock time); a delay is
 	// written by hand or by a tool, and replay bounds it by the run.
@@ -92,6 +105,10 @@ func (f *Fault) Validate() error {
 	}
 	switch f.Kind {
 	case FaultReset, FaultTimeout:
+	case FaultStoppedReading:
+		if !f.AfterHead {
+			return fmt.Errorf("fault stopped_reading without after_head: an application that closed before the head came had no answer; write kind timeout")
+		}
 	case FaultEOF:
 		if f.AfterHead {
 			return fmt.Errorf("fault eof with after_head: an upstream that closed after the head truncated the answer; write kind truncate")
@@ -109,9 +126,9 @@ func (f *Fault) Validate() error {
 		}
 		return nil
 	case "":
-		return fmt.Errorf("fault with no kind: write one of reset, eof, timeout, truncate, delay")
+		return fmt.Errorf("fault with no kind: write one of reset, eof, timeout, truncate, stopped_reading, delay")
 	default:
-		return fmt.Errorf("%w: fault kind %q is not one this keploy knows (reset, eof, timeout, truncate, delay); upgrade keploy", ErrFaultUnsupported, f.Kind)
+		return fmt.Errorf("%w: fault kind %q is not one this keploy knows (reset, eof, timeout, truncate, stopped_reading, delay); upgrade keploy", ErrFaultUnsupported, f.Kind)
 	}
 	if f.Delay != 0 {
 		return fmt.Errorf("fault %s with a delay: only kind delay takes one", f.Kind)
@@ -148,6 +165,8 @@ func (f *Fault) String() string {
 		return "no answer until the application closed"
 	case FaultTruncate:
 		return "upstream sent " + sent + ", then closed"
+	case FaultStoppedReading:
+		return "the application read " + sent + ", then stopped reading and closed"
 	case FaultDelay:
 		return "answer held " + f.Delay.String()
 	}

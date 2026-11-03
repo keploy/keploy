@@ -203,18 +203,25 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		gotLastWritten, err := h.readResponseV2(ctx, sess.DestStream, &finalResp, requestMethod(finalReq))
 		// The stream ended before readResponseV2 found the response's end.
 		// Where keploy relays the connection it has read all the server sent,
-		// so that is the server's doing, unless the relay ended the stream
-		// where the client stopped taking it (EndedWhereClientStopped): the
-		// client closed its socket partway through the response, and refused
-		// the rest. That exchange is left out, and said so
-		// (LeftOutClientClosedPartway): the client gave up on the call (its
-		// timeout) or wanted no more of it, and nothing tells which. Recorded
-		// as far as the client had it, a call that timed out at record would
-		// be served a complete-looking shorter response at replay. Unless
-		// what it refused, of what the destination sent before the client's
-		// FIN reached the proxy, ended the response with framing alone
-		// (chunkedEndRefused): then it had every byte of content, and the
-		// exchange is whole. An
+		// so that is the server's doing (its reset or its close), unless the
+		// client ended the call: it closed its socket partway through the
+		// response, and read no more of it. The stream then holds the response
+		// as far as the client read it, whether the server sent nothing more
+		// before the client's close (the client closed first:
+		// Session.FirstPeerEnded) or went on sending what the client refused
+		// (the relay ended the stream where the client stopped taking it:
+		// Session.EndedWhereClientStopped). The two are one call, as the app
+		// saw it, and one mock (partAnswerFault): the response as far as the
+		// app read it, with the fault models.FaultStoppedReading, which
+		// replay serves without its end and holds until the app closes the
+		// connection, as it did here. An app that had all it wanted (the
+		// JSON it decoded, before the last chunk came) closes again; one that
+		// gave up on the rest (a stream it abandoned, its own timeout) waits
+		// on it again. Whether the server wrote after the client's close is
+		// the server's timing, never the app's: it does not decide the mock.
+		// The exchange is left out, and said so (LeftOutClientClosedPartway),
+		// where what the client read is no response: it closed before the
+		// whole head came. An
 		// observe-only capture carries only what the client read, so when its
 		// stream ended with the connection (EndedWithConnection) it is the
 		// client that stopped reading and closed, and the response is
@@ -244,45 +251,6 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		} else if !gotLastWritten.IsZero() {
 			resTs = gotLastWritten
 		}
-		if streamEnded && sess.EndedWhereClientStopped() {
-			whole, ok := chunkedEndRefused(finalResp, sess.NotTakenWhereClientStopped())
-			if !ok || sess.IsMockIncomplete() {
-				// The client closed the connection partway through the
-				// response: no whole exchange to record. Its stream has
-				// ended, and so has every answer after it. A mark on the
-				// incomplete-mock flag is a chunk the capture lost, the
-				// likelier cause, so the exchange is reported under it;
-				// and what the client refused does not follow on from
-				// what the stream holds across a chunk the capture lost,
-				// so it does not end the response then.
-				reason := supervisor.LeftOutClientClosedPartway
-				if mark, ok := sess.TakeMockIncomplete(); ok {
-					reason = mark + ": " + reason
-				}
-				logger.Debug("V2 HTTP record: the client closed the connection partway through the response; the exchange is left out")
-				sess.ReportLeftOut(&models.Mock{
-					Kind: models.HTTP,
-					Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
-				}, reason)
-				return nil
-			}
-			// What the client refused was the end of the chunked body's
-			// framing alone, the last chunk, which a server that flushes
-			// its body writes only as its handler returns, and it reached
-			// the proxy before the client's FIN: the client had all the
-			// response carries, and closed before the last chunk came,
-			// which the destination wrote before it could know. The
-			// response is whole, and recorded so. A client whose own
-			// timeout fired in that gap closed the same way, and its call
-			// failed: nothing its stack did tells the two apart, so its
-			// call is recorded whole too, and at replay the app gets the
-			// response its call timed out on at record. A last chunk that
-			// reached the proxy after the client's FIN, as a streaming
-			// server writes one once its client has gone, ends nothing
-			// here: that exchange is left out above.
-			finalResp, streamEnded = whole, false
-		}
-
 		// Build and emit the mock. Identical shape to the legacy path.
 		var fault *models.Fault
 		if streamEnded {
@@ -303,6 +271,29 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				return nil
 			}
 			fault = partAnswerFault(sess)
+		}
+		if streamEnded && (sess.EndedWhereClientStopped() || fault != nil && fault.Kind == models.FaultStoppedReading) {
+			if _, _, _, headWhole := messageHead(finalResp, true); fault == nil || !headWhole || sess.IsMockIncomplete() {
+				// The client closed the connection before the response's
+				// head came whole: no response to record. Or the recording's
+				// stop, or a capture hole, ended the stream where the client
+				// stopped taking it (partAnswerFault). Its stream has
+				// ended, and so has every answer after it. A mark on the
+				// incomplete-mock flag is a chunk the capture lost, the
+				// likelier cause, so the exchange is reported under it:
+				// what the stream holds is then not what the client read.
+				reason := supervisor.LeftOutClientClosedPartway
+				if mark, ok := sess.TakeMockIncomplete(); ok {
+					reason = mark + ": " + reason
+				}
+				logger.Debug("V2 HTTP record: the client closed the connection partway through the response; the exchange is left out")
+				sess.ReportLeftOut(&models.Mock{
+					Kind: models.HTTP,
+					Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
+				}, reason)
+				return nil
+			}
+			logger.Debug("V2 HTTP record: the client stopped reading the response partway; it is recorded as far as the client read it")
 		}
 		mock, err := h.buildHTTPMock(&FinalHTTP{
 			Req:              finalReq,
@@ -426,12 +417,15 @@ func partAnswerLeftOut(sess *supervisor.Session) (reason string, ok bool) {
 // partAnswerFault is the fault a call ends in whose response stream ended
 // before the response did, as the relay saw the connection end, or nil: the
 // destination reset the connection (FaultReset after the head) or closed it
-// (FaultTruncate), or the client closed first, the upstream silent, and gave
-// up on the rest (FaultTimeout after the head). Where the client closed while
-// the destination still sent (Session.EndedWhereClientStopped), or its end came
-// first and records no fault (partAnswerLeftOut), the exchange is left out
-// before this is asked. The upstream's end read once the recording's stop had
-// begun (Session.EndFollowedStop) records no fault, as in noAnswerFault.
+// (FaultTruncate), or the client stopped reading the rest and closed
+// (FaultStoppedReading): it closed first, or the relay ended the stream where
+// it stopped taking what the destination still sent
+// (Session.EndedWhereClientStopped). Those two are one fault, with one
+// Observed: what the destination did once the client had closed, the client
+// never saw. Where the client's end came first and records no fault
+// (partAnswerLeftOut), the exchange is left out before this is asked. An end
+// that was the application's stop (Session.EndFollowedStop), or a stream that
+// ended at a capture hole, records no fault, as in noAnswerFault.
 // buildHTTPMock records the fault only when the response is in fact
 // unfinished (FinalHTTP.Fault).
 func partAnswerFault(sess *supervisor.Session) *models.Fault {
@@ -439,11 +433,14 @@ func partAnswerFault(sess *supervisor.Session) *models.Fault {
 		return nil
 	}
 	first, ok := sess.FirstPeerEnded()
-	if !ok || sess.EndFollowedStop() {
+	if sess.EndFollowedStop() {
 		return nil
 	}
-	if first == fakeconn.FromClient {
-		return &models.Fault{Kind: models.FaultTimeout, AfterHead: true, Observed: "the application closed the connection partway through the answer"}
+	if sess.EndedWhereClientStopped() || ok && first == fakeconn.FromClient {
+		return &models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, Observed: "the application stopped reading partway through the answer and closed the connection"}
+	}
+	if !ok {
+		return nil
 	}
 	if sess.PeerEnded(fakeconn.FromDest) == supervisor.PeerReset {
 		return &models.Fault{Kind: models.FaultReset, AfterHead: true, Observed: "the upstream reset the connection partway through the answer"}
@@ -924,14 +921,30 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 	var wire []byte
 	if respParsed.Body != nil {
 		respBody, err = io.ReadAll(respParsed.Body)
-		// The answer ended unfinished, in a fault: its body was cut short of
-		// its framing, or it is close-delimited and the upstream reset it or
-		// the client gave up on it (a close is its end). Recorded as the
-		// upstream sent it, its head as it came (Content-Length and
-		// Transfer-Encoding as sent) and its body as the bytes on the wire,
-		// undecoded, so replay sends the same bytes and then the fault.
-		if m.Fault != nil && (errors.Is(err, io.ErrUnexpectedEOF) ||
+		if m.Fault != nil && m.Fault.Kind == models.FaultStoppedReading {
+			// The app stopped reading partway (partAnswerFault): its body is
+			// recorded as far as it read it, decoded, under a whole answer's
+			// head (the Content-Length set below), with the fault, which
+			// replay frames without the end (serveFault). Cut short of its
+			// framing, or after its last chunk (in the trailer section, which
+			// net/http reads to its own error: it has all of its content), or
+			// close-delimited (a close is its end, which the app never saw),
+			// it is unfinished. A response that came whole before the app
+			// closed (one with no body by rule, past which the upstream sent
+			// bytes the app did not take) has no fault.
+			if errors.Is(err, io.ErrUnexpectedEOF) || err != nil && lastChunkRead(m.Resp) ||
+				err == nil && closeDelimited(respParsed, req.Method) {
+				f := *m.Fault
+				fault, cut, err = &f, true, nil
+			}
+		} else if m.Fault != nil && (errors.Is(err, io.ErrUnexpectedEOF) ||
 			err == nil && m.Fault.Kind != models.FaultTruncate && closeDelimited(respParsed, req.Method)) {
+			// The answer ended unfinished, in a fault: its body was cut short
+			// of its framing, or it is close-delimited and the upstream reset
+			// it (a close is its end). Recorded as the upstream sent it, its
+			// head as it came (Content-Length and Transfer-Encoding as sent)
+			// and its body as the bytes on the wire, undecoded, so replay
+			// sends the same bytes and then the fault.
 			return h.buildFaultAfterHead(m, req, respParsed, destPort, connID, opts)
 		}
 		// A body its client read in part is recorded as far as it read it:
@@ -966,6 +979,11 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		// the body a GET gets (an S3 client's Stat), not its own 0.
 		if !responseHasNoBody(req.Method, respParsed.StatusCode) {
 			respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
+		}
+		// The app read the head and this much of the body (decoded), the
+		// bytes replay sends before it holds the connection.
+		if fault != nil && fault.Kind == models.FaultStoppedReading {
+			fault.BodyBytes = int64(len(respBody))
 		}
 	}
 
