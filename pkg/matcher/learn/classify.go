@@ -278,10 +278,12 @@ type Raw struct {
 	// reads a word of the payload as one of a recording of another test.
 	beforeTest bool
 	// servedAfter: every serve of the mock's the read saw was made after the
-	// call reached keploy (Order.ArrivedAt, ServedView), so F had not served
-	// it before the call. Only the rule a recording F had not served before
-	// the call reads it (follows.notServed); every other rule reads the mock
-	// as served, with F's view of it.
+	// call reached keploy, or in a request whose answer had not started to
+	// go out by then (Order.ArrivedAt, ServedView), so F had not given it
+	// the application before the call. The rule a recording F had not
+	// served before the call reads it (follows.notServed), and so does
+	// viewUnstated: no view stated of it leaves nothing untold before the
+	// call. Every other rule reads the mock as served, with F's view of it.
 	servedAfter bool
 	// call is the call the mock answers, as one recording of it stands in
 	// for another (callOf): only an answer to the same call is given in
@@ -543,9 +545,11 @@ func (r Raw) BeforeTheTest() bool { return r.served && r.beforeTest }
 // cannot tell what F gave the application there, so a word a value holds now
 // that may stand there is refused, as where a serve's view could not be read
 // (unaccounted): fail closed. Every other rule reads that F gave nothing
-// there. Of a Raw F did not serve it is false: it needs no view.
+// there. Of a Raw F did not serve it is false: it needs no view. So it is
+// of one F gave the application only after the call reached keploy
+// (servedAfter): whatever F gave there, the call's request was sent first.
 func (r Raw) viewUnstated() bool {
-	return r.served && !r.asRecorded && r.live == nil && !r.unseen
+	return r.served && !r.servedAfter && !r.asRecorded && r.live == nil && !r.unseen
 }
 
 // ServedLive is r, which F served (ServedIn, WithServed) changed, with F's

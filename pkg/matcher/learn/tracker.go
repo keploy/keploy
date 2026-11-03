@@ -1056,9 +1056,11 @@ func (o Order) ArrivedAt(arrival time.Time) Order {
 }
 
 // servedAfterLocked reports whether every serve of the mock of identity id
-// that o saw was made after o's arrival (ArrivedAt), and there was one: no
+// that o saw was made after o's arrival (ArrivedAt), or in a request of the
+// application's still aloft then (landedAfter), and there was one: no
 // arrival said, a serve of an instant not kept, or one made at or before the
-// arrival, says it was served before the call. o.t.mu is held.
+// arrival in no such request, says it was served before the call. o.t.mu is
+// held.
 func (o Order) servedAfterLocked(id string) bool {
 	if o.arrival.IsZero() {
 		return false
@@ -1069,11 +1071,24 @@ func (o Order) servedAfterLocked(id string) bool {
 		return false
 	}
 	for _, s := range n[:k] {
-		if s < 1 || s > len(o.serveAt) || !o.serveAt[s-1].After(o.arrival) {
+		if s < 1 || s > len(o.serveAt) || !o.serveAt[s-1].After(o.arrival) && !o.landedAfter(s) {
 			return false
 		}
 	}
 	return true
+}
+
+// landedAfter reports whether the serve numbered s was made in a request
+// the application sent (one Lift lifted) that had not landed by o's arrival:
+// its answer had not started to go out (Flight.Land), so the application
+// had none of it when the call reached keploy, however early F claimed the
+// recording (a parser that claims it, then learns and renders the answer
+// before writing it, as the Mongo learn step does). A serve in no request,
+// in a request a serve caused (LiftCaused, landed by its parser), or in one
+// that landed at or before the arrival, is not. o.t.mu is held.
+func (o Order) landedAfter(s int) bool {
+	f := o.flights[s]
+	return f != nil && !f.at.IsZero() && (f.landed == 0 || f.landedAt.After(o.arrival))
 }
 
 // Of is where F served m in the set, in one sequence across its start-up,
