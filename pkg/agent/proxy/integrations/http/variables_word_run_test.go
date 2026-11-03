@@ -199,3 +199,34 @@ func TestVariables_AnEchoWordIsNoPartOfARun(t *testing.T) {
 		t.Fatalf("refused at %s, want refundId", p.name)
 	}
 }
+
+// Two cookies of one header are two texts: a UUID bound word by word in each
+// is a run of its own cookie, never one run with the other's words. Two fresh
+// UUIDs whose version groups are equal by chance bind; the application
+// sending one UUID in both cookies, where the recording had two, is refused.
+func TestVariables_TwoCookiesOfOneHeaderAreTwoRuns(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	rec := func() *models.Mock {
+		vars := uuidWordBinds("sd", recEvent, "header.Cookie|cookie.sid", 0)
+		for k, v := range uuidWordBinds("cs", recSuite, "header.Cookie|cookie.csrf", 0) {
+			vars[k] = v
+		}
+		m := varMock("mock-1", "POST", "http://store/sessions", `{"kind":"open"}`, 201, `{}`, vars)
+		m.Spec.HTTPReq.Header["Cookie"] = "sid=" + recEvent + "; csrf=" + recSuite
+		return at(m, 1)
+	}
+	call := func(sid, csrf string) *req {
+		r := liveReq("POST", "/sessions", `{"kind":"open"}`)
+		r.header.Set("Cookie", "sid="+sid+"; csrf="+csrf)
+		return r
+	}
+	h := newHTTP()
+	db := &varDb{perTest: []*models.Mock{rec()}}
+	if ok, stub, diag := matchVar(t, h, db, call(liveEvent, liveSuite)); !ok || stub.Name != "mock-1" {
+		t.Fatalf("two fresh UUIDs whose version groups are equal by chance were not answered: ok=%v diag=%+v", ok, diag)
+	}
+	h = newHTTP()
+	db = &varDb{perTest: []*models.Mock{rec()}}
+	ok, _, diag := matchVar(t, h, db, call(liveEvent, liveEvent))
+	wantProblem(t, ok, diag, "they were two values when the test was recorded")
+}
