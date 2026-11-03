@@ -232,6 +232,11 @@ type ScopeGateReq struct {
 	// their calls send in the same run (a run's variable), so it cannot run
 	// without them.
 	Needs map[string][]ScopeNeed `json:"needs,omitempty"`
+	// SetFlags, read with Skip, are the flags that make a command a failed
+	// test's reason names (keploy mock quarantine, keploy mock derive
+	// --remove) act on the set this replay serves, as the replay CLI names
+	// it ("--local", "--name", "<set>"). None: the commands carry no flags.
+	SetFlags []string `json:"set_flags,omitempty"`
 }
 
 // ScopeNeed is one test a replayed test needs to have begun before it

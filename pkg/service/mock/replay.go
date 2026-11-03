@@ -1786,10 +1786,26 @@ func RegisterScopeSkipSource(fn ScopeSkipSource) {
 	scopeSkipSource = fn
 }
 
+// ScopeSetFlagsSource names the flags that make a command a failed test's
+// reason names (keploy mock quarantine, keploy mock derive --remove) act on
+// the set req names, as the replay CLI names it (models.ScopeGateReq.SetFlags).
+// A wrapping build (enterprise) installs one; OSS installs none, and those
+// commands carry no flags.
+type ScopeSetFlagsSource func(req ScopeGateRequest) []string
+
+var scopeSetFlagsSource ScopeSetFlagsSource
+
+// RegisterScopeSetFlagsSource installs the set-flags source, read with the
+// skip source. A nil fn removes it.
+func RegisterScopeSetFlagsSource(fn ScopeSetFlagsSource) {
+	scopeSetFlagsSource = fn
+}
+
 // ScopeSkipPusher is an optional Instrumentation extension: under the proven
-// switch, Replay hands the agent the tests to skip with it.
+// switch, Replay hands the agent the tests to skip with it, and the flags
+// that name the replayed set in the commands a failed test's reason names.
 type ScopeSkipPusher interface {
-	PushScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) error
+	PushScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, setFlags []string) error
 }
 
 // pushScopeSkips hands the agent the proven gate, under the proven switch and
@@ -1798,9 +1814,14 @@ func (m *mockService) pushScopeSkips(ctx context.Context, name, digest string) e
 	if !provenswitch.On() || scopeSkipSource == nil {
 		return nil
 	}
-	skip, needs, err := scopeSkipSource(ctx, ScopeGateRequest{Set: name, MocksDigest: digest, Path: m.config.Path})
+	req := ScopeGateRequest{Set: name, MocksDigest: digest, Path: m.config.Path}
+	skip, needs, err := scopeSkipSource(ctx, req)
 	if err != nil {
 		return fmt.Errorf("could not read which tests this replay skips: %w", err)
+	}
+	var setFlags []string
+	if scopeSetFlagsSource != nil {
+		setFlags = scopeSetFlagsSource(req)
 	}
 	pusher, ok := m.instrumentation.(ScopeSkipPusher)
 	if !ok {
@@ -1812,7 +1833,7 @@ func (m *mockService) pushScopeSkips(ctx context.Context, name, digest string) e
 	if skip == nil {
 		skip = map[string]string{}
 	}
-	if err := pusher.PushScopeSkips(ctx, skip, needs); err != nil {
+	if err := pusher.PushScopeSkips(ctx, skip, needs, setFlags); err != nil {
 		return fmt.Errorf("could not tell the agent which tests to skip: %w", err)
 	}
 	if len(skip) > 0 {

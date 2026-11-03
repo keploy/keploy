@@ -5146,17 +5146,21 @@ func (a *AgentClient) PushScopeGate(ctx context.Context, run []string, reason st
 
 // PushScopeSkips hands the agent the proven model's gate: the tests to skip,
 // by ID, each with its reason, and the tests each test needs to have begun
-// before it (models.ScopeGateReq.Needs); an empty map skips nothing. Made
-// again on a restarted agent, like the scope gate. Any answer but 200 is a
-// failure: a replay that cannot skip what CI skips refuses.
-func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) (retErr error) {
+// before it (models.ScopeGateReq.Needs); an empty map skips nothing. With
+// them go the flags that name the replayed set in the commands a failed
+// test's reason names (models.ScopeGateReq.SetFlags). Made again on a
+// restarted agent, like the scope gate. Any answer but 200 is a failure: a
+// replay that cannot skip what CI skips refuses.
+func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, setFlags []string) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			recorded, recordedNeeds := maps.Clone(skip), maps.Clone(needs)
-			a.session().record(stepScopeGate, func(c context.Context) error { return a.PushScopeSkips(c, recorded, recordedNeeds) })
+			recorded, recordedNeeds, recordedFlags := maps.Clone(skip), maps.Clone(needs), slices.Clone(setFlags)
+			a.session().record(stepScopeGate, func(c context.Context) error {
+				return a.PushScopeSkips(c, recorded, recordedNeeds, recordedFlags)
+			})
 		}
 	}()
-	body, err := json.Marshal(models.ScopeGateReq{Skip: skip, Needs: needs})
+	body, err := json.Marshal(models.ScopeGateReq{Skip: skip, Needs: needs, SetFlags: setFlags})
 	if err != nil {
 		return fmt.Errorf("failed to marshal the tests to skip: %w", err)
 	}
