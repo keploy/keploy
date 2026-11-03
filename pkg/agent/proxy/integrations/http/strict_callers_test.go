@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -120,16 +121,17 @@ func TestStrictServesEachCallerItsOwnRecordings(t *testing.T) {
 
 // A token no recording was made with (rotated, re-issued) is no recorded
 // caller's: it misses. It is answered only when the recordings learned
-// Authorization as noise (record's full round saw it drift), and then from
-// one group of recordings in record order, whichever token comes: a token
-// that matches every recording under the noise takes their turns.
+// Authorization's token as noise (record's full round saw it drift: its
+// word 1, the scheme still compared), and then from one group of
+// recordings in record order, whichever token comes: a token that matches
+// every recording under the noise takes their turns.
 func TestStrictARotatedTokenMissesUnlessLearned(t *testing.T) {
 	if got := authorizeCalls(t, authorizeDb(), true, "token-rotated", "token-rotated"); strings.Join(got, ",") != "," {
 		t.Fatalf("a rotated token was served %v", got)
 	}
 	learned := authorizeDb()
 	for _, m := range learned.mocks {
-		m.Spec.ReqBodyNoise = map[string][]string{"header.authorization": {}}
+		m.Spec.ReqBodyNoise = map[string][]string{"header.authorization": {learn.NoiseWordsPattern([]int{1})}}
 	}
 	if got := authorizeCalls(t, learned, true, "token-rotated", "token-A", "token-rotated", "token-B"); strings.Join(got, ",") != "a-1,b-1,a-2,a-2" {
 		t.Fatalf("with Authorization learned as noise served %v, want the recordings in record order", got)

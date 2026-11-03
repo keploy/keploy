@@ -137,6 +137,28 @@ func (k strictKnown) wordsAt(exact, rec, live string) bool {
 	return ok && learn.WordsAdmit(rec, live, words)
 }
 
+// learnedExcuses reports whether noise the mock learned excuses the field at
+// exact (or at legacy, the request-body learner's dialect) whole
+// (learnedAt), its value recorded there; and, where that noise is an older
+// keploy's noise whole at a text of more than one word (staleWhole), which
+// no longer excuses it, why, naming the field shape. A read of the
+// application's clock learned there is checked apart (clockDiffs).
+func (k strictKnown) learnedExcuses(exact, legacy, shape, recorded string) (bool, string) {
+	if !k.learnedAt(exact, legacy) {
+		return false, ""
+	}
+	if _, clock := k.clocks[exact]; !clock && staleWhole(k.learned, exact, legacy, recorded) {
+		return false, staleWholeWhy(shape)
+	}
+	return true, ""
+}
+
+// staleNoise is f refused for why (learnedExcuses), "" for none.
+func (f strictField) staleNoise(why string) strictField {
+	f.why, f.noise = why, why != ""
+	return f
+}
+
 // redacted reports whether a recorded value is one the obfuscator redacted.
 func (k strictKnown) redacted(recorded string) bool {
 	return recorded != "" && k.values != nil && k.values.IsNoisy(recorded)
@@ -150,8 +172,10 @@ type strictField struct {
 	diff  models.MockFieldDiff
 	shape string
 	// why is, of a read of the application's clock a replay refused
-	// (clockDiffs), the reason learn.CheckClockRead gives.
-	why string
+	// (clockDiffs), the reason learn.CheckClockRead gives; of a field whose
+	// learned noise no longer excuses it (noise), staleWholeWhy's.
+	why   string
+	noise bool
 }
 
 // field is a strictField whose name holds no value (a fixed part, a header).
@@ -339,11 +363,17 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 	}
 	rs := strings.Split(strings.TrimPrefix(maskURLNoise(rec, k.n.url), "/"), "/")
 	ls := strings.Split(strings.TrimPrefix(maskURLNoise(live, k.n.url), "/"), "/")
+	why := ""
 	if len(rs) == len(ls) {
 		same := true
 		for i := range rs {
-			if rs[i] != ls[i] && !k.learnedAt("url.path."+strconv.Itoa(i), "") && !k.wordsAt("url.path."+strconv.Itoa(i), rs[i], ls[i]) {
-				same = false
+			if rs[i] == ls[i] {
+				continue
+			}
+			place := "url.path." + strconv.Itoa(i)
+			learned, stale := k.learnedExcuses(place, "", "path", rs[i])
+			if !learned && !k.wordsAt(place, rs[i], ls[i]) {
+				same, why = false, stale
 				break
 			}
 		}
@@ -351,7 +381,7 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 			return nil
 		}
 	}
-	return []strictField{field(valueDiff("path", rec, live))}
+	return []strictField{field(valueDiff("path", rec, live)).staleNoise(why)}
 }
 
 // queryDiffs compares two queries: the same parameters, each with the same
@@ -395,10 +425,15 @@ func (k strictKnown) queryDiffs(rec, live url.Values) []strictField {
 		if sameMembers(maskValues(rv, k.n.url), maskValues(lv, k.n.url)) {
 			continue
 		}
-		if len(rv) == 1 && len(lv) == 1 && (k.learnedAt("url.query."+name, "") || k.wordsAt("url.query."+name, rv[0], lv[0])) {
-			continue
+		why := ""
+		if len(rv) == 1 && len(lv) == 1 {
+			learned, stale := k.learnedExcuses("url.query."+name, "", shape, rv[0])
+			if learned || k.wordsAt("url.query."+name, rv[0], lv[0]) {
+				continue
+			}
+			why = stale
 		}
-		out = append(out, shaped(path, shape, models.DiffKindValueChanged, strings.Join(rv, ", "), strings.Join(lv, ", ")))
+		out = append(out, shaped(path, shape, models.DiffKindValueChanged, strings.Join(rv, ", "), strings.Join(lv, ", ")).staleNoise(why))
 	}
 	return out
 }
@@ -468,7 +503,8 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 				continue
 			}
 		}
-		if k.learnedAt(path, "") || k.wordsAt(path, rv, lv) || k.redacted(rv) {
+		learned, why := k.learnedExcuses(path, "", path, rv)
+		if learned || k.wordsAt(path, rv, lv) || k.redacted(rv) {
 			continue
 		}
 		switch name {
@@ -481,7 +517,7 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 				continue
 			}
 		}
-		out = append(out, field(valueDiff(path, rv, lv)))
+		out = append(out, field(valueDiff(path, rv, lv)).staleNoise(why))
 	}
 	return out
 }
@@ -608,10 +644,13 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 			out = append(out, shaped(path, shape, models.DiffKindMissingInMock, "", ""))
 			continue
 		}
-		if sameMembers(rv, lv) || k.learnedAt(path, "") || len(rv) == 1 && len(lv) == 1 && k.wordsAt(path, rv[0], lv[0]) || redacted[key] {
+		// A repeated key is learned as one text, its values joined, so it
+		// is more than one word.
+		learned, why := k.learnedExcuses(path, "", shape, strings.Join(rv, ","))
+		if sameMembers(rv, lv) || learned || len(rv) == 1 && len(lv) == 1 && k.wordsAt(path, rv[0], lv[0]) || redacted[key] {
 			continue
 		}
-		out = append(out, shaped(path, shape, models.DiffKindValueChanged, "", ""))
+		out = append(out, shaped(path, shape, models.DiffKindValueChanged, "", "").staleNoise(why))
 	}
 	return out
 }
@@ -653,16 +692,17 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 	}
 	var out []strictField
 	for i := range rp {
-		path := "body." + rp[i].name
+		path, shape := "body."+rp[i].name, "body."+shapeKey(rp[i].name)
+		learned, why := k.learnedExcuses(path, "", shape, string(rp[i].data))
 		switch {
 		case rp[i].name != lp[i].name || rp[i].file != lp[i].file:
 			return append(out, bodyChanged())
 		case bytes.Equal(rp[i].data, lp[i].data):
 			continue
-		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || k.learnedAt(path, "") || k.wordsAt(path, string(rp[i].data), string(lp[i].data)) || k.redacted(string(rp[i].data))):
+		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || learned || k.wordsAt(path, string(rp[i].data), string(lp[i].data)) || k.redacted(string(rp[i].data))):
 			continue
 		}
-		out = append(out, shaped(path, "body."+shapeKey(rp[i].name), models.DiffKindValueChanged, "", ""))
+		out = append(out, shaped(path, shape, models.DiffKindValueChanged, "", "").staleNoise(why))
 	}
 	return out
 }
@@ -727,7 +767,9 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 	if isScalar(r) && k.redacted(scalarText(r)) {
 		return
 	}
-	learned = learned || k.learnedAt(exact, name)
+	recorded, _ := r.(string)
+	excused, why := k.learnedExcuses(exact, name, shape, recorded)
+	learned = learned || excused
 	if jsonKind(r) != jsonKind(l) {
 		*out = append(*out, shaped(name, shape, models.DiffKindTypeChanged, jsonKind(r), jsonKind(l)))
 		return
@@ -778,7 +820,7 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 				return
 			}
 		}
-		f := shaped(name, shape, models.DiffKindValueChanged, scalarText(r), scalarText(l))
+		f := shaped(name, shape, models.DiffKindValueChanged, scalarText(r), scalarText(l)).staleNoise(why)
 		if strings.Contains(risk, "[]") {
 			// Elements of an array share one name, so the values would not
 			// say which element changed: the field alone.

@@ -845,6 +845,13 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 		if !ok {
 			continue
 		}
+		if staleWhole(m.Spec.ReqBodyNoise, k, "", r.value) {
+			// Noise an older keploy learned whole at a text of more
+			// than one word leaves it unchecked no longer: it is
+			// compared as it came (strictDiff: learnedExcuses). A JSON
+			// number, bool or null is one word.
+			continue
+		}
 		l, ok := live.leaf(place)
 		if !ok || l.body && l.kind != r.kind {
 			return nil, nil

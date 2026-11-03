@@ -233,7 +233,12 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 			phase = models.MatchPhaseSchema
 		}
 		for _, f := range closestDiffs {
-			if f.why != "" {
+			switch {
+			case f.noise:
+				// A text an older keploy learned as noise whole, which
+				// keploy compares now, changed: why, and to record again.
+				h.Logger.Warn("noise an older keploy learned no longer leaves a text unchecked", zap.String("mock", closest.Name), zap.String("field", f.shape), zap.String("reason", f.why))
+			case f.why != "":
 				// A read of the application's clock the closest recording
 				// learned that this call does not hold: why, legibly.
 				h.Logger.Warn("a learned read of the application's clock does not hold", zap.String("mock", closest.Name), zap.String("field", f.shape), zap.String("reason", f.why))
@@ -601,7 +606,8 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest, actualKe
 
 // reasonsOf are, of fields, those refused for a reason of their own (a
 // learned read of the application's clock the call does not carry:
-// clockDiffs), each named by its shape, with that reason, once.
+// clockDiffs; a text an older keploy learned as noise whole that changed:
+// staleWholeWhy), each named by its shape, with that reason, once.
 func reasonsOf(fields []strictField) []models.FieldReason {
 	var out []models.FieldReason
 	for _, f := range fields {

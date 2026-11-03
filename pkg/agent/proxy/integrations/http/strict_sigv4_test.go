@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap/zaptest"
 )
@@ -282,9 +283,10 @@ func TestStrictSigV4ALearnedAuthorizationKeepsTheScope(t *testing.T) {
 			t.Fatalf("%s: differs %v", tc.want, d)
 		}
 	}
-	// What is no SigV4 is excused by the learned noise, as before.
+	// What is no SigV4 is excused by the learned noise, as before: a
+	// Bearer token's word, the scheme still compared.
 	bearer := recorded("m", "/bucket/key", map[string]string{"Authorization": "Bearer token-1"}, "")
-	bearer.Spec.ReqBodyNoise = map[string][]string{"header.authorization": {}}
+	bearer.Spec.ReqBodyNoise = map[string][]string{"header.authorization": {learn.NoiseWordsPattern([]int{1})}}
 	if got, diag := strictMatch(t, sent("/bucket/key", map[string]string{"Authorization": "Bearer token-2"}, ""), nil, nil, nil, bearer); got == nil {
 		t.Fatalf("a learned Bearer token was not excused: differs %v", differs(diag))
 	}

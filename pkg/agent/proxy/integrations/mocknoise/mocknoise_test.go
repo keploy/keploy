@@ -444,18 +444,20 @@ func TestLearnedFieldTypeStrict(t *testing.T) {
 	})
 }
 
-// The merge behind a mock's learned noise keeps what is there, but for two
-// words patterns of one place: those leave unchecked the words either does
+// The merge behind a mock's learned noise keeps what is there, but for a
+// words pattern of one place: two leave unchecked the words either does
 // (learn.MergeNoise), so a pairing that changed another word of a text adds
-// it. Its inputs are not changed.
+// it, and one learned where noise whole is (an older keploy's, at a text of
+// more than one word) takes its place. Noise whole learned beside a words
+// pattern leaves it as it is. Its inputs are not changed.
 func TestMergeLearnedUnionsTwoWordsPatterns(t *testing.T) {
 	w := func(words ...int) []string { return []string{learn.NoiseWordsPattern(words)} }
-	existing := map[string][]string{"body.note": w(1), "body.a": {}}
-	got := MergeLearned(existing, map[string][]string{"body.note": w(3), "body.a": w(0), "body.b": {}})
-	if want := map[string][]string{"body.note": w(1, 3), "body.a": {}, "body.b": {}}; !reflect.DeepEqual(got, want) {
+	existing := map[string][]string{"body.note": w(1), "body.a": {}, "body.c": w(2)}
+	got := MergeLearned(existing, map[string][]string{"body.note": w(3), "body.a": w(0), "body.b": {}, "body.c": {}})
+	if want := map[string][]string{"body.note": w(1, 3), "body.a": w(0), "body.b": {}, "body.c": w(2)}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("MergeLearned = %v, want %v", got, want)
 	}
-	if !reflect.DeepEqual(existing, map[string][]string{"body.note": w(1), "body.a": {}}) {
+	if !reflect.DeepEqual(existing, map[string][]string{"body.note": w(1), "body.a": {}, "body.c": w(2)}) {
 		t.Fatalf("MergeLearned changed its input: %v", existing)
 	}
 }

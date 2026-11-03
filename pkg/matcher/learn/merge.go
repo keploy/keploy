@@ -16,8 +16,10 @@ import (
 // MergeReqBodyNoise returns a fresh map combining the existing on-disk
 // request-body noise with newly-detected noise carried on the MockState.
 // Noise is monotonic: on a key collision existing noise stays, but two
-// words patterns leave unchecked the words either does (MergeNoise). Every
-// slice is copied so the result shares no backing storage with its inputs.
+// words patterns leave unchecked the words either does, and a words pattern
+// detected where existing is noise whole, an older keploy's, takes its place
+// (MergeNoise). Every slice is copied so the result shares no backing
+// storage with its inputs.
 func MergeReqBodyNoise(existing, detected map[string][]string) map[string][]string {
 	out := make(map[string][]string, len(existing)+len(detected))
 	for k, v := range existing {
