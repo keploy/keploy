@@ -2144,8 +2144,10 @@ func unobfuscated(mv []string, isObfuscated func(string) bool) []string {
 // it and each of its values, on each side, matches one (formValuesMatch):
 // otherwise it is compared as any other key. The entry with patterns that
 // decides a key is found as the strict comparison and PatternDrift find it
-// (formGuards: on the decoded key, without case, whole fields at any depth),
-// and that key's drift is named by its decoded key, which PatternDrift's
+// (formGuards: on the decoded key, without case, whole fields at any depth).
+// Such a key is read on both sides by its decoded key, as the strict
+// comparison reads it (raw spellings that decode alike are one key, their
+// values in body order), and its drift is named by it, which PatternDrift's
 // filter reads.
 func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObfuscated func(string) bool) map[string][]string {
 	// Split on raw bytes (Split on '&', IndexByte on '=') rather than via
@@ -2154,7 +2156,8 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 	// (^<raw_key>=[^&]+$) — exactly as formBodiesMatchModuloNoise does. Passing
 	// only the decoded value here would never match a key-anchored regex, so
 	// obfuscated form fields would be wrongly re-flagged as schema noise.
-	rawValuesByKey := func(body string) map[string][]string {
+	// The raw values of each key, in body order, the key as name gives it.
+	rawValuesByKey := func(body string, name func(string) string) map[string][]string {
 		out := map[string][]string{}
 		for _, seg := range strings.Split(body, "&") {
 			if seg == "" {
@@ -2164,23 +2167,38 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 			if i := strings.IndexByte(seg, '='); i >= 0 {
 				key, val = seg[:i], seg[i+1:]
 			}
-			out[key] = append(out[key], val)
+			out[name(key)] = append(out[name(key)], val)
 		}
 		return out
 	}
-	mockVals := rawValuesByKey(mockBody)
-	reqVals := rawValuesByKey(reqBody)
+	asWritten := func(k string) string { return k }
+	mockVals := rawValuesByKey(mockBody, asWritten)
+	reqVals := rawValuesByKey(reqBody, asWritten)
+	// By decoded key, built for the first key an entry with patterns guards.
+	var mockByName, reqByName map[string][]string
 	if isObfuscated == nil {
 		isObfuscated = func(string) bool { return false } // no value-regex noise on the mock
 	}
 
 	guards := formGuards(known)
+	read := map[string]bool{} // decoded keys a guarded key was read under
 	out := map[string][]string{}
 	for rawKey, mv := range mockVals {
 		key := "body." + rawKey
 		pats, ok := known[key]
+		rv, inLive := reqVals[rawKey]
 		if gp := guards(rawKey); len(gp) > 0 {
-			pats, ok, key = gp, true, "body."+formKeyName(rawKey)
+			name := formKeyName(rawKey)
+			if read[name] {
+				continue
+			}
+			read[name] = true
+			if mockByName == nil {
+				mockByName, reqByName = rawValuesByKey(mockBody, formKeyName), rawValuesByKey(reqBody, formKeyName)
+			}
+			pats, ok, key = gp, true, "body."+name
+			mv = mockByName[name]
+			rv, inLive = reqByName[name]
 		}
 		if ok && len(pats) == 0 {
 			continue
@@ -2190,14 +2208,13 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 			// exclusion: a recorded value it redacted is not held to them
 			// (it matches a pattern of its own), the key's other recorded
 			// values and the live ones are.
-			if rv, inLive := reqVals[rawKey]; inLive && formValuesMatch(unobfuscated(mv, isObfuscated), pats) && formValuesMatch(rv, pats) {
+			if inLive && formValuesMatch(unobfuscated(mv, isObfuscated), pats) && formValuesMatch(rv, pats) {
 				continue
 			}
 		} else if obfuscatedKey(rawKey, mv, isObfuscated) {
 			continue
 		}
-		rv, ok := reqVals[rawKey]
-		if !ok {
+		if !inLive {
 			out[key] = []string{} // key dropped on replay
 			continue
 		}
