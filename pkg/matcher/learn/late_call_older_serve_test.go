@@ -17,16 +17,23 @@ import (
 // gave it. Each value is a copy of a place both runs gave, in the same
 // order, so neither shows the other is no copy: the call is refused, naming
 // the older serve, never learned as noise. So too where F served a changed
-// and gave its view of it (the recording's a answered 5).
+// and gave its view of it (the recording's a answered 5), and where F gave
+// a only before the call's test began in no older test (between tests, or
+// at the set's start-up: Raw.ServedBeforeTheTest): the application may
+// have kept what a gave it.
 //
 // The controls keep the rule a copy follows its source: a in the call's own
 // test, where the order alone decides (an application copying the last
 // answer took b's 82 in both runs, so F's 7 is a's by chance); and a word of
 // the older serve the value holds by chance, where the recorded value holds
-// no word of any place both runs gave (83): both noise, as a word of
-// another test's recording is let go on the same terms (excusedGiven).
+// no word of any place both runs gave (83), an older test's serve or one
+// before the test: noise, as a word of another test's recording is let go
+// on the same terms (excusedGiven).
 func TestALateCallsValueAnOlderServeGaveIsNeverLearnedAsNoise(t *testing.T) {
-	const late = "record's full round gave the application mock-a only in an older test than the call's: the call may be a late call of that test"
+	const (
+		late = "record's full round gave the application mock-a only in an older test than the call's: the call may be a late call of that test"
+		kept = "record's full round gave the application mock-a only before the call's test began: the application may have kept what it gave there"
+	)
 	b := eAnswer("mock-b", 200*time.Millisecond, "82").ServedAs(2).ServedAsRecorded()
 	asRecorded := eAnswer("mock-a", 300*time.Millisecond, "7").ServedAs(1).ServedAsRecorded()
 	viewed := eAnswer("mock-a", 300*time.Millisecond, "5").ServedAs(1).ServedLive(eAnswer("mock-a", 300*time.Millisecond, "7"))
@@ -36,15 +43,22 @@ func TestALateCallsValueAnOlderServeGaveIsNeverLearnedAsNoise(t *testing.T) {
 		a        Raw
 		kind     Kind
 		why      []string
+		not      string
 	}{
 		{"a served as recorded in an older test", "slot 82", asRecorded.ServedInAnOlderTest(), KindUnaccounted,
-			[]string{"stands in mock-b", late, "the recording cannot show the value does not follow that word"}},
+			[]string{"stands in mock-b", late, "the recording cannot show the value does not follow that word"}, kept},
 		{"a served changed in an older test, F's view gave 7", "slot 82", viewed.ServedInAnOlderTest(), KindUnaccounted,
-			[]string{"stands in mock-b", late, "the recording cannot show the value does not follow that word"}},
-		{"a served as recorded in the call's own test", "slot 82", asRecorded, KindNoise, nil},
-		{"a served changed in the call's own test, F's view gave 7", "slot 82", viewed, KindNoise, nil},
-		{"a served as recorded in an older test, the recorded value took no word", "slot 83", asRecorded.ServedInAnOlderTest(), KindNoise, nil},
-		{"a served changed in an older test, the recorded value took no word", "slot 83", viewed.ServedInAnOlderTest(), KindNoise, nil},
+			[]string{"stands in mock-b", late, "the recording cannot show the value does not follow that word"}, kept},
+		{"a served as recorded before the test, in no older test", "slot 82", asRecorded.ServedBeforeTheTest(), KindUnaccounted,
+			[]string{"stands in mock-b", kept, "the recording cannot show the value does not follow that word"}, late},
+		{"a served changed before the test, in no older test, F's view gave 7", "slot 82", viewed.ServedBeforeTheTest(), KindUnaccounted,
+			[]string{"stands in mock-b", kept, "the recording cannot show the value does not follow that word"}, late},
+		{"a served as recorded in the call's own test", "slot 82", asRecorded, KindNoise, nil, ""},
+		{"a served changed in the call's own test, F's view gave 7", "slot 82", viewed, KindNoise, nil, ""},
+		{"a served as recorded in an older test, the recorded value took no word", "slot 83", asRecorded.ServedInAnOlderTest(), KindNoise, nil, ""},
+		{"a served changed in an older test, the recorded value took no word", "slot 83", viewed.ServedInAnOlderTest(), KindNoise, nil, ""},
+		{"a served as recorded before the test, the recorded value took no word", "slot 83", asRecorded.ServedBeforeTheTest(), KindNoise, nil, ""},
+		{"a served changed before the test, the recorded value took no word", "slot 83", viewed.ServedBeforeTheTest(), KindNoise, nil, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := classifyF(t, tc.recorded, "slot 7", nil, []Raw{tc.a, b}, nil)
@@ -55,6 +69,9 @@ func TestALateCallsValueAnOlderServeGaveIsNeverLearnedAsNoise(t *testing.T) {
 				if !strings.Contains(got.Why, w) {
 					t.Errorf("why %q; want it to say %q", got.Why, w)
 				}
+			}
+			if tc.not != "" && strings.Contains(got.Why, tc.not) {
+				t.Errorf("why %q says %q", got.Why, tc.not)
 			}
 			// The rule's absence (ClassifyGiven) refuses every one of
 			// them: the older serve is a place of the value.

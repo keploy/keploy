@@ -75,18 +75,20 @@ import (
 // go on the same terms.
 //
 // A payload handed as a place of the call's own test that F gave the
-// application only in an older test than the call's (Raw.InAnOlderTest: an
-// adapter reads the previous test's serves so) is read on the terms of a
-// recording of another test too (olderTook): a word there is let go only
-// where no word that changed of the value lacking it stands in a place the
-// rule reads. A consumer that fell behind makes a call of an older test in
-// a later test's window: F gives it the older test's answer (a token) and
-// then the window's recording, as the recording did, and it sends the older
-// token, while the recording's call sent the window's. Each value is a copy
-// of a place both runs gave, the two places in the same order, so neither
-// shows the other is no copy, and the call is refused: a value an older
-// serve gave the application is never read as one it made fresh. Within
-// the call's own test the order alone decides, as above. Everything else the classifier
+// application only before the call's test began (outsideTest: in an older
+// test than the call's, Raw.InAnOlderTest, as an adapter reads the previous
+// test's serves; between tests or at the set's start-up,
+// Raw.BeforeTheTest) is read on the terms of a recording of another test
+// too (olderTook): a word there is let go only where no word that changed
+// of the value lacking it stands in a place the rule reads. A consumer that
+// fell behind makes a call of an older test in a later test's window: F
+// gives it the older test's answer (a token) and then the window's
+// recording, as the recording did, and it sends the older token, while the
+// recording's call sent the window's. Each value is a copy of a place both
+// runs gave, the two places in the same order, so neither shows the other
+// is no copy, and the call is refused: a value a serve before the call's
+// test gave the application is never read as one it made fresh. Within the
+// call's own test the order alone decides, as above. Everything else the classifier
 // refuses (an offset, an instant, a glued word of an undeclared body, a word
 // of a recording made after the call, an echo in the answer) stays refused:
 // the rule reads the word rule's plain matches alone.
@@ -533,21 +535,30 @@ func (f *follows) tookElsewhere(v *valueDrift, t string) string {
 	return f.took[side]
 }
 
-// olderTook is tookElsewhere of word t of v, found in mock, a payload F gave
-// the application only in an older test than the call's
-// (Raw.InAnOlderTest), saying so: "" where no word that changed of the value
-// lacking t stands in a place the word rule reads. Such a payload is read
-// as a recording of another test is (excusedGiven): a value F saw that
-// holds an older test's word, while the recorded value holds a word of a
-// place both runs gave, is a late call's (an application that fell behind
-// still works on what the older test gave it), not a value made beside the
-// word.
-func (f *follows) olderTook(v *valueDrift, t, mock string) string {
+// outsideTest reports whether F gave the application x's payload only
+// before the call's test began: in an older test than the call's
+// (Raw.InAnOlderTest), or between tests or at the set's start-up
+// (Raw.BeforeTheTest), never in the call's own test.
+func outsideTest(x Raw) bool { return x.InAnOlderTest() || x.BeforeTheTest() }
+
+// olderTook is tookElsewhere of word t of v, found in x's payload, which F
+// gave the application only before the call's test began (outsideTest),
+// saying so: "" where no word that changed of the value lacking t stands in
+// a place the word rule reads. Such a payload is read as a recording of
+// another test is (excusedGiven): a value F saw that holds a word of what F
+// gave before the test, while the recorded value holds a word of a place
+// both runs gave, may be a late call's (an application that fell behind
+// still works on what an older test gave it) or one the application kept
+// from before the test, not a value made beside the word.
+func (f *follows) olderTook(v *valueDrift, t string, x Raw) string {
 	took := f.tookElsewhere(v, t)
 	if took == "" {
 		return ""
 	}
-	return took + "; record's full round gave the application " + mock + " only in an older test than the call's: the call may be a late call of that test, by an application that fell behind"
+	if x.InAnOlderTest() {
+		return took + "; record's full round gave the application " + x.mock + " only in an older test than the call's: the call may be a late call of that test, by an application that fell behind"
+	}
+	return took + "; record's full round gave the application " + x.mock + " only before the call's test began: the application may have kept what it gave there"
 }
 
 // liveOf is what F gave the application at x, as tookElsewhere reads the
@@ -733,8 +744,8 @@ func (f *follows) excusedRaw(x Raw, v *valueDrift, i int, t string, at time.Time
 		fv, followed = f.dc.liveAt(x, f.dc.searched(x, false)[0], false, v, func(own string) bool { return f.dc.rawTokens(own)[i][t] })
 	}
 	var took func() string
-	if x.InAnOlderTest() {
-		took = func() string { return f.olderTook(v, t, x.mock) }
+	if outsideTest(x) {
+		took = func() string { return f.olderTook(v, t, x) }
 	}
 	if !f.excused(t, before && held, fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+place, took) {
 		return false
@@ -795,8 +806,8 @@ func (f *follows) excusedLive(x Raw, v *valueDrift, i int, t string, at time.Tim
 	case f.dc.holdsWord(f.rec, t):
 		f.refused = "the recorded value holds that word too, so it cannot show the value does not follow it"
 		return false
-	case x.InAnOlderTest() && f.olderTook(v, t, x.mock) != "":
-		f.refused = f.olderTook(v, t, x.mock) + ", so each value may be a copy of a word its run picked from what both runs gave, and the recording cannot show the value does not follow that word"
+	case outsideTest(x) && f.olderTook(v, t, x) != "":
+		f.refused = f.olderTook(v, t, x) + ", so each value may be a copy of a word its run picked from what both runs gave, and the recording cannot show the value does not follow that word"
 		return false
 	}
 	if f.first == "" {
