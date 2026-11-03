@@ -6,12 +6,14 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // TestSameRecordedBody holds that SameRecordedBody reads two bodies as the
 // strict comparison does: by the recording's Content-Type, JSON as a
 // decoded document, a form by its parsed values, a multipart form part by
-// part, anything else byte for byte, with learned and redacted places free.
+// part, anything else byte for byte, with learned and redacted places free,
+// and the fields keploy.yml's request-body noise names.
 func TestSameRecordedBody(t *testing.T) {
 	const jsonCT, formCT = "application/json", "application/x-www-form-urlencoded"
 	rec := func(ct, body string, noise ...string) *models.Mock {
@@ -71,7 +73,46 @@ func TestSameRecordedBody(t *testing.T) {
 		{"no request", &models.Mock{Kind: models.HTTP}, nil, `{}`, jsonCT, false},
 	}
 	for _, r := range rows {
-		if got := SameRecordedBody(r.rec, r.learned, []byte(r.body), r.ct); got != r.want {
+		if got := SameRecordedBody(r.rec, r.learned, RequestNoise{}, []byte(r.body), r.ct); got != r.want {
+			t.Errorf("%s: SameRecordedBody = %v, want %v", r.name, got, r.want)
+		}
+	}
+
+	// keploy.yml's noise, as a keploy test run hands it to its matcher
+	// (OutgoingOptions.NoiseConfig) and NewRequestNoise reads it: a
+	// requestbody path with no pattern frees its whole field, at any depth,
+	// present or not; one with patterns lets the field vary only while its
+	// recorded and its live value each match one, as the strict comparison
+	// reads it; no other bucket frees a request body field.
+	ymlRows := []struct {
+		name string
+		cfg  map[string]map[string][]string
+		rec  *models.Mock
+		body string
+		ct   string
+		want bool
+	}{
+		{"json, a keploy.yml request-body field's value differs", map[string]map[string][]string{"requestbody": {"ts": nil}}, rec(jsonCT, `{"amount":100,"ts":"t1"}`), `{"amount":100,"ts":"t2"}`, jsonCT, true},
+		{"json, the field keploy.yml names in capitals", map[string]map[string][]string{"requestbody": {"TS": nil}}, rec(jsonCT, `{"amount":100,"ts":"t1"}`), `{"amount":100,"ts":"t2"}`, jsonCT, true},
+		{"json, a keploy.yml field nested", map[string]map[string][]string{"requestbody": {"ts": nil}}, rec(jsonCT, `{"amount":100,"meta":{"ts":1}}`), `{"amount":100,"meta":{"ts":2}}`, jsonCT, true},
+		{"json, a keploy.yml field by its dotted path", map[string]map[string][]string{"requestbody": {"meta.ts": nil}}, rec(jsonCT, `{"amount":100,"meta":{"ts":1}}`), `{"amount":100,"meta":{"ts":2}}`, jsonCT, true},
+		{"json, a keploy.yml field the live body leaves out", map[string]map[string][]string{"requestbody": {"ts": nil}}, rec(jsonCT, `{"amount":100,"ts":"t1"}`), `{"amount":100}`, jsonCT, true},
+		{"json, a keploy.yml field's pattern holds both values", map[string]map[string][]string{"requestbody": {"ts": {"^t[12]$"}}}, rec(jsonCT, `{"amount":100,"ts":"t1"}`), `{"amount":100,"ts":"t2"}`, jsonCT, true},
+		{"json, a keploy.yml field's pattern misses the live value", map[string]map[string][]string{"requestbody": {"ts": {"^t1$"}}}, rec(jsonCT, `{"amount":100,"ts":"t1"}`), `{"amount":100,"ts":"t2"}`, jsonCT, false},
+		{"json, a keploy.yml field's pattern misses the recorded value", map[string]map[string][]string{"requestbody": {"ts": {"^t2$"}}}, rec(jsonCT, `{"amount":100,"ts":"t1"}`), `{"amount":100,"ts":"t2"}`, jsonCT, false},
+		{"json, a keploy.yml field with a pattern the live body leaves out", map[string]map[string][]string{"requestbody": {"ts": {"^t1$"}}}, rec(jsonCT, `{"amount":100,"ts":"t1"}`), `{"amount":100}`, jsonCT, false},
+		{"form, a keploy.yml field's pattern holds both values", map[string]map[string][]string{"requestbody": {"ts": {"^[12]$"}}}, rec(formCT, `a=1&ts=1`), `ts=2&a=1`, formCT, true},
+		{"form, a keploy.yml field's pattern misses the live value", map[string]map[string][]string{"requestbody": {"ts": {"^1$"}}}, rec(formCT, `a=1&ts=1`), `ts=2&a=1`, formCT, false},
+		{"json, a field beside a keploy.yml one", map[string]map[string][]string{"requestbody": {"ts": nil}}, rec(jsonCT, `{"amount":100,"ts":"t1"}`), `{"amount":200,"ts":"t2"}`, jsonCT, false},
+		{"json, keploy.yml's response-body noise", map[string]map[string][]string{"body": {"ts": nil}}, rec(jsonCT, `{"amount":100,"ts":"t1"}`), `{"amount":100,"ts":"t2"}`, jsonCT, false},
+		{"json, keploy.yml's header and url noise", map[string]map[string][]string{"header": {"ts": nil}, "url": {"ts": nil}}, rec(jsonCT, `{"amount":100,"ts":"t1"}`), `{"amount":100,"ts":"t2"}`, jsonCT, false},
+		{"form, a keploy.yml field", map[string]map[string][]string{"requestbody": {"ts": nil}}, rec(formCT, `a=1&ts=1`), `ts=2&a=1`, formCT, true},
+		{"form, a field beside a keploy.yml one", map[string]map[string][]string{"requestbody": {"ts": nil}}, rec(formCT, `a=1&ts=1`), `ts=2&a=2`, formCT, false},
+		{"text, keploy.yml names no field of it", map[string]map[string][]string{"requestbody": {"ts": nil}}, rec("text/plain", `ts=1`), `ts=2`, "text/plain", false},
+	}
+	for _, r := range ymlRows {
+		noise := NewRequestNoise(zap.NewNop(), models.OutgoingOptions{NoiseConfig: r.cfg})
+		if got := SameRecordedBody(r.rec, nil, noise, []byte(r.body), r.ct); got != r.want {
 			t.Errorf("%s: SameRecordedBody = %v, want %v", r.name, got, r.want)
 		}
 	}
