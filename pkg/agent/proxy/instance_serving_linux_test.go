@@ -352,7 +352,9 @@ func TestAConnectionKeployRefusedIsCountedACallItCannotAttribute(t *testing.T) {
 
 // Every staging of the set reaches each worker's manager and is kept, one
 // of each kind in the order they last came; a test's own window (the run's
-// test, not the set) is not kept.
+// test, not the set) is not kept. The pool names come with the mocks each
+// test lists (SetPoolTests, the teardown bound's run of a test): each
+// worker's manager holds the latest table, as the run's does.
 func TestEveryStagingOfTheSetReachesEachTestWorker(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	p, _ := storeProxy(t, ipv4Dest(t, "127.0.0.1:50064"))
@@ -365,7 +367,7 @@ func TestEveryStagingOfTheSetReachesEachTestWorker(t *testing.T) {
 		p.SetMocks(ctx, nil, []*models.Mock{a}),
 		p.SetMocksWithWindow(ctx, nil, []*models.Mock{a}, models.BaseTime, time.Now()),
 		p.OpenTestWithWindow(ctx, nil, []*models.Mock{a}, exactT0, exactT0.Add(time.Second), nil),
-		p.SetPoolNames([]string{"a"}, nil, nil),
+		p.SetPoolNames([]string{"a"}, nil, map[string][]string{"t-1": {"a"}}),
 		p.StageExactBackground(models.RecordedWithS12Routing),
 		p.ServeExactBackground(models.RecordedWithS12Routing, []string{"a"}, nil),
 		p.SetRecordedOfKind(func(models.Kind, func(string, func() (*models.Mock, error)) bool) error { return nil }),
@@ -398,9 +400,14 @@ func TestEveryStagingOfTheSetReachesEachTestWorker(t *testing.T) {
 	if m2 := instanceMgrOf(t, p, 2); m2.exact.times.Load() == nil || m2.exact.staging.Load() {
 		t.Fatal("worker 2, served after the set's stagings, missed some")
 	}
+	for _, m := range []*MockManager{p.getMockManager(), m1, instanceMgrOf(t, p, 2)} {
+		if pt := m.exact.poolTests.Load(); pt == nil || len(pt.lists) != 1 || strings.Join(pt.lists["t-1"], " ") != "a" {
+			t.Fatalf("a manager holds the pool's tests %+v, want t-1 listing a", pt)
+		}
+	}
 	// The same kind staged again is kept once, as the latest of them all,
 	// and a worker served after it begins with it, not the one it replaced.
-	if err := p.SetPoolNames([]string{"b"}, nil); err != nil {
+	if err := p.SetPoolNames([]string{"b"}, nil, map[string][]string{"t-2": {"b"}}); err != nil {
 		t.Fatal(err)
 	}
 	keys = keys[:0]
@@ -422,6 +429,10 @@ func TestEveryStagingOfTheSetReachesEachTestWorker(t *testing.T) {
 		if _, b := (*names)["b"]; len(*names) != 1 || !b {
 			t.Fatalf("worker %d holds pool names %v, want only the latest, b", inst, *names)
 		}
+		pt := instanceMgrOf(t, p, inst).exact.poolTests.Load()
+		if pt == nil || len(pt.lists) != 1 || strings.Join(pt.lists["t-2"], " ") != "b" || strings.Join(pt.of["b"], " ") != "t-2" {
+			t.Fatalf("worker %d holds the pool's tests %+v, want only the latest, t-2 listing b", inst, pt)
+		}
 	}
 }
 
@@ -431,7 +442,7 @@ func TestEveryStagingOfTheSetReachesEachTestWorker(t *testing.T) {
 func TestASetStagingWithNoReplayIsRefusedAndKeptForNoWorker(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	p := &Proxy{logger: zap.NewNop()}
-	if err := p.SetPoolNames([]string{"a"}, nil); !errors.Is(err, errNoMockManager) {
+	if err := p.SetPoolNames([]string{"a"}, nil, nil); !errors.Is(err, errNoMockManager) {
 		t.Fatalf("SetPoolNames with no replay gave %v, want errNoMockManager", err)
 	}
 	if len(p.instances.staged) != 0 {
@@ -451,7 +462,7 @@ func TestAWorkerServedUnderExactServingBeginsWithAnEmptyPool(t *testing.T) {
 	if err := p.SetMocks(ctx, nil, []*models.Mock{exactMock("a", 0, models.LifetimeSession)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.SetPoolNames([]string{"a"}, nil); err != nil {
+	if err := p.SetPoolNames([]string{"a"}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if p.getMockManager().exactView() != nil {
