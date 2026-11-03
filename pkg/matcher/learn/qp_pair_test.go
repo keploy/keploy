@@ -390,7 +390,8 @@ func TestQuotedPrintableInAJSONStringIsCheckedUnescaped(t *testing.T) {
 
 // A mail that says it is quoted-printable is checked with each of its
 // escapes decoded, in a JSON string too, whose header may hold a JSON
-// escape ("\t" after the colon): the header is read with its escapes read.
+// escape ("\t" after the colon), or nothing after the colon: the header
+// is read with its escapes read.
 // A changed run of the standard base64 alphabet that only that reading
 // shows ("=2B" a '+') and that does not decode is refused, as in the raw
 // mail, each way.
@@ -402,6 +403,8 @@ func TestADeclaredMailInAJSONStringIsCheckedAsOne(t *testing.T) {
 	for _, tc := range []struct{ name, nl, tab string }{
 		{"raw", "\r\n", "\t"},
 		{"in a JSON string", `\r\n`, `\t`},
+		{"raw, nothing after the colon", "\r\n", ""},
+		{"in a JSON string, nothing after the colon", `\r\n`, ""},
 	} {
 		for _, p := range [][2]string{{"YmFy", "YmFz"}, {"YmFz", "YmFy"}} {
 			t.Run(tc.name+", "+p[0], func(t *testing.T) {
@@ -598,6 +601,8 @@ func TestWhatOnlyACheckedFormShowsIsRefused(t *testing.T) {
 		{"wrapped in both runs", "Token: ab+=\r\ncd ok", "Token: ab+=\r\nxy ok", b64Run},
 		{"wrapped in one run, no '=' in the other", "Token: ab+=\r\ncd ok", "Token: abzxy ok", b64Run},
 		{"wrapped, a '!' escaped", "Token: ab+=\r\ncd ok=21", "Token: ab+=\r\nxy ok=21", b64Run},
+		{"wrapped in a JSON string, a '!' escaped", `Token: ab+=\r\ncd ok=21`, `Token: ab+=\r\nxy ok=21`, b64Run},
+		{"wrapped in a JSON string in a JSON string, a '!' escaped", `Token: ab+=\\r\\ncd ok=21`, `Token: ab+=\\r\\nxy ok=21`, b64Run},
 		{"non-ASCII escapes only", "Commande =C3=A9t=C3=A9 ok", "Commande =C3=A8t=C3=A8 ok", script},
 		{"a mail that says it is, its escapes show it", mail("YmFy"), mail("YmFz"), b64Run},
 		{"a '%' in base64 text", "data " + b64("price 10% off a7k29q"), "data " + b64("price 10% off b8l30r"), escape},
@@ -647,4 +652,68 @@ func TestWhatFlowedIsFollowedInEveryFormSearched(t *testing.T) {
 			})
 		}
 	}
+}
+
+// A line only the quoted-printable form shows ("order#A7K29Q" of
+// "order=23A7K29Q") is a line of the value, and is followed whole where an
+// earlier test holds it, though only its punctuation drifted: the value
+// as written holds no such line, so nothing written stands for it. Alone,
+// and after a line break of its own.
+func TestALineOnlyTheQuotedPrintableFormShowsIsFollowedWhole(t *testing.T) {
+	at := time.Date(2026, 11, 2, 11, 48, 4, 0, time.UTC)
+	held := payloadEarlier(at, "order#A7K29Q", "order-A7K29Q")
+	for _, p := range [][2]string{{"order=23A7K29Q", "order+A7K29Q"}, {"x=0Aorder=23A7K29Q", "x=0Aorder+A7K29Q"}} {
+		t.Run(p[0], func(t *testing.T) {
+			if got := classifyOne(p[0], p[1], at, held, nil, nil); got.Kind != KindVariable {
+				t.Fatalf("got %s (%s), want the line that flowed followed as a variable", got.Kind, got.Why)
+			}
+		})
+	}
+}
+
+// A line of the text a base64 run decodes to is a line of the value where
+// the value has a quoted-printable form too, though the value also holds
+// it as written: only the quoted-printable form's own lines are checked
+// against the value as written. Here the text "order#A7K29Q" flowed from
+// an earlier test, and only its punctuation drifted.
+func TestABase64TextLineIsFollowedBesideAQuotedPrintableForm(t *testing.T) {
+	at := time.Date(2026, 11, 2, 11, 48, 4, 0, time.UTC)
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	held := payloadEarlier(at, "order#A7K29Q", "order-A7K29Q")
+	rec, live := "k=3D order#A7K29Q "+b64("order#A7K29Q"), "k=3D order+A7K29Q "+b64("order+A7K29Q")
+	if got := classifyOne(rec, live, at, held, nil, nil); got.Kind != KindVariable {
+		t.Fatalf("got %s (%s), want the line that flowed followed as a variable", got.Kind, got.Why)
+	}
+}
+
+// A line the quoted-printable form cuts is no line of the value where the
+// value holds it as written on its own side, recorded or live, whatever
+// the other side holds: "t=1730546884,v1" is the recorded value's own
+// text, and the live value, whose separator changed, holds none of it. An
+// earlier test whose signature also begins "0A" shares no value with it.
+func TestALineHeldAsWrittenOnItsOwnSideIsNoLineThatFlowed(t *testing.T) {
+	at := time.Date(2026, 11, 2, 11, 48, 4, 385340565, time.UTC)
+	comma, semi := "t=1730546884,v1=0A", "t=1730546884;v1=E7"
+	for _, p := range [][2]string{{comma + sigA[2:], semi + sigB[2:]}, {semi + sigB[2:], comma + sigA[2:]}} {
+		erec, elive := p[0][:len(comma)]+reversed(p[0][len(comma):]), p[1][:len(semi)]+reversed(p[1][len(semi):])
+		earlier := []Earlier{{Mock: "mock-11", At: at.Add(-2 * time.Second), Run: true, Seen: []Seen{{
+			Side: Request, Leaf: Leaf{Path: "header.authorization", Noise: "header.authorization", Type: String, Value: erec},
+			Live: elive, Place: "header.authorization",
+		}}}}
+		t.Run(p[0][:len(comma)], func(t *testing.T) {
+			if got := classifyOne(p[0], p[1], at, earlier, nil, nil); got.Kind != KindNoise {
+				t.Fatalf("got %s (%s), want noise", got.Kind, got.Why)
+			}
+		})
+	}
+}
+
+// payloadEarlier is an earlier exchange of the test, whose payload keploy
+// was given, that sent rec at body.id (live in the full round).
+func payloadEarlier(at time.Time, rec, live string) []Earlier {
+	t := at.Add(-time.Second)
+	m := RawOf(&models.Mock{Name: "mock-1", Spec: models.MockSpec{ReqTimestampMock: t, ResTimestampMock: t.Add(time.Millisecond)}}, true)
+	return []Earlier{{Mock: "mock-1", At: t, Own: true, Payload: m.ServedAs(1), Seen: []Seen{
+		{Side: Request, Leaf: Leaf{Path: "body.id", Noise: "body.id", Type: String, Value: rec}, Live: live, Place: "body.id"},
+	}}}
 }
