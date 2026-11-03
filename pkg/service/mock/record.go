@@ -533,7 +533,15 @@ func (m *mockService) Record(ctx context.Context) error {
 			streams = append(streams, roundStream{kind: models.TestCaseStream, done: capture.done})
 		}
 		strict := agentHolds && startedAgent(m.instrumentation)
-		lost = m.endRound(round, func() bool { return strict }, streams, recordDrainWords)
+		var refused error
+		lost, refused = m.endRound(round, func() bool { return strict }, streams, recordDrainWords)
+		if refused != nil {
+			// The agent answered, and did not take the request: its streams
+			// are ended here, as before markers. A mock still on its way is
+			// lost, and the recording is still saved: a loss at record time
+			// does not fail the recording, the replay of it judges it.
+			m.logger.Warn(endRefused, zap.Error(refused), zap.String("next_step", recordDrainWords.endedHere))
+		}
 	}
 	stopCapture()
 	// 8''. The capture has stopped: its consumers write what the agent handed
@@ -1742,6 +1750,13 @@ const (
 	quietRequestsUnconfirmed     = "replay failed: the keploy agent could not confirm it had handed over every request it captured before the run ended (it cannot say what it still holds, or cannot end its request stream after what it sent), so keploy stopped reading the stream once it had gone quiet: this run is not judged, since a request it handed over later would read as one the app never made"
 	quietRequestsUnconfirmedNext = "run a keploy agent of this keploy's version, which says when it has handed over every request it captured, then replay again"
 )
+
+// endRefused is said when the agent answered the request to end a round's
+// streams but did not take it (endRound's refused): the streams are ended
+// here, as before markers, and a frame still on its way is lost. keploy mock
+// record says it at WARN and saves the recording; keploy mock replay fails
+// the run as keploy's (replayEndRefused).
+const endRefused = "the keploy agent did not take the request to end its streams; ending them here, and what was still on its way is lost"
 
 // requestsUnconfirmed is why such a run is short of the requests the agent
 // captured (Replay's requestsShort): it names the agent's missing word and

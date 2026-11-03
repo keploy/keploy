@@ -492,7 +492,14 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			// run ends unjudged, 128+N.
 			ownAgent := !m.isDockerCompose() && startedAgent(m.instrumentation)
 			strict := func() bool { return ownAgent && !utils.Interrupted() }
-			lost = m.endRound(watchRound, strict, []roundStream{{kind: models.TestCaseStream, done: actual.done}}, replayDrainWords)
+			var refused error
+			lost, refused = m.endRound(watchRound, strict, []roundStream{{kind: models.TestCaseStream, done: actual.done}}, replayDrainWords)
+			// An agent that answered and did not take the request to end its
+			// stream leaves it to be ended here: the run cannot confirm it
+			// holds every request (replayEndRefused).
+			if short := m.replayEndRefused(name, refused); short != "" {
+				requestsShort = short
+			}
 		}
 		if lost {
 			select {

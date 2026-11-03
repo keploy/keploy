@@ -281,35 +281,66 @@ func TestRecord_WaitsForTestCasesStillBeingStoredAfterTheCaptureStops(t *testing
 	}, mappedCases(t, dir))
 }
 
-// afterStopIncoming is a replay's request stream that hands over its last
-// request only once the watch has stopped and the test lets it go. Its agent
-// says it holds nothing more from before the run ended and that it ends its
-// streams on request, then does not take the request (an error that is not
-// the agent gone): the round's streams are ended here, as before markers
-// (endRound), and the stream is read for as long as it takes to end.
+// afterStopIncoming is a replay's request stream whose agent says it holds
+// nothing more from before the run ended, and that it ends its streams on
+// request. The stream hands over its last request only once the round's end
+// has come and the test lets it go, then ends: the end request taken, with
+// its marker; or, from an agent that could no longer be reached when asked
+// (gone), once the watch has stopped.
 type afterStopIncoming struct {
 	*runnerInstr
 	tc      *models.TestCase
 	release chan struct{}
+	// gone is the end request's answer from an agent that could no longer
+	// be reached; nil takes the request.
+	gone    error
+	endOnce sync.Once
+	endReq  chan struct{}
+	ended   atomic.Bool
 }
 
-func (afterStopIncoming) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+func newAfterStopIncoming(t *testing.T, gone error) *afterStopIncoming {
+	a := &afterStopIncoming{runnerInstr: newRunnerInstr(t, sequentialMarks()...), release: make(chan struct{}), endReq: make(chan struct{}), gone: gone,
+		tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))}
+	t.Cleanup(func() {
+		select {
+		case <-a.release:
+		default:
+			close(a.release)
+		}
+	})
+	return a
+}
+
+func (*afterStopIncoming) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
 	return models.AgentBacklog{Verdict: models.BacklogClear, EndMarkers: true}, nil
 }
 
-func (afterStopIncoming) EndRecordingStreams(context.Context, string) error {
-	return errors.New("the agent answered 500 Internal Server Error")
+func (a *afterStopIncoming) EndRecordingStreams(context.Context, string) error {
+	if a.gone != nil {
+		return a.gone
+	}
+	a.endOnce.Do(func() { close(a.endReq) })
+	return nil
 }
 
-func (afterStopIncoming) StreamEnded(models.FrameStream) bool { return false }
+func (a *afterStopIncoming) StreamEnded(kind models.FrameStream) bool {
+	return kind == models.TestCaseStream && a.ended.Load()
+}
 
-func (a afterStopIncoming) GetIncoming(ctx context.Context, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
+func (a *afterStopIncoming) GetIncoming(ctx context.Context, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
 	out := make(chan *models.TestCase)
 	go func() {
 		defer close(out)
-		<-ctx.Done()
+		took := false
+		select {
+		case <-a.endReq:
+			took = true
+		case <-ctx.Done():
+		}
 		<-a.release
 		out <- a.tc
+		a.ended.Store(took)
 	}()
 	return out, nil
 }
@@ -318,20 +349,16 @@ func (a afterStopIncoming) GetIncoming(ctx context.Context, _ models.IncomingOpt
 // stream takes to end once the watch has stopped. Before, a stream that
 // brought nothing for 5 s was given up and the run judged without what it
 // still had: a request it had not handed over yet read as one the app never
-// made.
+// made. The stream is still open after the watch stops when its agent, one
+// this client did not start (the user runs and stops it), could no longer be
+// reached when asked to end it: the stream is ended here, said at WARN, and
+// read to its end. An agent that takes the request holds the round until its
+// marker (TestReplayGivenUpAtItsRequestStreamsWaitEndsUnjudged).
 func TestReplayWaitsForARequestStreamStillOpenAfterTheWatchStops(t *testing.T) {
 	defer func(d time.Duration) { mockDrainNotice = d }(mockDrainNotice)
 	mockDrainNotice = 20 * time.Millisecond
-	instr := newRunnerInstr(t, sequentialMarks()...)
-	late := afterStopIncoming{runnerInstr: instr, release: make(chan struct{}),
-		tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))}
-	t.Cleanup(func() {
-		select {
-		case <-late.release:
-		default:
-			close(late.release)
-		}
-	})
+	late := newAfterStopIncoming(t, refusedErr(t))
+	instr := late.runnerInstr
 	dir := t.TempDir()
 	mapDB := mapdb.New(zap.NewNop(), dir, "")
 	require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil, nil))
@@ -354,16 +381,19 @@ func TestReplayWaitsForARequestStreamStillOpenAfterTheWatchStops(t *testing.T) {
 	}
 	close(late.release)
 	require.NoError(t, returnedWithin(t, returned))
+	require.Zero(t, utils.ErrCode)
 	require.Len(t, got.Cases, 1)
 	require.NotNil(t, got.Cases[0].Actual, "the request the stream handed over after the watch stopped was not compared")
 	require.True(t, got.Cases[0].Passed)
+	require.Equal(t, 1, logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("ended its stream before its end marker").Len(), "%v", logs.All())
 }
 
 // A replay whose user gives up its wait for the request stream, at the wait's
 // offer, ends unjudged: what it would judge is short of the requests the
 // stream still held, and a verdict on part of the run could pass a suite that
 // did not. It exits as a replay the user stopped (128+N), and no outcome is
-// reported.
+// reported. The agent took the request to end its stream, so the wait is for
+// the stream's marker (endRound), and no clock ends it: only the user does.
 func TestReplayGivenUpAtItsRequestStreamsWaitEndsUnjudged(t *testing.T) {
 	defer func(d time.Duration) { mockDrainNotice = d }(mockDrainNotice)
 	mockDrainNotice = 20 * time.Millisecond
@@ -371,10 +401,8 @@ func TestReplayGivenUpAtItsRequestStreamsWaitEndsUnjudged(t *testing.T) {
 	utils.ClearInterrupted()
 	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
 	t.Cleanup(utils.SetInterruptSignalForTest(0))
-	instr := newRunnerInstr(t, sequentialMarks()...)
-	late := afterStopIncoming{runnerInstr: instr, release: make(chan struct{}),
-		tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))}
-	t.Cleanup(func() { close(late.release) })
+	late := newAfterStopIncoming(t, nil)
+	instr := late.runnerInstr
 	dir := t.TempDir()
 	mapDB := mapdb.New(zap.NewNop(), dir, "")
 	require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil, nil))
@@ -392,12 +420,16 @@ func TestReplayGivenUpAtItsRequestStreamsWaitEndsUnjudged(t *testing.T) {
 	svc.(TestDBSetter).SetTestDB(db)
 	returned := make(chan error, 1)
 	go func() { returned <- svc.Replay(context.Background()) }()
-	if err, early := untilSaid(t, logs, replayDrainWords.writing, returned); early {
-		t.Fatalf("the replay returned (%v) with its request stream still open", err)
+	select {
+	case <-late.endReq:
+	case err := <-returned:
+		t.Fatalf("the replay returned (%v) before it asked the agent to end its request stream", err)
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("the replay never asked the agent to end its request stream")
 	}
 	utils.SetInterruptSignalForTest(2) // the user's Ctrl+C: SIGINT
 	utils.MarkInterrupted()
-	if err, early := untilSaid(t, logs, replayDrainWords.writing+"; "+replayDrainWords.stopNow, returned); early {
+	if err, early := untilSaid(t, logs, replayDrainWords.saving+"; "+replayDrainWords.stopNow, returned); early {
 		t.Fatalf("the replay returned (%v) before it offered to stop now", err)
 	}
 	if !utils.MarkInterruptedAgain() { // the user, as told
