@@ -351,6 +351,18 @@ func TestAStoppedWorkersMissIsCountedACallKeployCannotAttribute(t *testing.T) {
 	if n, what := unattributed(); n != 3 || what != "the latest: a call, from process 4242 of ended test worker 2, on a connection it made before keploy stopped serving that worker" {
 		t.Fatalf("a stopped worker's miss to a made-up address counted %d, %q; want 3 naming no address", n, what)
 	}
+	miss(2, &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /nodest"}, &models.ConditionalDstCfg{Addr: "10.0.0.9:5432"})
+	if n, what := unattributed(); n != 4 || what != "the latest: a call to 10.0.0.9:5432, from process 4242 of ended test worker 2, on a connection it made before keploy stopped serving that worker" {
+		t.Fatalf("a stopped worker's miss whose report names no destination counted %d, %q; want 4 naming its dialled address", n, what)
+	}
+	miss(2, nil, &models.ConditionalDstCfg{})
+	if n, what := unattributed(); n != 5 || what != "the latest: a call, from process 4242 of ended test worker 2, on a connection it made before keploy stopped serving that worker" {
+		t.Fatalf("a stopped worker's miss with no dialled address counted %d, %q; want 5 naming no address", n, what)
+	}
+	miss(2, nil, nil)
+	if n, what := unattributed(); n != 6 || what != "the latest: a call, from process 4242 of ended test worker 2, on a connection it made before keploy stopped serving that worker" {
+		t.Fatalf("a stopped worker's miss with neither a report nor a destination counted %d, %q; want 6 naming no address", n, what)
+	}
 	if p.stoppedWorker(0) {
 		t.Fatal("instance 0, no worker's, was read as a stopped worker's")
 	}
