@@ -248,8 +248,9 @@ func TestRecordMySQLOutgoing_UnregisteredParser(t *testing.T) {
 	}
 }
 
-// upgradingParser drives the legacy TLSUpgrader the way the MySQL
-// recorder's STARTTLS path does (recorder/conn.go UpgradeDestTLS).
+// upgradingParser drives the legacy TLSUpgrader the way a parser's
+// STARTTLS on the raw sockets would, as MySQL's removed legacy recorder
+// did (UpgradeDestTLS).
 type upgradingParser struct {
 	recordingMySQLParser
 	upgradeErr error
