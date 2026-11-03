@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
@@ -68,11 +69,26 @@ func reportText(rep *models.MockMismatchReport) string {
 	return fmt.Sprintf("%+v", *rep)
 }
 
-// logText is every log entry's message and fields.
+// logText is every log entry as the replay's JSON encoder writes it, a
+// packet logged whole included (a map of the fields shows a pointer's
+// address, not what it points to), and each binary field's bytes as text
+// too: the encoder writes those in base64.
 func logText(entries []observer.LoggedEntry) string {
+	enc := zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig())
 	var b strings.Builder
 	for _, e := range entries {
-		fmt.Fprintf(&b, "%s %v\n", e.Message, e.ContextMap())
+		line, err := enc.EncodeEntry(e.Entry, e.Context)
+		if err != nil {
+			fmt.Fprintf(&b, "%s %v (%v)\n", e.Message, e.ContextMap(), err)
+			continue
+		}
+		b.Write(line.Bytes())
+		line.Free()
+		for _, f := range e.Context {
+			if raw, ok := f.Interface.([]byte); ok && f.Type == zapcore.BinaryType {
+				fmt.Fprintf(&b, "%s %s\n", f.Key, raw)
+			}
+		}
 	}
 	return b.String()
 }
@@ -364,6 +380,25 @@ func TestMySQLLogsRedactTheLiveValueAtAPlaceAnyRecordingRedacted(t *testing.T) {
 			c.send(0, append([]byte{mysql.COM_QUERY}, "SELECT 1 FROM missing"...))
 		},
 		lines: [][2]string{{"Recorded runtime PREP mapping with new statement ID", "query"}},
+	}, {
+		name: "a value streamed to a statement, and the EXECUTE that binds one",
+		pool: []*models.Mock{preparedMock("mock-prepare", "0", 1, "SELECT name FROM users WHERE id = ? AND api_key = ?", stmtT0),
+			redacting(executedMock("mock-execute", 1, stmtT0.Add(time.Millisecond), "user row", "", "41", redactedPlaceholder))},
+		send: func(c mysqlClient) {
+			c.send(0, append([]byte{mysql.COM_STMT_PREPARE}, "SELECT name FROM users WHERE id = ? AND api_key = ?"...))
+			ok := c.read()
+			if len(ok) < 5 || ok[0] != 0x00 {
+				c.t.Fatalf("the PREPARE was answered with %x, want a COM_STMT_PREPARE_OK", ok)
+			}
+			sld := append([]byte{mysql.COM_STMT_SEND_LONG_DATA}, ok[1:5]...)
+			sld = binary.LittleEndian.AppendUint16(sld, 1)
+			c.send(0, append(sld, liveSecret...))
+			c.send(0, executeBytes(binary.LittleEndian.Uint32(ok[1:5]), "42", liveSecret))
+			if row := c.read(); len(row) == 0 {
+				c.t.Fatal("the EXECUTE was not answered")
+			}
+			c.send(0, append([]byte{mysql.COM_QUERY}, "SELECT 1 FROM missing"...))
+		},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := &fakeMockDb{session: append([]*models.Mock{nativeHandshake()}, tc.pool...)}
@@ -428,5 +463,93 @@ func TestMySQLStrictMissRedactsByEveryRecordingItNames(t *testing.T) {
 	}
 	if !miss.places.literals[0] || miss.places.literals[1] {
 		t.Fatalf("the miss's places %+v: want the rejected recording's literal 0 alone", miss.places)
+	}
+}
+
+// sessionUnreadable is a store whose session tier cannot be read whole; its
+// keyed walk still can.
+type sessionUnreadable struct{ *fakeMockDb }
+
+func (sessionUnreadable) GetSessionMocks() ([]*models.Mock, error) {
+	return nil, errors.New("the session tier is gone")
+}
+
+// A command whose pool cannot be read whole is logged with its statement
+// redacted whole: no recording's places can be read, so none is shown.
+func TestMySQLLogsRedactTheWholeStatementWhenThePoolCannotBeRead(t *testing.T) {
+	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
+	keyed := func(key, org string) string {
+		return "SELECT name FROM users WHERE api_key = '" + key + "' AND org = '" + org + "'"
+	}
+	// The open test's window is read on its own (GetSessionMocksInWindow).
+	db := sessionUnreadable{&fakeMockDb{session: []*models.Mock{queryRecorded("mock-plain", keyed("k1", "initech"), nil)},
+		winStart: stmtT0.Add(-time.Second), winEnd: stmtT0.Add(time.Second)}}
+	core, logs := observer.New(zapcore.DebugLevel)
+	req := mysql.Request{PacketBundle: mysql.PacketBundle{
+		Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 80}, Type: "COM_QUERY"},
+		Message: &mysql.QueryPacket{Query: keyed(liveSecret, "globex")},
+	}}
+	_, _, _, _ = matchCommand(ctx, zap.New(core), req, db, newDecodeCtx(), mocknoise.New(mysqlNoiseAdapter{}, false, true), nil)
+	if logged := logText(logs.All()); strings.Contains(logged, liveSecret) {
+		t.Errorf("the replay logged the live statement of a pool it could not read:\n%s", logged)
+	}
+	if got := loggedAt(logs.All(), "query matched with drifted inline literals", "actual query"); len(got) == 0 || got[0] != valueRedacted {
+		t.Errorf("the drift line shows %q; want the statement redacted whole:\n%s", got, logText(logs.All()))
+	}
+}
+
+// An EXECUTE answered on its bound values alone (no recorded PREPARE) is
+// logged with its statement by the pool's places.
+func TestMySQLLogsAnExecuteMatchedOnItsValuesAloneByThePoolsPlaces(t *testing.T) {
+	keyed := func(key, org string) string {
+		return "SELECT name FROM users WHERE api_key = '" + key + "' AND org = '" + org + "' AND id = ?"
+	}
+	pool := []*models.Mock{queryRecorded("mock-users", keyed(redactedPlaceholder, "acme"), redactedNoise)}
+	core, logs := observer.New(zapcore.DebugLevel)
+	id := mysql.Parameter{Type: uint16(mysql.FieldTypeLong), Value: int32(7)}
+	ok, _, _ := matchStmtExecuteLive(zap.New(core), executeOf(executePacket(1, id)), executeOf(executePacket(1, id)), "",
+		newLiveExecStatement(keyed(liveSecret, "globex")), 1, "mock-execute", util.NewNoiseChecker(nil),
+		logPlaces(func() redactedPlaces { return poolPlaces(pool) }))
+	if !ok {
+		t.Fatal("the EXECUTE was not matched on its values alone")
+	}
+	got := strings.Join(loggedAt(logs.All(), "EXECUTE matched on params alone (mock has no recorded PREPARE)", "actual_query"), " ")
+	if strings.Contains(got, liveSecret) || !strings.Contains(got, valueRedacted) || !strings.Contains(got, "globex") {
+		t.Errorf("the line shows %q; want the redacted literal redacted and the other shown", got)
+	}
+}
+
+// A strict miss on a statement of another template that keeps a literal
+// the rewriter does not reach (an INTO OUTFILE path) shows neither its
+// statement nor its template.
+func TestMySQLStrictMissRedactsATemplateThatKeepsALiteral(t *testing.T) {
+	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
+	// Of the same structure (sameQueryStructure): another path.
+	m := queryRecorded("q1", "SELECT name FROM users WHERE org = 'acme' AND api_key = '"+redactedPlaceholder+"' INTO OUTFILE '/tmp/export.csv'", redactedNoise)
+	db := &fakeMockDb{session: []*models.Mock{m}}
+	req := mysql.Request{PacketBundle: mysql.PacketBundle{
+		Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 80}, Type: "COM_QUERY"},
+		Message: &mysql.QueryPacket{Query: "SELECT name FROM users WHERE org = 'acme' AND api_key = 'k' INTO OUTFILE '/tmp/" + liveSecret + ".csv'"},
+	}}
+	core, logs := observer.New(zapcore.DebugLevel)
+	_, ok, miss, err := matchCommand(ctx, zap.New(core), req, db, newDecodeCtx(), mocknoise.New(mysqlNoiseAdapter{}, false, true), nil)
+	if err != nil || ok || miss == nil {
+		t.Fatalf("strict served the COM_QUERY (%v)", err)
+	}
+	if logged := logText(logs.All()); strings.Contains(logged, liveSecret) {
+		t.Errorf("the replay logged the live value:\n%s", logged)
+	}
+	sawTemplate := false
+	for _, d := range miss.fieldDiffs {
+		if strings.Contains(d.Actual, liveSecret) || strings.Contains(d.Expected, liveSecret) {
+			t.Fatalf("a field diff holds the live value: %+v", miss.fieldDiffs)
+		}
+		sawTemplate = sawTemplate || d.Path == "body.query.template" && d.Actual == valueRedacted
+	}
+	if !sawTemplate {
+		t.Fatalf("the diffs %+v: want the template redacted", miss.fieldDiffs)
+	}
+	if got := miss.places.liveStatement(req.Message.(*mysql.QueryPacket).Query); got != valueRedacted {
+		t.Fatalf("the summary shows %q; want the statement redacted whole", got)
 	}
 }

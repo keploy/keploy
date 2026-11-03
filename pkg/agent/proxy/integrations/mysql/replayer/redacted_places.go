@@ -241,7 +241,8 @@ func (p redactedPlaces) liveParams(params []mysql.Parameter) []mysql.Parameter {
 // being the live statement they were compared with: a literal at a
 // redacted position (every literal when the live template is not the
 // recorded one), the statement whole and every part of it when
-// p.statement, and the value of a bound parameter at a redacted position.
+// p.statement, the template when the live statement is redacted whole, and
+// the value of a bound parameter at a redacted position.
 func (p redactedPlaces) fieldDiffs(diffs []models.MockFieldDiff, liveQuery string) []models.MockFieldDiff {
 	if !p.inStatement() && len(p.params) == 0 {
 		return diffs
@@ -260,6 +261,12 @@ func (p redactedPlaces) fieldDiffs(diffs []models.MockFieldDiff, liveQuery strin
 				redacted = p.inStatement()
 			case isLiteral:
 				redacted = allLiterals || p.literals[n]
+			case path == "body.query.template":
+				// A template of the same structure (sameQueryStructure)
+				// keeps a literal the rewriter does not reach (an INTO
+				// OUTFILE path) as the client sent it: the live statement is
+				// redacted whole then (liveStatement), and so is this.
+				redacted = p.liveStatement(liveQuery) == valueRedacted
 			}
 		case strings.HasPrefix(path, "body.parameters."):
 			idx, field, _ := strings.Cut(strings.TrimPrefix(path, "body.parameters."), ".")

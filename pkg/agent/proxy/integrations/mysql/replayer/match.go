@@ -1699,7 +1699,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 					if !seen {
 						// remove this log and if block
 						if ce := logger.Check(zap.DebugLevel, "Trying to match the mock with com-stmt-execute request"); ce != nil && actMsg != nil {
-							ce.Write(zap.String("mock_name", mock.Name), zap.Any("Req", executeForLog(actMsg)))
+							ce.Write(zap.String("mock_name", mock.Name), zap.Any("Req", executeForLog(actMsg, logged())))
 						}
 
 						var expectedQuery, actualQuery string
@@ -2858,13 +2858,14 @@ const maskedAttributeValue = "[masked]"
 // sent unnamed) masked. The client names an attribute (a password, a
 // tenant's token), and what redacts a log goes by what a value looks like,
 // not by such a name: one only its name says is a secret was logged in the
-// clear.
-func executeForLog(p *mysql.StmtExecutePacket) *mysql.StmtExecutePacket {
+// clear. Its bound value at each place a recording redacted (places, the
+// pool's) is redacted too.
+func executeForLog(p *mysql.StmtExecutePacket, places redactedPlaces) *mysql.StmtExecutePacket {
 	if p == nil {
 		return nil
 	}
 	c := *p
-	c.Parameters = slices.Clone(p.Parameters)
+	c.Parameters = slices.Clone(places.liveParams(p.Parameters))
 	for i := range c.Parameters {
 		if c.Parameters[i].Name != "" && c.Parameters[i].Value != nil {
 			c.Parameters[i].Value = maskedAttributeValue
