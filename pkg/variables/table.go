@@ -2,6 +2,7 @@ package variables
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -368,8 +369,67 @@ func collides(inForce map[string]Binding, beside []Binding, b Binding, earlier [
 // about the live values decides it. BindAll and Bind refuse such a b, and an
 // adapter that checks a call before it binds asks the same (http's
 // holdVariables).
+//
+// Two bindings at words of values (each with its WordRun) share one live
+// value as two variables only when their runs are one live run and were two
+// recorded ones: the application sent one value where the recording had
+// two. A word of two runs that differ live is equal by chance (a group of
+// two fresh UUIDs), and two words of one run, recorded and live, are words
+// of one value: neither is refused. A word binding beside a binding of a
+// value whole is checked as two values whole.
 func TwoValues(held, b Binding) bool {
-	return !held.Given && held.Name != b.Name && held.Value == b.Value && held.Recorded != b.Recorded && !models.ReadInOneSecond(held.Clock, b.Clock)
+	if held.Given || held.Name == b.Name || held.Value != b.Value || held.Recorded == b.Recorded || models.ReadInOneSecond(held.Clock, b.Clock) {
+		return false
+	}
+	if held.WordRun != "" && b.WordRun != "" {
+		return held.WordRun == b.WordRun && held.RecordedWordRun != b.RecordedWordRun
+	}
+	return true
+}
+
+// wordRunSep joins the words of a run: no word holds it (Words).
+const wordRunSep = "-"
+
+// WordRuns is, for each binding one call makes at a word address (at[i], with
+// its live and recorded words live[i] and recorded[i]), its run, live and
+// recorded (Binding.WordRun): the words the call binds at consecutive words
+// of the same text (one place, one decode), its own among them, in word
+// order, joined. A binding of a value whole (Word -1) has none. Words the
+// call binds apart, with a word between them it does not bind, are two runs.
+func WordRuns(at []Address, live, recorded []string) (liveRun, recordedRun []string) {
+	liveRun, recordedRun = make([]string, len(at)), make([]string, len(at))
+	byText := map[string][]int{}
+	var texts []string
+	for i, a := range at {
+		if a.Word < 0 {
+			continue
+		}
+		k := Address{Place: a.Place, Steps: a.Steps, Word: -1}.String()
+		if _, seen := byText[k]; !seen {
+			texts = append(texts, k)
+		}
+		byText[k] = append(byText[k], i)
+	}
+	for _, k := range texts {
+		idx := byText[k]
+		sort.SliceStable(idx, func(x, y int) bool { return at[idx[x]].Word < at[idx[y]].Word })
+		for lo := 0; lo < len(idx); {
+			hi := lo + 1
+			for hi < len(idx) && at[idx[hi]].Word == at[idx[hi-1]].Word+1 {
+				hi++
+			}
+			lw, rw := make([]string, 0, hi-lo), make([]string, 0, hi-lo)
+			for _, i := range idx[lo:hi] {
+				lw, rw = append(lw, live[i]), append(rw, recorded[i])
+			}
+			l, r := strings.Join(lw, wordRunSep), strings.Join(rw, wordRunSep)
+			for _, i := range idx[lo:hi] {
+				liveRun[i], recordedRun[i] = l, r
+			}
+			lo = hi
+		}
+	}
+	return liveRun, recordedRun
 }
 
 // Start begins a new scope (as Reset) with the values its test case gave
