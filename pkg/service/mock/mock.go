@@ -207,7 +207,12 @@ func (m *mockService) isDockerCompose() bool {
 // healthcheck, and that healthcheck only passes once keploy posts /agent/ready.
 // This function therefore waits only for the agent to become REACHABLE; the
 // app stays parked at its healthcheck until the caller has armed the proxy.
-func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Group, phase string) (chan models.AppError, error) {
+//
+// stopNoticeFrom, for a recording, is the user's context (Record's parent):
+// the project then runs on runUntilStopNoted's context, so the user's stop is
+// told to the agent before the project is torn down, as the native command's
+// is. A replay passes nil: it records nothing, and the project runs on ctx.
+func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Group, phase string, stopNoticeFrom context.Context) (chan models.AppError, error) {
 	if !m.isDockerCompose() {
 		return nil, nil
 	}
@@ -230,7 +235,11 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 		exit := models.AppError{AppErrorType: models.ErrInternal, Err: errors.New("the app runner panicked")}
 		defer utils.Recover(m.logger)
 		defer func() { appExit <- exit }()
-		exit = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
+		if stopNoticeFrom != nil {
+			exit = m.runStopNoted(stopNoticeFrom, ctx)
+		} else {
+			exit = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
+		}
 		return nil
 	})
 
@@ -340,29 +349,41 @@ type stopBeganNotifier interface {
 
 // runUntilStopNoted returns the context the recorded test command runs on,
 // with ctx's values, and ran, which releases it once the command's run has
-// returned. A stop of the user's (parent ends: Ctrl+C, or the record timer's
-// stop) ends the command only once the agent has been told the recording's
-// stop has begun, so the calls the command still has in flight are cut by a
-// stop the agent knows of, and record no fault; ended with the stop, the
-// command was killed first, and a call it had open was recorded as the
-// application's giving up. keploy's own failure (ctx ends, parent does not)
-// ends the command at once, with no notice: no stop of the user's began.
+// returned. ctx is parent's child (the recording's errgroup context). A stop
+// of the user's (parent ends: Ctrl+C, or the record timer's stop) ends the
+// command only once the agent has been told the recording's stop has begun,
+// so the calls the command still has in flight are cut by a stop the agent
+// knows of, and record no fault; ended with the stop, the command was killed
+// first, and a call it had open was recorded as the application's giving up.
+// keploy's own failure (ctx ends, parent does not) ends the command at once,
+// with no notice: no stop of the user's began.
+//
+// One callback on ctx's end decides both, in that order: parent's end ends
+// ctx too, and a context's Err is set before its children end, so the
+// callback reads whose end it is; the notice, when there is one, returns
+// before the command's context ends, with no second callback to race it.
 func (m *mockService) runUntilStopNoted(parent, ctx context.Context) (runCtx context.Context, ran func()) {
 	runCtx, stopRun := context.WithCancel(context.WithoutCancel(ctx))
-	stopNotice := context.AfterFunc(parent, func() {
-		m.notifyStopBegun()
-		stopRun()
-	})
-	stopOnFailure := context.AfterFunc(ctx, func() {
-		if parent.Err() == nil {
-			stopRun()
+	stop := context.AfterFunc(ctx, func() {
+		if parent.Err() != nil {
+			m.notifyStopBegun()
 		}
+		stopRun()
 	})
 	return runCtx, func() {
-		stopNotice()
-		stopOnFailure()
+		stop()
 		stopRun()
 	}
+}
+
+// runStopNoted runs the recorded test command until it exits, on
+// runUntilStopNoted's context (parent: the user's; ctx: the recording's), and
+// releases that context once the run has returned, so a stop of the user's
+// after it tells the agent nothing: no call of the command's is left to cut.
+func (m *mockService) runStopNoted(parent, ctx context.Context) models.AppError {
+	runCtx, ran := m.runUntilStopNoted(parent, ctx)
+	defer ran()
+	return m.instrumentation.Run(runCtx, models.RunOptions{AppCommand: m.config.Command})
 }
 
 // notifyStopBegun tells the agent the recording's stop has begun, bounded so
