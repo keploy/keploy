@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +37,7 @@ type wireSvc struct {
 	ended     []models.ScopeReq
 	skips     map[string]string
 	needs     map[string][]models.ScopeNeed
+	setFlags  []string
 	beginResp models.ScopeBeginResp
 	beginErr  *models.ScopeError
 	endResp   models.ScopeEndResp
@@ -63,8 +65,8 @@ func (s *wireSvc) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Sc
 	return s.endResp, s.endErr
 }
 
-func (s *wireSvc) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) error {
-	s.skips, s.needs = skip, needs
+func (s *wireSvc) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, setFlags []string) error {
+	s.skips, s.needs, s.setFlags = skip, needs, setFlags
 	return nil
 }
 
@@ -185,9 +187,15 @@ func TestTheGateTakesTheSkipMapAndAcknowledgesIt(t *testing.T) {
 		len(svc.needs["o::TestUse"]) != 1 || svc.needs["o::TestUse"][0] != (models.ScopeNeed{Test: "o::TestMake", Reason: "r"}) {
 		t.Fatalf("needs: %d %s, needs %v (%v)", rec.Code, rec.Body.String(), svc.needs, err)
 	}
+	// The set's flags ride the same push, for the commands a failed
+	// test's reason names.
+	rec = call(t, a.HandleScopeGate, `{"run":null,"set_flags":["--local","--name","checkout"]}`)
+	if rec.Code != http.StatusOK || !reflect.DeepEqual(svc.setFlags, []string{"--local", "--name", "checkout"}) {
+		t.Fatalf("set flags: %d %s, flags %q", rec.Code, rec.Body.String(), svc.setFlags)
+	}
 	// A push without a map (an empty one is left out of the JSON) skips nothing.
 	rec = call(t, a.HandleScopeGate, `{"run":null}`)
-	if rec.Code != http.StatusOK || svc.skips != nil || svc.needs != nil {
+	if rec.Code != http.StatusOK || svc.skips != nil || svc.needs != nil || svc.setFlags != nil {
 		t.Fatalf("empty gate: %d %s, skips %v", rec.Code, rec.Body.String(), svc.skips)
 	}
 }
