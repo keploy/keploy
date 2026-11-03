@@ -1311,17 +1311,21 @@ func (d *valueDrift) plainRunsOf(forms [][2]string, runs [2][]decodedRun, eLive 
 	}
 	decLower, eLower := strings.ToLower(d.decLive), strings.ToLower(eLive)
 	for _, f := range forms {
-		b := f[1]
+		b, rawForm := f[1], false
 		switch {
 		case d.decoded && b == d.live:
-			b = standing(blankAt(b, raw, false), d.live, own)
+			b, rawForm = blankAt(b, raw, false), true
 		case b == d.decLive || b == decLower:
 			b = blankAt(b, liveRuns, false)
 		case b == eLive || b == eLower:
 			b = blankAt(b, liveRuns, true)
 		}
 		for _, rd := range readings {
-			for w := range tokensBy(b, rd) {
+			rb := b
+			if rawForm {
+				rb = standing(b, d.live, own, rd)
+			}
+			for w := range tokensBy(rb, rd) {
 				delete(words, w)
 			}
 		}
@@ -1469,15 +1473,25 @@ func keptEscape(rec decodedRun, recRun string, e rawEscape) bool {
 	return false
 }
 
-// standing is b, the raw value s with runs put out (blankAt), with s's
-// bytes at each span of own written back where they stand.
-func standing(b, s string, own [][2]int) string {
+// standing is b, the raw value s with runs put out (blankAt), with each
+// escape at a span of own written back where it stands, and with it the
+// bytes of s its word, as word reads it, glues to after it: the word the
+// escape leaves, "2FIGE" of "b2s%2FIGE+Yi" as "3D" of "=%3D%3D", is
+// searched where the escape stands, even where a run that kept its escapes
+// spells the same word. An escape starts with '%' or '\', which no
+// reading takes for a word byte, so no word it leaves starts before it; one
+// that ends in a byte that is no word byte ("\/") leaves no word.
+func standing(b, s string, own [][2]int, word func(byte) bool) string {
 	if len(own) == 0 {
 		return b
 	}
 	out := []byte(b)
 	for _, sp := range own {
-		copy(out[sp[0]:sp[1]], s[sp[0]:sp[1]])
+		e := sp[1]
+		for e < len(s) && word(s[e-1]) && word(s[e]) {
+			e++
+		}
+		copy(out[sp[0]:e], s[sp[0]:e])
 	}
 	return string(out)
 }

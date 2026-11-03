@@ -1794,6 +1794,89 @@ func TestAnEncodedTextGetsThePlainTextsAnswerWhateverUnreadPayloadWasServedBefor
 									t.Errorf("encoded, three runs side by side, %s, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", c.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
 								}
 							}
+							// An escape inside a run is decided where it
+							// stands too: one record's full round's value
+							// gained ("%2F" or "\u002F" for the '/' of
+							// "b2s/IGE+Yi") leaves the word it glues to the
+							// run's next bytes ("2FIGE"), refused even where
+							// another run that kept that escape spells the
+							// same word, beside it or after words. Written
+							// alike on both sides it is noise, as the plain
+							// text is, and so is a gained "\/", which leaves
+							// no word.
+							mid := func(v time.Time, word, slash string) string {
+								return strings.ReplaceAll(enc("ok? a>b lead "+dotNetStamp(v)+" "+word), "/", slash)
+							}
+							for _, v := range []time.Time{recRun.read, fRun.read} {
+								if !strings.HasPrefix(mid(v, "created.", "/"), "b2s/IGE+") || !strings.HasPrefix(mid(v, "updated.", "/"), "b2s/IGE+") {
+									t.Fatalf("the runs at %v do not start \"b2s/IGE+\", so this row tells nothing", v)
+								}
+							}
+							for _, sp := range []string{"%2F", `\u002F`} {
+								for _, c := range []struct {
+									what                     string
+									between                  string
+									rec0, live0, rec1, live1 string
+									noise                    bool
+								}{
+									{"gained in the second run, the first beside it kept it", " ", sp, sp, "/", sp, false},
+									{"gained in the second run, the first after words kept it", " ok ", sp, sp, "/", sp, false},
+									{"gained in the first run, the second kept it", " ", "/", sp, sp, sp, false},
+									{"gained in the one run of two", " ", "/", "/", "/", sp, false},
+									{"written alike in both runs", " ", sp, sp, sp, sp, true},
+									{"written alike in one run of two", " ok ", sp, sp, "/", "/", true},
+									{`a "\/" gained beside a run that kept it`, " ", sp, sp, "/", `\/`, true},
+								} {
+									of := func(v time.Time, a, b string) string {
+										return "tok " + mid(v, "created.", a) + c.between + mid(v, "updated.", b) + " ok"
+									}
+									ln := learnOf(of(recRun.read, c.rec0, c.rec1), of(fRun.read, c.live0, c.live1))
+									if c.noise && (ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "") {
+										t.Errorf("encoded, an escape inside a run %q, %s, %s, window %+v: %s from %q held %q (%s); want noise of the word", sp, c.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+									} else if !c.noise && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11")) {
+										t.Errorf("encoded, an escape inside a run %q, %s, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", sp, c.what, pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+									}
+								}
+							}
+							// The stated limit, so too inside a run: a run
+							// after text that changed in more than clock
+							// reads (a ':' made ';') pairs with none, so no
+							// recorded run of its rank tells how it writes
+							// its escapes, and the word its "%2F" leaves is
+							// the value's own even where the run before it,
+							// which kept that escape, spells the same word:
+							// refused, red, where the plain text is noise.
+							// With nothing changed before it, it is noise.
+							slashRun := func(v time.Time, word string) string {
+								return strings.ReplaceAll(enc("ok? lead "+dotNetStamp(v)+" abc>d "+word), "/", "%2F")
+							}
+							for _, v := range []time.Time{recRun.read, fRun.read} {
+								if r := slashRun(v, "created."); !strings.HasPrefix(r, "b2s%2FIGxlYWQg") || strings.Count(r, "%2F") != 1 || !strings.HasPrefix(slashRun(v, "updated."), r[:strings.IndexByte(r, '+')+1]) {
+									t.Fatalf("the runs at %v do not share the word their \"%%2F\" leaves, so this row tells nothing: %q", v, r)
+								}
+							}
+							for _, before := range [][2]string{{":", ";"}, {":", ":"}} {
+								of := func(v time.Time, sep string) string {
+									return "tok " + slashRun(v, "created.") + sep + slashRun(v, "updated.") + " ok"
+								}
+								if ln := learnOf(of(recRun.read, before[0]), of(fRun.read, before[1])); before[0] != before[1] && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "may stand in mock-11")) {
+									t.Errorf("encoded, an escape inside a run after %q made %q, %s, window %+v: %s from %q (%s); want it refused as a word that may stand in mock-11", before[0], before[1], pl.what, *w, ln.Kind, ln.From.Mock, ln.Why)
+								} else if before[0] == before[1] && (ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "") {
+									t.Errorf("encoded, an escape inside a run after %q, %s, window %+v: %s from %q held %q (%s); want noise of the word", before[0], pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+								}
+								plainOf := func(v time.Time, sep string) string {
+									return "tok ok? lead " + dotNetStamp(v) + " abc>d created." + sep + "ok? lead " + dotNetStamp(v) + " abc>d updated. ok"
+								}
+								if ln := learnOf(plainOf(recRun.read, before[0]), plainOf(fRun.read, before[1])); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+									t.Errorf("plain, the runs' text after %q made %q, %s, window %+v: %s from %q held %q (%s); want noise of the word", before[0], before[1], pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+								}
+							}
+							plainMid := func(v time.Time) string {
+								return "tok ok? a>b lead " + dotNetStamp(v) + " created. ok? a>b lead " + dotNetStamp(v) + " updated. ok"
+							}
+							if ln := learnOf(plainMid(recRun.read), plainMid(fRun.read)); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+								t.Errorf("plain, the two runs' text with a '/' inside, %s, window %+v: %s from %q held %q (%s); want noise of the word", pl.what, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+							}
 							// The stated limit: a run after text that changed
 							// in more than clock reads (a ':' made ';', a
 							// space gained before the escape before it)

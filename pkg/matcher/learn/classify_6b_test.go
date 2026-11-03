@@ -272,3 +272,45 @@ func TestRawImagesListsABytesSpellingsInOrderWhereTheyDiffer(t *testing.T) {
 		}
 	}
 }
+
+// keptEscape reads sameEscapes one escape at a time: an escape of a live
+// run is the recorded run's where it writes its copy of its byte as the
+// recorded run of the same rank writes that copy, the one spelling every
+// recorded copy shares or, where they differ, the copy of the same rank; and
+// for a byte the recorded run does not hold, where it is of the kind (first
+// byte and length) by which that run writes another byte.
+func TestKeptEscapeDecidesEachEscapeByTheRecordedCopyOfItsRank(t *testing.T) {
+	image := func(raw string) (decodedRun, string) {
+		dec, _ := unescapedAt(raw)
+		st, en := strings.Index(dec, "YW"), strings.Index(dec, " ok")
+		got := rawImages(raw, []decodedRun{{run: dec[st:en], at: -1, st: st, en: en}})
+		if len(got) != 1 {
+			t.Fatalf("rawImages(%q) = %+v; want one run", raw, got)
+		}
+		return got[0], dec[st:en]
+	}
+	for _, c := range []struct {
+		what, rec, live string
+		kept            []bool
+	}{
+		{"one spelling, alike", "tok YW%2FI%3D%3D ok", "tok YW%2FI%3D%3D ok", []bool{true, true, true}},
+		{"one spelling, respelled", "tok YW%2FI%3D%3D ok", "tok YW%2fI%3D%3D ok", []bool{false, true, true}},
+		{"a byte the recorded run writes as itself, gained", "tok YW/I%3D%3D ok", "tok YW%2FI%3D%3D ok", []bool{false, true, true}},
+		{"recorded copies mixed, the live ones by rank", "tok YW%2FI=%3D ok", "tok YW%2FI%3D%3D ok", []bool{true, false, true}},
+		{"recorded copies mixed, alike", "tok YW%2FI%3D= ok", "tok YW%2FI%3D= ok", []bool{true, true}},
+		{"a byte only live holds, of the kind of another recorded escape", "tok YWxI%3D%3D ok", "tok YW%2FI%3D%3D ok", []bool{true, true, true}},
+		{"a byte only live holds, a longer escape of the same first byte", "tok YWxI%3D%3D ok", "tok YW%252FI%3D%3D ok", []bool{false, true, true}},
+		{"a byte only live holds, no recorded escape", "tok YWxI== ok", "tok YW%2FI== ok", []bool{false}},
+	} {
+		rec, recRun := image(c.rec)
+		live, _ := image(c.live)
+		if len(live.escs) != len(c.kept) {
+			t.Fatalf("%s: %q holds %d escapes (%+v); this row lists %d", c.what, c.live, len(live.escs), live.escs, len(c.kept))
+		}
+		for i, e := range live.escs {
+			if got := keptEscape(rec, recRun, e); got != c.kept[i] {
+				t.Errorf("%s: keptEscape of %q's escape %d (%q, copy %d of %q) against %q = %v; want %v", c.what, c.live, i, e.sp, e.n, e.c, c.rec, got, c.kept[i])
+			}
+		}
+	}
+}
