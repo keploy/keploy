@@ -302,6 +302,20 @@ func (w *Window) ComparesOffsets() *Window {
 // later call), which the learn step learns only where both runs' spans from
 // their test's begin hold it (Window.sinceBegin), and a replay checks from
 // its own test's begin (models.SinceTestBegin), never from an earlier start.
+//
+// TestFrom is where the running test began on the app's clock, or where the
+// app's clock's run to the call began after it (SetAppClockRun), in a
+// replay's span (LiveSpan) whose From a serve made after the test began
+// set, and in a server test's window (CallWindowFrom) in each run whose
+// From a call made after the test began set there (in the recording, after
+// its recorded begin): zero otherwise, and in a client test's window, which
+// reads from each run's test begin by Began. Another goroutine of the
+// application (a queue's consumer beside the test's handler) can make a
+// call keploy serves between a read of the clock and the call that carries
+// the read, so a serve made after the test began bounds no read of the
+// call: a replay passes a value that holds in the span from TestFrom too
+// (CheckClockRead), and so never refuses a read made in the test because
+// of when keploy served another call.
 type Span struct {
 	From, To time.Time
 	Zone     *time.Location
@@ -309,8 +323,9 @@ type Span struct {
 	// ClockSpanFrom): the zone the application writes its clock in in this
 	// run, in which a replay checks a learned read whatever zone the learn
 	// step named (CheckClockRead). false where Zone is the agent's own.
-	Own   bool
-	Began time.Time
+	Own      bool
+	Began    time.Time
+	TestFrom time.Time
 }
 
 // sinceBegin is s from the running test's begin (Began) to its call: false
@@ -340,6 +355,31 @@ func (w *Window) sinceBegin() *Window {
 		return nil
 	}
 	return &Window{Rec: rec, F: f, offsets: w.offsets, begun: true}
+}
+
+// fromTestBegin is w, the window of a server test's call, with each run's
+// span from where the test began there where a call made after that begin
+// starts it (Span.TestFrom), the other run's span as w has it: the window
+// in which the learn step reads a read of the clock its call's window
+// refuses, as the replay's check passes a value its span refuses where it
+// holds from the test's begin (CheckClockRead). Another goroutine of the
+// application can make a call between the read and the call that carries
+// it, in either run, so that call bounds no read of this one. It is also
+// the window in which a server test's value's words are read as the
+// clock's rather than as data (newDrift). nil where neither run's span
+// knows such a begin.
+func (w *Window) fromTestBegin() *Window {
+	if w == nil || w.Rec.TestFrom.IsZero() && w.F.TestFrom.IsZero() {
+		return nil
+	}
+	from := func(s Span) Span {
+		if !s.TestFrom.IsZero() && s.TestFrom.Before(s.From) {
+			s.From = s.TestFrom
+		}
+		s.TestFrom = time.Time{}
+		return s
+	}
+	return &Window{Rec: from(w.Rec), F: from(w.F), offsets: w.offsets}
 }
 
 // clockWordIn finds the one instant that changed in a text, recorded as rec
@@ -615,19 +655,27 @@ func (w *Window) Holds(rec, live time.Time, res time.Duration) bool {
 	return w != nil && w.Rec.holds(rec, res) && w.F.holds(live, res)
 }
 
-// key is w as a map key, the zero key for none: its spans' bounds, and 1
-// last for a reading from each run's test begin (begun), which reads a
-// value's words otherwise than its call's own window does even where the
-// two windows' bounds are the same.
-func (w *Window) key() [5]int64 {
+// key is w as a map key, the zero key for none: its spans' bounds, 1 for a
+// reading from each run's test begin (begun), which reads a value's words
+// otherwise than its call's own window does even where the two windows'
+// bounds are the same, and each run's test begin a server test's span
+// carries (Span.TestFrom, 0 for none), from which the value's clock words
+// are read too (newDrift).
+func (w *Window) key() [7]int64 {
 	if w == nil {
-		return [5]int64{}
+		return [7]int64{}
 	}
 	var begun int64
 	if w.begun {
 		begun = 1
 	}
-	return [5]int64{w.Rec.From.UnixNano(), w.Rec.To.UnixNano(), w.F.From.UnixNano(), w.F.To.UnixNano(), begun}
+	at := func(t time.Time) int64 {
+		if t.IsZero() {
+			return 0
+		}
+		return t.UnixNano()
+	}
+	return [7]int64{w.Rec.From.UnixNano(), w.Rec.To.UnixNano(), w.F.From.UnixNano(), w.F.To.UnixNano(), begun, at(w.Rec.TestFrom), at(w.F.TestFrom)}
 }
 
 // clockOf is clockIn with no call's window: the clock reads that moved by

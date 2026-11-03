@@ -1107,6 +1107,7 @@ func TestUnescaped(t *testing.T) {
 		{esc("#u0418#u0432#u0430#u043d"), "Иван"},
 		{esc("#ud83e#udd8a"), "🦊"},
 		{`x\\nA7K29Q`, "x A7K29Q"},
+		{`https:\/\/h\/A7K29Q`, "https://h/A7K29Q"},
 	} {
 		if got := unescaped(tc.in); got != tc.want {
 			t.Errorf("unescaped(%q) = %q, want %q", tc.in, got, tc.want)
