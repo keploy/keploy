@@ -76,6 +76,57 @@ func TestChangedJSONFieldPaths(t *testing.T) {
 			act:      `{"id":"a"}`,
 			expected: nil,
 		},
+		// A pattern-guarded entry excuses a field only when the recorded and the
+		// live value each match it.
+		{
+			name:     "pattern: a live value outside a pattern the recorded value matches is a change",
+			exp:      `{"id":1,"name":"a"}`,
+			act:      `{"id":2,"name":"a"}`,
+			known:    map[string][]string{"id": {"^1$"}},
+			expected: []string{"id"},
+		},
+		{
+			name:     "pattern: a recorded value outside a pattern the live value matches is a change",
+			exp:      `{"id":2,"name":"a"}`,
+			act:      `{"id":1,"name":"a"}`,
+			known:    map[string][]string{"id": {"^1$"}},
+			expected: []string{"id"},
+		},
+		{
+			name:     "pattern: both values inside it are excused",
+			exp:      `{"id":1,"name":"a"}`,
+			act:      `{"id":2,"name":"a"}`,
+			known:    map[string][]string{"id": {"^[12]$"}},
+			expected: nil,
+		},
+		{
+			name:     "pattern: a matched field the live body lacks is removed",
+			exp:      `{"id":1,"name":"a"}`,
+			act:      `{"name":"a"}`,
+			known:    map[string][]string{"id": {"^1$"}},
+			expected: []string{"id"},
+		},
+		{
+			name:     "pattern: an array element outside it is a change though another element matches",
+			exp:      `{"ids":[1,1]}`,
+			act:      `{"ids":[1,2]}`,
+			known:    map[string][]string{"ids": {"^1$"}},
+			expected: []string{"ids[]"},
+		},
+		{
+			name:     "pattern: unmatched elements still compare first",
+			exp:      `{"ids":[1,5]}`,
+			act:      `{"ids":[1,6]}`,
+			known:    map[string][]string{"ids": {"^1$"}},
+			expected: []string{"ids[]"},
+		},
+		{
+			name:     "pattern: an unmatched element against matched ones is a change",
+			exp:      `{"ids":[5]}`,
+			act:      `{"ids":[1]}`,
+			known:    map[string][]string{"ids": {"^1$"}},
+			expected: []string{"ids[]"},
+		},
 	}
 
 	for _, tc := range tests {

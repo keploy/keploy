@@ -54,3 +54,21 @@ func TestJSONFieldDiffs_InvalidJSONReturnsNil(t *testing.T) {
 		t.Errorf("expected nil for invalid JSON, got %+v", d)
 	}
 }
+
+// TestJSONFieldDiffs_PatternIsJudgedOnBothSides pins that a pattern-guarded
+// entry is held to the recorded and the live value alike: the recorded id 1
+// under {"id": ["^1$"]} against a live 2 is a changed value, reported with both
+// values, not a recorded id hidden and a live one added.
+func TestJSONFieldDiffs_PatternIsJudgedOnBothSides(t *testing.T) {
+	got := JSONFieldDiffs(`{"id":1,"n":"a"}`, `{"id":2,"n":"a"}`, map[string][]string{"id": {"^1$"}}, "body.", 0)
+	if len(got) != 1 || got[0].Path != "body.id" || got[0].Kind != models.DiffKindValueChanged || got[0].Expected != "1" || got[0].Actual != "2" {
+		t.Fatalf("got %+v, want one value change of body.id from 1 to 2", got)
+	}
+	if got := JSONFieldDiffs(`{"id":1}`, `{"id":2}`, map[string][]string{"id": {"^[12]$"}}, "body.", 0); len(got) != 0 {
+		t.Fatalf("got %+v, want none: both values match the pattern", got)
+	}
+	assess, err := ComputeFailureAssessmentJSON(`{"id":1}`, `{"id":2}`, map[string][]string{"id": {"^1$"}}, false)
+	if err != nil || assess == nil || len(assess.ValueChanges) != 1 || assess.ValueChanges[0] != "id" || len(assess.AddedFields) != 0 {
+		t.Fatalf("assessment = %+v (err %v), want id as a value change and nothing added", assess, err)
+	}
+}

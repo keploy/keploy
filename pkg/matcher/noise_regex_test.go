@@ -125,11 +125,48 @@ func TestRegexNoise_EnforcesPattern(t *testing.T) {
 			want:     true,
 		},
 		{
-			name:     "several patterns: matching any one of them ignores the field",
-			expected: `{"order":{"status":"PENDING"}}`,
+			name:     "several patterns: each value matching any one of them ignores the field",
+			expected: `{"order":{"status":"PAID"}}`,
 			actual:   `{"order":{"status":"SHIPPED"}}`,
 			noise:    map[string][]string{"order.status": {"^PAID$", "^SHIPPED$"}},
 			want:     true,
+		},
+		{
+			// Both sides: a pattern written for the replayed value only does
+			// not excuse a recorded value outside it.
+			name:     "several patterns: a recorded value matching none of them is a real difference",
+			expected: `{"order":{"status":"PENDING"}}`,
+			actual:   `{"order":{"status":"SHIPPED"}}`,
+			noise:    map[string][]string{"order.status": {"^PAID$", "^SHIPPED$"}},
+			want:     false,
+		},
+		{
+			name:     "string: a recorded value outside the pattern is a real difference",
+			expected: `{"order":{"status":"GARBAGE"}}`,
+			actual:   `{"order":{"status":"PAID"}}`,
+			noise:    map[string][]string{"order.status": {"^(PENDING|PAID)$"}},
+			want:     false,
+		},
+		{
+			name:     "number: a pattern written for the recorded value does not excuse another live one",
+			expected: `{"id":1}`,
+			actual:   `{"id":2}`,
+			noise:    map[string][]string{"id": {"^1$"}},
+			want:     false,
+		},
+		{
+			name:     "number: a recorded value outside the pattern is a real difference",
+			expected: `{"id":1}`,
+			actual:   `{"id":2}`,
+			noise:    map[string][]string{"id": {"^2$"}},
+			want:     false,
+		},
+		{
+			name:     "bool: a recorded value outside the pattern is a real difference",
+			expected: `{"order":{"paid":false}}`,
+			actual:   `{"order":{"paid":true}}`,
+			noise:    map[string][]string{"order.paid": {"^true$"}},
+			want:     false,
 		},
 		{
 			name:     "several patterns: matching none of them is a real difference",
@@ -283,11 +320,27 @@ func TestRegexNoise_GlobalKeyEnforcesPattern(t *testing.T) {
 			want:     false,
 		},
 		{
-			name:     "unexpected extra key matching the pattern is excused",
+			// No recorded value for the pattern to match: the rule for a
+			// missing key, the other way round.
+			name:     "unexpected extra key is not excused by a pattern, even one it matches",
 			expected: `{"a":1}`,
 			actual:   `{"a":1,"status":"PAID"}`,
 			noise:    map[string][]string{"status": {"^PAID$"}},
+			want:     false,
+		},
+		{
+			name:     "unexpected extra key is excused by an empty pattern list",
+			expected: `{"a":1}`,
+			actual:   `{"a":1,"status":"PAID"}`,
+			noise:    map[string][]string{"status": {}},
 			want:     true,
+		},
+		{
+			name:     "top level, recorded value outside the pattern",
+			expected: `{"status":"GARBAGE"}`,
+			actual:   `{"status":"PAID"}`,
+			noise:    map[string][]string{"status": {"^(PENDING|PAID)$"}},
+			want:     false,
 		},
 		{
 			// A pattern has no value to match against, and a field disappearing
@@ -562,8 +615,13 @@ func TestRegexNoise_NullValuedFieldCanBeNoise(t *testing.T) {
 	if !diffNoise(t, recorded, replayed, map[string][]string{"order.cancelledAt": {}}) {
 		t.Errorf("an empty pattern list must cover a field recorded as null")
 	}
-	if !diffNoise(t, recorded, replayed, map[string][]string{"order.cancelledAt": {`^\d{4}-`}}) {
-		t.Errorf("a matching pattern must cover a field recorded as null")
+	if !diffNoise(t, recorded, replayed, map[string][]string{"order.cancelledAt": {`^(null|\d{4}-.*)$`}}) {
+		t.Errorf("a pattern both values match must cover a field recorded as null")
+	}
+	// Both sides: the recorded value is null, which a pattern written for
+	// the replayed date alone does not match.
+	if diffNoise(t, recorded, replayed, map[string][]string{"order.cancelledAt": {`^\d{4}-`}}) {
+		t.Errorf("a pattern the recorded null does not match must leave the difference reported")
 	}
 	if diffNoise(t, recorded, replayed, map[string][]string{"order.cancelledAt": {`^nope$`}}) {
 		t.Errorf("a non-matching pattern must leave the difference reported")
@@ -574,10 +632,15 @@ func TestRegexNoise_NullValuedFieldCanBeNoise(t *testing.T) {
 }
 
 // TestRegexNoise_UnexpectedKeyHonoursPattern pins that an extra key in the
-// replay is excused on the same terms under path noise as under a global entry.
+// replay is excused on the same terms under path noise as under a global entry:
+// only by an unconditional entry, since there is no recorded value for a
+// pattern to match.
 func TestRegexNoise_UnexpectedKeyHonoursPattern(t *testing.T) {
-	if !diffNoise(t, `{"a":1}`, `{"a":1,"trace":"ord-9"}`, map[string][]string{"trace": {`^ord-\d+$`}}) {
-		t.Errorf("an unexpected key matching its pattern should be excused")
+	if diffNoise(t, `{"a":1}`, `{"a":1,"trace":"ord-9"}`, map[string][]string{"trace": {`^ord-\d+$`}}) {
+		t.Errorf("an unexpected key must not be excused by a pattern: the recording holds no value for it to match")
+	}
+	if !diffNoise(t, `{"a":1}`, `{"a":1,"trace":"ord-9"}`, map[string][]string{"trace": {}}) {
+		t.Errorf("an unexpected key must be excused by an unconditional entry")
 	}
 	if diffNoise(t, `{"a":1}`, `{"a":1,"trace":"HACK"}`, map[string][]string{"trace": {`^ord-\d+$`}}) {
 		t.Errorf("an unexpected key outside its pattern must be reported")
@@ -672,6 +735,40 @@ func TestCompareHeaders_RegexEnforced(t *testing.T) {
 		http.Header{"X-Trace": []string{"HACK"}}, outOfPattern, noise) {
 		t.Errorf("a value outside the pattern must be reported")
 	}
+
+	// Both sides: a recorded value outside the pattern is a change too.
+	if CompareHeaders(
+		http.Header{"X-Trace": []string{"HACK"}},
+		http.Header{"X-Trace": []string{"ord-2"}}, &[]models.HeaderResult{}, noise) {
+		t.Errorf("a recorded value outside the pattern must be reported")
+	}
+	// Every value of a repeated header, on each side.
+	if CompareHeaders(
+		http.Header{"X-Trace": []string{"ord-1", "ord-2"}},
+		http.Header{"X-Trace": []string{"ord-3", "HACK"}}, &[]models.HeaderResult{}, noise) {
+		t.Errorf("a second live value outside the pattern must be reported")
+	}
+	if CompareHeaders(
+		http.Header{"X-Trace": []string{"ord-1", "HACK"}},
+		http.Header{"X-Trace": []string{"ord-3", "ord-4"}}, &[]models.HeaderResult{}, noise) {
+		t.Errorf("a second recorded value outside the pattern must be reported")
+	}
+	if !CompareHeaders(
+		http.Header{"X-Trace": []string{"ord-1", "ord-2"}},
+		http.Header{"X-Trace": []string{"ord-3", "ord-4"}}, &[]models.HeaderResult{}, noise) {
+		t.Errorf("every value inside the pattern on both sides should be ignored")
+	}
+	// A header the recording lacks has no recorded value to match.
+	if CompareHeaders(
+		http.Header{},
+		http.Header{"X-Trace": []string{"ord-2"}}, &[]models.HeaderResult{}, noise) {
+		t.Errorf("a header only the replay sent must not be excused by a pattern")
+	}
+	if !CompareHeaders(
+		http.Header{},
+		http.Header{"X-Trace": []string{"anything"}}, &[]models.HeaderResult{}, map[string][]string{"x-trace": {}}) {
+		t.Errorf("a header only the replay sent is excused by an unconditional entry")
+	}
 }
 
 // TestRegexNoise_UnexpectedContainerKeyIsReported pins that a pattern which
@@ -697,8 +794,11 @@ func TestRegexNoise_UnexpectedContainerKeyIsReported(t *testing.T) {
 // TestRegexNoise_UnexpectedKeyPathForm covers the path-noise form of the
 // unexpected-key rule; the global form is covered above.
 func TestRegexNoise_UnexpectedKeyPathForm(t *testing.T) {
-	if !diffNoise(t, `{"o":{"a":1}}`, `{"o":{"a":1,"trace":"ord-9"}}`, map[string][]string{"o.trace": {`^ord-\d+$`}}) {
-		t.Errorf("an unexpected key matching its pattern should be excused")
+	if diffNoise(t, `{"o":{"a":1}}`, `{"o":{"a":1,"trace":"ord-9"}}`, map[string][]string{"o.trace": {`^ord-\d+$`}}) {
+		t.Errorf("an unexpected key must not be excused by a pattern: the recording holds no value for it to match")
+	}
+	if !diffNoise(t, `{"o":{"a":1}}`, `{"o":{"a":1,"trace":"ord-9"}}`, map[string][]string{"o.trace": {}}) {
+		t.Errorf("an unexpected key must be excused by an unconditional entry")
 	}
 	if diffNoise(t, `{"o":{"a":1}}`, `{"o":{"a":1,"trace":"HACK"}}`, map[string][]string{"o.trace": {`^ord-\d+$`}}) {
 		t.Errorf("an unexpected key outside its pattern must be reported")

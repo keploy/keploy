@@ -276,9 +276,10 @@ func (w *noiseCandidateWalk) alreadySilenced(lowerKey string, ancestryLower []st
 }
 
 // knownCoversLeaf reports whether the test case's existing noise already excuses
-// this leaf, applying patterns the way noisyForValue does — an entry with
-// patterns only excuses the values those patterns match, so treating it as an
-// unconditional skip would make the producer return nothing for a live drift.
+// this value of a leaf, applying patterns the way noisyForValues does — an
+// entry with patterns only excuses the values those patterns match, so treating
+// it as an unconditional skip would make the producer return nothing for a live
+// drift. A drift is excused when both its values are (noisyForValues).
 func (w *noiseCandidateWalk) knownCoversLeaf(key string, actual interface{}) bool {
 	value, isScalar := jsonScalarToString(actual)
 	if regs, noisy := w.knownPath.match(strings.ToLower(key)); noisy {
@@ -375,24 +376,25 @@ func (w *noiseCandidateWalk) walk(key, id string, exp, act interface{}, ambiguou
 			}
 			// A global entry on a key that IS present skips the child subtree
 			// wholesale, structure included — and with containersCovered=true, so
-			// even a pattern-guarded one does. Walking into it anyway invented
-			// refusals for differences the matcher already excuses, and derived
-			// redundant entries for values it had already stopped comparing.
-			if w.globalCoversSubtree(k, av) {
+			// even a pattern-guarded one does when both values are containers or
+			// match it. Walking into it anyway invented refusals for differences
+			// the matcher already excuses, and derived redundant entries for
+			// values it had already stopped comparing.
+			if w.globalCoversSubtree(k, ev) && w.globalCoversSubtree(k, av) {
 				continue
 			}
 			w.walk(child, childNodeID(id, k), ev, av, ambiguous || strings.Contains(k, "."), ancestorNoisy)
 		}
-		for k, av := range a {
+		for k := range a {
 			if _, present := e[k]; present {
 				continue
 			}
-			// A key the replay added. Here a pattern CAN excuse it, because there
-			// is a replayed value for it to describe — via a global entry or a
-			// path entry, both passed to noisyForRegexps in utils.go's added-key
-			// branch. That branch does not consult ancestorNoisy either.
+			// A key the replay added. A pattern cannot excuse it: there is no
+			// recorded value for it to match, so only an unconditional global or
+			// path entry does, as in utils.go's added-key branch. That branch
+			// does not consult ancestorNoisy either.
 			child := childNoisePath(key, k)
-			if w.globalCoversValue(k, av) || w.pathCoversValue(child, av) {
+			if w.globalUnconditional(k) || w.knownCoversSubtree(child) {
 				continue
 			}
 			w.skip(child, NoiseSkipStructural)
@@ -482,7 +484,7 @@ func (w *noiseCandidateWalk) walk(key, id string, exp, act interface{}, ambiguou
 		if key != "" {
 			w.drifted[id] = true
 		}
-		if ancestorNoisy || w.knownCoversLeaf(key, act) {
+		if ancestorNoisy || (w.knownCoversLeaf(key, exp) && w.knownCoversLeaf(key, act)) {
 			return
 		}
 		switch {
@@ -573,17 +575,6 @@ func (w *noiseCandidateWalk) acceptedByMatcher(exp, act interface{}, known map[s
 	return err == nil && res.IsExact()
 }
 
-// pathCoversValue reports whether a path entry excuses a field the replay added.
-// Mirrors utils.go's added-key branch, which passes the replayed value to
-// noisyForRegexps so a pattern can describe it.
-func (w *noiseCandidateWalk) pathCoversValue(key string, value interface{}) bool {
-	regs, noisy := w.knownPath.match(strings.ToLower(key))
-	if !noisy {
-		return false
-	}
-	return noisyForRegexps(regs, value, false)
-}
-
 // globalCoversSubtree reports whether a global entry covers a key that is present
 // in both documents. Mirrors utils.go's present-key branch, which passes
 // containersCovered=true: a pattern that cannot describe a container still covers
@@ -597,19 +588,6 @@ func (w *noiseCandidateWalk) globalCoversSubtree(field string, value interface{}
 		return false
 	}
 	return noisyForRegexps(regs, value, true)
-}
-
-// globalCoversValue reports whether a global entry excuses a field the replay
-// added, which a pattern can do because there is a value for it to describe.
-func (w *noiseCandidateWalk) globalCoversValue(field string, value interface{}) bool {
-	if !w.hasKnownGlobal {
-		return false
-	}
-	regs, ok := w.knownGlobalRegs[strings.ToLower(field)]
-	if !ok {
-		return false
-	}
-	return noisyForRegexps(regs, value, false)
 }
 
 func (w *noiseCandidateWalk) emit(path string) {

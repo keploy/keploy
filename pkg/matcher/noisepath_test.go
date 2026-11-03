@@ -506,10 +506,24 @@ func TestBodyNoiseFromJSONDiff_PatternGuardedKnownDoesNotSwallowDrift(t *testing
 		}
 	}
 
-	// A pattern that DOES match the replayed value is genuine coverage.
-	matching := map[string][]string{"o.ts": {"^2025-"}}
+	// A pattern that matches the recorded and the replayed value is genuine
+	// coverage.
+	matching := map[string][]string{"o.ts": {"^202[45]-"}}
+	if !bodyMatches(t, exp, act, matching) {
+		t.Fatal("control failed: the matcher does not excuse a pattern both values match")
+	}
 	if paths, _ := BodyNoiseFromJSONDiff(exp, act, matching, false); len(paths) != 0 {
 		t.Errorf("paths = %v, want none: the existing pattern already covers this value", paths)
+	}
+
+	// One that matches the replayed value only is not: the matcher compares a
+	// field whose recorded value the pattern does not match.
+	liveOnly := map[string][]string{"o.ts": {"^2025-"}}
+	if bodyMatches(t, exp, act, liveOnly) {
+		t.Fatal("control failed: the matcher excuses a pattern only the replayed value matches")
+	}
+	if paths, skipped := BodyNoiseFromJSONDiff(exp, act, liveOnly, false); len(paths) != 1 || paths[0] != "o.ts" {
+		t.Errorf("paths = %v, skipped = %+v; want [o.ts]", paths, skipped)
 	}
 }
 
@@ -628,19 +642,27 @@ func TestBodyNoiseFromJSONDiff_ScalarArraysArePairingIndependent(t *testing.T) {
 	}
 }
 
-// A pattern that matches an ADDED field excuses it in the walker, because there
-// is a replayed value for the pattern to describe. Reporting a refusal for a case
-// the matcher passes would surface a schema change on a green run.
-func TestBodyNoiseFromJSONDiff_PatternExcusesAnAddedField(t *testing.T) {
+// A pattern does not excuse an ADDED field, even one it matches: the recording
+// holds no value for it to match, so the matcher fails the case and the walker
+// must say so rather than report nothing for a red run. An unconditional entry
+// still excuses it in both.
+func TestBodyNoiseFromJSONDiff_PatternDoesNotExcuseAnAddedField(t *testing.T) {
 	var (
 		known    = map[string][]string{"b": {"^tok-"}}
 		exp, act = `{"a":1}`, `{"a":1,"b":"tok-9"}`
 	)
-	if !bodyMatches(t, exp, act, known) {
-		t.Fatal("control failed: the matcher rejects this, so the case proves nothing")
+	if bodyMatches(t, exp, act, known) {
+		t.Fatal("control failed: the matcher accepts this, so the case proves nothing")
 	}
-	if paths, skipped := BodyNoiseFromJSONDiff(exp, act, known, false); len(paths) != 0 || len(skipped) != 0 {
-		t.Errorf("paths = %v skipped = %+v, want both empty: the pattern already excuses the added field", paths, skipped)
+	if paths, skipped := BodyNoiseFromJSONDiff(exp, act, known, false); len(paths) != 0 || len(skipped) != 1 || skipped[0].Path != "b" || skipped[0].Reason != NoiseSkipStructural {
+		t.Errorf("paths = %v skipped = %+v, want no path and b skipped as structural", paths, skipped)
+	}
+	unconditional := map[string][]string{"b": {}}
+	if !bodyMatches(t, exp, act, unconditional) {
+		t.Fatal("control failed: an unconditional entry must excuse the added field")
+	}
+	if paths, skipped := BodyNoiseFromJSONDiff(exp, act, unconditional, false); len(paths) != 0 || len(skipped) != 0 {
+		t.Errorf("paths = %v skipped = %+v, want both empty: the entry already excuses the added field", paths, skipped)
 	}
 }
 
@@ -795,17 +817,23 @@ func TestBodyNoiseFromJSONDiff_LiteralDotKeyDoesNotAliasNesting(t *testing.T) {
 	}
 }
 
-// A dotted pattern on a field the replay ADDED excuses it, because there is a
-// replayed value for the pattern to describe. Only the global form was covered.
-func TestBodyNoiseFromJSONDiff_DottedPatternExcusesAnAddedField(t *testing.T) {
+// The dotted form of the row above.
+func TestBodyNoiseFromJSONDiff_DottedPatternDoesNotExcuseAnAddedField(t *testing.T) {
 	var (
 		known    = map[string][]string{"a.b": {"^tok-"}}
 		exp, act = `{"a":{"x":1}}`, `{"a":{"x":1,"b":"tok-9"}}`
 	)
-	if !bodyMatches(t, exp, act, known) {
-		t.Fatal("control failed: the matcher rejects this, so the case proves nothing")
+	if bodyMatches(t, exp, act, known) {
+		t.Fatal("control failed: the matcher accepts this, so the case proves nothing")
 	}
-	if paths, skipped := BodyNoiseFromJSONDiff(exp, act, known, false); len(paths) != 0 || len(skipped) != 0 {
+	if paths, skipped := BodyNoiseFromJSONDiff(exp, act, known, false); len(paths) != 0 || len(skipped) != 1 || skipped[0].Path != "a.b" || skipped[0].Reason != NoiseSkipStructural {
+		t.Errorf("paths = %v skipped = %+v, want no path and a.b skipped as structural", paths, skipped)
+	}
+	unconditional := map[string][]string{"a.b": {}}
+	if !bodyMatches(t, exp, act, unconditional) {
+		t.Fatal("control failed: an unconditional entry must excuse the added field")
+	}
+	if paths, skipped := BodyNoiseFromJSONDiff(exp, act, unconditional, false); len(paths) != 0 || len(skipped) != 0 {
 		t.Errorf("paths = %v skipped = %+v, want both empty", paths, skipped)
 	}
 }

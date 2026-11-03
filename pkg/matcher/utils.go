@@ -124,6 +124,20 @@ func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
 	return false, ""
 }
 
+// allMatchAnyRegex reports whether there is at least one value and each
+// matches one of the patterns.
+func allMatchAnyRegex(values []string, patterns []string) bool {
+	if len(values) == 0 {
+		return false
+	}
+	for _, v := range values {
+		if ok, _ := MatchesAnyRegex(v, patterns); !ok {
+			return false
+		}
+	}
+	return true
+}
+
 type noiseEntry struct {
 	keyLower string
 	key      string           // as configured; orders entries whose keyLower is the same
@@ -566,9 +580,9 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		}
 		// A field recorded as null and replayed as something else. Nullable
 		// volatile fields are exactly what a pattern is for, so consult the
-		// noise entry against the replayed value rather than ignoring it.
+		// noise entry against both values: the recorded one is "null".
 		if av, ok := jsonScalarToString(actual); ok {
-			if ancestorNoisy || noisyForValue(ni, key, av) {
+			if ancestorNoisy || noisyForValues(ni, key, "null", av) {
 				out.matches, out.isExact = true, true
 			}
 			return out, nil
@@ -589,7 +603,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		// SamePresignedSigV4: a presigned URL is compared but for its
 		// signature and session token, which a replay's stand-in AWS
 		// secret changes (presigned.go).
-		if e == a || ancestorNoisy || noisyForValue(ni, key, a) || SamePresignedSigV4(e, a) {
+		if e == a || ancestorNoisy || noisyForValues(ni, key, e, a) || SamePresignedSigV4(e, a) {
 			out.matches, out.isExact = true, true
 		}
 		return out, nil
@@ -599,7 +613,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		if !ok {
 			return out, errors.New("type not matched")
 		}
-		if e == a || ancestorNoisy || noisyForValue(ni, key, strconv.FormatBool(a)) {
+		if e == a || ancestorNoisy || noisyForValues(ni, key, strconv.FormatBool(e), strconv.FormatBool(a)) {
 			out.matches, out.isExact = true, true
 		}
 		return out, nil
@@ -609,7 +623,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		if !ok {
 			return out, errors.New("type not matched")
 		}
-		if e == a || ancestorNoisy || noisyForValue(ni, key, formatJSONNumber(a)) {
+		if e == a || ancestorNoisy || noisyForValues(ni, key, formatJSONNumber(e), formatJSONNumber(a)) {
 			out.matches, out.isExact = true, true
 		}
 		return out, nil
@@ -667,7 +681,9 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 				return out, nil
 			}
 
-			if regs, isGlobal := globalKeys[strings.ToLower(k)]; isGlobal && noisyForRegexps(regs, val, true) {
+			// A pattern-guarded entry excuses the field only when the recorded
+			// and the replayed value each match it.
+			if regs, isGlobal := globalKeys[strings.ToLower(k)]; isGlobal && noisyForRegexps(regs, v, true) && noisyForRegexps(regs, val, true) {
 				continue
 			}
 
@@ -705,11 +721,14 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 			if _, ok := e[k]; ok {
 				continue
 			}
-			if regs, isGlobal := globalKeys[strings.ToLower(k)]; isGlobal && noisyForRegexps(regs, a[k], false) {
+			// A key the recording lacks has no recorded value for a pattern to
+			// match, so only an unconditional entry excuses it: the rule for a
+			// key the replay dropped (above), the other way round.
+			if regs, isGlobal := globalKeys[strings.ToLower(k)]; isGlobal && len(regs) == 0 {
 				continue
 			}
 			childKeyLower := prefixLower + strings.ToLower(k)
-			if regs, noisy := ni.match(childKeyLower); noisy && noisyForRegexps(regs, a[k], false) {
+			if regs, noisy := ni.match(childKeyLower); noisy && len(regs) == 0 {
 				continue // ignore unexpected but noisy subtree
 			}
 			return out, nil
@@ -828,16 +847,17 @@ func anyRegexpMatchStr(s string, regs []*regexp.Regexp) bool {
 	return false
 }
 
-// noisyForValue reports whether the leaf at key should be ignored given the
-// value actually replayed.
+// noisyForValues reports whether the leaf at key should be ignored given its
+// recorded and its replayed value.
 //
 // A noise entry with no patterns ignores the field unconditionally — that is
 // what auto-detected noise emits and it is unchanged. An entry WITH patterns
-// describes which values are volatile, so it ignores the field only when the
-// replayed value is one of them. Treating a pattern-guarded entry as an
-// unconditional skip makes the pattern decorative and silently stops asserting
-// the field, which is the opposite of what writing a pattern asks for.
-func noisyForValue(ni noiseIndex, key, actual string) bool {
+// says the field may vary within them, so it ignores the field only when the
+// recorded value and the replayed value are each one of them. Treating a
+// pattern-guarded entry as an unconditional skip makes the pattern decorative,
+// and checking one side only lets the other hold anything: a pattern written
+// for the recorded value would pass whatever the replay returned.
+func noisyForValues(ni noiseIndex, key, recorded, actual string) bool {
 	regs, noisy := ni.match(strings.ToLower(key))
 	switch {
 	case !noisy:
@@ -845,7 +865,7 @@ func noisyForValue(ni noiseIndex, key, actual string) bool {
 	case len(regs) == 0:
 		return true
 	default:
-		return anyRegexpMatchStr(actual, regs)
+		return anyRegexpMatchStr(recorded, regs) && anyRegexpMatchStr(actual, regs)
 	}
 }
 
@@ -1854,15 +1874,13 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 		regexArr, isNoisy := SubstringKeyMatch(k, loweredNoise)
 		val, ok := h2[k]
 		if isNoisy && len(regexArr) != 0 {
-			// Constrain on the REPLAYED value, matching how body noise works:
-			// the replayed value is the one that varies, so testing the recorded
-			// one instead would let any replayed value through. A header the
-			// replay dropped has no value to match, so a pattern-guarded entry
-			// does not excuse it — only an unconditional entry does.
-			isNoisy = false
-			if ok && len(val) > 0 {
-				isNoisy, _ = MatchesAnyRegex(val[0], regexArr)
-			}
+			// A pattern says the header may vary within it, so it excuses the
+			// header only when every recorded value and every replayed value
+			// matches it, as body noise does: testing one side only would let
+			// the other hold anything. A header the replay dropped has no value
+			// to match, so a pattern-guarded entry does not excuse it — only an
+			// unconditional entry does.
+			isNoisy = ok && allMatchAnyRegex(v, regexArr) && allMatchAnyRegex(val, regexArr)
 		}
 		isNoisy = isNoisy || isHeaderNoisy
 		if !isNoisy {
@@ -1937,14 +1955,14 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	}
 	for k, v := range h2 {
 		regexArr, isNoisy := SubstringKeyMatch(k, loweredNoise)
+		val, ok := h1[k]
 		if isNoisy && len(regexArr) != 0 {
-			isNoisy = false
-			if len(v) > 0 {
-				isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
-			}
+			// The same rule as above. A header the recording lacks has no
+			// recorded value to match, so only an unconditional entry
+			// excuses it.
+			isNoisy = ok && allMatchAnyRegex(val, regexArr) && allMatchAnyRegex(v, regexArr)
 		}
 		isNoisy = isNoisy || isHeaderNoisy
-		val, ok := h1[k]
 		if isNoisy && checkKey(res, k) {
 			*res = append(*res, models.HeaderResult{
 				Normal: true,

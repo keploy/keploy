@@ -157,13 +157,17 @@ func (k *matchKeyer) walk(v interface{}, p string) {
 // once in 10^19 pairs) would count one difference too few.
 type JSONFields struct {
 	fields []fieldHash // sorted by path hash
+	// covered are the scalars a pattern-guarded noise entry matched, one per
+	// path, sorted by path hash. Whether the pattern excuses them depends on
+	// the other side (bothSides), so they are counted only against it.
+	covered []fieldHash
 }
 
 type fieldHash struct{ path, value uint64 }
 
 // Bytes is the memory f's fields take: 16 bytes each. A caller that keeps many
 // counts them against its budget.
-func (f JSONFields) Bytes() int { return cap(f.fields) * 16 }
+func (f JSONFields) Bytes() int { return (cap(f.fields) + cap(f.covered)) * 16 }
 
 func fnv64a(parts ...string) uint64 {
 	h := uint64(14695981039346656037)
@@ -181,18 +185,56 @@ func fnv64a(parts ...string) uint64 {
 // CollectJSONFields collects doc under known as JSONFieldDiffs collects each
 // side it compares.
 func CollectJSONFields(doc interface{}, known map[string][]string) JSONFields {
-	pm := pathMaps{types: map[string]string{}, values: map[string]string{}}
+	pm := newPathMaps()
 	collectJSON(doc, "", buildNoiseIndex(known, nil), &pm)
 	out := JSONFields{fields: make([]fieldHash, 0, len(pm.types))}
 	for p, typ := range pm.types {
 		out.fields = append(out.fields, fieldHash{path: fnv64a(p), value: fnv64a(typ, pm.values[p])})
 	}
-	sort.Slice(out.fields, func(i, j int) bool {
-		if out.fields[i].path != out.fields[j].path {
-			return out.fields[i].path < out.fields[j].path
+	sortFieldHashes(out.fields)
+	for p, typ := range pm.coveredTypes {
+		out.covered = append(out.covered, fieldHash{path: fnv64a(p), value: fnv64a(typ, pm.coveredValues[p])})
+	}
+	sortFieldHashes(out.covered)
+	return out
+}
+
+func sortFieldHashes(f []fieldHash) {
+	sort.Slice(f, func(i, j int) bool {
+		if f[i].path != f[j].path {
+			return f[i].path < f[j].path
 		}
-		return out.fields[i].value < out.fields[j].value
+		return f[i].value < f[j].value
 	})
+}
+
+// compared is f's fields as bothSides leaves them against other: its fields,
+// and each scalar a pattern matched at a path f holds no other field at,
+// unless other too holds only such a scalar there.
+func (f JSONFields) compared(other JSONFields) []fieldHash {
+	if len(f.covered) == 0 {
+		return f.fields
+	}
+	plain := make(map[uint64]bool, len(f.fields))
+	for _, h := range f.fields {
+		plain[h.path] = true
+	}
+	otherPlain := make(map[uint64]bool, len(other.fields))
+	for _, h := range other.fields {
+		otherPlain[h.path] = true
+	}
+	otherCovered := make(map[uint64]bool, len(other.covered))
+	for _, h := range other.covered {
+		otherCovered[h.path] = true
+	}
+	out := append(make([]fieldHash, 0, len(f.fields)+len(f.covered)), f.fields...)
+	for _, h := range f.covered {
+		if plain[h.path] || (otherCovered[h.path] && !otherPlain[h.path]) {
+			continue
+		}
+		out = append(out, h)
+	}
+	sortFieldHashes(out)
 	return out
 }
 
@@ -200,7 +242,7 @@ func CollectJSONFields(doc interface{}, known map[string][]string) JSONFields {
 // documents collected under the same known noise, without building the diffs:
 // the fields only one side has, plus those whose type or value differs.
 func CountJSONFieldDiffs(exp, act JSONFields) int {
-	e, a := exp.fields, act.fields
+	e, a := exp.compared(act), act.compared(exp)
 	n, i, j := 0, 0, 0
 	for i < len(e) && j < len(a) {
 		switch {
