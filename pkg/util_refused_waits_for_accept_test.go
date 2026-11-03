@@ -6,8 +6,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -125,6 +127,52 @@ func TestARefusedTestRequestStopsWaitingWhenTheAppExits(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the wait did not end when the application exited")
+	}
+}
+
+// refusingDials refuses the client's first n dials as the kernel does, then
+// dials for real: an application that accepted the wait's connection and
+// refused the request's again (a listener that comes and goes as it starts).
+type refusingDials struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (d *refusingDials) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	d.mu.Lock()
+	refuse := d.n > 0
+	if refuse {
+		d.n--
+	}
+	d.mu.Unlock()
+	if refuse {
+		return nil, &net.OpError{Op: "dial", Net: network, Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+	}
+	var dialer net.Dialer
+	return dialer.DialContext(ctx, network, addr)
+}
+
+// Refusals that come again after the address accepted are waited out too,
+// however many: no count of re-sends ends the wait while the application
+// keploy started runs.
+func TestARefusedTestRequestIsSentAgainPastTheBoundedCountWhileTheAppRuns(t *testing.T) {
+	addr := refusingAddr(t)
+	serve(t, addr)
+	ctx, cancel := context.WithCancel(EndsWithApp(context.Background()))
+	defer cancel()
+	refusals := &refusingDials{n: maxConnRefusedRetries + 2}
+	client := &http.Client{Transport: &http.Transport{DialContext: refusals.dial}}
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://"+addr+"/a", strings.NewReader("body"))
+	resp, err := doRequestWithConnRefusedRetry(ctx, zap.NewNop(), client, req, nil, 0)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("want the application's 200 after %d refusals, got (%v, %v)", maxConnRefusedRetries+2, resp, err)
+	}
+	_ = resp.Body.Close()
+	refusals.mu.Lock()
+	left := refusals.n
+	refusals.mu.Unlock()
+	if left != 0 {
+		t.Errorf("%d refusals left: the request was answered before it was refused as often as the row says", left)
 	}
 }
 

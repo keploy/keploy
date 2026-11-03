@@ -56,7 +56,7 @@ func listeningPortsIn(path string, inodes map[string]bool) []int {
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var ports []int
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {

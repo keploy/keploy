@@ -108,6 +108,28 @@ func TestAHealthURLThatOutlastsItsPollTimeoutWaitsForTheAppToAccept(t *testing.T
 	}
 }
 
+// With probing the app's address disabled, a health URL that outlasts its
+// poll timeout is polled on: the first test waits for its 2xx, not for a
+// ceiling.
+func TestAHealthURLThatOutlastsItsPollTimeoutIsPolledOnWithTheAddressProbeDisabled(t *testing.T) {
+	app := newSlowApp(t)
+	cfg := &config.Config{}
+	cfg.Test.Delay = 0
+	cfg.Test.HealthURL = "http://" + app.addr() + "/healthz"
+	cfg.Test.HealthPollTimeout = 200 * time.Millisecond
+	cfg.Test.DisableAppReadyProbe = true
+
+	core, logs := observer.New(zap.InfoLevel)
+	done := slowWaitResult(context.Background(), zap.New(core), cfg, httpProbeTarget{})
+
+	requireStillWaiting(t, done, 2*time.Second)
+	if logs.FilterMessageSnippet("probing the app's address is disabled").Len() != 1 {
+		t.Errorf("the wait did not say once that it waits for the health URL with address probing disabled: %v", logs.All())
+	}
+	app.start()
+	requireReady(t, done)
+}
+
 // Without --health-url: the address the set's first test dials refuses past
 // the ceiling, and the first test waits for it.
 func TestTheTestAddressGateWaitsPastItsCeilingForAnAppThatStartsSlowly(t *testing.T) {

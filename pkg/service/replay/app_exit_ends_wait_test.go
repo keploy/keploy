@@ -4,16 +4,22 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
+	"github.com/go-chi/chi/v5"
 	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/routes"
 	"go.keploy.io/server/v3/pkg/models"
+	httpclient "go.keploy.io/server/v3/pkg/platform/http"
 	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // marksHooks records whether each test request's context says the
@@ -65,31 +71,52 @@ func TestTestRequestsWaitOnARefusalOnlyForAnAppKeployStarted(t *testing.T) {
 
 // An application keploy started that exits before it ever accepts a
 // connection ends the set's wait for it, and the set fails as the exit does
-// (the application halted), saying so: not as a stop by the user.
+// (the application halted), saying so: not as a stop by the user. A native
+// command and a docker compose stack alike.
 func TestAnAppThatExitsBeforeItAcceptsFailsItsSetSayingSo(t *testing.T) {
-	refusing := net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t)))
-	h := newPartialRunHarness(t, 2, 0)
-	for _, tc := range h.cases {
-		tc.HTTPReq.URL = "http://" + refusing + "/x"
-	}
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		close(h.instr.appStopped)
-	}()
-	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
-	defer cancel()
-	status, err := h.replayer.RunTestSet(ctx, "test-set-0", "test-run-0", false)
-	if status != models.TestSetStatusAppHalted {
-		t.Errorf("status %q, want %q: the application exited before it accepted a connection", status, models.TestSetStatusAppHalted)
-	}
-	if err == nil || !strings.Contains(err.Error(), "exited before it accepted a connection") {
-		t.Errorf("error %v, want one saying the application exited before it accepted a connection", err)
-	}
-	if errors.Is(err, context.Canceled) {
-		t.Errorf("error %v reads as the user's stop", err)
-	}
-	if n := len(h.report.results); n != 0 {
-		t.Errorf("%d tests were sent, want none", n)
+	for _, kind := range []utils.CmdType{utils.Native, utils.DockerCompose} {
+		t.Run(string(kind), func(t *testing.T) {
+			refusing := net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t)))
+			h := newPartialRunHarness(t, 2, 0)
+			h.replayer.config.CommandType = string(kind)
+			if kind == utils.DockerCompose {
+				// keploy's agent comes up in the stack before the wait.
+				router := chi.NewRouter()
+				routes.DefaultRoutes{}.New(router, &composeAgent{}, zap.NewNop())
+				srv := httptest.NewServer(router)
+				defer srv.Close()
+				h.replayer.config.Agent.AgentURI = srv.URL + "/agent"
+				h.replayer.instrumentation = &composeAgentInstr{prInstr: h.instr, client: httpclient.New(zap.NewNop(), nil, h.replayer.config)}
+			}
+			for _, tc := range h.cases {
+				tc.HTTPReq.URL = "http://" + refusing + "/x"
+			}
+			// The application exits once the set waits for it to accept a
+			// connection: past the agent's start, at the wait itself.
+			var exit sync.Once
+			core, _ := observer.New(zapcore.InfoLevel)
+			h.replayer.logger = zap.New(core, zap.Hooks(func(e zapcore.Entry) error {
+				if strings.Contains(e.Message, "waiting for the application to accept a connection on "+refusing) {
+					exit.Do(func() { close(h.instr.appStopped) })
+				}
+				return nil
+			}))
+			ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+			defer cancel()
+			status, err := h.replayer.RunTestSet(ctx, "test-set-0", "test-run-0", false)
+			if status != models.TestSetStatusAppHalted {
+				t.Errorf("status %q, want %q: the application exited before it accepted a connection", status, models.TestSetStatusAppHalted)
+			}
+			if err == nil || !strings.Contains(err.Error(), "exited before it accepted a connection") {
+				t.Errorf("error %v, want one saying the application exited before it accepted a connection", err)
+			}
+			if errors.Is(err, context.Canceled) {
+				t.Errorf("error %v reads as the user's stop", err)
+			}
+			if n := len(h.report.results); n != 0 {
+				t.Errorf("%d tests were sent, want none", n)
+			}
+		})
 	}
 }
 
@@ -108,6 +135,59 @@ func TestNeverReadyStatusIsTheExitsOrTheUsersStop(t *testing.T) {
 	} {
 		if status, exited := neverReadyStatus(c.err); status != c.status || exited != c.exited {
 			t.Errorf("%+v: (%q, %v), want (%q, %v)", c.err, status, exited, c.status, c.exited)
+		}
+	}
+}
+
+// notingInstr starts the application and notes its pid where keploy keeps it,
+// as ExecuteCommand does for a native command.
+type notingInstr struct{ *prInstr }
+
+func (n *notingInstr) Run(ctx context.Context, opts models.RunOptions) models.AppError {
+	utils.NoteAppPID(ctx, 7)
+	return n.prInstr.Run(ctx, opts)
+}
+
+type pidHooks struct {
+	prHooks
+	mu   sync.Mutex
+	pids []int
+}
+
+func (h *pidHooks) SimulateRequest(ctx context.Context, tc *models.TestCase, set string) (interface{}, error) {
+	h.mu.Lock()
+	h.pids = append(h.pids, utils.AppPID(ctx))
+	h.mu.Unlock()
+	return h.prHooks.SimulateRequest(ctx, tc, set)
+}
+
+// An application kept alive across test sets is started once, by Start, not
+// by a set: the pid it notes is the one each set's waits read, to name the
+// ports it listens on instead of the one they wait on.
+func TestTheKeptAppsPidIsTheOneEachSetsWaitsRead(t *testing.T) {
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.instrumentation = &notingInstr{h.instr}
+	hooks := &pidHooks{}
+	h.replayer.hookImpl = hooks
+	h.replayer.config.Command = "./app"
+	h.replayer.config.CommandType = string(utils.Native)
+	h.replayer.config.Test.KeepAppAlive = true
+	h.replayer.config.Test.MaxFlakyChecks = 1
+	saved := utils.ErrCode
+	t.Cleanup(func() { utils.ErrCode = saved })
+	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+	defer cancel()
+	if err := h.replayer.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	hooks.mu.Lock()
+	defer hooks.mu.Unlock()
+	if len(hooks.pids) != 2 {
+		t.Fatalf("%d test requests sent, want 2", len(hooks.pids))
+	}
+	for i, pid := range hooks.pids {
+		if pid != 7 {
+			t.Errorf("request %d's context holds pid %d, want the kept application's 7", i+1, pid)
 		}
 	}
 }

@@ -41,14 +41,22 @@ func TestAppListenPortsAreTheAppsAndItsChildrensListeningPorts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	own := ln.Addr().(*net.TCPAddr).Port
 	conn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	dialled := conn.LocalAddr().(*net.TCPAddr).Port
+	// A listener on IPv6 is in /proc's tcp6 table, not its tcp one.
+	wants := []int{own}
+	if ln6, err := net.Listen("tcp6", "[::1]:0"); err == nil {
+		defer func() { _ = ln6.Close() }()
+		wants = append(wants, ln6.Addr().(*net.TCPAddr).Port)
+	} else {
+		t.Logf("no IPv6 loopback here (%v): the tcp6 table is not checked", err)
+	}
 
 	child := exec.Command(os.Args[0], "-test.run=^TestListenChildHelper$")
 	child.Env = append(os.Environ(), listenChildEnv+"=1")
@@ -79,7 +87,7 @@ func TestAppListenPortsAreTheAppsAndItsChildrensListeningPorts(t *testing.T) {
 	}
 	NoteAppPID(ctx, os.Getpid())
 	got := AppListenPorts(ctx)
-	for _, want := range []int{own, kid} {
+	for _, want := range append(wants, kid) {
 		if !slices.Contains(got, want) {
 			t.Errorf("ports %v lack %d", got, want)
 		}

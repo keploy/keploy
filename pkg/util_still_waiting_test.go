@@ -72,7 +72,7 @@ func TestTheStillWaitingLineNamesThePortsTheAppListensOnInstead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	other := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
 	ctx := utils.WithAppPID(context.Background())
 	utils.NoteAppPID(ctx, os.Getpid()) // the "application" is this test's process
@@ -150,5 +150,15 @@ func TestARefusedRequestsWaitIsNotTheAppsStallUnderTheProvenSwitch(t *testing.T)
 	waitArmed(t, clk, w)
 	if w.didStall() {
 		t.Fatal("the wait's time was counted toward the stall once it ended")
+	}
+	// The rule is back once the wait ends: a grace with no progress after
+	// it cuts the exchange.
+	clk.Advance(10 * time.Second)
+	deadline = time.Now().Add(10 * time.Second)
+	for !w.didStall() {
+		if time.Now().After(deadline) {
+			t.Fatal("the stall rule did not come back once the wait ended")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
