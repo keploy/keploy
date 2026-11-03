@@ -91,8 +91,10 @@ type Tracker struct {
 	// (Flight.LiftCaused); NewSet replaces it.
 	flights map[int]*Flight
 	// handshakes are the set's serves told as handshakes
-	// (ServedHandshakeIn), by number.
+	// (ServedHandshakeIn), by number; phases those of the other protocol
+	// phases placed in the request their parser said (ServedMockIn).
 	handshakes map[int]bool
+	phases     map[int]bool
 	aloft      map[*Flight]struct{}
 	landings   uint64
 	flying     bool
@@ -260,7 +262,7 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	t.mocks, t.kept, t.before = nil, nil, nil
 	t.set, t.serves, t.seq, t.asRecorded, t.lives = nil, nil, 0, nil, nil
 	t.testFrom, t.outsideSeq, t.starts = 0, nil, nil
-	t.flights, t.lifts, t.handshakes = nil, nil, nil
+	t.flights, t.lifts, t.handshakes, t.phases = nil, nil, nil, nil
 	// The earlier set's derived data is let go now, not when its last
 	// handler is done with it, so the agent holds one set's budget at a time.
 	t.derived.drop()
@@ -795,7 +797,7 @@ func (t *Tracker) Placed() Placed {
 // orderLocked is the order of the set's serves as a read now sees it
 // (Placed.Order). t.mu is held.
 func (t *Tracker) orderLocked() Order {
-	return Order{t: t, serves: t.serves, asRecorded: t.asRecorded, lives: t.lives, upTo: t.seq, testFrom: t.testFrom, outside: t.outsideSeq, starts: t.starts[:len(t.starts):len(t.starts)], places: t.places, flights: t.flights, handshakes: t.handshakes, set: t.setEpoch, landings: t.landings, flying: t.flying, serveAt: t.serveAt[:len(t.serveAt):len(t.serveAt)]}
+	return Order{t: t, serves: t.serves, asRecorded: t.asRecorded, lives: t.lives, upTo: t.seq, testFrom: t.testFrom, outside: t.outsideSeq, starts: t.starts[:len(t.starts):len(t.starts)], places: t.places, flights: t.flights, handshakes: t.handshakes, phases: t.phases, set: t.setEpoch, landings: t.landings, flying: t.flying, serveAt: t.serveAt[:len(t.serveAt):len(t.serveAt)]}
 }
 
 // ServedMock notes a mock any parser served in the running test: an earlier
@@ -835,8 +837,9 @@ func (t *Tracker) ServedMockAtIn(m *models.Mock, at time.Time, in *Flight) {
 // answers the StartupMessage, and is picked as the connection's first
 // request arrives: its StartupMessage, or the SSLRequest before it; an
 // SSLRequest's answer, the SSLRequest). A protocol phase told with
-// ServedMockIn (a driver's heartbeat) has no place in F's order and makes no
-// request a serve; a handshake told here has in's place (Flight) where it
+// ServedMockIn in a request (a connection's setup statement, a driver's
+// heartbeat) has that request's place as a handshake chosen in it has, and
+// makes no request a serve (Flight); a handshake told here has in's place (Flight) where it
 // was chosen in in: told once in landed, unless in was aloft beside a
 // request that was a serve or got a handshake. Chosen in another request, it
 // has no place, as two connections whose choices were aloft together may
@@ -931,6 +934,12 @@ func (t *Tracker) servedIn(m *models.Mock, at, from time.Time, in *Flight, k ser
 			t.flights = map[int]*Flight{}
 		}
 		t.flights[t.seq] = f
+		if !k.handshake && m.IsProtocolPhase() {
+			if t.phases == nil {
+				t.phases = map[int]bool{}
+			}
+			t.phases[t.seq] = true
+		}
 	}
 	// Kept between tests too: the next Begin moves it to before.
 	if !t.kept[id] {
@@ -981,8 +990,10 @@ type Order struct {
 	// (Order.told).
 	flights map[int]*Flight
 	// handshakes are the set's serves told as handshakes
-	// (ServedHandshakeIn), by number.
+	// (ServedHandshakeIn), by number; phases the other protocol phases
+	// placed in a request (Tracker.phases).
 	handshakes map[int]bool
+	phases     map[int]bool
 	// set is the epoch of the set the read was of (Tracker.setEpoch).
 	set      uint64
 	landings uint64
