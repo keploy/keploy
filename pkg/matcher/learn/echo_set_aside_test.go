@@ -1,9 +1,12 @@
 package learn
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // echoSetAside is what an echo refused past places the rule a copy follows
@@ -13,6 +16,19 @@ const echoSetAside = "; but the call's recorded answer holds it, an echo keploy 
 // echoLearned is what an echo learned past such places says after naming
 // the first.
 const echoLearned = ", and keploy learns it as an echo of the call's answer"
+
+// namesInOrder reports whether why holds each of names, each after the one
+// before it.
+func namesInOrder(why string, names []string) bool {
+	for _, n := range names {
+		i := strings.Index(why, n)
+		if i < 0 {
+			return false
+		}
+		why = why[i+len(n):]
+	}
+	return true
+}
 
 // An echo of the call's answer (its recorded answer holds the recorded value
 // whole) whose search for a source went past places the rule a copy follows
@@ -118,5 +134,99 @@ func TestAnEchoPastPlacesTheCopyRuleShowedNoSourceIsLearnedAsTheEcho(t *testing.
 	got = classifyF(t, "82 1", "4 1 1", nil, eStartup(), echo("82 1"))
 	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the recorded value and the value record's full round saw both hold that word") || !strings.Contains(got.Why, "in mock-1") {
 		t.Errorf("FALSE GREEN? 82 1 echoed, 4 1 1 in F beside SELECT 1: %s (%q); want refused naming the word both hold", got.Kind, got.Why)
+	}
+}
+
+// A leaf set aside (follows.refuteSeen) is named after the first place an
+// echo's reason names, where that is a place the search for the value's
+// source went past, a place F gave another value at, or a word held by
+// chance (follows.setAside), not only after an unserved sibling
+// (TestAnEqualStampBesideASiblingFHadNotServedIsAnEcho): here a place the
+// word rule let a word of the value go at, where F gave another value that
+// the value took none of the words of (moved), and a recording of another
+// test that both runs gave the word at, which the value holds by chance
+// (chance). The leaf is an answer F served before the call that held the
+// recorded value whole, where F gave the recorded value with another word
+// after it: the word rule lets the value's words go there, as F gave them as
+// recorded, and the leaf is no source, as F saw it hold another value than
+// the value's. The echo is learned where both runs gave the places in one
+// order, and refused where they did not, naming the first place, then the
+// leaf, either way.
+func TestAnEchoNamesALeafSetAsideAfterAPlaceTheValueMovedFromOrHoldsAWordOfByChance(t *testing.T) {
+	const asideWhy = "; and its recorded value stands whole in mock-9 at body.at, where record's full round gave the application another value than the value's: a copy moves with its source, so the value is no copy of it"
+	const order = echoSetAside + "the recording and record's full round gave the application the earlier answers in a different order"
+	check := func(what string, got Learned, kind Kind, names []string) {
+		t.Helper()
+		if got.Kind != kind || !namesInOrder(got.Why, names) {
+			lead := ""
+			if kind == KindUnaccounted && got.Kind != KindUnaccounted {
+				lead = "FALSE GREEN? "
+			}
+			t.Errorf("%s%s: %s (%q); want %s naming, in this order, %q", lead, what, got.Kind, got.Why, kind, names)
+		}
+		if !slices.Contains(names, asideWhy) && strings.Contains(got.Why, "; and ") {
+			t.Errorf("%s: %s (%q); want no leaf set aside named where none was", what, got.Kind, got.Why)
+		}
+	}
+	aside := func(at time.Time, n int, recorded, live string) Earlier {
+		payload := RawOf(&models.Mock{Name: "mock-9", Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}, true)
+		return Earlier{Mock: "mock-9", At: at, Payload: payload.ServedAs(n), Seen: []Seen{
+			{Side: Response, Leaf: Leaf{Path: "body.at", Type: String, Value: recorded}, Live: live},
+		}}
+	}
+
+	// Moved: mock-8's request id held "48d1" of the recorded value, and F
+	// gave another id there, which the value took none of the words of
+	// (TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNoneOfIt).
+	const moved = "a word of its recorded value (its characters 20 to 23) stands in mock-8 at body.cmd.documents.0._id, where record's full round gave the application another value, which the value took none of the words of: a copy moves with its source, so the value is no copy of it"
+	before := eRecAt.Add(-50 * time.Millisecond)
+	movedAt := func(n int) Earlier {
+		return Earlier{Mock: "mock-8", At: before, Payload: eLeaf(before, n, "", "").Payload, Seen: []Seen{
+			{Side: Request, Leaf: Leaf{Path: "body.cmd.documents.0._id", Type: String, Value: chanceSrcRec}, Live: chanceSrcLive},
+		}}
+	}
+	echo := []Leaf{{Path: "rows[0][2]", Noise: "rows[0][2]", Type: String, Value: chanceValRec}}
+	// F gave the leaf the recorded value with another word after it.
+	const grown = chanceValRec + " zzzz"
+	for _, row := range []struct {
+		what    string
+		earlier []Earlier
+		kind    Kind
+		names   []string
+	}{
+		{"moved, then the leaf, served in that order", []Earlier{movedAt(6), aside(before.Add(10*time.Millisecond), 7, chanceValRec, grown)}, KindEcho, []string{moved, asideWhy, echoLearned}},
+		{"moved, then the leaf, F serving the leaf first", []Earlier{movedAt(7), aside(before.Add(10*time.Millisecond), 6, chanceValRec, grown)}, KindUnaccounted, []string{moved, asideWhy, order}},
+		{"moved alone", []Earlier{movedAt(6)}, KindEcho, []string{moved, echoLearned}},
+	} {
+		check(row.what, classifyF(t, chanceValRec, chanceValLive, row.earlier, nil, echo), row.kind, row.names)
+	}
+
+	// Chance: "48d1" of another test's message id, which both runs gave the
+	// application as recorded (TestAChanceWordOfAnotherTestsAnswerIsLearnedAsVarying).
+	const (
+		p        = "body.appId"
+		srcID    = "bb7ed9ee-670e-48d1-982f-b54b2b73982f"
+		chance   = "5c0e9a7b-1f2d-48d1-9a3b-c4d5e6f70812" // the recorded appId: "48d1" by chance
+		other    = "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5" // the appId F saw
+		grownBy  = chance + " zzzz"                       // the leaf as F gave it
+		byChance = "a word of its recorded value (its characters 15 to 18) stands in mock-31, which the recording and record's full round both gave the application at the same fields before the call, and the value record's full round saw lacks that word, and no word of it that changed, but for a read of the clock, stands in any place either run gave the application before the call: an application that copied the word would have copied it in both runs, so the value holds it by chance"
+	)
+	src := receiveOf("mock-31", srcID, r1Insert.Add(-time.Minute))
+	near := r1Insert.Add(-50 * time.Millisecond)
+	for _, row := range []struct {
+		what    string
+		n       int // mock-31's serve
+		earlier []Earlier
+		kind    Kind
+		names   []string
+	}{
+		{"by chance, then the leaf, served in that order", 3, []Earlier{aside(near, 4, chance, grownBy)}, KindEcho, []string{byChance, asideWhy, echoLearned}},
+		{"by chance, then the leaf, F serving the leaf first", 5, []Earlier{aside(near, 4, chance, grownBy)}, KindUnaccounted, []string{byChance, asideWhy, order}},
+		{"by chance alone", 3, nil, KindEcho, []string{byChance, echoLearned}},
+	} {
+		dc := clockedDrifts()
+		x := dc.RawOf(src, true).ServedAs(row.n).ServedAsRecorded().OfAnotherTest()
+		resp := []Leaf{{Path: "body.id", Noise: "body.id", Type: String, Value: chance}}
+		check(row.what, ClassifyFollowing(dc, []string{p}, strLeaf(p, other), strLeaf(p, chance), r1Insert, row.earlier, []Raw{x}, resp, nil, nil)[0], row.kind, row.names)
 	}
 }

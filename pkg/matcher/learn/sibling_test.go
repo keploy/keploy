@@ -328,25 +328,31 @@ func TestAnEqualStampBesideASiblingFHadNotServedIsAnEcho(t *testing.T) {
 			}
 		}
 	}
-	// A leaf set aside is named in the refusal wherever it stands, beside
-	// the sibling the search went past first too: it is what refuses the
-	// echo there.
-	const asideWhy = "its recorded value stands whole in mock-8 at body.at"
+	// A leaf set aside is named in the refusal wherever it stands, after
+	// the sibling the search went past first too (follows.setAside): it is
+	// what refuses the echo there, and the sibling stays named first.
+	const (
+		asideWhy = "its recorded value stands whole in mock-8 at body.at"
+		sibAt    = "its recorded value stands whole in mock-17 at "
+		sibWhy   = ", which the application sent there and record's full round had not served before this call"
+		sibThen  = "so the value is no copy of it; and " + asideWhy
+	)
 	for _, row := range []struct {
 		what    string
 		earlier []Earlier
 		raw     []Raw
+		names   []string // what the reason names, in this order
 	}{
-		{"no role stated", nil, []Raw{unserved}},
-		{"stated unread with another value", nil, []Raw{unserved.Sibling(role("", other))}},
-		{"learned as noise", nil, []Raw{unserved.Sibling(role(KindNoise, same))}},
-		{"beside an unread sibling, an unserved recording that is none", nil, []Raw{unserved16, unserved.Sibling(role("", same))}},
-		{"a sibling F served as recorded, stated unread", nil, []Raw{asRec.Sibling(role("", same))}},
-		{"a sibling F served as recorded, learned as an echo", nil, []Raw{asRec.Sibling(role(KindEcho, same))}},
-		{"two siblings F served as recorded, both unread", nil, []Raw{asRec.Sibling(role("", same)), asRec17.Sibling(role("", same))}},
-		{"a leaf set aside alone", []Earlier{asideLeaf}, nil},
-		{"an unserved sibling stated unread, beside a leaf set aside", []Earlier{asideLeaf}, []Raw{unserved.Sibling(role("", same))}},
-		{"an unserved sibling learned as an echo, beside a leaf set aside", []Earlier{asideLeaf}, []Raw{unserved.Sibling(role(KindEcho, same))}},
+		{"no role stated", nil, []Raw{unserved}, nil},
+		{"stated unread with another value", nil, []Raw{unserved.Sibling(role("", other))}, nil},
+		{"learned as noise", nil, []Raw{unserved.Sibling(role(KindNoise, same))}, nil},
+		{"beside an unread sibling, an unserved recording that is none", nil, []Raw{unserved16, unserved.Sibling(role("", same))}, nil},
+		{"a sibling F served as recorded, stated unread", nil, []Raw{asRec.Sibling(role("", same))}, nil},
+		{"a sibling F served as recorded, learned as an echo", nil, []Raw{asRec.Sibling(role(KindEcho, same))}, nil},
+		{"two siblings F served as recorded, both unread", nil, []Raw{asRec.Sibling(role("", same)), asRec17.Sibling(role("", same))}, nil},
+		{"a leaf set aside alone", []Earlier{asideLeaf}, nil, []string{asideWhy}},
+		{"an unserved sibling stated unread, beside a leaf set aside", []Earlier{asideLeaf}, []Raw{unserved.Sibling(role("", same))}, []string{sibAt, sibWhy, sibThen}},
+		{"an unserved sibling learned as an echo, beside a leaf set aside", []Earlier{asideLeaf}, []Raw{unserved.Sibling(role(KindEcho, same))}, []string{sibAt, sibWhy, sibThen}},
 	} {
 		got := callIn(row.earlier, row.raw...)
 		for _, p := range []string{"bind.$3", "bind.$4"} {
@@ -358,8 +364,8 @@ func TestAnEqualStampBesideASiblingFHadNotServedIsAnEcho(t *testing.T) {
 			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, echoSetAside+"an instant of it changed") {
 				t.Errorf("FALSE GREEN? %s: %s learned %s from %q (%s); want the echo refused beside a source set aside, as before", row.what, p, ln.Kind, ln.From.Mock, ln.Why)
 			}
-			if row.earlier != nil && !strings.Contains(ln.Why, asideWhy) {
-				t.Errorf("%s: %s refused (%s); want the reason to name the leaf set aside (%q)", row.what, p, ln.Why, asideWhy)
+			if !namesInOrder(ln.Why, row.names) {
+				t.Errorf("%s: %s refused (%s); want the reason to name, in this order, %q", row.what, p, ln.Why, row.names)
 			}
 			if row.earlier == nil && strings.Contains(ln.Why, "; and ") {
 				t.Errorf("%s: %s refused (%s); want the reason to name no leaf set aside where none was", row.what, p, ln.Why)
