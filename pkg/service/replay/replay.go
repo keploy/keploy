@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -128,6 +129,19 @@ func mapAppErrorToTestSetStatus(appErr models.AppError) (models.TestSetStatus, b
 	default:
 		return models.TestSetStatusAppHalted, true
 	}
+}
+
+// neverReadyStatus is the status of a set whose wait for its application
+// ended without it ready, from the application's run's error (appErr, the
+// zero value when its run had not returned): the status its exit maps to,
+// and exited, when it exited; the user's stop otherwise (no error, or the
+// run's cancellation).
+func neverReadyStatus(appErr models.AppError) (status models.TestSetStatus, exited bool) {
+	status, exited = mapAppErrorToTestSetStatus(appErr)
+	if !exited || appErr == (models.AppError{}) {
+		return models.TestSetStatusUserAbort, false
+	}
+	return status, true
 }
 
 func resolveTestSetStatus(cmdType utils.CmdType, current, derived models.TestSetStatus, err error) (models.TestSetStatus, bool) {
@@ -705,6 +719,9 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// agent's, the app's, the daemons', a compose project's down) moves it,
 	// and the run's drains below wait while it moves.
 	ctx, teardown := utils.NewTeardownScope(ctx)
+	// The pid of the application keploy starts (a native command's), for a
+	// wait on it to name the ports it listens on (pkg.SayStillWaiting).
+	ctx = utils.WithAppPID(ctx)
 
 	// The exit code, recorded on EVERY way out of this function.
 	//
@@ -1870,7 +1887,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// runTestSetCtx (the app watchers below, or Start's group): a test
 		// request it refuses waits for its address to accept, and only
 		// that exit or keploy's stop ends the wait.
-		runTestSetCtx = pkg.EndsWithApp(runTestSetCtx)
+		runTestSetCtx = utils.WithAppPID(pkg.EndsWithApp(runTestSetCtx))
 	}
 
 	// EVERY RECORDED VERDICT, for the reporter -- which is a different set from
@@ -2175,6 +2192,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testSetStatusByErrChanMu.RLock()
 		defer testSetStatusByErrChanMu.RUnlock()
 		return lastAppErr
+	}
+	// neverReady is the set's end when the wait for its application to be
+	// ready ended without it (appReady, nothing said why): the application
+	// keploy started for the set exited first (its run set lastAppErr before
+	// its exit cancelled runTestSetCtx), and the set fails as an exit does,
+	// saying so; else the user stopped keploy.
+	neverReady := func() (models.TestSetStatus, error) {
+		appErr := getLastAppErr()
+		status, exited := neverReadyStatus(appErr)
+		if !exited {
+			return status, context.Canceled
+		}
+		r.logger.Error("the application exited before it accepted a connection: no test of the test-set was sent",
+			zap.String("testSetID", testSetID), zap.String("exit", appErr.Error()))
+		return status, fmt.Errorf("the application exited before it accepted a connection: %w", appErr)
 	}
 	// stopAppBeforeSetEnd, under the proven switch, stops the application
 	// keploy started for this set as the set's teardown does (an interrupt,
@@ -2673,7 +2705,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if !waitsForApp(serveTest, r.isFirstTestSet) {
 			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
 		} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, true, serveTest && !r.isFirstTestSet && composeRestart == nil); !ready && why == "" {
-			return models.TestSetStatusUserAbort, context.Canceled
+			return neverReady()
 		} else if !ready {
 			notReady = why
 		}
@@ -2868,7 +2900,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if !waitsForApp(serveTest, r.isFirstTestSet) {
 				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
 			} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, true, serveTest && !r.isFirstTestSet); !ready && why == "" {
-				return models.TestSetStatusUserAbort, context.Canceled
+				return neverReady()
 			} else if !ready {
 				notReady = why
 			}
@@ -9107,6 +9139,7 @@ func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase
 	if pkg.IsUnreachableAppPort(origErr) {
 		return nil, false, nil, nil
 	}
+	said := false
 	for attempt := 1; attempt <= maxResetResends; attempt++ {
 		if ctx.Err() != nil {
 			return nil, false, nil, nil
@@ -9127,7 +9160,7 @@ func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase
 		// endpoint the request dials) so we re-send only once the app/proxy is
 		// ready, not blindly. Best effort: if we can't determine a probeable
 		// target we proceed — the bounded attempts still protect us.
-		r.waitForResetResendReady(ctx, testCase, testSetID)
+		r.waitForResetResendReady(ctx, testCase, testSetID, &said)
 
 		r.logger.Warn("test request reset by app/proxy before any mock was consumed; re-sending — the request was never processed, so this is not a retry of an assertion",
 			zap.Int("attempt", attempt),
@@ -9198,7 +9231,17 @@ func (r *Replayer) resetResendUnsafe(ctx context.Context) (bool, []models.MockSt
 // mid-response. For a non-HTTP or unresolvable target it falls back to the docker
 // published host-port TCP gate (no-op for native apps / unmapped publishes). On
 // timeout it returns and lets the bounded re-send attempts run.
-func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models.TestCase, testSetID string) {
+//
+// When keploy started the application (pkg.AppExitEnds: its exit, a
+// container's included, or keploy's stop ends ctx), the HTTP-level wait has no
+// time limit: an application still starting behind docker's published port
+// resets the request through docker's proxy instead of refusing it, and is
+// waited for until it answers, as a refused request is (said once per request,
+// said tells; then every so often while it waits, pkg.SayStillWaiting). A
+// reset after it answered still counts toward maxResetResends. The resolution
+// of the target, and the TCP gate on the published port (docker's proxy
+// accepts there before the application does), keep resetResendReadyTimeout.
+func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models.TestCase, testSetID string, said *bool) {
 	// The same opt-out as the pre-test gate, and this path needs it more,
 	// not less. Its trigger is a transport-level reset — which, behind a
 	// kubectl port-forward, is exactly what a dying forward produces.
@@ -9214,7 +9257,18 @@ func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models
 	defer cancel()
 
 	if scheme, host, port, ok := resolveProbeTarget(wctx, r.config.Test, testCase, testSetID, r.logger, publishedPortsOf(r.logger, r.instrumentation).of(testSetID)); ok {
-		if err := waitForHTTPServing(wctx, scheme, host, port); err != nil {
+		serveCtx := wctx
+		if pkg.AppExitEnds(ctx) {
+			serveCtx = ctx
+			addr := net.JoinHostPort(host, port)
+			if !*said {
+				*said = true
+				r.logger.Info(fmt.Sprintf("the test request was reset at %s before the application took it: waiting for the application to answer HTTP there, then sending it again. The wait ends when it does, when the application exits, or when keploy is stopped", addr),
+					zap.String("testSetID", testSetID), zap.String("testCaseID", testCase.Name))
+			}
+			defer pkg.SayStillWaiting(ctx, r.logger, "answer HTTP", addr, time.Now())()
+		}
+		if err := waitForHTTPServing(serveCtx, scheme, host, port); err != nil {
 			r.logger.Debug("app not serving HTTP before reset re-send; re-sending anyway",
 				zap.String("host", host), zap.String("port", port), zap.Error(err))
 		}

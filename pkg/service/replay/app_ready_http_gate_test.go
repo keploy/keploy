@@ -855,7 +855,7 @@ func TestWaitForResetResendReady_HonoursTheDisableFlag(t *testing.T) {
 					Kind:    models.HTTP,
 					HTTPReq: models.HTTPReq{URL: "http://" + host + ":" + port + "/x"},
 				},
-				"test-set-0")
+				"test-set-0", new(bool))
 
 			made := conns.Load()
 			if tc.disabled && made != 0 {

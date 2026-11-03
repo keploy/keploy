@@ -624,7 +624,7 @@ func gateOnAppAddress(ctx context.Context, logger *zap.Logger, cfg *config.Confi
 // and what for.
 func waitForAccept(ctx context.Context, logger *zap.Logger, label, host, port string) error {
 	addr := net.JoinHostPort(host, port)
-	return pkg.WaitForAccept(ctx, addr, func(err error) {
+	return pkg.WaitForAccept(ctx, logger, addr, func(err error) {
 		logger.Info(fmt.Sprintf("waiting for the application to accept a connection on %s before the first test; the wait ends when it does, when the application exits, or when keploy is stopped", addr),
 			zap.String("gate", label), zap.Error(err))
 	})

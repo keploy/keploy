@@ -206,8 +206,8 @@ func TestWaitForAcceptSaysOnceAndEndsOnlyByAcceptOrContext(t *testing.T) {
 	addr := refusingAddr(t)
 	said := 0
 	done := make(chan error, 2)
-	go func() { done <- WaitForAccept(context.Background(), addr, func(error) { said++ }) }()
-	go func() { done <- WaitForAccept(context.Background(), addr, nil) }()
+	go func() { done <- WaitForAccept(context.Background(), zap.NewNop(), addr, func(error) { said++ }) }()
+	go func() { done <- WaitForAccept(context.Background(), nil, addr, nil) }()
 	select {
 	case err := <-done:
 		t.Fatalf("the wait ended (%v) before %s accepted a connection", err, addr)
@@ -231,7 +231,7 @@ func TestWaitForAcceptSaysOnceAndEndsOnlyByAcceptOrContext(t *testing.T) {
 	ended, cancel := context.WithCancel(context.Background())
 	cancel()
 	calls := 0
-	if err := WaitForAccept(ended, refusingAddr(t), func(error) { calls++ }); !errors.Is(err, context.Canceled) {
+	if err := WaitForAccept(ended, zap.NewNop(), refusingAddr(t), func(error) { calls++ }); !errors.Is(err, context.Canceled) {
 		t.Errorf("on an ended context: want its error, got %v", err)
 	}
 	if calls != 0 {

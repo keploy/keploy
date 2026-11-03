@@ -217,6 +217,9 @@ type answerWatch struct {
 	hasBody bool
 	// waits is how many waits on the app are in flight (waiting).
 	waits int
+	// held is how many waits of keploy's own are in flight
+	// (holdAnswerStall): none of the time accrues while one is.
+	held int
 
 	stalled  atomic.Bool
 	answered atomic.Bool
@@ -260,10 +263,11 @@ func (w *answerWatch) run() {
 		case <-w.meter.Wait():
 		}
 		w.mu.Lock()
-		if w.waits == 0 || !w.meter.Expired() {
+		if w.waits == 0 || w.held > 0 || !w.meter.Expired() {
 			// Keploy is not waiting on the app (the time does not
-			// accrue: waiting starts the stall again), or the grace has
-			// not passed.
+			// accrue: waiting starts the stall again), it waits for an
+			// event of its own (holdAnswerStall: its end starts the stall
+			// again), or the grace has not passed.
 			w.mu.Unlock()
 			continue
 		}
@@ -381,7 +385,33 @@ func (w *answerWatch) bind(ctx context.Context) context.Context {
 	w.mu.Lock()
 	w.release = cancel
 	w.mu.Unlock()
-	return ctx
+	return context.WithValue(ctx, answerWatchKey{}, w)
+}
+
+type answerWatchKey struct{}
+
+// holdAnswerStall says keploy, on the exchange whose context bind made,
+// waits from now until the returned func is called for an event of its own
+// (a refused request's address to accept a connection, waitToReSend), not
+// on the app's answer: the stall does not accrue during that wait, and
+// starts again at its end. A no-op on a context no watch bound.
+func holdAnswerStall(ctx context.Context) func() {
+	w, _ := ctx.Value(answerWatchKey{}).(*answerWatch)
+	if w == nil {
+		return func() {}
+	}
+	w.mu.Lock()
+	w.held++
+	w.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			w.mu.Lock()
+			w.held--
+			w.meter.Reset()
+			w.mu.Unlock()
+		})
+	}
 }
 
 // answering says the app's answer began (its response headers came):

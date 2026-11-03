@@ -1008,10 +1008,14 @@ const acceptPollInterval = 250 * time.Millisecond
 // WaitForAccept dials addr over TCP until it accepts a connection, which it
 // closes at once. Only ctx ends the wait: it returns nil once addr accepted,
 // or ctx's error. refused, when not nil, is called once, with the first
-// dial's error, when that dial is not accepted.
-func WaitForAccept(ctx context.Context, addr string, refused func(error)) error {
+// dial's error, when that dial is not accepted; from then on the wait says
+// every stillWaitingEvery that it still waits (SayStillWaiting).
+func WaitForAccept(ctx context.Context, logger *zap.Logger, addr string, refused func(error)) error {
 	dialer := net.Dialer{Timeout: 800 * time.Millisecond}
+	began := time.Now()
 	said := false
+	still := func() {}
+	defer func() { still() }()
 	for {
 		conn, err := dialer.DialContext(ctx, "tcp", addr)
 		if err == nil {
@@ -1021,9 +1025,12 @@ func WaitForAccept(ctx context.Context, addr string, refused func(error)) error 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if !said && refused != nil {
+		if !said {
 			said = true
-			refused(err)
+			if refused != nil {
+				refused(err)
+			}
+			still = SayStillWaiting(ctx, logger, "accept a connection", addr, began)
 		}
 		retry := time.NewTimer(acceptPollInterval)
 		select {
@@ -1035,11 +1042,80 @@ func WaitForAccept(ctx context.Context, addr string, refused func(error)) error 
 	}
 }
 
+// stillWaitingEvery is how often a wait for the application with no time
+// limit says it is still waiting. A var only so that a test can shorten it.
+var stillWaitingEvery = 30 * time.Second
+
+// SayStillWaiting logs, every stillWaitingEvery until the returned stop is
+// called or ctx ends, that keploy still waits for the application to do what
+// on addr, and how long it has waited since began: a wait that only the
+// application's exit or keploy's stop ends says what it waits on. A log
+// line, never a verdict. When the application keploy started listens on
+// other ports but not on addr's (utils.AppListenPorts), the line names them,
+// so a wrong port is plain. A nil logger says nothing.
+func SayStillWaiting(ctx context.Context, logger *zap.Logger, what, addr string, began time.Time) (stop func()) {
+	if logger == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		tick := time.NewTicker(stillWaitingEvery)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case now := <-tick.C:
+				logger.Info(stillWaitingLine(ctx, what, addr, now.Sub(began)))
+			}
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
+}
+
+// stillWaitingLine is SayStillWaiting's line.
+func stillWaitingLine(ctx context.Context, what, addr string, waited time.Duration) string {
+	line := fmt.Sprintf("still waiting for the application to %s on %s: %s so far. The wait ends when it does, when the application exits, or when keploy is stopped", what, addr, waited.Round(time.Second))
+	if other := otherListenPorts(ctx, addr); other != "" {
+		line += ". " + other
+	}
+	return line
+}
+
+// otherListenPorts says which ports the application keploy started listens
+// on when they do not include addr's: "" when they do, or when they are not
+// known.
+func otherListenPorts(ctx context.Context, addr string) string {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ""
+	}
+	ports := utils.AppListenPorts(ctx)
+	if len(ports) == 0 {
+		return ""
+	}
+	listed := make([]string, len(ports))
+	for i, p := range ports {
+		listed[i] = strconv.Itoa(p)
+		if listed[i] == port {
+			return ""
+		}
+	}
+	return fmt.Sprintf("The application listens on %s, not on %s", strings.Join(listed, ", "), port)
+}
+
 // waitToReSend is the wait of a test request refused at addr on a context
 // EndsWithApp marked: until addr accepts a connection, or ctx ends. said
-// keeps the line that says so to one per request.
+// keeps the line that says so to one per request. keploy waits here for an
+// event of its own choosing, not on the application's answer: under the
+// proven switch the answer stall rule does not count the wait
+// (holdAnswerStall).
 func waitToReSend(ctx context.Context, logger *zap.Logger, what, addr string, said *bool) error {
-	return WaitForAccept(ctx, addr, func(err error) {
+	defer holdAnswerStall(ctx)()
+	return WaitForAccept(ctx, logger, addr, func(err error) {
 		if *said {
 			return
 		}
