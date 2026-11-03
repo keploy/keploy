@@ -153,7 +153,7 @@ func TestRedactFieldDiffs(t *testing.T) {
 		{Path: "body.assertion", Expected: jwtSecret, Actual: "x"},                   // value-shape backstop
 		{Path: "body.qty", Expected: "2", Actual: "5"},                               // benign -> must remain
 	}
-	redactFieldDiffs(diffs, redactedPlacesOf(nil, nc))
+	redactFieldDiffs(diffs, redactedPlacesOf(nil, nc), "")
 	if diffs[0].Expected != valueRedacted || diffs[0].Actual != valueRedacted {
 		t.Errorf("keyword path not redacted: %+v", diffs[0])
 	}

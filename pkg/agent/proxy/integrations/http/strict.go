@@ -621,8 +621,8 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest string, d
 	diffs := fieldDiffs(diag.differs)
 	differs := differsOf(diag.differs)
 	places := redactedPlacesOf(closest.Spec.HTTPReq, closest.Noise)
-	redactFieldDiffs(diffs, places)
-	r := mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.Path)).
+	redactFieldDiffs(diffs, places, request.URL.EscapedPath())
+	r := mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.EscapedPath())).
 		WithDestination(dest).
 		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).

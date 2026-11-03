@@ -893,7 +893,9 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string, urlNoise []string, autoDyna
 		return false
 	}
 	if ce := h.Logger.Check(zap.DebugLevel, "parsed URL"); ce != nil {
-		ce.Write(zap.Any("parsed URL", mockPath), zap.Any("req path", reqPath))
+		// The call's path in its shape: the mock's patterns, which say
+		// which segment holds a secret, are not at hand here.
+		ce.Write(zap.Any("parsed URL", mockPath), zap.Any("req path", utils.URLPathShape(&url.URL{Path: reqPath})))
 	}
 	if mockPath == reqPath {
 		return true
@@ -1358,8 +1360,11 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		// URL path match
 		if !h.MatchURLPath(mock.Spec.HTTPReq.URL, input.url.Path, urlNoise, autoDynamic) {
 			if ce := h.Logger.Check(zap.DebugLevel, "The url path of mock and request aren't the same"); ce != nil {
+				// The call's path with the segments the mock redacted
+				// written valueRedacted: the call sent its secret there.
 				mockPath, _ := recordedURLPath(mock.Spec.HTTPReq.URL)
-				ce.Write(zap.String("mock name", mock.Name), zap.String("input path", input.url.Path), zap.String("mock path", mockPath))
+				livePath := redactedPlacesOf(mock.Spec.HTTPReq, mock.Noise).decodedPath(input.url.EscapedPath())
+				ce.Write(zap.String("mock name", mock.Name), zap.String("input path", livePath), zap.String("mock path", mockPath))
 			}
 			continue
 		}
@@ -2462,7 +2467,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		// the call is that recording's. Its path shows the segments that
 		// recording redacted redacted.
 		last := diag.answered.lastMock
-		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, placesOf(last).summary(request.Method, request.URL.Path)).
+		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, placesOf(last).summary(request.Method, request.URL.EscapedPath())).
 			WithDestination(dest).
 			WithComparedDestinations(comparedDestinations(diag.pool, diag.candidates)).
 			WithPhase(diag.phase, diag.candidates).
@@ -2628,9 +2633,9 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	// are attached — they (and the Diff string derived from them) are persisted
 	// into the report YAML and the platform API.
 	places := redactedPlacesOf(mockReq, closestMock.Noise)
-	redactFieldDiffs(fieldDiffs, places)
+	redactFieldDiffs(fieldDiffs, places, diffReq.URL.EscapedPath())
 
-	b := mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.Path)).
+	b := mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.EscapedPath())).
 		WithDestination(dest).
 		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).

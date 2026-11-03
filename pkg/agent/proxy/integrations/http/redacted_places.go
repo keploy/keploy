@@ -35,11 +35,18 @@ type redactedPlaces struct {
 	// headers are lowercased header names.
 	headers map[string]bool
 	query   map[string]bool
-	// segments are URL path segments by position, as strictKnown.pathDiffs
-	// counts them (the path's leading "/" dropped).
+	// segments are URL path segments by position, counted on the escaped
+	// path (the path's leading "/" dropped), as a test variable's place
+	// (url.path[i]) counts them: a %2F stays inside its segment, on the
+	// recording's side and on the call's.
 	segments map[int]bool
+	// recordedPath is the recorded URL's escaped path.
+	recordedPath string
 	// body is a recorded body redacted whole.
 	body bool
+	// fieldsIn is how the recorded body was read for its fields: as JSON,
+	// a form or a multipart form.
+	fieldsIn bodyForm
 	// fields are body fields by the name a field diff gives them under
 	// "body.": a JSON field's path with each array position written "[]",
 	// a root array's too ("[].id", as matcher.JSONFieldDiffs and the strict
@@ -83,10 +90,11 @@ func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
 				}
 			}
 		}
-	}
-	for i, seg := range pathSegments(mockURLPath(r.URL)) {
-		if p.noisy(seg) {
-			p.segments[i] = true
+		p.recordedPath = u.EscapedPath()
+		for i, seg := range pathSegments(p.recordedPath) {
+			if p.noisy(seg) || p.noisy(unescapeSegment(seg)) {
+				p.segments[i] = true
+			}
 		}
 	}
 	if p.noisy(r.Body) {
@@ -96,6 +104,7 @@ func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
 	ct := headerValue(r.Header, "Content-Type")
 	switch mediaTypeKey(ct) {
 	case "application/x-www-form-urlencoded":
+		p.fieldsIn = bodyFormURLEncoded
 		for _, seg := range strings.Split(r.Body, "&") {
 			raw, rawValue, _ := strings.Cut(seg, "=")
 			key, err := url.QueryUnescape(raw)
@@ -111,6 +120,7 @@ func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
 			}
 		}
 	case "multipart/form-data":
+		p.fieldsIn = bodyMultipart
 		parts, _ := multipartParts(ct, []byte(r.Body))
 		for _, part := range parts {
 			if p.noisy(string(part.data)) {
@@ -118,6 +128,7 @@ func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
 			}
 		}
 	default:
+		p.fieldsIn = bodyJSON
 		var v interface{}
 		if json.Unmarshal([]byte(r.Body), &v) == nil {
 			p.collectJSON(v, "")
@@ -220,32 +231,69 @@ func bodyFieldName(path []templates.PathSeg) string {
 	return name
 }
 
-// path is a URL path with each segment the recording redacted written
-// valueRedacted.
-func (p redactedPlaces) path(path string) string {
-	if len(p.segments) == 0 {
-		return path
-	}
-	lead := strings.HasPrefix(path, "/")
-	segs := pathSegments(path)
-	for i := range segs {
-		if p.segments[i] {
+// escapedPath is the escaped URL path escaped with each segment the
+// recording redacted written valueRedacted, counted as segments counts them.
+func (p redactedPlaces) escapedPath(escaped string) string {
+	return p.redactPath(escaped, false)
+}
+
+// decodedPath is the escaped URL path escaped decoded, as URL.Path names
+// it, with each segment the recording redacted written valueRedacted: the
+// segments are counted escaped, then the others decoded one by one, so a
+// %2F in a segment neither shifts the segments after it nor splits a
+// redacted one.
+func (p redactedPlaces) decodedPath(escaped string) string {
+	return p.redactPath(escaped, true)
+}
+
+func (p redactedPlaces) redactPath(escaped string, decode bool) string {
+	segs := pathSegments(escaped)
+	for i, seg := range segs {
+		switch {
+		case p.segments[i]:
 			segs[i] = valueRedacted
+		case decode:
+			segs[i] = unescapeSegment(seg)
 		}
 	}
 	out := strings.Join(segs, "/")
-	if lead {
+	if strings.HasPrefix(escaped, "/") {
 		out = "/" + out
 	}
 	return out
 }
 
+// unescapeSegment is an escaped path segment decoded; seg as it is when it
+// does not decode.
+func unescapeSegment(seg string) string {
+	if d, err := url.PathUnescape(seg); err == nil {
+		return d
+	}
+	return seg
+}
+
+// pathValue is a "path" diff's value v, which names a path decoded (URL.Path),
+// with the segments the recording redacted written valueRedacted, read by
+// the escaped path v was decoded from (decodedPath). A v that is not that
+// path decoded cannot have its segments counted, so it is redacted whole
+// when the recording redacted a segment.
+func (p redactedPlaces) pathValue(v, escaped string) string {
+	if v == "" || len(p.segments) == 0 {
+		return v
+	}
+	if decoded, err := url.PathUnescape(escaped); err == nil && decoded == v {
+		return p.decodedPath(escaped)
+	}
+	return valueRedacted
+}
+
 // redactDiff redacts, in place, both values of a field diff at a place the
-// recording redacted; the "path" diff has its redacted segments written
-// valueRedacted, so the segments that differ still show.
-func (p redactedPlaces) redactDiff(d *models.MockFieldDiff) {
+// recording redacted. The "path" diff names the recorded path and the
+// call's, livePath escaped, decoded: each has its redacted segments written
+// valueRedacted (pathValue), so the segments that differ still show.
+func (p redactedPlaces) redactDiff(d *models.MockFieldDiff, livePath string) {
 	if d.Path == "path" {
-		d.Expected, d.Actual = p.path(d.Expected), p.path(d.Actual)
+		d.Expected, d.Actual = p.pathValue(d.Expected, p.recordedPath), p.pathValue(d.Actual, livePath)
 		return
 	}
 	if !p.covers(d.Path) {
@@ -310,11 +358,55 @@ func (p redactedPlaces) redactMultipart(body, contentType string) (string, bool)
 	return b.String(), true
 }
 
-// summary is a miss's summary, "METHOD path", with the path's redacted
-// segments written valueRedacted. path is the live path in the form the
-// summary names it (escaped or not).
-func (p redactedPlaces) summary(method, path string) string {
-	return method + " " + p.path(path)
+// summary is a miss's summary, "METHOD path", the path named decoded
+// (decodedPath) from escaped, the call's escaped path, with the segments
+// the recording redacted written valueRedacted.
+func (p redactedPlaces) summary(method, escaped string) string {
+	return method + " " + p.decodedPath(escaped)
+}
+
+// escapedSummary is summary with the path named escaped (escapedPath).
+func (p redactedPlaces) escapedSummary(method, escaped string) string {
+	return method + " " + p.escapedPath(escaped)
+}
+
+// bodyForm is how a body is read for its fields.
+type bodyForm int
+
+const (
+	bodyJSON bodyForm = iota + 1
+	bodyFormURLEncoded
+	bodyMultipart
+)
+
+// redactFields renders body, the call's, with each field the recording
+// redacted written valueRedacted, when the recording redacted a field: the
+// body is read as the recording's was (fieldsIn). It reports false when the
+// body does not read that way: a field's place cannot be found in it, so it
+// is to be redacted whole.
+func (p redactedPlaces) redactFields(body, contentType string) (string, bool) {
+	switch p.fieldsIn {
+	case bodyJSON:
+		var v interface{}
+		if json.Unmarshal([]byte(body), &v) != nil {
+			return "", false
+		}
+		redactJSONValue(v, p, "")
+		out, err := json.MarshalIndent(v, "", "  ")
+		return string(out), err == nil
+	case bodyFormURLEncoded:
+		if mediaTypeKey(contentType) != "application/x-www-form-urlencoded" {
+			return "", false
+		}
+		// redactQuery redacts a body that does not parse whole itself.
+		return redactQuery(body, p.values, p.field), true
+	case bodyMultipart:
+		if mediaTypeKey(contentType) != "multipart/form-data" {
+			return "", false
+		}
+		return p.redactMultipart(body, contentType)
+	}
+	return "", false
 }
 
 // jsonChildPath is the path of a JSON object's member key under path, in

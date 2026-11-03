@@ -180,7 +180,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// query and body never go to the log, only its shape.
 			if ce := h.Logger.Check(zap.DebugLevel, "decodeHTTP debug logs for input"); ce != nil {
 				ce.Write(zap.String("method", input.method),
-					zap.String("path", input.url.Path),
+					zap.String("path", utils.URLPathShape(input.url)),
 					zap.Strings("header names", headerNames(input.header)),
 					zap.Int("body bytes", len(input.body)))
 			}
@@ -236,7 +236,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				if ce := h.Logger.Check(zap.DebugLevel, "egress passthrough: serving without mock match"); ce != nil {
 					ce.Write(zap.String("mode", string(mode)), zap.String("served", served),
-						zap.String("path", input.url.Path), zap.Any("metadata", utils.GetReqMeta(request)))
+						zap.String("path", utils.URLPathShape(input.url)), zap.Any("metadata", utils.GetReqMeta(request)))
 				}
 				if _, werr := clientConn.Write(out); werr != nil {
 					if ctx.Err() != nil {
@@ -595,7 +595,16 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				noMockBody := "keploy: no matching mock found for this HTTP request\n"
 				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)
-				baseErr := fmt.Errorf("%w for %s %s", ErrMockNotMatched, request.Method, request.URL.Path)
+				// The error names the call as its report does, with the
+				// segments the closest recording redacted written
+				// redacted, or, with no report, by its path's shape: the
+				// proxy logs it at ERROR, and the call may have sent its
+				// secret in its path.
+				call := request.Method + " " + utils.URLPathShape(request.URL)
+				if report != nil {
+					call = report.ActualSummary
+				}
+				baseErr := fmt.Errorf("%w for %s", ErrMockNotMatched, call)
 				missErr := models.NewMockMismatchError(baseErr, report)
 				// The miss is queued for the test that made it before the app
 				// sees the 502. The replay reads a test's misses once the app

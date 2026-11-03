@@ -166,9 +166,10 @@ func ReplacePort(currentURL string, port string) (string, error) {
 	return parsedURL.String(), nil
 }
 
-// GetReqMeta is what a log says about req: its method, its host, its path
-// and the names of its query parameters. Never a query value, a header or
-// the body: those are the application's content (tokens, credentials), and
+// GetReqMeta is what a log says about req: its method, its host, its path's
+// shape (URLPathShape) and the names of its query parameters. Never a path
+// segment, a query value, a header or the body: those are the application's
+// content (a segment may be a token the recording redacted), and
 // logs get pasted into issues. A query part with no "=" is not named either,
 // since it may be a bare token; a bare token that holds "=" (padded base64,
 // ?dG9rZW4=) is named by what comes before its first "=" (dG9rZW4).
@@ -180,12 +181,35 @@ func GetReqMeta(req *http.Request) map[string]string {
 	reqMeta["method"] = req.Method
 	reqMeta["host"] = req.Host
 	if req.URL != nil {
-		reqMeta["path"] = req.URL.Path
+		reqMeta["path"] = URLPathShape(req.URL)
 		if keys := queryKeys(req.URL.RawQuery); len(keys) > 0 {
 			reqMeta["query keys"] = strings.Join(keys, ",")
 		}
 	}
 	return reqMeta
+}
+
+// URLPathShape is u's path in its shape: each segment of the escaped path
+// written {}, an empty one (a trailing "/", "//") kept empty, so it names
+// how many segments the path has and never a value of one. A log made where
+// no recording is at hand names a path this way: keploy does not know there
+// which segment holds a secret the recording redacted. "" for a nil u.
+func URLPathShape(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	escaped := u.EscapedPath()
+	segs := strings.Split(strings.TrimPrefix(escaped, "/"), "/")
+	for i, seg := range segs {
+		if seg != "" {
+			segs[i] = "{}"
+		}
+	}
+	out := strings.Join(segs, "/")
+	if strings.HasPrefix(escaped, "/") {
+		out = "/" + out
+	}
+	return out
 }
 
 // queryKeys are the names of rawQuery's name=value parameters, unescaped,

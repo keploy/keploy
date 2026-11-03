@@ -1350,9 +1350,19 @@ func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, cons
 		}
 		return nil, nil, true, nil
 	}
-	for _, b := range hit.binds {
-		h.Logger.Debug("variable bound", zap.String("variable", b.Name), zap.String("value", b.Value),
-			zap.String("recorded", b.Recorded), zap.String("mock", b.Mock), zap.String("place", b.Place))
+	if ce := h.Logger.Check(zap.DebugLevel, "variable bound"); ce != nil {
+		places := placesOf(hit.mock)
+		for _, b := range hit.binds {
+			// A value bound at a place the recording redacted is the
+			// secret it hid; one at a place that does not read is
+			// redacted too.
+			value := b.Value
+			if at, err := variables.ParseAddress(b.Place); err != nil || places.at(at.Place) {
+				value = valueRedacted
+			}
+			h.Logger.Debug("variable bound", zap.String("variable", b.Name), zap.String("value", value),
+				zap.String("recorded", b.Recorded), zap.String("mock", b.Mock), zap.String("place", b.Place))
+		}
 	}
 	if !consume(hit.mock) {
 		return nil, nil, true, nil
@@ -1667,9 +1677,9 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 	var places redactedPlaces
 	if closest != nil {
 		places = redactedPlacesOf(closest.Spec.HTTPReq, closest.Noise)
-		redactFieldDiffs(diffs, places)
+		redactFieldDiffs(diffs, places, request.URL.EscapedPath())
 		// actualKey names the path escaped (buildHTTPMismatchReport).
-		actualKey = places.summary(request.Method, request.URL.EscapedPath())
+		actualKey = places.escapedSummary(request.Method, request.URL.EscapedPath())
 	}
 	b := mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 		WithDestination(dest).
@@ -1712,7 +1722,7 @@ func withRoutePlaces(r *models.MockMismatchReport, request *http.Request, closes
 		// The path escaped, as a place counts it, with the segments the
 		// closest recording redacted written valueRedacted, as the report
 		// it replaces wrote them.
-		r.ActualSummary = placesOf(closest).summary(request.Method, request.URL.EscapedPath())
+		r.ActualSummary = placesOf(closest).escapedSummary(request.Method, request.URL.EscapedPath())
 		r.VariablePlaces = places
 	}
 	return r

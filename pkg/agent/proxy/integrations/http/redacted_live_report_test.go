@@ -4,11 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
@@ -61,6 +67,29 @@ type redactedLiveCase struct {
 	// recording redacted a field of it, so the rendered body is redacted
 	// whole.
 	wholeBody bool
+	// secrets are what the report must not carry: the live value, and its
+	// parts when the call sent it escaped (liveSecret when none).
+	secrets []string
+}
+
+// carried are the secrets of c the report r carries anywhere it persists.
+func (c redactedLiveCase) carried(t *testing.T, r *models.MockMismatchReport) []string {
+	t.Helper()
+	all, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets := c.secrets
+	if len(secrets) == 0 {
+		secrets = []string{liveSecret}
+	}
+	var out []string
+	for _, s := range secrets {
+		if strings.Contains(string(all), s) {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func redactedLiveCases(t *testing.T) []redactedLiveCase {
@@ -107,12 +136,31 @@ func redactedLiveCases(t *testing.T) []redactedLiveCase {
 		{name: "multipart-malformed-header", url: "/x", liveURL: "/x/other", ctype: recMPCT, liveCtype: liveMPCT, hdr: other, liveHdr: liveOther, rec: recMP, live: badHeader, noise: value, wholeBody: true},
 		{name: "multipart-cut-after-delimiter-text", url: "/x", liveURL: "/x/other", ctype: recMPCT, liveCtype: liveMPCT, hdr: other, liveHdr: liveOther, rec: recMP, live: cutAfterDelim, noise: value, wholeBody: true},
 		{name: "query-in-urlparams-only", url: "/x", params: map[string]string{"assertion": "REDACTED_abc"}, liveURL: "/x?assertion=" + liveSecret, ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value},
+		// A repeated parameter whose later recorded value was redacted.
+		{name: "query-repeated", url: "/x?assertion=public1&assertion=REDACTED_abc", params: map[string]string{}, liveURL: "/x?assertion=public1&assertion=" + liveSecret, ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value},
 		{name: "query-in-url-only", url: "/x?assertion=REDACTED_abc", params: map[string]string{}, liveURL: "/x?assertion=" + liveSecret, ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value},
 		// A test variable's place on the path makes the report name the
 		// path escaped, as a place counts it.
 		{name: "path-segment-route-variable", url: "/x/REDACTED_abc/y", liveURL: "/x/" + liveSecret + "/y", ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value, vars: models.MockVariables{"v": {Recorded: "y", Bind: "url.path[2]"}}},
 		{name: "path-segment-escaped-route-variable", url: "/x/REDACTED_abc/y", liveURL: "/x/" + liveSecret + "%2B/y", ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value, vars: models.MockVariables{"v": {Recorded: "y", Bind: "url.path[2]"}}},
 		// The variable's place is the segment the recording redacted.
+		// A %2F in a segment before the redacted one does not shift it,
+		// and a %2F in the secret's own segment does not split it: a place
+		// counts the escaped path's segments, on both sides.
+		{name: "path-segment-after-an-escaped-slash", url: "/a%2Fb/REDACTED_abc/y", liveURL: "/a%2Fb/" + liveSecret + "/y", ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value},
+		{name: "path-segment-after-an-escaped-slash-route-variable", url: "/a%2Fb/REDACTED_abc/y", liveURL: "/a%2Fb/" + liveSecret + "/y", ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value, vars: models.MockVariables{"v": {Recorded: "y", Bind: "url.path[2]"}}},
+		{name: "path-segment-holding-an-escaped-slash", url: "/x/REDACTED_abc/y", liveURL: "/x/zq9Plm%2F3Xw7Rt/y", ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value, secrets: []string{"zq9Plm", "3Xw7Rt"}},
+		{name: "path-segment-holding-an-escaped-slash-route-variable", url: "/x/REDACTED_abc/y", liveURL: "/x/zq9Plm%2F3Xw7Rt/y", ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value, secrets: []string{"zq9Plm", "3Xw7Rt"}, vars: models.MockVariables{"v": {Recorded: "y", Bind: "url.path[2]"}}},
+		// A recorded segment whose pattern matches it decoded.
+		{name: "path-segment-escaped-in-the-recording", url: "/x/REDACTED%20abc/y", liveURL: "/x/" + liveSecret + "/y", ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: []string{`^REDACTED abc$`}},
+		// A live body that does not read as the recording's did, whose
+		// recording redacted a field of it: JSON that does not parse (a
+		// trailing comma, two values), and a form or multipart form sent
+		// as another type.
+		{name: "json-does-not-parse", url: "/x", ctype: jsonCT, hdr: other, liveHdr: liveOther, rec: `{"assertion":"REDACTED_abc","x":"alpha1"}`, live: `{"assertion":"` + liveSecret + `","x":"bravo2",}`, noise: value, wholeBody: true},
+		{name: "json-two-values", url: "/x", ctype: jsonCT, hdr: other, liveHdr: liveOther, rec: `{"assertion":"REDACTED_abc","x":"alpha1"}`, live: `{"assertion":"` + liveSecret + `","x":"bravo2"}` + "\n" + `{"y":1}`, noise: value, wholeBody: true},
+		{name: "form-sent-as-another-type", url: "/x", liveURL: "/x/other", ctype: formCT, liveCtype: "text/plain", hdr: other, liveHdr: liveOther, rec: `assertion=REDACTED_abc&x=alpha1`, live: `assertion=` + liveSecret + `&x=bravo2`, noise: value, wholeBody: true},
+		{name: "multipart-sent-as-another-type", url: "/x", liveURL: "/x/other", ctype: recMPCT, liveCtype: "text/plain", hdr: other, liveHdr: liveOther, rec: recMP, live: liveMP, noise: value, wholeBody: true},
 		{name: "path-segment-at-its-route-variable", url: "/x/REDACTED_abc/y", liveURL: "/x/" + liveSecret + "/y", ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value, vars: models.MockVariables{"v": {Recorded: "REDACTED_abc", Bind: "url.path[1]"}}},
 	}
 }
@@ -195,8 +243,18 @@ func TestMissReportRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
 				for _, d := range r.FieldDiffs {
 					t.Logf("diff %s %s exp=%q act=%q", d.Path, d.Kind, d.Expected, d.Actual)
 				}
-				if strings.Contains(string(all), liveSecret) {
-					t.Errorf("the report carries the live value at a place the recording redacted:\nDiff: %s\nReceivedReq:\n%s\nreport: %s", r.Diff, r.ReceivedReq, all)
+				if got := c.carried(t, r); len(got) > 0 {
+					t.Errorf("the report carries the live value at a place the recording redacted (%q):\nsummary: %s\nDiff: %s\nReceivedReq:\n%s\nreport: %s", got, r.ActualSummary, r.Diff, r.ReceivedReq, all)
+				}
+				// The redacted segment is the one redacted, whole, and the
+				// segment after it still shows.
+				if strings.HasPrefix(c.name, "path-segment") && !strings.HasSuffix(r.ActualSummary, "/"+valueRedacted+"/y") {
+					t.Errorf("the summary does not show the redacted segment, and only it, redacted: %s", r.ActualSummary)
+				}
+				// A redacted place shows valueRedacted on the recording's
+				// side too, the path diff's as well.
+				if strings.Contains(r.Diff, "REDACTED") {
+					t.Errorf("Diff shows the recorded placeholder: %s", r.Diff)
 				}
 				// The rendered recording shows the place redacted too, so
 				// the two sides line up.
@@ -210,6 +268,10 @@ func TestMissReportRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
 					switch {
 					case d.Path == "path" && (!strings.HasPrefix(d.Expected, "/") || !strings.HasPrefix(d.Actual, "/")):
 						t.Errorf("the path diff does not name the paths whole: %+v", d)
+					case d.Path == "path" && strings.HasPrefix(c.name, "path-segment") && (!strings.HasSuffix(d.Expected, "/"+valueRedacted+"/y") || !strings.HasSuffix(d.Actual, "/"+valueRedacted+"/y")):
+						t.Errorf("the path diff does not show the redacted segment, and only it, redacted on both sides: %+v", d)
+					case strings.Contains(d.Expected, "REDACTED"):
+						t.Errorf("a field diff shows the recorded placeholder: %+v", d)
 					case d.Kind == models.DiffKindMissingInLive && d.Actual != "":
 						t.Errorf("a field the live call does not have shows a live value: %+v", d)
 					case d.Kind == models.DiffKindMissingInMock && d.Expected != "":
@@ -305,7 +367,13 @@ func TestAnsweredAndPairedReportsRedactTheLiveValueAtARedactedSegment(t *testing
 				diag := &matchDiag{phase: models.MatchPhaseExhausted, candidates: 1, pool: []*models.Mock{m}, answered: answered}
 				r := newHTTP().buildHTTPMismatchReport(request, []byte(c.live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, nil, diag)
 				noSecret(t, r, true)
-				if r != nil && !strings.HasPrefix(r.ActualSummary, "POST /x/") {
+				if got := c.carried(t, r); len(got) > 0 {
+					t.Errorf("the report carries %q: summary %s", got, r.ActualSummary)
+				}
+				if r != nil && !strings.HasSuffix(r.ActualSummary, "/"+valueRedacted+"/y") {
+					t.Errorf("the summary does not show the redacted segment, and only it, redacted: %s", r.ActualSummary)
+				}
+				if r != nil && !strings.HasPrefix(r.ActualSummary, "POST "+c.liveURL[:2]) {
 					t.Errorf("the summary does not name the call's path: %s", r.ActualSummary)
 				}
 				// A route variable's place is named on the miss.
@@ -327,6 +395,12 @@ func TestAnsweredAndPairedReportsRedactTheLiveValueAtARedactedSegment(t *testing
 				})
 				reportPairing(ctx, in, m, integrations.AnsweredCall{}, false)
 				noSecret(t, r, true)
+				if got := c.carried(t, r); len(got) > 0 {
+					t.Errorf("the report carries %q: summary %s", got, r.ActualSummary)
+				}
+				if r != nil && !strings.HasSuffix(r.ActualSummary, "/"+valueRedacted+"/y") {
+					t.Errorf("the summary does not show the redacted segment, and only it, redacted: %s", r.ActualSummary)
+				}
 			})
 		}
 	}
@@ -455,5 +529,139 @@ func TestVariableMissKeepsWhatTheRecordingDidNotRedact(t *testing.T) {
 	r = h.buildHTTPMismatchReport(makeReq("GET", "/orders/ord-live-9"), nil, db, nil, nil, nil, diag)
 	if r == nil || r.Diff != p.diff() {
 		t.Fatalf("the report's Diff is not the problem's evidence: %+v", r)
+	}
+}
+
+// loggedNone fails t when an entry logs carries one of secrets, in its
+// message or a field.
+func loggedNone(t *testing.T, logs *observer.ObservedLogs, secrets ...string) {
+	t.Helper()
+	for _, e := range logs.All() {
+		for _, s := range secrets {
+			if strings.Contains(e.Message, s) {
+				t.Errorf("log %q carries %q", e.Message, s)
+			}
+			for k, v := range e.ContextMap() {
+				if strings.Contains(fmt.Sprint(v), s) {
+					t.Errorf("log %q field %s carries %q: %v", e.Message, k, s, v)
+				}
+			}
+		}
+	}
+}
+
+// The miss's error, which the proxy logs at Error with the switch off,
+// names the call as its report does, the segment the recording redacted
+// redacted, and no log line of the call carries the secret: the debug lines
+// made where the recording is at hand show it redacted, the others the
+// path's shape. Switch off and on; the secret's segment holds a %2F too.
+func TestMissErrorAndLogsNameTheCallRedacted(t *testing.T) {
+	for _, live := range []string{liveSecret, "zq9Plm%2F3Xw7Rt"} {
+		for _, on := range []bool{false, true} {
+			mode, env := "off", ""
+			if on {
+				mode, env = "on", "1"
+			}
+			t.Run(live+"/"+mode, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, env)
+				m := recorded("m", "/x/REDACTED_abc/y", map[string]string{"Content-Type": "application/json"}, `{"x":"alpha1"}`)
+				m.Noise = []string{`^REDACTED_abc$`}
+				app, proxy := tcpPair(t)
+				t.Cleanup(func() { _ = app.Close(); _ = proxy.Close() })
+				core, logs := observer.New(zap.DebugLevel)
+				h := &HTTP{Logger: zap.New(core)}
+				var reported *models.MockMismatchReport
+				ctx := models.WithMockMismatchReporter(context.Background(), func(err error) {
+					if e, ok := err.(interface {
+						MismatchReport() *models.MockMismatchReport
+					}); ok {
+						reported = e.MismatchReport()
+					}
+				})
+				body := `{"x":"bravo2"}`
+				raw := "POST /x/" + live + "/y?k=v HTTP/1.1\r\nHost: api.example\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
+				done := make(chan error, 1)
+				go func() {
+					done <- h.decodeHTTP(ctx, []byte(raw), proxy, &models.ConditionalDstCfg{Addr: "127.0.0.1:1"}, &mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true}, models.OutgoingOptions{})
+				}()
+				go func() { _, _ = io.Copy(io.Discard, app) }()
+				err := awaitDone(t, done, "decodeHTTP returning")
+				if reported == nil {
+					t.Fatal("the miss was not reported")
+				}
+				want := "POST /x/" + valueRedacted + "/y"
+				if reported.ActualSummary != want {
+					t.Errorf("the report names the call %q, want %q", reported.ActualSummary, want)
+				}
+				// With the switch on the miss is reported, not returned.
+				if !on && (err == nil || !strings.Contains(err.Error(), "for "+want)) {
+					t.Errorf("decodeHTTP = %v, want the miss's error naming the call %q", err, want)
+				}
+				if err != nil && (strings.Contains(err.Error(), "zq9Plm") || strings.Contains(err.Error(), "3Xw7Rt")) {
+					t.Errorf("the miss's error carries the secret: %v", err)
+				}
+				loggedNone(t, logs, "zq9Plm", "3Xw7Rt")
+			})
+		}
+	}
+}
+
+// The "variable bound" debug line shows a value bound at a place the
+// recording redacted redacted, and one bound elsewhere as it is.
+func TestVariableBoundLogRedactsAValueAtARedactedPlace(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const rec = "REDACTED_abc"
+	m := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"`+rec+`","item":"pen"}`, 201, `{}`,
+		models.MockVariables{"orderId": bindV(rec, "body.id"), "item": bindV("pen", "body.item")}), 1)
+	m.Noise = []string{`^REDACTED_abc$`}
+	core, logs := observer.New(zap.DebugLevel)
+	h := newHTTP()
+	h.Logger = zap.New(core)
+	db := &varDb{perTest: []*models.Mock{m}}
+	if ok, _, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":"`+liveBound+`","item":"pencil"}`)); !ok {
+		t.Fatal("the binding call should match")
+	}
+	values := map[string]string{}
+	for _, e := range logs.FilterMessage("variable bound").All() {
+		v, _ := e.ContextMap()["variable"].(string)
+		values[v], _ = e.ContextMap()["value"].(string)
+	}
+	if values["orderId"] != valueRedacted || values["item"] != "pencil" {
+		t.Errorf("logged the bound values as %v, want orderId redacted and item as it is", values)
+	}
+	loggedNone(t, logs, liveBound)
+}
+
+// A variable used at a path segment the recording redacted, after a
+// segment that holds a %2F: the place counts the escaped path, so the miss
+// shows that segment redacted, in its summary and in its Diff.
+func TestVariableMissAfterAnEscapedSlashRedactsTheSegment(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const rec = "REDACTED_abc"
+	noise := []string{`^REDACTED_(abc|def)$`}
+	m1 := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"`+rec+`","item":"pen"}`, 201, `{}`,
+		models.MockVariables{"orderId": bindV(rec, "body.id")}), 1)
+	m1.Noise = noise
+	m2 := at(varMock("mock-2", "GET", "http://store/a%2Fb/"+rec, "", 200, `{}`, models.MockVariables{"orderId": useV(rec, []string{"url.path[1]"})}), 2)
+	m2.Noise = noise
+	h := newHTTP()
+	db := &varDb{perTest: []*models.Mock{m1, m2}}
+	if ok, _, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":"`+liveBound+`","item":"pen"}`)); !ok {
+		t.Fatal("the binding call should match")
+	}
+	in := liveReq("GET", "/a%2Fb/"+liveSecret, "")
+	ok, _, diag := matchVar(t, h, db, in)
+	if ok || diag == nil || diag.variable == nil {
+		t.Fatalf("want a variable miss, got served %v, %+v", ok, diag)
+	}
+	request, _ := http.NewRequest("GET", "http://store/a%2Fb/"+liveSecret, nil)
+	request.Header = in.header.Clone()
+	r := h.buildHTTPMismatchReport(request, nil, db, nil, nil, nil, diag)
+	noSecret(t, r, true)
+	if want := "GET /a%2Fb/" + valueRedacted; r != nil && r.ActualSummary != want {
+		t.Errorf("the miss names the call %q, want %q", r.ActualSummary, want)
+	}
+	if r != nil && !strings.Contains(r.Diff, valueRedacted) {
+		t.Errorf("Diff does not show the segment redacted: %s", r.Diff)
 	}
 }

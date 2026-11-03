@@ -24,7 +24,7 @@ func TestPlacesOfNoMockIsNoPlaces(t *testing.T) {
 		}
 	}()
 	p := placesOf(nil)
-	if p.body || len(p.fields) > 0 || p.path("/x/y") != "/x/y" {
+	if p.body || len(p.fields) > 0 || p.decodedPath("/x/y") != "/x/y" {
 		t.Errorf("placesOf(nil) = %+v, want no places", p)
 	}
 }

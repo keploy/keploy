@@ -261,8 +261,8 @@ func sqsPoll(input *req) bool {
 func reportPairing(ctx context.Context, input *req, x *models.Mock, a integrations.AnsweredCall, repeat bool) {
 	path, dest := "/", input.header.Get("Host")
 	if input.url != nil {
-		if input.url.Path != "" {
-			path = input.url.Path
+		if escaped := input.url.EscapedPath(); escaped != "" {
+			path = escaped
 		}
 		if dest == "" {
 			dest = input.url.Host

@@ -89,9 +89,11 @@ func scrubSecretsInText(s string) string {
 // and the one-line Diff string derived from them — are persisted into the
 // report YAML and the platform API, so raw secrets must never reach them (the
 // whole-request renders are sanitized separately).
-func redactFieldDiffs(diffs []models.MockFieldDiff, places redactedPlaces) {
+//
+// livePath is the call's escaped path, the one its "path" diff names decoded.
+func redactFieldDiffs(diffs []models.MockFieldDiff, places redactedPlaces, livePath string) {
 	for i := range diffs {
-		places.redactDiff(&diffs[i])
+		places.redactDiff(&diffs[i], livePath)
 		sensitive := isSensitiveHeader(diffs[i].Path)
 		if sensitive || places.noisy(diffs[i].Expected) || looksLikeSecretValue(diffs[i].Expected) {
 			diffs[i].Expected = valueRedacted
@@ -115,7 +117,11 @@ func renderMockRequest(mockReq *models.HTTPReq, mockNoise []string) string {
 		header[k] = v
 	}
 	places := redactedPlacesOf(mockReq, mockNoise)
-	return renderRequestPreview(string(mockReq.Method), places.path(mockURLPath(mockReq.URL)), mockQueryString(mockReq), header, mockReq.Body, places)
+	path := mockURLPath(mockReq.URL)
+	if _, err := url.Parse(mockReq.URL); err == nil {
+		path = places.decodedPath(places.recordedPath)
+	}
+	return renderRequestPreview(string(mockReq.Method), path, mockQueryString(mockReq), header, mockReq.Body, places)
 }
 
 // mockQueryString returns the mock's query string, mirroring the matcher's
@@ -143,7 +149,7 @@ func renderLiveRequest(request *http.Request, body []byte, places redactedPlaces
 	for k := range request.Header {
 		header[k] = strings.Join(request.Header.Values(k), ", ")
 	}
-	return renderRequestPreview(request.Method, places.path(request.URL.Path), request.URL.RawQuery, header, string(body), places)
+	return renderRequestPreview(request.Method, places.decodedPath(request.URL.EscapedPath()), request.URL.RawQuery, header, string(body), places)
 }
 
 // mockURLPath extracts just the path from a mock's URL (mocks store full URL
@@ -268,12 +274,21 @@ func redactQuery(rawQuery string, nc *util.NoiseChecker, redacted func(string) b
 // key looks sensitive or the recording redacted its place (regardless of its
 // type), or the value matches the mock's noise patterns — and re-indented one
 // field per line so line diffs align. Form-urlencoded and multipart bodies are
-// redacted per field, the same way; a multipart body that does not read as one
-// is redacted whole when the recording redacted any of its fields. Other
-// non-JSON bodies are redacted wholesale when they match a noise pattern, else
-// returned as-is (the caller length-caps them).
+// redacted per field, the same way. When the recording redacted a field of
+// its body, the call's body is read as the recording's was (redactFields), and
+// one that does not read that way (JSON that does not parse, a multipart form
+// cut short, another type) is redacted whole: the field's live value is in it,
+// at a place that cannot be found. Other non-JSON bodies are redacted
+// wholesale when they match a noise pattern, else returned as-is (the caller
+// length-caps them).
 func redactBody(body, contentType string, places redactedPlaces) string {
 	if places.body {
+		return valueRedacted
+	}
+	if len(places.fields) > 0 {
+		if out, ok := places.redactFields(body, contentType); ok {
+			return out
+		}
 		return valueRedacted
 	}
 	if pkg.IsJSON([]byte(body)) {
@@ -295,9 +310,6 @@ func redactBody(body, contentType string, places redactedPlaces) string {
 	if strings.Contains(ct, "multipart/form-data") {
 		if out, ok := places.redactMultipart(body, contentType); ok {
 			return out
-		}
-		if len(places.fields) > 0 {
-			return valueRedacted
 		}
 	}
 	if places.noisy(body) {
