@@ -70,6 +70,13 @@ type Seen struct {
 	// (unaccounted), as one found there as a word is, never learned as
 	// noise. A body that declares a text media type is read by its words.
 	Undeclared bool
+	// Uncompared: the leaf, a request's, is one its call leaves uncompared
+	// as noise at a replay: keploy.yml declares it, or the learn step
+	// learned it so (in that call, or on the mock before). A value that
+	// follows it is checked against nothing but itself, so the HTTP parser
+	// does not take it to explain a change at a leaf naming the operation
+	// (its identity leaves). Its caller marks it, after Named.
+	Uncompared bool
 }
 
 // Earlier is an HTTP mock the learn step served earlier in the same test,
@@ -770,6 +777,9 @@ type Place struct {
 	// Clock: the learn step learned the leaf as a plain read of the
 	// application's clock (Seen.Clock).
 	Clock bool
+	// Uncompared: the leaf's call leaves it uncompared as noise
+	// (Seen.Uncompared).
+	Uncompared bool
 	// InStartUp: the mock was served in the test set's start-up, before its
 	// first test began (Earlier.StartUp). Only the wording reads it.
 	InStartUp bool
@@ -3903,7 +3913,7 @@ func withoutGave(earlier []Earlier) []Earlier {
 func seenPlace(e Earlier, s Seen, whole bool) Place {
 	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
 		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Gave: e.Gave, Name: s.Name, Clock: s.Clock,
-		InStartUp: e.StartUp, givenWhole: s.Side == Response && whole}
+		Uncompared: s.Uncompared, InStartUp: e.StartUp, givenWhole: s.Side == Response && whole}
 }
 
 // echoedIn are v's changed instants the echo takes for a copy of what the

@@ -222,7 +222,18 @@ func identityHold(class string) LearnHold {
 // leaf naming the operation, which only what explains a change there
 // excuses.
 func learnedNoiseHolds(class string) bool {
-	return identityHold(class) != LearnExplainedOnly
+	return noiseExplains(identityHold(class))
+}
+
+// noiseExplains reports whether what a replay compares with nothing (noise)
+// may explain a change at a leaf the learn step holds hold: anywhere but at
+// a leaf naming the operation (LearnExplainedOnly). It is the one rule for
+// noise an earlier keploy learned at the leaf itself (learnedNoiseHolds)
+// and for a variable whose source leaf is noise (explained): an id that
+// noise passes is still one id, named the same wherever the application
+// uses it; an operation it passes may be any operation.
+func noiseExplains(hold LearnHold) bool {
+	return hold != LearnExplainedOnly
 }
 
 // staleNoiseWhy is why noise already learned at leaf, its field named shape
@@ -250,15 +261,40 @@ func (n learnNoise) holdOf(l learn.Learned) LearnHold {
 // the test gave keploy (given: its key's variable, givenFor), or a read of
 // the application's clock, with or without an offset (Learned.Clock:
 // compared in the call's window). Noise, an echo and anything else explain
-// nothing here: an echo explains only an id (heldLearned).
-func explained(l learn.Learned, given []variables.Binding) bool {
+// nothing here: an echo explains only an id (heldLearned). At a leaf held
+// hold naming the operation (noiseExplains), nor does a variable whose
+// source leaf its call leaves uncompared as noise, declared in keploy.yml
+// or learned (learn.Place.Uncompared, noiseMarked): a replay checks the two
+// values only against each other, so together they may name any operation.
+// At a leaf holding an id it still does: the application names the same id
+// in both calls, whatever the id is.
+func explained(l learn.Learned, given []variables.Binding, hold LearnHold) bool {
 	if _, ok := givenFor(l.Recorded, l.Live, given); ok {
 		return true
 	}
 	if _, ok := l.Clock(); ok {
 		return true
 	}
-	return l.Kind == learn.KindVariable
+	return l.Kind == learn.KindVariable && (!l.From.Uncompared || noiseExplains(hold))
+}
+
+// noiseMarked is e, the exchange a call just served, with each leaf of its
+// request that a replay leaves uncompared as noise marked so
+// (learn.Seen.Uncompared): what the call's learn step learned as noise
+// (noise, by its exact path) and what the mock's comparison excuses (known:
+// keploy.yml's noise, the noise learned onto the mock before, an obfuscated
+// value). A later call's value that follows such a leaf explains no change
+// at a leaf naming the operation (explained).
+func noiseMarked(e learn.Earlier, known learn.Known, noise map[string][]string) learn.Earlier {
+	for i, s := range e.Seen {
+		if s.Side != learn.Request {
+			continue
+		}
+		if excused, _ := known.Excused(s.Leaf); excused || learnedCovers(noise, s.Leaf.Path) {
+			e.Seen[i].Uncompared = true
+		}
+	}
+	return e
 }
 
 // declareHow is the keploy.yml noise that excuses leaf, for a miss to name:

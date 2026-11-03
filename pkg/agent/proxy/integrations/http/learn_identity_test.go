@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -653,5 +654,130 @@ func TestLearnMatchOldLearnedNoiseExcusesAnIdNotAnOperation(t *testing.T) {
 				t.Fatalf("served %v miss %+v: want request_changed naming %s", served, miss, tc.refused)
 			}
 		})
+	}
+}
+
+// A value the application sent in an earlier call explains a change at a
+// leaf naming the operation only where a replay compares that earlier leaf:
+// one its call leaves uncompared as noise, declared in keploy.yml or learned
+// (in that call, or on the mock before), is checked against nothing but the
+// later value, so the two could name any operation together. At a path
+// segment the same value is still followed: both calls name one id.
+func TestLearnMatchAVariableFromNoiseExplainsNoOperation(t *testing.T) {
+	for _, src := range []struct {
+		name     string
+		declared map[string][]string // keploy.yml's request-body noise
+		learned  map[string][]string // noise mock-0 already holds
+	}{
+		{name: "learned as noise in the earlier call"},
+		{name: "learned as noise on the mock before", learned: map[string][]string{"body.next": {}}},
+		{name: "declared noise in keploy.yml", declared: map[string][]string{"next": {}}},
+	} {
+		for _, at := range []struct {
+			name, rec, now string
+			call           func(v string) (string, map[string]string)
+			refused        string
+		}{
+			{name: "an operation header", rec: "AmazonSQS.PurgeQueue", now: "AmazonSQS.DeleteQueue",
+				call:    func(v string) (string, map[string]string) { return "/", map[string]string{"X-Amz-Target": v} },
+				refused: "header.x-amz-target changed, and it says which call this is (an operation header)"},
+			{name: "a path segment", rec: "orders", now: "audit",
+				call: func(v string) (string, map[string]string) { return "/v1/queues/" + v + "/messages", nil }},
+		} {
+			t.Run(src.name+" at "+at.name, func(t *testing.T) {
+				h, _, opts := learnOn(t)
+				n := h.newLearnNoise(opts, src.declared, nil)
+				tr := learn.NewTracker()
+				tr.Begin()
+				first := learnRecorded("mock-0", 0, "POST", "/v1/jobs", `{"next":"`+at.rec+`"}`, nil, `{}`)
+				first.Spec.ReqBodyNoise = src.learned
+				target, header := at.call(at.rec)
+				db := &learnDb{perTest: []*models.Mock{first, learnRecorded("mock-1", time.Second, "POST", target, `{"m":"x"}`, header, `{}`)}}
+				ctx := learn.WithTracker(context.Background(), tr)
+				if served, miss, err := h.learnMatch(ctx, live("POST", "/v1/jobs", `{"next":"`+at.now+`"}`, nil), db, n, opts); err != nil || served == nil || miss != nil {
+					t.Fatalf("first call: served %v miss %+v err %v", served, miss, err)
+				}
+				target, header = at.call(at.now)
+				served, miss, err := h.learnMatch(ctx, live("POST", target, `{"m":"x"}`, header), db, n, opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if at.refused == "" {
+					if served == nil || miss != nil {
+						t.Fatalf("miss %+v: the value the earlier call sent explains the id", miss)
+					}
+					return
+				}
+				if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, at.refused) {
+					t.Fatalf("served %v miss %+v: want request_changed saying %q", served, miss, at.refused)
+				}
+			})
+		}
+	}
+}
+
+// explained, a variable's half: one whose source leaf a replay compares
+// explains a change anywhere; one whose source leaf it leaves uncompared
+// (learn.Place.Uncompared) explains one at a leaf holding an id, never at
+// one naming the operation, by the leaf's class or by the caller's hold.
+func TestExplainedAVariableFromAnUncomparedLeaf(t *testing.T) {
+	leaf := func(noise string) learn.Learned {
+		return learn.Learned{Kind: learn.KindVariable,
+			Recorded: learn.Leaf{Path: noise, Noise: noise, Type: learn.String, Value: "a"},
+			Live:     learn.Leaf{Path: noise, Noise: noise, Type: learn.String, Value: "b"}}
+	}
+	var n learnNoise
+	for _, tc := range []struct {
+		leaf       string
+		uncompared bool
+		want       bool
+	}{
+		{leaf: "header.x-amz-target", want: true},
+		{leaf: "header.x-amz-target", uncompared: true},
+		{leaf: "body.Action", uncompared: true},
+		{leaf: "url.path.2", uncompared: true, want: true},
+		{leaf: "body.QueueUrl", uncompared: true, want: true},
+	} {
+		l := leaf(tc.leaf)
+		l.From.Uncompared = tc.uncompared
+		if got := explained(l, nil, n.holdOf(l)); got != tc.want {
+			t.Errorf("a variable at %s, its source uncompared %v: explained %v, want %v", tc.leaf, tc.uncompared, got, tc.want)
+		}
+	}
+	n.hold = func(string) LearnHold { return LearnExplainedOnly }
+	l := leaf("body.note")
+	l.From.Uncompared = true
+	if explained(l, nil, n.holdOf(l)) {
+		t.Errorf("a variable from an uncompared leaf at a leaf the caller holds explained-only: explained, want refused")
+	}
+	n.hold = func(string) LearnHold { return LearnExplainedOrEcho }
+	if !explained(l, nil, n.holdOf(l)) {
+		t.Errorf("a variable from an uncompared leaf at a leaf the caller holds explained-or-echo: refused, want explained")
+	}
+}
+
+// noiseMarked marks the request leaves a replay leaves uncompared: learned
+// as noise in the call, or excused by the mock's comparison (keploy.yml's
+// noise, the noise learned onto the mock before); never a compared one, nor
+// a leaf of the answer, whatever its name.
+func TestNoiseMarkedMarksOnlyUncomparedRequestLeaves(t *testing.T) {
+	h, _, opts := learnOn(t)
+	n := h.newLearnNoise(opts, map[string][]string{"declared": {}}, nil)
+	m := learnRecorded("mock-0", 0, "POST", "/v1/jobs", `{}`, nil, `{}`)
+	m.Spec.ReqBodyNoise = map[string][]string{"body.before": {}}
+	seen := func(side learn.Side, path string) learn.Seen {
+		return learn.Seen{Side: side, Leaf: learn.Leaf{Path: path, Noise: path, Type: learn.String, Value: "a"}, Live: "b"}
+	}
+	e := learn.Earlier{Seen: []learn.Seen{
+		seen(learn.Request, "body.now"), seen(learn.Request, "body.before"), seen(learn.Request, "body.declared"),
+		seen(learn.Request, "body.compared"), seen(learn.Response, "body.now"),
+	}}
+	got := map[string]bool{}
+	for _, s := range noiseMarked(e, n.known(m), map[string][]string{"body.now": {}}).Seen {
+		got[string(s.Side)+" "+s.Leaf.Path] = s.Uncompared
+	}
+	want := map[string]bool{"request body.now": true, "request body.before": true, "request body.declared": true, "request body.compared": false, "response body.now": false}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("marked %v, want %v", got, want)
 	}
 }

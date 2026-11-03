@@ -335,7 +335,7 @@ func (n learnNoise) heldLearned(learned []learn.Learned, given []variables.Bindi
 				return l.Recorded.Path + " changed, and keploy learns it only as a value the answer carries back, which the answer does not"
 			}
 		case LearnExplainedOnly, LearnExplainedOrEcho:
-			if explained(l, given) || hold == LearnExplainedOrEcho && l.Kind == learn.KindEcho {
+			if explained(l, given, hold) || hold == LearnExplainedOrEcho && l.Kind == learn.KindEcho {
 				continue
 			}
 			what := "a value the application sent in an earlier call, a value the test gave keploy, or a read of the clock"
@@ -1845,7 +1845,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			}
 			commit()
 			if e, ok := n.servedExchange(tracker.Drifts(), picked, answered, rec, recordedParts(picked), liveShape, input, live, out, own, h.learnedView(picked, plan)); ok {
-				tracker.Served(test, learn.Named(e, plan.vars, plan.clocks))
+				tracker.Served(test, noiseMarked(learn.Named(e, plan.vars, plan.clocks), n.known(picked), plan.noise))
 			}
 			return out, nil, nil
 
@@ -1950,7 +1950,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 					zap.String("type", string(l.Recorded.Type)), zap.String("fromMock", l.From.Mock), zap.String("fromField", l.From.Path), zap.Bool("fromSet", l.From.Run))
 			}
 			if e, ok := n.servedExchange(tracker.Drifts(), m, answered, c.Shape, recordedParts(m), liveShape, input, live, out, own, h.learnedView(m, plan)); ok {
-				tracker.Served(test, learn.Named(e, plan.vars, plan.clocks))
+				tracker.Served(test, noiseMarked(learn.Named(e, plan.vars, plan.clocks), n.known(m), plan.noise))
 			}
 			return out, nil, nil
 		}
