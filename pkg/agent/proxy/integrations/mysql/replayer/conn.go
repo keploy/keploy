@@ -123,6 +123,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	// Set the intial auth plugin
 	decodeCtx.PluginName = handshake.AuthPluginName
 	decodeCtx.ServerCaps = handshake.CapabilityFlags
+	decodeCtx.ServerMariaDBCaps = handshake.MariaDBCapabilities
 	var err error
 
 	// encode the response
@@ -295,6 +296,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 			models.MatchPhaseExhausted, handshakes)
 	}
 	decodeCtx.ClientCaps = hr41.CapabilityFlags // live client caps
+	decodeCtx.ClientMariaDBCaps = hr41.MariaDBCapabilities()
 
 	// NEW: Build a single candidate list:
 	// - If SSL was used: match HR41 within sslMatchedMocks only.

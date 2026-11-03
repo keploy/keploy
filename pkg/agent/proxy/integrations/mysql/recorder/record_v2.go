@@ -233,6 +233,7 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	var serverID string
 	if greeting, ok := handshakePkt.Message.(*mysql.HandshakeV10Packet); ok {
 		decodeCtx.ServerCaps = greeting.CapabilityFlags
+		decodeCtx.ServerMariaDBCaps = greeting.MariaDBCapabilities
 		decodeCtx.ServerGreetings.Store(clientKey, greeting)
 		serverID = greetingServerIdentity(greeting)
 		// A live greeting is the freshest word on what this server is, for any
@@ -604,6 +605,7 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		return res, fmt.Errorf("post-TLS V2: stored greeting is not HandshakeV10")
 	}
 	decodeCtx.ServerCaps = sg.CapabilityFlags
+	decodeCtx.ServerMariaDBCaps = sg.MariaDBCapabilities
 	decodeCtx.ServerGreetings.Store(clientKey, sg)
 	decodeCtx.LastOp.Store(clientKey, mysql.HandshakeV10)
 	decodeCtx.UseSSL = true
@@ -643,13 +645,14 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		// its first packet.
 		logger.Debug("post-TLS V2: existing connection detected (seq=0), skipping auth; entering command phase",
 			zap.Uint16("dstPort", dstPort))
-		if caps, ok := ownClientCaps(source, sslReqPkt); ok {
+		if caps, mariaDBCaps, ok := ownClientCaps(source, sslReqPkt); ok {
 			// The connection's own SSLRequest: a client sends the same
 			// capability flags in its HandshakeResponse41, and the config mock
 			// declares them (buildSyntheticPostTLSConfig), so the connection is
 			// framed by them and nothing is assumed.
 			decodeCtx.ClientCaps = caps
 			decodeCtx.ClientCapabilities = caps
+			decodeCtx.ClientMariaDBCaps = mariaDBCaps
 		} else {
 			// No SSLRequest that is provably this connection's: assume a modern
 			// client (every supported driver negotiates CLIENT_DEPRECATE_EOF),
@@ -2114,7 +2117,7 @@ func assembleTextResultSetV2(ctx context.Context, logger *zap.Logger, sess *supe
 			return ts, err
 		}
 		ts = sess.DestStream.LastReadTime()
-		col, _, err := rowscols.DecodeColumn(ctx, logger, buf)
+		col, _, err := rowscols.DecodeColumn(ctx, logger, buf, decodeCtx.MetadataFraming())
 		if err != nil {
 			return ts, undecodable(logger, sess, seq, "column definition", i, err)
 		}
@@ -2172,7 +2175,7 @@ func assembleBinaryResultSetV2(ctx context.Context, logger *zap.Logger, sess *su
 			return ts, err
 		}
 		ts = sess.DestStream.LastReadTime()
-		col, _, err := rowscols.DecodeColumn(ctx, logger, buf)
+		col, _, err := rowscols.DecodeColumn(ctx, logger, buf, decodeCtx.MetadataFraming())
 		if err != nil {
 			return ts, undecodable(logger, sess, seq, "column definition", i, err)
 		}
@@ -2236,7 +2239,7 @@ func assembleStmtPrepareV2(ctx context.Context, logger *zap.Logger, sess *superv
 			return ts, err
 		}
 		ts = sess.DestStream.LastReadTime()
-		col, _, err := rowscols.DecodeColumn(ctx, logger, buf)
+		col, _, err := rowscols.DecodeColumn(ctx, logger, buf, decodeCtx.MetadataFraming())
 		if err != nil {
 			return ts, undecodable(logger, sess, seq, "parameter definition", i, err)
 		}
@@ -2258,7 +2261,7 @@ func assembleStmtPrepareV2(ctx context.Context, logger *zap.Logger, sess *superv
 			return ts, err
 		}
 		ts = sess.DestStream.LastReadTime()
-		col, _, err := rowscols.DecodeColumn(ctx, logger, buf)
+		col, _, err := rowscols.DecodeColumn(ctx, logger, buf, decodeCtx.MetadataFraming())
 		if err != nil {
 			return ts, undecodable(logger, sess, seq, "column definition", i, err)
 		}

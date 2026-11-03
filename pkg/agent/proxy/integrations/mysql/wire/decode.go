@@ -120,7 +120,7 @@ func handleQueryStmtResponse(ctx context.Context, logger *zap.Logger, packet mys
 			pktType = string(mysql.Text)
 		}
 
-		pkt, err := query.DecodeResultSetMetadata(ctx, logger, payload, rowType)
+		pkt, err := query.DecodeResultSetMetadata(ctx, logger, payload, rowType, decodeCtx.MetadataFraming())
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode result set: %w", err)
 		}
@@ -167,6 +167,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		case *mysql.HandshakeResponse41Packet:
 			// Store the client capabilities to use it later
 			decodeCtx.ClientCapabilities = pkt.CapabilityFlags
+			decodeCtx.ClientMariaDBCaps = pkt.MariaDBCapabilities()
 
 			// Its auth response is the client's credential, or derived
 			// from it: the password in clear under mysql_clear_password
@@ -187,6 +188,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		case *mysql.SSLRequestPacket:
 			// Store the client capabilities to use it later
 			decodeCtx.ClientCapabilities = pkt.CapabilityFlags
+			decodeCtx.ClientMariaDBCaps = pkt.MariaDBCapabilities()
 
 			pktType = mysql.SSLRequest
 			decodeCtx.UseSSL = true

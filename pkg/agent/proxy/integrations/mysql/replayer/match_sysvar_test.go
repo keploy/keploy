@@ -175,7 +175,7 @@ func TestBuildSessionVarResponse_RoundTrip(t *testing.T) {
 	trs, ok := resp.PacketBundle.Message.(*mysql.TextResultSet)
 	require.True(t, ok)
 
-	enc, err := query.EncodeTextResultSet(ctx, log, trs)
+	enc, err := query.EncodeTextResultSet(ctx, log, trs, 0)
 	require.NoError(t, err)
 
 	pos := 0
@@ -184,7 +184,7 @@ func TestBuildSessionVarResponse_RoundTrip(t *testing.T) {
 	require.Equal(t, uint64(1), count, "single-column result set")
 	pos += n
 
-	col, cn, err := rowscols.DecodeColumn(ctx, log, enc[pos:])
+	col, cn, err := rowscols.DecodeColumn(ctx, log, enc[pos:], 0)
 	require.NoError(t, err)
 	require.NotNil(t, col)
 	assert.Equal(t, "transaction_isolation", col.Name)
@@ -233,7 +233,7 @@ func TestASessionVarAnswerBuiltFromAServedProbeLeavesTheProbeAsRecorded(t *testi
 	first, err := wire.EncodeToBinary(ctx, log, probe, c1, dctx)
 	require.NoError(t, err)
 	require.Equal(t, recorded, first)
-	require.NotNil(t, probe.Message.(*mysql.TextResultSet).WireCache().Load(), "the probe's first serve caches its payload")
+	require.NotNil(t, probe.Message.(*mysql.TextResultSet).WireCache().Load(0), "the probe's first serve caches its payload")
 
 	// The probe labels this column "@@sql_mode"; the built answer names it
 	// "sql_mode", so a resolver that renamed the probe's own column would
@@ -241,7 +241,7 @@ func TestASessionVarAnswerBuiltFromAServedProbeLeavesTheProbeAsRecorded(t *testi
 	resp := buildSessionVarResponse(log, pool, "sql_mode", dctx)
 	require.NotNil(t, resp)
 	built := resp.Message.(*mysql.TextResultSet)
-	require.Nil(t, built.WireCache().Load(), "the built answer is a new set: nothing cached")
+	require.Nil(t, built.WireCache().Load(0), "the built answer is a new set: nothing cached")
 	servedBuilt, err := wire.EncodeToBinary(ctx, log, &resp.PacketBundle, c1, dctx)
 	require.NoError(t, err)
 	require.Equal(t, mainServes(resp.PacketBundle), servedBuilt)
