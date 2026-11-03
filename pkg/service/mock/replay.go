@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/record"
+	"go.keploy.io/server/v3/pkg/service/replay"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -264,7 +265,16 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		return err
 	}
 
-	// 3. Put the proxy in mock-serving mode with the miss policy.
+	// 3. Put the proxy in mock-serving mode with the miss policy and
+	// keploy.yml's matching settings, as keploy test's replay hands them:
+	// test.globalNoise's global entries with the set's own test-sets entry
+	// joined in (replay.PrepareMockNoiseConfig: its header, body and
+	// requestbody buckets), so a header or field declared noise there is not
+	// compared, nor a declared header required to be present, when a call is
+	// matched to its mock;
+	// test.disableAutoHeaderNoise; and test.mockNoiseDetection and
+	// test.mockNoiseStrict. keploy mock record's judging rounds are runs of
+	// this replay and take them the same way.
 	if err := m.instrumentation.MockOutgoing(ctx, models.OutgoingOptions{
 		// A session of its own: what an agent kept from an earlier one
 		// recorded consumed is that session's.
@@ -283,6 +293,10 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		PassThroughHosts:          m.config.Record.PassThroughHosts,
 		DisableStatefulMocks:      m.statefulMocksDisabled(),
 		DisableMockCorrelation:    m.config.Test.DisableMockCorrelation,
+		NoiseConfig:               replay.PrepareMockNoiseConfig(m.config.Test.GlobalNoise.Global, m.config.Test.GlobalNoise.Testsets, name),
+		DisableAutoHeaderNoise:    m.config.Test.DisableAutoHeaderNoise,
+		MockNoiseDetection:        m.config.Test.NoiseDetection(),
+		MockNoiseStrict:           m.config.Test.NoiseStrict(),
 		Learn:                     m.learning(),
 		LearnPool:                 m.learningPool(),
 		LearnTests:                m.learningTests(),
