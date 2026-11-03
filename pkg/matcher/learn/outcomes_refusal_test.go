@@ -323,7 +323,7 @@ func TestOutcomeANoiseEditNamesWhatKeployYmlCanSay(t *testing.T) {
 		{Edit{Kind: EditNoiseAtWord, Mock: "mock-300", Field: "header.", Word: 0},
 			[]string{`re-record: no keploy.yml noise names "header."`}},
 	} {
-		w := editWords(c.e)
+		w := EditWords(c.e)
 		for _, s := range c.says {
 			if !strings.Contains(w, s) {
 				t.Errorf("%+v: %q; want it to say %q", c.e, w, s)
@@ -335,6 +335,31 @@ func TestOutcomeANoiseEditNamesWhatKeployYmlCanSay(t *testing.T) {
 		r := rfBase(RefusalChangedShape, "a word was added or dropped", nil, c.e)
 		if back, ok := ParseRefusal(RefusalLine(r)); !ok || !reflect.DeepEqual(back, r) {
 			t.Errorf("%+v: ParseRefusal(%q) = %+v, %v", c.e, RefusalLine(r), back, ok)
+		}
+	}
+}
+
+// EditWords is the one text of an edit: the keploy.yml entry a body, a
+// header and a url noise edit print, word for word, and the undo Decide's
+// learned line and the edit its refusal line print are that text, so an
+// adapter that prints its own line (Mongo's) says what Decide says.
+func TestOutcomeEditWordsIsTheEntryDecidePrints(t *testing.T) {
+	const every = ", or the same under test.globalNoise.test-sets.<the test set>: noise for every mock there"
+	for _, c := range []struct{ field, entry string }{
+		{"body.slot", `in keploy.yml, test.globalNoise.global.requestbody: {"slot": []} (the whole field: keploy.yml names no word)` + every},
+		{"header.X-Ref", `in keploy.yml, test.globalNoise.global.header: {"X-Ref": []} (the whole field: keploy.yml names no word)` + every},
+		{"url.path.2", `in keploy.yml, test.globalNoise.global.url: {"<regex>": []}, a regex of the part of url.path.2 that changes` + every},
+	} {
+		e := Edit{Kind: EditNoiseAtField, Mock: "mock-300", Field: c.field, Word: -1}
+		if got := EditWords(e); got != c.entry {
+			t.Errorf("EditWords(%+v) = %q; want %q", e, got, c.entry)
+		}
+		d := oWord(t, Decide(oInput(c.field, "ref-8c41f2", "ref-e09b7d", nil, nil)), "8c41f2", "e09b7d")
+		if undo := ". Undo: " + c.entry + editSep + EditWords(Edit{Kind: EditReRecord}) + "."; d.Outcome != OutcomeFresh || !strings.HasSuffix(d.Line, undo) {
+			t.Errorf("%s: %s %q; want fresh, its line ending %q", c.field, oDescribe([]Decision{d}), d.Line, undo)
+		}
+		if line := RefusalLine(rfBase(RefusalChangedShape, "a word was added or dropped", nil, e)); !strings.Contains(line, ". Edits: "+c.entry+". refusal=") {
+			t.Errorf("%s: %q; want its edit to print %q", c.field, line, c.entry)
 		}
 	}
 }
