@@ -110,20 +110,31 @@ func (k strictKnown) learnedAt(exact, legacy string) bool {
 	if len(k.learned) == 0 {
 		return false
 	}
-	if _, ok := k.learned[exact]; ok {
+	// A place learned by its words (learn.UncheckedWords) is no noise
+	// whole: wordsAt reads it.
+	if patterns, ok := k.learned[exact]; ok && !learn.IsNoiseWords(patterns) {
 		return true
 	}
 	if legacy != "" && legacy != exact {
-		if _, ok := k.learned[legacy]; ok {
+		if patterns, ok := k.learned[legacy]; ok && !learn.IsNoiseWords(patterns) {
 			return true
 		}
 	}
-	for p := range k.learned {
-		if strings.HasPrefix(exact, p+".") || strings.HasPrefix(exact, p+"[") {
+	for p, patterns := range k.learned {
+		if (strings.HasPrefix(exact, p+".") || strings.HasPrefix(exact, p+"[")) && !learn.IsNoiseWords(patterns) {
 			return true
 		}
 	}
 	return false
+}
+
+// wordsAt reports whether the mock learned the text at exact by its words
+// (learn.UncheckedWords) and live, the call's text there, is rec, the
+// recording's, but for those words (learn.WordsAdmit): only the words that
+// changed when it was learned go unchecked, and the rest is compared.
+func (k strictKnown) wordsAt(exact, rec, live string) bool {
+	words, ok := learn.UncheckedWords(k.learned[exact])
+	return ok && learn.WordsAdmit(rec, live, words)
 }
 
 // redacted reports whether a recorded value is one the obfuscator redacted.
@@ -331,7 +342,7 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 	if len(rs) == len(ls) {
 		same := true
 		for i := range rs {
-			if rs[i] != ls[i] && !k.learnedAt("url.path."+strconv.Itoa(i), "") {
+			if rs[i] != ls[i] && !k.learnedAt("url.path."+strconv.Itoa(i), "") && !k.wordsAt("url.path."+strconv.Itoa(i), rs[i], ls[i]) {
 				same = false
 				break
 			}
@@ -384,7 +395,7 @@ func (k strictKnown) queryDiffs(rec, live url.Values) []strictField {
 		if sameMembers(maskValues(rv, k.n.url), maskValues(lv, k.n.url)) {
 			continue
 		}
-		if len(rv) == 1 && len(lv) == 1 && k.learnedAt("url.query."+name, "") {
+		if len(rv) == 1 && len(lv) == 1 && (k.learnedAt("url.query."+name, "") || k.wordsAt("url.query."+name, rv[0], lv[0])) {
 			continue
 		}
 		out = append(out, shaped(path, shape, models.DiffKindValueChanged, strings.Join(rv, ", "), strings.Join(lv, ", ")))
@@ -457,7 +468,7 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 				continue
 			}
 		}
-		if k.learnedAt(path, "") || k.redacted(rv) {
+		if k.learnedAt(path, "") || k.wordsAt(path, rv, lv) || k.redacted(rv) {
 			continue
 		}
 		switch name {
@@ -597,7 +608,7 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 			out = append(out, shaped(path, shape, models.DiffKindMissingInMock, "", ""))
 			continue
 		}
-		if sameMembers(rv, lv) || k.learnedAt(path, "") || redacted[key] {
+		if sameMembers(rv, lv) || k.learnedAt(path, "") || len(rv) == 1 && len(lv) == 1 && k.wordsAt(path, rv[0], lv[0]) || redacted[key] {
 			continue
 		}
 		out = append(out, shaped(path, shape, models.DiffKindValueChanged, "", ""))
@@ -648,7 +659,7 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 			return append(out, bodyChanged())
 		case bytes.Equal(rp[i].data, lp[i].data):
 			continue
-		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || k.learnedAt(path, "") || k.redacted(string(rp[i].data))):
+		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || k.learnedAt(path, "") || k.wordsAt(path, string(rp[i].data), string(lp[i].data)) || k.redacted(string(rp[i].data))):
 			continue
 		}
 		out = append(out, shaped(path, "body."+shapeKey(rp[i].name), models.DiffKindValueChanged, "", ""))
@@ -761,6 +772,11 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 	default:
 		if learned || sameScalar(r, l) {
 			return
+		}
+		if rs, ok := r.(string); ok {
+			if ls, ok := l.(string); ok && k.wordsAt(exact, rs, ls) {
+				return
+			}
 		}
 		f := shaped(name, shape, models.DiffKindValueChanged, scalarText(r), scalarText(l))
 		if strings.Contains(risk, "[]") {

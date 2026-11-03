@@ -836,6 +836,11 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 			// never excused by noise on the same place.
 			continue
 		}
+		if learn.IsNoiseWords(m.Spec.ReqBodyNoise[k]) {
+			// A text learned by its words is checked as it came too
+			// (strictDiff: strictKnown.wordsAt), its other words compared.
+			continue
+		}
 		r, ok := rec.leaf(place)
 		if !ok {
 			continue
