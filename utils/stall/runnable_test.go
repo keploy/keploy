@@ -648,6 +648,30 @@ func TestSampler_LateSamplesCountOnlyWhatTheProcessRan(t *testing.T) {
 	}
 }
 
+// A sample is late only past two ticks. A sleep of one tick ends a little
+// after it on any host, so a sample one and a half ticks after the last is on
+// time and counts its whole interval, though an idle process ran nothing in
+// it: counted as late, an idle process's clock would move only by what it
+// ran, next to nothing, and a consumer that stopped would not be judged.
+func TestSampler_ASampleUpToTwoTicksAfterTheLastIsOnTime(t *testing.T) {
+	s, src := newFakeSampler(0)
+	src.wall = src.wall.Add(3 * Tick / 2)
+	s.sample()
+	if got := time.Duration(s.ran.Load()); got != 3*Tick/2 {
+		t.Fatalf("an idle process's sample 1.5 ticks after the last counted %v, want its %v of wall time", got, 3*Tick/2)
+	}
+	src.wall = src.wall.Add(2 * Tick)
+	s.sample()
+	if got := time.Duration(s.ran.Load()); got != 7*Tick/2 {
+		t.Fatalf("an idle process's sample 2 ticks after the last brought the clock to %v, want %v", got, 7*Tick/2)
+	}
+	src.wall = src.wall.Add(2*Tick + time.Millisecond)
+	s.sample()
+	if got := time.Duration(s.ran.Load()); got != 7*Tick/2 {
+		t.Fatalf("an idle process's sample past 2 ticks brought the clock to %v, want it unmoved at %v: late, and it ran nothing", got, 7*Tick/2)
+	}
+}
+
 // A process limited to a tenth of a CPU (docker --cpus 0.1, a pod's CPU
 // limit) can run for a tenth of each interval, however punctually the sampler
 // wakes: CFS hands the quota out in per-CPU slices, so one thread can wake on

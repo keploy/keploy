@@ -41,9 +41,15 @@ func TestParse_ReadsTheKernelsAccounts(t *testing.T) {
 	if _, cpu, ok := parseStat([]byte("42 (x) R" + strings.Repeat(" 1", 35) + " x 0 0\n")); ok {
 		t.Fatalf("parseStat read a CPU that is not a number: %q", cpu)
 	}
-	// A CPU line without steal (kernels before 2.6.11) and other lines as long
-	// as a CPU's are skipped.
-	steal := parseSteal([]byte("cpu  1 2 3 4 5 6 7 99 0 0\ncpu0 1 2 3 4 5 6 7 40 0 0\ncpu1 1 2 3 4 5 6 7 59 0 0\ncpu2 1 2 3 4 5 6 7\nintr 5\nsoftirq 1 2 3 4 5 6 7 8 9 10\n"))
+	// Without comm's ')' the fields cannot be counted: the 39th from the
+	// start of the line is not the CPU.
+	if _, cpu, ok := parseStat([]byte("42 x R" + tail)); ok {
+		t.Fatalf("parseStat read a stat without comm's ')': CPU %q", cpu)
+	}
+	// A CPU line without steal (kernels before 2.6.11), one whose steal is not
+	// a number, and other lines as long as a CPU's are skipped: a CPU read as
+	// 0 would charge all of its steal so far at the next read.
+	steal := parseSteal([]byte("cpu  1 2 3 4 5 6 7 99 0 0\ncpu0 1 2 3 4 5 6 7 40 0 0\ncpu1 1 2 3 4 5 6 7 59 0 0\ncpu2 1 2 3 4 5 6 7\ncpu3 1 2 3 4 5 6 7 x 0 0\nintr 5\nsoftirq 1 2 3 4 5 6 7 8 9 10\n"))
 	if len(steal) != 2 || steal["cpu0"] != 40 || steal["cpu1"] != 59 {
 		t.Fatalf("parseSteal = %v; want cpu0 40, cpu1 59", steal)
 	}
@@ -95,6 +101,50 @@ func TestThreadWaits_CountStealAndSeeAWaitInProgress(t *testing.T) {
 	}
 }
 
+// A thread is held off now only if nothing in its account moved since the
+// last read. Any one counter moving says it is not stuck where that read left
+// it: its CPU time alone (it ran on across both reads with no new run), its
+// run delay alone (a wait ended), or its times run alone. Found held instead,
+// a thread that runs on would hold a verdict back for as long as it runs. A
+// thread that moved is held off by its CPU's steal even if it sleeps now: it
+// ran or waited on that CPU since the last read. And a thread first seen at
+// this read started since the last: all of its account is new, so it is
+// taken as moved, and its CPU's steal is charged even before its first run
+// shows (the slow side: the clock only counts less).
+func TestThreadWaits_AThreadThatMovedIsNotHeldOff(t *testing.T) {
+	tick := time.Second / userHZ
+	was := threadStat{exec: 100, delay: 10, runs: 1, runnable: true, cpu: "cpu0"}
+	for _, c := range []struct {
+		name     string
+		now      threadStat
+		wantMost time.Duration
+	}{
+		{"its CPU time alone", threadStat{exec: 200, delay: 10, runs: 1, runnable: true, cpu: "cpu0"}, 20 * tick},
+		{"its run delay alone", threadStat{exec: 100, delay: 10 + int64(5*time.Millisecond), runs: 1, runnable: true, cpu: "cpu0"}, 5*time.Millisecond + 20*tick},
+		{"its times run alone", threadStat{exec: 100, delay: 10, runs: 2, runnable: true, cpu: "cpu0"}, 20 * tick},
+		{"it ran and sleeps now", threadStat{exec: 200, delay: 10, runs: 2, cpu: "cpu0"}, 20 * tick},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var w threadWaits
+			w.account(map[string]threadStat{"1": was}, map[string]int64{"cpu0": 5})
+			if most, held := w.account(map[string]threadStat{"1": c.now}, map[string]int64{"cpu0": 25}); most != c.wantMost || held != 0 {
+				t.Fatalf("got %v, held for %d reads; want %v, the 20 ticks of its CPU's steal included, and none held", most, held, c.wantMost)
+			}
+		})
+	}
+	t.Run("a thread first seen at this read", func(t *testing.T) {
+		var w threadWaits
+		w.account(map[string]threadStat{"1": {exec: 100, delay: 10, runs: 1, cpu: "cpu0"}}, map[string]int64{"cpu0": 5, "cpu1": 5})
+		most, held := w.account(map[string]threadStat{
+			"1": {exec: 100, delay: 10, runs: 1, cpu: "cpu0"},
+			"2": {cpu: "cpu1"}, // not run yet, and stopped
+		}, map[string]int64{"cpu0": 5, "cpu1": 35})
+		if most != 30*tick || held != 0 {
+			t.Fatalf("got %v, held for %d reads; want the 30 ticks of the new thread's CPU's steal, and none held", most, held)
+		}
+	})
+}
+
 // The host gives a virtual CPU back, so its steal shows at its first tick,
 // while the thread on it is still queued behind others: at that read the
 // thread is runnable and has not moved. The steal held it off, and is charged
@@ -131,6 +181,26 @@ func TestThreadWaits_StealThatReadsLowerTakesNoWaitOff(t *testing.T) {
 	}, map[string]int64{"cpu0": 20})
 	if most != 30*time.Millisecond {
 		t.Fatalf("charged %v; want the 30 ms the thread was queued, the lower steal taking none of it off", most)
+	}
+}
+
+// The sampling thread's own wait for a CPU is read from its own account, as
+// the kernel keeps it: read, it is at least what the file showed a moment
+// before. Read as none, the sampler would take every sample that came late
+// for its own wait as late, and count only what the process ran.
+func TestThreadRunDelay_ReadsTheCallingThreadsAccount(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	b, err := os.ReadFile("/proc/thread-self/schedstat")
+	if err != nil {
+		t.Skipf("the kernel keeps no run delay: %v", err)
+	}
+	_, before, _, ok := parseSchedstat(b)
+	if !ok {
+		t.Fatalf("the kernel's schedstat %q did not parse", b)
+	}
+	if got, ok := threadRunDelay(); !ok || got < time.Duration(before) {
+		t.Fatalf("threadRunDelay = %v, %v; want at least the %v the thread's schedstat showed before it", got, ok, time.Duration(before))
 	}
 }
 
