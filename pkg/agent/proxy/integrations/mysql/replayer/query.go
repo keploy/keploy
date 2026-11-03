@@ -152,9 +152,9 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				actualQuery := ""
 				switch msg := req.Message.(type) {
 				case *mysql.QueryPacket:
-					actualQuery = sqlStatementIdentity(msg.Query)
+					actualQuery = miss.places.liveStatement(sqlStatementIdentity(msg.Query))
 				case *mysql.StmtPreparePacket:
-					actualQuery = sqlStatementIdentity(msg.Query)
+					actualQuery = miss.places.liveStatement(sqlStatementIdentity(msg.Query))
 				case *mysql.StmtExecutePacket:
 					// EXECUTE carries no SQL text of its own — resolve the
 					// prepared query via the runtime stmtID map and show the
@@ -162,9 +162,9 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					// "COM_STMT_EXECUTE".
 					if msg != nil {
 						if decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
-							actualQuery = sqlStatementIdentity(decodeCtx.StmtIDToQuery[msg.StatementID])
+							actualQuery = miss.places.liveStatement(sqlStatementIdentity(decodeCtx.StmtIDToQuery[msg.StatementID]))
 						}
-						actualQuery = strings.TrimSpace(actualQuery + " " + formatExecParams(msg.Parameters))
+						actualQuery = strings.TrimSpace(actualQuery + " " + formatExecParams(miss.places.liveParams(msg.Parameters)))
 					}
 				case *mysql.StmtSendLongDataPacket:
 					if msg != nil {

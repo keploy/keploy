@@ -137,6 +137,11 @@ type mockMiss struct {
 	// hunt for a lost recording.
 	candidateCount int
 	matchPhase     string
+	// places are the places of the recorded commands the report names
+	// (its closest mock, the first one strict rejected) the obfuscator
+	// redacted: the report and the miss's log show the live command's
+	// value at each as valueRedacted.
+	places redactedPlaces
 	// why and nextSteps, when set, are what the report says about the miss
 	// in place of the generic diff note and advice.
 	why       string
