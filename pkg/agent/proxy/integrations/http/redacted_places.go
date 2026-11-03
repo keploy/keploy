@@ -7,6 +7,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
@@ -42,6 +43,10 @@ type redactedPlaces struct {
 	segments map[int]bool
 	// recordedPath is the recorded URL's escaped path.
 	recordedPath string
+	// urlUnread: the recorded URL does not parse, so its places cannot be
+	// found, and the mock redacted something (it holds a pattern): the
+	// call's path and query values are redacted whole.
+	urlUnread bool
 	// body is a recorded body redacted whole.
 	body bool
 	// fieldsIn is how the recorded body was read for its fields: as JSON,
@@ -52,6 +57,10 @@ type redactedPlaces struct {
 	// a root array's too ("[].id", as matcher.JSONFieldDiffs and the strict
 	// comparison name it), a form key or a multipart field's name, decoded.
 	fields map[string]bool
+	// keys are the last keys of fields (fieldKeys): the obfuscator redacts
+	// a body field by its key's name, so a live field under one of them is
+	// redacted wherever it sits, though the recording has it elsewhere.
+	keys map[string]bool
 }
 
 // placesOf reads the places of m's recorded request the obfuscator
@@ -66,7 +75,7 @@ func placesOf(m *models.Mock) redactedPlaces {
 // redactedPlacesOf reads the places of r the obfuscator redacted, by the
 // mock's patterns noise.
 func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
-	p := redactedPlaces{values: util.NewNoiseChecker(noise), headers: map[string]bool{}, query: map[string]bool{}, segments: map[int]bool{}, fields: map[string]bool{}}
+	p := redactedPlaces{values: util.NewNoiseChecker(noise), headers: map[string]bool{}, query: map[string]bool{}, segments: map[int]bool{}, fields: map[string]bool{}, keys: map[string]bool{}}
 	if r == nil || p.values == nil {
 		return p
 	}
@@ -82,7 +91,9 @@ func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
 			p.query[k] = true
 		}
 	}
-	if u, err := parseRecordedURL(r.URL); err == nil {
+	u, err := parseRecordedURL(r.URL)
+	p.urlUnread = err != nil
+	if err == nil {
 		for k, vs := range u.Query() {
 			for _, v := range vs {
 				if p.noisy(v) {
@@ -116,28 +127,88 @@ func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
 				value = rawValue
 			}
 			if p.noisy(seg) || p.noisy(value) {
-				p.fields[key] = true
+				p.addField(key)
 			}
 		}
 	case "multipart/form-data":
 		p.fieldsIn = bodyMultipart
 		parts, _ := multipartParts(ct, []byte(r.Body))
 		for _, part := range parts {
-			if p.noisy(string(part.data)) {
-				p.fields[part.name] = true
+			// A part's data is not read for fields: one that holds a
+			// redacted value anywhere is redacted whole.
+			if p.noisy(string(part.data)) || holdsPattern(noise, string(part.data)) {
+				p.addField(part.name)
 			}
 		}
 	default:
 		p.fieldsIn = bodyJSON
 		var v interface{}
-		if json.Unmarshal([]byte(r.Body), &v) == nil {
-			p.collectJSON(v, "")
+		if json.Unmarshal([]byte(r.Body), &v) != nil {
+			// Not read for fields (XML, SOAP, text): a body that holds a
+			// value one of the mock's patterns names, at a place that
+			// cannot be found, is redacted whole.
+			p.body = holdsPattern(noise, r.Body)
+			return p
 		}
+		p.collectJSON(v, "")
 		// A redacted string at the root has no name of its own: the body
 		// is redacted whole.
 		p.body = p.fields[""]
 	}
 	return p
+}
+
+// addField adds the body field name, and its last key (keys).
+func (p redactedPlaces) addField(name string) {
+	p.fields[name] = true
+	p.keys[lastKey(name)] = true
+}
+
+// lastKey is the last key a recorded body field's name holds: "assertion"
+// of "items[].assertion", "tags" of "tags[]", "password" of the form key
+// "user[password]"; "" of a root array's elements ("[]"), which no key of
+// fieldKeys is.
+func lastKey(name string) string {
+	name = strings.TrimRight(name, "[]")
+	return name[strings.LastIndexAny(name, ".[]")+1:]
+}
+
+// fieldKeys are the keys a body field's name holds, in order, split at "."
+// and at the brackets of an array position or a form key ("items[0].id"
+// and "items[].id" hold items, 0 and id; "user[password]" user and
+// password), so a key reads the same in each dialect a field is named in.
+func fieldKeys(name string) []string {
+	return strings.FieldsFunc(name, func(r rune) bool { return r == '.' || r == '[' || r == ']' })
+}
+
+// holdsPattern reports whether text holds a value one of the patterns
+// names, read anywhere in it: each pattern with its anchors (a leading "^",
+// a trailing unquoted "$") dropped, as the obfuscator anchors the value it
+// wrote on the value alone.
+func holdsPattern(patterns []string, text string) bool {
+	for _, pat := range patterns {
+		inner := strings.TrimPrefix(pat, "^")
+		if strings.HasSuffix(inner, "$") && !quoted(inner, len(inner)-1) {
+			inner = inner[:len(inner)-1]
+		}
+		if inner == "" {
+			continue
+		}
+		if re, err := regexp.Compile(inner); err == nil && re.MatchString(text) {
+			return true
+		}
+	}
+	return false
+}
+
+// quoted reports whether the byte at i of a pattern is quoted: an odd count
+// of backslashes is before it.
+func quoted(pat string, i int) bool {
+	n := 0
+	for j := i - 1; j >= 0 && pat[j] == '\\'; j-- {
+		n++
+	}
+	return n%2 == 1
 }
 
 // noisy reports whether v matches one of the mock's patterns.
@@ -162,13 +233,15 @@ func (p redactedPlaces) collectJSON(v interface{}, path string) {
 		}
 	case string:
 		if p.noisy(t) {
-			p.fields[path] = true
+			p.addField(path)
 		}
 	}
 }
 
 // field reports whether a body field named name (a field diff's name under
-// "body.") is a redacted field or inside one, or the body was redacted whole.
+// "body.") is a redacted field or inside one, is under a key the recording
+// redacted a field by (keys) wherever it sits, or the body was redacted
+// whole.
 func (p redactedPlaces) field(name string) bool {
 	if p.body {
 		return true
@@ -178,7 +251,24 @@ func (p redactedPlaces) field(name string) bool {
 			return true
 		}
 	}
+	for _, k := range fieldKeys(name) {
+		if p.keys[k] {
+			return true
+		}
+	}
 	return false
+}
+
+// queryKey reports whether the call's query parameter name is at a place the
+// recording redacted, or the recorded URL could not be read for its places.
+func (p redactedPlaces) queryKey(name string) bool {
+	return p.urlUnread || p.query[name]
+}
+
+// segment reports whether the call's URL path segment i is at a place the
+// recording redacted, or the recorded URL could not be read for its places.
+func (p redactedPlaces) segment(i int) bool {
+	return p.urlUnread || p.segments[i]
 }
 
 // covers reports whether a field diff's path names a redacted place. A
@@ -194,7 +284,7 @@ func (p redactedPlaces) covers(path string) bool {
 	}
 	switch {
 	case strings.HasPrefix(path, "query."):
-		return p.query[strings.TrimPrefix(path, "query.")]
+		return p.queryKey(strings.TrimPrefix(path, "query."))
 	case strings.HasPrefix(path, "body."):
 		return p.field(strings.TrimPrefix(path, "body."))
 	}
@@ -208,9 +298,9 @@ func (p redactedPlaces) at(place variables.Place) bool {
 	case variables.PartHeader:
 		return p.headers[strings.ToLower(place.Name)]
 	case variables.PartQuery:
-		return p.query[place.Name]
+		return p.queryKey(place.Name)
 	case variables.PartPath:
-		return p.segments[place.Index]
+		return p.segment(place.Index)
 	case variables.PartBody:
 		return p.field(bodyFieldName(place.Path))
 	}
@@ -247,6 +337,9 @@ func (p redactedPlaces) decodedPath(escaped string) string {
 }
 
 func (p redactedPlaces) redactPath(escaped string, decode bool) string {
+	if p.urlUnread {
+		return "/" + valueRedacted
+	}
 	segs := pathSegments(escaped)
 	for i, seg := range segs {
 		switch {
@@ -279,13 +372,25 @@ func unescapeSegment(seg string) string {
 // path decoded cannot have its segments counted, so it is redacted whole
 // when the recording redacted a segment.
 func (p redactedPlaces) pathValue(v, escaped string) string {
-	if v == "" || len(p.segments) == 0 {
+	if v == "" || len(p.segments) == 0 && !p.urlUnread {
 		return v
 	}
-	if decoded, err := url.PathUnescape(escaped); err == nil && decoded == v {
+	if decoded, err := url.PathUnescape(escaped); p.urlUnread || err == nil && decoded == v {
 		return p.decodedPath(escaped)
 	}
 	return valueRedacted
+}
+
+// pathPrefix is the call's path, escaped, decoded (decodedPath) up to the
+// first segment the recording redacted: a session call's pathPrefix that
+// ends in "/" matches every path under it (models.SessionCallRule), so a
+// hint that names it is one a user can paste, and names no secret.
+func (p redactedPlaces) pathPrefix(escaped string) string {
+	path := p.decodedPath(escaped)
+	if i := strings.Index(path, valueRedacted); i >= 0 {
+		return path[:i]
+	}
+	return path
 }
 
 // redactDiff redacts, in place, both values of a field diff at a place the

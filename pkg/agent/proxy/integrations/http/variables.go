@@ -1659,7 +1659,9 @@ func variableTable(mockDb integrations.MockMemDb) *variables.Table {
 // variableMismatchReport is the miss report of a call a recorded call fit
 // except for a test variable: the variable, the place, the value it has in
 // the test and the one the call sent, and what to do.
-func variableMismatchReport(request *http.Request, liveBody []byte, dest, actualKey string, diag *matchDiag, httpMocks []*models.Mock, table *variables.Table) *models.MockMismatchReport {
+//
+// closest is the recording the problem names (nil: not in the pool).
+func variableMismatchReport(request *http.Request, liveBody []byte, dest, actualKey string, diag *matchDiag, httpMocks []*models.Mock, table *variables.Table) (*models.MockMismatchReport, *models.Mock) {
 	p := diag.variable
 	var diffs []models.MockFieldDiff
 	if p.place != "" && p.kind != "" {
@@ -1711,7 +1713,7 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 			r.VariablePlaces = append(r.VariablePlaces, place)
 		}
 	}
-	return r
+	return r, closest
 }
 
 // withRoutePlaces is r carrying, under the proven switch, the URL path places

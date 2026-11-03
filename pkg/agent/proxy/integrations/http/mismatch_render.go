@@ -118,7 +118,9 @@ func renderMockRequest(mockReq *models.HTTPReq, mockNoise []string) string {
 	}
 	places := redactedPlacesOf(mockReq, mockNoise)
 	path := mockURLPath(mockReq.URL)
-	if _, err := parseRecordedURL(mockReq.URL); err == nil {
+	if _, err := parseRecordedURL(mockReq.URL); err == nil || places.urlUnread {
+		// A URL that does not parse, at a mock that redacted something,
+		// is redacted whole (decodedPath).
 		path = places.decodedPath(places.recordedPath)
 	}
 	return renderRequestPreview(string(mockReq.Method), path, mockQueryString(mockReq), header, mockReq.Body, places)
@@ -194,7 +196,7 @@ func renderRequestPreview(method, path, rawQuery string, header map[string]strin
 		// Canonicalize so semantically equal queries render identically on
 		// both sides, and redact sensitive / obfuscated parameter values so
 		// credentials in the query string never reach the report.
-		target += "?" + redactQuery(rawQuery, places.values, func(k string) bool { return places.query[k] })
+		target += "?" + redactQuery(rawQuery, places.values, places.queryKey)
 	}
 	fmt.Fprintf(&b, "%s %s", method, target)
 

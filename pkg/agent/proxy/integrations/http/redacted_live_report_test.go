@@ -110,6 +110,9 @@ func redactedLiveCases(t *testing.T) []redactedLiveCase {
 	badHeader := strings.Replace(cutMP, `Content-Disposition: form-data; name="assertion"`, `Content-Disposition form-data name assertion`, 1)
 	delimMP, _ := redactedMultipart(t, [2]string{"x", "bravo2"}, [2]string{"assertion", liveSecret + " --redacted-live-boundary-- tail"})
 	cutAfterDelim := delimMP[:strings.Index(delimMP, " tail")]
+	// A part that holds the redacted value inside its data.
+	recDoc, recDocCT := redactedMultipart(t, [2]string{"doc", "<a>REDACTED_abc</a>"}, [2]string{"x", "alpha1"})
+	liveDoc, liveDocCT := redactedMultipart(t, [2]string{"doc", "<a>" + liveSecret + "</a>"}, [2]string{"x", "bravo2"})
 	// With the switch off the request matcher serves a form or a multipart
 	// form whose field changed: those calls go to another path too, so
 	// they miss either way.
@@ -171,6 +174,27 @@ func redactedLiveCases(t *testing.T) []redactedLiveCase {
 		// not a multipart form.
 		{name: "multipart-sent-as-another-type-with-a-boundary", url: "/x", liveURL: "/x/other", ctype: recMPCT, liveCtype: strings.Replace(liveMPCT, "multipart/form-data", "text/plain", 1), hdr: other, liveHdr: liveOther, rec: recMP, live: liveMP, noise: value, wholeBody: true},
 		{name: "path-segment-at-its-route-variable", url: "/x/REDACTED_abc/y", liveURL: "/x/" + liveSecret + "/y", ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value, vars: models.MockVariables{"v": {Recorded: "REDACTED_abc", Bind: "url.path[1]"}}},
+		// A body not read for fields (XML, SOAP, text): the obfuscator
+		// redacts an XML element's text by its name, and a pattern's hit
+		// in a text, and anchors the pattern on the value alone. The
+		// value's place cannot be found in the call's body: it is redacted
+		// whole.
+		{name: "xml-element", url: "/x", liveURL: "/x/other", ctype: "application/xml", hdr: other, liveHdr: liveOther, rec: `<req><assertion>REDACTED_abc</assertion><x>alpha1</x></req>`, live: `<req><assertion>` + liveSecret + `</assertion><x>bravo2</x></req>`, noise: value, wholeBody: true},
+		{name: "soap-element", url: "/x", liveURL: "/x/other", ctype: "text/xml", hdr: other, liveHdr: liveOther, rec: `<Envelope><Body><assertion>REDACTED_abc</assertion></Body></Envelope>`, live: `<Envelope><Body><assertion>` + liveSecret + `</assertion></Body></Envelope>`, noise: value, wholeBody: true},
+		{name: "text-token", url: "/x", liveURL: "/x/other", ctype: "text/plain", hdr: other, liveHdr: liveOther, rec: `assertion REDACTED_abc x alpha1`, live: `assertion ` + liveSecret + ` x bravo2`, noise: value, wholeBody: true},
+		// A multipart part's data is not read for fields either.
+		{name: "multipart-part-holding-a-redacted-value", url: "/x", liveURL: "/x/other", ctype: recDocCT, liveCtype: liveDocCT, rec: recDoc, live: liveDoc, noise: value},
+		// The obfuscator redacts a field by its key's name: the call's
+		// field under that key is redacted wherever it sits.
+		{name: "json-moved-field", url: "/x", ctype: jsonCT, rec: `{"assertion":"REDACTED_abc","x":"alpha1"}`, live: `{"data":{"assertion":"` + liveSecret + `"},"x":"bravo2"}`, noise: value},
+		{name: "json-moved-field-in-an-array", url: "/x", ctype: jsonCT, rec: `{"items":[{"assertion":"REDACTED_abc"}],"x":"alpha1"}`, live: `{"data":[{"assertion":{"v":"` + liveSecret + `"}}],"x":"bravo2"}`, noise: value},
+		{name: "form-moved-field", url: "/x", liveURL: "/x/other", ctype: formCT, rec: `assertion=REDACTED_abc&x=alpha1`, live: `data.assertion=` + liveSecret + `&x=bravo2`, noise: value},
+		{name: "form-moved-bracket-key", url: "/x", liveURL: "/x/other", ctype: formCT, rec: `user[assertion]=REDACTED_abc&x=alpha1`, live: `data[assertion]=` + liveSecret + `&x=bravo2`, noise: value},
+		{name: "json-moved-string-array", url: "/x", ctype: jsonCT, rec: `{"tags":["REDACTED_abc"],"x":"alpha1"}`, live: `{"data":{"tags":["` + liveSecret + `"]},"x":"bravo2"}`, noise: value},
+		// A recorded URL that does not parse, at a mock that redacted
+		// something: its places cannot be found, so the call's path and
+		// query values are redacted whole.
+		{name: "url-does-not-parse", url: "/x/%zz/REDACTED_abc", liveURL: "/x/zz/" + liveSecret + "?q=" + liveSecret, ctype: jsonCT, rec: `{"x":"alpha1"}`, live: `{"x":"bravo2"}`, noise: value},
 	}
 }
 
@@ -216,16 +240,18 @@ func (c redactedLiveCase) sent() (*req, *http.Request) {
 // platform API persist. It goes by the place: the live value matches none of
 // the recording's patterns, and neither its key nor its shape says it is a
 // secret. The rest of the call is still shown, and the place is shown
-// redacted. Switch off and on.
+// redacted. Switch off and on, and switch off at a recording that states
+// its lifetime (as the recorder writes every HTTP mock), whose report tells
+// how to serve the call to every test (sessionCallHint).
 func TestMissReportRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
 	for _, c := range redactedLiveCases(t) {
-		for _, on := range []bool{false, true} {
-			mode := "off"
-			if on {
-				mode = "on"
-			}
+		for _, mode := range []string{"off", "off-stated-lifetime", "on"} {
+			on := mode == "on"
 			t.Run(c.name+"/"+mode, func(t *testing.T) {
 				m := c.mock()
+				if mode == "off-stated-lifetime" {
+					m.Spec.Metadata = map[string]string{models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+				}
 				in, request := c.sent()
 				var diag *matchDiag
 				if on {
@@ -297,12 +323,55 @@ func TestMissReportRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
 				if !strings.Contains(r.ReceivedReq, "bravo2") {
 					t.Errorf("ReceivedReq lost the rest of the call:\n%s", r.ReceivedReq)
 				}
+				if mode == "off-stated-lifetime" {
+					sessionHintMatchesTheCall(t, r, request)
+				}
 				// A query or a form renders the marker query-escaped.
 				if !strings.Contains(r.ReceivedReq, valueRedacted) && !strings.Contains(r.ReceivedReq, url.QueryEscape(valueRedacted)) {
 					t.Errorf("ReceivedReq does not show the redacted place redacted:\n%s", r.ReceivedReq)
 				}
 			})
 		}
+	}
+}
+
+// sessionHintMatchesTheCall fails t unless r's next steps tell how to serve
+// the call to every test with a session call whose pathPrefix matches the
+// call's path (as models.SessionCallRule matches one): a prefix a user can
+// paste, which stops before a segment the recording redacted.
+func sessionHintMatchesTheCall(t *testing.T, r *models.MockMismatchReport, request *http.Request) {
+	t.Helper()
+	_, hint, ok := strings.Cut(r.NextSteps, "pathPrefix: ")
+	if !ok {
+		t.Fatalf("the report does not tell how to serve the call to every test: %s", r.NextSteps)
+	}
+	prefix, err := strconv.QuotedPrefix(hint)
+	if err != nil {
+		t.Fatalf("the hint's pathPrefix is not quoted: %s", r.NextSteps)
+	}
+	prefix, _ = strconv.Unquote(prefix)
+	path := request.URL.Path
+	matches := path == prefix || strings.HasPrefix(path, prefix+"/")
+	if strings.HasSuffix(prefix, "/") {
+		matches = strings.HasPrefix(path, prefix)
+	}
+	if !matches || strings.Contains(prefix, valueRedacted) {
+		t.Errorf("the hint's pathPrefix %q does not match the call's path, or names a redacted segment", prefix)
+	}
+}
+
+// A call whose path is empty is named "/" in the hint that tells how to
+// serve it to every test, as the request line names it.
+func TestSessionHintNamesAnEmptyPathSlash(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	m := recorded("m", "/x/REDACTED_abc", map[string]string{"Content-Type": "application/json"}, `{"x":"alpha1"}`)
+	m.Noise = []string{`^REDACTED_abc$`}
+	m.Spec.Metadata = map[string]string{models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+	request, _ := http.NewRequest("POST", "http://api.example", strings.NewReader(`{"x":"bravo2"}`))
+	request.Header.Set("Content-Type", "application/json")
+	r := newHTTP().buildHTTPMismatchReport(request, []byte(`{"x":"bravo2"}`), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, nil, nil)
+	if r == nil || !strings.Contains(r.NextSteps, `pathPrefix: "/"}`) {
+		t.Fatalf("the hint does not name the empty path \"/\": %+v", r)
 	}
 }
 
