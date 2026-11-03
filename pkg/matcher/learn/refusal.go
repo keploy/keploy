@@ -79,7 +79,7 @@ func refusalFoot(r Refusal) string {
 	s := placesPart(r.Places)
 	sep := ". Edits: "
 	for _, e := range r.Edits {
-		s, sep = s+sep+editWords(e), editSep
+		s, sep = s+sep+EditWords(e), editSep
 	}
 	r.Recorded, r.Full, r.Why = "", "", ""
 	js, _ := json.Marshal(r) // a struct of strings and ints always marshals
@@ -107,9 +107,13 @@ func wordWhere(test, mock, field string, word int) string {
 	return s
 }
 
-// editWords is e in its kind's words; an edit of no known kind prints its
-// kind alone (it then reads back as no refusal: fail closed).
-func editWords(e Edit) string {
+// EditWords is e in its kind's words, the text Decide's lines print for it:
+// a noise edit as the keploy.yml entry that names its field (noiseWords),
+// the edit a refusal line names and a learned line's undo. An adapter that
+// prints its own line prints an edit with it, so the two say the same. An
+// edit of no known kind prints its kind alone (it then reads back as no
+// refusal: fail closed).
+func EditWords(e Edit) string {
 	form, ok := editForms[e.Kind]
 	if !ok {
 		return lineName(string(e.Kind))
