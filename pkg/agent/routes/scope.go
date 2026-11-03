@@ -145,10 +145,13 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 	}
 	starts.Default.Begin(uint32(req.Pid), req.Name, req.Dir, req.Suite, markTime(req.At))
 	if err := beginScope(r.Context(), a.svc, req); err != nil {
-		a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))
+		// A refused begin fails its test, and the replay with it, whatever
+		// the harness does with the answer: said where the agent's log is read.
+		a.logger.Warn("keploy refused a test at its begin, so the test fails", zap.String("test", req.Name), zap.Int("pid", req.Pid), zap.Error(err))
 		code := http.StatusInternalServerError
-		if errors.Is(err, agent.ErrOneTestAtATime) {
-			// release1-cut §2.1: 422 one_test_at_a_time.
+		if errors.Is(err, agent.ErrOneTestAtATime) || errors.Is(err, agent.ErrPidBeginWithoutMarks) {
+			// release1-cut §2.1: 422 one_test_at_a_time. A pid begin keploy
+			// cannot narrow is the harness's to change, as that one is.
 			code = http.StatusUnprocessableEntity
 		}
 		http.Error(w, err.Error(), code)

@@ -21,9 +21,9 @@ import (
 // part of it holding the same lock, so it reads them of one instant:
 //
 //   - a consume's or a spend's settle, every delete door's,
-//     UpdateUnFilteredMock's and MarkMockAsUsed's, with the served
-//     observer told of it in the same step (exactConsumeAt), and a spend by
-//     kind (spendByKindAt);
+//     UpdateUnFilteredMock's and MarkMockAsUsed's, with the tier's take of
+//     one the view passes and the served observer told of it in the same
+//     step (exactConsumeAt), and a spend by kind (spendByKindAt);
 //   - a pairing's claim (claimPairingAt);
 //   - a view's install, with the claims a retried test gives back, the
 //     mocks of the tests begun, and the ahead answers it carries or voids
@@ -35,14 +35,19 @@ import (
 //   - a staging's new epoch (bumpStagingEpoch).
 //
 // Lock order: swapMu (read) before the round lock; the round lock before a
-// view's mu and the leaves (claims, staging names, the tracker, treesMu read,
-// a tree's, the disk store's). Nothing holding it takes swapMu, a variables
-// table's lock or a consume door: prepareOutside, which takes swapMu, runs
-// before it. A view install that begins variables takes the variables' lock
-// and then this one (variables.Table.StartOpening runs the install).
+// view's mu and the leaves (claims, staging names, the tracker, the disk
+// store's, and what a consume's tier takes in the settle: mirrorMu, hitMu,
+// treesMu, connMu read, a tree's, windowMu read, consumedMu, revMu,
+// answeredLog.mu, the kept learning's filedBases.mu and keptLoad.mu).
+// Nothing holding it takes swapMu, a variables table's lock or a consume door:
+// prepareOutside, which takes swapMu, runs before it. A view install that
+// begins variables takes the variables' lock and then this one
+// (variables.Table.StartOpening runs the install).
 //
 // What the replay drains (flagMockAsUsed), the revisions and the window
-// signal move after it, as before: a parser that keeps an index reads again.
+// signal move after a view's own serve, as before: a parser that keeps an
+// index reads again. A consume the view passes goes through its tier inside
+// the step, since the tier decides whether it is a serve at all.
 
 // roundState is the round's state that changes holding mu alone.
 type roundState struct {
@@ -386,13 +391,19 @@ func (m *MockManager) stagedRecording(mk *models.Mock) *models.Mock {
 // swapMu, which comes before it.
 func (m *MockManager) bumpStagingEpoch() {
 	m.lockRound()
-	m.stagingEpoch.Add(1)
 	// The outside answers of the staging before (prepareOutside) hold every
-	// recording it staged, and no read takes them now (each checks the
-	// epoch): let them go with that staging's trees, not at the next call
-	// outside every test, which may come only well into this staging, or
-	// never.
+	// recording it staged: let them go with that staging's trees, not at the
+	// next call outside every test, which may come only well into this
+	// staging, or never. They go before the epoch moves on, and they are
+	// built only under swapMu, which this staging holds, with the epoch read
+	// there: so the outside answers are, at every instant, none or the
+	// current staging's, and no read that takes no lock (outsideNow) ever
+	// sees a past staging's answers under the new epoch.
 	m.exact.outside.cur.Store(nil)
+	if f := m.exact.outside.onLetGo; f != nil {
+		f()
+	}
+	m.stagingEpoch.Add(1)
 	// The set the tracker began last is staged now, whichever it is: the
 	// tracker's own (SetTrackerSetAt), as its set may have begun before any
 	// of its boundaries reached this manager.

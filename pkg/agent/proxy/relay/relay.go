@@ -138,6 +138,9 @@ type Relay struct {
 	awaitingFrom []uint64
 	resolverDone chan struct{}
 	awaitingMark string
+	// notTaken is the start of what the client refused (refuse,
+	// notTakenSoFar): nil until it refused, stored under verdictMu.
+	notTaken atomic.Pointer[[]byte]
 	// lastLook is closed by run once both forwarders have returned and a
 	// waiting resolve has had HalfCloseGrace more (awaitClientVerdict): the
 	// next look at the client's socket is the last.
@@ -280,6 +283,9 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		cfg.OnMarkMockIncomplete,
 		cfg.Logger,
 	)
+	// A Read on the destination's conn beneath its layers is when no chunk
+	// read from it so far is left to be numbered (StreamedBefore).
+	r.order.OnRead(r.teeD2C.progress.changed.wake)
 
 	// Assigned after construction rather than threaded through newTee's
 	// positional signature, which is already at six arguments.
@@ -784,6 +790,7 @@ func (r *Relay) forward(
 				// before these bytes were forwarded to it.
 				chunk.ConnSeq, chunk.AfterClientClose = r.order.FromDest()
 			}
+			t.noteNumbered(chunk.ConnSeq)
 			chunk.Bytes = make([]byte, n)
 			copy(chunk.Bytes, buf[:n])
 		}

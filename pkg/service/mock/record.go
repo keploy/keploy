@@ -906,7 +906,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 
 	if keep {
-		if err := m.hooks.AfterRecordingComplete(persistCtx, &rec.RecordingCompleteContext{TestSetID: name, Path: m.config.Path}); err != nil {
+		if err := rec.RunAfterRecordingHook(persistCtx, m.logger, m.hooks, &rec.RecordingCompleteContext{TestSetID: name, Path: m.config.Path}, mockDrainNotice); err != nil {
 			m.logger.Warn("AfterRecordingComplete hook failed", zap.Error(err), zap.String("mock-set", name))
 		}
 	}
@@ -956,8 +956,12 @@ func runnerPassed(appErr models.AppError) bool {
 	return false
 }
 
-// agentWindows reads the windows the runner itself posted to the agent's scope API; none is not an error.
+// agentWindows reads the windows the runner itself posted to the agent's
+// scope API, for a record with the proven switch off: a best-effort epilogue
+// read, bounded by agentEpilogueTimeout, and none is not an error.
 func (m *mockService) agentWindows(ctx context.Context) []models.ScopeWindow {
+	ctx, cancel := context.WithTimeout(ctx, agentEpilogueTimeout)
+	defer cancel()
 	windows, err := m.readWindows(ctx)
 	if err != nil {
 		m.logger.Debug("failed to read per-test scope windows from the agent", zap.Error(err))
@@ -968,9 +972,11 @@ func (m *mockService) agentWindows(ctx context.Context) []models.ScopeWindow {
 
 // readWindows reads the run's per-test windows from the agent. Under the
 // proven switch they are what each test did, which judging and keploy's
-// verdict rest on: the read has no deadline (the agent closes a test whose
-// process went away before it answers; its answer, or the connection's
-// close, ends the wait), and a failed read is an error, never "no tests".
+// verdict rest on, and a replay's fails a test keploy refused at its begin
+// whatever the switch: the read has no deadline (the agent closes a test
+// whose process went away before it answers; its answer, or the
+// connection's close, ends the wait), and a failed read is an error, never
+// "no tests".
 func (m *mockService) readWindows(ctx context.Context) ([]models.ScopeWindow, error) {
 	reader, ok := m.instrumentation.(ScopeReader)
 	if !ok {
@@ -978,11 +984,6 @@ func (m *mockService) readWindows(ctx context.Context) ([]models.ScopeWindow, er
 			return nil, errors.New("this keploy cannot read what each test did from its agent")
 		}
 		return nil, nil
-	}
-	if !provenswitch.On() {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, agentEpilogueTimeout)
-		defer cancel()
 	}
 	all, err := reader.GetScopeWindows(ctx)
 	if err != nil {
@@ -1166,8 +1167,11 @@ type capturedMock struct {
 	// ts is where the call sits (models.PlaceOf): its request timestamp, or
 	// its answer's for one a parser holds until its answer (a consumer's
 	// poll), which is the test's whose window holds its answer.
-	ts   time.Time
-	pid  uint32 // source worker PID (0 if unknown); enables exact parallel attribution
+	ts time.Time
+	// pid is the caller's kernel PID (0 if unknown), not walked up to its
+	// worker: it places a call the worker makes itself in that worker's
+	// window; any other call falls back to the time scan (correlateScopes).
+	pid  uint32
 	end  time.Time
 	boot bool
 	// protocol: protocol-phase under the proven switch (models.Mock.IsProtocolPhase),
@@ -1191,9 +1195,11 @@ func stagingSetID(name string) string { return name + yaml.MockStagingSuffix }
 // is left out of every test's mapping — it stays reusable/session-tier at
 // replay, exactly as the timestamp-based fallback would treat it.
 //
-// When a mock carries a source PID it is attributed to the SAME worker's window
-// (exact, so overlapping parallel windows don't steal each other's mocks). That
-// PID match is exact only when the worker made the call itself and the agent
+// When a mock carries a source PID it is attributed to the SAME worker's window,
+// so another worker's overlapping window does not take it; two windows open at
+// once in one worker (parallel tests of one go test binary) share its PID, and
+// the later-begun one takes both's calls. The PID match is exact only when
+// the worker made the call itself and the agent
 // shares its PID namespace (the normal `keploy mock <cmd>` wrap); a call made by
 // a CHILD of the worker, or a containerized/cross-namespace worker whose
 // self-reported PID differs from the kernel PID, falls back to the timestamp
@@ -1225,7 +1231,9 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 	for _, mk := range mocks {
 		best := -1
 		if mk.pid != 0 {
-			// Exact, parallel-safe: attribute to the same worker's window.
+			// Attribute to the same worker's window: exact for a call the
+			// worker makes with one test open, but two tests open at once in
+			// one worker share its pid, and the later-begun takes both's calls.
 			best = containingWindow(mk, true)
 		}
 		if best == -1 {

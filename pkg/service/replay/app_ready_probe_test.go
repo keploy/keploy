@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v3/config"
@@ -41,13 +42,8 @@ func TestWaitForAppReady_ProbeAddrGate_ReadyAddr(t *testing.T) {
 // anyway, matching the historical fixed-delay behavior — the gate never blocks
 // forever and never weakens the run) after the bounded ceiling.
 func TestWaitForAppReady_ProbeAddrGate_DeadAddrProceeds(t *testing.T) {
-	// Pick an address nothing is listening on by opening then closing a listener.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	ln.Close()
+	// An address nothing is listening on, held so no other socket takes it.
+	addr := testnet.RefusedAddr(t, "tcp")
 
 	cfg := &config.Config{}
 	cfg.Test.Delay = 0
@@ -66,9 +62,7 @@ func TestWaitForAppReady_ProbeAddrGate_DeadAddrProceeds(t *testing.T) {
 // ctx cancellation during the probe wait must unblock immediately and report
 // not-ready (false), preserving the "false only on ctx cancel" contract.
 func TestWaitForAppReady_ProbeAddrGate_CtxCancel(t *testing.T) {
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	addr := ln.Addr().String()
-	ln.Close()
+	addr := testnet.RefusedAddr(t, "tcp")
 
 	cfg := &config.Config{}
 	cfg.Test.Delay = 0

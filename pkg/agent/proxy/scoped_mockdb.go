@@ -18,12 +18,19 @@ import (
 
 // Per-PID (worker-keyed) mock scoping — "Design A".
 //
-// Parallel test runners (Playwright, jest, pytest-xdist, `go test` -parallel)
-// spawn WORKER PROCESSES that each run their tests sequentially. The scope API
-// (POST /agent/scope/begin|end) lets a worker mark its current test so replay
-// serves only that test's recorded mocks. With a single global filter, two
-// workers' begin/end calls stomp each other; keying the filter by the worker's
-// PID instead lets them run concurrently without a shared "current scope".
+// A test process (a worker) marks its current test through the scope API
+// (POST /agent/scope/begin|end) so replay serves only that test's recorded
+// mocks. Keying the filter by the worker's PID keeps two workers' begin/end
+// calls from overwriting one shared filter, but it does NOT isolate tests that
+// run at the same time: it narrows only the worker's own process tree. So a
+// replay without the suite mark or an app-start mark refuses a begin with a pid
+// (service/agent pidCannotScope); with them, a process no registered worker
+// started (an app server the tests share) is served the one open test's
+// mocks, or refused while more than one test is open (scopedFor,
+// starts.Unattributed). At record such a process's calls, and every call of
+// two tests open at once in one process, are charged by time (service/mock
+// correlateScopes). Run scoped tests one at a time; a shared app server needs
+// a begin without a pid, which narrows the global pool.
 //
 // A worker self-reports its PID in the scope call (ScopeReq.Pid — e.g. Node
 // process.pid), which registers an allowlist of that test's mock names on the
@@ -94,6 +101,9 @@ type workerView struct {
 	allow    map[string]struct{}
 	universe map[string]struct{}
 	scope    string // the worker's current scope ("" for none); keys stateful cursors
+	// refused is why keploy refused the worker's open test at its begin
+	// (Proxy.RefuseWorker): every read of the view is refused with it.
+	refused string
 	// version is the proxy's scope sequence at the latest change to anything
 	// this view is made from: the scope of a worker on its chain, or the
 	// mapped universe. It only grows, and never returns to an earlier value.
@@ -138,9 +148,16 @@ func (s *scopedMockDb) keep(mocks []*models.Mock, err error) ([]*models.Mock, er
 		return mocks, err
 	}
 	if s.live {
-		return without(byStart(s.pid, mocks), s.consumed(workerView{})), nil
+		shown, err := byStart(s.pid, mocks)
+		if err != nil {
+			return nil, err
+		}
+		return without(shown, s.consumed(workerView{})), nil
 	}
 	v := s.current()
+	if v.refused != "" {
+		return nil, v.refusal()
+	}
 	gone := s.consumed(v)
 	if v.allow == nil || v.universe == nil {
 		return without(mocks, gone), nil
@@ -684,6 +701,9 @@ func (s *scopedMockDb) RangePerTestMocksInWindow(fn func(*models.Mock) bool) err
 		return nil
 	}
 	v := s.current()
+	if v.refused != "" {
+		return v.refusal()
+	}
 	gone := s.consumed(v)
 	return r.RangePerTestMocksInWindow(func(mk *models.Mock) bool {
 		return !visibleIn(v, mk) || (gone != nil && gone(mk.Name)) || fn(mk)
@@ -724,9 +744,19 @@ func (s *scopedMockDb) RangeSessionMocksWithKey(ix *integrations.MockIndex, key 
 			return r.RangeSessionMocksWithKey(ix, key, fn)
 		}
 		v := s.current()
+		if v.refused != "" {
+			return v.refusal()
+		}
 		gone := s.consumed(v)
+		shown := func(mk *models.Mock) bool { return visibleIn(v, mk) }
+		if s.live {
+			var err error
+			if shown, err = startShown(s.pid); err != nil {
+				return err
+			}
+		}
 		return r.RangeSessionMocksWithKey(ix, key, func(mk *models.Mock) bool {
-			return !visibleIn(v, mk) || (gone != nil && gone(mk.Name)) || fn(mk)
+			return !shown(mk) || (gone != nil && gone(mk.Name)) || fn(mk)
 		})
 	}
 	all, err := s.GetSessionMocks()
@@ -1093,6 +1123,32 @@ func (p *Proxy) SetWorkerScope(pid uint32, names []string) {
 	consumeRetained(ended)
 }
 
+// RefuseWorker refuses every read of a connection worker pid, or a process
+// it started, opened while it is registered, until its test ends
+// (ClearWorkerScope) or it registers its next one: keploy refused the
+// worker's test at its begin, for the reason why, and a harness that runs
+// the test anyway is never served the whole pool. A view made for the
+// worker's previous test follows it, so it is refused too.
+func (p *Proxy) RefuseWorker(pid uint32, why string) {
+	if pid == 0 {
+		return
+	}
+	p.workerScopeMu.Lock()
+	if p.workerScope == nil {
+		p.workerScope = make(map[uint32]workerScopeEntry)
+	}
+	ended := p.takeRetainedLocked(p.workerScope[pid].scope)
+	at := p.stampWorkerLocked(pid)
+	p.workerScope[pid] = workerScopeEntry{refused: why, scope: fmt.Sprintf("w%d.%d", pid, at)}
+	p.workerScopeMu.Unlock()
+	consumeRetained(ended)
+}
+
+// refusal is the error every read of a view of a refused worker returns.
+func (v workerView) refusal() error {
+	return fmt.Errorf("keploy serves no recording to a call of a test it refused at its begin, until that test ends: %s", v.refused)
+}
+
 // retainedUse is a per-test recording of a stateful dependency a worker's
 // scope was served and kept for the scope's repeats of the request (a cursor
 // mock, models.ConsumeCursorSaturate), and the store that holds it.
@@ -1237,6 +1293,9 @@ func (s *scopedMockDb) Spent(m *models.Mock) bool {
 type workerScopeEntry struct {
 	allow map[string]struct{}
 	scope string
+	// refused, set by RefuseWorker, is why keploy refused the test at its
+	// begin; allow is nil then.
+	refused string
 }
 
 // stampWorkerLocked records that pid's scope changed now, and returns the
@@ -1296,20 +1355,28 @@ func (p *Proxy) SetMappedUniverse(names []string) {
 	p.workerScopeMu.Unlock()
 }
 
-// scopedFor returns a mock view for an outgoing call from kpid. A call whose
-// process descends from a registered worker gets a view that follows that
-// worker from test to test, resolved on every read (see scopedMockDb.src);
-// any other call gets the bare manager (whole pool), as does kpid == 0
-// (non-eBPF platform / lookup miss).
+// scopedFor returns a mock view for an outgoing call from kpid. In a run with
+// the suite mark or an app-start mark (starts.Default.Active) every call, kpid == 0
+// (non-eBPF platform / lookup miss) included, gets a view resolved from the
+// app starts on every read (scopedMockDb.live): a call of no test process is
+// the one open test's, or refused while more than one is open (starts
+// Unattributed). Otherwise a call whose process descends from a registered
+// worker gets a view that follows that worker from test to test, resolved on
+// every read (see scopedMockDb.src); any other call gets the bare manager
+// (whole pool), as does kpid == 0.
 //
 // A connection opened before its process (or an ancestor) registered as a
 // worker — a client a test binary dialled during its setup — keeps the bare
 // manager: it is not wrapped on the chance that it might belong to a worker
 // later, because a wrap is a new store identity, and parsers that key their
 // indexes and stateful cursors on the store (enterprise Redis, Memcached,
-// Couchbase, HBase) would then split one app's state per connection.
+// Couchbase, HBase) would then split one app's state per connection. So a
+// pid begin cannot narrow a connection its app opened outside a test (its pool
+// at boot, or one opened between two tests), and keploy refuses a pid begin in
+// a run without the suite mark or an app-start mark (service/agent pidCannotScope).
+// Under exact serving (below) a begin with any pid is served exactly.
 func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.MockMemDb {
-	if kpid == 0 || mgr == nil {
+	if mgr == nil {
 		return mgr
 	}
 	// Under exact serving (the proven switch) the manager itself decides what
@@ -1321,6 +1388,9 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 	if starts.Default.Active() {
 		return &scopedMockDb{MockMemDb: mgr, pid: kpid, live: true}
 	}
+	if kpid == 0 {
+		return mgr
+	}
 	p.workerScopeMu.RLock()
 	nobody := len(p.workerScope) == 0
 	p.workerScopeMu.RUnlock()
@@ -1328,7 +1398,7 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 		return mgr // fast path: no worker scoped — no /proc walk, exact old behavior
 	}
 	chain := ancestorChain(kpid)
-	if p.workerViewFor(chain).allow == nil {
+	if v := p.workerViewFor(chain); v.allow == nil && v.refused == "" {
 		return mgr
 	}
 	p.workerScopeMu.Lock()
@@ -1372,8 +1442,8 @@ func (p *Proxy) workerViewFor(chain []uint32) workerView {
 		// Every worker on the chain counts, not only the nearest: one that
 		// ended its test changed this view as much as one that began.
 		v.version = max(v.version, p.workerScopeAt[pid])
-		if e, ok := p.workerScope[pid]; ok && v.allow == nil {
-			v.allow, v.scope = e.allow, e.scope
+		if e, ok := p.workerScope[pid]; ok && v.allow == nil && v.refused == "" {
+			v.allow, v.scope, v.refused = e.allow, e.scope, e.refused
 		}
 	}
 	return v
@@ -1389,10 +1459,16 @@ func ppidFromStat(pid uint32) (uint32, bool) {
 	return uint32(st.PPID), true
 }
 
-func byStart(pid uint32, mocks []*models.Mock) []*models.Mock {
-	rank, universe, ok := starts.Default.View(pid, time.Now())
+// byStart is mocks as a live view for pid shows them (starts View): those it
+// may be served, in its order. An error refuses the call every recording
+// (starts.Unattributed).
+func byStart(pid uint32, mocks []*models.Mock) ([]*models.Mock, error) {
+	rank, universe, ok, err := starts.Default.View(pid, time.Now())
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
-		return mocks
+		return mocks, nil
 	}
 	type ranked struct {
 		m *models.Mock
@@ -1416,7 +1492,28 @@ func byStart(pid uint32, mocks []*models.Mock) []*models.Mock {
 	for i, k := range kept {
 		out[i] = k.m
 	}
-	return out
+	return out, nil
+}
+
+// startShown is whether a live view for pid shows a mock, as byStart keeps
+// it, for a walk that keeps its own order (a keyed walk of the session
+// tier). An error refuses the call every recording. With no view (View's ok
+// false) rank and universe are nil, and every mock is shown.
+func startShown(pid uint32) (func(*models.Mock) bool, error) {
+	rank, universe, _, err := starts.Default.View(pid, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	return func(m *models.Mock) bool {
+		if m == nil {
+			return false
+		}
+		if _, ranked := rank[m.Name]; ranked {
+			return true
+		}
+		_, known := universe[m.Name]
+		return !known
+	}, nil
 }
 
 // Every MockMemDb the proxy hands a parser must keep the stateful cursor.

@@ -84,20 +84,12 @@ func TestALiveClientsHangUpMidAnswerReachesTheAppAndSettles(t *testing.T) {
 			_ = lc.app.Close()
 			close(hungUp)
 
-			select {
-			case <-gone:
-			case <-lc.never:
-				t.Fatalf("the app never saw its client gone: %s", lc.state())
-			}
+			<-gone
 			// The proxy forgets a connection once its handler is done
 			// (handleConnection): the handler's end is the settle's.
 			// That the exchange its client left is not recorded is the
 			// incoming package's row (it waits on the captures).
-			select {
-			case <-lc.served:
-			case <-lc.never:
-				t.Fatalf("the live call's handler never ended: %s", lc.state())
-			}
+			<-lc.served
 		})
 	}
 }
@@ -146,16 +138,8 @@ func TestALiveClientsHangUpReachesTheAppThroughTheProxysChain(t *testing.T) {
 				t.Fatalf("precondition: the live handler was handed a %s, want the proxy's %s", got, tc.want)
 			}
 			_ = lc.app.Close()
-			select {
-			case <-gone:
-			case <-lc.never:
-				t.Fatalf("the app never saw its client gone: %s", lc.state())
-			}
-			select {
-			case <-lc.served:
-			case <-lc.never:
-				t.Fatalf("the live call's handler never ended: %s", lc.state())
-			}
+			<-gone
+			<-lc.served
 		})
 	}
 }
@@ -241,22 +225,14 @@ func deafAppsClientHangsUp(t *testing.T, serve func(http.Handler) *liveCall) {
 		t.Fatalf("precondition: a live call whose answer streams to its client held no work of a replay's settle (pending %d): %s", n, lc.state())
 	}
 	_ = lc.app.Close()
-	select {
-	case <-gone:
-	case <-lc.never:
-		t.Fatalf("the app never saw its client gone: %s", lc.state())
-	}
+	<-gone
 	for {
 		changed := lc.tr.Changed()
 		n, _ := streaming.State(true)
 		if n == 0 && lc.tr.Pending(true) == 0 && lc.tr.Pending(false) == 0 {
 			break
 		}
-		select {
-		case <-changed:
-		case <-lc.never:
-			t.Fatalf("the hang-up told on to an app deaf to it, the call's connection still holds work (scope's %d): %s", n, lc.state())
-		}
+		<-changed
 	}
 	if left := lc.tr.scope().PendingProgress(true); len(left) != 0 {
 		t.Fatalf("a settle begun after the hang-up was told on would wait on %v: %s", left, lc.state())
@@ -314,22 +290,10 @@ func TestALiveClientsHangUpBeforeTheAnswerReachesTheApp(t *testing.T) {
 			if _, err := lc.app.Write([]byte("GET /poll HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
 				t.Fatal(err)
 			}
-			select {
-			case <-entered:
-			case <-lc.never:
-				t.Fatalf("the app never got the request: %s", lc.state())
-			}
+			<-entered
 			_ = lc.app.Close()
-			select {
-			case <-gone:
-			case <-lc.never:
-				t.Fatalf("the app never saw its client gone: %s", lc.state())
-			}
-			select {
-			case <-lc.served:
-			case <-lc.never:
-				t.Fatalf("the live call's handler never ended: %s", lc.state())
-			}
+			<-gone
+			<-lc.served
 		})
 	}
 }
@@ -354,17 +318,9 @@ func TestALiveClientsHangUpBeforeTheAnswerIsNotSentAgain(t *testing.T) {
 			if _, err := lc.app.Write([]byte("GET /poll HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
 				t.Fatal(err)
 			}
-			select {
-			case <-entered:
-			case <-lc.never:
-				t.Fatalf("the app never got the request: %s", lc.state())
-			}
+			<-entered
 			_ = lc.app.Close()
-			select {
-			case <-lc.served:
-			case <-lc.never:
-				t.Fatalf("the live call's handler never ended: %s", lc.state())
-			}
+			<-lc.served
 			if n := calls.Load(); n != 1 {
 				t.Fatalf("the app got the request %d times; its client had gone before the first answer", n)
 			}
@@ -401,13 +357,8 @@ func TestALiveCallsAnswerStillHoldsWorkWhileTheClientWaits(t *testing.T) {
 	free()
 	readUntil(t, br, "DONE")
 	waitSettled(t, lc.tr, func() bool { return lc.tr.Pending(true) == 0 })
-	select {
-	case got := <-lc.pm.TCChan():
-		if got.HTTPReq.URL == "" || !strings.Contains(got.HTTPResp.Body, "DONE") {
-			t.Fatalf("the exchange was recorded cut: %+v", got.HTTPResp)
-		}
-	case <-lc.never:
-		t.Fatalf("the whole exchange was not recorded: %s", lc.state())
+	if got := <-lc.pm.TCChan(); got.HTTPReq.URL == "" || !strings.Contains(got.HTTPResp.Body, "DONE") {
+		t.Fatalf("the exchange was recorded cut: %+v", got.HTTPResp)
 	}
 }
 
@@ -530,25 +481,26 @@ func TestALiveCallsHalfClosingClientGetsTheWholeAnswer(t *testing.T) {
 	if err != nil || !strings.Contains(string(body), `{"line":3}`) {
 		t.Fatalf("the half-closed client got %q (%v): %s", body, err, lc.state())
 	}
-	select {
-	case <-lc.served:
-	case <-lc.never:
-		t.Fatalf("the live call's handler never ended: %s", lc.state())
-	}
+	<-lc.served
 }
 
 // liveCall is a live call the proxy serves through incoming.ServeLive: the
 // client's end (app), the proxy's tracked end of it, the app server behind.
+//
+// Its rows wait for events and for nothing else: one that never comes holds
+// the row to the test binary's deadline, whose panic names the row and the
+// line it waits at. A wait cut at the deadline less 5 s failed a row that
+// began inside those 5 s at its first wait, though nothing was wrong: a
+// parallel row begins only once the package's serial rows have run, which on
+// a loaded box took all but the last second of go test's 10 minutes, and a
+// live call's whole answer was then told as not recorded before its capture
+// had run.
 type liveCall struct {
 	app    net.Conn
 	proxy  *trackedConn
 	tr     *inflight
 	pm     *incoming.IngressProxyManager
 	served chan struct{}
-	// never fires at the test binary's deadline less 5 s: a hang that never
-	// ends fails there, not at a budget of its own (the tests run in
-	// parallel, so each has all of it).
-	never <-chan time.Time
 }
 
 func serveLiveCall(t *testing.T, h http.Handler) *liveCall {
@@ -576,11 +528,6 @@ func serveLiveCallWith(t *testing.T, synchronous bool, h http.Handler) *liveCall
 		defer close(lc.served)
 		lc.pm.ServeLive(context.Background(), lc.proxy, ln.Addr().String(), 8083)
 	}()
-	never := make(<-chan time.Time)
-	if d, ok := t.Deadline(); ok {
-		never = time.After(time.Until(d) - 5*time.Second)
-	}
-	lc.never = never
 	return lc
 }
 
@@ -593,7 +540,6 @@ func serveLiveCallWith(t *testing.T, synchronous bool, h http.Handler) *liveCall
 // Not parallel: the switch is the environment's.
 func serveTreeCall(t *testing.T, synchronous, real bool, h http.Handler) (lc *liveCall, handed <-chan string) {
 	t.Helper()
-	p, _ := provenTreeProxy(t)
 	srv := &http.Server{Handler: h}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -601,7 +547,15 @@ func serveTreeCall(t *testing.T, synchronous, real bool, h http.Handler) (lc *li
 	}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
-	addr := ln.Addr().String()
+	return serveTreeCallTo(t, synchronous, real, ln.Addr().(*net.TCPAddr))
+}
+
+// serveTreeCallTo is serveTreeCall to a listener the caller started, at
+// addr (this process's).
+func serveTreeCallTo(t *testing.T, synchronous, real bool, tcpAddr *net.TCPAddr) (lc *liveCall, handed <-chan string) {
+	t.Helper()
+	p, _ := provenTreeProxy(t)
+	addr := tcpAddr.String()
 	if real {
 		if err := p.SetRealDeps(context.Background(), []string{addr}); err != nil {
 			t.Fatal(err)
@@ -618,7 +572,7 @@ func serveTreeCall(t *testing.T, synchronous, real bool, h http.Handler) (lc *li
 		lc.pm.ServeLive(ctx, conn, upstream, port)
 	}
 	lc.app, lc.proxy = acceptedPair(t, lc.tr)
-	port := uint32(ln.Addr().(*net.TCPAddr).Port)
+	port := uint32(tcpAddr.Port)
 	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getppid()), AgentNsPid: uint32(os.Getppid())}
 	go func() {
 		defer close(lc.served)
@@ -627,11 +581,6 @@ func serveTreeCall(t *testing.T, synchronous, real bool, h http.Handler) (lc *li
 			kinds <- fmt.Sprintf("not served (served %v, err %v)", served, err)
 		}
 	}()
-	never := make(<-chan time.Time)
-	if d, ok := t.Deadline(); ok {
-		never = time.After(time.Until(d) - 5*time.Second)
-	}
-	lc.never = never
 	return lc, kinds
 }
 
@@ -650,11 +599,7 @@ func (lc *liveCall) waitClientFIN(t *testing.T) {
 		if _, st, ok := socketReceived(lc.proxy.raw); ok && st == unix.BPF_TCP_CLOSE_WAIT {
 			return
 		}
-		select {
-		case <-lc.never:
-			t.Fatalf("the client's FIN never reached the proxy: %s", lc.state())
-		case <-time.After(5 * time.Millisecond):
-		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

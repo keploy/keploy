@@ -121,9 +121,16 @@ type TestMockMapping struct {
 type ScopeReq struct {
 	Name string `json:"name"`
 	// Pid is the calling test WORKER's PID (e.g. Node process.pid, os.Getpid()).
-	// It keys the per-worker scope so parallel workers don't stomp each other
-	// (Design A). Optional: 0/omitted falls back to the single global scope
-	// (correct for sequential single-worker runs and suite-level).
+	// It keys the per-worker scope so two workers never overwrite one filter;
+	// it does not keep parallel tests apart. A replay narrows by it only in a
+	// run with the marks: every connection's view is then resolved from the
+	// app starts on every read, and a connection of a process the worker did
+	// not start (a shared app server) is served the one open test's mocks, or
+	// refused while more than one test is open. Without the marks a replay
+	// refuses a mapped test that begins with a pid (422): the test fails, and
+	// the replay with it, whatever the harness does with the answer.
+	// Optional: 0/omitted falls back to the single global scope, which
+	// narrows every connection (a sequential run, a shared app, suite-level).
 	Pid int `json:"pid,omitempty"`
 	// At is the runner's own clock for this boundary; zero means the agent stamps its read time.
 	At    time.Time `json:"at,omitzero"`
@@ -238,15 +245,22 @@ type ScopeNeed struct {
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during
 // which the named test made its outgoing calls. Record correlates captured
 // mocks into these windows to build mappings.yaml — by source PID when the
-// worker reported one (exact, parallel-safe), else by request timestamp.
+// worker reported one, else by request timestamp. The PID match is exact only
+// for a call the worker makes itself while one test of it is open: it is not
+// parallel-safe (see PID).
 type ScopeWindow struct {
 	Name  string    `json:"name"`
 	Start time.Time `json:"start"`
 	End   time.Time `json:"end"`
 	// PID is the reporting worker's PID (ScopeReq.Pid), 0 if none. When set,
-	// record attributes a captured mock to this window if the mock's own source
-	// PID resolves (up the /proc tree) to this worker — exact even when windows
-	// from parallel workers overlap in time.
+	// record attributes a captured mock to this window if the mock's source PID
+	// (the kernel PID of the caller, not walked up the /proc tree) is this
+	// worker's. Any other call (one from a child of the worker or from a
+	// shared app server, or one with no source PID) falls back to the time
+	// scan, which charges it to the latest-begun window open at that time,
+	// whatever worker's; and two windows open at once in one worker (parallel
+	// tests of one go test binary) share its PID, so the later-begun one takes
+	// both tests' calls.
 	PID     uint32    `json:"pid,omitempty"`
 	Dir     string    `json:"dir,omitempty"`
 	Suite   bool      `json:"suite,omitempty"`
@@ -261,6 +275,11 @@ type ScopeWindow struct {
 	// Outcome is the verdict the test's harness reported when it ended the
 	// scope (ScopeReq.Outcome); "" when it reported none.
 	Outcome string `json:"outcome,omitempty"`
+	// BeginRefused is, in a replay, why keploy refused the test at its begin,
+	// on a window with no extent and the failed Outcome: the replay then
+	// fails, whatever the test's harness did with the refusal and whatever
+	// its runner exits. "" when keploy refused nothing.
+	BeginRefused string `json:"beginRefused,omitempty"`
 	// Evidence is, under the proven wire, what keploy saw that failed the
 	// test at its end in a replay; nil when nothing did.
 	Evidence *ScopeEvidence `json:"evidence,omitempty"`
@@ -596,11 +615,41 @@ type ExactServing struct {
 	// Worker is, on the staging call, the set's worker scope
 	// (Mapping.Worker): the mocks no test case owns, each with its place
 	// (MockEntry.Place). The agent stages them with the pool, and each
-	// answers from its place in the set's run on (once the test case it is
-	// placed after has begun; from the start for an empty place), whether a
-	// test case is open or not, after the open test case's own, at most one
-	// request in the staging.
+	// answers from its place in the set's run on (once the run has reached
+	// the test case it is placed after, see Order; from the start for an
+	// empty place), whether a test case is open or not, after the open test
+	// case's own, at most one request in the staging.
 	Worker []MockEntry `json:"worker,omitempty"`
+	// Order is, on the staging call, every test case of the set in the order
+	// the run takes them up: recorded order, with the streaming test cases
+	// (which the replay runs after the rest) last. It holds the ones the run
+	// will not open too: those a --testcase selection leaves out, quarantined
+	// or ignored ones, and those refused or failed unsent. When a test case
+	// opens, the run has passed every test case before it in Order, opened
+	// or not, so the worker-scope mocks placed after any of them answer from
+	// then on: a place at a test case the run skipped is reached all the
+	// same. A test case after the open one in Order is not passed until a
+	// later one opens or a pass of the run ends (Passed), and a test case
+	// that is not in Order is reached only as it opens. An agent that
+	// predates it ignores it and reaches a place only when its test case
+	// opens: a worker mock placed at a skipped test case then answers no
+	// call, as before.
+	Order []string `json:"order,omitempty"`
+	// Passed is, on a call that serves the pool (no Stage, no Test), how
+	// many test cases of Order, from its start, the run has passed. The
+	// replay sends it as a pass of the set's run ends: its main loop (the
+	// test cases before the streaming ones, or all of Order when no
+	// streaming pass follows), and its streaming pass (all of Order). So a
+	// test case the run skipped after the last one it opened (a quarantined
+	// last test case, a --testcase selection that ends before the set does,
+	// a skipped one before the streaming pass) reaches the worker-scope
+	// mocks placed after it, for the calls the application makes after its
+	// last test case. One no greater than what the run has passed already
+	// passes nothing more, and one greater than Order's length passes all
+	// of it. An agent that predates it ignores it and serves the pool
+	// again: a place at a test case skipped after the last one opened then
+	// answers no call, as before.
+	Passed int `json:"passed,omitempty"`
 	// Concurrent is, on a call that opens a test case (Test), the
 	// recordings it may answer with beside Owned: those recorded while its
 	// request and other tests' requests were open together, which keploy
@@ -1063,6 +1112,11 @@ type StreamEndSummary struct {
 	// recorded as a test case. Connections, not calls: the agent relays them
 	// without reading the calls, so a keep-alive connection counts once.
 	UnnamedCallerConns uint64 `json:"connections_from_unnamed_callers,omitempty"`
+	// TLSRelayedConns: connections to the app that opened with a TLS
+	// handshake, which the agent relayed to the app's own TLS unread: their
+	// calls are encrypted, so none was recorded as a test case. Connections,
+	// not calls: a keep-alive connection counts once.
+	TLSRelayedConns uint64 `json:"connections_relayed_tls,omitempty"`
 	// Unsettled: test cases saved before the agent had parsed all the
 	// traffic they overlap.
 	Unsettled int `json:"tcs_released_unsettled"`

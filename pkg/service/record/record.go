@@ -54,12 +54,6 @@ const (
 	// — is what signals the tail is through. Sized well above the agent's
 	// per-mapping flush latency so a slow flush is not mistaken for completion.
 	mappingIdleGrace = 3 * time.Second
-
-	// afterRecordingHookTimeout bounds the end-of-recording hook (issue #1867) so a
-	// wedged consumer cannot hang teardown. Matches the 30s stall bound of the
-	// drains (DrainErrGroupProgress) in the same teardown defer. It is the hook context's only deadline (WithoutCancel
-	// drops the upstream one), and consumers are expected to honor it.
-	afterRecordingHookTimeout = 30 * time.Second
 )
 
 // stopTimer disarms t, draining its channel if it had already fired, so a later
@@ -1132,20 +1126,14 @@ func (r *Recorder) afterRecordingComplete(ctx context.Context, testSetID string)
 		}
 	}()
 	// The recorder ctx is already cancelled on the normal SIGINT stop of an
-	// interactive recording (the teardown defer above runs under a cancelled ctx).
-	// Decouple the hook from that cancellation (context.WithoutCancel) so a
-	// legitimate post-record pass is not skipped — but re-impose a fresh bound so a
-	// wedged hook cannot hang teardown, matching the 10s NotifyGracefulShutdown and
-	// 30s drain bounds in this same defer. WithoutCancel keeps request-scoped values
-	// while dropping the upstream cancellation AND deadline, so this WithTimeout is
-	// the hook's only deadline; consumers are expected to honor it (the enterprise
-	// re-key does — keploy/enterprise#2536).
-	hookCtx, cancelHook := context.WithTimeout(context.WithoutCancel(ctx), afterRecordingHookTimeout)
-	defer cancelHook()
-	if hookErr := r.hooks.AfterRecordingComplete(hookCtx, &RecordingCompleteContext{
+	// interactive recording (the teardown defer above runs under a cancelled
+	// ctx); RunAfterRecordingHook gives the hook a context without that
+	// cancellation, and without a deadline: the pass runs in full however
+	// loaded the machine is, and a second interrupt, once offered, stops it.
+	if hookErr := RunAfterRecordingHook(ctx, r.logger, r.hooks, &RecordingCompleteContext{
 		TestSetID: testSetID,
 		Path:      r.config.Path,
-	}); hookErr != nil {
+	}, r.noticeEvery()); hookErr != nil {
 		r.logger.Error("AfterRecordingComplete hook failed; recording is saved but a post-record pass may be incomplete. Check your RecordHooks implementation.",
 			zap.Error(hookErr), zap.String("testSetID", testSetID))
 	}

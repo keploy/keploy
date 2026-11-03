@@ -240,11 +240,7 @@ func stopFindsItPending(t *testing.T, mgr *syncMock.SyncMockManager, where strin
 // capture could go on, and that the stop then has nothing more to wait for.
 func builtAndHandedOn(t *testing.T, pm *IngressProxyManager, mgr *syncMock.SyncMockManager, done chan struct{}) {
 	t.Helper()
-	select {
-	case <-done:
-	case <-never(t):
-		t.Fatal("the ingress did not finish its exchange")
-	}
+	<-done
 	pm.captures.Wait()
 	if n := len(pm.tcChan); n != 1 {
 		t.Fatalf("%d test cases reached the queue, want the exchange's 1", n)
@@ -317,11 +313,7 @@ func TestAStopWaitsForAnExchangeWhoseHandlerWaitsAfterItsWrite(t *testing.T) {
 					close(goOn)
 				}
 			})
-			select {
-			case <-parked:
-			case <-never(t):
-				t.Fatal("the handler did not go on past its write")
-			}
+			<-parked
 			stopFindsItPending(t, mgr, "the handler waits after its write")
 			goneOn = true
 			close(goOn)
@@ -407,13 +399,8 @@ func TestAClientThatLeftBeforeTheAnswersEndLeavesNoNoteForAStop(t *testing.T) {
 			} else {
 				_ = client.Close()
 			}
-			for _, c := range []chan struct{}{gone, served} {
-				select {
-				case <-c:
-				case <-never(t):
-					t.Fatal("the exchange did not end once its client went")
-				}
-			}
+			<-gone
+			<-served
 			pm.captures.Wait()
 			if n := len(pm.tcChan); n != 0 {
 				t.Fatalf("%d test cases reached the queue from an exchange whose client went before its answer's end", n)
@@ -467,14 +454,8 @@ func TestAClientThatLeavesOnceTheAnswerArrivedWholeIsRecorded(t *testing.T) {
 			left := make(chan struct{})
 			saved := bodyReading
 			bodyReading = func(int) {
-				for _, c := range []chan struct{}{left, told} {
-					select {
-					case <-c:
-					case <-never(t):
-						t.Error("the client did not go, or the app was not told of it")
-						return
-					}
-				}
+				<-left
+				<-told
 			}
 			t.Cleanup(func() { bodyReading = saved })
 
@@ -500,6 +481,15 @@ func TestAClientThatLeavesOnceTheAnswerArrivedWholeIsRecorded(t *testing.T) {
 				_ = client.Close()
 				<-served
 			})
+			// The hook waits on left: a row that fails before it closes left
+			// lets it go here, ahead of the wait for the handler above.
+			t.Cleanup(func() {
+				select {
+				case <-left:
+				default:
+					close(left)
+				}
+			})
 			if _, err := client.Write([]byte("GET /whoami HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
 				t.Fatal(err)
 			}
@@ -516,11 +506,7 @@ func TestAClientThatLeavesOnceTheAnswerArrivedWholeIsRecorded(t *testing.T) {
 			}
 			_ = client.Close()
 			close(left)
-			select {
-			case <-served:
-			case <-never(t):
-				t.Fatal("the exchange did not end once its client went")
-			}
+			<-served
 			pm.captures.Wait()
 			if n := len(pm.tcChan); n != 1 {
 				t.Fatalf("%d test cases reached the queue from an exchange whose app answered whole before its client went, want 1", n)
@@ -622,22 +608,14 @@ func holdAtTheCount(t *testing.T) (parked chan struct{}, goOn func()) {
 // atTheCount waits until the handler is held right after its count.
 func atTheCount(t *testing.T, parked chan struct{}) {
 	t.Helper()
-	select {
-	case <-parked:
-	case <-never(t):
-		t.Fatal("the handler did not count its exchange's loss")
-	}
+	<-parked
 }
 
 // nothingRecordedAndNothingLeft checks the exchange whose loss was counted
 // reached no queue, and that a stop then has nothing to wait for.
 func nothingRecordedAndNothingLeft(t *testing.T, pm *IngressProxyManager, mgr *syncMock.SyncMockManager, done chan struct{}) {
 	t.Helper()
-	select {
-	case <-done:
-	case <-never(t):
-		t.Fatal("the ingress did not finish its exchange")
-	}
+	<-done
 	pm.captures.Wait()
 	if n := len(pm.tcChan); n != 0 {
 		t.Fatalf("%d test cases reached the queue from an exchange counted as lost", n)

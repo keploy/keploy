@@ -322,7 +322,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	actualPort := appPort
 
 	// Dial Upstream
-	upConn, err := dialIngressTarget(ctx, finalAppAddr, ingressTargetListenTimeout)
+	upConn, err := pm.dialApp(ctx, finalAppAddr, clientConn)
 	if err != nil {
 		pm.logAppDialFailure(logger, "Failed to connect to upstream application. Verify the application is listening on the resolved address.",
 			err, zap.String("final_app_addr", finalAppAddr))
@@ -1191,11 +1191,11 @@ func writeBadRequest(c net.Conn) {
 func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientConn net.Conn, upConn net.Conn, logger *zap.Logger, t chan *models.TestCase, appPort uint16, forceClose bool, releaseSlot func()) {
 	logger.Debug("Using request-framed HTTP/1.1 proxy with MSG_PEEK pool liveness")
 
+	// A redial goes to the address the first dial reached, and its family
+	// (appNetwork: tcp6 for an IPv6 upstream), but never off the host: one
+	// to an interface's address the namespace no longer has is not made
+	// (dialHere), and fails the call at ERROR.
 	upstreamAddr := upConn.RemoteAddr().String()
-	// Capture the network family of the original conn so redial uses
-	// the same one — hard-coding "tcp4" would break against an IPv6
-	// upstream and could mismatch a "tcp" dual-stack listener.
-	upstreamNetwork := upConn.RemoteAddr().Network()
 
 	// upConnHolder lets the ctx-cancel + function-exit goroutines safely
 	// close whatever the CURRENT upstream conn is, without racing with
@@ -1344,13 +1344,12 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		if h := upConnHolder.Load(); h != nil {
 			_ = h.c.Close()
 		}
-		// DialContext (instead of DialTimeout) so an in-flight dial
-		// also gets cancelled when the parent ctx fires. The derived
-		// 3s deadline preserves the original per-dial timeout.
-		dialCtx, cancelDial := context.WithTimeout(ctx, 3*time.Second)
-		defer cancelDial()
-		var d net.Dialer
-		newConn, err := d.DialContext(dialCtx, upstreamNetwork, upstreamAddr)
+		// As the first dial (dialApp): no time ends it, only ctx or the
+		// client's going, and an app that restarts is waited for. A 3 s
+		// budget here timed out redials to a listener that existed on a
+		// loaded host (a SYN its full accept queue dropped is retried at
+		// 1 s and then 3 s) as "i/o timeout", an ERROR even while stopping.
+		newConn, err := pm.dialApp(ctx, upstreamAddr, clientConn)
 		if err != nil {
 			return err
 		}
@@ -1507,8 +1506,14 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			logger.Debug("Stale upstream pool entry detected (FIN in queue); redialing",
 				zap.String("upstream", upstreamAddr))
 			if err := redial(); err != nil {
-				if pm.mockMode {
-					logger.Debug("the app is not listening after a restart; closing the call as the app would", zap.String("upstream", upstreamAddr), zap.Error(err))
+				// The redial waits for an app that restarts (dialApp), so it
+				// ends without a connection only when keploy's context ends,
+				// the client goes, the recording stops, or the dial fails
+				// otherwise. keploy mock says that at DEBUG, but for an app
+				// that listens only where no connection reaches it.
+				var unreachable *appUnreachableError
+				if pm.mockMode && !errors.As(err, &unreachable) {
+					logger.Debug("the redial of a stale pooled connection to the app ended without a connection; closing the call as the app would", zap.String("upstream", upstreamAddr), zap.Error(err))
 				} else {
 					pm.logAppDialFailure(logger, "Upstream redial after stale-detect failed. Verify the application is still listening on the resolved address and that the network path between the agent and upstream is healthy.",
 						err, zap.String("upstream", upstreamAddr))

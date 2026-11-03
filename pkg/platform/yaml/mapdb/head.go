@@ -99,9 +99,9 @@ type Unkept struct {
 // entry naming renames[n], and an old entry whose mock renames lacks has no
 // new entry: the rewrite did not carry that call, and a new entry that holds
 // the name n now is another call, so a hand edit never moves to it
-// (Unkept.Dropped). enterprise's per-test commit passes the map it renames
-// the carried mocks with, {"mock-1": "mock-3"} for a call recorded as mock-1
-// it carries past a new recording's mock-0 to mock-2.
+// (Unkept.Dropped). A caller that keeps the names of the mocks it carries
+// passes the identity map of them, {"mock-1": "mock-1"}; one that renames
+// them passes {old: new}, e.g. {"mock-1": "mock-3"}.
 func EncodeOver(mapping *models.Mapping, old []byte, renames map[string]string) ([]byte, Unkept, error) {
 	return encodeYAMLOver(mapping, old, renames, headerAlways)
 }

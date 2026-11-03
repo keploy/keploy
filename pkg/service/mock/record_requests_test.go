@@ -313,6 +313,10 @@ type hookSpy struct {
 	mu       sync.Mutex
 	calls    []string
 	complete []rec.RecordingCompleteContext
+	// stoppable says, for each AfterRecordingComplete, whether its context
+	// can end (a second interrupt stops the pass through it) and has no
+	// deadline.
+	stoppable []bool
 }
 
 func (h *hookSpy) add(s string) {
@@ -341,10 +345,12 @@ func (h *hookSpy) AfterMockInsert(_ context.Context, info *rec.MockContext) erro
 	return nil
 }
 
-func (h *hookSpy) AfterRecordingComplete(_ context.Context, info *rec.RecordingCompleteContext) error {
+func (h *hookSpy) AfterRecordingComplete(ctx context.Context, info *rec.RecordingCompleteContext) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.complete = append(h.complete, *info)
+	_, hasDeadline := ctx.Deadline()
+	h.stoppable = append(h.stoppable, ctx.Done() != nil && !hasDeadline && ctx.Err() == nil)
 	return nil
 }
 
@@ -366,8 +372,81 @@ func TestRecordPassesCasesAndMocksThroughTheHooks(t *testing.T) {
 	require.ElementsMatch(t, []string{"before-case set test-1", "after-case set test-1", "before-mock set.keploy-staging mock-0", "after-mock set.keploy-staging mock-0"}, hooks.calls)
 	require.Less(t, slices.Index(hooks.calls, "before-case set test-1"), slices.Index(hooks.calls, "after-case set test-1"))
 	require.Equal(t, []rec.RecordingCompleteContext{{TestSetID: "set", Path: cfg.Path}}, hooks.complete)
+	// The post-record pass runs as keploy record's does
+	// (rec.RunAfterRecordingHook): live, with no deadline, and under a
+	// context a second interrupt can end, so a long pass can be stopped.
+	require.Equal(t, []bool{true}, hooks.stoppable, "the hook's context is live, has no deadline, and can be ended")
 	_, err := os.Stat(filepath.Join(dir, "set", "mappings.yaml"))
 	require.NoError(t, err, "the hook ran after the mappings were written")
+}
+
+// stopAtOfferHook is a post-record pass the user stops: it waits for the
+// stop's offer to end it (rec.RunAfterRecordingHook), presses Ctrl+C again,
+// and returns once its context has ended, with the cause it ended with.
+type stopAtOfferHook struct {
+	rec.BaseRecordHooks
+	logs    *observer.ObservedLogs
+	pressed bool
+	cause   error
+	failure string
+}
+
+func (h *stopAtOfferHook) AfterRecordingComplete(ctx context.Context, _ *rec.RecordingCompleteContext) error {
+	deadline := time.Now().Add(30 * time.Second) // bounds only a stop that never offers
+	for h.logs.FilterMessageSnippet("press Ctrl+C again to stop it now").Len() == 0 {
+		if time.Now().After(deadline) {
+			h.failure = "the stop never offered to end the post-record pass"
+			return nil
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if ctx.Err() != nil {
+		h.failure = fmt.Sprintf("the pass's context ended before the user's second interrupt: %v", context.Cause(ctx))
+		return nil
+	}
+	h.pressed = utils.MarkInterruptedAgain()
+	select {
+	case <-ctx.Done():
+		h.cause = context.Cause(ctx)
+	case <-time.After(30 * time.Second): // bounds only a press that never ends the pass
+		h.failure = "the user's press after the offer never ended the pass's context"
+	}
+	return nil
+}
+
+// keploy mock record runs the post-record pass as keploy record does: with
+// no deadline, so a long pass is waited for, and, once the run was
+// interrupted, the stop offers that another Ctrl+C stops the pass now. That
+// press ends the pass's context with rec.ErrHookStoppedNow as its cause.
+// Before, the pass ran under the record's persistCtx, which nothing ends:
+// only SIGKILL stopped a long one.
+func TestRecordAPressAtTheOfferStopsThePostRecordPass(t *testing.T) {
+	defer func(d time.Duration) { mockDrainNotice = d }(mockDrainNotice)
+	mockDrainNotice = 20 * time.Millisecond
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted(); utils.ErrCode = 0 })
+	instr := newRunnerInstr(t, sequentialMarks()...)
+	instr.incoming = []*models.TestCase{caseAt("test-1", runnerT0.Add(5*time.Millisecond))}
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(6*time.Millisecond))}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+	cfg.Path = t.TempDir()
+	withRequests(cfg)
+	core, logs := observer.New(zapcore.InfoLevel)
+	hook := &stopAtOfferHook{logs: logs}
+	svc := New(zap.New(core), instr, stubMockDB{}, mapdb.New(zap.NewNop(), t.TempDir(), ""), nil, hook, cfg)
+	svc.(TestDBSetter).SetTestDB(&memTestDB{})
+	utils.MarkInterrupted() // the stop
+
+	require.NoError(t, svc.Record(context.Background()))
+
+	require.Empty(t, hook.failure, "%s: %v", hook.failure, logs.All())
+	require.True(t, hook.pressed, "the user's press after the offer did not stop the post-record pass")
+	require.ErrorIs(t, hook.cause, rec.ErrHookStoppedNow, "the pass's context ended with the cause of the user's stop")
+	require.Equal(t, 1, logs.FilterMessageSnippet("Stopping the post-record pass now").FilterField(zap.String("testSetID", "set")).Len(),
+		"the stop says once that the second interrupt stopped the pass: %v", logs.All())
+	require.False(t, utils.MarkInterruptedAgain(), "the offer to stop the pass still stands after the pass ended")
 }
 
 func TestCorrelateCasesPairsAMockWithACaseOfTheSameFlowAcrossEntries(t *testing.T) {

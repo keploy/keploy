@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
@@ -210,101 +211,64 @@ func TestAParkedCallToAPortKeployDidNotMoveIsClosed(t *testing.T) {
 	}
 }
 
-// boundAtWait starts g's forwarder for orig (the app moved to newPort, which
-// does not listen) and returns whether orig was bound when the forwarder's
-// wait for the app began, then stops it.
-func boundAtWait(t *testing.T, pm *IngressProxyManager) bool {
-	t.Helper()
-	orig := portOf(t, freeAddr(t))
-	newPort := portOf(t, freeAddr(t))
-	bound := make(chan bool, 1)
-	saved := ingressTargetWait
-	t.Cleanup(func() { ingressTargetWait = saved })
-	ingressTargetWait = func(context.Context, uint16, string, time.Duration) (bool, error) {
-		c, err := net.Dial("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(orig))))
-		if err == nil {
-			_ = c.Close()
-		}
-		bound <- err == nil
-		return true, nil
-	}
+// The forwarder starts, and is registered with the hold, at once, whether or
+// not the app listens on its moved port yet: a call that comes before the app
+// listens waits for it in its dial (dialApp), and is answered once it does.
+// The forwarder used to wait up to 3 s for the app first, on 25 ms dials that
+// a loaded host timed out against an app that listened, with a false WARN,
+// and opened and closed a connection to the app on each start.
+func TestAForwarderStartsAtOnceAndItsCallsWaitForTheApp(t *testing.T) {
+	stubIngressPaused(t, func() bool { return false })
+	// The call's capture is waited for below: the forwarder's goroutine,
+	// which nothing joins, starts it after it answers, and pm.captures.Wait
+	// in the cleanup counts only a capture that started before it.
+	captured := make(chan string, 1)
+	stubCaptureHook(t, func(_ context.Context, _ *zap.Logger, _ chan *models.TestCase,
+		req *http.Request, _ *http.Response, _ time.Time, _ time.Time,
+		_ models.IncomingOptions, _ bool, _ bool, _ uint16) {
+		captured <- req.URL.Path
+	})
+	holder := &fakePortHolder{held: true}
+	core, logs := observer.New(zapcore.WarnLevel)
+	pm := &IngressProxyManager{logger: zap.New(core), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
+	t.Cleanup(pm.captures.Wait)
+	ctx, cancel := context.WithCancel(syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop())))
+	defer cancel()
+	app := sharedAppAddr(t) // the app has not listened yet
+	orig := uint16(testnet.ReservedPort(t))
 	g := newGoTCPIngressHook(pm)
-	if err := g.StartIngress(context.Background(), orig, newPort); err != nil {
+	if err := g.StartIngress(ctx, orig, portOf(t, app)); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = g.StopIngress(orig) })
-	return <-bound
-}
+	holder.mu.Lock()
+	registered := holder.registered[orig] != nil
+	holder.mu.Unlock()
+	if !registered {
+		t.Fatal("the forwarder was not registered with the hold before the app listened")
+	}
 
-func freeAddr(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	c, err := net.Dial("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(orig))))
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
-	return addr
-}
-
-// The forwarder binds the app's port before it waits for the app to listen
-// on its moved one. Without a hold (a kernel without sk_lookup), nothing
-// covers the port during that wait: a call in it then waits in the backlog
-// instead of being refused. With a hold, binding first finds at once a port
-// another listener holds already, for the hold to yield it.
-func TestTheForwarderBindsBeforeItsWait(t *testing.T) {
-	unheld := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1)}
-	if !boundAtWait(t, unheld) {
-		t.Fatal("with nothing holding the port, the forwarder had not bound it when its wait for the app began")
+	defer func() { _ = c.Close() }()
+	answered := callAndRead(t, c, "/")
+	awaitWaiters(t, pm, app, 1)
+	ln := testnet.ListenShared(t, "tcp4", app)
+	srv := &http.Server{Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	if status := <-answered; status != "200 OK" {
+		t.Fatalf("a call that came before the app listened: %s, want the app's answer", status)
 	}
-	// Hooks that can hold ports but hold none on this kernel are no hold.
-	failed := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1),
-		portHolder: &fakePortHolder{held: false}}
-	if !boundAtWait(t, failed) {
-		t.Fatal("with a hold that did not start, the forwarder had not bound the port when its wait for the app began")
+	select {
+	case <-captured:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call was not recorded")
 	}
-	held := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1),
-		portHolder: &fakePortHolder{held: true}}
-	if !boundAtWait(t, held) {
-		t.Fatal("with the port held, the forwarder had not bound it when its wait for the app began")
-	}
-}
-
-// A forwarder whose agent stops while it waits for the app (it bound the
-// port before the wait) releases the port and starts nothing: no forwarder
-// entry, nothing registered with the hold, and the port free for the next
-// run's app, held or not.
-func TestAForwarderCanceledInItsWaitReleasesThePort(t *testing.T) {
-	for _, held := range []bool{true, false} {
-		holder := &fakePortHolder{held: held}
-		pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
-		ctx, cancel := context.WithCancel(context.Background())
-		saved := ingressTargetWait
-		ingressTargetWait = func(context.Context, uint16, string, time.Duration) (bool, error) {
-			cancel() // the agent stops during the wait
-			return true, context.Canceled
-		}
-		orig := portOf(t, freeAddr(t))
-		g := newGoTCPIngressHook(pm)
-		err := g.StartIngress(ctx, orig, portOf(t, freeAddr(t)))
-		ingressTargetWait = saved
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("held %v: StartIngress canceled in its wait: %v, want context.Canceled", held, err)
-		}
-		g.mu.Lock()
-		_, started := g.forwarders[orig]
-		g.mu.Unlock()
-		holder.mu.Lock()
-		registered := len(holder.registered)
-		holder.mu.Unlock()
-		if started || registered != 0 {
-			t.Fatalf("held %v: a forwarder canceled in its wait started (%v) or was registered (%d)", held, started, registered)
-		}
-		ln, err := net.Listen("tcp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(int(orig))))
-		if err != nil {
-			t.Fatalf("held %v: the port of a forwarder canceled in its wait is not free: %v", held, err)
-		}
-		_ = ln.Close()
+	if all := logs.All(); len(all) != 0 {
+		t.Fatalf("logged %v, want nothing at WARN or above", all)
 	}
 }
 
@@ -636,12 +600,9 @@ func TestTheEndCountsTheHoldsIPv6CallsApart(t *testing.T) {
 func TestAForwarderIsRegisteredWithTheHoldAndUnregisteredWhenItStops(t *testing.T) {
 	holder := &fakePortHolder{held: true}
 	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
-	saved := ingressTargetWait
-	t.Cleanup(func() { ingressTargetWait = saved })
-	ingressTargetWait = func(context.Context, uint16, string, time.Duration) (bool, error) { return true, nil }
-	orig := portOf(t, freeAddr(t))
+	orig := uint16(testnet.ReservedPort(t))
 	g := newGoTCPIngressHook(pm)
-	if err := g.StartIngress(context.Background(), orig, portOf(t, freeAddr(t))); err != nil {
+	if err := g.StartIngress(context.Background(), orig, uint16(testnet.ReservedPort(t))); err != nil {
 		t.Fatal(err)
 	}
 	holder.mu.Lock()
@@ -817,7 +778,7 @@ func TestAParkedCallAndTheForwardersShareThePortsSynchronousSlot(t *testing.T) {
 		captured <- req.URL.Path
 	})
 	app, got, answer := heldUpstream(t)
-	orig := portOf(t, freeAddr(t))
+	orig := uint16(testnet.ReservedPort(t))
 	park := parkListener{Listener: loopbackListener(t), orig: int(orig)}
 	holder := &fakePortHolder{park: park, moved: map[uint16]uint16{orig: portOf(t, app)}, held: true}
 	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder, synchronous: true}
@@ -828,9 +789,6 @@ func TestAParkedCallAndTheForwardersShareThePortsSynchronousSlot(t *testing.T) {
 
 	for _, via := range []string{"park", "forwarder"} {
 		if via == "forwarder" {
-			saved := ingressTargetWait
-			t.Cleanup(func() { ingressTargetWait = saved })
-			ingressTargetWait = func(context.Context, uint16, string, time.Duration) (bool, error) { return true, nil }
 			g := newGoTCPIngressHook(pm)
 			if err := g.StartIngress(ctx, orig, portOf(t, app)); err != nil {
 				t.Fatal(err)

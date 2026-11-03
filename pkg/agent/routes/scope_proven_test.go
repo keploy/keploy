@@ -207,6 +207,16 @@ func TestAnAppStartNeedsANewIntegrationUnderTheWire(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), models.ScopeErrUpgradeIntegration) {
 		t.Fatalf("app start: %d %s", rec.Code, rec.Body.String())
 	}
+	// Its remedy names only the integrations of the wire that exist.
+	// Mutation: put back the old remedy, which named keploy-pytest and
+	// @keploy/jest, never published.
+	var got map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Equal(t, models.ScopeUpgradeRemedy, got["remedy"])
+	require.Contains(t, got["remedy"], "go-sdk keploytest for go test")
+	require.Contains(t, got["remedy"], "@keploy/playwright for Playwright")
+	require.NotContains(t, got["remedy"], "keploy-pytest")
+	require.NotContains(t, got["remedy"], "@keploy/jest")
 }
 
 // refusingSvc records what it was told was refused.

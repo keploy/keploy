@@ -796,7 +796,7 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	if !req.CanSkip || req.Suite {
 		return models.ScopeBeginResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrUpgradeIntegration,
 			"this test harness predates keploy's scope protocol v1: it cannot skip a test keploy quarantines, or it opens suite scopes",
-			"upgrade the keploy integration of your test framework (go-sdk keploytest, keploy-pytest, @keploy/jest)")
+			models.ScopeUpgradeRemedy)
 	}
 	if serr := oldWireFields(req); serr != nil {
 		return models.ScopeBeginResp{}, serr
@@ -813,14 +813,14 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		a.provenMu.Unlock()
 		return models.ScopeBeginResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
 			req.Name+" began before its test process claimed this keploy run, so keploy cannot tell that its calls are captured or mocked",
-			"upgrade the keploy integration of your test framework: it claims the run (POST /agent/instance) before its first test")
+			"have the test process claim the run before its first test: go-sdk keploytest and @keploy/playwright do; a framework with neither claims it by hand (POST /agent/instance with its package folder, relative to the project, as key)")
 	}
 	id := models.TestID(req.Project, req.File, a.proven.key, req.Name)
 	if open := a.proven.open; open != "" {
 		a.provenMu.Unlock()
 		return models.ScopeBeginResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrOneTestAtATime,
 			fmt.Sprintf("%s began while %s was still open: two tests ran at once in one test process", id, open),
-			"run them one at a time: start parallel tests with keploytest.Parallel and subtests with keploytest.Run (keploy mock codemod go writes them); parallel test workers arrive in a later keploy release")
+			"run them one at a time: in Go, start parallel tests with keploytest.Parallel and subtests with keploytest.Run, which take turns; elsewhere, end each test before the next one begins; parallel test workers arrive in a later keploy release")
 	}
 	reason, gated := a.proven.skip[id]
 	outcome := models.ScopeOutcomeGated
@@ -985,7 +985,7 @@ func oldWireFields(req models.ScopeReq) *models.ScopeError {
 	}
 	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrUpgradeIntegration,
 		"this test harness sends "+strings.Join(sent, ", ")+", which keploy's scope protocol v1 does not use: the claim names the test process, and keploy stamps each test's begin and end itself",
-		"upgrade the keploy integration of your test framework (go-sdk keploytest, keploy-pytest, @keploy/jest)")
+		models.ScopeUpgradeRemedy)
 }
 
 // ProvenEnd closes the open test. An end without an outcome counts as

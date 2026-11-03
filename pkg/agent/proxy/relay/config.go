@@ -519,7 +519,21 @@ type Config struct {
 	// client stopped taking it there, and the destination did not cut it
 	// short. It is called before the stream ends, and must not block. Nil is
 	// safe.
-	ClientStopped func()
+	//
+	// notTaken returns the start of what the client refused, from that
+	// chunk on, at most notTakenKept bytes: the chunks refused with it, and
+	// those refused after it, which the destination's forwarder goes on
+	// writing to the client, are in it once the stream ends, up to the first
+	// that reached the proxy after the client's FIN
+	// (fakeconn.Chunk.AfterClientClose): all of it was sent before the
+	// destination could know the client had closed, and none of it is the
+	// destination's answer to that. It may be called from any goroutine,
+	// and the caller must not change what it returns. A parser that reaches
+	// the end of the stream in the middle of a message reads in it whether
+	// the destination finished the message there, before the client's
+	// close reached it, with nothing the client did not have: a chunked
+	// body whose last chunk the client closed before.
+	ClientStopped func(notTaken func() []byte)
 }
 
 // withDefaults returns a copy of cfg with zero-valued optional fields

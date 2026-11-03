@@ -269,6 +269,7 @@ func reportPairing(ctx context.Context, input *req, x *models.Mock, a integratio
 		}
 	}
 	r := mismatch.NewReport(mismatch.ProtocolHTTP, input.method+" "+path).WithDestination(dest).Build()
+	r.Operation = models.HTTPOperationLabel(liveRequest(nil, input))
 	r.Answer, r.ClosestMock, r.NotOwned = models.AnswerProvisional, x.Name, true
 	r.ClosestMockReq = renderMockRequest(x.Spec.HTTPReq, x.Noise)
 	if repeat {

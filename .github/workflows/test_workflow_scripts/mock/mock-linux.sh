@@ -16,9 +16,10 @@
 # that hangs up on a quiet streaming answer from an app the test command
 # started ends its call, and its test's end does not wait on it. The
 # suite's harness speaks scope protocol v1 both ways (keploy_v1.py,
-# conftest_v1.py); without the switch it sends the worker's
-# pid, as today's workers do, and the record and the gated replay run again
-# with no pid (KEPLOY_E2E_NO_PID), the optional single shared pool.
+# conftest_v1.py); without the switch it sends no pid, as a suite that
+# marks no suite and no app start must (a replay refuses a test begun with a
+# pid without the marks: mock-parallel-linux.sh), so each test narrows the
+# one pid-less scope in turn.
 # MOCK_LANE_SWITCH (lane_switch.sh) picks the half a run runs; CI runs each in
 # a job of its own.
 #
@@ -213,36 +214,6 @@ grep -q "3 passed" ungated.log || { echo "FAIL: a harness that cannot skip shoul
 grep -q "asked to run only some tests, and did not" ungated.log || { echo "FAIL: keploy did not say the run was not the subset asked for"; FAIL=1; }
 grep -qx '    ungated: 2' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not count the 2 tests that ran outside the run list"; FAIL=1; }
 grep -q '^    gateNote: ' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not say the gate did not hold"; FAIL=1; }
-
-echo "== 1 and 2b' with no pid: the pid-less scope (KEPLOY_E2E_NO_PID) =="
-# The scope API without the switch also takes a begin and an end with no pid:
-# the optional single shared pool, which each test narrows in turn, where a
-# pid narrows only that worker's view. The record and the gated replay above,
-# again with a harness that sends no pid.
-start_dep
-sudo -E env PATH="$PATH" KEPLOY_E2E_NO_PID=1 "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e-nopid --disable-tele 2>&1 | tee rec-nopid.log
-RC=${PIPESTATUS[0]}
-stop_dep
-[ "$RC" -eq 0 ] && grep -q "3 passed" rec-nopid.log || { echo "FAIL: (no pid) the record should pass (exit 0, 3 passed), got $RC"; FAIL=1; }
-MOCKS=$(grep -c '^kind:' keploy/e2e-nopid/mocks.yaml 2>/dev/null)
-[ "${MOCKS:-0}" -eq 3 ] || { echo "FAIL: (no pid) expected 3 mocks, got ${MOCKS:-0}"; FAIL=1; }
-[ -f keploy/e2e-nopid/mappings.yaml ] || { echo "FAIL: (no pid) per-test mappings.yaml not written"; FAIL=1; }
-sudo -E env PATH="$PATH" KEPLOY_E2E_NO_PID=1 "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e-nopid --disable-tele 2>&1 | tee rep-nopid.log
-RC=${PIPESTATUS[0]}
-[ "$RC" -eq 0 ] && grep -q "3 passed" rep-nopid.log || { echo "FAIL: (no pid) the replay should pass entirely from mocks (exit 0, 3 passed), got $RC"; FAIL=1; }
-sudo -E env PATH="$PATH" KEPLOY_E2E_NO_PID=1 "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider -rs test_api.py" --name e2e-nopid --run-only test_users --disable-tele 2>&1 | tee gated-nopid.log
-RC=${PIPESTATUS[0]}
-[ "$RC" -eq 0 ] || { echo "FAIL: (no pid) a gated replay whose run tests pass should exit 0, got $RC"; FAIL=1; }
-grep -q "1 passed, 2 skipped" gated-nopid.log || { echo "FAIL: (no pid) pytest did not skip the two gated tests"; FAIL=1; }
-grep -qE 'SKIPPED \[[0-9]+\] [^ ]+: not in --run-only' gated-nopid.log || { echo "FAIL: (no pid) pytest did not skip with the gate's reason"; FAIL=1; }
-grep -q '^    gateNote:' keploy/e2e-nopid/last-replay.yaml && { echo "FAIL: (no pid) the receipt says the gate did not hold, though the harness skipped"; FAIL=1; }
-for t in test_items test_health; do
-  got=$(outcome_of "$t" e2e-nopid)
-  [ "$got" = "gated" ] || { echo "FAIL: (no pid) the replay gives gated $t the verdict '$got', want gated"; FAIL=1; }
-done
-[ "$(outcome_of test_users e2e-nopid)" = "passed" ] || { echo "FAIL: (no pid) the test the gate ran is not recorded as passed"; FAIL=1; }
-grep -qx '    gated: 2' keploy/e2e-nopid/last-replay.yaml || { echo "FAIL: (no pid) the receipt does not count 2 gated tests"; FAIL=1; }
-grep -qx '    gateReason: not in --run-only' keploy/e2e-nopid/last-replay.yaml || { echo "FAIL: (no pid) the receipt does not say why tests were gated"; FAIL=1; }
 
 echo "== 2c. a replay that lets calls reach real services proves nothing =="
 # --on-miss passthrough: any call the recording lacks goes to the real

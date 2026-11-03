@@ -1853,10 +1853,11 @@ func elsewhereCounts(own bool, windows integrations.TestWindows) func(*models.Mo
 	}
 }
 
-// variablePlaces is the leaf paths (learn.LeafPath) of m's variables'
-// request places, each bind and use (models.MockVariable): where a call of m
-// holds a value the application makes anew each run. err names a place keploy
-// cannot read.
+// variablePlaces is the leaf paths (learn.VariableLeafPath) of m's
+// variables' request places, each bind and use (models.MockVariable): where
+// a call of m holds a value the application makes anew each run. A word of a
+// field names the field's leaf, the whole of which is then excused. err
+// names a place keploy cannot read.
 func variablePlaces(m *models.Mock) (map[string]bool, error) {
 	names := make([]string, 0, len(m.Spec.Variables))
 	for name := range m.Spec.Variables {
@@ -1871,7 +1872,7 @@ func variablePlaces(m *models.Mock) (map[string]bool, error) {
 			places = append(places, v.Bind)
 		}
 		for _, p := range places {
-			path, ok := learn.LeafPath(p)
+			path, ok := learn.VariableLeafPath(m, p)
 			if !ok {
 				return nil, &unreadPlace{mock: m.Name, variable: name, place: p}
 			}
@@ -1991,11 +1992,13 @@ type learnRead struct {
 // and what the test's own answered, of one instant, and a claim is taken
 // only while the round is still at it (integrations.WithinRound). From any
 // other store, the reads one after another: the scope first, then the
-// tracker, so a mock a concurrent call consumed before the scope was read is
-// gone from the scope, and in the tracker's account (the store tells it
-// first: MockManager.observeServed). From a snapshot it reads the pass's
-// mark too (learnRead.call): the call's, of its first pass and of a pass
-// whose round the call caught up with (learnMatchIn).
+// tracker. Those two reads are not one instant: a store tells the tracker of
+// a consume once it went through (MockManager.observeServed), so a mock a
+// concurrent call is consuming as they run can be in neither. The agent
+// serves every proven replay under exact serving, from before it stages a
+// mock, so no replay reads this way. From a snapshot it reads the pass's mark
+// too (learnRead.call): the call's, of its first pass and of a pass whose
+// round the call caught up with (learnMatchIn).
 func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Tracker, live httpParts, liveShape learn.Shape, n learnNoise, pool bool) (learnRead, error) {
 	rev := storeRevision(mockDb)
 	if snap, ok := integrations.SnapshotRound(mockDb, integrations.RoundQuery{Tracker: tracker}); ok {

@@ -558,7 +558,7 @@ func (s *settlement) chargeUnconsumed(test string, u models.UnconsumedMock) {
 // call is the charge of a shared recording mock's call, with reason and note.
 func (s *settlement) call(mock, reason string, note *models.ConcurrentNote, why string) models.UnmatchedCall {
 	info := s.lookup[mock]
-	protocol, summary := info.protocol, info.summaryOf()
+	protocol, summary, operation := info.protocol, info.summaryOf(), models.MockOperation(info.onDisk)
 	if in := s.sp.info[mock]; in != nil && in.keys.Describe != nil {
 		if p, sum := in.keys.Describe(in.mock); p != "" {
 			protocol, summary = p, sum
@@ -571,10 +571,12 @@ func (s *settlement) call(mock, reason string, note *models.ConcurrentNote, why 
 		if summary == "" {
 			summary = models.MockSummaryFromSpec(in.mock)
 		}
+		operation = models.MockOperation(in.mock)
 	}
 	return models.UnmatchedCall{
 		Protocol:      protocol,
 		ActualSummary: summary,
+		Operation:     operation,
 		ClosestMock:   mock,
 		Kind:          models.MissInTest,
 		Reason:        reason,

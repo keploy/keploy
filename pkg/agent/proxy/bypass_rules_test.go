@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/internal/testnet"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -623,12 +624,7 @@ func TestKeployTestLooksAtTheServerOfARulePortWithNoMock(t *testing.T) {
 			if tc.serve != nil {
 				addr, conns, accepted = acceptingServer(t, tc.serve)
 			} else {
-				ln, err := net.Listen("tcp4", "127.0.0.1:0")
-				if err != nil {
-					t.Fatal(err)
-				}
-				addr = ln.Addr().String()
-				_ = ln.Close()
+				addr = testnet.RefusedAddr(t, "tcp")
 			}
 			_, portStr, _ := net.SplitHostPort(addr)
 			port, err := strconv.ParseUint(portStr, 10, 16)

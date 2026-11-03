@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -109,10 +110,10 @@ func TestAStartIsJudgedByTheAgentsOwnCountOfBeatsWithoutProgress(t *testing.T) {
 func TestAStalledStartSaysWhereItWas(t *testing.T) {
 	b := newBootLooks(t)
 	p := utils.BootProgress{Beat: 41, Seq: 9, Quiet: bootStallChecks, CountsQuiet: true, Step: "the proxy listens",
-		Stages: []utils.BootStage{{Name: "the UDP DNS server's bind", State: "D", Wait: "rtnl_lock"}, {Name: "the proxy's start", State: "S"}},
+		Stages: []utils.BootStage{{Name: "the proxy listener's start", State: "D", Wait: "rtnl_lock"}, {Name: "the proxy's start", State: "S"}},
 		Errors: 1, Error: "failed to attach the udp4 sendmsg hook"}
 	v, why := b.look(0, p, true, true)
-	want := "its start took no step across 30 of its beats, with no work in progress making progress; its last step: the proxy listens; in progress: the UDP DNS server's bind (its thread in an uninterruptible wait, in rtnl_lock), the proxy's start (its thread sleeping) (it logged 1 ERROR(s) while starting, the last: failed to attach the udp4 sendmsg hook)"
+	want := "its start took no step across 30 of its beats, with no work in progress making progress; its last step: the proxy listens; in progress: the proxy listener's start (its thread in an uninterruptible wait, in rtnl_lock), the proxy's start (its thread sleeping) (it logged 1 ERROR(s) while starting, the last: failed to attach the udp4 sendmsg hook)"
 	if v != bootStalled || why != want {
 		t.Fatalf("%v\n got: %s\nwant: %s", v, why, want)
 	}
@@ -651,12 +652,7 @@ func fastURILooks(t *testing.T) {
 // silence.
 func TestAnAgentURIWhereNothingAnswersIsGivenUpOn(t *testing.T) {
 	fastURILooks(t)
-	closed, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	uri := "http://" + closed.Addr().String() + "/agent"
-	_ = closed.Close()
+	uri := "http://" + testnet.RefusedAddr(t, "tcp") + "/agent"
 	core, logs := observer.New(zapcore.InfoLevel)
 	a := New(zap.New(core), nil, &config.Config{Agent: config.Agent{AgentURI: uri}})
 	select {
@@ -925,12 +921,7 @@ func TestTheWaitForARestartedAgentEndsOnItsFailedStart(t *testing.T) {
 	t.Cleanup(func() { utils.ErrCode = keepCode })
 	c := &scriptedContainer{}
 	c.install(t)
-	closed, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	uri := "http://" + closed.Addr().String() + "/agent"
-	_ = closed.Close()
+	uri := "http://" + testnet.RefusedAddr(t, "tcp") + "/agent"
 	a := clientFor(uri)
 	a.agentContainer = &namedContainer{name: "keploy-v3-test"}
 	c.set(true, utils.BootProgress{Beat: 2, Seq: 2, Failed: true, ExitCode: utils.ExitPrivilegeRequired, Failure: "failed to load eBPF"}, true)

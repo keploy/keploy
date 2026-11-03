@@ -43,7 +43,11 @@ func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // ownConnections returns rt sending each request on a connection of its own,
 // never one kept from an earlier request (http.Transport.DisableKeepAlives).
-// A RoundTripper it does not know is returned as it is.
+// That is for the requests on http and https, the ones a pool of keploy's
+// carries (ownPool): a request in a scheme the embedder registered goes to
+// the round tripper it registered, as it is, since that one and its
+// connections are the embedder's. A RoundTripper it does not know is
+// returned as it is.
 func ownConnections(rt http.RoundTripper) http.RoundTripper {
 	switch t := rt.(type) {
 	case nil:
@@ -56,13 +60,44 @@ func ownConnections(rt http.RoundTripper) http.RoundTripper {
 		c := *t
 		c.base = ownConnections(t.base)
 		return &c
+	case *ownPool:
+		return &ownPool{pool: noKeepAlives(t.pool), registered: t.registered}
 	case *http.Transport:
-		c := t.Clone()
-		c.DisableKeepAlives = true
-		return c
+		return &ownPool{pool: noKeepAlives(t), registered: t}
 	default:
 		return rt
 	}
+}
+
+// noKeepAlives is a clone of t that keeps no connection past its request.
+func noKeepAlives(t *http.Transport) *http.Transport {
+	c := t.Clone()
+	c.DisableKeepAlives = true
+	return c
+}
+
+// ownPool sends a request on http or https on pool, a clone of registered,
+// and a request in any other scheme to registered itself. Clone copies none
+// of the protocols registered on a transport (http.Transport.
+// RegisterProtocol), which is how a program that embeds keploy's client
+// serves an agent URI of its own scheme: k8s-proxy registers keploy-agent://
+// on http.DefaultTransport, whose round tripper puts a pod's token on the
+// request and sends it on as http. On the clone alone every request to such
+// a URI failed before it left the process: unsupported protocol scheme
+// "keploy-agent". Sent to registered, a scheme nothing registered fails there
+// with that same error, as it does on the clone.
+type ownPool struct {
+	pool *http.Transport
+	// registered is the transport the embedder registered its schemes on.
+	// Nothing here needs more of it than RoundTrip.
+	registered http.RoundTripper
+}
+
+func (t *ownPool) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL == nil || req.URL.Scheme == "http" || req.URL.Scheme == "https" {
+		return t.pool.RoundTrip(req)
+	}
+	return t.registered.RoundTrip(req)
 }
 
 // ownConnection is the agent's client with every request on a connection of
@@ -111,10 +146,11 @@ func agentHTTPClient(token string) http.Client {
 // connections close as the default pool's do, at its IdleConnTimeout, so a
 // client dropped holds none past it. A default transport that something
 // replaced with a RoundTripper of its own is used as it is: there is no pool
-// in it to copy.
+// in it to copy. A request in a scheme registered on the default transport
+// goes to it (ownPool).
 func agentPool() http.RoundTripper {
 	if t, ok := http.DefaultTransport.(*http.Transport); ok {
-		return t.Clone()
+		return &ownPool{pool: t.Clone(), registered: t}
 	}
 	return http.DefaultTransport
 }

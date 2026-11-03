@@ -472,13 +472,13 @@ func (s RoundSnapshot) Owner(m *models.Mock) RoundOwner {
 // names none, and pairs none, which only fails closed.
 func (s RoundSnapshot) CallRound() CallRound {
 	if s.SetUnstaged() {
-		return NewCallRound(s.At.Epoch, HoldsEvery).ReadAt(s.At).InStaging(true).InView(false, s.Background)
+		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(true).InView(false, s.Background)
 	}
 	// A test's view with a worker scope shows it the worker scope, as the
 	// store's MarkCallRound says (its sequence view's Worker).
 	worker := s.Test != "" && len(s.worker) > 0
 	if s.TrackerAhead() {
-		return NewCallRound(s.At.Epoch, HoldsEvery).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker)
+		return NewCallRound(s.At.Epoch, nil).HoldingEvery().ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker)
 	}
 	owners, ended := s.owners, s.endedOwn
 	return NewCallRound(s.At.Epoch, func(name string) bool {
@@ -490,6 +490,8 @@ func (s RoundSnapshot) CallRound() CallRound {
 // HoldsEvery holds every recording as a call's own (NewCallRound): the mark
 // of a call whose round's own recordings the store cannot tell
 // (RoundSnapshot.TrackerAhead). Its miss names no recording made elsewhere.
+// A store marks such a call with CallRound.HoldingEvery, which keeps that it
+// could not tell (CallRound.HoldsEveryRecording).
 func HoldsEvery(string) bool { return true }
 
 // Claimant is the test that took the shared recording m (OwnerSharedTaken).

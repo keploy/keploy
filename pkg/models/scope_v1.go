@@ -127,6 +127,14 @@ const (
 	ScopeErrInternal = "internal"
 )
 
+// ScopeUpgradeRemedy is the remedy of each ScopeErrUpgradeIntegration
+// refusal of a harness that predates the wire. It names only the
+// integrations of the wire that exist, and how a framework that has none
+// makes the wire's calls itself.
+const ScopeUpgradeRemedy = "use an integration that speaks keploy's scope protocol v1 (go-sdk keploytest for go test, @keploy/playwright for Playwright) and run one test process at a time; " +
+	"keploy has none for other frameworks, whose test process makes the calls by hand: it claims the run (POST /agent/instance with its package folder, relative to the project, as key) before its first test, " +
+	"then sends each test's begin with canSkip true, skips the test when the begin answers action skip, and sends its end, never with pid, at, dir or suite"
+
 // ScopeEvidence is what keploy saw of one replayed test that fails it: the
 // calls no recorded answer matched while it was open, or since the previous
 // test ended (a miss outside every test is charged to the next test that

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -286,9 +287,7 @@ func TestAgentHealthTickerWithAnswer_SendsTheReadyAnswerAndChecksTheGuard(t *tes
 	require.Equal(t, "Bearer not-the-session-token", <-probed,
 		"the check presented a credential that a guarded agent would accept, which would prove nothing")
 
-	gone := httptest.NewServer(http.NotFoundHandler())
-	goneURL := gone.URL
-	gone.Close()
+	goneURL := "http://" + testnet.RefusedAddr(t, "tcp") // nothing answers there, nor can come to
 	ended, end := context.WithCancel(context.Background())
 	nothing := make(chan http.Header, 1)
 	go AgentHealthTickerWithAnswer(ended, zap.NewNop(), goneURL+"/agent", nothing, 10*time.Millisecond)

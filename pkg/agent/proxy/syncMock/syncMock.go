@@ -515,6 +515,17 @@ type SyncMockManager struct {
 	// namespace, so that none of the calls they carried was recorded as a
 	// test case (NoteUnnamedCallerConn).
 	unnamedCallerConns atomic.Uint64
+	// tlsRelayedConns counts the connections to the app that opened with a
+	// TLS handshake, which the ingress relayed to the app's TLS unread, so
+	// that none of the calls they carried was recorded as a test case
+	// (NoteTLSRelayedConn).
+	tlsRelayedConns atomic.Uint64
+	// tlsRelayedSaid holds the app ports a TLS connection was relayed to
+	// since the recording session started (StartTLSRelayedSession): the
+	// session's first to each is said at WARN as it comes. tlsRelayedMu
+	// guards it, and orders each count against a session's start.
+	tlsRelayedMu   sync.Mutex
+	tlsRelayedSaid map[uint16]struct{}
 
 	// outChanClosedDrops counts mocks that were already counted in
 	// totalAdded (they passed the pressure gate) but were then dropped

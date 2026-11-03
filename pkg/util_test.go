@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -1245,7 +1247,11 @@ func TestCompressDecompress_AllEncodings_555(t *testing.T) {
 
 // TestReadAllCapped_556 exercises the capped reader directly: boundary
 // sizes, tiny limits below the initial buffer, and that buffer capacity
-// never overshoots limit+1 (the reason it replaced io.ReadAll+LimitReader).
+// never overshoots limit+1 rounded up to whole 8 KiB heap pages: for
+// limit+1 over 32 KiB, what the allocator gives a buffer of limit+1 bytes;
+// under it, up to a page more than the size class it would give, so that
+// what a decode reserves for its buffer is what it holds
+// (io.ReadAll+LimitReader, which it replaced, could keep twice limit+1).
 func TestReadAllCapped_556(t *testing.T) {
 	t.Run("Boundaries", func(t *testing.T) {
 		for _, tc := range []struct {
@@ -1271,7 +1277,8 @@ func TestReadAllCapped_556(t *testing.T) {
 				}
 				require.NoError(t, err)
 				assert.Equal(t, tc.size, int64(len(data)))
-				assert.LessOrEqual(t, int64(cap(data)), tc.limit+1, "capacity must never overshoot limit+1")
+				pages := (tc.limit + 1 + 8<<10 - 1) / (8 << 10) * (8 << 10)
+				assert.LessOrEqual(t, int64(cap(data)), pages, "capacity must never overshoot limit+1 in whole pages")
 			})
 		}
 	})
@@ -1981,10 +1988,7 @@ func TestSimulateHTTP_TargetFromURLLeavesTheRecordedAddressOut(t *testing.T) {
 	serverHost := strings.TrimPrefix(server.URL, "http://")
 
 	// The port the test was recorded on: nothing listens there any more.
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	recordedPort := uint16(l.Addr().(*net.TCPAddr).Port)
-	require.NoError(t, l.Close())
+	recordedPort := refusedPort(t)
 
 	newCase := func(appPort uint16) *models.TestCase {
 		return &models.TestCase{
@@ -2405,9 +2409,7 @@ func TestAgentHealthAnswer_IsOnlyAHealthyAnswersHeaders(t *testing.T) {
 	require.Nil(t, agentHealthAnswer(context.Background(), zap.NewNop(), &http.Client{}, answer(http.StatusServiceUnavailable)),
 		"the headers of a 503 were taken for the agent's")
 
-	gone := httptest.NewServer(http.NotFoundHandler())
-	goneURL := gone.URL
-	gone.Close()
+	goneURL := "http://" + testnet.RefusedAddr(t, "tcp") // nothing answers there, nor can come to
 	require.Nil(t, agentHealthAnswer(context.Background(), zap.NewNop(), &http.Client{}, goneURL+"/agent"),
 		"an address nothing answers on gave headers")
 }
@@ -2536,14 +2538,15 @@ func TestATestGoesToTheAppPortItWasRecordedOn(t *testing.T) {
 	}
 }
 
-// refusedPort is a port on 127.0.0.1 nothing listens on.
+// refusedPort is a port on 127.0.0.1 nothing listens on, held for the test's
+// life so that no other socket can take it (testnet.RefusedAddr).
 func refusedPort(t *testing.T) uint16 {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	_, p, err := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
 	require.NoError(t, err)
-	port := uint16(ln.Addr().(*net.TCPAddr).Port)
-	require.NoError(t, ln.Close())
-	return port
+	port, err := strconv.ParseUint(p, 10, 16)
+	require.NoError(t, err)
+	return uint16(port)
 }
 
 // unreachableAt says every address is one the app can never be reached at,

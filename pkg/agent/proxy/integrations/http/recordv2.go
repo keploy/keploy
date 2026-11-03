@@ -186,7 +186,11 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// (LeftOutClientClosedPartway): the client gave up on the call (its
 		// timeout) or wanted no more of it, and nothing tells which. Recorded
 		// as far as the client had it, a call that timed out at record would
-		// be served a complete-looking shorter response at replay. An
+		// be served a complete-looking shorter response at replay. Unless
+		// what it refused, of what the destination sent before the client's
+		// FIN reached the proxy, ended the response with framing alone
+		// (chunkedEndRefused): then it had every byte of content, and the
+		// exchange is whole. An
 		// observe-only capture carries only what the client read, so when its
 		// stream ended with the connection (EndedWithConnection) it is the
 		// client that stopped reading and closed, and the response is
@@ -217,21 +221,42 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			resTs = gotLastWritten
 		}
 		if streamEnded && sess.EndedWhereClientStopped() {
-			// The client closed the connection partway through the
-			// response: no whole exchange to record. Its stream has ended,
-			// and so has every answer after it. A mark on the
-			// incomplete-mock flag is a chunk the capture lost, the
-			// likelier cause, so the exchange is reported under it.
-			reason := supervisor.LeftOutClientClosedPartway
-			if mark, ok := sess.TakeMockIncomplete(); ok {
-				reason = mark + ": " + reason
+			whole, ok := chunkedEndRefused(finalResp, sess.NotTakenWhereClientStopped())
+			if !ok || sess.IsMockIncomplete() {
+				// The client closed the connection partway through the
+				// response: no whole exchange to record. Its stream has
+				// ended, and so has every answer after it. A mark on the
+				// incomplete-mock flag is a chunk the capture lost, the
+				// likelier cause, so the exchange is reported under it;
+				// and what the client refused does not follow on from
+				// what the stream holds across a chunk the capture lost,
+				// so it does not end the response then.
+				reason := supervisor.LeftOutClientClosedPartway
+				if mark, ok := sess.TakeMockIncomplete(); ok {
+					reason = mark + ": " + reason
+				}
+				logger.Debug("V2 HTTP record: the client closed the connection partway through the response; the exchange is left out")
+				sess.ReportLeftOut(&models.Mock{
+					Kind: models.HTTP,
+					Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
+				}, reason)
+				return nil
 			}
-			logger.Debug("V2 HTTP record: the client closed the connection partway through the response; the exchange is left out")
-			sess.ReportLeftOut(&models.Mock{
-				Kind: models.HTTP,
-				Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
-			}, reason)
-			return nil
+			// What the client refused was the end of the chunked body's
+			// framing alone, the last chunk, which a server that flushes
+			// its body writes only as its handler returns, and it reached
+			// the proxy before the client's FIN: the client had all the
+			// response carries, and closed before the last chunk came,
+			// which the destination wrote before it could know. The
+			// response is whole, and recorded so. A client whose own
+			// timeout fired in that gap closed the same way, and its call
+			// failed: nothing its stack did tells the two apart, so its
+			// call is recorded whole too, and at replay the app gets the
+			// response its call timed out on at record. A last chunk that
+			// reached the proxy after the client's FIN, as a streaming
+			// server writes one once its client has gone, ends nothing
+			// here: that exchange is left out above.
+			finalResp, streamEnded = whole, false
 		}
 
 		// Build and emit the mock. Identical shape to the legacy path.

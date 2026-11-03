@@ -3,7 +3,7 @@ package proxy
 import (
 	"testing"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
