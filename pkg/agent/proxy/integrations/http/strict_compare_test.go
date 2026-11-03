@@ -555,11 +555,13 @@ func TestStrictARedactedFormValueMayChange(t *testing.T) {
 	if got, _ := strictMatch(t, sent("/oauth/token", ct, "grant_type=password&client_secret=s3cr3t"), nil, nil, nil, rec); got != nil {
 		t.Fatal("another form value beside a redacted one was excused")
 	}
-	// A form of one key, whose key pattern matches the whole recorded body:
-	// the redacted value may change, but a key the recording lacks is still
-	// a change. Before, the whole body was skipped as one redacted value.
+	// A form of one key whose value the obfuscator redacted by its key (a
+	// pattern for the value and one for the key's segment, which matches the
+	// whole recorded body): the redacted value may change, but a key the
+	// recording lacks is still a change. Before, the whole body was skipped
+	// as one redacted value.
 	one := recorded("one", "/introspect", ct, "token=REDACTED-3")
-	one.Noise = []string{`^token=[^&]+$`}
+	one.Noise = []string{`^REDACTED-3$`, `^token=[^&]+$`}
 	if got, diag := strictMatch(t, sent("/introspect", ct, "token=s3cr3t"), nil, nil, nil, one); got == nil {
 		t.Fatalf("the redacted value of a one-key form was compared: %v", differs(diag))
 	}

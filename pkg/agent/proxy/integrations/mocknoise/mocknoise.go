@@ -315,6 +315,22 @@ func (e *Engine) userGuardedDrift(m *models.Mock, recorded, live *JSONBody, user
 	if len(learned) == 0 || !hasPatterns(userNoise) {
 		return nil
 	}
+	return e.patternDrift(m, recorded, live, userNoise)
+}
+
+// PatternDrift is the drift of every field of m's recorded body and
+// liveBody that keploy.yml's entry with patterns guards and that differs
+// under userNoise alone: a value outside the patterns on either side (where
+// the obfuscator redacted the recorded value, the live one), or a field the
+// live body lacks. A pass that excuses the obfuscator's redacted values (the HTTP
+// parser's noise-aware exact body match) serves m only when it is empty.
+func (e *Engine) PatternDrift(m *models.Mock, liveBody []byte, userNoise map[string][]string) map[string][]string {
+	recorded, _ := e.adapter.RecordedBody(m)
+	return e.patternDrift(m, NewJSONBody(recorded), NewJSONBody(liveBody), userNoise)
+}
+
+// patternDrift is PatternDrift over bodies already read.
+func (e *Engine) patternDrift(m *models.Mock, recorded, live *JSONBody, userNoise map[string][]string) map[string][]string {
 	var ud map[string][]string
 	if jd, isJSON := e.adapter.(JSONBodyDiffer); isJSON {
 		ud, _ = jd.DiffJSONBodies(m, recorded, live, userNoise, nil, false, e.adapter.RecordedValueIsNoise(m))

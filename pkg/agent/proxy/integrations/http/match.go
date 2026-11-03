@@ -368,7 +368,11 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		}
 
 		// Exact body match
-		ok, bestMatch := h.ExactBodyMatch(input.body, schemaMatched)
+		// A value the obfuscator redacted is excused there, but one that
+		// keploy.yml's request-body patterns guard holds the live value.
+		ok, bestMatch := h.exactBodyMatch(input.body, schemaMatched, func(m *models.Mock) bool {
+			return len(noiseEngine.PatternDrift(m, input.body, userBodyNoise)) == 0
+		})
 		if ok {
 			// Stateful dependency: when several recorded responses share this
 			// exact request (a counter, a created-then-read row), serve them in
@@ -475,6 +479,21 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 
 			// More than one match, perform fuzzy match
 			shortListed = bodyMatched
+		} else if schemaNoiseStrict {
+			// A body that is not JSON (a form) is value-checked only where
+			// keploy.yml's request-body patterns guard a field: they hold
+			// both values, or the live one where the obfuscator redacted
+			// the recorded one.
+			var held []*models.Mock
+			for _, m := range shortListed {
+				if len(noiseEngine.PatternDrift(m, input.body, userBodyNoise)) == 0 {
+					held = append(held, m)
+				}
+			}
+			if len(held) == 0 {
+				return false, nil, &matchDiag{phase: models.MatchPhaseStrict, candidates: len(comparedPool), schemaMatched: schemaMatched, pool: comparedPool}, nil
+			}
+			shortListed = held
 		}
 
 		h.Logger.Debug("Performing fuzzy match for req buffer")
@@ -1414,6 +1433,13 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 //     produce byte-identical request bodies at replay.
 //  3. JSON — field-by-field comparison via JSONBodyMatchScore.
 func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, *models.Mock) {
+	return h.exactBodyMatch(body, schemaMatched, func(*models.Mock) bool { return true })
+}
+
+// exactBodyMatch is ExactBodyMatch whose second pass, which excuses the
+// values the obfuscator redacted, matches a mock only when held allows it:
+// the replay holds keploy.yml's request-body patterns there (PatternDrift).
+func (h *HTTP) exactBodyMatch(body []byte, schemaMatched []*models.Mock, held func(*models.Mock) bool) (bool, *models.Mock) {
 	// Log all mock names in a single line for better readability
 	if ce := h.Logger.Check(zap.DebugLevel, "mocks under consideration for exact body match"); ce != nil {
 		ce.Write(zap.Strings("mock names", mockNamesOf(schemaMatched)), zap.Int("req body bytes", len(body)))
@@ -1456,7 +1482,7 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 
 		// If the entire body is a single noisy value, auto-match
 		// (schema match already filtered by URL, method, headers)
-		if nc.IsNoisy(mockBody) {
+		if nc.IsNoisy(mockBody) && held(mock) {
 			if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
 				ce.Write(zap.String("mock", mock.Name),
 					zap.Float64("match_percentage", 100.0),
@@ -1471,7 +1497,7 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 		// segment. The remaining keys must be the same set on both sides
 		// and each non-wildcarded value(s) must be byte-equal.
 		if reqIsForm && looksLikeFormEncoded(mockBody) {
-			if formBodiesMatchModuloNoise(mockBody, reqBodyStr, nc) {
+			if formBodiesMatchModuloNoise(mockBody, reqBodyStr, nc) && held(mock) {
 				if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
 					ce.Write(zap.String("mock", mock.Name),
 						zap.Float64("match_percentage", 100.0),
@@ -1511,7 +1537,7 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 		if matched == total {
 			// Verify the request has no extra non-noisy keys beyond
 			// what the mock defines — otherwise this isn't truly exact.
-			if !util.HasExtraNonNoisyKeys(mockData, reqData, nc) {
+			if !util.HasExtraNonNoisyKeys(mockData, reqData, nc) && held(mock) {
 				return true, mock
 			}
 		}
@@ -2083,6 +2109,33 @@ func isFormURLEncoded(header map[string]string) bool {
 	return false
 }
 
+// obfuscatedKey reports whether one of a recorded form key's raw values is in
+// a "key=value" segment the obfuscator's patterns match: per occurrence, on
+// the full raw segment, as Mock.Noise is read for form bodies.
+func obfuscatedKey(rawKey string, mv []string, isObfuscated func(string) bool) bool {
+	for _, v := range mv {
+		if isObfuscated(rawKey + "=" + v) {
+			return true
+		}
+	}
+	return false
+}
+
+// unobfuscated are the raw form values of mv the obfuscator did not redact,
+// in their order: each value it redacts matches a pattern of its own, as
+// it reads decoded.
+func unobfuscated(mv []string, isObfuscated func(string) bool) []string {
+	var out []string
+	for _, v := range mv {
+		// A value that does not unescape reads "", which no value the
+		// obfuscator redacted is.
+		if d, _ := url.QueryUnescape(v); !isObfuscated(d) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // formReqBodyNoise diffs two form-encoded bodies key-by-key and returns the
 // drifted/removed keys as body.<key> field-path noise. Keys covered by the
 // obfuscator value-regexes are skipped, and so are keys known with no
@@ -2112,31 +2165,26 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 	}
 	mockVals := rawValuesByKey(mockBody)
 	reqVals := rawValuesByKey(reqBody)
+	if isObfuscated == nil {
+		isObfuscated = func(string) bool { return false } // no value-regex noise on the mock
+	}
 
 	out := map[string][]string{}
 	for rawKey, mv := range mockVals {
 		key := "body." + rawKey
-		if pats, ok := known[key]; ok {
-			if len(pats) == 0 {
+		pats, ok := known[key]
+		if ok && len(pats) == 0 {
+			continue
+		}
+		if len(pats) > 0 {
+			// The patterns decide the key, before the obfuscator's
+			// exclusion: a recorded value it redacted is not held to them
+			// (it matches a pattern of its own), the key's other recorded
+			// values and the live ones are.
+			if rv, inLive := reqVals[rawKey]; inLive && formValuesMatch(unobfuscated(mv, isObfuscated), pats) && formValuesMatch(rv, pats) {
 				continue
 			}
-			if rv, inLive := reqVals[rawKey]; inLive && formValuesMatch(mv, pats) && formValuesMatch(rv, pats) {
-				continue
-			}
-		}
-		// Obfuscator exclusion is per-occurrence on the full raw key=value
-		// segment, matching how Mock.Noise is evaluated for form bodies.
-		// isObfuscated may be nil (no value-regex noise on the mock).
-		obfuscated := false
-		if isObfuscated != nil {
-			for _, v := range mv {
-				if isObfuscated(rawKey + "=" + v) {
-					obfuscated = true
-					break
-				}
-			}
-		}
-		if obfuscated {
+		} else if obfuscatedKey(rawKey, mv, isObfuscated) {
 			continue
 		}
 		rv, ok := reqVals[rawKey]

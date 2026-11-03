@@ -1,6 +1,7 @@
 package matcher
 
 import (
+	"reflect"
 	"sort"
 	"testing"
 )
@@ -142,6 +143,36 @@ func TestChangedJSONFieldPaths(t *testing.T) {
 				if got[i] != want[i] {
 					t.Fatalf("got %v, want %v", got, want)
 				}
+			}
+		})
+	}
+}
+
+// A recorded value the obfuscator redacted is not compared, but where an
+// entry with patterns guards the path the live value alone is held to them:
+// one outside them, or none, is a change; one inside them is not. A path no
+// pattern guards keeps the rule. Before, the redacted recorded value excused
+// the path whatever the live value.
+func TestChangedJSONFieldPathsHoldsTheLiveValueUnderARedactedRecording(t *testing.T) {
+	redacted := func(v string) bool { return v == "REDACTED_abc" }
+	guarded := map[string][]string{"token": {`^t-\d$`}}
+	rec := `{"token":"REDACTED_abc","n":1}`
+	for _, c := range []struct {
+		name  string
+		known map[string][]string
+		live  string
+		want  []string
+	}{
+		{"the live value inside", guarded, `{"token":"t-1","n":1}`, nil},
+		{"the live value outside", guarded, `{"token":"evil","n":1}`, []string{"token"}},
+		{"the live value of another type", guarded, `{"token":7,"n":1}`, []string{"token"}},
+		{"no live value", guarded, `{"n":1}`, []string{"token"}},
+		{"no pattern guards it", nil, `{"token":"evil","n":1}`, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := ChangedJSONFieldPaths(rec, c.live, c.known, nil, false, redacted)
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("changed %v; want %v", got, c.want)
 			}
 		})
 	}

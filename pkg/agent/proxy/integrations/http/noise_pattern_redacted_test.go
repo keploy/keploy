@@ -29,12 +29,15 @@ func TestARedactedRecordingHoldsTheLiveValueToKeployYmlPatterns(t *testing.T) {
 	token := map[string][]string{"token": {`^t-\d$`}}
 	key := map[string][]string{"X-Key": {`^k-\d$`}}
 	const redacted = `^REDACTED_abc$`
+	// The obfuscator's noise for a form value it redacts by its key: a
+	// pattern for the value and one for the key's segment.
+	byKey := []string{redacted, `^token=[^&]+$`}
 	for _, c := range []struct {
 		name                   string
 		bodyNoise, headerNoise map[string][]string
 		header, liveHeader     map[string]string
 		recBody, body          string
-		obfuscated             string
+		obfuscated             []string
 		served                 bool
 		field, why             string
 	}{
@@ -51,16 +54,35 @@ func TestARedactedRecordingHoldsTheLiveValueToKeployYmlPatterns(t *testing.T) {
 		{name: "a JSON field, the live value inside", bodyNoise: token, header: ct, recBody: `{"token":"REDACTED_abc","n":1}`, body: `{"token":"t-1","n":1}`, served: true},
 		{name: "a JSON field no pattern guards", header: ct, recBody: `{"token":"REDACTED_abc","n":1}`, body: `{"token":"evil","n":1}`, served: true},
 		{name: "a JSON field the live body lacks, no pattern guards", header: ct, recBody: `{"token":"REDACTED_abc","n":1}`, body: `{"n":1}`, served: true},
-		{name: "a form key, the live value outside", bodyNoise: token, header: form, recBody: `token=REDACTED_abc&x=a`, body: `token=evil&x=a`, obfuscated: `^token=REDACTED_abc$`,
+		{name: "a form key, the live value outside", bodyNoise: token, header: form, recBody: `token=REDACTED_abc&x=a`, body: `token=evil&x=a`, obfuscated: byKey,
 			field: "body.token", why: "the live value (a string of 4 bytes)"},
-		{name: "a form key, the live value inside", bodyNoise: token, header: form, recBody: `token=REDACTED_abc&x=a`, body: `token=t-1&x=a`, obfuscated: `^token=REDACTED_abc$`, served: true},
-		{name: "a form key no pattern guards", header: form, recBody: `token=REDACTED_abc&x=a`, body: `token=evil&x=a`, obfuscated: `^token=REDACTED_abc$`, served: true},
+		{name: "a form key, the live value inside", bodyNoise: token, header: form, recBody: `token=REDACTED_abc&x=a`, body: `token=t-1&x=a`, obfuscated: byKey, served: true},
+		{name: "a form key no pattern guards", header: form, recBody: `token=REDACTED_abc&x=a`, body: `token=evil&x=a`, obfuscated: byKey, served: true},
 		// A form of one key: the obfuscator's key pattern matches the whole
 		// recorded body, which the form reader still reads key by key.
-		{name: "a one-key form, the live value outside", bodyNoise: token, header: form, recBody: `token=REDACTED_abc`, body: `token=evil`, obfuscated: `^token=[^&]+$`,
+		{name: "a one-key form, the live value outside", bodyNoise: token, header: form, recBody: `token=REDACTED_abc`, body: `token=evil`, obfuscated: byKey,
 			field: "body.token", why: "the live value (a string of 4 bytes)"},
-		{name: "a one-key form, the live value inside", bodyNoise: token, header: form, recBody: `token=REDACTED_abc`, body: `token=t-1`, obfuscated: `^token=[^&]+$`, served: true},
-		{name: "a one-key form no pattern guards", header: form, recBody: `token=REDACTED_abc`, body: `token=evil`, obfuscated: `^token=[^&]+$`, served: true},
+		{name: "a one-key form, the live value inside", bodyNoise: token, header: form, recBody: `token=REDACTED_abc`, body: `token=t-1`, obfuscated: byKey, served: true},
+		{name: "a one-key form no pattern guards", header: form, recBody: `token=REDACTED_abc`, body: `token=evil`, obfuscated: byKey, served: true},
+		// The obfuscator writes a redacted form value escaped, its pattern
+		// on the value as it reads.
+		{name: "a one-key form, an escaped redacted value, the live value outside", bodyNoise: token, header: form, recBody: `token=REDACTED%2Fabc%3D`, body: `token=evil`,
+			obfuscated: []string{`^REDACTED/abc=$`, `^token=[^&]+$`}, field: "body.token", why: "the live value (a string of 4 bytes)"},
+		// A body the obfuscator redacted whole, under a form Content-Type: no
+		// key=value of it holds a value it redacted by its key, so it is one
+		// redacted value, as before, base64 padding read as a key or not.
+		{name: "a whole body redacted under a form Content-Type", bodyNoise: token, header: form, recBody: `REDACTED_abc`, body: `s3cr3t-tok`, served: true},
+		{name: "a whole base64 body redacted under a form Content-Type", bodyNoise: token, header: form, recBody: `UkVEQUNURUQ=`, body: `c2VjcmV0dG9r`,
+			obfuscated: []string{`^UkVEQUNURUQ=$`}, served: true},
+		// A key=value body under another Content-Type is not read as a
+		// form: the obfuscator's key pattern matches it whole, as before.
+		{name: "a key=value body under a text Content-Type, redacted by its key", bodyNoise: token, header: map[string]string{"Content-Type": "text/plain"},
+			recBody: `token=REDACTED_abc`, body: `token=evil`, obfuscated: byKey, served: true},
+		// A repeated key: the recorded values the obfuscator did not redact
+		// are held to the patterns, as the live ones are.
+		{name: "a repeated form key, a recorded value inside", bodyNoise: token, header: form, recBody: `token=REDACTED_abc&token=t-3`, body: `token=t-1&token=t-2`, obfuscated: byKey, served: true},
+		{name: "a repeated form key, a recorded value outside", bodyNoise: token, header: form, recBody: `token=REDACTED_abc&token=bbbbbbb`, body: `token=t-1&token=t-2`, obfuscated: byKey,
+			field: "body.token", why: "the recorded value (a string of 7 bytes)"},
 		{name: "a multipart field, the live value outside", bodyNoise: token, header: mp, recBody: part("REDACTED_abc"), body: part("evil"),
 			field: "body.token", why: "the live value (a string of 4 bytes)"},
 		{name: "a multipart field, the live value inside", bodyNoise: token, header: mp, recBody: part("REDACTED_abc"), body: part("t-1"), served: true},
@@ -73,8 +95,8 @@ func TestARedactedRecordingHoldsTheLiveValueToKeployYmlPatterns(t *testing.T) {
 			}
 			m := recorded("m", "/x", c.header, c.recBody)
 			m.Noise = []string{redacted}
-			if c.obfuscated != "" {
-				m.Noise = []string{c.obfuscated}
+			if c.obfuscated != nil {
+				m.Noise = c.obfuscated
 			}
 			got, diag := strictMatch(t, sent("/x", lh, c.body), c.headerNoise, requestBodyNoise(c.bodyNoise).Body, nil, m)
 			if (got != nil) != c.served {
@@ -83,7 +105,7 @@ func TestARedactedRecordingHoldsTheLiveValueToKeployYmlPatterns(t *testing.T) {
 			if c.served {
 				return
 			}
-			if why := whyOf(diag, c.field); !strings.Contains(why, c.why) || !strings.Contains(why, "vary only within") || strings.Contains(why, "evil") {
+			if why := whyOf(diag, c.field); !strings.Contains(why, c.why) || !strings.Contains(why, "vary only within") || strings.Contains(why, "evil") || strings.Contains(why, "bbbbbbb") {
 				t.Fatalf("reason %q for %s; want the pattern and %q, never the value (differs %v)", why, c.field, c.why, differs(diag))
 			}
 		})

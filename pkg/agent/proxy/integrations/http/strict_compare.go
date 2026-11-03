@@ -698,19 +698,20 @@ func (k strictKnown) bodyDiffs(r *models.HTTPReq, input *req) []strictField {
 	if bytes.Equal(rec, live) {
 		return nil
 	}
-	// A form is read key by key, each redacted value by its key (its
-	// readers), even where the obfuscator's pattern for a key's value
-	// matches a whole form of one key: the key is the recording's, and
-	// keploy.yml's patterns on it still hold the live value.
 	recCT := headerValue(r.Header, "Content-Type")
-	switch mediaTypeKey(recCT) {
-	case "application/x-www-form-urlencoded":
-		return k.formDiffs(r.Body, string(live))
-	case "multipart/form-data":
-		return k.multipartDiffs(recCT, r.Body, input.header.Get("Content-Type"), live)
-	}
-	if k.redacted(r.Body) {
+	form := mediaTypeKey(recCT) == "application/x-www-form-urlencoded"
+	// A whole recorded body the obfuscator's patterns match is one value it
+	// redacted, but for a form of one key whose value it redacted by its key
+	// (oneKeyRedacted): that form is read key by key, as any other, so
+	// keploy.yml's patterns on the key still hold the live value.
+	if k.redacted(r.Body) && (!form || !k.oneKeyRedacted(r.Body)) {
 		return nil // the whole recorded body is a redacted value
+	}
+	switch {
+	case form:
+		return k.formDiffs(r.Body, string(live))
+	case mediaTypeKey(recCT) == "multipart/form-data":
+		return k.multipartDiffs(recCT, r.Body, input.header.Get("Content-Type"), live)
 	}
 	rv, rok := decodeJSONDoc(rec)
 	lv, lok := decodeJSONDoc(live)
@@ -765,13 +766,9 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 		if sameMembers(rv, lv) || !guarded && (k.learnedAt(path, "") || redacted[key]) {
 			continue
 		}
-		held := rv
-		if redacted[key] {
-			// The obfuscator redacted the recorded value: the live one
-			// alone is held to the patterns.
-			held = nil
-		}
-		covered, why := k.fieldCovers(key, shape, held, lv)
+		// A recorded value the obfuscator redacted is not held to the
+		// patterns; the key's other recorded values and the live ones are.
+		covered, why := k.fieldCovers(key, shape, k.unredacted(rv), lv)
 		if covered {
 			continue
 		}
@@ -827,6 +824,29 @@ func (k strictKnown) redactedFormKeys(rec string) map[string]bool {
 		raw, _, _ := strings.Cut(seg, "=")
 		if key, err := url.QueryUnescape(raw); err == nil {
 			out[key] = true
+		}
+	}
+	return out
+}
+
+// oneKeyRedacted reports whether a recorded form body is one key=value
+// segment whose value the obfuscator redacted by its key: it writes a pattern
+// for the value as well as one for the key's segment, so the value matches
+// one alone. A value it redacted whole (no key=value, or base64 padding read
+// as one) leaves no such value.
+func (k strictKnown) oneKeyRedacted(rec string) bool {
+	_, raw, _ := strings.Cut(rec, "=")
+	v, _ := url.QueryUnescape(raw) // "" when raw does not unescape: not redacted
+	return k.redacted(v)
+}
+
+// unredacted are the values of vals the obfuscator did not redact, in their
+// order: each value it redacts in a form matches a pattern of its own.
+func (k strictKnown) unredacted(vals []string) []string {
+	var out []string
+	for _, v := range vals {
+		if !k.redacted(v) {
+			out = append(out, v)
 		}
 	}
 	return out

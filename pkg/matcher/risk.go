@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -260,14 +261,31 @@ func ChangedDecodedJSONFieldPaths(exp, act interface{}, known map[string][]strin
 
 	_, removed, typeChanges, valueChanges := diffMaps(expMaps, actMaps)
 
+	// live is the live document read alone, each scalar a pattern-guarded
+	// entry matched set aside: whether the live value at a path is inside
+	// its patterns, which bothSides no longer tells. Read on first need.
+	live := sync.OnceValue(func() pathMaps {
+		m := newPathMaps()
+		collectJSON(act, "", idx, &m)
+		return m
+	})
 	keep := func(path string) bool {
 		if excludeRecordedValue == nil {
 			return true
 		}
-		if v, ok := expMaps.values[path]; ok && excludeRecordedValue(v) {
+		v, ok := expMaps.values[path]
+		if !ok || !excludeRecordedValue(v) {
+			return true
+		}
+		// The obfuscator redacted the recorded value, so it is not
+		// compared. Where an entry with patterns guards the path, the live
+		// value alone is held to them: one outside them, or none, is a
+		// change.
+		if regs, _, _ := idx.matchKind(strings.ToLower(path)); len(regs) == 0 {
 			return false
 		}
-		return true
+		m := live()
+		return !m.coveredOnly(path)
 	}
 
 	groups := [][]string{valueChanges, typeChanges, removed}
