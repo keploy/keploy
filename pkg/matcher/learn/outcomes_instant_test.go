@@ -2856,11 +2856,11 @@ func TestOutcomeAHalfPlacesATimeAsItsRecordingDoes(t *testing.T) {
 	}
 	for i, what := range []string{"request", "answer"} {
 		if len(halves[i]) == 0 || !slices.Equal(halves[i], wholes[i]) {
-			t.Errorf("the %s half placed its times at %+v; want %+v, as the recording's whole text places them", what, halves[i], wholes[i])
+			t.Errorf("the %s half placed its times at %#v; want %#v, as the recording's whole text places them", what, halves[i], wholes[i])
 		}
 	}
 	if a := halves[1]; len(a) != 4 || slices.ContainsFunc(a, func(p instantPlace) bool { return p.field == "" }) ||
 		a[0] == a[1] || a[1] != a[2] || a[3] == a[0] || a[3] == a[1] {
-		t.Errorf("the answer's times placed at %+v; want the body's top-level time, its items' times and the header's time three named places, the items' one", a)
+		t.Errorf("the answer's times placed at %#v; want the body's top-level time, its items' times and the header's time three named places, the items' one", a)
 	}
 }
