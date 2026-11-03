@@ -44,3 +44,29 @@ func TestAStopCutIsLeftOutWithItsOwnNextStep(t *testing.T) {
 		}
 	}
 }
+
+// Each of the stop's reasons says how the stop cut the response, and no two
+// say it alike: only LeftOutStopCut, whose upstream's end the parser read,
+// says that the upstream ended the connection partway through it. The others
+// were cut by the stop with the connection still open, by the stop's end of
+// the read after the upstream's end, or by the stop's close of the
+// application.
+func TestTheStopsReasonsSayHowTheStopCutTheResponse(t *testing.T) {
+	const upstreamsCut = "the upstream ended the connection partway through"
+	reasons := []string{LeftOutStopCut, LeftOutStopCutOpen, LeftOutStopCutAfterEnd, LeftOutPartwayAtStop}
+	for i, a := range reasons {
+		for _, b := range reasons[i+1:] {
+			if a == b {
+				t.Errorf("two of the stop's reasons are both %q", a)
+			}
+		}
+	}
+	if !strings.Contains(LeftOutStopCut, upstreamsCut) {
+		t.Errorf("LeftOutStopCut %q does not say %q", LeftOutStopCut, upstreamsCut)
+	}
+	for _, r := range reasons[1:] {
+		if strings.Contains(r, upstreamsCut) {
+			t.Errorf("the reason %q says %q: the upstream's end did not cut that response", r, upstreamsCut)
+		}
+	}
+}

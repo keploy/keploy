@@ -266,8 +266,15 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				// likelier cause, so the exchange is reported under it;
 				// and what the client refused does not follow on from
 				// what the stream holds across a chunk the capture lost,
-				// so it does not end the response then.
+				// so it does not end the response then. A client's end
+				// that records no fault (partAnswerLeftOut) says which
+				// it was: the recording's stop closing the application
+				// with the call in flight is the stop's cut, not the
+				// client's giving up.
 				reason := supervisor.LeftOutClientClosedPartway
+				if why, ok := partAnswerLeftOut(sess); ok {
+					reason = why
+				}
 				if mark, ok := sess.TakeMockIncomplete(); ok {
 					reason = mark + ": " + reason
 				}
@@ -476,7 +483,13 @@ func partAnswerLeftOut(sess *supervisor.Session) (reason string, ok bool) {
 //     (Session.RecordingStopping): the relay, whose context is the
 //     recording's, ended the stream with the connection still open, or the
 //     supervisor's abort at the stop closed it, or the parser's context ended
-//     with the recording's: LeftOutStopCutOpen.
+//     with the recording's: LeftOutStopCutOpen;
+//   - the connection's first end was the client's, read once the stop had
+//     begun (FirstEndNoFault's EndAtStop: the stop closed the application
+//     with the call in flight): LeftOutPartwayAtStop, however the read ended
+//     after it: at the stream's end (as partAnswerLeftOut finds), at the
+//     supervisor's abort's close of the stream while the relay still waited
+//     on the upstream's half, or with the parser's context.
 //
 // EndFollowedStop holds only of a first end that came, so the first end is
 // not asked for whether one did there.
@@ -493,6 +506,9 @@ func stopCut(sess *supervisor.Session, readItsEnd bool) (reason string, ok bool)
 			return supervisor.LeftOutStopCutAfterEnd, true
 		}
 		return supervisor.LeftOutStopCut, true
+	}
+	if first == fakeconn.FromClient && sess.FirstEndNoFault() == supervisor.EndAtStop {
+		return supervisor.LeftOutPartwayAtStop, true
 	}
 	return "", false
 }
