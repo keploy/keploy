@@ -180,11 +180,17 @@ func replay(t *testing.T, db integrations.MockMemDb) (mysqlClient, <-chan error)
 // replayLogged is replay, logging to logger.
 func replayLogged(t *testing.T, db integrations.MockMemDb, logger *zap.Logger) (mysqlClient, <-chan error) {
 	t.Helper()
+	return replayIn(t, context.Background(), db, logger, models.OutgoingOptions{})
+}
+
+// replayIn is replayLogged serving the connection in ctx, with opts.
+func replayIn(t *testing.T, ctx context.Context, db integrations.MockMemDb, logger *zap.Logger, opts models.OutgoingOptions) (mysqlClient, <-chan error) {
+	t.Helper()
 	client, agentEnd := net.Pipe()
 	t.Cleanup(func() { _ = client.Close(); _ = agentEnd.Close() })
 	ret := make(chan error, 1)
 	go func() {
-		ret <- Replay(context.Background(), logger, agentEnd, &models.ConditionalDstCfg{Addr: testDBAddr}, db, models.OutgoingOptions{})
+		ret <- Replay(ctx, logger, agentEnd, &models.ConditionalDstCfg{Addr: testDBAddr}, db, opts)
 		_ = agentEnd.Close()
 	}()
 	return mysqlClient{t: t, c: client}, ret

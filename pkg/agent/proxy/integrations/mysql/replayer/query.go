@@ -194,6 +194,11 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				case miss.strictRejected > 0:
 					nextSteps = fmt.Sprintf("schema-noise strict rejected %d candidate mock(s): the listed request fields drifted outside configured/learned noise. Mark them under test.globalNoise.requestBody, run once with --schema-noise-detection to learn them, or re-record.", miss.strictRejected)
 				}
+				if miss.reason == models.MissRequestChanged {
+					// The learn step's refusal first, as the HTTP learn
+					// step's misses give it: why, and judging's reason.
+					nextSteps = "keploy's learn step: " + strings.TrimSuffix(miss.why, ".") + ". The request changed since it was recorded in a way keploy does not learn (request_changed). " + nextSteps
+				}
 				report := &models.MockMismatchReport{
 					At:            time.Now(),
 					Protocol:      "MySQL",
@@ -209,6 +214,9 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					// reported "match_phase":"" and "candidates":0 — indistinguishable
 					// from an empty mock pool.
 					CandidateCount: miss.candidateCount,
+					// Why the call missed, when record's full round's learn
+					// step decided it: judging's evidence.
+					Reason: miss.reason,
 				}
 				// The miss was decided where the command first read the
 				// round: whether that read found a staging is told from it.

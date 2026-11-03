@@ -2,6 +2,7 @@ package replayer_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -395,6 +396,87 @@ func TestRecordsFullRoundAsksNothingWhereAQueryAttributeChangedToo(t *testing.T)
 			}
 			if ok != tc.served || (l.n == 1) != tc.served {
 				t.Fatalf("served %v, the learner asked %d times (miss %s); want served and asked %v", ok, l.n, miss, tc.served)
+			}
+		})
+	}
+}
+
+// A literal record's full round refuses is a request that changed since it
+// was recorded: the learn step learned no read of the application's clock
+// where it changed, or a literal learned as one holds no read of its call's
+// span. The miss Replay returns then carries judging's reason,
+// models.MissRequestChanged, and its next steps give the refusal's reason
+// and name it, as the HTTP learn step's misses do, so judging lists the test
+// as one whose request changed, never as one whose call had no recorded
+// answer. A refusal outside the full round (keploy test), without the
+// switch, after the set's learn step ended, or where the full round asks no
+// learner, gives no reason: only record's full round, where the learn step
+// runs, gives one.
+func TestARefusedLiteralOfRecordsFullRoundIsARequestThatChanged(t *testing.T) {
+	const learnerWhy = "body.query.literals.1 changed, and keploy cannot tell where its value came from"
+	recAt := diffBase.Add(time.Millisecond)
+	cases := []struct {
+		name                      string
+		proven, fullRnd, register bool
+		held, ended               bool
+		reason                    string
+		says                      string
+	}{
+		{name: "the learner learns none", proven: true, fullRnd: true, register: true, reason: models.MissRequestChanged, says: learnerWhy},
+		{name: "held as a read, read outside the span", proven: true, fullRnd: true, register: true, held: true, reason: models.MissRequestChanged, says: "body.query.literals.1"},
+		{name: "held as a read, read outside the span, no learner", proven: true, fullRnd: true, held: true, reason: models.MissRequestChanged, says: "body.query.literals.1"},
+		{name: "held as a read, read outside the span, keploy test", proven: true, held: true},
+		{name: "not the full round", proven: true, register: true},
+		{name: "the learn step ended", proven: true, fullRnd: true, register: true, ended: true},
+		{name: "the switch off", fullRnd: true, register: true},
+		{name: "no learner", proven: true, fullRnd: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[bool]string{false: "0", true: "1"}[tc.proven])
+			l := &learnerCalls{}
+			if tc.register {
+				replayer.RegisterLiteralLearner(l.learner)
+				t.Cleanup(func() { replayer.RegisterLiteralLearner(nil) })
+			}
+			// The run's test began a second ago: Replay reads the command
+			// as it arrives, after the run's previous call.
+			f := newClockRun(time.Now().UTC().Add(-time.Second))
+			f.tr.SetLearnEnded(tc.ended)
+			m, o := recordedClock(t, recAt, f, f.read().Format(literalForm))
+			sql := strings.Replace(clockSQL, "%s", f.read().Format(literalForm), 1)
+			if tc.held {
+				m.Spec.Clocks = map[string]models.ClockOffset{"body.query.literals.1": o}
+				sql = strings.Replace(clockSQL, "%s", f.read().Add(-time.Hour).Format(literalForm), 1)
+			}
+			mm := stageOwn(t, []*models.Mock{replayer.NativeHandshakeForTest(), m}, []*models.Mock{m}, true)
+			ctx, _ := poolConn("c1")
+			ctx = learn.WithTracker(ctx, f.tr)
+			_, done := replayer.ReplayCommandsInForTest(t, ctx, mm, models.OutgoingOptions{Learn: tc.fullRnd}, append([]byte{mysql.COM_QUERY}, sql...))
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the command was answered; want a miss that ends the connection")
+			}
+			var r interface {
+				MismatchReport() *models.MockMismatchReport
+			}
+			if !errors.Is(err, models.ErrNoMockMatched) || !errors.As(err, &r) || r.MismatchReport() == nil {
+				t.Fatalf("Replay returned %v; want a miss carrying a mismatch report", err)
+			}
+			rep := r.MismatchReport()
+			if rep.Reason != tc.reason {
+				t.Fatalf("the miss's reason is %q (next steps %q); want %q", rep.Reason, rep.NextSteps, tc.reason)
+			}
+			if tc.reason == "" {
+				if strings.Contains(rep.NextSteps, models.MissRequestChanged) {
+					t.Fatalf("the miss gives no reason, and its next steps name one: %q", rep.NextSteps)
+				}
+				return
+			}
+			if !strings.Contains(rep.NextSteps, tc.says) || !strings.Contains(rep.NextSteps, "("+models.MissRequestChanged+")") {
+				t.Fatalf("the miss's next steps (%q) do not give the refusal's reason %q and name %s", rep.NextSteps, tc.says, models.MissRequestChanged)
 			}
 		})
 	}

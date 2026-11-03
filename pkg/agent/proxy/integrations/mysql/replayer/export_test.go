@@ -258,7 +258,14 @@ func NativeHandshakeForTest() *models.Mock { return nativeHandshake() }
 // and what Replay returns once it ends the connection.
 func ReplayCommandsForTest(t *testing.T, db integrations.MockMemDb, commands ...[]byte) ([][]byte, <-chan error) {
 	t.Helper()
-	client, done := replay(t, db)
+	return ReplayCommandsInForTest(t, context.Background(), db, models.OutgoingOptions{}, commands...)
+}
+
+// ReplayCommandsInForTest is ReplayCommandsForTest serving the connection in
+// ctx with opts: a connection of record's full round where opts.Learn is set.
+func ReplayCommandsInForTest(t *testing.T, ctx context.Context, db integrations.MockMemDb, opts models.OutgoingOptions, commands ...[]byte) ([][]byte, <-chan error) {
+	t.Helper()
+	client, done := replayIn(t, ctx, db, zap.NewNop(), opts)
 	client.greetAndAnswer("app", mysql.Native)
 	if ok := client.read(); len(ok) == 0 || ok[0] != mysql.OK {
 		t.Fatalf("the client read % x after its handshake; want the recorded OK", ok)

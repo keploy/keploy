@@ -2423,9 +2423,16 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		// as a read of the application's clock holds no read of this call's
 		// span, or because the learn step learned none at a literal that
 		// differs, says why (clocksHold, learnsClocks): the named closest
-		// recording's reason, or another's, named (clockWhyFor).
+		// recording's reason, or another's, named (clockWhyFor). In record's
+		// full round that refusal is the learn step's: a recording of the
+		// statement differs from the call at literals it does not learn, so
+		// the request changed since it was recorded (request_changed), as
+		// the HTTP learn step says of a drift it refuses.
 		if miss.why == "" {
 			miss.why = gate.clockWhyFor(miss.closestMock)
+			if miss.why != "" && gate.learnStepRuns() {
+				miss.reason = models.MissRequestChanged
+			}
 		}
 		if miss.nextSteps == "" && gate.exactRejected > 0 {
 			miss.nextSteps = exactDriftNextSteps

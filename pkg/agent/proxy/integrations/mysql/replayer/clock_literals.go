@@ -175,6 +175,14 @@ func (g *strictGate) refusedOnClock(mock *models.Mock, why string) {
 	g.clockRefusals = append(g.clockRefusals, clockRefusal{mock: mock.Name, why: why})
 }
 
+// learnStepRuns reports whether the gate's command is a call of record's
+// full round under the proven switch while the set's learn step runs
+// (learn.TrackerFrom): the one round whose misses carry judging's reason
+// (models.MockMismatchReport.Reason).
+func (g *strictGate) learnStepRuns() bool {
+	return commandOf(g.ctx).learn && provenswitch.On() && learn.TrackerFrom(g.ctx) != nil
+}
+
 // clockWhyFor is the reason a miss that names closest the recording nearest
 // the command gives for a refusal at literals: that recording's own, or,
 // where it has none, the first another gave, prefixed with that one's name,
@@ -218,10 +226,10 @@ func (g *strictGate) checkClocks(mock *models.Mock, held map[string]models.Clock
 // (learn.TrackerFrom), it learns nothing, as before it.
 func (g *strictGate) learnsClocks(mock *models.Mock, drift map[string][]string) bool {
 	fn := literalLearner.Load()
-	call := commandOf(g.ctx)
-	if fn == nil || !call.learn || !provenswitch.On() || learn.TrackerFrom(g.ctx) == nil || len(drift) == 0 {
+	if fn == nil || !g.learnStepRuns() || len(drift) == 0 {
 		return false
 	}
+	call := commandOf(g.ctx)
 	paths := make([]string, 0, len(drift))
 	for p := range drift {
 		p = "body." + strings.TrimPrefix(p, "body.")
