@@ -347,7 +347,9 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 //     read after the recording's stop began (keploy stops the application),
 //     or the client's end as its process exited (the command's own exit
 //     included). The close of a call it had in flight is the stop's, not its
-//     client's timeout.
+//     client's timeout. So is a client's end the hooks cannot tell from its
+//     process's exit (the macOS and Windows hooks): no fault is recorded on
+//     an end nothing says was the application's giving up.
 func noAnswerFault(sess *supervisor.Session, err error, exchanges int) *models.Fault {
 	if !errors.Is(err, io.EOF) {
 		return nil

@@ -475,7 +475,9 @@ const endFollowedStopBit = 1 << (peerEndFirstShift + 3)
 // EndFollowedStop reports whether the first end of the connection
 // (FirstPeerEnded) was the application's stop (MarkPeerEndedStopping): read
 // after the recording's stop had begun (keploy stops the application only
-// once it has told the agent), or the client's end as its process exited.
+// once it has told the agent), the client's end as its process exited, or
+// the client's end where the hooks cannot say how the application released
+// it (the proxy's peerEndMarker).
 // The call it had in flight ended in no fault of the upstream's or the
 // application's. An end read before the stop began while the client's process
 // ran on (the application's own timeout, the upstream's reset) is not one,
@@ -513,8 +515,9 @@ func (s *Session) MarkPeerEnded(dir fakeconn.Direction, reset bool) {
 // MarkPeerEndedStopping is MarkPeerEnded for a relay that knows whether the
 // end it read is the application's stop (stopBegun): the recording's stop had
 // begun (keploy record and keploy mock record tell the agent before they stop
-// the application), or the client's process was exiting as its end was read
-// (the proxy's peerEndMarker). Such an end is not a fault (EndFollowedStop).
+// the application), the client's process was exiting as its end was read, or
+// the hooks cannot say how the client released its end (the proxy's
+// peerEndMarker). Such an end is not a fault (EndFollowedStop).
 // Only the first end's is kept. Nil-safe.
 func (s *Session) MarkPeerEndedStopping(dir fakeconn.Direction, reset, stopBegun bool) {
 	if s == nil || dir > fakeconn.FromDest {
