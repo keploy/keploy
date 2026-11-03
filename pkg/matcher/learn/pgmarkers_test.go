@@ -31,6 +31,10 @@ func TestAStatementsParameterMarkersAreNoWordsOfItsPayload(t *testing.T) {
 		{"a quoted string with a doubled quote", "SELECT 'it''s $1', $1", 1, "SELECT 'it''s $1', $ "},
 		{"an E string with an escaped quote", `SELECT E'\' $1', $1`, 1, `SELECT E'\' $1', $ `},
 		{"an e string with an escaped quote", `SELECT e'\' $1', $1`, 1, `SELECT e'\' $1', $ `},
+		// A doubled quote stands for one inside the E string. Read as a close
+		// and a new plain string, the escaped quote after it would end that
+		// string, and the "$1" inside would read as a marker.
+		{"an E string with a doubled quote, then an escaped quote", `SELECT E'it''s \' $1', $1`, 1, `SELECT E'it''s \' $1', $ `},
 		{"a plain string ending in a backslash", `SELECT 'a\', $1`, 1, `SELECT 'a\', $ `},
 		{"an identifier ending in E before a string", `SELECT x FROM t WHERE'\' = $1`, 1, `SELECT x FROM t WHERE'\' = $ `},
 		{"a quoted identifier", `SELECT "$1", $1 FROM t`, 1, `SELECT "$1", $  FROM t`},

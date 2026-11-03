@@ -1090,6 +1090,32 @@ func TestTiedSourcesHoldingTheValuesWordsAtTheSameFieldsNeedNoOrder(t *testing.T
 	}
 }
 
+// Two tied sources read as one place only where each word of the value
+// stands at fields of both (alike). A word that stands in a source's text
+// but in no one field of it gives no fields to compare: here "abcd", read
+// where a quoted-printable soft break ("ab=" then "cd") joins two cells,
+// at the first two cells of a and the last two of b. Copied by position,
+// the order could change it, so the order is read: in flight together it
+// stays refused, and with a answered before b was asked it is learned.
+func TestATiedWordStandingInNoOneFieldLeavesTheOrderRead(t *testing.T) {
+	src := func(name string, before, answered time.Duration, n int, cells ...string) Raw {
+		var row models.PostgresV3Cells
+		for _, v := range cells {
+			row = append(row, models.PostgresV3Cell{Value: v})
+		}
+		return ePgAnswered(name, before, eRecAt.Add(-answered), "SELECT next_slot FROM slots", []models.PostgresV3Cells{row}, "SELECT 1").ServedAs(n).ServedAsRecorded()
+	}
+	a := src("mock-a", 300*time.Millisecond, 100*time.Millisecond, 1, "ab=", "cd")
+	together := src("mock-b", 250*time.Millisecond, 200*time.Millisecond, 2, "x", "ab=", "cd")
+	if got := classifyF(t, "abcd", "efgh", nil, []Raw{a, together}, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the recording's requests for mock-a and mock-b were in flight together") {
+		t.Errorf("FALSE GREEN? abcd in no one field of a and b, in flight together: %s (%q), want refused for the order", got.Kind, got.Why)
+	}
+	after := src("mock-b", 50*time.Millisecond, 20*time.Millisecond, 2, "x", "ab=", "cd")
+	if got := classifyF(t, "abcd", "efgh", nil, []Raw{a, after}, nil); got.Kind != KindNoise {
+		t.Errorf("abcd in no one field of a and b, a answered before b was asked: %s (%q), want noise", got.Kind, got.Why)
+	}
+}
+
 // Only recordings tie alike (alike): two exchanges of the call's own test in
 // flight together, each holding F's 7 at the same leaf, stay refused, as
 // keploy reads an exchange's words at its leaves and not in its payload.
