@@ -32,6 +32,13 @@ func procStart(pid int) (uint64, bool) {
 	return st.StartTime, true
 }
 
+// zombieExited reports whether process pid, whose stat reads Z, has exited:
+// the rule procStart keeps (utils.Exited), for the stat line procStatStart
+// reads itself. A variable so a test can say which.
+var zombieExited = func(pid int) bool {
+	return utils.Exited(pid, utils.ProcStat{State: 'Z'})
+}
+
 // procDescends reports whether pid is ancestor or one of its descendants.
 func procDescends(pid, ancestor int) bool {
 	for i := 0; i < 64 && pid > 1; i++ {
