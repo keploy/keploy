@@ -1975,8 +1975,12 @@ func (t *Tracker) CallWindow(paired *models.Mock, recorded []*models.Mock, arriv
 // in this run, on the app's clock, after the previous data-plane call the
 // store served (ServedMockAt), or in a server test the set's begin where it
 // served none before it and the hooks tell the clock's run (LiveSpan), and
-// no later than arrival. nil when the
-// recording has no previous call (the app's start is not recorded), paired
+// no later than arrival. In a server test whose recording has no previous
+// call, the recording's half starts at the open test's recorded begin
+// (RecordedBegin): the app read its clock for the call after the test's
+// request reached it. nil when the recording has no previous call and no
+// test is open or its recorded begin is not before paired (the app's start
+// is not recorded), paired
 // has no recorded time, no app clock reads arrival and the previous serve,
 // or the app's clock did not run as one between them (a test's begin moved
 // it): the span F's clock reads from its start to the arrival must be the
@@ -2106,7 +2110,8 @@ func (o *OwnCall) See(m *models.Mock) {
 
 // Window is the window of the call that reached keploy at the real instant
 // arrival (OwnCall); nil where the call has none (CallWindowFrom's rules:
-// paired has no recorded time, no previous call is recorded, and the
+// paired has no recorded time, no previous call is recorded and no test is
+// open or its recorded begin is not before paired, and the
 // rest), and for a nil o.
 func (o *OwnCall) Window(arrival time.Time) *Window {
 	if o == nil {
@@ -2140,13 +2145,22 @@ func (t *Tracker) CallWindowIn(prevRec, recBegan time.Time, paired *models.Mock,
 // window is the window of the call that reached keploy at arrival, paired
 // with paired, with the recording's half bounded by prevRec and, in a client
 // test, by recBegan, which in a server test that half carries as its test's
-// begin where it came before prevRec (CallWindowFrom).
+// begin where it came before prevRec, and is bounded by where no previous
+// call is recorded and a test is open (CallWindowFrom).
 func (lc liveClock) window(prevRec, recBegan time.Time, paired *models.Mock, arrival time.Time) *Window {
 	if paired == nil || paired.Spec.ReqTimestampMock.IsZero() {
 		return nil
 	}
 	recFrom := prevRec
-	if lc.client && recBegan.After(recFrom) {
+	switch {
+	case lc.client && recBegan.After(recFrom):
+		recFrom = recBegan
+	case recFrom.IsZero() && lc.open:
+		// A server test's call with no data-plane call recorded before it
+		// (the test's first call, where the app made no start-up call)
+		// read its clock after its test's request reached the app: the
+		// test's recorded begin bounds the recording's half, as the set's
+		// begin or the clock's run bounds this run's (setBound).
 		recFrom = recBegan
 	}
 	if recFrom.IsZero() || !recFrom.Before(paired.Spec.ReqTimestampMock) || lc.clock == nil {
