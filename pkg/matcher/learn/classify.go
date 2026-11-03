@@ -2672,7 +2672,9 @@ type valueDrift struct {
 	// movedRec and movedLive are the words of what changed, recorded and
 	// live, by reading, in every form: the words outside a longest common
 	// subsequence of the recorded and the live words (movedWords). A word
-	// held in another order, or once more, is one.
+	// held in another order, or once more, is one. One the
+	// quoted-printable form moved, which the value holds as written on
+	// that side, is one only where it moved as written (newDrift).
 	movedRec, movedLive []map[string]bool
 	pieces              []run
 	// pieceWords are each piece's changed words (changedWords), by piece.
@@ -3048,15 +3050,16 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 		dclock = clockAt(d.decRec, d.decLive, w, lead, call, zone)
 		merge(dclock)
 	}
-	forms, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
+	forms, checked, qp, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
 	d.encodedRec = encoded[0]
-	// The clock reads of every other form (the first is the decoded value,
-	// read above).
+	// The clock reads of every other form searched (the first is the
+	// decoded value, read above).
 	for _, f := range forms[1:] {
 		merge(clockAt(f[0], f[1], w, lead, call, zone))
 	}
 	if d.decoded {
 		forms = append([][2]string{{rec, live}}, forms...)
+		qp[0], qp[1] = qp[0]+1, qp[1]+1
 		d.clock.whole = d.clock.whole || dclock.whole
 		// Read raw, a clock read's escapes are no words of their own: an
 		// escape's remnant glued to a clock word is one ("3A41Z" of
@@ -3072,12 +3075,10 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 		d.clock.live[strings.ToLower(w)] = true
 	}
 	d.forms = forms
-	// What the readings cannot read whole, in every form but the raw one
-	// of a value with escapes (whose '%' and '\' are the escapes).
-	for i, f := range forms {
-		if d.decoded && i == 0 {
-			continue
-		}
+	// What the readings cannot read whole, in every form checked (formsOf;
+	// never the raw one of a value with escapes, whose '%' and '\' are the
+	// escapes).
+	for _, f := range checked {
 		if why := unparsed(f[0], f[1], d.clock); why != "" {
 			d.unparsed = why
 			break
@@ -3086,15 +3087,30 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 	// The value whole in each form (each line of its decoded text) that
 	// drifted: the same value whole in another place, in any reading, is
 	// followed. A line both sides hold (a JWT's header) did not drift.
+	// A line of the quoted-printable form that the value holds as written
+	// is a line only where it is one as written: that form reads an "=0A"
+	// as a line break in one run where the other run's bytes spell none
+	// ("t=1730546884,v1=0A41..." splits at "v1" in one run only), and so
+	// cuts a line the value never holds, as it groups words (below). A
+	// line only that form shows (an id an escape hid) is one.
 	liveLines := map[string]bool{}
 	for _, f := range forms {
 		for _, w := range strings.Split(f[1], "\n") {
 			liveLines[w] = true
 		}
 	}
-	for _, f := range forms {
+	heldAsWritten := func(w string) bool {
+		for _, f := range forms[:qp[0]] {
+			if strings.Contains(f[0], w) {
+				return true
+			}
+		}
+		return false
+	}
+	for k, f := range forms {
+		inQP := k >= qp[0] && k < qp[1]
 		for _, w := range strings.Split(f[0], "\n") {
-			if w != "" && !liveLines[w] {
+			if w != "" && !liveLines[w] && (!inQP || !heldAsWritten(w)) {
 				if d.wholes == nil {
 					d.wholes = map[string]bool{}
 				}
@@ -3105,12 +3121,22 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 	for _, word := range readings {
 		lost, gained := map[string]bool{}, map[string]bool{}
 		recTok, liveTok := map[string]bool{}, map[string]bool{}
-		for _, f := range forms {
+		// The words of the value as written (the forms before the
+		// quoted-printable one: raw, decoded, case-folded), recorded and
+		// live, where it has a quoted-printable form.
+		var written [2]map[string]bool
+		if qp[0] < qp[1] {
+			written = [2]map[string]bool{{}, {}}
+		}
+		for k, f := range forms {
 			r, l := tokensBy(f[0], word), tokensBy(f[1], word)
 			for t := range r {
 				recTok[t] = true
 				if !l[t] {
 					lost[t] = true
+				}
+				if k < qp[0] && written[0] != nil {
+					written[0][t] = true
 				}
 			}
 			for t := range l {
@@ -3118,18 +3144,35 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 				if !r[t] {
 					gained[t] = true
 				}
+				if k < qp[0] && written[1] != nil {
+					written[1][t] = true
+				}
 			}
 		}
 		d.lost, d.gained = append(d.lost, lost), append(d.gained, gained)
 		d.recTok, d.liveTok = append(d.recTok, recTok), append(d.liveTok, liveTok)
+		// A word the quoted-printable form moved that the value holds as
+		// written on that side moved only where it moved as written: that
+		// form reads an "=XX" as an escape in one run where the other
+		// run's bytes spell none ("Signature=41ab..." reads
+		// "SignatureAab..." in one run, "Signature=b1cd..." as written in
+		// the other), and so groups a word with its neighbour in one run
+		// only, a word that stands at its place in both. A word only that
+		// form shows (an id an escape hid, "A7K29Q" of "=23A7K29Q") moved
+		// where it says.
 		movedRec, movedLive := map[string]bool{}, map[string]bool{}
-		for _, f := range forms {
+		for k, f := range forms {
+			inQP := k >= qp[0] && k < qp[1]
 			mr, ml := movedWords(wordsBy(f[0], word), wordsBy(f[1], word))
 			for _, t := range mr {
-				movedRec[t] = true
+				if !inQP || !written[0][t] {
+					movedRec[t] = true
+				}
 			}
 			for _, t := range ml {
-				movedLive[t] = true
+				if !inQP || !written[1][t] {
+					movedLive[t] = true
+				}
 			}
 		}
 		d.movedRec, d.movedLive = append(d.movedRec, movedRec), append(d.movedLive, movedLive)
