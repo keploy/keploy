@@ -148,12 +148,27 @@ func servedRead(t *testing.T, d *DiskMocks, name string) *models.Mock {
 	return got[0]
 }
 
+// freshAsStored is m as a new decoder reads it, with the bytes the store d
+// keeps it in, its record and its parked response together, as the
+// StoredSize every read of it from d carries: no decoder carries that count.
+func freshAsStored(t *testing.T, d *DiskMocks, m *models.Mock) *models.Mock {
+	t.Helper()
+	e, ok := d.byName[m.Name]
+	if !ok || e.length <= 0 {
+		t.Fatalf("mock %s is not in the store", m.Name)
+	}
+	want := freshRead(t, m)
+	want.SetStoredSize(int64(e.length + e.respLen))
+	return want
+}
+
 // sameAsFresh fails unless the store serves every mock in ms as a new
-// decoder reads it, in the order given.
+// decoder reads it, in the order given, with the bytes the store keeps it in
+// (freshAsStored).
 func sameAsFresh(t *testing.T, d *DiskMocks, ms []*models.Mock, label string) {
 	t.Helper()
 	for _, m := range ms {
-		want, got := freshRead(t, m), servedRead(t, d, m.Name)
+		want, got := freshAsStored(t, d, m), servedRead(t, d, m.Name)
 		if !reflect.DeepEqual(want, got) {
 			t.Fatalf("%s: mock %s served\n%+v\nwant, as a new decoder reads it,\n%+v", label, m.Name, got.Spec, want.Spec)
 		}
@@ -317,7 +332,7 @@ func TestStoreHandsOutCopies(t *testing.T) {
 			}
 			name := m.Name
 			a := servedRead(t, d, name)
-			want := freshRead(t, m)
+			want := freshAsStored(t, d, m)
 			a.Spec.Metadata["changed"] = "yes"
 			if a.Spec.HTTPResp != nil {
 				a.Spec.HTTPResp.Header["X-Changed"] = "yes"
@@ -345,7 +360,7 @@ func TestStoreServesConcurrentReadersAlike(t *testing.T) {
 	defer func() { _ = d.Close() }()
 	want := make(map[string]*models.Mock, len(corpus))
 	for _, m := range corpus {
-		want[m.Name] = freshRead(t, m)
+		want[m.Name] = freshAsStored(t, d, m)
 	}
 	var wg sync.WaitGroup
 	errs := make(chan string, 8)

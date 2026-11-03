@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
@@ -67,6 +68,21 @@ type HTTP struct {
 	// strictIx is the strict pass's index of the last staging generation, or
 	// shared part of an open test's reads, a strict call read (strictIndex).
 	strictIx strictIndexes
+	// verify is the exact view's verify mode of this handler's own reads
+	// (verifying): nil follows the process's (integrations.ExactViewVerify),
+	// what every handler the proxy makes does; a row gives a handler its
+	// own, so handlers in different modes run at once.
+	verify *atomic.Bool
+}
+
+// verifying is whether h's reads run in the exact view's verify mode: each
+// kept read (an index, a sieve's pass) is computed again the way it was
+// before it was kept, and a difference panics.
+func (h *HTTP) verifying() bool {
+	if h.verify != nil {
+		return h.verify.Load()
+	}
+	return integrations.ExactViewVerify.Load()
 }
 
 func New(logger *zap.Logger) integrations.Integrations {

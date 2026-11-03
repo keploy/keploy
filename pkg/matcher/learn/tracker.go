@@ -1168,7 +1168,7 @@ func (o Order) viewsLocked(id string) (recorded bool, keys []int, loads []func()
 // they read it, and kept by none of the set's caches (Raw.viewOf).
 func viewRaw(m *models.Mock, load func() (*models.Mock, error)) Raw {
 	return Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, answered: m.Spec.ResTimestampMock, served: true, call: callOf(m),
-		src: &rawSource{name: m.Name, load: load}}
+		src: &rawSource{name: m.Name, load: load, mock: m}}
 }
 
 // beforeTestLocked reports whether every serve of the mock of identity id the

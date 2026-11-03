@@ -3,6 +3,7 @@ package http
 import (
 	"net/http"
 	"runtime"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,12 @@ func (h *HTTP) encodeRecordedAnswer(stub *models.Mock) ([]byte, error) {
 // rewrite, if any. stub's response is in its Spec (withResponse). The bytes are
 // written into one buffer of their size: each header line was a fmt.Sprintf
 // and a new string holding every line before it.
+//
+// The header lines are written with their names sorted, as net/http's
+// Header.Write writes them, a name's lines in their recorded order: the same
+// answer built twice is the same bytes. Built in the header map's order, an
+// answer built again (its kept bytes gone with a collected entry, or a table
+// with no room) could be other bytes than its serves before.
 func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, error) {
 	resp := stub.Spec.HTTPResp
 	protoMajor, protoMinor := 1, 1
@@ -63,7 +70,10 @@ func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, e
 
 	// "HTTP/" major "." minor " " code " " text CRLF, each int at most 20 bytes.
 	size := len("HTTP/. \r\n ") + 3*20 + len(status) + len("\r\n") + len(respBody)
+	var nameSpace [32]string
+	names := nameSpace[:0]
 	for key, values := range header {
+		names = append(names, key)
 		if key == "Content-Length" && !noBody {
 			size += len(key) + len(": \r\n") + len(length)
 			continue
@@ -82,7 +92,9 @@ func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, e
 	out = append(out, ' ')
 	out = append(out, status...)
 	out = append(out, "\r\n"...)
-	for key, values := range header {
+	slices.Sort(names)
+	for _, key := range names {
+		values := header[key]
 		if key == "Content-Length" && !noBody {
 			out = append(out, key...)
 			out = append(out, ": "...)

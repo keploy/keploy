@@ -495,7 +495,7 @@ func (h *HTTP) learnedGroupOf(base, db integrations.MockMemDb, tracker *learn.Tr
 		return group, owner, nil
 	}
 	r := h.learnRules(db, tracker)
-	verify := integrations.ExactViewVerify.Load()
+	verify := h.verifying()
 	if verify {
 		r = r.answersOnce()
 	}
