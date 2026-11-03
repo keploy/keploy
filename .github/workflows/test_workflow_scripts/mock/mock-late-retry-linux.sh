@@ -57,7 +57,7 @@ with socketserver.ThreadingTCPServer(("127.0.0.1", PORT), H) as s:
 PY
 
 cat > suite.py <<'PY'
-import json, os, queue, sys, threading, urllib.error, urllib.request
+import http.client, json, os, queue, sys, threading, urllib.error, urllib.request
 import keploy_v1 as k
 SHAPE, MODE, PORT = sys.argv[1], os.environ.get("LR_MODE") or sys.argv[2], sys.argv[3]
 URL = "http://127.0.0.1:%s" % PORT
@@ -83,7 +83,7 @@ def call(job, path, body):
             attempts.append((job, e.code))
             if e.code not in (408, 429, 500, 502, 503, 504):
                 return e.code
-        except (urllib.error.URLError, ConnectionError, OSError) as e:
+        except (urllib.error.URLError, http.client.HTTPException, ConnectionError, OSError) as e:
             attempts.append((job, "conn:" + type(e).__name__))
     return None
 
@@ -128,18 +128,23 @@ else:
     def consume():
         while True:
             job, path = jobs.get()
-            call(job, path, {"lead": job})
-            done[job].set()
-    threading.Thread(target=consume, daemon=True).start()
+            try:
+                call(job, path, {"lead": job})
+            finally:
+                done[job].set()
+    consumer = threading.Thread(target=consume, daemon=True)
+    consumer.start()
     for name, path in (("c1", first_path), ("c2", "/put"), ("c3", "/put")):
         assert begin(name) is None
         done[name] = threading.Event(); n0 = len(attempts)
         jobs.put((name, path))
         if name == "c1":
-            while len(attempts) == n0:
+            while len(attempts) == n0 and consumer.is_alive():
                 done[name].wait(0.05)   # c1 ends after its job's first attempt
         else:
             done[name].wait(20)         # c2, c3 wait for their own job
+        if not consumer.is_alive():     # its traceback is on stderr
+            sys.exit("FAIL: the consumer thread ended during %s's job" % name)
         end(name)
 if PID:
     mark("end")
