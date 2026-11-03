@@ -1029,7 +1029,9 @@ func b64DecodeAny(s string) ([]byte, bool) {
 // decoded), where it differs, itself case-folded; and the text its encoded
 // runs decode to (b64Text), itself case-folded; and that text, recorded and
 // live, on its own (encoded). The words of each form are searched for what
-// flowed into the value.
+// flowed into the value. qp is where forms holds the quoted-printable form
+// and its case-folded one (forms[qp[0]:qp[1]], empty where it holds none):
+// right after the value as written.
 //
 // checked are the forms unparsed reads, the same but for the
 // quoted-printable one: that is read only where both values read as
@@ -1041,7 +1043,7 @@ func b64DecodeAny(s string) ([]byte, bool) {
 // does not decode, which unparsed refuses. The search still reads every
 // escape decoded: a word only that reading shows ("=23A7K29Q" a '#' and
 // an id) is found where it flowed.
-func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms, checked [][2]string, encoded [2]string) {
+func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms, checked [][2]string, qp [2]int, encoded [2]string) {
 	with := func(fs [][2]string, f [2]string) [][2]string {
 		fs = append(fs, f)
 		if lr, ll := strings.ToLower(f[0]), strings.ToLower(f[1]); lr != f[0] || ll != f[1] {
@@ -1051,8 +1053,10 @@ func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms, checked 
 	}
 	base := with(nil, [2]string{decRec, decLive})
 	forms = append([][2]string(nil), base...)
+	qp = [2]int{len(forms), len(forms)}
 	if qr, ql := qpForm(rec), qpForm(live); qr != decRec || ql != decLive {
 		forms = with(forms, [2]string{qr, ql})
+		qp[1] = len(forms)
 	}
 	checked = append([][2]string(nil), base...)
 	qr, qpR := qpFormRead(rec)
@@ -1065,7 +1069,7 @@ func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms, checked 
 		forms = with(forms, encoded)
 		checked = with(checked, encoded)
 	}
-	return forms, checked, encoded
+	return forms, checked, qp, encoded
 }
 
 // allIn reports whether every word of ws is in set, and there is one.

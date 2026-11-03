@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -425,6 +426,109 @@ func TestAnEscapeLeftAsWrittenKeepsItsOwnDigits(t *testing.T) {
 	} {
 		if got, qp := qpFormRead(tc.in); got != tc.want || !qp {
 			t.Errorf("qpFormRead(%q) = %q, %v; want %q, true", tc.in, got, qp, tc.want)
+		}
+	}
+}
+
+// A signed header that changed only in its signature, beside an earlier
+// test of the set that signed with the same scheme, is noise, whatever two
+// digits each run's signature begins with: "Signature" stands at its place
+// in both runs. The quoted-printable reading of a run whose signature
+// begins with an "=XX" that decodes to a letter or a digit ("=41" an 'A',
+// "=35" a '5') glues it to the signature ("SignatureAab..."), while the
+// other run's "=b1", or "=23" a '#', leaves it a word of its own: that is
+// the reading regrouping a word the value holds as written in both runs,
+// no word that moved, and the earlier test's header that holds it is no
+// place it came from. As an AWS SigV4 header (lower-case hex) signed a
+// DynamoDB PutItem in a .NET SDK's record, and a v1= or sha256= value in
+// upper-case hex; and a presigned URL, whose percent-escapes are read raw
+// and decoded.
+func TestAWordAnEscapeGluesInOneRunIsNoWordThatMoved(t *testing.T) {
+	at := time.Date(2026, 11, 2, 11, 48, 4, 385340565, time.UTC)
+	const sigv4 = "AWS4-HMAC-SHA256 Credential=local/20261102/us-east-1/dynamodb/aws4_request, SignedHeaders=content-type;host;x-amz-api-version;x-amz-content-sha256;x-amz-date;x-amz-target, Signature="
+	const lowA = "9bbdba4c503009bffa4d5df085bfc642559eb27e81e28586a31d6fa5cf13e5b"
+	const lowB = "7da81317308f9dc505ba7b017f223e47ef887b56beb75c5b8d1f34ac6820d9"
+	for _, sc := range []struct {
+		name, head, digits, a, b string
+	}{
+		{"aws signature", sigv4, "0123456789abcdef", lowA, lowB},
+		{"aws presigned url", "https://shop.s3.amazonaws.com/k?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAEXAMPLE%2F20261102%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261102T114804Z&X-Amz-Expires=900&X-Amz-SignedHeaders=host&X-Amz-Signature=", "0123456789abcdef", lowA, lowB},
+		{"v1", "t=1730546884,v1=", "0123456789ABCDEF", sigA[2:], sigB[2:]},
+		{"sha256", "sha256=", "0123456789ABCDEF", sigA[2:], sigB[2:]},
+	} {
+		earlier := []Earlier{{Mock: "mock-11", At: at.Add(-2 * time.Second), Run: true, Seen: []Seen{{
+			Side: Request, Leaf: Leaf{Path: "header.authorization", Noise: "header.authorization", Type: String, Value: sc.head + "c4" + reversed(sc.a)},
+			Live: sc.head + "e7" + reversed(sc.b), Place: "header.authorization",
+		}}}}
+		t.Run(sc.name, func(t *testing.T) {
+			// Against a run whose first two digits are no escape ("b1"), and
+			// one whose are an escape of a separator ("23", a '#').
+			for _, other := range []string{"b1", "23"} {
+				if sc.digits[10] == 'A' {
+					other = strings.ToUpper(other)
+				}
+				for _, hi := range sc.digits {
+					for _, lo := range sc.digits {
+						xy := string(hi) + string(lo)
+						for _, p := range [][2]string{{sc.head + xy + sc.a, sc.head + other + sc.b}, {sc.head + other + sc.a, sc.head + xy + sc.b}} {
+							if got := classifyOne(p[0], p[1], at, earlier, nil, nil); got.Kind != KindNoise {
+								t.Errorf("%q against %q: got %s (%s), want noise", p[0][len(sc.head):len(sc.head)+4], p[1][len(sc.head):len(sc.head)+4], got.Kind, got.Why)
+							}
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// reversed is s back to front.
+func reversed(s string) string {
+	b := []byte(s)
+	for i, j := 0, len(b)-1; i < j; i, j = i+1, j-1 {
+		b[i], b[j] = b[j], b[i]
+	}
+	return string(b)
+}
+
+// Ids an escape hides that changed places are words that moved, in the
+// quoted-printable form alone: the value as written holds "23A7K29QXM",
+// never "A7K29QXM". Where an earlier test of the set holds one of them,
+// recorded or live, at a place that did not drift with it, the value is
+// refused, never noise, held in both runs or in one.
+func TestIDsAnEscapeHidesThatSwapMoved(t *testing.T) {
+	at := time.Date(2026, 11, 2, 11, 48, 4, 0, time.UTC)
+	const a, b = "A7K29QXM", "Zq81Lm0X"
+	// Ids in lower case, in a value whose quoted-printable form holds no
+	// upper case: that form has no case-folded twin to find them in.
+	const c, d = "a7k29qxm", "q81lm0xz"
+	for _, tc := range []struct {
+		name, rec, live string
+		ids             []string
+	}{
+		{"swapped", "x=3D=23" + a + " y=3D=23" + b, "x=3D=23" + b + " y=3D=23" + a, []string{a, b}},
+		{"swapped, in lower case", "x=3D=23" + c + " y=3D=23" + d, "x=3D=23" + d + " y=3D=23" + c, []string{c, d}},
+		{"swapped, escaped against as written", "=23" + a + " =23" + b, b + " " + a, []string{a, b}},
+		{"swapped, as written against escaped", b + " " + a, "=23" + a + " =23" + b, []string{a, b}},
+		{"held once more", "x=3D=23" + a + " y=3D=23" + b, "x=3D=23" + a + " y=3D=23" + b + " z=3D=23" + a, []string{a}},
+		{"held once more, recorded", "x=3D=23" + a + " y=3D=23" + b + " z=3D=23" + a, "x=3D=23" + a + " y=3D=23" + b, []string{a}},
+	} {
+		for _, id := range tc.ids {
+			for _, held := range [][2]string{{"ref " + id, "ref " + id}, {"ref " + id, "ref other"}, {"ref other", "ref " + id}} {
+				// A word held once more is a word of what changed on the
+				// side that holds it once more, searched on that side.
+				if strings.HasPrefix(tc.name, "held once more") && (held[1] == "ref other") != strings.HasSuffix(tc.name, "recorded") && held[0] != held[1] {
+					continue
+				}
+				earlier := []Earlier{{Mock: "mock-11", At: at.Add(-2 * time.Second), Run: true, Seen: []Seen{{
+					Side: Request, Leaf: Leaf{Path: "body.ref", Noise: "body.ref", Type: String, Value: held[0]}, Live: held[1], Place: "body.ref",
+				}}}}
+				t.Run(fmt.Sprintf("%s, %s, earlier %q to %q", tc.name, id, held[0], held[1]), func(t *testing.T) {
+					if got := classifyOne(tc.rec, tc.live, at, earlier, nil, nil); got.Kind == KindNoise {
+						t.Errorf("got noise (%s), want it refused: %s moved, and an earlier test holds it", got.Why, id)
+					}
+				})
+			}
 		}
 	}
 }
