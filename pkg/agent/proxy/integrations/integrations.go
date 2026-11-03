@@ -592,7 +592,7 @@ type ExactServedReader interface {
 
 // AnsweredFinder is an optional MockMemDb extension: of the per-test
 // recordings of kind that answered a call earlier in the test set staged now,
-// indexed under any of keys (models.RequestKeys), the one answered last that
+// and of the background's a call spent, indexed under any of keys (models.RequestKeys), the one answered last that
 // match accepts and that the open test does not own. A parser that finds no
 // mock for a call asks it whether the call repeats one an earlier test made
 // (models.RepeatNote): the cue of an application that kept the earlier
@@ -631,10 +631,12 @@ func AnsweredRedacting(db MockMemDb, kind models.Kind) ([]*models.Mock, bool) {
 }
 
 // AnsweredCall is what AnsweredFinder found: the recording, and when it
-// answered at this replay.
+// answered at this replay. Background is the scope of the set's background
+// the recording is of (models.RepeatNote.Background), empty for a test's own.
 type AnsweredCall struct {
 	Mock       *models.Mock
 	AnsweredAt time.Time
+	Background string
 }
 
 // StagedFinder is an optional MockMemDb extension under exact serving (the

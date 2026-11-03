@@ -13,11 +13,13 @@ import (
 )
 
 // answeredLog remembers, for the test set staged now, the per-test recordings
-// that answered a call, by their request keys (models.RequestKeys), so that a
-// later miss can tell it is a repeat of a call an earlier test made
-// (FindAnsweredEarlier, models.RepeatNote). A consumed per-test recording is
-// in no read after it answers, so without this the miss of an identical
-// later call names nothing ("no_mocks, candidates 0").
+// that answered a call, and the background's that a call spent (one of the
+// worker scope's in a test's window, one of the pool's), by their request
+// keys (models.RequestKeys), so that a later miss can tell it is a repeat of
+// a call made earlier (FindAnsweredEarlier, models.RepeatNote). A consumed
+// per-test recording, or a spent one of the background's, is in no read
+// after it answers, so without this the miss of an identical later call
+// names nothing ("no_mocks, candidates 0").
 //
 // It keeps of each recording only what a match reads (answeredProbe): its
 // name, kind, times, noise and request, never its response, so the on-disk
@@ -60,9 +62,12 @@ const redactingMaxBytes = 16 << 20
 type answeredEntry struct {
 	mock *models.Mock // answeredProbe's; nil once the entry is dropped
 	at   time.Time
-	keys []string
-	refs int // the key lists it is in: 0 once dropped
-	size int // answeredSize
+	// background is the scope of the set's background mock is of
+	// (models.RepeatNote.Background), empty for a test's own recording.
+	background string
+	keys       []string
+	refs       int // the key lists it is in: 0 once dropped
+	size       int // answeredSize
 }
 
 const (
@@ -83,6 +88,12 @@ const (
 // A recording that holds a pattern is kept apart too, whatever its keys and
 // size, under redactingMaxBytes alone (keepRedacting).
 func (l *answeredLog) note(mk *models.Mock, at time.Time) {
+	l.noteFrom(mk, at, "")
+}
+
+// noteFrom is note of a recording of the set's background of scope
+// background (models.RepeatNote.Background); "" is a test's own.
+func (l *answeredLog) noteFrom(mk *models.Mock, at time.Time, background string) {
 	if mk == nil || mk.Name == "" {
 		return
 	}
@@ -112,7 +123,7 @@ func (l *answeredLog) note(mk *models.Mock, at time.Time) {
 	if l.byKey == nil {
 		l.byKey = map[string][]*answeredEntry{}
 	}
-	e := &answeredEntry{mock: probe, at: at, keys: keys, size: size}
+	e := &answeredEntry{mock: probe, at: at, background: background, keys: keys, size: size}
 	l.queue = append(l.queue, e)
 	l.live++
 	l.bytes += size
@@ -544,20 +555,31 @@ func (m *MockManager) noteAnswered(mk models.Mock) {
 // AnsweredRedacting implements integrations.AnsweredRedactingReader: since
 // the last fence (the test set staged now; the run, for a CLI that never
 // says a set starts: answeredLog.reset), every per-test recording of kind
-// that answered a call and holds a pattern, once a name and content, as the
-// answered log keeps it (answeredProbe), and whether the log kept every one
-// (redactingMaxBytes).
+// that answered a call and holds a pattern, and every such background
+// recording a call spent (noteBackgroundSpent), once a name and content, as
+// the answered log keeps it (answeredProbe), and whether the log kept every
+// one (redactingMaxBytes).
 func (m *MockManager) AnsweredRedacting(kind models.Kind) ([]*models.Mock, bool) {
 	return m.answered.redactingOf(kind)
 }
 
 var _ integrations.AnsweredRedactingReader = (*MockManager)(nil)
 
+// noteBackgroundSpent records that mk, a recording of the set's background
+// of scope background (models.RepeatBackgroundWorker or
+// models.RepeatBackgroundPool), answered a call now and is spent for the
+// calls it answers no more: a later identical call it does not answer then
+// names it, and its scope (FindAnsweredEarlier).
+func (m *MockManager) noteBackgroundSpent(mk *models.Mock, background string) {
+	m.answered.noteFrom(mk, time.Now(), background)
+}
+
 // FindAnsweredEarlier implements integrations.AnsweredFinder: of the per-test
-// recordings of kind that answered a call earlier in this test set, under any
-// of keys, the one answered last that match accepts, and is not the open
-// test's own (recorded inside its window, or in its exact view). ok is false
-// when there is none.
+// recordings of kind that answered a call earlier in this test set, and of
+// the background's a call spent (AnsweredCall.Background), under any of
+// keys, the one answered last that match accepts, and is not the open test's
+// own (recorded inside its window, or in its exact view). ok is false when
+// there is none.
 func (m *MockManager) FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (integrations.AnsweredCall, bool) {
 	if match == nil || len(keys) == 0 {
 		return integrations.AnsweredCall{}, false
@@ -582,7 +604,7 @@ func (m *MockManager) FindAnsweredEarlier(kind models.Kind, keys []string, match
 	if best.mock == nil {
 		return integrations.AnsweredCall{}, false
 	}
-	return integrations.AnsweredCall{Mock: best.mock, AnsweredAt: best.at}, true
+	return integrations.AnsweredCall{Mock: best.mock, AnsweredAt: best.at, Background: best.background}, true
 }
 
 var _ integrations.AnsweredFinder = (*MockManager)(nil)

@@ -3478,7 +3478,17 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool,
 			return verdict, nil, nil
 		}
 		m.takeLocked(integrations.Take{Mock: m.stagedRecording(mk), How: integrations.TakeSpent, Gen: v.round, Test: v.test})
-		return verdict, nil, func() { m.noteExactSpent(mk) }
+		// The spend is the background's: one of the worker scope's for the
+		// windows, else one of the pool's for the staging. A later identical
+		// call it no longer answers names it (noteBackgroundSpent).
+		background := models.RepeatBackgroundPool
+		if worker {
+			background = models.RepeatBackgroundWorker
+		}
+		return verdict, nil, func() {
+			m.noteExactSpent(mk)
+			m.noteBackgroundSpent(mk, background)
+		}
 	}
 	v.mu.Lock()
 	if wait := v.closedWait(); wait != nil {
