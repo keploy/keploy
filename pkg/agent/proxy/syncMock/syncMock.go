@@ -419,11 +419,11 @@ type SyncMockManager struct {
 	outQueueMu sync.Mutex
 	out        *outLane
 	outOld     map[*outLane]struct{}
-	// outGone is closed once outGoneOf's consumer has stopped reading it for
-	// good (SetOutputConsumer): a lane SetOutputChannel makes for that
-	// channel takes it. Guarded by outQueueMu.
-	outGoneOf chan<- *models.Mock
-	outGone   <-chan struct{}
+	// outGone holds, by channel, what is closed once that channel's consumer
+	// has stopped reading it for good (SetOutputConsumer): a lane
+	// SetOutputChannel makes for the channel takes it. One manager can feed
+	// several channels, each its own consumer's. Guarded by outQueueMu.
+	outGone map[chan<- *models.Mock]<-chan struct{}
 	// outClock, outStall and outCloseStall measure the drainer's stall
 	// (outChanStall, outCloseStall): the process's own runnable clock and
 	// those bounds unless a test sets them.
@@ -755,14 +755,28 @@ func (m *SyncMockManager) NextTestID() int64 {
 // host comes at a small fraction of wall time, and never on a frozen clock.
 // Call it before out is set (SetOutputChannel): a lane is told its
 // consumer's exit as it is made. With no gone set for a channel, only the
-// verdict ends that wait.
+// verdict ends that wait. Each channel keeps its own: a manager that feeds
+// several (a per-app runtime's, and the agent's stream) is told each
+// consumer's exit. A channel whose consumer has exited is forgotten at the
+// next call, so the record does not grow with the sessions a long-lived
+// agent serves; a lane already made keeps what it was told.
 func (m *SyncMockManager) SetOutputConsumer(out chan<- *models.Mock, gone <-chan struct{}) {
 	if m == nil {
 		return
 	}
 	m.outQueueMu.Lock()
 	defer m.outQueueMu.Unlock()
-	m.outGoneOf, m.outGone = out, gone
+	for ch, g := range m.outGone {
+		select {
+		case <-g:
+			delete(m.outGone, ch)
+		default:
+		}
+	}
+	if m.outGone == nil {
+		m.outGone = make(map[chan<- *models.Mock]<-chan struct{})
+	}
+	m.outGone[out] = gone
 }
 
 // SetOutputChannel plugs an outgoing mock channel into the manager.
@@ -822,9 +836,7 @@ func (m *SyncMockManager) SetOutputChannel(out chan<- *models.Mock) {
 		lane.closing = make(chan struct{})
 	}
 	lane.epoch = epoch
-	if out == m.outGoneOf {
-		lane.gone = m.outGone
-	}
+	lane.gone = m.outGone[out]
 	m.out = lane
 	m.outQueueMu.Unlock()
 	// New session (distinct channel = re-record): drop any revokes still
@@ -1429,8 +1441,6 @@ func (m *SyncMockManager) OutQueuedTo(ch chan<- *models.Mock) bool {
 	return false
 }
 
-// outStallBound is the drainer's stall bound: outChanStall unless a test set
-// outStall.
 // SetOutStallForTest has m's out-queue drainers measure their stall on clk,
 // at bound (the close's bound no more than it), from the next lane on, and
 // returns what puts the process's clock and bounds back once those lanes'
@@ -1449,6 +1459,8 @@ func (m *SyncMockManager) SetOutStallForTest(clk stall.Clock, bound time.Duratio
 	}
 }
 
+// outStallBound is the drainer's stall bound: outChanStall unless a test set
+// outStall.
 func (m *SyncMockManager) outStallBound() time.Duration {
 	if m.outStall > 0 {
 		return m.outStall

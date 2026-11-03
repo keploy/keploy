@@ -627,6 +627,56 @@ func TestCloseOutChanEndsAtItsConsumersExitWhileItsStallVerdictIsPending(t *test
 	}
 }
 
+// A manager that feeds several channels (a per-app runtime's manager, or the
+// process's, which the agent's stream and a runtime's channel both take) is
+// told each one's consumer, and keeps each: the second consumer said does not
+// put the first one's exit out of mind. Each lane ends at its own consumer's
+// exit, the clock frozen so that nothing else can end it. A consumer that has
+// exited is forgotten at the next call, so the record stays as small as the
+// consumers still reading.
+func TestEachChannelsConsumerIsKeptOnAManagerThatFeedsSeveral(t *testing.T) {
+	clk := &stall.ManualClock{} // never advanced
+	m := New(nil)
+	m.outClock, m.outStall = clk, time.Hour
+	a, b := make(chan *models.Mock, 1), make(chan *models.Mock, 1)
+	a <- &models.Mock{Name: "filler"}
+	b <- &models.Mock{Name: "filler"}
+	goneA, goneB := make(chan struct{}), make(chan struct{})
+	m.SetOutputConsumer(a, goneA)
+	m.SetOutputConsumer(b, goneB)
+	endsAtItsExit := func(ch chan *models.Mock, gone chan struct{}, name string) {
+		t.Helper()
+		m.SetOutputChannel(ch)
+		outcome := make(chan bool, 1)
+		m.send(&models.Mock{Name: name}, "test-"+name, func(d bool) { outcome <- d })
+		select {
+		case d := <-outcome:
+			t.Fatalf("mock %s was decided (delivered: %v) before its consumer exited", name, d)
+		case <-time.After(50 * time.Millisecond):
+		}
+		close(gone)
+		select {
+		case d := <-outcome:
+			if d {
+				t.Fatalf("mock %s, which no consumer took, was said to be delivered", name)
+			}
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatalf("channel %s's wait did not end at its consumer's exit, its stall verdict pending", name)
+		}
+	}
+	endsAtItsExit(a, goneA, "a")
+	c := make(chan *models.Mock)
+	m.SetOutputConsumer(c, make(chan struct{}))
+	m.outQueueMu.Lock()
+	_, keptA := m.outGone[a]
+	n := len(m.outGone)
+	m.outQueueMu.Unlock()
+	if keptA || n != 2 {
+		t.Fatalf("after a's consumer exited, the next call keeps a: %v, %d consumers; want b's and c's alone", keptA, n)
+	}
+	endsAtItsExit(b, goneB, "b")
+}
+
 // A consumer's exit ends only its own channel's wait: a channel set while
 // another's consumer is said to have exited waits on for its own consumer
 // (here, the clock frozen, for good). A nil manager takes the call.
