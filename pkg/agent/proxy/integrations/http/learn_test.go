@@ -5198,7 +5198,10 @@ func TestLearnMatchATokenAnotherTestsServeMayHaveGivenIsRefusedUnlessItsAdapterS
 // so the user could not act on it; it names the late call and mock-22, and
 // refuses as before. Where mock-22 gave another id, keploy cannot name the
 // value's source, and the refusal says so, never that mock-60 holds it
-// earlier where keploy cannot bind it.
+// earlier where keploy cannot bind it. A serve of test 3, the test F ran
+// just before the call's, is handed to the call as an earlier place of its
+// own test (earlierRaw reads what F served since the previous test began),
+// as F served it (Order.ServedView): the refusal names it so.
 func TestALateCallsRefusalNamesTheOlderTestsServeNotTheWindowsRecording(t *testing.T) {
 	const (
 		path   = "body.Key.Id.S"
@@ -5208,22 +5211,26 @@ func TestALateCallsRefusalNamesTheOlderTestsServeNotTheWindowsRecording(t *testi
 		otherID = "0a0b0c0d-1e1f-4a4b-8c8d-9e9f0a0b0c0d"
 	)
 	for _, c := range []struct {
-		name, gave, want string
-		not              []string
+		name, gave string
+		previous   bool
+		want       string
+		not        []string
 	}{
-		{"an older test's serve gave it", liveID, path + " changed, and the value it carries now is, whole, what record's full round gave the application in mock-22, in an older test than the call's", []string{"holds earlier (in mock-60)", "flowed from mock-60", "cannot name"}},
-		{"no older test's serve gave it", otherID, path + " carries a value keploy cannot name a source of: ", []string{"holds earlier (in mock-60)", "flowed from mock-60", "cannot bind", "late call", "mock-22"}},
+		{"an older test's serve gave it", liveID, false, path + " changed, and the value it carries now is, whole, what record's full round gave the application in mock-22, in an older test than the call's", []string{"holds earlier (in mock-60)", "flowed from mock-60", "cannot name"}},
+		{"no older test's serve gave it", otherID, false, path + " carries a value keploy cannot name a source of: ", []string{"holds earlier (in mock-60)", "flowed from mock-60", "cannot bind", "late call", "mock-22"}},
+		{"the previous test's serve gave it", liveID, true, path + " changed, and the value it carries now is, whole, what record's full round gave the application in mock-22, in the test record's full round ran just before the call's", []string{"holds earlier (in mock-60)", "flowed from mock-60", "cannot name", "an older test"}},
+		{"the previous test's serve gave another id", otherID, true, path + " carries a value keploy cannot name a source of: ", []string{"holds earlier (in mock-60)", "flowed from mock-60", "cannot bind", "late call", "mock-22"}},
 	} {
-		t.Run(c.name, func(t *testing.T) { lateCallRefusal(t, path, recID, liveID, c.gave, c.want, c.not) })
+		t.Run(c.name, func(t *testing.T) { lateCallRefusal(t, path, recID, liveID, c.gave, c.previous, c.want, c.not) })
 	}
 }
 
 // lateCallRefusal is the refusal HTTP gives a call of test 4 that carries
 // liveID where its recording holds recID, which mock-60, served as recorded
-// in the call's own test, holds, where a serve of test 2 (mock-22) gave the
-// application the id gave: it starts want, says none of not, and refuses the
-// call.
-func lateCallRefusal(t *testing.T, path, recID, liveID, gave, want string, not []string) {
+// in the call's own test, holds, where a serve of test 2 (mock-22; of test
+// 3, handed to the call, where previous) gave the application the id gave:
+// it starts want, says none of not, and refuses the call.
+func lateCallRefusal(t *testing.T, path, recID, liveID, gave string, previous bool, want string, not []string) {
 	t.Helper()
 	at := time.Date(2026, 10, 24, 9, 55, 53, 938177550, time.UTC)
 	pg := func(name string, before time.Duration, id string) *models.Mock {
@@ -5243,10 +5250,16 @@ func lateCallRefusal(t *testing.T, path, recID, liveID, gave, want string, not [
 	tr.Begin()
 	tr.End()
 	tr.Begin()
-	tr.ServedMock(older)
-	tr.ServedMockAsRecorded(older)
+	if !previous {
+		tr.ServedMock(older)
+		tr.ServedMockAsRecorded(older)
+	}
 	tr.End()
 	tr.Begin()
+	if previous {
+		tr.ServedMock(older)
+		tr.ServedMockAsRecorded(older)
+	}
 	tr.End()
 	tr.Begin()
 	o := tr.Placed().Order
@@ -5254,10 +5267,15 @@ func lateCallRefusal(t *testing.T, path, recID, liveID, gave, want string, not [
 		g, err := o.GivenPlaces(older)
 		return []learn.GivenPlaces{g}, err
 	}
+	var raw []learn.Raw
+	if previous {
+		raw = append(raw, o.ServedView(older, learn.RawOf(older, true).ServedIn(o.Of(older))))
+		given = func() ([]learn.GivenPlaces, error) { return nil, nil }
+	}
 	window := learn.RawOf(pg("mock-60", 200*time.Millisecond, recID), false).ServedAs(9).ServedAsRecorded()
 	rec := learn.Shape{Leaves: map[string]learn.Leaf{path: {Path: path, Type: learn.String, Value: recID}}}
 	live := learn.Shape{Leaves: map[string]learn.Leaf{path: {Path: path, Type: learn.String, Value: liveID}}}
-	learned := learn.ClassifyGiven(tr.Drifts(), []string{path}, live, rec, at, nil, []learn.Raw{window}, nil, nil, given)
+	learned := learn.ClassifyGiven(tr.Drifts(), []string{path}, live, rec, at, nil, append(raw, window), nil, nil, given)
 	p, why := learnPlan(tr, 4, &models.Mock{Name: "mock-61"}, rec, true, learned, nil, nil)
 	if !strings.HasPrefix(why, want) {
 		t.Errorf("why %q; want it to start %q", why, want)

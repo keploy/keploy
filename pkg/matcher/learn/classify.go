@@ -242,6 +242,14 @@ type Raw struct {
 	// (appearedIn, follows.refute); one F gave the application anywhere else
 	// stays its source whatever F gave there.
 	olderTest bool
+	// test and prev, of a Raw marked olderTest: the number in the set of
+	// the one older test F made every serve of it in (Order.testOf; 0 where
+	// they were made in more than one), and whether that test is the one
+	// F ran just before the call's (Order.previous). A late call's reason
+	// names such a serve that gave the application the value the call
+	// carries now (lateServes).
+	test int
+	prev bool
 	// beforeTest: F gave the application the mock only before the call's
 	// test began (ServedBeforeTheTest; Order.ServedView marks it by the
 	// serves' numbers): at the set's start-up, between tests, or in an older
@@ -446,6 +454,7 @@ func (r Raw) WithServed(served bool) Raw {
 	if !served {
 		r.first, r.last, r.asRecorded, r.live = 0, 0, false, nil
 		r.unseen, r.views, r.olderTest, r.servedAfter = false, nil, false, false
+		r.test, r.prev = 0, false
 	}
 	return r
 }

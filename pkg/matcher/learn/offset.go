@@ -752,8 +752,10 @@ type givenWords struct {
 	// test is the number in the set of the older test F gave the
 	// application the recording in, every serve of it, as the read
 	// numbered them (Order.testOf); 0 where keploy cannot name one. A call
-	// that carries what F gave there is late (lateServes).
+	// that carries what F gave there is late (lateServes). prev: that test
+	// is the one F ran just before the call's (Order.previous).
 	test        int
+	prev        bool
 	first, last int
 	set         bool
 	// unstated: F served it and no adapter said what it gave the
@@ -1113,6 +1115,7 @@ func (o Order) GivenPlaces(m *models.Mock) (GivenPlaces, error) {
 	if o.t != nil {
 		o.t.mu.Lock()
 		g.words.test = o.testOf(g.first, g.last)
+		g.words.prev = o.previous(g.words.test)
 		o.t.mu.Unlock()
 	}
 	return g, nil

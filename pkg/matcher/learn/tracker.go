@@ -1083,7 +1083,9 @@ func (o Order) Spans(ms []*models.Mock) [][2]int {
 // Where F made every serve of m the read saw in an older test of the set
 // (olderTestLocked), r is also marked so (Raw.ServedInAnOlderTest): F gave
 // the application m's answer there, never at the start-up, between tests or
-// in the call's own test. One serve there, or one in an order keploy cannot
+// in the call's own test; and with the one older test F made them all in
+// (Raw.test, Raw.prev: testOf), where they were made in one, which a late
+// call's reason names it by (lateServes). One serve there, or one in an order keploy cannot
 // tell, leaves it unmarked: the answer then stays where a value may have
 // come from, whatever F gave there (fail closed). A Raw not served, or of
 // another mock, is returned as it is.
@@ -1097,12 +1099,14 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 	var loads []func() (*models.Mock, error)
 	o.t.mu.Lock()
 	older, before, after := o.olderTestLocked(id), o.beforeTestLocked(id), o.servedAfterLocked(id)
+	test := o.testOf(o.ofLocked(id))
 	if unstated {
 		recorded, _, loads, unread, ok = o.viewsLocked(id)
 	}
 	o.t.mu.Unlock()
 	if older {
 		r = r.ServedInAnOlderTest()
+		r.test, r.prev = test, o.previous(test)
 	}
 	if before {
 		r = r.ServedBeforeTheTest()
@@ -1237,6 +1241,13 @@ func (o Order) testOf(first, last int) int {
 		return 0
 	}
 	return k
+}
+
+// previous reports whether test, a number testOf gave, is the test of the
+// set F began just before the running one (the last of starts): the test
+// F ran before the call's.
+func (o Order) previous(test int) bool {
+	return test > 0 && test == len(o.starts)-1
 }
 
 // ofLocked is Of of the mock of identity id, o.t.mu held (the running set's

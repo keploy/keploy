@@ -238,15 +238,33 @@ func TestOrderNamesTheOlderTestOfAServe(t *testing.T) {
 			t.Errorf("%s (serves %d to %d): test %d, want %d", name, first, last, got, want)
 		}
 	}
-	// The word rule reads the set's recordings so named (GivenPlaces).
-	for name, want := range map[string]int{"one": 1, "two": 2, "both": 0, "three": 0} {
+	// The word rule reads the set's recordings so named (GivenPlaces),
+	// and a recording handed to the call as F served it (ServedView), the
+	// test F ran just before the running one (two's) said so (prev).
+	for name, want := range map[string]int{"startup": 0, "one": 1, "two": 2, "both": 0, "three": 0} {
 		g, err := o.GivenPlaces(m(name))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if g.words.test != want {
-			t.Errorf("%s as the word rule reads it: test %d, want %d", name, g.words.test, want)
+		if g.words.test != want || g.words.prev != (want == 2) {
+			t.Errorf("%s as the word rule reads it: test %d previous %v, want %d", name, g.words.test, g.words.prev, want)
 		}
+		r := o.ServedView(m(name), RawOf(m(name), true).ServedIn(o.Of(m(name))))
+		if r.test != want || r.prev != (want == 2) {
+			t.Errorf("%s as F served it: test %d previous %v, want %d", name, r.test, r.prev, want)
+		}
+		if r = r.WithServed(false); r.test != 0 || r.prev {
+			t.Errorf("%s unserved: test %d previous %v, want none", name, r.test, r.prev)
+		}
+	}
+	// In a set's first test, a serve of the start-up is of no test, and
+	// none the test before the running one.
+	tr.NewSet()
+	tr.ServedMock(m("startup"))
+	tr.Begin()
+	o = tr.Placed().Order
+	if g, err := o.GivenPlaces(m("startup")); err != nil || g.words.test != 0 || g.words.prev {
+		t.Errorf("a start-up's serve in the set's first test: test %d previous %v (%v), want none", g.words.test, g.words.prev, err)
 	}
 }
 
@@ -439,6 +457,87 @@ func TestALateCallsReasonReadsTheWindowsStampsWhereTheyEcho(t *testing.T) {
 		ln := got[0]
 		if ln.Kind != KindVariable || ln.From.Mock != "mock-60" || ln.From.SetAside != c.aside || strings.Contains(ln.Why, unnamed) != c.aside {
 			t.Errorf("%s: %s from %q set aside %v (%q); want a variable of mock-60, set aside %v", c.name, ln.Kind, ln.From.Mock, ln.From.SetAside, ln.Why, c.aside)
+		}
+	}
+}
+
+// A consumer one test behind: the late call carries the id a serve of the
+// test F ran just before the call's gave the application (mock-22). That
+// recording is handed to the call (Tracker.Before: an earlier place of the
+// call's own test, which Order.ServedView marks as served in one older
+// test), not read among the set's; the reason names it as the serve of the
+// test F ran just before the call's, and says why keploy follows no value
+// of it here, as it names a serve of a test two back (an older test's), or
+// both. A recording F served in two older tests names no test: keploy then
+// names no serve, and says it cannot name the source. The protocols that
+// read a recording handed to the call so (HTTP, Postgres) classify by
+// ClassifyGiven; Mongo's rule (ClassifyFollowing) sets the window's
+// recording aside before this reason is read, and is not this row's.
+func TestALateCallNamesThePreviousTestsServeHandedToTheCall(t *testing.T) {
+	const path = "body.Key.Id.S"
+	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: lateRecID}}}
+	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: lateLiveID}}}
+	const (
+		late     = "late call of mock-22's test"
+		prev     = "in mock-22, in the test record's full round ran just before the call's"
+		older    = "in mock-22, in an older test than the call's"
+		notPrev  = "the call was recorded with another value than the application got there"
+		notOlder = "keploy does not follow a value another test's recording gave the application"
+		unnamed  = "keploy cannot name where the value the call carries now came from"
+	)
+	window := lateMsg("mock-60", 200*time.Millisecond, lateRecID).ServedAs(9).ServedAsRecorded()
+	// served is a recording F served in older test n of the set, as
+	// ServedView marks it (n 0: in two older tests), previous where n is
+	// the test F ran just before the call's.
+	served := func(x Raw, n int, previous bool) Raw {
+		x = x.ServedAs(3).ServedAsRecorded().ServedInAnOlderTest()
+		x.test, x.prev = n, previous
+		return x
+	}
+	for _, c := range []struct {
+		name string
+		raw  []Raw
+		set  []GivenPlaces
+		want []string
+		not  []string
+	}{
+		{"the previous test's serve gave it", []Raw{served(lateMsg("mock-22", 40*time.Second, lateLiveID), 3, true)}, nil,
+			[]string{late, prev, notPrev}, []string{older, notOlder, unnamed, "flowed from mock-60"}},
+		{"a serve two tests back gave it", []Raw{served(lateMsg("mock-22", 40*time.Second, lateLiveID), 2, false)}, nil,
+			[]string{late, older, notOlder}, []string{prev, notPrev, unnamed}},
+		{"the previous test's serve and an older one's gave it", []Raw{served(lateMsg("mock-22", 40*time.Second, lateLiveID), 3, true)},
+			[]GivenPlaces{lateSet("mock-11", 1, lateLiveID, func(x Raw) Raw { return x.ServedAsRecorded() })},
+			[]string{"in each of mock-22, mock-11", notPrev}, []string{notOlder, unnamed}},
+		{"the previous test's serve holds another id", []Raw{served(lateMsg("mock-22", 40*time.Second, lateOtherID), 3, true)}, nil,
+			[]string{unnamed}, []string{late, "mock-22"}},
+		{"a serve made in two older tests gave it", []Raw{served(lateMsg("mock-22", 40*time.Second, lateLiveID), 0, false)}, nil,
+			[]string{unnamed}, []string{late, "mock-22"}},
+	} {
+		at := c.name
+		set := c.set
+		got := ClassifyGiven(clockedDrifts(), []string{path}, live, rec, eRecAt, nil, append(append(eStartup(), c.raw...), window), nil, nil, func() ([]GivenPlaces, error) { return set, nil })
+		if len(got) != 1 {
+			t.Fatalf("%s: %d learned, want 1", at, len(got))
+		}
+		ln := got[0]
+		// Refused, as before: a late call's leaf is no variable of any
+		// place, and one whose source keploy cannot name stays a
+		// variable of the window's recording, set aside.
+		switch named := strings.Contains(ln.Why, late) || strings.Contains(ln.Why, "in each of"); {
+		case named && (ln.Kind != KindUnaccounted || ln.From != (Place{})):
+			t.Errorf("%s: %s from %+v; want unaccounted, from no place", at, ln.Kind, ln.From)
+		case !named && (ln.Kind != KindVariable || ln.From.Mock != "mock-60" || ln.From.Side != "" || !ln.From.SetAside):
+			t.Errorf("%s: %s from %+v; want a variable of mock-60, set aside", at, ln.Kind, ln.From)
+		}
+		for _, w := range c.want {
+			if !strings.Contains(ln.Why, w) {
+				t.Errorf("%s: why %q; want it to say %q", at, ln.Why, w)
+			}
+		}
+		for _, n := range c.not {
+			if strings.Contains(ln.Why, n) {
+				t.Errorf("%s: why %q says %q", at, ln.Why, n)
+			}
 		}
 	}
 }
