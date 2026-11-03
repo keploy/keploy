@@ -87,3 +87,30 @@ func TestAHungParserRecordsNothingAfterItsRetirement(t *testing.T) {
 		}
 	}
 }
+
+// TestARetiredSessionsMarkStaysSet: the retirement's mark replaces a mark set
+// before it, is found at every take after it, and outlives MarkMockComplete and
+// a later mark. A clear flag is taken as clear.
+func TestARetiredSessionsMarkStaysSet(t *testing.T) {
+	s := &Session{}
+	if r, ok := s.TakeMockIncomplete(); ok {
+		t.Fatalf("a clear flag was taken as set (%q)", r)
+	}
+	s.MarkMockIncomplete("per_conn_cap: a chunk the tee dropped")
+	s.retire(leftOutParserHung)
+	for i := 0; i < 2; i++ {
+		if r, ok := s.TakeMockIncomplete(); !ok || r != leftOutParserHung {
+			t.Fatalf("take %d = %q, %v; want the retirement's reason, set", i+1, r, ok)
+		}
+	}
+	s.MarkMockComplete()
+	s.MarkMockIncomplete("short_write: a later mark")
+	if !s.IsMockIncomplete() {
+		t.Fatal("MarkMockComplete cleared the retirement")
+	}
+	if r, ok := s.TakeMockIncomplete(); !ok || r != leftOutParserHung {
+		t.Fatalf("take after a later mark = %q, %v; want the retirement's reason", r, ok)
+	}
+	var none *Session
+	none.retire(leftOutParserHung) // nil-safe
+}
