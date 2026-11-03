@@ -265,11 +265,13 @@ type Session struct {
 
 	// incomplete is the incomplete-mock flag (MarkMockIncomplete): nil while
 	// it is clear, else why it was set, the first reason since it was last
-	// cleared. The reason is the flag, one atomic: whoever takes the flag
-	// (TakeMockIncomplete) takes the reason that set it, and a mark that
-	// lands while the flag is being taken is either taken with it or left set
-	// for the next mock, never lost.
-	incomplete atomic.Pointer[string]
+	// cleared, or the retirement's, which replaces it (retire). The reason is
+	// the flag, one atomic: whoever takes the flag (TakeMockIncomplete) takes
+	// the reason that set it, and a mark that lands while the flag is being
+	// taken is either taken with it or left set for the next mock, never
+	// lost. A retired parser's mark (retire) is set for good: taking it
+	// leaves it set, and nothing clears it.
+	incomplete atomic.Pointer[incompleteMark]
 
 	// stoppedAt is the instant the connection stopped being recorded
 	// (StoppedAt), in Unix nanoseconds: 0 until StoppedAt first reads the
@@ -332,14 +334,11 @@ func (s *Session) MarkMockIncomplete(reason string) {
 	}
 	// The relay calls this for every chunk it drops, so the usual call finds
 	// the flag set already and must cost nothing: return before anything is
-	// allocated. Only a call that may set the flag copies its reason to the
-	// heap (r escapes through the CompareAndSwap; reason itself must not, or
-	// every call would allocate it on entry).
+	// allocated. Only a call that may set the flag puts its mark on the heap.
 	if s.incomplete.Load() != nil {
 		return
 	}
-	r := reason
-	if s.incomplete.CompareAndSwap(nil, &r) && s.Logger != nil {
+	if s.incomplete.CompareAndSwap(nil, &incompleteMark{reason: reason}) && s.Logger != nil {
 		s.Logger.Debug("mock marked incomplete", zap.String("reason", reason), zap.String("connID", s.ClientConnID))
 	}
 }
@@ -654,11 +653,19 @@ func (s *Session) EndedAtHole(dir fakeconn.Direction) (reason string, ok bool) {
 // mark set since (by the relay, while EmitMock delivered) is the next mock's:
 // clearing it records that mock with nothing reporting it. A parser that drops
 // a mock for the flag calls LeaveOutIfIncomplete instead, which reports it.
+//
+// A retired parser's mark (retire) stays: nothing that parser records after
+// its retirement is whole.
 func (s *Session) MarkMockComplete() {
 	if s == nil {
 		return
 	}
-	s.incomplete.Store(nil)
+	for {
+		m := s.incomplete.Load()
+		if m == nil || m.retired || s.incomplete.CompareAndSwap(m, nil) {
+			return
+		}
+	}
 }
 
 // IsMockIncomplete reports whether the session's active mock has been
@@ -686,7 +693,9 @@ func (s *Session) IsMockIncomplete() bool {
 // once on a connection, say, and drops the ones in flight when a chunk was
 // lost. Whoever takes the flag takes the duty to report what it leaves out:
 // such a parser calls ReportLeftOut once for each exchange it leaves out for
-// the mark, passing the reason it took, and emits nothing for it.
+// the mark, passing the reason it took, and emits nothing for it. A retired
+// parser's mark (retire) is taken and left set, so each take after it finds it
+// again: from its retirement on, nothing the parser has in flight is whole.
 // RecordOrphanWindow alone is not enough: it records the span, but nothing
 // counts the mock or says why it is missing. A parser that leaves out one mock
 // for the flag calls LeaveOutIfIncomplete. Nil-safe.
@@ -694,14 +703,57 @@ func (s *Session) TakeMockIncomplete() (reason string, ok bool) {
 	// EmitMock takes the flag for every mock, and it is nearly always clear:
 	// read it before writing it, so the usual call does not write the word the
 	// relay reads on every chunk it drops.
-	if s == nil || s.incomplete.Load() == nil {
+	if s == nil {
 		return "", false
 	}
-	r := s.incomplete.Swap(nil)
-	if r == nil {
-		return "", false
+	for {
+		m := s.incomplete.Load()
+		if m == nil {
+			return "", false
+		}
+		// A retired parser's mark is taken and left set: it marks every
+		// mock after it (retire).
+		if m.retired || s.incomplete.CompareAndSwap(m, nil) {
+			return m.reason, true
+		}
 	}
-	return *r, true
+}
+
+// incompleteMark is a mark of the incomplete-mock flag: why it was set, and
+// whether it marks every mock from then on (retire) rather than the next one.
+type incompleteMark struct {
+	reason  string
+	retired bool
+}
+
+// leftOutParserHung is the reason a hung parser's mocks are left out from its
+// retirement on (retire). The text before its colon is the cause its WARN is
+// limited by.
+const leftOutParserHung = "parser_hung: the supervisor retired this connection's parser, which made no progress within " +
+	"its hang budget with an exchange in hand, and closed its streams under it: what it read of an exchange in " +
+	"flight ends where they were closed, not where the exchange did"
+
+// retire marks every mock this session's parser hands over from now on as
+// incomplete, for reason: the supervisor calls it as it retires a parser that
+// goes on running, before the abort closes the parser's streams (SessionOnAbort).
+// A parser reading a closed stream gets fakeconn.ErrClosed once it has taken
+// what was delivered before the close, and its context is cancelled only after
+// the close: what it then builds of an exchange in flight ends where the
+// streams were closed, not where the exchange did. The HTTP/1 recorder takes a
+// close-delimited body read up to the close for a whole response, and a parser
+// that flushes what it holds once its context ends (EmitMockOnShutdown, which
+// skips the context check) records it as well. So the mark is set before the
+// close, and for good: EmitMock and EmitMockOnShutdown leave out and report
+// each mock after it (LeaveOutIfIncomplete), and a parser that takes the flag
+// itself (TakeMockIncomplete) leaves out what it has in flight, each time it
+// takes it. MarkMockComplete does not clear it. A mark already set is replaced:
+// the retirement leaves out what that mark would have, and every mock after
+// it. A Supervisor runs one session once, and retires it at most once. Nil-safe.
+func (s *Session) retire(reason string) {
+	if s == nil {
+		return
+	}
+	s.incomplete.Store(&incompleteMark{reason: reason, retired: true})
 }
 
 // LeaveOutIfIncomplete takes the incomplete-mock flag (TakeMockIncomplete)
@@ -720,7 +772,8 @@ func (s *Session) TakeMockIncomplete() (reason string, ok bool) {
 // or emitting it, calls this instead of IsMockIncomplete and
 // MarkMockComplete, passing what it knows of the mock: its kind and its
 // exchange's times are enough. Its flag is cleared as it is taken, so the
-// next mock gets a fresh chance.
+// next mock gets a fresh chance, except on a retired session (retire): its
+// mark stays set as it is taken, and leaves out every mock after it too.
 //
 // A nil m is a no-op that leaves the flag alone, like EmitMock's. Nil-safe.
 func (s *Session) LeaveOutIfIncomplete(m *models.Mock) bool {
@@ -743,10 +796,11 @@ func (s *Session) LeaveOutIfIncomplete(m *models.Mock) bool {
 //     delivered during the hole is never turned into a mock);
 //   - every mock the incomplete-mock flag leaves out (LeaveOutIfIncomplete,
 //     ReportLeftOut), whatever set the flag: a decode failure, a short or
-//     failed write, or a chunk the relay's tee gated, memory pressure
-//     included. That covers each exchange a parser that takes the flag itself
-//     leaves out for it, such as the half a generic-parser split carries out
-//     of an exchange the flag left out;
+//     failed write, a chunk the relay's tee gated (memory pressure
+//     included), or a hang's retirement (retire), which leaves out every
+//     mock after it. That covers each exchange a parser that takes the flag
+//     itself leaves out for it, such as the half a generic-parser split
+//     carries out of an exchange the flag left out;
 //   - each exchange a parser reports it cannot record, without the flag
 //     (ReportLeftOut): the MySQL recorder's leaveOut, say, for a command that
 //     does not decode, a cursor's fetch, a packet of 16 MiB or more, or a
@@ -822,9 +876,10 @@ type OrphanSpans interface {
 // SyncMockManager.OpenOrphanWindow.
 //
 // The caller is the V2 dispatcher on a passthrough fallthrough: once a parser
-// is retired the relay raw-forwards the rest of that connection, so it emits no
-// further mock and every test case recorded against it would otherwise ship
-// mock-less and replay as match_phase=no_mocks.
+// is retired the relay raw-forwards the rest of that connection, so nothing
+// more of it is recorded (a hung parser that goes on running has every later
+// mock left out: Session.retire), and every test case recorded against it
+// would otherwise ship mock-less and replay as match_phase=no_mocks.
 func (s *Session) OpenOrphanWindow(start time.Time) func() {
 	if s == nil {
 		return func() {}
@@ -838,12 +893,13 @@ func (s *Session) OpenOrphanWindow(start time.Time) func() {
 // EmitMock sends m to the mocks channel. If the session's active mock
 // is marked incomplete, EmitMock returns nil without sending (the mock
 // is left out and the incomplete flag is cleared, matching the "partial
-// mocks are dropped" invariant), and reports the mock's exchange as one
-// the connection could not record (LeaveOutIfIncomplete), which leaves out
-// the test cases recorded over it that the recording has not saved yet
-// (ReportLeftOut says when one may have been). A caller that keeps its own
-// spans (Session.Orphans: a DaemonSet agent, per pod) checks that pod's test
-// cases against them instead.
+// mocks are dropped" invariant; a retired session's mark stays set, so
+// every mock after it is left out too: retire), and reports the mock's
+// exchange as one the connection could not record (LeaveOutIfIncomplete),
+// which leaves out the test cases recorded over it that the recording has
+// not saved yet (ReportLeftOut says when one may have been). A caller that
+// keeps its own spans (Session.Orphans: a DaemonSet agent, per pod) checks
+// that pod's test cases against them instead.
 //
 // Context cancellation semantics differ between the two delivery paths:
 //
@@ -928,7 +984,9 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 	}
 	if s.LeaveOutIfIncomplete(m) {
 		// Left out, and the flag reset, so the next mock in this cycle
-		// gets a fresh chance. Matches invariant I4 in PLAN.md.
+		// gets a fresh chance; a retired session's mark stays set, and
+		// leaves out every mock after it (retire). Matches invariant I4
+		// in PLAN.md.
 		//
 		// Pending work is still cleared: the parser has consumed the
 		// input even though the mock is abandoned. Leaving it armed

@@ -306,7 +306,12 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 
 	case <-s.hungCh:
 		// Abort first: the parser is retired from here, and the abort
-		// stops its capture (SessionOnAbort).
+		// stops its capture (SessionOnAbort). It goes on running, and the
+		// abort closes its streams under it before its context is
+		// cancelled below: retire its session first, so that nothing it
+		// hands over from here, cut where its streams were closed, is
+		// recorded (Session.retire).
+		sess.retire(leftOutParserHung)
 		s.fireOnAbort()
 		// Debug-level: hang abort is a designed control-flow path —
 		// the dispatcher's FallthroughToPassthrough handling picks it
