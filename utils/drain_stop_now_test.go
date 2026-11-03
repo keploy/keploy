@@ -136,10 +136,13 @@ func TestATeardownDrainWhoseVerdictCannotComeEndsAtTheUsersInterrupt(t *testing.
 	var p atomic.Uint64
 	const bound = 30 * time.Second
 	res, logs := startDrain(clk, &g, bound, p.Load)
-	offer := awaitLog(t, logs, drainOffer, res)
+	offer, at := awaitLogAfter(t, logs, drainOffer, -1, res)
 	if f := offer.ContextMap(); f["group"] != "t" || f["stalledFor"] != time.Duration(0) || f["bound"] != bound {
 		t.Fatalf("the offer said %v: want the group, no stall yet (a frozen clock), and the bound", f)
 	}
+	// Its own offer standing, it says so again at its next notice with no
+	// progress.
+	awaitLogAfter(t, logs, drainOffer, at, res)
 	if !MarkInterruptedAgain() {
 		t.Fatal("the user's interrupt after the drain's offer ended no stop")
 	}
