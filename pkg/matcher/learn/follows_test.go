@@ -257,7 +257,8 @@ func jobsServed(id, n string, live Raw) []Raw {
 // gained nothing, or F's view of it is missing, lacks the field, or holds
 // the value F saw, it stays where the value came from (a variable), or the
 // word is refused: fail closed. ClassifyGiven, the rule's absence, never
-// learns it.
+// learns it. Where the call's answer echoes the value, each value learned
+// as noise here is learned as that echo instead, naming the same place.
 func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNoneOfIt(t *testing.T) {
 	const (
 		moved   = "where record's full round gave the application another value, which the value took none of the words of: a copy moves with its source"
@@ -339,6 +340,13 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 		given := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.recorded}}}, eRecAt, tc.earlier, tc.raw, nil, nil, nil)
 		if given[0].Kind == KindNoise {
 			t.Errorf("FALSE GREEN? ClassifyGiven, %s: noise (%q), want it never learned (the rule is ClassifyFollowing's)", tc.name, given[0].Why)
+		}
+		// The same value echoed by the call's answer: the echo stands
+		// beside the place set aside, and names it as the noise does
+		// (follows.setAside), not only the word the rule let go there.
+		echo := []Leaf{{Path: "rows[0][2]", Noise: "rows[0][2]", Type: String, Value: tc.recorded}}
+		if got := classifyF(t, tc.recorded, tc.live, tc.earlier, tc.raw, echo); got.Kind != KindEcho || !strings.Contains(got.Why, tc.why) || !strings.HasSuffix(got.Why, echoLearned) {
+			t.Errorf("%s, echoed: %s (%q); want an echo naming %q", tc.name, got.Kind, got.Why, tc.why)
 		}
 	}
 }

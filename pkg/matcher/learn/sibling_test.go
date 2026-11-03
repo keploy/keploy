@@ -361,6 +361,9 @@ func TestAnEqualStampBesideASiblingFHadNotServedIsAnEcho(t *testing.T) {
 			if row.earlier != nil && !strings.Contains(ln.Why, asideWhy) {
 				t.Errorf("%s: %s refused (%s); want the reason to name the leaf set aside (%q)", row.what, p, ln.Why, asideWhy)
 			}
+			if row.earlier == nil && strings.Contains(ln.Why, "; and ") {
+				t.Errorf("%s: %s refused (%s); want the reason to name no leaf set aside where none was", row.what, p, ln.Why)
+			}
 		}
 	}
 }
