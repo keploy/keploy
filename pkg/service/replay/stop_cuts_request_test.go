@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -459,6 +460,123 @@ func TestAnErrorWritingResultsBeforeTheStreamedTestsKeepsTheSetInternalErr(t *te
 				}
 				if after := sent.afterStop(); len(after) > 0 {
 					t.Errorf("%v sent after the set's results could not be written", after)
+				}
+			})
+		}
+	}
+}
+
+// refusedFetchHooks answers as the harness's hooks, but the fetch of the
+// agent's consumed mocks after the named test is refused, once, as it is when
+// docker compose has taken the stack down (keploy's agent with it) while the
+// set's watch has not seen it yet. Once that test's verdict is reported
+// (AfterTestCaseRun), before the loop's next test, it calls settled.
+type refusedFetchHooks struct {
+	prHooks
+	name    string
+	sent    *sendLog
+	armed   *atomic.Bool
+	settled func(ctx context.Context)
+}
+
+func (h refusedFetchHooks) SimulateRequest(ctx context.Context, tc *models.TestCase, set string) (interface{}, error) {
+	h.sent.add(tc.Name)
+	if tc.Name == h.name {
+		h.armed.Store(true)
+	}
+	return h.prHooks.SimulateRequest(ctx, tc, set)
+}
+
+func (h refusedFetchHooks) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
+	if h.armed.CompareAndSwap(true, false) {
+		return nil, errors.New(`Get "http://127.0.0.1:16789/agent/consumedmocks": dial tcp 127.0.0.1:16789: connect: connection refused`)
+	}
+	return h.prHooks.GetConsumedMocks(ctx)
+}
+
+func (h refusedFetchHooks) AfterTestCaseRun(ctx context.Context, set string, tc *models.TestCase, res *models.TestResult) error {
+	if tc != nil && tc.Name == h.name {
+		h.settled(ctx)
+	}
+	return h.prHooks.AfterTestCaseRun(ctx, set, tc, res)
+}
+
+// A compose stack seen down by a test's consumed-mocks fetch (connection
+// refused) halts the set: APP_HALTED, an end of the set's own. The user's
+// stop that comes after it, recorded by the set's watch before the loop's
+// next test, does not change it: the set ends APP_HALTED, the run exits 1,
+// and no test is sent after the stop. The stop comes as the test's verdict
+// is reported, and returns once the watch has had a moment to record it (the
+// moment matters only to what the case shows before the fix). Before, the
+// loop's next head took the watch's status, USER_ABORT, whenever the watch
+// had sent on exitLoopChan by then: which end the set took was down to
+// scheduling.
+func TestAComposeStackSeenDownKeepsTheSetHaltedPastALaterUserStop(t *testing.T) {
+	const sigint = 2
+	for _, c := range []struct {
+		name     string
+		on, kept bool
+	}{
+		{name: "switch off, run per set"},
+		{name: "switch on, run per set", on: true},
+		{name: "switch off, kept alive", kept: true},
+		{name: "switch on, kept alive", on: true, kept: true},
+	} {
+		for _, procs := range []int{1, 0} {
+			name := c.name + ", GOMAXPROCS default"
+			if procs != 0 {
+				name = fmt.Sprintf("%s, GOMAXPROCS=%d", c.name, procs)
+			}
+			t.Run(name, func(t *testing.T) {
+				if procs != 0 {
+					defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(procs))
+				}
+				setSwitch(t, c.on)
+				h, _ := composeRetried(t, 3)
+				h.replayer.config.Test.MaxFlakyChecks = 1
+				h.replayer.config.Test.KeepAppAlive = c.kept
+				t.Cleanup(utils.SetInterruptSignalForTest(0))
+				ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+				defer cancel()
+				ctx, stop := context.WithCancel(ctx)
+				defer stop()
+				sent := &sendLog{stopAt: -1}
+				var stops sync.Once
+				armed := &atomic.Bool{}
+				h.replayer.hookImpl = refusedFetchHooks{name: "test-1", sent: sent, armed: armed,
+					settled: func(setCtx context.Context) {
+						stops.Do(func() {
+							sent.stop()
+							utils.SetInterruptSignalForTest(sigint)
+							stop()
+							<-setCtx.Done()
+							time.Sleep(20 * time.Millisecond)
+						})
+					}}
+				_ = h.replayer.Start(ctx)
+				h.report.mu.Lock()
+				rep := h.report.report
+				h.report.mu.Unlock()
+				if rep == nil {
+					t.Fatal("the set wrote no report")
+				}
+				if armed.Load() {
+					t.Fatal("no consumed-mocks fetch came after test-1")
+				}
+				sent.mu.Lock()
+				stopped := sent.stopAt
+				sent.mu.Unlock()
+				if stopped < 0 {
+					t.Fatal("test-1's verdict was never reported, so the user's stop never came")
+				}
+				if status := models.TestSetStatus(rep.Status); status != models.TestSetStatusAppHalted {
+					t.Errorf("the set ended %s, want %s", status, models.TestSetStatusAppHalted)
+				}
+				if utils.ErrCode != 1 {
+					t.Errorf("the run exits %d, want 1", utils.ErrCode)
+				}
+				if after := sent.afterStop(); len(after) > 0 {
+					t.Errorf("%v sent after the user's stop", after)
 				}
 			})
 		}
