@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +49,44 @@ func TestLearnNoisePatternHoldsTheRecordedAndTheLiveValue(t *testing.T) {
 	in := live("POST", "/v1/x", `{"id":1}`, map[string]string{"X-Id": "a-1"})
 	if d := learn.Compare(nullable.shape(liveParts(context.Background(), in), ""), nullable.shape(recordedParts(m), ""), nullable.known(m)); d.Structural != "" || len(d.Drift) > 0 {
 		t.Fatalf("a recorded null the pattern names was compared: %+v", d)
+	}
+}
+
+// A field one side lacks is excused by keploy.yml only through an entry with
+// no patterns, whichever side holds it: an entry with patterns, even one an
+// empty value matches, leaves a header the recording or the call lacks a
+// change. A variable's place excuses a field the recording lacks.
+func TestLearnNoiseOnAFieldOneSideLacks(t *testing.T) {
+	h, _, _ := learnOn(t)
+	opts := models.OutgoingOptions{Learn: true, NoiseConfig: map[string]map[string][]string{"header": {"X-Trace": {`^(t-\d+)?$`}}}}
+	n := h.newLearnNoise(opts, map[string][]string{"extra": {}}, nil)
+	trace := map[string]string{"X-Trace": "t-1"}
+	for _, c := range []struct {
+		name, recBody, body string
+		recHeader, header   map[string]string
+		at                  string
+		same                bool
+	}{
+		{"a body field only the call holds, an entry with no patterns", `{"id":1}`, `{"id":1,"extra":2}`, nil, nil, "", true},
+		{"a body field only the recording holds, an entry with no patterns", `{"id":1,"extra":2}`, `{"id":1}`, nil, nil, "", true},
+		{"a body field only the call holds, no entry", `{"id":1}`, `{"id":1,"page":2}`, nil, nil, "", false},
+		{"a body field only the call holds, at a variable's place", `{"id":1}`, `{"id":1,"page":2}`, nil, nil, "body.page", true},
+		{"a header only the call holds, a pattern an empty value matches", `{}`, `{}`, nil, trace, "", false},
+		{"a header only the recording holds, a pattern an empty value matches", `{}`, `{}`, trace, nil, "", false},
+		{"a header both hold, values the pattern matches", `{}`, `{}`, trace, map[string]string{"X-Trace": "t-2"}, "", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := learnRecorded("m", 0, "POST", "/v1/x", c.recBody, c.recHeader, `{}`)
+			in := live("POST", "/v1/x", c.body, c.header)
+			known := n.known(m)
+			if c.at != "" {
+				known = excusedAt{Known: known, at: map[string]bool{c.at: true}}
+			}
+			d := learn.Compare(n.shape(liveParts(context.Background(), in), ""), n.shape(recordedParts(m), ""), known)
+			if same := d.Structural == "" && len(d.Drift) == 0; same != c.same {
+				t.Fatalf("same = %v (%+v), want %v", same, d, c.same)
+			}
+		})
 	}
 }
 
@@ -208,5 +247,85 @@ func TestStrictNoisePatternMissWarnsItsReason(t *testing.T) {
 	said := logs.FilterMessage("a keploy.yml noise pattern does not excuse a field").All()
 	if len(said) != 1 || !strings.Contains(said[0].ContextMap()["reason"].(string), `"^1$"`) {
 		t.Fatalf("warnings %+v; want one naming the pattern", said)
+	}
+}
+
+// rangeDb is a disk store that says which request keys it was asked by.
+type rangeDb struct {
+	*mockMemDb
+	asked *[]string
+}
+
+func (d rangeDb) RangeStagedRecordings(_ models.Kind, keys []string, _ func(*models.Mock) bool) error {
+	*d.asked = append(*d.asked, keys...)
+	return nil
+}
+
+// The learn step's check that a call is exactly another recording asks the
+// disk store by the shape key alone when keploy.yml's noise reaches
+// X-Amz-Target, with patterns or without: a recording of another target the
+// patterns let vary is filed under another exact key.
+func TestExactlyElsewhereAsksByTheShapeKeyWhenAPatternGuardsTheTarget(t *testing.T) {
+	h, _, _ := learnOn(t)
+	in := live("POST", "/", `{}`, map[string]string{"X-Amz-Target": "AmazonSQS.SendMessage"})
+	for _, c := range []struct {
+		name  string
+		noise map[string][]string
+		loose bool
+	}{
+		{"no noise on the target", nil, false},
+		{"an entry with no patterns", map[string][]string{"X-Amz-Target": {}}, true},
+		{"an entry with patterns", map[string][]string{"X-Amz-Target": {`^AmazonSQS\.`}}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			n := h.newLearnNoise(models.OutgoingOptions{Learn: true, NoiseConfig: map[string]map[string][]string{"header": c.noise}}, nil, nil)
+			var asked []string
+			if _, err := exactlyElsewhere(in, rangeDb{mockMemDb: &mockMemDb{}, asked: &asked}, scope{}, httpParts{}, learn.Shape{}, n, func(*models.Mock) bool { return true }); err != nil {
+				t.Fatal(err)
+			}
+			if want := RequestKeysOf("POST", "/", "AmazonSQS.SendMessage", c.loose); !slices.Equal(asked, want) {
+				t.Fatalf("asked by %q, want %q", asked, want)
+			}
+		})
+	}
+}
+
+// A keploy.yml url pattern reaches a learned read of the application's
+// clock in a query value only when it matches the recorded and the live
+// value: when it matches one, the read is still checked, and the call is
+// refused with the clock's reason at that field.
+func TestAClockReadInTheURLKeployYmlPatternHoldsBothSides(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	old := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	pattern := []string{`\d{4}-\d{2}-\d{2}T[0-9:]+Z`}
+	ct := map[string]string{"Content-Type": "application/json"}
+	for _, c := range []struct {
+		name, rec, live string
+		refused         bool
+	}{
+		{"both values match", old, old, false},
+		{"only the live value matches", "later", old, true},
+		{"only the recorded value matches", old, "later", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := recorded("m", "/v1/u?at="+c.rec, ct, `{}`)
+			m.Spec.Clocks = map[string]models.ClockOffset{"url.query.at": {Res: time.Second}}
+			in := sent("/v1/u?at="+c.live, ct, `{}`)
+			in.arrived = base.Add(2 * time.Second)
+			got, diag := strictMatchIn(t, clockConn(true, base), in, nil, nil, pattern, m)
+			if refused := got == nil; refused != c.refused {
+				t.Fatalf("refused %v, differs %v; want %v", refused, differs(diag), c.refused)
+			}
+			if !c.refused {
+				return
+			}
+			for _, f := range diag.differs {
+				if f.clock && f.shape == "query.at" {
+					return
+				}
+			}
+			t.Fatalf("no read of the clock refused at query.at: %+v", diag.differs)
+		})
 	}
 }

@@ -83,6 +83,9 @@ func TestCompare(t *testing.T) {
 		{"known noise must be present", `{"n":1,"opt":"x"}`, known{"body.id": true}, "body.id is missing", nil},
 		{"declared noise may be absent", `{"n":1,"opt":"x"}`, declared{"body.id": true}, "", nil},
 		{"declared noise may change type", `{"id":7,"n":1,"opt":"x"}`, declared{"body.id": true}, "", nil},
+		// A Known that reads one value at a time is asked of the live leaf
+		// when the recording lacks it (ExcusedLeaf).
+		{"declared noise may be added", `{"id":"a","n":1,"opt":"x","new":2}`, declared{"body.new": true}, "", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := Compare(body(t, "k", tc.live), rec, tc.known)

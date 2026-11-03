@@ -160,6 +160,13 @@ func TestFailureAssessmentNamesTheNoisePatternAndTheSide(t *testing.T) {
 			noise: map[string][]string{"id": {"^1$"}},
 		},
 		{
+			// No pattern decides a value that became an array.
+			name:  "a field that became an array names no pattern",
+			exp:   `{"id":1,"n":1}`,
+			act:   `{"id":[1],"n":2}`,
+			noise: map[string][]string{"id": {"^1$"}},
+		},
+		{
 			name:  "a field no pattern guards is not named",
 			exp:   `{"id":1,"n":"a"}`,
 			act:   `{"id":1,"n":"b"}`,
@@ -234,5 +241,25 @@ func TestHeaderPatternWhysNameTheHeaderPatternAndSide(t *testing.T) {
 				t.Fatalf("header reasons:\n got %q\nwant %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// Two keploy.yml keys that differ only in case name one header, and the
+// comparison holds it to both keys' patterns: its reason names them all.
+func TestHeaderPatternWhysNameEveryPatternOfCaseVariantKeys(t *testing.T) {
+	noise := map[string][]string{"X-Req": {"^r-"}, "x-req": {"^s-"}}
+	rec, act := http.Header{"X-Req": {"s-1"}}, http.Header{"X-Req": {"zz"}}
+	var res []models.HeaderResult
+	if CompareHeaders(rec, act, &res, noise) {
+		t.Fatal("the headers matched")
+	}
+	got := HeaderPatternWhys(res, noise)
+	if len(got) != 1 {
+		t.Fatalf("header reasons %q, want one", got)
+	}
+	for _, want := range []string{`"^r-"`, `"^s-"`, "live value (a string of 2 bytes)"} {
+		if !strings.Contains(got[0], want) {
+			t.Fatalf("reason %q does not say %s", got[0], want)
+		}
 	}
 }
