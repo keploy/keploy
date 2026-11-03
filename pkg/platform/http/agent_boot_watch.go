@@ -683,11 +683,12 @@ type startJudgment struct {
 // slowly, or not at all. A look that does not come back holds up no rule: its
 // silence is judged as any other. A wait that goes on is said every
 // stillWaitingLooks ticks since the agent's last new report (or since the
-// watch began), with what the latest look found: the engine has not answered
+// watch began), with what the latest look found: the look has not said
 // whether the process runs, it does not run, or it runs with no report, or
 // no new one, read. A look out past the silence bound is said once, at WARN,
-// in place of the next of those lines. inContainer says, for those lines,
-// whether the agent runs in a container.
+// in place of the next of those lines, with what it is out on and what keploy
+// does next (lookOutWarning). inContainer says, for those lines, whether the
+// agent runs in a container.
 // ended, when set, is asked of a process that does not run whether it has
 // ended for good (its container exited), and with what code: the judgment is
 // then bootExited, or bootFailed for an agent whose last report says its start
@@ -800,7 +801,7 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 				asked++
 				waited++
 				if every > 0 && waited%every == 0 {
-					if line := startWaitLine(cur, asking && asked >= every, inContainer); line != "" {
+					if line := startWaitLine(cur, asking && asked >= every, inContainer, silence); line != "" {
 						if !lookSaid && clk.Runnable()-lookSince >= silence {
 							// A look out past the silence bound is said
 							// once at WARN, in place of the line: the
@@ -808,7 +809,7 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 							// are what judge its start, and a look that
 							// does not come back brings no more of them.
 							lookSaid = true
-							logger.Warn("keploy's look at the agent's start has not come back for a while; the container engine may not be answering, and keploy waits on",
+							logger.Warn(lookOutWarning(cur, asking, ended != nil, inContainer, silence),
 								zap.Duration("runnable_time", silence), zap.Bool("in_a_container", inContainer), zap.Duration("waited", time.Duration(waited)*look))
 						} else {
 							logger.Info(line, zap.Duration("waited", time.Duration(waited)*look))
@@ -826,21 +827,27 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 }
 
 // startWaitLine is what a start's wait that has gone on says: what the latest
-// look found (cur). notAnswered: the engine has not answered the look out on
-// whether the process runs for a whole line's worth of ticks, as an engine
-// still creating or starting a container may not until that is done. "" when
-// the latest look found the process running and its report says its server
-// listens (the ready rule bounds that wait), unless notAnswered.
-func startWaitLine(cur bootLookResult, notAnswered, inContainer bool) string {
+// look found (cur). notAnswered: the look out has not said whether the
+// process runs for a whole line's worth of ticks (a container's look asks the
+// engine, which may not answer while it is still creating or starting the
+// container); the line then says what keploy does next (startWaitNext;
+// silence: the silence bound). "" once a report says the start failed: the
+// watch ends the wait with that failure at the same tick (bootJudge.look
+// judges a failure first). "" too when the latest look found the process
+// running and its report says its server listens (the ready rule bounds that
+// wait), unless notAnswered.
+func startWaitLine(cur bootLookResult, notAnswered, inContainer bool, silence time.Duration) string {
 	what := "its process"
 	if inContainer {
 		what = "its container"
 	}
 	switch {
+	case cur.ok && cur.p.Failed:
+		return ""
 	case notAnswered && inContainer:
-		return "waiting on the container engine: it has not answered keploy's look at the keploy agent's container, as an engine still creating or starting a container may not until that is done, and keploy waits for it however long that takes"
+		return "waiting on the container engine: it has not answered keploy's look at the keploy agent's container, as an engine still creating or starting a container may not until that is done; " + startWaitNext(cur, inContainer, silence)
 	case notAnswered:
-		return "waiting on the keploy agent's start: keploy's look at it has not come back, and keploy waits for it however long that takes"
+		return "waiting on the keploy agent's start: keploy's look at it has not come back; " + startWaitNext(cur, inContainer, silence)
 	case !cur.running && inContainer:
 		return "still waiting for the keploy agent: the container engine does not run its container (not started yet, paused, or stopped), and keploy waits for it to run however long that takes"
 	case !cur.running:
@@ -851,6 +858,65 @@ func startWaitLine(cur bootLookResult, notAnswered, inContainer bool) string {
 		return ""
 	default:
 		return "still waiting for the keploy agent: " + what + " runs, and keploy has read no new report of its start since its last"
+	}
+}
+
+// lookOutWarning is the silence bound's warning of a look out (watchStart):
+// what the look has not come back with, by what it has said so far, then what
+// keploy does next (startWaitNext). asking: it has not said whether the
+// process runs. Else it has (cur.running): for one that runs, it reads the
+// report of its start; for a container that does not run, it asks whether
+// the container has ended, and reads its last report if it has (ending: the
+// watch asks that); else it has nothing left to say. (The look's result may
+// also be in already and not yet taken, when a tick that came at the same
+// time is taken first; the warning then says what the look had said before
+// that result.) A container's look goes through the engine's CLI, a native
+// agent's through keploy's own reads of its process and its report's file:
+// only a container's names the engine.
+func lookOutWarning(cur bootLookResult, asking, ending, inContainer bool, silence time.Duration) string {
+	var out string
+	switch {
+	case asking && inContainer:
+		out = "the container engine has not answered whether it runs the agent's container"
+	case asking:
+		out = "keploy has not yet found out whether the agent's process runs"
+	case cur.running && inContainer:
+		out = "the agent's container runs, and the container engine has not yet given keploy the report of its start from inside it"
+	case cur.running:
+		out = "the agent's process runs, and keploy's read of the report of its start has not come back"
+	case ending && inContainer:
+		out = "the container engine does not run the agent's container, and has not yet said whether the container has ended or, if it has, given keploy its last report from inside it"
+	case inContainer:
+		out = "the container engine does not run the agent's container"
+	default:
+		out = "the agent's process does not run"
+	}
+	return "keploy's look at the agent's start has not come back for a while: " + out + "; " + startWaitNext(cur, inContainer, silence)
+}
+
+// startWaitNext is what keploy does next in a start's wait while a look is
+// out, by what the latest look found (cur), as bootJudge.look judges the wait
+// with no new report: no time limit while the process is not known to run; an
+// agent found running with no report read is given up on once it has been
+// found running for the silence bound, and one that says its server listens
+// once it has not answered keploy for that bound; otherwise only a new report
+// can show that its start has stalled, and keploy reads none until the look
+// comes back. (A report that says the start failed has no line at all:
+// startWaitLine.)
+func startWaitNext(cur bootLookResult, inContainer bool, silence time.Duration) string {
+	what := "process"
+	if inContainer {
+		what = "container"
+	}
+	switch {
+	case !cur.running:
+		return "keploy sets no time limit on the wait while the agent's " + what + " is not known to run, and waits on"
+	case !cur.ok:
+		return fmt.Sprintf("keploy gives up on the start once it has found the agent's %s running, with no report of its start read, for %s of keploy's runnable time", what, silence)
+	case cur.p.Ready:
+		return fmt.Sprintf("keploy gives up on the start once the agent, which says its server listens, has not answered keploy for %s of keploy's runnable time", silence)
+	default:
+		return "keploy waits on: the agent has reported, so only a new report from it can show that its start has stalled, and keploy reads none until this look comes back"
 	}
 }
 
