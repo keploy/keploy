@@ -569,6 +569,26 @@ func TestReplayOldLearnedNoiseAtAMultipartOperation(t *testing.T) {
 	}
 }
 
+// Noise learned at a file part's name never excused other bytes in the
+// file, and still does not: only a field part's value is read as noise.
+func TestReplayOldLearnedNoiseAtAMultipartFile(t *testing.T) {
+	file := func(boundary, data string) (string, map[string]string) {
+		return "--" + boundary + "\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\n" + data + "\r\n--" + boundary + "--\r\n",
+			map[string]string{"Content-Type": "multipart/form-data; boundary=" + boundary}
+	}
+	body, ct := file("rec-f", "one")
+	rec := recorded("old", "/upload", ct, body)
+	rec.Spec.ReqBodyNoise = map[string][]string{"body.doc": {}}
+	same, sameCT := file("f1", "one")
+	if got, diag := strictMatch(t, sent("/upload", sameCT, same), nil, nil, nil, rec); got == nil {
+		t.Fatalf("the same file was not served: %v", differs(diag))
+	}
+	other, otherCT := file("f2", "two")
+	if got, _ := strictMatch(t, sent("/upload", otherCT, other), nil, nil, nil, rec); got != nil {
+		t.Fatal("a file with other bytes was served: the noise learned at its part's name excused them")
+	}
+}
+
 func diagDiffers(d *matchDiag) []strictField {
 	if d == nil {
 		return nil
