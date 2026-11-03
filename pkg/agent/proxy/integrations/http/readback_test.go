@@ -35,11 +35,13 @@ func rbGetBody(id string) string { return `{"Key":{"Id":{"S":"` + id + `"}},"Tab
 func rbItem(id, name string) string { return `{"Id":{"S":"` + id + `"},"Name":{"S":"` + name + `"}}` }
 
 // rbStore is the stand-in reader. calls, when set, is told each set of calls
-// Access is given; written, when set, replaces what Access marks.
+// Access is given; written, when set, replaces what Access marks; access,
+// when set, is told each read Access is asked of, first.
 type rbStore struct {
 	calls   *[][]string
 	written func(n int) []map[string]string
 	unread  map[string]string
+	access  func(read *models.Mock)
 }
 
 func rbTarget(r *models.HTTPReq) string { return r.Header["X-Amz-Target"] }
@@ -62,6 +64,9 @@ func rbLeaves(body, key string) map[string]learn.Leaf {
 }
 
 func (s rbStore) Access(read *models.Mock, calls []*models.Mock) models.HTTPStoreAccess {
+	if s.access != nil {
+		s.access(read)
+	}
 	if s.calls != nil {
 		var names []string
 		for _, c := range calls {
@@ -456,9 +461,10 @@ func TestReadBackPlanReadsBackOnlyTheTestsOwnWrites(t *testing.T) {
 
 // rbRaceDb is the lead store where another connection takes the recording
 // named take under this call's take of it, once armed: it answers it in the
-// tracker before this call does (answer), or consumes it from the store
-// before this call's claim does (claim). From then on the store no longer
-// shows it.
+// tracker before this call does, as the call reads the store (answer) or
+// as the call reads its answer back, after the call picked it (access), or
+// it consumes it from the store before this call's claim does (claim). From
+// then on the store no longer shows it.
 type rbRaceDb struct {
 	*learnDb
 	tr     *learn.Tracker
@@ -480,13 +486,18 @@ func (d *rbRaceDb) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 			// The other connection answers it with the scope read: this
 			// call's take is refused, and the other's consume lands
 			// before this call reads again.
-			d.armed, d.gone = false, true
-			if d.tr.Answer(d.tr.Placed().Test, m) {
-				d.others++
-			}
+			d.otherAnswers(m)
 		}
 	}
 	return out, nil
+}
+
+// otherAnswers is the other connection answering m in the tracker, once.
+func (d *rbRaceDb) otherAnswers(m *models.Mock) {
+	d.armed, d.gone = false, true
+	if d.tr.Answer(d.tr.Placed().Test, m) {
+		d.others++
+	}
 }
 
 func (d *rbRaceDb) DeleteFilteredMock(m models.Mock) bool {
@@ -499,18 +510,24 @@ func (d *rbRaceDb) DeleteFilteredMock(m models.Mock) bool {
 }
 
 // A read the test's PutItem is read back into whose recording another
-// connection takes first, in the tracker or in the store, is never served
-// from it: the call reads the store again, no longer finds it, and misses;
-// and the tracker keeps no answer of this call's for it.
+// connection takes first, in the tracker (as the call reads the store, or
+// after the call picked it, as it reads the answer back) or in the store, is
+// never served from it: the call reads the store again, no longer finds it,
+// and misses; and the tracker keeps no answer of this call's for it.
 func TestReadBackGivesUpARecordingAnotherConnectionTook(t *testing.T) {
-	for _, race := range []string{"answer", "claim"} {
+	for _, race := range []string{"answer", "access", "claim"} {
 		t.Run(race, func(t *testing.T) {
-			rbRegister(t, rbStore{})
+			var db *rbRaceDb
+			rbRegister(t, rbStore{access: func(read *models.Mock) {
+				if db.armed && db.race == "access" && read.Name == db.take {
+					db.otherAnswers(read)
+				}
+			}})
 			h, n, opts := learnOn(t)
 			tr := learn.NewTracker()
 			tr.Begin()
 			ctx := learn.WithTracker(context.Background(), tr)
-			db := &rbRaceDb{learnDb: &learnDb{perTest: []*models.Mock{
+			db = &rbRaceDb{learnDb: &learnDb{perTest: []*models.Mock{
 				learnRecorded("mock-0", 0, "POST", "/", rbPutBody("c-1", "Lead 1700000000000"), rbPut, `{}`),
 				learnRecorded("mock-1", time.Second, "POST", "/", rbGetBody("c-1"), rbGet, `{"Item":`+rbItem("c-1", "Lead 1700000000000")+`}`),
 			}, observe: tr.ServedMock}, tr: tr, take: "mock-1", race: race}
