@@ -17,6 +17,7 @@ import (
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
 	bpfMapAppBindSocks                = "app_bind_socks"
+	bpfMapAppConnEnds                 = "app_conn_ends"
 	bpfMapAppConnEvents               = "app_conn_events"
 	bpfMapAppConnEventsDropped        = "app_conn_events_dropped"
 	bpfMapAppConns                    = "app_conns"
@@ -59,6 +60,7 @@ const (
 	bpfMapUdpReplyEpoch               = "udp_reply_epoch"
 	bpfMapUdpReplyEvents              = "udp_reply_events"
 	bpfMapUdpReplyEventsLost          = "udp_reply_events_lost"
+	bpfProgK_appConnRelease           = "k_app_conn_release"
 	bpfProgK_bind4                    = "k_bind4"
 	bpfProgK_bind6                    = "k_bind6"
 	bpfProgK_connect4                 = "k_connect4"
@@ -131,6 +133,7 @@ type bpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
+	K_appConnRelease        *ebpf.ProgramSpec `ebpf:"k_app_conn_release"`
 	K_bind4                 *ebpf.ProgramSpec `ebpf:"k_bind4"`
 	K_bind6                 *ebpf.ProgramSpec `ebpf:"k_bind6"`
 	K_connect4              *ebpf.ProgramSpec `ebpf:"k_connect4"`
@@ -166,6 +169,7 @@ type bpfProgramSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
 	AppBindSocks                *ebpf.MapSpec `ebpf:"app_bind_socks"`
+	AppConnEnds                 *ebpf.MapSpec `ebpf:"app_conn_ends"`
 	AppConnEvents               *ebpf.MapSpec `ebpf:"app_conn_events"`
 	AppConnEventsDropped        *ebpf.MapSpec `ebpf:"app_conn_events_dropped"`
 	AppConns                    *ebpf.MapSpec `ebpf:"app_conns"`
@@ -237,6 +241,7 @@ func (o *bpfObjects) Close() error {
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
 	AppBindSocks                *ebpf.Map `ebpf:"app_bind_socks"`
+	AppConnEnds                 *ebpf.Map `ebpf:"app_conn_ends"`
 	AppConnEvents               *ebpf.Map `ebpf:"app_conn_events"`
 	AppConnEventsDropped        *ebpf.Map `ebpf:"app_conn_events_dropped"`
 	AppConns                    *ebpf.Map `ebpf:"app_conns"`
@@ -284,6 +289,7 @@ type bpfMaps struct {
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
 		m.AppBindSocks,
+		m.AppConnEnds,
 		m.AppConnEvents,
 		m.AppConnEventsDropped,
 		m.AppConns,
@@ -339,6 +345,7 @@ type bpfVariables struct {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
+	K_appConnRelease        *ebpf.Program `ebpf:"k_app_conn_release"`
 	K_bind4                 *ebpf.Program `ebpf:"k_bind4"`
 	K_bind6                 *ebpf.Program `ebpf:"k_bind6"`
 	K_connect4              *ebpf.Program `ebpf:"k_connect4"`
@@ -371,6 +378,7 @@ type bpfPrograms struct {
 
 func (p *bpfPrograms) Close() error {
 	return _BpfClose(
+		p.K_appConnRelease,
 		p.K_bind4,
 		p.K_bind6,
 		p.K_connect4,

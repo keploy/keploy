@@ -16,6 +16,7 @@ import (
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	unixconnMapAppConnEnds                 = "app_conn_ends"
 	unixconnMapAppConnEvents               = "app_conn_events"
 	unixconnMapAppConnEventsDropped        = "app_conn_events_dropped"
 	unixconnMapAppConns                    = "app_conns"
@@ -109,6 +110,7 @@ type unixconnProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type unixconnMapSpecs struct {
+	AppConnEnds                 *ebpf.MapSpec `ebpf:"app_conn_ends"`
 	AppConnEvents               *ebpf.MapSpec `ebpf:"app_conn_events"`
 	AppConnEventsDropped        *ebpf.MapSpec `ebpf:"app_conn_events_dropped"`
 	AppConns                    *ebpf.MapSpec `ebpf:"app_conns"`
@@ -162,6 +164,7 @@ func (o *unixconnObjects) Close() error {
 //
 // It can be passed to loadUnixconnObjects or ebpf.CollectionSpec.LoadAndAssign.
 type unixconnMaps struct {
+	AppConnEnds                 *ebpf.Map `ebpf:"app_conn_ends"`
 	AppConnEvents               *ebpf.Map `ebpf:"app_conn_events"`
 	AppConnEventsDropped        *ebpf.Map `ebpf:"app_conn_events_dropped"`
 	AppConns                    *ebpf.Map `ebpf:"app_conns"`
@@ -191,6 +194,7 @@ type unixconnMaps struct {
 
 func (m *unixconnMaps) Close() error {
 	return _UnixconnClose(
+		m.AppConnEnds,
 		m.AppConnEvents,
 		m.AppConnEventsDropped,
 		m.AppConns,
