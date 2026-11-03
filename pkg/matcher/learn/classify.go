@@ -2082,23 +2082,16 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// learns there is taken, checked in its call's span at every replay,
 		// which passes it from the test's begin too (CheckClockRead): here
 		// the wider window turns a refusal into a checked read, never into
-		// noise, a variable or a read plus an offset. (Which words of a value
-		// are the clock's is read in that window as well, for every form of
-		// the value (newDrift), so a word of a text that is a read there is
-		// never read as data, and is noise of that word as where no serve
-		// came between the read and its call.)
-		//
-		// So is a value its call's window learns only as a part found in a
-		// recording's payload (partInPayload): a word the window from the
-		// test's begin shows no read of is read as data, as are its decoded
-		// and case-folded forms, and whether one stands as
-		// a token in a recording's payload is chance, which would decide,
-		// run by run, between that variable, which no call can bind, and the
-		// read the window from each run's test begin holds. A plain read
-		// that window learns is taken; anything else is not, and the
-		// variable stands. A payload F served with its view counts too
-		// (partInPayload).
-		if wt := w.fromTestBegin(); (ln.Kind == KindUnaccounted || partInPayload(ln)) && wt != nil {
+		// noise, a variable or a read plus an offset. Which words of a value
+		// are the clock's is read in that window already, for every form of
+		// the value (newDrift), so both windows' drifts read the same words
+		// as data, and a part the call's window finds there the window from
+		// the test's begin finds too: it learns no plain read for it. A text
+		// whose changed words are all reads there is noise of those words,
+		// as where no serve came between the read and its call. (A read
+		// inside an encoded run's text is still decoded again: b64Text reads
+		// that text's runs without its clock words, in every window.)
+		if wt := w.fromTestBegin(); ln.Kind == KindUnaccounted && wt != nil {
 			if wide := leaf(r, l, wt, 0); wide.Kind == KindClockRead && wide.Read != nil {
 				ln = wide
 			}
@@ -2203,26 +2196,6 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		out = append(out, ln)
 	}
 	return out
-}
-
-// partInPayload reports whether ln is a variable whose place is in a raw
-// mock's payload (Place.Side "": appearedIn reads its words as tokens there)
-// and holds only a part of the recorded value (Place.Held: a word, a piece,
-// or a decoded or case-folded form of one), never an echo's instant. A place
-// that holds the value whole, or a leaf of an exchange F served field by
-// field that drifted with it (Place.Side Request or Response), is not one.
-// A place holding only the value's decoded text counts as a part here,
-// though appearedIn ranks it whole: no clock layout reads an escape, so the
-// re-read from the test's begin never takes a read for it.
-// A payload F served with its view (Raw.Live) is one too: Place carries no
-// mark of it. There follows.refute keeps a part unless F's view shows the
-// value moved apart from it, so the part may be no chance, yet the value is
-// read again from its test's begin, where the plain read learned is refused
-// at replay if the application copied that payload's word (the replay
-// serves it as recorded): red there, where the part's variable is refused
-// at record, never a pass.
-func partInPayload(ln Learned) bool {
-	return ln.Kind == KindVariable && ln.From.Side == "" && !ln.From.Echo && ln.From.Held != ln.Recorded.Value
 }
 
 // clockSourceWhy is why a value an earlier call of the run sent at from (the
@@ -3086,13 +3059,15 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 	// (Window.fromTestBegin), the span in which the replay's check passes a
 	// read (CheckClockRead): another goroutine's call served between the
 	// read and the call that carries it bounds no read of this one, so its
-	// words are never read as data, decoded (b64Text) or searched as the
-	// parts of a payload (appearedIn, unaccounted), which would decide by
+	// words are never read as data, decoded (b64Text: a read inside an
+	// encoded run's text is still decoded again, in every window) or
+	// searched as the parts of a payload (appearedIn, unaccounted), which
+	// would decide by
 	// chance, by the read's digits and by that serve, between noise of the
 	// word, a variable no call binds and a refusal. Whether the value is a
 	// read of the clock (reads, whole) stays its call's window's: whole, the
-	// window from the test's begin turns a refusal, or a part found by
-	// chance, into a plain read alone (ClassifyIn).
+	// window from the test's begin turns a refusal into a plain read alone
+	// (ClassifyIn).
 	wt := w.fromTestBegin()
 	clockWordsOf := func(a, b string) clockSet {
 		c := clockAt(a, b, w, lead, call, zone)

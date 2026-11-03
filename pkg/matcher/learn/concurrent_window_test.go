@@ -2,6 +2,8 @@ package learn
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
@@ -498,10 +500,11 @@ func startUpLookUp(rec serverStampRun) []Raw {
 // A server test's clock read made before another goroutine's call is
 // learned the same way whatever digits the clock gave it: as a plain read
 // of the clock that its window from the test's begin holds, which the
-// replay's check passes in the call's span carrying that begin. Its call's
-// window shows no read, so the value's changed words are searched as data,
-// and whether one of them, or a decoded or case-folded form of one, stands
-// as a token in an opaque payload is chance: "…55.3505371Z" ends in
+// replay's check passes in the call's span carrying that begin. Where only
+// its call's window is known, that window shows no read, so the value's
+// changed words are searched as data, and whether one of them, or a decoded
+// or case-folded form of one, stands as a token in an opaque payload is
+// chance: "…55.3505371Z" ends in
 // "3505371Z", which decodes as base64 to a text whose word, case-folded, is
 // "y", a token a start-up Pulsar look-up's JSON holds; "…55.3805371Z"
 // decodes to no text. Read as a variable of the look-up, which no call can
@@ -529,19 +532,28 @@ func TestAServerTestsReadPastAnotherGoroutinesServeIsLearnedWhateverPartAPayload
 	}
 	learn := func(rec time.Time, w *Window, raw []Raw) Learned { return learnAfter(nil, rec, w, raw) }
 	w := serverStampWindow(recRun, fRun)
-	if ln := learn(recRun.read, &Window{Rec: Span{From: recRun.prev, To: recRun.call}, F: Span{From: fRun.prev, To: fRun.call}}, lookUp); !partInPayload(ln) || ln.From.Mock != "mock-1" {
+	if ln := learn(recRun.read, &Window{Rec: Span{From: recRun.prev, To: recRun.call}, F: Span{From: fRun.prev, To: fRun.call}}, lookUp); !foundAsAPart(ln) || ln.From.Mock != "mock-1" {
 		t.Fatalf("the call's window alone: %s from %q held %q (%s); want a part of the value the look-up holds", ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
 	}
+	// The recording's read in its call's window (no serve came between them
+	// there) and its test's begin not known, record's full round's read
+	// before another goroutine's serve: the window from the test's begin
+	// moves record's full round's span alone, and holds the read in both.
+	recInCall := serverStampWindow(recRun, fRun)
+	recInCall.Rec = Span{From: recRun.read.Add(-10 * time.Millisecond), To: recRun.call}
 	for _, c := range []struct {
 		what string
 		rec  time.Time
 		raw  []Raw
+		w    *Window
 	}{
-		{"a decoded word of it stands in the start-up look-up", recRun.read, lookUp},
-		{"no word of it stands in the look-up", recRun.read.Add(30 * time.Millisecond), lookUp},
-		{"no payload", recRun.read, nil},
+		{"a decoded word of it stands in the start-up look-up", recRun.read, lookUp, w},
+		{"no word of it stands in the look-up", recRun.read.Add(30 * time.Millisecond), lookUp, w},
+		{"no payload", recRun.read, nil, w},
+		{"the recording's read in its call's window, its begin unknown, the look-up", recRun.read, lookUp, recInCall},
+		{"the recording's read in its call's window, its begin unknown, no payload", recRun.read, nil, recInCall},
 	} {
-		ln := learn(c.rec, w, c.raw)
+		ln := learn(c.rec, c.w, c.raw)
 		if ln.Kind != KindClockRead || ln.Read == nil || ln.Read.Since == models.SinceTestBegin {
 			t.Errorf("%s: %s from %q held %q (%s); want a plain read of the clock checked in its call's span", c.what, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
 			continue
@@ -562,7 +574,7 @@ func TestAServerTestsReadPastAnotherGoroutinesServeIsLearnedWhateverPartAPayload
 		{"the recording's read made before its test began", serverStampWindow(early, fRun)},
 		{"the test's begin known in record's full round alone", fOnly},
 	} {
-		if ln := learn(recRun.read, c.w, lookUp); !partInPayload(ln) || ln.From.Mock != "mock-1" {
+		if ln := learn(recRun.read, c.w, lookUp); !foundAsAPart(ln) || ln.From.Mock != "mock-1" {
 			t.Errorf("%s: %s from %q held %q Read=%+v (%s); want the look-up's part to stay the value's place", c.what, ln.Kind, ln.From.Mock, ln.From.Held, ln.Read, ln.Why)
 		}
 	}
@@ -642,7 +654,7 @@ func TestAServerTestsReadPastAnotherGoroutinesServeIsLearnedWhateverPartAPayload
 					t.Setenv(provenswitch.Env, "1")
 				}
 				raw := append(append([]Raw{}, lookUp...), c.x)
-				if ln := learn(recRun.read, serverStampWindow(early, fRun), raw); !partInPayload(ln) || ln.From.Mock != "mock-1" {
+				if ln := learn(recRun.read, serverStampWindow(early, fRun), raw); !foundAsAPart(ln) || ln.From.Mock != "mock-1" {
 					t.Fatalf("%s from %q held %q Read=%+v (%s); want the look-up's part to stay the value's place", ln.Kind, ln.From.Mock, ln.From.Held, ln.Read, ln.Why)
 				}
 				ln := learn(recRun.read, w, raw)
@@ -690,9 +702,46 @@ func TestAServerTestsStampWordOfATextPastAnotherGoroutinesServeIsNoiseOfThatWord
 	}
 	for _, rec := range []time.Time{recRun.read, recRun.read.Add(30 * time.Millisecond)} {
 		for _, raw := range [][]Raw{lookUp, nil} {
-			ln := ClassifyIn(clockedDrifts(), []string{p}, escaped(fRun.read), escaped(rec), recRun.call, nil, raw, nil, serverStampWindow(recRun, fRun))[0]
-			if ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
-				t.Errorf("escaped, read at %s, look-up %v: %s from %q held %q (%s); want noise of the word", rec.Format("05.000000"), raw != nil, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+			for _, w := range []*Window{serverStampWindow(recRun, fRun), inSpan} {
+				ln := ClassifyIn(clockedDrifts(), []string{p}, escaped(fRun.read), escaped(rec), recRun.call, nil, raw, nil, w)[0]
+				if ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+					t.Errorf("escaped, read at %s, look-up %v, window %+v: %s from %q held %q (%s); want noise of the word", rec.Format("05.000000"), raw != nil, *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+				}
+			}
+		}
+	}
+	// The text base64-encoded in a token ("tok <base64 of the text> ok"):
+	// the words of its encoded run's text are read in the window from the
+	// test's begin too, so another goroutine's serve between the read and
+	// its call changes no answer. A read 30 ms later is noise of the word
+	// either way. Limit, pinned so that a fix shows here: the stamp's
+	// fraction inside the encoded run's text is decoded again (b64Text
+	// reads that text's runs without its clock words), so the digits still
+	// decide in every window: "3505371Z" is the look-up's part, or with no
+	// payload refused as text an encoded run decodes to. Both fail closed.
+	encodedText := func(v time.Time) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: "tok " + base64.StdEncoding.EncodeToString([]byte("lead "+dotNetStamp(v)+" created")) + " ok"}}}
+	}
+	for _, rec := range []time.Time{recRun.read, recRun.read.Add(30 * time.Millisecond)} {
+		for _, raw := range [][]Raw{lookUp, nil} {
+			between := ClassifyIn(clockedDrifts(), []string{p}, encodedText(fRun.read), encodedText(rec), recRun.call, nil, raw, nil, serverStampWindow(recRun, fRun))[0]
+			none := ClassifyIn(clockedDrifts(), []string{p}, encodedText(fRun.read), encodedText(rec), recRun.call, nil, raw, nil, inSpan)[0]
+			if between.Kind != none.Kind || between.From.Mock != none.From.Mock || between.From.Held != none.From.Held || between.Why != none.Why {
+				t.Errorf("encoded, read at %s, look-up %v: %s from %q held %q (%s) with a serve between the read and its call, %s from %q held %q (%s) with none; want one answer", rec.Format("05.000000"), raw != nil, between.Kind, between.From.Mock, between.From.Held, between.Why, none.Kind, none.From.Mock, none.From.Held, none.Why)
+			}
+			switch {
+			case rec.After(recRun.read):
+				if between.Kind != KindNoise || between.Read != nil {
+					t.Errorf("encoded, read at %s, look-up %v: %s (%s); want noise of the word", rec.Format("05.000000"), raw != nil, between.Kind, between.Why)
+				}
+			case raw != nil:
+				if !foundAsAPart(between) || between.From.Mock != "mock-1" {
+					t.Errorf("encoded, read at %s, the look-up: %s from %q (%s); want the look-up's part (the limit above)", rec.Format("05.000000"), between.Kind, between.From.Mock, between.Why)
+				}
+			default:
+				if between.Kind != KindUnaccounted || between.Why != encodedScriptWhy {
+					t.Errorf("encoded, read at %s, no payload: %s (%s); want it refused as %q (the limit above)", rec.Format("05.000000"), between.Kind, between.Why, encodedScriptWhy)
+				}
 			}
 		}
 	}
@@ -717,11 +766,53 @@ func TestAServerTestsStampWordOfATextPastAnotherGoroutinesServeIsNoiseOfThatWord
 			}
 		}
 	}
+	// The stamp the text carries, sent by the application earlier in the
+	// test in a payload (a SEND F served, or had not served, before the
+	// call), with the start-up look-up or without it: the text gets the
+	// answer it gets where no serve came between the read and its call,
+	// noise of the word, under the proven flow too. Where the window from
+	// the test's begin does not hold the read, a part found in a payload
+	// stays the value's place, as before.
+	sent := func(served bool) []Raw {
+		at := recRun.read.Add(40 * time.Millisecond)
+		return []Raw{RawOf(&models.Mock{Name: "mock-9", Kind: "Pulsar", Spec: models.MockSpec{
+			GenericRequests:  []models.Payload{{Origin: "client", Message: []models.OutputBinary{{Type: "json", Data: `{"commandType":"SEND","payload":{"type":"lead.created","at":"` + dotNetStamp(recRun.read) + `"}}`}}}},
+			ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
+		}}, served)}
+	}
+	early := recRun
+	early.began = recRun.read.Add(50 * time.Millisecond) // after the read, before the other goroutine's serve
+	for _, proven := range []bool{false, true} {
+		for _, served := range []bool{true, false} {
+			for _, withLookUp := range []bool{false, true} {
+				raw := sent(served)
+				if withLookUp {
+					raw = append(append([]Raw{}, lookUp...), raw...)
+				}
+				name := fmt.Sprintf("sent in a payload, served %v, look-up %v, proven %v", served, withLookUp, proven)
+				t.Run(name, func(t *testing.T) {
+					if proven {
+						t.Setenv(provenswitch.Env, "1")
+					}
+					for _, w := range []*Window{serverStampWindow(recRun, fRun), inSpan} {
+						if ln := learn(recRun.read, w, raw); ln.Kind != KindNoise || ln.Read != nil || ln.From.Mock != "" {
+							t.Errorf("window %+v: %s from %q held %q (%s); want noise of the word", *w, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+						}
+					}
+					want := "mock-9"
+					if withLookUp {
+						want = "mock-1"
+					}
+					if ln := learn(recRun.read, serverStampWindow(early, fRun), raw); !foundAsAPart(ln) || ln.From.Mock != want {
+						t.Errorf("the recording's read made before its test began: %s from %q held %q (%s); want a part found in %s to stay the value's place", ln.Kind, ln.From.Mock, ln.From.Held, ln.Why, want)
+					}
+				})
+			}
+		}
+	}
 	// Fail closed where the window from the test's begin does not hold the
 	// read: the look-up's part stays the value's place, and with no payload
 	// the decoded text is refused, named so.
-	early := recRun
-	early.began = recRun.read.Add(50 * time.Millisecond) // after the read, before the other goroutine's serve
 	unknown := serverStampWindow(recRun, fRun)
 	unknown.Rec.TestFrom = time.Time{}
 	for _, wc := range []struct {
@@ -732,12 +823,22 @@ func TestAServerTestsStampWordOfATextPastAnotherGoroutinesServeIsNoiseOfThatWord
 		{"the recording's begin unknown", unknown},
 		{"the call's window alone", &Window{Rec: Span{From: recRun.prev, To: recRun.call}, F: Span{From: fRun.prev, To: fRun.call}}},
 	} {
-		if ln := learn(recRun.read, wc.w, lookUp); !partInPayload(ln) || ln.From.Mock != "mock-1" {
+		if ln := learn(recRun.read, wc.w, lookUp); !foundAsAPart(ln) || ln.From.Mock != "mock-1" {
 			t.Errorf("%s, the look-up: %s from %q held %q (%s); want the look-up's part to stay the value's place", wc.what, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
 		}
 		ln := learn(recRun.read, wc.w, nil)
 		if ln.Kind != KindUnaccounted || ln.Why != encodedScriptWhy {
 			t.Errorf("%s, no payload: %s (%s); want it refused as %q", wc.what, ln.Kind, ln.Why, encodedScriptWhy)
+		}
+		// The text percent-escaped: the same answers.
+		learnEscaped := func(raw []Raw) Learned {
+			return ClassifyIn(clockedDrifts(), []string{p}, escaped(fRun.read), escaped(recRun.read), recRun.call, nil, raw, nil, wc.w)[0]
+		}
+		if ln := learnEscaped(lookUp); !foundAsAPart(ln) || ln.From.Mock != "mock-1" {
+			t.Errorf("%s, escaped, the look-up: %s from %q held %q (%s); want the look-up's part to stay the value's place", wc.what, ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
+		}
+		if ln := learnEscaped(nil); ln.Kind != KindUnaccounted || ln.Why != encodedScriptWhy {
+			t.Errorf("%s, escaped, no payload: %s (%s); want it refused as %q", wc.what, ln.Kind, ln.Why, encodedScriptWhy)
 		}
 	}
 	// One cache, one value, one call's window bounds: the window from the
@@ -777,6 +878,8 @@ func TestARefusalForTextOfAScriptNamesWhereThatTextStands(t *testing.T) {
 		{"its own text, escaped too", "понедельник " + esc("ок"), "вторник " + esc("да"), scriptWhy},
 		{"the text its escapes write", "day " + esc("понедельник"), "day " + esc("вторник"), escapedScriptWhy},
 		{"the text an encoded run decodes to", "lead 3505371Z created", "lead 2751164Z created", encodedScriptWhy},
+		{"the text an encoded run decodes to, escaped", "lead%203505371Z%20created", "lead%202751164Z%20created", encodedScriptWhy},
+		{"the text its quoted-printable escapes write", "day =D0=BF=D1=80", "day =D0=BF=D1=81", escapedScriptWhy},
 	} {
 		if got := NewDriftCache().of(c.rec, c.live).unparsed; got != c.want {
 			t.Errorf("%s (%q -> %q): %q; want %q", c.what, c.rec, c.live, got, c.want)
@@ -818,7 +921,7 @@ func TestAnEchoInALaterPayloadOutranksAnEarlierPayloadsPart(t *testing.T) {
 			t.Errorf("%s: %s from %q held %q echo %v (%s); want the echo's variable of mock-2", what, ln.Kind, ln.From.Mock, ln.From.Held, ln.From.Echo, ln.Why)
 		}
 	}
-	if ln := learn(config, timetable(at.Add(time.Second), false)); !partInPayload(ln) || ln.From.Mock != "mock-1" || ln.From.Held != "14" {
+	if ln := learn(config, timetable(at.Add(time.Second), false)); !foundAsAPart(ln) || ln.From.Mock != "mock-1" || ln.From.Held != "14" {
 		t.Errorf("a timetable recorded after the call, not served before it: %s from %q held %q echo %v (%s); want the config's part to stay the value's place", ln.Kind, ln.From.Mock, ln.From.Held, ln.From.Echo, ln.Why)
 	}
 }
@@ -852,13 +955,21 @@ func TestAStampWholeInALaterPayloadOutranksAnEarlierNonASCIIPart(t *testing.T) {
 	learn := func(raw ...Raw) Learned {
 		return ClassifyIn(clockedDrifts(), []string{p}, str(live), str(rec), recAt, nil, raw, nil, w)[0]
 	}
-	if ln := learn(locale); !partInPayload(ln) || ln.From.Mock != "mock-1" || ln.From.Held != "понедельник" {
+	if ln := learn(locale); !foundAsAPart(ln) || ln.From.Mock != "mock-1" || ln.From.Held != "понедельник" {
 		t.Fatalf("the locale table alone: %s from %q held %q (%s); want the weekday's part of mock-1", ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
 	}
 	if ln := learn(locale, sent(recAt.Add(-time.Second), true)); ln.Kind != KindVariable || ln.From.Mock != "mock-9" || ln.From.Held != rec {
 		t.Errorf("a later payload holding the value whole: %s from %q held %q (%s); want the variable of mock-9 holding it whole", ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
 	}
-	if ln := learn(locale, sent(recAt.Add(time.Second), false)); !partInPayload(ln) || ln.From.Mock != "mock-1" || ln.From.Held != "понедельник" {
+	if ln := learn(locale, sent(recAt.Add(time.Second), false)); !foundAsAPart(ln) || ln.From.Mock != "mock-1" || ln.From.Held != "понедельник" {
 		t.Errorf("the whole copy recorded after the call, not served before it: %s from %q held %q (%s); want the weekday's part of mock-1", ln.Kind, ln.From.Mock, ln.From.Held, ln.Why)
 	}
+}
+
+// foundAsAPart reports whether ln is a variable whose place is in a raw
+// mock's payload (Place.Side "": appearedIn reads its words as tokens there)
+// and holds only a part of the recorded value (a word, a piece, or a decoded
+// or case-folded form of one), never an echo's instant.
+func foundAsAPart(ln Learned) bool {
+	return ln.Kind == KindVariable && ln.From.Side == "" && !ln.From.Echo && ln.From.Held != ln.Recorded.Value
 }
