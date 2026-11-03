@@ -634,10 +634,10 @@ func TestBuildHTTPMock_FaultOnlyOnAnUnfinishedAnswer(t *testing.T) {
 }
 
 // keploy record tells the agent it is stopping before it stops the
-// application (Session.MarkPeerEndedStopping): a call the application had in
-// flight, closed by that stop, ended in no fault of the upstream's or of the
-// application's own client, and records none. Before the answer and after its
-// head alike.
+// application (Session.MarkPeerEndedBy, EndAtStop): a call the application
+// had in flight, closed by that stop, ended in no fault of the upstream's or
+// of the application's own client, and records none. Before the answer and
+// after its head alike.
 func TestRecordV2_FaultNotRecordedWhenTheAppIsStoppedMidCall(t *testing.T) {
 	const head = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n"
 	for _, afterHead := range []bool{false, true} {

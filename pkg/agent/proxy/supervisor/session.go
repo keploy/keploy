@@ -149,9 +149,11 @@ type Session struct {
 	// / monotonic-timestamp normalisation — they only differ on the
 	// final handoff.
 	RouteMocksViaSyncMock bool
-	// peerEnds: how each side of the connection ended, and which ended
-	// first (MarkPeerEnded; peerEndFirstShift), whether the server spoke
-	// unasked before the current request (ServerSpokeUnasked), and, from
+	// peerEnds: how each side of the connection ended, which ended first
+	// (MarkPeerEndedBy; peerEndFirstShift), and whether that first end
+	// records no fault (EndFollowedStop) and, from noFaultEndShift, which
+	// such end it was (FirstEndNoFault); whether the server spoke unasked
+	// before the current request (ServerSpokeUnasked); and, from
 	// endedWithConnectionShift, one bit per fakeconn.Direction: that stream
 	// ended because its connection did (MarkEndedWithConnection). Internal;
 	// one word here, in the padding after the bools, so a Session stays in
@@ -543,29 +545,21 @@ func (s *Session) ServerSpokeUnasked() bool {
 // The relay marks it as its read returns, before it forwards the end to the
 // other side, so the other side's end, which can come only after, is marked
 // after it. The caller marks it before the stream ends, so a parser that
-// reaches the end sees it. Nil-safe.
+// reaches the end sees it. It marks an end that may be a fault
+// (EndMayBeFault): the proxy marks each end with its kind (MarkPeerEndedBy).
+// Nil-safe.
 func (s *Session) MarkPeerEnded(dir fakeconn.Direction, reset bool) {
-	s.MarkPeerEndedStopping(dir, reset, false)
-}
-
-// MarkPeerEndedStopping is MarkPeerEnded for a relay that knows whether the
-// recording's stop had begun as it read the end (stopBegun): keploy record and
-// keploy mock record tell the agent before they stop the application. Such an
-// end is EndAtStop (MarkPeerEndedBy). Nil-safe.
-func (s *Session) MarkPeerEndedStopping(dir fakeconn.Direction, reset, stopBegun bool) {
-	why := EndMayBeFault
-	if stopBegun {
-		why = EndAtStop
-	}
-	s.MarkPeerEndedBy(dir, reset, why)
+	s.MarkPeerEndedBy(dir, reset, EndMayBeFault)
 }
 
 // MarkPeerEndedBy is MarkPeerEnded for a relay that knows which end that
 // records no fault the end it read is, if it is one (why): the recording's
-// stop had begun, the client's process was exiting as its end was read, or
-// the hooks cannot say how the client released its end (the proxy's
-// peerEndMarker). Such an end is not a fault (EndFollowedStop,
-// FirstEndNoFault). Only the first end's is kept. Nil-safe.
+// stop had begun (EndAtStop: keploy record and keploy mock record tell the
+// agent before they stop the application), the client's process was exiting
+// as its end was read (EndAtExit), or the hooks cannot say how the client
+// released its end (EndUnjudged), as the proxy's peerEndMarker reads it. Such
+// an end is not a fault (EndFollowedStop, FirstEndNoFault). Only the first
+// end's is kept. Nil-safe.
 func (s *Session) MarkPeerEndedBy(dir fakeconn.Direction, reset bool, why NoFaultEnd) {
 	if s == nil || dir > fakeconn.FromDest {
 		return

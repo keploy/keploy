@@ -59,20 +59,20 @@ func TestMarkPeerEndedKeepsEachSidesFirstEndAndWhichEndedFirst(t *testing.T) {
 func TestEndFollowedStopIsTheFirstEndReadAfterTheStopBegan(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		// stopBefore[i]: the stop had begun when end i was read.
-		ends       []fakeconn.Direction
-		stopBefore []bool
-		want       bool
+		// why[i]: EndAtStop where the stop had begun when end i was read.
+		ends []fakeconn.Direction
+		why  []NoFaultEnd
+		want bool
 	}{
-		{"the app closed after the stop began", []fakeconn.Direction{fakeconn.FromClient, fakeconn.FromDest}, []bool{true, true}, true},
-		{"the upstream reset after the stop began", []fakeconn.Direction{fakeconn.FromDest}, []bool{true}, true},
-		{"the app gave up before the stop", []fakeconn.Direction{fakeconn.FromClient, fakeconn.FromDest}, []bool{false, true}, false},
-		{"no stop", []fakeconn.Direction{fakeconn.FromClient}, []bool{false}, false},
+		{"the app closed after the stop began", []fakeconn.Direction{fakeconn.FromClient, fakeconn.FromDest}, []NoFaultEnd{EndAtStop, EndAtStop}, true},
+		{"the upstream reset after the stop began", []fakeconn.Direction{fakeconn.FromDest}, []NoFaultEnd{EndAtStop}, true},
+		{"the app gave up before the stop", []fakeconn.Direction{fakeconn.FromClient, fakeconn.FromDest}, []NoFaultEnd{EndMayBeFault, EndAtStop}, false},
+		{"no stop", []fakeconn.Direction{fakeconn.FromClient}, []NoFaultEnd{EndMayBeFault}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &Session{}
 			for i, dir := range tc.ends {
-				s.MarkPeerEndedStopping(dir, false, tc.stopBefore[i])
+				s.MarkPeerEndedBy(dir, false, tc.why[i])
 			}
 			if got := s.EndFollowedStop(); got != tc.want {
 				t.Errorf("EndFollowedStop = %v, want %v", got, tc.want)
@@ -109,18 +109,18 @@ func TestEndFollowedStopIsTheFirstEndReadAfterTheStopBegan(t *testing.T) {
 	} {
 		s := &Session{}
 		other.set(s)
-		s.MarkPeerEndedStopping(fakeconn.FromClient, false, false)
+		s.MarkPeerEndedBy(fakeconn.FromClient, false, EndMayBeFault)
 		if !other.read(s) || s.EndFollowedStop() {
 			t.Errorf("%s, then an end with no stop: that mark %v, EndFollowedStop %v; want true, false", other.name, other.read(s), s.EndFollowedStop())
 		}
 		stopped := &Session{}
-		stopped.MarkPeerEndedStopping(fakeconn.FromClient, false, true)
+		stopped.MarkPeerEndedBy(fakeconn.FromClient, false, EndAtStop)
 		if other.read(stopped) {
 			t.Errorf("an end after the stop says %s", other.name)
 		}
 	}
 	stopped := &Session{}
-	stopped.MarkPeerEndedStopping(fakeconn.FromClient, false, true)
+	stopped.MarkPeerEndedBy(fakeconn.FromClient, false, EndAtStop)
 	stopped.peerEnds.And(^uint32(spokeUnaskedBit)) // as NextRequest clears it for the next request
 	if !stopped.EndFollowedStop() {
 		t.Error("a request's clear of the unasked mark took the stop's mark away")

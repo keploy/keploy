@@ -56,8 +56,8 @@ type relayedConn struct {
 	// grace is the relay's HalfCloseGrace (0: its default).
 	grace time.Duration
 	// stopBegun is whether the recording's stop has begun as the relay reads
-	// an end (Session.MarkPeerEndedStopping): set, as keploy record's client
-	// says it is stopping before it stops the application.
+	// an end (Session.MarkPeerEndedBy, EndAtStop): set, as keploy record's
+	// client says it is stopping before it stops the application.
 	stopBegun atomic.Bool
 	// clientEnd is the end that records no fault (a supervisor.NoFaultEnd)
 	// the relay reads the client's end as before the stop has begun, as the
