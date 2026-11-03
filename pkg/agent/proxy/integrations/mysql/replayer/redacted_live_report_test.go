@@ -86,12 +86,15 @@ func queryRecorded(name, sql string, noise []string) *models.Mock {
 }
 
 // executeBytes is a COM_STMT_EXECUTE of statement stmtID binding the
-// strings vals.
+// strings vals (a statement of no parameters sends none of their parts).
 func executeBytes(stmtID uint32, vals ...string) []byte {
 	exec := []byte{mysql.COM_STMT_EXECUTE}
 	exec = binary.LittleEndian.AppendUint32(exec, stmtID)
 	exec = append(exec, 0x00)                        // flags
 	exec = binary.LittleEndian.AppendUint32(exec, 1) // iteration count
+	if len(vals) == 0 {
+		return exec
+	}
 	exec = append(exec, make([]byte, (len(vals)+7)/8)...)
 	exec = append(exec, 0x01) // new params bound
 	for range vals {
@@ -166,6 +169,28 @@ func TestMySQLMissRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
 		},
 		kept:   "42",
 		strict: true,
+	}, {
+		name: "an execute of a statement whose literal the recording redacted",
+		db: func() *fakeMockDb {
+			stmt := keyedPrepare(redactedPlaceholder, "acme")
+			prep := preparedMock("mock-prepare-keyed", "0", 1, stmt, stmtT0)
+			exec := executedMock("mock-execute-keyed", 1, stmtT0.Add(time.Millisecond), "user row", stmt, "41")
+			prep.Noise, exec.Noise = redactedNoise, redactedNoise
+			return &fakeMockDb{session: []*models.Mock{nativeHandshake(), prep, exec}}
+		},
+		send: func(c mysqlClient) {
+			// Strict serves no recorded PREPARE of drifted literals: the
+			// replay answers it with a statement of its own, of no
+			// parameters, and the EXECUTE of it is the miss.
+			c.send(0, append([]byte{mysql.COM_STMT_PREPARE}, keyedPrepare(liveSecret, "globex")...))
+			ok := c.read()
+			if len(ok) < 5 || ok[0] != 0x00 {
+				c.t.Fatalf("the PREPARE was answered with %x, want a COM_STMT_PREPARE_OK", ok)
+			}
+			c.send(0, executeBytes(binary.LittleEndian.Uint32(ok[1:5])))
+		},
+		kept:   "globex",
+		strict: true,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			rep, logs := missOf(t, tc.db(), models.OutgoingOptions{MockNoiseStrict: tc.strict}, tc.send)
@@ -184,6 +209,11 @@ func TestMySQLMissRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
 			}
 		})
 	}
+}
+
+// keyedPrepare is a prepared statement of a key literal and an org literal.
+func keyedPrepare(key, org string) string {
+	return "SELECT name FROM users WHERE api_key = '" + key + "' AND org = '" + org + "'"
 }
 
 // A recording that redacted nothing leaves the live call's values in the
@@ -238,6 +268,9 @@ func TestMySQLStrictMissRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
 			t.Fatalf("strict served the EXECUTE (%v)", err)
 		}
 		check(t, miss, "body.parameters.1.value", "body.parameters.0.value")
+		if !miss.places.params[1] || miss.places.params[0] {
+			t.Fatalf("the miss's places %+v: want the rejected recording's bound value 1 alone", miss.places)
+		}
 	})
 	t.Run("a COM_QUERY", func(t *testing.T) {
 		m := queryRecorded("q1", "SELECT name FROM users WHERE org = 'acme' AND api_key = '"+redactedPlaceholder+"'", redactedNoise)
@@ -251,5 +284,8 @@ func TestMySQLStrictMissRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
 			t.Fatalf("strict served the COM_QUERY (%v)", err)
 		}
 		check(t, miss, "body.query.literals.1", "body.query.literals.0")
+		if !miss.places.literals[1] || miss.places.literals[0] {
+			t.Fatalf("the miss's places %+v: want the rejected recording's literal 1 alone", miss.places)
+		}
 	})
 }

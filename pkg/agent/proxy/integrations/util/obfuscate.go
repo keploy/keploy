@@ -166,8 +166,6 @@ func dropEndAnchors(r *syntax.Regexp) *syntax.Regexp {
 		if len(subs) == 0 {
 			return &syntax.Regexp{Op: syntax.OpEmptyMatch}
 		}
-	case syntax.OpBeginText, syntax.OpBeginLine, syntax.OpEndText, syntax.OpEndLine:
-		return &syntax.Regexp{Op: syntax.OpEmptyMatch}
 	}
 	return r
 }

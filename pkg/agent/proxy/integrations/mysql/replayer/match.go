@@ -1692,7 +1692,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						actualQuery = liveExec.query
 
 						if debugOn {
-							logger.Debug("queries comparison", zap.String("expected_query", expectedQuery), zap.String("actual_query", actualQuery), zap.Uint32("mock_statement_id", expMsg.StatementID), zap.Uint32("actual_statment_id", actMsg.StatementID), zap.Any("connID", mock.Spec.Metadata["connID"]), zap.String("mock_name", mock.Name))
+							logger.Debug("queries comparison", zap.String("expected_query", expectedQuery), zap.String("actual_query", loggedLive(expectedQuery, actualQuery, mock.Noise)), zap.Uint32("mock_statement_id", expMsg.StatementID), zap.Uint32("actual_statment_id", actMsg.StatementID), zap.Any("connID", mock.Spec.Metadata["connID"]), zap.String("mock_name", mock.Name))
 						}
 
 						ev.ok, ev.score, ev.queryExact = matchStmtExecuteLive(logger, mockReq.PacketBundle, req.PacketBundle, expectedQuery, liveExec, liveStatementParams, mock.Name, util.NewNoiseChecker(mock.Noise))
@@ -2257,6 +2257,15 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			return generic, true, nil, nil
 		}
 
+		// The recordings the report names: the live command's value at a
+		// place either redacted is shown redacted, in the report and in the
+		// logs from here on.
+		closest := bestPartialMock
+		if closest == nil && gate.closestMock == "" {
+			closest = nearestMock
+		}
+		places := placesOf(closest).or(gate.closestPlaces)
+
 		if req.Header.Type == sCOM_STMT_PREP {
 			if sp, ok := req.Message.(*mysql.StmtPreparePacket); ok && sp != nil {
 				// Count placeholders in the statement, not in the prologue —
@@ -2337,7 +2346,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				}
 
 				logger.Info("Synthesized PREPARE_OK for unmocked statement (likely TiDB+JDBC cachePrepStmts caching pre-record stmtIDs)",
-					zap.String("query", truncate(strings.TrimSpace(sp.Query), 200)),
+					zap.String("query", truncate(strings.TrimSpace(places.liveStatement(sp.Query)), 200)),
 					zap.Uint32("synthetic_stmt_id", newStmtID),
 					zap.Uint16("num_params", numParams))
 				return synthetic, true, nil, nil
@@ -2350,13 +2359,6 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		} else if sp, spOk := req.Message.(*mysql.StmtPreparePacket); spOk {
 			actualQuery = sp.Query
 		}
-		// The recordings the report names: the live command's value at a
-		// place either redacted is shown redacted, in the report and here.
-		closest := bestPartialMock
-		if closest == nil && gate.closestMock == "" {
-			closest = nearestMock
-		}
-		places := placesOf(closest).or(gate.closestPlaces)
 		actualQuery = places.liveStatement(actualQuery)
 		if bestPartialMock != nil {
 			logger.Debug("mock miss",
