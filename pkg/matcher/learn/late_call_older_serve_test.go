@@ -53,7 +53,7 @@ func TestALateCallsValueAnOlderServeGaveIsNeverLearnedAsNoise(t *testing.T) {
 		return ePg("mock-a", 300*time.Millisecond, "SELECT next_slot FROM mock-a", []models.PostgresV3Cells{{{Value: "7"}}, {{Value: second}}}, "SELECT 2")
 	}
 	heldView := rows("q1").ServedAs(1).ServedLive(rows("q2"))
-	movedView := asRecorded.ServedLive(eAnswer("mock-a", 300*time.Millisecond, "5"))
+	movedView := eAnswer("mock-a", 300*time.Millisecond, "7").ServedAs(1).ServedLive(eAnswer("mock-a", 300*time.Millisecond, "5"))
 	for _, tc := range []struct {
 		name           string
 		recorded, live string
