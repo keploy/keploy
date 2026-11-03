@@ -292,7 +292,8 @@ func TestOutcomeTheTestsOwnValueThatStoppedFollowingItsSourceIsAConflict(t *test
 // A conflict's give edit names the value as the line names its place: a
 // part of the url by its whole path (url.path.2, url.query.order), as a
 // path segment's index alone ("2") names nothing a person reads; a body or
-// header field by its last key. A word and an instant are named alike.
+// header field by its last key, and so is another adapter's field whose
+// name only begins with "url". A word and an instant are named alike.
 func TestOutcomeAGiveEditNamesAUrlPartByItsWholePath(t *testing.T) {
 	gives := func(what string, d Decision, name string) {
 		t.Helper()
@@ -302,7 +303,7 @@ func TestOutcomeAGiveEditNamesAUrlPartByItsWholePath(t *testing.T) {
 		}
 	}
 	sent := oServed("mock-0", false, false, Request, oText("body.order", "o-1"), "o-9", time.Millisecond)
-	for _, c := range [][2]string{{"url.path.2", "url.path.2"}, {"url.query.order", "url.query.order"}, {"body.ref", "ref"}, {"header.X-Order", "X-Order"}} {
+	for _, c := range [][2]string{{"url.path.2", "url.path.2"}, {"url.query.order", "url.query.order"}, {"body.ref", "ref"}, {"header.X-Order", "X-Order"}, {"urls.ref", "ref"}} {
 		d := oWord(t, Decide(oInput(c[0], "o-1", "o-5", sent, nil)), "1", "5")
 		oRefused(t, "a word at "+c[0], d, RefusalConflict, "mock-0")
 		gives("a word at "+c[0], d, c[1])
