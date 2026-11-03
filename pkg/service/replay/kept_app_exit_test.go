@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -398,4 +399,167 @@ type twoPRSetsDB struct{ *prTestDB }
 
 func (twoPRSetsDB) GetAllTestSetIDs(context.Context) ([]string, error) {
 	return []string{"test-set-0", "test-set-1"}, nil
+}
+
+// A set the run runs again (a flaky check's next attempt) and that halts on
+// each attempt is named once in the run's stop, not once per attempt: docker
+// compose, a stack per set, where the run goes on past a halted set.
+func TestASetThatHaltsOnEachAttemptIsNamedOnceInTheRunsStop(t *testing.T) {
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.config.Command = "docker compose up"
+	h.replayer.config.CommandType = string(utils.DockerCompose)
+	h.replayer.config.Test.MaxFlakyChecks = 2
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer agent.Close()
+	h.replayer.config.Agent.AgentURI = agent.URL
+	core, logs := observer.New(zapcore.DebugLevel)
+	h.replayer.logger = zap.New(core)
+	h.instr.stopAppAfterNUpdates = 2
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+	defer cancel()
+	_ = h.replayer.Start(ctx)
+	if ran := setsRan(logs); len(ran) != 2 || ran[0] != "test-set-0" || ran[1] != "test-set-0" {
+		t.Fatalf("the run ran %v, the case needs test-set-0 run twice", ran)
+	}
+	stops := logs.FilterMessage("stopping Keploy").All()
+	if len(stops) != 1 {
+		t.Fatalf("%d \"stopping Keploy\" lines, want 1", len(stops))
+	}
+	reason, _ := stops[0].ContextMap()["reason"].(string)
+	if n := strings.Count(reason, "test-set-0"); n != 1 || strings.Contains(reason, "; ") {
+		t.Errorf("the run stops with the reason %q, want it to name test-set-0 once", reason)
+	}
+	if !strings.Contains(reason, "exited during test-set test-set-0") {
+		t.Errorf("the run stops with the reason %q, want it to name test-set-0's exit", reason)
+	}
+	if utils.ErrCode != 1 {
+		t.Errorf("exit code %d, want 1", utils.ErrCode)
+	}
+}
+
+// noteSetStop keeps one reason per set, the latest noted, in the sets' order.
+func TestNoteSetStopKeepsEachSetsLatestReasonInOrder(t *testing.T) {
+	at := map[string]int{}
+	var stops []string
+	stops = noteSetStop(stops, at, "a", "a1")
+	stops = noteSetStop(stops, at, "b", "b1")
+	stops = noteSetStop(stops, at, "a", "a2")
+	if got := strings.Join(stops, ","); got != "a2,b1" {
+		t.Fatalf("the stops are %q, want \"a2,b1\"", got)
+	}
+}
+
+// haltOnceInstr is the harness's instrumentation whose application exits
+// part-way through its first run, as the harness's does (stopAppAfterNUpdates).
+// Every later run calls again as it starts and stays up until its run's
+// context ends.
+type haltOnceInstr struct {
+	*prInstr
+	again func()
+	runs  atomic.Int32
+}
+
+func (f *haltOnceInstr) Run(ctx context.Context, opts models.RunOptions) models.AppError {
+	if f.runs.Add(1) == 1 {
+		return f.prInstr.Run(ctx, opts)
+	}
+	f.again()
+	<-ctx.Done()
+	return models.AppError{AppErrorType: models.ErrCtxCanceled, ExitCode: -1}
+}
+
+// A set run again after it halted (docker compose, a stack per set) whose
+// next attempt ends INTERNAL_ERR and stops the run is named once in the
+// run's stop, with that latest attempt's internal error, not also with the
+// halt of the attempt before it.
+func TestASetThatHaltsThenStopsTheRunIsNamedOnceWithItsLatestEnd(t *testing.T) {
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.config.Command = "docker compose up"
+	h.replayer.config.CommandType = string(utils.DockerCompose)
+	h.replayer.config.Test.MaxFlakyChecks = 2
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer agent.Close()
+	h.replayer.config.Agent.AgentURI = agent.URL
+	// The first attempt's application exits part-way through the set. As
+	// the next attempt's starts, test-1's result can no longer be written:
+	// that attempt ends INTERNAL_ERR.
+	h.instr.stopAppAfterNUpdates = 2
+	h.replayer.instrumentation = &haltOnceInstr{prInstr: h.instr, again: func() {
+		h.report.mu.Lock()
+		h.report.failInsertOf = map[string]error{"test-1": errors.New("report store is unwritable")}
+		h.report.mu.Unlock()
+	}}
+	core, logs := observer.New(zapcore.DebugLevel)
+	h.replayer.logger = zap.New(core)
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+	defer cancel()
+	_ = h.replayer.Start(ctx)
+	if ran := setsRan(logs); len(ran) != 2 || ran[0] != "test-set-0" || ran[1] != "test-set-0" {
+		t.Fatalf("the run ran %v, the case needs test-set-0 run twice", ran)
+	}
+	stops := logs.FilterMessage("stopping Keploy").All()
+	if len(stops) != 1 {
+		t.Fatalf("%d \"stopping Keploy\" lines, want 1", len(stops))
+	}
+	reason, _ := stops[0].ContextMap()["reason"].(string)
+	if want := "test-set test-set-0 ended INTERNAL_ERR: "; !strings.HasPrefix(reason, want) || strings.Count(reason, "test-set-0") != 1 {
+		t.Errorf("the run stops with the reason %q, want only test-set-0's latest end, %q...", reason, want)
+	}
+	if utils.ErrCode != 1 {
+		t.Errorf("exit code %d, want 1", utils.ErrCode)
+	}
+}
+
+// A set run again after it halted (docker compose, a stack per set) whose
+// next attempt runs clean keeps that halt in the run's stop: a set is named
+// with the end of its latest attempt that halted, or of the one whose
+// INTERNAL_ERR stopped the run (always its last). The attempt named need
+// not be its latest: here the latest ran clean. Its report, the latest
+// attempt's, says PASSED, and the halt still fails the run: it exits 1.
+func TestASetThatHaltsThenRunsCleanKeepsItsHaltInTheRunsStop(t *testing.T) {
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.config.Command = "docker compose up"
+	h.replayer.config.CommandType = string(utils.DockerCompose)
+	h.replayer.config.Test.MaxFlakyChecks = 2
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer agent.Close()
+	h.replayer.config.Agent.AgentURI = agent.URL
+	// The first attempt's application exits part-way through the set; the
+	// next attempt's stays up and the set runs clean.
+	h.instr.stopAppAfterNUpdates = 2
+	h.replayer.instrumentation = &haltOnceInstr{prInstr: h.instr, again: func() {}}
+	core, logs := observer.New(zapcore.DebugLevel)
+	h.replayer.logger = zap.New(core)
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+	defer cancel()
+	_ = h.replayer.Start(ctx)
+	if ran := setsRan(logs); len(ran) != 2 || ran[0] != "test-set-0" || ran[1] != "test-set-0" {
+		t.Fatalf("the run ran %v, the case needs test-set-0 run twice", ran)
+	}
+	h.report.mu.Lock()
+	rep := h.report.report
+	h.report.mu.Unlock()
+	if rep == nil || rep.Status != string(models.TestSetStatusPassed) {
+		t.Fatalf("the set's report is %+v, the case needs its second attempt PASSED", rep)
+	}
+	stops := logs.FilterMessage("stopping Keploy").All()
+	if len(stops) != 1 {
+		t.Fatalf("%d \"stopping Keploy\" lines, want 1", len(stops))
+	}
+	reason, _ := stops[0].ContextMap()["reason"].(string)
+	if want := "the application exited during test-set test-set-0 with exit code 1: app stopped"; reason != want {
+		t.Errorf("the run stops with the reason %q, want the first attempt's halt, %q", reason, want)
+	}
+	if utils.ErrCode != 1 {
+		t.Errorf("exit code %d, want 1", utils.ErrCode)
+	}
 }
