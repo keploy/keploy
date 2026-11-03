@@ -696,6 +696,42 @@ func TestTee_StreamClosedDuringTheFinalFlushReadsTheClose(t *testing.T) {
 	}
 }
 
+// The relay's teardown waits on done and then closes the FakeConns, so the
+// drain decides the stream's end before it signals done: a close that waited
+// on done finds the stream ended, and its reader reads io.EOF after what it
+// was handed. The teardown's one close lands just before the stream's end is
+// decided if done is already signalled there, where a close that waited on
+// done could land, and after waitDone otherwise. It runs once
+// (sync.OnceFunc), and a second call returns only once the first has closed
+// the reader, so an end decided after done reads that close
+// (fakeconn.ErrClosed) on every run.
+func TestTee_CloseThatWaitedOnDoneFindsTheStreamEnded(t *testing.T) {
+	t.Parallel()
+	tt := newTee(fakeconn.FromDest, 1<<20, 4, testStallGrace, nil, nil)
+	fc := fakeconn.New(tt.readCh(), nil, nil)
+	teardownClose := sync.OnceFunc(func() { _ = fc.Close() })
+	tt.endingStream = func() {
+		select {
+		case <-tt.done:
+			teardownClose()
+		default:
+		}
+	}
+	tt.start(fc.Done())
+	if !tt.push(mkChunk("answer")) {
+		t.Fatal("push refused")
+	}
+	tt.close()
+	tt.waitDone()
+	teardownClose()
+	if c, err := fc.ReadChunk(); err != nil || string(c.Bytes) != "answer" {
+		t.Fatalf("read %q, %v; want the chunk delivered before the end", c.Bytes, err)
+	}
+	if _, err := fc.ReadChunk(); !errors.Is(err, io.EOF) {
+		t.Errorf("a reader closed after done read %v at the stream's end, want %v: the end was decided after done", err, io.EOF)
+	}
+}
+
 // TestDrainingAChunkReturnsCapacity pins the queue's core accounting invariant.
 //
 // qBytes must fall when a chunk leaves the queue. Without that, PerConnCap

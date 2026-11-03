@@ -255,11 +255,12 @@ type tee struct {
 	// [tee.abandon] does skew it: chunks counted here are thrown away
 	// undelivered, so accepted can end up permanently ahead of what the
 	// FakeConn received. That is safe in the only way that matters —
-	// abandon returns from drain, whose deferred close of out closes the
-	// FakeConn's channel, so a discard watermark left stranded above the
-	// delivered total ends in io.EOF rather than a stall, and no byte
-	// ABOVE the watermark can be lost to it (everything delivered is
-	// below it by construction).
+	// abandon returns from drain, which ends the stream (endStream): its
+	// reader reads io.EOF there, or fakeconn.ErrClosed if it was closed
+	// first, so a discard watermark left stranded above the delivered total
+	// ends the read rather than stalling it, and no byte ABOVE the
+	// watermark can be lost to it (everything delivered is below it by
+	// construction).
 	//
 	// It exists so the relay can name a position in the parser's stream
 	// — "the parser must not see anything below offset N" — when it
@@ -302,6 +303,12 @@ type tee struct {
 	// view of the tee at that instant. Nil outside tests. Read-only after
 	// construction.
 	pushStart func()
+
+	// endingStream, when set, runs as endStream begins, before it decides
+	// the stream's end: a test's view of the tee at that instant. It runs on
+	// the drain goroutine, before done is signalled, so it must return. Nil
+	// outside tests. Read-only after construction.
+	endingStream func()
 }
 
 // newTee builds a tee. The drain goroutine does not run until [tee.start]
@@ -578,8 +585,14 @@ func (t *tee) drop(reason string) {
 // loss once with the total, and marks the tee closed so no later push is
 // accepted into a queue that no drain is left to serve.
 func (t *tee) drain() {
-	defer close(t.done)
-	defer t.endStream()
+	// End the stream, then signal done, in that order: the relay's teardown
+	// waits on done and then closes the FakeConns, so that close comes after
+	// endStream has read consumerGone. Signalled first, it could land before
+	// that read and leave open a stream that ended normally (ErrClosed).
+	defer func() {
+		t.endStream()
+		close(t.done)
+	}()
 	for {
 		t.mu.Lock()
 		if len(t.q) == 0 {
@@ -792,6 +805,9 @@ func (t *tee) abandon(held fakeconn.Chunk) {
 // teardown does. A closed FakeConn never waits on its channel, so nothing
 // blocks on one left open.
 func (t *tee) endStream() {
+	if t.endingStream != nil {
+		t.endingStream()
+	}
 	select {
 	case <-t.consumerGone:
 	default:
