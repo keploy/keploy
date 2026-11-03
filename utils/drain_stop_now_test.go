@@ -413,3 +413,44 @@ func TestADrainGaveUpUnlessItJoined(t *testing.T) {
 		}
 	}
 }
+
+// DrainErrGroupProgress, on the process's own clock, says that a drain the
+// user gave up at the press timed out, as it says of one the stall verdict
+// ended: a goroutine of its group may still run (DrainEnd.GaveUp). The bound
+// is an hour of runnable time, so only the press ends this drain.
+func TestDrainErrGroupProgressSaysAGroupGivenUpAtThePressTimedOut(t *testing.T) {
+	drainStopNowTest(t)
+	var g errgroup.Group
+	block := make(chan struct{})
+	defer close(block)
+	g.Go(func() error { <-block; return nil })
+	var p atomic.Uint64
+	core, logs := observer.New(zap.DebugLevel)
+	type result struct {
+		err      error
+		timedOut bool
+	}
+	res := make(chan result, 1)
+	go func() {
+		err, timedOut := DrainErrGroupProgress(zap.New(core), "t", &g, time.Hour, p.Load)
+		res <- result{err, timedOut}
+	}()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for logs.FilterMessageSnippet(drainOffer).Len() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the drain never offered to stop now; it said %v", logs.All())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !MarkInterruptedAgain() {
+		t.Fatal("the user's interrupt after the drain's offer ended no stop")
+	}
+	select {
+	case r := <-res:
+		if r.err != nil || !r.timedOut {
+			t.Fatalf("the drain given up at the press returned (%v, timedOut %v): want no error, timed out", r.err, r.timedOut)
+		}
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("the drain did not end at the user's interrupt after its offer")
+	}
+}
