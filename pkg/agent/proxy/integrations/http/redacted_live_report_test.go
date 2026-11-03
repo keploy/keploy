@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -244,5 +245,188 @@ func TestMissReportFieldWithoutValuesIsNotTwoEmptyValues(t *testing.T) {
 	}
 	if strings.Contains(r.Diff, `recorded "", live ""`) {
 		t.Errorf("Diff shows a field without values as two empty values: %s", r.Diff)
+	}
+}
+
+// liveBound is a value the test's variable took from an earlier live call,
+// at a place the recording redacted: it is a secret too.
+const liveBound = "Kp4wX8rTq2Lm"
+
+// liveNumber is a number the app sends where the recording holds a
+// redacted string.
+const liveNumber = "73950284611"
+
+// noSecret fails t when the report carries either secret, and when its
+// summary does not show the redacted place redacted (want).
+func noSecret(t *testing.T, r *models.MockMismatchReport, wantSummary bool) {
+	t.Helper()
+	if r == nil {
+		t.Fatal("no report")
+	}
+	all, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{liveSecret, liveBound, liveNumber} {
+		if strings.Contains(string(all), s) {
+			t.Errorf("the report carries %q, a live value at a place the recording redacted:\nsummary: %s\nDiff: %s\nreport: %s", s, r.ActualSummary, r.Diff, all)
+		}
+	}
+	if wantSummary && !strings.Contains(r.ActualSummary, valueRedacted) {
+		t.Errorf("the summary does not show the redacted segment redacted: %s", r.ActualSummary)
+	}
+}
+
+// A stateful walk's miss (each recording of the call has answered) names the
+// call's path with the segments its last recording redacted redacted, and so
+// does the report of a call paired with a recording: the call sent its secret
+// there. Switch off and on.
+func TestAnsweredAndPairedReportsRedactTheLiveValueAtARedactedSegment(t *testing.T) {
+	for _, c := range redactedLiveCases(t) {
+		if !strings.HasPrefix(c.name, "path-segment") {
+			continue
+		}
+		for _, on := range []bool{false, true} {
+			mode, env := "off", ""
+			if on {
+				mode, env = "on", "1"
+			}
+			t.Run("answered/"+c.name+"/"+mode, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, env)
+				m := c.mock()
+				_, request := c.sent()
+				i, _, answered := servedWalk(nil, []*models.Mock{m}, integrations.SequenceView{Cursor: &mockMemDb{}})
+				if i != -1 || answered == nil || answered.last != m.Name {
+					t.Fatalf("the walk answered %d (%+v); want the miss naming %s", i, answered, m.Name)
+				}
+				diag := &matchDiag{phase: models.MatchPhaseExhausted, candidates: 1, pool: []*models.Mock{m}, answered: answered}
+				r := newHTTP().buildHTTPMismatchReport(request, []byte(c.live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, nil, diag)
+				noSecret(t, r, true)
+				if r != nil && !strings.HasPrefix(r.ActualSummary, "POST /x/") {
+					t.Errorf("the summary does not name the call's path: %s", r.ActualSummary)
+				}
+			})
+			t.Run("paired/"+c.name+"/"+mode, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, env)
+				m := c.mock()
+				in, _ := c.sent()
+				var r *models.MockMismatchReport
+				ctx := models.WithMockMismatchReporter(context.Background(), func(err error) {
+					if e, ok := err.(interface {
+						MismatchReport() *models.MockMismatchReport
+					}); ok {
+						r = e.MismatchReport()
+					}
+				})
+				reportPairing(ctx, in, m, integrations.AnsweredCall{}, false)
+				noSecret(t, r, true)
+			})
+		}
+	}
+}
+
+// A miss at a test variable whose place the recording redacted shows the
+// values there redacted: the value the call sent, and the variable's value
+// in the test, which an earlier live call sent. Not in its field diffs, nor
+// in the Diff its evidence makes. The variable pass runs under the switch
+// only.
+func TestVariableMissRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const rec = "REDACTED_abc"
+	noise := []string{`^REDACTED_(abc|def)$`}
+	bind := func() *models.Mock {
+		m := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"`+rec+`","item":"pen"}`, 201, `{}`,
+			models.MockVariables{"orderId": bindV(rec, "body.id")}), 1)
+		m.Noise = noise
+		return m
+	}
+	bindLive := liveReq("POST", "/orders", `{"id":"`+liveBound+`","item":"pen"}`)
+	type step struct {
+		method, path, body string
+		hdr                map[string]string
+	}
+	for _, c := range []struct {
+		name  string
+		mocks func() []*models.Mock
+		first *req
+		live  step
+		why   string
+	}{
+		{name: "use-at-a-path-segment", why: "this call sent", mocks: func() []*models.Mock {
+			m := at(varMock("mock-2", "GET", "http://store/orders/"+rec, "", 200, `{}`, models.MockVariables{"orderId": useV(rec, []string{"url.path[1]"})}), 2)
+			m.Noise = noise
+			return []*models.Mock{bind(), m}
+		}, first: bindLive, live: step{method: "GET", path: "/orders/" + liveSecret}},
+		{name: "use-at-a-query-value", why: "this call sent", mocks: func() []*models.Mock {
+			m := at(varMock("mock-2", "GET", "http://store/items?tok="+rec, "", 200, `{}`, models.MockVariables{"orderId": useV(rec, []string{"url.query.tok"})}), 2)
+			m.Noise = noise
+			return []*models.Mock{bind(), m}
+		}, first: bindLive, live: step{method: "GET", path: "/items?tok=" + liveSecret}},
+		{name: "use-at-a-header", why: "this call sent", mocks: func() []*models.Mock {
+			m := at(varMock("mock-2", "GET", "http://store/items", "", 200, `{}`, models.MockVariables{"orderId": useV(rec, []string{"header.X-Tok"})}), 2)
+			m.Spec.HTTPReq.Header["X-Tok"] = rec
+			m.Noise = noise
+			return []*models.Mock{bind(), m}
+		}, first: bindLive, live: step{method: "GET", path: "/items", hdr: map[string]string{"X-Tok": liveSecret}}},
+		{name: "use-in-an-array", why: "this call sent", mocks: func() []*models.Mock {
+			m := at(varMock("mock-2", "POST", "http://store/items", `{"items":[{"tok":"`+rec+`"}]}`, 200, `{}`, models.MockVariables{"orderId": useV(rec, []string{"body.items[0].tok"})}), 2)
+			m.Noise = noise
+			return []*models.Mock{bind(), m}
+		}, first: bindLive, live: step{method: "POST", path: "/items", body: `{"items":[{"tok":"` + liveSecret + `"}]}`}},
+		{name: "type-changed", why: "another JSON type", mocks: func() []*models.Mock {
+			return []*models.Mock{bind()}
+		}, live: step{method: "POST", path: "/orders", body: `{"id":` + liveNumber + `,"item":"pen"}`}},
+		{name: "another-variables-value", why: "which is variable orderId's value", mocks: func() []*models.Mock {
+			m := at(varMock("mock-2", "POST", "http://store/carts", `{"cart":"REDACTED_def"}`, 201, `{}`, models.MockVariables{"cartId": bindV("REDACTED_def", "body.cart")}), 2)
+			m.Noise = noise
+			return []*models.Mock{bind(), m}
+		}, first: bindLive, live: step{method: "POST", path: "/carts", body: `{"cart":"` + liveBound + `"}`}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHTTP()
+			db := &varDb{perTest: c.mocks()}
+			if c.first != nil {
+				if ok, _, _ := matchVar(t, h, db, c.first); !ok {
+					t.Fatal("the binding call should match")
+				}
+			}
+			in := liveReq(c.live.method, c.live.path, c.live.body)
+			for k, v := range c.live.hdr {
+				in.header.Set(k, v)
+			}
+			ok, _, diag := matchVar(t, h, db, in)
+			wantProblem(t, ok, diag, c.why)
+			request, _ := http.NewRequest(c.live.method, "http://store"+c.live.path, strings.NewReader(c.live.body))
+			request.Header = in.header.Clone()
+			r := h.buildHTTPMismatchReport(request, []byte(c.live.body), db, nil, nil, nil, diag)
+			noSecret(t, r, false)
+			if r != nil && (r.MatchPhase != models.MatchPhaseVariable || !strings.Contains(r.Diff, valueRedacted)) {
+				t.Errorf("the variable miss does not show the place redacted: phase %s Diff %q", r.MatchPhase, r.Diff)
+			}
+		})
+	}
+}
+
+// A variable miss keeps the evidence the recording did not redact: the
+// values at a place it kept, and evidence that shows no value.
+func TestVariableMissKeepsWhatTheRecordingDidNotRedact(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	db := &varDb{perTest: createAndReadBack("ord-rec-1")}
+	if ok, _, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":"ord-live-9","item":"pen"}`)); !ok {
+		t.Fatal("the create should match")
+	}
+	ok, _, diag := matchVar(t, h, db, liveReq("GET", "/orders/ord-other-3", ""))
+	p := wantProblem(t, ok, diag, "this call sent")
+	r := h.buildHTTPMismatchReport(makeReq("GET", "/orders/ord-other-3"), nil, db, nil, nil, nil, diag)
+	if r == nil || r.Diff != p.diff() || !strings.Contains(r.Diff, `"ord-live-9"`) || !strings.Contains(r.Diff, `"ord-other-3"`) {
+		t.Fatalf("the report's Diff is not the problem's evidence, its values shown: %+v", r)
+	}
+	db = &varDb{perTest: createAndReadBack("ord-rec-1")[1:]}
+	ok, _, diag = matchVar(t, h, db, liveReq("GET", "/orders/ord-live-9", ""))
+	p = wantProblem(t, ok, diag, "before the call that binds it")
+	r = h.buildHTTPMismatchReport(makeReq("GET", "/orders/ord-live-9"), nil, db, nil, nil, nil, diag)
+	if r == nil || r.Diff != p.diff() {
+		t.Fatalf("the report's Diff is not the problem's evidence: %+v", r)
 	}
 }

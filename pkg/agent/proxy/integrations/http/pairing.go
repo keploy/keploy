@@ -268,7 +268,9 @@ func reportPairing(ctx context.Context, input *req, x *models.Mock, a integratio
 			dest = input.url.Host
 		}
 	}
-	r := mismatch.NewReport(mismatch.ProtocolHTTP, input.method+" "+path).WithDestination(dest).Build()
+	// The path shows the segments x redacted redacted: the call sent its
+	// secret there.
+	r := mismatch.NewReport(mismatch.ProtocolHTTP, placesOf(x).summary(input.method, path)).WithDestination(dest).Build()
 	r.Operation = models.HTTPOperationLabel(liveRequest(nil, input))
 	r.Answer, r.ClosestMock, r.NotOwned = models.AnswerProvisional, x.Name, true
 	r.ClosestMockReq = renderMockRequest(x.Spec.HTTPReq, x.Noise)

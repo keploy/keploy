@@ -11,6 +11,8 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/templates"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // redactedPlaces are the places of a recorded request whose value the
@@ -44,6 +46,15 @@ type redactedPlaces struct {
 	// strict comparison's "body[].id" is read the same), a form key or a
 	// multipart field's name, decoded.
 	fields map[string]bool
+}
+
+// placesOf reads the places of m's recorded request the obfuscator
+// redacted; none when m is nil or no HTTP call.
+func placesOf(m *models.Mock) redactedPlaces {
+	if m == nil {
+		return redactedPlaces{}
+	}
+	return redactedPlacesOf(m.Spec.HTTPReq, m.Noise)
 }
 
 // redactedPlacesOf reads the places of r the obfuscator redacted, by the
@@ -161,12 +172,17 @@ func (p redactedPlaces) field(name string) bool {
 }
 
 // covers reports whether a field diff's path names a redacted place. A
-// diff of the whole body is covered when any part of the body was redacted:
-// its values would carry that part.
+// test variable's place, or a word of one, reads in the variables grammar
+// (variables.ParseAddress: header.X, url.query.name, url.path[i],
+// body.items[0].id); a place a diff names in its own ("query.name", a
+// "[]" for an array's elements) reads as the matcher writes it. A diff of
+// the whole body is covered when any part of the body was redacted: its
+// values would carry that part.
 func (p redactedPlaces) covers(path string) bool {
+	if a, err := variables.ParseAddress(path); err == nil && p.at(a.Place) {
+		return true
+	}
 	switch {
-	case strings.HasPrefix(path, "header."):
-		return p.headers[strings.ToLower(strings.TrimPrefix(path, "header."))]
 	case strings.HasPrefix(path, "query."):
 		return p.query[strings.TrimPrefix(path, "query.")]
 	case path == "body":
@@ -178,6 +194,36 @@ func (p redactedPlaces) covers(path string) bool {
 		return p.field(strings.TrimPrefix(path, "body"))
 	}
 	return false
+}
+
+// at reports whether a test variable's place is a redacted place, or inside
+// one.
+func (p redactedPlaces) at(place variables.Place) bool {
+	switch place.Part {
+	case variables.PartHeader:
+		return p.headers[strings.ToLower(place.Name)]
+	case variables.PartQuery:
+		return p.query[place.Name]
+	case variables.PartPath:
+		return p.segments[place.Index]
+	case variables.PartBody:
+		return p.field(bodyFieldName(place.Path))
+	}
+	return false
+}
+
+// bodyFieldName is a JSON body place's path as redactedPlaces.fields names
+// it: each array position written "[]".
+func bodyFieldName(path []templates.PathSeg) string {
+	name := ""
+	for _, seg := range path {
+		if seg.IsIndex {
+			name = jsonElemPath(name)
+		} else {
+			name = jsonChildPath(name, seg.Key)
+		}
+	}
+	return name
 }
 
 // path is a URL path with each segment the recording redacted written

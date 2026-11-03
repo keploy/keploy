@@ -651,7 +651,7 @@ func servedWalk(live, full []*models.Mock, sv integrations.SequenceView) (int, f
 	}
 	a := &answeredSequence{test: sv.Test, held: hi - lo}
 	if hi > lo {
-		a.last = full[hi-1].Name
+		a.last, a.lastMock = full[hi-1].Name, full[hi-1]
 		windowed := sv.Test != "" && !sv.Start.IsZero() && !full[lo].Spec.ReqTimestampMock.Before(sv.Start)
 		a.inWindow = windowed && (sv.End.IsZero() || !full[lo].Spec.ReqTimestampMock.After(sv.End))
 		a.after = windowed && !a.inWindow
@@ -696,6 +696,9 @@ type answeredSequence struct {
 	held     int    // how many it holds
 	inWindow bool   // whether they are the test's recorded window's
 	after    bool   // whether it is the first recorded after the window (none in or before it)
+
+	// lastMock is the last itself: the miss redacts the places it redacted.
+	lastMock *models.Mock
 }
 
 // why is the miss's reason. It names recordings, never a value.
@@ -2456,14 +2459,16 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	if diag != nil && diag.answered != nil {
 		// Each recording of the call the stateful walk holds has answered
 		// (servedWalk): the miss names the last, and no request diff, as
-		// the call is that recording's.
-		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+		// the call is that recording's. Its path shows the segments that
+		// recording redacted redacted.
+		last := diag.answered.lastMock
+		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, placesOf(last).summary(request.Method, request.URL.Path)).
 			WithDestination(dest).
 			WithComparedDestinations(comparedDestinations(diag.pool, diag.candidates)).
 			WithPhase(diag.phase, diag.candidates).
 			WithClosest(diag.answered.last, nil).
 			WithDiff(diag.answered.why()).
-			WithNextSteps(diag.answered.next()).Build(), request, nil, diag.pool, variableTable(mockDb))
+			WithNextSteps(diag.answered.next()).Build(), request, last, diag.pool, variableTable(mockDb))
 	}
 	if diag != nil && diag.variable != nil {
 		// A variable's place counts the segments of the escaped path
