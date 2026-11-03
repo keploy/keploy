@@ -344,7 +344,7 @@ func TestRecord_ADrainEndedOnQuietIsSaid(t *testing.T) {
 			a.wg.Wait()
 			require.Equal(t, []string{"mock-0"}, db.inserted())
 			require.True(t, db.promoted.Load())
-			warned := logs.FilterMessage(quietTailUnconfirmed).All()
+			warned := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(quietTailUnconfirmed).All()
 			require.Len(t, warned, 1, "the saved recording was not said to be unconfirmed: %v", logs.All())
 			ctx := warned[0].ContextMap()
 			require.Equal(t, "quiet-test", ctx["mock-set"])

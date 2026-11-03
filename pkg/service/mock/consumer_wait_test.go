@@ -282,12 +282,26 @@ func TestRecord_WaitsForTestCasesStillBeingStoredAfterTheCaptureStops(t *testing
 }
 
 // afterStopIncoming is a replay's request stream that hands over its last
-// request only once the watch has stopped and the test lets it go.
+// request only once the watch has stopped and the test lets it go. Its agent
+// says it holds nothing more from before the run ended and that it ends its
+// streams on request, then does not take the request (an error that is not
+// the agent gone): the round's streams are ended here, as before markers
+// (endRound), and the stream is read for as long as it takes to end.
 type afterStopIncoming struct {
 	*runnerInstr
 	tc      *models.TestCase
 	release chan struct{}
 }
+
+func (afterStopIncoming) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	return models.AgentBacklog{Verdict: models.BacklogClear, EndMarkers: true}, nil
+}
+
+func (afterStopIncoming) EndRecordingStreams(context.Context, string) error {
+	return errors.New("the agent answered 500 Internal Server Error")
+}
+
+func (afterStopIncoming) StreamEnded(models.FrameStream) bool { return false }
 
 func (a afterStopIncoming) GetIncoming(ctx context.Context, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
 	out := make(chan *models.TestCase)

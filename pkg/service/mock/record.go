@@ -1731,6 +1731,23 @@ const (
 	quietTailUnconfirmedNext = "the recording is saved; replay the set to check it: under --on-miss fail (the default) a call it is missing fails the replay. Or run a keploy agent of this keploy's version, which says when it has handed over every mock it captured"
 )
 
+// quietRequestsUnconfirmed, with its next step, is said at ERROR when keploy
+// mock replay's request drain ended on the stream's quiet (tailQuiet): the
+// agent could not say what it still held, or could not end its request
+// stream after what it had sent, so a request it handed over later than the
+// quiet lasted is not in what the run compares, and would read as one the
+// app never made. Replay is the judge: such a run is not judged, and fails
+// as keploy's (requestsUnconfirmed).
+const (
+	quietRequestsUnconfirmed     = "replay failed: the keploy agent could not confirm it had handed over every request it captured before the run ended (it cannot say what it still holds, or cannot end its request stream after what it sent), so keploy stopped reading the stream once it had gone quiet: this run is not judged, since a request it handed over later would read as one the app never made"
+	quietRequestsUnconfirmedNext = "run a keploy agent of this keploy's version, which says when it has handed over every request it captured, then replay again"
+)
+
+// requestsUnconfirmed is why such a run is short of the requests the agent
+// captured (Replay's requestsShort): it names the agent's missing word and
+// the quiet keploy went by instead.
+var requestsUnconfirmed = "keploy could not confirm it read every request the app served: its agent gave no word that it had handed them all over, and keploy stopped reading after " + mockDrainQuiet.String() + " of quiet"
+
 // replayDrainWords are keploy mock replay's: it collects the requests the
 // agent captured, for the run's report. A run short of them is not judged
 // (Replay).

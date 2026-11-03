@@ -747,6 +747,98 @@ func TestReplayShortOfRequestsTheAgentCapturedFailsAsKeploys(t *testing.T) {
 	require.False(t, receipt.Isolated, "a run short of requests was certified isolated")
 }
 
+// quietIncoming is a replay's agent that hands over the app's request, then
+// holds its request stream open until this client ends it, as a live agent
+// does, and answers every look with says: it gives the drain no word that
+// ends it. It is asked to end no stream.
+type quietIncoming struct {
+	*runnerInstr
+	tc       *models.TestCase
+	says     models.AgentBacklog
+	endCalls *atomic.Int32
+}
+
+func (q quietIncoming) GetIncoming(ctx context.Context, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
+	out := make(chan *models.TestCase)
+	go func() {
+		defer close(out)
+		select {
+		case out <- q.tc:
+		case <-ctx.Done():
+			return
+		}
+		<-ctx.Done()
+	}()
+	return out, nil
+}
+
+func (q quietIncoming) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	return q.says, nil
+}
+
+func (q quietIncoming) EndRecordingStreams(context.Context, string) error {
+	q.endCalls.Add(1)
+	return nil
+}
+
+func (quietIncoming) StreamEnded(models.FrameStream) bool { return false }
+
+// A replay whose request drain ended on the stream's quiet -- its agent
+// cannot say what it still holds (it answers the question 404 or 501:
+// models.BacklogUnsupported), or said it holds nothing more but cannot end
+// its stream after what it sent -- cannot confirm it compares every request
+// the app served: one the agent was slower than the quiet to hand over would
+// read as a request the app never made. Replay is the judge, so it is not
+// judged: it fails as keploy's, said at ERROR with the quiet it went by, the
+// receipt does not certify it isolated, and no outcome is reported. It used
+// to be judged on what came before the quiet, in silence.
+func TestReplayADrainEndedOnQuietFailsAsKeploys(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		says models.AgentBacklog
+	}{
+		{"an agent that cannot tell", models.AgentBacklog{Verdict: models.BacklogUnsupported}},
+		{"clear, without end markers", models.AgentBacklog{Verdict: models.BacklogClear}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			instr := newRunnerInstr(t, sequentialMarks()...)
+			agent := quietIncoming{runnerInstr: instr, says: tc.says, endCalls: &atomic.Int32{},
+				tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))}
+			dir := t.TempDir()
+			mapDB := mapdb.New(zap.NewNop(), dir, "")
+			require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil, nil))
+			db := &memTestDB{existing: []*models.TestCase{httpCase("post-orders-1", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0)}}
+			cfg := instrConfig(instr.composeInstr, utils.Native, "./shop.test -test.v")
+			cfg.Path = dir
+			withRequests(cfg)
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			core, logs := observer.New(zapcore.DebugLevel)
+			svc := New(zap.New(core), agent, stubMockDB{}, mapDB, nil, nil, cfg)
+			svc.(TestDBSetter).SetTestDB(db)
+			reported := false
+			RegisterReplayOutcomeReporter(func(context.Context, ReplayOutcome) { reported = true })
+			t.Cleanup(func() { RegisterReplayOutcomeReporter(nil) })
+			err := svc.Replay(context.Background())
+			require.False(t, reported, "a run whose request drain ended on quiet was judged")
+			require.Error(t, err, "a run whose request drain ended on quiet was not keploy's failure")
+			require.Contains(t, err.Error(), requestsUnconfirmed)
+			require.Equal(t, utils.ExitKeployError, utils.ErrCode)
+			said := logs.FilterLevelExact(zapcore.ErrorLevel).FilterMessage(quietRequestsUnconfirmed).All()
+			require.Len(t, said, 1, "the drain's end on quiet was not said at ERROR: %v", logs.All())
+			fields := said[0].ContextMap()
+			require.Equal(t, "set", fields["mock-set"])
+			require.Equal(t, mockDrainQuiet, fields["quiet_for"])
+			require.Equal(t, quietRequestsUnconfirmedNext, fields["next_step"])
+			receipt, rerr := ReadReceipt(dir, "set")
+			require.NoError(t, rerr)
+			require.Equal(t, FailedByKeploy, receipt.FailedBy)
+			require.False(t, receipt.Isolated, "a run that may be short of requests was certified isolated")
+			require.Zero(t, agent.endCalls.Load(), "an agent that gave no word to end on was asked to end its streams")
+		})
+	}
+}
+
 // deadlineInstr is an agent that answers each epilogue read at once, and
 // remembers whether the read's context had a deadline.
 type deadlineInstr struct {

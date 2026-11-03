@@ -453,15 +453,31 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 	stoppedNow := false
 	// requestsShort says why the requests this run compares are short of
-	// what the agent captured, the user not having stopped it: keploy's own
-	// failure, said at ERROR where it was found, and the run's (below).
+	// what the agent captured, or cannot be confirmed not to be, the user
+	// not having stopped it: keploy's own failure, said at ERROR where it
+	// was found, and the run's (below).
 	requestsShort := ""
 	if actual != nil {
-		// Unconfirmed (the stream closed on its own) is not said: under
-		// compose this stream closes so on every run, and what it carries
-		// feeds the run's report, not a recording.
-		lost, _ := m.drainTrailingMocks(actual.done, time.Now(), false, func() (uint64, bool) { return uint64(actual.seen.Load()), false },
+		// A stream that closed on its own (tailStreamClosed) is not said:
+		// under compose this stream closes so on every run, and what it
+		// carries feeds the run's report, not a recording.
+		lost, tail := m.drainTrailingMocks(actual.done, time.Now(), false, func() (uint64, bool) { return uint64(actual.seen.Load()), false },
 			func() uint64 { return uint64(actual.seen.Load()) }, replayDrainWords, watchRound)
+		if tail == tailQuiet {
+			// The drain ended on the stream's quiet, the agent having given
+			// no word that it handed over every request it captured (it
+			// cannot say what it still holds, or cannot end its stream
+			// after what it sent): a request it was slower than the quiet
+			// to hand over is not in what this run compares, and would read
+			// as one the app never made. Replay is the judge, so a run that
+			// cannot confirm it holds every request is not judged: keploy's
+			// failure. Today's agent always says so; this is an older one,
+			// or one whose capture has no watermark.
+			m.logger.Error(quietRequestsUnconfirmed, zap.String("mock-set", name),
+				zap.Duration("quiet_for", mockDrainQuiet), zap.String("next_step", quietRequestsUnconfirmedNext))
+			utils.SetExitCodeOnce(utils.ExitKeployError)
+			requestsShort = requestsUnconfirmed
+		}
 		if !lost && watchRound.endsByMarkers() {
 			// The agent said it holds nothing more from before the run
 			// ended: the watch ends on its marker, every request the agent
