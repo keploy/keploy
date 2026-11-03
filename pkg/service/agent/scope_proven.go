@@ -508,7 +508,8 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	// says a mock was recorded while no test was open (the recorded test
 	// windows the table sends, SetRecordedWindows, end at each test's last
 	// recording, not at its scope's end). Whose tests list each, by key,
-	// bounds each test process's teardown.
+	// bounds each test process's teardown, and the table itself tells the
+	// run, and so the clock, of a test's recording on no clock.
 	if ps, ok := a.Proxy.(coreAgent.PoolNamesSetter); ok {
 		var names []string
 		for _, slice := range cp {
@@ -516,8 +517,9 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 		}
 		a.scopeMu.Lock()
 		owners := teardownOwners(a.scopeTable, cp)
+		tests := maps.Clone(a.scopeTable)
 		a.scopeMu.Unlock()
-		if err := ps.SetPoolNames(names, owners); err != nil {
+		if err := ps.SetPoolNames(names, owners, tests); err != nil {
 			return err
 		}
 	}
