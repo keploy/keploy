@@ -1683,6 +1683,7 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			At:            call.At,
 			Protocol:      call.Protocol,
 			ActualSummary: call.ActualSummary,
+			Operation:     call.Operation,
 			Destination:   call.Destination,
 			ClosestMock:   call.ClosestMock,
 			Diff:          call.Diff,
@@ -1892,7 +1893,7 @@ func printMismatchReport(r *models.MockMismatchReport) {
 	// only this human rendering suppresses it.
 	outOfScope := r.DestinationScope == models.DestinationScopeNotInComparedSet
 
-	heading := fmt.Sprintf("  Mock mismatch: [%s] %s", r.Protocol, r.ActualSummary)
+	heading := fmt.Sprintf("  Mock mismatch: [%s] %s", r.Protocol, models.WithHTTPOperation(r.ActualSummary, r.Operation))
 	if r.Destination != "" {
 		heading += fmt.Sprintf("  →  %s", r.Destination)
 	}

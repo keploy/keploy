@@ -42,19 +42,23 @@ func MergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // bind|use)", "<place> (echo <name>)" or "<path> (<offset>)" ("clock",
 // "clock + 30m"). Noise and variables are monotonic (what is on disk
 // stays), with two exceptions: a place that is a variable's is never noise,
-// so learned noise there is dropped (the learn step may have learned a
+// so learned noise there is dropped (at the leaf the replay reads the place
+// at, VariableLeafPath: a word's field; the learn step may have learned a
 // value as noise at the call that first sent it, before a later call showed
-// it flowed on); and a place that is a clock read is never noise, so noise
-// there, learned or on disk (an older keploy learned a clock read as
-// noise), is dropped too: the place stays compared. A clock read learned at
-// a place that holds one meets it (models.ClockOffset.Meet), so it holds
-// only the offsets both do, and is added when that changed it; one that
-// shares no offset with it is Empty and refuses every value there. A clock
-// read at a variable's place stays: the replay checks both. A value can be
-// the application's clock and flow on to a later call (an insert's
-// createdAt that a read returns), so dropping either check lets a wrong
-// value pass. The Mongo replay checks both; the HTTP replay refuses such a
-// place (it cannot hold one value to both yet), which fails closed.
+// it flowed on), but for a cookie read by name, whose value alone places it
+// (noiseDroppedAt): the replay compares that value whatever the noise, and
+// the noise stays for the rest of the header; and a place that is a clock
+// read is never noise, so noise there, learned or on disk (an older keploy
+// learned a clock read as noise), is dropped too: the place stays compared.
+// A clock read learned at a place that holds one meets it
+// (models.ClockOffset.Meet), so it holds only the offsets both do, and is
+// added when that changed it; one that shares no offset with it is Empty
+// and refuses every value there. A clock read at a variable's place stays:
+// the replay checks both. A value can be the application's clock and flow
+// on to a later call (an insert's createdAt that a read returns), so
+// dropping either check lets a wrong value pass. The Mongo replay checks
+// both; the HTTP replay refuses such a place (it cannot hold one value to
+// both yet), which fails closed.
 func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVariables) []string {
 	var added []string
 	if !provenswitch.On() {
@@ -111,7 +115,7 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 	varPlaces := map[string]bool{}
 	for _, v := range mock.Spec.Variables {
 		for _, place := range append([]string{v.Bind}, v.Use...) {
-			if p, ok := LeafPath(place); ok {
+			if p, ok := noiseDroppedAt(mock, place); ok {
 				varPlaces[p] = true
 			}
 		}

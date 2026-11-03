@@ -313,13 +313,13 @@ func TestMountsFromNamesADeclaredAnonymousVolume(t *testing.T) {
 }
 
 // The CA bundle reaches the app the same way the command path splices
-// `-v keploy-tls-certs:/tmp/keploy-tls:ro` in.
+// `-v keploy-tls-certs-<run id>:/tmp/keploy-tls:ro` in: the run's own volume.
 func TestReplicaConfigMountsTheKeployCABundle(t *testing.T) {
 	_, hostCfg := replicaConfig(container.InspectResponse{
 		Config: &container.Config{}, ContainerJSONBase: &container.ContainerJSONBase{HostConfig: &container.HostConfig{}},
-	}, "agent")
+	}, "keploy-v3-0a1b2c3d4e5f6071")
 	for _, m := range hostCfg.Mounts {
-		if m.Source == docker.KeployTLSVolumeName {
+		if m.Source == "keploy-tls-certs-0a1b2c3d4e5f6071" {
 			if m.Target != docker.KeployTLSMountPath || !m.ReadOnly {
 				t.Fatalf("CA bundle mounted wrong: %+v", m)
 			}

@@ -100,6 +100,7 @@ func DocToJSON(doc *NetworkTrafficDoc) (*NetworkTrafficDocJSON, error) {
 		Start:        doc.Start,
 		Variables:    doc.Variables,
 		Clocks:       doc.Clocks,
+		Real:         doc.Real,
 		Origin:       doc.Origin,
 	}, nil
 }
@@ -169,6 +170,7 @@ func jsonDocToYamlDoc(jsonDoc *NetworkTrafficDocJSON) (*NetworkTrafficDoc, error
 		Start:        jsonDoc.Start,
 		Variables:    jsonDoc.Variables,
 		Clocks:       jsonDoc.Clocks,
+		Real:         jsonDoc.Real,
 		Origin:       jsonDoc.Origin,
 	}
 

@@ -61,6 +61,10 @@ const (
 	// command ran (its PID map refused it), so that process's calls went to the
 	// real dependency, neither mocked nor counted (models.PIDMapRefusals).
 	FailedByCaptureIncomplete = "capture_incomplete"
+	// FailedByBeginRefused: keploy refused a test at its begin
+	// (models.ScopeWindow.BeginRefused), and the test fails whatever its
+	// harness did next.
+	FailedByBeginRefused = "begin_refused"
 )
 
 // Receipt is what one `keploy mock replay` proved.

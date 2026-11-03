@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -678,10 +679,17 @@ func holePathPlaces(shape string, places []string) string {
 }
 
 // pathPlaceIndex is the segment a place "url.path[<n>]" names, read as a
-// variable's place is read (a number from 0, without leading zeros); a place
-// past url.path[9999] is ignored.
+// variable's place is read (a number from 0, without leading zeros), or a
+// word of it ("url.path[<n>]#<w>", after any "|<step>": a word address, as
+// variables.ParseAddress reads one); a place past url.path[9999] is ignored.
 func pathPlaceIndex(place string) (int, bool) {
 	const prefix = "url.path["
+	if i := strings.IndexByte(place, ']'); i >= 0 && i+1 < len(place) {
+		if !isWordSuffix(place[i+1:]) {
+			return 0, false
+		}
+		place = place[:i+1]
+	}
 	if !strings.HasPrefix(place, prefix) || !strings.HasSuffix(place, "]") {
 		return 0, false
 	}
@@ -697,6 +705,41 @@ func pathPlaceIndex(place string) (int, bool) {
 		n = n*10 + int(digits[i]-'0')
 	}
 	return n, true
+}
+
+// isWordSuffix reports whether s, what follows a place, is a word
+// address's: steps ("|pct", "|json", "|b64", "|b64url", "|jwt.<claim>",
+// "|cookie.<name>", a '|', '#' or '\' in a name escaped by '\'), then at
+// most one word ("#<n>", a number from 0 without leading zeros), as
+// variables.ParseAddress reads them.
+func isWordSuffix(s string) bool {
+	for strings.HasPrefix(s, "|") {
+		i := 1
+		for ; i < len(s) && s[i] != '|' && s[i] != '#'; i++ {
+			if s[i] == '\\' {
+				i++
+			}
+		}
+		i = min(i, len(s))
+		// A name's escapes leave its step's kind and its being empty as
+		// they are: the raw name is read.
+		switch st := s[1:i]; {
+		case st == "pct" || st == "json" || st == "b64" || st == "b64url":
+		case len(st) > len("jwt.") && strings.HasPrefix(st, "jwt."):
+		case len(st) > len("cookie.") && strings.HasPrefix(st, "cookie."):
+		default:
+			return false
+		}
+		s = s[i:]
+	}
+	if s == "" {
+		return true
+	}
+	// A number prints as it is written; Atoi's 0 or bound on an error
+	// prints as no such text.
+	w, ok := strings.CutPrefix(s, "#")
+	n, _ := strconv.Atoi(w)
+	return ok && n >= 0 && strconv.Itoa(n) == w
 }
 
 func isASCIILetter(c byte) bool { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') }

@@ -52,6 +52,11 @@ type IngressProxyManager struct {
 	// listensAt is where the socket table found the app listening, by the
 	// address that refused (appdial.go), guarded by waitsMu.
 	listensAt map[string]string
+	// pollControl is the Control of the dialer a wait's poll dials the app
+	// with (pollApp): nil but in tests, which hold a poll's dial where its
+	// context no longer stops it, between the dialer's look at the context
+	// and its connect.
+	pollControl func(network, address string, c syscall.RawConn) error
 
 	mu       sync.Mutex
 	active   map[uint16]proxyStop

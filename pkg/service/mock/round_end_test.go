@@ -772,6 +772,37 @@ func (d *deadlineInstr) DrainCapturedMocks(ctx context.Context) ([]*models.Mock,
 	return nil, nil
 }
 
+func (d *deadlineInstr) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error) {
+	d.saw("windows", ctx)
+	return nil, nil
+}
+
+// A replay's per-test windows carry the begins keploy refused, which fail
+// the run whatever the switch, and a failed read fails it: so the read has
+// no deadline either way (an agent slow to answer on a loaded host is no
+// failed read; its answer, the connection's close or the run's context ends
+// it). A record's, with the switch off, is a best-effort epilogue read and
+// keeps its bound (agentEpilogueTimeout).
+func TestAReplaysWindowsReadHasNoDeadline(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		t.Run(map[bool]string{true: "switch on", false: "switch off"}[on], func(t *testing.T) {
+			if on {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			inst := &deadlineInstr{}
+			m := &mockService{logger: zap.NewNop(), instrumentation: inst, config: &config.Config{}}
+			_, err := m.replayWindows(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, map[string]bool{"windows": false}, inst.deadlines, "the replay's read had a deadline")
+			inst.deadlines = nil
+			m.agentWindows(context.Background())
+			require.Equal(t, map[string]bool{"windows": true}, inst.deadlines, "the record's best-effort read had no bound")
+		})
+	}
+}
+
 // Under the proven switch replay's epilogue reads -- what the agent served
 // and missed, and what it captured on miss -- have no deadline (design rule
 // 15): the agent's answer, the connection's close or the run's context ends

@@ -88,7 +88,11 @@ import (
 // (any one), so the app almost never sees a connection keploy opened for
 // itself: only when that call's context ends as the connection is handed to
 // it, and keploy then closes it unused (leaveWait). The other calls dial
-// their own, at the address the wait found.
+// their own, at the address the wait found. The last call to leave a wait
+// returns only once its poll has stopped: the end of the wait's context
+// cannot stop a dial already past the dialer's look at it, and that dial's
+// connect would reach an app that listens just after, for a call that has
+// ended.
 
 // errClientLeft is a dial's end for a call whose client went while the call
 // waited for the app to listen: nothing was sent on to the app.
@@ -132,14 +136,15 @@ func (e *appUnreachableError) Error() string {
 }
 
 // appWait is the one wait of every call that found addr refusing while the
-// recording was not stopping. Its fields but ctx, cancel and tableErr are
-// guarded by the manager's waitsMu; tableErr is the poll's own.
+// recording was not stopping. Its fields but ctx, cancel, polled and
+// tableErr are guarded by the manager's waitsMu; tableErr is the poll's own.
 type appWait struct {
 	addr     string
 	callers  map[*appWaiter]struct{}
 	ctx      context.Context // ends when the wait does, or its last caller leaves
 	cancel   context.CancelFunc
-	tableErr bool // the poll could not read the socket table, and said so
+	polled   chan struct{} // closed once the poll (pollApp) has returned
+	tableErr bool          // the poll could not read the socket table, and said so
 }
 
 // appWaiter is one call's place in an appWait.
@@ -333,7 +338,7 @@ func (pm *IngressProxyManager) awaitListener(ctx context.Context, addr string, c
 	}
 	wait := pm.waits[addr]
 	if wait == nil {
-		wait = &appWait{addr: addr, callers: make(map[*appWaiter]struct{})}
+		wait = &appWait{addr: addr, callers: make(map[*appWaiter]struct{}), polled: make(chan struct{})}
 		wait.ctx, wait.cancel = context.WithCancel(context.Background())
 		pm.waits[addr] = wait
 		go pm.pollApp(wait)
@@ -351,8 +356,10 @@ func (pm *IngressProxyManager) awaitListener(ctx context.Context, addr string, c
 }
 
 // leaveWait takes w, whose call's context has ended, out of wait: the last
-// caller to leave ends the wait. When the wait ended for w as its context
-// did, a connection the poll handed to it goes to no one, and is closed.
+// caller to leave ends the wait, and returns once its poll has stopped, so
+// that no dial of the poll's reaches the app after the call has ended. When
+// the wait ended for w as its context did, a connection the poll handed to
+// it goes to no one, and is closed.
 func (pm *IngressProxyManager) leaveWait(wait *appWait, w *appWaiter) {
 	pm.waitsMu.Lock()
 	if w.ended {
@@ -363,10 +370,19 @@ func (pm *IngressProxyManager) leaveWait(wait *appWait, w *appWaiter) {
 		return
 	}
 	delete(wait.callers, w)
-	if len(wait.callers) == 0 {
+	last := len(wait.callers) == 0
+	if last {
 		pm.dropWaitLocked(wait)
 	}
 	pm.waitsMu.Unlock()
+	if last {
+		// The poll's dial may be past the dialer's look at the context the
+		// drop just ended, its connect still to come. The poll takes waitsMu
+		// only after its look (probeApp), and stops there: what is left of
+		// it is that dial's connect, which the ended context does not let
+		// wait, and at most one read of the socket table.
+		<-wait.polled
+	}
 }
 
 // dropWaitLocked ends wait, which no call waits in any more: a call that
@@ -389,9 +405,10 @@ func endWaiterLocked(wait *appWait, w *appWaiter, conn net.Conn, target string, 
 // pollApp looks for the app's listener (probeApp) until the app listens,
 // the recording begins to stop, the socket table says the app listens only
 // where no connection reaches, or no call waits any more, and checks each
-// waiting call's client between looks.
+// waiting call's client between looks. It closes wait.polled as it returns.
 func (pm *IngressProxyManager) pollApp(wait *appWait) {
-	var d net.Dialer
+	defer close(wait.polled)
+	d := net.Dialer{Control: pm.pollControl}
 	tick := time.NewTicker(ingressTargetPollInterval)
 	defer tick.Stop()
 	for {

@@ -211,6 +211,52 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/docker_dns/docker-dns-linux.sh"
 
+  # Two `keploy record -c "docker run ..."` runs at once on one Docker host
+  # each keep their own CA. Every run's agent wrote its CA to one volume,
+  # keploy-tls-certs, so the second run's CA replaced the first's while the
+  # first ran, and the first run's app then refused its own agent's
+  # certificates: its HTTPS calls failed and went unrecorded. Each run now has
+  # its own volume, removed once its agent's container is gone; a run's start
+  # removes those earlier runs left, and keeps a compose project's and an
+  # older keploy's. Ordered by events (A calls, B calls, A calls again). Only
+  # the PR's binary and image: the published ones are what this guards
+  # against.
+  two_runs_docker:
+    # A healthy run takes about a minute; this bounds a hung step.
+    timeout-minutes: 20
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    name: two docker runs on one host (record_build, image_build)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run two docker run recordings at once
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          LANE_WORK: ${{ runner.temp }}/two-runs-docker
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/docker-run-two-runs-linux.sh"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: two-runs-docker-logs
+          path: ${{ runner.temp }}/two-runs-docker/
+          if-no-files-found: warn
+          retention-days: 7
+
   # Replay network isolation. A probe app tries every way out of a replay
   # (TCP, a port-only bypass port, a double-forked child, TCP fast open, an
   # IMDS stand-in, UDP, ICMP, DNS, IPv6) at a sink in a netns of its own that

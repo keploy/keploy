@@ -504,6 +504,12 @@ type UnmatchedCall struct {
 	Protocol      string `json:"protocol" yaml:"protocol"`
 	ActualSummary string `json:"actual_summary,omitempty" yaml:"actual_summary,omitempty"` // e.g. "POST /comments"
 	Destination   string `json:"destination,omitempty" yaml:"destination,omitempty"`       // outgoing call's destination/domain (HTTP Host, or host:port) — which upstream missed
+	// Operation mirrors MockMismatchReport.Operation: the label of the
+	// operation an HTTP call carries ("query GetAppLabels"), "" when none. It
+	// names no value (HTTPOperationOf drops a label that could), so a
+	// sanitized call keeps it. A line for a person names the call with it
+	// (Named); ActualSummary never holds it, so no shape or identity does.
+	Operation string `json:"operation,omitempty" yaml:"operation,omitempty"`
 	// LiveDestination is, under the proven switch, the address the call was
 	// made to when Destination names it as the recording does instead (the
 	// mocks' destAddr: 127.0.0.1:27017 where the app reached [::1]:27017,

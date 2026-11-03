@@ -109,10 +109,10 @@ func TestAStartIsJudgedByTheAgentsOwnCountOfBeatsWithoutProgress(t *testing.T) {
 func TestAStalledStartSaysWhereItWas(t *testing.T) {
 	b := newBootLooks(t)
 	p := utils.BootProgress{Beat: 41, Seq: 9, Quiet: bootStallChecks, CountsQuiet: true, Step: "the proxy listens",
-		Stages: []utils.BootStage{{Name: "the UDP DNS server's bind", State: "D", Wait: "rtnl_lock"}, {Name: "the proxy's start", State: "S"}},
+		Stages: []utils.BootStage{{Name: "the proxy listener's start", State: "D", Wait: "rtnl_lock"}, {Name: "the proxy's start", State: "S"}},
 		Errors: 1, Error: "failed to attach the udp4 sendmsg hook"}
 	v, why := b.look(0, p, true, true)
-	want := "its start took no step across 30 of its beats, with no work in progress making progress; its last step: the proxy listens; in progress: the UDP DNS server's bind (its thread in an uninterruptible wait, in rtnl_lock), the proxy's start (its thread sleeping) (it logged 1 ERROR(s) while starting, the last: failed to attach the udp4 sendmsg hook)"
+	want := "its start took no step across 30 of its beats, with no work in progress making progress; its last step: the proxy listens; in progress: the proxy listener's start (its thread in an uninterruptible wait, in rtnl_lock), the proxy's start (its thread sleeping) (it logged 1 ERROR(s) while starting, the last: failed to attach the udp4 sendmsg hook)"
 	if v != bootStalled || why != want {
 		t.Fatalf("%v\n got: %s\nwant: %s", v, why, want)
 	}

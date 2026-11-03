@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -26,7 +27,7 @@ import (
 // step gives; with no #n the address names that text whole. A plain place
 // (no step, no word) is written as Place.String writes it, so a place
 // written before word addresses prints the same (and reads the same through
-// Parse; ParseAddress states its limit).
+// Parse and ReadPlace; ParseAddress states its limit).
 //
 // The steps:
 //
@@ -77,8 +78,8 @@ type Address struct {
 // ("url.query.page#2") reads here as a word of the shorter name, and one
 // that holds '|' and a step's name ("url.query.a|json", "body.a|b64") reads
 // here as the shorter name and that step, where Parse reads the whole name
-// in both. A field written before word addresses is read with Parse, never
-// with ParseAddress.
+// in both. A place of a mock's variables block is read with ReadPlace,
+// which reads such a name whole where the recording holds it.
 func ParseAddress(s string) (Address, error) {
 	a, err := parseAddress(s)
 	if err != nil {
@@ -88,6 +89,49 @@ func ParseAddress(s string) (Address, error) {
 		return Address{Word: -1}, err
 	}
 	return a, nil
+}
+
+// ReadPlace reads s, a place of a mock's variables block (a bind, a use or
+// an answer of models.MockVariable), as each protocol's replay reads one: as
+// Parse reads it where the recording holds a value there (holds), so a place
+// written before word addresses reads as it did, a name that ends in
+// #<digits> or holds '|' included; else as ParseAddress reads it, a word or
+// a decode step of a shorter place. Another protocol's learn step writes a
+// word address there: a Mongo call that copies one word of a field an HTTP
+// call sent binds its variable at that word of the HTTP recording. A place
+// the recording holds neither way reads as ParseAddress reads it, and its
+// reader finds no value there. A place with no '#' and no '|' reads one way
+// only, and holds is not asked.
+func ReadPlace(s string, holds func(Place) bool) (Address, error) {
+	if !strings.ContainsAny(s, "#|") {
+		p, err := Parse(s)
+		if err != nil {
+			return Address{}, err
+		}
+		return Address{Place: p, Word: -1}, nil
+	}
+	if p, err := Parse(s); err == nil && holds(p) {
+		return Address{Place: p, Word: -1}, nil
+	}
+	return ParseAddress(s)
+}
+
+// Whole reports whether a names its place's value whole: no step, no word.
+func (a Address) Whole() bool { return a.Word < 0 && len(a.Steps) == 0 }
+
+// Within is the address of the text that places a's word: the value of the
+// cookie a's first step reads by name, which no byte of the place outside
+// that value moves; else a's place whole. A replay holds that text to the
+// recording, a's word put back, whatever the noise over the place: noise
+// is not applied there, and applies to the rest of the place only. A JWT
+// claim is read by name too, but its text is the place whole: keploy
+// cannot write a claim back in a request, so a request place that reads
+// one is refused before it is compared.
+func (a Address) Within() Address {
+	if len(a.Steps) > 0 && strings.HasPrefix(string(a.Steps[0]), cookiePrefix) {
+		return Address{Place: a.Place, Steps: a.Steps[:1:1], Word: -1}
+	}
+	return Address{Place: a.Place, Word: -1}
 }
 
 func parseAddress(s string) (Address, error) {
@@ -239,6 +283,142 @@ func wordAt(text string, n int) (string, bool) {
 	return text[ws[n][0]:ws[n][1]], true
 }
 
+// Overlaps reports whether a word written at a or at b, two addresses of
+// one value leaf, would change what the other names. Their steps in
+// common are decoded first, so two words of one decoded text are two
+// places. Under a step that re-encodes its text (b64, b64url, a JSON
+// string, a JWT) a word stands in the whole text it decodes from; pct and
+// cookie steps keep the bytes around it. Two words with no byte in common
+// still overlap where one would rewrite what the other's steps read:
+// under a pct step, a word holding a byte of an escape (written, the
+// escape decodes to something else, or a decoded word's escapes become
+// letters); under a cookie step, a word in a cookie's name, or a cookie
+// read under another step. A write that may change how many words its
+// span holds (a value whole under a step, as a cookie's value, or one a
+// step re-encodes) moves every word after its start: it overlaps each of
+// them but one read through another cookie, by name. An empty text (a
+// cookie's empty value, whole) stands at its offset: it overlaps what
+// holds or touches that offset. Where leaf does not hold both, it reports
+// true: the two cannot be told apart.
+func (a Address) Overlaps(b Address, leaf string) bool {
+	sa, sb := a.Steps, b.Steps
+	for len(sa) > 0 && len(sb) > 0 && sa[0] == sb[0] {
+		var ok bool
+		if leaf, ok = Decode(sa[0], leaf); !ok {
+			return true
+		}
+		sa, sb = sa[1:], sb[1:]
+	}
+	alo, ahi, aok := wordSpan(leaf, sa, a.Word)
+	blo, bhi, bok := wordSpan(leaf, sb, b.Word)
+	if !aok || !bok {
+		return true
+	}
+	if (slices.Contains(sa, StepPct) || slices.Contains(sb, StepPct)) && (holdsEscape(leaf, alo, ahi) || holdsEscape(leaf, blo, bhi)) {
+		return true
+	}
+	if !keepsCookies(leaf, sa, blo, bhi) || !keepsCookies(leaf, sb, alo, ahi) {
+		return true
+	}
+	if moves(sa, a.Word, sb) && bhi > alo || moves(sb, b.Word, sa) && ahi > blo {
+		return true
+	}
+	if alo == ahi || blo == bhi {
+		return max(alo, blo) <= min(ahi, bhi)
+	}
+	return max(alo, blo) < min(ahi, bhi)
+}
+
+// moves reports whether a write at the word n of a text decoded by steps
+// may change how many words the text holds, so that the words after it
+// move, as the other address, read through other, names them: a value
+// whole under a step (a cookie's value may be written with any number of
+// words), or a word under a step that re-encodes its text. A pct or cookie
+// step writes a word for a word. A word read through another cookie is
+// read by its name, which no write in this cookie's value moves.
+func moves(steps []Step, n int, other []Step) bool {
+	if len(other) > 0 && strings.HasPrefix(string(other[0]), cookiePrefix) {
+		return false
+	}
+	return len(steps) > 0 && (n < 0 || slices.ContainsFunc(steps, reencodes))
+}
+
+// reencodes reports whether st writes its text anew (b64, b64url, a JSON
+// string or number, a JWT claim), not a word for a word.
+func reencodes(st Step) bool {
+	return st != StepPct && !strings.HasPrefix(string(st), cookiePrefix)
+}
+
+// holdsEscape reports whether [lo, hi) of text holds a byte of a "%XX"
+// escape.
+func holdsEscape(text string, lo, hi int) bool {
+	return strings.IndexByte(text[max(lo-2, 0):hi], '%') >= 0
+}
+
+// keepsCookies reports whether a word written at [lo, hi) of text keeps
+// the cookies steps read: a word written in a cookie's name renames it,
+// and a cookie read under another step is not followed. A word for a word
+// anywhere else keeps every name.
+func keepsCookies(text string, steps []Step, lo, hi int) bool {
+	for i, st := range steps {
+		if strings.HasPrefix(string(st), cookiePrefix) && (i > 0 || inCookieName(text, lo, hi)) {
+			return false
+		}
+	}
+	return true
+}
+
+// inCookieName reports whether [lo, hi) of text holds a byte of a cookie's
+// name, the pairs read as cookieValue reads them.
+func inCookieName(text string, lo, hi int) bool {
+	for start := 0; start <= len(text); {
+		end := strings.IndexByte(text[start:], ';')
+		if end < 0 {
+			end = len(text)
+		} else {
+			end += start
+		}
+		if name, _, found := strings.Cut(text[start:end], "="); found && lo < start+len(name) && start < hi {
+			return true
+		}
+		start = end + 1
+	}
+	return false
+}
+
+// wordSpan is [lo, hi), the bytes of text that the word n of text decoded
+// by steps is written in (WordOf).
+func wordSpan(text string, steps []Step, n int) (lo, hi int, ok bool) {
+	if len(steps) == 0 {
+		if n < 0 {
+			return 0, len(text), true
+		}
+		ws := Words(text)
+		if n >= len(ws) {
+			return 0, 0, false
+		}
+		return ws[n][0], ws[n][1], true
+	}
+	inner, ok := Decode(steps[0], text)
+	if !ok {
+		return 0, 0, false
+	}
+	if lo, hi, ok = wordSpan(inner, steps[1:], n); !ok {
+		return 0, 0, false
+	}
+	switch st := steps[0]; {
+	case st == StepPct:
+		at := pctOffsets(text)
+		return at[lo], at[hi], true
+	case st == StepJSON && text == inner:
+		return lo, hi, true // a number: its text is its value
+	case strings.HasPrefix(string(st), cookiePrefix):
+		at, _, _ := cookieValue(text, string(st[len(cookiePrefix):]))
+		return at + lo, at + hi, true
+	}
+	return 0, len(text), true
+}
+
 // ReplaceWord is leaf with the word a names set to v, every step encoded
 // back the way leaf was, every other byte kept where a step allows (pct
 // and cookie keep them; b64 and json re-encode the text, where leaf is
@@ -258,6 +438,67 @@ func (a Address) ReplaceWord(leaf, v string) (string, bool) {
 		return "", false
 	}
 	return out, true
+}
+
+// WordPut is a value written at a word of one text: the text holds From
+// at At, and To takes its place.
+type WordPut struct {
+	At       Address
+	From, To string
+}
+
+// PutWords is text with each put's To written at its address, in turn, and
+// fails closed where a write would move another put's word. text must hold
+// each put's From at its address. After each write, every put written
+// before still reads its To and every put after still reads its From, each
+// at its own address; and any two puts can each be written first on text,
+// the other then written after it, and give the same text in both orders,
+// so a word the write moved that happens to read the same is refused too,
+// and so is a put that can be written only after another. Where it
+// refuses, i is the put that cannot be written or whose write moves
+// another, and j is the put it moves, or -1.
+func PutWords(text string, puts []WordPut) (out string, i, j int, ok bool) {
+	for j, p := range puts {
+		if got, ok := p.At.WordOf(text); !ok || got != p.From {
+			return "", j, -1, false
+		}
+	}
+	out = text
+	for i, p := range puts {
+		next, ok := p.At.ReplaceWord(out, p.To)
+		if !ok {
+			return "", i, -1, false
+		}
+		for j, q := range puts {
+			want := q.From
+			if j < i {
+				want = q.To
+			}
+			if got, ok := q.At.WordOf(next); j != i && (!ok || got != want) {
+				return "", i, j, false
+			}
+		}
+		out = next
+	}
+	for i := range puts {
+		for j := i + 1; j < len(puts); j++ {
+			ij, ok1 := writeBoth(text, puts[i], puts[j])
+			ji, ok2 := writeBoth(text, puts[j], puts[i])
+			if !ok1 || !ok2 || ij != ji {
+				return "", i, j, false
+			}
+		}
+	}
+	return out, -1, -1, true
+}
+
+// writeBoth is text with p written, then q.
+func writeBoth(text string, p, q WordPut) (string, bool) {
+	out, ok := p.At.ReplaceWord(text, p.To)
+	if !ok {
+		return "", false
+	}
+	return q.At.ReplaceWord(out, q.To)
 }
 
 func replaceIn(text string, steps []Step, n int, v string) (string, bool) {

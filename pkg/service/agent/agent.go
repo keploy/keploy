@@ -199,8 +199,11 @@ type Agent struct {
 	testGiven    map[string][]models.GivenValue // replay, proven switch: test ID -> the values it gave when recorded; replaced with the scope table (SetScopeGiven)
 	testPool     []string                       // keploy test, proven switch: the set's pool, served between test cases (exact_proven.go)
 	testWorker   []models.MockEntry             // keploy test, proven switch: the set's worker scope, each mock with its place (exact_proven.go)
-	testBegun    map[string]bool                // keploy test, proven switch: the set's test cases begun since its staging (exact_proven.go)
-	testBegunAt  map[string]int                 // keploy test, proven switch: each begun test case's place in the order they began (exact_proven.go)
+	testReached  map[string]bool                // keploy test, proven switch: the set's test cases the run has reached since its staging, begun or passed over (exact_proven.go reachTest)
+	testReachAt  map[string]int                 // keploy test, proven switch: each reached test case's place in the order the run reached them (exact_proven.go)
+	testOrder    []string                       // keploy test, proven switch: the set's test cases in the order its run takes them up (models.ExactServing.Order)
+	testOrderAt  map[string]int                 // keploy test, proven switch: each test case's index in testOrder
+	testPassed   int                            // keploy test, proven switch: how many of testOrder, from its start, the run has passed (reachTest)
 	testBg       *testBackground                // keploy test, proven switch: the set's background under the background rules, nil for today's (exact_proven.go)
 	loadedMocks  int                            // replay: count of mocks stored, for /agent/mock/stats
 	// replay: the tests allowed to run (SetScopeGate); nil = every test runs.
@@ -676,8 +679,8 @@ func (a *Agent) resetScopeState() {
 	a.testReal = nil
 	// keploy test's pool belongs to the set that staged it.
 	a.testPool = nil
-	a.testWorker, a.testBegun = nil, nil
-	a.testBegunAt, a.testBg = nil, nil
+	a.testWorker, a.testBg = nil, nil
+	a.forgetReached()
 	a.scopeMu.Unlock()
 }
 
@@ -894,6 +897,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	// proxy's listener is marked for the hooks' count of the connections
 	// waiting for it (proxyconns.go).
 	a.markProxyListener()
+	a.letProxyPortsMove()
 
 	// The proxy's start can take long without a step: its CA's install runs
 	// keytool, update-ca-certificates (whose Java hook starts a JVM) and
@@ -928,6 +932,35 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	a.proxyStarted = true
 	a.latchCounting()
 	return nil
+}
+
+// letProxyPortsMove lets the proxy and its DNS server move off a port another
+// socket holds when they bind it (proxy.SetPortMover), where the hooks can be
+// told where they then listen (coreAgent.ProxyPortsSetter) and redirect to the
+// proxy's own port (no coreAgent.EbpfProxyPortOverride), outside Docker. The
+// move is told to the hooks and kept in the agent's config. Elsewhere a taken
+// port fails the start, naming what holds it: in Docker the CLI publishes the
+// agent container's ports as the ones it handed the agent, and the container
+// has a network namespace of its own, which no other keploy run binds in.
+func (a *Agent) letProxyPortsMove() {
+	setter, ok := a.Hooks.(coreAgent.ProxyPortsSetter)
+	if !ok || coreAgent.EbpfProxyPortOverride != 0 || a.config.Agent.IsDocker {
+		return
+	}
+	mover, ok := a.Proxy.(interface {
+		SetPortMover(func(proxyPort, dnsPort uint32) error)
+	})
+	if !ok {
+		return
+	}
+	mover.SetPortMover(func(proxyPort, dnsPort uint32) error {
+		if err := setter.SetProxyPorts(proxyPort, dnsPort); err != nil {
+			return err
+		}
+		a.config.Agent.ProxyPort, a.config.Agent.DnsPort = proxyPort, dnsPort
+		a.config.ProxyPort, a.config.DNSPort = proxyPort, dnsPort
+		return nil
+	})
 }
 
 func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {

@@ -84,6 +84,8 @@ type replayCase struct {
 	// which the mock store refuses with insertErr when it is set.
 	captured  []*models.Mock
 	insertErr error
+	// windows: what each test did, as the agent tells it.
+	windows []models.ScopeWindow
 }
 
 // replayIn runs one replay against a real keploy/ directory in a temp repo
@@ -123,6 +125,7 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	base.mockErrors = c.mockErrs
 	base.mockErrorsErr = c.mockErrErr
 	base.windowsErr = c.windowsErr
+	base.windows = c.windows
 	if !c.noneServed {
 		base.consumedMocks = []models.MockState{{Name: "mock-0"}}
 	}

@@ -956,8 +956,12 @@ func runnerPassed(appErr models.AppError) bool {
 	return false
 }
 
-// agentWindows reads the windows the runner itself posted to the agent's scope API; none is not an error.
+// agentWindows reads the windows the runner itself posted to the agent's
+// scope API, for a record with the proven switch off: a best-effort epilogue
+// read, bounded by agentEpilogueTimeout, and none is not an error.
 func (m *mockService) agentWindows(ctx context.Context) []models.ScopeWindow {
+	ctx, cancel := context.WithTimeout(ctx, agentEpilogueTimeout)
+	defer cancel()
 	windows, err := m.readWindows(ctx)
 	if err != nil {
 		m.logger.Debug("failed to read per-test scope windows from the agent", zap.Error(err))
@@ -968,9 +972,11 @@ func (m *mockService) agentWindows(ctx context.Context) []models.ScopeWindow {
 
 // readWindows reads the run's per-test windows from the agent. Under the
 // proven switch they are what each test did, which judging and keploy's
-// verdict rest on: the read has no deadline (the agent closes a test whose
-// process went away before it answers; its answer, or the connection's
-// close, ends the wait), and a failed read is an error, never "no tests".
+// verdict rest on, and a replay's fails a test keploy refused at its begin
+// whatever the switch: the read has no deadline (the agent closes a test
+// whose process went away before it answers; its answer, or the
+// connection's close, ends the wait), and a failed read is an error, never
+// "no tests".
 func (m *mockService) readWindows(ctx context.Context) ([]models.ScopeWindow, error) {
 	reader, ok := m.instrumentation.(ScopeReader)
 	if !ok {
@@ -978,11 +984,6 @@ func (m *mockService) readWindows(ctx context.Context) ([]models.ScopeWindow, er
 			return nil, errors.New("this keploy cannot read what each test did from its agent")
 		}
 		return nil, nil
-	}
-	if !provenswitch.On() {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, agentEpilogueTimeout)
-		defer cancel()
 	}
 	all, err := reader.GetScopeWindows(ctx)
 	if err != nil {
