@@ -565,7 +565,7 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 		p := conflict[0]
 		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalConflict,
 			cmp.Or(p.why, strconv.Quote(w.Rec)+" stood whole at "+p.name+"; round F gave "+gaveAt(p, w.Live)+" there and the value did not follow"), names(conflict),
-			Edit{Kind: EditFixApp}, dc.fieldNoise(path), Edit{Kind: EditGive, Name: lastSegment(path)})
+			Edit{Kind: EditFixApp}, dc.fieldNoise(path), Edit{Kind: EditGive, Name: givenName(path)})
 	case len(unknown) > 0:
 		p := unknown[0]
 		why := cmp.Or(p.why, "both values hold it, or only part of a word")
@@ -1147,7 +1147,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		p := conflict[0]
 		return dc.refuse(path, at, n, r, l, RefusalConflict,
 			strconv.Quote(r)+" stood whole at "+p.name+"; round F gave "+gaveAt(p, l)+" there and the value did not follow", names(conflict),
-			Edit{Kind: EditFixApp}, dc.fieldNoise(path), Edit{Kind: EditGive, Name: lastSegment(path)})
+			Edit{Kind: EditFixApp}, dc.fieldNoise(path), Edit{Kind: EditGive, Name: givenName(path)})
 	}
 
 	// 1. Pick: (i) round F's moment stands at an answer or the test case's
@@ -1905,8 +1905,13 @@ func scopeName(p evPlace) string {
 	return cmp.Or(p.scope, "an earlier test or between tests")
 }
 
-// lastSegment is path's last key, a given's name.
-func lastSegment(path string) string {
+// givenName is the name a give edit gives the value at path: a part of the
+// url by its whole path (url.path.2, url.query.page), as a path segment's
+// index alone names nothing a person reads; any other field by its last key.
+func givenName(path string) string {
+	if strings.HasPrefix(path, "url.") {
+		return path
+	}
 	if i := strings.LastIndexAny(path, ".]"); i >= 0 && i+1 < len(path) {
 		return path[i+1:]
 	}
