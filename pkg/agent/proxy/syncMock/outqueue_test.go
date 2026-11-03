@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -613,9 +614,16 @@ func TestCloseOutChanEndsAtItsConsumersExitWhileItsStallVerdictIsPending(t *test
 	if !m.WasMockDroppedForTC("test-a") {
 		t.Fatal("the mock given up at its consumer's exit was not recorded for its test")
 	}
-	const want = "the consumer stopped reading (the stream that read it ended), having taken no mock for 0s of the 1s stall bound of the time the process could run"
-	if got := logs.FilterField(zap.String("why", want)).Len(); got != 1 {
-		t.Fatalf("%d drop lines say why as %q; the lines: %v", got, want, logs.All())
+	// The cause, not the bound: the drainer may read CloseOutChan's closing
+	// before or after it reads the consumer's exit, and its stall bound is
+	// the close's or the run's accordingly. Neither moved: 0s of it.
+	const want = "the consumer stopped reading (the stream that read it ended), having taken no mock for 0s of the "
+	said := logs.Filter(func(e observer.LoggedEntry) bool {
+		why, _ := e.ContextMap()["why"].(string)
+		return strings.HasPrefix(why, want)
+	})
+	if got := said.Len(); got != 1 {
+		t.Fatalf("%d drop lines say why as %q...; the lines: %v", got, want, logs.All())
 	}
 }
 

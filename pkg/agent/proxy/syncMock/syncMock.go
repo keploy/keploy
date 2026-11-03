@@ -1431,6 +1431,24 @@ func (m *SyncMockManager) OutQueuedTo(ch chan<- *models.Mock) bool {
 
 // outStallBound is the drainer's stall bound: outChanStall unless a test set
 // outStall.
+// SetOutStallForTest has m's out-queue drainers measure their stall on clk,
+// at bound (the close's bound no more than it), from the next lane on, and
+// returns what puts the process's clock and bounds back once those lanes'
+// drainers have ended. Tests only: a test of another package that drives a
+// stop's wait for m's consumer (the agent's outgoing stream) freezes the clock
+// so that only the consumer's exit can end it.
+func (m *SyncMockManager) SetOutStallForTest(clk stall.Clock, bound time.Duration) (restore func()) {
+	m.outQueueMu.Lock()
+	oldClk, oldStall := m.outClock, m.outStall
+	m.outClock, m.outStall = clk, bound
+	m.outQueueMu.Unlock()
+	return func() {
+		m.outQueueMu.Lock()
+		m.outClock, m.outStall = oldClk, oldStall
+		m.outQueueMu.Unlock()
+	}
+}
+
 func (m *SyncMockManager) outStallBound() time.Duration {
 	if m.outStall > 0 {
 		return m.outStall
