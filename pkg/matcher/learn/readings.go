@@ -4,6 +4,7 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -571,11 +572,25 @@ func joinWrapped(s string) (string, []int) {
 // or '\' (which the readings would take for escapes keploy cannot read).
 // A value with no such escape is itself.
 func qpDecoded(s string) string {
+	d, _ := qpRead(s)
+	return d
+}
+
+// qpRead is qpDecoded(s), and whether s reads as quoted-printable whole:
+// each '=' it holds starts a soft line break or a run of escapes that
+// qpDecoded decodes. Quoted-printable writes every '=' of its text as
+// "=3D", so a value that holds any other '=' ("Credential=local/...,
+// Signature=09bb..." of an AWS signature, "sig=B1CD") is no
+// quoted-printable text, and an "=XX" in it only looks like an escape. A
+// value with no '=' reads whole; one whose escapes decode to no text (a
+// Latin-1 "caf=E9") does not.
+func qpRead(s string) (string, bool) {
 	if !strings.Contains(s, "=") {
-		return s
+		return s, true
 	}
 	s = strings.ReplaceAll(strings.ReplaceAll(s, "=\r\n", ""), "=\n", "")
 	var b strings.Builder
+	whole := true
 	for i := 0; i < len(s); {
 		j := i
 		var bytes []byte
@@ -585,6 +600,9 @@ func qpDecoded(s string) string {
 			j += 3
 		}
 		if j == i {
+			if s[i] == '=' {
+				whole = false
+			}
 			b.WriteByte(s[i])
 			i++
 			continue
@@ -592,11 +610,12 @@ func qpDecoded(s string) string {
 		if isText(bytes) && !strings.ContainsAny(string(bytes), "%\\") {
 			b.Write(bytes)
 		} else {
+			whole = false
 			b.WriteString(s[i:j])
 		}
 		i = j
 	}
-	return b.String()
+	return b.String(), whole
 }
 
 // qpForm is s read as quoted-printable (qpDecoded) after its escapes
@@ -604,8 +623,26 @@ func qpDecoded(s string) string {
 // their escaped spellings too ("=\\r\\n" of a mail in a JSON string), which
 // unescaping would turn into separators.
 func qpForm(s string) string {
-	return qpDecoded(unescaped(noSoftBreaks(s)))
+	q, _ := qpFormRead(s)
+	return q
 }
+
+// qpFormRead is qpForm(s), and whether s reads as quoted-printable text:
+// whole (qpRead), or as a mail or a MIME part that says it is
+// (qpDeclared), whose header lines hold an '=' of their own
+// ("charset=utf-8") that starts no escape.
+func qpFormRead(s string) (string, bool) {
+	u := unescaped(noSoftBreaks(s))
+	q, qp := qpRead(u)
+	if !qp {
+		qp = qpDeclared.MatchString(u)
+	}
+	return q, qp
+}
+
+// qpDeclared is the header of a mail or a MIME part whose body is
+// quoted-printable.
+var qpDeclared = regexp.MustCompile(`(?i)content-transfer-encoding:[ \t]*quoted-printable`)
 
 // noSoftBreaks is s without its soft line breaks, each a "=" before a line
 // break in any spelling (softBreakAt), taken out from the left: s itself
@@ -938,7 +975,16 @@ func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms [][2]stri
 		}
 	}
 	fold(forms[0])
-	if qr, ql := qpForm(rec), qpForm(live); qr != decRec || ql != decLive {
+	// The quoted-printable form only where both values read as
+	// quoted-printable text (qpFormRead): one that does not is none, and
+	// reading its other value's "=XX" as an escape would make the two
+	// differ in this form where the value did not ("Signature=09bb..." a
+	// tab in one run, "Signature=b17d..." as written in the other: an '='
+	// that changed in a run of the base64 alphabet, which unparsed
+	// refuses).
+	qr, qpR := qpFormRead(rec)
+	ql, qpL := qpFormRead(live)
+	if qpR && qpL && (qr != decRec || ql != decLive) {
 		q := [2]string{qr, ql}
 		forms = append(forms, q)
 		fold(q)
