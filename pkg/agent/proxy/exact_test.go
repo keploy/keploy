@@ -451,7 +451,7 @@ func TestEachTestProcessesTeardownIsBoundedByItsOwnTests(t *testing.T) {
 	// pool names, through the proxy.
 	setup := func(owners map[string]string) *MockManager {
 		mm := stagedManager(t, all, nil)
-		if err := (&Proxy{mockManager: mm}).SetPoolNames(append(append([]string{}, aSlice...), bSlice...), owners); err != nil {
+		if err := (&Proxy{mockManager: mm}).SetPoolNames(append(append([]string{}, aSlice...), bSlice...), owners, nil); err != nil {
 			t.Fatalf("SetPoolNames: %v", err)
 		}
 		return mm

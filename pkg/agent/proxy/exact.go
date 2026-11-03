@@ -300,6 +300,10 @@ type exactState struct {
 	// one key is known: what bounds each test process's teardown
 	// (teardownAfter). nil until a replay sent one.
 	poolOwners atomic.Pointer[map[string]string]
+	// poolTests is, of the same scope table, the mocks each test lists and
+	// the tests that list each mock (SetPoolTests): what tells the run of a
+	// test's recording on no clock (teardownBy). nil until a replay sent one.
+	poolTests atomic.Pointer[poolTests]
 	// teardownLast is keploy mock replay's teardown bound (teardownAfter),
 	// cached for one staging generation of the trees (StagingGeneration: an
 	// exact serve does not move it), one scope table, one recording's times
@@ -1709,6 +1713,30 @@ func (m *MockManager) SetPoolOwners(owners map[string]string) {
 	m.exact.poolOwners.Store(&cp)
 }
 
+// SetPoolTests installs, of the replay's scope table, the mocks each test
+// lists (test ID -> names; keploy mock replay under the proven switch). It
+// tells the teardown bound (teardownBy) the run of a test's recording on no
+// clock: the run that recorded the test, whose clock its other recordings
+// are on. The agent installs it with the owners, before the pool names.
+func (m *MockManager) SetPoolTests(table map[string][]string) {
+	t := &poolTests{lists: make(map[string][]string, len(table)), of: map[string][]string{}}
+	for id, names := range table {
+		t.lists[id] = append([]string(nil), names...)
+		for _, n := range names {
+			t.of[n] = append(t.of[n], id)
+		}
+	}
+	m.exact.poolTests.Store(t)
+}
+
+// poolTests is a scope table as the teardown bound reads it
+// (SetPoolTests): the names each test lists (lists) and the tests that list
+// each name (of).
+type poolTests struct {
+	lists map[string][]string
+	of    map[string][]string
+}
+
 // InPool reports whether mk is the pool's by the scope table SetPoolNames
 // installed (integrations.PoolMembership); known is false until one was. A
 // mock is named once in a recording, and the table is the running
@@ -2695,19 +2723,25 @@ func (m *MockManager) teardown(key string, startup []*models.Mock) []*models.Moc
 // that clock and on none; a recording on another clock is no bound of it.
 // So a newer run's test, though recorded later, never moves an older run's
 // call after its own last test (a Go mongo-driver's endSessions) out of the
-// teardown, and that call is answered. A recording on no clock ("", an
-// untrusted stamp) is bounded by every recording, whatever its clock, as
-// before, and bounds every one: an untrusted time widens the bound, failing
-// closed. One record run stamps its recordings on one clock (the proxy's, or
-// proxyless capture's ktime, which has no relay) or on none, so the bound of
-// a set recorded in one run is the whole set's, as it was. Its limits: a
-// clock none of whose tests' recordings remain (every test of that run was
-// recorded anew) tells no teardown of it, and its call after the last test
-// misses (fail closed); and where the test recorded anew was its run's last,
-// that run's pool calls made between its previous test and it are after
+// teardown, and that call is answered. keploy's HTTP recorder and
+// keploy/integrations' Mongo v2 recorder name the clock of each call's stamp.
+// A recording on no clock ("", an untrusted stamp: one whose parser names
+// none, or one recorded before its parser named one) is bounded by every
+// recording, whatever its clock, as before. One a test lists bounds the
+// clock of the run that recorded that test, the clock its other recordings
+// are on (runClocks), and no other: a partial record's calls on no clock in
+// the tests it recorded anew never hide the older run's teardown. Any other
+// bounds every clock: an untrusted time of no known run widens the bound,
+// failing closed. Each of a run's recordings is on that run's one clock (the
+// proxy's, or proxyless capture's ktime, which has no relay) or on none, so
+// the bound of a set recorded in one run is the whole set's, as it was. Its
+// limits: a clock none of whose tests' recordings remain (every test of that
+// run was recorded anew) tells no teardown of it, and its call after the last
+// test misses (fail closed); and where the test recorded anew was its run's
+// last, that run's pool calls made between its previous test and it are after
 // every recording left on its clock, so they are its teardown too. keploy
-// test's staging (the recorded windows alone) reads no clock: it never
-// stages two record runs' recordings as one set.
+// test's staging (the recorded windows alone) reads no clock: it never stages
+// two record runs' recordings as one set.
 func (m *MockManager) teardownAfter(key, clock string) func(time.Time) bool {
 	on := m.teardownBy(key)
 	if on == nil {
@@ -2738,6 +2772,7 @@ func (m *MockManager) teardownBy(key string) func(clock string) func(time.Time) 
 		return nil
 	}
 	owners := m.exact.poolOwners.Load()
+	tests := m.exact.poolTests.Load()
 	// The generation first, then the trees (the revision's sample-read-install
 	// idiom): a bound read from trees a staging swaps meanwhile is cached
 	// under a generation that is already old. The staging generation, not
@@ -2747,10 +2782,11 @@ func (m *MockManager) teardownBy(key string) func(clock string) func(time.Time) 
 	// again.
 	rev := m.StagingGeneration()
 	times := m.exact.times.Load()
-	if c := m.exact.teardownLast.Load(); c != nil && c.rev == rev && c.pool == pool && c.owners == owners && c.times == times && c.key == key {
+	if c := m.exact.teardownLast.Load(); c != nil && c.rev == rev && c.pool == pool && c.owners == owners && c.tests == tests && c.times == times && c.key == key {
 		return c.on()
 	}
-	b := &teardownBound{rev: rev, pool: pool, owners: owners, times: times, key: key}
+	b := &teardownBound{rev: rev, pool: pool, owners: owners, tests: tests, times: times, key: key}
+	runs := newRunClocks(tests)
 	// bounds reports whether a recording named name bounds key's process.
 	bounds := func(name string, protocolPhase bool) bool {
 		if _, inPool := (*pool)[name]; inPool || protocolPhase {
@@ -2766,18 +2802,26 @@ func (m *MockManager) teardownBy(key string) func(clock string) func(time.Time) 
 	m.treesMu.RLock()
 	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
 	m.treesMu.RUnlock()
+	// visit moves the bound by one recording: a test's recording on no
+	// clock once every recording's clock is read (runClocks).
+	visit := func(name string, place time.Time, protocolPhase bool, clock string) {
+		runs.note(name, clock)
+		if !bounds(name, protocolPhase) {
+			return
+		}
+		if clock == "" && runs.hold(name, place) {
+			return
+		}
+		b.add(clock, place)
+	}
 	for _, tree := range trees {
 		for _, mk := range m.treeValues(tree, "") {
-			if bounds(mk.Name, mk.IsProtocolPhase()) {
-				b.add(mockClock(mk), models.PlaceOf(mk))
-			}
+			visit(mk.Name, models.PlaceOf(mk), mk.IsProtocolPhase(), mockClock(mk))
 		}
 	}
 	if times != nil && times.src != nil {
 		err := times.src(func(name string, place time.Time, protocolPhase bool, clock string) bool {
-			if bounds(name, protocolPhase) {
-				b.add(clock, place)
-			}
+			visit(name, place, protocolPhase, clock)
 			return true
 		})
 		if err != nil {
@@ -2787,8 +2831,114 @@ func (m *MockManager) teardownBy(key string) func(clock string) func(time.Time) 
 			return nil
 		}
 	}
+	runs.addTo(b)
 	m.exact.teardownLast.Store(b)
 	return b.on()
+}
+
+// runClocks tells, under keploy mock replay, the run of a test's recording
+// on no clock (teardownBy), from the scope table (SetPoolTests): a test is
+// recorded by one record run, and each of a run's recordings is on that
+// run's one clock or on none, so a test's recording on no clock is of the
+// run whose clock the same test's other recordings are on. It bounds that
+// clock, not every one: a partial record's recordings on no clock of the
+// tests it recorded anew (a call whose parser names no clock) never move
+// the teardown of the older run whose tests it kept. A recording on no
+// clock that no test lists, or that a test lists whose recordings are on no
+// clock, bounds every clock (fail closed), and one whose tests' recordings
+// are on several clocks bounds each of them. nil, with no scope table, holds
+// none: every recording on no clock bounds every clock.
+type runClocks struct {
+	tests *poolTests
+	// clockOf is the clock of each recording a test lists that is on one.
+	clockOf map[string]string
+	// held are the bounding recordings on no clock a test lists, in the
+	// order read, bounded once every clock is read (addTo).
+	held []heldPlace
+}
+
+// heldPlace is a recording on no clock that runClocks holds: its name and
+// its place (models.PlaceOf).
+type heldPlace struct {
+	name  string
+	place time.Time
+}
+
+// newRunClocks is the run reading of tests, nil for none.
+func newRunClocks(tests *poolTests) *runClocks {
+	if tests == nil {
+		return nil
+	}
+	return &runClocks{tests: tests, clockOf: map[string]string{}}
+}
+
+// note notes the clock of the recording named name, where a test lists it.
+func (r *runClocks) note(name, clock string) {
+	if r == nil || clock == "" || !r.listed(name) {
+		return
+	}
+	r.clockOf[name] = clock
+}
+
+// listed reports whether a test lists the recording named name.
+func (r *runClocks) listed(name string) bool {
+	return r != nil && len(r.tests.of[name]) > 0
+}
+
+// hold keeps a test's recording on no clock until every clock is read,
+// and reports whether it did: false for one no test lists.
+func (r *runClocks) hold(name string, place time.Time) bool {
+	if r == nil || !r.listed(name) {
+		return false
+	}
+	r.held = append(r.held, heldPlace{name: name, place: place})
+	return true
+}
+
+// addTo moves b by every held recording: on the clocks of its tests' runs
+// (clocksOf), or on no clock where they name none.
+func (r *runClocks) addTo(b *teardownBound) {
+	if r == nil {
+		return
+	}
+	byTest := map[string][]string{}
+	for _, h := range r.held {
+		clocks := r.clocksOf(h.name, byTest)
+		if len(clocks) == 0 {
+			b.add("", h.place)
+			continue
+		}
+		for _, c := range clocks {
+			b.add(c, h.place)
+		}
+	}
+}
+
+// clocksOf is the clocks of every test that lists the recording named name:
+// of each, the clocks of the recordings it lists; nil when one of them lists
+// none on a clock, whose run is then not known. byTest caches each test's.
+func (r *runClocks) clocksOf(name string, byTest map[string][]string) []string {
+	var out []string
+	for _, id := range r.tests.of[name] {
+		cs, ok := byTest[id]
+		if !ok {
+			for _, n := range r.tests.lists[id] {
+				if c := r.clockOf[n]; c != "" && !slices.Contains(cs, c) {
+					cs = append(cs, c)
+				}
+			}
+			byTest[id] = cs
+		}
+		if len(cs) == 0 {
+			return nil
+		}
+		for _, c := range cs {
+			if !slices.Contains(out, c) {
+				out = append(out, c)
+			}
+		}
+	}
+	return out
 }
 
 // teardownBound is teardownAfter's bound for keploy mock replay: the latest
@@ -2805,6 +2955,7 @@ type teardownBound struct {
 	rev       uint64
 	pool      *map[string]struct{}
 	owners    *map[string]string
+	tests     *poolTests
 	times     *recordingTimes
 	key       string
 	last      time.Time
