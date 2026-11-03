@@ -1393,6 +1393,34 @@ const (
 	LeftOutResetByServer = "http2 stream reset by the server"
 )
 
+// LeftOutStopCut is the reason an HTTP/1 recorder leaves an exchange out for
+// when the upstream's end, read once the recording's stop had begun
+// (EndFollowedStop), came partway through the response: through its head, or
+// through a body its Content-Length or chunked framing had not ended. The call
+// was in flight as the recording stopped, and the stop ended it: the response
+// is not whole, and the upstream gave the application no fault to record.
+// Neither is a capture loss. Its cause (leftOutCause) is leftOutStopCutCause,
+// of class leftOutAtStop.
+const LeftOutStopCut = leftOutStopCutCause + ": the upstream ended the connection partway through it, once the stop had begun"
+
+// LeftOutStopCutOpen is LeftOutStopCut for a response the recording's stop
+// cut short with neither side of the connection ended (FirstPeerEnded): the
+// capture of the connection ended with the recording (RecordingStopping),
+// partway through the response, framed or close-delimited, while the call was
+// still in flight. Of the same cause and class.
+const LeftOutStopCutOpen = leftOutStopCutCause + ": the recording stopped partway through it, with the connection still open"
+
+// LeftOutStopCutAfterEnd is LeftOutStopCut for a response whose read the
+// recording's stop ended (the supervisor's abort closed the stream, or the
+// parser's context ended with the recording's) after the upstream's end, read
+// once the stop had begun, and before the parser had read all the upstream
+// sent: the stop cut the read, not the upstream, and the response the parser
+// has is not whole. Of the same cause and class.
+const LeftOutStopCutAfterEnd = leftOutStopCutCause + ": the stop ended its read partway through it, after the upstream had ended the connection"
+
+// leftOutStopCutCause is LeftOutStopCut's cause: its text before the colon.
+const leftOutStopCutCause = "the recording's stop cut the response short"
+
 // LeftOutClientClosedPartway is the cause an HTTP/1 recorder leaves an
 // exchange out for when the client closed the connection partway through its
 // response: the relay ended the response's stream where the client stopped
@@ -1411,11 +1439,12 @@ const LeftOutClientClosedPartway = "the client closed the connection partway thr
 // framing had not ended, or its body is framed by the upstream's close, which
 // had not come), and no fault is known to record it with. Each is
 // LeftOutClientClosedPartway with a detail after its colon, so of its cause
-// and class.
+// and class, but LeftOutPartwayAtStop: the recording's stop cut that response
+// short, as it cut LeftOutStopCut's, and it is of that cause and class.
 const (
 	// LeftOutPartwayAtStop: EndAtStop, the recording's stop closed the
 	// application with the call in flight.
-	LeftOutPartwayAtStop = LeftOutClientClosedPartway + ": the recording's stop closed the application"
+	LeftOutPartwayAtStop = leftOutStopCutCause + ": it closed the application with the call in flight"
 	// LeftOutPartwayAtExit: EndAtExit, the application's process exited on
 	// its own with the call in flight.
 	LeftOutPartwayAtExit = LeftOutClientClosedPartway + ": its process exited"
@@ -1480,7 +1509,10 @@ const (
 	// leftOutClientClosed is an exchange whose client closed the connection
 	// partway through the response (LeftOutClientClosedPartway).
 	leftOutClientClosed = "client_closed"
-	leftOutOther        = "other"
+	// leftOutAtStop is an exchange whose response the recording's stop cut
+	// short (LeftOutStopCut, LeftOutPartwayAtStop).
+	leftOutAtStop = "at_stop"
+	leftOutOther  = "other"
 )
 
 // leftOutClass is the class of a cause (leftOutCause) a mock was left out
@@ -1491,6 +1523,8 @@ func leftOutClass(cause string) string {
 		return cause
 	case LeftOutResetByClient, LeftOutResetByServer:
 		return leftOutReset
+	case leftOutStopCutCause:
+		return leftOutAtStop
 	case LeftOutClientClosedPartway:
 		return leftOutClientClosed
 	}
@@ -1537,6 +1571,11 @@ func leftOutNextStep(class string, spanned bool) string {
 		return next + "The request these bytes answer was in flight when the capture of this already open connection " +
 			"began (the recording started, a TLS hook attached, or the agent restarted, while it was sent), so it was never " +
 			"captured: there is no setting to change, and the connection's later exchanges are recorded each with its own answer"
+	case leftOutAtStop:
+		return next + "reason=the recording's stop cut the response short: the app had this call in flight as the " +
+			"recording stopped, and the stop ended it partway through the response, so there is no whole exchange to " +
+			"record, and no fault of the upstream's to replay; the capture lost nothing. To record the call, stop the " +
+			"recording once the app's calls have ended"
 	case leftOutReset:
 		return next + "reason=http2 stream reset: the call was reset (RST_STREAM) before it completed, so there is no " +
 			"whole exchange to record, and a replay cannot reproduce the reset; the capture lost nothing. The reason " +
@@ -1544,8 +1583,8 @@ func leftOutNextStep(class string, spanned bool) string {
 			"its deadline: raise it and re-record. A server's reset is a call it failed or abandoned: its logs say why"
 	case leftOutClientClosed:
 		return next + "reason=the client closed partway: the app closed the connection before it had read the whole " +
-			"response (its timeout, a cancelled call, or it wanted only the start; or its process exited, or the " +
-			"recording's stop closed it, with the call in flight), so there is no whole exchange to " +
+			"response (its timeout, a cancelled call, or it wanted only the start; or its process exited with the " +
+			"call in flight), so there is no whole exchange to " +
 			"record, and a replay cannot reproduce the cut; the capture lost nothing. If the call timed out, raise the " +
 			"app's timeout for it and re-record"
 	}

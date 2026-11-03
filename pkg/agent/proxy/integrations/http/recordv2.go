@@ -219,7 +219,17 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// stream ended with the connection (EndedWithConnection) it is the
 		// client that stopped reading and closed, and the response is
 		// recorded as the client had it (FinalHTTP.RespReadInPart).
-		streamEnded := false
+		// cut: the read ended before the response did: inside its framing
+		// (errAnswerCut), at its reader's close (ErrClosed), with the
+		// parser's context (ctxEnded), or at an end of the stream that no
+		// side's end of the connection made (FirstPeerEnded): a
+		// close-delimited body ends with the upstream's close, and the relay
+		// that ends the stream with the connection still open (at the
+		// recording's stop) ends no body.
+		if !gotLastWritten.IsZero() {
+			resTs = gotLastWritten
+		}
+		streamEnded, cut, ctxEnded := false, false, false
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				// Legacy encodeHTTP treats EOF after some bytes as
@@ -230,9 +240,13 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				// ended the stream (its tee gave up on a consumer) marked the
 				// mock incomplete for them.
 				streamEnded = errors.Is(err, io.EOF)
-				if !gotLastWritten.IsZero() {
-					resTs = gotLastWritten
-				}
+				_, peerEnded := sess.FirstPeerEnded()
+				cut = errors.Is(err, errAnswerCut) || !streamEnded || !peerEnded
+			} else if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+				// The parser's context ended partway through the response:
+				// left out below when the recording's stop ended it, and
+				// returned as before otherwise.
+				cut, ctxEnded = true, true
 			} else {
 				if ctx.Err() != nil {
 					return ctx.Err()
@@ -241,8 +255,6 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				utils.LogError(logger, err, "V2 HTTP record: failed to read full response")
 				return err
 			}
-		} else if !gotLastWritten.IsZero() {
-			resTs = gotLastWritten
 		}
 		if streamEnded && sess.EndedWhereClientStopped() {
 			whole, ok := chunkedEndRefused(finalResp, sess.NotTakenWhereClientStopped())
@@ -280,7 +292,31 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			// reached the proxy after the client's FIN, as a streaming
 			// server writes one once its client has gone, ends nothing
 			// here: that exchange is left out above.
-			finalResp, streamEnded = whole, false
+			finalResp, streamEnded, cut = whole, false, false
+		}
+
+		// The recording's stop ended the read partway through the response
+		// (stopCut): the stop ended the call, with no fault of the upstream's
+		// or the application's (as partAnswerFault finds), and the response
+		// is not whole. So there is no whole exchange to record, nor a fault
+		// to record it with, and nothing failed to decode: it is left out for
+		// the stop, with its span, and the recording of the connection ends
+		// with its stream.
+		if cut {
+			if reason, ok := stopCut(sess, streamEnded); ok {
+				if mark, ok := sess.TakeMockIncomplete(); ok {
+					reason = mark + ": " + reason
+				}
+				logger.Debug("V2 HTTP record: the recording's stop cut the response short; the exchange is left out", zap.String("reason", reason))
+				sess.ReportLeftOut(&models.Mock{
+					Kind: models.HTTP,
+					Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
+				}, reason)
+				return nil
+			}
+		}
+		if ctxEnded {
+			return ctx.Err()
 		}
 
 		// Build and emit the mock. Identical shape to the legacy path.
@@ -419,6 +455,44 @@ func partAnswerLeftOut(sess *supervisor.Session) (reason string, ok bool) {
 		return supervisor.LeftOutPartwayAtExit, true
 	case supervisor.EndUnjudged:
 		return supervisor.LeftOutPartwayUnjudged, true
+	}
+	return "", false
+}
+
+// stopCut is the reason a response whose read ended before the response did
+// is left out for when the recording's stop ended it, and ok false when it did
+// not, or the destination's stream ended at a capture hole
+// (Session.EndedAtHole: the capture lost the rest). readItsEnd is whether the
+// read ended at the end of the stream (io.EOF), not at its reader's close or
+// with the parser's context:
+//   - the connection's first end (FirstPeerEnded) was the upstream's, read once
+//     the stop had begun (Session.EndFollowedStop): LeftOutStopCut where the
+//     read ended at the stream's end, which the relay gives once it has given
+//     all the upstream sent, so the upstream's end came partway through the
+//     response; LeftOutStopCutAfterEnd where the stop's close of the stream, or
+//     the parser's context, ended the read first, with what the upstream had
+//     sent before its end not all read;
+//   - neither side has ended, and the recording is stopping
+//     (Session.RecordingStopping): the relay, whose context is the
+//     recording's, ended the stream with the connection still open, or the
+//     supervisor's abort at the stop closed it, or the parser's context ended
+//     with the recording's: LeftOutStopCutOpen.
+//
+// EndFollowedStop holds only of a first end that came, so the first end is
+// not asked for whether one did there.
+func stopCut(sess *supervisor.Session, readItsEnd bool) (reason string, ok bool) {
+	if _, hole := sess.EndedAtHole(fakeconn.FromDest); hole {
+		return "", false
+	}
+	first, ended := sess.FirstPeerEnded()
+	if !ended && sess.RecordingStopping() {
+		return supervisor.LeftOutStopCutOpen, true
+	}
+	if first == fakeconn.FromDest && sess.EndFollowedStop() {
+		if !readItsEnd {
+			return supervisor.LeftOutStopCutAfterEnd, true
+		}
+		return supervisor.LeftOutStopCut, true
 	}
 	return "", false
 }
@@ -604,7 +678,9 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 //
 // Returns (lastWrittenAt, err). err may be io.EOF for the legitimate
 // "server closed after sending a full response" case; the caller
-// decides whether to emit a mock.
+// decides whether to emit a mock. A stream that ended before the response's
+// framing did (its head, a Content-Length body, a chunked body) ends in
+// errAnswerCut, an io.EOF too.
 func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, finalResp *[]byte, reqMethod string) (time.Time, error) {
 	var lastWr time.Time
 
@@ -618,7 +694,7 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 		}
 		chunk, err := stream.ReadChunk()
 		if err != nil {
-			return lastWr, err
+			return lastWr, answerCut(err)
 		}
 		if !chunk.WrittenAt.IsZero() {
 			lastWr = chunk.WrittenAt
@@ -646,7 +722,7 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 			}
 			chunk, err := stream.ReadChunk()
 			if err != nil {
-				return lastWr, err
+				return lastWr, answerCut(err)
 			}
 			if !chunk.WrittenAt.IsZero() {
 				lastWr = chunk.WrittenAt
@@ -675,7 +751,7 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 			}
 			chunk, err := stream.ReadChunk()
 			if err != nil {
-				return lastWr, err
+				return lastWr, answerCut(err)
 			}
 			if !chunk.WrittenAt.IsZero() {
 				lastWr = chunk.WrittenAt
@@ -700,6 +776,23 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 		}
 		*finalResp = append(*finalResp, chunk.Bytes...)
 	}
+}
+
+// errAnswerCut is readResponseV2's end of a stream that ended before the
+// response's framing did: partway through its head, or through a body its
+// Content-Length or chunked framing frames. It is an io.EOF (errors.Is): the
+// stream ran out. A close-delimited body ends with its stream, so the io.EOF
+// that ends it is plain.
+var errAnswerCut = fmt.Errorf("the stream ended before the response's framing did: %w", io.EOF)
+
+// answerCut is the error readResponseV2 returns for err, the error its read of
+// the next chunk ended in, inside the response's framing: errAnswerCut for the
+// end of the stream (io.EOF), err itself for any other.
+func answerCut(err error) error {
+	if errors.Is(err, io.EOF) {
+		return errAnswerCut
+	}
+	return err
 }
 
 // parseHeaders extracts the body-framing Content-Length and
