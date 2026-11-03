@@ -3,6 +3,8 @@
 package proxy
 
 import (
+	"syscall"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -17,8 +19,8 @@ import (
 
 // sockBase is where the counts of a kept connection's socket begin: the
 // sequence number of the application's first byte (its irs plus one). It is
-// read once, as the proxy keeps the connection and before its handler runs
-// (beginCounts), and only read after that.
+// set once, as the proxy keeps the connection and before its handler runs
+// (sockBase.read), and only read after that.
 type sockBase struct {
 	first uint32
 	// ok: first was read. A connection whose first byte's number cannot be
@@ -26,8 +28,8 @@ type sockBase struct {
 	ok bool
 }
 
-// beginCounts reads where c's counts begin (sockBase): as its handler has
-// not run, no read has taken a byte from its socket yet, so the socket holds
+// read reads where the counts of raw, a connection the proxy keeps, begin:
+// as its handler has not run, no read has taken a byte from its socket yet, so the socket holds
 // everything it has received in sequence (SO_NREAD) and, once it came, the
 // application's FIN, and the next number it expects less those is the first
 // byte's. The two are separate reads: they are taken as one only when a
@@ -37,12 +39,12 @@ type sockBase struct {
 // the FIN, and the one a read that returns the stream's end takes off
 // (finCounted) is put back by received's floor: never fewer than were
 // delivered.
-func (c *trackedConn) beginCounts() {
-	_ = c.raw.Control(func(fd uintptr) { c.base.first, c.base.ok = xnuFirstSeq(int(fd)) })
+func (b *sockBase) read(raw syscall.RawConn) {
+	_ = raw.Control(func(fd uintptr) { b.first, b.ok = xnuFirstSeq(int(fd)) })
 }
 
-// xnuFirstSeq is beginCounts's read of socket fd: false when its tcp_info
-// or SO_NREAD cannot be read. It reads again for as long as bytes or the
+// xnuFirstSeq is sockBase.read's read of socket fd: false when its
+// tcp_info or SO_NREAD cannot be read. It reads again for as long as bytes or the
 // FIN come in between its reads; what can come is bounded by what the
 // socket's receive window lets in while nothing reads it.
 func xnuFirstSeq(fd int) (uint32, bool) {

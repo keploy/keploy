@@ -75,8 +75,8 @@ func clientGone(state uint8) bool {
 // connection's first byte, so there is nothing to read as it is kept.
 type sockBase struct{}
 
-// beginCounts reads nothing on Linux (sockBase).
-func (c *trackedConn) beginCounts() {}
+// read reads nothing on Linux (sockBase).
+func (*sockBase) read(syscall.RawConn) {}
 
 // socketCounts is socketReceived of c's socket.
 func (c *trackedConn) socketCounts(connView) (received uint64, state uint8, ok bool) {

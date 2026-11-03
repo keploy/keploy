@@ -3,7 +3,6 @@
 package routes
 
 import (
-	"bufio"
 	"io"
 	"net"
 	"net/http"
@@ -11,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -51,7 +49,7 @@ func TestMain(m *testing.M) {
 		if err != nil {
 			os.Exit(3)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
@@ -74,35 +72,4 @@ func TestTheClaimReadsTheCallerFromTheConnection(t *testing.T) {
 	if svc.claimKey != "orders" || svc.claimCaller != c.Process.Pid {
 		t.Fatalf("claimed key %q for process %d, want orders for the child %d", svc.claimKey, svc.claimCaller, c.Process.Pid)
 	}
-}
-
-// holdConnFrom starts this test binary again as a child that dials addr and
-// holds the connection; it returns the child and the connection's local
-// address. The child and its process group die in cleanup.
-func holdConnFrom(t *testing.T, addr string) (*exec.Cmd, string) {
-	t.Helper()
-	c := exec.Command(os.Args[0], "-test.run=^$")
-	c.Env = append(os.Environ(), envHoldConnTo+"="+addr)
-	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	stdin, err := c.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err := c.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = stdin.Close()
-		_ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
-		_ = c.Wait()
-	})
-	line, err := bufio.NewReader(stdout).ReadString('\n')
-	if err != nil {
-		t.Fatalf("the holding child said nothing: %v", err)
-	}
-	return c, strings.TrimSpace(line)
 }

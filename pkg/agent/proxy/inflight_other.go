@@ -18,7 +18,7 @@ func clientGone(uint8) bool { return false }
 
 type sockBase struct{}
 
-func (c *trackedConn) beginCounts() {}
+func (*sockBase) read(syscall.RawConn) {}
 
 func (c *trackedConn) socketCounts(connView) (received uint64, state uint8, ok bool) {
 	return socketReceived(c.raw)

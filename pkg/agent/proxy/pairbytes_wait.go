@@ -32,9 +32,9 @@ type pairTarget struct {
 	// sent when the wait began (finSent): the last of want may be that FIN.
 	// Otherwise every byte of want is data.
 	finCounted bool
-	// isn is, on darwin, the application socket's initial sequence number
-	// (the proxy's side's irs): want and seen count from the one after it.
-	isn uint32
+	// base is where the proxy's side's count of what it received of the
+	// connection begins (targetBase.received): want and seen count from it.
+	base targetBase
 	// gone: the application's socket was already gone (closed, or reset)
 	// when the wait began. Its FIN, after everything it wrote, or a reset,
 	// is what the proxy's side waits for.

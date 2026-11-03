@@ -101,8 +101,17 @@ func (p *Proxy) pairTarget(table []xnuPCB, pc *pairedConn) (*pairTarget, error) 
 		// everything it wrote.
 		return nil, nil
 	}
-	return &pairTarget{pc: pc, isn: app.iss, want: uint64(app.writeSeq() - app.iss - 1), finCounted: app.finPending()}, nil
+	return &pairTarget{pc: pc, base: targetBase{isn: app.iss}, want: uint64(app.writeSeq() - app.iss - 1), finCounted: app.finPending()}, nil
 }
+
+// targetBase is where, on darwin, the proxy's side's count of what it
+// received of a connection begins: the application socket's initial sequence
+// number (the proxy's side's irs). want and seen count from the one after it.
+type targetBase struct{ isn uint32 }
+
+// received is how much the proxy's side ps received since b, its FIN
+// counted: a distance between sequence numbers, which wrap at 2^32.
+func (b targetBase) received(ps proxySide) uint32 { return ps.rcvNxt - b.isn - 1 }
 
 // pairReached says whether t needs no more waiting: the proxy's side received
 // what the application had written, or it never will (a capture loss).
@@ -121,7 +130,7 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 	if t.gone {
 		return p.pairEnded(t, ps, closed)
 	}
-	got := ps.rcvNxt - t.isn - 1 // what the proxy's side received, its FIN counted
+	got := t.base.received(ps)
 	if d := int32(got - uint32(t.seen)); d > 0 {
 		t.seen = uint64(got)
 		p.paired.progress.Add(1)
@@ -141,7 +150,7 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 		// an orphan that took the application's FIN refused nothing; one
 		// FIN short with the orphan still waiting for that FIN is looked
 		// at again; anything else is a loss.
-		d, took, err := orphanTookFIN(pc, t.isn)
+		d, took, err := orphanTookFIN(pc, t.base.isn)
 		oneShort := t.finCounted && short == 1
 		switch {
 		case took:

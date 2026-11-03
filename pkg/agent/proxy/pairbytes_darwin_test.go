@@ -467,7 +467,7 @@ func TestATCPInfoThatCannotBeReadIsUnknownOnDarwin(t *testing.T) {
 	}
 }
 
-// Bytes that come between beginCounts's reads of where the counts begin (its
+// Bytes that come between sockBase.read's reads of where the counts begin (its
 // first read of the next expected number, then SO_NREAD) would put the first
 // byte's number too low, and the count too high for good: bytes untaken that
 // no read returns, holding every settle that cuts the connection until its

@@ -291,6 +291,14 @@ func boundDevice(conn *net.TCPConn) uint32 {
 	return uint32(dev)
 }
 
+// targetBase is nothing on Linux: the proxy's side's count of what it
+// received (tcpi_bytes_received, which a FIN also moves) begins at the
+// connection's first byte.
+type targetBase struct{}
+
+// received is how much the proxy's side ps received, its FIN counted.
+func (targetBase) received(ps proxySide) uint64 { return ps.received }
+
 // pairReached says whether t needs no more waiting: the proxy's side received
 // what the application had written, or it never will (a capture loss).
 func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
@@ -314,12 +322,13 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 	if t.gone {
 		return p.pairEnded(t, ps, closed)
 	}
-	if ps.received > t.seen {
-		t.seen = ps.received
+	got := t.base.received(ps)
+	if got > t.seen {
+		t.seen = got
 		p.paired.progress.Add(1)
 	}
 	switch {
-	case ps.received >= t.want:
+	case got >= t.want:
 		return true, nil
 	case ps.state == tcpClose:
 		// A reset reached the proxy's side before the proxy closed it (a

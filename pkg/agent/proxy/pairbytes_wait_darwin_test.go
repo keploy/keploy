@@ -108,7 +108,7 @@ func TestAPooledWriteAStarvedHandlerHoldsBackIsWaitedForOnDarwin(t *testing.T) {
 	if got := pending[0].want; got != n {
 		t.Fatalf("the wait's target is %d bytes, want the %d the application wrote", got, n)
 	}
-	if got := receivedFrom(t, proxySide, pending[0].isn); got >= n {
+	if got := receivedFrom(t, proxySide, pending[0].base.isn); got >= n {
 		t.Fatalf("the proxy's side received %d of %d at once: the fixture holds nothing back", got, n)
 	}
 	done := make(chan error, 1)
@@ -118,7 +118,7 @@ func TestAPooledWriteAStarvedHandlerHoldsBackIsWaitedForOnDarwin(t *testing.T) {
 	for read < n {
 		select {
 		case err := <-done:
-			if got := receivedFrom(t, proxySide, pending[0].isn); got < n {
+			if got := receivedFrom(t, proxySide, pending[0].base.isn); got < n {
 				t.Fatalf("WaitPairedBytes returned %v with %d of %d bytes received", err, got, n)
 			}
 			done <- err

@@ -117,7 +117,7 @@ type trackedConn struct {
 	raw syscall.RawConn
 	// base is what the platform reads, as c is kept and before its handler
 	// runs, that its later counts of what the socket received are taken
-	// from (beginCounts; on macOS, the application's first sequence
+	// from (sockBase.read; on macOS, the application's first sequence
 	// number).
 	base sockBase
 	// forgotten: its handler is done with it (forget).
@@ -211,7 +211,7 @@ func (t *inflight) trackTold(conn net.Conn, flights *learn.Tracker) *trackedConn
 	if sc, ok := conn.(syscall.Conn); ok {
 		if raw, err := sc.SyscallConn(); err == nil {
 			tc.raw = raw
-			tc.beginCounts()
+			tc.base.read(raw)
 		}
 	}
 	t.mu.Lock()
