@@ -535,10 +535,16 @@ func TestAWordAnEscapeGluesInOneRunIsNoWordThatMoved(t *testing.T) {
 // begins "0A" holds the same line in its own quoted-printable form, and
 // shares no value with this one. A line only that form shows (an id an
 // escape hid) is still one (TestIDsAnEscapeHidesThatSwapMoved,
-// TestAnIDQuotedPrintableHidesIsFollowed).
+// TestAnIDQuotedPrintableHidesIsFollowed). The heads spell the line in
+// lower case, in mixed case and percent-encoded: in each, the value holds
+// it as written in one of its forms, decoded or case-folded.
 func TestALineAnEscapeBreaksInOneRunIsNoLineThatFlowed(t *testing.T) {
 	at := time.Date(2026, 11, 2, 11, 48, 4, 385340565, time.UTC)
-	for _, head := range []string{"t=1730546884,v1=", "sha256="} {
+	for _, head := range []string{
+		"t=1730546884,v1=", "sha256=",
+		"X-Sig: t=1730546884,v1=", "Sig: T=1730546884,V1=", "SHA256=",
+		"t%3D1730546884%2Cv1=",
+	} {
 		t.Run(head, func(t *testing.T) {
 			for _, earlierLive := range []bool{false, true} {
 				// The earlier test's signature that begins "0A", recorded
