@@ -542,11 +542,12 @@ type Config struct {
 	// side, so a side whose end answers the first one's is told after it,
 	// and before the stream ends. An end the relay makes itself (the
 	// context's, a pause, the other forwarder's teardown) and a write that
-	// fails are not a peer's end, and are not told. The caller wires it to
-	// supervisor.Session.MarkPeerEnded, so a parser whose stream ended with
-	// a call unanswered knows which side ended it, and how (the HTTP
-	// recorder records the upstream's fault, or the client giving up). It
-	// must not block. Nil is safe.
+	// fails are not a peer's end, and are not told. The proxy wires it to
+	// its peerEndMarker, which marks the end on the supervisor.Session
+	// (MarkPeerEndedBy), so a parser whose stream ended with a call
+	// unanswered knows which side ended it, and how (the HTTP recorder
+	// records the upstream's fault, or the client giving up, unless the end
+	// records no fault). It must not block. Nil is safe.
 	PeerEnded func(dir fakeconn.Direction, reset bool)
 }
 

@@ -1043,7 +1043,9 @@ type AppConnEnd struct {
 // read. ok is false where it holds nothing for the connection: one whose end
 // came before the application released it (a shutdown(2), or the proxy's end
 // first), a record the kernel's LRU evicted, or hooks that make no such
-// record.
+// record. A client's end the proxy reads where its DestInfo is not a
+// ConnEndInfo records no fault: nothing tells the application's giving up
+// from its process's exit.
 type ConnEndInfo interface {
 	TakeAppConnEnd(app netip.AddrPort) (end AppConnEnd, ok bool)
 }
