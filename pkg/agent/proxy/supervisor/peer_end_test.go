@@ -93,16 +93,19 @@ func TestEndFollowedStopIsTheFirstEndReadAfterTheStopBegan(t *testing.T) {
 	}
 	// The mark has a bit of its own in peerEnds, apart from the server's
 	// unasked bytes (ServerSpokeUnasked: set by the floor, cleared by each
-	// request) and from an end where the client stopped taking the stream
-	// (EndedWhereClientStopped): neither sets it, the stop sets neither, and
-	// a request's clear leaves it.
+	// request), from a stream that ended with its connection
+	// (EndedWithConnection: in the same word), and from an end where the
+	// client stopped taking the stream (EndedWhereClientStopped): none sets
+	// it, the stop sets none, and a request's clear leaves it.
 	for _, other := range []struct {
 		name string
 		set  func(*Session)
 		read func(*Session) bool
 	}{
 		{"the server spoke unasked", func(s *Session) { s.dropped(fakeconn.Dropped{}) }, (*Session).ServerSpokeUnasked},
-		{"the stream ended where the client stopped", (*Session).MarkEndedWhereClientStopped, (*Session).EndedWhereClientStopped},
+		{"the client's stream ended with its connection", func(s *Session) { s.MarkEndedWithConnection(fakeconn.FromClient) }, func(s *Session) bool { return s.EndedWithConnection(fakeconn.FromClient) }},
+		{"the destination's stream ended with its connection", func(s *Session) { s.MarkEndedWithConnection(fakeconn.FromDest) }, func(s *Session) bool { return s.EndedWithConnection(fakeconn.FromDest) }},
+		{"the stream ended where the client stopped", func(s *Session) { s.MarkEndedWhereClientStopped(func() []byte { return nil }) }, (*Session).EndedWhereClientStopped},
 	} {
 		s := &Session{}
 		other.set(s)
