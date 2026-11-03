@@ -412,6 +412,30 @@ func TestReadBackPlanReadsBackOnlyTheTestsOwnWrites(t *testing.T) {
 		t.Fatalf("a place answered already: vars %+v binds %+v", p.vars, p.binds)
 	}
 
+	// A binding the test is given (the test case's own values) keeps its
+	// name: the variable bound at the write takes another, even where the
+	// given one holds the name the write's place would take.
+	fresh := func() (*learn.Tracker, uint64) {
+		tr := clockedTracker()
+		tr.Begin()
+		return tr, tr.Placed().Test
+	}
+	ftr, ftest := fresh()
+	var own string
+	for name := range h.readBackPlan(ftr, ftest, get, []*models.Mock{put}, exchange(nil), nil, newPairing()).binds["mock-0"] {
+		own = name
+	}
+	ftr, ftest = fresh()
+	p = h.readBackPlan(ftr, ftest, get, []*models.Mock{put}, exchange(nil), []variables.Binding{{Name: own, Value: "c-9"}}, newPairing())
+	if len(p.binds["mock-0"]) != 1 {
+		t.Fatalf("a given binding of the place's name: binds %+v, want one variable bound at mock-0", p.binds)
+	}
+	for name := range p.binds["mock-0"] {
+		if own == "" || name == own {
+			t.Fatalf("the write's variable is named %q beside a given binding %q, want another name", name, own)
+		}
+	}
+
 	// A call served twice that stored nothing (a read) leaves no mark
 	// whose serve is unknown: the write is read back all the same.
 	if p := h.readBackPlan(tr, test, get, []*models.Mock{put, get, get}, exchange(nil), nil, newPairing()); len(p.vars) != 1 || len(p.binds["mock-0"]) != 1 {
