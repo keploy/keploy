@@ -20,6 +20,19 @@ func stalledOutClock(m *SyncMockManager) {
 	m.outStall = time.Millisecond
 }
 
+// takeOut takes the next mock off ch, as its consumer would. A mock the drainer
+// gave up never comes: the bound only turns that hang into a failure.
+func takeOut(t *testing.T, ch <-chan *models.Mock) *models.Mock {
+	t.Helper()
+	select {
+	case got := <-ch:
+		return got
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("the consumer took nothing: a mock it was owed never came")
+		return nil
+	}
+}
+
 // sendOwnedAndWait sends mock for owner, and waits for its outcome.
 func sendOwnedAndWait(t *testing.T, m *SyncMockManager, mock *models.Mock, owner string) bool {
 	t.Helper()
@@ -189,7 +202,7 @@ func TestTheOutQueueIsBoundedByBytes(t *testing.T) {
 		t.Fatalf("owners recorded: test-1 %v, test-2 %v; want only test-2's", m.WasMockDroppedForTC("test-1"), m.WasMockDroppedForTC("test-2"))
 	}
 	for i := 0; i < 3; i++ {
-		<-ch // the consumer takes again: the filler, small, big
+		takeOut(t, ch) // the consumer takes again: the filler, small, big
 	}
 	for i := 0; i < 2; i++ {
 		select {
@@ -740,7 +753,7 @@ func TestTheOutQueueBoundIsTheProcesss(t *testing.T) {
 	}
 	for _, ch := range []chan *models.Mock{chA, chB} {
 		for i := 0; i < 3; i++ {
-			<-ch // the consumers take again: the filler, then what was queued
+			takeOut(t, ch) // the consumers take again: the filler, then what was queued
 		}
 	}
 	for i := 0; i < 4; i++ {
@@ -772,7 +785,7 @@ func TestOutQueuedUntilTheQueueIsOnTheChannel(t *testing.T) {
 		t.Fatal("a mock queued behind a full channel, and not OutQueued")
 	}
 	<-ch // the consumer takes again
-	if got := <-ch; got.Name != "a" {
+	if got := takeOut(t, ch); got.Name != "a" {
 		t.Fatalf("the channel carried %q, want a", got.Name)
 	}
 	waitOutQueue(t, m)
