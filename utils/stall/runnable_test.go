@@ -116,6 +116,63 @@ func TestSampler_AWaitBesideLateSamplesIsNotPaidTwice(t *testing.T) {
 	}
 }
 
+// A late sample counts the CPU every thread of the process used, and other
+// threads can use it while the consumer waits for a CPU: a sampler woken on
+// time also waits, unseen in its own thread's account, for a stop of the
+// world or a scheduler slot held by a thread that waits for a CPU itself. In
+// a four-CPU quota beside busy loops, 523 such late samples in 40 runs counted
+// 3 s of the process's CPU, and none of it was ever set against the threads'
+// waits. A wait is set against the time late samples did not count first,
+// and what does not fit there comes out of what they counted, so a consumer
+// that waits the whole time is not judged on other threads' CPU. Every fifth
+// sample here is 30 ms late (its own thread's wait none of it), the process
+// using 3 ms of CPU in each, while the consumer waits the whole time.
+func TestMeter_OtherThreadsCPUInLateSamplesIsNotTheWaitingConsumersTime(t *testing.T) {
+	const grace = 150 * time.Millisecond
+	t.Run("the waits read by the sampler and at looks", func(t *testing.T) {
+		s, src := newFakeSampler(0)
+		m := NewMeter(heldClock{s}, grace)
+		for n := range 1000 { // 15 s of wall time, 200 late samples counting 600 ms
+			iv := Tick
+			if n%5 == 4 {
+				iv = 4 * Tick
+			}
+			src.wall, src.cpu = src.wall.Add(iv), src.cpu+3*time.Millisecond
+			src.held += iv
+			s.sample()
+			if n%3 == 0 && m.Expired() {
+				t.Fatalf("expired after %d samples with %v on the samples and %v owed: the consumer waited the whole time", n+1, m.Stalled(), s.waitOwed)
+			}
+		}
+	})
+	t.Run("a wait read past the last sample, then a late sample", func(t *testing.T) {
+		s, src := newFakeSampler(0)
+		m := NewMeter(heldClock{s}, grace)
+		for n := range 100 {
+			for range 4 {
+				src.wall, src.cpu = src.wall.Add(Tick), src.cpu+time.Millisecond
+				src.held += Tick
+				s.sample()
+			}
+			// The sampler is held off; the consumer waits 30 ms past the
+			// last sample, and a look reads it.
+			src.wall = src.wall.Add(3 * Tick)
+			src.held += 3 * Tick
+			if m.Expired() {
+				t.Fatalf("expired at look %d with %v on the samples: the consumer waited the whole time", n, m.Stalled())
+			}
+			// The sample, 40 ms after the last, its own wait none of it:
+			// late. Other threads ran 25 ms of it; the consumer waited on.
+			src.wall, src.cpu = src.wall.Add(Tick), src.cpu+25*time.Millisecond
+			src.held += Tick
+			s.sample()
+			if m.Expired() {
+				t.Fatalf("expired after late sample %d with %v on the samples and %v owed: the consumer waited the whole time", n, m.Stalled(), s.waitOwed)
+			}
+		}
+	})
+}
+
 // Behind a CPU quota that other work spends three parts in four, the sampler
 // wakes late, its own thread waiting out the throttle, and every thread of the
 // process waits as long. That wait is paid once, by on-time samples (the

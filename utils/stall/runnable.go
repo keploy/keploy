@@ -157,6 +157,12 @@ type sampler struct {
 	// sample, in time no sample has counted yet: the next sample pays it if
 	// it counts that time (on time), and it goes either way.
 	ahead time.Duration
+	// What late samples counted since the last read that no wait has taken
+	// (lateGot), and the time of their intervals they did not count
+	// (lateGap): a wait a read finds is set against that time before what
+	// they counted.
+	lateGot time.Duration
+	lateGap time.Duration
 	// The sampling thread's wait for a CPU so far, at the last sample
 	// (ownOK: it could be read).
 	lastOwn time.Duration
@@ -263,6 +269,7 @@ func (s *sampler) begin() {
 		s.reads++
 	}
 	s.onTime, s.waitOwed, s.ahead, s.heldFrom = 0, 0, 0, 0
+	s.lateGot, s.lateGap = 0, 0
 }
 
 // sample adds what the process could run since the last sample.
@@ -286,6 +293,17 @@ func (s *sampler) sample() {
 		pay := min(got, s.waitOwed)
 		s.waitOwed -= pay
 		got -= pay
+	} else {
+		// A late sample counts what the process ran, every thread of it,
+		// and the waits read past the last sample lie in its interval: in
+		// the part it did not count, or in what other threads ran while
+		// the one waiting could not. Only what does not fit in the part it
+		// did not count comes out of what it counted.
+		gap := accrue(iv, 0, false, share) - got
+		owe := min(got, max(s.ahead-gap, 0))
+		got -= owe
+		s.lateGot += got
+		s.lateGap += max(gap-s.ahead, 0)
 	}
 	s.ahead = 0
 	s.ran.Add(int64(got))
@@ -364,6 +382,7 @@ func (s *sampler) read() (wall time.Time, cpu time.Duration, cpuOK bool, waited 
 func (s *sampler) readWaits(ahead bool) {
 	s.waitWall = s.lastWall
 	before := s.onTime
+	lateGot, lateGap := s.lateGot, s.lateGap
 	s.mu.Unlock()
 	held, heldFor := s.src.heldOff()
 	var wall time.Time
@@ -374,11 +393,18 @@ func (s *sampler) readWaits(ahead bool) {
 	}
 	s.mu.Lock()
 	took := min(held, s.onTime)
-	s.waitOwed += took
+	rest := held - took
 	s.ahead = 0
 	if ahead {
-		s.ahead = min(held-took, max(wall.Sub(s.lastWall), 0))
+		s.ahead = min(rest, max(wall.Sub(s.lastWall), 0))
+		rest -= s.ahead
 	}
+	// The rest lay in time late samples counted before the read, or did
+	// not count: set against the time they did not count first, only what
+	// does not fit there is owed out of what they counted.
+	s.waitOwed += took + min(max(rest-lateGap, 0), lateGot)
+	s.lateGot -= lateGot
+	s.lateGap -= lateGap
 	// What samples counted while the read was in flight came after it
 	// began: the next read takes from it too, whatever the carry's bound.
 	s.onTime = min(before-took, heldEvery) + s.onTime - before
