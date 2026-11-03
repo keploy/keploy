@@ -221,7 +221,12 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// the server's timing, never the app's: it does not decide the mock.
 		// The exchange is left out, and said so (LeftOutClientClosedPartway),
 		// where what the client read is no response: it closed before the
-		// whole head came. An
+		// whole head came. It is left out too, with that end's reason, where
+		// the client's end came first and records no fault
+		// (partAnswerLeftOut: the recording's stop, its process's own exit,
+		// or an end the hooks cannot judge): that close is not the app's
+		// stopping reading. The kind of end asked is the first end's, so a
+		// client's end marked after the server's is not asked. An
 		// observe-only capture carries only what the client read, so when its
 		// stream ended with the connection (EndedWithConnection) it is the
 		// client that stopped reading and closed, and the response is
@@ -275,9 +280,11 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		if streamEnded && (sess.EndedWhereClientStopped() || fault != nil && fault.Kind == models.FaultStoppedReading) {
 			if _, _, _, headWhole := messageHead(finalResp, true); fault == nil || !headWhole || sess.IsMockIncomplete() {
 				// The client closed the connection before the response's
-				// head came whole: no response to record. Or the recording's
-				// stop, or a capture hole, ended the stream where the client
-				// stopped taking it (partAnswerFault). Its stream has
+				// head came whole: no response to record. Or a capture hole,
+				// or the recording's stop read first on the server's side (a
+				// client's first end at the stop is left out above), ended
+				// the stream where the client stopped taking it
+				// (partAnswerFault). Its stream has
 				// ended, and so has every answer after it. A mark on the
 				// incomplete-mock flag is a chunk the capture lost, the
 				// likelier cause, so the exchange is reported under it:

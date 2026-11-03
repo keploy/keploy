@@ -278,7 +278,9 @@ func (p *Proxy) recordViaSupervisor(
 		// the message there, not the destination (the HTTP recorder records
 		// that response as far as the client took it, with a stopped_reading
 		// fault, and leaves out, saying why, one whose head the client did
-		// not have whole).
+		// not have whole, and one whose client's end came first and records
+		// no fault: the recording's stop, its process's own exit, or an end
+		// the hooks cannot judge).
 		ClientStopped: svSess.MarkEndedWhereClientStopped,
 		// How each side ended its side of the connection, and which ended
 		// first: a call the destination never answered is recorded with

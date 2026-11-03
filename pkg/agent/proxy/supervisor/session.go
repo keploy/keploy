@@ -153,11 +153,11 @@ type Session struct {
 	// (MarkPeerEndedBy; peerEndFirstShift), and whether that first end
 	// records no fault (EndFollowedStop) and, from noFaultEndShift, which
 	// such end it was (FirstEndNoFault); whether the server spoke unasked
-	// before the current request (ServerSpokeUnasked); and, from
-	// endedWithConnectionShift, one bit per fakeconn.Direction: that stream
-	// ended because its connection did (MarkEndedWithConnection), and whether
-	// the destination's stream ended where the client stopped taking it
-	// (endedWhereClientStoppedBit). Internal; one word here, in the padding
+	// before the current request (ServerSpokeUnasked); whether the
+	// destination's stream ended where the client stopped taking it
+	// (endedWhereClientStoppedBit); and, from endedWithConnectionShift, one
+	// bit per fakeconn.Direction: that stream ended because its connection
+	// did (MarkEndedWithConnection). Internal; one word here, in the padding
 	// after the bools, so a Session stays in its size class.
 	peerEnds atomic.Uint32
 
@@ -1372,14 +1372,15 @@ const (
 
 // LeftOutClientClosedPartway is the cause an HTTP/1 recorder leaves an
 // exchange out for when the client closed the connection partway through its
-// response: the relay ended the response's stream where the client stopped
-// taking it (EndedWhereClientStopped), and the response had not ended there.
-// The client gave up on the call (its timeout, a cancelled call) or wanted no
-// more of it, and the capture cannot tell which. Recorded as far as the client
-// had it, replay would serve a complete-looking shorter response to a call
-// that saw a timeout at record. Neither is a capture loss: the call itself did
-// not complete, so there is no whole exchange to record. Of class
-// leftOutClientClosed.
+// response and what it read is not recorded: it closed before the response's
+// head came whole (no response to record), the capture lost a chunk of it
+// (the mark comes before the reason), or the stream ended where the client
+// stopped taking it (EndedWhereClientStopped) with no fault of the client's
+// to record it with (a capture hole, or the recording's stop read first on
+// the server's side). A response the client read past its head, and
+// stopped reading, is recorded as far as it read it, with the fault
+// models.FaultStoppedReading, instead. The call itself did not complete, so
+// there is no whole exchange to record. Of class leftOutClientClosed.
 const LeftOutClientClosedPartway = "the client closed the connection partway through the response"
 
 // The reasons an HTTP/1 recorder leaves an exchange out for when the client's
