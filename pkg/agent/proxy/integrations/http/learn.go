@@ -388,9 +388,11 @@ type httpKnown struct {
 // position included; noise learned before it (by the request-body learner
 // it replaces) names it in the request matcher's dialect. A place learned as
 // a read of the application's clock (clocks) is no learned noise's to excuse.
+// A text learned by its words (learn.NoiseWords) is not excused whole: Words
+// names its unchecked words, and the learn step compares the rest.
 func (k httpKnown) Excused(l learn.Leaf) (bool, bool) {
 	_, clock := k.clocks[l.Path]
-	if !clock && (learnedCovers(k.learned, l.Path) || l.Noise != l.Path && hasKey(k.learned, l.Noise)) {
+	if !clock && (learnedCovers(k.learned, l.Path) || l.Noise != l.Path && learnedWhole(k.learned, l.Noise)) {
 		return true, true
 	}
 	if k.n.declared(l) {
@@ -403,21 +405,35 @@ func (k httpKnown) Excused(l learn.Leaf) (bool, bool) {
 	return false, false
 }
 
-func hasKey(m map[string][]string, k string) bool {
-	_, ok := m[k]
-	return ok
+// Words implements learn.WordsKnown: the words of the text at path its
+// learned noise leaves unchecked (learn.UncheckedWords), where it learned
+// that text by its words. A read of the application's clock is no learned
+// noise's to excuse, word or whole.
+func (k httpKnown) Words(path string) ([]int, bool) {
+	if _, clock := k.clocks[path]; clock {
+		return nil, false
+	}
+	return learn.UncheckedWords(k.learned[path])
 }
 
-// learnedCovers reports whether learned noise names the leaf at path: the
-// leaf itself, or a container holding it. Unlike keploy.yml's noise, a
+// learnedWhole reports whether learned noise names the place k whole: noise
+// at k that is no words pattern (learn.IsNoiseWords).
+func learnedWhole(m map[string][]string, k string) bool {
+	v, ok := m[k]
+	return ok && !learn.IsNoiseWords(v)
+}
+
+// learnedCovers reports whether learned noise names the leaf at path whole:
+// the leaf itself, or a container holding it. Unlike keploy.yml's noise, a
 // learned entry names exactly the field that drifted, never a field whose
-// name it happens to contain, nor another element of its array.
+// name it happens to contain, nor another element of its array. A words
+// pattern names the words of its one text, and covers nothing whole.
 func learnedCovers(learned map[string][]string, path string) bool {
-	if _, ok := learned[path]; ok {
+	if learnedWhole(learned, path) {
 		return true
 	}
-	for p := range learned {
-		if strings.HasPrefix(path, p+".") || strings.HasPrefix(path, p+"[") {
+	for p, v := range learned {
+		if (strings.HasPrefix(path, p+".") || strings.HasPrefix(path, p+"[")) && !learn.IsNoiseWords(v) {
 			return true
 		}
 	}
@@ -2014,6 +2030,12 @@ func (k excusedAt) Excused(l learn.Leaf) (bool, bool) {
 		return true, false
 	}
 	return k.Known.Excused(l)
+}
+
+// Words implements learn.WordsKnown: Known's words (a leaf at is excused
+// whole first).
+func (k excusedAt) Words(path string) ([]int, bool) {
+	return learn.WordsOf(k.Known, path)
 }
 
 // elsewhereWhy is what the learn step says of a call that is exactly x, a

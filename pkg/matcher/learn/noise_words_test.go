@@ -3,6 +3,8 @@ package learn
 import (
 	"reflect"
 	"testing"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // NoiseWords names the words of a text that changed, whole where the text
@@ -80,6 +82,105 @@ func TestWordsAdmitChecksEveryWordButTheUncheckedOnes(t *testing.T) {
 	} {
 		if got := WordsAdmit(rec, c.live, c.words); got != c.want {
 			t.Errorf("%s: WordsAdmit(%q, %v) = %v; want %v", c.name, c.live, c.words, got, c.want)
+		}
+	}
+}
+
+// Two learnings of one place's text by its words leave unchecked the words
+// either changed, in order: a later run that moved another word adds it,
+// never replaces the first run's. Noise of any other kind keeps what is
+// there: whole stays whole, a words pattern stays beside whole noise,
+// keploy.yml-style patterns or one that does not read back.
+func TestMergeNoiseUnionsTheWordsOfTwoWordsPatterns(t *testing.T) {
+	w := func(words ...int) []string { return []string{NoiseWordsPattern(words)} }
+	for _, c := range []struct {
+		name                     string
+		existing, detected, want []string
+	}{
+		{"another word", w(1), w(3), w(1, 3)},
+		{"an earlier word", w(3), w(1), w(1, 3)},
+		{"shared words once", w(1, 3), w(0, 3), w(0, 1, 3)},
+		{"the detected tail", w(0), w(2, 4), w(0, 2, 4)},
+		{"the existing tail", w(2, 4), w(0), w(0, 2, 4)},
+		{"whole stays whole", []string{}, w(1), []string{}},
+		{"words beside whole", w(1), []string{}, w(1)},
+		{"words beside a pattern", w(1), []string{"^r-[0-9]+$"}, w(1)},
+		{"a pattern beside words", []string{"^r-[0-9]+$"}, w(1), []string{"^r-[0-9]+$"}},
+		{"an existing pattern that does not read back", []string{"^keploy:words 01$"}, w(1), []string{"^keploy:words 01$"}},
+		{"a detected pattern that does not read back", w(1), []string{"^keploy:words x$"}, w(1)},
+	} {
+		if got := MergeNoise(c.existing, c.detected); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: MergeNoise(%q, %q) = %q, want %q", c.name, c.existing, c.detected, got, c.want)
+		}
+	}
+	existing := map[string][]string{"body.note": w(1), "body.a": {}}
+	got := MergeReqBodyNoise(existing, map[string][]string{"body.note": w(3), "body.b": {}})
+	if want := map[string][]string{"body.note": w(1, 3), "body.a": {}, "body.b": {}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("MergeReqBodyNoise = %v, want %v", got, want)
+	}
+	if !reflect.DeepEqual(existing["body.note"], w(1)) {
+		t.Fatalf("MergeReqBodyNoise changed its input: %v", existing)
+	}
+}
+
+// What a merge onto a recording adds names a place whose words pattern grew,
+// as it names a new place, with the switch on and off; a words pattern that
+// adds no word adds nothing.
+func TestMergeLearnedNamesAWordsPatternThatGrew(t *testing.T) {
+	w := func(words ...int) []string { return []string{NoiseWordsPattern(words)} }
+	for _, proven := range []string{"1", "0"} {
+		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", proven)
+			for _, c := range []struct {
+				detected []string
+				added    []string
+				want     []string
+			}{
+				{w(3), []string{"body.new (noise)", "body.note (noise)"}, w(1, 3)},
+				{w(1), []string{"body.new (noise)"}, w(1)},
+			} {
+				m := &models.Mock{Spec: models.MockSpec{ReqBodyNoise: map[string][]string{"body.note": w(1)}}}
+				added := MergeLearned(m, models.MockState{ReqBodyNoise: map[string][]string{"body.note": c.detected, "body.new": w(0)}}, nil)
+				if !reflect.DeepEqual(added, c.added) || !reflect.DeepEqual(m.Spec.ReqBodyNoise["body.note"], c.want) {
+					t.Fatalf("merging %q: added %q noise %v; want %q, %q", c.detected, added, m.Spec.ReqBodyNoise, c.added, c.want)
+				}
+			}
+		})
+	}
+}
+
+// wordsKnown learned the texts at its paths by their words, and excuses
+// nothing whole.
+type wordsKnown map[string][]int
+
+func (wordsKnown) Excused(Leaf) (bool, bool) { return false, false }
+
+func (k wordsKnown) Words(path string) ([]int, bool) {
+	w, ok := k[path]
+	return w, ok
+}
+
+// A text a Known learned by its words is the same where only those words
+// changed, and drifted where any other did or its skeleton moved: the learn
+// step reads it as it reads any value. A Known that learned no words reads
+// it whole, and a value that is no text is never read by words.
+func TestCompareReadsATextLearnedByItsWordsWordByWord(t *testing.T) {
+	rec := body(t, "k", `{"note":"lead r-1 created","n":1}`)
+	for _, c := range []struct {
+		name  string
+		live  string
+		known Known
+		drift []string
+	}{
+		{"its word changed", `{"note":"lead r-2 created","n":1}`, wordsKnown{"body.note": {1}}, nil},
+		{"another word changed", `{"note":"deal r-2 created","n":1}`, wordsKnown{"body.note": {1}}, []string{"body.note"}},
+		{"its skeleton moved", `{"note":"lead r-2 created now","n":1}`, wordsKnown{"body.note": {1}}, []string{"body.note"}},
+		{"another place's words", `{"note":"lead r-2 created","n":1}`, wordsKnown{"body.other": {1}}, []string{"body.note"}},
+		{"no words known", `{"note":"lead r-2 created","n":1}`, known{}, []string{"body.note"}},
+		{"a number is no text", `{"note":"lead r-1 created","n":2}`, wordsKnown{"body.n": {0}}, []string{"body.n"}},
+	} {
+		if d := Compare(body(t, "k", c.live), rec, c.known); d.Structural != "" || !reflect.DeepEqual(d.Drift, c.drift) {
+			t.Errorf("%s: structural %q drift %v, want drift %v", c.name, d.Structural, d.Drift, c.drift)
 		}
 	}
 }

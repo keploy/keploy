@@ -38,6 +38,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/matcher"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -463,27 +464,15 @@ func DetectJSONBodyDrift(recorded, live *JSONBody, known map[string][]string, ty
 }
 
 // MergeLearned returns a fresh map combining already-recorded noise with newly
-// detected noise. Existing entries win on key collision (learned noise is
-// monotonic — once a field is noise it stays noise), and every value slice is
-// deep-copied so the result shares no backing storage with its inputs. This is
-// the single merge helper behind HTTP's HTTPReq.ReqBodyNoise, the kind-agnostic
-// MockSpec.ReqBodyNoise, and the on-disk persistence in mockdb.
+// detected noise, as learn.MergeReqBodyNoise does: learned noise is monotonic
+// (once a field is noise it stays noise), so existing entries win on key
+// collision but for two words patterns, which leave unchecked the words either
+// does (learn.MergeNoise); every value slice is deep-copied so the result
+// shares no backing storage with its inputs. This is the single merge helper
+// behind HTTP's HTTPReq.ReqBodyNoise, the kind-agnostic MockSpec.ReqBodyNoise,
+// and the on-disk persistence in mockdb.
 func MergeLearned(existing, detected map[string][]string) map[string][]string {
-	out := make(map[string][]string, len(existing)+len(detected))
-	for k, v := range existing {
-		vc := make([]string, len(v))
-		copy(vc, v)
-		out[k] = vc
-	}
-	for k, v := range detected {
-		if _, ok := out[k]; ok {
-			continue
-		}
-		vc := make([]string, len(v))
-		copy(vc, v)
-		out[k] = vc
-	}
-	return out
+	return learn.MergeReqBodyNoise(existing, detected)
 }
 
 // MergeKnown unions two read-only noise sets into a fresh map; entries in a win

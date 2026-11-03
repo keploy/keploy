@@ -6,6 +6,7 @@ package learn
 // those cycles are served the recordings as the next keploy test reads them.
 
 import (
+	"slices"
 	"sort"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -14,8 +15,9 @@ import (
 
 // MergeReqBodyNoise returns a fresh map combining the existing on-disk
 // request-body noise with newly-detected noise carried on the MockState.
-// Existing entries win on key collision (noise is monotonic), and every slice
-// is copied so the result shares no backing storage with its inputs.
+// Noise is monotonic: on a key collision existing noise stays, but two
+// words patterns leave unchecked the words either does (MergeNoise). Every
+// slice is copied so the result shares no backing storage with its inputs.
 func MergeReqBodyNoise(existing, detected map[string][]string) map[string][]string {
 	out := make(map[string][]string, len(existing)+len(detected))
 	for k, v := range existing {
@@ -24,7 +26,8 @@ func MergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 		out[k] = vc
 	}
 	for k, v := range detected {
-		if _, ok := out[k]; ok {
+		if cur, ok := out[k]; ok {
+			out[k] = MergeNoise(cur, v)
 			continue
 		}
 		vc := make([]string, len(v))
@@ -64,11 +67,7 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 	if !provenswitch.On() {
 		// Without the switch nothing learns variables, and noise merges as
 		// it always has.
-		for k := range st.ReqBodyNoise {
-			if _, ok := mock.Spec.ReqBodyNoise[k]; !ok {
-				added = append(added, k+" (noise)")
-			}
-		}
+		added = append(added, noiseAdded(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)...)
 		if len(st.ReqBodyNoise) > 0 {
 			mock.Spec.ReqBodyNoise = MergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
 		}
@@ -128,11 +127,7 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 				noise[k] = v
 			}
 		}
-		for k := range noise {
-			if _, ok := mock.Spec.ReqBodyNoise[k]; !ok {
-				added = append(added, k+" (noise)")
-			}
-		}
+		added = append(added, noiseAdded(mock.Spec.ReqBodyNoise, noise)...)
 		if len(noise) > 0 {
 			mock.Spec.ReqBodyNoise = MergeReqBodyNoise(mock.Spec.ReqBodyNoise, noise)
 		}
@@ -418,4 +413,18 @@ func (l *KeptLearning) Into(m *models.Mock) {
 		return
 	}
 	MergeLearned(m, l.states[m.Name], l.binds[m.Name])
+}
+
+// noiseAdded is what merging detected noise onto existing noise adds
+// (MergeReqBodyNoise), each as "<path> (noise)": a place existing has no
+// noise at, or a words pattern detected leaves more words of unchecked.
+func noiseAdded(existing, detected map[string][]string) []string {
+	var added []string
+	for k, v := range detected {
+		cur, ok := existing[k]
+		if !ok || !slices.Equal(MergeNoise(cur, v), cur) {
+			added = append(added, k+" (noise)")
+		}
+	}
+	return added
 }

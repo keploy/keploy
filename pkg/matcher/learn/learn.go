@@ -256,7 +256,7 @@ func leafChange(p string, live, rec Shape, known Known) (c leafDiff, l, r Leaf) 
 			return leafSame, l, r
 		}
 		return leafRetyped, l, r
-	case l.Value == r.Value || excused:
+	case l.Value == r.Value || excused || wordsSame(known, l, r):
 		return leafSame, l, r
 	case r.Unnamed:
 		return leafUnnamedDrift, l, r
