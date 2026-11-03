@@ -836,3 +836,39 @@ func TestAnEscapedPlusIsAPlusWhereTheValueReadsAsQuotedPrintable(t *testing.T) {
 		}
 	}
 }
+
+// qpForm, which reads every payload a read decodes and each text of its
+// base64 runs, allocates only the form it gives, even right after a
+// collection has emptied the pools a read takes state from
+// (allocatedOnOneCPU): nothing where the form is the text itself, and at
+// most eight bytes for each of the text where its escapes are decoded (up
+// to three passes, the soft line breaks out, the escapes read and the
+// quoted-printable ones decoded, each building a copy that grows by
+// doubling). The texts are 42 bytes or more, the shortest the declared
+// header's pattern (qpDeclared) matches; asking that pattern took its
+// matcher's state of 37 KB for each.
+func TestTheQuotedPrintableFormOfAReadTakesNoPatternsState(t *testing.T) {
+	asIs := []string{
+		"w12x1000 order placed by the customer at the counter of the shop",
+		`{"at":"2026-11-03T14:00:00Z","next":"2026-11-03T15:00:00Z","n":1730546884}`,
+		strings.Repeat("word ", 400),
+	}
+	decoded := []string{
+		"Caf=C3=A9 au lait, the customer ordered two of them at the counter",
+		`{"mail":"Caf=C3=A9 =\r\nau lait, the customer ordered two at the counter"}`,
+		strings.Repeat("eyJhIjoxfQ", 30) + "==",
+	}
+	for _, s := range asIs {
+		if got := qpForm(s); got != s {
+			t.Fatalf("qpForm(%q) = %q: want the text itself", s, got)
+		}
+		if n := allocatedOnOneCPU(func() { qpForm(s) }); n != 0 {
+			t.Errorf("qpForm of %d bytes that read as they are allocated %d bytes: want none", len(s), n)
+		}
+	}
+	for _, s := range decoded {
+		if n := allocatedOnOneCPU(func() { qpForm(s) }); n > 8*int64(len(s)) {
+			t.Errorf("qpForm of %d bytes allocated %d bytes: want at most %d", len(s), n, 8*len(s))
+		}
+	}
+}

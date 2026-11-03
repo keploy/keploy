@@ -655,8 +655,16 @@ func qpMustEscape(text []byte) bool {
 // (unescaped), with its soft line breaks taken out first (noSoftBreaks), in
 // their escaped spellings too ("=\\r\\n" of a mail in a JSON string), which
 // unescaping would turn into separators.
+//
+// It is qpFormRead's form, read without asking whether s reads as
+// quoted-printable: qpForm reads every payload a read decodes (decodeForms)
+// and each text of its base64 runs (b64Read), and asking the declared
+// header's pattern (qpDeclared) there took a matcher's state of 37 KB from
+// its pool for each of 42 bytes or more (the pattern's shortest match),
+// as the soft line breaks' pattern did before noSoftBreaks.
 func qpForm(s string) string {
-	q, _ := qpFormRead(s)
+	t, _ := qpSoftOut(s)
+	q, _, _ := qpRead(unescaped(t))
 	return q
 }
 
