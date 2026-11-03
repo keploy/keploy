@@ -1583,11 +1583,12 @@ func stampSeeds(byCase map[string]models.MappedTestCase, windows []models.ScopeW
 }
 
 // stampKeys writes into each test's mapping the key of the claim it began
-// under (claimKeyOf): its test process's, a test worker's own. A reader who moves one of the test's calls to
-// worker: (a call that is the app's own work, a token's first use) gives the
-// moved entry this key, so its replay serves it while that process holds
-// the run; without it keploy could not name the key in a set whose test
-// processes have several. A test begun under no claim gets none.
+// under (claimKeyOf): its test process's, a test worker's own. A reader who
+// moves one of the test's calls to worker: (a call that is the app's own
+// work, a token's first use) gives the moved entry this key, so its replay
+// serves it while that process holds the run; without it keploy could not
+// name the key in a set whose test processes have several. A test begun
+// under no claim gets none.
 func stampKeys(byCase map[string]models.MappedTestCase, windows []models.ScopeWindow, claims []models.ScopeWindow) {
 	for _, w := range windows {
 		key := claimKeyOf(claims, w.Instance, w.Start)
@@ -1615,12 +1616,13 @@ func flowOf(windows []models.ScopeWindow, test string) string {
 // setScopeMocks is startupMocks under the proven switch, split as the set
 // scope of mappings.yaml lists it: keploy decides no call's owner, so a
 // call is a test's only when a test's window holds it (held: a test
-// worker's call, only its own worker's), and every other one is the set's. startup: is what a test process did before its own first
-// test began, and the protocol-phase and app-start calls; worker: is every
-// other call outside every window, made between or after its tests, in
-// recorded order. Each keeps the key of the claim it was made under
-// (keyOf), and a call is split by the first window of that key (firstWindowByKey): a run
-// of several test binaries starts each one's start-up afresh, so a later
+// worker's call, only its own worker's), and every other one is the set's.
+// startup: is what a test process did before its own first test began, and
+// the protocol-phase and app-start calls; worker: is every other call
+// outside every window, made between or after its tests, in recorded order.
+// Each keeps the key of the claim it was made under (keyOf), and a call is
+// split by the first window of that key (firstWindowByKey): a run of
+// several test binaries starts each one's start-up afresh, so a later
 // binary's init or TestMain call, made after an earlier binary's tests, is
 // still its start-up. A call made under no claim keeps the run's first
 // window, and so does a set recorded without claims. A key no test began
