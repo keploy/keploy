@@ -87,10 +87,14 @@ func TestAnEchoPastPlacesTheCopyRuleShowedNoSourceIsLearnedAsTheEcho(t *testing.
 	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "stands in mock-1") || !strings.Contains(got.Why, echoSetAside+"record's full round gave the application mock-1 "+olderSetAside) {
 		t.Errorf("FALSE GREEN? 82 echoed, 1 in F beside SELECT 1 F gave only in an older test: %s (%q); want refused naming mock-1 and why", got.Kind, got.Why)
 	}
-	// Both, as noise is refused for both: the order first.
+	// Both: the recorded value holds b's word, and F gave b only in an older
+	// test, so the call may be a late call of that test. The copy rule sets
+	// b aside as no source of it at no point, and the value is refused as
+	// that late call, naming b, before any order is read
+	// (TestALateCallsValueAnOlderServeGaveIsNeverLearnedAsNoise).
 	got = classifyF(t, "slot 82", "slot 7", nil, []Raw{a.ServedAs(2).ServedAsRecorded().ServedInAnOlderTest(), b.ServedAs(1).ServedAsRecorded().ServedInAnOlderTest()}, echo("slot 82"))
-	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, echoSetAside+"the recording and record's full round gave the application the earlier answers in a different order") || strings.Contains(got.Why, olderSetAside) {
-		t.Errorf("FALSE GREEN? slot 82 echoed, slot 7 in F, F served b then a, both only in an older test: %s (%q); want refused for the order alone", got.Kind, got.Why)
+	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "record's full round gave the application mock-b only in an older test than the call's: the call may be a late call of that test") || strings.Contains(got.Why, olderSetAside) || strings.Contains(got.Why, echoLearned) {
+		t.Errorf("FALSE GREEN? slot 82 echoed, slot 7 in F, F served b then a, both only in an older test: %s (%q); want refused as a late call of b's test", got.Kind, got.Why)
 	}
 
 	// A word that is a source in both runs (both values hold it) is no
