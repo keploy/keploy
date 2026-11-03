@@ -1220,15 +1220,20 @@ func (o Order) olderTestLocked(id string) bool {
 
 // testOf is the number in the set (1 its first test) of the test, older
 // than the running one, in whose window F made the serves first to last
-// (Of) of a mock, as o's read numbered them: 0 where they were not all made
-// in one such test (one made at the start-up or between tests, two tests',
-// the running test's) or o cannot tell (no serve, an order not known).
+// (Of: first <= last, (0, 0) where o cannot tell, as no serve or an order
+// not known) of a mock, as o's read numbered them: 0 where they were not
+// all made in one such test (one made at the start-up or between tests,
+// two tests', the running test's) or o cannot tell. The running test began
+// at testFrom, the last of starts; a serve at the start-up stands before
+// the first of them (k 0), and one between tests in the window of none, as
+// the last such serve (outside) says: where the first is too, so is the
+// last, or a later test began between them.
 func (o Order) testOf(first, last int) int {
-	if first <= 0 || last < first || last >= o.testFrom || o.outside[first] || o.outside[last] {
+	if last >= o.testFrom || o.outside[last] {
 		return 0
 	}
 	k := sort.SearchInts(o.starts, first+1)
-	if k == 0 || k < len(o.starts) && last >= o.starts[k] {
+	if k < len(o.starts) && last >= o.starts[k] {
 		return 0
 	}
 	return k

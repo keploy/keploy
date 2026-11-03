@@ -18,55 +18,41 @@ import (
 // lateServes are the recordings F gave the application in an older test of
 // the set (givenWords.test) that hold live, the value a call carries now,
 // whole, as F gave it there (gaveWhole), in the order the word rule reads
-// them (offsetPlaces.words); none where the places could not be read
-// (offsetPlaces.unread).
+// them (offsetPlaces.words); none where a recording F gave earlier in the
+// set could not be read (offsetPlaces.unread), as it may hold the value too.
 func lateServes(live string, op *offsetPlaces) []givenWords {
-	if op == nil || op.unread != "" {
+	if op.unread != "" {
 		return nil
 	}
 	var out []givenWords
 	for _, g := range op.words {
-		if gave, known := g.gaveWhole(live); g.test > 0 && known && gave {
+		if g.test > 0 && g.gaveWhole(live) {
 			out = append(out, g)
 		}
 	}
 	return out
 }
 
-// gaveWhole reports whether F gave the application live whole, as one word
-// of a reading it is all of, in g's answer (gave), and whether keploy can
-// tell what F gave there (known): its recording's answer where F served it
-// as recorded, the view F gave of it where it stated one; not where no
-// adapter said, a view could not be read, or its serves gave views that
-// differ.
-func (g givenWords) gaveWhole(live string) (gave, known bool) {
+// gaveWhole reports whether keploy can tell that F gave the application
+// live whole, as one word in a reading of g's answer: its recording's answer
+// where F served it as recorded, the view F gave of it where it stated one;
+// never where no adapter said, a view could not be read, or its serves gave
+// views that differ. A word of a reading is a run of its bytes alone, so one
+// equal to live is all of it.
+func (g givenWords) gaveWhole(live string) bool {
 	if g.unstated || g.unread || len(g.views) > 0 {
-		return false, false
-	}
-	lists := g.answerLists
-	if g.view.words != nil || g.view.stamped != nil {
-		lists = g.view
-	}
-	for i, in := range readings {
-		if allBytes(live, in) && lists.holds(i, live, false) {
-			return true, true
-		}
-	}
-	return false, true
-}
-
-// allBytes reports whether s is not empty and every byte of it is one in
-// reads as a word's.
-func allBytes(s string, in func(byte) bool) bool {
-	if s == "" {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		if !in(s[i]) {
-			return false
+	lists := g.answerLists
+	if g.view.words != nil {
+		lists = g.view
+	}
+	for i := range readings {
+		if lists.holds(i, live, false) {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 // notFromWhy is the reason of a drifted value v whose recorded value the

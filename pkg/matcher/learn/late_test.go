@@ -68,7 +68,7 @@ func TestALateCallNamesTheOlderTestsServeNotTheWindowsRecording(t *testing.T) {
 		fol string
 	}{
 		{"an older test's serve gave it", lateMsg("mock-60", 200*time.Millisecond, lateRecID).ServedAs(9).ServedAsRecorded(),
-			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, asRecorded)}, late, []string{search, "follows it as a value from there"}, "appears in mock-22"},
+			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, asRecorded)}, late, []string{search, "follows it as a value from there", "a part of the value"}, "appears in mock-22"},
 		{"the window's recording not served yet", lateMsg("mock-60", 200*time.Millisecond, lateRecID),
 			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, asRecorded)}, late, []string{search}, ""},
 		{"two older tests' serves gave it", lateMsg("mock-60", 200*time.Millisecond, lateRecID).ServedAs(9).ServedAsRecorded(),
@@ -85,6 +85,21 @@ func TestALateCallNamesTheOlderTestsServeNotTheWindowsRecording(t *testing.T) {
 			[]GivenPlaces{lateSet("mock-22", 2, lateOtherID, asRecorded)}, unnamed, []string{search, late}, "-"},
 		{"F's view of the window's recording kept its id", lateMsg("mock-60", 200*time.Millisecond, lateRecID).ServedAs(9).ServedLive(lateMsg("mock-60", 200*time.Millisecond, lateRecID)),
 			[]GivenPlaces{lateSet("mock-22", 2, lateOtherID, asRecorded)}, "gave the application that word as recorded", []string{search, late}, "-"},
+		{"F gave its view of the older serve", lateMsg("mock-60", 200*time.Millisecond, lateRecID).ServedAs(9).ServedAsRecorded(),
+			[]GivenPlaces{lateSet("mock-22", 2, lateOtherID, func(x Raw) Raw { return x.ServedLive(lateMsg("mock-22", 40*time.Second, lateLiveID)) })}, late, []string{search, unnamed}, "-"},
+		{"F gave the older serve changed, with a view keploy could not read", lateMsg("mock-60", 200*time.Millisecond, lateRecID).ServedAs(9).ServedAsRecorded(),
+			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, func(x Raw) Raw { return x.ServedChanged() })}, unnamed, []string{search, late}, "-"},
+		{"F's serves of the older serve gave views that differ", lateMsg("mock-60", 200*time.Millisecond, lateRecID).ServedAs(9).ServedAsRecorded(),
+			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, func(x Raw) Raw {
+				return x.ServedChanged(lateMsg("mock-22", 40*time.Second, lateLiveID), lateMsg("mock-22", 40*time.Second, lateOtherID))
+			})}, unnamed, []string{search, late}, "-"},
+		{"a recording F gave earlier in the set could not be read", lateMsg("mock-60", 200*time.Millisecond, lateRecID).ServedAs(9).ServedAsRecorded(),
+			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, asRecorded), {}}, unnamed, []string{search, late}, "-"},
+		{"four older tests' serves gave it", lateMsg("mock-60", 200*time.Millisecond, lateRecID).ServedAs(9).ServedAsRecorded(),
+			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, asRecorded), lateSet("mock-33", 3, lateLiveID, asRecorded), lateSet("mock-44", 4, lateLiveID, asRecorded), lateSet("mock-55", 5, lateLiveID, asRecorded)},
+			"mock-44 (the set's test 4) and 1 more", []string{search, "mock-55"}, "appears in mock-22"},
+		{"a part of the recorded id stands in the window's recording", lateMsg("mock-60", 200*time.Millisecond, lateRecID[:8]).ServedAs(9).ServedAsRecorded(),
+			[]GivenPlaces{lateSet("mock-22", 2, lateLiveID, asRecorded)}, "a part of the value it was recorded with (its characters 1 to 8) stands in mock-60", []string{search, "stands whole"}, "appears in mock-22"},
 		{"the window's recording not served yet, and no older serve gave it", lateMsg("mock-60", 200*time.Millisecond, lateRecID),
 			[]GivenPlaces{lateSet("mock-22", 2, lateOtherID, asRecorded)}, "never served before this call", []string{late, unnamed}, ""},
 	} {
@@ -160,7 +175,8 @@ func TestALateCallReasonLeavesAReadOfTheClockToItsRules(t *testing.T) {
 
 // The serves of a mock name the test of the set F made them in (testOf),
 // read from the tracker's order: an older test's alone, never the start-up,
-// the gap between two tests, two tests', or the running test's.
+// the gap between two tests (a serve after a test's last one too), two
+// tests' (one the next test's first serve), or the running test's.
 func TestOrderNamesTheOlderTestOfAServe(t *testing.T) {
 	m := func(name string) *models.Mock {
 		return &models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
@@ -178,9 +194,13 @@ func TestOrderNamesTheOlderTestOfAServe(t *testing.T) {
 	tr.Begin()
 	tr.ServedMock(m("one"))
 	tr.ServedMock(m("both"))
+	tr.ServedMock(m("then between"))
+	tr.ServedMock(m("then the next test's first"))
 	tr.End()
 	tr.ServedMock(m("between"))
+	tr.ServedMock(m("then between"))
 	tr.Begin()
+	tr.ServedMock(m("then the next test's first"))
 	tr.ServedMock(m("two"))
 	tr.ServedMock(m("two"))
 	tr.ServedMock(m("both"))
@@ -188,7 +208,7 @@ func TestOrderNamesTheOlderTestOfAServe(t *testing.T) {
 	tr.Begin()
 	tr.ServedMock(m("three"))
 	o := tr.Placed().Order
-	for name, want := range map[string]int{"startup": 0, "one": 1, "between": 0, "two": 2, "both": 0, "three": 0, "never": 0} {
+	for name, want := range map[string]int{"startup": 0, "one": 1, "between": 0, "then between": 0, "then the next test's first": 0, "two": 2, "both": 0, "three": 0, "never": 0} {
 		o.t.mu.Lock()
 		first, last := o.ofLocked(MockID(m(name)))
 		got := o.testOf(first, last)
