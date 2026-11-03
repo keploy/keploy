@@ -16,6 +16,19 @@ func (s storeStub) Access(*Mock, []*Mock) HTTPStoreAccess {
 	return HTTPStoreAccess{Written: make([]map[string]string, s.written), Read: map[string]string{"body.Item.Name.S": "Leads/c-1"}}
 }
 
+// accessOf is HTTPStoreAccessOf, failing the test where it panics: a read the
+// hook cannot use, or no reader, is a call it answers with no access, never a
+// crash of the learn step.
+func accessOf(t *testing.T, read *Mock, calls []*Mock) (a HTTPStoreAccess, ok bool) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("HTTPStoreAccessOf(%+v) panicked: %v", read, r)
+		}
+	}()
+	return HTTPStoreAccessOf(read, calls)
+}
+
 // No reader reads nothing; a registered reader is asked, and one Written
 // entry per call or none is taken; a second reader, or a nil one, panics; the
 // returned function removes the reader.
@@ -25,7 +38,7 @@ func TestHTTPStoreReader(t *testing.T) {
 	if HTTPStoreReads(read.Spec.HTTPReq) {
 		t.Fatal("no reader reads a call")
 	}
-	if _, ok := HTTPStoreAccessOf(read, calls); ok {
+	if _, ok := accessOf(t, read, calls); ok {
 		t.Fatal("no reader states an access")
 	}
 
@@ -37,10 +50,10 @@ func TestHTTPStoreReader(t *testing.T) {
 	if !ok || len(a.Written) != 1 || !reflect.DeepEqual(a.Read, map[string]string{"body.Item.Name.S": "Leads/c-1"}) {
 		t.Fatalf("access %+v %v, want the reader's", a, ok)
 	}
-	if _, ok := HTTPStoreAccessOf(&Mock{}, calls); ok {
+	if _, ok := accessOf(t, &Mock{}, calls); ok {
 		t.Fatal("a mock with no HTTP request is no read")
 	}
-	if _, ok := HTTPStoreAccessOf(nil, calls); ok {
+	if _, ok := accessOf(t, nil, calls); ok {
 		t.Fatal("a nil mock is no read")
 	}
 	func() {
