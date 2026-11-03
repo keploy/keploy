@@ -1036,9 +1036,17 @@ func TestAnEncodedTextsStampIsDecodedAgainOnlyWhereNoReadingOfTheClockHoldsIt(t 
 // A value whose text of a script keploy reads only whole changed is refused
 // naming where that text stands: in the value's own text, in the text its
 // escapes write, or in the text an encoded run of it decodes to. A value all
-// in ASCII is never said to hold such text itself.
+// in ASCII is never said to hold such text itself. Each reason still calls it
+// text of a script keploy does not split into words.
 func TestARefusalForTextOfAScriptNamesWhereThatTextStands(t *testing.T) {
+	for _, why := range []string{scriptWhy, escapedScriptWhy, encodedScriptWhy} {
+		if !strings.Contains(why, "text of a script keploy does not split into words") {
+			t.Errorf("%q does not call it text of a script keploy does not split into words", why)
+		}
+	}
 	esc := func(s string) string { return strings.ReplaceAll(url.PathEscape(s), "%20", " ") }
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	hx := func(s string) string { return hex.EncodeToString([]byte(s)) }
 	for _, c := range []struct {
 		what, rec, live, want string
 	}{
@@ -1055,6 +1063,15 @@ func TestARefusalForTextOfAScriptNamesWhereThatTextStands(t *testing.T) {
 		// it checked too. Either way the encoded run's text is named.
 		{"the text an encoded run decodes to, beside an escape that shows no quoted-printable", "v1=41 lead 3505371Z created", "v1=41 lead 2751164Z created", encodedScriptWhy},
 		{"the text an encoded run decodes to, in a value read as quoted-printable", "caf=C3=A9 lead 3505371Z created", "caf=C3=A9 lead 2751164Z created", encodedScriptWhy},
+		// The text an encoded run decodes to adds as many forms to those
+		// checked as to those searched (its case-folded one too), and only
+		// those are named as its. So the escapes' text beside an encoded
+		// run is still named as theirs where the quoted-printable form is
+		// searched but not checked ("v1=41"), and where a hex run, whose
+		// digits give the value no case-folded form of its own, decodes
+		// to text of mixed case.
+		{"the text its escapes write, beside an escape that shows no quoted-printable and an encoded run", "v1=41 caf%C3%A9 tok " + b64("lead ok now") + " end", "v1=41 caf%C3%A8 tok " + b64("lead ok now") + " end", escapedScriptWhy},
+		{"the text its escapes write, beside a hex run of mixed-case text", "caf%c3%a9 " + hx("Lead OK now please") + " end", "caf%c3%a8 " + hx("Lead OK now please") + " end", escapedScriptWhy},
 	} {
 		if got := NewDriftCache().of(c.rec, c.live).unparsed; got != c.want {
 			t.Errorf("%s (%q -> %q): %q; want %q", c.what, c.rec, c.live, got, c.want)
