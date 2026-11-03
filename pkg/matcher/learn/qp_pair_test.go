@@ -300,3 +300,131 @@ func TestAPayloadReadsEachQuotedPrintableEscape(t *testing.T) {
 		}
 	}
 }
+
+// An id that flowed into a drifted value is followed as the variable it is
+// wherever quoted-printable hides it behind an escape of a character it
+// may write as itself ("=23" a '#', "=22" a '"', "=20" a space, "=09" a
+// tab): the words of the value are searched with each escape decoded,
+// whatever shows the value is quoted-printable (a soft line break, raw or
+// in a JSON string; an "=3D"; a non-ASCII escape) or that nothing does.
+// Only what the learn step checks the value for reads the escapes
+// quoted-printable has to write alone (qpFormRead). The id flowed each
+// way: from an earlier answer served with its payload (its request or its
+// response), or from a recorded payload.
+func TestAnIDQuotedPrintableHidesIsFollowed(t *testing.T) {
+	at := time.Date(2026, 11, 2, 11, 48, 4, 0, time.UTC)
+	exchange := func(side Side, id string) []Earlier {
+		m := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/orders", Body: `{}`, Header: map[string]string{}},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{}, Body: `{}`},
+			ReqTimestampMock: at.Add(-time.Second), ResTimestampMock: at.Add(-time.Second + 20*time.Millisecond),
+		}}
+		if side == Request {
+			m.Spec.HTTPReq.Body = `{"id":"` + id + `"}`
+		} else {
+			m.Spec.HTTPResp.Body = `{"id":"` + id + `"}`
+		}
+		return []Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Own: true, Payload: RawOf(m, true).ServedAs(1), Seen: []Seen{
+			{Side: side, Leaf: Leaf{Path: "body.id", Noise: "body.id", Type: String, Value: id}, Place: "body.id"},
+		}}}
+	}
+	for _, tc := range []struct {
+		name string
+		of   func(id string) string
+	}{
+		{"a soft break, '#' escaped", func(id string) string { return "order=\r\n=23" + id + " placed" }},
+		{"a soft break in a JSON string, '#' escaped", func(id string) string { return `order=\r\n=23` + id + " placed" }},
+		{"an '=' escaped, '#' escaped", func(id string) string { return "x=3D=23" + id }},
+		{"an '=' escaped, JSON quotes escaped", func(id string) string { return "q=3D1 =7B=22id=22:=22" + id + "=22=7D" }},
+		{"an '=' escaped, a space escaped", func(id string) string { return "a=3Db=20" + id }},
+		{"an '=' escaped, a tab escaped", func(id string) string { return "a=3Db=09" + id }},
+		{"a non-ASCII escape, '#' escaped", func(id string) string { return "Caf=C3=A9 order =23" + id }},
+		{"nothing shown, '#' escaped", func(id string) string { return "Order =23" + id + " placed" }},
+	} {
+		for _, ids := range [][2]string{{"A7K29QXM", "Zq81Lm0X"}, {"Zq81Lm0X", "A7K29QXM"}, {"b3f2b8c1e9a4d", "f1e2d3c4b5a69"}} {
+			rec, live := tc.of(ids[0]), tc.of(ids[1])
+			t.Run(tc.name+", "+ids[0], func(t *testing.T) {
+				for _, side := range []Side{Request, Response} {
+					earlier := exchange(side, ids[0])
+					earlier[0].Seen[0].Live = ids[1]
+					if got := classifyOne(rec, live, at, earlier, nil, nil); got.Kind != KindVariable {
+						t.Errorf("from an earlier %v: got %s (%s), want the id that flowed followed as a variable", side, got.Kind, got.Why)
+					}
+				}
+				raw := []Raw{{rRead: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, rText: "INSERT INTO orders (id) VALUES ('" + ids[0] + "')"}}
+				if got := classifyOne(rec, live, at, nil, raw, nil); got.Kind != KindVariable {
+					t.Errorf("from a recorded payload: got %s (%s), want the id that flowed followed as a variable", got.Kind, got.Why)
+				}
+				if got := classifyOne(rec, live, at, nil, nil, nil); got.Kind == KindVariable {
+					t.Errorf("from nothing: got a variable (%s)", got.Why)
+				}
+			})
+		}
+	}
+}
+
+// A quoted-printable value in a JSON string is checked with its backslash
+// escapes read first, as each other form reads them: they are the JSON
+// string's, no stray '\' the learn step cannot read. A drifted id no call
+// sent, and a signature in upper-case hex beside an "=3D", are each
+// learned as the noise they are, each way.
+func TestQuotedPrintableInAJSONStringIsCheckedUnescaped(t *testing.T) {
+	at := time.Date(2026, 11, 2, 11, 48, 4, 0, time.UTC)
+	for _, tc := range []struct{ name, rec, live string }{
+		{"quotes escaped, an id", `say \"hi\" order=3DA7K29Q`, `say \"hi\" order=3DB8L30R`},
+		{"a line feed escaped, an id", `a\nb order=3DA7K29Q`, `a\nb order=3DB8L30R`},
+		{"quotes escaped, a signature", `v=3D1 \"sig\":\"v1=2B` + sigA[2:] + `\"`, `v=3D1 \"sig\":\"v1=41` + sigB[2:] + `\"`},
+	} {
+		for _, p := range [][2]string{{tc.rec, tc.live}, {tc.live, tc.rec}} {
+			t.Run(tc.name+", "+p[0][len(p[0])-6:], func(t *testing.T) {
+				if got := classifyOne(p[0], p[1], at, nil, nil, nil); got.Kind != KindNoise {
+					t.Fatalf("got %s (%s), want noise", got.Kind, got.Why)
+				}
+			})
+		}
+	}
+}
+
+// A mail that says it is quoted-printable is checked with each of its
+// escapes decoded, in a JSON string too, whose header may hold a JSON
+// escape ("\t" after the colon): the header is read with its escapes read.
+// A changed run of the standard base64 alphabet that only that reading
+// shows ("=2B" a '+') and that does not decode is refused, as in the raw
+// mail, each way.
+func TestADeclaredMailInAJSONStringIsCheckedAsOne(t *testing.T) {
+	at := time.Date(2026, 11, 2, 11, 48, 4, 0, time.UTC)
+	mail := func(nl, tab, tok string) string {
+		return "From: shop@test" + nl + "Content-Type: text/plain; charset=utf-8" + nl + "Content-Transfer-Encoding:" + tab + "quoted-printable" + nl + nl + "Token: =2B" + tok + " ok" + nl
+	}
+	for _, tc := range []struct{ name, nl, tab string }{
+		{"raw", "\r\n", "\t"},
+		{"in a JSON string", `\r\n`, `\t`},
+	} {
+		for _, p := range [][2]string{{"YmFy", "YmFz"}, {"YmFz", "YmFy"}} {
+			t.Run(tc.name+", "+p[0], func(t *testing.T) {
+				got := classifyOne(mail(tc.nl, tc.tab, p[0]), mail(tc.nl, tc.tab, p[1]), at, nil, nil, nil)
+				if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "a run of the base64 alphabet that does not decode") {
+					t.Fatalf("got %s (%s), want refused: a run of the base64 alphabet that does not decode", got.Kind, got.Why)
+				}
+			})
+		}
+	}
+}
+
+// The form a drifted value is checked in leaves each escape of a character
+// quoted-printable may write as itself as it was written: its own two
+// digits, in their own case, wherever it sits in a run of escapes, after
+// another such escape too. Whether a changed run of the base64 alphabet
+// decodes depends on those digits ("2B=" reads as base32, "20=" does not).
+func TestAnEscapeLeftAsWrittenKeepsItsOwnDigits(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"k=3Dv&p=2B=20=3Dx", "k=v&p=2B=20=x"},
+		{"=41=2B=3D", "=41=2B="},
+		{"=3D=7B=22id=22:=22A7K29Q=22=7D", "==7B=22id=22:=22A7K29Q=22=7D"},
+	} {
+		if got, qp := qpFormRead(tc.in); got != tc.want || !qp {
+			t.Errorf("qpFormRead(%q) = %q, %v; want %q, true", tc.in, got, qp, tc.want)
+		}
+	}
+}

@@ -2991,10 +2991,10 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 		dclock = clockAt(d.decRec, d.decLive, w, lead, call, zone)
 		merge(dclock)
 	}
-	forms, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
+	forms, checked, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
 	d.encodedRec = encoded[0]
-	// The clock reads of every other form (the first is the decoded value,
-	// read above).
+	// The clock reads of every other form searched (the first is the
+	// decoded value, read above).
 	for _, f := range forms[1:] {
 		merge(clockAt(f[0], f[1], w, lead, call, zone))
 	}
@@ -3015,12 +3015,10 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 		d.clock.live[strings.ToLower(w)] = true
 	}
 	d.forms = forms
-	// What the readings cannot read whole, in every form but the raw one
-	// of a value with escapes (whose '%' and '\' are the escapes).
-	for i, f := range forms {
-		if d.decoded && i == 0 {
-			continue
-		}
+	// What the readings cannot read whole, in every form checked (formsOf;
+	// never the raw one of a value with escapes, whose '%' and '\' are the
+	// escapes).
+	for _, f := range checked {
 		if why := unparsed(f[0], f[1], d.clock); why != "" {
 			d.unparsed = why
 			break

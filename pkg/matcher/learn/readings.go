@@ -24,11 +24,12 @@ import (
 //   - case-folded: the decoded form in lower case;
 //   - quoted-printable: its soft line breaks taken out and its "=XX"
 //     escapes decoded, where they decode to text (qpDecoded), and that in
-//     lower case. A payload is read in it always; a drifted value only
-//     where it and the value it is compared with read as quoted-printable
-//     text: as a mail that says it is; or whole, and its escapes show it
-//     or a soft line break splits it, read with only the escapes
-//     quoted-printable has to write decoded (qpFormRead, formsOf);
+//     lower case. What a drifted value is checked for (unparsed, below)
+//     reads it in this form only where it and the value it is compared
+//     with read as quoted-printable text: as a mail that says it is; or
+//     whole, and its escapes show it or a soft line break splits it, read
+//     with only the escapes quoted-printable has to write decoded
+//     (qpFormRead, formsOf);
 //   - encoded: each run of eight characters or more that decodes to text:
 //     of the standard or URL-safe base64 alphabet, padded or not, whole,
 //     joined across the line breaks of wrapped base64 (indented or escaped
@@ -669,9 +670,9 @@ func qpForm(s string) string {
 	return q
 }
 
-// qpFormRead is the quoted-printable form of s, a drifted value, to compare
-// with that of the value it is compared with (formsOf), and whether s reads
-// as quoted-printable text:
+// qpFormRead is the quoted-printable form of s, a drifted value, that
+// unparsed checks beside that of the value it is compared with (formsOf),
+// and whether s reads as quoted-printable text:
 //   - as a mail or a MIME part that says it is (qpDeclared), whose header
 //     lines hold an '=' of their own ("charset=utf-8") that starts no
 //     escape: read as qpForm reads it, each escape decoded;
@@ -1024,38 +1025,47 @@ func b64DecodeAny(s string) ([]byte, bool) {
 
 // formsOf are the declared forms of a drifted value, recorded and live,
 // beside the value as read raw: decoded (percent and backslash escapes),
-// case-folded; quoted-printable, where both values read as
-// quoted-printable text (qpFormRead), itself case-folded; and the text its
-// encoded runs decode to (b64Text), itself case-folded; and that text,
-// recorded and live, on its own (encoded).
-func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms [][2]string, encoded [2]string) {
-	forms = [][2]string{{decRec, decLive}}
-	fold := func(f [2]string) {
+// case-folded; quoted-printable (qpForm, each escape that decodes to text
+// decoded), where it differs, itself case-folded; and the text its encoded
+// runs decode to (b64Text), itself case-folded; and that text, recorded and
+// live, on its own (encoded). The words of each form are searched for what
+// flowed into the value.
+//
+// checked are the forms unparsed reads, the same but for the
+// quoted-printable one: that is read only where both values read as
+// quoted-printable text, and with only the escapes quoted-printable has to
+// write decoded (qpFormRead). Reading the other escapes would make the two
+// values differ in that form where they did not ("Signature=09bb..." a tab
+// in one run, "Signature=b17d..." as written in the other; "v1=2B<hex>" a
+// '+' against "v1=41<hex>" an 'A'), in a run of the base64 alphabet that
+// does not decode, which unparsed refuses. The search still reads every
+// escape decoded: a word only that reading shows ("=23A7K29Q" a '#' and
+// an id) is found where it flowed.
+func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms, checked [][2]string, encoded [2]string) {
+	with := func(fs [][2]string, f [2]string) [][2]string {
+		fs = append(fs, f)
 		if lr, ll := strings.ToLower(f[0]), strings.ToLower(f[1]); lr != f[0] || ll != f[1] {
-			forms = append(forms, [2]string{lr, ll})
+			fs = append(fs, [2]string{lr, ll})
 		}
+		return fs
 	}
-	fold(forms[0])
-	// The quoted-printable form only where both values read as
-	// quoted-printable text (qpFormRead): one that does not is none, and
-	// reading the other value's "=XX" as an escape would make the two
-	// differ in this form where the value did not ("Signature=09bb..." a
-	// tab in one run, "Signature=b17d..." as written in the other: an '='
-	// that changed in a run of the base64 alphabet, which unparsed
-	// refuses).
+	base := with(nil, [2]string{decRec, decLive})
+	forms = append([][2]string(nil), base...)
+	if qr, ql := qpForm(rec), qpForm(live); qr != decRec || ql != decLive {
+		forms = with(forms, [2]string{qr, ql})
+	}
+	checked = append([][2]string(nil), base...)
 	qr, qpR := qpFormRead(rec)
 	ql, qpL := qpFormRead(live)
 	if qpR && qpL && (qr != decRec || ql != decLive) {
-		q := [2]string{qr, ql}
-		forms = append(forms, q)
-		fold(q)
+		checked = with(checked, [2]string{qr, ql})
 	}
 	if br, bl := b64Text(decRec, clock.rec), b64Text(decLive, clock.live); br != "" || bl != "" {
 		encoded = [2]string{br, bl}
-		forms = append(forms, encoded)
-		fold(encoded)
+		forms = with(forms, encoded)
+		checked = with(checked, encoded)
 	}
-	return forms, encoded
+	return forms, checked, encoded
 }
 
 // allIn reports whether every word of ws is in set, and there is one.
