@@ -77,9 +77,9 @@ type provenWire struct {
 	skip  map[string]string
 	needs map[string][]models.ScopeNeed
 	began map[string]bool
-	// setFlags name the replayed set in the commands a failed test's
-	// reason names (models.ScopeGateReq.SetFlags); set with skip.
-	setFlags []string
+	// set names the replayed set in the commands a failed test's reason
+	// names (models.ScopeGateReq.SetFlags and CloudSet); set with skip.
+	set scopeSet
 	// charged holds the misses the ends drained from the proxy, until the
 	// CLI's own end-of-run read (GetMockErrors) collects them, so charging a
 	// miss to a test never hides it from the run's totals.
@@ -982,7 +982,7 @@ func (a *Agent) SetScopeBackground(ctx context.Context, names []string) error {
 // record, none.
 func (a *Agent) evidenceText(id string, ev *models.ScopeEvidence, beganAt time.Time) string {
 	if !a.replaying() {
-		return evidenceReason(id, ev, nil, beganAt, nil, nil)
+		return evidenceReason(id, ev, nil, beganAt, nil, scopeSet{})
 	}
 	return evidenceReason(id, ev, a.mocksFound(ev.Unconsumed), beganAt, a.skippedReadTests(), a.scopeSetFlags())
 }
@@ -1306,21 +1306,32 @@ func (a *Agent) NoteRefusal(r models.RunRefusal) {
 // SetScopeSkips installs the proven gate: the tests a replay skips, by ID,
 // with their reasons, and the tests that must begin before each test that
 // needs them. nil skips nothing. setFlags name the replayed set in the
-// commands a failed test's reason names (evidenceReason).
-func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, setFlags []string) error {
+// commands a failed test's reason names (evidenceReason), and cloudSet says
+// that set is Keploy Cloud's recordings.
+func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, setFlags []string, cloudSet bool) error {
 	a.provenMu.Lock()
 	a.proven.skip, a.proven.needs = maps.Clone(skip), maps.Clone(needs)
-	a.proven.setFlags = slices.Clone(setFlags)
+	a.proven.set = scopeSet{flags: slices.Clone(setFlags), cloud: cloudSet}
 	a.provenMu.Unlock()
 	return nil
 }
 
-// scopeSetFlags are the flags the replay's gate named its set with
-// (SetScopeSkips); nil in a record, and in a replay that named none.
-func (a *Agent) scopeSetFlags() []string {
+// scopeSet is how the commands a failed test's reason names name the
+// replayed set: flags are the flags that make them act on it, and cloud
+// says it is Keploy Cloud's recordings, which keploy mock derive does not
+// change (models.ScopeGateReq.CloudSet). The zero value names no set: the
+// commands carry no flags, as in a record.
+type scopeSet struct {
+	flags []string
+	cloud bool
+}
+
+// scopeSetFlags is how the replay's gate named its set (SetScopeSkips);
+// the zero scopeSet in a record, and in a replay that named none.
+func (a *Agent) scopeSetFlags() scopeSet {
 	a.provenMu.Lock()
 	defer a.provenMu.Unlock()
-	return a.proven.setFlags
+	return a.proven.set
 }
 
 func (a *Agent) replaying() bool {
@@ -2894,11 +2905,12 @@ func (a *Agent) takeChargedMisses() []models.UnmatchedCall {
 // before it, before the test began, an extra call of another test's
 // included. skippedOf is, in a replay, the skipped test that lists each read
 // the replay's gate skips (SetScopeSkippedReads): an extra call's line names
-// the test of each that answered the call (extraCallText). setFlags name the
-// replayed set in each command it names (keploy mock quarantine, keploy mock
-// derive --remove), so the command acts on the set that failed (SetScopeSkips);
-// none, and they carry no flags.
-func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock, beganAt time.Time, skippedOf map[string]string, setFlags []string) string {
+// the test of each that answered the call (extraCallText). set's flags name
+// the replayed set in each command it names (keploy mock quarantine, keploy
+// mock derive --remove), so the command acts on the set that failed
+// (SetScopeSkips); none, and they carry no flags. A set of Keploy Cloud's
+// recordings is told no remove command (authoredFix).
+func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock, beganAt time.Time, skippedOf map[string]string, set scopeSet) string {
 	var what []string
 	for _, c := range ev.Incomplete {
 		what = append(what, "keploy could not capture a connection to "+c.Destination+" ("+c.Why+")")
@@ -2999,15 +3011,15 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 	} else {
 		head += " "
 	}
-	flags := quoteFlags(setFlags)
+	flags := quoteFlags(set.flags)
 	quarantine := fmt.Sprintf("If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\"%s.", shellQuote(id), flags)
 	if len(ev.Misses) == 0 && len(authored) == len(ev.Unconsumed) {
 		// Only authored mocks were left unmade: a re-record keeps them.
-		return RunnableText(head + authoredFix(id, authored, flags) + "\n" + quarantine)
+		return RunnableText(head + authoredFix(id, authored, flags, set.cloud) + "\n" + quarantine)
 	}
 	fix := ""
 	if len(authored) > 0 {
-		fix = authoredFix(id, authored, flags) + "\n"
+		fix = authoredFix(id, authored, flags, set.cloud) + "\n"
 	}
 	return RunnableText(fmt.Sprintf("%sIf this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n%s%s",
 		head, id, fix, quarantine))
@@ -3016,8 +3028,13 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 // authoredFix is what a test (id) that never called its authored mocks
 // (names) is told: a re-record keeps them, the command that takes each out,
 // with the set's flags (quoteFlags), and that a call the test now makes
-// differently is authored again.
-func authoredFix(id string, names []string, flags string) string {
+// differently is authored again. A set of Keploy Cloud's recordings (cloud)
+// is told no command: keploy mock derive refuses them, so it is told why,
+// and its quarantine line is what it can run.
+func authoredFix(id string, names []string, flags string, cloud bool) string {
+	if cloud {
+		return "A re-record keeps an authored mock, and keploy mock derive takes one out only of a set on disk, not of Keploy Cloud's recordings."
+	}
 	cmds := make([]string, 0, len(names))
 	for _, n := range names {
 		cmds = append(cmds, "keploy mock derive --remove "+shellQuote(id+"/"+n)+flags)
@@ -3063,8 +3080,6 @@ func missWhys(misses []models.UnmatchedCall, before func(models.UnmatchedCall) b
 	return out
 }
 
-// shellQuote quotes s for a POSIX shell unless it is made of characters a
-// shell reads as one plain word.
 // quoteFlags is flags as a command's trailing words, each quoted for a
 // shell and led by a space; "" for none.
 func quoteFlags(flags []string) string {
@@ -3075,6 +3090,8 @@ func quoteFlags(flags []string) string {
 	return b.String()
 }
 
+// shellQuote quotes s for a POSIX shell unless it is made of characters a
+// shell reads as one plain word.
 func shellQuote(s string) string {
 	plain := s != "" && !strings.ContainsFunc(s, func(r rune) bool {
 		return !(r == '/' || r == ':' || r == '.' || r == '_' || r == '-' || r == '+' || r == '=' || r == ',' || r == '@' ||

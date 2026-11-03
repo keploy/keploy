@@ -2354,10 +2354,12 @@ func RegisterScopeLeftOutSource(fn ScopeLeftOutSource) {
 
 // ScopeSetFlagsSource names the flags that make a command a failed test's
 // reason names (keploy mock quarantine, keploy mock derive --remove) act on
-// the set req names, as the replay CLI names it (models.ScopeGateReq.SetFlags).
-// A wrapping build (enterprise) installs one; OSS installs none, and those
-// commands carry no flags.
-type ScopeSetFlagsSource func(req ScopeGateRequest) []string
+// the set req names, as the replay CLI names it (models.ScopeGateReq.SetFlags),
+// and whether that set is Keploy Cloud's recordings, whose failed tests are
+// told no remove command (models.ScopeGateReq.CloudSet). A wrapping build
+// (enterprise) installs one; OSS installs none, and those commands carry no
+// flags.
+type ScopeSetFlagsSource func(req ScopeGateRequest) (flags []string, cloudSet bool)
 
 var scopeSetFlagsSource ScopeSetFlagsSource
 
@@ -2369,9 +2371,10 @@ func RegisterScopeSetFlagsSource(fn ScopeSetFlagsSource) {
 
 // ScopeSkipPusher is an optional Instrumentation extension: under the proven
 // switch, Replay hands the agent the tests to skip with it, and the flags
-// that name the replayed set in the commands a failed test's reason names.
+// that name the replayed set in the commands a failed test's reason names,
+// with whether that set is Keploy Cloud's recordings.
 type ScopeSkipPusher interface {
-	PushScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, setFlags []string) error
+	PushScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, setFlags []string, cloudSet bool) error
 }
 
 // scopeSkips is the proven gate a replay read from its skip source
@@ -2384,6 +2387,7 @@ type scopeSkips struct {
 	needs    map[string][]models.ScopeNeed
 	leftOut  map[string]bool
 	setFlags []string
+	cloudSet bool
 	err      error
 }
 
@@ -2419,7 +2423,7 @@ func readScopeSkips(ctx context.Context, name, digest, path string) scopeSkips {
 		g.leftOut = scopeLeftOutSource(ctx, req)
 	}
 	if scopeSetFlagsSource != nil {
-		g.setFlags = scopeSetFlagsSource(req)
+		g.setFlags, g.cloudSet = scopeSetFlagsSource(req)
 	}
 	return g
 }
@@ -2438,7 +2442,7 @@ func (m *mockService) pushSkips(ctx context.Context, name string, g scopeSkips) 
 	if g.err != nil {
 		return fmt.Errorf("could not read which tests this replay skips: %w", g.err)
 	}
-	skip, needs, setFlags := g.skip, g.needs, g.setFlags
+	skip, needs, setFlags, cloudSet := g.skip, g.needs, g.setFlags, g.cloudSet
 	pusher, ok := m.instrumentation.(ScopeSkipPusher)
 	if !ok {
 		if len(skip) == 0 && len(needs) == 0 {
@@ -2449,7 +2453,7 @@ func (m *mockService) pushSkips(ctx context.Context, name string, g scopeSkips) 
 	if skip == nil {
 		skip = map[string]string{}
 	}
-	if err := pusher.PushScopeSkips(ctx, skip, needs, setFlags); err != nil {
+	if err := pusher.PushScopeSkips(ctx, skip, needs, setFlags, cloudSet); err != nil {
 		return fmt.Errorf("could not tell the agent which tests to skip: %w", err)
 	}
 	if len(skip) > 0 {
