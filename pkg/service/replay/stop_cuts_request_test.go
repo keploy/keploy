@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -25,10 +26,52 @@ type cutShortHooks struct {
 	name   string
 	read   bool
 	during func()
+	// sent, when set, logs each test sent, in order.
+	sent *sendLog
+	// answered: the named test is answered as the harness's hooks answer
+	// it, and during is called after, not while its request is held.
+	answered bool
+}
+
+// sendLog is the tests a run sent, in order, and how many it had sent when
+// its user stopped it (stopAt, -1 before).
+type sendLog struct {
+	mu     sync.Mutex
+	names  []string
+	stopAt int
+}
+
+func (l *sendLog) add(name string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.names = append(l.names, name)
+}
+
+func (l *sendLog) stop() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.stopAt = len(l.names)
+}
+
+// afterStop is the tests sent after the stop.
+func (l *sendLog) afterStop() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.stopAt < 0 {
+		return nil
+	}
+	return append([]string(nil), l.names[l.stopAt:]...)
 }
 
 func (h cutShortHooks) SimulateRequest(ctx context.Context, tc *models.TestCase, set string) (interface{}, error) {
+	if h.sent != nil {
+		h.sent.add(tc.Name)
+	}
 	if tc.Name != h.name {
+		return h.prHooks.SimulateRequest(ctx, tc, set)
+	}
+	if h.answered {
+		defer h.during()
 		return h.prHooks.SimulateRequest(ctx, tc, set)
 	}
 	held := func() error {
@@ -55,61 +98,97 @@ func (r heldReader) Read([]byte) (int, error) { return 0, r() }
 // either mode, kept or per set; a streamed test likewise, as its request or
 // its stream's read was cut. With the switch off the test still fails and
 // the run exits 1, as before.
+//
+// Whatever the switch, the set ends USER_ABORT and no test is sent after the
+// stop. With the switch off the set ended FAILED or USER_ABORT by
+// scheduling, and the next test could be sent after the stop: the app
+// watcher records the stop on a goroutine of its own, and nothing ordered it
+// before the next test. At GOMAXPROCS=1 the set ended FAILED in each of 140
+// runs, with test-3 sent and filed PASSED after the stop. Each case runs at
+// GOMAXPROCS=1 and at the default, and with the stop in the set's last test
+// too, which leaves no next test for the loop to stop before.
 func TestAStopThatCutsATestShortGivesItNoVerdict(t *testing.T) {
 	const sigint = 2
 	for _, c := range []struct {
-		name            string
-		on, kept        bool
-		stream, read    bool
-		want            int
-		wantStatus      []models.TestSetStatus
-		wantTest2Failed bool
+		name         string
+		on, kept     bool
+		stream, read bool
+		// streamNext streams test-3 too, so a streamed test follows the
+		// cut one.
+		streamNext bool
+		// cut is the test whose request the stop cuts short: test-2 of
+		// three where empty. With answered, the stop comes as its answer
+		// returns, and cuts nothing short.
+		cut      string
+		answered bool
+		want     int
 	}{
-		{name: "switch on, run per set", on: true, want: 130, wantStatus: []models.TestSetStatus{models.TestSetStatusUserAbort}},
-		{name: "switch on, kept alive", on: true, kept: true, want: 130, wantStatus: []models.TestSetStatus{models.TestSetStatusUserAbort}},
-		{name: "switch on, a streamed test's request", on: true, stream: true, want: 130, wantStatus: []models.TestSetStatus{models.TestSetStatusUserAbort}},
-		{name: "switch on, a streamed test's read", on: true, stream: true, read: true, want: 130, wantStatus: []models.TestSetStatus{models.TestSetStatusUserAbort}},
-		// With the switch off the set's status is not pinned: USER_ABORT or
-		// FAILED. The app watcher records the user's stop (USER_ABORT) on a
-		// goroutine of its own, and with the switch off nothing orders that
-		// before the set's status is resolved. Only under the switch does a
-		// set run with an agent read the stop itself: as the cut request
-		// returns (endedPartWay) and at the set's end (stoppedByUser). At
-		// GOMAXPROCS=1 the set ended FAILED in each of 140 runs, with test-3
-		// run after the stop; beside busy-loop load it did so now and then at
-		// other GOMAXPROCS too. The exit code (1, as test-2 is filed FAILED)
-		// holds in every order.
-		{name: "switch off, run per set", want: 1, wantTest2Failed: true,
-			wantStatus: []models.TestSetStatus{models.TestSetStatusUserAbort, models.TestSetStatusFailed}},
-		{name: "switch off, kept alive", kept: true, want: 1, wantTest2Failed: true,
-			wantStatus: []models.TestSetStatus{models.TestSetStatusUserAbort, models.TestSetStatusFailed}},
+		{name: "switch on, run per set", on: true, want: 130},
+		{name: "switch on, kept alive", on: true, kept: true, want: 130},
+		{name: "switch on, a streamed test's request", on: true, stream: true, want: 130},
+		{name: "switch on, a streamed test's read", on: true, stream: true, read: true, want: 130},
+		{name: "switch on, the set's last test", on: true, cut: "test-3", want: 130},
+		{name: "switch off, run per set", want: 1},
+		{name: "switch off, kept alive", kept: true, want: 1},
+		{name: "switch off, a streamed test's request", stream: true, want: 1},
+		{name: "switch on, a streamed test's request, another streamed after it", on: true, stream: true, streamNext: true, want: 130},
+		{name: "switch off, a streamed test's request, another streamed after it", stream: true, streamNext: true, want: 1},
+		{name: "switch off, the set's last test", cut: "test-3", want: 1},
+		{name: "switch off, kept alive, the set's last test", kept: true, cut: "test-3", want: 1},
+		// Every test answered, then the stop: the set has no verdict under
+		// the switch, and with the switch off a stop is no failure.
+		{name: "switch on, after the last test's answer", on: true, cut: "test-3", answered: true, want: 130},
+		{name: "switch off, after the last test's answer", cut: "test-3", answered: true, want: 0},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			setSwitch(t, c.on)
-			h := newPartialRunHarness(t, 3, 0)
-			if c.stream {
-				h.streaming("test-2")
+		for _, procs := range []int{1, 0} {
+			name := c.name + ", GOMAXPROCS default"
+			if procs != 0 {
+				name = fmt.Sprintf("%s, GOMAXPROCS=%d", c.name, procs)
 			}
-			h.replayer.config.Test.KeepAppAlive = c.kept
-			core, logs := observer.New(zapcore.DebugLevel)
-			h.replayer.logger = zap.New(core)
-			code, status := startStopped(t, h, sigint, func(stop func()) {
-				h.replayer.hookImpl = cutShortHooks{name: "test-2", read: c.read, during: stop}
+			t.Run(name, func(t *testing.T) {
+				if procs != 0 {
+					defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(procs))
+				}
+				setSwitch(t, c.on)
+				cut := c.cut
+				if cut == "" {
+					cut = "test-2"
+				}
+				h := newPartialRunHarness(t, 3, 0)
+				if c.stream {
+					h.streaming(cut)
+				}
+				if c.streamNext {
+					h.streaming("test-3")
+				}
+				h.replayer.config.Test.KeepAppAlive = c.kept
+				core, logs := observer.New(zapcore.DebugLevel)
+				h.replayer.logger = zap.New(core)
+				sent := &sendLog{stopAt: -1}
+				code, status := startStopped(t, h, sigint, func(stop func()) {
+					h.replayer.hookImpl = cutShortHooks{name: cut, read: c.read, sent: sent, answered: c.answered,
+						during: func() { sent.stop(); stop() }}
+				})
+				if status != models.TestSetStatusUserAbort {
+					t.Errorf("the set ended %s, want %s", status, models.TestSetStatusUserAbort)
+				}
+				if code != c.want {
+					t.Errorf("the run exits %d, want %d", code, c.want)
+				}
+				// With the switch off the cut test is filed FAILED; under it,
+				// none is.
+				if got := failedTests(h); (len(got) == 1 && got[0] == cut) != (!c.on && !c.answered) || len(got) > 1 {
+					t.Errorf("the tests filed FAILED are %v; want %s filed FAILED: %v", got, cut, !c.on && !c.answered)
+				}
+				if after := sent.afterStop(); len(after) > 0 {
+					t.Errorf("%v sent after the user's stop in %s", after, cut)
+				}
+				said := logs.FilterMessageSnippet("the run was stopped before keploy judged it").Len()
+				if (said == 1) != c.on || said > 1 {
+					t.Errorf("keploy said %d times that the run was stopped before it judged it; want it said: %v", said, c.on)
+				}
 			})
-			if !containsStatus(c.wantStatus, status) {
-				t.Errorf("the set ended %s, want one of %v", status, c.wantStatus)
-			}
-			if code != c.want {
-				t.Errorf("the run exits %d, want %d", code, c.want)
-			}
-			if got := failedTests(h); (len(got) == 1 && got[0] == "test-2") != c.wantTest2Failed || len(got) > 1 {
-				t.Errorf("the tests filed FAILED are %v; want test-2 filed FAILED: %v", got, c.wantTest2Failed)
-			}
-			said := logs.FilterMessageSnippet("the run was stopped before keploy judged it").Len()
-			if (said == 1) != c.on || said > 1 {
-				t.Errorf("keploy said %d times that the run was stopped before it judged it; want it said: %v", said, c.on)
-			}
-		})
+		}
 	}
 }
 
@@ -154,15 +233,6 @@ func TestAnAppExitThatCutsARequestShortIsNoUserStop(t *testing.T) {
 			}
 		})
 	}
-}
-
-func containsStatus(in []models.TestSetStatus, s models.TestSetStatus) bool {
-	for _, x := range in {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }
 
 // failedTests names the tests h's set filed FAILED, in their order.

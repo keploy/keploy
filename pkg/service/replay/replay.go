@@ -3176,6 +3176,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusInternalErr, true
 		}
 	}
+	// userStopped reports whether the run's user has stopped it (Ctrl+C,
+	// SIGTERM), whatever the switch: the test loops stop before their next
+	// test on it, and the set is USER_ABORT for it. The app watcher records
+	// the same stop, but on a goroutine of its own that nothing orders before
+	// the next test starts: without this, a test could be sent after the
+	// user's stop, and the set end FAILED or USER_ABORT by scheduling. It
+	// reads the run's context (ctx), not the set's: the watch of a per-set
+	// application cancels the set's as that application exits, and the exit
+	// of one kept across the sets ends the run's with that exit as its cause;
+	// neither is its user's stop (stoppedByItsUser). A test whose request the
+	// stop cut short keeps the verdict endedPartWay gives it: none under the
+	// switch, FAILED without it.
+	userStopped := func() bool { return stoppedByItsUser(ctx) }
 	// captureOpened is whether a test of this set has opened its capture
 	// window: every later test's window carries in the misses made since the
 	// previous one closed (openTestErrorCapture).
@@ -3693,6 +3706,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			if status, ended := endedPartWay(); ended {
 				testSetStatus, exitLoop = status, true
+			}
+			if userStopped() {
+				testSetStatus, exitLoop = models.TestSetStatusUserAbort, true
 			}
 			if exitLoop {
 				break
@@ -4913,12 +4929,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Check for exit signals before each streaming test
 			select {
 			case <-exitLoopChan:
-				testSetStatus = testSetStatusByErrChan
+				testSetStatus = getErrStatus()
 				exitLoop = true
 			default:
 			}
 			if status, ended := endedPartWay(); ended {
 				testSetStatus, exitLoop = status, true
+			}
+			if userStopped() {
+				testSetStatus, exitLoop = models.TestSetStatusUserAbort, true
 			}
 			if exitLoop {
 				break
@@ -6287,6 +6306,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	} else if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil); ok {
 		testSetStatus = resolvedStatus
+	}
+	// A set its user stopped is USER_ABORT, whatever the switch, however its
+	// test loop ended: a stop during its last test leaves no next test for
+	// the loop to stop before, and the app watcher's USER_ABORT may not be
+	// recorded yet (userStopped). Under the switch stoppedByUser has done
+	// this already.
+	if userStopped() && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed) {
+		testSetStatus = models.TestSetStatusUserAbort
 	}
 
 	// A test whose unmatched calls could not all be read has no verdict, so its
