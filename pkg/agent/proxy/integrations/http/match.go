@@ -295,62 +295,25 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		// sees it, so it is never served on a call whose variables do not
 		// hold. With the switch off nothing here runs.
 		comparedPool := unfilteredMocks
-		var vp *varProblem
 		if provenswitch.On() {
-			withVars, rest := splitVariableMocks(unfilteredMocks)
-			if len(withVars) > 0 {
-				hits, problem, err := h.variablePass(ctx, input, withVars, scope, headerNoise, userBodyNoise, urlNoise)
-				if err != nil {
-					return false, nil, nil, err
-				}
-				if len(hits) > 0 {
-					hit, commitCursor, answered := h.pickHit(hits, ownedBy(ctx), mockDb, statefulMocks, h.variableMember(ctx, input, scope, headerNoise, userBodyNoise, urlNoise))
-					if answered != nil {
-						return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), pool: comparedPool, answered: answered}, nil
-					}
-					served, problem, retry, err := h.serveVariables(ctx, hit, mockDb)
-					if err != nil {
-						return false, nil, nil, err
-					}
-					if retry {
-						continue
-					}
-					if problem != nil {
-						if scope.moved() {
-							continue // a test began meanwhile: check the call against it
-						}
-						return false, nil, &matchDiag{phase: models.MatchPhaseVariable, candidates: len(comparedPool), pool: comparedPool, variable: problem}, nil
-					}
-					if commitCursor != nil {
-						commitCursor()
-					}
-					return true, served, nil, nil
-				}
-				vp = problem
-				unfilteredMocks = rest
-				if vp != nil {
-					// A recording fit this call but its variables did not
-					// hold: only an exact recording of this very call may
-					// still answer it, never a lenient pass.
-					served, ok, retry, err := h.exactOnly(ctx, input, rest, mockDb, headerNoise, userBodyNoise, urlNoise, statefulMocks)
-					if err != nil {
-						return false, nil, nil, err
-					}
-					if retry {
-						continue
-					}
-					if ok {
-						return true, served, nil, nil
-					}
-					if scope.moved() {
-						continue // a test began meanwhile: check the call against it
-					}
-					return false, nil, &matchDiag{phase: models.MatchPhaseVariable, candidates: len(comparedPool), pool: comparedPool, variable: vp}, nil
-				}
-				if len(unfilteredMocks) == 0 {
-					return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(comparedPool), pool: comparedPool}, nil
-				}
+			vs, err := h.variableStage(ctx, input, mockDb, scope, unfilteredMocks, headerNoise, userBodyNoise, urlNoise, statefulMocks)
+			if err != nil {
+				return false, nil, nil, err
 			}
+			if vs.retry {
+				continue
+			}
+			if vs.served != nil {
+				return true, vs.served, nil, nil
+			}
+			if vs.diag != nil {
+				return false, nil, vs.diag, nil
+			}
+			if len(vs.rest) == 0 {
+				// Every recording declares variables, and none fits.
+				return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(comparedPool), pool: comparedPool}, nil
+			}
+			unfilteredMocks = vs.rest
 		}
 
 		// Under the proven switch the rest are answered only by a recording

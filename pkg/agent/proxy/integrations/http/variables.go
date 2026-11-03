@@ -1067,6 +1067,124 @@ func (h *HTTP) fitsRecording(ctx context.Context, asRecorded *req, m *models.Moc
 	return len(strictDiff(ctx, asRecorded, liveDestination(ctx, asRecorded), m, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise))) == 0
 }
 
+// varStage is the variable pass's decision of a call in one attempt
+// (variableStage): served, the answer; diag, the call's miss; retry, check
+// the call again (another connection bound or took first, or a test began
+// meanwhile). With none of them the pass decided nothing: no recording that
+// declares variables fits the call, and rest, the pool less those
+// recordings, is the later passes' to decide the call against.
+type varStage struct {
+	served *models.Mock
+	diag   *matchDiag
+	retry  bool
+	rest   []*models.Mock
+}
+
+// variableStage is the variable pass of one attempt to answer a call, under
+// the proven switch, over pool (the store's view the attempt read, in its
+// order), with scope read before pool was fetched: a recording that declares
+// variables answers the call alone, where it fits the call and its variables
+// hold; one that fits but whose variables do not hold leaves only an exact
+// recording of this very call to answer it (exactOnly), else the call
+// misses with that evidence. ctx names whose recordings the open test's are
+// (ownedKey). The replay's matcher (matchCascade) and record's full round
+// (fullRoundVariables) decide a call so.
+func (h *HTTP) variableStage(ctx context.Context, input *req, mockDb integrations.MockMemDb, scope varScope, pool []*models.Mock, headerNoise, userBodyNoise map[string][]string, urlNoise []string, statefulMocks bool) (varStage, error) {
+	withVars, rest := splitVariableMocks(pool)
+	if len(withVars) == 0 {
+		return varStage{rest: rest}, nil
+	}
+	hits, problem, err := h.variablePass(ctx, input, withVars, scope, headerNoise, userBodyNoise, urlNoise)
+	if err != nil {
+		return varStage{}, err
+	}
+	if len(hits) > 0 {
+		hit, commitCursor, answered := h.pickHit(hits, ownedBy(ctx), mockDb, statefulMocks, h.variableMember(ctx, input, scope, headerNoise, userBodyNoise, urlNoise))
+		if answered != nil {
+			return varStage{diag: &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(pool), pool: pool, answered: answered}}, nil
+		}
+		served, problem, retry, err := h.serveVariables(ctx, hit, mockDb)
+		if err != nil {
+			return varStage{}, err
+		}
+		if retry {
+			return varStage{retry: true}, nil
+		}
+		if problem != nil {
+			if scope.moved() {
+				return varStage{retry: true}, nil // a test began meanwhile: check the call against it
+			}
+			return varStage{diag: &matchDiag{phase: models.MatchPhaseVariable, candidates: len(pool), pool: pool, variable: problem}}, nil
+		}
+		if commitCursor != nil {
+			commitCursor()
+		}
+		return varStage{served: served}, nil
+	}
+	if problem != nil {
+		// A recording fit this call but its variables did not hold: only
+		// an exact recording of this very call may still answer it, never
+		// a lenient pass.
+		served, ok, retry, err := h.exactOnly(ctx, input, rest, mockDb, headerNoise, userBodyNoise, urlNoise, statefulMocks)
+		if err != nil {
+			return varStage{}, err
+		}
+		if retry {
+			return varStage{retry: true}, nil
+		}
+		if ok {
+			return varStage{served: served}, nil
+		}
+		if scope.moved() {
+			return varStage{retry: true}, nil // a test began meanwhile: check the call against it
+		}
+		return varStage{diag: &matchDiag{phase: models.MatchPhaseVariable, candidates: len(pool), pool: pool, variable: problem}}, nil
+	}
+	return varStage{rest: rest}, nil
+}
+
+// fullRoundVariables decides, in record's full round, a call a recording
+// that declares variables fits, as a replay's matcher decides it
+// (variableStage over the store's view the replay's read gives: strictPool),
+// so the full round and the replays after it answer such a call alike. The
+// learn step neither serves such a recording nor learns onto it (scopeReads),
+// so without this pass every call of one (a derived mock that keeps its
+// source's echo, a kept recording that holds learned variables) missed in
+// the full round that its replays answer. decided is false where no such
+// recording fits the call: the learn step decides it. mockDb is the store
+// as a replay's matcher reads it: held to the call's round
+// (integrations.HoldToRound), with the open test's own-call decision
+// (integrations.OwnRepeatRead).
+func (h *HTTP) fullRoundVariables(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, userBodyNoise map[string][]string, urlNoise []string, statefulMocks bool) (served *models.Mock, diag *matchDiag, decided bool, err error) {
+	for {
+		if ctx.Err() != nil {
+			return nil, nil, true, ctx.Err()
+		}
+		// The variables' scope first, then the pool, as matchCascade reads
+		// them: a test that begins after the scope's read makes the binds
+		// of a call checked against the pool read after it stale, so a
+		// call checked against the previous test's recordings binds
+		// nothing in the test that began (variables.Table.BindAll).
+		scope := readVarScope(mockDb)
+		perTest, _, pool, err := strictPool(mockDb)
+		if err != nil {
+			return nil, nil, true, err
+		}
+		vs, err := h.variableStage(context.WithValue(ctx, ownedKey{}, openTestOwner(mockDb, perTest)), input, mockDb, scope, pool, headerNoise, userBodyNoise, urlNoise, statefulMocks)
+		switch {
+		case err != nil:
+			return nil, nil, true, err
+		case vs.retry:
+			continue
+		case vs.served != nil:
+			return vs.served, nil, true, nil
+		case vs.diag != nil:
+			return nil, vs.diag, true, nil
+		}
+		return nil, nil, false, nil
+	}
+}
+
 // pickHit chooses the hit that answers: the first of hits, and among the
 // reusable (ConsumeCursorSaturate) recordings of this call whose variables
 // hold, the first in record order not yet served, else the last (a call past
