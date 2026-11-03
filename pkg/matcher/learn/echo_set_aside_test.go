@@ -96,6 +96,21 @@ func TestAnEchoPastPlacesTheCopyRuleShowedNoSourceIsLearnedAsTheEcho(t *testing.
 	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "record's full round gave the application mock-b only in an older test than the call's: the call may be a late call of that test") || strings.Contains(got.Why, olderSetAside) || strings.Contains(got.Why, echoLearned) {
 		t.Errorf("FALSE GREEN? slot 82 echoed, slot 7 in F, F served b then a, both only in an older test: %s (%q); want refused as a late call of b's test", got.Kind, got.Why)
 	}
+	// Only b, in an older test: the recorded value holds b's 82 and c's 31,
+	// each a place both runs gave unchanged, and the value F saw (7 46)
+	// holds no word of any place, so no late call of b's test is read. The
+	// recording gave c then b, F b (in the older test) then c: the echo is
+	// refused for that order, which refuses it whatever test b was in, and
+	// the reason names the order, never b's older test.
+	c := eAnswer("mock-c", 300*time.Millisecond, "31")
+	got = classifyF(t, "slot 82 31", "slot 7 46", nil, []Raw{c.ServedAs(1).ServedAsRecorded(), b.ServedAs(2).ServedAsRecorded()}, echo("slot 82 31"))
+	if got.Kind != KindEcho || !strings.HasSuffix(got.Why, echoLearned) {
+		t.Errorf("slot 82 31 echoed, slot 7 46 in F, F served c then b: %s (%q); want an echo", got.Kind, got.Why)
+	}
+	got = classifyF(t, "slot 82 31", "slot 7 46", nil, []Raw{c.ServedAs(2).ServedAsRecorded(), b.ServedAs(1).ServedAsRecorded().ServedInAnOlderTest()}, echo("slot 82 31"))
+	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, echoSetAside+"the recording and record's full round gave the application the earlier answers in a different order") || strings.Contains(got.Why, olderSetAside) || strings.Contains(got.Why, "late call") {
+		t.Errorf("FALSE GREEN? slot 82 31 echoed, slot 7 46 in F, F served b (only in an older test) then c: %s (%q); want refused for the order, never naming b's older test", got.Kind, got.Why)
+	}
 
 	// A word that is a source in both runs (both values hold it) is no
 	// place the rule set aside: the echo beside it stays refused, naming
