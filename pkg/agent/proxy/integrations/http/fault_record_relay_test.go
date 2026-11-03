@@ -506,6 +506,37 @@ func TestRecordV2_FaultNotRecordedWhenTheSessionClosesTheStream(t *testing.T) {
 	}
 }
 
+// The session closed the stream before the connection ended, and the parser,
+// behind its capture, reads the stream's end only after the relay has ended
+// the connection: what it reads there is still the session's close, not the
+// upstream's end, whether the upstream's end was read before the close or
+// after it.
+func TestRecordV2_FaultNotRecordedWhenTheSessionClosedTheStreamBeforeItsEnd(t *testing.T) {
+	for _, upstreamFirst := range []bool{true, false} {
+		c := newRelayedConn(t)
+		c.startRelay(t)
+		write(t, c.app, c.src, faultReq)
+		relayed(t, c.dest, faultReq)
+		if upstreamFirst {
+			_ = c.dest.Close()
+			awaitPeerEnd(t, c, fakeconn.FromDest)
+		}
+		_ = c.sess.DestStream.Close()
+		if !upstreamFirst {
+			_ = c.dest.Close()
+			awaitPeerEnd(t, c, fakeconn.FromDest)
+		}
+		_ = c.app.Close()
+		<-c.relayDone
+		c.startParser(t)
+		mocks, err := c.finish(t)
+		if err != nil || len(mocks) != 0 {
+			t.Errorf("upstream's end first %v: recorded %d mocks, %v; want none when the session closed the stream before its end",
+				upstreamFirst, len(mocks), err)
+		}
+	}
+}
+
 // Partway through the answer: neither a hole nor the recording's stop is a
 // fault, and a stream that ends there records nothing, as before.
 func TestRecordV2_FaultAfterTheHeadNotRecordedAtAHoleOrAStop(t *testing.T) {
