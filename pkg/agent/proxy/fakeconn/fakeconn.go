@@ -863,8 +863,8 @@ func (f *FakeConn) LastReadTime() time.Time {
 // LastWrittenTime returns the WrittenAt timestamp of the most recently
 // delivered Chunk, or the zero time if no Chunk has been delivered or
 // no chunk carried a non-zero WrittenAt. Parsers that need response-
-// side semantics (time the relay handed the byte off to the real peer)
-// should prefer this over LastReadTime for consistency with other V2
+// side semantics (time the relay began handing the bytes to the real
+// peer, Chunk.WrittenAt) should prefer this over LastReadTime for consistency with other V2
 // recorders that anchor ResTimestampMock to chunk.WrittenAt.
 func (f *FakeConn) LastWrittenTime() time.Time {
 	n := f.lastWrittenNano.Load()

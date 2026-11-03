@@ -4,6 +4,7 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,7 +24,11 @@ import (
 //   - case-folded: the decoded form in lower case;
 //   - quoted-printable: its soft line breaks taken out and its "=XX"
 //     escapes decoded, where they decode to text (qpDecoded), and that in
-//     lower case;
+//     lower case. What a drifted value is checked for (unparsed, below)
+//     reads it in this form only where it and the value it is compared
+//     with read as quoted-printable text: as a mail that says it is; or
+//     whole, and its escapes show it or a soft line break splits it
+//     (qpFormRead, formsOf);
 //   - encoded: each run of eight characters or more that decodes to text:
 //     of the standard or URL-safe base64 alphabet, padded or not, whole,
 //     joined across the line breaks of wrapped base64 (indented or escaped
@@ -571,11 +576,38 @@ func joinWrapped(s string) (string, []int) {
 // or '\' (which the readings would take for escapes keploy cannot read).
 // A value with no such escape is itself.
 func qpDecoded(s string) string {
-	if !strings.Contains(s, "=") {
-		return s
-	}
+	d, _, _ := qpRead(s)
+	return d
+}
+
+// qpRead is s read as quoted-printable (qpDecoded), whether it reads as
+// such whole, and whether its escapes show it is.
+//
+// Whole: each '=' it holds starts a soft line break or a run of escapes.
+// Quoted-printable writes every '=' of its text as "=3D", so a value that
+// holds any other '=' ("Credential=local/..., Signature=09bb..." of an AWS
+// signature) is no quoted-printable text, and an "=XX" in it only looks
+// like an escape. Nor is one with a run of escapes that decodes to a '%'
+// or a '\', which qpDecoded leaves as written. A run that decodes to no
+// text (a Latin-1 "caf=E9") is an escape quoted-printable writes too: it
+// is left as written, and the value may still read whole.
+//
+// Shown: a run of its escapes decodes to text that holds a character
+// quoted-printable has to write as an escape (qpMustEscape), or it holds no
+// escape at all once its soft line breaks are out (it reads the same either
+// way). Every other escape ("=41" an 'A', "=2B" a '+', "=09" a tab) is of a
+// character quoted-printable may write as itself, and one that decodes to
+// no text is a byte a signature's hex spells as often, so a value whose
+// escapes are all of those kinds shows nothing: a signature in upper-case
+// hex whose first two digits happen to be an escape ("sha256=2BC4...",
+// "v1=41F0...", "v1=AA03...") is no '+', 'A' or byte and its hex.
+func qpRead(s string) (d string, whole, shown bool) {
 	s = strings.ReplaceAll(strings.ReplaceAll(s, "=\r\n", ""), "=\n", "")
+	if !strings.Contains(s, "=") {
+		return s, true, true
+	}
 	var b strings.Builder
+	whole = true
 	for i := 0; i < len(s); {
 		j := i
 		var bytes []byte
@@ -585,27 +617,88 @@ func qpDecoded(s string) string {
 			j += 3
 		}
 		if j == i {
+			if s[i] == '=' {
+				whole = false
+			}
 			b.WriteByte(s[i])
 			i++
 			continue
 		}
-		if isText(bytes) && !strings.ContainsAny(string(bytes), "%\\") {
-			b.Write(bytes)
-		} else {
+		switch {
+		case !isText(bytes):
 			b.WriteString(s[i:j])
+		case strings.ContainsAny(string(bytes), "%\\"):
+			whole = false
+			b.WriteString(s[i:j])
+		default:
+			b.Write(bytes)
+			shown = shown || qpMustEscape(bytes)
 		}
 		i = j
 	}
-	return b.String()
+	return b.String(), whole, shown
+}
+
+// qpMustEscape reports whether text, what a run of escapes decodes to,
+// holds a character quoted-printable has to write as an escape (RFC 2045):
+// an '=', or a non-ASCII character.
+func qpMustEscape(text []byte) bool {
+	for _, r := range string(text) {
+		if r == '=' || r >= utf8.RuneSelf {
+			return true
+		}
+	}
+	return false
 }
 
 // qpForm is s read as quoted-printable (qpDecoded) after its escapes
 // (unescaped), with its soft line breaks taken out first (noSoftBreaks), in
 // their escaped spellings too ("=\\r\\n" of a mail in a JSON string), which
 // unescaping would turn into separators.
+//
+// It is qpFormRead's form, read without asking whether s reads as
+// quoted-printable: qpForm reads every payload a read decodes (decodeForms)
+// and each text of its base64 runs (b64Read), and asking the declared
+// header's pattern (qpDeclared) there took a matcher's state of 37 KB from
+// its pool for each of 42 bytes or more (the pattern's shortest match),
+// as the soft line breaks' pattern did before noSoftBreaks.
 func qpForm(s string) string {
-	return qpDecoded(unescaped(noSoftBreaks(s)))
+	t, _ := qpSoftOut(s)
+	q, _, _ := qpRead(unescaped(t))
+	return q
 }
+
+// qpFormRead is the quoted-printable form of s (qpForm), and whether s, a
+// drifted value, reads as quoted-printable text, which unparsed then checks
+// in that form beside that of the value it is compared with (formsOf):
+//   - a mail or a MIME part that says it is (qpDeclared), whose header
+//     lines hold an '=' of their own ("charset=utf-8") that starts no
+//     escape;
+//   - else whole, and its escapes show it or a soft line break splits it
+//     (qpRead). An escape of a character quoted-printable may write as
+//     itself, or of no text, shows nothing ("v1=2B" of a signature).
+//
+// Either way every escape that decodes to text is decoded, as the readings
+// search it: a value read as quoted-printable is read whole as such, so
+// what changed behind any of its escapes ("ab=2Bcd", a '+' and a run of the
+// base64 alphabet) is checked as it reads.
+func qpFormRead(s string) (string, bool) {
+	t, soft := qpSoftOut(s)
+	u := unescaped(t)
+	q, whole, shown := qpRead(u)
+	return q, qpDeclared.MatchString(u) || whole && (shown || soft)
+}
+
+// qpSoftOut is s with its soft line breaks taken out (noSoftBreaks), and
+// whether it held one.
+func qpSoftOut(s string) (string, bool) {
+	t := noSoftBreaks(s)
+	return t, t != s
+}
+
+// qpDeclared is the header of a mail or a MIME part whose body is
+// quoted-printable.
+var qpDeclared = regexp.MustCompile(`(?i)content-transfer-encoding:[ \t]*quoted-printable`)
 
 // noSoftBreaks is s without its soft line breaks, each a "=" before a line
 // break in any spelling (softBreakAt), taken out from the left: s itself
@@ -928,27 +1021,50 @@ func b64DecodeAny(s string) ([]byte, bool) {
 
 // formsOf are the declared forms of a drifted value, recorded and live,
 // beside the value as read raw: decoded (percent and backslash escapes),
-// case-folded, and the text its encoded runs decode to (b64Text), itself
-// case-folded; and that text, recorded and live, on its own (encoded).
-func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms [][2]string, encoded [2]string) {
-	forms = [][2]string{{decRec, decLive}}
-	fold := func(f [2]string) {
+// case-folded; quoted-printable (qpForm, each escape that decodes to text
+// decoded), where it differs, itself case-folded; and the text its encoded
+// runs decode to (b64Text), itself case-folded; and that text, recorded and
+// live, on its own (encoded). The words of each form are searched for what
+// flowed into the value. qp is where forms holds the quoted-printable form
+// and its case-folded one (forms[qp[0]:qp[1]], empty where it holds none):
+// right after the value as written.
+//
+// checked are the forms unparsed reads, the same but for the
+// quoted-printable one: that is read only where both values read as
+// quoted-printable text (qpFormRead). Reading it where one does not would
+// make the two values differ in that form where they did not
+// ("Signature=09bb..." a tab in one run, "Signature=b17d..." as written in
+// the other; "v1=2B<hex>" a '+' against "v1=41<hex>" an 'A'), in a run of
+// the base64 alphabet that does not decode, which unparsed refuses. The
+// search reads it in every value: a word only that reading shows
+// ("=23A7K29Q" a '#' and an id) is found where it flowed.
+func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms, checked [][2]string, qp [2]int, encoded [2]string) {
+	with := func(fs [][2]string, f [2]string) [][2]string {
+		fs = append(fs, f)
 		if lr, ll := strings.ToLower(f[0]), strings.ToLower(f[1]); lr != f[0] || ll != f[1] {
-			forms = append(forms, [2]string{lr, ll})
+			fs = append(fs, [2]string{lr, ll})
 		}
+		return fs
 	}
-	fold(forms[0])
-	if qr, ql := qpForm(rec), qpForm(live); qr != decRec || ql != decLive {
-		q := [2]string{qr, ql}
-		forms = append(forms, q)
-		fold(q)
+	base := with(nil, [2]string{decRec, decLive})
+	forms = append([][2]string(nil), base...)
+	checked = append([][2]string(nil), base...)
+	qp = [2]int{len(forms), len(forms)}
+	qr, qpR := qpFormRead(rec)
+	ql, qpL := qpFormRead(live)
+	if qr != decRec || ql != decLive {
+		forms = with(forms, [2]string{qr, ql})
+		qp[1] = len(forms)
+		if qpR && qpL {
+			checked = with(checked, [2]string{qr, ql})
+		}
 	}
 	if br, bl := b64Text(decRec, clock.rec), b64Text(decLive, clock.live); br != "" || bl != "" {
 		encoded = [2]string{br, bl}
-		forms = append(forms, encoded)
-		fold(encoded)
+		forms = with(forms, encoded)
+		checked = with(checked, encoded)
 	}
-	return forms, encoded
+	return forms, checked, qp, encoded
 }
 
 // allIn reports whether every word of ws is in set, and there is one.
