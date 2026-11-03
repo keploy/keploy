@@ -133,8 +133,9 @@ func TestCancelledRunReasonNamesWhatEndedTheRun(t *testing.T) {
 // test) fails the set as its exit does, never as a stop by its user, whether
 // keploy runs it for the set or keeps it across the run's sets
 // (--keep-app-alive), or docker compose keeps its stack across them, and the
-// run stops naming the exit, its code and the set: never "replay completed
-// successfully". The exit code is 1.
+// run stops at that set, naming the exit, its code and the set: never "replay
+// completed successfully". No later set runs: none has an application to run
+// on. The exit code is 1.
 func TestAnAppThatExitsMidSetFailsTheSetAndTheRunNamesItsExit(t *testing.T) {
 	for _, c := range []struct {
 		name       string
@@ -150,6 +151,7 @@ func TestAnAppThatExitsMidSetFailsTheSetAndTheRunNamesItsExit(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newPartialRunHarness(t, 3, 0)
+			h.replayer.testDB = twoPRSetsDB{h.replayer.testDB.(*prTestDB)}
 			h.replayer.config.Command = "./app"
 			h.replayer.config.CommandType = string(utils.Native)
 			if c.compose {
@@ -175,6 +177,9 @@ func TestAnAppThatExitsMidSetFailsTheSetAndTheRunNamesItsExit(t *testing.T) {
 			utils.ErrCode = 0
 			t.Cleanup(func() { utils.ErrCode = saved })
 			_ = h.replayer.Start(ctx)
+			if ran := setsRan(logs); len(ran) != 1 || ran[0] != "test-set-0" {
+				t.Errorf("the run ran the sets %v, want it to stop after test-set-0", ran)
+			}
 			rep := h.report.report
 			if rep == nil {
 				t.Fatal("no report was persisted")
