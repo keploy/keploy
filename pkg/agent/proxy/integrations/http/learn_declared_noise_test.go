@@ -522,3 +522,145 @@ func TestLearnMatchAFollowedCallsParkedAnswerIsNotReadAgainAndStatesItsView(t *t
 		}
 	}
 }
+
+// A declared field whose value keploy cannot follow into the answer (here a
+// token another test's login answered, which a pool call carries) is served
+// as recorded, and the reason keploy logs says the field is declared and why
+// the value was still refused. It never tells the user to declare the field
+// noise in keploy.yml: the evidence a paired call's refusal carries ends in
+// that remedy, which a declared field already has.
+func TestLearnMatchADeclaredFieldsRefusalSaysItIsDeclared(t *testing.T) {
+	calls := func(t *testing.T, bodyNoise map[string][]string) (*models.Mock, *learnMiss, *learnDb, *observer.ObservedLogs) {
+		h, _, opts := learnOn(t)
+		core, logs := observer.New(zapcore.DebugLevel)
+		h.Logger = zap.New(core)
+		opts.LearnPool = true
+		n := h.newLearnNoise(opts, bodyNoise, nil)
+		tr := learn.NewTracker()
+		tr.Begin()
+		ctx := learn.WithTracker(context.Background(), tr)
+		login := learnRecorded("mock-0", 0, "POST", "/v1/login", `{"user":"u-7"}`, nil, `{"token":"tok-0c41b2"}`)
+		refresh := learnRecorded("mock-1", 2*time.Second, "POST", "/v1/sessions/refresh", `{"token":"tok-0c41b2"}`, nil, `{"ok":true}`)
+		ldb := &learnDb{perTest: []*models.Mock{refresh}, otherTest: map[time.Time]bool{login.Spec.ReqTimestampMock: true}}
+		db := poolView{&recordedBeforeDb{learnDb: ldb, onDisk: []*models.Mock{login}}}
+		served, miss, err := h.learnMatch(ctx, live("POST", "/v1/sessions/refresh", `{"token":"tok-9d8e7f"}`, nil), db, n, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return served, miss, ldb, logs
+	}
+
+	// Not declared: the refusal is the miss's, and its evidence names the
+	// remedy for a field keploy.yml does not declare.
+	_, miss, _, _ := calls(t, nil)
+	if miss == nil || !strings.Contains(miss.res.Why, "holds earlier (in mock-0)") || !strings.Contains(miss.res.Why, "declare it noise in keploy.yml") {
+		t.Fatalf("miss %+v, want the paired refusal with its evidence", miss)
+	}
+
+	served, miss, db, logs := calls(t, map[string][]string{"token": {}})
+	if miss != nil || served == nil || served.Spec.HTTPResp.Body != `{"ok":true}` {
+		t.Fatalf("served %v miss %+v, want mock-1 served as recorded", served, miss)
+	}
+	if len(db.consumed) != 1 || len(db.consumed[0].Spec.Learned()) != 0 || len(db.consumed[0].Spec.LearnedBinds()) != 0 || len(db.consumed[0].Spec.ReqBodyNoise) != 0 {
+		t.Fatalf("took %+v, want mock-1 with nothing learned", db.consumed)
+	}
+	said := logs.FilterMessage("keploy.yml declares these fields noise, so keploy does not compare them, but it cannot follow the value one carries into the answer; the call is served as recorded").All()
+	if len(said) != 1 {
+		t.Fatalf("%d declared-field refusals logged, want 1: %v", len(said), logs.All())
+	}
+	f := said[0].ContextMap()
+	why, _ := f["why"].(string)
+	if !reflect.DeepEqual(f["declared"], []interface{}{"body.token"}) || !strings.HasPrefix(why, "body.token carries a value the test's recording holds earlier (in mock-0)") {
+		t.Fatalf("logged %v, want the declared field and why it was refused", f)
+	}
+	if strings.Contains(why, "keploy.yml") || strings.Contains(why, "declare") {
+		t.Fatalf("the reason %q tells the user to declare a field keploy.yml declares", why)
+	}
+}
+
+// A leaf another parser's caller holds LearnEchoOnly is learned on the
+// declared path only as an echo, as on the paired one (heldLearned): a
+// variable's use there is refused, and the call is served as recorded with
+// nothing learned; an echo there still holds this run's value.
+func TestLearnMatchADeclaredFieldTheCallerHoldsEchoOnlyIsNoVariablesUse(t *testing.T) {
+	h, _, opts := learnOn(t)
+	core, logs := observer.New(zapcore.DebugLevel)
+	h.Logger = zap.New(core)
+	n := h.newLearnNoise(opts, map[string][]string{"q.id": {}, "ref": {}}, nil)
+	n.hold = func(leaf string) LearnHold {
+		if leaf == "body.q.id" || leaf == "body.ref" {
+			return LearnEchoOnly
+		}
+		return LearnAny
+	}
+	setup := func() (context.Context, *learnDb) {
+		tr := learn.NewTracker()
+		tr.Begin()
+		db := &learnDb{perTest: []*models.Mock{
+			learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"order":"o-1"}`, nil, `{}`),
+			learnRecorded("mock-1", time.Second, "POST", "/v1/find", `{"q":{"id":"o-1"}}`, nil, `{"id":"o-1","state":"new"}`),
+			learnRecorded("mock-2", 2*time.Second, "POST", "/v1/echo", `{"ref":"zeta"}`, nil, `{"ref":"zeta"}`),
+		}}
+		ctx := learn.WithTracker(context.Background(), tr)
+		if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/orders", `{"order":"o-9"}`, nil), db, n, opts); served == nil || miss != nil {
+			t.Fatalf("the first call is paired: %+v", miss)
+		}
+		return ctx, db
+	}
+
+	ctx, db := setup()
+	served, miss, err := h.learnMatch(ctx, live("POST", "/v1/find", `{"q":{"id":"o-9"}}`, nil), db, n, opts)
+	if err != nil || miss != nil || served == nil || served.Spec.HTTPResp.Body != `{"id":"o-1","state":"new"}` {
+		t.Fatalf("served %v miss %+v err %v, want mock-1 served as recorded", served, miss, err)
+	}
+	if got := db.consumed[1]; len(got.Spec.Learned()) != 0 || len(got.Spec.LearnedBinds()) != 0 || len(got.Spec.ReqBodyNoise) != 0 {
+		t.Fatalf("learned %+v binds %+v noise %v, want nothing at a leaf held echo-only", got.Spec.Learned(), got.Spec.LearnedBinds(), got.Spec.ReqBodyNoise)
+	}
+	said := logs.FilterMessage("keploy.yml declares these fields noise, so keploy does not compare them, but it cannot follow the value one carries into the answer; the call is served as recorded").All()
+	if len(said) != 1 {
+		t.Fatalf("%d declared-field refusals logged, want 1: %v", len(said), logs.All())
+	}
+	if why, _ := said[0].ContextMap()["why"].(string); why != "body.q.id changed, and keploy learns it only as a value the answer carries back, which the answer does not" {
+		t.Fatalf("logged %v, want the echo-only refusal", said)
+	}
+
+	ctx, db = setup()
+	served, miss, err = h.learnMatch(ctx, live("POST", "/v1/echo", `{"ref":"kappa"}`, nil), db, n, opts)
+	if err != nil || miss != nil || served == nil || served.Spec.HTTPResp.Body != `{"ref":"kappa"}` {
+		t.Fatalf("served %v miss %+v err %v: an echo at a leaf held echo-only holds this run's value", served, miss, err)
+	}
+}
+
+// Another parser's caller asks of the answer the declared path renders
+// (req.written), as of a paired call's: one it cannot write is no answer,
+// and the call is served as recorded with nothing learned, the recorded
+// answer being one it writes.
+func TestLearnMatchADeclaredFieldsRenderedAnswerIsAskedOfTheCaller(t *testing.T) {
+	h, _, opts := learnOn(t)
+	n := h.newLearnNoise(opts, map[string][]string{"ref": {}}, nil)
+	tr := learn.NewTracker()
+	tr.Begin()
+	db := &learnDb{perTest: []*models.Mock{
+		learnRecorded("mock-0", 0, "POST", "/v1/echo", `{"ref":"zeta"}`, nil, `{"ref":"zeta"}`),
+	}}
+	ctx := learn.WithTracker(context.Background(), tr)
+	in := live("POST", "/v1/echo", `{"ref":"kappa"}`, nil)
+	var asked []string
+	in.written = func(a *models.Mock) *models.Mock {
+		asked = append(asked, a.Spec.HTTPResp.Body)
+		if strings.Contains(a.Spec.HTTPResp.Body, "kappa") {
+			return nil
+		}
+		return a
+	}
+	served, miss, err := h.learnMatch(ctx, in, db, n, opts)
+	if err != nil || miss != nil || served == nil || served.Spec.HTTPResp.Body != `{"ref":"zeta"}` {
+		t.Fatalf("served %v miss %+v err %v, want mock-0 served as recorded", served, miss, err)
+	}
+	if len(asked) < 2 || !reflect.DeepEqual(asked[:2], []string{`{"ref":"zeta"}`, `{"ref":"kappa"}`}) {
+		t.Fatalf("the caller was asked of %q, want the recorded answer, then the rendered one", asked)
+	}
+	if len(db.consumed) != 1 || len(db.consumed[0].Spec.Learned()) != 0 || len(db.consumed[0].Spec.ReqBodyNoise) != 0 {
+		t.Fatalf("took %+v, want mock-0 with nothing learned", db.consumed)
+	}
+}
