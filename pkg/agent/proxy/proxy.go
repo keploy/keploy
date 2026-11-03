@@ -421,8 +421,9 @@ type Proxy struct {
 	nodataRelayLogged *expirable.LRU[string, bool] // keyed by generateCacheKey
 
 	// unansweredForwardLogged dedupes the WARN for a query no upstream
-	// answered (logUnansweredForward) to once per (name,qtype); the rest are
-	// Debug. Same shape, lifetime and reset as nodataRelayLogged.
+	// answered (logUnansweredForward) to once per (name,qtype) every 30
+	// minutes; the rest are Debug. Same shape, lifetime and reset as
+	// nodataRelayLogged.
 	unansweredForwardLogged *expirable.LRU[string, bool] // keyed by generateCacheKey
 
 	// The DNS servers, set by startDNSServers before anything serves or

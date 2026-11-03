@@ -750,11 +750,24 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 	case models.MODE_RECORD:
 		resp, err := p.recordDNSMock(question, reqTime, session)
 		if err != nil {
-			// recordDNSMock fails only when no upstream answered.
-			p.logUnansweredForward(question, "DNS resolution failed in record mode",
-				append(dnsQuestionFields(question), zap.Error(err),
-					zap.String("app_answer", "SERVFAIL, as a recursive resolver answers when the servers it asks do not; nothing is recorded for the name"))...,
-			)
+			// The failure's level says whose it is, as realDNS's does.
+			// recordDNSMock marks its error errNoUpstreamAnswered when it
+			// asked the app's own upstream resolvers and none answered: the
+			// SERVFAIL is the one the app's resolver gives, so it is
+			// logUnansweredForward's WARN. Any other failure is keploy's own
+			// and stays an ERROR, such as public resolvers keploy picked
+			// (recordDNSFallback) not answering when it captured none of the
+			// app's.
+			if errors.Is(err, errNoUpstreamAnswered) {
+				p.logUnansweredForward(question, "DNS resolution failed in record mode",
+					append(dnsQuestionFields(question), zap.Error(err),
+						zap.String("app_answer", "SERVFAIL, as a recursive resolver answers when the servers it asks do not; nothing is recorded for the name"))...,
+				)
+			} else {
+				utils.LogError(p.logger, err, "DNS resolution failed in record mode",
+					dnsQuestionFields(question)...,
+				)
+			}
 			return dnsCacheEntry{
 				Msg: &dns.Msg{
 					MsgHdr: dns.MsgHdr{Rcode: dns.RcodeServerFailure},
@@ -817,10 +830,12 @@ func localhostDNSResponse(question dns.Question) dnsCacheEntry {
 // is lost: a failed answer is never a mock (recordDNSMock records NOERROR
 // answers only), and a mock.real name is never recorded. The app did see a
 // DNS failure, which can shape what it did while it was recorded, so the line
-// is said at the level an operator reads. The first per (name, qtype) is a
-// WARN and the rest Debug: a failed answer is not cached, so every retry of an
-// app comes back here, and an upstream that stays down would otherwise repeat
-// the line for as long.
+// is said at the level an operator reads. It is a WARN once per (name, qtype)
+// every 30 minutes and Debug in between: a failed answer is not cached, so
+// every retry of an app comes back here, and an upstream that stays down would
+// otherwise repeat the line for as long. The tracker (unansweredForwardLogged)
+// holds the last 1024 questions for 30 minutes each, and a new recording
+// session clears it (ResetRecordedDNSMocks).
 func (p *Proxy) logUnansweredForward(question dns.Question, msg string, fields ...zap.Field) {
 	if firstNotice(p.unansweredForwardLogged, generateCacheKey(question.Name, question.Qtype)) {
 		p.logger.Warn(msg, fields...)
@@ -1056,6 +1071,16 @@ func generateDNSDedupeKey(question dns.Question) string {
 	)
 }
 
+// recordDNSFallback is what a recording's lookup asks when keploy captured
+// no upstream resolver of the app's at startup (captureDNSUpstream): public
+// resolvers keploy picked, as host:port. recordDNSTimeout caps each exchange
+// of the lookup. Both are vars only so a test can point the fallback at a
+// resolver that does not answer, and need not wait 5 s for one.
+var (
+	recordDNSFallback = []string{"8.8.8.8:53", "1.1.1.1:53"}
+	recordDNSTimeout  = 5 * time.Second
+)
+
 func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session *agent.Session) (dnsCacheEntry, error) {
 	// Prefer the upstream resolver list captured once at proxy
 	// startup (see captureDNSUpstream). This is critical in sidecar
@@ -1068,24 +1093,30 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	// (b) discover nothing at all. Capturing once at startup pins
 	// the REAL cluster resolvers.
 	//
-	// The public-DNS fallback (8.8.8.8 / 1.1.1.1) is retained for the
-	// rare local-dev case where the proxy runs outside a cluster AND
-	// resolv.conf is entirely missing — the forwarder treats this as
-	// "no upstream" and we would otherwise be stuck.
-	var servers []string
-	port := "53"
-	if p.hasDNSUpstream() {
-		servers = p.dnsUpstreamServers
-		port = p.dnsUpstreamPort
+	// The public-DNS fallback (recordDNSFallback: 8.8.8.8 / 1.1.1.1) is
+	// asked when keploy captured no upstream of the app's: resolv.conf
+	// is missing or unreadable, or names no resolver keploy can use (no
+	// nameserver given as a plain IP, or only keploy's own listener),
+	// and always on Windows, where keploy reads none. The forwarder
+	// treats this as "no upstream" and we would otherwise be stuck.
+	// Those servers are keploy's pick, not the app's, so a failure to
+	// reach them is not marked errNoUpstreamAnswered, and it stays an
+	// ERROR.
+	var addrs []string
+	appUpstream := p.hasDNSUpstream()
+	if appUpstream {
+		for _, server := range p.dnsUpstreamServers {
+			addrs = append(addrs, net.JoinHostPort(server, p.dnsUpstreamPort))
+		}
 	} else {
 		// captureDNSUpstream already logs once at startup if it cannot
 		// snapshot a real resolver, so we don't re-log per-query here
 		// (that path runs on every cache miss and would burst the log).
-		servers = []string{"8.8.8.8", "1.1.1.1"}
+		addrs = recordDNSFallback
 	}
 
 	c := new(dns.Client)
-	c.Timeout = 5 * time.Second
+	c.Timeout = recordDNSTimeout
 
 	m := new(dns.Msg)
 	m.SetQuestion(question.Name, question.Qtype)
@@ -1096,9 +1127,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		resolveErr error
 	)
 
-	for _, server := range servers {
-		addr := net.JoinHostPort(server, port)
-
+	for _, addr := range addrs {
 		// Per-server-attempt logs fire on every cache miss (worst case, multiple
 		// servers per miss) so we keep only the diagnostic ones — silent success
 		// path, log the rare failure / truncation / TCP-retry transitions.
@@ -1143,7 +1172,12 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	}
 
 	if resolveErr != nil {
-		return dnsCacheEntry{}, fmt.Errorf("failed to resolve DNS query for %s: %w", question.Name, resolveErr)
+		err := fmt.Errorf("failed to resolve DNS query for %s: %w", question.Name, resolveErr)
+		if appUpstream {
+			// It asked the app's own upstream resolvers and none answered.
+			err = fmt.Errorf("%w: %w", errNoUpstreamAnswered, err)
+		}
+		return dnsCacheEntry{}, err
 	}
 	if in == nil {
 		return dnsCacheEntry{}, fmt.Errorf("nil DNS response for %s", question.Name)

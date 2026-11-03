@@ -488,10 +488,11 @@ func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, e
 	return nil, fmt.Errorf("%w: %w", errNoUpstreamAnswered, lastErr)
 }
 
-// errNoUpstreamAnswered marks forwardDNS's error when it asked the upstream
-// resolvers and none answered in time (a timeout, a refused or a failed
-// exchange), as against the errors where it asked none: no upstream to ask,
-// or a question type it does not forward.
+// errNoUpstreamAnswered marks the error of a lookup keploy made for the app
+// (forwardDNS, recordDNSMock) when it asked the app's upstream resolvers and
+// none answered in time (a timeout, a refused or a failed exchange), as
+// against the errors where it asked none of them: no upstream to ask, a
+// question type it does not forward, or public resolvers keploy picked.
 var errNoUpstreamAnswered = errors.New("no upstream DNS server answered")
 
 // isForwardableQType is the allowlist of DNS query types the
