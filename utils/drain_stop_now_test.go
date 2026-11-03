@@ -2,6 +2,7 @@ package utils
 
 import (
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,11 +26,32 @@ func drainStopNowTest(t *testing.T) {
 // own (the app exited, a record timer): the run not interrupted yet.
 func drainStopNowTestOnItsOwn(t *testing.T) {
 	t.Helper()
+	awaitDrainsEnded(t)
 	notice := drainNotice
 	drainNotice = 5 * time.Millisecond
 	ClearInterrupted()
 	ResetInterruptedAgain()
-	t.Cleanup(func() { drainNotice = notice; ClearInterrupted(); ResetInterruptedAgain() })
+	t.Cleanup(func() { awaitDrainsEnded(t); drainNotice = notice; ClearInterrupted(); ResetInterruptedAgain() })
+}
+
+// drainsRunning counts the drains rows have started (startCarriedDrain)
+// that have not returned yet.
+var drainsRunning sync.WaitGroup
+
+// awaitDrainsEnded waits until every drain a row started has returned, its
+// offer withdrawn, before the interrupts are reset. A row ends its group as
+// it returns (defer close(block)), so its drain may still be running then. A
+// withdraw that came after the reset took the next row's offer out of the
+// count, and that row's press after its drain's offer then ended no stop.
+func awaitDrainsEnded(t *testing.T) {
+	t.Helper()
+	ended := make(chan struct{})
+	go func() { drainsRunning.Wait(); close(ended) }()
+	select {
+	case <-ended:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Error("a drain a row started was still running a minute after its row ended")
+	}
 }
 
 // drainResult is what a teardown drain returned.
@@ -49,7 +71,9 @@ func startDrain(clk stall.Clock, g *errgroup.Group, bound time.Duration, progres
 func startCarriedDrain(clk stall.Clock, g *errgroup.Group, bound time.Duration, progress func() uint64, carrier <-chan struct{}) (<-chan drainResult, *observer.ObservedLogs) {
 	core, logs := observer.New(zap.DebugLevel)
 	res := make(chan drainResult, 1)
+	drainsRunning.Add(1)
 	go func() {
+		defer drainsRunning.Done()
 		err, end := drainErrGroupProgress(clk, zap.New(core), "t", g, bound, progress, carrier)
 		res <- drainResult{err, end}
 	}()
