@@ -2142,13 +2142,15 @@ func unobfuscated(mv []string, isObfuscated func(string) bool) []string {
 // obfuscator value-regexes are skipped, and so are keys known with no
 // patterns. A key known with patterns is skipped only when both bodies hold
 // it and each of its values, on each side, matches one (formValuesMatch):
-// otherwise it is compared as any other key. The entry with patterns that
-// decides a key is found as the strict comparison and PatternDrift find it
+// otherwise its values are compared. The entry with patterns that decides a
+// key is found as the strict comparison and PatternDrift find it
 // (formGuards: on the decoded key, without case, whole fields at any depth).
-// Such a key is read on both sides by its decoded key, as the strict
-// comparison reads it (raw spellings that decode alike are one key, their
-// values in body order), and its drift is named by it, which PatternDrift's
-// filter reads.
+// Such a key is read on both sides by its decoded key, raw spellings that
+// decode alike as one key, their values read in body order and compared as
+// the strict comparison compares them (sameFormValues: decoded, in any
+// order, where both bodies parse), and its drift is named by it, which
+// PatternDrift's filter reads. Any other key is read by its raw text and its
+// raw values are compared in order, as before.
 func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObfuscated func(string) bool) map[string][]string {
 	// Split on raw bytes (Split on '&', IndexByte on '=') rather than via
 	// url.ParseQuery so the "key=value" segment handed to isObfuscated carries
@@ -2187,7 +2189,8 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 		key := "body." + rawKey
 		pats, ok := known[key]
 		rv, inLive := reqVals[rawKey]
-		if gp := guards(rawKey); len(gp) > 0 {
+		gp := guards(rawKey)
+		if len(gp) > 0 {
 			name := formKeyName(rawKey)
 			if read[name] {
 				continue
@@ -2218,6 +2221,14 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 			out[key] = []string{} // key dropped on replay
 			continue
 		}
+		if len(gp) > 0 {
+			// A key the patterns guard is compared as the strict
+			// comparison compares it, so a miss and the switch agree.
+			if !sameFormValues(mv, rv, mockBody, reqBody) {
+				out[key] = []string{} // value drifted
+			}
+			continue
+		}
 		// Compare occurrences element-wise (order-sensitive) rather than
 		// joining: a join is lossy when values embed the separator or the
 		// repeated-key cardinality differs (["a","bc"] vs ["a,bc"]), which
@@ -2236,6 +2247,40 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 		return nil
 	}
 	return out
+}
+
+// sameFormValues reports whether a form key's raw values a, of the form
+// body rec, and b, of live, are the same values as the strict comparison
+// reads them (formDiffs). Where url.ParseQuery reads both bodies, they are
+// compared as the application sent them (URL-decoded), in any order
+// (sameMembers): a value escaped another way ("+" or "%20" for a space) or a
+// repeated key's values in another order are the same values. Otherwise
+// (the strict comparison reads such a body, changed, as changed whole) they
+// are the same only as written, in order.
+func sameFormValues(a, b []string, rec, live string) bool {
+	if slices.Equal(a, b) {
+		return true
+	}
+	return formParses(rec) && formParses(live) && sameMembers(decodedFormValues(a), decodedFormValues(b))
+}
+
+// decodedFormValues are raw form values of a body url.ParseQuery reads,
+// URL-decoded (each does), in their order.
+func decodedFormValues(raw []string) []string {
+	out := make([]string, len(raw))
+	for i, v := range raw {
+		out[i], _ = url.QueryUnescape(v)
+	}
+	return out
+}
+
+// formParses reports whether url.ParseQuery reads body, as the strict
+// comparison reads a form; it does not where, for example, a segment holds
+// a ';', a key or a value does not decode, or the body holds more
+// parameters than it reads.
+func formParses(body string) bool {
+	_, err := url.ParseQuery(body)
+	return err == nil
 }
 
 // formGuards returns, for a raw form key, the patterns of the entry of known

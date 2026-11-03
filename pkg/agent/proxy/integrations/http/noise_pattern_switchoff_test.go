@@ -199,14 +199,15 @@ func TestAFormKeyIsHeldToTheEntryThatNamesItWithTheSwitchOnAndOff(t *testing.T) 
 
 // A form key keploy.yml's patterns guard is one key however the call escapes
 // it: a client that starts or stops escaping brackets, or writes a space as
-// "+" or "%20", on replay, and a recording that spells the key both ways.
-// Both values inside the patterns are served and a live value outside them
-// is refused, with the switch on and off, and the switch-off miss names the
-// field. Before, with the switch off, the live values were looked up by the
-// recorded key's raw text, so such a key counted as dropped on replay and
-// was refused, its miss saying nothing differed.
+// "+" or "%20", on replay, a recording that spells the key both ways, and a
+// call that adds a second spelling. Both values inside the patterns are
+// served and a live value outside them is refused, with the switch on and
+// off, and the switch-off miss names the field. Before, with the switch off,
+// the live values were looked up by the recorded key's raw text, so such a
+// key counted as dropped on replay and was refused, its miss saying nothing
+// differed, and a live value outside the patterns under a second spelling
+// was not read, so the call was served.
 func TestAGuardedFormKeyIsOneKeyHoweverItIsEscaped(t *testing.T) {
-	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
 	for _, c := range []struct {
 		name, entry, pat, rec, live string
 		served                      bool
@@ -220,47 +221,153 @@ func TestAGuardedFormKeyIsOneKeyHoweverItIsEscaped(t *testing.T) {
 		{"a key spelled both ways at record, both inside", "user[id]", `^\d+$`, `user%5Bid%5D=1&user[id]=2&x=a`, `user[id]=3&user[id]=4&x=a`, true},
 		{"a key spelled both ways at record, a live value outside", "user[id]", `^\d+$`, `user%5Bid%5D=1&user[id]=2&x=a`, `user[id]=3&user%5Bid%5D=evil&x=a`, false},
 		{"a key spelled both ways at record, outside the patterns, once on replay", "user[id]", `^\d+$`, `user%5Bid%5D=abcd&user[id]=abcd&x=a`, `user[id]=abcd&x=a`, false},
+		{"a second spelling on replay, the live value outside", "id", `^\d+$`, `id=1&x=a`, `id=1&%69d=evil&x=a`, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			user := requestBodyNoise(map[string][]string{c.entry: {c.pat}}).Body
+			holdsGuardedFormKey(t, c.entry, c.pat, c.rec, c.live, c.served, true)
+		})
+	}
+}
+
+// A form key keploy.yml's patterns guard keeps its values however the call
+// escapes or orders them: they are compared as the application sent them
+// (URL-decoded), in any order, as the switch compares them, so a repeated
+// key's values reordered on replay, or a space in a value written as "%20"
+// and then "+", are the same values, even outside the patterns. A changed
+// value is refused, with the switch on and off, and the switch-off miss
+// names the field. Before, with the switch off, the raw values were compared
+// in order, so such a call was refused, its miss saying nothing differed.
+func TestAGuardedFormKeyKeepsItsValuesHoweverTheyAreEscapedOrOrdered(t *testing.T) {
+	for _, c := range []struct {
+		name, rec, live string
+		served, named   bool
+	}{
+		{"a key spelled both ways at record, its values reordered on replay", `user%5Bid%5D=a&user[id]=b&x=1`, `user[id]=b&user[id]=a&x=1`, true, false},
+		{"a key spelled both ways at record, a value changed on replay", `user%5Bid%5D=a&user[id]=b&x=1`, `user[id]=evil&user[id]=a&x=1`, false, true},
+		{"a repeated key's values reordered on replay", `user[id]=a&user[id]=b&x=1`, `user[id]=b&user[id]=a&x=1`, true, false},
+		{"a space as %20 at record, + on replay", `user[id]=a%20b&x=1`, `user[id]=a+b&x=1`, true, false},
+		{"a space as %20 at record, + on replay, the value changed", `user[id]=a%20b&x=1`, `user[id]=a+bc&x=1`, false, true},
+		// In a body url.ParseQuery does not read (a value or a key that
+		// does not decode, or a ';'), values are the same only as written,
+		// in order: the switch reads such a body, changed, as changed
+		// whole, and names no field.
+		{"a value that does not decode, the same on replay", `user[id]=%zz&x=1`, `user[id]=%zz&x=1`, true, false},
+		{"a value that does not decode, changed on replay", `user[id]=%zz&x=1`, `user[id]=%zy&x=1`, false, false},
+		{"values that do not decode, reordered on replay", `user[id]=%zz&user[id]=a&x=1`, `user[id]=a&user[id]=%zz&x=1`, false, false},
+		{"values reordered beside a value that does not decode", `user[id]=a&user[id]=b&y=%zz`, `user[id]=b&user[id]=a&y=%zz`, false, false},
+		{"a ';' escaped at record only", `user[id]=a%3Bb&x=1`, `user[id]=a;b&x=1`, false, false},
+		{"a ';' escaped on replay only", `user[id]=a;b&x=1`, `user[id]=a%3Bb&x=1`, false, false},
+		{"values holding a ';' reordered on replay", `user[id]=a;b&user[id]=c&x=1`, `user[id]=c&user[id]=a;b&x=1`, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			holdsGuardedFormKey(t, "user[id]", `^\d+$`, c.rec, c.live, c.served, c.named)
+		})
+	}
+}
+
+// holdsGuardedFormKey checks that a call with the form body live is served
+// (served) by a recording of the form body rec, a keploy.yml request-body
+// entry holding entry to the pattern pat: with the switch off by the match
+// and by mock serving's body check, and with it on. Where it is refused and
+// named, the switch-off miss names the field: the reason by the key's shape,
+// as the switch's does (a key like these may carry a value), the live value
+// outside the pattern a string of 4 bytes, and the diff by its name.
+func holdsGuardedFormKey(t *testing.T, entry, pat, rec, live string, served, named bool) {
+	t.Helper()
+	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	user := requestBodyNoise(map[string][]string{entry: {pat}}).Body
+	t.Run("switch off", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "")
+		m := recorded("m", "/x", form, rec)
+		db := &mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true}
+		ok, _, diag, err := newHTTP().match(context.Background(), sent("/x", form, live), db, nil, user, nil, true, false, true, true, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok != served {
+			t.Errorf("served %v (miss %+v); want %v", ok, diag, served)
+		}
+		if allowed, drift := mocknoise.New(httpNoiseAdapter{}, true, true).StrictReject(m, []byte(live), user); allowed != served {
+			t.Errorf("mock serving's body check allowed %v (drift %v); want %v", allowed, drift, served)
+		}
+		if ok || served || !named {
+			return
+		}
+		request, _ := http.NewRequest("POST", "http://api.example/x", strings.NewReader(live))
+		request.Header.Set("Content-Type", form["Content-Type"])
+		r := newHTTP().buildHTTPMismatchReport(request, []byte(live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, user, diag)
+		if r == nil {
+			t.Fatal("no miss report")
+		}
+		field := "body." + models.KeyShape(entry)
+		want := []models.FieldReason{{Field: field, Why: matcher.PatternWhy(field, []string{pat}, "live", matcher.StringShape(4))}}
+		if !reflect.DeepEqual(r.FieldReasons, want) || !strings.Contains(r.Diff, "body."+entry+":") {
+			t.Errorf("reasons %v, diff %q; want %v and body.%s named", r.FieldReasons, r.Diff, want, entry)
+		}
+	})
+	t.Run("switch on", func(t *testing.T) {
+		m := recorded("m", "/x", form, rec)
+		if got, diag := strictMatch(t, sent("/x", form, live), nil, user, nil, m); (got != nil) != served {
+			t.Errorf("served %v (differs %v); want %v", got != nil, differs(diag), served)
+		}
+	})
+}
+
+// A form key no keploy.yml entry with patterns guards is read by its raw
+// text, its raw values compared in order, as before: an escaped key whose
+// recorded value the obfuscator redacted, writing a pattern for the key's
+// raw key=value segment beside one for the value, stays excused, with no
+// entry and beside a key an entry guards, with the switch on and off; and
+// with the switch off, mock serving's body check under strict enforcement
+// still refuses such a key's values reordered or escaped another way.
+func TestAFormKeyNoEntryGuardsIsReadByItsRawText(t *testing.T) {
+	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	noise := []string{`^REDACTED_abc$`, `^user%5Bsecret%5D=[^&]+$`}
+	rec := `user%5Bsecret%5D=REDACTED_abc&token=t-1`
+	for _, c := range []struct {
+		name, live string
+		user       map[string][]string
+	}{
+		{"no entry", `user%5Bsecret%5D=s3cr3t&token=t-1`, nil},
+		{"beside a key an entry guards", `user%5Bsecret%5D=s3cr3t&token=t-2`, requestBodyNoise(map[string][]string{"token": {`^t-\d$`}}).Body},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			live := c.live
 			t.Run("switch off", func(t *testing.T) {
 				t.Setenv(provenswitch.Env, "")
-				m := recorded("m", "/x", form, c.rec)
+				m := recorded("m", "/x", form, rec)
+				m.Noise = noise
 				db := &mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true}
-				ok, _, diag, err := newHTTP().match(context.Background(), sent("/x", form, c.live), db, nil, user, nil, true, false, true, true, true)
+				ok, _, diag, err := newHTTP().match(context.Background(), sent("/x", form, live), db, nil, c.user, nil, true, false, true, true, true)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if ok != c.served {
-					t.Errorf("served %v (miss %+v); want %v", ok, diag, c.served)
+				if !ok {
+					t.Errorf("refused (miss %+v)", diag)
 				}
-				if allowed, drift := mocknoise.New(httpNoiseAdapter{}, true, true).StrictReject(m, []byte(c.live), user); allowed != c.served {
-					t.Errorf("mock serving's body check allowed %v (drift %v); want %v", allowed, drift, c.served)
-				}
-				if ok || c.served {
-					return
-				}
-				request, _ := http.NewRequest("POST", "http://api.example/x", strings.NewReader(c.live))
-				request.Header.Set("Content-Type", form["Content-Type"])
-				r := newHTTP().buildHTTPMismatchReport(request, []byte(c.live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, user, diag)
-				if r == nil {
-					t.Fatal("no miss report")
-				}
-				// The reason names the key by its shape, as the switch's
-				// does (a key like these may carry a value); the diff by
-				// its name.
-				field := "body." + models.KeyShape(c.entry)
-				want := []models.FieldReason{{Field: field, Why: matcher.PatternWhy(field, []string{c.pat}, "live", matcher.StringShape(4))}}
-				if !reflect.DeepEqual(r.FieldReasons, want) || !strings.Contains(r.Diff, "body."+c.entry+":") {
-					t.Errorf("reasons %v, diff %q; want %v and body.%s named", r.FieldReasons, r.Diff, want, c.entry)
+				if allowed, drift := mocknoise.New(httpNoiseAdapter{}, true, true).StrictReject(m, []byte(live), c.user); !allowed {
+					t.Errorf("mock serving's body check refused it (drift %v)", drift)
 				}
 			})
 			t.Run("switch on", func(t *testing.T) {
-				m := recorded("m", "/x", form, c.rec)
-				if got, diag := strictMatch(t, sent("/x", form, c.live), nil, user, nil, m); (got != nil) != c.served {
-					t.Errorf("served %v (differs %v); want %v", got != nil, differs(diag), c.served)
+				m := recorded("m", "/x", form, rec)
+				m.Noise = noise
+				if got, diag := strictMatch(t, sent("/x", form, live), nil, c.user, nil, m); got == nil {
+					t.Errorf("refused (differs %v)", differs(diag))
 				}
 			})
+		})
+	}
+	tok := requestBodyNoise(map[string][]string{"token": {`^t-\d$`}}).Body
+	for _, c := range []struct{ name, rec, live string }{
+		{"its values reordered", `x=a&x=b&token=t-1`, `x=b&x=a&token=t-1`},
+		{"a value escaped another way", `x=a+b&token=t-1`, `x=a%20b&token=t-1`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "")
+			if allowed, _ := mocknoise.New(httpNoiseAdapter{}, true, true).StrictReject(recorded("m", "/x", form, c.rec), []byte(c.live), tok); allowed {
+				t.Error("mock serving's body check allowed it")
+			}
 		})
 	}
 }
