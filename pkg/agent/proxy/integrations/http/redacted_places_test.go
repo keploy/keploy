@@ -2,6 +2,7 @@ package http
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -77,5 +78,23 @@ func TestMissedCallNamesTheCallWithoutItsSecret(t *testing.T) {
 	}
 	if got := missedCall(request, &models.MockMismatchReport{ActualSummary: "GET /x/" + valueRedacted}); got != "GET /x/"+valueRedacted {
 		t.Errorf("with a report: %q", got)
+	}
+}
+
+// The recording's side of a report names its path as the call's request
+// line is read: a path-only recording that url.Parse cannot read
+// ("//api:v1/..." reads there as a host with a bad port) is a path, its
+// redacted segment shown redacted; a recorded URL that does not read at all
+// is shown as it was recorded.
+func TestRenderedRecordingReadsAPathOnlyURLAsARequestLine(t *testing.T) {
+	noise := []string{`^REDACTED_abc$`}
+	for _, c := range []struct{ url, want string }{
+		{"//api:v1/REDACTED_abc", "GET //api:v1/" + valueRedacted},
+		{"/%zz/a", "GET /%zz/a"},
+	} {
+		got, _, _ := strings.Cut(renderMockRequest(&models.HTTPReq{Method: "GET", URL: c.url}, noise), "\n")
+		if got != c.want {
+			t.Errorf("the recording %q renders as %q, want %q", c.url, got, c.want)
+		}
 	}
 }

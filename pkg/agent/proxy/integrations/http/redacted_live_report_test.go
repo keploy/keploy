@@ -631,18 +631,20 @@ func TestMissErrorAndLogsNameTheCallRedacted(t *testing.T) {
 }
 
 // The "variable bound" debug line shows a value bound at a place the
-// recording redacted redacted, and one bound elsewhere as it is.
+// recording redacted redacted, and one bound elsewhere as it is. A place
+// whose name ends in #<digits> ("body.ref#2") is read as the check read it,
+// the whole name where the recording holds it, not a word of "body.ref".
 func TestVariableBoundLogRedactsAValueAtARedactedPlace(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	const rec = "REDACTED_abc"
-	m := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"`+rec+`","item":"pen"}`, 201, `{}`,
-		models.MockVariables{"orderId": bindV(rec, "body.id"), "item": bindV("pen", "body.item")}), 1)
-	m.Noise = []string{`^REDACTED_abc$`}
+	const rec, recRef, liveRef = "REDACTED_abc", "REDACTED_def", "Rf7Lq2Zx9Wn"
+	m := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"`+rec+`","item":"pen","ref#2":"`+recRef+`"}`, 201, `{}`,
+		models.MockVariables{"orderId": bindV(rec, "body.id"), "item": bindV("pen", "body.item"), "ref": bindV(recRef, "body.ref#2")}), 1)
+	m.Noise = []string{`^REDACTED_(abc|def)$`}
 	core, logs := observer.New(zap.DebugLevel)
 	h := newHTTP()
 	h.Logger = zap.New(core)
 	db := &varDb{perTest: []*models.Mock{m}}
-	if ok, _, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":"`+liveBound+`","item":"pencil"}`)); !ok {
+	if ok, _, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":"`+liveBound+`","item":"pencil","ref#2":"`+liveRef+`"}`)); !ok {
 		t.Fatal("the binding call should match")
 	}
 	values := map[string]string{}
@@ -650,10 +652,10 @@ func TestVariableBoundLogRedactsAValueAtARedactedPlace(t *testing.T) {
 		v, _ := e.ContextMap()["variable"].(string)
 		values[v], _ = e.ContextMap()["value"].(string)
 	}
-	if values["orderId"] != valueRedacted || values["item"] != "pencil" {
-		t.Errorf("logged the bound values as %v, want orderId redacted and item as it is", values)
+	if values["orderId"] != valueRedacted || values["ref"] != valueRedacted || values["item"] != "pencil" {
+		t.Errorf("logged the bound values as %v, want orderId and ref redacted and item as it is", values)
 	}
-	loggedNone(t, logs, liveBound)
+	loggedNone(t, logs, liveBound, liveRef)
 }
 
 // A variable used at a path segment the recording redacted, after a

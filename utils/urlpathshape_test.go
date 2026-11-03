@@ -19,8 +19,15 @@ func TestURLPathShapeKeepsWhatHoldsNoValue(t *testing.T) {
 		{&url.URL{Path: "/a//b/"}, "/{}//{}/"},
 		{&url.URL{Path: "/a/b%2Fc", RawPath: "/a/b%2Fc"}, "/{}/{}"},
 	} {
-		if got := URLPathShape(c.u); got != c.want {
-			t.Errorf("URLPathShape(%v) = %q, want %q", c.u, got, c.want)
-		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("URLPathShape(%v) panicked: %v", c.u, r)
+				}
+			}()
+			if got := URLPathShape(c.u); got != c.want {
+				t.Errorf("URLPathShape(%v) = %q, want %q", c.u, got, c.want)
+			}
+		}()
 	}
 }
