@@ -595,16 +595,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				noMockBody := "keploy: no matching mock found for this HTTP request\n"
 				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)
-				// The error names the call as its report does, with the
-				// segments the closest recording redacted written
-				// redacted, or, with no report, by its path's shape: the
-				// proxy logs it at ERROR, and the call may have sent its
-				// secret in its path.
-				call := request.Method + " " + utils.URLPathShape(request.URL)
-				if report != nil {
-					call = report.ActualSummary
-				}
-				baseErr := fmt.Errorf("%w for %s", ErrMockNotMatched, call)
+				// The error names the call without its secret (missedCall).
+				baseErr := fmt.Errorf("%w for %s", ErrMockNotMatched, missedCall(request, report))
 				missErr := models.NewMockMismatchError(baseErr, report)
 				// The miss is queued for the test that made it before the app
 				// sees the 502. The replay reads a test's misses once the app
@@ -1034,4 +1026,15 @@ func passOneCallThrough(ctx context.Context, logger *zap.Logger, clientConn net.
 		// the close, which resp.Write tells the client as Connection: close.
 		return resp.Close, nil
 	}
+}
+
+// missedCall names a missed call in its error as its report does, with the
+// segments the closest recording redacted written redacted, or, with no
+// report, by its path's shape: the proxy logs the error at ERROR, and the
+// call may have sent its secret in its path.
+func missedCall(request *http.Request, report *models.MockMismatchReport) string {
+	if report != nil {
+		return report.ActualSummary
+	}
+	return request.Method + " " + utils.URLPathShape(request.URL)
 }

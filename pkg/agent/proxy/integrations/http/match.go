@@ -2570,7 +2570,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	}
 	mockPath := mockReq.URL
 	var mockQuery url.Values
-	if parsed, err := url.Parse(mockReq.URL); err == nil {
+	if parsed, err := parseRecordedURL(mockReq.URL); err == nil {
 		mockPath = parsed.Path
 		mockQuery = parsed.Query()
 	}

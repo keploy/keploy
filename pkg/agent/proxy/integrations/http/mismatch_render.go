@@ -118,7 +118,7 @@ func renderMockRequest(mockReq *models.HTTPReq, mockNoise []string) string {
 	}
 	places := redactedPlacesOf(mockReq, mockNoise)
 	path := mockURLPath(mockReq.URL)
-	if _, err := url.Parse(mockReq.URL); err == nil {
+	if _, err := parseRecordedURL(mockReq.URL); err == nil {
 		path = places.decodedPath(places.recordedPath)
 	}
 	return renderRequestPreview(string(mockReq.Method), path, mockQueryString(mockReq), header, mockReq.Body, places)

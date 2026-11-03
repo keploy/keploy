@@ -1352,12 +1352,18 @@ func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, cons
 	}
 	if ce := h.Logger.Check(zap.DebugLevel, "variable bound"); ce != nil {
 		places := placesOf(hit.mock)
+		var recorded *models.HTTPReq
+		if hit.mock != nil {
+			recorded = hit.mock.Spec.HTTPReq
+		}
+		inRequest := variables.InRequest(recorded)
 		for _, b := range hit.binds {
 			// A value bound at a place the recording redacted is the
-			// secret it hid; one at a place that does not read is
-			// redacted too.
+			// secret it hid. The place is read as the check read it
+			// (ReadPlace, so a name holding "#" stays one place); one
+			// that does not read is redacted too.
 			value := b.Value
-			if at, err := variables.ParseAddress(b.Place); err != nil || places.at(at.Place) {
+			if at, err := variables.ReadPlace(b.Place, inRequest); err != nil || places.at(at.Place) {
 				value = valueRedacted
 			}
 			h.Logger.Debug("variable bound", zap.String("variable", b.Name), zap.String("value", value),

@@ -82,7 +82,7 @@ func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
 			p.query[k] = true
 		}
 	}
-	if u, err := url.Parse(r.URL); err == nil {
+	if u, err := parseRecordedURL(r.URL); err == nil {
 		for k, vs := range u.Query() {
 			for _, v := range vs {
 				if p.noisy(v) {
@@ -250,7 +250,8 @@ func (p redactedPlaces) redactPath(escaped string, decode bool) string {
 	segs := pathSegments(escaped)
 	for i, seg := range segs {
 		switch {
-		case p.segments[i]:
+		case p.segments[i] && seg != "":
+			// An empty segment holds no value to redact.
 			segs[i] = valueRedacted
 		case decode:
 			segs[i] = unescapeSegment(seg)
