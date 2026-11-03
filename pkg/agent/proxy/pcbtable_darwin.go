@@ -81,7 +81,7 @@ var readTCPOpt = func(fd, opt int, buf []byte) (uint32, error) {
 // Everything else (SO_NREAD in readUnread) goes through x/sys's wrappers.
 func getsockopt(fd, level, name int, val unsafe.Pointer, vallen *uint32) error {
 	_, _, errno := unix.Syscall6(
-		unix.SYS_GETSOCKOPT,
+		unix.SYS_GETSOCKOPT, //nolint:staticcheck // SA1019: no libSystem wrapper reads into a caller's buffer (above).
 		uintptr(fd),
 		uintptr(level),
 		uintptr(name),
@@ -104,17 +104,17 @@ func proveXNUCounts() error {
 	if err != nil {
 		return fmt.Errorf("listen for the counts' proof: %w", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	c, err := net.Dial("tcp4", ln.Addr().String())
 	if err != nil {
 		return fmt.Errorf("dial the counts' proof: %w", err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	s, err := ln.Accept()
 	if err != nil {
 		return fmt.Errorf("accept the counts' proof: %w", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	const n = 3
 	if _, err := c.Write(make([]byte, n)); err != nil {
 		return fmt.Errorf("write the counts' proof: %w", err)

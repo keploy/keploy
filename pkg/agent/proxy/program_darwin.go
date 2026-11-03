@@ -48,6 +48,7 @@ func pidPath(pid int) string {
 	buf := make([]byte, procPIDPathMax)
 	// The call returns 0, not the path's length (libproc's proc_pidpath
 	// takes the length with strlen): the path is NUL-terminated in buf.
+	//nolint:staticcheck // SA1019: x/sys/unix wraps no proc_info call (libproc's proc_pidpath).
 	_, _, errno := unix.Syscall6(unix.SYS_PROC_INFO, procInfoCallPIDInfo, uintptr(pid), procPIDPathInfo, 0, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	if errno != 0 {
 		return ""

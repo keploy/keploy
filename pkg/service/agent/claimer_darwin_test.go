@@ -102,7 +102,7 @@ func waitExitedUnreaped(t *testing.T, pid int) {
 	const pPID = 1     // P_PID, sys/wait.h
 	var info [128]byte // siginfo_t is 104 bytes on darwin
 	for {
-		_, _, e := syscall.Syscall6(unix.SYS_WAITID, pPID, uintptr(pid),
+		_, _, e := syscall.Syscall6(unix.SYS_WAITID, pPID, uintptr(pid), //nolint:staticcheck // SA1019: no Waitid on darwin (above).
 			uintptr(unsafe.Pointer(&info[0])), unix.WEXITED|unix.WNOWAIT, 0, 0)
 		if e == syscall.EINTR {
 			continue

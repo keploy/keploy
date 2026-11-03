@@ -29,7 +29,7 @@ func darwinPair(t *testing.T) (p *Proxy, app, proxySide *net.TCPConn, reader *tr
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	c, err := net.Dial("tcp4", ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
@@ -391,7 +391,7 @@ func TestBytesBeforeTheConnectionIsKeptAreCountedOnDarwin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	c, err := net.Dial("tcp4", ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
@@ -480,7 +480,7 @@ func TestBytesThatComeBetweenTheFirstReadsAreCountedOnceOnDarwin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	c, err := net.Dial("tcp4", ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)

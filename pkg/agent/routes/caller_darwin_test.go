@@ -28,17 +28,17 @@ func TestTCPOwnerFindsTheClientEnd(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer ln.Close()
+			defer func() { _ = ln.Close() }()
 			c, err := net.Dial(network, ln.Addr().String())
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer c.Close()
+			defer func() { _ = c.Close() }()
 			s, err := ln.Accept()
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			self := netip.MustParseAddrPort(c.LocalAddr().String())
 			peer := netip.MustParseAddrPort(c.RemoteAddr().String())
 			pid, err := tcpOwner(self, peer)
@@ -55,7 +55,7 @@ func TestTCPOwnerNamesNoOneForAConnectionNobodyHolds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	peer := netip.MustParseAddrPort(ln.Addr().String())
 	self := netip.AddrPortFrom(peer.Addr(), peer.Port()+1)
 	if pid, err := tcpOwner(self, peer); err == nil || !strings.Contains(err.Error(), "no process holds") {
@@ -71,20 +71,20 @@ func TestTCPOwnerReadsOnlyTCPSockets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	child, local := holdConnFrom(t, ln.Addr().String())
 	s, err := ln.Accept()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	self := netip.MustParseAddrPort(local)
 	peer := netip.MustParseAddrPort(ln.Addr().String())
 	decoy, err := net.DialUDP("udp4", net.UDPAddrFromAddrPort(self), net.UDPAddrFromAddrPort(peer))
 	if err != nil {
 		t.Fatalf("binding the UDP decoy to %s -> %s: %v", self, peer, err)
 	}
-	defer decoy.Close()
+	defer func() { _ = decoy.Close() }()
 	pid, err := tcpOwner(self, peer)
 	if err != nil || pid != child.Process.Pid {
 		t.Fatalf("tcpOwner(%s -> %s) = %d, %v; want the child %d", self, peer, pid, err, child.Process.Pid)
@@ -98,7 +98,7 @@ func TestTCPOwnerNeedsTheRemoteEndToMatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	self := netip.MustParseAddrPort(ln.Addr().String())
 	peer := netip.AddrPortFrom(self.Addr(), 1)
 	if pid, err := tcpOwner(self, peer); err == nil || !strings.Contains(err.Error(), "no process holds") {
@@ -114,22 +114,22 @@ func TestTCPOwnerNamesTheParentOfAChildHoldingACopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	c, err := net.Dial("tcp4", ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	s, err := ln.Accept()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	f, err := c.(*net.TCPConn).File()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	child := exec.Command(os.Args[0], "-test.run=^$")
 	child.Env = append(os.Environ(), envHoldUntilStdinCloses+"=1")
 	child.ExtraFiles = []*os.File{f}
