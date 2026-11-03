@@ -2092,8 +2092,8 @@ func (t *Tracker) NewOwnCall(paired *models.Mock, sibling Siblings, tests Record
 // in force does not file as the test's own or the start-up's (OwnerTest: a
 // worker: scope's, the background's, or one it cannot say of, as servedIn
 // files a serve) is none, as its serve starts no span of the call in this
-// run. One the store cannot place is not known to be in the
-// call's test (same is false), and stays a previous call.
+// run. One the store cannot place is not known to be in the call's test
+// (same is false), and stays a previous call.
 func (o *OwnCall) See(m *models.Mock) {
 	if o == nil || m == nil {
 		return
@@ -2346,18 +2346,19 @@ func (t *Tracker) SetServeOwner(f func(*models.Mock) bool) {
 // the recording rec: from the test's own serves where rec is the open test's
 // own or the start-up's (liveClockAtOf), so a worker: or background serve
 // landing between the test's clock read and its send does not put the read
-// before its span. Record's learn step reads its windows from any flow's
-// serve (CallWindowFrom), never from this. LiveSpan is this with no
-// recording. The span carries where the running test began as LiveSpan's
-// does (Span.TestFrom), except against a recording the store says is not
-// the test's (OwnerOther): a call in a test's window is that test's, so a
-// value read earlier in the test passes at it, but a call checked against a
-// worker:'s recording is the worker's, whose read the test's begin does not
-// bound. Where the store cannot say (OwnerUnknown: no test's view in force,
-// as between the tracker's begin and the test view's install, or once a
-// pool view replaced it before the tracker's end) keploy cannot tell the
-// call is not the test's, and the span carries the begin as LiveSpan's
-// does: a stated limit, bounded by the test's begin.
+// before its span. Record's learn step reads a test's own call's window the
+// same way (OwnCall), and every other window from any flow's serve
+// (CallWindowFrom). LiveSpan is this with no recording. The span carries
+// where the running test began as LiveSpan's does (Span.TestFrom), except
+// against a recording the store says is not the test's (OwnerOther): a call
+// in a test's window is that test's, so a value read earlier in the test
+// passes at it, but a call checked against a worker:'s recording is the
+// worker's, whose read the test's begin does not bound. Where the store
+// cannot say (OwnerUnknown: no test's view in force, as between the
+// tracker's begin and the test view's install, or once a pool view replaced
+// it before the tracker's end) keploy cannot tell the call is not the
+// test's, and the span carries the begin as LiveSpan's does: a stated limit,
+// bounded by the test's begin.
 func (t *Tracker) LiveSpanOf(arrival time.Time, rec *models.Mock) (Span, bool) {
 	return t.LiveSpanOfSiblings(arrival, rec, nil)
 }

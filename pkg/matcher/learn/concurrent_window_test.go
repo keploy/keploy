@@ -1770,7 +1770,9 @@ func TestAnEncodedTextGetsThePlainTextsAnswerWhateverUnreadPayloadWasServedBefor
 							// an escape written alike on both sides, or one
 							// that record's full round's value lost, leaves
 							// no word of its own: noise, as the plain text
-							// is. One it gained is refused.
+							// is. One it gained is refused, except where
+							// another run lost one, so the same word stands
+							// on both sides: noise, as the plain text is.
 							for _, c := range []struct {
 								what                     string
 								rec0, live0, rec1, live1 string
@@ -1783,6 +1785,7 @@ func TestAnEncodedTextGetsThePlainTextsAnswerWhateverUnreadPayloadWasServedBefor
 								{"the first alike, the second one's escape lost", "=%3D", "=%3D", "%3D%3D", "=%3D", true},
 								{"the first raw, the second one's escape lost", "==", "==", "%3D%3D", "=%3D", true},
 								{"all both escaped", "%3D%3D", "%3D%3D", "%3D%3D", "%3D%3D", true},
+								{"the first one's escapes lost, the second one's first gained, so no word changed", "%3D%3D", "==", "=%3D", "%3D%3D", true},
 								{"the first alike, the second one's escape gained", "=%3D", "=%3D", "==", "=%3D", false},
 								{"the first one's escape gained, the second alike", "==", "=%3D", "=%3D", "=%3D", false},
 							} {

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf16"
 )
 
@@ -301,6 +302,7 @@ func TestKeptEscapeDecidesEachEscapeByTheRecordedCopyOfItsRank(t *testing.T) {
 		{"a byte only live holds, of the kind of another recorded escape", "tok YWxI%3D%3D ok", "tok YW%2FI%3D%3D ok", []bool{true, true, true}},
 		{"a byte only live holds, a longer escape of the same first byte", "tok YWxI%3D%3D ok", "tok YW%252FI%3D%3D ok", []bool{false, true, true}},
 		{"a byte only live holds, no recorded escape", "tok YWxI== ok", "tok YW%2FI== ok", []bool{false}},
+		{"a byte only live holds, an escape of another first byte as long as a recorded one", "tok YWxI%3D%3D ok", `tok YW\\/I%3D%3D ok`, []bool{false, true, true}},
 	} {
 		rec, recRun := image(c.rec)
 		live, _ := image(c.live)
@@ -311,6 +313,27 @@ func TestKeptEscapeDecidesEachEscapeByTheRecordedCopyOfItsRank(t *testing.T) {
 			if got := keptEscape(rec, recRun, e); got != c.kept[i] {
 				t.Errorf("%s: keptEscape of %q's escape %d (%q, copy %d of %q) against %q = %v; want %v", c.what, c.live, i, e.sp, e.n, e.c, c.rec, got, c.kept[i])
 			}
+		}
+	}
+}
+
+// An escape record's full round's value gained in its last run, a '/'
+// written "%2F" whose word ("2F" and the run's bytes after it) runs to the
+// value's end, is searched where it stands, even where another run, which
+// kept its own "%2F", spells the same word: the word is no part of the
+// runs' spelling (plainRuns). The same with a word after the last run is the
+// control. The runs are base64 of "leadX0 x?abc" and "lead 0 x?abc", which
+// end alike from their '/' on.
+func TestAGainedEscapesWordAtTheValuesEndIsSearched(t *testing.T) {
+	const kept, run, word = "bGVhZFgwIHg%2FYWJj", "bGVhZCAwIHg/YWJj", "2FYWJj"
+	rec := "tok " + kept + " " + run
+	live := "tok " + kept + " " + strings.ReplaceAll(run, "/", "%2F")
+	if !strings.HasSuffix(live, "%"+word) || !strings.HasSuffix(kept, "%"+word) {
+		t.Fatalf("live %q and the kept run %q do not both end in %q: not the layout this row reads", live, kept, word)
+	}
+	for _, tail := range []string{"", " ok"} {
+		if d := newDrift(rec+tail, live+tail, nil, true, time.Time{}, nil); d.plainRuns[word] {
+			t.Errorf("tail %q: the word %q the gained escape leaves is skipped (plainRuns); want it searched", tail, word)
 		}
 	}
 }

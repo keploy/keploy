@@ -484,3 +484,52 @@ func TestAReadEarlierInItsTestPassesAtALaterCallOfTheSameTest(t *testing.T) {
 		}
 	}
 }
+
+// A test's own call in keploy record's server tests reads its learn window
+// (OwnCall) as a replay checks its reads (LiveSpanOf): a recording made in
+// the call's recorded test that the store cannot say of (OwnerUnknown) is no
+// previous call of it, as a serve of one made after the test began starts no
+// span of it in this run. The window carries where the test began in each
+// run (Span.TestFrom), as the replay's span does, so the learn step reads a
+// read from the test's begin too (Window.fromTestBegin).
+func TestATestsOwnCallsWindowSkipsWhatTheStoreCannotSayOfAndCarriesItsBegin(t *testing.T) {
+	began := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	ownServe, unsaidServe, arrival := began.Add(10*time.Millisecond), began.Add(20*time.Millisecond), began.Add(30*time.Millisecond)
+	recAt := began.Add(-time.Hour)
+	recBegan := recAt.Add(-100 * time.Millisecond)
+	at := func(name string, d time.Duration) *models.Mock {
+		m := &models.Mock{Name: name, Kind: models.Mongo}
+		m.Spec.ReqTimestampMock = recAt.Add(d)
+		return m
+	}
+	prevTest, own1, unsaid, own2 := at("worker-0", -2*time.Second), at("own-1", -30*time.Millisecond), at("unsaid-1", -10*time.Millisecond), at("own-2", 0)
+	tests := recordedTests{prevTest.Spec.ReqTimestampMock: 1, own1.Spec.ReqTimestampMock: 2, unsaid.Spec.ReqTimestampMock: 2, own2.Spec.ReqTimestampMock: 2}
+	tr := NewTracker()
+	tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+	tr.SetAppClockRun(func(time.Time) (time.Time, bool) { return time.Time{}, true })
+	tr.SetServeOwnerOf(func(m *models.Mock) ServeOwner {
+		switch m.Name {
+		case "own-1", "own-2":
+			return OwnerTest
+		case "unsaid-1":
+			return OwnerUnknown
+		}
+		return OwnerOther
+	})
+	tr.NewSetAt(began.Add(-time.Second))
+	tr.RecordedBegin(recBegan)
+	tr.BeginAt(began)
+	tr.ServedMockAt(&models.Mock{Name: "own-1", Kind: models.Mongo}, ownServe)
+	tr.ServedMockAt(&models.Mock{Name: "unsaid-1", Kind: models.Mongo}, unsaidServe)
+	oc := tr.NewOwnCall(own2, nil, tests)
+	for _, m := range []*models.Mock{prevTest, own1, unsaid} {
+		oc.See(m)
+	}
+	w := oc.Window(arrival)
+	if w == nil || !w.F.From.Equal(ownServe) || !w.Rec.From.Equal(own1.Spec.ReqTimestampMock) {
+		t.Fatalf("the own call's window %+v; want F from the test's own serve %v and the recording's half from own-1 %v, past the recording the store cannot say of", w, ownServe, own1.Spec.ReqTimestampMock)
+	}
+	if !w.F.TestFrom.Equal(began) || !w.Rec.TestFrom.Equal(recBegan) {
+		t.Fatalf("the own call's window carries test begins F %v, recording %v; want %v and %v", w.F.TestFrom, w.Rec.TestFrom, began, recBegan)
+	}
+}
