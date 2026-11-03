@@ -303,6 +303,16 @@ func placeName(from learn.Place) string {
 	return from.Mock + " at " + from.Path
 }
 
+// served is e, the exchange a call just served under p, as the tracker
+// keeps it for the test's later calls: each request place a variable of
+// p's binds or uses named, and each clock read p learned marked
+// (learn.Named), then each leaf a replay leaves uncompared marked
+// (noiseMarked). The learn step's two serving paths, a call whose
+// keploy.yml-declared fields drifted and a paired one, keep it alike.
+func (p pairing) served(e learn.Earlier, known learn.Known) learn.Earlier {
+	return noiseMarked(learn.Named(e, p.vars, p.clocks), known, p.noise, p.vars)
+}
+
 // noiseMarked is e, the exchange a call just served, with each leaf a
 // replay leaves uncompared marked so (learn.Seen.Uncompared), whatever left
 // it so:

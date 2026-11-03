@@ -1851,7 +1851,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			}
 			commit()
 			if e, ok := n.servedExchange(tracker.Drifts(), picked, answered, rec, recordedParts(picked), liveShape, input, live, out, own, h.learnedView(picked, plan)); ok {
-				tracker.Served(test, noiseMarked(learn.Named(e, plan.vars, plan.clocks), n.known(picked), plan.noise, plan.vars))
+				tracker.Served(test, plan.served(e, n.known(picked)))
 			}
 			return out, nil, nil
 
@@ -1956,7 +1956,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 					zap.String("type", string(l.Recorded.Type)), zap.String("fromMock", l.From.Mock), zap.String("fromField", l.From.Path), zap.Bool("fromSet", l.From.Run))
 			}
 			if e, ok := n.servedExchange(tracker.Drifts(), m, answered, c.Shape, recordedParts(m), liveShape, input, live, out, own, h.learnedView(m, plan)); ok {
-				tracker.Served(test, noiseMarked(learn.Named(e, plan.vars, plan.clocks), n.known(m), plan.noise, plan.vars))
+				tracker.Served(test, plan.served(e, n.known(m)))
 			}
 			return out, nil, nil
 		}
