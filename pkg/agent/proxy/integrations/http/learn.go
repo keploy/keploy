@@ -542,9 +542,16 @@ func (n learnNoise) headerCovers(name, rec, live string, both bool) bool {
 // Declares implements learn.Declarer: keploy.yml's request-body and header
 // noise. An entry with patterns declares a value one of them matches; the
 // learn step asks of the recorded value and the live one alike, so a
-// pattern constrains both. keploy's own header list and obfuscated values
-// are no noise keploy.yml declares.
+// pattern constrains both. keploy's own header list is no noise keploy.yml
+// declares, and neither is a value the recording's own noise excuses (an
+// obfuscated one, values): keploy.yml's entry still stops the comparison
+// there, but keploy never follows such a value as a variable's use or an
+// echo, so the answer is served as recorded and never carries the live
+// value, a secret's included.
 func (k httpKnown) Declares(l learn.Leaf) bool {
+	if k.values.IsNoisy(l.Value) {
+		return false
+	}
 	switch {
 	case strings.HasPrefix(l.Noise, "body."):
 		return k.n.body.Covers(strings.TrimPrefix(l.Noise, "body."), noiseText(l), scalarLeaf(l))

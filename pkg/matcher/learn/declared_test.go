@@ -111,7 +111,7 @@ func TestCompareDeclaresADriftOnlyWhereTheNoiseNamesBothSides(t *testing.T) {
 	}{
 		{"both values match the pattern", "o-1", "o-9", []string{"body.id"}},
 		{"the live value matches no pattern", "o-1", "x-9", nil},
-		{"an obfuscated recorded value", "OBF-1", "o-9", nil},
+		{"a recorded value only another excuse covers", "OBF-1", "o-9", nil},
 	} {
 		t.Run(r.name, func(t *testing.T) {
 			d := Compare(str(r.live), str(r.rec), known)
