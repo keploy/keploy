@@ -248,6 +248,23 @@ func noteSetStop(stops []string, at map[string]int, set, reason string) []string
 	return append(stops, reason)
 }
 
+// setAttempt is one attempt of a set (a flaky check's, or --must-pass's):
+// its number (0 for none), the status it ended with, and, for a halt, the
+// reason the run's stop names it with (haltedRunReason).
+type setAttempt struct {
+	n      int
+	status models.TestSetStatus
+	why    string
+}
+
+// orFirst is a, or b when a is none.
+func (a setAttempt) orFirst(b setAttempt) setAttempt {
+	if a.n != 0 {
+		return a
+	}
+	return b
+}
+
 // runStopReason is the reason a run whose sets ended stops with: reason,
 // what stopped it, unless that is runCompletedReason and sets of the run
 // halted or stopped it (sets, their haltedRunReason or
@@ -1296,6 +1313,10 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		flaky := false // only be changed during replay with --must-pass flag set
 		// The refused test cases --must-pass keeps are said once per set.
 		keptRefused := false
+		// halt is the set's first attempt its application halted, and ran its
+		// first that ran to a verdict (PASSED or FAILED); n is 0 for none. A
+		// set with both is flaky, whatever its failed tests (flaky check).
+		var halt, ran setAttempt
 		for attempt := 1; attempt <= int(r.config.Test.MaxFlakyChecks); attempt++ {
 
 			// clearing testcase from map is required for 2 reasons:
@@ -1343,6 +1364,8 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			r.finalAttempt = noAttemptFollows(attempt, r.config.Test)
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, effectiveKeepAlive)
 			r.tellSetEnd(testSet, testSetStatus, err)
+			// halted is this attempt, when its application halted it.
+			var halted setAttempt
 			if err != nil {
 				if ctx.Err() == context.Canceled {
 					// The user's stop ends parentCtx, and the defer names no
@@ -1391,7 +1414,9 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				// too, whose halted set the run otherwise goes on past on a
 				// stack of its own. Either way the run's stop names the halt.
 				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType) || keptAppExit(ctx) != (models.AppError{})
-				setStops = noteSetStop(setStops, setStopAt, testSet, haltedRunReason(testSet, testSetStatus, r.setAppExit, nil))
+				halted = setAttempt{n: attempt, status: testSetStatus, why: haltedRunReason(testSet, testSetStatus, r.setAppExit, nil)}
+				setStops = noteSetStop(setStops, setStopAt, testSet, halted.why)
+				halt = halt.orFirst(halted)
 			case models.TestSetStatusInternalErr:
 				testSetResult = false
 				abortTestRun = abortAfterTestSet(testSetStatus, cmdType, r.notJudged(testSet))
@@ -1415,8 +1440,10 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				return nil
 			case models.TestSetStatusFailed:
 				testSetResult = false
+				ran = ran.orFirst(setAttempt{n: attempt, status: testSetStatus})
 			case models.TestSetStatusPassed:
 				testSetResult = true
+				ran = ran.orFirst(setAttempt{n: attempt, status: testSetStatus})
 			case models.TestSetStatusIgnored:
 				testSetResult = false
 			case models.TestSetStatusNoTestsToRun:
@@ -1458,6 +1485,20 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 					}
 					continue
 				}
+				// A set its application halted on one attempt and not on
+				// another is flaky, whatever its failed tests: a halt may
+				// file none FAILED. Its report is its latest attempt's (PASSED
+				// for one that ran clean after the halt), and the halt fails
+				// the run, so this line says which attempt halted, and how.
+				if halt.n != 0 && ran.n != 0 {
+					utils.LogError(r.logger, nil, "the testset is flaky: its application halted on one attempt and ran to a verdict on another, and the halt fails the run whatever that verdict",
+						zap.String("testSet", testSet),
+						zap.Int("haltedAttempt", halt.n), zap.String("haltedStatus", string(halt.status)), zap.String("halt", halt.why),
+						zap.Int("verdictAttempt", ran.n), zap.String("verdictStatus", string(ran.status)),
+						zap.String("next_step", "see why the application exited on the halted attempt (its logs in that attempt's output), then run the test-set again"))
+					flakyTestSets = append(flakyTestSets, testSet)
+					break
+				}
 				// checking if there is no mismatch in failed testcases across max retries
 				// check both length and value
 				if len(failedTcIDs) != len(initialFailedTCs) {
@@ -1483,6 +1524,16 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 			// this would be executed only when --must-pass flag is set
 			// we would be removing failed testcases
+			//
+			// An attempt its application halted removes none: a test the exit
+			// cut short failed for the exit, not for what it checks, and
+			// --must-pass would delete it from the set on disk. The next
+			// attempt, if any, runs the set again; the halt fails the run.
+			if halted.n != 0 {
+				r.logger.Warn("--must-pass removes no test case for an attempt the application halted: its tests failed for the exit, not for what they check",
+					zap.String("testSet", testSet), zap.Int("attempt", halted.n), zap.String("halt", halted.why))
+				continue
+			}
 			if r.config.Test.MaxFailAttempts == 0 {
 				utils.LogError(r.logger, nil, "no. of testset failure occurred during rerun reached maximum limit, testset still failing, increase count of maxFailureAttempts", zap.String("testSet", testSet))
 				break
