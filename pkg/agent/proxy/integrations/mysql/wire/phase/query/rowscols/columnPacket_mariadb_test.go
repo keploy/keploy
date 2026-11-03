@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"reflect"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -103,17 +104,22 @@ func TestEncodeColumn_WithoutExtendedMetadata(t *testing.T) {
 	}
 }
 
+// Extended type information that does not fit is refused, and the reason
+// says which part did not: the recorder leaves the exchange out with it.
 func TestDecodeColumn_ExtendedMetadataOverrunsPacket(t *testing.T) {
-	// The JSON column with its extended type information's length raised
-	// from 6 to 0x40: past the end of the packet.
-	p := "036465660464656d6f01740174046461746104646174614001046a736f6e0c2d00fffffffffc9000000000"
-	if _, _, err := DecodeColumn(context.Background(), zap.NewNop(), packet(t, p, 2), mysql.FramingExtendedMetadata); err == nil {
-		t.Fatal("decoded extended type information that overruns the packet")
-	}
-	// An entry whose value's length runs past the information's own length.
-	p = "036465660464656d6f0174017404646174610464617461030105" + "0c2d00fffffffffc9000000000"
-	if _, _, err := DecodeColumn(context.Background(), zap.NewNop(), packet(t, p, 2), mysql.FramingExtendedMetadata); err == nil {
-		t.Fatal("decoded an extended type entry that overruns its information")
+	for _, tc := range []struct{ name, payload, want string }{
+		// The JSON column with its extended type information's length
+		// raised from 6 to 0x40: past the end of the packet.
+		{"length past the packet", "036465660464656d6f01740174046461746104646174614001046a736f6e0c2d00fffffffffc9000000000", "(64 bytes) overruns the packet"},
+		// An entry whose value's length runs past the information's own.
+		{"entry past its information", "036465660464656d6f0174017404646174610464617461030105" + "0c2d00fffffffffc9000000000", "extended type information does not decode"},
+		// The packet ends after org_name, where the information belongs.
+		{"packet ends before it", "036465660464656d6f0174017404646174610464617461", "truncated before its extended type information"},
+	} {
+		_, _, err := DecodeColumn(context.Background(), zap.NewNop(), packet(t, tc.payload, 2), mysql.FramingExtendedMetadata)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: DecodeColumn = %v, want an error saying %q", tc.name, err, tc.want)
+		}
 	}
 }
 

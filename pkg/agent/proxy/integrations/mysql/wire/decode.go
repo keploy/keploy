@@ -188,7 +188,6 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		case *mysql.SSLRequestPacket:
 			// Store the client capabilities to use it later
 			decodeCtx.ClientCapabilities = pkt.CapabilityFlags
-			decodeCtx.ClientMariaDBCaps = pkt.MariaDBCapabilities()
 
 			pktType = mysql.SSLRequest
 			decodeCtx.UseSSL = true
