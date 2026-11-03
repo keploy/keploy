@@ -579,9 +579,22 @@ type UnmatchedCall struct {
 	// and that test's evidence lists it. Empty for a call no test was
 	// charged with: one made before the test process claimed the run, one
 	// made outside every test (before the first, between two, or after the
-	// last), and every call without the switch. keploy mock's receipt lists
-	// those of them that count against a test (Receipt.UnchargedMisses).
+	// last), one that repeats a spent recording of the set's background
+	// (WindowOf), and every call without the switch. keploy mock's receipt
+	// lists those of them that count against a test
+	// (Receipt.UnchargedMisses).
 	ChargedTo string `json:"charged_to,omitempty" yaml:"charged_to,omitempty"`
+	// WindowOf names, under the proven switch, the test whose window a call
+	// was made in when keploy charged it to no test because it repeats a
+	// spent recording of the set's background (Repeat.Background): the
+	// application's own schedule (a janitor's sweep, a timer) made it again
+	// after that recording answered one call, and no recording of the open
+	// test's own is that call (it is no extra call of the test's, nor a
+	// recording another test made). Such a call never fails the test whose
+	// window it lands in; the receipt lists it, by this name, so a reader
+	// sees where it landed. Empty for every other call, and for one made
+	// before that test began being served, whose window is not known.
+	WindowOf string `json:"window_of,omitempty" yaml:"window_of,omitempty"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`

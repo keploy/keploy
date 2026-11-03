@@ -1851,6 +1851,13 @@ func (a *Agent) missesOf(ctx context.Context, worker uint32) ([]models.Unmatched
 // does not move a call into it. It is charged to no test, and the run's
 // receipt lists it (Receipt.UnchargedMisses), so a reader who finds it the
 // test's own call edits the set's mappings rather than keploy guessing.
+//
+// A miss that repeats a spent recording of the set's background
+// (backgroundRepeat) is no call of the test's either: the application made
+// it on its own schedule, and no recording of the test's own is that call.
+// It is charged to no test the same way, and names the window it was made
+// in (missWindow), so a background call keploy cannot answer never fails
+// the test whose window it lands in.
 func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganAt time.Time) (*models.ScopeEvidence, error) {
 	if a.Proxy == nil {
 		return nil, errors.New("no proxy")
@@ -1860,6 +1867,11 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 	var misses, outside []models.UnmatchedCall
 	for _, m := range all {
 		if outsideEveryTest(m, beganAt) {
+			outside = append(outside, m)
+			continue
+		}
+		if backgroundRepeat(m) {
+			m.WindowOf = missWindow(m, id, beganAt)
 			outside = append(outside, m)
 			continue
 		}
@@ -1915,6 +1927,33 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 // previous test's still in flight as it ended), and fails it.
 func outsideEveryTest(m models.UnmatchedCall, beganAt time.Time) bool {
 	return m.Kind == models.MissOutsideTest && !beganAt.IsZero() && !m.At.IsZero() && m.At.Before(beganAt)
+}
+
+// backgroundRepeat reports whether miss m repeats a spent recording of the
+// set's background (models.RepeatNote.Background: the worker scope's, or
+// the pool's, its startup: recordings among them) that the open test's own
+// recordings never hold. The proxy notes a background repeat only on a call
+// none of the test's own recordings is: none on a call one more than the
+// test recorded, and none while the test holds an unconsumed recording
+// under the call's request keys, which the miss then names as changed.
+// Here an extra call (models.MissExtraCall) and a call that is a recording
+// another test made (NotOwned, whose mapping edit judging names) stay the
+// test's misses all the same: either is a call some test recorded, which
+// the test that made it is judged on.
+func backgroundRepeat(m models.UnmatchedCall) bool {
+	return m.Repeat != nil && m.Repeat.Background != "" && m.Kind != models.MissExtraCall && !m.NotOwned
+}
+
+// missWindow is the test whose window miss m was made in, for a miss read
+// at test id's end that began being served at beganAt: id when m was made
+// at or after it, "" when it was made before it (another test's window, or
+// none) or when either time is not known (a miss without a time is before
+// every begin).
+func missWindow(m models.UnmatchedCall, id string, beganAt time.Time) string {
+	if beganAt.IsZero() || m.At.Before(beganAt) {
+		return ""
+	}
+	return id
 }
 
 // mocksByName finds every stored mock named, resident or on disk. A name the

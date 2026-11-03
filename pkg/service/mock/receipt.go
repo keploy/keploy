@@ -142,7 +142,10 @@ type Receipt struct {
 	// empty): a call made before the test process claimed the run, or
 	// outside every test's window (before the first test, between two, or
 	// after the last): the test framework sets the windows, and a call made
-	// in none is the set's, never a test's. Each
+	// in none is the set's, never a test's. A call that repeats a spent
+	// recording of the set's background, which no recording of the open
+	// test's own is, is the set's too, wherever it lands, and names the
+	// window it was made in (models.UnmatchedCall.WindowOf). Each
 	// is as evidence keeps a miss (models.UnmatchedCall.Sanitized: no value
 	// the app sent), with the process that made it. nil when the misses
 	// were not read, and with the switch off.

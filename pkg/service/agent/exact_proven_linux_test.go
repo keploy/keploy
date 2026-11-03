@@ -96,7 +96,8 @@ func (p *servingProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, e
 // noteMiss files a miss the matcher reported, as the proxy does
 // (sendMockNotFoundErrorFrom, GetMockErrors): by the view served when it is
 // filed, an extra call as its matcher found it, with the fields its report
-// says differ, and stamped with when its report was built.
+// says differ, whether it is a recording made elsewhere, its repeat note,
+// and stamped with when its report was built.
 func (p *servingProxy) noteMiss(err error) {
 	uc := models.UnmatchedCall{Protocol: "HTTP", Kind: models.MissOutsideTest, At: time.Now()}
 	if p.mm.WindowSnapshot().Active {
@@ -108,7 +109,7 @@ func (p *servingProxy) noteMiss(err error) {
 	if errors.As(err, &r) && r.MismatchReport() != nil {
 		rep := r.MismatchReport()
 		uc.ActualSummary, uc.Destination, uc.Differs = rep.ActualSummary, rep.Destination, rep.Differs
-		uc.ClosestMock = rep.ClosestMock
+		uc.ClosestMock, uc.NotOwned, uc.Repeat = rep.ClosestMock, rep.NotOwned, rep.Repeat.Clone()
 		if !rep.At.IsZero() {
 			uc.At = rep.At
 		}
