@@ -362,7 +362,7 @@ func TestADeadlineSetDuringTheClosesReadIsNoEndOfIt(t *testing.T) {
 }
 
 // A TLS client that meets keploy's close -- it reads the answer keploy closed
-// after (a 502 with Connection: close), then closes, its close_notify first --
+// after (a 400 with Connection: close), then closes, its close_notify first --
 // writes that close_notify after keploy's close: no capture loss. The proxy's
 // orphan answers it with a reset, as the client's own close does with
 // keploy's close_notify unread, so a wait finds the client's socket gone, or,

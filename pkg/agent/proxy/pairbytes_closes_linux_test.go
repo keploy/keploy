@@ -348,7 +348,7 @@ func proxySocketIn(t *testing.T, pc *pairedConn, state uint8) {
 // FIN, which the close's own read of the proxy's side, made before it, does
 // not, so the wait is one FIN short, and the socket it finds is no orphan: it
 // took the FIN in sequence (CLOSE_WAIT), so nothing was refused. No test ends
-// up charged with bytes nobody lost (a 502 Connection: close that the
+// up charged with bytes nobody lost (a miss answered with Connection: close that the
 // application closed on at once, under load: mock-pins-e2e's first-use row).
 func TestAFINTakenBeforeTheProxysCloseReachedTheKernelIsNoLoss(t *testing.T) {
 	p, pc, app, at, let := closeBegunNotDone(t)

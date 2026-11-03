@@ -872,7 +872,7 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 // no capture loss: keploy's close, not a capture keploy missed, ended the
 // connection under it, as a server's close would (the application writing on
 // meets the same reset). A TLS client's close_notify, sent once it has read
-// the answer keploy closed after (a 502 with Connection: close), is such a
+// the answer keploy closed after (a 400 with Connection: close), is such a
 // write. A socket that cannot be read leaves it unset, and the wait judges the
 // connection by what was written when it began.
 //
