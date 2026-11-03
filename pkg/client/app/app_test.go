@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -656,16 +657,53 @@ func TestModifyDockerRunRefusesAStart(t *testing.T) {
 	}
 }
 
+// childStackOf is a ComposeChildOutput for the project name these rows record
+// their tails under.
+//
+// It replaces &fakeComposeStack{} + a.composeRunnerVal, which stood in for the
+// in-process library's runner. recentAppLogs now reads the project from
+// a.composeChildOut (composeOutputProject), so the stand-in has to be the
+// thing that actually answers.
+func childStackOf(t *testing.T, project string) *docker.ComposeChildOutput {
+	t.Helper()
+	out, err := docker.StartComposeChildOutput(context.Background(),
+		[]byte("services:\n  app:\n    image: app\n"), project, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("start compose child output: %v", err)
+	}
+	return out
+}
+
+// unsetEnvVars removes keys for one row and restores them after, which
+// t.Setenv alone cannot do: it can only set a key to "", and compose tells an
+// unset variable apart from an empty one.
+//
+// It lived in compose_library_test.go, which went with the library; the
+// compose-child output rows still need it to drive the project-name
+// precedence with nothing inherited from the runner's environment.
+func unsetEnvVars(t *testing.T, keys ...string) {
+	t.Helper()
+	for _, k := range keys {
+		t.Setenv(k, "")
+		if err := os.Unsetenv(k); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // noDaemon is a docker client every call to panics on: its interface is nil.
 type noDaemon struct{ docker.Client }
 
-// libraryPath has recentAppLogs take the library path's decisions in this
-// build, -tags composelib or not, and gives each row fresh tails.
-func libraryPath(t *testing.T) {
+// ownStack gives each row fresh tails, for the rows about keploy's OWN compose
+// stack.
+//
+// It used to also force composeLibrarySupported on, so the row took the
+// in-process library's decisions whatever the build tags were. The library is
+// gone and the shell-out is the only path, so there is nothing left to force:
+// what these rows assert -- recentAppLogs reading the attach tail rather than
+// asking the daemon -- is now what every build does.
+func ownStack(t *testing.T) {
 	t.Helper()
-	was := composeLibrarySupported
-	composeLibrarySupported = true
-	t.Cleanup(func() { composeLibrarySupported = was })
 	docker.ForgetAppOutput()
 	t.Cleanup(docker.ForgetAppOutput)
 }
@@ -679,12 +717,12 @@ func libraryPath(t *testing.T) {
 //
 // It takes the library path in every build, -tags composelib or not, so the
 // row runs in OSS CI's default-tag step too.
-func TestRecentAppLogsReadsTheAttachTailOnTheLibraryPath(t *testing.T) {
-	libraryPath(t)
-	stack := &fakeComposeStack{}
-	docker.RecordAppOutput(stack.ProjectName(), "db-1", "db", "db line")
-	docker.RecordAppOutput(stack.ProjectName(), "app-1", "app", "listening on :8080")
-	docker.RecordAppOutput(stack.ProjectName(), "app-1", "app", "panic: DB_PASSWORD=***")
+func TestRecentAppLogsReadsTheAttachTailForKeploysOwnStack(t *testing.T) {
+	ownStack(t)
+	stack := childStackOf(t, "fake")
+	docker.RecordAppOutput(stack.Project(), "db-1", "db", "db line")
+	docker.RecordAppOutput(stack.Project(), "app-1", "app", "listening on :8080")
+	docker.RecordAppOutput(stack.Project(), "app-1", "app", "panic: DB_PASSWORD=***")
 	docker.RecordAppOutput("another-project", "app-1", "app", "another project's app")
 	docker.RecordAppOutput("", "app-1", "app", "a tail of no project")
 
@@ -699,7 +737,7 @@ func TestRecentAppLogsReadsTheAttachTailOnTheLibraryPath(t *testing.T) {
 	if got := a.recentAppLogs(context.Background()); got != "" {
 		t.Fatalf("with no stack built, recentAppLogs = %q; want nothing", got)
 	}
-	a.composeRunnerVal = stack
+	a.composeChildOut.Store(stack)
 	if got, want := a.recentAppLogs(context.Background()), "listening on :8080\npanic: DB_PASSWORD=***"; got != want {
 		t.Fatalf("recentAppLogs = %q, want %q", got, want)
 	}
@@ -730,21 +768,21 @@ func (appCutter) RedactChildOutput(line string) string {
 // does not reach an AppError's AppLogs, the report's app_logs or the app-exit
 // message.
 func TestRecentAppLogsCutsAValueRegisteredSinceTheAppPrintedIt(t *testing.T) {
-	libraryPath(t)
+	ownStack(t)
 	keployLog.SetRedactor(nil)
 	t.Cleanup(func() { keployLog.SetRedactor(nil) })
-	stack := &fakeComposeStack{}
-	docker.RecordAppOutput(stack.ProjectName(), "app-1", "app", "token "+plantedAppValue)
+	stack := childStackOf(t, "fake")
+	docker.RecordAppOutput(stack.Project(), "app-1", "app", "token "+plantedAppValue)
 
 	keployLog.SetRedactor(appCutter{})
 	a := &App{
-		logger:           zap.NewNop(),
-		kind:             utils.DockerCompose,
-		composeContent:   []byte("services: {app: {image: app}}"),
-		composeService:   "app",
-		docker:           noDaemon{},
-		composeRunnerVal: stack,
+		logger:         zap.NewNop(),
+		kind:           utils.DockerCompose,
+		composeContent: []byte("services: {app: {image: app}}"),
+		composeService: "app",
+		docker:         noDaemon{},
 	}
+	a.composeChildOut.Store(stack)
 	if got := a.recentAppLogs(context.Background()); got != "token ***" {
 		t.Fatalf("recentAppLogs = %q; want the value registered since cut", got)
 	}
@@ -771,19 +809,19 @@ func (d *logsDaemon) ContainerLogs(_ context.Context, name string, _ container.L
 // tail, even where the compose library is linked, a stack was built and a
 // tail of the same container is held.
 func TestRecentAppLogsKeepsDockerLogsForAUsersOwnDockerCommand(t *testing.T) {
-	libraryPath(t)
-	stack := &fakeComposeStack{}
-	docker.RecordAppOutput(stack.ProjectName(), "app", "app", "from the attach tail")
+	ownStack(t)
+	stack := childStackOf(t, "fake")
+	docker.RecordAppOutput(stack.Project(), "app", "app", "from the attach tail")
 	docker.RecordAppOutput("", "app", "app", "from the attach tail")
 	for _, kind := range []utils.CmdType{utils.DockerRun, utils.DockerStart, utils.DockerCompose, utils.FromContainer} {
 		d := &logsDaemon{}
 		a := &App{
-			logger:           zap.NewNop(),
-			kind:             kind,
-			container:        "app",
-			docker:           d,
-			composeRunnerVal: stack,
+			logger:    zap.NewNop(),
+			kind:      kind,
+			container: "app",
+			docker:    d,
 		}
+		a.composeChildOut.Store(stack)
 		if got := a.recentAppLogs(context.Background()); got != "from docker logs" || len(d.asked) != 1 || d.asked[0] != "app" {
 			t.Errorf("%s: recentAppLogs = %q, asking docker logs of %v; want docker logs of app", kind, got, d.asked)
 		}

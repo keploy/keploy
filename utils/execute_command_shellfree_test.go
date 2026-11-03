@@ -17,12 +17,10 @@ import (
 // TestExecuteCommand_RunsPipedStdinShapeWithoutShell is the regression guard for
 // the shell dependency on the command-execution path.
 //
-// A compose document keploy generates ITSELF no longer comes through here at
-// all — that path drives the compose library in-process (see
-// App.runComposeInProcess), which is what removed the `docker` binary
-// requirement. What still comes through here is the USER's own command, and on
-// a distroless image with no /bin/sh the old `sh -c <cmd>` wrapper died with
-// `exec: "sh": executable file not found`.
+// Every command keploy launches comes through here, including the `docker
+// compose -f -` that takes a compose document keploy generated ITSELF on
+// stdin. On a distroless image with no /bin/sh the old `sh -c <cmd>` wrapper
+// died with `exec: "sh": executable file not found`.
 //
 // This test drives the *real* ExecuteCommand in an environment where `sh` is not
 // resolvable (PATH points at a directory that contains only the target binary),

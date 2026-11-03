@@ -8,8 +8,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/docker/compose/v5/pkg/api"
-	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -249,9 +247,9 @@ func ensureComposeExitOnAppFailure(appCmd, serviceName string, preferFailureAbor
 
 	// Insert the flags immediately after the `up` subcommand, where it
 	// stands, its spacing and quoting kept. Not into a wrapper's quoted
-	// script (`bash -c "docker compose up"`): keploy reads these flags back
-	// off the command's words (composeUpSemantics), where a flag inside
-	// the quotes would end in the quote.
+	// script (`bash -c "docker compose up"`): a flag spliced inside the
+	// quotes would end up in the quoted word rather than on compose's own
+	// command line, so compose would never see it.
 	if upAt, ok := composeUpOffset(appCmd, false); ok {
 		end := upAt + len("up")
 		return appCmd[:end] + " " + strings.Join(args, " ") + appCmd[end:]
@@ -332,47 +330,6 @@ func composeUpOffset(cmd string, intoQuoted bool) (int, bool) {
 		}
 	}
 	return 0, false
-}
-
-// composeUpSemantics reads the `up` flags that change what the run MEANS out of
-// the resolved command string.
-//
-// It parses the same string the shell-out would have executed rather than
-// re-deriving the flags from the compose document, so the in-process path and
-// the shell-out can never disagree: ensureComposeExitOnAppFailure leaves a
-// user-supplied --exit-code-from / --abort-* untouched, and only the final
-// string records which of the two decided them.
-func composeUpSemantics(cmd string) docker.ComposeUpOptions {
-	opts := docker.ComposeUpOptions{OnExit: api.CascadeIgnore}
-	parts := strings.Fields(cmd)
-	for i := 0; i < len(parts); i++ {
-		switch {
-		case parts[i] == "--abort-on-container-exit":
-			opts.OnExit = api.CascadeStop
-		case parts[i] == "--abort-on-container-failure":
-			opts.OnExit = api.CascadeFail
-		case parts[i] == "--exit-code-from" && i+1 < len(parts):
-			opts.ExitCodeFrom = parts[i+1]
-			i++
-		case strings.HasPrefix(parts[i], "--exit-code-from="):
-			opts.ExitCodeFrom = strings.TrimPrefix(parts[i], "--exit-code-from=")
-		}
-	}
-	// --exit-code-from IMPLIES --abort-on-container-exit. The CLI does this
-	// itself (compose v5.5.1 cmd/compose/up.go), and without it a command
-	// carrying only --exit-code-from would leave Up blocking after the app
-	// exited, where the shell-out returns. --abort-on-container-failure is the
-	// documented exception and keeps precedence.
-	//
-	// keploy's own generated commands always carry both flags
-	// (ensureComposeExitOnAppFailure), so nothing reaches this today — which is
-	// exactly why it is worth stating: the claim above is that the two paths
-	// cannot disagree, and that has to hold for inputs keploy does not
-	// currently produce, not only for the ones it does.
-	if opts.ExitCodeFrom != "" && opts.OnExit == api.CascadeIgnore {
-		opts.OnExit = api.CascadeStop
-	}
-	return opts
 }
 
 // composeProjectScope returns the -p/--project-name and --project-directory

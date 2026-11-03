@@ -437,7 +437,33 @@ func (f *prInstr) ComposeDownOnSetupFailure(context.Context) error      { return
 // response, so a test that runs, passes. simErr makes the named tests fail the
 // way SimulateHTTP does when no response comes back; streamErr fails the named
 // streaming tests while their body is read.
+// AfterTestCaseRun records what the engine reported, in order.
+//
+// Declared on prHooks so the optional TestCaseReporter is satisfied by the SAME
+// hooks the harness already wires in: a separate implementation would prove the
+// interface compiles and nothing about whether RunTestSet calls it.
+//
+// Value receiver and a pointer field, like the rest of this type -- the harness
+// stores hooks by value (hookImpl: prHooks{}), and a pointer-receiver method is
+// not in a value's method set, so the engine's type assertion would simply miss
+// it and the test would pass by never being called.
+func (h prHooks) AfterTestCaseRun(_ context.Context, testSetID string, tc *models.TestCase, result *models.TestResult) error {
+	if h.reported == nil {
+		return nil
+	}
+	name, status := "", ""
+	if tc != nil {
+		name = tc.Name
+	}
+	if result != nil {
+		status = string(result.Status)
+	}
+	*h.reported = append(*h.reported, testSetID+"/"+name+"="+status)
+	return nil
+}
+
 type prHooks struct {
+	reported  *[]string
 	wrongType bool
 	simErr    map[string]error
 	streamErr map[string]error
@@ -1532,5 +1558,41 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 	}
 	if len(h.instr.lastParams.TotalConsumedMocks) == 0 {
 		t.Fatal("the fallback did not carry the CLI's consumed map")
+	}
+}
+
+// The per-case reporter must actually be CALLED by RunTestSet, once per test,
+// with the settled verdict. Asserted through the real loop rather than against
+// the interface, because the defect this guards is the hook being declared and
+// never wired -- which an interface-only test cannot see.
+func TestRunTestSetReportsEveryCaseToTheReporter(t *testing.T) {
+	var reported []string
+	h := newPartialRunHarness(t, 4, 0) // never fail
+	h.replayer.hookImpl = prHooks{reported: &reported}
+
+	if status := h.run(t); status != models.TestSetStatusPassed {
+		t.Fatalf("the control run reported %q; want PASSED", status)
+	}
+	if len(reported) != 4 {
+		t.Fatalf("the reporter was handed %d cases (%v); want 4 -- RunTestSet ran every test, so every test has a settled verdict to report", len(reported), reported)
+	}
+	for _, got := range reported {
+		if !strings.HasPrefix(got, "test-set-0/") || !strings.HasSuffix(got, "=PASSED") {
+			t.Errorf("reported %q; want test-set-0/<case>=PASSED -- the hook must carry the set, the case and its verdict", got)
+		}
+	}
+}
+
+// A hooks implementation that does NOT report is the existing world, and it has
+// to keep working untouched: the run still passes and still scores every test.
+func TestARunWithoutAReporterIsUnchanged(t *testing.T) {
+	h := newPartialRunHarness(t, 4, 0)
+	h.replayer.hookImpl = prHooks{} // reported is nil: the hook no-ops
+
+	if status := h.run(t); status != models.TestSetStatusPassed {
+		t.Fatalf("a run with no reporter reported %q; want PASSED", status)
+	}
+	if got := len(h.report.results); got != 4 {
+		t.Fatalf("recorded %d results; want 4", got)
 	}
 }
