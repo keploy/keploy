@@ -351,6 +351,10 @@ type matchOptions struct {
 	// examined, when set, counts the candidates the scan visits, so a test can
 	// check what a command costs without timing it.
 	examined *int
+	// placesRead, when set, counts the reads of the pool's places (logged),
+	// so a test can check that a command whose lines and report show no
+	// live statement reads none.
+	placesRead *int
 	// bodiesBuilt, when set, counts the live request bodies the command
 	// builds (strictGate.liveRequestBody).
 	bodiesBuilt *int
@@ -467,6 +471,11 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		if unheld != "" {
 			miss.nextSteps = unheld
 		}
+		// The held store reads nothing once the staging moved, and an unheld
+		// one reads nothing at all, so the pool the command was decided
+		// against cannot be read: the report redacts the command whole.
+		miss.places = miss.places.or(everyPlace)
+		miss.fieldDiffs = miss.places.fieldDiffs(miss.fieldDiffs, "")
 	}
 	if miss != nil {
 		miss.call = call
@@ -1048,18 +1057,22 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 
 	debugOn := logger.Core().Enabled(zapcore.DebugLevel)
 
-	// logged reads the places the logs show the live statement by: every
-	// place any recording of the pool redacted (poolPlaces), so a line that
-	// compares the live statement with one candidate keeps hidden what
-	// another candidate's recording hid. Read once, by the first line that
-	// shows the live statement or its bound values; a pool that cannot be
-	// read redacts the statement whole. The scan writes such lines for the
+	// logged reads the places the logs and the miss's report show the live
+	// statement by: every place any recording of the pool redacted
+	// (poolPlaces), so a line that compares the live statement with one
+	// candidate, or a report that names one recording, keeps hidden what
+	// another recording hid. Read once, by the first line that shows the
+	// live statement or its bound values, or by the miss; a pool that
+	// cannot be read redacts the command whole (everyPlace). The scan writes such lines for the
 	// commands that carry a statement alone, and reading the pool in the
 	// scan would replace the tiers it walks: with debug lines on, those
 	// commands read it here, before the scan, and no other command does.
 	var placesLogged *redactedPlaces
 	logged := logPlaces(func() redactedPlaces {
 		if placesLogged == nil {
+			if opts.placesRead != nil {
+				*opts.placesRead++
+			}
 			p := everyPlace
 			if pool != nil || loadPool() == nil {
 				p = poolPlaces(pool)
@@ -2055,7 +2068,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		}
 	}
 	if len(lost) > 0 && matchedMock != nil {
-		return nil, false, unknownStatementsMiss(lost, matchedMock, mysqlCandidates), nil
+		miss := unknownStatementsMiss(lost, matchedMock, mysqlCandidates)
+		miss.places = logged().or(miss.places)
+		return nil, false, miss, nil
 	}
 
 	if opts.probed != nil {
@@ -2213,9 +2228,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				// unmarked payload drift is a real mismatch, not a pass.
 				logger.Debug("schema-noise strict: all recorded COM_STMT_SEND_LONG_DATA candidates rejected",
 					zap.String("closest_mock", sldClosest.Name))
-				// The chunk's diffs are shown by the places of the recordings
-				// the report names, the chunks they redacted among them.
-				places := placesOf(sldClosest).or(gate.closestPlaces)
+				// The chunk's diffs are shown by the pool's places and those of
+				// the recordings the report names, the chunks they redacted
+				// among them.
+				places := logged().or(placesOf(sldClosest)).or(gate.closestPlaces)
 				return nil, false, &mockMiss{
 					closestMock:    sldClosest.Name,
 					fieldDiffs:     gate.reportDiffs(places),
@@ -2286,15 +2302,6 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				zap.Uint32("statement_id", stmtID))
 			return generic, true, nil, nil
 		}
-
-		// The recordings the report names: the live command's value at a
-		// place either redacted is shown redacted in the report (and the
-		// miss's own lines, which show what it shows).
-		closest := bestPartialMock
-		if closest == nil && gate.closestMock == "" {
-			closest = nearestMock
-		}
-		places := placesOf(closest).or(gate.closestPlaces)
 
 		if req.Header.Type == sCOM_STMT_PREP {
 			if sp, ok := req.Message.(*mysql.StmtPreparePacket); ok && sp != nil {
@@ -2427,6 +2434,15 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		case gate.rejected > 0:
 			phase = models.MatchPhaseStrict
 		}
+		// The report shows the live command by the pool's places, as the logs
+		// do, and those of the recordings it names: a value any recording
+		// of the pool redacted is redacted, whichever recording the report
+		// names, the nearest one that redacted nothing included.
+		closest := bestPartialMock
+		if closest == nil && gate.closestMock == "" {
+			closest = nearestMock
+		}
+		places := logged().or(placesOf(closest)).or(gate.closestPlaces)
 		var unknown *mockMiss
 		if len(lost) > 0 {
 			// The test's own mock may be one whose statement is lost: say so,

@@ -57,6 +57,16 @@ func MatchWithEngineForTest(ctx context.Context, logger *zap.Logger, req mysql.R
 	return resp, ok, missText, err
 }
 
+// MatchShownForTest is MatchForTest that also returns the live command as
+// the miss's report shows it (mockMiss.liveCommand), "" with no miss.
+func MatchShownForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext) (bool, string, string, error) {
+	_, ok, miss, err := matchCommand(ctx, logger, req, db, dctx, nil, nil)
+	if miss == nil {
+		return ok, "", "", err
+	}
+	return ok, fmt.Sprintf("%+v", *miss), miss.liveCommand(req.Message, dctx), err
+}
+
 // MatchWithNoiseConfigForTest is MatchForTest with the user's noise
 // configuration (test.globalNoise), its requestBody bucket read as the
 // command phase reads it (requestBodyNoise).

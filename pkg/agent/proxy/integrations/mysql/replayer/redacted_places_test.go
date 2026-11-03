@@ -99,6 +99,46 @@ func TestRedactedPlacesTogether(t *testing.T) {
 	if got := a.or(redactedPlaces{data: true}); !got.data || !got.params[2] {
 		t.Fatalf("a chunk: %+v", got)
 	}
+	if got := (redactedPlaces{data: true}).or(a); !got.data || !got.params[2] {
+		t.Fatalf("onto a chunk: %+v", got)
+	}
+	if got := a.or(redactedPlaces{everyParam: true}); !got.everyParam || !got.params[2] {
+		t.Fatalf("every bound value: %+v", got)
+	}
+	if got := (redactedPlaces{everyParam: true}).or(a); !got.everyParam {
+		t.Fatalf("onto every bound value: %+v", got)
+	}
+}
+
+// everyPlace, the places of a pool that cannot be read, redacts the live
+// command whole: its statement, every bound value and every diff of it.
+func TestRedactedPlacesEveryPlace(t *testing.T) {
+	if !everyPlace.redactsAny() || !(redactedPlaces{everyParam: true}).redactsAny() {
+		t.Fatalf("everyPlace redacts nothing")
+	}
+	exec := &mysql.StmtExecutePacket{StatementID: 1, Parameters: []mysql.Parameter{
+		{Type: 254, Value: liveSecret}, {Type: 3, Value: int32(7)}, {Type: 254, Value: nil}}}
+	dctx := newDecodeCtx()
+	dctx.StmtIDToQuery[1] = "SELECT name FROM users WHERE api_key = ? AND id = ? AND org = 'acme'"
+	miss := &mockMiss{places: everyPlace}
+	if got := miss.liveCommand(exec, dctx); got != valueRedacted+" "+formatExecParams([]mysql.Parameter{
+		{Type: 254, Value: valueRedacted}, {Type: 3, Value: valueRedacted}, {Type: 254, Value: nil}}) {
+		t.Errorf("an EXECUTE shows %q; want its statement and every bound value redacted", got)
+	}
+	if got := miss.liveCommand(&mysql.QueryPacket{Query: "SELECT 1 FROM t WHERE k = '" + liveSecret + "'"}, nil); got != valueRedacted {
+		t.Errorf("a COM_QUERY shows %q; want it redacted whole", got)
+	}
+	diffs := everyPlace.fieldDiffs([]models.MockFieldDiff{
+		{Path: "body.parameters.1.value", Kind: models.DiffKindValueChanged, Expected: "k1", Actual: liveSecret},
+		{Path: "body.parameters.1.type", Kind: models.DiffKindValueChanged, Expected: "253", Actual: "254"},
+		{Path: "body.query.literals.3", Kind: models.DiffKindValueChanged, Expected: "k1", Actual: liveSecret},
+		{Path: "body.data.token", Kind: models.DiffKindValueChanged, Expected: "k1", Actual: liveSecret},
+	}, "")
+	for i, want := range []string{valueRedacted, "254", valueRedacted, valueRedacted} {
+		if diffs[i].Actual != want {
+			t.Errorf("the diff of %s shows %q; want %q", diffs[i].Path, diffs[i].Actual, want)
+		}
+	}
 }
 
 // The places of a pool are every place any recording of it redacted; a
