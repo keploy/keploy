@@ -400,3 +400,13 @@ func TestAPressBeforeAnAgentStopsHoldEndsIsNotAnAnswerToTheDrainsLaterOffer(t *t
 		t.Fatalf("the drain returned %+v: want it given up at the press after its later offer", r)
 	}
 }
+
+// A drain gave its group up, so a goroutine may still run, at the stall
+// verdict and at the user's press alike; only one that joined did not.
+func TestADrainGaveUpUnlessItJoined(t *testing.T) {
+	for end, want := range map[DrainEnd]bool{DrainJoined: false, DrainStalled: true, DrainStopped: true} {
+		if end.GaveUp() != want {
+			t.Fatalf("%v.GaveUp() = %v, want %v", end, !want, want)
+		}
+	}
+}

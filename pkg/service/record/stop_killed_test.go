@@ -2,11 +2,13 @@ package record
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -112,5 +114,24 @@ func TestARecordingKeepsWhyItsEndIsCut(t *testing.T) {
 	off.noteEndCut("the drain stalled")
 	if why := off.endCut.Load(); why != nil {
 		t.Fatalf("switch off: kept %q", *why)
+	}
+}
+
+// Only a stall of the frame drain cuts the recording's end as a stop that
+// killed the app would: the user's press after the drain's offer, and a drain
+// that joined its group, keep none.
+func TestOnlyAStalledFrameDrainCutsTheRecordingsEnd(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, end := range []utils.DrainEnd{utils.DrainJoined, utils.DrainStopped} {
+		r := &Recorder{logger: zap.NewNop()}
+		r.noteFrameDrainEnd(end)
+		if why := r.endCut.Load(); why != nil {
+			t.Fatalf("a frame drain that ended %v cut the recording's end: %q", end, *why)
+		}
+	}
+	r := &Recorder{logger: zap.NewNop()}
+	r.noteFrameDrainEnd(utils.DrainStalled)
+	if why := r.endCut.Load(); why == nil || !strings.Contains(*why, "made no progress") {
+		t.Fatalf("a stalled frame drain kept %v, want its stall as the cut", why)
 	}
 }

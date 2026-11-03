@@ -1068,6 +1068,17 @@ func (r *Recorder) reportDrainProgress(every time.Duration) (stop func()) {
 	}
 }
 
+// noteFrameDrainEnd notes how the drain of the frame streams ended. Only a
+// stall cuts the recording's end here (noteEndCut, which its config carries
+// as a stop that killed the app would): a press after the drain's offer is
+// the user's, and closed StopNow, which already fails the recording as
+// incomplete (captureLost), the app killed by no one.
+func (r *Recorder) noteFrameDrainEnd(end utils.DrainEnd) {
+	if end == utils.DrainStalled {
+		r.noteEndCut("keploy's drain of what the agent captured made no progress at the recording's end, so keploy gave it up, and what the agent still held is not in the recording")
+	}
+}
+
 // noticeEvery is waitNotice, or drainProgressEvery.
 func (r *Recorder) noticeEvery() time.Duration {
 	if r.waitNotice > 0 {
@@ -1731,9 +1742,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop request processing")
 		}
-		if end == utils.DrainStalled {
-			r.noteEndCut("keploy's drain of what the agent captured made no progress at the recording's end, so keploy gave it up, and what the agent still held is not in the recording")
-		}
+		r.noteFrameDrainEnd(end)
 		return end
 	}
 	// Under docker compose the agent is a service of the app's own stack

@@ -1596,6 +1596,17 @@ func TestAwaitPreviousAgentEndsOnContextOrInterrupt(t *testing.T) {
 // escalation signal once, which ends that wait, and is then waited for as any
 // other: its teardown judged, never SIGTERM nor SIGKILL from keploy.
 func TestEndComposeAgentReleasesAnAgentAStalledDrainHolds(t *testing.T) {
+	for _, c := range []struct {
+		drain utils.DrainEnd
+		cause string
+	}{{utils.DrainStalled, "given up on a stall"}, {utils.DrainStopped, "given up at the user's interrupt"}} {
+		t.Run(c.cause, func(t *testing.T) { endComposeAgentReleases(t, c.drain, c.cause) })
+	}
+}
+
+// endComposeAgentReleases is TestEndComposeAgentReleasesAnAgentAStalledDrainHolds
+// for a drain given up as drain says; the warning names cause.
+func endComposeAgentReleases(t *testing.T, drain utils.DrainEnd, cause string) {
 	defer func(d time.Duration) { dockerStopPoll = d }(dockerStopPoll)
 	dockerStopPoll = 5 * time.Millisecond
 	utils.ResetInterruptedAgain()
@@ -1603,10 +1614,14 @@ func TestEndComposeAgentReleasesAnAgentAStalledDrainHolds(t *testing.T) {
 	// The fake engine's container ends at the escalation signal, as the
 	// agent, released, then goes.
 	log, _ := fakeEngine(t)
-	a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{KeployContainer: stopTestContainer}}
+	core, logs := observer.New(zap.WarnLevel)
+	a := &AgentClient{logger: zap.New(core), conf: &config.Config{KeployContainer: stopTestContainer}}
 	returned := make(chan struct{})
-	go func() { a.EndComposeAgent(utils.DrainStalled); close(returned) }()
+	go func() { a.EndComposeAgent(drain); close(returned) }()
 	within(t, "EndComposeAgent", func() { <-returned })
+	if n := logs.FilterMessageSnippet(cause).Len(); n != 1 {
+		t.Fatalf("the warnings %v: want one that says the drain was %s", logs.All(), cause)
+	}
 	calls := engineLines(t, log)
 	sig, wait := slices.Index(calls, "kill --signal SIGUSR2 "+stopTestContainer), slices.Index(calls, "wait "+stopTestContainer)
 	if sig < 0 || wait < sig || count(calls, "kill --signal SIGUSR2 "+stopTestContainer) != 1 {
