@@ -537,3 +537,44 @@ func TestAWorkersViewPassesStraightThroughUnderExactServing(t *testing.T) {
 		t.Fatal("a test mock answered twice through the old view")
 	}
 }
+
+// A worker's views tell the test scope they serve a call in now
+// (integrations.ServingScoper): two workers' open tests tell two scopes, a
+// worker's next test (or the same test run again) a new one, a worker
+// between tests none, and the views follow their worker without a window
+// change. A store with no views tells none, and neither does a worker's view
+// under exact serving, where the store's own window is the call's test.
+func TestAWorkersViewTellsTheTestScopeItServesACallIn(t *testing.T) {
+	a := exactMock("a", 0, models.LifetimePerTest)
+	b := exactMock("b", time.Second, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{a, b}, nil)
+	require.Equal(t, "", integrations.ServingScopeOf(mm), "the store itself tells no scope")
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a", "b"})
+	const one, two = 4101, 4102
+	p.SetWorkerScope(one, []string{"a"})
+	p.SetWorkerScope(two, []string{"b"})
+	viewOne, viewTwo := p.scopedFor(one, mm), p.scopedFor(two, mm)
+	window := mm.WindowChanged()
+	first := integrations.ServingScopeOf(viewOne)
+	require.NotEqual(t, "", first, "a worker's open test is a scope")
+	require.NotEqual(t, first, integrations.ServingScopeOf(viewTwo), "two workers' open tests are two scopes")
+	require.Equal(t, first, integrations.ServingScopeOf(viewOne), "a view tells its test's scope while the test is open")
+
+	p.ClearWorkerScope(one)
+	require.Equal(t, "", integrations.ServingScopeOf(viewOne), "a worker between tests serves a call in no scope")
+	p.SetWorkerScope(one, []string{"a"})
+	again := integrations.ServingScopeOf(viewOne)
+	require.NotEqual(t, "", again)
+	require.NotEqual(t, first, again, "the worker's next test, the same test run again, is a new scope")
+	p.SetWorkerScope(one, []string{"b"})
+	require.NotEqual(t, again, integrations.ServingScopeOf(viewOne), "a test begun without an end between is a new scope")
+	select {
+	case <-window:
+		t.Fatal("precondition: a worker's begin or end changed the store's window")
+	default:
+	}
+
+	mm.ServeExactPool("k", nil)
+	require.Equal(t, "", integrations.ServingScopeOf(viewOne), "under exact serving the store's window is the call's test")
+}

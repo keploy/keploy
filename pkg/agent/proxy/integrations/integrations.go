@@ -1555,6 +1555,29 @@ type WindowPacer interface {
 	StagingEpoch() uint64
 }
 
+// ServingScoper is an OPTIONAL MockMemDb facet (type-assert for it, or read
+// it through ServingScopeOf; the proxy's per-worker connection views
+// implement it): the test scope a call through the view is served in now,
+// "" when the view narrows nothing to a test of its own (the store's window
+// is the call's test then). A worker that registers its test by pid moves
+// its views to that test without a window change (WindowPacer), so a parser
+// that keeps something once per test window keeps it per scope too: one
+// worker's test, or its next, never hides what another's call does. The
+// value names the scope and nothing more; it changes at each test the view's
+// worker begins, and two workers' tests open at once tell two values.
+type ServingScoper interface {
+	ServingScope() string
+}
+
+// ServingScopeOf is db's serving scope (ServingScoper), "" for a store that
+// keeps none.
+func ServingScopeOf(db MockMemDb) string {
+	if s, ok := db.(ServingScoper); ok {
+		return s.ServingScope()
+	}
+	return ""
+}
+
 // CarryOverReader is an OPTIONAL MockMemDb facet (type-assert for it; the
 // agent's MockManager implements it) for a parser whose kind registered a
 // carry-over predicate (models.RegisterCarryOver). It returns, in recorded

@@ -1226,6 +1226,14 @@ func (s *scopedMockDb) keptKey(name string) string {
 	return keptPrefix(s.scope()) + name
 }
 
+// ServingScope is the scope this view serves a call in now
+// (integrations.ServingScoper): its worker's open test, or the test its
+// process's start is attributed to; "" under exact serving, where the store's
+// own window is the call's test, and while no test is open to it.
+func (s *scopedMockDb) ServingScope() string { return s.scope() }
+
+var _ integrations.ServingScoper = (*scopedMockDb)(nil)
+
 // scope is the scope this view serves a call in now: the test open to it, or
 // its worker's.
 func (s *scopedMockDb) scope() string {
