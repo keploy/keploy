@@ -44,7 +44,9 @@ type workerClaim struct {
 
 // declaredWorkers is how many test workers a claim of process caller says
 // the run has: 0, from an integration that predates the count, and 1 both
-// mean one.
+// mean one. A count over the limit is refused in the same words whichever
+// process sent it (it is the run's count, not the process's), so the
+// claims of one run's test processes are one refusal, said once.
 func declaredWorkers(n, caller int) (int, *models.ScopeError) {
 	if n < 0 {
 		return 0, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest,
@@ -58,24 +60,26 @@ func declaredWorkers(n, caller int) (int, *models.ScopeError) {
 			remedy = "run one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)"
 		}
 		return 0, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrTooManyWorkers,
-			fmt.Sprintf("process %d declared %d test workers, but this keploy runs %s", caller, n, most), remedy)
+			fmt.Sprintf("a test process declared %d test workers, but this keploy runs %s", n, most), remedy)
 	}
 	return n, nil
 }
 
 // workersRefusal is why this run takes no claim of declared test workers
-// (more than one) from process pid, nil when it takes one. Each reason holds
-// for the whole run, so it is checked at the claim, before any test runs,
-// never at a begin that happens to overlap another worker's test: whether a
-// run is taken never depends on how its workers' tests are scheduled.
-func (a *Agent) workersRefusal(ctx context.Context, pid, declared int) *models.ScopeError {
-	if serr := a.learnWorkersRefusal(pid, declared); serr != nil {
+// (more than one), nil when it takes one. Each reason holds for the whole
+// run, so it is checked at the claim, before any test runs, never at a begin
+// that happens to overlap another worker's test: whether a run is taken
+// never depends on how its workers' tests are scheduled. For the same
+// reason a refusal names no process: every test process of the run that
+// claims is refused in the same words, one refusal said once.
+func (a *Agent) workersRefusal(ctx context.Context, declared int) *models.ScopeError {
+	if serr := a.learnWorkersRefusal(declared); serr != nil {
 		return serr
 	}
-	if serr := a.clockWorkersRefusal(pid, declared); serr != nil {
+	if serr := a.clockWorkersRefusal(declared); serr != nil {
 		return serr
 	}
-	return a.lossWorkersRefusal(ctx, pid, declared)
+	return a.lossWorkersRefusal(ctx, declared)
 }
 
 // takesWorkers says this run would take a claim of more than one test
@@ -86,16 +90,16 @@ func (a *Agent) takesWorkers(ctx context.Context, pid int) bool {
 	if _, serr := declaredWorkers(2, pid); serr != nil {
 		return false
 	}
-	return a.workersRefusal(ctx, pid, 2) == nil
+	return a.workersRefusal(ctx, 2) == nil
 }
 
-// learnWorkersRefusal refuses process pid's claim as one of declared test
+// learnWorkersRefusal refuses a claim as one of declared test
 // workers in record's full round (models.OutgoingOptions.Learn): its learn
 // step keeps the set's tests to the order they were recorded in, one after
 // another (keepRecordedOrder, holdLearn), and tests that several workers run
 // at once keep no order. A replay that learns nothing serves each worker on
 // its own (serveWorker).
-func (a *Agent) learnWorkersRefusal(pid, declared int) *models.ScopeError {
+func (a *Agent) learnWorkersRefusal(declared int) *models.ScopeError {
 	a.provenMu.Lock()
 	learn := a.proven.order.learn
 	a.provenMu.Unlock()
@@ -103,38 +107,38 @@ func (a *Agent) learnWorkersRefusal(pid, declared int) *models.ScopeError {
 		return nil
 	}
 	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrTooManyWorkers,
-		fmt.Sprintf("process %d declared %d test workers, but record's full round replays one test worker at a time: its learn step pairs each call with a recording by the order the set's tests were recorded in, and tests that several workers run at once keep none", pid, declared),
+		fmt.Sprintf("a test process declared %d test workers, but record's full round replays one test worker at a time: its learn step pairs each call with a recording by the order the set's tests were recorded in, and tests that several workers run at once keep none", declared),
 		"record with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
 }
 
-// clockWorkersRefusal refuses process pid's claim as one of declared test
+// clockWorkersRefusal refuses a claim as one of declared test
 // workers in a replay whose build moves the run's clock to each test's
 // recorded begin in this run (testClock): the run has one clock, so two
 // workers' tests open at once cannot each run at their own recorded begin.
 // It is refused at the claim, before any test runs, never at a begin that
 // happens to overlap another worker's test: whether a run is taken never
 // depends on how its workers' tests are scheduled.
-func (a *Agent) clockWorkersRefusal(pid, declared int) *models.ScopeError {
+func (a *Agent) clockWorkersRefusal(declared int) *models.ScopeError {
 	if _, moves := testClock(); !moves || !a.replaying() {
 		return nil
 	}
 	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrTooManyWorkers,
-		fmt.Sprintf("process %d declared %d test workers, but this replay moves the run's clock to each test's recorded begin, and a run has one clock, so two workers' tests open at once cannot each run at their own", pid, declared),
+		fmt.Sprintf("a test process declared %d test workers, but this replay moves the run's clock to each test's recorded begin, and a run has one clock, so two workers' tests open at once cannot each run at their own", declared),
 		"replay with one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
 }
 
-// lossWorkersRefusal refuses process pid's claim as one of declared test
+// lossWorkersRefusal refuses a claim as one of declared test
 // workers where keploy's hooks count no capture losses
 // (countsCaptureLosses): a connection the kernel dropped while two workers'
 // tests were open could then be charged to neither, and a test it belonged
 // to could pass. One worker's test is open alone, and a drop in it is the
 // run's gap or the one test's own, as before.
-func (a *Agent) lossWorkersRefusal(ctx context.Context, pid, declared int) *models.ScopeError {
+func (a *Agent) lossWorkersRefusal(ctx context.Context, declared int) *models.ScopeError {
 	if a.countsCaptureLosses(ctx) {
 		return nil
 	}
 	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrTooManyWorkers,
-		fmt.Sprintf("process %d declared %d test workers, but keploy's hooks here count no capture losses, so a connection the kernel dropped while two workers' tests were open could not be charged to each of them", pid, declared),
+		fmt.Sprintf("a test process declared %d test workers, but keploy's hooks here count no capture losses, so a connection the kernel dropped while two workers' tests were open could not be charged to each of them", declared),
 		"run one worker (go test -p 1, Playwright workers: 1, pytest without -n, jest --runInBand)")
 }
 
@@ -145,7 +149,7 @@ func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me clai
 	stamper, ok := a.Hooks.(coreAgent.InstanceStamper)
 	if !ok {
 		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInInstance,
-			fmt.Sprintf("process %d declared %d test workers, but keploy's hooks cannot tell one worker's calls from another's", me.pid, declared),
+			fmt.Sprintf("a test process declared %d test workers, but keploy's hooks cannot tell one worker's calls from another's", declared),
 			"run one worker")
 	}
 	a.provenMu.Lock()
