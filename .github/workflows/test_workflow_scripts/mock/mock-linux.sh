@@ -28,6 +28,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# http_mocks_only: the mocks a record kept are the suite's own calls by kind.
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/mock-kinds.sh" || exit 1
 # root also needs an installation-id so the sudo'd agent doesn't prompt
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
@@ -142,9 +144,10 @@ echo "== 1. record dependency calls =="
 start_dep
 sudo -E env PATH="$PATH" "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e --disable-tele 2>&1 | tee rec.log
 stop_dep
-MOCKS=$(grep -c '^kind:' keploy/e2e/mocks.yaml 2>/dev/null || echo 0)
+# One Http mock a test, its call to the dependency, and no other: client.py
+# calls it at an IP address, so the suite makes no DNS query on any runner.
+MOCKS=$(http_mocks_only keploy/e2e/mocks.yaml 3) || { echo "FAIL: expected 3 Http mocks and no other, got $MOCKS"; FAIL=1; }
 echo "recorded mocks: $MOCKS"
-[ "$MOCKS" -eq 3 ] || { echo "FAIL: expected 3 mocks, got $MOCKS"; FAIL=1; }
 [ -f keploy/e2e/mappings.yaml ] || { echo "FAIL: per-test mappings.yaml not written"; FAIL=1; }
 # Begins are kept only under the switch (step 6).
 grep -qE '^\s+at: ' keploy/e2e/mappings.yaml && { echo "FAIL: a record without the proven switch wrote test begins"; FAIL=1; }
@@ -412,8 +415,7 @@ sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 -
 RC=${PIPESTATUS[0]}
 stop_dep
 [ "$RC" -eq 0 ] && grep -q "3 passed" rec-proven.log || { echo "FAIL: under the switch the record should pass (exit 0, 3 passed), got $RC"; FAIL=1; }
-MOCKS=$(grep -c '^kind:' keploy/e2e-proven/mocks.yaml 2>/dev/null)
-[ "${MOCKS:-0}" -eq 3 ] || { echo "FAIL: under the switch, expected 3 mocks, got ${MOCKS:-0}"; FAIL=1; }
+MOCKS=$(http_mocks_only keploy/e2e-proven/mocks.yaml 3) || { echo "FAIL: under the switch, expected 3 Http mocks and no other, got $MOCKS"; FAIL=1; }
 # Each test's ID names its file, and its mapping its own call's mock.
 python3 - <<'PY' || FAIL=1
 import datetime, re, sys

@@ -33,7 +33,8 @@ name: Linux CI scripts
 # the Http mocks its own calls make (repeated-headers' busy --sync pass). DNS
 # mocks of the runner's own name, which only some runners' resolvers answer,
 # pass beside them; an Http mock lost or duplicated, or a mock of any other
-# kind, fails.
+# kind, fails. And http_mocks_only, the mock lanes' check, whose recordings
+# make no DNS query: a DNS mock fails there too.
 
 on:
   push:
@@ -198,7 +199,7 @@ jobs:
         run: bash .github/workflows/test_workflow_scripts/keploy-installer.tests.sh
 
   mock-kinds:
-    # Fourteen cases on files the script writes; under a second.
+    # Twenty-five cases on files the script writes; under a second.
     timeout-minutes: 5
     runs-on: ubuntu-latest
     steps:
