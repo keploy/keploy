@@ -50,7 +50,7 @@ type mockService struct {
 	// claims are, under the proven switch, the run's claims (windows with
 	// Claim set), which readWindows takes out of the windows it returns: a
 	// record tags each pool mock with the key of the claim it was made
-	// under (claimKeyAt).
+	// under (claimKeyOf).
 	claims []models.ScopeWindow
 	// refusals are, under the proven switch, what the run's wire refused
 	// (windows with Refused set), which readWindows takes out of the
