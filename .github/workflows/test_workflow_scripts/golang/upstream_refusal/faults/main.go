@@ -20,6 +20,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"syscall"
 	"time"
@@ -136,10 +138,30 @@ func app(addr, up string) {
 		// A background long poll, as a queue consumer's: in flight until it
 		// is answered or its client's 120s timeout, which no run here
 		// reaches; what ends it is said.
+		//
+		// GRACEFUL=1 is a graceful application's: the stop signal cancels the
+		// call, so its client closes the connection while the process still
+		// runs, and the process exits once that call has ended. Only keploy's
+		// notice that the stop began tells the agent that close is the
+		// stop's, not the application giving up.
+		held := context.Background()
+		graceful := os.Getenv("GRACEFUL") == "1"
+		if graceful {
+			held, _ = signal.NotifyContext(held, syscall.SIGINT, syscall.SIGTERM)
+		}
 		go func() {
 			pc := &http.Client{Timeout: 120 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
-			resp, err := pc.Get("http://" + up + "/held")
+			req, err := http.NewRequestWithContext(held, http.MethodGet, "http://"+up+"/held", nil)
 			if err != nil {
+				fmt.Println("held call:", err)
+				return
+			}
+			resp, err := pc.Do(req)
+			if err != nil {
+				if graceful && held.Err() != nil {
+					fmt.Println("app: closed its held call on the stop signal; exiting")
+					os.Exit(0)
+				}
 				fmt.Println("held call:", saw(err))
 				return
 			}

@@ -26,7 +26,12 @@
 #      SIGINT, stopped by --record-timer, and the command exiting on its own
 #      (its /exit) with the call still open. Each is the run's end, not the
 #      application giving up: no fault is recorded and no note is said, and
-#      the /ok call is recorded.
+#      the /ok call is recorded. A stop's leg also fails if keploy could not
+#      tell the agent the stop had begun.
+#   9-10. As 6 and 7, with a graceful application: the stop signal cancels
+#      its held call, so its client closes the connection while the process
+#      still runs, then it exits. Only keploy's notice that the stop began
+#      tells the agent that close is the stop's: no fault is recorded.
 #
 # Env: RECORD_BIN, REPLAY_BIN (default RECORD_BIN), OLD_BIN (optional). Ports:
 # 18090 (app), 18091 (upstream). Runs as a user with passwordless sudo.
@@ -247,19 +252,23 @@ fi
 cp held_upstream.log held_record.log "$WORK/" 2>/dev/null
 cd "$WORK" || exit 1
 
-# mock_record_held LEG HOW: keploy mock record of the application with a call
-# held open, ended HOW (sigint, timer or exit), and what it wrote checked.
+# mock_record_held LEG HOW [graceful]: keploy mock record of the application
+# with a call held open, ended HOW (sigint, timer or exit), and what it wrote
+# checked. graceful: the application closes the held call itself on the stop
+# signal while it still runs, then exits (GRACEFUL=1), so only keploy's notice
+# that the stop began keeps that close from being recorded as a fault.
 mock_record_held() {
-    local leg="$1" how="$2" extra=() held=0 mocks
-    echo "== $leg. keploy mock record ended by $how with a call in flight =="
+    local leg="$1" how="$2" graceful="${3:-}" extra=() held=0 mocks dir="mock-$2"
+    [ -n "$graceful" ] && dir="mock-$how-graceful"
+    echo "== $leg. keploy mock record ended by $how with a call in flight${graceful:+ (a graceful application)} =="
     local before=$FAIL
-    mkdir -p "$WORK/mock-$how" && cd "$WORK/mock-$how" || exit 1
+    mkdir -p "$WORK/$dir" && cd "$WORK/$dir" || exit 1
     "$WORK/faults" -upstream "$UP" > upstream.log 2>&1 &
     UP_PID=$!
     wait_listen "$UP" "$UP_PID" || { echo "::error::the upstream did not start"; exit 1; }
     [ "$how" = timer ] && extra=(--record-timer 30s)
     # shellcheck disable=SC2024
-    sudo -E env PATH="$PATH" HELD_CALL=1 "$RECORD_BIN" mock record -c "$WORK/faults -app $APP $UP" --name held \
+    sudo -E env PATH="$PATH" HELD_CALL=1 GRACEFUL="${graceful:+1}" "$RECORD_BIN" mock record -c "$WORK/faults -app $APP $UP" --name held \
         --disable-tele "${extra[@]}" > record.log 2>&1 < /dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy mock record"; tail -30 record.log; exit 1; }
@@ -286,6 +295,14 @@ mock_record_held() {
     if [ "$how" = exit ] && ! grep -q 'app: exiting on its own' record.log; then
         fail "$leg: the application did not exit on its own"
     fi
+    if [ -n "$graceful" ] && ! grep -q 'app: closed its held call on the stop signal' record.log; then
+        fail "$leg: the application did not close its held call itself on the stop signal, so this proves nothing"
+    fi
+    # A stop keploy could not tell the agent of leaves the decision to the
+    # application dying with its call: this leg must not pass that way.
+    if [ "$how" != exit ] && grep -q 'keploy could not tell the agent the recording is stopping' record.log; then
+        fail "$leg: keploy mock record could not tell the agent its stop had begun"
+    fi
     mocks=keploy/held/mocks.yaml
     grep -q '/ok' "$mocks" 2>/dev/null || fail "$leg: keploy mock record did not record the /ok call, so a recording with no fault proves nothing"
     got=$(grep -c '^kind: HttpFault$' "$mocks" 2>/dev/null)
@@ -294,13 +311,15 @@ mock_record_held() {
         fail "$leg: keploy mock record said its fault note for a call the run's end cut"
     fi
     [ "$FAIL" -eq "$before" ] || { grep -n 'fault' "$mocks" | head -20; tail -40 record.log; }
-    cp upstream.log "$WORK/mock-$how-upstream.log" 2>/dev/null
-    cp record.log "$WORK/mock-$how-record.log" 2>/dev/null
+    cp upstream.log "$WORK/$dir-upstream.log" 2>/dev/null
+    cp record.log "$WORK/$dir-record.log" 2>/dev/null
     cd "$WORK" || exit 1
 }
 mock_record_held 6 sigint
 mock_record_held 7 timer
 mock_record_held 8 exit
+mock_record_held 9 sigint graceful
+mock_record_held 10 timer graceful
 
 if [ "$FAIL" -ne 0 ]; then
     echo "::error::$FAIL check(s) failed"
