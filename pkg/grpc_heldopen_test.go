@@ -11,10 +11,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -31,15 +33,16 @@ type h2App struct {
 	addr string
 	// keepalives counts the PINGs it sent, each counted before it goes out.
 	keepalives atomic.Int32
-	// exhausted closes when the script sent every keepalive it had and the
-	// client still had not ended the stream: the hang.
-	exhausted chan struct{}
+	// ended closes when the app, its keepalives sent and the stream still
+	// open, ends the stream itself (endItself).
+	ended chan struct{}
 }
 
 // h2Stream is the call the script answers.
 type h2Stream struct {
 	app   *h2App
 	mu    sync.Mutex
+	c     net.Conn
 	fr    *http2.Framer
 	hbuf  bytes.Buffer
 	enc   *hpack.Encoder
@@ -114,15 +117,56 @@ func (s *h2Stream) pingNow() error {
 	return nil
 }
 
-// holdOpen sends keepalives until the client ends the stream; when it sent
-// limit and the client had not, the app is exhausted.
-func (s *h2Stream) holdOpen(limit int) {
-	for i := 0; i < limit; i++ {
-		if !s.keepalive() {
-			return
+// sendTogether sends msgs, then n keepalives, in one write, so the client
+// reads the keepalives with the messages ahead of them: the keepalive keploy's
+// rule ends the wait on is read before the drain has those messages. It then
+// waits for the keepalives' acknowledgements; false once the client reset the
+// stream or the connection is gone.
+func (s *h2Stream) sendTogether(msgs [][]byte, n int) bool {
+	var b bytes.Buffer
+	fr := http2.NewFramer(&b, nil)
+	for _, m := range msgs {
+		if fr.WriteData(s.id, false, grpcMessage(m)) != nil {
+			return false
 		}
 	}
-	close(s.app.exhausted)
+	for i := 0; i < n; i++ {
+		if fr.WritePing(false, [8]byte{}) != nil {
+			return false
+		}
+	}
+	s.app.keepalives.Add(int32(n))
+	if s.write(func() error { _, err := s.c.Write(b.Bytes()); return err }) != nil {
+		return false
+	}
+	for i := 0; i < n; i++ {
+		select {
+		case <-s.acks:
+		case <-s.reset:
+			return false
+		}
+	}
+	return true
+}
+
+// holdOpen holds the stream open for n keepalives, each answered before the
+// next; false once the client ended the stream.
+func (s *h2Stream) holdOpen(n int) bool {
+	for i := 0; i < n; i++ {
+		if !s.keepalive() {
+			return false
+		}
+	}
+	return true
+}
+
+// endItself ends the stream the app held open (status 0). keploy decides on
+// the keepalives, in the order the app sent its frames, so an end after them
+// changes nothing of what the call returns; a call that returns the app's end
+// waited for it (heldOpenCall).
+func (s *h2Stream) endItself() {
+	close(s.app.ended)
+	_ = s.trailers(codes.OK)
 }
 
 // startH2App serves gRPC calls on a listener of its own: on each, once the
@@ -133,7 +177,7 @@ func startH2App(t *testing.T, script func(s *h2Stream)) *h2App {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := &h2App{addr: ln.Addr().String(), exhausted: make(chan struct{})}
+	app := &h2App{addr: ln.Addr().String(), ended: make(chan struct{})}
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
@@ -152,7 +196,7 @@ func (a *h2App) serve(c net.Conn, script func(s *h2Stream)) {
 	if _, err := io.ReadFull(c, make([]byte, len(http2.ClientPreface))); err != nil {
 		return
 	}
-	s := &h2Stream{app: a, fr: http2.NewFramer(c, c), acks: make(chan struct{}, 64), reset: make(chan struct{})}
+	s := &h2Stream{app: a, c: c, fr: http2.NewFramer(c, c), acks: make(chan struct{}, 64), reset: make(chan struct{})}
 	s.enc = hpack.NewEncoder(&s.hbuf)
 	var resetOnce sync.Once
 	closeReset := func() { resetOnce.Do(func() { close(s.reset) }) }
@@ -192,27 +236,29 @@ func (a *h2App) serve(c net.Conn, script func(s *h2Stream)) {
 }
 
 // heldOpenCall replays tc against the app under the proven switch, with no
-// clock on the app's answer, and returns what SimulateGRPC returned; or fails
-// once the app has sent every keepalive it had and the call still waits.
-func heldOpenCall(t *testing.T, tc *models.TestCase, exhausted <-chan struct{}) (*models.GrpcResp, error) {
+// clock on the app's answer, and returns what SimulateGRPC returned. It fails
+// when the app had ended the stream itself after its keepalives (ended) and
+// the call returned that end, not a stream held open: it waited for the end,
+// so on an app that never ends it would hang.
+//
+// The call is waited for, not raced against a count of the app's keepalives:
+// once keploy decided on one, how soon the call returns is the scheduler's,
+// and a drain was seen off the CPU while the app sent 198 more. So the rows'
+// apps send no keepalive past the one the rule ends the wait on: an end
+// decides (the app's, or keploy's own). The stall rule's clock does not move
+// (a ManualClock never advanced), so only keepalives and ends end the call.
+func heldOpenCall(t *testing.T, tc *models.TestCase, ended <-chan struct{}) (*models.GrpcResp, error) {
 	t.Helper()
 	t.Setenv(provenswitch.Env, "1")
-	type result struct {
-		resp *models.GrpcResp
-		err  error
-	}
-	done := make(chan result, 1)
-	go func() {
-		resp, err := SimulateGRPC(context.Background(), tc, "set", zap.NewNop(), SimulationConfig{APITimeout: 1, Unbounded: true})
-		done <- result{resp, err}
-	}()
+	resp, err := SimulateGRPC(context.Background(), tc, "set", zap.NewNop(), SimulationConfig{APITimeout: 1, Unbounded: true, StallClock: &stall.ManualClock{}})
 	select {
-	case r := <-done:
-		return r.resp, r.err
-	case <-exhausted:
-		t.Fatal("the app kept the stream open past its recording, sent keepalive after keepalive, and the call still waits: with no clock it hangs")
-		return nil, nil
+	case <-ended:
+		if !errors.Is(err, ErrStreamHeldOpen) && !errors.Is(err, ErrAnswerStalled) {
+			t.Fatalf("the app kept the stream open past its recording for its keepalives, then ended it, and the call returned that end (%v): it waited for the end, and with no clock it hangs on an app that never ends", err)
+		}
+	default:
 	}
+	return resp, err
 }
 
 // recordedAs is tc with msgs as its recorded answer.
@@ -238,6 +284,51 @@ func grpcStatusOf(resp *models.GrpcResp) string {
 	return resp.Trailers.OrdinaryHeaders["grpc-status"]
 }
 
+// heldOpenRow is a stream an app holds open past, or short of, its recording:
+// its headers, then the messages it sent, then the keepalives keploy's rule
+// ends the wait on, and no end; recorded is the test case, and check what the
+// call must return. together sends the messages and the keepalives in one
+// write (sendTogether).
+type heldOpenRow struct {
+	name       string
+	sent       [][]byte
+	keepalives int
+	together   bool
+	recorded   func(addr string) *models.TestCase
+	check      func(t *testing.T, resp *models.GrpcResp, err error)
+}
+
+// run replays the row against its app. After its keepalives the app ends the
+// stream itself (itself), or sends nothing more: then the call ends only if
+// keploy ends it, with no frame of the app's to end it on.
+func (r heldOpenRow) run(t *testing.T, itself bool) {
+	t.Helper()
+	app := startH2App(t, func(s *h2Stream) {
+		if s.headers(false, ":status", "200", "content-type", "application/grpc") != nil {
+			return
+		}
+		if r.together {
+			if s.sendTogether(r.sent, r.keepalives) && itself {
+				s.endItself()
+			}
+			return
+		}
+		for _, m := range r.sent {
+			if s.message(m) != nil {
+				return
+			}
+		}
+		if s.holdOpen(r.keepalives) && itself {
+			s.endItself()
+		}
+	})
+	resp, err := heldOpenCall(t, r.recorded(app.addr), app.ended)
+	r.check(t, resp, err)
+	if n := app.keepalives.Load(); n < int32(r.keepalives) {
+		t.Fatalf("the call ended after the app's keepalive %d, before keepalive %d, the one keploy's rule ends the wait on", n, r.keepalives)
+	}
+}
+
 // Under the proven switch, with no clock on the app's answer (row W1), a gRPC
 // stream the app keeps open past its recording ends on its keepalives: every
 // recorded message came, then PINGs and no end. The first PING after the
@@ -249,50 +340,41 @@ func grpcStatusOf(resp *models.GrpcResp) string {
 // it: the app's headers and then keepalives alone are a stall, two
 // keepalives on, with nothing of the answer to compare: it fails closed
 // (ErrAnswerStalled, the coordinator's ruling (a)), never a pass on the
-// recording.
-func TestAGRPCStreamHeldOpenPastItsRecordingEndsOnItsKeepalives(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		sent     [][]byte
-		recorded [][]byte
-		nothing  bool
-	}{
-		{"every recorded message, then keepalives", [][]byte{pbMsg("one"), pbMsg("two")}, [][]byte{pbMsg("one"), pbMsg("two")}, false},
-		{"a message beyond the recording, then keepalives", [][]byte{pbMsg("one"), pbMsg("two")}, [][]byte{pbMsg("one")}, false},
-		{"an answer of trailers alone recorded, then headers and keepalives", nil, [][]byte{nil}, true},
-	} {
-		recordedCode := codes.OK
-		if tc.sent == nil {
-			recordedCode = codes.NotFound
+// recording. Sent in one write, the messages and the keepalives are read
+// together, the keepalive before the drain has the messages ahead of it: the
+// drain itself ends the wait once it has them, not keploy's cut.
+var heldPastRows = []heldOpenRow{
+	{"every recorded message, then keepalives", [][]byte{pbMsg("one"), pbMsg("two")}, 2, false, func(addr string) *models.TestCase {
+		return withStatus(recordedAs(grpcTestCase(addr, []models.GrpcLengthPrefixedMessage{{}}), pbMsg("one"), pbMsg("two")), codes.OK)
+	}, heldPast(2)},
+	{"every recorded message and the keepalives in one write", [][]byte{pbMsg("one"), pbMsg("two")}, 2, true, func(addr string) *models.TestCase {
+		return withStatus(recordedAs(grpcTestCase(addr, []models.GrpcLengthPrefixedMessage{{}}), pbMsg("one"), pbMsg("two")), codes.OK)
+	}, heldPast(2)},
+	{"a message beyond the recording, then keepalives", [][]byte{pbMsg("one"), pbMsg("two")}, 2, false, func(addr string) *models.TestCase {
+		return withStatus(recordedAs(grpcTestCase(addr, []models.GrpcLengthPrefixedMessage{{}}), pbMsg("one")), codes.OK)
+	}, heldPast(2)},
+	{"an answer of trailers alone recorded, then headers and keepalives", nil, 3, false, func(addr string) *models.TestCase {
+		return withStatus(recordedAs(grpcTestCase(addr, []models.GrpcLengthPrefixedMessage{{}}), nil), codes.NotFound)
+	}, func(t *testing.T, resp *models.GrpcResp, err error) {
+		t.Helper()
+		if want := "the app sent its answer's headers and nothing of its body, then only keepalives, for /pkg.Svc/Method"; !errors.Is(err, ErrAnswerStalled) || errors.Is(err, ErrStreamHeldOpen) || fmtErr(err) != want || !AnswerBegan(err) {
+			t.Fatalf("SimulateGRPC: %v, %v; want it failing closed: %q", resp, err, want)
 		}
-		t.Run(tc.name, func(t *testing.T) {
-			app := startH2App(t, func(s *h2Stream) {
-				if s.headers(false, ":status", "200", "content-type", "application/grpc") != nil {
-					return
-				}
-				for _, m := range tc.sent {
-					if s.message(m) != nil {
-						return
-					}
-				}
-				s.holdOpen(200)
-			})
-			resp, err := heldOpenCall(t, withStatus(recordedAs(grpcTestCase(app.addr, []models.GrpcLengthPrefixedMessage{{}}), tc.recorded...), recordedCode), app.exhausted)
-			switch {
-			case tc.nothing:
-				if want := "the app sent its answer's headers and nothing of its body, then only keepalives, for /pkg.Svc/Method"; !errors.Is(err, ErrAnswerStalled) || errors.Is(err, ErrStreamHeldOpen) || fmtErr(err) != want || !AnswerBegan(err) {
-					t.Fatalf("SimulateGRPC: %v, %v; want it failing closed: %q", resp, err, want)
-				}
-				requireHeadersOnly(t, resp, true)
-			case !errors.Is(err, ErrStreamHeldOpen) || errors.Is(err, ErrStreamStalled):
-				t.Fatalf("SimulateGRPC: %v; want ErrStreamHeldOpen, not stalled", err)
-			case len(resp.AllMessages()) != len(tc.sent):
-				t.Fatalf("returned %d messages, want what came (%d)", len(resp.AllMessages()), len(tc.sent))
-			}
-			if n := app.keepalives.Load(); n < 2 {
-				t.Fatalf("the call ended after the app's keepalive %d; the first after the request may be a flow-control ping, so not before the second", n)
-			}
-		})
+		requireHeadersOnly(t, resp, true)
+	}},
+}
+
+// heldPast checks a stream held open past its recording: ErrStreamHeldOpen,
+// not stalled, with the came messages the app sent before its keepalives.
+func heldPast(came int) func(t *testing.T, resp *models.GrpcResp, err error) {
+	return func(t *testing.T, resp *models.GrpcResp, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrStreamHeldOpen) || errors.Is(err, ErrStreamStalled) {
+			t.Fatalf("SimulateGRPC: %v; want ErrStreamHeldOpen, not stalled", err)
+		}
+		if got := len(resp.AllMessages()); got != came {
+			t.Fatalf("returned %d messages, want what came (%d)", got, came)
+		}
 	}
 }
 
@@ -301,14 +383,10 @@ func TestAGRPCStreamHeldOpenPastItsRecordingEndsOnItsKeepalives(t *testing.T) {
 // app neither ended the stream nor sent the rest of its answer. It has no
 // verdict (ErrStreamStalled, an ErrStreamHeldOpen): what came is returned,
 // then the recording's rest, so only what came is compared.
-func TestAGRPCStreamThatStallsShortOfItsRecordingEndsOnItsKeepalives(t *testing.T) {
-	app := startH2App(t, func(s *h2Stream) {
-		if s.headers(false, ":status", "200", "content-type", "application/grpc") != nil || s.message(pbMsg("one")) != nil {
-			return
-		}
-		s.holdOpen(200)
-	})
-	resp, err := heldOpenCall(t, recordedAs(grpcTestCase(app.addr, []models.GrpcLengthPrefixedMessage{{}}), pbMsg("one"), pbMsg("two")), app.exhausted)
+var stalledShortRow = heldOpenRow{"a message, then keepalives", [][]byte{pbMsg("one")}, 3, false, func(addr string) *models.TestCase {
+	return recordedAs(grpcTestCase(addr, []models.GrpcLengthPrefixedMessage{{}}), pbMsg("one"), pbMsg("two"))
+}, func(t *testing.T, resp *models.GrpcResp, err error) {
+	t.Helper()
 	if !errors.Is(err, ErrStreamStalled) || !errors.Is(err, ErrStreamHeldOpen) {
 		t.Fatalf("SimulateGRPC: %v; want ErrStreamStalled, an ErrStreamHeldOpen", err)
 	}
@@ -316,9 +394,22 @@ func TestAGRPCStreamThatStallsShortOfItsRecordingEndsOnItsKeepalives(t *testing.
 	if len(got) != 2 || int(got[0].MessageLength) != len(pbMsg("one")) || int(got[1].MessageLength) != len(pbMsg("two")) {
 		t.Fatalf("returned %+v, want the message that came, then the recording's rest", got)
 	}
-	if n := app.keepalives.Load(); n < 3 {
-		t.Fatalf("the call ended after the app's keepalive %d; the first after the request may be a flow-control ping, so not before the third", n)
+}}
+
+// The held-past rows, the app ending the stream itself after the keepalives
+// the rule ends the wait on: the call returns the stream held open all the
+// same, decided on the keepalives, and an end it returned instead fails it
+// (heldOpenCall).
+func TestAGRPCStreamHeldOpenPastItsRecordingEndsOnItsKeepalives(t *testing.T) {
+	for _, row := range heldPastRows {
+		t.Run(row.name, func(t *testing.T) { row.run(t, true) })
 	}
+}
+
+// The stalled-short row, the app ending the stream itself after its third
+// keepalive, the one the rule ends the wait on.
+func TestAGRPCStreamThatStallsShortOfItsRecordingEndsOnItsKeepalives(t *testing.T) {
+	stalledShortRow.run(t, true)
 }
 
 // An answer that is slow to come is the app's, judged, while its app sends
@@ -377,7 +468,7 @@ func TestASlowAnswerIsJudgedUntilTheAppStallsOnItsKeepalives(t *testing.T) {
 			})
 			call := grpcTestCase(app.addr, []models.GrpcLengthPrefixedMessage{{}})
 			call.GrpcResp = tc.recorded.GrpcResp
-			resp, err := heldOpenCall(t, call, app.exhausted)
+			resp, err := heldOpenCall(t, call, app.ended)
 			if tc.stalled {
 				// Keepalives alone, no answer: nothing to compare, so
 				// it fails closed (ErrAnswerStalled).
@@ -413,7 +504,7 @@ func TestAnEndAfterTheKeepaliveIsNotWaitedFor(t *testing.T) {
 		_ = s.trailers(codes.OK)
 	})
 	for i := 0; i < 20; i++ {
-		resp, err := heldOpenCall(t, recordedAs(grpcTestCase(app.addr, []models.GrpcLengthPrefixedMessage{{}}), pbMsg("one")), app.exhausted)
+		resp, err := heldOpenCall(t, recordedAs(grpcTestCase(app.addr, []models.GrpcLengthPrefixedMessage{{}}), pbMsg("one")), app.ended)
 		if !errors.Is(err, ErrStreamHeldOpen) {
 			t.Fatalf("call %d: SimulateGRPC: %v; want ErrStreamHeldOpen", i, err)
 		}
@@ -435,7 +526,7 @@ func TestOnePingAfterTheRequestIsNoKeepaliveYet(t *testing.T) {
 			_ = s.trailers(codes.OK)
 		}
 	})
-	resp, err := heldOpenCall(t, recordedAs(grpcTestCase(app.addr, []models.GrpcLengthPrefixedMessage{{}}), pbMsg("one")), app.exhausted)
+	resp, err := heldOpenCall(t, recordedAs(grpcTestCase(app.addr, []models.GrpcLengthPrefixedMessage{{}}), pbMsg("one")), app.ended)
 	if err != nil {
 		t.Fatalf("SimulateGRPC: %v", err)
 	}
@@ -445,7 +536,8 @@ func TestOnePingAfterTheRequestIsNoKeepaliveYet(t *testing.T) {
 }
 
 // keepaliveCounter counts the PINGs (not acknowledgements) a real gRPC server
-// writes on the connections it accepts.
+// writes on the connections it accepts, and closes exhausted as its limit-th
+// goes out.
 type keepaliveCounter struct {
 	net.Listener
 	pings     atomic.Int32
@@ -483,20 +575,24 @@ func (c *pingCountingConn) Write(b []byte) (int, error) {
 
 // startKeepaliveServer is a real gRPC server with keepalives on (grpc-go sends
 // one after a second without activity, its least), answering every call with
-// handle. Its flow-control pings are on, as by default.
-func startKeepaliveServer(t *testing.T, limit int32, handle grpc.StreamHandler) *keepaliveCounter {
-	return startGRPCServer(t, limit, time.Second, handle)
+// handle; it closes exhausted (one of its own when nil) as its limit-th PING
+// goes out. Its flow-control pings are on, as by default.
+func startKeepaliveServer(t *testing.T, limit int32, exhausted chan struct{}, handle grpc.StreamHandler) *keepaliveCounter {
+	return startGRPCServer(t, limit, exhausted, time.Second, handle)
 }
 
 // startGRPCServer is startKeepaliveServer with keepalives every keepaliveTime
 // of inactivity; grpc-go's default (two hours) when it is zero.
-func startGRPCServer(t *testing.T, limit int32, keepaliveTime time.Duration, handle grpc.StreamHandler) *keepaliveCounter {
+func startGRPCServer(t *testing.T, limit int32, exhausted chan struct{}, keepaliveTime time.Duration, handle grpc.StreamHandler) *keepaliveCounter {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	counter := &keepaliveCounter{Listener: ln, limit: limit, exhausted: make(chan struct{})}
+	if exhausted == nil {
+		exhausted = make(chan struct{})
+	}
+	counter := &keepaliveCounter{Listener: ln, limit: limit, exhausted: exhausted}
 	opts := []grpc.ServerOption{grpc.ForceServerCodec(rawSrvCodec{}), grpc.UnknownServiceHandler(handle)}
 	if keepaliveTime > 0 {
 		opts = append(opts, grpc.KeepaliveParams(keepalive.ServerParameters{Time: keepaliveTime, Timeout: time.Minute}))
@@ -513,6 +609,7 @@ func startGRPCServer(t *testing.T, limit int32, keepaliveTime time.Duration, han
 // alone (an error status) among them, which a recording keeps as one empty
 // message, or as none.
 func TestARealGRPCServersKeepalivesEndAStreamHeldOpen(t *testing.T) {
+	t.Run("held open", func(t *testing.T) { realServerHeldOpen(t, true) })
 	drain := func(stream grpc.ServerStream) {
 		for {
 			var m rawMessage
@@ -521,23 +618,6 @@ func TestARealGRPCServersKeepalivesEndAStreamHeldOpen(t *testing.T) {
 			}
 		}
 	}
-	t.Run("held open", func(t *testing.T) {
-		srv := startKeepaliveServer(t, 6, func(_ interface{}, stream grpc.ServerStream) error {
-			drain(stream)
-			if err := stream.SendMsg(&rawMessage{data: pbMsg("one")}); err != nil {
-				return err
-			}
-			<-stream.Context().Done()
-			return nil
-		})
-		resp, err := heldOpenCall(t, recordedAs(grpcTestCase(srv.Addr().String(), []models.GrpcLengthPrefixedMessage{{}}), pbMsg("one")), srv.exhausted)
-		if !errors.Is(err, ErrStreamHeldOpen) {
-			t.Fatalf("SimulateGRPC: %v; want ErrStreamHeldOpen", err)
-		}
-		if got := len(resp.AllMessages()); got != 1 {
-			t.Fatalf("returned %d messages, want the one that came", got)
-		}
-	})
 	for _, tc := range []struct {
 		name     string
 		answer   func(stream grpc.ServerStream) error
@@ -558,7 +638,7 @@ func TestARealGRPCServersKeepalivesEndAStreamHeldOpen(t *testing.T) {
 			// The app's flow-control pings, and no keepalive: a judged
 			// answer does not race the app's keepalive clock on a loaded
 			// machine.
-			srv := startGRPCServer(t, 6, 0, func(_ interface{}, stream grpc.ServerStream) error {
+			srv := startGRPCServer(t, 6, nil, 0, func(_ interface{}, stream grpc.ServerStream) error {
 				drain(stream)
 				return tc.answer(stream)
 			})
@@ -572,6 +652,39 @@ func TestARealGRPCServersKeepalivesEndAStreamHeldOpen(t *testing.T) {
 				t.Fatalf("grpc-status %q, want the app's %s", got, tc.status)
 			}
 		})
+	}
+}
+
+// realServerHeldOpen replays a call a real gRPC server holds open past its
+// recording, its keepalives coming every second. The server ends the stream
+// itself as its sixth PING goes out, its flow-control pings among them
+// (itself), or only once keploy ended it.
+func realServerHeldOpen(t *testing.T, itself bool) {
+	t.Helper()
+	exhausted := make(chan struct{})
+	var ended chan struct{}
+	if itself {
+		ended = exhausted
+	}
+	srv := startKeepaliveServer(t, 6, exhausted, func(_ interface{}, stream grpc.ServerStream) error {
+		var m rawMessage
+		for stream.RecvMsg(&m) == nil {
+		}
+		if err := stream.SendMsg(&rawMessage{data: pbMsg("one")}); err != nil {
+			return err
+		}
+		select {
+		case <-stream.Context().Done():
+		case <-ended:
+		}
+		return nil
+	})
+	resp, err := heldOpenCall(t, recordedAs(grpcTestCase(srv.Addr().String(), []models.GrpcLengthPrefixedMessage{{}}), pbMsg("one")), ended)
+	if !errors.Is(err, ErrStreamHeldOpen) {
+		t.Fatalf("SimulateGRPC: %v; want ErrStreamHeldOpen", err)
+	}
+	if got := len(resp.AllMessages()); got != 1 {
+		t.Fatalf("returned %d messages, want the one that came", got)
 	}
 }
 
@@ -598,6 +711,14 @@ func framesOf(t *testing.T, write func(fr *http2.Framer) error) []byte {
 // end, once every recorded message has come whole and the app has not ended
 // the stream, holds it open; nothing else does. Each sequence is also fed a
 // byte at a time, as reads and writes may split it anywhere.
+//
+// The keepalive cuts the stream on a goroutine of its own, and only when the
+// drain already had every message it held the stream at. Each sequence runs
+// in a synctest bubble, and after each step waits until every other goroutine
+// there is blocked or done (synctest.Wait): a cut that was started has run by
+// then, so a cut that is missing, or one that comes when the drain still
+// waits for its messages, fails the step, with no clock and no wait on the
+// cut.
 func TestPingWatchHoldsAStreamOpenOnTheSecondPingAfterTheRequestEnds(t *testing.T) {
 	ping := framesOf(t, func(fr *http2.Framer) error { return fr.WritePing(false, [8]byte{1}) })
 	ack := framesOf(t, func(fr *http2.Framer) error { return fr.WritePing(true, [8]byte{1}) })
@@ -671,11 +792,10 @@ func TestPingWatchHoldsAStreamOpenOnTheSecondPingAfterTheRequestEnds(t *testing.
 			if split {
 				name += ", a byte at a time"
 			}
-			t.Run(name, func(t *testing.T) {
+			run := func(t *testing.T) {
 				var cuts atomic.Int32
-				cut := make(chan struct{}, 1)
 				pw := newPingWatch(nil)
-				pw.arm(tc.complete, func() { cuts.Add(1); cut <- struct{}{} })
+				pw.arm(tc.complete, func() { cuts.Add(1) })
 				for i, st := range tc.steps {
 					if st.drain > 0 {
 						if pw.gotMessage(st.drain) {
@@ -700,6 +820,14 @@ func TestPingWatchHoldsAStreamOpenOnTheSecondPingAfterTheRequestEnds(t *testing.
 					if got, _, _ := pw.heldOpen(); got != st.held {
 						t.Fatalf("step %d: held open %v, want %v", i, got, st.held)
 					}
+					synctest.Wait()
+					want := int32(0)
+					if st.held && tc.cutByKeepalive {
+						want = 1
+					}
+					if n := cuts.Load(); n != want {
+						t.Fatalf("step %d: the stream was cut %d times, want %d: the keepalive cuts it once, and only when the drain already had the messages it held the stream at", i, n, want)
+					}
 				}
 				held, at, stalled := pw.heldOpen()
 				if !held {
@@ -712,22 +840,38 @@ func TestPingWatchHoldsAStreamOpenOnTheSecondPingAfterTheRequestEnds(t *testing.
 					t.Fatalf("stalled %v, want %v", stalled, tc.stalled)
 				}
 				if tc.cutByKeepalive {
-					// The drain had them all: the keepalive cuts the
-					// stream it waits on.
-					<-cut
-					if n := cuts.Load(); n != 1 {
-						t.Fatalf("cut %d times, want once", n)
-					}
+					// The drain had them all: the keepalive cut the
+					// stream it waits on (each step's check).
 					return
 				}
 				// The drain had none of them yet: it is done once it has
-				// them all.
+				// them all, and leaves the stream itself.
 				for n := 1; n <= at; n++ {
 					if done := pw.gotMessage(n); done != (n == at) {
 						t.Fatalf("the drain is done after %d of %d messages: %v", n, at, done)
 					}
 				}
-			})
+			}
+			t.Run(name, func(t *testing.T) { synctest.Test(t, run) })
 		}
 	}
+}
+
+// The held-open rows once more, the app sending nothing after the keepalives
+// keploy's rule ends the wait on, neither a frame nor its end, and a real
+// gRPC server that holds the stream open until keploy ends it, its
+// keepalives going on: keploy ends each call itself, on the keepalive it
+// decided on, and returns what the row's app-ended run returns. The stall
+// rule's clock does not move (heldOpenCall), so only keploy's own end ends
+// the call: one it never ends hangs the row, which fails at go test's
+// -timeout. No count of keepalives can fail it sooner without failing a call
+// that ends: what is left once keploy decided is the scheduler's.
+//
+// It runs last of the held-open rows, so that a hang here does not hide what
+// they reported.
+func TestKeployEndsAGRPCStreamHeldOpenWithNothingAfterItsKeepalives(t *testing.T) {
+	for _, row := range append(append([]heldOpenRow(nil), heldPastRows...), stalledShortRow) {
+		t.Run(row.name, func(t *testing.T) { row.run(t, false) })
+	}
+	t.Run("a real gRPC server", func(t *testing.T) { realServerHeldOpen(t, false) })
 }
