@@ -1292,9 +1292,9 @@ func shouldRecordViaSupervisor(parser integrations.Integrations) bool {
 // pointers it is given and writes the upgraded *tls.Conn back through
 // them, so that handleConnection's deferred close acts on the TLS conn
 // and sends close_notify. Constructing it here would alias this
-// function's PARAMETER COPIES: the legacy MySQL STARTTLS path
-// (recorder/conn.go UpgradeClientTLS/UpgradeDestTLS) would still
-// upgrade, but the caller's variables would keep pointing at the raw
+// function's PARAMETER COPIES: a parser's STARTTLS upgrade on the raw
+// sockets (session.TLSUpgrader's UpgradeClientTLS/UpgradeDestTLS) would
+// still upgrade, but the caller's variables would keep pointing at the raw
 // sockets and the deferred close would tear them down without
 // close_notify. proxy.go's matched-parser site carries the same warning.
 //

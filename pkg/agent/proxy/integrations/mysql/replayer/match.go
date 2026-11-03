@@ -709,8 +709,8 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// fetchConnectionTier is the connection tier's read.
 	//
 	// Unification Phase 2.5: prepared-statement setup mocks are tagged
-	// type=connection by the recorder (see
-	// pkg/agent/proxy/integrations/mysql/recorder/query.go) and live in
+	// type=connection by the recorder (see handleCommandsV2 in
+	// pkg/agent/proxy/integrations/mysql/recorder/record_v2.go) and live in
 	// their own per-connID pool. Fetch them explicitly here so
 	// buildRecordedPrepIndex can include them; GetConnectionMocks
 	// returns an empty slice when no connection-scoped mocks exist, so
