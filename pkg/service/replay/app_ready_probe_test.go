@@ -125,3 +125,27 @@ func TestWaitForAppReady_ProbeAddrGate_EmptyHostShorthand(t *testing.T) {
 		t.Fatalf("ready port should return promptly (leading dial), took %v", elapsed)
 	}
 }
+
+// Once test.appReadyProbeAddr accepted, the address gate is done: it does
+// not gate again on the address the set's first test dials. The host may
+// not reach that address (a port mapped elsewhere), and a second gate there
+// would wait until the application exits.
+func TestWaitForAppReady_ProbeAddrGate_IsTheOnlyAddressGate(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	cfg := &config.Config{}
+	cfg.Test.Delay = 0
+	cfg.Test.AppReadyProbeAddr = ln.Addr().String()
+	// The HTTP check after the accept is the user's bound; keep it short.
+	cfg.Test.HealthPollTimeout = 300 * time.Millisecond
+	host, port, _ := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
+	probe := httpProbeTarget{scheme: "http", host: host, port: port, ok: true}
+
+	if !readyWithin(t, 20*time.Second, zap.NewNop(), cfg, probe) {
+		t.Fatal("waitForAppReady should proceed once the probe address accepted")
+	}
+}

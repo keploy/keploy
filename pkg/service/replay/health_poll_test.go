@@ -26,6 +26,25 @@ func newCfg(healthURL string, pollTimeout time.Duration) *config.Config {
 	return cfg
 }
 
+// readyWithin runs waitForAppReady under a context the row cancels when it
+// ends, and fails the row when the gate has not decided within bound: a gate
+// that waits with no end fails its row by the row's own check, not by the
+// test binary's timeout.
+func readyWithin(t *testing.T, bound time.Duration, logger *zap.Logger, cfg *config.Config, probe httpProbeTarget) bool {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan bool, 1)
+	t.Cleanup(cancel)
+	go func() { done <- waitForAppReady(ctx, logger, cfg, probe) }()
+	select {
+	case ok := <-done:
+		return ok
+	case <-time.After(bound):
+		t.Fatalf("the readiness gate did not decide within %s", bound)
+		return false
+	}
+}
+
 // TestWaitForAppReady_200OnFirstTry verifies the happy path: a health endpoint
 // that is up immediately unblocks replay in well under the --delay fallback
 // window (and far under healthPollInterval).
@@ -112,7 +131,7 @@ func TestWaitForAppReady_NeverOK(t *testing.T) {
 	logger := zap.New(core)
 
 	start := time.Now()
-	ok := waitForAppReady(context.Background(), logger, cfg, httpProbeTarget{})
+	ok := readyWithin(t, 30*time.Second, logger, cfg, httpProbeTarget{})
 	elapsed := time.Since(start)
 
 	// The health URL's own address accepts (it answers 500): past the poll
@@ -339,5 +358,43 @@ func TestWaitForAppReady_CtxCanceled(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("ctx cancel should unblock quickly, elapsed=%v", elapsed)
+	}
+}
+
+// A stop (the application's exit or the user's) during the health poll ends
+// the gate at once, not ready, and is not reported as the poll's timeout:
+// the line that says the health URL did not answer within the poll timeout
+// would name the wrong cause.
+func TestAStopDuringTheHealthPollIsNotReportedAsItsTimeout(t *testing.T) {
+	var polls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		polls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	core, logs := observer.New(zap.InfoLevel)
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	done := make(chan bool, 1)
+	go func() { done <- waitForAppReady(ctx, zap.New(core), newCfg(srv.URL, time.Minute), httpProbeTarget{}) }()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for polls.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the health URL was never polled")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	stop()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("the gate reported the application ready after the stop")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the gate did not end at the stop")
+	}
+	if n := logs.FilterMessageSnippet("has not answered 2xx within the poll timeout").Len(); n != 0 {
+		t.Errorf("a stop during the health poll was reported as its timeout: %v", logs.All())
 	}
 }
