@@ -1034,23 +1034,26 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 
 // wordRunsOf is, by name, the live and recorded run (variables.WordRuns) of
 // each variable decls bind at a word of a value of the call: the words m
-// declares bound at consecutive words of that text, an echo's apart (it is
-// the call's own, never bound in the table).
+// declares bound at consecutive words of that text (one place, one decode),
+// an echo's apart (it is the call's own, never bound in the table).
 func wordRunsOf(decls []varDecl, liveAt map[string]held) map[string][2]string {
 	var names []string
-	var at []variables.Address
-	var live, recorded []string
+	var ws []variables.WordBind
 	for _, d := range decls {
 		if d.echo || d.bind == nil {
 			continue
 		}
+		at := d.bind.at
 		names = append(names, d.name)
-		at = append(at, d.bind.at)
-		live = append(live, liveAt[d.bind.key()].value)
-		recorded = append(recorded, d.recorded)
+		ws = append(ws, variables.WordBind{
+			Text:     variables.Address{Place: at.Place, Steps: at.Steps, Word: -1}.String(),
+			Word:     at.Word,
+			Live:     liveAt[d.bind.key()].value,
+			Recorded: d.recorded,
+		})
 	}
 	out := make(map[string][2]string, len(names))
-	lr, rr := variables.WordRuns(at, live, recorded)
+	lr, rr := variables.WordRuns(ws)
 	for i, name := range names {
 		out[name] = [2]string{lr[i], rr[i]}
 	}

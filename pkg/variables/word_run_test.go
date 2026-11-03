@@ -16,18 +16,14 @@ func uuidBinds(t *testing.T, prefix, field, live, recorded string, first int) []
 	if len(lw) != len(rw) {
 		t.Fatalf("%s and %s hold %d and %d words", live, recorded, len(lw), len(rw))
 	}
-	at := make([]Address, len(lw))
+	ws := make([]WordBind, len(lw))
 	for i := range lw {
-		a, err := ParseAddress("body." + field + "#" + strconv.Itoa(first+i))
-		if err != nil {
-			t.Fatal(err)
-		}
-		at[i] = a
+		ws[i] = WordBind{Text: "body." + field, Word: first + i, Live: lw[i], Recorded: rw[i]}
 	}
-	lr, rr := WordRuns(at, lw, rw)
+	lr, rr := WordRuns(ws)
 	out := make([]Binding, len(lw))
 	for i := range lw {
-		out[i] = Binding{Name: prefix + strconv.Itoa(i), Value: lw[i], Recorded: rw[i], Place: at[i].String(), WordRun: lr[i], RecordedWordRun: rr[i]}
+		out[i] = Binding{Name: prefix + strconv.Itoa(i), Value: lw[i], Recorded: rw[i], Place: "body." + field + "#" + strconv.Itoa(first+i), WordRun: lr[i], RecordedWordRun: rr[i]}
 	}
 	return out
 }
@@ -41,24 +37,18 @@ func wordsOf(s string) []string {
 }
 
 func TestWordRuns_ConsecutiveWordsOfOneTextAreOneRun(t *testing.T) {
-	addr := func(s string) Address {
-		a, err := ParseAddress(s)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return a
+	ws := []WordBind{
+		{"body.what", 3, "c", "C"}, {"body.what", 1, "a", "A"}, {"body.id", 0, "z", "Z"}, {"body.what", 2, "b", "B"},
+		{"body.code", -1, "whole", "WHOLE"}, {"body.what", 5, "e", "E"}, {"header.X-Id|b64", 1, "y", "Y"}, {"header.X-Id", 0, "x", "X"},
 	}
-	at := []Address{addr("body.what#3"), addr("body.what#1"), addr("body.id#0"), addr("body.what#2"), addr("body.code"), addr("body.what#5"), addr("header.X-Id|b64#1"), addr("header.X-Id#0")}
-	live := []string{"c", "a", "z", "b", "whole", "e", "y", "x"}
-	rec := []string{"C", "A", "Z", "B", "WHOLE", "E", "Y", "X"}
-	lr, rr := WordRuns(at, live, rec)
+	lr, rr := WordRuns(ws)
 	want := []string{"a-b-c", "a-b-c", "z", "a-b-c", "", "e", "y", "x"}
 	for i := range want {
 		if lr[i] != want[i] {
-			t.Fatalf("live run of %s: %q, want %q (all %q)", at[i], lr[i], want[i], lr)
+			t.Fatalf("live run of %+v: %q, want %q (all %q)", ws[i], lr[i], want[i], lr)
 		}
 		if rr[i] != toUpper(want[i]) {
-			t.Fatalf("recorded run of %s: %q, want %q", at[i], rr[i], toUpper(want[i]))
+			t.Fatalf("recorded run of %+v: %q, want %q", ws[i], rr[i], toUpper(want[i]))
 		}
 	}
 }
