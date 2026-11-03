@@ -23,6 +23,21 @@ func PatternWhy(field string, patterns []string, side, shape string) string {
 	return fmt.Sprintf("keploy.yml's noise lets %s vary only within %s; the %s value (%s) is outside it, so it is compared", field, strings.Join(quoted, ", "), side, shape)
 }
 
+// StringShape names a string by its length in bytes, and NumberShape a
+// number by the characters it is written in: a reason's words for a value a
+// noise pattern guards, never its text.
+func StringShape(n int) string { return "a string of " + counted(n, "byte") }
+
+// NumberShape: see StringShape.
+func NumberShape(n int) string { return "a number of " + counted(n, "character") }
+
+func counted(n int, unit string) string {
+	if n == 1 {
+		return "1 " + unit
+	}
+	return strconv.Itoa(n) + " " + unit + "s"
+}
+
 // bodyPatternWhys are the reasons for the differences at paths (as diffMaps
 // names them) that a pattern-guarded entry decided: the live value is outside
 // the pattern unless the live side held only values it matched there (liveIn,
@@ -112,9 +127,9 @@ func pathShape(m pathMaps, path string) string {
 	}
 	switch typ {
 	case "string":
-		return "a string of " + strconv.Itoa(len(m.values[path])) + " bytes"
+		return StringShape(len(m.values[path]))
 	case "number":
-		return "a number of " + strconv.Itoa(len(m.values[path])) + " characters"
+		return NumberShape(len(m.values[path]))
 	case "boolean":
 		return "a boolean"
 	}
@@ -159,7 +174,7 @@ func HeaderPatternWhys(res []models.HeaderResult, noise map[string][]string) []s
 func headerShape(values, pats []string) string {
 	for _, v := range values {
 		if ok, _ := MatchesAnyRegex(v, pats); !ok {
-			return "a string of " + strconv.Itoa(len(v)) + " bytes"
+			return StringShape(len(v))
 		}
 	}
 	return "absent"

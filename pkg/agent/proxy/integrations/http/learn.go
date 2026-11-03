@@ -489,7 +489,10 @@ func (k httpKnown) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, 
 		}
 	}
 	if scalarLeaf(ref) && k.values != nil && k.values.IsNoisy(ref.Value) {
-		return true, false
+		// A value the obfuscator redacted is not compared; where
+		// keploy.yml's patterns guard the leaf, the live value alone is
+		// held to them.
+		return !guarded || both && k.n.declared(live), false
 	}
 	return false, false
 }

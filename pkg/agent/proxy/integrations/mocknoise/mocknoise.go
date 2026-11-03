@@ -278,6 +278,7 @@ func (e *Engine) StrictRejectRecordedJSONBody(m *models.Mock, recorded *JSONBody
 	learned := userDecided(userNoise, StripBodyPrefix(stored))
 	known := knownWithLearned(userNoise, learned)
 	typeStrict := learnedTypeStrict(userNoise, learned)
+	guarded := e.userGuardedDrift(m, recorded, live, userNoise, learned)
 	var d map[string][]string
 	var comparable bool
 	if jd, isJSON := e.adapter.(JSONBodyDiffer); isJSON {
@@ -293,10 +294,44 @@ func (e *Engine) StrictRejectRecordedJSONBody(m *models.Mock, recorded *JSONBody
 		}
 		return false, map[string][]string{"body": nil}
 	}
+	for p, v := range guarded {
+		if d == nil {
+			d = map[string][]string{}
+		}
+		d[p] = v
+	}
 	if len(d) == 0 {
 		return true, nil
 	}
 	return false, d
+}
+
+// userGuardedDrift is the drift of every field keploy.yml's entry with
+// patterns guards that differs under userNoise alone: those patterns decide
+// such a field before any learned noise, and a learned container holding it
+// ("user" beside the user's "id", which userDecided keeps) would excuse it
+// whole. nil when nothing is learned or no entry has patterns.
+func (e *Engine) userGuardedDrift(m *models.Mock, recorded, live *JSONBody, userNoise, learned map[string][]string) map[string][]string {
+	if len(learned) == 0 || !hasPatterns(userNoise) {
+		return nil
+	}
+	var ud map[string][]string
+	if jd, isJSON := e.adapter.(JSONBodyDiffer); isJSON {
+		ud, _ = jd.DiffJSONBodies(m, recorded, live, userNoise, nil, false, e.adapter.RecordedValueIsNoise(m))
+	} else {
+		ud, _ = e.adapter.Diff(m, recorded.Raw(), live.Raw(), userNoise, nil, false, e.adapter.RecordedValueIsNoise(m))
+	}
+	user := matcher.NewNoiseLookup(userNoise)
+	var out map[string][]string
+	for p, v := range ud {
+		if pats, ok := user.Patterns(strings.TrimPrefix(p, "body.")); ok && len(pats) > 0 {
+			if out == nil {
+				out = map[string][]string{}
+			}
+			out[p] = v
+		}
+	}
+	return out
 }
 
 // knownWithLearned is KnownNoise's set (userNoise ∪ learned, userNoise winning

@@ -121,7 +121,7 @@ func TestStrictHeaderNoisePatternHoldsBothSides(t *testing.T) {
 		t.Fatalf("reason %q says the value", why)
 	}
 	other := recorded("m", "/x", map[string]string{"Content-Type": "application/json", "X-Id": "z"}, `{}`)
-	if got, diag := strictMatch(t, sent("/x", with("a-1"), `{}`), noise, nil, nil, other); got != nil || !strings.Contains(whyOf(diag, "header.x-id"), "recorded value (a string of 1 bytes)") {
+	if got, diag := strictMatch(t, sent("/x", with("a-1"), `{}`), noise, nil, nil, other); got != nil || !strings.Contains(whyOf(diag, "header.x-id"), "recorded value (a string of 1 byte)") {
 		t.Fatalf("a recorded header value outside the pattern: served %v, reason %q", got != nil, whyOf(diag, "header.x-id"))
 	}
 	if got, diag := strictMatch(t, sent("/x", ct, `{}`), noise, nil, nil, rec); got != nil || !strings.Contains(whyOf(diag, "header.x-id"), "live value (absent)") {
@@ -152,7 +152,7 @@ func TestStrictBodyNoisePatternSaysWhy(t *testing.T) {
 	noise := map[string][]string{"id": {`^1$`}}
 	for _, c := range []struct{ name, rec, live, want string }{
 		{"the live value", `{"id":1}`, `{"id":"tok-123"}`, "live value (a string of 7 bytes)"},
-		{"the recorded value", `{"id":5}`, `{"id":1}`, "recorded value (a number of 1 characters)"},
+		{"the recorded value", `{"id":5}`, `{"id":1}`, "recorded value (a number of 1 character)"},
 		{"the live side lacks it", `{"id":1}`, `{}`, "live value (absent)"},
 		{"the recorded side lacks it", `{}`, `{"id":1}`, "recorded value (absent)"},
 		{"a value of another kind", `{"id":1}`, `{"id":{"a":1}}`, "live value (an object)"},

@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
 )
 
@@ -73,6 +74,33 @@ type strictNoise struct {
 	// url is keploy.yml's url noise: what a pattern matches in the path or
 	// a query value is not compared.
 	url []*regexp.Regexp
+}
+
+// guardsPlace reports whether keploy.yml's entry with patterns names the
+// place p of a call: a body leaf, by its name as the strict comparison reads
+// it (keys dot-joined, an array "[]"), or a header, by its lowercased name.
+// Those patterns decide its value, and noise learned there does not.
+func (n strictNoise) guardsPlace(p variables.Place) bool {
+	switch p.Part {
+	case variables.PartBody:
+		var risk strings.Builder
+		for _, s := range p.Path {
+			switch {
+			case s.IsIndex:
+				risk.WriteString("[]")
+			case risk.Len() > 0:
+				risk.WriteString("." + s.Key)
+			default:
+				risk.WriteString(s.Key)
+			}
+		}
+		pats, ok := n.body.Patterns(risk.String())
+		return ok && len(pats) > 0
+	case variables.PartHeader:
+		_, ok := n.headerPats[strings.ToLower(p.Name)]
+		return ok
+	}
+	return false
 }
 
 func (h *HTTP) newStrictNoise(headerNoise, bodyNoise map[string][]string, urlNoise []string) strictNoise {
@@ -145,9 +173,9 @@ func valueShape(v interface{}, ok bool) string {
 	case nil:
 		return "null"
 	case string:
-		return "a string of " + strconv.Itoa(len(t)) + " bytes"
+		return matcher.StringShape(len(t))
 	case json.Number:
-		return "a number of " + strconv.Itoa(len(t)) + " characters"
+		return matcher.NumberShape(len(t))
 	case bool:
 		return "a boolean"
 	case map[string]interface{}:
@@ -577,8 +605,17 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 			}
 		}
 		// keploy.yml's patterns decide a header they guard: no noise
-		// learned on it excuses a value they refuse.
-		if !guarded && k.learnedAt(path, "") || k.redacted(rv) {
+		// learned on it excuses a value they refuse, and where the
+		// obfuscator redacted the recorded value, the live one alone is
+		// held to them.
+		if !guarded && (k.learnedAt(path, "") || k.redacted(rv)) {
+			continue
+		}
+		if k.redacted(rv) {
+			if liveOK {
+				continue
+			}
+			out = append(out, patternField(field(valueDiff(path, rv, lv))))
 			continue
 		}
 		switch name {
@@ -721,10 +758,16 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 		// keploy.yml's patterns decide a key they guard (fieldCovers): no
 		// noise learned on it excuses a value they refuse.
 		guarded := k.guards(key)
-		if sameMembers(rv, lv) || !guarded && k.learnedAt(path, "") || redacted[key] {
+		if sameMembers(rv, lv) || !guarded && (k.learnedAt(path, "") || redacted[key]) {
 			continue
 		}
-		covered, why := k.fieldCovers(key, shape, rv, lv)
+		held := rv
+		if redacted[key] {
+			// The obfuscator redacted the recorded value: the live one
+			// alone is held to the patterns.
+			held = nil
+		}
+		covered, why := k.fieldCovers(key, shape, held, lv)
 		if covered {
 			continue
 		}
@@ -809,11 +852,17 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 			return append(out, bodyChanged())
 		case bytes.Equal(rp[i].data, lp[i].data):
 			continue
-		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || !k.guards(rp[i].name) && k.learnedAt(path, "") || k.redacted(string(rp[i].data))):
+		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || !k.guards(rp[i].name) && (k.learnedAt(path, "") || k.redacted(string(rp[i].data)))):
 			continue
 		case rp[i].file == "":
+			// A recorded value the obfuscator redacted is not held to the
+			// patterns; the live one is.
+			held := []string{string(rp[i].data)}
+			if k.redacted(held[0]) {
+				held = nil
+			}
 			var covered bool
-			if covered, why = k.fieldCovers(rp[i].name, shape, []string{string(rp[i].data)}, []string{string(lp[i].data)}); covered {
+			if covered, why = k.fieldCovers(rp[i].name, shape, held, []string{string(lp[i].data)}); covered {
 				continue
 			}
 		}
@@ -878,10 +927,11 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 	// why is, where keploy.yml's noise guards this field with patterns
 	// one side's value is outside of, the reason it is compared.
 	var why string
-	guarded := false
+	guarded, liveOK := false, false
 	if risk != "" {
 		name = "body." + risk
-		recOK, liveOK := k.n.body.Covers(risk, scalarText(r), isScalar(r)), k.n.body.Covers(risk, scalarText(l), isScalar(l))
+		var recOK bool
+		recOK, liveOK = k.n.body.Covers(risk, scalarText(r), isScalar(r)), k.n.body.Covers(risk, scalarText(l), isScalar(l))
 		if recOK && liveOK {
 			return
 		}
@@ -895,7 +945,9 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 			why = matcher.PatternWhy(shape, pats, side, valueShape(v, true))
 		}
 	}
-	if isScalar(r) && k.redacted(scalarText(r)) {
+	// A recorded value the obfuscator redacted is not compared; under
+	// keploy.yml's patterns the live value alone is held to them.
+	if isScalar(r) && k.redacted(scalarText(r)) && (!guarded || liveOK) {
 		return
 	}
 	// keploy.yml's patterns decide a field they guard: no noise learned on
@@ -928,7 +980,7 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 			switch {
 			case inRec && inLive:
 				k.jsonDiffs(rc, lc, exact+"."+key, childRisk, childShape, learned, out)
-			case k.n.body.Covers(childRisk, scalarText(rc), false) || (inRec && isScalar(rc) && k.redacted(scalarText(rc))):
+			case k.n.body.Covers(childRisk, scalarText(rc), false) || (inRec && isScalar(rc) && k.redacted(scalarText(rc)) && !k.guards(childRisk)):
 			case !inLive:
 				*out = append(*out, k.oneSided(childRisk, childShape, models.DiffKindMissingInLive, "live", rc))
 			default:

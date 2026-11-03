@@ -40,19 +40,19 @@ func TestKeployYmlRequestBodyPatternHoldsBothValues(t *testing.T) {
 		why           string // the strict comparison's reason, where it refuses
 		field         string // the field the strict comparison names
 	}{
-		{"JSON, the live value outside", `^1$`, ct, `{"id":1}`, `{"id":2}`, false, "live value (a number of 1 characters)", "body.id"},
-		{"JSON, the recorded value outside", `^2$`, ct, `{"id":1}`, `{"id":2}`, false, "recorded value (a number of 1 characters)", "body.id"},
+		{"JSON, the live value outside", `^1$`, ct, `{"id":1}`, `{"id":2}`, false, "live value (a number of 1 character)", "body.id"},
+		{"JSON, the recorded value outside", `^2$`, ct, `{"id":1}`, `{"id":2}`, false, "recorded value (a number of 1 character)", "body.id"},
 		{"JSON, both values inside", `^[12]$`, ct, `{"id":1}`, `{"id":2}`, true, "", ""},
-		{"a form, the live value outside", `^1$`, form, `id=1`, `id=2`, false, "live value (a string of 1 bytes)", "body.id"},
-		{"a form, the recorded value outside", `^2$`, form, `id=1`, `id=2`, false, "recorded value (a string of 1 bytes)", "body.id"},
-		{"a form, a repeated key's later value outside", `^1$`, form, `id=1&id=1`, `id=1&id=2`, false, "live value (a string of 1 bytes)", "body.id"},
+		{"a form, the live value outside", `^1$`, form, `id=1`, `id=2`, false, "live value (a string of 1 byte)", "body.id"},
+		{"a form, the recorded value outside", `^2$`, form, `id=1`, `id=2`, false, "recorded value (a string of 1 byte)", "body.id"},
+		{"a form, a repeated key's later value outside", `^1$`, form, `id=1&id=1`, `id=1&id=2`, false, "live value (a string of 1 byte)", "body.id"},
 		{"a form, the call lacks the key", `^1$`, form, `id=1&x=a`, `x=a`, false, "live value (absent)", "body.id"},
 		{"a form, the recording lacks the key", `^1$`, form, `x=a`, `id=1&x=a`, false, "recorded value (absent)", "body.id"},
 		{"a form, both values inside", `^[12]$`, form, `id=1`, `id=2`, true, "", ""},
 		{"a form, both encoded values inside", `^a b$|^a\+b$`, form, `id=a+b`, `id=a%2Bb`, true, "", ""},
 		{"a form field no entry names", `^1$`, form, `id=1&x=a`, `id=1&x=b`, false, "", "body.x"},
-		{"a multipart field, the live value outside", `^1$`, mp, part("1"), part("2"), false, "live value (a string of 1 bytes)", "body.id"},
-		{"a multipart field, the recorded value outside", `^2$`, mp, part("1"), part("2"), false, "recorded value (a string of 1 bytes)", "body.id"},
+		{"a multipart field, the live value outside", `^1$`, mp, part("1"), part("2"), false, "live value (a string of 1 byte)", "body.id"},
+		{"a multipart field, the recorded value outside", `^2$`, mp, part("1"), part("2"), false, "recorded value (a string of 1 byte)", "body.id"},
 		{"a multipart field, both values inside", `^[12]$`, mp, part("1"), part("2"), true, "", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {

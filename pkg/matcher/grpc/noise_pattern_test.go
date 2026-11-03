@@ -95,12 +95,12 @@ func TestGrpcNoisePatternHoldsBothValues(t *testing.T) {
 			// differs too; an entry with no patterns excuses that.
 			name: "message length, live outside", recorded: "1: 7", live: "1: 99",
 			tcNoise: map[string][]string{"body.decoded_data": {}, "body.message_length": {`^4$`}},
-			field:   "body.message_length", pattern: `^4$`, side: "live", shape: "a number of 1 characters", secret: "",
+			field:   "body.message_length", pattern: `^4$`, side: "live", shape: "a number of 1 character", secret: "",
 		},
 		{
 			name: "message length, recorded outside", recorded: "1: 7", live: "1: 99",
 			tcNoise: map[string][]string{"body.decoded_data": {}, "body.message_length": {`^5$`}},
-			field:   "body.message_length", pattern: `^5$`, side: "recorded", shape: "a number of 1 characters", secret: "",
+			field:   "body.message_length", pattern: `^5$`, side: "recorded", shape: "a number of 1 character", secret: "",
 		},
 		{
 			name: "message length, both inside", recorded: "1: 7", live: "1: 99",
@@ -111,13 +111,13 @@ func TestGrpcNoisePatternHoldsBothValues(t *testing.T) {
 			name: "compression flag, live outside", recorded: "1: 7", live: "1: 7",
 			mutate:  func(_, act *models.GrpcResp) { act.Body.CompressionFlag = 1 },
 			tcNoise: map[string][]string{"body.compression_flag": {`^0$`}},
-			field:   "body.compression_flag", pattern: `^0$`, side: "live", shape: "a number of 1 characters", secret: "",
+			field:   "body.compression_flag", pattern: `^0$`, side: "live", shape: "a number of 1 character", secret: "",
 		},
 		{
 			name: "compression flag, recorded outside", recorded: "1: 7", live: "1: 7",
 			mutate:  func(_, act *models.GrpcResp) { act.Body.CompressionFlag = 1 },
 			tcNoise: map[string][]string{"body.compression_flag": {`^1$`}},
-			field:   "body.compression_flag", pattern: `^1$`, side: "recorded", shape: "a number of 1 characters", secret: "",
+			field:   "body.compression_flag", pattern: `^1$`, side: "recorded", shape: "a number of 1 character", secret: "",
 		},
 		{
 			name: "compression flag, both inside", recorded: "1: 7", live: "1: 7",
@@ -175,7 +175,7 @@ func TestGrpcNoisePatternHoldsBothValues(t *testing.T) {
 				act.SetMessages([]models.GrpcLengthPrefixedMessage{act.Body, act.Body})
 			},
 			tcNoise: map[string][]string{"body.message_count": {`^1$`}},
-			field:   "body.message_count", pattern: `^1$`, side: "live", shape: "a number of 1 characters", secret: "",
+			field:   "body.message_count", pattern: `^1$`, side: "live", shape: "a number of 1 character", secret: "",
 		},
 		{
 			name: "message count, both inside", recorded: "1: 7", live: "1: 7",

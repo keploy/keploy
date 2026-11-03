@@ -71,7 +71,7 @@ func TestFailureAssessmentNamesTheNoisePatternAndTheSide(t *testing.T) {
 			noise: map[string][]string{"ok": {"^true$"}, "v": {"^null$"}},
 			want: []string{
 				PatternWhy("ok", []string{"^true$"}, "live", "a boolean"),
-				PatternWhy("v", []string{"^null$"}, "live", "a string of 1 bytes"),
+				PatternWhy("v", []string{"^null$"}, "live", "a string of 1 byte"),
 			},
 		},
 		{
@@ -269,6 +269,22 @@ func TestHeaderPatternWhysNameEveryPatternOfCaseVariantKeys(t *testing.T) {
 	for _, want := range []string{`"^r-"`, `"^s-"`, "live value (a string of 2 bytes)"} {
 		if !strings.Contains(got[0], want) {
 			t.Fatalf("reason %q does not say %s", got[0], want)
+		}
+	}
+}
+
+// A reason counts a value's length in whole units: one byte or character,
+// any other number of them.
+func TestShapesCountTheirUnits(t *testing.T) {
+	for _, c := range []struct{ got, want string }{
+		{StringShape(0), "a string of 0 bytes"},
+		{StringShape(1), "a string of 1 byte"},
+		{StringShape(12), "a string of 12 bytes"},
+		{NumberShape(1), "a number of 1 character"},
+		{NumberShape(3), "a number of 3 characters"},
+	} {
+		if c.got != c.want {
+			t.Errorf("shape %q; want %q", c.got, c.want)
 		}
 	}
 }

@@ -626,9 +626,9 @@ func grpcPatternWhy(field string, pats []string, d grpcDiff) string {
 // noise pattern guards may be a secret.
 func grpcShape(v string, number bool) string {
 	if number {
-		return "a number of " + strconv.Itoa(len(v)) + " characters"
+		return matcher.NumberShape(len(v))
 	}
-	return "a string of " + strconv.Itoa(len(v)) + " bytes"
+	return matcher.StringShape(len(v))
 }
 
 // msgComparison reports how one length-prefixed message compared.
