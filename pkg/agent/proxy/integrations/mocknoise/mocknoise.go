@@ -141,7 +141,7 @@ func (e *Engine) KnownNoise(m *models.Mock, userNoise map[string][]string) map[s
 	if e == nil {
 		return userNoise
 	}
-	return MergeKnown(userNoise, StripBodyPrefix(e.adapter.StoredNoise(m)))
+	return MergeKnown(userNoise, userDecided(userNoise, StripBodyPrefix(e.adapter.StoredNoise(m))))
 }
 
 // Detect returns the new "body."-prefixed schema-noise to record on the mock for
@@ -275,7 +275,7 @@ func (e *Engine) StrictRejectRecordedJSONBody(m *models.Mock, recorded *JSONBody
 	// typeStrict, still fully exclude learned noise; typeStrict additionally marks
 	// them so a JSON parser type-enforces rather than fully ignores (collectJSON
 	// consults typeStrict first). User-configured noise stays full-ignore/regex.
-	learned := StripBodyPrefix(stored)
+	learned := userDecided(userNoise, StripBodyPrefix(stored))
 	known := knownWithLearned(userNoise, learned)
 	typeStrict := learnedTypeStrict(userNoise, learned)
 	var d map[string][]string
@@ -307,6 +307,43 @@ func knownWithLearned(userNoise, learned map[string][]string) map[string][]strin
 		return userNoise
 	}
 	return MergeKnown(userNoise, learned)
+}
+
+// userDecided is learned without every path keploy.yml's entry with patterns
+// names (matcher.NoiseLookup: by whole fields, without case): the user's
+// patterns decide such a field, both its values. A learned entry there, a
+// case twin ("userId" beside the user's "userid") or a more specific path
+// ("user.id" under the user's "id"), would win the matcher's most specific
+// first, or case, tie-break and excuse a value the patterns refuse. learned
+// itself when it drops nothing.
+func userDecided(userNoise, learned map[string][]string) map[string][]string {
+	if len(learned) == 0 || !hasPatterns(userNoise) {
+		return learned
+	}
+	user := matcher.NewNoiseLookup(userNoise)
+	var out map[string][]string
+	for k := range learned {
+		if pats, ok := user.Patterns(k); ok && len(pats) > 0 {
+			if out == nil {
+				out = maps.Clone(learned)
+			}
+			delete(out, k)
+		}
+	}
+	if out == nil {
+		return learned
+	}
+	return out
+}
+
+// hasPatterns reports whether an entry of noise has patterns.
+func hasPatterns(noise map[string][]string) bool {
+	for _, pats := range noise {
+		if len(pats) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // learnedTypeStrict is the learned paths a JSON parser type-enforces: every

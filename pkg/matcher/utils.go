@@ -920,10 +920,12 @@ func noisyForRegexps(regs []*regexp.Regexp, value interface{}, containersCovered
 // globalCoversPair reports whether a global entry's patterns regs excuse a
 // field present on both sides with the recorded value rec and the live value
 // live: an entry with no patterns whatever they are; one with patterns two
-// scalars that each match one, or two containers, which hold no single value
-// for a pattern to match (the entry named the field). A scalar on one side
-// and a container on the other is a retype, which no pattern excuses: the
-// live value is outside the pattern, or the recorded one is.
+// scalars that each match one, or two containers of one kind (two objects,
+// two arrays), which hold no single value for a pattern to match (the entry
+// named the field). A scalar on one side and a container on the other, or an
+// object on one and an array on the other, is a retype, a schema change no
+// pattern excuses: the live value is outside the pattern, or the recorded
+// one is.
 func globalCoversPair(regs []*regexp.Regexp, rec, live interface{}) bool {
 	if len(regs) == 0 {
 		return true
@@ -933,7 +935,12 @@ func globalCoversPair(regs []*regexp.Regexp, rec, live interface{}) bool {
 	if recScalar != liveScalar {
 		return false
 	}
-	return !recScalar || anyRegexpMatchStr(rs, regs) && anyRegexpMatchStr(ls, regs)
+	if !recScalar {
+		_, recObject := rec.(map[string]interface{})
+		_, liveObject := live.(map[string]interface{})
+		return recObject == liveObject
+	}
+	return anyRegexpMatchStr(rs, regs) && anyRegexpMatchStr(ls, regs)
 }
 
 // allJSONScalars reports whether every element is a JSON scalar, i.e. the array

@@ -576,7 +576,9 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 				continue
 			}
 		}
-		if k.learnedAt(path, "") || k.redacted(rv) {
+		// keploy.yml's patterns decide a header they guard: no noise
+		// learned on it excuses a value they refuse.
+		if !guarded && k.learnedAt(path, "") || k.redacted(rv) {
 			continue
 		}
 		switch name {
@@ -716,7 +718,10 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 			out = append(out, k.oneSided(key, shape, models.DiffKindMissingInMock, "recorded", nil))
 			continue
 		}
-		if sameMembers(rv, lv) || k.learnedAt(path, "") || redacted[key] {
+		// keploy.yml's patterns decide a key they guard (fieldCovers): no
+		// noise learned on it excuses a value they refuse.
+		guarded := k.guards(key)
+		if sameMembers(rv, lv) || !guarded && k.learnedAt(path, "") || redacted[key] {
 			continue
 		}
 		covered, why := k.fieldCovers(key, shape, rv, lv)
@@ -751,6 +756,13 @@ func (k strictKnown) fieldCovers(key, shape string, rec, live []string) (covered
 		}
 	}
 	return true, ""
+}
+
+// guards reports whether keploy.yml's request-body entry with patterns names
+// the form or multipart field key: those patterns decide its values.
+func (k strictKnown) guards(key string) bool {
+	pats, ok := k.n.body.Patterns(key)
+	return ok && len(pats) > 0
 }
 
 // redactedFormKeys are the keys of a recorded form one of whose "key=value"
@@ -797,7 +809,7 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 			return append(out, bodyChanged())
 		case bytes.Equal(rp[i].data, lp[i].data):
 			continue
-		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || k.learnedAt(path, "") || k.redacted(string(rp[i].data))):
+		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || !k.guards(rp[i].name) && k.learnedAt(path, "") || k.redacted(string(rp[i].data))):
 			continue
 		case rp[i].file == "":
 			var covered bool
@@ -866,6 +878,7 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 	// why is, where keploy.yml's noise guards this field with patterns
 	// one side's value is outside of, the reason it is compared.
 	var why string
+	guarded := false
 	if risk != "" {
 		name = "body." + risk
 		recOK, liveOK := k.n.body.Covers(risk, scalarText(r), isScalar(r)), k.n.body.Covers(risk, scalarText(l), isScalar(l))
@@ -874,6 +887,7 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 		}
 		// Not both covered: an entry that names the field has patterns.
 		if pats, ok := k.n.body.Patterns(risk); ok {
+			guarded = true
 			side, v := "live", l
 			if liveOK {
 				side, v = "recorded", r
@@ -884,7 +898,9 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 	if isScalar(r) && k.redacted(scalarText(r)) {
 		return
 	}
-	learned = learned || k.learnedAt(exact, name)
+	// keploy.yml's patterns decide a field they guard: no noise learned on
+	// it, or on a container holding it, excuses a value they refuse.
+	learned = !guarded && (learned || k.learnedAt(exact, name))
 	if jsonKind(r) != jsonKind(l) {
 		f := shaped(name, shape, models.DiffKindTypeChanged, jsonKind(r), jsonKind(l))
 		f.why = why

@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -306,6 +307,65 @@ func (n learnNoise) declared(l learn.Leaf) bool {
 	return false
 }
 
+// userPatterns are the patterns of keploy.yml's entry with patterns that
+// names the leaf noise (its name in the noise dialect), and whether one does:
+// a body path's entry as the strict comparison reads it, a header's by its
+// lowercased name. Such a leaf may vary only within them: the learn step
+// never learns it (patternWhy), and no learned noise excuses it.
+func (n learnNoise) userPatterns(noise string) ([]string, bool) {
+	switch {
+	case strings.HasPrefix(noise, "body."):
+		pats, ok := n.body.Patterns(strings.TrimPrefix(noise, "body."))
+		return pats, ok && len(pats) > 0
+	case strings.HasPrefix(noise, "header."):
+		pats, ok := n.headerPats[strings.TrimPrefix(noise, "header.")]
+		return patternStrings(pats), ok
+	}
+	return nil, false
+}
+
+// patternWhy is why the learn step learns nothing of a call paired with a
+// recording it drifted from (drift, as learn.Pair names the leaves) at a leaf
+// keploy.yml's entry with patterns names: a value there outside them is a
+// change the user declared, never noise to learn. It names the field, the
+// patterns and the side outside them (the live one first), giving that
+// value's kind and length only. "" where no drifted leaf is such a leaf.
+func (n learnNoise) patternWhy(drift []string, live, rec learn.Shape) string {
+	for _, p := range drift {
+		r, l := rec.Leaves[p], live.Leaves[p]
+		pats, ok := n.userPatterns(r.Noise)
+		if !ok {
+			continue
+		}
+		side, v := "live", l
+		if n.declared(l) {
+			side, v = "recorded", r
+		}
+		return matcher.PatternWhy(models.FieldShape(r.Path), pats, side, leafShape(v)) + ", and keploy learns nothing from this call"
+	}
+	return ""
+}
+
+// leafShape names a leaf's value by its kind and length, as valueShape
+// names a JSON value: never its text.
+func leafShape(l learn.Leaf) string {
+	switch l.Type {
+	case learn.String:
+		return valueShape(l.Value, true)
+	case learn.Number:
+		return valueShape(json.Number(l.Value), true)
+	case learn.Bool:
+		return valueShape(true, true)
+	case learn.Null:
+		return valueShape(nil, true)
+	case learn.EmptyObj:
+		return valueShape(map[string]interface{}{}, true)
+	case learn.EmptyArray:
+		return valueShape([]interface{}{}, true)
+	}
+	return valueShape(l.Value, true)
+}
+
 // heldLearned is why the learn step refuses what it learned of another
 // parser's call, by the leaves the caller holds (learnNoise.hold): a leaf
 // held LearnEchoOnly learned as anything but a value the answer carries
@@ -394,7 +454,9 @@ func (k httpKnown) Excused(l learn.Leaf) (bool, bool) {
 }
 
 // ExcusedPair implements learn.PairKnown. Learned noise keeps its type;
-// keploy.yml's noise and obfuscated values excuse type and presence.
+// keploy.yml's noise and obfuscated values excuse type and presence. A leaf
+// keploy.yml's entry with patterns names is decided by those patterns, never
+// by learned noise.
 // What the learn step learned names a leaf by its exact path, an array
 // position included; noise learned before it (by the request-body learner
 // it replaces) names it in the request matcher's dialect. A place learned as
@@ -407,8 +469,11 @@ func (k httpKnown) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, 
 	if !inRec {
 		ref = live
 	}
+	// keploy.yml's entry with patterns is the user's word on the leaf: no
+	// noise learned there excuses a value its patterns refuse.
+	_, guarded := k.n.userPatterns(ref.Noise)
 	_, clock := k.clocks[ref.Path]
-	if !clock && (learnedCovers(k.learned, ref.Path) || ref.Noise != ref.Path && hasKey(k.learned, ref.Noise)) {
+	if !guarded && !clock && (learnedCovers(k.learned, ref.Path) || ref.Noise != ref.Path && hasKey(k.learned, ref.Noise)) {
 		return true, true
 	}
 	both := inRec && inLive
@@ -1837,6 +1902,10 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			}
 			if stuck(m, read.at) {
 				return refused(m, res, sc)
+			}
+			if why := n.patternWhy(res.Diff.Drift, liveShape, c.Shape); why != "" {
+				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
+				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			if m.Spec.ReqTimestampMock.IsZero() {
 				// A mock's earlier places are the recordings made before

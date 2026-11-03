@@ -47,6 +47,7 @@ func TestKeployYmlRequestBodyPatternHoldsBothValues(t *testing.T) {
 		{"a form, the recorded value outside", `^2$`, form, `id=1`, `id=2`, false, "recorded value (a string of 1 bytes)", "body.id"},
 		{"a form, a repeated key's later value outside", `^1$`, form, `id=1&id=1`, `id=1&id=2`, false, "live value (a string of 1 bytes)", "body.id"},
 		{"a form, the call lacks the key", `^1$`, form, `id=1&x=a`, `x=a`, false, "live value (absent)", "body.id"},
+		{"a form, the recording lacks the key", `^1$`, form, `x=a`, `id=1&x=a`, false, "recorded value (absent)", "body.id"},
 		{"a form, both values inside", `^[12]$`, form, `id=1`, `id=2`, true, "", ""},
 		{"a form, both encoded values inside", `^a b$|^a\+b$`, form, `id=a+b`, `id=a%2Bb`, true, "", ""},
 		{"a form field no entry names", `^1$`, form, `id=1&x=a`, `id=1&x=b`, false, "", "body.x"},

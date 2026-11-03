@@ -382,11 +382,36 @@ func TestRegexNoise_GlobalKeyEnforcesPattern(t *testing.T) {
 			want:     false,
 		},
 		{
-			// Two containers hold no single value for a pattern to match:
-			// the entry named the field, which it excuses whole.
-			name:     "a container on both sides is excused by a pattern naming it",
+			// An object replaced by an array, or the reverse, is a retype,
+			// a schema change no pattern excuses. Before, two containers of
+			// any kind were excused by a pattern naming the field.
+			name:     "a recorded object, a live array",
 			expected: `{"id":{"a":1}}`,
 			actual:   `{"id":[2]}`,
+			noise:    map[string][]string{"id": {`^\d+$`}},
+			want:     false,
+		},
+		{
+			name:     "a recorded array, a live object",
+			expected: `{"id":[1,2]}`,
+			actual:   `{"id":{"a":1}}`,
+			noise:    map[string][]string{"id": {`^\d+$`}},
+			want:     false,
+		},
+		{
+			// Two containers of one kind hold no single value for a pattern
+			// to match: the entry named the field, which it excuses whole,
+			// keys and elements included (today's rule).
+			name:     "an object on both sides, its keys changed, is excused by a pattern naming it",
+			expected: `{"id":{"a":1}}`,
+			actual:   `{"id":{"b":"x","c":2}}`,
+			noise:    map[string][]string{"id": {`^\d+$`}},
+			want:     true,
+		},
+		{
+			name:     "an array on both sides is excused by a pattern naming it",
+			expected: `{"id":[1]}`,
+			actual:   `{"id":[2,3]}`,
 			noise:    map[string][]string{"id": {`^\d+$`}},
 			want:     true,
 		},

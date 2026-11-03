@@ -7,6 +7,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // patternReasons are the reasons a gRPC comparison kept with its result.
@@ -311,4 +312,26 @@ func TestGrpcAFieldAPatternKeptIsGraded(t *testing.T) {
 
 func grpcMsg(decoded string) models.GrpcLengthPrefixedMessage {
 	return models.GrpcLengthPrefixedMessage{MessageLength: uint32(len(decoded)), DecodedData: decoded}
+}
+
+// TestGrpcPatternReasonIsWarned: a failed gRPC test that emits its failure
+// logs warns each field a keploy.yml noise pattern did not excuse, with the
+// same reason its result carries, and never the value.
+func TestGrpcPatternReasonIsWarned(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	tc := grpcTestCase(`{"stock":99}`, map[string][]string{"header.content-type": {`^application/grpc$`}})
+	act := grpcActual(`{"stock":99}`)
+	act.Headers.OrdinaryHeaders["content-type"] = "application/json"
+	pass, res := Match(tc, act, map[string]map[string][]string{}, false, zap.New(core), true)
+	if pass {
+		t.Fatal("Match passed a header outside its pattern")
+	}
+	want := "keploy.yml's noise lets header.content-type vary only within \"^application/grpc$\"; the live value (a string of 16 bytes) is outside it, so it is compared"
+	if !slices.Contains(patternReasons(res), want) {
+		t.Fatalf("the result's reasons %q lack %q", patternReasons(res), want)
+	}
+	warned := logs.FilterMessage("a keploy.yml noise pattern does not excuse a field").All()
+	if len(warned) != 1 || warned[0].ContextMap()["reason"] != want || warned[0].ContextMap()["testCase"] != tc.Name {
+		t.Fatalf("warned %+v; want one warning with reason %q", warned, want)
+	}
 }
