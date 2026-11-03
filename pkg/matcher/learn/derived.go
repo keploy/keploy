@@ -1236,27 +1236,43 @@ const readInFlight = 8 << 20
 // keeps all it allocated until the next one: readBase whatever its size,
 // and for each byte of its recording what its reader reads of it. Measured
 // (TestAReadAllocatesNoMoreThanItsCost, its store keeping no payload, so
-// each read loads it), the most is a list of dates', each a candidate read
-// in several layouts:
+// each read loads it) on twelve shapes: nine from words to a list of dates,
+// and the list as recordings nest it: written as a JSON string (SQS and
+// SNS bodies), base64 of a JSON list (Kafka and Pulsar payloads), and
+// comma-separated values. The most is the JSON string's, each date a
+// candidate read in several layouts in each of its forms:
 //   - readBase, what a read allocates whatever its size: one of a payload
-//     of 16 to 27 bytes allocates 27-58 KB;
+//     of 15 to 30 bytes allocates 37-87 KB after a collection emptied the
+//     pools it takes state from, the most where it holds a "=" (the soft
+//     line break's regexp, qpForm);
 //   - readCost, a call's warm (warmOne: the parts every call's rules
-//     read): past readBase, 259 bytes for each byte of dates at 31 KiB,
-//     228 at 1 MiB; 10 of words (the HTTP bound row's answers), 42 of JSON
-//     items with an instant each;
+//     read): past readBase, 344 bytes for each byte of the JSON string at
+//     16 KiB and 354 at 31 KiB, 308 at 1 MiB; 326 of the comma-separated
+//     dates, 266 of the plain list, 114 of its base64, 10 of words (the
+//     HTTP bound row's answers), 41 of JSON items with an instant each;
 //   - stageCost, the staging's (warmSet: a call's parts and those the
 //     staging reads beyond them, stagedParts; or those alone, after a call
-//     read the rest, stageRest, which loads the payload again): 650 for
-//     each byte of dates, 391 of the rest of them.
+//     read the rest, stageRest, which loads the payload again): 975 for
+//     each byte of the JSON string at 1 KiB and 1,066 at 31 KiB, 712 of the
+//     rest of it; 808 of the comma-separated dates, 666 of the plain list,
+//     457 of its base64.
 //
-// So a call's read of 4 KiB reserves 1.2 MiB and six run at once, and one
-// of 29 KiB or more reserves all of readInFlight, a read alone; the
-// staging's of 4 KiB reserves 3.1 MiB, two at once, and one of 11 KiB or
-// more reserves all of it.
+// Each is an eighth or more past the most measured (readBase 13% past 87
+// KB, readCost 18% past 354, stageCost 20% past 1,066). Deeper nesting can
+// cost more: an escaped JSON string holding comma-separated dates
+// allocates up to 1.18 times a call's cost and 1.01 times the staging's
+// under the sizes from which each runs alone, so readers running together
+// can hold about 1.2 times readInFlight, inside the 16 MiB the set's bound
+// leaves past its budget.
+//
+// So a call's read of 4 KiB reserves 1.7 MiB and four run at once, and one
+// of 19,929 bytes (19.5 KiB) or more reserves all of readInFlight, a read
+// alone; the staging's of 4 KiB reserves 5.1 MiB, one at a time, and one
+// of 6,477 bytes (6.3 KiB) or more reserves all of it.
 const (
-	readBase  = 64 << 10
-	readCost  = 288
-	stageCost = 768
+	readBase  = 96 << 10
+	readCost  = 416
+	stageCost = 1280
 )
 
 // readWeight is what x's read reserves of the set's readInFlight: readBase

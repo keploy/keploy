@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -531,9 +532,9 @@ func TestAReadReservesWhatItsRecordingsBytesCost(t *testing.T) {
 
 // What a read reserves of the set's readInFlight, at literal sizes: 8 MiB
 // in flight at once; a call's read of a recording of 4 KiB the agent's
-// store counted reserves 1 216 KiB (64 KiB and 288 bytes for each of its
-// bytes), so six run at once, the staging's 3 136 KiB (64 KiB and 768 a
-// byte), two at once; of 16 KiB, a call's 4 672 KiB, one at a time, the
+// store counted reserves 1 760 KiB (96 KiB and 416 bytes for each of its
+// bytes), so four run at once, the staging's 5 216 KiB (96 KiB and 1 280 a
+// byte), one at a time; of 16 KiB, a call's 6 752 KiB, one at a time, the
 // staging's all of it; of 1 MiB or 40 KiB, all of it on either path, a
 // read alone, as the bound row's are read. Literal, so that a cost or a
 // cap changed in the code fails here and not only in the rows that follow
@@ -544,7 +545,7 @@ func TestAReadReservesItsRecordingsLiteralCost(t *testing.T) {
 	if readInFlight != 8<<20 {
 		t.Fatalf("the set's readers have %d bytes in flight at once: want 8 MiB", readInFlight)
 	}
-	const callOf4KiB, stagedOf4KiB = 1216 << 10, 3136 << 10
+	const callOf4KiB, stagedOf4KiB = 1760 << 10, 5216 << 10
 	tr := NewTracker()
 	tr.NewSet()
 	tr.Begin()
@@ -555,9 +556,9 @@ func TestAReadReservesItsRecordingsLiteralCost(t *testing.T) {
 	}{
 		{1 << 20, 8 << 20, 8 << 20},
 		{40 << 10, 8 << 20, 8 << 20},
-		{16 << 10, 4672 << 10, 8 << 20},
+		{16 << 10, 6752 << 10, 8 << 20},
 		{4 << 10, callOf4KiB, stagedOf4KiB},
-		{1000, 353536, 833536},
+		{1000, 514304, 1378304},
 	} {
 		m := newHeldRow(1, 4).mocks[0]
 		m.SetStoredSize(c.stored)
@@ -622,6 +623,130 @@ func TestAReadReservesItsRecordingsLiteralCost(t *testing.T) {
 	})
 }
 
+// readAt is when readShapes' instants start.
+var readAt = time.Date(2026, 10, 24, 9, 55, 53, 0, time.UTC)
+
+// readList is a list of items from open to close, item(i) for each, joined
+// by sep, of size bytes or a little more.
+func readList(size int, open, close, sep string, item func(i int) string) string {
+	var b strings.Builder
+	b.WriteString(open)
+	for i := 0; b.Len() < size; i++ {
+		if i > 0 {
+			b.WriteString(sep)
+		}
+		b.WriteString(item(i))
+	}
+	b.WriteString(close)
+	return b.String()
+}
+
+// readDay is readShapes' i-th date.
+func readDay(i int) string { return readAt.Add(time.Duration(i) * 24 * time.Hour).Format("2006-01-02") }
+
+// readShape is a payload a read is measured on (readAllocation): body(n),
+// one of n bytes or a little more.
+type readShape struct {
+	name string
+	body func(n int) string
+}
+
+// readShapes are payloads from the sparsest in instants (the HTTP bound
+// row's words) to the densest (a list of dates, each a candidate read in
+// several layouts), and the forms recordings nest them in: a JSON text
+// written as a string (SQS and SNS bodies), base64 of one (Kafka and
+// Pulsar payloads), and comma-separated values.
+func readShapes() []readShape {
+	quoted := func(layout string, step time.Duration) func(i int) string {
+		return func(i int) string { return `"` + readAt.Add(time.Duration(i)*step).Format(layout) + `"` }
+	}
+	return []readShape{
+		{"words", func(n int) string {
+			var b strings.Builder
+			b.WriteString(`{"blob":"`)
+			for i := 0; b.Len() < n; i++ {
+				fmt.Fprintf(&b, "w7x%d ", i)
+			}
+			b.WriteString(`"}`)
+			return b.String()
+		}},
+		{"items with an instant each", func(n int) string {
+			return readList(n, `{"items":[`, `]}`, ",", func(i int) string {
+				return fmt.Sprintf(`{"id":"it-%d","n":%d,"made":"%s"}`, i, i, readAt.Add(time.Duration(i)*time.Second).Format(time.RFC3339))
+			})
+		}},
+		{"uuids", func(n int) string {
+			return readList(n, "[", "]", ",", func(i int) string { return fmt.Sprintf(`"%08x-1234-4abc-8def-%012x"`, i, i*7) })
+		}},
+		{"RFC 3339 instants", func(n int) string { return readList(n, "[", "]", ",", quoted(time.RFC3339, time.Second)) }},
+		{"HTTP-dates", func(n int) string { return readList(n, "[", "]", ",", quoted(time.RFC1123, time.Second)) }},
+		{"epoch seconds", func(n int) string {
+			return readList(n, "[", "]", ",", func(i int) string { return fmt.Sprint(1792656120 + i) })
+		}},
+		{"epoch milliseconds", func(n int) string {
+			return readList(n, "[", "]", ",", func(i int) string { return fmt.Sprint(int64(1792656120000) + int64(i)) })
+		}},
+		{"times of day", func(n int) string { return readList(n, "[", "]", ",", quoted("15:04:05", time.Second)) }},
+		{"dates", func(n int) string { return readList(n, "[", "]", ",", quoted("2006-01-02", 24*time.Hour)) }},
+		{"escaped JSON of dates", func(n int) string {
+			return `{"payload":"` + readList(n-14, "[", "]", ",", func(i int) string { return `\"` + readDay(i) + `\"` }) + `"}`
+		}},
+		{"base64 of a JSON list of dates", func(n int) string {
+			return `{"blob":"` + base64.StdEncoding.EncodeToString([]byte(readList(n*3/4-12, "[", "]", ",", quoted("2006-01-02", 24*time.Hour)))) + `"}`
+		}},
+		{"CSV of dates", func(n int) string { return readList(n, `{"csv":"`, `"}`, ",", readDay) }},
+	}
+}
+
+// readAllocation is one read of body's recording on path (a call's warm:
+// "call"; the staging's whole read: "staged"; the staging's rest of one a
+// call read first: "rest") and what it allocated. The row sets one reader
+// on each path (warmReadersOf, oneStageReader) and bodyBudget 0, so each
+// read loads its own payload, as past the set's budget. Two collections
+// before it empty the pools a read takes state from (sync.Pool keeps what
+// it held through one), so each read allocates that state again, as the
+// first read after a collection does: the most it allocates, the same in
+// every run.
+func readAllocation(t *testing.T, path, body string) int64 {
+	t.Helper()
+	m := getAnswer("big-0", "http://api/blobs/0", body, eRecAt)
+	m.SetStoredSize(int64(len(body)))
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	x := dc.LazyRawOf(m, true, nil)
+	loads := 1
+	if path == "rest" {
+		dc.warm([]Raw{x})
+		loads = 2
+	}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	if path == "call" {
+		dc.warm([]Raw{x})
+	} else if err := dc.warmSet(srcOf([]*models.Mock{m}), 1); err != nil {
+		t.Fatal(err)
+	}
+	runtime.ReadMemStats(&after)
+	staged, called, _ := readsOf(dc.set)
+	if ok := map[string]bool{"call": staged == 0 && called == 1, "staged": staged == 1 && called == 0,
+		"rest": staged == 0 && called == 1 && dc.set.finished == 1}[path]; !ok || dc.Loads() != loads {
+		t.Fatalf("%s read of %d bytes: the staging read %d, a call %d, the rest of %d, loading %d: want the one read, %d loads", path, len(body), staged, called, dc.set.finished, dc.Loads(), loads)
+	}
+	return int64(after.TotalAlloc - before.TotalAlloc)
+}
+
+// readCosts are the paths a read is measured on (readAllocation) and what
+// each reserves a byte.
+var readCosts = []struct {
+	path string
+	cost int64
+}{{"call", readCost}, {"staged", stageCost}, {"rest", stageCost}}
+
 // What one read of a payload allocates (its load, bodyOf, and the parts
 // its reader reads of it), with its recording counted by the agent's store
 // (models.Mock.StoredSize), is at most the cost its reader reserves for it
@@ -631,115 +756,72 @@ func TestAReadReservesItsRecordingsLiteralCost(t *testing.T) {
 // parts and stagedParts) or the rest of one a call read first (stageRest).
 // A collection running through a read keeps all it allocated until the
 // next one, so the reservation is what bounds the readers' memory in
-// flight whatever their count. The set's store keeps no payload here, so
-// each read loads its own, as past the set's budget. Read on payloads from
-// the sparsest in instants (the HTTP bound row's words) to the densest (a
-// list of dates, each a candidate read in several layouts): at 16 bytes,
-// 256 and 1 KiB, where readBase counts most; at 16 KiB and 31 KiB, under
-// the sizes read alone, where the cost decides how many reads run at once;
-// and a call's at 1 MiB. A read that came to cost more, or a cost set
-// lower, fails here; the per-byte figures are logged.
+// flight whatever their count. Read on each of readShapes: at 16 bytes,
+// 256 and 1 KiB, where readBase counts most; at 4, 6, 16 and 19 KiB, where
+// the cost decides how many reads run at once (the staging's read runs
+// alone from 6.3 KiB, a call's from 19.5 KiB); at 31 KiB; and a call's at
+// 1 MiB. A read that came to cost more, or a cost set lower, fails here;
+// the per-byte figures are logged.
 func TestAReadAllocatesNoMoreThanItsCost(t *testing.T) {
-	at := time.Date(2026, 10, 24, 9, 55, 53, 0, time.UTC)
-	list := func(size int, open, close string, item func(i int) string) string {
-		var b strings.Builder
-		b.WriteString(open)
-		for i := 0; b.Len() < size; i++ {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-			b.WriteString(item(i))
-		}
-		b.WriteString(close)
-		return b.String()
-	}
-	words := func(size int) string {
-		var b strings.Builder
-		b.WriteString(`{"blob":"`)
-		for i := 0; b.Len() < size; i++ {
-			fmt.Fprintf(&b, "w7x%d ", i)
-		}
-		b.WriteString(`"}`)
-		return b.String()
-	}
-	quoted := func(layout string, step time.Duration) func(i int) string {
-		return func(i int) string { return `"` + at.Add(time.Duration(i)*step).Format(layout) + `"` }
-	}
-	shapes := []struct {
-		name string
-		body func(size int) string
-	}{
-		{"words", words},
-		{"items with an instant each", func(n int) string {
-			return list(n, `{"items":[`, `]}`, func(i int) string {
-				return fmt.Sprintf(`{"id":"it-%d","n":%d,"made":"%s"}`, i, i, at.Add(time.Duration(i)*time.Second).Format(time.RFC3339))
-			})
-		}},
-		{"uuids", func(n int) string {
-			return list(n, "[", "]", func(i int) string { return fmt.Sprintf(`"%08x-1234-4abc-8def-%012x"`, i, i*7) })
-		}},
-		{"RFC 3339 instants", func(n int) string { return list(n, "[", "]", quoted(time.RFC3339, time.Second)) }},
-		{"HTTP-dates", func(n int) string { return list(n, "[", "]", quoted(time.RFC1123, time.Second)) }},
-		{"epoch seconds", func(n int) string { return list(n, "[", "]", func(i int) string { return fmt.Sprint(1792656120 + i) }) }},
-		{"epoch milliseconds", func(n int) string {
-			return list(n, "[", "]", func(i int) string { return fmt.Sprint(int64(1792656120000) + int64(i)) })
-		}},
-		{"times of day", func(n int) string { return list(n, "[", "]", quoted("15:04:05", time.Second)) }},
-		{"dates", func(n int) string { return list(n, "[", "]", quoted("2006-01-02", 24*time.Hour)) }},
-	}
 	warmReadersOf(t, 1)
 	oneStageReader(t)
 	defer func(b int64) { bodyBudget = b }(bodyBudget)
 	bodyBudget = 0
-	// read is one read of body's recording on path, and what it allocated.
-	read := func(path, body string) int64 {
-		m := getAnswer("big-0", "http://api/blobs/0", body, eRecAt)
-		m.SetStoredSize(int64(len(body)))
-		tr := NewTracker()
-		tr.NewSet()
-		tr.Begin()
-		defer tr.End()
-		dc := tr.Drifts()
-		x := dc.LazyRawOf(m, true, nil)
-		loads := 1
-		if path == "rest" {
-			dc.warm([]Raw{x})
-			loads = 2
-		}
-		var before, after runtime.MemStats
-		runtime.GC()
-		runtime.ReadMemStats(&before)
-		if path == "call" {
-			dc.warm([]Raw{x})
-		} else if err := dc.warmSet(srcOf([]*models.Mock{m}), 1); err != nil {
-			t.Fatal(err)
-		}
-		runtime.ReadMemStats(&after)
-		staged, called, _ := readsOf(dc.set)
-		if ok := map[string]bool{"call": staged == 0 && called == 1, "staged": staged == 1 && called == 0,
-			"rest": staged == 0 && called == 1 && dc.set.finished == 1}[path]; !ok || dc.Loads() != loads {
-			t.Fatalf("%s read of %d bytes: the staging read %d, a call %d, the rest of %d, loading %d: want the one read, %d loads", path, len(body), staged, called, dc.set.finished, dc.Loads(), loads)
-		}
-		return int64(after.TotalAlloc - before.TotalAlloc)
+	shapes := readShapes()
+	// A first read of each shape sets up what every read after it shares
+	// (the tables of the forms it decodes).
+	for _, sh := range shapes {
+		readAllocation(t, "staged", sh.body(1<<10))
 	}
-	// A first read sets up what every read after it shares (its tables).
-	read("staged", shapes[len(shapes)-1].body(1<<10))
-	for _, size := range []int{16, 256, 1 << 10, 16 << 10, 31 << 10, 1 << 20} {
+	for _, size := range []int{16, 256, 1 << 10, 4 << 10, 6 << 10, 16 << 10, 19 << 10, 31 << 10, 1 << 20} {
 		for _, sh := range shapes {
 			body := sh.body(size)
-			for _, c := range []struct {
-				path string
-				cost int64
-			}{{"call", readCost}, {"staged", stageCost}, {"rest", stageCost}} {
+			for _, c := range readCosts {
 				if size == 1<<20 && c.path != "call" {
 					continue
 				}
 				began := time.Now()
-				alloc := read(c.path, body)
+				alloc := readAllocation(t, c.path, body)
 				t.Logf("%s, %s read of %d bytes: allocated %d, %.1f a byte past readBase (its cost: %d a byte) in %v", sh.name, c.path, len(body), alloc, float64(alloc-readBase)/float64(len(body)), c.cost, time.Since(began).Round(time.Millisecond))
 				if want := readBase + c.cost*int64(len(body)); alloc > want {
 					t.Errorf("%s: a %s read of a %d-byte recording allocated %d bytes: past the %d it costs (readBase and %d a byte)", sh.name, c.path, len(body), alloc, want, c.cost)
 				}
+			}
+		}
+	}
+}
+
+// A staging's read of a payload grows the heap with the payload, not its
+// square: the names of its keyed places are copied once each (copyPlaces),
+// so a list of instants after one long word holds the word once, not once
+// for each instant. A base64 text of a JSON list of dates is that shape:
+// the instants of its decoded form (rawExtra) take its encoded run as
+// their label. Read as its size doubles from 8 to 128 KiB, past the sizes
+// read alone, the staging's whole read and its rest allocate at most
+// readBase and stageCost a byte, as at the sizes read with others: what a
+// read allocates bounds the most its heap grows by while it reads, and it
+// is counted, so the row holds whatever the machine's load. A copy of the
+// label for each place allocated 1,401 bytes a byte at 16 KiB and 8,037 at
+// 128 KiB, about 1 GB.
+func TestAStagingsReadGrowsTheHeapWithItsPayloadNotItsSquare(t *testing.T) {
+	warmReadersOf(t, 1)
+	oneStageReader(t)
+	defer func(b int64) { bodyBudget = b }(bodyBudget)
+	bodyBudget = 0
+	var b64 readShape
+	for _, sh := range readShapes() {
+		if strings.HasPrefix(sh.name, "base64") {
+			b64 = sh
+		}
+	}
+	readAllocation(t, "staged", b64.body(1<<10))
+	for size := 8 << 10; size <= 128<<10; size *= 2 {
+		body := b64.body(size)
+		for _, path := range []string{"staged", "rest"} {
+			alloc := readAllocation(t, path, body)
+			t.Logf("%s read of %d bytes: allocated %d, %.1f a byte past readBase", path, len(body), alloc, float64(alloc-readBase)/float64(len(body)))
+			if want := readBase + stageCost*int64(len(body)); alloc > want {
+				t.Errorf("a %s read of a %d-byte base64 text of a JSON list of dates allocated %d bytes: past the %d it costs (readBase and %d a byte)", path, len(body), alloc, want, stageCost)
 			}
 		}
 	}
