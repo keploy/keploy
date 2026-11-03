@@ -211,37 +211,57 @@ func TestQuotedPrintableShownBySoftBreakOrNonASCIIEscape(t *testing.T) {
 	}
 }
 
-// Where a value reads as quoted-printable text only by a soft line break (a
-// line that ends in base64 padding reads as one) or by an "=3D" of its
-// own, an escape of a character quoted-printable may write as itself is
-// left as written: a signature in upper-case hex whose first two digits
-// happen to be one ("2B" a '+', "41" an 'A', "09" a tab) changes as the
-// signature it is, against any first two digits, "3D" and "41" too.
-func TestAnEscapeQuotedPrintableMayWriteAsItselfIsLeftAsWritten(t *testing.T) {
+// A value that reads as quoted-printable text by a soft line break (a line
+// that ends in base64 padding reads as one) or by an "=3D" of its own is
+// read with every escape decoded, as main reads it: nothing in the two runs
+// tells an escape from a signature's first two digits there. So a
+// signature in upper-case hex in it whose first two digits read as an
+// escape of a '+' in one run ("2B" against "41") is refused, each way: the
+// stated limit, a false refusal and no false pass. So, after "v1", is one
+// whose first two read as an '=' or as no text in one run ("3D" or "80"
+// against "41"): "v1=" is then a run of the base64 alphabet in that run
+// only, which does not decode ("sha256=" decodes as base32). Two first
+// digits that each read as a letter or a digit ("41" against "35") leave a
+// run of the hex alphabet that changed, which is noise. Where nothing shows
+// it, it reads as written: noise.
+func TestASignatureInAValueThatReadsAsQuotedPrintableReadsEveryEscape(t *testing.T) {
 	at := time.Date(2026, 11, 2, 11, 48, 4, 385340565, time.UTC)
-	const digits = "0123456789ABCDEF"
-	for _, pre := range []string{
-		"X-A: YWJj=\r\nX-Sig: v1=",
-		"X-A: YWJj=\r\nX-Sig: sha256=",
-		"X-A: YWJj=\nv1=",
-		"k=3Dv&v1=",
-		"k=3Dv&sha256=",
-		"keyId=3DA94F0C11B2,v1=",
+	for _, tc := range []struct {
+		pre string
+		v1  bool
+	}{
+		{"X-A: YWJj=\r\nX-Sig: v1=", true},
+		{"X-A: YWJj=\r\nX-Sig: sha256=", false},
+		{"X-A: YWJj=\nv1=", true},
+		{"k=3Dv&v1=", true},
+		{"k=3Dv&sha256=", false},
+		{"keyId=3DA94F0C11B2,v1=", true},
 	} {
+		pre := tc.pre
 		t.Run(pre, func(t *testing.T) {
-			pairs := [][2]string{{"2B", "41"}, {"41", "2B"}, {"2B", "09"}, {"09", "2B"}, {"3D", "41"}, {"41", "3D"}}
-			for _, hi := range digits {
-				for _, lo := range digits {
-					xy := string(hi) + string(lo)
-					pairs = append(pairs, [2]string{xy, "3D"}, [2]string{"3D", xy}, [2]string{xy, "41"}, [2]string{"41", xy})
+			refused := [][2]string{{"2B", "41"}, {"41", "2B"}}
+			if tc.v1 {
+				refused = append(refused, [2]string{"3D", "41"}, [2]string{"41", "3D"}, [2]string{"80", "41"}, [2]string{"41", "80"})
+			}
+			for _, p := range refused {
+				got := classifyOne(pre+p[0]+sigA[2:], pre+p[1]+sigB[2:], at, nil, nil, nil)
+				if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "a run of the base64 alphabet that does not decode") {
+					t.Errorf("%s against %s: got %s (%s), want refused: a run of the base64 alphabet that does not decode", p[0], p[1], got.Kind, got.Why)
 				}
 			}
-			for _, p := range pairs {
+			for _, p := range [][2]string{{"41", "35"}, {"35", "41"}} {
 				if got := classifyOne(pre+p[0]+sigA[2:], pre+p[1]+sigB[2:], at, nil, nil, nil); got.Kind != KindNoise {
-					t.Errorf("%s against %s: got %s (%s), want noise: its change is a signature's", p[0], p[1], got.Kind, got.Why)
+					t.Errorf("%s against %s: got %s (%s), want noise: a run of the hex alphabet changed", p[0], p[1], got.Kind, got.Why)
 				}
 			}
 		})
+	}
+	for _, pre := range []string{"v1=", "sha256=", "x=21y v1=", "caf=E9 v1="} {
+		for _, p := range [][2]string{{"2B", "41"}, {"41", "2B"}, {"3D", "41"}, {"41", "80"}} {
+			if got := classifyOne(pre+p[0]+sigA[2:], pre+p[1]+sigB[2:], at, nil, nil, nil); got.Kind != KindNoise {
+				t.Errorf("%s%s against %s: got %s (%s), want noise: nothing shows it is quoted-printable", pre, p[0], p[1], got.Kind, got.Why)
+			}
+		}
 	}
 }
 
@@ -257,22 +277,32 @@ const (
 // escaped '=' there: read in the quoted-printable form, it loses its first
 // two characters and is no run that decodes. So the two runs are read in
 // that form only where both read as quoted-printable text: whole (no '='
-// that starts no escape, no escape left as written) and shown (an escape
-// quoted-printable has to write, or a soft line break). Where either is
-// not, the signature's change is read raw, each way.
+// that starts no escape, no escape of a '%' or a '\') and shown (an escape
+// of an '=' or of non-ASCII text, or a soft line break). Where either is
+// not, the signature's change is read raw, each way: noise. Where both are
+// (an "=3D" of the value's own, beside a Latin-1 escape of no text or not),
+// it is refused, each way: the stated limit, a false refusal.
 func TestABase64SignatureThatBeginsAnEscapedEqualsSignInOneRun(t *testing.T) {
 	at := time.Date(2026, 11, 2, 11, 48, 4, 385340565, time.UTC)
-	for _, tc := range []struct{ name, pre string }{
-		{"the other run shows nothing", "sig="},
-		{"beside an '=' that starts no escape", "k=3Dv&a=b&sig="},
-		{"beside an escape of a '%'", "k=3Dv&p=25&sig="},
-		{"beside an escape of a '\\'", "k=3Dv&p=5C&sig="},
-		{"beside an escape that decodes to no text", "k=3Dv&caf=E9&sig="},
-		{"after a line that ends in base64 padding, beside an '=' that starts no escape", "X-A: YWJj=\r\nX-Sig: keyId=k1,sig="},
+	for _, tc := range []struct {
+		name, pre string
+		refused   bool
+	}{
+		{"the other run shows nothing", "sig=", false},
+		{"beside an '=' that starts no escape", "k=3Dv&a=b&sig=", false},
+		{"beside an escape of a '%'", "k=3Dv&p=25&sig=", false},
+		{"beside an escape of a '\\'", "k=3Dv&p=5C&sig=", false},
+		{"after a line that ends in base64 padding, beside an '=' that starts no escape", "X-A: YWJj=\r\nX-Sig: keyId=k1,sig=", false},
+		{"beside an escaped '=' of its own", "k=3Dv&sig=", true},
+		{"beside an escape that decodes to no text", "k=3Dv&caf=E9&sig=", true},
 	} {
 		for _, p := range [][2]string{{tc.pre + "3D" + b64A[2:], tc.pre + "41" + b64B[2:]}, {tc.pre + "41" + b64A[2:], tc.pre + "3D" + b64B[2:]}} {
 			t.Run(tc.name+", "+p[0][len(tc.pre):len(tc.pre)+2], func(t *testing.T) {
-				if got := classifyOne(p[0], p[1], at, nil, nil, nil); got.Kind != KindNoise {
+				got := classifyOne(p[0], p[1], at, nil, nil, nil)
+				if tc.refused && (got.Kind != KindUnaccounted || !strings.Contains(got.Why, "a run of the base64 alphabet that does not decode")) {
+					t.Fatalf("got %s (%s), want refused: a run of the base64 alphabet that does not decode", got.Kind, got.Why)
+				}
+				if !tc.refused && got.Kind != KindNoise {
 					t.Fatalf("got %s (%s), want noise: its change is a signature's, read raw", got.Kind, got.Why)
 				}
 			})
@@ -369,14 +399,15 @@ func TestAnIDQuotedPrintableHidesIsFollowed(t *testing.T) {
 // A quoted-printable value in a JSON string is checked with its backslash
 // escapes read first, as each other form reads them: they are the JSON
 // string's, no stray '\' the learn step cannot read. A drifted id no call
-// sent, and a signature in upper-case hex beside an "=3D", are each
-// learned as the noise they are, each way.
+// sent, and a signature in upper-case hex beside an "=3D" whose first two
+// digits read as a letter or a digit in each run, are each learned as the
+// noise they are, each way.
 func TestQuotedPrintableInAJSONStringIsCheckedUnescaped(t *testing.T) {
 	at := time.Date(2026, 11, 2, 11, 48, 4, 0, time.UTC)
 	for _, tc := range []struct{ name, rec, live string }{
 		{"quotes escaped, an id", `say \"hi\" order=3DA7K29Q`, `say \"hi\" order=3DB8L30R`},
 		{"a line feed escaped, an id", `a\nb order=3DA7K29Q`, `a\nb order=3DB8L30R`},
-		{"quotes escaped, a signature", `v=3D1 \"sig\":\"v1=2B` + sigA[2:] + `\"`, `v=3D1 \"sig\":\"v1=41` + sigB[2:] + `\"`},
+		{"quotes escaped, a signature", `v=3D1 \"sig\":\"v1=41` + sigA[2:] + `\"`, `v=3D1 \"sig\":\"v1=35` + sigB[2:] + `\"`},
 	} {
 		for _, p := range [][2]string{{tc.rec, tc.live}, {tc.live, tc.rec}} {
 			t.Run(tc.name+", "+p[0][len(p[0])-6:], func(t *testing.T) {
@@ -417,19 +448,30 @@ func TestADeclaredMailInAJSONStringIsCheckedAsOne(t *testing.T) {
 	}
 }
 
-// The form a drifted value is checked in leaves each escape of a character
-// quoted-printable may write as itself as it was written: its own two
-// digits, in their own case, wherever it sits in a run of escapes, after
-// another such escape too. Whether a changed run of the base64 alphabet
-// decodes depends on those digits ("2B=" reads as base32, "20=" does not).
-func TestAnEscapeLeftAsWrittenKeepsItsOwnDigits(t *testing.T) {
-	for _, tc := range []struct{ in, want string }{
-		{"k=3Dv&p=2B=20=3Dx", "k=v&p=2B=20=x"},
-		{"=41=2B=3D", "=41=2B="},
-		{"=3D=7B=22id=22:=22A7K29Q=22=7D", "==7B=22id=22:=22A7K29Q=22=7D"},
+// The form a drifted value is checked in decodes every escape of text
+// where the value reads as quoted-printable, those of characters
+// quoted-printable may write as themselves too, and leaves one of no text
+// (Latin-1) as written, which keeps the value whole. A value whose escapes
+// are all of characters quoted-printable may write as themselves, or of no
+// text, shows nothing; one with an escape of a '%', or an '=' that starts
+// no escape, is not whole.
+func TestTheQuotedPrintableFormReadsEveryEscapeOfText(t *testing.T) {
+	for _, tc := range []struct {
+		in, want string
+		qp       bool
+	}{
+		{"k=3Dv&p=2B=20=3Dx", "k=v&p+ =x", true},
+		{"=41=2B=3D", "A+=", true},
+		{"=3D=7B=22id=22:=22A7K29Q=22=7D", `={"id":"A7K29Q"}`, true},
+		{"caf=E9 =C3=A9t=C3=A9", "caf=E9 \u00e9t\u00e9", true},
+		{"x=\r\ny ab=2Bcd", "xy ab+cd", true},
+		{"caf=E9 ab=2Bcd", "caf=E9 ab+cd", false},
+		{"x=21y ab=2Bcd", "x!y ab+cd", false},
+		{"k=3Dv p=25", "k=v p=25", false},
+		{"Credential=AKIA/x, Signature=3Dab", "Credential=AKIA/x, Signature=ab", false},
 	} {
-		if got, qp := qpFormRead(tc.in); got != tc.want || !qp {
-			t.Errorf("qpFormRead(%q) = %q, %v; want %q, true", tc.in, got, qp, tc.want)
+		if got, qp := qpFormRead(tc.in); got != tc.want || qp != tc.qp {
+			t.Errorf("qpFormRead(%q) = %q, %v; want %q, %v", tc.in, got, qp, tc.want, tc.qp)
 		}
 	}
 }
@@ -716,4 +758,73 @@ func payloadEarlier(at time.Time, rec, live string) []Earlier {
 	return []Earlier{{Mock: "mock-1", At: t, Own: true, Payload: m.ServedAs(1), Seen: []Seen{
 		{Side: Request, Leaf: Leaf{Path: "body.id", Noise: "body.id", Type: String, Value: rec}, Live: live, Place: "body.id"},
 	}}}
+}
+
+// An escape that decodes to no text (a Latin-1 "caf=E9" with no MIME
+// header) is still an escape: it is left as written, and the value still
+// reads as quoted-printable text where its other escapes or a soft line
+// break show it. What only that form shows is then refused, each way, as on
+// main: non-ASCII text that changed behind its escapes, and a soft line
+// break that joins a run of the base64 alphabet that does not decode. An id
+// that flowed behind an escape in such a value is still a variable.
+func TestAnEscapeOfNoTextKeepsAValueQuotedPrintable(t *testing.T) {
+	at := time.Date(2026, 11, 3, 9, 50, 0, 0, time.UTC)
+	for _, tc := range []struct{ name, a, b, why string }{
+		{"non-ASCII text that changed", "caf=E9 =C3=A9t=C3=A9 ok", "caf=E9 =C3=A8t=C3=A8 ok", "text of a script keploy does not split into words"},
+		{"non-ASCII text that changed, beside a Latin-1 escape that changed", "caf=E9 =C3=A9 ok", "caf=E8 =C3=A8 ok", "text of a script keploy does not split into words"},
+		{"a soft line break joins a base64 run", "caf=E9 ab+=\r\ncd ok", "caf=E9 ab+=\r\nce ok", "a run of the base64 alphabet that does not decode"},
+	} {
+		for _, p := range [][2]string{{tc.a, tc.b}, {tc.b, tc.a}} {
+			t.Run(fmt.Sprintf("%s, %q to %q", tc.name, p[0], p[1]), func(t *testing.T) {
+				if got := classifyOne(p[0], p[1], at, nil, nil, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.why) {
+					t.Fatalf("got %s (%s), want refused: %s", got.Kind, got.Why, tc.why)
+				}
+			})
+		}
+	}
+	held := payloadEarlier(at, "A7K29Q", "B8L30R")
+	for _, p := range [][2]string{{"caf=E9 order =23A7K29Q placed", "caf=E9 order =23B8L30R placed"}, {"caf=E9 =C3=A9 =23A7K29Q", "caf=E9 =C3=A9 =23B8L30R"}} {
+		if got := classifyOne(p[0], p[1], at, held, nil, nil); got.Kind != KindVariable {
+			t.Errorf("%q to %q: got %s (%s), want the id that flowed followed as a variable", p[0], p[1], got.Kind, got.Why)
+		}
+	}
+}
+
+// A value that reads as quoted-printable text is checked with every escape
+// of text decoded, those of characters quoted-printable may write as
+// themselves too: an "=2B" there is a '+', and a run of the base64 alphabet
+// that changed behind it and does not decode is refused, each way, as main
+// refuses it, whatever shows the value is quoted-printable (an "=3D", an
+// escape of non-ASCII text, a soft line break, a MIME header), in a
+// signature in upper-case hex too. Where nothing shows it (escapes of
+// characters it may write as themselves only, or of no text), the value is
+// read as written, the form main checks too, which holds no such run: noise.
+func TestAnEscapedPlusIsAPlusWhereTheValueReadsAsQuotedPrintable(t *testing.T) {
+	at := time.Date(2026, 11, 3, 10, 30, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name, pre, a, b string
+		refused         bool
+	}{
+		{"an escaped '='", "k=3Dv ", "ab=2Bcd ok", "ab=2Bce ok", true},
+		{"non-ASCII text", "=C3=A9 ", "ab=2Bcd ok", "ab=2Bce ok", true},
+		{"a soft line break", "x=\r\ny ", "ab=2Bcd ok", "ab=2Bce ok", true},
+		{"a MIME header", "Content-Transfer-Encoding: quoted-printable\r\n\r\n", "ab=2Bcd ok", "ab=2Bce ok", true},
+		{"an escaped '=', a signature", "k=3Dv&", "v1=2B" + sigA[2:], "v1=2B" + sigB[2:], true},
+		{"non-ASCII text, a signature", "=C3=A9 ", "v1=2B" + sigA[2:], "v1=2B" + sigB[2:], true},
+		{"an escaped '!' only", "x=21y ", "ab=2Bcd ok", "ab=2Bce ok", false},
+		{"a Latin-1 escape only", "caf=E9 ", "ab=2Bcd ok", "ab=2Bce ok", false},
+		{"nothing, a signature", "", "v1=2B" + sigA[2:], "v1=2B" + sigB[2:], false},
+	} {
+		for _, p := range [][2]string{{tc.a, tc.b}, {tc.b, tc.a}} {
+			t.Run(fmt.Sprintf("%s, %q", tc.name, p[0][:7]), func(t *testing.T) {
+				got := classifyOne(tc.pre+p[0], tc.pre+p[1], at, nil, nil, nil)
+				if tc.refused && (got.Kind != KindUnaccounted || !strings.Contains(got.Why, "a run of the base64 alphabet that does not decode")) {
+					t.Fatalf("got %s (%s), want refused: a run of the base64 alphabet that does not decode", got.Kind, got.Why)
+				}
+				if !tc.refused && got.Kind != KindNoise {
+					t.Fatalf("got %s (%s), want noise: read as written", got.Kind, got.Why)
+				}
+			})
+		}
+	}
 }
