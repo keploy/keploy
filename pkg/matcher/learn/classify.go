@@ -4345,11 +4345,15 @@ func putBack(v interface{}, kept []keptBody) bool {
 // payload's length, its sequence id). The driver and the server count
 // them, the application never reads them, and a number of them that is a
 // word of a value (a 4-digit group of a minted UUID that is a reply's
-// requestId) is chance, never its source. spec is not changed: the copy is.
+// requestId) is chance, never its source. Nor the digits of a Postgres
+// statement's parameter markers ($1, $2 ...: pgMarkersBlanked), syntax that
+// says where each of its values goes: the "1" of "$1" is no word of data.
+// spec is not changed: the copy is.
 func payloadSpec(spec models.MockSpec) models.MockSpec {
-	if pg := spec.PostgresV3; pg != nil && pg.Query != nil && pg.Query.InvocationID != "" {
+	if pg := spec.PostgresV3; pg != nil && pg.Query != nil {
 		q := *pg.Query
 		q.InvocationID = ""
+		q.SQLNormalized = pgMarkersBlanked(q.SQLNormalized, len(q.BindValues)+len(q.Literals))
 		p := *pg
 		p.Query = &q
 		spec.PostgresV3 = &p
