@@ -709,7 +709,8 @@ func (r *Relay) noteCarried(t *tee, c fakeconn.Chunk, teed bool) {
 //  2. Read up to ForwardBuf bytes from src, and make their Chunk, once:
 //     ReadAt, the number (order) that orders it against the other
 //     direction's (fakeconn.Chunk.ConnSeq), and a copy of the bytes.
-//  3. Write to dst; stamp the Chunk's WrittenAt after Write returns.
+//  3. Stamp the Chunk's WrittenAt, then write to dst: the stamp is taken
+//     before the Write, so the peer cannot have acted on the bytes before it.
 //  4. Push the Chunk into the tee (non-blocking), with its SeqNo, and tell
 //     the owner it was carried (Config.OnCarried). A destination chunk
 //     written to a client after its FIN may instead be set aside until the
@@ -780,7 +781,7 @@ func (r *Relay) forward(
 		// The chunk the Read returned, made once, here, and teed as it is by
 		// whichever path below takes the bytes (written on, stashed, held):
 		// each sets only what is its own, SeqNo as it tees and WrittenAt
-		// once the bytes are written on. It is numbered here, as the Read
+		// as the bytes are written on. It is numbered here, as the Read
 		// returns: a client chunk after every byte the destination had sent
 		// by now, read or not, a destination chunk by when its bytes reached
 		// the proxy (connseq.Upstream). Its bytes are an owned copy, so the
@@ -1007,8 +1008,16 @@ func (r *Relay) forward(
 			if dir == fakeconn.FromDest {
 				finBefore, from = r.clientFINBefore()
 			}
-			wn, werr := dst.Write(chunk.Bytes)
+			// Stamped before the Write, not after it returns. Once the bytes
+			// are on the peer's socket the peer can take them and act on
+			// them (an application reads an answer, then reads its clock or
+			// sends its next request) before this forwarder gets its CPU
+			// back, so a stamp taken after the Write can be later than what
+			// the peer did with the bytes; on a starved host by
+			// milliseconds. Taken here it is no later than the peer could
+			// have seen any of them, and no earlier than ReadAt.
 			chunk.WrittenAt = time.Now()
+			wn, werr := dst.Write(chunk.Bytes)
 
 			// The incomplete-mock mark this chunk's Write earns, set below
 			// once the chunk is teed.
