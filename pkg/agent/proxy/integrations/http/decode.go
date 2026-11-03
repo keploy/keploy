@@ -348,6 +348,29 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// nor learned.
 				stub, lmiss, err = h.learnMatchIn(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts, integrations.CallRound{}, &call)
 				ok = stub != nil
+				if !ok && err == nil && (lmiss == nil || !lmiss.moved) {
+					// The learn step neither serves nor learns onto a
+					// recording that declares variables: a request it
+					// answered none for that such a recording fits is
+					// decided by the variable pass, as a replay decides it
+					// (fullRoundVariables), reading the store as a replay's
+					// matcher reads it: held to the round the learn step's
+					// first pass read, and with the open test's own-call
+					// decision (integrations.OwnRepeatRead), so the
+					// background never answers a call one more than the
+					// test recorded. A moved miss is of no round, and stays
+					// one.
+					held, _ := integrations.HoldToRound(mockDb, call)
+					ownHeld := held
+					held = integrations.OwnRepeatRead(held, call, func() bool {
+						return h.ownCall(reqCtx, input, ownHeld, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict())
+					})
+					vstub, vdiag, decided, verr := h.fullRoundVariables(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableStatefulMocks)
+					if decided {
+						stub, diag, lmiss, err = vstub, vdiag, nil, verr
+						ok = stub != nil
+					}
+				}
 				if !ok && err == nil {
 					// Then the pairing, under the background rules: a call
 					// that is exactly another test's recording is answered
