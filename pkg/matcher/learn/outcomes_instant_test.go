@@ -2823,8 +2823,10 @@ func TestOutcomeAPickedSecondBesideAFinerMemberStaysRefusedInAListThatGrew(t *te
 // A recording's half keeps where each of its fields stands in it
 // (textHalf), so each time in it is placed as in the recording's whole
 // text: by the field that holds it and the member at its path in that
-// field. In the answer, the body's top-level time, its items' times and a
-// header's JSON time are three places, the items' one place.
+// field, whether the call keeps the half or lets it go with its instant
+// (past the reader's budget). In the answer, the body's top-level time, its
+// items' times and a header's JSON time are three places, the items' one
+// place.
 func TestOutcomeAHalfPlacesATimeAsItsRecordingDoes(t *testing.T) {
 	s := oAt.Add(96 * time.Second).UTC().Format(time.RFC3339)
 	m := &models.Mock{Name: "mock-7", Kind: models.HTTP, Spec: models.MockSpec{
@@ -2833,45 +2835,55 @@ func TestOutcomeAHalfPlacesATimeAsItsRecordingDoes(t *testing.T) {
 			Body: `{"at":"` + s + `","items":[{"at":"` + s + `"},{"at":"` + s + `"}]}`},
 		ReqTimestampMock: oAt.Add(-time.Second), ResTimestampMock: oAt.Add(-time.Second + time.Millisecond),
 	}}
-	x := newReaderIndex(nil)
-	dc := decider{x: x}
-	places := func(t *readerText) []instantPlace {
-		spans, read := t.spansOf()
-		text, fields, ok := dc.laidOut(t)
-		if !read || !ok {
-			return nil
+	defer func(r int64) { readerBudget = r }(readerBudget)
+	for _, c := range []struct {
+		what   string
+		budget int64
+	}{{"within the reader's budget", 0}, {"past it", 1}} {
+		readerBudget = c.budget
+		x := newReaderIndex(nil)
+		dc := decider{x: x}
+		places := func(t *readerText) []instantPlace {
+			spans, read := t.spansOf()
+			text, fields, ok := dc.laidOut(t)
+			if !read || !ok {
+				return nil
+			}
+			return dc.placesIn(text, fields, spans).at
 		}
-		return dc.placesIn(text, fields, spans).at
-	}
-	// Each half's places, and the whole text's places of each half's
-	// fields, in order.
-	var halves, wholes [2][]instantPlace
-	crashed := func() (crashed any) {
-		defer func() { crashed = recover() }()
-		whole := x.textOf(RawOf(m, true))
-		req, ans := dc.halves(0, evPlace{t: &placeText{rec: whole, live: whole}})
-		halves = [2][]instantPlace{places(req.t.rec), places(ans.t.live)}
-		for _, p := range places(whole) {
-			field, _, _ := strings.Cut(p.field, "\x00")
-			if requestPath(field) {
-				wholes[0] = append(wholes[0], p)
-			} else {
-				wholes[1] = append(wholes[1], p)
+		// Each half's places, and the whole text's places of each half's
+		// fields, in order.
+		var halves, wholes [2][]instantPlace
+		crashed := func() (crashed any) {
+			defer func() { crashed = recover() }()
+			whole := x.textOf(RawOf(m, true))
+			req, ans := dc.halves(0, evPlace{t: &placeText{rec: whole, live: whole}})
+			halves = [2][]instantPlace{places(req.t.rec), places(ans.t.live)}
+			for _, p := range places(whole) {
+				field, _, _ := strings.Cut(p.field, "\x00")
+				if requestPath(field) {
+					wholes[0] = append(wholes[0], p)
+				} else {
+					wholes[1] = append(wholes[1], p)
+				}
+			}
+			return nil
+		}()
+		if crashed != nil {
+			t.Fatalf("%s: the question crashed (%v)", c.what, crashed)
+		}
+		if kept := len(dc.laid) > 0; kept == (c.budget == 1) || kept == (len(dc.laidNow) > 0) {
+			t.Errorf("%s: the call kept %d halves' fields and holds %d for the instant; want them kept within the budget, held for the instant past it", c.what, len(dc.laid), len(dc.laidNow))
+		}
+		for i, what := range []string{"request", "answer"} {
+			if len(halves[i]) == 0 || !slices.Equal(halves[i], wholes[i]) {
+				t.Errorf("%s: the %s half placed its times at %#v; want %#v, as the recording's whole text places them", c.what, what, halves[i], wholes[i])
 			}
 		}
-		return nil
-	}()
-	if crashed != nil {
-		t.Fatalf("the question crashed (%v)", crashed)
-	}
-	for i, what := range []string{"request", "answer"} {
-		if len(halves[i]) == 0 || !slices.Equal(halves[i], wholes[i]) {
-			t.Errorf("the %s half placed its times at %#v; want %#v, as the recording's whole text places them", what, halves[i], wholes[i])
+		if a := halves[1]; len(a) != 4 || slices.ContainsFunc(a, func(p instantPlace) bool { return p.field == "" }) ||
+			a[0] == a[1] || a[1] != a[2] || a[3] == a[0] || a[3] == a[1] {
+			t.Errorf("%s: the answer's times placed at %#v; want the body's top-level time, its items' times and the header's time three named places, the items' one", c.what, a)
 		}
-	}
-	if a := halves[1]; len(a) != 4 || slices.ContainsFunc(a, func(p instantPlace) bool { return p.field == "" }) ||
-		a[0] == a[1] || a[1] != a[2] || a[3] == a[0] || a[3] == a[1] {
-		t.Errorf("the answer's times placed at %#v; want the body's top-level time, its items' times and the header's time three named places, the items' one", a)
 	}
 }
 
