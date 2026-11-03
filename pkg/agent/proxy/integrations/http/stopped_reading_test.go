@@ -816,51 +816,85 @@ func TestAHeldAnswerGoesOutFramedAsSentAndNothingAfterIt(t *testing.T) {
 		for _, way := range servedWays {
 			proven, pooled := way.proven, way.pooled
 			t.Run(row.name+way.suffix(), func(t *testing.T) {
-				t.Setenv("KEPLOY_PROVEN", proven)
-				m := recorded("events-1", "/v1/events", nil, "")
-				m.Spec.HTTPReq.ProtoMajor, m.Spec.HTTPReq.ProtoMinor = 1, row.minor
-				m.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: row.body,
-					Header: map[string]string{"Content-Type": "text/event-stream", "Content-Length": strconv.Itoa(len(row.body))}}
-				m.Spec.Fault = stoppedReadingIf(true, len(row.body), row.sent)
-				if pooled {
-					m.MarkPooled()
-				}
-				app, proxy := tcpPair(t)
-				boundAppReads(t, app)
-				h := &HTTP{Logger: zap.NewNop()}
-				request := "POST /v1/events HTTP/1." + strconv.Itoa(row.minor) + "\r\nHost: api.example\r\nContent-Length: 0\r\n\r\n"
-				done := runDecode(t, proxy, func(ctx context.Context) error {
-					return h.decodeHTTP(ctx, []byte(request), proxy, nil,
-						&mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true}, models.OutgoingOptions{})
-				})
-				got := make([]byte, len(row.want))
-				if _, err := io.ReadFull(app, got); err != nil || string(got) != row.want {
-					t.Fatalf("served %q (%v), want %q", got, err, row.want)
-				}
-				// Nothing more comes while the app holds the connection.
-				if err := app.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
-					t.Fatal(err)
-				}
-				if n, err := app.Read(make([]byte, 1)); n != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
-					t.Fatalf("after the answer read %d byte(s) (%v), want nothing until the app's own timeout", n, err)
-				}
-				if err := app.(*net.TCPConn).CloseWrite(); err != nil {
-					t.Fatal(err)
-				}
-				select {
-				case err := <-done:
-					if err != nil {
-						t.Fatalf("decodeHTTP returned %v once the app closed, want nil", err)
-					}
-				case <-time.After(time.Minute): // the bound only turns a hang into a failure
-					t.Fatal("decodeHTTP did not return once the app closed the connection")
-				}
-				_ = proxy.Close()
-				boundAppReads(t, app)
-				if tail, _ := io.ReadAll(app); len(tail) != 0 {
-					t.Fatalf("served %q after the answer, want nothing until the close", tail)
-				}
+				checkHeldWire(t, proven, pooled, row.minor, row.body, len(row.body), row.sent, row.want)
 			})
 		}
+	}
+}
+
+// TestAHeldAnswerServesOnlyTheBytesItsFaultSends: a mock whose body holds
+// more than its fault's body_bytes (one written or edited by hand) is served
+// only those bytes, framed as sent, and then nothing until the app closes.
+func TestAHeldAnswerServesOnlyTheBytesItsFaultSends(t *testing.T) {
+	const events, read = "data: 1\n\ndata: 2\n\n", "data: 1\n"
+	for _, row := range []struct {
+		name string
+		sent sentAs
+		want string
+	}{
+		{"sent chunked", sentChunked,
+			"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n8\r\n" + read + "\r\n"},
+		{"sent with a length", sentAs{length: 1000},
+			"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nContent-Type: text/event-stream\r\n\r\n" + read},
+		{"its upstream's close was to end it", sentByClose,
+			"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n" + read},
+	} {
+		for _, way := range servedWays {
+			proven, pooled := way.proven, way.pooled
+			t.Run(row.name+way.suffix(), func(t *testing.T) {
+				checkHeldWire(t, proven, pooled, 1, events, len(read), row.sent, row.want)
+			})
+		}
+	}
+}
+
+// checkHeldWire serves a mock of body, its stopped_reading fault sending
+// bodyBytes of it framed as sent, over HTTP/1.minor, and checks the app gets
+// want on the wire, then nothing until it closes, and the serve ends then.
+func checkHeldWire(t *testing.T, proven string, pooled bool, minor int, body string, bodyBytes int, sent sentAs, want string) {
+	t.Helper()
+	t.Setenv("KEPLOY_PROVEN", proven)
+	m := recorded("events-1", "/v1/events", nil, "")
+	m.Spec.HTTPReq.ProtoMajor, m.Spec.HTTPReq.ProtoMinor = 1, minor
+	m.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: body,
+		Header: map[string]string{"Content-Type": "text/event-stream", "Content-Length": strconv.Itoa(len(body))}}
+	m.Spec.Fault = stoppedReadingIf(true, bodyBytes, sent)
+	if pooled {
+		m.MarkPooled()
+	}
+	app, proxy := tcpPair(t)
+	boundAppReads(t, app)
+	h := &HTTP{Logger: zap.NewNop()}
+	request := "POST /v1/events HTTP/1." + strconv.Itoa(minor) + "\r\nHost: api.example\r\nContent-Length: 0\r\n\r\n"
+	done := runDecode(t, proxy, func(ctx context.Context) error {
+		return h.decodeHTTP(ctx, []byte(request), proxy, nil,
+			&mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true}, models.OutgoingOptions{})
+	})
+	got := make([]byte, len(want))
+	if _, err := io.ReadFull(app, got); err != nil || string(got) != want {
+		t.Fatalf("served %q (%v), want %q", got, err, want)
+	}
+	// Nothing more comes while the app holds the connection.
+	if err := app.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := app.Read(make([]byte, 1)); n != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("after the answer read %d byte(s) (%v), want nothing until the app's own timeout", n, err)
+	}
+	if err := app.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("decodeHTTP returned %v once the app closed, want nil", err)
+		}
+	case <-time.After(time.Minute): // the bound only turns a hang into a failure
+		t.Fatal("decodeHTTP did not return once the app closed the connection")
+	}
+	_ = proxy.Close()
+	boundAppReads(t, app)
+	if tail, _ := io.ReadAll(app); len(tail) != 0 {
+		t.Fatalf("served %q after the answer, want nothing until the close", tail)
 	}
 }
