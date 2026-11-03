@@ -32,6 +32,13 @@
 #      its held call, so its client closes the connection while the process
 #      still runs, then it exits. Only keploy's notice that the stop began
 #      tells the agent that close is the stop's: no fault is recorded.
+#   11-13. keploy mock record of a command whose client gives up on calls the
+#      upstream never answers while the command runs on: curl --max-time 1
+#      (curl closes the connection, then exits at once), a Go client that
+#      exits right after its own timeout, and curl killed by `timeout 1` (as
+#      a test runner kills a timed-out test's worker). Each call is the
+#      application giving up, not the run's end: each is recorded as a
+#      timeout fault, the note is said once, and the /ok call is recorded.
 #
 # Env: RECORD_BIN, REPLAY_BIN (default RECORD_BIN), OLD_BIN (optional). Ports:
 # 18090 (app), 18091 (upstream). Runs as a user with passwordless sudo.
@@ -320,6 +327,72 @@ mock_record_held 7 timer
 mock_record_held 8 exit
 mock_record_held 9 sigint graceful
 mock_record_held 10 timer graceful
+
+# mock_record_gave_up LEG HOW: keploy mock record of a command (a script)
+# whose client gives up, HOW, on GAVE_UP calls to /hang, which the upstream
+# never answers, then calls /ok and exits 0 on its own. The kernel says each
+# connection was closed while its process ran, or by a signal: each call is
+# recorded as a timeout fault, however soon the client exits after.
+GAVE_UP=8
+# mock_kind MOCKS TAG: the kind of the mock whose request names TAG, with
+# "/timeout" when its fault is a timeout, or "-" when no mock names TAG.
+mock_kind() {
+    [ -f "$1" ] || { printf '%s\n' -; return; }
+    awk -v tag="$2" 'BEGIN { RS = "\n---\n"; out = "-" }
+        index($0, tag) {
+            out = "?"
+            if (match($0, /(^|\n)kind: [A-Za-z]+/)) { out = substr($0, RSTART, RLENGTH); sub(/^\n?kind: /, "", out) }
+            if ($0 ~ /\n +kind: timeout(\n|$)/) out = out "/timeout"
+            exit
+        }
+        END { print out }' "$1"
+}
+mock_record_gave_up() {
+    local leg="$1" how="$2" dir="gaveup-$2" call want i got before=$FAIL
+    echo "== $leg. keploy mock record of a client that gives up ($how) =="
+    mkdir -p "$WORK/$dir" && cd "$WORK/$dir" || exit 1
+    case "$how" in
+    maxtime) call="curl -s -o /dev/null --max-time 1" want="call ${how}[0-9] rc=28" ;;
+    go) call="$WORK/faults -get" want="get: timeout" ;;
+    killed) call="timeout -s TERM 1 curl -s -o /dev/null" want="call ${how}[0-9] rc=124" ;;
+    esac
+    {
+        echo '#!/bin/sh'
+        for i in $(seq 1 "$GAVE_UP"); do
+            echo "$call 'http://$UP/hang?c=$how$i'; echo \"call $how$i rc=\$?\""
+        done
+        echo "curl -s -o /dev/null 'http://$UP/ok?c=${how}ok'; echo \"call ${how}ok rc=\$?\""
+        echo 'exit 0'
+    } > cmd.sh
+    chmod +x cmd.sh
+    "$WORK/faults" -upstream "$UP" > upstream.log 2>&1 &
+    UP_PID=$!
+    wait_listen "$UP" "$UP_PID" || { echo "::error::the upstream did not start"; exit 1; }
+    # shellcheck disable=SC2024
+    sudo -E env PATH="$PATH" "$RECORD_BIN" mock record -c "$WORK/$dir/cmd.sh" --name gaveup --disable-tele \
+        > record.log 2>&1 < /dev/null &
+    REC_PID=$!
+    wait "$REC_PID" 2>/dev/null
+    REC_PID=""
+    kill "$UP_PID" 2>/dev/null; wait "$UP_PID" 2>/dev/null; UP_PID=""
+    sudo chown -R "$(id -u):$(id -g)" . 2>/dev/null
+    got=$(grep -c "$want" record.log)
+    [ "$got" = "$GAVE_UP" ] || fail "$leg: the client gave up ($want) on $got of its $GAVE_UP calls, so this proves nothing"
+    grep -q "call ${how}ok rc=0" record.log || fail "$leg: the command's /ok call failed"
+    grep -q "c=${how}ok" keploy/gaveup/mocks.yaml 2>/dev/null || fail "$leg: keploy mock record did not record the /ok call"
+    for i in $(seq 1 "$GAVE_UP"); do
+        got=$(mock_kind keploy/gaveup/mocks.yaml "c=$how$i")
+        [ "$got" = HttpFault/timeout ] || fail "$leg: the call $how$i was recorded as '$got', want a timeout fault (HttpFault/timeout)"
+    done
+    got=$(grep -c 'keploy now records a call that ended in a fault with the fault itself' record.log)
+    [ "$got" = 1 ] || fail "$leg: keploy mock record said its fault note $got times, want once"
+    [ "$FAIL" -eq "$before" ] || { grep -n 'fault' keploy/gaveup/mocks.yaml | head -20; tail -40 record.log; }
+    cp record.log "$WORK/$dir-record.log" 2>/dev/null
+    cd "$WORK" || exit 1
+}
+mock_record_gave_up 11 maxtime
+mock_record_gave_up 12 go
+mock_record_gave_up 13 killed
 
 if [ "$FAIL" -ne 0 ]; then
     echo "::error::$FAIL check(s) failed"

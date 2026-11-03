@@ -16,6 +16,10 @@
 // or timeout; else the status line and how much of the body it read). The e2e
 // asserts these answers are the same without keploy, under keploy record,
 // and under keploy test with the upstream gone.
+//
+// faults -get URL is a client that gives up on URL by its own 1s timeout and
+// exits at once after it gave up, as a test's worker process that ends right
+// after its call failed.
 package main
 
 import (
@@ -175,14 +179,27 @@ func app(addr, up string) {
 	}
 }
 
+func get(url string) {
+	resp, err := (&http.Client{Timeout: time.Second}).Get(url)
+	if err != nil {
+		fmt.Println("get:", saw(err))
+		os.Exit(0)
+	}
+	_ = resp.Body.Close()
+	fmt.Println("get: answered", resp.Status)
+	os.Exit(0)
+}
+
 func main() {
 	switch {
+	case len(os.Args) == 3 && os.Args[1] == "-get":
+		get(os.Args[2])
 	case len(os.Args) == 3 && os.Args[1] == "-upstream":
 		upstream(os.Args[2])
 	case len(os.Args) == 4 && os.Args[1] == "-app":
 		app(os.Args[2], os.Args[3])
 	default:
-		fmt.Println("usage: faults -upstream ADDR | faults -app ADDR UPSTREAM")
+		fmt.Println("usage: faults -upstream ADDR | faults -app ADDR UPSTREAM | faults -get URL")
 		os.Exit(2)
 	}
 }
