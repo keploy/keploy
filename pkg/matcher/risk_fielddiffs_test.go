@@ -64,6 +64,14 @@ func TestJSONFieldDiffs_PatternIsJudgedOnBothSides(t *testing.T) {
 	if len(got) != 1 || got[0].Path != "body.id" || got[0].Kind != models.DiffKindValueChanged || got[0].Expected != "1" || got[0].Actual != "2" {
 		t.Fatalf("got %+v, want one value change of body.id from 1 to 2", got)
 	}
+	// The other way round: the live value matches, the recorded one does not.
+	got = JSONFieldDiffs(`{"id":2,"n":"a"}`, `{"id":1,"n":"a"}`, map[string][]string{"id": {"^1$"}}, "body.", 0)
+	if len(got) != 1 || got[0].Path != "body.id" || got[0].Kind != models.DiffKindValueChanged || got[0].Expected != "2" || got[0].Actual != "1" {
+		t.Fatalf("got %+v, want one value change of body.id from 2 to 1", got)
+	}
+	if got := ChangedJSONFieldPaths(`{"id":2}`, `{"id":1}`, map[string][]string{"id": {"^1$"}}, nil, true, nil); len(got) != 1 || got[0] != "id" {
+		t.Fatalf("value changes only: got %v, want [id]", got)
+	}
 	if got := JSONFieldDiffs(`{"id":1}`, `{"id":2}`, map[string][]string{"id": {"^[12]$"}}, "body.", 0); len(got) != 0 {
 		t.Fatalf("got %+v, want none: both values match the pattern", got)
 	}

@@ -518,12 +518,16 @@ func TestBodyNoiseFromJSONDiff_PatternGuardedKnownDoesNotSwallowDrift(t *testing
 
 	// One that matches the replayed value only is not: the matcher compares a
 	// field whose recorded value the pattern does not match.
-	liveOnly := map[string][]string{"o.ts": {"^2025-"}}
-	if bodyMatches(t, exp, act, liveOnly) {
-		t.Fatal("control failed: the matcher excuses a pattern only the replayed value matches")
-	}
-	if paths, skipped := BodyNoiseFromJSONDiff(exp, act, liveOnly, false); len(paths) != 1 || paths[0] != "o.ts" {
-		t.Errorf("paths = %v, skipped = %+v; want [o.ts]", paths, skipped)
+	for _, liveOnly := range []map[string][]string{
+		{"o.ts": {"^2025-"}}, // dotted form
+		{"ts": {"^2025-"}},   // global form
+	} {
+		if bodyMatches(t, exp, act, liveOnly) {
+			t.Fatalf("control failed: the matcher excuses %v, which only the replayed value matches", liveOnly)
+		}
+		if paths, skipped := BodyNoiseFromJSONDiff(exp, act, liveOnly, false); len(paths) != 1 || paths[0] != "o.ts" {
+			t.Errorf("known=%v: paths = %v, skipped = %+v; want [o.ts]", liveOnly, paths, skipped)
+		}
 	}
 }
 
