@@ -20,6 +20,14 @@
 // faults -get URL is a client that gives up on URL by its own 1s timeout and
 // exits at once after it gave up, as a test's worker process that ends right
 // after its call failed.
+//
+// faults -halfclose URL is a client that sends its GET of URL, shuts its end
+// of the connection down (SHUT_WR) and exits at once on its own, the call
+// unanswered.
+//
+// faults -trap URL is a client that handles SIGTERM by exiting with status
+// 143, as a JVM or .NET process does by default, and calls URL with no
+// timeout of its own: a SIGTERM from another process ends its call.
 package main
 
 import (
@@ -31,6 +39,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -190,16 +199,61 @@ func get(url string) {
 	os.Exit(0)
 }
 
+func halfClose(raw string) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		fmt.Println("halfclose:", err)
+		os.Exit(1)
+	}
+	c, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		fmt.Println("halfclose:", err)
+		os.Exit(1)
+	}
+	if _, err := fmt.Fprintf(c, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", u.RequestURI(), u.Host); err != nil {
+		fmt.Println("halfclose:", err)
+		os.Exit(1)
+	}
+	if err := c.(*net.TCPConn).CloseWrite(); err != nil {
+		fmt.Println("halfclose:", err)
+		os.Exit(1)
+	}
+	fmt.Println("halfclose: shut")
+	os.Exit(0)
+}
+
+func trap(raw string) {
+	term := make(chan os.Signal, 1)
+	signal.Notify(term, syscall.SIGTERM)
+	go func() {
+		<-term
+		fmt.Println("trap: exiting on SIGTERM")
+		os.Exit(143)
+	}()
+	resp, err := http.Get(raw)
+	if err != nil {
+		fmt.Println("trap:", saw(err))
+		os.Exit(0)
+	}
+	_ = resp.Body.Close()
+	fmt.Println("trap: answered", resp.Status)
+	os.Exit(0)
+}
+
 func main() {
 	switch {
 	case len(os.Args) == 3 && os.Args[1] == "-get":
 		get(os.Args[2])
+	case len(os.Args) == 3 && os.Args[1] == "-halfclose":
+		halfClose(os.Args[2])
+	case len(os.Args) == 3 && os.Args[1] == "-trap":
+		trap(os.Args[2])
 	case len(os.Args) == 3 && os.Args[1] == "-upstream":
 		upstream(os.Args[2])
 	case len(os.Args) == 4 && os.Args[1] == "-app":
 		app(os.Args[2], os.Args[3])
 	default:
-		fmt.Println("usage: faults -upstream ADDR | faults -app ADDR UPSTREAM | faults -get URL")
+		fmt.Println("usage: faults -upstream ADDR | faults -app ADDR UPSTREAM | faults -get URL | faults -halfclose URL | faults -trap URL")
 		os.Exit(2)
 	}
 }

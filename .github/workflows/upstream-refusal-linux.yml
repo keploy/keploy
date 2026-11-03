@@ -122,6 +122,14 @@ jobs:
           tar -xzf "$RUNNER_TEMP/keploy-old/keploy_linux_amd64.tar.gz" -C "$RUNNER_TEMP/keploy-old"
           echo "path=$RUNNER_TEMP/keploy-old/keploy" >> "$GITHUB_OUTPUT"
 
+      # The faults lane's JVM client (leg 16): a JVM handles SIGTERM itself
+      # and exits from its handler.
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
       # An upstream that resets, closes, never answers, cuts its body short and
       # sends its own reason phrase: recorded, then replayed with the upstream
       # gone, the application's own error handling seeing the same each time.

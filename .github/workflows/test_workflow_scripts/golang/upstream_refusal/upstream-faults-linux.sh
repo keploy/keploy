@@ -39,9 +39,17 @@
 #      a test runner kills a timed-out test's worker). Each call is the
 #      application giving up, not the run's end: each is recorded as a
 #      timeout fault, the note is said once, and the /ok call is recorded.
+#   14-16. As 11-13, with clients whose end the kernel's release record must
+#      not read as their own exit: one that shuts its end down (SHUT_WR) and
+#      exits at once on its own (the end keploy reads is the shutdown's, made
+#      while it ran), and two that handle the SIGTERM `timeout` or the script
+#      sends them and exit with status 143 from their handler: a Go client,
+#      and a JVM (its default). Each of the 8 calls is a timeout fault, every
+#      run.
 #
 # Env: RECORD_BIN, REPLAY_BIN (default RECORD_BIN), OLD_BIN (optional). Ports:
-# 18090 (app), 18091 (upstream). Runs as a user with passwordless sudo.
+# 18090 (app), 18091 (upstream). Runs as a user with passwordless sudo, with
+# a JDK (javac and java) on PATH for leg 16.
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
@@ -331,8 +339,9 @@ mock_record_held 10 timer graceful
 # mock_record_gave_up LEG HOW: keploy mock record of a command (a script)
 # whose client gives up, HOW, on GAVE_UP calls to /hang, which the upstream
 # never answers, then calls /ok and exits 0 on its own. The kernel says each
-# connection was closed while its process ran, or by a signal: each call is
-# recorded as a timeout fault, however soon the client exits after.
+# connection was closed while its process ran, or by a signal, or holds no
+# record of it (a shut-down end): each call is recorded as a timeout fault,
+# however soon the client exits after.
 GAVE_UP=8
 # mock_kind MOCKS TAG: the kind of the mock whose request names TAG, with
 # "/timeout" when its fault is a timeout, or "-" when no mock names TAG.
@@ -355,6 +364,9 @@ mock_record_gave_up() {
     maxtime) call="curl -s -o /dev/null --max-time 1" want="call ${how}[0-9] rc=28" ;;
     go) call="$WORK/faults -get" want="get: timeout" ;;
     killed) call="timeout -s TERM 1 curl -s -o /dev/null" want="call ${how}[0-9] rc=124" ;;
+    halfclose) call="$WORK/faults -halfclose" want="halfclose: shut" ;;
+    trap) call="timeout -s TERM 1 $WORK/faults -trap" want="trap: exiting on SIGTERM" ;;
+    jvm) call="$WORK/jvm-held.sh" want="jvm: stopping" ;;
     esac
     {
         echo '#!/bin/sh'
@@ -393,6 +405,37 @@ mock_record_gave_up() {
 mock_record_gave_up 11 maxtime
 mock_record_gave_up 12 go
 mock_record_gave_up 13 killed
+mock_record_gave_up 14 halfclose
+mock_record_gave_up 15 trap
+
+# The JVM client of leg 16: jvm-held.sh URL runs HeldCall, waits until it
+# has sent its request, then sends it SIGTERM, as a test runner stops a JVM
+# worker; the JVM's own handler exits it with status 143.
+mkdir -p "$WORK/jcls"
+if javac -d "$WORK/jcls" "$HERE/faults/HeldCall.java"; then
+    cat > "$WORK/jvm-held.sh" <<JVM
+#!/bin/sh
+out=\$(mktemp)
+java -cp '$WORK/jcls' HeldCall "\$1" > "\$out" 2>&1 &
+p=\$!
+i=0
+until grep -q '^sent\$' "\$out"; do
+    kill -0 "\$p" 2>/dev/null || break
+    i=\$((i + 1))
+    [ "\$i" -le 1200 ] || break
+    sleep 0.1
+done
+kill -TERM "\$p"
+wait "\$p"
+echo "jvm: rc=\$?"
+cat "\$out"
+rm -f "\$out"
+JVM
+    chmod +x "$WORK/jvm-held.sh"
+    mock_record_gave_up 16 jvm
+else
+    fail "16: no JDK to build the JVM client (javac)"
+fi
 
 if [ "$FAIL" -ne 0 ]; then
     echo "::error::$FAIL check(s) failed"
