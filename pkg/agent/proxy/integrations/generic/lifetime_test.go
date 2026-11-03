@@ -6,10 +6,12 @@ import (
 	"testing"
 	"time"
 
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -778,6 +780,65 @@ func TestLegacyAConnectionWhollyInsideATestIsThatTestsWhole(t *testing.T) {
 		}
 		if got["publish 1"] != want || got["publish 2"] != models.MetadataLifetimePerTest {
 			t.Fatalf("in a window %v: stated %v, want the first %s and the second per-test", inWindow, got, want)
+		}
+	}
+}
+
+// A test worker's connection opened while another worker's test is open is
+// held until that test's end (holdPreamble), by when the worker may have
+// ended. Each exchange is still its worker's or not by when the relay read
+// its request: the one read while the worker lived carries the worker's
+// instance, though handed over after its end; the one read after the end
+// (a process the worker left) carries it as ended.
+func TestV2AHeldExchangeIsItsWorkersByWhenItsRequestWasRead(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	a := coreAgent.InstanceValue(1, 0)
+	const conn = "held-past-its-worker"
+	starts.Default.InstanceBegan(a)
+	starts.Default.NoteOriginIn(conn, 4242, a)
+	t.Cleanup(func() {
+		starts.Default.ForgetOrigin(conn)
+		starts.Default.InstanceEnded(a)
+	})
+	mgr := syncMock.New(zap.NewNop())
+	opened := time.Now().Add(-time.Second)
+	w := mgr.OpenWindow(opened, nil) // the other worker's longer test
+	live := time.Now()
+	time.Sleep(time.Millisecond)
+	starts.Default.InstanceEnded(a)
+	time.Sleep(time.Millisecond)
+	left := time.Now()
+	clientCh := make(chan fakeconn.Chunk, 4)
+	destCh := make(chan fakeconn.Chunk, 4)
+	for i, readAt := range []time.Time{live, left} {
+		clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte([]string{"publish 1", "publish 2"}[i]), ConnSeq: uint32(2*i + 1), ReadAt: readAt}
+		destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok"), ConnSeq: uint32(2*i + 2), WrittenAt: readAt.Add(100 * time.Microsecond)}
+	}
+	close(clientCh)
+	close(destCh)
+	sess, mocks := newV2Session(t, clientCh, destCh)
+	sess.ClientConnID = conn
+	sess.Ctx = syncMock.NewContext(context.Background(), mgr)
+	done := make(chan error, 1)
+	go func() { done <- dispatch(t, sess) }()
+	answer := left.Add(time.Second)
+	w.Yield(answer)
+	w.Tested(opened, answer)
+	w.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	close(mocks)
+	got := drainMocks(mocks)
+	if len(got) != 2 {
+		t.Fatalf("emitted %d mocks, want 2", len(got))
+	}
+	for i, want := range []struct{ instance, ended uint32 }{{a, 0}, {0, a}} {
+		m := got[i]
+		// As the sync manager stamps a mock its parser hands over.
+		starts.Default.StampInstance(m)
+		if m.Instance != want.instance || m.EndedInstance != want.ended {
+			t.Fatalf("exchange %d (read at %v, its worker ended between) got instance %d, ended %d; want %d, %d", i+1, m.Spec.ReqTimestampMock, m.Instance, m.EndedInstance, want.instance, want.ended)
 		}
 	}
 }

@@ -1,6 +1,9 @@
 package starts
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // liveInstances are the keploy instances of the test workers live now
 // (agent.InstanceValue). The agent makes one live before the kernel can
@@ -29,12 +32,24 @@ func (r *Registry) InstanceBegan(v uint32) {
 }
 
 // InstanceEnded ends keploy instance v: its worker ended, or its claim was
-// not given. A call stamped with it from now on is from no live worker.
+// not given. A call stamped with it whose request keploy reads from now on
+// is from no live worker: each connection noted in it is marked with the
+// end (connOrigin.endedAt), under the origins' lock, which NoteOriginIn
+// holds as it reads whether v lives.
 func (r *Registry) InstanceEnded(v uint32) {
+	o := &r.origin
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	l := &r.instances
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	delete(l.live, v)
+	l.mu.Unlock()
+	now := time.Now()
+	for _, c := range o.conns {
+		if c.instance == v && c.endedAt.IsZero() {
+			c.endedAt = now
+		}
+	}
 }
 
 // InstanceGone reports whether a connection stamped with keploy instance v
