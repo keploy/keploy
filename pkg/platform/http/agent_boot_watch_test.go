@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"go.keploy.io/server/v3/config"
@@ -1319,39 +1320,178 @@ func TestALookTheEngineDoesNotAnswerIsSaidWhileItIsOut(t *testing.T) {
 	}
 }
 
+// inBubble runs f in a synctest bubble, whose clock moves only once every
+// goroutine there is durably blocked: a row there moves the clock to the
+// ticks it checks (tickTo), every tick on the way coming in turn, and decides
+// when each look comes back, whatever the host's load. keploy's process
+// clock is held from outside the bubble meanwhile, so a watch's hold of it in
+// the bubble neither starts nor stops its sampling, which goes on outside,
+// on real time, as it does for every other hold. Were no other hold out when
+// the watch takes its own, it would start the sampler in the bubble, and a
+// hold taken from outside while that sampler ran, and released after the
+// watch's, would fail the run: released while the row runs, it closes the
+// sampler's stop channel, made in the bubble, from outside, a fatal error
+// that ends the test binary; still held when the row ends, it leaves the
+// sampler running in the bubble, synctest's deadlock panic. The process
+// clock, sampled outside, is the one real clock the rows leave: the silence
+// bound runs on it, and the rows set that to an hour, past any run.
+func inBubble(t *testing.T, f func(t *testing.T)) {
+	t.Helper()
+	defer stall.Hold()()
+	synctest.Test(t, f)
+}
+
+// tickTo moves a bubble's clock (inBubble) to half a tick (bootLook/2) past
+// the nth tick of the watch that began at start, and waits until every other
+// goroutine there is durably blocked again. The watch has then taken each
+// tick up to the nth, and each look that came back before it or as the clock
+// got here; the next tick has not come. start is the bubble's time when
+// watchStart returned, which is when the watch's ticks began: the clock does
+// not move while the row's goroutine runs, nor before the watch's goroutine
+// has made its ticker and blocks on it.
+func tickTo(start time.Time, n int) {
+	time.Sleep(time.Until(start.Add(time.Duration(n)*bootLook + bootLook/2)))
+	synctest.Wait()
+}
+
+// notJudged fails if the watch has judged the start.
+func notJudged(t *testing.T, judged <-chan startJudgment) {
+	t.Helper()
+	select {
+	case j := <-judged:
+		t.Fatalf("the start was judged: %v (%s)", j.verdict, j.why)
+	default:
+	}
+}
+
 // Looks the engine answers, each slower than a tick, still have the wait said
 // every stillWaitingLooks ticks: the lines count the wait's ticks, not the
-// looks that came back, nor the ticks one look is out.
+// looks that came back, nor the ticks one look is out. Each look here comes
+// back "not running" two and a half ticks after it began, and the next
+// begins at the tick after that: at the 1st tick, the 4th, the 7th and so on.
+// So a look is out at each line, at the 10th, 20th and 30th tick, begun then,
+// a tick before, or two: the line says what the look before it found, that
+// the container does not run, not that the engine has not answered. The row
+// runs in a bubble (inBubble): each look comes back at its time, half way
+// between two ticks, and the watch takes it before the next tick.
 func TestLooksTheEngineAnswersSlowlyAreSaidAsTheWaitGoesOn(t *testing.T) {
 	look, silence, every := bootLook, bootSilence, stillWaitingLooks
-	bootLook, bootSilence, stillWaitingLooks = 2*time.Millisecond, time.Hour, 10
+	bootLook, bootSilence, stillWaitingLooks = time.Second, time.Hour, 10
 	t.Cleanup(func() { bootLook, bootSilence, stillWaitingLooks = look, silence, every })
-	core, logs := observer.New(zapcore.InfoLevel)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var looks atomic.Int32
-	running := func(ctx context.Context) bool {
-		looks.Add(1)
-		// Each look is answered, "not running", two and a half ticks on.
-		select {
-		case <-time.After(5 * time.Millisecond):
-		case <-ctx.Done():
+	inBubble(t, func(t *testing.T) {
+		const notRun = "still waiting for the keploy agent: the container engine does not run its container"
+		core, logs := observer.New(zapcore.InfoLevel)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var looks atomic.Int32
+		running := func(ctx context.Context) bool {
+			looks.Add(1)
+			select {
+			case <-time.After(bootLook * 5 / 2):
+			case <-ctx.Done():
+			}
+			return false
 		}
-		return false
-	}
-	read := func(context.Context) (utils.BootProgress, bool) { return utils.BootProgress{}, false }
-	judged := watchStart(ctx, zap.New(core), read, running, nil, true, false)
-	lines := awaitStartLines(t, logs, judged, 3, anyStartLine, "looks answered slowly")
-	for i, e := range lines[:3] {
-		if !strings.HasPrefix(e.Message, "still waiting for the keploy agent: the container engine does not run its container") &&
-			!strings.HasPrefix(e.Message, "waiting on the container engine: it has not answered") {
-			t.Fatalf("line %d says %q; want the container the engine does not run, or has not answered of", i, e.Message)
+		read := func(context.Context) (utils.BootProgress, bool) { return utils.BootProgress{}, false }
+		judged := watchStart(ctx, zap.New(core), read, running, nil, true, false)
+		start := time.Now()
+		for i, at := range []struct {
+			tick  int
+			looks int32
+		}{{10, 4}, {20, 7}, {30, 10}} {
+			tickTo(start, at.tick)
+			notJudged(t, judged)
+			if n := looks.Load(); n != at.looks {
+				t.Fatalf("%d looks begun by the %dth tick; want %d, one every 3 ticks from the 1st", n, at.tick, at.looks)
+			}
+			lines := logs.All()
+			if len(lines) != i+1 {
+				t.Fatalf("%d lines said by the %dth tick; want %d, one every 10 ticks", len(lines), at.tick, i+1)
+			}
+			if e := lines[i]; !strings.HasPrefix(e.Message, notRun) || e.Level != zapcore.InfoLevel {
+				t.Fatalf("line %d, at the %dth tick, with a look out for less than a line, says %s %q; want INFO %q", i, at.tick, e.Level.CapitalString(), e.Message, notRun)
+			}
 		}
-	}
-	checkStartLineTicks(t, lines[:3], 20*time.Millisecond)
-	if n := looks.Load(); n < 2 {
-		t.Fatalf("%d looks began; want each answered, and the next begun", n)
-	}
+		checkStartLineTicks(t, logs.All(), 10*bootLook)
+	})
+}
+
+// A look out for fewer ticks than a line's worth when the line is due has not
+// been out since the line before: the line says what the look before it
+// found, here that the container runs with no report read, not that the
+// engine has not answered. A line with the look out for all its ticks says
+// the engine has not answered. The row runs in a bubble (inBubble): it moves
+// the clock to the ticks it checks, answers the first look between the 6th
+// tick and the 7th, and the watch takes that answer before the 7th; the
+// second look is never answered.
+func TestALookOutForLessThanALineIsSaidByWhatTheLookBeforeFound(t *testing.T) {
+	look, silence, every := bootLook, bootSilence, stillWaitingLooks
+	bootLook, bootSilence, stillWaitingLooks = time.Second, time.Hour, 5
+	t.Cleanup(func() { bootLook, bootSilence, stillWaitingLooks = look, silence, every })
+	inBubble(t, func(t *testing.T) {
+		const notAnswered = "waiting on the container engine: it has not answered keploy's look at the keploy agent's container"
+		const runsUnread = "still waiting for the keploy agent: its container runs, and keploy has read no report of its start from it yet"
+		core, logs := observer.New(zapcore.InfoLevel)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		// The first look is out until the row answers it: the container
+		// runs, and its read finds no report. The second is out for good.
+		answer := make(chan struct{})
+		var looks atomic.Int32
+		running := func(ctx context.Context) bool {
+			if looks.Add(1) == 1 {
+				select {
+				case <-answer:
+					return true
+				case <-ctx.Done():
+					return false
+				}
+			}
+			<-ctx.Done()
+			return false
+		}
+		read := func(context.Context) (utils.BootProgress, bool) { return utils.BootProgress{}, false }
+		judged := watchStart(ctx, zap.New(core), read, running, nil, true, false)
+		start := time.Now()
+		// said fails unless n lines have been said by the tick, the last
+		// at INFO, beginning want, and nothing has been judged.
+		said := func(tick, n int, want, why string) {
+			t.Helper()
+			notJudged(t, judged)
+			lines := logs.All()
+			if len(lines) != n {
+				t.Fatalf("%d lines said by the %dth tick; want %d", len(lines), tick, n)
+			}
+			if e := lines[n-1]; !strings.HasPrefix(e.Message, want) || e.Level != zapcore.InfoLevel {
+				t.Fatalf("line %d, at the %dth tick, %s, says %s %q; want INFO %q", n-1, tick, why, e.Level.CapitalString(), e.Message, want)
+			}
+		}
+		begun := func(tick int, want int32, why string) {
+			t.Helper()
+			if n := looks.Load(); n != want {
+				t.Fatalf("%d looks begun by the %dth tick; want %d: %s", n, tick, want, why)
+			}
+		}
+		// The first look begins at the 1st tick: at the 5th it has been
+		// out for all the line's 5 ticks.
+		tickTo(start, 5)
+		said(5, 1, notAnswered, "with the first look out for all the line's 5 ticks")
+		// It comes back between the 6th tick and the 7th, where the second
+		// begins.
+		tickTo(start, 6)
+		begun(6, 1, "one look at a time")
+		close(answer)
+		synctest.Wait()
+		tickTo(start, 7)
+		begun(7, 2, "the second at the tick after the first came back")
+		// At the 10th, the second has been out for 4 of the line's 5
+		// ticks, the 7th to the 10th: the line says what the first found.
+		tickTo(start, 10)
+		said(10, 2, runsUnread, "with the second look out for 4 of the line's 5 ticks")
+		tickTo(start, 15)
+		said(15, 3, notAnswered, "with the second look out for all the line's 5 ticks (9 in all)")
+		checkStartLineTicks(t, logs.All(), 5*bootLook)
+	})
 }
 
 // A container that runs, whose report keploy has not read (the read is out,
