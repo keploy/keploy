@@ -19,6 +19,7 @@ func TestIsNoisyWithin(t *testing.T) {
 		{"a group", []string{`(^xq7Lm2$)`}, "k = 'xq7Lm2'", true},
 		{"an alternation after a shared begin anchor", []string{`^(?:aaa$|xq7Lm2$)`}, "k = 'xq7Lm2'", true},
 		{"a pattern with no anchors", []string{`xq7Lm2`}, "k = 'xq7Lm2'", true},
+		{"the value of a pattern after another", []string{`^aaa$`, `^bbb$`, `^xq7Lm2$`}, "k = 'xq7Lm2'", true},
 		{"a text without the value", []string{`^xq7Lm2$`}, "SELECT 1 FROM t WHERE k = 'other'", false},
 		{"a pattern of anchors alone", []string{`^$`}, "SELECT 1", false},
 		{"no patterns", nil, "xq7Lm2", false},

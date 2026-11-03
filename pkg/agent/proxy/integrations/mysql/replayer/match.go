@@ -1051,9 +1051,12 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// logged reads the places the logs show the live statement by: every
 	// place any recording of the pool redacted (poolPlaces), so a line that
 	// compares the live statement with one candidate keeps hidden what
-	// another candidate's recording hid. Read once; a pool that cannot be
-	// read redacts the statement whole. With debug lines on it is read
-	// here, before the scan, which reads it on every candidate.
+	// another candidate's recording hid. Read once, by the first line that
+	// shows the live statement or its bound values; a pool that cannot be
+	// read redacts the statement whole. The scan writes such lines for the
+	// commands that carry a statement alone, and reading the pool in the
+	// scan would replace the tiers it walks: with debug lines on, those
+	// commands read it here, before the scan, and no other command does.
 	var placesLogged *redactedPlaces
 	logged := logPlaces(func() redactedPlaces {
 		if placesLogged == nil {
@@ -1065,7 +1068,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		}
 		return *placesLogged
 	})
-	if debugOn {
+	if debugOn && (req.Header.Type == sCOM_QUERY || req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC) {
 		logged()
 	}
 
@@ -2210,9 +2213,13 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				// unmarked payload drift is a real mismatch, not a pass.
 				logger.Debug("schema-noise strict: all recorded COM_STMT_SEND_LONG_DATA candidates rejected",
 					zap.String("closest_mock", sldClosest.Name))
+				// The chunk's diffs are shown by the places of the recordings
+				// the report names, the chunks they redacted among them.
+				places := placesOf(sldClosest).or(gate.closestPlaces)
 				return nil, false, &mockMiss{
 					closestMock:    sldClosest.Name,
-					fieldDiffs:     gate.fieldDiffs,
+					fieldDiffs:     gate.reportDiffs(places),
+					places:         places,
 					strictRejected: gate.rejected,
 					// Candidates existed and strict rejected them; leaving the
 					// count at zero would make query.go report this as a mock
@@ -2420,19 +2427,24 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		case gate.rejected > 0:
 			phase = models.MatchPhaseStrict
 		}
+		var unknown *mockMiss
+		if len(lost) > 0 {
+			// The test's own mock may be one whose statement is lost: say so,
+			// and, when nothing else explains the miss, what to do about it.
+			// The report names those recordings too: their places are its.
+			unknown = unknownStatementsMiss(lost, nil, mysqlCandidates)
+			places = places.or(unknown.places)
+		}
 		miss := &mockMiss{
 			closestQuery:   closestQuery,
 			closestMock:    bestPartialMockName,
-			fieldDiffs:     gate.fieldDiffs,
+			fieldDiffs:     gate.reportDiffs(places),
 			strictRejected: gate.rejected,
 			candidateCount: mysqlCandidates,
 			matchPhase:     phase,
 			places:         places,
 		}
-		if len(lost) > 0 {
-			// The test's own mock may be one whose statement is lost: say so,
-			// and, when nothing else explains the miss, what to do about it.
-			unknown := unknownStatementsMiss(lost, nil, mysqlCandidates)
+		if unknown != nil {
 			miss.why = unknown.why
 			if miss.strictRejected == 0 {
 				miss.nextSteps = unknown.nextSteps
