@@ -1760,7 +1760,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			var answered *models.Mock
 			if declared := learn.Compare(liveShape, rec, n.known(picked)).Declared; len(declared) > 0 {
 				learned, withAnswer, earlier, why := classify(picked, learn.Candidate{Shape: rec}, own, declared)
-				plan, answered = h.declaredPlan(tracker, test, picked, rec, own, mockDb, learned, withAnswer, earlier, why)
+				plan, answered = h.declaredPlan(tracker, test, picked, rec, own, mockDb, n, learned, withAnswer, earlier, why)
 			}
 			if own && !tracker.Answer(test, picked) {
 				// Read again, held to the call's round: a test's own is
@@ -2528,25 +2528,39 @@ func appendNew(list []string, vs ...string) []string {
 // why keploy's store could not tell): a variable's use and an echo alone,
 // as learnPlan writes them, with m's answer read back for the serve's view.
 // Nothing is learned where classify or learnPlan cannot follow one, nor
+// where the caller holds a leaf learned so (learnNoise.heldLearned), nor
 // noise at a declared field ever: the user's noise excuses it already.
-func (h *HTTP) declaredPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, mockDb integrations.MockMemDb, learned []learn.Learned, answered *models.Mock, earlier []learn.Earlier, why string) (pairing, *models.Mock) {
+func (h *HTTP) declaredPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, mockDb integrations.MockMemDb, n learnNoise, learned []learn.Learned, answered *models.Mock, earlier []learn.Earlier, why string) (pairing, *models.Mock) {
 	if why != "" {
 		return pairing{}, nil
 	}
 	var kept []learn.Learned
+	var fields []string
 	for _, l := range learned {
 		if l.Kind == learn.KindVariable || l.Kind == learn.KindEcho {
+			// Its evidence (Learned.Why) ends in the remedy for a field
+			// keploy.yml does not declare ("declare it noise in
+			// keploy.yml"): this one is declared, so a refusal names
+			// why it was refused alone.
+			l.Why = ""
 			kept = append(kept, l)
+			fields = append(fields, l.Recorded.Path)
 		}
 	}
 	if len(kept) == 0 {
 		return pairing{}, nil
 	}
+	refuse := func(why string) (pairing, *models.Mock) {
+		h.Logger.Debug("keploy.yml declares these fields noise, so keploy does not compare them, but it cannot follow the value one carries into the answer; the call is served as recorded",
+			zap.String("mock", m.Name), zap.Strings("declared", fields), zap.String("why", why))
+		return pairing{}, nil
+	}
+	if why := n.heldLearned(kept); why != "" {
+		return refuse(why)
+	}
 	plan, why := learnPlan(tracker, test, answered, rec, own, kept, earlier, givenBindings(mockDb))
 	if why != "" {
-		h.Logger.Debug("a field keploy.yml declares noise carries a value keploy cannot follow; the call is served as recorded",
-			zap.String("mock", m.Name), zap.String("why", why))
-		return pairing{}, nil
+		return refuse(why)
 	}
 	for _, l := range kept {
 		h.Logger.Info("learned a field that changed between record and replay",
