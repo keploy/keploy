@@ -76,10 +76,10 @@ type learnNoise struct {
 	url []*regexp.Regexp
 	// hold is how another parser's call may have each leaf learned
 	// (LearnMatch), by its name in the noise dialect; nil: as an HTTP
-	// call's. A leaf held LearnNever is a fixed part of the shape too
-	// (shape), so a recording that holds another value there is no
-	// candidate; one held LearnEchoOnly is learned only as an echo
-	// (heldLearned).
+	// call's leaf by its class (identityOf). A leaf held LearnNever is a
+	// fixed part of the shape too (shape), so a recording that holds
+	// another value there is no candidate; one held LearnEchoOnly is
+	// learned only as an echo (heldLearned).
 	hold func(leaf string) LearnHold
 }
 
@@ -254,6 +254,12 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 		}
 		add("header."+k, v, false)
 	}
+	// SOAP 1.2 names the operation in Content-Type's action parameter, which
+	// the media type drops: a leaf of its own, so a change there is the
+	// request's (identityClass).
+	if a := soapAction(p.header["content-type"]); a != "" {
+		add(soapActionLeaf, a, false)
+	}
 	switch {
 	case len(p.body) == 0:
 		s.Fixed["body"] = ""
@@ -316,22 +322,31 @@ func (n learnNoise) declared(l learn.Leaf) bool {
 
 // heldLearned is why the learn step refuses what it learned of a call, by
 // how it may learn each leaf (holdOf): a leaf held LearnEchoOnly learned as
-// anything but a value the answer carries back; one held
-// LearnExplainedOnly, that names which call this is (identityClass), learned
-// as anything a value an earlier call gave, a value the test gave (given) or
-// a read of the clock does not explain (explained). "" where it refuses
-// nothing.
+// anything but a value the answer carries back; one that says which call
+// this is (identityOf), held LearnExplainedOnly or LearnExplainedOrEcho,
+// learned as anything that does not explain the change (explained; an echo
+// too, for an id). Every leaf is asked: one explained ends nothing. "" where
+// it refuses nothing.
 func (n learnNoise) heldLearned(learned []learn.Learned, given []variables.Binding) string {
 	for _, l := range learned {
-		switch n.holdOf(l.Recorded.Noise) {
+		switch hold := n.holdOf(l); hold {
 		case LearnEchoOnly:
 			if l.Kind != learn.KindEcho {
 				return l.Recorded.Path + " changed, and keploy learns it only as a value the answer carries back, which the answer does not"
 			}
-		case LearnExplainedOnly:
-			if !explained(l, given) {
-				return l.Recorded.Path + " changed, and it says which call this is (" + identityClass(l.Recorded.Noise) + "): keploy learns a change there only as a value an earlier call or the test gave, or a read of the clock, and this one is none of them. If the application now makes this call, record it again; if the value there may really change, declare it noise in keploy.yml"
+		case LearnExplainedOnly, LearnExplainedOrEcho:
+			if explained(l, given) || hold == LearnExplainedOrEcho && l.Kind == learn.KindEcho {
+				continue
 			}
+			what := "a value the application sent in an earlier call, a value the test gave keploy, or a read of the clock"
+			if hold == LearnExplainedOrEcho {
+				what += ", or a value the answer carries back"
+			}
+			why := l.Recorded.Path + " changed, and it says which call this is"
+			if class := identityOf(l); class != "" {
+				why += " (" + class + ")"
+			}
+			return why + ": keploy learns a change there only as " + what + ", and this one is none of them. If the application now makes another call, record it again; if the value there may really change, declare it in keploy.yml (" + declareHow(l.Recorded.Noise) + ")"
 		}
 	}
 	return ""

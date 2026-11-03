@@ -1,6 +1,7 @@
 package http
 
 import (
+	"mime"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/matcher/learn"
@@ -8,31 +9,65 @@ import (
 )
 
 // What says which call a request is. The learn step learns a drifted leaf as
-// noise, an echo, an earlier call's value or a read of the clock. Noise is
-// never compared again, and an echo answers whatever the call sent, so a
-// call to another resource or operation learned either way is answered with
-// this one's recording at every later run: a false green. A leaf that names
-// the call is therefore learned only where something explains the change: a
-// value an earlier call gave (a variable, asserted equal to it at every
-// replay) or a read of the application's clock (compared in the call's
-// window). Otherwise the call is request_changed, naming the leaf. keploy.yml's
-// noise still excuses such a leaf, as the user declared it (Known.Excused
-// reads it before any drift).
+// noise, an echo, a value the application sent in an earlier call or a read
+// of the clock. Noise is never compared again, so a call to another resource
+// or operation learned as noise is answered with this one's recording at
+// every later run: a false green. A leaf that names the call is therefore
+// learned only where something explains the change; otherwise the call is
+// request_changed, naming the leaf. keploy.yml's noise still excuses such a
+// leaf, as the user declared it (Known.Excused reads it before any drift).
+//
+// What explains a change there, by the kind of leaf:
+//   - A leaf naming the operation (classOperation): a value the application
+//     sent in an earlier call (a variable, asserted equal to it at every
+//     replay), a value the test gave keploy, or a read of the application's
+//     clock, with or without an offset (compared in the call's window).
+//     Never an echo: an answer that carries an operation's name back says
+//     nothing of which operation the application meant.
+//   - A leaf holding the id of what the call acts on (classResource): those,
+//     or an echo. An id that drifted between the recording and record's full
+//     round and comes back in the answer is the relation an application that
+//     mints its ids has with the dependency (PUT /objects/<uuid>), learned
+//     as that relation; an id that does not drift is never learned at all.
 //
 // The classes, and why each names the call:
 //   - The method and the destination (the host, or the container) are the
 //     operation key itself (operationKey): a recording with another one is
 //     never a candidate, so nothing there is learned at all.
-//   - Every path segment (url.path.N): a path names the resource a call acts
-//     on, and its words the collection, the operation or the item.
-//   - The operation headers (operationHeaders): an endpoint that serves many
-//     operations at one URL is told which one in a header.
-//   - The fields naming the operation or the destination (namingFields),
-//     at any depth of a JSON or form body or in the URL query: a protocol
-//     that posts every call to one URL names the operation and the resource
-//     there, where a REST call's path would.
+//   - Every path segment (url.path.N), a resource: a path names the
+//     resource a call acts on, its words the collection and the item.
+//   - The operation headers (operationHeaders) and SOAP 1.2's action
+//     (soapActionLeaf): an endpoint that serves many operations at one URL
+//     is told which one there.
+//   - The fields naming the operation (operationFields) or the resource
+//     (resourceFields), at any depth of a JSON or form body or in the URL
+//     query, an array of them too: a protocol that posts every call to one
+//     URL names the operation and the resource there, where a REST call's
+//     path would.
+//   - A GraphQL document's operations, their types and names
+//     (graphQLOperations), in a field named query: a client that sends no
+//     operationName says which operation it means only there.
 //
 // A leaf no class names keeps the learn step's own rules.
+
+// The classes of leaf that say which call a request is, as a miss names
+// them.
+const (
+	classPath          = "a path segment"
+	classOpHeader      = "an operation header"
+	classSOAPAction    = "the SOAP 1.2 action"
+	classOpField       = "a field naming the operation"
+	classResourceField = "a field naming the resource"
+	classGraphQL       = "the GraphQL operation"
+)
+
+// classResource reports whether class names a leaf holding the id of what
+// the call acts on, which an echo explains; every other class names the
+// operation, which only an earlier call's value, the test's or the clock
+// explains.
+func classResource(class string) bool {
+	return class == classPath || class == classResourceField
+}
 
 // operationHeaders are the headers, lowercased as httpParts holds them,
 // that carry a call's operation: AWS's JSON protocol (X-Amz-Target names
@@ -46,16 +81,34 @@ var operationHeaders = map[string]bool{
 	"x-method-override":      true,
 }
 
-// namingFields are the field names, lowercased, that name a call's
-// operation or destination where every call goes to one URL: the operation
-// of AWS's query protocol (Action), of GraphQL (operationName) and of
-// JSON-RPC (method); the resource AWS's JSON and query protocols name in
-// the body (a queue, table, topic, stream, log group, state machine, event
-// bus, function, secret or key).
-var namingFields = map[string]bool{
-	"action":             true,
-	"operationname":      true,
-	"method":             true,
+// soapActionLeaf is the leaf (shape) holding SOAP 1.2's action: the action
+// parameter of an application/soap+xml Content-Type, which the media type
+// the shape compares drops with every other parameter.
+const soapActionLeaf = "header.content-type.action"
+
+// soapAction is Content-Type ct's SOAP 1.2 action, "" where it holds none.
+func soapAction(ct string) string {
+	mt, params, err := mime.ParseMediaType(ct)
+	if err != nil || mt != "application/soap+xml" {
+		return ""
+	}
+	return params["action"]
+}
+
+// operationFields are the field names, lowercased, that name a call's
+// operation where every call goes to one URL: AWS's query protocol
+// (Action), GraphQL (operationName) and JSON-RPC (method).
+var operationFields = map[string]bool{
+	"action":        true,
+	"operationname": true,
+	"method":        true,
+}
+
+// resourceFields are the field names, lowercased, that name the resource a
+// call acts on where every call goes to one URL: what AWS's JSON and query
+// protocols name in the body (a queue, table, topic, stream, log group,
+// state machine, event bus, function, secret or key).
+var resourceFields = map[string]bool{
 	"queueurl":           true,
 	"queuename":          true,
 	"tablename":          true,
@@ -73,57 +126,92 @@ var namingFields = map[string]bool{
 	"keyid":              true,
 }
 
+// fieldOf is the field name a body or URL query leaf ends in, without an
+// array's brackets ("body.Items[].TableName", "body.QueueUrl[]"): "" for any
+// other leaf.
+func fieldOf(leaf string) string {
+	if !strings.HasPrefix(leaf, "body") && !strings.HasPrefix(leaf, "url.query.") {
+		return ""
+	}
+	field := leaf[strings.LastIndexByte(leaf, '.')+1:]
+	if i := strings.IndexByte(field, '['); i >= 0 {
+		field = field[:i]
+	}
+	return field
+}
+
 // identityClass is the class (above) of the leaf named leaf in keploy.yml's
 // noise dialect (learn.Leaf.Noise: "url.path.2", "header.x-amz-target",
 // "body.Items[].TableName", "url.query.Action"), as a miss names it; ""
-// for a leaf no class names.
+// for a leaf no class names by its name alone.
 func identityClass(leaf string) string {
 	switch {
 	case strings.HasPrefix(leaf, "url.path."):
-		return "a path segment"
+		return classPath
+	case leaf == soapActionLeaf:
+		return classSOAPAction
 	case strings.HasPrefix(leaf, "header."):
 		if operationHeaders[strings.TrimPrefix(leaf, "header.")] {
-			return "an operation header"
+			return classOpHeader
 		}
-	case strings.HasPrefix(leaf, "body."), strings.HasPrefix(leaf, "url.query."):
-		field := leaf[strings.LastIndexByte(leaf, '.')+1:]
-		if namingFields[strings.ToLower(field)] {
-			return "a field naming the operation or the destination"
+	}
+	switch field := strings.ToLower(fieldOf(leaf)); {
+	case operationFields[field]:
+		return classOpField
+	case resourceFields[field]:
+		return classResourceField
+	}
+	return ""
+}
+
+// identityOf is the class (above) of drifted leaf l, by its name or, for a
+// GraphQL document, by what changed in it; "" for none.
+func identityOf(l learn.Learned) string {
+	if c := identityClass(l.Recorded.Noise); c != "" {
+		return c
+	}
+	if strings.EqualFold(fieldOf(l.Recorded.Noise), "query") {
+		rec, ok := graphQLOperations(l.Recorded.Value)
+		live, liveOK := graphQLOperations(l.Live.Value)
+		if ok && liveOK && rec != live {
+			return classGraphQL
 		}
 	}
 	return ""
 }
 
-// identityHold is how the learn step may learn each leaf of an HTTP call by
-// its class: LearnExplainedOnly for a leaf a class names, LearnAny
-// otherwise.
-func identityHold(leaf string) LearnHold {
-	if identityClass(leaf) != "" {
-		return LearnExplainedOnly
+// identityHold is how the learn step may learn a leaf of class class:
+// LearnExplainedOrEcho for a leaf holding an id (classResource),
+// LearnExplainedOnly for one naming the operation, LearnAny for "".
+func identityHold(class string) LearnHold {
+	switch {
+	case class == "":
+		return LearnAny
+	case classResource(class):
+		return LearnExplainedOrEcho
 	}
-	return LearnAny
+	return LearnExplainedOnly
 }
 
-// holdOf is how the learn step may learn the leaf named leaf: as the
-// caller of LearnMatch holds it (learnNoise.hold), where it holds it; as
-// its class does (identityHold) otherwise, for the HTTP parser's own call
-// too.
-func (n learnNoise) holdOf(leaf string) LearnHold {
+// holdOf is how the learn step may learn drifted leaf l: as the caller of
+// LearnMatch holds it (learnNoise.hold), where it holds it; as its class
+// does (identityOf) otherwise, for the HTTP parser's own call too.
+func (n learnNoise) holdOf(l learn.Learned) LearnHold {
 	if n.hold != nil {
-		if h := n.hold(leaf); h != LearnAny {
+		if h := n.hold(l.Recorded.Noise); h != LearnAny {
 			return h
 		}
 	}
-	return identityHold(leaf)
+	return identityHold(identityOf(l))
 }
 
 // explained reports whether what the learn step learned at a leaf explains
-// the change, as learnPlan carries it: a value an earlier call gave (a
-// variable, asserted equal to it at every replay), a value the test gave
-// keploy (given: its key's variable, givenFor), or a read of the
-// application's clock, with or without an offset (Learned.Clock: compared in
-// the call's window). Noise, an echo and anything else explain nothing:
-// none says why the call names another resource or operation.
+// the change, as learnPlan carries it: a value the application sent in an
+// earlier call (a variable, asserted equal to it at every replay), a value
+// the test gave keploy (given: its key's variable, givenFor), or a read of
+// the application's clock, with or without an offset (Learned.Clock:
+// compared in the call's window). Noise, an echo and anything else explain
+// nothing here: an echo explains only an id (heldLearned).
 func explained(l learn.Learned, given []variables.Binding) bool {
 	if _, ok := givenFor(l.Recorded, l.Live, given); ok {
 		return true
@@ -132,4 +220,154 @@ func explained(l learn.Learned, given []variables.Binding) bool {
 		return true
 	}
 	return l.Kind == learn.KindVariable
+}
+
+// declareHow is the keploy.yml noise that excuses leaf, for a miss to name:
+// its bucket (keploy.yml's url, header or requestBody), as the matchers read
+// each (requestNoiseFor).
+func declareHow(leaf string) string {
+	switch {
+	case strings.HasPrefix(leaf, "url."):
+		return "url noise matching it"
+	case strings.HasPrefix(leaf, "header."):
+		return "header noise naming the header"
+	}
+	return "requestBody noise naming the field"
+}
+
+// graphQLOperations is the operations GraphQL document doc defines, each
+// its type and its name ("query GetOrder"; "query" for a shorthand, the type
+// alone for an unnamed one), in order and joined by commas; ok is false
+// where doc is no GraphQL document (a search text in a field named query)
+// or defines no operation. Fragments are no operation, and what an
+// operation selects is not read.
+func graphQLOperations(doc string) (string, bool) {
+	var ops []string
+	i := 0
+	for {
+		i = skipGraphQLIgnored(doc, i)
+		if i >= len(doc) {
+			break
+		}
+		if doc[i] == '{' {
+			end, ok := skipGraphQLBlock(doc, i)
+			if !ok {
+				return "", false
+			}
+			ops, i = append(ops, "query"), end
+			continue
+		}
+		kw, j := graphQLName(doc, i)
+		switch kw {
+		case "query", "mutation", "subscription", "fragment":
+		default:
+			return "", false
+		}
+		op := kw
+		if name, k := graphQLName(doc, skipGraphQLIgnored(doc, j)); name != "" {
+			op, j = kw+" "+name, k
+		}
+		// The selection set: the first brace outside the variables'
+		// parentheses and their strings.
+		depth := 0
+		for j < len(doc) && (doc[j] != '{' || depth > 0) {
+			switch doc[j] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+			case '"':
+				j = skipGraphQLString(doc, j) - 1
+			}
+			j++
+		}
+		end, ok := skipGraphQLBlock(doc, j)
+		if !ok {
+			return "", false
+		}
+		if kw != "fragment" {
+			ops = append(ops, op)
+		}
+		i = end
+	}
+	return strings.Join(ops, ","), len(ops) > 0
+}
+
+// skipGraphQLIgnored is the index of doc's first token at or after i,
+// past white space, commas, comments and a byte order mark.
+func skipGraphQLIgnored(doc string, i int) int {
+	for i < len(doc) {
+		switch {
+		case doc[i] == ' ' || doc[i] == '\t' || doc[i] == '\n' || doc[i] == '\r' || doc[i] == ',':
+			i++
+		case doc[i] == '#':
+			for i < len(doc) && doc[i] != '\n' && doc[i] != '\r' {
+				i++
+			}
+		case strings.HasPrefix(doc[i:], "\xef\xbb\xbf"):
+			i += len("\xef\xbb\xbf")
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+// graphQLName is the GraphQL name at doc[i:] and the index past it; "" where
+// none starts there.
+func graphQLName(doc string, i int) (string, int) {
+	j := i
+	for j < len(doc) && (doc[j] == '_' || doc[j] >= 'a' && doc[j] <= 'z' || doc[j] >= 'A' && doc[j] <= 'Z' || j > i && doc[j] >= '0' && doc[j] <= '9') {
+		j++
+	}
+	return doc[i:j], j
+}
+
+// skipGraphQLString is the index past the string, or block string, that
+// starts at doc[i], or len(doc) where it does not end.
+func skipGraphQLString(doc string, i int) int {
+	if strings.HasPrefix(doc[i:], `"""`) {
+		if end := strings.Index(doc[i+3:], `"""`); end >= 0 {
+			return i + 3 + end + 3
+		}
+		return len(doc)
+	}
+	for j := i + 1; j < len(doc); j++ {
+		switch doc[j] {
+		case '\\':
+			j++
+		case '"':
+			return j + 1
+		}
+	}
+	return len(doc)
+}
+
+// skipGraphQLBlock is the index past the braces that open at doc[i], their
+// strings and comments read as such; ok is false where doc[i] is no brace
+// or they do not close.
+func skipGraphQLBlock(doc string, i int) (int, bool) {
+	if i >= len(doc) || doc[i] != '{' {
+		return i, false
+	}
+	depth := 0
+	for i < len(doc) {
+		switch doc[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i + 1, true
+			}
+		case '"':
+			i = skipGraphQLString(doc, i)
+			continue
+		case '#':
+			i = skipGraphQLIgnored(doc, i)
+			continue
+		}
+		i++
+	}
+	return i, false
 }

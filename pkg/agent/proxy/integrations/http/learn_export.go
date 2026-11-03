@@ -38,8 +38,10 @@ func (m *LearnMiss) Explain(r *models.MockMismatchReport) {
 	m.m.explain(r)
 }
 
-// LearnHold is how the learn step may learn a leaf of another parser's call
-// (LearnMatch's hold).
+// LearnHold is how the learn step may learn a leaf of a call: of another
+// parser's, as LearnMatch's hold says; of the HTTP parser's own, and of
+// another parser's where its hold says LearnAny, as the leaf's class says
+// (identityOf).
 type LearnHold uint8
 
 const (
@@ -52,13 +54,19 @@ const (
 	// entry's Id), never as noise, a read of the clock or an earlier call's
 	// value.
 	LearnEchoOnly
-	// LearnExplainedOnly: only as a value an earlier call gave or a read of
-	// the application's clock, never as noise or an echo. The leaf names
-	// which call this is (a path segment, an operation header, a field
-	// naming the destination: identityClass), as every HTTP call's leaves
-	// of those classes are held, so a change nothing explains is the
-	// request's.
+	// LearnExplainedOnly: only as a value the application sent in an
+	// earlier call, a value the test gave keploy, or a read of the
+	// application's clock (with or without an offset), never as noise or an
+	// echo. The leaf names the call's operation (an operation header,
+	// SOAP 1.2's action, a field naming the operation, a GraphQL document's
+	// operation: identityOf), so a change nothing explains is the request's.
 	LearnExplainedOnly
+	// LearnExplainedOrEcho: as LearnExplainedOnly, or as a value the answer
+	// carries back. The leaf holds the id of what the call acts on (a path
+	// segment, a field naming the resource: identityOf): an id that drifted
+	// between the recording and record's full round and comes back in the
+	// answer is learned as that relation.
+	LearnExplainedOrEcho
 )
 
 // LearnMatch decides a call of another parser in record's full round with
