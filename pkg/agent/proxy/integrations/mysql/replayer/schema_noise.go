@@ -1,6 +1,7 @@
 package replayer
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	lru "github.com/hashicorp/golang-lru/v2"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	// vitesslog must load before any vitess code logs: see that package.
 	_ "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/vitesslog"
@@ -265,6 +267,20 @@ type strictGate struct {
 	// counts the builds.
 	noiseMade     map[bodyNoiseKey]map[string][]string
 	noiseSetsMade *int
+
+	// ctx is the command's (withCommand: when it arrived, whether it is a
+	// call of record's full round; the learn tracker), and mockDb the store
+	// it is matched in, for the literals the learn step learned as reads of
+	// the application's clock (clocksHold, learnsClocks). learned are the
+	// reads the learn step learned for this command, by recording;
+	// learnTried the recordings it was asked about; clockVerdicts
+	// clocksHold's answers; clockWhy the first reason one of them gave no.
+	ctx           context.Context
+	mockDb        integrations.MockMemDb
+	learned       map[*models.Mock]map[string]models.ClockOffset
+	learnTried    map[*models.Mock]bool
+	clockVerdicts map[*models.Mock]bool
+	clockWhy      string
 }
 
 // bodyFor is the live request body mock's recorded one is compared with: the
@@ -485,6 +501,20 @@ func (g *strictGate) allowsLiterals(mock *models.Mock) bool {
 	if g.compare(g.strictEngine(), &g.literalVerdicts, mock, literalsLeftOut...) {
 		return true
 	}
+	// Record's full round asks the learn step whether the literals that
+	// differ are reads of the application's clock (learnsClocks), once a
+	// recording: served where they all are, its verdict kept so a scan
+	// that meets it again serves it too.
+	if v := g.literalVerdicts[mock]; !g.learnTried[mock] {
+		if g.learnTried == nil {
+			g.learnTried = make(map[*models.Mock]bool)
+		}
+		g.learnTried[mock] = true
+		if g.learnsClocks(mock, v.drift) {
+			g.literalVerdicts[mock] = gateVerdict{allowed: true}
+			return true
+		}
+	}
 	g.exactRejected++
 	return false
 }
@@ -504,8 +534,9 @@ func (g *strictGate) strictEngine() *mocknoise.Engine {
 func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Mock]gateVerdict, mock *models.Mock, leftOut ...string) bool {
 	v, seen := (*verdicts)[mock]
 	if seen && v.allowed {
-		return true
+		return g.clocksHold(mock)
 	}
+	leftOut = g.clockLeftOut(mock, leftOut)
 	noise := g.bodyNoise(mock, leftOut)
 	body := g.bodyDocFor(mock)
 	if !seen {
@@ -519,7 +550,7 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 		}
 		(*verdicts)[mock] = v
 	}
-	if v.allowed {
+	if v.allowed && g.clocksHold(mock) {
 		return true
 	}
 	g.rejected++
@@ -589,6 +620,8 @@ func (g *strictGate) resetDiagnostics() {
 type queryShape struct {
 	template string
 	literals []string
+	// numeric tells, by position, which literals are numbers (not quoted).
+	numeric  []bool
 	comments string
 	ok       bool
 }
@@ -670,9 +703,11 @@ func computeQueryShape(sql string) (shape *queryShape) {
 	// `WHERE a = ? AND b = 5` and `WHERE a = 5 AND b = ?` would both render
 	// as `a = :v1 and b = :v1` and false-match as the same template.
 	var literals []string
+	var numeric []bool
 	out := sqlparser.Rewrite(stmt, func(cursor *sqlparser.Cursor) bool {
 		if lit, isLit := cursor.Node().(*sqlparser.Literal); isLit {
 			literals = append(literals, lit.Val)
+			numeric = append(numeric, lit.Type == sqlparser.IntVal || lit.Type == sqlparser.FloatVal || lit.Type == sqlparser.DecimalVal)
 			cursor.Replace(sqlparser.NewArgument("kp_lit_" + strconv.Itoa(len(literals))))
 		}
 		return true
@@ -681,6 +716,7 @@ func computeQueryShape(sql string) (shape *queryShape) {
 	return &queryShape{
 		template: sqlparser.String(out),
 		literals: literals,
+		numeric:  numeric,
 		comments: strings.TrimSpace(strings.Join(comments, " ")),
 		ok:       true,
 	}

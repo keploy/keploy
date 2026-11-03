@@ -1278,6 +1278,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// reads it.
 	gate := newStrictGate(noiseEngine, logger, req.Header.Type, &req.PacketBundle, liveStatementParams, liveStmtQuery, userBodyNoise)
 	gate.bodiesBuilt, gate.compared, gate.docsMade = opts.bodiesBuilt, opts.compared, opts.docsMade
+	gate.ctx, gate.mockDb = ctx, mockDb
 	if opts.eagerBody {
 		gate.liveRequestBody()
 	}
@@ -1575,7 +1576,11 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						// depend on them), so it is not compared: a statement
 						// vitess cannot parse is compared whole, and a changed
 						// leading comment would refuse it.
-						if !gate.allows(mock) || (sameStatementOnly && liveReadsAttributes && !gate.allowsLiterals(mock)) {
+						// So is one at whose literals the learn step learned
+						// reads of the application's clock: each must hold a
+						// read of this call's span, though it equals its
+						// recording (allowsClocks).
+						if !gate.allows(mock) || (sameStatementOnly && liveReadsAttributes && !gate.allowsLiterals(mock)) || !gate.allowsClocks(mock) {
 							// A strict-rejected exact-text candidate is still the
 							// closest mock for the mismatch report (parity with
 							// the EXECUTE branch) — without this the miss diff
@@ -2403,6 +2408,13 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				miss.nextSteps = unknown.nextSteps
 			}
 		}
+		// A recording turned away because a literal the learn step learned
+		// as a read of the application's clock holds no read of this call's
+		// span, or because the learn step learned none at a literal that
+		// differs, says why (clocksHold, learnsClocks).
+		if miss.why == "" && gate.clockWhy != "" {
+			miss.why = gate.clockWhy
+		}
 		if miss.nextSteps == "" && gate.exactRejected > 0 {
 			miss.nextSteps = exactDriftNextSteps
 			if req.Header.Type == sCOM_QUERY {
@@ -2426,7 +2438,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			// The recording as strict compares it (strictGate.recordedBody),
 			// so what is learned is what a strict replay then excuses.
 			recorded, recordedOK := gate.recordedBody(matchedMock)
-			detectedNoise, _ = noiseEngine.DetectRecorded(matchedMock, recorded, recordedOK, body, executeBodyNoise(userBodyNoise, matchedMock, &req.PacketBundle))
+			// A literal learned as a read of the application's clock is
+			// checked as one, never learned as noise (withoutClocks).
+			known := withoutClocks(executeBodyNoise(userBodyNoise, matchedMock, &req.PacketBundle), literalClocks(matchedMock), gate.learned[matchedMock])
+			detectedNoise, _ = noiseEngine.DetectRecorded(matchedMock, recorded, recordedOK, body, known)
 		}
 		if len(detectedNoise) > 0 {
 			paths := make([]string, 0, len(detectedNoise))
@@ -2442,7 +2457,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 
 	// Update the mock in the database BEFORE modifying the response
 	// This ensures we update using the original mock state
-	if okk := updateMock(ctx, logger, matchedMock, mockDb, detectedNoise); !okk {
+	if okk := updateMockLearned(ctx, logger, matchedMock, mockDb, detectedNoise, gate.learned[matchedMock]); !okk {
 		logger.Debug("failed to update the matched mock")
 		return nil, false, nil, &refusedConsume{mock: matchedMock}
 	}
@@ -3519,13 +3534,30 @@ func matchResetConnectionPacket(_ context.Context, _ *zap.Logger, expected, actu
 // request (integrations.ServingIn), so a request aloft on another connection
 // that reads no recording leaves this one's serve in its order.
 func updateMock(ctx context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string) bool {
+	return updateMockLearned(ctx, logger, matchedMock, mockDb, detectedNoise, nil)
+}
+
+// updateMockLearned is updateMock whose consumed copy carries clocks too,
+// merged into its MockSpec.Clocks: the reads of the application's clock the
+// learn step learned for the command (strictGate.learned), which the
+// consumed mock's state carries back to the recording.
+func updateMockLearned(ctx context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string, clocks map[string]models.ClockOffset) bool {
 	mockDb = integrations.ServingIn(ctx, mockDb)
 	updatedMock := *matchedMock
 	updatedMock.TestModeInfo.IsFiltered = false
 	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
-	if len(detectedNoise) > 0 {
-		updatedMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(updatedMock.Spec.ReqBodyNoise, detectedNoise)
+	// attach puts what the command learned on a copy of the recording: the
+	// copies the consume writes carry it on the consumed mock's state,
+	// never the shared pooled mock.
+	attach := func(spec *models.MockSpec) {
+		if len(detectedNoise) > 0 {
+			spec.ReqBodyNoise = schemanoise.MergeLearned(spec.ReqBodyNoise, detectedNoise)
+		}
+		if len(clocks) > 0 {
+			spec.Clocks = models.MergeClocks(spec.Clocks, clocks)
+		}
 	}
+	attach(&updatedMock.Spec)
 
 	lifetime := updatedMock.TestModeInfo.Lifetime
 	rawConfig := false
@@ -3548,9 +3580,7 @@ func updateMock(ctx context.Context, logger *zap.Logger, matchedMock *models.Moc
 			return false
 		}
 		used := *matchedMock
-		if len(detectedNoise) > 0 {
-			used.Spec.ReqBodyNoise = schemanoise.MergeLearned(used.Spec.ReqBodyNoise, detectedNoise)
-		}
+		attach(&used.Spec)
 		return mockDb.MarkMockAsUsed(used)
 	}
 
@@ -3576,9 +3606,7 @@ func updateMock(ctx context.Context, logger *zap.Logger, matchedMock *models.Moc
 	// carries the detected noise on a fresh ReqBodyNoise map — this is how
 	// the noise gets reported on the consumed per-test mock (mirrors HTTP).
 	deleteMock := *matchedMock
-	if len(detectedNoise) > 0 {
-		deleteMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(deleteMock.Spec.ReqBodyNoise, detectedNoise)
-	}
+	attach(&deleteMock.Spec)
 	if mockDb.DeleteFilteredMock(deleteMock) {
 		return true
 	}

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
@@ -316,4 +317,10 @@ func checkDecodedBody(message any, statementParams int, query string, doc map[st
 		panic(fmt.Sprintf("a body made decoded is not what its bytes decode to:\nbytes   %s\ndecoded %#v\nwant    %#v", raw, decoded, want))
 	}
 	decodedBodiesChecked.Add(1)
+}
+
+// WithCommandForTest is ctx carrying the command's arrival and whether
+// record's full round learns it, as the command phase gives matchCommand.
+func WithCommandForTest(ctx context.Context, arrived time.Time, learn bool) context.Context {
+	return withCommand(ctx, commandCall{arrived: arrived, learn: learn})
 }

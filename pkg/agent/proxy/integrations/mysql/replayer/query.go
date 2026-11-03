@@ -72,6 +72,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 
 			// read the command from the client
 			command, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
+			arrived := time.Now()
 			if err != nil {
 				if ne, ok := err.(net.Error); ok && ne.Timeout() {
 					// Idle wait: keep the connection open and continue polling
@@ -114,7 +115,11 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			}
 
 			// Match the request with the mock
-			resp, ok, miss, err := matchCommand(ctx, logger, req, mockDb, decodeCtx, noiseEngine, userBodyNoise)
+			// The command's call: when keploy read it whole, the end of its
+			// span on the application's clock, and whether record's full
+			// round learns it (clock_literals.go).
+			cmdCtx := withCommand(ctx, commandCall{arrived: arrived, learn: opts.Learn})
+			resp, ok, miss, err := matchCommand(cmdCtx, logger, req, mockDb, decodeCtx, noiseEngine, userBodyNoise)
 			if err != nil {
 				if err == io.EOF {
 					logger.Debug("Connection closing due to EOF from matchCommand",
