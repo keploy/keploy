@@ -242,6 +242,16 @@ func TestEngineWithoutDetection(t *testing.T) {
 	}
 }
 
+// The default config attaches no engine, so EngineFrom returns nil and the
+// match path (http/match.go) calls PatternDrift on it directly. It must report
+// no drift rather than dereference a nil adapter and panic.
+func TestEngineNilPatternDriftIsNoop(t *testing.T) {
+	var nilEngine *Engine
+	if drift := nilEngine.WithoutDetection().PatternDrift(&models.Mock{}, []byte(`{"a":2}`), nil); drift != nil {
+		t.Fatalf("nil engine PatternDrift must be a no-op, got %v", drift)
+	}
+}
+
 func TestEngineLearnMonotonicAndDeepCopied(t *testing.T) {
 	stored := map[string][]string{"body.a": {}}
 	a := &fakeAdapter{stored: stored}

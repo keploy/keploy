@@ -195,23 +195,18 @@ func ownedBy(ctx context.Context) func(*models.Mock) bool {
 // matchCascade is match without its proven-switch report additions.
 func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
 
-	// Shared mock-noise engine for this match, built by the proxy from HTTP's
-	// declared adapter (MockNoise()) and handed in on ctx — so the declaration is
-	// what turns detection/strict on. Nil when noise is off; all Engine methods
-	// are nil-safe.
-	//
-	// The proxy builds the ctx engine from the connection-level
-	// opts.NoiseDetection()/Strict(). The per-call schemaNoiseDetection can still
-	// turn learning OFF for THIS match (it is never used to turn learning on):
-	// the proven-switch fallback and the dry own/extra-call matches pass false
-	// because record's learn step is the one noise learner — "no other replay
-	// learns noise". Honour that here by deriving a detection-off copy, so the
-	// per-call opt-out holds regardless of the connection-level flag. Strict is
-	// never force-disabled per call, so it is left to the ctx engine.
-	noiseEngine := mocknoise.EngineFrom(ctx)
-	if !schemaNoiseDetection {
-		noiseEngine = noiseEngine.WithoutDetection()
-	}
+	// Mock-noise engine for this match, built from HTTP's own adapter so it is
+	// ALWAYS present. keploy.yml request-body patterns (PatternDrift) are a user
+	// feature that must hold whether or not schema-noise detection/strict are on,
+	// so the engine cannot come from ctx (the proxy attaches none when both noise
+	// flags are off) — it is built here, like main, with the flags gating only
+	// learning and strict enforcement. The per-call schemaNoiseDetection turns
+	// learning OFF for THIS match (never on): the proven-switch fallback and the
+	// dry own/extra-call matches pass false because record's learn step is the
+	// one noise learner. Other parsers (MySQL) read the proxy's ctx-attached
+	// engine via EngineFrom; HTTP's match path is also driven directly in tests
+	// with no ctx engine, so it owns its construction from the same adapter.
+	noiseEngine := mocknoise.New(httpNoiseAdapter{}, schemaNoiseDetection, schemaNoiseStrict)
 
 	// Under the proven switch no path segment or query value is relaxed for
 	// its shape (design v14 row S1): what may differ between record and

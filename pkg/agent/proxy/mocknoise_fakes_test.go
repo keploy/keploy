@@ -21,6 +21,7 @@ func (*feedProbe) MockNoise() mocknoise.Adapter            { return nil }
 func (*heldParser) MockNoise() mocknoise.Adapter           { return nil }
 func (*holdWantingParser) MockNoise() mocknoise.Adapter    { return nil }
 func (returnsAfterOneParser) MockNoise() mocknoise.Adapter { return nil }
+func (deadlineSeer) MockNoise() mocknoise.Adapter          { return nil }
 
 // These fakes embed the Integrations interface (a nil value) and override only
 // the methods they need; without an explicit MockNoise() the promoted method

@@ -341,6 +341,12 @@ func (e *Engine) userGuardedDrift(m *models.Mock, recorded, live *JSONBody, user
 // live body lacks. A pass that excuses the obfuscator's redacted values (the HTTP
 // parser's noise-aware exact body match) serves m only when it is empty.
 func (e *Engine) PatternDrift(m *models.Mock, liveBody []byte, userNoise map[string][]string) map[string][]string {
+	// nil engine == noise off: no adapter means no keploy.yml patterns to hold,
+	// so nothing drifts beyond them. Keeps the "every method is nil-safe"
+	// contract (see context.go) that match.go relies on when both flags are off.
+	if e == nil {
+		return nil
+	}
 	recorded, _ := e.adapter.RecordedBody(m)
 	return e.patternDrift(m, NewJSONBody(recorded), NewJSONBody(liveBody), userNoise)
 }
