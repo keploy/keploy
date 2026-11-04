@@ -86,6 +86,32 @@ func TestADerivedMockReplacesItsSourceInItsOwnTestAlone(t *testing.T) {
 	}
 }
 
+// A staging that opens no window (its start unset or the base time) and
+// names no mapping stages no test, so it replaces nothing: it holds every
+// source beside the mocks derived from it, in either window mode.
+func TestAStagingThatOpensNoWindowReplacesNoSource(t *testing.T) {
+	for _, strict := range []string{"0", "1"} {
+		for _, start := range []struct {
+			name string
+			at   time.Time
+		}{{"unset", time.Time{}}, {"base time", models.BaseTime}} {
+			t.Run("KEPLOY_STRICT_MOCK_WINDOW="+strict+"/start "+start.name, func(t *testing.T) {
+				a, p := replacingStore(t, strict)
+				params := models.MockFilterParams{AfterTime: start.at, BeforeTime: stageT0.Add(2 * time.Minute), StrictMockWindow: strict == "1"}
+				if err := a.UpdateMockParams(context.Background(), params); err != nil {
+					t.Fatal(err)
+				}
+				got := p.windowed[len(p.windowed)-1]
+				for _, src := range []string{"boot", "sess"} {
+					if !slices.Contains(got[0], src) && !slices.Contains(got[1], src) {
+						t.Fatalf("a staging that opens no window dropped the source %s: staged %v", src, got)
+					}
+				}
+			})
+		}
+	}
+}
+
 // Staged by its mapping, as the proven switch stages a test, the test is
 // served its derived mock and not its source either.
 func TestADerivedMockReplacesItsSourceInATestStagedByItsMapping(t *testing.T) {
