@@ -268,10 +268,10 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// 3. Put the proxy in mock-serving mode with the miss policy and
 	// keploy.yml's matching settings, as keploy test's replay hands them:
 	// test.globalNoise's global entries with the set's own test-sets entry
-	// joined in (replay.PrepareMockNoiseConfig: its header, body and
-	// requestbody buckets), so a header or field declared noise there is not
-	// compared, nor a declared header required to be present, when a call is
-	// matched to its mock;
+	// joined in (replay.PrepareMockNoiseConfig: its header, body,
+	// requestbody and url buckets, models.MockMatchingNoise), so a header,
+	// field or url part declared noise there is not compared, nor a declared
+	// header required to be present, when a call is matched to its mock;
 	// test.disableAutoHeaderNoise; and test.mockNoiseDetection and
 	// test.mockNoiseStrict. keploy mock record's judging rounds are runs of
 	// this replay and take them the same way.

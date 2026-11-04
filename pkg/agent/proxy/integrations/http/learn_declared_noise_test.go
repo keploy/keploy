@@ -230,6 +230,75 @@ func TestLearnMatchADeclaredHeaderOnKeploysOwnListStaysKeploysNoise(t *testing.T
 	}
 }
 
+// A header on keploy's own lists that keploy.yml declares with a pattern
+// declares nothing keploy follows while the lists are on: the pattern still
+// bounds the comparison (a leaf whose live value must match it), but a value
+// it holds on both sides is excused, never a variable's use, so the call is
+// exact and served as recorded, as when keploy.yml names the header with no
+// pattern. Following it read every call whose trace or request id drifted
+// against every earlier exchange of its test. Once the lists are off
+// (DisableAutoHeaderNoise) the entry is keploy.yml's alone, and followed.
+func TestLearnMatchAPatternOnAHeaderOnKeploysOwnListDeclaresNothing(t *testing.T) {
+	h, _, _ := learnOn(t)
+	for _, row := range []struct {
+		header  string
+		listOff bool
+		liveVal string
+		miss    bool
+		want    string
+	}{
+		{"X-Request-Id", false, "o-9", false, `{"id":"o-1"}`},
+		{"Traceparent", false, "o-9", false, `{"id":"o-1"}`},
+		{"Amz-Sdk-Retry", false, "o-9", false, `{"id":"o-1"}`},
+		{"X-Request-Id", false, "z-9", true, ""},
+		{"X-Request-Id", true, "o-9", false, `{"id":"o-9"}`},
+		{"Traceparent", true, "o-9", false, `{"id":"o-9"}`},
+	} {
+		opts := models.OutgoingOptions{Learn: true, DisableAutoHeaderNoise: row.listOff, NoiseConfig: map[string]map[string][]string{"header": {row.header: {"^o-"}}}}
+		n := h.newLearnNoise(opts, nil, nil)
+		name := row.header + " " + row.liveVal
+		if row.listOff {
+			name += " (list off)"
+		}
+		noise := "header." + strings.ToLower(row.header)
+		find := live("GET", "/v1/find", "", map[string]string{row.header: row.liveVal})
+		rec := learnRecorded("mock-1", time.Second, "GET", "/v1/find", "", map[string]string{row.header: "o-1"}, `{"id":"o-1"}`)
+		if _, leaf := n.shape(liveParts(context.Background(), find), "").Leaves[noise]; !leaf {
+			t.Fatalf("%s: no leaf of the call's shape, so its pattern bounds nothing", name)
+		}
+		tr := learn.NewTracker()
+		tr.Begin()
+		db := &learnDb{perTest: []*models.Mock{
+			learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"order":"o-1"}`, nil, `{}`),
+			rec,
+		}}
+		ctx := learn.WithTracker(context.Background(), tr)
+		if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/orders", `{"order":"o-9"}`, nil), db, n, opts); served == nil || miss != nil {
+			t.Fatalf("%s: the first call is paired: %+v", name, miss)
+		}
+		served, miss, err := h.learnMatch(ctx, find, db, n, opts)
+		if row.miss {
+			if served != nil || miss == nil {
+				t.Fatalf("%s: a value outside the pattern was served %v (miss %+v err %v)", name, served, miss, err)
+			}
+			continue
+		}
+		if err != nil || miss != nil || served == nil {
+			t.Fatalf("%s: served %v miss %+v err %v", name, served, miss, err)
+		}
+		if served.Spec.HTTPResp.Body != row.want {
+			t.Fatalf("%s: served %s, want %s", name, served.Spec.HTTPResp.Body, row.want)
+		}
+		got := db.consumed[1].Spec.Learned()
+		if want := (models.MockVariables{"order": {Recorded: "o-1", Use: []string{noise}, Answer: []string{"body.id"}}}); row.listOff && !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: variables %+v, want %+v", name, got, want)
+		}
+		if !row.listOff && (len(got) != 0 || len(db.consumed[1].Spec.LearnedBinds()) != 0) {
+			t.Fatalf("%s: learned %+v binds %+v, want nothing", name, got, db.consumed[1].Spec.LearnedBinds())
+		}
+	}
+}
+
 // A value an earlier call sent in a header the comparison excuses, whether
 // keploy.yml declares it (X-Order) or keploy's own list of headers that
 // change every run names it (X-Request-Id), is a place a later call's

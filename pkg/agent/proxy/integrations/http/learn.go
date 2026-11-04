@@ -67,14 +67,17 @@ type learnNoise struct {
 	// lowercased name: such a header is compared unless its recorded and
 	// its live value each match one (headerCovers).
 	headerPats map[string][]*regexp.Regexp
-	// declaredHeaders are keploy.yml's entries with no patterns alone, by
-	// lowercased name, but those the static list already excuses:
-	// keploy.yml declaring one changes nothing, so it stays keploy's own
-	// noise (never a leaf, an earlier place: withExcused). A call whose
-	// trace or request id drifts is then exact, as before, and never read
-	// against every earlier exchange. An entry with patterns on such a
-	// header is the user's (headerPats), as the strict matcher reads it.
-	declaredHeaders map[string]bool
+	// ownHeaders are the names keploy's own header lists hold while they
+	// are on (models.FlakyHeaders but the credentials, and the proven
+	// switch's models.ProvenOnlyFlakyHeaders), whatever keploy.yml says of
+	// them. keploy.yml naming one declares nothing keploy follows
+	// (Declares): with no patterns it stays keploy's own noise (never a
+	// leaf, an earlier place: withExcused); with patterns it is a leaf they
+	// bound, as the strict matcher reads it, and a value they hold on both
+	// sides is excused, never followed. A call whose trace or request id
+	// drifts is then exact, as before, and never read against every
+	// earlier exchange.
+	ownHeaders map[string]bool
 	// body is keploy.yml's request-body noise, read by matcher.NoiseLookup:
 	// a path names whole fields, as the strict matcher reads it.
 	body matcher.NoiseLookup
@@ -93,24 +96,27 @@ type learnNoise struct {
 func (h *HTTP) newLearnNoise(opts models.OutgoingOptions, bodyNoise map[string][]string, urlNoise []string) learnNoise {
 	n := learnNoise{body: matcher.NewNoiseLookup(bodyNoise), url: compileURLNoise(h.Logger, urlNoise)}
 	n.headers, n.headerPats = splitHeaderNoise(h.Logger, opts.NoiseConfig["header"])
-	n.declaredHeaders = maps.Clone(n.headers)
+	n.ownHeaders = map[string]bool{}
 	if !opts.DisableAutoHeaderNoise {
 		// keploy.yml's own entry on a name the static lists hold wins, as
 		// NewRequestNoise keeps it for the strict matcher: a pattern the user
 		// gave such a header still holds both its values.
 		for _, k := range models.FlakyHeaders {
-			if _, user := n.headerPats[k]; !credentialHeaders[k] && !user {
+			if credentialHeaders[k] {
+				continue
+			}
+			n.ownHeaders[k] = true
+			if _, user := n.headerPats[k]; !user {
 				n.headers[k] = true
-				delete(n.declaredHeaders, k)
 			}
 		}
 		// The proven switch's own additions, as the strict matcher reads
 		// them (models.ProvenFlakyHeaderNoise): the learn step runs under the
 		// switch only.
 		for _, k := range models.ProvenOnlyFlakyHeaders {
+			n.ownHeaders[k] = true
 			if _, user := n.headerPats[k]; !user {
 				n.headers[k] = true
-				delete(n.declaredHeaders, k)
 			}
 		}
 	}
@@ -254,7 +260,7 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 		switch {
 		case k == "host" || k == "content-length" || k == "content-type" || strings.HasPrefix(k, "keploy"):
 			continue
-		case n.headers[k] && !n.declaredHeaders[k]:
+		case n.headers[k] && n.ownHeaders[k]:
 			// keploy's own noise: never read. keploy.yml's is a leaf its
 			// noise excuses (httpKnown), which the learn step still reads
 			// for a variable's use (learn.Declarer).
@@ -540,26 +546,20 @@ func (n learnNoise) headerCovers(name, rec, live string, both bool) bool {
 }
 
 // Declares implements learn.Declarer: keploy.yml's request-body and header
-// noise. An entry with patterns declares a value one of them matches; the
-// learn step asks of the recorded value and the live one alike, so a
-// pattern constrains both. keploy's own header list is no noise keploy.yml
-// declares, and neither is a value the recording's own noise excuses (an
+// noise, as declared reads it. An entry with patterns declares a value one
+// of them matches; the learn step asks of the recorded value and the live
+// one alike, so a pattern constrains both. A header on keploy's own lists
+// (ownHeaders) is no noise keploy.yml declares, its entry with patterns or
+// without, and neither is a value the recording's own noise excuses (an
 // obfuscated one, values): keploy.yml's entry still stops the comparison
 // there, but keploy never follows such a value as a variable's use or an
 // echo, so the answer is served as recorded and never carries the live
 // value, a secret's included.
 func (k httpKnown) Declares(l learn.Leaf) bool {
-	if k.values.IsNoisy(l.Value) {
+	if name, ok := strings.CutPrefix(l.Noise, "header."); ok && k.n.ownHeaders[name] {
 		return false
 	}
-	switch {
-	case strings.HasPrefix(l.Noise, "body."):
-		return k.n.body.Covers(strings.TrimPrefix(l.Noise, "body."), noiseText(l), scalarLeaf(l))
-	case strings.HasPrefix(l.Noise, "header."):
-		name := strings.TrimPrefix(l.Noise, "header.")
-		return k.n.declaredHeaders[name] || matchesAny(k.n.headerPats[name], l.Value)
-	}
-	return false
+	return !k.values.IsNoisy(l.Value) && k.n.declared(l)
 }
 
 func hasKey(m map[string][]string, k string) bool {
@@ -3121,7 +3121,7 @@ func fixedText(name, v string) (string, bool) {
 // mints and carries on), and a later call that carries it uses it.
 func withExcused(e learn.Earlier, n learnNoise, live, rec httpParts) learn.Earlier {
 	for k, v := range rec.header {
-		if !n.headers[k] || n.declaredHeaders[k] {
+		if !n.headers[k] || !n.ownHeaders[k] {
 			// Not excused, or keploy.yml's: the shape reads that header
 			// as a leaf (earlierOf), and a place is named once.
 			continue
