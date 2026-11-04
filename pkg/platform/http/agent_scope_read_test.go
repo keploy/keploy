@@ -101,12 +101,17 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3", "mock-4"}}, nil, nil, nil, nil, repeats, nil); err != nil {
 		t.Fatal(err)
 	}
+	// The names each test's own list marks served, not required, too.
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, nil, nil, nil, map[string][]string{"o::TestA": {"mock-3"}}); err != nil {
+		t.Fatal(err)
+	}
 	want := []string{
 		`{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1","mock-2"]},"worker":{"o":["mock-2"]}}`,
 		`{"mappings":{"o::TestA":[]},"pool":{}}`,
 		`{"mappings":{"o::TestA":[]},"pool":{},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}]}`,
 		`{"mappings":{"o::TestA":["mock-3"]},"pool":{},"given":{"o::TestA":[{"name":"given:nonce","value":"1761","source":"a_test.go:9"}]}}`,
 		`{"mappings":{"o::TestA":["mock-3","mock-4"]},"pool":{},"repeatReads":{"o::TestA":[{"name":"onboarding","mocks":["mock-3","mock-4"]}]}}`,
+		`{"mappings":{"o::TestA":["mock-3"]},"pool":{},"notRequired":{"o::TestA":["mock-3"]}}`,
 	}
 	if !slices.Equal(bodies, want) {
 		t.Fatalf("posted %q, want %q", bodies, want)

@@ -114,7 +114,7 @@ type provenWire struct {
 	// notRequired is, in a replay, by test ID, the names of the test's own
 	// list keploy record marked served, not required (the CLI's scope table,
 	// models.ScopeTableReq.NotRequired): its end does not charge the test
-	// for one it did not make (testEvidence). nil when the table had none.
+	// for one it did not make (testEvidence). Empty when the table had none.
 	notRequired map[string]map[string]bool
 	// staged: the replay's mocks are staged on the proxy, which serves them
 	// exactly (exact_proven.go). Once per session, and again when the CLI
@@ -651,11 +651,8 @@ func (a *Agent) SetScopeNotRequired(ctx context.Context, notRequired map[string]
 		return err
 	}
 	defer a.wire.unlock()
-	var cp map[string]map[string]bool
+	cp := make(map[string]map[string]bool, len(notRequired))
 	for test, names := range notRequired {
-		if cp == nil {
-			cp = make(map[string]map[string]bool, len(notRequired))
-		}
 		cp[test] = make(map[string]bool, len(names))
 		for _, n := range names {
 			cp[test][n] = true
