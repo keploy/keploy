@@ -77,9 +77,10 @@ type composeInstr struct {
 	// recordedWindows are the recorded test windows that push sent.
 	recordedWindows []models.TestWindow
 	given           map[string][]models.GivenValue
-	// begins is what the last push of the tests' recorded begins sent, and
-	// beginsErr what it fails with.
+	// begins and seeds are what the last push of the tests' recorded begins
+	// sent, and beginsErr what it fails with.
 	begins    map[string]time.Time
+	seeds     map[string]string
 	beginsErr error
 	// windows is what the agent answers the windows read with.
 	windows []models.ScopeWindow
@@ -230,8 +231,8 @@ func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker ma
 
 // PushTestBegins takes the tests' recorded begins (TestBeginsPusher), or
 // fails with beginsErr.
-func (f *composeInstr) PushTestBegins(_ context.Context, begins map[string]time.Time, _ map[string][]string) error {
-	f.begins = begins
+func (f *composeInstr) PushTestBegins(_ context.Context, begins map[string]time.Time, _ map[string][]string, seeds map[string]string) error {
+	f.begins, f.seeds = begins, seeds
 	return f.beginsErr
 }
 
