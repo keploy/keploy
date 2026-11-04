@@ -123,10 +123,6 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				// (integrations.OwnRepeat): one is compared and reported with
 				// the background hidden.
 				integrations.OwnRepeat(db)
-				preview := genericRequests[0]
-				if len(preview) > 64 {
-					preview = preview[:64]
-				}
 				// Build the universal mismatch report so generic misses show
 				// up in the mismatch table / report yaml like HTTP and MySQL
 				// misses do, instead of vanishing as a bare error.
@@ -160,14 +156,17 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				// Per-call generic detail at Debug; the canonical mock-mismatch
 				// WARN is emitted once in proxy.sendMockNotFoundErrorFrom (covers
 				// every parser), so this stays Debug to avoid double-logging.
+				// It prints only what the report prints, and the report
+				// carries none of the live bytes: a live buffer at a place a
+				// recording redacted (a token the obfuscator took out) is a
+				// secret, at any log level.
 				logger.Debug("no matching generic mock found for outgoing call",
 					zap.String("protocol", report.Protocol),
 					zap.Int("requestCount", len(genericRequests)),
 					zap.Int("firstRequestBytes", len(genericRequests[0])),
 					zap.String("closest", report.ClosestMock),
 					zap.String("diff", report.Diff),
-					zap.String("next_step", report.NextSteps),
-					zap.Binary("preview", preview))
+					zap.String("next_step", report.NextSteps))
 				errCh <- models.NewMockMismatchError(fmt.Errorf("generic: %w", models.ErrNoMockMatched), report)
 				return
 			}
