@@ -97,22 +97,18 @@ func withoutCookieDates(s string) string {
 	var b strings.Builder
 	from := 0
 	for _, c := range templates.SplitSetCookie(s) {
-		ma, ok := c.Attr("Max-Age")
-		if !ok || !ma.HasValue {
-			continue
-		}
+		// A Max-Age absent or with no value spans nothing, which is no
+		// number.
+		ma, _ := c.Attr("Max-Age")
 		if _, err := strconv.Atoi(s[ma.ValueStart:ma.ValueEnd]); err != nil {
 			continue
 		}
 		for _, at := range c.Attrs {
-			if strings.EqualFold(at.Name, "Expires") && at.HasValue && at.ValueStart >= from {
+			if at.HasValue && strings.EqualFold(at.Name, "Expires") {
 				b.WriteString(s[from:at.ValueStart])
 				from = at.ValueEnd
 			}
 		}
-	}
-	if from == 0 {
-		return s
 	}
 	b.WriteString(s[from:])
 	return b.String()

@@ -66,7 +66,7 @@ func namedRepeatReads(set string, table map[string][]string, loaded []*models.Mo
 	}
 	byName := make(map[string]*models.Mock, len(loaded))
 	for _, mk := range loaded {
-		if mk != nil && mk.Name != "" {
+		if mk != nil {
 			byName[mk.Name] = mk
 		}
 	}

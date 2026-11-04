@@ -13,7 +13,15 @@ import (
 func TestARegisteredNamerNamesEachTestsRepeatedReads(t *testing.T) {
 	loaded := []*models.Mock{{Name: "mock-1"}, {Name: "mock-2"}, {Name: "mock-3"}, nil, {Name: "mock-5"}}
 	table := map[string][]string{"o::TestA": {"mock-1", "mock-2", "mock-4"}, "o::TestB": {"mock-3", "mock-5"}}
-	if got := namedRepeatReads("o", table, loaded); got != nil {
+	named := func() (got map[string][]models.RepeatRead) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("namedRepeatReads panicked: %v", r)
+			}
+		}()
+		return namedRepeatReads("o", table, loaded)
+	}
+	if got := named(); got != nil {
 		t.Fatalf("keploy alone named %v", got)
 	}
 	var gotSet string
@@ -37,7 +45,7 @@ func TestARegisteredNamerNamesEachTestsRepeatedReads(t *testing.T) {
 		}
 	})
 	defer unregister()
-	got := namedRepeatReads("o", table, loaded)
+	got := named()
 	if gotSet != "o" || !reflect.DeepEqual(gotOwned, map[string][]string{"o::TestA": {"mock-1", "mock-2"}, "o::TestB": {"mock-3", "mock-5"}}) {
 		t.Fatalf("the namer was handed %q %v", gotSet, gotOwned)
 	}
@@ -57,7 +65,24 @@ func TestARegisteredNamerNamesEachTestsRepeatedReads(t *testing.T) {
 		RegisterRepeatReadNamer(func(string, map[string][]*models.Mock) map[string][]models.RepeatRead { return nil })
 	}()
 	unregister()
-	if got := namedRepeatReads("o", table, loaded); got != nil {
+	if got := named(); got != nil {
 		t.Fatalf("an unregistered namer named %v", got)
 	}
+	// An old registration's unregister leaves a newer one.
+	again := RegisterRepeatReadNamer(func(string, map[string][]*models.Mock) map[string][]models.RepeatRead {
+		return map[string][]models.RepeatRead{"o::TestB": {{Name: "list", Mocks: []string{"mock-3", "mock-5"}}}}
+	})
+	defer again()
+	unregister()
+	if got := named(); len(got) != 1 {
+		t.Fatalf("an old unregister removed the newer namer: %v", got)
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("a nil namer registered")
+			}
+		}()
+		RegisterRepeatReadNamer(nil)
+	}()
 }

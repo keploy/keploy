@@ -103,13 +103,26 @@ func TestRepeatReadOfProvesNoAnswerItCannotRead(t *testing.T) {
 			})
 		},
 	} {
-		if _, _, ok := RepeatReadOf(repeatReadMock(edit)); ok {
+		if provesRead(t, repeatReadMock(edit)) {
 			t.Errorf("%s: proved", name)
 		}
 	}
-	if _, _, ok := RepeatReadOf(nil); ok {
+	if provesRead(t, nil) {
 		t.Error("no recording: proved")
 	}
+}
+
+// provesRead is RepeatReadOf's ok for m, a panic failing the test.
+func provesRead(t *testing.T, m *models.Mock) (ok bool) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("RepeatReadOf panicked: %v", r)
+			ok = false
+		}
+	}()
+	_, _, ok = RepeatReadOf(m)
+	return ok
 }
 
 // The date of a cookie keploy cannot read, or of one that has no Max-Age, is
@@ -121,9 +134,18 @@ func TestWithoutCookieDatesDropsOnlyADateMaxAgeOverrides(t *testing.T) {
 		"a=1; Expires=Tue, 10 Nov 2026 22:45:17 GMT; Max-Age=x":                                              "a=1; Expires=Tue, 10 Nov 2026 22:45:17 GMT; Max-Age=x",
 		"a=1; Expires=Tue, 10 Nov 2026 22:45:17 GMT; Max-Age=60, b=2; Expires=Tue, 10 Nov 2026 22:45:17 GMT": "a=1; Expires=; Max-Age=60, b=2; Expires=Tue, 10 Nov 2026 22:45:17 GMT",
 		"a=1; Path=/": "a=1; Path=/",
+		// an Expires with no date has none to drop
+		"a=1; Expires=Tue, 10 Nov 2026 22:45:17 GMT; Max-Age=60, b=2; Expires; Max-Age=5": "a=1; Expires=; Max-Age=60, b=2; Expires; Max-Age=5",
 	} {
-		if got := withoutCookieDates(in); got != want {
-			t.Errorf("%q: %q; want %q", in, got, want)
-		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%q: panicked: %v", in, r)
+				}
+			}()
+			if got := withoutCookieDates(in); got != want {
+				t.Errorf("%q: %q; want %q", in, got, want)
+			}
+		}()
 	}
 }

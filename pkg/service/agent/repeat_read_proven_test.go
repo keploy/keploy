@@ -13,7 +13,15 @@ import (
 func TestRepeatedReadsMarkCopiesOfTheTestsRecordings(t *testing.T) {
 	m1, m2, m3 := &models.Mock{Name: "mock-1"}, &models.Mock{Name: "mock-2"}, &models.Mock{Name: "mock-3"}
 	owned := []*models.Mock{m1, nil, m2, m3}
-	got := markRepeatReads(owned, []models.RepeatRead{{Name: "onboarding", Mocks: []string{"mock-1", "mock-3"}}, {Name: "list", Mocks: []string{"mock-3", "mock-9"}}})
+	var got []*models.Mock
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("markRepeatReads panicked: %v", r)
+			}
+		}()
+		got = markRepeatReads(owned, []models.RepeatRead{{Name: "onboarding", Mocks: []string{"mock-1", "mock-3"}}, {Name: "list", Mocks: []string{"mock-3", "mock-9"}}})
+	}()
 	if len(got) != 4 || got[1] != nil || got[2] != m2 {
 		t.Fatalf("an unnamed recording is not served as it is: %v", got)
 	}
