@@ -329,7 +329,7 @@ func TestAnErrorReadBeforeTheAgentsExitLeavesItsExitCode(t *testing.T) {
 func TestAHungLookHoldsUpNoRule(t *testing.T) {
 	look, silence, bootLookFn := bootLook, bootSilence, containerBootLook
 	bootLook, bootSilence = time.Millisecond, 50*time.Millisecond
-	containerBootLook = func(*zap.Logger, *namedContainer) (func(context.Context) (utils.BootProgress, bool), func(context.Context) bool) {
+	containerBootLook = func(*zap.Logger, containerAPI, *namedContainer) (func(context.Context) (utils.BootProgress, bool), func(context.Context) bool) {
 		read := func(ctx context.Context) (utils.BootProgress, bool) {
 			<-ctx.Done() // the daemon never answers
 			return utils.BootProgress{}, false
@@ -515,7 +515,7 @@ func (c *scriptedContainer) install(t *testing.T) {
 	t.Helper()
 	look, silence, bootLookFn, endFn := bootLook, bootSilence, containerBootLook, containerEnd
 	bootLook, bootSilence = time.Millisecond, 50*time.Millisecond
-	containerBootLook = func(*zap.Logger, *namedContainer) (func(context.Context) (utils.BootProgress, bool), func(context.Context) bool) {
+	containerBootLook = func(*zap.Logger, containerAPI, *namedContainer) (func(context.Context) (utils.BootProgress, bool), func(context.Context) bool) {
 		read := func(context.Context) (utils.BootProgress, bool) {
 			c.mu.Lock()
 			defer c.mu.Unlock()
@@ -529,7 +529,7 @@ func (c *scriptedContainer) install(t *testing.T) {
 		}
 		return read, running
 	}
-	containerEnd = func(*zap.Logger, *namedContainer) func(context.Context) (int, bool) {
+	containerEnd = func(*zap.Logger, containerAPI, *namedContainer) func(context.Context) (int, bool) {
 		return func(context.Context) (int, bool) {
 			c.mu.Lock()
 			defer c.mu.Unlock()
@@ -1061,7 +1061,7 @@ func TestTheContainerWatchEndsOnceTheAgentSaysItListens(t *testing.T) {
 	bootLook = time.Millisecond
 	t.Cleanup(func() { bootLook, containerBootLook = look, lookFn })
 	reads := make(chan struct{}, 16)
-	containerBootLook = func(*zap.Logger, *namedContainer) (func(context.Context) (utils.BootProgress, bool), func(context.Context) bool) {
+	containerBootLook = func(*zap.Logger, containerAPI, *namedContainer) (func(context.Context) (utils.BootProgress, bool), func(context.Context) bool) {
 		read := func(context.Context) (utils.BootProgress, bool) {
 			select {
 			case reads <- struct{}{}:
@@ -1185,7 +1185,7 @@ func TestARealEnginesUnknownContainerDoesNotRunAndHasEnded(t *testing.T) {
 	if running(context.Background()) {
 		t.Fatal("the engine does not know the container, and it is still taken to run")
 	}
-	exited := containerExited(cli, c)
+	exited := containerExited(&containerLook{cli: cli}, c)
 	if code, ended := exited(context.Background()); ended {
 		t.Fatalf("containerExited = %d, %v of a container keploy never knew to be there, whose run is not over; want not ended", code, ended)
 	}
@@ -1199,7 +1199,7 @@ func TestARealEnginesUnknownContainerDoesNotRunAndHasEnded(t *testing.T) {
 	}
 	a.nameAgentContainer(name)
 	c = a.containerNamed(name)
-	exited = containerExited(cli, c)
+	exited = containerExited(&containerLook{cli: cli}, c)
 	if code, ended := exited(context.Background()); ended {
 		t.Fatalf("containerExited = %d, %v of a container named again, whose run is not over; want not ended", code, ended)
 	}
@@ -1424,7 +1424,7 @@ func TestAWaitOnTheAgentEndsOnlyOnceItsWatchHas(t *testing.T) {
 				// back once let go; none other begins while it is out.
 				var looks, cancelled, back atomic.Int32
 				letGo, let := heldBack(t)
-				containerBootLook = func(*zap.Logger, *namedContainer) (func(context.Context) (utils.BootProgress, bool), func(context.Context) bool) {
+				containerBootLook = func(*zap.Logger, containerAPI, *namedContainer) (func(context.Context) (utils.BootProgress, bool), func(context.Context) bool) {
 					read := func(context.Context) (utils.BootProgress, bool) { return utils.BootProgress{}, false }
 					return read, func(ctx context.Context) bool {
 						looks.Add(1)
@@ -1435,7 +1435,7 @@ func TestAWaitOnTheAgentEndsOnlyOnceItsWatchHas(t *testing.T) {
 						return false
 					}
 				}
-				containerEnd = func(*zap.Logger, *namedContainer) func(context.Context) (int, bool) {
+				containerEnd = func(*zap.Logger, containerAPI, *namedContainer) func(context.Context) (int, bool) {
 					return func(context.Context) (int, bool) { return 0, false }
 				}
 				a := clientFor("")
