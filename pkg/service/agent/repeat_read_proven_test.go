@@ -36,12 +36,15 @@ func TestRepeatedReadsMarkCopiesOfTheTestsRecordings(t *testing.T) {
 	}
 
 	a := &Agent{}
-	in := map[string][]models.RepeatRead{"o::TestA": {{Name: "onboarding", Mocks: []string{"mock-1", "mock-3"}}}, "o::TestB": nil}
+	in := map[string][]models.RepeatRead{"o::TestA": {{Name: "onboarding", Mocks: []string{"mock-1", "mock-3"}}}, "o::TestB": nil, "o::TestC": {{Name: "list", Mocks: []string{"mock-5", "mock-6"}}}}
 	if err := a.SetScopeRepeatReads(context.Background(), in); err != nil {
 		t.Fatal(err)
 	}
 	in["o::TestA"][0].Mocks[0] = "changed"
 	if r := a.testRepeats["o::TestA"]; len(r) != 1 || r[0].Name != "onboarding" || r[0].Mocks[0] != "mock-1" {
+		t.Fatalf("installed %v", a.testRepeats)
+	}
+	if r := a.testRepeats["o::TestC"]; len(r) != 1 || r[0].Name != "list" {
 		t.Fatalf("installed %v", a.testRepeats)
 	}
 	if _, ok := a.testRepeats["o::TestB"]; ok {

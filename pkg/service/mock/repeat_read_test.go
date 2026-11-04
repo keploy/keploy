@@ -77,12 +77,13 @@ func TestARegisteredNamerNamesEachTestsRepeatedReads(t *testing.T) {
 	if got := named(); len(got) != 1 {
 		t.Fatalf("an old unregister removed the newer namer: %v", got)
 	}
+	again()
 	func() {
 		defer func() {
 			if recover() == nil {
 				t.Error("a nil namer registered")
 			}
 		}()
-		RegisterRepeatReadNamer(nil)
+		defer RegisterRepeatReadNamer(nil)()
 	}()
 }
