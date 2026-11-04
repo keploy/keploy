@@ -39,10 +39,10 @@ type composeChildProject struct {
 // when neither the command nor the caller names one.
 const composeProjectNameEnv = "COMPOSE_PROJECT_NAME"
 
-// composeEnvFilesEnv is the variable compose reads extra env files from. Not
-// read here -- see composeChildProject on why interpolation does not change
-// what this file takes out of the document -- but the name travels with the
-// one above, and the output tests drive both.
+// composeEnvFilesEnv is the variable compose reads extra env files from. The
+// library's composeEnvironment reads it (composelib.go); this file's loader
+// does not -- see composeChildProject on why interpolation does not change
+// what it takes out of the document.
 const composeEnvFilesEnv = "COMPOSE_ENV_FILES"
 
 // composeContainerSeparator is what compose puts between a service and its
