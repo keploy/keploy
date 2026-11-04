@@ -62,7 +62,10 @@ until curl --silent --show-error --fail --location --speed-limit 1000 --speed-ti
   n=$((n + 1))
   sleep 10
 done
-got="$(sha256sum "$PART" | cut -d' ' -f1)"
+# Hashed from stdin: given a name with a backslash in it (the windows
+# runner's DIR, D:\a\...), GNU sha256sum escapes the name and starts its
+# line with a backslash, so the hash read off the line would not be the pin.
+got="$(sha256sum < "$PART" | cut -d' ' -f1)"
 if [ "$got" != "$SHA256" ]; then
   echo "llvm-mingw-toolchain: $UPSTREAM hashes to $got, not the pin $SHA256" >&2
   rm -f "$PART"
@@ -74,7 +77,9 @@ mkdir -p "$DIR/llvm-mingw.unpack"
 case "$ASSET" in
   # Windows' own bsdtar reads zip (Git Bash's GNU tar does not).
   *.zip) "${SYSTEMROOT:-C:/Windows}/System32/tar.exe" -xf "$PART" -C "$DIR/llvm-mingw.unpack" ;;
-  *) tar -xJf "$PART" -C "$DIR/llvm-mingw.unpack" ;;
+  # GNU tar reads a backslash in a name as an escape (\7 as one byte) unless
+  # told not to.
+  *) tar --no-unquote -xJf "$PART" -C "$DIR/llvm-mingw.unpack" ;;
 esac
 rm -f "$PART"
 top="$DIR/llvm-mingw.unpack/${ASSET%.zip}"

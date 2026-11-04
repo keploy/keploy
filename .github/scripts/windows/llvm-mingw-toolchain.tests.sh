@@ -143,6 +143,16 @@ if [ -n "${LLVM_MINGW_ARCHIVE:-}" ]; then
   done
   stage pinned-again 0 "already at $work/d5/llvm-mingw" STUB_CURL_FAILS=all -- "$work/d5"
   want_calls pinned-again 0 0
+  # A DIR with a backslash in its name, as the windows runner's
+  # GITHUB_WORKSPACE (D:\a\...) gives: the pinned archive is still the pin.
+  stage pinned-backslash-dir 0 "from https://github.com/mstorsjo/llvm-mingw/releases/download/$rel/$lin_asset" STUB_CURL_FILE="$LLVM_MINGW_ARCHIVE" -- "$work/d\\7"
+  [ -x "$work/d\\7/llvm-mingw/bin/x86_64-w64-mingw32-clang" ] || fail "pinned-backslash-dir: no clang staged"
+  # One left unstamped (a cut-off run's) is replaced, not unpacked into.
+  fake "$work/d6" ""
+  stage pinned-over-stale 0 "at $work/d6/llvm-mingw, from" STUB_CURL_FILE="$LLVM_MINGW_ARCHIVE" -- "$work/d6"
+  ! grep -q 'fake clang' "$work/d6/llvm-mingw/bin/x86_64-w64-mingw32-clang" || fail "pinned-over-stale: kept the stale clang"
+  [ ! -e "$work/d6/llvm-mingw/${lin_asset%.tar.xz}" ] || fail "pinned-over-stale: unpacked into the stale one, at $work/d6/llvm-mingw/${lin_asset%.tar.xz}"
+  [ "$(cat "$work/d6/llvm-mingw/.release" 2>/dev/null)" = "$lin_asset $lin_sha" ] || fail "pinned-over-stale: stamp '$(cat "$work/d6/llvm-mingw/.release" 2>/dev/null)'"
 else
   echo "skip pinned, pinned-again: LLVM_MINGW_ARCHIVE names no copy of $lin_asset"
 fi
