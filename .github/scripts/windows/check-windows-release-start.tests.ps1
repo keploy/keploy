@@ -2,7 +2,7 @@
 # passes a release-shaped set of programs and fails, naming why, for each way
 # one can be wrong: a probe that starts, a binary that needs a DLL Windows does
 # not ship, exits non-zero, prints no version or hangs, and a parser test run
-# that fails.
+# that fails. A program that hangs is killed: none is left running.
 #
 # Windows only. Builds small C programs with llvm-mingw (KEPLOY_LLVM_MINGW, as
 # llvm-mingw-toolchain.sh stages it): each is linked -static, so it needs only
@@ -24,15 +24,31 @@ function Build([string]$Name, [string]$Source, [string[]]$Flags) {
 }
 
 $failures = 0
+# The hang.exe copies still running. The check kills a program that does not
+# exit in time; Windows tears a killed process down after TerminateProcess
+# returns, so this waits up to 10 s for the count to reach 0.
+function HangLeft {
+    $deadline = (Get-Date).AddSeconds(10)
+    while ($true) {
+        $n = @(Get-Process -Name hang -ErrorAction SilentlyContinue).Count
+        if ($n -eq 0 -or (Get-Date) -gt $deadline) { return $n }
+        Start-Sleep -Milliseconds 200
+    }
+}
 # Row NAME RC WANT ARGS: run the check with ARGS, want exit RC and WANT in
-# what it printed.
+# what it printed, and no hang.exe left running after it.
 function Row([string]$Name, [int]$WantRc, [string]$Want, [string[]]$CheckArgs) {
     $out = (& pwsh -NoLogo -NoProfile -File $check @CheckArgs 2>&1 | Out-String)
     $rc = $LASTEXITCODE
+    $hung = HangLeft
+    # Stopped here, so one row's leftover does not fail the rows after it.
+    if ($hung -ne 0) { Get-Process -Name hang -ErrorAction SilentlyContinue | Stop-Process -Force }
     if ($rc -ne $WantRc) {
         Write-Host "FAIL ${Name}: exit $rc, want ${WantRc}:`n$out"; $script:failures++
     } elseif (-not $out.Contains($Want)) {
         Write-Host "FAIL ${Name}: printed:`n$out`nwant '$Want'"; $script:failures++
+    } elseif ($hung -ne 0) {
+        Write-Host "FAIL ${Name}: $hung hang.exe still running after the check returned"; $script:failures++
     } else {
         Write-Host "ok   ${Name}: $Want"
     }
@@ -85,6 +101,7 @@ try {
         Write-Host "note: the probe with this runner's own PATH did not exit within 60 s"
     }
 } finally {
+    Get-Process -Name hang -ErrorAction SilentlyContinue | Stop-Process -Force
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 
