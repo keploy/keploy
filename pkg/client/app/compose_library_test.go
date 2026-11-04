@@ -612,6 +612,38 @@ func TestALibraryDownProjectIgnoresTheCommandsAssignment(t *testing.T) {
 	}
 }
 
+// The down of an in-process run takes the project the runner ran, over what
+// else names one; a runner that names none leaves it to those (here keploy's
+// own COMPOSE_PROJECT_NAME).
+func TestALibraryDownProjectIsTheRunnersElseTheEnvironments(t *testing.T) {
+	forceComposeLibrary(t)
+	t.Setenv("COMPOSE_PROJECT_NAME", "Exported")
+	for _, tc := range []struct {
+		name  string
+		stack *fakeComposeStack
+		want  string
+	}{
+		{"a runner that names its project", &fakeComposeStack{}, "fake"},
+		{"a runner that names none", &fakeComposeStack{noProject: true}, "exported"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &App{
+				logger:          zap.NewNop(),
+				docker:          &inspectRecorder{},
+				composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
+				cmd:             "docker compose -f - up",
+				newComposeStack: func(context.Context) (composeStack, error) { return tc.stack, nil },
+			}
+			if _, err := a.composeRunner(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if got := a.composeDownProject(context.Background()); got != tc.want {
+				t.Fatalf("project %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // With no in-memory document there is nothing for a runner to run: none is
 // built, and the caller hears why.
 func TestNoRunnerIsBuiltWithoutAnInMemoryDocument(t *testing.T) {

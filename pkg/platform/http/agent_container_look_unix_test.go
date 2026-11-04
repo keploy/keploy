@@ -26,6 +26,7 @@ import (
 type fakeContainerAPI struct {
 	mu        sync.Mutex
 	state     *container.State // nil: an inspect with no state
+	noBase    bool             // an inspect with not even the container's base
 	inspected int
 	inspectEr error
 	report    []byte // the agent's report of its start; nil: none written
@@ -39,6 +40,9 @@ func (f *fakeContainerAPI) ContainerInspect(_ context.Context, _ string) (contai
 	f.inspected++
 	if f.inspectEr != nil {
 		return container.InspectResponse{}, f.inspectEr
+	}
+	if f.noBase {
+		return container.InspectResponse{}, nil
 	}
 	return container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{State: f.state}}, nil
 }
@@ -152,8 +156,9 @@ func TestAnUnreachableAPIHasTheCLIRead(t *testing.T) {
 }
 
 // An answer of the engine through its API is no unreachable socket, and runs
-// no CLI: an inspect with no state, or an error the daemon answers, is no
-// answer, and keeps the last one; a not-found copy is no report.
+// no CLI: an inspect with no state (or not even the container's base), or an
+// error the daemon answers, is no answer, and keeps the last one; a not-found
+// copy is no report.
 func TestAnAPIAnswerIsNotHandedToTheCLI(t *testing.T) {
 	ran := engineCLIRecorder(t, "running")
 	api := &fakeContainerAPI{state: &container.State{Status: "paused"}}
@@ -175,6 +180,19 @@ func TestAnAPIAnswerIsNotHandedToTheCLI(t *testing.T) {
 	if !running(context.Background()) {
 		t.Fatal("a container the API says runs is not taken to run")
 	}
+	api.state = nil
+	if !running(context.Background()) {
+		t.Fatal("an inspect with no state was read as an answer that the container does not run")
+	}
+	api.noBase = true
+	if !running(context.Background()) {
+		t.Fatal("an inspect with no base was read as an answer that the container does not run")
+	}
+	if code, over := containerEnd(zap.NewNop(), api, c)(context.Background()); over {
+		t.Fatalf("an inspect with no base ended the container: %d", code)
+	}
+	api.noBase = false
+	api.state = &container.State{Status: "running"}
 	api.inspectEr = errdefs.System(errors.New("the daemon is busy"))
 	if !running(context.Background()) {
 		t.Fatal("a daemon's error was read as an answer that the container does not run")

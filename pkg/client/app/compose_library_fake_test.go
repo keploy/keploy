@@ -46,6 +46,8 @@ type fakeComposeStack struct {
 	// project that never moves does; downCtxEnded says it ended.
 	downBlocks   bool
 	downCtxEnded atomic.Bool
+	// noProject makes the runner name no project.
+	noProject bool
 }
 
 // upContext is the context the run's Up was given (nil before Up).
@@ -55,7 +57,12 @@ func (f *fakeComposeStack) upContext() context.Context {
 	return f.upCtx
 }
 
-func (f *fakeComposeStack) ProjectName() string { return "fake" }
+func (f *fakeComposeStack) ProjectName() string {
+	if f.noProject {
+		return ""
+	}
+	return "fake"
+}
 
 func (f *fakeComposeStack) Up(ctx context.Context, _ docker.ComposeUpOptions, _, _ io.Writer) error {
 	f.upMu.Lock()
