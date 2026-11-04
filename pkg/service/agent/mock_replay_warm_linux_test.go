@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -196,27 +197,40 @@ func TestAKeployTestSetIsReadForTheLearnStepAsItIsStaged(t *testing.T) {
 type sourceWireProxy struct {
 	*wireProxy
 	handed, before, times []int
+	// fail names the setter that fails ("source", "before" or "times").
+	fail string
+}
+
+// errHanding is the error a sourceWireProxy's failing setter returns.
+var errHanding = errors.New("the proxy refused the handing")
+
+// handingErr is the error the setter named what returns.
+func (p *sourceWireProxy) handingErr(what string) error {
+	if p.fail == what {
+		return errHanding
+	}
+	return nil
 }
 
 func (p *sourceWireProxy) SetRecordingSource(func(models.Kind, []string, func(string, func() (*models.Mock, error)) bool) error) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.handed = append(p.handed, p.staged)
-	return nil
+	return p.handingErr("source")
 }
 
 func (p *sourceWireProxy) SetRecordedBefore(func(t time.Time, visit func(*models.Mock) bool) error) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.before = append(p.before, p.staged)
-	return nil
+	return p.handingErr("before")
 }
 
 func (p *sourceWireProxy) SetRecordingTimes(func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.times = append(p.times, p.staged)
-	return nil
+	return p.handingErr("times")
 }
 
 // keploy mock's replay of record's full round hands the proxy its set's keyed
@@ -241,4 +255,31 @@ func TestAMockReplaySetsOnDiskSourcesAreHandedBeforeItsStaging(t *testing.T) {
 	require.Equal(t, []int{0}, p.handed, "the keyed source is handed once, before the set's staging")
 	require.Equal(t, []int{0}, p.before, "the recordings before an instant are handed once, before the set's staging")
 	require.Equal(t, []int{0}, p.times, "the recordings' times are handed once, before the set's staging")
+}
+
+// A handing the proxy refuses fails the set's staging before it stages
+// anything: the set is not served with its trees and another set's on-disk
+// recordings, nor with none where its trees do not hold a recording.
+func TestAHandingTheProxyRefusesFailsTheSetsStagingBeforeItStages(t *testing.T) {
+	for _, tc := range []struct{ fail, want string }{
+		{"source", "set the test set's recording source"},
+		{"before", "set the test set's recordings before an instant"},
+		{"times", "set the test set's recording times"},
+	} {
+		t.Run(tc.fail, func(t *testing.T) {
+			a, wp := wireAgent(t, models.MODE_TEST)
+			p := &sourceWireProxy{wireProxy: wp, fail: tc.fail}
+			a.Proxy = p
+			m := httpMock("mock-0", "GET", "http://h/rows/0")
+			m.Spec.ReqTimestampMock = t0
+			storeMocks(a, m)
+			a.scopeTable = map[string][]string{"o::TestA": {"mock-0"}}
+			err := a.SetScopePool(context.Background(), map[string][]string{"o": {"mock-0"}})
+			require.ErrorIs(t, err, errHanding, "a refused handing fails the staging")
+			require.ErrorContains(t, err, tc.want)
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			require.Equal(t, 0, p.staged, "nothing is staged after a refused handing")
+		})
+	}
 }
