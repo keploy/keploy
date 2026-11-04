@@ -341,6 +341,18 @@ func TestARepeatedReadIsAnsweredAgainOnlyFromTheViewsOwnAnsweredRecordings(t *te
 	if _, ok := mm.AnswerRepeatRead(answered); ok {
 		t.Fatal("the read was answered again twice in one test")
 	}
+	// A test that owns no recording answers none of another test's again.
+	mm.ServeExactTest("t2", nil)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("a test that owns nothing panicked answering again: %v", r)
+			}
+		}()
+		if _, ok := mm.AnswerRepeatRead(answered); ok {
+			t.Fatal("a test that owns nothing answered another test's recording again")
+		}
+	}()
 }
 
 // The pinned CORS row's set (TestACORSPreflightRecordedAsTheTestsDataFails
