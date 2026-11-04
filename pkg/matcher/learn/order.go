@@ -2227,8 +2227,11 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 // test's (the run's variable).
 func (dc *decider) bound(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
 	first := earliest(src)
+	if first.trailed {
+		rule += ", sent in " + dc.in.Trails.Test + ", which this call trails"
+	}
 	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+first.name+rule+answeredAt(c.valueEcho, c.rec), names(src))
-	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest, InStartUp: first.startUp}
+	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest || first.trailed, InStartUp: first.startUp}
 	d.FromAt = dc.fromAt(first, c.r)
 	d.Echo = c.valueEcho
 	return d
