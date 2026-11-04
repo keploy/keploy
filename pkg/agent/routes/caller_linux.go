@@ -63,9 +63,14 @@ func tcpOwner(self, peer netip.AddrPort) (int, error) {
 		if err != nil {
 			continue
 		}
-		pid, err := strconv.Atoi(strings.SplitN(filepath.ToSlash(rel), "/", 2)[0])
+		name := strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
+		pid, err := pidOf(name)
 		if err != nil {
-			continue
+			// A holder whose name is no process ID could be the caller
+			// itself: taking another holder for it would hand the run to
+			// the wrong process, and reading no holder would hide why the
+			// caller is unknown.
+			return 0, fmt.Errorf("the socket %s -> %s (inode %s) is held by %s, which is not a process ID: %w", self, peer, inode, filepath.Join(procRoot, name), err)
 		}
 		holders[pid] = true
 	}
@@ -73,6 +78,22 @@ func tcpOwner(self, peer netip.AddrPort) (int, error) {
 		return 0, fmt.Errorf("no process holds the socket %s -> %s (inode %s)", self, peer, inode)
 	}
 	return soleHolder(self, peer, holders, procParent)
+}
+
+// pidOf reads a /proc directory's name as the process ID it is: a pid_t,
+// a positive 32-bit signed integer. Parsed at 32 bits, it fits the agent's
+// int and the u32 TGID the instance stamp keys on, so no later conversion
+// can truncate it; a name outside that range is no process, never one whose
+// low bits name another.
+func pidOf(name string) (int, error) {
+	v, err := strconv.ParseInt(name, 10, 32)
+	if err != nil {
+		return 0, err
+	}
+	if v <= 0 || strconv.FormatInt(v, 10) != name {
+		return 0, fmt.Errorf("%q is not a process ID as the kernel writes one", name)
+	}
+	return int(v), nil
 }
 
 // procParent is pid's parent, from its stat in procRoot.

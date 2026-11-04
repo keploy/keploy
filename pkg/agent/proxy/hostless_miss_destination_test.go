@@ -80,7 +80,7 @@ func TestAMissKeepsItsParsersDestinationAndNamesNoFabricatedAddress(t *testing.T
 		t.Run(tc.name, func(t *testing.T) {
 			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 1)}
 			report := &models.MockMismatchReport{Protocol: "HTTP", Destination: tc.parser, ActualSummary: "GET /"}
-			p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, report), 0, tc.dst)
+			p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, report), 0, 0, tc.dst)
 			var pe models.ParserError
 			if err := <-p.errChannel; !errors.As(err, &pe) || pe.MismatchReport == nil {
 				t.Fatalf("no miss kept: %v", err)

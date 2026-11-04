@@ -16,6 +16,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -226,7 +227,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		// record's restore just removed.
 		if recordJudged && provenswitch.On() && recordsJudged.Load() && m.config.Path != "" {
 			writeRecordTestsReceipt(m.logger, m.config.Path, TestsReceipt{
-				Set: name, At: started.UTC().Truncate(time.Second), Refusals: m.refusals, Live: m.live, Mocked: m.mocked, Real: recordReal,
+				Set: name, At: started.UTC().Truncate(time.Second), Refusals: m.refusals, Workers: claimedWorkers(m.claims), Live: m.live, Mocked: m.mocked, Real: recordReal,
 				CannotCapture: recordNotJudged, CaptureLosses: recordLosses, CaptureLossesUnread: recordLossesUnread,
 			}, recordTests)
 		}
@@ -390,11 +391,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			m.logger.Debug("AfterMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
 		}
 		mockCount++
-		typ := mk.Spec.Metadata["type"]
-		// Under the proven switch a protocol-phase mock is the pool's, never
-		// a test's (design v14 §5.2): the mapping lists data-plane mocks only.
-		protocol := provenswitch.On() && mk.IsProtocolPhase()
-		recorded = append(recorded, capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, boot: typ == "config" || typ == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef})
+		recorded = append(recorded, capturedOf(mk))
 	}
 	go func() {
 		defer utils.Recover(m.logger)
@@ -835,6 +832,30 @@ func (m *mockService) Record(ctx context.Context) error {
 		m.logger.Error(err.Error())
 		return err
 	}
+	// In a run of more than one test worker, a call from a process in no
+	// worker's keploy instance made while workers' tests were open is in
+	// none of their recordings (correlateScopes): keploy cannot tell whose
+	// it is. Each of those tests is charged with it
+	// (models.CaptureLossUnattributed), which leaves it without a verdict, so
+	// judging keeps its previous recording. A build that does not judge the
+	// record would keep their recordings short of the call, so it keeps none.
+	if calls := chargeUnattributed(windows, dataPlane(recorded)); len(calls) > 0 {
+		judging := provenswitch.On() && recordsJudged.Load()
+		for _, c := range calls {
+			m.logger.Error("a call came from a process in no test worker's keploy instance while test workers' tests were open, so keploy cannot tell which test made it: it is in none of their recordings, and those tests are not judged",
+				zap.String("mock", c.mock), zap.Uint32("pid", c.pid), zap.Strings("open_tests", c.tests),
+				zap.String("next_step", models.UnattributedRemedy))
+		}
+		if !judging {
+			// keep is false here, so the deferred DiscardStagedSet drops
+			// the staging set; a stop by the user returned above.
+			m.logger.Error("the recording was not kept: calls came from processes in no test worker's keploy instance while workers' tests were open, and this keploy does not judge the record test by test; the existing mock set (if any) was left unchanged",
+				zap.Int("calls", len(calls)), zap.String("mock-set", name), zap.String("next_step", models.UnattributedRemedy))
+			m.propagateExit(appErr, "record")
+			utils.SetExitCodeOnce(utils.ExitKeployError)
+			return fmt.Errorf("the recording is incomplete: %d call(s) came from no test worker while workers' tests were open", len(calls))
+		}
+	}
 	recordTests, recordJudged = windows, true
 	keep = runnerPassed(appErr)
 	judged := provenswitch.On() && recordsJudged.Load() && len(windows) > 0
@@ -1036,18 +1057,55 @@ func (m *mockService) takeRunWindows(all []models.ScopeWindow) []models.ScopeWin
 	return windows
 }
 
-// claimKeyAt is the key of the claim a call made at at belongs to: the
-// latest claim made at or before it (claims are in the order they were
-// made); "" before the first, which is models.PoolKeyNone's.
-func claimKeyAt(claims []models.ScopeWindow, at time.Time) string {
-	key := ""
+// claimedWorkers is the most test workers any of claims declared
+// (models.ScopeWindow.Workers): 0 when none declared more than one.
+func claimedWorkers(claims []models.ScopeWindow) int {
+	most := 0
 	for _, c := range claims {
+		most = max(most, c.Workers)
+	}
+	return most
+}
+
+// claimKeyOf is the key of the claim a call, or a test's begin, made at at
+// from keploy instance instance belongs to. A test worker's (instance, the
+// value its claim was given) is its own claim's (models.ScopeWindow.Worker),
+// whatever other workers claimed around it: each claim's value is given
+// once, so the kernel's stamp names the claim, never the time. Anything
+// else is the latest claim's made at or before it (claims are in the order
+// they were made), unless that claim is a test worker's: a call from no
+// worker is no worker's. "" before the first claim, which is
+// models.PoolKeyNone's, and for a call that has no claim of its own.
+func claimKeyOf(claims []models.ScopeWindow, instance uint32, at time.Time) string {
+	if instance != 0 {
+		for _, c := range claims {
+			if c.Worker == instance {
+				return c.Claim
+			}
+		}
+		return ""
+	}
+	latest := -1
+	for i, c := range claims {
 		if c.Start.After(at) {
 			break
 		}
-		key = c.Claim
+		latest = i
 	}
-	return key
+	if latest == -1 || claims[latest].Worker != 0 {
+		return ""
+	}
+	return claims[latest].Claim
+}
+
+// keyOf is claimKeyOf for mk: its worker's claim, or, for a call from a
+// worker that had ended (capturedMock.ended), that worker's.
+func keyOf(claims []models.ScopeWindow, mk capturedMock) string {
+	owner := mk.instance
+	if owner == 0 {
+		owner = mk.ended
+	}
+	return claimKeyOf(claims, owner, mk.ts)
 }
 
 // existsOnly is saveSet for a build whose judging keeps the set's backup: it
@@ -1216,6 +1274,23 @@ type capturedMock struct {
 	protocol bool
 	start    string
 	ref      string
+	// instance is the keploy instance (a test worker's) the call's
+	// connection was stamped with (models.Mock.Instance): only a window of
+	// that worker's (ScopeWindow.Instance) holds it. 0 for none.
+	instance uint32
+	// ended is the keploy instance of the ended test worker its connection
+	// was stamped with (models.Mock.EndedInstance; instance is then 0): a
+	// call from a process in no live worker. 0 for none.
+	ended uint32
+}
+
+// capturedOf is what record correlates of mk, a mock it recorded.
+func capturedOf(mk *models.Mock) capturedMock {
+	typ := mk.Spec.Metadata["type"]
+	// Under the proven switch a protocol-phase mock is the pool's, never
+	// a test's (design v14 §5.2): the mapping lists data-plane mocks only.
+	protocol := provenswitch.On() && mk.IsProtocolPhase()
+	return capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, instance: mk.Instance, ended: mk.EndedInstance, boot: typ == "config" || typ == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef}
 }
 
 // stagingSetID returns the staging set name record captures into while recording
@@ -1242,6 +1317,17 @@ func stagingSetID(name string) string { return name + yaml.MockStagingSuffix }
 // self-reported PID differs from the kernel PID, falls back to the timestamp
 // scan — which is exact for sequential record and best-effort under overlap.
 func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[string][]models.MockEntry {
+	return correlate(windows, mocks, true)
+}
+
+// correlate is correlateScopes. byInstance: the items are calls, each
+// stamped with its test worker's keploy instance, and a window holds only
+// the calls of its own worker's (ScopeWindow.Instance), whatever their
+// times: a call from another worker, or from no worker while workers' tests
+// are open, is never a window's of theirs. Otherwise (a test's recorded
+// requests, which carry no instance) an item that falls in windows of more
+// than one worker is no window's: its time alone cannot say whose it is.
+func correlate(windows []models.ScopeWindow, mocks []capturedMock, byInstance bool) map[string][]models.MockEntry {
 	// Sort windows by start so overlapping scopes resolve to the innermost
 	// (latest-started) window deterministically.
 	sort.SliceStable(windows, func(i, j int) bool { return windows[i].Start.Before(windows[j].Start) })
@@ -1253,11 +1339,17 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 	containingWindow := func(mk capturedMock, sameWorkerOnly bool) int {
 		best := -1
 		for i, w := range windows {
+			if byInstance && w.Instance != mk.instance {
+				continue
+			}
 			if sameWorkerOnly && w.PID != mk.pid {
 				continue
 			}
 			if mk.ts.Before(w.Start) || mk.ts.After(w.End) {
 				continue
+			}
+			if best != -1 && w.Instance != windows[best].Instance {
+				return -1
 			}
 			if best == -1 || windows[i].Start.After(windows[best].Start) {
 				best = i
@@ -1287,6 +1379,69 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 	return byTest
 }
 
+// unattributedCall is a call from a process in no test worker's keploy
+// instance (instance 0), or in an ended worker's (capturedMock.ended), made
+// while test workers' tests were open and no test of a run of one worker
+// was: no test's window holds it (correlateScopes).
+type unattributedCall struct {
+	mock  string
+	pid   uint32
+	tests []string // the tests open at its time
+}
+
+// chargeUnattributed charges each test open at an unattributed call with it
+// (models.CaptureLossUnattributed, What naming its latest such call and the
+// ended worker it came from, if any), on a copy of the test's evidence, and
+// returns the calls in the order of mocks.
+func chargeUnattributed(windows []models.ScopeWindow, mocks []capturedMock) []unattributedCall {
+	var out []unattributedCall
+	charged := map[int]models.CaptureLoss{}
+	latest := map[int]time.Time{}
+	for _, mk := range mocks {
+		if mk.instance != 0 {
+			continue
+		}
+		var open []int
+		mine := false
+		for i, w := range windows {
+			if mk.ts.Before(w.Start) || mk.ts.After(w.End) {
+				continue
+			}
+			if w.Instance == 0 {
+				mine = true
+				break
+			}
+			open = append(open, i)
+		}
+		if mine || len(open) == 0 {
+			continue
+		}
+		c := unattributedCall{mock: mk.name, pid: mk.pid}
+		for _, i := range open {
+			c.tests = append(c.tests, windows[i].Name)
+			loss := charged[i]
+			loss.Kind, loss.Count = models.CaptureLossUnattributed, loss.Count+1
+			if !mk.ts.Before(latest[i]) {
+				loss.What, latest[i] = fmt.Sprintf("the latest: mock %s, from process %d", mk.name, mk.pid), mk.ts
+				if mk.ended != 0 {
+					loss.What += " of ended test worker " + coreAgent.InstanceLabel(mk.ended)
+				}
+			}
+			charged[i] = loss
+		}
+		out = append(out, c)
+	}
+	for i, loss := range charged {
+		ev := models.ScopeEvidence{}
+		if windows[i].Evidence != nil {
+			ev = *windows[i].Evidence
+		}
+		ev.ChargeNotJudged(models.CaptureLosses{loss})
+		windows[i].Evidence = &ev
+	}
+	return out
+}
+
 // dataPlane is the captured mocks less the protocol-phase ones (none
 // without the proven switch): only data-plane mocks go in a test's mapping.
 func dataPlane(mocks []capturedMock) []capturedMock {
@@ -1306,7 +1461,7 @@ func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, s
 	for _, c := range cases {
 		spans[c.name] = models.ScopeWindow{Name: c.name, Start: c.ts, End: c.end}
 	}
-	for test, entries := range correlateScopes(windows, cases) {
+	for test, entries := range correlate(windows, cases, false) {
 		tc := models.MappedTestCase{CaseSteps: make(map[string]string, len(entries))}
 		for _, e := range entries {
 			tc.Cases = append(tc.Cases, e.Name)
@@ -1428,14 +1583,15 @@ func stampSeeds(byCase map[string]models.MappedTestCase, windows []models.ScopeW
 }
 
 // stampKeys writes into each test's mapping the key of the claim it began
-// under: its test process's. A reader who moves one of the test's calls to
-// worker: (a call that is the app's own work, a token's first use) gives the
-// moved entry this key, so its replay serves it while that process holds
-// the run; without it keploy could not name the key in a set whose test
-// processes have several. A test begun under no claim gets none.
+// under (claimKeyOf): its test process's, a test worker's own. A reader who
+// moves one of the test's calls to worker: (a call that is the app's own
+// work, a token's first use) gives the moved entry this key, so its replay
+// serves it while that process holds the run; without it keploy could not
+// name the key in a set whose test processes have several. A test begun
+// under no claim gets none.
 func stampKeys(byCase map[string]models.MappedTestCase, windows []models.ScopeWindow, claims []models.ScopeWindow) {
 	for _, w := range windows {
-		key := claimKeyAt(claims, w.Start)
+		key := claimKeyOf(claims, w.Instance, w.Start)
 		if w.Start.IsZero() || key == "" || key == models.PoolKeyNone {
 			continue
 		}
@@ -1459,13 +1615,14 @@ func flowOf(windows []models.ScopeWindow, test string) string {
 
 // setScopeMocks is startupMocks under the proven switch, split as the set
 // scope of mappings.yaml lists it: keploy decides no call's owner, so a
-// call is a test's only when a test's window holds it, and every other one
-// is the set's. startup: is what a test process did before its own first
-// test began, and the protocol-phase and app-start calls; worker: is every
-// other call outside every window, made between or after its tests, in
-// recorded order. Each keeps the key of the claim it was made under, and a
-// call is split by the first window of that key (firstWindowByKey): a run
-// of several test binaries starts each one's start-up afresh, so a later
+// call is a test's only when a test's window holds it (held: a test
+// worker's call, only its own worker's), and every other one is the set's.
+// startup: is what a test process did before its own first test began, and
+// the protocol-phase and app-start calls; worker: is every other call
+// outside every window, made between or after its tests, in recorded order.
+// Each keeps the key of the claim it was made under (keyOf), and a call is
+// split by the first window of that key (firstWindowByKey): a run of
+// several test binaries starts each one's start-up afresh, so a later
 // binary's init or TestMain call, made after an earlier binary's tests, is
 // still its start-up. A call made under no claim keeps the run's first
 // window, and so does a set recorded without claims. A key no test began
@@ -1477,10 +1634,10 @@ func flowOf(windows []models.ScopeWindow, test string) string {
 func setScopeMocks(windows []models.ScopeWindow, mocks []capturedMock, claims []models.ScopeWindow) (startup, worker []models.MockEntry) {
 	first, byKey := firstWindowByKey(windows, claims)
 	for _, mk := range mocks {
-		if !mk.boot && !mk.protocol && containing(windows, mk.ts) != "" {
+		if !mk.boot && !mk.protocol && held(windows, mk) {
 			continue
 		}
-		key := claimKeyAt(claims, mk.ts)
+		key := keyOf(claims, mk)
 		e := models.MockEntry{Name: mk.name, Kind: mk.kind, Key: key}
 		start := first
 		if key != "" {
@@ -1496,8 +1653,8 @@ func setScopeMocks(windows []models.ScopeWindow, mocks []capturedMock, claims []
 }
 
 // firstWindowByKey is when the run's first test began (first), and when the
-// first test begun under each claim key did (byKey): a window's key is the
-// claim made at or before it began, as stampKeys gives it.
+// first test begun under each claim key did (byKey): a window's key is its
+// claim's, as stampKeys gives it (claimKeyOf).
 func firstWindowByKey(windows, claims []models.ScopeWindow) (first time.Time, byKey map[string]time.Time) {
 	byKey = make(map[string]time.Time)
 	for _, w := range windows {
@@ -1507,7 +1664,7 @@ func firstWindowByKey(windows, claims []models.ScopeWindow) (first time.Time, by
 		if first.IsZero() || w.Start.Before(first) {
 			first = w.Start
 		}
-		key := claimKeyAt(claims, w.Start)
+		key := claimKeyOf(claims, w.Instance, w.Start)
 		if key == "" {
 			continue
 		}
@@ -1521,13 +1678,31 @@ func firstWindowByKey(windows, claims []models.ScopeWindow) (first time.Time, by
 func startupMocks(windows []models.ScopeWindow, mocks []capturedMock, claims []models.ScopeWindow) []models.MockEntry {
 	var out []models.MockEntry
 	for _, mk := range mocks {
-		if mk.boot || mk.protocol || containing(windows, mk.ts) == "" {
+		if mk.boot || mk.protocol || !held(windows, mk) {
 			// Under the proven wire, the pool slice of the key it was made
 			// under (design v14 §5.2); claims are none without it.
-			out = append(out, models.MockEntry{Name: mk.name, Kind: mk.kind, Key: claimKeyAt(claims, mk.ts)})
+			out = append(out, models.MockEntry{Name: mk.name, Kind: mk.kind, Key: keyOf(claims, mk)})
 		}
 	}
 	return out
+}
+
+// held reports whether a test's window holds mk, so no set scope lists it.
+// A test worker's call is held only by its own worker's windows, as
+// correlate keeps it: one made outside them is the set's, though another
+// worker's test was open. Any other call is held by any window open at its
+// time: inside a worker's test, a call from no worker is charged to it
+// (chargeUnattributed).
+func held(windows []models.ScopeWindow, mk capturedMock) bool {
+	if mk.instance == 0 {
+		return containing(windows, mk.ts) != ""
+	}
+	for _, w := range windows {
+		if w.Instance == mk.instance && !mk.ts.Before(w.Start) && !mk.ts.After(w.End) {
+			return true
+		}
+	}
+	return false
 }
 
 func containing(windows []models.ScopeWindow, at time.Time) string {

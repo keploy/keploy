@@ -42,7 +42,7 @@ func darwinPair(t *testing.T) (p *Proxy, app, proxySide *net.TCPConn, reader *tr
 	}
 	proxySide = s.(*net.TCPConn)
 	t.Cleanup(func() { _ = proxySide.Close() })
-	p.paired.add(proxySide, 1)
+	p.paired.add(proxySide, 1, 0)
 	reader = p.inflight.track(proxySide)
 	reader.beforeClose = func() { p.pairClosing(context.Background(), proxySide, reader) }
 	t.Cleanup(func() { p.inflight.forget(reader) })

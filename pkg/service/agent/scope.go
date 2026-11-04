@@ -316,7 +316,10 @@ func (a *Agent) failLostScope(ctx context.Context, lost lostScope, at time.Time)
 	a.scopeMu.Unlock()
 	for _, o := range open {
 		a.closeWindow(o.name, int(o.pid), at)
-		if err := a.restorePool(ctx, o.name, int(o.pid)); err != nil {
+		// A worker pid's scope is no test worker's (scopeInstance): the
+		// wire sends a pid only with the switch off, and an in-process
+		// caller's is served on the run's manager.
+		if err := a.restorePool(ctx, o.name, int(o.pid), 0); err != nil {
 			a.logger.Debug("could not give back the pool of a test whose worker exited", zap.String("test", o.name), zap.Error(err))
 		}
 	}
@@ -397,7 +400,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 		if a.replaying() {
 			meta.given = nil
 		}
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Random: meta.random, Seed: meta.seed, Evidence: ev, Real: meta.real, Given: meta.given})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Random: meta.random, Seed: meta.seed, Evidence: ev, Real: meta.real, Given: meta.given, Instance: meta.instance})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
@@ -420,6 +423,9 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 	}
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
 		a.noteEndOfGated(name, pid)
+		// The test worker whose pool the end serves again, read before
+		// the window that names it closes.
+		worker := a.scopeInstance(name)
 		closed := a.closeWindow(name, pid, at)
 		// Under the switch, only the end of a begin that opened a window gives
 		// the pool back: a test keploy refused or withdrew at its begin, or an
@@ -430,7 +436,7 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 		// this test holds, or its own move still in force.
 		var err error
 		if closed || !provenswitch.On() {
-			err = a.restorePool(ctx, name, pid)
+			err = a.restorePool(ctx, name, pid, worker)
 		}
 		if cerr := a.endTestClock(ctx, name, pid); cerr != nil {
 			err = errors.Join(err, fmt.Errorf("keploy could not move the clock back after %s: %w", name, cerr))
@@ -446,8 +452,9 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 // restorePool gives a worker, or the whole run, back the whole pool after a
 // test whose mapping narrowed it (the whole run, with the switch off, less
 // what tests consumed: stageScope); under the proven wire, the current key's
-// pool slice after any test.
-func (a *Agent) restorePool(ctx context.Context, name string, pid int) error {
+// pool slice after any test: of the test worker that ran it (worker), 0 in
+// the run of one test process.
+func (a *Agent) restorePool(ctx context.Context, name string, pid int, worker uint32) error {
 	a.scopeMu.Lock()
 	_, scoped := a.scopeTable[name]
 	a.scopeMu.Unlock()
@@ -459,9 +466,9 @@ func (a *Agent) restorePool(ctx context.Context, name string, pid int) error {
 	}
 	if exact {
 		// Between tests the proven wire serves the current key's pool
-		// slice (exact_proven.go).
+		// slice (exact_proven.go), of the worker that ran the test.
 		a.logger.Debug("scope end: serving the pool slice of the current key", zap.String("test", name))
-		return a.servePoolExactly(ctx)
+		return a.servePoolExactly(ctx, worker)
 	}
 	if pid > 0 {
 		a.logger.Debug("scope end: clearing worker scope", zap.String("test", name), zap.Int("worker", pid))
@@ -586,6 +593,10 @@ type scopeMeta struct {
 	// whose container the Docker daemon did not answer the read of
 	// (unreadMock): its window says so as it closes.
 	unread models.CaptureLosses
+	// instance is, under the proven wire, the keploy instance of the test
+	// worker that began the test (ProvenBegin), which its window carries
+	// (models.ScopeWindow.Instance): 0 in a run of one worker.
+	instance uint32
 }
 
 func (a *Agent) NoteScope(name string, pid int, dir string, suite bool) {
@@ -643,6 +654,31 @@ func (a *Agent) noteScopeRandomDone(name string, pid int, random string) {
 	meta := a.scopeMeta[k]
 	meta.random = random
 	a.scopeMeta[k] = meta
+}
+
+// noteScopeInstance records, under the proven wire, that test name was begun
+// by the test worker with keploy instance inst, for the window its end
+// closes: record charges it only that worker's calls. inst 0: the test of a
+// run of one worker, whose window holds the calls of no worker.
+func (a *Agent) noteScopeInstance(name string, inst uint32) {
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	if a.scopeMeta == nil {
+		a.scopeMeta = make(map[scopeKey]scopeMeta)
+	}
+	k := scopeKey{pid: 0, name: name}
+	meta := a.scopeMeta[k]
+	meta.instance = inst
+	a.scopeMeta[k] = meta
+}
+
+// scopeInstance is the keploy instance of the test worker that began test
+// name (noteScopeInstance), while its window is open; 0 in a run of one test
+// process.
+func (a *Agent) scopeInstance(name string) uint32 {
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	return a.scopeMeta[scopeKey{pid: 0, name: name}].instance
 }
 
 // NoteScopeOutcome records the verdict a test's harness reported as it ended

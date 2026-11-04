@@ -550,7 +550,10 @@ type UnmatchedCall struct {
 	// Kind is where the call was made, under the proven switch (MissInTest,
 	// MissExtraCall, MissOutsideTest); empty without it. Recorded is, for an
 	// extra call, how many times the test recorded that call.
-	Kind     string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Kind string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	// Instance is the test worker whose process made the call (0, left
+	// out: the run of one test process, or no worker).
+	Instance uint32 `json:"instance,omitempty" yaml:"instance,omitempty"`
 	Recorded int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
 	// BeforeSet says, under the proven switch, that the call was made before
 	// its test set's first test began, with no test's window open: the
@@ -581,6 +584,14 @@ type UnmatchedCall struct {
 	// likely one that test recorded, such as a later exchange of a connection
 	// it opened, whose handshake was recorded there.
 	RecordedIn string `json:"recorded_in,omitempty" yaml:"recorded_in,omitempty"`
+	// OrderDependent says, under the proven switch, a test of one of a
+	// run's parallel test workers made the call RecordedIn's test recorded:
+	// a call a worker makes once (a token fetch, a pooled connection's
+	// handshake) lands in whichever of its tests it runs first, and the
+	// workers take tests in another order each run, so the call is no one
+	// test's. The test fails on it, named, as it fails on any miss: keploy
+	// never answers it with the other test's recording.
+	OrderDependent bool `json:"order_dependent,omitempty" yaml:"order_dependent,omitempty"`
 	// Reason is why the call missed, in judging's words (design v14 §5.3,
 	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall. Only
 	// record's full round, where the learn step runs, gives one; empty

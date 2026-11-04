@@ -142,8 +142,16 @@ type Mock struct {
 	// for parallel runners). Runtime-only: never serialized (yaml/json/bson "-")
 	// — it is an in-process hint, not part of the recorded mock. 0 if unknown.
 	SourcePID uint32 `json:"-" yaml:"-" bson:"-"`
-	Start     string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
-	StartRef  string `json:"-" yaml:"-" bson:"-"`
+	// EndedInstance is, under the proven switch, the keploy instance the
+	// call's connection was stamped with when that test worker had ended by
+	// the time the call was captured (Instance is then 0): a value is given
+	// to one claim only, so the call is from a process in no live worker,
+	// and record charges it as it charges one from a process in no worker,
+	// naming the ended worker. 0 for none. Like SourcePID it only travels,
+	// and it sits in that field's padding, so a Mock is no bigger for it.
+	EndedInstance uint32 `json:"-" yaml:"-" bson:"-"`
+	Start         string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
+	StartRef      string `json:"-" yaml:"-" bson:"-"`
 	// Origin is, under the proven switch, where the call came from: the clock
 	// its ReqTimestampMock is on, and the process that made it. Only a record
 	// under the switch sets it; a file's is read and
@@ -152,6 +160,12 @@ type Mock struct {
 	// yaml "-" here. Set it whole, never edit one in place: ShallowCopy shares
 	// it, as it shares Spec's pointers.
 	Origin *Origin `json:"origin,omitempty" yaml:"-" bson:"origin,omitempty"`
+	// Instance is, under the proven switch, the keploy instance (a test
+	// worker's) the process that made the call was in when it connected,
+	// as the kernel stamped its connection: record charges the call to
+	// that worker's test only (ScopeWindow.Instance). 0 for none. Like
+	// SourcePID it only travels, to keploy record, and is never stored.
+	Instance uint32 `json:"-" yaml:"-" bson:"-"`
 
 	// pooled is set when the replay mock manager takes the mock into a staging,
 	// or stores it in a pool that matchers read, and is never cleared. The
@@ -1212,6 +1226,8 @@ func (m *Mock) DeepCopy() *Mock {
 	// Where the call came from (proven switch): the copy's own, so a copy
 	// written later (the async gob writer's) holds what the mock held.
 	c.Origin = m.Origin.clone()
+	// And the test worker it came from, which record charges it by.
+	c.Instance, c.EndedInstance = m.Instance, m.EndedInstance
 
 	// Deep copy the Noise slice so mutations to one copy don't affect the other.
 	if len(m.Noise) > 0 {

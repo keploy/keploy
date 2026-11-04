@@ -316,7 +316,7 @@ func (p *Proxy) countAccept(conn net.Conn) bool {
 		// bytes the application writes to it (pairbytes.go). A proxy that
 		// keeps no connection (an agent that settles no read) only routes
 		// by the pairing: nothing would wait for the bytes.
-		p.paired.add(tc, pairing.AppSeq)
+		p.paired.add(tc, pairing.AppSeq, pairing.Dst.Instance)
 		p.proveAppVisible(tc)
 	}
 	p.accepts.Add(pairing.Seq)

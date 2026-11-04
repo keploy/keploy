@@ -525,3 +525,164 @@ func TestAFailedNameReadIsTriedAgain(t *testing.T) {
 		t.Fatalf("the connection is named %+v, %v once its process can be read", n, ok)
 	}
 }
+
+// Each mock carries the keploy instance (a test worker's) its own
+// connection was stamped with, the connection's process aside: a mock that
+// names one already keeps it, a connection noted again with another
+// instance is the later connection's, and Stamp gives it under the proven
+// switch only, by the connection's metadata ID too.
+func TestAMockCarriesItsConnectionsInstance(t *testing.T) {
+	c := newCommander()
+	c.comm[42], c.comm[43] = "w1", "w2"
+	r := New(c, 0)
+	for _, v := range []uint32{3, 4, 5} {
+		r.InstanceBegan(v)
+	}
+	r.NoteOriginIn("1", 42, 3)
+	r.NoteOriginIn("2", 43, 5)
+	r.NoteOrigin("3", 42)
+	for conn, want := range map[string]uint32{"1": 3, "2": 5, "3": 0, "unknown": 0} {
+		m := &models.Mock{ConnectionID: conn}
+		r.StampInstance(m)
+		if m.Instance != want {
+			t.Fatalf("connection %s's mock got instance %d; want %d", conn, m.Instance, want)
+		}
+	}
+	kept := &models.Mock{ConnectionID: "2", Instance: 7}
+	r.StampInstance(kept)
+	if kept.Instance != 7 {
+		t.Fatalf("a mock that names its instance got %d", kept.Instance)
+	}
+	r.NoteOriginIn("1", 42, 4)
+	again := &models.Mock{ConnectionID: "1"}
+	r.StampInstance(again)
+	if again.Instance != 4 {
+		t.Fatalf("a connection ID noted again with another instance stamps %d; want the later 4", again.Instance)
+	}
+	t.Setenv(provenswitch.Env, "")
+	off := &models.Mock{ConnectionID: "2"}
+	r.Stamp(off)
+	if off.Instance != 0 {
+		t.Fatalf("without the switch Stamp gave the mock instance %d", off.Instance)
+	}
+	t.Setenv(provenswitch.Env, "1")
+	on := &models.Mock{Spec: models.MockSpec{Metadata: map[string]string{"connID": "2"}}}
+	r.Stamp(on)
+	if on.Instance != 5 {
+		t.Fatalf("under the switch Stamp gave the mock instance %d; want 5", on.Instance)
+	}
+	if c := on.DeepCopy(); c.Instance != 5 {
+		t.Fatalf("a copy of the mock carries instance %d; want 5", c.Instance)
+	}
+}
+
+// A connection stamped with a test worker's keploy instance whose worker
+// has ended by the time its mock is stamped is from no live worker: the
+// mock gets no instance, so no window of a later claim of that id holds it,
+// and carries the ended one, which record names as it charges the call. A
+// stamp never made live is no worker's either. While the worker lives its
+// mocks carry its instance, and a mock stamped before the end keeps it.
+func TestAnEndedWorkersConnectionStampsNoInstance(t *testing.T) {
+	c := newCommander()
+	c.comm[42] = "app"
+	r := New(c, 0)
+	r.InstanceBegan(1025)
+	r.NoteOriginIn("1", 42, 1025)
+	r.NoteOriginIn("2", 42, 9)
+	before := &models.Mock{ConnectionID: "1"}
+	r.StampInstance(before)
+	if before.Instance != 1025 || before.EndedInstance != 0 {
+		t.Fatalf("a live worker's mock got instance %d, ended %d; want 1025, 0", before.Instance, before.EndedInstance)
+	}
+	r.InstanceEnded(1025)
+	r.StampInstance(before)
+	if before.Instance != 1025 || before.EndedInstance != 0 {
+		t.Fatalf("a mock stamped while its worker lived got instance %d, ended %d at a later stamp; want 1025, 0", before.Instance, before.EndedInstance)
+	}
+	r.Reset()
+	r.NoteOriginIn("1", 42, 1025)
+	for conn, want := range map[string]uint32{"1": 1025, "2": 0} {
+		if conn == "2" {
+			r.NoteOriginIn("2", 42, 9)
+			want = 9
+		}
+		after := &models.Mock{ConnectionID: conn}
+		r.StampInstance(after)
+		if after.Instance != 0 || after.EndedInstance != want {
+			t.Fatalf("connection %s's mock got instance %d, ended %d; want 0, %d", conn, after.Instance, after.EndedInstance, want)
+		}
+		r.StampInstance(after)
+		if after.Instance != 0 || after.EndedInstance != want {
+			t.Fatalf("connection %s's mock stamped again got instance %d, ended %d; want 0, %d", conn, after.Instance, after.EndedInstance, want)
+		}
+		if cp := after.DeepCopy(); cp.EndedInstance != want {
+			t.Fatalf("a copy of connection %s's mock carries ended %d; want %d", conn, cp.EndedInstance, want)
+		}
+	}
+	r.InstanceBegan(2049)
+	r.Reset()
+	r.NoteOriginIn("3", 42, 2049)
+	live := &models.Mock{ConnectionID: "3"}
+	r.StampInstance(live)
+	if live.Instance != 2049 || live.EndedInstance != 0 {
+		t.Fatalf("a worker live across a Reset: its mock got instance %d, ended %d; want 2049, 0", live.Instance, live.EndedInstance)
+	}
+	if r.InstanceGone(0) {
+		t.Fatal("a connection stamped with no instance was read as an ended worker's")
+	}
+	stamped := &models.Mock{ConnectionID: "1", EndedInstance: 1025}
+	r.NoteOriginIn("1", 42, 2049)
+	r.StampInstance(stamped)
+	if stamped.Instance != 0 || stamped.EndedInstance != 1025 {
+		t.Fatalf("a mock stamped as an ended worker's got instance %d, ended %d once its connection id was noted in a live worker; want 0, 1025 (the first stamp is final)", stamped.Instance, stamped.EndedInstance)
+	}
+}
+
+// Whether a call is an ended worker's is decided by when keploy read its
+// request, against its worker's end, never by when its parser hands it
+// over: a request read while the worker lived is the worker's, though
+// handed over after its end; one read at or after the end, or with no read
+// time, is from no live worker. Another worker's connection stays its own,
+// a second end does not move the first, and a connection noted after the
+// end is from no live worker whatever its calls' times.
+func TestACallIsAnEndedWorkersByWhenItsRequestWasRead(t *testing.T) {
+	c := newCommander()
+	c.comm[42], c.comm[43] = "a", "b"
+	r := New(c, 0)
+	r.InstanceBegan(1)
+	r.InstanceBegan(2)
+	r.NoteOriginIn("a", 42, 1)
+	r.NoteOriginIn("b", 43, 2)
+	live := time.Now()
+	time.Sleep(time.Millisecond)
+	r.InstanceEnded(1)
+	end := r.origin.conns["a"].endedAt
+	if end.IsZero() || !r.origin.conns["b"].endedAt.IsZero() {
+		t.Fatalf("worker 1's end marked its connection at %v and worker 2's at %v; want only worker 1's", end, r.origin.conns["b"].endedAt)
+	}
+	time.Sleep(time.Millisecond)
+	between := time.Now()
+	time.Sleep(time.Millisecond)
+	r.InstanceEnded(1)
+	r.NoteOriginIn("a-late", 42, 1)
+	for _, tc := range []struct {
+		what, conn          string
+		read                time.Time
+		instance, wantEnded uint32
+	}{
+		{"read while its worker lived, handed over after its end", "a", live, 1, 0},
+		{"read at the instant its worker ended", "a", end, 0, 1},
+		{"read after its worker ended, before a second end", "a", between, 0, 1},
+		{"read after its worker ended", "a", time.Now(), 0, 1},
+		{"with no read time", "a", time.Time{}, 0, 1},
+		{"of another, live, worker, read after the first's end", "b", time.Now(), 2, 0},
+		{"on a connection noted after its worker ended", "a-late", live, 0, 1},
+	} {
+		m := &models.Mock{ConnectionID: tc.conn}
+		m.Spec.ReqTimestampMock = tc.read
+		r.StampInstance(m)
+		if m.Instance != tc.instance || m.EndedInstance != tc.wantEnded {
+			t.Fatalf("a call %s got instance %d, ended %d; want %d, %d", tc.what, m.Instance, m.EndedInstance, tc.instance, tc.wantEnded)
+		}
+	}
+}

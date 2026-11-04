@@ -33,10 +33,20 @@ type InstanceReq struct {
 	// run (a Go package's directory). Kept on each test's window, so the
 	// recording's mapping names the folder each test runs in.
 	Dir string `json:"dir,omitempty"`
+	// Workers is how many test workers of the run its framework runs at
+	// once (Playwright's workers, go test's -p), each claiming for itself.
+	// 0, sent by an integration that predates it, is one. The agent refuses
+	// more than it runs at once (ScopeErrTooManyWorkers: more than its limit,
+	// or more than one in record's full round or in a replay that moves the
+	// run's one clock to each test's recorded begin), and a count other than
+	// a live worker's (ScopeErrWorkersMismatch), so whether a run is taken
+	// never depends on how its workers happen to overlap.
+	Workers int `json:"workers,omitempty"`
 }
 
 // InstanceResp answers POST /agent/instance. With one test process per run
-// the instance is the run itself. TimeFile is the clock file the test process
+// the instance is the run itself (InstanceRun); a worker of a run of more
+// gets its keploy instance's number. TimeFile is the clock file the test process
 // runs on, empty when the run is not frozen.
 type InstanceResp struct {
 	V        int    `json:"v"`
@@ -116,6 +126,18 @@ const (
 	// ScopeErrOneTestProcess: a test process claimed the run while another
 	// live one held it; the first release runs one at a time.
 	ScopeErrOneTestProcess = "one_test_process_at_a_time"
+	// ScopeErrTooManyWorkers: a claim declared more test workers
+	// (InstanceReq.Workers) than this keploy runs at once, or more than one
+	// where the run runs one (record's full round, a replay that moves the
+	// run's one clock).
+	ScopeErrTooManyWorkers = "too_many_workers"
+	// ScopeErrWorkersMismatch: a claim declared another worker count than
+	// a live worker of the run did.
+	ScopeErrWorkersMismatch = "workers_mismatch"
+	// ScopeErrNotInInstance: a begin or end of a run of more than one worker
+	// came from a process that is no live worker's claimant, or keploy
+	// could not put a worker's processes in an instance of their own.
+	ScopeErrNotInInstance = "not_in_instance"
 	// ScopeErrNotOpen: an end for a test that is not open, or a given
 	// while no test is open.
 	ScopeErrNotOpen = "not_open"
@@ -193,6 +215,43 @@ func IDPart(s string) bool {
 // Empty reports whether there is no evidence.
 func (e *ScopeEvidence) Empty() bool {
 	return e == nil || (len(e.Misses) == 0 && len(e.Unconsumed) == 0 && len(e.CaptureIncomplete) == 0 && len(e.Incomplete) == 0 && len(e.CannotCapture) == 0)
+}
+
+// ChargeNotJudged charges the test with losses that leave it without a
+// verdict (CaptureLosses.Split's notJudged), never failed: on CannotCapture,
+// and in the reason one sentence names all of CannotCapture with its summed
+// counts. The sentence the reason already holds for CannotCapture is written
+// again in its place; else the sentence goes after what the reason says.
+// What the agent charged (a worker's REAL use) and what the record charges
+// (a mock), or each late mock whose container keploy could not read, are one
+// count: a reader sees one number, and each What charged, once.
+func (e *ScopeEvidence) ChargeNotJudged(l CaptureLosses) {
+	was := e.CannotCapture.NotJudgedText()
+	sum := e.CannotCapture.Plus(l)
+	for i := range sum {
+		for _, c := range e.CannotCapture {
+			if c.Kind != sum[i].Kind || c.What == "" {
+				continue
+			}
+			// Plus keeps the What charged last: each What charged is named,
+			// once.
+			if !strings.Contains(c.What, sum[i].What) {
+				sum[i].What = c.What + "; " + sum[i].What
+			} else {
+				sum[i].What = c.What
+			}
+		}
+	}
+	e.CannotCapture = sum
+	text := sum.NotJudgedText()
+	switch {
+	case was != "" && strings.Contains(e.Reason, was):
+		e.Reason = strings.Replace(e.Reason, was, text, 1)
+	case e.Reason == "":
+		e.Reason = "keploy: " + text + "."
+	default:
+		e.Reason = strings.TrimSpace(e.Reason + " Also " + text + ".")
+	}
 }
 
 // TestID is a test's ID on the wire (design v14 §6.2):

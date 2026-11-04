@@ -549,7 +549,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-
 					// agnostic mock-mismatch WARN is emitted once in
-					// proxy.sendMockNotFoundError (where every parser's miss
+					// proxy.sendMockNotFoundErrorFrom (where every parser's miss
 					// funnels), so this stays Debug to avoid double-logging.
 					h.Logger.Debug("no matching http mock found for outgoing request",
 						zap.String("protocol", report.Protocol),

@@ -432,6 +432,10 @@ type ParserError struct {
 	// MissOutsideTest), set by the proxy under exact serving; empty without
 	// the proven switch.
 	MissKind string
+	// Instance is the test worker whose process made the call, as the
+	// kernel stamped its connection (0: no worker): its tests alone are
+	// charged the miss.
+	Instance uint32
 	// Recorded is, for MissExtraCall, how many times the call was recorded
 	// for the test.
 	Recorded int

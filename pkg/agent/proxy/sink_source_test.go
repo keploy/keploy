@@ -65,7 +65,7 @@ func TestTheSinkNamesTheProcessOfEachCallUnderTheSwitchOnly(t *testing.T) {
 		}
 		p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 8)}
 		p.BeginTestErrorCapture()
-		ctx := models.WithMockMismatchReporter(context.Background(), func(err error) { p.sendMockNotFoundErrorFrom(err, self, nil) })
+		ctx := models.WithMockMismatchReporter(context.Background(), func(err error) { p.sendMockNotFoundErrorFrom(err, self, 0, nil) })
 		if !models.ReportMockMismatch(ctx, models.NewMockMismatchError(models.ErrNoMockMatched, &models.MockMismatchReport{Protocol: "MongoDB", ActualSummary: "insert on events"})) {
 			t.Fatal("the miss was not reported")
 		}
