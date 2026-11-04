@@ -421,6 +421,7 @@ func TestWordRuns_AStretchItsMockHoldsElsewhereIsAValueOfItsOwn(t *testing.T) {
 		name, recorded string
 		held           []string // held whole elsewhere, and learned as one value each
 		unnamed        bool     // learning names no word's value
+		named          string   // learning names every word a word of this one value
 		none           bool     // no evidence at all (no Elsewhere)
 		want           []string
 	}{
@@ -448,6 +449,13 @@ func TestWordRuns_AStretchItsMockHoldsElsewhereIsAValueOfItsOwn(t *testing.T) {
 		{name: "the whole held beside the cid before it", recorded: cid + "/3", held: []string{cid, cid + "/3"}, want: cat(cids, []string{"3@0"})},
 		{name: "the whole held beside the cid after two words", recorded: "x/y/" + cid, held: []string{cid, "x/y/" + cid}, want: cat([]string{"x@0", "y@0"}, cids)},
 		{name: "the whole held beside the cid before two words", recorded: cid + "/x/y", held: []string{cid, cid + "/x/y"}, want: cat(cids, []string{"x@0", "y@0"})},
+		// Learning naming the whole one value does not make it one: a held
+		// stretch inside it, at its end, its start or apart from the end
+		// words, still makes it two values.
+		{name: "the whole named one value beside the cid after it", recorded: "3/" + cid, held: []string{cid, "3/" + cid}, named: "3/" + cid, want: cat([]string{"3@0"}, cids)},
+		{name: "the whole named one value beside the cid before it", recorded: cid + "/3", held: []string{cid, cid + "/3"}, named: cid + "/3", want: cat(cids, []string{"3@0"})},
+		{name: "the whole named one value beside the cid after two words", recorded: "x/y/" + cid, held: []string{cid, "x/y/" + cid}, named: "x/y/" + cid, want: cat([]string{"x@0", "y@0"}, cids)},
+		{name: "the whole named one value beside the cid before two words", recorded: cid + "/x/y", held: []string{cid, cid + "/x/y"}, named: cid + "/x/y", want: cat(cids, []string{"x@0", "y@0"})},
 		{name: "no evidence: each word alone", recorded: "ab/3", held: []string{"ab/3"}, none: true, want: []string{"ab@0", "3@0"}},
 		{name: "the cid held elsewhere: the word before it alone", recorded: "3/" + cid, held: []string{cid}, want: cat([]string{"3@0"}, cids)},
 		{name: "a run longer than spans are read in: each word alone", recorded: strings.Repeat("ab/", maxSpanRun) + "3", held: []string{"ab/ab", "3"}, want: []string{"ab@0", "ab@0"}},
@@ -463,6 +471,9 @@ func TestWordRuns_AStretchItsMockHoldsElsewhereIsAValueOfItsOwn(t *testing.T) {
 			elsewhere, of := heldAt(c.held...), learnedAs(c.held...)
 			if c.unnamed {
 				of = nil
+			}
+			if c.named != "" {
+				of = func(string, int) string { return c.named }
 			}
 			if c.none {
 				elsewhere = nil
@@ -480,18 +491,19 @@ func TestWordRuns_AStretchItsMockHoldsElsewhereIsAValueOfItsOwn(t *testing.T) {
 	}
 	// A text whose words differ from the run's ("zz/3"), or that ends before
 	// the run does, at its first word ("3") or after a first word it holds
-	// ("ab"): each word alone, though its mock holds the text whole elsewhere
-	// and learning names it one value.
-	for _, text := range []string{"zz/3", "3", "ab"} {
-		ws := []WordBind{{Text: "body.key", Word: 0, Live: "x", Recorded: "ab", RecordedText: text, Elsewhere: heldAt(text), Of: text}, {Text: "body.key", Word: 1, Live: "7", Recorded: "3", RecordedText: text, Elsewhere: heldAt(text), Of: text}}
+	// ("ab"), or a run whose second word names another recorded text ("ab/4",
+	// though its word there is the first text's): each word alone, though its
+	// mock holds the text whole elsewhere and learning names it one value.
+	for _, c := range []struct{ text, second string }{{"zz/3", "zz/3"}, {"3", "3"}, {"ab", "ab"}, {"ab/3", "ab/4"}} {
+		ws := []WordBind{{Text: "body.key", Word: 0, Live: "x", Recorded: "ab", RecordedText: c.text, Elsewhere: heldAt(c.text), Of: c.text}, {Text: "body.key", Word: 1, Live: "7", Recorded: "3", RecordedText: c.second, Elsewhere: heldAt(c.text), Of: c.text}}
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					t.Errorf("recorded text %q: WordRuns panicked: %v", text, r)
+					t.Errorf("recorded texts %q and %q: WordRuns panicked: %v", c.text, c.second, r)
 				}
 			}()
 			if got := WordRuns(ws); got[0].Recorded != "ab" || got[1].Recorded != "3" {
-				t.Errorf("recorded text %q does not hold the run's words: %+v, want each word alone", text, got)
+				t.Errorf("recorded texts %q and %q do not hold the run's words: %+v, want each word alone", c.text, c.second, got)
 			}
 		}()
 	}
