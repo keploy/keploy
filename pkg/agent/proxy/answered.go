@@ -1,6 +1,9 @@
 package proxy
 
 import (
+	"encoding/binary"
+	"hash/maphash"
+	"math"
 	"reflect"
 	"sync"
 	"time"
@@ -39,12 +42,12 @@ type answeredLog struct {
 	set uint64
 	// redacting holds, apart from the keyed entries and their bounds, every
 	// recording noted that holds a pattern (Mock.Noise: the obfuscator
-	// redacted something in it), once a name, in the order noted
-	// (AnsweredRedacting); redactingNames are their names and redactingBytes
-	// their sizes (answeredSize). One that would pass redactingMaxBytes is
-	// not kept, and its kind is marked in redactingLost.
+	// redacted something in it), once a name and content (redactingKey), in
+	// the order noted (AnsweredRedacting); redactingKeys are their keys and
+	// redactingBytes their sizes (answeredSize). One that would pass
+	// redactingMaxBytes is not kept, and its kind is marked in redactingLost.
 	redacting      []*models.Mock
-	redactingNames map[string]bool
+	redactingKeys  map[redactingKey]bool
 	redactingBytes int
 	redactingLost  map[models.Kind]bool
 }
@@ -90,13 +93,18 @@ func (l *answeredLog) note(mk *models.Mock, at time.Time) {
 	}
 	probe := answeredProbe(mk)
 	size := answeredSize(probe, keys)
+	var key redactingKey
+	keyed := false
+	if redacts {
+		key, keyed = redactingKeyOf(probe)
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if g := mk.TestModeInfo.StagedSet; g != 0 && g != l.set {
 		return
 	}
 	if redacts {
-		l.keepRedacting(probe, size)
+		l.keepRedacting(probe, key, keyed, size)
 	}
 	if len(keys) == 0 || size > answeredMaxEntryBytes {
 		return
@@ -124,10 +132,11 @@ func (l *answeredLog) note(mk *models.Mock, at time.Time) {
 }
 
 // keepRedacting keeps probe, of a recording that holds a pattern, once a
-// name: one that would pass redactingMaxBytes is not kept, and its kind is
-// marked lost (redactingOf). Caller holds mu.
-func (l *answeredLog) keepRedacting(probe *models.Mock, size int) {
-	if l.redactingNames[probe.Name] {
+// key (redactingKey; one with no key, keyed false, each time it is noted):
+// one that would pass redactingMaxBytes is not kept, and its kind is marked
+// lost (redactingOf). Caller holds mu.
+func (l *answeredLog) keepRedacting(probe *models.Mock, key redactingKey, keyed bool, size int) {
+	if keyed && l.redactingKeys[key] {
 		return
 	}
 	if l.redactingBytes+size > redactingMaxBytes {
@@ -137,10 +146,12 @@ func (l *answeredLog) keepRedacting(probe *models.Mock, size int) {
 		l.redactingLost[probe.Kind] = true
 		return
 	}
-	if l.redactingNames == nil {
-		l.redactingNames = map[string]bool{}
+	if keyed {
+		if l.redactingKeys == nil {
+			l.redactingKeys = map[redactingKey]bool{}
+		}
+		l.redactingKeys[key] = true
 	}
-	l.redactingNames[probe.Name] = true
 	l.redacting = append(l.redacting, probe)
 	l.redactingBytes += size
 }
@@ -162,7 +173,7 @@ func (l *answeredLog) redactingOf(kind models.Kind) ([]*models.Mock, bool) {
 // forgetRedacting empties what the log keeps apart (keepRedacting). Caller
 // holds mu.
 func (l *answeredLog) forgetRedacting() {
-	l.redacting, l.redactingNames, l.redactingBytes, l.redactingLost = nil, nil, 0, nil
+	l.redacting, l.redactingKeys, l.redactingBytes, l.redactingLost = nil, nil, 0, nil
 }
 
 // unref takes e out of one key's list; out of its last, it is dropped.
@@ -252,7 +263,13 @@ func (l *answeredLog) candidates(keys []string) []answeredEntry {
 // mid-set (the agent-replacement repair, MockManager.ResetForReplaySession),
 // where a call that repeats a recording that answered before it still carries
 // the secret that recording redacted. A reset that starts another test set
-// is followed by its staging's fence (ArmSetFence), which forgets them.
+// is followed by its staging's fence (ArmSetFence) when the CLI says the set
+// starts, which forgets them. A CLI that never says so arms no fence: the
+// log then keeps them across the run's test sets, a recording of a later
+// set beside an earlier set's of the same name (names are unique within a
+// set only: keepRedacting keys by name and content), until
+// redactingMaxBytes, past which their kind reads incomplete and its calls
+// are redacted whole.
 func (l *answeredLog) reset() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -364,15 +381,172 @@ func reachableBytes(v reflect.Value, depth int) int {
 	return 0
 }
 
+// redactingKey tells apart the recordings the log keeps apart
+// (keepRedacting): their name and the digest of their content
+// (redactingKeyOf). Two copies of one recording (the agent stages each
+// test's pool from copies) are one; two recordings of one name with another
+// request or other patterns are two, as test sets name their recordings
+// alike (a name is unique within a set only).
+type redactingKey struct {
+	name    string
+	content [2]uint64
+}
+
+// redactingKeyOf is probe's key: its name, and the digest of its kind, its
+// request (answeredProbe's spec) and its patterns, last, which is all a
+// redaction reads of it: every string, number and flag they reach, each
+// with its kind, a slice's and a map's length, a map's pairs in no order,
+// its times aside (no place is read from a time). It is two 64-bit hashes
+// (hash/maphash) under seeds drawn at start: no two recordings' contents
+// meet by chance in 128 bits. ok is false for a value the walk does not
+// read (deeper than reachableBytes reads, or a channel or a function): such
+// a recording has no key, and is kept each time it is noted.
+func redactingKeyOf(probe *models.Mock) (redactingKey, bool) {
+	h := newContentHash()
+	h.str(string(probe.Kind))
+	if !h.walk(reflect.ValueOf(&probe.Spec).Elem(), 0) {
+		return redactingKey{}, false
+	}
+	h.word(uint64(len(probe.Noise)))
+	for _, pat := range probe.Noise {
+		h.str(pat)
+	}
+	return redactingKey{name: probe.Name, content: h.sum()}, true
+}
+
+// contentSeeds are contentHash's seeds.
+var contentSeeds = [2]maphash.Seed{maphash.MakeSeed(), maphash.MakeSeed()}
+
+var timeType = reflect.TypeFor[time.Time]()
+
+// contentHash is two hashes of one content under contentSeeds.
+type contentHash [2]maphash.Hash
+
+func newContentHash() *contentHash {
+	var h contentHash
+	h[0].SetSeed(contentSeeds[0])
+	h[1].SetSeed(contentSeeds[1])
+	return &h
+}
+
+func (h *contentHash) word(u uint64) {
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], u)
+	_, _ = h[0].Write(b[:])
+	_, _ = h[1].Write(b[:])
+}
+
+// str writes s with its length first, so no two splits of the same bytes
+// hash alike.
+func (h *contentHash) str(s string) {
+	h.word(uint64(len(s)))
+	_, _ = h[0].WriteString(s)
+	_, _ = h[1].WriteString(s)
+}
+
+func (h *contentHash) sum() [2]uint64 { return [2]uint64{h[0].Sum64(), h[1].Sum64()} }
+
+// walk writes v, each value with its kind first (a value an interface
+// holds, with its type), depth at most 24 as reachableBytes reads; false for a deeper value or one of a kind a request
+// holds none of (a channel, a function, an unsafe pointer).
+func (h *contentHash) walk(v reflect.Value, depth int) bool {
+	if depth > 24 {
+		return false
+	}
+	if !v.IsValid() {
+		h.word(0)
+		return true
+	}
+	h.word(uint64(v.Kind()) + 1)
+	switch v.Kind() {
+	case reflect.String:
+		h.str(v.String())
+	case reflect.Bool:
+		if v.Bool() {
+			h.word(1)
+		} else {
+			h.word(0)
+		}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		h.word(uint64(v.Int()))
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		h.word(v.Uint())
+	case reflect.Float32, reflect.Float64:
+		h.word(math.Float64bits(v.Float()))
+	case reflect.Complex64, reflect.Complex128:
+		c := v.Complex()
+		h.word(math.Float64bits(real(c)))
+		h.word(math.Float64bits(imag(c)))
+	case reflect.Pointer, reflect.Interface:
+		if v.IsNil() {
+			h.word(0)
+			return true
+		}
+		h.word(1)
+		if v.Kind() == reflect.Interface {
+			// The held value's type, by its identity in this process (a
+			// type is one *rtype, which Type values compare by): two types
+			// of one name and layout are two.
+			h.word(uint64(reflect.ValueOf(v.Elem().Type()).Pointer()))
+		}
+		return h.walk(v.Elem(), depth+1)
+	case reflect.Struct:
+		if v.Type() == timeType {
+			return true
+		}
+		h.word(uint64(v.NumField()))
+		for i := 0; i < v.NumField(); i++ {
+			if !h.walk(v.Field(i), depth+1) {
+				return false
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		h.word(uint64(v.Len()))
+		if v.Kind() == reflect.Slice && v.Type().Elem().Kind() == reflect.Uint8 {
+			b := v.Bytes()
+			_, _ = h[0].Write(b)
+			_, _ = h[1].Write(b)
+			return true
+		}
+		for i := 0; i < v.Len(); i++ {
+			if !h.walk(v.Index(i), depth+1) {
+				return false
+			}
+		}
+	case reflect.Map:
+		h.word(uint64(v.Len()))
+		// Each pair hashed alone, the sums added: the same pairs in any
+		// order are one.
+		var acc [2]uint64
+		it := v.MapRange()
+		for it.Next() {
+			e := newContentHash()
+			if !e.walk(it.Key(), depth+1) || !e.walk(it.Value(), depth+1) {
+				return false
+			}
+			s := e.sum()
+			acc[0] += s[0]
+			acc[1] += s[1]
+		}
+		h.word(acc[0])
+		h.word(acc[1])
+	default:
+		return false
+	}
+	return true
+}
+
 // noteAnswered records that the per-test recording mk answered a call now.
 func (m *MockManager) noteAnswered(mk models.Mock) {
 	m.answered.note(&mk, time.Now())
 }
 
-// AnsweredRedacting implements integrations.AnsweredRedactingReader: of the
-// test set staged now, every per-test recording of kind that answered a call
-// and holds a pattern, as the answered log keeps it (answeredProbe), and
-// whether the log kept every one (redactingMaxBytes).
+// AnsweredRedacting implements integrations.AnsweredRedactingReader: since
+// the last fence (the test set staged now; the run, for a CLI that never
+// says a set starts: answeredLog.reset), every per-test recording of kind
+// that answered a call and holds a pattern, once a name and content, as the
+// answered log keeps it (answeredProbe), and whether the log kept every one
+// (redactingMaxBytes).
 func (m *MockManager) AnsweredRedacting(kind models.Kind) ([]*models.Mock, bool) {
 	return m.answered.redactingOf(kind)
 }

@@ -482,8 +482,8 @@ type AnsweredFinder interface {
 }
 
 // AnsweredRedactingReader is an optional MockMemDb extension: of the test set
-// staged now, every per-test recording of kind that answered a call and holds
-// a pattern (Mock.Noise: the obfuscator redacted something in it), its
+// staged now at least (a store may keep earlier sets' too), every per-test
+// recording of kind that answered a call and holds a pattern (Mock.Noise: the obfuscator redacted something in it), its
 // request and patterns kept, and whether the store kept every one (it keeps
 // them under a bound). An answered per-test recording is in no read after it
 // answers, while a call that repeats it carries again the secret it

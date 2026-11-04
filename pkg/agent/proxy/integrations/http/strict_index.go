@@ -251,9 +251,21 @@ func spentReaderOf(db integrations.MockMemDb) func(*models.Mock) bool {
 }
 
 // strictPool is the pool matchCascade's strict pass reads: the reads' HTTP
-// recordings, less what a test kept for its repeats and is over with, the
-// per-test read's first.
+// recordings (storeReads), less what a test kept for its repeats and is
+// over with.
 func strictPool(db integrations.MockMemDb) (perTest, session, pool []*models.Mock, err error) {
+	perTest, session, combined, err := storeReads(db)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return perTest, session, FilterHTTPMocks(integrations.WithoutSpent(db, combined)), nil
+}
+
+// storeReads are db's per-test and session reads, as matchCascade reads
+// them, and both in one slice of its own, the per-test read's first: the
+// pool the strict pass (strictPool) and the logs of a pass that read no
+// pool (storePlaces) read.
+func storeReads(db integrations.MockMemDb) (perTest, session, combined []*models.Mock, err error) {
 	if perTest, err = db.GetPerTestMocksInWindow(); err != nil {
 		return nil, nil, nil, err
 	}
@@ -261,9 +273,8 @@ func strictPool(db integrations.MockMemDb) (perTest, session, pool []*models.Moc
 	if session, err = db.GetSessionMocks(); err != nil {
 		return nil, nil, nil, err
 	}
-	combined := make([]*models.Mock, 0, len(perTest)+len(session))
-	combined = append(append(combined, perTest...), session...)
-	return perTest, session, FilterHTTPMocks(integrations.WithoutSpent(db, combined)), nil
+	combined = make([]*models.Mock, 0, len(perTest)+len(session))
+	return perTest, session, append(append(combined, perTest...), session...), nil
 }
 
 // strictIndexed answers, under the proven switch, a call the strict pass

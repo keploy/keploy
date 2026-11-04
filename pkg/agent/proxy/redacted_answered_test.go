@@ -173,3 +173,134 @@ func TestARepeatOfACallAnAnsweredRedactingRecordingServedStaysRedacted(t *testin
 		}
 	}
 }
+
+// Two test sets of one replay, each holding a "mock-0" (names are unique
+// within a set only), each redacting a secret under another key. Set 1's
+// answers a call; the next set's Mock call resets the session
+// (ResetForReplaySession), with the set's fence when the CLI says a set
+// starts and with none when it does not (a CLI from before StartsTestSet);
+// set 2's mock-0 answers a call, and the same call comes again and misses.
+// The miss's report and every log line show set 2's secret redacted: the
+// answered log keeps set 2's mock-0 beside set 1's of the same name.
+// Switch off and on.
+func TestARepeatOfTheNextSetsSameNamedRedactingRecordingStaysRedacted(t *testing.T) {
+	const secret1 = "aaSECRETONEaa"
+	const secret2 = "zq9Plm3Xw7Rt"
+	t0 := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	rec := func(path, body string) *models.Mock {
+		m := redactedRecording(path, "application/json", body)
+		m.Spec.HTTPResp.Body = `{"from":"recording"}`
+		m.Spec.HTTPResp.Header["Content-Length"] = strconv.Itoa(len(m.Spec.HTTPResp.Body))
+		m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = t0, t0.Add(time.Millisecond)
+		m.TestModeInfo = models.TestModeInfo{ID: 1, SortOrder: 1, IsFiltered: true, Lifetime: models.LifetimePerTest}
+		return m
+	}
+	other := func() *models.Mock {
+		return &models.Mock{Version: "api.keploy.io/v1beta1", Name: "mock-s", Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": models.HTTPClient, "operation": "GET", models.MetadataLifetimeKey: models.MetadataLifetimeSession},
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "http://api.example/other", Header: map[string]string{"Host": "api.example"}},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: `{}`},
+			ReqTimestampMock: t0, ResTimestampMock: t0.Add(time.Millisecond),
+		}, TestModeInfo: models.TestModeInfo{ID: 2, SortOrder: 2, Lifetime: models.LifetimeSession}}
+	}
+	for _, mode := range []string{"off", "on"} {
+		for _, fenced := range []bool{false, true} {
+			name := mode + map[bool]string{false: "/no-set-start", true: "/set-start"}[fenced]
+			t.Run(name, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, map[string]string{"off": "", "on": "1"}[mode])
+				const dst = "10.96.0.9:80"
+				p := replayProxyTo(t, dst, models.OutgoingOptions{})
+				mm := NewMockManager(nil, nil, zap.NewNop())
+				t.Cleanup(mm.Close)
+				p.mockManager = mm
+				core, logs := observer.New(zap.DebugLevel)
+				p.logger = zap.New(core)
+				p.errChannel = make(chan error, 8)
+				p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.HTTP: httpint.New(zap.New(core))}
+				p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: integrations.HTTP}}
+				send := func(path, body string) string {
+					app, src := acceptedConn(t)
+					done := make(chan error, 1)
+					go func() { done <- p.handleConnection(context.Background(), src) }()
+					call := "POST " + path + " HTTP/1.1\r\nHost: api.example\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
+					if _, err := app.Write([]byte(call)); err != nil {
+						t.Fatal(err)
+					}
+					got := ""
+					if resp, err := http.ReadResponse(bufio.NewReader(app), nil); err == nil {
+						b, _ := io.ReadAll(resp.Body)
+						_ = resp.Body.Close()
+						got = string(b)
+					}
+					_ = app.Close()
+					_ = awaitEvent(t, done, "handleConnection returning after the client left")
+					return got
+				}
+				stage := func(m *models.Mock) {
+					mm.SetMocksWithWindow([]*models.Mock{m}, []*models.Mock{other()}, models.BaseTime, time.Now())
+					mm.SetMocksWithWindow([]*models.Mock{m}, []*models.Mock{other()}, t0.Add(-time.Second), t0.Add(time.Second))
+				}
+				// Set 1: its mock-0 redacted body.memo.
+				stage(rec("/login", `{"memo":"REDACTED_abc","x":"alpha1"}`))
+				if got := send("/login", `{"memo":"`+secret1+`","x":"alpha1"}`); got != `{"from":"recording"}` {
+					t.Fatalf("set 1's recording did not answer: %q", got)
+				}
+				mm.ResetForReplaySession()
+				if fenced {
+					mm.ArmSetFence()
+				}
+				// Set 2: its mock-0 redacted body.assertion.
+				stage(rec("/pay", `{"assertion":"REDACTED_abc","x":"alpha1"}`))
+				body2 := `{"assertion":"` + secret2 + `","x":"alpha1"}`
+				if got := send("/pay", body2); got != `{"from":"recording"}` {
+					t.Fatalf("set 2's recording did not answer: %q", got)
+				}
+				got, complete := integrations.AnsweredRedacting(mm, models.HTTP)
+				var urls []string
+				for _, m := range got {
+					urls = append(urls, m.Spec.HTTPReq.URL)
+				}
+				want := "http://api.example/login,http://api.example/pay"
+				if fenced {
+					want = "http://api.example/pay"
+				}
+				if strings.Join(urls, ",") != want || !complete {
+					t.Errorf("the answered log keeps %v (complete %v); want %s, complete", urls, complete, want)
+				}
+				for len(p.errChannel) > 0 {
+					<-p.errChannel
+				}
+				if got := send("/pay", body2); got == `{"from":"recording"}` {
+					t.Fatal("the repeat was answered again: the row is of its miss")
+				}
+				for _, e := range logs.All() {
+					if strings.Contains(e.Message, secret2) {
+						t.Errorf("the log %q carries set 2's secret", e.Message)
+					}
+					for k, v := range e.ContextMap() {
+						if strings.Contains(fmt.Sprint(v), secret2) {
+							t.Errorf("the log %q field %s carries set 2's secret: %v", e.Message, k, v)
+						}
+					}
+				}
+				reports := 0
+				for len(p.errChannel) > 0 {
+					var pe models.ParserError
+					if err := <-p.errChannel; errors.As(err, &pe) && pe.MismatchReport != nil {
+						reports++
+						all, _ := json.Marshal(pe.MismatchReport)
+						if strings.Contains(string(all), secret2) {
+							t.Errorf("the miss report carries set 2's secret: %s", all)
+						}
+						if !strings.Contains(string(all), "alpha1") {
+							t.Errorf("the miss report hides the rest of the call too: %s", all)
+						}
+					}
+				}
+				if reports == 0 {
+					t.Error("the repeat's miss sent no report: the row is of its report")
+				}
+			})
+		}
+	}
+}

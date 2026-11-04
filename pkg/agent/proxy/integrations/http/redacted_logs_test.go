@@ -182,8 +182,9 @@ func (d failingDb) GetSessionMocks() ([]*models.Mock, error) {
 }
 
 // storePlaces reads the places of the store's per-test and session
-// recordings and of those that answered before, and every place when either
-// read fails or the store does not tell what answered.
+// recordings (those a test is over with too) and of those that answered
+// before, and every place when either read fails or the store does not tell
+// what answered.
 func TestStorePlacesReadsTheStoresPool(t *testing.T) {
 	perTest := recorded("orders", "/orders", nil, `{"item":"alpha1"}`)
 	perTest.Noise = []string{`^alpha1$`}
@@ -204,7 +205,19 @@ func TestStorePlacesReadsTheStoresPool(t *testing.T) {
 	if p := storePlaces(answered, nil, "/orders"); !p.body || !p.urlUnread {
 		t.Errorf("a store that does not tell: body %v, url unread %v; want every place", p.body, p.urlUnread)
 	}
+	// A recording a test kept for its repeats and is over with, which the
+	// strict pass no longer reads, still redacts its places.
+	spent := &spentVarDb{genVarDb: &genVarDb{varDb: db}, over: map[string]bool{"login": true}}
+	if _, _, pool, err := strictPool(spent); err != nil || len(pool) != 1 || pool[0].Name != "orders" {
+		t.Fatalf("the strict pass reads %v (%v); want orders alone", pool, err)
+	}
+	if p := storePlaces(spent, nil, "/orders"); p.body || !p.field("assertion") {
+		t.Errorf("a spent recording: body %v, fields %v; want its field redacted", p.body, p.fields)
+	}
 	for _, f := range []failingDb{{varDb: db, perTest: true}, {varDb: db, session: true}} {
+		if _, _, _, err := strictPool(f); err == nil {
+			t.Errorf("the strict pass read a store whose read fails (per-test %v, session %v)", f.perTest, f.session)
+		}
 		if p := storePlaces(f, nil, "/orders"); !p.body || !p.urlUnread {
 			t.Errorf("a store whose read fails (per-test %v, session %v): body %v, url unread %v; want every place", f.perTest, f.session, p.body, p.urlUnread)
 		}
@@ -212,25 +225,47 @@ func TestStorePlacesReadsTheStoresPool(t *testing.T) {
 }
 
 // Another parser's call served by the variable pass (VariableMatch) logs
-// each bound value redacted at a place a recording of the pool it passed
-// redacted, though the one that answers did not.
+// each bound value redacted at a place a recording redacted, though the one
+// that answers did not: another of the pool it passed, or one that answered
+// a call before and is only on the store's answered list. A store that does
+// not tell its answered recordings has every value redacted.
 func TestVariableMatch_TheBoundLineIsRedactedByThePool(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	core, logs := observer.New(zap.DebugLevel)
-	h := newHTTP()
-	h.Logger = zap.New(core)
-	m := sqsSend("mock-1", "dedup-rec", models.MockVariables{"dedup": bindV("dedup-rec", "body.MessageDeduplicationId")})
-	other := sqsSend("mock-3", "REDACTED_xyz", nil)
-	other.Spec.HTTPReq.Body = strings.Replace(other.Spec.HTTPReq.Body, "order 1", "order 3", 1)
-	other.Noise = []string{`^REDACTED_xyz$`}
-	db := &varDb{perTest: []*models.Mock{m}}
-	consume := func(x *models.Mock) bool { return db.DeleteFilteredMock(*x) }
-	res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall(liveBound), sdkNoise(), []*models.Mock{m, other}, db, consume, nil)
-	if err != nil || res.Outcome != VariableServed {
-		t.Fatalf("the row is of a variable bound by a served call: %+v, %v", res, err)
+	for _, c := range []struct {
+		name             string
+		inPool, answered bool
+		hiding           bool
+	}{
+		{name: "pool", inPool: true},
+		{name: "answered-before", answered: true},
+		{name: "a-store-that-does-not-tell", hiding: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			core, logs := observer.New(zap.DebugLevel)
+			h := newHTTP()
+			h.Logger = zap.New(core)
+			m := sqsSend("mock-1", "dedup-rec", models.MockVariables{"dedup": bindV("dedup-rec", "body.MessageDeduplicationId")})
+			other := sqsSend("mock-3", "REDACTED_xyz", nil)
+			other.Spec.HTTPReq.Body = strings.Replace(other.Spec.HTTPReq.Body, "order 1", "order 3", 1)
+			other.Noise = []string{`^REDACTED_xyz$`}
+			db := &varDb{perTest: []*models.Mock{m}}
+			store := answeredVarDb{varDb: db, hiding: c.hiding}
+			pool := []*models.Mock{m}
+			if c.inPool {
+				pool = append(pool, other)
+			}
+			if c.answered {
+				store.answered = []*models.Mock{other}
+			}
+			consume := func(x *models.Mock) bool { return db.DeleteFilteredMock(*x) }
+			res, err := h.VariableMatch(context.Background(), ReadVariableScope(db), sqsCall(liveBound), sdkNoise(), pool, store, consume, nil)
+			if err != nil || res.Outcome != VariableServed {
+				t.Fatalf("the row is of a variable bound by a served call: %+v, %v", res, err)
+			}
+			wantBound(t, logs, map[string]string{"dedup": valueRedacted})
+			loggedNone(t, logs, liveBound)
+		})
 	}
-	wantBound(t, logs, map[string]string{"dedup": valueRedacted})
-	loggedNone(t, logs, liveBound)
 }
 
 // Another parser's call handed with no URL is read as one with an empty URL
@@ -271,5 +306,36 @@ func TestVariableMatch_ACallWithNoURL(t *testing.T) {
 	}
 	if strings.Contains(res.Problem, liveSecret) || strings.Contains(res.Problem, liveBound) {
 		t.Errorf("the why carries a secret: %s", res.Problem)
+	}
+}
+
+// A variable a served call binds at a path segment is logged redacted when
+// another recording of the call's shape (as many segments) redacted that
+// segment, though the one that answers did not: in the pool, or only on the
+// store's answered list. A value at a place no recording redacted shows.
+func TestTheVariableBoundLineIsRedactedAtAPathSegmentAnotherRecordingRedacted(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, answered := range []bool{false, true} {
+		t.Run(map[bool]string{false: "pool", true: "answered-before"}[answered], func(t *testing.T) {
+			core, logs := observer.New(zap.DebugLevel)
+			h := newHTTP()
+			h.Logger = zap.New(core)
+			m := at(varMock("mock-1", "POST", "http://store/orders/ord-rec-1/confirm", `{"item":"pen"}`, 201, `{}`,
+				models.MockVariables{"orderId": bindV("ord-rec-1", "url.path[1]"), "item": bindV("pen", "body.item")}), 1)
+			other := at(varMock("other", "POST", "http://store/orders/REDACTED_abc/cancel", `{}`, 200, `{}`, nil), 2)
+			other.Noise = []string{`^REDACTED_abc$`}
+			db := &varDb{perTest: []*models.Mock{m}}
+			var store integrations.MockMemDb = answeredVarDb{varDb: db, answered: []*models.Mock{other}}
+			if !answered {
+				db.perTest = append(db.perTest, other)
+				store = db
+			}
+			ok, _, _, err := h.match(context.Background(), liveReq("POST", "/orders/"+liveBound+"/confirm", `{"item":"pencil"}`), store, nil, nil, nil, true, false, false, true, true)
+			if err != nil || !ok {
+				t.Fatalf("the binding call should be served: %v, %v", ok, err)
+			}
+			wantBound(t, logs, map[string]string{"orderId": valueRedacted, "item": "pencil"})
+			loggedNone(t, logs, liveBound)
+		})
 	}
 }
