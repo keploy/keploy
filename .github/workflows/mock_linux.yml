@@ -21,13 +21,19 @@ name: Mock Mode Regression (Linux)
 # scopes and asserts each is served only its own scope's mocks. Another replays a stateful
 # dependency (one request recorded several times) and asserts record order,
 # per worker and per scope, and, with consume-once mocks, that a mock a test
-# consumed is not served again after that test's end (on the worker's pid). Another runs more short-lived processes than the
-# agent's PID map holds between two calls and asserts both are recorded, then
-# replayed without reaching the dependency. Another records, under the
-# proven switch, three containers of one image, configured apart, on random
-# published ports and asserts each call's mock names its container by its
-# key (repository, port and configuration's fingerprint), the same again with
-# new containers on new ports, and for one test alone.
+# consumed is not served again after that test's end (on the worker's pid).
+# Another, without the switch, records a pipeline of identical MySQL
+# commands sent in one write while a call on another connection, asked
+# before it, is answered after it, then replays with MySQL down and
+# consume-once mocks and asserts the commands are answered with their
+# recordings in the order they were recorded.
+# Another runs more short-lived processes than the agent's PID map holds
+# between two calls and asserts both are recorded, then replayed without
+# reaching the dependency. Another records, under the proven switch, three
+# containers of one image, configured apart, on random published ports and
+# asserts each call's mock names its container by its key (repository, port
+# and configuration's fingerprint), the same again with new containers on new
+# ports, and for one test alone.
 # Another holds more LIVE processes than the agent's PID map holds while a
 # call is made, and asserts record keeps nothing and replay fails, both saying
 # the agent could not track a process (and the pid_map_overflow job runs the
@@ -181,6 +187,19 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-stateful-linux.sh"
+
+      # A pipeline of identical MySQL commands sent in one write is recorded
+      # at one request time, and its mock file is not in time order (a call
+      # on another connection, asked first, is answered after it). Replayed
+      # with MySQL down, the commands must be answered with their recordings
+      # in the order they were recorded: the agent's on-disk store sorted the
+      # file by time alone and reordered them.
+      - name: Run mock-mode MySQL pipeline-order e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-pipeline-order-linux.sh"
 
       # A test command that runs more short-lived processes than the agent's
       # PID map holds (10240) must still have the calls of every later process
