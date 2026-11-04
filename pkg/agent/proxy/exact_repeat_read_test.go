@@ -82,13 +82,19 @@ func repeatRunLogged(t *testing.T, logger *zap.Logger, cases []repeatCase) {
 	at := t0
 	for _, c := range cases {
 		var mapping []*models.Mock
+		// The case's read: one mark its recordings share, as the agent
+		// marks them (models.MarkRepeatReads).
+		var read models.RepeatReadMark
+		if c.read != "" {
+			read = models.RepeatReadMark{Name: c.read, At: 1}
+		}
 		for i := 0; i < c.recorded; i++ {
 			answer := c.answers[0]
 			if i < len(c.answers) {
 				answer = c.answers[i]
 			}
 			mk := readMock(fmt.Sprintf("%s-%d", c.name, i), at, c.method, c.path, c.body, answer)
-			mk.TestModeInfo.RepeatRead = c.read
+			mk.TestModeInfo.RepeatRead = read
 			if c.edit != nil {
 				c.edit(i, mk)
 			}
@@ -192,6 +198,7 @@ func TestARepeatedReadIsAnsweredOnlyOnceMoreAndExcusedOnlyOnceFewer(t *testing.T
 // not name.
 func TestWhatIsNotARepeatedReadKeepsItsExactCount(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
+	q2 := models.RepeatReadMark{Name: "q2", At: 2}
 	repeatRun(t, []repeatCase{
 		{name: "once", method: "GET", path: "/api/once", read: "once", answers: []string{`{}`}, recorded: 1, sends: 2, missed: []int{1}},
 		{name: "two-answers-more", method: "GET", path: "/api/count", read: "count", answers: []string{`{"n":1}`, `{"n":2}`}, recorded: 2, sends: 3, missed: []int{2}},
@@ -247,14 +254,21 @@ func TestWhatIsNotARepeatedReadKeepsItsExactCount(t *testing.T) {
 		{name: "partly-named", method: "GET", path: "/api/p", read: "p", answers: []string{`{}`}, recorded: 3, sends: 4, missed: []int{3},
 			edit: func(i int, mk *models.Mock) {
 				if i == 0 {
-					mk.TestModeInfo.RepeatRead = ""
+					mk.TestModeInfo.RepeatRead = models.RepeatReadMark{}
 				}
 			}},
 		// a call more that matches the recordings of two reads
 		{name: "two-reads", method: "GET", path: "/api/q", read: "q1", answers: []string{`{}`}, recorded: 4, sends: 5, missed: []int{4},
 			edit: func(i int, mk *models.Mock) {
 				if i >= 2 {
-					mk.TestModeInfo.RepeatRead = "q2"
+					mk.TestModeInfo.RepeatRead = q2
+				}
+			}},
+		// a call more that matches the recordings of two reads named alike
+		{name: "two-reads-named-alike", method: "GET", path: "/api/q3", read: "q3", answers: []string{`{}`}, recorded: 4, sends: 5, missed: []int{4},
+			edit: func(i int, mk *models.Mock) {
+				if i >= 2 {
+					mk.TestModeInfo.RepeatRead = models.RepeatReadMark{Name: "q3", At: 2}
 				}
 			}},
 	})
@@ -292,13 +306,14 @@ func TestASharedRecordingIsNoPartOfATestsRepeatedRead(t *testing.T) {
 	// charged as never made.
 	run := func(own []string, shared string, sends int) (missed []int, left []string) {
 		var owned, set []*models.Mock
+		r := models.RepeatReadMark{Name: "r", At: 1}
 		for i, answer := range own {
 			mk := readMock(fmt.Sprintf("own-%d", i), t0.Add(time.Duration(i)*time.Second), "GET", "/api/shared", "", answer)
-			mk.TestModeInfo.RepeatRead = "r"
+			mk.TestModeInfo.RepeatRead = r
 			owned = append(owned, mk)
 		}
 		sh := readMock("shared-0", t0.Add(time.Minute), "GET", "/api/shared", "", shared)
-		sh.TestModeInfo.RepeatRead = "r"
+		sh.TestModeInfo.RepeatRead = r
 		set = append(append(set, owned...), sh)
 		mm := NewMockManager(nil, nil, zap.NewNop())
 		t.Cleanup(mm.Close)
@@ -341,7 +356,8 @@ func TestARepeatedReadIsAnsweredAgainOnlyFromTheViewsOwnAnsweredRecordings(t *te
 	t0 := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
 	r0 := readMock("r-0", t0, "GET", "/api/r", "", `{}`)
 	r1 := readMock("r-1", t0.Add(time.Second), "GET", "/api/r", "", `{}`)
-	r0.TestModeInfo.RepeatRead, r1.TestModeInfo.RepeatRead = "r", "r"
+	r := models.RepeatReadMark{Name: "r", At: 1}
+	r0.TestModeInfo.RepeatRead, r1.TestModeInfo.RepeatRead = r, r
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
 	mm.SetMocksWithWindow(nil, []*models.Mock{r0, r1}, models.BaseTime, time.Now().Add(time.Hour))
@@ -395,9 +411,10 @@ func TestARepeatedReadIsAnsweredAgainOnlyFromTheViewsOwnAnsweredRecordings(t *te
 func TestACORSPreflightRecordedTwiceAndNamedARepeatedReadIsAnsweredAThirdTime(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	set, tests := corsSet(false)
+	preflight := models.RepeatReadMark{Name: "preflight", At: 1}
 	for _, mk := range tests[0].mapping {
 		if mk.Spec.HTTPReq.Method == "OPTIONS" {
-			mk.TestModeInfo.RepeatRead = "preflight"
+			mk.TestModeInfo.RepeatRead = preflight
 		}
 	}
 	missed, unconsumed := corsRun(t, set, tests)
@@ -410,4 +427,107 @@ func TestACORSPreflightRecordedTwiceAndNamedARepeatedReadIsAnsweredAThirdTime(t 
 	if got := unconsumed["fewer"]; len(got) != 1 || got[0] != "pf-fewer" {
 		t.Errorf("fewer: unconsumed %v; want pf-fewer", got)
 	}
+}
+
+// readShape is one call of a test that makes several (readsRun): recorded
+// recorded times with answer, in a read the replay names read ("" names
+// none), and sent sends times.
+type readShape struct {
+	method, path, body, answer, read string
+	recorded, sends                  int
+}
+
+// readsTest is one test of readsRun: its calls, recorded in order and sent
+// in order, each call's sends one after another. missed are the sends that
+// must miss, by index over all of the test's sends; unmade the recordings,
+// by name (test-call-i), its end must charge as never made.
+type readsTest struct {
+	name   string
+	calls  []readShape
+	missed []int
+	unmade []string
+}
+
+// readsRun records every test into one set, names each test's reads as the
+// replay sends them (models.RepeatRead, marked onto copies of the test's
+// recordings by models.MarkRepeatReads, as the agent marks them), serves the
+// set as a replay does (corsRun) and checks each test's misses and unmade
+// recordings.
+func readsRun(t *testing.T, tests []readsTest) {
+	t.Helper()
+	at := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	var set []*models.Mock
+	var served []corsTest
+	for _, tc := range tests {
+		var mapping []*models.Mock
+		var reads []models.RepeatRead
+		var sends []string
+		for c, call := range tc.calls {
+			var names []string
+			for i := 0; i < call.recorded; i++ {
+				mk := readMock(fmt.Sprintf("%s-%d-%d", tc.name, c, i), at, call.method, call.path, call.body, call.answer)
+				at = at.Add(time.Second)
+				mapping = append(mapping, mk)
+				names = append(names, mk.Name)
+			}
+			if call.read != "" {
+				reads = append(reads, models.RepeatRead{Name: call.read, Mocks: names})
+			}
+			for i := 0; i < call.sends; i++ {
+				sends = append(sends, readCall(call.method, call.path, call.body))
+			}
+		}
+		set = append(set, mapping...)
+		served = append(served, corsTest{name: tc.name, mapping: models.MarkRepeatReads(mapping, reads), sends: sends})
+	}
+	missed, unconsumed := corsRun(t, set, served)
+	for _, tc := range tests {
+		if got := missed[tc.name]; !reflect.DeepEqual(got, tc.missed) {
+			t.Errorf("%s: missed %v; want %v", tc.name, got, tc.missed)
+		}
+		if got := unconsumed[tc.name]; !reflect.DeepEqual(got, tc.unmade) {
+			t.Errorf("%s: never made %v; want %v", tc.name, got, tc.unmade)
+		}
+	}
+}
+
+// Two reads of one test that the replay names alike are two reads: the
+// namer names a read by its method, path and count, so two get_list calls
+// with other bodies, each recorded three times with one answer, carry one
+// name (the Frappe CRM convert test's), and so do three search_link calls
+// recorded five times each (the email test's). Each is answered once more,
+// and excused once fewer, on its own: one more of one read and one more of
+// the other both pass, a second one more of either misses, and one fewer of
+// each is charged nothing while two fewer are charged.
+func TestTwoReadsNamedAlikeAreEachAnsweredOnceMoreAndExcusedOnceFewer(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const (
+		list3  = "POST /api/method/frappe.client.get_list, answered once more: recorded 3 times with one answer"
+		list2  = "POST /api/method/frappe.client.get_list, answered once more: recorded 2 times with one answer"
+		link5  = "POST /api/method/frappe.desk.search.search_link, answered once more: recorded 5 times with one answer"
+		getAPI = "/api/method/frappe.client.get_list"
+		search = "/api/method/frappe.desk.search.search_link"
+	)
+	listOf := func(doctype string) string { return `{"doctype":"` + doctype + `","fields":["name"]}` }
+	linkOf := func(doctype string) string { return `{"txt":"","doctype":"` + doctype + `"}` }
+	readsRun(t, []readsTest{
+		{name: "convert", calls: []readShape{
+			{method: "POST", path: getAPI, body: listOf("CRM Form Script"), answer: formScript, read: list3, recorded: 3, sends: 4},
+			{method: "POST", path: getAPI, body: listOf("CRM Deal Status"), answer: `{"message":[{"name":"Qualification"}]}`, read: list3, recorded: 3, sends: 3},
+			{method: "POST", path: getAPI, body: listOf("CRM Lead Status"), answer: `{"message":[{"name":"New"}]}`, read: list2, recorded: 2, sends: 2},
+		}},
+		{name: "email", calls: []readShape{
+			{method: "POST", path: search, body: linkOf("Email Template"), answer: `{"message":[]}`, read: link5, recorded: 5, sends: 6},
+			{method: "POST", path: search, body: linkOf("Contact"), answer: `{"message":[{"value":"c-1"}]}`, read: link5, recorded: 5, sends: 5},
+			{method: "POST", path: search, body: linkOf("User"), answer: `{"message":[{"value":"Administrator"}]}`, read: link5, recorded: 5, sends: 4},
+		}},
+		{name: "each-once-more", calls: []readShape{
+			{method: "POST", path: getAPI, body: listOf("A"), answer: `{"message":["a"]}`, read: list2, recorded: 2, sends: 4},
+			{method: "POST", path: getAPI, body: listOf("B"), answer: `{"message":["b"]}`, read: list2, recorded: 2, sends: 3},
+		}, missed: []int{3}},
+		{name: "each-once-fewer", calls: []readShape{
+			{method: "POST", path: getAPI, body: listOf("A"), answer: `{"message":["a"]}`, read: list3, recorded: 3, sends: 1},
+			{method: "POST", path: getAPI, body: listOf("B"), answer: `{"message":["b"]}`, read: list3, recorded: 3, sends: 2},
+		}, unmade: []string{"each-once-fewer-0-1", "each-once-fewer-0-2"}},
+	})
 }

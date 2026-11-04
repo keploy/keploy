@@ -162,14 +162,14 @@ type exactView struct {
 	// positions in the order they did.
 	consumed []bool
 	order    []int
-	// repeats are the test's repeated reads its mapping names
-	// (models.TestModeInfo.RepeatRead) that exact serving honours, by name:
+	// repeats are the test's repeated reads the replay names
+	// (models.TestModeInfo.RepeatRead) that exact serving honours, by mark:
 	// the positions of their recordings, in recorded order
 	// (exactView.repeatReads). Set at install, never changed. answeredAgain
-	// names those a call one more than recorded was answered again, under
+	// holds those a call one more than recorded was answered again, under
 	// mu (MockManager.AnswerRepeatRead).
-	repeats       map[string][]int
-	answeredAgain map[string]bool
+	repeats       map[models.RepeatReadMark][]int
+	answeredAgain map[models.RepeatReadMark]bool
 	// spent are the staged mocks this view shows that a parser consumed
 	// through a delete door in its test, or a protocol-phase mock one
 	// evicted outside every test: gone until the view changes. The staged

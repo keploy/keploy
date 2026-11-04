@@ -346,7 +346,7 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		owned = markRepeatReads(a.notReal(id, testMocks(names, mocks)), reads)
+		owned = models.MarkRepeatReads(a.notReal(id, testMocks(names, mocks)), reads)
 	}
 	// What the store refused of the test's mapping serves nothing; its end
 	// counts each as a recorded call the test did not make.

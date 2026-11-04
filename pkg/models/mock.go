@@ -351,13 +351,14 @@ type TestModeInfo struct {
 	Concurrent bool `json:"-" bson:"-"`
 
 	// RepeatRead is, on a test's own recording under exact serving
-	// (KEPLOY_PROVEN), the name of the repeated read the replay named it
-	// in (ScopeTableReq.RepeatReads): the test recorded that read
-	// at least twice, every time with one answer. Exact serving answers
-	// such a read once more than recorded, and does not charge one of its
-	// recordings left unmade (one fewer). Empty for every other recording.
-	// Runtime-only, like the fields above.
-	RepeatRead string `json:"-" bson:"-"`
+	// (KEPLOY_PROVEN), the repeated read the replay named it in
+	// (ScopeTableReq.RepeatReads, MarkRepeatReads): the test recorded that
+	// read at least twice, every time with one answer. Exact serving
+	// answers such a read once more than recorded, and does not charge one
+	// of its recordings left unmade (one fewer). Two reads the replay names
+	// alike are two reads (RepeatReadMark.At). The zero mark, no read, on
+	// every other recording. Runtime-only, like the fields above.
+	RepeatRead RepeatReadMark `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {

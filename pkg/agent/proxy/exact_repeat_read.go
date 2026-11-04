@@ -24,29 +24,32 @@ import (
 //   - one of its recordings left unmade is not charged to the test
 //     (oneFewerLocked); a second one is.
 //
-// The mapping decides which recordings are one read; exact serving honours a
+// The replay decides which recordings are one read: each read it names marks
+// its recordings with one mark (models.MarkRepeatReads), and two reads it
+// names alike carry two marks. Exact serving honours a
 // named read only when it holds at least two of the test's own recordings,
 // every one of one call with one answer by the proof the namer uses too
 // (httpint.RepeatReadOf), whatever their method (repeatReads). Any other named
 // read is served as if it were not named.
 
 // repeatReads is the repeated reads of v's test that exact serving honours
-// (exactView.repeats): by name, the positions of each one's recordings among
-// the test's own, in recorded order. nil when none is.
-func (v *exactView) repeatReads() map[string][]int {
-	var named map[string][]int
+// (exactView.repeats): by mark (never by name, which two reads may share),
+// the positions of each one's recordings among the test's own, in recorded
+// order. nil when none is.
+func (v *exactView) repeatReads() map[models.RepeatReadMark][]int {
+	var named map[models.RepeatReadMark][]int
 	for i, mk := range v.owned {
-		if v.isCand(i) || mk.TestModeInfo.RepeatRead == "" {
+		if v.isCand(i) || !mk.TestModeInfo.RepeatRead.Marked() {
 			continue
 		}
 		if named == nil {
-			named = map[string][]int{}
+			named = map[models.RepeatReadMark][]int{}
 		}
 		named[mk.TestModeInfo.RepeatRead] = append(named[mk.TestModeInfo.RepeatRead], i)
 	}
-	for name, at := range named {
+	for read, at := range named {
 		if len(at) < 2 || !v.oneRead(at) {
-			delete(named, name)
+			delete(named, read)
 		}
 	}
 	if len(named) == 0 {
@@ -88,7 +91,7 @@ func (m *MockManager) AnswerRepeatRead(matched []*models.Mock) (*models.Mock, st
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	read := ""
+	var read models.RepeatReadMark
 	for _, mk := range matched {
 		// matched are the view's own copies (ConsumedTestMocks): one of a
 		// view installed since, or a shared recording, is not the test's.
@@ -97,7 +100,7 @@ func (m *MockManager) AnswerRepeatRead(matched []*models.Mock) (*models.Mock, st
 			return nil, "", false
 		}
 		r := v.owned[i].TestModeInfo.RepeatRead
-		if r == "" || read != "" && r != read {
+		if !r.Marked() || read.Marked() && r != read {
 			return nil, "", false
 		}
 		read = r
@@ -112,7 +115,7 @@ func (m *MockManager) AnswerRepeatRead(matched []*models.Mock) (*models.Mock, st
 		}
 	}
 	if v.answeredAgain == nil {
-		v.answeredAgain = map[string]bool{}
+		v.answeredAgain = map[models.RepeatReadMark]bool{}
 	}
 	v.answeredAgain[read] = true
 	return v.owned[at[len(at)-1]], v.test, true
