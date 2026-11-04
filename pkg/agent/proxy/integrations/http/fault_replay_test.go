@@ -287,12 +287,18 @@ func okHead(body string, header map[string]string) *models.HTTPResp {
 // A delay holds the whole answer for its duration, then serves it, and the
 // connection stays for the next call; the run's end stops the hold and serves
 // nothing.
+//
+// The hold is timed from the call: sent is read before replaying hands the
+// call to decodeHTTP, which starts on it at once, so the hold starts after
+// sent, and a timer fires no sooner than its duration. Read once replaying
+// returns, sent could fall after the hold had started: a starved scheduler
+// ran the hold's start first, and its answer read as early.
 func TestReplayFault_ADelayHoldsTheWholeAnswerBoundedByTheRun(t *testing.T) {
 	const delay = 50 * time.Millisecond
 	m := faultMock(&models.Fault{Kind: models.FaultDelay, Delay: delay},
 		okHead(`{"ok":true}`, map[string]string{"Content-Length": "11"}))
-	app, returned := replaying(t, &HTTP{Logger: zap.NewNop()}, m)
 	sent := time.Now()
+	app, returned := replaying(t, &HTTP{Logger: zap.NewNop()}, m)
 	got := readUntil(app, `{"ok":true}`, 10*time.Second)
 	if !strings.HasPrefix(got, "HTTP/1.1 200 OK\r\n") || !strings.HasSuffix(got, `{"ok":true}`) {
 		t.Fatalf("the delayed call was answered %q, want its whole answer", got)
