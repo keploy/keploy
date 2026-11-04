@@ -975,6 +975,16 @@ const mysqlPostTLSStashPrimaryDefault = 8 * time.Second
 // delay the success path.
 const mysqlPostTLSStashPollSlice = 500 * time.Millisecond
 
+// postTLSStashWaitHookKey is the context key of a func() that
+// resolvePreTLSGreeting calls each time it is about to block on the port's
+// queue for its own raw leg: the queue held no entry for it and no fallback
+// answered. Only this package's tests set it (the key is unexported): it lets
+// a test push the raw leg once the recorder is waiting for it, so the lateness
+// the test injects is counted from the wait itself, not from when the test
+// began. Carried by the context, it reaches only the recording that test
+// drives, never one another test left running.
+type postTLSStashWaitHookKey struct{}
+
 func mysqlPostTLSStashWait() time.Duration {
 	if v := os.Getenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS"); v != "" {
 		if ms, err := strconv.Atoi(v); err == nil && ms >= 0 {
@@ -1234,6 +1244,9 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 		}
 		if slice <= 0 {
 			continue
+		}
+		if hook, ok := ctx.Value(postTLSStashWaitHookKey{}).(func()); ok {
+			hook()
 		}
 		if entry, taker, src := take(false, slice); src != greetingNone {
 			return entry, taker, src
