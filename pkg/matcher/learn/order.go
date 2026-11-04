@@ -972,9 +972,7 @@ func (dc *decider) holds(p evPlace, t *readerText, w string, m *moment, byText b
 	// An instant of several words (a date and a time) stands in a text
 	// as those words in order.
 	if ok && !h && len(variables.Words(w)) > 1 {
-		var text string
-		text, ok = t.textNow()
-		h = strings.Contains(text, w)
+		h, ok = t.contains(w)
 	}
 	if !ok {
 		return false, false, false
@@ -1066,8 +1064,8 @@ const escapeReach = 128
 // alone and pass any time of that day. A wall clock of no zone is read in
 // the application's zone too (inZone).
 func (dc *decider) coarserOnly(t *readerText, w string, m moment) bool {
-	text, ok := t.textNow()
-	return ok && !strings.Contains(text, w) && dc.namedBy(t, m, func(h, m moment) bool {
+	in, ok := t.contains(w)
+	return ok && !in && dc.namedBy(t, m, func(h, m moment) bool {
 		return h.key == m.key || cuts(h, m, func(c cutRule) bool { return !c.finer })
 	}) == 0
 }
