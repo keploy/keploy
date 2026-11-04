@@ -7,6 +7,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
 )
 
@@ -20,6 +21,14 @@ func redactingRecording(name string, kind models.Kind, url, body string, redacts
 		m.Noise = []string{`^REDACTED_abc$`}
 	}
 	return m
+}
+
+// fenceNextSet fences the manager's answered log as a fenced set boundary's
+// staging does (dropPreviousSetConsumes, under swapMu).
+func fenceNextSet(mm *MockManager) {
+	mm.swapMu.Lock()
+	defer mm.swapMu.Unlock()
+	mm.dropPreviousSetConsumes()
 }
 
 func redactingNames(ms []*models.Mock) string {
@@ -76,17 +85,12 @@ func TestTheAnsweredLogKeepsEveryRecordingThatRedactedApart(t *testing.T) {
 // next fence.
 func TestTheAnsweredRedactingRecordingsAreBounded(t *testing.T) {
 	byURL(t)
-	fence := func(mm *MockManager) {
-		mm.swapMu.Lock()
-		defer mm.swapMu.Unlock()
-		mm.dropPreviousSetConsumes()
-	}
 	for _, forget := range []struct {
 		name  string
 		do    func(mm *MockManager)
 		keeps bool
 	}{
-		{"fence", fence, false},
+		{"fence", fenceNextSet, false},
 		{"reset", func(mm *MockManager) { mm.answered.reset() }, true},
 		{"session-reset", func(mm *MockManager) { mm.ResetForReplaySession() }, true},
 	} {
@@ -123,7 +127,7 @@ func TestTheAnsweredRedactingRecordingsAreBounded(t *testing.T) {
 				if got, complete := mm.AnsweredRedacting(models.Mongo); len(got) != 1 || !complete {
 					t.Fatalf("another kind after a %s: %d kept, complete %v; want its one, complete", forget.name, len(got), complete)
 				}
-				fence(mm)
+				fenceNextSet(mm)
 			}
 			for _, kind := range []models.Kind{models.HTTP, models.Mongo} {
 				if got, complete := mm.AnsweredRedacting(kind); len(got) != 0 || !complete {
@@ -189,16 +193,17 @@ func TestAMidSetResetKeepsTheAnsweredRedactingRecordings(t *testing.T) {
 	}
 }
 
+// sameLayoutA and sameLayoutB are two types of one layout.
+type sameLayoutA struct{ S string }
+type sameLayoutB struct{ S string }
+
 // The log keeps a recording that redacted something once a name and
 // content: a copy of it (each test's pool holds one), with its maps built
 // in another order or another time, is the one kept; one of the same name
 // with another request or other patterns, the same request under another
 // name, and one whose content the key does not read (deeper than its walk)
-// are kept beside it.
-// sameLayoutA and sameLayoutB are two types of one layout.
-type sameLayoutA struct{ S string }
-type sameLayoutB struct{ S string }
-
+// are kept beside it. A byte string at the deepest place the walk reads
+// still has a key.
 func TestTheAnsweredLogKeepsARedactingRecordingOnceANameAndContent(t *testing.T) {
 	byURL(t)
 	mm := NewMockManager(nil, nil, zap.NewNop())
@@ -265,5 +270,144 @@ func TestTheAnsweredLogKeepsARedactingRecordingOnceANameAndContent(t *testing.T)
 	mm.noteAnswered(*d)
 	if got, complete := mm.AnsweredRedacting(models.Mongo); redactingNames(got) != "mock-t,mock-t,mock-d,mock-d" || !complete {
 		t.Fatalf("a recording with no key, noted twice: kept %q (complete %v); want it twice", redactingNames(got), complete)
+	}
+	// A byte string at the deepest place the key reads (ten lists in a
+	// Mongo message put it at depth 24) is read whole there: it has a key,
+	// and is kept once however often noted; one list more, it has none.
+	atBound := func(lists int) *models.Mock {
+		var msg any = []byte("REDACTED_abc")
+		for i := 0; i < lists; i++ {
+			msg = []any{msg}
+		}
+		m := redactingRecording("mock-y", models.Mongo, "/y", `{}`, true)
+		m.Spec.MongoRequests = []models.MongoRequest{{Message: msg}}
+		return m
+	}
+	if _, ok := redactingKeyOf(answeredProbe(atBound(11))); ok {
+		t.Fatal("a byte string deeper than the key reads has a key")
+	}
+	y := atBound(10)
+	if _, ok := redactingKeyOf(answeredProbe(y)); !ok {
+		t.Fatal("a byte string at the deepest place the key reads has no key")
+	}
+	my := NewMockManager(nil, nil, zap.NewNop())
+	defer my.Close()
+	my.noteAnswered(*y)
+	my.noteAnswered(*y)
+	if got, complete := my.AnsweredRedacting(models.Mongo); redactingNames(got) != "mock-y" || !complete {
+		t.Fatalf("a byte string at the deepest place the key reads, noted twice: kept %q (complete %v); want it once", redactingNames(got), complete)
+	}
+}
+
+// A fence forgets the keys of the recordings it forgets: the next set's
+// recording identical in name and content to one the set before kept (the
+// same set replayed again in one run) is kept, the log complete, and a copy
+// of it noted after is the one kept.
+func TestAFenceForgetsTheKeysOfTheRecordingsItForgets(t *testing.T) {
+	byURL(t)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	x := redactingRecording("mock-0", models.HTTP, "/pay", `{"assertion":"REDACTED_abc"}`, true)
+	mm.noteAnswered(*x)
+	fenceNextSet(mm)
+	mm.noteAnswered(*x.DeepCopy())
+	if got, complete := mm.AnsweredRedacting(models.HTTP); redactingNames(got) != "mock-0" || !complete {
+		t.Fatalf("the recording noted again after the fence: kept %q (complete %v); want mock-0, complete", redactingNames(got), complete)
+	}
+	mm.noteAnswered(*x.DeepCopy())
+	if got, _ := mm.AnsweredRedacting(models.HTTP); len(got) != 1 {
+		t.Fatalf("a copy noted after it: kept %d; want the one", len(got))
+	}
+}
+
+// pointerFields and nestedLists are values a parser's message may hold.
+// Two of each, below, would write one stream if the digest left out the
+// word that tells a nil pointer from a set one, or a list's length.
+type pointerFields struct {
+	A **string
+	B *string
+	Q **string
+}
+
+type nestedLists struct {
+	A [][]string
+	B []string
+	C [][]string
+}
+
+// The log keeps apart two recordings of one name that differ only where the
+// digest must read them: a MySQL statement's parameter that is another int,
+// uint, float or byte string, or has another unsigned flag (the parsers of
+// other protocols read such values for what a pattern names); one payload
+// recorded under two kinds; and two values an interface holds that would
+// write one stream without a pointer's nil word (A nil, B set and Q set to
+// a nil pointer, against A set to a set pointer, B and Q nil) or without a
+// list's length (A holding ["a"], B ["b"] and C one empty list, against A
+// holding ["a"] and ["b"], B and C nil). Each is kept once however often it
+// is noted.
+func TestTheAnsweredLogKeepsApartSameNamedRecordingsOfOtherContent(t *testing.T) {
+	rec := func(kind models.Kind, fill func(*models.MockSpec)) *models.Mock {
+		m := &models.Mock{Name: "mock-q", Kind: kind, Noise: []string{`^REDACTED_abc$`}}
+		fill(&m.Spec)
+		return m
+	}
+	param := func(typ mysql.FieldType, unsigned bool, v any) func(*models.MockSpec) {
+		return func(s *models.MockSpec) {
+			s.MySQLRequests = []mysql.Request{{PacketBundle: mysql.PacketBundle{
+				Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 24}, Type: "COM_STMT_EXECUTE"},
+				Message: &mysql.StmtExecutePacket{Status: 0x17, StatementID: 1, IterationCount: 1, ParameterCount: 1, NewParamsBindFlag: 1, Parameters: []mysql.Parameter{{Type: uint16(typ), Unsigned: unsigned, Value: v}}},
+			}}}
+		}
+	}
+	generic := func(s *models.MockSpec) {
+		s.GenericRequests = []models.Payload{{Origin: models.FromClient, Message: []models.OutputBinary{{Type: "binary", Data: "KjEKJDQKUElORwo="}}}}
+	}
+	message := func(msg any) func(*models.MockSpec) {
+		return func(s *models.MockSpec) { s.MongoRequests = []models.MongoRequest{{Message: msg}} }
+	}
+	x := "REDACTED_abc"
+	px, nilPtr := &x, (*string)(nil)
+	for _, row := range []struct {
+		name string
+		a, b *models.Mock
+	}{
+		{"an int", rec(models.MySQL, param(mysql.FieldTypeLongLong, false, int64(4111))), rec(models.MySQL, param(mysql.FieldTypeLongLong, false, int64(4222)))},
+		{"a uint", rec(models.MySQL, param(mysql.FieldTypeLongLong, true, uint64(4111))), rec(models.MySQL, param(mysql.FieldTypeLongLong, true, uint64(4222)))},
+		{"a flag", rec(models.MySQL, param(mysql.FieldTypeLongLong, false, int64(4111))), rec(models.MySQL, param(mysql.FieldTypeLongLong, true, int64(4111)))},
+		{"a float", rec(models.MySQL, param(mysql.FieldTypeDouble, false, 41.11)), rec(models.MySQL, param(mysql.FieldTypeDouble, false, 42.22))},
+		{"a byte string", rec(models.MySQL, param(mysql.FieldTypeString, false, []byte("4111"))), rec(models.MySQL, param(mysql.FieldTypeString, false, []byte("4222")))},
+		{"the kind", rec(models.GENERIC, generic), rec(models.REDIS, generic)},
+		{"a nil pointer", rec(models.Mongo, message(pointerFields{B: px, Q: &nilPtr})), rec(models.Mongo, message(pointerFields{A: &px}))},
+		{"a list's end", rec(models.Mongo, message(nestedLists{A: [][]string{{"a"}}, B: []string{"b"}, C: [][]string{{}}})), rec(models.Mongo, message(nestedLists{A: [][]string{{"a"}, {"b"}}}))},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			defer mm.Close()
+			for _, m := range []*models.Mock{row.a, row.b} {
+				// A recording with no key is kept each time: the row is of
+				// two keys.
+				if _, ok := redactingKeyOf(answeredProbe(m)); !ok {
+					t.Fatalf("a %s recording has no key", m.Kind)
+				}
+			}
+			for _, m := range []*models.Mock{row.a, row.a, row.b, row.b} {
+				mm.noteAnswered(*m)
+			}
+			kinds := []models.Kind{row.a.Kind}
+			if row.b.Kind != row.a.Kind {
+				kinds = append(kinds, row.b.Kind)
+			}
+			kept := 0
+			for _, kind := range kinds {
+				got, complete := mm.AnsweredRedacting(kind)
+				if !complete {
+					t.Fatalf("%s: incomplete", kind)
+				}
+				kept += len(got)
+			}
+			if kept != 2 {
+				t.Fatalf("kept %d of two recordings noted twice each; want each once", kept)
+			}
+		})
 	}
 }
