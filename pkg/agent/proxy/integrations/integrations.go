@@ -480,6 +480,28 @@ type CallViewTeller interface {
 	CallViewMoved() bool
 }
 
+// CallViewDiagnoser is an optional capability of a store HoldToRound
+// returned under exact serving. DiagnoseInCallView returns the store a
+// parser reads its call's miss through: for a call marked from a round
+// snapshot (record's full round), which reads in the view in force, one
+// that reads only in the view the snapshot read, and nothing once a test's
+// begin or end replaced it, so the miss names, and diffs the call against,
+// no recording of another test's view or the pool's. A held store is one
+// call's, and may be told in place. Every MockMemDb wrapper that forwards
+// RoundHolder must forward it.
+type CallViewDiagnoser interface {
+	DiagnoseInCallView() MockMemDb
+}
+
+// DiagnoseInCallView is db's CallViewDiagnoser answer: db itself for a store
+// that has none.
+func DiagnoseInCallView(db MockMemDb) MockMemDb {
+	if d, ok := db.(CallViewDiagnoser); ok {
+		return d.DiagnoseInCallView()
+	}
+	return db
+}
+
 // CallViewMoved is db's CallViewTeller answer: false for a store that tells
 // none (one that holds no call to a view).
 func CallViewMoved(db MockMemDb) bool {

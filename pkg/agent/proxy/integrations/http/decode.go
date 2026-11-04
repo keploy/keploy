@@ -416,7 +416,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					}
 				}
 				// A miss is diagnosed on the call's hold too: in the round
-				// the learn step's first pass read, and in its view.
+				// the learn step's first pass read, and in its view
+				// (integrations.DiagnoseInCallView, below).
 			default:
 				// Under the switch a replay first honours what the learn step
 				// learned onto the recording; anything else goes on to the
@@ -506,7 +507,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 
 			if !ok {
 				// Build mismatch report for the user (surfaced in the mismatch
-				// table, the report yaml and `keploy report`).
+				// table, the report yaml and `keploy report`). Every read of
+				// it is of the view the call was read in: a full-round call,
+				// which serves from the view in force, reads its miss only in
+				// the view its learn step read, and nothing once a test's
+				// begin or end replaced it, so the miss names no recording of
+				// another test's view, or the pool's, as its closest.
+				db = integrations.DiagnoseInCallView(db)
 				if lmiss == nil && provenswitch.On() {
 					// A call that came with an array in another order is
 					// unstable_order in every round, not only the full one.

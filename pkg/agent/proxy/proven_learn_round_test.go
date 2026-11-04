@@ -829,11 +829,16 @@ func TestALearnStepDecidesNothingOfACallInARoundTheStoreMovedOnFrom(t *testing.T
 // refused as the replay ends test-1 under it (and, in one case, begins
 // test-2, which owns mock-own2). mock-own2p, a recording of no test open
 // then, is the same request. The call misses plainly, saying the replay
-// ended its test, with no extra-call kind and no recording named as made
-// elsewhere. Before, the miss was held after the move to the view then in
-// force, which told it no move, and its lookup named mock-own2p as recorded
-// where the replay did not make it (NotOwned), whose next step had record's
-// judging move mock-own2p to the worker scope.
+// ended its test, with no extra-call kind, no recording named as made
+// elsewhere, and no closest recording: the hold reads nothing once test-1's
+// view was replaced, so the miss names none of the view in force's, and its
+// path is redacted whole, as a miss whose pool is unread is. Before,
+// the miss was held after the move to the view then in force, which told it
+// no move, and its lookup named mock-own2p as recorded where the replay did
+// not make it (NotOwned), whose next step had record's judging move
+// mock-own2p to the worker scope; and, held to test-1's view, its closest
+// was still read in the view in force: test-2's mock-own2, diffed against a
+// call of test-1's.
 func TestAMovedLearnMissIsDiagnosedOnTheCallsHold(t *testing.T) {
 	for _, next := range []bool{false, true} {
 		t.Run(map[bool]string{false: "the test ends", true: "the next test begins"}[next], func(t *testing.T) {
@@ -867,8 +872,35 @@ func TestAMovedLearnMissIsDiagnosedOnTheCallsHold(t *testing.T) {
 				if m.NotOwned {
 					t.Errorf("the moved miss names %s as recorded where the replay did not make it", m.ClosestMock)
 				}
+				if m.ClosestMock != "" || m.Diff != "" || len(m.FieldDiffs) > 0 {
+					t.Errorf("the moved miss of a test-1 call names %q as its closest (diff %q, fields %+v); want none: no recording of test-1's view is read once it ended", m.ClosestMock, m.Diff, m.FieldDiffs)
+				}
+				if strings.Contains(m.ActualSummary, "orders") {
+					t.Errorf("the moved miss names the call %q; want its path redacted whole, its view's pool unread", m.ActualSummary)
+				}
 			}
 		})
+	}
+}
+
+// A full-round miss whose view did not move is diagnosed on its hold, which
+// reads the view its learn step read, as before: a GET of /orders in
+// test-1, which recorded only a POST of it, misses naming test-1's own
+// mock-own1 as its closest.
+func TestAFullRoundMissNamesTheClosestRecordingOfItsHold(t *testing.T) {
+	p, mm := heldOrders(t, false)
+	mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+	p.ContinueTestErrorCapture()
+	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, "GET /orders HTTP/1.1\r\nHost: deps.example\r\n\r\n")
+	if code == http.StatusOK {
+		t.Fatalf("a GET test-1 never recorded was answered %d %s", code, got)
+	}
+	misses, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(misses) != 1 || misses[0].ClosestMock != "mock-own1" {
+		t.Fatalf("the miss reads %+v; want one naming test-1's mock-own1 as its closest", misses)
 	}
 }
 

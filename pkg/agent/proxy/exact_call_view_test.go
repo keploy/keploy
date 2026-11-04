@@ -243,3 +243,130 @@ func TestACallMarkedFromAnotherStoresSnapshotIsHeldToTheViewInForce(t *testing.T
 		t.Fatal("a call held to another store's snapshot is told it moved, with no view installed since its hold")
 	}
 }
+
+// The miss of a call marked from a round snapshot (record's full round's
+// learn step, integrations.RoundSnapshot.CallRound) reads, through its hold
+// (integrations.DiagnoseInCallView), the view that snapshot read and no
+// other. While test-1's view is in force the hold reads test-1's own
+// mock-own1 and mock-sess1. Once the replay ends test-1 (the pool view in
+// force) or ends it and begins test-2 (which owns mock-own2 and mock-sess2),
+// before the hold or after it, every read of the hold finds nothing, its
+// walks stop, the generation it reports is its own (the view in force's
+// would file that nothing for the view's own calls), its answered
+// redactions are not complete (so the miss is redacted by every place), and
+// the move is no staging. A call decided in the test the store opens next (TrackerAhead)
+// reads the view in force, as before. Before, the miss read the view in
+// force: a test-1 call's named test-2's mock-own2, or a pool recording, as
+// its closest.
+func TestASnapshotMarkedCallsMissReadsOnlyTheViewItsSnapshotRead(t *testing.T) {
+	for _, scoped := range []bool{false, true} {
+		for _, ahead := range []bool{false, true} {
+			for _, when := range []string{"never", "test-1 ends before its hold", "test-2 begins before its hold", "test-1 ends after its hold", "test-2 begins after its hold"} {
+				name := map[bool]string{false: "the manager", true: "a scoped view"}[scoped] + "/" + map[bool]string{false: "of the store's test", true: "the tracker ahead"}[ahead] + "/" + when
+				t.Run(name, func(t *testing.T) {
+					t.Setenv(provenswitch.Env, "1")
+					now := time.Now()
+					pool := r3Mock("mock-pool", now.Add(100*time.Millisecond), "POST", "/orders", `{"item":"apple"}`, `{"order":0}`)
+					own1 := r3Mock("mock-own1", now.Add(700*time.Millisecond), "POST", "/orders", `{"item":"pear"}`, `{"order":1}`)
+					sess1 := r3Mock("mock-sess1", now.Add(710*time.Millisecond), "GET", "/config", "", `{"v":1}`)
+					own2 := r3Mock("mock-own2", now.Add(1500*time.Millisecond), "POST", "/orders", `{"item":"plum"}`, `{"order":2}`)
+					sess2 := r3Mock("mock-sess2", now.Add(1510*time.Millisecond), "GET", "/config", "", `{"v":2}`)
+					mm := NewMockManager(nil, nil, zap.NewNop())
+					t.Cleanup(mm.Close)
+					mm.SeedRecordedWindows([]models.TestWindow{
+						{Start: now.Add(500 * time.Millisecond), End: now.Add(800 * time.Millisecond)},
+						{Start: now.Add(time.Second), End: now.Add(2 * time.Second)},
+					})
+					mm.SetMocksWithWindow([]*models.Mock{pool, own1, own2}, []*models.Mock{sess1, sess2}, models.BaseTime, now.Add(time.Hour))
+					mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"mock-pool"}, nil)
+					mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+					mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1"), roundMock(mm, "mock-sess1")})
+					var store integrations.MockMemDb = mm
+					if scoped {
+						store = &scopedMockDb{MockMemDb: mm}
+					}
+					snap, ok := integrations.SnapshotRound(store, integrations.RoundQuery{})
+					if !ok || snap.Test != "test-1" {
+						t.Fatalf("precondition: the snapshot read %q (ok %v); want test-1's view", snap.Test, ok)
+					}
+					call := snap.CallRound().WithTrackerAhead(ahead)
+					move := func() {
+						mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+						if strings.HasPrefix(when, "test-2") {
+							mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2"), roundMock(mm, "mock-sess2")})
+						}
+					}
+					before := strings.HasSuffix(when, "before its hold")
+					if before {
+						move()
+					}
+					held, restaged := integrations.HoldToRound(store, call)
+					held = integrations.DiagnoseInCallView(held)
+					if strings.HasSuffix(when, "after its hold") {
+						move()
+					}
+					perTest, _ := held.GetPerTestMocksInWindow()
+					session, _ := held.GetSessionScopedMocks()
+					startup, _ := held.GetStartupMocks()
+					walked, keyed := 0, 0
+					if r, ok := held.(integrations.PerTestRanger); ok {
+						_ = r.RangePerTestMocksInWindow(func(*models.Mock) bool { walked++; return true })
+					}
+					if r, ok := held.(integrations.SessionKeyReader); ok {
+						ix := &integrations.MockIndex{Keys: func(*models.Mock) []string { return []string{"config"} }}
+						_ = r.RangeSessionMocksWithKey(ix, "config", func(*models.Mock) bool { keyed++; return true })
+					}
+					read := answeredNames(append(append(append([]*models.Mock{}, perTest...), session...), startup...))
+					has := func(name string) bool {
+						for _, n := range read {
+							if n == name {
+								return true
+							}
+						}
+						return false
+					}
+					switch {
+					case when == "never":
+						if !has("mock-own1") || has("mock-own2") || has("mock-sess2") || walked == 0 || keyed == 0 {
+							t.Fatalf("with test-1's view in force the hold reads %v (walked %d, keyed %d); want test-1's mock-own1 and mock-sess1, none of test-2's", read, walked, keyed)
+						}
+					case ahead:
+						// Decided in the test the store opens next: it reads
+						// the view in force.
+						if strings.HasPrefix(when, "test-2") && !has("mock-own2") {
+							t.Fatalf("a call decided in the test the store opens next reads %v once test-2 began; want test-2's mock-own2", read)
+						}
+					default:
+						if len(read) > 0 || walked > 0 || keyed > 0 {
+							t.Fatalf("once %s the hold of a call its snapshot read in test-1's view reads %v (walked %d, keyed %d); want nothing", when, read, walked, keyed)
+						}
+						if b, ok := held.(integrations.ExactBackground); ok {
+							if bg := b.Background(models.HTTP); len(bg) > 0 {
+								t.Errorf("the hold's background reads %v; want nothing", answeredNames(bg))
+							}
+						}
+						if b, ok := held.(interface {
+							KindBackground(models.Kind) ([]*models.Mock, []*models.Mock)
+						}); ok {
+							if unused, spent := b.KindBackground(models.HTTP); len(unused)+len(spent) > 0 {
+								t.Errorf("the hold's kind background reads %v and %v; want nothing", answeredNames(unused), answeredNames(spent))
+							}
+						}
+						if !scoped {
+							gen := held.(integrations.StagingGenerations).StagingGeneration()
+							if gen == mm.StagingGeneration() || gen == integrations.RestagedGeneration {
+								t.Errorf("the hold reports generation %d (the view in force's %d, restaged %d); want its own", gen, mm.StagingGeneration(), integrations.RestagedGeneration)
+							}
+						}
+						if _, complete := integrations.AnsweredRedacting(held, models.HTTP); complete {
+							t.Error("the hold tells its answered redactions complete, its view's pool unread; want not complete, so the miss is redacted by every place")
+						}
+						if restaged() {
+							t.Error("a test's end or begin is told a staging")
+						}
+					}
+				})
+			}
+		}
+	}
+}

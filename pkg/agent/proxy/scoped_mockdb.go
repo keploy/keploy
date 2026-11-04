@@ -480,6 +480,14 @@ func (s *scopedMockDb) HoldToRound(call integrations.CallRound) (integrations.Mo
 	return &c, restaged
 }
 
+// DiagnoseInCallView implements integrations.CallViewDiagnoser: this view
+// over the store DiagnoseInCallView returned for it.
+func (s *scopedMockDb) DiagnoseInCallView() integrations.MockMemDb {
+	c := *s
+	c.MockMemDb = integrations.DiagnoseInCallView(s.MockMemDb)
+	return &c
+}
+
 // HideBackgroundWhen implements integrations.BackgroundHider: this view over
 // the store HideBackgroundWhen returned for it, a held store being one
 // call's, as HoldToRound's copy is. Under exact serving scopedFor wraps no
