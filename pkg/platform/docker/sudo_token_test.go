@@ -24,18 +24,18 @@ func TestSudoCannotKeepAgentToken(t *testing.T) {
 		// refused is what the refusal names; empty when there is none.
 		refused string
 	}{
-		{goos: "linux", version: "sudo-rs 0.2.5\n", refused: "sudo-rs 0.2.5"},
-		{goos: "linux", version: "sudo-rs 0.2.6\n", refused: "sudo-rs 0.2.6"},
-		{goos: "linux", version: "sudo-rs 0.1.9\n", refused: "sudo-rs 0.1.9"},
+		{goos: "linux", version: "sudo-rs 0.2.5\n", refused: "sudo-rs 0.2.5 ignores --preserve-env"},
+		{goos: "linux", version: "sudo-rs 0.2.6\n", refused: "sudo-rs 0.2.6 ignores --preserve-env"},
+		{goos: "linux", version: "sudo-rs 0.1.9\n", refused: "sudo-rs 0.1.9 ignores --preserve-env"},
 		{goos: "linux", version: "sudo-rs 0.2.7\n"},
 		{goos: "linux", version: "sudo-rs 0.2.13\n"},
 		{goos: "linux", version: "sudo-rs 0.10.0\n"},
 		{goos: "linux", version: "sudo-rs 1.0.0\n"},
-		{goos: "linux", version: "Sudo version 1.8.20p2\nSudoers policy plugin version 1.8.20p2\n", refused: "sudo 1.8.20"},
+		{goos: "linux", version: "Sudo version 1.8.20p2\nSudoers policy plugin version 1.8.20p2\n", refused: "sudo 1.8.20 does not accept --preserve-env"},
 		{goos: "linux", version: "Sudo version 1.8.21\n"},
 		// Whatever sudo says first, the version line decides.
-		{goos: "linux", version: "sudo: unable to resolve host box: Name or service not known\nSudo version 1.8.20\n", refused: "sudo 1.8.20"},
-		{goos: "linux", version: "warning: something\nsudo-rs 0.2.5\n", refused: "sudo-rs 0.2.5"},
+		{goos: "linux", version: "sudo: unable to resolve host box: Name or service not known\nSudo version 1.8.20\n", refused: "sudo 1.8.20 does not accept --preserve-env"},
+		{goos: "linux", version: "warning: something\nsudo-rs 0.2.5\n", refused: "sudo-rs 0.2.5 ignores --preserve-env"},
 		{goos: "linux", version: "Sudo version 1.9.16p2\nSudoers policy plugin version 1.9.16p2\n"},
 		{goos: "linux", version: "Sudo version 1.10.0\n"},
 		{goos: "darwin", version: "Sudo version 1.9.13p2\n"},
@@ -44,8 +44,8 @@ func TestSudoCannotKeepAgentToken(t *testing.T) {
 		{goos: "linux", version: ""},
 		{goos: "linux", version: "sudo: unknown option --version\n"},
 		{goos: "windows", version: "", refused: "Windows"},
-		{goos: "linux", version: "sudo-rs 0.2.5\n", root: true, refused: "sudo-rs 0.2.5"},
-		{goos: "linux", version: "Sudo version 1.8.20\n", root: true, refused: "sudo 1.8.20"},
+		{goos: "linux", version: "sudo-rs 0.2.5\n", root: true, refused: "sudo-rs 0.2.5 ignores --preserve-env"},
+		{goos: "linux", version: "Sudo version 1.8.20\n", root: true, refused: "sudo 1.8.20 does not accept --preserve-env"},
 		{goos: "linux", version: "sudo-rs 0.2.7\n", root: true},
 	} {
 		err := sudoCannotKeepAgentToken(tc.goos, tc.version, tc.root)
@@ -82,7 +82,7 @@ func TestPrepareDockerCommand_RefusesASudoThatWouldDropTheToken(t *testing.T) {
 		root, noToken     bool
 		refused           string
 	}{
-		{name: "sudo-rs 0.2.5", sudoVersion: "sudo-rs 0.2.5", refused: "sudo-rs 0.2.5"},
+		{name: "sudo-rs 0.2.5", sudoVersion: "sudo-rs 0.2.5", refused: "sudo-rs 0.2.5 ignores --preserve-env"},
 		{name: "sudo-rs 0.2.7", sudoVersion: "sudo-rs 0.2.7"},
 		{name: "sudo 1.9.16p2", sudoVersion: "Sudo version 1.9.16p2"},
 		{name: "root, sudo-rs 0.2.5", sudoVersion: "sudo-rs 0.2.5", root: true},
