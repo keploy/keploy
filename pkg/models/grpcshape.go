@@ -10,46 +10,45 @@ package models
 // (0, false, an enum's first value) off the wire, so a scalar's presence
 // says what a value was, not what the message is. A length-delimited field
 // counts by its number and, for an embedded message, its own length-delimited
-// fields, "1.2" being field 2 of the message in field 1. Protoscope prints a
-// string whose bytes happen to parse as protobuf as a message, so such a
-// string counts as one only when it parses into length-delimited fields of
-// its own, which is rare.
+// fields, field 2 of the message in field 1 being under field 1. Protoscope
+// prints a string whose bytes happen to parse as protobuf as a message, so
+// such a string counts as one only when it parses into length-delimited
+// fields of its own, which is rare.
 //
-// A direction's entries are the union of its messages' (a stream's length
-// and order are no shape), plus "$:m" when it carries any message at all, so
-// a direction with no message differs from one whose messages hold no
-// length-delimited field.
+// A direction's shape is the union of its messages' (a stream's length and
+// order are no shape), its root marked "m" when it carries any message at
+// all, so a direction with no message differs from one whose messages hold
+// no length-delimited field. A message is read in full, however deep it
+// nests, without recursion.
 
-// protoscopeMaxDepth bounds how deep the shape follows embedded messages; the
-// fields of a deeper one do not count. It keeps a crafted message from
-// exhausting the stack.
-const protoscopeMaxDepth = 64
-
-// grpcMessagesShape is the entries of a direction's messages.
-func grpcMessagesShape(msgs []GrpcLengthPrefixedMessage) []string {
+// grpcMessagesShape is the shape of a direction's messages, written out
+// (shapeNode.String): "" for none.
+func grpcMessagesShape(msgs []GrpcLengthPrefixedMessage) string {
 	if len(msgs) == 0 {
-		return nil
+		return ""
 	}
-	set := map[string]struct{}{}
-	addShape(set, "$", "m")
+	root := &shapeNode{types: shapeMessage}
 	for _, m := range msgs {
-		protoscopeFields(m.DecodedData, 0, "$", set, 0)
+		protoscopeShape(m.DecodedData, root)
 	}
-	return sortedKeys(set)
+	return root.String()
 }
 
-// protoscopeFields adds the length-delimited fields of the protoscope block
-// that starts at i, under path, and returns the position after the block's
-// closing '}' (or the end of the text).
-func protoscopeFields(data string, i int, path string, set map[string]struct{}, depth int) int {
+// protoscopeShape adds the length-delimited fields of a message's protoscope
+// text to root.
+func protoscopeShape(data string, root *shapeNode) {
+	stack := []*shapeNode{root} // the embedded messages open at i
 	n := len(data)
-	for i < n {
+	for i := 0; i < n; {
 		c := data[i]
 		switch {
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+		case isProtoscopeSpace(c):
 			i++
 		case c == '}':
-			return i + 1
+			if len(stack) > 1 {
+				stack = stack[:len(stack)-1]
+			}
+			i++
 		case c == '#':
 			// A remark (protoscope appends one to fixed-width scalars) runs to
 			// the end of its line.
@@ -62,7 +61,11 @@ func protoscopeFields(data string, i int, path string, set map[string]struct{}, 
 			// A block with no field number: skip it whole.
 			i = skipProtoscopeBlock(data, i+1)
 		case isDigitByte(c):
-			i = protoscopeField(data, i, path, set, depth)
+			var opened *shapeNode
+			i, opened = protoscopeField(data, i, stack[len(stack)-1])
+			if opened != nil {
+				stack = append(stack, opened)
+			}
 		default:
 			// Any other token (a long-form marker, a scalar's residue).
 			for i < n && !isProtoscopeSpace(data[i]) && data[i] != '}' {
@@ -70,18 +73,19 @@ func protoscopeFields(data string, i int, path string, set map[string]struct{}, 
 			}
 		}
 	}
-	return i
 }
 
-// protoscopeField reads one "number: value" field at i and returns the
-// position after it, adding it when its value is length-delimited.
-func protoscopeField(data string, i int, path string, set map[string]struct{}, depth int) int {
+// protoscopeField reads one "number: value" field at i, under parent, and
+// returns the position after what it read, adding the field when its value
+// is length-delimited. When the value is an embedded message, it returns the
+// field's node, whose fields follow at that position, up to its '}'.
+func protoscopeField(data string, i int, parent *shapeNode) (int, *shapeNode) {
 	n := len(data)
 	start := i
 	for i < n && isDigitByte(data[i]) {
 		i++
 	}
-	field := path + "." + data[start:i]
+	number := data[start:i]
 	for i < n && data[i] == ' ' {
 		i++
 	}
@@ -95,11 +99,12 @@ func protoscopeField(data string, i int, path string, set map[string]struct{}, d
 		i++
 	}
 	if i >= n {
-		return i
+		return i, nil
 	}
 	switch data[i] {
 	case '{':
-		addShape(set, field, "l")
+		field := parent.field(number)
+		field.types |= shapeLengthDelimited
 		i++
 		for i < n && isProtoscopeSpace(data[i]) {
 			i++
@@ -113,25 +118,22 @@ func protoscopeField(data string, i int, path string, set map[string]struct{}, d
 				}
 				i++
 			}
-			return min(i+1, n)
+			return min(i+1, n), nil
 		}
-		if depth >= protoscopeMaxDepth {
-			return skipProtoscopeBlock(data, i)
-		}
-		return protoscopeFields(data, i, field, set, depth+1)
+		return i, field
 	case '`':
-		addShape(set, field, "l")
+		parent.field(number).types |= shapeLengthDelimited
 		i++
 		for i < n && data[i] != '`' {
 			i++
 		}
-		return min(i+1, n)
+		return min(i+1, n), nil
 	}
 	// A scalar: its token runs to whitespace or the enclosing block's '}'.
 	for i < n && !isProtoscopeSpace(data[i]) && data[i] != '}' {
 		i++
 	}
-	return i
+	return i, nil
 }
 
 // skipProtoscopeString returns the position after the quoted literal at i.
@@ -168,7 +170,7 @@ func skipProtoscopeBlock(data string, i int) int {
 		}
 		i++
 	}
-	return i
+	return min(i, n)
 }
 
 func isProtoscopeSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }

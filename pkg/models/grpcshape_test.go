@@ -1,7 +1,6 @@
 package models
 
 import (
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -53,24 +52,25 @@ func TestGRPCMessagesShapeParsing(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		data string
-		want []string
+		want string
 	}{
-		{"fields on one line", `1: {"y"} 2: {"z"}`, []string{"$.1:l", "$.2:l", "$:m"}},
-		{"a single-line nested block", `1: {7: 56}`, []string{"$.1:l", "$:m"}},
-		{"nested length-delimited fields", "1: {\n  2: {\"x\"}\n  3: {4: {`ff`}}\n}", []string{"$.1.2:l", "$.1.3.4:l", "$.1.3:l", "$.1:l", "$:m"}},
-		{"bytes", "5: `deadbeef`", []string{"$.5:l", "$:m"}},
-		{"a group", `6: !{1: {"g"}}`, []string{"$.6.1:l", "$.6:l", "$:m"}},
-		{"a long-form marker and a remark", "1: long-form:1 0\n2: 1.5i64   # 0x3ff8000000000000i64\n3: {\"k\"}", []string{"$.3:l", "$:m"}},
-		{"braces and a quote inside a string", `1: {"a } b \" {"} 2: {"c"}`, []string{"$.1:l", "$.2:l", "$:m"}},
-		{"an unterminated block", `1: {2: {"x"`, []string{"$.1.2:l", "$.1:l", "$:m"}},
+		{"fields on one line", `1: {"y"} 2: {"z"}`, "m{1:l,2:l}"},
+		{"a single-line nested block", `1: {7: 56}`, "m{1:l}"},
+		{"nested length-delimited fields", "1: {\n  2: {\"x\"}\n  3: {4: {`ff`}}\n}", "m{1:l{2:l,3:l{4:l}}}"},
+		{"bytes", "5: `deadbeef`", "m{5:l}"},
+		{"a group", `6: !{1: {"g"}}`, "m{6:l{1:l}}"},
+		{"a long-form marker and a remark", "1: long-form:1 0\n2: 1.5i64   # 0x3ff8000000000000i64\n3: {\"k\"}", "m{3:l}"},
+		{"braces and a quote inside a string", `1: {"a } b \" {"} 2: {"c"}`, "m{1:l,2:l}"},
+		{"an unterminated block", `1: {2: {"x"`, "m{1:l{2:l}}"},
+		{"a stray '}' does not end the message", `1: {"a"} } 2: {"b"}`, "m{1:l,2:l}"},
 	} {
 		got := grpcMessagesShape([]GrpcLengthPrefixedMessage{{DecodedData: tc.data}})
-		if !reflect.DeepEqual(got, tc.want) {
-			t.Errorf("%s: %q → %v, want %v", tc.name, tc.data, got, tc.want)
+		if got != tc.want {
+			t.Errorf("%s: %q → %q, want %q", tc.name, tc.data, got, tc.want)
 		}
 	}
-	if got := grpcMessagesShape(nil); got != nil {
-		t.Errorf("no messages → %v, want none", got)
+	if got := grpcMessagesShape(nil); got != "" {
+		t.Errorf("no messages → %q, want none", got)
 	}
 }
 
@@ -82,19 +82,31 @@ func FuzzGRPCMessagesShape(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, data string) {
 		msgs := []GrpcLengthPrefixedMessage{{DecodedData: data}}
-		if !reflect.DeepEqual(grpcMessagesShape(msgs), grpcMessagesShape(msgs)) {
-			t.Fatal("the shape differs between two reads")
+		if first, again := grpcMessagesShape(msgs), grpcMessagesShape(msgs); first != again {
+			t.Fatalf("the shape differs between two reads: %q, then %q", first, again)
 		}
 	})
 }
 
-func TestGRPCMessagesShapeOfADeepMessage(t *testing.T) {
-	deep := strings.Repeat("1: {", 1<<20) + strings.Repeat("}", 1<<20) + "\n2: {\"after\"}"
-	got := grpcMessagesShape([]GrpcLengthPrefixedMessage{{DecodedData: deep}})
-	if len(got) != protoscopeMaxDepth+3 {
-		t.Fatalf("%d entries for a message nested past protoscopeMaxDepth, want %d", len(got), protoscopeMaxDepth+3)
+// TestGRPCShapeIsReadInFull checks that two messages that differ only deep
+// down are two shapes: no depth is cut off.
+func TestGRPCShapeIsReadInFull(t *testing.T) {
+	const p = "/users.v1.Users/Get"
+	nested := func(depth int, leaf string) string {
+		return strings.Repeat("1: {", depth) + leaf + strings.Repeat("}", depth)
 	}
-	if got[len(got)-2] != "$.2:l" {
-		t.Fatalf("the field after the deep one: %v", got[len(got)-3:])
+	differentShape(t, "messages that differ 100 levels down",
+		grpcCase(p, "0", nil, []string{nested(100, `2: {"x"}`)}),
+		grpcCase(p, "0", nil, []string{nested(100, `3: {"x"}`)}))
+}
+
+// TestGRPCShapeOfADeepMessage checks that a message nested 1<<20 deep is read
+// without exhausting the stack, its deepest field and the one after it kept.
+func TestGRPCShapeOfADeepMessage(t *testing.T) {
+	const p = "/users.v1.Users/Get"
+	deep := func(leaf, after string) *TestCase {
+		return grpcCase(p, "0", nil, []string{strings.Repeat("1: {", 1<<20) + leaf + strings.Repeat("}", 1<<20) + "\n" + after})
 	}
+	differentShape(t, "the deepest field", deep(`2: {"x"}`, `4: {"y"}`), deep(`3: {"x"}`, `4: {"y"}`))
+	differentShape(t, "the field after", deep(`2: {"x"}`, `4: {"y"}`), deep(`2: {"x"}`, `5: {"y"}`))
 }

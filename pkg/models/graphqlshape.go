@@ -1,9 +1,11 @@
 package models
 
 import (
-	"encoding/json"
+	"bytes"
+	"crypto/sha256"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -19,89 +21,75 @@ import (
 // is no GraphQL request:
 //
 //   - a JSON body {"query": ..., "operationName": ...} whose query is a
-//     GraphQL document (looksLikeGraphQL), or a batch, a JSON array of them;
+//     GraphQL document (looksLikeGraphQL), or a batch, a JSON array of them,
+//     whose operations are a set: each distinct one, sorted, joined by ';';
 //   - a JSON body naming a persisted query
 //     ({"extensions": {"persistedQuery": {"sha256Hash": ...}}}) and no query;
 //   - an application/graphql body;
-//   - a GET with the query in the URL (?query=...&operationName=...).
-func graphQLRequestOperation(media string, body []byte, doc any, rawQuery string) string {
+//   - a GET with the query in the URL (?query=...&operationName=...), read
+//     from the parameters that parse when another one does not.
+func graphQLRequestOperation(media string, body []byte, req *jsonRequest, rawQuery string) string {
 	if media == "application/graphql" {
 		return graphQLOperation(string(body), "")
 	}
-	if op := graphQLEnvelopeOperation(doc); op != "" {
-		return op
-	}
-	if arr, ok := doc.([]any); ok && len(arr) > 0 {
-		ops := make([]string, 0, len(arr))
-		for _, v := range arr {
-			op := graphQLEnvelopeOperation(v)
-			if op == "" {
-				return ""
-			}
-			ops = append(ops, op)
+	if req != nil && req.envelopes > 0 {
+		if !req.notGraphQL {
+			return strings.Join(sortedKeys(req.graphQL), ";")
 		}
-		sort.Strings(ops)
-		return strings.Join(ops, ";")
+		if req.batch {
+			return ""
+		}
 	}
 	if rawQuery == "" {
 		return ""
 	}
-	q, err := url.ParseQuery(rawQuery)
-	if err != nil {
-		return ""
-	}
+	// url.ParseQuery returns the parameters that parse beside the error of
+	// one that does not (a bad escape, a ';').
+	q, _ := url.ParseQuery(rawQuery)
 	if d := q.Get("query"); looksLikeGraphQL(d) {
 		return graphQLOperation(d, q.Get("operationName"))
 	}
 	if ext := q.Get("extensions"); ext != "" {
-		var e any
-		if json.Unmarshal([]byte(ext), &e) == nil {
-			if h := persistedQueryHash(e); h != "" {
-				return graphQLPersisted(h, q.Get("operationName"))
-			}
+		if h := persistedQueryHash(ext); h != "" {
+			return graphQLPersisted(h, q.Get("operationName"))
 		}
 	}
 	return ""
 }
 
 // graphQLEnvelopeOperation is the operation of one JSON GraphQL request
-// envelope, "" when v is none.
-func graphQLEnvelopeOperation(v any) string {
-	obj, ok := v.(map[string]any)
-	if !ok {
+// envelope, "" when e is none.
+func graphQLEnvelopeOperation(e *jsonEnvelope) string {
+	if !e.object {
 		return ""
 	}
-	name, _ := obj["operationName"].(string)
-	if d, ok := obj["query"].(string); ok && looksLikeGraphQL(d) {
-		return graphQLOperation(d, name)
+	if e.queryType == shapeString && looksLikeGraphQL(e.query) {
+		return graphQLOperation(e.query, e.opName)
 	}
-	if _, has := obj["query"]; !has || obj["query"] == nil || obj["query"] == "" {
-		if h := persistedQueryHash(obj["extensions"]); h != "" {
-			return graphQLPersisted(h, name)
+	if e.queryType == 0 || e.queryType == shapeNull || (e.queryType == shapeString && e.query == "") {
+		if e.persisted != "" {
+			return graphQLPersisted(e.persisted, e.opName)
 		}
 	}
 	return ""
 }
 
-// persistedQueryHash is the sha256Hash of an envelope's
-// extensions.persistedQuery, "" when it has none.
-func persistedQueryHash(ext any) string {
-	e, ok := ext.(map[string]any)
-	if !ok {
+// persistedQueryHash is the persistedQuery.sha256Hash of a GET's extensions
+// parameter, "" when it has none.
+func persistedQueryHash(extensions string) string {
+	s := &jsonScanner{rootRole: roleExtensions, tree: &shapeNode{}}
+	if !s.scan(strings.TrimSpace(extensions)) {
 		return ""
 	}
-	pq, ok := e["persistedQuery"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	h, _ := pq["sha256Hash"].(string)
-	return h
+	return s.env.persisted
 }
 
+// graphQLPersisted is a persisted query as an operation: its hash and its
+// operation name, each quoted, as a request can put any text in them.
 func graphQLPersisted(hash, name string) string {
-	op := "graphql:persisted:" + hash
+	op := "graphql:persisted:" + strconv.Quote(hash)
 	if name != "" {
-		op += "#" + name
+		op += "#" + strconv.Quote(name)
 	}
 	return op
 }
@@ -126,8 +114,9 @@ func looksLikeGraphQL(s string) bool {
 }
 
 // graphQLOperation is a GraphQL document as an operation ("graphql:" and its
-// canonical form), with "#" and the operation name when the request names
-// the one it runs.
+// canonical form), with "#" and the operation name, quoted, when the request
+// names the one it runs. The canonical form holds no '#', ';' or '"', so the
+// name cannot be read as more of it, nor as another operation of a batch.
 func graphQLOperation(doc, operationName string) string {
 	p := gqlParser{lx: gqlLexer{src: doc}}
 	p.advance()
@@ -137,7 +126,7 @@ func graphQLOperation(doc, operationName string) string {
 	}
 	op := "graphql:" + canonical
 	if operationName != "" {
-		op += "#" + operationName
+		op += "#" + strconv.Quote(operationName)
 	}
 	return op
 }
@@ -233,16 +222,12 @@ func (l *gqlLexer) token() gqlToken {
 // executable grammar (operations, fragments, selections, arguments,
 // directives, variable definitions); a token it does not expect is skipped,
 // so a malformed document still gives a form, and the same one each time.
+// It reads without recursion, and writes the form in full in time and memory
+// linear in the document, however deep it nests.
 type gqlParser struct {
-	lx    gqlLexer
-	tok   gqlToken
-	depth int // selection sets open
+	lx  gqlLexer
+	tok gqlToken
 }
-
-// gqlMaxDepth bounds how deep the form follows nested selection sets; a
-// deeper one is written "{…}". It keeps a crafted document from exhausting
-// the stack.
-const gqlMaxDepth = 64
 
 func (p *gqlParser) advance() { p.tok = p.lx.next() }
 
@@ -295,49 +280,129 @@ func (p *gqlParser) document() string {
 	return strings.Join(defs, " ")
 }
 
-// selectionSet is "{" and the set's selections, sorted, then "}".
-func (p *gqlParser) selectionSet() string {
-	if p.depth >= gqlMaxDepth {
-		p.skipSelectionSet()
-		return "{…}"
-	}
-	p.depth++
-	defer func() { p.depth-- }()
-	p.advance() // {
-	var sel []string
-	for p.tok.kind != gqlEOF && !p.is("}") {
-		s := p.selection()
-		if s != "" {
-			sel = append(sel, s)
-		}
-	}
-	p.advance() // }
-	sort.Strings(sel)
-	return "{" + strings.Join(sel, " ") + "}"
+// gqlSelection is a selection as read: its head (a field's name, not its
+// alias, its argument names and its directives; a fragment spread; an inline
+// fragment's type condition and directives) and its selection set, when it
+// has one.
+type gqlSelection struct {
+	head string
+	sels []*gqlSelection
+	sum  [16]byte // a hash of its canonical form (canonicalize)
+	set  bool
 }
 
-// selection is a field (its name, not its alias, its argument names, its
-// directives and its selections), a fragment spread or an inline fragment.
-func (p *gqlParser) selection() string {
+// selectionSet is the canonical form of the selection set at '{': "{", its
+// selections in canonical order, each its head and its own set, joined by
+// ' ', then "}". It reads the set into a tree, puts each set in canonical
+// order as it closes (canonicalize), then writes the tree once, so a set
+// nested to any depth costs no stack and is copied once.
+func (p *gqlParser) selectionSet() string {
+	root := &gqlSelection{set: true}
+	open := []*gqlSelection{root}
+	var buf []byte
+	p.advance() // {
+	for len(open) > 0 {
+		if p.tok.kind == gqlEOF || p.is("}") {
+			p.advance() // }
+			buf = open[len(open)-1].canonicalize(buf[:0])
+			open = open[:len(open)-1]
+			continue
+		}
+		sel, hasSet := p.selection()
+		if sel == nil {
+			continue
+		}
+		parent := open[len(open)-1]
+		parent.sels = append(parent.sels, sel)
+		if hasSet {
+			p.advance() // {
+			sel.set = true
+			open = append(open, sel)
+		} else {
+			buf = sel.canonicalize(buf[:0])
+		}
+	}
+	return root.write()
+}
+
+// canonicalize orders a selection's set, whose selections are already
+// canonical, by head and then by hash, so the order is the same whatever
+// order the document gives them, and computes its own hash: of its head
+// (length-prefixed), whether it has a set, and its selections' hashes in
+// that order. buf is scratch space, returned for reuse.
+func (s *gqlSelection) canonicalize(buf []byte) []byte {
+	sort.Slice(s.sels, func(i, j int) bool {
+		a, b := s.sels[i], s.sels[j]
+		if a.head != b.head {
+			return a.head < b.head
+		}
+		return bytes.Compare(a.sum[:], b.sum[:]) < 0
+	})
+	buf = strconv.AppendInt(buf, int64(len(s.head)), 10)
+	buf = append(buf, ':')
+	buf = append(buf, s.head...)
+	if s.set {
+		buf = append(buf, '{')
+		for _, c := range s.sels {
+			buf = append(buf, c.sum[:]...)
+		}
+	}
+	sum := sha256.Sum256(buf)
+	copy(s.sum[:], sum[:])
+	return buf
+}
+
+// write is the selection written out, without recursion.
+func (s *gqlSelection) write() string {
+	type work struct {
+		text string
+		sel  *gqlSelection
+	}
+	var b strings.Builder
+	stack := []work{{sel: s}}
+	for len(stack) > 0 {
+		w := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if w.sel == nil {
+			b.WriteString(w.text)
+			continue
+		}
+		b.WriteString(w.sel.head)
+		if !w.sel.set {
+			continue
+		}
+		stack = append(stack, work{text: "}"})
+		for i := len(w.sel.sels) - 1; i >= 0; i-- {
+			stack = append(stack, work{sel: w.sel.sels[i]})
+			if i > 0 {
+				stack = append(stack, work{text: " "})
+			}
+		}
+		stack = append(stack, work{text: "{"})
+	}
+	return b.String()
+}
+
+// selection reads one selection's head, and reports whether a selection set
+// follows it; it is nil for a token that starts no selection, which it
+// skips.
+func (p *gqlParser) selection() (*gqlSelection, bool) {
 	if p.is("...") {
 		p.advance()
 		if p.tok.kind == gqlName && p.tok.text != "on" {
-			return "..." + p.name() + p.directives()
+			return &gqlSelection{head: "..." + p.name() + p.directives()}, false
 		}
-		s := "..."
+		head := "..."
 		if p.tok.kind == gqlName && p.tok.text == "on" {
 			p.advance()
-			s += "on " + p.name()
+			head += "on " + p.name()
 		}
-		s += p.directives()
-		if p.is("{") {
-			s += p.selectionSet()
-		}
-		return s
+		head += p.directives()
+		return &gqlSelection{head: head}, p.is("{")
 	}
 	if p.tok.kind != gqlName {
 		p.advance()
-		return ""
+		return nil, false
 	}
 	field := p.name()
 	if p.is(":") {
@@ -345,10 +410,7 @@ func (p *gqlParser) selection() string {
 		field = p.name()
 	}
 	field += p.arguments() + p.directives()
-	if p.is("{") {
-		field += p.selectionSet()
-	}
-	return field
+	return &gqlSelection{head: field}, p.is("{")
 }
 
 // arguments is "(" and the argument names, sorted, then ")", without their
@@ -382,12 +444,14 @@ func (p *gqlParser) arguments() string {
 // directives is each directive, '@', its name and its argument names, in
 // order.
 func (p *gqlParser) directives() string {
-	var s string
+	var b strings.Builder
 	for p.is("@") {
 		p.advance()
-		s += "@" + p.name() + p.arguments()
+		b.WriteByte('@')
+		b.WriteString(p.name())
+		b.WriteString(p.arguments())
 	}
-	return s
+	return b.String()
 }
 
 // variableDefinitions is "(" and each variable's name and type, sorted, then
@@ -425,22 +489,32 @@ func (p *gqlParser) variableDefinitions() string {
 }
 
 // typeRef is a variable's type: a name or a list of a type, each maybe "!".
+// It reads the lists' '[' first, then the name, then each list's ']' and
+// '!', so a type nested to any depth costs no stack and is written once.
 func (p *gqlParser) typeRef() string {
-	var t string
-	if p.is("[") {
+	var b strings.Builder
+	lists := 0
+	for p.is("[") {
 		p.advance()
-		t = "[" + p.typeRef() + "]"
+		b.WriteByte('[')
+		lists++
+	}
+	b.WriteString(p.name())
+	if p.is("!") {
+		p.advance()
+		b.WriteByte('!')
+	}
+	for ; lists > 0; lists-- {
 		if p.is("]") {
 			p.advance()
 		}
-	} else {
-		t = p.name()
+		b.WriteByte(']')
+		if p.is("!") {
+			p.advance()
+			b.WriteByte('!')
+		}
 	}
-	if p.is("!") {
-		p.advance()
-		t += "!"
-	}
-	return t
+	return b.String()
 }
 
 // skipValue reads past one value: a variable, a scalar, a list or an object,
@@ -465,24 +539,6 @@ func (p *gqlParser) skipValue() {
 		default:
 			p.advance()
 		}
-		if depth == 0 {
-			return
-		}
-	}
-}
-
-// skipSelectionSet reads past a selection set nested deeper than
-// gqlMaxDepth, without recursion.
-func (p *gqlParser) skipSelectionSet() {
-	depth := 0
-	for p.tok.kind != gqlEOF {
-		switch {
-		case p.is("{"):
-			depth++
-		case p.is("}"):
-			depth--
-		}
-		p.advance()
 		if depth == 0 {
 			return
 		}

@@ -126,13 +126,88 @@ func FuzzGraphQLOperation(f *testing.F) {
 	})
 }
 
+// TestGraphQLCostIsLinear checks that a document's operation costs memory in
+// proportion to the document: nested list types, runs of directives and
+// nested selection sets are not copied once per level.
+func TestGraphQLCostIsLinear(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		doc  func(n int) string
+	}{
+		{"nested list types", func(n int) string {
+			return "query Q($a:" + strings.Repeat("[", n) + "Int" + strings.Repeat("]", n) + "){a}"
+		}},
+		{"a run of directives", func(n int) string { return "query Q @a" + strings.Repeat("@a", n) + "{a}" }},
+		{"nested selection sets", func(n int) string { return strings.Repeat("{ a ", n) + strings.Repeat("}", n) }},
+	} {
+		requireLinear(t, c.name, c.doc, func(doc string) { graphQLOperation(doc, "") })
+	}
+}
+
+// TestGraphQLOperationIsWrittenInFull checks that two documents that differ
+// only deep down are two operations: no depth is cut off.
+func TestGraphQLOperationIsWrittenInFull(t *testing.T) {
+	nested := func(depth int, leaf string) string {
+		return strings.Repeat("{ a ", depth) + leaf + strings.Repeat(" }", depth)
+	}
+	differentShape(t, "selection sets that differ 100 levels down",
+		gqlCase(nested(100, "b"), ""), gqlCase(nested(100, "c"), ""))
+	differentShape(t, "list types that differ 100 levels down",
+		gqlCase("query Q($a:"+strings.Repeat("[", 100)+"Int"+strings.Repeat("]", 100)+"){a}", ""),
+		gqlCase("query Q($a:"+strings.Repeat("[", 100)+"Int!"+strings.Repeat("]", 100)+"){a}", ""))
+}
+
+// TestGraphQLOperationOfADeepDocument checks that a document nested 1<<20
+// deep, in its selection sets, a variable's type or an argument's value, is
+// read without exhausting the stack, and written in full.
 func TestGraphQLOperationOfADeepDocument(t *testing.T) {
-	deep := strings.Repeat("{ a ", 1<<20) + strings.Repeat("}", 1<<20)
-	if op := graphQLOperation(deep, ""); !strings.Contains(op, "{…}") {
-		t.Fatalf("a document nested past gqlMaxDepth: %.80q…, want its deep sets written {…}", op)
+	deep := strings.Repeat("{ a ", 1<<20) + "b" + strings.Repeat(" }", 1<<20)
+	if op := graphQLOperation(deep, ""); !strings.HasSuffix(op, "{a b}"+strings.Repeat("}", 1<<20-1)) || len(op) != len("graphql:query ")+3*(1<<20)+2 {
+		t.Fatalf("a document nested 1<<20 deep: %.80q…, want it written in full", op)
+	}
+	deepType := "query Q($a:" + strings.Repeat("[", 1<<20) + "Int" + strings.Repeat("]", 1<<20) + "){a}"
+	if op := graphQLOperation(deepType, ""); !strings.Contains(op, "($a:"+strings.Repeat("[", 1<<20)+"Int]") {
+		t.Fatalf("a variable type nested 1<<20 deep: %.80q…", op)
 	}
 	deepValue := "{ a(x: " + strings.Repeat("[", 1<<20) + strings.Repeat("]", 1<<20) + ") }"
 	if op := graphQLOperation(deepValue, ""); op != "graphql:query {a(x)}" {
 		t.Fatalf("a deep argument value: %q", op)
 	}
+}
+
+// TestGraphQLOperationCannotBeForged checks that an operation name or a
+// persisted query's hash cannot write a line or another operation into the
+// canonical form.
+func TestGraphQLOperationCannotBeForged(t *testing.T) {
+	body := func(b string) *TestCase {
+		return httpCase("POST", "/graphql", 200, "application/json", b, "application/json", `{"data":{}}`)
+	}
+	differentShape(t, "an operation name that holds a body line",
+		body(`{"query":"{a}","operationName":"Q\nreq $.a:s"}`), body(`{"a":"x","query":"{a}","operationName":"Q"}`))
+	persisted := func(hash, name string) string {
+		return `{"operationName":"` + name + `","extensions":{"persistedQuery":{"sha256Hash":"` + hash + `"}}}`
+	}
+	differentShape(t, "a persisted hash and a name that hold '#'",
+		body(persisted("a#b", "c")), body(persisted("a", "b#c")))
+	differentShape(t, "a batch whose operation name holds another operation",
+		body(`[{"query":"{a}","operationName":"x;graphql:query {b}"}]`),
+		body(`[{"query":"{a}","operationName":"x"},{"query":"{b}"}]`))
+}
+
+// TestGraphQLBatchIsASetOfOperations checks that a batch's operations count
+// once each, whatever the batch's length.
+func TestGraphQLBatchIsASetOfOperations(t *testing.T) {
+	batch := func(b string) *TestCase {
+		return httpCase("POST", "/graphql", 200, "application/json", b, "application/json", `[]`)
+	}
+	sameShape(t, "an operation once and twice", batch(`[{"query":"{a}"}]`), batch(`[{"query":"{a}"},{"query":"{a}"}]`))
+}
+
+// TestGraphQLGETWithAMalformedParameter checks that a GET's query is read
+// even when another parameter does not parse.
+func TestGraphQLGETWithAMalformedParameter(t *testing.T) {
+	get := func(q string) *TestCase {
+		return httpCase("GET", "/graphql?query="+url.QueryEscape(q)+"&x=%zz", 200, "", "", "application/json", `{"data":{}}`)
+	}
+	differentShape(t, "two queries beside a malformed parameter", get(`{a}`), get(`{b}`))
 }
