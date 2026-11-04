@@ -243,22 +243,26 @@ func (p *Proxy) serveReal(ctx context.Context, src net.Conn, dstAddr, containerR
 		name, rerr := realdeps.ReadName(br)
 		stop()
 		// The tracker charges a connection closed unnamed to the open test,
-		// whatever earlier tests' ends charged it (Tracker.Pending).
+		// whatever earlier tests' ends charged it (Tracker.Pending): the
+		// test open for who the connection is from as keploy closes it
+		// (realUseOrigin), so one a process its worker left behind opened
+		// before the end is charged as one it opens after.
+		at := realUseOrigin(from)
 		switch {
 		case errors.Is(rerr, realdeps.ErrNoName):
 			why := realdeps.UnreadableWhy(dstAddr, dec.Candidates, rerr.Error())
-			done(why)
+			done(at, why)
 			p.logger.Warn("keploy closed a connection it could not name: capture_incomplete", zap.String("destination", dstAddr), zap.String("why", why))
 			return true, wrapped, nil
 		case rerr != nil:
 			if ctx.Err() == nil {
-				done(realdeps.UnreadableWhy(dstAddr, dec.Candidates, "its client closed it before naming it"))
+				done(at, realdeps.UnreadableWhy(dstAddr, dec.Candidates, "its client closed it before naming it"))
 			} else {
-				done("")
+				done(at, "")
 			}
 			return true, wrapped, nil
 		}
-		done("")
+		done(at, "")
 		dec = d.ByName(name, dst.Port())
 		if dec.Verdict == realdeps.Dependency {
 			p.logger.Debug("a connection to a mock.real name's address is for another name: a dependency",
@@ -375,11 +379,14 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 	logger.Debug("relaying a connection to a mock.real destination")
 	r := &realdeps.Relay{
 		Client: client, In: br, Dest: dest, Check: dec.Check,
+		// Each use, its h2 note and a name check's end are charged by who
+		// the connection is from as keploy reads or ends it
+		// (realUseOrigin), never as it was accepted.
 		Sent:     func(int) { p.realTracker.Sent(realUseOrigin(from), connID, dec.Label) },
 		Answered: func() { p.realTracker.Answered(dec.Label) },
-		H2:       func() { p.realTracker.H2(from, dec.Label) },
+		H2:       func() { p.realTracker.H2(realUseOrigin(from), dec.Label) },
 		Refused: func(why string) {
-			p.realTracker.Incomplete(from, dstAddr, why)
+			p.realTracker.Incomplete(realUseOrigin(from), dstAddr, why)
 			logger.Warn("keploy ended a mock.real connection: capture_incomplete", zap.String("why", why))
 		},
 		// The app's side over, the connection waits on the real server's

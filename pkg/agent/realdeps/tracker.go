@@ -79,6 +79,21 @@ type Origin struct {
 	Ended    string
 }
 
+// endedWhy is why, naming the ended test worker from's process was left
+// behind by (Ended), and the process when known: capture_incomplete that a
+// process of an ended worker made is charged to the tests open then, none of
+// them its own, so it says whose it was.
+func (o Origin) endedWhy(why string) string {
+	if o.Ended == "" {
+		return why
+	}
+	who := "a process"
+	if o.Pid != 0 {
+		who = fmt.Sprintf("process %d", o.Pid)
+	}
+	return why + "; from " + who + " of ended test worker " + o.Ended
+}
+
 // openTest is a test open on its worker's instance.
 type openTest struct {
 	// seq numbers it among the run's tests (Tracker.seq).
@@ -336,30 +351,32 @@ func sortedKeys(m map[string]bool) []string {
 	return out
 }
 
-// Pending notes that connection id, to dst, waits for its client's first
-// bytes to name it; candidates are the name entries resolving to dst. done
-// ends the wait, whatever it decided: unnamed is why keploy closed the
-// connection without a name ("" when it was named, or the run ended). A
-// connection closed unnamed is charged to the open test its origin's
-// (testsOfLocked), during which it was undecided, whatever earlier tests'
-// ends charged it; with none open, it is the run's, unless a test's end or a
-// read charged it already.
-func (t *Tracker) Pending(from Origin, id int64, dst string, candidates []string) (done func(unnamed string)) {
+// Pending notes that connection id, to dst, from from, waits for its
+// client's first bytes to name it; candidates are the name entries resolving
+// to dst. done ends the wait, whatever it decided: unnamed is why keploy
+// closed the connection without a name ("" when it was named, or the run
+// ended), and at who the connection is from when it ended (a process of
+// from's worker may be left behind by its end: from no live worker then). A
+// connection closed unnamed is charged to the open test at's (testsOfLocked),
+// during which it was undecided, whatever earlier tests' ends charged it;
+// with none open, it is the run's, unless a test's end or a read charged it
+// already.
+func (t *Tracker) Pending(from Origin, id int64, dst string, candidates []string) (done func(at Origin, unnamed string)) {
 	t.mu.Lock()
 	if t.pending == nil {
 		t.pending = map[int64]*pendingConn{}
 	}
 	t.pending[id] = &pendingConn{dst: dst, candidates: candidates, instance: from.Instance}
 	t.mu.Unlock()
-	return func(unnamed string) {
+	return func(at Origin, unnamed string) {
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		p := t.pending[id]
 		delete(t.pending, id)
-		if unnamed == "" || (len(t.testsOfLocked(from)) == 0 && p != nil && p.reported) {
+		if unnamed == "" || (len(t.testsOfLocked(at)) == 0 && p != nil && p.reported) {
 			return
 		}
-		t.incompleteLocked(from, models.CaptureIncomplete{Class: models.CaptureIncompleteRealName, Destination: dst, Why: unnamed, At: t.stamp()})
+		t.incompleteLocked(at, models.CaptureIncomplete{Class: models.CaptureIncompleteRealName, Destination: dst, Why: unnamed, At: t.stamp()})
 	}
 }
 
@@ -373,6 +390,7 @@ func (t *Tracker) Incomplete(from Origin, dst, why string) {
 }
 
 func (t *Tracker) incompleteLocked(from Origin, c models.CaptureIncomplete) {
+	c.Why = from.endedWhy(c.Why)
 	tests := t.testsOfLocked(from)
 	if len(tests) == 0 {
 		t.run = append(t.run, c)

@@ -96,7 +96,7 @@ func TestAConnectionUndecidedAcrossTestsIsChargedToEach(t *testing.T) {
 
 	// Closed unnamed between tests: every test it was undecided in was
 	// charged already.
-	done("its client closed it before naming it")
+	done(Origin{}, "its client closed it before naming it")
 	tr.BeginTest() // never touched it
 	_, inc = tr.EndTest()
 	require.Empty(t, inc, "a test that never had it undecided is not charged")
@@ -108,7 +108,7 @@ func TestAConnectionUndecidedAcrossTestsIsChargedToEach(t *testing.T) {
 	_, inc = tr.EndTest()
 	require.Len(t, inc, 1)
 	tr.BeginTest()
-	done("unreadable")
+	done(Origin{}, "unreadable")
 	_, inc = tr.EndTest()
 	require.Len(t, inc, 1)
 	require.Equal(t, "unreadable", inc[0].Why)
@@ -116,13 +116,13 @@ func TestAConnectionUndecidedAcrossTestsIsChargedToEach(t *testing.T) {
 	// Named during a test: nothing is charged.
 	tr.BeginTest()
 	done = tr.Pending(Origin{}, 9, "10.0.0.3:3306", nil)
-	done("")
+	done(Origin{}, "")
 	_, inc = tr.EndTest()
 	require.Empty(t, inc)
 
 	// Opened and closed unnamed while no test was open: it touched no test,
 	// and is the run's.
-	tr.Pending(Origin{}, 10, "10.0.0.4:3306", nil)("unreadable")
+	tr.Pending(Origin{}, 10, "10.0.0.4:3306", nil)(Origin{}, "unreadable")
 	tr.BeginTest()
 	_, inc = tr.EndTest()
 	require.Empty(t, inc)
@@ -172,7 +172,7 @@ func TestAPendingConnectionClosedAfterItsTestIsNotChargedAgain(t *testing.T) {
 	done := tr.Pending(Origin{}, 1, "10.0.0.1:443", []string{"a"})
 	_, inc := tr.EndTest()
 	require.Len(t, inc, 1)
-	done("unreadable")
+	done(Origin{}, "unreadable")
 	require.Empty(t, tr.Run().Incomplete)
 }
 
@@ -439,13 +439,13 @@ func TestAPendingConnectionIsChargedToItsOwnWorkersTests(t *testing.T) {
 	require.Len(t, one.Incomplete, 1, "worker 2's is not worker 1's")
 	require.Equal(t, "10.0.0.8:443", one.Incomplete[0].Destination)
 	tr.BeginTestOf(1)
-	doneTwo("its client closed it unnamed")
+	doneTwo(worker(2), "its client closed it unnamed")
 	two := tr.EndTestOf(2)
 	require.Len(t, two.Incomplete, 2)
 	require.Equal(t, "10.0.0.7:443", two.Incomplete[0].Destination, "closed unnamed while its test was open")
 	require.Equal(t, "its client closed it unnamed", two.Incomplete[0].Why)
 	require.Equal(t, "10.0.0.8:443", two.Incomplete[1].Destination, "undecided during it too")
-	doneNone("its client closed it unnamed")
+	doneNone(Origin{}, "its client closed it unnamed")
 	one = tr.EndTestOf(1)
 	require.Len(t, one.Incomplete, 1, "closed unnamed while only worker 1's test was open")
 	require.Equal(t, "10.0.0.8:443", one.Incomplete[0].Destination)
@@ -562,4 +562,27 @@ func TestARealUseFromAnEndedWorkerIsChargedToEveryOpenTestAndNamed(t *testing.T)
 		require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1,
 			What: "the latest: a connection to mock.real destination cache:6379, from process 9 of ended test worker 3"}}, tr.EndTestOf(inst).Unattributed)
 	}
+}
+
+// capture_incomplete a process an ended worker left behind made is charged
+// to the tests open then, none of them its own, and says whose it was: the
+// ended worker, and the process when known. From a live worker's process,
+// or a process in no worker, it says only why.
+func TestAnIncompleteFromAnEndedWorkersProcessNamesIt(t *testing.T) {
+	tr := newTracker()
+	tr.BeginTestOf(2)
+	tr.Incomplete(Origin{Pid: 4242, Ended: "1 (claim 2 of that id)"}, "10.0.0.1:443", "why")
+	tr.Incomplete(Origin{Ended: "3"}, "10.0.0.1:443", "why")
+	tr.Incomplete(worker(2), "10.0.0.1:443", "why")
+	tr.Incomplete(Origin{Pid: 7}, "10.0.0.1:443", "why")
+	var whys []string
+	for _, c := range tr.EndTestOf(2).Incomplete {
+		whys = append(whys, c.Why)
+	}
+	require.Equal(t, []string{
+		"why; from process 4242 of ended test worker 1 (claim 2 of that id)",
+		"why; from a process of ended test worker 3",
+		"why",
+		"why",
+	}, whys)
 }
