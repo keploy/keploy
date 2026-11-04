@@ -634,12 +634,12 @@ func TestMeter_AConsumerHeldOffSinceBeforeItsStallWasDueHoldsItsVerdict(t *testi
 // and a release (stop closed, then the waker woken) ends a long one: at once
 // with an eventfd, and at its next Tick without one. A poll a wake ends takes
 // that wake, and a wake that came before the sleep, with stop still open,
-// ends no sleep early: the sleep takes it and sleeps what is left. Each is waited on for far more of the test's own
-// short sleeps than a Tick takes, so a sleep that does not end fails here,
-// not on the test's timeout. Whether the release's sleep took its wake is
-// not pinned: a signal can end the sleep after stop closed and before the
-// wake came (the sampler's next run takes that wake:
-// TestSampler_TheLastReleaseWakesItsSleep).
+// ends no sleep early: the sleep takes it and sleeps what is left. Each is
+// waited on for far more of the test's own short sleeps than a Tick takes,
+// so a sleep that does not end fails here, not on the test's timeout.
+// Whether the release's sleep took its wake is not pinned: a signal can end
+// the sleep after stop closed and before the wake came (the sampler's next
+// run takes that wake: TestSampler_TheLastReleaseWakesItsSleep).
 func TestSleepForEndsAtItsLengthOrItsRelease(t *testing.T) {
 	const most = 10000 // the test's 1 ms sleeps: ten seconds and more
 	ends := func(t *testing.T, ended <-chan bool, want bool) {

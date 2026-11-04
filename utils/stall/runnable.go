@@ -262,7 +262,7 @@ func (s *sampler) run(stop, done chan struct{}, wake *waker) {
 	// A wake the last sampling did not take (a signal ended its sleep after
 	// its release closed stop, before the wake came) is taken before the
 	// first sleep, so it does not end that sleep at once. The wake taken can
-	// be this run's own release's, written before the run began: its stop is
+	// be this run's own release's, written before the take: its stop is
 	// closed by then, and the run ends here rather than sleep its tick.
 	wake.take()
 	select {
