@@ -785,24 +785,28 @@ func parseHeaders(head []byte, response bool) (contentLength int, chunked bool, 
 	var trailers [][]byte
 	lengths, codings, hosts := 0, 0, 0
 	var fieldErr error
+	// The names are compared in place (token bytes: ASCII), with no copy: a
+	// replay frames every request it serves twice (HandleChunkedRequests,
+	// then messageFrame), and a recording frames each chunk it reads.
 	err = headerFields(head, func(name, value []byte) {
-		field := strings.ToLower(string(bytes.TrimRight(name, " "))) // token bytes: ASCII
-		if len(field) != len(name) {
+		if field := bytes.TrimRight(name, " "); len(field) != len(name) {
 			// A name no other field has, to net/http's reader.
-			if field == "content-length" || field == "transfer-encoding" {
-				fieldErr = fmt.Errorf("%w: a space before a %s field's colon", errFramingRefused, field)
+			for _, framing := range []string{"content-length", "transfer-encoding"} {
+				if asciiEqualFold(field, framing) {
+					fieldErr = fmt.Errorf("%w: a space before a %s field's colon", errFramingRefused, framing)
+				}
 			}
 			return
 		}
-		switch field {
-		case "host":
+		switch {
+		case asciiEqualFold(name, "host"):
 			hosts++
-		case "trailer":
+		case asciiEqualFold(name, "trailer"):
 			trailers = append(trailers, value)
-		case "transfer-encoding":
+		case asciiEqualFold(name, "transfer-encoding"):
 			coding = value
 			codings++
-		case "content-length":
+		case asciiEqualFold(name, "content-length"):
 			value = trimWhiteSpace(value) // a value's end, which a fold can leave
 			n, valueErr := contentLengthValue(string(value))
 			switch {
