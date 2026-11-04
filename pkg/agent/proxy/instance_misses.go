@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -96,6 +97,31 @@ func stoppedWorkerMissWhat(r *models.MockMismatchReport, dst *models.Conditional
 		to = " to " + dst.Addr
 	}
 	return fmt.Sprintf("the latest: a call%s, from process %d of ended test worker %s, on a connection it made before keploy stopped serving that worker", to, pid, agent.InstanceLabel(inst))
+}
+
+// workersServed reports whether test workers are served: from the first
+// worker served until the run's manager is replaced (endInstances).
+func (p *Proxy) workersServed() bool {
+	s := &p.instances
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.on
+}
+
+// sendDNSMiss reports miss, a DNS question no DNS mock answers, as it is
+// asked. A DNS question carries no kernel stamp of the process that asked it
+// (only the TCP connect hooks stamp a worker's instance), so while test
+// workers are served keploy cannot tell whose test it is: it is counted as a
+// call keploy cannot attribute (models.CaptureLossUnattributed), which leaves
+// each test open then without a verdict. Filed in the run's window, which no
+// worker's test reads, it would fail no test. Before any worker is served it
+// is the run's test's miss, as before.
+func (p *Proxy) sendDNSMiss(miss error, question dns.Question) {
+	if p.workersServed() {
+		p.losses.Add(models.CaptureLossUnattributed, fmt.Sprintf("the latest: a DNS question for %s (%s) that no DNS mock answers, asked while test workers are served: a DNS question carries no stamp of the test worker that asked it", question.Name, dns.TypeToString[question.Qtype]))
+		return
+	}
+	p.SendError(miss)
 }
 
 // workerMissWindows is every served test worker's misses window.
