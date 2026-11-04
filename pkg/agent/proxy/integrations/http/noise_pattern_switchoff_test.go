@@ -3,7 +3,9 @@ package http
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -271,7 +273,9 @@ func TestAGuardedFormKeyKeepsItsValuesHoweverTheyAreEscapedOrOrdered(t *testing.
 // and by mock serving's body check, and with it on. Where it is refused and
 // named, the switch-off miss names the field: the reason by the key's shape,
 // as the switch's does (a key like these may carry a value), the live value
-// outside the pattern a string of 4 bytes, and the diff by its name.
+// outside the pattern a string of 4 bytes, and the recorded one beside it
+// where rec's first value of the key is outside it too, and the diff by its
+// name.
 func holdsGuardedFormKey(t *testing.T, entry, pat, rec, live string, served, named bool) {
 	t.Helper()
 	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
@@ -300,7 +304,15 @@ func holdsGuardedFormKey(t *testing.T, entry, pat, rec, live string, served, nam
 			t.Fatal("no miss report")
 		}
 		field := "body." + models.KeyShape(entry)
-		want := []models.FieldReason{{Field: field, Why: matcher.PatternWhy(field, []string{pat}, "live", matcher.StringShape(4))}}
+		why := matcher.PatternWhy(field, []string{pat}, "live", matcher.StringShape(4))
+		recValues, _ := url.ParseQuery(rec)
+		for _, v := range recValues[entry] {
+			if !regexp.MustCompile(pat).MatchString(v) {
+				why = matcher.PatternBothWhy(field, []string{pat}, matcher.StringShape(4), matcher.StringShape(len(v)))
+				break
+			}
+		}
+		want := []models.FieldReason{{Field: field, Why: why}}
 		if !reflect.DeepEqual(r.FieldReasons, want) || !strings.Contains(r.Diff, "body."+entry+":") {
 			t.Errorf("reasons %v, diff %q; want %v and body.%s named", r.FieldReasons, r.Diff, want, entry)
 		}

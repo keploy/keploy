@@ -172,6 +172,15 @@ func TestHintNamesTheNoiseBucket(t *testing.T) {
 		}
 		return "{" + strings.Join(entries, ", ") + "}"
 	}
+	// lengths is n misses of path under entry, each a live value of
+	// another length, from 2 bytes.
+	lengths := func(path, entry string, n int) []PatternMiss {
+		out := make([]PatternMiss, n)
+		for i := range out {
+			out[i] = PatternMiss{Path: path, Entry: entry, Patterns: []string{"^1$"}, Live: ShapesOf(fmt.Sprintf("a string of %d bytes", i+2))}
+		}
+		return out
+	}
 	const (
 		bodyQty  = "the request-body fields under test.globalNoise.global.requestbody with root-relative keys (e.g. requestbody: {qty: []})"
 		referer  = "the headers under test.globalNoise.global.header (e.g. header: {referer: []})"
@@ -247,7 +256,7 @@ func TestHintNamesTheNoiseBucket(t *testing.T) {
 		{name: "a body field of an HBase call", protocol: ProtocolHBase, diffs: []models.MockFieldDiff{drift("body.qty")},
 			want: "Only values drifted (body.qty). " + dynamic + bodyQty + "; otherwise %[1]s."},
 		{name: "a body field of a Pulsar call", protocol: ProtocolPulsar, diffs: []models.MockFieldDiff{drift("body.qty")},
-			want: "Only values drifted (body.qty). " + dynamic + "the request-body fields under test.globalNoise.global.body with root-relative keys (e.g. body: {qty: []}); otherwise %[1]s."},
+			want: "Only values drifted (body.qty). " + dynamic + "the message payload fields under test.globalNoise.global.body with root-relative keys (e.g. body: {qty: []}), the bucket that also stops keploy test asserting those fields in HTTP response bodies; otherwise %[1]s."},
 		{name: "a body field of a gRPC call", protocol: ProtocolGRPC, diffs: []models.MockFieldDiff{drift("body.qty")},
 			want: "Only values drifted (body.qty). keploy's gRPC mock matcher reads no keploy.yml noise for body.qty. " + expected + "%[1]s."},
 		{name: "a body field of an HTTP/2 call", protocol: ProtocolHTTP2, diffs: []models.MockFieldDiff{drift("body.qty")},
@@ -332,54 +341,79 @@ func TestHintNamesTheNoiseBucket(t *testing.T) {
 		// noise.
 		{name: "a guarded header missing", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{missing("header.Referer")}, guarded: []string{"header.referer"}, structural: true},
 		{name: "a guarded header missing, its patterns named", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{missing("header.Referer")},
-			misses: []PatternMiss{{Path: "header.referer", Patterns: []string{"^https://a/"}, Live: []string{"absent"}}}, structural: true},
+			misses: []PatternMiss{{Path: "header.referer", Patterns: []string{"^https://a/"}, Live: ShapesOf("absent")}}, structural: true},
 		{name: "a guarded header only the call carries, beside a drifted value", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{added("header.X-New"), drift("body.qty")},
-			misses: []PatternMiss{{Path: "header.x-new", Patterns: []string{"^n$"}, Recorded: []string{"absent"}}},
+			misses: []PatternMiss{{Path: "header.x-new", Patterns: []string{"^n$"}, Recorded: ShapesOf("absent")}},
 			want:   "Only values drifted (body.qty). " + dynamic + bodyQty + "; otherwise %[1]s.", onStructural: true},
 		{name: "guarded and new fields together", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.referer"), drift("header.x-request-id"), drift("body.qty"), drift("body.id")}, guarded: []string{"header.Referer", "body.qty"},
 			want: "Only values drifted (header.referer, header.x-request-id, body.qty, body.id). " + dynamic + "the request-body fields under test.globalNoise.global.requestbody with root-relative keys (e.g. requestbody: {id: []}) and the headers under test.globalNoise.global.header (e.g. header: {x-request-id: []}) and widen the patterns of keploy.yml's test.globalNoise requestbody entries for qty so they match the recorded and the live value and widen the patterns of keploy.yml's test.globalNoise header entries for referer so they match the recorded and the live value; otherwise %[1]s."},
 		// A parser that names the patterns and the side: the hint names
 		// them, and that value by its shape, never its text.
 		{name: "a body field whose live value is outside its patterns", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.qty")},
-			misses: []PatternMiss{{Path: "body.qty", Patterns: []string{`^\d{3}$`}, Live: []string{"a number of 4 characters"}}},
+			misses: []PatternMiss{{Path: "body.qty", Patterns: []string{`^\d{3}$`}, Live: ShapesOf("a number of 4 characters")}},
 			want:   "Only values drifted (body.qty). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for qty (\"^\\\\d{3}$\") so one matches the live value (a number of 4 characters); otherwise %[1]s."},
 		{name: "a header whose recorded value is outside its two patterns", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.X-Request-Id")},
-			misses: []PatternMiss{{Path: "header.x-request-id", Patterns: []string{"^req-", "^r-"}, Recorded: []string{"a string of 9 bytes"}}},
+			misses: []PatternMiss{{Path: "header.x-request-id", Patterns: []string{"^req-", "^r-"}, Recorded: ShapesOf("a string of 9 bytes")}},
 			want:   "Only values drifted (header.X-Request-Id). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise header entries for x-request-id (\"^req-\", \"^r-\") so one matches the recorded value (a string of 9 bytes); otherwise %[1]s."},
 		{name: "two guarded body fields beside a new header", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.qty"), drift("body.id"), drift("header.referer")},
-			misses: []PatternMiss{{Path: "body.qty", Patterns: []string{"^1$"}, Live: []string{"a number of 2 characters"}}, {Path: "body.id", Patterns: []string{"^a"}, Recorded: []string{"a string of 3 bytes"}}},
+			misses: []PatternMiss{{Path: "body.qty", Patterns: []string{"^1$"}, Live: ShapesOf("a number of 2 characters")}, {Path: "body.id", Patterns: []string{"^a"}, Recorded: ShapesOf("a string of 3 bytes")}},
 			want:   "Only values drifted (body.qty, body.id, header.referer). " + dynamic + referer + " and widen the patterns of keploy.yml's test.globalNoise requestbody entries for qty (\"^1$\") so one matches the live value (a number of 2 characters) and for id (\"^a\") so one matches the recorded value (a string of 3 bytes); otherwise %[1]s."},
 		// Both sides outside the patterns: widened to match one side's
 		// value alone, they would leave the call a miss, so both are named.
 		{name: "a body field whose two values are outside its patterns", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.qty")},
-			misses: []PatternMiss{{Path: "body.qty", Patterns: []string{"^1$"}, Live: []string{"a number of 2 characters"}, Recorded: []string{"a number of 3 characters"}}},
+			misses: []PatternMiss{{Path: "body.qty", Patterns: []string{"^1$"}, Live: ShapesOf("a number of 2 characters"), Recorded: ShapesOf("a number of 3 characters")}},
 			want:   "Only values drifted (body.qty). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for qty (\"^1$\") so they match the live value (a number of 2 characters) and the recorded value (a number of 3 characters); otherwise %[1]s."},
 		{name: "a form field with two live values outside its patterns", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.code")},
-			misses: []PatternMiss{{Path: "body.code", Patterns: []string{`^c\d$`}, Live: []string{"a string of 3 bytes", "a string of 4 bytes"}}},
+			misses: []PatternMiss{{Path: "body.code", Patterns: []string{`^c\d$`}, Live: ShapesOf("a string of 3 bytes", "a string of 4 bytes")}},
 			want:   "Only values drifted (body.code). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for code (\"^c\\\\d$\") so they match the live values (a string of 3 bytes, a string of 4 bytes); otherwise %[1]s."},
 		// The hint names the entry that holds the patterns, which may name
 		// the field by its last name alone: the user edits that entry.
 		{name: "a nested body field an entry names by its last name", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.order.qty")},
-			misses: []PatternMiss{{Path: "body.order.qty", Entry: "qty", Patterns: []string{"^1$"}, Live: []string{"a number of 2 characters"}}},
+			misses: []PatternMiss{{Path: "body.order.qty", Entry: "qty", Patterns: []string{"^1$"}, Live: ShapesOf("a number of 2 characters")}},
 			want:   "Only values drifted (body.order.qty). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for qty (\"^1$\") so one matches the live value (a number of 2 characters); otherwise %[1]s."},
 		// Two fields one entry guards: its patterns are to match the values
 		// of each.
 		{name: "two body fields one entry guards", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.order.qty"), drift("body.item.qty")},
-			misses: []PatternMiss{{Path: "body.order.qty", Entry: "qty", Patterns: []string{"^1$"}, Live: []string{"a number of 2 characters"}}, {Path: "body.item.qty", Entry: "qty", Patterns: []string{"^1$"}, Recorded: []string{"a number of 3 characters"}}},
+			misses: []PatternMiss{{Path: "body.order.qty", Entry: "qty", Patterns: []string{"^1$"}, Live: ShapesOf("a number of 2 characters")}, {Path: "body.item.qty", Entry: "qty", Patterns: []string{"^1$"}, Recorded: ShapesOf("a number of 3 characters")}},
 			want:   "Only values drifted (body.order.qty, body.item.qty). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for qty (\"^1$\") so they match the live value (a number of 2 characters) and the recorded value (a number of 3 characters); otherwise %[1]s."},
 		// A field named twice (an array's elements share a path), and named
 		// so by the diffs: its patterns are its first naming's, and are to
 		// match the values of every naming, each named once.
 		{name: "a field named twice", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.ids[]"), drift("body.ids[]")},
-			misses: []PatternMiss{{Path: "body.ids[]", Entry: "ids", Patterns: []string{"^1$"}, Live: []string{"a number of 2 characters"}}, {Path: "body.ids[]", Entry: "ids", Patterns: []string{"^2$"}, Live: []string{"a number of 3 characters"}}},
+			misses: []PatternMiss{{Path: "body.ids[]", Entry: "ids", Patterns: []string{"^1$"}, Live: ShapesOf("a number of 2 characters")}, {Path: "body.ids[]", Entry: "ids", Patterns: []string{"^2$"}, Live: ShapesOf("a number of 3 characters")}},
 			want:   "Only values drifted (body.ids[], body.ids[]). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for ids (\"^1$\") so they match the live values (a number of 2 characters, a number of 3 characters); otherwise %[1]s."},
 		{name: "a field named twice, each naming a side", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.ids[]")},
-			misses: []PatternMiss{{Path: "body.ids[]", Entry: "ids", Patterns: []string{"^1$"}, Live: []string{"a number of 2 characters"}}, {Path: "body.ids[]", Entry: "ids", Patterns: []string{"^1$"}, Recorded: []string{"a number of 3 characters"}}},
+			misses: []PatternMiss{{Path: "body.ids[]", Entry: "ids", Patterns: []string{"^1$"}, Live: ShapesOf("a number of 2 characters")}, {Path: "body.ids[]", Entry: "ids", Patterns: []string{"^1$"}, Recorded: ShapesOf("a number of 3 characters")}},
 			want:   "Only values drifted (body.ids[]). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for ids (\"^1$\") so they match the live value (a number of 2 characters) and the recorded value (a number of 3 characters); otherwise %[1]s."},
+		// However many values miss, the hint names each distinct shape of a
+		// side once, the first three, and counts the values past them
+		// (TestTheHintStaysSmallHoweverManyValuesMiss).
+		{name: "a field named many times, each a value of another shape", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.ids[]")},
+			misses: lengths("body.ids[]", "ids", 3000),
+			want:   "Only values drifted (body.ids[]). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for ids (\"^1$\") so they match the live values (a string of 2 bytes, a string of 3 bytes, a string of 4 bytes and 2997 more); otherwise %[1]s."},
+		{name: "a field named twice, a value of one shape each", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.ids[]"), drift("body.ids[]")},
+			misses: []PatternMiss{{Path: "body.ids[]", Entry: "ids", Patterns: []string{"^1$"}, Live: ShapesOf("a number of 2 characters")}, {Path: "body.ids[]", Entry: "ids", Patterns: []string{"^1$"}, Live: ShapesOf("a number of 2 characters")}},
+			want:   "Only values drifted (body.ids[], body.ids[]). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for ids (\"^1$\") so they match the live values (a number of 2 characters); otherwise %[1]s."},
+		{name: "a form field with many values of one shape", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.code")},
+			misses: []PatternMiss{{Path: "body.code", Patterns: []string{`^c\d$`}, Live: ShapesOf(slices.Repeat([]string{"a string of 3 bytes"}, 3000)...), Recorded: ShapesOf("a string of 4 bytes")}},
+			want:   "Only values drifted (body.code). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for code (\"^c\\\\d$\") so they match the live values (a string of 3 bytes) and the recorded value (a string of 4 bytes); otherwise %[1]s."},
+		// Array elements that hold containers share a path: the hint says
+		// why it offers no noise for it once.
+		{name: "array elements guarded with patterns that hold containers", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.rows[]"), drift("body.rows[]")},
+			misses: []PatternMiss{{Path: "body.rows[]", Patterns: []string{"^1$"}, Live: ShapesOf("an array"), Container: true}, {Path: "body.rows[]", Patterns: []string{"^1$"}, Live: ShapesOf("an object"), Container: true}},
+			want:   "Only values drifted (body.rows[], body.rows[]). keploy.yml's noise lets body.rows[] vary only within \"^1$\", and a pattern matches a single value, never an array or an object. " + expected + "%[1]s."},
+		// Two fields one entry guards, past the shapes a hint names: the
+		// second field's values are counted with the first's.
+		{name: "two fields one entry guards, past the shapes a hint names", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.order.qty"), drift("body.item.qty")},
+			misses: []PatternMiss{
+				{Path: "body.order.qty", Entry: "qty", Patterns: []string{"^1$"}, Live: ShapesOf("a number of 2 characters", "a number of 3 characters", "a number of 4 characters", "a number of 5 characters")},
+				{Path: "body.item.qty", Entry: "qty", Patterns: []string{"^1$"}, Live: ShapesOf("a number of 3 characters", "a number of 6 characters", "a number of 6 characters")},
+			},
+			want: "Only values drifted (body.order.qty, body.item.qty). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for qty (\"^1$\") so they match the live values (a number of 2 characters, a number of 3 characters, a number of 4 characters and 3 more); otherwise %[1]s."},
 		// A pattern miss with no patterns, or no value of either side,
 		// names what it can: both values.
 		{name: "a pattern miss naming no patterns", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.qty")},
-			misses: []PatternMiss{{Path: "body.qty", Live: []string{"a number of 2 characters"}}},
+			misses: []PatternMiss{{Path: "body.qty", Live: ShapesOf("a number of 2 characters")}},
 			want:   "Only values drifted (body.qty). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for qty so they match the recorded and the live value; otherwise %[1]s."},
 		{name: "a pattern miss naming no value", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.qty")},
 			misses: []PatternMiss{{Path: "body.qty", Patterns: []string{"^1$"}}},
@@ -387,38 +421,38 @@ func TestHintNamesTheNoiseBucket(t *testing.T) {
 		// A pattern matches a single value: for an array or an object no
 		// widening serves, so the hint offers recording again and says why.
 		{name: "a guarded array whose length changed", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.items")},
-			misses: []PatternMiss{{Path: "body.items", Patterns: []string{`^\d+$`}, Live: []string{"an array"}, Recorded: []string{"an array"}, Container: true}},
+			misses: []PatternMiss{{Path: "body.items", Patterns: []string{`^\d+$`}, Live: ShapesOf("an array"), Recorded: ShapesOf("an array"), Container: true}},
 			want:   "Only values drifted (body.items). keploy.yml's noise lets body.items vary only within \"^\\\\d+$\", and a pattern matches a single value, never an array or an object. " + expected + "%[1]s."},
 		{name: "a guarded array beside a plain field", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.qty"), drift("body.items")},
-			misses: []PatternMiss{{Path: "body.items", Patterns: []string{"^1$"}, Live: []string{"an array"}, Container: true}},
+			misses: []PatternMiss{{Path: "body.items", Patterns: []string{"^1$"}, Live: ShapesOf("an array"), Container: true}},
 			want:   "Only values drifted (body.qty, body.items). keploy.yml's noise lets body.items vary only within \"^1$\", and a pattern matches a single value, never an array or an object. " + expected + "%[1]s."},
 		// A field named twice is a container if either naming says so.
 		{name: "a guarded array named twice, the second a container", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.items")},
-			misses: []PatternMiss{{Path: "body.items", Patterns: []string{"^1$"}, Live: []string{"a number of 2 characters"}}, {Path: "body.items", Patterns: []string{"^1$"}, Live: []string{"an array"}, Container: true}},
+			misses: []PatternMiss{{Path: "body.items", Patterns: []string{"^1$"}, Live: ShapesOf("a number of 2 characters")}, {Path: "body.items", Patterns: []string{"^1$"}, Live: ShapesOf("an array"), Container: true}},
 			want:   "Only values drifted (body.items). keploy.yml's noise lets body.items vary only within \"^1$\", and a pattern matches a single value, never an array or an object. " + expected + "%[1]s."},
 		{name: "a guarded array named twice, the first a container", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.items")},
-			misses: []PatternMiss{{Path: "body.items", Patterns: []string{"^1$"}, Live: []string{"an array"}, Container: true}, {Path: "body.items", Patterns: []string{"^1$"}, Live: []string{"a number of 2 characters"}}},
+			misses: []PatternMiss{{Path: "body.items", Patterns: []string{"^1$"}, Live: ShapesOf("an array"), Container: true}, {Path: "body.items", Patterns: []string{"^1$"}, Live: ShapesOf("a number of 2 characters")}},
 			want:   "Only values drifted (body.items). keploy.yml's noise lets body.items vary only within \"^1$\", and a pattern matches a single value, never an array or an object. " + expected + "%[1]s."},
 		// A scalar field outside its patterns, offered no noise for another
 		// field's sake, is no container.
 		{name: "a guarded scalar beside a field offered no noise", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.qty"), drift("path")},
-			misses: []PatternMiss{{Path: "body.qty", Patterns: []string{"^1$"}, Live: []string{"a number of 2 characters"}}},
+			misses: []PatternMiss{{Path: "body.qty", Patterns: []string{"^1$"}, Live: ShapesOf("a number of 2 characters")}},
 			want:   "Only values drifted (body.qty, path). " + expected + "%[1]s."},
 		// A header is named by its lowercased name, as the HTTP matcher
 		// reads it.
 		{name: "a guarded header its parser names in another case", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.X-Request-Id")},
-			misses: []PatternMiss{{Path: "header.X-Request-Id", Patterns: []string{"^r-"}, Live: []string{"a string of 4 bytes"}}},
+			misses: []PatternMiss{{Path: "header.X-Request-Id", Patterns: []string{"^r-"}, Live: ShapesOf("a string of 4 bytes")}},
 			want:   "Only values drifted (header.X-Request-Id). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise header entries for x-request-id (\"^r-\") so one matches the live value (a string of 4 bytes); otherwise %[1]s."},
 		{name: "a container naming no patterns", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.items")},
-			misses: []PatternMiss{{Path: "body.items", Live: []string{"an array"}, Container: true}},
+			misses: []PatternMiss{{Path: "body.items", Live: ShapesOf("an array"), Container: true}},
 			want:   "Only values drifted (body.items). " + expected + "%[1]s."},
 		// Pulsar's matcher reads its message payload's noise under body.
 		{name: "a Pulsar body field whose live value is outside its patterns", protocol: ProtocolPulsar, diffs: []models.MockFieldDiff{drift("body.qty")},
-			misses: []PatternMiss{{Path: "body.qty", Patterns: []string{`^\d{3}$`}, Live: []string{"a number of 4 characters"}}},
+			misses: []PatternMiss{{Path: "body.qty", Patterns: []string{`^\d{3}$`}, Live: ShapesOf("a number of 4 characters")}},
 			want:   "Only values drifted (body.qty). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise body entries for qty (\"^\\\\d{3}$\") so one matches the live value (a number of 4 characters); otherwise %[1]s."},
 		// MongoDB's matcher reads requestbody's patterns under the switch.
 		{name: "a MongoDB body field whose live value is outside its patterns", protocol: ProtocolMongo, diffs: []models.MockFieldDiff{drift("body.filter.status")},
-			misses: []PatternMiss{{Path: "body.filter.status", Patterns: []string{"^open$"}, Live: []string{"a string of 6 bytes"}}},
+			misses: []PatternMiss{{Path: "body.filter.status", Patterns: []string{"^open$"}, Live: ShapesOf("a string of 6 bytes")}},
 			want:   "Only values drifted (body.filter.status). If these are dynamic (timestamps, ids, tokens), widen the patterns of keploy.yml's test.globalNoise requestbody entries for filter.status (\"^open$\") so one matches the live value (a string of 6 bytes); otherwise %[1]s."},
 		{name: "a body field's key keeps its case", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.qty")}, guarded: []string{"body.QTY"},
 			want: "Only values drifted (body.qty). " + dynamic + bodyQty + "; otherwise %[1]s."},

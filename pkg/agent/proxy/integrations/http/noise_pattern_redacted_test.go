@@ -112,7 +112,7 @@ func TestARedactedRecordingHoldsTheLiveValueToKeployYmlPatterns(t *testing.T) {
 				t.Fatalf("reason %q for %s; want the pattern and %q, never the value (differs %v)", why, c.field, c.why, differs(diag))
 			}
 			for _, f := range diag.differs {
-				if f.diff.Path == c.field && (f.pattern == nil || !slices.Equal(f.pattern.Recorded, c.recorded)) {
+				if f.diff.Path == c.field && (f.pattern == nil || !slices.Equal(f.pattern.Recorded.Shapes(), c.recorded)) {
 					t.Fatalf("the hint's facts of %s are %+v; want the recorded values %q", c.field, f.pattern, c.recorded)
 				}
 			}
