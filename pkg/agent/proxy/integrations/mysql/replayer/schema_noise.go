@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+	"unsafe"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
@@ -615,6 +616,16 @@ type queryShape struct {
 // SQL texts on the same code paths.
 const queryShapeCacheSize = querySigCacheSize
 
+// bytes is about what s holds beside the statement it was read from: its
+// template and comments, and its literals' values and headers.
+func (s *queryShape) bytes() int {
+	n := len(s.template) + len(s.comments) + int(unsafe.Sizeof(""))*cap(s.literals)
+	for _, v := range s.literals {
+		n += len(v)
+	}
+	return n
+}
+
 // queryShapeCache memoizes extractQueryShape per SQL text — the same query is
 // re-canonicalized for every candidate mock during a pool scan, and mock-side
 // texts repeat across commands. Sibling of match.go's querySigCache, 2Q for
@@ -634,13 +645,16 @@ func newQueryShapeCache() *lru.TwoQueueCache[string, *queryShape] {
 // extractQueryShape parses sql with the vitess parser (the one the matcher
 // already uses for AST-structure signatures) and splits it into template +
 // literals + comments — the MySQL equivalent of the "give it a query, get its
-// fields" helper the Postgres integration uses. Results are memoized.
+// fields" helper the Postgres integration uses. Results are memoized, those
+// memoKeeps keeps.
 func extractQueryShape(sql string) *queryShape {
 	if v, ok := queryShapeCache.Get(sql); ok {
 		return v
 	}
 	shape := computeQueryShape(sql)
-	queryShapeCache.Add(sql, shape)
+	if memoKeeps(sql, shape.bytes()) {
+		queryShapeCache.Add(sql, shape)
+	}
 	return shape
 }
 
@@ -693,7 +707,9 @@ func computeQueryShape(sql string) (shape *queryShape) {
 	}, nil)
 
 	return &queryShape{
-		template: sqlparser.String(out),
+		// The rendering's buffer may be up to twice its length: a copy
+		// holds what the cache counts (queryShape.bytes).
+		template: strings.Clone(sqlparser.String(out)),
 		literals: literals,
 		comments: strings.TrimSpace(strings.Join(comments, " ")),
 		ok:       true,

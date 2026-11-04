@@ -3,6 +3,8 @@ package replayer
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"go.keploy.io/server/v3/pkg"
@@ -31,11 +34,32 @@ import (
 	"vitess.io/vitess/go/vt/sqlparser"
 )
 
+// memoMaxBytes bounds by size what each of the replayer's caches of
+// statements (stmtIdentityCache, querySigCache, queryShapeCache,
+// sqlLiteralsCache) keeps of one statement: its text and what it is read
+// into, together. Their keys are the statements' texts, and a statement's
+// read grows with it, with its literals most: measured, a 1 MB bulk INSERT
+// reads into a 4 MB signature, a 6 MB shape and 10 MB of literals, a 64 KB
+// statement of one-digit literals into 1.1-2.2 MB. Bounded by its count of
+// entries alone, each cache could so hold gigabytes. Now each holds at
+// most its 2048 entries of at most memoMaxBytes, 128 MB, and in its 2Q
+// ghost list the keys of up to 1024 statements it let go, 64 MB. The
+// statements the caches are for are short: an ORM statement of 300 bytes
+// and 4 literals reads into a few KB at most.
+const memoMaxBytes = 64 << 10
+
+// memoKeeps reports whether a cache of statements keeps sql, read into a
+// value of about valueBytes (memoMaxBytes). One it does not keep is read
+// again each time it is needed.
+func memoKeeps(sql string, valueBytes int) bool {
+	return len(sql)+valueBytes <= memoMaxBytes
+}
+
 // stmtIdentityCacheSize bounds stmtIdentityCache. Same reasoning as
 // querySigCacheSize below: the key is the raw SQL text and that key space is not
 // finite (a tracer mints a fresh traceparent per request), while the value is a
 // pure function of the key, so an eviction costs one re-scan and can never
-// change a match verdict.
+// change a match verdict. It keeps what memoKeeps keeps.
 const stmtIdentityCacheSize = 2048
 
 var stmtIdentityCache = newStmtIdentityCache()
@@ -69,7 +93,8 @@ func newStmtIdentityCache() *lru.TwoQueueCache[string, string] {
 // Entry cost, measured against the pinned vitess: the signature runs 3-13x the
 // length of the SQL text (it is the joined reflect type name of every AST
 // node), so a realistic entry is 0.5-1.8 KB and this cap is a few MB. Multi-KB
-// ORM statements cost proportionally more; the cap is on entries, not bytes.
+// ORM statements cost proportionally more. The cap is on entries; each entry
+// is bounded by size too (querySigKey, querySigOf).
 const querySigCacheSize = 2048
 
 var querySigCache = newQuerySigCache()
@@ -119,15 +144,47 @@ func hasPrefixFold(s, p string) bool {
 	return strings.EqualFold(s[:len(p)], p)
 }
 
+// getQueryStructureCached is getQueryStructure memoized in querySigCache,
+// the signature as querySigOf keeps it. A signature is only compared with
+// another (and written by a debug line, a long one as its digest), so a
+// statement of any size is read once, not once for each candidate it is
+// compared with, and its entry still takes at most memoMaxBytes. A text
+// over half of it is hashed for each lookup.
 func getQueryStructureCached(sql string) (string, error) {
-	if v, ok := querySigCache.Get(sql); ok {
+	key := querySigKey(sql)
+	if v, ok := querySigCache.Get(key); ok {
 		return v, nil
 	}
 	sig, err := getQueryStructure(sql)
 	if err == nil {
-		querySigCache.Add(sql, sig)
+		sig = querySigOf(sig)
+		querySigCache.Add(key, sig)
 	}
 	return sig, err
+}
+
+// querySigKey is the key querySigCache keeps sql's signature by: sql
+// itself, or, for a text longer than half of memoMaxBytes, a NUL and its
+// SHA-256 digest.
+func querySigKey(sql string) string {
+	if len(sql) <= memoMaxBytes/2 {
+		return sql
+	}
+	d := sha256.Sum256(unsafe.Slice(unsafe.StringData(sql), len(sql)))
+	return "\x00" + string(d[:])
+}
+
+// querySigOf is the signature sig as querySigCache keeps and returns it:
+// sig itself, or, for one longer than half of memoMaxBytes, "sha256:" and
+// its digest in hex. It depends on sig alone, so two signatures are equal
+// exactly when what it makes of them is. No signature begins with
+// "sha256:": it is the names of a tree's node types.
+func querySigOf(sig string) string {
+	if len(sig) <= memoMaxBytes/2 {
+		return sig
+	}
+	d := sha256.Sum256(unsafe.Slice(unsafe.StringData(sig), len(sig)))
+	return "sha256:" + hex.EncodeToString(d[:])
 }
 
 // exactDriftNextSteps is what a miss says when, under exact serving,
@@ -1078,22 +1135,17 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// the commands that carry a statement alone, and reading the pool in the
 	// scan would replace the tiers it walks: with debug lines on, those
 	// commands read it here, before the scan, and no other command does.
-	var placesLogged *redactedPlaces
-	logged := logPlaces(func() redactedPlaces {
-		if placesLogged == nil {
-			if opts.placesRead != nil {
-				*opts.placesRead++
-			}
-			p := everyPlace
-			if (pool != nil || loadPool() == nil) && integrations.UnheldWhy(mockDb) == "" && (opts.restaged == nil || !opts.restaged()) {
-				p = poolPlaces(pool)
-			}
-			placesLogged = &p
+	logged := &logPlaces{read: func() redactedPlaces {
+		if opts.placesRead != nil {
+			*opts.placesRead++
 		}
-		return *placesLogged
-	})
+		if (pool != nil || loadPool() == nil) && integrations.UnheldWhy(mockDb) == "" && (opts.restaged == nil || !opts.restaged()) {
+			return poolPlaces(pool)
+		}
+		return everyPlace
+	}}
 	if debugOn && (req.Header.Type == sCOM_QUERY || req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC) {
-		logged()
+		logged.places()
 	}
 
 	// The names of every COM_STMT_EXECUTE mock, for the debug log only. It is a
@@ -1726,7 +1778,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 					if !seen {
 						// remove this log and if block
 						if ce := logger.Check(zap.DebugLevel, "Trying to match the mock with com-stmt-execute request"); ce != nil && actMsg != nil {
-							ce.Write(zap.String("mock_name", mock.Name), zap.Any("Req", executeForLog(actMsg, logged())))
+							ce.Write(zap.String("mock_name", mock.Name), zap.Any("Req", executeForLog(actMsg, logged.places())))
 						}
 
 						var expectedQuery, actualQuery string
@@ -2080,7 +2132,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	}
 	if len(lost) > 0 && matchedMock != nil {
 		miss := unknownStatementsMiss(lost, matchedMock, mysqlCandidates)
-		miss.places = logged().or(miss.places)
+		miss.places = logged.places().or(miss.places)
 		return nil, false, miss, nil
 	}
 
@@ -2242,7 +2294,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				// The chunk's diffs are shown by the pool's places and those of
 				// the recordings the report names, the chunks they redacted
 				// among them.
-				places := logged().or(placesOf(sldClosest)).or(gate.closestPlaces)
+				places := logged.places().or(placesOf(sldClosest)).or(gate.closestPlaces)
 				return nil, false, &mockMiss{
 					closestMock:    sldClosest.Name,
 					fieldDiffs:     gate.reportDiffs(places),
@@ -2453,7 +2505,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		if closest == nil && gate.closestMock == "" {
 			closest = nearestMock
 		}
-		places := logged().or(placesOf(closest)).or(gate.closestPlaces)
+		places := logged.places().or(placesOf(closest)).or(gate.closestPlaces)
 		var unknown *mockMiss
 		if len(lost) > 0 {
 			// The test's own mock may be one whose statement is lost: say so,
@@ -2699,7 +2751,7 @@ func (lq *liveQuery) structure() (string, error) {
 // facts are kept in live, so a caller comparing one live statement with many
 // candidates derives them once. The identity is empty only when the packet
 // types differ, which returns before it is derived.
-func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *liveQuery, getQuery func(packet mysql.PacketBundle) string, logged logPlaces) (bool, int, string) {
+func matchQueryLive(log *zap.Logger, expected, actual mysql.PacketBundle, live *liveQuery, getQuery func(packet mysql.PacketBundle) string, logged *logPlaces) (bool, int, string) {
 	// Match the type and return zero if the types are not equal
 	if expected.Header.Type != actual.Header.Type {
 		return false, 0, ""
@@ -3154,7 +3206,7 @@ func newLiveExecStatement(query string) liveExecStatement {
 
 // matchStmtExecuteLive is matchStmtExecutePacketQueryAware with the live
 // statement's facts derived once (liveExecStatement).
-func matchStmtExecuteLive(logger *zap.Logger, expected, actual mysql.PacketBundle, expectedQuery string, live liveExecStatement, liveStatementParams int, mockName string, nc *util.NoiseChecker, logged logPlaces) (bool, int, bool) {
+func matchStmtExecuteLive(logger *zap.Logger, expected, actual mysql.PacketBundle, expectedQuery string, live liveExecStatement, liveStatementParams int, mockName string, nc *util.NoiseChecker, logged *logPlaces) (bool, int, bool) {
 	matchCount := 0
 
 	// Match the type and return zero if the types are not equal
@@ -4204,7 +4256,16 @@ func sqlStatementIdentity(query string) string {
 	if id == "" {
 		id = strings.TrimSpace(query)
 	}
-	stmtIdentityCache.Add(query, id)
+	if len(id) < len(query) && len(id) <= memoMaxBytes {
+		// A part of the text, or a buffer the size of it (the strip's), would
+		// hold the whole text for as long as the identity is kept: in this
+		// cache, and as a key of the others. A longer identity is kept by
+		// none (memoKeeps, querySigKey), so it is not copied.
+		id = strings.Clone(id)
+	}
+	if memoKeeps(query, len(id)) {
+		stmtIdentityCache.Add(query, id)
+	}
 	return id
 }
 
