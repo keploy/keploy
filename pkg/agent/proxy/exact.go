@@ -310,9 +310,11 @@ type exactState struct {
 	// and one key.
 	teardownLast atomic.Pointer[teardownBound]
 	// times is where the teardown bound reads the times of the set's
-	// recordings the trees do not hold (SetRecordingTimes): nil until the
-	// agent set one.
-	times atomic.Pointer[recordingTimes]
+	// recordings the trees do not hold (SetRecordingTimes): as the agent
+	// handed it, and stagedTimes as the last staging installed it with its
+	// trees (installRecordedSourcesLocked), which the bound reads. nil until
+	// the agent set one.
+	times, stagedTimes atomic.Pointer[recordingTimes]
 	// fired: a test has begun since exact serving was turned on. It is what
 	// tells a tier-routing parser (Postgres v3) "between tests" from
 	// "before the first test".
@@ -379,8 +381,12 @@ type exactState struct {
 	// recorded is where a miss's diagnosis reads the set's recordings the
 	// trees do not hold (SetRecordingSource).
 	recorded recordingSource
-	// before is where RecordedBefore reads what the trees do not hold.
-	before recordedBeforeSource
+	// before is where RangeRecordedBefore reads what the trees do not hold;
+	// onBefore, a test seam, nil outside tests, runs as it has read the
+	// trees and before it reads the source installed with them
+	// (stagedRecordedBefore).
+	before   recordedBeforeSource
+	onBefore func()
 	// claims are the shared recordings the tests of the current staging
 	// answered with (exactClaims).
 	claims exactClaims
@@ -1219,35 +1225,63 @@ func (m *MockManager) consumedInSet(name string) bool {
 }
 
 // recordedBeforeSource is where RangeRecordedBefore reads the staged set's
-// recordings the trees do not hold, by request time (SetRecordedBefore).
+// recordings the trees do not hold, by request time (SetRecordedBefore): src
+// as the agent handed it, and staged as the last staging installed it with
+// its trees (installRecordedSourcesLocked), which every reader reads. mu is
+// a leaf, taken under swapMu by the staging and by the readers
+// (stagedRecordedBefore).
 type recordedBeforeSource struct {
-	mu  sync.Mutex
-	src func(t time.Time, visit func(*models.Mock) bool) error
+	mu     sync.Mutex
+	src    func(t time.Time, visit func(*models.Mock) bool) error
+	staged func(t time.Time, visit func(*models.Mock) bool) error
 }
 
 // SetRecordedBefore sets where RangeRecordedBefore reads the staged set's
 // recordings the trees do not hold (the agent's on-disk store of per-test
 // mocks: DiskMocks.RangeRecordedBefore, which decodes one at a time); nil for
-// none, when every one is in the trees. The agent sets it as it stages a
-// set.
+// none, when every one is in the trees. The agent sets it before it stages a
+// set, and the staging installs it with the trees it builds: until then the
+// reads read the set staged.
 func (m *MockManager) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) {
 	m.exact.before.mu.Lock()
 	defer m.exact.before.mu.Unlock()
 	m.exact.before.src = src
 }
 
+// stagedRecordedBefore is the staged trees' recordings (StagedMocks) and the
+// source of the recordings before an instant the staging installed with
+// them (installRecordedSourcesLocked), nil for none, read together under
+// swapMu, as one staging left them: the agent hands a set's source before it
+// stages that set, so a read between the two reads the set staged, never its
+// trees with the next set's on-disk recordings. The disk is read after the
+// lock, by the caller.
+func (m *MockManager) stagedRecordedBefore() ([]*models.Mock, func(t time.Time, visit func(*models.Mock) bool) error) {
+	m.swapMu.RLock()
+	defer m.swapMu.RUnlock()
+	staged := m.StagedMocks()
+	if m.exact.onBefore != nil {
+		m.exact.onBefore()
+	}
+	m.exact.before.mu.Lock()
+	src := m.exact.before.staged
+	m.exact.before.mu.Unlock()
+	return staged, src
+}
+
 // RangeRecordedBefore visits every recording of the staged set made before
 // t, or at t's own instant, by request time, of any kind
 // (integrations.RecordedBeforeReader): those
 // in the manager's trees (StagedMocks), then those the agent keeps on disk
-// (SetRecordedBefore), each once, until visit returns false. A recording a
+// (SetRecordedBefore, as the staging installed it: stagedRecordedBefore),
+// each once, until visit returns false. A recording a
 // tree holds a copy of (the open test's own, loaded from disk) is visited
 // from the tree. The disk's are visited as the source decodes them, one at a
 // time: the manager keeps none of them, only which it visited.
 func (m *MockManager) RangeRecordedBefore(t time.Time, visit func(*models.Mock) bool) error {
+	staged, src := m.stagedRecordedBefore()
 	seen := map[string]bool{}
 	id := recordingID
-	for _, mk := range m.StagedMocks() {
+	for _, mk := range staged {
 		if mk == nil || mk.Spec.ReqTimestampMock.After(t) || seen[id(mk)] {
 			continue
 		}
@@ -1256,9 +1290,6 @@ func (m *MockManager) RangeRecordedBefore(t time.Time, visit func(*models.Mock) 
 			return nil
 		}
 	}
-	m.exact.before.mu.Lock()
-	src := m.exact.before.src
-	m.exact.before.mu.Unlock()
 	if src == nil {
 		return nil
 	}
@@ -1293,9 +1324,10 @@ func recordingID(mk *models.Mock) string {
 // before the first test's own on disk, so with few readers (an agent of
 // two CPUs) a test could open before the recordings its calls read were.
 func (m *MockManager) rangeRecordedInOrder(t time.Time, visit func(*models.Mock) bool) error {
+	staged, src := m.stagedRecordedBefore()
 	seen := map[string]bool{}
 	var trees []*models.Mock
-	for _, mk := range m.StagedMocks() {
+	for _, mk := range staged {
 		if mk == nil || mk.Spec.ReqTimestampMock.After(t) || seen[recordingID(mk)] {
 			continue
 		}
@@ -1318,9 +1350,6 @@ func (m *MockManager) rangeRecordedInOrder(t time.Time, visit func(*models.Mock)
 		}
 		return true
 	}
-	m.exact.before.mu.Lock()
-	src := m.exact.before.src
-	m.exact.before.mu.Unlock()
 	if src != nil {
 		err := src(t, func(mk *models.Mock) bool {
 			if mk == nil || mk.Spec.ReqTimestampMock.After(t) {
@@ -1697,14 +1726,17 @@ func (m *MockManager) SetPoolNames(names []string) {
 // (DiskMocks.RangeTimes); nil for none, when every one is in the trees.
 // keploy mock replay's staging reads no test's own recording (each test
 // reads its own as it opens), and the bound is the latest of them: from the
-// trees alone it is told by none. The agent sets it as it stages a set.
+// trees alone it is told by none. The agent sets it before it stages a set,
+// and the staging installs it with the trees it builds: until then the bound
+// reads the set staged.
 func (m *MockManager) SetRecordingTimes(src func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error) {
 	m.exact.times.Store(&recordingTimes{src: src})
 }
 
 // recordingTimes is where the teardown bound reads the times of the set's
 // recordings the trees do not hold (SetRecordingTimes). A new one is stored
-// on every set, so the bound cached under an older one is read again.
+// on every set, so the bound cached under an older one is read again once a
+// staging installed it.
 type recordingTimes struct {
 	src func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error
 }
@@ -2794,7 +2826,11 @@ func (m *MockManager) teardownBy(key string) func(clock string) func(time.Time) 
 	// tests after each call's consume does not walk the whole staged set
 	// again.
 	rev := m.StagingGeneration()
-	times := m.exact.times.Load()
+	// The times the staging installed with the trees
+	// (installRecordedSourcesLocked), not the ones handed: the agent hands
+	// a set's before it stages that set, so a bound read between the two is
+	// the set staged's, never its trees with the next set's recordings.
+	times := m.exact.stagedTimes.Load()
 	if c := m.exact.teardownLast.Load(); c != nil && c.rev == rev && c.pool == pool && c.owners == owners && c.tests == tests && c.times == times && c.key == key {
 		return c.on()
 	}

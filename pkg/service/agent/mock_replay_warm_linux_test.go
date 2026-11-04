@@ -189,11 +189,13 @@ func TestAKeployTestSetIsReadForTheLearnStepAsItIsStaged(t *testing.T) {
 }
 
 // sourceWireProxy is the wire's proxy (wireProxy) that takes the set's keyed
-// on-disk source (coreAgent.RecordingSourceSetter), as keploy's proxy does:
-// it counts the stagings (SetMocks) made before each handing.
+// on-disk source (coreAgent.RecordingSourceSetter), its recordings before an
+// instant (coreAgent.RecordedBeforeSetter) and their times
+// (coreAgent.RecordingTimesSetter), as keploy's proxy does: it counts the
+// stagings (SetMocks) made before each handing of each.
 type sourceWireProxy struct {
 	*wireProxy
-	handed []int
+	handed, before, times []int
 }
 
 func (p *sourceWireProxy) SetRecordingSource(func(models.Kind, []string, func(string, func() (*models.Mock, error)) bool) error) error {
@@ -203,13 +205,28 @@ func (p *sourceWireProxy) SetRecordingSource(func(models.Kind, []string, func(st
 	return nil
 }
 
+func (p *sourceWireProxy) SetRecordedBefore(func(t time.Time, visit func(*models.Mock) bool) error) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.before = append(p.before, p.staged)
+	return nil
+}
+
+func (p *sourceWireProxy) SetRecordingTimes(func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.times = append(p.times, p.staged)
+	return nil
+}
+
 // keploy mock's replay of record's full round hands the proxy its set's keyed
-// on-disk source before it stages the set (handKeyedSource), as it hands the
-// source of a kind: the staging installs it with the trees it builds, so a
-// read by key between the two (the learn step's pairing under request keys,
-// a miss's diagnosis) reads the set staged, never its trees with this set's
-// on-disk recordings.
-func TestAMockReplaySetsKeyedSourceIsHandedBeforeItsStaging(t *testing.T) {
+// on-disk source, its recordings before an instant and their times before it
+// stages the set (handUnstagedSources), as it hands the source of a kind: the
+// staging installs them with the trees it builds, so a read between the two
+// (the learn step's pairing under request keys and its earlier places, a
+// miss's diagnosis, the teardown bound) reads the set staged, never its trees
+// with this set's on-disk recordings.
+func TestAMockReplaySetsOnDiskSourcesAreHandedBeforeItsStaging(t *testing.T) {
 	a, wp := wireAgent(t, models.MODE_TEST)
 	p := &sourceWireProxy{wireProxy: wp}
 	a.Proxy = p
@@ -222,4 +239,6 @@ func TestAMockReplaySetsKeyedSourceIsHandedBeforeItsStaging(t *testing.T) {
 	defer p.mu.Unlock()
 	require.Equal(t, 1, p.staged, "the set is staged once")
 	require.Equal(t, []int{0}, p.handed, "the keyed source is handed once, before the set's staging")
+	require.Equal(t, []int{0}, p.before, "the recordings before an instant are handed once, before the set's staging")
+	require.Equal(t, []int{0}, p.times, "the recordings' times are handed once, before the set's staging")
 }

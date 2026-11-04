@@ -716,13 +716,16 @@ func (m *MockManager) ResetForReplaySession() {
 	// does, today's serve.
 	m.exact.bg.Store(nil)
 	m.exact.poolCursor.Store(nil)
-	// The keyed source as installed goes too (installRecordedSourcesLocked):
-	// the reads by key read that one, and until the next staging they read
-	// none of the trees' set kept on disk.
+	// The keyed source and the source of the recordings before an instant
+	// as installed go too (installRecordedSourcesLocked): the reads by key
+	// and RangeRecordedBefore read those, and until the next staging they
+	// read none of the trees' set kept on disk.
 	m.exact.recorded.mu.Lock()
 	m.exact.recorded.src, m.exact.recorded.staged = nil, nil
 	m.exact.recorded.mu.Unlock()
-	m.SetRecordedBefore(nil)
+	m.exact.before.mu.Lock()
+	m.exact.before.src, m.exact.before.staged = nil, nil
+	m.exact.before.mu.Unlock()
 	m.SetRecordedOfKind(nil)
 	// Nor its scope table's pool names (SetPoolNames), owners
 	// (SetPoolOwners) and tests (SetPoolTests): until the next session sends

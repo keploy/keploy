@@ -199,7 +199,13 @@ func TestUnderMockReplayTheTeardownBoundReadsTheRecordingOnDisk(t *testing.T) {
 	if after := mm.teardownAfter("k", ""); after == nil || !after(gap.Spec.ReqTimestampMock) {
 		t.Fatal("precondition: the staged trees alone did not put the bound at the test's early call")
 	}
-	mm.SetRecordingTimes(disk.RangeTimes)
+	// The set as the agent stages one it keeps on disk: its recordings'
+	// times handed before the staging, which installs them.
+	restage := func(times func(func(string, time.Time, bool, string) bool) error) {
+		mm.SetRecordingTimes(times)
+		mm.SetMocksWithWindow([]*models.Mock{early, boot, gap, end}, nil, models.BaseTime, time.Now())
+	}
+	restage(disk.RangeTimes)
 	after := mm.teardownAfter("k", "")
 	if after == nil || !after(end.Spec.ReqTimestampMock) {
 		t.Fatal("end-sessions, sent after every test's recording on disk, is not the set's teardown")
@@ -234,7 +240,7 @@ func TestUnderMockReplayTheTeardownBoundReadsTheRecordingOnDisk(t *testing.T) {
 		}
 	}
 	other.Finalize()
-	mm.SetRecordingTimes(other.RangeTimes)
+	restage(other.RangeTimes)
 	if after := mm.teardownAfter("k", ""); after == nil || !after(gap.Spec.ReqTimestampMock) {
 		t.Fatal("a new set's store was not read again: its bound is the first set's")
 	}
@@ -244,7 +250,7 @@ func TestUnderMockReplayTheTeardownBoundReadsTheRecordingOnDisk(t *testing.T) {
 	if err := other.Close(); err != nil {
 		t.Fatal(err)
 	}
-	mm.SetRecordingTimes(other.RangeTimes)
+	restage(other.RangeTimes)
 	if mm.teardownAfter("k", "") != nil {
 		t.Fatal("FALSE GREEN? a store that cannot be read told a teardown bound from the trees alone")
 	}
@@ -268,6 +274,21 @@ func onDisk(t *testing.T, ms ...*models.Mock) *DiskMocks {
 	return disk
 }
 
+// stagedManagerOnDisk is stagedManager of a set the agent keeps on disk, of
+// per-test tier perTest: the agent hands the times of the set's recordings
+// (times, nil for none) before it stages the set (Agent.handUnstagedSources),
+// and the staging installs them with the trees it builds.
+func stagedManagerOnDisk(t *testing.T, perTest []*models.Mock, times func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error) *MockManager {
+	t.Helper()
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	if times != nil {
+		mm.SetRecordingTimes(times)
+	}
+	mm.SetMocksWithWindow(perTest, nil, models.BaseTime, time.Now())
+	return mm
+}
+
 // Under keploy mock replay each test process's teardown is bounded by its
 // own tests' recordings on disk, as from the trees: the staging holds no
 // test's own, so the bound reads them from the store, and a recording only
@@ -284,10 +305,9 @@ func TestUnderMockReplayEachProcessesTeardownIsBoundedByItsOwnTestsOnDisk(t *tes
 	bEnd := exactMongo("b-end", 3500*time.Millisecond, models.LifetimePerTest)
 	disk := onDisk(t, aBoot, a1, aEnd, bBoot, b1, bEnd)
 	// The staging: the pool's slices, never a test's own.
-	mm := stagedManager(t, []*models.Mock{aBoot, aEnd, bBoot, bEnd}, nil)
+	mm := stagedManagerOnDisk(t, []*models.Mock{aBoot, aEnd, bBoot, bEnd}, disk.RangeTimes)
 	mm.SetPoolOwners(map[string]string{"a1": "a", "b1": "b"})
 	mm.SetPoolNames([]string{"a-boot", "a-end", "b-boot", "b-end"})
-	mm.SetRecordingTimes(disk.RangeTimes)
 	for _, tc := range []struct {
 		key  string
 		mk   *models.Mock
@@ -332,12 +352,13 @@ func TestUnderMockReplayTheTeardownIsAfterTheTestsLastPlaceOnDisk(t *testing.T) 
 				if !onDiskOnly {
 					staged = append(staged, c.last)
 				}
-				mm := stagedManager(t, staged, nil)
+				var times func(func(string, time.Time, bool, string) bool) error
+				if onDiskOnly {
+					times = onDisk(t, before, c.last, mid, end).RangeTimes
+				}
+				mm := stagedManagerOnDisk(t, staged, times)
 				mm.SetPoolOwners(map[string]string{c.last.Name: "k"})
 				mm.SetPoolNames([]string{"before", "mid", "end"})
-				if onDiskOnly {
-					mm.SetRecordingTimes(onDisk(t, before, c.last, mid, end).RangeTimes)
-				}
 				after := mm.teardownAfter("k", "")
 				if after == nil || !after(end.Spec.ReqTimestampMock) {
 					t.Fatal("end, sent after the test's last answer, is not the teardown")
@@ -387,10 +408,9 @@ func TestUnderMockReplayAnOlderRunsTeardownIsBoundedByItsOwnClock(t *testing.T) 
 	slice := []string{"s-boot", "s-gap", "s-end"}
 	owners := map[string]string{"s1": "k", "s2": "k", "l1": "k"}
 
-	mm := stagedManager(t, []*models.Mock{sBoot, sGap, sEnd}, nil)
+	mm := stagedManagerOnDisk(t, []*models.Mock{sBoot, sGap, sEnd}, onDisk(t, sBoot, s1, sGap, s2, sEnd, l1).RangeTimes)
 	mm.SetPoolOwners(owners)
 	mm.SetPoolNames(slice)
-	mm.SetRecordingTimes(onDisk(t, sBoot, s1, sGap, s2, sEnd, l1).RangeTimes)
 	after := mm.teardownAfter("k", s)
 	if after == nil || !after(sEnd.Spec.ReqTimestampMock) {
 		t.Fatal("s-end, sent after every test S recorded, is not the teardown of S's clock: a newer run's test, on another clock, bounded it")
@@ -443,10 +463,9 @@ func TestUnderMockReplayAnOlderRunsTeardownIsBoundedByItsOwnClock(t *testing.T) 
 	})
 	t.Run("a recording on no clock bounds every clock", func(t *testing.T) {
 		lu := exactMongo("l-untrusted", 44*time.Second, models.LifetimePerTest)
-		mm := stagedManager(t, []*models.Mock{sBoot, sGap, sEnd}, nil)
+		mm := stagedManagerOnDisk(t, []*models.Mock{sBoot, sGap, sEnd}, onDisk(t, sBoot, s1, sGap, s2, sEnd, l1, lu).RangeTimes)
 		mm.SetPoolOwners(map[string]string{"s1": "k", "s2": "k", "l1": "k", "l-untrusted": "k"})
 		mm.SetPoolNames(slice)
-		mm.SetRecordingTimes(onDisk(t, sBoot, s1, sGap, s2, sEnd, l1, lu).RangeTimes)
 		if after := mm.teardownAfter("k", s); after != nil && after(sEnd.Spec.ReqTimestampMock) {
 			t.Fatal("FALSE GREEN? a recording on no clock, made after s-end by its time, did not bound S's clock")
 		}
@@ -462,10 +481,9 @@ func TestUnderMockReplayAnOlderRunsTeardownIsBoundedByItsOwnClock(t *testing.T) 
 	// teardown too. A clock orders only its own run's stamps, and no
 	// recording of the set tells where S's T2 was.
 	t.Run("the stated limit: the gap before a run's last test recorded anew", func(t *testing.T) {
-		mm := stagedManager(t, []*models.Mock{sBoot, sGap, sEnd}, nil)
+		mm := stagedManagerOnDisk(t, []*models.Mock{sBoot, sGap, sEnd}, onDisk(t, sBoot, s1, sGap, sEnd, l1).RangeTimes)
 		mm.SetPoolOwners(owners)
 		mm.SetPoolNames(slice)
-		mm.SetRecordingTimes(onDisk(t, sBoot, s1, sGap, sEnd, l1).RangeTimes)
 		after := mm.teardownAfter("k", s)
 		if after == nil || !after(sGap.Spec.ReqTimestampMock) || after(sBoot.Spec.ReqTimestampMock) {
 			t.Fatal("the stated limit changed: s-gap, after S's last test left in the set, is not S's teardown, or s-boot is")
@@ -527,12 +545,13 @@ func TestUnderMockReplayATestsRecordingOnNoClockBoundsOnlyItsRunsClock(t *testin
 		if inTrees {
 			staged = ms
 		}
-		mm := stagedManager(t, staged, nil)
+		var times func(func(string, time.Time, bool, string) bool) error
+		if !inTrees {
+			times = onDisk(t, ms...).RangeTimes
+		}
+		mm := stagedManagerOnDisk(t, staged, times)
 		if err := (&Proxy{mockManager: mm}).SetPoolNames(slice, owners(tests), tests); err != nil {
 			t.Fatalf("SetPoolNames: %v", err)
-		}
-		if !inTrees {
-			mm.SetRecordingTimes(onDisk(t, ms...).RangeTimes)
 		}
 		return mm
 	}
@@ -682,10 +701,9 @@ func TestUnderMockReplayOneRunsTeardownIsTheSameWithItsClock(t *testing.T) {
 			}
 		}
 		pool := []*models.Mock{ms[0], ms[3], ms[5], ms[6]}
-		mm := stagedManager(t, pool, nil)
+		mm := stagedManagerOnDisk(t, pool, onDisk(t, ms...).RangeTimes)
 		mm.SetPoolOwners(map[string]string{"owned": "k", "owned-2": "k", "owned-2-untrusted": "k"})
 		mm.SetPoolNames([]string{"boot", "gap", "end", "end-untrusted"})
-		mm.SetRecordingTimes(onDisk(t, ms...).RangeTimes)
 		got := map[string]bool{}
 		for _, mk := range mm.teardown("k", pool) {
 			got[mk.Name] = true
@@ -727,12 +745,13 @@ func TestUnderMockReplayARecordingWithNoPlaceBoundsNoTeardown(t *testing.T) {
 		{"on disk only", []*models.Mock{boot, end}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			mm := stagedManager(t, c.staged, nil)
+			var times func(func(string, time.Time, bool, string) bool) error
+			if c.disk {
+				times = onDisk(t, boot, unplaced, end).RangeTimes
+			}
+			mm := stagedManagerOnDisk(t, c.staged, times)
 			mm.SetPoolOwners(map[string]string{"unplaced": "k"})
 			mm.SetPoolNames(slice)
-			if c.disk {
-				mm.SetRecordingTimes(onDisk(t, boot, unplaced, end).RangeTimes)
-			}
 			if after := mm.teardownAfter("k", ""); after != nil {
 				t.Fatalf("FALSE GREEN? a recording with no place bounded the set's teardown (the boot reads as the teardown: %v)", after(boot.Spec.ReqTimestampMock))
 			}
@@ -776,12 +795,13 @@ func TestUnderMockReplayAnAnswerStampedAfterTheNextCallKeepsTheTeardown(t *testi
 		{"the test's recordings on disk only", []*models.Mock{boot, end}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			mm := stagedManager(t, c.staged, nil)
+			var times func(func(string, time.Time, bool, string) bool) error
+			if c.disk {
+				times = onDisk(t, boot, find, del, end).RangeTimes
+			}
+			mm := stagedManagerOnDisk(t, c.staged, times)
 			mm.SetPoolOwners(owners)
 			mm.SetPoolNames(slice)
-			if c.disk {
-				mm.SetRecordingTimes(onDisk(t, boot, find, del, end).RangeTimes)
-			}
 			after := mm.teardownAfter("items", "")
 			if after == nil || !after(end.Spec.ReqTimestampMock) {
 				t.Fatal("endSessions, sent after the last test's delete was answered (same connection), is not the set's teardown: the delete's late answer stamp bounded it")

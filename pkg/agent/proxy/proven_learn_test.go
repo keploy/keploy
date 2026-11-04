@@ -1013,8 +1013,8 @@ func TestAPoolMocksEarlierPlacesAreReadFromTheDiskToo(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
 	mm.SeedRecordedWindows([]models.TestWindow{w1, w2})
-	mm.SetMocksWithWindow(nil, []*models.Mock{refresh}, models.BaseTime, time.Now())
 	mm.SetRecordedBefore(disk.RangeRecordedBefore)
+	mm.SetMocksWithWindow(nil, []*models.Mock{refresh}, models.BaseTime, time.Now())
 	mm.ServeExactPool(models.PoolKeyNone, []string{"mock-2"})
 	body := `{"token":"tok-9d8e7f"}`
 	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
@@ -1055,8 +1055,8 @@ func TestATestsOwnCallIsNotRefusedForAnotherTestsRowOnDisk(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
 	mm.SeedRecordedWindows([]models.TestWindow{w1, w2})
-	mm.SetMocksWithWindow([]*models.Mock{own}, nil, w2.Start, w2.End)
 	mm.SetRecordedBefore(disk.RangeRecordedBefore)
+	mm.SetMocksWithWindow([]*models.Mock{own}, nil, w2.Start, w2.End)
 	mm.ServeExactTest("test-2", []*models.Mock{own})
 	p.ContinueTestErrorCapture()
 	body := `{"note":"n-9d8e7f"}`

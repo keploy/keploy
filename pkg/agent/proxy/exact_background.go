@@ -207,12 +207,14 @@ type recordedOfKindSource struct {
 }
 
 // installRecordedSourcesLocked makes the on-disk sources the agent handed
-// last, of a kind (SetRecordedOfKind) and by key (SetRecordingSource), the
-// staging's, holding swapMu, which the staging holds as it changes the trees
-// and moves the staging epoch: a reader of the set as recorded that takes
-// swapMu (RangeRecordedSet, the pairing) reads one staging's trees and
-// sources, never one set's trees with the next set's sources, which the
-// agent hands before it stages that set.
+// last, of a kind (SetRecordedOfKind), by key (SetRecordingSource), of the
+// recordings before an instant (SetRecordedBefore) and of the recordings'
+// times (SetRecordingTimes), the staging's, holding swapMu, which the staging
+// holds as it changes the trees and moves the staging epoch: a reader of the
+// set as recorded that takes swapMu (RangeRecordedSet, the pairing,
+// RangeRecordedBefore) reads one staging's trees and sources, never one
+// set's trees with the next set's sources, which the agent hands before it
+// stages that set.
 func (m *MockManager) installRecordedSourcesLocked() {
 	m.exact.ofKind.mu.Lock()
 	m.exact.ofKind.staged = m.exact.ofKind.src
@@ -220,6 +222,10 @@ func (m *MockManager) installRecordedSourcesLocked() {
 	m.exact.recorded.mu.Lock()
 	m.exact.recorded.staged = m.exact.recorded.src
 	m.exact.recorded.mu.Unlock()
+	m.exact.before.mu.Lock()
+	m.exact.before.staged = m.exact.before.src
+	m.exact.before.mu.Unlock()
+	m.exact.stagedTimes.Store(m.exact.times.Load())
 }
 
 // recordedOfKindLocked is kind's recordings of the set as the last staging

@@ -464,7 +464,7 @@ func readsByKey(t *testing.T, mm *MockManager) map[string][]string {
 }
 
 // The agent hands the next set's keyed on-disk source before it stages that
-// set (Agent.handKeyedSource), as it hands the source of a kind. A read by
+// set (Agent.handUnstagedSources), as it hands the source of a kind. A read by
 // key between the two, the learn step's pairing under request keys or a
 // miss's, reads the set staged, its trees and its keyed source, never its
 // trees with the next set's on-disk recordings: the staging installs that
@@ -493,4 +493,138 @@ func TestAReadByKeyBeforeTheNextSetIsStagedReadsTheSetStaged(t *testing.T) {
 	check("set b's keyed source handed, set a still staged", setOf("a"))
 	stageSet("b")
 	check("set b staged", setOf("b"))
+}
+
+// earlierSet is a manager and the staging of a set the agent keeps on disk,
+// as the learn step's earlier places and keploy mock replay's teardown bound
+// read it: hand hands set's reader of the recordings before an instant and
+// the times of its recordings (Agent.handUnstagedSources), and stage stages
+// its trees, set+"-tree", a pool recording at 1 s. Set a's test was recorded
+// at 5 s (a-disk), set b's at 50 s (b-disk), on disk alone.
+func earlierSet(t *testing.T) (mm *MockManager, hand, stage func(set string)) {
+	t.Helper()
+	t.Setenv(provenswitch.Env, "1")
+	mm = NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	disk := map[string]*models.Mock{
+		"a": exactMock("a-disk", 5*time.Second, models.LifetimePerTest),
+		"b": exactMock("b-disk", 50*time.Second, models.LifetimePerTest),
+	}
+	hand = func(set string) {
+		mk := disk[set]
+		mm.SetRecordedBefore(func(before time.Time, visit func(*models.Mock) bool) error {
+			if !mk.Spec.ReqTimestampMock.After(before) {
+				visit(mk)
+			}
+			return nil
+		})
+		mm.SetRecordingTimes(func(visit func(string, time.Time, bool, string) bool) error {
+			visit(mk.Name, models.PlaceOf(mk), false, "")
+			return nil
+		})
+	}
+	stage = func(set string) {
+		mm.SetMocksWithWindow(nil, []*models.Mock{exactMock(set+"-tree", time.Second, models.LifetimeSession)}, models.BaseTime, time.Now())
+	}
+	mm.SetPoolNames([]string{"a-tree", "b-tree"})
+	return mm, hand, stage
+}
+
+// earlierReads is what each read of earlierSet's recordings gives: the
+// learn step's earlier places (RangeRecordedBefore, the trees' then the
+// disk's), the set's staging read in recorded order (rangeRecordedInOrder),
+// and whether a pool call at 10 s, after set a's test and before set b's,
+// is the teardown (teardownAfter).
+func earlierReads(t *testing.T, mm *MockManager) map[string]string {
+	t.Helper()
+	names := func(read func(time.Time, func(*models.Mock) bool) error) string {
+		var out []string
+		if err := read(lastRecorded, func(mk *models.Mock) bool {
+			out = append(out, mk.Name)
+			return true
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(out, ",")
+	}
+	after := mm.teardownAfter("", "")
+	return map[string]string{
+		"RangeRecordedBefore":  names(mm.RangeRecordedBefore),
+		"rangeRecordedInOrder": names(mm.rangeRecordedInOrder),
+		"teardownAfter":        strconv.FormatBool(after != nil && after(exactT0.Add(10*time.Second))),
+	}
+}
+
+// The agent hands the next set's reader of the recordings before an instant
+// and the times of its recordings before it stages that set
+// (Agent.handUnstagedSources). A read between the two, of the learn step's
+// earlier places, of the set's staging read in recorded order or of keploy
+// mock replay's teardown bound, reads the set staged, its trees and its
+// on-disk recordings, never its trees with the next set's: the staging
+// installs both with the trees it builds.
+func TestAnEarlierPlacesOrTeardownReadBeforeTheNextSetIsStagedReadsTheSetStaged(t *testing.T) {
+	mm, hand, stage := earlierSet(t)
+	setOf := map[string]map[string]string{
+		"a": {"RangeRecordedBefore": "a-tree,a-disk", "rangeRecordedInOrder": "a-tree,a-disk", "teardownAfter": "true"},
+		"b": {"RangeRecordedBefore": "b-tree,b-disk", "rangeRecordedInOrder": "b-tree,b-disk", "teardownAfter": "false"},
+	}
+	check := func(when, set string) {
+		t.Helper()
+		got := earlierReads(t, mm)
+		var wrong []string
+		for _, read := range []string{"RangeRecordedBefore", "rangeRecordedInOrder", "teardownAfter"} {
+			if want := setOf[set][read]; got[read] != want {
+				wrong = append(wrong, fmt.Sprintf("%s read %s, want set %s's %s", read, got[read], set, want))
+			}
+		}
+		if len(wrong) > 0 {
+			t.Fatalf("%s: %s", when, strings.Join(wrong, "; "))
+		}
+	}
+	hand("a")
+	stage("a")
+	check("set a staged", "a")
+	hand("b")
+	check("set b's sources handed, set a still staged", "a")
+	stage("b")
+	check("set b staged", "b")
+}
+
+// The learn step's earlier places read the staged trees and the source the
+// staging installed with them under one staging lock (read): the agent
+// stages set b while RangeRecordedBefore reads, as far as the lock lets it,
+// and the read must give set a's recordings.
+func TestTheEarlierPlacesReadTheTreesAndTheirSourceUnderOneStagingLock(t *testing.T) {
+	mm, hand, stage := earlierSet(t)
+	hand("a")
+	stage("a")
+	for _, read := range []struct {
+		name string
+		read func(time.Time, func(*models.Mock) bool) error
+	}{{"RangeRecordedBefore", mm.RangeRecordedBefore}, {"rangeRecordedInOrder", mm.rangeRecordedInOrder}} {
+		var underLock, ran bool
+		mm.exact.onBefore = func() {
+			ran = true
+			// The agent hands set b's sources and stages it now, unless
+			// the staging lock is held: then it waits for the read.
+			if mm.swapMu.TryLock() {
+				mm.swapMu.Unlock()
+				hand("b")
+				stage("b")
+			} else {
+				underLock = true
+			}
+		}
+		var got []string
+		if err := read.read(lastRecorded, func(mk *models.Mock) bool {
+			got = append(got, mk.Name)
+			return true
+		}); err != nil {
+			t.Fatal(err)
+		}
+		mm.exact.onBefore = nil
+		if want := []string{"a-tree", "a-disk"}; !ran || !underLock || !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: the trees and their source were read under the staging lock: %v (seam ran: %v); it read %v; want set a's %v", read.name, underLock, ran, got, want)
+		}
+	}
 }

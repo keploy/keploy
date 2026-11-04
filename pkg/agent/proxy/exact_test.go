@@ -3039,7 +3039,7 @@ func TestFindStagedNotOwnedSkipsTheNextTestsCallsInFlight(t *testing.T) {
 // visited from the tree), until the visitor stops; a reader that fails says
 // so, and with none the trees' alone are visited. The worker's scoped view
 // forwards them, and is an error over a store that cannot read them; a new
-// replay session forgets the last set's reader.
+// replay session forgets the last set's reader, handed and installed.
 func TestRangeRecordedBeforeVisitsTheTreesAndTheDisk(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
@@ -3050,7 +3050,13 @@ func TestRangeRecordedBeforeVisitsTheTreesAndTheDisk(t *testing.T) {
 	// it before the call, so it is visited (the learn step reads it as an
 	// earlier place unless F served it).
 	same := exactMock("pool-5", 5*time.Second, models.LifetimeSession)
-	mm.SetMocksWithWindow([]*models.Mock{own}, []*models.Mock{pool, later, same}, models.BaseTime, time.Now())
+	// The set staged as the agent stages one it keeps on disk: the reader
+	// handed before the staging, which installs it (nil for none).
+	stage := func(src func(time.Time, func(*models.Mock) bool) error) {
+		mm.SetRecordedBefore(src)
+		mm.SetMocksWithWindow([]*models.Mock{own}, []*models.Mock{pool, later, same}, models.BaseTime, time.Now())
+	}
+	stage(nil)
 	at := exactT0.Add(5 * time.Second)
 	visit := func(db integrations.RecordedBeforeReader) (string, []*models.Mock, error) {
 		var names []string
@@ -3070,7 +3076,7 @@ func TestRangeRecordedBeforeVisitsTheTreesAndTheDisk(t *testing.T) {
 	ownCopy := exactMock("own-2", 2*time.Second, models.LifetimePerTest)
 	onDiskSame := exactMock("other-test-5", 5*time.Second, models.LifetimePerTest)
 	onDiskLater := exactMock("other-test-6", 6*time.Second, models.LifetimePerTest)
-	mm.SetRecordedBefore(func(t2 time.Time, v func(*models.Mock) bool) error {
+	stage(func(t2 time.Time, v func(*models.Mock) bool) error {
 		if !t2.Equal(at) {
 			t.Fatalf("the disk read before %v", t2)
 		}
@@ -3082,9 +3088,10 @@ func TestRangeRecordedBeforeVisitsTheTreesAndTheDisk(t *testing.T) {
 		return nil
 	})
 	names, got, err := visit(mm)
+	// The tree's own-2 is the staging's copy of own, not the disk's.
 	treeCopy := false
 	for _, m := range got {
-		treeCopy = treeCopy || m == own
+		treeCopy = treeCopy || (m.Name == "own-2" && m != ownCopy)
 	}
 	if err != nil || names != "other-test-3,other-test-5,own-2,pool-1,pool-5" || !treeCopy {
 		t.Fatalf("with the disk: %s %v (own-2 the tree's: %v); want other-test-3, other-test-5, own-2 (the tree's), pool-1, pool-5 (not other-test-6, a source that hands more)", names, err, treeCopy)
@@ -3101,13 +3108,18 @@ func TestRangeRecordedBeforeVisitsTheTreesAndTheDisk(t *testing.T) {
 	if stops != 1 {
 		t.Fatalf("a visitor that stops was called %d times", stops)
 	}
-	mm.SetRecordedBefore(func(time.Time, func(*models.Mock) bool) error { return fmt.Errorf("closed") })
+	stage(func(time.Time, func(*models.Mock) bool) error { return fmt.Errorf("closed") })
 	if _, _, err := visit(mm); err == nil {
 		t.Fatal("a failing disk read was not told")
 	}
 	mm.ResetForReplaySession()
 	if names, _, err := visit(mm); err != nil || strings.Contains(names, "other-test-3") {
 		t.Fatalf("after a new replay session: %s %v; want the last set's reader forgotten", names, err)
+	}
+	// Nor does a staging that hands none install it again.
+	mm.SetMocksWithWindow([]*models.Mock{own}, []*models.Mock{pool, later, same}, models.BaseTime, time.Now())
+	if names, _, err := visit(mm); err != nil || names != "own-2,pool-1,pool-5" {
+		t.Fatalf("staged after a new replay session with no reader handed: %s %v; want the trees' own-2,pool-1,pool-5", names, err)
 	}
 }
 

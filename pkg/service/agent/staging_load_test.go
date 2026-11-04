@@ -275,12 +275,21 @@ type workerExactProxy struct {
 	source    func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error
 	sourcedAt []int
 	// before is the reader of the recordings before an instant the staging
-	// set (coreAgent.RecordedBeforeSetter).
-	before func(t time.Time, visit func(*models.Mock) bool) error
+	// set (coreAgent.RecordedBeforeSetter), and beforeAt the stagings made
+	// before each handing of it; timesAt is the same of the recordings'
+	// times (coreAgent.RecordingTimesSetter).
+	before            func(t time.Time, visit func(*models.Mock) bool) error
+	beforeAt, timesAt []int
 }
 
 func (p *workerExactProxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error {
 	p.before = src
+	p.beforeAt = append(p.beforeAt, len(p.windowed))
+	return nil
+}
+
+func (p *workerExactProxy) SetRecordingTimes(func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error) error {
+	p.timesAt = append(p.timesAt, len(p.windowed))
 	return nil
 }
 
@@ -342,6 +351,12 @@ func TestTheExactStagingStagesTheWorkerScopesMocksFromDisk(t *testing.T) {
 	}
 	if want := []int{0}; !reflect.DeepEqual(p.sourcedAt, want) {
 		t.Fatalf("the recording source was handed after %v stagings; want once, before the set's staging (%v)", p.sourcedAt, want)
+	}
+	// So are the reader of the recordings before an instant (the learn
+	// step's earlier places) and the recordings' times (the teardown
+	// bound): a read between the handing and the staging reads one set.
+	if want := []int{0}; !reflect.DeepEqual(p.beforeAt, want) || !reflect.DeepEqual(p.timesAt, want) {
+		t.Fatalf("the recordings before an instant were handed after %v stagings and the recordings' times after %v; want each once, before the set's staging (%v)", p.beforeAt, p.timesAt, want)
 	}
 	var onDisk []string
 	found := false

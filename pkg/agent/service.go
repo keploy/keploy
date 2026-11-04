@@ -752,7 +752,8 @@ type RecordedOfKindSetter interface {
 // the latest of them. SetRecordingTimes sets where (src visits every on-disk
 // mock with its name, its place (models.PlaceOf), whether it is
 // protocol-phase and its clock (models.Origin.Clock), decoding none; nil for
-// none).
+// none). The agent sets it before it stages a set: the staging installs it
+// with the trees it builds.
 type RecordingTimesSetter interface {
 	SetRecordingTimes(src func(visit func(name string, place time.Time, protocolPhase bool, clock string) bool) error) error
 }
@@ -776,6 +777,8 @@ type RecordingSourceSetter interface {
 // on disk too: a test's own are staged only as it opens. SetRecordedBefore
 // sets where (src visits the on-disk mocks recorded before t, by request
 // time, decoding one at a time; nil for none). Nothing it reads is served.
+// The agent sets it before it stages a set: the staging installs it with the
+// trees it builds.
 type RecordedBeforeSetter interface {
 	SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error
 }

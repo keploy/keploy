@@ -136,12 +136,13 @@ func TestUnderMockReplayANewerRunsRecordedHTTPCallBoundsOnlyItsRunsClock(t *test
 						if inTrees {
 							staged = shape.all
 						}
-						mm := stagedManager(t, staged, nil)
+						var times func(func(string, time.Time, bool, string) bool) error
+						if !inTrees {
+							times = onDisk(t, shape.all...).RangeTimes
+						}
+						mm := stagedManagerOnDisk(t, staged, times)
 						if err := (&Proxy{mockManager: mm}).SetPoolNames(slice, owners, shape.tests); err != nil {
 							t.Fatalf("SetPoolNames: %v", err)
-						}
-						if !inTrees {
-							mm.SetRecordingTimes(onDisk(t, shape.all...).RangeTimes)
 						}
 						after := mm.teardownAfter("k", s)
 						if after == nil || !after(sEnd.Spec.ReqTimestampMock) {

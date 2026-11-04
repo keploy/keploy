@@ -26,6 +26,9 @@ type warmRow struct {
 	mm   *MockManager
 	disk atomic.Int64
 	all  []*models.Mock // the whole set, in recorded order
+	// stage stages the test's recordings again with src the on-disk
+	// source, handed before the staging as the agent hands it.
+	stage func(src func(time.Time, func(*models.Mock) bool) error)
 }
 
 const warmStaged, warmLater = 12, 8
@@ -53,8 +56,11 @@ func newWarmRow(t *testing.T, logger *zap.Logger) *warmRow {
 		}
 	}
 	r.all = all
-	r.mm.SetMocksWithWindow(staged, nil, now, now.Add(time.Second))
-	r.mm.SetRecordedBefore(func(before time.Time, visit func(*models.Mock) bool) error {
+	r.stage = func(src func(time.Time, func(*models.Mock) bool) error) {
+		r.mm.SetRecordedBefore(src)
+		r.mm.SetMocksWithWindow(staged, nil, now, now.Add(time.Second))
+	}
+	r.stage(func(before time.Time, visit func(*models.Mock) bool) error {
 		r.disk.Add(1)
 		for _, m := range all {
 			if m.Spec.ReqTimestampMock.After(before) {
@@ -177,8 +183,8 @@ func TestAStagedSetIsReadForTheLearnStepInRecordsFullRoundAlone(t *testing.T) {
 		t.Setenv(provenswitch.Env, "1")
 		r := newWarmRow(t, zap.NewNop())
 		start := r.all[0].Spec.ReqTimestampMock
-		r.mm.SetMocksWithWindow(r.all, nil, start, start.Add(2*time.Hour))
 		r.mm.SetRecordedBefore(nil)
+		r.mm.SetMocksWithWindow(r.all, nil, start, start.Add(2*time.Hour))
 		r.mm.SetPairing(true)
 		if n := len(r.mm.StagedMocks()); n != len(r.all) {
 			t.Fatalf("the manager's trees hold %d recordings: want the set's %d", n, len(r.all))
@@ -211,7 +217,7 @@ func TestAStagedSetIsReadForTheLearnStepInRecordsFullRoundAlone(t *testing.T) {
 		r.mm.SetPairing(true)
 		const read = 5
 		broken := errors.New("read mock-w5: input/output error")
-		r.mm.SetRecordedBefore(func(_ time.Time, visit func(*models.Mock) bool) error {
+		r.stage(func(_ time.Time, visit func(*models.Mock) bool) error {
 			for i := 0; i < read; i++ {
 				m := r3Mock(fmt.Sprintf("mock-x%d", i), time.Now(), "POST", "/log", fmt.Sprintf(`{"n":%d}`, i), `{"ok":true}`)
 				m.DeriveLifetime()
@@ -307,6 +313,14 @@ func TestASetsStagingReadsTheFirstTestsRecordingsFirst(t *testing.T) {
 		b.TestModeInfo.Lifetime = models.LifetimeConnection
 		startup = append(startup, b)
 	}
+	mm.SetRecordedBefore(func(before time.Time, visit func(*models.Mock) bool) error {
+		for _, m := range disk {
+			if !m.Spec.ReqTimestampMock.After(before) && !visit(m) {
+				return nil
+			}
+		}
+		return nil
+	})
 	mm.SetMocksWithWindowThreeTier(nil, session, startup, start, start.Add(time.Second))
 	staged := mm.StagedMocks()
 	if len(staged) != len(session)+boot {
@@ -317,14 +331,6 @@ func TestASetsStagingReadsTheFirstTestsRecordingsFirst(t *testing.T) {
 			t.Fatalf("the trees list %q at %d: want the start-up recordings listed after the session ones, made before them", m.Name, len(session)+i)
 		}
 	}
-	mm.SetRecordedBefore(func(before time.Time, visit func(*models.Mock) bool) error {
-		for _, m := range disk {
-			if !m.Spec.ReqTimestampMock.After(before) && !visit(m) {
-				return nil
-			}
-		}
-		return nil
-	})
 	mm.SetPairing(true)
 	done, err := p.warmLearnSet()
 	if err != nil || done == nil {
