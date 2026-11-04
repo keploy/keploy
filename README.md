@@ -73,7 +73,7 @@ If you’re a **developer**, you probably care about *statement* and *branch* co
 
 If you’re a **QA**, you focus more on *API schema* and *business use‑case coverage* — Keploy calculates that too. This way coverage isn’t subjective anymore. 
 
-👉 [Read the docs on coverage](https://keploy.io/docs/server/sdk-installation/go/)
+👉 [Read the docs on coverage](https://keploy.io/docs/keploy-explained/coverage/)
 
 <img src="https://keploy-devrel.s3.us-west-2.amazonaws.com/keploy+ai+test+gen+for+api+statement+schema+and+branch+coverage.jpg" width="100%" alt="ai test gen for api statement schema and branch coverage"/>
 
@@ -83,7 +83,7 @@ Keploy uses existing recordings, Swagger/OpenAPI Schema to find: boundary values
 
 This helps expand API Schema, Statement, and Branch Coverage. 
 
-👉 [Read the docs on coverage](https://app.keploy.io/)
+👉 [Read the docs on coverage](https://keploy.io/docs/keploy-explained/coverage/)
 
 <img src="https://keploy-devrel.s3.us-west-2.amazonaws.com/ai+test+case+generation+that+works.png" width="100%" alt="ai test gen for api statement schema and branch coverage"/>
 
