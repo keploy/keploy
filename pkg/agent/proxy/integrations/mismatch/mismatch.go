@@ -88,21 +88,30 @@ type noiseFacts struct {
 }
 
 // PatternMiss is a field of a miss that keploy.yml's noise lets vary only
-// within patterns, and that the matcher compared because a side's value is
-// outside all of them.
+// within patterns, and that the matcher compared because a value of a side
+// is outside all of them.
 type PatternMiss struct {
 	// Path is the field's report path, as its diff names it ("body.qty",
 	// "header.x-request-id").
 	Path string
+	// Entry is the key of keploy.yml's entry that holds the patterns, as
+	// keploy.yml writes it, where it is not the field's own root-relative
+	// key: an entry may name a field by its last name alone ("qty" for
+	// "body.order.qty") or name the array it is an element of ("ids" for
+	// "body.ids[]"). "" names the entry by Path.
+	Entry string
 	// Patterns are the entry's patterns, as keploy.yml writes them.
 	Patterns []string
-	// Side is the side whose value no pattern matches: "live" or
-	// "recorded".
-	Side string
-	// Value names that value by its kind and length, never its text
-	// (matcher.StringShape, matcher.NumberShape): a value a noise pattern
-	// guards may be a secret.
-	Value string
+	// Live and Recorded name each value of that side that no pattern
+	// matches, by its kind and length, never its text (matcher.StringShape,
+	// matcher.NumberShape): a value a noise pattern guards may be a secret.
+	// Both name a value where neither side's is in the patterns: widened
+	// to match one side's alone, they would leave the call a miss.
+	Live, Recorded []string
+	// Container: a side's value is an array or an object. A pattern
+	// matches a single value, never a container, so no widening of the
+	// patterns makes the call match: the hint offers recording again.
+	Container bool
 }
 
 // NewReport starts a report for one missed call. actualSummary should be the
@@ -232,11 +241,13 @@ func (b *Builder) WithGuarded(paths ...string) *Builder {
 }
 
 // WithPatternMisses names the fields of the diffs that keploy.yml's noise
-// already declares with patterns, each with those patterns and the side
-// whose value is outside them (a header by its name in any case). The hint
-// names the patterns and that value's shape, and tells the user to widen
-// them to match it: an entry emptied to a list with no patterns would stop
-// the field being compared at all.
+// already declares with patterns, each with its entry, those patterns and
+// the values of each side outside them (a header by its name in any case).
+// The hint names the entry, the patterns and those values' shapes, and
+// tells the user to widen the patterns to match each: an entry emptied to
+// a list with no patterns would stop the field being compared at all. A
+// field named more than once (an array's elements share a path) is to
+// match the values of every naming.
 func (b *Builder) WithPatternMisses(misses ...PatternMiss) *Builder {
 	b.noise.guarded = append(b.noise.guarded, misses...)
 	return b
@@ -446,6 +457,11 @@ func defaultNextSteps(r *models.MockMismatchReport, all []models.MockFieldDiff, 
 		if noiseOK {
 			return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), %s; otherwise %s.", drifted, noise, rerecordRemedy(r))
 		}
+		if held := containerMisses(named, n); len(held) > 0 {
+			// Widening the patterns would leave the call a miss: say why
+			// none is offered, rather than leave the user to try.
+			return fmt.Sprintf("Only values drifted (%s). keploy.yml's noise lets %s, and a pattern matches a single value, never an array or an object. If the change is expected, %s.", drifted, strings.Join(held, " and "), rerecordRemedy(r))
+		}
 		if unread := unreadFields(r.Protocol, named); len(unread) > 0 {
 			// Say why no noise is offered where the protocol's matcher
 			// reads none: an entry the user adds there would change nothing.
@@ -572,28 +588,27 @@ func carriedHeader(d models.MockFieldDiff) bool {
 //
 // A field the parser named WithoutNoise is in no bucket's reach. A field it
 // named WithGuarded or WithPatternMisses is already declared with patterns,
-// so its patterns are to be widened to match the value outside them
-// (widenRemedy), never the field added or its entry emptied: an entry with
-// no patterns would stop the field being compared at all. A pattern matches
-// no absent value, so such a field missing on a side is in no bucket's
+// so its entry's patterns are to be widened to match every value outside
+// them, of each side (widenRemedy), never the field added or its entry
+// emptied: an entry with no patterns would stop the field being compared at
+// all. A pattern matches no absent value and no array or object, so such a
+// field missing on a side, or holding a container, is in no bucket's
 // reach. A call with any field out of every bucket's reach is offered no
 // noise: noise would leave that field's difference, so recording again is
 // the only remedy that makes the call match.
 func matchingNoise(protocol string, diffs []models.MockFieldDiff, n noiseFacts) (string, bool) {
 	isHTTP := protocol == ProtocolHTTP
 	bodyKey := requestBodyNoiseKey(protocol)
-	unreachable := fieldSet(n.unreachable)
-	guarded := make(map[string]PatternMiss, len(n.guarded))
-	for _, g := range n.guarded {
-		if _, seen := guarded[fieldKey(g.Path)]; !seen {
-			guarded[fieldKey(g.Path)] = g
-		}
-	}
+	unreachable, guarded := fieldSet(n.unreachable), patternMisses(n.guarded)
 	type bucket struct {
-		add, widen []string
-		named      map[string]bool
+		add     []string
+		added   map[string]bool
+		widen   []*PatternMiss // by the entry each names, in the diffs' order
+		widened map[string]*PatternMiss
 	}
-	body, header := bucket{named: map[string]bool{}}, bucket{named: map[string]bool{}}
+	body := bucket{added: map[string]bool{}, widened: map[string]*PatternMiss{}}
+	header := bucket{added: map[string]bool{}, widened: map[string]*PatternMiss{}}
+	folded := map[string]bool{}
 	for _, d := range diffs {
 		if unreachable[fieldKey(d.Path)] {
 			return "", false
@@ -611,17 +626,31 @@ func matchingNoise(protocol string, diffs []models.MockFieldDiff, n noiseFacts) 
 			return "", false
 		}
 		g, isGuarded := guarded[fieldKey(d.Path)]
-		if isGuarded && d.Kind != models.DiffKindValueChanged {
+		if isGuarded && (d.Kind != models.DiffKindValueChanged || g.Container) {
 			return "", false
 		}
-		if b.named[key] {
-			continue
-		}
-		b.named[key] = true
-		if isGuarded {
-			b.widen = append(b.widen, widenRemedy(key, g))
-		} else {
-			b.add = append(b.add, key)
+		switch {
+		case !isGuarded:
+			if !b.added[key] {
+				b.added[key], b.add = true, append(b.add, key)
+			}
+		case folded[fieldKey(d.Path)]:
+			// patternMisses holds every value of the field: a field the
+			// diffs name twice (an array's elements) is folded in once.
+		default:
+			folded[fieldKey(d.Path)] = true
+			if g.Entry != "" {
+				key = g.Entry
+			}
+			if w := b.widened[key]; w != nil {
+				// Another field the same entry guards: its patterns are to
+				// match that field's values too.
+				w.Live, w.Recorded = append(w.Live, g.Live...), append(w.Recorded, g.Recorded...)
+				continue
+			}
+			w := g
+			w.Live, w.Recorded = slices.Clone(g.Live), slices.Clone(g.Recorded)
+			b.widened[key], b.widen = &w, append(b.widen, &w)
 		}
 	}
 	var add, remedy []string
@@ -634,28 +663,96 @@ func matchingNoise(protocol string, diffs []models.MockFieldDiff, n noiseFacts) 
 	if len(add) > 0 {
 		remedy = append(remedy, "add "+strings.Join(add, " and "))
 	}
-	if len(body.widen) > 0 {
-		remedy = append(remedy, fmt.Sprintf("widen the patterns of keploy.yml's test.globalNoise %s entries for %s", bodyKey, strings.Join(body.widen, " and for ")))
-	}
-	if len(header.widen) > 0 {
-		remedy = append(remedy, "widen the patterns of keploy.yml's test.globalNoise header entries for "+strings.Join(header.widen, " and for "))
+	for _, w := range []struct {
+		key     string
+		entries []*PatternMiss
+		header  bool
+	}{{bodyKey, body.widen, false}, {"header", header.widen, true}} {
+		if len(w.entries) == 0 {
+			continue
+		}
+		named := make([]string, len(w.entries))
+		for i, g := range w.entries {
+			named[i] = widenRemedy(g, w.header)
+		}
+		remedy = append(remedy, fmt.Sprintf("widen the patterns of keploy.yml's test.globalNoise %s entries for %s", w.key, strings.Join(named, " and for ")))
 	}
 	return strings.Join(remedy, " and "), len(remedy) > 0
 }
 
-// widenRemedy is how the hint names the entry for key whose patterns g
-// says miss a side's value, and the value they are to match: the patterns
-// and that value's shape where the parser named them (WithPatternMisses),
-// else both values (WithGuarded).
-func widenRemedy(key string, g PatternMiss) string {
-	if len(g.Patterns) == 0 || g.Side == "" || g.Value == "" {
+// patternMisses is misses by their fields (fieldKey), each field's values
+// of every naming of it under its first naming's entry and patterns.
+func patternMisses(misses []PatternMiss) map[string]PatternMiss {
+	out := make(map[string]PatternMiss, len(misses))
+	for _, g := range misses {
+		k := fieldKey(g.Path)
+		if had, seen := out[k]; seen {
+			had.Live = append(slices.Clone(had.Live), g.Live...)
+			had.Recorded = append(slices.Clone(had.Recorded), g.Recorded...)
+			had.Container = had.Container || g.Container
+			g = had
+		}
+		out[k] = g
+	}
+	return out
+}
+
+// widenRemedy is how the hint names the entry whose patterns g says miss
+// values, and the values they are to match: the entry (a header's by its
+// lowercased name, as the HTTP matcher reads it), its patterns and each
+// value's shape where the parser named them (WithPatternMisses), else both
+// values (WithGuarded).
+func widenRemedy(g *PatternMiss, header bool) string {
+	key := g.Entry
+	if key == "" {
+		key = strings.TrimPrefix(g.Path, "body.")
+		if header {
+			key = strings.ToLower(strings.TrimPrefix(g.Path, "header."))
+		}
+	}
+	if len(g.Patterns) == 0 || len(g.Live)+len(g.Recorded) == 0 {
 		return key + " so they match the recorded and the live value"
 	}
 	quoted := make([]string, len(g.Patterns))
 	for i, p := range g.Patterns {
 		quoted[i] = strconv.Quote(p)
 	}
-	return fmt.Sprintf("%s (%s) so one matches the %s value (%s)", key, strings.Join(quoted, ", "), g.Side, g.Value)
+	var sides []string
+	for _, side := range []struct {
+		name   string
+		shapes []string
+	}{{"live", g.Live}, {"recorded", g.Recorded}} {
+		switch len(side.shapes) {
+		case 0:
+		case 1:
+			sides = append(sides, fmt.Sprintf("the %s value (%s)", side.name, side.shapes[0]))
+		default:
+			sides = append(sides, fmt.Sprintf("the %s values (%s)", side.name, strings.Join(side.shapes, ", ")))
+		}
+	}
+	verb := "one matches"
+	if len(g.Live)+len(g.Recorded) > 1 {
+		verb = "they match"
+	}
+	return fmt.Sprintf("%s (%s) so %s %s", key, strings.Join(quoted, ", "), verb, strings.Join(sides, " and "))
+}
+
+// containerMisses are, of diffs, the fields keploy.yml's noise guards with
+// patterns whose value on a side is an array or an object, each named with
+// its patterns, for the hint to say why it offers no noise for them.
+func containerMisses(diffs []models.MockFieldDiff, n noiseFacts) []string {
+	guarded := patternMisses(n.guarded)
+	var out []string
+	for _, d := range diffs {
+		if g := guarded[fieldKey(d.Path)]; g.Container && len(g.Patterns) > 0 {
+			quoted := make([]string, len(g.Patterns))
+			for i, p := range g.Patterns {
+				quoted[i] = strconv.Quote(p)
+			}
+			out = append(out, fmt.Sprintf("%s vary only within %s", d.Path, strings.Join(quoted, ", ")))
+		}
+	}
+	return out
 }
 
 // requestBodyNoiseKey is the keploy.yml test.globalNoise bucket a
@@ -686,7 +783,7 @@ func unreadFields(protocol string, diffs []models.MockFieldDiff) []string {
 	var out []string
 	for _, d := range diffs {
 		isBody := d.Path == "body" || strings.HasPrefix(d.Path, "body.")
-		if !strings.HasPrefix(d.Path, "header.") && !(isBody && bodyRead) {
+		if !strings.HasPrefix(d.Path, "header.") && (!isBody || !bodyRead) {
 			out = append(out, d.Path)
 		}
 	}
