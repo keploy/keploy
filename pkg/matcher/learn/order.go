@@ -139,6 +139,9 @@ type decider struct {
 	laid, laidNow               map[*readerText][]rawField
 	halfBuilds                  int
 	halfKept, halfNow, halfPeak int64
+	// answer is the call's answer index (answerIndex), built at its first
+	// ask.
+	answer *answerWords
 }
 
 // decideWords decides every changed word of in, and the field each
@@ -835,6 +838,12 @@ func (dc *decider) answered(path string, bare variables.Address, w readWord, rec
 		return nil, &d
 	}
 	echo, unnamed := dc.readBack(path, w.At, w, rec, withWhole)
+	if withWhole && (w.At.Word < 0 || len(w.At.Steps) > 0) {
+		// A fresh word behind a decode step, or a token read whole: an
+		// answer leaf whose recorded text is the request's whole reads it
+		// back there, as main's WholeEcho answers it.
+		echo, unnamed = dc.wholeEchoes(path, w.At, rec)
+	}
 	if d, refused := dc.unanswerable(path, bare, rec, live, echo, unnamed); refused {
 		return nil, &d
 	}
@@ -2189,10 +2198,18 @@ func (dc *decider) instantEchoed(c changedInstant) string {
 // adapter's echo, as main answers it). unnamed is the path of the first
 // such leaf keploy cannot name to the adapter.
 func (dc *decider) readBack(path string, at variables.Address, w readWord, rec string, withWhole bool) (echo []variables.Address, unnamed string) {
-	r := dc.in.Rec.Leaves[path]
 	if at.Word < 0 || len(at.Steps) > 0 || w.Rec == rec && !withWhole {
 		return nil, ""
 	}
+	return dc.wholeEchoes(path, at, rec)
+}
+
+// wholeEchoes are the answer leaves whose recorded text is rec, the request
+// leaf's at path, whole (main's WholeEcho), each at at's steps and word,
+// and the keys of the answer's objects that are rec whole; unnamed as
+// readBack gives it.
+func (dc *decider) wholeEchoes(path string, at variables.Address, rec string) (echo []variables.Address, unnamed string) {
+	r := dc.in.Rec.Leaves[path]
 	for _, l := range dc.in.Resp {
 		// An answer scalar of any type holding the whole text reads it back
 		// (a number sent as text, answered as a number), as main's WholeEcho.
@@ -2201,6 +2218,9 @@ func (dc *decider) readBack(path string, at variables.Address, w readWord, rec s
 			a := dc.in.AddressOf(l, true)
 			if a.Place.Part == 0 && unnamed == "" {
 				unnamed = l.Path
+			}
+			if len(at.Steps) > 0 {
+				a.Steps = at.Steps
 			}
 			a.Word = at.Word
 			echo = append(echo, a)
@@ -2217,19 +2237,117 @@ func (dc *decider) readBack(path string, at variables.Address, w readWord, rec s
 // back may be the dependency's echo of it inside a longer value (an id in
 // a GraphQL argument, an OData filter, a header the answer counts): served
 // as recorded, the application would get the recorded word back, so the
-// word is refused, never learned fresh.
+// word is refused, never learned fresh. Each ask is a lookup of the call's
+// answer index (answerIndex).
 func (dc *decider) answerHoldsWord(w string) string {
-	folded := strings.ToLower(w)
-	for _, a := range dc.in.Resp {
+	ai := dc.answerIndex()
+	ai.asks++
+	first, vs := -1, []string{w}
+	if folded := strings.ToLower(w); folded != w {
+		vs = append(vs, folded)
+	}
+	for _, v := range vs {
+		i, ok := ai.first[v]
+		if !ok && ai.cands != nil && !ai.cands[v] {
+			ai.scans++
+			i, ok = dc.answerScan(v, ai.past)
+		}
+		if ok && (first < 0 || i < first) {
+			first = i
+		}
+	}
+	if first < 0 {
+		return ""
+	}
+	return dc.in.Resp[first].Path
+}
+
+// answerWords is the call's answer index: each word of every leaf of its
+// recorded answer but an instant, in every reading and declared form (as
+// holdsWord reads a text), mapped to the first leaf that holds it (its
+// index in Resp). It is built once per call, at the first word that asks,
+// in one pass over each answer text, each leaf's words counted on the
+// reader's budget (claim). From the leaf past on, where they pass the
+// budget, it maps only the call's own words (cands); a word asked that is
+// none of them is answered by a scan of those leaves (scans). reads counts
+// the answer texts read, asks the words asked: what keeps a call's work
+// linear in its words.
+type answerWords struct {
+	first                    map[string]int
+	cands                    map[string]bool
+	past, reads, asks, scans int
+}
+
+// answerIndex is the call's answer index, built at its first ask.
+func (dc *decider) answerIndex() *answerWords {
+	if dc.answer != nil {
+		return dc.answer
+	}
+	ai := &answerWords{first: map[string]int{}, past: len(dc.in.Resp)}
+	dc.answer = ai
+	for i, a := range dc.in.Resp {
 		if a.Type == Instant {
 			continue
 		}
-		t := dc.x.text(a.Value)
-		if evHolds(t, w) || folded != w && evHolds(t, folded) {
-			return a.Path
+		ai.reads++
+		var added []string
+		n := int64(0)
+		formWords(a.Value, func(w string) {
+			if _, ok := ai.first[w]; !ok && (ai.cands == nil || ai.cands[w]) {
+				ai.first[w] = i
+				added = append(added, w)
+				n += wordBytes + int64(len(w))
+			}
+		})
+		if ai.cands == nil && !dc.x.claim(n) {
+			ai.cands, ai.past = dc.callWords(), i
+			for _, w := range added {
+				if !ai.cands[w] {
+					delete(ai.first, w)
+				}
+			}
 		}
 	}
-	return ""
+	return ai
+}
+
+// callWords are the words of the call's changed request leaves as recorded,
+// each whole too, in every reading and declared form, in their case and
+// folded: the words answerHoldsWord is asked.
+func (dc *decider) callWords() map[string]bool {
+	c := map[string]bool{}
+	add := func(w string) { c[w], c[strings.ToLower(w)] = true, true }
+	for _, p := range dc.in.Drift {
+		v := dc.in.Rec.Leaves[p].Value
+		add(v)
+		formWords(v, add)
+	}
+	return c
+}
+
+// answerScan is the first leaf of the answer from from on, but an instant,
+// that holds w as a word in any reading and declared form.
+func (dc *decider) answerScan(w string, from int) (int, bool) {
+	for i := from; i < len(dc.in.Resp); i++ {
+		if a := dc.in.Resp[i]; a.Type != Instant && heldIn(textForms(a.Value), w, 0, 1, 2) {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// formWords calls f with each word of s in every declared form and reading
+// (textForms, readings), as rawTokens reads them, keeping none.
+func formWords(s string, f func(string)) {
+	for _, form := range textForms(s) {
+		for _, word := range readings {
+			for _, seg := range segmentsBy(form, word) {
+				if seg.word {
+					f(seg.text)
+				}
+			}
+		}
+	}
 }
 
 // unanswerable refuses a word whose answer places (echo, unnamed: as
