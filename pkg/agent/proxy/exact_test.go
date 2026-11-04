@@ -2955,7 +2955,8 @@ func TestFindStagedNotOwnedNamesARecordingTheViewDoesNotShow(t *testing.T) {
 // source's mocks take the same filters as the trees': never the open test's
 // own, each named once; and one passed over by name (named already, the open
 // test's) is never decoded. Without keys only the trees are looked in, and a
-// session reset drops the source.
+// session reset drops the source: a staging after it that hands none reads
+// none.
 func TestFindStagedNotOwnedByKeysReadsTheRecordingSource(t *testing.T) {
 	pool := httpCall("pool", 0, "/pool")
 	onDisk := httpCall("t2-delete", time.Second, "/delete")
@@ -3009,6 +3010,12 @@ func TestFindStagedNotOwnedByKeysReadsTheRecordingSource(t *testing.T) {
 	mm.ServeExactPool("k", nil)
 	if got := find("DELETE /delete", "t2-delete"); got != "" || len(asked) != 3 {
 		t.Fatalf("after a session reset the source was still read (%v), naming %q", asked, got)
+	}
+	// Nor does a staging that hands none install it again.
+	mm.SetMocksWithWindow(nil, []*models.Mock{pool}, models.BaseTime, time.Now())
+	mm.ServeExactPool("k", []string{"pool"})
+	if got := find("DELETE /delete", "t2-delete"); got != "" || len(asked) != 3 {
+		t.Fatalf("staged after a session reset with no source handed, the last set's source was read (%v), naming %q", asked, got)
 	}
 }
 
