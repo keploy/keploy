@@ -489,20 +489,23 @@ type AnsweredFinder interface {
 // answers, while a call that repeats it carries again the secret it
 // redacted: a parser redacts a miss's report and its logs by these
 // recordings' places too, and by every place when the store did not keep
-// them all. For a miss's diagnosis and logs only: never served. Every
-// MockMemDb wrapper must forward it.
+// them all. For a miss's diagnosis and logs only: never served. A
+// MockMemDb wrapper forwards it; one that does not is read as a store that
+// did not keep them all (AnsweredRedacting).
 type AnsweredRedactingReader interface {
 	AnsweredRedacting(kind models.Kind) (mocks []*models.Mock, complete bool)
 }
 
 // AnsweredRedacting is db's AnsweredRedacting (AnsweredRedactingReader):
-// none, and complete, for a store without it, which takes no recording out
-// of its reads as it answers.
+// none, and not complete, for a store without it (nil included), whose
+// answered recordings cannot be known, so a miss and its logs are redacted
+// by every place. A wrapper that does not forward it hides the store's
+// list and so leaks nothing by the omission (fail closed by construction).
 func AnsweredRedacting(db MockMemDb, kind models.Kind) ([]*models.Mock, bool) {
 	if r, ok := db.(AnsweredRedactingReader); ok {
 		return r.AnsweredRedacting(kind)
 	}
-	return nil, true
+	return nil, false
 }
 
 // AnsweredCall is what AnsweredFinder found: the recording, and when it

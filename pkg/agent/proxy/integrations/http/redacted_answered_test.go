@@ -46,9 +46,9 @@ func answeredRedacting() *models.Mock {
 }
 
 // answeredMiss is the report of the call POST /x/pathSecret, liveSecret in
-// its body, at the pool, matched with the switch off (mode "off") or on,
-// the report built at store.
-func answeredMiss(t *testing.T, mode string, store answeredStore) *models.MockMismatchReport {
+// its body, at pool, matched with the switch off (mode "off") or on, the
+// report built at store, whose pool is pool.
+func answeredMiss(t *testing.T, mode string, store integrations.MockMemDb, pool []*models.Mock) *models.MockMismatchReport {
 	t.Helper()
 	t.Setenv(provenswitch.Env, map[string]string{"on": "1"}[mode])
 	path, body := "/x/"+pathSecret, `{"assertion":"`+liveSecret+`","x":"alpha1"}`
@@ -57,7 +57,7 @@ func answeredMiss(t *testing.T, mode string, store answeredStore) *models.MockMi
 	request.Header = in.header.Clone()
 	var diag *matchDiag
 	if mode == "on" {
-		got, d := strictMatch(t, in, nil, nil, nil, store.mocks...)
+		got, d := strictMatch(t, in, nil, nil, nil, pool...)
 		if got != nil {
 			t.Fatalf("served the call with %q", got.Name)
 		}
@@ -80,8 +80,9 @@ func answeredMiss(t *testing.T, mode string, store answeredStore) *models.MockMi
 // call before and redacted something (integrations.AnsweredRedacting), which
 // a read of the pool no longer holds: a recording of another call left, or
 // none (the summary names the path redacted then). When the store did not
-// keep them all, the call's path, query values and body are redacted whole.
-// Switch off and on.
+// keep them all, or does not tell them (a wrapper that does not forward
+// integrations.AnsweredRedactingReader), the call's path, query values and
+// body are redacted whole. Switch off and on.
 func TestAMissIsRedactedByTheRecordingsThatAnsweredBefore(t *testing.T) {
 	other := func() []*models.Mock {
 		return []*models.Mock{recorded("other", "/other/thing", map[string]string{"Content-Type": "application/json"}, `{"x":"alpha1"}`)}
@@ -94,17 +95,28 @@ func TestAMissIsRedactedByTheRecordingsThatAnsweredBefore(t *testing.T) {
 			complete bool
 			// shown is what of the call the report still shows.
 			shown string
+			// hiding: the store is wrapped by one that does not forward
+			// the reader.
+			hiding bool
 		}{
-			{"another call's recording left", other(), []*models.Mock{answeredRedacting()}, true, "alpha1"},
-			{"none left", nil, []*models.Mock{answeredRedacting()}, true, "POST /x/"},
-			{"another call's recording left, not every answered kept", other(), nil, false, ""},
-			{"none left, not every answered kept", nil, nil, false, ""},
+			{"another call's recording left", other(), []*models.Mock{answeredRedacting()}, true, "alpha1", false},
+			{"none left", nil, []*models.Mock{answeredRedacting()}, true, "POST /x/", false},
+			{"another call's recording left, not every answered kept", other(), nil, false, "", false},
+			{"none left, not every answered kept", nil, nil, false, "", false},
+			{"another call's recording left, a store that does not tell", other(), []*models.Mock{answeredRedacting()}, false, "", true},
+			{"none left, a store that does not tell", nil, []*models.Mock{answeredRedacting()}, false, "", true},
 		} {
 			t.Run(mode+"/"+tc.name, func(t *testing.T) {
 				// The pool has room past its end, which the redaction
 				// must not write into: a store may share it.
 				pool := append(make([]*models.Mock, 0, len(tc.pool)+4), tc.pool...)
-				r := answeredMiss(t, mode, answeredStore{mockMemDb: &mockMemDb{mocks: pool}, answered: tc.answered, complete: tc.complete})
+				var store integrations.MockMemDb = answeredStore{mockMemDb: &mockMemDb{mocks: pool}, answered: tc.answered, complete: tc.complete}
+				if tc.hiding {
+					// The wrapper hides the store's reader: what the
+					// store would tell is not read.
+					store = struct{ integrations.MockMemDb }{answeredStore{mockMemDb: &mockMemDb{mocks: pool}, answered: tc.answered, complete: true}}
+				}
+				r := answeredMiss(t, mode, store, pool)
 				for i, m := range pool[len(pool):cap(pool)] {
 					if m != nil {
 						t.Errorf("the redaction wrote %q past the pool's end (%d)", m.Name, i)

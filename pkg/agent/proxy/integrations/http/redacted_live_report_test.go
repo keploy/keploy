@@ -942,11 +942,12 @@ func TestAMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 // A miss whose stateful walk has answered each recording of the call is
 // named by the last, and redacted by every recording of the pool: the last
 // (b) redacted nothing, and another recording of the call (a) redacted the
-// segment the call sent its secret in.
+// segment the call sent its secret in, in the pool or, having answered a
+// call before, on the set's answered list only.
 func TestAnAnsweredMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 	jsonHdr := map[string]string{"Content-Type": "application/json"}
 	const live = "/x/" + liveSecret + "/y"
-	for _, mode := range []string{"off", "off-stated-lifetime", "on", "off-read-again-empty"} {
+	for _, mode := range []string{"off", "off-stated-lifetime", "on", "off-read-again-empty", "off-a-answered-before"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, map[string]string{"on": "1"}[mode])
 			a := recorded("a", "/x/REDACTED_abc/y", jsonHdr, `{"x":"alpha1"}`)
@@ -964,12 +965,18 @@ func TestAnAnsweredMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 			request, _ := http.NewRequest("POST", "http://api.example"+live, strings.NewReader(`{"x":"bravo2"}`))
 			request.Header.Set("Content-Type", "application/json")
 			diag := &matchDiag{phase: models.MatchPhaseExhausted, candidates: 2, pool: []*models.Mock{b, a}, answered: answered}
-			db := &mockMemDb{mocks: []*models.Mock{b, a}}
-			if mode == "off-read-again-empty" {
+			var db integrations.MockMemDb = &mockMemDb{mocks: []*models.Mock{b, a}}
+			switch mode {
+			case "off-read-again-empty":
 				// The db read again for the report holds none of the pool
 				// the walk was compared with (another connection consumed
 				// them since): the pool's places still redact it.
 				db = &mockMemDb{}
+			case "off-a-answered-before":
+				// a answered a call before and is in no read: only the
+				// set's answered list holds it.
+				diag.pool = []*models.Mock{b}
+				db = answeredStore{mockMemDb: &mockMemDb{mocks: []*models.Mock{b}}, answered: []*models.Mock{a}, complete: true}
 			}
 			r := newHTTP().buildHTTPMismatchReport(request, []byte(`{"x":"bravo2"}`), db, nil, nil, nil, diag)
 			if r == nil || r.ClosestMock != "b" {
@@ -1071,11 +1078,36 @@ func TestAMissWithNoClosestRecordingNamesNoSecret(t *testing.T) {
 			}
 			check(t, r, request, "POST /x/"+valueRedacted+"/y")
 		})
+		// The recording that redacted the segment answered a call before
+		// and is in no read: the set's answered list (heldPlaces) redacts
+		// a miss that names no closest recording, of a pool that redacted
+		// nothing.
+		t.Run("the-redacting-recording-answered-before/"+mode, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[string]string{"off": "", "on": "1"}[mode])
+			request := newReq()
+			kept := recorded("kept", "/x/plain/y", map[string]string{"Content-Type": "application/json"}, `{}`)
+			diag := &matchDiag{phase: models.MatchPhaseExhausted, candidates: 1, pool: []*models.Mock{kept}}
+			db := answeredStore{mockMemDb: &mockMemDb{}, answered: []*models.Mock{other}, complete: true}
+			r := newHTTP().buildHTTPMismatchReport(request, []byte(`{}`), db, nil, nil, nil, diag)
+			if r.ClosestMock != "" {
+				t.Fatalf("the row is of a miss with no closest recording, not %q", r.ClosestMock)
+			}
+			check(t, r, request, "POST /x/"+valueRedacted+"/y")
+		})
 		t.Run("variable-recording-gone/"+mode, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, map[string]string{"off": "", "on": "1"}[mode])
 			diag := &matchDiag{pool: []*models.Mock{other}, variable: &varProblem{mock: "gone", name: "v", place: "url.path[1]", kind: models.DiffKindVariable, expected: "REDACTED_abc", actual: liveSecret}}
 			request := newReq()
-			r, _ := variableMismatchReport(request, nil, "api.example", diag, nil, nil)
+			r, _ := variableMismatchReport(request, nil, "api.example", diag, nil, &mockMemDb{})
+			check(t, r, request, "POST /x/"+valueRedacted+"/y")
+		})
+		// The recording that redacted the variable's place answered a
+		// call before: only the set's answered list holds it.
+		t.Run("variable-recording-answered-before/"+mode, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[string]string{"off": "", "on": "1"}[mode])
+			diag := &matchDiag{variable: &varProblem{mock: "gone", name: "v", place: "url.path[1]", kind: models.DiffKindVariable, expected: "REDACTED_abc", actual: liveSecret}}
+			request := newReq()
+			r, _ := variableMismatchReport(request, nil, "api.example", diag, nil, answeredStore{mockMemDb: &mockMemDb{}, answered: []*models.Mock{other}, complete: true})
 			check(t, r, request, "POST /x/"+valueRedacted+"/y")
 		})
 	}

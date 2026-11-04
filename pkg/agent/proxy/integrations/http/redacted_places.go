@@ -258,7 +258,8 @@ func poolPlaces(closest *models.Mock, pool []*models.Mock, livePath string) reda
 // (integrations.AnsweredRedacting): a read of the pool no longer holds a
 // per-test recording once it answered, while a call that repeats it carries
 // the secret it redacted again. Every place (unreadPlaces) when the store
-// did not keep them all.
+// did not keep them all, or does not tell them (no store, or a store or
+// wrapper without integrations.AnsweredRedactingReader).
 func heldPlaces(mockDb integrations.MockMemDb, closest *models.Mock, pool []*models.Mock, livePath string) redactedPlaces {
 	answered, complete := integrations.AnsweredRedacting(mockDb, models.HTTP)
 	if !complete {

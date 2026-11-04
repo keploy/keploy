@@ -134,8 +134,14 @@ func TestTheAnsweredRedactingRecordingsAreReadThroughEveryView(t *testing.T) {
 	if got, complete := integrations.AnsweredRedacting(held, models.HTTP); len(got) != 0 || complete || !restaged() {
 		t.Fatalf("once restaged a held store read %q (complete %v, restaged %v); want none, incomplete", redactingNames(got), complete, restaged())
 	}
-	// A store that takes nothing out of its reads as it answers.
-	if got, complete := integrations.AnsweredRedacting(nil, models.HTTP); len(got) != 0 || !complete {
-		t.Fatalf("no store read %d (complete %v); want none, complete", len(got), complete)
+	// No store, and a wrapper that does not forward the reader, tell no
+	// answered recording: read as not complete (every place redacted), so
+	// a wrapper leaks nothing by the omission.
+	if got, complete := integrations.AnsweredRedacting(nil, models.HTTP); len(got) != 0 || complete {
+		t.Fatalf("no store read %d (complete %v); want none, not complete", len(got), complete)
+	}
+	hiding := struct{ integrations.MockMemDb }{mm}
+	if got, complete := integrations.AnsweredRedacting(hiding, models.HTTP); len(got) != 0 || complete {
+		t.Fatalf("a wrapper that does not forward read %q (complete %v); want none, not complete", redactingNames(got), complete)
 	}
 }
