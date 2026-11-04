@@ -127,3 +127,101 @@ func TestARecordingServedInARequestAloftWhenTheCallArrivedGaveItNothing(t *testi
 		}
 	}
 }
+
+// Two serves F made of one recording, each told with its own view (keys v
+// and w), are read as of the call's arrival too. Where both came after it
+// (claimed after it in no request, or before it in requests still aloft
+// then), F had given the application neither view when the call reached
+// keploy, so the call's fresh word that stands in one of them by chance is
+// learned, under ClassifyGiven and ClassifyFollowing, as a place of the
+// call's own test and another test's: read with the views it was refused as
+// in one of two serves that gave the application different views of it
+// (FALSE RED). Where both requests landed before the arrival, or one did,
+// it stays refused naming the two views (fail closed).
+func TestTwoViewsOfARecordingServedAloftWhenTheCallArrivedGaveItNothing(t *testing.T) {
+	const path = "bind.$8"
+	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}
+	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "6c7d"}}}
+	const inTwo = "in one of 2 serves that gave the application different views of it"
+	m := jobsMock(chanceSrcRec, "5")
+	v := func() (*models.Mock, error) { return jobsMock(chanceSrcLive, "5"), nil }
+	w := func() (*models.Mock, error) { return jobsMock("1a2b3c4d-5e6f-4a7b-8c9d-e0f1a2b3c4d5", "5"), nil }
+	tick := func() { time.Sleep(2 * time.Millisecond) }
+	for _, c := range []struct {
+		name   string
+		learns bool
+		serve  func(tr *Tracker, arrive func())
+	}{
+		{"claimed twice after the call arrived, in no request", true, func(tr *Tracker, arrive func()) {
+			arrive()
+			tr.ServedMock(m)
+			tr.ServedMockLive(m, "v", v)
+			tr.ServedMock(m)
+			tr.ServedMockLive(m, "w", w)
+		}},
+		{"claimed twice before the call arrived, both requests landing after it", true, func(tr *Tracker, arrive func()) {
+			a, b := tr.Lift(), tr.Lift()
+			tr.ServedMockIn(m, a)
+			tr.ServedMockIn(m, b)
+			arrive()
+			tr.ServedMockLive(m, "v", v)
+			a.Land()
+			tr.ServedMockLive(m, "w", w)
+			b.Land()
+		}},
+		{"served twice, both requests landed before the call arrived", false, func(tr *Tracker, arrive func()) {
+			a := tr.Lift()
+			tr.ServedMockIn(m, a)
+			tr.ServedMockLive(m, "v", v)
+			a.Land()
+			b := tr.Lift()
+			tr.ServedMockIn(m, b)
+			tr.ServedMockLive(m, "w", w)
+			b.Land()
+			arrive()
+		}},
+		{"served twice, one request landed before the call arrived, one after it", false, func(tr *Tracker, arrive func()) {
+			a := tr.Lift()
+			tr.ServedMockIn(m, a)
+			tr.ServedMockLive(m, "v", v)
+			a.Land()
+			b := tr.Lift()
+			tr.ServedMockIn(m, b)
+			arrive()
+			tr.ServedMockLive(m, "w", w)
+			b.Land()
+		}},
+	} {
+		tr := NewTracker()
+		tr.Begin()
+		var arrival time.Time
+		c.serve(tr, func() { tick(); arrival = time.Now(); tick() })
+		o := tr.Placed().Order.ArrivedAt(arrival)
+		first, last := o.Of(m)
+		for _, other := range []bool{false, true} {
+			x := o.ServedView(m, RawOf(m, true).ServedIn(first, last))
+			if other {
+				x = x.OfAnotherTest()
+			}
+			for _, cl := range []struct {
+				name string
+				run  func(raw []Raw) []Learned
+			}{
+				{"ClassifyGiven", func(raw []Raw) []Learned {
+					return ClassifyGiven(clockedDrifts(), []string{path}, live, rec, eRecAt, nil, raw, nil, nil, nil)
+				}},
+				{"ClassifyFollowing", func(raw []Raw) []Learned {
+					return ClassifyFollowing(clockedDrifts(), []string{path}, live, rec, eRecAt, nil, raw, nil, nil, nil)
+				}},
+			} {
+				got := cl.run(append(eStartup(), x))[0]
+				switch {
+				case c.learns && got.Kind == KindUnaccounted:
+					t.Errorf("FALSE RED: %s, %s, another test's %v: refused (%q); want learned", cl.name, c.name, other, got.Why)
+				case !c.learns && (got.Kind != KindUnaccounted || !strings.Contains(got.Why, inTwo)):
+					t.Errorf("FALSE GREEN: %s, %s, another test's %v: %s (%q); want refused: %q", cl.name, c.name, other, got.Kind, got.Why, inTwo)
+				}
+			}
+		}
+	}
+}
