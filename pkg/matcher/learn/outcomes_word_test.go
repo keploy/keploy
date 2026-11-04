@@ -949,16 +949,15 @@ func TestOutcomeAnIdAnotherTestSentInsideAnEncodingIsRefusedNamingTheEdit(t *tes
 	}
 }
 
-// A place that kept its value says nothing: the id did not move there, so
-// the encoded value's change is not its copy.
-func TestOutcomeAnIdThatStayedAtItsPlaceSaysNothingOfAnEncodedValue(t *testing.T) {
+// A place that kept the id in both runs refuses the encoded value, as main
+// refuses it (unaccounted: the place did not drift with the value): keploy
+// binds no word in a signed message, so it cannot tell whether the id came
+// from there. So does one that kept round F's id.
+func TestOutcomeAnIdThatStayedAtItsPlaceRefusesAnEncodedValue(t *testing.T) {
 	const r, f = "rAHcEraS7Qx1", "Zq81Lm0XpVb4"
 	enc := oEncoded()["a signed message"]
-	ds := Decide(oInput("body.blob", enc(r), enc(f), oSent(r, r), nil))
-	for _, d := range ds {
-		if d.Outcome != OutcomeFresh {
-			t.Errorf("want fresh: %s", oDescribe(ds))
-		}
+	for _, kept := range []string{r, f} {
+		oNoneFresh(t, "FALSE GREEN? a place kept "+kept, Decide(oInput("body.blob", enc(r), enc(f), oSent(kept, kept), nil)), RefusalUnknown, "mock-0")
 	}
 }
 
@@ -1598,7 +1597,8 @@ func TestOutcomeAnIdThatMovedInADecodedFormIsNeverFresh(t *testing.T) {
 //   - a word under 32 bits that moved there stands all over a set, so a
 //     place that holds it is chance, as for a piece of a longer value;
 //   - an id that changed there (one run lost it), not moved, is the
-//     decoded-form rule's: a place that kept it says nothing of it.
+//     decoded-form rule's: a place that kept it refuses the value, as main
+//     does (inDecodedForm).
 func TestOutcomeTheMovedWordRuleReadsEachSideAndWholeIdsOnly(t *testing.T) {
 	const a = "A7K29QXM"
 	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
@@ -1617,7 +1617,7 @@ func TestOutcomeTheMovedWordRuleReadsEachSideAndWholeIdsOnly(t *testing.T) {
 	fresh("an id once more as recorded, the place gave it only in F", Decide(in(twice, once, "other", a)))
 	oNoneFresh(t, "an id once more as recorded, the place held it as recorded", Decide(in(twice, once, a, "other")), "", "mock-11")
 	fresh("a 3-letter word swapped in base64 text, held at a place", Decide(in("=23 "+b64(`{"a":"k7q","b":"m2x"}`), "=23 "+b64(`{"a":"m2x","b":"k7q"}`), "k7q", "k7q")))
-	fresh("an id an escape hides that changed, not moved, the place kept it", Decide(in("x=3D=23"+a+" ok", "x=3D=23B8L30RQW ok", a, a)))
+	oNoneFresh(t, "FALSE GREEN? an id an escape hides that changed, not moved, the place kept it", Decide(in("x=3D=23"+a+" ok", "x=3D=23B8L30RQW ok", a, a)), "", "mock-11")
 }
 
 // An id that moved in the value as written (stayed at one place in round F
@@ -1681,5 +1681,115 @@ func TestOutcomeAClockReadInTheCallsWindowIsNoDecodedText(t *testing.T) {
 	}
 	if d := oWord(t, Decide(in("other")), "Hd73Kw2Nqe", "Rt58Vb1Mxo"); d.Outcome != OutcomeFresh {
 		t.Errorf("a place holding another word: %s; want fresh", oDescribe([]Decision{d}))
+	}
+}
+
+// The decoded-form rule reads the value's forms in the call's window, as
+// main does: a run that is a read of the clock there is not decoded. Here an
+// epoch in microseconds whose digits read as hex text (" ABCDEFG") is read
+// twice as recorded, a read of the clock in the recorded call's window both
+// times, while round F holds that read once, an hour outside its own
+// window, beside its own read: only round F's value carries "ABCDEFG", in a
+// decoded form. A place that held it in both runs, in the call's test, an
+// older test, or served by round F only after the call arrived, refuses the
+// changed word beside it, as main refuses the value (unaccounted). With no
+// window both runs decode the recorded read, so both carry "ABCDEFG" and the
+// place says nothing of it: the word is fresh, as main learns the value. A
+// place that holds another word leaves it fresh.
+func TestOutcomeADecodedFormIsReadInTheCallsWindow(t *testing.T) {
+	const bus = 2041424344454647
+	b := time.UnixMicro(bus).UTC()
+	c := b.Add(time.Hour + 7*time.Second)
+	rAt, fAt := b.Add(300*time.Millisecond), c.Add(300*time.Millisecond)
+	B, C := strconv.FormatInt(bus, 10), strconv.FormatInt(c.UnixMicro(), 10)
+	const w1, w2 = "Hd73Kw2Nqe", "Rt58Vb1Mxo"
+	in := func(h string, older, after, window bool) Input {
+		e := oServed("mock-11", older, false, Request, oText("body.ref", "ref "+h), "ref "+h, time.Millisecond)
+		e[0].Payload.servedAfter = after
+		in := oInput("url.query.state", "a="+B+" b="+B+" c="+w1, "a="+B+" b="+C+" c="+w2, e, nil)
+		if window {
+			in.At, in.Arrived, in.Window = rAt, fAt, iWin(rAt, fAt, 2*time.Second)
+		}
+		return in
+	}
+	for _, p := range []struct {
+		what         string
+		older, after bool
+	}{{"the call's test", false, false}, {"an older test", true, false}, {"the call's test, served by round F after the call arrived", false, true}} {
+		if d := oWord(t, Decide(in("ABCDEFG", p.older, p.after, true)), w1, w2); d.Outcome != OutcomeRefused || d.Refusal == nil || !strings.Contains(d.Refusal.Why, "mock-11") {
+			t.Errorf("FALSE GREEN? in the call's window, a place in %s held the decoded id in both runs: %s; want refused naming mock-11", p.what, oDescribe([]Decision{d}))
+		}
+		for _, c := range []struct {
+			what   string
+			h      string
+			window bool
+		}{{"in the call's window, a place holding another word", "other", true}, {"with no window, a place holding the id both runs decode", "ABCDEFG", false}} {
+			if d := oWord(t, Decide(in(c.h, p.older, p.after, c.window)), w1, w2); d.Outcome != OutcomeFresh {
+				t.Errorf("%s, in %s: %s; want fresh", c.what, p.what, oDescribe([]Decision{d}))
+			}
+		}
+	}
+}
+
+// A word of 32 bits or more that only one run's value carries, and only in
+// a decoded form (behind a quoted-printable escape, inside a base64 run),
+// leaves no word of the value fresh where a place keploy reads holds it:
+// as recorded or in round F, whatever the place gave in the other run (the
+// same word, the same text around it, another word), in the call's test or
+// an older one, case-folded, or in a view of an answer round F served
+// changed. keploy binds no word in such a form, so it can check no copy of
+// the place, and main refuses each of these (unaccounted), or binds the
+// value where it followed the place. A place that holds it only in the
+// other run's text refuses too, where main reads such a place only in a
+// recording's payload: one rule across places. A place, or a view, that
+// holds another word leaves the value's word fresh.
+func TestOutcomeAWordOnlyADecodedFormCarriesIsRefusedWhereAPlaceHoldsIt(t *testing.T) {
+	const r, f, o = "A7K29QXM", "B8L30RQW", "Zq19Wd83"
+	const recCarries, fCarries = "which only the recorded value carries", "which only round F's value carries"
+	b64 := func(w string) string {
+		return "x=" + base64.StdEncoding.EncodeToString([]byte(`{"a":"`+w+`"}`)) + " ok"
+	}
+	esc := func(w string) string { return "x=3D=23" + w + " ok" }
+	ans := func(v string) Raw { return oAnswer("mock-7", 100*time.Millisecond, v) }
+	fresh := func(what string, ds []Decision) {
+		t.Helper()
+		if len(ds) == 0 || slices.ContainsFunc(ds, func(d Decision) bool { return d.Outcome != OutcomeFresh }) {
+			t.Errorf("%s: %s; want every changed word fresh", what, oDescribe(ds))
+		}
+	}
+	for _, enc := range []struct {
+		name string
+		of   func(string) string
+	}{{"behind a quoted-printable escape", esc}, {"inside a base64 run", b64}} {
+		rec, live := enc.of(r), enc.of(f)
+		at := func(older bool, pr, pf string) Input {
+			return oInput("url.query.state", rec, live, oServed("mock-11", older, false, Request, oText("body.ref", pr), pf, time.Millisecond), nil)
+		}
+		for _, older := range []bool{false, true} {
+			for _, c := range []struct{ what, pr, pf, carries string }{
+				{"the recorded id, kept", "ref " + r, "ref " + r, recCarries},
+				{"the recorded id, kept, the text around it changed", "ref " + r + " n=1", "ref " + r + " n=2", recCarries},
+				{"the recorded id as recorded, round F gave another word", "ref " + r, "ref " + o, recCarries},
+				{"round F's id, kept", "ref " + f, "ref " + f, fCarries},
+				{"round F's id, kept, the text around it changed", "ref " + f + " n=1", "ref " + f + " n=2", fCarries},
+				{"round F's id in round F, the recording gave another word", "ref " + o, "ref " + f, fCarries},
+				{"the recorded id case-folded, kept", "ref " + strings.ToLower(r), "ref " + strings.ToLower(r), recCarries},
+				{"the recorded id only in round F", "ref " + o, "ref " + r, recCarries},
+				{"round F's id only as recorded", "ref " + f, "ref " + o, fCarries},
+			} {
+				what := fmt.Sprintf("FALSE GREEN? %s, a place (an older test: %v) held %s", enc.name, older, c.what)
+				ds := Decide(at(older, c.pr, c.pf))
+				oNoneFresh(t, what, ds, "", "mock-11")
+				oNoneFresh(t, what, ds, "", c.carries)
+			}
+			fresh(fmt.Sprintf("%s, a place (an older test: %v) holding another word", enc.name, older), Decide(at(older, "ref "+o, "ref "+o)))
+		}
+		view := func(v string) Input {
+			return oInput("url.query.state", rec, live, nil, []Raw{ans("ok").ServedAs(1).ServedChanged(ans("ok"), ans(v))})
+		}
+		ds := Decide(view(f))
+		oNoneFresh(t, "FALSE GREEN? "+enc.name+", a view of an answer round F served changed held round F's id", ds, "", "mock-7")
+		oNoneFresh(t, "FALSE GREEN? "+enc.name+", a view of an answer round F served changed held round F's id", ds, "", fCarries)
+		fresh(enc.name+", a view of an answer round F served changed holding another word", Decide(view(o)))
 	}
 }
