@@ -142,6 +142,13 @@
 # the app's ports, the test files keploy writes. Ports: 8096 (app), 9096 (auth
 # service), 3306 (MySQL). Env: RECORD_BIN, REPLAY_BIN; MYSQL_IMAGE (default
 # mysql:8.0).
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+
 set -uo pipefail
 
 # docker_pull_retry: a registry hiccup is retried and named, not taken for a
@@ -286,7 +293,7 @@ record() {
     start_mysql
     start_upstream
     named_env
-    sudo env -u KEPLOY_PROVEN PATH="$PATH" "${NAMED_ENV[@]}" ${proven:+KEPLOY_PROVEN=1} "$RECORD_BIN" record -c "./shop" "${flags[@]}" \
+    sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "${NAMED_ENV[@]}" ${proven:+KEPLOY_PROVEN=1} "$RECORD_BIN" record -c "./shop" "${flags[@]}" \
         --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -355,7 +362,7 @@ replay() {
     } >keploy.yml
     before="$(newest_run)"
     named_env
-    sudo env -u KEPLOY_PROVEN PATH="$PATH" "${NAMED_ENV[@]}" "${switch[@]}" "$REPLAY_BIN" test -c "./shop" --delay 1 --health-path /healthz \
+    sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "${NAMED_ENV[@]}" "${switch[@]}" "$REPLAY_BIN" test -c "./shop" --delay 1 --health-path /healthz \
         --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
     own

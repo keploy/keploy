@@ -40,10 +40,13 @@ name: Linux CI scripts
 # kind whole: an Http2 or HttpFault mock is not an Http one, though a
 # `^kind: Http` prefix counts it.
 #
-# And sudo_env.tests.sh: SUDO_ENV, what each mock lane's `sudo env`
-# names besides its own variables (KEPLOY_EXACT_VIEW_VERIFY, only while it is
-# set: sudo-rs ignores -E), and verify_ran, which fails a run under the proven
-# switch whose agent never said its exact view's verify mode is on.
+# And sudo_env.tests.sh: SUDO_ENV, what every sudo'd keploy run in a CI
+# script names besides its own variables (the switches a workflow sets for
+# keploy, each only while it is set: sudo-rs ignores -E), a check that every
+# KEPLOY_ variable a workflow's env: block sets is one of those switches or one
+# keploy does not read (so it runs on a change to any workflow), and
+# verify_ran, which fails a run under the proven switch whose agent never said
+# its exact view's verify mode is on.
 #
 # And golang/gin_mongo/golang-docker.tests.sh and
 # golang/echo_sql/golang-docker.tests.sh: the gin-mongo and echo-sql lanes of
@@ -71,6 +74,9 @@ on:
       - '.github/workflows/test_workflow_scripts/mock-kinds.tests.sh'
       - '.github/workflows/test_workflow_scripts/sudo_env.sh'
       - '.github/workflows/test_workflow_scripts/sudo_env.tests.sh'
+      # A workflow's env: block: sudo_env.tests.sh checks each KEPLOY_ name.
+      - '.github/workflows/*.yml'
+      - '.github/workflows/*.yaml'
       - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.sh'
       - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.tests.sh'
       - '.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.sh'
@@ -97,6 +103,9 @@ on:
       - '.github/workflows/test_workflow_scripts/mock-kinds.tests.sh'
       - '.github/workflows/test_workflow_scripts/sudo_env.sh'
       - '.github/workflows/test_workflow_scripts/sudo_env.tests.sh'
+      # A workflow's env: block: sudo_env.tests.sh checks each KEPLOY_ name.
+      - '.github/workflows/*.yml'
+      - '.github/workflows/*.yaml'
       - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.sh'
       - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.tests.sh'
       - '.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.sh'
@@ -259,7 +268,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test sudo_env.sh (a lane's sudo names KEPLOY_EXACT_VIEW_VERIFY; a run under the switch whose agent did not say verify mode is on fails)
+      - name: Test sudo_env.sh (a sudo'd keploy run names each workflow switch; a run under the switch whose agent did not say verify mode is on fails)
         run: bash .github/workflows/test_workflow_scripts/sudo_env.tests.sh
 
   golang-docker-lanes:

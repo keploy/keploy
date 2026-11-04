@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+
 source "$(dirname "${BASH_SOURCE[0]}")/go-retry.sh"
 # http_mock_count: the Http mocks of mocks.yaml, by their kind whole.
 source "$(dirname "${BASH_SOURCE[0]}")/mock-kinds.sh" || exit 1
@@ -341,7 +347,7 @@ export ECHO_URL="https://${ECHO_HOST}:${UPSTREAM_PORT}/anything"
 go_retry build -o sample-tls-app .
 
 # shellcheck disable=SC2086
-sudo -E env PATH="$PATH" MYSQL_DSN="$MYSQL_DSN" POSTGRES_DSN="$POSTGRES_DSN" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" MYSQL_DSN="$MYSQL_DSN" POSTGRES_DSN="$POSTGRES_DSN" \
   QUOTE_URL="$QUOTE_URL" ECHO_URL="$ECHO_URL" \
   "$RECORD_BIN" record \
   -c "./sample-tls-app" \

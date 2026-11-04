@@ -49,6 +49,13 @@
 # docker or compose mode.
 # Readiness is the app's answer, keploy's test file and the watcher's marker.
 # The script stops only the processes it started. Port: 8098 (app).
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+
 set -uo pipefail
 MODE="${1:-native}"
 RECORD_BIN="${RECORD_BIN:-keploy}"
@@ -159,7 +166,7 @@ record() {
     shift
     mkdir -p "$WORK/$name" && cd "$WORK/$name" || exit 1
     LEG_FROM="$(mark "$name-start")" || exit 1
-    sudo -E env -u KEPLOY_PROVEN "${env[@]}" PATH="$PATH" "$RECORD_BIN" record -c "$APP_CMD" "${MODE_FLAGS[@]}" "$@" \
+    sudo env -u KEPLOY_PROVEN "${SUDO_ENV[@]}" "${env[@]}" PATH="$PATH" "$RECORD_BIN" record -c "$APP_CMD" "${MODE_FLAGS[@]}" "$@" \
         --generateGithubActions=false >"record.log" 2>&1 </dev/null &
     REC_PID=$!
     # Ready is the app's answer, not its port: in Docker the published port
@@ -233,7 +240,7 @@ crash() {
     shift 2
     mkdir -p "$WORK/$name" && cd "$WORK/$name" || exit 1
     LEG_FROM="$(mark "$name-start")" || exit 1
-    sudo -E env -u KEPLOY_PROVEN KEPLOY_E2E_CRASH="$where" PATH="$PATH" "$WORK/keploy-crash" record -c "$APP_CMD" "$@" \
+    sudo env -u KEPLOY_PROVEN "${SUDO_ENV[@]}" KEPLOY_E2E_CRASH="$where" PATH="$PATH" "$WORK/keploy-crash" record -c "$APP_CMD" "$@" \
         --generateGithubActions=false >"record.log" 2>&1 </dev/null
     # The window closes once the agent is gone too: a crashed agent reports
     # (and resolves the host) before it exits, and the CLI may return first.

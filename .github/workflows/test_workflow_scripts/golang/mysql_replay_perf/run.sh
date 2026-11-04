@@ -20,6 +20,12 @@
 # run_with_keploy_privileges + compose lifecycle, same GITHUB_WORKSPACE layout.
 # It is expected to be `source`d from samples-go/go-memory-load-mysql.
 
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+
 set -Eeuo pipefail
 
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
@@ -84,11 +90,12 @@ section() {
     printf '\n==== %s ====\n' "$*"
 }
 
-# sudo -E so keploy keeps the env (CPU_PROFILE etc.) when it re-execs for
-# privileged eBPF/proxy setup. Mirrors the sibling harnesses.
+# sudo hands keploy only the variables its command line names (sudo-rs
+# ignores -E): SUDO_ENV names the workflow's switches, and each caller names
+# its own (CPU_PROFILE). Mirrors the sibling harnesses.
 run_with_keploy_privileges() {
     if command -v sudo >/dev/null 2>&1; then
-        sudo -E env PATH="$PATH" "$@"
+        sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$@"
     else
         env PATH="$PATH" "$@"
     fi

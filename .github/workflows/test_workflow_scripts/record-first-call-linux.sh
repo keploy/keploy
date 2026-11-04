@@ -25,6 +25,13 @@
 #
 # Env: RECORD_BIN (the keploy binary under test; its agent image loaded for
 # the compose runs), RUNS (default 5), MODES (default "native compose v4mapped").
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
@@ -157,13 +164,13 @@ services:
     command: python -u app.py
     ports: ["$port:8080"]
 YML
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "docker compose up" --container-name "$APP" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "docker compose up" --container-name "$APP" \
       --disable-tele --disable-ansi > "$log" 2>&1 &
   else
     rm -f docker-compose.yml
     local host=0.0.0.0
     [ "$mode" = v4mapped ] && host=::ffff:127.0.0.1
-    sudo -E env PATH="$PATH" APP_PORT="$port" APP_HOST="$host" "$RECORD_BIN" record -c "python3 -u app.py" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" APP_PORT="$port" APP_HOST="$host" "$RECORD_BIN" record -c "python3 -u app.py" \
       --disable-tele --disable-ansi > "$log" 2>&1 &
   fi
   pid=$!

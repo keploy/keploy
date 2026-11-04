@@ -52,6 +52,13 @@
 # start while something else listens on one.
 #
 # Env: RECORD_BIN and REPLAY_BIN, the PR `build` binary for both (mock_linux.yml).
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+
 set -uo pipefail
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
@@ -230,7 +237,7 @@ DRIVER=$!
 # The timer stops the recording: the app is a server and would not end. It
 # runs from when keploy starts the app, so a slow agent does not use it up.
 # shellcheck disable=SC2024 # the log is this user's, so the shell redirects
-sudo -E env PATH="$PATH" timeout -k 10 480 "$RECORD_BIN" record -c "python3 app.py 127.0.0.1 $APP_PORT $DEP_PORT" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" timeout -k 10 480 "$RECORD_BIN" record -c "python3 app.py 127.0.0.1 $APP_PORT $DEP_PORT" \
   --record-timer 20s --generateGithubActions=false --disable-tele > record.log 2>&1
 echo "record exit status: $?"
 # Once keploy is gone nothing will answer a driver still waiting for the app.

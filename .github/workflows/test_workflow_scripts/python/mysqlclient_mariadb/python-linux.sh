@@ -22,6 +22,13 @@
 # The python3 on PATH must have mysqlclient. Readiness is event-driven: the
 # server answering SELECT 1, the app's port, the test files keploy writes.
 # Ports: 8096 (app), 3306 (database).
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+
 set -uo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/../../docker-build-retry.sh"
@@ -120,7 +127,7 @@ get() {
 
 # 1. Record.
 start_db
-sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$APP_CMD" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" APP_PORT="$APP_PORT" DB_PORT="$DB_PORT" DB_PASSWORD="$DB_PASSWORD" "$RECORD_BIN" record -c "$APP_CMD" \
     --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
 REC_PID=$!
 wait_listen "$APP_PORT" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -152,7 +159,7 @@ n=$(grep -c 'packet_type: HandshakeResponse41' "$MOCKS" 2>/dev/null)
 [ "$n" = 5 ] || fail "the mocks hold $n handshakes, want 5 (one per request)"
 
 # 2. Replay, the database down.
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$APP_CMD" --delay 1 --health-path /healthz \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" APP_PORT="$APP_PORT" DB_PORT="$DB_PORT" DB_PASSWORD="$DB_PASSWORD" "$REPLAY_BIN" test -c "$APP_CMD" --delay 1 --health-path /healthz \
     --generateGithubActions=false --disable-tele >test.log 2>&1 </dev/null
 RC=$?
 own

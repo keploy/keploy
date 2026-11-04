@@ -21,6 +21,12 @@
 #   at its bind, every time: both must move their DNS servers, naming that
 #   process, and their apps' DNS must still reach their own moved servers.
 
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+
 set -uo pipefail
 set +e
 
@@ -74,7 +80,7 @@ round() {
     record_pids=()
     for run in A B; do
         if [ "$run" = A ]; then tag=runa app_port=8081; else tag=runb app_port=8082; fi
-        (cd "$run" && exec timeout -s INT -k 30 120 sudo -E env PATH="$PATH" "$RECORD_BIN" record \
+        (cd "$run" && exec timeout -s INT -k 30 120 sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record \
             -c "python3 $dir/app.py $tag $app_port 127.0.0.1 $UPSTREAM_PORT" \
             --path "$dir/$run" --record-timer 40s --generateGithubActions=false \
             > "$dir/record_logs_${run}_$name.txt" 2>&1) &

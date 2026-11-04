@@ -5,13 +5,15 @@
 #
 #   bash .github/workflows/test_workflow_scripts/sudo_env.tests.sh
 #
-# SUDO_ENV names KEPLOY_EXACT_VIEW_VERIFY with its value while it is set, an
-# empty value included, and nothing while it is unset. verify_ran passes a run
-# under the proven switch whose log holds the agent's verify line, and fails
-# one whose log lacks it or does not exist, saying so; a run without the
-# switch, or with KEPLOY_EXACT_VIEW_VERIFY other than 1, passes whatever its
-# log holds; the line passes as a docker agent's reaches the log too, or in the
-# agent's debug log, which verify_ran then removes. proven_of
+# SUDO_ENV names each of its switches (KEPLOY_EXACT_VIEW_VERIFY,
+# KEPLOY_PG_V3_LOG_BIND_VALUES) with its value while it is set, an empty value
+# included, and nothing while it is unset, and every KEPLOY_ variable a
+# workflow's env: block sets is one of them or one keploy does not read.
+# verify_ran passes a run under the proven switch whose log holds the agent's
+# verify line, and fails one whose log lacks it or does not exist, saying so; a
+# run without the switch, or with KEPLOY_EXACT_VIEW_VERIFY other than 1, passes
+# whatever its log holds; the line passes as a docker agent's reaches the log
+# too, or in the agent's debug log, which verify_ran then removes. proven_of
 # prints the KEPLOY_PROVEN value its arguments set, the last one, or nothing.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -19,13 +21,20 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fails=0 cases=0
 
-# load [NAME=value] CODE [ARG...]: sources sudo_env.sh in a fresh bash with
-# only that variable of the ones it reads, then runs CODE there with ARG... as
-# its "$@".
+# The switches sudo_env.sh reads (SUDO_SWITCHES), each unset for load.
+unset_switches=()
+for n in $(env -u KEPLOY_EXACT_VIEW_VERIFY bash -c 'source "$1/sudo_env.sh" >/dev/null && echo "${SUDO_SWITCHES[*]}"' _ "$here"); do
+  unset_switches+=(-u "$n")
+done
+
+# load [NAME=value[|NAME=value...]] CODE [ARG...]: sources sudo_env.sh in a
+# fresh bash with only those variables of the ones it reads, then runs CODE
+# there with ARG... as its "$@".
 load() {
-  local set=$1 code=$2
+  local set=$1 code=$2 sets=()
   shift 2
-  env -u KEPLOY_EXACT_VIEW_VERIFY ${set:+"$set"} bash -c 'source "$1/sudo_env.sh" || exit 9; code=$2; shift 2; eval "$code"' _ "$here" "$code" "$@"
+  [ -z "$set" ] || IFS='|' read -r -a sets <<<"$set"
+  env "${unset_switches[@]}" "${sets[@]}" bash -c 'source "$1/sudo_env.sh" || exit 9; code=$2; shift 2; eval "$code"' _ "$here" "$code" "$@"
 }
 
 # sudo_env_is NAME [NAME=value] WANT: SUDO_ENV, its entries joined by "|",
@@ -44,6 +53,49 @@ sudo_env_is unset "" ""
 sudo_env_is one KEPLOY_EXACT_VIEW_VERIFY=1 "KEPLOY_EXACT_VIEW_VERIFY=1"
 sudo_env_is empty KEPLOY_EXACT_VIEW_VERIFY= "KEPLOY_EXACT_VIEW_VERIFY="
 sudo_env_is spaced "KEPLOY_EXACT_VIEW_VERIFY=a b" "KEPLOY_EXACT_VIEW_VERIFY=a b"
+sudo_env_is pg KEPLOY_PG_V3_LOG_BIND_VALUES=1 "KEPLOY_PG_V3_LOG_BIND_VALUES=1"
+sudo_env_is pg-empty KEPLOY_PG_V3_LOG_BIND_VALUES= "KEPLOY_PG_V3_LOG_BIND_VALUES="
+sudo_env_is both "KEPLOY_PG_V3_LOG_BIND_VALUES=1|KEPLOY_EXACT_VIEW_VERIFY=1" "KEPLOY_EXACT_VIEW_VERIFY=1|KEPLOY_PG_V3_LOG_BIND_VALUES=1"
+sudo_env_is other-keploy-name "KEPLOY_PROVEN=1|KEPLOY_EXACT_VIEW_VERIFY=1" "KEPLOY_EXACT_VIEW_VERIFY=1"
+
+# Every KEPLOY_ variable a workflow sets in an env: block is a switch SUDO_ENV
+# names, or one keploy does not read: a script's own (the binary or flags it
+# runs, a go test filter, an earlier step's outcome) or go test's own
+# KEPLOY_TEST_ switches, which go-test.yaml names on its sudo lines. A new
+# switch fails here until it is in one of them, so no sudo'd keploy run drops
+# it unseen.
+NOT_READ=" KEPLOY_BIN KEPLOY_FLAGS KEPLOY_E2E_MYSQL_RUN KEPLOY_START_STEP_OUTCOME "
+switches=" $(load "" 'echo "${SUDO_SWITCHES[*]}"') "
+# unnamed_switches DIR: each KEPLOY_ name a workflow in DIR sets in an env:
+# block that is neither a switch nor in NOT_READ, as "FILE sets NAME".
+unnamed_switches() {
+  local wf n
+  for wf in "$1"/*.yml "$1"/*.yaml; do
+    [ -e "$wf" ] || continue
+    for n in $(grep -oE '^[[:space:]]+KEPLOY_[A-Z0-9_]+:' "$wf" | tr -d ' :' | sort -u); do
+      case $n in KEPLOY_TEST_*) continue ;; esac
+      case "$switches$NOT_READ" in *" $n "*) continue ;; esac
+      echo "$(basename "$wf") sets $n"
+    done
+  done
+}
+# unnamed_is NAME DIR WANT: unnamed_switches DIR, its lines joined by "|", is
+# WANT.
+unnamed_is() {
+  local got
+  cases=$((cases + 1))
+  got=$(unnamed_switches "$2" | paste -sd'|')
+  if [ "$got" != "$3" ]; then
+    echo "FAIL $1: workflow KEPLOY_ names neither in sudo_env.sh's SUDO_SWITCHES nor in NOT_READ here: '$got', want '$3'"
+    fails=$((fails + 1))
+  fi
+}
+unnamed_is workflows "$here/.." ""
+mkdir -p "$tmp/wf"
+printf 'env:\n  KEPLOY_EXACT_VIEW_VERIFY: 1\njobs:\n  a:\n    env:\n      KEPLOY_TEST_X: 1\n    steps:\n      - env:\n          KEPLOY_BIN: k\n          KEPLOY_PG_V3_LOG_BIND_VALUES: "1"\n' > "$tmp/wf/known.yml"
+unnamed_is known-names "$tmp/wf" ""
+printf 'jobs:\n  a:\n    steps:\n      - env:\n          KEPLOY_NEW_SWITCH: 1\n        run: echo "KEPLOY_IN_RUN: 1"\n' > "$tmp/wf/new.yaml"
+unnamed_is new-switch "$tmp/wf" "new.yaml sets KEPLOY_NEW_SWITCH"
 
 LINE="2026-11-05T00:00:00Z INFO Keploy(agent): the exact view's verify mode is on in this agent: each read it keeps is recomputed"
 printf 'start\n%s\nend\n' "$LINE" > "$tmp/with.log"

@@ -22,6 +22,12 @@
 # sends the body once it stops waiting for the 100, and the test case must
 # hold it too.
 
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+
 set -uo pipefail
 # Explicit `set +e`: exit codes are captured explicitly and cleanup always runs.
 set +e
@@ -124,7 +130,7 @@ KEPLOY_CFG
 
     drive_requests > "driver_logs_${mode}.txt" 2>&1 &
     local driver_pid=$!
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record "${mode_flag[@]}" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record "${mode_flag[@]}" \
         -c "python3 app.py ${APP_PORT}" \
         --generateGithubActions=false > "record_logs_${mode}.txt" 2>&1
     echo "record exit status: $?"
@@ -176,7 +182,7 @@ KEPLOY_CFG
     done
 
     echo "=================== replay ${mode} ==================="
-    sudo -E env PATH="$PATH" "$REPLAY_BIN" test \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" test \
         -c "python3 app.py ${APP_PORT}" --delay 5 \
         --generateGithubActions=false > "test_logs_${mode}.txt" 2>&1
     echo "test exit status: $?"

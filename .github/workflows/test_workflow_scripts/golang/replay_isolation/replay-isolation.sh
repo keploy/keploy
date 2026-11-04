@@ -55,13 +55,20 @@
 # Not asserted, KNOWN GAP lines instead: until a kernel-level deny lands,
 # non-DNS UDP, ICMP and raw sockets, and a native app's double-forked child,
 # still reach the real network in replay. No secret is involved anywhere.
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 KEPLOY_SRC=${KEPLOY_SRC:-$(cd "$HERE/../../../../.." && pwd)}
 IMAGE=${KEPLOY_IMAGE:-ghcr.io/keploy/keploy:v3-dev}
 W=${RISO_WORK:-/work/riso}
 rm -rf "$W" && mkdir -p "$W/out"
-S=""; [ "$(id -u)" = 0 ] || S="sudo -E"
+S=""; [ "$(id -u)" = 0 ] || S="sudo"
 MODES=("$@"); [ ${#MODES[@]} -gt 0 ] || MODES=(native docker)
 SINKPID=""
 DOCKER_RESOLV=""
@@ -215,7 +222,7 @@ replay() {
 	# has none, which docker prints as "invalid IP").
 	waitfor 300 sh -c "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' riso-peer 2>/dev/null | grep -E '^[0-9]+([.][0-9]+){3}\$' > '$W/out/$phase/peer-ip'" &
 	local peerwatch=$!
-	"${RUNNER[@]}" "$KEPLOY" test "$@" --apiTimeout 60 --disable-tele --disableANSI --generate-github-actions=false > "$W/out/$phase/keploy.log" 2>&1
+	"${RUNNER[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" test "$@" --apiTimeout 60 --disable-tele --disableANSI --generate-github-actions=false > "$W/out/$phase/keploy.log" 2>&1
 	echo $? > "$W/out/$phase/exit"
 	echo "$phase exit $(cat "$W/out/$phase/exit")"
 	waitfor 15 grep -q 'probe fork-tcp' "$W/out/$phase/keploy.log"
@@ -301,7 +308,7 @@ for mode in "${MODES[@]}"; do
 		bypass_yml
 		log "record-native"
 		sink_start record-native
-		"${SINKDNS[@]}" "$KEPLOY" record -c "$W/egressprobe $RECARGS" --disable-tele --disableANSI > "$W/out/record-native/keploy.log" 2>&1 &
+		"${SINKDNS[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" record -c "$W/egressprobe $RECARGS" --disable-tele --disableANSI > "$W/out/record-native/keploy.log" 2>&1 &
 		KP=$!
 		waitfor 180 curl -sf localhost:8080/health || echo "record app not up"
 		fire http://localhost:8080 "$W/out/record-native/keploy.log"
@@ -317,7 +324,7 @@ for mode in "${MODES[@]}"; do
 		# An entry keploy does not act on is refused before anything starts.
 		log "refuse-native"
 		mkdir -p "$W/out/refuse-native"
-		"${SINKDNS[@]}" "$KEPLOY" test -c "$W/egressprobe $APPARGS" --allow-egress imds --disable-tele --disableANSI --generate-github-actions=false > "$W/out/refuse-native/keploy.log" 2>&1
+		"${SINKDNS[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" test -c "$W/egressprobe $APPARGS" --allow-egress imds --disable-tele --disableANSI --generate-github-actions=false > "$W/out/refuse-native/keploy.log" 2>&1
 		echo $? > "$W/out/refuse-native/exit"
 		cd "$W" || die cd
 		;;
@@ -339,7 +346,7 @@ for mode in "${MODES[@]}"; do
 		bypass_yml
 		log "record-docker"
 		sink_start record-docker
-		$S "$KEPLOY" record -c "$RECRUN" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-docker/keploy.log" 2>&1 &
+		$S env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" record -c "$RECRUN" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-docker/keploy.log" 2>&1 &
 		KP=$!
 		waitfor 300 curl -sf localhost:8080/health || { echo "record app not up"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}'; }
 		fire http://localhost:8080 "$W/out/record-docker/keploy.log"
@@ -382,7 +389,7 @@ for mode in "${MODES[@]}"; do
 		bypass_yml
 		log "record-compose"
 		sink_start record-compose
-		$S "$KEPLOY" record -c "docker compose up" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-compose/keploy.log" 2>&1 &
+		$S env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" record -c "docker compose up" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-compose/keploy.log" 2>&1 &
 		KP=$!
 		# A call before keploy's agent holds the published port is reset
 		# (record-bind-race), so the probe is fired once it does.

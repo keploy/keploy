@@ -41,6 +41,13 @@
 # Env: RECORD_BIN, REPLAY_BIN. Ports: 8080 (app), 9099 (the dependency), 16789
 # (keploy's proxy). Runs as a user with passwordless sudo; needs iptables, ss
 # and python3.
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
@@ -173,7 +180,7 @@ mkdir -p rec && cd rec || exit 1
 ../ld-app -dep "127.0.0.1:$DEP" >dep.log 2>&1 &
 DEP_PID=$!
 wait_listen "$DEP" "$DEP_PID" || { echo "::error::the dependency did not start"; exit 1; }
-sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "../ld-app" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "../ld-app" \
     --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
 REC_PID=$!
 wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -192,7 +199,7 @@ grep -lq 'abandoned, dep said dep-ok' keploy/test-set-0/tests/*.yaml 2>/dev/null
 echo "== 2. keploy mock record: TestPing, TestAbandon, TestAfter, each in its window =="
 # A directory of its own: keploy test (step 3) replays every set in rec's.
 mkdir -p ../scope && cd ../scope || exit 1
-sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record \
     -c "../ld-app -harness" --name ld-scope --disable-tele >scope.log 2>&1 </dev/null
 RC=$?
 own
@@ -205,7 +212,7 @@ wait "$DEP_PID" 2>/dev/null
 DEP_PID=""
 
 echo "== 3. keploy test of step 1's recording, the dependency down =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "../ld-app" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "../ld-app" \
     --delay 2 --generateGithubActions=false --disable-tele >test.log 2>&1 </dev/null
 RC=$?
 own

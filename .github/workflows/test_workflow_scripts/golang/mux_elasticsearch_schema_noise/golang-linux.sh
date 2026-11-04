@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 #
 # Schema-based request-body noise detection — end-to-end CI test using the real
@@ -100,7 +106,7 @@ record_fresh() {
   local n="${1:-1}"
   cleanup
   sudo rm -rf "$SND_PATH"
-  sudo env "PATH=$PATH" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" ${STAMP_CREATED_AT+"STAMP_CREATED_AT=$STAMP_CREATED_AT"} \
+  sudo env "PATH=$PATH" "${SUDO_ENV[@]}" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" ${STAMP_CREATED_AT+"STAMP_CREATED_AT=$STAMP_CREATED_AT"} \
     "$KEPLOY_BIN" record -c "./$APP_BIN" --path "$SND_PATH" >"$APP_DIR/record.log" 2>&1 &
   local rec_pid=$!
   local i
@@ -131,7 +137,7 @@ record_fresh() {
 replay() {
   local log="$1"; shift
   cleanup
-  sudo env "PATH=$PATH" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" ${STAMP_CREATED_AT+"STAMP_CREATED_AT=$STAMP_CREATED_AT"} \
+  sudo env "PATH=$PATH" "${SUDO_ENV[@]}" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" ${STAMP_CREATED_AT+"STAMP_CREATED_AT=$STAMP_CREATED_AT"} \
     "$KEPLOY_BIN" test -c "./$APP_BIN" --path "$SND_PATH" --delay 10 "$@" >"$log" 2>&1
   local rc=$?
   cleanup
@@ -396,7 +402,7 @@ else
   cleanup
   # --api-timeout outlasts the agent's shutdown, so doc-4 is still parked when
   # the agent is gone and the listener answers it.
-  sudo env "PATH=$PATH" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" ${STAMP_CREATED_AT+"STAMP_CREATED_AT=$STAMP_CREATED_AT"} \
+  sudo env "PATH=$PATH" "${SUDO_ENV[@]}" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" ${STAMP_CREATED_AT+"STAMP_CREATED_AT=$STAMP_CREATED_AT"} \
     "$KEPLOY_BIN" test -c "./$APP_BIN" --path "$SND_PATH" --delay 10 --remove-unused-mocks --api-timeout 30 \
     >"$APP_DIR/test_stopped.log" 2>&1 &
   test_pid=$!

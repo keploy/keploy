@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 # E2E test for DNS mock deduplication.
@@ -137,7 +143,7 @@ endsec
 # Record
 section "Start Recording"
 echo "Starting Recording..."
-sudo -E env PATH=$PATH "$RECORD_BIN" record -c "./dns-dedup" --generateGithubActions=false >record.txt 2>&1 &
+sudo env PATH=$PATH "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "./dns-dedup" --generateGithubActions=false >record.txt 2>&1 &
 KEPLOY_PID=$!
 echo "Keploy record started with PID: $KEPLOY_PID"
 sleep 5
@@ -164,7 +170,7 @@ source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_s
 if json_pass_supported; then
     section "Start Recording (json)"
     echo "Starting json-format recording..."
-    sudo -E env PATH=$PATH "$RECORD_BIN" record --storage-format json -c "./dns-dedup" --generateGithubActions=false >record_json.txt 2>&1 &
+    sudo env PATH=$PATH "${SUDO_ENV[@]}" "$RECORD_BIN" record --storage-format json -c "./dns-dedup" --generateGithubActions=false >record_json.txt 2>&1 &
     KEPLOY_PID=$!
     echo "Keploy record (json) started with PID: $KEPLOY_PID"
     sleep 5
@@ -184,7 +190,7 @@ fi
 # Replay
 section "Start Replay"
 echo "Starting Replay..."
-sudo -E env PATH=$PATH "$REPLAY_BIN" test -c "./dns-dedup" --delay 10 --generateGithubActions=false 2>&1 | tee test.txt || true
+sudo env PATH=$PATH "${SUDO_ENV[@]}" "$REPLAY_BIN" test -c "./dns-dedup" --delay 10 --generateGithubActions=false 2>&1 | tee test.txt || true
 check_for_errors "test.txt"
 check_test_report
 endsec
@@ -195,7 +201,7 @@ if json_pass_supported; then
     # coexist in keploy/ now).
     section "Start Replay (json)"
     echo "Starting json-format Replay..."
-    sudo -E env PATH=$PATH "$REPLAY_BIN" test --storage-format json -c "./dns-dedup" --delay 10 --generateGithubActions=false 2>&1 | tee test_json.txt || true
+    sudo env PATH=$PATH "${SUDO_ENV[@]}" "$REPLAY_BIN" test --storage-format json -c "./dns-dedup" --delay 10 --generateGithubActions=false 2>&1 | tee test_json.txt || true
     check_for_errors "test_json.txt"
     if ! json_scan_reports; then
         cat test_json.txt

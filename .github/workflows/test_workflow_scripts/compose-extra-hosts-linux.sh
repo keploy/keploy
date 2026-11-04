@@ -20,6 +20,13 @@
 #
 # Env: RECORD_BIN (the keploy binary under test). The agent image the binary
 # names must be loaded (.github/actions/download-image).
+
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
@@ -162,7 +169,7 @@ record() {
   local name=$1 cmd=$2 ctr=$3 log="$1.log" pid rc p made before=$FAIL
   sudo rm -rf keploy
   : > "$log"
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$cmd" --container-name "$ctr" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "$cmd" --container-name "$ctr" \
     --disable-tele --debug > "$log" 2>&1 &
   pid=$!
   if await "$log" "$pid" "APP LISTENING" 1; then

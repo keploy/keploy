@@ -1,19 +1,27 @@
 # shellcheck shell=bash
-# Sourced by the lanes that run keploy through sudo in a workflow that sets
-# KEPLOY_EXACT_VIEW_VERIFY (mock_linux.yml, mock_compose_linux.yml,
-# mock_fromcontainer_linux.yml, proven-setend-docker.yml).
+# Sourced by every CI script that runs keploy through sudo.
 #
 # sudo hands the command it runs only the variables its command line names:
-# sudo-rs (Ubuntu 26.04's sudo) ignores -E, so no such lane uses it. SUDO_ENV is,
+# sudo-rs (Ubuntu 26.04's sudo) ignores -E, so no script uses it. SUDO_ENV is,
 # as NAME=value for `sudo env`, what every such run names besides its own
-# variables: the switches a workflow sets for every keploy run, each only
-# while it is set. KEPLOY_EXACT_VIEW_VERIFY=1 runs the agent's exact view in
-# verify mode under the proven switch; keploy reads it from its own
-# environment (provenswitch.AgentArgs).
+# variables: the switches a workflow sets for keploy (SUDO_SWITCHES), each only
+# while it is set, an empty value included.
+# - KEPLOY_EXACT_VIEW_VERIFY=1 runs the agent's exact view in verify mode under
+#   the proven switch; keploy reads it from its own environment
+#   (provenswitch.AgentArgs).
+# - KEPLOY_PG_V3_LOG_BIND_VALUES=1 puts the raw bind values in the Postgres
+#   replayer's miss lines.
+# A workflow that sets another KEPLOY_ variable in an env: block adds it here,
+# or to the names keploy does not read in sudo_env.tests.sh, whose case for
+# that fails until it is in one of them.
+SUDO_SWITCHES=(KEPLOY_EXACT_VIEW_VERIFY KEPLOY_PG_V3_LOG_BIND_VALUES)
 SUDO_ENV=()
-if [ -n "${KEPLOY_EXACT_VIEW_VERIFY+x}" ]; then
-  SUDO_ENV+=("KEPLOY_EXACT_VIEW_VERIFY=$KEPLOY_EXACT_VIEW_VERIFY")
-fi
+for _sudo_switch in "${SUDO_SWITCHES[@]}"; do
+  if [ -n "${!_sudo_switch+x}" ]; then
+    SUDO_ENV+=("$_sudo_switch=${!_sudo_switch}")
+  fi
+done
+unset _sudo_switch
 
 # VERIFY_LINE: what an agent prints when it runs its exact view in verify
 # mode (cli/provider/cmd.go).

@@ -42,6 +42,12 @@
 #           gate waited for the app's answer before any test went; the probe
 #           did not time out; every 8095 test passes.
 
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=../../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
+
 set -uo pipefail
 # Explicit `set +e`: exit codes are captured explicitly and cleanup always runs.
 set +e
@@ -105,7 +111,7 @@ drive_requests() {
 echo "=== record ==="
 drive_requests > driver_logs.txt 2>&1 &
 driver_pid=$!
-sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$RUN_CMD" --container-name "$NAME" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "$RUN_CMD" --container-name "$NAME" \
     --generateGithubActions=false --disable-ansi > record_logs.txt 2>&1
 echo "record exit status: $?"
 if ! wait "$driver_pid"; then
@@ -158,7 +164,7 @@ fi
 
 echo "=== replay ==="
 start=$(date +%s)
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$RUN_CMD" --container-name "$NAME" --delay 10 \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" test -c "$RUN_CMD" --container-name "$NAME" --delay 10 \
     --generateGithubActions=false --disable-ansi > test_logs.txt 2>&1
 echo "test exit status: $? after $(( $(date +%s) - start ))s"
 
@@ -237,7 +243,7 @@ REMAP_RECORD_CMD="docker run -p 18095:8095 --rm --name $NAME $IMAGE"
 REMAP_TEST_CMD="docker run -p 18095:8095 -e PUBLIC_START_DELAY=25 --rm --name $NAME $IMAGE"
 drive_requests 18095 > remap_driver_logs.txt 2>&1 &
 driver_pid=$!
-sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$REMAP_RECORD_CMD" --container-name "$NAME" --path "$REMAP_DIR" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "$REMAP_RECORD_CMD" --container-name "$NAME" --path "$REMAP_DIR" \
     --generateGithubActions=false --disable-ansi > remap_record_logs.txt 2>&1
 echo "record exit status: $?"
 if ! wait "$driver_pid"; then
@@ -264,7 +270,7 @@ remap_replay() {
     echo "=== remapped port: replay $*, the app serving 25s after it starts ==="
     sudo rm -rf "$REMAP_DIR/keploy/reports"
     start=$(date +%s)
-    sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$REMAP_TEST_CMD" --container-name "$NAME" --path "$REMAP_DIR" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" test -c "$REMAP_TEST_CMD" --container-name "$NAME" --path "$REMAP_DIR" \
         --delay 5 "$@" --generateGithubActions=false --disable-ansi > "$log" 2>&1
     echo "test exit status: $? after $(( $(date +%s) - start ))s"
     docker rm -f "$NAME" >/dev/null 2>&1 || true
