@@ -55,10 +55,11 @@ type Fault struct {
 	// upstream's end reached it, and the call was judged by that end. A FIN
 	// cannot say whether the application closed or only half-closed
 	// (shutdown(SHUT_WR)) and read on, so at replay its FIN, before the
-	// answer or after it, does not end the hold: only a reset or the run's
-	// end does. A fault without it (written by hand, or by a keploy that did
-	// not record it) ends the hold at the application's FIN, unless its
-	// socket says that FIN was in before the answer was written.
+	// answer or after it, does not end the hold: only a reset, the run's
+	// end, or a later answer served from the same mock and held does. A
+	// fault without it (written by hand, or by a keploy that did not record
+	// it) ends the hold at the application's FIN, unless its socket says
+	// that FIN was in before the answer was written.
 	AppEndedFirst bool `json:"app_ended_first,omitempty" yaml:"app_ended_first,omitempty" bson:"app_ended_first,omitempty"`
 	// Delay, for a delay, is how long the whole answer is held before it is
 	// sent, bounded by the run. Only a delay takes one.
@@ -84,7 +85,8 @@ const (
 	// connection: its own client gave up. It is the application's close that
 	// ends it, never a clock: replay answers nothing more and holds the
 	// connection until the application closes it or the run ends; one
-	// recorded with AppEndedFirst, until a reset or the run's end.
+	// recorded with AppEndedFirst, until a reset, the run's end, or a later
+	// answer served from the same mock and held.
 	FaultTimeout FaultKind = "timeout"
 	// FaultTruncate: the upstream sent the head, with the Content-Length it
 	// sent, and BodyBytes of the body, then closed the connection.
@@ -102,8 +104,9 @@ const (
 	// no last chunk; or, framed by the close, as it is; a compressed body
 	// flushed, not ended. Then it holds the connection until the
 	// application closes it or the run ends (with AppEndedFirst, as a
-	// recording writes it, until a reset or the run's end), never ended by
-	// a clock. AfterHead always.
+	// recording writes it, until a reset, the run's end, or a later answer
+	// served from the same mock and held), never ended by a clock.
+	// AfterHead always.
 	FaultStoppedReading FaultKind = "stopped_reading"
 	// FaultDelay: the whole answer, sent once Delay has passed. A recording
 	// holds none (a record makes no verdict on wall-clock time); a delay is
