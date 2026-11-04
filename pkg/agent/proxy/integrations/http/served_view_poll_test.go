@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
@@ -136,5 +138,66 @@ func TestAnAnswersKeyNamesEveryPartOfIt(t *testing.T) {
 	}
 	if answerKey(nil) != "" {
 		t.Errorf("no answer keyed %q; want none", answerKey(nil))
+	}
+}
+
+// Two serves of one recording that gave the application two different
+// answers are two views of it, each its own: here the caller of the learn
+// step (LearnMatch's written: SQS sets a digest over each message sent)
+// wrote count 77 into the first serve's answer and 78 into the second's,
+// to the same request. A later call of the set that carries a word only the
+// second answer held is refused, naming the recording, as one that carries
+// a word of the first; a fresh word is learned. Keyed by the recorded
+// answer, the two serves were one view, the first one's, and the second
+// answer's word was learned as noise (a false green).
+func TestTwoAnswersOfOneRecordingAreTwoViewsALaterCallReads(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ref     string // the later call's body.ref in F (recorded "7")
+		refused bool   // refused, naming pool-2; else learned
+	}{
+		{"a word only the second answer held", "78", true},
+		{"a word of the first answer", "77", true},
+		{"a fresh word", "42", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			opts.LearnPool = true
+			pool := learnRecorded("pool-2", time.Second, "POST", "/v1/receive", `{"max":10}`, nil, `{"count":"9"}`)
+			pool.TestModeInfo.Lifetime = models.LifetimeSession
+			call := learnRecorded("mock-1", 2*time.Second, "POST", "/v1/messages", `{"ref":"7"}`, nil, `{}`)
+			tr := learn.NewTracker()
+			ctx := learn.WithTracker(context.Background(), tr)
+			db := &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{pool}}, observe: tr.ServedMock}
+			tr.Begin()
+			for _, count := range []string{"77", "78"} {
+				written := func(m *models.Mock) *models.Mock {
+					c := m.ShallowCopy()
+					rs := *m.Spec.HTTPResp
+					rs.Body = strings.ReplaceAll(rs.Body, `"9"`, `"`+count+`"`)
+					c.Spec.HTTPResp = &rs
+					return c
+				}
+				got, miss, err := h.LearnMatch(ctx, exportCall(live("POST", "/v1/receive", `{"max":10}`, nil)), NewRequestNoise(zap.NewNop(), opts), db, opts, integrations.CallRound{}, written, nil)
+				if err != nil || got == nil || got.Name != "pool-2" || got.Spec.HTTPResp.Body != `{"count":"9"}` {
+					t.Fatalf("the serve the caller writes %s into: served %v miss %+v err %v; want pool-2 as the learn step gives it", count, got, miss, err)
+				}
+			}
+			tr.End()
+			tr.Begin()
+			got, miss, err := h.learnMatch(ctx, live("POST", "/v1/messages", `{"ref":"`+tc.ref+`"}`, nil), &learnDb{perTest: []*models.Mock{call}}, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.refused {
+				if got == nil || miss != nil {
+					t.Fatalf("FALSE RED: served %v miss %+v; want body.ref learned: no answer F gave at pool-2 holds %s", got, miss, tc.ref)
+				}
+				return
+			}
+			if got != nil || miss == nil || !strings.Contains(miss.res.Why, "pool-2") {
+				t.Fatalf("FALSE GREEN: served %v miss %+v; want body.ref %s refused, naming pool-2: an answer F gave there held it", got, miss, tc.ref)
+			}
+		})
 	}
 }
