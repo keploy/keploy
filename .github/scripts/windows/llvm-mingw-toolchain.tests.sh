@@ -154,7 +154,7 @@ if [ -n "${LLVM_MINGW_ARCHIVE:-}" ]; then
   [ ! -e "$work/d6/llvm-mingw/${lin_asset%.tar.xz}" ] || fail "pinned-over-stale: unpacked into the stale one, at $work/d6/llvm-mingw/${lin_asset%.tar.xz}"
   [ "$(cat "$work/d6/llvm-mingw/.release" 2>/dev/null)" = "$lin_asset $lin_sha" ] || fail "pinned-over-stale: stamp '$(cat "$work/d6/llvm-mingw/.release" 2>/dev/null)'"
 else
-  echo "skip pinned, pinned-again: LLVM_MINGW_ARCHIVE names no copy of $lin_asset"
+  echo "skip pinned, pinned-again, pinned-backslash-dir, pinned-over-stale: LLVM_MINGW_ARCHIVE names no copy of $lin_asset"
 fi
 
 if [ "$fails" -ne 0 ]; then

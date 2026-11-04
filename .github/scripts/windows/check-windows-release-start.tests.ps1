@@ -1,11 +1,11 @@
 # check-windows-release-start.tests.ps1 - check-windows-release-start.ps1
 # passes a release-shaped set of programs and fails, naming why, for each way
 # one can be wrong: a probe that starts, a binary that needs a DLL Windows does
-# not ship, exits non-zero, prints no version or hangs, and a parser test run
-# that fails. A program that hangs is killed with the programs it started:
-# none is left running, and the check leaves no directory behind. A
-# libwinpthread-1.dll on the PATH the check itself runs with does not reach
-# the programs it starts.
+# not ship, exits non-zero, prints no version line on stdout (keploy's banner
+# on stderr is not one) or hangs, and a parser test run that fails. A program
+# that hangs is killed with the programs it started: none is left running,
+# and the check leaves no directory behind. A libwinpthread-1.dll on the
+# PATH the check itself runs with does not reach the programs it starts.
 #
 # Windows only. Builds small C programs with llvm-mingw (KEPLOY_LLVM_MINGW, as
 # llvm-mingw-toolchain.sh stages it): each is linked -static, so it needs only
@@ -75,6 +75,31 @@ try {
     $static = @('-static', '-s')
     Build 'version' "#include <stdio.h>`nint main(void) { puts(`"Keploy 1.2.3`"); return 0; }" $static
     Build 'noversion' "#include <stdio.h>`nint main(void) { puts(`"hello`"); return 0; }" $static
+    # keploy's banner, which it writes to stderr on every start, and no
+    # version line: its words are not a version.
+    $banner = @'
+#include <stdio.h>
+int main(void) {
+    fputs("  TRY THE FULL KEPLOY (FREE)\n", stderr);
+    fputs("  This is Keploy's open-source build. Keploy from keploy.io (free with an account) adds:\n", stderr);
+    fputs("  Install:  source /dev/stdin <<<\"$(curl -fsSL https://keploy.io/install.sh || echo 'echo Keploy installer download failed >&2; return 1')\"\n", stderr);
+    return 0;
+}
+'@
+    Build 'banner' $banner $static
+    # Lines like the version line that are not it: in capitals, indented,
+    # with no version, and the line itself on stderr, not stdout.
+    $elsewhere = @'
+#include <stdio.h>
+int main(void) {
+    puts("KEPLOY 1.2.3");
+    puts("  Keploy 1.2.3");
+    puts("Keploy ");
+    fputs("Keploy 1.2.3\n", stderr);
+    return 0;
+}
+'@
+    Build 'elsewhere' $elsewhere $static
     Build 'pass' "int main(void) { return 0; }" $static
     Build 'exit3' "int main(void) { return 3; }" $static
     Build 'hang' "#include <windows.h>`nint main(void) { Sleep(INFINITE); return 0; }" $static
@@ -116,6 +141,8 @@ int main(void) {
     Row 'binary-needs-dll' 1 'STATUS_DLL_NOT_FOUND, it imports a DLL Windows does not ship' @('-Binary', (& $w 'probe.exe'), '-PgTest', (& $w 'pass.exe'), '-Probe', (& $w 'probe.exe'))
     Row 'binary-exits-3' 1 'exe --version exited 3 (0x00000003)' @('-Binary', (& $w 'exit3.exe'), '-PgTest', (& $w 'pass.exe'), '-Probe', (& $w 'probe.exe'))
     Row 'binary-no-version' 1 'exe --version printed no Keploy version' @('-Binary', (& $w 'noversion.exe'), '-PgTest', (& $w 'pass.exe'), '-Probe', (& $w 'probe.exe'))
+    Row 'binary-banner-only' 1 'banner.exe --version printed no Keploy version' @('-Binary', (& $w 'banner.exe'), '-PgTest', (& $w 'pass.exe'), '-Probe', (& $w 'probe.exe'))
+    Row 'binary-version-elsewhere' 1 'elsewhere.exe --version printed no Keploy version' @('-Binary', (& $w 'elsewhere.exe'), '-PgTest', (& $w 'pass.exe'), '-Probe', (& $w 'probe.exe'))
     Row 'pgtest-fails' 1 'the Postgres parser tests exited 3 (0x00000003)' @('-Binary', (& $w 'version.exe'), '-PgTest', (& $w 'exit3.exe'), '-Probe', (& $w 'probe.exe'))
     Row 'pgtest-needs-dll' 1 'the Postgres parser tests exited -1073741515 (0xC0000135)' @('-Binary', (& $w 'version.exe'), '-PgTest', (& $w 'probe.exe'), '-Probe', (& $w 'probe.exe'))
     Row 'binary-hangs' 1 'hang.exe --version did not exit within 5 s' @('-Binary', (& $w 'hang.exe'), '-PgTest', (& $w 'pass.exe'), '-Probe', (& $w 'probe.exe'), '-TimeoutSeconds', '5')
