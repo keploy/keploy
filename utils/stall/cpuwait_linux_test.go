@@ -632,10 +632,14 @@ func TestMeter_AConsumerHeldOffSinceBeforeItsStallWasDueHoldsItsVerdict(t *testi
 
 // The sampler sleeps in the kernel: a sleep ends once its length has passed,
 // and a release (stop closed, then the waker woken) ends a long one: at once
-// with an eventfd, which the sleep then reads empty (it took the wake), and
-// at its next Tick without one. Each is waited on for far more of the test's
-// own short sleeps than a Tick takes, so a sleep that does not end fails
-// here, not on the test's timeout.
+// with an eventfd, and at its next Tick without one. A poll a wake ends takes
+// that wake, and a wake that came before the sleep, with stop still open,
+// ends no sleep early: the sleep takes it and sleeps what is left. Each is waited on for far more of the test's own
+// short sleeps than a Tick takes, so a sleep that does not end fails here,
+// not on the test's timeout. Whether the release's sleep took its wake is
+// not pinned: a signal can end the sleep after stop closed and before the
+// wake came (the sampler's next run takes that wake:
+// TestSampler_TheLastReleaseWakesItsSleep).
 func TestSleepForEndsAtItsLengthOrItsRelease(t *testing.T) {
 	const most = 10000 // the test's 1 ms sleeps: ten seconds and more
 	ends := func(t *testing.T, ended <-chan bool, want bool) {
@@ -669,6 +673,31 @@ func TestSleepForEndsAtItsLengthOrItsRelease(t *testing.T) {
 				go func() { ended <- sleepFor(5*time.Millisecond, make(chan struct{}), c.w) }()
 				ends(t, ended, false)
 			})
+			if c.w.fd >= 0 {
+				// One poll, not sleepFor's loop: a loop that left the wake
+				// polls on at once until its end, and a signal or its last
+				// poll can take the wake there by chance.
+				t.Run("a poll takes the wake that ends it", func(t *testing.T) {
+					c.w.wake()
+					ended := make(chan bool, 1)
+					go func() { c.w.sleep(time.Hour); ended <- false }()
+					ends(t, ended, false)
+					wakeTaken(t, c.w)
+				})
+			}
+			t.Run("a wake from before ends no sleep early", func(t *testing.T) {
+				c.w.wake()
+				ended := make(chan bool, 1)
+				began := time.Now()
+				go func() { ended <- sleepFor(5*time.Millisecond, make(chan struct{}), c.w) }()
+				ends(t, ended, false)
+				if took := time.Since(began); took < 5*time.Millisecond {
+					t.Fatalf("a 5 ms sleep with a wake from before it ended after %v", took)
+				}
+				if c.w.fd >= 0 {
+					wakeTaken(t, c.w)
+				}
+			})
 			t.Run("a release ends a long sleep", func(t *testing.T) {
 				stop, ended := make(chan struct{}), make(chan bool, 1)
 				go func() { ended <- sleepFor(time.Hour, stop, c.w) }()
@@ -676,21 +705,19 @@ func TestSleepForEndsAtItsLengthOrItsRelease(t *testing.T) {
 				close(stop)
 				c.w.wake()
 				ends(t, ended, true)
-				if c.w.fd >= 0 {
-					wakeTaken(t, c.w)
-				}
+				c.w.take() // the wake, if a signal ended the sleep before it came
 			})
 		})
 	}
 }
 
-// wakeTaken fails the test unless w's eventfd reads empty: the sleep took the
-// wake, and the next one does not end at once.
+// wakeTaken fails the test unless w's eventfd reads empty: no wake is left to
+// end the next sleep at once.
 func wakeTaken(t *testing.T, w *waker) {
 	t.Helper()
 	var b [8]byte
 	if n, err := unix.Read(w.fd, b[:]); err != unix.EAGAIN {
-		t.Fatalf("the eventfd read %d bytes (%v) after the sleep ended; want none (EAGAIN): the sleep left its wake", n, err)
+		t.Fatalf("the eventfd read %d bytes (%v); want none (EAGAIN): a wake is left to end the next sleep at once", n, err)
 	}
 }
 
@@ -699,19 +726,24 @@ func wakeTaken(t *testing.T, w *waker) {
 // once an hour still lets go at once (on a Go timer it did; the sleep in the
 // kernel must too, or every last release waits a Tick: a meter per chunk
 // that a closed tee stops, and the agent's boot reporter at its end). The
-// sleep takes the wake before the sampling ends, and the sampler keeps the
-// one eventfd for all its samplings.
+// sampler keeps the one eventfd for all its samplings. A sampling can end
+// without taking its release's wake: a signal can end its sleep after the
+// release closed stop and before it wrote the wake. What the sampler
+// guarantees is that the next sampling takes every wake written before it
+// began, before its first sleep, so none ends that sleep at once. The row
+// writes such a wake after each release, as that signal leaves it, and reads
+// the eventfd while the next sampling waits at its first read of its own
+// thread (ownWait), which comes after the take and before the first sleep.
 func TestSampler_TheLastReleaseWakesItsSleep(t *testing.T) {
-	s := &sampler{src: &fakeSource{}, tick: time.Hour}
+	src := &gatedOwnSource{at: make(chan struct{}), goOn: make(chan struct{})}
+	s := &sampler{src: src, tick: time.Hour}
 	fd := -1
-	for run := range 2 {
+	for run := range 3 {
 		release := s.acquire()
-		released := make(chan struct{})
-		go func() { release(); close(released) }()
 		select {
-		case <-released:
+		case <-src.at:
 		case <-time.After(time.Minute): // only turns a hang into a failure
-			t.Fatalf("sampling %d: the release of a sampler that looks once an hour has not returned in a minute", run)
+			t.Fatalf("sampling %d did not read its own thread in a minute", run)
 		}
 		if s.wake.fd < 0 {
 			t.Fatal("the sampler made no eventfd")
@@ -722,7 +754,55 @@ func TestSampler_TheLastReleaseWakesItsSleep(t *testing.T) {
 			t.Fatalf("sampling %d polled eventfd %d, the first %d; want one per sampler", run, s.wake.fd, fd)
 		}
 		wakeTaken(t, s.wake)
+		src.goOn <- struct{}{}
+		released := make(chan struct{})
+		go func() { release(); close(released) }()
+		select {
+		case <-released:
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatalf("sampling %d: the release of a sampler that looks once an hour has not returned in a minute", run)
+		}
+		s.wake.wake() // the wake a signal leaves: the next sampling must take it
 	}
+}
+
+// A run whose release came before it took the eventfd (stop closed, then the
+// wake written) ends without sleeping. Its take of a wake left from before
+// takes that release's wake too, and a run that slept then would sleep its
+// whole tick with its release waiting for it: an hour here, where the row's
+// minute turns that hang into a failure. The run is started by hand with its
+// stop closed and its wake written, the order a release right after acquire
+// can give before the run's goroutine first runs.
+func TestSampler_ARunReleasedBeforeItsFirstSleepEndsAtOnce(t *testing.T) {
+	s := &sampler{src: &fakeSource{}, tick: time.Hour}
+	w := newWaker()
+	if w.fd < 0 {
+		t.Fatal("the kernel made no eventfd")
+	}
+	stop, done := make(chan struct{}), make(chan struct{})
+	close(stop)
+	w.wake()
+	go s.run(stop, done, w)
+	select {
+	case <-done:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("a run released (stop closed, then woken) before its first sleep still sleeps a minute later; its tick is an hour")
+	}
+	wakeTaken(t, w)
+}
+
+// gatedOwnSource is a fakeSource whose ownWait, which a sampling run reads
+// once before its first sleep, says the run is there (at) and waits for the
+// row's go-ahead (goOn).
+type gatedOwnSource struct {
+	fakeSource
+	at, goOn chan struct{}
+}
+
+func (g *gatedOwnSource) ownWait() (time.Duration, bool) {
+	g.at <- struct{}{}
+	<-g.goOn
+	return 0, true
 }
 
 // threadWaitSource is a frozen process (its CPU time never moves) whose wall

@@ -124,13 +124,15 @@ func (w *threadWaits) account(seen map[string]threadStat, steal map[string]int64
 // stop closed first. The thread is woken where its sleep ends, so on a host
 // that holds the process off its wait for a CPU from then on is its own run
 // delay (threadRunDelay). It looks at stop only after a sleep: whoever closes
-// stop wakes w after it, so the sleep takes that wake before the sampling
-// ends, and the next sampling's first sleep does not end at once.
+// stop wakes w after it, and the sleep ends. A signal can end the sleep after
+// stop closed and before the wake came: the sampling then ends without
+// taking the wake, and the next one takes it before its first sleep (run).
 func sleepFor(d time.Duration, stop <-chan struct{}, w *waker) (stopped bool) {
 	end := time.Now().Add(d)
 	for {
-		// Cut short by a signal, or by a wake left from an earlier
-		// release, it sleeps what is left.
+		// Cut short by a signal, or by a wake that came while this
+		// sampling ran (a release's, as the next acquire began), it sleeps
+		// what is left.
 		w.sleep(time.Until(end))
 		select {
 		case <-stop:
@@ -168,6 +170,13 @@ func (w *waker) wake() {
 	_, _ = unix.Write(w.fd, one[:])
 }
 
+// take takes the wakes written so far, if any, without waiting (the eventfd
+// does not block). Without an eventfd it reads none (EBADF).
+func (w *waker) take() {
+	var b [8]byte
+	_, _ = unix.Read(w.fd, b[:])
+}
+
 // sleep sleeps the calling thread in the kernel for d at most (none if d is
 // not positive: the kernel refuses a negative time), and ends at a wake,
 // which it takes. Without an eventfd it sleeps a Tick at most.
@@ -180,8 +189,7 @@ func (w *waker) sleep(d time.Duration) {
 	ts := unix.NsecToTimespec(int64(d))
 	fds := []unix.PollFd{{Fd: int32(w.fd), Events: unix.POLLIN}}
 	if n, _ := unix.Ppoll(fds, &ts, nil); n > 0 {
-		var b [8]byte
-		_, _ = unix.Read(w.fd, b[:])
+		w.take()
 	}
 }
 

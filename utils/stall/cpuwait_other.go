@@ -31,3 +31,5 @@ type waker struct{}
 func newWaker() *waker { return &waker{} }
 
 func (*waker) wake() {}
+
+func (*waker) take() {}

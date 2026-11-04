@@ -259,6 +259,17 @@ func (s *sampler) run(stop, done chan struct{}, wake *waker) {
 	// from its own account (ownWait).
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	// A wake the last sampling did not take (a signal ended its sleep after
+	// its release closed stop, before the wake came) is taken before the
+	// first sleep, so it does not end that sleep at once. The wake taken can
+	// be this run's own release's, written before the run began: its stop is
+	// closed by then, and the run ends here rather than sleep its tick.
+	wake.take()
+	select {
+	case <-stop:
+		return
+	default:
+	}
 	r := &sampling{stop: stop}
 	s.mu.Lock()
 	r.lastOwn, r.ownOK = s.src.ownWait()
