@@ -60,10 +60,6 @@ type chunkedBody struct {
 	inTrailer bool // the last-chunk has been framed; off is in the trailer section
 	done      bool
 	end       int // the body's length, once done
-	// contentEnd is the offset in the body just past the last chunk data or
-	// trailer field framed so far: only framing (chunk-size lines, their
-	// CRLFs, the empty line) follows it (chunkedEndRefused).
-	contentEnd int
 
 	// legacy is set once framing failed on a relay: from then on the end is
 	// judged by the legacy terminator suffix (completeOrLegacy).
@@ -121,12 +117,10 @@ func (c *chunkedBody) feed(body []byte) (bool, error) {
 		if c.inTrailer {
 			// Trailer section: field lines until the empty line that ends the
 			// message.
+			c.off = next
 			if len(line) == 0 {
 				c.done, c.end = true, next
-			} else {
-				c.contentEnd = c.off + len(line)
 			}
-			c.off = next
 			continue
 		}
 		size, err := parseChunkSize(line)
@@ -150,49 +144,25 @@ func (c *chunkedBody) feed(body []byte) (bool, error) {
 		if body[dataEnd] != '\r' || body[dataEnd+1] != '\n' {
 			return false, fmt.Errorf("%w: chunk data is not followed by CRLF", errMalformedChunkedBody)
 		}
-		c.off, c.contentEnd = dataEnd+2, dataEnd
+		c.off = dataEnd + 2
 	}
 	return true, nil
 }
 
-// chunkedEndRefused is the response resp with the end of its chunked body
-// appended, and true, when refused ends that body with framing alone: resp is
-// a chunked response its stream ended in the middle of, where the client
-// closed the connection, and refused is the start of what the destination sent
-// after it that the client refused, up to what reached the proxy after the
-// client's FIN (supervisor.Session.NotTakenWhereClientStopped). The client then
-// had every byte of content the response carries: the head and all the chunk
-// data (the trailer section, too, up to its empty line); it closed before the
-// rest of the framing came, the last chunk and the empty line, which a server
-// that flushes its body writes only as its handler returns. The destination
-// ended the response before it could know the client had closed, so the end is
-// not its answer to the close. The response is whole, and what the client had
-// of it is all of it.
-//
-// It is false when anything the client did not have is content: a data chunk,
-// the rest of one, or a trailer field. The client gave up on the rest of the
-// response, or never read it, and the exchange is left out, as are a body that
-// refused does not end (refused may stop short of the end: the relay keeps the
-// start of what was refused, and none of what reached the proxy after the
-// client's FIN, such as the end a streaming server writes once its client has
-// gone) and one that is not framed by the RFC. It is called only for a
-// response whose body readResponseV2 was still reading when the stream ended,
-// so one with a body.
-func chunkedEndRefused(resp, refused []byte) ([]byte, bool) {
-	// A head the client did not have whole is nil here, and names no
-	// framing. Chunked framing is readResponseV2's test: parseHeaders drops a
+// lastChunkRead reports whether resp, a chunked response its stream ended in
+// the middle of, holds its body's last chunk: the stream ended in the trailer
+// section, so it holds every byte of content but trailer fields. A response
+// not chunked, or not framed by the RFC, holds none.
+func lastChunkRead(resp []byte) bool {
+	// Chunked framing is readResponseV2's test: parseHeaders drops a
 	// Content-Length beside it.
-	head, bodyStart, _, _ := messageHead(resp, true)
+	head, _, _, _ := messageHead(resp, true)
 	if _, transferEncoding := parseHeaders(head); !strings.Contains(strings.ToLower(transferEncoding), "chunked") {
-		return nil, false
+		return false
 	}
-	msg := append(resp[:len(resp):len(resp)], refused...)
 	body := chunkedBody{response: true}
-	// A body framing fails on is not done.
-	if done, _ := body.complete(msg); !done || bodyStart+body.contentEnd > len(resp) {
-		return nil, false
-	}
-	return msg[:bodyStart+body.end], true
+	_, err := body.complete(resp)
+	return err == nil && body.inTrailer
 }
 
 // chunkedLine returns the CRLF-terminated line starting at off without its

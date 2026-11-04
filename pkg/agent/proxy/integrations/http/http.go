@@ -77,6 +77,10 @@ type HTTP struct {
 	// answerFaultHook is the fault hook replay asks before it serves a
 	// mock's answer (SetAnswerFault, answerFault); nil when none is set.
 	answerFaultHook atomic.Pointer[AnswerFault]
+	// held is, for each recording, the newest answer served from it that
+	// replay holds (heldAnswers), so a recording served again ends the hold
+	// past the FIN of the answer before.
+	held heldAnswers
 }
 
 // verifying is whether h's reads run in the exact view's verify mode: each

@@ -2,13 +2,18 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"strconv"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -74,8 +79,11 @@ const faultResetGrace = relay.DefaultHalfCloseGrace
 //   - truncate: the head as recorded, with its Content-Length, and BodyBytes
 //     of the body, then the close;
 //   - timeout: the head and BodyBytes when after the head, then nothing more,
-//     the connection held until the application closes it or ctx ends: its
-//     own client's timeout ends it, never a clock here;
+//     the connection held (holdAnswer) until the application closes it or
+//     ctx ends: its own client's timeout ends it, never a clock here;
+//   - stopped_reading: the head and BodyBytes of the body, framed without
+//     the end (serveStoppedReading), then nothing more, the connection held
+//     as for a timeout;
 //   - delay: the whole answer once Delay has passed, or nothing when ctx ends
 //     first.
 //
@@ -99,6 +107,10 @@ func (h *HTTP) serveFault(ctx context.Context, clientConn net.Conn, stub *models
 			return true, nil
 		}
 	}
+	if fault.Kind == models.FaultStoppedReading {
+		return h.serveStoppedReading(ctx, clientConn, stub, fault)
+	}
+	pastFIN := heldPastFIN(clientConn, fault)
 	if fault.SendsHead() {
 		head, err := h.faultHead(stub, fault)
 		if err != nil {
@@ -119,7 +131,7 @@ func (h *HTTP) serveFault(ctx context.Context, clientConn net.Conn, stub *models
 				zap.String("mock", stub.Name))
 		}
 	case models.FaultTimeout:
-		holdUntilClosed(ctx, clientConn)
+		h.holdAnswer(ctx, stub.Name, clientConn, pastFIN)
 	}
 	return true, nil
 }
@@ -173,14 +185,109 @@ func (h *HTTP) faultHead(stub *models.Mock, fault *models.Fault) ([]byte, error)
 	return append(out, resp.Body[:fault.BodyBytes]...), nil
 }
 
+// serveStoppedReading enacts a stopped_reading fault (models.FaultStoppedReading)
+// on the application's connection: stub's head and the first BodyBytes of its
+// body, framed without the end (encodeAnswer, held), as far as the app read
+// them at record, then nothing more, the connection held until the app closes
+// it or ctx ends (holdUntilClosed), as the app closed it at record. An app
+// that had all it wanted closes again; one that gave up on the rest (a stream
+// it abandoned, its own timeout) waits on it again. An answer with no body by
+// rule (to a HEAD, a 1xx, 204 or 304) is whole once its head is: nothing is
+// written, and false tells the caller to serve it whole.
+func (h *HTTP) serveStoppedReading(ctx context.Context, clientConn net.Conn, stub *models.Mock, fault *models.Fault) (bool, error) {
+	name := stub.Name
+	loaded, err := withResponse(stub)
+	if err != nil {
+		return true, err
+	}
+	resp := loaded.Spec.HTTPResp
+	if resp == nil || resp.StatusCode == 0 {
+		return true, fmt.Errorf("http: mock %q has a fault after the head (%s) and no recorded head", name, fault)
+	}
+	method := ""
+	if loaded.Spec.HTTPReq != nil {
+		method = string(loaded.Spec.HTTPReq.Method)
+	}
+	if responseHasNoBody(method, resp.StatusCode) {
+		return false, nil
+	}
+	if fault.BodyBytes > int64(len(resp.Body)) {
+		return true, fmt.Errorf("http: mock %q: its fault sends %d body bytes and its body holds %d", name, fault.BodyBytes, len(resp.Body))
+	}
+	read := func(header http.Header, body string) (http.Header, string) {
+		return header, body[:fault.BodyBytes]
+	}
+	answer, err := h.encodeAnswer(loaded, read, fault)
+	if err != nil {
+		return true, err
+	}
+	pastFIN := heldPastFIN(clientConn, fault)
+	if _, err := clientConn.Write(answer); err != nil {
+		if ctx.Err() != nil {
+			return true, nil
+		}
+		return true, fmt.Errorf("http: write what the app read of mock %q, cut short: %w", name, err)
+	}
+	h.Logger.Info("served a mock's fault", zap.String("mock", name), zap.String("fault", fault.String()))
+	h.holdAnswer(ctx, name, clientConn, pastFIN)
+	return true, nil
+}
+
+// heldPastFIN reports whether the hold of fault's answer on c holds past the
+// application's FIN (holdUntilClosed). It does for a fault whose recording
+// found the app had ended its side first (models.Fault.AppEndedFirst): that
+// FIN may have been a half-close (shutdown(SHUT_WR), Node's socket.end(data))
+// after which the app read on, and so may the one it sends at replay, before
+// the answer or after it. That is known from the record alone, with no look
+// at c, so the app's FIN cannot race it. For a fault without the mark
+// (written by hand, or by a keploy that did not record it), it does only
+// where the app's FIN (or a reset) is already in on c before the serve
+// writes, c's socket asked at once (pUtil.PeerGone); where c's socket cannot
+// be asked (Windows, or a wrapper with no socket under it), the app's FIN
+// ends the hold, as before.
+func heldPastFIN(c net.Conn, fault *models.Fault) bool {
+	if fault.AppEndedFirst {
+		return true
+	}
+	gone, _ := pUtil.PeerGone(c)
+	return gone
+}
+
+// holdAnswer holds c (holdUntilClosed) once an answer served from the
+// recording named name is written. pastFIN (heldPastFIN) says the app's FIN
+// may be a half-close: the hold then outlasts it, until a reset, ctx's end,
+// or a later answer of the same recording held (heldAnswers).
+func (h *HTTP) holdAnswer(ctx context.Context, name string, c net.Conn, pastFIN bool) {
+	outlived, done := h.held.hold(ctx, name)
+	defer done()
+	var past context.Context
+	if pastFIN {
+		past = outlived
+	}
+	holdUntilClosed(ctx, c, past)
+}
+
 // holdUntilClosed reads, and drops, what the application sends on c until it
 // closes c or ctx ends (decodeHTTP's InterruptOnDone ends the read then): a
 // timeout answers nothing more, and it is the application's own client that
-// gives up.
-func holdUntilClosed(ctx context.Context, c net.Conn) {
+// gives up. A past that is not nil says the app's FIN may be a half-close
+// (heldPastFIN), after which it reads on, not its close: the end of c's
+// stream does not let the app go then. Only a reset or past's end (ctx's, or
+// a later answer of the same recording held: heldAnswers) ends the hold
+// (pUtil.AwaitPeerReset; past alone where c's socket cannot be asked): an app
+// that half-closed and then gave up sends nothing more, and waits until its
+// own timeout as it did at record. Meanwhile the connection is marked idle
+// (integrations.MarkIdle): its handler waits on the app, and holds no work a
+// test's end waits for.
+func holdUntilClosed(ctx context.Context, c net.Conn, past context.Context) {
 	var buf [512]byte
 	for ctx.Err() == nil {
 		if _, err := c.Read(buf[:]); err != nil {
+			if past != nil && errors.Is(err, io.EOF) {
+				release := integrations.MarkIdle(ctx)
+				pUtil.AwaitPeerReset(past, c)
+				release()
+			}
 			return
 		}
 	}

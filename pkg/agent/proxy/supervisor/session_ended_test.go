@@ -6,10 +6,9 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 )
 
-// How a session's streams ended is one word and one pointer (a Session stays
-// in its size class): each stream that ended with its connection, and, where
-// the client stopped taking the destination's stream, what reads the start of
-// what it refused there, for a parser that reaches that end mid-message.
+// How a session's streams ended: each stream that ended with its connection,
+// and whether the destination's ended where the client stopped taking it, for
+// a parser that reaches that end mid-message.
 func TestASessionSaysHowItsStreamsEnded(t *testing.T) {
 	s := &Session{}
 	for _, d := range []fakeconn.Direction{fakeconn.FromClient, fakeconn.FromDest, fakeconn.Direction(2)} {
@@ -17,8 +16,8 @@ func TestASessionSaysHowItsStreamsEnded(t *testing.T) {
 			t.Fatalf("a fresh session says %v ended with its connection", d)
 		}
 	}
-	if s.EndedWhereClientStopped() || s.NotTakenWhereClientStopped() != nil {
-		t.Fatalf("a fresh session says the client stopped, refusing %q", s.NotTakenWhereClientStopped())
+	if s.EndedWhereClientStopped() {
+		t.Fatal("a fresh session says the client stopped")
 	}
 
 	s.MarkEndedWithConnection(fakeconn.FromDest)
@@ -38,26 +37,20 @@ func TestASessionSaysHowItsStreamsEnded(t *testing.T) {
 		t.Fatal("a stream that ended with its connection says the client stopped taking it")
 	}
 
-	refused := "0\r\n"
-	s.MarkEndedWhereClientStopped(func() []byte { return []byte(refused) })
-	refused += "\r\n" // refused after the stop: read as it is now
-	if !s.EndedWhereClientStopped() || string(s.NotTakenWhereClientStopped()) != "0\r\n\r\n" {
-		t.Fatalf("EndedWhereClientStopped %v, refused %q; want true, the last chunk", s.EndedWhereClientStopped(), s.NotTakenWhereClientStopped())
+	s.MarkEndedWhereClientStopped()
+	if !s.EndedWhereClientStopped() {
+		t.Fatal("marked where the client stopped: EndedWhereClientStopped false")
 	}
 	stopped := &Session{}
-	stopped.MarkEndedWhereClientStopped(nil)
-	if !stopped.EndedWhereClientStopped() || stopped.NotTakenWhereClientStopped() != nil {
-		t.Fatalf("stopped with nothing to read what was refused: EndedWhereClientStopped %v, refused %q; want true, nil",
-			stopped.EndedWhereClientStopped(), stopped.NotTakenWhereClientStopped())
-	}
+	stopped.MarkEndedWhereClientStopped()
 	if stopped.EndedWithConnection(fakeconn.FromDest) {
 		t.Fatal("a stream that ended where the client stopped says it ended with its connection")
 	}
 
 	var nilSess *Session
 	nilSess.MarkEndedWithConnection(fakeconn.FromDest)
-	nilSess.MarkEndedWhereClientStopped(func() []byte { return []byte("x") })
-	if nilSess.EndedWithConnection(fakeconn.FromDest) || nilSess.EndedWhereClientStopped() || nilSess.NotTakenWhereClientStopped() != nil {
+	nilSess.MarkEndedWhereClientStopped()
+	if nilSess.EndedWithConnection(fakeconn.FromDest) || nilSess.EndedWhereClientStopped() {
 		t.Fatal("a nil session says how a stream ended")
 	}
 }

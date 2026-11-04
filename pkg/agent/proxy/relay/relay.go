@@ -139,9 +139,6 @@ type Relay struct {
 	awaitingFrom []uint64
 	resolverDone chan struct{}
 	awaitingMark string
-	// notTaken is the start of what the client refused (refuse,
-	// notTakenSoFar): nil until it refused, stored under verdictMu.
-	notTaken atomic.Pointer[[]byte]
 	// lastLook is closed by run once both forwarders have returned and a
 	// waiting resolve has had HalfCloseGrace more (awaitClientVerdict): the
 	// next look at the client's socket is the last.
@@ -578,15 +575,31 @@ func (r *Relay) run(ctx context.Context) error {
 	// Anything that is NOT a clean EOF (a read error, a write error, a
 	// dead peer) keeps the original immediate teardown: there is no
 	// half-open state to preserve when the connection is already broken.
+	//
+	// A FIN that cannot be forwarded because the other side's connection
+	// is over already (connOver: its peer reset it as this side's end was
+	// read) is no broken half-close: the opposite forwarder's read returns
+	// that end at once, so it is drained as a half-close is, and the end is
+	// read and told (Config.PeerEnded). Torn down, the opposite forwarder
+	// would stop at its nudged read, with the end in its socket unread.
 	onForwarderExit := func(err error, writeSide, nudgeSide *atomic.Pointer[net.Conn]) {
-		if r.cfg.HalfCloseGrace < 0 || !errors.Is(err, io.EOF) || !halfCloseWrite(writeSide.Load()) {
+		if r.cfg.HalfCloseGrace < 0 || !errors.Is(err, io.EOF) {
+			closeStopping()
+			r.nudgeDeadline(nudgeSide.Load())
+			return
+		}
+		cerr := closeWrite(writeSide.Load())
+		if cerr != nil && !connOver(cerr) {
 			closeStopping()
 			r.nudgeDeadline(nudgeSide.Load())
 			return
 		}
 		if log := r.cfg.Logger; log != nil {
+			// over: the FIN was not forwarded, the other side's connection
+			// being over already; nil where it was.
 			log.Debug("relay: peer half-closed; forwarding FIN and draining the opposite direction",
 				zap.Duration("grace", r.cfg.HalfCloseGrace),
+				zap.NamedError("over", cerr),
 			)
 		}
 		graceWG.Add(1)
@@ -1126,6 +1139,11 @@ func (r *Relay) forward(
 				if r.cfg.PeerEnded != nil {
 					r.cfg.PeerEnded(dir, false)
 				}
+				if dir == fakeconn.FromDest {
+					// Before onForwarderExit forwards the FIN to the client:
+					// had the client ended its side by then (client_took.go)?
+					r.destEndRead()
+				}
 				return io.EOF
 			}
 			if errors.Is(err, syscall.ECONNRESET) {
@@ -1136,6 +1154,8 @@ func (r *Relay) forward(
 				}
 				if dir == fakeconn.FromDest {
 					r.destReset.Store(true)
+					// Before the teardown resets the client too.
+					r.destEndRead()
 				}
 				return err
 			}
@@ -1430,36 +1450,49 @@ type closeWriter interface {
 	CloseWrite() error
 }
 
-// halfCloseWrite forwards a FIN on c — telling the peer "no more data
-// from this side" while leaving the peer free to keep sending. Reports
-// whether the half-close actually happened; false means the caller must
-// fall back to tearing the connection down.
+// errNoHalfClose is closeWrite's error for a conn that cannot half-close.
+var errNoHalfClose = errors.New("relay: the connection cannot half-close")
+
+// closeWrite forwards a FIN on c — telling the peer "no more data from
+// this side" while leaving the peer free to keep sending. Its error is the
+// CloseWrite's own, or errNoHalfClose where c cannot half-close; a non-nil
+// error means the half-close did not happen, and the caller falls back to
+// tearing the connection down.
 //
 // Unwrapping matters: the relay is handed conns that may be wrapped for
 // safety or accounting, and a wrapper that forwards Read/Write but not
 // CloseWrite would silently cost every connection its half-close. Any
 // wrapper exposing NetConn() (the convention *tls.Conn established) is
 // followed to the conn underneath.
-func halfCloseWrite(c *net.Conn) bool {
+func closeWrite(c *net.Conn) error {
 	if c == nil || *c == nil {
-		return false
+		return errNoHalfClose
 	}
 	conn := *c
 	for i := 0; i < 4; i++ { // bounded: wrappers nest, cycles must not hang
 		if cw, ok := conn.(closeWriter); ok {
-			return cw.CloseWrite() == nil
+			return cw.CloseWrite()
 		}
 		u, ok := conn.(interface{ NetConn() net.Conn })
 		if !ok {
-			return false
+			return errNoHalfClose
 		}
 		inner := u.NetConn()
 		if inner == nil || inner == conn {
-			return false
+			return errNoHalfClose
 		}
 		conn = inner
 	}
-	return false
+	return errNoHalfClose
+}
+
+// connOver reports whether a half-close failed because the connection was
+// over already: its peer reset it, or its stack gave up on it. A socket says
+// so with ENOTCONN, which shutdown gives only for a socket in TCP_CLOSE, so
+// that a read of it returns its end at once (the reset, or the error), and
+// never waits for the peer.
+func connOver(err error) bool {
+	return errors.Is(err, syscall.ENOTCONN)
 }
 
 // clearDeadline drops any read deadline previously installed on the

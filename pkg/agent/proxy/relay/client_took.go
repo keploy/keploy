@@ -58,11 +58,7 @@ import (
 //     a byte of the chunk or after it (the client took it), and refused if
 //     the connection closes with none of it acknowledged (the client closed
 //     before it came, and reset it). A refused chunk ends the destination's
-//     stream for the parser: no later chunk is teed (Config.ClientStopped,
-//     whose caller can read the start of what was refused that the
-//     destination sent before it could know the client had closed, so a
-//     parser can tell a message the client had all of from one it gave up
-//     on).
+//     stream for the parser: no later chunk is teed (Config.ClientStopped).
 //     A closed client acknowledges nothing after its FIN. A half-closed
 //     client acknowledges each chunk it receives, so one that reads a chunk
 //     and then closes its socket has that chunk teed and every chunk sent
@@ -86,6 +82,13 @@ import (
 //     closed it under the relay, or the call failed) refuses nothing.
 //   - No mark of an incomplete mock is set for a chunk the parser is not
 //     given, its Write failed or not.
+//   - As the destination's forwarder reads the destination's end, once it
+//     has told it (Config.PeerEnded) and before the relay forwards it to the
+//     client, it looks once more, unless the FIN was found already
+//     (destEndRead): a client that had ended its side by then, its FIN in or
+//     the connection reset, ended it before the destination's end reached
+//     it, whichever forwarder read its end first
+//     (Config.ClientEndedBeforeDest).
 //
 // The bytes are forwarded either way: only what the parser is given changes.
 //
@@ -180,11 +183,11 @@ type clientLook struct {
 
 // clientSocket looks at the proxy's end of the client connection. The
 // client's forwarder looks as it reads the client's end, and the destination's
-// forwarder before it writes, until one of them finds the client's FIN (one at
-// a time: Relay.finMu); the goroutine that waits for the client's answer
-// (resolve) looks after that. No two looks run at once. written is the
-// destination's forwarder's alone, before each chunk it writes once the FIN
-// was found, and may run while resolve looks.
+// forwarder before it writes and as it reads the destination's end, until one
+// of them finds the client's FIN (one at a time: Relay.finMu); the goroutine
+// that waits for the client's answer (resolve) looks after that. No two looks
+// run at once. written is the destination's forwarder's alone, before each
+// chunk it writes once the FIN was found, and may run while resolve looks.
 type clientSocket interface {
 	look() clientLook
 	// written is how many bytes had been written to the socket in all,
@@ -203,13 +206,6 @@ const (
 	firstLookAgain = 50 * time.Microsecond
 	lastLookAgain  = 5 * time.Millisecond
 )
-
-// notTakenKept is how many bytes of what the client refused, from its start,
-// the relay keeps for Config.ClientStopped: enough for the end of a message's
-// framing (an HTTP/1 chunked body's last chunk and the empty line after it,
-// with a chunk extension or trailer fields), and never a copy of a whole
-// answer the client gave up on.
-const notTakenKept = 4 << 10
 
 // clientVerdict is what the client's answer, so far, says of a chunk set
 // aside.
@@ -289,14 +285,47 @@ func (r *Relay) clientFINRead() {
 // lookForClientFIN looks at the client's socket unless the FIN was found
 // already. It reports whether the FIN has been found.
 func (r *Relay) lookForClientFIN() bool {
+	fin, _ := r.lookForClientEnd()
+	return fin
+}
+
+// lookForClientEnd is lookForClientFIN, and also what its look said of the
+// client: clientUnknown where it took none, the FIN being found already.
+func (r *Relay) lookForClientEnd() (fin bool, said clientSaid) {
 	r.finMu.Lock()
 	defer r.finMu.Unlock()
+	said = clientUnknown
 	if !r.clientFIN.Load() {
-		if l := r.client.look(); l.said == clientFinned || l.said == clientClosed && r.clientEOF.Load() {
+		l := r.client.look()
+		said = l.said
+		if l.said == clientFinned || l.said == clientClosed && r.clientEOF.Load() {
 			r.clientFIN.Store(true)
 		}
 	}
-	return r.clientFIN.Load()
+	return r.clientFIN.Load(), said
+}
+
+// destEndRead is the destination's forwarder's look at the client's socket as
+// it reads the destination's end (its FIN or its reset), once it has told
+// Config.PeerEnded of it and before the relay forwards it to the client: it
+// tells Config.ClientEndedBeforeDest when the client had ended its side by
+// then, its FIN found (lookForClientFIN) or the connection closed. Until the
+// relay forwards the destination's end, the proxy has sent the client no FIN
+// and no reset, so a closed connection is the client's reset, or the proxy's
+// stack timing out a client that stopped answering, whose read gives the
+// client's forwarder no end of the client's (Config.PeerEnded is not told of
+// it). A client's end that comes after this look is read after it, and so
+// after PeerEnded was told of the destination's: which end came first is then
+// told by the order PeerEnded is told in. Where the client's socket cannot be
+// asked, or nothing is to be told (Config.ClientEndedBeforeDest nil), no look
+// is taken, and nothing is told.
+func (r *Relay) destEndRead() {
+	if r.client == nil || r.cfg.ClientEndedBeforeDest == nil {
+		return
+	}
+	if fin, said := r.lookForClientEnd(); fin || said == clientClosed {
+		r.cfg.ClientEndedBeforeDest()
+	}
 }
 
 // chunkFate is what becomes of a destination chunk the forwarder wrote to the
@@ -335,7 +364,8 @@ func (r *Relay) destWritten(ctx context.Context, t *tee, seq *atomic.Uint64, c f
 	defer r.verdictMu.Unlock()
 	switch {
 	case r.clientStopped.Load():
-		r.refuse(c)
+		r.notTakenChunks.Add(1)
+		r.notTakenBytes.Add(int64(len(c.Bytes)))
 		return fateRefused
 	case r.resolverDone != nil:
 		// Behind a chunk the client's answer has not decided yet: set aside
@@ -392,14 +422,14 @@ func (r *Relay) resolve(ctx context.Context, t *tee, seq *atomic.Uint64, done ch
 // settle carries out what the look l says of the chunks set aside, oldest
 // first (chunkVerdict): each one taken, or that no answer can be had for, is
 // teed, in order; a refused one is refused with every chunk behind it, and
-// counted (refuse), and the relay says once that the destination's stream
-// ended where the client stopped (Config.ClientStopped); the first one the
-// client has not answered for yet stops it. The forwarder's incomplete-mock
-// mark is set once the last chunk set aside, the one that earned it, is
-// teed. decided is whether any chunk was decided, settled whether none is
-// left set aside (when resolve ends). Each chunk set aside leaves
-// tee.awaiting only once it is on the tee's queue or refused, so the capture
-// watermark never loses sight of it.
+// counted, and the relay says once that the destination's stream ended where
+// the client stopped (Config.ClientStopped); the first one the client has not
+// answered for yet stops it. The forwarder's incomplete-mock mark is set once
+// the last chunk set aside, the one that earned it, is teed. decided is
+// whether any chunk was decided, settled whether none is left set aside (when
+// resolve ends). Each chunk set aside leaves tee.awaiting only once it is on
+// the tee's queue or refused, so the capture watermark never loses sight of
+// it.
 func (r *Relay) settle(t *tee, seq *atomic.Uint64, l clientLook, last bool) (decided, settled bool) {
 	r.verdictMu.Lock()
 	defer r.verdictMu.Unlock()
@@ -410,12 +440,13 @@ func (r *Relay) settle(t *tee, seq *atomic.Uint64, l clientLook, last bool) (dec
 			return decided, false
 		case verdictRefused:
 			for ok := true; ok; c, ok = t.firstAwaiting() {
-				r.refuse(c)
+				r.notTakenChunks.Add(1)
+				r.notTakenBytes.Add(int64(len(c.Bytes)))
 				t.doneAwaiting()
 			}
 			r.awaitingFrom, r.awaitingMark, r.resolverDone = nil, "", nil
 			if !r.clientStopped.Swap(true) && r.cfg.ClientStopped != nil {
-				r.cfg.ClientStopped(r.notTakenSoFar)
+				r.cfg.ClientStopped()
 			}
 			return true, true
 		}
@@ -436,43 +467,6 @@ func (r *Relay) settle(t *tee, seq *atomic.Uint64, l clientLook, last bool) (dec
 		}
 	}
 	return decided, true
-}
-
-// refuse counts the chunk c the client refused, and keeps its start while
-// fewer than notTakenKept bytes of what the client refused are kept
-// (notTakenSoFar), unless c reached the proxy after the client's FIN
-// (fakeconn.Chunk.AfterClientClose). The relay forwards the FIN to the
-// destination only after it numbered it, so such a chunk may be the
-// destination's answer to the client's going: a server whose streaming handler
-// returns when its client goes writes the end of a chunked body then. What the
-// client refused is kept only up to there, a destination that wrote it before
-// it could know the client had closed. Every chunk after it is numbered after
-// the FIN too (connseq.Upstream numbers them in the order the destination sent
-// them), so what is kept is the start of what was refused, with no gap. Under
-// verdictMu, so the chunks are kept in order.
-func (r *Relay) refuse(c fakeconn.Chunk) {
-	r.notTakenChunks.Add(1)
-	r.notTakenBytes.Add(int64(len(c.Bytes)))
-	if c.AfterClientClose {
-		return
-	}
-	before := r.notTakenSoFar()
-	if n := min(len(c.Bytes), notTakenKept-len(before)); n > 0 {
-		after := append(before[:len(before):len(before)], c.Bytes[:n]...)
-		r.notTaken.Store(&after)
-	}
-}
-
-// notTakenSoFar is the start of what the client refused so far, at most
-// notTakenKept bytes, up to the first chunk refused that reached the proxy
-// after the client's FIN (refuse), which Config.ClientStopped is given to
-// read: every chunk refused before the destination's stream ends is in it by
-// then. The caller must not change it.
-func (r *Relay) notTakenSoFar() []byte {
-	if p := r.notTaken.Load(); p != nil {
-		return *p
-	}
-	return nil
 }
 
 // awaitClientVerdict is run's wait, once both forwarders have returned, for

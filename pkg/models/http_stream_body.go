@@ -84,7 +84,11 @@ func (c HTTPStreamChunk) ValueByKey(key string) (string, bool) {
 // as a YAML sequence of chunks. Otherwise, it is written as a plain scalar string.
 func (h HTTPResp) MarshalYAML() (interface{}, error) {
 	bodyNode := &yamlLib.Node{}
-	if chunks, ok := streamChunksForYAML(h); ok {
+	// A body cut short by a fault after the head (HTTPSchema.MarshalYAML) is
+	// written flat: replay serves it byte for byte, and the chunk form gives
+	// back whole frames joined by separators only, without the last frame's
+	// end, or with an end for a frame the app read only part of.
+	if chunks, ok := streamChunksForYAML(h); ok && !h.flatBody {
 		// Streaming response — encode as a YAML sequence of chunks
 		bodyNode = encodeStreamChunksNode(chunks)
 	} else {

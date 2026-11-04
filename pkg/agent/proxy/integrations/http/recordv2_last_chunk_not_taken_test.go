@@ -14,34 +14,29 @@ import (
 
 // Through the relay, as the proxy records: a dependency answers a call with a
 // chunked response and flushes its body before it ends the message (a Go
-// handler that calls Flush, any server that streams). The client reads the
-// head and the body, has the whole JSON it asked for, and closes the
-// connection (a Go http.Client with keep-alives off closes on Body.Close
-// before EOF). The end of the message's framing, the last chunk and the empty
-// line after it, had reached the proxy before the client's FIN, but the relay
-// writes it to the client only after that (its forwarder was not run in
-// between, as on a busy host), and the client refuses it with a reset. The
-// destination ended the message before it could know the client had closed,
-// and the client took every byte the response carries: the exchange is whole
-// and recorded, its body the one the client read, and nothing is left out.
-// Before, the parser was given the stream only up to the refused bytes, found
-// a chunked body with no end, and left the exchange out as one the client
-// closed partway, so a test lost its dependency's mock (and, when the parser
-// ran ahead of the case's save, the test case over it) on how the client's
-// close raced the last chunk. The rows end what the destination sends in ways
-// that carry content, and those stay left out: the client never read it.
-//
-// The same ends reaching the proxy only after the client's FIN, which the
-// relay forwards to the destination, stay left out, as before: a server whose
-// streaming handler returns when its client goes (an SSE or long-poll answer
-// the app stopped reading) writes them then, in answer to the close, and the
-// client did not have all the destination would have sent.
+// handler that calls Flush, any server that streams). The client reads what it
+// wants of it and closes the connection: a Go http.Client with keep-alives off
+// closes on Body.Close once the app decoded the JSON it asked for, before the
+// last chunk came; an app that abandons a stream, or whose own timeout fires,
+// closes the same way. What the destination sends then, the client refuses
+// with a reset, whether it reached the proxy before the client's FIN (the
+// relay's forwarder was not run in between, as on a busy host) or after it (a
+// handler that returns only as its client goes, which the relay's forwarding
+// of the FIN tells it). The exchange is recorded as far as the client read it,
+// with a stopped_reading fault (models.FaultStoppedReading),
+// with no length, chunked as it was sent: replay serves it so, and holds the
+// connection open without the end until the app closes it, as here. Before,
+// the exchange was left out as one the client closed partway (unless what it
+// refused, before its FIN, was the framing's end alone), so a test lost its
+// dependency's mock (and, when the parser ran ahead of the case's save, the
+// test case over it) on how the client's close raced the last chunk. A chunk
+// the capture lost still leaves the exchange out, under its mark: what the
+// stream holds is then not what the client read.
 func TestRecordV2_ThroughTheRelayAChunkedResponseWhoseLastChunkTheClientDidNotTake(t *testing.T) {
 	const head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n"
 	const data = `{"id":"ch_1","status":"pending"}`
 	chunk := "20\r\n" + data + "\r\n"
-	// A last chunk whose extension is longer than any end of framing is
-	// short: what the relay keeps of the refusal holds it whole.
+	// A last chunk whose extension is longer than the rest of its framing.
 	longExt := "0;note=" + strings.Repeat("x", 200) + "\r\n\r\n"
 	for _, row := range []struct {
 		name string
@@ -50,110 +45,106 @@ func TestRecordV2_ThroughTheRelayAChunkedResponseWhoseLastChunkTheClientDidNotTa
 		// said the client stopped, after the client's FIN.
 		read, after, later string
 		// mark: the capture marked the exchange's mock incomplete (a chunk
-		// it lost) before the stream ended.
+		// it lost) before the stream ended: left out.
 		mark string
-		// whole: the exchange is recorded with body when after reached the
-		// proxy before the client's FIN; else it is left out. It is left
-		// out whenever after reached the proxy after the FIN.
-		whole bool
-		body  string
+		// body is the body recorded: the content the client read.
+		body string
 	}{
-		{name: "the last chunk and the empty line after it", read: head + chunk, after: "0\r\n\r\n", whole: true, body: data},
-		{name: "a last chunk with an extension", read: head + chunk, after: "0;done=1\r\n\r\n", whole: true, body: data},
-		{name: "a last chunk with a long extension", read: head + chunk, after: longExt, whole: true, body: data},
-		{name: "the empty line alone, after the last chunk the client took", read: head + chunk + "0\r\n", after: "\r\n", whole: true, body: data},
-		{name: "the CRLF after the data the client took, and the last chunk", read: head + "20\r\n" + data, after: "\r\n0\r\n\r\n", whole: true, body: data},
-		{name: "the last chunk, and the empty line after the client stopped", read: head + chunk, after: "0\r\n", later: "\r\n"},
-		{name: "the last chunk, and a trailer field after the client stopped", read: head + chunk, after: "0\r\n", later: "X-Checksum: 1\r\n\r\n"},
+		{name: "the last chunk and the empty line after it", read: head + chunk, after: "0\r\n\r\n", body: data},
+		{name: "a last chunk with an extension", read: head + chunk, after: "0;done=1\r\n\r\n", body: data},
+		{name: "a last chunk with a long extension", read: head + chunk, after: longExt, body: data},
+		{name: "the empty line alone, after the last chunk the client took", read: head + chunk + "0\r\n", after: "\r\n", body: data},
+		{name: "the CRLF after the data the client took, and the last chunk", read: head + "20\r\n" + data, after: "\r\n0\r\n\r\n", body: data},
+		{name: "the last chunk, and the empty line after the client stopped", read: head + chunk, after: "0\r\n", later: "\r\n", body: data},
+		{name: "the last chunk, and a trailer field after the client stopped", read: head + chunk, after: "0\r\n", later: "X-Checksum: 1\r\n\r\n", body: data},
 		{name: "the last chunk, after a chunk the capture lost", read: head + chunk, after: "0\r\n\r\n", mark: "per_conn_cap"},
-		{name: "the last chunk of an empty body", read: head, after: "0\r\n\r\n", whole: true},
-		{name: "a data chunk before the last chunk", read: head + chunk, after: "5\r\nmore!\r\n0\r\n\r\n"},
-		{name: "the rest of a chunk the client took the start of", read: head + "20\r\n" + data[:10], after: data[10:] + "\r\n0\r\n\r\n"},
-		{name: "a trailer field", read: head + chunk, after: "0\r\nX-Checksum: 1\r\n\r\n"},
-		{name: "the last chunk without the empty line", read: head + chunk, after: "0\r\n"},
+		{name: "the last chunk of an empty body", read: head, after: "0\r\n\r\n"},
+		{name: "a data chunk before the last chunk", read: head + chunk, after: "5\r\nmore!\r\n0\r\n\r\n", body: data},
+		{name: "the rest of a chunk the client took the start of", read: head + "20\r\n" + data[:10], after: data[10:] + "\r\n0\r\n\r\n", body: data[:10]},
+		{name: "a trailer field", read: head + chunk, after: "0\r\nX-Checksum: 1\r\n\r\n", body: data},
+		{name: "the last chunk without the empty line", read: head + chunk, after: "0\r\n", body: data},
+		{name: "a stream the client abandoned", read: head + chunk + chunk, after: chunk + "0\r\n\r\n", body: data + data},
 	} {
 		for _, beforeFIN := range []bool{true, false} {
-			when := "after the client's FIN"
-			if beforeFIN {
-				when = "before the client's FIN"
-			}
-			t.Run(when+"/"+row.name, func(t *testing.T) {
-				c := newRelayedConn(t)
-				var held *readsHeldAfter
+			for _, proven := range []string{"", "1"} {
+				when := "after the client's FIN"
 				if beforeFIN {
-					held = &readsHeldAfter{n: len(row.read), release: make(chan struct{})}
-					c.wrapDst = func(u net.Conn) net.Conn { held.Conn = u; return held }
+					when = "before the client's FIN"
 				}
-				c.start(t)
-				if held != nil {
-					// Before the relay's own cleanup waits for it to end.
-					t.Cleanup(held.let)
-				}
-				write(t, c.app, c.src, jdkRequest(7))
-				relayed(t, c.dest, jdkRequest(7))
-				if _, err := c.dest.Write([]byte(row.read)); err != nil {
-					t.Fatal(err)
-				}
-				relayed(t, c.app, row.read)
-				if beforeFIN {
-					// At the proxy's socket, unread: the relay's forwarder
-					// reads it only once the client's FIN is in.
-					write(t, c.dest, c.dst, row.after)
-				}
-				if err := c.app.Close(); err != nil {
-					t.Fatal(err)
-				}
-				awaitFIN(t, c.dest)
-				if beforeFIN {
-					held.let()
-				} else if _, err := c.dest.Write([]byte(row.after)); err != nil {
-					t.Fatal(err)
-				}
-				if row.later != "" {
-					for limit := time.Now().Add(10 * time.Second); !c.sess.EndedWhereClientStopped(); {
-						if time.Now().After(limit) {
-							t.Fatal("the relay did not say the client stopped")
-						}
-						time.Sleep(time.Millisecond)
+				t.Run(when+"/"+row.name+"/KEPLOY_PROVEN="+proven, func(t *testing.T) {
+					t.Setenv("KEPLOY_PROVEN", proven)
+					c := newRelayedConn(t)
+					var held *readsHeldAfter
+					if beforeFIN {
+						held = &readsHeldAfter{n: len(row.read), release: make(chan struct{})}
+						c.wrapDst = func(u net.Conn) net.Conn { held.Conn = u; return held }
 					}
-					if _, err := c.dest.Write([]byte(row.later)); err != nil {
+					c.start(t)
+					if held != nil {
+						// Before the relay's own cleanup waits for it to end.
+						t.Cleanup(held.let)
+					}
+					write(t, c.app, c.src, jdkRequest(7))
+					relayed(t, c.dest, jdkRequest(7))
+					if _, err := c.dest.Write([]byte(row.read)); err != nil {
 						t.Fatal(err)
 					}
-				}
-				if row.mark != "" {
-					c.sess.MarkMockIncomplete(row.mark)
-				}
-				mocks := c.end(t)
-				if !c.sess.EndedWhereClientStopped() {
-					t.Fatal("the relay did not say the destination's stream ended where the client stopped")
-				}
-				if !row.whole || !beforeFIN {
-					if len(mocks) != 0 {
-						t.Fatalf("recorded %d mock(s), the first with the body %q; want none: the client never read what came after its close",
-							len(mocks), mocks[0].Spec.HTTPResp.Body)
+					relayed(t, c.app, row.read)
+					if beforeFIN {
+						// At the proxy's socket, unread: the relay's forwarder
+						// reads it only once the client's FIN is in.
+						write(t, c.dest, c.dst, row.after)
 					}
-					reason := supervisor.LeftOutClientClosedPartway
+					if err := c.app.Close(); err != nil {
+						t.Fatal(err)
+					}
+					awaitFIN(t, c.dest)
+					if beforeFIN {
+						held.let()
+					} else if _, err := c.dest.Write([]byte(row.after)); err != nil {
+						t.Fatal(err)
+					}
+					if row.later != "" {
+						for limit := time.Now().Add(10 * time.Second); !c.sess.EndedWhereClientStopped(); {
+							if time.Now().After(limit) {
+								t.Fatal("the relay did not say the client stopped")
+							}
+							time.Sleep(time.Millisecond)
+						}
+						if _, err := c.dest.Write([]byte(row.later)); err != nil {
+							t.Fatal(err)
+						}
+					}
 					if row.mark != "" {
-						reason = row.mark + ": " + reason
+						c.sess.MarkMockIncomplete(row.mark)
 					}
-					if l := c.leftOut(reason); len(l) != 1 || c.mgr.MocksLeftOut() != 1 {
-						t.Fatalf("%d left-out lines for a close partway, %d left out; want the one exchange", len(l), c.mgr.MocksLeftOut())
+					mocks := c.end(t)
+					if !c.sess.EndedWhereClientStopped() {
+						t.Fatal("the relay did not say the destination's stream ended where the client stopped")
 					}
-					return
-				}
-				if len(mocks) != 1 {
-					t.Fatalf("recorded %d mocks, want the one exchange: the client took every byte the response carries", len(mocks))
-				}
-				if got := mocks[0].Spec.HTTPResp; got.StatusCode != 200 || got.Body != row.body {
-					t.Fatalf("recorded a %d with the body %q, want a 200 with %q", got.StatusCode, got.Body, row.body)
-				}
-				if s := c.spans.all(); len(s) != 0 || c.mgr.MocksLeftOut() != 0 {
-					t.Fatalf("left out %v (%d counted), want nothing", s, c.mgr.MocksLeftOut())
-				}
-				if w := c.warnings(); len(w) != 0 {
-					t.Fatalf("logged at %v: %q", w[0].Level, w[0].Message)
-				}
-			})
+					if row.mark != "" {
+						if len(mocks) != 0 {
+							t.Fatalf("recorded %d mock(s), the first with the body %q; want none: a chunk the capture lost",
+								len(mocks), mocks[0].Spec.HTTPResp.Body)
+						}
+						reason := row.mark + ": " + supervisor.LeftOutClientClosedPartway
+						if l := c.leftOut(reason); len(l) != 1 || c.mgr.MocksLeftOut() != 1 {
+							t.Fatalf("%d left-out lines for a chunk the capture lost, %d left out; want the one exchange", len(l), c.mgr.MocksLeftOut())
+						}
+						return
+					}
+					if len(mocks) != 1 {
+						t.Fatalf("recorded %d mocks, want the one exchange, as far as the client read it", len(mocks))
+					}
+					wantStoppedReading(t, mocks[0], row.body, sentChunked)
+					if s := c.spans.all(); len(s) != 0 || c.mgr.MocksLeftOut() != 0 {
+						t.Fatalf("left out %v (%d counted), want nothing", s, c.mgr.MocksLeftOut())
+					}
+					if w := c.warnings(); len(w) != 0 {
+						t.Fatalf("logged at %v: %q", w[0].Level, w[0].Message)
+					}
+				})
+			}
 		}
 	}
 }

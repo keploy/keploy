@@ -30,3 +30,12 @@ func PeerGone(conn net.Conn) (gone, known bool) {
 	}
 	return false, true
 }
+
+// finOnly reports whether the TCP socket fd has received its peer's FIN and
+// nothing after it: CLOSE_WAIT, which a socket reaches by its peer's FIN
+// while its own side is open. A reset moves it on (CLOSE), as a failure to
+// ask it reads.
+func finOnly(fd uintptr) bool {
+	info, err := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO)
+	return err == nil && info.State == unix.BPF_TCP_CLOSE_WAIT
+}

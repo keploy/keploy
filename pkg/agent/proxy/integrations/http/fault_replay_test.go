@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
@@ -89,8 +90,17 @@ func throughDisk(t *testing.T, m *models.Mock) *models.Mock {
 // returns. It returns the application's end and decodeHTTP's result.
 func replaying(t *testing.T, h *HTTP, mocks ...*models.Mock) (net.Conn, <-chan error) {
 	t.Helper()
+	r := replayingHeld(t, h, mocks...)
+	return r.app, r.done
+}
+
+// replayingHeld is replaying, with the idle marks the serve takes and the
+// run's end (stop).
+func replayingHeld(t *testing.T, h *HTTP, mocks ...*models.Mock) heldReplay {
+	t.Helper()
 	app, proxy := loopback(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	marks := newIdleMarks()
+	ctx, cancel := context.WithCancel(integrations.WithRequestHolder(context.Background(), marks))
 	returned := make(chan error, 1)
 	go func() {
 		err := h.decodeHTTP(ctx, []byte(faultReq), proxy, nil,
@@ -99,7 +109,7 @@ func replaying(t *testing.T, h *HTTP, mocks ...*models.Mock) (net.Conn, <-chan e
 		returned <- err
 	}()
 	t.Cleanup(func() { cancel(); _ = app.Close() })
-	return app, returned
+	return heldReplay{app: app, marks: marks, done: returned, stop: cancel}
 }
 
 func awaitReturn(t *testing.T, returned <-chan error) error {
@@ -187,6 +197,24 @@ func TestReplayFault_TheApplicationSeesWhatItSawAtRecord(t *testing.T) {
 			return s
 		},
 		app: appGivesUp,
+	}, {
+		name: "the head and a chunk, then nothing until the application gave up",
+		record: func(t *testing.T, c *relayedConn) seen {
+			write(t, c.dest, c.dst, chunkedHead+"a\r\n0123456789\r\n")
+			s := appGivesUp(t, c.app)
+			appClosed(t, c)
+			return s
+		},
+		app: appGivesUp,
+	}, {
+		name: "the head and part of a body the upstream's close ends, then nothing until the application gave up",
+		record: func(t *testing.T, c *relayedConn) seen {
+			write(t, c.dest, c.dst, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n01234")
+			s := appGivesUp(t, c.app)
+			appClosed(t, c)
+			return s
+		},
+		app: appGivesUp,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newRelayedConn(t)
@@ -201,12 +229,13 @@ func TestReplayFault_TheApplicationSeesWhatItSawAtRecord(t *testing.T) {
 			}
 
 			h := &HTTP{Logger: zap.NewNop()}
-			app, returned := replaying(t, h, throughDisk(t, m))
+			r := replayingHeld(t, h, throughDisk(t, m))
+			app, returned := r.app, r.done
 			atReplay := tc.app(t, app)
 			if atReplay != atRecord {
 				t.Errorf("at replay the application saw %+v; at record %+v (the mock's fault: %s)", atReplay, atRecord, m.Spec.Fault)
 			}
-			if m.Spec.Fault.Kind == models.FaultTimeout {
+			if m.Spec.Fault.Kind == models.FaultTimeout || m.Spec.Fault.Kind == models.FaultStoppedReading {
 				// Held until the application closed: the connection is
 				// its client's to end, not a clock's.
 				select {
@@ -215,8 +244,17 @@ func TestReplayFault_TheApplicationSeesWhatItSawAtRecord(t *testing.T) {
 				default:
 				}
 				_ = app.Close()
+				if !m.Spec.Fault.AppEndedFirst {
+					t.Fatalf("recorded %+v, want it marked as an app that ended its side first", *m.Spec.Fault)
+				}
+				// Its FIN may have been a half-close at record, so it may
+				// be at replay too: the hold outlasts it, until the run's
+				// end.
+				r.held(t)
+				r.stillHeld(t, "at the application's close")
+				r.stop()
 			}
-			if err := awaitReturn(t, returned); err != nil {
+			if err := awaitReturn(t, returned); err != nil && !errors.Is(err, context.Canceled) {
 				t.Errorf("decodeHTTP = %v, want nil: a recorded fault is a served mock, not a failure", err)
 			}
 		})

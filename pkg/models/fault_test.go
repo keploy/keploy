@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 	"unsafe"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // Each fault the format has, spelled the one way it has for it, validates;
@@ -26,6 +28,13 @@ func TestFaultValidate(t *testing.T) {
 		{"truncate", Fault{Kind: FaultTruncate, BodyBytes: 10}, ""},
 		{"truncate after no body bytes", Fault{Kind: FaultTruncate}, ""},
 		{"delay", Fault{Kind: FaultDelay, Delay: 3 * time.Second}, ""},
+		{"stopped reading after the head", Fault{Kind: FaultStoppedReading, AfterHead: true, BodyBytes: 5}, ""},
+		{"stopped reading after the head, no body read", Fault{Kind: FaultStoppedReading, AfterHead: true}, ""},
+		{"stopped reading of a body sent with a length", Fault{Kind: FaultStoppedReading, AfterHead: true, BodyBytes: 5, ContentLength: 20}, ""},
+		{"stopped reading of a body sent chunked", Fault{Kind: FaultStoppedReading, AfterHead: true, BodyBytes: 5, Chunked: true}, ""},
+		{"stopped reading of an app that ended its side first", Fault{Kind: FaultStoppedReading, AfterHead: true, BodyBytes: 5, AppEndedFirst: true}, ""},
+		{"timeout of an app that ended its side first", Fault{Kind: FaultTimeout, AppEndedFirst: true}, ""},
+		{"timeout after the head, of an app that ended its side first", Fault{Kind: FaultTimeout, AfterHead: true, BodyBytes: 3, AppEndedFirst: true}, ""},
 
 		{"no kind", Fault{}, "no kind"},
 		{"unknown kind", Fault{Kind: "tls_alert"}, "upgrade keploy"},
@@ -41,6 +50,20 @@ func TestFaultValidate(t *testing.T) {
 		{"negative body bytes", Fault{Kind: FaultTruncate, BodyBytes: -1}, "not negative"},
 		{"reset with body bytes and no head", Fault{Kind: FaultReset, BodyBytes: 5}, "set after_head"},
 		{"timeout with body bytes and no head", Fault{Kind: FaultTimeout, BodyBytes: 5}, "set after_head"},
+		{"stopped reading with no head", Fault{Kind: FaultStoppedReading}, "write kind timeout"},
+		{"stopped reading with a delay", Fault{Kind: FaultStoppedReading, AfterHead: true, Delay: time.Second}, "only kind delay"},
+		{"stopped reading with a negative length", Fault{Kind: FaultStoppedReading, AfterHead: true, ContentLength: -1}, "not negative"},
+		{"stopped reading with a length and chunked", Fault{Kind: FaultStoppedReading, AfterHead: true, ContentLength: 20, Chunked: true}, "one way"},
+		{"timeout with a length", Fault{Kind: FaultTimeout, AfterHead: true, ContentLength: 20}, "only kind stopped_reading"},
+		{"truncate chunked", Fault{Kind: FaultTruncate, BodyBytes: 5, Chunked: true}, "only kind stopped_reading"},
+		{"reset with a length", Fault{Kind: FaultReset, AfterHead: true, ContentLength: 20}, "only kind stopped_reading"},
+		{"eof chunked", Fault{Kind: FaultEOF, Chunked: true}, "only kind stopped_reading"},
+		{"delay with a length", Fault{Kind: FaultDelay, Delay: time.Second, ContentLength: 20}, "a delay sends the whole answer"},
+		{"delay chunked", Fault{Kind: FaultDelay, Delay: time.Second, Chunked: true}, "a delay sends the whole answer"},
+		{"reset of an app that ended its side first", Fault{Kind: FaultReset, AppEndedFirst: true}, "only kinds stopped_reading and timeout"},
+		{"eof of an app that ended its side first", Fault{Kind: FaultEOF, AppEndedFirst: true}, "only kinds stopped_reading and timeout"},
+		{"truncate of an app that ended its side first", Fault{Kind: FaultTruncate, BodyBytes: 5, AppEndedFirst: true}, "only kinds stopped_reading and timeout"},
+		{"delay of an app that ended its side first", Fault{Kind: FaultDelay, Delay: time.Second, AppEndedFirst: true}, "a delay sends the whole answer"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.f.Validate()
@@ -75,6 +98,7 @@ func TestFaultString(t *testing.T) {
 		{&Fault{Kind: FaultTimeout}, "no answer until the application closed"},
 		{&Fault{Kind: FaultTimeout, AfterHead: true, BodyBytes: 3}, "upstream sent the head and 3 body bytes, then nothing until the application closed"},
 		{&Fault{Kind: FaultTruncate, BodyBytes: 10}, "upstream sent the head and 10 body bytes, then closed"},
+		{&Fault{Kind: FaultStoppedReading, AfterHead: true, BodyBytes: 5}, "the application read the head and 5 body bytes, then stopped reading and closed"},
 		{&Fault{Kind: FaultDelay, Delay: 1500 * time.Millisecond}, "answer held 1.5s"},
 		{&Fault{Kind: "tls_alert"}, `fault "tls_alert"`},
 		{nil, ""},
@@ -232,6 +256,30 @@ func TestDiskKindAndFaultKindMismatch(t *testing.T) {
 	} {
 		if got := FaultKindMismatch(tc.kind, tc.f) != ""; got != tc.bad {
 			t.Errorf("FaultKindMismatch(%s, %v) refuses: %v, want %v", tc.kind, tc.f, got, tc.bad)
+		}
+	}
+}
+
+// The mark of an app that ended its side first (AppEndedFirst) goes through
+// BSON, as a mock stored in a database does, and comes back; a fault without
+// it comes back without it, and writes no key for it.
+func TestAFaultsAppEndedFirstMarkRoundTripsThroughBSON(t *testing.T) {
+	for _, want := range []Fault{
+		{Kind: FaultStoppedReading, AfterHead: true, BodyBytes: 5, Chunked: true, AppEndedFirst: true},
+		{Kind: FaultTimeout, AppEndedFirst: true},
+		{Kind: FaultStoppedReading, AfterHead: true, BodyBytes: 5, Chunked: true},
+		{Kind: FaultTimeout},
+	} {
+		b, err := bson.Marshal(want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got Fault
+		if err := bson.Unmarshal(b, &got); err != nil || got != want {
+			t.Fatalf("bson round trip of %+v = %+v (%v)", want, got, err)
+		}
+		if _, err := bson.Raw(b).LookupErr("app_ended_first"); (err == nil) != want.AppEndedFirst {
+			t.Fatalf("bson of %+v: the app_ended_first key is there = %v, want %v", want, err == nil, want.AppEndedFirst)
 		}
 	}
 }

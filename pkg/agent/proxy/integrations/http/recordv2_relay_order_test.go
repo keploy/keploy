@@ -65,6 +65,10 @@ type relayedConn struct {
 	// the client's process exit on its own, EndUnjudged where they cannot
 	// say how it released the connection (the macOS and Windows hooks).
 	clientEnd atomic.Uint32
+	// endHook, when set, runs as the relay reads a side's end, on that side's
+	// forwarder, and marks it on the session by calling mark: it orders the
+	// two ends' marks as a busy host's scheduler can.
+	endHook func(dir fakeconn.Direction, mark func())
 }
 
 // loopback returns the two ends of a loopback TCP connection.
@@ -114,7 +118,9 @@ func (c *relayedConn) startRelay(t *testing.T) {
 	// The relay carries the connection from its first byte: its session is
 	// never one the capture joined mid-way (JoinedMidConnection). It ends the
 	// destination's stream where the client stopped taking it, and says so on
-	// the session, as the proxy wires it (recordViaSupervisor).
+	// the session, as it says the client ended its side before the
+	// destination's end reached it, as the proxy wires them
+	// (recordViaSupervisor).
 	c.sess = &supervisor.Session{
 		Mocks: c.mocks, Mgr: c.mgr, Orphans: c.spans,
 		Logger: zap.New(zapcore.NewTee(zaptest.NewLogger(t).Core(), c.core)), ClientConnID: "relayed-1",
@@ -128,7 +134,7 @@ func (c *relayedConn) startRelay(t *testing.T) {
 	if c.wrapDst != nil {
 		dst = c.wrapDst(dst)
 	}
-	r := relay.New(relay.Config{Logger: zap.NewNop(), HalfCloseGrace: c.grace, ClientStopped: c.sess.MarkEndedWhereClientStopped, PeerEnded: func(dir fakeconn.Direction, reset bool) {
+	mark := func(dir fakeconn.Direction, reset bool) {
 		why := supervisor.EndMayBeFault
 		if c.stopBegun.Load() {
 			why = supervisor.EndAtStop
@@ -136,7 +142,14 @@ func (c *relayedConn) startRelay(t *testing.T) {
 			why = supervisor.NoFaultEnd(c.clientEnd.Load())
 		}
 		c.sess.MarkPeerEndedBy(dir, reset, why)
-	}}, src, dst)
+	}
+	r := relay.New(relay.Config{Logger: zap.NewNop(), HalfCloseGrace: c.grace, ClientStopped: c.sess.MarkEndedWhereClientStopped, PeerEnded: func(dir fakeconn.Direction, reset bool) {
+		if c.endHook == nil {
+			mark(dir, reset)
+			return
+		}
+		c.endHook(dir, func() { mark(dir, reset) })
+	}, ClientEndedBeforeDest: c.sess.MarkClientEndedBeforeDest}, src, dst)
 	c.sess.ClientStream, c.sess.DestStream = r.ClientStream(), r.DestStream()
 	ctx, cancel := context.WithCancel(context.Background())
 	c.stopRelay = cancel
@@ -191,10 +204,14 @@ func write(t *testing.T, w, at net.Conn, b string) {
 	}
 }
 
-// relayed reads len(b) bytes at r, as the relay delivers them.
+// relayed reads len(b) bytes at r, as the relay delivers them, within 10s: a
+// relay that never delivers them fails the row here, never by the package's
+// timeout. r's read deadline is cleared again after.
 func relayed(t *testing.T, r net.Conn, b string) {
 	t.Helper()
 	buf := make([]byte, len(b))
+	_ = r.SetReadDeadline(time.Now().Add(10 * time.Second))
+	defer func() { _ = r.SetReadDeadline(time.Time{}) }()
 	if _, err := io.ReadFull(r, buf); err != nil || string(buf) != b {
 		t.Fatalf("relayed %q, %v; want %q", buf, err, b)
 	}
@@ -269,7 +286,7 @@ func refused408(t *testing.T, round int, c *relayedConn, mocks []*models.Mock, p
 	if m.Spec.HTTPReq == nil || !strings.HasSuffix(m.Spec.HTTPReq.URL, path) {
 		t.Fatalf("round %d: the last mock is %v, want the call to %s", round, m.Spec.HTTPReq, path)
 	}
-	wantFault(t, m, models.Fault{Kind: models.FaultTimeout})
+	wantFault(t, m, models.Fault{Kind: models.FaultTimeout, AppEndedFirst: true})
 	return mocks[:len(mocks)-1]
 }
 
