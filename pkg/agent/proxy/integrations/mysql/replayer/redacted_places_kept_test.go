@@ -40,7 +40,7 @@ func keptExecute(sql string, vals ...string) mysql.Request {
 // or a binary string is bound.
 func keptExecuteBytes(sql string, vals ...string) mysql.Request {
 	r := keptExecute(sql)
-	msg := r.PacketBundle.Message.(*mysql.StmtExecutePacket)
+	msg := r.Message.(*mysql.StmtExecutePacket)
 	for _, v := range vals {
 		msg.Parameters = append(msg.Parameters, mysql.Parameter{Type: 252, Value: []byte(v)})
 	}
