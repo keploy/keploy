@@ -34,6 +34,15 @@ func TestPlacesOfNoMockIsNoPlaces(t *testing.T) {
 	if p.body || len(p.fields) > 0 || p.decodedPath("/x/y") != "/x/y" {
 		t.Errorf("placesOf(nil) = %+v, want no places", p)
 	}
+	// A recording of no HTTP call, with patterns, and a pool that holds
+	// one and no recording at all, redact nothing.
+	other := &models.Mock{Name: "other", Noise: []string{`^REDACTED_abc$`}}
+	if p := placesOf(other); p.body || len(p.fields) > 0 || len(p.segments) > 0 {
+		t.Errorf("placesOf(a recording of no HTTP call) = %+v, want no places", p)
+	}
+	if p := poolPlaces(nil, []*models.Mock{nil, other}, "/x/y"); p.body || p.decodedPath("/x/y") != "/x/y" {
+		t.Errorf("the places of a pool of no HTTP recording = %+v, want none", p)
+	}
 }
 
 // A redacted path keeps what holds no value: a path with no leading "/" (the

@@ -116,7 +116,7 @@ func renderMockRequest(mockReq *models.HTTPReq, mockNoise []string) string {
 	for k, v := range mockReq.Header {
 		header[k] = v
 	}
-	places := redactedPlacesOf(mockReq, mockNoise)
+	places := placesFor(mockReq, mockNoise)
 	path := mockURLPath(mockReq.URL)
 	if _, err := parseRecordedURL(mockReq.URL); err == nil || places.urlUnread {
 		// A URL that does not parse, at a mock that redacted something,

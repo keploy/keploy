@@ -2,8 +2,10 @@ package http
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"hash/maphash"
 	"io"
 	"maps"
 	"mime"
@@ -11,11 +13,11 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"weak"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -76,59 +78,160 @@ type redactedPlaces struct {
 }
 
 // placesOf reads the places of m's recorded request the obfuscator
-// redacted; none when m is nil or no HTTP call. A recording's places are
-// read once (placesMemo): they are a function of its recorded request and
-// its patterns, which a recording of the pool never changes (a served view
-// is a copy of it). The places returned are read only: poolPlaces adds to a
-// copy.
+// redacted; none when m is nil or no HTTP call (placesFor).
 func placesOf(m *models.Mock) redactedPlaces {
 	if m == nil {
-		return redactedPlacesOf(nil, nil)
+		return placesFor(nil, nil)
 	}
-	key := weak.Make(m)
-	if e, ok := placesMemo.Load(key); ok {
-		if e := e.(*memoPlaces); e.req == m.Spec.HTTPReq && sameNoise(e.noise, m.Noise) {
-			return e.places
-		}
+	return placesFor(m.Spec.HTTPReq, m.Noise)
+}
+
+// placesFor reads the places of the recorded request r redacted by the
+// patterns noise. They are a function of r's content and the patterns'
+// texts, and are kept by those (placesKept): the agent stages each test's
+// pool from copies of the recordings, so a recording is read once a run,
+// whichever copy of it a test's pool holds. A recording with no patterns
+// redacted nothing: it is read for its path and how its body is read
+// (fieldsIn) only, with no digest. The places returned are read only:
+// poolPlaces adds to a copy.
+func placesFor(r *models.HTTPReq, noise []string) redactedPlaces {
+	if r == nil || len(noise) == 0 {
+		return redactedPlacesOf(r, noise)
+	}
+	key := placesKey(r, noise)
+	if p, ok := placesKept.get(key); ok {
+		return p
 	}
 	placesReads.Add(1)
-	p := redactedPlacesOf(m.Spec.HTTPReq, m.Noise)
-	if _, replaced := placesMemo.Swap(key, &memoPlaces{req: m.Spec.HTTPReq, noise: m.Noise, places: p}); !replaced {
-		// The entry goes with its recording.
-		runtime.AddCleanup(m, func(k weak.Pointer[models.Mock]) { placesMemo.Delete(k) }, key)
-	}
+	p := redactedPlacesOf(r, noise)
+	placesKept.put(key, p, p.size(noise))
 	return p
 }
 
-// placesMemo holds each recording's places once read, by the recording: a
-// weak pointer, so it keeps no recording of a pool that is gone. A miss
-// report, and a debug line, over a pool of n recordings unions n sets read
-// once, not n recorded requests read again for each call.
-var placesMemo sync.Map // weak.Pointer[models.Mock] -> *memoPlaces
-
 // placesReads counts the recorded requests read for their places
-// (placesOf): one a recording, however many calls miss.
+// (placesFor): one a recording with patterns, however many calls miss, and
+// however many tests' pools hold a copy of it.
 var placesReads atomic.Int64
 
-// memoPlaces are a recording's places, with the recorded request and the
-// patterns they were read from: a recording given another request or other
-// patterns is read again.
-type memoPlaces struct {
-	req    *models.HTTPReq
-	noise  []string
-	places redactedPlaces
+// placesKey is the digest of what a recording's places are read from: r's
+// URL, query parameters, headers and body, and the patterns' texts, each
+// written with its length, a map's pairs in key order. It is two 64-bit
+// hashes (hash/maphash) under two seeds drawn at start: no two recordings'
+// contents meet by chance in 128 bits, and the seeds are not known outside
+// the process.
+func placesKey(r *models.HTTPReq, noise []string) placesDigest {
+	var h [2]maphash.Hash
+	h[0].SetSeed(placesSeeds[0])
+	h[1].SetSeed(placesSeeds[1])
+	write := func(s string) {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(s)))
+		for i := range h {
+			_, _ = h[i].Write(n[:])
+			_, _ = h[i].WriteString(s)
+		}
+	}
+	pairs := func(m map[string]string) {
+		keys := make([]string, 0, 16)
+		for k := range m {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		write(strconv.Itoa(len(keys)))
+		for _, k := range keys {
+			write(k)
+			write(m[k])
+		}
+	}
+	write(r.URL)
+	pairs(r.URLParams)
+	pairs(r.Header)
+	write(r.Body)
+	write(strconv.Itoa(len(noise)))
+	for _, pat := range noise {
+		write(pat)
+	}
+	return placesDigest{h[0].Sum64(), h[1].Sum64()}
 }
 
-// sameNoise reports whether a and b are the same patterns: one slice.
-func sameNoise(a, b []string) bool {
-	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
+// placesDigest is a recording's digest (placesKey).
+type placesDigest [2]uint64
+
+// placesSeeds are placesKey's seeds.
+var placesSeeds = [2]maphash.Seed{maphash.MakeSeed(), maphash.MakeSeed()}
+
+// maxKeptPlaces bounds the bytes the places kept hold (size): past it, kept
+// places are dropped, any of them, until the new ones fit.
+const maxKeptPlaces = 32 << 20
+
+// placesKept are the places read, by their recording's digest (placesKey).
+var placesKept = keptPlaces{byKey: map[placesDigest]keptEntry{}, max: maxKeptPlaces}
+
+// keptPlaces are places by digest, holding at most max bytes (size).
+type keptPlaces struct {
+	mu    sync.RWMutex
+	byKey map[placesDigest]keptEntry
+	bytes int
+	max   int
+}
+
+type keptEntry struct {
+	places redactedPlaces
+	size   int
+}
+
+func (k *keptPlaces) get(key placesDigest) (redactedPlaces, bool) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	e, ok := k.byKey[key]
+	return e.places, ok
+}
+
+// put keeps p, of size bytes, by key, dropping kept places until it fits;
+// places larger than the bound are not kept.
+func (k *keptPlaces) put(key placesDigest, p redactedPlaces, size int) {
+	if size > k.max {
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if old, ok := k.byKey[key]; ok {
+		delete(k.byKey, key)
+		k.bytes -= old.size
+	}
+	for other, e := range k.byKey {
+		if k.bytes+size <= k.max {
+			break
+		}
+		delete(k.byKey, other)
+		k.bytes -= e.size
+	}
+	k.byKey[key] = keptEntry{places: p, size: size}
+	k.bytes += size
+}
+
+// size is about the bytes p holds, read by the patterns noise: its names,
+// its recorded path and the patterns' texts, each with what a map entry or
+// a compiled pattern costs.
+func (p redactedPlaces) size(noise []string) int {
+	n := 512 + len(p.recordedPath) + 64*len(p.segments)
+	for _, m := range []map[string]bool{p.headers, p.query, p.fields, p.keys} {
+		for name := range m {
+			n += 64 + len(name)
+		}
+	}
+	for _, pat := range noise {
+		n += 256 + 4*len(pat)
+	}
+	return n
 }
 
 // poolPlaces are the places closest's recorded request redacted, with those
 // of every recording of pool added: a miss report names the call redacted
 // by every place a recording it was compared with redacted, so a nearer
 // recording that redacted nothing does not show the secret another hid,
-// and the closest recording's places only add to them. A path segment's
+// and the closest recording's places only add to them. A recording of the
+// pool with no patterns redacted nothing and is not read. A path segment's
 // place is taken from a recording of the pool whose path has as many
 // segments as the call's, livePath (escaped), only: a path of another
 // shape says nothing of the call's segment i. The patterns, the recorded
@@ -139,6 +242,9 @@ func poolPlaces(closest *models.Mock, pool []*models.Mock, livePath string) reda
 	p := placesOf(closest).clone()
 	n := len(pathSegments(livePath))
 	for _, m := range pool {
+		if m == nil || len(m.Noise) == 0 {
+			continue
+		}
 		q := placesOf(m)
 		p.add(q, q.pathSegs == n)
 	}
@@ -163,9 +269,16 @@ func shapeSummary(request *http.Request) string {
 
 // clone is p with maps of its own, which add may add to.
 func (p redactedPlaces) clone() redactedPlaces {
-	p.headers, p.query, p.segments = maps.Clone(p.headers), maps.Clone(p.query), maps.Clone(p.segments)
-	p.fields, p.keys = maps.Clone(p.fields), maps.Clone(p.keys)
+	p.headers, p.query, p.segments = own(p.headers), own(p.query), own(p.segments)
+	p.fields, p.keys = own(p.fields), own(p.keys)
 	return p
+}
+
+// own is a copy of m, a map even when m is nil.
+func own[K comparable](m map[K]bool) map[K]bool {
+	c := make(map[K]bool, len(m))
+	maps.Copy(c, m)
+	return c
 }
 
 // add adds q's places to p's, its path segments' when segments is true.
@@ -184,7 +297,7 @@ func (p *redactedPlaces) add(q redactedPlaces, segments bool) {
 // redactedPlacesOf reads the places of r the obfuscator redacted, by the
 // mock's patterns noise.
 func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
-	p := redactedPlaces{values: util.NewNoiseChecker(noise), pathSegs: -1, headers: map[string]bool{}, query: map[string]bool{}, segments: map[int]bool{}, fields: map[string]bool{}, keys: map[string]bool{}}
+	p := redactedPlaces{values: util.NewNoiseChecker(noise), pathSegs: -1}
 	if r == nil {
 		return p
 	}
@@ -202,6 +315,8 @@ func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
 	if p.values == nil {
 		return p
 	}
+	p.headers, p.query, p.segments = map[string]bool{}, map[string]bool{}, map[int]bool{}
+	p.fields, p.keys = map[string]bool{}, map[string]bool{}
 	for k, v := range r.Header {
 		if p.noisy(v) {
 			p.headers[strings.ToLower(k)] = true
