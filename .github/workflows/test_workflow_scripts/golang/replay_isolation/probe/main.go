@@ -95,6 +95,7 @@ func app(args []string) {
 	sink6 := fs.String("sink6", "", "the sink's IPv6 address (empty: skip IPv6)")
 	imds := fs.String("imds", "", "the metadata address the sink owns (empty: the app makes no metadata call)")
 	peer := fs.String("peer", "", "a container name the network holds, resolved through it (empty: skip)")
+	unrecorded := fs.Bool("unrecorded", false, "also look up the names a recording must not hold (the replay's and the baselines' args; the recording's leave it off)")
 	listen := fs.String("listen", ":8080", "")
 	_ = fs.Parse(args)
 	at := func(p int) string { return net.JoinHostPort(*sinkIP, strconv.Itoa(p)) }
@@ -113,22 +114,36 @@ func app(args []string) {
 			outcome("imds-tcp", dialWrite("tcp", net.JoinHostPort(*imds, strconv.Itoa(portIMDS)), "GET /latest/meta-data/ HTTP/1.1\r\nHost: "+*imds+"\r\nConnection: close\r\n\r\n"))
 		}
 		outcome("tfo", fastOpen(*sinkIP, portTFO))
-		_, err := net.DefaultResolver.LookupHost(context.Background(), "leak-probe.invalid-replay-isolation.test")
-		outcome("dns-lookup", err)
-		// An unrecorded single-label name: docker's 127.0.0.11 recurses one
-		// it does not hold to its upstream like any other name.
-		_, err = net.DefaultResolver.LookupHost(context.Background(), "leak-probe-bare-replay-isolation")
-		outcome("dns-bare-lookup", err)
+		// A name that does not exist, looked up at record and at replay: the
+		// recording holds its NXDOMAIN, which the replay serves itself, so it
+		// fails as it did while recording and never reaches the sink there
+		// (dns-recorded).
+		_, err := net.DefaultResolver.LookupHost(context.Background(), "recorded-nx.invalid-replay-isolation.test")
+		outcome("dns-recorded-lookup", err)
+		// The names below are looked up only with -unrecorded, which the
+		// recording leaves off, so no mock answers them at replay.
+		if *unrecorded {
+			_, err = net.DefaultResolver.LookupHost(context.Background(), "leak-probe.invalid-replay-isolation.test")
+			outcome("dns-lookup", err)
+			// An unrecorded single-label name: docker's 127.0.0.11 recurses
+			// one it does not hold to its upstream like any other name.
+			_, err = net.DefaultResolver.LookupHost(context.Background(), "leak-probe-bare-replay-isolation")
+			outcome("dns-bare-lookup", err)
+		}
 		// A container the network holds: its address, which only docker's
 		// resolver knows, says that resolver still answers the network's
-		// own names.
+		// own names. The recording looks it up too, before the peer is up,
+		// so it holds the name's NXDOMAIN, and the replay must still ask
+		// docker's resolver.
 		if *peer != "" {
 			// Its name's other types (TXT, SRV, and what CNAME asks), which
 			// docker's resolver does not hold and recurses to its upstream:
 			// the sink counts each as dns-owned.
-			_, _ = net.DefaultResolver.LookupTXT(context.Background(), *peer)
-			_, _, _ = net.DefaultResolver.LookupSRV(context.Background(), "", "", *peer)
-			_, _ = net.DefaultResolver.LookupCNAME(context.Background(), *peer)
+			if *unrecorded {
+				_, _ = net.DefaultResolver.LookupTXT(context.Background(), *peer)
+				_, _, _ = net.DefaultResolver.LookupSRV(context.Background(), "", "", *peer)
+				_, _ = net.DefaultResolver.LookupCNAME(context.Background(), *peer)
+			}
 			addrs, err := net.DefaultResolver.LookupHost(context.Background(), *peer)
 			if err != nil {
 				outcome("dns-peer", err)
@@ -266,8 +281,9 @@ func sink(args []string) {
 					p = string(buf[:n]) // udp-connected, udp-sendto, udp6
 				}
 				if path == "dns-udp" {
-					// The probe's own dotted name counts as dns-udp, its
-					// single-label one as dns-bare; any other name
+					// The probe's own dotted name counts as dns-udp, the one
+					// its recording holds as dns-recorded, its single-label one
+					// as dns-bare; any other name
 					// (keploy's or the runtime's own lookups) as dns-other, so a
 					// count names who leaked. Every name goes to dns-names.txt.
 					// The sink answers the probe's names NXDOMAIN and every
@@ -284,6 +300,8 @@ func sink(args []string) {
 						qtype = int(buf[off])<<8 | int(buf[off+1])
 					}
 					switch {
+					case strings.HasPrefix(name, "recorded-nx."):
+						p = "dns-recorded"
 					case strings.HasPrefix(name, "riso-peer") && qtype != 1 && qtype != 28 && qtype != 15:
 						p = "dns-owned"
 						appendLine(filepath.Join(*dir, "dns-owned-types.txt"), name+" "+strconv.Itoa(qtype))

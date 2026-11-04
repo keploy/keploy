@@ -41,6 +41,13 @@
 #
 # Per mode: baseline (no keploy: each path must reach the sink, so a zero in
 # replay means keploy kept it in), record, replay, and the opt-in rows.
+# The recording's probe runs without -unrecorded, so the names the isolation
+# rows count (leak-probe*, the peer's other types) are not in the recording
+# and stay misses at replay. It does look up recorded-nx.*, which does not
+# exist: the recording holds its NXDOMAIN and the replay must serve it, with
+# no resolver asked even under the DNS opt-in; and the peer's name, before
+# the peer is up, so the recording holds that NXDOMAIN too and the replay must
+# still ask docker's resolver, which now knows the peer.
 # "internal" (report only) runs the probe on an internal: true docker network.
 # Counts land in $W/out/<phase>/<path>.count. Each assertion prints one
 # "ROW <name>: PASS|FAIL" line and any FAIL fails the lane.
@@ -59,7 +66,7 @@ MODES=("$@"); [ ${#MODES[@]} -gt 0 ] || MODES=(native docker)
 SINKPID=""
 DOCKER_RESOLV=""
 FAILED=0
-PATHS="tcp bypass-tcp fork-tcp tfo imds-tcp udp-connected udp-sendto udp-quic icmp-raw icmp-dgram dns-udp dns-bare dns-other dns-tcp tcp6 udp6 dns-owned"
+PATHS="tcp bypass-tcp fork-tcp tfo imds-tcp udp-connected udp-sendto udp-quic icmp-raw icmp-dgram dns-udp dns-bare dns-other dns-tcp tcp6 udp6 dns-owned dns-recorded"
 # The recording makes no metadata call (RECARGS has no -imds), so the replay's
 # is one no mock answers, as the IMDS rows need. keploy records a call that
 # ended with no answer as its fault: the probe writes its metadata request and
@@ -67,7 +74,7 @@ PATHS="tcp bypass-tcp fork-tcp tfo imds-tcp udp-connected udp-sendto udp-quic ic
 # would be a fault mock (whichever close came first) that the replay serves,
 # and the replay's report would not name the call.
 RECARGS="app -sink 198.18.0.10 -sink6 fd00::10 -peer riso-peer"
-APPARGS="$RECARGS -imds 198.18.0.11"
+APPARGS="$RECARGS -imds 198.18.0.11 -unrecorded"
 # Native runs: as root, in a mount namespace of their own whose resolv.conf
 # names the sink and whose nsswitch.conf asks files then DNS (a runner's image
 # may list systemd-resolved first, which answers from outside the namespace).
@@ -177,6 +184,24 @@ rows_reach() {
 }
 # row_log NAME FILE REGEX: FILE has a line matching REGEX.
 row_log() { row "$1" "$(grep -qE -- "$3" "$2" 2>/dev/null && echo 1)" "/$3/ in $(basename "$(dirname "$2")")"; }
+# rows_recorded_nx MODE: the recording holds an NXDOMAIN for recorded-nx.*
+# (and, under docker, for the peer, which was not up yet); the replay serves
+# it, so the app's lookup fails as it did while recording, the name is not
+# reported as one keploy answered itself, and no resolver is asked, with the
+# DNS opt-in too.
+rows_recorded_nx() {
+	local m=$1 names=(recorded-nx.invalid-replay-isolation.test.) n p
+	[ "$m" = native ] || names+=(riso-peer.)
+	rows_reach "record-$m" dns-recorded
+	for n in "${names[@]}"; do
+		row "record-$m records the NXDOMAIN of $n" "$(cat "$W/$m"/keploy/test-set-*/mocks.yaml 2>/dev/null | grep -A5 -F -- "name: $n" | grep -q 'rcode: 3' && echo 1)" "$m/keploy mocks"
+	done
+	for p in "replay-$m" "replay-$m-dns"; do
+		rows_zero "$p" dns-recorded
+		row_log "$p serves the recorded NXDOMAIN" "$W/out/$p/keploy.log" 'probe dns-recorded-lookup: .*no such host'
+		row_nolog "$p does not report the recorded name as a miss" "$W/out/$p/keploy.log" "${KEPT}DNS recorded-nx"
+	done
+}
 # row_nolog NAME FILE REGEX: FILE has no line matching REGEX.
 row_nolog() { row "$1" "$(grep -qE -- "$3" "$2" 2>/dev/null || echo 1)" "no /$3/ in $(basename "$(dirname "$2")")"; }
 
@@ -265,7 +290,7 @@ for mode in "${MODES[@]}"; do
 	native)
 		log "baseline-native"
 		sink_start base-native
-		"${SINKDNS[@]}" "$W/egressprobe" app -sink 198.18.0.10 -sink6 fd00::10 -imds 198.18.0.11 -listen :18081 2> "$W/out/base-native/app.log" &
+		"${SINKDNS[@]}" "$W/egressprobe" app -sink 198.18.0.10 -sink6 fd00::10 -imds 198.18.0.11 -unrecorded -listen :18081 2> "$W/out/base-native/app.log" &
 		AP=$!
 		waitfor 30 curl -sf localhost:18081/health || echo "baseline app not up"
 		fire http://localhost:18081 "$W/out/base-native/app.log"
@@ -325,8 +350,9 @@ for mode in "${MODES[@]}"; do
 		sink_stop
 
 		# A container keploy-network holds, which the probe resolves by name.
-		# Started after the recording, so no DNS mock answers it: the replay's
-		# miss must go to docker's resolver, which alone knows its address.
+		# Started after the recording, which holds only its NXDOMAIN: the
+		# replay must still ask docker's resolver, which alone knows its
+		# address now.
 		docker run -d --name riso-peer --net keploy-network riso-probe:local app >/dev/null || die "peer container"
 		RUNNER=($S)
 		replay replay-docker -c "$RUN" --containerName riso-app --delay 10
@@ -369,8 +395,8 @@ for mode in "${MODES[@]}"; do
 		docker compose down --remove-orphans >/dev/null 2>&1
 		sink_stop
 
-		# The peer service joins only now, after the recording, so no DNS
-		# mock answers it (as in the docker phase).
+		# The peer service joins only now, after the recording, which holds
+		# only its NXDOMAIN (as in the docker phase).
 		compose_yml riso-app 8080 "$APPARGS" peer
 		RUNNER=($S)
 		replay replay-compose -c "docker compose up" --containerName riso-app --delay 10
@@ -446,6 +472,7 @@ for mode in "${MODES[@]}"; do
 		row "replay-native-dns forwards to the host's resolver" "$([ "$c" -gt 0 ] && echo 1)" "$c DNS at the sink"
 		row_log "replay-native-dns names its opt-in" "$W/out/replay-native-dns/keploy.log" "$EGRESS_DNS"
 		row_nolog "replay-native-dns does not report the forwarded name as kept inside" "$W/out/replay-native-dns/keploy.log" "${KEPT}DNS leak-probe"
+		rows_recorded_nx native
 		row "refuse-native fails" "$([ "$(cat "$W/out/refuse-native/exit" 2>/dev/null)" != 0 ] && echo 1)" "exit $(cat "$W/out/refuse-native/exit" 2>/dev/null)"
 		row_log "refuse-native says why" "$W/out/refuse-native/keploy.log" 'entry \\?"imds\\?" is not one keploy can open'
 		;;
@@ -473,6 +500,7 @@ for mode in "${MODES[@]}"; do
 		# The opt-in sends the miss on, through 127.0.0.11 to its upstream,
 		# and the peer's other types with it (the probe's dns-owned works).
 		rows_reach replay-docker-dns dns-udp dns-owned
+		rows_recorded_nx docker
 		;;
 	compose)
 		# dns-udp at the baseline: the project network's 127.0.0.11 forwards
@@ -496,6 +524,7 @@ for mode in "${MODES[@]}"; do
 		row "replay-compose-dns passes" "$([ "$(cat "$W/out/replay-compose-dns/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose-dns/exit" 2>/dev/null)"
 		row_log "replay-compose-dns: the agent gets the opt-in" "$W/out/replay-compose-dns/keploy.log" "$EGRESS_DNS"
 		rows_reach replay-compose-dns dns-udp
+		rows_recorded_nx compose
 		;;
 	esac
 done
