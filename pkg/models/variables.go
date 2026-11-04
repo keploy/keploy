@@ -83,6 +83,16 @@ type MockVariable struct {
 	// regression. Each is still asserted at every one of its places. Only the
 	// learn step sets it, with a Bind; none for any other variable.
 	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty" bson:"clock,omitempty"`
+	// Of is, for a variable bound at a word of a text (Bind a word
+	// address), the learned value that word is a word of, as recorded: the
+	// whole stretch of that text the learn step read as one value, every
+	// word of which is a variable bound here naming the same Of. A replay
+	// reads two such words as one value only inside that stretch, where the
+	// mock also holds it whole at another place (variables.WordBind.Of); a
+	// word with none is its own value, checked word by word. Deleting it
+	// undoes it. Only the learn step sets it, with a Bind; none for any
+	// other variable.
+	Of string `json:"of,omitempty" yaml:"of,omitempty" bson:"of,omitempty"`
 	// Why is, for a variable the learn step wrote, why it is one and how to
 	// undo it, for a person or a tool reading the mock (the legibility
 	// rule). Only given variables (GivenPrefix) carry one for now
@@ -1970,9 +1980,10 @@ func (v MockVariables) Clone() MockVariables {
 
 // MergeVariables is a and b as one block (neither is changed): a variable in
 // both keeps a's bind and both's uses and answers, and is an echo only when
-// both say so. Clock goes with the bind it was read at: a's bind keeps a's,
-// one taken from b keeps b's, and a variable both bind is a clock read only
-// when both say so.
+// both say so. Clock and Of go with the bind they were read at: a's bind
+// keeps a's, one taken from b keeps b's, and a variable both bind is a clock
+// read only when both say so, and a word of a value only when both name the
+// same one.
 func MergeVariables(a, b MockVariables) MockVariables {
 	out := a.Clone()
 	for name, v := range b {
@@ -1985,9 +1996,14 @@ func MergeVariables(a, b MockVariables) MockVariables {
 			continue
 		}
 		if cur.Bind == "" {
-			cur.Bind, cur.Clock = v.Bind, append([]ClockRead(nil), v.Clock...)
-		} else if v.Bind != "" && len(v.Clock) == 0 {
-			cur.Clock = nil
+			cur.Bind, cur.Clock, cur.Of = v.Bind, append([]ClockRead(nil), v.Clock...), v.Of
+		} else if v.Bind != "" {
+			if len(v.Clock) == 0 {
+				cur.Clock = nil
+			}
+			if v.Of != cur.Of {
+				cur.Of = ""
+			}
 		}
 		cur.Use = appendNewPlaces(cur.Use, v.Use...)
 		cur.Answer = appendNewPlaces(cur.Answer, v.Answer...)

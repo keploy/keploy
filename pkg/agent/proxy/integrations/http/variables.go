@@ -75,7 +75,10 @@ type varDecl struct {
 	// clock: the clock reads the learn step marked at the variable's bind
 	// (models.MockVariable.Clock). It is read only where the call binds the
 	// variable.
-	clock  []models.ClockRead
+	clock []models.ClockRead
+	// of: the learned value the word at the variable's bind is a word of
+	// (models.MockVariable.Of), read only where the call binds it.
+	of     string
 	bind   *varPlace
 	use    []varPlace
 	answer []varPlace
@@ -155,7 +158,7 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 		if mv.Recorded == "" {
 			return nil, fmt.Sprintf("variable %s has no recorded value", name)
 		}
-		d := varDecl{name: name, recorded: mv.Recorded, echo: mv.Echo, clock: mv.Clock}
+		d := varDecl{name: name, recorded: mv.Recorded, echo: mv.Echo, clock: mv.Clock, of: mv.Of}
 		if mv.Bind != "" {
 			p, why := parse(name, "bind", mv.Bind, false)
 			if why != "" {
@@ -1047,10 +1050,9 @@ func wordRunsOf(m *models.Mock, decls []varDecl, liveAt map[string]held) map[str
 // bind at a word of a value of the call, and its name: the text that holds
 // it (one place, one decode), live and as recorded, with the evidence that
 // cuts a run into held stretches, the places other than that text where m's
-// request holds a value whole (heldWhole). An echo is the call's own, never
-// bound in the table, so it has none. No learned value names a word here
-// (WordBind.Of), so each word's span is its own word (main's word by word
-// check).
+// request holds a value whole (heldWhole), and the learned value its word is
+// a word of (WordBind.Of: the variable's Of). An echo is the call's own,
+// never bound in the table, so it has none.
 func wordBindsOf(m *models.Mock, decls []varDecl, liveAt map[string]held) ([]string, []variables.WordBind) {
 	rec, _ := recordedView(m.Spec.HTTPReq) // fitVariables refused a recording whose URL does not read
 	whole := heldWhole(rec)
@@ -1066,6 +1068,7 @@ func wordBindsOf(m *models.Mock, decls []varDecl, liveAt map[string]held) ([]str
 			Word:     at.Word,
 			Live:     liveAt[d.bind.key()].value,
 			Recorded: d.recorded,
+			Of:       d.of,
 		}
 		if l, ok := rec.leaf(at.Place); ok {
 			if text, ok := (variables.Address{Place: at.Place, Steps: at.Steps, Word: -1}).WordOf(l.value); ok {

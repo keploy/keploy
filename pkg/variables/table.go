@@ -441,9 +441,10 @@ const wordRunSep = "-"
 // its steps), and Elsewhere reports whether the binding's mock holds a
 // string, whole, at a place other than Text (a field, a segment, a header, a
 // value of its answer): the evidence that cuts a run into held stretches
-// (WordRuns). Of names the learned value Live is a word of: a held stretch
-// is one value only when each of its words names the same one. A WordBind
-// with none of them has no span but its own word.
+// (WordRuns). Of is the learned value Live is a word of, as recorded
+// (models.MockVariable.Of): a held stretch is one value only when each of
+// its words names that stretch, as recorded, so. A WordBind with none of
+// them has no span but its own word.
 type WordBind struct {
 	Text         string
 	Word         int
@@ -482,13 +483,14 @@ const maxSpanRun = 64
 // around its word whose recorded text its mock holds whole elsewhere (a cid
 // or an appId sent whole in another field) and that holds no shorter such
 // stretch (a stretch that holds one, "<B>/3" sent whole beside "<B>", is two
-// values), when each of its words names the same learned value (Of). A held
+// values), when each of its words names that stretch, as recorded, its
+// learned value (Of). A held
 // stretch is not proof of one value by itself: "<B>/3" sent whole elsewhere
 // may be one id or a cid beside a count, and the recording does not say
 // which. Every other word is its own value, alone, checked word by word as
 // main checks it: a word no held stretch covers (never the words around it:
 // "<cid>/<appId>/7" with only the cid held leaves "7" alone, not with the
-// appId), a word of a held stretch whose words name no one value, a word
+// appId), a word of a held stretch its words do not all name so, a word
 // whose recorded text does not hold the run's recorded words where the run
 // says, and one with no Elsewhere. A binding of a value whole has none.
 func WordRuns(ws []WordBind) []Run {
@@ -568,7 +570,7 @@ func spansOf(ws []WordBind, run []int) [][2]int {
 				}
 			}
 		}
-		if from >= 0 && oneValue(ws, run[from:to+1]) {
+		if from >= 0 && oneValue(ws, run[from:to+1], first.RecordedText[words[ws[run[from]].Word][0]:words[ws[run[to]].Word][1]]) {
 			spans[at] = [2]int{from, to}
 		}
 	}
@@ -576,11 +578,13 @@ func spansOf(ws []WordBind, run []int) [][2]int {
 }
 
 // oneValue reports whether the word binds of stretch (indexes of ws) each
-// name the same learned value (WordBind.Of).
-func oneValue(ws []WordBind, stretch []int) bool {
-	of := ws[stretch[0]].Of
+// name text, the stretch as recorded, as the learned value their words are
+// words of (WordBind.Of): learning read that very stretch as one value, not
+// a part of it or a longer text around it. A word that names none ("")
+// never does: text holds a word.
+func oneValue(ws []WordBind, stretch []int, text string) bool {
 	for _, j := range stretch {
-		if ws[j].Of == "" || ws[j].Of != of {
+		if ws[j].Of != text {
 			return false
 		}
 	}

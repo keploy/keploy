@@ -451,11 +451,20 @@ func TestWordRuns_AStretchItsMockHoldsElsewhereIsAValueOfItsOwn(t *testing.T) {
 		{name: "the whole held beside the cid before two words", recorded: cid + "/x/y", held: []string{cid, cid + "/x/y"}, want: cat(cids, []string{"x@0", "y@0"})},
 		// Learning naming the whole one value does not make it one: a held
 		// stretch inside it, at its end, its start or apart from the end
-		// words, still makes it two values.
-		{name: "the whole named one value beside the cid after it", recorded: "3/" + cid, held: []string{cid, "3/" + cid}, named: "3/" + cid, want: cat([]string{"3@0"}, cids)},
-		{name: "the whole named one value beside the cid before it", recorded: cid + "/3", held: []string{cid, cid + "/3"}, named: cid + "/3", want: cat(cids, []string{"3@0"})},
-		{name: "the whole named one value beside the cid after two words", recorded: "x/y/" + cid, held: []string{cid, "x/y/" + cid}, named: "x/y/" + cid, want: cat([]string{"x@0", "y@0"}, cids)},
-		{name: "the whole named one value beside the cid before two words", recorded: cid + "/x/y", held: []string{cid, cid + "/x/y"}, named: cid + "/x/y", want: cat(cids, []string{"x@0", "y@0"})},
+		// words, still makes it two values. Nor is the shorter held stretch
+		// one value: learning named another text, so each of its words is
+		// alone.
+		{name: "the whole named one value beside the cid after it", recorded: "3/" + cid, held: []string{cid, "3/" + cid}, named: "3/" + cid, want: cat([]string{"3@0"}, cidAlone)},
+		{name: "the whole named one value beside the cid before it", recorded: cid + "/3", held: []string{cid, cid + "/3"}, named: cid + "/3", want: cat(cidAlone, []string{"3@0"})},
+		{name: "the whole named one value beside the cid after two words", recorded: "x/y/" + cid, held: []string{cid, "x/y/" + cid}, named: "x/y/" + cid, want: cat([]string{"x@0", "y@0"}, cidAlone)},
+		{name: "the whole named one value beside the cid before two words", recorded: cid + "/x/y", held: []string{cid, cid + "/x/y"}, named: cid + "/x/y", want: cat(cidAlone, []string{"x@0", "y@0"})},
+		// Learning names a value only as the very stretch the mock holds:
+		// the cid held, its words named a word of a text that is not the
+		// cid (a part of it, a text around it, another value), or one word
+		// naming none, is each word alone.
+		{name: "the cid held, its words named a part of it", recorded: cid + "/3", held: []string{cid}, named: "c9bf9e57-1685", want: cat(cidAlone, []string{"3@0"})},
+		{name: "the cid held, its words named another value", recorded: cid + "/3", held: []string{cid}, named: app, want: cat(cidAlone, []string{"3@0"})},
+		{name: "the cid held, its words named the cid", recorded: cid + "/3", held: []string{cid}, named: cid, want: cat(cids, []string{"3@0"})},
 		{name: "no evidence: each word alone", recorded: "ab/3", held: []string{"ab/3"}, none: true, want: []string{"ab@0", "3@0"}},
 		{name: "the cid held elsewhere: the word before it alone", recorded: "3/" + cid, held: []string{cid}, want: cat([]string{"3@0"}, cids)},
 		{name: "a run longer than spans are read in: each word alone", recorded: strings.Repeat("ab/", maxSpanRun) + "3", held: []string{"ab/ab", "3"}, want: []string{"ab@0", "ab@0"}},
