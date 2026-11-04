@@ -165,11 +165,28 @@ func TestRun_AtTheStopTheWatchdogMeasuresTheParsersReads(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	// armed waits until the watchdog has armed its next look, and fails at
+	// once if the parser was ended instead: a parser retired arms none.
+	armed := func(while string) {
+		t.Helper()
+		bound := time.Now().Add(time.Minute) // only turns a hang into a failure
+		for clk.Pending() == 0 {
+			select {
+			case r := <-resc:
+				t.Fatalf("the parser was ended %s %s", r.Status, while)
+			default:
+			}
+			if time.Now().After(bound) {
+				t.Fatal("the watchdog never armed its next look")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
 	look := func(while string) {
 		t.Helper()
-		waitPending(t, clk)
+		armed(while)
 		clk.Advance(budget * 3 / 4)
-		waitPending(t, clk) // the look is done, and armed the next
+		armed(while) // the look is done, and armed the next
 		select {
 		case r := <-resc:
 			t.Fatalf("the parser was ended %s %s", r.Status, while)
