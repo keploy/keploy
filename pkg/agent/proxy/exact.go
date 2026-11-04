@@ -1062,9 +1062,11 @@ var requestKeyIndex = &integrations.MockIndex{Keys: models.RequestKeys}
 var notOwnedTried atomic.Uint64
 
 // findNotOwned is FindStagedNotOwned, and with keys FindStagedNotOwnedByKeys.
-// The staging only moves on, and moves before the trees change (a staging
-// bumps it first, holding swapMu), so a recording read from the trees while
-// the staging is still call's is of call's set.
+// The staging only moves on: a staging moves its epoch first, holding
+// swapMu, then changes the trees, and publishes them as the set staged with
+// that epoch (stagedSet.epoch). A set of another epoch than call's is not
+// call's staging's, and call is told restaged, so a recording read from the
+// set's trees is of call's set.
 //
 // With keys, of a kind whose parser files its recordings under request keys
 // (models.HasRequestKeys), each tree hands only its recordings filed under
@@ -1084,6 +1086,13 @@ func (m *MockManager) findNotOwned(kind models.Kind, call integrations.CallRound
 		return "", true
 	}
 	s := m.stagedNow()
+	if s.epoch != epoch {
+		// The set staged is not call's staging's: the next set's staging
+		// moved the epoch the call read and has not published its set yet
+		// (stagedSet.epoch), so the trees published are the previous set's,
+		// none of them call's.
+		return "", true
+	}
 	trees := s.trees()
 	found, restaged := "", false
 	seen := map[string]bool{}

@@ -228,6 +228,11 @@ type stagedSet struct {
 	recorded       RecordingSource
 	before         func(t time.Time, visit func(*models.Mock) bool) error
 	times          *recordingTimes
+	// epoch is the staging epoch the set was published in: a staging moves
+	// the epoch before it changes a tree, and publishes the set after, so a
+	// call whose first read saw the new epoch (CallRound.Epoch) reads its
+	// set only once epoch is the call's (findNotOwned).
+	epoch uint64
 }
 
 // trees are s's trees: per-test, session, startup.
@@ -246,7 +251,7 @@ func (m *MockManager) stagedNow() *stagedSet {
 // its staging put every tree in place, before it moves any generation: a
 // reader that read the new generation reads the new set.
 func (m *MockManager) publishStagedLocked() {
-	s := &stagedSet{times: m.exact.times.Load()}
+	s := &stagedSet{times: m.exact.times.Load(), epoch: m.stagingEpoch.Load()}
 	m.treesMu.RLock()
 	s.filtered, s.unfiltered, s.startup, s.filteredByKind = m.filtered, m.unfiltered, m.startup, m.filteredByKind
 	m.treesMu.RUnlock()
