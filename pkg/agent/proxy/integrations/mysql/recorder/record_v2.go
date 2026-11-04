@@ -979,11 +979,12 @@ const mysqlPostTLSStashPollSlice = 500 * time.Millisecond
 // resolvePreTLSGreeting calls each time it is about to wait on the port's
 // queue: every take with a non-zero wait, never one that only looks. Only
 // this package's tests set it (the key is unexported). A test counts its calls
-// to prove an event, not a duration: that a connection never waited (a
-// joined connection, a cache fallback past the primary bound), or waited no
-// further slice after a cancel. A test can also push the raw leg once the
-// recorder is waiting for it, so the lateness it injects is counted from the
-// wait itself, not from when the test began. Carried by the context, it
+// to prove an event, not a duration: that a joined connection never waited,
+// that a cache fallback past the primary bound waited at most the one slice
+// that bound cuts short, or that a cancel ended the wait within its slice. A
+// test can also act from the hook: push the raw leg, or cancel, once the
+// recorder is waiting, so what it injects is ordered after the wait began, not
+// timed from when the test began. Carried by the context, it
 // reaches only the recording that test drives, never one another test left
 // running.
 type postTLSStashWaitHookKey struct{}
