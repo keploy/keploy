@@ -129,6 +129,7 @@ func TestAnAnswersKeyNamesEveryPartOfIt(t *testing.T) {
 		"no stream body":        func(r *models.HTTPResp) { r.StreamBody = nil },
 		"a stream chunk's time": func(r *models.HTTPResp) { r.StreamBody[0].TS = time.Unix(2, 0) },
 		"a stream chunk's data": func(r *models.HTTPResp) { r.StreamBody[0].Data[0].Value = "b" },
+		"a stream field's name": func(r *models.HTTPResp) { r.StreamBody[0].Data[0].Key = "event" },
 	} {
 		r := base()
 		change(r)
