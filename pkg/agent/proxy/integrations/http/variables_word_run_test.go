@@ -11,11 +11,11 @@ import (
 // Rows for word binds that share a live value: a value the learn step binds
 // word by word (a fresh UUID, each of its five groups its own variable) holds
 // words a second fresh value can hold by chance (a v4 UUID's version group is
-// 12 random bits). Two such binds are two variables recorded with two values
-// sharing one live value only when the runs of words they are bound in (the
-// words their calls bind at consecutive words of one text) are one live run
-// and were two recorded ones: the application sent one value where the
-// recording had two. One equal group of two runs that differ is chance.
+// 12 random bits). Two such binds share a live value by chance only when the
+// runs of words they are bound in (the words their calls bind at consecutive
+// words of one text), set side by side at the shared word, differ live at a
+// word both hold. Otherwise the application sent one value where the
+// recording had two, alone or beside another bound value, and it is refused.
 
 const (
 	recEvent = "6f9619ff-8b86-4011-b42d-00c04fc964ff"
@@ -191,7 +191,7 @@ func TestVariables_AnEchoWordIsNoPartOfARun(t *testing.T) {
 	if ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/charges", `{"key":"k9-z9"}`)); !ok || stub.Name != "mock-1" {
 		t.Fatalf("the charge should be answered by mock-1: ok=%v stub=%v diag=%+v", ok, stub, diag)
 	}
-	if b, bound := db.table.Lookup("orderId"); !bound || b.WordRun != "z9" || b.RecordedWordRun != "ord7" {
+	if b, bound := db.table.Lookup("orderId"); !bound || b.WordRun != "z9" || b.WordRunAt != 0 {
 		t.Fatalf("orderId bound as %+v (%v), want its run alone", b, bound)
 	}
 	ok, _, diag := matchVar(t, h, db, liveReq("POST", "/refunds", `{"ref":"z9"}`))
@@ -229,4 +229,51 @@ func TestVariables_TwoCookiesOfOneHeaderAreTwoRuns(t *testing.T) {
 	db = &varDb{perTest: []*models.Mock{rec()}}
 	ok, _, diag := matchVar(t, h, db, call(liveEvent, liveEvent))
 	wantProblem(t, ok, diag, "they were two values when the test was recorded")
+}
+
+// A suite event whose id field holds two fresh UUIDs, each bound word by word
+// and set apart only by "/" ("<C>/<B>": one run of ten words). The event's
+// UUID sent as the first of them, or one UUID sent as both, is one value
+// where two were recorded: refused. Two fresh UUIDs there, one of whose
+// groups equals the event's by chance, are answered.
+func TestVariables_OneUUIDWhereTwoWereRecordedBesideAnAdjacentBoundUUIDIsRefused(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const (
+		recC  = "1e2d3c4b-5a69-4788-9766-554433221100"
+		liveY = "0a0b0c0d-1e1f-4a2b-8c3d-4e5f6a7b8c9d"
+	)
+	mocks := func() []*models.Mock {
+		vars := uuidWordBinds("su", recC, "body.id", 0)
+		for i, w := range splitWords(recSuite) {
+			vars["sb"+strconv.Itoa(i)] = bindV(w, "body.id#"+strconv.Itoa(5+i))
+		}
+		return []*models.Mock{
+			at(varMock("mock-1", "POST", "http://store/events", `{"id":"`+recEvent+`","kind":"audit"}`, 201, `{}`,
+				uuidWordBinds("ev", recEvent, "body.id", 0)), 1),
+			at(varMock("mock-2", "POST", "http://store/suites/events", `{"id":"`+recC+`/`+recSuite+`","kind":"update"}`, 201, `{}`, vars), 2),
+		}
+	}
+	for _, c := range []struct {
+		name, id, refusedAt string
+	}{
+		{"the event's UUID first", liveEvent + "/" + liveY, "su0"},
+		{"one UUID twice", liveY + "/" + liveY, "su0"},
+		{"two fresh UUIDs, a group equal by chance", liveSuite + "/" + liveY, ""},
+	} {
+		h := newHTTP()
+		db := &varDb{perTest: mocks()}
+		if ok, _, diag := matchVar(t, h, db, liveReq("POST", "/events", `{"id":"`+liveEvent+`","kind":"audit"}`)); !ok {
+			t.Fatalf("%s: the event was not answered: %+v", c.name, diag)
+		}
+		ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/suites/events", `{"id":"`+c.id+`","kind":"update"}`))
+		if c.refusedAt == "" {
+			if !ok || stub.Name != "mock-2" {
+				t.Fatalf("%s: %s should be answered by mock-2: ok=%v stub=%v diag=%+v", c.name, c.id, ok, stub, diag)
+			}
+			continue
+		}
+		if p := wantProblem(t, ok, diag, "they were two values when the test was recorded"); p.name != c.refusedAt {
+			t.Fatalf("%s: refused at %s, want %s: %q", c.name, p.name, c.refusedAt, p.why)
+		}
+	}
 }
