@@ -1522,6 +1522,12 @@ func TestOutcomeAFinerTimeHoldingRoundFsSecondIsNoPick(t *testing.T) {
 		{"the second in a base64 page cursor beside a $date", func(x time.Time) string {
 			return date(x) + `,"cursor":"` + base64.StdEncoding.EncodeToString([]byte(`{"t":`+sec(x)+`}`)) + `"`
 		}, true},
+		// Alone, as a time of seconds: no instant of the answer as written
+		// holds the second, and its escapes read hold none either, so the
+		// hold the decoded cursor gives stands, a pick.
+		{"the second as a time of seconds in a base64 page cursor alone", func(x time.Time) string {
+			return `"cursor":"` + base64.StdEncoding.EncodeToString([]byte(`{"t":"`+x.UTC().Format(time.RFC3339)+`"}`)) + `"`
+		}, true},
 	} {
 		for _, made := range []struct {
 			what       string
@@ -3120,6 +3126,29 @@ func TestOutcomeAPercentEncodedSecondHoldsOnlyTheTimeItOpensTo(t *testing.T) {
 	oRefused(t, "round F's second picked from an answer that holds it percent-encoded", d, RefusalPick, "mock-799")
 	d = oWord(t, Decide(call(rAt.Add(-10*time.Minute), fAt.Add(-10*time.Minute))), sec(rAt), sec(fAt))
 	iClock(t, "the call's second beside a percent-encoded time ten minutes before it", d)
+	// A percent-encoded time ten seconds before the call: as written it
+	// reads as its hour, which holds the call's second, and opens to
+	// another second of that hour, so the call's second is its own clock
+	// read. So too where a later time of that hour ends where the reach
+	// that escapes are read in around the hour ends (escapeReach): the
+	// reach cuts that time to the hour, an instant of the encoded hour's
+	// own text at another place, and the encoded hour still opens.
+	edge := func(x time.Time, cut bool) *models.Mock {
+		m := answer(x)
+		hour := x.UTC().Format("2006-01-02T15")
+		pad := escapeReach - (len(pct(x)) - len(hour)) - len(`","pad":"`) - len(`","later":"`) - len(hour)
+		if !cut {
+			pad += 3
+		}
+		m.Spec.HTTPResp.Body = `{"next":"/v1/events?since=` + pct(x) + `","pad":"` + strings.Repeat("x", pad) + `","later":"` + hour + `:59:59Z"}`
+		return m
+	}
+	for _, cut := range []bool{false, true} {
+		r10, f10 := rAt.Add(-10*time.Second), fAt.Add(-10*time.Second)
+		d = oWord(t, Decide(iCall("body.cmd.query.dirtyAt.$lte.$numberLong", Number, sec(rAt), sec(fAt), rAt, fAt, iWin(rAt, fAt, 100*time.Millisecond), nil,
+			[]Raw{RawOf(edge(r10, cut), true).ServedAs(1).ServedLive(RawOf(edge(f10, cut), true))})), sec(rAt), sec(fAt))
+		iClock(t, fmt.Sprintf("the call's second beside a percent-encoded time ten seconds before it, a later time of its hour cut to the hour at the reach's end: %v", cut), d)
+	}
 	// A time the answer writes at a cut finer than a millisecond, its
 	// zone percent-encoded after it ("09:00:23.654321%2B05:30", a link's
 	// query): as written it holds the call's microsecond, and a hold that
