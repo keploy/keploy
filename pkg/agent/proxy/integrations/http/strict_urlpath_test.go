@@ -41,17 +41,18 @@ func TestURLPathIsThePathAsUrlNoiseMasksItWhole(t *testing.T) {
 		t.Run(fmt.Sprintf("%s %q", c.path, c.pats), func(t *testing.T) {
 			res := compileURLNoise(zap.NewNop(), c.pats)
 			u := strictKnown{n: strictNoise{url: res}}.urlPathOf(c.path)
-			if want := (learnNoise{url: res}).segments(c.path); !slices.Equal(u.segs, want) || len(u.noised) != len(u.segs) {
-				t.Fatalf("segments %q (%d marks); want the learn step's %q", u.segs, len(u.noised), want)
+			noised, ownNoised := marked(u.segs, u.mask), marked(u.own, u.taken)
+			if want := (learnNoise{url: res}).segments(c.path); !slices.Equal(u.segs, want) {
+				t.Fatalf("segments %q; want the learn step's %q", u.segs, want)
 			}
 			if want := strings.Split(strings.TrimPrefix(c.path, "/"), "/"); !slices.Equal(u.own, want) || (c.own != nil && !slices.Equal(u.own, c.own)) {
 				t.Fatalf("own segments %q; want %q", u.own, want)
 			}
-			if c.segs != nil && (!slices.Equal(u.segs, c.segs) || !slices.Equal(u.noised, c.noised)) {
-				t.Fatalf("segments %q marked %v; want %q marked %v", u.segs, u.noised, c.segs, c.noised)
+			if c.segs != nil && (!slices.Equal(u.segs, c.segs) || !slices.Equal(noised, c.noised)) {
+				t.Fatalf("segments %q marked %v; want %q marked %v", u.segs, noised, c.segs, c.noised)
 			}
-			if !slices.Equal(u.ownNoised, c.ownNoised) {
-				t.Fatalf("own segments %q marked %v; want %v", u.own, u.ownNoised, c.ownNoised)
+			if !slices.Equal(ownNoised, c.ownNoised) {
+				t.Fatalf("own segments %q marked %v; want %v", u.own, ownNoised, c.ownNoised)
 			}
 		})
 	}
@@ -75,16 +76,41 @@ func TestURLPathAtReadsTheMaskedSegmentThenThePathsOwn(t *testing.T) {
 		{3, "x", false, true},
 		{4, "", false, false},
 	} {
-		if seg, noised, ok := u.at(c.i); seg != c.seg || noised != c.noised || ok != c.ok {
+		if v, ok := u.at(c.i); v.masked != c.seg || slices.Contains(v.mask, true) != c.noised || ok != c.ok {
+			seg, noised := v.masked, slices.Contains(v.mask, true)
 			t.Fatalf("at(%d) = %q, %v, %v; want %q, %v, %v", c.i, seg, noised, ok, c.seg, c.noised, c.ok)
 		}
 	}
 	inSegment := strictKnown{n: strictNoise{url: compileURLNoise(zap.NewNop(), []string{`T[0-9:]+Z`})}}.urlPathOf("/v1/u/2026-09-01T09:00:00Z")
-	if seg, noised, ok := inSegment.at(2); seg != "2026-09-01T09:00:00Z" || !noised || !ok {
-		t.Fatalf("at(2) of a path no pattern joined = %q, %v, %v; want the segment as sent, reached", seg, noised, ok)
+	if v, ok := inSegment.at(2); v.sent != "2026-09-01T09:00:00Z" || v.masked != "2026-09-01"+urlNoisePlaceholder || !slices.Contains(v.mask, true) || !slices.Equal(v.taken, marksOf("2026-09-01", "T09:00:00Z")) || !ok {
+		t.Fatalf("at(2) of a path no pattern joined = %+v, %v; want the segment as sent and masked, marked", v, ok)
 	}
 	whole := strictKnown{n: strictNoise{url: compileURLNoise(zap.NewNop(), []string{`^/v1/.*$`})}}.urlPathOf("/v1/u/2026-09-01T09:00:00Z")
-	if seg, noised, ok := whole.at(2); seg != "2026-09-01T09:00:00Z" || !noised || !ok {
-		t.Fatalf("at(2) of a path masked whole = %q, %v, %v; want the path's own segment, reached", seg, noised, ok)
+	if v, ok := whole.at(2); v.sent != "2026-09-01T09:00:00Z" || v.masked != v.sent || !slices.Equal(v.taken, marksOf("", "2026-09-01T09:00:00Z")) || !slices.Equal(v.mask, v.taken) || !ok {
+		t.Fatalf("at(2) of a path masked whole = %+v, %v; want the path's own segment, taken whole", v, ok)
 	}
+}
+
+// marked says, of each segment, whether any of its bytes is marked (none
+// where marks is nil).
+func marked(segs []string, marks [][]bool) []bool {
+	out := make([]bool, len(segs))
+	for i := range segs {
+		if marks != nil {
+			if len(marks[i]) != len(segs[i]) {
+				panic(fmt.Sprintf("segment %q has %d marks", segs[i], len(marks[i])))
+			}
+			out[i] = slices.Contains(marks[i], true)
+		}
+	}
+	return out
+}
+
+// marksOf is the marks of clear+noise: false over clear, true over noise.
+func marksOf(clear, noise string) []bool {
+	out := make([]bool, len(clear)+len(noise))
+	for j := len(clear); j < len(out); j++ {
+		out[j] = true
+	}
+	return out
 }

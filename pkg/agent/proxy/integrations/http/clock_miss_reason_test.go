@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -382,19 +383,33 @@ func TestAWordReadInAPathSegmentIsOfTheRouteOnlyInItsForm(t *testing.T) {
 	}
 }
 
-// keploy.yml's url noise that reaches a path segment learned as a read of
-// the clock, in the recording's value and the call's, leaves the segment
-// unchecked, as at the clock check (clockDiffs): the call is answered
-// though its segment, the noise masked, differs and is no instant whole.
-func TestAClockSegmentKeployYmlUrlNoiseReachesIsNotChecked(t *testing.T) {
+// keploy.yml's url noise that covers a path segment learned as a read of the
+// clock whole, in the recording's value and the call's, leaves the segment
+// unchecked, as at the clock check (clockDiffs): a stale instant is
+// answered. A pattern that covers only part of it excuses only the words it
+// matches: the rest is still checked, so a call whose segment, the noise
+// masked, differs there ("me-" where the date was) and is no instant whole
+// is refused, as a path difference.
+func TestAClockSegmentKeployYmlUrlNoiseCoversIsNotChecked(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
-	m := recorded("mock-n", "/v1/u/2026-09-01T09:00:00Z", map[string]string{"Content-Type": "application/json"}, `{}`)
-	m.Spec.Clocks = map[string]models.ClockOffset{"url.path.2": {Res: time.Second}}
-	in := sent("/v1/u/me-T09:00:00Z", map[string]string{"Content-Type": "application/json"}, `{}`)
-	in.arrived = base.Add(2 * time.Second)
-	if got, diag := strictMatchIn(t, clockConn(true, base), in, nil, nil, []string{`T[0-9:]+Z`}, m); got == nil {
-		t.Fatalf("refused (%v); want the segment keploy.yml's noise reaches left unchecked", differs(diag))
+	for _, c := range []struct {
+		pat, seg string
+		answered bool
+	}{
+		{`20[0-9T:-]+Z`, "2026-09-02T09:00:00Z", true},
+		{`T[0-9:]+Z`, "me-T09:00:00Z", false},
+	} {
+		t.Run(c.pat, func(t *testing.T) {
+			m := recorded("mock-n", "/v1/u/2026-09-01T09:00:00Z", map[string]string{"Content-Type": "application/json"}, `{}`)
+			m.Spec.Clocks = map[string]models.ClockOffset{"url.path.2": {Res: time.Second}}
+			in := sent("/v1/u/"+c.seg, map[string]string{"Content-Type": "application/json"}, `{}`)
+			in.arrived = base.Add(2 * time.Second)
+			got, diag := strictMatchIn(t, clockConn(true, base), in, nil, nil, []string{c.pat}, m)
+			if (got != nil) != c.answered || !c.answered && !slices.Equal(differs(diag), []string{"path"}) {
+				t.Fatalf("answered %v (%v); want %v", got != nil, differs(diag), c.answered)
+			}
+		})
 	}
 }
 
@@ -415,6 +430,7 @@ func TestAClockSegmentKeployYmlUrlNoiseReachesInOneValueAloneIsAnotherRoute(t *t
 	}{
 		{"the call's value alone", seg + "$", true},
 		{"the recorded value alone", `T[0-9:]+Z`, false},
+		{"the recorded value alone, covered whole", `20[0-9T:-]+Z`, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			// The pattern matches the one value the row names, in its
