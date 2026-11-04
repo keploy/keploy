@@ -777,7 +777,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 					NextSteps:     "DNS mocks may be missing. Re-record to capture DNS queries.",
 				},
 			}
-			p.SendError(proxyErr)
+			p.sendDNSMiss(proxyErr, question)
 		}
 		return p.defaultDNSResponse(question)
 

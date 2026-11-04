@@ -258,15 +258,17 @@ const (
 	// the test command did not start inside a worker, such as a server
 	// every worker shares) while workers' tests were open, or, in a replay,
 	// from a process of a worker keploy does not serve (it ended, or keploy
-	// never began serving it): keploy cannot tell which test made it. A
-	// record keeps it in none of the tests' recordings, and charges it
-	// itself to each test open at its time, from the mocks it recorded. A
-	// replay refuses it unanswered, and the proxy counts the refusal, which
-	// is a test's own (PerTest): it charges each test open when it was made
-	// (the call may have been any of theirs), and, made while none was, the
-	// next test. Either way a test charged with it is left without a verdict
-	// (NotJudged), never failed. What names the latest such call and its
-	// process.
+	// never began serving it), or, while workers are served, a DNS question
+	// no DNS mock answers (it carries no stamp of the worker that asked it,
+	// and keploy answers it as any DNS miss): keploy cannot tell which test
+	// made it. A record keeps it in none of the tests' recordings, and
+	// charges it itself to each test open at its time, from the mocks it
+	// recorded. A replay refuses a connection's call unanswered, and the
+	// proxy counts the refusal, which is a test's own (PerTest): it charges
+	// each test open when it was made (the call may have been any of
+	// theirs), and, made while none was, the next test. Either way a test
+	// charged with it is left without a verdict (NotJudged), never failed.
+	// What names the latest such call and its process.
 	CaptureLossUnattributed CaptureLossKind = "call_unattributed"
 )
 
