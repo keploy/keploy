@@ -97,7 +97,7 @@ func (l *containerLook) copyOut(ctx context.Context, name, path string) ([]byte,
 	if l.useAPI() {
 		rc, _, err := l.api.CopyFromContainer(ctx, name, path)
 		if err == nil {
-			defer rc.Close()
+			defer func() { _ = rc.Close() }()
 			return io.ReadAll(io.LimitReader(rc, bootReportMax))
 		}
 		if !l.unreachable(err) {

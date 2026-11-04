@@ -139,7 +139,7 @@ func TestTheBootWatchReadsTheAgentsContainerThroughTheAPI(t *testing.T) {
 // keeps reading: the API is not asked again.
 func TestAnUnreachableAPIHasTheCLIRead(t *testing.T) {
 	ran := engineCLIRecorder(t, "running")
-	api := &fakeContainerAPI{inspectEr: client.ErrorConnectionFailed("unix:///nowhere/docker.sock")}
+	api := &fakeContainerAPI{inspectEr: unreachableEngine(t)}
 	_, running := containerBootLook(zap.NewNop(), api, &namedContainer{name: "keploy-v3"})
 
 	for range 2 {
@@ -219,4 +219,20 @@ func TestAWaitWithNoClientMakesOneForTheEnvironment(t *testing.T) {
 	if api := envContainerAPI(zap.NewNop()); api != nil {
 		t.Fatalf("an API client %T was made for a DOCKER_HOST that names no endpoint", api)
 	}
+}
+
+// unreachableEngine is the error an Engine API client gives when the engine's
+// socket is not there.
+func unreachableEngine(t *testing.T) error {
+	t.Helper()
+	c, err := client.NewClientWithOpts(client.WithHost("unix://" + filepath.Join(t.TempDir(), "docker.sock")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	_, err = c.ContainerInspect(context.Background(), "keploy-v3")
+	if !client.IsErrConnectionFailed(err) {
+		t.Fatalf("an inspect through a socket that is not there = %v; want a failure to connect", err)
+	}
+	return err
 }

@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/docker/docker/client"
+	cerrdefs "github.com/containerd/errdefs"
 	"go.keploy.io/server/v3/pkg"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
@@ -346,7 +346,7 @@ func runningByStatus(inspect func(context.Context) ([]byte, error)) func(context
 // CLI's "No such container" or "No such object", as Docker and Podman say it,
 // in either case, on stderr (which an *exec.ExitError carries) or on stdout.
 func engineSaysGone(out []byte, err error) bool {
-	if err != nil && client.IsErrNotFound(err) {
+	if err != nil && cerrdefs.IsNotFound(err) {
 		return true
 	}
 	said := string(out)
