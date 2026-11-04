@@ -10,7 +10,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
@@ -374,14 +373,11 @@ func TestAnAppExitBeforeItsUserStopKeepsTheSetHalted(t *testing.T) {
 // its application's exit, the user's stop or the exit of the application kept
 // across the sets comes after it, before the first streamed test, and no
 // streamed test is sent. Each later end comes in the failed write, which
-// returns once the set's context has ended and the set's watch has had a
-// moment to record it (the moment matters only to what the case shows
-// before the fix: the fixed set's end does not depend on it). Before, the
-// watch's status replaced the set's at the streamed loop's head whenever the
-// watch had sent on exitLoopChan by then: run per set, the application's exit
-// ended the set APP_HALTED in every run (that watch sends before it ends the
-// set's context), and the stop and the kept application's exit ended it
-// USER_ABORT or APP_HALTED by scheduling.
+// returns once the set's context has ended and the set's watch has sent its
+// end on exitLoopChan (watchSends), so the streamed loop's head always comes
+// after that send. Before, the watch's status replaced the set's at the
+// streamed loop's head whenever the watch had sent on exitLoopChan by then:
+// here it always has, so the set ended APP_HALTED or USER_ABORT in every run.
 func TestAnErrorWritingResultsBeforeTheStreamedTestsKeepsTheSetInternalErr(t *testing.T) {
 	const sigint = 2
 	const unwritable = "failed to insert final test case result: report store is unwritable"
@@ -421,10 +417,11 @@ func TestAnErrorWritingResultsBeforeTheStreamedTestsKeepsTheSetInternalErr(t *te
 				t.Cleanup(func() { utils.ErrCode = saved })
 				utils.ErrCode = 0
 				t.Cleanup(utils.SetInterruptSignalForTest(0))
-				ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+				bound, cancel := context.WithTimeout(context.Background(), prTimeout)
 				defer cancel()
-				ctx, stop := context.WithCancel(ctx)
+				ctx, stop := context.WithCancel(bound)
 				defer stop()
+				watchSent := watchSends(t)
 				sent := &sendLog{stopAt: -1}
 				h.replayer.hookImpl = cutShortHooks{sent: sent}
 				var ends sync.Once
@@ -439,10 +436,11 @@ func TestAnErrorWritingResultsBeforeTheStreamedTestsKeepsTheSetInternalErr(t *te
 							close(h.instr.appStopped)
 						}
 						<-setCtx.Done()
-						time.Sleep(20 * time.Millisecond)
+						awaitWatchSend(bound, watchSent)
 					})
 				}
 				_ = h.replayer.Start(ctx)
+				requireWatchSent(t, watchSent)
 				h.report.mu.Lock()
 				rep := h.report.report
 				h.report.mu.Unlock()
@@ -506,11 +504,10 @@ func (h refusedFetchHooks) AfterTestCaseRun(ctx context.Context, set string, tc 
 // stop that comes after it, recorded by the set's watch before the loop's
 // next test, does not change it: the set ends APP_HALTED, the run exits 1,
 // and no test is sent after the stop. The stop comes as the test's verdict
-// is reported, and returns once the watch has had a moment to record it (the
-// moment matters only to what the case shows before the fix). Before, the
-// loop's next head took the watch's status, USER_ABORT, whenever the watch
-// had sent on exitLoopChan by then: which end the set took was down to
-// scheduling.
+// is reported, and returns once the watch has sent its end on exitLoopChan
+// (watchSends), so the loop's next head always comes after that send.
+// Before, the loop's next head took the watch's status, USER_ABORT, whenever
+// the watch had sent on exitLoopChan by then: here it always has.
 func TestAComposeStackSeenDownKeepsTheSetHaltedPastALaterUserStop(t *testing.T) {
 	const sigint = 2
 	for _, c := range []struct {
@@ -536,10 +533,11 @@ func TestAComposeStackSeenDownKeepsTheSetHaltedPastALaterUserStop(t *testing.T) 
 				h.replayer.config.Test.MaxFlakyChecks = 1
 				h.replayer.config.Test.KeepAppAlive = c.kept
 				t.Cleanup(utils.SetInterruptSignalForTest(0))
-				ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+				bound, cancel := context.WithTimeout(context.Background(), prTimeout)
 				defer cancel()
-				ctx, stop := context.WithCancel(ctx)
+				ctx, stop := context.WithCancel(bound)
 				defer stop()
+				watchSent := watchSends(t)
 				sent := &sendLog{stopAt: -1}
 				var stops sync.Once
 				armed := &atomic.Bool{}
@@ -550,10 +548,11 @@ func TestAComposeStackSeenDownKeepsTheSetHaltedPastALaterUserStop(t *testing.T) 
 							utils.SetInterruptSignalForTest(sigint)
 							stop()
 							<-setCtx.Done()
-							time.Sleep(20 * time.Millisecond)
+							awaitWatchSend(bound, watchSent)
 						})
 					}}
 				_ = h.replayer.Start(ctx)
+				requireWatchSent(t, watchSent)
 				h.report.mu.Lock()
 				rep := h.report.report
 				h.report.mu.Unlock()
@@ -580,6 +579,39 @@ func TestAComposeStackSeenDownKeepsTheSetHaltedPastALaterUserStop(t *testing.T) 
 				}
 			})
 		}
+	}
+}
+
+// watchSends replaces setWatchSent for t: the channel it returns is closed
+// once a set's watch has sent the set's end on exitLoopChan.
+func watchSends(t *testing.T) <-chan struct{} {
+	t.Helper()
+	sent := make(chan struct{})
+	var once sync.Once
+	was := setWatchSent
+	setWatchSent = func() { once.Do(func() { close(sent) }) }
+	t.Cleanup(func() { setWatchSent = was })
+	return sent
+}
+
+// awaitWatchSend waits until a set's watch has sent on exitLoopChan (sent,
+// from watchSends). bound is the case's own bound, a fail-safe only: a watch
+// that never sends is reported by requireWatchSent.
+func awaitWatchSend(bound context.Context, sent <-chan struct{}) {
+	select {
+	case <-sent:
+	case <-bound.Done():
+	}
+}
+
+// requireWatchSent fails t when no set's watch sent on exitLoopChan: the case
+// then never ordered the watch's send before the loop's next head.
+func requireWatchSent(t *testing.T, sent <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-sent:
+	default:
+		t.Error("the set's watch never sent its end on exitLoopChan, so the case did not order that send before the loop's next head")
 	}
 }
 

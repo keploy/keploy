@@ -2042,6 +2042,11 @@ func (r *Replayer) beforeFirstTestSet(ctx context.Context, testRunID string) {
 // not a const, so a test can shrink it rather than wait it out.
 var testSetDrainStall = 30 * time.Second
 
+// setWatchSent is called by a test set's watch once it has sent the set's
+// end on exitLoopChan. A no-op: a test replaces it to wait on that send, so
+// it orders the watch before the test loop's next read of it.
+var setWatchSent = func() {}
+
 // teardownDrainStall is the same bound for the drains of a run's teardown.
 const teardownDrainStall = 30 * time.Second
 
@@ -2747,6 +2752,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				setErrStatus(stoppedSetStatus(ctx, setLastAppErr))
 			}
 			exitLoopChan <- true
+			setWatchSent()
 			runTestSetCtxCancel()
 			return nil
 		})
@@ -3121,6 +3127,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					setErrStatus(stoppedSetStatus(ctx, setLastAppErr))
 				}
 				exitLoopChan <- true
+				setWatchSent()
 				runTestSetCtxCancel()
 				return nil
 			})
