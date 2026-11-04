@@ -53,7 +53,9 @@ func leftOutReasons(logs *observer.ObservedLogs) []string {
 }
 
 // wantLeftOutUnread checks that the exchange, whose response's end was not
-// read, was left out for want, with nothing recorded, nothing logged at ERROR, and recordV2 returning nil.
+// read, was left out for want, with its span recorded (spanRecorded: the test
+// cases over it are left out too), nothing recorded, nothing logged at ERROR,
+// and recordV2 returning nil.
 func wantLeftOutUnread(t *testing.T, name string, logs *observer.ObservedLogs, mocks []*models.Mock, err error, want string) {
 	t.Helper()
 	if err != nil {
@@ -69,6 +71,14 @@ func wantLeftOutUnread(t *testing.T, name string, logs *observer.ObservedLogs, m
 	}
 	if got := leftOutReasons(logs); len(got) != 1 || got[0] != want {
 		t.Errorf("%s: left out for %q; want once for %q", name, got, want)
+	}
+	for _, e := range logs.All() {
+		if e.Message != supervisor.LeftOutWarnMsg && e.Message != supervisor.LeftOutDebugMsg {
+			continue
+		}
+		if spanned, _ := e.ContextMap()["spanRecorded"].(bool); !spanned {
+			t.Errorf("%s: left out with spanRecorded %v; want its exchange's span recorded", name, e.ContextMap()["spanRecorded"])
+		}
 	}
 	for _, e := range logs.FilterLevelExact(zapcore.ErrorLevel).All() {
 		t.Errorf("%s: logged at ERROR: %s", name, e.Message)
@@ -316,6 +326,18 @@ func TestRecordV2_ObserveOnly_ACloseDelimitedBodyIsWholeOnlyAtTheConnectionsEnd(
 	}
 }
 
+// An observe-only capture that ended the upstream's stream at a hole has not
+// read the body's end, even when it marks its connection's end too: what the
+// hole lost may be the body's tail.
+func TestRecordV2_ObserveOnly_ACloseDelimitedBodyEndedAtAHoleIsLeftOut(t *testing.T) {
+	mocks, logs, err := recordUnit(t, reportReq, reportHead+firstHalf, func(s *supervisor.Session) {
+		s.Opts.SkipTLSMITM = true
+		s.MarkEndedAtHole(fakeconn.FromDest, "test hole")
+		s.MarkEndedWithConnection(fakeconn.FromDest)
+	})
+	wantLeftOutUnread(t, "a hole, then the connection's end", logs, mocks, err, supervisor.LeftOutCloseNotRead)
+}
+
 // drainMocks returns the mocks on mocks, without waiting.
 func drainMocks(mocks chan *models.Mock) []*models.Mock {
 	var got []*models.Mock
@@ -372,20 +394,34 @@ const (
 	wsFrame     = "\x81\x05hello"
 )
 
-// A 101 Switching Protocols ends at its head (RFC 9112 6.3), and what follows
-// it is another protocol, not its body: its mock does not depend on how the
-// upgraded connection ends. Each way the stream ends short of the upstream's
-// close records it, as a whole close-delimited body is not.
+// An HTTP/2 cleartext upgrade asked on a POST (RFC 7540 3.2: an Upgrade may
+// come on any method), and the server's first HTTP/2 frame after its 101.
+const (
+	h2cUpgradeReq  = "POST /rpc HTTP/1.1\r\nHost: h2.example\r\nContent-Length: 4\r\nConnection: Upgrade, HTTP2-Settings\r\nUpgrade: h2c\r\nHTTP2-Settings: AAMAAABkAAQAAP__\r\n\r\nping"
+	h2cUpgradeHead = "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n"
+	h2Settings     = "\x00\x00\x00\x04\x00\x00\x00\x00\x00"
+)
+
+// A 101 Switching Protocols ends at its head (RFC 9112 6.3), whatever method
+// the Upgrade came on, and what follows it is another protocol, not its body:
+// its mock does not depend on how the upgraded connection ends. Each way the
+// stream ends short of the upstream's close records it, as a whole
+// close-delimited body is not.
 func TestRecordV2_ASwitchingProtocolsHeadIsWholeHoweverTheUpgradedStreamEnds(t *testing.T) {
-	for name, prep := range map[string]func(*supervisor.Session){
-		"no side's end":           nil,
-		"a capture hole":          func(s *supervisor.Session) { s.MarkEndedAtHole(fakeconn.FromDest, "test hole") },
-		"observe-only, cut":       func(s *supervisor.Session) { s.Opts.SkipTLSMITM = true },
-		"the upstream's reset":    func(s *supervisor.Session) { s.MarkPeerEndedBy(fakeconn.FromDest, true, supervisor.EndAtStop) },
-		"observe-only, conn ends": func(s *supervisor.Session) { s.Opts.SkipTLSMITM = true; s.MarkEndedWithConnection(fakeconn.FromDest) },
+	for upgrade, ex := range map[string]struct{ req, resp string }{
+		"a WebSocket upgrade on a GET": {upgradeReq, upgradeHead + wsFrame},
+		"an h2c upgrade on a POST":     {h2cUpgradeReq, h2cUpgradeHead + h2Settings},
 	} {
-		mocks, logs, err := recordUnit(t, upgradeReq, upgradeHead+wsFrame, prep)
-		wantRecordedWhole(t, name, logs, mocks, err, 101, "")
+		for name, prep := range map[string]func(*supervisor.Session){
+			"no side's end":           nil,
+			"a capture hole":          func(s *supervisor.Session) { s.MarkEndedAtHole(fakeconn.FromDest, "test hole") },
+			"observe-only, cut":       func(s *supervisor.Session) { s.Opts.SkipTLSMITM = true },
+			"the upstream's reset":    func(s *supervisor.Session) { s.MarkPeerEndedBy(fakeconn.FromDest, true, supervisor.EndAtStop) },
+			"observe-only, conn ends": func(s *supervisor.Session) { s.Opts.SkipTLSMITM = true; s.MarkEndedWithConnection(fakeconn.FromDest) },
+		} {
+			mocks, logs, err := recordUnit(t, ex.req, ex.resp, prep)
+			wantRecordedWhole(t, upgrade+", "+name, logs, mocks, err, 101, "")
+		}
 	}
 }
 
@@ -454,18 +490,44 @@ func TestRecordV2_TheAnswerToAHEADWithNoFramingIsWholeAtItsHead(t *testing.T) {
 
 const connectReq = "CONNECT api.example:443 HTTP/1.1\r\nHost: api.example:443\r\n\r\n"
 
-// A CONNECT's 2xx opens a tunnel after its head (RFC 9110 9.3.6): it has no
-// body (RFC 9112 6.3), and what follows is the tunnel's bytes, no HTTP/1
-// exchange. Its mock is its head, recorded as the head comes, and the
-// connection's recording ends there, while the tunnel carries on. A CONNECT
-// refused (its 407) is an answer like any other, with its body, and the client
-// may ask again on the connection.
-func TestRecordV2_AConnectsTunnelIsNoBodyAndNoExchange(t *testing.T) {
-	for _, refusedFirst := range []bool{false, true} {
-		name := "tunnel"
-		if refusedFirst {
-			name = "refused, then a tunnel"
+// A CONNECT's 2xx whose head's lines end in a bare LF, which readResponseV2
+// finds no end of and reads to the stream's end, tunnel bytes and all, is
+// framed as buildHTTPMock parses it: at its head, with no body and no
+// Content-Length, however the stream ends; not as a body that ends at a close
+// never read.
+func TestRecordV2_ABareLFConnectHeadIsWholeAtItsHead(t *testing.T) {
+	mocks, logs, err := recordUnit(t, connectReq, "HTTP/1.1 200 Connection Established\nProxy-Agent: corp-proxy\n\n\x16\x03\x01tunnel", nil)
+	wantRecordedWhole(t, "bare-LF CONNECT head", logs, mocks, err, 200, "")
+	if len(mocks) == 1 && mocks[0].Spec.HTTPResp != nil {
+		if cl, ok := mocks[0].Spec.HTTPResp.Header["Content-Length"]; ok {
+			t.Errorf("the tunnel's head was recorded with Content-Length %q, which it was not sent and must not carry", cl)
 		}
+	}
+	wantTunnelWarned(t, "bare-LF CONNECT head", logs, "api.example:443")
+}
+
+// A CONNECT's 2xx, any 2xx, opens a tunnel after its head (RFC 9110 9.3.6): it
+// has no body (RFC 9112 6.3), and what follows is the tunnel's bytes, no
+// HTTP/1 exchange. Its mock is its head, recorded as the head comes, and the
+// connection's recording ends there, while the tunnel carries on, which is said
+// once at WARN, naming the tunnel's host (Session.ReportTunnel). A CONNECT
+// refused (its 407) is an answer like any other, with its body, and the client
+// may ask again on the connection. The 202's connection then ends with no
+// side's end: its head is whole however its stream ends, and so is not a body
+// cut short of a close.
+func TestRecordV2_AConnectsTunnelIsNoBodyAndNoExchange(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		refusedFirst bool
+		status       int
+		head         string
+		ended        bool
+	}{
+		{name: "tunnel", status: 200, head: "HTTP/1.1 200 Connection Established\r\n\r\n"},
+		{name: "refused, then a tunnel", refusedFirst: true, status: 200, head: "HTTP/1.1 200 Connection Established\r\n\r\n"},
+		{name: "a tunnel opened by a 2xx other than 200", status: 202, head: "HTTP/1.1 202 Accepted\r\n\r\n", ended: true},
+	} {
+		name, refusedFirst := tc.name, tc.refusedFirst
 		supervisor.ResetLeftOutWarningsForTest()
 		core, logs := observer.New(zapcore.DebugLevel)
 		sess, sendReq, closeReq, sendResp, closeResp, mocks := newTestSession(t)
@@ -479,9 +541,13 @@ func TestRecordV2_AConnectsTunnelIsNoBodyAndNoExchange(t *testing.T) {
 		sendReq([]byte(connectReq), at, at)
 		// The tunnel's first bytes come with the head; inside it, a plain
 		// HTTP/1 call, which is the tunnel's, not this connection's.
-		sendResp([]byte("HTTP/1.1 200 Connection Established\r\n\r\n\x16\x03\x01tunnel"), at, at)
+		sendResp([]byte(tc.head+"\x16\x03\x01tunnel"), at, at)
 		sendReq([]byte("GET /inside HTTP/1.1\r\nHost: api.example\r\n\r\n"), at, at)
 		sendResp([]byte("HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\ninside"), at, at)
+		if tc.ended {
+			closeReq()
+			closeResp()
+		}
 		done := make(chan error, 1)
 		go func() { done <- (&HTTP{Logger: zap.New(core)}).recordV2(t.Context(), sess) }()
 		var err error
@@ -491,9 +557,9 @@ func TestRecordV2_AConnectsTunnelIsNoBodyAndNoExchange(t *testing.T) {
 			t.Fatalf("%s: recordV2 did not return within 10s of the tunnel's head with the connection open", name)
 		}
 		got := drainMocks(mocks)
-		want := []int{200}
+		want := []int{tc.status}
 		if refusedFirst {
-			want = []int{407, 200}
+			want = []int{407, tc.status}
 		}
 		if err != nil || len(got) != len(want) {
 			t.Fatalf("%s: recorded %d mocks, recordV2 = %v; want %d and nil", name, len(got), err, len(want))
@@ -519,6 +585,23 @@ func TestRecordV2_AConnectsTunnelIsNoBodyAndNoExchange(t *testing.T) {
 		for _, e := range logs.FilterLevelExact(zapcore.ErrorLevel).All() {
 			t.Errorf("%s: logged at ERROR: %s", name, e.Message)
 		}
+		wantTunnelWarned(t, name, logs, "api.example:443")
+	}
+}
+
+// wantTunnelWarned checks that the connection said once, at WARN, that its
+// recording ended at a tunnel to host (Session.ReportTunnel).
+func wantTunnelWarned(t *testing.T, name string, logs *observer.ObservedLogs, host string) {
+	t.Helper()
+	var hosts []any
+	for _, e := range logs.FilterMessage(supervisor.TunnelWarnMsg).All() {
+		if e.Level != zapcore.WarnLevel {
+			t.Errorf("%s: the tunnel was said at %v; want WARN", name, e.Level)
+		}
+		hosts = append(hosts, e.ContextMap()["host"])
+	}
+	if len(hosts) != 1 || hosts[0] != host {
+		t.Errorf("%s: the tunnel was said for hosts %v; want once, for %q", name, hosts, host)
 	}
 }
 
