@@ -304,6 +304,23 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			}
 			fault = partAnswerFault(sess)
 		}
+		if fault == nil && bodyEndsAtClose(finalResp, requestMethod(finalReq)) && !closeEnded(sess, streamEnded) {
+			// The body ends at the upstream's close, and its read did not
+			// end there (closeEnded): it is not known to be whole, and no
+			// fault is known to record it with. Recorded as far as it
+			// came, the call would be served a complete-looking shorter
+			// response at replay.
+			reason := supervisor.LeftOutCloseNotRead
+			if mark, ok := sess.TakeMockIncomplete(); ok {
+				reason = mark + ": " + reason
+			}
+			logger.Debug("V2 HTTP record: the response's body ends at the upstream's close, which its read did not reach; the exchange is left out")
+			sess.ReportLeftOut(&models.Mock{
+				Kind: models.HTTP,
+				Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
+			}, reason)
+			return nil
+		}
 		mock, err := h.buildHTTPMock(&FinalHTTP{
 			Req:              finalReq,
 			Resp:             finalResp,
@@ -449,6 +466,50 @@ func partAnswerFault(sess *supervisor.Session) *models.Fault {
 		return &models.Fault{Kind: models.FaultReset, AfterHead: true, Observed: "the upstream reset the connection partway through the answer"}
 	}
 	return &models.Fault{Kind: models.FaultTruncate, Observed: "the upstream closed the connection partway through the answer"}
+}
+
+// bodyEndsAtClose reports whether resp, a response as readResponseV2 read it to
+// the request of method, has a body framed by the upstream's close: its final
+// head has come, it has a body by rule, and the head names neither a
+// Content-Length nor a chunked Transfer-Encoding, as readResponseV2 frames it.
+// A head readResponseV2 found no end of (messageHead: one whose lines end in a
+// bare LF, read to the stream's end) is framed as buildHTTPMock parses it
+// (parseFinalResponse, closeDelimited).
+func bodyEndsAtClose(resp []byte, method string) bool {
+	head, _, status, ok := messageHead(resp, true)
+	if !ok {
+		parsed, _, err := parseFinalResponse(&FinalHTTP{Resp: resp}, &http.Request{Method: method})
+		return err == nil && closeDelimited(parsed, method)
+	}
+	if responseHasNoBody(method, status) {
+		return false
+	}
+	contentLength, transferEncoding := parseHeaders(head)
+	return contentLength == "" && !strings.Contains(strings.ToLower(transferEncoding), "chunked")
+}
+
+// closeEnded reports whether a response's read, which ended at the stream's
+// end where streamEnded (io.EOF) and else at its reader's close, ended at the
+// upstream's close, the one end of a body framed by it (bodyEndsAtClose): the
+// stream ran out, not at a capture hole (Session.EndedAtHole), and the
+// upstream's side had ended with its FIN (Session.PeerEnded), which the relay
+// marks before it ends the stream; not with its reset, nor with no end of its
+// own, as where the relay ends the stream at the recording's stop or when its
+// read of a side fails otherwise. An observe-only capture (Opts.SkipTLSMITM),
+// with no relay to mark it, says instead that the stream ended because its
+// connection did (Session.EndedWithConnection): the client read the body to
+// that end.
+func closeEnded(sess *supervisor.Session, streamEnded bool) bool {
+	if !streamEnded {
+		return false
+	}
+	if _, hole := sess.EndedAtHole(fakeconn.FromDest); hole {
+		return false
+	}
+	if sess.Opts.SkipTLSMITM {
+		return sess.EndedWithConnection(fakeconn.FromDest)
+	}
+	return sess.PeerEnded(fakeconn.FromDest) == supervisor.PeerClosed
 }
 
 // recordFault builds and emits the mock of a call that got no answer, with the
