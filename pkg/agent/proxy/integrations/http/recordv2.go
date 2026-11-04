@@ -634,7 +634,7 @@ func (f *messageFrame) end(msg []byte) (int, bool, error) {
 			return 0, false, nil
 		}
 		return bodyStart + n, true, nil
-	case strings.Contains(strings.ToLower(transferEncoding), "chunked"):
+	case chunkedCoding(transferEncoding):
 		done, err := f.body.feed(msg[bodyStart:])
 		return bodyStart + f.body.end, done, err
 	}
@@ -669,36 +669,36 @@ func parseHeaders(msg []byte) (contentLength string, transferEncoding string) {
 		}
 		key = bytes.TrimSpace(key)
 		switch {
-		case equalFoldASCII(key, contentLengthName):
+		case equalFoldASCII(key, "content-length"):
 			cl = bytes.TrimSpace(val)
-		case equalFoldASCII(key, transferEncodingName):
+		case equalFoldASCII(key, "transfer-encoding"):
 			te = bytes.TrimSpace(val)
 		}
 	}
 	transferEncoding = string(te)
-	if strings.Contains(strings.ToLower(transferEncoding), "chunked") {
+	if chunkedCoding(transferEncoding) {
 		return "", transferEncoding
 	}
 	return string(cl), transferEncoding
 }
 
 var (
-	newline              = []byte("\n")
-	colon                = []byte(":")
-	contentLengthName    = []byte("content-length")
-	transferEncodingName = []byte("transfer-encoding")
+	newline = []byte("\n")
+	colon   = []byte(":")
 )
 
-// equalFoldASCII reports whether name, a header field's name, is lower (a
-// name in lower-case ASCII) without regard to case. Only ASCII letters fold,
-// as net/http folds a field name: bytes.EqualFold also takes Unicode's simple
-// folds, so U+017F (ſ) matched s and a field net/http does not read as
-// Transfer-Encoding framed the message as chunked.
-func equalFoldASCII(name, lower []byte) bool {
-	if len(name) != len(lower) {
+// equalFoldASCII reports whether s, a header field's name or a part of a
+// field's value, is lower (lower-case ASCII) without regard to case. Only
+// ASCII letters fold, as net/http folds a field name and the chunked coding's
+// name: bytes.EqualFold also takes Unicode's simple folds, so U+017F (ſ)
+// matched s and a field net/http does not read as Transfer-Encoding framed
+// the message as chunked.
+func equalFoldASCII[S ~string | ~[]byte](s S, lower string) bool {
+	if len(s) != len(lower) {
 		return false
 	}
-	for i, c := range name {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
 		if 'A' <= c && c <= 'Z' {
 			c += 'a' - 'A'
 		}
@@ -707,6 +707,23 @@ func equalFoldASCII(name, lower []byte) bool {
 		}
 	}
 	return true
+}
+
+// chunkedCoding reports whether te, a Transfer-Encoding value, holds
+// "chunked" without regard to ASCII case (equalFoldASCII): "Chunked" and
+// "gzip, chunked" do. It tests for the word anywhere in the value, as every
+// framing tested it before, and it is the one test every framing makes of
+// the value. strings.ToLower, which each lowered the value with, lowers
+// U+212A (the Kelvin sign) to k, so a value net/http refuses as an
+// unsupported coding framed its message as chunked.
+func chunkedCoding(te string) bool {
+	const chunked = "chunked"
+	for i := 0; i+len(chunked) <= len(te); i++ {
+		if equalFoldASCII(te[i:i+len(chunked)], chunked) {
+			return true
+		}
+	}
+	return false
 }
 
 // destPortFromAddr extracts the destination TCP port from a FakeConn's

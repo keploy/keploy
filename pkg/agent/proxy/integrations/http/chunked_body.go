@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"strconv"
-	"strings"
 
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -183,7 +182,7 @@ func chunkedEndRefused(resp, refused []byte) ([]byte, bool) {
 	// framing. Chunked framing is readResponseV2's test: parseHeaders drops a
 	// Content-Length beside it.
 	head, bodyStart, _, _ := messageHead(resp, true)
-	if _, transferEncoding := parseHeaders(head); !strings.Contains(strings.ToLower(transferEncoding), "chunked") {
+	if _, transferEncoding := parseHeaders(head); !chunkedCoding(transferEncoding) {
 		return nil, false
 	}
 	msg := append(resp[:len(resp):len(resp)], refused...)
@@ -407,7 +406,7 @@ func awaitsContinue(req []byte) bool {
 		return false
 	}
 	contentLength, transferEncoding := parseHeaders(head)
-	if strings.Contains(strings.ToLower(transferEncoding), "chunked") {
+	if chunkedCoding(transferEncoding) {
 		return true
 	}
 	n, err := strconv.Atoi(contentLength)
