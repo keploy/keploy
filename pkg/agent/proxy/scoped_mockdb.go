@@ -589,9 +589,22 @@ func (s *scopedMockDb) AnsweredRedacting(kind models.Kind) ([]*models.Mock, bool
 	return integrations.AnsweredRedacting(s.MockMemDb, kind)
 }
 
+// HasUnservedRecording forwards the store's check of an unserved recording
+// (integrations.UnservedRecordingFinder), whatever this view's allowlist
+// shows: the set holds the recording a parser's hold waits for, and each
+// window change re-reads it through the view. Over a store without the check
+// it finds none, so the parser holds no call.
+func (s *scopedMockDb) HasUnservedRecording(kind models.Kind, match func(*models.Mock) bool) (bool, error) {
+	if f, ok := s.MockMemDb.(integrations.UnservedRecordingFinder); ok {
+		return f.HasUnservedRecording(kind, match)
+	}
+	return false, nil
+}
+
 var (
 	_ integrations.AnsweredRedactingReader = (*scopedMockDb)(nil)
 	_ integrations.AnsweredFinder          = (*scopedMockDb)(nil)
+	_ integrations.UnservedRecordingFinder = (*scopedMockDb)(nil)
 	_ integrations.ExactServingReader      = (*scopedMockDb)(nil)
 	_ integrations.ExactConsumedReader     = (*scopedMockDb)(nil)
 	_ integrations.ExactServedReader       = (*scopedMockDb)(nil)

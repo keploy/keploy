@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -78,6 +79,14 @@ func aLaterTestsRecordingOnDiskIsUnservedUntilItAnswers(t *testing.T) {
 	mm.SetRecordedOfKind(disk.RangeKind)
 	if !hasUnserved(t, mm, models.HTTP, later.Name) {
 		t.Fatal("the later test's recording on disk was not found")
+	}
+	// A parser reads the store through the worker-scope wrap (app-start
+	// marks, a scoped worker), which must forward the check.
+	var wrapped integrations.MockMemDb = &scopedMockDb{MockMemDb: mm}
+	if f, ok := wrapped.(integrations.UnservedRecordingFinder); !ok {
+		t.Fatal("the worker-scope wrap is no UnservedRecordingFinder")
+	} else if got, err := f.HasUnservedRecording(models.HTTP, named(later.Name)); err != nil || !got {
+		t.Fatalf("through the worker-scope wrap found %v (%v), want the later test's recording as the store found it", got, err)
 	}
 	if hasUnserved(t, mm, models.GENERIC, later.Name) {
 		t.Fatal("a recording of another kind was found")
