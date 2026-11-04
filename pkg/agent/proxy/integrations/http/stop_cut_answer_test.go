@@ -1476,22 +1476,28 @@ func peerEndRead(c *relayedConn, dir fakeconn.Direction) bool {
 // the application, or the upstream's close) is read after it, before recordV2
 // has judged the read: here on its third check of the context after its end
 // (readResponseV2's, the one that would have the read take what the stream
-// held, and the one that finds the context ended the read). The read is
-// judged as it ended: the stop cut it with the connection still open
-// (LeftOutStopCutOpen), left out once with its span. Not dropped with nothing
-// reported (the client's end), nor said to be cut after the upstream had
-// ended the connection (the upstream's). Where the recording is not stopping
-// (Session.RecordingStopping), the context's end with the connection open is
-// returned as before, nothing left out, whatever end is read after it.
+// held, and the one that finds the context ended the read), or on its second,
+// as recordV2 asks whether an end judges the read the context ended
+// (endJudgesAfterCtx). The read is judged as it ended: the stop cut it with
+// the connection still open (LeftOutStopCutOpen), left out once with its
+// span. Not dropped with nothing reported (the client's end), nor said to be
+// cut after the upstream had ended the connection (the upstream's). Where the
+// recording is not stopping (Session.RecordingStopping), the context's end
+// with the connection open is returned as before, nothing left out, whatever
+// end is read after it: not taken as an end that came first, which would
+// have the read take the rest of the stream and fail to decode.
 func TestRecordV2_AnEndReadAfterTheContextsEndAtTheStopDoesNotJudgeTheCut(t *testing.T) {
 	const part, more = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n01234", "567"
 	rows := []struct {
 		name               string
 		upstream, stopping bool
+		at                 int32 // the check of the context the end is read on
 	}{
-		{"the stop closes the application", false, true},
-		{"the upstream closes", true, true},
-		{"the upstream closes, the recording not stopping", true, false},
+		{"the stop closes the application", false, true, 3},
+		{"the upstream closes", true, true, 3},
+		{"the upstream closes, the recording not stopping", true, false, 3},
+		{"the upstream closes as the drain is asked, the recording not stopping", true, false, 2},
+		{"the application closes as the drain is asked, the recording not stopping", false, false, 2},
 	}
 	for _, proven := range []bool{false, true} {
 		for _, r := range rows {
@@ -1514,7 +1520,7 @@ func TestRecordV2_AnEndReadAfterTheContextsEndAtTheStopDoesNotJudgeTheCut(t *tes
 				var relayedOnce sync.Once
 				relayedMore := func() { relayedOnce.Do(func() { close(moreRelayed) }) }
 				t.Cleanup(relayedMore)
-				ctx := &ctxEndHook{Context: context.Background(), at: 3, hook: func() {
+				ctx := &ctxEndHook{Context: context.Background(), at: r.at, hook: func() {
 					<-moreRelayed
 					if upstream {
 						_ = c.dest.Close()
@@ -1969,5 +1975,151 @@ func TestRecordV2_AHoleMarkedAfterTheAbortsCloseDoesNotJudgeTheRead(t *testing.T
 				wantFault(t, oneMock(t, mocks, err), models.Fault{Kind: models.FaultTimeout, AfterHead: true, BodyBytes: 5})
 			})
 		}
+	}
+}
+
+// The relay ends the destination's stream at the recording's stop with the
+// connection open, partway through a close-delimited body, and a side's end
+// is marked after the stream's end, before recordV2 has judged the read: here
+// on its first check of its context after the read returned. The read is
+// judged by the ends as it ended (Session.Ends, read once): the stream's end
+// came with no side's end, so it ended no body, and the stop cut it
+// (LeftOutStopCutOpen), left out once with its span. Not a body the
+// upstream's close ended, recorded whole as far as it came.
+func TestRecordV2_AnEndMarkedAfterTheRelaysEndAtTheStopEndsNoBody(t *testing.T) {
+	part := stopCutAllParts[len(stopCutAllParts)-1].part
+	for _, proven := range []bool{false, true} {
+		for _, dir := range []fakeconn.Direction{fakeconn.FromClient, fakeconn.FromDest} {
+			name := map[fakeconn.Direction]string{fakeconn.FromClient: "the stop closes the application", fakeconn.FromDest: "the upstream closes"}[dir] + switchName[proven]
+			t.Run(name, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+				c := newRelayedConn(t)
+				c.startRelay(t)
+				stopping := make(chan struct{})
+				close(stopping)
+				c.sess.RecordingDone = stopping
+				ctx := &ctxErrHook{Context: context.Background(), hook: func() {
+					c.sess.MarkPeerEndedBy(dir, false, supervisor.EndAtStop)
+				}}
+				go func() { c.done <- (&HTTP{Logger: zaptest.NewLogger(t)}).recordV2(ctx, c.sess) }()
+				write(t, c.app, c.src, faultReq)
+				relayed(t, c.dest, faultReq)
+				at := cutTimes{sent: time.Now()}
+				at.last = at.sent
+				write(t, c.dest, c.dst, part)
+				relayed(t, c.app, part)
+				at.done = time.Now()
+				awaitTaken(t, c.sess.DestStream, len(part))
+				ctx.armed.Store(true)
+				c.stopRelay()
+				mocks, err := c.collect(t)
+				if !ctx.fired.Load() {
+					t.Fatal("recordV2 did not ask its context after the read")
+				}
+				wantLeftOutForTheStop(t, c, at, mocks, err, supervisor.LeftOutStopCutOpen, false)
+			})
+		}
+	}
+}
+
+// The supervisor's abort closes the streams with the parser's context ended,
+// partway through a close-delimited body, with neither side's end and the
+// recording not stopping, and a side's end is read after the close, before
+// recordV2 has judged the read: here on its first check of its context after
+// the read returned. The read is judged by the ends as it ended (Session.Ends,
+// read once): no end judged it, so recordV2 returns the context's end, as with
+// no end read after the close. Not judged by the end that came after the
+// close, as a read the connection's end ended, whose recording ends there
+// with nothing returned.
+func TestRecordV2_AnEndReadAfterTheAbortsCloseWithTheContextEndedJudgesNothing(t *testing.T) {
+	part := stopCutAllParts[len(stopCutAllParts)-1].part
+	for _, proven := range []bool{false, true} {
+		for _, upstream := range []bool{false, true} {
+			name := map[bool]string{false: "the application closes", true: "the upstream closes"}[upstream] + switchName[proven]
+			t.Run(name, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+				c := newRelayedConn(t)
+				c.grace = time.Minute
+				c.startRelay(t)
+				endRead := true
+				ctx := &ctxEndHook{Context: context.Background(), at: 1, hook: func() {
+					if upstream {
+						_ = c.dest.Close()
+						endRead = peerEndRead(c, fakeconn.FromDest)
+						return
+					}
+					_ = c.app.Close()
+					endRead = peerEndRead(c, fakeconn.FromClient)
+				}}
+				go func() { c.done <- (&HTTP{Logger: zaptest.NewLogger(t)}).recordV2(ctx, c.sess) }()
+				write(t, c.app, c.src, faultReq)
+				relayed(t, c.dest, faultReq)
+				write(t, c.dest, c.dst, part)
+				relayed(t, c.app, part)
+				awaitTaken(t, c.sess.DestStream, len(part))
+				// The parser waits in a read, its check of its context made:
+				// the next is after the read.
+				ctx.ended.Store(true)
+				_ = c.sess.ClientStream.Close()
+				_ = c.sess.DestStream.Close()
+				_, err := c.collect(t)
+				if !ctx.fired.Load() || !endRead {
+					t.Fatalf("the side's end ran %v, read by the relay %v: recordV2 did not ask its context after the read",
+						ctx.fired.Load(), endRead)
+				}
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("recordV2 = %v, want the parser's context's end: no side's end judged the read as it ended", err)
+				}
+				if got := errorsLogged(c); len(got) != 0 {
+					t.Errorf("logged %q at ERROR, want nothing", got)
+				}
+			})
+		}
+	}
+}
+
+// The relay ends the destination's stream where the client stopped taking it
+// (Session.EndedWhereClientStopped), partway through the response, before it
+// has read the client's end, and that end, the stop's close of the
+// application, is marked after the stream's end, before recordV2 has judged
+// the read: here on its first check of its context after the read returned.
+// The read is judged by the ends as it ended (Session.Ends, read once): the
+// client closed partway through the response, and refused the rest
+// (LeftOutClientClosedPartway). Not by the end marked after it, as the stop's
+// close of the application with the call in flight (LeftOutPartwayAtStop).
+func TestRecordV2_AClientEndMarkedAfterItsStreamEndedDoesNotJudgeTheRead(t *testing.T) {
+	const part = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n01234"
+	for _, proven := range []bool{false, true} {
+		t.Run(strings.TrimPrefix(switchName[proven], ", "), func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+			c := newRelayedConn(t)
+			c.startRelay(t)
+			ctx := &ctxErrHook{Context: context.Background(), hook: func() {
+				c.sess.MarkPeerEndedBy(fakeconn.FromClient, false, supervisor.EndAtStop)
+			}}
+			go func() { c.done <- (&HTTP{Logger: zaptest.NewLogger(t)}).recordV2(ctx, c.sess) }()
+			write(t, c.app, c.src, faultReq)
+			relayed(t, c.dest, faultReq)
+			write(t, c.dest, c.dst, part)
+			relayed(t, c.app, part)
+			awaitTaken(t, c.sess.DestStream, len(part))
+			// As the relay says it before it ends the stream there.
+			c.sess.MarkEndedWhereClientStopped(func() []byte { return nil })
+			ctx.armed.Store(true)
+			c.stopRelay()
+			mocks, err := c.collect(t)
+			if !ctx.fired.Load() {
+				t.Fatal("recordV2 did not ask its context after the read")
+			}
+			if err != nil || len(mocks) != 0 {
+				t.Errorf("recordV2 = %v, recorded %d mocks; want nil, and none: the response is not whole", err, len(mocks))
+			}
+			if got := leftOutReasons(c); len(got) != 1 || got[0] != supervisor.LeftOutClientClosedPartway {
+				t.Errorf("left out for %q, want once for %q: the client's end came after the read's", got, supervisor.LeftOutClientClosedPartway)
+			}
+			if got := errorsLogged(c); len(got) != 0 {
+				t.Errorf("logged %q at ERROR, want nothing", got)
+			}
+		})
 	}
 }
