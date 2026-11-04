@@ -167,3 +167,27 @@ func TestALibraryDownThatDidNotSucceedIsSwept(t *testing.T) {
 		}
 	})
 }
+
+// A down through the compose library runs under the project's progress bound,
+// as a shell-out down does: one whose project never moves is cut at the stall
+// bound and its leftovers swept, never left to hang the teardown.
+func TestALibraryDownThatMakesNoProgressIsCut(t *testing.T) {
+	shortDownStall(t, 500*time.Millisecond)
+	stack := &fakeComposeStack{downBlocks: true}
+	a, _, _ := libraryDownApp(t, func(context.Context) (composeStack, error) { return stack, nil })
+
+	done := make(chan struct{})
+	go func() {
+		a.ComposeDown()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("a library down whose project never moved was not cut at the stall bound of %s", composeDownStall)
+	}
+	if stack.downCall != 1 || !stack.downCtxEnded.Load() {
+		t.Fatalf("the library down ran %d times and saw its context end: %v; want once, cut", stack.downCall, stack.downCtxEnded.Load())
+	}
+}

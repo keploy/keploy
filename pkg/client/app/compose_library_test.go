@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -217,14 +218,22 @@ func TestRunComposeInProcessClassifiesFailures(t *testing.T) {
 //
 // compose reacts to a cancelled context with a graceful stop of every service,
 // on a context it deliberately makes uncancellable. That is the slow teardown
-// the drain budget cannot absorb, so keploy's fast down must run FIRST. If this
-// stops happening, runs fail with "teardown drain timed out" rather than
-// anything that points here.
+// the drain budget cannot absorb, so keploy's fast down must run FIRST: Up's
+// context must still be live when the down starts. If this stops happening,
+// runs fail with "teardown drain timed out" rather than anything that points
+// here.
+//
+// And the run returns only once its down has finished: the replay loop starts
+// the next test-set's `up` as soon as it returns, which would race the daemon
+// still reaping these containers ("container name already in use").
 func TestRunComposeInProcessTearsDownOnCancel(t *testing.T) {
 	blockUntilCancel := make(chan struct{})
-	stack := &fakeComposeStack{upBlocksUntil: blockUntilCancel}
+	upStarted := make(chan struct{})
+	stack := &fakeComposeStack{upBlocksUntil: blockUntilCancel, upStarted: upStarted}
 
 	downCalled := make(chan struct{})
+	releaseDown := make(chan struct{})
+	var upEndedBeforeDown atomic.Bool
 	a := &App{
 		logger:          zap.NewNop(),
 		docker:          exitedInspector{},
@@ -235,22 +244,45 @@ func TestRunComposeInProcessTearsDownOnCancel(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan utils.CmdError, 1)
 	go func() {
 		done <- a.runComposeInProcess(ctx, func() {
+			upEndedBeforeDown.Store(stack.upContext().Err() != nil)
 			close(downCalled)
 			close(blockUntilCancel)
+			<-releaseDown
 		})
 	}()
 
+	select {
+	case <-upStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run never called the runner's Up")
+	}
 	cancel()
 
 	select {
 	case <-downCalled:
 	case <-time.After(graceBudget + 5*time.Second):
+		close(releaseDown)
 		t.Fatal("the compose stack was never brought down after the run was cancelled; compose's own " +
 			"graceful stop then runs unbounded and overruns the teardown drain budget")
 	}
+	if upEndedBeforeDown.Load() {
+		close(releaseDown)
+		t.Fatal("the run's cancel reached the runner's Up before keploy's down started: compose's own " +
+			"unbounded graceful stop runs first")
+	}
+
+	// The down is still running: the run must not have returned.
+	select {
+	case <-done:
+		close(releaseDown)
+		t.Fatal("runComposeInProcess returned while its own down was still running")
+	case <-time.After(time.Second):
+	}
+	close(releaseDown)
 
 	select {
 	case <-done:
@@ -481,6 +513,53 @@ func TestALibraryStateReadAsksTheDaemonNothing(t *testing.T) {
 	}
 	if len(rec.asked) != 0 {
 		t.Fatalf("a state read on the in-process path inspected %v on the daemon", rec.asked)
+	}
+}
+
+// The dependency-abort retry reads the in-process runner's service states as
+// it reads `docker compose ps`'s: an app compose created but never started,
+// beside a dependency that crashed, is retried; an app that ran is not.
+func TestALibraryStateReadFeedsTheDependencyAbortRetry(t *testing.T) {
+	forceComposeLibrary(t)
+	for _, tc := range []struct {
+		name     string
+		appState string
+		retry    bool
+	}{
+		{name: "compose created the app and a dependency crashed", appState: "created", retry: true},
+		{name: "the app ran and exited", appState: "exited", retry: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stack := &fakeComposeStack{ps: []docker.ServiceState{
+				{ID: "id-app", Service: "app", State: tc.appState, ExitCode: 1},
+				{ID: "id-db", Service: "db", State: "exited", ExitCode: 1},
+				{ID: "id-agent", Service: keployAgentComposeService, State: "running"},
+			}}
+			a := &App{
+				logger:          zap.NewNop(),
+				docker:          &inspectRecorder{},
+				kind:            utils.DockerCompose,
+				composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
+				cmd:             "docker compose -f - up",
+				composeService:  "app",
+				keployContainer: "keploy-v3",
+				container:       "user-app",
+				newComposeStack: func(context.Context) (composeStack, error) { return stack, nil },
+			}
+
+			got := shouldRetryComposeUp(a.kind, 1, composeDepFailureRetries, nil, errors.New("dependency failed to start"),
+				utils.Runtime, a.composeService, func() []composeServiceState {
+					return a.composeServiceStatesWithin(composePsStateBudget)
+				})
+
+			if got != tc.retry {
+				t.Fatalf("with the app %s and db exited 1 in the runner's states, keploy retried the up: %v; want %v",
+					tc.appState, got, tc.retry)
+			}
+			if stack.psCalls != 1 {
+				t.Fatalf("the retry decision read the runner's states %d times; want once", stack.psCalls)
+			}
+		})
 	}
 }
 

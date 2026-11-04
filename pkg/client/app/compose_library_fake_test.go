@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"io"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,12 +37,33 @@ type fakeComposeStack struct {
 	// upBlocksUntil, when non-nil, makes Up block until it is closed or the
 	// context ends — the shape a foreground `up` has.
 	upBlocksUntil chan struct{}
+	// upStarted, when non-nil, is closed once Up has been called and holds
+	// its context (upContext).
+	upStarted chan struct{}
+	upMu      sync.Mutex
+	upCtx     context.Context
+	// downBlocks makes Down block until its context ends, as a down of a
+	// project that never moves does; downCtxEnded says it ended.
+	downBlocks   bool
+	downCtxEnded atomic.Bool
+}
+
+// upContext is the context the run's Up was given (nil before Up).
+func (f *fakeComposeStack) upContext() context.Context {
+	f.upMu.Lock()
+	defer f.upMu.Unlock()
+	return f.upCtx
 }
 
 func (f *fakeComposeStack) ProjectName() string { return "fake" }
 
 func (f *fakeComposeStack) Up(ctx context.Context, _ docker.ComposeUpOptions, _, _ io.Writer) error {
-	f.upCalls.Add(1)
+	f.upMu.Lock()
+	f.upCtx = ctx
+	f.upMu.Unlock()
+	if f.upCalls.Add(1) == 1 && f.upStarted != nil {
+		close(f.upStarted)
+	}
 	if f.upBlocksUntil != nil {
 		select {
 		case <-f.upBlocksUntil:
@@ -51,9 +73,14 @@ func (f *fakeComposeStack) Up(ctx context.Context, _ docker.ComposeUpOptions, _,
 	return f.upErr
 }
 
-func (f *fakeComposeStack) Down(_ context.Context, grace time.Duration) error {
+func (f *fakeComposeStack) Down(ctx context.Context, grace time.Duration) error {
 	f.downCall++
 	f.downGrace = grace
+	if f.downBlocks {
+		<-ctx.Done()
+		f.downCtxEnded.Store(true)
+		return ctx.Err()
+	}
 	return f.downErr
 }
 
