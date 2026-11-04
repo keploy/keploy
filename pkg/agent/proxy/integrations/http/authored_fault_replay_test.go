@@ -1,3 +1,5 @@
+//go:build linux
+
 package http
 
 import (
@@ -22,6 +24,9 @@ func authoredFault(fault *models.Fault, resp *models.HTTPResp) *models.Mock {
 // fault and its authored block, and served as a recorded one is: a timeout
 // before any answer gives the application nothing until its own timeout; a
 // reset after the head gives it the head and the body bytes, then the reset.
+// Linux only: off Linux relay.ResetClientOnClose cannot reset the socket, so
+// the reset below is served as a close; and the fault-replay helpers it uses
+// (faultMock, loopback, seenAt and the rest) live in Linux-only test files.
 func TestReplayFault_AnAuthoredFaultIsServed(t *testing.T) {
 	m := throughDisk(t, authoredFault(&models.Fault{Kind: models.FaultTimeout}, nil))
 	if m.Spec.Authored == nil || m.FaultOf() == nil || m.FaultServed() != "mock-12: no answer until the application closed, as authored" {
