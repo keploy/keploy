@@ -335,3 +335,15 @@ func ForgetAnsweredForTest() {
 	defer answeredInWindow.mu.Unlock()
 	answeredInWindow.places = redactedPlaces{}
 }
+
+// ForgetPlacesForTest drops every recording's places kept (placesKept), so
+// a row reads each recording of its pool again.
+func ForgetPlacesForTest() {
+	placesKept.mu.Lock()
+	defer placesKept.mu.Unlock()
+	placesKept.byKey, placesKept.bytes = map[placesDigest]keptEntry{}, 0
+}
+
+// PlacesReadsForTest is how many recordings were read for their places
+// (placesReads) since the process started.
+func PlacesReadsForTest() int64 { return placesReads.Load() }
