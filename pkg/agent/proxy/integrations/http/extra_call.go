@@ -14,34 +14,41 @@ import (
 // proven switch), whether it is one call more than the open test recorded:
 // identical, as the matcher judges it, to a call the test's own mocks already
 // answered. It returns how many times that call was recorded for the test,
-// 0 when the request is not such a call or exact serving is off.
+// 0 when the request is not such a call or exact serving is off, and the
+// earliest request time of those recordings (notOwnedRecordingBefore's
+// before): zero when none has one, so keploy cannot place them.
 //
 // The test's answered mocks are matched as the live pool would be, on a view
 // that holds only them and that no match can consume, so one definition of
 // "the same call" serves both the answer and this verdict.
-func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) int {
+func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) (int, time.Time) {
 	er, ok := mockDb.(integrations.ExactConsumedReader)
 	if !ok {
-		return 0
+		return 0, time.Time{}
 	}
 	answered := FilterHTTPMocks(er.ConsumedTestMocks())
 	if len(answered) == 0 {
-		return 0
+		return 0, time.Time{}
 	}
 	dry := h.answeredMatch(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation)
 	if !dry(answered) {
-		return 0
+		return 0, time.Time{}
 	}
 	// How often the test recorded the call: each answered mock the call
 	// matches on its own (recordings of one call may differ where its
-	// variables sit).
+	// variables sit), and the earliest of them.
 	n := 0
+	var first time.Time
 	for _, a := range answered {
-		if dry([]*models.Mock{a}) {
-			n++
+		if !dry([]*models.Mock{a}) {
+			continue
+		}
+		n++
+		if at := a.Spec.ReqTimestampMock; !at.IsZero() && (first.IsZero() || at.Before(first)) {
+			first = at
 		}
 	}
-	return max(n, 1)
+	return max(n, 1), first
 }
 
 // ownCall reports whether the request is one of the open test's own calls

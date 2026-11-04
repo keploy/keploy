@@ -66,6 +66,9 @@ type wireProxy struct {
 	// poolOwners are the owners handed with them (the key of each test-listed
 	// mock's process), nil until they were.
 	poolOwners map[string]string
+	// poolTests is the scope table handed with them (the mocks each test
+	// lists), nil until it was.
+	poolTests map[string][]string
 	// failPools fails that many pool serves, then serves again.
 	failPools int
 	// staged counts the stagings (SetMocks).
@@ -188,12 +191,17 @@ func (p *wireProxy) ServeExactTest(test string, owned []*models.Mock) error {
 	return nil
 }
 
-func (p *wireProxy) SetPoolNames(names []string, owners map[string]string) error {
+// The agent finds the capability by a type assertion: a signature that
+// drifts from it would leave the pool unnamed with no build error.
+var _ coreAgent.PoolNamesSetter = (*wireProxy)(nil)
+
+func (p *wireProxy) SetPoolNames(names []string, owners map[string]string, tests map[string][]string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.poolNames = append([]string{}, names...)
 	sort.Strings(p.poolNames)
 	p.poolOwners = owners
+	p.poolTests = tests
 	return nil
 }
 
@@ -668,6 +676,131 @@ func TestAnEndWithoutAnOutcomeCountsAsFailed(t *testing.T) {
 	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA"})
 	require.Nil(t, serr)
 	require.Equal(t, models.ScopeOutcomeFailed, windowOf(t, a, "o::TestA").Outcome)
+}
+
+// A test's window keeps how its browser drew its random numbers, as its end
+// said, else its begin (ScopeWindow.Random), normalized: a judge that finds
+// the test's calls vary between runs then tells a draw the seeding reaches
+// from one it does not. The claim names a folder, as @keploy/playwright's
+// does: NoteScope then starts the test's notes, and what the begin noted must
+// come after it.
+func TestATestsWindowKeepsHowItsBrowserDrewItsRandomNumbers(t *testing.T) {
+	for _, tc := range []struct{ began, ended, kept string }{
+		{"seeded", "", models.ScopeRandomSeeded},
+		{" OWN ", "", models.ScopeRandomOwn},
+		{"", "", ""},
+		{"dice", "", ""}, // a word keploy does not know says nothing
+		// What the harness did replaces what it meant to do.
+		{"seeded", "own", models.ScopeRandomOwn},
+		{"", "Seeded", models.ScopeRandomSeeded},
+		{"seeded", "dice", models.ScopeRandomSeeded},
+	} {
+		t.Run("began "+tc.began+" ended "+tc.ended, func(t *testing.T) {
+			for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
+				a, _ := wireAgent(t, mode)
+				ctx := context.Background()
+				_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "ui", Dir: t.TempDir()}, os.Getpid())
+				require.Nil(t, serr)
+				req := begin("tr renders the case list")
+				req.Random = tc.began
+				_, serr = a.ProvenBegin(ctx, req)
+				require.Nil(t, serr)
+				_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "tr renders the case list", Outcome: "passed", Random: tc.ended})
+				require.Nil(t, serr)
+				require.Equal(t, tc.kept, windowOf(t, a, "ui::tr renders the case list").Random, mode)
+			}
+		})
+	}
+}
+
+// seededBegin is a begin that asks for a seed for its browser, as
+// @keploy/playwright's does.
+func seededBegin(name, seed string) models.ScopeReq {
+	req := begin(name)
+	req.Random, req.Seed = models.ScopeRandomSeeded, seed
+	return req
+}
+
+// runSeeded begins and ends name with seed, and returns the seed keploy
+// answered the begin with.
+func runSeeded(t *testing.T, a *Agent, name, seed string) string {
+	t.Helper()
+	ctx := context.Background()
+	b, serr := a.ProvenBegin(ctx, seededBegin(name, seed))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: name, Outcome: "passed"})
+	require.Nil(t, serr)
+	return b.Seed
+}
+
+// A record answers a begin with the seed it sent, and keeps it on the test's
+// window for the test's mapping: each record of a test draws new numbers. A
+// retry of the test in the same record draws the first attempt's, so its
+// calls are the ones the attempt made. A seed keploy could not write back as
+// it came is none.
+func TestARecordAnswersABeginWithItsOwnSeedAndARetryWithTheFirstAttempts(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_RECORD)
+	ctx := context.Background()
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "ui", Dir: t.TempDir()}, os.Getpid())
+	require.Nil(t, serr)
+	require.Equal(t, "0123456789abcdef", runSeeded(t, a, "tr", "0123456789ABCDEF"))
+	require.Equal(t, "0123456789abcdef", runSeeded(t, a, "tr", "fedcba9876543210"), "a retry draws the first attempt's numbers")
+	require.Equal(t, "fedcba9876543210", runSeeded(t, a, "deep link", "fedcba9876543210"))
+	require.Empty(t, runSeeded(t, a, "history", "not hex!"))
+	require.Empty(t, runSeeded(t, a, "schema", ""), "a begin that asks for no seed gets none")
+	require.Empty(t, runSeeded(t, a, "tr", ""), "a retry with seeding off gets none")
+	ws, err := a.FinalScopeWindows(ctx)
+	require.NoError(t, err)
+	seeds := map[string][]string{}
+	for _, w := range ws {
+		if strings.HasPrefix(w.Name, "ui::") { // not the claim's own window
+			seeds[w.Name] = append(seeds[w.Name], w.Seed)
+		}
+	}
+	require.Equal(t, map[string][]string{
+		"ui::tr":        {"0123456789abcdef", "0123456789abcdef", ""},
+		"ui::deep link": {"fedcba9876543210"},
+		"ui::history":   {""},
+		"ui::schema":    {""},
+	}, seeds)
+
+	// The next record of the test is a new session: it draws new numbers.
+	b, _ := wireAgent(t, models.MODE_RECORD)
+	_, serr = b.ClaimInstance(ctx, models.InstanceReq{Key: "ui", Dir: t.TempDir()}, os.Getpid())
+	require.Nil(t, serr)
+	require.Equal(t, "1111222233334444", runSeeded(t, b, "tr", "1111222233334444"))
+}
+
+// A replay answers a begin with the seed the test's recording kept, whatever
+// seed the begin sent, so its pages draw what the recording's drew; a test
+// whose recording kept none (recorded before keploy kept seeds, or with
+// seeding off) gets none, and its browser draws its own. A seed is the
+// recording's entry's, not its name's: an entry renamed keeps it.
+func TestAReplayAnswersABeginWithTheSeedItsRecordingKept(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	a.SetTestSeeds(ctx, map[string]string{"ui::tr renamed": "0123456789abcdef", "ui::history": "not hex!"})
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "ui", Dir: t.TempDir()}, os.Getpid())
+	require.Nil(t, serr)
+	require.Equal(t, "0123456789abcdef", runSeeded(t, a, "tr renamed", "fedcba9876543210"))
+	require.Empty(t, runSeeded(t, a, "deep link", "fedcba9876543210"), "an older recording kept no seed")
+	require.Empty(t, runSeeded(t, a, "history", "fedcba9876543210"), "a seed keploy cannot write back is none")
+	require.Empty(t, runSeeded(t, a, "tr renamed", ""), "a begin with seeding off is answered none")
+	require.Equal(t, "0123456789abcdef", windowOf(t, a, "ui::tr renamed").Seed)
+
+	// A second install (the next test set's begins) replaces the first: a
+	// test the new set's recordings name no seed for draws its own, never an
+	// earlier set's recording's numbers.
+	b, _ := wireAgent(t, models.MODE_TEST)
+	b.SetTestSeeds(ctx, map[string]string{"ui::tr renamed": "0123456789abcdef"})
+	_, serr = b.ClaimInstance(ctx, models.InstanceReq{Key: "ui", Dir: t.TempDir()}, os.Getpid())
+	require.Nil(t, serr)
+	require.Equal(t, "0123456789abcdef", runSeeded(t, b, "tr renamed", "fedcba9876543210"))
+	b.SetTestSeeds(ctx, map[string]string{"ui::deep link": "1111222233334444"})
+	require.Empty(t, runSeeded(t, b, "tr renamed", "fedcba9876543210"), "the first install's seed is gone")
+	require.Equal(t, "1111222233334444", runSeeded(t, b, "deep link", "fedcba9876543210"))
+	b.SetTestSeeds(ctx, nil)
+	require.Empty(t, runSeeded(t, b, "deep link", "fedcba9876543210"), "an install of none clears them all")
 }
 
 func TestAnEndOfATestThatIsNotOpenIsRefused(t *testing.T) {
@@ -1259,7 +1392,7 @@ func TestASelfSkippedTestIsNotFailedForCallsItNeverMade(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	storeMocks(a, httpMock("mock-1", "POST", "http://h/audit"))
 	a.scopeTable = map[string][]string{"t": {"mock-1"}}
-	ev, err := a.testEvidence(context.Background(), "t", false)
+	ev, err := a.testEvidence(context.Background(), "t", false, time.Time{})
 	require.NoError(t, err)
 	require.True(t, ev.Empty())
 }
@@ -1381,7 +1514,7 @@ func TestAnUnmadeRecordedCallIsEvidence(t *testing.T) {
 	require.NoError(t, a.serveTestExactly(context.Background(), "orders::TestPlaceOrder"))
 	p.served["mock-2"]++
 
-	ev, err := a.testEvidence(context.Background(), "orders::TestPlaceOrder", true)
+	ev, err := a.testEvidence(context.Background(), "orders::TestPlaceOrder", true, time.Time{})
 	require.NoError(t, err)
 	require.Equal(t, []string{"mock-1"}, ev.Unconsumed, "the audit call was not made; DNS is protocol-phase")
 
@@ -1716,10 +1849,61 @@ func TestAFailedConsumptionReadKeepsTheTestsMisses(t *testing.T) {
 	storeMocks(a, httpMock("mock-1", "GET", "http://h/x"))
 	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
 	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /audit"}}
-	ev, err := a.testEvidence(context.Background(), "o::TestA", true)
+	ev, err := a.testEvidence(context.Background(), "o::TestA", true, time.Time{})
 	require.ErrorContains(t, err, "was not serving o::TestA exactly")
 	require.NotNil(t, ev)
 	require.Len(t, ev.Misses, 1)
+}
+
+// A call made outside every test, before the test that ends began, is no
+// call of that test's: the test framework set its window. It is charged to
+// no test (the run's receipt lists it), and the test's evidence holds only
+// what it made. A miss without a time, one filed while a test was open
+// (the previous test's call still in flight), and any miss read when the
+// test's begin is not known stay the ending test's.
+func TestAMissOutsideEveryTestIsChargedToNoTest(t *testing.T) {
+	began := time.Now()
+	misses := []models.UnmatchedCall{
+		{Protocol: "HTTP", ActualSummary: "GET /tick", Destination: "between:80", Kind: models.MissOutsideTest, At: began.Add(-time.Second)},
+		{Protocol: "HTTP", ActualSummary: "GET /late", Destination: "late:80", Kind: models.MissInTest, At: began.Add(-time.Second)},
+		{Protocol: "HTTP", ActualSummary: "GET /untimed", Destination: "untimed:80", Kind: models.MissOutsideTest},
+		{Protocol: "HTTP", ActualSummary: "GET /ending", Destination: "ending:80", Kind: models.MissOutsideTest, At: began.Add(time.Second)},
+		{Protocol: "HTTP", ActualSummary: "GET /own", Destination: "own:80", Kind: models.MissInTest, At: began.Add(time.Second)},
+	}
+	for _, c := range []struct {
+		name      string
+		beganAt   time.Time
+		uncharged []string
+	}{
+		{"begin known", began, []string{"between:80"}},
+		{"begin not known", time.Time{}, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a, p := wireAgent(t, models.MODE_TEST)
+			p.misses = append([]models.UnmatchedCall(nil), misses...)
+			ev, err := a.testEvidence(context.Background(), "o::TestA", false, c.beganAt)
+			require.NoError(t, err)
+			var listed, uncharged []string
+			for _, m := range ev.Misses {
+				listed = append(listed, m.Destination)
+			}
+			for _, m := range a.takeChargedMisses() {
+				if m.ChargedTo == "" {
+					uncharged = append(uncharged, m.Destination)
+				} else {
+					require.Equal(t, "o::TestA", m.ChargedTo)
+				}
+			}
+			require.Equal(t, c.uncharged, uncharged, "the misses charged to no test")
+			var want []string
+			for _, m := range misses {
+				if !slices.Contains(c.uncharged, m.Destination) {
+					want = append(want, m.Destination)
+				}
+			}
+			require.Equal(t, want, listed, "the misses the ending test's evidence lists")
+		})
+	}
 }
 
 // A test recorded with no call, or one the mapping omits, owns no test mock:
@@ -1938,6 +2122,12 @@ func TestTheScopePoolTellsTheProxyWhoseTestsListEachMock(t *testing.T) {
 		"m-a1": "a", "m-a2": "a", "m-b": "b", "m-b2": "b",
 		"m-shared": "", "m-file": "", "m-c": "", "m-none": "", "m-bare": "",
 	}, p.poolOwners)
+	// And the table itself, which tells the run of a test's recording on no
+	// clock (the clock its other recordings are on): a copy, so a later
+	// table the agent installs never changes the one the proxy holds.
+	require.Equal(t, a.scopeTable, p.poolTests)
+	a.scopeTable["a::TestA1"] = []string{"m-later"}
+	require.Equal(t, []string{"m-a1", "m-shared"}, p.poolTests["a::TestA1"])
 }
 
 // Without the slices (a CLI that sent none) no data-plane pool mock answers

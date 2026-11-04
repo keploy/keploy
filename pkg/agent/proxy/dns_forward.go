@@ -300,6 +300,18 @@ func (p *Proxy) replayMissServers(mockingEnabled bool, name string, qtype uint16
 	if !mockingEnabled || p.GlobalPassthrough || p.allowEgressDNS {
 		return p.dnsUpstreamServers
 	}
+	return p.inNetworkServers(name, qtype)
+}
+
+// inNetworkServers are the resolvers inside the replay's own network that a
+// question for name, of type qtype, may be put to without leaving the machine:
+// the in-network resolvers for a name that network owns (networkOwnsName) and
+// a type its resolver answers for that name itself (inNetworkAnswersItself),
+// none otherwise. They are part of the replay's environment, not real egress,
+// so a replay asks them whatever the egress knobs say: for a DNS mock miss
+// (replayMissServers), and for a question whose recorded answer is negative
+// (replayDNSAnswer), as the name may exist in the replay's network now.
+func (p *Proxy) inNetworkServers(name string, qtype uint16) []string {
 	if !p.inNetworkAnswersItself(qtype) || !p.networkOwnsName(name) {
 		return nil
 	}

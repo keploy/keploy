@@ -246,6 +246,12 @@ func entryOver(o, w models.MappedTestCase) models.MappedTestCase {
 	if len(w.Real) > 0 {
 		o.Real = w.Real
 	}
+	if w.Key != "" {
+		o.Key = w.Key
+	}
+	if w.Seed != "" {
+		o.Seed = w.Seed
+	}
 	return o
 }
 
@@ -674,11 +680,19 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 			// replace what an earlier record wrote, none included, as they
 			// pair with this record's calls.
 			tc.Given = in.Given
+			// The seed its browser drew from in this record, none included
+			// (seeding off): the calls it pairs with were drawn from it.
+			tc.Seed = in.Seed
 		}
 		// The mock.real destinations this record's run of the test used
 		// (proven switch only): they replace what an earlier record wrote.
 		if len(in.Real) > 0 {
 			tc.Real = in.Real
+		}
+		// The key of the claim this record's run of the test ran under
+		// (proven switch only): it replaces what an earlier record wrote.
+		if in.Key != "" {
+			tc.Key = in.Key
 		}
 	}
 	if len(suites) > 0 {

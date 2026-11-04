@@ -139,9 +139,10 @@ type Receipt struct {
 	CannotCapture models.CaptureLosses `yaml:"cannotCapture,omitempty" json:"cannotCapture,omitempty"`
 	// UnchargedMisses are, under the proven switch, the misses MissedData
 	// counts that no test was charged with (models.UnmatchedCall.ChargedTo
-	// empty): a call made before the test process claimed the run, after
-	// the last test's end, or between test processes (within one, a test's
-	// end charges it the misses made since the previous test's end). Each
+	// empty): a call made before the test process claimed the run, or
+	// outside every test's window (before the first test, between two, or
+	// after the last): the test framework sets the windows, and a call made
+	// in none is the set's, never a test's. Each
 	// is as evidence keeps a miss (models.UnmatchedCall.Sanitized: no value
 	// the app sent), with the process that made it. nil when the misses
 	// were not read, and with the switch off.
@@ -340,10 +341,14 @@ func (r TestsReceipt) empty() bool {
 
 // TestReceipt is one test's line in a TestsReceipt. Outcome is its latest
 // run's verdict this replay (models.ScopeOutcome*); "" when it did not run or
-// reported none. A count the agent did not report in full is -1.
+// reported none. Random is how the test's browser drew its random numbers
+// in that run, as its harness said at its end, else at its begin
+// (models.ScopeWindow.Random): seeded, own, or "" when it said nothing. A
+// count the agent did not report in full is -1.
 type TestReceipt struct {
 	Name     string `yaml:"name" json:"name"`
 	Outcome  string `yaml:"outcome,omitempty" json:"outcome,omitempty"`
+	Random   string `yaml:"random,omitempty" json:"random,omitempty"`
 	Consumed int    `yaml:"consumed" json:"consumed"`
 	Missed   int    `yaml:"missed" json:"missed"`
 	// Began is when the test's latest run began (its window's start); zero
@@ -443,7 +448,7 @@ func writeRecordTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceip
 		if w.App || w.Suite || parentOf(windows, w.Name) != "" {
 			continue
 		}
-		tr := TestReceipt{Name: w.Name, Outcome: w.Outcome, Real: w.Real}
+		tr := TestReceipt{Name: w.Name, Outcome: w.Outcome, Random: w.Random, Real: w.Real}
 		// What keploy could not capture while the test ran (a record's
 		// window carries no misses): a verdict against real infra keploy
 		// did not see whole is no basis for judging the recording.

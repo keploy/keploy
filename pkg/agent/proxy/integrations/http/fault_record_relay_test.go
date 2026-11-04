@@ -506,6 +506,37 @@ func TestRecordV2_FaultNotRecordedWhenTheSessionClosesTheStream(t *testing.T) {
 	}
 }
 
+// The session closed the stream before the connection ended, and the parser,
+// behind its capture, reads the stream's end only after the relay has ended
+// the connection: what it reads there is still the session's close, not the
+// upstream's end, whether the upstream's end was read before the close or
+// after it.
+func TestRecordV2_FaultNotRecordedWhenTheSessionClosedTheStreamBeforeItsEnd(t *testing.T) {
+	for _, upstreamFirst := range []bool{true, false} {
+		c := newRelayedConn(t)
+		c.startRelay(t)
+		write(t, c.app, c.src, faultReq)
+		relayed(t, c.dest, faultReq)
+		if upstreamFirst {
+			_ = c.dest.Close()
+			awaitPeerEnd(t, c, fakeconn.FromDest)
+		}
+		_ = c.sess.DestStream.Close()
+		if !upstreamFirst {
+			_ = c.dest.Close()
+			awaitPeerEnd(t, c, fakeconn.FromDest)
+		}
+		_ = c.app.Close()
+		<-c.relayDone
+		c.startParser(t)
+		mocks, err := c.finish(t)
+		if err != nil || len(mocks) != 0 {
+			t.Errorf("upstream's end first %v: recorded %d mocks, %v; want none when the session closed the stream before its end",
+				upstreamFirst, len(mocks), err)
+		}
+	}
+}
+
 // Partway through the answer: neither a hole nor the recording's stop is a
 // fault, and a stream that ends there records nothing, as before.
 func TestRecordV2_FaultAfterTheHeadNotRecordedAtAHoleOrAStop(t *testing.T) {
@@ -634,10 +665,10 @@ func TestBuildHTTPMock_FaultOnlyOnAnUnfinishedAnswer(t *testing.T) {
 }
 
 // keploy record tells the agent it is stopping before it stops the
-// application (Session.MarkPeerEndedStopping): a call the application had in
-// flight, closed by that stop, ended in no fault of the upstream's or of the
-// application's own client, and records none. Before the answer and after its
-// head alike.
+// application (Session.MarkPeerEndedBy, EndAtStop): a call the application
+// had in flight, closed by that stop, ended in no fault of the upstream's or
+// of the application's own client, and records none. Before the answer and
+// after its head alike.
 func TestRecordV2_FaultNotRecordedWhenTheAppIsStoppedMidCall(t *testing.T) {
 	const head = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n"
 	for _, afterHead := range []bool{false, true} {
@@ -657,6 +688,180 @@ func TestRecordV2_FaultNotRecordedWhenTheAppIsStoppedMidCall(t *testing.T) {
 				t.Errorf("after the head %v: recorded fault %v, want none: the recording's stop closed the application, which did not give up on the call", afterHead, m.Spec.Fault)
 			}
 		}
+	}
+}
+
+// A call that got no answer, whose first end is the client's and records no
+// fault: the hooks cannot judge the client's end (the macOS and Windows
+// hooks: nothing tells its giving up from its exit), its process exited on
+// its own, or the recording's stop closed the application. No fault is
+// recorded, and the call is not recorded at all, as before faults were
+// recorded. Nor is it left out: there is no answer to lose.
+func TestRecordV2_NoAnswerNotRecordedWhenTheClientsEndRecordsNoFault(t *testing.T) {
+	for _, e := range []struct {
+		name string
+		why  supervisor.NoFaultEnd
+	}{
+		{"the hooks cannot judge the client's end", supervisor.EndUnjudged},
+		{"the client's process exited on its own", supervisor.EndAtExit},
+		{"the recording's stop closed the application", supervisor.EndAtStop},
+	} {
+		t.Run(e.name, func(t *testing.T) {
+			c := newRelayedConn(t)
+			c.start(t)
+			write(t, c.app, c.src, faultReq)
+			relayed(t, c.dest, faultReq)
+			if e.why == supervisor.EndAtStop {
+				c.stopBegun.Store(true)
+			} else {
+				c.clientEnd.Store(uint32(e.why))
+			}
+			appClosed(t, c)
+			mocks, err := c.finish(t)
+			if err != nil {
+				t.Fatalf("recordV2 = %v, want nil", err)
+			}
+			for _, m := range mocks {
+				t.Errorf("recorded a mock, fault %v; want nothing: the call got no answer, and its end records no fault", m.Spec.Fault)
+			}
+			if n := c.mgr.MocksLeftOut(); n != 0 || len(c.spans.all()) != 0 {
+				t.Fatalf("%d mocks left out, spans %v; want none: there was no answer to lose", n, c.spans.all())
+			}
+		})
+	}
+}
+
+// A call whose first end is the client's, partway through the answer, where
+// that end records no fault: the recording's stop closed the application, its
+// process exited on its own, or the hooks cannot judge the client's end (the
+// macOS and Windows hooks: nothing tells its giving up from its exit). The
+// answer is not known to be whole: a framed one had not ended, and a
+// close-delimited one ends with the upstream's close, which had not come. Nor
+// is a fault known to record it with. The exchange is left out, and said so
+// with that end's reason, under the mark of a chunk the capture lost when
+// there is one. It is not recorded whole: replay would serve a
+// complete-looking shorter answer to a call that may have timed out at
+// record. And it is not reported as a decode error: no decode failed.
+func TestRecordV2_PartAnswerLeftOutWhenTheClientsEndRecordsNoFault(t *testing.T) {
+	framings := []struct{ name, head, part string }{
+		{"close-delimited", "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", "01234"},
+		{"Content-Length", "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n", "01234"},
+		{"chunked", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", "5\r\nabcde\r\n"},
+	}
+	type end struct {
+		name   string
+		why    supervisor.NoFaultEnd
+		mark   string
+		reason string
+	}
+	ends := []end{
+		{"the hooks cannot judge the client's end", supervisor.EndUnjudged, "", supervisor.LeftOutPartwayUnjudged},
+		{"the client's process exited on its own", supervisor.EndAtExit, "", supervisor.LeftOutPartwayAtExit},
+		{"the recording's stop closed the application", supervisor.EndAtStop, "", supervisor.LeftOutPartwayAtStop},
+		{"the hooks cannot judge the client's end, a chunk lost before", supervisor.EndUnjudged, "per_conn_cap",
+			"per_conn_cap: " + supervisor.LeftOutPartwayUnjudged},
+	}
+	for _, e := range ends {
+		for _, f := range framings {
+			t.Run(e.name+"/"+f.name, func(t *testing.T) {
+				c := newRelayedConn(t)
+				c.start(t)
+				write(t, c.app, c.src, faultReq)
+				relayed(t, c.dest, faultReq)
+				write(t, c.dest, c.dst, f.head+f.part)
+				relayed(t, c.app, f.head+f.part)
+				if e.mark != "" {
+					c.sess.MarkMockIncomplete(e.mark)
+				}
+				if e.why == supervisor.EndAtStop {
+					c.stopBegun.Store(true)
+				} else {
+					c.clientEnd.Store(uint32(e.why))
+				}
+				appClosed(t, c)
+				mocks, err := c.finish(t)
+				if err != nil {
+					t.Fatalf("recordV2 = %v, want nil: no decode failed", err)
+				}
+				for _, m := range mocks {
+					t.Errorf("recorded %d %q (Content-Length %q), fault %v; want nothing: the answer is not known to be whole",
+						m.Spec.HTTPResp.StatusCode, m.Spec.HTTPResp.Body, m.Spec.HTTPResp.Header["Content-Length"], m.Spec.Fault)
+				}
+				if n := c.mgr.MocksLeftOut(); n != 1 || len(c.spans.all()) != 1 {
+					t.Fatalf("%d mocks left out, spans %v; want the one exchange, spanned", n, c.spans.all())
+				}
+				if l := c.leftOut(e.reason); len(l) != 1 {
+					t.Fatalf("%d left-out lines with the reason %q, want one", len(l), e.reason)
+				}
+				if m, ok := c.sess.TakeMockIncomplete(); ok {
+					t.Fatalf("the mark %q is still set: the exchange reported under it did not take it", m)
+				}
+			})
+		}
+	}
+}
+
+// The ends a part answer is not left out on, beside those above: the
+// upstream's close of a close-delimited answer is its end, and the answer is
+// whole and recorded with no fault, though the stop had begun or the hooks
+// cannot judge the client's end. And a stream that ended at a capture hole is
+// the hole's: it is not left out as one the client's end cut, whatever that
+// end was.
+func TestRecordV2_PartAnswerNotLeftOutAsTheClientsCut(t *testing.T) {
+	const closeDelimited = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"
+	for _, tc := range []struct {
+		name      string
+		stopBegun bool
+		why       supervisor.NoFaultEnd
+	}{
+		{"the stop had begun", true, supervisor.EndMayBeFault},
+		{"the hooks cannot judge the client's end", false, supervisor.EndUnjudged},
+	} {
+		t.Run("the upstream's close ends the answer, "+tc.name, func(t *testing.T) {
+			c := newRelayedConn(t)
+			c.start(t)
+			write(t, c.app, c.src, faultReq)
+			relayed(t, c.dest, faultReq)
+			write(t, c.dest, c.dst, closeDelimited+"01234")
+			relayed(t, c.app, closeDelimited+"01234")
+			c.stopBegun.Store(tc.stopBegun)
+			c.clientEnd.Store(uint32(tc.why))
+			_ = c.dest.Close()
+			awaitPeerEnd(t, c, fakeconn.FromDest)
+			mocks, err := c.finish(t)
+			m := oneMock(t, mocks, err)
+			if m.Spec.Fault != nil || m.Spec.HTTPResp.Body != "01234" {
+				t.Fatalf("recorded %q, fault %v; want the whole answer \"01234\" with no fault", m.Spec.HTTPResp.Body, m.Spec.Fault)
+			}
+			if n := c.mgr.MocksLeftOut(); n != 0 {
+				t.Fatalf("%d mocks left out, want none", n)
+			}
+		})
+	}
+	for _, hole := range []struct {
+		name string
+		why  supervisor.NoFaultEnd
+	}{
+		{"a capture hole, the hooks cannot judge the client's end", supervisor.EndUnjudged},
+		{"a capture hole, the client's process exited on its own", supervisor.EndAtExit},
+	} {
+		t.Run(hole.name, func(t *testing.T) {
+			c := newRelayedConn(t)
+			c.start(t)
+			write(t, c.app, c.src, faultReq)
+			relayed(t, c.dest, faultReq)
+			write(t, c.dest, c.dst, closeDelimited+"01234")
+			relayed(t, c.app, closeDelimited+"01234")
+			c.sess.MarkEndedAtHole(fakeconn.FromDest, "test hole")
+			c.clientEnd.Store(uint32(hole.why))
+			appClosed(t, c)
+			_, _ = c.finish(t)
+			for _, reason := range []string{supervisor.LeftOutPartwayUnjudged, supervisor.LeftOutPartwayAtExit} {
+				if l := c.leftOut(reason); len(l) != 0 {
+					t.Fatalf("left out under %q, want the hole's handling: the stream ended at the hole", reason)
+				}
+			}
+		})
 	}
 }
 

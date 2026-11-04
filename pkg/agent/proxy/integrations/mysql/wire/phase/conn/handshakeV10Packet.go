@@ -81,7 +81,12 @@ func DecodeHandshakeV10(_ context.Context, _ *zap.Logger, data []byte) (*mysql.H
 		data = data[1:] // constant 0x00
 	}
 
-	data = data[10:] // Skip 10 bytes reserved (all 0s)
+	// Reserved (10): all zero from MySQL. A MariaDB server sends its
+	// extended capabilities in the last four, and the client answers with
+	// them (MariaDBCapabilities): a greeting replayed without them is
+	// answered with none, unlike the HandshakeResponse41 recorded.
+	packet.MariaDBCapabilities = binary.LittleEndian.Uint32(data[6:10])
+	data = data[10:]
 
 	if authPluginDataLen > 8 {
 		lenToRead := min(authPluginDataLen-8, len(data))
@@ -153,8 +158,12 @@ func EncodeHandshakeV10(_ context.Context, _ *zap.Logger, packet *mysql.Handshak
 		buf.WriteByte(0x00)
 	}
 
-	// Reserved (10 zero bytes)
-	buf.Write(make([]byte, 10))
+	// Reserved (10): six zero bytes, then a MariaDB server's extended
+	// capabilities (zero for MySQL).
+	buf.Write(make([]byte, 6))
+	if err := binary.Write(buf, binary.LittleEndian, packet.MariaDBCapabilities); err != nil {
+		return nil, err
+	}
 
 	// Auth-plugin-data-part-2 (remaining auth data)
 	if packet.CapabilityFlags&mysql.CLIENT_PLUGIN_AUTH != 0 && len(packet.AuthPluginData) > 8 {

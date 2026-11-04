@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
@@ -27,12 +28,29 @@ import (
 // once the replay staged another set, which restaged then says
 // (restagedNote), for the miss to tell. The zero CallRound names nothing.
 func notOwnedRecording(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise, call integrations.CallRound) (found *models.Mock, restaged bool) {
+	return notOwnedRecordingBefore(ctx, input, mockDb, n, call, time.Time{})
+}
+
+// notOwnedRecordingBefore is notOwnedRecording, naming, when before is not
+// zero, only a recording made before it at record (its request time): for a
+// call one more than the open test recorded (extraCall), before is the
+// earliest of the test's own recordings of it. The test windows of a
+// recording run one after another, so a per-test recording made before the
+// test's own is an earlier test's, which the replay passed without making it
+// there (that test was skipped, or the call moved on): the call is that
+// recording, made here. A later test's identical recording, which the
+// replay has not reached, is never named for it, nor one with no request
+// time, which keploy cannot place.
+func notOwnedRecordingBefore(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise, call integrations.CallRound, before time.Time) (found *models.Mock, restaged bool) {
 	live := liveDestination(ctx, input)
 	// accepted is what match last accepted: the store names it unless
 	// another miss spent its name first, and then offers the next.
 	var accepted *models.Mock
 	match := func(m *models.Mock) bool {
 		if m.Spec.HTTPReq == nil || len(strictDiff(ctx, input, live, m, n)) != 0 {
+			return false
+		}
+		if at := m.Spec.ReqTimestampMock; !before.IsZero() && (at.IsZero() || !at.Before(before)) {
 			return false
 		}
 		accepted = m
@@ -119,7 +137,8 @@ func RequestKeysOf(method, path, amzTarget string, loose bool) []string {
 // loose reports whether keploy.yml's noise reaches a call's path or its
 // X-Amz-Target (RequestKeysOf).
 func (n strictNoise) loose() bool {
-	return len(n.url) > 0 || n.header[strings.ToLower(amzTargetHeader)]
+	_, targetPats := n.headerPats[strings.ToLower(amzTargetHeader)]
+	return len(n.url) > 0 || n.header[strings.ToLower(amzTargetHeader)] || targetPats
 }
 
 // recordedRequestKeys are a recorded HTTP mock's request keys

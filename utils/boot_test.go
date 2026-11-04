@@ -300,6 +300,10 @@ func TestReportBootProgressToWritesNextToTheTeardownFile(t *testing.T) {
 // file, then the rename) into that directory while the test's cleanup removed
 // it, which failed the cleanup with "directory not empty".
 func TestStopTeardownReportingEndsTheBootReporters(t *testing.T) {
+	// An earlier test's reporter may still be ending (it wrote its last
+	// report, and lets go of its clock): ended and waited for here, it is
+	// not counted below.
+	StopTeardownReporting()
 	resetBoot(t)
 	// End the reporters earlier tests started before counting this test's.
 	// An earlier test's reporter ends with that test's cancel, and its

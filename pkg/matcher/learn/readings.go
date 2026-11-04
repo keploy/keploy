@@ -4,6 +4,8 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
+	"maps"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,12 +20,16 @@ import (
 //   - raw: the value as it is;
 //   - decoded: each %XX escape decoded on its own, and each backslash escape
 //     read (\uXXXX and an escaped surrogate pair as the character it names,
-//     \\ as \, and \n \r \t \b \f \" \/ as a space, a separator), again
-//     while that changes anything, up to four levels (unescaped);
+//     \\ as \, \/ as /, and \n \r \t \b \f \" as a space, a separator),
+//     again while that changes anything, up to four levels (unescaped);
 //   - case-folded: the decoded form in lower case;
 //   - quoted-printable: its soft line breaks taken out and its "=XX"
 //     escapes decoded, where they decode to text (qpDecoded), and that in
-//     lower case;
+//     lower case. What a drifted value is checked for (unparsed, below)
+//     reads it in this form only where it and the value it is compared
+//     with read as quoted-printable text: as a mail that says it is; or
+//     whole, and its escapes show it or a soft line break splits it
+//     (qpFormRead, formsOf);
 //   - encoded: each run of eight characters or more that decodes to text:
 //     of the standard or URL-safe base64 alphabet, padded or not, whole,
 //     joined across the line breaks of wrapped base64 (indented or escaped
@@ -112,115 +118,242 @@ func b64Text(s string, clock map[string]bool) string { return b64Read(s, clock, 
 // (the bound row's). everySplit makes those reads all the same and keeps
 // every run tried: only the row that holds b64Text to them sets it.
 func b64Read(s string, clock map[string]bool, everySplit bool) string {
-	var sb strings.Builder
-	seen := map[string]bool{}
-	level := []string{s}
-	for depth := 0; depth < maxDecodeLevels && len(level) > 0; depth++ {
-		var next []string
-		try := func(c string) bool {
-			if len(c) < minEncodedRun || seen[c] || (everySplit || len(clock) > 0) && allIn(tokensBy(c, isWord), clock) {
-				return false
-			}
-			if everySplit {
-				seen[c] = true
-			}
-			t, ok := decodeText(c)
-			if !ok {
-				return false
-			}
+	r := newB64Reader(s, clock, everySplit)
+	for depth := 0; depth < maxDecodeLevels && len(r.level) > 0; depth++ {
+		r.next()
+	}
+	return r.sb.String()
+}
+
+// b64Reader reads the encoded runs of a text one level at a time (b64Read):
+// level are the texts the last level decoded to (at first the text itself),
+// whose runs the next level decodes; sb holds every text decoded so far, each
+// on a line of its own; and a run all of whose words are in clock is a part
+// of a clock read, not decoded. Where keepRuns is set, runs are the runs it
+// decoded whole where they stand (b64Pair's, for the value's plain runs:
+// plainRunsOf), and offs where in sb each text of level stands (-1: the
+// text it was given). texts are the texts of the runs it decoded, by run.
+type b64Reader struct {
+	sb         strings.Builder
+	seen       map[string]bool
+	texts      map[string]string
+	level      []string
+	clock      map[string]bool
+	everySplit bool
+	keepRuns   bool
+	runs       []decodedRun
+	offs       []int
+}
+
+// decodedRun is a run of the base64 alphabets (nextB64Run) a b64Reader
+// decoded whole, or whole past its "0x" (or "0X") in any encoding it reads
+// (hex, base64), where it stands: at [st, en) of the text the reader was
+// given (at -1) or of its sb from at. esc is, for a run's text in a raw
+// value (rawImages), how it writes the bytes it escapes, and escs each
+// escape in it, in order.
+type decodedRun struct {
+	run        string
+	at, st, en int
+	esc        map[byte]string
+	escs       []rawEscape
+}
+
+// rawEscape is one byte of a run's text in a raw value (rawImages) that the
+// text writes by an escape: the byte (c), its spelling (sp, "%3D"), where
+// that stands in the raw value ([st, en)), and which copy of c in the run
+// it is (n, from 0).
+type rawEscape struct {
+	c      byte
+	sp     string
+	st, en int
+	n      int
+}
+
+func newB64Reader(s string, clock map[string]bool, everySplit bool) *b64Reader {
+	return &b64Reader{seen: map[string]bool{}, texts: map[string]string{}, level: []string{s}, clock: clock, everySplit: everySplit}
+}
+
+// next decodes the runs of the texts of rd's level, writes each text it
+// finds to sb, and makes those texts rd's level (none where it finds none).
+func (rd *b64Reader) next() {
+	sb, seen, clock, everySplit := &rd.sb, rd.seen, rd.clock, rd.everySplit
+	var next []string
+	var nextOffs []int
+	try := func(c string) bool {
+		if len(c) < minEncodedRun || seen[c] || (everySplit || len(clock) > 0) && allIn(tokensBy(c, isWord), clock) {
+			return false
+		}
+		if everySplit {
 			seen[c] = true
-			raw := t
-			t = unescaped(raw)
-			if q := qpForm(raw); q != t {
-				t += "\n" + q
+		}
+		t, ok := decodeText(c)
+		if !ok {
+			return false
+		}
+		seen[c] = true
+		raw := t
+		rd.texts[c] = raw
+		t = unescaped(raw)
+		if q := qpForm(raw); q != t {
+			t += "\n" + q
+		}
+		if rd.keepRuns {
+			nextOffs = append(nextOffs, sb.Len())
+		}
+		sb.WriteString(t)
+		sb.WriteByte('\n')
+		next = append(next, t)
+		return true
+	}
+	// hexWhole: the last run tryRun read decoded whole past its "0x" (or
+	// "0X"), in any encoding (set on every read).
+	hexWhole := false
+	tryRun := func(run string) bool {
+		slash, glued := runSeparators(run)
+		whole := try(run)
+		if everySplit || slash {
+			// A part of a run decoded whole, here or in a text read
+			// before (texts), that decodes to a piece of the run's text
+			// (one that starts a group of four: "b2s" of "b2s/IHll")
+			// holds nothing that text does not: it is not read again, so
+			// a '/' the encoder happened to write (a byte of the text, or
+			// its length, moving one into the run) adds no copy of the
+			// text's words to one side's form.
+			wholeText, had := rd.texts[run]
+			for _, part := range strings.FieldsFunc(run, func(r rune) bool { return r == '/' || r == '.' }) {
+				if pt, ok := decodeText(part); had && ok && strings.Contains(wholeText, pt) {
+					continue
+				}
+				try(part)
 			}
-			sb.WriteString(t)
-			sb.WriteByte('\n')
-			next = append(next, t)
+		}
+		h, prefixed := strings.CutPrefix(run, "0x")
+		if !prefixed {
+			h, prefixed = strings.CutPrefix(run, "0X")
+		}
+		hexWhole = prefixed && try(h)
+		if whole {
 			return true
 		}
-		tryRun := func(run string) bool {
-			slash, glued := runSeparators(run)
-			whole := try(run)
-			if everySplit || slash {
-				for _, part := range strings.FieldsFunc(run, func(r rune) bool { return r == '/' || r == '.' }) {
-					try(part)
+		if !everySplit && !glued {
+			return false
+		}
+		// Its longest parts between groups of '-' and '_' that are text,
+		// none inside another that was.
+		var read [][2]int
+		for _, sp := range gluedSpans(run) {
+			inside := false
+			for _, r := range read {
+				if sp[0] >= r[0] && sp[1] <= r[1] {
+					inside = true
+					break
 				}
 			}
-			if h, ok := strings.CutPrefix(run, "0x"); ok {
-				try(h)
-			} else if h, ok := strings.CutPrefix(run, "0X"); ok {
-				try(h)
+			if !inside && try(run[sp[0]:sp[1]]) {
+				read = append(read, sp)
 			}
-			if whole {
-				return true
-			}
-			if !everySplit && !glued {
-				return false
-			}
-			// Its longest parts between groups of '-' and '_' that are text,
-			// none inside another that was.
-			var read [][2]int
-			for _, sp := range gluedSpans(run) {
-				inside := false
-				for _, r := range read {
-					if sp[0] >= r[0] && sp[1] <= r[1] {
-						inside = true
+		}
+		return false
+	}
+	for li, text := range rd.level {
+		texts := []string{text}
+		j, joins := joinWrapped(text)
+		if j != text {
+			texts = append(texts, j)
+		}
+		for ti, tx := range texts {
+			for st, en, ok := nextB64Run(tx, 0); ok; st, en, ok = nextB64Run(tx, en) {
+				ix := [2]int{st, en}
+				whole := tryRun(tx[ix[0]:ix[1]])
+				// A run decoded whole where it stands in the level's text,
+				// or whole past its "0x": its text stands for it.
+				if ti == 0 && rd.keepRuns && (whole || hexWhole) {
+					rd.runs = append(rd.runs, decodedRun{run: strings.Clone(tx[ix[0]:ix[1]]), at: rd.offs[li], st: ix[0], en: ix[1]})
+				}
+				if whole || ti == 0 {
+					continue
+				}
+				// A run that joined lines and is no text: its lines up
+				// to a join may be (the last line of the base64 joined
+				// to the text on the next line), longest first; and so
+				// may its lines from its first join (the line before
+				// was no part of it: a header ending in an id).
+				starts := []int{ix[0]}
+				for _, c := range joins {
+					if c > ix[0] && c < ix[1] {
+						starts = append(starts, c)
 						break
 					}
 				}
-				if !inside && try(run[sp[0]:sp[1]]) {
-					read = append(read, sp)
-				}
-			}
-			return false
-		}
-		for _, text := range level {
-			texts := []string{text}
-			j, joins := joinWrapped(text)
-			if j != text {
-				texts = append(texts, j)
-			}
-			for ti, tx := range texts {
-				for st, en, ok := nextB64Run(tx, 0); ok; st, en, ok = nextB64Run(tx, en) {
-					ix := [2]int{st, en}
-					if tryRun(tx[ix[0]:ix[1]]) || ti == 0 {
-						continue
+			retry:
+				for _, st := range starts {
+					if st != ix[0] && try(tx[st:ix[1]]) {
+						break
 					}
-					// A run that joined lines and is no text: its lines up
-					// to a join may be (the last line of the base64 joined
-					// to the text on the next line), longest first; and so
-					// may its lines from its first join (the line before
-					// was no part of it: a header ending in an id).
-					starts := []int{ix[0]}
-					for _, c := range joins {
-						if c > ix[0] && c < ix[1] {
-							starts = append(starts, c)
-							break
-						}
-					}
-				retry:
-					for _, st := range starts {
-						if st != ix[0] && try(tx[st:ix[1]]) {
-							break
-						}
-						for k := len(joins) - 1; k >= 0; k-- {
-							if c := joins[k]; c > st && c < ix[1] && try(tx[st:c]) {
-								break retry
-							}
+					for k := len(joins) - 1; k >= 0; k-- {
+						if c := joins[k]; c > st && c < ix[1] && try(tx[st:c]) {
+							break retry
 						}
 					}
 				}
-				for part := range strings.SplitSeq(tx, ".") {
-					if isB64Run(part) {
-						try(part)
-					}
+			}
+			for part := range strings.SplitSeq(tx, ".") {
+				if isB64Run(part) {
+					try(part)
 				}
 			}
 		}
-		level = next
 	}
-	return sb.String()
+	rd.level, rd.offs = next, nextOffs
+}
+
+// b64Pair is b64Text of a drifted value's two sides, recorded and live
+// (clock their clock words), read one level at a time: after each level,
+// the text each side has decoded so far is read for clock words as the
+// value's own are, in the value's window (clockOf, of a recorded text and a
+// live one: newDrift's), before the runs of that level's texts are decoded
+// in turn, and a run all of whose words are those of a clock read found
+// there is not decoded either. So a clock read written in the text an
+// encoded run decodes to ("tok <base64 of 'lead <stamp> created'> ok"),
+// where the two sides hold each of the value's instants at the same depth,
+// is read as the clock it is, and its digits ("3505371Z" of the stamp's
+// fraction) are not decoded as data, which would decide by chance between
+// a token a payload holds, text of a script keploy reads only whole and
+// nothing. A word found here is a read the value's window (or the lead)
+// holds: that text is the start of the encoded form the caller reads for
+// clock words itself. Limit: where the sides hold an instant at different
+// depths (one side's text encoded once more), it pairs with the other's
+// only once both are decoded, so a run of a read decoded before that, on
+// either side and of any layout whose pairing it shifts, is decoded as it
+// was before (fail closed: its words are data), and the caller's read of
+// the whole may pair a layout otherwise (an earlier layout taking the
+// bytes of a later one's). The sets in clock are not changed: the caller
+// reads the clock words of the decoded text itself. runs are the runs
+// each side (recorded [0], live [1]) decoded whole, at any level, where
+// they stand (plainRunsOf).
+func b64Pair(rec, live string, clock clockSet, clockOf func(rec, live string) clockSet) (string, string, [2][]decodedRun) {
+	r, l := newB64Reader(rec, clock.rec, false), newB64Reader(live, clock.live, false)
+	for _, rd := range []*b64Reader{r, l} {
+		rd.keepRuns, rd.offs = true, []int{-1}
+	}
+	for depth := 0; depth < maxDecodeLevels && (len(r.level) > 0 || len(l.level) > 0); depth++ {
+		r.next()
+		l.next()
+		// Where neither side decoded more, nothing new is read.
+		if len(r.level) > 0 || len(l.level) > 0 {
+			c := clockOf(r.sb.String(), l.sb.String())
+			r.clock, l.clock = union(r.clock, c.rec), union(l.clock, c.live)
+		}
+	}
+	return r.sb.String(), l.sb.String(), [2][]decodedRun{r.runs, l.runs}
+}
+
+// union is a new set of the words of a and of b.
+func union(a, b map[string]bool) map[string]bool {
+	u := make(map[string]bool, len(a)+len(b))
+	maps.Copy(u, a)
+	maps.Copy(u, b)
+	return u
 }
 
 // runSeparators says whether run holds a '/' (slash: it is read by its
@@ -571,11 +704,38 @@ func joinWrapped(s string) (string, []int) {
 // or '\' (which the readings would take for escapes keploy cannot read).
 // A value with no such escape is itself.
 func qpDecoded(s string) string {
-	if !strings.Contains(s, "=") {
-		return s
-	}
+	d, _, _ := qpRead(s)
+	return d
+}
+
+// qpRead is s read as quoted-printable (qpDecoded), whether it reads as
+// such whole, and whether its escapes show it is.
+//
+// Whole: each '=' it holds starts a soft line break or a run of escapes.
+// Quoted-printable writes every '=' of its text as "=3D", so a value that
+// holds any other '=' ("Credential=local/..., Signature=09bb..." of an AWS
+// signature) is no quoted-printable text, and an "=XX" in it only looks
+// like an escape. Nor is one with a run of escapes that decodes to a '%'
+// or a '\', which qpDecoded leaves as written. A run that decodes to no
+// text (a Latin-1 "caf=E9") is an escape quoted-printable writes too: it
+// is left as written, and the value may still read whole.
+//
+// Shown: a run of its escapes decodes to text that holds a character
+// quoted-printable has to write as an escape (qpMustEscape), or it holds no
+// escape at all once its soft line breaks are out (it reads the same either
+// way). Every other escape ("=41" an 'A', "=2B" a '+', "=09" a tab) is of a
+// character quoted-printable may write as itself, and one that decodes to
+// no text is a byte a signature's hex spells as often, so a value whose
+// escapes are all of those kinds shows nothing: a signature in upper-case
+// hex whose first two digits happen to be an escape ("sha256=2BC4...",
+// "v1=41F0...", "v1=AA03...") is no '+', 'A' or byte and its hex.
+func qpRead(s string) (d string, whole, shown bool) {
 	s = strings.ReplaceAll(strings.ReplaceAll(s, "=\r\n", ""), "=\n", "")
+	if !strings.Contains(s, "=") {
+		return s, true, true
+	}
 	var b strings.Builder
+	whole = true
 	for i := 0; i < len(s); {
 		j := i
 		var bytes []byte
@@ -585,27 +745,88 @@ func qpDecoded(s string) string {
 			j += 3
 		}
 		if j == i {
+			if s[i] == '=' {
+				whole = false
+			}
 			b.WriteByte(s[i])
 			i++
 			continue
 		}
-		if isText(bytes) && !strings.ContainsAny(string(bytes), "%\\") {
-			b.Write(bytes)
-		} else {
+		switch {
+		case !isText(bytes):
 			b.WriteString(s[i:j])
+		case strings.ContainsAny(string(bytes), "%\\"):
+			whole = false
+			b.WriteString(s[i:j])
+		default:
+			b.Write(bytes)
+			shown = shown || qpMustEscape(bytes)
 		}
 		i = j
 	}
-	return b.String()
+	return b.String(), whole, shown
+}
+
+// qpMustEscape reports whether text, what a run of escapes decodes to,
+// holds a character quoted-printable has to write as an escape (RFC 2045):
+// an '=', or a non-ASCII character.
+func qpMustEscape(text []byte) bool {
+	for _, r := range string(text) {
+		if r == '=' || r >= utf8.RuneSelf {
+			return true
+		}
+	}
+	return false
 }
 
 // qpForm is s read as quoted-printable (qpDecoded) after its escapes
 // (unescaped), with its soft line breaks taken out first (noSoftBreaks), in
 // their escaped spellings too ("=\\r\\n" of a mail in a JSON string), which
 // unescaping would turn into separators.
+//
+// It is qpFormRead's form, read without asking whether s reads as
+// quoted-printable: qpForm reads every payload a read decodes (decodeForms)
+// and each text of its base64 runs (b64Read), and asking the declared
+// header's pattern (qpDeclared) there took a matcher's state of 37 KB from
+// its pool for each of 42 bytes or more (the pattern's shortest match),
+// as the soft line breaks' pattern did before noSoftBreaks.
 func qpForm(s string) string {
-	return qpDecoded(unescaped(noSoftBreaks(s)))
+	t, _ := qpSoftOut(s)
+	q, _, _ := qpRead(unescaped(t))
+	return q
 }
+
+// qpFormRead is the quoted-printable form of s (qpForm), and whether s, a
+// drifted value, reads as quoted-printable text, which unparsed then checks
+// in that form beside that of the value it is compared with (formsOf):
+//   - a mail or a MIME part that says it is (qpDeclared), whose header
+//     lines hold an '=' of their own ("charset=utf-8") that starts no
+//     escape;
+//   - else whole, and its escapes show it or a soft line break splits it
+//     (qpRead). An escape of a character quoted-printable may write as
+//     itself, or of no text, shows nothing ("v1=2B" of a signature).
+//
+// Either way every escape that decodes to text is decoded, as the readings
+// search it: a value read as quoted-printable is read whole as such, so
+// what changed behind any of its escapes ("ab=2Bcd", a '+' and a run of the
+// base64 alphabet) is checked as it reads.
+func qpFormRead(s string) (string, bool) {
+	t, soft := qpSoftOut(s)
+	u := unescaped(t)
+	q, whole, shown := qpRead(u)
+	return q, qpDeclared.MatchString(u) || whole && (shown || soft)
+}
+
+// qpSoftOut is s with its soft line breaks taken out (noSoftBreaks), and
+// whether it held one.
+func qpSoftOut(s string) (string, bool) {
+	t := noSoftBreaks(s)
+	return t, t != s
+}
+
+// qpDeclared is the header of a mail or a MIME part whose body is
+// quoted-printable.
+var qpDeclared = regexp.MustCompile(`(?i)content-transfer-encoding:[ \t]*quoted-printable`)
 
 // noSoftBreaks is s without its soft line breaks, each a "=" before a line
 // break in any spelling (softBreakAt), taken out from the left: s itself
@@ -846,11 +1067,28 @@ func isText(b []byte) bool {
 	return true
 }
 
+// The reasons unparsed gives for a value whose text of a script keploy
+// reads only whole (nonASCIIRuns) changed, by where that text stands: in the
+// value's own text, in the text its escapes write (a percent- or
+// quoted-printable-escaped name), or in the text an encoded run of it
+// decodes to (b64Text: the base64 run "3505371Z" of a .NET stamp's fraction
+// decodes to such text). A value all in ASCII is never said to hold such
+// text itself. Each names that text as scriptWhy does ("text of a script
+// keploy does not split into words"), so the three read as one refusal and
+// say where the text stands.
+const (
+	scriptWhy        = "it changed in text of a script keploy does not split into words"
+	escapedScriptWhy = "it changed in the text its escapes write, which is text of a script keploy does not split into words"
+	encodedScriptWhy = "it changed in the text an encoded run of it decodes to, which is text of a script keploy does not split into words"
+)
+
 // unparsed says what of a drifted value, read in form (recorded, live),
 // the declared readings cannot read whole, where it drifted: "" when
 // nothing. clock are the value's clock words: a clock read the lead moved
-// ("41+00:00" of an aware datetime) is read, whatever runs it makes.
-func unparsed(rec, live string, clock clockSet) string {
+// ("41+00:00" of an aware datetime) is read, whatever runs it makes. script
+// is the reason to give where the form's text of a script keploy reads only
+// whole changed (scriptWhy and its kin: where that text stands).
+func unparsed(rec, live string, clock clockSet, script string) string {
 	if rec == live {
 		return ""
 	}
@@ -858,7 +1096,7 @@ func unparsed(rec, live string, clock clockSet) string {
 		return "it holds a '%' or '\\' that is no escape keploy reads"
 	}
 	if !sameStrings(nonASCIIRuns(rec), nonASCIIRuns(live)) {
-		return "it changed in text of a script keploy does not split into words"
+		return script
 	}
 	r, l := b64Runs(rec), b64Runs(live)
 	for _, side := range []struct {
@@ -928,27 +1166,468 @@ func b64DecodeAny(s string) ([]byte, bool) {
 
 // formsOf are the declared forms of a drifted value, recorded and live,
 // beside the value as read raw: decoded (percent and backslash escapes),
-// case-folded, and the text its encoded runs decode to (b64Text), itself
-// case-folded; and that text, recorded and live, on its own (encoded).
-func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms [][2]string, encoded [2]string) {
-	forms = [][2]string{{decRec, decLive}}
-	fold := func(f [2]string) {
+// case-folded; quoted-printable (qpForm, each escape that decodes to text
+// decoded), where it differs, itself case-folded; and the text its encoded
+// runs decode to (b64Pair: b64Text of each side, a clock read in a decoded
+// text not decoded again where both sides hold the value's instants at the
+// same depth), itself case-folded; and that text, recorded and live, on its
+// own (encoded). The words of each form are searched for what flowed into
+// the value. qp is where forms holds the quoted-printable form and its
+// case-folded one (forms[qp[0]:qp[1]], empty where it holds none): right
+// after the value as written. The last encN forms are that text's (none
+// where there is none), in forms and in checked alike, and runs the runs
+// each side decoded to it (b64Pair). clockOf reads the clock words of a
+// decoded text's two sides in the value's window.
+//
+// checked are the forms unparsed reads, the same but for the
+// quoted-printable one: that is read only where both values read as
+// quoted-printable text (qpFormRead). Reading it where one does not would
+// make the two values differ in that form where they did not
+// ("Signature=09bb..." a tab in one run, "Signature=b17d..." as written in
+// the other; "v1=2B<hex>" a '+' against "v1=41<hex>" an 'A'), in a run of
+// the base64 alphabet that does not decode, which unparsed refuses. The
+// search reads it in every value: a word only that reading shows
+// ("=23A7K29Q" a '#' and an id) is found where it flowed.
+func formsOf(rec, live, decRec, decLive string, clock clockSet, clockOf func(rec, live string) clockSet) (forms, checked [][2]string, qp [2]int, encoded [2]string, encN int, runs [2][]decodedRun) {
+	with := func(fs [][2]string, f [2]string) [][2]string {
+		fs = append(fs, f)
 		if lr, ll := strings.ToLower(f[0]), strings.ToLower(f[1]); lr != f[0] || ll != f[1] {
-			forms = append(forms, [2]string{lr, ll})
+			fs = append(fs, [2]string{lr, ll})
+		}
+		return fs
+	}
+	base := with(nil, [2]string{decRec, decLive})
+	forms = append([][2]string(nil), base...)
+	checked = append([][2]string(nil), base...)
+	qp = [2]int{len(forms), len(forms)}
+	qr, qpR := qpFormRead(rec)
+	ql, qpL := qpFormRead(live)
+	if qr != decRec || ql != decLive {
+		forms = with(forms, [2]string{qr, ql})
+		qp[1] = len(forms)
+		if qpR && qpL {
+			checked = with(checked, [2]string{qr, ql})
 		}
 	}
-	fold(forms[0])
-	if qr, ql := qpForm(rec), qpForm(live); qr != decRec || ql != decLive {
-		q := [2]string{qr, ql}
-		forms = append(forms, q)
-		fold(q)
+	if br, bl, rs := b64Pair(decRec, decLive, clock, clockOf); br != "" || bl != "" {
+		n := len(forms)
+		encoded, runs = [2]string{br, bl}, rs
+		forms = with(forms, encoded)
+		checked = with(checked, encoded)
+		encN = len(forms) - n
 	}
-	if br, bl := b64Text(decRec, clock.rec), b64Text(decLive, clock.live); br != "" || bl != "" {
-		encoded = [2]string{br, bl}
-		forms = append(forms, encoded)
-		fold(encoded)
+	return forms, checked, qp, encoded, encN, runs
+}
+
+// plainRunsOf are the words, in every reading, as written and case-folded,
+// of the runs the live side of a drifted value decoded whole where they
+// stand (liveRuns: b64Pair's, at any level; eLive the text they decode to),
+// that stand in no live form of the value (forms) once each such run is put
+// out where it stands (blankAt): words only those runs hold there. The word
+// rule reads such a run as the text it decodes to, which is a form of the
+// value: every word of that text that changed is searched as any word of
+// the value is, and a clock read in it is read as the clock it is. So where
+// record's full round served a payload before the call whose view no
+// adapter stated or keploy could not read, which may hold any word
+// (unseenWhy, servedWhy), the run is not a word of its own: the encoded
+// text gets the answer the same text unencoded gets, whether or not such a
+// payload was served before the call, which another goroutine's serve
+// decides. A run decodes whole to its text, so it holds no word its text
+// does not: the bytes a respelling changes (its padding or unused trailing
+// bits, the other alphabet, a hex run's case or its "0x") are none. A run
+// the reader decoded only in parts (between '/', '.' or groups of '-' and
+// '_'), one it did not decode where it stands again (a second copy, which
+// its text does not show twice), and one in a form keploy cannot place it
+// in (the value's quoted-printable reading, a case-folding that moves it)
+// are put out nowhere, so their words are searched there as any other
+// (fail closed). In a value with escapes, a run the reader read in its
+// decoded form stands in the raw form as the escaped text that decodes to
+// it (rawImages), and that text is put out there too. Its words there
+// ("2FIGx" of "%2FIGx") are the run's only where it pairs with the recorded
+// value's run of the same rank and escapes each byte as that one does
+// (pairedRuns, sameEscapes), and the value's own otherwise. Where it does
+// not, each of its escapes is decided where it stands: one written as the
+// recorded run writes that copy of its byte is the run's, and any other (a
+// gained "%3D" of its padding) leaves a word that is the value's own even
+// where another run's kept escapes spell the same word (keptEscape). An
+// escape before it is no part of it, whether it stands after the run
+// before it or ends that run (its padding's "%3D" right before the run): a
+// word it glues to the run ("20b2s" of "%20b2s", "3DbGVh" of "Lg=%3DbGVh")
+// is the run's only where the run pairs and the same escape stands before
+// the recorded one, and the value's own otherwise, changed where the escape
+// did. Only those two searches skip these: a run that stands in an earlier
+// payload, as recorded or in a view of a serve of it, is refused or
+// followed there as any word is.
+func (d *valueDrift) plainRunsOf(forms [][2]string, runs [2][]decodedRun, eLive string) map[string]bool {
+	liveRuns := runs[1]
+	if len(liveRuns) == 0 {
+		return nil
 	}
-	return forms, encoded
+	var raw, recRaw []decodedRun
+	if d.decoded {
+		raw, recRaw = rawImages(d.live, liveRuns), rawImages(d.rec, runs[0])
+	}
+	words := map[string]bool{}
+	add := func(run string) {
+		for _, rd := range readings {
+			maps.Copy(words, tokensBy(run, rd))
+			maps.Copy(words, tokensBy(strings.ToLower(run), rd))
+		}
+	}
+	for _, r := range liveRuns {
+		add(r.run)
+	}
+	// A run's text in the raw value holds what its escapes leave ("3D" of
+	// "%3D", "2FIGx" of "%2FIGx"): its words are the run's only where the
+	// run pairs with the recorded value's run of the same rank (pairedRuns)
+	// and writes each byte it escapes as that run writes it (sameEscapes),
+	// so no escape was gained or respelled in it; else they are the
+	// value's own, as an escape a plain text gained is.
+	recTops, liveTops := topRuns(runs[0]), topRuns(liveRuns)
+	paired := 0
+	if raw != nil && recRaw != nil {
+		paired = d.pairedRuns(recTops, liveTops)
+	}
+	for k := 0; k < paired; k++ {
+		if sameEscapes(recRaw[k].esc, raw[k].esc, recTops[k].run) {
+			add(raw[k].run)
+		}
+	}
+	// The words are a set, so each escape is decided where it stands, not
+	// by its remnant's spelling: an escape of a run that pairs, written as
+	// the recorded run writes that copy of its byte (keptEscape: each
+	// escape of a run that kept its escapes is), is the run's and put out
+	// with it; every other one (gained or respelled, or one of a run that
+	// pairs with none) is left standing in the raw form (own), so its
+	// remnant ("3D" of a gained "%3D") is the value's own word and searched,
+	// even where a run that kept its escapes spells the same word. An escape
+	// the run lost leaves no remnant, and those it kept are the recorded
+	// run's.
+	var own [][2]int
+	for k, r := range raw {
+		for _, e := range r.escs {
+			if k >= paired || !keptEscape(recRaw[k], recTops[k].run, e) {
+				own = append(own, [2]int{e.st, e.en})
+			}
+		}
+	}
+	decLower, eLower := strings.ToLower(d.decLive), strings.ToLower(eLive)
+	for _, f := range forms {
+		b, rawForm := f[1], false
+		switch {
+		case d.decoded && b == d.live:
+			b, rawForm = blankAt(b, raw, false), true
+		case b == d.decLive || b == decLower:
+			b = blankAt(b, liveRuns, false)
+		case b == eLive || b == eLower:
+			b = blankAt(b, liveRuns, true)
+		}
+		for _, rd := range readings {
+			rb := b
+			if rawForm {
+				rb = standing(b, d.live, own, rd)
+			}
+			for w := range tokensBy(rb, rd) {
+				delete(words, w)
+			}
+		}
+	}
+	// An escape right before a run glues its remnant to the run's first
+	// word in the raw form ("20b2s" of "%20b2s"): that word is the runs'
+	// where the run pairs with the recorded value's run of the same rank
+	// and the same escape stands right before that one, so only the run
+	// changed the word. So too where the escape ends the run before it (a
+	// run ends after its padding: "Lg=%3D" right before the next): runs
+	// pair only where the text between them is the same on both sides,
+	// here none, so the recorded escape ends the recorded run before too.
+	// The word holds the escape's remnant, the same on both sides, and the
+	// run's own bytes, none of the run before it: an escape that run gained
+	// or respelled leaves a word of its own ("3D" of "%3D%3D" against
+	// "=%3D"), which is searched unless a run read above holds it, and one
+	// it lost leaves none.
+	for k := 0; k < paired; k++ {
+		r, q := raw[k], recRaw[k]
+		if e := escapeBefore(d.live, r.st); e != "" && escapeBefore(d.rec, q.st) == e {
+			for _, rd := range readings {
+				if w := wordAcross(d.live, r.st, rd); w != "" {
+					words[w] = true
+				}
+			}
+		}
+	}
+	return words
+}
+
+// topRuns are the runs of runs read in the value's decoded form itself
+// (at -1), in order.
+func topRuns(runs []decodedRun) []decodedRun {
+	var out []decodedRun
+	for _, r := range runs {
+		if r.at < 0 {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// pairedRuns is how many of the decoded form's top-level runs, recorded
+// (rec) and live, pair by rank, from the first: the text before each, from
+// the run before it (or the value's start), is the same on both sides but
+// for words both sides read as clock reads (sameButClock), so each is the
+// other's run where it stands, whatever the clock wrote before it. The
+// first that does not pair, and every run after it, pairs with none (fail
+// closed: a run dropped or gained before it shifts the ranks).
+func (d *valueDrift) pairedRuns(rec, live []decodedRun) int {
+	pr, pl := 0, 0
+	for k := 0; k < len(rec) && k < len(live); k++ {
+		q, r := rec[k], live[k]
+		if !d.sameButClock(d.decRec[pr:q.st], d.decLive[pl:r.st]) {
+			return k
+		}
+		pr, pl = q.en, r.en
+	}
+	return min(len(rec), len(live))
+}
+
+// sameButClock says rec and live are the same text but for words (isWord)
+// that are clock words of the value on each side, in the same places.
+func (d *valueDrift) sameButClock(rec, live string) bool {
+	if rec == live {
+		return true
+	}
+	rs, ls := segmentsBy(rec, isWord), segmentsBy(live, isWord)
+	if len(rs) != len(ls) {
+		return false
+	}
+	for i := range rs {
+		if rs[i] == ls[i] {
+			continue
+		}
+		if !rs[i].word || !ls[i].word || !d.clock.rec[rs[i].text] || !d.clock.live[ls[i].text] {
+			return false
+		}
+	}
+	return true
+}
+
+// sameEscapes says a live run's raw text writes each byte it escapes
+// (live, rawImages' esc) as the recorded run's does (rec; recRun the text
+// that run decodes to): the one spelling all of its copies share, or the
+// same spellings in order where a side mixes them. A byte the recorded run
+// does not hold is written so where it is one spelling of the kind (the
+// escape's first byte and its length, "%" and three of "%2F") by which the
+// recorded run writes another byte, so the same encoder wrote both ("%2F"
+// beside "%3D"); else nothing says how the recorded side writes it, and it
+// is a change of its own (fail closed). A byte live writes as itself
+// leaves no word of an escape, so it says nothing either way.
+func sameEscapes(rec, live map[byte]string, recRun string) bool {
+	for c, sp := range live {
+		if strings.IndexByte(recRun, c) >= 0 {
+			rs, ok := rec[c]
+			if !ok {
+				rs = string(c)
+			}
+			if rs != sp {
+				return false
+			}
+			continue
+		}
+		kin := false
+		for _, rs := range rec {
+			kin = kin || !mixedEscape(sp) && rs[0] == sp[0] && len(rs) == len(sp)
+		}
+		if !kin {
+			return false
+		}
+	}
+	return true
+}
+
+// keptEscape says e, an escape of a live run's text in the raw value
+// (rawImages), writes its copy of its byte as the recorded run of the same
+// rank writes that copy (rec its text there, recRun what that decodes to):
+// sameEscapes, read one escape at a time. That is the one spelling every
+// recorded copy shares, or the spelling of the recorded copy of the same
+// rank where they differ (none where the recorded run holds fewer copies,
+// or writes that one as itself); for a byte the recorded run does not
+// hold, an escape of the kind by which it writes another byte.
+func keptEscape(rec decodedRun, recRun string, e rawEscape) bool {
+	if strings.IndexByte(recRun, e.c) < 0 {
+		for _, rs := range rec.esc {
+			if !mixedEscape(rs) && rs[0] == e.sp[0] && len(rs) == len(e.sp) {
+				return true
+			}
+		}
+		return false
+	}
+	rs, ok := rec.esc[e.c]
+	if !ok {
+		return false
+	}
+	if !mixedEscape(rs) {
+		return rs == e.sp
+	}
+	for _, q := range rec.escs {
+		if q.c == e.c && q.n == e.n {
+			return q.sp == e.sp
+		}
+	}
+	return false
+}
+
+// standing is b, the raw value s with runs put out (blankAt), with each
+// escape at a span of own written back where it stands, and with it the
+// bytes of s its word, as word reads it, glues to after it: the word the
+// escape leaves, "2FIGE" of "b2s%2FIGE+Yi" as "3D" of "=%3D%3D", is
+// searched where the escape stands, even where a run that kept its escapes
+// spells the same word. An escape starts with '%' or '\', which no
+// reading takes for a word byte, so no word it leaves starts before it; one
+// that ends in a byte that is no word byte ("\/") leaves no word.
+func standing(b, s string, own [][2]int, word func(byte) bool) string {
+	if len(own) == 0 {
+		return b
+	}
+	out := []byte(b)
+	for _, sp := range own {
+		e := sp[1]
+		for e < len(s) && word(s[e-1]) && word(s[e]) {
+			e++
+		}
+		copy(out[sp[0]:e], s[sp[0]:e])
+	}
+	return string(out)
+}
+
+// mixedEscape says an esc spelling (rawImages) lists a byte's copies, in
+// order, because they are not all written the same way.
+func mixedEscape(sp string) bool { return sp[0] == 0 }
+
+// escapeBefore is the escape that ends at i in s ("%20", "\\n"), "" where
+// none does.
+func escapeBefore(s string, i int) string {
+	isHex := func(c byte) bool { return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F' }
+	switch {
+	case i >= 3 && s[i-3] == '%' && isHex(s[i-2]) && isHex(s[i-1]):
+		return s[i-3 : i]
+	case i >= 2 && s[i-2] == '\\' && strings.IndexByte("nrtbf", s[i-1]) >= 0:
+		return s[i-2 : i]
+	}
+	return ""
+}
+
+// wordAcross is the word of s, as word reads it, that holds both s[i-1] and
+// s[i], "" where none does.
+func wordAcross(s string, i int, word func(byte) bool) string {
+	if i == 0 || i >= len(s) || !word(s[i-1]) || !word(s[i]) {
+		return ""
+	}
+	a, b := i-1, i
+	for a > 0 && word(s[a-1]) {
+		a--
+	}
+	for b < len(s) && word(s[b]) {
+		b++
+	}
+	return s[a:b]
+}
+
+// rawImages are the top-level runs of the value's decoded form (runs at
+// -1, read in unescaped(raw)), in order, each as the text of raw that
+// decodes to it, where that stands in raw (unescapedAt's places of its
+// ends), and how that text writes each byte it escapes somewhere (esc): the
+// one spelling all its copies share ("%2F"), or, where they differ, each
+// copy's in order after a 0 byte. A run's bytes are ASCII, each placed, so
+// every run has such a text; the guard for one that does not (an escape's
+// character split at an end) gives none at all, so no run pairs by rank
+// (fail closed). It costs a pass over raw for each pass of unescaped.
+func rawImages(raw string, runs []decodedRun) []decodedRun {
+	dec, at := unescapedAt(raw)
+	var out []decodedRun
+	for _, r := range runs {
+		if r.at >= 0 {
+			continue
+		}
+		a, b := at[r.st], at[r.en]
+		if a < 0 || b < 0 {
+			return nil
+		}
+		// Each byte written whole: as itself (one byte) or by an escape
+		// (more).
+		var first [256]string
+		var escaped, mixed [256]bool
+		var copies [256]int
+		var escs []rawEscape
+		for j := r.st; j < r.en; j++ {
+			c, sp := dec[j], raw[at[j]:at[j+1]]
+			escaped[c] = escaped[c] || len(sp) > 1
+			if first[c] == "" {
+				first[c] = sp
+			}
+			mixed[c] = mixed[c] || sp != first[c]
+			if len(sp) > 1 {
+				escs = append(escs, rawEscape{c: c, sp: sp, st: at[j], en: at[j+1], n: copies[c]})
+			}
+			copies[c]++
+		}
+		var esc map[byte]string
+		for c := range escaped {
+			if !escaped[c] {
+				continue
+			}
+			if esc == nil {
+				esc = map[byte]string{}
+			}
+			if !mixed[c] {
+				esc[byte(c)] = first[c]
+				continue
+			}
+			sb := strings.Builder{}
+			sb.WriteByte(0)
+			for j := r.st; j < r.en; j++ {
+				if dec[j] == byte(c) {
+					sb.WriteByte(' ')
+					sb.WriteString(raw[at[j]:at[j+1]])
+				}
+			}
+			esc[byte(c)] = sb.String()
+		}
+		out = append(out, decodedRun{run: raw[a:b], at: -1, st: a, en: b, esc: esc, escs: escs})
+	}
+	return out
+}
+
+// blankAt is s, the text the runs were read in (deep: the text they decode
+// to; else the value's decoded form), or that text case-folded, with each
+// run that stands there where the reader read it, as written or
+// case-folded, put out: a space for each of its bytes, so the others keep
+// their places.
+func blankAt(s string, runs []decodedRun, deep bool) string {
+	var b []byte
+	for _, r := range runs {
+		if (r.at >= 0) != deep {
+			continue
+		}
+		st, en := r.st, r.en
+		if deep {
+			st, en = r.at+r.st, r.at+r.en
+		}
+		if en > len(s) {
+			continue
+		}
+		if w := s[st:en]; w != r.run && w != strings.ToLower(r.run) {
+			continue
+		}
+		if b == nil {
+			b = []byte(s)
+		}
+		for i := st; i < en; i++ {
+			b[i] = ' '
+		}
+	}
+	if b == nil {
+		return s
+	}
+	return string(b)
 }
 
 // allIn reports whether every word of ws is in set, and there is one.
@@ -1178,7 +1857,10 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			// application read: no rule lets it go. So is any word where F
 			// served x and its adapter stated no view of it (viewUnstated):
 			// keploy cannot tell what F gave the application there either.
-			if !recorded && (x.unseen || x.viewUnstated()) {
+			// A word of an encoded run read as its text is (plainRuns) is
+			// no word F may have given there unread, as the same text
+			// unencoded holds none: only a view that holds it refuses it.
+			if !recorded && (x.unseen || x.viewUnstated()) && (!v.plainRuns[t] || len(x.views) != 0) {
 				if why := unseenWhy(dc, x, held.of(j).unseen[changedWord{i, t}], keep, word(t, recorded), t, at); why != "" {
 					return why + "; " + notClock(v) + ". " + correction(x.mock, false)
 				}
@@ -1273,6 +1955,11 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 			return ""
 		}
 		for _, g := range op.words {
+			// A word of an encoded run read as its text is (plainRuns), as
+			// in unaccounted.
+			if v.plainRuns[t] && (g.unstated || g.unread) {
+				continue
+			}
 			if why := g.servedWhy(i, t, v.wordOf(t, recorded), givenWhose(g.at, at, g.late, g.noTime), keep); why != "" {
 				return why + "; " + notClock(v) + ". " + correction(g.mock, false)
 			}

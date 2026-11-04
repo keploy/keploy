@@ -180,7 +180,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// query and body never go to the log, only its shape.
 			if ce := h.Logger.Check(zap.DebugLevel, "decodeHTTP debug logs for input"); ce != nil {
 				ce.Write(zap.String("method", input.method),
-					zap.String("path", input.url.Path),
+					zap.String("path", utils.URLPathShape(input.url)),
 					zap.Strings("header names", headerNames(input.header)),
 					zap.Int("body bytes", len(input.body)))
 			}
@@ -236,7 +236,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				if ce := h.Logger.Check(zap.DebugLevel, "egress passthrough: serving without mock match"); ce != nil {
 					ce.Write(zap.String("mode", string(mode)), zap.String("served", served),
-						zap.String("path", input.url.Path), zap.Any("metadata", utils.GetReqMeta(request)))
+						zap.String("path", utils.URLPathShape(input.url)), zap.Any("metadata", utils.GetReqMeta(request)))
 				}
 				if _, werr := clientConn.Write(out); werr != nil {
 					if ctx.Err() != nil {
@@ -321,8 +321,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				lmiss *learnMiss
 				// extra is the full round's own-repeat check (extraCall),
 				// asked before its pairing; -1 where it was not asked. A
-				// miss reads it rather than asking again.
-				extra = -1
+				// miss reads it rather than asking again. extraAt is the
+				// earliest of the test's own recordings of it.
+				extra   = -1
+				extraAt time.Time
 				// call is where the request's first read of the round
 				// found it made (integrations.CallRound): a miss's lookup
 				// of a recording made elsewhere is asked of that round.
@@ -346,6 +348,29 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// nor learned.
 				stub, lmiss, err = h.learnMatchIn(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts, integrations.CallRound{}, &call)
 				ok = stub != nil
+				if !ok && err == nil && (lmiss == nil || !lmiss.moved) {
+					// The learn step neither serves nor learns onto a
+					// recording that declares variables: a request it
+					// answered none for that such a recording fits is
+					// decided by the variable pass, as a replay decides it
+					// (fullRoundVariables), reading the store as a replay's
+					// matcher reads it: held to the round the learn step's
+					// first pass read, and with the open test's own-call
+					// decision (integrations.OwnRepeatRead), so the
+					// background never answers a call one more than the
+					// test recorded. A moved miss is of no round, and stays
+					// one.
+					held, _ := integrations.HoldToRound(mockDb, call)
+					ownHeld := held
+					held = integrations.OwnRepeatRead(held, call, func() bool {
+						return h.ownCall(reqCtx, input, ownHeld, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict())
+					})
+					vstub, vdiag, decided, verr := h.fullRoundVariables(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableStatefulMocks)
+					if decided {
+						stub, diag, lmiss, err = vstub, vdiag, nil, verr
+						ok = stub != nil
+					}
+				}
 				if !ok && err == nil {
 					// Then the pairing, under the background rules: a call
 					// that is exactly another test's recording is answered
@@ -359,7 +384,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// recording to the worker scope on its account. A call
 					// whose test recorded none of its kind still pairs.
 					held, _ := integrations.HoldToRound(mockDb, call)
-					extra = h.extraCall(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+					extra, extraAt = h.extraCall(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 					strict := h.newStrictNoise(headerNoise, bodyNoise, urlNoise)
 					if extra == 0 {
 						if answer, x := h.pairExactlyFrom(reqCtx, input, mockDb, strict, call); answer != nil {
@@ -457,9 +482,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// the scope open now, the next test's once a test ended.
 				// Where the full round asked already (extra) it read this
 				// same held store: asking again would repeat that read.
-				n := extra
+				n, nAt := extra, extraAt
 				if n < 0 {
-					n = h.extraCall(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+					n, nAt = h.extraCall(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 				}
 				if n == 0 && lmiss == nil {
 					// (A learn-step miss names the candidate it refused.)
@@ -479,11 +504,18 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// It is asked of the round the request's first read found it
 				// made in (notOwnedRecording): never a recording that read
 				// held as its view's own, nor one of a set the replay staged
-				// under the request, which the miss then says.
+				// under the request, which the miss then says. A call one
+				// more than the test recorded is named only as an earlier
+				// test's recording, made before the test's own of it
+				// (notOwnedRecordingBefore): the replay passed that test
+				// without the call, which moved here (its first use, with
+				// that test skipped). It stays an extra call. No later
+				// test's recording is named for it, and none when keploy
+				// cannot place the test's own (nAt zero).
 				var elsewhere *models.Mock
 				restaged := false
-				if n == 0 && report != nil && provenswitch.On() {
-					elsewhere, restaged = notOwnedRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
+				if report != nil && provenswitch.On() && (n == 0 || !nAt.IsZero()) {
+					elsewhere, restaged = notOwnedRecordingBefore(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call, nAt)
 				}
 				if elsewhere != nil {
 					markNotOwned(report, elsewhere)
@@ -563,7 +595,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				noMockBody := "keploy: no matching mock found for this HTTP request\n"
 				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)
-				baseErr := fmt.Errorf("%w for %s %s", ErrMockNotMatched, request.Method, request.URL.Path)
+				// The error names the call without its secret (missedCall).
+				baseErr := fmt.Errorf("%w for %s", ErrMockNotMatched, missedCall(request, report))
 				missErr := models.NewMockMismatchError(baseErr, report)
 				// The miss is queued for the test that made it before the app
 				// sees the 502. The replay reads a test's misses once the app
@@ -783,19 +816,15 @@ func NewRequestNoise(logger *zap.Logger, opts models.OutgoingOptions) RequestNoi
 	// matching if the user puts it under requestBody on purpose.
 	//
 	// Lowercased copy for the same reason as headerNoise: the matcher's
-	// noise index matches lowercased paths. Entries are normalized to
-	// presence-only (empty regex list): request-body mock matching and
-	// drift detection are path-based, so a value-regex cannot gate here.
+	// noise index matches lowercased paths. An entry keeps its patterns:
+	// it excuses a field only when the recorded and the live value each
+	// match one, and an entry with none excuses the field whatever it holds.
 	var bodyNoise map[string][]string
 	if opts.NoiseConfig != nil {
 		if bn, ok := opts.NoiseConfig["requestbody"]; ok {
 			bodyNoise = make(map[string][]string, len(bn))
 			for k, v := range bn {
-				if len(v) > 0 {
-					logger.Debug("body-noise value regexes are ignored for mock matching; the field is skipped by path",
-						zap.String("field", k))
-				}
-				bodyNoise[strings.ToLower(k)] = []string{}
+				bodyNoise[strings.ToLower(k)] = append([]string{}, v...)
 			}
 		}
 	}
@@ -806,8 +835,8 @@ func NewRequestNoise(logger *zap.Logger, opts models.OutgoingOptions) RequestNoi
 	// the recorded mock unmatchable and produced a "no matching mock -> 502"
 	// on replay. Each key here is a regex that wildcards the matching
 	// segment in both the mock and request paths (see MatchURLPath). The
-	// value slice is unused — like requestbody, matching is by pattern, not
-	// by a value-regex — so an entry is presence-only.
+	// value slice is unused: the key is the pattern, so an entry is
+	// presence-only.
 	var urlNoise []string
 	if opts.NoiseConfig != nil {
 		if un, ok := opts.NoiseConfig["url"]; ok {
@@ -997,4 +1026,16 @@ func passOneCallThrough(ctx context.Context, logger *zap.Logger, clientConn net.
 		// the close, which resp.Write tells the client as Connection: close.
 		return resp.Close, nil
 	}
+}
+
+// missedCall names a missed call in its error as its report does, with the
+// segments a recording of the pool redacted written redacted, or by its
+// path's shape with no recording at hand or no report (shapeSummary): the
+// proxy logs the error at ERROR, and the call may have sent its secret in
+// its path.
+func missedCall(request *http.Request, report *models.MockMismatchReport) string {
+	if report != nil {
+		return report.ActualSummary
+	}
+	return shapeSummary(request)
 }

@@ -28,6 +28,26 @@ name: Linux CI scripts
 # never source a local install.sh in place of a failed download, and delete
 # nothing there. With --oss it must download and extract in a temp directory
 # of its own too, and touch no fixed /tmp path, nor anyone else's files.
+#
+# And mock-kinds.tests.sh: http_mocks_are, the check of a lane that counts
+# the Http mocks its own calls make and may record DNS mocks beside them
+# (the DNS mocks of the runner's own name, which only some runners'
+# resolvers answer, in repeated-headers' busy --sync pass); an Http mock
+# lost or duplicated, or a mock of any other kind, fails. And
+# http_mocks_only, the check of a lane whose code makes no DNS query: a
+# DNS mock fails there too. And http_mock_count, the count of the Http
+# mocks of a lane that records other kinds beside them. All three match the
+# kind whole: an Http2 or HttpFault mock is not an Http one, though a
+# `^kind: Http` prefix counts it.
+#
+# And golang/gin_mongo/golang-docker.tests.sh and
+# golang/echo_sql/golang-docker.tests.sh: the gin-mongo and echo-sql lanes of
+# golang_docker.yml, sourced by `bash -e` as their step runs them, against a
+# fake keploy. A keploy record or keploy test that exits non-zero has to fail
+# the lane with keploy's own exit code and a line naming that command and its
+# exit, the failed test sets and tests of the test run it wrote, and the
+# command's log; under `bash -e` the lane ended at that command with none of
+# them, and an echo-sql record, its exit taken as tee's, did not stop it.
 
 on:
   push:
@@ -42,6 +62,19 @@ on:
       - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh'
       - 'keploy.sh'
       - '.github/workflows/test_workflow_scripts/keploy-installer.tests.sh'
+      - '.github/workflows/test_workflow_scripts/mock-kinds.sh'
+      - '.github/workflows/test_workflow_scripts/mock-kinds.tests.sh'
+      - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.sh'
+      - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.tests.sh'
+      - '.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.sh'
+      - '.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.tests.sh'
+      - '.github/workflows/test_workflow_scripts/golang/golang-docker-fakes.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-exit-helpers.sh'
+      - '.github/workflows/test_workflow_scripts/test-iid.sh'
+      - '.github/workflows/test_workflow_scripts/docker-build-retry.sh'
+      - '.github/workflows/test_workflow_scripts/mongo-ci.sh'
+      - '.github/workflows/test_workflow_scripts/json-pass-helpers.sh'
+      - '.github/workflows/golang_docker.yml'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
     paths:
@@ -53,6 +86,19 @@ on:
       - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh'
       - 'keploy.sh'
       - '.github/workflows/test_workflow_scripts/keploy-installer.tests.sh'
+      - '.github/workflows/test_workflow_scripts/mock-kinds.sh'
+      - '.github/workflows/test_workflow_scripts/mock-kinds.tests.sh'
+      - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.sh'
+      - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.tests.sh'
+      - '.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.sh'
+      - '.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.tests.sh'
+      - '.github/workflows/test_workflow_scripts/golang/golang-docker-fakes.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-exit-helpers.sh'
+      - '.github/workflows/test_workflow_scripts/test-iid.sh'
+      - '.github/workflows/test_workflow_scripts/docker-build-retry.sh'
+      - '.github/workflows/test_workflow_scripts/mongo-ci.sh'
+      - '.github/workflows/test_workflow_scripts/json-pass-helpers.sh'
+      - '.github/workflows/golang_docker.yml'
       - '.github/workflows/linux-ci-scripts.yml'
 
 permissions:
@@ -186,3 +232,29 @@ jobs:
           REQUIRE_ZSH: '1'
           REQUIRE_PTY: '1'
         run: bash .github/workflows/test_workflow_scripts/keploy-installer.tests.sh
+
+  mock-kinds:
+    # Thirty-three cases on files the script writes; under a second.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test mock-kinds.sh (DNS mocks beside the Http ones pass; an Http mock lost or duplicated, or another kind, fails)
+        run: bash .github/workflows/test_workflow_scripts/mock-kinds.tests.sh
+
+  golang-docker-lanes:
+    # Forty-two cases against fakes, a few seconds in all; each is bounded
+    # at 60 s.
+    timeout-minutes: 8
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test gin_mongo/golang-docker.sh (a keploy record or keploy test that exits non-zero is named, with its reports and log)
+        run: bash .github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.tests.sh
+
+      - name: Test echo_sql/golang-docker.sh (a keploy record or keploy test that exits non-zero is named, with its reports and log)
+        # Runs even when the gin_mongo step failed, so one run reports both.
+        if: ${{ !cancelled() }}
+        run: bash .github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.tests.sh

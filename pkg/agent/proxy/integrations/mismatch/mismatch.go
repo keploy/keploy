@@ -23,6 +23,7 @@ package mismatch
 import (
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -30,6 +31,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // Canonical protocol names. Parsers must use these so report consumers can
@@ -50,7 +52,8 @@ const (
 // large payload can't bloat the report yaml or the CLI table.
 const maxFieldDiffValueLen = 256
 
-// maxFieldDiffs bounds how many per-field diffs a single report carries.
+// maxFieldDiffs bounds how many per-field diffs a single report carries, and
+// so how many fields its hint names.
 const maxFieldDiffs = 25
 
 // Builder assembles a models.MockMismatchReport with consistent rendering.
@@ -61,6 +64,23 @@ type Builder struct {
 	// check in Build(). nil means "the question is undecidable" — see
 	// WithComparedDestinations.
 	comparedDests []string
+	// diffs are every field diff WithClosest was given. The report carries
+	// at most maxFieldDiffs of them; the hint reads them all, so that a
+	// difference past the cut still decides what it offers.
+	diffs []models.MockFieldDiff
+	// noise is what the parser knows of keploy.yml's noise for the
+	// report's fields (WithGuarded, WithoutNoise).
+	noise noiseFacts
+}
+
+// noiseFacts is what a parser knows of keploy.yml's noise for a report's
+// fields that its field diffs do not carry, each a field's report path.
+type noiseFacts struct {
+	// guarded: fields keploy.yml's noise declares with patterns that a
+	// side's value is outside of.
+	guarded []string
+	// unreachable: fields no keploy.yml noise is offered for.
+	unreachable []string
 }
 
 // NewReport starts a report for one missed call. actualSummary should be the
@@ -161,13 +181,36 @@ func (b *Builder) WithPhase(phase string, candidateCount int) *Builder {
 	return b
 }
 
-// WithClosest attaches the nearest candidate and its field-level diffs.
+// WithClosest attaches the nearest candidate and its field-level diffs. The
+// report carries at most maxFieldDiffs of them: when it cuts them, those that
+// can be why the call missed (causes) first, each in its order. The hint
+// reads them all.
 func (b *Builder) WithClosest(mockName string, diffs []models.MockFieldDiff) *Builder {
 	b.report.ClosestMock = mockName
+	b.diffs = diffs
 	if len(diffs) > maxFieldDiffs {
-		diffs = diffs[:maxFieldDiffs]
+		// A copy, so the report does not keep every diff alive.
+		diffs = slices.Clone(causesFirst(b.report.Protocol, diffs)[:maxFieldDiffs])
 	}
 	b.report.FieldDiffs = diffs
+	return b
+}
+
+// WithGuarded names the fields of the diffs that keploy.yml's noise already
+// declares with patterns, a side's value outside them (a header by its name
+// in any case). The hint tells the user to change those entries to empty
+// lists, rather than to add them.
+func (b *Builder) WithGuarded(paths ...string) *Builder {
+	b.noise.guarded = append(b.noise.guarded, paths...)
+	return b
+}
+
+// WithoutNoise names the fields of the diffs that no keploy.yml noise is
+// offered for (a header by its name in any case): the parser compares them
+// whatever the noise says, or declaring them would stop a comparison keploy
+// keeps. A miss that differs in one of them is offered only recording again.
+func (b *Builder) WithoutNoise(paths ...string) *Builder {
+	b.noise.unreachable = append(b.noise.unreachable, paths...)
 	return b
 }
 
@@ -221,7 +264,7 @@ func (b *Builder) Build() *models.MockMismatchReport {
 		r.Diff = RenderFieldDiffs(r.FieldDiffs)
 	}
 	if r.NextSteps == "" {
-		r.NextSteps = defaultNextSteps(&r)
+		r.NextSteps = defaultNextSteps(&r, b.diffs, b.noise)
 	}
 	return &r
 }
@@ -242,6 +285,13 @@ func RenderFieldDiffs(diffs []models.MockFieldDiff) string {
 		case models.DiffKindTypeChanged:
 			parts = append(parts, fmt.Sprintf("%s: type changed (recorded %s, live %s)", d.Path, d.Expected, d.Actual))
 		default:
+			if d.Expected == "" && d.Actual == "" {
+				// A diff that carries no values (a form field, an array
+				// element under the strict comparison) names the field
+				// alone: two empty values would read as values it had.
+				parts = append(parts, fmt.Sprintf("%s: differs (values not shown)", d.Path))
+				continue
+			}
 			parts = append(parts, fmt.Sprintf("%s: recorded %q, live %q", d.Path, d.Expected, d.Actual))
 		}
 	}
@@ -262,11 +312,12 @@ var mockMode atomic.Bool
 func SetMockMode(on bool) { mockMode.Store(on) }
 
 // MockMode reports whether the agent serves a `keploy mock` session. A
-// protocol that writes its own hint with WithNextSteps uses it to leave out
-// advice a mock run cannot act on, such as test.globalNoise: `keploy mock
-// replay` sends the agent no NoiseConfig (its MockOutgoing options in
-// pkg/service/mock/replay.go), so noise from keploy.yml never reaches a
-// matcher there.
+// protocol that writes its own hint with WithNextSteps uses it to name how a
+// mock run is recorded again (a mock set, RecordCommand) and to leave out
+// advice a mock run cannot act on, such as keploy test's
+// --update-test-mapping. keploy.yml's test.globalNoise is not such advice:
+// `keploy mock replay` hands it to the agent as keploy test does (its
+// MockOutgoing options in pkg/service/mock/replay.go).
 func MockMode() bool { return mockMode.Load() }
 
 // RecordCommand is the command that records this run again. A protocol that
@@ -281,15 +332,34 @@ func RecordCommand() string {
 
 // defaultNextSteps derives an actionable hint from the report shape. The
 // wording deliberately never references commands that don't exist; the two
-// real remedies are noise (for drifting values) and re-recording (for
-// structural change).
-func defaultNextSteps(r *models.MockMismatchReport) string {
-	onlyValueDrift := len(r.FieldDiffs) > 0
-	for _, d := range r.FieldDiffs {
+// real remedies are keploy.yml noise (for drifted values and headers that a
+// noise bucket reaches: matchingNoise) and re-recording (for everything, and
+// alone for anything else). Only the diffs that can be why the call missed
+// are read (causes).
+//
+// It decides from every field diff (all), not only those the report carries,
+// so a difference past the report's cut still keeps noise that would leave
+// the call a miss out of the hint. It names only the fields the report
+// carries (named), as the miss's sanitizer shapes those names
+// (models.UnmatchedCall.SanitizedNextStep), and counts the rest (more). So
+// it offers noise only when the report carries every cause: a remedy it
+// could not name whole would leave the call a miss.
+func defaultNextSteps(r *models.MockMismatchReport, all []models.MockFieldDiff, n noiseFacts) string {
+	diffs := causes(r.Protocol, all)
+	named := causes(r.Protocol, r.FieldDiffs)
+	more := len(diffs) - len(named)
+	onlyValueDrift := len(diffs) > 0
+	for _, d := range diffs {
 		if d.Kind != models.DiffKindValueChanged {
 			onlyValueDrift = false
 			break
 		}
+	}
+	var noise string
+	var noiseOK bool
+	if more == 0 {
+		// The report carries every cause: named is diffs.
+		noise, noiseOK = matchingNoise(r.Protocol, named, n)
 	}
 	switch {
 	case r.MatchPhase == models.MatchPhaseNoMocks:
@@ -324,36 +394,61 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 		}
 		return lead
 	case onlyValueDrift:
-		paths := make([]string, 0, len(r.FieldDiffs))
-		for _, d := range r.FieldDiffs {
+		paths := make([]string, 0, len(named))
+		for _, d := range named {
 			paths = append(paths, d.Path)
 		}
-		if mockMode.Load() {
-			// `keploy mock replay` sends the agent no noise config, so
-			// test.globalNoise would not change the next run's match. Only
-			// the HTTP parser acts on --on-miss, and only when it can reach
-			// the real dependency.
-			hint := fmt.Sprintf("Only values drifted (%s). If the change is expected, re-record the mock set with '%s'", strings.Join(paths, ", "), RecordCommand())
-			if r.Protocol == ProtocolHTTP {
-				hint += ", or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'"
+		drifted := strings.Join(paths, ", ")
+		if more > 0 {
+			drifted += fmt.Sprintf(", and %d more", more)
+		}
+		// keploy test and keploy mock replay alike hand the agent
+		// keploy.yml's test.globalNoise, so the noise is a remedy in both
+		// where it reaches every drifted field; a mock run is only recorded
+		// again another way (rerecordRemedy).
+		if noiseOK {
+			return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), %s; otherwise %s.", drifted, noise, rerecordRemedy(r))
+		}
+		return fmt.Sprintf("Only values drifted (%s). If the change is expected, %s.", drifted, rerecordRemedy(r))
+	case noiseOK:
+		// Not only value drift, and still in the noise's reach: an HTTP call
+		// that does not carry recorded headers, or (under the proven switch)
+		// carries headers its recording does not, beside any value drift the
+		// noise reaches (matchingNoise reaches no other missing field). The
+		// HTTP matcher compares those headers unless keploy.yml declares them
+		// noise, so that declaration makes the call match.
+		var missing, carried, drifted []string
+		for _, d := range named {
+			switch d.Kind {
+			case models.DiffKindMissingInLive:
+				missing = append(missing, d.Path)
+			case models.DiffKindMissingInMock:
+				carried = append(carried, d.Path)
+			default:
+				drifted = append(drifted, d.Path)
 			}
-			return hint + "."
 		}
-		// Body diffs are reported "body."-prefixed for readability, but HTTP
-		// request matching reads the request-body noise bucket with
-		// root-relative keys — so strip the prefix in the copy-paste hint to
-		// avoid pointing users at the response-noise (body) bucket, which the
-		// request matcher never consults.
-		bodyKeys := make([]string, 0, len(r.FieldDiffs))
-		for _, d := range r.FieldDiffs {
-			if k := strings.TrimPrefix(d.Path, "body."); k != d.Path {
-				bodyKeys = append(bodyKeys, k)
+		var parts []string
+		if len(missing) > 0 {
+			parts = append(parts, "Recorded headers are missing from this call ("+strings.Join(missing, ", ")+")")
+		}
+		if len(carried) > 0 {
+			lead := "This call carries headers its recording does not"
+			if len(parts) > 0 {
+				lead = "it carries headers its recording does not"
 			}
+			parts = append(parts, lead+" ("+strings.Join(carried, ", ")+")")
 		}
-		if len(bodyKeys) > 0 {
-			return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.requestbody with root-relative keys (e.g. requestbody: {%s: []}); otherwise re-record with '%s'.", strings.Join(paths, ", "), strings.Join(bodyKeys, ": [], "), RecordCommand())
+		cond := "they are optional"
+		if len(drifted) > 0 {
+			parts = append(parts, "values drifted ("+strings.Join(drifted, ", ")+")")
+			cond = "these are optional or dynamic (timestamps, ids, tokens)"
 		}
-		return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add them to the matching noise (test.globalNoise); otherwise re-record with '%s'.", strings.Join(paths, ", "), RecordCommand())
+		lead := parts[len(parts)-1]
+		if len(parts) > 1 {
+			lead = strings.Join(parts[:len(parts)-1], ", ") + " and " + lead
+		}
+		return fmt.Sprintf("%s. If %s, %s; otherwise %s.", lead, cond, noise, rerecordRemedy(r))
 	default:
 		// Not --update-test-mapping alone: it updates only a passing test's
 		// mapping, so a test this miss failed keeps its recorded one. With
@@ -364,6 +459,187 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 		}
 		return "Request structure changed since recording. Re-record the test set with '" + RecordCommand() + "', or, if you edited its mocks, remap it with --disable-mapping --update-test-mapping."
 	}
+}
+
+// causes are the field diffs, of a protocol's miss, that can be why its call
+// missed. Without the proven switch the HTTP matcher lets a call carry
+// headers its recording does not (HeadersContainKeys), so such a header is
+// reported and is no cause; under the switch every header is compared except
+// host, content-length and keploy* headers and those keploy's own or
+// keploy.yml's header noise names (the strict comparison's headerDiffs), so
+// one only the call carries is a cause.
+func causes(protocol string, diffs []models.MockFieldDiff) []models.MockFieldDiff {
+	if !carriedHeadersPass(protocol) {
+		return diffs
+	}
+	return slices.DeleteFunc(slices.Clone(diffs), carriedHeader)
+}
+
+// causesFirst is diffs with its causes ahead of the rest, each in its order,
+// so a report cut to maxFieldDiffs names why its call missed.
+func causesFirst(protocol string, diffs []models.MockFieldDiff) []models.MockFieldDiff {
+	if !carriedHeadersPass(protocol) {
+		return diffs
+	}
+	out := make([]models.MockFieldDiff, 0, len(diffs))
+	var carried []models.MockFieldDiff
+	for _, d := range diffs {
+		if carriedHeader(d) {
+			carried = append(carried, d)
+		} else {
+			out = append(out, d)
+		}
+	}
+	return append(out, carried...)
+}
+
+// carriedHeadersPass reports whether a protocol's matcher lets a call carry
+// headers its recording does not: HTTP's, without the proven switch.
+func carriedHeadersPass(protocol string) bool {
+	return protocol == ProtocolHTTP && !provenswitch.On()
+}
+
+// carriedHeader reports whether d is a header only the live call carries.
+func carriedHeader(d models.MockFieldDiff) bool {
+	return d.Kind == models.DiffKindMissingInMock && strings.HasPrefix(d.Path, "header.")
+}
+
+// matchingNoise is the keploy.yml noise that makes a call that differs in
+// diffs match, as the remedy the hint names (its verb included) by the
+// bucket the matcher reads for each field, and whether there is any.
+//   - A request-body field's value drift is named under requestbody by its
+//     root-relative key: the "body." prefix is the report's, and a request
+//     is never matched with the response body bucket.
+//   - On HTTP, a header whose value drifted, that was recorded and the call
+//     does not carry, or that the call carries and its recording does not
+//     (a cause only under the proven switch: causes), is named under header
+//     by its lowercased name, once. Nothing else is in a bucket's reach
+//     there. url noise is never handed to the matcher, so a path, query,
+//     method, host or container drift has no noise remedy. Nor does an
+//     Authorization of any scheme, or a part of a SigV4 one
+//     ("header.authorization.region"): authorizationHeader. Nor does a
+//     dotted header name with a part that may be a value
+//     (models.FieldShape writes it otherwise): the miss's sanitizer would
+//     not shape it in the noise's example, and a name that holds a value
+//     differs call by call.
+//   - Elsewhere, a value drift outside the request body is named as
+//     test.globalNoise when no request-body field drifted.
+//
+// A field the parser named WithoutNoise is in no bucket's reach. A field it
+// named WithGuarded is already declared with patterns, so its entry is to be
+// changed to an empty list rather than added. A call with any field out of
+// every bucket's reach is offered no noise: noise would leave that field's
+// difference, so recording again is the only remedy that makes the call
+// match.
+func matchingNoise(protocol string, diffs []models.MockFieldDiff, n noiseFacts) (string, bool) {
+	isHTTP := protocol == ProtocolHTTP
+	unreachable, guarded := fieldSet(n.unreachable), fieldSet(n.guarded)
+	type bucket struct {
+		add, change []string
+		named       map[string]bool
+	}
+	body, header := bucket{named: map[string]bool{}}, bucket{named: map[string]bool{}}
+	other := false
+	for _, d := range diffs {
+		if unreachable[fieldKey(d.Path)] {
+			return "", false
+		}
+		name, isHeader := strings.CutPrefix(d.Path, "header.")
+		key, isBody := strings.CutPrefix(d.Path, "body.")
+		var b *bucket
+		switch {
+		case isBody && d.Kind == models.DiffKindValueChanged:
+			b = &body
+		case isHTTP && isHeader && !authorizationHeader(name) && models.FieldShape(d.Path) == d.Path &&
+			(d.Kind == models.DiffKindValueChanged || d.Kind == models.DiffKindMissingInLive || d.Kind == models.DiffKindMissingInMock):
+			key, b = strings.ToLower(name), &header
+		case !isHTTP && d.Kind == models.DiffKindValueChanged:
+			other = true
+			continue
+		default:
+			return "", false
+		}
+		if b.named[key] {
+			continue
+		}
+		b.named[key] = true
+		if guarded[fieldKey(d.Path)] {
+			b.change = append(b.change, key)
+		} else {
+			b.add = append(b.add, key)
+		}
+	}
+	var add, remedy []string
+	if len(body.add) > 0 {
+		add = append(add, fmt.Sprintf("the request-body fields under test.globalNoise.global.requestbody with root-relative keys (e.g. requestbody: {%s: []})", strings.Join(body.add, ": [], ")))
+	}
+	if len(header.add) > 0 {
+		add = append(add, fmt.Sprintf("the headers under test.globalNoise.global.header (e.g. header: {%s: []})", strings.Join(header.add, ": [], ")))
+	}
+	if len(add) > 0 {
+		remedy = append(remedy, "add "+strings.Join(add, " and "))
+	}
+	if len(body.change) > 0 {
+		remedy = append(remedy, fmt.Sprintf("change the request-body fields' entries under test.globalNoise.global.requestbody to empty lists (e.g. requestbody: {%s: []})", strings.Join(body.change, ": [], ")))
+	}
+	if len(header.change) > 0 {
+		remedy = append(remedy, fmt.Sprintf("change the headers' entries under test.globalNoise.global.header to empty lists (e.g. header: {%s: []})", strings.Join(header.change, ": [], ")))
+	}
+	if len(remedy) == 0 && other {
+		remedy = append(remedy, "add them to the matching noise (test.globalNoise)")
+	}
+	return strings.Join(remedy, " and "), len(remedy) > 0
+}
+
+// authorizationHeader reports whether a header's report name (its path less
+// "header.") is the Authorization header, or a part of a SigV4 one
+// ("authorization.region"), in any case. The hint offers no keploy.yml noise
+// for it, of any scheme. Under the proven switch the parts of a recorded
+// SigV4 Authorization are compared so that it may differ only in its access
+// key id, date and signature. keploy.yml's header noise, global or a test
+// set's (test.globalNoise.test-sets), applies to every recording it reaches,
+// so declaring authorization, even to excuse a Bearer token that drifts,
+// would stop that comparison for each signed recording there. Nothing the
+// hint can read says that none is signed: the mock store holds only what the
+// replay sends it, less what it has served, and is never told whether that
+// is the whole test set. One keploy.yml serves both modes, so neither
+// offers it.
+func authorizationHeader(name string) bool {
+	n := strings.ToLower(name)
+	return n == "authorization" || strings.HasPrefix(n, "authorization.")
+}
+
+// fieldSet is paths as a set of fieldKey.
+func fieldSet(paths []string) map[string]bool {
+	set := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		set[fieldKey(p)] = true
+	}
+	return set
+}
+
+// fieldKey is how a field path is named in a fieldSet: a header by its
+// lowercased name, as the HTTP matcher reads header names in any case, and
+// any other field as it is.
+func fieldKey(path string) string {
+	if strings.HasPrefix(path, "header.") {
+		return strings.ToLower(path)
+	}
+	return path
+}
+
+// rerecordRemedy is how the hint says to record r's call again: a mock run
+// is recorded again as a mock set, and only the HTTP parser acts on
+// --on-miss, only when it can reach the real dependency.
+func rerecordRemedy(r *models.MockMismatchReport) string {
+	if !mockMode.Load() {
+		return "re-record with '" + RecordCommand() + "'"
+	}
+	rerecord := "re-record the mock set with '" + RecordCommand() + "'"
+	if r.Protocol == ProtocolHTTP {
+		rerecord += ", or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'"
+	}
+	return rerecord
 }
 
 // JSONBodyDiffs computes field-level diffs between a recorded JSON body and

@@ -478,6 +478,180 @@ func TestUnderMockReplayAnOlderRunsTeardownIsBoundedByItsOwnClock(t *testing.T) 
 	})
 }
 
+// A partial record's tests recorded anew may make calls whose stamp names
+// no clock (models.Origin.Clock ""): a call whose parser names none, or an
+// HTTP call recorded before keploy's HTTP recorder named its clock, as in
+// api-server's partial re-record of two tests from a whole record's set.
+// Such a recording bounded every clock, so the newer run's calls, made after
+// the older run's endSessions by their time, hid the older run's teardown:
+// the call the application made at its disconnect after the last test
+// missed, outside every test, and the partial record failed with every test
+// passing. A recording on no clock that a test lists is of the run that
+// recorded that test, whose clock the test's other recordings are on
+// (runClocks): it bounds that clock alone. One that no test lists, or that
+// only a test whose recordings are on no clock lists, still bounds every
+// clock (fail closed), and one that tests of two runs list bounds both.
+func TestUnderMockReplayATestsRecordingOnNoClockBoundsOnlyItsRunsClock(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const s, l = "proxy:5555", "proxy:1111"
+	sBoot := exactMongo("s-boot", 100*time.Millisecond, models.LifetimePerTest)
+	s1 := exactMongo("s1", time.Second, models.LifetimePerTest)
+	sGap := exactMongo("s-gap", 1500*time.Millisecond, models.LifetimePerTest)
+	s2 := exactMongo("s2", 2*time.Second, models.LifetimePerTest)
+	sEnd := exactMongo("s-end", 3*time.Second, models.LifetimePerTest)
+	onClock(s, sBoot, s1, sGap, s2, sEnd)
+	// T3, recorded anew 42 s later by another agent run: a Mongo call on
+	// that run's clock and an HTTP call on none (recorded before the HTTP
+	// recorder named its clock).
+	l1 := exactMongo("l1", 45*time.Second, models.LifetimePerTest)
+	onClock(l, l1)
+	lHTTP := exactMock("l-http", 46*time.Second, models.LifetimePerTest)
+	lHTTP.Kind = models.HTTP
+	slice := []string{"s-boot", "s-gap", "s-end"}
+	all := []*models.Mock{sBoot, s1, sGap, s2, sEnd, l1, lHTTP}
+	tests := map[string][]string{"T1": {"s1"}, "T2": {"s2"}, "T3": {"l1", "l-http"}}
+	owners := func(tests map[string][]string) map[string]string {
+		out := map[string]string{}
+		for _, names := range tests {
+			for _, n := range names {
+				out[n] = "k"
+			}
+		}
+		return out
+	}
+	// As the agent hands the scope table (agent.PoolNamesSetter), through
+	// the proxy; the tests' recordings on disk, or in the trees.
+	setup := func(t *testing.T, tests map[string][]string, inTrees bool, ms ...*models.Mock) *MockManager {
+		t.Helper()
+		staged := []*models.Mock{sBoot, sGap, sEnd}
+		if inTrees {
+			staged = ms
+		}
+		mm := stagedManager(t, staged, nil)
+		if err := (&Proxy{mockManager: mm}).SetPoolNames(slice, owners(tests), tests); err != nil {
+			t.Fatalf("SetPoolNames: %v", err)
+		}
+		if !inTrees {
+			mm.SetRecordingTimes(onDisk(t, ms...).RangeTimes)
+		}
+		return mm
+	}
+	for _, inTrees := range []bool{false, true} {
+		where := map[bool]string{false: "on disk", true: "in the trees"}[inTrees]
+		t.Run("the tests' recordings "+where, func(t *testing.T) {
+			mm := setup(t, tests, inTrees, all...)
+			after := mm.teardownAfter("k", s)
+			if after == nil || !after(sEnd.Spec.ReqTimestampMock) {
+				t.Fatal("s-end, sent after every test S recorded, is not the teardown of S's clock: the newer run's HTTP call, on no clock, bounded it")
+			}
+			for _, mk := range []*models.Mock{sBoot, sGap} {
+				if after(mk.Spec.ReqTimestampMock) {
+					t.Errorf("FALSE GREEN? %s, sent before a test of its own clock, reads as the teardown", mk.Name)
+				}
+			}
+			// The HTTP call still bounds its own run's clock.
+			if after := mm.teardownAfter("k", l); after == nil || after(lHTTP.Spec.ReqTimestampMock) || !after(lHTTP.Spec.ReqTimestampMock.Add(time.Millisecond)) {
+				t.Fatal("FALSE GREEN? the HTTP call T3 lists does not bound the clock of T3's run")
+			}
+			// The replay: T1 and T2 (S's), then T3 (L's), then the
+			// client's disconnect.
+			mm.ServeExactPool("k", slice)
+			perTestReads(t, mm, "before the first test")
+			for _, tc := range []struct {
+				name string
+				own  []*models.Mock
+			}{{"T1", []*models.Mock{s1}}, {"T2", []*models.Mock{s2}}, {"T3", []*models.Mock{l1, lHTTP}}} {
+				mm.ServeExactTest(tc.name, tc.own)
+				for _, mk := range tc.own {
+					if !mm.DeleteFilteredMock(*mk) {
+						t.Fatalf("precondition: %s's own recording %s did not answer it", tc.name, mk.Name)
+					}
+				}
+				mm.ServeExactPool("k", slice)
+			}
+			perTestReads(t, mm, "after the last test", "s-end")
+			if !mm.DeleteFilteredMock(*sEnd) {
+				t.Fatal("the call after the last test (endSessions) was not answered by S's recording of it")
+			}
+		})
+	}
+	// Each one below makes the HTTP call's run not known, or S's too, so it
+	// bounds S's clock, and s-end, before it, is no teardown.
+	for _, tc := range []struct {
+		name  string
+		tests map[string][]string
+	}{
+		{"no test lists it", map[string][]string{"T1": {"s1"}, "T2": {"s2"}, "T3": {"l1"}}},
+		{"a test whose recordings are on no clock lists it too", map[string][]string{"T1": {"s1"}, "T2": {"s2"}, "T3": {"l1", "l-http"}, "T4": {"l-http"}}},
+		{"only a test whose recordings are on no clock lists it", map[string][]string{"T1": {"s1"}, "T2": {"s2"}, "T3": {"l1"}, "T4": {"l-http"}}},
+		{"tests of both runs list it", map[string][]string{"T1": {"s1"}, "T2": {"s2", "l-http"}, "T3": {"l1", "l-http"}}},
+		{"its test's recordings are on both clocks", map[string][]string{"T1": {"s1"}, "T2": {"s2"}, "T3": {"l1", "s2", "l-http"}}},
+	} {
+		t.Run(tc.name+": it bounds every clock", func(t *testing.T) {
+			for _, inTrees := range []bool{false, true} {
+				mm := setup(t, tc.tests, inTrees, all...)
+				if after := mm.teardownAfter("k", s); after == nil || after(sEnd.Spec.ReqTimestampMock) {
+					t.Fatalf("FALSE GREEN? (in trees %v) the HTTP call, of no run known apart from S's, did not bound S's clock: s-end reads as the teardown", inTrees)
+				}
+				// Nor L's: whichever order the table names its tests in.
+				if after := mm.teardownAfter("k", l); after == nil || after(lHTTP.Spec.ReqTimestampMock) {
+					t.Fatalf("FALSE GREEN? (in trees %v) the HTTP call did not bound L's clock", inTrees)
+				}
+			}
+		})
+	}
+	// A recording on a clock bounds that clock alone, whatever else its test
+	// lists: T3's l1, beside S's s2, never bounds S's clock.
+	t.Run("a test on both clocks: each recording on one bounds its own", func(t *testing.T) {
+		for _, inTrees := range []bool{false, true} {
+			mm := setup(t, map[string][]string{"T1": {"s1"}, "T2": {"s2"}, "T3": {"l1", "s2"}}, inTrees, sBoot, s1, sGap, s2, sEnd, l1)
+			if after := mm.teardownAfter("k", s); after == nil || !after(sEnd.Spec.ReqTimestampMock) {
+				t.Fatalf("(in trees %v) s-end is not S's teardown: l1, on L's clock, bounded S's", inTrees)
+			}
+		}
+	})
+	// The table is read as it was installed: a later write to the caller's
+	// slices (T3's first recording is now S's s2) moves no bound.
+	t.Run("a change to the caller's table after it was installed is not read", func(t *testing.T) {
+		table := map[string][]string{"T1": {"s1"}, "T2": {"s2"}, "T3": {"l1", "l-http"}}
+		mm := setup(t, table, false, all...)
+		table["T3"][0] = "s2"
+		if after := mm.teardownAfter("k", s); after == nil || !after(sEnd.Spec.ReqTimestampMock) {
+			t.Fatal("the bound read the caller's table as written after it was installed: T3's HTTP call bounded S's clock")
+		}
+	})
+	// Without the table (an agent handed none) every recording on no clock
+	// bounds every clock, as before.
+	t.Run("no table: it bounds every clock", func(t *testing.T) {
+		mm := setup(t, nil, false, all...)
+		if after := mm.teardownAfter("k", s); after == nil || after(sEnd.Spec.ReqTimestampMock) {
+			t.Fatal("FALSE GREEN? with no scope table, the HTTP call did not bound S's clock")
+		}
+	})
+	// A new replay session forgets the previous session's table: one that
+	// names its pool and owners alone reads none.
+	t.Run("a new session reads no earlier table", func(t *testing.T) {
+		mm := setup(t, tests, false, all...)
+		mm.ResetForReplaySession()
+		mm.SetPoolOwners(owners(tests))
+		mm.SetPoolNames(slice)
+		if after := mm.teardownAfter("k", s); after == nil || after(sEnd.Spec.ReqTimestampMock) {
+			t.Fatal("FALSE GREEN? a new session's bound read the previous session's table: the HTTP call did not bound S's clock")
+		}
+	})
+	// The bound cached for one table is not the next one's.
+	t.Run("a new table is read again", func(t *testing.T) {
+		mm := setup(t, tests, false, all...)
+		if after := mm.teardownAfter("k", s); after == nil || !after(sEnd.Spec.ReqTimestampMock) {
+			t.Fatal("precondition: s-end is not S's teardown")
+		}
+		mm.SetPoolTests(map[string][]string{"T1": {"s1"}, "T2": {"s2"}, "T3": {"l1"}})
+		if after := mm.teardownAfter("k", s); after == nil || after(sEnd.Spec.ReqTimestampMock) {
+			t.Fatal("FALSE GREEN? the bound cached for the earlier table was read for a new one")
+		}
+	})
+}
+
 // A set recorded in one run is on one clock (the proxy's, or proxyless
 // capture's ktime) or, for an untrusted stamp, on none: its teardown is the
 // same with the clocks read as without them, every recording of the set

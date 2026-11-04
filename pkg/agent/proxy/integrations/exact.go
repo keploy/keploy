@@ -103,7 +103,11 @@ type ExactConcurrentReader interface {
 // RestagedGeneration once it moved, when it reads nothing. So an index a
 // parser built from a held read the staging moved under is never kept for
 // the generation of the set staged after the call, which an unheld read (or
-// a call marked after the staging) finds whole.
+// a call marked after the staging) finds whole. A held store that reads in a
+// view other than the one in force (a test's begin or end landed between the
+// call's mark and its read) reports a generation of its own
+// (ElsewhereGeneration), and MockSpent of the view it reads in: what it reads
+// is of no generation another call reads.
 type StagingGenerations interface {
 	StagingGeneration() uint64
 	StagingGenerationByKind(kind models.Kind) uint64
@@ -117,6 +121,23 @@ type StagingGenerations interface {
 // by one per change (a view over a store adds its own small version) and
 // never reach it, so no index of a staged set is keyed on it.
 const RestagedGeneration uint64 = 1 << 63
+
+// ElsewhereGeneration is where the generations (and the revisions) begin
+// that a store held to a call (RoundHolder) reports while it reads in a view
+// other than the one in force: a test's begin or end landed between the
+// call's mark and its read, and the store reads in the view the call was
+// read in. Each such store reports one of its own, the same at each sample
+// while it reads there, which no other store reports: what it reads is
+// neither the view in force's reads nor another call's, so no index of them
+// is kept for another call, and none of the view in force answers it. A
+// store's own generations never reach it (RestagedGeneration).
+const ElsewhereGeneration uint64 = 1 << 62
+
+// KeptGeneration reports whether gen names reads a parser may keep an index
+// of for the calls that sample it: false for RestagedGeneration's empty set
+// and for a held store's reads in another view (ElsewhereGeneration), which
+// the call reads from the store instead.
+func KeptGeneration(gen uint64) bool { return gen < ElsewhereGeneration }
 
 // StagingGenerationOf returns db's staging generation for kind's reads (every
 // kind's for ""), and false when db keeps none: the parser then keys its index
@@ -162,8 +183,9 @@ type SharedGen struct {
 // lasts only as long as its view, so a parser keeps one index of it per
 // SharedGen and skips at lookup what MockSpent reports. Every method reports
 // false (or nothing) while no test is open, and for a store held to a call
-// once the staging moved from the call's (RoundHolder): such a parser keys on
-// the staging generation then.
+// once the staging moved from the call's, or while it reads in a view other
+// than the one in force (RoundHolder, ElsewhereGeneration): such a parser
+// keys on the staging generation then.
 //
 // A parser builds its index in this order: sample SharedGeneration, read
 // SharedMocks, sample SharedGeneration again, and keep the index only when

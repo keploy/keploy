@@ -35,7 +35,7 @@ func typedExecuteCommand(statementID uint32, bound bool, n int32, s string) []by
 // over it was left out of the recording.
 func TestRecordV2_AnExecuteWithoutTypesIsRecorded(t *testing.T) {
 	t.Parallel()
-	param := &mysql.ColumnDefinition41{Catalog: "def", Name: "?", CharacterSet: 0x3f, Type: byte(mysql.FieldTypeVarString)}
+	param := &mysql.ColumnDefinition41{Catalog: "def", Name: "?", FixedLength: 0x0c, CharacterSet: 0x3f, Type: byte(mysql.FieldTypeVarString)}
 	got, leftOut, err := runRecordV2(t, func(h *v2Harness, at func() time.Time) {
 		h.pushClient(wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "INSERT INTO items (n, s) VALUES (?, ?)"...), 0), at())
 		for _, p := range prepareOK(false, [][]byte{columnPayload(t, param), columnPayload(t, param)}, nil) {

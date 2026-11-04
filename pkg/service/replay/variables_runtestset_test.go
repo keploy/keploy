@@ -553,6 +553,21 @@ func TestTestRequestOf(t *testing.T) {
 	if strings.Join(names, ",") != "url,header.A,header.B,body,form.slot" || got.Parts[0].Sent != "http://h/u/u_rec" || got.Parts[4].Recorded != "11:14\n11:15" || got.Unread != "" {
 		t.Fatalf("the HTTP request %+v", got)
 	}
+	// Where the test began in its recording: its request's recorded time,
+	// HTTP's or gRPC's, also where keploy reads none of the request.
+	at := time.Date(2026, 10, 31, 8, 53, 33, 933_485_077, time.UTC)
+	for _, c := range []*models.TestCase{
+		{Kind: models.HTTP, Name: "test-2", HTTPReq: models.HTTPReq{URL: "http://h/", Timestamp: at}},
+		{Kind: models.GRPC_EXPORT, Name: "test-3", GrpcReq: models.GrpcReq{Timestamp: at}},
+		{Kind: "unknown", Name: "test-4", HTTPReq: models.HTTPReq{Timestamp: at}},
+	} {
+		if got := testRequestOf(run, c, ""); !got.RecordedAt.Equal(at) {
+			t.Errorf("%s (%s): recorded at %v; want %v", c.Name, c.Kind, got.RecordedAt, at)
+		}
+	}
+	if got := testRequestOf(run, &models.TestCase{Kind: models.HTTP, Name: "test-5"}, ""); !got.RecordedAt.IsZero() {
+		t.Errorf("a recording of no request time: recorded at %v; want none", got.RecordedAt)
+	}
 	// As recorded, each placeholder holds the value it was recorded with,
 	// never its text: a template value in the URL, the body, a header and a
 	// form field, and a secret in a header's name, which the recording held

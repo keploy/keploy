@@ -379,6 +379,10 @@ type Raw struct {
 	// application, keyed as the payload's own are (movePlaces), never as
 	// places the recording gave it.
 	moves []servedMove
+	// roles are, of a recording of the same call as the one classified
+	// (Sibling), the roles its learn step learned at its places, by the
+	// call's leaf path; nil for any other.
+	roles map[string]SiblingRole
 }
 
 // Mock is the name of r's mock.
@@ -1541,42 +1545,60 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	}
 	unreadRaw := rawUnread(raw)
 	unreadReq := requestUnread(served)
-	// The moved places the offset rule reads (offset.go), read once for the
-	// call, and only where a changed instant or word reaches it or the word
-	// rule (givenWhy): another recorded test's too (OfAnotherTest), and
-	// those F gave earlier in the set (given), which no other rule reads.
 	all := raw
-	raw = ownPlaces(raw)
-	// The moments the call's earlier places hold (echoedIn), read once for
-	// the call: every leaf and window of every value it classifies holds
-	// its moments against the same places.
-	var eh earlierHeld
-	var op *offsetPlaces
-	places := func() *offsetPlaces {
-		if op == nil {
-			var unread string
-			var set []GivenPlaces
-			if given != nil {
-				more, err := given()
-				switch {
-				case err != nil:
-					unread = "keploy cannot read back a recording record's full round gave the application earlier in the test set, so it cannot tell whether what changed came from it or was built on it: " + err.Error()
-				default:
-					unread, set = placesUnread(more), more
-				}
-			}
-			op = dc.offsetPlacesOf(at, served, all, set)
-			if unread != "" {
-				op.unread = unread
+	// The places F gave the application earlier in the set (given), read
+	// once for the call, and only where the offset rule reads them.
+	givenRead, givenUnread, givenSet := false, "", []GivenPlaces(nil)
+	givenPlaces := func() (string, []GivenPlaces) {
+		if !givenRead && given != nil {
+			more, err := given()
+			switch {
+			case err != nil:
+				givenUnread = "keploy cannot read back a recording record's full round gave the application earlier in the test set, so it cannot tell whether what changed came from it or was built on it: " + err.Error()
+			default:
+				givenUnread, givenSet = placesUnread(more), more
 			}
 		}
-		return op
+		givenRead = true
+		return givenUnread, givenSet
 	}
+	// A reading is the recordings a leaf is read against: all of them, which
+	// the offset rule and the word rule read (another recorded test's too:
+	// OfAnotherTest), and raw, those every rule reads (ownPlaces); with the
+	// moments their earlier places hold (eh: echoedIn) and the moved places
+	// the offset rule reads (places: offset.go, with those F gave earlier in
+	// the set), each read once for the reading, and only where a changed
+	// instant or word reaches it: every leaf and window of every value read
+	// against it holds them against the same places.
+	type reading struct {
+		all, raw []Raw
+		eh       earlierHeld
+		places   func() *offsetPlaces
+	}
+	readingOf := func(all []Raw) *reading {
+		rd := &reading{all: all, raw: ownPlaces(all)}
+		var op *offsetPlaces
+		rd.places = func() *offsetPlaces {
+			if op == nil {
+				unread, set := givenPlaces()
+				op = dc.offsetPlacesOf(at, served, all, set)
+				if unread != "" {
+					op.unread = unread
+				}
+			}
+			return op
+		}
+		return rd
+	}
+	// The call's reading: every recording before it.
+	callReading := readingOf(all)
 	out := make([]Learned, 0, len(drift))
-	// leaf classifies one changed leaf, r as recorded and l as F saw it, as
-	// a value of the call whose window is w, without the rules skip names
-	// (skipRule), every other rule as it stands.
-	leaf := func(r, l Leaf, w *Window, skip skipRule) Learned {
+	// leafIn classifies one changed leaf, r as recorded and l as F saw it,
+	// as a value of the call whose window is w, against the recordings of
+	// rd, without the rules skip names (skipRule), every other rule as it
+	// stands.
+	leafIn := func(rd *reading, r, l Leaf, w *Window, skip skipRule) Learned {
+		raw, all, places, eh := rd.raw, rd.all, rd.places, &rd.eh
 		if unreadRaw != "" {
 			return Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw}
 		}
@@ -1589,7 +1611,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at, served: served, raw: raw, places: places}
 		}
 		if r.Value != "" {
-			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, placed, raw, fol, &eh); ok && skip&skipSource == 0 {
+			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, placed, raw, fol, eh); ok && skip&skipSource == 0 {
 				ln.Kind, ln.From = KindVariable, from
 				if from.Side == "" || from.Echo {
 					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w, at), from)
@@ -1634,7 +1656,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// any lead or window excuses its words (offset.go).
 				why = offsetWhy(m)
 				offWhy = why
-			} else if why = unaccounted(dc, v, at, served, raw, fol, &eh); why != "" {
+			} else if why = unaccounted(dc, v, at, served, raw, fol, eh); why != "" {
 				sourced = true
 				if fol != nil && fol.refused != "" {
 					why += "; " + fol.refused
@@ -1726,7 +1748,8 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// Words the word rule let go in record's full round: noise only
 		// where the recording and F gave the application the places before
 		// the call in the same order (follows.followed); an echo they stood
-		// beside is refused as the word rule refuses them.
+		// beside stands on the same terms, and only where no instant of it
+		// changed (follows.echoed).
 		//
 		// A source the search went past (follows.refute) counts as such a
 		// word, whether or not the word rule let one go there: noise only
@@ -1745,19 +1768,21 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					ln.Why = fol.chance + ", and keploy learns it as varying"
 				}
 			case KindEcho:
-				why := fol.first
-				if why == "" {
-					why = fol.refuted + "; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside"
+				// Past its own siblings alone, which F had not served
+				// before the call, the echo stands (sibling.go).
+				if fol.pastSiblingsOnly(all, r, KindEcho) {
+					break
 				}
-				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
+				ln = fol.echoed(ln, dc.ofIn(r.Value, l.Value, w, at), at, served, all)
 			}
 		}
 		// A leaf set aside as no source (follows.refuteSeen), and nothing
-		// else: an echo beside it is refused as beside any source set aside;
-		// a value left noise is ordered below, once its kind is final.
+		// else: an echo beside it stands as beside any source set aside
+		// (follows.echoed); a value left noise is ordered below, once its
+		// kind is final.
 		asideOnly := fol != nil && fol.first == "" && fol.refuted == "" && fol.aside != ""
 		if asideOnly && ln.Kind == KindEcho {
-			ln.Kind, ln.Why, ln.Echo = KindUnaccounted, fol.aside+"; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside", nil
+			ln = fol.echoed(ln, dc.ofIn(r.Value, l.Value, w, at), at, served, all)
 		}
 		// A time of day whole (textTimeOfDay), which names no day, is a
 		// read modulo a day (textTodRead), checked so at every replay.
@@ -1856,8 +1881,33 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln.Why = fol.aside + ", and keploy learns it as varying"
 			}
 		}
+		// No excuse from a place served only in an older test (a founder
+		// ruling, 2026-11-02): a value left noise past a place F gave the
+		// application only in an older test of the set is refused, naming
+		// it (follows.noteOlder); a read of the clock stands.
+		ln = fol.olderRefused(ln)
 		if ln.Kind == KindNoise || ln.Kind == KindClockRead {
 			ln.Refuted = fol.refutedAll()
+		}
+		return ln
+	}
+	// leaf is leafIn against the call's recordings, where a value found
+	// carried from a sibling's place learned in a role a sibling passes on
+	// is learned in that role (sibling.go): read again with those siblings
+	// set aside, and taken only where that reading learns their role. That
+	// reading is of the recordings left, its own (readingOf): no rule of it
+	// reads a sibling, nor the moments or moved places a sibling holds.
+	leaf := func(r, l Leaf, w *Window, skip skipRule) Learned {
+		ln := leafIn(callReading, r, l, w, skip)
+		if ln.Kind != KindVariable {
+			return ln
+		}
+		own, role, ok := siblingsAside(all, r, ln.From)
+		if !ok {
+			return ln
+		}
+		if same := leafIn(readingOf(own), r, l, w, skip); same.Kind == role {
+			return same
 		}
 		return ln
 	}
@@ -2023,6 +2073,33 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln = word
 			}
 		}
+		// A read made before another goroutine's call: in keploy test's
+		// server tests, a value refused in its call's window is classified
+		// again in the window from where its test began in each run whose
+		// span a call made after that begin starts (Window.fromTestBegin: a
+		// queue's consumer beside the test's handler, served between the
+		// handler's read and its call). Only a plain read of the clock it
+		// learns there is taken, checked in its call's span at every replay,
+		// which passes it from the test's begin too (CheckClockRead): here
+		// the wider window turns a refusal into a checked read, never into
+		// noise, a variable or a read plus an offset. Which words of a value
+		// are the clock's is read in that window already, for every form of
+		// the value (newDrift), so both windows' drifts read the same words
+		// as data, and a part the call's window finds there the window from
+		// the test's begin finds too: it learns no plain read for it. A text
+		// whose changed words are all reads there is noise of those words,
+		// as where no serve came between the read and its call. So is one
+		// written in the text an encoded run decodes to (b64Pair reads that
+		// text's clock words before decoding its runs), also where F served
+		// a payload before the call whose view keploy cannot read: the
+		// encoded run is read as its text is (plainRuns), so it is no word
+		// such a payload may hold (unseenWhy, servedWhy), as that text
+		// unencoded holds none.
+		if wt := w.fromTestBegin(); ln.Kind == KindUnaccounted && wt != nil {
+			if wide := leaf(r, l, wt, 0); wide.Kind == KindClockRead && wide.Read != nil {
+				ln = wide
+			}
+		}
 		// A copy of an earlier read of the clock that is a read in its own
 		// call's window too: under the rule a copy follows its source
 		// (follow), in keploy mock's client tests (the only calls whose
@@ -2112,6 +2189,13 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					}
 				}
 			}
+		}
+		// A client test's read of an instant whose zone after a space is
+		// UTC's says where a keploy that did not read such a zone learned
+		// it, a wall clock word of its date and time (withWallWord), so a
+		// mock that holds that learning meets this one as the one read.
+		if dc.clientTests {
+			ln = withWallWord(ln)
 		}
 		out = append(out, ln)
 	}
@@ -2615,7 +2699,9 @@ type valueDrift struct {
 	// movedRec and movedLive are the words of what changed, recorded and
 	// live, by reading, in every form: the words outside a longest common
 	// subsequence of the recorded and the live words (movedWords). A word
-	// held in another order, or once more, is one.
+	// held in another order, or once more, is one. One the
+	// quoted-printable form moved, which the value holds as written on
+	// that side, is one only where it moved as written (newDrift).
 	movedRec, movedLive []map[string]bool
 	pieces              []run
 	// pieceWords are each piece's changed words (changedWords), by piece.
@@ -2640,8 +2726,12 @@ type valueDrift struct {
 	// go (clockChanged).
 	begun bool
 	// encodedRec is the text the recorded value's encoded runs decode to
-	// (b64Text), "" when none.
+	// (b64Pair), "" when none.
 	encodedRec string
+	// plainRuns are the words, as F saw them, of the value's encoded runs
+	// that the word rule reads as it reads their text (plainRunsOf), nil
+	// where none.
+	plainRuns map[string]bool
 	// unparsed says what of its drift the declared readings cannot read
 	// (unparsed).
 	unparsed string
@@ -2923,7 +3013,7 @@ func (dc *DriftCache) rawExtra(text string) string {
 // (Window.key) and the call's recorded instant (UnixNano, 0 for none).
 type driftKey struct {
 	run
-	w    [5]int64
+	w    [7]int64
 	call int64
 	// zone is the zone the clock reads were read in (DriftCache.zone): a
 	// test's caches share what they keep across the zones of its calls'
@@ -2972,7 +3062,36 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window, call time.Time) *valueDr
 // nothing changes it once built: the set's tests share one bounded by no call
 // (driftOf).
 func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time.Location) *valueDrift {
-	d := &valueDrift{rec: rec, live: live, clock: clockAt(rec, live, w, lead, call, zone), begun: w != nil && w.begun}
+	// In a server test, which words of a form of the value are the clock's
+	// is read in the window from each run's test begin too
+	// (Window.fromTestBegin), the span in which the replay's check passes a
+	// read (CheckClockRead): another goroutine's call served between the
+	// read and the call that carries it bounds no read of this one, so its
+	// words are not read as data, decoded (b64Pair, which reads the text an
+	// encoded run decodes to for clock words in this window too before
+	// decoding it again, where both sides hold the value's instants at the
+	// same depth) or searched as the parts of a payload (appearedIn,
+	// unaccounted), which would decide by chance, by the read's digits and
+	// by that serve, between noise of the word, a variable no call binds
+	// and a refusal. Whether the value is a
+	// read of the clock (reads, whole) stays its call's window's: whole, the
+	// window from the test's begin turns a refusal into a plain read alone
+	// (ClassifyIn).
+	wt := w.fromTestBegin()
+	clockWordsOf := func(a, b string) clockSet {
+		c := clockAt(a, b, w, lead, call, zone)
+		if wt != nil {
+			o := clockAt(a, b, wt, lead, call, zone)
+			for x := range o.rec {
+				c.rec[x] = true
+			}
+			for x := range o.live {
+				c.live[x] = true
+			}
+		}
+		return c
+	}
+	d := &valueDrift{rec: rec, live: live, clock: clockWordsOf(rec, live), begun: w != nil && w.begun}
 	d.decRec, d.decLive = unescaped(rec), unescaped(live)
 	d.decoded = d.decRec != rec || d.decLive != live
 	// A value with escapes is read raw and decoded: a '%' or '\' may be
@@ -2988,18 +3107,19 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 	}
 	var dclock clockSet
 	if d.decoded {
-		dclock = clockAt(d.decRec, d.decLive, w, lead, call, zone)
+		dclock = clockWordsOf(d.decRec, d.decLive)
 		merge(dclock)
 	}
-	forms, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
+	forms, checked, qp, encoded, encN, runs := formsOf(rec, live, d.decRec, d.decLive, d.clock, clockWordsOf)
 	d.encodedRec = encoded[0]
-	// The clock reads of every other form (the first is the decoded value,
-	// read above).
+	// The clock reads of every other form searched (the first is the
+	// decoded value, read above).
 	for _, f := range forms[1:] {
-		merge(clockAt(f[0], f[1], w, lead, call, zone))
+		merge(clockWordsOf(f[0], f[1]))
 	}
 	if d.decoded {
 		forms = append([][2]string{{rec, live}}, forms...)
+		qp[0], qp[1] = qp[0]+1, qp[1]+1
 		d.clock.whole = d.clock.whole || dclock.whole
 		// Read raw, a clock read's escapes are no words of their own: an
 		// escape's remnant glued to a clock word is one ("3A41Z" of
@@ -3015,13 +3135,23 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 		d.clock.live[strings.ToLower(w)] = true
 	}
 	d.forms = forms
-	// What the readings cannot read whole, in every form but the raw one
-	// of a value with escapes (whose '%' and '\' are the escapes).
-	for i, f := range forms {
-		if d.decoded && i == 0 {
-			continue
+	// What the readings cannot read whole, in every form checked (formsOf;
+	// never the raw one of a value with escapes, whose '%' and '\' are the
+	// escapes). Text of a script keploy reads only whole that changed is
+	// named where it stands: in the value's own text, else in an encoded
+	// run's (the last encN forms checked) or in its escapes' text, which
+	// the quoted-printable form's, where it is checked, is too (scriptWhy).
+	ownScript := !sameStrings(nonASCIIRuns(rec), nonASCIIRuns(live))
+	for i, f := range checked {
+		script := scriptWhy
+		switch {
+		case ownScript:
+		case i >= len(checked)-encN:
+			script = encodedScriptWhy
+		default:
+			script = escapedScriptWhy
 		}
-		if why := unparsed(f[0], f[1], d.clock); why != "" {
+		if why := unparsed(f[0], f[1], d.clock, script); why != "" {
 			d.unparsed = why
 			break
 		}
@@ -3029,15 +3159,30 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 	// The value whole in each form (each line of its decoded text) that
 	// drifted: the same value whole in another place, in any reading, is
 	// followed. A line both sides hold (a JWT's header) did not drift.
+	// A line of the quoted-printable form that the value holds as written
+	// is a line only where it is one as written: that form reads an "=0A"
+	// as a line break in one run where the other run's bytes spell none
+	// ("t=1730546884,v1=0A41..." splits at "v1" in one run only), and so
+	// cuts a line the value never holds, as it groups words (below). A
+	// line only that form shows (an id an escape hid) is one.
 	liveLines := map[string]bool{}
 	for _, f := range forms {
 		for _, w := range strings.Split(f[1], "\n") {
 			liveLines[w] = true
 		}
 	}
-	for _, f := range forms {
+	heldAsWritten := func(w string) bool {
+		for _, f := range forms[:qp[0]] {
+			if strings.Contains(f[0], w) {
+				return true
+			}
+		}
+		return false
+	}
+	for k, f := range forms {
+		inQP := k >= qp[0] && k < qp[1]
 		for _, w := range strings.Split(f[0], "\n") {
-			if w != "" && !liveLines[w] {
+			if w != "" && !liveLines[w] && (!inQP || !heldAsWritten(w)) {
 				if d.wholes == nil {
 					d.wholes = map[string]bool{}
 				}
@@ -3048,12 +3193,22 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 	for _, word := range readings {
 		lost, gained := map[string]bool{}, map[string]bool{}
 		recTok, liveTok := map[string]bool{}, map[string]bool{}
-		for _, f := range forms {
+		// The words of the value as written (the forms before the
+		// quoted-printable one: raw, decoded, case-folded), recorded and
+		// live, where it has a quoted-printable form.
+		var written [2]map[string]bool
+		if qp[0] < qp[1] {
+			written = [2]map[string]bool{{}, {}}
+		}
+		for k, f := range forms {
 			r, l := tokensBy(f[0], word), tokensBy(f[1], word)
 			for t := range r {
 				recTok[t] = true
 				if !l[t] {
 					lost[t] = true
+				}
+				if k < qp[0] && written[0] != nil {
+					written[0][t] = true
 				}
 			}
 			for t := range l {
@@ -3061,22 +3216,40 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 				if !r[t] {
 					gained[t] = true
 				}
+				if k < qp[0] && written[1] != nil {
+					written[1][t] = true
+				}
 			}
 		}
 		d.lost, d.gained = append(d.lost, lost), append(d.gained, gained)
 		d.recTok, d.liveTok = append(d.recTok, recTok), append(d.liveTok, liveTok)
+		// A word the quoted-printable form moved that the value holds as
+		// written on that side moved only where it moved as written: that
+		// form reads an "=XX" as an escape in one run where the other
+		// run's bytes spell none ("Signature=41ab..." reads
+		// "SignatureAab..." in one run, "Signature=b1cd..." as written in
+		// the other), and so groups a word with its neighbour in one run
+		// only, a word that stands at its place in both. A word only that
+		// form shows (an id an escape hid, "A7K29Q" of "=23A7K29Q") moved
+		// where it says.
 		movedRec, movedLive := map[string]bool{}, map[string]bool{}
-		for _, f := range forms {
+		for k, f := range forms {
+			inQP := k >= qp[0] && k < qp[1]
 			mr, ml := movedWords(wordsBy(f[0], word), wordsBy(f[1], word))
 			for _, t := range mr {
-				movedRec[t] = true
+				if !inQP || !written[0][t] {
+					movedRec[t] = true
+				}
 			}
 			for _, t := range ml {
-				movedLive[t] = true
+				if !inQP || !written[1][t] {
+					movedLive[t] = true
+				}
 			}
 		}
 		d.movedRec, d.movedLive = append(d.movedRec, movedRec), append(d.movedLive, movedLive)
 	}
+	d.plainRuns = d.plainRunsOf(forms, runs, encoded[1])
 	d.readIDParts(forms)
 	// Pieces of the value in every form.
 	for _, f := range forms {
@@ -3115,34 +3288,156 @@ func clockWord(t string, recorded bool, d *valueDrift, cs ...clockSet) bool {
 
 // unescaped is s with its percent-escapes decoded and its backslash escapes
 // read: "\uXXXX" (and an escaped surrogate pair) as the character it names,
-// "\\" as "\", and the others of a JSON string ("\n", "\t", "\"", "\/") as
-// a space, a separator: a value right after one ("uploads%2F<id>",
-// "\n<id>") is a word of its own there.
+// "\\" as "\", "\/" as the "/" it escapes (a JSON writer's escape of a
+// URL's or a base64 text's '/'), and the others of a JSON string ("\n",
+// "\t", "\"") as a space, a separator: a value right after one
+// ("uploads%2F<id>", "\n<id>") is a word of its own there.
 //
 // It scans by hand (every text form of every value read goes through it,
 // most of them holding no escape at all); unescapedByPattern in the tests is
 // the regular-expression reading it must agree with on every text.
 func unescaped(s string) string {
+	t, _ := unescapedBy(s, false)
+	return t
+}
+
+// unescapedAt is unescaped(s) and, for each place j of it (0 to its
+// length), the place in s where the text before j ends: s[:at[j]] reads as
+// its first j bytes, and s[at[j]:at[k]] as those from j to k; -1 where j
+// falls inside what an escape reads as (between two bytes of a character
+// "\u00e9" names), at any pass. It costs a pass over s for each pass of
+// unescaped, however many places are looked up.
+func unescapedAt(s string) (string, []int) {
+	return unescapedBy(s, true)
+}
+
+// unescapedBy is unescaped(s), and its places (unescapedAt) where track is
+// set (else nil).
+func unescapedBy(s string, track bool) (string, []int) {
+	var at []int
+	if track {
+		at = make([]int, len(s)+1)
+		for i := range at {
+			at[i] = i
+		}
+	}
 	// Each escape on its own (a stray '%' leaves the others to decode), and
 	// again while that changes anything, a few times at most (a value
 	// encoded inside a value encoded again: "%252F", "\\\\n"). Every escape
 	// read is shorter than its text, so a pass that reads one changes s.
 	for i := 0; i < 4; i++ {
-		d := backslashesRead(surrogatesRead(percentsDecoded(s)))
+		d := s
+		for step := range 3 {
+			// Called directly on a value of this frame: a text with no
+			// escape costs no allocation.
+			e := escapes{s: d, track: track}
+			switch step {
+			case 0:
+				percentsDecoded(&e)
+			case 1:
+				surrogatesRead(&e)
+			default:
+				backslashesRead(&e)
+			}
+			var pos []int
+			d, pos = e.text()
+			// What this step read is placed in s by where its text
+			// stands in what the steps before it gave.
+			if pos != nil {
+				for j, k := range pos {
+					if k >= 0 {
+						pos[j] = at[k]
+					}
+				}
+				at = pos
+			}
+		}
 		if d == s {
 			break
 		}
 		s = d
 	}
-	return s
+	return s, at
 }
 
-// percentsDecoded is s with each "%XX" (two hex digits, either case) the
-// byte it names, read left to right, none overlapping; s itself when it
-// holds none.
-func percentsDecoded(s string) string {
-	var b []byte
-	last := 0
+// escapes is a text built from s with some of its escapes read, left to
+// right, none overlapping: b holds it from where something was first read
+// (nil: none was, the text is s), last is where in s what is not yet
+// copied starts, and where track is set pos[j] is where in s byte j of the
+// text starts (-1 for each byte but the first of what an escape reads as).
+type escapes struct {
+	s     string
+	b     []byte
+	last  int
+	track bool
+	pos   []int
+}
+
+// readByte writes c, what the escape of n bytes at i of s reads as.
+func (e *escapes) readByte(i, n int, c byte) {
+	k := e.begin(i)
+	e.b = append(e.b, c)
+	e.read(i, n, k)
+}
+
+// readRune writes r, what the escape of n bytes at i of s reads as, in
+// UTF-8 (the replacement character where r is none).
+func (e *escapes) readRune(i, n int, r rune) {
+	k := e.begin(i)
+	e.b = utf8.AppendRune(e.b, r)
+	e.read(i, n, k)
+}
+
+// begin copies s as it is up to i, where an escape starts, and is where
+// in the text what it reads as starts.
+func (e *escapes) begin(i int) int {
+	if e.b == nil {
+		e.b = make([]byte, 0, len(e.s))
+	}
+	e.copyTo(i)
+	return len(e.b)
+}
+
+// read places what the escape of n bytes at i reads as, written from k of
+// the text on: its first byte at i, the others nowhere (-1).
+func (e *escapes) read(i, n, k int) {
+	if e.track {
+		e.pos = append(e.pos, i)
+		for range len(e.b) - k - 1 {
+			e.pos = append(e.pos, -1)
+		}
+	}
+	e.last = i + n
+}
+
+// copyTo copies s as it is up to i.
+func (e *escapes) copyTo(i int) {
+	if e.track {
+		for k := e.last; k < i; k++ {
+			e.pos = append(e.pos, k)
+		}
+	}
+	e.b = append(e.b, e.s[e.last:i]...)
+}
+
+// text is the text built and, where track is set and something was read,
+// its places in s (pos, and len(s) for its end); s itself and nil where
+// nothing was read.
+func (e *escapes) text() (string, []int) {
+	if e.b == nil {
+		return e.s, nil
+	}
+	e.copyTo(len(e.s))
+	if e.track {
+		e.pos = append(e.pos, len(e.s))
+	}
+	return string(e.b), e.pos
+}
+
+// percentsDecoded reads each "%XX" (two hex digits, either case) of e.s as
+// the byte it names, left to right, none overlapping.
+func percentsDecoded(e *escapes) {
+	s := e.s
 	for i := 0; ; {
 		j := strings.IndexByte(s[i:], '%')
 		if j < 0 {
@@ -3153,27 +3448,16 @@ func percentsDecoded(s string) string {
 			i++
 			continue
 		}
-		if b == nil {
-			b = make([]byte, 0, len(s))
-		}
-		b = append(b, s[last:i]...)
-		b = append(b, byte(hexValue(s[i+1:i+3])))
+		e.readByte(i, 3, byte(hexValue(s[i+1:i+3])))
 		i += 3
-		last = i
 	}
-	if b == nil {
-		return s
-	}
-	return string(append(b, s[last:]...))
 }
 
-// surrogatesRead is s with each high and low surrogate escaped as two
-// \uXXXX ("😀") the one character beyond the basic plane they
-// name (an emoji), read left to right, none overlapping; s itself when it
-// holds none.
-func surrogatesRead(s string) string {
-	var b []byte
-	last := 0
+// surrogatesRead reads each high and low surrogate of e.s escaped as two
+// \uXXXX ("😀") as the one character beyond the basic plane they
+// name (an emoji), left to right, none overlapping.
+func surrogatesRead(e *escapes) {
+	s := e.s
 	for i := 0; ; {
 		j := strings.IndexByte(s[i:], '\\')
 		if j < 0 {
@@ -3184,19 +3468,10 @@ func surrogatesRead(s string) string {
 			i++
 			continue
 		}
-		if b == nil {
-			b = make([]byte, 0, len(s))
-		}
-		b = append(b, s[last:i]...)
 		// Four hex digits each: 16 bits.
-		b = utf8.AppendRune(b, utf16.DecodeRune(rune(hexValue(s[i+2:i+6])), rune(hexValue(s[i+8:i+12]))))
+		e.readRune(i, 12, utf16.DecodeRune(rune(hexValue(s[i+2:i+6])), rune(hexValue(s[i+8:i+12]))))
 		i += 12
-		last = i
 	}
-	if b == nil {
-		return s
-	}
-	return string(append(b, s[last:]...))
 }
 
 // escapedSurrogatePairAt reports whether s holds at i a high surrogate
@@ -3209,14 +3484,13 @@ func escapedSurrogatePairAt(s string, i int) bool {
 		s[i+7] == 'u' && s[i+8]|0x20 == 'd' && strings.IndexByte("cdefCDEF", s[i+9]) >= 0 && hexAt(s, i+10, 2)
 }
 
-// backslashesRead is s with each backslash escape of a JSON string read,
-// left to right, none overlapping: "\uXXXX" as the character it names (a
-// JSON writer's escape of what is beyond ASCII; a lone surrogate names
-// none: the replacement character), "\\" as "\", and "\n", "\r", "\t",
-// "\b", "\f", "\"" and "\/" as a space; s itself when it holds none.
-func backslashesRead(s string) string {
-	var b []byte
-	last := 0
+// backslashesRead reads each backslash escape of a JSON string in e.s, left
+// to right, none overlapping: "\uXXXX" as the character it names (a JSON
+// writer's escape of what is beyond ASCII; a lone surrogate names none: the
+// replacement character), "\\" as "\", "\/" as "/", and "\n", "\r",
+// "\t", "\b", "\f" and "\"" as a space.
+func backslashesRead(e *escapes) {
+	s := e.s
 	for i := 0; ; {
 		j := strings.IndexByte(s[i:], '\\')
 		if j < 0 || i+j+1 >= len(s) {
@@ -3229,26 +3503,17 @@ func backslashesRead(s string) string {
 		case c == 'u' && hexAt(s, i+2, 4):
 			// Four hex digits: 16 bits.
 			r, n = rune(hexValue(s[i+2:i+6])), 6
-		case c == '\\':
-			r = '\\'
-		case strings.IndexByte(`nrtbf"/`, c) >= 0:
+		case c == '\\' || c == '/':
+			r = rune(c)
+		case strings.IndexByte(`nrtbf"`, c) >= 0:
 			r = ' '
 		default:
 			i++
 			continue
 		}
-		if b == nil {
-			b = make([]byte, 0, len(s))
-		}
-		b = append(b, s[last:i]...)
-		b = utf8.AppendRune(b, r)
+		e.readRune(i, n, r)
 		i += n
-		last = i
 	}
-	if b == nil {
-		return s
-	}
-	return string(append(b, s[last:]...))
 }
 
 // hexValue is the number the hex digits h (either case, checked by the
@@ -3560,6 +3825,21 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			decRuns = wordsBy(v.decRec, isWord)
 		}
 	}
+	// A payload that holds only a part of the value (a word, a piece, or a
+	// decoded or case-folded form of one, a start-up's word included) is its
+	// place only where no later payload holds the value whole (a whole
+	// clock read, its decoded text, or the value as one token), or the
+	// moment it was recorded with (echoRaw): a short word stands in an
+	// opaque payload by chance (a stamp's digits decode to a word a start-up
+	// look-up's JSON holds), while the value whole stands where the
+	// application sent it, in whichever payload that is. Where none does,
+	// the earliest part stands. The search past a part sets later places
+	// aside as it would with no part found (fol.refute). A variable found
+	// here never reads what it set aside; a re-read that takes no source
+	// (skipSource) does, and only refuses more for it (follows.followed,
+	// Learned.Bindable), never less.
+	var part Place
+	var parted bool
 	for _, x := range raw {
 		if !x.earlierThan(at) {
 			continue
@@ -3679,11 +3959,17 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 					}
 					continue
 				}
-				return p, true
+				if w == recorded {
+					return p, true
+				}
+				if !parted {
+					part, parted = p, true
+				}
+				break
 			}
 		}
 	}
-	return Place{}, false
+	return part, parted
 }
 
 // echoServed is the place of an exchange F served leaf by leaf (or the test
@@ -3892,9 +4178,15 @@ func correction(mock string, unserved bool) string {
 
 // partOf names where part stands in value, by its characters' places,
 // never by its text: "its characters 15 to 26", or "a part of it in another
-// form" (decoded, case-folded) where value holds it in none of its own.
+// form" (decoded, case-folded) where value holds it in none of its own. A
+// word stands where value first holds it as a word (tokenIndex), so the
+// word "0" of a hash "$2a$08$Kx9/0.…" is named at its own place, not at the
+// "0" of the word "08"; a part value holds as no word, at its first place.
 func partOf(value, part string) string {
-	i := strings.Index(value, part)
+	i := tokenIndex(value, part)
+	if i < 0 {
+		i = strings.Index(value, part)
+	}
 	if part == "" || i < 0 {
 		return "a part of it in another form"
 	}
@@ -4289,11 +4581,15 @@ func putBack(v interface{}, kept []keptBody) bool {
 // payload's length, its sequence id). The driver and the server count
 // them, the application never reads them, and a number of them that is a
 // word of a value (a 4-digit group of a minted UUID that is a reply's
-// requestId) is chance, never its source. spec is not changed: the copy is.
+// requestId) is chance, never its source. Nor the digits of a Postgres
+// statement's parameter markers ($1, $2 ...: pgMarkersBlanked), syntax that
+// says where each of its values goes: the "1" of "$1" is no word of data.
+// spec is not changed: the copy is.
 func payloadSpec(spec models.MockSpec) models.MockSpec {
-	if pg := spec.PostgresV3; pg != nil && pg.Query != nil && pg.Query.InvocationID != "" {
+	if pg := spec.PostgresV3; pg != nil && pg.Query != nil {
 		q := *pg.Query
 		q.InvocationID = ""
+		q.SQLNormalized = pgMarkersBlanked(q.SQLNormalized, len(q.BindValues)+len(q.Literals))
 		p := *pg
 		p.Query = &q
 		spec.PostgresV3 = &p
@@ -4756,7 +5052,7 @@ func escapeClock(s string, set map[string]bool) {
 var clockSpans = func(text string) [][]int {
 	var spans [][]int
 	for _, lay := range clockLayouts {
-		spans = append(spans, lay.re.FindAllStringIndex(text, -1)...)
+		spans = append(spans, lay.matches(lay.re, text, 0, len(text))...)
 	}
 	return spans
 }

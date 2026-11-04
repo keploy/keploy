@@ -417,12 +417,12 @@ func TestVariables_AMissNamesItsVariablesPlaces(t *testing.T) {
 	t.Run("a report with no closest mock", func(t *testing.T) {
 		read := at(varMock("mock-2", "GET", "http://store/orders/recval", "", 200, `{}`,
 			models.MockVariables{"orderId": useV("recval", []string{"url.path[1]"})}), 2)
-		r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /orders/kqzxwvbn"}, makeReq("GET", "/orders/kqzxwvbn"), nil, []*models.Mock{read}, nil)
+		r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /orders/kqzxwvbn"}, makeReq("GET", "/orders/kqzxwvbn"), nil, []*models.Mock{read}, nil, placesOf(nil))
 		if !slices.Equal(r.VariablePlaces, []string{"url.path[1]"}) {
 			t.Fatalf("places %v; want the route's url.path[1]", r.VariablePlaces)
 		}
 		for _, off := range []*http.Request{makeReq("GET", "/items/kqzxwvbn"), makeReq("DELETE", "/orders/kqzxwvbn"), makeReq("GET", "/orders/kqzxwvbn/lines")} {
-			r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: off.Method + " " + off.URL.Path}, off, nil, []*models.Mock{read}, nil)
+			r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: off.Method + " " + off.URL.Path}, off, nil, []*models.Mock{read}, nil, placesOf(nil))
 			if r.VariablePlaces != nil {
 				t.Fatalf("%s %s is off mock-2's route, yet carries places %v", off.Method, off.URL.Path, r.VariablePlaces)
 			}
@@ -625,7 +625,7 @@ func TestVariables_ABindRefusedOverWhatTheCheckReadIsAMiss(t *testing.T) {
 		hit := &varHit{mock: m, binds: []variables.Binding{{Name: "polled", Value: "V", Recorded: "r-2", Mock: "mock-2", Place: "body.at"}},
 			local: map[string]variables.Binding{}, table: &tb, gen: tb.Gen(), saw: c.saw}
 		consumed := false
-		served, problem, retry, err := newHTTP().serveVariablesBy(hit, nil, func(*models.Mock) bool { consumed = true; return true }, nil)
+		served, problem, retry, err := newHTTP().serveVariablesBy(hit, nil, func(*models.Mock) bool { consumed = true; return true }, nil, unreadPlaces)
 		if err != nil || served != nil || consumed {
 			t.Fatalf("%s: served %v, consumed %v, err %v", c.name, served, consumed, err)
 		}
@@ -1234,10 +1234,10 @@ func TestVariables_ConcurrentCreatesOfOneShapeAreEachAnswered(t *testing.T) {
 	if hx.mock != first || hy.mock != first {
 		t.Fatalf("both checked before either bound should pick the first recording: %s, %s", hx.mock.Name, hy.mock.Name)
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hx, db); err != nil || p != nil || retry {
+	if _, p, retry, err := h.serveVariables(ctx, hx, db, unreadPlaces); err != nil || p != nil || retry {
 		t.Fatalf("x: problem %+v retry %v err %v", p, retry, err)
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hy, db); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hy, db, unreadPlaces); err != nil || p != nil || !retry {
 		t.Fatalf("y's collision should be checked again, not failed: problem %+v retry %v err %v", p, retry, err)
 	}
 	ok, stub, diag := matchVar(t, h, db, y)
@@ -1262,7 +1262,7 @@ func TestVariables_AStragglerBindsNothingInTheNextTest(t *testing.T) {
 		t.Fatal("the straggler should fit")
 	}
 	db.table.Reset() // the next test begins
-	if _, p, retry, err := h.serveVariables(ctx, hits[0], db); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hits[0], db, unreadPlaces); err != nil || p != nil || !retry {
 		t.Fatalf("a straggler should be checked again: problem %+v retry %v err %v", p, retry, err)
 	}
 	if got := db.table.Snapshot(); len(got) != 0 {
@@ -1289,7 +1289,7 @@ func TestVariables_AMockAnotherCallTookIsCheckedAgain(t *testing.T) {
 	if ok, _, _ := matchVar(t, h, db, read); !ok {
 		t.Fatal("the read-back should match")
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hits[0], db); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hits[0], db, unreadPlaces); err != nil || p != nil || !retry {
 		t.Fatalf("a mock another call took: problem %+v retry %v err %v", p, retry, err)
 	}
 	if ok, _, _ := matchVar(t, h, db, read); ok {

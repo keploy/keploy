@@ -97,8 +97,10 @@ type Supervisor struct {
 	// SessionOnAbort is invoked exactly once when the supervisor
 	// aborts the run (hang, panic, mem-cap, outer cancel). The relay
 	// sets this to a closure that closes the FakeConns so the
-	// parser's blocked reads unblock: with ErrClosed while the relay
-	// still captures, or io.EOF once it has ended the stream.
+	// parser's blocked reads unblock: with ErrClosed, however long the
+	// connection goes on after (the relay leaves the stream of a FakeConn
+	// closed before its end open), or io.EOF when the relay had ended the
+	// stream before the close.
 	//
 	// Set it before calling Run. The supervisor calls it synchronously
 	// on the abort path, so the callback must not block. It calls it
@@ -304,7 +306,12 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 
 	case <-s.hungCh:
 		// Abort first: the parser is retired from here, and the abort
-		// stops its capture (SessionOnAbort).
+		// stops its capture (SessionOnAbort). It goes on running, and the
+		// abort closes its streams under it before its context is
+		// cancelled below: retire its session first, so that nothing it
+		// hands over from here, cut where its streams were closed, is
+		// recorded (Session.retire).
+		sess.retire(leftOutParserHung)
 		s.fireOnAbort()
 		// Debug-level: hang abort is a designed control-flow path —
 		// the dispatcher's FallthroughToPassthrough handling picks it

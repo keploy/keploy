@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 source "$(dirname "${BASH_SOURCE[0]}")/go-retry.sh"
+# http_mock_count: the Http mocks of mocks.yaml, by their kind whole.
+source "$(dirname "${BASH_SOURCE[0]}")/mock-kinds.sh" || exit 1
 # E2E validation for keploy's TLS capture features.
 #
 # Runs the sample-tls-app under keploy with $KEPLOY_FLAGS — either
@@ -663,7 +665,7 @@ case "$MODE_NAME" in
     # (MySQL/Postgres mocks may also appear depending on which
     # integrations are linked into the build.)
     sudo test -s "$MOCKS" || { echo "::error::missing or empty $MOCKS"; exit 1; }
-    HTTP_MOCKS=$(sudo grep -c "^kind: Http" "$MOCKS" || true)
+    HTTP_MOCKS=$(http_mock_count <(sudo cat "$MOCKS"))
     echo "Http mock records: $HTTP_MOCKS"
     if [[ "$HTTP_MOCKS" -lt 2 ]]; then
       echo "::error::expected >=2 'kind: Http' mocks (one per upstream host); saw $HTTP_MOCKS"
@@ -680,6 +682,8 @@ case "$MODE_NAME" in
     # issues no outbound DNS — there are no DNS mocks to write, and with
     # parser dispatch bypassed there are no Http mocks either. Treat a
     # missing/empty file as zero Http mocks rather than a failure.
+    # The `Http` prefix counts the Http2 and HttpFault mocks too: the HTTP
+    # parsers write those as well, so none may appear here either.
     if sudo test -s "$MOCKS"; then
       HTTP_MOCKS=$(sudo grep -c "^kind: Http" "$MOCKS" || true)
     else
@@ -727,7 +731,7 @@ case "$MODE_NAME" in
     echo "== recorded mock kinds =="
     sudo grep "^kind: " "$MOCKS" | sort | uniq -c || true
 
-    HTTP_MOCKS=$(sudo grep -c "^kind: Http" "$MOCKS" || true)
+    HTTP_MOCKS=$(http_mock_count <(sudo cat "$MOCKS"))
     MYSQL_MOCKS=$(sudo grep -c "^kind: MySQL" "$MOCKS" || true)
     # The `Postgres` prefix deliberately covers all three parser
     # generations (Postgres / PostgresV2 / PostgresV3) — which one is
@@ -771,7 +775,8 @@ case "$MODE_NAME" in
     # Mock shape here is the with-opportunistic shape, not the
     # verify-upstream one: parser dispatch is bypassed, so there must be
     # NO Http mocks. Verification changes which upstreams keploy is
-    # willing to talk to, never whether parsers run.
+    # willing to talk to, never whether parsers run. As there, the `Http`
+    # prefix counts the Http2 and HttpFault mocks too.
     if sudo test -s "$MOCKS"; then
       HTTP_MOCKS=$(sudo grep -c "^kind: Http" "$MOCKS" || true)
     else

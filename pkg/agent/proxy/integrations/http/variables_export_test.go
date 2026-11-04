@@ -272,3 +272,152 @@ func TestVariableMatch_AskTheWrittenAnswerBeforeTheTake(t *testing.T) {
 		t.Fatalf("the variable was not bound to the call's value: %+v %v", b, ok)
 	}
 }
+
+// answeredVarDb is varDb that tells answered, the set's recordings that
+// answered a call before and redacted something
+// (integrations.AnsweredRedactingReader), or, hiding, tells nothing (a
+// wrapper that does not forward the reader).
+type answeredVarDb struct {
+	*varDb
+	answered []*models.Mock
+	hiding   bool
+}
+
+func (d answeredVarDb) AnsweredRedacting(models.Kind) ([]*models.Mock, bool) {
+	return d.answered, !d.hiding
+}
+
+// Another parser's call that breaks a variable at a place a recording of
+// the pool redacted gets a why that shows the values there redacted, as an
+// HTTP miss report shows them: the value the call sent, and the variable's
+// value in the test, which an earlier live call sent. Redacted by the
+// recording the why names, by another of the pool, or by another that
+// answered a call before (on the set's answered list only); a pool that
+// redacted nothing there shows them, unless the store does not tell its
+// answered recordings: then the why shows no value of the call. The caller's
+// pool is left as it was, past its end too.
+func TestVariableMatch_TheWhyShowsNoValueAtARedactedPlace(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, c := range []struct {
+		name string
+		// redacted: the recordings that declare the variable redacted its
+		// place; another: a recording of the pool beside them, which
+		// declares none, did; answered: that recording answered a call
+		// before and is only on the set's answered list; hiding: the store
+		// does not tell its answered recordings.
+		redacted, another, answered, hiding bool
+	}{
+		{name: "redacted", redacted: true},
+		{name: "redacted-by-another-recording", another: true},
+		{name: "redacted-by-a-recording-answered-before", another: true, answered: true},
+		{name: "kept", hiding: false},
+		{name: "kept-at-a-store-that-does-not-tell", hiding: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHTTP()
+			rec := map[bool]string{true: "REDACTED_abc", false: "dedup-rec"}[c.redacted]
+			send := func(name string, vars models.MockVariables) *models.Mock {
+				m := sqsSend(name, rec, vars)
+				if c.redacted {
+					m.Noise = []string{`^REDACTED_abc$`}
+				}
+				return m
+			}
+			m := send("mock-1", models.MockVariables{"dedup": bindV(rec, "body.MessageDeduplicationId")})
+			db := &varDb{perTest: []*models.Mock{m}}
+			consume := func(x *models.Mock) bool { return db.DeleteFilteredMock(*x) }
+			ctx := context.Background()
+			if res, err := h.VariableMatch(ctx, ReadVariableScope(db), sqsCall(liveBound), sdkNoise(), []*models.Mock{m}, db, consume, nil); err != nil || res.Outcome != VariableServed {
+				t.Fatalf("the row is of a variable bound by a served call: %+v, %v", res, err)
+			}
+			// The caller's pool has room past its end, which the why must
+			// not write into.
+			pool := append(make([]*models.Mock, 0, 4), send("mock-2", models.MockVariables{"dedup": useV(rec, []string{"body.MessageDeduplicationId"})}))
+			store := answeredVarDb{varDb: db, hiding: c.hiding}
+			if c.another {
+				other := sqsSend("mock-3", "REDACTED_xyz", nil)
+				other.Spec.HTTPReq.Body = strings.Replace(other.Spec.HTTPReq.Body, "order 1", "order 3", 1)
+				other.Noise = []string{`^REDACTED_xyz$`}
+				if c.answered {
+					store.answered = []*models.Mock{other}
+				} else {
+					pool = append(pool, other)
+				}
+			}
+			n := len(pool)
+			res, err := h.VariableMatch(ctx, ReadVariableScope(db), sqsCall(liveSecret), sdkNoise(), pool, store, consume, nil)
+			if err != nil || res.Outcome != VariableExactOnly || !strings.Contains(res.Problem, "mock-2") {
+				t.Fatalf("the row is of a call breaking the bound variable, with why: %+v, %v", res, err)
+			}
+			for i, m := range pool[n:cap(pool)] {
+				if m != nil {
+					t.Errorf("the why wrote %q past the caller's pool's end (%d)", m.Name, n+i)
+				}
+			}
+			if c.hiding {
+				if strings.Contains(res.Problem, liveSecret) || strings.Contains(res.Problem, liveBound) {
+					t.Errorf("a store that does not tell its answered recordings, the why shows a value of the call: %s", res.Problem)
+				}
+			} else if c.redacted || c.another {
+				if strings.Contains(res.Problem, liveSecret) || strings.Contains(res.Problem, liveBound) || !strings.Contains(res.Problem, valueRedacted) {
+					t.Errorf("the why shows a value at the place a recording redacted: %s", res.Problem)
+				}
+			} else if !strings.Contains(res.Problem, liveSecret) || !strings.Contains(res.Problem, liveBound) {
+				t.Errorf("the why does not show the values at a place no recording redacted: %s", res.Problem)
+			}
+		})
+	}
+}
+
+// Another parser's call that breaks a variable at a path segment gets a why
+// that shows the values there redacted when another recording of the call's
+// shape (as many segments) redacted that segment, in the pool or only on the
+// store's answered list, though the recording the why names did not. With
+// no recording that redacted it, the why shows them.
+func TestVariableMatch_TheWhyShowsNoValueAtARedactedPathSegment(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	call := func(method, path string) VariableCall {
+		u, _ := url.Parse("http://store" + path)
+		return VariableCall{Method: method, URL: u, Header: http.Header{"Host": {"store"}, "Content-Type": {"application/json"}}}
+	}
+	for _, c := range []struct {
+		name             string
+		inPool, answered bool
+	}{
+		{name: "redacted-by-another-recording", inPool: true},
+		{name: "redacted-by-a-recording-answered-before", answered: true},
+		{name: "kept"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHTTP()
+			bind := at(varMock("mock-1", "POST", "http://store/orders/ord-rec-1", "", 201, `{}`, models.MockVariables{"orderId": bindV("ord-rec-1", "url.path[1]")}), 1)
+			db := &varDb{perTest: []*models.Mock{bind}}
+			consume := func(x *models.Mock) bool { return db.DeleteFilteredMock(*x) }
+			ctx := context.Background()
+			if res, err := h.VariableMatch(ctx, ReadVariableScope(db), call("POST", "/orders/"+liveBound), sdkNoise(), []*models.Mock{bind}, db, consume, nil); err != nil || res.Outcome != VariableServed {
+				t.Fatalf("the row is of a variable bound by a served call: %+v, %v", res, err)
+			}
+			use := at(varMock("mock-2", "GET", "http://store/orders/ord-rec-1/items", "", 200, `{}`, models.MockVariables{"orderId": useV("ord-rec-1", []string{"url.path[1]"})}), 2)
+			other := at(varMock("other", "GET", "http://store/orders/REDACTED_abc/notes", "", 200, `{}`, nil), 3)
+			other.Noise = []string{`^REDACTED_abc$`}
+			pool := []*models.Mock{use}
+			store := answeredVarDb{varDb: db}
+			if c.inPool {
+				pool = append(pool, other)
+			}
+			if c.answered {
+				store.answered = []*models.Mock{other}
+			}
+			res, err := h.VariableMatch(ctx, ReadVariableScope(db), call("GET", "/orders/"+liveSecret+"/items"), sdkNoise(), pool, store, consume, nil)
+			if err != nil || res.Outcome != VariableExactOnly || !strings.Contains(res.Problem, "mock-2") {
+				t.Fatalf("the row is of a call breaking the bound variable, with why: %+v, %v", res, err)
+			}
+			shows := strings.Contains(res.Problem, liveSecret)
+			if redacted := c.inPool || c.answered; redacted && (shows || strings.Contains(res.Problem, liveBound)) {
+				t.Errorf("the why shows a value at the segment another recording redacted: %s", res.Problem)
+			} else if !redacted && !shows {
+				t.Errorf("with no recording that redacted the segment, the why hides the value the call sent: %s", res.Problem)
+			}
+		})
+	}
+}

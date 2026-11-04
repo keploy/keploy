@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -653,5 +654,19 @@ func TestReadNullTerminatedString_NoTerminator(t *testing.T) {
 				t.Fatalf("returned io.EOF, which the record loop reads as a clean close")
 			}
 		})
+	}
+}
+
+// LengthEncodedIntegerSize is the length WriteLengthEncodedInteger writes, on
+// each side of every boundary between its encodings.
+func TestLengthEncodedIntegerSizeIsTheWrittenLength(t *testing.T) {
+	for _, n := range []uint64{0, 249, 250, 251, 0xfffe, 0xffff, 0x10000, 0xfffffe, 0xffffff, 0x1000000, 1<<64 - 1} {
+		var buf bytes.Buffer
+		if err := WriteLengthEncodedInteger(&buf, n); err != nil {
+			t.Fatal(err)
+		}
+		if got := LengthEncodedIntegerSize(n); got != buf.Len() {
+			t.Errorf("LengthEncodedIntegerSize(%d) = %d, WriteLengthEncodedInteger wrote %d bytes", n, got, buf.Len())
+		}
 	}
 }

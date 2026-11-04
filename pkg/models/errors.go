@@ -288,7 +288,10 @@ type MockMismatchReport struct {
 	// place the learn step learned as a read of the application's clock at
 	// which the call carries no such read made in its window
 	// (learn.CheckClockRead). Each names its field as Differs does, and no
-	// value. Set by the strict HTTP matcher.
+	// value. Set by the strict HTTP matcher. Without the switch, the HTTP
+	// matcher's miss under strict enforcement sets them too: each request-body
+	// field keploy.yml's patterns guard whose value, on a side, is outside
+	// them, with that reason.
 	FieldReasons []FieldReason
 	// VariablePlaces are, under the proven switch only, the URL path places
 	// (url.path[<n>]) of a test variable on this call: those declared by the

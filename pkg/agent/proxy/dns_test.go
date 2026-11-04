@@ -245,20 +245,14 @@ func TestDNSCacheLifecycle_DedupeStillCatchesDuplicates(t *testing.T) {
 	dedupe := newRecordedDNSMocksCache()
 
 	q := dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
-	key := generateDNSDedupeKey(q)
 
-	if _, ok := dedupe.Get(key); ok {
+	if _, first := dedupe.firstAnswer(q, dnsRankResolved); !first {
 		t.Fatalf("fresh dedupe cache must not report the query as already recorded")
 	}
-	dedupe.Add(key, true)
-	if _, ok := dedupe.Get(key); !ok {
-		t.Fatalf("dedupe cache must remember the recorded query")
-	}
-	// Simulate a duplicate emission attempt — the caller checks Get()
-	// and skips recording if found. No double-Add is possible in
-	// production; the test just pins the read path.
+	// Simulate duplicate emission attempts — the caller skips recording
+	// when the answer is not the first of its kind.
 	for i := 0; i < 3; i++ {
-		if _, ok := dedupe.Get(key); !ok {
+		if _, first := dedupe.firstAnswer(q, dnsRankResolved); first {
 			t.Fatalf("dedupe cache must consistently signal a duplicate (iter=%d)", i)
 		}
 	}
@@ -327,15 +321,19 @@ func TestResetRecordedDNSMocks_ClearsBothTrackers(t *testing.T) {
 	}
 
 	key := generateCacheKey("carryover.example", dns.TypeA)
-	p.recordedDNSMocks.Add(key, true)
+	carried := dns.Question{Name: "carryover.example.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	p.recordedDNSMocks.firstAnswer(carried, dnsRankResolved)
+	p.recordedDNSMocks.firstAnswer(carried, dnsRankNXDOMAIN)
 	if !p.shouldLogNodataRelay(key) {
 		t.Fatal("first sighting must log")
 	}
 
 	p.ResetRecordedDNSMocks()
 
-	if p.recordedDNSMocks.Len() != 0 {
-		t.Errorf("recordedDNSMocks still holds %d entries after reset", p.recordedDNSMocks.Len())
+	for _, rank := range []int{dnsRankResolved, dnsRankNXDOMAIN} {
+		if _, first := p.recordedDNSMocks.firstAnswer(carried, rank); !first {
+			t.Errorf("recordedDNSMocks still holds the answer of kind %d after reset", rank)
+		}
 	}
 	if p.nodataRelayLogged.Len() != 0 {
 		t.Errorf("nodataRelayLogged still holds %d entries after reset", p.nodataRelayLogged.Len())

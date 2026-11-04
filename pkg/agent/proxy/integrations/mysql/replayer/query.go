@@ -327,9 +327,10 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 }
 
 // requestBodyNoise is the requestBody bucket of the user's noise
-// (test.globalNoise) as the matcher compares it: lowercased, presence-only
-// (request-body matching and drift detection are path-based, a value-regex
-// cannot gate here), and root-relative (parameters.0.value). A key may also
+// (test.globalNoise) as the matcher compares it: lowercased, root-relative
+// (parameters.0.value), each entry with its patterns (an entry with
+// patterns excuses a field only when the recorded and the live value each
+// match one; one with none, whatever it holds). A key may also
 // be written as a miss lists the field, with its leading "body."
 // (body.parameters.0.value): a MySQL command's body has no field named
 // body, so the prefix only ever names the body itself. Without it, the
@@ -340,8 +341,8 @@ func requestBodyNoise(cfg map[string]map[string][]string) map[string][]string {
 		return nil
 	}
 	out := make(map[string][]string, len(bn))
-	for k := range bn {
-		out[strings.TrimPrefix(strings.ToLower(k), "body.")] = []string{}
+	for k, v := range bn {
+		out[strings.TrimPrefix(strings.ToLower(k), "body.")] = append([]string{}, v...)
 	}
 	return out
 }

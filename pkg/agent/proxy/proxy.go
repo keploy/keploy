@@ -484,9 +484,10 @@ type Proxy struct {
 	dnsCache *expirable.LRU[string, dnsCacheEntry]
 
 	// recordedDNSMocks tracks DNS queries that have already been recorded
-	// to avoid recording duplicate mocks. Key format: "name:qtype:qclass"
-	// Uses bounded LRU with TTL to prevent unbounded memory growth.
-	recordedDNSMocks *expirable.LRU[string, bool]
+	// to avoid recording duplicate mocks. Key format: "name:qtype:qclass",
+	// with the kind for a negative answer. Uses bounded LRUs with TTL to
+	// prevent unbounded memory growth (dnsRecordDedupe).
+	recordedDNSMocks *dnsRecordDedupe
 
 	// dnsUpstreamServers is the list of upstream DNS resolver IPs
 	// captured from /etc/resolv.conf ONCE at proxy startup, BEFORE the
@@ -1973,10 +1974,12 @@ func (p *Proxy) setMockManager(m *MockManager) {
 		// as neither (a worker: scope's, the background's), as m's view in
 		// force says: a call checked against the test's own recording is
 		// read in a span only those serves start (learn.Tracker.LiveSpanOf).
-		p.learnTracker.SetServeOwner(m.ServedAsOwnOrStartup)
+		// Where no test's view is in force m says it cannot tell, and a
+		// call's span then carries its test's begin as LiveSpan's does.
+		p.learnTracker.SetServeOwnerOf(m.ServeOwnerOf)
 	} else if provenswitch.On() {
 		// No manager serves: the tracker keeps no hold on the one it drops.
-		p.learnTracker.SetServeOwner(nil)
+		p.learnTracker.SetServeOwnerOf(nil)
 	}
 	p.sessionMu.Lock()
 	prev := p.mockManager
@@ -4870,15 +4873,19 @@ func (p *Proxy) openExact(open func(*MockManager)) error {
 	return nil
 }
 
+var _ agent.PoolNamesSetter = (*Proxy)(nil)
+
 // SetPoolNames implements agent.PoolNamesSetter: the mock manager's pool
-// membership (MockManager.SetPoolNames) and the key of the test process
-// whose tests list each mock (MockManager.SetPoolOwners), the owners first.
-func (p *Proxy) SetPoolNames(names []string, owners map[string]string) error {
+// membership (MockManager.SetPoolNames), the key of the test process whose
+// tests list each mock (MockManager.SetPoolOwners) and the mocks each test
+// lists (MockManager.SetPoolTests), the owners and tests first.
+func (p *Proxy) SetPoolNames(names []string, owners map[string]string, tests map[string][]string) error {
 	m := p.getMockManager()
 	if m == nil {
 		return errNoMockManager
 	}
 	m.SetPoolOwners(owners)
+	m.SetPoolTests(tests)
 	m.SetPoolNames(names)
 	return nil
 }
@@ -4900,9 +4907,13 @@ func (p *Proxy) learnBoundary(step func(*learn.Tracker)) {
 // TakeTestRequest gives the learn step the running keploy test case's own
 // request (agent.TestRequestTaker; learn.Tracker.Give), under the proven
 // switch: the test's earliest place, which it reads as any earlier place.
+// Where the request carries when it was recorded, the learn step takes that
+// as where the test began in its recording in the same step
+// (learn.Tracker.GiveRequest), so a call the request releases reads its
+// window with it.
 func (p *Proxy) TakeTestRequest(req *models.TestRequest) {
 	if provenswitch.On() {
-		p.learnTracker.Give(learn.GivenRequest(req))
+		p.learnTracker.GiveRequest(req)
 	}
 }
 

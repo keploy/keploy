@@ -115,6 +115,11 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 	if err != nil {
 		return CmdError{Type: Init, Err: err}
 	}
+	if kind == Native {
+		// The application's own process: a wait for it to listen can name
+		// the ports it listens on instead (AppListenPorts).
+		NoteAppPID(ctx, cmd.Process.Pid)
+	}
 
 	err = cmd.Wait()
 	console.Exited()
