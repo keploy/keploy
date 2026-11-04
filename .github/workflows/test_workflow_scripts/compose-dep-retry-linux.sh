@@ -41,6 +41,11 @@
 # (.github/actions/download-image).
 set -uo pipefail
 
+# http_mock_count: the app's calls to its dependency are its Http mocks, by
+# their kind whole (an Http2 or HttpFault mock is not one).
+# shellcheck source=mock-kinds.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mock-kinds.sh" || exit 1
+
 RECORD_BIN="$(command -v "${RECORD_BIN:-keploy}" || echo "${RECORD_BIN:-keploy}")"
 REPLAY_BIN="$(command -v "${REPLAY_BIN:-$RECORD_BIN}" || echo "${REPLAY_BIN:-$RECORD_BIN}")"
 WORK="$(mktemp -d)"
@@ -160,7 +165,7 @@ record() {
     return
   fi
   tests=$( (sudo find keploy -path '*/tests/*.yaml' 2>/dev/null || true) | wc -l)
-  mocks=$( (sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null || true) | grep -c '^kind: Http')
+  mocks=$(http_mock_count <(sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null))
   [ "$tests" -ge 3 ] || fail "$name: $tests test case(s) recorded after the retry, want at least 3"
   [ "$mocks" -ge 3 ] || fail "$name: $mocks HTTP mock(s) of the app's calls to its dependency, want at least 3"
   if [ "$FAIL" -ne "$before" ]; then
@@ -200,13 +205,13 @@ fi
 before=$FAIL
 KEPLOY_PROVEN=1 record recreated-proven "docker compose up --always-recreate-deps app"
 setup_again recreated-proven || fail "recreated-proven: the agent compose recreated was not set up again"
-mocks=$( (sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null || true) | grep -c '^kind: Http')
+mocks=$(http_mock_count <(sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null))
 # The dependency's key: its repository (no tag), its port and its
 # configuration's fingerprint; one key on every mock.
 keys=$( (sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null || true) | grep -oE 'containerKey: container:python:8000@s[0-9a-f]{12}$')
 keyed=$(grep -c . <<<"$keys")
 if [ "$mocks" -lt 3 ] || [ "$keyed" -ne "$mocks" ] || [ "$(sort -u <<<"$keys" | wc -l)" -ne 1 ]; then
-  fail "recreated-proven: $keyed of $mocks HTTP mocks carry the dependency's container key, want all"
+  fail "recreated-proven: $keyed mock(s) carry the dependency's container key, and $mocks Http mock(s) were recorded; want 3 or more Http mocks, each with the one key, and no other mock keyed"
 fi
 [ "$FAIL" -eq "$before" ] && echo "ok: recreated-proven: all $mocks mocks carry the dependency's container key"
 
