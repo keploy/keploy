@@ -18,8 +18,13 @@ import (
 // and opens a test window for them (ScopeStager), so tier-aware parsers route
 // the test's calls to the test's own tier and report a miss as one inside a
 // test. A call that is answered by a per-test recording in a test is answered
-// by one of the test's own: a call the test did not record, or whose only
-// recording was made outside every test, misses, and the miss is reported.
+// by one of the test's own, or by one the application made at start-up: a
+// recording placed before the set's first test began (the startup band) is
+// filed in the proxy's startup tier, a per-test one too, and a parser that
+// reads the session tier through MockMemDb.GetSessionMocks, which holds the
+// startup tier (HTTP among them), serves it in every test as it does between
+// tests. Any other call the test did not record misses, and the miss is
+// reported.
 // The reusable tier is served in every test, as always; it holds the
 // session, config and connection recordings, and, unless
 // KEPLOY_STRICT_MOCK_WINDOW is set (the lax rule reads that variable alone,

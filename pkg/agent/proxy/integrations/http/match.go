@@ -2327,10 +2327,8 @@ func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // mockDb; otherwise it uses the pre-fetched slice to avoid a redundant read.
 func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) *models.MockMismatchReport {
 	r, places := h.buildHTTPMismatchReportOf(request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, diag)
-	// Under the proven switch a test is served what its mapping names, and a
-	// declared call does not change that: the hint would not help.
-	if r != nil && !provenswitch.On() && statesHTTPLifetimes(mockDb, httpMocks) {
-		r.NextSteps = strings.TrimSpace(r.NextSteps + " " + sessionCallHint(request, places))
+	if r != nil && statesHTTPLifetimes(mockDb, httpMocks) {
+		r.NextSteps = strings.TrimSpace(r.NextSteps + " " + sessionCallHint(request, places, provenswitch.On()))
 	}
 	return r
 }
@@ -2356,10 +2354,15 @@ func viewless(r *models.MockMismatchReport) {
 
 // sessionCallHint tells how to serve a call to every test, for a recording
 // that serves each test its own HTTP calls only: a test that never recorded
-// a call misses it though another test recorded it. places are the report's
-// (poolPlaces): the path prefix it names stops before the first segment a
-// recording of the pool redacted (redactedPlaces.pathPrefix).
-func sessionCallHint(request *http.Request, places redactedPlaces) string {
+// a call misses it though another test, or the application outside every
+// test, recorded it. Without the proven switch a declared call is served to
+// every test from any test's recording of it; under the switch from a
+// recording made outside every test only (in TestMain or at start-up), and
+// another test's recording of it stays that test's. Under the switch, a call
+// keploy.yaml declares already is told what the declaration serves. places
+// are the report's (poolPlaces): the path prefix it names stops before the
+// first segment a recording of the pool redacted (redactedPlaces.pathPrefix).
+func sessionCallHint(request *http.Request, places redactedPlaces, proven bool) string {
 	host := request.Host
 	if host == "" && request.URL != nil {
 		host = request.URL.Host
@@ -2369,8 +2372,18 @@ func sessionCallHint(request *http.Request, places redactedPlaces) string {
 	if prefix := places.pathPrefix(request.URL.EscapedPath()); prefix != "" {
 		path = prefix
 	}
-	return fmt.Sprintf("Each test is served the HTTP calls it recorded. If another test recorded this call and every test may make it (a token, a shared configuration read), declare it in keploy.yaml to serve it to every test (sessionCalls: [{host: %q, method: %q, pathPrefix: %q}]), or record again with '%s' so this test records it.",
-		host, request.Method, path, mismatch.RecordCommand())
+	record := mismatch.RecordCommand()
+	if !proven {
+		return fmt.Sprintf("Each test is served the HTTP calls it recorded. If another test recorded this call and every test may make it (a token, a shared configuration read), declare it in keploy.yaml to serve it to every test (sessionCalls: [{host: %q, method: %q, pathPrefix: %q}]), or record again with '%s' so this test records it.",
+			host, request.Method, path, record)
+	}
+	// The rule reads the call's real path; the hint names only the prefix
+	// the report may show.
+	if models.SessionCallDeclared(request.Method, host, request.URL.Path) {
+		return fmt.Sprintf("keploy.yaml declares this call a session call, which serves a recording of it made outside every test (in TestMain or at start-up) to every test; a recording another test made of it is served to that test only. Record again with '%s' so this test records it.", record)
+	}
+	return fmt.Sprintf("Each test is served the HTTP calls it recorded. If the application made this call outside every test (in TestMain or at start-up) and every test may make it (a token, a shared configuration read), declare it in keploy.yaml to serve that recording to every test (sessionCalls: [{host: %q, method: %q, pathPrefix: %q}]); a recording another test made of it is served to that test only, declared or not. Or record again with '%s' so this test records it.",
+		host, request.Method, path, record)
 }
 
 // statesHTTPLifetimes reports whether the recording being replayed states its

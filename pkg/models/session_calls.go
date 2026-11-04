@@ -114,6 +114,28 @@ func (m *Mock) DeclaredSessionCall() bool {
 	return ok && lt == LifetimePerTest && declaredSessionCall(m)
 }
 
+// SessionCallDeclared reports whether a declared session call
+// (SetSessionCalls) covers a call of method to host and path: a live call, as
+// a miss's hint reads it.
+func SessionCallDeclared(method, host, path string) bool {
+	rules := sessionCalls.Load()
+	if rules == nil {
+		return false
+	}
+	return rulesCover(*rules, method, host, path)
+}
+
+// rulesCover reports whether one of rules covers a call of method to host and
+// path.
+func rulesCover(rules []SessionCallRule, method, host, path string) bool {
+	for _, r := range rules {
+		if r.matches(method, host, path) {
+			return true
+		}
+	}
+	return false
+}
+
 // declaredSessionCall reports whether m is an HTTP or HTTP/2 call a declared
 // session call covers (SetSessionCalls).
 func declaredSessionCall(m *Mock) bool {
@@ -122,15 +144,7 @@ func declaredSessionCall(m *Mock) bool {
 		return false
 	}
 	method, host, path, ok := httpCallOf(m)
-	if !ok {
-		return false
-	}
-	for _, r := range *rules {
-		if r.matches(method, host, path) {
-			return true
-		}
-	}
-	return false
+	return ok && rulesCover(*rules, method, host, path)
 }
 
 // httpCallOf is the method, upstream host and path of an HTTP or HTTP/2 mock's
