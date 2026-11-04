@@ -445,7 +445,7 @@ func TestAClockWordIsFoundWhereTwoTextsDifferAsInTheWholeTexts(t *testing.T) {
 	found, parted := 0, 0
 	for _, pc := range pairs {
 		for _, w := range []*Window{anyInstant, runWin} {
-			b, rw, lw, a, ok := clockWordIn(pc.rec, pc.live, w)
+			b, rw, lw, a, ok := clockWordIn(pc.rec, pc.live, w, nil)
 			wb, wrw, wlw, wa, wok := clockWordInWhole(pc.rec, pc.live, w)
 			if ok != wok || b != wb || rw != wrw || lw != wlw || a != wa {
 				t.Fatalf("%s, %q -> %q: clockWordIn = %v %q/%q (%d bytes before, %d after), the whole texts' = %v %q/%q (%d, %d)",
@@ -499,7 +499,7 @@ func TestAClockWordWindowsEdgesReadAsTheWholeTexts(t *testing.T) {
 	}
 	found, cutBefore, cutAfter := 0, 0, 0
 	for _, pc := range pairs {
-		b, rw, lw, a, ok := clockWordIn(pc.rec, pc.live, anyInstant)
+		b, rw, lw, a, ok := clockWordIn(pc.rec, pc.live, anyInstant, nil)
 		wb, wrw, wlw, wa, wok := clockWordInWhole(pc.rec, pc.live, anyInstant)
 		if ok != wok || b != wb || rw != wrw || lw != wlw || a != wa {
 			t.Fatalf("%q -> %q: clockWordIn = %v %q/%q (%d bytes before, %d after), the whole texts' = %v %q/%q (%d, %d)",
