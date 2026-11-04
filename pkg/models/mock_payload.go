@@ -89,6 +89,9 @@ type payloadOnDisk struct {
 	mysqlSessionReusable    bool
 	// authored is IsAuthored's: whether the mock's Spec.Authored was set.
 	authored bool
+	// replaces is Replaces': the recording a derived mock replaces in its
+	// own test.
+	replaces string
 	// fault is a copy of the mock's Spec.Fault (FaultOf), nil for none: what
 	// a replay's summary names when the mock was served (FaultServed).
 	fault *Fault
@@ -124,6 +127,7 @@ func (m *Mock) LeavePayloadOnDisk(src PayloadSource, at PayloadAt) {
 	d.summary, d.longSummary = keptDisplay(MockSummaryFromSpec(m))
 	d.target, d.longTarget = keptDisplay(MockTargetFromSpec(m))
 	d.authored = m.Spec.Authored != nil
+	d.replaces = m.Spec.Authored.replaces()
 	if f := m.Spec.Fault; f != nil {
 		kept := *f
 		kept.Observed = strings.Clone(f.Observed)
