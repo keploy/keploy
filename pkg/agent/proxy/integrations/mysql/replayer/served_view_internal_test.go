@@ -19,15 +19,17 @@ func viewRecording(reqs []mysql.Request, resps []mysql.Response) *models.Mock {
 
 // The view the command phase states of a serve is the recording as the
 // application sent the command and F wrote the answer: the live command,
-// the recorded answer, a PREPARE's answer with the statement id F gave it,
-// and no answer to a command the server does not answer. It is the
-// recording itself only where both are the recording's; it is built from
-// the recording, which it never changes; its key names the answer F gave,
-// never the command: two serves that gave the same answer share it,
-// whatever command each answered, and another id, or no answer where the
-// recorded one was written, names another. An
-// answer F wrote that the recording does not hold, or a recording that is
-// not one command, is a view keploy cannot read.
+// the recorded answer, and no answer to a command the server does not
+// answer. A PREPARE's answer with the statement id F gave it is the
+// recorded answer: that id is F's own count of the connection's
+// statements, not part of what F gave the application. The view is the
+// recording itself only where the command is the recording's; it is built
+// from the recording, which it never changes; its key names the answer F
+// gave, never the command: two serves that gave the same answer share it,
+// whatever command each answered and whatever statement id F numbered, and
+// no answer where the recorded one was written names another. An answer F
+// wrote that the recording does not hold, or a recording that is not one
+// command, is a view keploy cannot read.
 func TestServedView_IsTheCommandAsSentAndTheAnswerAsWritten(t *testing.T) {
 	prepare := func(q string) mysql.Request {
 		return mysql.Request{PacketBundle: viewPacket("COM_STMT_PREPARE", &mysql.StmtPreparePacket{Command: 0x16, Query: q})}
@@ -42,35 +44,15 @@ func TestServedView_IsTheCommandAsSentAndTheAnswerAsWritten(t *testing.T) {
 		t.Fatal("the recorded command answered with the recorded answer is not read as recorded")
 	}
 	renumbered := prepOK(7)
-	if _, _, asRecorded := servedView(rec, &live, &renumbered); asRecorded {
-		t.Fatal("a PREPARE answered with another statement id is read as recorded")
-	}
-	load, key, _ := servedView(rec, &live, &renumbered)
-	if load == nil || key == "" {
-		t.Fatal("a PREPARE answered with another statement id states no view")
-	}
-	v, err := load()
-	if err != nil || len(v.Spec.MySQLResponses) != 1 || v.Spec.MySQLResponses[0].Message.(*mysql.StmtPrepareOkPacket).StatementID != 7 {
-		t.Fatalf("view %+v %v; want the recorded answer with statement id 7", v, err)
-	}
-	if v.Spec.MySQLResponses[0].Payload != "raw" || v.Spec.MySQLResponses[0].Message.(*mysql.StmtPrepareOkPacket).NumParams != 1 {
-		t.Fatalf("the view lost the rest of the recorded answer: %+v", v.Spec.MySQLResponses[0])
-	}
-	if rec.Spec.MySQLResponses[0].Message.(*mysql.StmtPrepareOkPacket).StatementID != 1 {
-		t.Fatal("the view changed the recording")
-	}
-	if _, k, _ := servedView(rec, &live, &renumbered); k != key {
-		t.Fatal("the same command and id name another view")
-	}
-	other := prepOK(8)
-	if _, k, _ := servedView(rec, &live, &other); k == key {
-		t.Fatal("two statement ids share a view's key")
+	if load, key, asRecorded := servedView(rec, &live, &renumbered); !asRecorded || load != nil || key != "" {
+		t.Fatalf("the recorded PREPARE answered with F's statement id 7: as recorded %v, view %v, key %q; want as recorded: the id is F's count, not what it gave",
+			asRecorded, load != nil, key)
 	}
 
 	// Another command, the recorded answer: the live command in the view.
 	sent := prepare("SELECT  ?").PacketBundle
 	load, key2, asRecorded := servedView(rec, &sent, &rec.Spec.MySQLResponses[0].PacketBundle)
-	if asRecorded || load == nil || key2 == "" || key2 == key {
+	if asRecorded || load == nil || key2 == "" {
 		t.Fatalf("another command: as recorded %v, key %q; want a view of its own", asRecorded, key2)
 	}
 	if v, err := load(); err != nil || v.Spec.MySQLRequests[0].Message.(*mysql.StmtPreparePacket).Query != "SELECT  ?" ||
@@ -82,6 +64,26 @@ func TestServedView_IsTheCommandAsSentAndTheAnswerAsWritten(t *testing.T) {
 	}
 	if _, k, _ := servedView(rec, func() *mysql.PacketBundle { p := prepare("SELECT   ?").PacketBundle; return &p }(), &rec.Spec.MySQLResponses[0].PacketBundle); k != key2 {
 		t.Fatal("two commands answered with the same recorded answer are named different views")
+	}
+	// Answered with the statement ids F numbered: the recorded answer, one
+	// view whatever the id.
+	for _, id := range []uint32{7, 8} {
+		written := prepOK(id)
+		load, k, asRecorded := servedView(rec, &sent, &written)
+		if asRecorded || load == nil || k != key2 {
+			t.Fatalf("another command answered with statement id %d: as recorded %v, view %v, its key the recorded answer's %v; want the recorded answer's view",
+				id, asRecorded, load != nil, k == key2)
+		}
+		v, err := load()
+		if err != nil || len(v.Spec.MySQLResponses) != 1 || v.Spec.MySQLResponses[0].Message.(*mysql.StmtPrepareOkPacket).StatementID != 1 {
+			t.Fatalf("view %+v %v; want the recorded answer, statement id 1", v, err)
+		}
+		if v.Spec.MySQLResponses[0].Payload != "raw" || v.Spec.MySQLResponses[0].Message.(*mysql.StmtPrepareOkPacket).NumParams != 1 {
+			t.Fatalf("the view lost the rest of the recorded answer: %+v", v.Spec.MySQLResponses[0])
+		}
+	}
+	if rec.Spec.MySQLResponses[0].Message.(*mysql.StmtPrepareOkPacket).StatementID != 1 {
+		t.Fatal("the view changed the recording")
 	}
 	// The command's header is the application's too: another sequence id
 	// is another command.
