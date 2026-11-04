@@ -148,7 +148,8 @@ type Earlier struct {
 	// another request; F gave it the recorded answer), gives that view: the
 	// recording as F's application sent its request and F answered it
 	// (Tracker.ServedMockLive, read where a later call's rule reads it), and
-	// ViewKey names it among the recording's views. Read only where AsRecorded
+	// ViewKey names it among the recording's views by the answer F gave
+	// there, never by the request. Read only where AsRecorded
 	// is not borne out (servedAsRecorded): the view a later call of the set
 	// reads the recording with (Order.ServedView). nil says nothing.
 	View    func() (*models.Mock, error)

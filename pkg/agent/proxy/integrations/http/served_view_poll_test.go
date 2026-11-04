@@ -1,0 +1,124 @@
+package http
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
+	"go.keploy.io/server/v3/pkg/models"
+)
+
+// A poll the application signs anew on every call (an SQS receive: its
+// date, signature and invocation id change each time) that F answers with
+// its recording's answer whole, again and again where F's start-up lasts
+// longer than record's, is one view of the recording: F gave the application
+// one answer. A later call of the set reads the recording with that one
+// view, so a changed value that holds no word of it is learned. Before, each
+// signed request named a view of its own, the fifth was past the views a set
+// keeps, and the later call refused every changed value as one that may
+// stand where keploy could not read what it gave the application: the
+// consumer's insert after the polls was refused in record's full round, and
+// its test never ran there. A word of the first serve's request, which the
+// one view holds, is still refused naming the recording; one only a later
+// serve's request carried is the application's own, not what F gave it.
+func TestASignedPollServedManyTimesIsOneViewOfItsRecording(t *testing.T) {
+	const (
+		polls      = 64
+		cannotRead = "where keploy could not read what it gave the application"
+	)
+	invocation := func(i int) string { return fmt.Sprintf("inv%04d", i) }
+	signed := func(i int) map[string]string {
+		return map[string]string{
+			"X-Amz-Target":          "AmazonSQS.ReceiveMessage",
+			"X-Amz-Date":            fmt.Sprintf("20261103T2343%02dZ", i%60),
+			"Amz-Sdk-Invocation-Id": invocation(i),
+			"Authorization":         fmt.Sprintf("AWS4-HMAC-SHA256 Credential=dummy/20261103/us-east-1/sqs/aws4_request, Signature=%064x", i+1),
+			"Content-Type":          "application/x-amz-json-1.0",
+			"X-Amzn-Query-Mode":     "true",
+			"Amz-Sdk-Request":       "attempt=1; max=3",
+			"Accept-Encoding":       "gzip",
+			"User-Agent":            "aws-sdk-go-v2/1.36.3",
+			"Host":                  "sqs.us-east-1.localhost.localstack.cloud:4566",
+			"Content-Length":        "122",
+		}
+	}
+	const body = `{"MaxNumberOfMessages":10,"QueueUrl":"http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/q"}`
+	for _, tc := range []struct {
+		name string
+		ref  string // the later call's body.ref in F (recorded "7")
+		why  string // "" learns; else a part of the refusal
+	}{
+		{"a value no answer F gave holds", "wvq", ""},
+		{"a value the first serve's request carried", invocation(0), "as record's full round gave it"},
+		{"a value only a later serve's request carried", invocation(40), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			poll := learnRecorded("mock-2", time.Second, "POST", "/000000000000/q/", body, signed(-1), `{}`)
+			call := learnRecorded("mock-1", 2*time.Second, "POST", "/v1/messages", `{"ref":"7"}`, nil, `{}`)
+			tr := learn.NewTracker()
+			ctx := learn.WithTracker(context.Background(), tr)
+			tr.Begin()
+			for i := 0; i < polls; i++ {
+				reportPairing(ctx, live("POST", "/000000000000/q/", body, signed(i)), poll, integrations.AnsweredCall{}, false)
+			}
+			tr.End()
+			tr.Begin()
+			got, miss, err := h.learnMatch(ctx, live("POST", "/v1/messages", `{"ref":"`+tc.ref+`"}`, nil), &learnDb{perTest: []*models.Mock{call}}, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.why == "" {
+				if got == nil || miss != nil {
+					t.Fatalf("served %v miss %+v; want body.ref learned: F gave the %d polls one answer, which holds no word of it", got, miss, polls)
+				}
+				return
+			}
+			if got != nil || miss == nil || !strings.Contains(miss.res.Why, "mock-2") || !strings.Contains(miss.res.Why, tc.why) || strings.Contains(miss.res.Why, cannotRead) {
+				t.Fatalf("FALSE GREEN? served %v miss %+v; want body.ref refused, naming mock-2: %q", got, miss, tc.why)
+			}
+		})
+	}
+}
+
+// Two answers F gave of one recording name one view only where they are the
+// same in every part answerAsRecorded compares; each part that differs names
+// another view, and none is the recorded answer's.
+func TestAnAnswersKeyNamesEveryPartOfIt(t *testing.T) {
+	base := func() *models.HTTPResp {
+		return &models.HTTPResp{StatusCode: 200, StatusMessage: "OK", ProtoMajor: 1, ProtoMinor: 1,
+			Header: map[string]string{"Content-Type": "application/json", "X-Amzn-Requestid": "r-1"}, Body: `{}`}
+	}
+	key := answerKey(base())
+	if key == "" || key == recordedAnswerKey || answerKey(base()) != key {
+		t.Fatalf("an answer keyed %q, then %q; want one key of its own", key, answerKey(base()))
+	}
+	for name, change := range map[string]func(r *models.HTTPResp){
+		"status":         func(r *models.HTTPResp) { r.StatusCode = 201 },
+		"status message": func(r *models.HTTPResp) { r.StatusMessage = "Created" },
+		"protocol major": func(r *models.HTTPResp) { r.ProtoMajor = 2 },
+		"protocol minor": func(r *models.HTTPResp) { r.ProtoMinor = 0 },
+		"a header value": func(r *models.HTTPResp) { r.Header["X-Amzn-Requestid"] = "r-2" },
+		"one more header": func(r *models.HTTPResp) {
+			r.Header["X-Extra"] = "e"
+		},
+		"body":         func(r *models.HTTPResp) { r.Body = `{"Messages":[]}` },
+		"binary":       func(r *models.HTTPResp) { r.Binary = "AA==" },
+		"body skipped": func(r *models.HTTPResp) { r.BodySkipped = true },
+		"body size":    func(r *models.HTTPResp) { r.BodySize = 2 },
+		"stream body":  func(r *models.HTTPResp) { r.StreamBody = []models.HTTPStreamChunk{{TS: time.Unix(1, 0)}} },
+	} {
+		r := base()
+		change(r)
+		if answerKey(r) == key {
+			t.Errorf("an answer with another %s keyed as the first: two answers, one view", name)
+		}
+	}
+	if answerKey(nil) != "" {
+		t.Errorf("no answer keyed %q; want none", answerKey(nil))
+	}
+}

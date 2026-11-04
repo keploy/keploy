@@ -1583,15 +1583,20 @@ func (t *Tracker) ServedMockAsRecorded(m *models.Mock) {
 // and F answered it (Raw.ServedLive's live), read where a later call's rule
 // first reads it and kept for the set's later calls in a store of the
 // set's views (setDerived.views, Order.viewRead), never in its caches by
-// recording; key names that view among m's, the same for two serves that
-// gave the same view and another for each other. An adapter tells it once
-// for each such serve, after the serve, in place of ServedMockAsRecorded,
-// and only where it knows the whole view. A later call of the set reads m
-// with the view (Order.ServedView) where every serve of it the call's read
-// saw was told; with each where they differ. A nil view, a key "", or a
-// view past the maxLiveViews different ones a set keeps of m, says F gave a
-// view keploy cannot read: a later call refuses every word a value holds
-// now that may stand there (Raw.ServedChanged with none: fail closed).
+// recording; key names that view among m's by what F gave the application
+// there, its answer, never by the request it answered: the same for two
+// serves that gave the same answer and another for each other answer. The
+// set keeps the first view told under a key: a poll the application signs
+// anew on each call (a date, a signature, an invocation id), which F
+// answers with the same recorded answer every time, is one view however
+// often F serves it. An adapter tells it once for each such serve, after
+// the serve, in place of ServedMockAsRecorded, and only where it knows the
+// whole view. A later call of the set reads m with the view
+// (Order.ServedView) where every serve of it the call's read saw was told;
+// with each where they differ. A nil view, a key "", or a view past the
+// maxLiveViews different ones a set keeps of m, says F gave a view keploy
+// cannot read: a later call refuses every word a value holds now that may
+// stand there (Raw.ServedChanged with none: fail closed).
 func (t *Tracker) ServedMockLive(m *models.Mock, key string, view func() (*models.Mock, error)) {
 	if t == nil || m == nil {
 		return
@@ -1601,8 +1606,9 @@ func (t *Tracker) ServedMockLive(m *models.Mock, key string, view func() (*model
 	t.mu.Unlock()
 }
 
-// maxLiveViews is how many different views of one recording a set keeps
-// (ServedMockLive): a serve that gave another one is read as one whose view
+// maxLiveViews is how many different views of one recording, different
+// answers F gave of it, a set keeps (ServedMockLive): a serve that gave
+// another one is read as one whose view
 // could not be read, which fails closed, so a set keeps at most
 // maxLiveViews loaders of each recording, and a later call reads at most
 // as many views of it.
