@@ -308,12 +308,9 @@ func augmentDetector(det *detect.Detector) (*detect.Detector, error) {
 	return newDet, nil
 }
 
-// RedactYAML applies secret detection + redaction to a YAML blob.
-// - Populates/extends aggSecrets (shared across files in a test-set)
-// - Writes placeholders into the YAML
-// - Handles JSON-in-string and curl header blobs
-func RedactYAML(yamlBytes []byte, aggSecrets map[string]string, testName string) ([]byte, error) {
-	// 1) Detect secrets
+// newSecretDetector returns the detector keploy sanitize scans with: gitleaks'
+// default rules with the rules of custom_gitleaks_rules.toml merged in.
+func newSecretDetector() (*detect.Detector, error) {
 	detector, err := detect.NewDetectorDefaultConfig()
 	if err != nil {
 		return nil, fmt.Errorf("gitleaks: %w", err)
@@ -321,6 +318,19 @@ func RedactYAML(yamlBytes []byte, aggSecrets map[string]string, testName string)
 	detector, err = augmentDetector(detector)
 	if err != nil {
 		return nil, fmt.Errorf("augment gitleaks rules: %w", err)
+	}
+	return detector, nil
+}
+
+// RedactYAML applies secret detection + redaction to a YAML blob.
+// - Populates/extends aggSecrets (shared across files in a test-set)
+// - Writes placeholders into the YAML
+// - Handles JSON-in-string and curl header blobs
+func RedactYAML(yamlBytes []byte, aggSecrets map[string]string, testName string) ([]byte, error) {
+	// 1) Detect secrets
+	detector, err := newSecretDetector()
+	if err != nil {
+		return nil, err
 	}
 
 	findings := detector.DetectString(string(yamlBytes))
