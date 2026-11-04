@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -39,13 +40,21 @@ func clockMissOf(t *testing.T, in *req, mocks ...*models.Mock) (*models.MockMism
 // clockMissIn is clockMissOf under keploy.yml's request-body noise body.
 func clockMissIn(t *testing.T, in *req, body map[string][]string, mocks ...*models.Mock) (*models.MockMismatchReport, []observer.LoggedEntry) {
 	t.Helper()
+	return clockMissWhere(t, true, in, body, nil, mocks...)
+}
+
+// clockMissWhere is clockMissIn under keploy.yml's url noise urlNoise too,
+// where appClock says whether keploy can tell the application's clock at
+// the call (clockConn).
+func clockMissWhere(t *testing.T, appClock bool, in *req, body map[string][]string, urlNoise []string, mocks ...*models.Mock) (*models.MockMismatchReport, []observer.LoggedEntry) {
+	t.Helper()
 	t.Setenv("KEPLOY_PROVEN", "1")
 	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
 	in.arrived = base.Add(2 * time.Second)
 	core, logs := observer.New(zap.WarnLevel)
 	h := &HTTP{Logger: zap.New(core)}
 	db := &mockMemDb{mocks: mocks, updateUnFilteredReturn: true}
-	ok, _, diag, err := h.match(clockConn(true, base), in, db, models.ProvenFlakyHeaderNoise(), body, nil, true, false, false, true, true)
+	ok, _, diag, err := h.match(clockConn(appClock, base), in, db, models.ProvenFlakyHeaderNoise(), body, urlNoise, true, false, false, true, true)
 	if err != nil || ok || diag == nil {
 		t.Fatalf("match ok=%v diag=%v err=%v; want a miss", ok, diag, err)
 	}
@@ -163,6 +172,34 @@ func TestAClockReadKeployYmlDeclaresNoiseIsNotRefusedAbsent(t *testing.T) {
 	}
 	if why := reportWhy(r, "body.since"); !strings.HasSuffix(why, ", and this call carries no value at body.since: it changed") || len(said) != 1 {
 		t.Fatalf("the reason of body.since is %q, %d clock warnings; want it refused as absent, once", why, len(said))
+	}
+}
+
+// Where keploy cannot tell the application's clock at the call, a learned
+// place the call does not carry is still refused as absent, the more direct
+// cause: the check that the call carries a value there comes before the
+// check that keploy can tell the clock to read it against. The place the
+// call does carry, a word of the recorded form, is refused for the clock
+// keploy cannot tell. The agent logs each with its reason.
+func TestAClockReadTheCallDoesNotCarryIsAbsentWhereKeployCannotTellTheClock(t *testing.T) {
+	const cannotTell = "keploy cannot tell the application's clock at this call"
+	in := sent("/send", map[string]string{"Content-Type": "application/json"}, `{"content":"<p>E2E email body 1730000000999</p>","to":"a@b.c"}`)
+	r, said := clockMissWhere(t, false, in, nil, nil, stampedSend())
+	absent, carried := reportWhy(r, "body.since"), reportWhy(r, "body.content")
+	if !strings.HasSuffix(absent, ", and this call carries no value at body.since: it changed") || strings.Contains(absent, cannotTell) {
+		t.Fatalf("the reason of body.since, which the call does not carry, is %q; want it refused as absent, not for the clock keploy cannot tell", absent)
+	}
+	if !strings.HasPrefix(carried, "body.content was learned as ") || !strings.Contains(carried, cannotTell) || strings.Contains(carried, "carries no value") {
+		t.Fatalf("the reason of body.content, which the call carries, is %q; want it refused for the clock keploy cannot tell (%q)", carried, cannotTell)
+	}
+	logged := map[string]string{}
+	for _, e := range said {
+		c := e.ContextMap()
+		f, _ := c["field"].(string)
+		logged[f], _ = c["reason"].(string)
+	}
+	if len(said) != 2 || logged["body.since"] != absent || logged["body.content"] != carried {
+		t.Fatalf("the agent logged %d clock warnings, %v; want body.since and body.content, each with its reason", len(said), logged)
 	}
 }
 
@@ -358,6 +395,39 @@ func TestAClockSegmentKeployYmlUrlNoiseReachesIsNotChecked(t *testing.T) {
 	in.arrived = base.Add(2 * time.Second)
 	if got, diag := strictMatchIn(t, clockConn(true, base), in, nil, nil, []string{`T[0-9:]+Z`}, m); got == nil {
 		t.Fatalf("refused (%v); want the segment keploy.yml's noise reaches left unchecked", differs(diag))
+	}
+}
+
+// keploy.yml's url noise that reaches a path segment learned as a read of
+// the clock in one of the two values alone (the call's "me", or the
+// recorded instant) excuses nothing there: a pattern reaches a place only
+// where it matches both values, as the walk excuses a field. "me" is no
+// read of the clock either, so the path differs as with nothing learned:
+// the recording is of another route, the path alone named, no reason, no
+// warning.
+func TestAClockSegmentKeployYmlUrlNoiseReachesInOneValueAloneIsAnotherRoute(t *testing.T) {
+	const seg = "me"
+	call, rec := "/v1/u/"+seg, pathStamped().Spec.HTTPReq.URL
+	recSeg := learnNoise{}.segments(rec)[2]
+	for _, c := range []struct {
+		name, pat string
+		inCall    bool
+	}{
+		{"the call's value alone", seg + "$", true},
+		{"the recorded value alone", `T[0-9:]+Z`, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			// The pattern matches the one value the row names, in its
+			// segment and in its whole path alike.
+			re := regexp.MustCompile(c.pat)
+			if re.MatchString(seg) != c.inCall || re.MatchString(call) != c.inCall || re.MatchString(recSeg) == c.inCall || re.MatchString(rec) == c.inCall {
+				t.Fatalf("pattern %q does not match the one value the row names", c.pat)
+			}
+			r, said := clockMissWhere(t, true, sent(call, map[string]string{"Content-Type": "application/json"}, `{}`), nil, []string{c.pat}, pathStamped())
+			if r.ClosestMock != "mock-p" || r.MatchPhase == models.MatchPhaseStrict || strings.Join(r.Differs, " ") != "path" || len(r.FieldReasons) != 0 || len(said) != 0 {
+				t.Fatalf("closest %q, phase %q, Differs %v, FieldReasons %+v, %d clock warnings; want mock-p of another route, the path alone, no reason, no warning", r.ClosestMock, r.MatchPhase, r.Differs, r.FieldReasons, len(said))
+			}
+		})
 	}
 }
 
