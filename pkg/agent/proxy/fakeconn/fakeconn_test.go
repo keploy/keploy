@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -974,4 +975,83 @@ func TestAtChunkBoundaryIsNoChunkReadInPart(t *testing.T) {
 	at(true, "with the third chunk gone")
 	peek("mnop")
 	at(true, "at the fourth chunk, whole")
+}
+
+// ReadToEnd says the reader has read its stream to the end its producer gave
+// it, however it gets there: with the stream ended before it reads, while it
+// waits for more, or after a Close. A reader closed before the stream's end
+// reads ErrClosed, and has not read it to its end.
+func TestReadToEndClosesAsTheReaderReadsTheStreamsEnd(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T, ch chan Chunk, f *FakeConn) error
+		end  bool
+	}{
+		{name: "ended before the read", end: true, run: func(t *testing.T, ch chan Chunk, f *FakeConn) error {
+			close(ch)
+			_, err := f.ReadChunk()
+			return err
+		}},
+		{name: "ended while the reader waits", end: true, run: func(t *testing.T, ch chan Chunk, f *FakeConn) error {
+			errc := make(chan error, 1)
+			go func() { _, err := f.ReadChunk(); errc <- err }()
+			for {
+				if waiting, _ := f.Waiting(); waiting {
+					break
+				}
+				runtime.Gosched()
+			}
+			close(ch)
+			return <-errc
+		}},
+		{name: "ended, then closed", end: true, run: func(t *testing.T, ch chan Chunk, f *FakeConn) error {
+			close(ch)
+			_ = f.Close()
+			_, err := f.ReadChunk()
+			return err
+		}},
+		{name: "closed before its end", end: false, run: func(t *testing.T, ch chan Chunk, f *FakeConn) error {
+			_ = f.Close()
+			_, err := f.ReadChunk()
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := make(chan Chunk, 1)
+			ch <- Chunk{Bytes: []byte("x")}
+			f := New(ch, nil, nil)
+			if c, err := f.ReadChunk(); err != nil || string(c.Bytes) != "x" {
+				t.Fatalf("first read: %q, %v", c.Bytes, err)
+			}
+			select {
+			case <-f.ReadToEnd():
+				t.Fatal("ReadToEnd closed before the reader read the stream's end")
+			default:
+			}
+			err := tc.run(t, ch, f)
+			want := io.EOF
+			if !tc.end {
+				want = ErrClosed
+			}
+			if !errors.Is(err, want) {
+				t.Fatalf("read: %v, want %v", err, want)
+			}
+			select {
+			case <-f.ReadToEnd():
+				if !tc.end {
+					t.Fatal("ReadToEnd closed for a reader closed before the stream's end")
+				}
+			default:
+				if tc.end {
+					t.Fatal("ReadToEnd not closed once the reader read the stream's end")
+				}
+			}
+			if tc.end {
+				// The end reads the same again, and is told once.
+				if _, err := f.ReadChunk(); !errors.Is(err, io.EOF) {
+					t.Fatalf("second read at the end: %v, want io.EOF", err)
+				}
+			}
+		})
+	}
 }

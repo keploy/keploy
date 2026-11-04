@@ -116,6 +116,14 @@ type Supervisor struct {
 	// we can and cannot guarantee.
 	SessionOnAbort func()
 
+	// StopDeadline, when set before Run, is closed once the stop's own
+	// overall deadline has passed. After the outer ctx ends (the recording's
+	// stop) Run waits for its parser to return, to read both its streams to
+	// their end, or to hang, and aborts it on none of those before this is
+	// closed. nil: the stop has no deadline of its own here (the process's
+	// end bounds it).
+	StopDeadline <-chan struct{}
+
 	// suspended, once set, permanently disarms the hang watchdog for
 	// this connection (see SuspendWatchdog). Panic and mem-cap
 	// protection are unaffected.
@@ -305,74 +313,112 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 		return s.classifyReturn(ctx, r.panicked, r.panicVal, r.stack, r.err)
 
 	case <-s.hungCh:
-		// Abort first: the parser is retired from here, and the abort
-		// stops its capture (SessionOnAbort). It goes on running, and the
-		// abort closes its streams under it before its context is
-		// cancelled below: retire its session first, so that nothing it
-		// hands over from here, cut where its streams were closed, is
-		// recorded (Session.retire).
-		sess.retire(leftOutParserHung)
-		s.fireOnAbort()
-		// Debug-level: hang abort is a designed control-flow path —
-		// the dispatcher's FallthroughToPassthrough handling picks it
-		// up and the relay keeps forwarding bytes. Operators who want
-		// to tune behaviour have explicit knobs (see next_step).
-		s.cfg.Logger.Debug("parser hang detected; aborting",
-			zap.Duration("hang_budget", s.cfg.HangBudget),
-			zap.String("next_step", "raise supervisor.Config.HangBudget for slow-but-legitimate workloads (long LLM replies, pg_sleep), or set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough)"),
-		)
-		runCancel()
-		return Result{
-			Status:                   StatusHung,
-			Err:                      fmt.Errorf("supervisor: parser hung beyond %s", s.cfg.HangBudget),
-			FallthroughToPassthrough: true,
-		}
+		return s.hung(sess, runCancel)
 
 	case <-ctx.Done():
 		s.cfg.Logger.Debug("supervisor: outer ctx cancelled")
 		runCancel()
-		// Give the parser a short chance to return cleanly; if it
-		// does we surface that. Otherwise we classify as canceled.
-		select {
-		case r := <-done:
-			if r.panicked {
-				s.fireOnAbort()
-				if s.cfg.PanicReporter != nil {
-					s.reportPanic(r.panicVal, r.stack)
-				}
-				return Result{
-					Status:                   StatusPanicked,
-					Err:                      wrapPanic(r.panicVal),
-					FallthroughToPassthrough: true,
-				}
+		// The stop. A parser behind its capture still holds what the relay
+		// captured for it before the stop, and the relay's teardown ends its
+		// streams once it has handed all of that on: the parser reads it
+		// (it ends on its streams' end, not on its context's) and returns.
+		// So the supervisor waits for an event, never for a time: a grace
+		// measured on the wall clock decides nothing on a starved agent,
+		// where the parser is not run within it, and aborting it then cut
+		// short what it had not read yet. It aborts the parser only once
+		// that costs nothing captured, or once the stop's own deadline says
+		// the wait is over:
+		//   - the parser has read both its streams to their end
+		//     (fakeconn.FakeConn.ReadToEnd): whatever it still waits on,
+		//     nothing of the capture is left for it to read;
+		//   - the stop's overall deadline passed (StopDeadline): what the
+		//     parser has not read by then is left out, with its span, as
+		//     everything a retired parser never read is;
+		//   - it hangs (the watchdog, on the time it could run): the hang
+		//     path, as before the stop.
+		// The abort fires SessionOnAbort, whose closes unblock a parser
+		// parked in a read of a stream the relay has not ended: the
+		// goroutine does not leak, and the relay's tees do not stay armed.
+		ends := streamEnds(sess)
+	wait:
+		for {
+			var end <-chan struct{}
+			if len(ends) > 0 {
+				end = ends[0]
 			}
-			// Clean parser exit on outer-cancel: no blocked reads to
-			// unstick, so we intentionally skip fireOnAbort. The
-			// FakeConns will be GC'd on the normal return path.
-			return Result{Status: StatusCanceled, Err: r.err}
-		case <-time.After(50 * time.Millisecond):
-			// Parser did NOT return within the grace window. Most
-			// likely it is parked in FakeConn.Read/ReadChunk, which
-			// do not observe ctx — they only unblock on Close. Fire
-			// SessionOnAbort now so the dispatcher's abort callback
-			// (closes both FakeConns, pauses relay tees) runs and
-			// the parser goroutine can exit. Without this, the
-			// goroutine leaks for the life of the process and the
-			// relay tees stay armed, so every subsequent chunk on
-			// this connection falls through the channel-full drop
-			// path logging at Debug.
-			//
-			// FallthroughToPassthrough is set so the outer caller
-			// knows this connection should route raw; consistent
-			// with the hang / panic paths above.
-			s.fireOnAbort()
-			return Result{
-				Status:                   StatusCanceled,
-				Err:                      ctx.Err(),
-				FallthroughToPassthrough: true,
+			select {
+			case r := <-done:
+				if r.panicked {
+					s.fireOnAbort()
+					if s.cfg.PanicReporter != nil {
+						s.reportPanic(r.panicVal, r.stack)
+					}
+					return Result{
+						Status:                   StatusPanicked,
+						Err:                      wrapPanic(r.panicVal),
+						FallthroughToPassthrough: true,
+					}
+				}
+				// Clean parser exit on outer-cancel: no blocked reads to
+				// unstick, so we intentionally skip fireOnAbort. The
+				// FakeConns will be GC'd on the normal return path.
+				return Result{Status: StatusCanceled, Err: r.err}
+			case <-s.hungCh:
+				return s.hung(sess, runCancel)
+			case <-end:
+				if ends = ends[1:]; len(ends) == 0 {
+					break wait
+				}
+			case <-s.StopDeadline:
+				break wait
 			}
 		}
+		// FallthroughToPassthrough is set so the outer caller knows this
+		// connection should route raw; consistent with the hang / panic
+		// paths above.
+		s.fireOnAbort()
+		return Result{
+			Status:                   StatusCanceled,
+			Err:                      ctx.Err(),
+			FallthroughToPassthrough: true,
+		}
 	}
+}
+
+// hung retires a parser the watchdog found hung, and aborts it.
+func (s *Supervisor) hung(sess *Session, runCancel context.CancelFunc) Result {
+	// Abort first: the parser is retired from here, and the abort
+	// stops its capture (SessionOnAbort). It goes on running, and the
+	// abort closes its streams under it before its context is
+	// cancelled below: retire its session first, so that nothing it
+	// hands over from here, cut where its streams were closed, is
+	// recorded (Session.retire).
+	sess.retire(leftOutParserHung)
+	s.fireOnAbort()
+	// Debug-level: hang abort is a designed control-flow path —
+	// the dispatcher's FallthroughToPassthrough handling picks it
+	// up and the relay keeps forwarding bytes. Operators who want
+	// to tune behaviour have explicit knobs (see next_step).
+	s.cfg.Logger.Debug("parser hang detected; aborting",
+		zap.Duration("hang_budget", s.cfg.HangBudget),
+		zap.String("next_step", "raise supervisor.Config.HangBudget for slow-but-legitimate workloads (long LLM replies, pg_sleep), or set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough)"),
+	)
+	runCancel()
+	return Result{
+		Status:                   StatusHung,
+		Err:                      fmt.Errorf("supervisor: parser hung beyond %s", s.cfg.HangBudget),
+		FallthroughToPassthrough: true,
+	}
+}
+
+// streamEnds is what says sess's parser has read both its streams to their
+// end (fakeconn.FakeConn.ReadToEnd), nil for a session without both: then
+// nothing says so.
+func streamEnds(sess *Session) []<-chan struct{} {
+	if sess == nil || sess.ClientStream == nil || sess.DestStream == nil {
+		return nil
+	}
+	return []<-chan struct{}{sess.ClientStream.ReadToEnd(), sess.DestStream.ReadToEnd()}
 }
 
 // classifyReturn maps a parser's return (panic or error or nil) plus
