@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
-	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg/agent"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/lru"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/plaintcp"
@@ -246,8 +246,8 @@ const (
 )
 
 // newDNSCache creates a new thread-safe, size-bounded, TTL-expiring DNS cache.
-func newDNSCache() *expirable.LRU[string, dnsCacheEntry] {
-	return expirable.NewLRU[string, dnsCacheEntry](dnsCacheMaxSize, nil, dnsCacheTTL)
+func newDNSCache() *lru.Expirable[string, dnsCacheEntry] {
+	return lru.NewExpirable[string, dnsCacheEntry](dnsCacheMaxSize, nil, dnsCacheTTL)
 }
 
 // shouldCacheDNSResponse reports whether a DNS resolution result is
@@ -282,16 +282,16 @@ func shouldCacheDNSResponse(mode models.Mode, resp dnsCacheEntry) bool {
 // exist (search-list expansions) never evict a resolved answer, which would be
 // recorded again each time its question leaves the dnsCache.
 type dnsRecordDedupe struct {
-	resolved *expirable.LRU[string, bool]
-	negative *expirable.LRU[string, bool]
+	resolved *lru.Expirable[string, bool]
+	negative *lru.Expirable[string, bool]
 }
 
 // newRecordedDNSMocksCache creates the bounded, TTL-expiring trackers for DNS
 // mock deduplication.
 func newRecordedDNSMocksCache() *dnsRecordDedupe {
 	return &dnsRecordDedupe{
-		resolved: expirable.NewLRU[string, bool](recordedDNSMocksMaxSize, nil, recordedDNSMocksTTL),
-		negative: expirable.NewLRU[string, bool](recordedDNSNegativesMaxSize, nil, recordedDNSMocksTTL),
+		resolved: lru.NewExpirable[string, bool](recordedDNSMocksMaxSize, nil, recordedDNSMocksTTL),
+		negative: lru.NewExpirable[string, bool](recordedDNSNegativesMaxSize, nil, recordedDNSMocksTTL),
 	}
 }
 
@@ -318,8 +318,8 @@ func (d *dnsRecordDedupe) Purge() {
 
 // newNodataRelayLogCache creates the bounded, TTL-expiring tracker that dedupes
 // the "relayed NODATA" Info log to once per (name, qtype).
-func newNodataRelayLogCache() *expirable.LRU[string, bool] {
-	return expirable.NewLRU[string, bool](nodataRelayLogMaxSize, nil, nodataRelayLogTTL)
+func newNodataRelayLogCache() *lru.Expirable[string, bool] {
+	return lru.NewExpirable[string, bool](nodataRelayLogMaxSize, nil, nodataRelayLogTTL)
 }
 
 // shouldLogNodataRelay reports whether the "relayed NODATA" Info line has not
