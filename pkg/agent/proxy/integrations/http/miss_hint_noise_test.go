@@ -2,6 +2,9 @@ package http
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -50,16 +53,28 @@ func missWith(t *testing.T, on, noAuto bool, cfg map[string]map[string][]string,
 // writes it:
 //   - Without the switch the matcher lets a call carry headers its recording
 //     does not, so such a header is no part of the remedy; under the switch
-//     every header is compared, so it is.
-//   - A recorded AWS SigV4 Authorization is never offered: under the switch
-//     its parts are compared so that only its signature may differ, and
-//     declaring the header would stop that. Another scheme is offered.
-//     (Without the switch Authorization is among the headers keploy itself
-//     treats as noise, so it causes a miss only with that noise disabled.)
+//     every header is compared (except host, content-length and keploy*
+//     headers and those keploy's own or keploy.yml's header noise names),
+//     so it is.
+//   - An AWS SigV4 Authorization, recorded or only the call's, and an
+//     x-amz-content-sha256, are never offered: under the switch a recorded
+//     SigV4 Authorization's parts are compared so that only its signature
+//     may differ, and an x-amz-content-sha256 with the body the call sent;
+//     declaring either header would stop that for every recording. An
+//     Authorization of another scheme on both sides is offered. (Without
+//     the switch both are among
+//     the headers keploy itself treats as noise, so they cause a miss only
+//     with that noise disabled.)
 //   - Without the switch the schema phase refuses a recording on its
 //     Content-Type's media type and its body's type whatever the noise says:
 //     the miss names them, and the hint offers no header noise for a call
-//     that would still miss.
+//     that would still miss, even when the refusal is past the 25 diffs the
+//     report carries (the causes first). A Content-Type that differs only
+//     in its parameters is no refusal. Nor is one the recording names under
+//     a key in another case, a gap of the matcher: the schema phase reads
+//     the key "Content-Type" exactly, so it skips the media-type check for
+//     such a recording (recordings read by http.ReadRequest never hit it,
+//     as it canonicalises keys), and the report mirrors it.
 //   - A field keploy.yml already guards with patterns is to have its entry
 //     changed, not added.
 //
@@ -81,6 +96,14 @@ func TestTheHintOffersOnlyNoiseThatMakesTheCallMatch(t *testing.T) {
 		}
 		return m
 	}
+	// numbered is m with n headers named prefix and a number from 00.
+	numbered := func(m map[string]string, prefix string, n int) map[string]string {
+		for i := 0; i < n; i++ {
+			m[fmt.Sprintf("%s%02d", prefix, i)] = "1"
+		}
+		return m
+	}
+	payloadHash := sha256.Sum256([]byte(json))
 	header := func(kv ...string) map[string]map[string][]string {
 		m := map[string][]string{}
 		for i := 0; i+1 < len(kv); i += 2 {
@@ -92,6 +115,12 @@ func TestTheHintOffersOnlyNoiseThatMakesTheCallMatch(t *testing.T) {
 		}
 		return map[string]map[string][]string{"header": m}
 	}
+	// recordedMissing declares the Referer and X-R00 to X-R23 with empty
+	// lists, as header's pairs.
+	recordedMissing := []string{"referer", ""}
+	for i := 0; i < 24; i++ {
+		recordedMissing = append(recordedMissing, fmt.Sprintf("x-r%02d", i), "")
+	}
 	for _, c := range []struct {
 		name            string
 		on, noAuto      bool
@@ -99,6 +128,8 @@ func TestTheHintOffersOnlyNoiseThatMakesTheCallMatch(t *testing.T) {
 		recHdr, liveHdr map[string]string
 		recBody, live   string
 		diffs           []models.MockFieldDiff // each among the report's field diffs
+		cut             []string               // paths the report does not carry, past the 25 it does
+		full            bool                   // the report is cut to 25
 		hint            string
 		fix             map[string]map[string][]string // the noise the hint offers: declared, the call is served
 		stillMisses     map[string]map[string][]string // a call offered no noise still misses with these declared
@@ -127,6 +158,17 @@ func TestTheHintOffersOnlyNoiseThatMakesTheCallMatch(t *testing.T) {
 		{name: "a recorded SigV4 Authorization signed another way, switch on", on: true, recHdr: hdr("Authorization", sigV4), liveHdr: hdr("Authorization", "Bearer t"), recBody: json, live: json,
 			diffs: []models.MockFieldDiff{{Path: "header.authorization", Kind: models.DiffKindValueChanged}},
 			hint:  "Only values drifted (header.authorization). If the change is expected, " + rerecord + "."},
+		{name: "a SigV4 Authorization only the call carries, switch on", on: true, recHdr: hdr(), liveHdr: hdr("Authorization", sigV4), recBody: json, live: json,
+			diffs: []models.MockFieldDiff{{Path: "header.authorization", Kind: models.DiffKindMissingInMock}}, hint: structural},
+		// An x-amz-content-sha256 is compared with the body the call sent
+		// under the switch, and is keploy's own header noise without it.
+		{name: "an x-amz-content-sha256 that is no hash of the body the call sent, switch on", on: true,
+			recHdr: hdr("X-Amz-Content-Sha256", hex.EncodeToString(payloadHash[:])), liveHdr: hdr("X-Amz-Content-Sha256", strings.Repeat("0", 64)), recBody: json, live: json,
+			diffs: []models.MockFieldDiff{{Path: "header.x-amz-content-sha256", Kind: models.DiffKindValueChanged}},
+			hint:  "Only values drifted (header.x-amz-content-sha256). If the change is expected, " + rerecord + "."},
+		{name: "a recorded x-amz-content-sha256 missing, switch off, keploy's header noise disabled", noAuto: true,
+			recHdr: hdr("X-Amz-Content-Sha256", hex.EncodeToString(payloadHash[:])), liveHdr: hdr(), recBody: json, live: json,
+			diffs: []models.MockFieldDiff{{Path: "header.X-Amz-Content-Sha256", Kind: models.DiffKindMissingInLive}}, hint: structural},
 		{name: "a recorded Authorization of another scheme missing, switch on", on: true, recHdr: hdr("Authorization", "Bearer t"), liveHdr: hdr(), recBody: json, live: json,
 			diffs: []models.MockFieldDiff{{Path: "header.authorization", Kind: models.DiffKindMissingInLive}},
 			hint:  "Recorded headers are missing from this call (header.authorization). If they are optional, add the headers under test.globalNoise.global.header (e.g. header: {authorization: []}); otherwise " + rerecord + ".",
@@ -139,6 +181,37 @@ func TestTheHintOffersOnlyNoiseThatMakesTheCallMatch(t *testing.T) {
 			diffs:       []models.MockFieldDiff{{Path: "header.Content-Type", Kind: models.DiffKindValueChanged}, {Path: "header.Referer", Kind: models.DiffKindMissingInLive}},
 			hint:        structural,
 			stillMisses: header("referer", "", "content-type", "")},
+		// The report carries 25 diffs, the causes first: without the switch
+		// 24 headers only the call carries are no cause, so the refused
+		// Content-Type after them is carried ahead of them, and keeps the
+		// noise out.
+		{name: "a Content-Type the schema phase refuses behind 24 headers only the call carries, beside a recorded header missing, switch off",
+			recHdr: hdr("Content-Type", "application/json", "Referer", "http://localhost/app"), liveHdr: numbered(hdr("Content-Type", "text/plain"), "X-H", 24), recBody: json, live: json,
+			diffs:       []models.MockFieldDiff{{Path: "header.Referer", Kind: models.DiffKindMissingInLive}, {Path: "header.Content-Type", Kind: models.DiffKindValueChanged}},
+			full:        true,
+			hint:        structural,
+			stillMisses: header("referer", "")},
+		// 25 recorded headers missing are causes ahead of the refused
+		// Content-Type, which the report cuts: the hint still reads it.
+		{name: "a Content-Type the schema phase refuses past the 25 diffs the report carries, behind recorded headers missing, switch off",
+			recHdr: numbered(hdr("Content-Type", "application/json", "Referer", "http://localhost/app"), "X-R", 24), liveHdr: hdr("Content-Type", "text/plain"), recBody: json, live: json,
+			diffs:       []models.MockFieldDiff{{Path: "header.Referer", Kind: models.DiffKindMissingInLive}, {Path: "header.X-R23", Kind: models.DiffKindMissingInLive}},
+			cut:         []string{"header.Content-Type"},
+			hint:        structural,
+			stillMisses: header(recordedMissing...)},
+		// The schema phase compares media types, not their parameters.
+		{name: "a Content-Type that differs only in its parameters beside a recorded header missing, switch off",
+			recHdr: hdr("Content-Type", "application/json", "Referer", "http://localhost/app"), liveHdr: hdr("Content-Type", "application/json; charset=utf-8"), recBody: json, live: json,
+			diffs: []models.MockFieldDiff{{Path: "header.Referer", Kind: models.DiffKindMissingInLive}},
+			hint:  "Recorded headers are missing from this call (header.Referer). If they are optional, add the headers under test.globalNoise.global.header (e.g. header: {referer: []}); otherwise " + rerecord + ".",
+			fix:   header("referer", "")},
+		// It reads the recording's Content-Type under the key "Content-Type"
+		// exactly, and the report mirrors it (see above).
+		{name: "a Content-Type recorded under a lowercase key beside a recorded header missing, switch off",
+			recHdr: hdr("content-type", "application/json", "Referer", "http://localhost/app"), liveHdr: hdr("Content-Type", "text/plain"), recBody: json, live: json,
+			diffs: []models.MockFieldDiff{{Path: "header.Referer", Kind: models.DiffKindMissingInLive}},
+			hint:  "Recorded headers are missing from this call (header.Referer). If they are optional, add the headers under test.globalNoise.global.header (e.g. header: {referer: []}); otherwise " + rerecord + ".",
+			fix:   header("referer", "")},
 		// The schema phase reads Content-Type only when both sides send one.
 		{name: "a Content-Type only the recording sends beside a recorded header missing, switch off", recHdr: hdr("Content-Type", "application/json", "Referer", "http://localhost/app"), liveHdr: hdr(), recBody: json, live: json,
 			diffs: []models.MockFieldDiff{{Path: "header.Content-Type", Kind: models.DiffKindMissingInLive}, {Path: "header.Referer", Kind: models.DiffKindMissingInLive}},
@@ -179,6 +252,14 @@ func TestTheHintOffersOnlyNoiseThatMakesTheCallMatch(t *testing.T) {
 					t.Errorf("field diffs %+v; want %+v among them", r.FieldDiffs, want)
 				}
 			}
+			if (c.full || len(c.cut) > 0) && len(r.FieldDiffs) != 25 {
+				t.Errorf("the report carries %d field diffs; want the 25 it is cut to", len(r.FieldDiffs))
+			}
+			for _, path := range c.cut {
+				if slices.ContainsFunc(r.FieldDiffs, func(d models.MockFieldDiff) bool { return d.Path == path }) {
+					t.Errorf("field diffs %+v carry %s; want it past the cut", r.FieldDiffs, path)
+				}
+			}
 			if r.NextSteps != c.hint {
 				t.Errorf("hint:\n got  %q\n want %q", r.NextSteps, c.hint)
 			}
@@ -214,9 +295,33 @@ func TestUnderTheSwitchTheMissNamesNoSchemaTypeRefusal(t *testing.T) {
 	}
 }
 
+// Under the switch, a miss built from the closest recording of the pool (the
+// strict comparison named none) offers no noise for a SigV4 Authorization
+// only the call carries, as a strict miss offers none.
+func TestUnderTheSwitchThePoolsClosestOffersNoSigV4Noise(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	sigV4 := "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=" + strings.Repeat("a", 64)
+	rec := recorded("m", "/x", nil, `{"a":1}`)
+	request, _ := http.NewRequest("POST", "http://api.example/x", strings.NewReader(`{"a":1}`))
+	request.Header.Set("Authorization", sigV4)
+	request.Header.Set("Host", request.Host) // as decode sets it
+	diag := &matchDiag{phase: models.MatchPhaseSchema, candidates: 1, pool: []*models.Mock{rec}}
+	r := newHTTP().buildHTTPMismatchReport(request, []byte(`{"a":1}`), &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
+	if !slices.ContainsFunc(r.FieldDiffs, func(d models.MockFieldDiff) bool {
+		return d.Path == "header.Authorization" && d.Kind == models.DiffKindMissingInMock
+	}) {
+		t.Errorf("field diffs %+v; want header.Authorization only the call carries among them", r.FieldDiffs)
+	}
+	const structural = "Request structure changed since recording. Re-record the test set with 'keploy record', or, if you edited its mocks, remap it with --disable-mapping --update-test-mapping."
+	if r.NextSteps != structural {
+		t.Errorf("hint:\n got  %q\n want %q", r.NextSteps, structural)
+	}
+}
+
 // The fields a strict miss names as keploy.yml's patterns refused are those
 // with a reason that is no refused read of the application's clock, and a
-// recording's SigV4 Authorization is named in the case it was recorded in.
+// SigV4 Authorization, the recording's or else the call's (any of its
+// values), is named in the case it was sent in.
 func TestTheHintsNoiseFactsOfAStrictMiss(t *testing.T) {
 	fields := []strictField{
 		{diff: models.MockFieldDiff{Path: "header.x-id"}, why: "keploy.yml's noise lets header.x-id vary only within ..."},
@@ -229,15 +334,22 @@ func TestTheHintsNoiseFactsOfAStrictMiss(t *testing.T) {
 	sigV4 := "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=" + strings.Repeat("a", 64)
 	for _, c := range []struct {
 		header map[string]string
+		live   http.Header
 		want   []string
 	}{
-		{map[string]string{"authorization": sigV4}, []string{"header.authorization"}},
-		{map[string]string{"Authorization": sigV4}, []string{"header.Authorization"}},
-		{map[string]string{"Authorization": "Bearer t"}, nil},
-		{map[string]string{"X-Auth": sigV4}, nil},
+		{map[string]string{"authorization": sigV4}, nil, []string{"header.authorization"}},
+		{map[string]string{"Authorization": sigV4}, nil, []string{"header.Authorization"}},
+		{map[string]string{"Authorization": sigV4}, http.Header{"authorization": {sigV4}}, []string{"header.Authorization"}},
+		{map[string]string{"Authorization": "Bearer t"}, nil, nil},
+		{map[string]string{"X-Auth": sigV4}, nil, nil},
+		{nil, http.Header{"Authorization": {sigV4}}, []string{"header.Authorization"}},
+		{nil, http.Header{"authorization": {sigV4}}, []string{"header.authorization"}},
+		{map[string]string{"Authorization": "Bearer t"}, http.Header{"Authorization": {"Bearer t", sigV4}}, []string{"header.Authorization"}},
+		{nil, http.Header{"Authorization": {"Bearer t"}}, nil},
+		{nil, http.Header{"X-Auth": {sigV4}}, nil},
 	} {
-		if got := signedAuthorization(recorded("m", "/x", c.header, "")); !slices.Equal(got, c.want) {
-			t.Errorf("signedAuthorization(%v) = %v; want %v", c.header, got, c.want)
+		if got := signedAuthorization(recorded("m", "/x", c.header, ""), c.live); !slices.Equal(got, c.want) {
+			t.Errorf("signedAuthorization(%v, %v) = %v; want %v", c.header, c.live, got, c.want)
 		}
 	}
 }

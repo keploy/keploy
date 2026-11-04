@@ -594,7 +594,8 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest, actualKe
 		WithPhase(phase, candidateCount).
 		WithClosest(closest.Name, diffs).
 		WithGuarded(guardedPaths(diag.differs)...).
-		WithoutNoise(signedAuthorization(closest)...).
+		WithoutNoise(signedAuthorization(closest, request.Header)...).
+		WithoutNoise(payloadHashPaths()...).
 		WithRenderedRequests(
 			renderMockRequest(closest.Spec.HTTPReq, closest.Noise),
 			renderLiveRequest(request, liveBody, closest.Noise),
@@ -619,12 +620,15 @@ func guardedPaths(fields []strictField) []string {
 	return out
 }
 
-// signedAuthorization is the report path of m's recorded Authorization when
-// it is an AWS SigV4 one, for the hint to offer no keploy.yml noise for:
-// under the proven switch its parts are compared so that only its signature
-// may differ (strict_sigv4.go), and declaring the header noise would stop
-// that for every call. One keploy.yml serves both modes, so neither offers it.
-func signedAuthorization(m *models.Mock) []string {
+// signedAuthorization is the report path of the Authorization of m's
+// recording, or else of the live call (live), when it is an AWS SigV4 one,
+// for the hint to offer no keploy.yml noise for. Under the proven switch the
+// parts of a recorded SigV4 Authorization are compared so that only its
+// signature may differ (strict_sigv4.go); declaring the header noise, even
+// to excuse a call that signs where its recording did not, would stop that
+// comparison for every recording. One keploy.yml serves both modes, so
+// neither offers it.
+func signedAuthorization(m *models.Mock, live http.Header) []string {
 	for k, v := range m.Spec.HTTPReq.Header {
 		if strings.EqualFold(k, "authorization") {
 			if _, ok := parseSigV4Authorization(v); ok {
@@ -632,7 +636,30 @@ func signedAuthorization(m *models.Mock) []string {
 			}
 		}
 	}
+	for k, vs := range live {
+		if strings.EqualFold(k, "authorization") {
+			for _, v := range vs {
+				if _, ok := parseSigV4Authorization(v); ok {
+					return []string{"header." + k}
+				}
+			}
+		}
+	}
 	return nil
+}
+
+// payloadHashPaths are the report paths of the headers that carry a hash of
+// the request's body (models.PayloadHashHeaders), for the hint to offer no
+// keploy.yml noise for. Under the proven switch each is compared with the body
+// the client sent (samePayloadHash); declaring it noise would stop that
+// comparison for every recording. One keploy.yml serves both modes, so
+// neither offers it.
+func payloadHashPaths() []string {
+	out := make([]string, len(models.PayloadHashHeaders))
+	for i, h := range models.PayloadHashHeaders {
+		out[i] = "header." + h
+	}
+	return out
 }
 
 // reasonsOf are, of fields, those refused for a reason of their own (a

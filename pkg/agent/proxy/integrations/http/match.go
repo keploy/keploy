@@ -2630,7 +2630,8 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		WithPhase(phase, candidateCount).
 		WithClosest(closestMock.Name, fieldDiffs).
 		WithGuarded(guardedPaths(guarded)...).
-		WithoutNoise(append(schemaTyped, signedAuthorization(closestMock)...)...).
+		WithoutNoise(append(schemaTyped, signedAuthorization(closestMock, diffReq.Header)...)...).
+		WithoutNoise(payloadHashPaths()...).
 		// Whole-request renders for the CLI side-by-side diff. Mock.Noise is
 		// passed so obfuscated values stay redacted on both sides.
 		WithRenderedRequests(

@@ -2,6 +2,7 @@ package mismatch
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -137,6 +138,36 @@ func TestHintNamesTheNoiseBucket(t *testing.T) {
 	added := func(path string) models.MockFieldDiff {
 		return models.MockFieldDiff{Path: path, Kind: models.DiffKindMissingInMock, Actual: "b"}
 	}
+	// series is n diffs of a kind, their paths prefix and a number from 00.
+	series := func(of func(string) models.MockFieldDiff, prefix string, n int) []models.MockFieldDiff {
+		out := make([]models.MockFieldDiff, n)
+		for i := range out {
+			out[i] = of(fmt.Sprintf("%s%02d", prefix, i))
+		}
+		return out
+	}
+	// listed is how a hint lists n names, each prefix and a number from 00:
+	// the first maxFieldDiffs (as many as a report carries), then how many
+	// more.
+	listed := func(prefix string, n int) string {
+		var names []string
+		for i := 0; i < n && i < maxFieldDiffs; i++ {
+			names = append(names, fmt.Sprintf("%s%02d", prefix, i))
+		}
+		if n > maxFieldDiffs {
+			return strings.Join(names, ", ") + fmt.Sprintf(", and %d more", n-maxFieldDiffs)
+		}
+		return strings.Join(names, ", ")
+	}
+	// example is how a hint shows a keploy.yml noise map of n keys, each
+	// prefix and a number from 00, each with an empty list.
+	example := func(prefix string, n int) string {
+		var entries []string
+		for i := 0; i < n; i++ {
+			entries = append(entries, fmt.Sprintf("%s%02d: []", prefix, i))
+		}
+		return "{" + strings.Join(entries, ", ") + "}"
+	}
 	const (
 		bodyQty  = "the request-body fields under test.globalNoise.global.requestbody with root-relative keys (e.g. requestbody: {qty: []})"
 		referer  = "the headers under test.globalNoise.global.header (e.g. header: {referer: []})"
@@ -155,6 +186,7 @@ func TestHintNamesTheNoiseBucket(t *testing.T) {
 		guarded, unreachable []string
 		want, on             string
 		structural           bool
+		onStructural         bool // under the switch, the structure-change hint
 	}{
 		{name: "a header and a body field", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.referer"), drift("body.qty")},
 			want: "Only values drifted (header.referer, body.qty). " + dynamic + bodyQty + " and " + referer + "; otherwise %[1]s."},
@@ -162,6 +194,10 @@ func TestHintNamesTheNoiseBucket(t *testing.T) {
 			want: "Only values drifted (header.X-Request-Id, header.x-request-id). " + dynamic + "the headers under test.globalNoise.global.header (e.g. header: {x-request-id: []}); otherwise %[1]s."},
 		{name: "two headers", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.authorization"), drift("header.referer")},
 			want: "Only values drifted (header.authorization, header.referer). " + dynamic + "the headers under test.globalNoise.global.header (e.g. header: {authorization: [], referer: []}); otherwise %[1]s."},
+		// A dotted header name with a part that may be a value is no name to
+		// declare: the sanitizer would not shape it in the example.
+		{name: "a dotted header name with a part that may be a value", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.x.4815162342")},
+			want: "Only values drifted (header.x.4815162342). " + expected + "%[1]s."},
 		{name: "a dotted header name stays whole", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.x.trace.id")},
 			want: "Only values drifted (header.x.trace.id). " + dynamic + "the headers under test.globalNoise.global.header (e.g. header: {x.trace.id: []}); otherwise %[1]s."},
 		// The parts the SigV4 differ compares, so that only the signature
@@ -191,7 +227,9 @@ func TestHintNamesTheNoiseBucket(t *testing.T) {
 		{name: "a missing header beside a path drift", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{missing("header.Referer"), drift("path")}, structural: true},
 		// Without the switch the HTTP matcher lets a call carry headers its
 		// recording does not, so such a header is no cause and no remedy;
-		// under the switch every header is compared, and noise reaches it.
+		// under the switch every header is compared (except host,
+		// content-length and keploy* headers and those keploy's own or
+		// keploy.yml's header noise names), and noise reaches it.
 		{name: "a header only the call carries", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{added("header.X-New")}, structural: true,
 			on: "This call carries headers its recording does not (header.X-New). If they are optional, add the headers under test.globalNoise.global.header (e.g. header: {x-new: []}); otherwise %[1]s."},
 		{name: "a recorded header missing and one only the call carries", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{missing("header.Referer"), added("header.X-New")},
@@ -223,6 +261,32 @@ func TestHintNamesTheNoiseBucket(t *testing.T) {
 			want: "Only values drifted (body.qty). " + dynamic + bodyQty + "; otherwise %[1]s."},
 		{name: "a missing body field", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{missing("body.qty")}, structural: true},
 		{name: "a missing header outside HTTP", protocol: ProtocolGeneric, diffs: []models.MockFieldDiff{missing("header.Referer")}, structural: true},
+		// The hint decides from every diff, not only the maxFieldDiffs a
+		// report carries: a field out of every bucket's reach past them
+		// keeps noise out of the hint. It names only the fields the report
+		// carries, and counts the rest; so it offers noise only when the
+		// report carries every cause, as it could not name the rest of the
+		// remedy.
+		{name: "a path drift past the diffs a report carries", protocol: ProtocolHTTP, diffs: slices.Concat(series(drift, "header.x-h", maxFieldDiffs), []models.MockFieldDiff{drift("path")}),
+			want: "Only values drifted (" + listed("header.x-h", maxFieldDiffs) + ", and 1 more). " + expected + "%[1]s."},
+		// A difference past them that is no value drift: not "only values".
+		{name: "a recorded header missing past the diffs a report carries", protocol: ProtocolHTTP,
+			diffs: slices.Concat(series(drift, "header.x-h", maxFieldDiffs), []models.MockFieldDiff{missing("header.Referer")}), structural: true},
+		{name: "a field offered no noise behind headers only the call carries, beside a recorded header missing", protocol: ProtocolHTTP,
+			diffs:       slices.Concat([]models.MockFieldDiff{missing("header.Referer")}, series(added, "header.X-H", maxFieldDiffs-1), []models.MockFieldDiff{drift("header.Content-Type")}),
+			unreachable: []string{"header.Content-Type"}, structural: true},
+		{name: "more body fields in reach than a report carries", protocol: ProtocolHTTP, diffs: series(drift, "body.f", 30),
+			want: "Only values drifted (" + listed("body.f", 30) + "). " + expected + "%[1]s."},
+		{name: "more headers in reach missing and drifted than a report carries", protocol: ProtocolHTTP,
+			diffs: slices.Concat(series(missing, "header.M", 13), series(drift, "header.D", 13)), structural: true},
+		{name: "as many drifted headers as a report carries", protocol: ProtocolHTTP, diffs: series(drift, "header.x-h", maxFieldDiffs),
+			want: "Only values drifted (" + listed("header.x-h", maxFieldDiffs) + "). " + dynamic + "the headers under test.globalNoise.global.header (e.g. header: " + example("x-h", maxFieldDiffs) + "); otherwise %[1]s."},
+		// Without the switch a header only the call carries is no cause, and
+		// the report carries the causes first: all 25 here.
+		{name: "as many drifted headers as a report carries and one only the call carries", protocol: ProtocolHTTP,
+			diffs:        slices.Concat([]models.MockFieldDiff{added("header.X-New")}, series(drift, "header.x-h", maxFieldDiffs)),
+			want:         "Only values drifted (" + listed("header.x-h", maxFieldDiffs) + "). " + dynamic + "the headers under test.globalNoise.global.header (e.g. header: " + example("x-h", maxFieldDiffs) + "); otherwise %[1]s.",
+			onStructural: true},
 		// A miss that names no field has nothing for noise to reach.
 		{name: "no field named", protocol: ProtocolHTTP, structural: true},
 		{name: "no field named outside HTTP", protocol: ProtocolGeneric, structural: true},
@@ -249,6 +313,8 @@ func TestHintNamesTheNoiseBucket(t *testing.T) {
 				r := NewReport(c.protocol, "GET /a").WithClosest("mock-1", c.diffs).WithGuarded(c.guarded...).WithoutNoise(c.unreachable...).Build()
 				want := fmt.Sprintf(c.want, rerecord(mock, c.protocol))
 				switch {
+				case on && c.onStructural:
+					want = structure[mock]
 				case on && c.on != "":
 					want = fmt.Sprintf(c.on, rerecord(mock, c.protocol))
 				case c.structural:
