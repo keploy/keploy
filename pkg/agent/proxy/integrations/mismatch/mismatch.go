@@ -508,13 +508,13 @@ func carriedHeader(d models.MockFieldDiff) bool {
 //     (a cause only under the proven switch: causes), is named under header
 //     by its lowercased name, once. Nothing else is in a bucket's reach
 //     there. url noise is never handed to the matcher, so a path, query,
-//     method, host or container drift has no noise remedy. Nor do the parts
-//     of a SigV4 Authorization ("header.authorization.region"): they are
-//     compared so that only its signature may differ, and declaring the
-//     header would stop that. Nor does a dotted header name with a part
-//     that may be a value (models.FieldShape writes it otherwise): the
-//     miss's sanitizer would not shape it in the noise's example, and a
-//     name that holds a value differs call by call.
+//     method, host or container drift has no noise remedy. Nor does an
+//     Authorization of any scheme, or a part of a SigV4 one
+//     ("header.authorization.region"): authorizationHeader. Nor does a
+//     dotted header name with a part that may be a value
+//     (models.FieldShape writes it otherwise): the miss's sanitizer would
+//     not shape it in the noise's example, and a name that holds a value
+//     differs call by call.
 //   - Elsewhere, a value drift outside the request body is named as
 //     test.globalNoise when no request-body field drifted.
 //
@@ -543,7 +543,7 @@ func matchingNoise(protocol string, diffs []models.MockFieldDiff, n noiseFacts) 
 		switch {
 		case isBody && d.Kind == models.DiffKindValueChanged:
 			b = &body
-		case isHTTP && isHeader && !strings.HasPrefix(name, "authorization.") && models.FieldShape(d.Path) == d.Path &&
+		case isHTTP && isHeader && !authorizationHeader(name) && models.FieldShape(d.Path) == d.Path &&
 			(d.Kind == models.DiffKindValueChanged || d.Kind == models.DiffKindMissingInLive || d.Kind == models.DiffKindMissingInMock):
 			key, b = strings.ToLower(name), &header
 		case !isHTTP && d.Kind == models.DiffKindValueChanged:
@@ -582,6 +582,24 @@ func matchingNoise(protocol string, diffs []models.MockFieldDiff, n noiseFacts) 
 		remedy = append(remedy, "add them to the matching noise (test.globalNoise)")
 	}
 	return strings.Join(remedy, " and "), len(remedy) > 0
+}
+
+// authorizationHeader reports whether a header's report name (its path less
+// "header.") is the Authorization header, or a part of a SigV4 one
+// ("authorization.region"), in any case. The hint offers no keploy.yml noise
+// for it, of any scheme. Under the proven switch the parts of a recorded
+// SigV4 Authorization are compared so that it may differ only in its access
+// key id, date and signature. keploy.yml's header noise, global or a test
+// set's (test.globalNoise.test-sets), applies to every recording it reaches,
+// so declaring authorization, even to excuse a Bearer token that drifts,
+// would stop that comparison for each signed recording there. Nothing the
+// hint can read says that none is signed: the mock store holds only what the
+// replay sends it, less what it has served, and is never told whether that
+// is the whole test set. One keploy.yml serves both modes, so neither
+// offers it.
+func authorizationHeader(name string) bool {
+	n := strings.ToLower(name)
+	return n == "authorization" || strings.HasPrefix(n, "authorization.")
 }
 
 // fieldSet is paths as a set of fieldKey.

@@ -126,7 +126,8 @@ func TestHintTextOutsideMockMode(t *testing.T) {
 // HTTP header that drifted or that the call does not carry under header by
 // its lowercased name (once), outside HTTP any other drift as
 // test.globalNoise. An HTTP call with a field no bucket reaches (its path,
-// query, a part of a SigV4 Authorization) is offered only recording again.
+// query, an Authorization of any scheme or a part of a SigV4 one) is offered
+// only recording again.
 // Only the way to record again differs between modes.
 func TestHintNamesTheNoiseBucket(t *testing.T) {
 	drift := func(path string) models.MockFieldDiff {
@@ -192,20 +193,29 @@ func TestHintNamesTheNoiseBucket(t *testing.T) {
 			want: "Only values drifted (header.referer, body.qty). " + dynamic + bodyQty + " and " + referer + "; otherwise %[1]s."},
 		{name: "a header in two spellings, named once", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.X-Request-Id"), drift("header.x-request-id")},
 			want: "Only values drifted (header.X-Request-Id, header.x-request-id). " + dynamic + "the headers under test.globalNoise.global.header (e.g. header: {x-request-id: []}); otherwise %[1]s."},
-		{name: "two headers", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.authorization"), drift("header.referer")},
-			want: "Only values drifted (header.authorization, header.referer). " + dynamic + "the headers under test.globalNoise.global.header (e.g. header: {authorization: [], referer: []}); otherwise %[1]s."},
+		{name: "two headers", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.x-id"), drift("header.referer")},
+			want: "Only values drifted (header.x-id, header.referer). " + dynamic + "the headers under test.globalNoise.global.header (e.g. header: {x-id: [], referer: []}); otherwise %[1]s."},
 		// A dotted header name with a part that may be a value is no name to
 		// declare: the sanitizer would not shape it in the example.
 		{name: "a dotted header name with a part that may be a value", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.x.4815162342")},
 			want: "Only values drifted (header.x.4815162342). " + expected + "%[1]s."},
 		{name: "a dotted header name stays whole", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.x.trace.id")},
 			want: "Only values drifted (header.x.trace.id). " + dynamic + "the headers under test.globalNoise.global.header (e.g. header: {x.trace.id: []}); otherwise %[1]s."},
-		// The parts the SigV4 differ compares, so that only the signature
-		// may differ: declaring authorization would stop that comparison.
+		// The parts the SigV4 differ compares, so that an Authorization may
+		// differ only in its access key id, date and signature: declaring
+		// authorization would stop that comparison.
 		{name: "a SigV4 part", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.authorization.region")},
 			want: "Only values drifted (header.authorization.region). " + expected + "%[1]s."},
 		{name: "a SigV4 part beside a header", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.authorization.signed_headers"), drift("header.referer")},
 			want: "Only values drifted (header.authorization.signed_headers, header.referer). " + expected + "%[1]s."},
+		// Nor is an Authorization of any scheme, in any case of its name:
+		// keploy.yml's header noise reaches every recording, the signed
+		// ones among them, and the parser cannot tell that none is signed.
+		{name: "an Authorization", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.Authorization")},
+			want: "Only values drifted (header.Authorization). " + expected + "%[1]s."},
+		{name: "an Authorization beside a header", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.authorization"), drift("header.referer")},
+			want: "Only values drifted (header.authorization, header.referer). " + expected + "%[1]s."},
+		{name: "a recorded Authorization missing beside a recorded header missing", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{missing("header.AUTHORIZATION"), missing("header.Referer")}, structural: true},
 		{name: "a header and the path", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.referer"), drift("path")},
 			want: "Only values drifted (header.referer, path). " + expected + "%[1]s."},
 		{name: "a body field and a query parameter", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("body.qty"), drift("query.page")},
@@ -243,12 +253,12 @@ func TestHintNamesTheNoiseBucket(t *testing.T) {
 			on:   "Recorded headers are missing from this call (header.Referer), it carries headers its recording does not (header.X-New) and values drifted (header.x-request-id). If these are optional or dynamic (timestamps, ids, tokens), add the headers under test.globalNoise.global.header (e.g. header: {referer: [], x-new: [], x-request-id: []}); otherwise %[1]s."},
 		{name: "a body field only the call carries", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{added("body.new"), drift("body.qty")}, structural: true},
 		{name: "a header only the call carries outside HTTP", protocol: ProtocolGeneric, diffs: []models.MockFieldDiff{added("header.X-New"), drift("payload")}, structural: true},
-		// A field the parser names WithoutNoise (a recorded SigV4
-		// Authorization, a Content-Type the schema phase refuses) is in no
-		// bucket's reach, in any case of its name.
-		{name: "a missing field offered no noise", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{missing("header.Authorization")}, unreachable: []string{"header.authorization"}, structural: true},
-		{name: "a drifted field offered no noise", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.Authorization")}, unreachable: []string{"header.authorization"},
-			want: "Only values drifted (header.Authorization). " + expected + "%[1]s."},
+		// A field the parser names WithoutNoise (an x-amz-content-sha256, a
+		// Content-Type the schema phase refuses) is in no bucket's reach, in
+		// any case of its name.
+		{name: "a missing field offered no noise", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{missing("header.X-Amz-Content-Sha256")}, unreachable: []string{"header.x-amz-content-sha256"}, structural: true},
+		{name: "a drifted field offered no noise", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.X-Amz-Content-Sha256")}, unreachable: []string{"header.x-amz-content-sha256"},
+			want: "Only values drifted (header.X-Amz-Content-Sha256). " + expected + "%[1]s."},
 		{name: "a field offered no noise beside one in reach", protocol: ProtocolHTTP, diffs: []models.MockFieldDiff{drift("header.Content-Type"), drift("body.qty")}, unreachable: []string{"header.Content-Type"},
 			want: "Only values drifted (header.Content-Type, body.qty). " + expected + "%[1]s."},
 		// A field keploy.yml already declares with patterns has its entry

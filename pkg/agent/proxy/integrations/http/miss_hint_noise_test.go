@@ -22,13 +22,19 @@ import (
 // report, as the agent builds them.
 func missWith(t *testing.T, on, noAuto bool, cfg map[string]map[string][]string, rec *models.Mock, liveHdr map[string]string, liveBody string) (bool, *models.MockMismatchReport) {
 	t.Helper()
+	return missIn(t, on, noAuto, cfg, []*models.Mock{rec}, liveHdr, liveBody)
+}
+
+// missIn is missWith with recs, in their order, as the call's pool.
+func missIn(t *testing.T, on, noAuto bool, cfg map[string]map[string][]string, recs []*models.Mock, liveHdr map[string]string, liveBody string) (bool, *models.MockMismatchReport) {
+	t.Helper()
 	if on {
 		t.Setenv(provenswitch.Env, "1")
 	} else {
 		t.Setenv(provenswitch.Env, "")
 	}
 	noise := NewRequestNoise(zap.NewNop(), models.OutgoingOptions{NoiseConfig: cfg, DisableAutoHeaderNoise: noAuto})
-	db := &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true}
+	db := &mockMemDb{mocks: recs, updateUnFilteredReturn: true}
 	ok, _, diag, err := newHTTP().match(context.Background(), sent("/x", liveHdr, liveBody), db, noise.Header, noise.Body, noise.URL, true, false, true, true, true)
 	if err != nil {
 		t.Fatal(err)
@@ -41,7 +47,7 @@ func missWith(t *testing.T, on, noAuto bool, cfg map[string]map[string][]string,
 		request.Header.Set(k, v)
 	}
 	request.Header.Set("Host", request.Host) // as decode sets it
-	r := newHTTP().buildHTTPMismatchReport(request, []byte(liveBody), &mockMemDb{mocks: []*models.Mock{rec}}, nil, noise.Header, noise.Body, diag)
+	r := newHTTP().buildHTTPMismatchReport(request, []byte(liveBody), &mockMemDb{mocks: recs}, nil, noise.Header, noise.Body, diag)
 	if r == nil {
 		t.Fatal("no miss report")
 	}
@@ -56,15 +62,15 @@ func missWith(t *testing.T, on, noAuto bool, cfg map[string]map[string][]string,
 //     every header is compared (except host, content-length and keploy*
 //     headers and those keploy's own or keploy.yml's header noise names),
 //     so it is.
-//   - An AWS SigV4 Authorization, recorded or only the call's, and an
-//     x-amz-content-sha256, are never offered: under the switch a recorded
-//     SigV4 Authorization's parts are compared so that only its signature
-//     may differ, and an x-amz-content-sha256 with the body the call sent;
-//     declaring either header would stop that for every recording. An
-//     Authorization of another scheme on both sides is offered. (Without
-//     the switch both are among
-//     the headers keploy itself treats as noise, so they cause a miss only
-//     with that noise disabled.)
+//   - No Authorization, recorded or only the call's, and no
+//     x-amz-content-sha256 is offered: under the switch a recorded SigV4
+//     Authorization's parts are compared so that it may differ only in its
+//     access key id, date and signature, and an x-amz-content-sha256 with
+//     the body the call sent; declaring either header would stop that for
+//     every recording it reaches (TestTheHintOffersNoAuthorizationNoise for
+//     an Authorization of another scheme). (Without the switch both are
+//     among the headers keploy itself treats as noise, so they cause a miss
+//     only with that noise disabled.)
 //   - Without the switch the schema phase refuses a recording on its
 //     Content-Type's media type and its body's type whatever the noise says:
 //     the miss names them, and the hint offers no header noise for a call
@@ -149,10 +155,6 @@ func TestTheHintOffersOnlyNoiseThatMakesTheCallMatch(t *testing.T) {
 			fix:   header("x-new", "")},
 		{name: "a recorded SigV4 Authorization missing, switch off, keploy's header noise disabled", noAuto: true, recHdr: hdr("Authorization", sigV4), liveHdr: hdr(), recBody: json, live: json,
 			diffs: []models.MockFieldDiff{{Path: "header.Authorization", Kind: models.DiffKindMissingInLive}}, hint: structural},
-		{name: "a recorded Authorization of another scheme missing, switch off, keploy's header noise disabled", noAuto: true, recHdr: hdr("Authorization", "Bearer t"), liveHdr: hdr(), recBody: json, live: json,
-			diffs: []models.MockFieldDiff{{Path: "header.Authorization", Kind: models.DiffKindMissingInLive}},
-			hint:  "Recorded headers are missing from this call (header.Authorization). If they are optional, add the headers under test.globalNoise.global.header (e.g. header: {authorization: []}); otherwise " + rerecord + ".",
-			fix:   header("authorization", "")},
 		{name: "a recorded SigV4 Authorization missing, switch on", on: true, recHdr: hdr("Authorization", sigV4), liveHdr: hdr(), recBody: json, live: json,
 			diffs: []models.MockFieldDiff{{Path: "header.authorization", Kind: models.DiffKindMissingInLive}}, hint: structural},
 		{name: "a recorded SigV4 Authorization signed another way, switch on", on: true, recHdr: hdr("Authorization", sigV4), liveHdr: hdr("Authorization", "Bearer t"), recBody: json, live: json,
@@ -169,10 +171,6 @@ func TestTheHintOffersOnlyNoiseThatMakesTheCallMatch(t *testing.T) {
 		{name: "a recorded x-amz-content-sha256 missing, switch off, keploy's header noise disabled", noAuto: true,
 			recHdr: hdr("X-Amz-Content-Sha256", hex.EncodeToString(payloadHash[:])), liveHdr: hdr(), recBody: json, live: json,
 			diffs: []models.MockFieldDiff{{Path: "header.X-Amz-Content-Sha256", Kind: models.DiffKindMissingInLive}}, hint: structural},
-		{name: "a recorded Authorization of another scheme missing, switch on", on: true, recHdr: hdr("Authorization", "Bearer t"), liveHdr: hdr(), recBody: json, live: json,
-			diffs: []models.MockFieldDiff{{Path: "header.authorization", Kind: models.DiffKindMissingInLive}},
-			hint:  "Recorded headers are missing from this call (header.authorization). If they are optional, add the headers under test.globalNoise.global.header (e.g. header: {authorization: []}); otherwise " + rerecord + ".",
-			fix:   header("authorization", "")},
 		{name: "a Content-Type the schema phase refuses, switch off", recHdr: hdr("Content-Type", "application/json"), liveHdr: hdr("Content-Type", "text/plain"), recBody: json, live: json,
 			diffs:       []models.MockFieldDiff{{Path: "header.Content-Type", Kind: models.DiffKindValueChanged, Expected: "application/json", Actual: "text/plain"}},
 			hint:        "Only values drifted (header.Content-Type). If the change is expected, " + rerecord + ".",
@@ -318,10 +316,103 @@ func TestUnderTheSwitchThePoolsClosestOffersNoSigV4Noise(t *testing.T) {
 	}
 }
 
+// No Authorization, of any scheme, is offered as keploy.yml noise, though
+// declaring it would serve the call: keploy.yml's header noise, global or a
+// test set's, applies to every recording it reaches, so declaring
+// authorization would also stop, under the switch, the part comparison of
+// each recording there whose Authorization is SigV4, and nothing the hint can
+// read says that none is (mismatch.authorizationHeader). A pool of Bearer
+// recordings only is what the hint sees when the signed recording is outside
+// it (one the call's own test already answered, another test's outside the
+// call's window, another test set's), so it is offered none either. Nor is
+// an x-amz-content-sha256. Each row's pool is the call's recording (POST
+// /x), then the other, if any (POST /s3, signed, or POST /y, Bearer).
+func TestTheHintOffersNoAuthorizationNoise(t *testing.T) {
+	sigV4 := "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=" + strings.Repeat("a", 64)
+	const json = `{"a":1}`
+	const rerecord = "re-record with 'keploy record'"
+	const structural = "Request structure changed since recording. Re-record the test set with 'keploy record', or, if you edited its mocks, remap it with --disable-mapping --update-test-mapping."
+	payloadHash := sha256.Sum256([]byte(json))
+	hdr := func(kv ...string) map[string]string {
+		m := map[string]string{}
+		for i := 0; i+1 < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		return m
+	}
+	signed := func() *models.Mock { return recorded("s3", "/s3", hdr("Authorization", sigV4), json) }
+	bearer := func() *models.Mock { return recorded("o", "/y", hdr("Authorization", "Bearer o"), json) }
+	drifted := "Only values drifted (header.authorization). If the change is expected, " + rerecord + "."
+	for _, c := range []struct {
+		name            string
+		on, noAuto      bool
+		other           func() *models.Mock // nil: the call's recording is alone in its pool
+		recHdr, liveHdr map[string]string
+		diff            models.MockFieldDiff // among the report's field diffs
+		hint            string
+		noise           string // the header whose noise, declared, serves the call
+	}{
+		{name: "a Bearer Authorization drifted, switch on", on: true,
+			recHdr: hdr("Authorization", "Bearer t"), liveHdr: hdr("Authorization", "Bearer u"),
+			diff: models.MockFieldDiff{Path: "header.authorization", Kind: models.DiffKindValueChanged}, hint: drifted, noise: "authorization"},
+		{name: "a recorded Bearer Authorization missing, switch on", on: true,
+			recHdr: hdr("Authorization", "Bearer t"), liveHdr: hdr(),
+			diff: models.MockFieldDiff{Path: "header.authorization", Kind: models.DiffKindMissingInLive}, hint: structural, noise: "authorization"},
+		{name: "a recorded Bearer Authorization missing, switch off, keploy's header noise disabled", noAuto: true,
+			recHdr: hdr("Authorization", "Bearer t"), liveHdr: hdr(),
+			diff: models.MockFieldDiff{Path: "header.Authorization", Kind: models.DiffKindMissingInLive}, hint: structural, noise: "authorization"},
+		{name: "a Bearer Authorization only the call carries, switch on", on: true,
+			recHdr: hdr(), liveHdr: hdr("Authorization", "Bearer u"),
+			diff: models.MockFieldDiff{Path: "header.authorization", Kind: models.DiffKindMissingInMock}, hint: structural, noise: "authorization"},
+		{name: "a Bearer Authorization drifted beside another Bearer recording, switch on", on: true, other: bearer,
+			recHdr: hdr("Authorization", "Bearer t"), liveHdr: hdr("Authorization", "Bearer u"),
+			diff: models.MockFieldDiff{Path: "header.authorization", Kind: models.DiffKindValueChanged}, hint: drifted, noise: "authorization"},
+		{name: "a recorded Bearer Authorization missing beside another Bearer recording, switch off, keploy's header noise disabled", noAuto: true, other: bearer,
+			recHdr: hdr("Authorization", "Bearer t"), liveHdr: hdr(),
+			diff: models.MockFieldDiff{Path: "header.Authorization", Kind: models.DiffKindMissingInLive}, hint: structural, noise: "authorization"},
+		{name: "a Bearer Authorization drifted beside a signed recording, switch on", on: true, other: signed,
+			recHdr: hdr("Authorization", "Bearer t"), liveHdr: hdr("Authorization", "Bearer u"),
+			diff: models.MockFieldDiff{Path: "header.authorization", Kind: models.DiffKindValueChanged}, hint: drifted, noise: "authorization"},
+		{name: "a recorded Bearer Authorization missing beside a signed recording, switch on", on: true, other: signed,
+			recHdr: hdr("Authorization", "Bearer t"), liveHdr: hdr(),
+			diff: models.MockFieldDiff{Path: "header.authorization", Kind: models.DiffKindMissingInLive}, hint: structural, noise: "authorization"},
+		{name: "a recorded Bearer Authorization missing beside a signed recording, switch off, keploy's header noise disabled", noAuto: true, other: signed,
+			recHdr: hdr("Authorization", "Bearer t"), liveHdr: hdr(),
+			diff: models.MockFieldDiff{Path: "header.Authorization", Kind: models.DiffKindMissingInLive}, hint: structural, noise: "authorization"},
+		{name: "an x-amz-content-sha256 that is no hash of the body the call sent beside a signed recording, switch on", on: true, other: signed,
+			recHdr: hdr("X-Amz-Content-Sha256", hex.EncodeToString(payloadHash[:])), liveHdr: hdr("X-Amz-Content-Sha256", strings.Repeat("0", 64)),
+			diff: models.MockFieldDiff{Path: "header.x-amz-content-sha256", Kind: models.DiffKindValueChanged},
+			hint: "Only values drifted (header.x-amz-content-sha256). If the change is expected, " + rerecord + ".", noise: "x-amz-content-sha256"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			pool := func() []*models.Mock {
+				p := []*models.Mock{recorded("m", "/x", c.recHdr, json)}
+				if c.other != nil {
+					p = append(p, c.other())
+				}
+				return p
+			}
+			served, r := missIn(t, c.on, c.noAuto, nil, pool(), c.liveHdr, json)
+			if served {
+				t.Fatal("served; want a miss")
+			}
+			if !slices.ContainsFunc(r.FieldDiffs, func(d models.MockFieldDiff) bool { return d.Path == c.diff.Path && d.Kind == c.diff.Kind }) {
+				t.Errorf("field diffs %+v; want %+v among them", r.FieldDiffs, c.diff)
+			}
+			if r.NextSteps != c.hint {
+				t.Errorf("hint:\n got  %q\n want %q", r.NextSteps, c.hint)
+			}
+			// The noise is in reach: the hint withholds it.
+			declared := map[string]map[string][]string{"header": {c.noise: {}}}
+			if served, r := missIn(t, c.on, c.noAuto, declared, pool(), c.liveHdr, json); !served {
+				t.Errorf("declaring %v leaves a miss: %+v", declared, r.FieldDiffs)
+			}
+		})
+	}
+}
+
 // The fields a strict miss names as keploy.yml's patterns refused are those
-// with a reason that is no refused read of the application's clock, and a
-// SigV4 Authorization, the recording's or else the call's (any of its
-// values), is named in the case it was sent in.
+// with a reason that is no refused read of the application's clock.
 func TestTheHintsNoiseFactsOfAStrictMiss(t *testing.T) {
 	fields := []strictField{
 		{diff: models.MockFieldDiff{Path: "header.x-id"}, why: "keploy.yml's noise lets header.x-id vary only within ..."},
@@ -330,26 +421,5 @@ func TestTheHintsNoiseFactsOfAStrictMiss(t *testing.T) {
 	}
 	if got := guardedPaths(fields); !slices.Equal(got, []string{"header.x-id"}) {
 		t.Errorf("guarded %v; want [header.x-id]", got)
-	}
-	sigV4 := "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=" + strings.Repeat("a", 64)
-	for _, c := range []struct {
-		header map[string]string
-		live   http.Header
-		want   []string
-	}{
-		{map[string]string{"authorization": sigV4}, nil, []string{"header.authorization"}},
-		{map[string]string{"Authorization": sigV4}, nil, []string{"header.Authorization"}},
-		{map[string]string{"Authorization": sigV4}, http.Header{"authorization": {sigV4}}, []string{"header.Authorization"}},
-		{map[string]string{"Authorization": "Bearer t"}, nil, nil},
-		{map[string]string{"X-Auth": sigV4}, nil, nil},
-		{nil, http.Header{"Authorization": {sigV4}}, []string{"header.Authorization"}},
-		{nil, http.Header{"authorization": {sigV4}}, []string{"header.authorization"}},
-		{map[string]string{"Authorization": "Bearer t"}, http.Header{"Authorization": {"Bearer t", sigV4}}, []string{"header.Authorization"}},
-		{nil, http.Header{"Authorization": {"Bearer t"}}, nil},
-		{nil, http.Header{"X-Auth": {sigV4}}, nil},
-	} {
-		if got := signedAuthorization(recorded("m", "/x", c.header, ""), c.live); !slices.Equal(got, c.want) {
-			t.Errorf("signedAuthorization(%v, %v) = %v; want %v", c.header, c.live, got, c.want)
-		}
 	}
 }
