@@ -80,25 +80,25 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	defer srv.Close()
 	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
 	ctx := context.Background()
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1", "mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1", "mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil, nil, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// The recorded test windows go with them, in the same request.
 	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}, nil, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// The values each test gave when it was recorded ride the same request.
 	given := map[string][]models.GivenValue{"o::TestA": {{Name: "given:nonce", Value: "1761", Source: "a_test.go:9"}}}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, nil, given, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, nil, given, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// So do each test's repeated reads.
 	repeats := map[string][]models.RepeatRead{"o::TestA": {{Name: "onboarding", Mocks: []string{"mock-3", "mock-4"}}}}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3", "mock-4"}}, nil, nil, nil, nil, repeats); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3", "mock-4"}}, nil, nil, nil, nil, repeats, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -113,7 +113,7 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	}
 	for _, s := range []int{http.StatusNotFound, http.StatusNotImplemented, http.StatusInternalServerError} {
 		status = s
-		if err := a.PushProvenTable(ctx, nil, nil, nil, nil, nil, nil); err == nil {
+		if err := a.PushProvenTable(ctx, nil, nil, nil, nil, nil, nil, nil); err == nil {
 			t.Fatalf("status %d: want an error", s)
 		}
 	}
@@ -144,7 +144,7 @@ func TestAgentClient_PushProvenTableIsReappliedWithItsWindows(t *testing.T) {
 	windows := []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}
 	given := map[string][]models.GivenValue{"o::TestA": {{Name: "given:nonce", Value: "1761", Source: "a_test.go:9"}}}
 	repeats := map[string][]models.RepeatRead{"o::TestA": {{Name: "onboarding", Mocks: []string{"mock-3", "mock-3"}}}}
-	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, map[string][]string{"o": {"mock-1"}}, windows, given, repeats); err != nil {
+	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, map[string][]string{"o": {"mock-1"}}, windows, given, repeats, nil); err != nil {
 		t.Fatal(err)
 	}
 	windows[0].TestCase = "o::Changed" // the caller's slice is its own

@@ -998,6 +998,20 @@ func TestTheTableNamesOnlyMocksTheAgentHolds(t *testing.T) {
 	require.Equal(t, map[string][]string{"o::TestA": {"mock-0"}, "o::TestB": {}, "o::TestC": {}}, got)
 }
 
+// The agent is told, by test, the names of its own list that record marked
+// served, not required: an unmarked entry, and a marked one the agent does
+// not hold for that test, are none.
+func TestTheTableNamesTheRecordingsMarkedNotRequiredByTest(t *testing.T) {
+	mappings := map[string][]models.MockEntry{
+		"o::TestA": {{Name: "mock-1"}, {Name: "mock-2", NotRequired: "served, not required"}},
+		"o::TestB": {{Name: "mock-3", NotRequired: "served, not required"}},
+		"o::TestC": {{Name: "mock-4"}},
+	}
+	table := map[string][]string{"o::TestA": {"mock-1", "mock-2"}, "o::TestB": {}, "o::TestC": {"mock-4"}}
+	require.Equal(t, map[string][]string{"o::TestA": {"mock-2"}}, notRequired(mappings, table))
+	require.Nil(t, notRequired(map[string][]models.MockEntry{"o::TestC": {{Name: "mock-4"}}}, table))
+}
+
 // A test owns a test mock only if a mock its mapping lists is held and
 // data-plane: a mapping of handshakes and DNS lookups alone owns none.
 func TestOwnsTestMocks(t *testing.T) {

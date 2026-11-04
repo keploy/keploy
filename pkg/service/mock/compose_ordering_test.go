@@ -226,7 +226,7 @@ func (f *composeInstr) PushScopeTable(context.Context, map[string][]string) erro
 // PushProvenTable takes the per-test table, the pool slices, the worker
 // scope, the recorded test windows, the recorded givens and the named
 // repeated reads (ProvenTablePusher), and keeps them.
-func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead) error {
+func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, _ map[string][]string) error {
 	f.table, f.pool, f.worker, f.recordedWindows, f.given, f.repeats = table, pool, worker, windows, given, repeats
 	return nil
 }

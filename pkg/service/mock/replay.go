@@ -1384,7 +1384,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	}
 	worker := workerSlices(mp, pool)
 	repeats := namedRepeatReads(name, httpint.NewRepeatReadNoise(m.matchNoise(name)), table, loaded)
-	if err := pp.PushProvenTable(ctx, table, pool, worker, windows, recordedGivens(mp), repeats); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, worker, windows, recordedGivens(mp), repeats, notRequired(mappings, table)); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
@@ -1550,6 +1550,26 @@ func ownsTestMocks(table map[string][]string, loaded []*models.Mock) bool {
 		}
 	}
 	return false
+}
+
+// notRequired is, by test, the names of its list in table (what the agent
+// holds) whose mapping entry keploy record marked served, not required
+// (models.MockEntry.NotRequired); nil when none is. A mark on a name the
+// test's table does not list marks nothing: the mark is the test's own.
+func notRequired(mappings map[string][]models.MockEntry, table map[string][]string) map[string][]string {
+	var out map[string][]string
+	for test, entries := range mappings {
+		for _, e := range entries {
+			if e.NotRequired == "" || !slices.Contains(table[test], e.Name) {
+				continue
+			}
+			if out == nil {
+				out = map[string][]string{}
+			}
+			out[test] = append(out[test], e.Name)
+		}
+	}
+	return out
 }
 
 // heldOnly is table less the names the agent does not hold: a mock the set
