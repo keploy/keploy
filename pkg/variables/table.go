@@ -475,8 +475,9 @@ const maxSpanRun = 64
 // a word between them it does not bind, are two runs) that hold the one
 // value its word is a word of. That is the shortest stretch of the run
 // around its word whose recorded text its mock holds whole elsewhere (a cid
-// or an appId sent whole in another field); failing one, the words around it
-// that no such stretch covers ("<cid>/<appId>" with the cid held whole
+// or an appId sent whole in another field) and that holds no shorter such
+// stretch (a stretch that holds one, "<B>/3" sent whole beside "<B>", is two
+// values); failing one, the words around it that no such stretch covers ("<cid>/<appId>" with the cid held whole
 // elsewhere leaves the appId's words; a text no stretch of which is held
 // elsewhere is one value, the run whole). A stretch held elsewhere is
 // another value, so a word beside it is never read with it: "<B>/3" whose
@@ -533,14 +534,24 @@ func spanOf(ws []WordBind, run []int, at int) (from, to int) {
 			return at, at
 		}
 	}
-	held := func(a, b int) bool {
-		return w.Elsewhere(w.RecordedText[words[ws[run[a]].Word][0]:words[ws[run[b]].Word][1]])
+	// value[a*n+b]: the stretch a..b of run is held whole elsewhere and holds
+	// no shorter stretch held whole (inner): one value. A held stretch that
+	// holds another ("<B>/3" beside "<B>") is two values, never one.
+	n := len(run)
+	value, inner := make([]bool, n*n), make([]bool, n*n)
+	for a := n - 1; a >= 0; a-- {
+		for b := a; b < n; b++ {
+			if b > a {
+				inner[a*n+b] = value[(a+1)*n+b] || inner[(a+1)*n+b] || value[a*n+b-1] || inner[a*n+b-1]
+			}
+			value[a*n+b] = !inner[a*n+b] && w.Elsewhere(w.RecordedText[words[ws[run[a]].Word][0]:words[ws[run[b]].Word][1]])
+		}
 	}
-	covered := make([]bool, len(run))
+	covered := make([]bool, n)
 	from, to = -1, -1
 	for a := range run {
-		for b := a; b < len(run); b++ {
-			if !held(a, b) {
+		for b := a; b < n; b++ {
+			if !value[a*n+b] {
 				continue
 			}
 			for c := a; c <= b; c++ {
