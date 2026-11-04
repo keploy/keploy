@@ -95,11 +95,11 @@ type junitSkipped struct {
 	// combination, and an unbounded attribute (one clause per unconsumed mock)
 	// would put kilobytes on one XML line.
 	//
-	// The one exception is a case keploy quarantined: its message is
-	// "quarantined by keploy (<reason>)", as a test framework's own skip
-	// shows its reason (the proven model's contract), so it groups by reason.
-	// It stays one line and bounded (quarantinedSkipMessage); the whole
-	// reason is the body.
+	// The one exception is a case keploy skipped for a reason: its message is
+	// its kind's words and its reason, "quarantined by keploy (<reason>)" for
+	// a quarantine (skipLine), as a test framework's own skip shows its reason
+	// (the proven model's contract), so it groups by reason. It stays one line
+	// and bounded (skipMessage); the whole reason is the body.
 	Text string `xml:",chardata"`
 }
 
@@ -669,29 +669,38 @@ func depFailureLines(deps []models.DepResult) []string {
 }
 
 // ignoredSkip is the <skipped> element of an IGNORED case. A case keploy
-// skipped with a reason (a quarantine) says so in the message, which is what
-// every CI dashboard shows for a skipped case: "quarantined by keploy
-// (<reason>)", with the reason in the body too. A case skipped without one
+// skipped with a reason says so in the message, which is what every CI
+// dashboard shows for a skipped case: its kind's words and its reason
+// (skipLine), with the reason in the body too. A case skipped without one
 // keeps the historical literal, byte for byte.
 func ignoredSkip(t models.TestResult) *junitSkipped {
 	if t.SkipReason == "" {
 		return &junitSkipped{Message: ignoredSkipMessage}
 	}
 	return &junitSkipped{
-		Message: quarantinedSkipMessage(t.SkipReason),
+		Message: skipMessage(t.SkipKind, t.SkipReason),
 		Text:    t.SkipReason,
 	}
 }
 
-// quarantinedSkipMessage is the <skipped message> of a case keploy skipped for
-// a reason: the reason on one line, cut at maxSkipMessageReason bytes (at a
-// character's start, marked "…").
-func quarantinedSkipMessage(reason string) string {
-	return quarantinedLine(capBytes(models.SkipReasonOneLine(reason), maxSkipMessageReason))
+// skipMessage is the <skipped message> of a case keploy skipped for a reason:
+// its kind's words and the reason on one line, cut at maxSkipMessageReason
+// bytes (at a character's start, marked "…").
+func skipMessage(kind models.SkipKind, reason string) string {
+	return skipLine(kind, capBytes(models.SkipReasonOneLine(reason), maxSkipMessageReason))
 }
 
-// quarantinedLine says a case was quarantined, and why.
-func quarantinedLine(reason string) string {
+// skipLine says a case was skipped, as what kind of skip, and why: a test
+// skipped for that run only, or until it is re-recorded, is not called
+// quarantined. A quarantine, and a kind keploy does not know, get a
+// quarantine's words, as every skip did before there were kinds.
+func skipLine(kind models.SkipKind, reason string) string {
+	switch kind {
+	case models.SkipThisRunOnly:
+		return "skipped by keploy for this run only (" + reason + ")"
+	case models.SkipUntilRerecorded:
+		return "skipped by keploy until it is re-recorded (" + reason + ")"
+	}
 	return "quarantined by keploy (" + reason + ")"
 }
 
