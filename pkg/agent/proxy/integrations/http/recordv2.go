@@ -646,36 +646,48 @@ func (f *messageFrame) end(msg []byte) (int, bool, error) {
 // parseHeaders extracts the body-framing Content-Length and
 // Transfer-Encoding header values (if any) from an HTTP message whose
 // headers end with CRLFCRLF. The parse is the same loose style the chunk.go
-// helpers use: split on '\n', trim '\r', skip malformed lines.
+// helpers use: split on '\n', trim '\r', skip malformed lines. It reads the
+// bytes in place: every request a replay serves is framed by it twice
+// (HandleChunkedRequests, then messageFrame), and a recording's every chunk,
+// so a copy of each line was an allocation per header field per read.
 //
 // A chunked Transfer-Encoding overrides a Content-Length sent with it (RFC
 // 9112 §6.3), so contentLength is "" then: framing such a message by its
 // Content-Length would end it where its peer does not.
 func parseHeaders(msg []byte) (contentLength string, transferEncoding string) {
-	lines := strings.Split(string(msg), "\n")
-	for _, line := range lines {
-		line = strings.TrimRight(line, "\r")
-		if line == "" {
+	var cl, te []byte
+	for rest := msg; len(rest) > 0; {
+		line, after, _ := bytes.Cut(rest, newline)
+		rest = after
+		line = bytes.TrimRight(line, "\r")
+		if len(line) == 0 {
 			break // end of headers
 		}
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
+		key, val, ok := bytes.Cut(line, colon)
+		if !ok {
 			continue
 		}
-		key := strings.ToLower(strings.TrimSpace(parts[0]))
-		val := strings.TrimSpace(parts[1])
-		switch key {
-		case "content-length":
-			contentLength = val
-		case "transfer-encoding":
-			transferEncoding = val
+		key = bytes.TrimSpace(key)
+		switch {
+		case bytes.EqualFold(key, contentLengthName):
+			cl = bytes.TrimSpace(val)
+		case bytes.EqualFold(key, transferEncodingName):
+			te = bytes.TrimSpace(val)
 		}
 	}
+	transferEncoding = string(te)
 	if strings.Contains(strings.ToLower(transferEncoding), "chunked") {
-		contentLength = ""
+		return "", transferEncoding
 	}
-	return contentLength, transferEncoding
+	return string(cl), transferEncoding
 }
+
+var (
+	newline              = []byte("\n")
+	colon                = []byte(":")
+	contentLengthName    = []byte("content-length")
+	transferEncodingName = []byte("transfer-encoding")
+)
 
 // destPortFromAddr extracts the destination TCP port from a FakeConn's
 // RemoteAddr, falling back to 0 if the address is not a TCP address

@@ -54,6 +54,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
 		defer close(errCh)
 		defer integrations.RecoverIntoCtx(ctx, h.Logger, clientConn, nil, errCh)
+		// rest is what the client sent after the request in hand: the start
+		// of its next request when it pipelined it (nextRequest).
+		var rest []byte
 		for {
 			// The whole header section first: only then is it known whether
 			// the client is waiting for a 100 (Continue) before its body.
@@ -83,6 +86,22 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				errCh <- err
 				return
 			}
+			// An HTTP/1.1 client may send its next request before the answer
+			// to this one has come (pipelining), as often as not in the same
+			// write, so reqBuf can run past this request's end. The request
+			// is reqBuf up to its end, framed as the recorder frames it
+			// (messageFrame; HandleChunkedRequests read it whole by the same
+			// framing), and what follows is the next request's start. Taking
+			// all of it as this request answered the first of a pipeline and
+			// dropped the rest, and the client waited for their answers.
+			end, _, err := (&messageFrame{}).end(reqBuf)
+			if err != nil {
+				utils.LogError(h.Logger, err, "failed to frame the http request message")
+				errCh <- err
+				return
+			}
+			rest = bytes.Clone(reqBuf[end:])
+			reqBuf = reqBuf[:end]
 
 			arrived := time.Now()
 
@@ -129,7 +148,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					errCh <- nil
 					return
 				}
-				reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+				reqBuf, err = nextRequest(ctx, h.Logger, clientConn, rest)
 				if err != nil {
 					h.Logger.Debug("bypassRule passthrough: client closed connection", zap.Error(err))
 					errCh <- nil
@@ -248,7 +267,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				// Read the next request on this keep-alive connection and loop,
 				// mirroring the matched-response path below.
-				reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+				reqBuf, err = nextRequest(ctx, h.Logger, clientConn, rest)
 				if err != nil {
 					h.Logger.Debug("egress passthrough: client closed connection", zap.Error(err))
 					errCh <- nil
@@ -304,7 +323,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					}
 					// Read the next poll on this keep-alive connection and loop,
 					// mirroring the telemetry short-circuit and matched-response paths.
-					reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+					reqBuf, err = nextRequest(ctx, h.Logger, clientConn, rest)
 					if err != nil {
 						h.Logger.Debug("async: client closed connection after delivery/keep-alive", zap.Error(err))
 						errCh <- nil
@@ -580,7 +599,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					} else if handled {
 						// Served live — continue the keep-alive loop for the next
 						// request on this connection. Not reported as a miss.
-						reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+						reqBuf, err = nextRequest(ctx, h.Logger, clientConn, rest)
 						if err != nil {
 							h.Logger.Debug("client closed connection after on-miss passthrough", zap.Error(err))
 							errCh <- nil
@@ -676,7 +695,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
-			reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+			reqBuf, err = nextRequest(ctx, h.Logger, clientConn, rest)
 			if err != nil {
 				h.Logger.Debug("failed to read the request buffer from the client", zap.Error(err))
 				if ce := h.Logger.Check(zap.DebugLevel, "This was the last response from the server"); ce != nil {
@@ -689,6 +708,18 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 	}(errCh, reqBuf, opts)
 
 	return pUtil.JoinParser(ctx, errCh)
+}
+
+// nextRequest returns the start of the client's next request: rest, what it
+// sent after the request just answered, when it pipelined its next request
+// with it, or else what it sends next, read on a small read
+// (pUtil.ReadBytesWaiting). readRequestHead and HandleChunkedRequests read
+// the rest of the request on by its framing.
+func nextRequest(ctx context.Context, logger *zap.Logger, clientConn net.Conn, rest []byte) ([]byte, error) {
+	if len(rest) > 0 {
+		return rest, nil
+	}
+	return pUtil.ReadBytesWaiting(ctx, logger, clientConn)
 }
 
 // withResponse returns m with its recorded response in Spec: m itself, or, when

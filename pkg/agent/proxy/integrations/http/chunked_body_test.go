@@ -630,6 +630,32 @@ func TestMockOfAResponseAfterAnInterimResponse(t *testing.T) {
 	}
 }
 
+// parseHeaders reads the framing fields of a header section in place: any
+// case, spaces around a name and a value trimmed, nothing past the empty line
+// that ends the section (a body line is no field), and no line without a
+// colon. It copies only the values it returns: it runs twice for every request
+// a replay serves, and for every chunk of a recording.
+func TestParseHeadersReadsTheFramingFields(t *testing.T) {
+	for _, c := range []struct{ name, head, cl, te string }{
+		{"names in any case, spaces trimmed", "POST / HTTP/1.1\r\nHOST: a\r\ncontent-LENGTH:  5 \r\n\r\n", "5", ""},
+		{"a space before the colon", "POST / HTTP/1.1\r\nContent-Length : 5\r\n\r\n", "5", ""},
+		{"a body line is no field", "POST / HTTP/1.1\r\nHost: a\r\n\r\nContent-Length: 10\r\n\r\n", "", ""},
+		{"a line without a colon is no field", "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length\r\n\r\n", "5", ""},
+		{"lines ended by LF alone", "POST / HTTP/1.1\nTransfer-Encoding: gzip\n\nContent-Length: 3\n", "", "gzip"},
+	} {
+		if cl, te := parseHeaders([]byte(c.head)); cl != c.cl || te != c.te {
+			t.Errorf("%s: parseHeaders = (%q, %q), want (%q, %q)", c.name, cl, te, c.cl, c.te)
+		}
+	}
+	if raceOn {
+		return // -race may allocate on its own
+	}
+	head := []byte("POST /u HTTP/1.1\r\nHost: api.example\r\nContent-Type: text/plain\r\nContent-Length: 16\r\n\r\n")
+	if n := testing.AllocsPerRun(20, func() { _, _ = parseHeaders(head) }); n != 1 {
+		t.Errorf("parseHeaders allocated %v times for a head with a Content-Length, want 1 (the value it returns)", n)
+	}
+}
+
 // A message with both "Transfer-Encoding: chunked" and a Content-Length is
 // framed by its chunks (RFC 9112 §6.3); framing it by the Content-Length cut
 // it short and left the rest to be read as the next message.
