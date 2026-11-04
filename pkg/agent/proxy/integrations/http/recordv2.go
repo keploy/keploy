@@ -325,7 +325,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// the stop, with its span, and the recording of the connection ends
 		// with its stream.
 		if cut {
-			if reason, ok := stopCut(sess, streamEnded); ok {
+			if reason, ok := stopCut(sess, streamEnded, ctxEnded); ok {
 				if mark, ok := sess.TakeMockIncomplete(); ok {
 					reason = mark + ": " + reason
 				}
@@ -512,7 +512,11 @@ func partAnswerLeftOut(sess *supervisor.Session) (reason string, ok bool) {
 // not, or the destination's stream ended at a capture hole
 // (Session.EndedAtHole: the capture lost the rest). readItsEnd is whether the
 // read ended at the end of the stream (io.EOF), not at its reader's close or
-// with the parser's context:
+// with the parser's context. ctxEnded is whether the parser's context ended
+// the read with no side's end come as it ended (with one, the read after it
+// took what the stream held, endJudgesAfterCtx, and ended otherwise): it is
+// judged as it was then, so a side's end read since, which came after the
+// context's, does not change what the stop cut:
 //   - the connection's first end (FirstPeerEnded) was the upstream's, read once
 //     the stop had begun (Session.EndFollowedStop): LeftOutStopCut where the
 //     read ended at the stream's end, which the relay gives once it has given
@@ -520,7 +524,8 @@ func partAnswerLeftOut(sess *supervisor.Session) (reason string, ok bool) {
 //     response; LeftOutStopCutAfterEnd where the stop's close of the stream, or
 //     the parser's context, ended the read first, with what the upstream had
 //     sent before its end not all read;
-//   - neither side has ended, and the recording is stopping
+//   - neither side has ended (or none had as the parser's context ended the
+//     read: ctxEnded), and the recording is stopping
 //     (Session.RecordingStopping): the relay, whose context is the
 //     recording's, ended the stream with the connection still open, or the
 //     supervisor's abort at the stop closed it, or the parser's context ended
@@ -530,13 +535,16 @@ func partAnswerLeftOut(sess *supervisor.Session) (reason string, ok bool) {
 // after it (partAnswerLeftOut: LeftOutPartwayAtStop where the stop closed the
 // application with the call in flight). EndFollowedStop holds only of a first
 // end that came, so the first end is not asked for whether one did there.
-func stopCut(sess *supervisor.Session, readItsEnd bool) (reason string, ok bool) {
+func stopCut(sess *supervisor.Session, readItsEnd, ctxEnded bool) (reason string, ok bool) {
 	if _, hole := sess.EndedAtHole(fakeconn.FromDest); hole {
 		return "", false
 	}
 	first, ended := sess.FirstPeerEnded()
-	if !ended && sess.RecordingStopping() {
-		return supervisor.LeftOutStopCutOpen, true
+	if !ended || ctxEnded {
+		if sess.RecordingStopping() {
+			return supervisor.LeftOutStopCutOpen, true
+		}
+		return "", false
 	}
 	if first == fakeconn.FromDest && sess.EndFollowedStop() {
 		if !readItsEnd {

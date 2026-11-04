@@ -826,3 +826,62 @@ func TestV2AHeldExchangeEmittedAsTheContextEndsIsRecorded(t *testing.T) {
 		t.Fatalf("the manager was handed %d mocks, want the held exchange as the context ended", added)
 	}
 }
+
+// On the direct channel, with the session's context alive, the emit of a held
+// exchange waits for a consumer that comes to the channel after it, as
+// EmitMock's does: here the channel is full until the consumer takes what it
+// holds, once the recorder has returned, or after 200ms if it has not. Not a
+// shutdown's send, which drops what a full channel cannot take.
+func TestV2AHeldExchangeWaitsForItsConsumerWhileTheContextLasts(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(5000, 0)
+	mgr := syncMock.New(zap.NewNop())
+	w := mgr.OpenWindow(t0, nil)
+	clientCh := make(chan fakeconn.Chunk, 2)
+	destCh := make(chan fakeconn.Chunk, 2)
+	clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("publish"), ReadAt: t0.Add(time.Second)}
+	destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok"), WrittenAt: t0.Add(2 * time.Second)}
+	sess, _ := newV2Session(t, clientCh, destCh)
+	mocks := make(chan *models.Mock, 1)
+	mocks <- &models.Mock{Name: "before"}
+	sess.Mocks = mocks
+	sess.Ctx = syncMock.NewContext(context.Background(), mgr)
+	held := make(chan struct{}, 4)
+	sess.OnPendingCleared = func() { held <- struct{}{} }
+	done := make(chan error, 1)
+	go func() { done <- dispatch(t, sess) }()
+	select {
+	case <-held:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the exchange was not held")
+	}
+	close(clientCh)
+	close(destCh)
+	w.Yield(t0.Add(3 * time.Second))
+	w.Tested(t0, t0.Add(3*time.Second))
+	w.Close()
+	var err error
+	returned := false
+	select {
+	case err = <-done:
+		returned = true
+	case <-time.After(200 * time.Millisecond):
+	}
+	if m := <-mocks; m.Name != "before" {
+		t.Fatalf("the channel held %q, want what it held before the exchange", m.Name)
+	}
+	select {
+	case m := <-mocks:
+		if m.Kind != models.GENERIC {
+			t.Errorf("delivered a %s mock, want the held exchange's", m.Kind)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the held exchange's mock was not delivered to a consumer that came after the emit")
+	}
+	if !returned {
+		err = <-done
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+}
