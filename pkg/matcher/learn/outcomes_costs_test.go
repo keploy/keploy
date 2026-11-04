@@ -580,3 +580,41 @@ func TestOutcomeAWordFsViewMovedToAnotherFieldIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// Beside an exchange keploy holds no payload of, a client test's read of the
+// clock made since its test began (in seconds, before its call's window) is
+// refused, naming the exchange, even where a send of its test before the
+// call holds the same second (a PUT's lastUsedAt its call learned as its own
+// read of the clock): main binds such a read as a copy of that send or, in
+// its audit-read row (copy_or_read_test.go:2035), learns it as a read of the
+// clock; this refusal is stricter than main, a red only. The same send with
+// its payload read leaves the read a Clock since the test began.
+func TestOutcomeCostAReadSinceItsTestBeganBesideAnExchangeWithNoPayloadIsRefused(t *testing.T) {
+	const p = "body.docs.msgs.0.app.createdAt"
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	frac := func(t time.Time) string { return secs(t) + "." + fmt.Sprintf("%06d", t.Nanosecond()/1000) }
+	r0, f0 := oAt.Add(6300*time.Millisecond), oAt.Add(61*time.Second+14800*time.Millisecond)
+	rAt, fAt := r0.Add(900*time.Millisecond), f0.Add(1400*time.Millisecond)
+	w := iWin(rAt, fAt, 100*time.Millisecond)
+	w.Rec.Began, w.F.Began = r0, f0
+	rec, live := secs(r0.Add(100*time.Millisecond)), secs(f0.Add(150*time.Millisecond))
+	if secs(r0.Add(120*time.Millisecond)) != rec || secs(f0.Add(170*time.Millisecond)) != live {
+		t.Fatal("fixture: the send must hold the read's second in both runs")
+	}
+	put := iSent("mock-204", rAt.Add(-500*time.Millisecond), "body.data.lastUsedAt", Number, frac(r0.Add(120*time.Millisecond)), frac(f0.Add(170*time.Millisecond)))
+	put.Seen[0].Clock = true
+	call := func(put Earlier) Decision {
+		in := iCall(p, Number, rec, live, rAt, fAt, w, []Earlier{put}, nil)
+		in.Drifts = oClientDrifts()
+		return oWord(t, Decide(in), rec, live)
+	}
+	d := call(put)
+	iClock(t, "a read since its test began beside a send of the same second, its payload read", d)
+	if d.Clock != nil && d.Clock.Since != models.SinceTestBegin {
+		t.Errorf("a read since its test began, its payload read: %+v; want a read since the test began", *d.Clock)
+	}
+	put.Payload = Raw{}
+	costRefused(t, "a read since its test began beside a send of the same second, no payload given", call(put), []RefusalKind{RefusalUnread}, "mock-204", "keploy was given no payload of mock-204")
+	put.Payload = Raw{mock: "mock-204", unread: "its kind is unknown"}
+	costRefused(t, "a read since its test began beside a send of the same second, its payload unread", call(put), []RefusalKind{RefusalUnread}, "mock-204", "keploy could not read mock-204")
+}

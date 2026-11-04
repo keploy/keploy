@@ -3393,6 +3393,40 @@ func TestOutcomeATextsMomentsIndexHoldsAsAskingEachInstantDoes(t *testing.T) {
 	}
 }
 
+// A wall clock of no zone ("2026-10-31 15:30:07") that a zoned instant of
+// the text holds as its own wall clock at a cut finer than a millisecond
+// ("...T15:30:07.000050+05:30"), beside a UTC instant that holds it only at
+// the second ("...T15:30:07.300Z"): asking every instant, the text holds it
+// at a fine cut, and so does the index, which asks first of the instants
+// whose wall clock stands within a millisecond of it. Asked only of the
+// instants near it as an instant, the index would stop at the coarse hold
+// and lose the fine cut, so a fine-cut conflict there would be read at a
+// later step.
+func TestOutcomeAWallClockAZonedInstantHoldsFinelyIsHeldFineBesideACoarseHold(t *testing.T) {
+	dc := oDrifts()
+	text := `{"a":"2026-10-31T15:30:07.300Z","b":"2026-10-31T15:30:07.000050+05:30"}`
+	spans := slices.Concat(dc.spansOf(text), dc.spansOf(dc.rawExtra(text)))
+	qs := dc.spansOf(`"2026-10-31 15:30:07"`)
+	if len(qs) != 1 || qs[0].zoned {
+		t.Fatalf("fixture: the asked instants %+v; want one wall clock of no zone", qs)
+	}
+	m := qs[0].moment()
+	var held, fine, coarse bool
+	for _, sp := range spans {
+		if sp.keyed {
+			h, f := byMoment(sp.moment(), m)
+			held, fine, coarse = held || h, fine || f, coarse || h && !f
+		}
+	}
+	if !held || !fine || !coarse {
+		t.Fatalf("fixture: asking each instant holds it %v, fine %v, also coarse %v; want all three", held, fine, coarse)
+	}
+	ix := newMomentIndex(spans)
+	if gotHeld, gotFine := ix.holds(m, func() {}); !gotHeld || !gotFine {
+		t.Errorf("the index holds it %v, fine %v; asking each instant, held at a fine cut", gotHeld, gotFine)
+	}
+}
+
 // One call deciding many changed instants an earlier answer holds asks of
 // the instants near each one (momentIndex), not of every instant of the
 // answer, each instant the answer's value, as when every instant is asked
