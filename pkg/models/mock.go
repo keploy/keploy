@@ -335,6 +335,18 @@ type TestModeInfo struct {
 	// test. Its matcher prefers the test's own recordings to it. Runtime-only,
 	// like the fields above.
 	Concurrent bool `json:"-" bson:"-"`
+
+	// LoadSeq is the mock's place, counted from 1, in the set the agent's
+	// mock stream handed it (Agent.StoreMocksStream): the order the client
+	// sent the set in, the order its mocks were recorded in. The agent keeps
+	// each per-test mock in memory or on disk, and a read lists those kept in
+	// memory ahead of those loaded from disk, so where one time ties mocks
+	// (the frames of one pipelined write) the order a read holds them in is
+	// not the order recorded; this is, whichever tier holds the mock. Zero on
+	// a mock no stream handed. Runtime-only, like the fields above: gob
+	// carries it into the agent's on-disk store and back, and no file keeps
+	// it.
+	LoadSeq int `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {

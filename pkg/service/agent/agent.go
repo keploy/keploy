@@ -1388,6 +1388,9 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 			return failStream(fmt.Errorf("storemocks stream: decode mock %d/%d: %w", i+1, total, err))
 		}
 		mock := &m
+		// Its place in the set as sent, kept whichever tier holds it below
+		// (models.TestModeInfo.LoadSeq).
+		mock.TestModeInfo.LoadSeq = i + 1
 		mock.DeriveLifetime()
 		mocknoise.MaterializeCorrelations(mock)
 		if proven {

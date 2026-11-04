@@ -56,9 +56,9 @@ func runtimeOnlyPaths(t reflect.Type) [][]int {
 //   - SourcePID and StartRef: the process that made the call and the
 //     in-process reference of the start it came from, hints the agent hands
 //     the recorder. Start, the start's recorded key, is kept.
-//   - IsStartup, ServedIn, StagedSet and Concurrent: the recorder's buffer
-//     and the replay's staging and serving set them on live mocks; a file
-//     would carry a past run's values.
+//   - IsStartup, ServedIn, StagedSet, Concurrent and LoadSeq: the
+//     recorder's buffer and the replay's load, staging and serving set them
+//     on live mocks; a file would carry a past run's values.
 //
 // Parts of the mock held through a pointer, slice or map (Spec's HTTPReq and
 // the other payloads) are not walked: walking every payload would cost every
