@@ -253,12 +253,10 @@ func newDNSCache() *expirable.LRU[string, dnsCacheEntry] {
 // shouldCacheDNSResponse reports whether a DNS resolution result is
 // eligible for the per-proxy dnsCache.
 //
-// Only real upstream responses are cached (FromUpstream == true), in
-// both record and test modes. Replayed-mock responses and
-// synthetic/fallback responses are intentionally NOT cached: mock
-// responses already come from an in-memory store and adding another
-// layer only complicates invalidation, and caching a fallback would
-// pin it for 30 s after transient upstream failures.
+// Only answers marked FromUpstream are cached, in both record and test
+// modes: a resolver's answer, and at replay a recorded mock's answer
+// (dnsMockAnswer). Synthetic/fallback responses are NOT cached: caching
+// a fallback would pin it for 30 s after transient upstream failures.
 //
 // Record-mode caching is safe against duplicate DNS-mock emission
 // because a cache hit short-circuits before resolveUncachedDNSResponse
@@ -1030,8 +1028,9 @@ func decodeDNSRRs(logger *zap.Logger, rrs []string) []dns.RR {
 // decoded; ok is false for a string that does not parse or that holds no
 // record (an empty line or a comment, which dns.NewRR returns as a nil
 // record), as a hand edit can leave a mock. decodeDNSRRs leaves such a string
-// out of the answer served, where a nil record failed to pack and the app got
-// no reply.
+// out of the answer served. Served, its nil record crashed keploy's agent: a
+// nil pointer dereference when the replay copied the answer into its
+// dnsCache.
 func decodeDNSRR(logger *zap.Logger, raw string) (rr dns.RR, ok bool) {
 	rr, err := dns.NewRR(raw)
 	if err != nil || rr == nil {

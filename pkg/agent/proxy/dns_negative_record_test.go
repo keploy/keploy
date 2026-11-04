@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"net"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -756,11 +757,13 @@ func TestADNSMockWithNoResponseRanksAsNODATA(t *testing.T) {
 
 // A recorded record that does not decode, as a hand edit or a corrupt mock
 // can leave it, is left out of the answer served, and so is one that holds no
-// record (an empty line or a comment): it was served as a nil record, the
-// answer failed to pack, and the app got no reply. A mock ranks by the answer
-// records it is served with, so one whose answer records all fail to decode
-// ranks as the NODATA it is served as: a valid resolved answer recorded after
-// it is served, and an NXDOMAIN recorded before it ranks under it.
+// record (an empty line or a comment): it was served as a nil record, which
+// crashed keploy's agent when the replay copied the answer into its DNS cache
+// (TestServeDNS_AnswersAMockWhoseRecordHoldsNoneAsNODATA). A mock ranks by
+// the answer records it is served with, so one whose answer records all fail
+// to decode ranks as the NODATA it is served as: a valid resolved answer
+// recorded after it is served, and an NXDOMAIN recorded before it ranks under
+// it.
 func TestADNSMockWhoseAnswersDoNotDecodeRanksAsTheNODATAItServes(t *testing.T) {
 	q := dns.Question{Name: "edited.example.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	valid := dnsMockOf(t, q, dns.RcodeSuccess, answerA(q, "10.0.0.7"))
@@ -802,14 +805,102 @@ func TestADNSMockWhoseAnswersDoNotDecodeRanksAsTheNODATAItServes(t *testing.T) {
 			})
 		}
 	}
-	// One answer record that decodes is enough: the mock ranks as resolved,
-	// is served first of its kind, and with that record only.
-	t.Run("one bad and one valid record, before another valid answer", func(t *testing.T) {
-		mixed := dnsMockOf(t, q, dns.RcodeSuccess, append([]string{"; edited out"}, answerA(q, "10.0.0.8")...))
-		got, misses := replayIsolated(t, []*models.Mock{nx, mixed, valid}, q)
-		if len(misses) != 0 || got.Msg == nil || got.Rcode != dns.RcodeSuccess || len(got.Answer) != 1 ||
-			got.Answer[0] == nil || got.Answer[0].String() != mixed.Spec.DNSResp.Answers[1] {
-			t.Fatalf("replay answered %+v (misses %+v), want the mixed mock's valid record %q", got.Msg, misses, mixed.Spec.DNSResp.Answers[1])
-		}
-	})
+	// One answer record that decodes is enough, before or after the one that
+	// does not: the mock ranks as resolved, is served first of its kind, and
+	// with that record only.
+	good := answerA(q, "10.0.0.8")[0]
+	for _, tc := range []struct {
+		name    string
+		answers []string
+	}{
+		{"one bad and one valid record", []string{"; edited out", good}},
+		{"one valid and one bad record", []string{good, "edited.example. 30 IN A 10.0.0"}},
+	} {
+		t.Run(tc.name+", before another valid answer", func(t *testing.T) {
+			mixed := dnsMockOf(t, q, dns.RcodeSuccess, tc.answers)
+			got, misses := replayIsolated(t, []*models.Mock{nx, mixed, valid}, q)
+			if len(misses) != 0 || got.Msg == nil || got.Rcode != dns.RcodeSuccess || len(got.Answer) != 1 ||
+				got.Answer[0] == nil || got.Answer[0].String() != good {
+				t.Fatalf("replay answered %+v (misses %+v), want the mixed mock's valid record %q", got.Msg, misses, good)
+			}
+		})
+	}
+}
+
+// packingDNSWriter is the dns.ResponseWriter of a TCP client. It keeps the
+// reply ServeDNS writes, and whether that reply packs, as miekg's server
+// packs it to write it.
+type packingDNSWriter struct {
+	msg *dns.Msg
+	err error
+}
+
+func (w *packingDNSWriter) LocalAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53}
+}
+
+func (w *packingDNSWriter) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5555}
+}
+
+func (w *packingDNSWriter) WriteMsg(m *dns.Msg) error {
+	_, err := m.Pack()
+	w.msg, w.err = m, err
+	return err
+}
+
+func (w *packingDNSWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (w *packingDNSWriter) Close() error                { return nil }
+func (w *packingDNSWriter) TsigStatus() error           { return nil }
+func (w *packingDNSWriter) TsigTimersOnly(bool)         {}
+func (w *packingDNSWriter) Hijack()                     {}
+
+// A mock answer line that holds no record (an empty line or a comment) is
+// served through ServeDNS, with the replay's dnsCache in place as in keploy's
+// agent. dns.NewRR decodes such a line to a nil record. When that nil record
+// was served, the copy of the answer made for the cache dereferenced it.
+// ServeDNS then panicked on miekg's request goroutine, which does not
+// recover, so keploy's agent crashed. The reply is now NOERROR with no answer:
+// the NODATA the mock ranks as.
+func TestServeDNS_AnswersAMockWhoseRecordHoldsNoneAsNODATA(t *testing.T) {
+	q := dns.Question{Name: "edited.example.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	for _, tc := range []struct {
+		name    string
+		answers []string
+	}{
+		{"an empty record", []string{""}},
+		{"a comment", []string{"; edited out"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mgr.Close)
+			mgr.SetFilteredMocks([]*models.Mock{dnsMockOf(t, q, dns.RcodeSuccess, tc.answers)})
+			p := &Proxy{
+				logger:      zap.NewNop(),
+				errChannel:  make(chan error, 4),
+				IP4:         "127.0.0.1",
+				IP6:         "::1",
+				mockManager: mgr,
+				dnsCache:    newDNSCache(),
+			}
+			p.setSession(&agent.Session{Mode: models.MODE_TEST, OutgoingOptions: models.OutgoingOptions{Mocking: true}})
+			req := new(dns.Msg)
+			req.SetQuestion(q.Name, q.Qtype)
+			w := &packingDNSWriter{}
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("ServeDNS panicked, which crashes keploy's agent (miekg's server does not recover): %v\n%s", r, debug.Stack())
+					}
+				}()
+				p.ServeDNS(w, req)
+			}()
+			if w.msg == nil || w.err != nil {
+				t.Fatalf("ServeDNS wrote %v (pack error: %v), want a reply that packs", w.msg, w.err)
+			}
+			if w.msg.Rcode != dns.RcodeSuccess || len(w.msg.Answer) != 0 {
+				t.Fatalf("ServeDNS replied %v, want NOERROR with no answer", w.msg)
+			}
+		})
+	}
 }
