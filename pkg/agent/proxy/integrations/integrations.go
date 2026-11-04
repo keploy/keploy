@@ -481,6 +481,33 @@ type AnsweredFinder interface {
 	FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (AnsweredCall, bool)
 }
 
+// AnsweredRedactingReader is an optional MockMemDb extension: of the test set
+// staged now at least (a store may keep earlier sets' too), every per-test
+// recording of kind that answered a call and holds a pattern (Mock.Noise: the obfuscator redacted something in it), its
+// request and patterns kept, and whether the store kept every one (it keeps
+// them under a bound). An answered per-test recording is in no read after it
+// answers, while a call that repeats it carries again the secret it
+// redacted: a parser redacts a miss's report and its logs by these
+// recordings' places too, and by every place when the store did not keep
+// them all. For a miss's diagnosis and logs only: never served. A
+// MockMemDb wrapper forwards it; one that does not is read as a store that
+// did not keep them all (AnsweredRedacting).
+type AnsweredRedactingReader interface {
+	AnsweredRedacting(kind models.Kind) (mocks []*models.Mock, complete bool)
+}
+
+// AnsweredRedacting is db's AnsweredRedacting (AnsweredRedactingReader):
+// none, and not complete, for a store without it (nil included), whose
+// answered recordings cannot be known, so a miss and its logs are redacted
+// by every place. A wrapper that does not forward it hides the store's
+// list and so leaks nothing by the omission (fail closed by construction).
+func AnsweredRedacting(db MockMemDb, kind models.Kind) ([]*models.Mock, bool) {
+	if r, ok := db.(AnsweredRedactingReader); ok {
+		return r.AnsweredRedacting(kind)
+	}
+	return nil, false
+}
+
 // AnsweredCall is what AnsweredFinder found: the recording, and when it
 // answered at this replay.
 type AnsweredCall struct {

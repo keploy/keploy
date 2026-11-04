@@ -279,3 +279,15 @@ func TestEveryCanonicalProtocolNamesItsKinds(t *testing.T) {
 		t.Error("a protocol keploy does not name names a kind")
 	}
 }
+
+// A field diff that carries no values is named alone, never as two empty
+// values it did not have.
+func TestRenderFieldDiffs_NoValuesNamesTheFieldAlone(t *testing.T) {
+	got := RenderFieldDiffs([]models.MockFieldDiff{
+		{Path: "body.x", Kind: models.DiffKindValueChanged},
+		{Path: "body.y", Kind: models.DiffKindValueChanged, Expected: "", Actual: "b"},
+	})
+	if want := `body.x: differs (values not shown); body.y: recorded "", live "b"`; got != want {
+		t.Fatalf("RenderFieldDiffs = %q, want %q", got, want)
+	}
+}

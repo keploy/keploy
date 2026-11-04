@@ -1282,6 +1282,18 @@ func (h *heldScope) FindAnsweredEarlier(kind models.Kind, keys []string, match f
 	return a, ok
 }
 
+// AnsweredRedacting is the manager's (integrations.AnsweredRedactingReader)
+// while the staging is still h's call's after the read; once another set was
+// staged under the call, the log is that set's, and the call's recordings are
+// not known: none, and not complete, so the miss is redacted by every place.
+func (h *heldScope) AnsweredRedacting(kind models.Kind) ([]*models.Mock, bool) {
+	mocks, complete := h.MockManager.AnsweredRedacting(kind)
+	if h.moved() {
+		return nil, false
+	}
+	return mocks, complete
+}
+
 func (h *heldScope) ExactTakenCandidates(kind models.Kind) []*models.Mock {
 	return h.heldOf(h.MockManager.ExactTakenCandidates(kind))
 }

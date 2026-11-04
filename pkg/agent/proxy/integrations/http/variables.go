@@ -513,6 +513,11 @@ type varProblem struct {
 	actual   string
 	why      string
 	next     string
+	// whyf and whyArgs, when set (say), are why's format and arguments, a
+	// value of the call among them a said: the miss report shows one at a
+	// place the closest recording redacted redacted (diffAt).
+	whyf    string
+	whyArgs []any
 	// given is name when the problem is a given's own: the call carried
 	// another value than the test gave, or a value of another JSON type, or
 	// this run's test did not give it before the call. The miss names it
@@ -522,6 +527,41 @@ type varProblem struct {
 
 func (p *varProblem) diff() string {
 	return fmt.Sprintf("mock %s: %s", p.mock, p.why)
+}
+
+// said is a value of the call a why text shows, and the place of the call
+// it is at.
+type said struct {
+	value string
+	at    variables.Place
+}
+
+// Format writes the value as verb writes a string.
+func (s said) Format(f fmt.State, verb rune) {
+	_, _ = fmt.Fprintf(f, fmt.FormatString(f, verb), s.value)
+}
+
+// say sets p's why to format written with args.
+func (p *varProblem) say(format string, args ...any) *varProblem {
+	p.whyf, p.whyArgs = format, args
+	p.why = fmt.Sprintf(format, args...)
+	return p
+}
+
+// diffAt is diff with each value of the call its why shows at a place the
+// closest recording redacted (places) shown valueRedacted: the live value
+// there is the secret the recording hid.
+func (p *varProblem) diffAt(places redactedPlaces) string {
+	if p.whyf == "" {
+		return p.diff()
+	}
+	args := slices.Clone(p.whyArgs)
+	for i, a := range args {
+		if v, ok := a.(said); ok && places.at(v.at) {
+			args[i] = said{value: valueRedacted, at: v.at}
+		}
+	}
+	return fmt.Sprintf("mock %s: %s", p.mock, fmt.Sprintf(p.whyf, args...))
 }
 
 // varHit is a mock the variable pass can serve, and what it binds.
@@ -726,7 +766,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 				// Mongo's replay says so of both.
 				rf, _ := rec.leaf(vp.place)
 				if typeChange == nil {
-					typeChange = typeChanged(m.Name, d.name, vp.raw, rf.raw, lf.raw)
+					typeChange = typeChanged(m.Name, d.name, vp, rf.raw, lf.raw)
 					typeChange.field = vp.place.String()
 				}
 				if asRecorded, ok = asRecorded.putBack(vp.place, rf); !ok {
@@ -738,7 +778,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 				continue
 			}
 			if l.body && l.kind != r.kind && typeChange == nil {
-				typeChange = typeChanged(m.Name, d.name, vp.raw, r.raw, l.raw)
+				typeChange = typeChanged(m.Name, d.name, vp, r.raw, l.raw)
 			}
 			if k := leafKey(vp.place); vp.whole() {
 				if asRecorded, ok = asRecorded.putBack(vp.place, r); !ok {
@@ -803,11 +843,10 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 			if worded == nil {
 				l, _ := live.leaf(in.Place)
 				sent, _ := in.WordOf(l.value)
-				worded = &varProblem{
+				worded = (&varProblem{
 					mock: m.Name, name: w.name, place: w.vp.raw, kind: models.DiffKindValueChanged, field: in.String(), expected: want, actual: sent,
-					why:  fmt.Sprintf("variable %s at %s: the call sent %q at %s, where the recording has %q. A word is read where the rest of that text places it, so keploy compares that text with the recording, its words put back, and noise is not applied there", w.name, w.vp.raw, sent, in.String(), want),
 					next: "if the application now sends " + in.String() + " in another shape, re-record the test; otherwise fix the application",
-				}
+				}).say("variable %s at %s: the call sent %q at %s, where the recording has %q. A word is read where the rest of that text places it, so keploy compares that text with the recording, its words put back, and noise is not applied there", w.name, w.vp.raw, said{sent, in.Place}, in.String(), said{want, in.Place})
 			}
 			if asRecorded, ok = asRecorded.putBack(in.Place, r); !ok {
 				return nil, nil
@@ -874,12 +913,12 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 
 // typeChanged is the evidence of a call that sent actual, a value of another
 // JSON type, where mock's recording holds expected at variable name's place.
-func typeChanged(mock, name, place, expected, actual string) *varProblem {
-	p := &varProblem{
+func typeChanged(mock, name string, vp varPlace, expected, actual string) *varProblem {
+	place := vp.raw
+	p := (&varProblem{
 		mock: mock, name: name, place: place, kind: models.DiffKindTypeChanged, expected: expected, actual: actual,
-		why:  fmt.Sprintf("variable %s at %s: the call sent %s where the recording has %s, a value of another JSON type", name, place, actual, expected),
 		next: "the application changed the type of the value it sends at " + place + ": if that is intended, re-record the test; otherwise fix the application",
-	}
+	}).say("variable %s at %s: the call sent %s where the recording has %s, a value of another JSON type", name, place, said{actual, vp.place}, said{expected, vp.place})
 	if models.IsGivenVariable(name) {
 		p.given = name
 	}
@@ -976,11 +1015,10 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 		}
 		for _, b := range others {
 			if variables.TwoValues(b, variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Clock: d.clock}) {
-				return nil, &varProblem{
+				return nil, (&varProblem{
 					mock: m.Name, name: d.name, place: d.bind.raw, expected: "a value other than variable " + b.Name + "'s", actual: v.value,
-					why:  fmt.Sprintf("this call binds variable %s at %s to %q, which is variable %s's value in this test (bound at %s %s); they were two values when the test was recorded", d.name, d.bind.raw, v.value, b.Name, b.Mock, b.Place),
 					next: fmt.Sprintf("the application sent %s's value where it sent %s's when the test was recorded: fix the application, or re-record the test if that is intended", b.Name, d.name),
-				}
+				}).say("this call binds variable %s at %s to %q, which is variable %s's value in this test (bound at %s %s); they were two values when the test was recorded", d.name, d.bind.raw, said{v.value, d.bind.place}, b.Name, b.Mock, b.Place)
 			}
 		}
 		taken[d.name] = variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Mock: m.Name, Place: d.bind.raw, Clock: d.clock}
@@ -1011,17 +1049,15 @@ func holdsAt(mock string, d varDecl, places []varPlace, want, boundMock, boundPl
 			if boundPlace != "" {
 				where = " (" + boundPlace + ")"
 			}
-			return &varProblem{
+			return (&varProblem{
 				mock: mock, name: d.name, place: vp.raw, kind: models.DiffKindVariable, expected: want, actual: l.value, given: d.name,
-				why:  fmt.Sprintf("the test gave %s = %q%s, and this call %s %q at %s: the application did not pass on the value the test gave", d.name, want, where, verb, l.value, vp.raw),
 				next: fmt.Sprintf("the application sent another value at %s than %s, the value the test gave: fix the application; if the call no longer carries the test's value, re-record the test", vp.raw, d.name),
-			}
+			}).say("the test gave %s = %q%s, and this call %s %q at %s: the application did not pass on the value the test gave", d.name, said{want, vp.place}, where, verb, said{l.value, vp.place}, vp.raw)
 		}
-		return &varProblem{
+		return (&varProblem{
 			mock: mock, name: d.name, place: vp.raw, kind: models.DiffKindVariable, expected: want, actual: l.value,
-			why:  fmt.Sprintf("variable %s is %q in this test (taken at %s %s), and this call %s %q at %s", d.name, want, boundMock, boundPlace, verb, l.value, vp.raw),
 			next: fmt.Sprintf("the application sent another value at %s than the one it made in this test: if that is intended, re-record the test; otherwise fix the application", vp.raw),
-		}
+		}).say("variable %s is %q in this test (taken at %s %s), and this call %s %q at %s", d.name, said{want, vp.place}, boundMock, boundPlace, verb, said{l.value, vp.place}, vp.raw)
 	}
 	return nil
 }
@@ -1110,7 +1146,9 @@ func (h *HTTP) variableStage(ctx context.Context, input *req, mockDb integration
 		if answered != nil {
 			return varStage{diag: &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(pool), pool: pool, answered: answered}}, nil
 		}
-		served, problem, retry, err := h.serveVariables(ctx, hit, mockDb)
+		served, problem, retry, err := h.serveVariables(ctx, hit, mockDb, func() redactedPlaces {
+			return heldPlaces(mockDb, hit.mock, pool, input.url.EscapedPath())
+		})
 		if err != nil {
 			return varStage{}, err
 		}
@@ -1269,8 +1307,8 @@ func (h *HTTP) variableMember(ctx context.Context, input *req, scope varScope, h
 // A bind refused over a binding the check read (varHit.read) is no race but
 // a disagreement of the check and the table: a problem, never a retry, which
 // would be refused again forever.
-func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrations.MockMemDb) (served *models.Mock, problem *varProblem, retry bool, err error) {
-	return h.serveVariablesBy(hit, mockDb, func(m *models.Mock) bool { return h.updateMock(ctx, m, mockDb, nil) }, nil)
+func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrations.MockMemDb, logPlaces func() redactedPlaces) (served *models.Mock, problem *varProblem, retry bool, err error) {
+	return h.serveVariablesBy(hit, mockDb, func(m *models.Mock) bool { return h.updateMock(ctx, m, mockDb, nil) }, nil, logPlaces)
 }
 
 // serveVariablesBy is serveVariables with consume taking the mock from the
@@ -1279,8 +1317,10 @@ func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrati
 // recording mockDb refuses the call (integrations.RefusesAnswer: the call is
 // one of the open test's own) binds nothing and is refused as at its consume
 // door: the call is checked again, and the recording's variables stay
-// unbound for the call it is the recording of.
-func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, consume func(*models.Mock) bool, written func(*models.Mock) *models.Mock) (served *models.Mock, problem *varProblem, retry bool, err error) {
+// unbound for the call it is the recording of. The debug line of each bind
+// writes its value redacted at a place logPlaces names redacted: the places
+// of every recording of the pool the call was checked against.
+func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, consume func(*models.Mock) bool, written func(*models.Mock) *models.Mock, logPlaces func() redactedPlaces) (served *models.Mock, problem *varProblem, retry bool, err error) {
 	if integrations.RefusesAnswer(mockDb, hit.mock) {
 		return nil, nil, true, nil
 	}
@@ -1304,17 +1344,35 @@ func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, cons
 			// Not another connection's bind meanwhile: the check passed
 			// over a binding the table refuses it beside. Checking the call
 			// again would pass and be refused again, forever.
-			return nil, &varProblem{
+			// with holds bad's value (variables.TwoValues): both are the
+			// value this call sent at bad's place.
+			at, _ := variables.ParseAddress(bad.Place)
+			return nil, (&varProblem{
 				mock: hit.mock.Name, name: bad.Name, place: bad.Place, expected: "a value variable " + with.Name + " does not hold", actual: bad.Value,
-				why:  fmt.Sprintf("this call binds variable %s at %s to %q, which the test's variables refuse beside variable %s (bound at %s %s to %q), though the check of the call let it", bad.Name, bad.Place, bad.Value, with.Name, with.Mock, with.Place, with.Value),
 				next: "the check of the call and its bind disagree, which is a keploy bug: report it with this test set",
-			}, false, nil
+			}).say("this call binds variable %s at %s to %q, which the test's variables refuse beside variable %s (bound at %s %s to %q), though the check of the call let it", bad.Name, bad.Place, said{bad.Value, at.Place}, with.Name, with.Mock, with.Place, said{with.Value, at.Place}), false, nil
 		}
 		return nil, nil, true, nil
 	}
-	for _, b := range hit.binds {
-		h.Logger.Debug("variable bound", zap.String("variable", b.Name), zap.String("value", b.Value),
-			zap.String("recorded", b.Recorded), zap.String("mock", b.Mock), zap.String("place", b.Place))
+	if ce := h.Logger.Check(zap.DebugLevel, "variable bound"); ce != nil {
+		places := logPlaces()
+		var recorded *models.HTTPReq
+		if hit.mock != nil {
+			recorded = hit.mock.Spec.HTTPReq
+		}
+		inRequest := variables.InRequest(recorded)
+		for _, b := range hit.binds {
+			// A value bound at a place the recording redacted is the
+			// secret it hid. The place is read as the check read it
+			// (ReadPlace, so a name holding "#" stays one place); one
+			// that does not read is redacted too.
+			value := b.Value
+			if at, err := variables.ReadPlace(b.Place, inRequest); err != nil || places.at(at.Place) {
+				value = valueRedacted
+			}
+			h.Logger.Debug("variable bound", zap.String("variable", b.Name), zap.String("value", value),
+				zap.String("recorded", b.Recorded), zap.String("mock", b.Mock), zap.String("place", b.Place))
+		}
 	}
 	if !consume(hit.mock) {
 		return nil, nil, true, nil
@@ -1602,10 +1660,23 @@ func variableTable(mockDb integrations.MockMemDb) *variables.Table {
 	return nil
 }
 
+// namedIn is the HTTP recording of pool named name; nil when none is.
+func namedIn(pool []*models.Mock, name string) *models.Mock {
+	for _, m := range pool {
+		if m != nil && m.Name == name && m.Spec.HTTPReq != nil {
+			return m
+		}
+	}
+	return nil
+}
+
 // variableMismatchReport is the miss report of a call a recorded call fit
 // except for a test variable: the variable, the place, the value it has in
 // the test and the one the call sent, and what to do.
-func variableMismatchReport(request *http.Request, liveBody []byte, dest, actualKey string, diag *matchDiag, httpMocks []*models.Mock, table *variables.Table) *models.MockMismatchReport {
+//
+// closest is the recording the problem names (nil: not in the pool).
+func variableMismatchReport(request *http.Request, liveBody []byte, dest string, diag *matchDiag, httpMocks []*models.Mock, mockDb integrations.MockMemDb) (*models.MockMismatchReport, redactedPlaces) {
+	table := variableTable(mockDb)
 	p := diag.variable
 	var diffs []models.MockFieldDiff
 	if p.place != "" && p.kind != "" {
@@ -1619,25 +1690,22 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 	if pool == nil {
 		pool = httpMocks
 	}
-	var closest *models.Mock
-	for _, m := range pool {
-		if m != nil && m.Name == p.mock && m.Spec.HTTPReq != nil {
-			closest = m
-			break
-		}
-	}
-	if closest != nil {
-		redactFieldDiffs(diffs, closest.Noise)
-	}
+	closest := namedIn(pool, p.mock)
+	// Redacted by every recording's places (poolPlaces), the closest's
+	// among them when it is still in the pool. The summary names the path
+	// escaped (buildHTTPMismatchReport).
+	places := heldPlaces(mockDb, closest, pool, request.URL.EscapedPath())
+	redactFieldDiffs(diffs, places, request.URL.EscapedPath())
+	actualKey := places.escapedSummary(request.Method, request.URL.EscapedPath())
 	b := mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 		WithDestination(dest).
 		WithComparedDestinations(comparedDestinations(pool, diag.candidates)).
 		WithPhase(models.MatchPhaseVariable, diag.candidates).
 		WithClosest(p.mock, diffs).
-		WithDiff(p.diff()).
+		WithDiff(p.diffAt(places)).
 		WithNextSteps(p.next)
 	if closest != nil {
-		b = b.WithRenderedRequests(renderMockRequest(closest.Spec.HTTPReq, closest.Noise), renderLiveRequest(request, liveBody, closest.Noise))
+		b = b.WithRenderedRequests(renderMockRequest(closest.Spec.HTTPReq, closest.Noise), renderLiveRequest(request, liveBody, places))
 	}
 	r := b.Build()
 	r.Given = p.given
@@ -1653,7 +1721,7 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 			r.VariablePlaces = append(r.VariablePlaces, place)
 		}
 	}
-	return r
+	return r, places
 }
 
 // withRoutePlaces is r carrying, under the proven switch, the URL path places
@@ -1662,13 +1730,16 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 // escaped, as a place counts segments, so its shape writes them {}
 // (models.MissShape). A place of the closest mock off its route only writes
 // more {}. With the switch off, r is as built.
-func withRoutePlaces(r *models.MockMismatchReport, request *http.Request, closest *models.Mock, pool []*models.Mock, table *variables.Table) *models.MockMismatchReport {
+func withRoutePlaces(r *models.MockMismatchReport, request *http.Request, closest *models.Mock, pool []*models.Mock, table *variables.Table, places redactedPlaces) *models.MockMismatchReport {
 	if !provenswitch.On() || r == nil || request.URL == nil {
 		return r
 	}
-	if places := routePathPlaces(request, closest, pool, table); len(places) > 0 {
-		r.ActualSummary = request.Method + " " + request.URL.EscapedPath()
-		r.VariablePlaces = places
+	if route := routePathPlaces(request, closest, pool, table); len(route) > 0 {
+		// The path escaped, as a place counts it, with the segments a
+		// recording of the pool redacted written valueRedacted (places,
+		// the report's), as the report it replaces wrote them.
+		r.ActualSummary = places.escapedSummary(request.Method, request.URL.EscapedPath())
+		r.VariablePlaces = route
 	}
 	return r
 }

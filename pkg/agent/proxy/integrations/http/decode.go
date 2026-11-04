@@ -180,7 +180,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// query and body never go to the log, only its shape.
 			if ce := h.Logger.Check(zap.DebugLevel, "decodeHTTP debug logs for input"); ce != nil {
 				ce.Write(zap.String("method", input.method),
-					zap.String("path", input.url.Path),
+					zap.String("path", utils.URLPathShape(input.url)),
 					zap.Strings("header names", headerNames(input.header)),
 					zap.Int("body bytes", len(input.body)))
 			}
@@ -236,7 +236,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				if ce := h.Logger.Check(zap.DebugLevel, "egress passthrough: serving without mock match"); ce != nil {
 					ce.Write(zap.String("mode", string(mode)), zap.String("served", served),
-						zap.String("path", input.url.Path), zap.Any("metadata", utils.GetReqMeta(request)))
+						zap.String("path", utils.URLPathShape(input.url)), zap.Any("metadata", utils.GetReqMeta(request)))
 				}
 				if _, werr := clientConn.Write(out); werr != nil {
 					if ctx.Err() != nil {
@@ -595,7 +595,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				noMockBody := "keploy: no matching mock found for this HTTP request\n"
 				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)
-				baseErr := fmt.Errorf("%w for %s %s", ErrMockNotMatched, request.Method, request.URL.Path)
+				// The error names the call without its secret (missedCall).
+				baseErr := fmt.Errorf("%w for %s", ErrMockNotMatched, missedCall(request, report))
 				missErr := models.NewMockMismatchError(baseErr, report)
 				// The miss is queued for the test that made it before the app
 				// sees the 502. The replay reads a test's misses once the app
@@ -1025,4 +1026,16 @@ func passOneCallThrough(ctx context.Context, logger *zap.Logger, clientConn net.
 		// the close, which resp.Write tells the client as Connection: close.
 		return resp.Close, nil
 	}
+}
+
+// missedCall names a missed call in its error as its report does, with the
+// segments a recording of the pool redacted written redacted, or by its
+// path's shape with no recording at hand or no report (shapeSummary): the
+// proxy logs the error at ERROR, and the call may have sent its secret in
+// its path.
+func missedCall(request *http.Request, report *models.MockMismatchReport) string {
+	if report != nil {
+		return report.ActualSummary
+	}
+	return shapeSummary(request)
 }
