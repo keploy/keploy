@@ -581,17 +581,19 @@ func endJudgesAfterCtx(ends supervisor.Ends) bool {
 
 // headCutLeftOut is LeftOutHeadCut, ok true, for a response whose read the
 // connection's end judges (ends, as the read ended) where the upstream's end
-// came first, before the recording's stop (Ends.FollowedStop: one read once
-// the stop had begun is the stop's cut, stopCut), and resp, the response read,
-// has no whole head as messageHead frames it: the application got part of a
-// head, then the upstream's close or reset, and no recorded fault replays that
-// (LeftOutHeadCut). ok is false otherwise, and for a stream that ended at a
-// capture hole, as in partAnswerFault.
+// came first, and resp, the response read, has no whole head as messageHead
+// frames it: the application got part of a head, then the upstream's close or
+// reset, and no recorded fault replays that (LeftOutHeadCut). ok is false
+// otherwise, and for a stream that ended at a capture hole, as in
+// partAnswerFault. A read that ends inside the head is always cut (recordV2's
+// cut: readResponseV2 ends it in errAnswerCut, its reader's close or the
+// context's end), so an upstream end read once the recording's stop had begun
+// (Ends.FollowedStop) is stopCut's, asked first, and is not asked for here.
 func headCutLeftOut(ends supervisor.Ends, resp []byte) (reason string, ok bool) {
 	if ends.DestAtHole() {
 		return "", false
 	}
-	if first, ended := ends.First(); !ended || first != fakeconn.FromDest || ends.FollowedStop() {
+	if first, ended := ends.First(); !ended || first != fakeconn.FromDest {
 		return "", false
 	}
 	if _, _, _, whole := messageHead(resp, true); whole {

@@ -1825,3 +1825,149 @@ func TestRecordV2_AMockWaitsForItsConsumerWhileTheContextLasts(t *testing.T) {
 		t.Errorf("recordV2 = %v, want nil", err)
 	}
 }
+
+// The upstream ends the connection partway through a close-delimited body
+// once the recording's stop has begun: its end is the stop's, so no fault is
+// recorded for it, a reset no more than a close, as for an upstream end read
+// once the stop had begun anywhere in the answer (partAnswerFault).
+func TestRecordV2_TheUpstreamsEndAfterTheStopRecordsNoFaultOnACloseDelimitedBody(t *testing.T) {
+	part := stopCutAllParts[len(stopCutAllParts)-1].part
+	for _, proven := range []bool{false, true} {
+		for _, reset := range []bool{false, true} {
+			t.Run(map[bool]string{false: "closed", true: "reset"}[reset]+switchName[proven], func(t *testing.T) {
+				t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+				c := newRelayedConn(t)
+				c.start(t)
+				write(t, c.app, c.src, faultReq)
+				relayed(t, c.dest, faultReq)
+				write(t, c.dest, c.dst, part)
+				relayed(t, c.app, part)
+				c.stopBegun.Store(true)
+				if reset {
+					resetConn(t, c.dest)
+				} else {
+					_ = c.dest.Close()
+				}
+				awaitPeerEnd(t, c, fakeconn.FromDest)
+				mocks, err := c.finish(t)
+				if err != nil {
+					t.Errorf("recordV2 = %v, want nil", err)
+				}
+				for _, m := range mocks {
+					if m.Spec.Fault != nil {
+						t.Errorf("recorded the fault %v, want none: the upstream's end came once the recording's stop had begun", m.Spec.Fault)
+					}
+				}
+				if got := errorsLogged(c); len(got) != 0 {
+					t.Errorf("logged %q at ERROR, want nothing", got)
+				}
+			})
+		}
+	}
+}
+
+// A capture hole ends the destination's stream partway through the
+// response's head, then the upstream closes: the capture lost the rest of the
+// head, so the head is not known to be the upstream's cut (LeftOutHeadCut),
+// and no fault is recorded, as at a hole anywhere in the answer.
+func TestRecordV2_AHeadCutAtAHoleIsNotTheUpstreamsHeadCut(t *testing.T) {
+	part := stopCutParts[len(stopCutParts)-1].part
+	for _, proven := range []bool{false, true} {
+		t.Run(strings.TrimPrefix(switchName[proven], ", "), func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+			c := newRelayedConn(t)
+			c.start(t)
+			write(t, c.app, c.src, faultReq)
+			relayed(t, c.dest, faultReq)
+			write(t, c.dest, c.dst, part)
+			relayed(t, c.app, part)
+			c.sess.MarkEndedAtHole(fakeconn.FromDest, "test hole")
+			_ = c.dest.Close()
+			<-c.relayDone
+			mocks, _ := c.finish(t)
+			for _, m := range mocks {
+				if m.Spec.Fault != nil {
+					t.Errorf("recorded the fault %v, want none at a capture hole", m.Spec.Fault)
+				}
+			}
+			for _, r := range leftOutReasons(c) {
+				if strings.HasSuffix(r, supervisor.LeftOutHeadCut) {
+					t.Errorf("left out for %q, want not the upstream's head cut: the capture lost the rest of the head", r)
+				}
+			}
+		})
+	}
+}
+
+// The client's end comes first partway through the response (at the
+// recording's stop, or before it), then the supervisor's abort closes the
+// stream, and a capture hole is marked on the destination's stream after the
+// close, before recordV2 has judged the read: here on its first check of its
+// context after the read returned. The read is judged by the ends as it ended
+// (Session.Ends, read once): left out for the stop's close of the application
+// (LeftOutPartwayAtStop), or recorded with the client's giving up
+// (FaultTimeout after the head). Not as a read the capture lost the rest of,
+// which neither leaves it out nor records a fault, and fails to decode.
+func TestRecordV2_AHoleMarkedAfterTheAbortsCloseDoesNotJudgeTheRead(t *testing.T) {
+	const part = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n01234"
+	for _, proven := range []bool{false, true} {
+		for _, atStop := range []bool{true, false} {
+			name := map[bool]string{false: "the client gave up before the stop", true: "the stop closed the application"}[atStop] + switchName[proven]
+			t.Run(name, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+				c := newRelayedConn(t)
+				c.grace = time.Minute
+				c.startRelay(t)
+				ctx := &ctxErrHook{Context: context.Background(), hook: func() {
+					c.sess.MarkEndedAtHole(fakeconn.FromDest, "test hole")
+				}}
+				go func() { c.done <- (&HTTP{Logger: zaptest.NewLogger(t)}).recordV2(ctx, c.sess) }()
+				write(t, c.app, c.src, faultReq)
+				relayed(t, c.dest, faultReq)
+				at := cutTimes{sent: time.Now()}
+				at.last = at.sent
+				write(t, c.dest, c.dst, part)
+				relayed(t, c.app, part)
+				at.done = time.Now()
+				awaitTaken(t, c.sess.DestStream, len(part))
+				for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(time.Millisecond) {
+					if waiting, _ := c.sess.DestStream.Waiting(); waiting {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("the parser did not block for the rest of the response in 10s")
+					}
+				}
+				stopping := make(chan struct{})
+				close(stopping)
+				if atStop {
+					c.sess.RecordingDone = stopping
+					c.stopBegun.Store(true)
+				}
+				_ = c.app.Close()
+				if !peerEndRead(c, fakeconn.FromClient) {
+					t.Fatal("the relay did not read the client's end in 10s")
+				}
+				if !atStop {
+					c.sess.RecordingDone = stopping
+					c.stopBegun.Store(true)
+				}
+				ctx.armed.Store(true)
+				_ = c.sess.DestStream.Close()
+				_ = c.sess.ClientStream.Close()
+				mocks, err := c.collect(t)
+				if !ctx.fired.Load() {
+					t.Fatal("recordV2 did not ask its context after the read")
+				}
+				if atStop {
+					wantLeftOutForTheStop(t, c, at, mocks, err, supervisor.LeftOutPartwayAtStop, false)
+					return
+				}
+				if got := errorsLogged(c); len(got) != 0 {
+					t.Errorf("logged %q at ERROR, want nothing", got)
+				}
+				wantFault(t, oneMock(t, mocks, err), models.Fault{Kind: models.FaultTimeout, AfterHead: true, BodyBytes: 5})
+			})
+		}
+	}
+}
