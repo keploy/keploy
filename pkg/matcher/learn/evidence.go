@@ -496,16 +496,18 @@ func untimedAnswer(req, answered time.Time) bool {
 // order cannot be told (follows.go's recordedOrder). One candidate has an
 // order only where F served it more than once: the recording gave its one
 // answer once, so an application copying by position may have taken
-// another serve of it in F.
+// another serve of it in F. Two places are tied alike here never: an
+// order the recording cannot tell, or one that differs, marks them
+// unknown even where both hold the value's words at the same fields.
 func orderUnknown(in Input, ps []evPlace, cand map[string]bool) {
 	if len(cand) == 0 || len(cand) == 1 && !servedAgain(in, cand) {
 		return
 	}
 	source := func(mock string) bool { return cand[mock] }
-	rec, untoldRec := recordedOrder(in.At, in.Earlier, in.Raw, source)
+	rec, _, untoldRec := recordedOrder(in.At, in.Earlier, in.Raw, source, func(Raw) string { return "" })
 	f, untoldF := servedOrder(in.Earlier, in.Raw, source)
 	why := cmp.Or(untoldRec, untoldF)
-	if d := orderDiff(rec, f); why == "" && d != "" {
+	if d := orderDiff(rec, f, func(a, b string) bool { return a == b }); why == "" && d != "" {
 		why = "another order: " + d
 	}
 	if why == "" {
