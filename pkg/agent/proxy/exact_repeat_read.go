@@ -149,24 +149,19 @@ var _ integrations.RepeatReadAnswerer = (*MockManager)(nil)
 func (v *exactView) oneFewerLocked() map[int]bool {
 	var excused map[int]bool
 	for _, at := range v.repeats {
-		unmade := -1
+		var unmade []int
 		for _, i := range at {
-			if v.consumed[i] {
-				continue
+			if !v.consumed[i] {
+				unmade = append(unmade, i)
 			}
-			if unmade >= 0 {
-				unmade = -1
-				break
-			}
-			unmade = i
 		}
-		if unmade < 0 {
+		if len(unmade) != 1 {
 			continue
 		}
 		if excused == nil {
 			excused = map[int]bool{}
 		}
-		excused[unmade] = true
+		excused[unmade[0]] = true
 	}
 	return excused
 }

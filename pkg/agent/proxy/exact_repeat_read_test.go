@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -168,6 +169,24 @@ func TestWhatIsNotARepeatedReadKeepsItsExactCount(t *testing.T) {
 			edit: func(_ int, mk *models.Mock) { mk.Spec.HTTPResp.BodySkipped = true }},
 		{name: "streamed", method: "GET", path: "/api/events", read: "sse", answers: []string{``}, recorded: 2, sends: 3, missed: []int{2},
 			edit: func(_ int, mk *models.Mock) { mk.Spec.HTTPResp.StreamBody = []models.HTTPStreamChunk{{}} }},
+		// an answer kept apart that cannot be read back is not one answer,
+		// whatever the recording still carries
+		{name: "unreadable", method: "GET", path: "/api/gone", read: "gone", answers: []string{`{}`}, recorded: 2, sends: 1, unmade: []int{1},
+			edit: func(i int, mk *models.Mock) {
+				if i == 1 {
+					mk.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
+						return nil, nil, errors.New("disk mocks: read back")
+					})
+				}
+			}},
+		// a recording of another protocol carrying the same request is no
+		// HTTP read
+		{name: "kind", method: "GET", path: "/api/kind", read: "kind", answers: []string{`{}`}, recorded: 2, sends: 1, unmade: []int{1},
+			edit: func(i int, mk *models.Mock) {
+				if i == 1 {
+					mk.Kind = models.GENERIC
+				}
+			}},
 		// recordings of two calls named one read: neither more nor fewer
 		{name: "two-calls", method: "GET", path: "/api/x", read: "xy", answers: []string{`{}`}, recorded: 2, sends: 2, missed: []int{1}, unmade: []int{1},
 			edit: func(i int, mk *models.Mock) {
@@ -212,32 +231,98 @@ func TestARepeatedReadKeptApartIsReadBackAndAnsweredOnceMore(t *testing.T) {
 
 // A shared recording (keploy record's full round: a test whose request was
 // open beside another's) is never one of the test's own repeated reads,
-// whatever read it names: the test's own recording of the call, answered,
-// with a shared one of the same read answered too, is not answered a third
-// time.
+// whatever read it names: it does not make a read the test recorded once a
+// repeated one, it does not decide whether the test's own recordings hold
+// one answer, and a call more that matches it is not answered again.
 func TestASharedRecordingIsNoPartOfATestsRepeatedRead(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	t0 := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
-	own := readMock("own-0", t0, "GET", "/api/shared", "", `{}`)
-	shared := readMock("shared-0", t0.Add(time.Second), "GET", "/api/shared", "", `{}`)
-	own.TestModeInfo.RepeatRead, shared.TestModeInfo.RepeatRead = "r", "r"
+	// run serves the test own (its own recordings) beside shared, all of
+	// them recordings of one call the mapping names read "r", sends the call
+	// sends times, and returns the sends that missed and what its end
+	// charged as never made.
+	run := func(own []string, shared string, sends int) (missed []int, left []string) {
+		var owned, set []*models.Mock
+		for i, answer := range own {
+			mk := readMock(fmt.Sprintf("own-%d", i), t0.Add(time.Duration(i)*time.Second), "GET", "/api/shared", "", answer)
+			mk.TestModeInfo.RepeatRead = "r"
+			owned = append(owned, mk)
+		}
+		sh := readMock("shared-0", t0.Add(time.Minute), "GET", "/api/shared", "", shared)
+		sh.TestModeInfo.RepeatRead = "r"
+		set = append(append(set, owned...), sh)
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mm.Close)
+		mm.SetMocksWithWindow(nil, set, models.BaseTime, time.Now().Add(time.Hour))
+		mm.ServeExactPool("k", nil)
+		mm.ServeExactTestConcurrent("t", owned, []*models.Mock{sh})
+		for i := 0; i < sends; i++ {
+			if r := sendForMiss(t, mm, models.OutgoingOptions{}, nil, readCall("GET", "/api/shared", "")); r != nil {
+				missed = append(missed, i)
+			}
+		}
+		test, _, left, ok := mm.ExactTestOutcome()
+		if !ok || test != "t" {
+			t.Fatalf("not serving t exactly at its end: %q %v", test, ok)
+		}
+		return missed, left
+	}
+	// recorded once by the test, once beside it: the third call misses
+	if missed, _ := run([]string{`{}`}, `{}`, 3); !reflect.DeepEqual(missed, []int{2}) {
+		t.Errorf("one own, one shared, sent 3: missed %v; want the third call (2)", missed)
+	}
+	// recorded twice by the test, once beside it: a fourth call is two more
+	// than the test's own recordings, and the shared one is not answered
+	// again
+	if missed, _ := run([]string{`{}`, `{}`}, `{}`, 4); !reflect.DeepEqual(missed, []int{3}) {
+		t.Errorf("two own, one shared, sent 4: missed %v; want the fourth call (3)", missed)
+	}
+	// recorded twice by the test with one answer, once beside it with
+	// another: the test's read holds one answer, so its one fewer is excused
+	if missed, left := run([]string{`{"v":1}`, `{"v":1}`}, `{"v":2}`, 1); len(missed) != 0 || len(left) != 0 {
+		t.Errorf("two own of one answer, one shared of another, sent 1: missed %v, never made %v; want none and none", missed, left)
+	}
+}
+
+// AnswerRepeatRead answers a read again only from the open view's own
+// recordings, only once every recording of the read has answered, with the
+// read's last recording, and once.
+func TestARepeatedReadIsAnsweredAgainOnlyFromTheViewsOwnAnsweredRecordings(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	r0 := readMock("r-0", t0, "GET", "/api/r", "", `{}`)
+	r1 := readMock("r-1", t0.Add(time.Second), "GET", "/api/r", "", `{}`)
+	r0.TestModeInfo.RepeatRead, r1.TestModeInfo.RepeatRead = "r", "r"
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
-	mm.SetMocksWithWindow(nil, []*models.Mock{own, shared}, models.BaseTime, time.Now().Add(time.Hour))
+	mm.SetMocksWithWindow(nil, []*models.Mock{r0, r1}, models.BaseTime, time.Now().Add(time.Hour))
 	mm.ServeExactPool("k", nil)
-	mm.ServeExactTestConcurrent("t", []*models.Mock{own}, []*models.Mock{shared})
-	var missed []int
-	for i := 0; i < 3; i++ {
-		if r := sendForMiss(t, mm, models.OutgoingOptions{}, nil, readCall("GET", "/api/shared", "")); r != nil {
-			missed = append(missed, i)
+	mm.ServeExactTest("t", []*models.Mock{r0, r1})
+	send := func() {
+		t.Helper()
+		if r := sendForMiss(t, mm, models.OutgoingOptions{}, nil, readCall("GET", "/api/r", "")); r != nil {
+			t.Fatalf("a recorded call missed: %v", r)
 		}
 	}
-	if !reflect.DeepEqual(missed, []int{2}) {
-		t.Fatalf("missed %v; want the third call (2): the shared recording is no part of the test's read", missed)
+	send()
+	answered := mm.ConsumedTestMocks()
+	if len(answered) != 1 {
+		t.Fatalf("answered %d recordings after one call; want 1", len(answered))
 	}
-	// and a copy that is not the view's own answers nothing again
-	if _, ok := mm.AnswerRepeatRead([]*models.Mock{own.ShallowCopy()}); ok {
+	if _, ok := mm.AnswerRepeatRead(answered); ok {
+		t.Fatal("answered again while one of the read's recordings had not answered")
+	}
+	send()
+	answered = mm.ConsumedTestMocks()
+	if _, ok := mm.AnswerRepeatRead([]*models.Mock{answered[0].ShallowCopy()}); ok {
 		t.Fatal("a copy that is not the open view's recording was answered again")
+	}
+	again, ok := mm.AnswerRepeatRead(answered)
+	if !ok || again.Name != "r-1" {
+		t.Fatalf("answered again %v (%v); want the read's last recording r-1", again, ok)
+	}
+	if _, ok := mm.AnswerRepeatRead(answered); ok {
+		t.Fatal("the read was answered again twice in one test")
 	}
 }
 
