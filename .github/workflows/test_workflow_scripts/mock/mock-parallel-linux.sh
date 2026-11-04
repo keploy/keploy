@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 # End-to-end guard for parallel test workers in `keploy mock`, both ways:
 #
-# Under the proven switch (KEPLOY_PROVEN=1), a REFUSAL check until release 2.
-# The first release runs one test process per keploy run, with one test open
-# at a time (release1-cut §2.1); parallel workers arrive in release 2. So, in
-# `keploy mock record`, over scope protocol v1:
+# Under the proven switch (KEPLOY_PROVEN=1), a REFUSAL check: test processes
+# that declare no worker count run one per keploy run, each with one test
+# open at a time. So, in `keploy mock record`, over scope protocol v1:
 #   - a test process that claims the run while another live one holds it is
 #     refused: 422 one_test_process_at_a_time;
 #   - a test that begins while another test of the same process is open is
 #     refused: 422 one_test_at_a_time;
 # each with a message that says what ran at once, and a remedy that names
-# running one at a time and the later release. Each refused process fails, as
+# running one at a time, and no later release. Each refused process fails, as
 # an integration must on any non-2xx answer, so the run does not pass: keploy
 # exits non-zero and keeps no recording. A control run, one process running
 # the same two tests one after the other, passes and records both.
@@ -433,8 +432,8 @@ line_of refused.log A_MESSAGE | grep -F "refuse.py::t2 began while refuse.py::t1
   fail "the one_test_at_a_time refusal does not say which tests ran at once: '$(line_of refused.log A_MESSAGE)'"
 line_of refused.log A_REMEDY | grep -F "run them one at a time" >/dev/null ||
   fail "the one_test_at_a_time refusal does not say to run them one at a time: '$(line_of refused.log A_REMEDY)'"
-line_of refused.log A_REMEDY | grep -F "parallel test workers arrive in a later keploy release" >/dev/null ||
-  fail "the one_test_at_a_time refusal does not say parallel workers come later: '$(line_of refused.log A_REMEDY)'"
+line_of refused.log A_REMEDY | grep -F "later" >/dev/null &&
+  fail "the one_test_at_a_time refusal promises a later release: '$(line_of refused.log A_REMEDY)'"
 grep -q "A_BEGAN_T2_WHILE_T1_WAS_OPEN" refused.log && fail "the agent opened a second test while the first was open"
 # A second test process.
 [ "$(line_of refused.log B_REFUSED)" = "422 one_test_process_at_a_time" ] ||
@@ -444,8 +443,8 @@ grep -q "A_BEGAN_T2_WHILE_T1_WAS_OPEN" refused.log && fail "the agent opened a s
   fail "the one_test_process_at_a_time refusal does not name both processes (A=$A_PID, B=$B_PID): '$(line_of refused.log B_MESSAGE)'"
 line_of refused.log B_REMEDY | grep -F "run one test process at a time" >/dev/null ||
   fail "the one_test_process_at_a_time refusal does not say to run one test process at a time: '$(line_of refused.log B_REMEDY)'"
-line_of refused.log B_REMEDY | grep -F "parallel test workers arrive in a later keploy release" >/dev/null ||
-  fail "the one_test_process_at_a_time refusal does not say parallel workers come later: '$(line_of refused.log B_REMEDY)'"
+[ "$(line_of refused.log B_REMEDY)" = "run one test process at a time (go test -p 1, pytest without -n, jest --runInBand)" ] ||
+  fail "the one_test_process_at_a_time refusal's fix is not to run one test process at a time, alone (this keploy runs one test worker): '$(line_of refused.log B_REMEDY)'"
 grep -q "B_CLAIMED_WHILE_A_HELD_THE_RUN" refused.log && fail "the agent let a second test process claim the run while the first held it"
 # The run does not pass: each process reached its end, refused, and failed.
 [ "$(line_of refused.log A_END)" = refused ] || fail "the first test process did not end refused (A_END='$(line_of refused.log A_END)'): its exit is not the refusal"

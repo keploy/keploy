@@ -98,6 +98,11 @@ type Hooks struct {
 	// ebpf objects and events
 	socket      link.Link
 	processExit link.Link
+	// instanceFork is k_instance_fork's link, attached at the first
+	// SetInstance (instance.go); instanceMu guards it.
+	instanceMu   sync.Mutex
+	instanceFork link.Link
+
 	connect4    link.Link
 	udp4Sendmsg link.Link
 	udp4Recvmsg link.Link
@@ -944,6 +949,9 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	// Close eBPF objects with proper synchronization
 	h.objectsMutex.Lock()
 	h.stopAppConns()
+	if err := h.closeInstanceFork(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the sched_process_fork hook that keeps keploy instances")
+	}
 	if err := h.objects.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the objects")
 	}

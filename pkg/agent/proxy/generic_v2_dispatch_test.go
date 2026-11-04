@@ -279,3 +279,30 @@ func TestMockGenericOutgoing_UnregisteredParserReportsInsteadOfPanicking(t *test
 			"reporting success")
 	}
 }
+
+// A test worker's connection that no parser can serve is reported as that
+// worker's, as a parser's miss is: the error drain files it in the worker's
+// window (missWindowOf), never the run's, which no worker's test reads.
+func TestAWorkersConnectionNoParserCanServeIsReportedAsItsWorkers(t *testing.T) {
+	p := &Proxy{
+		logger:       zap.NewNop(),
+		errChannel:   make(chan error, 1),
+		Integrations: map[integrations.IntegrationType]integrations.Integrations{}, // GENERIC absent
+	}
+	srcRaw, destRaw, cleanup := tcpConnPair(t)
+	defer cleanup()
+	_ = destRaw.Close()
+
+	opts := models.OutgoingOptions{SrcPid: uint32(os.Getpid()), SrcInstance: 7}
+	if err := p.mockGenericOutgoing(context.Background(), srcRaw, &models.ConditionalDstCfg{Addr: "127.0.0.1:1"}, nil, opts, zap.NewNop()); err == nil {
+		t.Fatal("a connection no parser can serve was not reported")
+	}
+	select {
+	case err := <-p.errChannel:
+		if pe, ok := err.(models.ParserError); !ok || pe.Instance != 7 {
+			t.Fatalf("reported %#v; want a failure of test worker 7, whose process made the connection", err)
+		}
+	default:
+		t.Fatal("nothing was reported for test worker 7's connection")
+	}
+}

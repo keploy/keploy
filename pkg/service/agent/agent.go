@@ -222,6 +222,12 @@ type Agent struct {
 	// taking scopeMu.
 	provenMu sync.Mutex
 	proven   provenWire
+	// instanceGen is, for each keploy instance id, the generation its next
+	// claim gets (coreAgent.InstanceValue), for the agent's life: a session's
+	// reset keeps it, so no claim of an id is stamped with the value of an
+	// earlier one, whose processes' connections may still be open. With the
+	// wire held.
+	instanceGen [coreAgent.MaxInstanceID + 1]uint32
 	// listenerDrops counts what the kernel dropped at the proxy's listener
 	// that the tests' ends charged them (settledSince), as their own capture
 	// loss, for the agent's life: CaptureLosses reads it with every other

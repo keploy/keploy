@@ -888,6 +888,6 @@ func TestATestsWindowBeginsAtItsBeginOnly(t *testing.T) {
 	require.EqualValues(t, 1, k.windows.Load(), "the test case's end begins none")
 
 	t.Setenv(provenswitch.Env, "0")
-	b.beginWindow()
+	b.beginWindow(0)
 	require.EqualValues(t, 1, k.windows.Load(), "with the switch off no window begins")
 }

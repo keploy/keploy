@@ -263,7 +263,7 @@ func TestAClientsHangUpToldOnHoldsNoTestsWork(t *testing.T) {
 	app, proxy := acceptedPair(t, tr)
 	release := proxy.HoldHangUp()
 	defer release()
-	s := tr.scope()
+	s := tr.scope(0)
 	_ = app.Close()
 	waitState(t, proxy, tcpCloseWait)
 	if n := tr.Pending(false); n != 1 {
@@ -289,7 +289,7 @@ func TestAClientsHangUpToldOnHoldsNoTestsWork(t *testing.T) {
 	if n, _ := s.State(true); n != 0 {
 		t.Fatalf("told on: the scope's pending %d, want 0", n)
 	}
-	later := tr.scope()
+	later := tr.scope(0)
 	if p := later.PendingProgress(true); len(p) != 0 {
 		t.Fatalf("told on: a later scope waits on %v", p)
 	}

@@ -27,6 +27,8 @@ const (
 	bpfMapAppPortInfo                 = "app_port_info"
 	bpfMapBindEvents                  = "bind_events"
 	bpfMapExcludedPids                = "excluded_pids"
+	bpfMapInstanceLost                = "instance_lost"
+	bpfMapInstanceOfTgid              = "instance_of_tgid"
 	bpfMapKeployAgentKernelPidMap     = "keploy_agent_kernel_pid_map"
 	bpfMapKeployAgentRegistrationMap  = "keploy_agent_registration_map"
 	bpfMapKeployClientKernelPidMap    = "keploy_client_kernel_pid_map"
@@ -68,6 +70,7 @@ const (
 	bpfProgK_connect6                 = "k_connect6"
 	bpfProgK_getpeername4             = "k_getpeername4"
 	bpfProgK_getpeername6             = "k_getpeername6"
+	bpfProgK_instanceFork             = "k_instance_fork"
 	bpfProgK_postBind4                = "k_post_bind4"
 	bpfProgK_postBind6                = "k_post_bind6"
 	bpfProgK_processExit              = "k_process_exit"
@@ -142,6 +145,7 @@ type bpfProgramSpecs struct {
 	K_connect6              *ebpf.ProgramSpec `ebpf:"k_connect6"`
 	K_getpeername4          *ebpf.ProgramSpec `ebpf:"k_getpeername4"`
 	K_getpeername6          *ebpf.ProgramSpec `ebpf:"k_getpeername6"`
+	K_instanceFork          *ebpf.ProgramSpec `ebpf:"k_instance_fork"`
 	K_postBind4             *ebpf.ProgramSpec `ebpf:"k_post_bind4"`
 	K_postBind6             *ebpf.ProgramSpec `ebpf:"k_post_bind6"`
 	K_processExit           *ebpf.ProgramSpec `ebpf:"k_process_exit"`
@@ -182,6 +186,8 @@ type bpfMapSpecs struct {
 	AppPortInfo                 *ebpf.MapSpec `ebpf:"app_port_info"`
 	BindEvents                  *ebpf.MapSpec `ebpf:"bind_events"`
 	ExcludedPids                *ebpf.MapSpec `ebpf:"excluded_pids"`
+	InstanceLost                *ebpf.MapSpec `ebpf:"instance_lost"`
+	InstanceOfTgid              *ebpf.MapSpec `ebpf:"instance_of_tgid"`
 	KeployAgentKernelPidMap     *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
@@ -255,6 +261,8 @@ type bpfMaps struct {
 	AppPortInfo                 *ebpf.Map `ebpf:"app_port_info"`
 	BindEvents                  *ebpf.Map `ebpf:"bind_events"`
 	ExcludedPids                *ebpf.Map `ebpf:"excluded_pids"`
+	InstanceLost                *ebpf.Map `ebpf:"instance_lost"`
+	InstanceOfTgid              *ebpf.Map `ebpf:"instance_of_tgid"`
 	KeployAgentKernelPidMap     *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
@@ -304,6 +312,8 @@ func (m *bpfMaps) Close() error {
 		m.AppPortInfo,
 		m.BindEvents,
 		m.ExcludedPids,
+		m.InstanceLost,
+		m.InstanceOfTgid,
 		m.KeployAgentKernelPidMap,
 		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,
@@ -358,6 +368,7 @@ type bpfPrograms struct {
 	K_connect6              *ebpf.Program `ebpf:"k_connect6"`
 	K_getpeername4          *ebpf.Program `ebpf:"k_getpeername4"`
 	K_getpeername6          *ebpf.Program `ebpf:"k_getpeername6"`
+	K_instanceFork          *ebpf.Program `ebpf:"k_instance_fork"`
 	K_postBind4             *ebpf.Program `ebpf:"k_post_bind4"`
 	K_postBind6             *ebpf.Program `ebpf:"k_post_bind6"`
 	K_processExit           *ebpf.Program `ebpf:"k_process_exit"`
@@ -392,6 +403,7 @@ func (p *bpfPrograms) Close() error {
 		p.K_connect6,
 		p.K_getpeername4,
 		p.K_getpeername6,
+		p.K_instanceFork,
 		p.K_postBind4,
 		p.K_postBind6,
 		p.K_processExit,
