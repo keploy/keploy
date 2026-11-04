@@ -14,15 +14,16 @@ import (
 // place body.<field> from word first on (a bare id: 0; "APP:"+id: 1), as
 // variables prefix0..prefix4, its runs filled (WordRuns) in a mock that
 // holds the recorded UUID whole at another place (the api-server's ids, each
-// also sent whole in a field of its own).
+// also sent whole in a field of its own), each word named a word of that one
+// learned value (WordBind.Of).
 func uuidBinds(t *testing.T, prefix, field, live, recorded string, first int) []Binding {
 	t.Helper()
-	return uuidBindsHeld(t, heldAt(recorded), prefix, field, live, recorded, first)
+	return uuidBindsHeld(t, heldAt(recorded), recorded, prefix, field, live, recorded, first)
 }
 
 // uuidBindsHeld is uuidBinds in a mock that holds whole elsewhere what
-// elsewhere says.
-func uuidBindsHeld(t *testing.T, elsewhere func(string) bool, prefix, field, live, recorded string, first int) []Binding {
+// elsewhere says, each word named a word of the learned value of ("": none).
+func uuidBindsHeld(t *testing.T, elsewhere func(string) bool, of, prefix, field, live, recorded string, first int) []Binding {
 	t.Helper()
 	lw, rw := wordsOf(live), wordsOf(recorded)
 	if len(lw) != len(rw) {
@@ -34,7 +35,7 @@ func uuidBindsHeld(t *testing.T, elsewhere func(string) bool, prefix, field, liv
 	}
 	ws := make([]WordBind, len(lw))
 	for i := range lw {
-		ws[i] = WordBind{Text: "body." + field, Word: first + i, Live: lw[i], Recorded: rw[i], RecordedText: text, Elsewhere: elsewhere}
+		ws[i] = WordBind{Text: "body." + field, Word: first + i, Live: lw[i], Recorded: rw[i], RecordedText: text, Elsewhere: elsewhere, Of: of}
 	}
 	runs := WordRuns(ws)
 	out := make([]Binding, len(lw))
@@ -60,6 +61,32 @@ func heldAt(values ...string) func(string) bool {
 	}
 }
 
+// learnedAs is a learning that names each word of a text a word of the
+// shortest of values the text holds over it (WordBind.Of), and of no value
+// where none does.
+func learnedAs(values ...string) func(text string, word int) string {
+	return func(text string, word int) string {
+		ws := Words(text)
+		if word >= len(ws) {
+			return ""
+		}
+		best := ""
+		for _, v := range values {
+			for off := 0; off < len(text); {
+				i := strings.Index(text[off:], v)
+				if i < 0 {
+					break
+				}
+				if from := off + i; ws[word][0] >= from && ws[word][1] <= from+len(v) && (best == "" || len(v) < len(best)) {
+					best = v
+				}
+				off += i + 1
+			}
+		}
+		return best
+	}
+}
+
 func wordsOf(s string) []string {
 	var out []string
 	for _, w := range Words(s) {
@@ -77,6 +104,18 @@ func TestWordRuns_ConsecutiveWordsOfOneTextAreOneRun(t *testing.T) {
 	for i := range ws {
 		ws[i].RecordedText, ws[i].Elsewhere = recorded[ws[i].Text], heldAt("A B C")
 	}
+	alone := []Run{{"c", "C", 0}, {"a", "A", 0}, {"z", "Z", 0}, {"b", "B", 0}, {}, {"e", "E", 0}, {"y", "Y", 0}, {"x", "X", 0}}
+	// Held whole elsewhere, but named a word of no learned value: each word
+	// is its own value.
+	if runs := WordRuns(ws); fmt.Sprint(runs) != fmt.Sprint(alone) {
+		t.Fatalf("runs no learned value names: %+v, want each word alone %+v", runs, alone)
+	}
+	of := learnedAs("A B C")
+	for i := range ws {
+		if ws[i].Word >= 0 {
+			ws[i].Of = of(ws[i].RecordedText, ws[i].Word)
+		}
+	}
 	runs := WordRuns(ws)
 	want := []Run{{"a-b-c", "A-B-C", 2}, {"a-b-c", "A-B-C", 0}, {"z", "Z", 0}, {"a-b-c", "A-B-C", 1}, {}, {"e", "E", 0}, {"y", "Y", 0}, {"x", "X", 0}}
 	for i := range want {
@@ -84,15 +123,21 @@ func TestWordRuns_ConsecutiveWordsOfOneTextAreOneRun(t *testing.T) {
 			t.Fatalf("run of %+v: %+v, want %+v (all %+v)", ws[i], runs[i], want[i], runs)
 		}
 	}
+	// Words held as one stretch but named two learned values are two.
+	ws[3].Of = "B"
+	if runs := WordRuns(ws); fmt.Sprint(runs) != fmt.Sprint(alone) {
+		t.Fatalf("runs of a held stretch learned as two values: %+v, want each word alone %+v", runs, alone)
+	}
 }
 
-// The api-server's shape: two fresh v4 UUIDs, each bound word by word and
-// each held whole at another place of its mock, whose version groups (12
-// random bits) are equal. Drawn from a fixed seed, every such pair binds, in
-// one call or two, bare or after "APP:"; one UUID sent where two were
-// recorded never does. In mocks that hold no part of them whole elsewhere
-// the pair shows no value, so each word is checked alone, and the group
-// equal by chance is refused, as main refuses it.
+// The api-server's shape: two fresh v4 UUIDs, each bound word by word, each
+// held whole at another place of its mock and named one learned value, whose
+// version groups (12 random bits) are equal. Drawn from a fixed seed, every
+// such pair binds, in one call or two, bare or after "APP:"; one UUID sent
+// where two were recorded never does. In mocks that hold no part of them
+// whole elsewhere, or where no learned value names their words, the pair
+// shows no value, so each word is checked alone, and the group equal by
+// chance is refused, as main refuses it.
 func TestTable_AGroupTwoFreshUUIDsShareByChanceBinds(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	rng := rand.New(rand.NewSource(20261103))
@@ -123,9 +168,14 @@ func TestTable_AGroupTwoFreshUUIDsShareByChanceBinds(t *testing.T) {
 				t.Fatalf("pair %d (first word %d): %s sent where %s and %s were recorded bound", n, first, liveA, recA, recB)
 			}
 			var bare Table
-			bare.BindAll(bare.Gen(), uuidBindsHeld(t, heldNowhere, "ev", "id", liveA, recA, 0))
-			if _, with, _, ok := bare.BindAll(bare.Gen(), uuidBindsHeld(t, heldNowhere, "su", "key", liveB, recB, first)); ok || with.Name == "" {
+			bare.BindAll(bare.Gen(), uuidBindsHeld(t, heldNowhere, recA, "ev", "id", liveA, recA, 0))
+			if _, with, _, ok := bare.BindAll(bare.Gen(), uuidBindsHeld(t, heldNowhere, recB, "su", "key", liveB, recB, first)); ok || with.Name == "" {
 				t.Fatalf("pair %d (first word %d): %s beside %s, neither held whole elsewhere, bound; main refuses the group %s", n, first, liveB, liveA, group)
+			}
+			var unnamed Table
+			unnamed.BindAll(unnamed.Gen(), uuidBindsHeld(t, heldAt(recA), "", "ev", "id", liveA, recA, 0))
+			if _, with, _, ok := unnamed.BindAll(unnamed.Gen(), uuidBindsHeld(t, heldAt(recB), "", "su", "key", liveB, recB, first)); ok || with.Name == "" {
+				t.Fatalf("pair %d (first word %d): %s beside %s, each held whole but named no learned value, bound; main refuses the group %s", n, first, liveB, liveA, group)
 			}
 		}
 	}
@@ -192,6 +242,13 @@ func TestTwoValues_WordRuns(t *testing.T) {
 // a mock that holds whole elsewhere what elsewhere says.
 func textBindsHeld(t *testing.T, elsewhere func(string) bool, texts ...[4]string) []Binding {
 	t.Helper()
+	return textBindsNamed(t, elsewhere, nil, texts...)
+}
+
+// textBindsNamed is textBindsHeld with each word named a word of the learned
+// value of says (nil: none).
+func textBindsNamed(t *testing.T, elsewhere func(string) bool, of func(string, int) string, texts ...[4]string) []Binding {
+	t.Helper()
 	var ws []WordBind
 	var out []Binding
 	for _, x := range texts {
@@ -201,7 +258,11 @@ func textBindsHeld(t *testing.T, elsewhere func(string) bool, texts ...[4]string
 			t.Fatalf("%s and %s hold %d and %d words", live, recorded, len(lw), len(rw))
 		}
 		for i := range lw {
-			ws = append(ws, WordBind{Text: text, Word: i, Live: lw[i], Recorded: rw[i], RecordedText: recorded, Elsewhere: elsewhere})
+			w := WordBind{Text: text, Word: i, Live: lw[i], Recorded: rw[i], RecordedText: recorded, Elsewhere: elsewhere}
+			if of != nil {
+				w.Of = of(recorded, i)
+			}
+			ws = append(ws, w)
 			out = append(out, Binding{Name: prefix + strconv.Itoa(i), Value: lw[i], Recorded: rw[i], Place: text + "#" + strconv.Itoa(i)})
 		}
 	}
@@ -214,10 +275,12 @@ func textBindsHeld(t *testing.T, elsewhere func(string) bool, texts ...[4]string
 // Two values bound word by word and set apart only by punctuation are one
 // run ("<A>/<B>"). One UUID sent where two were recorded stays refused there:
 // beside another place, in one call or two, and twice in one text, whether
-// the mocks hold each UUID whole elsewhere or nothing. Two fresh UUIDs side
-// by side, whose groups are equal by chance, still bind where the mocks hold
-// each UUID whole elsewhere, and are refused, as main refuses them, where
-// they hold no part of either text.
+// the mocks hold each UUID whole elsewhere or nothing, and whether learning
+// names each UUID one value or not. Two fresh UUIDs side by side, whose
+// groups are equal by chance, bind only where the mocks hold each UUID whole
+// elsewhere and learning names each one value, and are refused, as main
+// refuses them, where they hold no part of either text or learning names no
+// value.
 func TestTable_OneUUIDWhereTwoWereRecordedBesideAnAdjacentBoundUUIDIsRefused(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	const (
@@ -231,8 +294,8 @@ func TestTable_OneUUIDWhereTwoWereRecordedBesideAnAdjacentBoundUUIDIsRefused(t *
 		liveP = "11112222-3333-4444-8555-666677778888"
 		liveQ = "9999aaaa-bbbb-4ccc-9ddd-eeeeffff0000"
 	)
-	check := func(t *testing.T, held func(string) bool, uuids bool) {
-		bindText := func(texts ...[4]string) []Binding { return textBindsHeld(t, held, texts...) }
+	check := func(t *testing.T, held func(string) bool, of func(string, int) string, uuids bool) {
+		bindText := func(texts ...[4]string) []Binding { return textBindsNamed(t, held, of, texts...) }
 		refused := func(t *testing.T, calls ...[]Binding) {
 			t.Helper()
 			var tb Table
@@ -285,9 +348,9 @@ func TestTable_OneUUIDWhereTwoWereRecordedBesideAnAdjacentBoundUUIDIsRefused(t *
 			return bindText([4]string{"body.key", "k", liveX + "/" + liveY, recA + "/" + recB}, [4]string{"body.c", "c", liveZ, recC})
 		}
 		if !uuids {
-			// No part of either text is held whole elsewhere: each word is
-			// its own value, and the group equal by chance is refused, as
-			// main refuses it.
+			// No part of either text is held whole elsewhere, or no learned
+			// value names it: each word is its own value, and the group equal
+			// by chance is refused, as main refuses it.
 			t.Run("two fresh UUIDs side by side, a group equal by chance, are refused", func(t *testing.T) {
 				var tb Table
 				if _, with, _, ok := tb.BindAll(tb.Gen(), chance()); ok || with.Name == "" {
@@ -313,54 +376,81 @@ func TestTable_OneUUIDWhereTwoWereRecordedBesideAnAdjacentBoundUUIDIsRefused(t *
 	for _, m := range []struct {
 		name  string
 		held  func(string) bool
+		of    func(string, int) string
 		uuids bool
 	}{
-		{"each UUID held whole elsewhere", heldAt(recA, recB, recC, recD), true},
-		{"nothing held elsewhere", heldNowhere, false},
+		{"each UUID held whole elsewhere and learned as one value", heldAt(recA, recB, recC, recD), learnedAs(recA, recB, recC, recD), true},
+		{"each UUID held whole elsewhere, no learned value named", heldAt(recA, recB, recC, recD), nil, false},
+		{"nothing held elsewhere, each UUID learned as one value", heldNowhere, learnedAs(recA, recB, recC, recD), false},
 	} {
-		t.Run(m.name, func(t *testing.T) { check(t, m.held, m.uuids) })
+		t.Run(m.name, func(t *testing.T) { check(t, m.held, m.of, m.uuids) })
 	}
 }
 
 // A run's value spans: the shortest stretch around a word that its mock
-// holds whole elsewhere and that holds no shorter such stretch, else the
-// words no such stretch covers. With no stretch held, no evidence, or a
-// recorded text that does not hold the run's words, a word is its own span.
+// holds whole elsewhere, that holds no shorter such stretch, and whose words
+// learning names one value. Every other word is its own span: with no
+// stretch held, no evidence, a held stretch no one learned value names, a
+// word no held stretch covers (never the words around it), or a recorded
+// text that does not hold the run's words.
 func TestWordRuns_AStretchItsMockHoldsElsewhereIsAValueOfItsOwn(t *testing.T) {
 	const cid, app = "c9bf9e57-1685-4c89-bafb-ff5af830be8a", "6f9619ff-8b86-4011-b42d-00c04fc964ff"
-	runs := func(recorded string, elsewhere func(string) bool) []Run {
+	runs := func(recorded string, elsewhere func(string) bool, of func(string, int) string) []Run {
 		rw := wordsOf(recorded)
 		ws := make([]WordBind, len(rw))
 		for i, w := range rw {
 			ws[i] = WordBind{Text: "body.key", Word: i, Live: "L" + w, Recorded: w, RecordedText: recorded, Elsewhere: elsewhere}
+			if of != nil {
+				ws[i].Of = of(recorded, i)
+			}
 		}
 		return WordRuns(ws)
 	}
 	span := func(r Run) string { return r.Recorded + "@" + strconv.Itoa(r.At) }
+	cids := []string{cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4"}
+	cidAlone := []string{"c9bf9e57@0", "1685@0", "4c89@0", "bafb@0", "ff5af830be8a@0"}
+	appAlone := []string{"6f9619ff@0", "8b86@0", "4011@0", "b42d@0", "00c04fc964ff@0"}
+	cat := func(xs ...[]string) []string {
+		var out []string
+		for _, x := range xs {
+			out = append(out, x...)
+		}
+		return out
+	}
 	cases := []struct {
 		name, recorded string
-		elsewhere      func(string) bool
+		held           []string // held whole elsewhere, and learned as one value each
+		unnamed        bool     // learning names no word's value
+		none           bool     // no evidence at all (no Elsewhere)
 		want           []string
 	}{
 		// No part of the text held whole elsewhere shows no value: each word
 		// is its own (main's word by word check).
-		{"nothing held elsewhere: each word alone", cid + "/3", heldNowhere, []string{"c9bf9e57@0", "1685@0", "4c89@0", "bafb@0", "ff5af830be8a@0", "3@0"}},
-		{"the text whole held elsewhere: the run whole", cid + "/3", heldAt(cid + "/3"), []string{"c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@0", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@1", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@2", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@3", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@4", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@5"}},
-		{"the cid held elsewhere: the word beside it alone", cid + "/3", heldAt(cid), []string{cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4", "3@0"}},
-		{"the cid held elsewhere: the appId's words", cid + "/" + app, heldAt(cid), []string{cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4", app + "@0", app + "@1", app + "@2", app + "@3", app + "@4"}},
-		// The whole held beside the appId is two values: the cid's words are
-		// the ones the appId leaves.
-		{"a stretch holding a shorter held one is two values", cid + "/" + app, heldAt(cid+"/"+app, app), []string{cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4", app + "@0", app + "@1", app + "@2", app + "@3", app + "@4"}},
-		{"the shortest stretch held", "ab/cd/ef/gh", heldAt("ab/cd", "cd/ef/gh"), []string{"ab-cd@0", "ab-cd@1", "cd-ef-gh@1", "cd-ef-gh@2"}},
+		{name: "nothing held elsewhere: each word alone", recorded: cid + "/3", want: cat(cidAlone, []string{"3@0"})},
+		{name: "the text whole held elsewhere: the run whole", recorded: cid + "/3", held: []string{cid + "/3"}, want: []string{"c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@0", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@1", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@2", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@3", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@4", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@5"}},
+		// Held whole is no proof of one value ("<B>/3" may be an id, or a
+		// cid beside a count): with no learned value named, each word alone.
+		{name: "the text whole held elsewhere, no learned value: each word alone", recorded: cid + "/3", held: []string{cid + "/3"}, unnamed: true, want: cat(cidAlone, []string{"3@0"})},
+		{name: "the cid held elsewhere: the word beside it alone", recorded: cid + "/3", held: []string{cid}, want: cat(cids, []string{"3@0"})},
+		// A word no held stretch covers is its own value, never read with the
+		// words around it.
+		{name: "the cid held elsewhere: the appId's words each alone", recorded: cid + "/" + app, held: []string{cid}, want: cat(cids, appAlone)},
+		{name: "the cid held elsewhere: two words after it each alone", recorded: cid + "/x/y", held: []string{cid}, want: cat(cids, []string{"x@0", "y@0"})},
+		// The whole held beside the appId is two values: the cid's words, no
+		// held stretch of their own, are each alone.
+		{name: "a stretch holding a shorter held one is two values", recorded: cid + "/" + app, held: []string{cid + "/" + app, app}, want: cat(cidAlone, []string{app + "@0", app + "@1", app + "@2", app + "@3", app + "@4"})},
+		// Two held stretches overlap at "cd", which learning names a word of
+		// the shorter: the longer is not one value.
+		{name: "the shortest stretch held", recorded: "ab/cd/ef/gh", held: []string{"ab/cd", "cd/ef/gh"}, want: []string{"ab-cd@0", "ab-cd@1", "ef@0", "gh@0"}},
 		// A held stretch inside the whole, at its end, its start or apart
 		// from the end words, makes the whole two values.
-		{"the whole held beside the cid after it", "3/" + cid, heldAt(cid, "3/"+cid), []string{"3@0", cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4"}},
-		{"the whole held beside the cid before it", cid + "/3", heldAt(cid, cid+"/3"), []string{cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4", "3@0"}},
-		{"the whole held beside the cid after two words", "x/y/" + cid, heldAt(cid, "x/y/"+cid), []string{"x-y@0", "x-y@1", cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4"}},
-		{"the whole held beside the cid before two words", cid + "/x/y", heldAt(cid, cid+"/x/y"), []string{cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4", "x-y@0", "x-y@1"}},
-		{"no evidence: each word alone", "ab/3", nil, []string{"ab@0", "3@0"}},
-		{"the cid held elsewhere: the word before it alone", "3/" + cid, heldAt(cid), []string{"3@0", cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4"}},
-		{"a run longer than spans are read in: each word alone", strings.Repeat("ab/", maxSpanRun) + "3", heldAt("3"), []string{"ab@0", "ab@0"}},
+		{name: "the whole held beside the cid after it", recorded: "3/" + cid, held: []string{cid, "3/" + cid}, want: cat([]string{"3@0"}, cids)},
+		{name: "the whole held beside the cid before it", recorded: cid + "/3", held: []string{cid, cid + "/3"}, want: cat(cids, []string{"3@0"})},
+		{name: "the whole held beside the cid after two words", recorded: "x/y/" + cid, held: []string{cid, "x/y/" + cid}, want: cat([]string{"x@0", "y@0"}, cids)},
+		{name: "the whole held beside the cid before two words", recorded: cid + "/x/y", held: []string{cid, cid + "/x/y"}, want: cat(cids, []string{"x@0", "y@0"})},
+		{name: "no evidence: each word alone", recorded: "ab/3", held: []string{"ab/3"}, none: true, want: []string{"ab@0", "3@0"}},
+		{name: "the cid held elsewhere: the word before it alone", recorded: "3/" + cid, held: []string{cid}, want: cat([]string{"3@0"}, cids)},
+		{name: "a run longer than spans are read in: each word alone", recorded: strings.Repeat("ab/", maxSpanRun) + "3", held: []string{"ab/ab", "3"}, want: []string{"ab@0", "ab@0"}},
 	}
 	for _, c := range cases {
 		var got []Run
@@ -370,7 +460,14 @@ func TestWordRuns_AStretchItsMockHoldsElsewhereIsAValueOfItsOwn(t *testing.T) {
 					t.Errorf("%s: WordRuns panicked: %v", c.name, r)
 				}
 			}()
-			got = runs(c.recorded, c.elsewhere)
+			elsewhere, of := heldAt(c.held...), learnedAs(c.held...)
+			if c.unnamed {
+				of = nil
+			}
+			if c.none {
+				elsewhere = nil
+			}
+			got = runs(c.recorded, elsewhere, of)
 		}()
 		if got == nil {
 			continue
@@ -383,9 +480,10 @@ func TestWordRuns_AStretchItsMockHoldsElsewhereIsAValueOfItsOwn(t *testing.T) {
 	}
 	// A text whose words differ from the run's ("zz/3"), or that ends before
 	// the run does, at its first word ("3") or after a first word it holds
-	// ("ab"): each word alone, though its mock holds the text whole elsewhere.
+	// ("ab"): each word alone, though its mock holds the text whole elsewhere
+	// and learning names it one value.
 	for _, text := range []string{"zz/3", "3", "ab"} {
-		ws := []WordBind{{Text: "body.key", Word: 0, Live: "x", Recorded: "ab", RecordedText: text, Elsewhere: heldAt(text)}, {Text: "body.key", Word: 1, Live: "7", Recorded: "3", RecordedText: text, Elsewhere: heldAt(text)}}
+		ws := []WordBind{{Text: "body.key", Word: 0, Live: "x", Recorded: "ab", RecordedText: text, Elsewhere: heldAt(text), Of: text}, {Text: "body.key", Word: 1, Live: "7", Recorded: "3", RecordedText: text, Elsewhere: heldAt(text), Of: text}}
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -405,8 +503,9 @@ func TestWordRuns_AStretchItsMockHoldsElsewhereIsAValueOfItsOwn(t *testing.T) {
 // UUIDs are other values, so "7" is its own value and refused, as main
 // refuses it, in one call or two, when only one of the mocks shows it, and
 // when neither holds any part of its text whole elsewhere.
-// Two appIds beside cids held elsewhere, a group of the appIds equal by
-// chance, still bind.
+// Two appIds beside cids held elsewhere and learned as one value each, a
+// group of the appIds equal by chance, still bind; named no learned value,
+// they are refused, as main refuses them.
 func TestTable_OneWordBesideAnotherHeldValueIsItsOwnValue(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	const (
@@ -454,24 +553,102 @@ func TestTable_OneWordBesideAnotherHeldValueIsItsOwnValue(t *testing.T) {
 			t.Errorf("%s, in two calls: \"<P>/7\" and \"<Q>/7\" bound where \"<B>/3\" and \"<D>/5\" were recorded", x.name)
 		}
 	}
-	a := textBindsHeld(t, heldAt(recB, recA), [4]string{"body.k1", "k", liveP + "/" + liveX, recB + "/" + recA})
-	b := textBindsHeld(t, heldAt(recD, recC), [4]string{"body.k2", "c", liveQ + "/" + liveZ, recD + "/" + recC})
+	learned := learnedAs(recA, recB, recC, recD)
+	a := textBindsNamed(t, heldAt(recB, recA), learned, [4]string{"body.k1", "k", liveP + "/" + liveX, recB + "/" + recA})
+	b := textBindsNamed(t, heldAt(recD, recC), learned, [4]string{"body.k2", "c", liveQ + "/" + liveZ, recD + "/" + recC})
 	if !bind(a, b) || !bind(append(append([]Binding(nil), a...), b...)) {
 		t.Errorf("two appIds beside cids held elsewhere, a group equal by chance (41a3), did not bind")
 	}
-	copied := textBindsHeld(t, heldAt(recD, recC), [4]string{"body.k2", "c", liveQ + "/" + liveX, recD + "/" + recC})
+	ua := textBindsHeld(t, heldAt(recB, recA), [4]string{"body.k1", "k", liveP + "/" + liveX, recB + "/" + recA})
+	ub := textBindsHeld(t, heldAt(recD, recC), [4]string{"body.k2", "c", liveQ + "/" + liveZ, recD + "/" + recC})
+	if bind(ua, ub) || bind(append(append([]Binding(nil), ua...), ub...)) {
+		t.Errorf("two appIds beside cids held elsewhere but named no learned value, a group equal by chance (41a3), bound; main refuses the group")
+	}
+	copied := textBindsNamed(t, heldAt(recD, recC), learned, [4]string{"body.k2", "c", liveQ + "/" + liveX, recD + "/" + recC})
 	if bind(a, copied) {
 		t.Errorf("one appId beside two cids held elsewhere, where two were recorded, bound")
 	}
 	// The whole marker held as well changes neither: the cid and the appId
 	// stay two values.
-	aw := textBindsHeld(t, heldAt(recB, recA, recB+"/"+recA), [4]string{"body.k1", "k", liveP + "/" + liveX, recB + "/" + recA})
-	bw := textBindsHeld(t, heldAt(recD, recC, recD+"/"+recC), [4]string{"body.k2", "c", liveQ + "/" + liveZ, recD + "/" + recC})
-	cw := textBindsHeld(t, heldAt(recD, recC, recD+"/"+recC), [4]string{"body.k2", "c", liveQ + "/" + liveX, recD + "/" + recC})
+	aw := textBindsNamed(t, heldAt(recB, recA, recB+"/"+recA), learned, [4]string{"body.k1", "k", liveP + "/" + liveX, recB + "/" + recA})
+	bw := textBindsNamed(t, heldAt(recD, recC, recD+"/"+recC), learned, [4]string{"body.k2", "c", liveQ + "/" + liveZ, recD + "/" + recC})
+	cw := textBindsNamed(t, heldAt(recD, recC, recD+"/"+recC), learned, [4]string{"body.k2", "c", liveQ + "/" + liveX, recD + "/" + recC})
 	if !bind(aw, bw) {
 		t.Errorf("two appIds beside cids, each held elsewhere and the whole marker too, a group equal by chance, did not bind")
 	}
 	if bind(aw, cw) {
 		t.Errorf("one appId beside two cids, each held elsewhere and the whole marker too, where two were recorded, bound")
+	}
+}
+
+// One word sent at two places where two values were recorded, beside words
+// of other values, in shapes main's word by word check refuses: refused, in
+// one call and in two, under the switch. A word no held stretch covers is
+// its own value, never read with the unheld words around it ("<P>/<X>/7"
+// with only the cid held: "7" is not read with the appId's words), and a
+// held stretch is one value only where learning names its words one value:
+// "<B>/3" held whole in a field of its own may be one id or a cid beside a
+// count, and the recording does not say which. The control holds the cid
+// and the appId too, and the last row names "<B>/3" one learned value.
+func TestTable_OneWordWhereTwoWereRecordedBesideOtherValuesIsRefused(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const (
+		recA  = "6f9619ff-8b86-4011-b42d-00c04fc964ff"
+		recB  = "c9bf9e57-1685-4c89-bafb-ff5af830be8a"
+		recC  = "1e2d3c4b-5a69-4788-9766-554433221100"
+		recD  = "aabbccdd-eeff-4a11-9b22-334455667788"
+		liveX = "7d444840-9dc0-41a3-a15b-5b4c7a3f9e21"
+		liveY = "e3b0c442-98fc-4b11-8d2e-1c5a4e9b7f30"
+		liveP = "11112222-3333-4444-8555-666677778888"
+		liveQ = "9999aaaa-bbbb-4ccc-9ddd-eeeeffff0000"
+	)
+	bind := func(calls ...[]Binding) bool {
+		var tb Table
+		for _, call := range calls {
+			if _, _, _, ok := tb.BindAll(tb.Gen(), call); !ok {
+				return false
+			}
+		}
+		return true
+	}
+	type side struct {
+		held           []string
+		live, recorded string
+	}
+	for _, c := range []struct {
+		name string
+		k, c side
+		of   bool // learning names each held value one value
+	}{
+		{"the cid held, the appId not, the word after the appId", side{[]string{recB}, liveP + "/" + liveX + "/7", recB + "/" + recA + "/3"}, side{[]string{recD}, liveQ + "/" + liveY + "/7", recD + "/" + recC + "/5"}, false},
+		{"the same, learned", side{[]string{recB}, liveP + "/" + liveX + "/7", recB + "/" + recA + "/3"}, side{[]string{recD}, liveQ + "/" + liveY + "/7", recD + "/" + recC + "/5"}, true},
+		{"the word between an unheld appId and a held cid", side{[]string{recB}, liveX + "/7/" + liveP, recA + "/3/" + recB}, side{[]string{recD}, liveY + "/7/" + liveQ, recC + "/5/" + recD}, false},
+		{"the same, learned", side{[]string{recB}, liveX + "/7/" + liveP, recA + "/3/" + recB}, side{[]string{recD}, liveY + "/7/" + liveQ, recC + "/5/" + recD}, true},
+		{"only the whole text held", side{[]string{recB + "/3"}, liveP + "/7", recB + "/3"}, side{[]string{recD + "/5"}, liveQ + "/7", recD + "/5"}, false},
+		{"two unheld one-word values beside a held cid", side{[]string{recB}, "11/7/" + liveP, "22/3/" + recB}, side{[]string{recD}, "44/7/" + liveQ, "55/5/" + recD}, false},
+		{"the same, learned", side{[]string{recB}, "11/7/" + liveP, "22/3/" + recB}, side{[]string{recD}, "44/7/" + liveQ, "55/5/" + recD}, true},
+		{"control: the cid and the appId held", side{[]string{recB, recA}, liveP + "/" + liveX + "/7", recB + "/" + recA + "/3"}, side{[]string{recD, recC}, liveQ + "/" + liveY + "/7", recD + "/" + recC + "/5"}, true},
+	} {
+		binds := func(s side, text, prefix string) []Binding {
+			var of func(string, int) string
+			if c.of {
+				of = learnedAs(s.held...)
+			}
+			return textBindsNamed(t, heldAt(s.held...), of, [4]string{text, prefix, s.live, s.recorded})
+		}
+		k, cc := binds(c.k, "body.k1", "k"), binds(c.c, "body.k2", "c")
+		if bind(k, cc) {
+			t.Errorf("%s, in two calls: one word bound where two values were recorded", c.name)
+		}
+		if bind(append(append([]Binding(nil), k...), cc...)) {
+			t.Errorf("%s, in one call: one word bound where two values were recorded", c.name)
+		}
+	}
+	// Named one learned value, "<B>/3" is one value whose other words differ
+	// live and as recorded: "7" is equal by chance, and binds.
+	k := textBindsNamed(t, heldAt(recB+"/3"), learnedAs(recB+"/3"), [4]string{"body.k1", "k", liveP + "/7", recB + "/3"})
+	cc := textBindsNamed(t, heldAt(recD+"/5"), learnedAs(recD+"/5"), [4]string{"body.k2", "c", liveQ + "/7", recD + "/5"})
+	if !bind(k, cc) || !bind(append(append([]Binding(nil), k...), cc...)) {
+		t.Errorf("\"<P>/7\" and \"<Q>/7\", each learned as one value, did not bind")
 	}
 }
