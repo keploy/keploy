@@ -7,16 +7,27 @@
 #
 # Under `bash -e` a keploy test that exits non-zero ended the step at that
 # line, before the script's checks could print its log: the step failed with
-# no line saying what had failed. Every keploy test's exit has to be named,
-# with the reports and the command's log.
+# no line saying what had failed. keploy record's exit went through tee, so
+# one that exited non-zero did not stop the lane at all. Every keploy
+# command's exit has to be named, with the reports and the command's log.
 #
 # every command succeeds, every report passes
-#   The script has to end 0, past its last check; under pipefail too, which
-#   the step does not set today, so that setting it never ends the step at a
-#   count of test runs taken before there is one.
-# keploy test (the first replay) exits 4 with an ERROR line in its log
-#   The ERROR check runs first: the script has to exit 1 with its message and
-#   keploy test's log, whatever keploy's code.
+#   The script has to end 0, past its last check, and log each record's
+#   exit; under pipefail too, which the step does not set today, so that
+#   setting it never ends the step at a count of test runs taken before there
+#   is one.
+# keploy record of iteration 2, then of the first json iteration, fails
+#   The script has to exit with the record's code, naming that record (the
+#   json one as json), print its log, and not say the iteration was recorded;
+#   under pipefail too, where the pipeline's status is the record's.
+# keploy record exits 2 with an ERROR, a DATA RACE or a "running WITHOUT
+# authentication" line in its log
+#   The log's checks run first: the script has to exit 1 with that check's
+#   message, and name no record exit.
+# keploy test (the first replay or the json one) exits non-zero with an ERROR
+# or a DATA RACE line in its log
+#   Those checks run first: the script has to exit 1 with the line and the
+#   log, whatever keploy's code, and name no keploy test exit.
 # keploy test (the first replay) fails test-set-1's test-5
 #   The script has to exit with keploy test's code, name keploy test and that
 #   code, the report that failed and its failed test (not the tests that
@@ -49,6 +60,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../golang-docker-fakes.sh"
 
 run_case pass FAKE_JSON=1
 expect pass 0 \
+    "keploy record (iteration 2) exited 0" \
+    "keploy record (iteration 2, json) exited 0" \
     "All tests passed (baseline run, no --keep-app-alive)" \
     "All tests passed (yaml + json)" \
     "All tests passed (--keep-app-alive run)"
@@ -65,6 +78,66 @@ expect replay-error-line 1 \
     "ERROR fake keploy test 1 error" \
     "fake keploy test 1 log" \
     -- "::error::keploy test exited"
+
+run_case replay-race-line FAKE_TEST_RC_1=4 FAKE_TEST_RACE_1=1
+expect replay-race-line 1 \
+    "Race condition detected in test, stopping pipeline..." \
+    "WARNING: DATA RACE in fake keploy test 1" \
+    "fake keploy test 1 log" \
+    -- "::error::keploy test exited"
+
+run_case json-replay-error-line FAKE_JSON=1 FAKE_TEST_RC_2=5 FAKE_TEST_ERROR_2=1
+expect json-replay-error-line 1 \
+    "ERROR fake keploy test 2 error" \
+    "fake keploy test 2 log" \
+    -- "::error::keploy test --storage-format json exited"
+
+run_case json-replay-race-line FAKE_JSON=1 FAKE_TEST_RC_2=5 FAKE_TEST_RACE_2=1
+expect json-replay-race-line 1 \
+    "WARNING: DATA RACE in fake keploy test 2" \
+    "fake keploy test 2 log" \
+    -- "::error::keploy test --storage-format json exited"
+
+for code in 1 2; do
+    run_case "record-fails-$code" FAKE_RECORD_RC_2="$code"
+    expect "record-fails-$code" "$code" \
+        "::error::keploy record (iteration 2) exited $code" \
+        "fake keploy record 2 log" \
+        -- "Recorded test case and mocks for iteration 2" "test-run-"
+done
+
+for code in 1 6; do
+    run_case "json-record-fails-$code" FAKE_JSON=1 FAKE_RECORD_RC_3="$code"
+    expect "json-record-fails-$code" "$code" \
+        "::error::keploy record (iteration 1, json) exited $code" \
+        "fake keploy record 3 log" \
+        -- "Recorded test case and mocks for iteration 1 (json)" "test-run-"
+done
+
+LANE_SHELL_OPTS="-e -o pipefail" run_case record-fails-pipefail FAKE_RECORD_RC_2=3
+expect record-fails-pipefail 3 \
+    "::error::keploy record (iteration 2) exited 3" \
+    "fake keploy record 2 log" \
+    -- "Recorded test case and mocks for iteration 2" "test-run-"
+
+run_case record-error-line FAKE_RECORD_RC_2=2 FAKE_RECORD_SAYS_2="ERROR fake keploy record error"
+expect record-error-line 1 \
+    "Error found in pipeline..." \
+    "fake keploy record 2 log" \
+    -- "::error::keploy record" "Recorded test case and mocks for iteration 2"
+
+run_case record-race-line FAKE_RECORD_RC_2=2 FAKE_RECORD_SAYS_2="WARNING: DATA RACE in fake keploy record"
+expect record-race-line 1 \
+    "Race condition detected in recording, stopping pipeline..." \
+    "fake keploy record 2 log" \
+    -- "::error::keploy record" "Recorded test case and mocks for iteration 2"
+
+run_case record-noauth-line FAKE_RECORD_RC_2=2 \
+    FAKE_RECORD_SAYS_2="agent running WITHOUT authentication"
+expect record-noauth-line 1 \
+    "The agent came up with no control-plane token; the compose token handoff is broken." \
+    "fake keploy record 2 log" \
+    -- "::error::keploy record" "Recorded test case and mocks for iteration 2"
 
 for code in 1 4; do
     run_case "replay-fails-$code" FAKE_JSON=1 FAKE_TEST_RC_1="$code" \

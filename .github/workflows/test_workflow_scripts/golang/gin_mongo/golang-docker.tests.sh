@@ -15,9 +15,13 @@
 #   The script has to end 0, past its last check; under pipefail too, which
 #   the step does not set today, so that setting it never ends the step at a
 #   count of test runs taken before there is one.
-# keploy test (the first replay) exits 4 with an ERROR line in its log
-#   The ERROR check runs first: the script has to exit 1 with its message and
-#   keploy test's log, whatever keploy's code.
+# keploy test (the first replay or the json one) exits non-zero with an ERROR
+# or a DATA RACE line in its log
+#   Those checks run first: the script has to exit 1 with the line and the
+#   log, whatever keploy's code, and name no keploy test exit.
+# keploy record exits 2 with an ERROR or a DATA RACE line in its log
+#   Those checks run first too: the script has to exit 1 with that check's
+#   message, and name no record exit.
 # keploy test (the first replay) fails test-set-2's test-5
 #   The script has to exit with keploy test's code, name keploy test and that
 #   code, the report that failed and its failed test (not the tests that
@@ -64,6 +68,37 @@ expect replay-error-line 1 \
     "ERROR fake keploy test 1 error" \
     "fake keploy test 1 log" \
     -- "::error::keploy test exited"
+
+run_case replay-race-line FAKE_TEST_RC_1=4 FAKE_TEST_RACE_1=1
+expect replay-race-line 1 \
+    "Race condition detected in test, stopping pipeline..." \
+    "WARNING: DATA RACE in fake keploy test 1" \
+    "fake keploy test 1 log" \
+    -- "::error::keploy test exited"
+
+run_case json-replay-error-line FAKE_JSON=1 FAKE_TEST_RC_2=5 FAKE_TEST_ERROR_2=1
+expect json-replay-error-line 1 \
+    "ERROR fake keploy test 2 error" \
+    "fake keploy test 2 log" \
+    -- "::error::keploy test --storage-format json exited"
+
+run_case json-replay-race-line FAKE_JSON=1 FAKE_TEST_RC_2=5 FAKE_TEST_RACE_2=1
+expect json-replay-race-line 1 \
+    "WARNING: DATA RACE in fake keploy test 2" \
+    "fake keploy test 2 log" \
+    -- "::error::keploy test --storage-format json exited"
+
+run_case record-error-line FAKE_RECORD_RC_2=2 FAKE_RECORD_SAYS_2="ERROR fake keploy record error"
+expect record-error-line 1 \
+    "Error found in pipeline..." \
+    "fake keploy record 2 log" \
+    -- "::error::keploy record" "Recorded test case and mocks for iteration 2"
+
+run_case record-race-line FAKE_RECORD_RC_2=2 FAKE_RECORD_SAYS_2="WARNING: DATA RACE in fake keploy record"
+expect record-race-line 1 \
+    "Race condition detected in recording, stopping pipeline..." \
+    "fake keploy record 2 log" \
+    -- "::error::keploy record" "Recorded test case and mocks for iteration 2"
 
 for code in 1 4; do
     run_case "replay-fails-$code" FAKE_JSON=1 FAKE_TEST_RC_1="$code" \

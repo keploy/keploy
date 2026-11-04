@@ -13,8 +13,9 @@
 # `bash -e`, from samples-go/$LANE_APP of a scratch workspace, with fakes on
 # PATH for docker, curl, sleep, pgrep and sudo, and one fake keploy as both
 # RECORD_BIN and REPLAY_BIN. The fake's keploy record exits with the code a
-# case gives it; its keploy test writes the test-set reports a case gives it
-# into a new test-run directory, and exits with the code a case gives it.
+# case gives it, its log the line a case gives it; its keploy test writes the
+# test-set reports a case gives it into a new test-run directory, and exits
+# with the code a case gives it.
 
 set -u
 
@@ -55,7 +56,9 @@ EOF
 # FAKE_TEST_<n> the reports it writes: "SET:STATUS[:FAILED_TEST]" words. A
 # set's tests are test-1, passed, and with FAILED_TEST that test, failed, then
 # test-9, passed. FAKE_TEST_NORUN_<n>=1: the nth keploy test writes no test
-# run. FAKE_TEST_ERROR_<n>=1: its log has an ERROR line.
+# run. FAKE_TEST_ERROR_<n>=1: its log has an ERROR line;
+# FAKE_TEST_RACE_<n>=1: a "WARNING: DATA RACE" line. FAKE_RECORD_SAYS_<n>: a
+# line the nth keploy record's log has.
 next() {
     local f="$FAKE_DIR/$1" n
     n=$(( $(cat "$f" 2>/dev/null || echo 0) + 1 ))
@@ -70,6 +73,10 @@ case "${1:-}" in
     ;;
 record)
     n=$(next record)
+    says_var="FAKE_RECORD_SAYS_$n"
+    if [ -n "${!says_var:-}" ]; then
+        echo "${!says_var}"
+    fi
     echo "fake keploy record $n log"
     rc_var="FAKE_RECORD_RC_$n"
     exit "${!rc_var:-0}"
@@ -79,8 +86,12 @@ test)
     norun_var="FAKE_TEST_NORUN_$n"
     rc_var="FAKE_TEST_RC_$n"
     error_var="FAKE_TEST_ERROR_$n"
+    race_var="FAKE_TEST_RACE_$n"
     if [ "${!error_var:-0}" = 1 ]; then
         echo "ERROR fake keploy test $n error"
+    fi
+    if [ "${!race_var:-0}" = 1 ]; then
+        echo "WARNING: DATA RACE in fake keploy test $n"
     fi
     if [ "${!norun_var:-0}" = 1 ]; then
         echo "fake keploy test $n log"

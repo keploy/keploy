@@ -71,8 +71,16 @@ do_record_iteration() {
     local log="echoApp${label}.txt"
     local container_name="echoApp"
     send_request &
+    # The record's own exit, not tee's: the step sets no pipefail, so the
+    # pipeline's status is tee's, and a record that exited non-zero went on
+    # to the next iteration. Without pipefail the && takes it from
+    # PIPESTATUS; with pipefail the pipeline's status is the record's and
+    # the || takes it, so neither shell ends the step at this line.
+    local rc
     # shellcheck disable=SC2086
-    $RECORD_BIN record $extra_flags -c "docker compose up" --container-name "$container_name" --generateGithubActions=false |& tee "$log"
+    $RECORD_BIN record $extra_flags -c "docker compose up" --container-name "$container_name" --generateGithubActions=false |& tee "$log" && rc=${PIPESTATUS[0]} || rc=$?
+    # The record ends at send_request's SIGINT: logged here, after that stop.
+    echo "keploy record (iteration ${i}${label:+, json}) exited ${rc}"
 
     if grep "WARNING: DATA RACE" "$log"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -100,6 +108,11 @@ do_record_iteration() {
         cat "$log"
         cat "docker-compose-tmp.yaml"
         exit 1
+    fi
+    # The lane's own stop ends a record with 0; any other exit is the
+    # record's failure, named after the log's own checks above.
+    if [ "$rc" -ne 0 ]; then
+        keploy_exited "$rc" "keploy record (iteration ${i}${label:+, json})" "$log"
     fi
     sleep 5
     echo "Recorded test case and mocks for iteration ${i}${label:+ (json)}"
