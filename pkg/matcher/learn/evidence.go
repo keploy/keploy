@@ -180,6 +180,20 @@ const (
 	evUnknown
 )
 
+// payloadless is the first exchange of in served leaf by leaf whose
+// payload keploy was not given or could not read (Earlier.Payload), and
+// main's reason (payloadUnread): its answer's places cannot be searched.
+// The test case's own request is no exchange, and an earlier test's place
+// keeps no payload by design (ranCalls). "" where there is none.
+func payloadless(in Input) (mock, why string) {
+	for _, e := range in.Earlier {
+		if !e.Given && !e.ofEarlierTest() && !e.Payload.Read() {
+			return unreadName(e.Mock, e), payloadUnread(e)
+		}
+	}
+	return "", ""
+}
+
 // placesOf lists in's places before the call and each one's state, and the
 // first place keploy could not read ("" where it read every one): every
 // change of the call is then refused.

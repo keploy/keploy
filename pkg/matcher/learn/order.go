@@ -110,6 +110,9 @@ type decider struct {
 	allScope bool
 	// unread names what of the call keploy could not read, "" where none.
 	unread string
+	// noPayload is payloadless(in): an exchange before the call whose
+	// payload keploy has not read, and why; its mock "" where none.
+	noPayload struct{ mock, why string }
 	// dr is the call's drift cache, or an empty one.
 	dr *DriftCache
 	// set: the recordings the set read once (Input.Given); op: what each
@@ -153,6 +156,7 @@ func newDecider(in Input, allScope bool, x *readerIndex) *decider {
 	ps, unread := placesOf(in)
 	set, setNotRead := setUnread(in)
 	dc := &decider{in: in, ps: withTexts(x, ps), x: x, allScope: allScope, set: set, dr: in.Drifts, unread: cmp.Or(unread, setNotRead)}
+	dc.noPayload.mock, dc.noPayload.why = payloadless(in)
 	if dc.dr == nil {
 		dc.dr = NewDriftCache()
 	}
@@ -168,6 +172,18 @@ func (dc *decider) decide() ([]Decision, []string) {
 		out = append(out, dc.leaf(path, dc.unread)...)
 		for len(fields) < len(out) {
 			fields = append(fields, path)
+		}
+	}
+	if dc.noPayload.why != "" {
+		// A word made anew may have been built on the answer of an
+		// exchange keploy holds no payload of: refused, as main's word rule
+		// refuses it, before one value's other uses bind to it (a read of
+		// the clock: clock).
+		for i, d := range out {
+			if d.Outcome == OutcomeFresh {
+				out[i] = dc.noPayloadRefusal(fields[i], d.At, d.At.Word, d.Recorded, d.Full)
+				out[i].AnsweredAfter = d.AnsweredAfter
+			}
 		}
 	}
 	dc.oneValue(out, fields)
@@ -1796,7 +1812,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		}
 	}
 	if inWindow {
-		return dc.clock(path, at, n, c, off, "a read of the application's clock its call's window holds in both runs")
+		return dc.clock(path, at, n, c, off, "a read of the application's clock its call's window holds in both runs", copies(false) != nil)
 	}
 	if gaveRefusal != nil {
 		return *gaveRefusal
@@ -1848,7 +1864,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 				case uncompared:
 					return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
 				case g == "":
-					return dc.clock(path, at, n, c, *ln.Offset, "a read of the application's clock made since its test began in both runs, before its call's window")
+					return dc.clock(path, at, n, c, *ln.Offset, "a read of the application's clock made since its test began in both runs, before its call's window", false)
 				}
 			}
 		}
@@ -2049,8 +2065,15 @@ func (dc *decider) swappable(p evPlace, c changedInstant) bool {
 // text where no replay checks it as one word (clockWordOf). A read that is
 // one word of a longer text carries where (models.ClockOffset.Word), for
 // every adapter alike.
-func (dc *decider) clock(path string, at variables.Address, n int, c changedInstant, off models.ClockOffset, rule string) Decision {
+func (dc *decider) clock(path string, at variables.Address, n int, c changedInstant, off models.ClockOffset, rule string, copied bool) Decision {
 	r, l := c.r, c.l
+	if dc.noPayload.why != "" && !copied {
+		// Beside an exchange keploy holds no payload of, the value may have
+		// been built on its answer: main's offset rule refuses a read of
+		// the clock there, and binds one a place before the call holds as
+		// a coarse copy (copied), which the order reads after the clock.
+		return dc.noPayloadRefusal(path, at, n, r, l)
+	}
 	if echo := dc.instantEchoed(c); echo != "" {
 		return dc.cannotCheck(path, at, n, r, l, "keploy cannot check a clock read its own call's recorded answer holds ("+echo+"): it would serve that answer's recorded moment")
 	}
@@ -2255,6 +2278,13 @@ func (dc *decider) refuse(path string, at variables.Address, n int, r, f string,
 	rf := &Refusal{Kind: kind, Test: dc.in.Test, Mock: dc.in.Mock, Field: path, Word: n, Recorded: r, Full: f, Why: why, Places: places, Edits: onceEach(edits)}
 	hideSecrets(rf)
 	return Decision{At: at, Recorded: r, Full: f, Outcome: OutcomeRefused, Refusal: rf, Line: RefusalLine(*rf)}
+}
+
+// noPayloadRefusal refuses a value no place binds beside an exchange keploy
+// holds no payload of (payloadless), naming it, with main's reason.
+func (dc *decider) noPayloadRefusal(path string, at variables.Address, n int, r, f string) Decision {
+	return dc.refuse(path, at, n, r, f, RefusalUnread, dc.noPayload.why, []string{dc.noPayload.mock},
+		Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 }
 
 // cannotCheck refuses a field keploy cannot decide yet: its limit.

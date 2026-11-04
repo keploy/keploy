@@ -102,7 +102,7 @@ func TestOutcomeCostAnUnchangedPlaceHoldingOneShortWordIsChance(t *testing.T) {
 	costFresh(t, "tenant-acme7 to tenant-beta2 beside a header named X-Tenant-acme7 (given_test.go:228)",
 		oWord(t, Decide(costCall(clockedDrifts(), p, "tenant-acme7", "tenant-beta2", costAt, tenant, nil, nil, nil)), "acme7", "beta2"))
 
-	sevenSent := []Earlier{{Mock: "mock-1", At: costAt.Add(-time.Second), Run: true, StartUp: true, Seen: []Seen{{Side: Request,
+	sevenSent := []Earlier{{Mock: "mock-1", At: costAt.Add(-time.Second), Run: true, StartUp: true, Payload: oPayload("mock-1", costAt.Add(-time.Second)), Seen: []Seen{{Side: Request,
 		Leaf: Leaf{Path: "body.retries", Noise: "body.retries", Type: String, Value: "7"}, Live: "7", Place: "body.retries"}}}}
 	costFresh(t, "82 to 7 beside a 7 the start-up sent unchanged (run_test.go:751)",
 		oWord(t, Decide(costCall(clockedDrifts(), "body.count", "82", "7", costAt, sevenSent, nil, nil, nil)), "82", "7"))
@@ -129,7 +129,7 @@ func TestOutcomeCostAnUnchangedPlaceHoldingOneShortWordIsChance(t *testing.T) {
 	// word (unlike main on purpose, learn_test.go:1816 "served leaves"): four hex
 	// letters there are chance, fresh; eight are refused, naming the leaf.
 	served := func(a, b string) []Earlier {
-		return []Earlier{{Mock: "mock-1", At: costAt.Add(-time.Second), Seen: []Seen{
+		return []Earlier{{Mock: "mock-1", At: costAt.Add(-time.Second), Payload: oPayload("mock-1", costAt.Add(-time.Second)), Seen: []Seen{
 			{Side: Response, Leaf: Leaf{Path: "body.a", Noise: "body.a", Type: String, Value: a}, Live: a},
 			{Side: Response, Leaf: Leaf{Path: "body.b", Noise: "body.b", Type: String, Value: b}, Live: b},
 		}}}
