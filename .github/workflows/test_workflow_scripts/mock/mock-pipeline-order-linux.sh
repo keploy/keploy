@@ -27,6 +27,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/mock/sudo_env.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 # docker_pull_retry: a registry hiccup is retried and named, not taken for a
@@ -204,7 +206,7 @@ until docker exec "$MYSQL_CID" mysql -h127.0.0.1 -uroot -e 'SELECT 1' pipe >/dev
   sleep 1
 done
 
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 pipe.py $PORT $N record $MYSQL_CID" --name pipe --disable-tele 2>&1 | tee rec.log
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 pipe.py $PORT $N record $MYSQL_CID" --name pipe --disable-tele 2>&1 | tee rec.log
 RC=${PIPESTATUS[0]}
 stop_mysql
 [ "$RC" -eq 0 ] || { echo "FAIL: the record should pass (exit 0), got $RC"; FAIL=1; }
@@ -244,7 +246,7 @@ print("mock file: %d INSERTs at one request time; the waiter, read before them, 
 PY
 
 echo "== 2. replay with MySQL DOWN, consume-once mocks: the INSERTs get 1..$N in turn =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" mock replay -c "python3 pipe.py $PORT $N replay" --name pipe --disable-tele 2>&1 | tee rep.log
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN= KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" mock replay -c "python3 pipe.py $PORT $N replay" --name pipe --disable-tele 2>&1 | tee rep.log
 RC=${PIPESTATUS[0]}
 [ "$RC" -eq 0 ] || { echo "FAIL: the replay should pass (exit 0), got $RC"; FAIL=1; }
 grep -qx "PIPE=$WANT" rep.log ||

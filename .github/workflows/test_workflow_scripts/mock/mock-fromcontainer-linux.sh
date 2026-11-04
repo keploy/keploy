@@ -163,7 +163,8 @@ identity() {
 if half on; then
 echo "--- under the proven switch: refused, the container untouched ---"
 BEFORE="$(identity)"
-# keploy re-execs itself under sudo for --from-container, with sudo -E: the
+# keploy re-execs itself under sudo for --from-container, naming every
+# variable of its environment for sudo to keep: the
 # switch goes with it.
 KEPLOY_PROVEN=1 "$RECORD_BIN" mock record --from-container "$APP" --name fc-proven --path . --local --disable-ansi > record-proven.log 2>&1
 RC=$?

@@ -28,6 +28,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/mock/sudo_env.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 if ! python3 -c "import pytest" 2>/dev/null; then
@@ -237,7 +239,7 @@ record() {
   shift 3
   start_suite
   : > "$log"
-  sudo -E env PATH="$PATH" DEP_IMAGE="$IMAGE" KEPLOY_PROVEN="$proven" KEPLOY_LANE_LOG="$WORK/$log" "$RECORD_BIN" mock record -c "$CMD $*" --name "$name" --disable-tele --debug > "$log" 2>&1
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" DEP_IMAGE="$IMAGE" KEPLOY_PROVEN="$proven" KEPLOY_LANE_LOG="$WORK/$log" "$RECORD_BIN" mock record -c "$CMD $*" --name "$name" --disable-tele --debug > "$log" 2>&1
   local rc=$?
   grep -E "[0-9]+ (passed|failed|error)" "$log" | tail -3
   if [ "$rc" -ne 0 ]; then
@@ -245,6 +247,7 @@ record() {
     tail -40 "$log"
     FAIL=1
   fi
+  verify_ran "$proven" "$log" || FAIL=1
 }
 
 # untouched LOG WHAT: an agent without the switch never reads Docker for
@@ -305,7 +308,7 @@ expect keys-two.txt "test_two alone did not name its containers as the full run 
 
 echo "== 4. the switch's recording replays without the switch =="
 start_suite
-sudo -E env PATH="$PATH" DEP_IMAGE="$IMAGE" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "$CMD" --name ck --disable-tele --debug > rep-off.log 2>&1
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" DEP_IMAGE="$IMAGE" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "$CMD" --name ck --disable-tele --debug > rep-off.log 2>&1
 RC=$?
 grep -E "[0-9]+ (passed|failed|error)" rep-off.log | tail -3
 [ "$RC" -eq 0 ] || { echo "FAIL: the replay without the switch exited $RC"; tail -40 rep-off.log; FAIL=1; }
@@ -313,7 +316,7 @@ grep -q "2 passed" rep-off.log || { echo "FAIL: pytest did not pass both tests i
 untouched rep-off.log "an agent without the switch read Docker for container keys in replay"
 
 echo "== 4b. under the switch this build refuses the replay, the tests never run =="
-sudo -E env PATH="$PATH" DEP_IMAGE="$IMAGE" KEPLOY_PROVEN=1 "$REPLAY_BIN" mock replay -c "$CMD" --name ck --disable-tele > rep-on.log 2>&1
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" DEP_IMAGE="$IMAGE" KEPLOY_PROVEN=1 "$REPLAY_BIN" mock replay -c "$CMD" --name ck --disable-tele > rep-on.log 2>&1
 RC=$?
 [ "$RC" -eq 1 ] || { echo "FAIL: under the switch this build should refuse the replay with exit 1, got $RC"; tail -20 rep-on.log; FAIL=1; }
 grep -q "needs a keploy build that judges each test" rep-on.log || { echo "FAIL: the refused replay does not say it needs a build that judges each test"; FAIL=1; }

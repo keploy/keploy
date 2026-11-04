@@ -50,6 +50,9 @@ export ELASTICSEARCH_URL="http://127.0.0.1:9200"
 # keep-alive on the ES client). Off by default so the app's committed
 # recordings stay valid; this pipeline opts in.
 export STAMP_CREATED_AT=1
+# keploy runs under sudo, which hands it and the app only the variables each
+# command names: sudo-rs (Ubuntu 26.04's sudo) ignores -E. STAMP_CREATED_AT is
+# named only while it is set, so that the phases that unset it run without it.
 
 FAILURES=0
 step()  { echo "== $* =="; }
@@ -97,7 +100,7 @@ record_fresh() {
   local n="${1:-1}"
   cleanup
   sudo rm -rf "$SND_PATH"
-  sudo -E env "PATH=$PATH" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" \
+  sudo env "PATH=$PATH" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" ${STAMP_CREATED_AT+"STAMP_CREATED_AT=$STAMP_CREATED_AT"} \
     "$KEPLOY_BIN" record -c "./$APP_BIN" --path "$SND_PATH" >"$APP_DIR/record.log" 2>&1 &
   local rec_pid=$!
   local i
@@ -128,7 +131,7 @@ record_fresh() {
 replay() {
   local log="$1"; shift
   cleanup
-  sudo -E env "PATH=$PATH" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" \
+  sudo env "PATH=$PATH" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" ${STAMP_CREATED_AT+"STAMP_CREATED_AT=$STAMP_CREATED_AT"} \
     "$KEPLOY_BIN" test -c "./$APP_BIN" --path "$SND_PATH" --delay 10 "$@" >"$log" 2>&1
   local rc=$?
   cleanup
@@ -393,7 +396,7 @@ else
   cleanup
   # --api-timeout outlasts the agent's shutdown, so doc-4 is still parked when
   # the agent is gone and the listener answers it.
-  sudo -E env "PATH=$PATH" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" \
+  sudo env "PATH=$PATH" "ELASTICSEARCH_URL=$ELASTICSEARCH_URL" ${STAMP_CREATED_AT+"STAMP_CREATED_AT=$STAMP_CREATED_AT"} \
     "$KEPLOY_BIN" test -c "./$APP_BIN" --path "$SND_PATH" --delay 10 --remove-unused-mocks --api-timeout 30 \
     >"$APP_DIR/test_stopped.log" 2>&1 &
   test_pid=$!

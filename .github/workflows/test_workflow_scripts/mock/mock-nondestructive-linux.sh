@@ -26,6 +26,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/mock/sudo_env.sh" || exit 1
 # http_mocks_only: the mocks a record kept are the suite's own calls by kind.
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/mock-kinds.sh" || exit 1
 # root also needs an installation-id so the sudo'd agent doesn't prompt
@@ -112,7 +114,8 @@ echo "######## $LABEL (KEPLOY_PROVEN=${PROVEN}) ########"
 
 echo "== 1. record a baseline recording =="
 start_dep || return
-sudo -E env PATH="$PATH" KEPLOY_PROVEN="$PROVEN" "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name "$SET" --disable-tele 2>&1 | tee rec.log
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN="$PROVEN" "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name "$SET" --disable-tele 2>&1 | tee rec.log
+verify_ran "$PROVEN" rec.log || FAIL=1
 stop_dep
 [ -f "$MFILE" ] || { echo "FAIL: $LABEL: baseline recording not written"; FAIL=1; return; }
 # One Http mock a test, its call to the dependency, and no other: client.py
@@ -126,14 +129,16 @@ no_staging_left "the baseline record"
 echo "== 2. a re-record that captures NOTHING must leave the recording intact =="
 # The command makes no external calls, so nothing is captured. Before the fix,
 # record deleted the set first, so this left the user with an empty set.
-sudo -E env PATH="$PATH" KEPLOY_PROVEN="$PROVEN" "$RECORD_BIN" mock record -c "python3 -c 'pass'" --name "$SET" --disable-tele 2>&1 | tee rec-empty.log
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN="$PROVEN" "$RECORD_BIN" mock record -c "python3 -c 'pass'" --name "$SET" --disable-tele 2>&1 | tee rec-empty.log
+verify_ran "$PROVEN" rec-empty.log || FAIL=1
 [ -f "$MFILE" ] || { echo "FAIL: $LABEL: a zero-capture re-record DESTROYED the existing recording"; FAIL=1; }
 NOW_HASH=$(sha256sum "$MFILE" 2>/dev/null | awk '{print $1}')
 [ "$NOW_HASH" = "$BASE_HASH" ] || { echo "FAIL: $LABEL: a zero-capture re-record changed the existing recording ($NOW_HASH != $BASE_HASH)"; FAIL=1; }
 no_staging_left "a zero-capture re-record"
 
 echo "== 3. a re-record whose command FAILS (capturing nothing) also preserves it =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN="$PROVEN" "$RECORD_BIN" mock record -c "python3 -c 'import sys; sys.exit(7)'" --name "$SET" --disable-tele 2>&1 | tee rec-fail.log
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN="$PROVEN" "$RECORD_BIN" mock record -c "python3 -c 'import sys; sys.exit(7)'" --name "$SET" --disable-tele 2>&1 | tee rec-fail.log
+verify_ran "$PROVEN" rec-fail.log || FAIL=1
 [ -f "$MFILE" ] || { echo "FAIL: $LABEL: a failed re-record DESTROYED the existing recording"; FAIL=1; }
 NOW_HASH=$(sha256sum "$MFILE" 2>/dev/null | awk '{print $1}')
 [ "$NOW_HASH" = "$BASE_HASH" ] || { echo "FAIL: $LABEL: a failed re-record changed the existing recording"; FAIL=1; }
@@ -148,7 +153,8 @@ def test_a(): assert get("/alpha")["path"]=="/alpha"
 def test_b(): assert get("/beta")["path"]=="/beta"
 PY
 start_dep || return
-sudo -E env PATH="$PATH" KEPLOY_PROVEN="$PROVEN" "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name "$SET" --disable-tele 2>&1 | tee rec2.log
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN="$PROVEN" "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name "$SET" --disable-tele 2>&1 | tee rec2.log
+verify_ran "$PROVEN" rec2.log || FAIL=1
 stop_dep
 MOCKS=$(http_mocks_only "$MFILE" 2) || { echo "FAIL: $LABEL: expected 2 Http mocks and no other after a clean re-record, got $MOCKS"; FAIL=1; }
 echo "re-recorded mocks: $MOCKS"

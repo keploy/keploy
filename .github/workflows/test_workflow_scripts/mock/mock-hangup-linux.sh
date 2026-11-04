@@ -64,9 +64,13 @@
 # mock-offline-linux.sh, and a mount namespace of its own (unshare -m) in
 # which root's home is an empty tmpfs, for the agents hup-user and hup-pty
 # start through sudo. keploy tells those two apart by whether `sudo -n -v`
-# succeeds, so each has sudoers.d to itself: the user may run anything
-# without a password, and `sudo -v` asks for none (hup-user) or always asks
-# for one (hup-pty), so no password is ever typed.
+# succeeds, so each has sudoers.d to itself. hup-user's user may run anything
+# without a password, so `sudo -v` asks for none. hup-pty's may run keploy's
+# binary without one and anything else only with one, so `sudo -n -v` fails
+# while the agent's `sudo <keploy>` asks for none: no password is ever typed.
+# A rule for keploy alone, and not `Defaults verifypw=always`, which sudo-rs
+# (Ubuntu 26.04's sudo) does not honour: there `sudo -n -v` succeeded, keploy
+# rightly took `sudo -n`, and the case did not check what it is for.
 #
 # Every case runs twice: without the proven switch (today's default) and under
 # KEPLOY_PROVEN=1, which the flip makes the default (cases named *-proven). A
@@ -78,13 +82,18 @@
 # Env: RECORD_BIN (the keploy binary under test).
 set -uo pipefail
 
-# This lane's directory: lane_switch.sh.
+# This lane's directory: lane_switch.sh and sudo_env.sh.
 # shellcheck source-path=SCRIPTDIR
 MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # A lane that could not load it would skip both halves and pass: fail instead.
 # shellcheck source=lane_switch.sh
 if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
   echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
+  exit 1
+fi
+# shellcheck source=sudo_env.sh
+if ! source "$MOCK_DIR/sudo_env.sh" || ! declare -F verify_ran >/dev/null; then
+  echo "FAIL: could not load sudo_env.sh from $MOCK_DIR"
   exit 1
 fi
 BIN="${RECORD_BIN:-keploy}"
@@ -289,11 +298,14 @@ set --
 if [ -n "$AS" ]; then
   chown -R "$AS" "$D"
   # keploy runs `sudo -n -v` to learn whether sudo would ask it for a
-  # password.
-  VERIFYPW=never
-  [ "$BASE" = hup-pty ] && VERIFYPW=always
+  # password (see the top of this file). Of two rules that match a command,
+  # sudo and sudo-rs both apply the last.
   mount -t tmpfs -o mode=0755 tmpfs /etc/sudoers.d || exit 1
-  printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\nDefaults:%s verifypw=%s\n' "$AS" "$AS" "$VERIFYPW" > /etc/sudoers.d/keploy-hangup
+  if [ "$BASE" = hup-pty ]; then
+    printf '%s ALL=(ALL:ALL) ALL\n%s ALL=(ALL:ALL) NOPASSWD: %s\n' "$AS" "$AS" "$WORK/bin/keploy"
+  else
+    printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$AS"
+  fi > /etc/sudoers.d/keploy-hangup
   chmod 0440 /etc/sudoers.d/keploy-hangup
   # Without what sudo tells the program it runs: keploy reads SUDO_USER as
   # the user who ran it under sudo, and it was not run under sudo.
@@ -305,8 +317,9 @@ if [ -n "$AS" ]; then
   fi
 fi
 # The CLI's log is a temp file (keploy-logs-*.txt): in the case's own temp
-# directory, where run_case looks for one the CLI left.
-set -- "$@" env KEPLOY_PROVEN="$PROVEN" TMPDIR="$D/tmp"
+# directory, where run_case looks for one the CLI left. The workflow's
+# KEPLOY_EXACT_VIEW_VERIFY, only while it is set (sudo_env.sh).
+set -- "$@" env KEPLOY_PROVEN="$PROVEN" TMPDIR="$D/tmp" ${KEPLOY_EXACT_VIEW_VERIFY+"KEPLOY_EXACT_VIEW_VERIFY=$KEPLOY_EXACT_VIEW_VERIFY"}
 # shellcheck disable=SC2086 # EXTRA is flags, split on purpose
 "$@" python3 "$WORK/hangup.py" "$MODE" "$GAP" "$D/started" "$D/out" \
   "$WORK/bin/keploy" mock record -c "python3 $WORK/slowtest.py $D http://127.0.0.1:$PORT $LATE" \
@@ -341,11 +354,13 @@ kill_left() {
 run_case() {
   local name=$1 mode=$2 gap=$3 user=${4:-} extra=${5:-} left logs
   echo "--- $name ---"
-  sudo env PATH="$PATH" WORK="$WORK" PORT="$PORT" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" WORK="$WORK" PORT="$PORT" \
     unshare -n -m --propagation private "$WORK/inside.sh" "$name" "$mode" "$gap" "$user" "$extra" ||
     fail "$name: the namespaces themselves failed"
   EXIT_CODE=$(cat "$WORK/$name/exit" 2>/dev/null)
   echo "keploy exited ${EXIT_CODE:-nothing}"
+  # A *-proven case runs under the switch (inside.sh).
+  [ "${name%-proven}" = "$name" ] || verify_ran 1 "$WORK/$name/out" || FAIL=1
   if [ ! -e "$WORK/$name/started" ]; then
     fail "$name: the test command never called the dependency"
   fi

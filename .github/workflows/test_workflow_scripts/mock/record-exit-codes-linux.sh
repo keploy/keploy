@@ -20,6 +20,8 @@ set -uo pipefail
 # ignored, and sudo, finding it ignored, never relays the interrupt this lane
 # sends it to keploy.
 set -m
+# shellcheck source=sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/mock/sudo_env.sh" || exit 1
 
 BIN="${RECORD_BIN:-keploy}"
 BIN="$(command -v "$BIN" || echo "$BIN")"
@@ -56,7 +58,7 @@ start() {
   local name=$1
   shift
   mkdir -p "$WORK/$name"
-  (cd "$WORK/$name" && exec sudo -E env LC_ALL=C PATH="$PATH" timeout --verbose -s KILL 120 "$BIN" record "$@" --disable-tele > "$WORK/$name.log" 2>&1) &
+  (cd "$WORK/$name" && exec sudo env LC_ALL=C PATH="$PATH" "${SUDO_ENV[@]}" timeout --verbose -s KILL 120 "$BIN" record "$@" --disable-tele > "$WORK/$name.log" 2>&1) &
   PID=$!
 }
 

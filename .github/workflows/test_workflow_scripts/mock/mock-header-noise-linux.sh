@@ -28,6 +28,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/mock/sudo_env.sh" || exit 1
 # root also needs an installation-id so the sudo'd agent doesn't prompt
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
@@ -121,7 +123,7 @@ run_case() {
 
   echo "== record, every call with Referer $PAGE =="
   start_dep || return
-  sudo -E env PATH="$PATH" REFERER="$PAGE" "$RECORD_BIN" mock record -c "$CMD" --name hn --disable-tele 2>&1 | tee rec.log
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" REFERER="$PAGE" "$RECORD_BIN" mock record -c "$CMD" --name hn --disable-tele 2>&1 | tee rec.log
   rc=${PIPESTATUS[0]}
   stop_dep
   [ "$rc" -eq 0 ] || { echo "FAIL: $LABEL: record exited $rc, want 0"; FAIL=1; return; }
@@ -131,7 +133,7 @@ run_case() {
   [ "$referers" -eq 3 ] || { echo "FAIL: $LABEL: expected the Referer in 3 mocks, got $referers"; FAIL=1; return; }
 
   echo "== replay, the dependency stopped, no Referer sent =="
-  sudo -E env PATH="$PATH" "$RECORD_BIN" mock replay -c "$CMD" --name hn --disable-tele 2>&1 | tee rep.log
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" mock replay -c "$CMD" --name hn --disable-tele 2>&1 | tee rep.log
   rc=${PIPESTATUS[0]}
   got=fail
   [ "$rc" -eq 0 ] && grep -q "1 passed" rep.log && got=pass

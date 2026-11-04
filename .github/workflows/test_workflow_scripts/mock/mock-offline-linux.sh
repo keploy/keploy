@@ -36,13 +36,18 @@
 # Env: RECORD_BIN (the keploy binary under test).
 set -uo pipefail
 
-# This lane's directory: lane_switch.sh.
+# This lane's directory: lane_switch.sh and sudo_env.sh.
 # shellcheck source-path=SCRIPTDIR
 MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # A lane that could not load it would skip both halves and pass: fail instead.
 # shellcheck source=lane_switch.sh
 if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
   echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
+  exit 1
+fi
+# shellcheck source=sudo_env.sh
+if ! source "$MOCK_DIR/sudo_env.sh" || ! declare -F verify_ran >/dev/null; then
+  echo "FAIL: could not load sudo_env.sh from $MOCK_DIR"
   exit 1
 fi
 # http_mocks_are and http_mocks_only: what a record kept is the client's two
@@ -216,7 +221,7 @@ phase() {
   local name=$1 direct=$2 failed=$FAIL
   FAIL=0
   echo "--- $name ---"
-  sudo env PATH="$PATH" WORK="$WORK" BIN="$BIN" PORT="$PORT" DEP_IP="$DEP_IP" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" WORK="$WORK" BIN="$BIN" PORT="$PORT" DEP_IP="$DEP_IP" \
     unshare -n -m --propagation private "$WORK/inside.sh" "$name" || fail "$name: the namespace itself failed"
   cat "$WORK/$name.addr" 2>/dev/null
   [ "$(cat "$WORK/$name.direct" 2>/dev/null)" = "$direct" ] ||
@@ -224,6 +229,8 @@ phase() {
   local got
   got="$(cat "$WORK/$name.exit" 2>/dev/null)"
   [ "$got" = 0 ] || fail "$name: keploy exited ${got:-nothing}, want 0"
+  # A *-proven phase records under the switch (inside.sh).
+  [ "${name%-proven}" = "$name" ] || verify_ran 1 "$WORK/$name.log" || FAIL=1
   grep -c "^ok /" "$WORK/$name.log" | grep -x 2 >/dev/null || fail "$name: the test command did not get both answers"
   if [ "$FAIL" -ne 0 ]; then
     echo "--- $name: the last 40 lines keploy logged ---"
@@ -291,7 +298,7 @@ MOCKS=$(http_mocks_only "$WORK/keploy/loopback-proven/mocks.yaml" 2) ||
 # ...and this build refuses the replay under it, offline, before the test
 # command runs.
 echo "--- offline-proven ---"
-sudo env PATH="$PATH" WORK="$WORK" BIN="$BIN" PORT="$PORT" DEP_IP="$DEP_IP" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" WORK="$WORK" BIN="$BIN" PORT="$PORT" DEP_IP="$DEP_IP" \
   unshare -n -m --propagation private "$WORK/inside.sh" offline-proven || fail "offline-proven: the namespace itself failed"
 [ "$(cat "$WORK/offline-proven.exit" 2>/dev/null)" = 1 ] ||
   fail "offline-proven: keploy exited $(cat "$WORK/offline-proven.exit" 2>/dev/null), want this build's refusal (1)"

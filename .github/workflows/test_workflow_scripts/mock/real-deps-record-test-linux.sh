@@ -25,6 +25,8 @@ set -uo pipefail
 export GITHUB_WORKSPACE="${GITHUB_WORKSPACE:-$(pwd)}"
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/mock/sudo_env.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 python3 -c "import yaml" 2>/dev/null ||
   python3 -m pip install --quiet --disable-pip-version-check pyyaml ||
@@ -207,13 +209,27 @@ app_up() {
   done
 }
 
+# app_env: APP_ENV is what app.py reads from this script's environment, as
+# NAME=value, for `sudo env`, each only while it is set: sudo hands its
+# command only the variables it names (sudo-rs, Ubuntu 26.04's sudo, ignores
+# -E).
+app_env() {
+  local v
+  APP_ENV=()
+  for v in REAL_PORT DEP_PORT APP_PORT FIRE_READ SINK_FIFO; do
+    [ -n "${!v+x}" ] && APP_ENV+=("$v=${!v}")
+  done
+  return 0
+}
+
 # record LOG PROVEN [PATH...]: records each PATH (/both then /dep when none),
 # then stops keploy.
 record() {
   local log="$1" proven="$2" kpid p
   shift 2
   [ $# -gt 0 ] || set -- /both /dep
-  sudo -E env PATH="$PATH" KEPLOY_PROVEN="$proven" "$RECORD_BIN" record -c "python3 app.py" --disable-tele > "$log" 2>&1 &
+  app_env
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" "${APP_ENV[@]}" KEPLOY_PROVEN="$proven" "$RECORD_BIN" record -c "python3 app.py" --disable-tele > "$log" 2>&1 &
   kpid=$!
   if ! app_up "$kpid"; then
     echo "FAIL: keploy record ended before the app answered ($log)"
@@ -229,6 +245,9 @@ record() {
   # Ctrl+C does not reach) after it read what the agent holds.
   sudo kill -INT "$kpid" 2>/dev/null
   wait "$kpid"
+  local rc=$?
+  verify_ran "$proven" "$log" || FAIL=1
+  return "$rc"
 }
 
 # replay LOG [FLAG...]: replays the recording under the switch; its exit code
@@ -236,7 +255,11 @@ record() {
 replay() {
   local log="$1"
   shift
-  sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" test -c "python3 app.py" --disable-tele "$@" > "$log" 2>&1
+  app_env
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" "${APP_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" test -c "python3 app.py" --disable-tele "$@" > "$log" 2>&1
+  local rc=$?
+  verify_ran 1 "$log" || FAIL=1
+  return "$rc"
 }
 
 # cases: "<test case> <path> <real, comma-joined>" for each recorded test case.
@@ -319,7 +342,8 @@ export DEP_PORT
 python3 app.py > app.log 2>&1 &
 SERVER[app]=$!
 app_up "${SERVER[app]}" || { echo "FAIL: the app did not come up"; FAIL=1; }
-if ! sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" test --base-path "http://127.0.0.1:${APP_PORT}" --disable-tele > test-base.log 2>&1; then
+app_env
+if ! sudo env PATH="$PATH" "${SUDO_ENV[@]}" "${APP_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" test --base-path "http://127.0.0.1:${APP_PORT}" --disable-tele > test-base.log 2>&1; then
   echo "FAIL: keploy test --base-path with mock.real did not pass"
   tail -40 test-base.log
   FAIL=1

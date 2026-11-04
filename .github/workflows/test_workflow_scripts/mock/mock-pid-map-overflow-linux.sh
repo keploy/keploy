@@ -24,6 +24,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/mock/sudo_env.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
@@ -163,7 +165,7 @@ keploy_mock() {
   local log=$1 verb=$2 bin=$RECORD_BIN
   shift 2
   [ "$verb" = replay ] && bin=$REPLAY_BIN
-  sudo -E "${SCOPE[@]}" env PATH="$PATH" "$@" timeout -k 30 300 "$bin" mock "$verb" -c "bash overflow.sh" --name overflow --disable-tele > "$log" 2>&1
+  sudo "${SCOPE[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$@" timeout -k 30 300 "$bin" mock "$verb" -c "bash overflow.sh" --name overflow --disable-tele > "$log" 2>&1
   echo $?
 }
 
