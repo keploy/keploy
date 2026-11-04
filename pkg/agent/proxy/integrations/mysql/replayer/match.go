@@ -391,7 +391,7 @@ type matchOptions struct {
 // matchCommand matches one live command-phase request against the mock pool.
 // noiseEngine carries the resolved schema-noise flags (nil-safe: a nil engine
 // disables both detection and strict). userBodyNoise is the user's
-// test.globalNoise.requestBody bucket (root-relative lowercased paths) so
+// test.globalNoise.global.requestBody bucket (root-relative lowercased paths) so
 // configured noise participates in strict gating with the same vocabulary as
 // learned req_body_noise. miss is non-nil only when ok is false without error.
 //

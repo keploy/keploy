@@ -35,7 +35,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 	// MySQL-specific bit (canonicalizing command packets into diffable JSON).
 	noiseEngine := mocknoise.New(mysqlNoiseAdapter{}, opts.NoiseDetection(), opts.NoiseStrict())
 
-	// User request-body noise from test.globalNoise.requestBody — the same
+	// User request-body noise from test.globalNoise.global.requestBody — the same
 	// DEDICATED request-matching bucket HTTP consumes (see http/decode.go for
 	// why the response "body" bucket must not soften request matching).
 	userBodyNoise := requestBodyNoise(opts.NoiseConfig)
@@ -192,7 +192,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				case miss.nextSteps != "":
 					nextSteps = miss.nextSteps
 				case miss.strictRejected > 0:
-					nextSteps = fmt.Sprintf("schema-noise strict rejected %d candidate mock(s): the listed request fields drifted outside configured/learned noise. Mark them under test.globalNoise.requestBody, run once with --schema-noise-detection to learn them, or re-record.", miss.strictRejected)
+					nextSteps = fmt.Sprintf("schema-noise strict rejected %d candidate mock(s): the listed request fields drifted outside configured/learned noise. Mark them in keploy.yml, under test.globalNoise.global.requestBody, run once with --schema-noise-detection to learn them, or re-record.", miss.strictRejected)
 				}
 				if miss.reason == models.MissRequestChanged {
 					// The learn step's refusal first, as the HTTP learn

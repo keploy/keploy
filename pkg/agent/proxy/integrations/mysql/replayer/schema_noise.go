@@ -456,7 +456,7 @@ func (g *strictGate) allows(mock *models.Mock) bool {
 // allowsDrift is the rule, under exact serving, for a recording of a live
 // COM_STMT_EXECUTE's statement whose parameters are not all equal (the FIFO
 // candidate): it answers only when every parameter that differs is noise,
-// configured (test.globalNoise.requestBody) or learned on the recording
+// configured (test.globalNoise.global.requestBody) or learned on the recording
 // (req_body_noise), compared as strict enforcement compares, whether or
 // not strict enforcement is on. A MySQL recording that declares variables
 // never reaches the matcher there (the agent's followable: the MySQL parser
@@ -487,7 +487,7 @@ var literalsLeftOut = []string{"query.comments"}
 // literal tiers: the same text once its literals are masked): it answers
 // only when every literal that differs, compared by position
 // (body.query.literals.N), is noise, configured
-// (test.globalNoise.requestBody) or learned on the recording
+// (test.globalNoise.global.requestBody) or learned on the recording
 // (req_body_noise), compared as strict enforcement compares, whether or not
 // strict enforcement is on. A COM_QUERY's literals are its parameters:
 // served with another one, the recording answered the command with the rows
