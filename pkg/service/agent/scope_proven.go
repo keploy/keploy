@@ -631,6 +631,21 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 // at most once in the staging's windows, and between tests as the pool
 // slice's does (reused, or saturated on its last answer); no test is
 // required to make it. None leaves the set none, never the previous set's.
+func (a *Agent) SetScopeWorker(ctx context.Context, worker map[string][]string) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	cp := make(map[string][]string, len(worker))
+	for k, names := range worker {
+		cp[k] = append([]string{}, names...)
+	}
+	a.provenMu.Lock()
+	a.proven.worker = cp
+	a.provenMu.Unlock()
+	return nil
+}
+
 // SetScopeSkippedReads installs, for a replay, the names of its worker scope
 // (SetScopeWorker) that keploy mock replay moved there from the tests its
 // gate skips (models.ScopeTableReq.SkippedReads), each with the skipped test
@@ -668,21 +683,6 @@ func (a *Agent) skippedReadTests() map[string]string {
 	a.provenMu.Lock()
 	defer a.provenMu.Unlock()
 	return maps.Clone(a.proven.skippedReads)
-}
-
-func (a *Agent) SetScopeWorker(ctx context.Context, worker map[string][]string) error {
-	if err := a.wire.lock(ctx); err != nil {
-		return err
-	}
-	defer a.wire.unlock()
-	cp := make(map[string][]string, len(worker))
-	for k, names := range worker {
-		cp[k] = append([]string{}, names...)
-	}
-	a.provenMu.Lock()
-	a.proven.worker = cp
-	a.provenMu.Unlock()
-	return nil
 }
 
 // SetScopeNotRequired installs, for a replay, by test ID, the names of the
