@@ -441,7 +441,14 @@ func (a *AgentClient) setUpRestartedAgent(ctx context.Context) error {
 func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	start := a.WatchAgentStart(ctx)
+	start, over := a.watchAgent(ctx, false)
+	if over != nil {
+		// The wait ends only once its watch has, its look with it.
+		defer func() {
+			cancel()
+			<-over
+		}()
+	}
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	for {
