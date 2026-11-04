@@ -232,8 +232,10 @@ func TestNativeInstallHoldsTheRunsLockUntilTeardown(t *testing.T) {
 	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, nil, 0, app); err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := os.ReadFile(seen); strings.TrimSpace(string(b)) != filepath.Base(ownLockFile(ca.runID)) {
-		t.Fatalf("lock files when the store was updated: %q, want this run's %s", b, filepath.Base(ownLockFile(ca.runID)))
+	// The update runs holding the store lock too (storelock.go), whose file
+	// sorts after this run's hex id.
+	if b, _ := os.ReadFile(seen); strings.TrimSpace(string(b)) != filepath.Base(ownLockFile(ca.runID))+"\n"+storeLockName {
+		t.Fatalf("lock files when the store was updated: %q, want this run's %s and %s", b, filepath.Base(ownLockFile(ca.runID)), storeLockName)
 	}
 	if !runLive(ca.runID) {
 		t.Fatal("after the install, this run is not live: other runs' sweeps would remove its entries")

@@ -72,7 +72,7 @@ func sweepLegacyCA(ctx context.Context, logger *zap.Logger, fresh, includeTrusts
 	if removed > 0 {
 		logger.Info("removed retired static MITM CA anchors from the system trust store",
 			zap.Int("count", removed))
-		if err := refreshCaStore(ctx, fresh); err != nil {
+		if err := refreshCaStore(ctx, logger, fresh); err != nil {
 			logger.Debug("could not refresh the system CA store after removing legacy anchors", zap.Error(err))
 		}
 	}
@@ -159,8 +159,11 @@ func removeLegacyJavaAlias(ctx context.Context, logger *zap.Logger, fp [32]byte)
 		logger.Debug("a 'keployCA' JDK alias exists but is not the retired CA; leaving it", zap.String("cacerts", cacerts))
 		return
 	}
-	cmd := exec.CommandContext(ctx, keytool, "-delete", "-alias", legacyCAAlias, "-keystore", cacerts, "-storepass", "changeit", "-noprompt")
-	out, err := cmd.CombinedOutput()
+	var out []byte
+	err := withStoreLock(ctx, logger, func() (err error) {
+		out, err = exec.CommandContext(ctx, keytool, "-delete", "-alias", legacyCAAlias, "-keystore", cacerts, "-storepass", "changeit", "-noprompt").CombinedOutput()
+		return err
+	})
 	utils.BootStep("keytool -delete is over")
 	if err != nil {
 		logger.Debug("could not delete the legacy JDK alias", zap.String("cacerts", cacerts), zap.ByteString("output", out), zap.Error(err))
@@ -250,16 +253,20 @@ func removeLegacyTempFiles(logger *zap.Logger, fp [32]byte, includeTruststores b
 // On Debian/Ubuntu update-ca-certificates --fresh also prunes stale hash-links
 // to a deleted anchor (a plain run leaves dangling /etc/ssl/certs symlinks that
 // Go ignores but that are confusing); other distros' tools regenerate wholesale.
-func refreshCaStore(ctx context.Context, fresh bool) error {
-	if commandExists("update-ca-certificates") {
-		args := []string{}
-		if fresh {
-			args = append(args, "--fresh")
+//
+// It holds the store lock, as updateCaStore does.
+func refreshCaStore(ctx context.Context, logger *zap.Logger, fresh bool) error {
+	return withStoreLock(ctx, logger, func() error {
+		if commandExists("update-ca-certificates") {
+			args := []string{}
+			if fresh {
+				args = append(args, "--fresh")
+			}
+			return exec.CommandContext(ctx, "update-ca-certificates", args...).Run()
 		}
-		return exec.CommandContext(ctx, "update-ca-certificates", args...).Run()
-	}
-	// update-ca-trust / the rest take no --fresh; a bare extract regenerates.
-	return updateCaStore(ctx)
+		// update-ca-trust / the rest take no --fresh; a bare extract regenerates.
+		return runCaStoreUpdate(ctx)
+	})
 }
 
 func fileExists(path string) bool {

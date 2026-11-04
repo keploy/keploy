@@ -202,7 +202,9 @@ func runLive(id string) bool {
 		return !errors.Is(err, fs.ErrNotExist)
 	}
 	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), name+".") || !strings.HasSuffix(e.Name(), ".lock") {
+		// The store lock (storelock.go) is no run's, though "store" would
+		// name a run.
+		if e.Name() == storeLockName || !strings.HasPrefix(e.Name(), name+".") || !strings.HasSuffix(e.Name(), ".lock") {
 			continue
 		}
 		// #nosec G304 -- a lock file in caRunsDir.

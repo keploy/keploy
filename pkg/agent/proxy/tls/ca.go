@@ -995,7 +995,7 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 	importJavaCAOrWarn(ctx, logger, javaKS, javaErr, finalCAPath, alias)
 
 	// Update the system store
-	if err := updateCaStore(ctx); err != nil {
+	if err := updateCaStore(ctx, logger); err != nil {
 		utils.LogError(logger, err, "Failed to update the CA store")
 		return err
 	}
@@ -1065,7 +1065,7 @@ func TeardownNativeCA(logger *zap.Logger) {
 		// keploy-mitm-<id>.crt, removed directly here, so a full bundle rebuild is
 		// unnecessary. --fresh is reserved for `keploy ca clean`, where pruning
 		// stale hash-links of a generically-named legacy anchor matters.
-		if err := refreshCaStore(ctx, false); err != nil {
+		if err := refreshCaStore(ctx, logger, false); err != nil {
 			logger.Debug("could not refresh the CA store after removing this run's anchor", zap.Error(err))
 		}
 	}
@@ -1138,8 +1138,12 @@ func removeJavaAlias(ctx context.Context, logger *zap.Logger, ks javaKeystore, a
 	if ks.cacerts == "" {
 		return
 	}
-	cmd := exec.CommandContext(ctx, ks.keytool, "-delete", "-alias", alias, "-keystore", ks.cacerts, "-storepass", "changeit", "-noprompt")
-	if out, err := cmd.CombinedOutput(); err != nil {
+	var out []byte
+	err := withStoreLock(ctx, logger, func() (err error) {
+		out, err = exec.CommandContext(ctx, ks.keytool, "-delete", "-alias", alias, "-keystore", ks.cacerts, "-storepass", "changeit", "-noprompt").CombinedOutput()
+		return err
+	})
+	if err != nil {
 		logger.Debug("could not delete this run's JDK alias", zap.String("alias", alias), zap.ByteString("output", out), zap.Error(err))
 	}
 }
@@ -1342,7 +1346,16 @@ func commandExists(cmd string) bool {
 	return err == nil
 }
 
-func updateCaStore(ctx context.Context) error {
+// updateCaStore rebuilds the system trust bundle from the anchors' directory,
+// holding the store lock (withStoreLock): a rebuild that ran beside another
+// run's wrote out a bundle without the anchor that run had just added.
+func updateCaStore(ctx context.Context, logger *zap.Logger) error {
+	return withStoreLock(ctx, logger, func() error { return runCaStoreUpdate(ctx) })
+}
+
+// runCaStoreUpdate runs the first of caStoreUpdateCmd this host has. Its
+// callers hold the store lock.
+func runCaStoreUpdate(ctx context.Context) error {
 	commandRun := false
 	for _, cmd := range caStoreUpdateCmd {
 		if commandExists(cmd) {
@@ -1507,8 +1520,13 @@ func importJavaCA(ctx context.Context, logger *zap.Logger, ks javaKeystore, caPa
 		return nil
 	}
 
-	cmd := exec.CommandContext(ctx, ks.keytool, "-import", "-trustcacerts", "-keystore", ks.cacerts, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
-	cmdOutput, err := cmd.CombinedOutput()
+	// The store lock: an import beside another run's rewrite of the keystore
+	// was lost, or lost that run's change (storelock.go).
+	var cmdOutput []byte
+	err := withStoreLock(ctx, logger, func() (err error) {
+		cmdOutput, err = exec.CommandContext(ctx, ks.keytool, "-import", "-trustcacerts", "-keystore", ks.cacerts, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath).CombinedOutput()
+		return err
+	})
 	utils.BootStep("keytool -import is over")
 	if err != nil {
 		utils.LogError(logger, err, "Java detected but failed to import CA", zap.String("output", string(cmdOutput)))
@@ -1562,7 +1580,11 @@ func sweepJavaLeftovers(ctx context.Context, logger *zap.Logger, ks javaKeystore
 	removed := 0
 	var failed error // the delete the sweep stopped at, with keytool's output
 	for _, a := range leftovers[:min(len(leftovers), javaSweepMax)] {
-		delOut, delErr := exec.CommandContext(ctx, ks.keytool, "-delete", "-alias", a, "-keystore", ks.cacerts, "-storepass", "changeit", "-noprompt").CombinedOutput()
+		var delOut []byte
+		delErr := withStoreLock(ctx, logger, func() (err error) {
+			delOut, err = exec.CommandContext(ctx, ks.keytool, "-delete", "-alias", a, "-keystore", ks.cacerts, "-storepass", "changeit", "-noprompt").CombinedOutput()
+			return err
+		})
 		utils.BootStep("keytool -delete is over")
 		if delErr != nil {
 			logger.Debug("could not remove another keploy CA's alias from the JDK keystore", zap.String("alias", a), zap.String("cacerts", ks.cacerts), zap.ByteString("output", delOut), zap.Error(delErr))
