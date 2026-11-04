@@ -106,6 +106,10 @@ func TestRun_AtTheStopTheWatchdogMeasuresTheParsersReads(t *testing.T) {
 	t.Parallel()
 	const budget = 40 * time.Millisecond
 	clk := &stall.ManualClock{}
+	// The process could run for many budgets before the stop: what the
+	// watchdog measures from the stop starts at the stop, not at the
+	// clock's zero, so the looks below see under a budget each.
+	clk.Advance(10 * budget)
 	clientCh, _ := capturedStream(fakeconn.FromClient, 5)
 	clientCh = func() chan fakeconn.Chunk { // room for one more request
 		c := make(chan fakeconn.Chunk, 6)

@@ -615,10 +615,11 @@ func (s *Supervisor) armed() bool {
 // streams holding captured bytes it has not read, is hung all the same: the
 // watchdog fires once it has not read for its budget of the time it could
 // run, and Run retires it (hung), so that what it never read is left out and
-// reported, not waited on for as long as it stalls. The relay's forwarding
-// (BumpActivity), which goes on after the stop while the application's
-// connection lives, is no progress of the parser's, and counts for nothing
-// from here. A suspended watchdog (SuspendWatchdog) is armed again: its parser
+// reported, not waited on for as long as it stalls. The relay's activity
+// (BumpActivity) is no progress of the parser's, and counts for nothing from
+// the stop. The parser's budget is measured from the stop: the time the
+// process could run before it says nothing of the parser's reads after it.
+// A suspended watchdog (SuspendWatchdog) is armed again: its parser
 // waits in a read for an answer the network holds, and a parser blocked in a
 // read is not hung (stopWatch.hung). A session without both streams keeps the
 // pending flag: nothing says what its parser still has to read.
