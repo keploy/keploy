@@ -823,6 +823,55 @@ func TestALearnStepDecidesNothingOfACallInARoundTheStoreMovedOnFrom(t *testing.T
 	}
 }
 
+// A learn step's moved miss is diagnosed on the call's one hold, as every
+// full-round miss is: held to the call's round and to the view its learn
+// step read. A call that is exactly test-1's own mock-own1 has its take
+// refused as the replay ends test-1 under it (and, in one case, begins
+// test-2, which owns mock-own2). mock-own2p, a recording of no test open
+// then, is the same request. The call misses plainly, saying the replay
+// ended its test, with no extra-call kind and no recording named as made
+// elsewhere. Before, the miss was held after the move to the view then in
+// force, which told it no move, and its lookup named mock-own2p as recorded
+// where the replay did not make it (NotOwned), whose next step had record's
+// judging move mock-own2p to the worker scope.
+func TestAMovedLearnMissIsDiagnosedOnTheCallsHold(t *testing.T) {
+	for _, next := range []bool{false, true} {
+		t.Run(map[bool]string{false: "the test ends", true: "the next test begins"}[next], func(t *testing.T) {
+			p, mm := heldOrdersWith(t, false, zap.NewNop(), func(now time.Time) []*models.Mock {
+				return []*models.Mock{r3Mock("mock-own2p", now.Add(1600*time.Millisecond), "POST", "/orders", `{"item":"pear"}`, `{"order":3}`)}
+			})
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+			p.ContinueTestErrorCapture()
+			var moved atomic.Bool
+			mm.exact.round.onWait = func() {
+				if !moved.CompareAndSwap(false, true) {
+					return
+				}
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+				p.EndTestErrorCapture()
+				if next {
+					mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+					p.ContinueTestErrorCapture()
+				}
+			}
+			t.Cleanup(func() { mm.exact.round.onWait = nil })
+			code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, roundPost(`{"item":"pear"}`))
+			if !moved.Load() {
+				t.Fatal("precondition: no boundary landed under the call's take")
+			}
+			misses := heldMiss(t, p, mm, code, got, "in test-1", "ended that test")
+			for _, m := range misses {
+				if m.Kind == string(models.MissExtraCall) {
+					t.Errorf("the moved miss is told an extra call (recorded %d)", m.Recorded)
+				}
+				if m.NotOwned {
+					t.Errorf("the moved miss names %s as recorded where the replay did not make it", m.ClosestMock)
+				}
+			}
+		})
+	}
+}
+
 // A call made while the store showed test-1's view that the learn tracker
 // had not begun yet (a store-led begin, which no agent flow makes today) is of
 // test-1 by the store's view: once the replay ended test-1 on the store under

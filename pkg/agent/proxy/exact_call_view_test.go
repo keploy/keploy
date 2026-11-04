@@ -188,6 +188,46 @@ func TestACallMarkedFromARoundSnapshotIsHeldToTheViewItRead(t *testing.T) {
 	}
 }
 
+// A call marked from a round snapshot of the pool view (record's full round
+// reads a call between tests, no test open, and one the learn tracker began
+// ahead is read there too) is held to the pool view: a test's begin that
+// installs its view after the snapshot, before the call's hold, is a move to
+// the hold, which joins no answered list with the call's other reads. With
+// no install the hold tells no move. Through the store or a scoped view, of
+// the store's round or with the tracker ahead.
+func TestAPoolViewSnapshotsCallIsHeldToThePoolView(t *testing.T) {
+	for _, scoped := range []bool{false, true} {
+		for _, ahead := range []bool{false, true} {
+			for _, install := range []bool{false, true} {
+				name := map[bool]string{false: "the manager", true: "a scoped view"}[scoped] + "/" + map[bool]string{false: "of the store's round", true: "the tracker ahead"}[ahead] + "/" + map[bool]string{false: "no install", true: "test-1 opens before its hold"}[install]
+				t.Run(name, func(t *testing.T) {
+					mm, own := callViewRun(t)
+					mm.ServeExactPool(models.PoolKeyNone, nil)
+					var store integrations.MockMemDb = mm
+					if scoped {
+						store = &scopedMockDb{MockMemDb: mm}
+					}
+					snap, ok := integrations.SnapshotRound(store, integrations.RoundQuery{})
+					if !ok || snap.Test != "" {
+						t.Fatalf("precondition: the snapshot read %q (ok %v); want the pool view", snap.Test, ok)
+					}
+					call := snap.CallRound().WithTrackerAhead(ahead)
+					if install {
+						mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, own.Name)})
+					}
+					held, _ := integrations.HoldToRound(store, call)
+					if moved := integrations.CallViewMoved(held); moved != install {
+						t.Errorf("the hold tells the call moved %v; want %v", moved, install)
+					}
+					if _, one := integrations.ConsumedInCallView(held); one == install {
+						t.Errorf("the hold lets its answered list join the call's other reads: %v; want %v", one, !install)
+					}
+				})
+			}
+		}
+	}
+}
+
 // A round snapshot's mark is held to its view only by the store that made
 // it: another manager held to it holds the view in force as it is held, and
 // tells no move it did not see.
