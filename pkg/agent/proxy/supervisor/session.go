@@ -1273,8 +1273,10 @@ func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 // no request time. The connection's stop is logged apart from it: by the
 // dispatcher (its "parser retired" WARN), or by the parser, when the error it
 // returns wraps ErrReported. Neither the end of a stream nor a recording's
-// stop (ctx done) is an exchange stopped on: a parser that returns on either
-// reports nothing. Nil-safe.
+// stop (ctx done) is in itself an exchange stopped on: a parser that returns
+// on either reports nothing. At the stop the HTTP/1 recorder reads on to its
+// streams' end, and reports an exchange the end cut as it would before the
+// stop. Nil-safe.
 func (s *Session) ReportStoppedOn(kind models.Kind, reqTs time.Time, reason string) {
 	if s == nil {
 		return
