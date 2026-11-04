@@ -88,8 +88,15 @@ func PinLiveDestination(ctx context.Context, call VariableCall) context.Context 
 	return withLiveDestination(ctx, liveDestination(ctx, call.req()))
 }
 
+// req is the call as the HTTP parser reads one. A call with no URL is read
+// as one with an empty URL (no path, no query), for every pass alike: the
+// HTTP parser's own calls always carry one.
 func (c VariableCall) req() *req {
-	return &req{method: c.Method, url: c.URL, header: c.Header, body: c.Body, raw: c.Body}
+	u := c.URL
+	if u == nil {
+		u = &url.URL{}
+	}
+	return &req{method: c.Method, url: u, header: c.Header, body: c.Body, raw: c.Body}
 }
 
 // VariableMatch is the variable pass for a call of another parser, over pool
@@ -114,7 +121,7 @@ func (c VariableCall) req() *req {
 func (h *HTTP) VariableMatch(ctx context.Context, scope VariableScope, call VariableCall, noise RequestNoise, pool []*models.Mock, mockDb integrations.MockMemDb, consume func(*models.Mock) bool, written func(*models.Mock) *models.Mock) (VariableResult, error) {
 	res, problem, err := h.variableMatch(ctx, scope, call, noise, pool, mockDb, consume, written)
 	if problem != nil {
-		res.Problem = problem.diffAt(heldPlaces(mockDb, namedIn(pool, problem.mock), pool, call.URL.EscapedPath()))
+		res.Problem = problem.diffAt(heldPlaces(mockDb, namedIn(pool, problem.mock), pool, call.req().url.EscapedPath()))
 	}
 	return res, err
 }
@@ -140,7 +147,9 @@ func (h *HTTP) variableMatch(ctx context.Context, scope VariableScope, call Vari
 		return VariableResult{Outcome: VariableNone, Rest: rest}, nil, nil
 	}
 	hit, commitCursor, _ := h.pickHit(hits, nil, mockDb, false, nil)
-	served, problem, retry, err := h.serveVariablesBy(hit, mockDb, consume, written)
+	served, problem, retry, err := h.serveVariablesBy(hit, mockDb, consume, written, func() redactedPlaces {
+		return heldPlaces(mockDb, hit.mock, pool, call.req().url.EscapedPath())
+	})
 	switch {
 	case err != nil:
 		return VariableResult{}, nil, err

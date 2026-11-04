@@ -70,19 +70,24 @@ func TestTheAnsweredLogKeepsEveryRecordingThatRedactedApart(t *testing.T) {
 
 // What the log keeps apart is bounded: past redactingMaxBytes a recording is
 // not kept, and its kind is told incomplete, another kind not. A new test
-// set (fence) and a reset forget them all, incomplete or not.
+// set (fence) forgets them all, incomplete or not; a reset with no fence (it
+// runs mid-set too) keeps them, and whether they are complete, until the
+// next fence.
 func TestTheAnsweredRedactingRecordingsAreBounded(t *testing.T) {
 	byURL(t)
+	fence := func(mm *MockManager) {
+		mm.swapMu.Lock()
+		defer mm.swapMu.Unlock()
+		mm.dropPreviousSetConsumes()
+	}
 	for _, forget := range []struct {
-		name string
-		do   func(mm *MockManager)
+		name  string
+		do    func(mm *MockManager)
+		keeps bool
 	}{
-		{"fence", func(mm *MockManager) {
-			mm.swapMu.Lock()
-			defer mm.swapMu.Unlock()
-			mm.dropPreviousSetConsumes()
-		}},
-		{"reset", func(mm *MockManager) { mm.answered.reset() }},
+		{"fence", fence, false},
+		{"reset", func(mm *MockManager) { mm.answered.reset() }, true},
+		{"session-reset", func(mm *MockManager) { mm.ResetForReplaySession() }, true},
 	} {
 		t.Run(forget.name, func(t *testing.T) {
 			mm := NewMockManager(nil, nil, zap.NewNop())
@@ -104,6 +109,15 @@ func TestTheAnsweredRedactingRecordingsAreBounded(t *testing.T) {
 				t.Fatalf("another kind: %d kept, complete %v; want its one, complete", len(got), complete)
 			}
 			forget.do(mm)
+			if forget.keeps {
+				if got, complete := mm.AnsweredRedacting(models.HTTP); complete || len(got) != n {
+					t.Fatalf("after a %s: %d kept, complete %v; want the %d kept, incomplete, until the next fence", forget.name, len(got), complete, n)
+				}
+				if got, complete := mm.AnsweredRedacting(models.Mongo); len(got) != 1 || !complete {
+					t.Fatalf("another kind after a %s: %d kept, complete %v; want its one, complete", forget.name, len(got), complete)
+				}
+				fence(mm)
+			}
 			for _, kind := range []models.Kind{models.HTTP, models.Mongo} {
 				if got, complete := mm.AnsweredRedacting(kind); len(got) != 0 || !complete {
 					t.Fatalf("%s after %s: %d kept, complete %v; want none, complete", kind, forget.name, len(got), complete)
@@ -143,5 +157,21 @@ func TestTheAnsweredRedactingRecordingsAreReadThroughEveryView(t *testing.T) {
 	hiding := struct{ integrations.MockMemDb }{mm}
 	if got, complete := integrations.AnsweredRedacting(hiding, models.HTTP); len(got) != 0 || complete {
 		t.Fatalf("a wrapper that does not forward read %q (complete %v); want none, not complete", redactingNames(got), complete)
+	}
+}
+
+// The agent-replacement repair resets the session mid-set
+// (ResetForReplaySession, no fence): a recording that redacted something and
+// answered before it is still told, the log complete, so a call that repeats
+// it after the repair is redacted by its places.
+func TestAMidSetResetKeepsTheAnsweredRedactingRecordings(t *testing.T) {
+	byURL(t)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.noteAnswered(*redactingRecording("mock-a", models.HTTP, "/a", `{}`, true))
+	mm.ResetForReplaySession()
+	got, complete := integrations.AnsweredRedacting(mm, models.HTTP)
+	if redactingNames(got) != "mock-a" || !complete {
+		t.Fatalf("after a mid-set reset: %q, complete %v; want mock-a, complete", redactingNames(got), complete)
 	}
 }

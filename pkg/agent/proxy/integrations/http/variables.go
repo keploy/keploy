@@ -1146,7 +1146,9 @@ func (h *HTTP) variableStage(ctx context.Context, input *req, mockDb integration
 		if answered != nil {
 			return varStage{diag: &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(pool), pool: pool, answered: answered}}, nil
 		}
-		served, problem, retry, err := h.serveVariables(ctx, hit, mockDb)
+		served, problem, retry, err := h.serveVariables(ctx, hit, mockDb, func() redactedPlaces {
+			return heldPlaces(mockDb, hit.mock, pool, input.url.EscapedPath())
+		})
 		if err != nil {
 			return varStage{}, err
 		}
@@ -1305,8 +1307,8 @@ func (h *HTTP) variableMember(ctx context.Context, input *req, scope varScope, h
 // A bind refused over a binding the check read (varHit.read) is no race but
 // a disagreement of the check and the table: a problem, never a retry, which
 // would be refused again forever.
-func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrations.MockMemDb) (served *models.Mock, problem *varProblem, retry bool, err error) {
-	return h.serveVariablesBy(hit, mockDb, func(m *models.Mock) bool { return h.updateMock(ctx, m, mockDb, nil) }, nil)
+func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrations.MockMemDb, logPlaces func() redactedPlaces) (served *models.Mock, problem *varProblem, retry bool, err error) {
+	return h.serveVariablesBy(hit, mockDb, func(m *models.Mock) bool { return h.updateMock(ctx, m, mockDb, nil) }, nil, logPlaces)
 }
 
 // serveVariablesBy is serveVariables with consume taking the mock from the
@@ -1315,8 +1317,10 @@ func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrati
 // recording mockDb refuses the call (integrations.RefusesAnswer: the call is
 // one of the open test's own) binds nothing and is refused as at its consume
 // door: the call is checked again, and the recording's variables stay
-// unbound for the call it is the recording of.
-func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, consume func(*models.Mock) bool, written func(*models.Mock) *models.Mock) (served *models.Mock, problem *varProblem, retry bool, err error) {
+// unbound for the call it is the recording of. The debug line of each bind
+// writes its value redacted at a place logPlaces names redacted: the places
+// of every recording of the pool the call was checked against.
+func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, consume func(*models.Mock) bool, written func(*models.Mock) *models.Mock, logPlaces func() redactedPlaces) (served *models.Mock, problem *varProblem, retry bool, err error) {
 	if integrations.RefusesAnswer(mockDb, hit.mock) {
 		return nil, nil, true, nil
 	}
@@ -1351,7 +1355,7 @@ func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, cons
 		return nil, nil, true, nil
 	}
 	if ce := h.Logger.Check(zap.DebugLevel, "variable bound"); ce != nil {
-		places := placesOf(hit.mock)
+		places := logPlaces()
 		var recorded *models.HTTPReq
 		if hit.mock != nil {
 			recorded = hit.mock.Spec.HTTPReq

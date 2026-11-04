@@ -321,7 +321,11 @@ func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrati
 			if answered != nil {
 				return nil, false, nil
 			}
-			served, problem, retry, err := h.serveVariables(ctx, hit, db)
+			// The indexed look read no pool: the debug line of a bind
+			// reads the store's (storePlaces).
+			served, problem, retry, err := h.serveVariables(ctx, hit, db, func() redactedPlaces {
+				return storePlaces(db, hit.mock, input.url.EscapedPath())
+			})
 			if err != nil || retry || problem != nil {
 				return nil, retry, err
 			}

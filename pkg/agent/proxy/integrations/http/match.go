@@ -448,7 +448,11 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		shortListed := schemaMatched
 		// Schema match for JSON bodies
 		if pkg.IsJSON(input.body) {
-			bodyMatched, err := h.PerformBodyMatch(ctx, schemaMatched, input.body)
+			// A call body that does not read as a JSON object is logged
+			// redacted by every recording of the pool, as its miss is.
+			bodyMatched, err := h.performBodyMatch(ctx, schemaMatched, input.body, func(compared *models.Mock) redactedPlaces {
+				return heldPlaces(mockDb, compared, comparedPool, input.url.EscapedPath())
+			})
 			if err != nil {
 				return false, nil, nil, err
 			}
@@ -1577,8 +1581,9 @@ func (h *HTTP) exactBodyMatch(body []byte, schemaMatched []*models.Mock, held fu
 }
 
 // bodyMatch reports whether the call's body reqBody has every top-level key
-// of mock's recorded body.
-func (h *HTTP) bodyMatch(mock *models.Mock, reqBody []byte) (bool, error) {
+// of mock's recorded body. A reqBody that does not read as a JSON object is
+// logged redacted by logPlaces(mock).
+func (h *HTTP) bodyMatch(mock *models.Mock, reqBody []byte, logPlaces func(*models.Mock) redactedPlaces) (bool, error) {
 	mockBody := []byte(mock.Spec.HTTPReq.Body)
 	var mockData map[string]any
 	var reqData map[string]any
@@ -1589,9 +1594,10 @@ func (h *HTTP) bodyMatch(mock *models.Mock, reqBody []byte) (bool, error) {
 	}
 	err = json.Unmarshal(reqBody, &reqData)
 	if err != nil {
-		// The call's body as a report renders it: the values at the
-		// places the recording redacted redacted.
-		utils.LogError(h.Logger, err, "failed to unmarshal the request body", zap.String("Req", redactBody(string(reqBody), "", placesOf(mock))))
+		// The call's body with the values at the places a recording of
+		// the pool redacted redacted, or whole: the call sent its secret
+		// there.
+		utils.LogError(h.Logger, err, "failed to unmarshal the request body", zap.String("Req", redactBody(string(reqBody), "", logPlaces(mock))))
 		return false, err
 	}
 
@@ -1604,8 +1610,17 @@ func (h *HTTP) bodyMatch(mock *models.Mock, reqBody []byte) (bool, error) {
 	return true, nil
 }
 
-// PerformBodyMatch Perform body match for JSON data
+// PerformBodyMatch Perform body match for JSON data. The caller hands no
+// pool, so a reqBody that does not read as a JSON object is logged redacted
+// whole (unreadPlaces): any of its values may be one a recording redacted.
 func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Mock, reqBody []byte) ([]*models.Mock, error) {
+	return h.performBodyMatch(ctx, schemaMatched, reqBody, func(*models.Mock) redactedPlaces { return unreadPlaces() })
+}
+
+// performBodyMatch is PerformBodyMatch, a reqBody that does not read as a
+// JSON object logged redacted by logPlaces of the recording it was compared
+// with.
+func (h *HTTP) performBodyMatch(ctx context.Context, schemaMatched []*models.Mock, reqBody []byte, logPlaces func(compared *models.Mock) redactedPlaces) ([]*models.Mock, error) {
 	h.Logger.Debug("Performing schema match for body")
 
 	// Log all mock names in a single line for better readability
@@ -1619,7 +1634,7 @@ func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Moc
 			return nil, ctx.Err()
 		}
 
-		ok, err := h.bodyMatch(mock, reqBody)
+		ok, err := h.bodyMatch(mock, reqBody, logPlaces)
 		if err != nil {
 			h.Logger.Error("failed to do schema matching on request body", zap.Error(err))
 			break

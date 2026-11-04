@@ -247,11 +247,16 @@ func (l *answeredLog) candidates(keys []string) []answeredEntry {
 }
 
 // reset forgets every recording noted: a new test set, or a new session.
+// What it keeps apart of those that redacted something (keepRedacting), and
+// whether it kept them all, it keeps until the next fence: a reset also runs
+// mid-set (the agent-replacement repair, MockManager.ResetForReplaySession),
+// where a call that repeats a recording that answered before it still carries
+// the secret that recording redacted. A reset that starts another test set
+// is followed by its staging's fence (ArmSetFence), which forgets them.
 func (l *answeredLog) reset() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.byKey, l.queue, l.live, l.bytes = nil, nil, 0, 0
-	l.forgetRedacting()
 }
 
 // fence empties the log for the test set of generation set, which from now

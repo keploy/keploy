@@ -271,6 +271,24 @@ func heldPlaces(mockDb integrations.MockMemDb, closest *models.Mock, pool []*mod
 	return poolPlaces(closest, pool, livePath)
 }
 
+// storePlaces are heldPlaces of closest and the pool mockDb holds now, its
+// per-test recordings and its session's (as a miss report reads them), for
+// a log line of a pass that read no pool; every place (unreadPlaces) when
+// the store cannot be read.
+func storePlaces(mockDb integrations.MockMemDb, closest *models.Mock, livePath string) redactedPlaces {
+	perTest, err := mockDb.GetPerTestMocksInWindow()
+	if err != nil {
+		return unreadPlaces()
+	}
+	//nolint:staticcheck // SA1019: the pool the matcher reads (matchCascade), which the strict index is built from.
+	session, err := mockDb.GetSessionMocks()
+	if err != nil {
+		return unreadPlaces()
+	}
+	pool := FilterHTTPMocks(append(perTest[:len(perTest):len(perTest)], session...))
+	return heldPlaces(mockDb, closest, pool, livePath)
+}
+
 // unreadPlaces are the places of a pool that cannot be read: any place may
 // be one a recording redacted, so the call's path, its query values and its
 // body are redacted whole.
