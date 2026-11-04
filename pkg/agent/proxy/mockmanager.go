@@ -219,10 +219,13 @@ type MockManager struct {
 	// view prefixes its scope). Guarded by cursorMu, and dropped with the
 	// per-test cursors at every staging.
 	kept map[string]struct{}
-	// testHookKeepOwnedDecided, set only by a test before the manager is
-	// shared, runs in keepOwned between the owner check and the keep: the
-	// point no staging may land in.
-	testHookKeepOwnedDecided func()
+	// testHookOwnerRead and testHookKeep, set only by a test before the
+	// manager is shared, run in a claim (keepOwned): the first in its owner
+	// check, once that read the open test, its window and its pool, as it
+	// returns; the second under cursorMu just before the keep. No staging may
+	// land from the first through the second.
+	testHookOwnerRead func()
+	testHookKeep      func()
 	// usedUp are the recordings a worker's test consumed, held for the test
 	// instead of deleted, so a run of the same test again is served them
 	// (scopedMockDb.DeleteFilteredMock); by its scope and the name. Guarded by
@@ -2499,17 +2502,14 @@ func (m *MockManager) ClaimForRepeats(mk models.Mock) bool {
 // keepOwned keeps mk for its test's repeats when it is of this set, the open
 // test's own, and not kept yet. It decides holding swapMu, which every
 // staging holds while it drops what was kept and swaps the trees and the
-// window: no staging lands between the check and the keep, so a consume of
-// one test's recording that straddles the next test's staging keeps nothing
-// for that test.
+// window: no staging lands from the owner check's read through the keep, so a
+// consume of one test's recording that straddles the next test's staging
+// keeps nothing for that test.
 func (m *MockManager) keepOwned(mk *models.Mock) bool {
 	m.swapMu.RLock()
 	defer m.swapMu.RUnlock()
-	if m.stalePooled(mk) || !m.OwnedByOpenTest(mk) {
+	if m.stalePooled(mk) || !m.ownedByOpenTest(mk, m.testHookOwnerRead) {
 		return false
-	}
-	if m.testHookKeepOwnedDecided != nil {
-		m.testHookKeepOwnedDecided()
 	}
 	m.cursorMu.Lock()
 	defer m.cursorMu.Unlock()
@@ -2518,6 +2518,9 @@ func (m *MockManager) keepOwned(mk *models.Mock) bool {
 	}
 	if m.kept == nil {
 		m.kept = make(map[string]struct{})
+	}
+	if m.testHookKeep != nil {
+		m.testHookKeep()
 	}
 	m.kept[mk.Name] = struct{}{}
 	return true
@@ -2532,8 +2535,18 @@ func (m *MockManager) keepOwned(mk *models.Mock) bool {
 // staging before the first test, between tests, or a replay that opens none)
 // no mock is.
 func (m *MockManager) OwnedByOpenTest(mk *models.Mock) bool {
+	return m.ownedByOpenTest(mk, nil)
+}
+
+// ownedByOpenTest is OwnedByOpenTest. read, when not nil, runs once the check
+// read the open test, its window and its pool, as it returns: keepOwned's
+// test hook at the point the claim's owner is decided.
+func (m *MockManager) ownedByOpenTest(mk *models.Mock, read func()) bool {
 	if mk == nil {
 		return false
+	}
+	if read != nil {
+		defer read()
 	}
 	if v := m.exactView(); v != nil {
 		// The open test's test mocks (ServeExactTest), by name: its index

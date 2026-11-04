@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -173,52 +174,116 @@ func TestAClaimTheStoreCannotMarkUsedKeepsNothing(t *testing.T) {
 	}
 }
 
-// No staging lands between a claim's owner check and its keep. The next
-// test's staging, tried at that point, waits for the claim and then drops
-// what it kept, so test-3's same-named recording is free to be kept for
-// test-3. Before the claim decided under the staging's lock, the staging
-// landed there and the claim kept test-2's recording's name in test-3: the
-// same-named recording of test-3 read as kept from its start, so it answered
-// only byte-identical repeats and a request only the schema matches missed.
-// The hook lands the staging at once when it can (no claim holds the
-// staging's lock), so the row is decided by the lock, not by timing.
-func TestNoStagingLandsBetweenAClaimsOwnerCheckAndItsKeep(t *testing.T) {
-	mm, pool := claimRig(t, statedPoll("poll", `{"id":"a"}`, 2010, 2050))
-	stage3 := func() {
+// No staging lands from a claim's owner check, at the point that read the
+// open test's window and pool, through its keep: the claim holds the
+// staging's lock over all of it. The claim runs a test hook at each end, as
+// the owner check returns (testHookOwnerRead) and just before the keep
+// (testHookKeep), and the row checks the lock at both, in two cases. In the
+// first, the next test's staging is queued on the lock from the owner
+// check's read. A queued writer lets no new reader in before it, so a claim
+// that lets go of the lock there, even to take it again, lets the staging in
+// before its keep. In the second, the staging's lock is tried just before
+// the keep, and the staging is started there. In both, the staging then
+// waits for the claim and drops what it kept, so test-3's same-named
+// recording is free to be kept for test-3. A staging that landed inside
+// would leave test-2's recording's name kept in test-3: test-3's same-named
+// recording would read as kept from its start and answer only
+// byte-identical repeats, and a request only the schema matches would miss.
+// The row is decided by the lock, not by timing.
+func TestNoStagingLandsFromAClaimsOwnerReadToItsKeep(t *testing.T) {
+	stage3 := func(mm *MockManager) {
 		mm.SetMocksWithWindow([]*models.Mock{statedPoll("poll", `{"id":"a"}`, 3010, 3050)}, nil, winStart(3), winEnd(3))
 	}
-	decided, landedInside := 0, false
-	staged := make(chan struct{})
-	mm.testHookKeepOwnedDecided = func() {
-		decided++
-		if decided > 1 {
-			return
+	// lockFree is true when no claim holds the staging's lock: a staging
+	// could land at this point.
+	lockFree := func(mm *MockManager) bool {
+		if !mm.swapMu.TryLock() {
+			return false
 		}
-		if mm.swapMu.TryLock() {
-			mm.swapMu.Unlock()
-			stage3()
-			landedInside = true
-			close(staged)
-			return
+		mm.swapMu.Unlock()
+		return true
+	}
+	// claim runs test-2's claim with the hooks set, and checks that each ran
+	// once, that the staging could land nowhere inside the claim, and that
+	// test-3 is staged with nothing kept and its recording free to be kept
+	// for it. The hooks run inside the claim, on this goroutine, so their
+	// counts are final when it returns; staged closes only after a hook ran,
+	// so a claim that skips its hooks fails at once instead of waiting.
+	claim := func(t *testing.T, mm *MockManager, pool []*models.Mock, reads, keeps *int, inside *[]string, staged chan struct{}) {
+		t.Helper()
+		mm.ClaimForRepeats(*pool[0])
+		if *reads != 1 || *keeps != 1 {
+			t.Fatalf("the claim of test-2's own recording ran its owner check's read %d times and reached its keep %d times, want once each", *reads, *keeps)
 		}
-		go func() { stage3(); close(staged) }()
+		<-staged
+		if len(*inside) != 0 {
+			t.Errorf("test-3's staging could land inside the claim: %v", *inside)
+		}
+		if mm.KeptForRepeats() != nil {
+			t.Fatalf("test-3 is staged with test-2's recording kept: test-3's same-named recording would answer only repeats")
+		}
+		next, err := mm.GetPerTestMocksInWindow()
+		if err != nil || len(next) != 1 || !mm.ClaimForRepeats(*next[0]) {
+			t.Fatalf("test-3's pool %v (%v): its recording's claim was refused, want it kept for test-3", next, err)
+		}
 	}
-	mm.ClaimForRepeats(*pool[0])
-	// The hook runs inside the claim, on this goroutine, so the count is
-	// final here; staged closes only after the hook ran, so a claim that
-	// skipped its hook fails now instead of waiting for it.
-	if decided != 1 {
-		t.Fatalf("the claim of test-2's own recording reached its keep %d times, want once", decided)
-	}
-	<-staged
-	if landedInside {
-		t.Errorf("test-3's staging landed between the claim's owner check and its keep")
-	}
-	if mm.KeptForRepeats() != nil {
-		t.Fatalf("test-3 is staged with test-2's recording kept: test-3's same-named recording would answer only repeats")
-	}
-	next, err := mm.GetPerTestMocksInWindow()
-	if err != nil || len(next) != 1 || !mm.ClaimForRepeats(*next[0]) {
-		t.Fatalf("test-3's pool %v (%v): its recording's claim was refused, want it kept for test-3", next, err)
-	}
+	t.Run("a staging queued on the lock from the owner check's read", func(t *testing.T) {
+		mm, pool := claimRig(t, statedPoll("poll", `{"id":"a"}`, 2010, 2050))
+		reads, keeps := 0, 0
+		var inside []string
+		var landed atomic.Bool
+		staged := make(chan struct{})
+		mm.testHookOwnerRead = func() {
+			reads++
+			if reads > 1 {
+				return
+			}
+			if lockFree(mm) {
+				inside = append(inside, "the lock was free at the owner check's read")
+			}
+			go func() {
+				mm.swapMu.Lock()
+				landed.Store(true)
+				mm.swapMu.Unlock()
+				stage3(mm)
+				close(staged)
+			}()
+			// Wait for the staging to queue on the lock (a reader is refused
+			// from then on) or to have taken it.
+			for !landed.Load() && mm.swapMu.TryRLock() {
+				mm.swapMu.RUnlock()
+				runtime.Gosched()
+			}
+		}
+		mm.testHookKeep = func() {
+			keeps++
+			if keeps == 1 && landed.Load() {
+				inside = append(inside, "the staging queued at the owner check's read took the lock before the keep")
+			}
+		}
+		claim(t, mm, pool, &reads, &keeps, &inside, staged)
+	})
+	t.Run("a staging tried just before the keep", func(t *testing.T) {
+		mm, pool := claimRig(t, statedPoll("poll", `{"id":"a"}`, 2010, 2050))
+		reads, keeps := 0, 0
+		var inside []string
+		staged := make(chan struct{})
+		mm.testHookOwnerRead = func() {
+			reads++
+			if reads == 1 && lockFree(mm) {
+				inside = append(inside, "the lock was free at the owner check's read")
+			}
+		}
+		mm.testHookKeep = func() {
+			keeps++
+			if keeps > 1 {
+				return
+			}
+			if lockFree(mm) {
+				inside = append(inside, "the lock was free just before the keep")
+			}
+			go func() { stage3(mm); close(staged) }()
+		}
+		claim(t, mm, pool, &reads, &keeps, &inside, staged)
+	})
 }
