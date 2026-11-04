@@ -1380,3 +1380,49 @@ func TestRecordV2_TheUpstreamsEndInTheHeadIsAFaultWithNoAnswer(t *testing.T) {
 		}
 	}
 }
+
+// The parser's context, the session's, ends after the parser last asked it
+// and before the emit asks it, here as the post-record hook runs: the mock of
+// the exchange read whole is recorded, not dropped with nothing reporting it
+// (Session.EmitMockAcrossShutdown).
+func TestRecordV2_AMockEmittedAsTheContextEndsIsRecorded(t *testing.T) {
+	const answer = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n01234"
+	for _, proven := range []bool{false, true} {
+		t.Run(strings.TrimPrefix(switchName[proven], ", "), func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+			c := newRelayedConn(t)
+			c.startRelay(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			c.sess.Ctx = ctx
+			c.mgr.SetOutputChannel(c.mocks)
+			c.sess.RouteMocksViaSyncMock = true
+			c.sess.AddPostRecordHook(func(*models.Mock) { cancel() })
+			go func() { c.done <- (&HTTP{Logger: zaptest.NewLogger(t)}).recordV2(ctx, c.sess) }()
+			write(t, c.app, c.src, faultReq)
+			relayed(t, c.dest, faultReq)
+			write(t, c.dest, c.dst, answer)
+			relayed(t, c.app, answer)
+			var m *models.Mock
+			select {
+			case m = <-c.mocks:
+			case <-time.After(10 * time.Second): // turns a dropped mock into a failure
+				t.Fatal("recorded no mock: the exchange read whole was dropped as the context ended")
+			}
+			if r := m.Spec.HTTPResp; m.Spec.Fault != nil || r == nil || r.Body != "01234" {
+				t.Errorf("recorded the response %+v with the fault %v, want it whole, with no fault", r, m.Spec.Fault)
+			}
+			_ = c.sess.ClientStream.Close()
+			_ = c.sess.DestStream.Close()
+			if _, err := c.collect(t); err != nil && !errors.Is(err, context.Canceled) {
+				t.Errorf("recordV2 = %v, want nil or the context's end", err)
+			}
+			if got := errorsLogged(c); len(got) != 0 {
+				t.Errorf("logged %q at ERROR, want nothing", got)
+			}
+			if got := leftOutReasons(c); len(got) != 0 {
+				t.Errorf("left out for %q, want the whole exchange recorded", got)
+			}
+		})
+	}
+}

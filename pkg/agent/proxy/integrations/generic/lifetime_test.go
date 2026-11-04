@@ -781,3 +781,48 @@ func TestLegacyAConnectionWhollyInsideATestIsThatTestsWhole(t *testing.T) {
 		}
 	}
 }
+
+// The session's context ends after the recorder last asked it and before its
+// emit asks it, here as the post-record hook runs: the held exchange, read
+// whole, is handed on to the manager, not dropped with nothing reporting it
+// (Session.EmitMockAcrossShutdown).
+func TestV2AHeldExchangeEmittedAsTheContextEndsIsRecorded(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(5000, 0)
+	mgr := syncMock.New(zap.NewNop())
+	w := mgr.OpenWindow(t0, nil)
+	clientCh := make(chan fakeconn.Chunk, 2)
+	destCh := make(chan fakeconn.Chunk, 2)
+	clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("publish"), ReadAt: t0.Add(time.Second)}
+	destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok"), WrittenAt: t0.Add(2 * time.Second)}
+	sess, _ := newV2Session(t, clientCh, destCh)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sess.Ctx = syncMock.NewContext(ctx, mgr)
+	sess.Mgr = mgr
+	sess.RouteMocksViaSyncMock = true
+	sess.AddPostRecordHook(func(*models.Mock) { cancel() })
+	held := make(chan struct{}, 4)
+	sess.OnPendingCleared = func() { held <- struct{}{} }
+	done := make(chan error, 1)
+	go func() { done <- dispatch(t, sess) }()
+	select {
+	case <-held:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the exchange was not held")
+	}
+	if _, _, added, _ := mgr.GetDropStats(); added != 0 {
+		t.Fatalf("the manager was handed %d mocks while the exchange was held, want none yet", added)
+	}
+	close(clientCh)
+	close(destCh)
+	w.Yield(t0.Add(3 * time.Second))
+	w.Tested(t0, t0.Add(3*time.Second))
+	w.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, added, _ := mgr.GetDropStats(); added != 1 {
+		t.Fatalf("the manager was handed %d mocks, want the held exchange as the context ended", added)
+	}
+}

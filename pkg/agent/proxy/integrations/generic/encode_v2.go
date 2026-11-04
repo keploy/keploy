@@ -175,17 +175,10 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 	if sess != nil && sess.Ctx != nil {
 		ctx = sess.Ctx
 	}
-	emit := func(m *models.Mock) {
-		// An ended session's context would discard an ordinary emit of what
-		// the recorder held until it ended.
-		send := sess.EmitMock
-		if ctx.Err() != nil {
-			send = sess.EmitMockOnShutdown
-		}
-		if err := send(m); err != nil && logger != nil {
-			logger.Debug("generic v2: EmitMock returned error", zap.Error(err))
-		}
-	}
+	// An ended session's context would discard an ordinary emit of what the
+	// recorder held until it ended, and it may end between any check made
+	// here and EmitMock's: the session decides (EmitMockAcrossShutdown).
+	emit := sess.EmitMockAcrossShutdown
 	// hold is the connection's first exchange, and those after it, while the
 	// test that owns its request may own the whole connection (preambleHold).
 	// lastAt is the connection's latest chunk time.

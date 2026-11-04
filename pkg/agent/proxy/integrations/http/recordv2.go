@@ -401,22 +401,17 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			// connection's local destination is listed mocked
 			// (integrations.CallServed).
 			integrations.CallServed(ctx)
-			// EmitMock takes the incomplete-mock flag itself. Clearing it
-			// again here would wipe a mark set while EmitMock delivered
+			// The emit takes the incomplete-mock flag itself. Clearing it
+			// again here would wipe a mark set while it delivered
 			// (on another goroutine, meanwhile): that mark is the
 			// next exchange's, whose mock would then be recorded with
 			// nothing reporting it. The parser's context is the
 			// session's (Session.Ctx): once it has ended, as at the
 			// recording's stop, EmitMock would drop, with nothing
-			// reporting it, the mock of an exchange read before it
-			// (EmitMockOnShutdown).
-			emit := sess.EmitMock
-			if ctx.Err() != nil {
-				emit = sess.EmitMockOnShutdown
-			}
-			if emitErr := emit(mock); emitErr != nil {
-				return emitErr
-			}
+			// reporting it, the mock of an exchange read before it, and
+			// it may end between any check made here and EmitMock's, so
+			// the session decides (EmitMockAcrossShutdown).
+			sess.EmitMockAcrossShutdown(mock)
 			if judged && ctx.Err() != nil {
 				// Judged by the connection's end, after which nothing
 				// more comes to record: recorded, and its recording

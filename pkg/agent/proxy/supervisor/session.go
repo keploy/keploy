@@ -936,7 +936,7 @@ func (s *Session) OpenOrphanWindow(start time.Time) func() {
 // matches the defensive shape of RecordSession call sites. A nil m is
 // a programming error and treated as a no-op returning nil.
 func (s *Session) EmitMock(m *models.Mock) error {
-	return s.emitMockCore(m, false)
+	return s.emitMockCore(m, emitLive)
 }
 
 // EmitMockOnShutdown is the shutdown-time variant of EmitMock used by
@@ -964,8 +964,40 @@ func (s *Session) EmitMock(m *models.Mock) error {
 // propagation, ReqTimestampMock monotonicity, OnMockRecorded hook
 // chain, OnPendingCleared) match EmitMock byte-for-byte.
 func (s *Session) EmitMockOnShutdown(m *models.Mock) error {
-	return s.emitMockCore(m, true)
+	return s.emitMockCore(m, emitShutdown)
 }
+
+// EmitMockAcrossShutdown emits m, the mock of an exchange its parser read
+// before it built it, whether or not the session has ended by then: it is
+// EmitMock while the session's context (Ctx) lasts and EmitMockOnShutdown
+// once it has ended, decided by its own check of the context, which is the
+// one that would otherwise drop m. A parser that asked the context itself
+// and then called EmitMock would drop, with nothing reporting it, the mock
+// of an exchange it read whole as the context ended between its check and
+// EmitMock's. So:
+//
+//   - SyncMock path: mgr.AddMock is called whatever the context, as
+//     EmitMockOnShutdown calls it.
+//   - Direct-channel path: the send waits on the channel while the
+//     context lasts, as EmitMock's; once it has ended, before the send or
+//     during its wait, the send is EmitMockOnShutdown's non-blocking one.
+//
+// It never returns the context's end: a caller that must stop once the
+// session has ended asks the context after it. Every other invariant is
+// EmitMock's. Nil-safe.
+func (s *Session) EmitMockAcrossShutdown(m *models.Mock) {
+	_ = s.emitMockCore(m, emitAcrossShutdown)
+}
+
+// emitMode is how emitMockCore treats the session's context: EmitMock's,
+// EmitMockOnShutdown's, or EmitMockAcrossShutdown's.
+type emitMode int
+
+const (
+	emitLive emitMode = iota
+	emitShutdown
+	emitAcrossShutdown
+)
 
 // MockHeld tells the session its parser holds a mock it made instead of
 // emitting it now, to emit it once it knows what the mock is: the parser has
@@ -978,7 +1010,7 @@ func (s *Session) MockHeld() {
 	}
 }
 
-func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
+func (s *Session) emitMockCore(m *models.Mock, mode emitMode) error {
 	if s == nil || m == nil {
 		return nil
 	}
@@ -1060,12 +1092,12 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		// require threading ctx through every legacy
 		// record-path call site too.
 		//
-		// Shutdown variant SKIPS this pre-check: the parser has
-		// just reconstructed an invocation from chunks captured
-		// before ctx cancelled, and discarding that work because
-		// ctx is now done would lose the very last mock on a
-		// connection in flight at SIGINT.
-		if !shutdown {
+		// The shutdown and across-shutdown variants SKIP this
+		// pre-check: the parser has just reconstructed an
+		// invocation from chunks captured before ctx cancelled, and
+		// discarding that work because ctx is now done would lose
+		// the very last mock on a connection in flight at SIGINT.
+		if mode == emitLive {
 			if ctx := s.Ctx; ctx != nil {
 				if err := ctx.Err(); err != nil {
 					return err
@@ -1095,20 +1127,9 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		}
 		return nil
 	}
-	if shutdown {
-		// Non-blocking send: at shutdown the consumer is also
-		// winding down so a blocked send would deadlock the
-		// parser. Drop on full channel; callers that want stricter
-		// delivery during shutdown should route via SyncMock.
-		select {
-		case s.Mocks <- m:
-			if s.OnPendingCleared != nil {
-				s.OnPendingCleared()
-			}
-			return nil
-		default:
-			return nil
-		}
+	if mode == emitShutdown {
+		s.sendOnShutdown(m)
+		return nil
 	}
 	select {
 	case s.Mocks <- m:
@@ -1117,7 +1138,25 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		}
 		return nil
 	case <-ctx.Done():
+		if mode == emitAcrossShutdown {
+			s.sendOnShutdown(m)
+			return nil
+		}
 		return ctx.Err()
+	}
+}
+
+// sendOnShutdown is the direct-channel send of a session whose context has
+// ended. Non-blocking: at shutdown the consumer is also winding down so a
+// blocked send would deadlock the parser. Drop on full channel; callers that
+// want stricter delivery during shutdown should route via SyncMock.
+func (s *Session) sendOnShutdown(m *models.Mock) {
+	select {
+	case s.Mocks <- m:
+		if s.OnPendingCleared != nil {
+			s.OnPendingCleared()
+		}
+	default:
 	}
 }
 
