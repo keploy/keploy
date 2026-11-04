@@ -1,0 +1,98 @@
+name: Release windows binary (static)
+
+# Builds the windows release binary the release's way (release.yml's
+# build-windows: .github/scripts/windows/build-windows-release.sh, llvm-mingw,
+# -static) on every change to how it is built, and runs the release's checks
+# on it: it imports only DLLs that are part of Windows, carries no gcc
+# runtime, and it starts (and the Postgres parser, the C code, passes its
+# tests) with only Windows' own directories on the PATH. So a change that
+# would ship a binary that needs MinGW to start (v3.6.216 imported
+# libwinpthread-1.dll and exited at once on a machine without MinGW) fails
+# here, before a release, not after it.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/workflows/release-windows-static.yml'
+      - '.github/scripts/windows/llvm-mingw-toolchain.sh'
+      - '.github/scripts/windows/build-windows-release.sh'
+      - '.github/scripts/windows/check-windows-release-*'
+      - '.github/actions/setup-private-parsers/**'
+      - 'goreleaser.yaml'
+      - 'go.mod'
+      - 'go.sum'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/workflows/release-windows-static.yml'
+      - '.github/scripts/windows/llvm-mingw-toolchain.sh'
+      - '.github/scripts/windows/build-windows-release.sh'
+      - '.github/scripts/windows/check-windows-release-*'
+      - '.github/actions/setup-private-parsers/**'
+      - 'goreleaser.yaml'
+      - 'go.mod'
+      - 'go.sum'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The integrations ref the release builds with (release.yml).
+  INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'main' }}
+
+jobs:
+  build-windows-static:
+    timeout-minutes: 60
+    # GitHub's hosted image, as release.yml's build-windows: the release is
+    # built here, not on the self-hosted windows runners.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: true
+          integration-ref: ${{ env.INTEGRATION_REF }}
+
+      - name: Cache llvm-mingw
+        uses: actions/cache@v4
+        with:
+          path: .llvm-mingw
+          key: llvm-mingw-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/scripts/windows/llvm-mingw-toolchain.sh') }}
+
+      - name: Stage llvm-mingw
+        shell: bash
+        run: |
+          sh .github/scripts/windows/llvm-mingw-toolchain.sh "$GITHUB_WORKSPACE/.llvm-mingw"
+          echo "KEPLOY_LLVM_MINGW=$GITHUB_WORKSPACE/.llvm-mingw/llvm-mingw" >> "$GITHUB_ENV"
+
+      - name: Check the binary check refuses what it must
+        shell: bash
+        run: sh .github/scripts/windows/check-windows-release-binary.tests.sh
+
+      - name: Build keploy the release way
+        shell: bash
+        env:
+          VERSION: 0.0.0-static-check
+          SERVER_URL: https://api.keploy.io
+          GITHUB_APP_CLIENT_ID: ""
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          sh .github/scripts/windows/build-windows-release.sh binary amd64 out/keploy_windows_amd64.exe ""
+          sh .github/scripts/windows/build-windows-release.sh pgtest amd64 out/pgparse.test.exe
+          sh .github/scripts/windows/build-windows-release.sh probe amd64 out/probe.exe
+          ls -l out
+
+      - name: Start it with only Windows' own DLLs
+        shell: pwsh
+        run: ./.github/scripts/windows/check-windows-release-start.ps1 -Binary out/keploy_windows_amd64.exe -PgTest out/pgparse.test.exe -Probe out/probe.exe
