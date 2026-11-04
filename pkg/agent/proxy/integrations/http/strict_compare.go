@@ -697,10 +697,11 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 // segment is a value of that read's form (learn.ReadsAsClockRead), whose
 // instant clockDiffs checks. A segment of no such form ("me" where an
 // instant was) is no read of any clock: it differs as one with nothing
-// learned does, and its recording is of another route. So does the masked
-// segment i where the recording says the learn step read the place at the
-// path's own segment i (read, pathReadings), another segment, which
-// clockDiffs checks in its stead.
+// learned does, and its recording is of another route. Where the recording
+// says the learn step read the place at the path's own segment i (read,
+// pathReadings), or i is no learned place, the masked segment i is another
+// segment than the place's: it may differ only where it is, whole, the own
+// segment of a place read as sent, which clockDiffs checks (ownClockAt).
 func (k strictKnown) segmentMayDiffer(i int, rec, live urlPath, read pathReadings) bool {
 	place := "url.path." + strconv.Itoa(i)
 	if k.learnedNoiseAt(place, "") {
@@ -708,12 +709,34 @@ func (k strictKnown) segmentMayDiffer(i int, rec, live urlPath, read pathReading
 	}
 	o, clock := k.clocks[place]
 	if !clock || read.of(i) == readOwn {
-		return false
+		return k.ownClockAt(i, rec, live, read)
 	}
 	r, _ := rec.at(i)
 	l, _ := live.at(i)
 	text, excused := clockReadAt(o, r, l)
 	return excused || learn.ReadsAsClockRead(o, segmentLeaf(place, text))
+}
+
+// ownClockAt reports whether the masked segment i of a path a pattern that
+// crosses "/" joined is, in both paths (rec and live), the path's own
+// segment j whole (urlPath.ownIndexOf), j a place the learn step learned as
+// a read of the application's clock and the recording says it read as sent
+// (read, pathReadings), and the call's segment a value of the read's form
+// (learn.ReadsAsClockRead): clockDiffs checks its instant at url.path.<j>,
+// which no url noise excuses there (no pattern took a byte of it), so it
+// may differ. A segment the call's path joins otherwise is of another
+// route.
+func (k strictKnown) ownClockAt(i int, rec, live urlPath, read pathReadings) bool {
+	j := rec.ownIndexOf(i)
+	if j < 0 || live.ownIndexOf(i) != j {
+		return false
+	}
+	place := "url.path." + strconv.Itoa(j)
+	o, clock := k.clocks[place]
+	if !clock || read.of(j) != readOwn {
+		return false
+	}
+	return learn.ReadsAsClockRead(o, segmentLeaf(place, live.own[j]))
 }
 
 // segmentLeaf is a path segment's leaf at place, as the learn step shapes it
@@ -869,6 +892,43 @@ func (u urlPath) ownAt(i int) (v urlValue, ok bool) {
 // joined reports whether a pattern that crosses "/" joined the path's
 // segments, so the masked path's segment i may be another than its own.
 func (u urlPath) joined() bool { return len(u.segs) != len(u.own) }
+
+// ownIndexOf is the path's own segment its masked segment i is, whole,
+// where a pattern that crosses "/" joined the path's segments (joined); -1
+// where it is none. A masked segment that holds no mask's byte is one own
+// segment, every byte of it: a pattern's match leaves a mask where it took
+// a byte, and a "/" no match took ends a segment in both. It is the own
+// segment whose first byte is the first no match took after those the
+// masked segments before i hold ("/"s aside). An empty segment holds no
+// byte to place it by: none.
+func (u urlPath) ownIndexOf(i int) int {
+	if !u.joined() || u.segs[i] == "" || slices.Contains(u.mask[i], true) {
+		return -1
+	}
+	before := 0
+	for _, m := range u.mask[:i] {
+		before += unmarked(m)
+	}
+	for j, t := range u.taken {
+		kept := unmarked(t)
+		if before == 0 && kept > 0 {
+			return j
+		}
+		before -= kept
+	}
+	return -1
+}
+
+// unmarked is the number of bytes marks leaves unmarked.
+func unmarked(marks []bool) int {
+	n := 0
+	for _, m := range marks {
+		if !m {
+			n++
+		}
+	}
+	return n
+}
 
 // marksAt is marks[i], none where nothing is marked.
 func marksAt(marks [][]bool, i int) []bool {
