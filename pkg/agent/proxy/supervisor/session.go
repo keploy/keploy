@@ -155,7 +155,9 @@ type Session struct {
 	// such end it was (FirstEndNoFault); whether the server spoke unasked
 	// before the current request (ServerSpokeUnasked); and, from
 	// endedWithConnectionShift, one bit per fakeconn.Direction: that stream
-	// ended because its connection did (MarkEndedWithConnection). Internal;
+	// ended because its connection did (MarkEndedWithConnection); and, from
+	// clientEndErrnoShift, the errno the client's socket gave after the
+	// relay was done with it (MarkClientEndError). Internal;
 	// one word here, in the padding after the bools, so a Session stays in
 	// its size class with clientStopped.
 	peerEnds atomic.Uint32
