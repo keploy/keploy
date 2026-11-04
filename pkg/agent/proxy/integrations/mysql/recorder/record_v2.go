@@ -976,13 +976,16 @@ const mysqlPostTLSStashPrimaryDefault = 8 * time.Second
 const mysqlPostTLSStashPollSlice = 500 * time.Millisecond
 
 // postTLSStashWaitHookKey is the context key of a func() that
-// resolvePreTLSGreeting calls each time it is about to block on the port's
-// queue for its own raw leg: the queue held no entry for it and no fallback
-// answered. Only this package's tests set it (the key is unexported): it lets
-// a test push the raw leg once the recorder is waiting for it, so the lateness
-// the test injects is counted from the wait itself, not from when the test
-// began. Carried by the context, it reaches only the recording that test
-// drives, never one another test left running.
+// resolvePreTLSGreeting calls each time it is about to wait on the port's
+// queue: every take with a non-zero wait, never one that only looks. Only
+// this package's tests set it (the key is unexported). A test counts its calls
+// to prove an event, not a duration: that a connection never waited (a
+// joined connection, a cache fallback past the primary bound), or waited no
+// further slice after a cancel. A test can also push the raw leg once the
+// recorder is waiting for it, so the lateness it injects is counted from the
+// wait itself, not from when the test began. Carried by the context, it
+// reaches only the recording that test drives, never one another test left
+// running.
 type postTLSStashWaitHookKey struct{}
 
 func mysqlPostTLSStashWait() time.Duration {
@@ -1189,6 +1192,11 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 	// take pops, within wait, this connection's own entry or (unless ownOnly)
 	// one it may take, and classifies it.
 	take := func(ownOnly bool, wait time.Duration) (models.TLSHandshakeEntry, models.HandshakeOwner, preTLSGreetingSource) {
+		if wait > 0 {
+			if hook, ok := ctx.Value(postTLSStashWaitHookKey{}).(func()); ok {
+				hook()
+			}
+		}
 		entry, taker, ok := hsStore.PopWaitFor(portKey, owner, ownOnly, wait)
 		switch {
 		case !ok:
@@ -1244,9 +1252,6 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 		}
 		if slice <= 0 {
 			continue
-		}
-		if hook, ok := ctx.Value(postTLSStashWaitHookKey{}).(func()); ok {
-			hook()
 		}
 		if entry, taker, src := take(false, slice); src != greetingNone {
 			return entry, taker, src
