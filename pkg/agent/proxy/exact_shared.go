@@ -121,11 +121,8 @@ func (m *MockManager) SharedMocks() (perTest, session []*models.Mock, ok bool) {
 	if v == nil || v.test == "" {
 		return nil, nil, false
 	}
-	m.swapMu.RLock()
-	m.treesMu.RLock()
-	filtered, startup, unfiltered := m.filtered, m.startup, m.unfiltered
-	m.treesMu.RUnlock()
-	m.swapMu.RUnlock()
+	s := m.stagedNow()
+	filtered, startup, unfiltered := s.filtered, s.startup, s.unfiltered
 	// A test's view reads no teardown (afterTests): its per-test read is its
 	// own then what it shows of the per-test tier and of the worker scope in
 	// the startup tier (exactPerTest, windowWorker).

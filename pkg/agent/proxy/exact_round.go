@@ -661,6 +661,9 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	if v == nil {
 		return integrations.RoundSnapshot{}, false
 	}
+	// The set staged, whose trees, on-disk source and teardown bound every
+	// part below reads.
+	set := m.stagedNow()
 	read := func(step string) {
 		if r.onRead != nil {
 			r.onRead(step)
@@ -694,13 +697,11 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	s.Open = s.Phase == integrations.RoundInTest
 	read("learn")
 
-	m.treesMu.RLock()
-	filtered, unfiltered, startup := m.filtered, m.unfiltered, m.startup
-	m.treesMu.RUnlock()
+	filtered, unfiltered, startup := set.filtered, set.unfiltered, set.startup
 	// What the view shows of each tier (shownOf): perTest and reusable keep
 	// only those, so the snapshot never walks every test's recordings.
 	filteredVals, unfilteredVals, startupVals := v.shownOf(filtered, ""), v.shownOf(unfiltered, ""), v.shownOf(startup, "")
-	s.PerTest = v.perTest("", filteredVals, m.perTestFromStartup(v, startupVals, s.Fired))
+	s.PerTest = v.perTest("", filteredVals, m.perTestFromStartup(v, set, startupVals, s.Fired))
 	read("per-test")
 	s.Startup = v.reusable("", startupVals, unfilteredVals)
 	s.SessionScoped = v.reusable("", unfilteredVals, startupVals)
@@ -735,7 +736,7 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	read("consumed")
 
 	if q.Kind != "" && v.bg != nil {
-		for _, mk := range m.stagedOfKind(q.Kind) {
+		for _, mk := range m.stagedOfKind(set, q.Kind) {
 			if !v.isBackgroundRecording(mk) {
 				continue
 			}
@@ -751,7 +752,7 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	read("background")
 
 	if q.Pairing && q.Kind != "" {
-		s.Candidates, s.OnDisk, s.OnDiskErr = m.pairingCandidatesLocked(q.Kind)
+		s.Candidates, s.OnDisk, s.OnDiskErr = m.pairingCandidatesLocked(set, q.Kind)
 	}
 	read("candidates")
 
@@ -811,12 +812,12 @@ func byRecorded(ms []*models.Mock) {
 	})
 }
 
-// pairingCandidatesLocked is PairingCandidates of kind holding swapMu
-// (read) and the round lock (RoundSnapshot): those the trees hold, in recorded order, and those the agent keeps
-// on disk by name, not decoded (integrations.RoundSnapshot.LoadCandidates
+// pairingCandidatesLocked is PairingCandidates of kind in the set s holding
+// swapMu (read) and the round lock (RoundSnapshot): those s's trees hold, in
+// recorded order, and those its on-disk source keeps by name, not decoded (integrations.RoundSnapshot.LoadCandidates
 // decodes them outside the lock), with what the disk store's read of their
 // names returned.
-func (m *MockManager) pairingCandidatesLocked(kind models.Kind) ([]*models.Mock, []integrations.DiskCandidate, error) {
+func (m *MockManager) pairingCandidatesLocked(s *stagedSet, kind models.Kind) ([]*models.Mock, []integrations.DiskCandidate, error) {
 	v, epoch := m.pairing()
 	if v == nil {
 		return nil, nil, nil
@@ -825,18 +826,16 @@ func (m *MockManager) pairingCandidatesLocked(kind models.Kind) ([]*models.Mock,
 	var mem []*models.Mock
 	// What the staging took is no candidate, though the replay's account
 	// of it (consumedInSet) is written only after the take.
-	for _, mk := range m.stagedOfKind(kind) {
+	for _, mk := range m.stagedOfKind(s, kind) {
 		seen[mk.Name] = true
 		if m.pairable(v, epoch, mk) && !m.takenInStagingLocked(mk.Name) {
 			mem = append(mem, mk)
 		}
 	}
 	byRecorded(mem)
-	// The source the staging installed with the trees just read (swapMu is
-	// held), not one the agent handed for a set it has not staged yet.
-	m.exact.ofKind.mu.Lock()
-	src := m.exact.ofKind.staged
-	m.exact.ofKind.mu.Unlock()
+	// The source published with the trees just read (s), not one the agent
+	// handed for a set it has not staged yet.
+	src := s.ofKind
 	var disk []integrations.DiskCandidate
 	var err error
 	if src != nil {

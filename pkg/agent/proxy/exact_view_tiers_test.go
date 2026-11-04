@@ -126,7 +126,7 @@ func mainRead(mm *MockManager, r string) ([]*models.Mock, bool) {
 	perTest := func(kind models.Kind, staged []*models.Mock) []*models.Mock {
 		// The startup tree read whole: in a test the worker scope's, between
 		// tests once one fired the teardown (perTestFromStartup).
-		return v.perTest(kind, staged, mm.perTestFromStartup(v, mm.treeValues(startup, kind), mm.exact.fired.Load()))
+		return v.perTest(kind, staged, mm.perTestFromStartup(v, mm.stagedNow(), mm.treeValues(startup, kind), mm.exact.fired.Load()))
 	}
 	read, k, _ := strings.Cut(r, " ")
 	kind := map[string]models.Kind{"http": models.HTTP, "mysql": models.MySQL}[k]

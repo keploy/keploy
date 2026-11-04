@@ -3,6 +3,7 @@ package proxy
 import (
 	"sort"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
@@ -185,9 +186,9 @@ var _ integrations.LearnEnder = (*MockManager)(nil)
 // of a kind the trees do not hold (the agent's on-disk store of per-test
 // mocks: DiskMocks.RangeKind, which decodes one only as visit loads it); nil
 // for none, when every one is in the trees. The agent sets it as it stages a
-// set, before the staging, which installs it as the source of the set as
+// set, before the staging, which publishes it as the source of the set as
 // recorded (RangeRecordedSet) and of the pairing (pairableOfKind) with its
-// trees (installRecordedSourcesLocked).
+// trees (stagedSet).
 func (m *MockManager) SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) {
 	m.exact.ofKind.mu.Lock()
 	defer m.exact.ofKind.mu.Unlock()
@@ -195,59 +196,90 @@ func (m *MockManager) SetRecordedOfKind(src func(kind models.Kind, visit func(na
 }
 
 // recordedOfKindSource is where the pairing reads recordings of a kind the
-// trees do not hold (SetRecordedOfKind): src as the agent handed it, and
-// staged as the last staging installed it (installRecordedSourcesLocked).
-// mu is a leaf, taken under swapMu by the staging and by the readers of
-// staged: RangeRecordedSet and the pairing (pairableOfKind,
-// pairingCandidatesLocked).
+// trees do not hold (SetRecordedOfKind), as the agent handed it: the staging
+// publishes it with its trees (stagedSet). mu is a leaf, taken under swapMu
+// by the staging.
 type recordedOfKindSource struct {
-	mu     sync.Mutex
-	src    func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error
-	staged func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error
+	mu  sync.Mutex
+	src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error
 }
 
-// installRecordedSourcesLocked makes the on-disk sources the agent handed
-// last, of a kind (SetRecordedOfKind), by key (SetRecordingSource), of the
-// recordings before an instant (SetRecordedBefore) and of the recordings'
-// times (SetRecordingTimes), the staging's, holding swapMu, which the staging
-// holds as it changes the trees and moves the staging epoch: a reader of the
-// set as recorded that takes swapMu (RangeRecordedSet, the pairing,
-// RangeRecordedBefore) reads one staging's trees and sources, never one
-// set's trees with the next set's sources, which the agent hands before it
-// stages that set.
-func (m *MockManager) installRecordedSourcesLocked() {
+// stagedSet is the set as one staging left it: the trees it built (per-test,
+// session, startup) and the on-disk sources the agent handed before it, of a
+// kind (SetRecordedOfKind), by key (SetRecordingSource), of the recordings
+// before an instant (SetRecordedBefore) and of the recordings' times
+// (SetRecordingTimes). The staging publishes it whole, once every tree is in
+// place and before any generation moves (publishStagedLocked), and nothing
+// changes its fields after: the trees it names change only as the set's own
+// stores and consumes change them. Every read of the set as recorded (the
+// pairing, RangeRecordedSet, the reads by key, the learn step's earlier
+// places) and every read of keploy mock replay's teardown bound loads it
+// once (stagedNow) and reads every tree and source it uses from it, holding
+// swapMu or not: the agent hands a set's sources before it stages that set,
+// so no read pairs one staging's trees with another's sources, times or
+// trees.
+type stagedSet struct {
+	filtered, unfiltered, startup *TreeDb
+	// filteredByKind is the per-test tier's trees by kind, read under
+	// treesMu: a kind's tree made after the staging (ensureKindTrees) is
+	// made in this map while the set is the one staged.
+	filteredByKind map[models.Kind]*TreeDb
+	ofKind         func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error
+	recorded       RecordingSource
+	before         func(t time.Time, visit func(*models.Mock) bool) error
+	times          *recordingTimes
+}
+
+// trees are s's trees: per-test, session, startup.
+func (s *stagedSet) trees() []*TreeDb {
+	return []*TreeDb{s.filtered, s.unfiltered, s.startup}
+}
+
+// stagedNow is the set as the last staging left it (stagedSet).
+func (m *MockManager) stagedNow() *stagedSet {
+	return m.exact.set.Load()
+}
+
+// publishStagedLocked publishes the trees in place and the on-disk sources
+// the agent handed last as the set staged (stagedSet). The caller holds
+// swapMu, which every change of the trees' pointers holds, and calls it once
+// its staging put every tree in place, before it moves any generation: a
+// reader that read the new generation reads the new set.
+func (m *MockManager) publishStagedLocked() {
+	s := &stagedSet{times: m.exact.times.Load()}
+	m.treesMu.RLock()
+	s.filtered, s.unfiltered, s.startup, s.filteredByKind = m.filtered, m.unfiltered, m.startup, m.filteredByKind
+	m.treesMu.RUnlock()
 	m.exact.ofKind.mu.Lock()
-	m.exact.ofKind.staged = m.exact.ofKind.src
+	s.ofKind = m.exact.ofKind.src
 	m.exact.ofKind.mu.Unlock()
 	m.exact.recorded.mu.Lock()
-	m.exact.recorded.staged = m.exact.recorded.src
+	s.recorded = m.exact.recorded.src
 	m.exact.recorded.mu.Unlock()
 	m.exact.before.mu.Lock()
-	m.exact.before.staged = m.exact.before.src
+	s.before = m.exact.before.src
 	m.exact.before.mu.Unlock()
-	m.exact.stagedTimes.Store(m.exact.times.Load())
+	if f := m.exact.onPublish; f != nil {
+		f(false)
+	}
+	m.exact.set.Store(s)
+	if f := m.exact.onPublish; f != nil {
+		f(true)
+	}
 }
 
-// recordedOfKindLocked is kind's recordings of the set as the last staging
-// left it: the trees' (stagedOfKind) and the on-disk source it installed
-// (installRecordedSourcesLocked), nil for none. The caller holds swapMu, so
-// the two are one staging's.
-func (m *MockManager) recordedOfKindLocked(kind models.Kind) ([]*models.Mock, func(models.Kind, func(string, func() (*models.Mock, error)) bool) error) {
-	m.exact.ofKind.mu.Lock()
-	src := m.exact.ofKind.staged
-	m.exact.ofKind.mu.Unlock()
-	return m.stagedOfKind(kind), src
+// recordedOfKind is kind's recordings of the set s: its trees'
+// (stagedOfKind) and its on-disk source, nil for none.
+func (m *MockManager) recordedOfKind(s *stagedSet, kind models.Kind) ([]*models.Mock, func(models.Kind, func(string, func() (*models.Mock, error)) bool) error) {
+	return m.stagedOfKind(s, kind), s.ofKind
 }
 
-// stagedOfKind is the staged trees' recordings of kind (per-test, session,
+// stagedOfKind is the recordings of kind of s's trees (per-test, session,
 // startup, in that order), each once, by name.
-func (m *MockManager) stagedOfKind(kind models.Kind) []*models.Mock {
-	m.treesMu.RLock()
-	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
-	m.treesMu.RUnlock()
+func (m *MockManager) stagedOfKind(s *stagedSet, kind models.Kind) []*models.Mock {
 	seen := map[string]bool{}
 	var out []*models.Mock
-	for _, t := range trees {
+	for _, t := range s.trees() {
 		for _, mk := range m.treeValues(t, kind) {
 			if mk.Name == "" || seen[mk.Name] {
 				continue
@@ -277,7 +309,7 @@ func (m *MockManager) Background(kind models.Kind) []*models.Mock {
 		return nil
 	}
 	var shown []*models.Mock
-	for _, mk := range v.keep(m.stagedOfKind(kind)) {
+	for _, mk := range v.keep(m.stagedOfKind(m.stagedNow(), kind)) {
 		if v.isBackgroundRecording(mk) {
 			shown = append(shown, mk)
 		}
@@ -295,7 +327,7 @@ func (m *MockManager) SpentBackground(kind models.Kind) []*models.Mock {
 		return nil
 	}
 	var out []*models.Mock
-	for _, mk := range m.stagedOfKind(kind) {
+	for _, mk := range m.stagedOfKind(m.stagedNow(), kind) {
 		if v.isBackgroundRecording(mk) && v.spentBackground(mk.Name) {
 			out = append(out, mk)
 		}
@@ -320,7 +352,7 @@ func (m *MockManager) KindBackground(kind models.Kind) (unused, spent []*models.
 	if v == nil || v.bg == nil {
 		return nil, nil
 	}
-	for _, mk := range m.stagedOfKind(kind) {
+	for _, mk := range m.stagedOfKind(m.stagedNow(), kind) {
 		if !v.isBackgroundRecording(mk) {
 			continue
 		}
@@ -597,19 +629,19 @@ func (m *MockManager) PairingCandidates(kind models.Kind) []*models.Mock {
 // pairableOfKind is kind's recordings a pairing may take (pairable) in the
 // view in gives, in recorded order: those the trees hold, then those the
 // agent keeps on disk, each once; nil when in gives none. The view's staging
-// epoch, the trees and the on-disk source the staging installed with them
-// (installRecordedSourcesLocked) are read together under swapMu, as one
-// staging left them: the agent hands a set's source before it stages that
-// set, so a pairing between the two pairs with the set staged, never with
-// its trees and the next set's on-disk recordings. The disk is read after
-// the lock, from the source the staging installed.
+// epoch and the set staged (stagedSet: its trees and the on-disk source
+// published with them) are read together under swapMu, as one staging left
+// them: the agent hands a set's source before it stages that set, so a
+// pairing between the two pairs with the set staged, never with its trees
+// and the next set's on-disk recordings. The disk is read after the lock,
+// from that set's source.
 func (m *MockManager) pairableOfKind(in func() (*exactView, uint64), kind models.Kind) []*models.Mock {
 	m.swapMu.RLock()
 	v, epoch := in()
 	var staged []*models.Mock
 	var src func(models.Kind, func(string, func() (*models.Mock, error)) bool) error
 	if v != nil {
-		staged, src = m.recordedOfKindLocked(kind)
+		staged, src = m.recordedOfKind(m.stagedNow(), kind)
 	}
 	m.swapMu.RUnlock()
 	if v == nil {
@@ -622,16 +654,16 @@ func (m *MockManager) pairableOfKind(in func() (*exactView, uint64), kind models
 // keys (models.RequestKeys) alone: the trees' by their index
 // (TreeDb.keyedValues), and those the agent keeps on disk by its store's
 // (SetRecordingSource), so a recording filed under none is never decoded.
-// As pairableOfKind does, it reads the view in gives, the trees and the
-// keyed source the staging installed with them under swapMu, as one staging
-// left them, and the disk after the lock.
+// As pairableOfKind does, it reads the view in gives and the set staged (its
+// trees and the keyed source published with them) under swapMu, as one
+// staging left them, and the disk after the lock.
 func (m *MockManager) pairableUnderKeys(in func() (*exactView, uint64), kind models.Kind, keys []string) []*models.Mock {
 	m.swapMu.RLock()
 	v, epoch := in()
 	var staged []*models.Mock
 	var src RecordingSource
 	if v != nil {
-		staged, src = m.recordedUnderKeysLocked(kind, keys)
+		staged, src = m.recordedUnderKeys(m.stagedNow(), kind, keys)
 	}
 	m.swapMu.RUnlock()
 	if v == nil {
@@ -646,18 +678,13 @@ func (m *MockManager) pairableUnderKeys(in func() (*exactView, uint64), kind mod
 	return m.pairableFrom(v, epoch, kind, staged, ofKind)
 }
 
-// recordedUnderKeysLocked is kind's recordings filed under any of keys of the
-// set as the last staging left it: the trees' by their index, each once by
-// name, and the keyed on-disk source it installed
-// (installRecordedSourcesLocked), nil for none. The caller holds swapMu, so
-// the two are one staging's.
-func (m *MockManager) recordedUnderKeysLocked(kind models.Kind, keys []string) ([]*models.Mock, RecordingSource) {
-	m.treesMu.RLock()
-	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
-	m.treesMu.RUnlock()
+// recordedUnderKeys is kind's recordings filed under any of keys of the set
+// s: its trees' by their index, each once by name, and its keyed on-disk
+// source, nil for none.
+func (m *MockManager) recordedUnderKeys(s *stagedSet, kind models.Kind, keys []string) ([]*models.Mock, RecordingSource) {
 	seen := map[string]bool{}
 	var staged []*models.Mock
-	for _, t := range trees {
+	for _, t := range s.trees() {
 		if t == nil {
 			continue
 		}
@@ -669,7 +696,7 @@ func (m *MockManager) recordedUnderKeysLocked(kind models.Kind, keys []string) (
 			staged = append(staged, mk)
 		}
 	}
-	return staged, m.stagedRecordingSource()
+	return staged, s.recorded
 }
 
 // pairableFrom is, of staged (the trees' recordings of kind) and of what src

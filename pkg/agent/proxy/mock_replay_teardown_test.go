@@ -705,7 +705,7 @@ func TestUnderMockReplayOneRunsTeardownIsTheSameWithItsClock(t *testing.T) {
 		mm.SetPoolOwners(map[string]string{"owned": "k", "owned-2": "k", "owned-2-untrusted": "k"})
 		mm.SetPoolNames([]string{"boot", "gap", "end", "end-untrusted"})
 		got := map[string]bool{}
-		for _, mk := range mm.teardown("k", pool) {
+		for _, mk := range mm.teardown(mm.stagedNow(), "k", pool) {
 			got[mk.Name] = true
 		}
 		return got

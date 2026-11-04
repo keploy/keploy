@@ -13,28 +13,21 @@ import (
 // hands one as it stages a set it keeps on disk (Agent.stageMocks), and the
 // trees of a set it keeps resident may hold only the open test's window.
 //
-// The trees and the source are read together under swapMu, as one staging
-// installed them (installRecordedSourcesLocked): the agent hands a set's
-// source before it stages that set, so a read between the two still ranges
-// the set staged, never its trees with the next set's on-disk recordings.
+// The trees and the source are one staging's (stagedSet): the agent hands a
+// set's source before it stages that set, so a read between the two still
+// ranges the set staged, never its trees with the next set's on-disk
+// recordings.
 func (m *MockManager) RangeRecordedSet(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) (bool, error) {
 	if m.closed.Load() {
 		return false, nil
 	}
-	m.swapMu.RLock()
-	m.exact.ofKind.mu.Lock()
-	src := m.exact.ofKind.staged
-	m.exact.ofKind.mu.Unlock()
-	var staged []*models.Mock
-	if src != nil {
-		staged = m.stagedOfKind(kind)
-	}
-	m.swapMu.RUnlock()
+	s := m.stagedNow()
+	src := s.ofKind
 	if src == nil {
 		return false, nil
 	}
 	seen := map[string]bool{}
-	for _, mk := range staged {
+	for _, mk := range m.stagedOfKind(s, kind) {
 		seen[mk.Name] = true
 		if !visit(mk.Name, func() (*models.Mock, error) { return mk, nil }) {
 			return true, nil

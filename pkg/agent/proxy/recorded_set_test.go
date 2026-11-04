@@ -237,8 +237,8 @@ func TestARangeBeforeTheNextSetIsStagedRangesTheSetStaged(t *testing.T) {
 
 // Ranges made while the agent stages set after set, each set's source handed
 // before its staging as the agent does, each visit one set's recordings
-// alone: the staging changes the trees and installs the source under swapMu,
-// and the range reads them together under it.
+// alone: the staging changes the trees and publishes them with the source as
+// one set (stagedSet), and the range reads that one set.
 func TestRangesInterleavedWithStagingsEachSeeOneSet(t *testing.T) {
 	now := time.Now()
 	mm := NewMockManager(nil, nil, zap.NewNop())
@@ -297,8 +297,8 @@ func TestRangesInterleavedWithStagingsEachSeeOneSet(t *testing.T) {
 
 // handAndStage hands mm src as the agent hands a set's on-disk source, before
 // a staging, and stages the per-test tier again, empty in the sets that use
-// it: the staging installs what was handed (installRecordedSourcesLocked),
-// the trees left as they were.
+// it: the staging publishes what was handed with its trees (stagedSet), the
+// trees left as they were.
 func handAndStage(mm *MockManager, src func(models.Kind, func(string, func() (*models.Mock, error)) bool) error) {
 	mm.SetRecordedOfKind(src)
 	mm.SetFilteredMocks(nil)
@@ -452,7 +452,7 @@ func readsByKey(t *testing.T, mm *MockManager) map[string][]string {
 		t.Fatal(err)
 	}
 	sort.Strings(staged)
-	mm.rangeRecorded(models.HTTP, []string{"k"}, func(name string, _ func() (*models.Mock, error)) bool {
+	mm.rangeRecorded(mm.stagedNow(), models.HTTP, []string{"k"}, func(name string, _ func() (*models.Mock, error)) bool {
 		diagnosed = append(diagnosed, name)
 		return true
 	})
@@ -590,30 +590,25 @@ func TestAnEarlierPlacesOrTeardownReadBeforeTheNextSetIsStagedReadsTheSetStaged(
 	check("set b staged", "b")
 }
 
-// The learn step's earlier places read the staged trees and the source the
-// staging installed with them under one staging lock (read): the agent
-// stages set b while RangeRecordedBefore reads, as far as the lock lets it,
-// and the read must give set a's recordings.
-func TestTheEarlierPlacesReadTheTreesAndTheirSourceUnderOneStagingLock(t *testing.T) {
+// The learn step's earlier places read the staged trees and their source of
+// one staging (stagedSet): the agent hands set b's sources and stages it
+// after RangeRecordedBefore read the trees and before it reads the source,
+// and the read must give set a's recordings, its trees and its disk.
+func TestTheEarlierPlacesReadTheTreesAndTheirSourceOfOneStaging(t *testing.T) {
 	mm, hand, stage := earlierSet(t)
-	hand("a")
-	stage("a")
+	set := "a"
 	for _, read := range []struct {
 		name string
 		read func(time.Time, func(*models.Mock) bool) error
 	}{{"RangeRecordedBefore", mm.RangeRecordedBefore}, {"rangeRecordedInOrder", mm.rangeRecordedInOrder}} {
-		var underLock, ran bool
+		hand(set)
+		stage(set)
+		next := map[string]string{"a": "b", "b": "a"}[set]
+		var ran bool
 		mm.exact.onBefore = func() {
 			ran = true
-			// The agent hands set b's sources and stages it now, unless
-			// the staging lock is held: then it waits for the read.
-			if mm.swapMu.TryLock() {
-				mm.swapMu.Unlock()
-				hand("b")
-				stage("b")
-			} else {
-				underLock = true
-			}
+			hand(next)
+			stage(next)
 		}
 		var got []string
 		if err := read.read(lastRecorded, func(mk *models.Mock) bool {
@@ -623,8 +618,144 @@ func TestTheEarlierPlacesReadTheTreesAndTheirSourceUnderOneStagingLock(t *testin
 			t.Fatal(err)
 		}
 		mm.exact.onBefore = nil
-		if want := []string{"a-tree", "a-disk"}; !ran || !underLock || !reflect.DeepEqual(got, want) {
-			t.Fatalf("%s: the trees and their source were read under the staging lock: %v (seam ran: %v); it read %v; want set a's %v", read.name, underLock, ran, got, want)
+		if want := []string{set + "-tree", set + "-disk"}; !ran || !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: set %s staged while it read (seam ran: %v); it read %v; want set %s's %v", read.name, next, ran, got, set, want)
+		}
+		set = next
+	}
+}
+
+// raceSet is a manager and the staging of a set the agent keeps on disk, as
+// keploy mock replay's teardown bound and the learn step's earlier places
+// read it: hand hands set's reader of the recordings before an instant and
+// the times of its recordings, and stage stages its trees. Set a's trees
+// hold a pool recording at 1 s and a test's at 20 s, its disk a test's at
+// 5 s; set b's trees hold a pool recording at 1 s, its disk a test's at
+// 50 s. reads is what each read gives: whether a pool call at 10 s and one
+// at 30 s are the teardown (teardownAfter) and the earlier places
+// (RangeRecordedBefore, the trees' then the disk's). One set's trees with
+// the other's times read neither set's teardown.
+func raceSet(t *testing.T) (mm *MockManager, hand, stage func(set string), reads func() string) {
+	t.Helper()
+	t.Setenv(provenswitch.Env, "1")
+	mm = NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	disk := map[string]*models.Mock{
+		"a": exactMock("a-disk", 5*time.Second, models.LifetimePerTest),
+		"b": exactMock("b-disk", 50*time.Second, models.LifetimePerTest),
+	}
+	trees := map[string][]*models.Mock{
+		"a": {exactMock("a-test", 20*time.Second, models.LifetimePerTest)},
+		"b": nil,
+	}
+	hand = func(set string) {
+		mk := disk[set]
+		mm.SetRecordedBefore(func(before time.Time, visit func(*models.Mock) bool) error {
+			if !mk.Spec.ReqTimestampMock.After(before) {
+				visit(mk)
+			}
+			return nil
+		})
+		mm.SetRecordingTimes(func(visit func(string, time.Time, bool, string) bool) error {
+			visit(mk.Name, models.PlaceOf(mk), false, "")
+			return nil
+		})
+		load := func() (*models.Mock, error) { return mk, nil }
+		mm.SetRecordedOfKind(func(kind models.Kind, visit func(string, func() (*models.Mock, error)) bool) error {
+			if kind == mk.Kind {
+				visit(mk.Name, load)
+			}
+			return nil
+		})
+		mm.SetRecordingSource(func(kind models.Kind, _ []string, visit func(string, func() (*models.Mock, error)) bool) error {
+			if kind == mk.Kind {
+				visit(mk.Name, load)
+			}
+			return nil
+		})
+	}
+	stage = func(set string) {
+		mm.SetMocksWithWindow(trees[set], []*models.Mock{exactMock(set+"-pool", time.Second, models.LifetimeSession)}, models.BaseTime, time.Now())
+	}
+	mm.SetPoolNames([]string{"a-pool", "b-pool"})
+	reads = func() string {
+		after := mm.teardownAfter("", "")
+		is := func(at time.Duration) bool { return after != nil && after(exactT0.Add(at)) }
+		var names []string
+		err := mm.RangeRecordedBefore(lastRecorded, func(mk *models.Mock) bool {
+			names = append(names, mk.Name)
+			return true
+		})
+		kind := disk["a"].Kind
+		var ofKind []string
+		whole, setErr := mm.RangeRecordedSet(kind, func(name string, _ func() (*models.Mock, error)) bool {
+			ofKind = append(ofKind, name)
+			return true
+		})
+		var byKey []string
+		keyErr := mm.RangeStagedRecordings(kind, []string{"k"}, func(mk *models.Mock) bool {
+			byKey = append(byKey, mk.Name)
+			return true
+		})
+		sort.Strings(ofKind)
+		sort.Strings(byKey)
+		return fmt.Sprintf("teardown at 10s %v, at 30s %v; earlier places %s (err %v); set as recorded %s (whole %v, err %v); by key %s (err %v)",
+			is(10*time.Second), is(30*time.Second), strings.Join(names, ","), err, strings.Join(ofKind, ","), whole, setErr, strings.Join(byKey, ","), keyErr)
+	}
+	return mm, hand, stage, reads
+}
+
+// A teardown read races the next set's staging: the agent hands set b's
+// sources and stages it while another goroutine reads keploy mock replay's
+// teardown bound and the earlier places, taking no staging lock. The
+// staging publishes its trees and the sources handed before it as one set
+// (stagedSet), so the read gives set a's whole until the staging published,
+// and set b's whole once it did, though the trees and sources in place, and
+// the staging generation, are already set b's or still set a's: never one
+// set's trees with the other's times or disk.
+func TestATeardownReadRacingTheNextSetsStagingReadsOneSet(t *testing.T) {
+	mm, hand, stage, reads := raceSet(t)
+	setOf := map[string]string{}
+	for _, set := range []string{"a", "b"} {
+		hand(set)
+		stage(set)
+		setOf[set] = reads()
+	}
+	if setOf["a"] == setOf["b"] {
+		t.Fatalf("sets a and b read alike (%s): the row tells neither", setOf["a"])
+	}
+	hand("a")
+	stage("a")
+	// No read of set a before the race: its teardown bound is read anew there.
+	got := map[bool]string{}
+	gen := mm.StagingGeneration()
+	genAt := map[bool]uint64{}
+	mm.exact.onPublish = func(published bool) {
+		genAt[published] = mm.StagingGeneration()
+		// The read runs on its own goroutine, as a parser's would; one
+		// that waited for the staging would never answer in time.
+		done := make(chan string, 1)
+		go func() { done <- reads() }()
+		select {
+		case got[published] = <-done:
+		case <-time.After(5 * time.Second):
+			got[published] = "no answer: the read waited for the staging"
+		}
+	}
+	hand("b")
+	stage("b")
+	mm.exact.onPublish = nil
+	// The generation moves once the set is published, never before: a
+	// parser that read the new generation reads the new set.
+	if genAt[false] != gen || genAt[true] != gen || mm.StagingGeneration() == gen {
+		t.Errorf("the staging generation was %d before the staging, %d and %d as it published its set, %d after: it must move only after the set is published", gen, genAt[false], genAt[true], mm.StagingGeneration())
+	}
+	for _, c := range []struct {
+		published bool
+		set       string
+	}{{false, "a"}, {true, "b"}} {
+		if got[c.published] != setOf[c.set] {
+			t.Errorf("a read as set b's staging had published its set: %v: %s; want set %s's: %s", c.published, got[c.published], c.set, setOf[c.set])
 		}
 	}
 }

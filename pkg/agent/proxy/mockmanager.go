@@ -30,12 +30,12 @@ import (
 //	                          is a leaf lock — never re-acquire
 //	                          swapMu/treesMu from under it)
 //	swapMu  →  consumedMu    (independent; never hold consumedMu then swapMu)
-//	swapMu  →  exact.ofKind.mu  (the staging installs the set-as-recorded
-//	                          source, RangeRecordedSet and the pairing read
-//	                          it with the trees; a LEAF, also taken bare)
-//	swapMu  →  exact.recorded.mu  (the staging installs the keyed on-disk
-//	                          source, the pairing under keys reads it with
-//	                          the trees; a LEAF, also taken bare)
+//	swapMu  →  exact.ofKind.mu, exact.recorded.mu, exact.before.mu
+//	                         (the staging reads the on-disk sources the
+//	                          agent handed and publishes them with its
+//	                          trees, stagedSet; LEAVES, also taken bare by
+//	                          the setters)
+//	swapMu  →  treesMu       (publishStagedLocked reads the trees in place)
 //	hitMu   →  treesMu  →  connMu  →  TreeDb.mu
 //	                         (bumpHitCount's slow path; rebuildHitIndex takes
 //	                          hitMu as a LEAF — never acquire treesMu from
@@ -596,6 +596,8 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 	// sweep itself is a cheap map scan under connMu. Terminates when
 	// Close() is invoked on the manager (closes sweeperStop).
 	go mm.runIdleSweeper()
+	// The set staged before any staging: the trees made here, no source.
+	mm.exact.set.Store(&stagedSet{filtered: filtered, unfiltered: unfiltered, startup: mm.startup, filteredByKind: mm.filteredByKind})
 	return mm
 }
 
@@ -717,15 +719,10 @@ func (m *MockManager) ResetForReplaySession() {
 	m.exact.bg.Store(nil)
 	m.exact.poolCursor.Store(nil)
 	// The keyed source and the source of the recordings before an instant
-	// as installed go too (installRecordedSourcesLocked): the reads by key
-	// and RangeRecordedBefore read those, and until the next staging they
-	// read none of the trees' set kept on disk.
-	m.exact.recorded.mu.Lock()
-	m.exact.recorded.src, m.exact.recorded.staged = nil, nil
-	m.exact.recorded.mu.Unlock()
-	m.exact.before.mu.Lock()
-	m.exact.before.src, m.exact.before.staged = nil, nil
-	m.exact.before.mu.Unlock()
+	// go too, handed and staged (stagedSet): the reads by key and
+	// RangeRecordedBefore read those, and until the next staging they read
+	// none of the trees' set kept on disk.
+	m.dropStagedKeyedAndBefore()
 	m.SetRecordedOfKind(nil)
 	// Nor its scope table's pool names (SetPoolNames), owners
 	// (SetPoolOwners) and tests (SetPoolTests): until the next session sends
@@ -1069,12 +1066,15 @@ func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 // getFilteredMocksIn is GetFilteredMocks read in v: the view in force, or the view a call held to
 // its mark was read in (heldScope.readView); nil with exact serving off.
 func (m *MockManager) getFilteredMocksIn(v *exactView) ([]*models.Mock, error) {
+	if v != nil {
+		// The per-test tier, the startup tier and the teardown bound of
+		// one staging (stagedSet).
+		s := m.stagedNow()
+		return m.exactPerTest(v, s, "", v.shownOf(s.filtered, "")), nil
+	}
 	m.treesMu.RLock()
 	tree := m.filtered
 	m.treesMu.RUnlock()
-	if v != nil {
-		return m.exactPerTest(v, "", v.shownOf(tree, "")), nil
-	}
 	results := make([]*models.Mock, 0, 64)
 	tree.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -1243,6 +1243,7 @@ func (m *MockManager) getFilteredMocksInWindowIn(v *exactView) ([]*models.Mock, 
 	// iteration run unlocked — otherwise a long walk over a large
 	// pool would block SetMocksWithWindow writers for its duration.
 	m.swapMu.RLock()
+	set := m.stagedNow()
 	m.treesMu.RLock()
 	tree := m.filtered
 	m.treesMu.RUnlock()
@@ -1252,9 +1253,9 @@ func (m *MockManager) getFilteredMocksInWindowIn(v *exactView) ([]*models.Mock, 
 	m.swapMu.RUnlock()
 
 	// Under exact serving the test's mapping decides, not a recorded time,
-	// over what the view shows of the tier (shownOf).
+	// over what the view shows of the tier (shownOf), of the set staged.
 	if v != nil {
-		return m.exactPerTest(v, "", v.shownOf(tree, "")), nil
+		return m.exactPerTest(v, set, "", v.shownOf(set.filtered, "")), nil
 	}
 	all := make([]*models.Mock, 0, 64)
 	tree.rangeValues(func(v interface{}) bool {
@@ -1566,9 +1567,6 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// Every staging starts the per-test stateful cursors over: a test's own
 	// recordings of a request advance their cursor within that test alone.
 	m.resetPerTestCursors()
-	// The set's recordings as recorded are the trees this staging builds and
-	// the sources the agent handed before it.
-	m.installRecordedSourcesLocked()
 	// Track the earliest window-start we've ever seen on this manager.
 	// Used below to distinguish startup-init mocks (recorded before
 	// any test fired) from stale previous-test mocks. Once set, only
@@ -1984,6 +1982,10 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// manager, so it cannot swallow a concurrent consumer's own bump.
 	m.publishFiltered(filteredBuild, false)
 	m.publishUnfiltered(unfilteredBuild, false)
+	// Every tree of this staging is in place: the set as recorded is these
+	// trees and the sources the agent handed before it, published as one
+	// before any generation moves (stagedSet).
+	m.publishStagedLocked()
 
 	touchedAll := map[models.Kind]struct{}{}
 	if carryOn {
@@ -2947,13 +2949,8 @@ func (m *MockManager) RangePerTestMocksInWindow(fn func(*models.Mock) bool) erro
 // rangePerTestMocksInWindowIn is RangePerTestMocksInWindow read in v: the view in force, or the view a call held to
 // its mark was read in (heldScope.readView); nil with exact serving off.
 func (m *MockManager) rangePerTestMocksInWindowIn(v *exactView, fn func(*models.Mock) bool) error {
-	m.swapMu.RLock()
-	m.treesMu.RLock()
-	tree := m.filtered
-	m.treesMu.RUnlock()
-	m.swapMu.RUnlock()
 	if v != nil {
-		m.rangeExactPerTest(v, "", tree, fn)
+		m.rangeExactPerTest(v, m.stagedNow(), "", fn)
 		return nil
 	}
 	mocks, err := m.getPerTestMocksInWindowIn(v)
@@ -3365,6 +3362,16 @@ func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, 
 // getFilteredMocksByKindIn is GetFilteredMocksByKind read in v: the view in force, or the view a call held to
 // its mark was read in (heldScope.readView); nil with exact serving off.
 func (m *MockManager) getFilteredMocksByKindIn(v *exactView, kind models.Kind) ([]*models.Mock, error) {
+	if v != nil {
+		// The per-test tier of kind, the startup tier and the teardown
+		// bound of one staging (stagedSet): a kind that set has no tree of
+		// has no per-test recording in it.
+		s := m.stagedNow()
+		m.treesMu.RLock()
+		flt := s.filteredByKind[kind]
+		m.treesMu.RUnlock()
+		return m.exactPerTest(v, s, kind, v.shownOf(flt, "")), nil
+	}
 	// Fetch pointer safely; the tree itself is responsible for its own safety.
 	m.treesMu.RLock()
 	flt := m.filteredByKind[kind]
@@ -3373,9 +3380,6 @@ func (m *MockManager) getFilteredMocksByKindIn(v *exactView, kind models.Kind) (
 		flt, _ = m.ensureKindTrees(kind)
 	}
 
-	if v != nil {
-		return m.exactPerTest(v, kind, v.shownOf(flt, "")), nil
-	}
 	results := make([]*models.Mock, 0, 64)
 	flt.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -3419,9 +3423,26 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 	ownForStaging(&mocks)
-	m.installRecordedSourcesLocked()
 	m.stampSet(mocks)
 	m.publishFiltered(m.buildTier(mocks, true), true)
+}
+
+// dropStagedKeyedAndBefore lets go of the keyed source and the source of the
+// recordings before an instant, as the agent handed them and as the set
+// staged holds them (ResetForReplaySession): the set staged keeps its trees,
+// its source of a kind and its recordings' times.
+func (m *MockManager) dropStagedKeyedAndBefore() {
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+	m.exact.recorded.mu.Lock()
+	m.exact.recorded.src = nil
+	m.exact.recorded.mu.Unlock()
+	m.exact.before.mu.Lock()
+	m.exact.before.src = nil
+	m.exact.before.mu.Unlock()
+	s := *m.stagedNow()
+	s.recorded, s.before = nil, nil
+	m.exact.set.Store(&s)
 }
 
 // stampSet stamps the current set generation on the mocks a bare tier setter
@@ -3516,7 +3537,12 @@ func (m *MockManager) publishFiltered(b tierBuild, bump bool) {
 	}
 	m.filtered, m.filteredByKind, m.statelessFiltered = b.tree, b.byKind, b.stateless
 	m.treesMu.Unlock()
+	// bump: the call is a whole staging (SetFilteredMocks), which publishes
+	// the set with its tree before the generations move (stagedSet); a
+	// staging of every tier passes false and does both once its trees are
+	// in place.
 	if bump {
+		m.publishStagedLocked()
 		for k := range b.touched {
 			m.bumpRevisionKind(k)
 		}
@@ -3544,7 +3570,6 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 	ownForStaging(&mocks)
-	m.installRecordedSourcesLocked()
 	m.stampSet(mocks)
 	m.publishUnfiltered(m.buildTier(mocks, false), true)
 }
@@ -3561,7 +3586,9 @@ func (m *MockManager) publishUnfiltered(b tierBuild, bump bool) {
 	}
 	m.unfiltered, m.unfilteredByKind, m.statelessUnfiltered = b.tree, b.byKind, b.stateless
 	m.treesMu.Unlock()
+	// bump: as publishFiltered's (SetUnFilteredMocks).
 	if bump {
+		m.publishStagedLocked()
 		for k := range b.touched {
 			m.bumpRevisionKind(k)
 		}
