@@ -471,9 +471,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if extra < 0 {
 					extra, extraAt, extraMatched = h.extraCallOf(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 				}
-				if again, yes := integrations.AnswerRepeatRead(db, extraMatched); yes {
+				if again, test, yes := integrations.AnswerRepeatRead(db, extraMatched); yes {
+					// One line per read a replay answers once more, as it
+					// answers it: the test, and the read as the replay
+					// named it (the call, how many times it was recorded
+					// and that every answer was one).
 					h.Logger.Info("answered a repeated read once more than its test recorded it: the test's mapping names it a read recorded at least twice, every time with one answer",
-						zap.String("call", request.Method+" "+request.URL.Path), zap.String("read", again.TestModeInfo.RepeatRead), zap.Int("recorded", extra), zap.String("mock", again.Name))
+						zap.String("test", test), zap.String("call", request.Method+" "+request.URL.Path), zap.String("read", again.TestModeInfo.RepeatRead), zap.Int("recorded", extra), zap.String("mock", again.Name))
 					stub, ok, diag, lmiss = again, true, nil, nil
 				}
 			}

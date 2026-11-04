@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // A repeated read (exact_repeat_read.go): a read a test's mapping names, the
@@ -68,6 +69,12 @@ type repeatCase struct {
 // recordings.
 func repeatRun(t *testing.T, cases []repeatCase) {
 	t.Helper()
+	repeatRunLogged(t, zap.NewNop(), cases)
+}
+
+// repeatRunLogged is repeatRun with the agent logging to logger.
+func repeatRunLogged(t *testing.T, logger *zap.Logger, cases []repeatCase) {
+	t.Helper()
 	t0 := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
 	var set []*models.Mock
 	var tests []corsTest
@@ -96,7 +103,7 @@ func repeatRun(t *testing.T, cases []repeatCase) {
 		}
 		tests = append(tests, corsTest{name: c.name, mapping: mapping, sends: sends})
 	}
-	missed, unconsumed := corsRun(t, set, tests)
+	missed, unconsumed := corsRunLogged(t, logger, set, tests)
 	for _, c := range cases {
 		var unmade []string
 		for _, i := range c.unmade {
@@ -141,6 +148,31 @@ func TestARepeatedReadIsAnsweredOnceMoreAndExcusedOnceFewer(t *testing.T) {
 				mk.Spec.HTTPResp.Header["Set-Cookie"] = "sid=e7b5; Expires=" + at.Add(170*time.Hour).Format(http.TimeFormat) + "; Max-Age=612000; HttpOnly; Path=/; SameSite=Lax"
 			}},
 	})
+}
+
+// A replay says each read it answers once more as it answers it: one line
+// naming the test and the read as the replay named it, for a read sent once
+// more and for one sent twice more (whose second call more misses, unsaid).
+// A read sent as often as recorded, or once fewer, says none.
+func TestAReplaySaysEachReadItAnswersOnceMoreAsItAnswersIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	core, logs := observer.New(zap.InfoLevel)
+	const a, b = "GET /api/a, answered once more: recorded 2 times with one answer", "GET /api/b, answered once more: recorded 2 times with one answer"
+	repeatRunLogged(t, zap.New(core), []repeatCase{
+		{name: "more", method: "GET", path: "/api/a", read: a, answers: []string{`{"a":1}`}, recorded: 2, sends: 3},
+		{name: "exact", method: "GET", path: "/api/a", read: a, answers: []string{`{"a":1}`}, recorded: 2, sends: 2},
+		{name: "fewer", method: "GET", path: "/api/b", read: b, answers: []string{`{"b":1}`}, recorded: 3, sends: 2},
+		{name: "twice-more", method: "GET", path: "/api/b", read: b, answers: []string{`{"b":1}`}, recorded: 2, sends: 4, missed: []int{3}},
+	})
+	var said []string
+	for _, e := range logs.FilterMessageSnippet("answered a repeated read once more").All() {
+		f := e.ContextMap()
+		said = append(said, fmt.Sprintf("%v: %v (%v)", f["test"], f["read"], f["mock"]))
+	}
+	want := []string{"more: " + a + " (more-1)", "twice-more: " + b + " (twice-more-1)"}
+	if !reflect.DeepEqual(said, want) {
+		t.Fatalf("the replay said %q; want %q", said, want)
+	}
 }
 
 // Only once: a named read sent two more times than recorded misses on its
@@ -326,19 +358,19 @@ func TestARepeatedReadIsAnsweredAgainOnlyFromTheViewsOwnAnsweredRecordings(t *te
 	if len(answered) != 1 {
 		t.Fatalf("answered %d recordings after one call; want 1", len(answered))
 	}
-	if _, ok := mm.AnswerRepeatRead(answered); ok {
+	if _, _, ok := mm.AnswerRepeatRead(answered); ok {
 		t.Fatal("answered again while one of the read's recordings had not answered")
 	}
 	send()
 	answered = mm.ConsumedTestMocks()
-	if _, ok := mm.AnswerRepeatRead([]*models.Mock{answered[0].ShallowCopy()}); ok {
+	if _, _, ok := mm.AnswerRepeatRead([]*models.Mock{answered[0].ShallowCopy()}); ok {
 		t.Fatal("a copy that is not the open view's recording was answered again")
 	}
-	again, ok := mm.AnswerRepeatRead(answered)
-	if !ok || again.Name != "r-1" {
-		t.Fatalf("answered again %v (%v); want the read's last recording r-1", again, ok)
+	again, test, ok := mm.AnswerRepeatRead(answered)
+	if !ok || again.Name != "r-1" || test != "t" {
+		t.Fatalf("answered again %v in test %q (%v); want the read's last recording r-1 in t", again, test, ok)
 	}
-	if _, ok := mm.AnswerRepeatRead(answered); ok {
+	if _, _, ok := mm.AnswerRepeatRead(answered); ok {
 		t.Fatal("the read was answered again twice in one test")
 	}
 	// A test that owns no recording answers none of another test's again.
@@ -349,7 +381,7 @@ func TestARepeatedReadIsAnsweredAgainOnlyFromTheViewsOwnAnsweredRecordings(t *te
 				t.Fatalf("a test that owns nothing panicked answering again: %v", r)
 			}
 		}()
-		if _, ok := mm.AnswerRepeatRead(answered); ok {
+		if _, _, ok := mm.AnswerRepeatRead(answered); ok {
 			t.Fatal("a test that owns nothing answered another test's recording again")
 		}
 	}()

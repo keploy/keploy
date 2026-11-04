@@ -1272,9 +1272,9 @@ func (h *heldScope) ConsumedTestMocks() []*models.Mock {
 // AnswerRepeatRead is the manager's (integrations.RepeatReadAnswerer) while
 // the staging is still h's call's: a call of a set the replay staged another
 // under is answered by no recording of it.
-func (h *heldScope) AnswerRepeatRead(matched []*models.Mock) (*models.Mock, bool) {
+func (h *heldScope) AnswerRepeatRead(matched []*models.Mock) (*models.Mock, string, bool) {
 	if h.moved() {
-		return nil, false
+		return nil, "", false
 	}
 	return h.MockManager.AnswerRepeatRead(matched)
 }

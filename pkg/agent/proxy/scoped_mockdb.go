@@ -557,9 +557,9 @@ func (s *scopedMockDb) ConsumedTestMocks() []*models.Mock {
 }
 
 // AnswerRepeatRead forwards the store's answer to a call one more than the
-// open test recorded (integrations.RepeatReadAnswerer), none when it has
-// none.
-func (s *scopedMockDb) AnswerRepeatRead(matched []*models.Mock) (*models.Mock, bool) {
+// open test recorded, and the test's ID (integrations.RepeatReadAnswerer),
+// none when it has none.
+func (s *scopedMockDb) AnswerRepeatRead(matched []*models.Mock) (*models.Mock, string, bool) {
 	return integrations.AnswerRepeatRead(s.MockMemDb, matched)
 }
 

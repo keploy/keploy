@@ -437,18 +437,20 @@ type ExactConsumedReader interface {
 // matches, as the matcher judges it. It returns the recording to answer the
 // call with again when every one of them is a recording of one repeated read
 // of the test, every recording of that read has answered, and the read has
-// not been answered once more in this test yet. It answers each repeated read
-// at most once more per test; nil and false otherwise.
+// not been answered once more in this test yet, and the ID of the test it
+// answers it in, which the answer's log line names. It answers each repeated
+// read at most once more per test; nil, "" and false otherwise.
 type RepeatReadAnswerer interface {
-	AnswerRepeatRead(matched []*models.Mock) (*models.Mock, bool)
+	AnswerRepeatRead(matched []*models.Mock) (answer *models.Mock, test string, ok bool)
 }
 
 // AnswerRepeatRead is db's answer to a call one more than the open test
-// recorded (RepeatReadAnswerer); nil and false from a store that has none.
-func AnswerRepeatRead(db MockMemDb, matched []*models.Mock) (*models.Mock, bool) {
+// recorded, and the test's ID (RepeatReadAnswerer); nil, "" and false from a
+// store that has none.
+func AnswerRepeatRead(db MockMemDb, matched []*models.Mock) (*models.Mock, string, bool) {
 	r, ok := db.(RepeatReadAnswerer)
 	if !ok || len(matched) == 0 {
-		return nil, false
+		return nil, "", false
 	}
 	return r.AnswerRepeatRead(matched)
 }

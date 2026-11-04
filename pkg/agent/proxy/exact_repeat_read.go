@@ -79,11 +79,12 @@ func (v *exactView) oneRead(at []int) bool {
 // AnswerRepeatRead implements integrations.RepeatReadAnswerer for the test
 // view in force: matched are the open test's answered recordings a call one
 // more than recorded matches. It answers with the last recording of the
-// repeated read they all belong to, once per read per test.
-func (m *MockManager) AnswerRepeatRead(matched []*models.Mock) (*models.Mock, bool) {
+// repeated read they all belong to, once per read per test, and the test's
+// ID.
+func (m *MockManager) AnswerRepeatRead(matched []*models.Mock) (*models.Mock, string, bool) {
 	v := m.exactView()
 	if v == nil {
-		return nil, false
+		return nil, "", false
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -93,28 +94,28 @@ func (m *MockManager) AnswerRepeatRead(matched []*models.Mock) (*models.Mock, bo
 		// view installed since, or a shared recording, is not the test's.
 		i, own := v.index[mk.Name]
 		if !own || v.owned[i] != mk || v.isCand(i) {
-			return nil, false
+			return nil, "", false
 		}
 		r := v.owned[i].TestModeInfo.RepeatRead
 		if r == "" || read != "" && r != read {
-			return nil, false
+			return nil, "", false
 		}
 		read = r
 	}
 	at, ok := v.repeats[read]
 	if !ok || v.answeredAgain[read] {
-		return nil, false
+		return nil, "", false
 	}
 	for _, i := range at {
 		if !v.consumed[i] {
-			return nil, false
+			return nil, "", false
 		}
 	}
 	if v.answeredAgain == nil {
 		v.answeredAgain = map[string]bool{}
 	}
 	v.answeredAgain[read] = true
-	return v.owned[at[len(at)-1]], true
+	return v.owned[at[len(at)-1]], v.test, true
 }
 
 var _ integrations.RepeatReadAnswerer = (*MockManager)(nil)
