@@ -118,6 +118,25 @@ func TestRepeatReadOfComparesWhatTheMatcherAndTheResponseCompare(t *testing.T) {
 	}
 }
 
+// Only a Set-Cookie value loses its cookies' Expires dates: another header
+// of the answer that holds the same text keeps its date, and two answers
+// whose such header differs only by its date are two answers.
+func TestRepeatReadOfLeavesOutOnlyASetCookiesDates(t *testing.T) {
+	session := func(date string) func(*models.Mock) {
+		return func(m *models.Mock) {
+			m.Spec.HTTPResp.Header["X-Session"] = "sid=e7b5; Expires=" + date + "; Max-Age=612000; Path=/"
+		}
+	}
+	_, a, okA := RepeatReadOf(repeatReadMock(session("Tue, 10 Nov 2026 22:45:17 GMT")), frappeNoise)
+	_, b, okB := RepeatReadOf(repeatReadMock(session("Tue, 10 Nov 2026 22:45:19 GMT")), frappeNoise)
+	if !okA || !okB {
+		t.Fatal("not a recording keploy can prove")
+	}
+	if a == b {
+		t.Error("two answers whose X-Session header differs by its Expires date are one answer")
+	}
+}
+
 // The proof excuses only what the matcher excuses under the set's noise:
 // with no noise given, no header; with the static list turned off
 // (test.disableAutoHeaderNoise), not the static list's headers either.
