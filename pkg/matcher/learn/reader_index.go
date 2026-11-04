@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"hash/maphash"
@@ -8,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // The reader's index: what the places before a call hold of its changed
@@ -55,6 +57,9 @@ type readerIndex struct {
 	seed               maphash.Seed
 	texts              map[uint64][]*readerEntry
 	unreadTexts        int
+	// momentAsks counts the instants holdsMoment asks byMoment of: what
+	// keeps a call's work near linear in the instants it decides.
+	momentAsks int
 }
 
 // readerEntry is what the index keeps of one text: its words, its base64
@@ -65,12 +70,13 @@ type readerIndex struct {
 // fits the budget: the caller's handle holds the text while it asks (or, of
 // a recording, reads it per question), and nothing here holds it after.
 type readerEntry struct {
-	n                int
-	text             string
-	tokens           answer[[]map[string]bool]
-	runs             answer[map[string]bool]
-	spans, formSpans answer[[]instant]
-	fields           answer[fieldWords]
+	n         int
+	text      string
+	tokens    answer[[]map[string]bool]
+	runs      answer[map[string]bool]
+	spans     answer[[]instant]
+	formSpans answer[momentIndex]
+	fields    answer[fieldWords]
 	// past: an answer of the text did not fit what was left of the
 	// budget, which only fills, so the entry keeps none from then on: each
 	// question is answered from the text read again, a word by a scan of
@@ -765,22 +771,186 @@ func eachB64Run(s string, spans []instant, yield func(start, end int) bool) {
 // (byMoment), and whether one does so at a fine cut, in the text or any of
 // its declared forms, the forms main reads an instant in (holdsExact(text)
 // || holdsExact(rawExtra(text))) and holdsWord reads a word in; read as
-// holdsWord, the instants of the text and its forms from one read of it.
+// holdsWord, the instants of the text and its forms from one read of it,
+// kept in the orders momentIndex looks them up by. Past the budget each
+// question asks of every instant of the text read now, and orders none.
 func (t *readerText) holdsMoment(m moment) (held, fine, read bool) {
 	dc := t.x.dc
-	spans, _, ok := indexOnce(t, func(e *readerEntry) *answer[[]instant] { return &e.formSpans },
-		uncapped(func(s string, _ []rawField) []instant {
-			return slices.Concat(dc.spansOf(s), dc.spansOf(dc.rawExtra(s)))
-		}), spansBytes, nil)
+	asked := func() { t.x.momentAsks++ }
+	forms := func(s string) []instant { return slices.Concat(dc.spansOf(s), dc.spansOf(dc.rawExtra(s))) }
+	ix, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[momentIndex] { return &e.formSpans },
+		uncapped(func(s string, _ []rawField) momentIndex { return newMomentIndex(forms(s)) }), momentIndexBytes,
+		func(s string, _ []rawField) {
+			for _, sp := range forms(s) {
+				if !sp.keyed {
+					continue
+				}
+				asked()
+				h, f := byMoment(sp.moment(), m)
+				held, fine = held || h, fine || f
+			}
+		})
+	if !ok {
+		return false, false, false
+	}
+	if !scanned {
+		held, fine = ix.holds(m, asked)
+	}
+	return held, fine, true
+}
+
+// momentIndex is the moments of a text's instants that name one
+// (instant.keyed), in the orders holds looks them up by, so that a
+// question asks byMoment only of the instants cutsNone cannot turn away:
+//   - odd: a time of day, or an instant in a zone not a whole number of
+//     minutes off UTC, which cutsNone turns away from no moment;
+//   - at: every other instant, by its moment (key.at);
+//   - minute: those of at whole at the minute in UTC, the only ones a value
+//     finer than them is built on (cutsNone's finer);
+//   - wall: those of at in a zone off UTC, by the wall clock they write
+//     (key.at plus their offset), the only ones a value of no zone is the
+//     wall clock of.
+type momentIndex struct {
+	moments          []moment
+	odd              []int32
+	at, minute, wall momentOrder
+}
+
+// momentOrder is some of an index's moments by a key, ascending.
+type momentOrder []orderedMoment
+
+// orderedMoment is one moment of an order: its key, and its index in
+// momentIndex.moments (i).
+type orderedMoment struct {
+	key int64
+	i   int32
+}
+
+// newMomentIndex is the index of spans' instants that name a moment.
+func newMomentIndex(spans []instant) momentIndex {
+	var ix momentIndex
+	minute := int64(time.Minute)
+	add := func(o *momentOrder, key int64, i int32) {
+		*o = append(*o, orderedMoment{key, i})
+	}
 	for _, sp := range spans {
 		if !sp.keyed {
 			continue
 		}
-		if h, f := byMoment(sp.moment(), m); h {
-			held, fine = true, fine || f
+		m := sp.moment()
+		i := int32(len(ix.moments))
+		ix.moments = append(ix.moments, m)
+		z := m.offset()
+		if m.key.day || z%minute != 0 {
+			ix.odd = append(ix.odd, i)
+			continue
+		}
+		add(&ix.at, m.key.at, i)
+		if whole(m.key.at, 0, minute) {
+			add(&ix.minute, m.key.at, i)
+		}
+		if z != 0 {
+			add(&ix.wall, m.key.at+z, i)
 		}
 	}
-	return held, fine, ok
+	for _, o := range []momentOrder{ix.at, ix.minute, ix.wall} {
+		slices.SortFunc(o, func(a, b orderedMoment) int { return cmp.Compare(a.key, b.key) })
+	}
+	return ix
+}
+
+// momentIndexBytes is about what ix holds: each moment, and each of its
+// places in the orders.
+func momentIndexBytes(ix momentIndex) int64 {
+	return headerBytes + momentBytes*int64(len(ix.moments)) + 4*int64(len(ix.odd)) + 16*int64(len(ix.at)+len(ix.minute)+len(ix.wall))
+}
+
+// holds is holdsMoment's answer of ix: whether an instant names m by
+// moment (byMoment), and whether one does so at a fine cut. asked counts
+// each instant byMoment is asked of.
+//
+// It asks first of the instants that may hold m at a fine cut: the odd
+// ones, and those that stand within a millisecond of m, as instants or one
+// as the other's wall clock. A cut finer than a millisecond moves an
+// instant by less than one, and a value finer than an instant is built
+// only on a unit longer than F's lead (cutsEach's finerUnits), so no other
+// instant holds m at a fine cut. Where none of those holds m, it asks of
+// the instants cutsNone does not turn away from m (each of its three
+// reaches, coarserReach), and the first that holds m answers. A moment of a
+// time of day, or of a zone not a whole number of minutes off UTC, which
+// cutsNone turns away from nothing, is asked of every instant.
+func (ix *momentIndex) holds(m moment, asked func()) (held, fine bool) {
+	ask := func(i int32) bool {
+		asked()
+		h, f := byMoment(ix.moments[i], m)
+		held, fine = held || h, fine || f
+		return fine
+	}
+	minute := int64(time.Minute)
+	if m.key.day || m.offset()%minute != 0 {
+		for i := range ix.moments {
+			if ask(int32(i)) {
+				break
+			}
+		}
+		return held, fine
+	}
+	at, mz, ms := m.key.at, m.offset(), int64(time.Millisecond)
+	for _, i := range ix.odd {
+		if ask(i) {
+			return held, fine
+		}
+	}
+	if ix.at.each(at, ms, ask) || !m.zoned && ix.wall.each(at, ms, ask) || held {
+		return held, fine
+	}
+	first := func(i int32) bool {
+		ask(i)
+		return held
+	}
+	unzoned := func(i int32) bool { return !ix.moments[i].zoned && first(i) }
+	reach := coarserReach(m)
+	_ = ix.at.each(at, reach, first) ||
+		!m.typed && ix.minute.each(at, nsPerDay, first) ||
+		!m.zoned && ix.wall.each(at, reach, first) ||
+		mz != 0 && ix.at.each(at+mz, 0, unzoned) ||
+		mz != 0 && !m.typed && ix.minute.each(at+mz, nsPerDay, unzoned)
+	return held, fine
+}
+
+// each calls f with each moment of o whose key stands within r of c, from
+// the first at or past c up, then down from it, until f returns true;
+// it reports whether f did.
+func (o momentOrder) each(c, r int64, f func(int32) bool) bool {
+	p, _ := slices.BinarySearchFunc(o, c, func(e orderedMoment, c int64) int { return cmp.Compare(e.key, c) })
+	for j := p; j < len(o) && o[j].key <= c+r; j++ {
+		if f(o[j].i) {
+			return true
+		}
+	}
+	for j := p - 1; j >= 0 && o[j].key >= c-r; j-- {
+		if f(o[j].i) {
+			return true
+		}
+	}
+	return false
+}
+
+// coarserReach is how far from m, an instant of a zone whole minutes off
+// UTC, an instant may stand as an instant and hold m by being cut to a
+// unit m is whole at (cutsNone's coarser): a day where m is whole at the
+// minute, else the longest unit of a second or less m is whole at in UTC.
+func coarserReach(m moment) int64 {
+	if whole(m.key.at, 0, int64(time.Minute)) {
+		return nsPerDay
+	}
+	var reach int64
+	for _, d := range precisionUnits {
+		if u := int64(d); u <= int64(time.Second) && whole(m.key.at, 0, u) {
+			reach = u
+		}
+	}
+	return reach
 }
 
 // unread reports whether the call asked about a recording keploy could not
