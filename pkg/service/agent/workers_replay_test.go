@@ -501,6 +501,93 @@ func TestWorkersTestsOverlapAtReplay(t *testing.T) {
 	require.EqualValues(t, 2, windowOf(t, a, "b::TestTwo").Instance)
 }
 
+// Each test worker's test keeps its own browser seed, whatever other
+// worker's test is open beside it: the seed is the test's, never the
+// worker's or the last begin's. At record each begin is answered the seed it
+// sent, an end's word on how the browser drew replaces only its own test's,
+// and a retry of a test draws its first attempt's. At replay each begin is
+// answered its own test's recorded seed. Each window carries its seed beside
+// its worker's instance.
+func TestEachWorkersTestKeepsItsOwnSeedWhileAnothersIsOpen(t *testing.T) {
+	ctx := context.Background()
+	seeds := func(t *testing.T, a *Agent) {
+		t.Helper()
+		one, two := windowOf(t, a, "a::TestOne"), windowOf(t, a, "b::TestTwo")
+		require.Equal(t, "1111222233334444", one.Seed)
+		require.Equal(t, "aaaabbbbccccdddd", two.Seed)
+		require.Equal(t, models.ScopeRandomOwn, one.Random, "its end's word")
+		require.Equal(t, models.ScopeRandomSeeded, two.Random, "the other end's word is not its")
+		require.EqualValues(t, 1, one.Instance)
+		require.EqualValues(t, 2, two.Instance)
+	}
+	end := func(t *testing.T, a *Agent, w1, w2 int) {
+		t.Helper()
+		_, serr := a.ProvenEnd(as(w1), models.ScopeReq{Name: "TestOne", Outcome: "passed", Random: models.ScopeRandomOwn})
+		require.Nil(t, serr)
+		_, serr = a.ProvenEnd(as(w2), models.ScopeReq{Name: "TestTwo", Outcome: "passed"})
+		require.Nil(t, serr)
+	}
+
+	t.Run("record", func(t *testing.T) {
+		a, _ := workerAgent(t, models.MODE_RECORD, 4)
+		w1, w2 := child(t), child(t)
+		claimWorker(t, a, w1.Process.Pid, "a", 2)
+		claimWorker(t, a, w2.Process.Pid, "b", 2)
+		one, serr := a.ProvenBegin(as(w1.Process.Pid), seededBegin("TestOne", "1111222233334444"))
+		require.Nil(t, serr)
+		two, serr := a.ProvenBegin(as(w2.Process.Pid), seededBegin("TestTwo", "AAAABBBBCCCCDDDD"))
+		require.Nil(t, serr, "another worker's test may be open")
+		require.Equal(t, "1111222233334444", one.Seed, "the seed it sent")
+		require.Equal(t, "aaaabbbbccccdddd", two.Seed, "the seed it sent")
+		end(t, a, w1.Process.Pid, w2.Process.Pid)
+		// A retry of the other worker's test, begun while this worker's
+		// next test is open, draws its own first attempt's numbers.
+		_, serr = a.ProvenBegin(as(w1.Process.Pid), seededBegin("TestThree", "5555666677778888"))
+		require.Nil(t, serr)
+		retry, serr := a.ProvenBegin(as(w2.Process.Pid), seededBegin("TestTwo", "9999000099990000"))
+		require.Nil(t, serr)
+		require.Equal(t, "aaaabbbbccccdddd", retry.Seed, "a retry draws its first attempt's numbers")
+		for _, w := range []struct {
+			pid  int
+			name string
+		}{{w2.Process.Pid, "TestTwo"}, {w1.Process.Pid, "TestThree"}} {
+			_, serr = a.ProvenEnd(as(w.pid), models.ScopeReq{Name: w.name, Outcome: "passed"})
+			require.Nil(t, serr)
+		}
+		seeds(t, a)
+		ws, err := a.FinalScopeWindows(ctx)
+		require.NoError(t, err)
+		kept := map[string][]string{}
+		for _, w := range ws {
+			if w.Instance != 0 {
+				kept[w.Name] = append(kept[w.Name], w.Seed)
+			}
+		}
+		require.Equal(t, map[string][]string{
+			"a::TestOne":   {"1111222233334444"},
+			"b::TestTwo":   {"aaaabbbbccccdddd", "aaaabbbbccccdddd"},
+			"a::TestThree": {"5555666677778888"},
+		}, kept)
+	})
+
+	t.Run("replay", func(t *testing.T) {
+		a, _, _ := instanceAgent(t, models.MODE_TEST)
+		a.proven.pool = map[string][]string{"a": {"pa"}, "b": {"pb"}}
+		a.SetTestSeeds(ctx, map[string]string{"a::TestOne": "1111222233334444", "b::TestTwo": "aaaabbbbccccdddd"})
+		w1, w2 := child(t), child(t)
+		claimWorker(t, a, w1.Process.Pid, "a", 2)
+		claimWorker(t, a, w2.Process.Pid, "b", 2)
+		one, serr := a.ProvenBegin(as(w1.Process.Pid), seededBegin("TestOne", "fedcba9876543210"))
+		require.Nil(t, serr)
+		two, serr := a.ProvenBegin(as(w2.Process.Pid), seededBegin("TestTwo", "fedcba9876543210"))
+		require.Nil(t, serr, "another worker's test may be open")
+		require.Equal(t, "1111222233334444", one.Seed, "its own recording's")
+		require.Equal(t, "aaaabbbbccccdddd", two.Seed, "its own recording's")
+		end(t, a, w1.Process.Pid, w2.Process.Pid)
+		seeds(t, a)
+	})
+}
+
 // A replay whose build moves the run's one clock to each test's recorded
 // begin takes one test worker: a claim of two is refused at the claim,
 // named, before any test runs, so whether the run is taken never depends on
