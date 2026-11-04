@@ -19,10 +19,9 @@ import (
 
 	"github.com/spf13/viper"
 	"github.com/zricethezav/gitleaks/v8/config"
-	"github.com/zricethezav/gitleaks/v8/detect"
-	"github.com/zricethezav/gitleaks/v8/report"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
+	"go.keploy.io/server/v3/pkg/service/tools/internal/secretscan"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -240,14 +239,17 @@ type replacement struct {
 
 // loadCustomRules parses the custom gitleaks configuration from custom_gitleaks_rules.toml
 // and returns a Config. The TOML file is embedded at compile time for easy distribution.
+// It is read with a viper instance of its own, not viper's global one, where
+// the CLI keeps its own config with its flags and KEPLOY_* environment bound.
 func loadCustomRules() (config.Config, error) {
-	viper.SetConfigType("toml")
-	if err := viper.ReadConfig(strings.NewReader(customGitleaksRules)); err != nil {
+	v := viper.New()
+	v.SetConfigType("toml")
+	if err := v.ReadConfig(strings.NewReader(customGitleaksRules)); err != nil {
 		return config.Config{}, fmt.Errorf("failed to read custom rules config: %w", err)
 	}
 
 	var viperConfig config.ViperConfig
-	if err := viper.Unmarshal(&viperConfig); err != nil {
+	if err := v.Unmarshal(&viperConfig); err != nil {
 		return config.Config{}, fmt.Errorf("failed to unmarshal custom rules config: %w", err)
 	}
 
@@ -261,7 +263,7 @@ func loadCustomRules() (config.Config, error) {
 
 // augmentDetector adds custom rules from custom_gitleaks_rules.toml to an existing Detector.
 // This approach allows easy maintenance - just update the TOML file to add/modify rules.
-func augmentDetector(det *detect.Detector) (*detect.Detector, error) {
+func augmentDetector(det *secretscan.Detector) (*secretscan.Detector, error) {
 	// Load custom rules from the TOML configuration
 	customCfg, err := loadCustomRules()
 	if err != nil {
@@ -293,25 +295,13 @@ func augmentDetector(det *detect.Detector) (*detect.Detector, error) {
 	sort.Strings(cfg.OrderedRules)
 
 	// Create new detector with augmented config
-	newDet := detect.NewDetector(cfg)
-
-	// Preserve runtime knobs from original detector
-	newDet.Redact = det.Redact
-	newDet.Verbose = det.Verbose
-	newDet.MaxDecodeDepth = det.MaxDecodeDepth
-	newDet.MaxArchiveDepth = det.MaxArchiveDepth
-	newDet.MaxTargetMegaBytes = det.MaxTargetMegaBytes
-	newDet.FollowSymlinks = det.FollowSymlinks
-	newDet.NoColor = det.NoColor
-	newDet.IgnoreGitleaksAllow = det.IgnoreGitleaksAllow
-
-	return newDet, nil
+	return secretscan.NewDetector(cfg)
 }
 
 // newSecretDetector returns the detector keploy sanitize scans with: gitleaks'
 // default rules with the rules of custom_gitleaks_rules.toml merged in.
-func newSecretDetector() (*detect.Detector, error) {
-	detector, err := detect.NewDetectorDefaultConfig()
+func newSecretDetector() (*secretscan.Detector, error) {
+	detector, err := secretscan.NewDetectorDefaultConfig()
 	if err != nil {
 		return nil, fmt.Errorf("gitleaks: %w", err)
 	}
@@ -367,7 +357,7 @@ func RedactYAML(yamlBytes []byte, aggSecrets map[string]string, testName string)
 // collectSecrets returns:
 //   - set: the set of secret strings detected by gitleaks
 //   - names: a mapping from secret string -> rule-based base name (CamelCase)
-func collectSecrets(findings []report.Finding) (map[string]struct{}, map[string]string) {
+func collectSecrets(findings []secretscan.Finding) (map[string]struct{}, map[string]string) {
 	set := make(map[string]struct{})
 	names := make(map[string]string)
 
