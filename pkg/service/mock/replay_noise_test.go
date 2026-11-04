@@ -52,8 +52,9 @@ var switchName = map[bool]string{false: "switch off/", true: "switch on/"}
 // (replay.PrepareMockNoiseConfig): a header the user declared noise (a
 // browser's Referer, the page it was on) is then neither compared nor
 // required to be present when a call is matched to its mock. The set's own
-// test-sets entry joins the global one, another set's does not, and a
-// keploy.yml that declares none hands none. With and without the proven
+// test-sets entry joins the global one or stands alone, another set's does
+// not, a bucket other than header is handed without one, and a keploy.yml
+// that declares none hands none. With and without the proven
 // switch: the hand-off does not depend on it. A bucket handed with no entries
 // is the same to the matchers as one not handed, so the rows compare the
 // buckets that have entries.
@@ -80,6 +81,16 @@ func TestMockReplayHandsTheAgentKeployYmlRequestNoise(t *testing.T) {
 				global: map[string]map[string][]string{"requestbody": {"nonce": {}}},
 				sets:   map[string]map[string]map[string][]string{"set": {"header": {"X-Trace": {}}}, "other": {"header": {"X-Other": {}}}},
 				want:   map[string]map[string][]string{"header": {"X-Trace": {}}, "requestbody": {"nonce": {}}},
+			},
+			{
+				name: "only the set's own header",
+				sets: map[string]map[string]map[string][]string{"set": {"header": {"X-Trace": {}}}},
+				want: map[string]map[string][]string{"header": {"X-Trace": {}}},
+			},
+			{
+				name:   "global request-body noise alone",
+				global: map[string]map[string][]string{"requestbody": {"nonce": {}}},
+				want:   map[string]map[string][]string{"requestbody": {"nonce": {}}},
 			},
 			{
 				name: "only another set's noise",
@@ -112,7 +123,8 @@ func TestMockReplayHandsTheAgentKeployYmlRequestNoise(t *testing.T) {
 // keploy test's replay does: test.disableAutoHeaderNoise (the flaky-header
 // list is then not excused), test.mockNoiseDetection and test.mockNoiseStrict
 // (each under its pre-rename spelling too, schemaNoiseDetection and
-// schemaNoiseStrict). A keploy.yml that sets none hands none.
+// schemaNoiseStrict), each whatever the others are set to. A keploy.yml that
+// sets none hands none.
 func TestMockReplayHandsTheAgentKeployYmlMatchingSettings(t *testing.T) {
 	type handed struct{ disableAutoHeaderNoise, detection, strict bool }
 	for _, sw := range []bool{false, true} {
@@ -127,6 +139,7 @@ func TestMockReplayHandsTheAgentKeployYmlMatchingSettings(t *testing.T) {
 			{"mockNoiseStrict", func(ct *config.Test) { ct.MockNoiseStrict = true }, handed{strict: true}},
 			{"schemaNoiseDetection, the pre-rename spelling", func(ct *config.Test) { ct.SchemaNoiseDetection = true }, handed{detection: true}}, //nolint:staticcheck // SA1019: the pre-rename spelling is what this row sets.
 			{"schemaNoiseStrict, the pre-rename spelling", func(ct *config.Test) { ct.SchemaNoiseStrict = true }, handed{strict: true}},          //nolint:staticcheck // SA1019: the pre-rename spelling is what this row sets.
+			{"mockNoiseDetection and mockNoiseStrict together", func(ct *config.Test) { ct.MockNoiseDetection, ct.MockNoiseStrict = true, true }, handed{detection: true, strict: true}},
 		} {
 			t.Run(switchName[sw]+c.name, func(t *testing.T) {
 				got := mockServingOptions(t, sw, func(cfg *config.Config) { c.edit(&cfg.Test) })

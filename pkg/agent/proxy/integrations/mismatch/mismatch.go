@@ -23,6 +23,7 @@ package mismatch
 import (
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -262,11 +263,12 @@ var mockMode atomic.Bool
 func SetMockMode(on bool) { mockMode.Store(on) }
 
 // MockMode reports whether the agent serves a `keploy mock` session. A
-// protocol that writes its own hint with WithNextSteps uses it to leave out
-// advice a mock run cannot act on, such as test.globalNoise: `keploy mock
-// replay` sends the agent no NoiseConfig (its MockOutgoing options in
-// pkg/service/mock/replay.go), so noise from keploy.yml never reaches a
-// matcher there.
+// protocol that writes its own hint with WithNextSteps uses it to name how a
+// mock run is recorded again (a mock set, RecordCommand) and to leave out
+// advice a mock run cannot act on, such as keploy test's
+// --update-test-mapping. keploy.yml's test.globalNoise is not such advice:
+// `keploy mock replay` hands it to the agent as keploy test does (its
+// MockOutgoing options in pkg/service/mock/replay.go).
 func MockMode() bool { return mockMode.Load() }
 
 // RecordCommand is the command that records this run again. A protocol that
@@ -328,32 +330,42 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 		for _, d := range r.FieldDiffs {
 			paths = append(paths, d.Path)
 		}
-		if mockMode.Load() {
-			// `keploy mock replay` sends the agent no noise config, so
-			// test.globalNoise would not change the next run's match. Only
-			// the HTTP parser acts on --on-miss, and only when it can reach
-			// the real dependency.
-			hint := fmt.Sprintf("Only values drifted (%s). If the change is expected, re-record the mock set with '%s'", strings.Join(paths, ", "), RecordCommand())
-			if r.Protocol == ProtocolHTTP {
-				hint += ", or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'"
-			}
-			return hint + "."
-		}
+		// keploy test and keploy mock replay alike hand the agent
+		// keploy.yml's test.globalNoise, so the noise is a remedy in both; a
+		// mock run is only recorded again another way (rerecordRemedy).
+		rerecord := rerecordRemedy(r)
 		// Body diffs are reported "body."-prefixed for readability, but HTTP
 		// request matching reads the request-body noise bucket with
 		// root-relative keys — so strip the prefix in the copy-paste hint to
 		// avoid pointing users at the response-noise (body) bucket, which the
 		// request matcher never consults.
 		bodyKeys := make([]string, 0, len(r.FieldDiffs))
+		// The HTTP request matcher reads a header's noise from the header
+		// bucket by the header's name; a part of one
+		// ("header.authorization.signed_headers") is named by its header.
+		var headers []string
 		for _, d := range r.FieldDiffs {
 			if k := strings.TrimPrefix(d.Path, "body."); k != d.Path {
 				bodyKeys = append(bodyKeys, k)
 			}
+			if n, ok := strings.CutPrefix(d.Path, "header."); ok && r.Protocol == ProtocolHTTP {
+				n, _, _ = strings.Cut(n, ".")
+				if !slices.Contains(headers, n) {
+					headers = append(headers, n)
+				}
+			}
 		}
+		var noise []string
 		if len(bodyKeys) > 0 {
-			return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.requestbody with root-relative keys (e.g. requestbody: {%s: []}); otherwise re-record with '%s'.", strings.Join(paths, ", "), strings.Join(bodyKeys, ": [], "), RecordCommand())
+			noise = append(noise, fmt.Sprintf("the request-body fields under test.globalNoise.global.requestbody with root-relative keys (e.g. requestbody: {%s: []})", strings.Join(bodyKeys, ": [], ")))
 		}
-		return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add them to the matching noise (test.globalNoise); otherwise re-record with '%s'.", strings.Join(paths, ", "), RecordCommand())
+		if len(headers) > 0 {
+			noise = append(noise, fmt.Sprintf("the headers under test.globalNoise.global.header (e.g. header: {%s: []})", strings.Join(headers, ": [], ")))
+		}
+		if len(noise) == 0 {
+			noise = append(noise, "them to the matching noise (test.globalNoise)")
+		}
+		return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add %s; otherwise %s.", strings.Join(paths, ", "), strings.Join(noise, " and "), rerecord)
 	default:
 		// Not --update-test-mapping alone: it updates only a passing test's
 		// mapping, so a test this miss failed keeps its recorded one. With
@@ -364,6 +376,20 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 		}
 		return "Request structure changed since recording. Re-record the test set with '" + RecordCommand() + "', or, if you edited its mocks, remap it with --disable-mapping --update-test-mapping."
 	}
+}
+
+// rerecordRemedy is how the hint says to record r's call again: a mock run
+// is recorded again as a mock set, and only the HTTP parser acts on
+// --on-miss, only when it can reach the real dependency.
+func rerecordRemedy(r *models.MockMismatchReport) string {
+	if !mockMode.Load() {
+		return "re-record with '" + RecordCommand() + "'"
+	}
+	rerecord := "re-record the mock set with '" + RecordCommand() + "'"
+	if r.Protocol == ProtocolHTTP {
+		rerecord += ", or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'"
+	}
+	return rerecord
 }
 
 // JSONBodyDiffs computes field-level diffs between a recorded JSON body and

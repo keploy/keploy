@@ -30,7 +30,7 @@ func TestBuilder_RendersFieldDiffsAndDefaults(t *testing.T) {
 	}
 	// Pure value drift → next steps must suggest noise, never a nonexistent command.
 	// Pure request-body value drift must point users at the request-body noise
-	// bucket (test.globalNoise.requestbody, root-relative keys) — not the
+	// bucket (test.globalNoise.global.requestbody, root-relative keys) — not the
 	// response "body" bucket the request matcher never consults.
 	if !strings.Contains(report.NextSteps, "requestbody") {
 		t.Errorf("value-only request-body drift should point at the requestbody noise bucket, got %q", report.NextSteps)
