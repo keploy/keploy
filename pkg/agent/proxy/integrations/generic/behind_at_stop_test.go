@@ -31,11 +31,16 @@ type behindRun struct {
 // the first mock's record hook, after the parser checked the context and
 // before EmitMock checks it. viaDispatch runs the parser from RecordOutgoing,
 // its readers taking the chunks from both streams (ended as the relay's
-// teardown ends them); otherwise its loop takes them in wire order.
+// teardown ends them) and its merge pairing them in capture order; otherwise
+// its loop takes them in wire order.
 func runBehindAtTheStop(t *testing.T, n int, viaSyncMock, stopFirst, viaDispatch bool) behindRun {
 	t.Helper()
 	clientCh, destCh := make(chan fakeconn.Chunk, n), make(chan fakeconn.Chunk, n)
 	events := make(chan chunkEvent, 2*n)
+	// Every chunk is on its stream from the start, and the relay's capture
+	// order says so: the readers' order is the scheduler's, and the parser
+	// pairs the chunks in the order captured.
+	order := newCaptureOrder(nil)
 	for i := 0; i < n; i++ {
 		at := time.Unix(int64(5000+10*i), 0)
 		req := fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(fmt.Sprintf("req%d", i)), ReadAt: at, ConnSeq: uint32(2*i + 1)} // #nosec G115 -- test-only
@@ -43,6 +48,8 @@ func runBehindAtTheStop(t *testing.T, n int, viaSyncMock, stopFirst, viaDispatch
 			WrittenAt: at.Add(time.Second), ConnSeq: uint32(2*i + 2)} // #nosec G115 -- test-only
 		clientCh <- req
 		destCh <- resp
+		order.put[0] += int64(len(req.Bytes))
+		order.put[1] += int64(len(resp.Bytes))
 		for _, c := range []fakeconn.Chunk{req, resp} {
 			events <- chunkEvent{dir: c.Dir, bytes: c.Bytes, connSeq: c.ConnSeq, readAt: c.ReadAt, writtenAt: c.WrittenAt}
 		}
@@ -51,6 +58,7 @@ func runBehindAtTheStop(t *testing.T, n int, viaSyncMock, stopFirst, viaDispatch
 	close(destCh)
 	close(events)
 	sess, mocks := newV2Session(t, clientCh, destCh)
+	sess.Order = order.StreamedBefore
 	core, logs := observer.New(zapcore.DebugLevel)
 	sess.Logger = zap.New(core)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -127,16 +135,9 @@ func reqsOf(mocks []*models.Mock) []string {
 // the session's context has ended: on the sync-mock path (production's) all
 // were dropped with a Debug line only, and on the channel each was dropped or
 // not by a select's coin.
-//
-// From RecordOutgoing the row has one exchange: which of the two readers hands
-// on its chunk first is the scheduler's, and the order of several exchanges
-// is then not the row's to say.
 func TestV2_BehindAtTheStopRecordsEveryExchangeCapturedWhole(t *testing.T) {
+	const n = 3
 	for _, viaDispatch := range []bool{false, true} {
-		n := 3
-		if viaDispatch {
-			n = 1
-		}
 		for _, viaSyncMock := range []bool{true, false} {
 			t.Run(fmt.Sprintf("viaDispatch=%v/viaSyncMock=%v", viaDispatch, viaSyncMock), func(t *testing.T) {
 				r := runBehindAtTheStop(t, n, viaSyncMock, true, viaDispatch)

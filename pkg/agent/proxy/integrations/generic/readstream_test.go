@@ -62,8 +62,8 @@ func TestEncodeGenericV2_LeavesNoReaderBehindAfterAPanicOfItsMainLoop(t *testing
 const readersPanicMsg = "a panic of the generic V2 recorder's main loop"
 
 // readersStarted is how many goroutines encodeGenericV2 has started, and not
-// ended, while its main loop runs: the two stream readers and the closer of
-// their events channel. The check fails its setup at once on another count,
+// ended, while its main loop runs: the two stream readers and the merge that
+// hands their events on in capture order (mergeByCapture). The check fails its setup at once on another count,
 // so a creation line that names no goroutine cannot pass as one whose
 // goroutines all ended.
 const readersStarted = 3
@@ -76,13 +76,13 @@ const (
 	// one, once the main loop panics, and the abort's Close ends them.
 	fillNeither readersFill = iota
 	// fillClient: more requests, sent once the dest's reader waits on a read,
-	// done with the reply, so the client's reader parks on its send to the
-	// full events channel before the main loop panics. The dest's reader
-	// reads the abort's ErrClosed while the channel is still full, so its
-	// error send would find no room either if it did not look at stop.
+	// done with the reply, so the merge parks on its send to the full events
+	// channel, and the client's reader on its send to its own full channel,
+	// before the main loop panics. The dest's reader reads the abort's
+	// ErrClosed.
 	fillClient
-	// fillBoth: more requests and more replies, so both readers park on their
-	// sends to the full events channel before the main loop panics.
+	// fillBoth: more requests and more replies, so the merge and both readers
+	// park on their sends to full channels before the main loop panics.
 	fillBoth
 	// fillAfterTheLoop: nothing more until the main loop is gone, and the
 	// client's reader waits on a read when it panics. Then requests reach
@@ -136,7 +136,7 @@ func checkReadersEndAfterAPanicOfTheMainLoop(t *testing.T, fill readersFill) {
 	sess.OnMockRecorded = func(*models.Mock) {
 		// The main loop runs this, and drains nothing more. Every goroutine
 		// encodeGenericV2 started is alive here: no reader has ended, since
-		// both streams are open, and the closer waits for both readers.
+		// both streams are open, and the merge waits for both readers.
 		if left, _, _ := scanReaders(created); left != readersStarted {
 			panic(fmt.Sprintf("setup: %d goroutines %s are alive while the main loop runs, not %d", left, created, readersStarted))
 		}
@@ -205,10 +205,11 @@ func awaitWaiting(fc *fakeconn.FakeConn) {
 	}
 }
 
-// awaitReaderSends waits until n goroutines whose creation line is created
-// are parked on a channel send or a select outside FakeConn's read: a reader
-// waiting in its read (in a select, for a chunk or a Close) waits for data,
-// not on its send.
+// awaitReaderSends waits until n stream readers (readStream) whose creation
+// line is created are parked on a channel send or a select outside FakeConn's
+// read: a reader waiting in its read (in a select, for a chunk or a Close)
+// waits for data, not on its send. The merge (mergeByCapture) is not counted:
+// it waits in a select whether or not its send is what it waits on.
 func awaitReaderSends(created string, n int) {
 	for {
 		if _, _, sending := scanReaders(created); sending >= n {
@@ -217,6 +218,10 @@ func awaitReaderSends(created string, n int) {
 		time.Sleep(time.Millisecond) // a yield between looks
 	}
 }
+
+// readStreamFunc is the name of the stream readers' function, as a stack
+// prints it.
+var readStreamFunc = funcName(readStream)
 
 // awaitReadersEnd waits until every goroutine whose creation line is created
 // has ended. It runs once the main loop is gone, and fails t at once when one
@@ -241,9 +246,9 @@ func awaitReadersEnd(t *testing.T, created string) {
 }
 
 // scanReaders counts the live goroutines whose creation line is created, and
-// those of them parked on a channel send or a select outside FakeConn's read.
-// It returns the stack of one parked on a channel send or a select, inside
-// FakeConn's read or not, if any.
+// the stream readers (readStream) of them parked on a channel send or a select
+// outside FakeConn's read. It returns the stack of one of them parked on a
+// channel send or a select, inside FakeConn's read or not, if any.
 func scanReaders(created string) (left int, parked string, sending int) {
 	for _, g := range strings.Split(allStacks(), "\n\n") {
 		lines := strings.Split(g, "\n")
@@ -253,7 +258,7 @@ func scanReaders(created string) (left int, parked string, sending int) {
 		left++
 		if parkedOnAChannel(lines[0]) {
 			parked = g
-			if !inAFakeConnRead(lines[1:]) {
+			if !inAFakeConnRead(lines[1:]) && inFunc(lines[1:], readStreamFunc) {
 				sending++
 			}
 		}
@@ -274,6 +279,17 @@ func inAFakeConnRead(frames []string) bool {
 			continue
 		}
 		return strings.HasPrefix(f, fakeconnFunc)
+	}
+	return false
+}
+
+// inFunc reports whether a stack's frames run fn (a frame's line is the
+// function's name and its arguments).
+func inFunc(frames []string, fn string) bool {
+	for _, f := range frames {
+		if strings.HasPrefix(f, fn+"(") || strings.HasPrefix(f, fn+".func") {
+			return true
+		}
 	}
 	return false
 }

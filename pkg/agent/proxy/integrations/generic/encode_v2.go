@@ -35,7 +35,12 @@ type chunkEvent struct {
 	// response chunk per mock by construction in the generic parser, so
 	// "last" == "this").
 	writtenAt time.Time
-	err       error
+	// through is how far into its stream the reader was done once it had
+	// read this chunk (fakeconn.FakeConn.ReadThrough): what mergeByCapture
+	// compares with the session's capture order
+	// (supervisor.Session.StreamedBefore).
+	through int64
+	err     error
 }
 
 // encodeGenericV2 implements the V2 record path for the generic parser.
@@ -63,13 +68,21 @@ func encodeGenericV2(sess *supervisor.Session, logger *zap.Logger) error {
 	// dest event first on synthetic inputs where both streams are
 	// pre-primed).
 	//
-	// Beyond that first chunk, arrival order guarantees nothing. The
-	// relay writes bytes to the opposite socket BEFORE it tees them
-	// here (relay.go), and the two directions are drained by separate
-	// goroutines, so a reply the client has already acted on can reach
-	// this loop behind the request it unblocked. The pairing rules
-	// below read the chunks' capture numbers (fakeconn.Chunk.ConnSeq,
-	// order) instead of trusting the order these events turn up in.
+	// Beyond that first chunk, the order the two readers below hand their
+	// chunks on in says nothing of the order they were captured in. The relay
+	// writes bytes to the opposite socket BEFORE it tees them here (relay.go),
+	// and the two directions are drained by separate goroutines, so a reply
+	// the client has already acted on can reach this parser behind the
+	// request it unblocked, and a parser behind its capture, with both streams
+	// full, gets each direction's chunks in whatever runs the readers'
+	// scheduler picks. So the two directions are merged in capture order
+	// (mergeByCapture) before they are paired: the pairing sees the chunks in
+	// the order the relay captured them, whatever order they were read in.
+	// Before, it took them in the order read, and a run of answers read ahead
+	// of their requests (all three answers, then the requests) recorded the
+	// first exchange only, with nothing left out or said.
+	clientEvents := make(chan chunkEvent, 8)
+	destEvents := make(chan chunkEvent, 8)
 	events := make(chan chunkEvent, 16)
 
 	initial, err := sess.ClientStream.ReadChunk()
@@ -82,49 +95,40 @@ func encodeGenericV2(sess *supervisor.Session, logger *zap.Logger) error {
 		return nil
 	}
 
-	// Seed the events channel with the initial client chunk so the
-	// main loop's state machine treats it like any other.
+	// Seed the client's events with the initial client chunk so the merge
+	// and the main loop's state machine treat it like any other.
 	if len(initial.Bytes) > 0 {
-		events <- chunkEvent{
+		clientEvents <- chunkEvent{
 			dir:       fakeconn.FromClient,
 			bytes:     initial.Bytes,
 			connSeq:   initial.ConnSeq,
 			readAt:    initial.ReadAt,
 			writtenAt: initial.WrittenAt,
+			through:   sess.ClientStream.ReadThrough(),
 		}
 	}
 
 	// Reader goroutines: one per direction. Each loop reads chunks from
-	// its FakeConn and forwards them onto the shared events channel
-	// until EOF / ErrClosed. We count their exits via a WaitGroup-style
-	// pattern (two reads off readerDone) and close the events channel
-	// only after both have exited so the main loop never observes a
-	// "close before drain" race.
+	// its FakeConn and forwards them onto its direction's events until
+	// EOF / ErrClosed, then closes them. The merge hands both on, in
+	// capture order, to events, and closes it once both directions have
+	// ended and it has handed on everything they read, so the main loop
+	// never observes a "close before drain" race.
 	//
 	// stop is closed when this function returns, on a panic of the main
-	// loop too: nothing drains events after that, so a reader with an event
-	// to send (a chunk, or the error that ends its stream) would block on
-	// the send for good, and the closer below with it: up to three
-	// goroutines kept for the agent's life, with both FakeConns, every chunk
-	// still queued on them and the events buffered. Every send of the
-	// readers to events selects on it. On a normal return the loop has
-	// drained events to its close, so both readers have returned already.
+	// loop too: nothing drains events after that, so the merge, with an
+	// event to send, would block on the send for good, and with it the
+	// readers, each with an event to send (a chunk, or the error that ends
+	// its stream): three goroutines kept for the agent's life, with both
+	// FakeConns, every chunk still queued on them and the events buffered.
+	// Every send and every wait of the readers and of the merge selects on
+	// it. On a normal return the loop has drained events to its close, so
+	// the merge and both readers have returned already.
 	stop := make(chan struct{})
 	defer close(stop)
-	readerDone := make(chan struct{}, 2)
-	go readStream(sess.ClientStream, fakeconn.FromClient, events, stop, readerDone)
-	go readStream(sess.DestStream, fakeconn.FromDest, events, stop, readerDone)
-
-	// closer goroutine: waits for both readers to return, then closes
-	// events so the main-loop range exits exactly once. Without this,
-	// the main loop would need its own termination condition based on
-	// per-side done flags, which races against in-flight data events
-	// that landed in the buffer before the EOF event.
-	go func() {
-		<-readerDone
-		<-readerDone
-		close(events)
-	}()
+	go readStream(sess.ClientStream, fakeconn.FromClient, clientEvents, stop)
+	go readStream(sess.DestStream, fakeconn.FromDest, destEvents, stop)
+	go mergeByCapture([2]<-chan chunkEvent{clientEvents, destEvents}, events, sess.StreamedBefore, stop)
 
 	return pairChunkEvents(events, sess, logger)
 }
@@ -673,23 +677,22 @@ func emitV2(sess *supervisor.Session, logger *zap.Logger, m *models.Mock) {
 	}
 }
 
-// readStream pumps Chunks from one FakeConn onto the shared events
-// channel. It returns on EOF / ErrClosed / deadline-exceeded, or at its
-// first send once stop has closed. The supervisor.Session's ctx is observed
-// indirectly: when the ctx is cancelled the relay ends the FakeConn streams
-// and closes them, which surfaces here as EOF (ErrClosed when the session's
-// abort closed a stream before its end, however late the reader gets to
-// it: relay's tee.endStream). A panic of the main
-// loop aborts the session too, and closes stop, and nothing drains events
-// after it, so every send to out, the end-of-stream error's included,
-// selects on stop: a reader waiting on a read with nothing queued reads the
-// abort's ErrClosed, and its error send may find out full. A send looks at
-// stop before it tries out, so a reader takes at most one more chunk off its
-// stream once stop has closed: each chunk it takes can count as read
-// (FakeConn.ReadThrough) when the proxy decides which requests the parser
-// left unread, and nothing records it.
-func readStream(fc *fakeconn.FakeConn, dir fakeconn.Direction, out chan<- chunkEvent, stop <-chan struct{}, done chan<- struct{}) {
-	defer func() { done <- struct{}{} }()
+// readStream pumps Chunks from one FakeConn onto its direction's events, out,
+// and closes out as it returns: on EOF / ErrClosed / deadline-exceeded, or at
+// its first send once stop has closed. The supervisor.Session's ctx is
+// observed indirectly: when the ctx is cancelled the relay ends the FakeConn
+// streams and closes them, which surfaces here as EOF (ErrClosed when the
+// session's abort closed a stream before its end, however late the reader
+// gets to it: relay's tee.endStream). A panic of the main loop aborts the
+// session too, and closes stop, and nothing drains events after it, so every
+// send to out, the end-of-stream error's included, selects on stop: a reader
+// waiting on a read with nothing queued reads the abort's ErrClosed, and its
+// error send may find out full. A send looks at stop before it tries out, so
+// a reader takes at most one more chunk off its stream once stop has closed:
+// each chunk it takes can count as read (FakeConn.ReadThrough) when the proxy
+// decides which requests the parser left unread, and nothing records it.
+func readStream(fc *fakeconn.FakeConn, dir fakeconn.Direction, out chan<- chunkEvent, stop <-chan struct{}) {
+	defer close(out)
 	send := func(ev chunkEvent) bool {
 		// A select with out's room and stop both ready picks either: on
 		// its own it would let a reader go on reading after stop.
@@ -726,7 +729,143 @@ func readStream(fc *fakeconn.FakeConn, dir fakeconn.Direction, out chan<- chunkE
 			connSeq:   c.ConnSeq,
 			readAt:    c.ReadAt,
 			writtenAt: c.WrittenAt,
+			through:   fc.ReadThrough(),
 		}) {
+			return
+		}
+	}
+}
+
+// streamedBefore is the session's capture order
+// (supervisor.Session.StreamedBefore): whether every chunk of dir captured
+// before the chunk numbered seq has gone on dir's stream, or never will, and
+// then how far into the stream they all are (end); while one may still go on
+// it, changed is closed once that may have changed. ok and changed are both
+// unset when the producer cannot say.
+type streamedBefore func(dir fakeconn.Direction, seq uint32) (end int64, ok bool, changed <-chan struct{})
+
+// mergeByCapture hands the events of the connection's two directions (in, the
+// client's first) on to out in the order they were captured, closing out once
+// both directions have ended (closed) and it has handed on all they sent.
+//
+// Each direction's chunks come in the order captured, so a merge needs only
+// the next of each, its head. With both heads, the one captured first goes on
+// (fakeconn.Chunk.CapturedBefore: client and server chunks never share a
+// number). With one, it goes on once no chunk of the other direction captured
+// before it can come: the other has ended, or the session's capture order
+// (order) says every such chunk has gone on its stream and the other's reader
+// has handed on its stream through there (chunkEvent.through), so its head
+// would be here; until then the merge waits for the other's next event, or
+// for the order to change. The wait is on capture alone, never on the
+// network: a chunk the order waits on has reached the relay, and goes on its
+// stream, or is known never to, as the relay goes on; a stream the relay ends
+// ends the wait.
+//
+// What cannot be placed goes on in the order the merge received it: a chunk
+// its producer did not number (ConnSeq 0), two chunks with one number, and a
+// head whose producer cannot say its capture order (order says neither ok nor
+// changed: a session with no Session.Order, a test's; the relay always says),
+// as every chunk went on before.
+//
+// It returns, with nothing more sent, once stop has closed: nothing drains
+// out after the main loop returns.
+func mergeByCapture(in [2]<-chan chunkEvent, out chan<- chunkEvent, order streamedBefore, stop <-chan struct{}) {
+	defer close(out)
+	dirs := [2]fakeconn.Direction{fakeconn.FromClient, fakeconn.FromDest}
+	var (
+		head    [2]chunkEvent
+		has     [2]bool
+		ended   [2]bool
+		through [2]int64
+		arrived [2]uint64 // when each head was received, for what cannot be placed
+		n       uint64
+	)
+	// placed reports whether i's head can go on before anything the other
+	// direction has yet to hand on, and if not, what may tell when it can.
+	placed := func(i int) (ok bool, wake <-chan struct{}) {
+		o := 1 - i
+		seq := head[i].connSeq
+		if ended[o] || seq == 0 {
+			return true, nil
+		}
+		end, streamed, changed := order(dirs[o], seq)
+		switch {
+		case streamed:
+			return through[o] >= end, nil
+		case changed == nil:
+			return true, nil // the producer cannot say
+		default:
+			return false, changed
+		}
+	}
+	for {
+		pick := -1
+		var wake <-chan struct{}
+		switch {
+		case has[0] && has[1]:
+			pick = 0
+			c, d := head[0].connSeq, head[1].connSeq
+			switch {
+			case c != 0 && d != 0 && c != d:
+				if (fakeconn.Chunk{ConnSeq: d}).CapturedBefore(c) {
+					pick = 1
+				}
+			case arrived[1] < arrived[0]:
+				pick = 1
+			}
+		case has[0] || has[1]:
+			i := 0
+			if has[1] {
+				i = 1
+			}
+			var ok bool
+			if ok, wake = placed(i); ok {
+				pick = i
+			}
+		case ended[0] && ended[1]:
+			return
+		}
+		if pick >= 0 {
+			select {
+			case out <- head[pick]:
+				head[pick], has[pick] = chunkEvent{}, false
+			case <-stop:
+				return
+			}
+			continue
+		}
+		// Take the next event of each direction with no head that has not
+		// ended.
+		var from [2]<-chan chunkEvent
+		for i := range from {
+			if !has[i] && !ended[i] {
+				from[i] = in[i]
+			}
+		}
+		take := func(i int, ev chunkEvent, open bool) {
+			switch {
+			case !open:
+				ended[i] = true
+			case ev.err != nil:
+				// The direction's end: it comes after every chunk of its
+				// direction, and goes on as a head that waits on nothing
+				// (it has no number), for its log.
+				ended[i] = true
+				n++
+				head[i], has[i], arrived[i] = ev, true, n
+			default:
+				through[i] = ev.through
+				n++
+				head[i], has[i], arrived[i] = ev, true, n
+			}
+		}
+		select {
+		case ev, open := <-from[0]:
+			take(0, ev, open)
+		case ev, open := <-from[1]:
+			take(1, ev, open)
+		case <-wake:
+		case <-stop:
 			return
 		}
 	}
