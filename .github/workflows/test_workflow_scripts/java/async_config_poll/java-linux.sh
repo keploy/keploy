@@ -100,41 +100,94 @@ esac
 # overrides only the replay env (to boot-block on the watch), so default it here.
 REPLAY_APP_ENV="${REPLAY_APP_ENV:-$APP_ENV}"
 
+# Each wait below ends on an event, never on a count of seconds: the thing
+# answers (ready), or the process or container that would answer is gone
+# (fail, with its logs). A slow runner only makes a wait longer; a hang is
+# bounded by the job's timeout-minutes. Each probe, and each docker call that
+# looks for an exit, carries its own bound (curl -m; timeout DOCKER_BOUND,
+# then a KILL 10 s later, as the docker CLI holds on after one TERM) only so
+# a call that hangs cannot keep the loop from seeing an exit: a call cut off
+# at its bound is no answer, and the loop looks again.
+DOCKER_BOUND=30
+
+# alive PID: true while PID runs (this shell reaps its exited children, so an
+# exited one is no longer listed).
+alive() { ps -p "$1" >/dev/null 2>&1; }
+
+# mysql_gone: true only when `docker compose ps` lists the running services
+# and MySQL is not among them (ps lists only running containers without -a;
+# --status says so outright). A listing that fails (a transient CLI or daemon
+# error) or is cut off at its bound says nothing about MySQL: false, so the
+# wait looks again on its next pass. The first failure of a run of them is
+# printed, with docker's error. ps_failing is the calling wait's own local
+# (bash locals are seen by the functions a function calls), so each wait
+# starts with none.
+mysql_gone() {
+  local out
+  if ! out="$(timeout -k 10 "$DOCKER_BOUND" docker compose ps --status running --services 2>&1 </dev/null)"; then
+    if [[ -z "$ps_failing" ]]; then echo "docker compose ps failed or gave no answer within ${DOCKER_BOUND}s; looking again on the next pass${out:+: ${out}}"; ps_failing=1; fi
+    return 1
+  fi
+  ps_failing=""
+  ! grep -qx mysql <<<"$out"
+}
+
 wait_for_mysql() {
   section "Wait for MySQL (real networked server)"
   # -h127.0.0.1 forces TCP so we don't get a false-positive during MySQL's
   # init-temp-server phase (the container socket is up before :3306 is).
-  for _ in $(seq 1 120); do
-    if docker compose exec -T mysql mysql -h127.0.0.1 -uroot -prootpass -e "SELECT 1" >/dev/null 2>&1; then
-      echo "MySQL is ready."; endsec; return 0
+  local said="" ps_failing=""
+  until timeout -k 10 "$DOCKER_BOUND" docker compose exec -T mysql mysql -h127.0.0.1 -uroot -prootpass --connect-timeout=5 -e "SELECT 1" </dev/null >/dev/null 2>&1; do
+    if mysql_gone; then
+      echo "::error::the MySQL container is not running, so it can never become ready"; endsec; return 1
     fi
+    if [[ -z "$said" ]]; then echo "Waiting for MySQL to answer (until it does, or its container stops)"; said=1; fi
     sleep 1
   done
-  echo "::error::MySQL did not become ready in time"; endsec; return 1
+  echo "MySQL is ready."; endsec
 }
 
 wait_for_config_stub() {
   section "Wait for config-service stub (:9100)"
   # watch=false so the readiness probe is never held (POLL_HOLD only holds watch=true).
-  for _ in $(seq 1 30); do
-    if [[ "$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:9100/v1/buckets/app-config?watch=false&version=0' 2>/dev/null)" == "200" ]]; then
-      echo "config-stub is ready."; endsec; return 0
+  local said=""
+  until [[ "$(curl -s -m 5 -o /dev/null -w '%{http_code}' 'http://127.0.0.1:9100/v1/buckets/app-config?watch=false&version=0' 2>/dev/null)" == "200" ]]; do
+    if ! alive "$CONFIG_STUB_PID"; then
+      echo "::error::config-stub exited before it answered on :9100"; endsec; return 1
     fi
+    if [[ -z "$said" ]]; then echo "Waiting for config-stub to answer (until it does, or it exits)"; said=1; fi
     sleep 1
   done
-  echo "::error::config-stub did not become ready on :9100"; endsec; return 1
+  echo "config-stub is ready."; endsec
 }
 
+# The app runs under keploy record, which ends when the app ends, so keploy
+# record exiting is the event that the app can no longer answer. The app also
+# cannot boot without MySQL and the config stub (it then neither answers nor
+# exits), so either of them stopping ends the wait too.
 wait_for_app() {
   section "Wait for app HTTP port"
-  for _ in $(seq 1 60); do
-    if [[ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health 2>/dev/null)" == "200" ]]; then
-      echo "App is responding."; endsec; return 0
+  local said="" t0=$SECONDS ps_failing=""
+  until [[ "$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health 2>/dev/null)" == "200" ]]; do
+    if ! alive "$KEPLOY_PID"; then
+      echo "::error::keploy record exited before the app answered /health (see record.txt)"; endsec; return 1
     fi
+    if mysql_gone; then
+      echo "::error::the MySQL container stopped before the app answered /health"; endsec; return 1
+    fi
+    if ! alive "$CONFIG_STUB_PID"; then
+      echo "::error::config-stub exited before the app answered /health (see config-stub.log)"; endsec; return 1
+    fi
+    if [[ -z "$said" ]]; then echo "Waiting for the app to answer /health (until it does, or keploy record, MySQL or the config stub stops)"; said=1; fi
     sleep 1
   done
-  echo "::error::App did not return 200 from /health in time"; endsec; return 1
+  echo "App is responding (after $((SECONDS - t0))s)."; endsec
 }
+
+# SLOW_BOOT_SECONDS (CI sets it on one cell; default 0, off): the record run's
+# app JVM starts that many seconds late, as a stalled runner delays a boot.
+# The lane must still pass: no wait gives up after a count of seconds.
+SLOW_BOOT_SECONDS="${SLOW_BOOT_SECONDS:-0}"
 
 run_maven_build() {
   : > mvn_build.log
@@ -175,7 +228,12 @@ endsec
 wait_for_mysql  # ready by now — its init overlapped the build
 
 section "Record"
-"$RECORD_BIN" record -c "$APP_ENV $APP_JAVA -jar $JAR" > record.txt 2>&1 &
+RECORD_APP="$APP_JAVA -jar $JAR"
+if (( SLOW_BOOT_SECONDS > 0 )); then
+  RECORD_APP="sh -c 'sleep $SLOW_BOOT_SECONDS && exec $APP_JAVA -jar $JAR'"
+  echo "slow boot: the app JVM starts ${SLOW_BOOT_SECONDS}s late"
+fi
+"$RECORD_BIN" record -c "$APP_ENV $RECORD_APP" > record.txt 2>&1 &
 KEPLOY_PID=$!
 wait_for_app
 echo "=== drive the recorded tests ==="
