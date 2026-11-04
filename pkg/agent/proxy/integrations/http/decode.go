@@ -320,10 +320,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				diag  *matchDiag
 				lmiss *learnMiss
 				// extra is the full round's own-repeat check (extraCall),
-				// asked before its pairing; -1 where it was not asked. A
-				// miss reads it rather than asking again. extraAt is the
-				// earliest of the test's own recordings of it, and
-				// extraMatched those the request matches each on its own.
+				// asked before its pairing; -1 where it was not asked, or
+				// could not be told (the call's view moved), which pairs
+				// nothing. A miss reads a told one rather than asking
+				// again. extraAt is the earliest of the test's own
+				// recordings of it, and extraMatched those the request
+				// matches each on its own.
 				extra        = -1
 				extraAt      time.Time
 				extraMatched []*models.Mock
@@ -466,7 +468,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// It is asked once (the full round asked already where extra
 			// is set), and the miss below reads its count. A store that
 			// serves no test exactly holds no answered recording: the
-			// request then matches none, and nothing changes.
+			// request then matches none, and nothing changes. A call
+			// whose view moved is told neither (-1) and matches none: no
+			// recording of a list that may be of another view answers it
+			// again.
 			if !ok {
 				if extra < 0 {
 					extra, extraAt, extraMatched = h.extraCallOf(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
@@ -504,8 +509,11 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// Both read the request's destination as it came (reqCtx): a
 				// reading now would be a use of its connection's container in
 				// the scope open now, the next test's once a test ended.
-				// Where the full round asked already (extra) it read this
-				// same held store: asking again would repeat that read.
+				// Where the full round was told already (extra) it read
+				// this same held store: asking again would repeat that
+				// read. A call told neither (-1, its view moved) misses
+				// plainly: no extra call, no recording made elsewhere and
+				// no repeat note are named for it.
 				n, nAt := extra, extraAt
 				if n < 0 {
 					n, nAt = h.extraCall(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)

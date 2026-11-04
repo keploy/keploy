@@ -129,10 +129,13 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				// Under exact serving: one exchange more than the test
 				// recorded? Any other miss is compared with the test's
 				// answered exchanges too: they are in no read now.
+				// One whose view moved (n < 0) is told neither: it misses
+				// plainly, compared with no answered exchange, and no
+				// exchange made elsewhere is named for it.
 				n := extraCall(genericRequests, db)
 				var answered []*models.Mock
 				if n == 0 {
-					answered = answeredExchanges(db)
+					answered, _ = answeredExchanges(db)
 				}
 				report := buildGenericMismatchReport(ctx, genericRequests, db, answered)
 				// The miss was decided where the request first read the
@@ -140,7 +143,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				integrations.StampMark(report, call)
 				if n > 0 {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
-				} else if name, restaged := notOwnedExchange(genericRequests, db, call); name != "" {
+				} else if name, restaged := notOwnedExchange(genericRequests, db, call); name != "" && n == 0 {
 					report.ClosestMock, report.NotOwned = name, true
 					report.NextSteps = notOwnedExchangeNextSteps(name)
 				} else if restaged {

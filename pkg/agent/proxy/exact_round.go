@@ -969,7 +969,10 @@ func (m *MockManager) HoldToRound(call integrations.CallRound) (integrations.Moc
 	}
 	if seq, ok := call.Sequence(); ok {
 		if c, mine := seq.Cursor.(viewCursor); mine && c.m == m {
-			h.seq, h.g.readIn = seq, c.v
+			// Read in the view its mark kept: held there too, so a read in
+			// any other is a move (CallViewMoved), even when a test's begin
+			// or end installed the view in force between the mark and here.
+			h.seq, h.g.readIn, h.heldIn = seq, c.v, c.v
 		}
 	}
 	return h, h.restaged
@@ -1010,10 +1013,12 @@ type heldScope struct {
 	// ownGen is the generation h reports while it reads elsewhere
 	// (elsewhereGen), 0 until then.
 	ownGen uint64
-	// heldIn is the view in force as h was held (HoldToRound), which a call
-	// that reads the view in force (readIn nil) is told it moved from
+	// heldIn is the view h's call was read in: its mark's (readIn) when the
+	// mark kept one, else the view in force as h was held (HoldToRound). A
+	// call that reads the view in force (readIn nil: from its hold on, or
+	// since a refused consume, settled) is told it moved from it
 	// (CallViewMoved). Views are installed new and never again, so one
-	// still in force is the one the call was held in.
+	// still in force is the one the call was read in.
 	heldIn *exactView
 }
 
@@ -1305,10 +1310,11 @@ func (h *heldScope) AnswerRepeatRead(matched []*models.Mock) (integrations.Repea
 
 // CallViewMoved implements integrations.CallViewTeller: whether h's call
 // reads the view in force (readView: one decided in the test the store opens
-// next, integrations.CallRound.TrackerAhead) and a test's begin or end has
-// installed another view since the call was held (heldIn), so two of its
-// reads may have been made in two views. A call read in its own view (readIn)
-// makes every read there: false.
+// next, integrations.CallRound.TrackerAhead, or one whose consume the view in
+// force refused, settled) and that view is not the one the call was read in
+// (heldIn: its mark's, or the one in force as it was held), so two of its
+// reads may have been made in two views. A call that still reads the view it
+// was read in (readIn) makes every read there: false.
 func (h *heldScope) CallViewMoved() bool {
 	return h.g.readIn == nil && h.exactView() != h.heldIn
 }

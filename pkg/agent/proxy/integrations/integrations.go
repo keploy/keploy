@@ -467,14 +467,15 @@ func AnswerRepeatRead(db MockMemDb, matched []*models.Mock) (RepeatReadAnswer, b
 // under exact serving. CallViewMoved reports whether the view the store reads
 // its call in may not be the one it read it in before: true when the call
 // reads the view in force (one decided in the test the store opens next,
-// CallRound.TrackerAhead) and a test's begin or end installed another view
-// since the call was held. A call read in its own view reads there only, and
-// is never moved. A parser that joins two reads of one call, as a miss report
-// that hides the live call by the places its pool's recordings redacted and
-// those of the test's answered ones (ExactConsumedReader) does, asks after its
-// last read and, on true, cannot tell the two reads were of one view: such a
-// report redacts the call whole. Every MockMemDb wrapper that forwards
-// ExactConsumedReader must forward it.
+// CallRound.TrackerAhead, or one whose consume the view in force refused)
+// and that view is not the one the call was read in (its mark's, or the one
+// in force as it was held). A call that still reads the view it was read in
+// reads there only, and is not moved. A parser that joins two reads of one
+// call, as a miss report that hides the live call by the places its pool's
+// recordings redacted and those of the test's answered ones
+// (ExactConsumedReader) does, asks after its last read and, on true, cannot
+// tell the two reads were of one view: such a report redacts the call whole.
+// Every MockMemDb wrapper that forwards ExactConsumedReader must forward it.
 type CallViewTeller interface {
 	CallViewMoved() bool
 }
@@ -484,6 +485,27 @@ type CallViewTeller interface {
 func CallViewMoved(db MockMemDb) bool {
 	t, ok := db.(CallViewTeller)
 	return ok && t.CallViewMoved()
+}
+
+// ConsumedInCallView is the open test's mocks that have answered, as db, the
+// store a call is held to, lists them (ExactConsumedReader), and whether they
+// may be joined with the call's other reads: false when the call's view moved
+// (CallViewMoved, asked after the list is read, so a view installed while it
+// is read is seen), as its miss and the list may then be of two views. A
+// parser that builds a verdict or a report from both reads them here, so
+// none joins two views: on false it tells neither that the call is one more
+// than its test recorded nor that it is not, and a report redacts the call
+// whole. None, and true, for a store that lists none.
+func ConsumedInCallView(db MockMemDb) ([]*models.Mock, bool) {
+	er, ok := db.(ExactConsumedReader)
+	if !ok {
+		return nil, true
+	}
+	answered := er.ConsumedTestMocks()
+	if CallViewMoved(db) {
+		return nil, false
+	}
+	return answered, true
 }
 
 // ExactServedReader is an optional MockMemDb extension of a store that
