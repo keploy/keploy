@@ -206,7 +206,10 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 	// one noise learner. Other parsers (MySQL) read the proxy's ctx-attached
 	// engine via EngineFrom; HTTP's match path is also driven directly in tests
 	// with no ctx engine, so it owns its construction from the same adapter.
-	noiseEngine := mocknoise.New(httpNoiseAdapter{}, schemaNoiseDetection, schemaNoiseStrict)
+	// h.MockNoise() (not the httpNoiseAdapter{} literal) so the declaration and
+	// the use stay one source of truth; it never returns nil for HTTP, so New
+	// cannot be handed a nil adapter here.
+	noiseEngine := mocknoise.New(h.MockNoise(), schemaNoiseDetection, schemaNoiseStrict)
 
 	// Under the proven switch no path segment or query value is relaxed for
 	// its shape (design v14 row S1): what may differ between record and
