@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // Binding is the value a variable has in a scope, and where it was taken:
@@ -370,36 +371,56 @@ func collides(inForce map[string]Binding, beside []Binding, b Binding, earlier [
 // adapter that checks a call before it binds asks the same (http's
 // holdVariables).
 //
-// Two bindings at words of values (each with its WordRun) are set side by
-// side at the word they share, each run at its own word (WordRunAt). Where a
-// word both runs hold there differs live, the shared word is equal by chance
-// (a group of two fresh UUIDs, or two groups of one): neither is refused.
-// Where every such word is equal, the application sent one value where the
-// recording had two, whole ("<X>" where "<A>" and "<C>" were recorded) or
-// beside another ("<X>" inside "<X>/<Y>", or "<X>/<X>" where "<A>/<B>" was
-// recorded), and it is refused. A word binding beside a binding of a value
-// whole is checked as two values whole.
+// Under the proven switch (KEPLOY_PROVEN), two bindings at words of values
+// (each with its WordRun) are set side by side at the word they share, each
+// run at its own word (WordRunAt), and each pair of words they both hold
+// there is read live and as recorded (WordRunRecorded). A pair equal live
+// that was two words when recorded is a copy: the application sent more than
+// the one word where the recording had two values, whole ("<X>" where "<A>"
+// and "<C>" were recorded) or beside another ("<X>" inside "<X>/<Y>", or
+// "<P>/<X>" and "<Q>/<X>" where "<B>/<A>" and "<D>/<C>" were), and it is
+// refused. A pair recorded as one word is one value at both places: no
+// evidence either way. The shared word is equal by chance (a group of two
+// fresh UUIDs, or two groups of one), and neither binding refused, only where
+// no pair is a copy and at least one pair differs both live and as recorded;
+// with no such pair it is refused. A word binding beside a binding of a value
+// whole is checked as two values whole, and with the switch off every pair
+// is (main's word by word check).
 func TwoValues(held, b Binding) bool {
 	if held.Given || held.Name == b.Name || held.Value != b.Value || held.Recorded == b.Recorded || models.ReadInOneSecond(held.Clock, b.Clock) {
 		return false
 	}
-	if held.WordRun != "" && b.WordRun != "" {
-		return !runsDifferLive(held, b)
+	if held.WordRun != "" && b.WordRun != "" && provenswitch.On() {
+		return !chanceInRuns(held, b)
 	}
 	return true
 }
 
-// runsDifferLive reports whether, set side by side at the word they share
-// (held's WordRunAt beside b's), a word both runs hold differs live.
-func runsDifferLive(held, b Binding) bool {
+// chanceInRuns reports whether, set side by side at the word they share
+// (held's WordRunAt beside b's), the two runs show the shared word equal by
+// chance: no pair of words they both hold there is equal live where its
+// recorded words differ, and at least one pair differs both live and as
+// recorded. Runs whose recorded words are not as many as their live words
+// show nothing.
+func chanceInRuns(held, b Binding) bool {
 	hw, bw := strings.Split(held.WordRun, wordRunSep), strings.Split(b.WordRun, wordRunSep)
-	shift := b.WordRunAt - held.WordRunAt
-	for i, w := range hw {
-		if j := i + shift; j >= 0 && j < len(bw) && bw[j] != w {
-			return true
-		}
+	hr, br := strings.Split(held.WordRunRecorded, wordRunSep), strings.Split(b.WordRunRecorded, wordRunSep)
+	if len(hr) != len(hw) || len(br) != len(bw) {
+		return false
 	}
-	return false
+	shift := b.WordRunAt - held.WordRunAt
+	differ := false
+	for i := range hw {
+		j := i + shift
+		if i == held.WordRunAt || j < 0 || j >= len(bw) || hr[i] == br[j] {
+			continue
+		}
+		if hw[i] == bw[j] {
+			return false
+		}
+		differ = true
+	}
+	return differ
 }
 
 // wordRunSep joins the words of a run: no word holds it (Words).
@@ -408,24 +429,27 @@ const wordRunSep = "-"
 // WordBind is a binding one call makes at a word of a value: Text names the
 // text that holds the word (its place and decode steps, as the adapter writes
 // a place: one name for one text), Word is the word's index in it (Words; -1
-// for a value whole), and Live is the word, live.
+// for a value whole), Live is the word, live, and Recorded the word its
+// recording holds there.
 type WordBind struct {
-	Text string
-	Word int
-	Live string
+	Text     string
+	Word     int
+	Live     string
+	Recorded string
 }
 
-// Run is one binding's word run (Binding.WordRun): its words, live, joined,
-// and At, the index of the binding's own word among them. A binding of a
-// value whole has the zero Run.
+// Run is one binding's word run (Binding.WordRun): its words, live and as
+// recorded, each joined, and At, the index of the binding's own word among
+// them. A binding of a value whole has the zero Run.
 type Run struct {
-	Live string
-	At   int
+	Live     string
+	Recorded string
+	At       int
 }
 
 // On is b with r as its run.
 func (r Run) On(b Binding) Binding {
-	b.WordRun, b.WordRunAt = r.Live, r.At
+	b.WordRun, b.WordRunRecorded, b.WordRunAt = r.Live, r.Recorded, r.At
 	return b
 }
 
@@ -454,13 +478,14 @@ func WordRuns(ws []WordBind) []Run {
 			for hi < len(idx) && ws[idx[hi]].Word == ws[idx[hi-1]].Word+1 {
 				hi++
 			}
-			words := make([]string, 0, hi-lo)
+			live, recorded := make([]string, 0, hi-lo), make([]string, 0, hi-lo)
 			for _, i := range idx[lo:hi] {
-				words = append(words, ws[i].Live)
+				live, recorded = append(live, ws[i].Live), append(recorded, ws[i].Recorded)
 			}
-			live := strings.Join(words, wordRunSep)
+			run := Run{Live: strings.Join(live, wordRunSep), Recorded: strings.Join(recorded, wordRunSep)}
 			for at, i := range idx[lo:hi] {
-				runs[i] = Run{Live: live, At: at}
+				run.At = at
+				runs[i] = run
 			}
 			lo = hi
 		}
