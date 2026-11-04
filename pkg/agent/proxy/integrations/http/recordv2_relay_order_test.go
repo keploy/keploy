@@ -204,10 +204,14 @@ func write(t *testing.T, w, at net.Conn, b string) {
 	}
 }
 
-// relayed reads len(b) bytes at r, as the relay delivers them.
+// relayed reads len(b) bytes at r, as the relay delivers them, within 10s: a
+// relay that never delivers them fails the row here, never by the package's
+// timeout. r's read deadline is cleared again after.
 func relayed(t *testing.T, r net.Conn, b string) {
 	t.Helper()
 	buf := make([]byte, len(b))
+	_ = r.SetReadDeadline(time.Now().Add(10 * time.Second))
+	defer func() { _ = r.SetReadDeadline(time.Time{}) }()
 	if _, err := io.ReadFull(r, buf); err != nil || string(buf) != b {
 		t.Fatalf("relayed %q, %v; want %q", buf, err, b)
 	}
