@@ -753,3 +753,63 @@ func TestADNSMockWithNoResponseRanksAsNODATA(t *testing.T) {
 		})
 	}
 }
+
+// A recorded record that does not decode, as a hand edit or a corrupt mock
+// can leave it, is left out of the answer served, and so is one that holds no
+// record (an empty line or a comment): it was served as a nil record, the
+// answer failed to pack, and the app got no reply. A mock ranks by the answer
+// records it is served with, so one whose answer records all fail to decode
+// ranks as the NODATA it is served as: a valid resolved answer recorded after
+// it is served, and an NXDOMAIN recorded before it ranks under it.
+func TestADNSMockWhoseAnswersDoNotDecodeRanksAsTheNODATAItServes(t *testing.T) {
+	q := dns.Question{Name: "edited.example.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	valid := dnsMockOf(t, q, dns.RcodeSuccess, answerA(q, "10.0.0.7"))
+	nx := dnsMockOf(t, q, dns.RcodeNameError, nil, negativeRootSOA)
+	for _, bad := range []struct {
+		name    string
+		answers []string
+	}{
+		{"an address that does not parse", []string{"edited.example. 30 IN A not-an-address"}},
+		{"an empty record", []string{""}},
+		{"a comment", []string{"; edited out"}},
+		{"a comment and a bad record", []string{"; edited out", "edited.example. 30 IN A 10.0.0"}},
+	} {
+		edited := dnsMockOf(t, q, dns.RcodeSuccess, bad.answers)
+		t.Run(bad.name+", before a valid resolved answer", func(t *testing.T) {
+			got, misses := replayIsolated(t, []*models.Mock{edited, valid}, q)
+			if len(misses) != 0 || got.Msg == nil || got.Rcode != dns.RcodeSuccess || len(got.Answer) != 1 ||
+				got.Answer[0] == nil || got.Answer[0].String() != valid.Spec.DNSResp.Answers[0] {
+				t.Fatalf("replay answered %+v (misses %+v), want the valid answer %q", got.Msg, misses, valid.Spec.DNSResp.Answers)
+			}
+		})
+		for _, tc := range []struct {
+			name  string
+			mocks []*models.Mock
+		}{
+			{"alone", []*models.Mock{edited}},
+			{"after an NXDOMAIN", []*models.Mock{nx, edited}},
+		} {
+			t.Run(bad.name+", "+tc.name, func(t *testing.T) {
+				got, misses := replayIsolated(t, tc.mocks, q)
+				if len(misses) != 0 || got.Msg == nil || got.Rcode != dns.RcodeSuccess || len(got.Answer) != 0 {
+					t.Fatalf("replay answered %+v (misses %+v), want NOERROR with no answer", got.Msg, misses)
+				}
+				reply := got.Copy()
+				reply.Question = []dns.Question{q}
+				if _, err := reply.Pack(); err != nil {
+					t.Fatalf("the answer served does not pack, so the app gets no reply: %v", err)
+				}
+			})
+		}
+	}
+	// One answer record that decodes is enough: the mock ranks as resolved,
+	// is served first of its kind, and with that record only.
+	t.Run("one bad and one valid record, before another valid answer", func(t *testing.T) {
+		mixed := dnsMockOf(t, q, dns.RcodeSuccess, append([]string{"; edited out"}, answerA(q, "10.0.0.8")...))
+		got, misses := replayIsolated(t, []*models.Mock{nx, mixed, valid}, q)
+		if len(misses) != 0 || got.Msg == nil || got.Rcode != dns.RcodeSuccess || len(got.Answer) != 1 ||
+			got.Answer[0] == nil || got.Answer[0].String() != mixed.Spec.DNSResp.Answers[1] {
+			t.Fatalf("replay answered %+v (misses %+v), want the mixed mock's valid record %q", got.Msg, misses, mixed.Spec.DNSResp.Answers[1])
+		}
+	})
+}

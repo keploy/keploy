@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -926,7 +927,7 @@ func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool
 	// A question may hold up to three recorded answers, one of each kind
 	// (recordDNSMock): resolved, NODATA and NXDOMAIN. The replay serves the
 	// best (dnsMockRank), the first recorded of that kind, filtered mocks
-	// before unfiltered ones. Only that one's records are decoded.
+	// before unfiltered ones. Only that one's records are decoded whole.
 	var best *models.Mock
 	bestRank := -1
 	for _, mocks := range [][]*models.Mock{filteredMocks, unfilteredMocks} {
@@ -1018,16 +1019,28 @@ func decodeDNSRRs(logger *zap.Logger, rrs []string) []dns.RR {
 	}
 	decoded := make([]dns.RR, 0, len(rrs))
 	for _, raw := range rrs {
-		rr, err := dns.NewRR(raw)
-		if err != nil {
-			if logger != nil {
-				logger.Debug("failed to parse dns rr", zap.String("rr", raw), zap.Error(err))
-			}
-			continue
+		if rr, ok := decodeDNSRR(logger, raw); ok {
+			decoded = append(decoded, rr)
 		}
-		decoded = append(decoded, rr)
 	}
 	return decoded
+}
+
+// decodeDNSRR is raw, a record recorded in zone format (encodeDNSRRs),
+// decoded; ok is false for a string that does not parse or that holds no
+// record (an empty line or a comment, which dns.NewRR returns as a nil
+// record), as a hand edit can leave a mock. decodeDNSRRs leaves such a string
+// out of the answer served, where a nil record failed to pack and the app got
+// no reply.
+func decodeDNSRR(logger *zap.Logger, raw string) (rr dns.RR, ok bool) {
+	rr, err := dns.NewRR(raw)
+	if err != nil || rr == nil {
+		if logger != nil {
+			logger.Debug("failed to parse dns rr", zap.String("rr", raw), zap.Error(err))
+		}
+		return nil, false
+	}
+	return rr, true
 }
 
 func encodeDNSRRs(rrs []dns.RR) []string {
@@ -1078,14 +1091,26 @@ func dnsAnswerRank(m *dns.Msg) int {
 	return dnsRank(m.Rcode, len(m.Answer))
 }
 
-// dnsMockRank is the kind of the answer recorded in resp, read from its rcode
-// and its count of answer records without decoding them. A mock with no
-// response is served as NOERROR with no answer (dnsMockAnswer): NODATA.
+// dnsMockRank is the kind of the answer recorded in resp as dnsMockAnswer
+// serves it: its rcode, and whether one of its answer records decodes, since
+// decodeDNSRRs leaves out the ones that do not. So a mock whose answer
+// records all fail to decode, which keploy never writes but a hand edit can,
+// ranks as the NODATA it is served as, under a valid resolved answer recorded
+// after it. Answer records are decoded up to the first that decodes; the
+// served mock's records are decoded whole by dnsMockAnswer. A mock with no
+// response is served as NOERROR with no answer: NODATA.
 func dnsMockRank(resp *models.DNSResp) int {
 	if resp == nil {
 		return dnsRankNODATA
 	}
-	return dnsRank(resp.Rcode, len(resp.Answers))
+	answers := 0
+	if slices.ContainsFunc(resp.Answers, func(raw string) bool {
+		_, ok := decodeDNSRR(nil, raw)
+		return ok
+	}) {
+		answers = 1
+	}
+	return dnsRank(resp.Rcode, answers)
 }
 
 // dnsRank is the kind of an answer with rcode and that many answer records.
