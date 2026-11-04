@@ -467,3 +467,182 @@ func TestAnAbsentClockReadIsNamedByItsShape(t *testing.T) {
 		t.Fatalf("FieldReasons %+v, %d clock warnings; want the absent reason at body.u.{}, logged once", r.FieldReasons, len(said))
 	}
 }
+
+// keploy.yml's url noise is read in the whole path, by the walk and the
+// clock check alike: a pattern that anchors the whole path, or one that
+// crosses "/", masks a path segment learned as a read of the clock that it
+// matches no part of alone. The walk masks it, so the clock check leaves it
+// unchecked too: the call, whose segment is an instant a month off and so no
+// read in its window, is answered, for keploy.yml declares the place not
+// compared.
+func TestAClockSegmentKeployYmlUrlNoiseMasksInItsWholePathIsNotChecked(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	const call = "/v1/u/2026-09-02T09:00:00Z"
+	rec := pathStamped().Spec.HTTPReq.URL
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	for _, c := range []struct{ name, pat string }{
+		{"a pattern of the whole path", `^/v1/u/.*$`},
+		{"a pattern across segments", `u/[^/]+`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			re := regexp.MustCompile(c.pat)
+			if !re.MatchString(call) || !re.MatchString(rec) || re.MatchString(learnNoise{}.segments(call)[2]) || re.MatchString(learnNoise{}.segments(rec)[2]) {
+				t.Fatalf("pattern %q does not match both whole paths and neither segment alone", c.pat)
+			}
+			in := sent(call, map[string]string{"Content-Type": "application/json"}, `{}`)
+			in.arrived = base.Add(2 * time.Second)
+			if got, diag := strictMatchIn(t, clockConn(true, base), in, nil, nil, []string{c.pat}, pathStamped()); got == nil {
+				t.Fatalf("refused (%v); want the segment keploy.yml's noise masks left unchecked", differs(diag))
+			}
+		})
+	}
+}
+
+// joinedStamped is a recorded POST /v1/a/b/<instant> whose instant the learn
+// step learned as a plain read of the clock under keploy.yml's url noise
+// `a/b`, which joins the path's segments: its place is url.path.2 of the
+// path that noise masked ("v1/<mask>/<instant>"), not the path's own third
+// segment ("b").
+func joinedStamped() *models.Mock {
+	m := recorded("mock-j", "/v1/a/b/2026-09-01T09:00:00Z", map[string]string{"Content-Type": "application/json"}, `{}`)
+	m.Spec.Clocks = map[string]models.ClockOffset{"url.path.2": {Res: time.Second}}
+	return m
+}
+
+// The clock check reads a path segment where the learn step and the walk
+// read it, in the path keploy.yml's url noise masked whole: after a pattern
+// that joins segments before it, url.path.2 is the instant, never the
+// path's own third segment. A read in the call's window is answered; a
+// stale one is refused on the call's route, the read's reason kept.
+func TestAClockSegmentAfterUrlNoiseThatJoinsSegmentsIsTheLearnStepsSegment(t *testing.T) {
+	const pat = `a/b`
+	json := map[string]string{"Content-Type": "application/json"}
+	learned := learnNoise{url: compileURLNoise(zap.NewNop(), []string{pat})}.segments(joinedStamped().Spec.HTTPReq.URL)
+	if len(learned) != 3 || learned[2] != "2026-09-01T09:00:00Z" {
+		t.Fatalf("the learn step reads the path as %q; want the instant at url.path.2", learned)
+	}
+	t.Run("a read in its window", func(t *testing.T) {
+		t.Setenv("KEPLOY_PROVEN", "1")
+		base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+		in := sent("/v1/a/b/2026-10-26T15:50:36Z", json, `{}`)
+		in.arrived = base.Add(2 * time.Second)
+		if got, diag := strictMatchIn(t, clockConn(true, base), in, nil, nil, []string{pat}, joinedStamped()); got == nil {
+			t.Fatalf("refused (%v); want the read in the call's window answered", differs(diag))
+		}
+	})
+	t.Run("a stale read", func(t *testing.T) {
+		r, said := clockMissWhere(t, true, sent("/v1/a/b/2026-09-02T09:00:00Z", json, `{}`), nil, []string{pat}, joinedStamped())
+		why := reportWhy(r, "path")
+		if r.ClosestMock != "mock-j" || r.MatchPhase != models.MatchPhaseStrict || !strings.HasPrefix(why, "path was learned as ") || strings.Contains(why, "carries no value") || len(said) != 1 {
+			t.Fatalf("closest %q, phase %q, the reason of path %q, %d clock warnings; want mock-j of the call's route refused for its stale read, logged once", r.ClosestMock, r.MatchPhase, why, len(said))
+		}
+	})
+}
+
+// A place the learn step learned in a path that keploy.yml's url noise has
+// since joined (a pattern across "/" before it, here `v1/u`) is past the
+// masked path's segments: the clock check reads it in the path's own
+// segments, and checks it, for no pattern matched any of its text. The
+// call, the recorded stale instant, is refused for it as a read that does
+// not hold, never as a place the call does not carry.
+func TestAClockSegmentPastSegmentsUrlNoiseJoinedIsCheckedInThePath(t *testing.T) {
+	const pat = `v1/u`
+	if segs := (learnNoise{url: compileURLNoise(zap.NewNop(), []string{pat})}).segments(pathStamped().Spec.HTTPReq.URL); len(segs) != 2 {
+		t.Fatalf("the masked path is %q; want url.path.2 past its segments", segs)
+	}
+	r, said := clockMissWhere(t, true, sent(pathStamped().Spec.HTTPReq.URL, map[string]string{"Content-Type": "application/json"}, `{}`), nil, []string{pat}, pathStamped())
+	why := reportWhy(r, "path")
+	if r.ClosestMock != "mock-p" || r.MatchPhase != models.MatchPhaseStrict || !strings.HasPrefix(why, "path was learned as ") || strings.Contains(why, "carries no value") || len(said) != 1 {
+		t.Fatalf("closest %q, phase %q, the reason of path %q, %d clock warnings; want mock-p refused for its stale read, logged once", r.ClosestMock, r.MatchPhase, why, len(said))
+	}
+}
+
+// A path place that names no segment of the call's path, one past its
+// last (a learning of a longer path, or under other url noise) or one the
+// learn step never writes (a recording's file edited by hand): the call
+// carries nothing there, and is refused as one that does not carry the
+// read, as at a place of no part of the call.
+func TestAPathPlaceThatNamesNoSegmentOfTheCallIsOneItDoesNotCarry(t *testing.T) {
+	for _, place := range []string{"url.path.3", "url.path.-1", "url.path.+1", "url.path.01", "url.path.x"} {
+		t.Run(place, func(t *testing.T) {
+			defer func() {
+				if p := recover(); p != nil {
+					t.Fatalf("panicked: %v", p)
+				}
+			}()
+			m := pathStamped()
+			m.Spec.Clocks = map[string]models.ClockOffset{place: {Res: time.Second}}
+			r, said := clockMissOf(t, sent(m.Spec.HTTPReq.URL, map[string]string{"Content-Type": "application/json"}, `{}`), m)
+			if why := reportWhy(r, "path"); !strings.HasSuffix(why, ", and this call carries no value at path: it changed") || len(said) != 1 {
+				t.Fatalf("the reason of path %q, %d clock warnings; want the absent reason, logged once", why, len(said))
+			}
+		})
+	}
+}
+
+// Where no url pattern crosses "/", a path segment learned as a read of the
+// clock is checked as the application sent it: a pattern that matches part
+// of the call's instant alone (`2026-10-`, not the recorded one) excuses
+// nothing, and leaves the instant whole, so a read in the call's window is
+// answered, as with no pattern.
+func TestAClockSegmentUrlNoiseMatchesInPartOfTheCallsValueIsCheckedAsSent(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	const pat, call = `2026-10-`, "/v1/u/2026-10-26T15:50:36Z"
+	re := regexp.MustCompile(pat)
+	if !re.MatchString(call) || re.MatchString(pathStamped().Spec.HTTPReq.URL) {
+		t.Fatalf("pattern %q does not match the call's path alone", pat)
+	}
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	in := sent(call, map[string]string{"Content-Type": "application/json"}, `{}`)
+	in.arrived = base.Add(2 * time.Second)
+	if got, diag := strictMatchIn(t, clockConn(true, base), in, nil, nil, []string{pat}, pathStamped()); got == nil {
+		t.Fatalf("refused (%v); want the read in the call's window answered", differs(diag))
+	}
+}
+
+// A url pattern that matches a bare segment but nothing in the whole path
+// (`^[0-9T:-]+Z$`, anchored to one segment) masks nothing where keploy.yml's
+// url noise is read, the walk included, so it excuses no path segment
+// learned as a read of the clock: a stale instant there is refused on the
+// call's route, with its reason, logged once.
+func TestAClockSegmentUrlNoiseOfABareSegmentAloneExcusesNothing(t *testing.T) {
+	const pat, call = `^[0-9T:-]+Z$`, "/v1/u/2026-09-02T09:00:00Z"
+	re := regexp.MustCompile(pat)
+	if !re.MatchString(learnNoise{}.segments(call)[2]) || !re.MatchString(learnNoise{}.segments(pathStamped().Spec.HTTPReq.URL)[2]) || re.MatchString(call) || re.MatchString(pathStamped().Spec.HTTPReq.URL) {
+		t.Fatalf("pattern %q does not match both bare segments and neither whole path", pat)
+	}
+	r, said := clockMissWhere(t, true, sent(call, map[string]string{"Content-Type": "application/json"}, `{}`), nil, []string{pat}, pathStamped())
+	why := reportWhy(r, "path")
+	if r.ClosestMock != "mock-p" || r.MatchPhase != models.MatchPhaseStrict || !strings.HasPrefix(why, "path was learned as ") || len(said) != 1 {
+		t.Fatalf("closest %q, phase %q, the reason of path %q, %d clock warnings; want mock-p of the call's route refused for its stale read, logged once", r.ClosestMock, r.MatchPhase, why, len(said))
+	}
+}
+
+// keploy.yml's url noise that matches a learned clock segment in one of the
+// two values alone, both instants (the call's stale one, or the recorded
+// one), excuses nothing: the segment is of the read's form, so the call is
+// of the recording's route, and its stale read is refused there, with its
+// reason, logged once.
+func TestAClockSegmentUrlNoiseInOneInstantAloneIsChecked(t *testing.T) {
+	const call = "/v1/u/2026-09-02T09:00:00Z"
+	rec := pathStamped().Spec.HTTPReq.URL
+	for _, c := range []struct {
+		name, pat string
+		inCall    bool
+	}{
+		{"the call's value alone", `2026-09-02`, true},
+		{"the recorded value alone", `2026-09-01`, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			re := regexp.MustCompile(c.pat)
+			if re.MatchString(call) != c.inCall || re.MatchString(rec) == c.inCall {
+				t.Fatalf("pattern %q does not match the one path the row names", c.pat)
+			}
+			r, said := clockMissWhere(t, true, sent(call, map[string]string{"Content-Type": "application/json"}, `{}`), nil, []string{c.pat}, pathStamped())
+			why := reportWhy(r, "path")
+			if r.ClosestMock != "mock-p" || r.MatchPhase != models.MatchPhaseStrict || !strings.HasPrefix(why, "path was learned as ") || len(said) != 1 {
+				t.Fatalf("closest %q, phase %q, the reason of path %q, %d clock warnings; want mock-p of the call's route refused for its stale read, logged once", r.ClosestMock, r.MatchPhase, why, len(said))
+			}
+		})
+	}
+}

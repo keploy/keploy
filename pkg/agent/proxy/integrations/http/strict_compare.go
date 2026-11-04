@@ -325,22 +325,27 @@ func strictDiff(ctx context.Context, input *req, live destination, m *models.Moc
 // application's clock (k.clocks) at which the call carries no such read made
 // in its own window on the application's clock (learn.ClockSpanOf for the
 // recording m it is checked against, learn.CheckClockRead), each with the
-// reason it gives; none where
-// keploy.yml's noise reaches the place, which the user declared not
-// compared. Every place is checked, whatever the walk found: a value equal to
-// its recording is a read of this run's clock only where the application's
-// clock showed it in the call's window, and a place the call does not carry,
-// or keploy cannot read, is refused. So is every place where keploy cannot
-// tell the application's clock at the call.
+// reason it gives; none where keploy.yml's noise reaches the place, which
+// the user declared not compared. A path segment is read as the walk reads
+// it (urlPath): its value, and whether a url pattern reaches it, in the path
+// that noise masked whole. Every place is checked, whatever the walk found:
+// a value equal to its recording is a read of this run's clock only where
+// the application's clock showed it in the call's window, and a place the
+// call does not carry, or keploy cannot read, is refused. So is every place
+// where keploy cannot tell the application's clock at the call.
 func (k strictKnown) clockDiffs(ctx context.Context, input *req, m *models.Mock) []strictField {
 	if len(k.clocks) == 0 {
 		return nil
 	}
 	var leaves map[string]learn.Leaf
+	var livePath urlPath
 	if input.url != nil {
 		leaves = learnNoise{}.shape(liveParts(ctx, input), "").Leaves
+		livePath = k.urlPathOf(input.url.Path)
 	}
 	recLeaves := learnNoise{}.shape(recordedParts(m), "").Leaves
+	recPath, _ := recordedStrictURL(m)
+	rec := k.urlPathOf(recPath)
 	span, known := learn.ClockSpanOf(ctx, input.arrived, m)
 	places := make([]string, 0, len(k.clocks))
 	for p := range k.clocks {
@@ -350,7 +355,15 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req, m *models.Mock)
 	var out []strictField
 	for _, p := range places {
 		live, carried := leaves[p]
-		if k.userNoiseAt(p, recLeaves[p], live) {
+		var excused bool
+		if i, segment := pathPlace(p); segment {
+			seg, liveNoised, ok := livePath.at(i)
+			_, recNoised, _ := rec.at(i)
+			live, carried, excused = segmentLeaf(p, seg), ok, recNoised && liveNoised
+		} else {
+			excused = k.userNoiseAt(p, recLeaves[p], live)
+		}
+		if excused {
 			continue
 		}
 		// The reason names the field as a failed test's reason does (its
@@ -372,9 +385,11 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req, m *models.Mock)
 
 // userNoiseAt reports whether keploy.yml's noise reaches place, in the learn
 // step's dialect, as the recording (rec) and the call (live) hold it: its
-// header names, a url pattern that matches in a path segment or a query
-// value, and its request-body paths. A pattern reaches it only when it
-// matches both values, as the walk excuses a field (jsonDiffs, headerDiffs).
+// header names, a url pattern that matches in a query value, and its
+// request-body paths. A pattern reaches it only when it matches both values,
+// as the walk excuses a field (jsonDiffs, headerDiffs, queryDiffs). A path
+// segment is no value a pattern is matched in alone: clockDiffs and
+// segmentMayDiffer read it in its whole path (urlPath).
 func (k strictKnown) userNoiseAt(place string, rec, live learn.Leaf) bool {
 	switch {
 	case strings.HasPrefix(place, "header."):
@@ -455,19 +470,17 @@ func recordedURL(r *models.HTTPReq) (string, url.Values) {
 }
 
 // pathDiffs compares two paths segment by segment, after keploy.yml's url
-// noise is masked in both; a segment the mock learned (url.path.<i>) may
-// differ (segmentMayDiffer).
+// noise is masked in both (urlPath); a segment the mock learned
+// (url.path.<i>) may differ (segmentMayDiffer).
 func (k strictKnown) pathDiffs(rec, live string) []strictField {
 	if rec == live {
 		return nil
 	}
-	rs := strings.Split(strings.TrimPrefix(maskURLNoise(rec, k.n.url), "/"), "/")
-	ls := strings.Split(strings.TrimPrefix(maskURLNoise(live, k.n.url), "/"), "/")
-	if len(rs) == len(ls) {
-		recSegs, liveSegs := learnNoise{}.segments(rec), learnNoise{}.segments(live)
+	r, l := k.urlPathOf(rec), k.urlPathOf(live)
+	if len(r.segs) == len(l.segs) {
 		same := true
-		for i := range rs {
-			if rs[i] != ls[i] && !k.segmentMayDiffer(i, recSegs, liveSegs) {
+		for i := range r.segs {
+			if r.segs[i] != l.segs[i] && !k.segmentMayDiffer(i, r, l) {
 				same = false
 				break
 			}
@@ -482,12 +495,12 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 // segmentMayDiffer reports whether the path segment at i may differ from its
 // recording's: the mock learned it as noise, or as a read of the
 // application's clock and the call's segment (rec and live are the two
-// paths' segments, as clockDiffs reads them) is a value of that read's form
+// paths, as clockDiffs reads them) is a value of that read's form
 // (learn.ReadsAsClockRead), whose instant clockDiffs checks, or keploy.yml's
-// noise reaches it, where clockDiffs checks none. A segment of no such form
-// ("me" where an instant was) is no read of any clock: it differs as one
-// with nothing learned does, and its recording is of another route.
-func (k strictKnown) segmentMayDiffer(i int, rec, live []string) bool {
+// noise reaches it in both, where clockDiffs checks none. A segment of no
+// such form ("me" where an instant was) is no read of any clock: it differs
+// as one with nothing learned does, and its recording is of another route.
+func (k strictKnown) segmentMayDiffer(i int, rec, live urlPath) bool {
 	place := "url.path." + strconv.Itoa(i)
 	if k.learnedNoiseAt(place, "") {
 		return true
@@ -496,18 +509,124 @@ func (k strictKnown) segmentMayDiffer(i int, rec, live []string) bool {
 	if !clock {
 		return false
 	}
-	r, l := segmentLeaf(rec, i), segmentLeaf(live, i)
-	return k.userNoiseAt(place, r, l) || learn.ReadsAsClockRead(o, l)
+	_, recNoised, _ := rec.at(i)
+	seg, liveNoised, _ := live.at(i)
+	return recNoised && liveNoised || learn.ReadsAsClockRead(o, segmentLeaf(place, seg))
 }
 
-// segmentLeaf is the leaf of the path segment at i of segs, as the learn
-// step shapes it (learnNoise.shape); the zero leaf where segs has none.
-func segmentLeaf(segs []string, i int) learn.Leaf {
-	if i >= len(segs) {
-		return learn.Leaf{}
+// segmentLeaf is a path segment's leaf at place, as the learn step shapes it
+// (learnNoise.shape).
+func segmentLeaf(place, seg string) learn.Leaf {
+	return learn.Leaf{Path: place, Noise: place, Type: learn.String, Value: seg}
+}
+
+// pathPlace is the segment a place of the learn step's dialect names
+// (url.path.<i>, as it writes one), if it names one. A place it never
+// writes (url.path.-1, url.path.01), a file's edit, names none: the call
+// carries nothing there.
+func pathPlace(place string) (int, bool) {
+	n, ok := strings.CutPrefix(place, "url.path.")
+	if !ok {
+		return 0, false
 	}
-	place := "url.path." + strconv.Itoa(i)
-	return learn.Leaf{Path: place, Noise: place, Type: learn.String, Value: segs[i]}
+	// Atoi's i on an error is 0 or a bound, whose decimal is never n.
+	i, _ := strconv.Atoi(n)
+	return i, i >= 0 && strconv.Itoa(i) == n
+}
+
+// urlPath is a path as keploy.yml's url noise reads it, in the walk
+// (pathDiffs) and the clock check (clockDiffs) alike: each pattern's matches
+// masked in the whole path in turn, as maskURLNoise masks them, so a pattern
+// that crosses "/" or anchors the whole path masks what it matches there,
+// whatever it matches in one segment alone.
+type urlPath struct {
+	// segs are the masked path's segments, its leading "/" dropped, as the
+	// learn step splits it (learnNoise.segments) and names its places
+	// (url.path.<i>); noised says, of each, whether a pattern's match is in
+	// it.
+	segs   []string
+	noised []bool
+	// own are the path's own segments, and ownNoised says, of each, whether
+	// a pattern matched any of its text.
+	own       []string
+	ownNoised []bool
+}
+
+// urlPathOf is path as keploy.yml's url noise (k.n.url) reads it.
+func (k strictKnown) urlPathOf(path string) urlPath {
+	// text is the path as masked so far; from[j] is the byte of the path
+	// that text[j] is, or -1 for a byte of a mask.
+	text, from := path, make([]int, len(path))
+	for j := range from {
+		from[j] = j
+	}
+	for _, re := range k.n.url {
+		locs := re.FindAllStringIndex(text, -1)
+		if len(locs) == 0 {
+			continue
+		}
+		var b strings.Builder
+		next := make([]int, 0, len(from)+len(locs)*len(urlNoisePlaceholder))
+		last := 0
+		for _, loc := range locs {
+			b.WriteString(text[last:loc[0]])
+			next = append(next, from[last:loc[0]]...)
+			b.WriteString(urlNoisePlaceholder)
+			for range len(urlNoisePlaceholder) {
+				next = append(next, -1)
+			}
+			last = loc[1]
+		}
+		b.WriteString(text[last:])
+		text, from = b.String(), append(next, from[last:]...)
+	}
+	var u urlPath
+	if strings.HasPrefix(text, "/") {
+		text, from = text[1:], from[1:]
+	}
+	kept := make([]bool, len(path))
+	at := 0
+	for _, seg := range strings.Split(text, "/") {
+		noised := false
+		for _, f := range from[at : at+len(seg)] {
+			if f < 0 {
+				noised = true
+			} else {
+				kept[f] = true
+			}
+		}
+		u.segs, u.noised = append(u.segs, seg), append(u.noised, noised)
+		at += len(seg) + 1
+	}
+	at = 0
+	if strings.HasPrefix(path, "/") {
+		at = 1
+	}
+	for _, seg := range strings.Split(path[at:], "/") {
+		u.own, u.ownNoised = append(u.own, seg), append(u.ownNoised, slices.Contains(kept[at:at+len(seg)], false))
+		at += len(seg) + 1
+	}
+	return u
+}
+
+// at is the path's segment at the learn step's place url.path.<i>, and
+// whether keploy.yml's url noise reaches it: the masked path's segment i,
+// read as the application sent it where no pattern crossed "/" (the masked
+// path's segments are then the path's own, one for one); or, past the
+// masked path's segments, where a pattern that crosses "/" joined the
+// path's segments since the learn step read it, the path's own segment i,
+// which a pattern reaches where it matched any of its text. ok is false
+// where neither has a segment i.
+func (u urlPath) at(i int) (seg string, noised, ok bool) {
+	switch {
+	case i < len(u.segs) && len(u.segs) == len(u.own):
+		return u.own[i], u.noised[i], true
+	case i < len(u.segs):
+		return u.segs[i], u.noised[i], true
+	case i < len(u.own):
+		return u.own[i], u.ownNoised[i], true
+	}
+	return "", false, false
 }
 
 // queryDiffs compares two queries: the same parameters, each with the same
