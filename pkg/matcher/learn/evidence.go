@@ -63,13 +63,19 @@ type evPlace struct {
 	// scope names that scope for a line where mappings.yaml names it
 	// ("worker:", a test's name); "" where the place keeps its marks.
 	otherTest bool
-	// olderTest: a recording F gave the application only in an older test
-	// of the set than the call's (Raw.InAnOlderTest), which shows nothing
-	// of what the application did with a value in the tests since, so no
-	// whole word is set aside there (a founder ruling, 2026-11-02); a piece
-	// of a longer value still is, as chance.
-	olderTest bool
-	scope     string
+	// outsideTest: why a place F gave the application only before the
+	// call's test began says nothing of what the application did with a
+	// value since ("" of a place of the call's own test), as main's
+	// late-call rule reads it (outsideTest, Earlier.outsideTest): a
+	// recording F gave only in an older test of the set than the call's
+	// (Raw.InAnOlderTest) or only before the test, at the set's start-up or
+	// between tests (Raw.BeforeTheTest); or an exchange F served only
+	// before it (Earlier.beforeTest). No whole word is set aside there (a
+	// founder ruling, 2026-11-02); a piece of a longer value still is, as
+	// chance. A request an older test's call left the run
+	// (Earlier.ofEarlierTest) is none: a short word there is chance.
+	outsideTest string
+	scope       string
 	// leaf: an earlier exchange's leaf, which names its place (FromAt).
 	leaf  Leaf
 	at    time.Time
@@ -199,7 +205,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 				name: e.Mock + " " + path, mock: e.Mock, path: path,
 				rec: s.Leaf.Value, live: s.Live, side: s.Side, leaf: s.Leaf,
 				given: e.Given, gave: e.Gave, undeclared: s.Undeclared, clock: s.Clock, startUp: startUp, otherTest: other, scope: scope,
-				at: e.At, state: st, why: why, fGave: !e.Payload.servedAfter,
+				at: e.At, state: st, why: why, fGave: !e.Payload.servedAfter, outsideTest: earlierOutsideTest(e),
 				recAfter: !e.alwaysEarlier() && !e.noTime && e.At.After(in.At),
 			})
 			// What the application got in an answer it got at the answer's
@@ -241,7 +247,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		startUp, other, scope := inScope(in, r.Mock(), r.beforeTest && !other, other)
 		p := evPlace{
 			name: r.Mock(), mock: r.Mock(), src: src, fSrc: live, side: Response,
-			startUp: startUp, otherTest: other, olderTest: r.InAnOlderTest(), scope: scope,
+			startUp: startUp, otherTest: other, outsideTest: rawOutsideTest(r), scope: scope,
 			at: r.at, state: st, why: why, fUnstated: fUnstated, raw: i + 1,
 			fMay: fUnstated && len(views) == 0 && r.served && !r.servedAfter, views: views,
 			fGave: r.served && !r.servedAfter, recAfter: !r.noTime && (r.at.After(in.At) || r.answered.After(in.At)),
@@ -252,6 +258,29 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		ps = append(ps, p)
 	}
 	return ps, unread
+}
+
+// rawOutsideTest is evPlace.outsideTest of r: why F's serve of it says
+// nothing of a value where F gave it the application only in an older test
+// of the set (Raw.InAnOlderTest) or only before the call's test began
+// (Raw.BeforeTheTest), as main's outsideTest reads it.
+func rawOutsideTest(r Raw) string {
+	switch {
+	case r.InAnOlderTest():
+		return olderTestWhy
+	case r.BeforeTheTest():
+		return beforeTestWhy
+	}
+	return ""
+}
+
+// earlierOutsideTest is evPlace.outsideTest of e: an exchange F served
+// only before the call's test began (Earlier.beforeTest).
+func earlierOutsideTest(e Earlier) string {
+	if e.beforeTest {
+		return beforeTestWhy
+	}
+	return ""
 }
 
 // rawRequestState is a recording's state for a word its request holds:

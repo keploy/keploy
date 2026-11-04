@@ -1257,8 +1257,8 @@ func TestOutcomeAWordTwoRequestsInFlightTogetherBothShowIsACopy(t *testing.T) {
 // held there where F gave another text, too little to be a conflict, is
 // not set aside as a copy that moved with its source: the value is
 // refused as unknown, naming the place and why (fail closed). The same
-// place in the call's own test, or served before the test in no older
-// test, still sets the word aside, and the value is fresh. Flyway's
+// place in the call's own test still sets the word aside, and the value is
+// fresh (a place served before the test: the row after this). Flyway's
 // execution_time 50 beside VARCHAR(50) F sent unchanged; 82 at record and
 // 1 in F beside SELECT 1; "slot 83" beside an answer of 7 and a later
 // answer of 82 (older_test_word_test.go, late_call_older_serve_test.go).
@@ -1284,7 +1284,7 @@ func TestOutcomeAPlaceServedOnlyInAnOlderTestSetsNoWordAside(t *testing.T) {
 	}{
 		{"50 beside VARCHAR(50) F sent unchanged", "50", "7", history, older(history), "mock-5"},
 		{"82 at record, 1 in F, beside SELECT 1", "82", "1", eStartup(), older(eStartup()), "mock-1"},
-		{"slot 83 beside an answer of 7 served as recorded", "slot 83", "slot 7", []Raw{a.ServedBeforeTheTest(), b}, []Raw{a.ServedInAnOlderTest().ServedBeforeTheTest(), b}, "mock-a"},
+		{"slot 83 beside an answer of 7 served as recorded", "slot 83", "slot 7", []Raw{a, b}, []Raw{a.ServedInAnOlderTest().ServedBeforeTheTest(), b}, "mock-a"},
 	} {
 		r, f := strings.Fields(tc.rec), strings.Fields(tc.live)
 		rw, fw := r[len(r)-1], f[len(f)-1]
@@ -1300,5 +1300,64 @@ func TestOutcomeAPlaceServedOnlyInAnOlderTestSetsNoWordAside(t *testing.T) {
 	u = u.ServedLive(eAnswer("mock-u", 300*time.Millisecond, "0c1d2e3f-4a5b-6c7d-8e9f-a0b1c2d3e4f5"))
 	for _, x := range []Raw{u, u.ServedInAnOlderTest()} {
 		costFresh(t, "a UUID's 4-hex piece beside another UUID's answer, in an older test: "+strconv.FormatBool(x.InAnOlderTest()), oWord(t, Decide(costF(rec, live, nil, []Raw{x}, nil)), "48d1", "dddd"))
+	}
+}
+
+// No excuse from a place served only before the call's test began, as main's
+// late-call rule reads one (outsideTest, Earlier.outsideTest): a recording
+// F gave the application only at the set's start-up or between tests
+// (Raw.BeforeTheTest), an exchange F served only before the test
+// (Earlier.beforeTest). A word held there where F gave another text, too
+// little to be a conflict, is not set aside: the application may have kept
+// what it was given there, so the value is refused as unknown, naming the
+// place and why. Main
+// refuses each (late_call_older_serve_test.go); where the recorded value
+// took no word of another place ("slot 83"), main learns noise, and this
+// refuses it too (fail closed). The same place in the call's own test, or
+// the start-up exchange read at the start-up, still sets the word aside,
+// and the value is fresh.
+func TestOutcomeAPlaceServedOnlyBeforeTheTestSetsNoWordAside(t *testing.T) {
+	b := eAnswer("mock-b", 200*time.Millisecond, "82").ServedAs(2).ServedAsRecorded()
+	a := eAnswer("mock-a", 300*time.Millisecond, "7").ServedAs(1).ServedAsRecorded()
+	startUp := Earlier{Mock: "mock-s", At: eRecAt.Add(-300 * time.Millisecond), Run: true, StartUp: true, beforeTest: true,
+		Payload: eAnswer("mock-s", 300*time.Millisecond, "7").ServedAs(1),
+		Seen:    []Seen{{Side: Response, Leaf: Leaf{Path: "body.token", Type: String, Value: "7"}, Live: "7"}}}
+	atStartUp := startUp
+	atStartUp.beforeTest = false
+	const kept = "round F gave it to the application only before the call's test began, and the application may have kept what it gave there"
+	for _, tc := range []struct {
+		what, rec, live string
+		earlier         []Earlier
+		raw             []Raw
+		name, why       string
+	}{
+		{"a served as recorded before the test", "slot 82", "slot 7", nil, []Raw{a.ServedBeforeTheTest(), b}, "mock-a", kept},
+		{"a served as recorded before the test, the recording's call late", "slot 7", "slot 82", nil, []Raw{a.ServedBeforeTheTest(), b}, "mock-a", kept},
+		{"a served as recorded before the test, the recorded value took no word", "slot 83", "slot 7", nil, []Raw{a.ServedBeforeTheTest(), b}, "mock-a", kept},
+		{"the start-up exchange, read in a later test", "slot 82", "slot 7", []Earlier{startUp}, []Raw{b}, "mock-s body.token", kept},
+	} {
+		r, f := strings.Fields(tc.rec), strings.Fields(tc.live)
+		d := oWord(t, Decide(costF(tc.rec, tc.live, tc.earlier, tc.raw, nil)), r[1], f[1])
+		oRefused(t, tc.what, d, RefusalUnknown, tc.name)
+		if d.Refusal != nil && !strings.Contains(d.Refusal.Why, tc.why) {
+			t.Errorf("%s: refused %q; want it to say %q", tc.what, d.Refusal.Why, tc.why)
+		}
+	}
+	costFresh(t, "a served as recorded in the call's own test", oWord(t, Decide(costF("slot 82", "slot 7", nil, []Raw{a, b}, nil)), "82", "7"))
+	costFresh(t, "the start-up exchange, read at the start-up", oWord(t, Decide(costF("slot 82", "slot 7", []Earlier{atStartUp}, []Raw{b}, nil)), "82", "7"))
+}
+
+// A conflict comes before the older-test rule: a place F gave the
+// application only in an older test, or only before the call's test began,
+// that holds the recorded word whole where F gave another text there, a
+// word of 32 bits that counts by its text, is a conflict (edits: fix the
+// application, or give the value), not a place keploy cannot tell of
+// (edit: re-record).
+func TestOutcomeAConflictComesBeforeAPlaceServedOnlyBeforeTheTest(t *testing.T) {
+	const rec, live = "slot 4f9a2c7e1b3d", "slot 9e8d7c6b5a40"
+	a := eAnswer("mock-a", 300*time.Millisecond, "4f9a2c7e1b3d").ServedAs(1).ServedAsRecorded()
+	for _, x := range []Raw{a.ServedInAnOlderTest(), a.ServedBeforeTheTest(), a.ServedInAnOlderTest().ServedBeforeTheTest()} {
+		d := oWord(t, Decide(costF(rec, live, nil, []Raw{x}, nil)), "4f9a2c7e1b3d", "9e8d7c6b5a40")
+		oRefused(t, "a 48-bit word whole at a place served only in an older test ("+strconv.FormatBool(x.InAnOlderTest())+") or before the test", d, RefusalConflict, "mock-a")
 	}
 }

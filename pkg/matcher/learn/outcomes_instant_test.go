@@ -3167,3 +3167,51 @@ func TestOutcomeAPercentEncodedSecondHoldsOnlyTheTimeItOpensTo(t *testing.T) {
 		[]Raw{RawOf(zoned(rT), true).ServedAs(1).ServedLive(RawOf(zoned(fT), true))})), micro(rT), micro(fT))
 	iValue(t, "a microsecond the answer writes before a percent-encoded zone", d, "mock-799")
 }
+
+// A wall time of no zone the application writes in its own zone is held
+// where an answer holds it in UTC: its moment read in the run's zone (the
+// zone read of holds). Beside an answer that holds F's call second
+// percent-encoded in UTC ("%3A"), round F's moment stands in that answer,
+// which does not show it: refused as a pick, naming the answer. Another
+// second of that hour in the answer names no moment of the value: the
+// value is the call's clock read moved by the zone, refused as one keploy
+// cannot check, never as a clock no answer gave.
+func TestOutcomeAWallTimeOfNoZoneIsHeldWhereAnAnswerHoldsItInUTC(t *testing.T) {
+	ist, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		t.Skip("no zone database: ", err)
+	}
+	pct := func(x time.Time) string { return strings.ReplaceAll(x.UTC().Format(time.RFC3339), ":", "%3A") }
+	wall := func(x time.Time) string { return x.In(ist).Format("2006-01-02T15:04:05") }
+	for _, base := range []time.Time{
+		time.Date(2026, 10, 31, 21, 1, 36, 400e6, time.UTC), // the next day in the zone
+		time.Date(2026, 10, 31, 9, 1, 36, 400e6, time.UTC),
+	} {
+		rAt, fAt := base, base.Add(76*time.Second)
+		answer := func(at time.Time) *models.Mock {
+			return &models.Mock{Name: "mock-799", Kind: models.HTTP, Spec: models.MockSpec{
+				HTTPReq:          &models.HTTPReq{Method: "GET", URL: "http://api.local/jobs/1"},
+				HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: `{"next":"/v1/events?since=` + pct(at) + `"}`},
+				ReqTimestampMock: rAt.Add(-time.Second), ResTimestampMock: rAt.Add(-time.Second + time.Millisecond),
+			}}
+		}
+		call := func(r, f time.Time) Decision {
+			dc := oDrifts()
+			dc.zone = ist
+			const p = "body.updatedAt"
+			leaf := func(v string) Shape {
+				return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+			}
+			ds := Decide(Input{Drifts: dc, Drift: []string{p}, Live: leaf(wall(fAt)), Rec: leaf(wall(rAt)),
+				At: rAt, Arrived: fAt, Window: iWin(rAt, fAt, 100*time.Millisecond), Test: "test-2", Mock: "mock-300",
+				Raw:  []Raw{RawOf(answer(r), true).ServedAs(1).ServedLive(RawOf(answer(f), true))},
+				Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true}})
+			if len(ds) != 1 {
+				t.Fatalf("%s: %d decisions; want 1", base, len(ds))
+			}
+			return ds[0]
+		}
+		oRefused(t, base.String()+": F's call second in the answer", call(rAt.Add(-37*time.Second), fAt), RefusalPick, "mock-799")
+		oRefused(t, base.String()+": another second of that hour in the answer", call(rAt.Add(-10*time.Second), fAt.Add(-10*time.Second)), RefusalCannotCheck)
+	}
+}
