@@ -78,11 +78,13 @@ const (
 	// fillClient: more requests, sent once the dest's reader waits on a read,
 	// done with the reply, so the merge parks on its send to the full events
 	// channel, and the client's reader on its send to its own full channel,
-	// before the main loop panics. The dest's reader reads the abort's
-	// ErrClosed.
+	// before the main loop panics: it panics once the client's reader has
+	// taken fillClientTaken chunks, so every queue is full. The dest's reader
+	// reads the abort's ErrClosed.
 	fillClient
 	// fillBoth: more requests and more replies, so the merge and both readers
-	// park on their sends to full channels before the main loop panics.
+	// park on their sends to full channels before the main loop panics: it
+	// panics once the readers have taken fillBothTaken chunks between them.
 	fillBoth
 	// fillAfterTheLoop: nothing more until the main loop is gone, and the
 	// client's reader waits on a read when it panics. Then requests reach
@@ -92,19 +94,32 @@ const (
 	fillAfterTheLoop
 )
 
-// readersFillChunks is more than the events channel holds;
-// readersAfterChunks is fewer.
+// readersFillChunks is more than the recorder's queues hold;
+// readersAfterChunks is fewer than the events channel does.
 const (
 	readersFillChunks  = 1024
 	readersAfterChunks = 8
+)
+
+// fillClientTaken is how many chunks the client's reader has taken off its
+// stream in fillClient once every queue on its way is full: the events
+// channel (mergedQueueLen), the head the merge is sending, the client's
+// queue (streamQueueLen) and the chunk the reader is sending. Nothing takes
+// another until the main loop takes an event, which it does not.
+// fillBothTaken is the same, between both readers, in fillBoth: the merge
+// holds one head only, the one it sends, since it hands an unnumbered chunk
+// on at once and takes no other event while it sends.
+const (
+	fillClientTaken = mergedQueueLen + 1 + streamQueueLen + 1
+	fillBothTaken   = mergedQueueLen + 1 + 2*(streamQueueLen+1)
 )
 
 // checkReadersEndAfterAPanicOfTheMainLoop runs encodeGenericV2 under a
 // supervisor over a session whose streams hold one exchange, and whose
 // mock (recorded as the reply reaches the loop) panics in the main loop
 // (Session.OnMockRecorded runs in EmitMock): for fillClient and fillBoth,
-// once the fill has been sent and the readers it fills are parked on their
-// sends; for fillAfterTheLoop, once the client's reader waits on a read, the
+// once the fill has been sent, every queue on its way is full and the
+// readers it fills are parked on their sends; for fillAfterTheLoop, once the client's reader waits on a read, the
 // fill then sent by the abort. The abort Closes both FakeConns, as the
 // proxy's does. It then fails t if a goroutine encodeGenericV2 started is
 // parked for good, and once every one has ended, if a reader took more
@@ -149,12 +164,14 @@ func checkReadersEndAfterAPanicOfTheMainLoop(t *testing.T, fill readersFill) {
 			for i := 0; i < readersFillChunks; i++ {
 				clientCh <- chunk(fakeconn.FromClient, "REQX")
 			}
+			awaitTaken(func() int { return readersFillChunks - len(clientCh) }, fillClientTaken)
 			awaitReaderSends(created, 1)
 		case fillBoth:
 			for i := 0; i < readersFillChunks; i++ {
 				clientCh <- chunk(fakeconn.FromClient, "REQX")
 				destCh <- chunk(fakeconn.FromDest, "REPX")
 			}
+			awaitTaken(func() int { return 2*readersFillChunks - len(clientCh) - len(destCh) }, fillBothTaken)
 			awaitReaderSends(created, 2)
 		case fillAfterTheLoop:
 			awaitWaiting(clientConn)
@@ -200,6 +217,27 @@ func awaitWaiting(fc *fakeconn.FakeConn) {
 	for {
 		if waiting, _ := fc.Waiting(); waiting {
 			return
+		}
+		time.Sleep(time.Millisecond) // a yield between looks
+	}
+}
+
+// awaitTaken waits until taken, the chunks the readers have taken off their
+// streams since the fill, is want: every queue on their way is full, so no
+// reader takes another and the streams' lengths hold still. Waiting for the
+// readers parked on their sends is not enough: a reader parks on its send
+// to a full queue while the merge still moves events on to the main loop's,
+// and then takes more, after the streams' lengths were read. It panics (in
+// the main loop, so the row fails its setup) once taken passes want: the
+// queues hold more than their sizes.
+func awaitTaken(taken func() int, want int) {
+	for {
+		got := taken()
+		if got == want {
+			return
+		}
+		if got > want {
+			panic(fmt.Sprintf("setup: the readers took %d chunks off their streams with every queue full, more than the %d the queues hold", got, want))
 		}
 		time.Sleep(time.Millisecond) // a yield between looks
 	}

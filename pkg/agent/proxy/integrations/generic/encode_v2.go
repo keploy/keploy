@@ -43,6 +43,15 @@ type chunkEvent struct {
 	err     error
 }
 
+// The generic V2 recorder's queues: each direction's reader hands its chunks
+// to the merge (mergeByCapture) through a queue of streamQueueLen events, and
+// the merge hands both directions on to the main loop through one of
+// mergedQueueLen.
+const (
+	streamQueueLen = 8
+	mergedQueueLen = 16
+)
+
 // encodeGenericV2 implements the V2 record path for the generic parser.
 // It drains the two FakeConn streams concurrently and pairs chunks into
 // mocks with the same shape the legacy encodeGeneric path produces so
@@ -81,9 +90,9 @@ func encodeGenericV2(sess *supervisor.Session, logger *zap.Logger) error {
 	// Before, it took them in the order read, and a run of answers read ahead
 	// of their requests (all three answers, then the requests) recorded the
 	// first exchange only, with nothing left out or said.
-	clientEvents := make(chan chunkEvent, 8)
-	destEvents := make(chan chunkEvent, 8)
-	events := make(chan chunkEvent, 16)
+	clientEvents := make(chan chunkEvent, streamQueueLen)
+	destEvents := make(chan chunkEvent, streamQueueLen)
+	events := make(chan chunkEvent, mergedQueueLen)
 
 	initial, err := sess.ClientStream.ReadChunk()
 	if err != nil {
@@ -772,8 +781,11 @@ type streamedBefore func(dir fakeconn.Direction, seq uint32) (end int64, ok bool
 // changed: a session with no Session.Order, a test's; the relay always says),
 // as every chunk went on before.
 //
-// It returns, with nothing more sent, once stop has closed: nothing drains
-// out after the main loop returns.
+// It returns once stop has closed: nothing drains out after the main loop
+// returns. A select of it that finds stop and another case ready at once
+// picks either, so it may still put events in what room out has then, where
+// nothing reads them. It takes nothing off a stream (only the readers do),
+// so it moves nothing that counts as read (chunkEvent.through).
 //
 // first, when set, is the connection's first chunk, the client's, read before
 // the readers started: the merge starts with it as the client's head, received
