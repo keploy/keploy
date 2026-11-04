@@ -46,3 +46,32 @@ func TestTheAnsweredListIsToldOnlyAsOfTheCallsOneView(t *testing.T) {
 		}
 	}
 }
+
+// A call's mark made from a round snapshot carries the store's token of the
+// view the snapshot read (RoundParts.View), whatever round it is: a test's
+// or the pool's, the learn tracker ahead of the store, or a set the store
+// has not staged. So a store held to the call is held to that view, never to
+// one installed after the snapshot. A snapshot with no token marks none.
+func TestARoundSnapshotsCallRoundCarriesTheViewItRead(t *testing.T) {
+	type token struct{ n int }
+	for _, tc := range []struct {
+		name string
+		snap RoundSnapshot
+	}{
+		{name: "a test's view", snap: RoundSnapshot{Test: "test-0", Phase: RoundInTest}},
+		{name: "the pool view between tests", snap: RoundSnapshot{Phase: RoundBetween}},
+		{name: "the learn tracker ahead of the store", snap: RoundSnapshot{Phase: RoundBoundary, Learn: LearnRead{Bound: true, Open: true}}},
+		{name: "a set the store has not staged", snap: RoundSnapshot{Phase: RoundBoundary, Learn: LearnRead{Bound: true, SetAhead: true}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := &token{n: 1}
+			c := tc.snap.WithParts(RoundParts{View: v}).CallRound()
+			if got, ok := c.StoreView().(*token); !ok || got != v {
+				t.Fatalf("the call's mark carries %v; want the snapshot's view %v", c.StoreView(), v)
+			}
+			if got := tc.snap.WithParts(RoundParts{}).CallRound().StoreView(); got != nil {
+				t.Fatalf("a snapshot with no view marks %v; want none", got)
+			}
+		})
+	}
+}

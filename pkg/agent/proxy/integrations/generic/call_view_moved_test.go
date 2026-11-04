@@ -77,3 +77,40 @@ func TestAnExchangeWhoseViewMovedIsToldNoVerdictOfTheAnsweredList(t *testing.T) 
 		})
 	}
 }
+
+// movedSecondStore is movedStore whose call's view moves only inside its
+// second read of the answered list: the extra-call count read it in one
+// view, the answered comparison reads it after the move.
+type movedSecondStore struct {
+	movedStore
+	reads int
+}
+
+func (s *movedSecondStore) ConsumedTestMocks() []*models.Mock {
+	s.reads++
+	if s.reads == 2 {
+		s.moved = true
+	}
+	return s.answered
+}
+
+func (s *movedSecondStore) CallViewMoved() bool { return s.moved }
+
+func (s *movedSecondStore) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return s, func() bool { return false }
+}
+
+// A changed exchange whose view moves inside the answered comparison's read
+// of the list, after the extra-call count read it in one view, is not
+// compared with the list: the comparison asks after its own read too.
+func TestAGenericExchangeMovedInsideTheSecondListReadIsNotCompared(t *testing.T) {
+	set := exchange("mock-set", "SET k v")
+	s := &movedSecondStore{movedStore: movedStore{exactStore: exactStore{exact: true, own: map[string]bool{}}, answered: []*models.Mock{set}}}
+	r := missReport(t, s, "SET k w")
+	if s.reads < 2 {
+		t.Fatalf("precondition: the list was read %d times; want 2", s.reads)
+	}
+	if r.ClosestMock == "mock-set" {
+		t.Errorf("a changed exchange whose view moved inside the second read is compared with the answered mock-set")
+	}
+}

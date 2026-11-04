@@ -341,6 +341,11 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// recording made elsewhere (notOwnedRecording) checks the
 				// staging last, and says that it moved.
 				db = mockDb
+				// restaged is the full round's hold's
+				// (integrations.HoldToRound): whether a read of it found
+				// the staging moved since the call's first read; never
+				// elsewhere.
+				restaged = func() bool { return false }
 			)
 			switch {
 			case provenswitch.On() && opts.Learn && !integrations.LearnEnded(mockDb):
@@ -352,21 +357,32 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// nor learned.
 				stub, lmiss, err = h.learnMatchIn(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts, integrations.CallRound{}, &call)
 				ok = stub != nil
+				if !ok {
+					// The call's one hold: the variable pass, the
+					// pairing's own-repeat count and repeat note, and the
+					// miss read it, held to the round the learn step's
+					// first pass read and to the view that pass read in
+					// (integrations.CallRound.InStoreView). So a view a
+					// test's begin or end installs after that read, before
+					// any of them or between two, is a move to all of them
+					// (integrations.CallViewMoved), and none of their
+					// verdicts joins a read of one view with a read of the
+					// next.
+					db, restaged = integrations.HoldToRound(mockDb, call)
+				}
 				if !ok && err == nil && (lmiss == nil || !lmiss.moved) {
 					// The learn step neither serves nor learns onto a
 					// recording that declares variables: a request it
 					// answered none for that such a recording fits is
 					// decided by the variable pass, as a replay decides it
 					// (fullRoundVariables), reading the store as a replay's
-					// matcher reads it: held to the round the learn step's
-					// first pass read, and with the open test's own-call
-					// decision (integrations.OwnRepeatRead), so the
-					// background never answers a call one more than the
-					// test recorded. A moved miss is of no round, and stays
-					// one.
-					held, _ := integrations.HoldToRound(mockDb, call)
-					ownHeld := held
-					held = integrations.OwnRepeatRead(held, call, func() bool {
+					// matcher reads it: the call's hold, with the open
+					// test's own-call decision (integrations.OwnRepeatRead),
+					// so the background never answers a call one more than
+					// the test recorded. A moved miss is of no round, and
+					// stays one.
+					ownHeld := db
+					held := integrations.OwnRepeatRead(db, call, func() bool {
 						return h.ownCall(reqCtx, input, ownHeld, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict())
 					})
 					vstub, vdiag, decided, verr := h.fullRoundVariables(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableStatefulMocks)
@@ -379,32 +395,28 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// Then the pairing, under the background rules: a call
 					// that is exactly another test's recording is answered
 					// with it, reported for judging, not missed. The
-					// own-repeat check comes first, read of the store held
-					// to the round the call first read (HoldToRound): a
-					// call one more than the test recorded, its own
+					// own-repeat check comes first, read of the call's hold:
+					// a call one more than the test recorded, its own
 					// identical recordings spent (extraCall), never claims
 					// another test's identical recording. It misses as
 					// such below, so judging never moves the other test's
 					// recording to the worker scope on its account. A call
-					// whose test recorded none of its kind still pairs.
-					held, _ := integrations.HoldToRound(mockDb, call)
-					extra, extraAt, extraMatched = h.extraCallOf(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+					// whose test recorded none of its kind still pairs; one
+					// whose view moved (-1) pairs nothing.
+					extra, extraAt, extraMatched = h.extraCallOf(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 					strict := h.newStrictNoise(headerNoise, bodyNoise, urlNoise)
 					if extra == 0 {
 						if answer, x := h.pairExactlyFrom(reqCtx, input, mockDb, strict, call); answer != nil {
 							// Its repeat note is asked as a miss's is
 							// (repeatNoteOf).
-							a, repeat := repeatNoteOf(reqCtx, input, held, strict, extra)
+							a, repeat := repeatNoteOf(reqCtx, input, db, strict, extra)
 							reportPairing(reqCtx, input, x, a, repeat)
 							stub, ok, lmiss = answer, true, nil
 						}
 					}
 				}
-				if !ok {
-					// The miss is diagnosed in the round the learn step's
-					// first pass read.
-					db, _ = integrations.HoldToRound(mockDb, call)
-				}
+				// A miss is diagnosed on the call's hold too: in the round
+				// the learn step's first pass read, and in its view.
 			default:
 				// Under the switch a replay first honours what the learn step
 				// learned onto the recording; anything else goes on to the
@@ -513,7 +525,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// this same held store: asking again would repeat that
 				// read. A call told neither (-1, its view moved) misses
 				// plainly: no extra call, no recording made elsewhere and
-				// no repeat note are named for it.
+				// no repeat note are named for it. Asked again on the
+				// call's one hold, it is told neither again: views are
+				// installed new and never again, so a hold that saw its
+				// view move sees it moved from then on.
 				n, nAt := extra, extraAt
 				if n < 0 {
 					n, nAt = h.extraCall(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
@@ -545,16 +560,26 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// test's recording is named for it, and none when keploy
 				// cannot place the test's own (nAt zero).
 				var elsewhere *models.Mock
-				restaged := false
+				staged := false
 				if report != nil && provenswitch.On() && (n == 0 || !nAt.IsZero()) {
-					elsewhere, restaged = notOwnedRecordingBefore(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call, nAt)
+					elsewhere, staged = notOwnedRecordingBefore(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call, nAt)
+				} else if report != nil {
+					// A call no lookup is asked for (its view moved, or
+					// keploy cannot place the test's own recording of it)
+					// names no recording made elsewhere, but whether the
+					// replay staged a set under it is no claim about the
+					// test's answered calls: in record's full round its
+					// hold tells it, after the report's reads. A staging
+					// installs a view, so a call held to the view it was
+					// read in is moved by it too.
+					staged = restaged()
 				}
 				if elsewhere != nil {
 					markNotOwned(report, elsewhere)
 				} else if lmiss != nil {
 					lmiss.explain(report)
 				}
-				if restaged {
+				if staged {
 					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + restagedNote)
 				} else if why := integrations.UnheldWhy(db); why != "" && report != nil {
 					// The store marked the request's round but could not

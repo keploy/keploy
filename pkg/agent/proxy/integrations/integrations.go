@@ -673,6 +673,9 @@ type CallRound struct {
 	// ahead is whether the read found the learn tracker had begun a test
 	// the store had not opened (WithTrackerAhead).
 	ahead bool
+	// view is the store's own token of the view the read was made in
+	// (InStoreView), nil where the read kept none.
+	view any
 }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
@@ -744,6 +747,22 @@ func (c CallRound) WithTrackerAhead(ahead bool) CallRound {
 // TrackerAhead reports whether c's read found the learn tracker ahead of the
 // store (WithTrackerAhead).
 func (c CallRound) TrackerAhead() bool { return c.ahead }
+
+// InStoreView is c, of a read made in the view the store's token v names
+// (opaque to a parser; RoundParts.View): a store held to c's call
+// (RoundHolder) is held to that view, so every hold of the call tells it
+// moved (CallViewTeller) once another view is in force, however late the
+// hold is made and however many there are. A read that keeps no sequence
+// view (a round snapshot's, RoundSnapshot.CallRound) carries it, so a view
+// installed between the snapshot and a hold, or between two holds, is never
+// taken for the view the call was read in.
+func (c CallRound) InStoreView(v any) CallRound {
+	c.view = v
+	return c
+}
+
+// StoreView is the token InStoreView kept, nil for none.
+func (c CallRound) StoreView() any { return c.view }
 
 // ShowsWorker reports whether c's read found a test's view that showed the
 // worker scope (WithSequence, InWorkerView).

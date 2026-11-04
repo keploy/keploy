@@ -762,7 +762,7 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	parts := integrations.RoundParts{
 		Owners: owners, Claimants: claimants, Worker: v.worker, Pool: v.pool,
 		Windows: m.testWindows.Load(), PoolNames: m.exact.poolNames.Load(),
-		ViewGen: v.round,
+		ViewGen: v.round, View: viewCursor{m: m, v: v},
 	}
 	if b := r.bound; s.Ended != "" && b != nil {
 		// A call read here may be the ended test's late one: its
@@ -962,6 +962,15 @@ const restagedWhy = "the staging moved: the test set was staged again"
 func (m *MockManager) HoldToRound(call integrations.CallRound) (integrations.MockMemDb, func() bool) {
 	h := &heldScope{roundScope: roundScope{MockManager: m, g: roundGuard{at: integrations.RoundAt{Epoch: call.Epoch()}, staging: true}}, heldIn: m.exactView()}
 	h.read.at, h.read.known = call.Round()
+	if c, mine := call.StoreView().(viewCursor); mine && c.m == m {
+		// Marked from a round snapshot (integrations.RoundSnapshot.CallRound:
+		// record's full round, its learn step's read), which reads and walks
+		// in the view in force: held to the view that snapshot read, so a
+		// view installed after it, before this hold or between two holds of
+		// the call, is a move to every hold (CallViewMoved), and no verdict
+		// joins a read of one view with a read of the next.
+		h.heldIn = c.v
+	}
 	if call.TrackerAhead() {
 		// Decided in the test the store opens next: the call reads, walks
 		// and spends in the view in force (readView).
@@ -1014,11 +1023,12 @@ type heldScope struct {
 	// (elsewhereGen), 0 until then.
 	ownGen uint64
 	// heldIn is the view h's call was read in: its mark's (readIn) when the
-	// mark kept one, else the view in force as h was held (HoldToRound). A
-	// call that reads the view in force (readIn nil: from its hold on, or
-	// since a refused consume, settled) is told it moved from it
-	// (CallViewMoved). Views are installed new and never again, so one
-	// still in force is the one the call was read in.
+	// mark kept one, the round snapshot's its mark was made from
+	// (integrations.CallRound.StoreView), else the view in force as h was
+	// held (HoldToRound). A call that reads the view in force (readIn nil:
+	// from its hold on, or since a refused consume, settled) is told it
+	// moved from it (CallViewMoved). Views are installed new and never
+	// again, so one still in force is the one the call was read in.
 	heldIn *exactView
 }
 
@@ -1309,12 +1319,13 @@ func (h *heldScope) AnswerRepeatRead(matched []*models.Mock) (integrations.Repea
 }
 
 // CallViewMoved implements integrations.CallViewTeller: whether h's call
-// reads the view in force (readView: one decided in the test the store opens
-// next, integrations.CallRound.TrackerAhead, or one whose consume the view in
-// force refused, settled) and that view is not the one the call was read in
-// (heldIn: its mark's, or the one in force as it was held), so two of its
-// reads may have been made in two views. A call that still reads the view it
-// was read in (readIn) makes every read there: false.
+// reads the view in force (readView: one marked from a round snapshot, one
+// decided in the test the store opens next,
+// integrations.CallRound.TrackerAhead, or one whose consume the view in force
+// refused, settled) and that view is not the one the call was read in
+// (heldIn: its mark's, its round snapshot's, or the one in force as it was
+// held), so two of its reads may have been made in two views. A call that
+// still reads the view it was read in (readIn) makes every read there: false.
 func (h *heldScope) CallViewMoved() bool {
 	return h.g.readIn == nil && h.exactView() != h.heldIn
 }
