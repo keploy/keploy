@@ -428,6 +428,31 @@ type ExactConsumedReader interface {
 	ConsumedTestMocks() []*models.Mock
 }
 
+// RepeatReadAnswerer is an optional MockMemDb extension of a store that
+// serves each test its own mocks exactly (ExactConsumedReader). A call one
+// more than the open test recorded misses (models.MissExtraCall), except a
+// repeated read its mapping names (models.TestModeInfo.RepeatRead): the test
+// recorded that read at least twice, every time with one answer.
+// AnswerRepeatRead is given the open test's answered recordings the call
+// matches, as the matcher judges it. It returns the recording to answer the
+// call with again when every one of them is a recording of one repeated read
+// of the test, every recording of that read has answered, and the read has
+// not been answered once more in this test yet. It answers each repeated read
+// at most once more per test; nil and false otherwise.
+type RepeatReadAnswerer interface {
+	AnswerRepeatRead(matched []*models.Mock) (*models.Mock, bool)
+}
+
+// AnswerRepeatRead is db's answer to a call one more than the open test
+// recorded (RepeatReadAnswerer); nil and false from a store that has none.
+func AnswerRepeatRead(db MockMemDb, matched []*models.Mock) (*models.Mock, bool) {
+	r, ok := db.(RepeatReadAnswerer)
+	if !ok || len(matched) == 0 {
+		return nil, false
+	}
+	return r.AnswerRepeatRead(matched)
+}
+
 // ExactServedReader is an optional MockMemDb extension of a store that
 // serves each test its own mocks exactly (the proven switch), with a served
 // observer (the learn tracker's ServedMock). ServedInOpenTest returns, of one

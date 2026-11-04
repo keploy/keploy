@@ -322,9 +322,11 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// extra is the full round's own-repeat check (extraCall),
 				// asked before its pairing; -1 where it was not asked. A
 				// miss reads it rather than asking again. extraAt is the
-				// earliest of the test's own recordings of it.
-				extra   = -1
-				extraAt time.Time
+				// earliest of the test's own recordings of it, and
+				// extraMatched those the request matches each on its own.
+				extra        = -1
+				extraAt      time.Time
+				extraMatched []*models.Mock
 				// call is where the request's first read of the round
 				// found it made (integrations.CallRound): a miss's lookup
 				// of a recording made elsewhere is asked of that round.
@@ -384,7 +386,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// recording to the worker scope on its account. A call
 					// whose test recorded none of its kind still pairs.
 					held, _ := integrations.HoldToRound(mockDb, call)
-					extra, extraAt = h.extraCall(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+					extra, extraAt, extraMatched = h.extraCallOf(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 					strict := h.newStrictNoise(headerNoise, bodyNoise, urlNoise)
 					if extra == 0 {
 						if answer, x := h.pairExactlyFrom(reqCtx, input, mockDb, strict, call); answer != nil {
@@ -457,6 +459,25 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				errCh <- err
 				return
 			}
+			// Under exact serving, a call one more than the open test
+			// recorded is answered again when it is a repeated read the
+			// test's mapping names (integrations.AnswerRepeatRead): the
+			// test recorded it at least twice, every time with one answer.
+			// It is asked once (the full round asked already where extra
+			// is set), and the miss below reads its count. A store that
+			// serves no test exactly holds no answered recording: the
+			// request then matches none, and nothing changes.
+			if !ok {
+				if extra < 0 {
+					extra, extraAt, extraMatched = h.extraCallOf(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+				}
+				if again, yes := integrations.AnswerRepeatRead(db, extraMatched); yes {
+					h.Logger.Info("answered a repeated read once more than its test recorded it: the test's mapping names it a read recorded at least twice, every time with one answer",
+						zap.String("call", request.Method+" "+request.URL.Path), zap.String("read", again.TestModeInfo.RepeatRead), zap.Int("recorded", extra), zap.String("mock", again.Name))
+					stub, ok, diag, lmiss = again, true, nil, nil
+				}
+			}
+
 			// The recording matched is named, not dumped: its credentials and
 			// body are the application's content too, and the test set holds it.
 			if ce := h.Logger.Check(zap.DebugLevel, "after matching the http request"); ce != nil {

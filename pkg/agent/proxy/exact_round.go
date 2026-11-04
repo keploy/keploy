@@ -1269,6 +1269,16 @@ func (h *heldScope) ConsumedTestMocks() []*models.Mock {
 	return h.heldOf(h.MockManager.ConsumedTestMocks())
 }
 
+// AnswerRepeatRead is the manager's (integrations.RepeatReadAnswerer) while
+// the staging is still h's call's: a call of a set the replay staged another
+// under is answered by no recording of it.
+func (h *heldScope) AnswerRepeatRead(matched []*models.Mock) (*models.Mock, bool) {
+	if h.moved() {
+		return nil, false
+	}
+	return h.MockManager.AnswerRepeatRead(matched)
+}
+
 // FindAnsweredEarlier is the manager's (integrations.AnsweredFinder) while
 // the staging is still h's call's after the lookup: the answered log is the
 // staged set's, and recordings' names restart in each set, so a call of one

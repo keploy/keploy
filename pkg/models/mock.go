@@ -349,6 +349,15 @@ type TestModeInfo struct {
 	// test. Its matcher prefers the test's own recordings to it. Runtime-only,
 	// like the fields above.
 	Concurrent bool `json:"-" bson:"-"`
+
+	// RepeatRead is, on a test's own recording under exact serving
+	// (KEPLOY_PROVEN), the name of the repeated read its test's mapping
+	// lists it in (MappedTestCase.RepeatReads): the test recorded that read
+	// at least twice, every time with one answer. Exact serving answers
+	// such a read once more than recorded, and does not charge one of its
+	// recordings left unmade (one fewer). Empty for every other recording.
+	// Runtime-only, like the fields above.
+	RepeatRead string `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {

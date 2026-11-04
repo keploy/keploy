@@ -162,6 +162,14 @@ type exactView struct {
 	// positions in the order they did.
 	consumed []bool
 	order    []int
+	// repeats are the test's repeated reads its mapping names
+	// (models.TestModeInfo.RepeatRead) that exact serving honours, by name:
+	// the positions of their recordings, in recorded order
+	// (exactView.repeatReads). Set at install, never changed. answeredAgain
+	// names those a call one more than recorded was answered again, under
+	// mu (MockManager.AnswerRepeatRead).
+	repeats       map[string][]int
+	answeredAgain map[string]bool
 	// spent are the staged mocks this view shows that a parser consumed
 	// through a delete door in its test, or a protocol-phase mock one
 	// evicted outside every test: gone until the view changes. The staged
@@ -1494,6 +1502,7 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 	}
 	v.claims = &m.exact.claims
 	v.consumed = make([]bool, len(v.owned))
+	v.repeats = v.repeatReads()
 	for _, name := range ahead {
 		if i, ok := v.index[name]; ok && !v.isCand(i) {
 			if v.inFlight == nil {
@@ -2018,8 +2027,9 @@ func (v *exactView) outcomeLocked() *testOutcome {
 			o.consumed = append(o.consumed, v.owned[i].Name)
 		}
 	}
+	excused := v.oneFewerLocked()
 	for i, done := range v.consumed {
-		if !done && !v.isCand(i) {
+		if !done && !v.isCand(i) && !excused[i] {
 			o.unconsumed = append(o.unconsumed, v.owned[i].Name)
 		}
 	}

@@ -556,6 +556,13 @@ func (s *scopedMockDb) ConsumedTestMocks() []*models.Mock {
 	return nil
 }
 
+// AnswerRepeatRead forwards the store's answer to a call one more than the
+// open test recorded (integrations.RepeatReadAnswerer), none when it has
+// none.
+func (s *scopedMockDb) AnswerRepeatRead(matched []*models.Mock) (*models.Mock, bool) {
+	return integrations.AnswerRepeatRead(s.MockMemDb, matched)
+}
+
 // ServedInOpenTest forwards the store's stamp of its open test and account of
 // what it was served (integrations.ExactServedReader), 0 and none when it
 // keeps none, so a learn step on a scoped view reads the store's account as
