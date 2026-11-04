@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1745,10 +1746,11 @@ func TestTheExitClockReadsEveryThreadItsProcessCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	counts := 0
+	// The count is the server goroutine's: it serves the stat again at the
+	// exit clock's read below, after the check of it.
+	var counts atomic.Int32
 	serveStat(t, filepath.Join(root, "700", "stat"), func(int) string {
-		counts++
-		if counts == 1 {
+		if counts.Add(1) == 1 {
 			if err := os.Rename(filepath.Join(root, "700", "task", "701"), filepath.Join(root, "701-hidden")); err != nil {
 				t.Error(err)
 			}
@@ -1759,8 +1761,8 @@ func TestTheExitClockReadsEveryThreadItsProcessCounts(t *testing.T) {
 	if err != nil || gone || whole || !slices.Equal(ids, []string{"700", "701"}) {
 		t.Fatalf("taskIDs = %v, whole %v, gone %v, %v; want 700 and 701, every thread the listings held, not whole", ids, whole, gone, err)
 	}
-	if counts != taskListings {
-		t.Fatalf("%d counts read; want %d", counts, taskListings)
+	if n := int(counts.Load()); n != taskListings {
+		t.Fatalf("%d counts read; want %d", n, taskListings)
 	}
 	// Read by the exit clock, the same process is marked: its look counts
 	// only what its threads ran.
@@ -1785,10 +1787,9 @@ func TestTheExitClockReadsEveryThreadItsProcessCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	counts = 0
+	counts.Store(0)
 	serveStat(t, filepath.Join(root, "800", "stat"), func(int) string {
-		counts++
-		if counts == 1 {
+		if counts.Add(1) == 1 {
 			dir := filepath.Join(root, "800", "task", "803")
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				t.Error(err)
@@ -1797,8 +1798,8 @@ func TestTheExitClockReadsEveryThreadItsProcessCounts(t *testing.T) {
 		return withCount(3)
 	})
 	ids, whole, gone, err = taskIDs(root, 800)
-	if err != nil || gone || !whole || !slices.Equal(ids, []string{"800", "801", "803"}) || counts != 2 {
-		t.Fatalf("a thread started as the count was read: taskIDs = %v, whole %v, gone %v, %v, after %d counts; want 800, 801 and 803, whole, after 2", ids, whole, gone, err, counts)
+	if err != nil || gone || !whole || !slices.Equal(ids, []string{"800", "801", "803"}) || counts.Load() != 2 {
+		t.Fatalf("a thread started as the count was read: taskIDs = %v, whole %v, gone %v, %v, after %d counts; want 800, 801 and 803, whole, after 2", ids, whole, gone, err, counts.Load())
 	}
 	// A look with such a thread counts only what the threads ran: here
 	// one waited for a CPU all the look, which, missed by a listing, would
