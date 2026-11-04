@@ -50,7 +50,7 @@ func (j *Java) PreProcess(_ bool) (string, error) {
 			j.cmd = strings.Replace(
 				j.cmd,
 				j.executable,
-				fmt.Sprintf("%s -javaagent:%s=destfile=target/${TESTSETID}.exec", j.executable, jacocoAgentPath), 1,
+				fmt.Sprintf("%s \"-javaagent:%s=destfile=target/${TESTSETID}.exec\"", j.executable, jacocoAgentPath), 1,
 			)
 		}
 	}
