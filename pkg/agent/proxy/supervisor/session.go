@@ -954,15 +954,21 @@ func (s *Session) EmitMock(m *models.Mock) error {
 //     place to enforce shutdown-time backpressure.
 //
 //   - Direct-channel path: replace the select-against-ctx with a
-//     non-blocking best-effort send. If the channel is full at
-//     shutdown the mock is dropped (the alternative — blocking on a
-//     channel whose consumer is itself shutting down — would deadlock
-//     the parser). Callers that need stricter delivery semantics
-//     during shutdown should serialise through the SyncMock manager.
+//     non-blocking send. A mock that finds the channel full at shutdown
+//     is left out with its reason (ReportLeftOut,
+//     LeftOutChannelFullAtStop): counted, spanned and logged, never
+//     dropped with nothing said. Blocking on a channel whose consumer is
+//     itself shutting down would deadlock the parser. Callers that need
+//     stricter delivery semantics during shutdown should serialise
+//     through the SyncMock manager.
 //
 // All other invariants (incomplete-mock gate, ClientConnID
 // propagation, ReqTimestampMock monotonicity, OnMockRecorded hook
 // chain, OnPendingCleared) match EmitMock byte-for-byte.
+// LeftOutChannelFullAtStop is the reason EmitMockOnShutdown leaves out a
+// mock that found the session's channel (Session.Mocks) full.
+const LeftOutChannelFullAtStop = "the recording stopped with the session's mock channel full as this mock was handed over"
+
 func (s *Session) EmitMockOnShutdown(m *models.Mock) error {
 	return s.emitMockCore(m, true)
 }
@@ -1098,17 +1104,19 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 	if shutdown {
 		// Non-blocking send: at shutdown the consumer is also
 		// winding down so a blocked send would deadlock the
-		// parser. Drop on full channel; callers that want stricter
-		// delivery during shutdown should route via SyncMock.
+		// parser. A mock that finds the channel full is left out,
+		// reported, as any mock the session could not record;
+		// callers that want stricter delivery during shutdown
+		// should route via SyncMock.
 		select {
 		case s.Mocks <- m:
 			if s.OnPendingCleared != nil {
 				s.OnPendingCleared()
 			}
-			return nil
 		default:
-			return nil
+			s.ReportLeftOut(m, LeftOutChannelFullAtStop)
 		}
+		return nil
 	}
 	select {
 	case s.Mocks <- m:

@@ -671,6 +671,58 @@ func TestEmitMockOnShutdownLeavesOutAndReportsAMockMarkedIncomplete(t *testing.T
 	}
 }
 
+// A mock EmitMockOnShutdown hands to a session's channel that is full is left
+// out with its reason, counted and spanned once, its pending work cleared, and
+// never delivered. Before, the shutdown's non-blocking send dropped it with
+// nothing said. The session's ctx is cancelled, as it is at shutdown.
+// Not parallel: the WARN limit is process-wide, and this test sets its clock.
+func TestEmitMockOnShutdownLeavesOutAMockTheFullChannelCannotTake(t *testing.T) {
+	clock := time.Unix(7100, 0)
+	prev := leftOutWarns
+	leftOutWarns = &WarnLimiters{every: leftOutWarnEvery, now: func() time.Time { return clock }}
+	t.Cleanup(func() { leftOutWarns = prev })
+	core, logs := observer.New(zapcore.DebugLevel)
+	spans := &rawSpans{}
+	mgr := syncMock.New(nil)
+	mocks := make(chan *models.Mock, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s := &Session{Mgr: mgr, Orphans: spans, Mocks: mocks, Logger: zap.New(core), Ctx: ctx, ClientConnID: "full-conn"}
+	cleared := 0
+	s.OnPendingCleared = func() { cleared++ }
+	at := time.Now().Add(-time.Minute)
+	first := &models.Mock{Name: "first", Kind: models.GENERIC}
+	first.Spec.ReqTimestampMock, first.Spec.ResTimestampMock = at, at.Add(time.Millisecond)
+	second := &models.Mock{Name: "second", Kind: models.GENERIC}
+	second.Spec.ReqTimestampMock, second.Spec.ResTimestampMock = at.Add(time.Second), at.Add(time.Second+3*time.Millisecond)
+	for _, m := range []*models.Mock{first, second} {
+		if err := s.EmitMockOnShutdown(m); err != nil {
+			t.Fatalf("EmitMockOnShutdown(%s) = %v, want nil", m.Name, err)
+		}
+	}
+	if len(mocks) != 1 || <-mocks != first {
+		t.Fatal("the channel does not hold the first mock alone")
+	}
+	if n := mgr.MocksLeftOut(); n != 1 {
+		t.Fatalf("the manager counts %d mock(s) left out, want the one the full channel could not take", n)
+	}
+	if len(spans.got) != 1 || !spans.got[0][0].Equal(second.Spec.ReqTimestampMock) || !spans.got[0][1].Equal(second.Spec.ResTimestampMock) {
+		t.Fatalf("Orphans got %v, want the second mock's exchange once", spans.got)
+	}
+	if cleared != 2 {
+		t.Fatalf("pending work cleared %d time(s), want once for each mock", cleared)
+	}
+	var reasons []any
+	for _, e := range logs.All() {
+		if e.Message == LeftOutWarnMsg || e.Message == LeftOutDebugMsg {
+			reasons = append(reasons, e.ContextMap()["reason"])
+		}
+	}
+	if len(reasons) != 1 || reasons[0] != LeftOutChannelFullAtStop {
+		t.Fatalf("logged left-out reasons %v, want one: %q", reasons, LeftOutChannelFullAtStop)
+	}
+}
+
 type rawSpans struct{ got [][2]time.Time }
 
 func (r *rawSpans) Record(start, end time.Time) { r.got = append(r.got, [2]time.Time{start, end}) }
