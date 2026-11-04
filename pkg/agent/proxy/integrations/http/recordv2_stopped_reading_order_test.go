@@ -174,8 +174,9 @@ func TestPartAnswerFault_TheClientsStopWhicheverEndIsMarkedFirst(t *testing.T) {
 			s := &supervisor.Session{}
 			tc.marks(s)
 			s.MarkEndedWhereClientStopped()
-			if f := partAnswerFault(s); f == nil || f.Kind != models.FaultStoppedReading || !f.AfterHead {
-				t.Fatalf("partAnswerFault = %+v, want the app's stop (stopped_reading after the head)", f)
+			if f := partAnswerFault(s); f == nil || f.Kind != models.FaultStoppedReading || !f.AfterHead || !f.AppEndedFirst {
+				t.Fatalf("partAnswerFault = %+v, want the app's stop (stopped_reading after the head), "+
+					"marked as a call whose app ended its side first", f)
 			}
 		})
 	}

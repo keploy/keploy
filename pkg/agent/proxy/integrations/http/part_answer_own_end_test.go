@@ -11,10 +11,12 @@ import (
 
 // endsJudged is what recordV2 decides of a call whose response stream ended
 // before the response did, or got no byte of an answer, from the session's
-// marks alone.
+// marks alone: each fault's kind, and whether it says the app ended its side
+// first (models.Fault.AppEndedFirst), which replay holds past the app's FIN.
 type endsJudged struct {
-	leftOut      string // partAnswerLeftOut's reason; "" where it keeps the exchange
-	part, noneOf models.FaultKind
+	leftOut                string // partAnswerLeftOut's reason; "" where it keeps the exchange
+	part, noneOf           models.FaultKind
+	partFirst, noneOfFirst bool
 }
 
 func judge(s *supervisor.Session) endsJudged {
@@ -23,10 +25,10 @@ func judge(s *supervisor.Session) endsJudged {
 		j.leftOut = reason
 	}
 	if f := partAnswerFault(s); f != nil {
-		j.part = f.Kind
+		j.part, j.partFirst = f.Kind, f.AppEndedFirst
 	}
 	if f := noAnswerFault(s, io.EOF, 1); f != nil {
-		j.noneOf = f.Kind
+		j.noneOf, j.noneOfFirst = f.Kind, f.AppEndedFirst
 	}
 	return j
 }
@@ -48,7 +50,7 @@ func TestRecordV2Faults_TheClientsOwnEndJudgesWhicheverEndIsMarkedFirst(t *testi
 		{supervisor.EndAtStop, endsJudged{leftOut: supervisor.LeftOutPartwayAtStop}},
 		{supervisor.EndAtExit, endsJudged{leftOut: supervisor.LeftOutPartwayAtExit}},
 		{supervisor.EndUnjudged, endsJudged{leftOut: supervisor.LeftOutPartwayUnjudged}},
-		{supervisor.EndMayBeFault, endsJudged{part: models.FaultStoppedReading, noneOf: models.FaultTimeout}},
+		{supervisor.EndMayBeFault, endsJudged{part: models.FaultStoppedReading, noneOf: models.FaultTimeout, partFirst: true, noneOfFirst: true}},
 	} {
 		for _, dest := range []supervisor.NoFaultEnd{supervisor.EndMayBeFault, supervisor.EndAtStop} {
 			for _, clientFirst := range []bool{true, false} {
@@ -105,7 +107,7 @@ func TestRecordV2Faults_TheUpstreamsEndJudgesWhereTheClientsDoesNot(t *testing.T
 		{"the relay's word, the upstream's close read, the client's end never", func(s *supervisor.Session) {
 			s.MarkPeerEndedBy(fakeconn.FromDest, false, supervisor.EndMayBeFault)
 			s.MarkEndedWhereClientStopped()
-		}, endsJudged{part: models.FaultStoppedReading, noneOf: models.FaultEOF}},
+		}, endsJudged{part: models.FaultStoppedReading, noneOf: models.FaultEOF, partFirst: true}},
 		{"the relay's word, the upstream's close read at the stop, the client's end never", func(s *supervisor.Session) {
 			s.MarkPeerEndedBy(fakeconn.FromDest, false, supervisor.EndAtStop)
 			s.MarkEndedWhereClientStopped()

@@ -90,10 +90,22 @@ func TestAFaultRoundTrips(t *testing.T) {
 		if err != nil || len(jout) != 1 || jout[0].Spec.Fault == nil || *jout[0].Spec.Fault != want || jout[0].Kind != models.HTTP || !bytes.Contains(jsonBytes, []byte(`"kind":"HttpFault"`)) {
 			t.Fatalf("json document round-trip: err=%v %+v, want %+v", err, jout, want)
 		}
+		if bytes.Contains(jsonBytes, []byte(`"app_ended_first":true`)) != want.AppEndedFirst {
+			t.Fatalf("the app_ended_first mark is written in the json document = %v, want %v:\n%s",
+				!want.AppEndedFirst, want.AppEndedFirst, jsonBytes)
+		}
 
 		jm, ok, err := EncodeMockJSON(m, zap.NewNop())
 		if err != nil || !ok {
 			t.Fatalf("EncodeMockJSON: ok=%v err=%v", ok, err)
+		}
+		jmBytes, err := json.Marshal(jm)
+		if err != nil {
+			t.Fatalf("marshal the json mock: %v", err)
+		}
+		if bytes.Contains(jmBytes, []byte(`"app_ended_first":true`)) != want.AppEndedFirst {
+			t.Fatalf("the app_ended_first mark is written in the json mock = %v, want %v:\n%s",
+				!want.AppEndedFirst, want.AppEndedFirst, jmBytes)
 		}
 		jmout, err := DecodeMocksJSON([]*yaml.NetworkTrafficDocJSON{jm}, zap.NewNop())
 		if err != nil || len(jmout) != 1 || jmout[0].Spec.Fault == nil || *jmout[0].Spec.Fault != want || jm.Kind != models.HTTPFault || jmout[0].Kind != models.HTTP {
