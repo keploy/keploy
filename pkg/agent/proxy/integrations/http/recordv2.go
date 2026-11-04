@@ -344,13 +344,14 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// Build and emit the mock. Identical shape to the legacy path.
 		// The exchange is judged by how its connection ended where its
 		// read ended at the stream's end, and also where a side's end came
-		// first, before the recording's stop (stopCut judges one after it),
-		// and the supervisor's abort (the recording's stop) then closed the
-		// stream, or the parser's context ended (endJudgesAfterCtx), while
-		// the relay still waited on the other side's half (readerClosed):
-		// the abort ended only that wait, and the exchange ended with the
-		// end that came first, as it does at the stream's end that follows
-		// that end with no stop. The client's end is judged so (its giving
+		// first (an upstream end read once the recording's stop had begun
+		// is stopCut's), and the supervisor's abort (the recording's stop)
+		// then closed the stream, or the parser's context ended
+		// (endJudgesAfterCtx), while the relay still waited on the other
+		// side's half (readerClosed): the abort ended only that wait, and
+		// the exchange ended with the end that came first, as it does at
+		// the stream's end that follows that end with no stop. The client's
+		// end is judged so (the stop's close of the application, its giving
 		// up, its process's exit, an end the hooks cannot judge), and so is
 		// the upstream's (its reset or its close cut the answer short). Not
 		// as a response that does not decode, with an ERROR, nor a
@@ -369,7 +370,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				if mark, ok := sess.TakeMockIncomplete(); ok {
 					reason = mark + ": " + reason
 				}
-				logger.Debug("V2 HTTP record: the client's end came partway through the response, and records no fault; the exchange is left out")
+				logger.Debug("V2 HTTP record: the client's end came partway through the response, and records no fault; the exchange is left out", zap.String("reason", reason))
 				sess.ReportLeftOut(&models.Mock{
 					Kind: models.HTTP,
 					Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
@@ -528,16 +529,12 @@ func partAnswerLeftOut(sess *supervisor.Session) (reason string, ok bool) {
 //     (Session.RecordingStopping): the relay, whose context is the
 //     recording's, ended the stream with the connection still open, or the
 //     supervisor's abort at the stop closed it, or the parser's context ended
-//     with the recording's: LeftOutStopCutOpen;
-//   - the connection's first end was the client's, read once the stop had
-//     begun (FirstEndNoFault's EndAtStop: the stop closed the application
-//     with the call in flight): LeftOutPartwayAtStop, however the read ended
-//     after it: at the stream's end (as partAnswerLeftOut finds), at the
-//     supervisor's abort's close of the stream while the relay still waited
-//     on the upstream's half, or with the parser's context.
+//     with the recording's: LeftOutStopCutOpen.
 //
-// EndFollowedStop holds only of a first end that came, so the first end is
-// not asked for whether one did there.
+// A first end of the client's is judged by recordV2 however the read ended
+// after it (partAnswerLeftOut: LeftOutPartwayAtStop where the stop closed the
+// application with the call in flight). EndFollowedStop holds only of a first
+// end that came, so the first end is not asked for whether one did there.
 func stopCut(sess *supervisor.Session, readItsEnd bool) (reason string, ok bool) {
 	if _, hole := sess.EndedAtHole(fakeconn.FromDest); hole {
 		return "", false
@@ -551,9 +548,6 @@ func stopCut(sess *supervisor.Session, readItsEnd bool) (reason string, ok bool)
 			return supervisor.LeftOutStopCutAfterEnd, true
 		}
 		return supervisor.LeftOutStopCut, true
-	}
-	if first == fakeconn.FromClient && sess.FirstEndNoFault() == supervisor.EndAtStop {
-		return supervisor.LeftOutPartwayAtStop, true
 	}
 	return "", false
 }

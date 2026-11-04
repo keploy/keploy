@@ -1203,6 +1203,37 @@ func TestRecordV2_TheContextsEndAtAHoleIsNotTheClients(t *testing.T) {
 	}
 }
 
+// Not a cut: the parser read a whole response as its context ended, with no
+// side's end. The exchange it read is recorded whole: the session's context is
+// the parser's, and EmitMock's check of it would drop the mock with nothing
+// reporting it. The connection did not end, so recordV2 returns the context's
+// end, as before.
+func TestRecordV2_AWholeAnswerReadAsTheContextEndsIsRecorded(t *testing.T) {
+	const part, rest = "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n01234", "56789"
+	for _, proven := range []bool{false, true} {
+		t.Run(strings.TrimPrefix(switchName[proven], ", "), func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+			c := newRelayedConn(t)
+			_, _, mocks, err := firstEndThenStop(t, c, part, rest, theParsersCtx, 1, func() {})
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("recordV2 = %v, want the parser's context's end: the connection did not end", err)
+			}
+			if got := leftOutReasons(c); len(got) != 0 {
+				t.Errorf("left out for %q, want the whole exchange recorded", got)
+			}
+			if got := errorsLogged(c); len(got) != 0 {
+				t.Errorf("logged %q at ERROR, want nothing", got)
+			}
+			if len(mocks) != 1 {
+				t.Fatalf("recorded %d mocks, want the whole exchange once", len(mocks))
+			}
+			if f, r := mocks[0].Spec.Fault, mocks[0].Spec.HTTPResp; f != nil || r == nil || r.Body != "0123456789" {
+				t.Errorf("recorded the response %+v with the fault %v, want it whole, with no fault", r, f)
+			}
+		})
+	}
+}
+
 // Not a cut: a parser behind its capture reads a whole response after the
 // client's end, which came once the application had it (its giving up, the
 // recording's stop, its process's exit, or an end the hooks cannot judge),
