@@ -2,6 +2,8 @@ package postmanimport
 
 import (
 	"encoding/json"
+	"net/url"
+	"reflect"
 	"testing"
 )
 
@@ -65,5 +67,31 @@ func TestItemsContainerUnmarshal_KeepsRootRequests(t *testing.T) {
 	}
 	if got.TestDataItems[0].Name != "Health check" {
 		t.Fatalf("request name = %q, want Health check", got.TestDataItems[0].Name)
+	}
+}
+
+func TestProcessUrlencodedBody_EscapesReservedCharacters(t *testing.T) {
+	body := []map[string]interface{}{
+		{"key": "name", "value": "A&B+C"},
+		{"key": "email", "value": "dev+test@example.com"},
+		{"key": "a b", "value": "x=y"},
+	}
+
+	got := processUrlencodedBody(body)
+
+	values, err := url.ParseQuery(got)
+	if err != nil {
+		t.Fatalf("ParseQuery(%q) failed: %v", got, err)
+	}
+	want := url.Values{
+		"name":  {"A&B+C"},
+		"email": {"dev+test@example.com"},
+		"a b":   {"x=y"},
+	}
+	if !reflect.DeepEqual(values, want) {
+		t.Fatalf("decoded body = %v, want %v (encoded as %q)", values, want, got)
+	}
+	if want := "name=A%26B%2BC&email=dev%2Btest%40example.com&a+b=x%3Dy"; got != want {
+		t.Fatalf("processUrlencodedBody() = %q, want %q", got, want)
 	}
 }
