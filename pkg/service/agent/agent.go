@@ -2089,8 +2089,9 @@ func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, 
 	}
 	// The set's recordings as recorded, beside what the staging shows
 	// (integrations.RecordedSetRanger), in either switch mode: the on-disk
-	// store's, nil for a set kept resident. Set before the staging, so no
-	// read of it finds the last set's.
+	// store's, nil for a set kept resident. Handed before the staging, which
+	// installs it with the trees it builds, so a read of the set as recorded
+	// ranges one staging's trees and source, the last set's until then.
 	if rk, ok := a.Proxy.(coreAgent.RecordedOfKindSetter); ok {
 		if err := rk.SetRecordedOfKind(a.diskRecordedOfKind()); err != nil {
 			return fmt.Errorf("set the test set's recordings of a kind: %w", err)

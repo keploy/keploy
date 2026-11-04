@@ -9,21 +9,32 @@ import (
 // of kind its trees hold (per-test, session, startup), then those the agent
 // keeps on disk (SetRecordedOfKind), each once by name, whatever a read
 // shows of them (a test's window, a consume, exact serving's view). With no
-// on-disk source set, whole is false and nothing is visited: the agent sets
-// one as it stages a set it keeps on disk (Agent.stageMocks), and the trees
-// of a set it keeps resident may hold only the open test's window.
+// on-disk source staged, whole is false and nothing is visited: the agent
+// hands one as it stages a set it keeps on disk (Agent.stageMocks), and the
+// trees of a set it keeps resident may hold only the open test's window.
+//
+// The trees and the source are read together under swapMu, as one staging
+// installed them (installRecordedOfKindLocked): the agent hands a set's
+// source before it stages that set, so a read between the two still ranges
+// the set staged, never its trees with the next set's on-disk recordings.
 func (m *MockManager) RangeRecordedSet(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) (bool, error) {
 	if m.closed.Load() {
 		return false, nil
 	}
+	m.swapMu.RLock()
 	m.exact.ofKind.mu.Lock()
-	src := m.exact.ofKind.src
+	src := m.exact.ofKind.staged
 	m.exact.ofKind.mu.Unlock()
+	var staged []*models.Mock
+	if src != nil {
+		staged = m.stagedOfKind(kind)
+	}
+	m.swapMu.RUnlock()
 	if src == nil {
 		return false, nil
 	}
 	seen := map[string]bool{}
-	for _, mk := range m.stagedOfKind(kind) {
+	for _, mk := range staged {
 		seen[mk.Name] = true
 		if !visit(mk.Name, func() (*models.Mock, error) { return mk, nil }) {
 			return true, nil

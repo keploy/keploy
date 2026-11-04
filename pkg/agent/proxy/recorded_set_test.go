@@ -2,8 +2,12 @@ package proxy
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,7 +50,11 @@ func TestTheRecordedSetIsTheTreesAndTheDiskEachOnce(t *testing.T) {
 	session := r3Mock("s-config", now.Add(-time.Minute), "GET", "/config", "", `{}`)
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
-	mm.SetMocksWithWindow([]*models.Mock{early, late}, []*models.Mock{session}, now.Add(-time.Second), now.Add(time.Second))
+	// The agent hands a set's source, then stages it (Agent.stageMocks).
+	stage := func() {
+		mm.SetMocksWithWindow([]*models.Mock{early, late}, []*models.Mock{session}, now.Add(-time.Second), now.Add(time.Second))
+	}
+	stage()
 	if got, whole := rangedNames(t, mm); whole || got != nil {
 		t.Fatalf("with no on-disk source the range told whole %v and visited %v; want neither", whole, got)
 	}
@@ -60,6 +68,10 @@ func TestTheRecordedSetIsTheTreesAndTheDiskEachOnce(t *testing.T) {
 		}
 		return nil
 	})
+	if got, whole := rangedNames(t, mm); whole || got != nil {
+		t.Fatalf("a source handed and not staged yet told whole %v and visited %v; want the staging's, none", whole, got)
+	}
+	stage()
 	want := []string{"s-config", "t-early", "t-late"}
 	for name, db := range map[string]integrations.MockMemDb{"manager": mm, "view": &scopedMockDb{MockMemDb: mm}} {
 		if got, whole := rangedNames(t, db); !whole || !reflect.DeepEqual(got, want) {
@@ -73,15 +85,18 @@ func TestTheRecordedSetIsTheTreesAndTheDiskEachOnce(t *testing.T) {
 	}
 	boom := errors.New("disk read failed")
 	mm.SetRecordedOfKind(func(models.Kind, func(string, func() (*models.Mock, error)) bool) error { return boom })
+	stage()
 	if whole, err := mm.RangeRecordedSet(models.HTTP, func(string, func() (*models.Mock, error)) bool { return true }); whole || !errors.Is(err, boom) {
 		t.Fatalf("a source that failed told whole %v, %v; want false and its error", whole, err)
 	}
 	mm.SetRecordedOfKind(nil)
+	stage()
 	if got, whole := rangedNames(t, mm); whole || got != nil {
 		t.Fatalf("a source unset told whole %v and visited %v; want neither", whole, got)
 	}
 	// A manager closed tells none, though its source was not unset.
 	mm.SetRecordedOfKind(func(models.Kind, func(string, func() (*models.Mock, error)) bool) error { return nil })
+	stage()
 	mm.Close()
 	if got, whole := rangedNames(t, mm); whole || got != nil {
 		t.Fatalf("a closed manager told whole %v and visited %v; want neither", whole, got)
@@ -100,6 +115,7 @@ func TestAHeldCallIsToldNoSetStagedAfterItsMark(t *testing.T) {
 			t.Fatalf("view %v: a held call of a manager with no source told whole %v and visited %v; want neither", view, whole, got)
 		}
 		mm.SetRecordedOfKind(func(models.Kind, func(string, func() (*models.Mock, error)) bool) error { return nil })
+		stage()
 		held, _ = holdCall(store)
 		if got, whole := rangedNames(t, held); !whole || !reflect.DeepEqual(got, want) {
 			t.Fatalf("view %v: a held call's range told whole %v and visited %v; want %v", view, whole, got, want)
@@ -150,8 +166,8 @@ func TestTheOnDiskSetIsReadByKindInEitherSwitchMode(t *testing.T) {
 		}
 		disk.Finalize()
 		mm := NewMockManager(nil, nil, zap.NewNop())
-		mm.SetMocksWithWindow([]*models.Mock{early}, nil, now.Add(-time.Second), now.Add(time.Second))
 		mm.SetRecordedOfKind(disk.RangeKind)
+		mm.SetMocksWithWindow([]*models.Mock{early}, nil, now.Add(-time.Second), now.Add(time.Second))
 		got, whole := rangedNames(t, mm)
 		mm.Close()
 		_ = disk.Close()
@@ -159,5 +175,122 @@ func TestTheOnDiskSetIsReadByKindInEitherSwitchMode(t *testing.T) {
 		if want := []string{"t-early", "t-late"}; !whole || !reflect.DeepEqual(got, want) {
 			t.Fatalf("switch %v: the range told whole %v and visited %v; want the whole set %v", on, whole, got, want)
 		}
+	}
+}
+
+// setSource is a set's on-disk source of HTTP recordings: names, each its own
+// recording.
+func setSource(names ...string) func(models.Kind, func(string, func() (*models.Mock, error)) bool) error {
+	now := time.Now()
+	mocks := make([]*models.Mock, len(names))
+	for i, n := range names {
+		mocks[i] = r3Mock(n, now, "GET", "/"+n, "", `{}`)
+	}
+	return func(kind models.Kind, visit func(string, func() (*models.Mock, error)) bool) error {
+		for _, m := range mocks {
+			if m.Kind == kind && !visit(m.Name, func() (*models.Mock, error) { return m, nil }) {
+				return nil
+			}
+		}
+		return nil
+	}
+}
+
+// The agent hands the next set's on-disk source before it stages that set
+// (Agent.stageMocks). A read of the set as recorded between the two ranges
+// the set staged, its trees and its source, never its trees with the next
+// set's on-disk recordings: the staging installs the source it was handed
+// with the trees it builds, and the range reads both as one staging left
+// them.
+func TestARangeBeforeTheNextSetIsStagedRangesTheSetStaged(t *testing.T) {
+	now := time.Now()
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	stageSet := func(set string) {
+		mm.SetRecordedOfKind(setSource(set + "-disk"))
+		mm.SetMocksWithWindow(nil, []*models.Mock{r3Mock(set+"-tree", now, "GET", "/"+set, "", `{}`)}, models.BaseTime, now.Add(time.Hour))
+	}
+	stageSet("a")
+	if got, whole := rangedNames(t, mm); !whole || !reflect.DeepEqual(got, []string{"a-disk", "a-tree"}) {
+		t.Fatalf("set a staged: the range told whole %v and visited %v; want set a's", whole, got)
+	}
+	mm.SetRecordedOfKind(setSource("b-disk"))
+	if got, whole := rangedNames(t, mm); !whole || !reflect.DeepEqual(got, []string{"a-disk", "a-tree"}) {
+		t.Fatalf("set b's source handed, set a still staged: the range told whole %v and visited %v; want set a's alone", whole, got)
+	}
+	mm.SetMocksWithWindow(nil, []*models.Mock{r3Mock("b-tree", now, "GET", "/b", "", `{}`)}, models.BaseTime, now.Add(time.Hour))
+	if got, whole := rangedNames(t, mm); !whole || !reflect.DeepEqual(got, []string{"b-disk", "b-tree"}) {
+		t.Fatalf("set b staged: the range told whole %v and visited %v; want set b's", whole, got)
+	}
+	// The bare tier setters stage too, and install what was handed.
+	mm.SetRecordedOfKind(setSource("c-disk"))
+	mm.SetUnFilteredMocks([]*models.Mock{r3Mock("c-tree", now, "GET", "/c", "", `{}`)})
+	if got, whole := rangedNames(t, mm); !whole || !reflect.DeepEqual(got, []string{"b-tree", "c-disk", "c-tree"}) {
+		t.Fatalf("a bare session setter staged set c: the range told whole %v and visited %v; want the trees it left and set c's source", whole, got)
+	}
+	mm.SetRecordedOfKind(setSource("d-disk"))
+	mm.SetFilteredMocks(nil)
+	if got, whole := rangedNames(t, mm); !whole || !reflect.DeepEqual(got, []string{"b-tree", "c-tree", "d-disk"}) {
+		t.Fatalf("a bare per-test setter staged: the range told whole %v and visited %v; want the trees it left and the source it installed", whole, got)
+	}
+}
+
+// Ranges made while the agent stages set after set, each set's source handed
+// before its staging as the agent does, each visit one set's recordings
+// alone: the staging changes the trees and installs the source under swapMu,
+// and the range reads them together under it.
+func TestRangesInterleavedWithStagingsEachSeeOneSet(t *testing.T) {
+	now := time.Now()
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	stageSet := func(i int) {
+		set := "s" + strconv.Itoa(i)
+		mm.SetRecordedOfKind(setSource(set+"-disk-1", set+"-disk-2"))
+		mm.SetMocksWithWindow(nil, []*models.Mock{
+			r3Mock(set+"-tree-1", now, "GET", "/"+set+"/1", "", `{}`),
+			r3Mock(set+"-tree-2", now, "GET", "/"+set+"/2", "", `{}`),
+		}, models.BaseTime, now.Add(time.Hour))
+	}
+	stageSet(0)
+	const stagings, readers = 400, 4
+	done := make(chan struct{})
+	errs := make(chan string, readers)
+	var wg sync.WaitGroup
+	for r := 0; r < readers; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				sets := map[string]int{}
+				whole, err := mm.RangeRecordedSet(models.HTTP, func(name string, _ func() (*models.Mock, error)) bool {
+					sets[name[:strings.IndexByte(name, '-')]]++
+					return true
+				})
+				if err != nil || !whole || len(sets) != 1 {
+					errs <- fmt.Sprintf("a range told whole %v, %v and visited the recordings of sets %v; want one set's four", whole, err, sets)
+					return
+				}
+				for set, n := range sets {
+					if n != 4 {
+						errs <- fmt.Sprintf("a range visited %d recordings of set %s; want its four", n, set)
+						return
+					}
+				}
+			}
+		}()
+	}
+	for i := 1; i <= stagings; i++ {
+		stageSet(i)
+	}
+	close(done)
+	wg.Wait()
+	close(errs)
+	if msg, bad := <-errs; bad {
+		t.Fatal(msg)
 	}
 }
