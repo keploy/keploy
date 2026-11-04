@@ -125,9 +125,14 @@ func as(pid int) context.Context {
 	return coreAgent.WithCaller(context.Background(), func() (int, error) { return pid, nil })
 }
 
+// workerDir is the folder a test worker of key claims from, as keploy's Go
+// SDK sends its package's (os.Getwd): the begin then notes it (NoteScope)
+// before its seed and its worker.
+func workerDir(key string) string { return "/repo/" + key }
+
 func claimWorker(t *testing.T, a *Agent, pid int, key string, workers int) string {
 	t.Helper()
-	resp, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: key, Workers: workers}, pid)
+	resp, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: key, Dir: workerDir(key), Workers: workers}, pid)
 	require.Nil(t, serr)
 	return resp.Instance
 }

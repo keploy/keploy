@@ -119,7 +119,7 @@ func claimAsWorker(a *Agent, pid int, key string) (models.InstanceResp, *models.
 	defer a.wire.unlock()
 	start, _ := procStart(pid)
 	stamper, _ := a.Hooks.(coreAgent.InstanceStamper)
-	return a.claimWorker(ctx, models.InstanceReq{Key: key, Workers: 2}, claimant{pid: pid, start: start}, 2, stamper)
+	return a.claimWorker(ctx, models.InstanceReq{Key: key, Dir: workerDir(key), Workers: 2}, claimant{pid: pid, start: start}, 2, stamper)
 }
 
 // In a replay each worker's claim serves it from a manager of its own, armed
@@ -519,6 +519,8 @@ func TestEachWorkersTestKeepsItsOwnSeedWhileAnothersIsOpen(t *testing.T) {
 		require.Equal(t, models.ScopeRandomSeeded, two.Random, "the other end's word is not its")
 		require.EqualValues(t, 1, one.Instance)
 		require.EqualValues(t, 2, two.Instance)
+		require.Equal(t, workerDir("a"), one.Dir, "its worker's folder")
+		require.Equal(t, workerDir("b"), two.Dir, "its worker's folder")
 	}
 	end := func(t *testing.T, a *Agent, w1, w2 int) {
 		t.Helper()
@@ -586,6 +588,39 @@ func TestEachWorkersTestKeepsItsOwnSeedWhileAnothersIsOpen(t *testing.T) {
 		end(t, a, w1.Process.Pid, w2.Process.Pid)
 		seeds(t, a)
 	})
+}
+
+// A test worker's claim names its folder, as keploy's Go SDK sends it: the
+// begin notes the folder first, which starts the test's notes afresh, then
+// its seed and its worker. So each window keeps its folder, its own seed
+// and its worker's instance; a begin that noted the worker before the
+// folder would leave every window with no worker's instance, and charge
+// each worker's test with the calls of none.
+func TestAWorkersClaimWithItsFolderKeepsItsInstanceAndSeedOnItsWindows(t *testing.T) {
+	a, _ := workerAgent(t, models.MODE_RECORD, 4)
+	w1, w2 := child(t), child(t)
+	for _, c := range []struct {
+		pid      int
+		key, dir string
+	}{{w1.Process.Pid, "a", "/work/pkg/a"}, {w2.Process.Pid, "b", "/work/pkg/b"}} {
+		_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: c.key, Dir: c.dir, Workers: 2}, c.pid)
+		require.Nil(t, serr)
+	}
+	_, serr := a.ProvenBegin(as(w1.Process.Pid), seededBegin("TestOne", "1111222233334444"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(as(w2.Process.Pid), seededBegin("TestTwo", "aaaabbbbccccdddd"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(as(w1.Process.Pid), models.ScopeReq{Name: "TestOne", Outcome: "passed"})
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestTwo", Outcome: "passed"})
+	require.Nil(t, serr)
+	one, two := windowOf(t, a, "a::TestOne"), windowOf(t, a, "b::TestTwo")
+	require.Equal(t, "/work/pkg/a", one.Dir)
+	require.Equal(t, "/work/pkg/b", two.Dir)
+	require.EqualValues(t, 1, one.Instance)
+	require.EqualValues(t, 2, two.Instance)
+	require.Equal(t, "1111222233334444", one.Seed)
+	require.Equal(t, "aaaabbbbccccdddd", two.Seed)
 }
 
 // A replay whose build moves the run's one clock to each test's recorded
