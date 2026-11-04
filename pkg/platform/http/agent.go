@@ -3250,6 +3250,15 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	// A container that exits ends the wait through docker run's own exit
 	// (exited), which says why: the watch is not asked.
 	judged := watchStart(agentCtx, a.logger, read, running, nil, isDockerCmd, false)
+	// The wait ends only once its watch has, and so once the watch's look,
+	// and the engine command that look runs, have been ended and waited
+	// for, unless keploy may not signal that command (runEngine): the
+	// watch's channel closes then.
+	defer func(watch <-chan startJudgment) {
+		cancel()
+		for range watch {
+		}
+	}(judged)
 
 	for {
 		select {
@@ -3292,7 +3301,13 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 			default:
 			}
 			return context.Cause(ctx)
-		case j := <-judged:
+		case j, ok := <-judged:
+			if !ok {
+				// The watch ended with agentCtx, so with ctx: the
+				// case above says how.
+				judged = nil
+				continue
+			}
 			switch j.verdict {
 			case bootFailed:
 				// The agent says its start has failed, as a retry would: it
@@ -4043,17 +4058,65 @@ func stopAgentContainerFor(logger *zap.Logger, run *agentRun, name string) {
 	}
 }
 
+// killEngineCommand is how a container engine command whose context has
+// ended is killed (agentUtils.KillOwnProcessGroup). A variable for tests.
+var killEngineCommand = agentUtils.KillOwnProcessGroup
+
 // containerEngineCommand is the container engine's CLI running args under
 // ctx, as name (the engine's CLI, or sudo). It runs in a process group of its
-// own, so a terminal's Ctrl+C does not interrupt it.
-func containerEngineCommand(ctx context.Context, name string, argv ...string) *exec.Cmd {
-	c := exec.CommandContext(ctx, name, argv...)
+// own, so a terminal's Ctrl+C does not interrupt it. unsignalled is closed
+// once ctx has ended and the kill has found that keploy may not signal the
+// command (runEngine).
+func containerEngineCommand(ctx context.Context, name string, argv ...string) (c *exec.Cmd, unsignalled <-chan struct{}) {
+	c = exec.CommandContext(ctx, name, argv...)
 	agentUtils.SetOwnProcessGroup(c)
-	// Once ctx is cancelled the process is killed -- but under sudo that is
-	// sudo, and the root engine client it ran keeps the output pipe open until
-	// it exits by itself. Do not wait for that pipe.
+	refused := make(chan struct{})
+	// Once ctx is cancelled the command is killed, with every process of it
+	// still in its group: a CLI that does part of its work in a child
+	// process ends with it, and so does the wait for its output, which that
+	// child holds open too. Under sudo that kills sudo; the root engine
+	// client it ran, which keploy may not signal, keeps the output pipe open
+	// until it exits by itself. Do not wait for that pipe. Under a sudo
+	// that makes itself root in full (before 1.9.4, so that the user who
+	// ran it cannot kill it), keploy may not signal sudo either. exec calls
+	// Cancel once.
+	c.Cancel = func() error {
+		err := killEngineCommand(c)
+		if errors.Is(err, os.ErrPermission) {
+			close(refused)
+		}
+		return err
+	}
 	c.WaitDelay = time.Second
-	return c
+	return c, refused
+}
+
+// runEngine runs c (containerEngineCommand), and returns what output takes
+// from it once it has ended. The one exception is a command keploy may not
+// signal (unsignalled), which no kill of keploy's can end: once its context
+// has ended, its run returns at once, with that context's cause, and the
+// command is left to end by itself, waited for off the caller's goroutine.
+func runEngine(ctx context.Context, c *exec.Cmd, unsignalled <-chan struct{}, output func(*exec.Cmd) ([]byte, error)) ([]byte, error) {
+	type result struct {
+		out []byte
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := output(c)
+		done <- result{out, err}
+	}()
+	select {
+	case r := <-done:
+		return r.out, r.err
+	case <-unsignalled:
+		select {
+		case r := <-done:
+			return r.out, r.err
+		default:
+		}
+		return nil, fmt.Errorf("%w: keploy may not signal `%s` to end it, and leaves it to end by itself", context.Cause(ctx), strings.Join(c.Args, " "))
+	}
 }
 
 // engineCLI runs the container engine's CLI for one stop of an agent's
@@ -4075,13 +4138,17 @@ const (
 
 func newEngineCLI(logger *zap.Logger) *engineCLI { return &engineCLI{logger: logger} }
 
-// run runs the engine's CLI with args under ctx (containerEngineCommand), and
-// returns what output takes from it.
+// run runs the engine's CLI with args under ctx (containerEngineCommand,
+// runEngine), and returns what output takes from it.
 func (e *engineCLI) run(ctx context.Context, output func(*exec.Cmd) ([]byte, error), args ...string) ([]byte, error) {
 	cli := engine.Active().CLI
-	direct := func() ([]byte, error) { return output(containerEngineCommand(ctx, cli, args...)) }
+	direct := func() ([]byte, error) {
+		c, unsignalled := containerEngineCommand(ctx, cli, args...)
+		return runEngine(ctx, c, unsignalled, output)
+	}
 	sudo := func() ([]byte, error) {
-		return output(containerEngineCommand(ctx, "sudo", append([]string{"-n", cli}, args...)...))
+		c, unsignalled := containerEngineCommand(ctx, "sudo", append([]string{"-n", cli}, args...)...)
+		return runEngine(ctx, c, unsignalled, output)
 	}
 	switch e.mode.Load() {
 	case engineDirect:
@@ -4129,7 +4196,11 @@ func (e *engineCLI) ask(args ...string) ([]byte, error) {
 	defer release()
 	out, err := e.combined(ctx, args...)
 	if err != nil && ctx.Err() != nil {
-		err = fmt.Errorf("%w: %v", context.Cause(ctx), err)
+		if cause := context.Cause(ctx); !errors.Is(err, cause) {
+			// runEngine's error for a command keploy may not signal
+			// already wraps the cause.
+			err = fmt.Errorf("%w: %v", cause, err)
+		}
 		e.logger.Warn("The container engine's daemon did not answer keploy's `"+strings.Join(args, " ")+"` within keploy's bound: keploy goes on without its answer, and the keploy agent's container may still run",
 			zap.Duration("bound", daemonAnswerStall), zap.Error(err))
 	}
@@ -4696,7 +4767,15 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 	parent := ctx
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	if gone := a.watchAgent(ctx, true); gone != nil {
+	if gone, over := a.watchAgent(ctx, true); gone != nil {
+		// The release ends only once its watch has, and so once the
+		// watch's look, and the engine command that look runs, have been
+		// ended and waited for, unless keploy may not signal that command
+		// (watchStart, runEngine).
+		defer func() {
+			cancel(nil)
+			<-over
+		}()
 		go func() {
 			select {
 			case err := <-gone:
