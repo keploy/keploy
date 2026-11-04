@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,52 +48,82 @@ func TestReplay_HeldAnswersOfATestKeepAtMostOneConnectionEach(t *testing.T) {
 				p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: integrations.HTTP}}
 				ctx, cancel := context.WithCancel(context.Background())
 				t.Cleanup(cancel)
-				var held []chan error
+				// Each connection's index, once its handleConnection returns.
+				ended := make(chan int, 2*n)
+				// What the app read on each connection, and whether it was a held answer.
+				read := make([]string, 2*n)
+				held := make([]bool, 2*n)
+				var unserved []int
 				served := 0
 				for i := range 2 * n {
 					app, src := acceptedConn(t)
-					done := make(chan error, 1)
-					go func() { done <- p.handleConnection(ctx, src) }()
+					go func() {
+						// No connection's error is this row's: a request served no
+						// held answer returns its no-recording error, and a held one
+						// returns at the replay's end.
+						_ = p.handleConnection(ctx, src)
+						ended <- i
+					}()
 					if _, err := io.WriteString(app, request); err != nil {
 						t.Fatal(err)
 					}
 					_ = app.SetReadDeadline(time.Now().Add(10 * time.Second)) // turns a hang into a failure
 					got := make([]byte, len(want))
 					k, _ := io.ReadFull(app, got)
-					isHeld := string(got[:k]) == want
-					if isHeld {
+					read[i] = string(got[:k])
+					if read[i] == want {
 						served++
+						held[i] = true
 						// Nothing more, and no end, comes: the app's own timeout fires.
 						_ = app.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 						if m, err := app.Read(make([]byte, 1)); m != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
 							t.Fatalf("request %d: after the held answer the app read %d byte(s), %v; want nothing", i, m, err)
 						}
+					} else {
+						unserved = append(unserved, i)
 					}
 					// The app gives up and closes its socket.
 					_ = app.Close()
-					if !isHeld {
-						// Its error (no recording to serve) is not this row's.
-						_ = awaitEvent(t, done, fmt.Sprintf("handleConnection returning after request %d, "+
-							"which was served no held answer (%q)", i, got[:k]))
-						continue
-					}
-					held = append(held, done)
 				}
-				var open []chan error
-				for _, done := range held {
-					select {
-					case <-done:
-					case <-time.After(200 * time.Millisecond):
-						open = append(open, done)
-					}
+				if served != n {
+					t.Fatalf("a replay of %d held answers served one to %d of %d requests; want %d", n, served, 2*n, n)
 				}
-				if served != n || len(open) > n {
-					t.Fatalf("a replay of %d held answers served one to %d of %d requests and keeps %d connection(s) open; "+
-						"want %d served and at most %d open", n, served, 2*n, len(open), n, n)
+				gone := make([]bool, 2*n)
+				returned := 0
+				// open names the connections that have not returned yet.
+				open := func() string {
+					var names []string
+					for i := range 2 * n {
+						switch {
+						case gone[i]:
+						case held[i]:
+							names = append(names, fmt.Sprintf("request %d's, held", i))
+						default:
+							names = append(names, fmt.Sprintf("request %d's, served no held answer (the app read %q)", i, read[i]))
+						}
+					}
+					return strings.Join(names, "; ")
+				}
+				next := func(what string) {
+					gone[awaitEvent(t, ended, what)] = true
+					returned++
+				}
+				// At most n of the 2n connections are still open after the
+				// app's close, so at least n of them, of any kind, return
+				// before the replay's end.
+				for returned < n {
+					next(fmt.Sprintf("one more of the connections still open after the app's close (%s) returning, "+
+						"so that at most %d of the %d stay open,", open(), n, 2*n))
+				}
+				// The connections of the requests served no held answer end.
+				for _, i := range unserved {
+					for !gone[i] {
+						next(fmt.Sprintf("the connection of request %d, served no held answer (the app read %q), returning,", i, read[i]))
+					}
 				}
 				cancel()
-				for i, done := range open {
-					_ = awaitEvent(t, done, fmt.Sprintf("held connection %d returning at the replay's end", i))
+				for returned < 2*n {
+					next(fmt.Sprintf("the connections still open (%s) returning at the replay's end,", open()))
 				}
 			})
 		}
