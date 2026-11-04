@@ -19,6 +19,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -964,7 +965,9 @@ func (b *connClosingBody) Close() error {
 }
 
 // maxConnRefusedRetries bounds how many times a replay test request is re-sent
-// when the connection is REFUSED before the app accepts it. A refused connection
+// when the connection is REFUSED before the app accepts it, on a context
+// EndsWithApp did not mark (an application keploy did not start); on one it
+// marked the request waits for its address to accept instead (waitToReSend). A refused connection
 // proves the app never received the request — zero bytes sent, zero single-use
 // mocks consumed — so re-sending is safe and does NOT fabricate a result: it
 // obtains the real response the suite must assert on instead of a false
@@ -978,6 +981,283 @@ const (
 	maxConnRefusedRetries   = 3
 	connRefusedRetryBackoff = 150 * time.Millisecond
 )
+
+type endsWithAppKey struct{}
+
+// EndsWithApp marks ctx as the run of an application whose process keploy
+// runs itself: ctx is cancelled when that process exits (or when keploy is
+// stopped). A test request refused on such a context waits for its address
+// to accept a connection and is then sent again, with no count of re-sends
+// and no time limit: the application's exit is what ends the wait. A context
+// not marked (keploy did not start the application, or an embedder's run of
+// it does not end when it exits, so nothing would end the wait) keeps the
+// bounded re-send, maxConnRefusedRetries.
+func EndsWithApp(ctx context.Context) context.Context {
+	return context.WithValue(ctx, endsWithAppKey{}, true)
+}
+
+// AppExitEnds reports whether EndsWithApp marked ctx: the exit of the
+// application the test requests go to ends it.
+func AppExitEnds(ctx context.Context) bool {
+	marked, _ := ctx.Value(endsWithAppKey{}).(bool)
+	return marked
+}
+
+// acceptPollInterval is how often WaitForAccept dials an address that has
+// not accepted yet.
+const acceptPollInterval = 250 * time.Millisecond
+
+// WaitForAccept dials addr over TCP until it accepts a connection, which it
+// closes at once. Only ctx ends the wait: it returns nil once addr accepted,
+// or ctx's error. refused, when not nil, is called once, with the first
+// dial's error, when that dial is not accepted; from then on the wait says
+// every stillWaitingEvery that it still waits (SayStillWaiting).
+func WaitForAccept(ctx context.Context, logger *zap.Logger, addr string, refused func(error)) error {
+	dialer := net.Dialer{Timeout: 800 * time.Millisecond}
+	began := time.Now()
+	said := false
+	still := func() {}
+	defer func() { still() }()
+	for {
+		conn, err := dialer.DialContext(ctx, "tcp", addr)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !said {
+			said = true
+			if refused != nil {
+				refused(err)
+			}
+			still = SayStillWaiting(ctx, logger, "accept a connection", addr, began)
+		}
+		retry := time.NewTimer(acceptPollInterval)
+		select {
+		case <-ctx.Done():
+			retry.Stop()
+			return ctx.Err()
+		case <-retry.C:
+		}
+	}
+}
+
+// stillWaitingEvery is how often a wait for the application with no time
+// limit says it is still waiting. A var only so that a test can shorten it.
+var stillWaitingEvery = 30 * time.Second
+
+// SayStillWaiting logs, every stillWaitingEvery until the returned stop is
+// called or ctx ends, that keploy still waits for the application to do what
+// on addr, and how long it has waited since began: a wait that only the
+// application's exit or keploy's stop ends says what it waits on. A log
+// line, never a verdict. When the application keploy started listens on
+// other ports but not on addr's (utils.AppListenPorts), the line names them,
+// so a wrong port is plain. A nil logger says nothing. stop returns once the
+// line can no longer be said: a line that was being said as stop was called
+// is said before stop returns, never after.
+func SayStillWaiting(ctx context.Context, logger *zap.Logger, what, addr string, began time.Time) (stop func()) {
+	return sayStillWaiting(ctx, logger, what, addr, began, nil)
+}
+
+// stillGate holds a still-waiting line between the waits of one request: no
+// line is said while it is held. hold returns only once no line can be said
+// until open: a line that was being said as it was called is said before it
+// returns, never after. The zero value is open.
+type stillGate struct {
+	mu   sync.Mutex
+	held bool
+}
+
+func (g *stillGate) hold() { g.set(true) }
+func (g *stillGate) open() { g.set(false) }
+
+func (g *stillGate) set(held bool) {
+	g.mu.Lock()
+	g.held = held
+	g.mu.Unlock()
+}
+
+// sayIfOpen says line unless g holds it; a nil g holds nothing.
+func (g *stillGate) sayIfOpen(say func()) {
+	if g == nil {
+		say()
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.held {
+		say()
+	}
+}
+
+// sayStillWaiting is SayStillWaiting, with the line said only while gate is
+// open (always with a nil gate): its timer runs from began across the holds,
+// so a wait held and opened more often than stillWaitingEvery still says it
+// waits.
+func sayStillWaiting(ctx context.Context, logger *zap.Logger, what, addr string, began time.Time, gate *stillGate) (stop func()) {
+	if logger == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	every := stillWaitingEvery
+	go func() {
+		defer close(exited)
+		tick := time.NewTicker(every)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case now := <-tick.C:
+				gate.sayIfOpen(func() { logger.Info(stillWaitingLine(ctx, what, addr, now.Sub(began))) })
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(done) })
+		<-exited
+	}
+}
+
+// stillWaitingLine is SayStillWaiting's line.
+func stillWaitingLine(ctx context.Context, what, addr string, waited time.Duration) string {
+	line := fmt.Sprintf("still waiting for the application to %s on %s: %s so far. The wait ends when it does, when the application exits, or when keploy is stopped", what, addr, waited.Round(time.Second))
+	if other := otherListenPorts(ctx, addr); other != "" {
+		line += ". " + other
+	}
+	return line
+}
+
+// otherListenPorts says which ports the application keploy started listens
+// on when they do not include addr's: "" when they do, or when they are not
+// known.
+func otherListenPorts(ctx context.Context, addr string) string {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ""
+	}
+	ports := utils.AppListenPorts(ctx)
+	if len(ports) == 0 {
+		return ""
+	}
+	listed := make([]string, len(ports))
+	for i, p := range ports {
+		listed[i] = strconv.Itoa(p)
+		if listed[i] == port {
+			return ""
+		}
+	}
+	return fmt.Sprintf("The application listens on %s, not on %s", strings.Join(listed, ", "), port)
+}
+
+type noAddressProbeKey struct{}
+
+// WithoutAddressProbe marks ctx as one on which keploy may not dial the
+// application's address only to learn whether it accepts, a connection it
+// opens and closes having sent nothing (config.Test.DisableAppReadyProbe:
+// at a port-forward, such a connection can tear the forward down). A test
+// request refused on such a context EndsWithApp marked is sent again every
+// acceptPollInterval instead (waitToReSend): a refused connection carries
+// none of it, and an accepted one is the test's own.
+func WithoutAddressProbe(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noAddressProbeKey{}, true)
+}
+
+// AddressProbeAllowed reports whether keploy may dial the application's
+// address on ctx only to learn whether it accepts: true unless
+// WithoutAddressProbe marked ctx.
+func AddressProbeAllowed(ctx context.Context) bool {
+	off, _ := ctx.Value(noAddressProbeKey{}).(bool)
+	return !off
+}
+
+// reSendWait is what the waits of one test request (or gRPC dial) refused on
+// a context EndsWithApp marked share: when the first began (zero before it),
+// and the line that says every stillWaitingEvery that it still waits for the
+// application to accept a connection. The line is said only while the
+// request waits for that: from each wait until its address accepted the
+// probe, or, where it may not be probed, until the request's own connection
+// was made (connMade); gate holds it in between. end stops it.
+type reSendWait struct {
+	began time.Time
+	gate  stillGate
+	still func()
+}
+
+// connMade holds the line: the request's own connection was made, so it no
+// longer waits for the application to accept one.
+func (w *reSendWait) connMade() { w.gate.hold() }
+
+// end stops the line that says the request still waits.
+func (w *reSendWait) end() {
+	if w.still != nil {
+		w.still()
+	}
+}
+
+// heldOnConnection returns req with a trace that holds w's line once req has
+// its connection (httptrace GotConn: called in client.Do's own goroutine,
+// before req is written, for a new connection or a reused one alike).
+func heldOnConnection(req *http.Request, w *reSendWait) *http.Request {
+	return req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { w.connMade() },
+	}))
+}
+
+// waitToReSend is the wait of a test request refused at addr on a context
+// EndsWithApp marked, until it may be sent again: until addr accepts a
+// connection, or, where the address may not be probed (AddressProbeAllowed),
+// for acceptPollInterval. Only ctx ends it before then. The request's first
+// wait says, once, that it waits and what for; every later one (the request
+// was refused again after its address accepted) begins with a pause of
+// acceptPollInterval, so that a request whose address accepts but whose own
+// connection is refused is sent again at that pace, never at once. Its line
+// that says it still waits (w) is said from each wait until addr accepted;
+// where addr may not be probed, the caller holds it once the request's own
+// connection is made (heldOnConnection). keploy waits here for an event of
+// its own choosing, not on the application's answer: under the proven
+// switch the answer stall rule does not count the wait (holdAnswerStall).
+func waitToReSend(ctx context.Context, logger *zap.Logger, what, addr string, refusal error, w *reSendWait) error {
+	defer holdAnswerStall(ctx)()
+	probe := AddressProbeAllowed(ctx)
+	first := w.began.IsZero()
+	if first {
+		w.began = time.Now()
+		if probe {
+			logger.Info(fmt.Sprintf("the %s was refused at %s: the application is not accepting connections there yet; waiting for it to accept a connection, then sending it again. The wait ends when it does, when the application exits, or when keploy is stopped", what, addr),
+				zap.Error(refusal))
+		} else {
+			logger.Info(fmt.Sprintf("the %s was refused at %s: the application is not accepting connections there yet; sending it again every %s until it is accepted (probing the application's address is disabled by configuration). The wait ends when it is, when the application exits, or when keploy is stopped", what, addr, acceptPollInterval),
+				zap.Error(refusal))
+		}
+		w.still = sayStillWaiting(ctx, logger, "accept a connection", addr, w.began, &w.gate)
+	} else {
+		w.gate.open()
+	}
+	if !first || !probe {
+		pause := time.NewTimer(acceptPollInterval)
+		select {
+		case <-ctx.Done():
+			pause.Stop()
+			return ctx.Err()
+		case <-pause.C:
+		}
+	}
+	if !probe {
+		return nil
+	}
+	if err := WaitForAccept(ctx, nil, addr, nil); err != nil {
+		return err
+	}
+	w.gate.hold()
+	return nil
+}
 
 // isPreResponseConnRefused reports whether err is a pure "connection refused".
 // errors.Is unwraps the *url.Error -> *net.OpError -> *os.SyscallError ->
@@ -1147,15 +1427,22 @@ func IsTransportConnReset(err error) bool {
 }
 
 // doRequestWithConnRefusedRetry executes client.Do, re-sending ONLY on a
-// pre-response connection-refused (bounded, ctx-aware backoff, request body
-// rewound via GetBody). Any other error, or a real response, returns
-// immediately — so a genuinely crashed/unreachable app still fails fast after
-// the bounded retries, and a mid-response reset is never retried. A refusal,
+// pre-response connection-refused (request body rewound via GetBody): on a
+// context EndsWithApp marked, once the request's address accepts a
+// connection (or every acceptPollInterval where it may not be probed,
+// WithoutAddressProbe), with only the context ending the wait; on any other, a bounded
+// number of times with a ctx-aware backoff. Any other error, or a real
+// response, returns immediately, and a mid-response reset is never retried. A refusal,
 // reset or drop at an address reach says the app's server on appPort (the port
 // the test was recorded on, 0 when not known) can never be reached at fails at
 // once, saying why, as an *UnreachableAppPortError.
 func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request, reach AppPortReachability, appPort uint16) (*http.Response, error) {
 	asked := false
+	var wait reSendWait
+	defer wait.end()
+	// The request's own connection ends its wait for the application to
+	// accept one: where the address may not be probed, nothing else does.
+	req = heldOnConnection(req, &wait)
 	for attempt := 0; ; attempt++ {
 		resp, err := client.Do(req)
 		if err == nil {
@@ -1175,7 +1462,8 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 		if !refused {
 			return nil, err
 		}
-		if attempt >= maxConnRefusedRetries {
+		waits := AppExitEnds(ctx)
+		if !waits && attempt >= maxConnRefusedRetries {
 			return nil, err
 		}
 		// Only retry if we can faithfully re-send the body; otherwise stop so we
@@ -1189,6 +1477,13 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 				return nil, err
 			}
 			req.Body = body
+		}
+		if waits {
+			host, port := urlHostPort(req.URL)
+			if waitToReSend(ctx, logger, "test request", net.JoinHostPort(host, port), err, &wait) != nil {
+				return nil, err
+			}
+			continue
 		}
 		logger.Warn("test request refused by app (app not yet accepting connections); re-sending — the request was never processed, so this is not a retry of an assertion",
 			zap.Int("attempt", attempt+1), zap.Int("maxRetries", maxConnRefusedRetries), zap.Error(err))

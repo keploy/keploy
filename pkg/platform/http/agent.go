@@ -2235,6 +2235,12 @@ func boundedAgentRead[T any](ctx context.Context, what string, read func(context
 	}
 }
 
+// RunsAppProcess says that Run runs the application's command as a process
+// of its own (pkg/client/app) and returns when it exits: replay waits for
+// the application with no time limit, as its exit ends the wait
+// (replay.AppProcessRunner).
+func (a *AgentClient) RunsAppProcess() bool { return true }
+
 func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.AppError) {
 	// The agent's container this run is to create, under docker compose: a
 	// release that waits for it ends once the run is over without it
