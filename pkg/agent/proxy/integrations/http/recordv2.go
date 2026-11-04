@@ -85,9 +85,10 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 
 		// --- Request side ---------------------------------------------
 		//
-		// First chunk's ReadAt is the request arrival timestamp. We grab
-		// it via ReadChunk so the timestamp is carried regardless of
-		// what ReadBytes does underneath.
+		// The ReadAt of the chunk the request starts in is the request
+		// arrival timestamp. It is shown, not taken: readRequestV2 takes the
+		// request's bytes of it, so a request that starts partway through a
+		// chunk, after the request before it, carries that chunk's time.
 		firstChunk, err := nextRequestV2(sess)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
@@ -101,14 +102,11 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			return err
 		}
 		reqTs, reqClock := firstChunk.ReadAt, firstChunk.ReadClock
-		finalReq := append([]byte(nil), firstChunk.Bytes...)
+		var finalReq []byte
 
-		// Complete the request: read more chunks until headers + body
-		// are on hand. We use chunk-level reads (not HandleChunkedRequests
-		// which wraps bufio-like bulk reads over the conn) so we never
-		// over-read past the end of one request into the start of the
-		// next pipelined request. This is essential for HTTP/1.1
-		// keepalive correctness.
+		// Read the request: its headers and body, and never a byte past its
+		// end (readMessageV2), which is the start of the next request of a
+		// pipeline when its client sent them in one write.
 		if err := h.readRequestV2(ctx, sess.ClientStream, &finalReq); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				logger.Debug("V2 HTTP record: client stream closed mid-request", zap.Error(err))
@@ -137,7 +135,11 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		}
 
 		// --- Response side --------------------------------------------
-		firstRespChunk, err := sess.DestStream.ReadChunk()
+		//
+		// Shown, not taken, as the request's first chunk is: readResponseV2
+		// takes the response's bytes of it, and leaves the next response's
+		// for the next request.
+		firstRespChunk, err := sess.DestStream.Peek()
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				// The stream ended with nothing of a response. A side of the
@@ -197,7 +199,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			utils.LogError(logger, err, "V2 HTTP record: initial response read failed")
 			return err
 		}
-		finalResp := append([]byte(nil), firstRespChunk.Bytes...)
+		var finalResp []byte
 		resTs := firstRespChunk.WrittenAt
 
 		gotLastWritten, err := h.readResponseV2(ctx, sess.DestStream, &finalResp, requestMethod(finalReq))
@@ -486,13 +488,15 @@ func noteFaultRecorded(logger *zap.Logger, mock *models.Mock) {
 	})
 }
 
-// nextRequestV2 starts the next exchange (Session.NextRequest) and takes its
-// request's first chunk. A chunk with no request bytes, nothing but empty
-// lines (emptyLinesBefore), is no part of a request, so it is taken first, and
-// the request starts at the client's next chunk: its response is what the
-// server sent after that one was captured, and it is the connection's first
-// request when the capture began after the CRLF of a request it does not have.
-// The request's first chunk therefore always holds request bytes.
+// nextRequestV2 starts the next exchange (Session.NextRequest) and returns the
+// chunk its request starts in, not taken (readRequestV2 takes it): what is
+// left of a chunk the request before it ended in, when the client pipelined
+// them, or the client's next chunk. A chunk with no request bytes, nothing but
+// empty lines (emptyLinesBefore), is no part of a request, so it is taken
+// first, and the request starts at the client's next chunk: its response is
+// what the server sent after that one was captured, and it is the connection's
+// first request when the capture began after the CRLF of a request it does not
+// have. The request's first chunk therefore always holds request bytes.
 func nextRequestV2(sess *supervisor.Session) (fakeconn.Chunk, error) {
 	for {
 		c, err := sess.ClientStream.Peek()
@@ -506,200 +510,137 @@ func nextRequestV2(sess *supervisor.Session) (fakeconn.Chunk, error) {
 			return fakeconn.Chunk{}, err
 		}
 	}
-	if _, err := sess.NextRequest(models.HTTP, false); err != nil {
-		return fakeconn.Chunk{}, err
-	}
-	return sess.ClientStream.ReadChunk()
+	return sess.NextRequest(models.HTTP, false)
 }
 
-// readRequestV2 is the V2 counterpart of HandleChunkedRequests. It
-// consumes the remainder of an HTTP/1 request from stream, appending
-// bytes to *finalReq. Unlike HandleChunkedRequests it uses ReadChunk
-// so we pull exactly one tee'd chunk at a time and never over-read
-// past the end of the current request into the start of the next.
+// readRequestV2 is the V2 counterpart of HandleChunkedRequests. It reads the
+// rest of an HTTP/1 request from stream onto *finalReq, which holds what of it
+// was read before, and no byte past its end (readMessageV2): the bytes after it
+// are the next request's, when the client pipelined them. The empty lines
+// before its request line are dropped (dropEmptyLinesBeforeRequest).
 //
 // Returns io.EOF if stream closes before the body is fully consumed.
 // Returns a decode error for malformed Content-Length / body framing.
 func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, finalReq *[]byte) error {
-	// 1. Complete headers: complete when messageHead finds the header section,
-	// not at the first "\r\n\r\n", which can be empty lines in front of the
-	// request line. Those are dropped (dropEmptyLinesBeforeRequest).
-	head, bodyStart, _, ok := messageHead(*finalReq, false)
-	for ; !ok; head, bodyStart, _, ok = messageHead(*finalReq, false) {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		chunk, err := stream.ReadChunk()
-		if err != nil {
-			return err
-		}
-		*finalReq = append(*finalReq, chunk.Bytes...)
+	if _, err := readMessageV2(ctx, stream, finalReq, &messageFrame{}); err != nil {
+		return err
 	}
-	bodyStart -= dropEmptyLinesBeforeRequest(finalReq)
-
-	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
-
-	if contentLengthHeader != "" {
-		contentLength, err := contentLengthValue(contentLengthHeader)
-		if err != nil {
-			return err
-		}
-		remaining := contentLength - (len(*finalReq) - bodyStart)
-		for remaining > 0 {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			chunk, err := stream.ReadChunk()
-			if err != nil {
-				return err
-			}
-			*finalReq = append(*finalReq, chunk.Bytes...)
-			remaining -= len(chunk.Bytes)
-		}
-		return nil
-	}
-
-	if transferEncodingHeader != "" &&
-		strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
-		// Frame the chunks (see chunkedBody): a suffix test on the buffer ended
-		// a body whose data ends like "0\r\n\r\n" at a chunk boundary, and
-		// never ended one that carries trailers.
-		var body chunkedBody
-		for {
-			done, err := body.complete(*finalReq)
-			if err != nil {
-				return err
-			}
-			if done {
-				return nil
-			}
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			chunk, err := stream.ReadChunk()
-			if err != nil {
-				return err
-			}
-			*finalReq = append(*finalReq, chunk.Bytes...)
-		}
-	}
-
-	// No body framing: the request is headers-only (e.g. GET / HTTP/1.1
-	// with no body). We're done.
+	dropEmptyLinesBeforeRequest(finalReq)
 	return nil
 }
 
-// readResponseV2 is the V2 counterpart of handleChunkedResponses. It
-// consumes the remainder of an HTTP/1 response from stream, appending
-// bytes to *finalResp, and returns the WrittenAt timestamp of the last
-// chunk it consumed. It does NOT write to any client connection — the
-// relay owns forwarding on the V2 path.
-//
-// The completion logic mirrors handleChunkedResponses:
-//   - Pull more chunks until response headers are complete.
-//   - Parse Content-Length / Transfer-Encoding from headers.
-//   - If Content-Length, read until the declared body length is met.
-//   - If Transfer-Encoding chunked, read until the chunked framing ends
-//     (last-chunk, trailer section, final CRLF).
+// readResponseV2 is the V2 counterpart of handleChunkedResponses. It reads the
+// rest of an HTTP/1 response from stream onto *finalResp, as readRequestV2
+// reads a request (messageFrame frames it: past any interim 1xx, by its
+// Content-Length, its chunked framing, or to the stream's end), and returns
+// the WrittenAt of the last chunk it took bytes of. It does NOT write to any
+// client connection — the relay owns forwarding on the V2 path.
 //
 // Returns (lastWrittenAt, err). err may be io.EOF for the legitimate
 // "server closed after sending a full response" case; the caller
 // decides whether to emit a mock.
 func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, finalResp *[]byte, reqMethod string) (time.Time, error) {
+	return readMessageV2(ctx, stream, finalResp, &messageFrame{response: true, reqMethod: reqMethod})
+}
+
+// readMessageV2 takes the rest of one HTTP/1 message off stream onto *msg,
+// which holds what of it was taken before, chunk by chunk, and no byte past
+// the message's end, which frame finds. A client that pipelines its requests
+// (HTTP/1.1: it sends the next before the answer to the one before comes)
+// writes them in one write as often as not, and a server writes its answers
+// back to back, so a chunk can hold the end of one message and the start of
+// the next: what follows the end stays on the stream, with its chunk's times,
+// for the next message's read. Taking whole chunks recorded only the first
+// message of such a chunk, and the rest of the pipeline was lost.
+//
+// It returns the WrittenAt of the last chunk it took bytes of (zero when none
+// carried one), and frame's error or the stream's, the message unfinished.
+func readMessageV2(ctx context.Context, stream *fakeconn.FakeConn, msg *[]byte, frame *messageFrame) (time.Time, error) {
 	var lastWr time.Time
-
-	// 1. Complete headers: the final response's, past any interim 1xx.
-	for {
-		if _, _, _, ok := messageHead(*finalResp, true); ok {
-			break
-		}
+	_, done, err := frame.end(*msg)
+	for !done && err == nil {
 		if err := ctx.Err(); err != nil {
 			return lastWr, err
 		}
-		chunk, err := stream.ReadChunk()
+		// The chunk is looked at before it is taken: only the end of the
+		// message, framed with it, says how much of it is the message's.
+		c, perr := stream.Peek()
+		if perr != nil {
+			return lastWr, perr
+		}
+		from := len(*msg)
+		*msg = append(*msg, c.Bytes...)
+		var end int
+		if end, done, err = frame.end(*msg); done {
+			*msg = (*msg)[:end]
+		}
+		// Take what msg holds of the chunk off the stream: a Read takes it
+		// from the chunk Peek showed (the same bytes, into the same place),
+		// and leaves the rest of the chunk for the next read. The whole of
+		// it is taken as a chunk, one with no bytes too, which a Read never
+		// takes. Neither fails: the chunk Peek showed is in hand, and only
+		// the reader moves the stream (fakeconn.FakeConn).
+		if len(*msg)-from < len(c.Bytes) {
+			_, _ = stream.Read((*msg)[from:])
+		} else {
+			_, _ = stream.ReadChunk()
+		}
+		if !c.WrittenAt.IsZero() {
+			lastWr = c.WrittenAt
+		}
+	}
+	return lastWr, err
+}
+
+// messageFrame finds where one HTTP/1 message ends as its bytes arrive. The
+// header section that governs its body (a response's final one, past any
+// interim 1xx: messageHead) says how the body is framed: no body (the answer
+// to a HEAD, a 204 or a 304: responseHasNoBody; a request with neither field
+// below), a Content-Length, chunked framing (chunkedBody), or, for a response
+// with neither, the stream's end.
+type messageFrame struct {
+	response  bool
+	reqMethod string      // a response's request's method
+	body      chunkedBody // frames a chunked body as it arrives
+}
+
+// end reports the length of the message msg starts with, and true, once all
+// of it is in msg (bytes after it are the next message's), or false while it
+// is not. A body that runs to the stream's end never ends here. msg must only
+// grow between calls. A Content-Length that does not parse, or is negative,
+// and a malformed chunked body are errors.
+func (f *messageFrame) end(msg []byte) (int, bool, error) {
+	head, bodyStart, status, ok := messageHead(msg, f.response)
+	if !ok {
+		return 0, false, nil
+	}
+	// A request's status is 0 and its method unset here: no rule for an
+	// answer without a body holds for it.
+	if responseHasNoBody(f.reqMethod, status) {
+		return bodyStart, true, nil
+	}
+	contentLength, transferEncoding := parseHeaders(head)
+	switch {
+	case contentLength != "":
+		n, err := contentLengthValue(contentLength)
 		if err != nil {
-			return lastWr, err
+			return 0, false, err
 		}
-		if !chunk.WrittenAt.IsZero() {
-			lastWr = chunk.WrittenAt
+		if n < 0 {
+			// No length: the message would end inside its own head.
+			return 0, false, fmt.Errorf("%w (a negative value)", errBadContentLength)
 		}
-		*finalResp = append(*finalResp, chunk.Bytes...)
+		if len(msg)-bodyStart < n {
+			return 0, false, nil
+		}
+		return bodyStart + n, true, nil
+	case strings.Contains(strings.ToLower(transferEncoding), "chunked"):
+		done, err := f.body.feed(msg[bodyStart:])
+		return bodyStart + f.body.end, done, err
 	}
-
-	// 2. Parse the final response's headers for body framing. The answer to
-	// a HEAD, a 204 and a 304 have no body whatever the headers say.
-	head, bodyStart, status, _ := messageHead(*finalResp, true)
-	if responseHasNoBody(reqMethod, status) {
-		return lastWr, nil
-	}
-	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
-
-	if contentLengthHeader != "" {
-		contentLength, err := contentLengthValue(contentLengthHeader)
-		if err != nil {
-			return lastWr, err
-		}
-		remaining := contentLength - (len(*finalResp) - bodyStart)
-		for remaining > 0 {
-			if err := ctx.Err(); err != nil {
-				return lastWr, err
-			}
-			chunk, err := stream.ReadChunk()
-			if err != nil {
-				return lastWr, err
-			}
-			if !chunk.WrittenAt.IsZero() {
-				lastWr = chunk.WrittenAt
-			}
-			*finalResp = append(*finalResp, chunk.Bytes...)
-			remaining -= len(chunk.Bytes)
-		}
-		return lastWr, nil
-	}
-
-	if transferEncodingHeader != "" &&
-		strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
-		// Chunked: read until the body's chunked framing ends (see
-		// chunkedBody), not until finalResp ends in "0\r\n\r\n".
-		body := chunkedBody{response: true}
-		for {
-			done, err := body.complete(*finalResp)
-			if err != nil {
-				return lastWr, err
-			}
-			if done {
-				return lastWr, nil
-			}
-			if err := ctx.Err(); err != nil {
-				return lastWr, err
-			}
-			chunk, err := stream.ReadChunk()
-			if err != nil {
-				return lastWr, err
-			}
-			if !chunk.WrittenAt.IsZero() {
-				lastWr = chunk.WrittenAt
-			}
-			*finalResp = append(*finalResp, chunk.Bytes...)
-		}
-	}
-
-	// Neither Content-Length nor chunked: read until EOF (RFC 7230
-	// permits this for HTTP/1.0 and for responses with "Connection:
-	// close"). The loop relies on the stream eventually closing.
-	for {
-		if err := ctx.Err(); err != nil {
-			return lastWr, err
-		}
-		chunk, err := stream.ReadChunk()
-		if err != nil {
-			return lastWr, err
-		}
-		if !chunk.WrittenAt.IsZero() {
-			lastWr = chunk.WrittenAt
-		}
-		*finalResp = append(*finalResp, chunk.Bytes...)
-	}
+	// Neither field: a request has no body, and a response's runs until the
+	// server closes (RFC 9112 §6.3: HTTP/1.0 and "Connection: close").
+	return bodyStart, !f.response, nil
 }
 
 // parseHeaders extracts the body-framing Content-Length and
