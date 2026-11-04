@@ -211,9 +211,8 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 	// many there are (none: a no-op); they span from from, when the relay read
 	// the first of them or earlier, to when its write of the last returned
 	// (to): the times a test case that waited on them spans. Before, they were
-	// dropped
-	// with nothing left out or said, and a test case over an answer cut to
-	// its first chunk was saved as if it were whole.
+	// dropped with nothing left out or said, and a test case over an answer
+	// cut to its first chunk was saved as if it were whole.
 	//
 	// Chunks after an exchange left out (flushMock) are the rest of it,
 	// counted and spanned with it already: reported again, they would count
@@ -427,10 +426,10 @@ drain:
 			// Starting a brand-new exchange: leave out any orphaned
 			// response chunks from a previous multi-chunk server
 			// reply whose head chunk was already flushed (reported,
-			// with their span: leaveOutTail), and anchor
-			// the request timestamp to THIS chunk's ReadAt so we
-			// record when bytes actually hit the relay rather than
-			// when the parser got around to pairing them.
+			// with their span: leaveOutTail), and anchor the request
+			// timestamp to THIS chunk's ReadAt so we record when
+			// bytes actually hit the relay rather than when the
+			// parser got around to pairing them.
 			//
 			// Orphaned is decided by capture order, not on arrival. A
 			// single held response captured AFTER this request is not
@@ -467,11 +466,11 @@ drain:
 				// with its span: leaveOutTail): in wire order the head
 				// flushes the exchange and the tail is orphaned, and
 				// left out the same way. Carrying the tail in as well
-				// would emit a
-				// multi-response mock this parser has never produced,
-				// and replay writes every response buffer back — so
-				// the bytes a test replays would depend on which way
-				// the relay's two goroutines happened to be scheduled.
+				// would emit a multi-response mock this parser has
+				// never produced, and replay writes every response
+				// buffer back — so the bytes a test replays would
+				// depend on which way the relay's two goroutines
+				// happened to be scheduled.
 				heldChunks := len(genericResponses)
 				tailFrom, tailTo := resHeadAt, resTimestampMock
 				genericResponses = genericResponses[:1]
@@ -496,16 +495,16 @@ drain:
 			// split itself is held to: a response captured before the
 			// request cannot be its answer. In wire order that chunk
 			// is the tail of the PREVIOUS reply and is left out (with
-			// its span: leaveOutTail); pairing it here instead records an answer this
-			// request never got — and generic mocks are session-scoped
-			// (Metadata type "config"), so replay's window filter short
-			// -circuits them into the unfiltered pool BEFORE its
-			// response-precedes-request check. Nothing downstream
-			// catches this; it replays.
+			// its span: leaveOutTail); pairing it here instead
+			// records an answer this request never got — and generic
+			// mocks are session-scoped (Metadata type "config"), so
+			// replay's window filter short-circuits them into the
+			// unfiltered pool BEFORE its response-precedes-request
+			// check. Nothing downstream catches this; it replays.
 			if carriedBySplit && len(reqSeq) > 0 {
 				if resFirst, _ := order(stamp{ev.connSeq, ev.writtenAt}, stamp{reqSeq[0], reqReadAt[0]}); resFirst {
 					if logger != nil {
-						logger.Debug("generic v2: dropped a response older than the request a split carried forward",
+						logger.Debug("generic v2: left out a response older than the request a split carried forward",
 							zap.Uint32("responseConnSeq", ev.connSeq),
 							zap.Uint32("requestConnSeq", reqSeq[0]),
 							zap.Time("responseWrittenAt", ev.writtenAt),
