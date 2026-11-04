@@ -272,9 +272,15 @@ func TestAMockReplaySetsOnDiskSourcesAreHandedBeforeItsStaging(t *testing.T) {
 	a.Proxy = p
 	m := httpMock("mock-0", "GET", "http://h/rows/0")
 	m.Spec.ReqTimestampMock = t0
-	storeMocks(a, m)
+	pm := httpMock("mock-p", "GET", "http://h/pool/0")
+	pm.Spec.ReqTimestampMock = t0
+	storeMocks(a, m, pm)
 	a.scopeTable = map[string][]string{"o::TestA": {"mock-0"}}
-	require.NoError(t, a.SetScopePool(context.Background(), map[string][]string{"o": {"mock-0"}}))
+	// The CLI's slices are stored before the pool is served, so the current
+	// key (PoolKeyNone before any claim) already names mock-p at the first
+	// staging: a pool view of the key's slice logs "pool mock-p", apart from
+	// the empty view's "pool".
+	require.NoError(t, a.SetScopePool(context.Background(), map[string][]string{"o": {"mock-0"}, models.PoolKeyNone: {"mock-p"}}))
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	require.Equal(t, 1, p.staged, "the set is staged once")
@@ -282,7 +288,9 @@ func TestAMockReplaySetsOnDiskSourcesAreHandedBeforeItsStaging(t *testing.T) {
 	require.Equal(t, []int{0}, p.before, "the recordings before an instant are handed once, before the set's staging")
 	require.Equal(t, []int{0}, p.times, "the recordings' times are handed once, before the set's staging")
 	// The empty pool view is in force before the set's sources are handed
-	// and its trees staged: no read of them goes through another set's view.
+	// and its trees staged, though the current key names mock-p: no mock
+	// still staged from the previous session answers under this session's
+	// pool names, and no read of the new set goes through another view.
 	require.NoError(t, emptyPoolViewFirst(p.events))
 }
 
