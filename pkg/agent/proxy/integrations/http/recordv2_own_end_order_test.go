@@ -55,7 +55,15 @@ var ownEnds = []struct {
 // for the other end longer than 10s marks its own, and the order the test
 // asserts afterwards fails.
 func orderEnds(c *relayedConn, appFirst bool) <-chan struct{} {
-	appRead, appMarked, destMarked := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	appRead, _ := orderEndsMarked(c, appFirst)
+	return appRead
+}
+
+// orderEndsMarked is orderEnds, and also returns a channel closed once the
+// app's end is marked on the session, where appFirst: the mark runs after
+// the read, on the client's forwarder. Where !appFirst it is never closed.
+func orderEndsMarked(c *relayedConn, appFirst bool) (appRead, appMarkedOut <-chan struct{}) {
+	appReadC, appMarked, destMarked := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	await := func(ch <-chan struct{}) {
 		select {
 		case <-ch:
@@ -65,11 +73,11 @@ func orderEnds(c *relayedConn, appFirst bool) <-chan struct{} {
 	c.endHook = func(dir fakeconn.Direction, mark func()) {
 		switch {
 		case dir == fakeconn.FromClient && appFirst:
-			close(appRead)
+			close(appReadC)
 			mark()
 			close(appMarked)
 		case dir == fakeconn.FromClient:
-			close(appRead)
+			close(appReadC)
 			await(destMarked)
 			mark()
 		case appFirst:
@@ -80,7 +88,7 @@ func orderEnds(c *relayedConn, appFirst bool) <-chan struct{} {
 			close(destMarked)
 		}
 	}
-	return appRead
+	return appReadC, appMarked
 }
 
 // endsAfterTheAppsFIN runs one call through c: the app sends a request, reads

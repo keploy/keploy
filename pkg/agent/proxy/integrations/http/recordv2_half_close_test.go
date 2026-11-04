@@ -32,10 +32,11 @@ import (
 
 // halfClosedAppTakes runs the start of one call through c: the app sends a
 // request and shuts its sending side down; once the relay has read its FIN,
-// the upstream sends sent, and the app reads it.
-func halfClosedAppTakes(t *testing.T, c *relayedConn, appFirst bool, sent string) {
+// the upstream sends sent, and the app reads it. It returns a channel closed
+// once the FIN is marked on the session, where appFirst (orderEndsMarked).
+func halfClosedAppTakes(t *testing.T, c *relayedConn, appFirst bool, sent string) <-chan struct{} {
 	t.Helper()
-	appRead := orderEnds(c, appFirst)
+	appRead, appMarked := orderEndsMarked(c, appFirst)
 	c.start(t)
 	write(t, c.app, c.src, jdkRequest(7))
 	relayed(t, c.dest, jdkRequest(7))
@@ -51,6 +52,7 @@ func halfClosedAppTakes(t *testing.T, c *relayedConn, appFirst bool, sent string
 		t.Fatal(err)
 	}
 	relayed(t, c.app, sent)
+	return appMarked
 }
 
 // upstreamEndsAfter ends the upstream's side, a reset where reset is set, else
@@ -147,9 +149,9 @@ func TestRecordV2_ThroughTheRelayAHalfClosedAppThatTookPartThenClosedIsHeld(t *t
 // answer, the upstream then closing, resetting, or the relay ending as the
 // stop cancels it, is judged by its own end too: its FIN was read before the
 // stop began, so it is not the stop's (EndAtStop), and the call is recorded
-// as far as the app read it. The app's FIN is marked as the relay read it,
-// before the stop: a half-closed app's FIN is read as it sends it, long before
-// the stop.
+// as far as the app read it. The app's FIN is marked before the stop begins
+// (the row waits for the mark): a half-closed app's FIN is read as it sends
+// it, long before the stop.
 func TestRecordV2_ThroughTheRelayAHalfClosedAppTheRecordingsStopClosedIsHeld(t *testing.T) {
 	for _, shape := range partAnswers {
 		for _, how := range []string{"the upstream closes", "the upstream resets", "the relay is stopped"} {
@@ -157,7 +159,12 @@ func TestRecordV2_ThroughTheRelayAHalfClosedAppTheRecordingsStopClosedIsHeld(t *
 				t.Run(shape.name+"/"+how+"/KEPLOY_PROVEN="+proven, func(t *testing.T) {
 					t.Setenv("KEPLOY_PROVEN", proven)
 					c := newRelayedConn(t)
-					halfClosedAppTakes(t, c, true, shape.read)
+					appMarked := halfClosedAppTakes(t, c, true, shape.read)
+					select {
+					case <-appMarked:
+					case <-time.After(10 * time.Second):
+						t.Fatal("the relay did not mark the app's FIN within 10s")
+					}
 					c.stopBegun.Store(true)
 					if err := c.app.Close(); err != nil {
 						t.Fatal(err)
