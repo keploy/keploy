@@ -372,9 +372,14 @@ func collides(inForce map[string]Binding, beside []Binding, b Binding, earlier [
 // holdVariables).
 //
 // Under the proven switch (KEPLOY_PROVEN), two bindings at words of values
-// (each with its WordRun) are set side by side at the word they share, each
-// run at its own word (WordRunAt), and each pair of words they both hold
-// there is read live and as recorded (WordRunRecorded). A pair equal live
+// (each with its WordRun, the value span its word is in: WordRuns) are set
+// side by side at the word they share, each span at its own word
+// (WordRunAt), and each pair of words they both hold there is read live and
+// as recorded (WordRunRecorded). Only the words of the shared word's own
+// value are read: a neighbour that is another value (its mock holds it whole
+// elsewhere) says nothing of the shared word, so "<P>/7" and "<Q>/7", where
+// "<B>/3" and "<D>/5" were recorded and the mocks hold "<B>" and "<D>"
+// whole, leave "7" its own value, refused as main refuses it. A pair equal live
 // that was two words when recorded is a copy: the application sent more than
 // the one word where the recording had two values, whole ("<X>" where "<A>"
 // and "<C>" were recorded) or beside another ("<X>" inside "<X>/<Y>", or
@@ -430,15 +435,21 @@ const wordRunSep = "-"
 // text that holds the word (its place and decode steps, as the adapter writes
 // a place: one name for one text), Word is the word's index in it (Words; -1
 // for a value whole), Live is the word, live, and Recorded the word its
-// recording holds there.
+// recording holds there. RecordedText is that text as recorded (decoded by
+// its steps), and Elsewhere reports whether the binding's mock holds a
+// string, whole, at a place other than Text (a field, a segment, a header, a
+// value of its answer): the evidence that cuts a run into value spans
+// (WordRuns). A WordBind with neither has no span but its own word.
 type WordBind struct {
-	Text     string
-	Word     int
-	Live     string
-	Recorded string
+	Text         string
+	Word         int
+	Live         string
+	Recorded     string
+	RecordedText string
+	Elsewhere    func(string) bool
 }
 
-// Run is one binding's word run (Binding.WordRun): its words, live and as
+// Run is one binding's value span (Binding.WordRun): its words, live and as
 // recorded, each joined, and At, the index of the binding's own word among
 // them. A binding of a value whole has the zero Run.
 type Run struct {
@@ -453,10 +464,25 @@ func (r Run) On(b Binding) Binding {
 	return b
 }
 
-// WordRuns is, for each binding one call makes (ws[i]), its run: the words
-// the call binds at consecutive words of the same text, its own among them,
-// in word order. A binding of a value whole has none. Words the call binds
-// apart, with a word between them it does not bind, are two runs.
+// maxSpanRun bounds the run spanOf reads (it tries each stretch of it): a
+// longer run gives each of its words no span but its own (main's word by
+// word check).
+const maxSpanRun = 64
+
+// WordRuns is, for each binding one call makes (ws[i]), its value span: the
+// words of its run (the words the call binds at consecutive words of the same
+// text, its own among them, in word order; words the call binds apart, with
+// a word between them it does not bind, are two runs) that hold the one
+// value its word is a word of. That is the shortest stretch of the run
+// around its word whose recorded text its mock holds whole elsewhere (a cid
+// or an appId sent whole in another field); failing one, the words around it
+// that no such stretch covers ("<cid>/<appId>" with the cid held whole
+// elsewhere leaves the appId's words; a text no stretch of which is held
+// elsewhere is one value, the run whole). A stretch held elsewhere is
+// another value, so a word beside it is never read with it: "<B>/3" whose
+// mock holds "<B>" whole leaves "3" its own span. A binding of a value whole
+// has none, and one whose recorded text does not hold the recorded words
+// where the run says, or that has no Elsewhere, has its own word alone.
 func WordRuns(ws []WordBind) []Run {
 	runs := make([]Run, len(ws))
 	byText := map[string][]int{}
@@ -478,19 +504,64 @@ func WordRuns(ws []WordBind) []Run {
 			for hi < len(idx) && ws[idx[hi]].Word == ws[idx[hi-1]].Word+1 {
 				hi++
 			}
-			live, recorded := make([]string, 0, hi-lo), make([]string, 0, hi-lo)
-			for _, i := range idx[lo:hi] {
-				live, recorded = append(live, ws[i].Live), append(recorded, ws[i].Recorded)
-			}
-			run := Run{Live: strings.Join(live, wordRunSep), Recorded: strings.Join(recorded, wordRunSep)}
-			for at, i := range idx[lo:hi] {
-				run.At = at
-				runs[i] = run
+			run := idx[lo:hi]
+			for at, i := range run {
+				from, to := spanOf(ws, run, at)
+				live, recorded := make([]string, 0, to-from+1), make([]string, 0, to-from+1)
+				for _, j := range run[from : to+1] {
+					live, recorded = append(live, ws[j].Live), append(recorded, ws[j].Recorded)
+				}
+				runs[i] = Run{Live: strings.Join(live, wordRunSep), Recorded: strings.Join(recorded, wordRunSep), At: at - from}
 			}
 			lo = hi
 		}
 	}
 	return runs
+}
+
+// spanOf is the value span (WordRuns) of the at-th word of run (indexes of
+// ws, at consecutive words of one text), as the first and last index into
+// run: read from that word's recorded text and its mock (Elsewhere).
+func spanOf(ws []WordBind, run []int, at int) (from, to int) {
+	w := ws[run[at]]
+	words := Words(w.RecordedText)
+	if w.Elsewhere == nil || len(run) > maxSpanRun || ws[run[len(run)-1]].Word >= len(words) {
+		return at, at
+	}
+	for _, j := range run {
+		if x := words[ws[j].Word]; w.RecordedText[x[0]:x[1]] != ws[j].Recorded {
+			return at, at
+		}
+	}
+	held := func(a, b int) bool {
+		return w.Elsewhere(w.RecordedText[words[ws[run[a]].Word][0]:words[ws[run[b]].Word][1]])
+	}
+	covered := make([]bool, len(run))
+	from, to = -1, -1
+	for a := range run {
+		for b := a; b < len(run); b++ {
+			if !held(a, b) {
+				continue
+			}
+			for c := a; c <= b; c++ {
+				covered[c] = true
+			}
+			if a <= at && at <= b && (from < 0 || b-a < to-from) {
+				from, to = a, b
+			}
+		}
+	}
+	if from >= 0 {
+		return from, to
+	}
+	from, to = at, at
+	for from > 0 && !covered[from-1] {
+		from--
+	}
+	for to < len(run)-1 && !covered[to+1] {
+		to++
+	}
+	return from, to
 }
 
 // Start begins a new scope (as Reset) with the values its test case gave

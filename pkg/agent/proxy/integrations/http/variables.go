@@ -933,7 +933,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 	// 2. The variables hold.
 	hit := &varHit{mock: m, decls: decls, local: map[string]variables.Binding{}, saw: map[string]string{}}
 	taken := map[string]variables.Binding{} // this call's new bindings, by name
-	runOf := wordRunsOf(decls, liveAt)
+	runOf := wordRunsOf(m, decls, liveAt)
 	for _, d := range decls {
 		places := d.requestPlaces()
 		if d.echo {
@@ -1032,12 +1032,15 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 	return hit, nil
 }
 
-// wordRunsOf is, by name, the run (variables.WordRuns) of each variable
-// decls bind at a word of a value of the call: the words m declares bound at
-// consecutive words of that text (one place, one decode), live and as
-// recorded, an echo's apart (it is the call's own, never bound in the
+// wordRunsOf is, by name, the value span (variables.WordRuns) of each
+// variable decls bind at a word of a value of the call: the words m declares
+// bound at consecutive words of that text (one place, one decode), live and
+// as recorded, cut where m's request holds a stretch of them whole at
+// another place (heldWhole), an echo's apart (it is the call's own, never bound in the
 // table).
-func wordRunsOf(decls []varDecl, liveAt map[string]held) map[string]variables.Run {
+func wordRunsOf(m *models.Mock, decls []varDecl, liveAt map[string]held) map[string]variables.Run {
+	rec, _ := recordedView(m.Spec.HTTPReq) // fitVariables refused a recording whose URL does not read
+	whole := heldWhole(rec)
 	var names []string
 	var ws []variables.WordBind
 	for _, d := range decls {
@@ -1045,19 +1048,68 @@ func wordRunsOf(decls []varDecl, liveAt map[string]held) map[string]variables.Ru
 			continue
 		}
 		at := d.bind.at
-		names = append(names, d.name)
-		ws = append(ws, variables.WordBind{
+		w := variables.WordBind{
 			Text:     variables.Address{Place: at.Place, Steps: at.Steps, Word: -1}.String(),
 			Word:     at.Word,
 			Live:     liveAt[d.bind.key()].value,
 			Recorded: d.recorded,
-		})
+		}
+		if l, ok := rec.leaf(at.Place); ok {
+			if text, ok := (variables.Address{Place: at.Place, Steps: at.Steps, Word: -1}).WordOf(l.value); ok {
+				own := placeKey(at.Place)
+				w.RecordedText = text
+				w.Elsewhere = func(s string) bool {
+					for _, k := range whole[s] {
+						if k != own {
+							return true
+						}
+					}
+					return false
+				}
+			}
+		}
+		names = append(names, d.name)
+		ws = append(ws, w)
 	}
 	out := make(map[string]variables.Run, len(names))
 	for i, r := range variables.WordRuns(ws) {
 		out[names[i]] = r
 	}
 	return out
+}
+
+// heldWhole is, by value, the places (placeKey) where the recorded request
+// rec holds a value whole: each JSON scalar of its body, each URL path
+// segment, each value of a query parameter or a header.
+func heldWhole(rec reqView) map[string][]string {
+	out := map[string][]string{}
+	if leaves, ok := templates.JSONLeaves(rec.body); ok {
+		for _, l := range leaves {
+			k := placeKey(variables.BodyPlace(l.Path))
+			out[l.Value(rec.body)] = append(out[l.Value(rec.body)], k)
+		}
+	}
+	for i, seg := range rec.segments {
+		if v, err := url.PathUnescape(seg); err == nil {
+			out[v] = append(out[v], placeKey(variables.Place{Part: variables.PartPath, Index: i}))
+		}
+	}
+	for part, vs := range map[variables.Part]map[string][]string{variables.PartQuery: rec.query, variables.PartHeader: rec.header} {
+		for name, vals := range vs {
+			for _, v := range vals {
+				out[v] = append(out[v], placeKey(variables.Place{Part: part, Name: name}))
+			}
+		}
+	}
+	return out
+}
+
+// placeKey names p as heldWhole does, a header by its canonical name.
+func placeKey(p variables.Place) string {
+	if p.Part == variables.PartHeader {
+		p.Name = http.CanonicalHeaderKey(p.Name)
+	}
+	return p.String()
 }
 
 // holdsAt checks that every request place of d holds want, the value the
