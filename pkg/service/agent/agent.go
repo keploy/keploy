@@ -2385,7 +2385,8 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	// window: a set's staging, the pool staged between tests) replaces
 	// nothing. The carry-over below is other tests' mocks, so it is added
 	// after.
-	if mapped || !(params.AfterTime.IsZero() || params.AfterTime.Equal(models.BaseTime)) {
+	windowed := !params.AfterTime.IsZero() && !params.AfterTime.Equal(models.BaseTime)
+	if mapped || windowed {
 		own := filteredMocks
 		if !mapped {
 			own = nil
