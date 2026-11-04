@@ -397,7 +397,9 @@ func TestRecordV2_ObserveOnly_CloseDelimitedGzipBodyReadInPart(t *testing.T) {
 
 // Only a stream that ran out ended where its capture did. One whose reader was
 // closed under it (fakeconn.ErrClosed: an abort, with chunks possibly still on
-// their way) is not read in part, even where the capture had marked the end.
+// their way) is not read in part, even where the capture had marked the end:
+// with neither side's end come, it is left out (LeftOutAbortCut), and
+// recordV2 returns nil, with no parse error.
 func TestRecordV2_ObserveOnly_ClosedReaderIsNotReadInPart(t *testing.T) {
 	t.Parallel()
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
@@ -421,8 +423,8 @@ func TestRecordV2_ObserveOnly_ClosedReaderIsNotReadInPart(t *testing.T) {
 	_ = sess.DestStream.Close() // its reader is closed; its chunk channel is not
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Error("recordV2 returned nil for a response whose reader was closed under it; want the parse error")
+		if err != nil {
+			t.Errorf("recordV2 = %v for a response whose reader was closed under it; want nil: it is left out, not a parse error", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("recordV2 did not exit within 2s")

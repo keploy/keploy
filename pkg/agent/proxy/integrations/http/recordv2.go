@@ -364,6 +364,28 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// close-delimited body the client's end cut recorded whole as far
 		// as it came: its end, the upstream's close, never came.
 		_, endedFirst := ends.First()
+		if readerClosed && !endedFirst {
+			// The session closed the stream under the read (the
+			// supervisor's abort), partway through the response, with
+			// neither side's end come by then and not at the recording's
+			// stop (stopCut's, asked above): no end judges the read. The
+			// response is not whole, and a close-delimited body's end, the
+			// upstream's close, never came, so it is left out with its span:
+			// never recorded whole as far as it came, nor built into a
+			// response that does not decode, with an ERROR. The parser's
+			// context's end, if it has ended, is returned, as for a read the
+			// context's end stops with the connection open.
+			reason := supervisor.LeftOutAbortCut
+			if mark, ok := sess.TakeMockIncomplete(); ok {
+				reason = mark + ": " + reason
+			}
+			logger.Debug("V2 HTTP record: the session closed the response's stream partway through it; the exchange is left out", zap.String("reason", reason))
+			sess.ReportLeftOut(&models.Mock{
+				Kind: models.HTTP,
+				Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
+			}, reason)
+			return ctx.Err()
+		}
 		judged := streamEnded || readerClosed && endedFirst
 		var fault *models.Fault
 		if judged {
@@ -640,8 +662,12 @@ func partAnswerFault(ends supervisor.Ends, resp []byte) *models.Fault {
 }
 
 // recordFault builds and emits the mock of a call that got no answer, with the
-// fault it ended in, and ends the connection's recording: its stream has
-// ended.
+// fault it ended in, and ends the connection's recording with nil: its stream
+// has ended. The parser's context is the session's (Session.Ctx), which may
+// end before or as the mock is emitted (the recording's stop, after the
+// application gave up on the call, or a post-record hook): the session decides
+// under its own check (EmitMockAcrossShutdown), so the judged fault is not
+// dropped with nothing reporting it.
 func (h *HTTP) recordFault(ctx context.Context, sess *supervisor.Session, logger *zap.Logger, m *FinalHTTP, destPort uint, reqTs time.Time) error {
 	mock, err := h.buildHTTPMock(m, destPort, sess.ClientConnID, sess.Opts)
 	if err != nil {
@@ -655,7 +681,8 @@ func (h *HTTP) recordFault(ctx context.Context, sess *supervisor.Session, logger
 	}
 	noteFaultRecorded(logger, mock)
 	integrations.CallServed(ctx)
-	return sess.EmitMock(mock)
+	sess.EmitMockAcrossShutdown(mock)
+	return nil
 }
 
 // faultNoted makes noteFaultRecorded's note once per process.

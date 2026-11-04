@@ -1775,24 +1775,234 @@ func TestRecordV2_AJudgedExchangeGoesOnToTheNextRequestWhileTheContextLasts(t *t
 }
 
 // The supervisor's abort closes the streams with the parser's context ended,
-// as when it retires the parser, partway through a close-delimited body, with
-// neither side's end and the recording not stopping: no end judges the read,
-// so recordV2 returns the context's end, as it does for any read the
-// context's end stops with the connection open.
+// as when it retires the parser, partway through the response (a
+// Content-Length body, a chunked one between or inside a chunk, the head, a
+// close-delimited body), with neither side's end and the recording not
+// stopping: no end judges the read, so recordV2 returns the context's end, as
+// it does for any read the context's end stops with the connection open. The
+// response is not whole, so nothing is recorded: the exchange is left out
+// once with its span (LeftOutAbortCut). Never a close-delimited body recorded
+// whole as far as it came (its end, the upstream's close, never came), nor a
+// response that does not decode, with an ERROR.
 func TestRecordV2_TheAbortsCloseWithNoEndReturnsTheContextsEnd(t *testing.T) {
-	part := stopCutAllParts[len(stopCutAllParts)-1].part
+	for _, proven := range []bool{false, true} {
+		for _, p := range stopCutAllParts {
+			t.Run(p.name+switchName[proven], func(t *testing.T) {
+				t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+				c := newRelayedConn(t)
+				_, at, mocks, err := firstEndThenStop(t, c, p.part, "", theCtxThenTheAbort, 0, func() {})
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("recordV2 = %v, want the parser's context's end: no side's end judges the read", err)
+				}
+				wantAbortCutLeftOut(t, c, at, mocks)
+			})
+		}
+	}
+}
+
+// The supervisor's abort closes the streams partway through the response,
+// with neither side's end, the recording not stopping and the parser's
+// context alive (the order a hang's retirement takes: the close, then the
+// context's end): left out once with its span, as with the context ended
+// first, and recordV2 returns nil.
+func TestRecordV2_TheAbortsCloseWithNoEndLeavesTheCutAnswerOut(t *testing.T) {
+	for _, proven := range []bool{false, true} {
+		for _, p := range stopCutAllParts {
+			t.Run(p.name+switchName[proven], func(t *testing.T) {
+				t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+				c := newRelayedConn(t)
+				_, at, mocks, err := firstEndThenStop(t, c, p.part, "", theAbortsClose, 0, func() {})
+				if err != nil {
+					t.Errorf("recordV2 = %v, want nil: no side's end judges the read, and the stream has closed", err)
+				}
+				wantAbortCutLeftOut(t, c, at, mocks)
+			})
+		}
+	}
+}
+
+// wantAbortCutLeftOut checks that c's exchange, cut by the abort's close with
+// no side's end, was left out once for LeftOutAbortCut with its span, from
+// before at.sent to the last part the parser read, and nothing recorded or
+// logged at ERROR.
+func wantAbortCutLeftOut(t *testing.T, c *relayedConn, at cutTimes, mocks []*models.Mock) {
+	t.Helper()
+	if len(mocks) != 0 {
+		t.Errorf("recorded %d mocks (the first: %+v), want none: the response is not whole", len(mocks), mocks[0].Spec.HTTPResp)
+	}
+	if got := errorsLogged(c); len(got) != 0 {
+		t.Errorf("logged %q at ERROR, want nothing", got)
+	}
+	if got := leftOutReasons(c); len(got) != 1 || got[0] != supervisor.LeftOutAbortCut {
+		t.Errorf("left out for %q, want once for %q", got, supervisor.LeftOutAbortCut)
+	}
+	if got := c.mgr.MocksLeftOut(); got != 1 {
+		t.Errorf("left out %d mocks, want 1", got)
+	}
+	spans := c.spans.all()
+	if len(spans) != 1 || spans[0][0].IsZero() || !spans[0][0].Before(at.sent) ||
+		spans[0][1].Before(at.last) || spans[0][1].After(at.done) {
+		t.Errorf("spans %v, want one, from the request's time (before %v) to the last part the parser read "+
+			"(stamped from %v to %v)", spans, at.sent, at.last, at.done)
+	}
+}
+
+// awaitMocks adds to mocks what the sync-mock manager hands on after recordV2
+// returned, until there are want, or 10s pass.
+func awaitMocks(c *relayedConn, mocks []*models.Mock, want int) []*models.Mock {
+	for len(mocks) < want {
+		select {
+		case m := <-c.mocks:
+			mocks = append(mocks, m)
+		case <-time.After(10 * time.Second): // turns a lost mock into a failure
+			return mocks
+		}
+	}
+	return mocks
+}
+
+// A call that got no answer ends in a fault (noAnswerFault: the upstream's
+// close on the connection's first request, or the application's giving up),
+// and the parser's context, the session's, ends as its mock is emitted, here
+// in the post-record hook: the fault is recorded, not dropped with nothing
+// reporting it (recordFault's emit is EmitMockAcrossShutdown), and recordV2
+// returns nil, the connection's recording ended with it.
+func TestRecordV2_AFaultEmittedAsTheContextEndsIsRecorded(t *testing.T) {
+	for _, proven := range []bool{false, true} {
+		for _, appFirst := range []bool{false, true} {
+			name := map[bool]string{false: "the upstream closes", true: "the application gives up"}[appFirst] + switchName[proven]
+			t.Run(name, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+				c := newRelayedConn(t)
+				c.startRelay(t)
+				ctx, cancel := context.WithCancel(context.Background())
+				t.Cleanup(cancel)
+				c.sess.Ctx = ctx
+				c.mgr.SetOutputChannel(c.mocks)
+				c.sess.RouteMocksViaSyncMock = true
+				var hooked atomic.Int32
+				c.sess.AddPostRecordHook(func(*models.Mock) { hooked.Add(1); cancel() })
+				go func() { c.done <- (&HTTP{Logger: zaptest.NewLogger(t)}).recordV2(ctx, c.sess) }()
+				write(t, c.app, c.src, faultReq)
+				relayed(t, c.dest, faultReq)
+				want := models.Fault{Kind: models.FaultEOF}
+				if appFirst {
+					appClosed(t, c)
+					awaitPeerEnd(t, c, fakeconn.FromClient)
+					want = models.Fault{Kind: models.FaultTimeout}
+				}
+				_ = c.dest.Close()
+				if !appFirst {
+					// The relay holds the stream open on the client's half
+					// until the application's end, which comes after the
+					// upstream's.
+					awaitPeerEnd(t, c, fakeconn.FromDest)
+					_ = c.app.Close()
+				}
+				mocks, err := c.collect(t)
+				mocks = awaitMocks(c, mocks, 1)
+				if hooked.Load() != 1 {
+					t.Fatalf("the post-record hook ran %d times, want once: the fault's mock was not built", hooked.Load())
+				}
+				if err != nil {
+					t.Errorf("recordV2 = %v, want nil: the fault ends the connection's recording", err)
+				}
+				wantFault(t, oneMock(t, mocks, nil), want)
+				if got := leftOutReasons(c); len(got) != 0 {
+					t.Errorf("left out for %q, want the fault recorded", got)
+				}
+				if got := errorsLogged(c); len(got) != 0 {
+					t.Errorf("logged %q at ERROR, want nothing", got)
+				}
+			})
+		}
+	}
+}
+
+// The application gives up on a call with no answer (its client's timeout)
+// before the recording's stop, the parser waiting on the answer, and then the
+// stop ends the parser's context
+// (the session's, whose end is the recording's, as the proxy wires them) and
+// the relay's, while the relay waits on the upstream's half. The call is
+// judged by the application's end, as with no stop: recorded with its
+// timeout, not dropped with nothing recorded, left out or reported.
+func TestRecordV2_AGiveUpWithNoAnswerBeforeTheStopIsRecorded(t *testing.T) {
 	for _, proven := range []bool{false, true} {
 		t.Run(strings.TrimPrefix(switchName[proven], ", "), func(t *testing.T) {
 			t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
 			c := newRelayedConn(t)
-			_, _, _, err := firstEndThenStop(t, c, part, "", theCtxThenTheAbort, 0, func() {})
-			if !errors.Is(err, context.Canceled) {
-				t.Errorf("recordV2 = %v, want the parser's context's end: no side's end judges the read", err)
+			c.grace = time.Minute
+			c.startRelay(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			c.sess.Ctx = ctx
+			c.sess.RecordingDone = ctx.Done()
+			c.mgr.SetOutputChannel(c.mocks)
+			c.sess.RouteMocksViaSyncMock = true
+			go func() { c.done <- (&HTTP{Logger: zaptest.NewLogger(t)}).recordV2(ctx, c.sess) }()
+			write(t, c.app, c.src, faultReq)
+			relayed(t, c.dest, faultReq)
+			// The parser has read the request and waits on the answer.
+			awaitTaken(t, c.sess.DestStream, 0)
+			appClosed(t, c)
+			awaitPeerEnd(t, c, fakeconn.FromClient)
+			cancel()
+			c.stopRelay()
+			mocks, err := c.collect(t)
+			mocks = awaitMocks(c, mocks, 1)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Errorf("recordV2 = %v, want nil or the context's end", err)
+			}
+			wantFault(t, oneMock(t, mocks, nil), models.Fault{Kind: models.FaultTimeout})
+			if got := leftOutReasons(c); len(got) != 0 {
+				t.Errorf("left out for %q, want the application's timeout recorded", got)
 			}
 			if got := errorsLogged(c); len(got) != 0 {
 				t.Errorf("logged %q at ERROR, want nothing", got)
 			}
 		})
+	}
+}
+
+// The response's head arrives in two parts, each read by the parser before
+// the next is written, then part of the body, and then the connection's end:
+// the application's giving up is judged after the whole head (FaultTimeout
+// after it), and the upstream's close partway through the body is its
+// truncation (FaultTruncate), not a head cut short: each is judged by all of
+// the response read, not its first part.
+func TestRecordV2_AHeadReadInTwoPartsIsJudgedWhole(t *testing.T) {
+	const head1, head2, body = "HTTP/1.1 200 OK\r\nContent-Le", "ngth: 20\r\n\r\n", "01234"
+	for _, proven := range []bool{false, true} {
+		for _, appFirst := range []bool{false, true} {
+			name := map[bool]string{false: "the upstream closes", true: "the application gives up"}[appFirst] + switchName[proven]
+			t.Run(name, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+				c := newRelayedConn(t)
+				c.start(t)
+				write(t, c.app, c.src, faultReq)
+				relayed(t, c.dest, faultReq)
+				read := ""
+				for _, p := range []string{head1, head2, body} {
+					write(t, c.dest, c.dst, p)
+					relayed(t, c.app, p)
+					read += p
+					awaitTaken(t, c.sess.DestStream, len(read))
+				}
+				want := models.Fault{Kind: models.FaultTruncate, BodyBytes: int64(len(body))}
+				if appFirst {
+					appClosed(t, c)
+					want = models.Fault{Kind: models.FaultTimeout, AfterHead: true, BodyBytes: int64(len(body))}
+				} else {
+					_ = c.dest.Close()
+					awaitPeerEnd(t, c, fakeconn.FromDest)
+				}
+				mocks, err := c.finish(t)
+				wantFault(t, oneMock(t, mocks, err), want)
+				if got := leftOutReasons(c); len(got) != 0 {
+					t.Errorf("left out for %q, want the fault recorded", got)
+				}
+			})
+		}
 	}
 }
 
