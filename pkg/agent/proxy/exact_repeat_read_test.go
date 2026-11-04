@@ -548,3 +548,31 @@ func TestTwoReadsNamedAlikeAreEachAnsweredOnceMoreAndExcusedOnceFewer(t *testing
 		}, unmade: []string{"each-once-fewer-0-1", "each-once-fewer-0-2"}},
 	})
 }
+
+// Each of a test's repeated reads is answered once more and excused once
+// fewer on its own, whatever the order of their calls: a read answered once
+// more, then another read answered once more, then the first sent a second
+// time more misses; and two reads each made once fewer than recorded are
+// both charged nothing.
+func TestEachOfATestsRepeatedReadsKeepsItsOwnOnceMoreAndOnceFewer(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const (
+		a2 = "GET /api/a, answered once more: recorded 2 times with one answer"
+		b2 = "GET /api/b, answered once more: recorded 2 times with one answer"
+		a3 = "GET /api/a, answered once more: recorded 3 times with one answer"
+		b3 = "GET /api/b, answered once more: recorded 3 times with one answer"
+	)
+	readsRun(t, []readsTest{
+		{name: "a-b-a", calls: []readShape{
+			{method: "GET", path: "/api/a", answer: `{"a":1}`, read: a2, recorded: 2, sends: 3},
+			{method: "GET", path: "/api/b", answer: `{"b":1}`, read: b2, recorded: 2, sends: 3},
+			// the first read's call a second time more, after the other
+			// read was answered once more: it records nothing of its own
+			{method: "GET", path: "/api/a", recorded: 0, sends: 1},
+		}, missed: []int{6}},
+		{name: "both-once-fewer", calls: []readShape{
+			{method: "GET", path: "/api/a", answer: `{"a":1}`, read: a3, recorded: 3, sends: 2},
+			{method: "GET", path: "/api/b", answer: `{"b":1}`, read: b3, recorded: 3, sends: 2},
+		}},
+	})
+}
