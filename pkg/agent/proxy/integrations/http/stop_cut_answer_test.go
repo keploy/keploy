@@ -344,8 +344,15 @@ func openStopCutHolding(t *testing.T, part, more string, way openStopWay, held f
 func awaitTaken(t *testing.T, stream *fakeconn.FakeConn, n int) {
 	t.Helper()
 	for deadline := time.Now().Add(10 * time.Second); ; {
-		if waiting, _ := stream.Waiting(); waiting && stream.Consumed() == int64(n) {
-			return
+		// Consumed first: the read that took the last of the n bytes
+		// cleared its wait before it counted them, so a wait seen after the
+		// count is the reader's next read, with nothing for it. Asked the
+		// other way round, the wait seen could be the one the n bytes ended,
+		// and the reader then past it, about to ask its context.
+		if stream.Consumed() == int64(n) {
+			if waiting, _ := stream.Waiting(); waiting {
+				return
+			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("the parser took %d of %d bytes in 10s", stream.Consumed(), n)
