@@ -1,18 +1,40 @@
 package http
 
 import (
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/templates"
+	"go.uber.org/zap"
 )
 
-// repeatReadIgnored is the request headers the matcher ignores under the
-// proven switch (models.ProvenFlakyHeaderNoise): a repeated read's call is
-// compared without them.
-var repeatReadIgnored = models.ProvenFlakyHeaderNoise()
+// RepeatReadNoise is the request header noise the strict matcher excuses
+// under the proven switch for a set's calls (NewRepeatReadNoise): a repeated
+// read's proof (RepeatReadOf) excuses those headers and no other. The zero
+// value excuses none, so a proof made without the set's noise is never wider
+// than the matcher.
+type RepeatReadNoise struct {
+	// whole are the header names the matcher never compares; pats, by
+	// lowercased name, the headers it compares unless the recorded and the
+	// live value each match one (splitHeaderNoise).
+	whole map[string]bool
+	pats  map[string][]*regexp.Regexp
+}
+
+// NewRepeatReadNoise is the header noise the strict matcher compares a set's
+// calls with under opts, which a replay hands its agent for the set
+// (NewRequestNoise): keploy.yml's header noise, and the static list
+// (models.ProvenFlakyHeaderNoise) unless the run turns it off
+// (test.disableAutoHeaderNoise). Only opts' NoiseConfig and
+// DisableAutoHeaderNoise are read. A pattern that does not compile excuses no
+// value, as in the matcher.
+func NewRepeatReadNoise(opts models.OutgoingOptions) RepeatReadNoise {
+	whole, pats := splitHeaderNoise(zap.NewNop(), requestHeaderNoise(opts, models.ProvenFlakyHeaderNoise()))
+	return RepeatReadNoise{whole: whole, pats: pats}
+}
 
 // RepeatReadOf is m as one recording of a repeated read: recordings of one
 // read are recordings of one call, every one with one answer, and a test that
@@ -21,11 +43,18 @@ var repeatReadIgnored = models.ProvenFlakyHeaderNoise()
 // proof both exact serving and whatever names a test's repeated reads use,
 // for any method: the proof is the recordings, not the method.
 //
-// call is the request as the matcher compares it under the proven switch:
-// its method, URL and body, the name of each header, and the value of Host
-// and of each header that says who calls (models.CredentialHeaders). keploy's
-// own headers and those the matcher ignores (models.ProvenFlakyHeaderNoise)
-// are left out.
+// call is the request with every part the strict matcher compares under the
+// proven switch, byte for byte: its method, URL and body, and each header
+// with its value. Left out are only the headers the matcher does not compare
+// (keploy's own, and those noise names whole: n's keploy.yml header noise
+// and static list). Of a header the matcher excuses within keploy.yml's
+// patterns, a recorded value that matches one is kept as matching, not by
+// its bytes; of one the recording learned as noise (header.<name>), that it
+// was learned. Two recordings are one call only when they agree on each:
+// the matcher then takes a call for either one exactly when it takes it for
+// the other. A header the matcher reads more loosely than by its bytes
+// (Content-Type, User-Agent, a SigV4 Authorization, a value the obfuscator
+// redacted) is compared by its bytes here, which is narrower, never wider.
 //
 // answer is the response as a test's response is compared: its status, body
 // and binary body, and the name and value of each header but those a server
@@ -37,7 +66,7 @@ var repeatReadIgnored = models.ProvenFlakyHeaderNoise()
 // ok is false for a recording that is not HTTP, has no request or response,
 // whose response keploy kept apart and cannot read back, or whose body was
 // left out or streamed: keploy cannot say what it answered.
-func RepeatReadOf(m *models.Mock) (call, answer string, ok bool) {
+func RepeatReadOf(m *models.Mock, n RepeatReadNoise) (call, answer string, ok bool) {
 	if m == nil || m.Kind != models.HTTP {
 		return "", "", false
 	}
@@ -49,20 +78,23 @@ func RepeatReadOf(m *models.Mock) (call, answer string, ok bool) {
 	if q == nil || a == nil || a.BodySkipped || len(a.StreamBody) > 0 {
 		return "", "", false
 	}
+	learned := strictKnown{learned: c.Spec.ReqBodyNoise}
 	var qh []string
 	for k, v := range q.Header {
 		lk := strings.ToLower(k)
-		if strings.HasPrefix(lk, "keploy") {
+		if strings.HasPrefix(lk, "keploy") || n.whole[lk] {
 			continue
 		}
-		if _, ignored := repeatReadIgnored[lk]; ignored {
+		if pats, guarded := n.pats[lk]; guarded {
+			if matchesAny(pats, v) {
+				qh = append(qh, lk+" (within keploy.yml's patterns)")
+				continue
+			}
+		} else if learned.learnedNoiseAt("header."+lk, "") {
+			qh = append(qh, lk+" (learned)")
 			continue
 		}
-		if lk == "host" || isCredentialHeader(lk) {
-			qh = append(qh, lk+": "+v)
-			continue
-		}
-		qh = append(qh, lk)
+		qh = append(qh, lk+": "+v)
 	}
 	var ah []string
 	for k, v := range a.Header {
@@ -77,17 +109,6 @@ func RepeatReadOf(m *models.Mock) (call, answer string, ok bool) {
 	}
 	return keyOf(append([]string{string(q.Method), q.URL, q.Body}, sorted(qh)...)),
 		keyOf(append([]string{strconv.Itoa(a.StatusCode), a.Body, a.Binary}, sorted(ah)...)), true
-}
-
-// isCredentialHeader reports whether lk (lowercased) is one of the headers
-// that say who calls (models.CredentialHeaders).
-func isCredentialHeader(lk string) bool {
-	for _, h := range models.CredentialHeaders {
-		if lk == h {
-			return true
-		}
-	}
-	return false
 }
 
 // withoutCookieDates is a Set-Cookie value without the Expires date of each

@@ -471,14 +471,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if extra < 0 {
 					extra, extraAt, extraMatched = h.extraCallOf(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 				}
-				if again, test, yes := integrations.AnswerRepeatRead(db, extraMatched); yes {
+				if again, yes := integrations.AnswerRepeatRead(db, extraMatched); yes {
 					// One line per read a replay answers once more, as it
-					// answers it: the test, and the read as the replay
-					// named it (the call, how many times it was recorded
-					// and that every answer was one).
+					// answers it: the test, the read as the replay named
+					// it, and how many times the test recorded it.
 					h.Logger.Info("answered a repeated read once more than its test recorded it: the test's mapping names it a read recorded at least twice, every time with one answer",
-						zap.String("test", test), zap.String("call", request.Method+" "+request.URL.Path), zap.String("read", again.TestModeInfo.RepeatRead.Name), zap.Int("recorded", extra), zap.String("mock", again.Name))
-					stub, ok, diag, lmiss = again, true, nil, nil
+						zap.String("test", again.Test), zap.String("call", request.Method+" "+request.URL.Path), zap.String("read", again.Mock.TestModeInfo.RepeatRead.Name), zap.Int("recorded", again.Recorded), zap.String("mock", again.Mock.Name))
+					stub, ok, diag, lmiss = again.Mock, true, nil, nil
 				}
 			}
 
@@ -787,8 +786,13 @@ type RequestNoise struct {
 	URL    []string
 }
 
-// NewRequestNoise is the request noise of a call under opts.
-func NewRequestNoise(logger *zap.Logger, opts models.OutgoingOptions) RequestNoise {
+// requestHeaderNoise is the header noise a call is matched with under opts,
+// by lowercased name: keploy.yml's header noise, and flaky (the static list:
+// flakyHeaderNoise) for each header keploy.yml does not name, unless
+// --disableAutoHeaderNoise turns it off. A shallow copy, so injecting the
+// static list does not mutate the shared opts.NoiseConfig map, which other
+// outgoing requests may read at once. nil when neither names a header.
+func requestHeaderNoise(opts models.OutgoingOptions, flaky map[string][]string) map[string][]string {
 	// Extract header noise from noise configuration.
 	// We make a shallow copy so that injecting default flaky headers
 	// below does not mutate the shared opts.NoiseConfig map, which
@@ -822,12 +826,18 @@ func NewRequestNoise(logger *zap.Logger, opts models.OutgoingOptions) RequestNoi
 		if headerNoise == nil {
 			headerNoise = make(map[string][]string)
 		}
-		for hdr, noise := range flakyHeaderNoise() {
+		for hdr, noise := range flaky {
 			if _, exists := headerNoise[hdr]; !exists {
 				headerNoise[hdr] = noise
 			}
 		}
 	}
+	return headerNoise
+}
+
+// NewRequestNoise is the request noise of a call under opts.
+func NewRequestNoise(logger *zap.Logger, opts models.OutgoingOptions) RequestNoise {
+	headerNoise := requestHeaderNoise(opts, flakyHeaderNoise())
 
 	// User request-body noise from test.globalNoise.requestBody
 	// (root-relative dotted paths). This is a DEDICATED bucket,

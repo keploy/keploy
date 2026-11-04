@@ -4527,6 +4527,10 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 		// Record's full round pairs a call nothing answered with a recording
 		// another test owns: only its session sets Learn.
 		p.getMockManager().SetPairing(opts.Learn)
+		// A test's repeated read is proved by its recordings compared as
+		// the session's matcher compares the set's calls: with the set's
+		// header noise (SetRepeatReadNoise).
+		p.getMockManager().SetRepeatReadNoise(opts)
 		// A session's learn step begins anew: what ends it is a filter of
 		// a set's later cycle (SetLearnEnded).
 		p.getMockManager().SetLearnEnded(false)

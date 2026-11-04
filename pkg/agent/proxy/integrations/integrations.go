@@ -434,23 +434,31 @@ type ExactConsumedReader interface {
 // repeated read its mapping names (models.TestModeInfo.RepeatRead): the test
 // recorded that read at least twice, every time with one answer.
 // AnswerRepeatRead is given the open test's answered recordings the call
-// matches, as the matcher judges it. It returns the recording to answer the
-// call with again when every one of them is a recording of one repeated read
-// of the test, every recording of that read has answered, and the read has
-// not been answered once more in this test yet, and the ID of the test it
-// answers it in, which the answer's log line names. It answers each repeated
-// read at most once more per test; nil, "" and false otherwise.
+// matches, as the matcher judges it. It answers the call again
+// (RepeatReadAnswer) when every one of them is a recording of one repeated
+// read of the test, every recording of that read has answered, and the read
+// has not been answered once more in this test yet. It answers each repeated
+// read at most once more per test; ok is false otherwise.
 type RepeatReadAnswerer interface {
-	AnswerRepeatRead(matched []*models.Mock) (answer *models.Mock, test string, ok bool)
+	AnswerRepeatRead(matched []*models.Mock) (answer RepeatReadAnswer, ok bool)
+}
+
+// RepeatReadAnswer is a repeated read answered once more than its test
+// recorded it (RepeatReadAnswerer), as the answer's log line names it: the
+// recording it is answered with, the ID of the test, and how many times the
+// test recorded the read.
+type RepeatReadAnswer struct {
+	Mock     *models.Mock
+	Test     string
+	Recorded int
 }
 
 // AnswerRepeatRead is db's answer to a call one more than the open test
-// recorded, and the test's ID (RepeatReadAnswerer); nil, "" and false from a
-// store that has none.
-func AnswerRepeatRead(db MockMemDb, matched []*models.Mock) (*models.Mock, string, bool) {
+// recorded (RepeatReadAnswerer); ok is false from a store that has none.
+func AnswerRepeatRead(db MockMemDb, matched []*models.Mock) (RepeatReadAnswer, bool) {
 	r, ok := db.(RepeatReadAnswerer)
 	if !ok || len(matched) == 0 {
-		return nil, "", false
+		return RepeatReadAnswer{}, false
 	}
 	return r.AnswerRepeatRead(matched)
 }

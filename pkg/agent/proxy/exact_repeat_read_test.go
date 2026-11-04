@@ -374,19 +374,19 @@ func TestARepeatedReadIsAnsweredAgainOnlyFromTheViewsOwnAnsweredRecordings(t *te
 	if len(answered) != 1 {
 		t.Fatalf("answered %d recordings after one call; want 1", len(answered))
 	}
-	if _, _, ok := mm.AnswerRepeatRead(answered); ok {
+	if _, ok := mm.AnswerRepeatRead(answered); ok {
 		t.Fatal("answered again while one of the read's recordings had not answered")
 	}
 	send()
 	answered = mm.ConsumedTestMocks()
-	if _, _, ok := mm.AnswerRepeatRead([]*models.Mock{answered[0].ShallowCopy()}); ok {
+	if _, ok := mm.AnswerRepeatRead([]*models.Mock{answered[0].ShallowCopy()}); ok {
 		t.Fatal("a copy that is not the open view's recording was answered again")
 	}
-	again, test, ok := mm.AnswerRepeatRead(answered)
-	if !ok || again.Name != "r-1" || test != "t" {
-		t.Fatalf("answered again %v in test %q (%v); want the read's last recording r-1 in t", again, test, ok)
+	again, ok := mm.AnswerRepeatRead(answered)
+	if !ok || again.Mock.Name != "r-1" || again.Test != "t" || again.Recorded != 2 {
+		t.Fatalf("answered again %+v (%v); want the read's last recording r-1 in t, recorded 2 times", again, ok)
 	}
-	if _, _, ok := mm.AnswerRepeatRead(answered); ok {
+	if _, ok := mm.AnswerRepeatRead(answered); ok {
 		t.Fatal("the read was answered again twice in one test")
 	}
 	// A test that owns no recording answers none of another test's again.
@@ -397,7 +397,7 @@ func TestARepeatedReadIsAnsweredAgainOnlyFromTheViewsOwnAnsweredRecordings(t *te
 				t.Fatalf("a test that owns nothing panicked answering again: %v", r)
 			}
 		}()
-		if _, _, ok := mm.AnswerRepeatRead(answered); ok {
+		if _, ok := mm.AnswerRepeatRead(answered); ok {
 			t.Fatal("a test that owns nothing answered another test's recording again")
 		}
 	}()

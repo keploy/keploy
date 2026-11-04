@@ -2,9 +2,13 @@ package http
 
 import (
 	"errors"
+	"fmt"
+	"regexp"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 // repeatReadMock is a Frappe read as the browser recorded it, which edit
@@ -27,15 +31,29 @@ func repeatReadMock(edit func(*models.Mock)) *models.Mock {
 	return m
 }
 
-// One call and one answer are what the matcher and a test's response
+// frappeNoise is the header noise the Frappe app's keploy.yml gives the
+// matcher (Referer, whole) and an entry with a pattern (X-Trace), with the
+// static list, as a replay hands them to its agent.
+var frappeNoise = NewRepeatReadNoise(models.OutgoingOptions{NoiseConfig: map[string]map[string][]string{
+	"header": {"Referer": {}, "X-Trace": {`^t-[0-9]+$`}},
+}})
+
+// One call and one answer are what the strict matcher and a test's response
 // comparison compare, and nothing else: a recording differing from the first
 // only where neither compares is the same read; one differing where either
-// does is another call or another answer.
+// does is another call or another answer. A request header's value counts
+// unless the matcher excuses it under the set's noise.
 func TestRepeatReadOfComparesWhatTheMatcherAndTheResponseCompare(t *testing.T) {
-	base := repeatReadMock(nil)
-	call0, answer0, ok := RepeatReadOf(base)
+	base := func(m *models.Mock) { m.Spec.HTTPReq.Header["X-Trace"] = "t-1" }
+	call0, answer0, ok := RepeatReadOf(repeatReadMock(base), frappeNoise)
 	if !ok {
 		t.Fatal("a recorded HTTP read is not one keploy can prove")
+	}
+	learn := func(m *models.Mock, h string) {
+		if m.Spec.ReqBodyNoise == nil {
+			m.Spec.ReqBodyNoise = map[string][]string{}
+		}
+		m.Spec.ReqBodyNoise["header."+h] = []string{}
 	}
 	rows := []struct {
 		name               string
@@ -58,11 +76,17 @@ func TestRepeatReadOfComparesWhatTheMatcherAndTheResponseCompare(t *testing.T) {
 		{"the status", func(m *models.Mock) { m.Spec.HTTPResp.StatusCode = 500 }, true, false},
 		{"the body", func(m *models.Mock) { m.Spec.HTTPResp.Body = `{"message":{"x":1}}` }, true, false},
 		{"the binary body", func(m *models.Mock) { m.Spec.HTTPResp.Binary = "AAE=" }, true, false},
-		{"the page it was asked from", func(m *models.Mock) { m.Spec.HTTPReq.Header["Referer"] = "http://crm.test:8080/crm/deals/D-1" }, true, true},
-		{"a header the matcher ignores", func(m *models.Mock) { m.Spec.HTTPReq.Header["Traceparent"] = "00-ab-cd-01" }, true, true},
+		{"the page it was asked from, which keploy.yml names noise", func(m *models.Mock) { m.Spec.HTTPReq.Header["Referer"] = "http://crm.test:8080/crm/deals/D-1" }, true, true},
+		{"a header of the static list", func(m *models.Mock) { m.Spec.HTTPReq.Header["Traceparent"] = "00-ab-cd-01" }, true, true},
 		{"keploy's own header", func(m *models.Mock) { m.Spec.HTTPReq.Header["Keploy-Test-Id"] = "t2" }, true, true},
+		{"a value within keploy.yml's patterns", func(m *models.Mock) { m.Spec.HTTPReq.Header["X-Trace"] = "t-2" }, true, true},
+		{"a value outside keploy.yml's patterns", func(m *models.Mock) { m.Spec.HTTPReq.Header["X-Trace"] = "trace-2" }, false, true},
 		{"a header the other lacks", func(m *models.Mock) { m.Spec.HTTPReq.Header["X-Requested-With"] = "XMLHttpRequest" }, false, true},
 		{"who calls", func(m *models.Mock) { m.Spec.HTTPReq.Header["Authorization"] = "token b" }, false, true},
+		{"another user's cookie", func(m *models.Mock) { m.Spec.HTTPReq.Header["Cookie"] = "sid=0000; system_user=yes" }, false, true},
+		{"a CSRF token", func(m *models.Mock) { m.Spec.HTTPReq.Header["X-Frappe-Csrf-Token"] = "0000" }, false, true},
+		{"the language asked", func(m *models.Mock) { m.Spec.HTTPReq.Header["Accept"] = "text/html" }, false, true},
+		{"a header learned as noise on this recording only", func(m *models.Mock) { learn(m, "accept") }, false, true},
 		{"the host", func(m *models.Mock) { m.Spec.HTTPReq.Header["Host"] = "other.test:8080" }, false, true},
 		{"the method", func(m *models.Mock) { m.Spec.HTTPReq.Method = "GET" }, false, true},
 		{"the URL", func(m *models.Mock) { m.Spec.HTTPReq.URL += "?x=1" }, false, true},
@@ -70,7 +94,7 @@ func TestRepeatReadOfComparesWhatTheMatcherAndTheResponseCompare(t *testing.T) {
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
-			call, answer, ok := RepeatReadOf(repeatReadMock(r.edit))
+			call, answer, ok := RepeatReadOf(repeatReadMock(func(m *models.Mock) { base(m); r.edit(m) }), frappeNoise)
 			if !ok {
 				t.Fatal("not a recording keploy can prove")
 			}
@@ -79,13 +103,68 @@ func TestRepeatReadOfComparesWhatTheMatcherAndTheResponseCompare(t *testing.T) {
 			}
 		})
 	}
-	// Both sides carry Authorization: its value is compared.
-	a := repeatReadMock(func(m *models.Mock) { m.Spec.HTTPReq.Header["Authorization"] = "token a" })
-	b := repeatReadMock(func(m *models.Mock) { m.Spec.HTTPReq.Header["Authorization"] = "token b" })
-	ca, _, _ := RepeatReadOf(a)
-	cb, _, _ := RepeatReadOf(b)
-	if ca == cb {
-		t.Error("two callers' recordings are one call")
+	// A header both recordings learned as noise may differ, as the matcher
+	// takes a call for either one alike.
+	ca, _, _ := RepeatReadOf(repeatReadMock(func(m *models.Mock) { learn(m, "accept"); m.Spec.HTTPReq.Header["Accept"] = "a" }), frappeNoise)
+	cb, _, _ := RepeatReadOf(repeatReadMock(func(m *models.Mock) { learn(m, "accept"); m.Spec.HTTPReq.Header["Accept"] = "b" }), frappeNoise)
+	if ca != cb {
+		t.Error("two recordings that both learned Accept as noise are two calls")
+	}
+}
+
+// The proof excuses only what the matcher excuses under the set's noise:
+// with no noise given, no header; with the static list turned off
+// (test.disableAutoHeaderNoise), not the static list's headers either.
+func TestRepeatReadOfExcusesOnlyTheSetsNoise(t *testing.T) {
+	referer := func(m *models.Mock) { m.Spec.HTTPReq.Header["Referer"] = "http://crm.test:8080/crm/deals/D-1" }
+	trace := func(m *models.Mock) { m.Spec.HTTPReq.Header["Traceparent"] = "00-ab-cd-01" }
+	rows := []struct {
+		name  string
+		noise RepeatReadNoise
+		edit  func(*models.Mock)
+		same  bool
+	}{
+		{"no noise: the page", RepeatReadNoise{}, referer, false},
+		{"no noise: a static list header", RepeatReadNoise{}, trace, false},
+		{"the static list: a static list header", NewRepeatReadNoise(models.OutgoingOptions{}), trace, true},
+		{"the static list: the page", NewRepeatReadNoise(models.OutgoingOptions{}), referer, false},
+		{"the static list turned off: a static list header", NewRepeatReadNoise(models.OutgoingOptions{DisableAutoHeaderNoise: true}), trace, false},
+		{"the static list turned off, keploy.yml's noise kept: the page", NewRepeatReadNoise(models.OutgoingOptions{DisableAutoHeaderNoise: true, NoiseConfig: map[string]map[string][]string{"header": {"referer": {}}}}), referer, true},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			c0, _, _ := RepeatReadOf(repeatReadMock(nil), r.noise)
+			c1, _, _ := RepeatReadOf(repeatReadMock(r.edit), r.noise)
+			if (c0 == c1) != r.same {
+				t.Errorf("same call %v; want %v", c0 == c1, r.same)
+			}
+		})
+	}
+}
+
+// patsOf is pats as written, by name.
+func patsOf(pats map[string][]*regexp.Regexp) map[string][]string {
+	out := make(map[string][]string, len(pats))
+	for k, v := range pats {
+		out[k] = patternStrings(v)
+	}
+	return out
+}
+
+// The proof's noise is the header noise the matcher itself is handed
+// (NewRequestNoise) under the proven switch, so the two cannot drift.
+func TestRepeatReadNoiseIsTheMatchersHeaderNoise(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, opts := range []models.OutgoingOptions{
+		{},
+		{DisableAutoHeaderNoise: true},
+		{NoiseConfig: map[string]map[string][]string{"header": {"Referer": {}, "X-Trace": {`^t-`}, "traceparent": {`^00-`}}}},
+	} {
+		whole, pats := splitHeaderNoise(zap.NewNop(), NewRequestNoise(zap.NewNop(), opts).Header)
+		n := NewRepeatReadNoise(opts)
+		if fmt.Sprint(n.whole) != fmt.Sprint(whole) || fmt.Sprint(patsOf(n.pats)) != fmt.Sprint(patsOf(pats)) {
+			t.Errorf("%+v: the proof's noise %v %v is not the matcher's %v %v", opts, n.whole, patsOf(n.pats), whole, patsOf(pats))
+		}
 	}
 }
 
@@ -121,7 +200,7 @@ func provesRead(t *testing.T, m *models.Mock) (ok bool) {
 			ok = false
 		}
 	}()
-	_, _, ok = RepeatReadOf(m)
+	_, _, ok = RepeatReadOf(m, frappeNoise)
 	return ok
 }
 

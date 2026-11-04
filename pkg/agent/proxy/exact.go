@@ -1502,7 +1502,7 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 	}
 	v.claims = &m.exact.claims
 	v.consumed = make([]bool, len(v.owned))
-	v.repeats = v.repeatReads()
+	v.repeats = v.repeatReads(m.provingNoise())
 	for _, name := range ahead {
 		if i, ok := v.index[name]; ok && !v.isCand(i) {
 			if v.inFlight == nil {

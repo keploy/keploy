@@ -382,7 +382,11 @@ type MockManager struct {
 	// session) that seeds none has none there, not the previous one's: a
 	// keploy test session's windows would otherwise decide whose a later
 	// keploy mock replay's recordings are, over its scope table.
-	testWindows       atomic.Pointer[models.WindowSchedule]
+	testWindows atomic.Pointer[models.WindowSchedule]
+	// repeatNoise is the header noise the session's matcher compares the
+	// set's calls with, which proves a test's repeated reads
+	// (SetRepeatReadNoise); nil, none, until the session sets it.
+	repeatNoise       atomic.Pointer[repeatReadNoise]
 	testWindowsSeeded *models.WindowSchedule
 	windowsSeeded     *models.WindowSchedule
 

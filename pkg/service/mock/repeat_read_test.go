@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/config"
+	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/utils"
@@ -26,14 +28,14 @@ func TestARegisteredNamerNamesEachTestsRepeatedReads(t *testing.T) {
 				t.Fatalf("namedRepeatReads panicked: %v", r)
 			}
 		}()
-		return namedRepeatReads("o", table, loaded)
+		return namedRepeatReads("o", httpint.RepeatReadNoise{}, table, loaded)
 	}
 	if got := named(); got != nil {
 		t.Fatalf("keploy alone named %v", got)
 	}
 	var gotSet string
 	var gotOwned map[string][]string
-	unregister := RegisterRepeatReadNamer(func(set string, owned map[string][]*models.Mock) map[string][]models.RepeatRead {
+	unregister := RegisterRepeatReadNamer(func(set string, _ httpint.RepeatReadNoise, owned map[string][]*models.Mock) map[string][]models.RepeatRead {
 		gotSet, gotOwned = set, map[string][]string{}
 		for test, mks := range owned {
 			for _, mk := range mks {
@@ -69,14 +71,16 @@ func TestARegisteredNamerNamesEachTestsRepeatedReads(t *testing.T) {
 				t.Error("a second namer registered")
 			}
 		}()
-		RegisterRepeatReadNamer(func(string, map[string][]*models.Mock) map[string][]models.RepeatRead { return nil })
+		RegisterRepeatReadNamer(func(string, httpint.RepeatReadNoise, map[string][]*models.Mock) map[string][]models.RepeatRead {
+			return nil
+		})
 	}()
 	unregister()
 	if got := named(); got != nil {
 		t.Fatalf("an unregistered namer named %v", got)
 	}
 	// An old registration's unregister leaves a newer one.
-	again := RegisterRepeatReadNamer(func(string, map[string][]*models.Mock) map[string][]models.RepeatRead {
+	again := RegisterRepeatReadNamer(func(string, httpint.RepeatReadNoise, map[string][]*models.Mock) map[string][]models.RepeatRead {
 		return map[string][]models.RepeatRead{"o::TestB": {{Name: "list", Mocks: []string{"mock-3", "mock-5"}}}}
 	})
 	defer again()
@@ -113,17 +117,30 @@ func TestAReplayPushesTheNamedRepeatedReadsWithTheTable(t *testing.T) {
 	}, nil, nil))
 	read := models.RepeatRead{Name: "GET /api/onboarding", Mocks: []string{"mock-0", "mock-1"}}
 	var gotSet string
-	defer RegisterRepeatReadNamer(func(set string, _ map[string][]*models.Mock) map[string][]models.RepeatRead {
-		gotSet = set
+	var gotNoise httpint.RepeatReadNoise
+	defer RegisterRepeatReadNamer(func(set string, noise httpint.RepeatReadNoise, _ map[string][]*models.Mock) map[string][]models.RepeatRead {
+		gotSet, gotNoise = set, noise
 		return map[string][]models.RepeatRead{"orders::TestPlace": {read}}
 	})()
 	rinstr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
 	rcfg := instrConfig(rinstr, utils.Native, "go test -p 1 -json ./...")
 	rcfg.Path, rcfg.Mock.OnMiss = keployDir, "fail"
+	// The set's own keploy.yml entry names Referer noise: the namer proves
+	// reads under it, as the agent matches the set's calls.
+	rcfg.Test.GlobalNoise.Testsets = config.TestsetNoise{"set": {"header": {"Referer": {}}}}
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
 	require.NoError(t, New(zap.NewNop(), rinstr, named("mock-0", "mock-1"), mdb, nil, nil, rcfg).Replay(ctx))
 	require.Equal(t, "set", gotSet)
+	fromPage := func(page string) string {
+		call, _, ok := httpint.RepeatReadOf(&models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
+			HTTPReq:  &models.HTTPReq{Method: "GET", URL: "http://crm.test/api/onboarding", Header: map[string]string{"Referer": page}},
+			HTTPResp: &models.HTTPResp{StatusCode: 200, Body: "{}"},
+		}}, gotNoise)
+		require.True(t, ok)
+		return call
+	}
+	require.Equal(t, fromPage("/a"), fromPage("/b"), "the namer was not handed the set's header noise")
 	require.Equal(t, []string{"mock-0", "mock-1"}, rinstr.table["orders::TestPlace"])
 	require.Equal(t, map[string][]models.RepeatRead{"orders::TestPlace": {read}}, rinstr.repeats, "the replay pushes each test's named repeated reads")
 }

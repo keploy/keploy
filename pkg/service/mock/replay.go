@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/ids"
+	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
@@ -293,8 +294,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		PassThroughHosts:          m.config.Record.PassThroughHosts,
 		DisableStatefulMocks:      m.statefulMocksDisabled(),
 		DisableMockCorrelation:    m.config.Test.DisableMockCorrelation,
-		NoiseConfig:               replay.PrepareMockNoiseConfig(m.config.Test.GlobalNoise.Global, m.config.Test.GlobalNoise.Testsets, name),
-		DisableAutoHeaderNoise:    m.config.Test.DisableAutoHeaderNoise,
+		NoiseConfig:               m.matchNoise(name).NoiseConfig,
+		DisableAutoHeaderNoise:    m.matchNoise(name).DisableAutoHeaderNoise,
 		MockNoiseDetection:        m.config.Test.NoiseDetection(),
 		MockNoiseStrict:           m.config.Test.NoiseStrict(),
 		Learn:                     m.learning(),
@@ -1300,6 +1301,18 @@ func recordedGivens(mp *models.Mapping) map[string][]models.GivenValue {
 	return out
 }
 
+// matchNoise is the noise the agent matches mock set name's calls with, as
+// the replay hands it (MockOutgoing): test.globalNoise's global entries with
+// the set's own test-sets entry joined in (replay.PrepareMockNoiseConfig)
+// and test.disableAutoHeaderNoise. A test's repeated reads are proved under
+// the same (httpint.NewRepeatReadNoise).
+func (m *mockService) matchNoise(name string) models.OutgoingOptions {
+	return models.OutgoingOptions{
+		NoiseConfig:            replay.PrepareMockNoiseConfig(m.config.Test.GlobalNoise.Global, m.config.Test.GlobalNoise.Testsets, name),
+		DisableAutoHeaderNoise: m.config.Test.DisableAutoHeaderNoise,
+	}
+}
+
 // pushProvenTable hands the agent, under the proven switch, what each test
 // owns and each key's pool slice (design v14 §5.2): the one view the agent
 // serves a replay from. A test owns exactly the mocks its mapping lists (the
@@ -1370,7 +1383,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 			zap.String("next_step", "record the set again with this keploy: keploy mock record writes mappings.yaml"))
 	}
 	worker := workerSlices(mp, pool)
-	repeats := namedRepeatReads(name, table, loaded)
+	repeats := namedRepeatReads(name, httpint.NewRepeatReadNoise(m.matchNoise(name)), table, loaded)
 	if err := pp.PushProvenTable(ctx, table, pool, worker, windows, recordedGivens(mp), repeats); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
