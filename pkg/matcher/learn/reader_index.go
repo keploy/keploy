@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/maphash"
+	"index/suffixarray"
 	"io"
 	"slices"
 	"strconv"
@@ -77,6 +78,7 @@ type readerEntry struct {
 	spans     answer[[]instant]
 	formSpans answer[momentIndex]
 	fields    answer[fieldWords]
+	subs      answer[*suffixarray.Index]
 	// past: an answer of the text did not fit what was left of the
 	// budget, which only fills, so the entry keeps none from then on: each
 	// question is answered from the text read again, a word by a scan of
@@ -109,6 +111,9 @@ type readerText struct {
 	raw       *Raw
 	rawUnread bool
 	e         *readerEntry
+	// scans counts the questions contains answered by a scan of the text
+	// through this handle, before the text's suffix array.
+	scans int
 }
 
 // newReaderIndex is an empty index for one call, reading through dc's
@@ -321,6 +326,42 @@ func (t *readerText) textNow() (string, bool) {
 	s, _, ok := t.read()
 	return s, ok
 }
+
+// containsScans is how many questions of a text contains answers through
+// one handle by a scan of it before it reads the text's suffix array:
+// building one costs some tens of scans, so a text asked of a few words is
+// only scanned, and one asked of thousands (an answer of thousands of
+// instants, each changed) is scanned this often at most.
+const containsScans = 16
+
+// contains reports whether the text holds w anywhere, as strings.Contains
+// of it does: by a scan of the text read now for the handle's first
+// containsScans questions, then from the text's suffix array, built once
+// for the call where it fits what is left of the index's cap, and by a scan
+// past it (indexOnce). read is false where the recording was not read.
+func (t *readerText) contains(w string) (held, read bool) {
+	if t.scans < containsScans {
+		t.scans++
+		s, ok := t.textNow()
+		return ok && strings.Contains(s, w), ok
+	}
+	ix, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[*suffixarray.Index] { return &e.subs },
+		func(s string, _ []rawField, room int64) (*suffixarray.Index, bool) {
+			if suffixBytes(len(s)) > room {
+				return nil, false
+			}
+			return suffixarray.New([]byte(s)), true
+		}, func(ix *suffixarray.Index) int64 { return suffixBytes(len(ix.Bytes())) },
+		func(s string, _ []rawField) { held = strings.Contains(s, w) })
+	if scanned || !ok {
+		return held, ok
+	}
+	return w == "" || len(ix.Lookup([]byte(w), 1)) > 0, true
+}
+
+// suffixBytes is about what the suffix array of an n-byte text holds: a
+// copy of the text and a 4-byte place per byte.
+func suffixBytes(n int) int64 { return headerBytes + 5*int64(n) }
 
 // holdsWord reports whether the text holds w as a word in any of main's
 // readings (isWord, wordByte, idByte) and any declared form; read is false
@@ -939,14 +980,15 @@ func (o momentOrder) each(c, r int64, f func(int32) bool) bool {
 // coarserReach is how far from m, an instant of a zone whole minutes off
 // UTC, an instant may stand as an instant and hold m by being cut to a
 // unit m is whole at (cutsNone's coarser): a day where m is whole at the
-// minute, else the longest unit of a second or less m is whole at in UTC.
+// minute, else the longest unit m is whole at in UTC: one of a second or
+// less, as each unit past a second is whole minutes.
 func coarserReach(m moment) int64 {
 	if whole(m.key.at, 0, int64(time.Minute)) {
 		return nsPerDay
 	}
 	var reach int64
 	for _, d := range precisionUnits {
-		if u := int64(d); u <= int64(time.Second) && whole(m.key.at, 0, u) {
+		if u := int64(d); whole(m.key.at, 0, u) {
 			reach = u
 		}
 	}

@@ -545,6 +545,14 @@ func TestOutcomeAServedDateIsNoSourceOfTheTimeOfDayBesideIt(t *testing.T) {
 	whole := oAnswer("mock-7", 100*time.Millisecond, rec)
 	d = oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, nil, nil, []Raw{whole.ServedAs(1)})), rec, live)
 	iValue(t, "an answer holding the time itself", d, "mock-7")
+	// A typed time (a decoder's instant, held by its moment, never by its
+	// text) beside the served date: the date is no source of it either.
+	d = oWord(t, Decide(iCall(p, Instant, rec, live, rAt, fAt, nil, nil, []Raw{day.ServedAs(1)})), rec, live)
+	if d.Outcome == OutcomeValue {
+		t.Errorf("FALSE GREEN: a typed time bound to the date beside it: %s", oDescribe([]Decision{d}))
+	}
+	d = oWord(t, Decide(iCall(p, Instant, rec, live, rAt, fAt, nil, nil, []Raw{whole.ServedAs(1)})), rec, live)
+	iValue(t, "an answer holding the typed time itself", d, "mock-7")
 }
 
 // A request sent before the call that held the recorded minute and, in round
@@ -3467,6 +3475,7 @@ func TestOutcomeAMomentIsAskedOnlyOfTheInstantsThatMayHoldIt(t *testing.T) {
 		{"two fine copies", []moment{utc(T+123*us, time.Microsecond), utc(T+123*us, time.Microsecond)}, utc(T+123*us, time.Microsecond), true, true, 1},
 		{"two instants the minute holds", []moment{utc(M+30*s, time.Second), utc(M+40*s, time.Second)}, utc(M, time.Minute), true, false, 1},
 		{"a minute of no zone an hour past an IST typed value's wall clock", []moment{mk(M+ist+h, 0, false, time.Minute)}, typed(mk(T, ist, true, time.Second)), false, false, 0},
+		{"two instants a minute rounds them up to, the nearer asked", []moment{utc(M-20*s, time.Second), utc(M-10*s, time.Second)}, utc(M, time.Minute), true, false, 1},
 		{"a time of day, asked of every instant to the fine hold", []moment{utc(T+s, time.Second), utc(T, time.Second), utc(T+2*s, time.Second)}, moment{key: instantKey{at: T % nsPerDay, day: true}, wall: T % nsPerDay, res: time.Second}, true, true, 2},
 	} {
 		var spans []instant
@@ -3485,4 +3494,97 @@ func TestOutcomeAMomentIsAskedOnlyOfTheInstantsThatMayHoldIt(t *testing.T) {
 			t.Errorf("%s: held %v, fine %v, asking %d instants; want %v, %v, asking %d", c.what, gotHeld, gotFine, asks, c.held, c.fine, c.asks)
 		}
 	}
+}
+
+// A time-ordered UUID's time groups name no moment (instant.keyed), past
+// the budget as within it: a moment at the epoch, which such a group's
+// unkeyed instant stands at, is held by no instant of a text whose one
+// keyed instant is years on.
+func TestOutcomeAUUIDsTimeGroupsHoldNoMomentPastTheBudget(t *testing.T) {
+	defer func(r int64) { readerBudget = r }(readerBudget)
+	ms := time.Date(2026, 10, 31, 10, 50, 13, 305_000_000, time.UTC).UnixMilli()
+	text := fmt.Sprintf(`{"id":"%08x-%04x-7abc-8def-0123456789ab","at":"2026-10-31T10:50:13Z"}`, ms>>16, ms&0xffff)
+	m := moment{key: instantKey{at: 0}, res: time.Second, zoned: true}
+	dc := oDrifts()
+	group := false
+	for _, sp := range slices.Concat(dc.spansOf(text), dc.spansOf(dc.rawExtra(text))) {
+		if h, _ := byMoment(sp.moment(), m); h && !sp.keyed {
+			group = true
+		}
+	}
+	if !group {
+		t.Fatalf("fixture: no time group of the UUID stands at the epoch by moment: %+v", dc.spansOf(text))
+	}
+	for _, c := range []struct {
+		what   string
+		budget int64
+	}{{"within the budget", 0}, {"past the budget", 1}} {
+		readerBudget = c.budget
+		x := newReaderIndex(dc)
+		held, _, read := x.text(text).holdsMoment(m)
+		if held || !read {
+			t.Errorf("%s: the text holds the epoch %v (read %v); want held by no instant, as only the UUID's time groups stand there", c.what, held, read)
+		}
+		x.release()
+	}
+}
+
+// contains answers as strings.Contains of the text does: through a
+// handle's first containsScans questions by a scan, then from the text's
+// suffix array where it fits what is left of the index's cap (at exactly
+// the room too), and by a scan past it, keeping the entry's room for its
+// other answers. Its words: the text, one past it, the empty word, words
+// inside longer ones, and pieces of the text from all over it.
+func TestOutcomeContainsAnswersAsAScanOfTheText(t *testing.T) {
+	defer func(r int64) { readerBudget = r }(readerBudget)
+	var b strings.Builder
+	for i := range 300 {
+		fmt.Fprintf(&b, `{"id":%d,"at":"2026-10-31T10:%02d:%02d.%06dZ"},`, i, i/60, i%60, i*7919%1000000)
+	}
+	text := b.String()
+	words := []string{"", text, text + "x", "2026-10-31T10:04:59", "T10:04:5", "10:61:00", "x2026", `"id":299,`, `"id":300,`}
+	for i := 0; i < len(text); i += 37 {
+		words = append(words, text[i:min(len(text), i+1+i%23)], text[i:min(len(text), i+1+i%23)]+"\x00")
+	}
+	words = append(words, "", "\x00", text[len(text)-5:])
+	for _, c := range []struct {
+		what   string
+		budget int64
+		built  bool
+		past   bool
+	}{
+		{"within the budget", 0, true, false},
+		{"with exactly the room", int64(len(text)) + suffixBytes(len(text)), true, false},
+		{"past the room, within the budget", int64(len(text)) + headerBytes + 100, false, false},
+		{"past the budget", 1, false, true},
+	} {
+		readerBudget = c.budget
+		x := newReaderIndex(oDrifts())
+		h := x.text(text)
+		for i, w := range words {
+			got, read := h.contains(w)
+			if want := strings.Contains(text, w); got != want || !read {
+				t.Errorf("%s: question %d, %.40q: contains %v (read %v); want %v, as strings.Contains", c.what, i, w, got, read, want)
+			}
+			built := h.e != nil && h.e.subs.ok
+			if want := c.built && i >= containsScans; built != want {
+				t.Fatalf("%s: after question %d the suffix array is kept %v; want %v (a scan for the first %d)", c.what, i, built, want, containsScans)
+			}
+		}
+		if h.e == nil || h.e.past != c.past {
+			t.Errorf("%s: the text's entry is past the budget: %v; want %v (past the room, its room kept for its other answers)", c.what, h.e != nil && h.e.past, c.past)
+		}
+		x.release()
+	}
+	// A recording keploy could not read holds no word, the empty one
+	// included, through the first scans and past them.
+	readerBudget = 0
+	x := newReaderIndex(oDrifts())
+	h := x.textOf(Raw{mock: "mock-7", unread: "disk mocks: store closed"})
+	for i := range containsScans + 4 {
+		if held, read := h.contains(""); held || read {
+			t.Errorf("an unread recording, question %d: contains the empty word %v (read %v); want neither", i, held, read)
+		}
+	}
+	x.release()
 }
