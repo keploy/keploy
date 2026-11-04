@@ -340,7 +340,10 @@ func TestWordRuns_AStretchItsMockHoldsElsewhereIsAValueOfItsOwn(t *testing.T) {
 			}
 		}
 	}
-	for _, text := range []string{"zz/3", "3"} {
+	// A text whose words differ from the run's ("zz/3"), or that ends before
+	// the run does, at its first word ("3") or after a first word it holds
+	// ("ab"): each word alone.
+	for _, text := range []string{"zz/3", "3", "ab"} {
 		ws := []WordBind{{Text: "body.key", Word: 0, Live: "x", Recorded: "ab", RecordedText: text, Elsewhere: heldNowhere}, {Text: "body.key", Word: 1, Live: "7", Recorded: "3", RecordedText: text, Elsewhere: heldNowhere}}
 		func() {
 			defer func() {
