@@ -81,6 +81,10 @@ type roundState struct {
 	// drives a change between any two reads with them, never with sleeps.
 	onWait func()
 	onRead func(step string)
+	// onAnswerAgain is a test seam too: it runs as a held call is about to
+	// be answered once more (heldScope.AnswerRepeatRead), its staging
+	// checked, holding the round lock.
+	onAnswerAgain func()
 	// onSettled is a test seam too: it runs once a consume has settled and
 	// let the round lock go, before what it tells the replay
 	// (flagMockAsUsed).
@@ -1271,12 +1275,21 @@ func (h *heldScope) ConsumedTestMocks() []*models.Mock {
 
 // AnswerRepeatRead is the manager's (integrations.RepeatReadAnswerer) while
 // the staging is still h's call's: a call of a set the replay staged another
-// under is answered by no recording of it.
+// under is answered by no recording of it. The check and the answer are one
+// step under the round lock, which a staging holds as it moves its epoch
+// (bumpStagingEpoch), as a by-kind spend's are (spendByKindAt): a staging
+// lands before the check, and the call is refused, or after the answer.
 func (h *heldScope) AnswerRepeatRead(matched []*models.Mock) (integrations.RepeatReadAnswer, bool) {
-	if h.moved() {
+	m := h.MockManager
+	m.lockRound()
+	if ok, _ := m.guardLocked(&h.g, nil); !ok {
 		return integrations.RepeatReadAnswer{}, false
 	}
-	return h.MockManager.AnswerRepeatRead(matched)
+	defer m.exact.round.mu.Unlock()
+	if f := m.exact.round.onAnswerAgain; f != nil {
+		f()
+	}
+	return m.AnswerRepeatRead(matched)
 }
 
 // FindAnsweredEarlier is the manager's (integrations.AnsweredFinder) while
