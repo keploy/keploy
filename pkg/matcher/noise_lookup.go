@@ -63,12 +63,20 @@ func (l NoiseLookup) CoversAdded(path string) bool {
 // Covers reads it, and whether an entry does: none for an entry that excuses
 // every value. A reason names them; Covers decides.
 func (l NoiseLookup) Patterns(path string) ([]string, bool) {
-	regs, noisy := l.idx.matchWholeFields(strings.ToLower(path), true)
-	out := make([]string, len(regs))
-	for i, re := range regs {
-		out[i] = re.String()
+	_, pats, ok := l.Entry(path)
+	return pats, ok
+}
+
+// Entry is Patterns with the key of the entry that names the leaf at path,
+// as the noise configuration writes it: a hint names the entry to edit,
+// which may name the leaf by its last field alone ("qty" for "order.qty")
+// or name the array it is an element of ("ids" for "ids[]").
+func (l NoiseLookup) Entry(path string) (key string, patterns []string, ok bool) {
+	e, noisy := l.idx.entryWholeFields(strings.ToLower(path), true)
+	if !noisy {
+		return "", []string{}, false
 	}
-	return out, noisy
+	return e.key, regexpTexts(e.regexps), true
 }
 
 // matchWholeFields is match with entries naming whole fields (namesWholeFields):
@@ -76,6 +84,12 @@ func (l NoiseLookup) Patterns(path string) ([]string, bool) {
 // (NoiseIDKey) is tested against the path with its id keys collapsed, as
 // matchKind tests it, and only when idKeys is set (CoversAdded).
 func (ni noiseIndex) matchWholeFields(keyLower string, idKeys bool) (regs []*regexp.Regexp, isNoisy bool) {
+	e, ok := ni.entryWholeFields(keyLower, idKeys)
+	return e.regexps, ok
+}
+
+// entryWholeFields is the entry matchWholeFields reads.
+func (ni noiseIndex) entryWholeFields(keyLower string, idKeys bool) (noiseEntry, bool) {
 	collapsed := keyLower
 	if idKeys && ni.idKeys {
 		collapsed = CollapseIDKeys(keyLower)
@@ -89,10 +103,10 @@ func (ni noiseIndex) matchWholeFields(keyLower string, idKeys bool) (regs []*reg
 			path = collapsed
 		}
 		if namesWholeFields(path, e.keyLower) {
-			return e.regexps, true
+			return e, true
 		}
 	}
-	return nil, false
+	return noiseEntry{}, false
 }
 
 // namesWholeFields reports whether entry occurs in path as a run of whole
