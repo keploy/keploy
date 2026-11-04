@@ -180,7 +180,9 @@ jobs:
       # consume-once mocks (KEPLOY_STRICT_MOCK_WINDOW=1), a mock a test
       # consumed must not be served again after that test's end, on the
       # worker's pid; a control shows the same call is answered while the
-      # mock is unconsumed.
+      # mock is unconsumed. An HTTP/1.1 pipeline (20 reads of the counter in
+      # one write on one connection) must be recorded whole and replayed in
+      # turn.
       - name: Run mock-mode stateful-dependency e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}

@@ -106,7 +106,7 @@ func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncL
 	// verdict only counts a flag: the engine serves
 	// the recorded epoch either way (async.Engine.decideServe), as a lane the
 	// user declared asks.
-	matched, err := h.SchemaMatch(context.Background(), liveReq, []*models.Mock{rec}, flakyHeaderNoise(), nil, !provenswitch.On())
+	matched, err := h.SchemaMatch(context.Background(), liveReq, nil, []*models.Mock{rec}, flakyHeaderNoise(), nil, !provenswitch.On())
 	if err != nil {
 		return false, "schema match error: " + err.Error()
 	}

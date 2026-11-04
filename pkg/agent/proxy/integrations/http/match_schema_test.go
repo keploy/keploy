@@ -283,7 +283,7 @@ func sameSchemaMatch(t *testing.T, label string, pool []*models.Mock, calls []sc
 				for _, urlNoise := range [][]string{nil, {"/item/[0-9]+", "/a%20b"}} {
 					for _, auto := range []bool{false, true} {
 						want, werr := h.mainSchemaMatch(ctx, c.input, pool, headerNoise, urlNoise, auto)
-						got, gerr := h.SchemaMatch(ctx, c.input, pool, headerNoise, urlNoise, auto)
+						got, gerr := h.SchemaMatch(ctx, c.input, nil, pool, headerNoise, urlNoise, auto)
 						if (werr == nil) != (gerr == nil) {
 							t.Fatalf("%s, %s (proven %v, url noise %v, auto %v): error %v, main %v", label, c.name, proven, urlNoise, auto, gerr, werr)
 						}
@@ -416,7 +416,7 @@ func TestSchemaMatchParsesEachRecordedPathOnce(t *testing.T) {
 	h := newHTTP()
 	for _, auto := range []bool{false, true} {
 		for _, c := range calls {
-			if _, err := h.SchemaMatch(context.Background(), c.input, pool, nil, nil, auto); err != nil {
+			if _, err := h.SchemaMatch(context.Background(), c.input, nil, pool, nil, nil, auto); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -490,7 +490,7 @@ func TestSchemaMatchAllocationsDoNotGrowWithThePool(t *testing.T) {
 		in := schemaLiveReq(t, method, "/item/7?size=small", hdr, body)
 		allocs := func(pool []*models.Mock) float64 {
 			return testing.AllocsPerRun(20, func() {
-				got, err := h.SchemaMatch(context.Background(), in, pool, nil, nil, false)
+				got, err := h.SchemaMatch(context.Background(), in, nil, pool, nil, nil, false)
 				if err != nil || len(got) != 1 {
 					t.Fatalf("%s: matched %d, err %v", method, len(got), err)
 				}

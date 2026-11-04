@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"strconv"
-	"strings"
 
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -183,7 +182,7 @@ func chunkedEndRefused(resp, refused []byte) ([]byte, bool) {
 	// framing. Chunked framing is readResponseV2's test: parseHeaders drops a
 	// Content-Length beside it.
 	head, bodyStart, _, _ := messageHead(resp, true)
-	if _, transferEncoding := parseHeaders(head); !strings.Contains(strings.ToLower(transferEncoding), "chunked") {
+	if _, transferEncoding := parseHeaders(head); !chunkedCoding(transferEncoding) {
 		return nil, false
 	}
 	msg := append(resp[:len(resp):len(resp)], refused...)
@@ -366,7 +365,8 @@ func startsWithInterimResponse(resp []byte) bool {
 // §2.2: a server ignores at least one; a client may send them between
 // requests, and an old one sends a CRLF after a POST body). It is the one rule
 // for them: messageHead, requestMethod and dropEmptyLinesBeforeRequest skip
-// them by it, and nextRequestV2 takes a chunk that is nothing else.
+// them by it, nextRequestV2 takes a chunk that is nothing else, and replay's
+// nextRequest drops them and reads on past bytes that are nothing else.
 func emptyLinesBefore(b []byte) int {
 	return len(b) - len(bytes.TrimLeft(b, "\r\n"))
 }
@@ -406,7 +406,7 @@ func awaitsContinue(req []byte) bool {
 		return false
 	}
 	contentLength, transferEncoding := parseHeaders(head)
-	if strings.Contains(strings.ToLower(transferEncoding), "chunked") {
+	if chunkedCoding(transferEncoding) {
 		return true
 	}
 	n, err := strconv.Atoi(contentLength)

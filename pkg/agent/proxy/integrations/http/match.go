@@ -148,16 +148,6 @@ type keepForRepeatsKey struct{}
 // open test's own (openTestOwner), for updateMock.
 type ownedKey struct{}
 
-// storeKey carries, in a match's context, the store the match reads
-// (storeOf), for a debug line of a pass that is handed the pool alone.
-type storeKey struct{}
-
-// storeOf is the store ctx's match reads; nil for none.
-func storeOf(ctx context.Context) integrations.MockMemDb {
-	db, _ := ctx.Value(storeKey{}).(integrations.MockMemDb)
-	return db
-}
-
 // openTestOwner returns whether a mock is the open test's own recording, as
 // the store tells it (integrations.TestOwner), from whichever pool it is
 // served; a store that does not tell owns the mocks of the per-test pool it
@@ -279,7 +269,6 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		}
 		own := openTestOwner(mockDb, perTestMocks)
 		ctx = context.WithValue(ctx, ownedKey{}, own)
-		ctx = context.WithValue(ctx, storeKey{}, mockDb)
 		sessionMocks, err := mockDb.GetSessionMocks()
 		if err != nil {
 			utils.LogError(h.Logger, err, "failed to get session mocks")
@@ -350,7 +339,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		// Matching process
 		// Pass 1: exact URL + configured url-noise only. Deterministic and
 		// genuinely-distinct calls match here and are never relaxed.
-		schemaMatched, err := h.SchemaMatch(ctx, input, unfilteredMocks, headerNoise, urlNoise, false)
+		schemaMatched, err := h.SchemaMatch(ctx, input, mockDb, unfilteredMocks, headerNoise, urlNoise, false)
 		if err != nil {
 			return false, nil, nil, err
 		}
@@ -359,7 +348,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		// (numeric/uuid/hex/long token) to vary — so a non-deterministic path id
 		// doesn't 502 with no config. Disable via OutgoingOptions.DisableAutoURLDynamic.
 		if len(schemaMatched) == 0 && autoURLDynamic {
-			schemaMatched, err = h.SchemaMatch(ctx, input, unfilteredMocks, headerNoise, urlNoise, true)
+			schemaMatched, err = h.SchemaMatch(ctx, input, mockDb, unfilteredMocks, headerNoise, urlNoise, true)
 			if err != nil {
 				return false, nil, nil, err
 			}
@@ -808,11 +797,18 @@ func sameCursorRequest(m, want *models.Mock) bool {
 
 // recordedBefore orders recordings as they were recorded: the request
 // timestamp is stable across replay (SortOrder is mutated on every match, so
-// it cannot be used); ID then Name break ties.
+// it cannot be used); the number mockdb gave each as it wrote it
+// (models.CompareRecordedNumbers) breaks a tie, the order of the reads of
+// one write (an HTTP/1.1 pipeline), and ID then Name break the ties left.
+// The number comes before ID, which a tier stamps from its own slice and the
+// startup tier not at all.
 func recordedBefore(a, b *models.Mock) bool {
 	ta, tb := a.Spec.ReqTimestampMock, b.Spec.ReqTimestampMock
 	if !ta.Equal(tb) {
 		return ta.Before(tb)
+	}
+	if c := models.CompareRecordedNumbers(a.Name, b.Name); c != 0 {
+		return c < 0
 	}
 	if a.TestModeInfo.ID != b.TestModeInfo.ID {
 		return a.TestModeInfo.ID < b.TestModeInfo.ID
@@ -1330,7 +1326,12 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 	return true
 }
 
-func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*models.Mock, headerNoise map[string][]string, urlNoise []string, autoDynamic bool) ([]*models.Mock, error) {
+// SchemaMatch's mockDb is the store the pool was read from, read only for
+// the debug line of a path that differs (heldPlaces); nil for none, and that
+// line names the path redacted whole. It is an argument, not a ctx value, so
+// matchCascade wraps no context for it, and a match allocates nothing for a
+// debug line it does not write.
+func (h *HTTP) SchemaMatch(ctx context.Context, input *req, mockDb integrations.MockMemDb, unfilteredMocks []*models.Mock, headerNoise map[string][]string, urlNoise []string, autoDynamic bool) ([]*models.Mock, error) {
 	var schemaMatched []*models.Mock
 
 	// Parse the live query once, not once per candidate mock: url.Query()
@@ -1385,7 +1386,7 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 				// secret there.
 				mockPath, _ := recordedURLPath(mock.Spec.HTTPReq.URL)
 				if logPlaces == nil {
-					p := heldPlaces(storeOf(ctx), nil, unfilteredMocks, input.url.EscapedPath())
+					p := heldPlaces(mockDb, nil, unfilteredMocks, input.url.EscapedPath())
 					logPlaces = &p
 				}
 				livePath := logPlaces.decodedPath(input.url.EscapedPath())

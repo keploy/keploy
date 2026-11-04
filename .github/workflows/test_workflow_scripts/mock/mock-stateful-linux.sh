@@ -41,6 +41,12 @@
 #      between tests is never served a test's recording, consumed or not.
 #      (A pid-less end stages the whole pool again, t1's consumed mock with
 #      it: the call between tests is served it. Reported, not guarded here.)
+#   6. a pipeline: 20 reads of the counter sent in ONE write on one
+#      keep-alive connection (HTTP/1.1 pipelining), each answer read in
+#      turn. The record must keep the 20 (it kept the first of them, with
+#      nothing said), and the replay, with consume-once mocks, must answer
+#      them 1,...,20 in turn (it answered the first and waited for the
+#      client's next bytes, which the client had sent with it).
 # Without the switch every pid-scoped call is inside its process's suite
 # mark: a replay refuses a test begun with a pid without the marks (422,
 # mock-parallel-linux.sh). Step 4's pid-less run says no pid on purpose.
@@ -272,6 +278,64 @@ if pid:
     marks.mark("end")
 PY
 
+# Step 6's dependency: the counter, HTTP/1.1 keep-alive, so it reads a
+# pipeline's requests from one connection in turn and answers each.
+cat > dep-pipe.py <<'PY'
+import http.server, socketserver, sys, threading
+PORT = int(sys.argv[1])
+lock = threading.Lock()
+n = {"c": 0}
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def do_GET(self):
+        with lock:
+            n["c"] += 1
+            body = str(n["c"]).encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a): pass
+class S(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+with S(("127.0.0.1", PORT), H) as s:
+    print("ready", flush=True)
+    s.serve_forever()
+PY
+
+# Step 6's driver, argv PORT N: N reads of the counter in one write on one
+# connection, each answer read in turn. Prints PIPE=<the N answers>, MISS for
+# each that never came: the socket's timeout only turns a hang into that.
+cat > pipe.py <<'PY'
+import socket, sys
+PORT, N = int(sys.argv[1]), int(sys.argv[2])
+def answer(f):
+    if not f.readline():
+        return None
+    length = 0
+    while True:
+        h = f.readline()
+        if not h:
+            return None
+        if h in (b"\r\n", b"\n"):
+            break
+        k, _, v = h.decode().partition(":")
+        if k.strip().lower() == "content-length":
+            length = int(v.strip())
+    return f.read(length).decode()
+got = []
+with socket.create_connection(("127.0.0.1", PORT), timeout=60) as c:
+    c.sendall(b"GET /counter HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n" * N)
+    f = c.makefile("rb")
+    for _ in range(N):
+        try:
+            v = answer(f)
+        except OSError:
+            v = None
+        got.append(v if v is not None else "MISS")
+        if v is None:
+            break
+print("PIPE=" + ",".join(got), flush=True)
+PY
+
 # mapped_counts FILE: "<test id>=<mocks mapped>" per test, sorted.
 mapped_counts() {
   python3 - "$1" <<'PY'
@@ -418,6 +482,31 @@ done
 # test at its end, so no end says it did.
 grep -qx 'missed: 3' keploy/once/last-replay.yaml || { echo "FAIL: the once replay's receipt does not count the 3 misses: $(grep -E '^(missed|consumed|loaded):' keploy/once/last-replay.yaml | tr '\n' ' ')"; FAIL=1; }
 grep -q "_FAILED_BY_KEPLOY=" rep-once.log && { echo "FAIL: an end answered fail on the scope API without the switch: $(grep -o 'ONCE_[a-z0-9]*_FAILED_BY_KEPLOY=.*' rep-once.log | head -1)"; FAIL=1; }
+
+echo "== 6. without the switch: a pipeline of 20 reads in one write, replayed in turn, dependency DOWN =="
+PIPE_N=20
+WANT_PIPE=$(seq -s, 1 "$PIPE_N")
+: > dep.log
+python3 dep-pipe.py "$PORT" > dep.log 2>&1 &
+DP=$!
+until grep -qx ready dep.log 2>/dev/null; do
+  kill -0 "$DP" 2>/dev/null || { echo "FAIL: the pipeline's dependency exited before it listened"; cat dep.log; exit 1; }
+  sleep 0.1
+done
+sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 pipe.py $PORT $PIPE_N" --name pipe --disable-tele 2>&1 | tee rec-pipe.log
+RC=${PIPESTATUS[0]}
+stop_dep
+[ "$RC" -eq 0 ] || { echo "FAIL: the pipeline record should pass (exit 0), got $RC"; FAIL=1; }
+grep -qx "PIPE=$WANT_PIPE" rec-pipe.log ||
+  { echo "FAIL: the pipeline record did not read 1..$PIPE_N (got: $(grep -o 'PIPE=[^ ]*' rec-pipe.log | head -1))"; FAIL=1; }
+# Each read of the pipeline has its mock.
+GOT_PIPE=$(grep -cE '^\s*url: \S*/counter\s*$' keploy/pipe/mocks.yaml 2>/dev/null)
+[ "${GOT_PIPE:-0}" -eq "$PIPE_N" ] || { echo "FAIL: want the pipeline's $PIPE_N reads recorded, got $GOT_PIPE mocks"; FAIL=1; }
+# Consume-once (KEPLOY_STRICT_MOCK_WINDOW=1): each read is served one
+# recording, in the order they were recorded.
+sudo -E env PATH="$PATH" KEPLOY_PROVEN= KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" mock replay -c "python3 pipe.py $PORT $PIPE_N" --name pipe --disable-tele 2>&1 | tee rep-pipe.log
+grep -qx "PIPE=$WANT_PIPE" rep-pipe.log ||
+  { echo "FAIL: the pipeline's reads were not served 1..$PIPE_N in turn (got: $(grep -o 'PIPE=[^ ]*' rep-pipe.log | head -1))"; FAIL=1; }
 fi
 
 [ "$FAIL" = 0 ] && echo "MOCK STATEFUL E2E: PASSED" || echo "MOCK STATEFUL E2E: FAILED"

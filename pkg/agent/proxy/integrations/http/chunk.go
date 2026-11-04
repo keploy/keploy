@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"time"
 
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -78,7 +77,7 @@ func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clie
 			}
 		}
 	} else if transferEncodingHeader != "" {
-		if strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
+		if chunkedCoding(transferEncodingHeader) {
 			if err := h.chunkedRequest(ctx, finalReq, clientConn, destConn); err != nil {
 				return err
 			}
@@ -321,7 +320,7 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 				return err
 			}
 		}
-	} else if strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
+	} else if chunkedCoding(transferEncodingHeader) {
 		if err := h.chunkedResponse(ctx, finalResp, clientConn, destConn); err != nil {
 			return err
 		}

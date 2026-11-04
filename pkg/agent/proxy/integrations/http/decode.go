@@ -54,10 +54,16 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
 		defer close(errCh)
 		defer integrations.RecoverIntoCtx(ctx, h.Logger, clientConn, nil, errCh)
+		// rest is what the client sent after the request in hand: the start
+		// of its next request when it pipelined it (nextRequest).
+		var rest []byte
+		// The client's bytes are read through client, which gives the
+		// bytes a read ended with before its error (heldErrConn).
+		client := &heldErrConn{Conn: clientConn}
 		for {
 			// The whole header section first: only then is it known whether
 			// the client is waiting for a 100 (Continue) before its body.
-			if _, _, err := h.readRequestHead(ctx, &reqBuf, clientConn, nil); err != nil {
+			if _, _, err := h.readRequestHead(ctx, &reqBuf, client, nil); err != nil {
 				errCh <- err
 				return
 			}
@@ -77,12 +83,28 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			}
 
 			h.Logger.Debug("handling the chunked requests to read the complete request")
-			err := h.HandleChunkedRequests(ctx, &reqBuf, clientConn, nil)
+			err := h.HandleChunkedRequests(ctx, &reqBuf, client, nil)
 			if err != nil {
 				utils.LogError(h.Logger, err, "failed to handle chunked requests")
 				errCh <- err
 				return
 			}
+			// An HTTP/1.1 client may send its next request before the answer
+			// to this one has come (pipelining), as often as not in the same
+			// write, so reqBuf can run past this request's end. The request
+			// is reqBuf up to its end, framed as the recorder frames it
+			// (messageFrame; HandleChunkedRequests read it whole by the same
+			// framing), and what follows is the next request's start. Taking
+			// all of it as this request answered the first of a pipeline and
+			// dropped the rest, and the client waited for their answers.
+			end, _, err := (&messageFrame{}).end(reqBuf)
+			if err != nil {
+				utils.LogError(h.Logger, err, "failed to frame the http request message")
+				errCh <- err
+				return
+			}
+			rest = bytes.Clone(reqBuf[end:])
+			reqBuf = reqBuf[:end]
 
 			arrived := time.Now()
 
@@ -129,7 +151,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					errCh <- nil
 					return
 				}
-				reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+				reqBuf, err = nextRequest(ctx, h.Logger, client, rest)
 				if err != nil {
 					h.Logger.Debug("bypassRule passthrough: client closed connection", zap.Error(err))
 					errCh <- nil
@@ -248,7 +270,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				// Read the next request on this keep-alive connection and loop,
 				// mirroring the matched-response path below.
-				reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+				reqBuf, err = nextRequest(ctx, h.Logger, client, rest)
 				if err != nil {
 					h.Logger.Debug("egress passthrough: client closed connection", zap.Error(err))
 					errCh <- nil
@@ -304,7 +326,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					}
 					// Read the next poll on this keep-alive connection and loop,
 					// mirroring the telemetry short-circuit and matched-response paths.
-					reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+					reqBuf, err = nextRequest(ctx, h.Logger, client, rest)
 					if err != nil {
 						h.Logger.Debug("async: client closed connection after delivery/keep-alive", zap.Error(err))
 						errCh <- nil
@@ -580,7 +602,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					} else if handled {
 						// Served live — continue the keep-alive loop for the next
 						// request on this connection. Not reported as a miss.
-						reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+						reqBuf, err = nextRequest(ctx, h.Logger, client, rest)
 						if err != nil {
 							h.Logger.Debug("client closed connection after on-miss passthrough", zap.Error(err))
 							errCh <- nil
@@ -676,7 +698,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
-			reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+			reqBuf, err = nextRequest(ctx, h.Logger, client, rest)
 			if err != nil {
 				h.Logger.Debug("failed to read the request buffer from the client", zap.Error(err))
 				if ce := h.Logger.Check(zap.DebugLevel, "This was the last response from the server"); ce != nil {
@@ -689,6 +711,69 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 	}(errCh, reqBuf, opts)
 
 	return pUtil.JoinParser(ctx, errCh)
+}
+
+// nextRequest returns the start of the client's next request: rest, what it
+// sent after the request just answered, when it pipelined its next request
+// with it, or else what it sends next, read on a small read
+// (pUtil.ReadBytesWaiting). readRequestHead and HandleChunkedRequests read
+// the rest of the request on by its framing.
+//
+// The empty lines in front of it (emptyLinesBefore) are dropped: an old
+// client sends a CRLF after a POST body, and a client may send empty lines
+// between requests (RFC 9112 §2.2 lets a server ignore them). rest, or a
+// read, that holds nothing else is no request start, and the connection is
+// read on, as nextRequestV2 takes such a chunk at record. Handed on as one,
+// it held readRequestHead waiting for a request head, and a client that
+// closed then was logged as an error.
+func nextRequest(ctx context.Context, logger *zap.Logger, clientConn net.Conn, rest []byte) ([]byte, error) {
+	for {
+		if rest = rest[emptyLinesBefore(rest):]; len(rest) > 0 {
+			return rest, nil
+		}
+		var err error
+		if rest, err = pUtil.ReadBytesWaiting(ctx, logger, clientConn); err != nil {
+			return rest, err
+		}
+	}
+}
+
+// heldErrConn is the client's side of a replayed connection as decodeHTTP
+// reads it. A Read that gives bytes with an error gives the bytes alone. An
+// error that ends the connection (anything but a timeout) is held, and
+// every Read after it gives it again without reading the connection. A
+// reader may give the client's last bytes in the same Read as the error:
+// crypto/tls gives them with io.EOF when the client's close_notify follows
+// them (up to TLS 1.2), and io.Reader lets any reader. nextRequest,
+// readRequestHead and the Content-Length body read (contentLengthRequest)
+// took the error as the connection's end and dropped the bytes, so the
+// client's last request went unanswered; the chunked body read kept them. A
+// timeout ends only that read: a body's read deadline, which its reader
+// reads on past, so it is given at the next Read as the connection gives
+// it.
+type heldErrConn struct {
+	net.Conn
+	err error
+}
+
+func (c *heldErrConn) Read(p []byte) (int, error) {
+	if c.err != nil {
+		return 0, c.err
+	}
+	n, err := c.Conn.Read(p)
+	if err != nil && !isTimeout(err) {
+		c.err = err
+	}
+	if n > 0 {
+		return n, nil
+	}
+	return 0, err
+}
+
+// isTimeout reports whether err ends a read at its deadline.
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // withResponse returns m with its recorded response in Spec: m itself, or, when

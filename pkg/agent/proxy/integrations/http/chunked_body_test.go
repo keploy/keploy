@@ -630,6 +630,156 @@ func TestMockOfAResponseAfterAnInterimResponse(t *testing.T) {
 	}
 }
 
+// parseHeaders reads the framing fields of a header section in place: any
+// case, spaces around a name and a value trimmed, nothing past the empty line
+// that ends the section (a body line is no field), and no line without a
+// colon. It copies only the values it returns: it runs twice for every request
+// a replay serves, and for every chunk of a recording.
+func TestParseHeadersReadsTheFramingFields(t *testing.T) {
+	for _, c := range []struct{ name, head, cl, te string }{
+		{"names in any case, spaces trimmed", "POST / HTTP/1.1\r\nHOST: a\r\ncontent-LENGTH:  5 \r\n\r\n", "5", ""},
+		{"a space before the colon", "POST / HTTP/1.1\r\nContent-Length : 5\r\n\r\n", "5", ""},
+		{"a body line is no field", "POST / HTTP/1.1\r\nHost: a\r\n\r\nContent-Length: 10\r\n\r\n", "", ""},
+		{"a line without a colon is no field", "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length\r\n\r\n", "5", ""},
+		{"lines ended by LF alone", "POST / HTTP/1.1\nTransfer-Encoding: gzip\n\nContent-Length: 3\n", "", "gzip"},
+		{"a name in capitals", "POST / HTTP/1.1\r\nTRANSFER-ENCODING: chunked\r\nContent-Length: 5\r\n\r\n", "", "chunked"},
+		// Only ASCII letters fold, as net/http folds them: U+017F (ſ) is s in
+		// Unicode's simple folding, but a name spelled with it is no
+		// Transfer-Encoding, and the message is framed by its Content-Length.
+		{"a name with a non-ASCII letter is no field", "POST / HTTP/1.1\r\nTranſfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n", "5", ""},
+		// strings.ToLower lowers U+0130 (İ) to i: a lowering compare read
+		// this name as Transfer-Encoding.
+		{"a name with a dotted capital I is no field", "POST / HTTP/1.1\r\nTransfer-Encodİng: chunked\r\nContent-Length: 5\r\n\r\n", "5", ""},
+		{"a name that only starts like one is no field", "POST / HTTP/1.1\r\nContent: 3\r\n\r\n", "", ""},
+		{"a name that runs past one is no field", "POST / HTTP/1.1\r\nTransfer-Encoding-X: chunked\r\nContent-Length: 5\r\n\r\n", "5", ""},
+		{"other names of the same lengths are no fields", "GET / HTTP/1.1\r\nAccept-Charset: utf-8\r\nIf-Modified-Since: Tue, 03 Nov 2026 10:00:00 GMT\r\n\r\n", "", ""},
+	} {
+		if cl, te := parseHeaders([]byte(c.head)); cl != c.cl || te != c.te {
+			t.Errorf("%s: parseHeaders = (%q, %q), want (%q, %q)", c.name, cl, te, c.cl, c.te)
+		}
+	}
+	if raceOn {
+		return // -race may allocate on its own
+	}
+	head := []byte("POST /u HTTP/1.1\r\nHost: api.example\r\nContent-Type: text/plain\r\nContent-Length: 16\r\n\r\n")
+	if n := testing.AllocsPerRun(20, func() { _, _ = parseHeaders(head) }); n != 1 {
+		t.Errorf("parseHeaders allocated %v times for a head with a Content-Length, want 1 (the value it returns)", n)
+	}
+}
+
+// The chunked coding is named in a Transfer-Encoding value without regard to
+// ASCII case only, as net/http names it. strings.ToLower, which every framing
+// lowered the value with, lowers U+212A (the Kelvin sign) to k, so a message
+// net/http refuses for an unsupported coding framed as chunked.
+func TestChunkedCodingFoldsASCIIOnly(t *testing.T) {
+	for _, c := range []struct {
+		te   string
+		want bool
+	}{
+		{"chunked", true},
+		{"Chunked", true},
+		{"CHUNKED", true},
+		{"gzip, chunked", true},
+		{"gzip", false},
+		{"", false},
+		{"gzip ,CHUNKED", true},
+		{"chunke", false},
+		{"chun\u212aed", false}, // the Kelvin sign for the k
+		{"CHUN\u212aED", false},
+		// U+017F (ſ) folds to s, which chunked has no letter of: no fold
+		// takes it for chunked. The Kelvin sign is the one non-ASCII letter
+		// that folds into the word.
+		{"chun\u017fed", false},
+	} {
+		if got := chunkedCoding(c.te); got != c.want {
+			t.Errorf("chunkedCoding(%q) = %v, want %v", c.te, got, c.want)
+		}
+	}
+}
+
+// Every framing tests the Transfer-Encoding value with chunkedCoding: a value
+// that spells chunked with the Kelvin sign frames no message as chunked, and
+// "Chunked" frames each as chunked.
+func TestEveryFramingTakesAKelvinSignForNoChunkedCoding(t *testing.T) {
+	const body = "5\r\nhello\r\n0\r\n\r\n"
+	for _, c := range []struct {
+		te      string
+		chunked bool
+	}{
+		{"Chunked", true},
+		{"chun\u212aed", false},
+	} {
+		t.Run(c.te, func(t *testing.T) {
+			reqHead := "POST /k HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: " + c.te + "\r\n\r\n"
+			respHead := "HTTP/1.1 200 OK\r\nTransfer-Encoding: " + c.te + "\r\n\r\n"
+
+			// parseHeaders drops a Content-Length beside a chunked coding.
+			wantCL := "5"
+			if c.chunked {
+				wantCL = ""
+			}
+			if cl, _ := parseHeaders([]byte("POST / HTTP/1.1\r\nTransfer-Encoding: " + c.te + "\r\nContent-Length: 5\r\n\r\n")); cl != wantCL {
+				t.Errorf("parseHeaders: Content-Length %q, want %q", cl, wantCL)
+			}
+
+			// messageFrame: a request with no chunked coding and no
+			// Content-Length has no body.
+			wantEnd := len(reqHead)
+			if c.chunked {
+				wantEnd = len(reqHead) + len(body)
+			}
+			if end, done, err := (&messageFrame{}).end([]byte(reqHead + body)); err != nil || !done || end != wantEnd {
+				t.Errorf("messageFrame.end = (%d, %v, %v), want (%d, true, nil)", end, done, err, wantEnd)
+			}
+
+			// HandleChunkedRequests reads a chunked body on, and none else.
+			conn := newScriptedConn(readStep{data: []byte(body[3:])})
+			got, err := runChunkedRequest(t, reqHead+body[:3], conn)
+			want, wantReads := reqHead+body[:3], 0
+			if c.chunked {
+				want, wantReads = reqHead+body, 1
+			}
+			if err != nil || got != want || conn.reads != wantReads {
+				t.Errorf("HandleChunkedRequests = (%q, %v) after %d reads, want (%q, nil) after %d", got, err, conn.reads, want, wantReads)
+			}
+
+			// handleChunkedResponses reads a chunked body on, and none else.
+			dest, client := newScriptedConn(readStep{data: []byte(body[3:])}), newScriptedConn()
+			t.Cleanup(func() { _ = dest.Close(); _ = client.Close() })
+			h := &HTTP{Logger: zaptest.NewLogger(t)}
+			finalResp := []byte(respHead + body[:3])
+			done := make(chan error, 1)
+			go func() {
+				done <- h.handleChunkedResponses(context.Background(), &finalResp, client, dest, []byte(respHead+body[:3]), "GET")
+			}()
+			select {
+			case err := <-done:
+				want, wantReads := respHead+body[:3], 0
+				if c.chunked {
+					want, wantReads = respHead+body, 1
+				}
+				if err != nil || string(finalResp) != want || dest.reads != wantReads {
+					t.Errorf("handleChunkedResponses = (%q, %v) after %d reads, want (%q, nil) after %d", finalResp, err, dest.reads, want, wantReads)
+				}
+			case <-time.After(time.Minute): // the bound only turns a hang into a failure
+				t.Fatal("handleChunkedResponses did not return")
+			}
+
+			// chunkedEndRefused takes a refused last chunk for the end of a
+			// chunked response only.
+			if _, whole := chunkedEndRefused([]byte(respHead+"5\r\nhello\r\n"), []byte("0\r\n\r\n")); whole != c.chunked {
+				t.Errorf("chunkedEndRefused = %v, want %v", whole, c.chunked)
+			}
+
+			// awaitsContinue: a head with no chunked coding and no
+			// Content-Length frames no body to wait for.
+			if got := awaitsContinue([]byte("POST / HTTP/1.1\r\nExpect: 100-continue\r\nTransfer-Encoding: " + c.te + "\r\n\r\n")); got != c.chunked {
+				t.Errorf("awaitsContinue = %v, want %v", got, c.chunked)
+			}
+		})
+	}
+}
+
 // A message with both "Transfer-Encoding: chunked" and a Content-Length is
 // framed by its chunks (RFC 9112 §6.3); framing it by the Content-Length cut
 // it short and left the rest to be read as the next message.

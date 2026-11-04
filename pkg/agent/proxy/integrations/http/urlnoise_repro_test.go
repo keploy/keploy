@@ -27,12 +27,12 @@ func TestURLMatch_S3Receipt(t *testing.T) {
 
 	// autoDynamic OFF (old behaviour / DisableAutoURLDynamic): exact mismatch ->
 	// 0 candidates -> the 502.
-	if got, _ := h.SchemaMatch(ctx, replay, []*models.Mock{recorded}, nil, nil, false); len(got) != 0 {
+	if got, _ := h.SchemaMatch(ctx, replay, nil, []*models.Mock{recorded}, nil, nil, false); len(got) != 0 {
 		t.Fatalf("autoDynamic=false: expected 0 candidates, got %d", len(got))
 	}
 	// DEFAULT (auto-detect): the <user> token and <uuid>.txt segments are
 	// recognised as machine ids and the mock matches with ZERO config.
-	if got, _ := h.SchemaMatch(ctx, replay, []*models.Mock{recorded}, nil, nil, true); len(got) != 1 {
+	if got, _ := h.SchemaMatch(ctx, replay, nil, []*models.Mock{recorded}, nil, nil, true); len(got) != 1 {
 		t.Fatalf("autoDynamic=true: expected the mock to auto-match, got %d candidates", len(got))
 	}
 }

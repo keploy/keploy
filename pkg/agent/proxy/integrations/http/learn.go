@@ -2755,11 +2755,15 @@ func inRecordedOrder(mocks []*models.Mock) []*models.Mock {
 }
 
 // recordedFirst is inRecordedOrder's order: a before b when a was recorded
-// first, or at the same instant with a name that sorts first.
+// first, or at the same instant with the lower number mockdb gave it as it
+// wrote it (models.CompareRecordedNumbers), or a name that sorts first.
 func recordedFirst(a, b *models.Mock) bool {
 	ta, tb := a.Spec.ReqTimestampMock, b.Spec.ReqTimestampMock
 	if !ta.Equal(tb) {
 		return ta.Before(tb)
+	}
+	if c := models.CompareRecordedNumbers(a.Name, b.Name); c != 0 {
+		return c < 0
 	}
 	return a.Name < b.Name
 }

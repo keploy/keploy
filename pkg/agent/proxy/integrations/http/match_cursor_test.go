@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -51,6 +52,40 @@ func TestMatch_StatefulCursorSaturate(t *testing.T) {
 		if stub.Name != w {
 			t.Fatalf("call %d served %q, want %q — the cursor must advance in record order then saturate", i+1, stub.Name, w)
 		}
+	}
+}
+
+// TestMatch_StatefulCursorTiedTimesServeInRecordedNumberOrder: an HTTP/1.1
+// pipeline of 20 reads of one counter is read in one write, so its 20
+// recordings share one request time, and mockdb numbers them mock-0 to
+// mock-19 as it writes them, in turn. Staged before any test, their tier
+// stamps no ID on them, so the order of a tie is their names': read as
+// text, mock-10 sorts before mock-2 and the reads were answered
+// 1,2,11,...,20,3,...,10. Read as the numbers mockdb gave them, they are
+// answered in turn, then saturate on the last.
+func TestMatch_StatefulCursorTiedTimesServeInRecordedNumberOrder(t *testing.T) {
+	h := newHTTP()
+	ctx := context.Background()
+	at := time.Unix(1_700_000_000, 553388639)
+	const n = 20
+	var mocks, want []string
+	db := &mockMemDb{updateUnFilteredReturn: true}
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("mock-%d", i)
+		db.mocks = append(db.mocks, cursorMock(name, at))
+		mocks = append(mocks, name)
+	}
+	want = append(append(want, mocks...), mocks[n-1], mocks[n-1])
+	var got []string
+	for i := range want {
+		ok, stub, _, err := h.match(ctx, putGet("/counter"), db, nil, nil, nil, true, false, false, true, true)
+		if err != nil || !ok || stub == nil {
+			t.Fatalf("read %d: ok=%v stub=%v err=%v", i+1, ok, stub, err)
+		}
+		got = append(got, stub.Name)
+	}
+	if g, w := strings.Join(got, ","), strings.Join(want, ","); g != w {
+		t.Fatalf("served %s\nwant   %s: recordings of one request time are answered in the order mockdb numbered them", g, w)
 	}
 }
 
