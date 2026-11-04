@@ -341,10 +341,11 @@ jobs:
       # on the recorded port, under the recorded Host, or with its URL
       # unescaped), and the report and the exit code must follow the result.
       # A base path keploy cannot read is refused before any test is sent, a
-      # test the base path cannot go in is failed without being sent, and a
-      # run stopped part-way fails no test it did not finish. It had stopped
-      # before the first test, on a call to the agent it never starts, with no
-      # report and exit code 0.
+      # test the base path cannot go in is failed without being sent, a run
+      # stopped part-way fails no test it did not finish, and a run stopped
+      # before any test got a verdict exits 128+N for the signal, not 0. The
+      # base-path replay had stopped before the first test, on a call to the
+      # agent it never starts, with no report and exit code 0.
       - name: Run base-path replay e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
