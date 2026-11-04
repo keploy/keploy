@@ -92,11 +92,13 @@ func TestAUrlPatternExcusesOnlyTheClockWordItCovers(t *testing.T) {
 // Places learned on a path before a pattern that crosses "/" was added
 // (url.path.2 and url.path.3, two instants), then keploy.yml gains `v1/u`,
 // which joins the segments before them: the masked path's segment 2 is the
-// path's own segment 3, and a mock records no url noise with its places, so
-// the learned read is checked in both where both hold one. A stale first
-// instant is refused, as with no url noise and as where the places were
-// learned under the pattern.
-func TestAClockSegmentLearnedBeforeAJoiningPatternIsCheckedInBothReadings(t *testing.T) {
+// path's own segment 3, and a mock records no url noise with its places.
+// The recording says which path the learn step read: its masked path has
+// no segment 3, so the places are read in the path as sent, and the stale
+// first instant at the path's own segment 2 is checked. It is refused, as
+// with no url noise and as where the places were learned under the
+// pattern.
+func TestAClockSegmentLearnedBeforeAJoiningPatternIsCheckedWhereItWasLearned(t *testing.T) {
 	for _, c := range []struct {
 		name   string
 		places []string
@@ -209,5 +211,157 @@ func TestAUrlPatternCoversNoEmptyValueNorAWordOfNoPlace(t *testing.T) {
 	m.Spec.Clocks = map[string]models.ClockOffset{"url.query.at": {Res: time.Second, Word: w}}
 	if got := urlNoiseServed(t, "/v1/q?at=id-"+urlNoiseT1, []string{`id-`}, m); got != nil {
 		t.Fatal("a word of no place answered")
+	}
+}
+
+// A time range in the path, /users/123/events/<from>/<to>, learned under
+// keploy.yml's `/users/[0-9]+`, set before recording: url.path.2 (<from>, a
+// day before the call) and url.path.3 (<to>, the call's) of the masked
+// path. The path's own segment 3 holds <from> too, yet the recording says
+// the learn step read the masked path: its own segment 2 ("events") holds
+// no instant. So each place is read in the masked path alone: both
+// instants fresh are answered, and a stale one at either is refused.
+func TestATimeRangeLearnedUnderAJoiningPatternIsReadInTheMaskedPath(t *testing.T) {
+	const (
+		from = "2026-08-31T09:00:00Z" // recorded, a day before urlNoiseT1
+		ago  = "2026-10-25T15:50:36Z" // a day before urlNoiseNow
+	)
+	day := models.ClockOffset{Min: -24 * time.Hour, Max: -24*time.Hour + time.Second, Res: time.Second}
+	now := models.ClockOffset{Res: time.Second}
+	for _, c := range []struct {
+		name, rec, call string
+		pats            []string
+		clocks          map[string]models.ClockOffset
+		answered        bool
+	}{
+		{"/users/[0-9]+, both fresh", "/users/123/events/" + from + "/" + urlNoiseT1, "/users/123/events/" + ago + "/" + urlNoiseNow,
+			[]string{`/users/[0-9]+`}, map[string]models.ClockOffset{"url.path.2": day, "url.path.3": now}, true},
+		{"/users/[0-9]+, a stale from", "/users/123/events/" + from + "/" + urlNoiseT1, "/users/123/events/" + urlNoiseStale + "/" + urlNoiseNow,
+			[]string{`/users/[0-9]+`}, map[string]models.ClockOffset{"url.path.2": day, "url.path.3": now}, false},
+		{"/users/[0-9]+, a stale to", "/users/123/events/" + from + "/" + urlNoiseT1, "/users/123/events/" + ago + "/" + urlNoiseStale,
+			[]string{`/users/[0-9]+`}, map[string]models.ClockOffset{"url.path.2": day, "url.path.3": now}, false},
+		{"v1/u, both fresh", "/v1/u/" + from + "/" + urlNoiseT1, "/v1/u/" + ago + "/" + urlNoiseNow,
+			[]string{`v1/u`}, map[string]models.ClockOffset{"url.path.1": day, "url.path.2": now}, true},
+		{"no url noise, both fresh", "/v1/u/" + from + "/" + urlNoiseT1, "/v1/u/" + ago + "/" + urlNoiseNow,
+			nil, map[string]models.ClockOffset{"url.path.2": day, "url.path.3": now}, true},
+		{"one clock segment joined, fresh", "/users/123/events/" + urlNoiseT1, "/users/123/events/" + urlNoiseNow,
+			[]string{`/users/[0-9]+`}, map[string]models.ClockOffset{"url.path.2": now}, true},
+		{"v1/u inside the path and a query clock read, all fresh", "/api/v1/u/" + from + "/" + urlNoiseT1 + "?at=" + urlNoiseT1,
+			"/api/v1/u/" + ago + "/" + urlNoiseNow + "?at=" + urlNoiseNow,
+			[]string{`v1/u`}, map[string]models.ClockOffset{"url.path.2": day, "url.path.3": now, "url.query.at": now}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := recorded("mock-r", c.rec, urlNoiseJSON, `{}`)
+			m.Spec.Clocks = c.clocks
+			if got := urlNoiseServed(t, c.call, c.pats, m); (got != nil) != c.answered {
+				t.Errorf("%s: answered %v; want %v", c.call, got != nil, c.answered)
+			}
+		})
+	}
+}
+
+// Places learned on the path as sent (url.path.2 and url.path.3), then
+// keploy.yml gains `v1/u`, which joins segments, and a pattern that covers
+// the masked path's segment 2 whole. The noise covers the masked segment,
+// yet the place is read where the recording says it was learned, the
+// path's own segment 2, which holds the stale recorded instant: refused.
+func TestNoiseCoveringTheMaskedSegmentLeavesTheOwnLearnedSegmentChecked(t *testing.T) {
+	m := recorded("mock-e", "/v1/u/"+urlNoiseT1+"/"+urlNoiseT2, urlNoiseJSON, `{}`)
+	m.Spec.Clocks = map[string]models.ClockOffset{"url.path.2": {Res: time.Second}, "url.path.3": {Res: time.Second}}
+	if got := urlNoiseServed(t, "/v1/u/"+urlNoiseT1+"/"+urlNoiseNow, []string{`v1/u`, `[0-9T:-]+Z$`}, m); got != nil {
+		t.Fatalf("served %s: the stale recorded instant at the learned place url.path.2 was never checked", got.Name)
+	}
+}
+
+// A place learned under `v1/u` (url.path.1 of the masked path), whose
+// masked segment a second pattern covers whole in the recording and the
+// call: the user declared it noise, so a stale instant there is answered.
+func TestNoiseCoveringAJoinedPathsLearnedSegmentWholeExcusesIt(t *testing.T) {
+	m := recorded("mock-c", "/v1/u/"+urlNoiseT1+"/x", urlNoiseJSON, `{}`)
+	m.Spec.Clocks = map[string]models.ClockOffset{"url.path.1": {Res: time.Second}}
+	if got := urlNoiseServed(t, "/v1/u/"+urlNoiseStale+"/x", []string{`v1/u`, `[0-9T:-]+Z`}, m); got == nil {
+		t.Fatalf("refused; want answered: the pattern covers the segment whole in both")
+	}
+}
+
+// A place learned on the path as sent (url.path.2, an instant), then
+// keploy.yml gains `v1/u`: the masked path's segment 2 is the path's own
+// segment 3, "x", no instant, so the recording says the place was read in
+// the path as sent. The masked segment 2 is then not the learned place: a
+// call that sends an instant there for "x" is another route, refused,
+// though its instant is fresh; the recorded path is answered.
+func TestAMaskedSegmentBesideAPlaceLearnedAsSentIsComparedAsSent(t *testing.T) {
+	m := recorded("mock-x", "/v1/u/"+urlNoiseNow+"/x", urlNoiseJSON, `{}`)
+	m.Spec.Clocks = map[string]models.ClockOffset{"url.path.2": {Res: time.Second}}
+	for _, c := range []struct {
+		call     string
+		answered bool
+	}{
+		{"/v1/u/" + urlNoiseNow + "/" + urlNoiseNow, false},
+		{"/v1/u/" + urlNoiseNow + "/x", true},
+	} {
+		if got := urlNoiseServed(t, c.call, []string{`v1/u`}, m); (got != nil) != c.answered {
+			t.Errorf("%s: answered %v; want %v", c.call, got != nil, c.answered)
+		}
+	}
+}
+
+// Places learned under two url noises: url.path.1 holds an instant only in
+// the masked path under `v1/u` ("u" as sent), and url.path.2 of the path
+// /v1/u/<instant>/x only as sent (its masked segment 2 is "x"), so no one
+// path is the mock's. url.path.2 is read where its recording holds it, the
+// path's own segment 2: a call with both reads in its window is answered.
+func TestAPlaceItsRecordingHoldsAsSentAloneIsReadAsSent(t *testing.T) {
+	m := recorded("mock-a", "/v1/u/"+urlNoiseT1+"/x", urlNoiseJSON, `{}`)
+	m.Spec.Clocks = map[string]models.ClockOffset{"url.path.1": {Res: time.Second}, "url.path.2": {Res: time.Second}}
+	if got := urlNoiseServed(t, "/v1/u/"+urlNoiseNow+"/x", []string{`v1/u`}, m); got == nil {
+		t.Fatalf("refused; want answered: url.path.2 is the path's own segment 2, a read in the call's window")
+	}
+}
+
+// A time range learned on the path as sent (url.path.2, a day back, and
+// url.path.3), then keploy.yml gains `v1/u`: the masked path has no segment
+// 3, so the recording says the places were read as sent, and the masked
+// segment 2 (the path's own segment 3, <to>) is not url.path.2's. The
+// recording replayed in its own window is answered.
+func TestATimeRangeLearnedBeforeAJoiningPatternIsReadAsSent(t *testing.T) {
+	const ago = "2026-10-25T15:50:36Z" // a day before urlNoiseNow
+	day := models.ClockOffset{Min: -24 * time.Hour, Max: -24*time.Hour + time.Second, Res: time.Second}
+	m := recorded("mock-s", "/v1/u/"+ago+"/"+urlNoiseNow, urlNoiseJSON, `{}`)
+	m.Spec.Clocks = map[string]models.ClockOffset{"url.path.2": day, "url.path.3": {Res: time.Second}}
+	if got := urlNoiseServed(t, "/v1/u/"+ago+"/"+urlNoiseNow, []string{`v1/u`}, m); got == nil {
+		t.Fatalf("refused; want answered: each read holds at its place in the path as sent")
+	}
+}
+
+// Places learned under `v1/u` (url.path.1, the call's clock, and url.path.2,
+// a day back), then a pattern covers the masked segment 2 whole. Its
+// recording no longer says what segment 2 held, but url.path.1 holds an
+// instant only in the masked path, so the mock was read there: url.path.2
+// is the masked segment the noise covers, excused, and a stale value there
+// is answered.
+func TestNoiseCoveringAMaskedLearnedSegmentExcusesItBesideAnotherInstant(t *testing.T) {
+	day := models.ClockOffset{Min: -24 * time.Hour, Max: -24*time.Hour + time.Second, Res: time.Second}
+	m := recorded("mock-v", "/v1/u/"+urlNoiseT1+"/"+urlNoiseT2, urlNoiseJSON, `{}`)
+	m.Spec.Clocks = map[string]models.ClockOffset{"url.path.1": {Res: time.Second}, "url.path.2": day}
+	if got := urlNoiseServed(t, "/v1/u/"+urlNoiseNow+"/"+urlNoiseStale, []string{`v1/u`, `[0-9T:-]+Z$`}, m); got == nil {
+		t.Fatalf("refused; want answered: url.path.2 is the masked segment the pattern covers whole")
+	}
+}
+
+// Places whose recording reads in no one path: url.path.1 holds an instant
+// only in the masked path under `v1/u` ("u" as sent), url.path.3 only as
+// sent (the masked path has no segment 3), so they were learned under two
+// url noises. url.path.2 holds an instant in both, and the recording does
+// not say which the learn step read: both are checked (fail closed), so a
+// call whose masked segment 2 holds at url.path.2's offset a day back but
+// whose own segment 2 does not is refused.
+func TestAPlaceTheRecordingReadsInNoOnePathIsCheckedInBoth(t *testing.T) {
+	const ago = "2026-10-25T15:50:36Z" // a day before urlNoiseNow
+	day := models.ClockOffset{Min: -24 * time.Hour, Max: -24*time.Hour + time.Second, Res: time.Second}
+	m := recorded("mock-b", "/v1/u/"+urlNoiseT1+"/"+urlNoiseT2, urlNoiseJSON, `{}`)
+	m.Spec.Clocks = map[string]models.ClockOffset{"url.path.1": {Res: time.Second}, "url.path.2": day, "url.path.3": day}
+	if got := urlNoiseServed(t, "/v1/u/"+urlNoiseNow+"/"+ago, []string{`v1/u`}, m); got != nil {
+		t.Fatalf("served %s: url.path.2's own segment 2 was never checked", got.Name)
 	}
 }

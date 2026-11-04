@@ -347,6 +347,7 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req, m *models.Mock)
 	recLeaves := learnNoise{}.shape(recordedParts(m), "").Leaves
 	recPath, _ := recordedStrictURL(m)
 	rec := k.urlPathOf(recPath)
+	read := k.pathReadings(rec)
 	span, known := learn.ClockSpanOf(ctx, input.arrived, m)
 	places := make([]string, 0, len(k.clocks))
 	for p := range k.clocks {
@@ -358,7 +359,7 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req, m *models.Mock)
 		// The reason names the field as a failed test's reason does (its
 		// shape), never a value an object key of it may be.
 		f := clockField(p)
-		for _, r := range k.clockReads(p, leaves, recLeaves, livePath, rec) {
+		for _, r := range k.clockReads(p, leaves, recLeaves, livePath, rec, read) {
 			if r.excused {
 				continue
 			}
@@ -393,22 +394,32 @@ type clockRead struct {
 // the call's (leaves, livePath) values there say: a query value and a path
 // segment in the reading clockReadAt gives, a path segment at the learn
 // step's url.path.<i> (urlPath.at); other places as the learn step shapes
-// them, which keploy.yml's noise reaches as userNoiseAt says. The path's
-// own segment i (urlPath.ownAt) is checked as well where it holds a value of
-// the learned read's form that noise does not excuse: where a pattern that
-// crosses "/" joined the call's path's segments, the masked path's segment
-// i (the learn step's place under that pattern) and the own segment i (its
-// place before the pattern was added) are other segments, and a mock
-// records no url noise with its places, so a learned instant is never left
-// unchecked whichever of the two the learn step read; elsewhere the own
+// them, which keploy.yml's noise reaches as userNoiseAt says. Where a
+// pattern that crosses "/" joined the recorded path's segments, the masked
+// path's segment i (the learn step's place under that pattern) and the
+// path's own segment i (urlPath.ownAt, its place before the pattern was
+// added) may be other segments, and a mock records no url noise with its
+// places: the segment is the one the recording says the learn step read
+// (read, pathReadings), and where it does not say, both, the own segment
+// where it holds a value of the learned read's form that noise does not
+// excuse, so a learned instant is never left unchecked; elsewhere the own
 // segment is the one at reads, checked again.
-func (k strictKnown) clockReads(p string, leaves, recLeaves map[string]learn.Leaf, livePath, rec urlPath) []clockRead {
+func (k strictKnown) clockReads(p string, leaves, recLeaves map[string]learn.Leaf, livePath, rec urlPath, read pathReadings) []clockRead {
 	o := k.clocks[p]
 	if i, segment := pathPlace(p); segment {
+		if read.of(i) == readOwn {
+			l, carried := livePath.ownAt(i)
+			r, _ := rec.ownAt(i)
+			text, excused := clockReadAt(o, r, l)
+			return []clockRead{{segmentLeaf(p, text), carried, excused}}
+		}
 		l, carried := livePath.at(i)
 		r, _ := rec.at(i)
 		text, excused := clockReadAt(o, r, l)
 		reads := []clockRead{{segmentLeaf(p, text), carried, excused}}
+		if read.of(i) == readMasked {
+			return reads
+		}
 		if l, ok := livePath.ownAt(i); ok {
 			r, _ := rec.ownAt(i)
 			text, excused := clockReadAt(o, r, l)
@@ -425,6 +436,89 @@ func (k strictKnown) clockReads(p string, leaves, recLeaves map[string]learn.Lea
 		return []clockRead{{live, carried, excused}}
 	}
 	return []clockRead{{live, carried, k.userNoiseAt(p, recLeaves[p], live)}}
+}
+
+// pathReading is the segment of a recorded path clockReads reads a place
+// url.path.<i> the learn step learned as a read of the application's clock
+// at, where a pattern that crosses "/" joined the path's segments
+// (urlPath.joined): the masked path's segment i (urlPath.at), the path's
+// own segment i (urlPath.ownAt), or both, where the recording does not say
+// which.
+type pathReading uint8
+
+const (
+	readMasked pathReading = 1 << iota
+	readOwn
+	readBoth = readMasked | readOwn
+)
+
+// pathReadings are what a recorded path says of the segments its mock's
+// places url.path.<i> were read at (pathReadings.of): held, the readings
+// each place's recorded segments hold the learned read in, and every, those
+// every place's do.
+type pathReadings struct {
+	every pathReading
+	held  map[int]pathReading
+}
+
+// of is the reading of the place url.path.<i>: the one every place allows
+// where there is one; else the path's own segment where the place's
+// recorded own segment alone holds the read; else both. Both, not the
+// masked segment alone, where its recorded masked segment alone holds it:
+// the own segment is then checked only where the call holds a value of the
+// read's form there (clockReads), which the recording does not.
+func (r pathReadings) of(i int) pathReading {
+	if r.every == readMasked || r.every == readOwn {
+		return r.every
+	}
+	if r.held[i] == readOwn {
+		return readOwn
+	}
+	return readBoth
+}
+
+// pathReadings are the readings of the places url.path.<i> the mock learned
+// as reads of the application's clock (k.clocks) in rec, its recorded
+// path: both where no pattern that crosses "/" joined rec's segments. The
+// learn step learned a place from the recorded value it read there, so a
+// place is read only at a segment whose recorded value holds the learned
+// read (maskedHolds, learn.ReadsAsClockRead): where every place's recorded segments hold it in
+// one path alone, masked or as sent, the place is read in that path (the
+// time range /users/123/events/<from>/<to> under /users/[0-9]+ is read in
+// the masked path, whose segment 2 alone holds <from>); else as
+// pathReadings.of says, both where the recording does not tell (fail
+// closed).
+func (k strictKnown) pathReadings(rec urlPath) pathReadings {
+	if !rec.joined() {
+		return pathReadings{}
+	}
+	r := pathReadings{every: readBoth, held: map[int]pathReading{}}
+	for p, o := range k.clocks {
+		i, ok := pathPlace(p)
+		if !ok {
+			continue
+		}
+		var h pathReading
+		if i < len(rec.segs) && maskedHolds(o, rec.segs[i], marksAt(rec.mask, i)) {
+			h |= readMasked
+		}
+		if v, ok := rec.ownAt(i); ok && learn.ReadsAsClockRead(o, segmentLeaf(p, v.sent)) {
+			h |= readOwn
+		}
+		r.held[i] = h
+		r.every &= h
+	}
+	return r
+}
+
+// maskedHolds reports whether text, a recorded masked path segment with its
+// mask's marks (urlPath.mask), holds the learned read o: a value of its
+// form (learn.ReadsAsClockRead), or one url noise covers the read in
+// (readCovered), a mask that may hide the value the learn step read before
+// its pattern was added. The path's own segment is the recorded text
+// itself: it holds the read only where it is of the read's form.
+func maskedHolds(o models.ClockOffset, text string, marks []bool) bool {
+	return learn.ReadsAsClockRead(o, learn.Leaf{Type: learn.String, Value: text}) || readCovered(o, text, marks)
 }
 
 // userNoiseAt reports whether keploy.yml's noise reaches place, in the learn
@@ -581,9 +675,9 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 	}
 	r, l := k.urlPathOf(rec), k.urlPathOf(live)
 	if len(r.segs) == len(l.segs) {
-		same := true
+		same, read := true, k.pathReadings(r)
 		for i := range r.segs {
-			if r.segs[i] != l.segs[i] && !k.segmentMayDiffer(i, r, l) {
+			if r.segs[i] != l.segs[i] && !k.segmentMayDiffer(i, r, l, read) {
 				same = false
 				break
 			}
@@ -603,14 +697,17 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 // segment is a value of that read's form (learn.ReadsAsClockRead), whose
 // instant clockDiffs checks. A segment of no such form ("me" where an
 // instant was) is no read of any clock: it differs as one with nothing
-// learned does, and its recording is of another route.
-func (k strictKnown) segmentMayDiffer(i int, rec, live urlPath) bool {
+// learned does, and its recording is of another route. So does the masked
+// segment i where the recording says the learn step read the place at the
+// path's own segment i (read, pathReadings), another segment, which
+// clockDiffs checks in its stead.
+func (k strictKnown) segmentMayDiffer(i int, rec, live urlPath, read pathReadings) bool {
 	place := "url.path." + strconv.Itoa(i)
 	if k.learnedNoiseAt(place, "") {
 		return true
 	}
 	o, clock := k.clocks[place]
-	if !clock {
+	if !clock || read.of(i) == readOwn {
 		return false
 	}
 	r, _ := rec.at(i)
