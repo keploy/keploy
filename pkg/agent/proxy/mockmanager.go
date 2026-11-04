@@ -219,6 +219,10 @@ type MockManager struct {
 	// view prefixes its scope). Guarded by cursorMu, and dropped with the
 	// per-test cursors at every staging.
 	kept map[string]struct{}
+	// testHookKeepOwnedDecided, set only by a test before the manager is
+	// shared, runs in keepOwned between the owner check and the keep: the
+	// point no staging may land in.
+	testHookKeepOwnedDecided func()
 	// usedUp are the recordings a worker's test consumed, held for the test
 	// instead of deleted, so a run of the same test again is served them
 	// (scopedMockDb.DeleteFilteredMock); by its scope and the name. Guarded by
@@ -2503,6 +2507,9 @@ func (m *MockManager) keepOwned(mk *models.Mock) bool {
 	defer m.swapMu.RUnlock()
 	if m.stalePooled(mk) || !m.OwnedByOpenTest(mk) {
 		return false
+	}
+	if m.testHookKeepOwnedDecided != nil {
+		m.testHookKeepOwnedDecided()
 	}
 	m.cursorMu.Lock()
 	defer m.cursorMu.Unlock()

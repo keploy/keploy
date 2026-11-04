@@ -172,3 +172,50 @@ func TestAClaimTheStoreCannotMarkUsedKeepsNothing(t *testing.T) {
 		t.Fatalf("the refused claim left the unnamed recording kept")
 	}
 }
+
+// No staging lands between a claim's owner check and its keep. The next
+// test's staging, tried at that point, waits for the claim and then drops
+// what it kept, so test-3's same-named recording is free to be kept for
+// test-3. Before the claim decided under the staging's lock, the staging
+// landed there and the claim kept test-2's recording's name in test-3: the
+// same-named recording of test-3 read as kept from its start, so it answered
+// only byte-identical repeats and a request only the schema matches missed.
+// The hook lands the staging at once when it can (no claim holds the
+// staging's lock), so the row is decided by the lock, not by timing.
+func TestNoStagingLandsBetweenAClaimsOwnerCheckAndItsKeep(t *testing.T) {
+	mm, pool := claimRig(t, statedPoll("poll", `{"id":"a"}`, 2010, 2050))
+	stage3 := func() {
+		mm.SetMocksWithWindow([]*models.Mock{statedPoll("poll", `{"id":"a"}`, 3010, 3050)}, nil, winStart(3), winEnd(3))
+	}
+	decided, landedInside := 0, false
+	staged := make(chan struct{})
+	mm.testHookKeepOwnedDecided = func() {
+		decided++
+		if decided > 1 {
+			return
+		}
+		if mm.swapMu.TryLock() {
+			mm.swapMu.Unlock()
+			stage3()
+			landedInside = true
+			close(staged)
+			return
+		}
+		go func() { stage3(); close(staged) }()
+	}
+	mm.ClaimForRepeats(*pool[0])
+	<-staged
+	if decided != 1 {
+		t.Fatalf("the claim of test-2's own recording reached its keep %d times, want once", decided)
+	}
+	if landedInside {
+		t.Errorf("test-3's staging landed between the claim's owner check and its keep")
+	}
+	if mm.KeptForRepeats() != nil {
+		t.Fatalf("test-3 is staged with test-2's recording kept: test-3's same-named recording would answer only repeats")
+	}
+	next, err := mm.GetPerTestMocksInWindow()
+	if err != nil || len(next) != 1 || !mm.ClaimForRepeats(*next[0]) {
+		t.Fatalf("test-3's pool %v (%v): its recording's claim was refused, want it kept for test-3", next, err)
+	}
+}
