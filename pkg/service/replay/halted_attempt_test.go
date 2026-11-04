@@ -123,6 +123,10 @@ func startRetried(t *testing.T, h *prRun) {
 	}
 }
 
+// haltFlakyListLine is the run's closing line listing the sets flaky for a
+// halt.
+const haltFlakyListLine = "testsets flaky for an application halt detected"
+
 // A set its application halted on one attempt and that ran to a verdict on
 // another is flaky, whatever its failed tests: the halt may file none FAILED.
 // Its report is the latest attempt's, PASSED where that one ran clean, and
@@ -133,10 +137,6 @@ func startRetried(t *testing.T, h *prRun) {
 // the user is sent to --must-pass for: --must-pass removes no test case for a
 // halted attempt. A set that halts on both attempts, or on neither, is not
 // flaky for a halt.
-// haltFlakyListLine is the run's closing line listing the sets flaky for a
-// halt.
-const haltFlakyListLine = "testsets flaky for an application halt detected"
-
 func TestASetItsAppHaltedOnOneAttemptOnlyIsFlaky(t *testing.T) {
 	const haltLine = "the testset is flaky: its application halted on one attempt"
 	for _, c := range []struct {
@@ -298,22 +298,29 @@ func TestMustPassStillDeletesAFailingTestAfterAHaltedAttempt(t *testing.T) {
 				name: "test-2", done: new(atomic.Bool),
 				crash: func() { once.Do(func() { close(h.instr.appStopped) }) }}
 			startRetried(t, h)
-			if ran := setsRan(logs); len(ran) < 3 {
-				t.Fatalf("the run ran %v, the case needs test-set-0 run after the halted attempt and again after the deletion", ran)
+			ran := setsRan(logs)
+			if len(ran) < 2 {
+				t.Fatalf("the run ran %v, the case needs test-set-0 run again after the halted attempt", ran)
 			}
 			stops := logs.FilterMessage("stopping Keploy").All()
 			if len(stops) != 1 || !strings.Contains(fmt.Sprint(stops[0].ContextMap()["reason"]), "the application exited during test-set test-set-0") {
 				t.Fatalf("the run stops with %v, the case needs an attempt halted by the application's exit", stops)
 			}
-			kept := logs.FilterMessageSnippet("--must-pass removes no test case for an attempt the application halted").All()
-			if len(kept) != 1 || kept[0].ContextMap()["attempt"] != int64(1) {
-				t.Errorf("%d lines say --must-pass removed nothing for the halted attempt (%v), want 1 naming attempt 1", len(kept), kept)
-			}
+			// The deletion is checked before the third run is: a missed
+			// deletion also leaves the set without that run, and the
+			// deletion is the regression to name.
 			db.mu.Lock()
 			deleted := fmt.Sprint(db.deleted)
 			db.mu.Unlock()
 			if deleted != "[test-3]" {
 				t.Errorf("--must-pass deleted %s from the set, want [test-3]: it failed for what it checks on the attempt after the halted one", deleted)
+			}
+			if len(ran) < 3 {
+				t.Errorf("the run ran %v, want test-set-0 run a third time, once test-3 is deleted", ran)
+			}
+			kept := logs.FilterMessageSnippet("--must-pass removes no test case for an attempt the application halted").All()
+			if len(kept) != 1 || kept[0].ContextMap()["attempt"] != int64(1) {
+				t.Errorf("%d lines say --must-pass removed nothing for the halted attempt (%v), want 1 naming attempt 1", len(kept), kept)
 			}
 			h.report.mu.Lock()
 			rep := h.report.report
