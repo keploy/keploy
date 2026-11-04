@@ -303,16 +303,18 @@ func TestRecordV2_ResponseCutShortOtherwiseIsNotRecorded(t *testing.T) {
 	}
 }
 
-// Whole responses record the same mock whether or not the stream ended with
-// the client closing: the flag changes only what does not parse whole.
+// Whole responses framed by their head record the same mock whether or not the
+// stream ended with the client closing: the flag changes only what does not
+// parse whole. A body framed by the connection's close is whole only where the
+// stream ended with the connection
+// (TestRecordV2_ObserveOnly_ACloseDelimitedBodyIsWholeOnlyAtTheConnectionsEnd).
 func TestRecordV2_WholeResponsesAreRecordedAlike(t *testing.T) {
 	t.Parallel()
 	for name, resp := range map[string]string{
-		"close-delimited":      "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello until close",
-		"bare-LF header lines": "HTTP/1.1 200 OK\r\nContent-Type: text/plain\n\nline1\r\nline2",
-		"content-length":       "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
-		"chunked":              "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
-		"no content":           "HTTP/1.1 204 No Content\r\n\r\n",
+		"content-length":                       "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+		"content-length, bare-LF header lines": "HTTP/1.1 200 OK\r\nContent-Length: 5\nContent-Type: text/plain\n\nhello",
+		"chunked":                              "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+		"no content":                           "HTTP/1.1 204 No Content\r\n\r\n",
 	} {
 		read, err := recordOne(t, clientClosed, []byte(resp))
 		if err != nil || read == nil {

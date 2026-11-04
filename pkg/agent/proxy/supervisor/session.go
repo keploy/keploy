@@ -1425,6 +1425,18 @@ const (
 		"(its hooks do not say how the application released the connection), so keploy cannot tell a whole answer from a cut one"
 )
 
+// LeftOutCloseNotRead is the reason an HTTP/1 recorder leaves an exchange out
+// for whose response's body ends where the upstream closes the connection (no
+// Content-Length, not chunked), when its read did not end at that close: the
+// response is not known to be whole, and no fault is known to record it with.
+// The stream was closed under the read (the supervisor's abort), or ended with
+// no side's end (the relay ends the stream so at the recording's stop, and
+// when its read of a side fails otherwise, as at a TLS record cut short), or
+// at the upstream's reset once the recording's stop had begun, which is not
+// the close that ends such a body. Recorded as far as it came, replay would
+// serve a complete-looking shorter response.
+const LeftOutCloseNotRead = "the response's body ends at the upstream's close, and its read ended before that close"
+
 // maxLeftOutCause is the longest cause leftOutCause keeps of a reason.
 const maxLeftOutCause = 64
 
