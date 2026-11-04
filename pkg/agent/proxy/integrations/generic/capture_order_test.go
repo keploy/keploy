@@ -148,6 +148,7 @@ type recording struct {
 	order   *captureOrder
 	streams [2]*fakeconn.FakeConn
 	chans   [2]chan fakeconn.Chunk
+	ended   [2]bool // the stream has ended (endStream)
 	want    [2]int64
 	read    bool // the client's first chunk is put: the dest's reader starts once it is read
 	mocks   chan *models.Mock
@@ -236,12 +237,46 @@ func (r *recording) recorded(pair string, within time.Duration) bool {
 	}
 }
 
+// endStream ends stream i (0 the client's, 1 the dest's), as the relay ends
+// one, if it has not ended.
+func (r *recording) endStream(i int) {
+	if !r.ended[i] {
+		r.ended[i] = true
+		close(r.chans[i])
+	}
+}
+
+// awaitMergeWaits waits until the recording's merge (mergeByCapture) is
+// parked in a select: with nothing it can take or hand on, it waits on what
+// the row does next. A row's recording has the one merge: two parked at once
+// fail the row's setup.
+func (r *recording) awaitMergeWaits() {
+	r.t.Helper()
+	merge := funcName(mergeByCapture)
+	for {
+		parked := 0
+		for _, g := range strings.Split(allStacks(), "\n\n") {
+			lines := strings.Split(g, "\n")
+			if inFunc(lines[1:], merge) && parkedOnAChannel(lines[0]) {
+				parked++
+			}
+		}
+		switch {
+		case parked == 1:
+			return
+		case parked > 1:
+			r.t.Fatalf("setup: %d merges are parked at once; the row's recording has one", parked)
+		}
+		time.Sleep(time.Millisecond) // a yield between looks
+	}
+}
+
 // end ends both streams, as the relay's teardown does, and waits for the
 // parser to return.
 func (r *recording) end() orderedRun {
 	r.t.Helper()
-	close(r.chans[0])
-	close(r.chans[1])
+	r.endStream(0)
+	r.endStream(1)
 	var out orderedRun
 	select {
 	case err := <-r.done:
@@ -327,6 +362,83 @@ func TestV2_AStreamsEndEndsTheMergesWaitOnIt(t *testing.T) {
 			}
 			if got := pairsOf(r.recorded); len(got) != 1 || got[0] != "req0|resp0" || r.leftOut != 0 {
 				t.Fatalf("recorded %q and left out %d; want the first exchange alone", got, r.leftOut)
+			}
+		})
+	}
+}
+
+// An answer the merge takes once the client's stream has ended goes on at
+// once, though the capture order still waits on a client chunk captured
+// before it that never reached the stream (the relay numbered it and ended
+// the stream with it in hand): an ended direction hands on nothing more, so
+// nothing of it can come before the answer. The client's end reaches the
+// merge, waiting with nothing else to take, before the answer does, so the
+// answer is its one head and the end is not one beside it. Were the end not
+// looked at, the merge would wait on the order for good: the exchange not
+// recorded, and the parser not returning at the streams' end.
+func TestV2_AnAnswerTakenAfterTheClientsEndWaitsOnNoClientChunk(t *testing.T) {
+	reqs, resps := exchangeChunks(2)
+	lost := fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("lost"), ConnSeq: 4}
+	resps[1].ConnSeq = 5
+	plan := []fakeconn.Chunk{reqs[0], resps[0], reqs[1], lost, resps[1]}
+	for _, viaSyncMock := range []bool{true, false} {
+		t.Run(fmt.Sprint("viaSyncMock=", viaSyncMock), func(t *testing.T) {
+			r := startRecording(t, plan, viaSyncMock)
+			r.put(reqs[0])
+			r.put(resps[0])
+			r.put(reqs[1])
+			awaitWaiting(r.streams[0])
+			r.awaitMergeWaits()
+			r.endStream(0)
+			r.put(resps[1])
+			ok := r.recorded("req1|resp1", 5*time.Second)
+			got := r.end()
+			if !ok {
+				t.Fatalf("req1's mock was not recorded with the dest's stream open, its answer taken after the client's end (recorded %q by the end)", pairsOf(got.recorded))
+			}
+			if !got.returned {
+				t.Fatal("the parser did not return once both streams ended")
+			}
+			if p := pairsOf(got.recorded); strings.Join(p, " ") != "req0|resp0 req1|resp1" || got.leftOut != 0 {
+				t.Fatalf("recorded %q and left out %d; want both exchanges, nothing left out", p, got.leftOut)
+			}
+		})
+	}
+}
+
+// An answer the merge holds, waiting on a client chunk captured before it,
+// goes on ahead of an unnumbered client chunk received after it: the merge
+// cannot place a chunk with no number, so the two go on in the order it
+// received them. Were the client's head taken first whatever its arrival,
+// the unnumbered request would go on ahead of the answer it came after, and
+// the answer would still wait: req1's exchange not recorded with the streams
+// open, and paired with the later request too.
+func TestV2_AHeldAnswerGoesOnAheadOfAnUnnumberedChunkReceivedAfterIt(t *testing.T) {
+	reqs, resps := exchangeChunks(3)
+	lost := fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("lost"), ConnSeq: 4}
+	resps[1].ConnSeq = 5
+	reqs[2].ConnSeq = 0
+	plan := []fakeconn.Chunk{reqs[0], resps[0], reqs[1], lost, resps[1]}
+	for _, viaSyncMock := range []bool{true, false} {
+		t.Run(fmt.Sprint("viaSyncMock=", viaSyncMock), func(t *testing.T) {
+			r := startRecording(t, plan, viaSyncMock)
+			r.put(reqs[0])
+			r.put(resps[0])
+			r.put(reqs[1])
+			r.put(resps[1])
+			awaitWaiting(r.streams[1])
+			r.awaitMergeWaits()
+			r.push(reqs[2])
+			ok := r.recorded("req1|resp1", 5*time.Second)
+			got := r.end()
+			if !ok {
+				t.Fatalf("req1's mock was not recorded with the streams open, its answer held ahead of an unnumbered request received after it (recorded %q by the end)", pairsOf(got.recorded))
+			}
+			if !got.returned {
+				t.Fatal("the parser did not return once both streams ended")
+			}
+			if p := pairsOf(got.recorded); strings.Join(p, " ") != "req0|resp0 req1|resp1" || got.leftOut != 0 {
+				t.Fatalf("recorded %q and left out %d; want the two answered exchanges, nothing left out", p, got.leftOut)
 			}
 		})
 	}
