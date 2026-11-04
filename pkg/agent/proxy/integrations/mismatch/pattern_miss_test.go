@@ -84,15 +84,24 @@ func TestTheHintStaysSmallHoweverManyValuesMiss(t *testing.T) {
 		for _, c := range []struct {
 			name   string
 			misses []PatternMiss
+			diffs  []models.MockFieldDiff
 		}{
-			{"named once", []PatternMiss{{Path: "body.ids[]", Entry: "ids", Patterns: []string{`^\d$`}, Live: ShapesOf(shapes(n)...), Recorded: ShapesOf(shapes(n)...)}}},
-			{"named once per value", many},
+			{"named once", []PatternMiss{{Path: "body.ids[]", Entry: "ids", Patterns: []string{`^\d$`}, Live: ShapesOf(shapes(n)...), Recorded: ShapesOf(shapes(n)...)}}, []models.MockFieldDiff{drift}},
+			{"named once per value", many, []models.MockFieldDiff{drift}},
+			// A diff of the field's name for each value (the proven
+			// switch's comparison names each element so): they are one
+			// diff, past the cut or not, and the hint still offers the
+			// widen.
+			{"named once per value, in the diffs too", many, slices.Repeat([]models.MockFieldDiff{drift}, n)},
 		} {
-			b := NewReport(ProtocolHTTP, "POST /x").WithClosest("mock-1", []models.MockFieldDiff{drift}).WithPatternMisses(c.misses...)
+			b := NewReport(ProtocolHTTP, "POST /x").WithClosest("mock-1", c.diffs).WithPatternMisses(c.misses...)
 			if len(b.noise.guarded) != 1 {
 				t.Errorf("%d values, %s: the builder holds %d facts of one field; want 1", n, c.name, len(b.noise.guarded))
 			}
 			r := b.Build()
+			if len(r.FieldDiffs) != 1 || len(b.diffs) != 1 {
+				t.Errorf("%d values, %s: the report carries %d field diffs and the builder holds %d; want 1 each", n, c.name, len(r.FieldDiffs), len(b.diffs))
+			}
 			if len(r.NextSteps) > maxHint {
 				t.Errorf("%d values, %s: the hint is %d bytes; want at most %d: %q", n, c.name, len(r.NextSteps), maxHint, r.NextSteps)
 			}
