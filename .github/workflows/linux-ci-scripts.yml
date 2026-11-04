@@ -43,9 +43,10 @@ name: Linux CI scripts
 # And golang/gin_mongo/golang-docker.tests.sh: the gin-mongo lane of
 # golang_docker.yml, sourced by `bash -e` as its step runs it, against a fake
 # keploy. A keploy record or keploy test that exits non-zero has to fail the
-# lane with a line naming that command and its exit, the failed test sets and
-# tests, and the command's log; under `bash -e` the lane ended at that command
-# with none of them.
+# lane with keploy's own exit code and a line naming that command and its
+# exit, the failed test sets and tests of the test run it wrote, and the
+# command's log; under `bash -e` the lane ended at that command with none of
+# them.
 
 on:
   push:
@@ -64,6 +65,10 @@ on:
       - '.github/workflows/test_workflow_scripts/mock-kinds.tests.sh'
       - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.sh'
       - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.tests.sh'
+      - '.github/workflows/test_workflow_scripts/test-iid.sh'
+      - '.github/workflows/test_workflow_scripts/docker-build-retry.sh'
+      - '.github/workflows/test_workflow_scripts/mongo-ci.sh'
+      - '.github/workflows/test_workflow_scripts/json-pass-helpers.sh'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
     paths:
@@ -79,6 +84,10 @@ on:
       - '.github/workflows/test_workflow_scripts/mock-kinds.tests.sh'
       - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.sh'
       - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.tests.sh'
+      - '.github/workflows/test_workflow_scripts/test-iid.sh'
+      - '.github/workflows/test_workflow_scripts/docker-build-retry.sh'
+      - '.github/workflows/test_workflow_scripts/mongo-ci.sh'
+      - '.github/workflows/test_workflow_scripts/json-pass-helpers.sh'
       - '.github/workflows/linux-ci-scripts.yml'
 
 permissions:
@@ -224,7 +233,7 @@ jobs:
         run: bash .github/workflows/test_workflow_scripts/mock-kinds.tests.sh
 
   gin-mongo-docker-lane:
-    # Five cases against fakes, under a second; each is bounded at 60 s.
+    # Twelve cases against fakes, a few seconds in all; each is bounded at 60 s.
     timeout-minutes: 8
     runs-on: ubuntu-latest
     steps:

@@ -20,19 +20,29 @@
 #
 # every command succeeds, every report passes
 #   The script has to end 0, past its last check.
-# keploy test (the first replay) fails test-set-1's test-5 and exits 1
-#   The script has to exit 1, name keploy test and its exit, the report that
-#   failed and its failed test (not the tests that passed, before it and
-#   after it), and print keploy test's log; and name no report the run did
-#   not write.
-# keploy record of iteration 2 exits 2
-#   The script has to exit 2, naming that record, and print its log.
-# keploy test --storage-format json fails test-set-3's test-2 and exits 1
-#   The script has to exit 1, naming that replay, its failed test from the
-#   json report, and print its log.
-# the --keep-app-alive replay exits 3
-#   The script has to exit 3 with its own message for that replay, which a
-#   `replay_status=$?` after the command never reached under `bash -e`.
+# keploy test (the first replay) fails test-set-2's test-5
+#   The script has to exit with keploy test's code, name keploy test and that
+#   code, the report that failed and its failed test (not the tests that
+#   passed, before it and after it), and print keploy test's log; and name no
+#   report the run did not write.
+# keploy record of iteration 2, then of the first json iteration, fails
+#   The script has to exit with the record's code, naming that record (the
+#   json one as json), print its log, and not say the iteration was recorded.
+# keploy test --storage-format json fails test-set-3's test-2
+#   The script has to exit with its code, naming that replay, the failed test
+#   of the json report (not the tests that passed, before it and after it),
+#   and print its log.
+# keploy test --storage-format json fails before it writes a test run
+#   The script has to name that replay and print its log, and print no report
+#   of the yaml replay's test run.
+# the --keep-app-alive replay fails
+#   The script has to exit with its code, with its own message for that
+#   replay, which a `replay_status=$?` after the command never reached under
+#   `bash -e`.
+#
+# Each failing command runs twice, exiting 1 and then another code: the step
+# has to exit with keploy's own code, and a code of 1 has to fail it too. In
+# no case may bash raise an error in the lane script.
 
 set -u
 
@@ -70,7 +80,8 @@ EOF
 # the nth keploy record; FAKE_TEST_RC_<n> that of the nth keploy test, and
 # FAKE_TEST_<n> the reports it writes: "SET:STATUS[:FAILED_TEST]" words. A
 # set's tests are test-1, passed, and with FAILED_TEST that test, failed, then
-# test-9, passed.
+# test-9, passed. FAKE_TEST_NORUN_<n>=1: the nth keploy test writes no test
+# run.
 next() {
     local f="$FAKE_DIR/$1" n
     n=$(( $(cat "$f" 2>/dev/null || echo 0) + 1 ))
@@ -91,6 +102,12 @@ record)
     ;;
 test)
     n=$(next test)
+    norun_var="FAKE_TEST_NORUN_$n"
+    rc_var="FAKE_TEST_RC_$n"
+    if [ "${!norun_var:-0}" = 1 ]; then
+        echo "fake keploy test $n log"
+        exit "${!rc_var:-0}"
+    fi
     format=yaml
     case " $* " in *" --storage-format json "*) format=json ;; esac
     run=0
@@ -102,7 +119,10 @@ test)
         IFS=: read -r set status failed <<<"$word"
         if [ "$format" = json ]; then
             tests='[{"kind":"Http","status":"PASSED","testCaseID":"test-1"}'
-            if [ -n "$failed" ]; then tests="$tests"',{"kind":"Http","status":"FAILED","testCaseID":"'"$failed"'"}'; fi
+            if [ -n "$failed" ]; then
+                tests="$tests"',{"kind":"Http","status":"FAILED","testCaseID":"'"$failed"'"}'
+                tests="$tests"',{"kind":"Http","status":"PASSED","testCaseID":"test-9"}'
+            fi
             printf '{"name":"test-set-%s","status":"%s","tests":%s]}\n' "$set" "$status" "$tests" \
                 >"$dir/test-set-$set-report.json"
         else
@@ -128,7 +148,6 @@ test)
         fi
     done
     echo "fake keploy test $n log"
-    rc_var="FAKE_TEST_RC_$n"
     exit "${!rc_var:-0}"
     ;;
 esac
@@ -158,12 +177,17 @@ run_case() {
 }
 
 # expect CASE WANT_RC LINE... [-- NOT_LINE...]: the case's exit is WANT_RC,
-# its output has each LINE and no NOT_LINE (fixed strings).
+# its output has each LINE and no NOT_LINE (fixed strings), and no error bash
+# raised in the lane script ("golang-docker.sh: line N: ...").
 expect() {
     local name="$1" want_rc="$2" line bad=0 refute=0
     shift 2
     if [ "$rc" -ne "$want_rc" ]; then
         echo "FAIL $name: exit $rc, want $want_rc"
+        bad=1
+    fi
+    if grep -F -- "golang-docker.sh: line " "$out"; then
+        echo "FAIL $name: bash raised an error in the lane script"
         bad=1
     fi
     for line in "$@"; do
@@ -192,32 +216,56 @@ expect() {
 run_case pass FAKE_JSON=1 FAKE_TEST_2="0:PASSED 1:PASSED 2:PASSED 3:PASSED"
 expect pass 0 "All tests passed (yaml + json)" "All tests passed (--keep-app-alive run)"
 
-run_case replay-fails FAKE_JSON=1 FAKE_TEST_RC_1=1 \
-    FAKE_TEST_1="0:PASSED 1:PASSED 2:FAILED:test-5 3:PASSED"
-expect replay-fails 1 \
-    "::error::keploy test exited 1" \
-    "test-run-0/test-set-2-report.yaml: FAILED" \
-    "  failed: test-5" \
-    "fake keploy test 1 log" \
-    -- "failed: test-1" "failed: test-9" "report.json"
+for code in 1 4; do
+    run_case "replay-fails-$code" FAKE_JSON=1 FAKE_TEST_RC_1="$code" \
+        FAKE_TEST_1="0:PASSED 1:PASSED 2:FAILED:test-5 3:PASSED"
+    expect "replay-fails-$code" "$code" \
+        "::error::keploy test exited $code" \
+        "test-run-0/test-set-2-report.yaml: FAILED" \
+        "  failed: test-5" \
+        "fake keploy test 1 log" \
+        -- "failed: test-1" "failed: test-9" "report.json"
+done
 
-run_case record-fails FAKE_RECORD_RC_2=2
-expect record-fails 2 \
-    "::error::keploy record (iteration 2) exited 2" \
-    "fake keploy record 2 log"
+for code in 1 2; do
+    run_case "record-fails-$code" FAKE_RECORD_RC_2="$code"
+    expect "record-fails-$code" "$code" \
+        "::error::keploy record (iteration 2) exited $code" \
+        "fake keploy record 2 log" \
+        -- "Recorded test case and mocks for iteration 2" "test-run-"
+done
 
-run_case json-replay-fails FAKE_JSON=1 FAKE_TEST_RC_2=1 \
-    FAKE_TEST_2="0:PASSED 1:PASSED 2:PASSED 3:FAILED:test-2"
-expect json-replay-fails 1 \
+for code in 1 6; do
+    run_case "json-record-fails-$code" FAKE_JSON=1 FAKE_RECORD_RC_3="$code"
+    expect "json-record-fails-$code" "$code" \
+        "::error::keploy record (iteration 1, json) exited $code" \
+        "fake keploy record 3 log" \
+        -- "Recorded test case and mocks for iteration 1 (json)" "test-run-"
+done
+
+for code in 1 5; do
+    run_case "json-replay-fails-$code" FAKE_JSON=1 FAKE_TEST_RC_2="$code" \
+        FAKE_TEST_2="0:PASSED 1:PASSED 2:PASSED 3:FAILED:test-2"
+    expect "json-replay-fails-$code" "$code" \
+        "::error::keploy test --storage-format json exited $code" \
+        "test-run-1/test-set-3-report.json: FAILED" \
+        "  failed: test-2" \
+        "fake keploy test 2 log" \
+        -- "failed: test-1" "failed: test-9" "report.yaml"
+done
+
+run_case json-replay-writes-no-run FAKE_JSON=1 FAKE_TEST_RC_2=1 FAKE_TEST_NORUN_2=1
+expect json-replay-writes-no-run 1 \
     "::error::keploy test --storage-format json exited 1" \
-    "test-run-1/test-set-3-report.json: FAILED" \
-    "  failed: test-2" \
-    "fake keploy test 2 log"
+    "fake keploy test 2 log" \
+    -- "test-run-"
 
-run_case keep-app-alive-fails FAKE_TEST_RC_2=3
-expect keep-app-alive-fails 3 \
-    "::error::--keep-app-alive replay failed with exit code 3" \
-    "fake keploy test 2 log"
+for code in 1 3; do
+    run_case "keep-app-alive-fails-$code" FAKE_TEST_RC_2="$code"
+    expect "keep-app-alive-fails-$code" "$code" \
+        "::error::--keep-app-alive replay failed with exit code $code" \
+        "fake keploy test 2 log"
+done
 
 if [ "$fails" -ne 0 ]; then
     echo "$fails case(s) failed"

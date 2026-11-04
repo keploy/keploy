@@ -28,28 +28,41 @@ docker logs mongoDb &
 docker_build_retry docker build -t gin-mongo .
 docker rm -f ginApp 2>/dev/null || true
 
+# The number of test runs keploy test has written under ./keploy/reports.
+test_run_count() {
+    ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l
+}
+
 # The step runs this script under `bash -e`, so a keploy command that exited
 # non-zero ended the step at that line, before the checks below it could print
 # its log: the step failed with no line saying what had failed. Each keploy
 # command's exit status is taken instead, and keploy_exited names a non-zero
-# one, with the test-set reports of the newest test run and the command's log.
+# one, with the test-set reports of the test run it wrote and the command's log.
+#
+# keploy_exited RC WHAT LOG [RUNS_BEFORE]: RUNS_BEFORE is test_run_count taken
+# before a keploy test. Only a test run past that count, the one the command
+# wrote, has its reports printed, so a replay that wrote no test run prints no
+# earlier run's reports. keploy record, which runs before any keploy test and
+# writes no test run, gives none.
 keploy_exited() {
-    local rc=$1 what=$2 log=$3 run f
+    local rc=$1 what=$2 log=$3 runs_before=${4:-0} run f
     echo "::error::${what} exited ${rc}; the test-set reports and its log (${log}) follow"
-    run="$(ls -td ./keploy/reports/test-run-* 2>/dev/null | head -n 1 || true)"
-    for f in "$run"/test-set-*-report.yaml "$run"/test-set-*-report.json; do
-        [ -f "$f" ] || continue
-        case "$f" in
-        *.json)
-            echo "$f: $(jq -r '.status' "$f" 2>/dev/null || echo '<unreadable>')"
-            jq -r '.tests[]? | select(.status == "FAILED") | "  failed: " + .testCaseID' "$f" 2>/dev/null || true
-            ;;
-        *)
-            echo "$f: $(grep -m 1 'status:' "$f" | awk '{print $2}')"
-            awk '/^ +status: FAILED/ {f = 1} f && /test_case_id:/ {print "  failed: " $2; f = 0}' "$f"
-            ;;
-        esac
-    done
+    if [ "$(test_run_count)" -gt "$runs_before" ]; then
+        run="$(ls -td ./keploy/reports/test-run-* 2>/dev/null | head -n 1 || true)"
+        for f in "$run"/test-set-*-report.yaml "$run"/test-set-*-report.json; do
+            [ -f "$f" ] || continue
+            case "$f" in
+            *.json)
+                echo "$f: $(jq -r '.status' "$f" 2>/dev/null || echo '<unreadable>')"
+                jq -r '.tests[]? | select(.status == "FAILED") | "  failed: " + .testCaseID' "$f" 2>/dev/null || true
+                ;;
+            *)
+                echo "$f: $(grep -m 1 'status:' "$f" | awk '{print $2}')"
+                awk '/^ +status: FAILED/ {f = 1} f && /test_case_id:/ {print "  failed: " $2; f = 0}' "$f"
+                ;;
+            esac
+        done
+    fi
     cat "$log"
     exit "$rc"
 }
@@ -156,6 +169,7 @@ fi
 # Start the keploy in test mode.
 test_container="ginApp_test"
 rc=0
+runs_before="$(test_run_count)"
 $REPLAY_BIN test -c 'docker run --rm -p 8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt" || rc=$?
 
 if grep "ERROR" "${test_container}.txt"; then
@@ -171,7 +185,7 @@ if grep "WARNING: DATA RACE" "${test_container}.txt"; then
 fi
 
 if [ "$rc" -ne 0 ]; then
-    keploy_exited "$rc" "keploy test" "${test_container}.txt"
+    keploy_exited "$rc" "keploy test" "${test_container}.txt" "$runs_before"
 fi
 
 all_passed=true
@@ -205,6 +219,7 @@ fi
 
 if json_pass_supported; then
     rc=0
+    runs_before="$(test_run_count)"
     $REPLAY_BIN test --storage-format json -c 'docker run --rm -p 8080:8080 --net keploy-network --name ginApp_test_json gin-mongo' --containerName "ginApp_test_json" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}_json.txt" || rc=$?
     if grep "ERROR" "${test_container}_json.txt"; then
         cat "${test_container}_json.txt"
@@ -215,7 +230,7 @@ if json_pass_supported; then
         exit 1
     fi
     if [ "$rc" -ne 0 ]; then
-        keploy_exited "$rc" "keploy test --storage-format json" "${test_container}_json.txt"
+        keploy_exited "$rc" "keploy test --storage-format json" "${test_container}_json.txt" "$runs_before"
     fi
     if ! json_scan_reports; then
         cat "${test_container}_json.txt"
@@ -243,7 +258,7 @@ fi
 #                                     no flag → exit non-zero / no new
 #                                     report dir → expected red
 echo "===== --keep-app-alive regression run ====="
-prev_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
+prev_report_count=$(test_run_count)
 
 ka_container="ginApp_test_keep_app_alive"
 replay_status=0
@@ -267,7 +282,7 @@ if grep "WARNING: DATA RACE" "${ka_container}.txt"; then
     exit 1
 fi
 
-new_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
+new_report_count=$(test_run_count)
 if [ "$new_report_count" -le "$prev_report_count" ]; then
     echo "::error::--keep-app-alive replay did not produce a new test-run-* directory (prev=${prev_report_count}, new=${new_report_count}). Most likely the binary rejected the --keep-app-alive flag."
     cat "${ka_container}.txt"
