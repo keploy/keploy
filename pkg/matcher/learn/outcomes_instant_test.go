@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"slices"
 	"strconv"
 	"strings"
@@ -3294,5 +3295,194 @@ func TestOutcomeAWallTimeOfNoZoneIsHeldWhereAnAnswerHoldsItInUTC(t *testing.T) {
 		}
 		oRefused(t, base.String()+": F's call second in the answer", call(rAt.Add(-37*time.Second), fAt), RefusalPick, "mock-799")
 		oRefused(t, base.String()+": another second of that hour in the answer", call(rAt.Add(-10*time.Second), fAt.Add(-10*time.Second)), RefusalCannotCheck)
+	}
+}
+
+// The index of a text's moments (momentIndex) holds a moment as asking
+// byMoment of every instant of the text does, at the same cut: random
+// texts of instants in UTC, in zones of whole minutes and not, of no zone,
+// times of day, and instants that name no moment, each asked of moments
+// cut from their own instants (truncated or rounded to each unit, in each
+// zone, read as one another's wall clock, a day off), and of others.
+func TestOutcomeATextsMomentsIndexHoldsAsAskingEachInstantDoes(t *testing.T) {
+	rng := rand.New(rand.NewPCG(5, 11))
+	base := time.Date(2026, 10, 31, 10, 50, 0, 0, time.UTC).UnixNano()
+	zones := []int64{0, int64(5*time.Hour + 30*time.Minute), int64(-10 * time.Hour), int64(30 * time.Second), int64(time.Hour)}
+	units := []int64{1, int64(time.Microsecond), int64(time.Millisecond), int64(10 * time.Millisecond), int64(time.Second), int64(time.Minute), int64(time.Hour), nsPerDay}
+	pick := func(xs []int64) int64 { return xs[rng.IntN(len(xs))] }
+	mod := func(a, b int64) int64 { return (a%b + b) % b }
+	moment0 := func(at, zone int64, zoned, day bool, res int64) moment {
+		if day {
+			at = mod(at, nsPerDay)
+			return moment{key: instantKey{at: at, day: true}, wall: at, res: time.Duration(res)}
+		}
+		return moment{key: instantKey{at: at}, wall: mod(at+zone, nsPerDay), res: time.Duration(res), zone: zone, zoned: zoned}
+	}
+	randomAt := func() int64 {
+		at := base + rng.Int64N(3*nsPerDay) - nsPerDay
+		return at - mod(at, pick(units))
+	}
+	asked, mismatches := 0, 0
+	for text := 0; text < 400; text++ {
+		var spans []instant
+		for range 1 + rng.IntN(40) {
+			z := pick(zones)
+			m := moment0(randomAt(), z, z != 0 || rng.IntN(2) == 0, rng.IntN(10) == 0, pick(units))
+			spans = append(spans, instant{key: m.key, wall: m.wall, res: m.res, zone: m.zone, zoned: m.zoned, keyed: rng.IntN(12) != 0})
+		}
+		ix := newMomentIndex(spans)
+		for range 80 {
+			var m moment
+			if h := spans[rng.IntN(len(spans))].moment(); rng.IntN(5) != 0 && !h.key.day {
+				u, z := pick(units), pick(zones)
+				tr, ro := cut(h.key.at, z, u)
+				at := []int64{h.key.at, tr, ro, h.key.at + h.zone, h.key.at - z, tr + nsPerDay, ro - u, h.key.at + int64(time.Millisecond), h.key.at - 1}[rng.IntN(9)]
+				m = moment0(at, z, z != 0 && rng.IntN(3) != 0, rng.IntN(15) == 0, pick(units))
+			} else {
+				z := pick(zones)
+				m = moment0(randomAt(), z, z != 0, rng.IntN(8) == 0, pick(units))
+			}
+			m.typed = rng.IntN(3) == 0
+			var held, fine bool
+			for _, sp := range spans {
+				if sp.keyed {
+					h, f := byMoment(sp.moment(), m)
+					held, fine = held || h, fine || f
+				}
+			}
+			gotHeld, gotFine := ix.holds(m, func() {})
+			if held {
+				asked++
+			}
+			if gotHeld != held || gotFine != fine {
+				if mismatches++; mismatches <= 5 {
+					t.Errorf("text %d, moment %+v: the index holds it %v, fine %v; asking each instant, %v, fine %v (instants %+v)", text, m, gotHeld, gotFine, held, fine, spans)
+				}
+			}
+		}
+	}
+	if mismatches > 0 {
+		t.Errorf("%d moments the index holds otherwise than asking each instant does", mismatches)
+	}
+	if asked < 5000 {
+		t.Errorf("fixture: only %d of the moments asked are held; want most cut from the text's own instants", asked)
+	}
+}
+
+// One call deciding many changed instants an earlier answer holds asks of
+// the instants near each one (momentIndex), not of every instant of the
+// answer, each instant the answer's value, as when every instant is asked
+// of (past the budget).
+func TestOutcomeACallAsksOfTheInstantsNearEachChangedOne(t *testing.T) {
+	defer func(r int64) { readerBudget = r }(readerBudget)
+	rAt, fAt := oAt.Add(20400*time.Millisecond), oAt.Add(96400*time.Millisecond)
+	const n = 400
+	var rDocs, fDocs, drift []string
+	leaves, live := map[string]Leaf{}, map[string]Leaf{}
+	for i := range n {
+		r := rAt.Add(-50*time.Second + time.Duration(i)*7*time.Millisecond + 123*time.Microsecond).UTC().Format(time.RFC3339Nano)
+		f := fAt.Add(-50*time.Second + time.Duration(i)*7*time.Millisecond + 456*time.Microsecond).UTC().Format(time.RFC3339Nano)
+		rDocs = append(rDocs, fmt.Sprintf(`{"id":%d,"updated_at":"%s"}`, i, r))
+		fDocs = append(fDocs, fmt.Sprintf(`{"id":%d,"updated_at":"%s"}`, i, f))
+		p := fmt.Sprintf("body.docs[%d].updated_at", i)
+		drift = append(drift, p)
+		leaves[p], live[p] = Leaf{Path: p, Noise: p, Type: Instant, Value: r}, Leaf{Path: p, Noise: p, Type: Instant, Value: f}
+	}
+	mock := func(docs []string) *models.Mock {
+		return &models.Mock{Name: "mock-799", Kind: models.HTTP, Spec: models.MockSpec{
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "http://api.local/docs", Body: ``},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: `{"docs":[` + strings.Join(docs, ",") + `]}`},
+			ReqTimestampMock: oAt.Add(-time.Second), ResTimestampMock: oAt.Add(-time.Second + time.Millisecond),
+		}}
+	}
+	asks := map[string]int{}
+	for _, c := range []struct {
+		what   string
+		budget int64
+	}{{"within the budget", 0}, {"past the budget", 1}} {
+		readerBudget = c.budget
+		in := Input{
+			Drifts: oDrifts(), Drift: drift,
+			Live: Shape{Leaves: live}, Rec: Shape{Leaves: leaves},
+			At: rAt, Arrived: fAt, Raw: []Raw{RawOf(mock(rDocs), true).ServedAs(1).ServedLive(RawOf(mock(fDocs), true))},
+			Window: iWin(rAt, fAt, 100*time.Millisecond), Test: "test-2", Mock: "mock-300",
+			Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true},
+		}
+		x := newReaderIndex(in.Drifts)
+		ds, _ := newDecider(in, false, x).decide()
+		x.release()
+		values := 0
+		for _, d := range ds {
+			if d.Outcome == OutcomeValue {
+				values++
+			}
+		}
+		if values != n || len(ds) != n {
+			t.Errorf("%s: %d decisions, %d of them the answer's value; want %d, each the answer's value: %s", c.what, len(ds), values, n, oDescribe(ds[:min(len(ds), 3)]))
+		}
+		asks[c.what] = x.momentAsks
+	}
+	t.Logf("asked of %d instants within the budget, %d past it, for %d changed", asks["within the budget"], asks["past the budget"], n)
+	if got := asks["within the budget"]; got == 0 || got > 8*n {
+		t.Errorf("the call asked byMoment of %d instants for %d changed ones; want some, and at most %d, a few near each", got, n, 8*n)
+	}
+	if got := asks["past the budget"]; got < n*n {
+		t.Errorf("fixture: past the budget the call asked of %d instants; want every instant of the answer for each changed one (at least %d)", got, n*n)
+	}
+}
+
+// A moment is asked of the instants of a text that may hold it, and of no
+// other (momentIndex.holds): of those within a millisecond first, where a
+// fine hold stops it; then of the ones cutsNone does not turn away, to the
+// first hold. Each case counts the instants asked.
+func TestOutcomeAMomentIsAskedOnlyOfTheInstantsThatMayHoldIt(t *testing.T) {
+	T := time.Date(2026, 10, 31, 10, 50, 13, 0, time.UTC).UnixNano()
+	M := time.Date(2026, 10, 31, 10, 50, 0, 0, time.UTC).UnixNano()
+	us, s, h := int64(time.Microsecond), int64(time.Second), int64(time.Hour)
+	ist := 5*h + 30*int64(time.Minute)
+	mk := func(at, zone int64, zoned bool, res time.Duration) moment {
+		return moment{key: instantKey{at: at}, wall: ((at+zone)%nsPerDay + nsPerDay) % nsPerDay, res: res, zone: zone, zoned: zoned}
+	}
+	utc := func(at int64, res time.Duration) moment { return mk(at, 0, true, res) }
+	typed := func(m moment) moment { m.typed = true; return m }
+	for _, c := range []struct {
+		what       string
+		text       []moment
+		m          moment
+		held, fine bool
+		asks       int
+	}{
+		{"a fine copy beside another instant", []moment{utc(T+123*us, time.Microsecond), utc(T+7*int64(time.Millisecond)+123*us, time.Microsecond)}, utc(T+123*us, time.Microsecond), true, true, 1},
+		{"two fine copies in a zone of seconds", []moment{mk(T, 30*s, true, time.Microsecond), mk(T, 30*s, true, time.Microsecond)}, utc(T, time.Microsecond), true, true, 1},
+		{"a coarse copy beside the next second", []moment{utc(T, time.Second), utc(T+s, time.Second)}, utc(T, time.Second), true, false, 1},
+		{"a coarse copy beside an IST wall clock of it", []moment{utc(T, time.Second), mk(T-ist, ist, true, time.Second)}, utc(T, time.Second), true, false, 1},
+		{"an IST instant whose wall clock a zoned value is", []moment{mk(T-ist, ist, true, time.Second)}, utc(T, time.Second), false, false, 0},
+		{"an instant a second on, at the reach", []moment{utc(T+s, time.Second)}, utc(T, time.Second), false, false, 1},
+		{"an instant a second back, at the reach", []moment{utc(T-s, time.Second)}, utc(T, time.Second), false, false, 1},
+		{"a whole minute two hours on, a typed value", []moment{utc(M+2*h, time.Minute)}, typed(utc(T, time.Second)), false, false, 0},
+		{"a whole minute two hours on, a value from a text", []moment{utc(M+2*h, time.Minute)}, utc(T, time.Second), false, false, 1},
+		{"a minute of no zone three hours back, a value in UTC", []moment{mk(M-3*h, 0, false, time.Minute)}, utc(T, time.Second), false, false, 1},
+		{"a zoned instant at an IST value's wall clock", []moment{utc(T+ist, time.Second)}, typed(mk(T, ist, true, time.Second)), false, false, 0},
+		{"a fine instant half a second on", []moment{utc(T+123*us+500*int64(time.Millisecond), time.Microsecond)}, utc(T+123*us, time.Microsecond), false, false, 0},
+		{"two fine copies", []moment{utc(T+123*us, time.Microsecond), utc(T+123*us, time.Microsecond)}, utc(T+123*us, time.Microsecond), true, true, 1},
+		{"two instants the minute holds", []moment{utc(M+30*s, time.Second), utc(M+40*s, time.Second)}, utc(M, time.Minute), true, false, 1},
+		{"a minute of no zone an hour past an IST typed value's wall clock", []moment{mk(M+ist+h, 0, false, time.Minute)}, typed(mk(T, ist, true, time.Second)), false, false, 0},
+		{"a time of day, asked of every instant to the fine hold", []moment{utc(T+s, time.Second), utc(T, time.Second), utc(T+2*s, time.Second)}, moment{key: instantKey{at: T % nsPerDay, day: true}, wall: T % nsPerDay, res: time.Second}, true, true, 2},
+	} {
+		var spans []instant
+		var held, fine bool
+		for _, m := range c.text {
+			spans = append(spans, instant{key: m.key, wall: m.wall, res: m.res, zone: m.zone, zoned: m.zoned, keyed: true})
+			hh, ff := byMoment(m, c.m)
+			held, fine = held || hh, fine || ff
+		}
+		if held != c.held || fine != c.fine {
+			t.Fatalf("%s: fixture: asking each instant holds it %v, fine %v; want %v, %v", c.what, held, fine, c.held, c.fine)
+		}
+		ix, asks := newMomentIndex(spans), 0
+		gotHeld, gotFine := ix.holds(c.m, func() { asks++ })
+		if gotHeld != c.held || gotFine != c.fine || asks != c.asks {
+			t.Errorf("%s: held %v, fine %v, asking %d instants; want %v, %v, asking %d", c.what, gotHeld, gotFine, asks, c.held, c.fine, c.asks)
+		}
 	}
 }
