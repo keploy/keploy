@@ -282,6 +282,11 @@ func (p *Proxy) recordViaSupervisor(
 		// no fault: the recording's stop, its process's own exit, or an end
 		// the hooks cannot judge).
 		ClientStopped: svSess.MarkEndedWhereClientStopped,
+		// The client had ended its side before the destination's end
+		// reached it, whichever end the relay read first: the HTTP recorder
+		// judges a call the client closed partway by the client's own end
+		// then, as when the client's end is read first.
+		ClientEndedBeforeDest: svSess.MarkClientEndedBeforeDest,
 		// How each side ended its side of the connection, and which ended
 		// first: a call the destination never answered is recorded with
 		// the fault it gave (its reset or its close), or as the client's

@@ -82,6 +82,13 @@ import (
 //     closed it under the relay, or the call failed) refuses nothing.
 //   - No mark of an incomplete mock is set for a chunk the parser is not
 //     given, its Write failed or not.
+//   - As the destination's forwarder reads the destination's end, once it
+//     has told it (Config.PeerEnded) and before the relay forwards it to the
+//     client, it looks once more, unless the FIN was found already
+//     (destEndRead): a client that had ended its side by then, its FIN in or
+//     the connection reset, ended it before the destination's end reached
+//     it, whichever forwarder read its end first
+//     (Config.ClientEndedBeforeDest).
 //
 // The bytes are forwarded either way: only what the parser is given changes.
 //
@@ -176,9 +183,9 @@ type clientLook struct {
 
 // clientSocket looks at the proxy's end of the client connection. The
 // client's forwarder looks as it reads the client's end, and the destination's
-// forwarder before it writes, until one of them finds the client's FIN (one at
-// a time: Relay.finMu); the goroutine that waits for the client's answer
-// (resolve) looks after that. No two looks run at once. written is the
+// forwarder before it writes and as it reads the destination's end, until one
+// of them finds the client's FIN (one at a time: Relay.finMu); the goroutine
+// that waits for the client's answer (resolve) looks after that. No two looks run at once. written is the
 // destination's forwarder's alone, before each chunk it writes once the FIN
 // was found, and may run while resolve looks.
 type clientSocket interface {
@@ -278,14 +285,47 @@ func (r *Relay) clientFINRead() {
 // lookForClientFIN looks at the client's socket unless the FIN was found
 // already. It reports whether the FIN has been found.
 func (r *Relay) lookForClientFIN() bool {
+	fin, _ := r.lookForClientEnd()
+	return fin
+}
+
+// lookForClientEnd is lookForClientFIN, and also what its look said of the
+// client: clientUnknown where it took none, the FIN being found already.
+func (r *Relay) lookForClientEnd() (fin bool, said clientSaid) {
 	r.finMu.Lock()
 	defer r.finMu.Unlock()
+	said = clientUnknown
 	if !r.clientFIN.Load() {
-		if l := r.client.look(); l.said == clientFinned || l.said == clientClosed && r.clientEOF.Load() {
+		l := r.client.look()
+		said = l.said
+		if l.said == clientFinned || l.said == clientClosed && r.clientEOF.Load() {
 			r.clientFIN.Store(true)
 		}
 	}
-	return r.clientFIN.Load()
+	return r.clientFIN.Load(), said
+}
+
+// destEndRead is the destination's forwarder's look at the client's socket as
+// it reads the destination's end (its FIN or its reset), once it has told
+// Config.PeerEnded of it and before the relay forwards it to the client: it
+// tells Config.ClientEndedBeforeDest when the client had ended its side by
+// then, its FIN found (lookForClientFIN) or the connection closed. Until the
+// relay forwards the destination's end, the proxy has sent the client no FIN
+// and no reset, so a closed connection is the client's reset, or the proxy's
+// stack timing out a client that stopped answering, whose read gives the
+// client's forwarder no end of the client's (Config.PeerEnded is not told of
+// it). A client's end that comes after this look is read after it, and so
+// after PeerEnded was told of the destination's: which end came first is then
+// told by the order PeerEnded is told in. Where the client's socket cannot be
+// asked, or nothing is to be told (Config.ClientEndedBeforeDest nil), no look
+// is taken, and nothing is told.
+func (r *Relay) destEndRead() {
+	if r.client == nil || r.cfg.ClientEndedBeforeDest == nil {
+		return
+	}
+	if fin, said := r.lookForClientEnd(); fin || said == clientClosed {
+		r.cfg.ClientEndedBeforeDest()
+	}
 }
 
 // chunkFate is what becomes of a destination chunk the forwarder wrote to the

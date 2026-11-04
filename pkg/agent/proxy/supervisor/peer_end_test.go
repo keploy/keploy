@@ -106,6 +106,7 @@ func TestEndFollowedStopIsTheFirstEndReadAfterTheStopBegan(t *testing.T) {
 		{"the client's stream ended with its connection", func(s *Session) { s.MarkEndedWithConnection(fakeconn.FromClient) }, func(s *Session) bool { return s.EndedWithConnection(fakeconn.FromClient) }},
 		{"the destination's stream ended with its connection", func(s *Session) { s.MarkEndedWithConnection(fakeconn.FromDest) }, func(s *Session) bool { return s.EndedWithConnection(fakeconn.FromDest) }},
 		{"the stream ended where the client stopped", func(s *Session) { s.MarkEndedWhereClientStopped() }, (*Session).EndedWhereClientStopped},
+		{"the client ended its side before the destination's end reached it", func(s *Session) { s.MarkClientEndedBeforeDest() }, (*Session).ClientEndedBeforeDest},
 	} {
 		s := &Session{}
 		other.set(s)
@@ -163,6 +164,7 @@ func TestClientEndNoFaultIsTheClientsOwn(t *testing.T) {
 		{"the client's stream ended with its connection", func(s *Session) { s.MarkEndedWithConnection(fakeconn.FromClient) }, func(s *Session) bool { return s.EndedWithConnection(fakeconn.FromClient) }},
 		{"the destination's stream ended with its connection", func(s *Session) { s.MarkEndedWithConnection(fakeconn.FromDest) }, func(s *Session) bool { return s.EndedWithConnection(fakeconn.FromDest) }},
 		{"the stream ended where the client stopped", func(s *Session) { s.MarkEndedWhereClientStopped() }, (*Session).EndedWhereClientStopped},
+		{"the client ended its side before the destination's end reached it", func(s *Session) { s.MarkClientEndedBeforeDest() }, (*Session).ClientEndedBeforeDest},
 	} {
 		s := &Session{}
 		other.set(s)
@@ -227,5 +229,37 @@ func TestClientEndNoFaultIsTheClientsOwnWhicheverEndIsFirst(t *testing.T) {
 	s.MarkPeerEndedBy(fakeconn.FromDest, false, EndAtStop)
 	if got := s.ClientEndNoFault(); got != EndMayBeFault {
 		t.Errorf("only the destination's end marked, at the stop: ClientEndNoFault = %d, want %d", got, EndMayBeFault)
+	}
+}
+
+// The client ending its side before the destination's end reached it
+// (MarkClientEndedBeforeDest) is a mark of its own: it marks no side's end,
+// no first end, no stop, no end kind of the client's, and no other word of
+// the relay's, and none of those marks it (above). Nil-safe.
+func TestClientEndedBeforeDestIsAMarkOfItsOwn(t *testing.T) {
+	s := &Session{}
+	if s.ClientEndedBeforeDest() {
+		t.Fatal("a fresh session says the client ended its side before the destination's end reached it")
+	}
+	s.MarkClientEndedBeforeDest()
+	if !s.ClientEndedBeforeDest() {
+		t.Fatal("marked: ClientEndedBeforeDest false")
+	}
+	if _, ok := s.FirstPeerEnded(); ok || s.PeerEnded(fakeconn.FromClient) != PeerOpen || s.PeerEnded(fakeconn.FromDest) != PeerOpen {
+		t.Fatal("the mark marked a side's end")
+	}
+	if s.EndFollowedStop() || s.ClientEndNoFault() != EndMayBeFault || s.EndedWhereClientStopped() || s.ServerSpokeUnasked() ||
+		s.EndedWithConnection(fakeconn.FromClient) || s.EndedWithConnection(fakeconn.FromDest) {
+		t.Fatal("the mark set another of the session's marks")
+	}
+	s.MarkPeerEndedBy(fakeconn.FromDest, true, EndAtStop)
+	s.MarkPeerEndedBy(fakeconn.FromClient, false, EndAtExit)
+	if !s.ClientEndedBeforeDest() {
+		t.Fatal("the sides' ends took the mark away")
+	}
+	var nilSess *Session
+	nilSess.MarkClientEndedBeforeDest()
+	if nilSess.ClientEndedBeforeDest() {
+		t.Fatal("a nil session says the client ended its side first")
 	}
 }

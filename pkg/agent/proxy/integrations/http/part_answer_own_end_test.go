@@ -32,8 +32,9 @@ func judge(s *supervisor.Session) endsJudged {
 }
 
 // The client's own end judges a call where the relay says the client stopped
-// taking the stream (Session.EndedWhereClientStopped) or the client's end
-// came first, whichever end the session marked first and whatever the
+// taking the stream (Session.EndedWhereClientStopped), or that the client's
+// end was in before the upstream's reached it (Session.ClientEndedBeforeDest),
+// or the client's end came first, whichever end the session marked first and whatever the
 // upstream's end was (read before the stop or after it began): an end that
 // records no fault leaves a part answer out with its reason and records no
 // fault; one that may be a fault records the app's stop (stopped_reading), or
@@ -51,8 +52,8 @@ func TestRecordV2Faults_TheClientsOwnEndJudgesWhicheverEndIsMarkedFirst(t *testi
 	} {
 		for _, dest := range []supervisor.NoFaultEnd{supervisor.EndMayBeFault, supervisor.EndAtStop} {
 			for _, clientFirst := range []bool{true, false} {
-				for _, stopped := range []bool{true, false} {
-					if !clientFirst && !stopped {
+				for _, word := range []struct{ stopped, before bool }{{true, false}, {false, true}, {true, true}, {false, false}} {
+					if !clientFirst && !word.stopped && !word.before {
 						continue // the upstream's own end, below
 					}
 					for _, reset := range []bool{false, true} {
@@ -64,12 +65,15 @@ func TestRecordV2Faults_TheClientsOwnEndJudgesWhicheverEndIsMarkedFirst(t *testi
 							s.MarkPeerEndedBy(fakeconn.FromDest, reset, dest)
 							s.MarkPeerEndedBy(fakeconn.FromClient, false, tc.why)
 						}
-						if stopped {
+						if word.stopped {
 							s.MarkEndedWhereClientStopped()
 						}
+						if word.before {
+							s.MarkClientEndedBeforeDest()
+						}
 						if got := judge(s); got != tc.want {
-							t.Errorf("the client's end %d, the upstream's %d, the client's first: %v, the relay's word: %v, the upstream's reset: %v: judged %+v, want %+v",
-								tc.why, dest, clientFirst, stopped, reset, got, tc.want)
+							t.Errorf("the client's end %d, the upstream's %d, the client's first: %v, the relay's word: %v, the client's end in before the upstream's reached it: %v, the upstream's reset: %v: judged %+v, want %+v",
+								tc.why, dest, clientFirst, word.stopped, word.before, reset, got, tc.want)
 						}
 					}
 				}
@@ -80,9 +84,10 @@ func TestRecordV2Faults_TheClientsOwnEndJudgesWhicheverEndIsMarkedFirst(t *testi
 
 // Where the client's end does not judge the call, the end the relay read
 // does, as before: the upstream's close or reset came first with no word from
-// the relay that the client stopped (its own fault, whatever the client's end
-// after it), and a client's end the relay never read leaves the call to the
-// upstream's end it did read, the relay's word or not.
+// the relay that the client stopped or had ended its side before (its own
+// fault, whatever the client's end after it), and a client's end the relay
+// never read leaves the call to the upstream's end it did read, the relay's
+// word or not.
 func TestRecordV2Faults_TheUpstreamsEndJudgesWhereTheClientsDoesNot(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -105,6 +110,10 @@ func TestRecordV2Faults_TheUpstreamsEndJudgesWhereTheClientsDoesNot(t *testing.T
 			s.MarkPeerEndedBy(fakeconn.FromDest, false, supervisor.EndAtStop)
 			s.MarkEndedWhereClientStopped()
 		}, endsJudged{}},
+		{"the client's end in before the upstream's reached it, the upstream's close read, the client's end never", func(s *supervisor.Session) {
+			s.MarkPeerEndedBy(fakeconn.FromDest, false, supervisor.EndMayBeFault)
+			s.MarkClientEndedBeforeDest()
+		}, endsJudged{part: models.FaultTruncate, noneOf: models.FaultEOF}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &supervisor.Session{}

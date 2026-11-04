@@ -521,6 +521,26 @@ type Config struct {
 	// safe.
 	ClientStopped func()
 
+	// ClientEndedBeforeDest, when set, is told once, on the destination's
+	// forwarder, when a look at the client's socket, taken as that forwarder
+	// reads the destination's end (its FIN or its reset), once PeerEnded is
+	// told of it and before the relay forwards it to the client, finds the
+	// client had ended its side by then: its FIN in, or the connection
+	// closed (its reset) (client_took.go). The client ended its side before
+	// the destination's end reached it, whichever of the two ends the
+	// forwarders read, and so told PeerEnded of, first: on a busy host the
+	// destination's forwarder can read a close the destination made on its
+	// own before the client's forwarder reads a FIN that came first. A
+	// client's end that comes after this look comes after the
+	// destination's end was told, so PeerEnded is told of it second. It is
+	// not told where the client's socket cannot be asked (off Linux, or a
+	// client connection that is no TCP socket). The proxy wires it to
+	// supervisor.Session.MarkClientEndedBeforeDest, so the HTTP recorder
+	// judges such a call by the client's own end, never by the order the
+	// two ends were read in. It is called before the stream ends, and must
+	// not block. Nil is safe: no look is taken.
+	ClientEndedBeforeDest func()
+
 	// PeerEnded, when set, is told once per direction, as that direction's
 	// read finds its peer ended its side: a FIN (reset false) or a reset
 	// (reset true; the read failed with ECONNRESET). It is told on that

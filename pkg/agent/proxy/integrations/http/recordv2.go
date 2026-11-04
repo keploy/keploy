@@ -227,7 +227,8 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// cannot judge): that close is not the app's stopping reading. The
 		// client's own end is asked (clientEndJudges), never the first end
 		// the relay read: the server's own close, once its last bytes are
-		// sent, can be read before the client's FIN that came first. An
+		// sent or with nothing sent after the client's FIN, can be read
+		// before the client's FIN that came first. An
 		// observe-only capture carries only what the client read, so when its
 		// stream ended with the connection (EndedWithConnection) it is the
 		// client that stopped reading and closed, and the response is
@@ -349,9 +350,9 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 //     idled out as the client sent it): the end that follows is its idle
 //     close, which the application's HTTP client meets by retrying the
 //     request on a new connection, where it is recorded;
-//   - the client's own end judges it (clientEndJudges: it ended first, or the
-//     relay ended the stream where the client stopped taking the answer the
-//     destination sent after its close, whichever end the relay read first):
+//   - the client's own end judges it (clientEndJudges: it came before the
+//     destination's end reached the client, whichever end the relay read
+//     first):
 //     the application gave up on the call (its client's timeout) and closed,
 //     with no answer (FaultTimeout), on any request of the connection, unless
 //     that end records no fault (Session.ClientEndNoFault, below);
@@ -404,20 +405,29 @@ func noAnswerFault(sess *supervisor.Session, err error, exchanges int) *models.F
 // clientEndJudges reports whether a call whose response stream ended before
 // the response did is judged by the client's own end
 // (Session.ClientEndNoFault), as the relay read it: the client's end came
-// first, or the relay ended the stream where the client stopped taking what
-// the destination still sent (Session.EndedWhereClientStopped), and the relay
-// has read the client's end. Which of the two ends the relay read first is
-// then the scheduler's, never the app's: the client's FIN came first, and an
-// upstream that closes once its last bytes are sent (keep-alives off) closes
-// on its own, so its forwarder can read that close first. A client's end the
-// relay never read (it ended the read itself) leaves the call to the end it
-// did read, as before.
+// before the destination's end reached it, and the relay has read the
+// client's end. The relay says so by events, never by which of the two ends
+// it read first: the relay ended the stream where the client stopped taking
+// what the destination still sent (Session.EndedWhereClientStopped), or its
+// look at the client's socket as it read the destination's end found the
+// client's side ended (Session.ClientEndedBeforeDest), or it read the
+// client's end first. Which end the relay read first is the scheduler's,
+// never the app's: an upstream that closes once its last bytes are sent
+// (keep-alives off), or that closes on its own with nothing after the
+// client's FIN, closes as the client does, and its forwarder can read that
+// close first. A client that closed only once it had the destination's end
+// (its read of a cut answer ended) is judged by the destination's end. A
+// client's end the relay never read (it ended the read itself) leaves the
+// call to the end it did read, as before.
 func clientEndJudges(sess *supervisor.Session) bool {
 	if sess.PeerEnded(fakeconn.FromClient) == supervisor.PeerOpen {
 		return false
 	}
+	if sess.EndedWhereClientStopped() || sess.ClientEndedBeforeDest() {
+		return true
+	}
 	first, _ := sess.FirstPeerEnded()
-	return first == fakeconn.FromClient || sess.EndedWhereClientStopped()
+	return first == fakeconn.FromClient
 }
 
 // partAnswerLeftOut reports the reason an exchange is left out for whose

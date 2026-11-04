@@ -154,12 +154,13 @@ type Session struct {
 	// records no fault (EndFollowedStop); whether the server spoke unasked
 	// before the current request (ServerSpokeUnasked); whether the
 	// destination's stream ended where the client stopped taking it
-	// (endedWhereClientStoppedBit); from endedWithConnectionShift, one bit
-	// per fakeconn.Direction: that stream ended because its connection did
-	// (MarkEndedWithConnection); and, from clientEndShift, which end that
-	// records no fault the client's own end was, first or not
-	// (ClientEndNoFault). Internal; one word here, in the padding after the
-	// bools, so a Session stays in its size class.
+	// (endedWhereClientStoppedBit); whether the client had ended its side
+	// before the destination's end reached it (ClientEndedBeforeDest); from
+	// endedWithConnectionShift, one bit per fakeconn.Direction: that stream
+	// ended because its connection did (MarkEndedWithConnection); and, from
+	// clientEndShift, which end that records no fault the client's own end
+	// was, first or not (ClientEndNoFault). Internal; one word here, in the
+	// padding after the bools, so a Session stays in its size class.
 	peerEnds atomic.Uint32
 
 	// --- Backward-compatibility (populated by the migration shim) ---
@@ -399,6 +400,30 @@ func (s *Session) EndedWhereClientStopped() bool {
 	return s != nil && s.peerEnds.Load()&endedWhereClientStoppedBit != 0
 }
 
+// MarkClientEndedBeforeDest says the client had ended its side of the
+// connection (its FIN in, or the connection reset) before the destination's end
+// reached it: a look at the proxy's end of the client connection, taken as the
+// relay read the destination's end and before it forwarded it, found it so
+// (relay.Config.ClientEndedBeforeDest). The client's end then came first,
+// whichever of the two ends the relay read first: a destination that closes on
+// its own as the client closes can have its close read first on a busy host.
+// The caller calls it before the stream ends, so a parser that reaches the end
+// sees it. Nil-safe.
+func (s *Session) MarkClientEndedBeforeDest() {
+	if s == nil {
+		return
+	}
+	s.peerEnds.Or(clientEndedBeforeDestBit)
+}
+
+// ClientEndedBeforeDest reports whether the client had ended its side before
+// the destination's end reached it (MarkClientEndedBeforeDest). False where the
+// relay cannot look at the client's socket (off Linux), and where the
+// destination's end was never read. Nil-safe.
+func (s *Session) ClientEndedBeforeDest() bool {
+	return s != nil && s.peerEnds.Load()&clientEndedBeforeDestBit != 0
+}
+
 // StreamedBefore reports whether every chunk of dir captured before the chunk
 // numbered seq (fakeconn.Chunk.CapturedBefore), a number its producer gave on
 // this connection, has gone on dir's stream, or never will (Order): end is then
@@ -450,6 +475,10 @@ const endFollowedStopBit = 1 << (peerEndFirstShift + 3)
 // endedWhereClientStoppedBit, in peerEnds, after endFollowedStopBit:
 // EndedWhereClientStopped.
 const endedWhereClientStoppedBit = 1 << (peerEndFirstShift + 4)
+
+// clientEndedBeforeDestBit, in peerEnds, after endedWhereClientStoppedBit:
+// ClientEndedBeforeDest.
+const clientEndedBeforeDestBit = 1 << (peerEndFirstShift + 5)
 
 // EndFollowedStop reports whether the first end of the connection
 // (FirstPeerEnded) was the application's stop, which records no fault

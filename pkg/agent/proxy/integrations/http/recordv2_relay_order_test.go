@@ -118,7 +118,9 @@ func (c *relayedConn) startRelay(t *testing.T) {
 	// The relay carries the connection from its first byte: its session is
 	// never one the capture joined mid-way (JoinedMidConnection). It ends the
 	// destination's stream where the client stopped taking it, and says so on
-	// the session, as the proxy wires it (recordViaSupervisor).
+	// the session, as it says the client ended its side before the
+	// destination's end reached it, as the proxy wires them
+	// (recordViaSupervisor).
 	c.sess = &supervisor.Session{
 		Mocks: c.mocks, Mgr: c.mgr, Orphans: c.spans,
 		Logger: zap.New(zapcore.NewTee(zaptest.NewLogger(t).Core(), c.core)), ClientConnID: "relayed-1",
@@ -147,7 +149,7 @@ func (c *relayedConn) startRelay(t *testing.T) {
 			return
 		}
 		c.endHook(dir, func() { mark(dir, reset) })
-	}}, src, dst)
+	}, ClientEndedBeforeDest: c.sess.MarkClientEndedBeforeDest}, src, dst)
 	c.sess.ClientStream, c.sess.DestStream = r.ClientStream(), r.DestStream()
 	ctx, cancel := context.WithCancel(context.Background())
 	c.stopRelay = cancel

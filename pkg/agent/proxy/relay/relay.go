@@ -1123,6 +1123,11 @@ func (r *Relay) forward(
 				if r.cfg.PeerEnded != nil {
 					r.cfg.PeerEnded(dir, false)
 				}
+				if dir == fakeconn.FromDest {
+					// Before onForwarderExit forwards the FIN to the client:
+					// had the client ended its side by then (client_took.go)?
+					r.destEndRead()
+				}
 				return io.EOF
 			}
 			if errors.Is(err, syscall.ECONNRESET) {
@@ -1133,6 +1138,8 @@ func (r *Relay) forward(
 				}
 				if dir == fakeconn.FromDest {
 					r.destReset.Store(true)
+					// Before the teardown resets the client too.
+					r.destEndRead()
 				}
 				return err
 			}
