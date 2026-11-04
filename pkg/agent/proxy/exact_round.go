@@ -811,8 +811,8 @@ func byRecorded(ms []*models.Mock) {
 	})
 }
 
-// pairingCandidatesLocked is PairingCandidates of kind holding the round
-// lock: those the trees hold, in recorded order, and those the agent keeps
+// pairingCandidatesLocked is PairingCandidates of kind holding swapMu
+// (read) and the round lock (RoundSnapshot): those the trees hold, in recorded order, and those the agent keeps
 // on disk by name, not decoded (integrations.RoundSnapshot.LoadCandidates
 // decodes them outside the lock), with what the disk store's read of their
 // names returned.
@@ -832,8 +832,10 @@ func (m *MockManager) pairingCandidatesLocked(kind models.Kind) ([]*models.Mock,
 		}
 	}
 	byRecorded(mem)
+	// The source the staging installed with the trees just read (swapMu is
+	// held), not one the agent handed for a set it has not staged yet.
 	m.exact.ofKind.mu.Lock()
-	src := m.exact.ofKind.src
+	src := m.exact.ofKind.staged
 	m.exact.ofKind.mu.Unlock()
 	var disk []integrations.DiskCandidate
 	var err error

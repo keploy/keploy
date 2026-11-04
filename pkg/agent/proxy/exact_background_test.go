@@ -373,13 +373,13 @@ func TestPairingCandidatesReadTheDisk(t *testing.T) {
 		}
 	}
 	disk.Finalize()
-	mm.SetRecordedOfKind(disk.RangeKind)
+	handAndStage(mm, disk.RangeKind)
 	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
 	equalNames(t, "the candidates", mm.PairingCandidates(models.HTTP), "on-disk", "other")
 	equalNames(t, "the Mongo candidates", mm.PairingCandidates(models.Mongo), "mongo-on-disk")
 	// One its owner consumed is not decoded at all: its name rules it out.
 	loaded := map[string]int{}
-	mm.SetRecordedOfKind(func(kind models.Kind, visit func(string, func() (*models.Mock, error)) bool) error {
+	handAndStage(mm, func(kind models.Kind, visit func(string, func() (*models.Mock, error)) bool) error {
 		return disk.RangeKind(kind, func(name string, load func() (*models.Mock, error)) bool {
 			return visit(name, func() (*models.Mock, error) { loaded[name]++; return load() })
 		})
@@ -392,7 +392,7 @@ func TestPairingCandidatesReadTheDisk(t *testing.T) {
 		t.Fatalf("a consumed on-disk recording was decoded %d times", loaded["on-disk"])
 	}
 	// A source that fails gives the trees' alone.
-	mm.SetRecordedOfKind(func(models.Kind, func(string, func() (*models.Mock, error)) bool) error {
+	handAndStage(mm, func(models.Kind, func(string, func() (*models.Mock, error)) bool) error {
 		return errors.New("the store is closed")
 	})
 	equalNames(t, "the candidates with a failed source", mm.PairingCandidates(models.HTTP), "other")

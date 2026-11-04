@@ -1261,7 +1261,7 @@ func TestTheRoundsCandidatesOnDiskNameWhatCouldNotBeRead(t *testing.T) {
 	s.inTest()
 	disk := httpCall("disk-x", 9*time.Second, "/disk")
 	broken, closed := errors.New("truncated"), errors.New("closed")
-	s.mm.SetRecordedOfKind(func(kind models.Kind, visit func(string, func() (*models.Mock, error)) bool) error {
+	handAndStage(s.mm, func(kind models.Kind, visit func(string, func() (*models.Mock, error)) bool) error {
 		visit("disk-x", func() (*models.Mock, error) { return disk, nil })
 		visit("disk-bad", func() (*models.Mock, error) { return nil, broken })
 		return closed

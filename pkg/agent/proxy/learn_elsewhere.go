@@ -50,12 +50,12 @@ func (m *MockManager) learningElsewhere() (*exactView, uint64) {
 // full round parks thousands of other tests' recordings on disk, and the
 // parser compares a call only with recordings its keys file.
 func (m *MockManager) LearnElsewhereCandidates(kind models.Kind, keys []string) []*models.Mock {
+	if len(keys) == 0 || !models.HasRequestKeys(kind) {
+		return m.pairableOfKind(m.learningElsewhere, kind)
+	}
 	v, epoch := m.learningElsewhere()
 	if v == nil {
 		return nil
-	}
-	if len(keys) == 0 || !models.HasRequestKeys(kind) {
-		return m.pairableOfKind(v, epoch, kind)
 	}
 	return m.pairableUnderKeys(v, epoch, kind, keys)
 }

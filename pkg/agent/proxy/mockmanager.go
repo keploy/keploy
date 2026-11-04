@@ -31,8 +31,8 @@ import (
 //	                          swapMu/treesMu from under it)
 //	swapMu  →  consumedMu    (independent; never hold consumedMu then swapMu)
 //	swapMu  →  exact.ofKind.mu  (the staging installs the set-as-recorded
-//	                          source, RangeRecordedSet reads it with the
-//	                          trees; a LEAF, also taken bare)
+//	                          source, RangeRecordedSet and the pairing read
+//	                          it with the trees; a LEAF, also taken bare)
 //	hitMu   →  treesMu  →  connMu  →  TreeDb.mu
 //	                         (bumpHitCount's slow path; rebuildHitIndex takes
 //	                          hitMu as a LEAF — never acquire treesMu from

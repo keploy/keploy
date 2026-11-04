@@ -102,7 +102,7 @@ func TestLearnElsewhereCandidatesDecodeOnlyRecordingsUnderTheCallsKeys(t *testin
 	mm.SetRecordingSource(func(kind models.Kind, keys []string, visit func(string, func() (*models.Mock, error)) bool) error {
 		return disk.RangeKeys(kind, keys, counted(visit))
 	})
-	mm.SetRecordedOfKind(func(kind models.Kind, visit func(string, func() (*models.Mock, error)) bool) error {
+	handAndStage(mm, func(kind models.Kind, visit func(string, func() (*models.Mock, error)) bool) error {
 		return disk.RangeKind(kind, counted(visit))
 	})
 	mm.SetPairing(true)
