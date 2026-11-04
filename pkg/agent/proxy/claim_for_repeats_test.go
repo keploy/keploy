@@ -126,9 +126,10 @@ func TestAClaimThatStraddlesTheNextTestsStagingKeepsNothing(t *testing.T) {
 }
 
 // A copy read before the set was staged again, at a set boundary, is of the
-// earlier set: its
-// claim keeps nothing, and the new staging's same-named recording is still
-// free to be kept.
+// earlier set: its claim keeps nothing, not even for the moment before the
+// store refuses to mark it used (a request beside it would then read the new
+// staging's same-named recording as kept, and not be served it), and the new
+// staging's same-named recording is still free to be kept.
 func TestAClaimOfAnEarlierStagingsCopyKeepsNothing(t *testing.T) {
 	poll := statedPoll("poll", `{"id":"a"}`, 2010, 2050)
 	mm, pool := claimRig(t, poll)
@@ -137,6 +138,9 @@ func TestAClaimOfAnEarlierStagingsCopyKeepsNothing(t *testing.T) {
 	mm.ArmSetFence()
 	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
 	mm.SetMocksWithWindow([]*models.Mock{statedPoll("poll", `{"id":"a"}`, 2010, 2050)}, nil, winStart(2), winEnd(2))
+	if mm.keepOwned(pool[0]) {
+		t.Fatalf("the claim of a copy of the earlier staging kept it before marking it used (its set %d, the store's %d)", pool[0].TestModeInfo.StagedSet, mm.setGen.Load())
+	}
 	if mm.ClaimForRepeats(*pool[0]) {
 		t.Fatalf("a copy of the earlier staging was kept (its set %d, the store's %d)", pool[0].TestModeInfo.StagedSet, mm.setGen.Load())
 	}
