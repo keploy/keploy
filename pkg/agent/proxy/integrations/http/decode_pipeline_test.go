@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +17,8 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // The three requests of the replay pipeline rows: one with no body, one with
@@ -273,5 +276,69 @@ func TestDecodeHTTPRefusesANegativeContentLength(t *testing.T) {
 		}
 	case <-time.After(time.Minute): // the bound only turns a hang into a failure
 		t.Fatal("decodeHTTP did not return")
+	}
+}
+
+// An old client sends a CRLF after a POST body (RFC 9112 §2.2 lets a server
+// ignore empty lines before a request line), and a client may send empty
+// lines between requests. They are no part of a request: replay drops them,
+// as the recorder does (nextRequestV2), and reads the connection on, so a
+// client that closes after them ends the connection as any keep-alive close
+// does, with nothing logged as an error. Kept as the next request's start,
+// they held replay waiting for a request head, and the close was logged as
+// "failed to read the request message from the client: EOF".
+func TestDecodeHTTPDropsEmptyLinesAfterARequest(t *testing.T) {
+	const post = "POST /p HTTP/1.1\r\nHost: api.example\r\nContent-Length: 2\r\n\r\nhi"
+	m := recorded("p", "/p", nil, "hi")
+	m.Spec.HTTPReq.ProtoMajor, m.Spec.HTTPReq.ProtoMinor = 1, 1
+	m.Spec.HTTPResp.Header = map[string]string{"Content-Length": strconv.Itoa(len(m.Spec.HTTPResp.Body))}
+	for _, tc := range []struct {
+		name    string
+		first   string // the proxy's first read
+		then    string // what the client writes after it, before its answers
+		after   string // what it writes once answered, before it closes
+		answers int
+	}{
+		{name: "a CRLF after the body, then close", first: post + "\r\n", answers: 1},
+		{name: "an LF after the body, then close", first: post + "\n", answers: 1},
+		{name: "two CRLFs after the body, then close", first: post + "\r\n\r\n", answers: 1},
+		{name: "a CRLF in its own write once answered, then close", first: post, after: "\r\n", answers: 1},
+		{name: "a CRLF after the body, then the next request", first: post + "\r\n", then: post, answers: 2},
+		{name: "a CRLF and the next request in one read", first: post + "\r\n" + post, answers: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			app, proxy := tcpPair(t)
+			core, logs := observer.New(zapcore.DebugLevel)
+			h := &HTTP{Logger: zap.New(core)}
+			done := runDecode(t, proxy, func(ctx context.Context) error {
+				return h.decodeHTTP(ctx, []byte(tc.first), proxy, nil,
+					&mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true}, models.OutgoingOptions{})
+			})
+			if _, err := app.Write([]byte(tc.then)); err != nil {
+				t.Fatal(err)
+			}
+			methods := make([]string, tc.answers)
+			for i := range methods {
+				methods[i] = "POST"
+			}
+			readAnswers(t, app, methods...)
+			if _, err := app.Write([]byte(tc.after)); err != nil {
+				t.Fatal(err)
+			}
+			_ = app.Close()
+			select {
+			case err := <-done:
+				var errs []string
+				for _, e := range logs.FilterLevelExact(zapcore.ErrorLevel).All() {
+					errs = append(errs, e.Message+": "+fmt.Sprint(e.ContextMap()["error"]))
+				}
+				if err != nil || len(errs) > 0 {
+					t.Fatalf("decodeHTTP = %v, error logs %q; want nil and none: the client closed once answered", err, errs)
+				}
+			case <-time.After(time.Minute): // the bound only turns a hang into a failure
+				t.Fatal("decodeHTTP did not return")
+			}
+		})
 	}
 }
