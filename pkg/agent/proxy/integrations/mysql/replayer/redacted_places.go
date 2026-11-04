@@ -1,10 +1,14 @@
 package replayer
 
 import (
+	"encoding/binary"
 	"fmt"
+	"hash/maphash"
+	"maps"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -62,11 +66,35 @@ type redactedPlaces struct {
 }
 
 // placesOf reads the places of m's recorded commands the obfuscator
-// redacted; none when m is nil or carries no patterns.
+// redacted; none when m is nil or carries no patterns. They are a function
+// of m's patterns' texts and of what readPlaces reads of its recorded
+// commands, and are kept by those (placesKept): the agent stages each test's
+// pool from copies of the recordings, so a recording is read once a run,
+// whichever copy of it a test's pool holds, however many commands miss. A
+// recording with no patterns redacted nothing: it is not read and no digest
+// is taken. The places returned are shared: read them, never change them
+// (or makes new maps).
 func placesOf(m *models.Mock) redactedPlaces {
-	if m == nil {
+	if m == nil || len(m.Noise) == 0 {
 		return redactedPlaces{}
 	}
+	key := placesKey(m)
+	if p, ok := placesKept.get(key); ok {
+		return p
+	}
+	placesReads.Add(1)
+	p := readPlaces(m)
+	placesKept.put(key, p, p.size())
+	return p
+}
+
+// placesReads counts the recordings read for their places (readPlaces): one
+// a recording with patterns, however many commands miss and however many
+// tests' pools hold a copy of it, while placesKept keeps its places.
+var placesReads atomic.Int64
+
+// readPlaces is placesOf uncached.
+func readPlaces(m *models.Mock) redactedPlaces {
 	nc := util.NewNoiseChecker(m.Noise)
 	var p redactedPlaces
 	if nc == nil {
@@ -103,6 +131,142 @@ func placesOf(m *models.Mock) redactedPlaces {
 		}
 	}
 	return p
+}
+
+// placesKey is the digest of what readPlaces reads of m: its patterns'
+// texts, then, in order, the statement of each recorded COM_QUERY and
+// COM_STMT_PREPARE, the stored statement and each bound value's text
+// (paramText) of each COM_STMT_EXECUTE, and the data of each
+// COM_STMT_SEND_LONG_DATA, each command after a tag of its kind and each
+// text and count written with its length, so no two different contents
+// write the same bytes. A command of another kind, or one with no message,
+// adds no place and is not written. It is two 64-bit hashes (hash/maphash)
+// under two seeds drawn at start: no two recordings' contents meet by
+// chance in 128 bits, and the seeds are not known outside the process.
+func placesKey(m *models.Mock) placesDigest {
+	var h [2]maphash.Hash
+	h[0].SetSeed(placesSeeds[0])
+	h[1].SetSeed(placesSeeds[1])
+	var n [8]byte
+	count := func(c int) {
+		binary.BigEndian.PutUint64(n[:], uint64(c))
+		for i := range h {
+			_, _ = h[i].Write(n[:])
+		}
+	}
+	write := func(s string) {
+		count(len(s))
+		for i := range h {
+			_, _ = h[i].WriteString(s)
+		}
+	}
+	tag := func(t byte) {
+		for i := range h {
+			_ = h[i].WriteByte(t)
+		}
+	}
+	count(len(m.Noise))
+	for _, pat := range m.Noise {
+		write(pat)
+	}
+	for i := range m.Spec.MySQLRequests {
+		b := &m.Spec.MySQLRequests[i].PacketBundle
+		switch msg := b.Message.(type) {
+		case *mysql.QueryPacket:
+			if msg != nil {
+				tag('q')
+				write(msg.Query)
+			}
+		case *mysql.StmtPreparePacket:
+			if msg != nil {
+				tag('p')
+				write(msg.Query)
+			}
+		case *mysql.StmtExecutePacket:
+			if msg != nil {
+				tag('e')
+				write(b.StoredQuery())
+				count(len(msg.Parameters))
+				for _, prm := range msg.Parameters {
+					write(paramText(prm.Value))
+				}
+			}
+		case *mysql.StmtSendLongDataPacket:
+			if msg != nil {
+				tag('d')
+				count(len(msg.Data))
+				for i := range h {
+					_, _ = h[i].Write(msg.Data)
+				}
+			}
+		}
+	}
+	return placesDigest{h[0].Sum64(), h[1].Sum64()}
+}
+
+// placesDigest is a recording's digest (placesKey).
+type placesDigest [2]uint64
+
+// placesSeeds are placesKey's seeds.
+var placesSeeds = [2]maphash.Seed{maphash.MakeSeed(), maphash.MakeSeed()}
+
+// maxKeptPlaces bounds the bytes the places kept hold (size): past it, kept
+// places are dropped, any of them, until the new ones fit. A recording's
+// places hold its template and a few positions, a few hundred bytes for an
+// ORM statement, so it keeps those of some tens of thousands of redacted
+// recordings; a pool of more is read in part again at each miss.
+const maxKeptPlaces = 32 << 20
+
+// placesKept are the places read, by their recording's digest (placesKey).
+var placesKept = keptPlaces{byKey: map[placesDigest]keptEntry{}, max: maxKeptPlaces}
+
+// keptPlaces are places by digest, holding at most max bytes (size).
+type keptPlaces struct {
+	mu    sync.RWMutex
+	byKey map[placesDigest]keptEntry
+	bytes int
+	max   int
+}
+
+type keptEntry struct {
+	places redactedPlaces
+	size   int
+}
+
+func (k *keptPlaces) get(key placesDigest) (redactedPlaces, bool) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	e, ok := k.byKey[key]
+	return e.places, ok
+}
+
+// put keeps p, of size bytes, by key, dropping kept places, any of them,
+// until it fits; places larger than the bound are not kept.
+func (k *keptPlaces) put(key placesDigest, p redactedPlaces, size int) {
+	if size > k.max {
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if old, ok := k.byKey[key]; ok {
+		delete(k.byKey, key)
+		k.bytes -= old.size
+	}
+	for other, e := range k.byKey {
+		if k.bytes+size <= k.max {
+			break
+		}
+		delete(k.byKey, other)
+		k.bytes -= e.size
+	}
+	k.byKey[key] = keptEntry{places: p, size: size}
+	k.bytes += size
+}
+
+// size is about the bytes p holds: its template and its positions, each
+// with what a map entry costs, and its header.
+func (p redactedPlaces) size() int {
+	return int(unsafe.Sizeof(p)) + 64 + len(p.template) + 48*(len(p.literals)+len(p.params))
 }
 
 // queryPlaces reads the places of the recorded statement sql the
@@ -150,35 +314,52 @@ func queryPlaces(sql string, nc *util.NoiseChecker) redactedPlaces {
 	return p
 }
 
-// or is the places of p and q together.
+// or is the places of p and q together. Its maps are new when it adds to
+// them: p's and q's are left as they were.
 func (p redactedPlaces) or(q redactedPlaces) redactedPlaces {
-	if len(q.literals) > 0 {
-		if len(p.literals) > 0 && p.template != q.template {
-			p.statement = true
-		}
-		p.template = q.template
-		p.literals = mergePositions(p.literals, q.literals)
-	}
-	p.statement = p.statement || q.statement
-	p.whole = p.whole || q.whole
-	p.params = mergePositions(p.params, q.params)
-	p.everyParam = p.everyParam || q.everyParam
-	p.data = p.data || q.data
-	return p
+	s := placesSum{p: p}
+	s.add(q)
+	return s.p
 }
 
-func mergePositions(a, b map[int]bool) map[int]bool {
-	if len(b) == 0 {
-		return a
+// placesSum adds places together, as or does, into maps of its own: those
+// it starts from are copied before it first adds to them, and then added
+// to, so a pool of n recordings' places sum into one map of literals and
+// one of bound values, not n of each.
+type placesSum struct {
+	p redactedPlaces
+	// ownLiterals and ownParams are set once p's maps are the sum's own.
+	ownLiterals, ownParams bool
+}
+
+// add adds q's places to s's.
+func (s *placesSum) add(q redactedPlaces) {
+	if len(q.literals) > 0 {
+		if len(s.p.literals) > 0 && s.p.template != q.template {
+			s.p.statement = true
+		}
+		s.p.template = q.template
+		s.p.literals = addPositions(s.p.literals, q.literals, &s.ownLiterals)
 	}
-	out := make(map[int]bool, len(a)+len(b))
-	for k := range a {
-		out[k] = true
+	s.p.statement = s.p.statement || q.statement
+	s.p.whole = s.p.whole || q.whole
+	if len(q.params) > 0 {
+		s.p.params = addPositions(s.p.params, q.params, &s.ownParams)
 	}
-	for k := range b {
-		out[k] = true
+	s.p.everyParam = s.p.everyParam || q.everyParam
+	s.p.data = s.p.data || q.data
+}
+
+// addPositions adds b's positions to a, copied first unless *own says a is
+// the caller's own; *own is set then.
+func addPositions(a, b map[int]bool, own *bool) map[int]bool {
+	if !*own {
+		c := make(map[int]bool, len(a)+len(b))
+		maps.Copy(c, a)
+		a, *own = c, true
 	}
-	return out
+	maps.Copy(a, b)
+	return a
 }
 
 // inStatement reports whether p holds a place of a statement.
@@ -516,11 +697,11 @@ func liveStatementOf(b *mysql.PacketBundle, executeQuery string) string {
 // whichever recording a report names, so neither carries a value the
 // recording it names left in but another recording hid.
 func poolPlaces(pool []*models.Mock) redactedPlaces {
-	var p redactedPlaces
+	var s placesSum
 	for _, m := range pool {
-		p = p.or(placesOf(m))
+		s.add(placesOf(m))
 	}
-	return p
+	return s.p
 }
 
 // answeredPlaces are the places of the recordings that answered a call of
