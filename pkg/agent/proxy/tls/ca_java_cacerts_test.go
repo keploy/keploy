@@ -168,6 +168,7 @@ func fakeNativeLinux(t *testing.T, n int, pathJDK string) []string {
 	t.Cleanup(func() {
 		caStorePath, caStoreUpdateCmd = oldPaths, oldCmds
 		recordNativeInstall(nil)
+		releaseRunLock()
 		ResetCAReadyForTest()
 	})
 	return stores

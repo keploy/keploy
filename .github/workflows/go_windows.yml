@@ -123,3 +123,22 @@ jobs:
       - name: Test the run's log (amd64)
         run: go test -count=1 -run "TestTheRunsLog|TestCloseLogFileOfAClosedLogIsANoOp|TestCloseLogFileLeavesAFileThatIsNotALog" ./utils/log/
         shell: cmd
+
+      # The CA run lock on Windows (pkg/agent/proxy/tls/runlock_windows.go:
+      # LockFileEx on a file in %ProgramData%\Keploy\ca-runs, under a test
+      # directory here): the rows of runlock_test.go (all portable;
+      # runlock_unix_test.go's are not built here). A held lock makes its run
+      # live, a released one does not and its file is gone; an upper-case id
+      # is its lower-case form's run, and an id with a dot or a separator
+      # takes no lock; with no lock directory no run is live; a run that can
+      # take no lock warns once; a run whose own file another handle keeps
+      # locked takes it when that handle lets go, gives up after its bound and
+      # says so, and does not wait once its context has ended; a lock error
+      # (a closed handle) ends the wait at once. Only these rows of
+      # ./pkg/agent/proxy/tls/ run here: the package's other tests are
+      # Unix-only or have not been shown to pass on Windows. They were added
+      # with the code, which no Windows host was at hand to run, so this job
+      # is their first Windows run.
+      - name: Test the CA run lock (amd64)
+        run: go test -count=1 -run "^TestRunLock" ./pkg/agent/proxy/tls/
+        shell: cmd

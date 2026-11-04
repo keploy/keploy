@@ -120,8 +120,7 @@ func installNSSCA(ctx context.Context, logger *zap.Logger, dir, certPath, alias 
 
 // sweepNSSLeftovers removes from the database the CAs of earlier keploy runs
 // a crash left there (their keys died with those runs, so they are inert),
-// and nothing else; a keploy run going on at the same time on this host loses
-// its CA too.
+// and nothing else: a run that holds its lock (runLive) keeps its CA.
 func sweepNSSLeftovers(ctx context.Context, logger *zap.Logger, certutil, db, alias string) {
 	out, err := exec.CommandContext(ctx, certutil, "-L", "-d", db).Output()
 	if err != nil {
@@ -129,6 +128,9 @@ func sweepNSSLeftovers(ctx context.Context, logger *zap.Logger, certutil, db, al
 		return
 	}
 	for _, nick := range nssLeftovers(out, alias) {
+		if liveRunEntry(nick) {
+			continue
+		}
 		if err := exec.CommandContext(ctx, certutil, "-D", "-d", db, "-n", nick).Run(); err != nil {
 			logger.Debug("could not remove an earlier run's CA from the NSS database", zap.String("nickname", nick), zap.Error(err))
 		}

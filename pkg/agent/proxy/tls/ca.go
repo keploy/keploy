@@ -900,6 +900,10 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 			}
 		}()
 
+		// This run's lock, before any entry is written: other keploy runs'
+		// sweeps leave a live run's entries (runlock.go).
+		holdRunLock(ctx, logger, ca.runID)
+
 		// Recorded before the install, as on Linux below: whatever it leaves
 		// in the ROOT store is removed by this run's teardown however the
 		// install ends (removeWindowsCAByName finds nothing to remove when it
@@ -942,6 +946,10 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 		utils.LogError(logger, err, "Failed to find the CA store path")
 		return err
 	}
+
+	// This run's lock, before any entry is written: other keploy runs' sweeps
+	// leave a live run's entries (runlock.go).
+	holdRunLock(ctx, logger, ca.runID)
 
 	// Remove any keploy-mitm-*.crt a previous run left behind on a crash before
 	// installing this run's. Those copies are inert (their signing key died with
@@ -1025,8 +1033,12 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 // path, where the run's context is already cancelled — so it runs the trust-store
 // and keytool commands under its own short-lived context rather than the dead
 // one. Safe to call when nothing was installed (docker/k8s modes, or a persisted
-// per-user CA): it is then a no-op.
+// per-user CA): it then removes nothing, and only gives up the run's lock if it
+// holds one.
 func TeardownNativeCA(logger *zap.Logger) {
+	// The run's lock goes last, once its entries are gone: until then other
+	// runs' sweeps leave them.
+	defer releaseRunLock()
 	installedNativeMu.Lock()
 	n := installedNative
 	installedNative = nil
@@ -1088,10 +1100,10 @@ func removeWindowsCAByName(ctx context.Context, logger *zap.Logger, cn string) {
 }
 
 // sweepRunLeftovers removes the keploy-mitm-*.crt anchors of other runs (any
-// run id other than the current one). A crashed run's anchor is inert — its
-// signing key is gone — so this is housekeeping, not a security fix; a keploy
-// run going on at the same time on this host loses its anchor too. Such a
-// run's JDK alias and NSS nickname are removed where this run adds its own:
+// run id other than the current one) that are no longer alive: a run that
+// holds its lock (runLive) keeps its anchor. A crashed run's anchor is inert —
+// its signing key is gone — so this is housekeeping, not a security fix. Such
+// a run's JDK alias and NSS nickname are removed where this run adds its own:
 // the JDK alias a few per start (sweepJavaLeftovers), the NSS nickname at once
 // (sweepNSSLeftovers).
 func sweepRunLeftovers(logger *zap.Logger, currentRunID string) {
@@ -1104,6 +1116,10 @@ func sweepRunLeftovers(logger *zap.Logger, currentRunID string) {
 		for _, e := range entries {
 			name := e.Name()
 			if name == current || !strings.HasPrefix(name, "keploy-mitm-") || !strings.HasSuffix(name, ".crt") {
+				continue
+			}
+			if liveRunEntry(name) {
+				logger.Debug("left the CA anchor of a keploy run that is still alive", zap.String("path", filepath.Join(dir, name)))
 				continue
 			}
 			if err := os.Remove(filepath.Join(dir, name)); err == nil {
@@ -1512,17 +1528,23 @@ func importJavaCA(ctx context.Context, logger *zap.Logger, ks javaKeystore, caPa
 const javaSweepMax = 3
 
 // sweepJavaLeftovers lists ks and removes from it up to javaSweepMax aliases
-// named keploy-mitm-* other than alias, this run's, and nothing else. Such an
-// alias is an earlier run's, whose teardown deletes only its own alias and
-// never runs after a crash (its key died with it), or another user's
-// persisted Windows CA in a JDK both use (re-imported at that user's next
-// run), or, as with the .crt and NSS sweeps, a keploy run going on at the same
-// time on this host. It stops at the first delete that fails: the keystore is
-// most likely not writable, and the next would fail too (or another start
-// removed that alias first, and then likely the next ones). It reports whether
-// the listing holds alias and whether ks could be listed at all (when not,
-// present says nothing). Like the NSS sweep (sweepNSSLeftovers), it is
-// best-effort.
+// named keploy-mitm-* other than alias, this run's, whose runs are no longer
+// alive (runLive), and nothing else. Such an alias is an earlier run's, whose
+// teardown deletes only its own alias and never runs after a crash (its key
+// died with it), or that of another user's persisted Windows CA in a JDK both
+// use, once no run of that user is alive (it is re-imported at that user's
+// next run). It stops at the first delete that fails: the keystore is most
+// likely not writable, and the next would fail too (or another start removed
+// that alias first, and then likely the next ones). It reports whether the
+// listing holds alias and whether ks could be listed at all (when not, present
+// says nothing). Like the NSS sweep (sweepNSSLeftovers), it is best-effort.
+//
+// A run is found dead before its aliases are deleted, a keytool -delete
+// (about 0.3 s) each. A random run id never comes back, but a persisted
+// Windows CA's does: that user's next run, starting in between, finds its
+// alias still there and does not import it, and this sweep then deletes it.
+// That run's Java still trusts the CA through the JAVA_TOOL_OPTIONS
+// truststore.
 func sweepJavaLeftovers(ctx context.Context, logger *zap.Logger, ks javaKeystore, alias string) (present, listed bool) {
 	out, err := exec.CommandContext(ctx, ks.keytool, "-list", "-keystore", ks.cacerts, "-storepass", "changeit").Output()
 	utils.BootStep("keytool -list is over")
@@ -1530,7 +1552,13 @@ func sweepJavaLeftovers(ctx context.Context, logger *zap.Logger, ks javaKeystore
 		logger.Debug("could not list the JDK keystore to remove other keploy CAs' aliases", zap.String("cacerts", ks.cacerts), zap.Error(err))
 		return false, false
 	}
-	present, leftovers := javaLeftovers(out, alias)
+	present, others := javaLeftovers(out, alias)
+	var leftovers []string
+	for _, a := range others {
+		if !liveRunEntry(a) {
+			leftovers = append(leftovers, a)
+		}
+	}
 	removed := 0
 	var failed error // the delete the sweep stopped at, with keytool's output
 	for _, a := range leftovers[:min(len(leftovers), javaSweepMax)] {
