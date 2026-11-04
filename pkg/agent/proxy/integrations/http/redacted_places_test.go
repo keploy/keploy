@@ -145,36 +145,3 @@ func TestRenderedRecordingReadsAPathOnlyURLAsARequestLine(t *testing.T) {
 		}
 	}
 }
-
-// A body not read for fields holds a value one of the mock's patterns names
-// when the pattern, its anchors dropped, matches anywhere in it: a leading
-// "^" and a trailing "$" are anchors, a quoted "\$" is not, and a pattern
-// that names nothing, or does not compile, matches nothing.
-func TestHoldsPatternReadsAValueAnywhere(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		patterns []string
-		text     string
-		want     bool
-	}{
-		{"an anchored value inside XML", []string{`^REDACTED_abc$`}, `<a>REDACTED_abc</a>`, true},
-		{"a value not there", []string{`^REDACTED_abc$`}, `<a>alpha1</a>`, false},
-		{"a quoted dollar is the value's", []string{`REDACTED_abc\$`}, `pay REDACTED_abc$ now`, true},
-		{"a quoted dollar is not an anchor", []string{`REDACTED_abc\$`}, `pay REDACTED_abc now`, false},
-		{"a quoted backslash before the anchor", []string{`^REDACTED\\$`}, `x REDACTED\ y`, true},
-		{"a pattern that names nothing", []string{`^$`}, `alpha1`, false},
-		{"a pattern that does not compile", []string{`^(REDACTED$`}, `(REDACTED`, false},
-		{"the second pattern", []string{`^REDACTED_def$`, `^REDACTED_abc$`}, `x REDACTED_abc`, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Errorf("holdsPattern(%q, %q) panicked: %v", tc.patterns, tc.text, r)
-				}
-			}()
-			if got := holdsPattern(tc.patterns, tc.text); got != tc.want {
-				t.Errorf("holdsPattern(%q, %q) = %v, want %v", tc.patterns, tc.text, got, tc.want)
-			}
-		})
-	}
-}

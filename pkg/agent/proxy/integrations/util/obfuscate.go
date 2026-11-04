@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"regexp/syntax"
 	"sync"
+	"sync/atomic"
 )
 
 // NoiseChecker holds compiled regex patterns from Mock.Noise for efficient
@@ -107,7 +108,18 @@ func (nc *NoiseChecker) IsNoisyWithin(value string) bool {
 var (
 	unanchoredMu    sync.RWMutex
 	unanchoredCache = make(map[string]*regexp.Regexp)
+	// unanchoredCompiles counts the patterns compiled without their anchors
+	// (unanchored): one a pattern, however many values and checkers read it.
+	unanchoredCompiles atomic.Int64
 )
+
+// UnanchoredCompiles is the count of patterns compiled without their
+// anchors (IsNoisyWithin) in this process: one a pattern while the cache
+// holds it, however many values and checkers read it. Rows that bound a miss
+// report's cost read it.
+func UnanchoredCompiles() int64 {
+	return unanchoredCompiles.Load()
+}
 
 // unanchored is re with the anchors at its start and end dropped (of each
 // alternative of it), bounded in a cache as getCachedRegexp's; re itself
@@ -125,6 +137,7 @@ func unanchored(re *regexp.Regexp) *regexp.Regexp {
 		// A pattern of anchors alone matches an empty value only: read
 		// without them it would match every text.
 		if dropped := dropEndAnchors(parsed); dropped.Op != syntax.OpEmptyMatch {
+			unanchoredCompiles.Add(1)
 			if c, err := regexp.Compile(dropped.String()); err == nil {
 				u = c
 			}
