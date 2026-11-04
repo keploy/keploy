@@ -1671,7 +1671,8 @@ func namedIn(pool []*models.Mock, name string) *models.Mock {
 // the test and the one the call sent, and what to do.
 //
 // closest is the recording the problem names (nil: not in the pool).
-func variableMismatchReport(request *http.Request, liveBody []byte, dest string, diag *matchDiag, httpMocks []*models.Mock, table *variables.Table) (*models.MockMismatchReport, redactedPlaces) {
+func variableMismatchReport(request *http.Request, liveBody []byte, dest string, diag *matchDiag, httpMocks []*models.Mock, mockDb integrations.MockMemDb) (*models.MockMismatchReport, redactedPlaces) {
+	table := variableTable(mockDb)
 	p := diag.variable
 	var diffs []models.MockFieldDiff
 	if p.place != "" && p.kind != "" {
@@ -1689,7 +1690,7 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest string,
 	// Redacted by every recording's places (poolPlaces), the closest's
 	// among them when it is still in the pool. The summary names the path
 	// escaped (buildHTTPMismatchReport).
-	places := poolPlaces(closest, pool, request.URL.EscapedPath())
+	places := heldPlaces(mockDb, closest, pool, request.URL.EscapedPath())
 	redactFieldDiffs(diffs, places, request.URL.EscapedPath())
 	actualKey := places.escapedSummary(request.Method, request.URL.EscapedPath())
 	b := mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).

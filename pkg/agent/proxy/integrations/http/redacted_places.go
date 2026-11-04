@@ -19,6 +19,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/templates"
@@ -249,6 +250,24 @@ func poolPlaces(closest *models.Mock, pool []*models.Mock, livePath string) reda
 		p.add(q, q.pathSegs == n)
 	}
 	return p
+}
+
+// heldPlaces are the places a miss of a call to livePath (escaped) and its
+// logs are redacted by: poolPlaces of pool and closest, with the test set's
+// recordings that answered a call and redacted something
+// (integrations.AnsweredRedacting): a read of the pool no longer holds a
+// per-test recording once it answered, while a call that repeats it carries
+// the secret it redacted again. Every place (unreadPlaces) when the store
+// did not keep them all.
+func heldPlaces(mockDb integrations.MockMemDb, closest *models.Mock, pool []*models.Mock, livePath string) redactedPlaces {
+	answered, complete := integrations.AnsweredRedacting(mockDb, models.HTTP)
+	if !complete {
+		return unreadPlaces()
+	}
+	if len(answered) > 0 {
+		pool = append(pool[:len(pool):len(pool)], answered...)
+	}
+	return poolPlaces(closest, pool, livePath)
 }
 
 // unreadPlaces are the places of a pool that cannot be read: any place may

@@ -37,7 +37,21 @@ type answeredLog struct {
 	// set is the test set generation (MockManager.setGen) whose answers the
 	// log holds, moved by fence.
 	set uint64
+	// redacting holds, apart from the keyed entries and their bounds, every
+	// recording noted that holds a pattern (Mock.Noise: the obfuscator
+	// redacted something in it), once a name, in the order noted
+	// (AnsweredRedacting); redactingNames are their names and redactingBytes
+	// their sizes (answeredSize). One that would pass redactingMaxBytes is
+	// not kept, and its kind is marked in redactingLost.
+	redacting      []*models.Mock
+	redactingNames map[string]bool
+	redactingBytes int
+	redactingLost  map[models.Kind]bool
 }
+
+// redactingMaxBytes bounds what the log keeps of a test set's answered
+// recordings that hold a pattern (answeredLog.redacting).
+const redactingMaxBytes = 16 << 20
 
 // answeredEntry is one recording that answered, and when.
 type answeredEntry struct {
@@ -62,22 +76,29 @@ const (
 // nor one an earlier test set's staging pooled (TestModeInfo.StagedSet):
 // a consume of it is no answer of this set (errPreviousSet), however late
 // after the fence the parser that held it gets here.
+//
+// A recording that holds a pattern is kept apart too, whatever its keys and
+// size, under redactingMaxBytes alone (keepRedacting).
 func (l *answeredLog) note(mk *models.Mock, at time.Time) {
 	if mk == nil || mk.Name == "" {
 		return
 	}
 	keys := models.RequestKeys(mk)
-	if len(keys) == 0 {
+	redacts := len(mk.Noise) > 0
+	if len(keys) == 0 && !redacts {
 		return
 	}
 	probe := answeredProbe(mk)
 	size := answeredSize(probe, keys)
-	if size > answeredMaxEntryBytes {
-		return
-	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if g := mk.TestModeInfo.StagedSet; g != 0 && g != l.set {
+		return
+	}
+	if redacts {
+		l.keepRedacting(probe, size)
+	}
+	if len(keys) == 0 || size > answeredMaxEntryBytes {
 		return
 	}
 	if l.byKey == nil {
@@ -100,6 +121,48 @@ func (l *answeredLog) note(mk *models.Mock, at time.Time) {
 		l.evictOldest()
 	}
 	l.compact()
+}
+
+// keepRedacting keeps probe, of a recording that holds a pattern, once a
+// name: one that would pass redactingMaxBytes is not kept, and its kind is
+// marked lost (redactingOf). Caller holds mu.
+func (l *answeredLog) keepRedacting(probe *models.Mock, size int) {
+	if l.redactingNames[probe.Name] {
+		return
+	}
+	if l.redactingBytes+size > redactingMaxBytes {
+		if l.redactingLost == nil {
+			l.redactingLost = map[models.Kind]bool{}
+		}
+		l.redactingLost[probe.Kind] = true
+		return
+	}
+	if l.redactingNames == nil {
+		l.redactingNames = map[string]bool{}
+	}
+	l.redactingNames[probe.Name] = true
+	l.redacting = append(l.redacting, probe)
+	l.redactingBytes += size
+}
+
+// redactingOf is what the log kept of the recordings of kind that answered
+// and hold a pattern, and whether it kept every one noted.
+func (l *answeredLog) redactingOf(kind models.Kind) ([]*models.Mock, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []*models.Mock
+	for _, m := range l.redacting {
+		if m.Kind == kind {
+			out = append(out, m)
+		}
+	}
+	return out, !l.redactingLost[kind]
+}
+
+// forgetRedacting empties what the log keeps apart (keepRedacting). Caller
+// holds mu.
+func (l *answeredLog) forgetRedacting() {
+	l.redacting, l.redactingNames, l.redactingBytes, l.redactingLost = nil, nil, 0, nil
 }
 
 // unref takes e out of one key's list; out of its last, it is dropped.
@@ -188,6 +251,7 @@ func (l *answeredLog) reset() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.byKey, l.queue, l.live, l.bytes = nil, nil, 0, 0
+	l.forgetRedacting()
 }
 
 // fence empties the log for the test set of generation set, which from now
@@ -198,6 +262,7 @@ func (l *answeredLog) fence(set uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.byKey, l.queue, l.live, l.bytes = nil, nil, 0, 0
+	l.forgetRedacting()
 	l.set = set
 }
 
@@ -298,6 +363,16 @@ func reachableBytes(v reflect.Value, depth int) int {
 func (m *MockManager) noteAnswered(mk models.Mock) {
 	m.answered.note(&mk, time.Now())
 }
+
+// AnsweredRedacting implements integrations.AnsweredRedactingReader: of the
+// test set staged now, every per-test recording of kind that answered a call
+// and holds a pattern, as the answered log keeps it (answeredProbe), and
+// whether the log kept every one (redactingMaxBytes).
+func (m *MockManager) AnsweredRedacting(kind models.Kind) ([]*models.Mock, bool) {
+	return m.answered.redactingOf(kind)
+}
+
+var _ integrations.AnsweredRedactingReader = (*MockManager)(nil)
 
 // FindAnsweredEarlier implements integrations.AnsweredFinder: of the per-test
 // recordings of kind that answered a call earlier in this test set, under any

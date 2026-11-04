@@ -114,7 +114,7 @@ func (c VariableCall) req() *req {
 func (h *HTTP) VariableMatch(ctx context.Context, scope VariableScope, call VariableCall, noise RequestNoise, pool []*models.Mock, mockDb integrations.MockMemDb, consume func(*models.Mock) bool, written func(*models.Mock) *models.Mock) (VariableResult, error) {
 	res, problem, err := h.variableMatch(ctx, scope, call, noise, pool, mockDb, consume, written)
 	if problem != nil {
-		res.Problem = problem.diffAt(poolPlaces(namedIn(pool, problem.mock), pool, call.URL.EscapedPath()))
+		res.Problem = problem.diffAt(heldPlaces(mockDb, namedIn(pool, problem.mock), pool, call.URL.EscapedPath()))
 	}
 	return res, err
 }
