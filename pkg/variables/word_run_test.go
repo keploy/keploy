@@ -284,7 +284,8 @@ func TestTable_OneUUIDWhereTwoWereRecordedBesideAnAdjacentBoundUUIDIsRefused(t *
 }
 
 // A run's value spans: the shortest stretch around a word that its mock
-// holds whole elsewhere, else the words no such stretch covers. With no
+// holds whole elsewhere and that holds no shorter such stretch, else the
+// words no such stretch covers. With no
 // evidence, or a recorded text that does not hold the run's words, a word is
 // its own span.
 func TestWordRuns_AStretchItsMockHoldsElsewhereIsAValueOfItsOwn(t *testing.T) {
@@ -306,7 +307,16 @@ func TestWordRuns_AStretchItsMockHoldsElsewhereIsAValueOfItsOwn(t *testing.T) {
 		{"nothing held elsewhere: the run whole", cid + "/3", heldNowhere, []string{"c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@0", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@1", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@2", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@3", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@4", "c9bf9e57-1685-4c89-bafb-ff5af830be8a-3@5"}},
 		{"the cid held elsewhere: the word beside it alone", cid + "/3", heldAt(cid), []string{cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4", "3@0"}},
 		{"the cid held elsewhere: the appId's words", cid + "/" + app, heldAt(cid), []string{cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4", app + "@0", app + "@1", app + "@2", app + "@3", app + "@4"}},
-		{"the shortest stretch held", cid + "/" + app, heldAt(cid+"/"+app, app), []string{cid + "-" + app + "@0", cid + "-" + app + "@1", cid + "-" + app + "@2", cid + "-" + app + "@3", cid + "-" + app + "@4", app + "@0", app + "@1", app + "@2", app + "@3", app + "@4"}},
+		// The whole held beside the appId is two values: the cid's words are
+		// the ones the appId leaves.
+		{"a stretch holding a shorter held one is two values", cid + "/" + app, heldAt(cid+"/"+app, app), []string{cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4", app + "@0", app + "@1", app + "@2", app + "@3", app + "@4"}},
+		{"the shortest stretch held", "ab/cd/ef/gh", heldAt("ab/cd", "cd/ef/gh"), []string{"ab-cd@0", "ab-cd@1", "cd-ef-gh@1", "cd-ef-gh@2"}},
+		// A held stretch inside the whole, at its end, its start or apart
+		// from the end words, makes the whole two values.
+		{"the whole held beside the cid after it", "3/" + cid, heldAt(cid, "3/"+cid), []string{"3@0", cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4"}},
+		{"the whole held beside the cid before it", cid + "/3", heldAt(cid, cid+"/3"), []string{cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4", "3@0"}},
+		{"the whole held beside the cid after two words", "x/y/" + cid, heldAt(cid, "x/y/"+cid), []string{"x-y@0", "x-y@1", cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4"}},
+		{"the whole held beside the cid before two words", cid + "/x/y", heldAt(cid, cid+"/x/y"), []string{cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4", "x-y@0", "x-y@1"}},
 		{"no evidence: each word alone", "ab/3", nil, []string{"ab@0", "3@0"}},
 		{"the cid held elsewhere: the word before it alone", "3/" + cid, heldAt(cid), []string{"3@0", cid + "@0", cid + "@1", cid + "@2", cid + "@3", cid + "@4"}},
 		{"a run longer than spans are read in: each word alone", strings.Repeat("ab/", maxSpanRun) + "3", heldNowhere, []string{"ab@0", "ab@0"}},
@@ -382,7 +392,14 @@ func TestTable_OneWordBesideAnotherHeldValueIsItsOwnValue(t *testing.T) {
 	for _, x := range []struct {
 		name   string
 		kh, ch func(string) bool
-	}{{"both mocks hold their UUID", heldAt(recB), heldAt(recD)}, {"only the first", heldAt(recB), heldNowhere}, {"only the second", heldNowhere, heldAt(recD)}} {
+	}{
+		{"both mocks hold their UUID", heldAt(recB), heldAt(recD)},
+		{"only the first", heldAt(recB), heldNowhere},
+		{"only the second", heldNowhere, heldAt(recD)},
+		// The whole text held too ("<B>/3" in a field of its own beside
+		// "<B>") is two values, never one: "3" stays its own.
+		{"both mocks hold their UUID and their whole text", heldAt(recB, recB+"/3"), heldAt(recD, recD+"/5")},
+	} {
 		if bind(append(k(x.kh), c(x.ch)...)) {
 			t.Errorf("%s, in one call: \"<P>/7\" and \"<Q>/7\" bound where \"<B>/3\" and \"<D>/5\" were recorded", x.name)
 		}
@@ -398,5 +415,16 @@ func TestTable_OneWordBesideAnotherHeldValueIsItsOwnValue(t *testing.T) {
 	copied := textBindsHeld(t, heldAt(recD, recC), [4]string{"body.k2", "c", liveQ + "/" + liveX, recD + "/" + recC})
 	if bind(a, copied) {
 		t.Errorf("one appId beside two cids held elsewhere, where two were recorded, bound")
+	}
+	// The whole marker held as well changes neither: the cid and the appId
+	// stay two values.
+	aw := textBindsHeld(t, heldAt(recB, recA, recB+"/"+recA), [4]string{"body.k1", "k", liveP + "/" + liveX, recB + "/" + recA})
+	bw := textBindsHeld(t, heldAt(recD, recC, recD+"/"+recC), [4]string{"body.k2", "c", liveQ + "/" + liveZ, recD + "/" + recC})
+	cw := textBindsHeld(t, heldAt(recD, recC, recD+"/"+recC), [4]string{"body.k2", "c", liveQ + "/" + liveX, recD + "/" + recC})
+	if !bind(aw, bw) {
+		t.Errorf("two appIds beside cids, each held elsewhere and the whole marker too, a group equal by chance, did not bind")
+	}
+	if bind(aw, cw) {
+		t.Errorf("one appId beside two cids, each held elsewhere and the whole marker too, where two were recorded, bound")
 	}
 }
