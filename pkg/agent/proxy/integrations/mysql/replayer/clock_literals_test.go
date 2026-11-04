@@ -139,6 +139,51 @@ func TestALiteralLearnedAsAClockReadIsCheckedAsOne(t *testing.T) {
 	}
 }
 
+// A recording whose statement holds two literals the learn step learned as
+// reads of the application's clock leaves both out of the exact compare and
+// checks each as one: a statement with a read of its call's span at both is
+// answered, and one whose read at either lies outside the span is refused,
+// the miss naming that literal.
+func TestEveryLiteralLearnedAsAClockReadIsCheckedAsOne(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const twoClocksSQL = "SELECT name FROM tabNote WHERE owner = 'a@x.io' AND expire_notification_on > '%s' AND starts_on < '%s'"
+	twoClocks := func(first, second string) string {
+		return strings.Replace(strings.Replace(twoClocksSQL, "%s", first, 1), "%s", second, 1)
+	}
+	recAt := diffBase.Add(time.Millisecond)
+	f := newClockRun(time.Now().UTC().Add(-time.Minute))
+	_, o := recordedClock(t, recAt, f, f.read().Format(literalForm))
+	later := newClockRun(time.Now().UTC())
+	recLit := recAt.Add(-1300 * time.Microsecond).Format(literalForm)
+	in, early := later.read().Format(literalForm), later.read().Add(-time.Hour).Format(literalForm)
+	for _, tc := range []struct {
+		name, first, second string
+		served              bool
+		mention             string
+	}{
+		{"both reads in the call's span", in, in, true, ""},
+		{"the first read an hour before the span", early, in, false, "body.query.literals.1"},
+		{"the second read an hour before the span", in, early, false, "body.query.literals.2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := diffMock("mock-note", "c1", []mysql.Request{queryReq(twoClocks(recLit, recLit))}, recAt, models.LifetimePerTest, "mocks")
+			m.Spec.Clocks = map[string]models.ClockOffset{"body.query.literals.1": o, "body.query.literals.2": o}
+			mm := stageOwn(t, []*models.Mock{m}, []*models.Mock{m}, true)
+			_, dctx := poolConn("c1")
+			_, ok, miss, err := replayer.MatchCommandForTest(later.ctx(false), zap.NewNop(), queryReq(twoClocks(tc.first, tc.second)), mm, dctx, nil, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok != tc.served {
+				t.Fatalf("served %v (miss %s); want %v", ok, miss, tc.served)
+			}
+			if tc.mention != "" && (!strings.Contains(miss, tc.mention) || !strings.Contains(miss, "matchPhase:strict_noise_reject")) {
+				t.Fatalf("the miss (%s) does not name %s, rejected by strict comparison", miss, tc.mention)
+			}
+		})
+	}
+}
+
 // A miss that turned recordings away at literals learned as reads of the
 // application's clock gives the reason of the recording it names the
 // closest: of two recordings of the statement, each refused for its own
