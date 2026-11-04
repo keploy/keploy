@@ -64,11 +64,35 @@ func TestBuilder_StructuralChangeNextSteps(t *testing.T) {
 func TestBuilder_FieldDiffCap(t *testing.T) {
 	diffs := make([]models.MockFieldDiff, maxFieldDiffs+10)
 	for i := range diffs {
-		diffs[i] = models.MockFieldDiff{Path: "body.x", Kind: models.DiffKindValueChanged}
+		diffs[i] = models.MockFieldDiff{Path: fmt.Sprintf("body.x%d", i), Kind: models.DiffKindValueChanged}
 	}
 	report := NewReport(ProtocolHTTP, "GET /a").WithClosest("m", diffs).Build()
 	if len(report.FieldDiffs) != maxFieldDiffs {
 		t.Errorf("expected diff cap %d, got %d", maxFieldDiffs, len(report.FieldDiffs))
+	}
+}
+
+// A report carries a field's diff once however many of its places differ
+// alike (diffs of one path and kind, an array's elements by the array's
+// shape), at its first place, in the diffs' order: they count once against
+// the cut (TestTheHintStaysSmallHoweverManyValuesMiss: the hint still
+// offers the widen). Diffs of one path and two kinds are two.
+func TestBuilderFoldsTheDiffsOfOneName(t *testing.T) {
+	drift := func(path, expected string) models.MockFieldDiff {
+		return models.MockFieldDiff{Path: path, Kind: models.DiffKindValueChanged, Expected: expected, Actual: "x"}
+	}
+	gone := models.MockFieldDiff{Path: "body.ids[]", Kind: models.DiffKindMissingInLive, Expected: "9"}
+	var diffs []models.MockFieldDiff
+	for i := 0; i < 3000; i++ {
+		diffs = append(diffs, drift("body.ids[]", fmt.Sprint(i)))
+	}
+	diffs = append(diffs, drift("body.a", "a"), gone, drift("body.ids[]", "late"), gone)
+	r := NewReport(ProtocolHTTP, "POST /x").WithClosest("m", diffs).Build()
+	if want := []models.MockFieldDiff{drift("body.ids[]", "0"), drift("body.a", "a"), gone}; !slices.Equal(r.FieldDiffs, want) {
+		t.Errorf("field diffs %+v; want %+v", r.FieldDiffs, want)
+	}
+	if few := []models.MockFieldDiff{drift("body.a", "a"), drift("body.b", "b")}; !slices.Equal(foldDiffs(few), few) || foldDiffs(nil) != nil {
+		t.Errorf("foldDiffs changed diffs that do not repeat")
 	}
 }
 

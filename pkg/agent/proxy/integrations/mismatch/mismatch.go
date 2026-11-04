@@ -67,9 +67,10 @@ type Builder struct {
 	// check in Build(). nil means "the question is undecidable" — see
 	// WithComparedDestinations.
 	comparedDests []string
-	// diffs are every field diff WithClosest was given. The report carries
-	// at most maxFieldDiffs of them; the hint reads them all, so that a
-	// difference past the cut still decides what it offers.
+	// diffs are every field diff WithClosest was given, each path and kind
+	// once (foldDiffs). The report carries at most maxFieldDiffs of them;
+	// the hint reads them all, so that a difference past the cut still
+	// decides what it offers.
 	diffs []models.MockFieldDiff
 	// noise is what the parser knows of keploy.yml's noise for the
 	// report's fields (WithGuarded, WithoutNoise).
@@ -345,12 +346,16 @@ func (b *Builder) WithPhase(phase string, candidateCount int) *Builder {
 	return b
 }
 
-// WithClosest attaches the nearest candidate and its field-level diffs. The
+// WithClosest attaches the nearest candidate and its field-level diffs,
+// each path and kind once (foldDiffs): the places of one field a parser
+// names alike (an array's elements, by the array's shape) are one diff, so
+// they count once against the cut and the hint names the field once. The
 // report carries at most maxFieldDiffs of them: when it cuts them, those that
 // can be why the call missed (causes) first, each in its order. The hint
 // reads them all.
 func (b *Builder) WithClosest(mockName string, diffs []models.MockFieldDiff) *Builder {
 	b.report.ClosestMock = mockName
+	diffs = foldDiffs(diffs)
 	b.diffs = diffs
 	if len(diffs) > maxFieldDiffs {
 		// A copy, so the report does not keep every diff alive.
@@ -358,6 +363,24 @@ func (b *Builder) WithClosest(mockName string, diffs []models.MockFieldDiff) *Bu
 	}
 	b.report.FieldDiffs = diffs
 	return b
+}
+
+// foldDiffs is diffs with each path and kind once, at its first place, in
+// diffs' order: a diff of a path and kind an earlier one has is dropped.
+func foldDiffs(diffs []models.MockFieldDiff) []models.MockFieldDiff {
+	type name struct {
+		path string
+		kind models.MockFieldDiffKind
+	}
+	seen := make(map[name]bool, len(diffs))
+	out := diffs[:0:0]
+	for _, d := range diffs {
+		if n := (name{d.Path, d.Kind}); !seen[n] {
+			seen[n] = true
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // WithGuarded names the fields of the diffs that keploy.yml's noise already
