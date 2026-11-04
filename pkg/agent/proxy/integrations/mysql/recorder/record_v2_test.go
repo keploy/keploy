@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,6 +35,15 @@ import (
 func postTLSCtxWithStore(store *models.TLSHandshakeStore) context.Context {
 	ctx := context.WithValue(context.Background(), models.PostTLSModeKey, true)
 	return context.WithValue(ctx, models.TLSHandshakeStoreKey, store)
+}
+
+// countStashWaits returns ctx carrying a postTLSStashWaitHookKey hook that
+// counts the recorder's waits on the port's queue (every take with a non-zero
+// wait), and the count. A row reads it to prove by event, not by how long the
+// recording took, that a connection waited or did not.
+func countStashWaits(ctx context.Context) (context.Context, *atomic.Int32) {
+	n := new(atomic.Int32)
+	return context.WithValue(ctx, postTLSStashWaitHookKey{}, func() { n.Add(1) }), n
 }
 
 // collectPostTLSMocks drives RecordV2 under ctx and collects want mocks, with
@@ -69,7 +79,8 @@ func collectPostTLSMocksSeen(t *testing.T, h *v2Harness, ctx context.Context, wa
 				h.closeStreams()
 			}
 		case <-time.After(patience):
-			t.Fatalf("timed out waiting for mocks (got %d, want %d)", len(got), want)
+			t.Fatalf("timed out waiting for mocks: none in %v (got %d, want %d); the patience only stops "+
+				"a hung recording, it is not a timing check", patience, len(got), want)
 		}
 	}
 	if err := <-done; err != nil {
@@ -80,10 +91,10 @@ func collectPostTLSMocksSeen(t *testing.T, h *v2Harness, ctx context.Context, wa
 
 // TestRecordV2_PostTLS_LateStash_StillRecords is the permanent regression test
 // for the 5s cliff: the raw leg's greeting+SSLRequest push lands 6s after the
-// recorder began waiting for it — past the old PopWait(5s)+fallback(2s) budget
-// that aborted the connection ("no greeting in store" → ECONNREFUSED on the
-// fabricated dial → command phase never reached). With the ctx/TTL-bounded
-// wait, lateness within the store TTL must yield a complete recording.
+// recorder began waiting for it — past the old 5s pop that aborted the
+// connection ("no greeting in store" → ECONNREFUSED on the fabricated dial →
+// command phase never reached). With the ctx/TTL-bounded wait, lateness
+// within the store TTL must yield a complete recording.
 //
 // The row orders its events, not its clock readings: the push waits for the
 // recorder to block on the queue (postTLSStashWaitHookKey), then lateBy more,
@@ -309,25 +320,29 @@ func TestRecordV2_PostTLS_LostStash_FabricatedDest_NoDialCleanAbort(t *testing.T
 }
 
 // TestResolvePreTLSGreeting_CtxCancelUnblocks pins one half of the wait bound:
-// teardown (ctx cancellation) must unblock the wait promptly even though the
-// overall budget is 30s and no greeting is cached (so the loop is in its
-// extended no-cache wait).
+// teardown (ctx cancellation) must end the wait within the poll slice it is in,
+// even though the overall budget is 30s and no greeting is cached (so the loop
+// is in its extended no-cache wait). The ctx is cancelled by the wait hook as
+// the recorder begins its first slice, so the row counts slices rather than
+// timing the call: one that honours the cancel waits that slice and no other.
 func TestResolvePreTLSGreeting_CtxCancelUnblocks(t *testing.T) {
 	store := models.NewTLSHandshakeStore()
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		cancel()
-	}()
+	defer cancel()
+	var waits atomic.Int32
+	ctx = context.WithValue(ctx, postTLSStashWaitHookKey{}, func() {
+		if waits.Add(1) == 1 {
+			cancel()
+		}
+	})
 
-	start := time.Now()
 	_, _, source := resolvePreTLSGreeting(ctx, store, models.HandshakeOwner{}, 3306, "", "", testDst("10.0.0.5:3306"), false)
-	elapsed := time.Since(start)
 	if source != greetingNone {
 		t.Fatalf("resolvePreTLSGreeting must return greetingNone on an empty store, got %v", source)
 	}
-	if elapsed > 3*time.Second {
-		t.Fatalf("returned after %v — ctx cancellation must cut the 30s bound short (poll slice is %v)", elapsed, mysqlPostTLSStashPollSlice)
+	if n := waits.Load(); n != 1 {
+		t.Fatalf("waited %d slices of %v on the queue, cancelled as the first began; ctx cancellation must "+
+			"end the wait within that slice, not run on to the 30s bound", n, mysqlPostTLSStashPollSlice)
 	}
 }
 
@@ -336,9 +351,9 @@ func TestResolvePreTLSGreeting_CtxCancelUnblocks(t *testing.T) {
 // cached greeting must fall back to that cache at the SHORT primary bound, NOT
 // after the full (large) overall bound — otherwise the stall pushes the
 // COM_QUERY decode past the CI (2a) 30s gate. Here the overall bound stays at
-// its 30s default while the primary bound is shortened to 200ms; the cache hit
-// must land near 200ms, far below both the overall bound and any plausible
-// gate.
+// its 30s default while the primary bound is shortened to 200ms; the cache must
+// answer once that bound is past, after at most the one wait the bound cuts
+// short. The row counts those waits (the hook) instead of timing the call.
 func TestResolvePreTLSGreeting_DroppedLegHitsCacheAtPrimaryBound(t *testing.T) {
 	// Shorten only the PRIMARY bound; leave the overall (30s default) alone so
 	// the test proves the fast path returns at primary, not overall. t.Setenv
@@ -354,19 +369,21 @@ func TestResolvePreTLSGreeting_DroppedLegHitsCacheAtPrimaryBound(t *testing.T) {
 		ReqTimestamp: time.Now(),
 	})
 
-	start := time.Now()
-	entry, _, source := resolvePreTLSGreeting(context.Background(), store, models.HandshakeOwner{}, 3306, "", "", testDst("10.0.0.5:3306"), false)
-	elapsed := time.Since(start)
+	ctx, waits := countStashWaits(context.Background())
+	entry, _, source := resolvePreTLSGreeting(ctx, store, models.HandshakeOwner{}, 3306, "", "", testDst("10.0.0.5:3306"), false)
 	if source != greetingCached {
 		t.Fatalf("source = %v, want greetingCached (the dropped-leg cache fallback)", source)
 	}
 	if len(entry.RespPackets) != 1 {
 		t.Fatalf("cached entry not returned: %+v", entry)
 	}
-	// Must land at ~the 200ms primary bound, decisively below the 30s overall
-	// bound. 5s is a generous ceiling that still proves it did not wait overall.
-	if elapsed > 5*time.Second {
-		t.Fatalf("cache fallback took %v — it must fire at the primary bound (200ms), not the 30s overall bound", elapsed)
+	// The first wait is cut at the primary bound and a wait never ends before
+	// its time is up, so the next pass is past the bound and takes the cache:
+	// one wait, or none if the loop was first reached past the bound. Waiting
+	// out the 30s overall bound is some 60 waits of one poll slice each.
+	if n := waits.Load(); n > 1 {
+		t.Fatalf("the cache answered after %d waits on the queue; it must answer at the primary bound "+
+			"(200ms, one wait), not after the 30s overall bound", n)
 	}
 }
 
@@ -1515,11 +1532,13 @@ func TestRecordV2_PostTLS_PooledConnRecordsPromptlyWithDefaultStashWait(t *testi
 			h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), base)
 			h.pushDest(cannedOK(t, 1, greeting.CapabilityFlags), base.Add(time.Millisecond))
 
-			start := time.Now()
-			got := collectPostTLSMocks(t, h, postTLSCtxWithStore(store), 2, 10*time.Second)
-			if elapsed := time.Since(start); elapsed > 3*time.Second {
-				t.Fatalf("the pooled connection's command took %v to record; it waited for a greeting "+
-					"that cannot come (stash wait %v)", elapsed, mysqlPostTLSStashWait())
+			ctx, waits := countStashWaits(postTLSCtxWithStore(store))
+			// 45s only stops a hung recording: one that waited out the 30s
+			// stash bound still records, and the count below says it waited.
+			got := collectPostTLSMocks(t, h, ctx, 2, 45*time.Second)
+			if n := waits.Load(); n != 0 {
+				t.Fatalf("the pooled connection waited %d times on the port's queue for a greeting "+
+					"that cannot come (stash wait %v)", n, mysqlPostTLSStashWait())
 			}
 			if got[0].Name != "config" {
 				t.Fatalf("first mock = %q, want config", got[0].Name)
@@ -1623,10 +1642,12 @@ func TestRecordV2_PostTLS_JoinedConnTakesOnlyItsOwnEntry(t *testing.T) {
 		base := time.Now()
 		h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), base)
 		h.pushDest(cannedOK(t, 1, caps), base.Add(time.Millisecond))
-		start := time.Now()
-		got := collectPostTLSMocks(t, h, postTLSCtxWithStore(store), 2, 5*time.Second)
-		if d := time.Since(start); d > 3*time.Second {
-			t.Fatalf("the joined connection took %v; it waited", d)
+		ctx, waits := countStashWaits(postTLSCtxWithStore(store))
+		// 45s only stops a hung recording: one that waited out the 30s stash
+		// bound still records, and the count below says it waited.
+		got := collectPostTLSMocks(t, h, ctx, 2, 45*time.Second)
+		if n := waits.Load(); n != 0 {
+			t.Fatalf("the joined connection waited %d times on the port's queue", n)
 		}
 		if got[0].Name != "config" {
 			t.Fatalf("first mock = %q, want config", got[0].Name)
@@ -1812,13 +1833,13 @@ func TestResolvePreTLSGreeting_JoinedConnTakesItsOwnEntry(t *testing.T) {
 	store.PushFor(portKey, models.HandshakeOwner{Conn: "conn-B", Proc: "p1"}, models.TLSHandshakeEntry{RespPackets: [][]byte{{0x0a, 's'}}})
 	store.PushFor(portKey, connA, models.TLSHandshakeEntry{RespPackets: [][]byte{{0x0a, 'o'}}})
 
-	start := time.Now()
-	entry, _, source := resolvePreTLSGreeting(context.Background(), store, connA, 3306, "", "", testDst("10.0.0.5:3306"), true)
+	ctx, waits := countStashWaits(context.Background())
+	entry, _, source := resolvePreTLSGreeting(ctx, store, connA, 3306, "", "", testDst("10.0.0.5:3306"), true)
 	if source != greetingOwn || len(entry.RespPackets) != 1 || entry.RespPackets[0][1] != 'o' {
 		t.Fatalf("got %v from source %v, want the own entry", entry, source)
 	}
-	if d := time.Since(start); d > time.Second {
-		t.Fatalf("a joined connection waited %v", d)
+	if n := waits.Load(); n != 0 {
+		t.Fatalf("a joined connection waited %d times on the port's queue", n)
 	}
 	if e, ok := store.PopWait(portKey, 0); !ok || e.RespPackets[0][1] != 's' {
 		t.Fatalf("port queue head = %v (%v), want the other connection's entry untouched", e, ok)
