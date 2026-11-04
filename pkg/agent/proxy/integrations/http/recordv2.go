@@ -569,10 +569,15 @@ func endJudgesAfterCtx(sess *supervisor.Session) bool {
 // before the response did, as the relay saw the connection end, or nil: the
 // destination reset the connection (FaultReset after the head) or closed it
 // (FaultTruncate), or the client closed first, the upstream silent, and gave
-// up on the rest (FaultTimeout after the head, or with no answer where resp,
-// the response read, has no whole head as messageHead frames it: a head cut
-// short is no answer to the application's HTTP client, which gave up waiting
-// for one, and no answer to record). Where the client closed while
+// up on the rest (FaultTimeout after the head). Where resp, the response
+// read, has no whole head as messageHead frames it, the fault is one with no
+// answer, whichever side's end it is: a head cut short is no answer to the
+// application's HTTP client, and no answer to record. The application gave up
+// waiting for one (FaultTimeout), or the destination reset the connection
+// (FaultReset) or closed it (FaultEOF) partway through its head, on any
+// request of the connection: bytes of an answer came, so it was not the
+// keep-alive idle-close race noAnswerFault leaves to the client's retry.
+// Where the client closed while
 // the destination still sent (Session.EndedWhereClientStopped), or its end came
 // first and records no fault (partAnswerLeftOut), the exchange is left out
 // before this is asked. The upstream's end read once the recording's stop had
@@ -587,11 +592,18 @@ func partAnswerFault(sess *supervisor.Session, resp []byte) *models.Fault {
 	if !ok || sess.EndFollowedStop() {
 		return nil
 	}
+	_, _, _, headWhole := messageHead(resp, true)
 	if first == fakeconn.FromClient {
-		if _, _, _, whole := messageHead(resp, true); !whole {
+		if !headWhole {
 			return &models.Fault{Kind: models.FaultTimeout, Observed: "the application closed the connection before the answer's head arrived whole"}
 		}
 		return &models.Fault{Kind: models.FaultTimeout, AfterHead: true, Observed: "the application closed the connection partway through the answer"}
+	}
+	if !headWhole {
+		if sess.PeerEnded(fakeconn.FromDest) == supervisor.PeerReset {
+			return &models.Fault{Kind: models.FaultReset, Observed: "the upstream reset the connection before the answer's head arrived whole"}
+		}
+		return &models.Fault{Kind: models.FaultEOF, Observed: "the upstream closed the connection before the answer's head arrived whole"}
 	}
 	if sess.PeerEnded(fakeconn.FromDest) == supervisor.PeerReset {
 		return &models.Fault{Kind: models.FaultReset, AfterHead: true, Observed: "the upstream reset the connection partway through the answer"}

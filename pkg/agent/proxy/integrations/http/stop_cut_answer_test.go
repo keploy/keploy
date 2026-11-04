@@ -1294,3 +1294,89 @@ func TestRecordV2_AWholeAnswerReadAfterTheClientsEndIsRecorded(t *testing.T) {
 		}
 	}
 }
+
+// The upstream's end partway through the response's head, before the
+// recording's stop or with none: an answer whose head never arrived whole is
+// no answer to the application's HTTP client, so the call is recorded with
+// the upstream's reset or close and no answer (FaultReset, FaultEOF), as the
+// application's giving up there is recorded with its timeout and no answer.
+// Read at the stream's end, at the stop's abort's close after it, or with the
+// parser's context ending after it; on the connection's first request and on
+// a later one (bytes of an answer came, so it is not the keep-alive
+// idle-close race). Never a response that does not decode, with an ERROR.
+func TestRecordV2_TheUpstreamsEndInTheHeadIsAFaultWithNoAnswer(t *testing.T) {
+	const part, more = "HTTP/1.1 200 OK\r\nContent-Le", "ngth: 5\r\n"
+	const whole = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+	ends := []struct {
+		name  string
+		reset bool
+		want  models.Fault
+	}{
+		{"closed", false, models.Fault{Kind: models.FaultEOF}},
+		{"reset", true, models.Fault{Kind: models.FaultReset}},
+	}
+	end := func(t *testing.T, c *relayedConn, reset bool) {
+		if reset {
+			resetConn(t, c.dest)
+		} else {
+			_ = c.dest.Close()
+		}
+		awaitPeerEnd(t, c, fakeconn.FromDest)
+	}
+	check := func(t *testing.T, c *relayedConn, mocks []*models.Mock, err error, want models.Fault, n int) {
+		t.Helper()
+		if err != nil {
+			t.Errorf("recordV2 = %v, want nil: the upstream's end is a fault to record, not a decode error", err)
+		}
+		if got := errorsLogged(c); len(got) != 0 {
+			t.Errorf("logged %q at ERROR, want nothing", got)
+		}
+		if got := leftOutReasons(c); len(got) != 0 {
+			t.Errorf("left out for %q, want the call recorded with the upstream's end", got)
+		}
+		if len(mocks) != n {
+			t.Fatalf("recorded %d mocks, want %d", len(mocks), n)
+		}
+		for _, m := range mocks[:n-1] {
+			if m.Spec.Fault != nil || m.Spec.HTTPResp == nil || m.Spec.HTTPResp.Body != "ok" {
+				t.Errorf("recorded the earlier call as %+v with the fault %v, want its whole answer", m.Spec.HTTPResp, m.Spec.Fault)
+			}
+		}
+		wantFault(t, mocks[n-1], want)
+	}
+	for _, proven := range []bool{false, true} {
+		for _, e := range ends {
+			for _, later := range []bool{false, true} {
+				name := e.name + map[bool]string{false: "", true: ", a later request"}[later] + ", the stream's end" + switchName[proven]
+				t.Run(name, func(t *testing.T) {
+					t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+					c := newRelayedConn(t)
+					c.start(t)
+					n := 1
+					if later {
+						write(t, c.app, c.src, faultReq)
+						relayed(t, c.dest, faultReq)
+						write(t, c.dest, c.dst, whole)
+						relayed(t, c.app, whole)
+						n = 2
+					}
+					write(t, c.app, c.src, faultReq)
+					relayed(t, c.dest, faultReq)
+					write(t, c.dest, c.dst, part)
+					relayed(t, c.app, part)
+					end(t, c, e.reset)
+					mocks, err := c.finish(t)
+					check(t, c, mocks, err, e.want, n)
+				})
+			}
+			for _, way := range []firstEndStop{theAbortsClose, theCtxThenTheAbort, theParsersCtx} {
+				t.Run(e.name+", "+way.String()+switchName[proven], func(t *testing.T) {
+					t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+					c := newRelayedConn(t)
+					_, _, mocks, err := firstEndThenStop(t, c, part, more, way, 1, func() { end(t, c, e.reset) })
+					check(t, c, mocks, err, e.want, 1)
+				})
+			}
+		}
+	}
+}
