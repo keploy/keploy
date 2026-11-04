@@ -272,3 +272,57 @@ func TestVariableMatch_AskTheWrittenAnswerBeforeTheTake(t *testing.T) {
 		t.Fatalf("the variable was not bound to the call's value: %+v %v", b, ok)
 	}
 }
+
+// Another parser's call that breaks a variable at a place a recording of
+// the pool redacted gets a why that shows the values there redacted, as an
+// HTTP miss report shows them: the value the call sent, and the variable's
+// value in the test, which an earlier live call sent. Redacted by the
+// recording the why names or by another of the pool; a pool that redacted
+// nothing there shows them.
+func TestVariableMatch_TheWhyShowsNoValueAtARedactedPlace(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, c := range []struct {
+		name string
+		// redacted: the recordings that declare the variable redacted its
+		// place; another: a recording of the pool beside them, which
+		// declares none, did.
+		redacted, another bool
+	}{{"redacted", true, false}, {"redacted-by-another-recording", false, true}, {"kept", false, false}} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHTTP()
+			rec := map[bool]string{true: "REDACTED_abc", false: "dedup-rec"}[c.redacted]
+			send := func(name string, vars models.MockVariables) *models.Mock {
+				m := sqsSend(name, rec, vars)
+				if c.redacted {
+					m.Noise = []string{`^REDACTED_abc$`}
+				}
+				return m
+			}
+			m := send("mock-1", models.MockVariables{"dedup": bindV(rec, "body.MessageDeduplicationId")})
+			db := &varDb{perTest: []*models.Mock{m}}
+			consume := func(x *models.Mock) bool { return db.DeleteFilteredMock(*x) }
+			ctx := context.Background()
+			if res, err := h.VariableMatch(ctx, ReadVariableScope(db), sqsCall(liveBound), sdkNoise(), []*models.Mock{m}, db, consume, nil); err != nil || res.Outcome != VariableServed {
+				t.Fatalf("the row is of a variable bound by a served call: %+v, %v", res, err)
+			}
+			pool := []*models.Mock{send("mock-2", models.MockVariables{"dedup": useV(rec, []string{"body.MessageDeduplicationId"})})}
+			if c.another {
+				other := sqsSend("mock-3", "REDACTED_xyz", nil)
+				other.Spec.HTTPReq.Body = strings.Replace(other.Spec.HTTPReq.Body, "order 1", "order 3", 1)
+				other.Noise = []string{`^REDACTED_xyz$`}
+				pool = append(pool, other)
+			}
+			res, err := h.VariableMatch(ctx, ReadVariableScope(db), sqsCall(liveSecret), sdkNoise(), pool, db, consume, nil)
+			if err != nil || res.Outcome != VariableExactOnly || !strings.Contains(res.Problem, "mock-2") {
+				t.Fatalf("the row is of a call breaking the bound variable, with why: %+v, %v", res, err)
+			}
+			if c.redacted || c.another {
+				if strings.Contains(res.Problem, liveSecret) || strings.Contains(res.Problem, liveBound) || !strings.Contains(res.Problem, valueRedacted) {
+					t.Errorf("the why shows a value at the place a recording redacted: %s", res.Problem)
+				}
+			} else if !strings.Contains(res.Problem, liveSecret) || !strings.Contains(res.Problem, liveBound) {
+				t.Errorf("the why does not show the values at a place no recording redacted: %s", res.Problem)
+			}
+		})
+	}
+}

@@ -1656,6 +1656,16 @@ func variableTable(mockDb integrations.MockMemDb) *variables.Table {
 	return nil
 }
 
+// namedIn is the HTTP recording of pool named name; nil when none is.
+func namedIn(pool []*models.Mock, name string) *models.Mock {
+	for _, m := range pool {
+		if m != nil && m.Name == name && m.Spec.HTTPReq != nil {
+			return m
+		}
+	}
+	return nil
+}
+
 // variableMismatchReport is the miss report of a call a recorded call fit
 // except for a test variable: the variable, the place, the value it has in
 // the test and the one the call sent, and what to do.
@@ -1675,13 +1685,7 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest string,
 	if pool == nil {
 		pool = httpMocks
 	}
-	var closest *models.Mock
-	for _, m := range pool {
-		if m != nil && m.Name == p.mock && m.Spec.HTTPReq != nil {
-			closest = m
-			break
-		}
-	}
+	closest := namedIn(pool, p.mock)
 	// Redacted by every recording's places (poolPlaces), the closest's
 	// among them when it is still in the pool. The summary names the path
 	// escaped (buildHTTPMismatchReport).

@@ -106,41 +106,56 @@ func (c VariableCall) req() *req {
 // written. ctx has the call's destination pinned (PinLiveDestination). With
 // the switch off nothing here runs: the outcome is VariableNone and Rest is
 // pool.
+//
+// Problem shows each value of the call it quotes at a place a recording of
+// pool redacted as valueRedacted, as an HTTP miss report shows it
+// (variableMismatchReport): the live value there is the secret the
+// recording hid.
 func (h *HTTP) VariableMatch(ctx context.Context, scope VariableScope, call VariableCall, noise RequestNoise, pool []*models.Mock, mockDb integrations.MockMemDb, consume func(*models.Mock) bool, written func(*models.Mock) *models.Mock) (VariableResult, error) {
+	res, problem, err := h.variableMatch(ctx, scope, call, noise, pool, mockDb, consume, written)
+	if problem != nil {
+		res.Problem = problem.diffAt(poolPlaces(namedIn(pool, problem.mock), pool, call.URL.EscapedPath()))
+	}
+	return res, err
+}
+
+// variableMatch is VariableMatch, with why the call was not served
+// (VariableExactOnly, VariableMiss) as the problem, not yet a text.
+func (h *HTTP) variableMatch(ctx context.Context, scope VariableScope, call VariableCall, noise RequestNoise, pool []*models.Mock, mockDb integrations.MockMemDb, consume func(*models.Mock) bool, written func(*models.Mock) *models.Mock) (VariableResult, *varProblem, error) {
 	if !provenswitch.On() {
-		return VariableResult{Outcome: VariableNone, Rest: pool}, nil
+		return VariableResult{Outcome: VariableNone, Rest: pool}, nil, nil
 	}
 	withVars, rest := splitVariableMocks(pool)
 	if len(withVars) == 0 {
-		return VariableResult{Outcome: VariableNone, Rest: rest}, nil
+		return VariableResult{Outcome: VariableNone, Rest: rest}, nil, nil
 	}
 	hits, problem, err := h.variablePass(ctx, call.req(), withVars, scope.s, noise.Header, noise.Body, noise.URL)
 	if err != nil {
-		return VariableResult{}, err
+		return VariableResult{}, nil, err
 	}
 	if len(hits) == 0 {
 		if problem != nil {
-			return VariableResult{Outcome: VariableExactOnly, Rest: rest, Problem: problem.diff()}, nil
+			return VariableResult{Outcome: VariableExactOnly, Rest: rest}, problem, nil
 		}
-		return VariableResult{Outcome: VariableNone, Rest: rest}, nil
+		return VariableResult{Outcome: VariableNone, Rest: rest}, nil, nil
 	}
 	hit, commitCursor, _ := h.pickHit(hits, nil, mockDb, false, nil)
 	served, problem, retry, err := h.serveVariablesBy(hit, mockDb, consume, written)
 	switch {
 	case err != nil:
-		return VariableResult{}, err
+		return VariableResult{}, nil, err
 	case retry:
-		return VariableResult{Outcome: VariableRetry}, nil
+		return VariableResult{Outcome: VariableRetry}, nil, nil
 	case problem != nil:
 		if scope.Moved() {
-			return VariableResult{Outcome: VariableRetry}, nil
+			return VariableResult{Outcome: VariableRetry}, nil, nil
 		}
-		return VariableResult{Outcome: VariableMiss, Problem: problem.diff()}, nil
+		return VariableResult{Outcome: VariableMiss}, problem, nil
 	}
 	if commitCursor != nil {
 		commitCursor()
 	}
-	return VariableResult{Outcome: VariableServed, Served: served}, nil
+	return VariableResult{Outcome: VariableServed, Served: served}, nil, nil
 }
 
 // StrictFits are the recordings of pool that are this very call under the
