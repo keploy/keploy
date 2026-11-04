@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -128,6 +129,153 @@ func mapAppErrorToTestSetStatus(appErr models.AppError) (models.TestSetStatus, b
 	default:
 		return models.TestSetStatusAppHalted, true
 	}
+}
+
+// neverReadyStatus is the status of a set whose wait for its application
+// ended without it ready, from the application's run's error (appErr, the
+// zero value when its run had not returned): the status its exit maps to,
+// and exited, when it exited; the user's stop otherwise (no error, or the
+// run's cancellation).
+func neverReadyStatus(appErr models.AppError) (status models.TestSetStatus, exited bool) {
+	status, exited = mapAppErrorToTestSetStatus(appErr)
+	if !exited || appErr == (models.AppError{}) {
+		return models.TestSetStatusUserAbort, false
+	}
+	return status, true
+}
+
+// stoppedSetStatus is the status of a set whose context ended before the
+// application keploy started for it exited (ctx is the run's, the set's
+// parent): when the exit of the application --keep-app-alive keeps across
+// the run's sets ended the run (keptAppExit), the status that exit maps to,
+// as for an application run per set, which it hands to setAppErr; else the
+// user's stop.
+func stoppedSetStatus(ctx context.Context, setAppErr func(models.AppError)) models.TestSetStatus {
+	exit := keptAppExit(ctx)
+	status, exited := neverReadyStatus(exit)
+	if exited {
+		setAppErr(exit)
+	}
+	return status
+}
+
+// keptAppExit is the exit of the application --keep-app-alive keeps across a
+// run's sets, when that exit is what ended ctx: Start runs it in the run's
+// errgroup, which cancels the run's context with the error the run returned
+// as the cause. The zero value when ctx has not ended, or ended for anything
+// else (the user's stop).
+func keptAppExit(ctx context.Context) models.AppError {
+	var appErr models.AppError
+	// errors.As leaves appErr as it is when the cause holds no exit.
+	_ = errors.As(context.Cause(ctx), &appErr)
+	return appErr
+}
+
+// cancelledRunReason is the reason a run stops with when its context ended
+// while a set ran and its user did not stop it: the set's error when it says
+// more than the cancellation (an application that exited before it accepted
+// a connection), else what ended the run (cause: the error of a goroutine of
+// the run's errgroup, such as the exit of the application --keep-app-alive
+// keeps), with the set testSet it stopped in. Never "replay completed
+// successfully".
+func cancelledRunReason(testSet string, setErr, cause error) string {
+	switch {
+	case setErr != nil && !errors.Is(setErr, context.Canceled):
+		return fmt.Sprintf("failed to run test set: %v", setErr)
+	case cause != nil && !errors.Is(cause, context.Canceled):
+		return fmt.Sprintf("the run stopped during test-set %s: %v", testSet, cause)
+	default:
+		return "the run was cancelled before its test sets ended"
+	}
+}
+
+// runCompletedReason is the reason a run stops with when nothing stopped it
+// early and none of its sets halted.
+const runCompletedReason = "replay completed successfully"
+
+// haltedRunReason is the reason a set testSet that ended status (APP_HALTED
+// or APP_FAULT, or under docker compose USER_ABORT, when its application's
+// exit stopped it) gives the run's stop: the application's exit, with its
+// code when it has one, when keploy saw it (exit, else the exit the set's
+// error setErr wraps), else the set's status and its error. Never "replay
+// completed successfully".
+func haltedRunReason(testSet string, status models.TestSetStatus, exit models.AppError, setErr error) string {
+	if exit == (models.AppError{}) {
+		// errors.As leaves exit as it is when setErr wraps no exit.
+		_ = errors.As(setErr, &exit)
+	}
+	if exit == (models.AppError{}) {
+		if setErr != nil {
+			return fmt.Sprintf("test-set %s ended %s: %v", testSet, status, setErr)
+		}
+		return fmt.Sprintf("test-set %s ended %s", testSet, status)
+	}
+	code := ""
+	if exit.ExitCode > 0 {
+		code = fmt.Sprintf(" with exit code %d", exit.ExitCode)
+	}
+	return fmt.Sprintf("the application exited during test-set %s%s: %v", testSet, code, exit)
+}
+
+// internalErrRunReason is the reason a set testSet that ended INTERNAL_ERR,
+// and so stopped the run, gives the run's stop: the set, and the error of
+// keploy's own failure that ended it (setErr), else the internal error the
+// application's runner reported (exit, when it is one). Never "replay
+// completed successfully".
+func internalErrRunReason(testSet string, setErr error, exit models.AppError) string {
+	if setErr == nil && exit.AppErrorType == models.ErrInternal {
+		setErr = exit
+	}
+	if setErr == nil {
+		return fmt.Sprintf("test-set %s ended %s", testSet, models.TestSetStatusInternalErr)
+	}
+	return fmt.Sprintf("test-set %s ended %s: %v", testSet, models.TestSetStatusInternalErr, setErr)
+}
+
+// noteSetStop records reason, set's, in stops, the reasons of a run's sets in
+// their order, where at says which entry is whose: a set the run ran again
+// (a flaky check's next attempt) keeps one: the end of its latest attempt
+// that halted, or of the attempt whose INTERNAL_ERR stopped the run (always
+// its last). The attempt named need not be its latest: one after a halt
+// that passes or fails its tests, or ends INTERNAL_ERR only not judged,
+// notes nothing, and the halt, which failed the run, stays its reason.
+func noteSetStop(stops []string, at map[string]int, set, reason string) []string {
+	if i, ok := at[set]; ok {
+		stops[i] = reason
+		return stops
+	}
+	at[set] = len(stops)
+	return append(stops, reason)
+}
+
+// setAttempt is one attempt of a set (a flaky check's, or --must-pass's):
+// its number (0 for none), the status it ended with, and, for a halt, the
+// reason the run's stop names it with (haltedRunReason).
+type setAttempt struct {
+	n      int
+	status models.TestSetStatus
+	why    string
+}
+
+// orFirst is a, or b when a is none.
+func (a setAttempt) orFirst(b setAttempt) setAttempt {
+	if a.n != 0 {
+		return a
+	}
+	return b
+}
+
+// runStopReason is the reason a run whose sets ended stops with: reason,
+// what stopped it, unless that is runCompletedReason and sets of the run
+// halted or stopped it (sets, their haltedRunReason or
+// internalErrRunReason): then those, each with its set. A run with a set
+// that halted or stopped it never stops with "replay completed
+// successfully".
+func runStopReason(reason string, sets []string) string {
+	if reason != runCompletedReason || len(sets) == 0 {
+		return reason
+	}
+	return strings.Join(sets, "; ")
 }
 
 func resolveTestSetStatus(cmdType utils.CmdType, current, derived models.TestSetStatus, err error) (models.TestSetStatus, bool) {
@@ -634,6 +782,17 @@ type Replayer struct {
 	setEnd        *models.SetEnd
 	setEndCalls   []models.UnmatchedCall
 	setEndAnswers []models.UnmatchedCall
+	// setAppExit is the exit of the application seen as the set RunTestSet
+	// ran ended (the zero value when none was): what a run that stops on
+	// that set's APP_HALTED or APP_FAULT names (haltedRunReason). Reset
+	// before each run of a set.
+	setAppExit models.AppError
+	// setInternalErr is the error of keploy's own failure that ended the set
+	// RunTestSet last ran to its end INTERNAL_ERR (nil when none did): what a
+	// run that stops on that set names (internalErrRunReason). Each run of a
+	// set that reaches its end sets it, so a set that ends INTERNAL_ERR, the
+	// only one it is read for, never reads an earlier set's.
+	setInternalErr error
 	// setCalls are the calls of the set RunTestSet is running that no mock
 	// answered and that are the set's, no test's (proven switch): those made
 	// before its first test (before_set_calls.go).
@@ -705,6 +864,9 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// agent's, the app's, the daemons', a compose project's down) moves it,
 	// and the run's drains below wait while it moves.
 	ctx, teardown := utils.NewTeardownScope(ctx)
+	// The pid of the application keploy starts (a native command's), for a
+	// wait on it to name the ports it listens on (pkg.SayStillWaiting).
+	ctx = utils.WithAppPID(ctx)
 
 	// The exit code, recorded on EVERY way out of this function.
 	//
@@ -783,7 +945,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	setupCtx = context.WithValue(setupCtx, models.ErrGroupKey, setupErrGrp)
 
 	var hookCancel context.CancelFunc
-	var stopReason = "replay completed successfully"
+	var stopReason = runCompletedReason
 	// summaryEmitted flips true once the normal TestRun summary fires. If the
 	// run stops gracefully before that (setup/instrument failure), the defer
 	// emits a TestRunAborted with the categorized reason instead.
@@ -1079,8 +1241,20 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 	var testSetResult bool
 	abortTestRun := false
+	// setStops: in their order, the reasons of the run's sets whose
+	// application exited (haltedRunReason), the one that stopped the run or
+	// those the run went on past (docker compose, a stack per set), and of
+	// the set whose internal error stopped it (internalErrRunReason). The
+	// run's stop names them (runStopReason), each set once (noteSetStop).
+	var setStops []string
+	setStopAt := map[string]int{}
 	r.afterTestRunCalled = false
 	var flakyTestSets []string
+	// haltFlakyTestSets are the sets flaky for a halt: their application
+	// halted on one attempt and ran to a verdict on another. They are listed
+	// apart from flakyTestSets, whose closing line sends the user to
+	// --must-pass: --must-pass removes no test case for a halted attempt.
+	var haltFlakyTestSets []string
 	var testSets []string
 	runDomainSet := telemetry.NewDomainSet()
 	r.runDomainSet = runDomainSet
@@ -1144,6 +1318,10 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		flaky := false // only be changed during replay with --must-pass flag set
 		// The refused test cases --must-pass keeps are said once per set.
 		keptRefused := false
+		// halt is the set's first attempt its application halted, and ran its
+		// first that ran to a verdict (PASSED or FAILED); n is 0 for none. A
+		// set with both is flaky, whatever its failed tests (flaky check).
+		var halt, ran setAttempt
 		for attempt := 1; attempt <= int(r.config.Test.MaxFlakyChecks); attempt++ {
 
 			// clearing testcase from map is required for 2 reasons:
@@ -1184,14 +1362,22 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			// historical per-test-set restart behaviour is preserved
 			// whenever the one-shot spawn didn't fire.
 			r.setEnd, r.setEndCalls, r.setEndAnswers = nil, nil, nil
+			r.setAppExit = models.AppError{}
 			// The set's exact plan is this run's: a run that ends before it
 			// makes one tells its end hooks no earlier set's shares.
 			r.exact = nil
 			r.finalAttempt = noAttemptFollows(attempt, r.config.Test)
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, effectiveKeepAlive)
 			r.tellSetEnd(testSet, testSetStatus, err)
+			// halted is this attempt, when its application halted it.
+			var halted setAttempt
 			if err != nil {
 				if ctx.Err() == context.Canceled {
+					// The user's stop ends parentCtx, and the defer names no
+					// reason then. Otherwise a goroutine of the run's
+					// errgroup ended ctx (the exit of the application
+					// --keep-app-alive keeps), and the reason names it.
+					stopReason = cancelledRunReason(testSet, err, context.Cause(ctx))
 					return err
 				}
 				// DockerCompose: when the user-app container exits,
@@ -1212,6 +1398,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 						"test set failed because the app exited; continuing to next test set",
 						zap.String("test-set", testSet),
 						zap.String("status", string(testSetStatus)))
+					setStops = noteSetStop(setStops, setStopAt, testSet, haltedRunReason(testSet, testSetStatus, r.setAppExit, err))
 					testSetResult = false
 					testRunResult = false
 					break
@@ -1224,15 +1411,25 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				return fmt.Errorf("failed to run test set: %w", err)
 			}
 			switch testSetStatus {
-			case models.TestSetStatusAppHalted:
+			case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp:
 				testSetResult = false
-				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
+				// The exit of the application kept across the run's sets
+				// (--keep-app-alive, or the stack docker compose keeps) ended
+				// the run's context: no set can run after it, under compose
+				// too, whose halted set the run otherwise goes on past on a
+				// stack of its own. Either way the run's stop names the halt.
+				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType) || keptAppExit(ctx) != (models.AppError{})
+				halted = setAttempt{n: attempt, status: testSetStatus, why: haltedRunReason(testSet, testSetStatus, r.setAppExit, nil)}
+				setStops = noteSetStop(setStops, setStopAt, testSet, halted.why)
+				halt = halt.orFirst(halted)
 			case models.TestSetStatusInternalErr:
 				testSetResult = false
 				abortTestRun = abortAfterTestSet(testSetStatus, cmdType, r.notJudged(testSet))
-			case models.TestSetStatusFaultUserApp:
-				testSetResult = false
-				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
+				// The run's stop names the internal error that stopped it. A
+				// set only not judged does not stop it: its report says why.
+				if abortTestRun {
+					setStops = noteSetStop(setStops, setStopAt, testSet, internalErrRunReason(testSet, r.setInternalErr, r.setAppExit))
+				}
 			case models.TestSetStatusUserAbort:
 				// A Ctrl+C does not un-fail the tests that already ran, nor
 				// pass a test that got no verdict before it: the defer at
@@ -1248,8 +1445,10 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				return nil
 			case models.TestSetStatusFailed:
 				testSetResult = false
+				ran = ran.orFirst(setAttempt{n: attempt, status: testSetStatus})
 			case models.TestSetStatusPassed:
 				testSetResult = true
+				ran = ran.orFirst(setAttempt{n: attempt, status: testSetStatus})
 			case models.TestSetStatusIgnored:
 				testSetResult = false
 			case models.TestSetStatusNoTestsToRun:
@@ -1291,6 +1490,20 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 					}
 					continue
 				}
+				// A set its application halted on one attempt and not on
+				// another is flaky, whatever its failed tests: a halt may
+				// file none FAILED. Its report is its latest attempt's (PASSED
+				// for one that ran clean after the halt), and the halt fails
+				// the run, so this line says which attempt halted, and how.
+				if halt.n != 0 && ran.n != 0 {
+					utils.LogError(r.logger, nil, "the testset is flaky: its application halted on one attempt and ran to a verdict on another, and the halt fails the run whatever that verdict",
+						zap.String("testSet", testSet),
+						zap.Int("haltedAttempt", halt.n), zap.String("haltedStatus", string(halt.status)), zap.String("halt", halt.why),
+						zap.Int("verdictAttempt", ran.n), zap.String("verdictStatus", string(ran.status)),
+						zap.String("next_step", "see why the application exited on the halted attempt (its logs in that attempt's output), then run the test-set again"))
+					haltFlakyTestSets = append(haltFlakyTestSets, testSet)
+					break
+				}
 				// checking if there is no mismatch in failed testcases across max retries
 				// check both length and value
 				if len(failedTcIDs) != len(initialFailedTCs) {
@@ -1316,6 +1529,16 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 			// this would be executed only when --must-pass flag is set
 			// we would be removing failed testcases
+			//
+			// An attempt its application halted removes none: a test the exit
+			// cut short failed for the exit, not for what it checks, and
+			// --must-pass would delete it from the set on disk. The next
+			// attempt, if any, runs the set again; the halt fails the run.
+			if halted.n != 0 {
+				r.logger.Warn("--must-pass removes no test case for an attempt the application halted: its tests failed for the exit, not for what they check",
+					zap.String("testSet", testSet), zap.Int("attempt", halted.n), zap.String("halt", halted.why))
+				continue
+			}
 			if r.config.Test.MaxFailAttempts == 0 {
 				utils.LogError(r.logger, nil, "no. of testset failure occurred during rerun reached maximum limit, testset still failing, increase count of maxFailureAttempts", zap.String("testSet", testSet))
 				break
@@ -1379,6 +1602,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			}
 		}
 	}
+	stopReason = runStopReason(stopReason, setStops)
 	verdictReached = true
 	// A run none of whose tests got a verdict (every test set, or every test,
 	// ignored or quarantined) verified nothing, so it does not pass, as a run
@@ -1406,6 +1630,11 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 	if len(flakyTestSets) > 0 {
 		r.logger.Info("flaky testsets detected, please rerun the specific testsets with --must-pass flag to remove flaky testcases", zap.Strings("testSets", flakyTestSets))
+	}
+	if len(haltFlakyTestSets) > 0 {
+		r.logger.Info("testsets flaky for an application halt detected: --must-pass removes no test case for a halted attempt",
+			zap.Strings("testSets", haltFlakyTestSets),
+			zap.String("next_step", "see why the application exited on each set's halted attempt (its logs in that attempt's output), then run those test-sets again"))
 	}
 
 	testRunStatus := "fail"
@@ -1813,6 +2042,11 @@ func (r *Replayer) beforeFirstTestSet(ctx context.Context, testRunID string) {
 // not a const, so a test can shrink it rather than wait it out.
 var testSetDrainStall = 30 * time.Second
 
+// setWatchSent is called by a test set's watch once it has sent the set's
+// end on exitLoopChan. A no-op: a test replaces it to wait on that send, so
+// it orders the watch before the test loop's next read of it.
+var setWatchSent = func() {}
+
 // teardownDrainStall is the same bound for the drains of a run's teardown.
 const teardownDrainStall = 30 * time.Second
 
@@ -1864,6 +2098,24 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// A test case's calls to the agent's hooks are keploy's own, on the run's
 	// context (agentHookContext): the set's is cancelled when its app exits.
 	runTestSetCtx = withRunLife(runTestSetCtx, ctx)
+	if r.instrument {
+		runTestSetCtx = utils.WithAppPID(runTestSetCtx)
+		if runsAppProcess(r.instrumentation) {
+			// keploy runs the set's application's process (for this set,
+			// or once for the run under --keep-app-alive), and its exit
+			// cancels runTestSetCtx (the app watchers below, or Start's
+			// group): the wait before the first test, and a test request
+			// it refuses, wait for its address to accept, and only that
+			// exit or keploy's stop ends the wait.
+			runTestSetCtx = pkg.EndsWithApp(runTestSetCtx)
+		}
+	}
+	// --disable-app-ready-probe says keploy may not dial the application's
+	// address only to learn whether it accepts, whoever runs the
+	// application: an embedder's port-forward is torn down by such a dial.
+	if r.config.Test.DisableAppReadyProbe {
+		runTestSetCtx = pkg.WithoutAddressProbe(runTestSetCtx)
+	}
 
 	startTime := time.Now()
 	pruneBefore := startTime.UTC()
@@ -2087,6 +2339,32 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		defer testSetStatusByErrChanMu.RUnlock()
 		return lastAppErr
 	}
+	// neverReady is the set's end when a wait before its first test ended
+	// with nothing ready (before says what it waited for: the application to
+	// accept a connection, or, under docker compose, keploy's agent in the
+	// stack to answer healthy): the application keploy started for the set
+	// exited first (its run set lastAppErr before its exit cancelled
+	// runTestSetCtx), and the set fails as an exit does, saying so; else the
+	// user stopped keploy. An application --keep-app-alive keeps across the
+	// run's sets is run by Start, not by the set: its exit cancels the run's
+	// context with that exit as the cause (keptAppExit).
+	neverReady := func(before string) (models.TestSetStatus, error) {
+		appErr := getLastAppErr()
+		if appErr == (models.AppError{}) {
+			appErr = keptAppExit(ctx)
+		}
+		status, exited := neverReadyStatus(appErr)
+		if !exited {
+			return status, context.Canceled
+		}
+		r.logger.Error("the application exited before "+before+": no test of the test-set was sent",
+			zap.String("testSetID", testSetID), zap.String("exit", appErr.Error()))
+		return status, fmt.Errorf("the application exited before %s: %w", before, appErr)
+	}
+	const (
+		beforeAccept     = "it accepted a connection"
+		beforeAgentReady = "keploy's agent in its stack was ready"
+	)
 	// stopAppBeforeSetEnd, under the proven switch, stops the application
 	// keploy started for this set as the set's teardown does (an interrupt,
 	// the runner's grace, then a kill) and waits for it to exit (P101-b). It
@@ -2390,9 +2668,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				utils.LogError(r.logger, err, applicationFailedToRunLogMessage)
 			case <-runTestSetCtx.Done():
-				setErrStatus(models.TestSetStatusUserAbort)
+				setErrStatus(stoppedSetStatus(ctx, setLastAppErr))
 			}
 			exitLoopChan <- true
+			setWatchSent()
 			runTestSetCtxCancel()
 			return nil
 		})
@@ -2416,14 +2695,26 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			go pkg.AgentHealthTicker(agentCtx, r.logger, string(r.config.Agent.AgentURI), agentReadyCh, 1*time.Second)
 			agentStart := pkg.WatchAgentStart(agentCtx, r.instrumentation)
 
+			// The wait ends when the agent answers healthy, when its start
+			// fails, or when the set's context ends: the user stopped keploy,
+			// or the application compose started exited before the agent was
+			// healthy. It is read once it ends, the set's context first
+			// (whichever case the select took): neverReady tells an exit from
+			// the user's stop, so an exit fails the set as that exit does, not
+			// as the user's stop. With the context live, the ticker has sent
+			// true (it closes its channel unready only once that context
+			// ends), or the start failed.
+			agentUp := false
+			var startErr error
 			select {
 			case <-runTestSetCtx.Done():
-				// Parent context cancelled (user pressed Ctrl+C)
-				return models.TestSetStatusUserAbort, runTestSetCtx.Err()
-			case err := <-agentStart:
-				if runTestSetCtx.Err() != nil {
-					return models.TestSetStatusUserAbort, runTestSetCtx.Err()
-				}
+			case startErr = <-agentStart:
+			case agentUp = <-agentReadyCh:
+			}
+			switch {
+			case runTestSetCtx.Err() != nil:
+				return neverReady(beforeAgentReady)
+			case !agentUp:
 				// Tear down the compose stack we already created before returning,
 				// so a retry's `compose up` doesn't hit "container name already in
 				// use" — an agent that did not come up otherwise leaves the
@@ -2432,13 +2723,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if downErr := r.instrumentation.ComposeDownOnSetupFailure(context.Background()); downErr != nil {
 					r.logger.Debug("composeDown after the agent did not come up failed", zap.Error(downErr))
 				}
-				return models.TestSetStatusFailed, fmt.Errorf("the keploy-agent docker compose started did not come up: %w", err)
-			case ready, ok := <-agentReadyCh:
-				// The ticker closes its channel unready only once the set's
-				// context ends.
-				if !ok || !ready {
-					return models.TestSetStatusUserAbort, runTestSetCtx.Err()
-				}
+				return models.TestSetStatusFailed, fmt.Errorf("the keploy-agent docker compose started did not come up: %w", startErr)
 			}
 			cancel()
 		}
@@ -2584,7 +2869,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if !waitsForApp(serveTest, r.isFirstTestSet) {
 			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
 		} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, true, serveTest && !r.isFirstTestSet && composeRestart == nil); !ready && why == "" {
-			return models.TestSetStatusUserAbort, context.Canceled
+			return neverReady(beforeAccept)
 		} else if !ready {
 			notReady = why
 		}
@@ -2758,9 +3043,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 					utils.LogError(r.logger, err, applicationFailedToRunLogMessage)
 				case <-runTestSetCtx.Done():
-					setErrStatus(models.TestSetStatusUserAbort)
+					setErrStatus(stoppedSetStatus(ctx, setLastAppErr))
 				}
 				exitLoopChan <- true
+				setWatchSent()
 				runTestSetCtxCancel()
 				return nil
 			})
@@ -2779,7 +3065,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if !waitsForApp(serveTest, r.isFirstTestSet) {
 				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
 			} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, true, serveTest && !r.isFirstTestSet); !ready && why == "" {
-				return models.TestSetStatusUserAbort, context.Canceled
+				return neverReady(beforeAccept)
 			} else if !ready {
 				notReady = why
 			}
@@ -2840,6 +3126,71 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		exitLoop = true
 		testSetStatus = models.TestSetStatusInternalErr
 	}
+	// internalFailure is the error of keploy's own failure that ended the set
+	// INTERNAL_ERR in a way that stops the run (abortAfterTestSet), noted
+	// where keploy failed; the set's end hands it on (r.setInternalErr).
+	var internalFailure error
+	// endedFirst is the end of the set's own that the set's loop (status, what
+	// it has so far) or its watch (getErrStatus) has recorded, if any: its
+	// application's exit (APP_HALTED, APP_FAULT) or keploy's internal error.
+	// An end of the run that comes after it (its user's stop, the exit of
+	// the application kept across the sets) does not change it, wherever
+	// keploy sees that end: a test loop's head, a request that fails, the
+	// set's end.
+	endedFirst := func(status models.TestSetStatus) (models.TestSetStatus, bool) {
+		for _, s := range []models.TestSetStatus{status, getErrStatus()} {
+			switch s {
+			case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp, models.TestSetStatusInternalErr:
+				return s, true
+			}
+		}
+		return "", false
+	}
+	// userStop is the status the run's user's stop gives the set: USER_ABORT,
+	// unless an end of the set's own came first (endedFirst).
+	userStop := func(status models.TestSetStatus) models.TestSetStatus {
+		if ended, first := endedFirst(status); first {
+			return ended
+		}
+		return models.TestSetStatusUserAbort
+	}
+	// runEnded reports whether the run's context (ctx) has ended for its
+	// user's stop (Ctrl+C, SIGTERM), whatever the switch, or for the exit of
+	// the application kept across its sets (--keep-app-alive), and the status
+	// the set takes for it: an end of the set's own that came first
+	// (endedFirst), else USER_ABORT for the stop and the exit's for the exit
+	// (stoppedSetStatus, which notes the exit for the run's stop reason). The
+	// test loops stop before their next test on it, and the set's end reads
+	// it. The set's watch records the same, but on a goroutine of its own
+	// that nothing orders before the next test starts: without this, a test
+	// could be sent after the user's stop or to an application that had
+	// exited, and the set end FAILED or USER_ABORT by scheduling. It reads
+	// the run's context, not the set's: the watch of a per-set application
+	// cancels the set's as that application exits, and that end is the
+	// watch's to name. A test whose request the stop cut short keeps the
+	// verdict endedPartWay gives it: none under the switch, FAILED without it.
+	runEnded := func(status models.TestSetStatus) (models.TestSetStatus, bool) {
+		if !stoppedByItsUser(ctx) && keptAppExit(ctx) == (models.AppError{}) {
+			return "", false
+		}
+		if ended, first := endedFirst(status); first {
+			return ended, true
+		}
+		return stoppedSetStatus(ctx, setLastAppErr), true
+	}
+	// watchEnded is the status the set takes at a test loop's head once its
+	// watch has ended it (exitLoopChan): an end of the set's own recorded
+	// before that head (endedFirst; keploy's error writing the set's results,
+	// say) is kept, as resolveTestSetStatus keeps it at the set's end, else
+	// the watch's (its application's exit, or the user's stop). Before, the
+	// watch's replaced it whenever the watch had sent by the time the loop
+	// read exitLoopChan, so which end the set took was down to scheduling.
+	watchEnded := func(status models.TestSetStatus) models.TestSetStatus {
+		if ended, first := endedFirst(status); first {
+			return ended
+		}
+		return getErrStatus()
+	}
 	// endedPartWay reports whether the context of a run with no agent has
 	// ended before its tests did, and the status the set ends with if so:
 	// USER_ABORT when its user stopped it, INTERNAL_ERR for anything else (a
@@ -2848,13 +3199,31 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// the run is what failed it, or cannot be told from what did. A run with an
 	// agent learns the same from the goroutine that watches its app, through
 	// exitLoopChan; one with no agent starts no app and has no such goroutine.
+	//
+	// Under the proven switch a run with an agent stops on it too, for its
+	// user's stop only: the run's context (ctx, never the set's, which the
+	// watch of a per-set app cancels as that app exits) ended by its user.
+	// A request that stop cut short gets no verdict, so the run exits 128+N
+	// (armStoppedRunExitCode), not 1 for a test it failed. Any other end of
+	// such a run's context is the watch's to name (APP_HALTED for the app's
+	// exit). With the switch off such a request still fails its test, as
+	// before, and the run exits 1.
+	//
+	// An end of the set's own that came before the user's stop (userStop)
+	// is not the stop's: the request it cut short is judged as with no stop.
 	endedPartWay := func() (models.TestSetStatus, bool) {
 		switch {
-		case !r.noAgent || runTestSetCtx.Err() == nil:
+		case runTestSetCtx.Err() == nil:
+			return "", false
+		case !r.noAgent:
+			if provenswitch.On() && stoppedByItsUser(ctx) && userStop(testSetStatus) == models.TestSetStatusUserAbort {
+				return models.TestSetStatusUserAbort, true
+			}
 			return "", false
 		case stoppedByItsUser(runTestSetCtx):
 			return models.TestSetStatusUserAbort, true
 		default:
+			internalFailure = fmt.Errorf("the run ended before the set's tests did: %w", context.Cause(runTestSetCtx))
 			return models.TestSetStatusInternalErr, true
 		}
 	}
@@ -3367,11 +3736,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// already pending — avoids mutating test cases that will never run.
 			select {
 			case <-exitLoopChan:
-				testSetStatus = getErrStatus()
+				testSetStatus = watchEnded(testSetStatus)
 				exitLoop = true
 			default:
 			}
 			if status, ended := endedPartWay(); ended {
+				testSetStatus, exitLoop = status, true
+			}
+			if status, ended := runEnded(testSetStatus); ended {
 				testSetStatus, exitLoop = status, true
 			}
 			if exitLoop {
@@ -4493,6 +4865,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to insert final test case result")
+			internalFailure = fmt.Errorf("failed to insert final test case result: %w", err)
 			testSetStatus = models.TestSetStatusInternalErr
 		}
 	}
@@ -4585,11 +4958,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Check for exit signals before each streaming test
 			select {
 			case <-exitLoopChan:
-				testSetStatus = testSetStatusByErrChan
+				testSetStatus = watchEnded(testSetStatus)
 				exitLoop = true
 			default:
 			}
 			if status, ended := endedPartWay(); ended {
+				testSetStatus, exitLoop = status, true
+			}
+			if status, ended := runEnded(testSetStatus); ended {
 				testSetStatus, exitLoop = status, true
 			}
 			if exitLoop {
@@ -4707,10 +5083,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// loop serves it once its test case has its answer), so the
 			// next test case never begins over this one's view. Every exit
 			// calls it once and leaves the iteration (continue or break).
-			// On the two endedPartWay exits, which only a run with no agent
-			// reaches, it does nothing: that run has no exact plan (r.exact
-			// is nil, exactServing). A failed pool call is returned, and
-			// served again at the next one's loop head (poolBeforeBegin).
+			// On the two endedPartWay exits it does nothing for a run with
+			// no agent, which has no exact plan (r.exact is nil,
+			// exactServing); a run with an agent reaches them only as its
+			// user stops it (proven switch), when the call fails on the
+			// ended context and no test case follows. A failed pool call is
+			// returned, and served again at the next one's loop head
+			// (poolBeforeBegin).
 			endStream := func() error {
 				rest := make([]*models.TestCase, 0, len(streamingTests)-i-1)
 				for _, s := range streamingTests[i+1:] {
@@ -5409,6 +5788,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				testSetStatus = resolvedStatus
 			} else {
 				utils.LogError(r.logger, resultsErr, "failed to get test case results")
+				internalFailure = fmt.Errorf("failed to get test case results: %w", resultsErr)
 				testSetStatus = models.TestSetStatusInternalErr
 			}
 		}
@@ -5716,12 +6096,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		//
 		// The run's context, not the set's: the app watcher cancels the set's
 		// once it has recorded how the app ended, and that is no user's stop.
+		// An end of the set's own the watcher recorded first (the app's exit
+		// in the set's last test) is kept, as a test loop's head keeps it
+		// (userStop).
 		stoppedByUser := func() bool {
 			if !stoppedByItsUser(ctx) {
 				return false
 			}
 			if testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed {
-				testSetStatus = models.TestSetStatusUserAbort
+				testSetStatus = userStop(testSetStatus)
 			}
 			return true
 		}
@@ -5944,10 +6327,24 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), loopErr); ok {
 			testSetStatus = resolvedStatus
 		} else {
+			internalFailure = loopErr
 			testSetStatus = models.TestSetStatusInternalErr
 		}
 	} else if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil); ok {
 		testSetStatus = resolvedStatus
+	}
+	// A set its user stopped is USER_ABORT, whatever the switch, however its
+	// test loop ended: a stop during its last test leaves no next test for
+	// the loop to stop before, and the app watcher's USER_ABORT may not be
+	// recorded yet (runEnded). Under the switch stoppedByUser has done
+	// this already. A set an end of its own ended first keeps that end
+	// (userStop), as resolveTestSetStatus has given it. So does a set in
+	// whose last test the application kept across the sets exited: the
+	// set's watch may not have recorded that exit yet either (runEnded).
+	if testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed {
+		if status, ended := runEnded(testSetStatus); ended {
+			testSetStatus = status
+		}
 	}
 
 	// A test whose unmatched calls could not all be read has no verdict, so its
@@ -6065,6 +6462,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	appFailure := getLastAppErr()
+	r.setAppExit = appFailure
 	appLogs := appFailure.AppLogs
 
 	// A set that stopped part-way is not a pass. scoredNothing below catches
@@ -6383,6 +6781,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.String("reason", unchecked))
 		} else if err := r.persistLearned(runTestSetCtx, testSetID, learnedKept, r.learnedElsewhere(runTestSetCtx, testSetID), ownerOf(expectedTestMockMappings), actualTestMockMappings, r.exact.consumerOf()); err != nil {
 			utils.LogError(r.logger, err, "keploy did not complete the full round of this record: what its learn step learned was not kept", zap.String("testSetID", testSetID))
+			internalFailure = fmt.Errorf("what the learn step learned was not kept: %w", err)
 			testSetStatus = models.TestSetStatusInternalErr
 		}
 	}
@@ -6423,6 +6822,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			appLogs = r.instrumentation.GetRecentAppLogs(logCtx)
 		}
 	}
+	// The status is final here, and no error of keploy's that leaves the set
+	// INTERNAL_ERR is noted past this point (a failed report write returns
+	// it).
+	r.setInternalErr = internalFailure
 	testReport = &models.TestReport{
 		Version:       models.GetVersion(),
 		TestSet:       testSetID,
@@ -9003,6 +9406,7 @@ func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase
 	if pkg.IsUnreachableAppPort(origErr) {
 		return nil, false, nil, nil
 	}
+	said := false
 	for attempt := 1; attempt <= maxResetResends; attempt++ {
 		if ctx.Err() != nil {
 			return nil, false, nil, nil
@@ -9023,7 +9427,7 @@ func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase
 		// endpoint the request dials) so we re-send only once the app/proxy is
 		// ready, not blindly. Best effort: if we can't determine a probeable
 		// target we proceed — the bounded attempts still protect us.
-		r.waitForResetResendReady(ctx, testCase, testSetID)
+		r.waitForResetResendReady(ctx, testCase, testSetID, &said)
 
 		r.logger.Warn("test request reset by app/proxy before any mock was consumed; re-sending — the request was never processed, so this is not a retry of an assertion",
 			zap.Int("attempt", attempt),
@@ -9094,7 +9498,17 @@ func (r *Replayer) resetResendUnsafe(ctx context.Context) (bool, []models.MockSt
 // mid-response. For a non-HTTP or unresolvable target it falls back to the docker
 // published host-port TCP gate (no-op for native apps / unmapped publishes). On
 // timeout it returns and lets the bounded re-send attempts run.
-func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models.TestCase, testSetID string) {
+//
+// When keploy started the application (pkg.AppExitEnds: its exit, a
+// container's included, or keploy's stop ends ctx), the HTTP-level wait has no
+// time limit: an application still starting behind docker's published port
+// resets the request through docker's proxy instead of refusing it, and is
+// waited for until it answers, as a refused request is (said once per request,
+// said tells; then every so often while it waits, pkg.SayStillWaiting). A
+// reset after it answered still counts toward maxResetResends. The resolution
+// of the target, and the TCP gate on the published port (docker's proxy
+// accepts there before the application does), keep resetResendReadyTimeout.
+func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models.TestCase, testSetID string, said *bool) {
 	// The same opt-out as the pre-test gate, and this path needs it more,
 	// not less. Its trigger is a transport-level reset — which, behind a
 	// kubectl port-forward, is exactly what a dying forward produces.
@@ -9110,7 +9524,18 @@ func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models
 	defer cancel()
 
 	if scheme, host, port, ok := resolveProbeTarget(wctx, r.config.Test, testCase, testSetID, r.logger, publishedPortsOf(r.logger, r.instrumentation).of(testSetID)); ok {
-		if err := waitForHTTPServing(wctx, scheme, host, port); err != nil {
+		serveCtx := wctx
+		if pkg.AppExitEnds(ctx) {
+			serveCtx = ctx
+			addr := net.JoinHostPort(host, port)
+			if !*said {
+				*said = true
+				r.logger.Info(fmt.Sprintf("the test request was reset at %s before the application took it: waiting for the application to answer HTTP there, then sending it again. The wait ends when it does, when the application exits, or when keploy is stopped", addr),
+					zap.String("testSetID", testSetID), zap.String("testCaseID", testCase.Name))
+			}
+			defer sayStillWaiting(ctx, r.logger, "answer HTTP", addr, time.Now())()
+		}
+		if err := waitForHTTPServing(serveCtx, scheme, host, port); err != nil {
 			r.logger.Debug("app not serving HTTP before reset re-send; re-sending anyway",
 				zap.String("host", host), zap.String("port", port), zap.Error(err))
 		}

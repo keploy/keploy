@@ -151,6 +151,9 @@ type prReportDB struct {
 	failInserts bool
 	// failInsertOf fails only the named test's result insert, with that error.
 	failInsertOf map[string]error
+	// onFailInsert, when set, is called with the insert's context as a
+	// failInsertOf insert fails, before it returns its error.
+	onFailInsert func(context.Context)
 	// Read-back faults: onRead runs first (a test cancels the run from it),
 	// dropOnRead leaves the named test's result out, as a store that lost or
 	// paged away a result does, and readErr fails the read alongside whatever it
@@ -194,16 +197,22 @@ func (f *prReportDB) ClearTestCaseResults(context.Context, string, string) {
 	defer f.mu.Unlock()
 	f.results = nil
 }
-func (f *prReportDB) InsertTestCaseResult(_ context.Context, _ string, _ string, r *models.TestResult) error {
+func (f *prReportDB) InsertTestCaseResult(ctx context.Context, _ string, _ string, r *models.TestResult) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.failInserts {
+		f.mu.Unlock()
 		return fmt.Errorf("report store is unwritable")
 	}
 	if err := f.failInsertOf[r.TestCaseID]; err != nil {
+		onFail := f.onFailInsert
+		f.mu.Unlock()
+		if onFail != nil {
+			onFail(ctx)
+		}
 		return err
 	}
 	f.results = append(f.results, *r)
+	f.mu.Unlock()
 	return nil
 }
 func (f *prReportDB) InsertReport(_ context.Context, _ string, _ string, rep *models.TestReport) error {
@@ -235,6 +244,10 @@ func (prTelemetry) MockTestRun(int)                                            {
 // prInstr fails UpdateMockParams from the Nth call onwards, which is exactly
 // how a replaced agent behaves: it refuses the per-test filter params for the
 // rest of the set (#4614 → #4618).
+// RunsAppProcess: the harness's application is one keploy runs, whose exit
+// (appStopped) ends Run.
+func (f *prInstr) RunsAppProcess() bool { return true }
+
 type prInstr struct {
 	mu                sync.Mutex
 	updateCalls       int
@@ -246,6 +259,10 @@ type prInstr struct {
 	appStopped           chan struct{}
 	// stopErr is how the app exits; ErrAppStopped when empty.
 	stopErr models.AppErrorType
+	// stopErrs, when set, is how each of the app's exits is in turn (its
+	// first exit stopErrs[0]), stopErr past its end; exits counts them.
+	stopErrs []models.AppErrorType
+	exits    int
 	// lastParams is the filter-params payload of the most recent send, so a
 	// test can assert what the agent was actually told.
 	lastParams models.MockFilterParams
@@ -317,10 +334,16 @@ func (f *prInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError 
 		}
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, ExitCode: -1, LeftRunning: f.leftRunning}
 	case <-f.appStopped:
+		f.mu.Lock()
 		errType := models.ErrAppStopped
 		if f.stopErr != "" {
 			errType = f.stopErr
 		}
+		if f.exits < len(f.stopErrs) {
+			errType = f.stopErrs[f.exits]
+		}
+		f.exits++
+		f.mu.Unlock()
 		return models.AppError{
 			AppErrorType: errType,
 			ExitCode:     1,

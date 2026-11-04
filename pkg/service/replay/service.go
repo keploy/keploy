@@ -8,6 +8,26 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
+// AppProcessRunner is an Instrumentation that says whether its Run runs the
+// application's command as a process of its own and returns when that
+// process exits, so that the exit ends the test set's run. Only for one that
+// says so does replay wait for the application with no time limit (before
+// the first test, and for a refused test request's address, pkg.EndsWithApp):
+// the exit is what ends such a wait. An Instrumentation that does not say so
+// (an embedder's whose Run only waits for its context to end, with no local
+// application to exit) keeps the bounded waits, since nothing but the
+// caller's stop would end an unbounded one.
+type AppProcessRunner interface {
+	RunsAppProcess() bool
+}
+
+// runsAppProcess reports whether instrumentation says its Run runs the
+// application's process (AppProcessRunner).
+func runsAppProcess(instrumentation Instrumentation) bool {
+	p, ok := instrumentation.(AppProcessRunner)
+	return ok && p.RunsAppProcess()
+}
+
 type Instrumentation interface {
 	//Setup prepares the environment for the recording
 	Setup(ctx context.Context, cmd string, opts models.SetupOptions) error
