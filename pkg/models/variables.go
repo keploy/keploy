@@ -2073,11 +2073,13 @@ type VariableBinding struct {
 	// WordRun is, for a binding at a word of a value (a word address), the
 	// run of words its call binds there: the words bound at consecutive
 	// words of that text, its own among them, live, in word order, joined
-	// by "-" (variables.WordRuns), and WordRunAt is the index of the
-	// binding's own word among them. A binding of a value whole has none.
-	// Two word bindings share a live value as two variables unless, set
-	// side by side at that word, a word both runs hold differs live
-	// (variables.TwoValues).
-	WordRun   string `json:"wordRun,omitempty" yaml:"wordRun,omitempty"`
-	WordRunAt int    `json:"wordRunAt,omitempty" yaml:"wordRunAt,omitempty"`
+	// by "-" (variables.WordRuns); WordRunRecorded is the same words as its
+	// recording holds them, and WordRunAt is the index of the binding's own
+	// word among them. A binding of a value whole has none. Under the
+	// proven switch, two word bindings share a live value as two variables
+	// only where, set side by side at that word, the runs show it equal by
+	// chance (variables.TwoValues).
+	WordRun         string `json:"wordRun,omitempty" yaml:"wordRun,omitempty"`
+	WordRunRecorded string `json:"wordRunRecorded,omitempty" yaml:"wordRunRecorded,omitempty"`
+	WordRunAt       int    `json:"wordRunAt,omitempty" yaml:"wordRunAt,omitempty"`
 }
