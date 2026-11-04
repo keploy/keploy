@@ -949,3 +949,120 @@ func TestCertForClient_NoSNINamesDestinationIP(t *testing.T) {
 		t.Errorf("no SNI, no CONNECT target, no destination: leaf CN %q, IP SANs %v, want neither (as before)", leaf.Subject.CommonName, leaf.IPAddresses)
 	}
 }
+
+// caTrustTempDir points os.TempDir, and so SetupCaCertEnv's files, at a
+// directory of the test's own, and has every variable SetupCaCertEnv sets
+// restored when the test ends (t.Setenv), so no later test or child is left
+// pointed at a file in a temp dir that is gone.
+func caTrustTempDir(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("os.TempDir does not honour TMPDIR on Windows")
+	}
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	for _, k := range append([]string{EnvJavaToolOptions}, caTrustEnvVars...) {
+		t.Setenv(k, "")
+	}
+	t.Cleanup(func() { _ = RemoveCaCertEnvFiles() })
+	return dir
+}
+
+func globIn(t *testing.T, dir, pattern string) []string {
+	t.Helper()
+	m, err := filepath.Glob(filepath.Join(dir, pattern))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// TestRemoveCaCertEnvFiles_RemovesEveryTrustFileAndPutsTheEnvBack: the app's
+// trust file stays for as long as the run, every one this process wrote goes
+// when the run is done, and the variables that named them are as they were
+// before keploy set them.
+func TestRemoveCaCertEnvFiles_RemovesEveryTrustFileAndPutsTheEnvBack(t *testing.T) {
+	dir := caTrustTempDir(t)
+	orig := loadSystemCABundleFn
+	t.Cleanup(func() { loadSystemCABundleFn = orig })
+	loadSystemCABundleFn = func(*zap.Logger) ([]byte, string) { return testCACertPEM(), "test" }
+
+	// The user's own bundle for one variable, nothing for another.
+	t.Setenv("SSL_CERT_FILE", "/etc/the-users-bundle.pem")
+	if err := os.Unsetenv("NODE_EXTRA_CA_CERTS"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SetupCaCertEnv(zap.NewNop(), testCACertPEM()); err != nil {
+		t.Fatalf("SetupCaCertEnv: %v", err)
+	}
+	first := os.Getenv("SSL_CERT_FILE")
+	// An agent set up again in the same process: an app started before may
+	// still read the first file, so it stays until the run is done.
+	if err := SetupCaCertEnv(zap.NewNop(), testCACertPEM()); err != nil {
+		t.Fatalf("second SetupCaCertEnv: %v", err)
+	}
+	second := os.Getenv("SSL_CERT_FILE")
+	if first == second || filepath.Dir(first) != dir || filepath.Dir(second) != dir {
+		t.Fatalf("want two trust files in %s, have %q and %q", dir, first, second)
+	}
+	if left := globIn(t, dir, "keploy-ca-*.crt"); len(left) != 2 {
+		t.Fatalf("want both trust files while the run is live, have %v", left)
+	}
+	for _, k := range caTrustEnvVars {
+		if got := os.Getenv(k); got != second {
+			t.Fatalf("%s = %q while the run is live, want the trust file %q", k, got, second)
+		}
+	}
+	if left := globIn(t, dir, "keploy-java-cas-*.pem"); len(left) != 0 {
+		t.Errorf("the merged Java PEM outlived the truststore it was built for: %v", left)
+	}
+	// Set by someone else since keploy set it: not keploy's to put back.
+	t.Setenv("CARGO_HTTP_CAINFO", "/etc/set-since.pem")
+
+	if err := RemoveCaCertEnvFiles(); err != nil {
+		t.Fatalf("RemoveCaCertEnvFiles: %v", err)
+	}
+	if left := globIn(t, dir, "keploy-ca-*.crt"); len(left) != 0 {
+		t.Errorf("the app's CA trust files outlived the run: %v", left)
+	}
+	if got := os.Getenv("SSL_CERT_FILE"); got != "/etc/the-users-bundle.pem" {
+		t.Errorf("SSL_CERT_FILE = %q after the run, want the user's own bundle back", got)
+	}
+	if v, ok := os.LookupEnv("NODE_EXTRA_CA_CERTS"); ok {
+		t.Errorf("NODE_EXTRA_CA_CERTS = %q after the run, want it unset as it was", v)
+	}
+	if got := os.Getenv("REQUESTS_CA_BUNDLE"); got != "" {
+		t.Errorf("REQUESTS_CA_BUNDLE = %q after the run, want it empty as it was", got)
+	}
+	if got := os.Getenv("CARGO_HTTP_CAINFO"); got != "/etc/set-since.pem" {
+		t.Errorf("CARGO_HTTP_CAINFO = %q, want the value set since left alone", got)
+	}
+
+	// Again, and with nothing set up: nothing to do, and no error.
+	if err := RemoveCaCertEnvFiles(); err != nil {
+		t.Errorf("a second RemoveCaCertEnvFiles: %v", err)
+	}
+}
+
+// TestRemoveCaCertEnvFiles_ToleratesAFileAlreadyGone: a temp cleaner may have
+// taken the file first; that is not a failure to remove it.
+func TestRemoveCaCertEnvFiles_ToleratesAFileAlreadyGone(t *testing.T) {
+	dir := caTrustTempDir(t)
+	if err := SetupCaCertEnv(zap.NewNop(), testCACertPEM()); err != nil {
+		t.Fatalf("SetupCaCertEnv: %v", err)
+	}
+	path := os.Getenv("SSL_CERT_FILE")
+	if filepath.Dir(path) != dir {
+		t.Fatalf("the trust file %q is not in the test's temp dir %s", path, dir)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveCaCertEnvFiles(); err != nil {
+		t.Errorf("RemoveCaCertEnvFiles: %v", err)
+	}
+	if got := os.Getenv("SSL_CERT_FILE"); got != "" {
+		t.Errorf("SSL_CERT_FILE = %q, want it put back to empty", got)
+	}
+}

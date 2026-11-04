@@ -250,13 +250,14 @@ func TestSetupNativeDarwin_KeytoolFailureIsNonFatal(t *testing.T) {
 	}
 }
 
-// A successful import must still mark ready, and must not leave the temp cert
-// file behind (it is only keytool's -file argument).
+// A successful setup must mark ready, and must not leave a temp cert file
+// behind: on darwin the agent side writes none.
 func TestSetupNativeDarwin_SucceedsAndLeavesNoTempFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake keytool is a /bin/sh script")
 	}
 	ResetCAReadyForTest()
+	t.Setenv("TMPDIR", t.TempDir()) // its own, so a count is exact
 
 	before := tempCertFiles(t)
 
@@ -275,8 +276,6 @@ func TestSetupNativeDarwin_SucceedsAndLeavesNoTempFile(t *testing.T) {
 	}
 }
 
-// tempCertFiles lists the ca.crt* scratch files extractCertToTemp creates in
-// the temp dir, so a leak is detectable.
 // putFakeJavaOnPath makes util.IsJavaInstalled() true on the linux test runner
 // by putting the fake JDK's bin (which we give a `java` too) first on PATH.
 // On darwin IsJavaInstalled uses java_home instead, but these tests are
@@ -290,8 +289,10 @@ func putFakeJavaOnPath(t *testing.T, javaHome string) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+// tempCertFiles lists the keploy-ca-*.crt scratch files extractCertToTemp
+// creates in the temp dir, so a leak is detectable.
 func tempCertFiles(t *testing.T) []string {
 	t.Helper()
-	matches, _ := filepath.Glob(filepath.Join(os.TempDir(), "ca.crt*"))
+	matches, _ := filepath.Glob(filepath.Join(os.TempDir(), "keploy-ca-*.crt"))
 	return matches
 }
