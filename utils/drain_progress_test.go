@@ -31,6 +31,14 @@ func TestDrainErrGroupProgressWaitsWhileProgressing(t *testing.T) {
 	}
 }
 
+// mostStill is how many of a drain's looks in a row may find its stall where
+// the last one left it: a look comes every 10 ms of wall time at the most
+// often (stall.CheckEvery of the rows' 100 ms bound), so these are 100 s and
+// more in which the process clock counted nothing at all. That is a clock
+// that stopped, not a slow one, and a stall that never moves never runs a
+// hang guard's run time.
+const mostStill = 10_000
+
 // A group that stops making progress is given up on once the process could
 // run for the bound with no progress, on its own runnable clock (stall), and
 // not before. The row reads the stall the drain itself measures, on the meter
@@ -42,8 +50,9 @@ func TestDrainErrGroupProgressWaitsWhileProgressing(t *testing.T) {
 // slower than wall time (one thread in a four-CPU quota beside 26 busy loops
 // can run about a seventh of it), so no wall bound holds there. A drain that
 // never gives up fails here by assertion, not at the test binary's timeout:
-// once its stall has run hangRun with no verdict, the row ends the group
-// itself, and says so.
+// once its stall has run hangRun with no verdict, or has not moved in
+// mostStill of the drain's looks in a row (which come on a wall timer
+// whatever the clock does), the row ends the group itself, and says so.
 func TestDrainErrGroupProgressGivesUpOnAStall(t *testing.T) {
 	const bound = 100 * time.Millisecond
 	// hangRun is run time no verdict waits for: the bound, and five times
@@ -63,8 +72,8 @@ func TestDrainErrGroupProgressGivesUpOnAStall(t *testing.T) {
 	// that found the stall due (stall.Meter.Expired), so the stall read at
 	// the verdict's look is the bound or more on a drain that waits for it.
 	var m *stall.Meter
-	var stalled time.Duration
-	looks, overdue := 0, false
+	var stalled, last time.Duration
+	looks, still, overdue := 0, 0, false
 	watch := func(w *stall.Meter) { m = w }
 	progress := func() uint64 {
 		looks++
@@ -73,7 +82,13 @@ func TestDrainErrGroupProgressGivesUpOnAStall(t *testing.T) {
 			return 0
 		}
 		stalled = m.Stalled()
-		if stalled >= hangRun && !overdue {
+		if stalled == last {
+			still++
+		} else {
+			still = 0
+		}
+		last = stalled
+		if (stalled >= hangRun || still >= mostStill) && !overdue {
 			overdue = true
 			end()
 		}
@@ -82,7 +97,7 @@ func TestDrainErrGroupProgressGivesUpOnAStall(t *testing.T) {
 	_, timedOut := drainErrGroupProgress(nil, zap.NewNop(), "t", &g, bound, progress, watch)
 	switch {
 	case overdue:
-		t.Fatalf("no give-up after %v of the drain's stall, in %d looks: want one at about the bound, %v", stalled, looks, bound)
+		t.Fatalf("no give-up after %v of the drain's stall, in %d looks (the last %d with it still): want one at about the bound, %v", stalled, looks, still, bound)
 	case !timedOut:
 		t.Fatalf("a group that made no progress was not given up on (%v of the drain's stall, %d looks)", stalled, looks)
 	case stalled < bound:
@@ -97,7 +112,8 @@ func TestDrainErrGroupProgressGivesUpOnAStall(t *testing.T) {
 // the drain's first call of progress, as its wait starts: that comes after
 // the drain's meter started, and the clock only moves forward, so the guard
 // never reads more stall than the drain has. It ends the group, as the row
-// above does, only once the drain is hangRun into its stall with no verdict.
+// above does, only once the drain is hangRun into its stall, or the clock
+// has not moved in mostStill of its looks in a row, with no verdict.
 func TestDrainErrGroupProgressSaysItGaveUpOnAStall(t *testing.T) {
 	const bound = 100 * time.Millisecond
 	const hangRun = bound + 5*time.Second // the row above's, for its reasons
@@ -108,14 +124,20 @@ func TestDrainErrGroupProgressSaysItGaveUpOnAStall(t *testing.T) {
 	defer end()
 	g.Go(func() error { <-block; return nil })
 	clk := stall.ProcessClock() // held by the drain's meter while it waits
-	var from, seen time.Duration
-	looks, overdue := 0, false
+	var from, seen, last time.Duration
+	looks, still, overdue := 0, 0, false
 	progress := func() uint64 {
 		if looks++; looks == 1 {
 			from = clk.Runnable()
 		}
 		seen = clk.Runnable() - from
-		if seen >= hangRun && !overdue {
+		if seen == last {
+			still++
+		} else {
+			still = 0
+		}
+		last = seen
+		if (seen >= hangRun || still >= mostStill) && !overdue {
 			overdue = true
 			end()
 		}
@@ -124,7 +146,7 @@ func TestDrainErrGroupProgressSaysItGaveUpOnAStall(t *testing.T) {
 	err, timedOut := DrainErrGroupProgress(zap.NewNop(), "t", &g, bound, progress)
 	switch {
 	case overdue:
-		t.Fatalf("no give-up after %v of the process clock since the drain's wait started, in %d looks: want one at about the bound, %v", seen, looks, bound)
+		t.Fatalf("no give-up after %v of the process clock since the drain's wait started, in %d looks (the last %d with it still): want one at about the bound, %v", seen, looks, still, bound)
 	case err != nil || !timedOut:
 		t.Fatalf("(%v, timedOut=%v) for a group that made no progress, after %d looks: want (nil, true)", err, timedOut, looks)
 	}
