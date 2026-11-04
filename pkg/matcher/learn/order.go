@@ -545,9 +545,18 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 				outside = append(outside, p)
 			}
 		case evDisproven:
-			if p.gave || countsByText(p, w) || (dc.allScope || !p.otherTest) && heldWhole(p, w, text) {
+			switch {
+			case p.gave || countsByText(p, w) || (dc.allScope || !p.otherTest) && heldWhole(p, w, text):
 				conflict = append(conflict, p)
-			} else {
+			case p.olderTest && !piece:
+				// F gave it only in an older test of the set: what F gave
+				// there shows nothing of what the application did with the
+				// word in the tests since, so it is no copy moved apart. A
+				// piece of a longer value (pieceOfAnId) is still set aside
+				// as chance: the ruling covers whole words.
+				p.why = olderTestWhy
+				unknown = append(unknown, p)
+			default:
 				aside = append(aside, p)
 			}
 		case evUnknown:
@@ -631,6 +640,11 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 	d.Echo = echo
 	return d
 }
+
+// olderTestWhy is why a word held at a place F gave the application only in
+// an older test of the set, where F gave another text, says nothing of the
+// value (evPlace.olderTest).
+const olderTestWhy = "round F gave it to the application only in an older test of the set, and what it gave there shows nothing of what the application did with the value in the tests since, so keploy cannot tell a copy from a varying value"
 
 // inDecodedForm is why no word of a leaf may be learned fresh, and the place
 // that says so: an earlier place holds a word of 32 bits

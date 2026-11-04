@@ -63,6 +63,12 @@ type evPlace struct {
 	// scope names that scope for a line where mappings.yaml names it
 	// ("worker:", a test's name); "" where the place keeps its marks.
 	otherTest bool
+	// olderTest: a recording F gave the application only in an older test
+	// of the set than the call's (Raw.InAnOlderTest), which shows nothing
+	// of what the application did with a value in the tests since, so no
+	// whole word is set aside there (a founder ruling, 2026-11-02); a piece
+	// of a longer value still is, as chance.
+	olderTest bool
 	scope     string
 	// leaf: an earlier exchange's leaf, which names its place (FromAt).
 	leaf  Leaf
@@ -235,7 +241,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		startUp, other, scope := inScope(in, r.Mock(), r.beforeTest && !other, other)
 		p := evPlace{
 			name: r.Mock(), mock: r.Mock(), src: src, fSrc: live, side: Response,
-			startUp: startUp, otherTest: other, scope: scope,
+			startUp: startUp, otherTest: other, olderTest: r.InAnOlderTest(), scope: scope,
 			at: r.at, state: st, why: why, fUnstated: fUnstated, raw: i + 1,
 			fMay: fUnstated && len(views) == 0 && r.served && !r.servedAfter, views: views,
 			fGave: r.served && !r.servedAfter, recAfter: !r.noTime && (r.at.After(in.At) || r.answered.After(in.At)),

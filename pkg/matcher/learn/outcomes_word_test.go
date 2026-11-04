@@ -1249,3 +1249,56 @@ func TestOutcomeAWordTwoRequestsInFlightTogetherBothShowIsACopy(t *testing.T) {
 	d := oWord(t, call(moved(find, "body.filter.ownerId"), moved(other, "body.filter.ownerId")), "4303", "4d9c")
 	oRefused(t, "neither find shows the pair at one field", d, RefusalUnknown, "mock-1499", "in flight together")
 }
+
+// No excuse from a place served only in an older test (a founder ruling,
+// 2026-11-02): a place round F gave the application only in an older test
+// of the set than the call's (Raw.ServedInAnOlderTest) shows nothing of
+// what the application did with the value in the tests since, so a word
+// held there where F gave another text, too little to be a conflict, is
+// not set aside as a copy that moved with its source: the value is
+// refused as unknown, naming the place and why (fail closed). The same
+// place in the call's own test, or served before the test in no older
+// test, still sets the word aside, and the value is fresh. Flyway's
+// execution_time 50 beside VARCHAR(50) F sent unchanged; 82 at record and
+// 1 in F beside SELECT 1; "slot 83" beside an answer of 7 and a later
+// answer of 82 (older_test_word_test.go, late_call_older_serve_test.go).
+// The rule covers whole words: a 4-hex piece of a fresh UUID beside
+// another UUID's answer that holds that piece by chance, F's view of it
+// read with no piece of F's new UUID, is still chance there, and the
+// UUID is fresh either way.
+func TestOutcomeAPlaceServedOnlyInAnOlderTestSetsNoWordAside(t *testing.T) {
+	older := func(raw []Raw) []Raw {
+		out := make([]Raw, len(raw))
+		for i, x := range raw {
+			out[i] = x.ServedInAnOlderTest()
+		}
+		return out
+	}
+	b := eAnswer("mock-b", 200*time.Millisecond, "82").ServedAs(2).ServedAsRecorded()
+	a := eAnswer("mock-a", 300*time.Millisecond, "7").ServedAs(1).ServedAsRecorded()
+	history := append(eStartup(), eHistory(eRecAt.Add(-150*time.Millisecond), 6, true))
+	for _, tc := range []struct {
+		what, rec, live string
+		own, old        []Raw
+		mock            string
+	}{
+		{"50 beside VARCHAR(50) F sent unchanged", "50", "7", history, older(history), "mock-5"},
+		{"82 at record, 1 in F, beside SELECT 1", "82", "1", eStartup(), older(eStartup()), "mock-1"},
+		{"slot 83 beside an answer of 7 served as recorded", "slot 83", "slot 7", []Raw{a.ServedBeforeTheTest(), b}, []Raw{a.ServedInAnOlderTest().ServedBeforeTheTest(), b}, "mock-a"},
+	} {
+		r, f := strings.Fields(tc.rec), strings.Fields(tc.live)
+		rw, fw := r[len(r)-1], f[len(f)-1]
+		costFresh(t, tc.what+", in no older test", oWord(t, Decide(costF(tc.rec, tc.live, nil, tc.own, nil)), rw, fw))
+		d := oWord(t, Decide(costF(tc.rec, tc.live, nil, tc.old, nil)), rw, fw)
+		oRefused(t, tc.what+", F gave it only in an older test", d, RefusalUnknown, tc.mock)
+		if d.Refusal != nil && !strings.Contains(d.Refusal.Why, "only in an older test of the set, and what it gave there shows nothing of what the application did with the value in the tests since") {
+			t.Errorf("%s, F gave it only in an older test: refused %q; want it to say why", tc.what, d.Refusal.Why)
+		}
+	}
+	rec, live := "1111aaaa-2222-3333-48d1-444455556666", "9999cccc-7777-8888-dddd-000011112222"
+	u := eAnswer("mock-u", 300*time.Millisecond, "bb7ed9ee-670e-48d1-982f-b54b2b73982f").ServedAs(1)
+	u = u.ServedLive(eAnswer("mock-u", 300*time.Millisecond, "0c1d2e3f-4a5b-6c7d-8e9f-a0b1c2d3e4f5"))
+	for _, x := range []Raw{u, u.ServedInAnOlderTest()} {
+		costFresh(t, "a UUID's 4-hex piece beside another UUID's answer, in an older test: "+strconv.FormatBool(x.InAnOlderTest()), oWord(t, Decide(costF(rec, live, nil, []Raw{x}, nil)), "48d1", "dddd"))
+	}
+}

@@ -31,8 +31,10 @@ func apiAnswer(name string, before time.Duration, id string, n int) Raw {
 // before the call in both runs (rows 22, 25, 33, 40: insert app_config_
 // audits' _id beside mock-11210). With F's view of that answer read (it
 // gave its own fresh id there, which shares nothing with F's new word):
-// chance, so the id is fresh. With F's view not stated: keploy cannot tell
-// what F gave there, so the word is unknown, refused naming the answer.
+// chance, so the id is fresh, though F gave that answer only in an older
+// test: the older-test rule covers whole words, not a piece of a longer
+// value. With F's view not stated: keploy cannot tell what F gave there,
+// so the word is unknown, refused naming the answer.
 func TestOutcomeAPIAFreshUUIDsShortWordAtAnotherTestsAnswer(t *testing.T) {
 	const p = "body.documents[0]._id"
 	recID, liveID := "1111aaaa-2222-3333-48d1-444455556666", "9999cccc-7777-8888-dddd-000011112222"
