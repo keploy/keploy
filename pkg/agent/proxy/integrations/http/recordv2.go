@@ -669,9 +669,9 @@ func parseHeaders(msg []byte) (contentLength string, transferEncoding string) {
 		}
 		key = bytes.TrimSpace(key)
 		switch {
-		case bytes.EqualFold(key, contentLengthName):
+		case equalFoldASCII(key, contentLengthName):
 			cl = bytes.TrimSpace(val)
-		case bytes.EqualFold(key, transferEncodingName):
+		case equalFoldASCII(key, transferEncodingName):
 			te = bytes.TrimSpace(val)
 		}
 	}
@@ -688,6 +688,26 @@ var (
 	contentLengthName    = []byte("content-length")
 	transferEncodingName = []byte("transfer-encoding")
 )
+
+// equalFoldASCII reports whether name, a header field's name, is lower (a
+// name in lower-case ASCII) without regard to case. Only ASCII letters fold,
+// as net/http folds a field name: bytes.EqualFold also takes Unicode's simple
+// folds, so U+017F (ſ) matched s and a field net/http does not read as
+// Transfer-Encoding framed the message as chunked.
+func equalFoldASCII(name, lower []byte) bool {
+	if len(name) != len(lower) {
+		return false
+	}
+	for i, c := range name {
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != lower[i] {
+			return false
+		}
+	}
+	return true
+}
 
 // destPortFromAddr extracts the destination TCP port from a FakeConn's
 // RemoteAddr, falling back to 0 if the address is not a TCP address

@@ -715,11 +715,24 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 // with it, or else what it sends next, read on a small read
 // (pUtil.ReadBytesWaiting). readRequestHead and HandleChunkedRequests read
 // the rest of the request on by its framing.
+//
+// The empty lines in front of it (emptyLinesBefore) are dropped: an old
+// client sends a CRLF after a POST body, and a client may send empty lines
+// between requests (RFC 9112 §2.2 lets a server ignore them). rest, or a
+// read, that holds nothing else is no request start, and the connection is
+// read on, as nextRequestV2 takes such a chunk at record. Handed on as one,
+// it held readRequestHead waiting for a request head, and a client that
+// closed then was logged as an error.
 func nextRequest(ctx context.Context, logger *zap.Logger, clientConn net.Conn, rest []byte) ([]byte, error) {
-	if len(rest) > 0 {
-		return rest, nil
+	for {
+		if rest = rest[emptyLinesBefore(rest):]; len(rest) > 0 {
+			return rest, nil
+		}
+		var err error
+		if rest, err = pUtil.ReadBytesWaiting(ctx, logger, clientConn); err != nil {
+			return rest, err
+		}
 	}
-	return pUtil.ReadBytesWaiting(ctx, logger, clientConn)
 }
 
 // withResponse returns m with its recorded response in Spec: m itself, or, when

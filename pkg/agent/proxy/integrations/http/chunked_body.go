@@ -366,7 +366,8 @@ func startsWithInterimResponse(resp []byte) bool {
 // §2.2: a server ignores at least one; a client may send them between
 // requests, and an old one sends a CRLF after a POST body). It is the one rule
 // for them: messageHead, requestMethod and dropEmptyLinesBeforeRequest skip
-// them by it, and nextRequestV2 takes a chunk that is nothing else.
+// them by it, nextRequestV2 takes a chunk that is nothing else, and replay's
+// nextRequest drops them and reads on past bytes that are nothing else.
 func emptyLinesBefore(b []byte) int {
 	return len(b) - len(bytes.TrimLeft(b, "\r\n"))
 }

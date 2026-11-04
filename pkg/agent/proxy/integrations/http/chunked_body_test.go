@@ -642,6 +642,17 @@ func TestParseHeadersReadsTheFramingFields(t *testing.T) {
 		{"a body line is no field", "POST / HTTP/1.1\r\nHost: a\r\n\r\nContent-Length: 10\r\n\r\n", "", ""},
 		{"a line without a colon is no field", "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length\r\n\r\n", "5", ""},
 		{"lines ended by LF alone", "POST / HTTP/1.1\nTransfer-Encoding: gzip\n\nContent-Length: 3\n", "", "gzip"},
+		{"a name in capitals", "POST / HTTP/1.1\r\nTRANSFER-ENCODING: chunked\r\nContent-Length: 5\r\n\r\n", "", "chunked"},
+		// Only ASCII letters fold, as net/http folds them: U+017F (ſ) is s in
+		// Unicode's simple folding, but a name spelled with it is no
+		// Transfer-Encoding, and the message is framed by its Content-Length.
+		{"a name with a non-ASCII letter is no field", "POST / HTTP/1.1\r\nTranſfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n", "5", ""},
+		// strings.ToLower lowers U+0130 (İ) to i: a lowering compare read
+		// this name as Transfer-Encoding.
+		{"a name with a dotted capital I is no field", "POST / HTTP/1.1\r\nTransfer-Encodİng: chunked\r\nContent-Length: 5\r\n\r\n", "5", ""},
+		{"a name that only starts like one is no field", "POST / HTTP/1.1\r\nContent: 3\r\n\r\n", "", ""},
+		{"a name that runs past one is no field", "POST / HTTP/1.1\r\nTransfer-Encoding-X: chunked\r\nContent-Length: 5\r\n\r\n", "5", ""},
+		{"other names of the same lengths are no fields", "GET / HTTP/1.1\r\nAccept-Charset: utf-8\r\nIf-Modified-Since: Tue, 03 Nov 2026 10:00:00 GMT\r\n\r\n", "", ""},
 	} {
 		if cl, te := parseHeaders([]byte(c.head)); cl != c.cl || te != c.te {
 			t.Errorf("%s: parseHeaders = (%q, %q), want (%q, %q)", c.name, cl, te, c.cl, c.te)
