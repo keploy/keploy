@@ -69,7 +69,8 @@ func (v *exactView) repeatReads(noise repeatReadNoise) map[models.RepeatReadMark
 		if named == nil {
 			named = map[models.RepeatReadMark][]int{}
 		}
-		named[mk.TestModeInfo.RepeatRead] = append(named[mk.TestModeInfo.RepeatRead], i)
+		read := mk.TestModeInfo.ReadMark()
+		named[read] = append(named[read], i)
 	}
 	for read, at := range named {
 		if len(at) < 2 || !v.oneRead(at, noise) {
@@ -124,7 +125,7 @@ func (m *MockManager) AnswerRepeatRead(matched []*models.Mock) (integrations.Rep
 		if !own || v.owned[i] != mk || v.isCand(i) {
 			return integrations.RepeatReadAnswer{}, false
 		}
-		r := v.owned[i].TestModeInfo.RepeatRead
+		r := v.owned[i].TestModeInfo.ReadMark()
 		if !r.Marked() || read.Marked() && r != read {
 			return integrations.RepeatReadAnswer{}, false
 		}

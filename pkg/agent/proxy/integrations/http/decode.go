@@ -476,7 +476,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// answers it: the test, the read as the replay named
 					// it, and how many times the test recorded it.
 					h.Logger.Info("answered a repeated read once more than its test recorded it: the test's mapping names it a read recorded at least twice, every time with one answer",
-						zap.String("test", again.Test), zap.String("call", request.Method+" "+request.URL.Path), zap.String("read", again.Mock.TestModeInfo.RepeatRead.Name), zap.Int("recorded", again.Recorded), zap.String("mock", again.Mock.Name))
+						zap.String("test", again.Test), zap.String("call", request.Method+" "+request.URL.Path), zap.String("read", again.Mock.TestModeInfo.ReadMark().Name), zap.Int("recorded", again.Recorded), zap.String("mock", again.Mock.Name))
 					stub, ok, diag, lmiss = again.Mock, true, nil, nil
 				}
 			}

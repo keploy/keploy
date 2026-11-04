@@ -86,9 +86,9 @@ func repeatRunLogged(t *testing.T, logger *zap.Logger, cases []repeatCase) {
 		var mapping []*models.Mock
 		// The case's read: one mark its recordings share, as the agent
 		// marks them (models.MarkRepeatReads).
-		var read models.RepeatReadMark
+		var read *models.RepeatReadMark
 		if c.read != "" {
-			read = models.RepeatReadMark{Name: c.read, At: 1}
+			read = &models.RepeatReadMark{Name: c.read, At: 1}
 		}
 		for i := 0; i < c.recorded; i++ {
 			answer := c.answers[0]
@@ -215,7 +215,7 @@ func TestARepeatedReadIsAnsweredOnlyOnceMoreAndExcusedOnlyOnceFewer(t *testing.T
 // not name.
 func TestWhatIsNotARepeatedReadKeepsItsExactCount(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	q2 := models.RepeatReadMark{Name: "q2", At: 2}
+	q2 := &models.RepeatReadMark{Name: "q2", At: 2}
 	repeatRun(t, []repeatCase{
 		{name: "once", method: "GET", path: "/api/once", read: "once", answers: []string{`{}`}, recorded: 1, sends: 2, missed: []int{1}},
 		{name: "two-answers-more", method: "GET", path: "/api/count", read: "count", answers: []string{`{"n":1}`, `{"n":2}`}, recorded: 2, sends: 3, missed: []int{2}},
@@ -271,7 +271,7 @@ func TestWhatIsNotARepeatedReadKeepsItsExactCount(t *testing.T) {
 		{name: "partly-named", method: "GET", path: "/api/p", read: "p", answers: []string{`{}`}, recorded: 3, sends: 4, missed: []int{3},
 			edit: func(i int, mk *models.Mock) {
 				if i == 0 {
-					mk.TestModeInfo.RepeatRead = models.RepeatReadMark{}
+					mk.TestModeInfo.RepeatRead = nil
 				}
 			}},
 		// a call more that matches the recordings of two reads
@@ -285,7 +285,7 @@ func TestWhatIsNotARepeatedReadKeepsItsExactCount(t *testing.T) {
 		{name: "two-reads-named-alike", method: "GET", path: "/api/q3", read: "q3", answers: []string{`{}`}, recorded: 4, sends: 5, missed: []int{4},
 			edit: func(i int, mk *models.Mock) {
 				if i >= 2 {
-					mk.TestModeInfo.RepeatRead = models.RepeatReadMark{Name: "q3", At: 2}
+					mk.TestModeInfo.RepeatRead = &models.RepeatReadMark{Name: "q3", At: 2}
 				}
 			}},
 	})
@@ -323,7 +323,7 @@ func TestASharedRecordingIsNoPartOfATestsRepeatedRead(t *testing.T) {
 	// charged as never made.
 	run := func(own []string, shared string, sends int) (missed []int, left []string) {
 		var owned, set []*models.Mock
-		r := models.RepeatReadMark{Name: "r", At: 1}
+		r := &models.RepeatReadMark{Name: "r", At: 1}
 		for i, answer := range own {
 			mk := readMock(fmt.Sprintf("own-%d", i), t0.Add(time.Duration(i)*time.Second), "GET", "/api/shared", "", answer)
 			mk.TestModeInfo.RepeatRead = r
@@ -373,7 +373,7 @@ func TestARepeatedReadIsAnsweredAgainOnlyFromTheViewsOwnAnsweredRecordings(t *te
 	t0 := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
 	r0 := readMock("r-0", t0, "GET", "/api/r", "", `{}`)
 	r1 := readMock("r-1", t0.Add(time.Second), "GET", "/api/r", "", `{}`)
-	r := models.RepeatReadMark{Name: "r", At: 1}
+	r := &models.RepeatReadMark{Name: "r", At: 1}
 	r0.TestModeInfo.RepeatRead, r1.TestModeInfo.RepeatRead = r, r
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
@@ -428,7 +428,7 @@ func TestARepeatedReadIsAnsweredAgainOnlyFromTheViewsOwnAnsweredRecordings(t *te
 func TestACORSPreflightRecordedTwiceAndNamedARepeatedReadIsAnsweredAThirdTime(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	set, tests := corsSet(false)
-	preflight := models.RepeatReadMark{Name: "preflight", At: 1}
+	preflight := &models.RepeatReadMark{Name: "preflight", At: 1}
 	for _, mk := range tests[0].mapping {
 		if mk.Spec.HTTPReq.Method == "OPTIONS" {
 			mk.TestModeInfo.RepeatRead = preflight

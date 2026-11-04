@@ -328,6 +328,16 @@ type TestModeInfo struct {
 	// (mockdb's clearRuntimeOnly), so a disk-loaded mock never carries it.
 	IsStartup bool `json:"-" bson:"-"`
 
+	// Concurrent is, on a copy exact serving serves an open test
+	// (KEPLOY_PROVEN), set for a recording the test shares with the tests whose
+	// requests were open beside its own at record time
+	// (ExactServing.Concurrent): a candidate, answered at most once in the
+	// staging by whichever of them makes its call, never required of the
+	// test. Its matcher prefers the test's own recordings to it. Runtime-only,
+	// like the fields above. It sits in IsStartup's padding, which leaves room
+	// for RepeatRead: a Mock stays in its size class.
+	Concurrent bool `json:"-" bson:"-"`
+
 	// ServedIn is, on a copy exact serving serves an open test
 	// (KEPLOY_PROVEN), the number of that test's view; zero on every other mock. A
 	// consume of a copy an earlier view served (a previous attempt of the
@@ -341,24 +351,17 @@ type TestModeInfo struct {
 	// mock names. Runtime-only, like the fields above.
 	StagedSet uint64 `json:"-" bson:"-"`
 
-	// Concurrent is, on a copy exact serving serves an open test
-	// (KEPLOY_PROVEN), set for a recording the test shares with the tests whose
-	// requests were open beside its own at record time
-	// (ExactServing.Concurrent): a candidate, answered at most once in the
-	// staging by whichever of them makes its call, never required of the
-	// test. Its matcher prefers the test's own recordings to it. Runtime-only,
-	// like the fields above.
-	Concurrent bool `json:"-" bson:"-"`
-
 	// RepeatRead is, on a test's own recording under exact serving
 	// (KEPLOY_PROVEN), the repeated read the replay named it in
 	// (ScopeTableReq.RepeatReads, MarkRepeatReads): the test recorded that
 	// read at least twice, every time with one answer. Exact serving
 	// answers such a read once more than recorded, and does not charge one
 	// of its recordings left unmade (one fewer). Two reads the replay names
-	// alike are two reads (RepeatReadMark.At). The zero mark, no read, on
-	// every other recording. Runtime-only, like the fields above.
-	RepeatRead RepeatReadMark `json:"-" bson:"-"`
+	// alike are two reads (RepeatReadMark.At). nil, no read, on every other
+	// recording (ReadMark). The recordings of one read share one mark: set
+	// it whole, never edit one in place, as ShallowCopy shares it.
+	// Runtime-only, like the fields above.
+	RepeatRead *RepeatReadMark `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {
@@ -1236,6 +1239,12 @@ func (m *Mock) DeepCopy() *Mock {
 	// Where the call came from (proven switch): the copy's own, so a copy
 	// written later (the async gob writer's) holds what the mock held.
 	c.Origin = m.Origin.clone()
+	// And the repeated read it is one of (TestModeInfo.RepeatRead), its
+	// own copy: ShallowCopy shares the mark, a deep copy shares nothing.
+	if r := m.TestModeInfo.RepeatRead; r != nil {
+		mark := *r
+		c.TestModeInfo.RepeatRead = &mark
+	}
 	// And the test worker it came from, which record charges it by.
 	c.Instance, c.EndedInstance = m.Instance, m.EndedInstance
 

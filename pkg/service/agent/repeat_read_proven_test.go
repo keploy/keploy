@@ -66,10 +66,10 @@ func TestAMockReplayTestOpensWithItsRepeatedReadsMarked(t *testing.T) {
 			t.Fatalf("TestA's recording %d opened with read %+v; want one named list", i, r)
 		}
 	}
-	if r := p.owned; r[0].TestModeInfo.RepeatRead != r[1].TestModeInfo.RepeatRead || r[2].TestModeInfo.RepeatRead != r[3].TestModeInfo.RepeatRead {
+	if r := p.owned; r[0].TestModeInfo.ReadMark() != r[1].TestModeInfo.ReadMark() || r[2].TestModeInfo.ReadMark() != r[3].TestModeInfo.ReadMark() {
 		t.Fatal("the recordings of one read opened as two reads")
 	}
-	if p.owned[0].TestModeInfo.RepeatRead == p.owned[2].TestModeInfo.RepeatRead {
+	if p.owned[0].TestModeInfo.ReadMark() == p.owned[2].TestModeInfo.ReadMark() {
 		t.Fatal("two reads named alike opened as one read")
 	}
 	if stored[0].TestModeInfo.RepeatRead.Marked() {

@@ -54,7 +54,7 @@ func usersReads(prefix string) []*models.Mock {
 	for i, sid := range []string{"a", "b"} {
 		mk := readMock(fmt.Sprintf("%s-%d", prefix, i), t0.Add(time.Duration(i)*time.Second), "GET", "/api/notifications", "", `{"data":[]}`)
 		mk.Spec.HTTPReq.Header["Cookie"] = "sid=" + sid
-		mk.TestModeInfo.RepeatRead = models.RepeatReadMark{Name: "GET /api/notifications", At: 1}
+		mk.TestModeInfo.RepeatRead = &models.RepeatReadMark{Name: "GET /api/notifications", At: 1}
 		mapping = append(mapping, mk)
 	}
 	return mapping
@@ -77,7 +77,7 @@ func TestTwoCallsAHeaderValueTellsApartAreNotOneRead(t *testing.T) {
 				mapping := usersReads(fmt.Sprintf("n%v", named))
 				if !named {
 					for _, mk := range mapping {
-						mk.TestModeInfo.RepeatRead = models.RepeatReadMark{}
+						mk.TestModeInfo.RepeatRead = nil
 					}
 				}
 				missed, unmade := headerRun(t, mapping, models.OutgoingOptions{}, &models.OutgoingOptions{}, nil, []string{asUser("a")})
@@ -114,7 +114,7 @@ func pageReads() []*models.Mock {
 	for i := range 3 {
 		mk := readMock(fmt.Sprintf("page-%d", i), t0.Add(time.Duration(i)*time.Second), "GET", "/api/onboarding", "", `{"done":false}`)
 		mk.Spec.HTTPReq.Header["Referer"] = fmt.Sprintf("http://localhost:8083/crm/leads/%d", i)
-		mk.TestModeInfo.RepeatRead = models.RepeatReadMark{Name: "GET /api/onboarding", At: 1}
+		mk.TestModeInfo.RepeatRead = &models.RepeatReadMark{Name: "GET /api/onboarding", At: 1}
 		mapping = append(mapping, mk)
 	}
 	return mapping
