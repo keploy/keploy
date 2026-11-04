@@ -111,3 +111,38 @@ func TestTheHintStaysSmallHoweverManyValuesMiss(t *testing.T) {
 		}
 	}
 }
+
+// A pattern miss's reason names its patterns and each side's values outside
+// them by their few shapes, a value or many, and stays small however many
+// namings of the field are folded into it; folding keeps the field's own
+// entry and patterns, and a container on either side.
+func TestAPatternMissWhyNamesEachSide(t *testing.T) {
+	const lets = "keploy.yml's noise lets body.ids[] vary only within \"^\\\\d$\"; "
+	pats := []string{`^\d$`}
+	for _, c := range []struct {
+		name           string
+		live, recorded ValueShapes
+		want           string
+	}{
+		{"one live value", ShapesOf("a string of 2 bytes"), ValueShapes{}, lets + "the live value (a string of 2 bytes) is outside it, so it is compared"},
+		{"one recorded value", ValueShapes{}, ShapesOf("a number of 3 characters"), lets + "the recorded value (a number of 3 characters) is outside it, so it is compared"},
+		{"two live values of one shape", ShapesOf("a string of 2 bytes", "a string of 2 bytes"), ValueShapes{}, lets + "the live values (a string of 2 bytes) are outside it, so it is compared"},
+		{"a value of each side", ShapesOf("a string of 2 bytes"), ShapesOf("a string of 3 bytes"), lets + "the live value (a string of 2 bytes) and the recorded value (a string of 3 bytes) are outside it, so it is compared"},
+		{"many of each side", ShapesOf("a string of 2 bytes", "a string of 3 bytes", "a string of 4 bytes", "a string of 5 bytes"), ShapesOf("a string of 6 bytes", "a string of 7 bytes"), lets + "the live values (a string of 2 bytes, a string of 3 bytes, a string of 4 bytes and 1 more) and the recorded values (a string of 6 bytes, a string of 7 bytes) are outside it, so it is compared"},
+		{"none", ValueShapes{}, ValueShapes{}, lets + "a value is outside it, so it is compared"},
+	} {
+		if got := (PatternMiss{Path: "body.ids[]", Patterns: pats, Live: c.live, Recorded: c.recorded}).Why("body.ids[]"); got != c.want {
+			t.Errorf("%s:\n got  %q\n want %q", c.name, got, c.want)
+		}
+	}
+	m := PatternMiss{Path: "body.ids[]", Entry: "ids", Patterns: pats, Live: ShapesOf("a string of 2 bytes")}
+	for i := 0; i < 3000; i++ {
+		m.Fold(PatternMiss{Path: "body.ids[]", Entry: "other", Patterns: []string{`^x$`}, Live: ShapesOf(fmt.Sprintf("a string of %d bytes", i%60+2)), Recorded: ShapesOf(fmt.Sprintf("a string of %d bytes", i%50+2)), Container: i == 2999})
+	}
+	if m.Entry != "ids" || !slices.Equal(m.Patterns, pats) || !m.Container || m.Live.Len() != 3001 || m.Recorded.Len() != 3000 {
+		t.Fatalf("folded: entry %q, patterns %v, container %v, %d live and %d recorded values; want ids, %v, a container, 3001 and 3000", m.Entry, m.Patterns, m.Container, m.Live.Len(), m.Recorded.Len(), pats)
+	}
+	if why := m.Why("body.ids[]"); len(why) > 400 || !strings.Contains(why, "and 2850 more) and the recorded values (") {
+		t.Errorf("the folded reason is %d bytes: %q; want at most 400, counting the values past three shapes", len(why), why)
+	}
+}

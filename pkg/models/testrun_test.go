@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -157,5 +158,49 @@ func TestFieldReasonShapesKeepOnlyFieldsThatNameNoValue(t *testing.T) {
 		if strings.Contains(string(y), "field_reasons") || strings.Contains(string(j), "field_reasons") {
 			t.Fatalf("a miss with no field reasons writes them: %s / %s", y, j)
 		}
+	}
+}
+
+// A next step names a few reasons of the fields a replay refused, the
+// first three, and counts the rest: it stays small however many fields
+// there are. Three or fewer are named whole, and a reason the advice says
+// already is not counted.
+func TestTheNextStepNamesAFewFieldReasons(t *testing.T) {
+	whys := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = "header.x-f" + strconv.Itoa(i) + " is outside its patterns"
+		}
+		return out
+	}
+	reasons := func(ws []string) []FieldReason {
+		out := make([]FieldReason, len(ws))
+		for i, w := range ws {
+			out[i] = FieldReason{Field: "header.x-f" + strconv.Itoa(i), Why: w}
+		}
+		return out
+	}
+	for _, c := range []struct {
+		n    int
+		want []string
+	}{
+		{0, []string{}},
+		{3, whys(3)},
+		{4, append(whys(3), "and 1 more reason")},
+		{5, append(whys(3), "and 2 more reasons")},
+		{3000, append(whys(3), "and 2997 more reasons")},
+	} {
+		if got := NamedWhys(whys(c.n)); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("NamedWhys of %d = %q; want %q", c.n, got, c.want)
+		}
+	}
+	all := whys(3000)
+	next := UnmatchedCall{Protocol: "HTTP", NextSteps: "re-record the test", FieldReasons: reasons(all)}.SanitizedNextStep()
+	if want := "re-record the test (" + strings.Join(all[:3], "; ") + "; and 2997 more reasons)"; next != want {
+		t.Errorf("the next step is %q; want %q", next, want)
+	}
+	said := UnmatchedCall{Protocol: "HTTP", NextSteps: all[0], FieldReasons: reasons(all[:5])}.SanitizedNextStep()
+	if want := all[0] + " (" + strings.Join(all[1:4], "; ") + "; and 1 more reason)"; said != want {
+		t.Errorf("the next step is %q; want %q", said, want)
 	}
 }

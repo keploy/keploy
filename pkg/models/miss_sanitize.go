@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -142,7 +143,7 @@ func givenNextStep(g, mock string, diffs []MockFieldDiff) string {
 // a field for a reason of its own (a learned read of the application's
 // clock the call does not carry: FieldReasons) is added to it, as the
 // miss's reason says it, so the run's summary, which shows the next step,
-// says it too.
+// says it too: a few of them, and how many more (NamedWhys).
 func (m UnmatchedCall) SanitizedNextStep() string {
 	next := m.shapedNextStep()
 	var whys []string
@@ -151,6 +152,7 @@ func (m UnmatchedCall) SanitizedNextStep() string {
 			whys = append(whys, r.Why)
 		}
 	}
+	whys = NamedWhys(whys)
 	switch {
 	case len(whys) == 0:
 		return next
@@ -186,6 +188,23 @@ func keptVariableName(name string) bool {
 }
 
 var learnedName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*(#[1-9][0-9]*)?$`)
+
+// maxNamedWhys is how many reasons of fields (FieldReasons) a next step or
+// a test's reason names at most (NamedWhys).
+const maxNamedWhys = 3
+
+// NamedWhys are whys as a next step or a test's reason names them: the
+// first maxNamedWhys, then how many more there are ("and 57 more
+// reasons"), so the text stays small however many fields a replay refused.
+func NamedWhys(whys []string) []string {
+	switch n := len(whys) - maxNamedWhys; {
+	case n == 1:
+		return append(slices.Clone(whys[:maxNamedWhys]), "and 1 more reason")
+	case n > 1:
+		return append(slices.Clone(whys[:maxNamedWhys]), "and "+strconv.Itoa(n)+" more reasons")
+	}
+	return whys
+}
 
 // shapedNextStep is m's own next step with every field path it names in its
 // shape, every quoted value {} and a refused word's line without its values
