@@ -62,6 +62,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
@@ -270,7 +272,7 @@ set_status() { sudo grep -m1 '^status:' "$(report "$1")" 2>/dev/null | awk '{pri
 record() {
   local n=$1 log="record$1.log" pid before=$FAIL want=0
   shift
-  sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$@" "$RECORD_BIN" record -c "docker compose -p $PROJECT up" --container-name "$KNAME" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$@" "$RECORD_BIN" record -c "docker compose -p $PROJECT up" --container-name "$KNAME" \
     --disable-tele > "$log" 2>&1 &
   pid=$!
   if await "$log" "$pid" "APP LISTENING" 1; then
@@ -292,6 +294,7 @@ record() {
   # printed. A call that failed writes no test case: its failure is said.
   signal_keploy "$pid" INT
   wait "$pid"
+  verify_ran 1 "$log" || FAIL=$((FAIL + 1))
   if [ "$FAIL" -eq "$before" ] && [ "$(test_files)" -lt "$want" ]; then
     fail "record $n: keploy record wrote $(test_files) test cases, want $want"
   fi
@@ -311,9 +314,10 @@ replay() {
   local name=$1 before
   shift
   before="$(newest_run)"
-  sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$@" "$REPLAY_BIN" test -c "docker compose -p $PROJECT up" --container-name "$KNAME" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$@" "$REPLAY_BIN" test -c "docker compose -p $PROJECT up" --container-name "$KNAME" \
     --delay 5 --disable-tele > "$name.log" 2>&1 </dev/null
   RC=$?
+  verify_ran 1 "$name.log" || FAIL=$((FAIL + 1))
   [ "$(newest_run)" != "$before" ] || fail "$name: keploy test wrote no report (exit $RC)"
   no_orphans "$name"
 }
@@ -355,7 +359,7 @@ replay halts HALT_AFTER=1
 [ "$(set_status test-set-1)" != PASSED ] || fail "3: test-set-1 passed after the app's halt; the halt must take its stack down"
 
 echo "== 4. keploy interrupted as it replays =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "docker compose -p $PROJECT up" --container-name "$APP" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "docker compose -p $PROJECT up" --container-name "$APP" \
   --delay 5 --disable-tele > interrupted.log 2>&1 </dev/null &
 pid=$!
 if await interrupted.log "$pid" "starting test for" 1; then
@@ -365,6 +369,7 @@ else
 fi
 wait "$pid"
 no_orphans "4"
+verify_ran 1 interrupted.log || FAIL=$((FAIL + 1))
 
 # variant NAME [COMPOSE_APP_KEYS]: the cases below each run in a directory
 # and a project of their own (NAME), the app's service in its compose file as

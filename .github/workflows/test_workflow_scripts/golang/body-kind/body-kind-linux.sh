@@ -41,6 +41,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=../../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
@@ -127,7 +129,7 @@ read -r line <&"${DEPPROC[0]}"
 [ "$line" = ready ] || { echo "::error::the dependency did not start"; exit 1; }
 
 # Record two GET /n and one GET /t, with the dependency up.
-sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$RECORD_BIN" record -c "env DEP_URL=http://127.0.0.1:$DEP ./body-app" \
+sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "env DEP_URL=http://127.0.0.1:$DEP ./body-app" \
     --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
 REC_PID=$!
 wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -176,9 +178,10 @@ replay() {
     local name="$1" before
     before="$(newest_run)"
     # shellcheck disable=SC2086
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" ${PROVEN:+KEPLOY_PROVEN=1} "$REPLAY_BIN" test -c "env DEP_URL=http://127.0.0.1:$DEP ./body-app" \
+    sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" ${PROVEN:+KEPLOY_PROVEN=1} "$REPLAY_BIN" test -c "env DEP_URL=http://127.0.0.1:$DEP ./body-app" \
         --delay 1 --health-path /healthz --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
+    verify_ran "${PROVEN:+1}" "$name.log" || FAIL=$((FAIL + 1))
     own
     if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
         fail "$name: keploy test wrote no report (exit $RC)"

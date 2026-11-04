@@ -26,8 +26,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
-# shellcheck source=sudo_env.sh
-source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/mock/sudo_env.sh" || exit 1
+# shellcheck source=../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
 # http_mocks_only: the mocks a record kept are the suite's own calls by kind.
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/mock-kinds.sh" || exit 1
 # root also needs an installation-id so the sudo'd agent doesn't prompt

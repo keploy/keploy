@@ -50,6 +50,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=../../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
 
 if [ "${LEGACY_KEYS:-}" = 1 ] && [ -z "${RECORD_BIN:-}" ]; then
     echo "::error::LEGACY_KEYS=1 needs RECORD_BIN: the release that recorded container keys in the legacy form"
@@ -163,7 +165,7 @@ stop_containers() {
 record() {
     local proven="$1" url="$2"
     rm -rf keploy
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN="$proven" "$RECORD_BIN" record -c "env AMOUNT=100 PAYMENTS_URL=$url ./order-app" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN="$proven" "$RECORD_BIN" record -c "env AMOUNT=100 PAYMENTS_URL=$url ./order-app" \
         --generateGithubActions=false --disable-tele >"record-${proven:-off}.log" 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 "record-${proven:-off}.log"; exit 1; }
@@ -175,6 +177,9 @@ record() {
     stop_pid "$REC_PID"
     REC_PID=""
     own
+    # Under LEGACY_KEYS=1 a release records, whose agent has no verify mode:
+    # the check is of this build's runs.
+    [ "${LEGACY_KEYS:-}" = 1 ] || verify_ran "$proven" "record-${proven:-off}.log" || FAIL=$((FAIL + 1))
     [ "$(grep -c '^kind: Http$' keploy/test-set-0/mocks.yaml 2>/dev/null)" -ge 2 ] || { echo "::error::the charge calls were not recorded"; exit 1; }
 }
 
@@ -186,9 +191,10 @@ replay() {
     before="$(newest_run)"
     # The switch is on only where a step asks for it, whatever the job's
     # environment holds.
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$@" "$REPLAY_BIN" test -c "env AMOUNT=$amount PAYMENTS_URL=$url ./order-app" \
+    sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "$@" "$REPLAY_BIN" test -c "env AMOUNT=$amount PAYMENTS_URL=$url ./order-app" \
         --delay 1 --health-path /healthz --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
+    verify_ran "$(proven_of "$@")" "$name.log" || FAIL=$((FAIL + 1))
     own
     if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
         fail "$name: keploy test wrote no report (exit $RC)"
@@ -292,7 +298,7 @@ echo "== 7b. KEPLOY_PROVEN=1, the container started while the replay runs: passe
 URL_FILE="$WORK/payments-url"
 rm -f "$URL_FILE"
 before="$(newest_run)"
-sudo -E env -u KEPLOY_PROVEN PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "env AMOUNT=100 PAYMENTS_URL_FILE=$URL_FILE ./order-app" \
+sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "env AMOUNT=100 PAYMENTS_URL_FILE=$URL_FILE ./order-app" \
     --delay 1 --health-url "http://127.0.0.1:$APP/healthz" --generateGithubActions=false --disable-tele >midsession.log 2>&1 </dev/null &
 MID_PID=$!
 # keploy started the app, so its session (and its watch of Docker) is up: the
@@ -304,6 +310,7 @@ wait "$MID_PID"
 RC=$?
 MID_PID=""
 own
+verify_ran 1 midsession.log || FAIL=$((FAIL + 1))
 if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
     fail "step 7b: keploy test wrote no report (exit $RC)"
     tail -30 midsession.log

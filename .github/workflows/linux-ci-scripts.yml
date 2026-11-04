@@ -40,7 +40,7 @@ name: Linux CI scripts
 # kind whole: an Http2 or HttpFault mock is not an Http one, though a
 # `^kind: Http` prefix counts it.
 #
-# And mock/sudo_env.tests.sh: SUDO_ENV, what each mock lane's `sudo env`
+# And sudo_env.tests.sh: SUDO_ENV, what each mock lane's `sudo env`
 # names besides its own variables (KEPLOY_EXACT_VIEW_VERIFY, only while it is
 # set: sudo-rs ignores -E), and verify_ran, which fails a run under the proven
 # switch whose agent never said its exact view's verify mode is on.
@@ -69,8 +69,8 @@ on:
       - '.github/workflows/test_workflow_scripts/keploy-installer.tests.sh'
       - '.github/workflows/test_workflow_scripts/mock-kinds.sh'
       - '.github/workflows/test_workflow_scripts/mock-kinds.tests.sh'
-      - '.github/workflows/test_workflow_scripts/mock/sudo_env.sh'
-      - '.github/workflows/test_workflow_scripts/mock/sudo_env.tests.sh'
+      - '.github/workflows/test_workflow_scripts/sudo_env.sh'
+      - '.github/workflows/test_workflow_scripts/sudo_env.tests.sh'
       - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.sh'
       - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.tests.sh'
       - '.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.sh'
@@ -95,8 +95,8 @@ on:
       - '.github/workflows/test_workflow_scripts/keploy-installer.tests.sh'
       - '.github/workflows/test_workflow_scripts/mock-kinds.sh'
       - '.github/workflows/test_workflow_scripts/mock-kinds.tests.sh'
-      - '.github/workflows/test_workflow_scripts/mock/sudo_env.sh'
-      - '.github/workflows/test_workflow_scripts/mock/sudo_env.tests.sh'
+      - '.github/workflows/test_workflow_scripts/sudo_env.sh'
+      - '.github/workflows/test_workflow_scripts/sudo_env.tests.sh'
       - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.sh'
       - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.tests.sh'
       - '.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.sh'
@@ -259,8 +259,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test mock/sudo_env.sh (a lane's sudo names KEPLOY_EXACT_VIEW_VERIFY; a run under the switch whose agent did not say verify mode is on fails)
-        run: bash .github/workflows/test_workflow_scripts/mock/sudo_env.tests.sh
+      - name: Test sudo_env.sh (a lane's sudo names KEPLOY_EXACT_VIEW_VERIFY; a run under the switch whose agent did not say verify mode is on fails)
+        run: bash .github/workflows/test_workflow_scripts/sudo_env.tests.sh
 
   golang-docker-lanes:
     # Forty-two cases against fakes, a few seconds in all; each is bounded

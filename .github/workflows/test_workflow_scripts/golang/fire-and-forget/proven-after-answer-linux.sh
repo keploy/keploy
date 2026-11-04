@@ -84,6 +84,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=../../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
@@ -167,7 +169,7 @@ record() {
     ../ff-broker >broker.log 2>&1 &
     BROKER_PID=$!
     wait_listen 9099 "$BROKER_PID" || { echo "::error::the broker did not start"; exit 1; }
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=$proto BROKER=$broker $APP_ENV ../ff-app" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=$proto BROKER=$broker $APP_ENV ../ff-app" \
         --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::$dir: the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -183,6 +185,7 @@ record() {
     wait "$BROKER_PID" 2>/dev/null
     BROKER_PID=""
     own
+    verify_ran 1 record.log || FAIL=$((FAIL + 1))
     grep -q "after 1" keploy/test-set-0/mocks.yaml 2>/dev/null || fail "$dir: the publish was not recorded"
     cd "$WORK" || exit 1
 }
@@ -195,7 +198,7 @@ record_shutdown() {
     ../ff-broker >broker.log 2>&1 &
     BROKER_PID=$!
     wait_listen 9099 "$BROKER_PID" || { echo "::error::the broker did not start"; exit 1; }
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
         --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::$dir: the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -207,6 +210,7 @@ record_shutdown() {
     wait "$BROKER_PID" 2>/dev/null
     BROKER_PID=""
     own
+    verify_ran 1 record.log || FAIL=$((FAIL + 1))
     grep -q "shutdown published" record.log || fail "$dir: the app did not publish as keploy record stopped it"
     grep -q "shutdown" keploy/test-set-0/mocks.yaml 2>/dev/null || fail "$dir: the shutdown publish was not recorded"
     cd "$WORK" || exit 1
@@ -231,7 +235,7 @@ record_startup() {
     ../ff-broker >broker.log 2>&1 &
     BROKER_PID=$!
     wait_listen 9099 "$BROKER_PID" || { echo "::error::the broker did not start"; exit 1; }
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
         --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::$dir: the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -243,6 +247,7 @@ record_startup() {
     wait "$BROKER_PID" 2>/dev/null
     BROKER_PID=""
     own
+    verify_ran 1 record.log || FAIL=$((FAIL + 1))
     grep -q "startup published" record.log || fail "$dir: the app did not publish as it started under keploy record"
     grep -q "startup" keploy/test-set-0/mocks.yaml 2>/dev/null || fail "$dir: the startup publish was not recorded"
     cd "$WORK" || exit 1
@@ -256,9 +261,10 @@ replay() {
     REPLAY_DIR="$WORK/$dir"
     cd "$REPLAY_DIR" || exit 1
     before="$(newest_run)"
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "$(app_cmd "env PROTO=$proto BROKER=$broker SUFFIX=$suffix NOPUBLISH=$nopublish $APP_ENV ../ff-app")" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "$(app_cmd "env PROTO=$proto BROKER=$broker SUFFIX=$suffix NOPUBLISH=$nopublish $APP_ENV ../ff-app")" \
         --delay 2 --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
+    verify_ran 1 "$name.log" || FAIL=$((FAIL + 1))
     own
     if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
         fail "$dir, $name: keploy test wrote no report (exit $RC)"
@@ -345,7 +351,7 @@ APP_ENV="IGNORE_INT=1"
 record_ping() {
     local dir="$1"
     mkdir -p "$dir" && cd "$dir" || exit 1
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
         --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::$dir: the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -354,6 +360,7 @@ record_ping() {
     stop_pid "$REC_PID"
     REC_PID=""
     own
+    verify_ran 1 record.log || FAIL=$((FAIL + 1))
     cd "$WORK" || exit 1
 }
 record_ping ignores
@@ -375,7 +382,7 @@ record_cut() {
     ../ff-broker >broker.log 2>&1 &
     BROKER_PID=$!
     wait_listen 9099 "$BROKER_PID" || { echo "::error::the broker did not start"; exit 1; }
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
         --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::$dir: the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -387,6 +394,7 @@ record_cut() {
     wait "$BROKER_PID" 2>/dev/null
     BROKER_PID=""
     own
+    verify_ran 1 record.log || FAIL=$((FAIL + 1))
     grep -q "shutdown published" record.log && fail "$dir: the app published as keploy record stopped it; its stop was to be cut"
     grep -q "recordStopKilled" keploy/test-set-0/config.yaml 2>/dev/null ||
         fail "$dir: the test-set's config does not say its recording's stop killed the app: $(cat keploy/test-set-0/config.yaml 2>/dev/null)"

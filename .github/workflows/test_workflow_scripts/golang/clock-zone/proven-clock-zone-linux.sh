@@ -120,6 +120,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=../../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
@@ -207,9 +209,10 @@ replay() {
     before="$(newest_run)"
     # The switch is on only where a step asks for it, whatever the job's
     # environment holds.
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$@" "$REPLAY_BIN" test -c "env TZ=$zone SKEW_HOURS=$skew PAYMENTS_URL=http://127.0.0.1:$DEP ./order-app" \
+    sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "$@" "$REPLAY_BIN" test -c "env TZ=$zone SKEW_HOURS=$skew PAYMENTS_URL=http://127.0.0.1:$DEP ./order-app" \
         --delay 1 --health-path /healthz --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
+    verify_ran "$(proven_of "$@")" "$name.log" || FAIL=$((FAIL + 1))
     own
     if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
         fail "$name: keploy test wrote no report (exit $RC)"
@@ -267,7 +270,7 @@ native_leg() {
     ./payments-svc >payments.log 2>&1 &
     DEP_PID=$!
     wait_listen "$DEP" "$DEP_PID" || { echo "::error::the payments service did not start"; exit 1; }
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env TZ=$REC_ZONE SKEW_HOURS=0 PAYMENTS_URL=http://127.0.0.1:$DEP ./order-app" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env TZ=$REC_ZONE SKEW_HOURS=0 PAYMENTS_URL=http://127.0.0.1:$DEP ./order-app" \
         --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -282,6 +285,7 @@ native_leg() {
     wait "$DEP_PID" 2>/dev/null
     DEP_PID=""
     own
+    verify_ran 1 record.log || FAIL=$((FAIL + 1))
     MOCKS=keploy/test-set-0/mocks.yaml
     [ "$(grep -c '^kind: Http$' "$MOCKS" 2>/dev/null)" -ge 2 ] || { echo "::error::the charge calls were not recorded"; exit 1; }
 
@@ -378,7 +382,7 @@ drecord() {
     PAYMENTS_ADDR="0.0.0.0:$DEP" "$WORK/payments-svc" >payments.log 2>&1 &
     DEP_PID=$!
     wait_listen "$DEP" "$DEP_PID" || { fail "$LEG: the payments service did not start"; return 1; }
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "$cmd" --container-name "$ctr" \
+    sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "$cmd" --container-name "$ctr" \
         --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
     REC_PID=$!
     # The app's port is the agent's, published before the app runs: a call
@@ -397,6 +401,7 @@ drecord() {
     wait "$DEP_PID" 2>/dev/null
     DEP_PID=""
     own
+    verify_ran 1 record.log || FAIL=$((FAIL + 1))
     learn_in "$DREC_ZONE"
 }
 # dreplay <name> <container> <command>: keploy test (KEPLOY_PROVEN=1) of the
@@ -405,9 +410,10 @@ drecord() {
 dreplay() {
     local name="$1" ctr="$2" cmd="$3" before
     before="$(newest_run)"
-    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "$cmd" --container-name "$ctr" \
+    sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "$cmd" --container-name "$ctr" \
         --delay 1 --health-path /healthz --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
+    verify_ran 1 "$name.log" || FAIL=$((FAIL + 1))
     own
     if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
         fail "$name: keploy test wrote no report (exit $RC)"

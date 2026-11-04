@@ -52,6 +52,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
 # http_mocks_only: the recording is the app's calls to its dependency, by kind.
 # shellcheck source=mock-kinds.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mock-kinds.sh" || exit 1
@@ -259,7 +261,7 @@ echo "== record $N tests, one dependency call each =="
 # No --record-timer: the recording is stopped as a user stops one, with
 # Ctrl+C, once every request has had its answer. timeout only ends a keploy
 # that hangs.
-sudo -E "${SCOPE[@]}" env PATH="$PATH" timeout -k 10 600 "$RECORD_BIN" record -c "bash app.sh" \
+sudo "${SCOPE[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" timeout -k 10 600 "$RECORD_BIN" record -c "bash app.sh" \
   --generateGithubActions=false --disable-tele > record.log 2>&1 &
 KP=$!
 # Until the app listens (a connect, which records no test): keploy starts it
@@ -321,7 +323,7 @@ ktest() {
   # full), so that fallback must stay unreachable -- the outer timeout, the
   # same 600s, is the real hang guard, and app.py exits the app if the holder
   # dies, so a stuck /healthz never burns the window on a dead app.
-  sudo -E "${SCOPE[@]}" env PATH="$PATH" "$@" timeout -k 30 600 "$REPLAY_BIN" test -c "bash app.sh" \
+  sudo "${SCOPE[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$@" timeout -k 30 600 "$REPLAY_BIN" test -c "bash app.sh" \
     --health-url "http://127.0.0.1:$APP/healthz" --health-poll-timeout 600s \
     --remove-unused-mocks --generateGithubActions=false --disable-tele > "$log" 2>&1
   echo $?
@@ -357,7 +359,7 @@ ktest_kept() {
   sudo rm -rf keploy hold.out && sudo cp -a keploy.rec keploy
   make_kept_set || { echo 99; return; }
   : > dep.log
-  sudo -E "${SCOPE[@]}" env PATH="$PATH" KEPLOY_PROVEN=1 "$@" timeout -k 30 900 "$REPLAY_BIN" test -c "bash app.sh" --keep-app-alive \
+  sudo "${SCOPE[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$@" timeout -k 30 900 "$REPLAY_BIN" test -c "bash app.sh" --keep-app-alive \
     --health-url "http://127.0.0.1:$APP/healthz" --generateGithubActions=false --disable-tele > "$log" 2>&1
   echo $?
 }
@@ -409,6 +411,8 @@ grep -E "PID map|could not track|skipping mock pruning|not writing mappings" tes
 
 echo "== keploy test --keep-app-alive, KEPLOY_PROVEN=1, two test sets, the PID map overflowing in the first: the second must fail as capture incomplete too, saying why =="
 rc=$(ktest_kept test-kept.log OVERFLOW=1)
+# ktest_kept runs in a subshell: its run's verify line is checked here.
+verify_ran 1 test-kept.log || FAIL=$((FAIL + 1))
 rep0=$(latest_report test-set-0)
 rep1=$(latest_report test-set-1)
 echo "test (kept): keploy exited $rc; test-set-0 $(sudo grep -m1 '^status:' "$rep0" 2>/dev/null); test-set-1 $(sudo grep -m1 '^status:' "$rep1" 2>/dev/null); the dependency saw: $(tr '\n' ' ' < dep.log)"

@@ -26,6 +26,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=../../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
@@ -100,7 +102,7 @@ APPCMD="./daemonapp app 127.0.0.1:$APP 127.0.0.1:$UP"
 
 echo "== 1. record =="
 start_upstream up-record.log
-sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "$APPCMD" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "$APPCMD" \
     --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
 REC_PID=$!
 wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -110,6 +112,7 @@ stop_pid "$REC_PID"
 REC_PID=""
 stop_upstream
 own
+verify_ran 1 record.log || FAIL=$((FAIL + 1))
 grep -m1 'daemon said' record.log
 for path in /from-app /from-child /from-daemon; do
     grep -qx "$path" up-record.log || fail "record: the upstream never saw $path"
@@ -118,9 +121,10 @@ done
 
 echo "== 2. replay, the upstream up =="
 start_upstream up-replay.log
-sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "$APPCMD" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "$APPCMD" \
     --delay 2 --generateGithubActions=false --disable-tele >replay.log 2>&1 </dev/null
 RC=$?
+verify_ran 1 replay.log || FAIL=$((FAIL + 1))
 stop_upstream
 own
 said="$(grep -m1 'daemon said' replay.log)"
@@ -162,7 +166,7 @@ case "\$(cat "$WORK/server.ready")" in listen*) cat "$WORK/server.ready"; echo; 
 EOF
 hits() { grep -cx /hi "$HITS" 2>/dev/null || echo 0; }
 mock_run() {
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "sh $WORK/fixture.sh" --name "$1" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "sh $WORK/fixture.sh" --name "$1" \
         --disable-tele >"$1.log" 2>&1 </dev/null
 }
 # Two runs, one after the other: the second's daemon listens on the port the
@@ -172,6 +176,7 @@ mock_run() {
 for run in 1 2; do
     mock_run "dm$run"
     RC=$?
+    verify_ran 1 "dm$run.log" || FAIL=$((FAIL + 1))
     own
     [ "$RC" -eq 0 ] || { fail "mock record $run: exit $RC"; tail -30 "dm$run.log"; }
     [ "$(hits)" = "$run" ] || fail "mock record $run: the daemon's server answered $(hits) calls in all, want $run"
@@ -193,7 +198,7 @@ DAPP="env DAEMON_SRV=127.0.0.1:$DSRV DEAF=1 ../daemonapp app 127.0.0.1:$APP 127.
 mkdir -p "$WORK/sets" && cd "$WORK/sets" || exit 1
 start_upstream up-sets.log
 for set in 0 1; do
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "$DAPP" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "$DAPP" \
         --generateGithubActions=false --disable-tele >"record-$set.log" 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { fail "set $set: the app did not start under keploy record"; tail -30 "record-$set.log"; break; }
@@ -205,14 +210,16 @@ for set in 0 1; do
     stop_pid "$REC_PID"
     REC_PID=""
     own
+    verify_ran 1 "record-$set.log" || FAIL=$((FAIL + 1))
     grep -q "made no progress on its way out" "record-$set.log" ||
         fail "record $set: keploy did not stop the daemon that ignores SIGTERM"
     if listening "$DSRV"; then fail "record $set: the daemon still listens on $DSRV after the recording"; fi
 done
 stop_upstream
-sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "$DAPP" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "$DAPP" \
     --delay 2 --generateGithubActions=false --disable-tele >replay-sets.log 2>&1 </dev/null
 RC=$?
+verify_ran 1 replay-sets.log || FAIL=$((FAIL + 1))
 own
 run="$(ls -1d keploy/reports/test-run-* 2>/dev/null | sort -V | tail -n1)"
 for set in 0 1; do

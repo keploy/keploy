@@ -36,7 +36,7 @@
 # Env: RECORD_BIN (the keploy binary under test).
 set -uo pipefail
 
-# This lane's directory: lane_switch.sh and sudo_env.sh.
+# This lane's directory: lane_switch.sh; its parent: sudo_env.sh.
 # shellcheck source-path=SCRIPTDIR
 MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # A lane that could not load it would skip both halves and pass: fail instead.
@@ -45,9 +45,9 @@ if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
   echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
   exit 1
 fi
-# shellcheck source=sudo_env.sh
-if ! source "$MOCK_DIR/sudo_env.sh" || ! declare -F verify_ran >/dev/null; then
-  echo "FAIL: could not load sudo_env.sh from $MOCK_DIR"
+# shellcheck source=../sudo_env.sh
+if ! source "$MOCK_DIR/../sudo_env.sh" || ! declare -F verify_ran >/dev/null; then
+  echo "FAIL: could not load sudo_env.sh from $MOCK_DIR/.."
   exit 1
 fi
 # http_mocks_are and http_mocks_only: what a record kept is the client's two

@@ -20,8 +20,8 @@ set -uo pipefail
 # ignored, and sudo, finding it ignored, never relays the interrupt this lane
 # sends it to keploy.
 set -m
-# shellcheck source=sudo_env.sh
-source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/mock/sudo_env.sh" || exit 1
+# shellcheck source=../sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
 
 BIN="${RECORD_BIN:-keploy}"
 BIN="$(command -v "$BIN" || echo "$BIN")"

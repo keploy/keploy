@@ -54,6 +54,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
@@ -246,9 +248,10 @@ case_statuses() {
 replay() {
   local log="$1" mode="$2" before; shift 2
   before="$(newest_run)"
-  sudo -E env PATH="$PATH" "$@" "$REPLAY_BIN" test -c "python3 app.py $APP $DEP${mode:+ $mode}" --delay 5 \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$@" "$REPLAY_BIN" test -c "python3 app.py $APP $DEP${mode:+ $mode}" --delay 5 \
     --generateGithubActions=false --disable-tele >"$log.log" 2>&1 </dev/null
   RC=$?
+  verify_ran "$(proven_of "$@")" "$log.log" || FAIL=$((FAIL + 1))
   own
   if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
     fail "$log: keploy test wrote no report (exit $RC)"; tail -30 "$log.log"
@@ -277,7 +280,7 @@ trap cleanup EXIT
 wait_for_port "$DEP" 30 || { echo "FAIL: the dependency did not start"; exit 1; }
 
 echo "== 1. record two creates =="
-sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "python3 app.py $APP $DEP" --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "python3 app.py $APP $DEP" --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
 REC_PID=$!
 wait_for_port "$APP" 360 || { echo "FAIL: the app did not start under keploy record"; tail -30 record.log; exit 1; }
 for item in pen book; do
@@ -304,7 +307,7 @@ expect_rc 1 "step 2"
 grep -q 'variable_mismatch' "$(REPORT)" && fail "step 2: a variable was reported in a set that declares none"
 
 echo "== 3. keploy templatize, then the variables on the mocks, as the learn step would =="
-sudo -E env PATH="$PATH" "$REPLAY_BIN" templatize --disable-tele >templatize.log 2>&1 </dev/null; own
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" templatize --disable-tele >templatize.log 2>&1 </dev/null; own
 UC="$(grep -l 'url: .*/users$' keploy/test-set-0/tests/*.yaml | head -n1)"
 UR="$(grep -l 'url: .*/users/' keploy/test-set-0/tests/*.yaml | head -n1)"
 grep -q '{{capture string .id}}' "$UC" 2>/dev/null || fail "templatize did not capture the user's id: $(grep -m1 'body:' "$UC" 2>/dev/null)"

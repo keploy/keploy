@@ -25,6 +25,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
@@ -128,7 +130,7 @@ record() {
   local name=$1 hp=$2 log="$1-record.log" pid rc made=0
   sudo rm -rf keploy
   : > "$log"
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "docker compose up" --container-name "$APP" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record -c "docker compose up" --container-name "$APP" \
     --disable-tele --disable-ansi > "$log" 2>&1 &
   pid=$!
   # The calls go as soon as the app says it listens, as a user's would: keploy
@@ -162,9 +164,10 @@ replay() {
   shift
   # Only this replay's report is read: an earlier one's is no answer.
   sudo rm -rf keploy/reports
-  sudo -E env PATH="$PATH" "$@" "$RECORD_BIN" test -c "docker compose up" --container-name "$APP" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$@" "$RECORD_BIN" test -c "docker compose up" --container-name "$APP" \
     --delay 5 --disable-tele --disable-ansi > "$log" 2>&1
   rc=$?
+  verify_ran "$(proven_of "$@")" "$log" || FAIL=$((FAIL + 1))
   cleanup
   REPORT_STATUS=$(sudo sh -c 'cat keploy/reports/test-run-*/test-set-0-report.yaml 2>/dev/null' | sed -n 's/^status: //p' | tail -n 1)
   REPLAY_RC=$rc

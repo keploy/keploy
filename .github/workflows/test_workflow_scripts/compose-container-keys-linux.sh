@@ -23,6 +23,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=sudo_env.sh
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/sudo_env.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
@@ -179,7 +181,7 @@ record() {
   local name=$1 proven=$2 cmd=$3 ctr=$4 log="$1.log" pid rc p made before=$FAIL
   sudo rm -rf keploy
   : > "$log"
-  sudo -E env PATH="$PATH" KEPLOY_PROVEN="$proven" "$RECORD_BIN" record -c "$cmd" --container-name "$ctr" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN="$proven" "$RECORD_BIN" record -c "$cmd" --container-name "$ctr" \
     --disable-tele --debug > "$log" 2>&1 &
   pid=$!
   if await "$log" "$pid" "APP LISTENING" 1; then
@@ -202,6 +204,7 @@ record() {
   wait "$pid"
   rc=$?
   [ "$rc" -eq 0 ] || { echo "FAIL: $name: keploy record exited $rc"; FAIL=1; }
+  verify_ran "$proven" "$log" || FAIL=$((FAIL + 1))
   [ "$FAIL" -eq "$before" ] || {
     tail -60 "$log"
     # A call reset as the app came up: did keploy's ingress forwarder hold
