@@ -1370,7 +1370,7 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 				// secret there.
 				mockPath, _ := recordedURLPath(mock.Spec.HTTPReq.URL)
 				if logPlaces == nil {
-					p := poolPlaces(nil, unfilteredMocks)
+					p := poolPlaces(nil, unfilteredMocks, input.url.EscapedPath())
 					logPlaces = &p
 				}
 				livePath := logPlaces.decodedPath(input.url.EscapedPath())
@@ -2490,7 +2490,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		// the call is that recording's. Its path shows the segments that
 		// recording redacted redacted.
 		last := diag.answered.lastMock
-		places := poolPlaces(last, diag.pool)
+		places := poolPlaces(last, diag.pool, request.URL.EscapedPath())
 		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.EscapedPath())).
 			WithDestination(dest).
 			WithComparedDestinations(comparedDestinations(diag.pool, diag.candidates)).
@@ -2551,7 +2551,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	if diag != nil && diag.closest != nil && diag.closest.Spec.HTTPReq != nil {
 		// Under the proven switch: the strict comparison's closest recording,
 		// and the fields it found differ.
-		places := poolPlaces(diag.closest, comparedPool)
+		places := poolPlaces(diag.closest, comparedPool, request.URL.EscapedPath())
 		return withRoutePlaces(strictMismatchReport(request, liveBody, dest, diag, comparedDests, phase, candidateCount, places),
 			request, diag.closest, comparedPool, variableTable(mockDb), places), places
 	}
@@ -2567,7 +2567,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	closestMock := pickClosestCandidate(request, liveOp, schemaSurvivors, closestPool)
 	if closestMock == nil || closestMock.Spec.HTTPReq == nil {
 		// Named redacted by the places of every recording compared.
-		places := poolPlaces(nil, comparedPool)
+		places := poolPlaces(nil, comparedPool, request.URL.EscapedPath())
 		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.EscapedPath())).
 			WithDestination(dest).
 			WithComparedDestinations(comparedDests).
@@ -2659,7 +2659,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 	// Redact secret / obfuscated values out of the structured diffs before they
 	// are attached — they (and the Diff string derived from them) are persisted
 	// into the report YAML and the platform API.
-	places = poolPlaces(closestMock, comparedPool)
+	places = poolPlaces(closestMock, comparedPool, request.URL.EscapedPath())
 	redactFieldDiffs(fieldDiffs, places, diffReq.URL.EscapedPath())
 
 	b := mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.EscapedPath())).

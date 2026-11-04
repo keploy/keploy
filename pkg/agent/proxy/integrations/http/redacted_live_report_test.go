@@ -689,50 +689,61 @@ func loggedNone(t *testing.T, logs *observer.ObservedLogs, secrets ...string) {
 func TestMissErrorAndLogsNameTheCallRedacted(t *testing.T) {
 	for _, live := range []string{liveSecret, "zq9Plm%2F3Xw7Rt"} {
 		for _, on := range []bool{false, true} {
-			mode, env := "off", ""
-			if on {
-				mode, env = "on", "1"
-			}
-			t.Run(live+"/"+mode, func(t *testing.T) {
-				t.Setenv(provenswitch.Env, env)
-				m := recorded("m", "/x/REDACTED_abc/y", map[string]string{"Content-Type": "application/json"}, `{"x":"alpha1"}`)
-				m.Noise = []string{`^REDACTED_abc$`}
-				app, proxy := tcpPair(t)
-				t.Cleanup(func() { _ = app.Close(); _ = proxy.Close() })
-				core, logs := observer.New(zap.DebugLevel)
-				h := &HTTP{Logger: zap.New(core)}
-				var reported *models.MockMismatchReport
-				ctx := models.WithMockMismatchReporter(context.Background(), func(err error) {
-					if e, ok := err.(interface {
-						MismatchReport() *models.MockMismatchReport
-					}); ok {
-						reported = e.MismatchReport()
+			for _, pool := range []string{"", "/with-a-candidate-that-redacted-nothing"} {
+				mode, env := "off", ""
+				if on {
+					mode, env = "on", "1"
+				}
+				t.Run(live+"/"+mode+pool, func(t *testing.T) {
+					t.Setenv(provenswitch.Env, env)
+					m := recorded("m", "/x/REDACTED_abc/y", map[string]string{"Content-Type": "application/json"}, `{"x":"alpha1"}`)
+					m.Noise = []string{`^REDACTED_abc$`}
+					mocks := []*models.Mock{m}
+					if pool != "" {
+						// Each candidate's debug line names the call redacted
+						// by the pool's places, not by the candidate's own.
+						mocks = []*models.Mock{recorded("n", "/x/q9P/y", map[string]string{"Content-Type": "application/json"}, `{"x":"alpha1"}`), m}
+					}
+					app, proxy := tcpPair(t)
+					t.Cleanup(func() { _ = app.Close(); _ = proxy.Close() })
+					core, logs := observer.New(zap.DebugLevel)
+					h := &HTTP{Logger: zap.New(core)}
+					var reported *models.MockMismatchReport
+					ctx := models.WithMockMismatchReporter(context.Background(), func(err error) {
+						if e, ok := err.(interface {
+							MismatchReport() *models.MockMismatchReport
+						}); ok {
+							reported = e.MismatchReport()
+						}
+					})
+					body := `{"x":"bravo2"}`
+					raw := "POST /x/" + live + "/y?k=v HTTP/1.1\r\nHost: api.example\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
+					done := make(chan error, 1)
+					go func() {
+						done <- h.decodeHTTP(ctx, []byte(raw), proxy, &models.ConditionalDstCfg{Addr: "127.0.0.1:1"}, &mockMemDb{mocks: mocks, updateUnFilteredReturn: true}, models.OutgoingOptions{})
+					}()
+					go func() { _, _ = io.Copy(io.Discard, app) }()
+					err := awaitDone(t, done, "decodeHTTP returning")
+					if reported == nil {
+						t.Fatal("the miss was not reported")
+					}
+					want := "POST /x/" + valueRedacted + "/y"
+					if reported.ActualSummary != want {
+						t.Errorf("the report names the call %q, want %q", reported.ActualSummary, want)
+					}
+					// With the switch on the miss is reported, not returned.
+					if !on && (err == nil || !strings.Contains(err.Error(), "for "+want)) {
+						t.Errorf("decodeHTTP = %v, want the miss's error naming the call %q", err, want)
+					}
+					if err != nil && (strings.Contains(err.Error(), "zq9Plm") || strings.Contains(err.Error(), "3Xw7Rt")) {
+						t.Errorf("the miss's error carries the secret: %v", err)
+					}
+					loggedNone(t, logs, "zq9Plm", "3Xw7Rt")
+					if pool != "" && !on && logs.FilterMessage("The url path of mock and request aren't the same").FilterField(zap.String("mock name", "n")).Len() == 0 {
+						t.Error("the row is of a debug line at the candidate that redacted nothing: none was written")
 					}
 				})
-				body := `{"x":"bravo2"}`
-				raw := "POST /x/" + live + "/y?k=v HTTP/1.1\r\nHost: api.example\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
-				done := make(chan error, 1)
-				go func() {
-					done <- h.decodeHTTP(ctx, []byte(raw), proxy, &models.ConditionalDstCfg{Addr: "127.0.0.1:1"}, &mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true}, models.OutgoingOptions{})
-				}()
-				go func() { _, _ = io.Copy(io.Discard, app) }()
-				err := awaitDone(t, done, "decodeHTTP returning")
-				if reported == nil {
-					t.Fatal("the miss was not reported")
-				}
-				want := "POST /x/" + valueRedacted + "/y"
-				if reported.ActualSummary != want {
-					t.Errorf("the report names the call %q, want %q", reported.ActualSummary, want)
-				}
-				// With the switch on the miss is reported, not returned.
-				if !on && (err == nil || !strings.Contains(err.Error(), "for "+want)) {
-					t.Errorf("decodeHTTP = %v, want the miss's error naming the call %q", err, want)
-				}
-				if err != nil && (strings.Contains(err.Error(), "zq9Plm") || strings.Contains(err.Error(), "3Xw7Rt")) {
-					t.Errorf("the miss's error carries the secret: %v", err)
-				}
-				loggedNone(t, logs, "zq9Plm", "3Xw7Rt")
-			})
+			}
 		}
 	}
 }
@@ -853,8 +864,8 @@ func TestAMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 		{name: "json-moved-field", aURL: "/x/aa", bURL: "/x", live: "/x", aHdr: jsonHdr, bHdr: jsonHdr, inHdr: jsonHdr, aBody: `{"assertion":"REDACTED_abc","x":"alpha1"}`, bBody: `{"x":"alpha1"}`, body: `{"data":{"assertion":"` + liveSecret + `"},"x":"bravo2"}`},
 		// A root array's elements are a field with no key ("[]"): found by
 		// the field's name alone.
-		{name: "json-root-array", aURL: "/x/aa", bURL: "/x", live: "/x", aHdr: jsonHdr, bHdr: jsonHdr, inHdr: jsonHdr, aBody: `["REDACTED_abc","alpha1"]`, bBody: `["q9P","alpha1"]`, body: `["` + liveSecret + `","bravo2"]`},
-		{name: "text-body", aURL: "/x/aa", bURL: "/x/otherz", live: "/x/other", aHdr: text, bHdr: text, inHdr: with(text, "X-Other", "bravo2"), aBody: `token REDACTED_abc`, bBody: `hello`, body: `token ` + liveSecret},
+		{name: "json-root-array", aURL: "/x/aa", bURL: "/x", live: "/x", aHdr: jsonHdr, bHdr: jsonHdr, inHdr: with(jsonHdr, "X-Other", "bravo2"), aBody: `["REDACTED_abc","alpha1"]`, bBody: `["q9P","alpha1"]`, body: `["` + liveSecret + `","bravo2"]`},
+		{name: "text-body", aURL: "/x/aa", bURL: "/x/otherz", live: "/x/other", aHdr: text, bHdr: text, inHdr: map[string]string{"Content-Type": "text/plain", "X-Other": "bravo2"}, aBody: `token REDACTED_abc`, bBody: `hello`, body: `token ` + liveSecret},
 		{name: "url-does-not-parse", aURL: "/x/%zz/REDACTED_abc", bURL: "/x/zz/q9P", live: "/x/zz/" + liveSecret, aHdr: jsonHdr, bHdr: jsonHdr, inHdr: jsonHdr, aBody: `{"x":"alpha1"}`, bBody: `{"x":"alpha1"}`, body: `{"x":"bravo2"}`},
 	}
 	for _, c := range cases {
@@ -863,8 +874,12 @@ func TestAMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 				a := recorded("a", c.aURL, c.aHdr, c.aBody)
 				a.Noise = value
 				b := recorded("b", c.bURL, c.bHdr, c.bBody)
+				// A third recording, far from the call, after the one that
+				// redacted: each recording of the pool is read, not the
+				// first or the last alone.
+				far := recorded("far", "/far/away/from/it", c.bHdr, c.bBody)
 				if mode == "off-stated-lifetime" {
-					for _, m := range []*models.Mock{a, b} {
+					for _, m := range []*models.Mock{a, b, far} {
 						m.Spec.Metadata = map[string]string{models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
 					}
 				}
@@ -873,14 +888,14 @@ func TestAMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 				request.Header = in.header.Clone()
 				var diag *matchDiag
 				if mode == "on" {
-					got, d := strictMatch(t, in, nil, nil, nil, b, a)
+					got, d := strictMatch(t, in, nil, nil, nil, b, a, far)
 					if got != nil {
 						t.Fatal("served a call that differs in x")
 					}
 					diag = d
 				} else {
 					t.Setenv(provenswitch.Env, "")
-					ok, _, d, err := newHTTP().match(context.Background(), in, &mockMemDb{mocks: []*models.Mock{b, a}, updateUnFilteredReturn: true}, nil, nil, nil, true, false, true, true, true)
+					ok, _, d, err := newHTTP().match(context.Background(), in, &mockMemDb{mocks: []*models.Mock{b, a, far}, updateUnFilteredReturn: true}, nil, nil, nil, true, false, true, true, true)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -889,7 +904,7 @@ func TestAMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 					}
 					diag = d
 				}
-				r := newHTTP().buildHTTPMismatchReport(request, []byte(c.body), &mockMemDb{mocks: []*models.Mock{b, a}}, nil, nil, nil, diag)
+				r := newHTTP().buildHTTPMismatchReport(request, []byte(c.body), &mockMemDb{mocks: []*models.Mock{b, a, far}}, nil, nil, nil, diag)
 				if r == nil {
 					t.Fatal("no report")
 				}
@@ -904,6 +919,17 @@ func TestAMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 				}
 				if strings.Contains(string(all), liveSecret) {
 					t.Errorf("the report at closest %q carries the live value at a place recording a redacted:\nsummary: %s\nDiff: %s\nReceivedReq:\n%s\nnext: %s", r.ClosestMock, r.ActualSummary, r.Diff, r.ReceivedReq, r.NextSteps)
+				}
+				// The rest of the call still shows, and the path diff names
+				// the recorded path, but where a recorded URL that does not
+				// parse leaves no place of the path to find.
+				if !strings.Contains(r.ReceivedReq, "bravo2") {
+					t.Errorf("ReceivedReq lost what no recording redacted:\n%s", r.ReceivedReq)
+				}
+				for _, d := range r.FieldDiffs {
+					if d.Path == "path" && c.name != "url-does-not-parse" && !strings.HasPrefix(d.Expected, "/x/") {
+						t.Errorf("the path diff does not name the recorded path: %+v", d)
+					}
 				}
 				if mode == "off-stated-lifetime" {
 					sessionHintMatchesTheCall(t, r, request)
@@ -920,7 +946,7 @@ func TestAMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 func TestAnAnsweredMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 	jsonHdr := map[string]string{"Content-Type": "application/json"}
 	const live = "/x/" + liveSecret + "/y"
-	for _, mode := range []string{"off", "off-stated-lifetime", "on"} {
+	for _, mode := range []string{"off", "off-stated-lifetime", "on", "off-read-again-empty"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, map[string]string{"on": "1"}[mode])
 			a := recorded("a", "/x/REDACTED_abc/y", jsonHdr, `{"x":"alpha1"}`)
@@ -938,7 +964,14 @@ func TestAnAnsweredMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 			request, _ := http.NewRequest("POST", "http://api.example"+live, strings.NewReader(`{"x":"bravo2"}`))
 			request.Header.Set("Content-Type", "application/json")
 			diag := &matchDiag{phase: models.MatchPhaseExhausted, candidates: 2, pool: []*models.Mock{b, a}, answered: answered}
-			r := newHTTP().buildHTTPMismatchReport(request, []byte(`{"x":"bravo2"}`), &mockMemDb{mocks: []*models.Mock{b, a}}, nil, nil, nil, diag)
+			db := &mockMemDb{mocks: []*models.Mock{b, a}}
+			if mode == "off-read-again-empty" {
+				// The db read again for the report holds none of the pool
+				// the walk was compared with (another connection consumed
+				// them since): the pool's places still redact it.
+				db = &mockMemDb{}
+			}
+			r := newHTTP().buildHTTPMismatchReport(request, []byte(`{"x":"bravo2"}`), db, nil, nil, nil, diag)
 			if r == nil || r.ClosestMock != "b" {
 				t.Fatalf("the report %+v does not name the walk's last recording b", r)
 			}
@@ -1052,7 +1085,7 @@ func TestAMissWithNoClosestRecordingNamesNoSecret(t *testing.T) {
 		read.Spec.Variables = models.MockVariables{"v": {Recorded: "recval", Bind: "url.path[1]"}}
 		request := newReq()
 		pool := []*models.Mock{read, other}
-		r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: poolPlaces(nil, pool).summary(request.Method, request.URL.EscapedPath())}, request, nil, pool, nil, poolPlaces(nil, pool))
+		r := withRoutePlaces(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: poolPlaces(nil, pool, request.URL.EscapedPath()).summary(request.Method, request.URL.EscapedPath())}, request, nil, pool, nil, poolPlaces(nil, pool, request.URL.EscapedPath()))
 		if len(r.VariablePlaces) == 0 {
 			t.Fatal("the row is of a call on the route of a declared path place")
 		}

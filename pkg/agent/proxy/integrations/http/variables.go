@@ -1685,7 +1685,7 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest string,
 	// Redacted by every recording's places (poolPlaces), the closest's
 	// among them when it is still in the pool. The summary names the path
 	// escaped (buildHTTPMismatchReport).
-	places := poolPlaces(closest, pool)
+	places := poolPlaces(closest, pool, request.URL.EscapedPath())
 	redactFieldDiffs(diffs, places, request.URL.EscapedPath())
 	actualKey := places.escapedSummary(request.Method, request.URL.EscapedPath())
 	b := mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
