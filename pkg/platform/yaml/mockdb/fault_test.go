@@ -34,6 +34,9 @@ func TestAFaultRoundTrips(t *testing.T) {
 		{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: 5, Observed: "the application stopped reading partway through the answer and closed the connection"},
 		{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: 5, ContentLength: 20},
 		{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: 5, Chunked: true},
+		{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: 5, Chunked: true, AppEndedFirst: true},
+		{Kind: models.FaultTimeout, AppEndedFirst: true},
+		{Kind: models.FaultTimeout},
 	} {
 		m := variablesMock()
 		f := want
@@ -56,6 +59,9 @@ func TestAFaultRoundTrips(t *testing.T) {
 		// never kind Http, whose head it would serve as a whole answer.
 		if !strings.Contains(text, "kind: HttpFault\n") {
 			t.Fatalf("a fault mock is not written as kind HttpFault:\n%s", text)
+		}
+		if strings.Contains(text, "app_ended_first: true\n") != want.AppEndedFirst {
+			t.Fatalf("the app_ended_first mark is written = %v, want %v:\n%s", !want.AppEndedFirst, want.AppEndedFirst, text)
 		}
 		if want.Delay != 0 && !strings.Contains(text, "delay: 1.5s") {
 			t.Fatalf("the delay is not written as a duration a person reads:\n%s", text)

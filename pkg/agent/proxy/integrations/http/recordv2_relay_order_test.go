@@ -286,7 +286,7 @@ func refused408(t *testing.T, round int, c *relayedConn, mocks []*models.Mock, p
 	if m.Spec.HTTPReq == nil || !strings.HasSuffix(m.Spec.HTTPReq.URL, path) {
 		t.Fatalf("round %d: the last mock is %v, want the call to %s", round, m.Spec.HTTPReq, path)
 	}
-	wantFault(t, m, models.Fault{Kind: models.FaultTimeout})
+	wantFault(t, m, models.Fault{Kind: models.FaultTimeout, AppEndedFirst: true})
 	return mocks[:len(mocks)-1]
 }
 

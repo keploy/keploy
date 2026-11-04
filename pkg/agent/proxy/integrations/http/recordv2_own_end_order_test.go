@@ -213,7 +213,7 @@ func TestRecordV2_ThroughTheRelayTheAppsOwnEndJudgesACallItClosedUnansweredWhich
 					if len(mocks) != 1 {
 						t.Fatalf("%s: recorded %d mocks, want the call the app gave up on", order.name, len(mocks))
 					}
-					wantFault(t, mocks[0], models.Fault{Kind: models.FaultTimeout})
+					wantFault(t, mocks[0], models.Fault{Kind: models.FaultTimeout, AppEndedFirst: true})
 				}
 			})
 		}

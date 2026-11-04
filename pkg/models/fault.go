@@ -50,6 +50,16 @@ type Fault struct {
 	// which replay sends it as. A head with neither this nor a
 	// ContentLength left the body to the connection's close to end.
 	Chunked bool `json:"chunked,omitempty" yaml:"chunked,omitempty" bson:"chunked,omitempty"`
+	// AppEndedFirst, for stopped_reading and timeout: at record the
+	// application had ended its side (its FIN, or a reset) before the
+	// upstream's end reached it, and the call was judged by that end. A FIN
+	// cannot say whether the application closed or only half-closed
+	// (shutdown(SHUT_WR)) and read on, so at replay its FIN, before the
+	// answer or after it, does not end the hold: only a reset or the run's
+	// end does. A fault without it (written by hand, or by a keploy that did
+	// not record it) ends the hold at the application's FIN, unless its
+	// socket says that FIN was in before the answer was written.
+	AppEndedFirst bool `json:"app_ended_first,omitempty" yaml:"app_ended_first,omitempty" bson:"app_ended_first,omitempty"`
 	// Delay, for a delay, is how long the whole answer is held before it is
 	// sent, bounded by the run. Only a delay takes one.
 	Delay time.Duration `json:"delay,omitempty" yaml:"delay,omitempty" bson:"delay,omitempty"`
@@ -73,7 +83,8 @@ const (
 	// BodyBytes of the body (AfterHead), before the application closed the
 	// connection: its own client gave up. It is the application's close that
 	// ends it, never a clock: replay answers nothing more and holds the
-	// connection until the application closes it or the run ends.
+	// connection until the application closes it or the run ends; one
+	// recorded with AppEndedFirst, until a reset or the run's end.
 	FaultTimeout FaultKind = "timeout"
 	// FaultTruncate: the upstream sent the head, with the Content-Length it
 	// sent, and BodyBytes of the body, then closed the connection.
@@ -90,8 +101,9 @@ const (
 	// upstream's Content-Length, which it does not reach; as one chunk with
 	// no last chunk; or, framed by the close, as it is; a compressed body
 	// flushed, not ended. Then it holds the connection until the
-	// application closes it or the run ends: the application's close ends
-	// it, never a clock. AfterHead always.
+	// application closes it or the run ends (with AppEndedFirst, as a
+	// recording writes it, until a reset or the run's end), never ended by
+	// a clock. AfterHead always.
 	FaultStoppedReading FaultKind = "stopped_reading"
 	// FaultDelay: the whole answer, sent once Delay has passed. A recording
 	// holds none (a record makes no verdict on wall-clock time); a delay is
@@ -140,8 +152,8 @@ func (f *Fault) Validate() error {
 		if f.Delay <= 0 {
 			return fmt.Errorf("fault delay of %s: a delay holds the answer for a positive duration", f.Delay)
 		}
-		if f.AfterHead || f.BodyBytes != 0 || f.ContentLength != 0 || f.Chunked {
-			return fmt.Errorf("fault delay with after_head, body_bytes, content_length or chunked: a delay sends the whole answer")
+		if f.AfterHead || f.BodyBytes != 0 || f.ContentLength != 0 || f.Chunked || f.AppEndedFirst {
+			return fmt.Errorf("fault delay with after_head, body_bytes, content_length, chunked or app_ended_first: a delay sends the whole answer")
 		}
 		return nil
 	case "":
@@ -154,6 +166,9 @@ func (f *Fault) Validate() error {
 	}
 	if f.Kind != FaultStoppedReading && (f.ContentLength != 0 || f.Chunked) {
 		return fmt.Errorf("fault %s with content_length or chunked: only kind stopped_reading takes them; its head is the mock's response as the upstream sent it", f.Kind)
+	}
+	if f.AppEndedFirst && f.Kind != FaultStoppedReading && f.Kind != FaultTimeout {
+		return fmt.Errorf("fault %s with app_ended_first: only kinds stopped_reading and timeout take it; the upstream's end judged this call", f.Kind)
 	}
 	if f.BodyBytes < 0 {
 		return fmt.Errorf("fault %s with body_bytes %d: a count of bytes sent is not negative", f.Kind, f.BodyBytes)

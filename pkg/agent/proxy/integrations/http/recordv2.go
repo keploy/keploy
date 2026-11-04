@@ -388,7 +388,7 @@ func noAnswerFault(sess *supervisor.Session, err error, exchanges int) *models.F
 		if sess.ClientEndNoFault() != supervisor.EndMayBeFault {
 			return nil
 		}
-		return &models.Fault{Kind: models.FaultTimeout, Observed: "the application closed the connection with no answer"}
+		return &models.Fault{Kind: models.FaultTimeout, AppEndedFirst: true, Observed: "the application closed the connection with no answer"}
 	}
 	if _, ok := sess.FirstPeerEnded(); !ok || sess.EndFollowedStop() {
 		return nil
@@ -423,8 +423,10 @@ func noAnswerFault(sess *supervisor.Session, err error, exchanges int) *models.F
 // later close of a socket whose FIN is out sends nothing, and the hooks keep
 // no record of that release, so nothing tells one that read to the
 // destination's end from one that gave up partway, unless the destination
-// sent bytes after that close. Its call is held at replay (stopped_reading),
-// past the FIN it sends again before the answer (holdUntilClosed): one that
+// sent bytes after that close. Its call is recorded as far as it read
+// (stopped_reading), or as a timeout, marked as one whose client ended its
+// side first (models.Fault.AppEndedFirst), which replay holds past any FIN
+// the app sends (holdUntilClosed), before the answer or after it: one that
 // read on waits there until its own timeout, never served an end it may not
 // have had.
 func clientEndJudges(sess *supervisor.Session) bool {
@@ -506,9 +508,12 @@ func partAnswerFault(sess *supervisor.Session) *models.Fault {
 }
 
 // stoppedReadingFault is the fault of a call whose client stopped reading the
-// answer partway and closed (partAnswerFault).
+// answer partway and closed (partAnswerFault). Its client's end came before
+// the destination's (AppEndedFirst): it judged the call (clientEndJudges),
+// or the relay found its FIN in before the chunk it did not take
+// (Session.EndedWhereClientStopped).
 func stoppedReadingFault() *models.Fault {
-	return &models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, Observed: "the application stopped reading partway through the answer and closed the connection"}
+	return &models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, AppEndedFirst: true, Observed: "the application stopped reading partway through the answer and closed the connection"}
 }
 
 // recordFault builds and emits the mock of a call that got no answer, with the

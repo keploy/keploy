@@ -271,7 +271,7 @@ type readsOnConn struct {
 	afterWrite chan struct{}
 }
 
-// NetConn is the conn under c, so the serve asks its socket (appEndedItsSide).
+// NetConn is the conn under c, so the serve asks its socket (heldPastFIN).
 func (c *readsOnConn) NetConn() net.Conn { return c.Conn }
 
 func (c *readsOnConn) Write(p []byte) (int, error) {
@@ -550,7 +550,7 @@ func wantStoppedReading(t *testing.T, m *models.Mock, body string, sent sentAs) 
 		t.Fatalf("recorded %+v, want a 200 with the body %q the app read", got, body)
 	}
 	want := models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: int64(len(body)),
-		ContentLength: sent.length, Chunked: sent.chunked,
+		ContentLength: sent.length, Chunked: sent.chunked, AppEndedFirst: true,
 		Observed: "the application stopped reading partway through the answer and closed the connection"}
 	if f == nil || *f != want {
 		t.Fatalf("recorded the fault %+v, want %+v", f, want)
@@ -637,10 +637,10 @@ func stoppedReadingIf(stopped bool, n int, sent sentAs) *models.Fault {
 
 // wireConn takes what is written to it, and reads as a connection the app
 // closed: an answer served on it ends where the replay holds the connection.
-// It has no socket under it, so the hold cannot tell the app's close from a
-// half-close, and holds on through it until ctx ends (appEndedItsSide): its
-// first read ends the serve's ctx too (end), as the proxy's would end with
-// the app's session.
+// It has no socket under it, so a hold past the app's FIN (a fault marked
+// AppEndedFirst, as a recording writes it: heldPastFIN) waits on ctx alone:
+// its first read ends the serve's ctx too (end), as the proxy's would end
+// with the app's session.
 type wireConn struct {
 	net.Conn
 	out bytes.Buffer

@@ -91,7 +91,8 @@ func TestRecordV2_ThroughTheRelayAHalfClosedAppThatReadToTheUpstreamsEndIsHeld(t
 						_ = c.app.SetReadDeadline(time.Now().Add(10 * time.Second))
 						n, err := c.app.Read(make([]byte, 1))
 						if n != 0 || !up.reset && !errors.Is(err, io.EOF) || up.reset && !errors.Is(err, syscall.ECONNRESET) {
-							t.Fatalf("the half-closed app read %d byte(s), %v, after the answer; want the upstream's end (io.EOF for a close, ECONNRESET for a reset)", n, err)
+							t.Fatalf("the half-closed app read %d byte(s), %v, "+
+								"after the answer; want the upstream's end (io.EOF for a close, ECONNRESET for a reset)", n, err)
 						}
 						mocks := c.end(t)
 						if c.sess.EndedWhereClientStopped() {
@@ -118,23 +119,24 @@ func TestRecordV2_ThroughTheRelayAHalfClosedAppThatTookPartThenClosedIsHeld(t *t
 	for _, shape := range partAnswers {
 		for _, up := range upstreamEnds {
 			for _, proven := range []string{"", "1"} {
-				t.Run(shape.name+"/"+up.name+"/it gave up or its process exited/KEPLOY_PROVEN="+proven, func(t *testing.T) {
-					t.Setenv("KEPLOY_PROVEN", proven)
-					for _, order := range ownEndOrders {
-						c := newRelayedConn(t)
-						halfClosedAppTakes(t, c, order.appFirst, shape.read)
-						c.clientEnd.Store(uint32(supervisor.EndMayBeFault))
-						if err := c.app.Close(); err != nil {
-							t.Fatal(err)
+				t.Run(
+					shape.name+"/"+up.name+"/it gave up or its process exited/KEPLOY_PROVEN="+proven, func(t *testing.T) {
+						t.Setenv("KEPLOY_PROVEN", proven)
+						for _, order := range ownEndOrders {
+							c := newRelayedConn(t)
+							halfClosedAppTakes(t, c, order.appFirst, shape.read)
+							c.clientEnd.Store(uint32(supervisor.EndMayBeFault))
+							if err := c.app.Close(); err != nil {
+								t.Fatal(err)
+							}
+							upstreamEndsAfter(t, c, up.reset)
+							mocks := c.end(t)
+							if !c.sess.ClientEndedBeforeDest() {
+								t.Fatalf("%s: the relay's look as it read the upstream's end did not find the app's FIN in", order.name)
+							}
+							wantHeldOnce(t, mocks, shape.body, shape.sent)
 						}
-						upstreamEndsAfter(t, c, up.reset)
-						mocks := c.end(t)
-						if !c.sess.ClientEndedBeforeDest() {
-							t.Fatalf("%s: the relay's look as it read the upstream's end did not find the app's FIN in", order.name)
-						}
-						wantHeldOnce(t, mocks, shape.body, shape.sent)
-					}
-				})
+					})
 			}
 		}
 	}

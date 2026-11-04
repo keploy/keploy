@@ -118,7 +118,7 @@ func TestRecordV2_ThroughTheRelayALateAnswerToACallTheClientGaveUpOnIsRecordedAs
 	}
 	m := mocks[0]
 	// A timeout before any answer: the client closed with nothing read.
-	wantFault(t, m, models.Fault{Kind: models.FaultTimeout})
+	wantFault(t, m, models.Fault{Kind: models.FaultTimeout, AppEndedFirst: true})
 	if r := m.Spec.HTTPResp; r != nil && (r.StatusCode != 0 || r.Body != "" || len(r.Header) != 0) {
 		t.Fatalf("recorded answer %+v, want none: the client never read the late answer", r)
 	}
@@ -559,7 +559,7 @@ func TestRecordV2_ThroughTheRelayAWholeResponseBeforeTheClientStoppedIsRecorded(
 	if len(mocks) != 2 {
 		t.Fatalf("recorded %d mocks, want 2: the whole response, then the call the client gave up on", len(mocks))
 	}
-	wantFault(t, mocks[1], models.Fault{Kind: models.FaultTimeout})
+	wantFault(t, mocks[1], models.Fault{Kind: models.FaultTimeout, AppEndedFirst: true})
 	assertPairs(t, mocks[:1], 7)
 	if s := c.spans.all(); len(s) != 0 || c.mgr.MocksLeftOut() != 0 {
 		t.Fatalf("left out %v (%d counted), want nothing", s, c.mgr.MocksLeftOut())

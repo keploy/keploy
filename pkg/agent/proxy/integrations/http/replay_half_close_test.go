@@ -17,34 +17,19 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 )
 
 // At replay a half-closed app half-closes again, as it did at record: its
-// request, then its FIN, in before the serve writes the answer. That FIN is
-// not its close: the hold reads the end of the stream and holds on, until a
-// reset or the run's end, so the app sees what it read at record and then
-// nothing until its own timeout. A FIN after the answer is the app's close,
-// and lets the connection go, as before.
-
-// idleMarks is a request holder (integrations.WithRequestHolder) that keeps
-// the idle marks a serve takes (integrations.MarkIdle), as the proxy's kept
-// connection does: marked closes once one is taken, released once it is
-// let go.
-type idleMarks struct {
-	marked, released chan struct{}
-	mark, release    sync.Once
-}
-
-func newIdleMarks() *idleMarks {
-	return &idleMarks{marked: make(chan struct{}), released: make(chan struct{})}
-}
-
-func (m *idleMarks) Hold() func() { return func() {} }
-
-func (m *idleMarks) MarkIdle() func() {
-	m.mark.Do(func() { close(m.marked) })
-	return func() { m.release.Do(func() { close(m.released) }) }
-}
+// request, then its FIN, which reaches the proxy before the serve writes the
+// answer or after it, as the scheduler has it. Its recording marked it as one
+// whose app ended its side first (models.Fault.AppEndedFirst), so that FIN,
+// in either order, is not taken for its close: the hold reads the end of the
+// stream and holds on, until a reset or the run's end, and the app sees what
+// it read at record and then nothing until its own timeout. A fault without
+// the mark (a recording of a keploy that did not write it) is held past a FIN
+// only where the FIN is in on the app's socket before the answer is written;
+// one after the answer lets the connection go, as before.
 
 // heldReplay is a serve of one mock to an app on a real socket.
 type heldReplay struct {
@@ -56,11 +41,11 @@ type heldReplay struct {
 
 // replayTo serves m to an app that sends request and, where halfClose, then
 // its FIN: the proxy reads the request, and the FIN once it is in (a read
-// returns the end of the stream), before the serve begins, as the proxy's
-// socket holds it by the time a matched answer is written. proxyOf wraps the
-// proxy's end where it is not nil. The proxy closes the app's connection once
-// decodeHTTP returns.
-func replayTo(t *testing.T, m *models.Mock, request string, halfClose bool, proxyOf func(net.Conn) net.Conn) heldReplay {
+// returns the end of the stream), before the serve begins, so the FIN is in
+// before the answer is written. proxyOf wraps the proxy's end where it is not
+// nil. The proxy closes the app's connection once decodeHTTP returns.
+func replayTo(t *testing.T, m *models.Mock, request string,
+	halfClose bool, proxyOf func(net.Conn) net.Conn) heldReplay {
 	t.Helper()
 	app, proxy := tcpPair(t)
 	t.Cleanup(func() { _ = app.Close() })
@@ -104,7 +89,8 @@ func (r heldReplay) held(t *testing.T) {
 	select {
 	case <-r.marks.marked:
 	case err := <-r.done:
-		t.Fatalf("decodeHTTP returned %v at the app's FIN, sent before the answer: the app is let go with an end it never had", err)
+		t.Fatalf("decodeHTTP returned %v at the app's FIN, sent before the answer: "+
+			"the app is let go with an end it never had", err)
 	case <-time.After(time.Minute): // turns a hang into a failure
 		t.Fatal("the serve neither held the half-closed app's connection nor returned")
 	}
@@ -137,15 +123,6 @@ func (r heldReplay) ended(t *testing.T, by string) {
 	}
 }
 
-func markedAt(m *idleMarks) bool {
-	select {
-	case <-m.marked:
-		return true
-	default:
-		return false
-	}
-}
-
 // readsUntilItsTimeout is the app's own client at replay: it parses the
 // answer, and reads its body until its own deadline. It checks the app got
 // body, and then nothing, no byte and no end, until that deadline.
@@ -158,7 +135,8 @@ func readsUntilItsTimeout(t *testing.T, app net.Conn, body string) {
 	}
 	got, err := io.ReadAll(resp.Body)
 	if string(got) != body || !errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatalf("the app read %q, then %v; want %q, then nothing until its own timeout, as at record", got, err, body)
+		t.Fatalf("the app read %q, then %v; "+
+			"want %q, then nothing until its own timeout, as at record", got, err, body)
 	}
 }
 
@@ -193,9 +171,10 @@ func halfClosedAtRecord(t *testing.T, shape string, readOn bool) *models.Mock {
 // the answer sees at replay what it saw at record, the part, then nothing
 // until its own timeout. One that read on to the upstream's end sees the
 // same at replay, the stated limit: its test fails by its own timeout, and
-// never passes on an end it may not have had. The serve holds on past the
-// app's FIN, marked idle, until a reset, here the app's (it closes with the
-// rest unread), or the run's end.
+// never passes on an end it may not have had. Its FIN reaches the proxy
+// before the answer is written, or after it: the serve holds on past it
+// either way, marked idle, until a reset, here the app's (it closes with
+// the rest unread), or the run's end.
 func TestReplay_AHalfClosedAppsHeldAnswerIsHeldPastItsFIN(t *testing.T) {
 	for _, shape := range partAnswers {
 		for _, readOn := range []bool{false, true} {
@@ -203,22 +182,36 @@ func TestReplay_AHalfClosedAppsHeldAnswerIsHeldPastItsFIN(t *testing.T) {
 			if readOn {
 				atRecord = "it read on to the upstream's end"
 			}
-			for _, end := range []string{"the app resets", "the run ends"} {
-				for _, proven := range []string{"", "1"} {
-					t.Run(shape.name+"/"+atRecord+"/"+end+"/KEPLOY_PROVEN="+proven, func(t *testing.T) {
-						t.Setenv("KEPLOY_PROVEN", proven)
-						m := throughDisk(t, halfClosedAtRecord(t, shape.read, readOn))
-						r := replayTo(t, m, jdkRequest(7), true, nil)
-						r.held(t)
-						readsUntilItsTimeout(t, r.app, shape.body)
-						r.stillHeld(t, "before the app's own timeout")
-						if end == "the app resets" {
-							resetConn(t, r.app)
-						} else {
-							r.stop()
-						}
-						r.ended(t, end)
-					})
+			for _, finFirst := range []bool{true, false} {
+				order := map[bool]string{true: "its FIN before the answer", false: "its FIN after the answer"}[finFirst]
+				for _, end := range []string{"the app resets", "the run ends"} {
+					for _, proven := range []string{"", "1"} {
+						t.Run(shape.name+"/"+atRecord+"/"+order+"/"+end+"/KEPLOY_PROVEN="+proven, func(t *testing.T) {
+							t.Setenv("KEPLOY_PROVEN", proven)
+							m := throughDisk(t, halfClosedAtRecord(t, shape.read, readOn))
+							if !m.Spec.Fault.AppEndedFirst {
+								t.Fatalf("recorded %+v, want it marked as an app that ended its side first", *m.Spec.Fault)
+							}
+							r := replayTo(t, m, jdkRequest(7), finFirst, nil)
+							if finFirst {
+								r.held(t)
+								readsUntilItsTimeout(t, r.app, shape.body)
+							} else {
+								readsUntilItsTimeout(t, r.app, shape.body)
+								if err := r.app.(*net.TCPConn).CloseWrite(); err != nil {
+									t.Fatal(err)
+								}
+								r.held(t)
+							}
+							r.stillHeld(t, "before the app's own timeout")
+							if end == "the app resets" {
+								resetConn(t, r.app)
+							} else {
+								r.stop()
+							}
+							r.ended(t, end)
+						})
+					}
 				}
 			}
 		}
@@ -226,8 +219,10 @@ func TestReplay_AHalfClosedAppsHeldAnswerIsHeldPastItsFIN(t *testing.T) {
 }
 
 // A timeout (the upstream silent, before its head or after part of its body)
-// served to an app that half-closed, as it did at record, holds past its FIN
-// too: the app waits until its own timeout, as at record.
+// without the mark (written by hand, or by a keploy that did not record it)
+// served to an app that half-closed, its FIN in before the answer is
+// written, holds past its FIN too, the app's socket asked: the app waits
+// until its own timeout, as at record.
 func TestReplay_ATimeoutServedToAHalfClosedAppIsHeldPastItsFIN(t *testing.T) {
 	for _, row := range []struct {
 		name  string
@@ -257,15 +252,19 @@ func TestReplay_ATimeoutServedToAHalfClosedAppIsHeldPastItsFIN(t *testing.T) {
 }
 
 // An app that keeps its side open while it reads, and closes once it has
-// what it wanted, ends the hold with that FIN, sent after the answer: the
-// connection is let go at once, as before, and never marked idle.
+// what it wanted, ends the hold of a fault without the mark with that FIN,
+// sent after the answer: the connection is let go at once, as before, and
+// never marked idle. The recorded stopped_reading has its mark taken off,
+// as a keploy that did not write it recorded it.
 func TestReplay_AFINAfterTheHeldAnswerEndsTheHold(t *testing.T) {
 	for _, row := range []struct {
 		name, request, body string
 		mock                func(t *testing.T) *models.Mock
 	}{
 		{"stopped_reading", jdkRequest(7), "01234", func(t *testing.T) *models.Mock {
-			return halfClosedAtRecord(t, partAnswers[0].read, false)
+			m := halfClosedAtRecord(t, partAnswers[0].read, false)
+			m.Spec.Fault.AppEndedFirst = false
+			return m
 		}},
 		{"timeout", faultReq, "01234", func(*testing.T) *models.Mock {
 			return faultMock(&models.Fault{Kind: models.FaultTimeout, AfterHead: true, BodyBytes: 5},
@@ -296,34 +295,111 @@ func TestReplay_AFINAfterTheHeldAnswerEndsTheHold(t *testing.T) {
 // the app's FIN came before the answer.
 type unaskedConn struct{ net.Conn }
 
-// Where the socket cannot be asked, a FIN cannot be told a half-close or a
-// close, and the hold holds on through it, until the run's end (fail closed:
-// never an end the app may not have had). A reset still ends it at once.
-func TestReplay_AHoldWhoseSocketCannotBeAskedHoldsPastAFIN(t *testing.T) {
+// Where the socket cannot be asked, as on Windows, a fault without the mark
+// is held as before: the app's FIN ends the hold, and so does its reset.
+// One marked as an app that ended its side first needs no socket: it holds
+// past the app's FIN until the run's end.
+func TestReplay_AHoldWhoseSocketCannotBeAskedEndsAtAFINUnlessMarked(t *testing.T) {
 	unasked := func(c net.Conn) net.Conn { return unaskedConn{c} }
-	for _, end := range []string{"the app closes", "the app resets"} {
-		t.Run(end, func(t *testing.T) {
-			m := faultMock(&models.Fault{Kind: models.FaultTimeout, AfterHead: true, BodyBytes: 5},
-				okHead("0123456789", map[string]string{"Content-Length": "10"}))
-			r := replayTo(t, m, faultReq, false, unasked)
-			readsUntilItsTimeout(t, r.app, "01234")
-			if end == "the app resets" {
-				resetConn(t, r.app)
+	for _, marked := range []bool{false, true} {
+		for _, end := range []string{"the app closes", "the app resets"} {
+			if marked && end == "the app resets" {
+				continue // TestAHoldOfAnAppThatEndedItsSideFirstOutlastsItsFIN
+			}
+			t.Run(end+map[bool]string{true: "/app_ended_first", false: ""}[marked], func(t *testing.T) {
+				m := faultMock(&models.Fault{Kind: models.FaultTimeout, AfterHead: true, BodyBytes: 5, AppEndedFirst: marked},
+					okHead("0123456789", map[string]string{"Content-Length": "10"}))
+				r := replayTo(t, m, faultReq, false, unasked)
+				readsUntilItsTimeout(t, r.app, "01234")
+				if end == "the app resets" {
+					resetConn(t, r.app)
+				} else if err := r.app.(*net.TCPConn).CloseWrite(); err != nil {
+					t.Fatal(err)
+				}
+				if marked {
+					r.held(t)
+					r.stillHeld(t, "at the app's FIN")
+					r.stop()
+					r.ended(t, "the run ends")
+					return
+				}
 				if err := awaitReturn(t, r.done); err != nil {
-					t.Fatalf("decodeHTTP = %v once the app reset, want nil", err)
+					t.Fatalf("decodeHTTP = %v once %s, want nil", err, end)
 				}
 				if markedAt(r.marks) {
-					t.Fatal("the serve marked the connection idle at the app's reset; want it let go")
+					t.Fatalf("the serve marked the connection idle once %s; want it let go", end)
 				}
-				return
-			}
-			if err := r.app.(*net.TCPConn).CloseWrite(); err != nil {
-				t.Fatal(err)
-			}
-			r.held(t)
-			r.stillHeld(t, "at the app's FIN")
-			r.stop()
-			r.ended(t, "the run ends")
-		})
+			})
+		}
+	}
+}
+
+// finAfterWriteConn is the proxy's end of a connection (a *net.TCPConn,
+// asked through NetConn) whose Write returns only once the app's FIN, which
+// it sends once it has read what was written, is in on the socket: a look
+// at the socket taken after the write would find it.
+type finAfterWriteConn struct {
+	net.Conn
+	once sync.Once
+}
+
+func (c *finAfterWriteConn) NetConn() net.Conn { return c.Conn }
+
+func (c *finAfterWriteConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.once.Do(func() { awaitPeerFIN(c.Conn) })
+	return n, err
+}
+
+// awaitPeerFIN waits, by the poller's events and bounded by a read deadline,
+// until c's socket has left ESTABLISHED: its peer's FIN (or reset) is in.
+func awaitPeerFIN(c net.Conn) {
+	rc, err := c.(*net.TCPConn).SyscallConn()
+	if err != nil {
+		return
+	}
+	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	defer func() { _ = c.SetReadDeadline(time.Time{}) }()
+	_ = rc.Read(func(fd uintptr) bool {
+		info, err := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO)
+		return err != nil || info.State != unix.BPF_TCP_ESTABLISHED
+	})
+}
+
+// A fault without the mark asks the app's socket once, before the serve
+// writes: a FIN the app sends once it has read the answer comes after that
+// look, even when it is in by the time the write returns, and lets the
+// connection go, as before.
+func TestReplay_AnUnmarkedServeAsksTheSocketBeforeItWrites(t *testing.T) {
+	for _, row := range []struct {
+		name    string
+		fault   *models.Fault
+		request string
+	}{
+		{"stopped_reading", &models.Fault{Kind: models.FaultStoppedReading, AfterHead: true, BodyBytes: 5, ContentLength: 10}, faultReq},
+		{"a timeout after the head", &models.Fault{Kind: models.FaultTimeout, AfterHead: true, BodyBytes: 5}, faultReq},
+	} {
+		for _, proven := range []string{"", "1"} {
+			t.Run(row.name+"/KEPLOY_PROVEN="+proven, func(t *testing.T) {
+				t.Setenv("KEPLOY_PROVEN", proven)
+				m := faultMock(row.fault, okHead("0123456789", map[string]string{"Content-Length": "10"}))
+				r := replayTo(t, m, row.request, false, func(c net.Conn) net.Conn { return &finAfterWriteConn{Conn: c} })
+				const want = "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n01234"
+				got := make([]byte, len(want))
+				_ = r.app.SetReadDeadline(time.Now().Add(10 * time.Second)) // turns a hang into a failure
+				if _, err := io.ReadFull(r.app, got); err != nil || string(got) != want {
+					t.Fatalf("the app read %q (%v); want %q", got, err, want)
+				}
+				if err := r.app.(*net.TCPConn).CloseWrite(); err != nil {
+					t.Fatal(err)
+				}
+				if err := awaitReturn(t, r.done); err != nil {
+					t.Fatalf("decodeHTTP = %v once the app closed after the answer, want nil", err)
+				}
+				if markedAt(r.marks) {
+					t.Fatal("the serve held past a FIN the app sent after the answer: its look came after the write")
+				}
+			})
+		}
 	}
 }
