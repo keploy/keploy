@@ -142,6 +142,37 @@ func TestLearnMatchFollowsAVariableInAHeaderKeployYmlDeclaresNoise(t *testing.T)
 	}
 }
 
+// A header keploy.yml declares with a pattern is declared where its recorded
+// and its live value each match one: a value an earlier call of the test
+// sent, carried there, is that variable's use, so the answer holds this
+// run's value.
+func TestLearnMatchFollowsAVariableInAHeaderKeployYmlDeclaresWithAPattern(t *testing.T) {
+	h, _, _ := learnOn(t)
+	opts := models.OutgoingOptions{Learn: true, NoiseConfig: map[string]map[string][]string{"header": {"X-Order": {"^o-[0-9]+$"}}}}
+	n := h.newLearnNoise(opts, nil, nil)
+	tr := learn.NewTracker()
+	tr.Begin()
+	db := &learnDb{perTest: []*models.Mock{
+		learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"order":"o-1"}`, nil, `{}`),
+		learnRecorded("mock-1", time.Second, "GET", "/v1/find", "", map[string]string{"X-Order": "o-1"}, `{"id":"o-1"}`),
+	}}
+	ctx := learn.WithTracker(context.Background(), tr)
+	if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/orders", `{"order":"o-9"}`, nil), db, n, opts); served == nil || miss != nil {
+		t.Fatalf("the first call is paired: %+v", miss)
+	}
+	served, miss, err := h.learnMatch(ctx, live("GET", "/v1/find", "", map[string]string{"X-Order": "o-9"}), db, n, opts)
+	if err != nil || miss != nil || served == nil {
+		t.Fatalf("served %v miss %+v err %v", served, miss, err)
+	}
+	if served.Spec.HTTPResp.Body != `{"id":"o-9"}` {
+		t.Fatalf("served %s: the answer holds this run's value", served.Spec.HTTPResp.Body)
+	}
+	use := db.consumed[1]
+	if want := (models.MockVariables{"order": {Recorded: "o-1", Use: []string{"header.x-order"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(use.Spec.Learned(), want) {
+		t.Fatalf("variables %+v, want %+v", use.Spec.Learned(), want)
+	}
+}
+
 // A header keploy's own list already excuses (X-Request-Id, traceparent,
 // the proven switch's amz-sdk-retry) stays keploy's own noise when
 // keploy.yml names it too: no leaf of the call's shape, so a call whose id
