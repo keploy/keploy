@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,7 +26,13 @@ type fakeComposeStack struct {
 	ps       []docker.ServiceState
 	psCalls  int
 	downCall int
-	upErr    error
+	// downGrace is the stop grace the last Down was given; downErr is what
+	// Down answers.
+	downGrace time.Duration
+	downErr   error
+	upErr     error
+	// upCalls counts Up, which a run calls from its own goroutine.
+	upCalls atomic.Int32
 	// upBlocksUntil, when non-nil, makes Up block until it is closed or the
 	// context ends — the shape a foreground `up` has.
 	upBlocksUntil chan struct{}
@@ -34,6 +41,7 @@ type fakeComposeStack struct {
 func (f *fakeComposeStack) ProjectName() string { return "fake" }
 
 func (f *fakeComposeStack) Up(ctx context.Context, _ docker.ComposeUpOptions, _, _ io.Writer) error {
+	f.upCalls.Add(1)
 	if f.upBlocksUntil != nil {
 		select {
 		case <-f.upBlocksUntil:
@@ -43,9 +51,10 @@ func (f *fakeComposeStack) Up(ctx context.Context, _ docker.ComposeUpOptions, _,
 	return f.upErr
 }
 
-func (f *fakeComposeStack) Down(context.Context, time.Duration) error {
+func (f *fakeComposeStack) Down(_ context.Context, grace time.Duration) error {
 	f.downCall++
-	return nil
+	f.downGrace = grace
+	return f.downErr
 }
 
 func (f *fakeComposeStack) Ps(context.Context) ([]docker.ServiceState, error) {

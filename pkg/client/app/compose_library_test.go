@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -346,5 +348,130 @@ func TestARegisteredComposeStackRunsTheInMemoryDocument(t *testing.T) {
 	noDoc.composeContent = nil
 	if noDoc.useComposeLibrary() {
 		t.Fatal("a compose file on disk takes the in-process path; only keploy's own in-memory document may")
+	}
+}
+
+// A run of keploy's own compose document, in a build with a runner, starts
+// the stack through that runner and tears it down through it: no `docker`
+// binary runs, which is what lets the agent image, which has no compose
+// plugin, run a compose replay.
+func TestARunDrivesTheInMemoryDocumentThroughTheRunner(t *testing.T) {
+	forceComposeLibrary(t)
+	argvLog := stubDockerCLI(t, "", 0)
+	stack := &fakeComposeStack{}
+	a := &App{
+		logger:          zap.NewNop(),
+		docker:          &inspectRecorder{},
+		kind:            utils.DockerCompose,
+		cmd:             "docker compose -f - up",
+		composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
+		keployContainer: "keploy-v3",
+		container:       "app",
+		composeServices: []string{"app", "keploy-agent"},
+		newComposeStack: func(context.Context) (composeStack, error) { return stack, nil },
+	}
+
+	if appErr := a.run(context.Background()); appErr.AppErrorType != models.ErrAppStopped {
+		t.Fatalf("the stack's up returned clean; run() reported %+v", appErr)
+	}
+
+	if n := stack.upCalls.Load(); n != 1 {
+		t.Fatalf("the runner's Up ran %d times; want once", n)
+	}
+	if stack.downCall != 1 {
+		t.Fatalf("the runner's Down ran %d times; want once", stack.downCall)
+	}
+	if log := recordedLog(t, argvLog); strings.Contains(log, "ARG") {
+		t.Fatalf("the run shelled out to a `docker` binary:\n%s", log)
+	}
+}
+
+// A state read on the in-process path asks the runner, which knows its own
+// project: it asks the daemon nothing to resolve one, whose answer it would
+// wait out however slow (composeProjectLabelAnswered) only to drop it.
+func TestALibraryStateReadAsksTheDaemonNothing(t *testing.T) {
+	forceComposeLibrary(t)
+	rec := &inspectRecorder{}
+	stack := &fakeComposeStack{ps: []docker.ServiceState{{ID: "id-db", Service: "db", State: "exited", ExitCode: 1}}}
+	a := &App{
+		logger:          zap.NewNop(),
+		docker:          rec,
+		composeContent:  []byte("services:\n  db:\n    image: postgres\n"),
+		cmd:             "docker compose -f - up",
+		keployContainer: "keploy-v3",
+		container:       "user-app",
+		newComposeStack: func(context.Context) (composeStack, error) { return stack, nil },
+	}
+
+	states := a.composeServiceStates(context.Background())
+
+	if len(states) != 1 || states[0].ID != "id-db" || states[0].ExitCode != 1 {
+		t.Fatalf("states %+v; want the runner's id-db, exited 1", states)
+	}
+	if len(rec.asked) != 0 {
+		t.Fatalf("a state read on the in-process path inspected %v on the daemon", rec.asked)
+	}
+}
+
+// On the in-process path the app's recent output is read under the runner's
+// project, where the runner's Up keeps it (StartAppOutputRun), and there is
+// none before a runner is built.
+func TestALibraryRunsRecentOutputIsReadUnderTheRunnersProject(t *testing.T) {
+	forceComposeLibrary(t)
+	docker.ForgetAppOutput()
+	t.Cleanup(docker.ForgetAppOutput)
+	a := &App{
+		logger:          zap.NewNop(),
+		composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
+		cmd:             "docker compose -p orderflow -f - up",
+		container:       "app",
+		composeService:  "app",
+		newComposeStack: func(context.Context) (composeStack, error) { return &fakeComposeStack{}, nil },
+	}
+	if got := a.recentAppOutput(); got != "" {
+		t.Fatalf("no runner built yet: recent output %q; want none", got)
+	}
+	if _, err := a.composeRunner(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	run := docker.StartAppOutputRun("fake")
+	docker.RecordAppOutputOfRun("fake", run, "fake-app-1", "app", "panic: the app crashed")
+
+	if got := a.recentAppOutput(); !strings.Contains(got, "panic: the app crashed") {
+		t.Fatalf("recent output %q; want the app's line the runner kept under its project", got)
+	}
+}
+
+// The library never runs the command in a shell, so an assignment in it does
+// not name the project the down takes; keploy's own environment does.
+func TestALibraryDownProjectIgnoresTheCommandsAssignment(t *testing.T) {
+	forceComposeLibrary(t)
+	t.Setenv("COMPOSE_PROJECT_NAME", "")
+	a := &App{
+		logger:         zap.NewNop(),
+		docker:         &inspectRecorder{},
+		composeContent: []byte("services:\n  app:\n    image: alpine\n"),
+		cmd:            "COMPOSE_PROJECT_NAME=assigned docker compose -f - up",
+	}
+	if got := a.composeDownProject(context.Background()); got != "" {
+		t.Fatalf("project %q; the library run never sees the command's assignment", got)
+	}
+	t.Setenv("COMPOSE_PROJECT_NAME", "Exported")
+	if got := a.composeDownProject(context.Background()); got != "exported" {
+		t.Fatalf("project %q; want keploy's own COMPOSE_PROJECT_NAME, normalized", got)
+	}
+}
+
+// With no in-memory document there is nothing for a runner to run: none is
+// built, and the caller hears why.
+func TestNoRunnerIsBuiltWithoutAnInMemoryDocument(t *testing.T) {
+	built := 0
+	a := &App{
+		logger:          zap.NewNop(),
+		composeFile:     "/tmp/keploy-compose.yaml",
+		newComposeStack: func(context.Context) (composeStack, error) { built++; return &fakeComposeStack{}, nil },
+	}
+	if r, err := a.composeRunner(context.Background()); err == nil || r != nil || built != 0 {
+		t.Fatalf("composeRunner with no document = (%v, %v), builder ran %d times; want an error and no build", r, err, built)
 	}
 }
