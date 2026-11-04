@@ -3,6 +3,7 @@ package models
 import (
 	"maps"
 	"slices"
+	"strings"
 )
 
 // How a mock was authored (Authored.How).
@@ -111,4 +112,68 @@ func (m *Mock) IsAuthored() bool {
 		return m.onDisk.authored
 	}
 	return m.Spec.Authored != nil
+}
+
+// Replaces is, for a derived mock (AuthoredDerived), the name of the
+// recording it was derived from: the mock part of Authored.Source
+// ("<test>/<mock>"). A replay serves a derived mock in its own test in
+// that recording's place: a replay of the test never serves the
+// recording, which keeps answering every other test as it did
+// (WithoutReplaced). "" for a generated or a recorded mock, and for a
+// Source that names no mock.
+func (m *Mock) Replaces() string {
+	if m == nil {
+		return ""
+	}
+	if m.onDisk != nil {
+		return m.onDisk.replaces
+	}
+	return m.Spec.Authored.replaces()
+}
+
+// replaces is Mock.Replaces of a mock whose authored record is a.
+func (a *Authored) replaces() string {
+	if a == nil || a.How != AuthoredDerived {
+		return ""
+	}
+	i := strings.LastIndex(a.Source, "/")
+	if i < 0 {
+		return ""
+	}
+	return a.Source[i+1:]
+}
+
+// ReplacedBy names the recordings the derived mocks of own, the mocks a
+// replay serves a test as its own, replace in that test (Mock.Replaces).
+// nil when own holds no derived mock.
+func ReplacedBy(own []*Mock) map[string]struct{} {
+	var out map[string]struct{}
+	for _, m := range own {
+		if n := m.Replaces(); n != "" {
+			if out == nil {
+				out = map[string]struct{}{}
+			}
+			out[n] = struct{}{}
+		}
+	}
+	return out
+}
+
+// WithoutReplaced is mocks less each one named in replaced (ReplacedBy), in
+// mocks' order: the pool a replay serves a test whose own mocks replace
+// them. It shares mocks' backing array only when it drops none.
+func WithoutReplaced(mocks []*Mock, replaced map[string]struct{}) []*Mock {
+	if len(replaced) == 0 {
+		return mocks
+	}
+	out := make([]*Mock, 0, len(mocks))
+	for _, m := range mocks {
+		if m != nil {
+			if _, gone := replaced[m.Name]; gone {
+				continue
+			}
+		}
+		out = append(out, m)
+	}
+	return out
 }

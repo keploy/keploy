@@ -99,3 +99,75 @@ func TestAFaultAnAuthoredMockServedIsNamedAsAuthored(t *testing.T) {
 		}
 	}
 }
+
+// A derived mock replaces, in its own test, the recording its Source names:
+// the mock part of "<test>/<mock>", whatever the test part holds, also once
+// its payload is left on disk. A generated or a recorded mock, and a Source
+// naming no mock, replace nothing; ReplacedBy collects what a test's own
+// replace, and WithoutReplaced drops exactly those, in order.
+func TestADerivedMockReplacesTheRecordingItsSourceNames(t *testing.T) {
+	for _, c := range []struct {
+		authored *Authored
+		want     string
+	}{
+		{nil, ""},
+		{&Authored{How: AuthoredDerived, Source: "pkg/a::TestCheckout/mock-7"}, "mock-7"},
+		{&Authored{How: AuthoredDerived, Source: "startup:/mock-0"}, "mock-0"},
+		{&Authored{How: AuthoredDerived, Source: "mock-7"}, ""},
+		{&Authored{How: AuthoredGenerated, Source: "TestCheckout/mock-7"}, ""},
+	} {
+		m := &Mock{Name: "mock-9", Kind: HTTP, Spec: MockSpec{Authored: c.authored}}
+		if got := m.Replaces(); got != c.want {
+			t.Errorf("Replaces() = %q with block %+v, want %q", got, c.authored, c.want)
+		}
+		recorded := payloadMocks()
+		d := recorded["http"]()
+		d.Name = "mock-9"
+		d.Spec.Authored = c.authored.Clone()
+		d.DeriveLifetime()
+		d.LeavePayloadOnDisk(&fileSource{recorded: recorded}, PayloadAt{Name: "http"})
+		if !d.PayloadOnDisk() || d.Spec.Authored != nil {
+			t.Fatalf("the payload stayed in memory: on disk %v, Spec.Authored %+v", d.PayloadOnDisk(), d.Spec.Authored)
+		}
+		if got := d.Replaces(); got != c.want {
+			t.Errorf("on disk: Replaces() = %q with block %+v, want %q", got, c.authored, c.want)
+		}
+	}
+	var none *Mock
+	if none.Replaces() != "" {
+		t.Fatal("a nil mock replaces a recording")
+	}
+
+	src, other, kept := &Mock{Name: "mock-1"}, &Mock{Name: "mock-2"}, &Mock{Name: "mock-3"}
+	derived := &Mock{Name: "mock-5", Spec: MockSpec{Authored: &Authored{How: AuthoredDerived, Source: "TestA/mock-1"}}}
+	if got := ReplacedBy([]*Mock{kept, nil}); got != nil {
+		t.Fatalf("ReplacedBy of no derived mock = %v, want nil", got)
+	}
+	replaced := ReplacedBy([]*Mock{kept, derived})
+	if len(replaced) != 1 {
+		t.Fatalf("ReplacedBy = %v, want mock-1 alone", replaced)
+	}
+	if _, ok := replaced["mock-1"]; !ok {
+		t.Fatalf("ReplacedBy = %v, want mock-1", replaced)
+	}
+	got := withoutReplacedOrFail(t, []*Mock{other, src, nil, kept}, replaced)
+	if len(got) != 3 || got[0] != other || got[1] != nil || got[2] != kept {
+		t.Fatalf("WithoutReplaced = %v, want mock-2, nil, mock-3", got)
+	}
+	pool := []*Mock{src, kept}
+	if got := WithoutReplaced(pool, nil); len(got) != 2 || &got[0] != &pool[0] {
+		t.Fatal("WithoutReplaced with nothing replaced is not the pool itself")
+	}
+}
+
+// withoutReplacedOrFail is WithoutReplaced, failing t, not the run, when it
+// panics (a nil entry of mocks must be kept, not read).
+func withoutReplacedOrFail(t *testing.T, mocks []*Mock, replaced map[string]struct{}) (out []*Mock) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("WithoutReplaced did not keep a nil entry: %v", r)
+		}
+	}()
+	return WithoutReplaced(mocks, replaced)
+}
