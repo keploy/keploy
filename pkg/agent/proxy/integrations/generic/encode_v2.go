@@ -177,6 +177,10 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 		// WrittenAt of the first response chunk currently held.
 		resHeadSeq       uint32
 		resHeadWrittenAt time.Time
+		// resHeadAt is when the relay read that chunk (its write's return
+		// when it has no read time): where the span of answer chunks left
+		// out from it starts (leaveOutTail).
+		resHeadAt        time.Time
 		reqTimestampMock time.Time
 		resTimestampMock time.Time
 		// prevChunkWasReq tracks request→response transitions so we know
@@ -201,6 +205,32 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 		ctx = sess.Ctx
 	}
 	emit := func(m *models.Mock) { emitV2(sess, logger, m) }
+	// leaveOutTail reports answer chunks the parser does not record as left
+	// out: chunks the server sent after the first chunk of an answer, which
+	// is the one its exchange records, and before the next request. n is how
+	// many there are (none: a no-op); they span from from, when the relay read
+	// the first of them or earlier, to when its write of the last returned
+	// (to): the times a test case that waited on them spans. Before, they were
+	// dropped
+	// with nothing left out or said, and a test case over an answer cut to
+	// its first chunk was saved as if it were whole.
+	//
+	// Chunks after an exchange left out (flushMock) are the rest of it,
+	// counted and spanned with it already: reported again, they would count
+	// a mock twice, and span time its test cases need not span.
+	var flushedLeftOut bool
+	leaveOutTail := func(n int, from, to time.Time) {
+		if n == 0 || flushedLeftOut {
+			return
+		}
+		tail := &models.Mock{Version: models.GetVersion(), Name: "mocks", Kind: models.GENERIC}
+		tail.Spec.ReqTimestampMock, tail.Spec.ResTimestampMock = from, to
+		sess.ReportLeftOut(tail, leftOutAnswerTail)
+		if logger != nil {
+			logger.Debug("generic v2: left out answer chunks sent after the chunk their exchange records",
+				zap.Int("chunks", n), zap.Time("from", from), zap.Time("to", to))
+		}
+	}
 	// hold is the connection's first exchange, and those after it, while the
 	// test that owns its request may own the whole connection (preambleHold).
 	// lastAt is the connection's latest chunk time.
@@ -240,6 +270,7 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 			reqReadAt = nil
 			resHeadSeq = 0
 			resHeadWrittenAt = time.Time{}
+			resHeadAt = time.Time{}
 			reqTimestampMock = time.Time{}
 			resTimestampMock = time.Time{}
 		}
@@ -274,8 +305,10 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 		if reason, ok := sess.TakeMockIncomplete(); ok {
 			sess.ReportLeftOut(mock, reason)
 			reset()
+			flushedLeftOut = true
 			return reason, true
 		}
+		flushedLeftOut = false
 		// A held exchange is consumed input, as an emitted one is: the
 		// session's pending work is cleared, or an idle spell while it is
 		// held reads as a hung parser.
@@ -391,9 +424,10 @@ drain:
 			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
 				flushMock()
 			}
-			// Starting a brand-new exchange: drop any orphaned
+			// Starting a brand-new exchange: leave out any orphaned
 			// response chunks from a previous multi-chunk server
-			// reply whose head chunk was already flushed, and anchor
+			// reply whose head chunk was already flushed (reported,
+			// with their span: leaveOutTail), and anchor
 			// the request timestamp to THIS chunk's ReadAt so we
 			// record when bytes actually hit the relay rather than
 			// when the parser got around to pairing them.
@@ -411,9 +445,11 @@ drain:
 				reqFirst
 			if len(genericRequests) == 0 {
 				if !answersThis {
+					leaveOutTail(len(genericResponses), resHeadAt, resTimestampMock)
 					genericResponses = nil
 					resHeadSeq = 0
 					resHeadWrittenAt = time.Time{}
+					resHeadAt = time.Time{}
 				}
 				reqTimestampMock = ev.readAt
 				carriedBySplit = false
@@ -427,14 +463,17 @@ drain:
 				// the next request starts clean, exactly as it would
 				// have had the two chunks arrived in wire order. That
 				// means the HEAD chunk only, with the rest of a reply
-				// the server split across chunks dropped: in wire
-				// order the head flushes the exchange and the tail is
-				// orphaned. Carrying the tail in as well would emit a
+				// the server split across chunks left out (reported,
+				// with its span: leaveOutTail): in wire order the head
+				// flushes the exchange and the tail is orphaned, and
+				// left out the same way. Carrying the tail in as well
+				// would emit a
 				// multi-response mock this parser has never produced,
 				// and replay writes every response buffer back — so
 				// the bytes a test replays would depend on which way
 				// the relay's two goroutines happened to be scheduled.
 				heldChunks := len(genericResponses)
+				tailFrom, tailTo := resHeadAt, resTimestampMock
 				genericResponses = genericResponses[:1]
 				resTimestampMock = resHeadWrittenAt
 				if logger != nil {
@@ -447,6 +486,7 @@ drain:
 						zap.Int("responseChunksKept", len(genericResponses)))
 				}
 				flushMock()
+				leaveOutTail(heldChunks-1, tailFrom, tailTo)
 				prevChunkWasReq = false
 			}
 
@@ -455,8 +495,8 @@ drain:
 			// parser created, so it owes the same precondition the
 			// split itself is held to: a response captured before the
 			// request cannot be its answer. In wire order that chunk
-			// is the tail of the PREVIOUS reply and is dropped;
-			// pairing it here instead records an answer this
+			// is the tail of the PREVIOUS reply and is left out (with
+			// its span: leaveOutTail); pairing it here instead records an answer this
 			// request never got — and generic mocks are session-scoped
 			// (Metadata type "config"), so replay's window filter short
 			// -circuits them into the unfiltered pool BEFORE its
@@ -471,6 +511,7 @@ drain:
 							zap.Time("responseWrittenAt", ev.writtenAt),
 							zap.Time("requestReadAt", reqReadAt[0]))
 					}
+					leaveOutTail(1, readOrWritten(ev), ev.writtenAt)
 					continue
 				}
 			}
@@ -557,6 +598,7 @@ drain:
 			if len(genericResponses) == 0 {
 				resHeadSeq = ev.connSeq
 				resHeadWrittenAt = ev.writtenAt
+				resHeadAt = readOrWritten(ev)
 			}
 			genericResponses = append(genericResponses, encodePayload(ev.bytes, models.FromServer))
 			// Per the migration spec, ResTimestampMock is WrittenAt of
@@ -569,7 +611,11 @@ drain:
 			// outstanding request arrives. This makes the mock
 			// visible BEFORE the next request (which may be seconds
 			// away on a pooled connection) so the syncMock buffer
-			// can associate it with the currently-active test.
+			// can associate it with the currently-active test. The
+			// chunks the server sends after it, before the next
+			// request, are left out with their span (leaveOutTail),
+			// so a test case over an answer the mock has only the
+			// first chunk of is left out, never saved as whole.
 			if prevChunkWasReq && len(genericRequests) > 0 {
 				flushMock()
 			}
@@ -578,8 +624,12 @@ drain:
 	}
 
 	// Final flush for any in-flight exchange that had at least one
-	// request and one response chunk by the time streams closed.
+	// request and one response chunk by the time streams closed. Answer
+	// chunks still held after it have no request to answer (the flush
+	// takes an exchange with both): the tail of the answer flushed last,
+	// left out as at a next request.
 	flushMock()
+	leaveOutTail(len(genericResponses), resHeadAt, resTimestampMock)
 	// The connection has ended: the first exchange held until now is the
 	// test's when the connection's whole lay inside it (preambleHold), known
 	// once the test's answer is.
@@ -671,6 +721,19 @@ func order(x, y stamp) (first, known bool) {
 		return false, false
 	}
 	return x.at.Before(y.at), true
+}
+
+// leftOutAnswerTail is the reason the parser leaves out the part of an answer
+// after the chunk its exchange records (pairChunkEvents' leaveOutTail).
+const leftOutAnswerTail = "the Generic recorder records an answer's first chunk only: the server sent this part of it after that chunk, before the next request, and it was left out"
+
+// readOrWritten is when the relay read ev's chunk, or when its write of it
+// returned when it has no read time.
+func readOrWritten(ev chunkEvent) time.Time {
+	if ev.readAt.IsZero() {
+		return ev.writtenAt
+	}
+	return ev.readAt
 }
 
 // leftOutRefusedAtStop is the reason emitV2 leaves out a mock the session
