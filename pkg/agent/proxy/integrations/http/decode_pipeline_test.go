@@ -575,12 +575,12 @@ func (c *queuedConn) Read(p []byte) (int, error) {
 
 func (c *queuedConn) queue(t *testing.T) {
 	t.Helper()
-	_ = c.Conn.SetReadDeadline(time.Now().Add(time.Minute)) // the bound only turns a hang into a failure
+	_ = c.SetReadDeadline(time.Now().Add(time.Minute)) // the bound only turns a hang into a failure
 	all, err := io.ReadAll(c.Conn)
 	if err != nil {
 		t.Fatalf("reading what the app sent until its close: %v", err)
 	}
-	_ = c.Conn.SetReadDeadline(time.Time{})
+	_ = c.SetReadDeadline(time.Time{})
 	c.mu.Lock()
 	c.queued = bytes.NewReader(all)
 	c.mu.Unlock()
