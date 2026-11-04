@@ -297,24 +297,17 @@ func (k strictKnown) bodyRefusal(risk string, live, recorded mismatch.ValueShape
 	return &patternRefusal{entry: entry, patterns: pats, live: live, recorded: recorded}
 }
 
-// refuse gives f the reason it is compared, naming the field as name and
-// the first value outside the patterns of each side that has one
-// (matcher.PatternWhy, matcher.PatternBothWhy), and the facts of it the
-// miss's hint names; a nil p, no refusal by patterns, leaves f as it is.
+// refuse gives f the facts of its refusal the miss's hint names, and the
+// reason it is compared, naming the field as name and the values outside
+// the patterns of each side that has some, by their few shapes
+// (mismatch.PatternMiss.Why); a nil p, no refusal by patterns, leaves f as
+// it is.
 func (p *patternRefusal) refuse(f *strictField, name string) {
 	if p == nil {
 		return
 	}
-	live, recorded := p.live.Shapes(), p.recorded.Shapes()
-	switch {
-	case len(live) > 0 && len(recorded) > 0:
-		f.why = matcher.PatternBothWhy(name, p.patterns, live[0], recorded[0])
-	case len(live) > 0:
-		f.why = matcher.PatternWhy(name, p.patterns, "live", live[0])
-	default:
-		f.why = matcher.PatternWhy(name, p.patterns, "recorded", slices.Concat(recorded, []string{""})[0])
-	}
 	f.pattern = &mismatch.PatternMiss{Path: f.diff.Path, Entry: p.entry, Patterns: p.patterns, Live: p.live, Recorded: p.recorded, Container: p.container}
+	f.why = f.pattern.Why(name)
 }
 
 // outside is a value of shape when out, none otherwise: one side's value a

@@ -670,12 +670,39 @@ func payloadHashPaths() []string {
 
 // reasonsOf are, of fields, those refused for a reason of their own (a
 // learned read of the application's clock the call does not carry:
-// clockDiffs), each named by its shape, with that reason, once.
+// clockDiffs; a value outside the patterns keploy.yml's noise guards a
+// field with: strictField.pattern), each named by its shape, with that
+// reason, once. A field the patterns refused at many places (an array's
+// elements share its shape) has one reason, of the values of every one of
+// them (mismatch.PatternMiss.Fold), which names a few shapes a side and
+// counts the rest: a field's reason stays small however many values miss.
 func reasonsOf(fields []strictField) []models.FieldReason {
 	var out []models.FieldReason
+	// facts[i] is the refusal by patterns out[i] says, folded over each
+	// place of its field; nil for a reason of another kind.
+	var facts []*mismatch.PatternMiss
+	at := map[string]int{} // a field's shape and patterns: its index in out
 	for _, f := range fields {
-		if r := (models.FieldReason{Field: f.shape, Why: f.why}); f.shape != "" && f.why != "" && !slices.Contains(out, r) {
-			out = append(out, r)
+		switch {
+		case f.shape == "" || f.why == "":
+		case f.pattern == nil:
+			if r := (models.FieldReason{Field: f.shape, Why: f.why}); !slices.Contains(out, r) {
+				out, facts = append(out, r), append(facts, nil)
+			}
+		default:
+			key := strings.Join(append([]string{f.shape}, f.pattern.Patterns...), "\x00")
+			if i, seen := at[key]; seen {
+				facts[i].Fold(*f.pattern)
+				continue
+			}
+			p := *f.pattern
+			at[key] = len(out)
+			out, facts = append(out, models.FieldReason{Field: f.shape}), append(facts, &p)
+		}
+	}
+	for i, p := range facts {
+		if p != nil {
+			out[i].Why = p.Why(out[i].Field)
 		}
 	}
 	return out

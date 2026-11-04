@@ -126,6 +126,34 @@ type PatternMiss struct {
 	Container bool
 }
 
+// Fold names o's values too, as values of m's field: o is another naming
+// of it (an array's elements share a path) or another field m's entry
+// guards. m keeps its own path, entry and patterns.
+func (m *PatternMiss) Fold(o PatternMiss) {
+	m.Live.merge(o.Live)
+	m.Recorded.merge(o.Recorded)
+	m.Container = m.Container || o.Container
+}
+
+// Why is why the matcher compares m's field, named field as a reason names
+// it: keploy.yml's noise lets it vary only within m's patterns, and m's
+// values of each side are outside them, each side's by its few shapes
+// (ValueShapes.String), so a reason is as small as ValueShapes keeps each
+// side however many values m names.
+func (m PatternMiss) Why(field string) string {
+	sides := strings.Join(m.sides(), " and ")
+	if sides == "" {
+		sides = "a value"
+	}
+	return matcher.PatternValuesWhy(field, m.Patterns, sides, m.Live.Len()+m.Recorded.Len() > 1)
+}
+
+// sides names m's values of each side that has some (ValueShapes.of), live
+// first.
+func (m PatternMiss) sides() []string {
+	return slices.DeleteFunc([]string{m.Live.of("live"), m.Recorded.of("recorded")}, func(s string) bool { return s == "" })
+}
+
 // maxNamedShapes is how many distinct shapes of one side's values a hint
 // names at most; it counts the values past them.
 const maxNamedShapes = 3
@@ -204,6 +232,19 @@ func (s ValueShapes) String() string {
 		out += " and " + strconv.Itoa(s.more) + " more"
 	}
 	return out
+}
+
+// of is how a hint or a reason names s's values as those of side (live,
+// recorded): "the live value (a string of 4 bytes)", "the recorded values
+// (a string of 2 bytes and 3 more)"; "" for none.
+func (s ValueShapes) of(side string) string {
+	switch s.Len() {
+	case 0:
+		return ""
+	case 1:
+		return "the " + side + " value (" + s.String() + ")"
+	}
+	return "the " + side + " values (" + s.String() + ")"
 }
 
 // NewReport starts a report for one missed call. actualSummary should be the
@@ -346,10 +387,7 @@ func (b *Builder) WithPatternMisses(misses ...PatternMiss) *Builder {
 	for _, m := range misses {
 		k := fieldKey(m.Path)
 		if i, seen := b.noise.guardedAt[k]; seen {
-			had := &b.noise.guarded[i]
-			had.Live.merge(m.Live)
-			had.Recorded.merge(m.Recorded)
-			had.Container = had.Container || m.Container
+			b.noise.guarded[i].Fold(m)
 			continue
 		}
 		if b.noise.guardedAt == nil {
@@ -750,15 +788,17 @@ func matchingNoise(protocol string, diffs []models.MockFieldDiff, n noiseFacts) 
 			if g.Entry != "" {
 				key = g.Entry
 			}
-			if w := b.widened[key]; w != nil {
+			// keploy.yml's keys are read without case, so an entry two
+			// fields name in two cases (id, ID) is one entry: it is named
+			// once, by its first naming's run.
+			if w := b.widened[strings.ToLower(key)]; w != nil {
 				// Another field the same entry guards: its patterns are to
 				// match that field's values too.
-				w.Live.merge(g.Live)
-				w.Recorded.merge(g.Recorded)
+				w.Fold(g)
 				continue
 			}
 			w := g
-			b.widened[key], b.widen = &w, append(b.widen, &w)
+			b.widened[strings.ToLower(key)], b.widen = &w, append(b.widen, &w)
 		}
 	}
 	var add, remedy []string
@@ -812,24 +852,11 @@ func widenRemedy(g *PatternMiss, header bool) string {
 	if len(g.Patterns) == 0 || values == 0 {
 		return key + " so they match the recorded and the live value"
 	}
-	var sides []string
-	for _, side := range []struct {
-		name   string
-		shapes ValueShapes
-	}{{"live", g.Live}, {"recorded", g.Recorded}} {
-		switch side.shapes.Len() {
-		case 0:
-		case 1:
-			sides = append(sides, fmt.Sprintf("the %s value (%s)", side.name, side.shapes))
-		default:
-			sides = append(sides, fmt.Sprintf("the %s values (%s)", side.name, side.shapes))
-		}
-	}
 	verb := "one matches"
 	if values > 1 {
 		verb = "they match"
 	}
-	return fmt.Sprintf("%s (%s) so %s %s", key, quotedPatterns(g.Patterns), verb, strings.Join(sides, " and "))
+	return fmt.Sprintf("%s (%s) so %s %s", key, quotedPatterns(g.Patterns), verb, strings.Join(g.sides(), " and "))
 }
 
 // quotedPatterns is patterns as a hint names them, each quoted.
