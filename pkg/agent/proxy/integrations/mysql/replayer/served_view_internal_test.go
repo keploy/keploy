@@ -126,6 +126,13 @@ func TestServedView_IsTheCommandAsSentAndTheAnswerAsWritten(t *testing.T) {
 			p := viewPacket(mysql.COM_STMT_PREPARE_OK, &mysql.StmtPrepareOkPacket{StatementID: 7, NumParams: 2})
 			return &p
 		}()},
+		// The statement id is the only part F numbers: the recorded answer
+		// with another id under another header is not the recorded one.
+		"the recorded answer with another statement id and header": {rec, func() *mysql.PacketBundle {
+			p := prepOK(7)
+			p.Header = &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 12, SequenceID: 2}, Type: p.Header.Type}
+			return &p
+		}()},
 		"an answer to a recording that holds none": {closeRec, &renumbered},
 		"a recording of two commands":              {viewRecording([]mysql.Request{prepare("SELECT ?"), prepare("SELECT ?")}, rec.Spec.MySQLResponses), &rec.Spec.MySQLResponses[0].PacketBundle},
 		"a recording of two answers":               {viewRecording(rec.Spec.MySQLRequests, []mysql.Response{rec.Spec.MySQLResponses[0], rec.Spec.MySQLResponses[0]}), &rec.Spec.MySQLResponses[0].PacketBundle},

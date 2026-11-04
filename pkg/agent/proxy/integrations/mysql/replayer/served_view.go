@@ -15,13 +15,15 @@ import (
 // reads a recording F served (learn.Order.ServedView): live is the command
 // as the application sent it, and written the answer F writes for it (nil:
 // a command the server does not answer, which F answers with nothing). The
-// recording byte for byte (learn.Tracker.ServedMockAsRecorded) where the
-// command is the recorded one and the answer the recorded one; otherwise the
-// view the serve gave (learn.Tracker.ServedMockLive, servedView). Without a
-// statement a later call of the set reads m as a serve no adapter stated,
-// and refuses every changed value that may stand there. It is told after
-// the consume, which numbered the serve, and only under the proven switch:
-// with the switch off nothing is stated, and the serve is as it was.
+// recording itself (learn.Tracker.ServedMockAsRecorded) where the command is
+// the recorded one, packet for packet, and the answer the recorded one,
+// packet for packet or but for the statement id F numbered in it (a
+// PREPARE's: servedView); otherwise the view the serve gave
+// (learn.Tracker.ServedMockLive, servedView). Without a statement a later
+// call of the set reads m as a serve no adapter stated, and refuses every
+// changed value that may stand there. It is told after the consume, which
+// numbered the serve, and only under the proven switch: with the switch off
+// nothing is stated, and the serve is as it was.
 func stateServed(ctx context.Context, m *models.Mock, live, written *mysql.PacketBundle) {
 	if m == nil || live == nil {
 		return
@@ -35,16 +37,18 @@ func stateServed(ctx context.Context, m *models.Mock, live, written *mysql.Packe
 // answer written (stateServed): m as the application sent live and F
 // answered it, built from the recording where a rule reads it, and the key
 // that names it among m's views; asRecorded where that view is m's
-// recording (live is its command, written its answer, packet for packet).
-// The view keeps the live command and the recorded answer. An answer F
-// wrote that is the recorded one with another statement id (a PREPARE's,
-// which F numbers per connection: matchCommandWith) gave the recorded
-// answer: F's own count of the connection's statements, which the
-// application's driver reads back in its next commands, is not part of
-// what F gave it, so a poller that prepares one recorded statement anew on
-// every call (Go's database/sql with interpolateParams off prepares each
-// query that has arguments) is one view, not one for each statement id.
-// An answer that is neither the recorded one nor that one with another
+// recording (live is its command, packet for packet, and written its
+// answer, packet for packet or but for the statement id F numbered in it,
+// a PREPARE's). The view keeps the live command and the recorded answer,
+// or no answer where F wrote none. An answer F wrote that is the recorded
+// one but for its statement id (a PREPARE's, which F numbers per
+// connection: matchCommandWith) gave the recorded answer: F's own count of
+// the connection's statements, which the application's driver reads back
+// in its next commands, is not part of what F gave it, so a poller that
+// prepares one recorded statement anew on every call (Go's database/sql
+// with interpolateParams off prepares each query that has arguments) is
+// one view, not one for each statement id.
+// An answer that is neither the recorded one nor that one but for its
 // statement id, or a recording that is not one command, is a view keploy
 // cannot read: nil, "" (fail closed). The key names the answer F gave,
 // never the command it answered: none, or the recorded one. Serves of m
@@ -114,7 +118,7 @@ func servedView(m *models.Mock, live, written *mysql.PacketBundle) (func() (*mod
 }
 
 // renumberedPrepare reports whether written is the recorded PREPARE answer
-// rec with another statement id.
+// rec but for its statement id.
 func renumberedPrepare(rec, written *mysql.PacketBundle) bool {
 	r, ok := rec.Message.(*mysql.StmtPrepareOkPacket)
 	if !ok || r == nil {
