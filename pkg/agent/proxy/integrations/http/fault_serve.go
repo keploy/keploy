@@ -2,14 +2,18 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -106,6 +110,7 @@ func (h *HTTP) serveFault(ctx context.Context, clientConn net.Conn, stub *models
 	if fault.Kind == models.FaultStoppedReading {
 		return h.serveStoppedReading(ctx, clientConn, stub, fault)
 	}
+	halfClosed := appEndedItsSide(clientConn)
 	if fault.SendsHead() {
 		head, err := h.faultHead(stub, fault)
 		if err != nil {
@@ -126,7 +131,7 @@ func (h *HTTP) serveFault(ctx context.Context, clientConn net.Conn, stub *models
 				zap.String("mock", stub.Name))
 		}
 	case models.FaultTimeout:
-		holdUntilClosed(ctx, clientConn)
+		holdUntilClosed(ctx, clientConn, halfClosed)
 	}
 	return true, nil
 }
@@ -216,6 +221,7 @@ func (h *HTTP) serveStoppedReading(ctx context.Context, clientConn net.Conn, stu
 	if err != nil {
 		return true, err
 	}
+	halfClosed := appEndedItsSide(clientConn)
 	if _, err := clientConn.Write(answer); err != nil {
 		if ctx.Err() != nil {
 			return true, nil
@@ -223,18 +229,42 @@ func (h *HTTP) serveStoppedReading(ctx context.Context, clientConn net.Conn, stu
 		return true, fmt.Errorf("http: write what the app read of mock %q, cut short: %w", name, err)
 	}
 	h.Logger.Info("served a mock's fault", zap.String("mock", name), zap.String("fault", fault.String()))
-	holdUntilClosed(ctx, clientConn)
+	holdUntilClosed(ctx, clientConn, halfClosed)
 	return true, nil
+}
+
+// appEndedItsSide reports whether the application's FIN (or a reset) is in on
+// c, its socket asked at once (pUtil.PeerGone), before the serve writes to
+// it: an app that sent its request and then shut its sending side down
+// (shutdown(SHUT_WR), Node's socket.end(data)) half-closed, and reads on.
+// Where the socket cannot be asked (no socket under c, or a platform that
+// cannot ask), it reports true: a half-close cannot be told from a close
+// there, and the hold holds on through either (fail closed).
+func appEndedItsSide(c net.Conn) bool {
+	gone, known := pUtil.PeerGone(c)
+	return gone || !known
 }
 
 // holdUntilClosed reads, and drops, what the application sends on c until it
 // closes c or ctx ends (decodeHTTP's InterruptOnDone ends the read then): a
 // timeout answers nothing more, and it is the application's own client that
-// gives up.
-func holdUntilClosed(ctx context.Context, c net.Conn) {
+// gives up. halfClosed is the application's end already in before the serve
+// wrote (appEndedItsSide): that FIN is its half-close, sent as it was at
+// record, not its close, so the end of c's stream does not let the app go.
+// Only a reset or ctx ends the hold then (pUtil.AwaitPeerReset): an app that
+// half-closed and then gave up sends nothing more, and waits until its own
+// timeout as it did at record. Meanwhile the connection is marked idle
+// (integrations.MarkIdle): its handler waits on the app, and holds no work a
+// test's end waits for.
+func holdUntilClosed(ctx context.Context, c net.Conn, halfClosed bool) {
 	var buf [512]byte
 	for ctx.Err() == nil {
 		if _, err := c.Read(buf[:]); err != nil {
+			if halfClosed && errors.Is(err, io.EOF) {
+				release := integrations.MarkIdle(ctx)
+				pUtil.AwaitPeerReset(ctx, c)
+				release()
+			}
 			return
 		}
 	}

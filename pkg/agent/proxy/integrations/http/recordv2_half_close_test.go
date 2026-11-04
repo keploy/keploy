@@ -24,11 +24,13 @@ import (
 // read on to the upstream's end and one that took part of the answer and then
 // gave up, exited or was stopped look the same to keploy whenever the upstream
 // sends nothing after that close. Both are recorded as far as they read
-// (stopped_reading), which replay serves without its end and holds: the app
-// that gave up sees what it saw, and the app that read on waits on the held
+// (stopped_reading), which replay serves without its end and holds past the
+// FIN the app sends again before the answer (holdUntilClosed): the app that
+// gave up sees what it saw, and the app that read on waits on the held
 // answer until its own timeout, so its test fails rather than passing on an
-// end it may never have had. Only bytes the upstream sends after the app's
-// close tell the two apart (its closed socket resets on them).
+// end it may never have had (replay_half_close_test.go). Only bytes the
+// upstream sends after the app's close tell the two apart (its closed socket
+// resets on them).
 
 // halfClosedAppTakes runs the start of one call through c: the app sends a
 // request and shuts its sending side down; once the relay has read its FIN,
@@ -106,40 +108,33 @@ func TestRecordV2_ThroughTheRelayAHalfClosedAppThatReadToTheUpstreamsEndIsHeld(t
 // A half-closed app that took part of the answer and then closed (it gave up,
 // or its process exited), the upstream then sending nothing more before it
 // closes or resets, is judged by its own end, the FIN it sent first, in both
-// orders the relay can read the two ends in. Its process's exit after that
-// FIN reads as the FIN: the hooks keep no record of the release of a socket
-// that had shut down (they write one only for a socket still established),
-// so the proxy's peerEndMarker finds none at the FIN and marks an end that
-// may be a fault, as for an app that gave up.
+// orders the relay can read the two ends in. Its giving up and its process's
+// exit are one row: after that FIN, an exit reads as the FIN, as a give-up
+// does. The hooks keep no record of the release of a socket that had shut
+// down (they write one only for a socket still established), so the proxy's
+// peerEndMarker finds none at the FIN and marks an end that may be a fault
+// (supervisor.EndMayBeFault) for both.
 func TestRecordV2_ThroughTheRelayAHalfClosedAppThatTookPartThenClosedIsHeld(t *testing.T) {
 	for _, shape := range partAnswers {
 		for _, up := range upstreamEnds {
-			for _, end := range []struct {
-				name   string
-				client supervisor.NoFaultEnd
-			}{
-				{"it gave up", supervisor.EndMayBeFault},
-				{"its process exited", supervisor.EndMayBeFault},
-			} {
-				for _, proven := range []string{"", "1"} {
-					t.Run(shape.name+"/"+up.name+"/"+end.name+"/KEPLOY_PROVEN="+proven, func(t *testing.T) {
-						t.Setenv("KEPLOY_PROVEN", proven)
-						for _, order := range ownEndOrders {
-							c := newRelayedConn(t)
-							halfClosedAppTakes(t, c, order.appFirst, shape.read)
-							c.clientEnd.Store(uint32(end.client))
-							if err := c.app.Close(); err != nil {
-								t.Fatal(err)
-							}
-							upstreamEndsAfter(t, c, up.reset)
-							mocks := c.end(t)
-							if !c.sess.ClientEndedBeforeDest() {
-								t.Fatalf("%s: the relay's look as it read the upstream's end did not find the app's FIN in", order.name)
-							}
-							wantHeldOnce(t, mocks, shape.body, shape.sent)
+			for _, proven := range []string{"", "1"} {
+				t.Run(shape.name+"/"+up.name+"/it gave up or its process exited/KEPLOY_PROVEN="+proven, func(t *testing.T) {
+					t.Setenv("KEPLOY_PROVEN", proven)
+					for _, order := range ownEndOrders {
+						c := newRelayedConn(t)
+						halfClosedAppTakes(t, c, order.appFirst, shape.read)
+						c.clientEnd.Store(uint32(supervisor.EndMayBeFault))
+						if err := c.app.Close(); err != nil {
+							t.Fatal(err)
 						}
-					})
-				}
+						upstreamEndsAfter(t, c, up.reset)
+						mocks := c.end(t)
+						if !c.sess.ClientEndedBeforeDest() {
+							t.Fatalf("%s: the relay's look as it read the upstream's end did not find the app's FIN in", order.name)
+						}
+						wantHeldOnce(t, mocks, shape.body, shape.sent)
+					}
+				})
 			}
 		}
 	}

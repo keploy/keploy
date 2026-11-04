@@ -271,6 +271,9 @@ type readsOnConn struct {
 	afterWrite chan struct{}
 }
 
+// NetConn is the conn under c, so the serve asks its socket (appEndedItsSide).
+func (c *readsOnConn) NetConn() net.Conn { return c.Conn }
+
 func (c *readsOnConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
 	c.wrote.Add(int64(n))
@@ -634,13 +637,30 @@ func stoppedReadingIf(stopped bool, n int, sent sentAs) *models.Fault {
 
 // wireConn takes what is written to it, and reads as a connection the app
 // closed: an answer served on it ends where the replay holds the connection.
+// It has no socket under it, so the hold cannot tell the app's close from a
+// half-close, and holds on through it until ctx ends (appEndedItsSide): its
+// first read ends the serve's ctx too (end), as the proxy's would end with
+// the app's session.
 type wireConn struct {
 	net.Conn
 	out bytes.Buffer
+	end context.CancelFunc
 }
 
 func (c *wireConn) Write(p []byte) (int, error) { return c.out.Write(p) }
-func (c *wireConn) Read([]byte) (int, error)    { return 0, io.EOF }
+func (c *wireConn) Read([]byte) (int, error) {
+	c.end()
+	return 0, io.EOF
+}
+
+// newWireConn is a wireConn and the ctx to serve on it with, which its first
+// read ends.
+func newWireConn(t *testing.T) (*wireConn, context.Context) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	return &wireConn{end: cancel}, ctx
+}
 
 // serveFrom is the answer replay serves from m, parsed: its response, the body
 // read to the end of the bytes served, and how that read ended. A mock with a
@@ -652,9 +672,9 @@ func serveFrom(t *testing.T, m *models.Mock) (*http.Response, []byte, error) {
 	var wire []byte
 	over := false
 	if m.Spec.Fault != nil {
-		c := &wireConn{}
+		c, ctx := newWireConn(t)
 		var err error
-		if over, err = h.serveFault(context.Background(), c, m, m.Spec.Fault); err != nil {
+		if over, err = h.serveFault(ctx, c, m, m.Spec.Fault); err != nil {
 			t.Fatal(err)
 		}
 		wire = c.out.Bytes()
@@ -1010,8 +1030,8 @@ func TestAFaultAfterTheHeadIsServedFromAResponseKeptApart(t *testing.T) {
 				})
 				m.MarkPooled()
 				h := &HTTP{Logger: zap.NewNop()}
-				c := &wireConn{} // the app closes once the answer is out
-				over, err := h.EnactFault(context.Background(), c, m)
+				c, ctx := newWireConn(t) // the app closes once the answer is out
+				over, err := h.EnactFault(ctx, c, m)
 				if err != nil || !over {
 					t.Fatalf("EnactFault = %v, %v; want the fault served, the call over", over, err)
 				}

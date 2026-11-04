@@ -423,9 +423,10 @@ func noAnswerFault(sess *supervisor.Session, err error, exchanges int) *models.F
 // later close of a socket whose FIN is out sends nothing, and the hooks keep
 // no record of that release, so nothing tells one that read to the
 // destination's end from one that gave up partway, unless the destination
-// sent bytes after that close. Its call is held at replay (stopped_reading):
-// one that read on waits there until its own timeout, never served an end it
-// may not have had.
+// sent bytes after that close. Its call is held at replay (stopped_reading),
+// past the FIN it sends again before the answer (holdUntilClosed): one that
+// read on waits there until its own timeout, never served an end it may not
+// have had.
 func clientEndJudges(sess *supervisor.Session) bool {
 	if sess.PeerEnded(fakeconn.FromClient) == supervisor.PeerOpen {
 		return false

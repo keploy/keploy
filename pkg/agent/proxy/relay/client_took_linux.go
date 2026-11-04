@@ -24,8 +24,8 @@ const canAskClientSockets = true
 // forwarder before it writes and as it reads the destination's end, one at a
 // time (Relay.finMu) and only until the FIN is found; resolve looks while
 // chunks wait for the client's answer, only after. No two looks run at once.
-// written is the destination's forwarder's, once the FIN is found, and may run while resolve looks: it has an answer of
-// its own.
+// written is the destination's forwarder's, once the FIN is found, and may
+// run while resolve looks: it has an answer of its own.
 //
 // The states (include/net/tcp_states.h, as golang.org/x/sys/unix names them)
 // the socket can be in while the relay asks it: ESTABLISHED, the client has
