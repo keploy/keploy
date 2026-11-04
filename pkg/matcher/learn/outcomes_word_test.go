@@ -588,6 +588,20 @@ func TestOutcomeAFreshWordIsAnsweredOnlyWhereItsAnswerHoldsTheRequestsTextWhole(
 		{"a header's word answered as a number", "header.x-trace", "t-r-1", "t-r-9", "1", "9",
 			[]Leaf{{Path: "body.ok", Noise: "body.ok", Type: Number, Value: "1"}}, "", "body.ok"},
 		{"an answer holding the word in another case", "body.batch", "batch-AB12", "batch-CD34", "AB12", "CD34", []Leaf{oText("body.ref", "ref ab12 seen")}, "", "body.ref"},
+		{"an answer holding a lower-case word in upper case", "body.batch", "batch-ab12", "batch-cd34", "ab12", "cd34", []Leaf{oText("body.ref", "REF AB12 SEEN")}, "", "body.ref"},
+		{"an answer holding the word percent-encoded", "body.batch", "batch-QX7Z", "batch-RW8Y", "QX7Z", "RW8Y", []Leaf{oText("body.next", "q%3Dbatch%20QX7Z%26p%3D2")}, "", "body.next"},
+		{"an answer holding the word in base64", "body.batch", "batch-QX7Z", "batch-RW8Y", "QX7Z", "RW8Y",
+			[]Leaf{oText("body.cursor", base64.StdEncoding.EncodeToString([]byte("cursor batch QX7Z page 2")))}, "", "body.cursor"},
+		{"an earlier leaf holding the word folded only", "body.batch", "batch-AB12", "batch-CD34", "AB12", "CD34",
+			[]Leaf{oText("body.a", "ref ab12"), oText("body.b", "REF AB12")}, "", "body.a"},
+		{"an earlier leaf holding the word as written only", "body.batch", "batch-AB12", "batch-CD34", "AB12", "CD34",
+			[]Leaf{oText("body.a", "AB12%41"), oText("body.b", "ref ab12")}, "", "body.a"},
+		{"a later leaf holding the word", "body.batch", "batch-14", "batch-15", "14", "15",
+			[]Leaf{oText("body.a", "nothing here"), oText("body.b", "still nothing"), oText("body.at", "seen 14 times")}, "", "body.at"},
+		{"a key holding the word after a leaf that does not", "body.batch", "batch-14", "batch-15", "14", "15",
+			[]Leaf{oText("body.a", "nothing"), {Path: "body{keys}", Noise: "body{keys}", Type: Keys, Value: "x\nrow_14_meta"}}, "", "body{keys}"},
+		{"a number of the answer that is the word", "body.batch", "batch-14", "batch-15", "14", "15",
+			[]Leaf{oText("body.a", "nothing"), {Path: "body.n", Noise: "body.n", Type: Number, Value: "14"}}, "", "body.n"},
 		{"an instant its protocol types whose minute is a word of the request", "body.batch", "batch-14", "batch-15", "14", "15",
 			[]Leaf{{Path: "body.at", Noise: "body.at", Type: Instant, Value: "2026-10-22T11:14:16Z"}}, "", ""},
 		{"an answer holding no word of the request", "body.batch", "batch-14", "batch-15", "14", "15", []Leaf{oText("body.at", "seen 15 times")}, "", ""},
@@ -610,6 +624,155 @@ func TestOutcomeAFreshWordIsAnsweredOnlyWhereItsAnswerHoldsTheRequestsTextWhole(
 			t.Errorf("%s (%s to %s): %s, echo %q, line %q; want fresh, answered at %q only, its line naming just that",
 				c.name, c.rec, c.live, oDescribe([]Decision{d}), got, d.Line, c.echo)
 		}
+	}
+}
+
+// A fresh word behind a decode step (a base64 JSON cursor, a percent-encoded
+// filter) or a URL-safe token read whole (its '-' and '_' moved) is read back
+// where an answer field holds the request field's whole recorded text, as
+// main's WholeEcho answers it: fresh, answered there at the same steps and
+// word (the token whole). Only inside a longer answer text, nothing reads it
+// back, and the word is refused naming that field, as main refuses it. An
+// adapter that cannot answer at a word refuses the echoed field; a key of
+// the answer that is the token whole is a place keploy cannot name.
+func TestOutcomeAFreshWordBehindADecodeStepIsAnsweredWhereItsFieldIsEchoedWhole(t *testing.T) {
+	b := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	cur, curF := b(`{"id":"A7K29QXM","n":3}`), b(`{"id":"Zq81Lm0X","n":3}`)
+	const pct, pctF = "id%3DA7K29QXM%26n%3D3", "id%3DZq81Lm0X%26n%3D3"
+	const tok, tokF = "Ab3-xY_9Qr7Lm2Xv9Tp4", "Kq8Zw1Pqn6Hd3-Rs5Ty2"
+	for _, c := range []struct {
+		name, path, rec, live, r, f string
+		resp                        []Leaf
+		noAnswerAtWord              bool
+		echo, refused               string
+	}{
+		{"a base64 JSON cursor echoed whole", "body.cursor", cur, curF, "A7K29QXM", "Zq81Lm0X", []Leaf{oText("body.ok", "true"), oText("body.cursor", cur)}, false, "body.cursor|b64#1", ""},
+		{"a percent-encoded filter echoed whole", "body.next", pct, pctF, "A7K29QXM", "Zq81Lm0X", []Leaf{oText("body.next", pct)}, false, "body.next|pct#1", ""},
+		{"a token whose separators moved echoed whole", "body.token", tok, tokF, tok, tokF, []Leaf{oText("body.token", tok)}, false, "body.token", ""},
+		{"a base64 JSON cursor inside a longer answer text", "body.cursor", cur, curF, "A7K29QXM", "Zq81Lm0X", []Leaf{oText("body.msg", "next "+cur+" ok")}, false, "", "comes back in the answer at body.msg,"},
+		{"a percent-encoded filter inside a longer answer text", "body.next", pct, pctF, "A7K29QXM", "Zq81Lm0X", []Leaf{oText("body.msg", "next="+pct+"&x=1")}, false, "", "comes back in the answer at body.msg,"},
+		{"a token inside a longer answer text", "body.token", tok, tokF, tok, tokF, []Leaf{oText("body.ok", "true"), oText("body.msg", "token "+tok+" ok")}, false, "", "comes back in the answer at body.msg,"},
+		{"a token that is a key of the answer", "body.token", tok, tokF, tok, tokF, []Leaf{{Path: "body{keys}", Type: Keys, Value: tok + "\nok", Unnamed: true}}, false, "", "body{keys}"},
+		{"a token echoed whole to an adapter that cannot answer at a word", "body.token", tok, tokF, tok, tokF, []Leaf{oText("body.token", tok)}, true, "", "cannot answer a word inside its answer"},
+	} {
+		in := oInput(c.path, c.rec, c.live, nil, nil)
+		in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
+		in.Resp = c.resp
+		in.Caps.AnswerAtWord = !c.noAnswerAtWord
+		ds := Decide(in)
+		if c.noAnswerAtWord {
+			if len(ds) != 1 {
+				t.Fatalf("%s: %s; want the field refused", c.name, oDescribe(ds))
+			}
+			oRefused(t, c.name, ds[0], RefusalCannotCheck, c.refused)
+			continue
+		}
+		d := oWord(t, ds, c.r, c.f)
+		if c.refused != "" {
+			oRefused(t, c.name, d, RefusalCannotCheck, c.refused)
+			continue
+		}
+		var echo []string
+		for _, a := range d.Echo {
+			echo = append(echo, a.String())
+		}
+		if got := strings.Join(echo, ", "); d.Outcome != OutcomeFresh || got != c.echo || !strings.Contains(d.Line, "answered at "+c.echo+",") {
+			t.Errorf("%s: %s, echo %q, line %q; want fresh, answered at %q", c.name, oDescribe([]Decision{d}), got, d.Line, c.echo)
+		}
+	}
+}
+
+// A Value behind a decode step whose field the answer echoes whole is bound,
+// as before: only a fresh word is read back there (wholeEchoes); a Value's
+// answer is left as readBack leaves it.
+func TestOutcomeAValueBehindADecodeStepKeepsItsAnswerWhereItsFieldIsEchoedWhole(t *testing.T) {
+	b := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	cur := b(`{"id":"A7K29QXM","n":3}`)
+	earlier := oServed("mock-0", false, false, Response, oText("body.id", "A7K29QXM"), "Zq81Lm0X", time.Millisecond)
+	in := oInput("body.cursor", cur, b(`{"id":"Zq81Lm0X","n":3}`), earlier, nil)
+	in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
+	in.Resp = []Leaf{oText("body.cursor", cur)}
+	if d := oWord(t, Decide(in), "A7K29QXM", "Zq81Lm0X"); d.Outcome != OutcomeValue || d.From.Mock != "mock-0" || len(d.Echo) > 0 {
+		t.Errorf("a Value behind a decode step, its field echoed whole: %s, from %+v, echo %v; want a value bound to mock-0, no echo", oDescribe([]Decision{d}), d.From, d.Echo)
+	}
+}
+
+// A fresh word beside an earlier place it set aside (the test's find gave
+// "blue-17" in both runs) whose answer holds it inside a longer text is
+// refused, as one nothing set aside is: the aside names no source, and
+// replay would give the application the recorded word back. Main refuses
+// the field there (unaccounted: the find holds a word of it).
+func TestOutcomeAFreshWordBesideAPlaceSetAsideIsRefusedWhereItsAnswerHoldsIt(t *testing.T) {
+	find := oServed("mock-0", false, false, Response, oText("body.tag", "blue-17"), "blue-17", time.Millisecond)
+	in := oInput("body.note", "blue-17", "red-42", find, nil)
+	in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
+	in.Resp = []Leaf{oText("body.msg", "seen 17 times")}
+	oRefused(t, "a word set aside at the find, held in the answer", oWord(t, Decide(in), "17", "42"), RefusalCannotCheck, "comes back in the answer at body.msg,")
+	in.Resp = []Leaf{oText("body.msg", "seen 99 times")}
+	if d := oWord(t, Decide(in), "17", "42"); d.Outcome != OutcomeFresh || !strings.Contains(d.Line, "set aside") {
+		t.Errorf("a word set aside at the find, not in the answer: %s, line %q; want fresh, naming the find set aside", oDescribe([]Decision{d}), d.Line)
+	}
+}
+
+// The call's answer is read once per call for the words its fresh words
+// ask (answerIndex): each answer text once, within the reader's budget and
+// past it, and each word one lookup, with no scan of the answer per word.
+// n fresh words against n answer leaves, the last holding the first word:
+// that word is refused, every other one fresh, as a scan per word decided.
+// A word asked past the budget that is none of the call's (no request word
+// gives it) is still found, by a scan of the leaves past the budget.
+func TestOutcomeACallsAnswerIsReadOncePerCallForItsFreshWords(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	const n = 300
+	word := func(i, k int) string { return fmt.Sprintf("Q%dZ%04dX", k, i) }
+	rec, live := Shape{Leaves: map[string]Leaf{}}, Shape{Leaves: map[string]Leaf{}}
+	var drift []string
+	var resp []Leaf
+	for i := 0; i < n; i++ {
+		p := fmt.Sprintf("body.items.%d.id", i)
+		rec.Leaves[p], live.Leaves[p] = oText(p, "id-"+word(i, 1)), oText(p, "id-"+word(i, 2))
+		drift = append(drift, p)
+		resp = append(resp, oText(fmt.Sprintf("body.rows.%d", i), "row "+word(i, 3)+" ok"))
+	}
+	resp = append(resp, oText("body.seen", "seen "+word(0, 1)+" once"), Leaf{Path: "body.at", Noise: "body.at", Type: Instant, Value: "2026-10-22T11:14:16Z"})
+	for _, c := range []struct {
+		what   string
+		budget int64
+	}{{"within the budget", 0}, {"past the budget", 1}} {
+		readerBudget = c.budget
+		in := Input{
+			Drifts: oDrifts(), Drift: drift, Live: live, Rec: rec, At: oAt, Arrived: oAt, Test: "test-2", Mock: "mock-300",
+			Caps:    Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true},
+			PlaceOf: func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) },
+			Resp:    resp,
+		}
+		x := newReaderIndex(in.Drifts)
+		dc := newDecider(in, false, x)
+		ds, _ := dc.decide()
+		fresh := 0
+		for _, d := range ds {
+			if d.Outcome == OutcomeFresh {
+				fresh++
+			}
+		}
+		oRefused(t, c.what+", the word the last leaf holds", oWord(t, ds, word(0, 1), word(0, 2)), RefusalCannotCheck, "comes back in the answer at body.seen,")
+		if fresh != n-1 || len(ds) != n {
+			t.Errorf("%s: %d decisions, %d fresh; want %d, all but one fresh: %s", c.what, len(ds), fresh, n, oDescribe(ds[:min(len(ds), 3)]))
+		}
+		ai := dc.answer
+		if ai == nil || ai.asks != n || ai.reads != len(resp)-1 || ai.scans != 0 {
+			t.Fatalf("%s: the answer index %+v; want %d words asked, each of the %d answer texts but the instant read once, no scan", c.what, ai, n, len(resp)-1)
+		}
+		if past := ai.past < len(resp); past != (c.budget > 0) {
+			t.Errorf("%s: the index went past the budget at leaf %d of %d; want past it %v", c.what, ai.past, len(resp), c.budget > 0)
+		}
+		if got := dc.answerHoldsWord("row"); got != "body.rows.0" || ai.scans != map[bool]int{true: 1, false: 0}[c.budget > 0] {
+			t.Errorf("%s: a word none of the call's, held from the first answer leaf: %q, %d scans; want body.rows.0, scanned past the budget only", c.what, got, ai.scans)
+		}
+		if got := dc.answerHoldsWord("2026"); got != "" {
+			t.Errorf("%s: a word only the answer's typed instant holds: %q; want none", c.what, got)
+		}
+		x.release()
 	}
 }
 
