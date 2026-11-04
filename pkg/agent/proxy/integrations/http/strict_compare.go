@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
@@ -359,6 +360,10 @@ type strictField struct {
 	// keploy.yml's noise guards with patterns a side is outside of, that
 	// (matcher.PatternWhy).
 	why string
+	// pattern is, of a field keploy.yml's noise guards with patterns a
+	// side is outside of, the patterns, that side and its value's shape,
+	// for the miss's hint to name (patternRefusal); nil for every other.
+	pattern *mismatch.PatternMiss
 	// clock: the field is a read of the application's clock a replay
 	// refused (clockDiffs), not a part the walk found differing. It says
 	// nothing of the call's route (routeMatches): the walk excuses a place
@@ -366,6 +371,25 @@ type strictField struct {
 	// its recording is of the call's route whatever the read's check says.
 	// A recording of another route drops it (walkOnly).
 	clock bool
+}
+
+// patternRefusal is why keploy.yml's noise, which lets a field vary only
+// within patterns, refused it: side's value, value its shape (valueShape),
+// is outside them.
+type patternRefusal struct {
+	patterns    []string
+	side, value string
+}
+
+// refuse gives f the reason it is compared, naming the field as name
+// (matcher.PatternWhy), and the facts of it the miss's hint names; a nil p,
+// no refusal by patterns, leaves f as it is.
+func (p *patternRefusal) refuse(f *strictField, name string) {
+	if p == nil {
+		return
+	}
+	f.why = matcher.PatternWhy(name, p.patterns, p.side, p.value)
+	f.pattern = &mismatch.PatternMiss{Path: f.diff.Path, Patterns: p.patterns, Side: p.side, Value: p.value}
 }
 
 // field is a strictField whose name holds no value (a fixed part, a header).
@@ -1134,21 +1158,20 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 		// unless its recorded and its live value each match one; why says
 		// which side is outside them, by its length.
 		pats, guarded := k.n.headerPats[name]
-		why := func(side string, v string, ok bool) string {
-			if !guarded {
-				return ""
+		refuse := func(f *strictField, side string, v string, ok bool) {
+			if guarded {
+				(&patternRefusal{patternStrings(pats), side, valueShape(v, ok)}).refuse(f, path)
 			}
-			return matcher.PatternWhy(path, patternStrings(pats), side, valueShape(v, ok))
 		}
 		switch {
 		case !inLive:
 			f := field(models.MockFieldDiff{Path: path, Kind: models.DiffKindMissingInLive, Expected: rv})
-			f.why = why("live", "", false)
+			refuse(&f, "live", "", false)
 			out = append(out, f)
 			continue
 		case !inRec:
 			f := field(models.MockFieldDiff{Path: path, Kind: models.DiffKindMissingInMock, Actual: strings.Join(lvs, ",")})
-			f.why = why("recorded", "", false)
+			refuse(&f, "recorded", "", false)
 			out = append(out, f)
 			continue
 		}
@@ -1159,9 +1182,9 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 		}
 		patternField := func(f strictField) strictField {
 			if liveOK {
-				f.why = why("recorded", rv, true)
+				refuse(&f, "recorded", rv, true)
 			} else {
-				f.why = why("live", lv, true)
+				refuse(&f, "live", lv, true)
 			}
 			return f
 		}
@@ -1354,12 +1377,12 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 		}
 		// A recorded value the obfuscator redacted is not held to the
 		// patterns; the key's other recorded values and the live ones are.
-		covered, why := k.fieldCovers(key, shape, k.unredacted(rv), lv)
+		covered, refusal := k.fieldCovers(key, k.unredacted(rv), lv)
 		if covered {
 			continue
 		}
 		f := shaped(path, shape, models.DiffKindValueChanged, "", "")
-		f.why = why
+		refusal.refuse(&f, shape)
 		out = append(out, f)
 	}
 	return out
@@ -1368,12 +1391,12 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 // fieldCovers reports whether keploy.yml's noise excuses the form or
 // multipart field key, which both bodies hold, with the values rec and live:
 // an entry with patterns does only when each value of each side matches one
-// (an entry with none is read before). why is, where such an entry does
-// not, the reason it is compared: the live side's value outside them first.
-func (k strictKnown) fieldCovers(key, shape string, rec, live []string) (covered bool, why string) {
+// (an entry with none is read before). refusal is, where such an entry does
+// not, why it is compared: the live side's value outside them first.
+func (k strictKnown) fieldCovers(key string, rec, live []string) (covered bool, refusal *patternRefusal) {
 	pats, ok := k.n.body.Patterns(key)
 	if !ok {
-		return false, ""
+		return false, nil
 	}
 	for _, side := range []struct {
 		name   string
@@ -1381,11 +1404,11 @@ func (k strictKnown) fieldCovers(key, shape string, rec, live []string) (covered
 	}{{"live", live}, {"recorded", rec}} {
 		for _, v := range side.values {
 			if !k.n.body.Covers(key, v, true) {
-				return false, matcher.PatternWhy(shape, pats, side.name, valueShape(v, true))
+				return false, &patternRefusal{pats, side.name, valueShape(v, true)}
 			}
 		}
 	}
-	return true, ""
+	return true, nil
 }
 
 // guards reports whether keploy.yml's request-body entry with patterns names
@@ -1456,7 +1479,7 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 	var out []strictField
 	for i := range rp {
 		path, shape := "body."+rp[i].name, "body."+shapeKey(rp[i].name)
-		var why string
+		var refusal *patternRefusal
 		switch {
 		case rp[i].name != lp[i].name || rp[i].file != lp[i].file:
 			return append(out, bodyChanged())
@@ -1472,12 +1495,12 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 				held = nil
 			}
 			var covered bool
-			if covered, why = k.fieldCovers(rp[i].name, shape, held, []string{string(lp[i].data)}); covered {
+			if covered, refusal = k.fieldCovers(rp[i].name, held, []string{string(lp[i].data)}); covered {
 				continue
 			}
 		}
 		f := shaped(path, shape, models.DiffKindValueChanged, "", "")
-		f.why = why
+		refusal.refuse(&f, shape)
 		out = append(out, f)
 	}
 	return out
@@ -1534,9 +1557,9 @@ func decodeJSONDoc(b []byte) (interface{}, bool) {
 // only its type is compared.
 func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, learned bool, out *[]strictField) {
 	name := "body"
-	// why is, where keploy.yml's noise guards this field with patterns
-	// one side's value is outside of, the reason it is compared.
-	var why string
+	// refusal is, where keploy.yml's noise guards this field with patterns
+	// one side's value is outside of, why it is compared.
+	var refusal *patternRefusal
 	guarded, liveOK := false, false
 	if risk != "" {
 		name = "body." + risk
@@ -1552,7 +1575,7 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 			if liveOK {
 				side, v = "recorded", r
 			}
-			why = matcher.PatternWhy(shape, pats, side, valueShape(v, true))
+			refusal = &patternRefusal{pats, side, valueShape(v, true)}
 		}
 	}
 	// A recorded value the obfuscator redacted is not compared; under
@@ -1566,7 +1589,7 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 	learned = !guarded && !k.noiseBarred(exact) && (learned || k.learnedAt(exact, name))
 	if jsonKind(r) != jsonKind(l) {
 		f := shaped(name, shape, models.DiffKindTypeChanged, jsonKind(r), jsonKind(l))
-		f.why = why
+		refusal.refuse(&f, shape)
 		*out = append(*out, f)
 		return
 	}
@@ -1606,7 +1629,7 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 		lv := l.([]interface{})
 		if len(rv) != len(lv) {
 			f := shaped(name, shape, models.DiffKindValueChanged, strconv.Itoa(len(rv))+" elements", strconv.Itoa(len(lv))+" elements")
-			f.why = why
+			refusal.refuse(&f, shape)
 			*out = append(*out, f)
 			return
 		}
@@ -1618,7 +1641,7 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 			return
 		}
 		f := shaped(name, shape, models.DiffKindValueChanged, scalarText(r), scalarText(l))
-		f.why = why
+		refusal.refuse(&f, shape)
 		if strings.Contains(risk, "[]") {
 			// Elements of an array share one name, so the values would not
 			// say which element changed: the field alone.
@@ -1635,7 +1658,7 @@ func (k strictKnown) oneSided(risk, shape string, kind models.MockFieldDiffKind,
 	f := shaped("body."+risk, shape, kind, "", "")
 	// Reached only when no entry with no patterns names the field.
 	if pats, ok := k.n.body.Patterns(risk); ok {
-		f.why = matcher.PatternWhy(shape, pats, absent, valueShape(held, false))
+		(&patternRefusal{pats, absent, valueShape(held, false)}).refuse(&f, shape)
 	}
 	return f
 }

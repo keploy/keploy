@@ -628,7 +628,7 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest string, d
 		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).
 		WithClosest(closest.Name, diffs).
-		WithGuarded(guardedPaths(diag.differs)...).
+		WithPatternMisses(patternMisses(diag.differs)...).
 		WithoutNoise(payloadHashPaths()...).
 		WithRenderedRequests(
 			renderMockRequest(closest.Spec.HTTPReq, closest.Noise),
@@ -641,14 +641,14 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest string, d
 	return r
 }
 
-// guardedPaths are the report paths of fields keploy.yml's noise guards with
-// patterns that a side's value is outside of: those with a reason that is no
-// refused read of the application's clock (strictField.why).
-func guardedPaths(fields []strictField) []string {
-	var out []string
+// patternMisses are, of fields, those keploy.yml's noise guards with
+// patterns that a side's value is outside of, each with those patterns and
+// that side (strictField.pattern), for the miss's hint to name.
+func patternMisses(fields []strictField) []mismatch.PatternMiss {
+	var out []mismatch.PatternMiss
 	for _, f := range fields {
-		if f.why != "" && !f.clock {
-			out = append(out, f.diff.Path)
+		if f.pattern != nil {
+			out = append(out, *f.pattern)
 		}
 	}
 	return out
