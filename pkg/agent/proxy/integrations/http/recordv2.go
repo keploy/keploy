@@ -265,8 +265,10 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				cut = errors.Is(err, errAnswerCut) || !streamEnded || !peerEnded
 			} else if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
 				// The parser's context ended partway through the response:
-				// left out below when the recording's stop ended it, and
-				// returned as before otherwise.
+				// left out below, for the stop where the recording's stop
+				// ended it, and as the session's cut where neither side's
+				// end had come, as at the abort's close; returned as before
+				// at a capture hole after a side's end.
 				cut, ctxEnded = true, true
 			} else {
 				if ctx.Err() != nil {
@@ -343,9 +345,6 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				return nil
 			}
 		}
-		if ctxEnded {
-			return ctx.Err()
-		}
 
 		// Build and emit the mock. Identical shape to the legacy path.
 		// The exchange is judged by how its connection ended where its
@@ -364,26 +363,34 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// close-delimited body the client's end cut recorded whole as far
 		// as it came: its end, the upstream's close, never came.
 		_, endedFirst := ends.First()
-		if readerClosed && !endedFirst {
-			// The session closed the stream under the read (the
-			// supervisor's abort), partway through the response, with
-			// neither side's end come by then and not at the recording's
-			// stop (stopCut's, asked above): no end judges the read. The
-			// response is not whole, and a close-delimited body's end, the
-			// upstream's close, never came, so it is left out with its span:
-			// never recorded whole as far as it came, nor built into a
-			// response that does not decode, with an ERROR. The parser's
+		if (readerClosed || ctxEnded) && !endedFirst {
+			// The session ended the read partway through the response: it
+			// closed the stream under it (the supervisor's abort), or the
+			// parser's context, the session's, ended under it, with neither
+			// side's end come by then and not at the recording's stop
+			// (stopCut's, asked above): no end judges the read. The response
+			// is not whole, and a close-delimited body's end, the upstream's
+			// close, never came, so it is left out with its span, whichever
+			// of the two ended the read: never recorded whole as far as it
+			// came, nor built into a response that does not decode, with an
+			// ERROR, nor dropped with nothing reporting it. The parser's
 			// context's end, if it has ended, is returned, as for a read the
 			// context's end stops with the connection open.
 			reason := supervisor.LeftOutAbortCut
 			if mark, ok := sess.TakeMockIncomplete(); ok {
 				reason = mark + ": " + reason
 			}
-			logger.Debug("V2 HTTP record: the session closed the response's stream partway through it; the exchange is left out", zap.String("reason", reason))
+			logger.Debug("V2 HTTP record: the session ended the response's read partway through it; the exchange is left out", zap.String("reason", reason))
 			sess.ReportLeftOut(&models.Mock{
 				Kind: models.HTTP,
 				Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
 			}, reason)
+			return ctx.Err()
+		}
+		if ctxEnded {
+			// A side's end came first, and the destination's stream ended
+			// at a capture hole (endJudgesAfterCtx): the capture lost the
+			// rest of the response, and the read is returned as before.
 			return ctx.Err()
 		}
 		judged := streamEnded || readerClosed && endedFirst

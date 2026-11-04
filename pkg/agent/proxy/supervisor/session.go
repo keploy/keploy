@@ -1508,15 +1508,16 @@ const LeftOutStopCutOpen = leftOutStopCutCause + ": the recording stopped partwa
 const LeftOutStopCutAfterEnd = leftOutStopCutCause + ": the stop ended its read partway through it, after the upstream had ended the connection"
 
 // LeftOutAbortCut is the reason an HTTP/1 recorder leaves an exchange out for
-// when the session closed the response's stream under its read (the
-// supervisor's abort, SessionOnAbort) partway through the response, with
-// neither side of the connection ended as the read ended (Ends.First), and not
-// for the recording's stop (LeftOutStopCutOpen is the stop's): the response is
-// not whole, a close-delimited body's end (the upstream's close) never came,
-// and no end says what fault the call ended in. A parser the supervisor
-// retired (retire) leaves it out under the retirement's reason, then this one.
-// Not a capture loss of its own.
-const LeftOutAbortCut = "the session closed the response's stream partway through it, with neither side of the connection ended"
+// when the session ended its read of the response partway through it: it
+// closed the response's stream under the read (the supervisor's abort,
+// SessionOnAbort), or the parser's context, the session's (Ctx), ended under
+// it. Neither side of the connection had ended as the read ended (Ends.First),
+// and it is not for the recording's stop (LeftOutStopCutOpen is the stop's):
+// the response is not whole, a close-delimited body's end (the upstream's
+// close) never came, and no end says what fault the call ended in. A parser
+// the supervisor retired (retire) leaves it out under the retirement's reason,
+// then this one. Not a capture loss of its own.
+const LeftOutAbortCut = "the session ended the response's read partway through it, with neither side of the connection ended"
 
 // leftOutStopCutCause is LeftOutStopCut's cause: its text before the colon.
 const leftOutStopCutCause = "the recording's stop cut the response short"

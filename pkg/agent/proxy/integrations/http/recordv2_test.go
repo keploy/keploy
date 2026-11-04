@@ -498,8 +498,23 @@ func TestRecordV2_Keepalive_TwoCycles(t *testing.T) {
 		t.Fatal("recordV2 timeout")
 	}
 
-	first := <-mocks
-	second := <-mocks
+	// recordV2 has returned, and EmitMock sends on the session's channel
+	// before it returns, so every mock recordV2 emitted is buffered: take
+	// them without waiting, and a recordV2 that ended early fails here
+	// rather than leaving the package's run waiting on a mock never sent.
+	var got []*models.Mock
+	for drained := false; !drained; {
+		select {
+		case m := <-mocks:
+			got = append(got, m)
+		default:
+			drained = true
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("recorded %d mocks, want 2: one for each request", len(got))
+	}
+	first, second := got[0], got[1]
 	if first.Spec.HTTPReq.URL != "/hello" {
 		t.Errorf("first URL = %q, want /hello", first.Spec.HTTPReq.URL)
 	}

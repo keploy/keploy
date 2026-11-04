@@ -506,8 +506,9 @@ func (c *ctxEndHeld) Err() error {
 func (c *ctxEndHeld) release() { c.once.Do(func() { close(c.released) }) }
 
 // Not the stop's cut: what the parser read when its context ended without the
-// recording's (the supervisor retired it) is returned as before, with no
-// ERROR; a response that does not decode once the stop has begun is not left
+// recording's (the supervisor retired it) is not left out for the stop
+// (TestRecordV2_TheParsersContextWithNoEndLeavesTheCutAnswerOut: the session's
+// cut), and recordV2 returns the context's end, with no ERROR; a response that does not decode once the stop has begun is not left
 // out for the stop; nor is one the client's end, or the upstream's end before
 // the stop began, ended while the recording was stopping: the upstream's is
 // its fault, recorded.
@@ -516,7 +517,7 @@ func TestRecordV2_OpenStopCutOnlyForTheRecordingsStop(t *testing.T) {
 	t.Run("the parser retired", func(t *testing.T) {
 		c, _, mocks, err := openStopCut(t, part, "56789", parserRetired, false)
 		if !errors.Is(err, context.Canceled) {
-			t.Errorf("recordV2 = %v, want the parser's context's end, as before", err)
+			t.Errorf("recordV2 = %v, want the parser's context's end", err)
 		}
 		if len(mocks) != 0 || len(stopReasons(c)) != 0 || len(errorsLogged(c)) != 0 {
 			t.Errorf("recorded %d mocks, left out for %q, logged %q at ERROR; want none of them", len(mocks), stopReasons(c), errorsLogged(c))
@@ -1482,26 +1483,33 @@ func peerEndRead(c *relayedConn, dir fakeconn.Direction) bool {
 // the connection still open (LeftOutStopCutOpen), left out once with its
 // span. Not dropped with nothing reported (the client's end), nor said to be
 // cut after the upstream had ended the connection (the upstream's). Where the
-// recording is not stopping (Session.RecordingStopping), the context's end
-// with the connection open is returned as before, nothing left out, whatever
-// end is read after it: not taken as an end that came first, which would
-// have the read take the rest of the stream and fail to decode.
+// recording is not stopping (Session.RecordingStopping), the session's end of
+// the read with the connection open leaves it out once with its span
+// (LeftOutAbortCut), and the context's end is returned, whatever end is read
+// after it: not taken as an end that came first, which would have the read
+// take the rest of the stream and be judged by that end: with the rest of the
+// answer in the stream before the upstream's close, that read would find the
+// answer whole and record it.
 func TestRecordV2_AnEndReadAfterTheContextsEndAtTheStopDoesNotJudgeTheCut(t *testing.T) {
 	const part, more = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n01234", "567"
 	rows := []struct {
 		name               string
 		upstream, stopping bool
 		at                 int32 // the check of the context the end is read on
+		// rest, if not empty, is what the upstream sends before its end,
+		// in the stream before the end is read.
+		rest string
 	}{
-		{"the stop closes the application", false, true, 3},
-		{"the upstream closes", true, true, 3},
-		{"the upstream closes, the recording not stopping", true, false, 3},
-		{"the upstream closes as the drain is asked, the recording not stopping", true, false, 2},
-		{"the application closes as the drain is asked, the recording not stopping", false, false, 2},
+		{"the stop closes the application", false, true, 3, ""},
+		{"the upstream closes", true, true, 3, ""},
+		{"the upstream closes, the recording not stopping", true, false, 3, ""},
+		{"the upstream closes as the drain is asked, the recording not stopping", true, false, 2, ""},
+		{"the application closes as the drain is asked, the recording not stopping", false, false, 2, ""},
+		{"the rest of the answer, then the upstream's close, as the drain is asked, the recording not stopping", true, false, 2, "89abcdefghij"},
 	}
 	for _, proven := range []bool{false, true} {
 		for _, r := range rows {
-			upstream := r.upstream
+			upstream, rest := r.upstream, r.rest
 			t.Run(r.name+switchName[proven], func(t *testing.T) {
 				t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
 				c := newRelayedConn(t)
@@ -1520,8 +1528,25 @@ func TestRecordV2_AnEndReadAfterTheContextsEndAtTheStopDoesNotJudgeTheCut(t *tes
 				var relayedOnce sync.Once
 				relayedMore := func() { relayedOnce.Do(func() { close(moreRelayed) }) }
 				t.Cleanup(relayedMore)
+				restHeld := ""
 				ctx := &ctxEndHook{Context: context.Background(), at: r.at, hook: func() {
 					<-moreRelayed
+					if rest != "" {
+						// The hook runs on recordV2's goroutine, which is
+						// not reading: the stream holds what the relay hands
+						// it, and Peek shows it.
+						_, _ = c.dest.Write([]byte(rest))
+						held := make(chan string, 1)
+						go func() {
+							if ch, err := c.sess.DestStream.Peek(); err == nil {
+								held <- string(ch.Bytes)
+							}
+						}()
+						select {
+						case restHeld = <-held:
+						case <-time.After(10 * time.Second):
+						}
+					}
 					if upstream {
 						_ = c.dest.Close()
 						endRead = peerEndRead(c, fakeconn.FromDest)
@@ -1548,11 +1573,14 @@ func TestRecordV2_AnEndReadAfterTheContextsEndAtTheStopDoesNotJudgeTheCut(t *tes
 					t.Fatalf("the side's end ran %v, read by the relay %v: recordV2 asked its context fewer than %d times after its end",
 						ctx.fired.Load(), endRead, ctx.at)
 				}
+				if restHeld != rest {
+					t.Fatalf("the stream held %q before the upstream's end, want %q", restHeld, rest)
+				}
 				if !r.stopping {
-					if !errors.Is(err, context.Canceled) || len(mocks) != 0 || len(leftOutReasons(c)) != 0 || len(errorsLogged(c)) != 0 {
-						t.Errorf("recordV2 = %v, recorded %d mocks, left out for %q, logged %q at ERROR; want the context's end, and none of them",
-							err, len(mocks), leftOutReasons(c), errorsLogged(c))
+					if !errors.Is(err, context.Canceled) {
+						t.Errorf("recordV2 = %v, want the parser's context's end: no side's end judges the read", err)
 					}
+					wantAbortCutLeftOut(t, c, at, mocks)
 					return
 				}
 				wantLeftOutForTheStop(t, c, at, mocks, err, supervisor.LeftOutStopCutOpen, false)
@@ -1821,23 +1849,62 @@ func TestRecordV2_TheAbortsCloseWithNoEndLeavesTheCutAnswerOut(t *testing.T) {
 	}
 }
 
+// The parser's context alone ends partway through the response (the
+// supervisor ends the session's context, the parser's, without the
+// recording's stop), and the parser takes the next part of it, which the relay
+// relays, before its stream is closed: with neither side's end, the read is
+// judged by the same event as the abort's close. The exchange is left out once
+// with its span for LeftOutAbortCut, under a mark on the incomplete-mock flag,
+// which it takes, and recordV2 returns the context's end. Never the context's
+// end with nothing recorded, nothing left out and the mark left untaken.
+func TestRecordV2_TheParsersContextWithNoEndLeavesTheCutAnswerOut(t *testing.T) {
+	for _, proven := range []bool{false, true} {
+		for _, p := range stopCutAllParts {
+			for _, mark := range []bool{false, true} {
+				t.Run(p.name+markName[mark]+switchName[proven], func(t *testing.T) {
+					t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+					c, at, mocks, err := openStopCut(t, p.part, stopCutMore[p.name], parserRetired, mark)
+					if !errors.Is(err, context.Canceled) {
+						t.Errorf("recordV2 = %v, want the parser's context's end: no side's end judges the read", err)
+					}
+					wantAbortCutLeftOutUnder(t, c, at, mocks, mark)
+				})
+			}
+		}
+	}
+}
+
 // wantAbortCutLeftOut checks that c's exchange, cut by the abort's close with
 // no side's end, was left out once for LeftOutAbortCut with its span, from
 // before at.sent to the last part the parser read, and nothing recorded or
 // logged at ERROR.
 func wantAbortCutLeftOut(t *testing.T, c *relayedConn, at cutTimes, mocks []*models.Mock) {
 	t.Helper()
+	wantAbortCutLeftOutUnder(t, c, at, mocks, false)
+}
+
+// wantAbortCutLeftOutUnder is wantAbortCutLeftOut, under the mark per_conn_cap
+// with mark, which the exchange took.
+func wantAbortCutLeftOutUnder(t *testing.T, c *relayedConn, at cutTimes, mocks []*models.Mock, mark bool) {
+	t.Helper()
+	want := supervisor.LeftOutAbortCut
+	if mark {
+		want = "per_conn_cap: " + want
+	}
 	if len(mocks) != 0 {
 		t.Errorf("recorded %d mocks (the first: %+v), want none: the response is not whole", len(mocks), mocks[0].Spec.HTTPResp)
 	}
 	if got := errorsLogged(c); len(got) != 0 {
 		t.Errorf("logged %q at ERROR, want nothing", got)
 	}
-	if got := leftOutReasons(c); len(got) != 1 || got[0] != supervisor.LeftOutAbortCut {
-		t.Errorf("left out for %q, want once for %q", got, supervisor.LeftOutAbortCut)
+	if got := leftOutReasons(c); len(got) != 1 || got[0] != want {
+		t.Errorf("left out for %q, want once for %q", got, want)
 	}
 	if got := c.mgr.MocksLeftOut(); got != 1 {
 		t.Errorf("left out %d mocks, want 1", got)
+	}
+	if c.sess.IsMockIncomplete() {
+		t.Error("the incomplete-mock mark is still set, want it taken by the exchange it was left out under")
 	}
 	spans := c.spans.all()
 	if len(spans) != 1 || spans[0][0].IsZero() || !spans[0][0].Before(at.sent) ||

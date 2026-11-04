@@ -325,9 +325,12 @@ func TestRecordV2_ReportsNothingWhenTheServersStreamEndsWithoutAResponse(t *test
 
 // A recording's stop cancels the parser's context, and the streams end or
 // fail after it: nothing the parser was in the middle of is reported, though
-// the relay had marked the connection. Each subtest blocks the parser where
-// it reads, with nothing for it (Waiting), then stops the recording, then
-// hands it what ends its read.
+// the relay had marked the connection, but a response the stop cut partway
+// through its body, which is left out for the stop under the mark, with its
+// span (LeftOutStopCutOpen). Each subtest blocks the parser where it reads,
+// with nothing for it (Waiting), then stops the recording, then hands it what
+// ends its read. The session's RecordingDone is the recording's context's,
+// and the parser's context is that context, as the proxy wires them.
 func TestRecordV2_ReportsNothingAtARecordingStop(t *testing.T) {
 	reqAt := time.Unix(1_700_009_500, 0)
 	respAt := reqAt.Add(5 * time.Millisecond)
@@ -336,6 +339,8 @@ func TestRecordV2_ReportsNothingAtARecordingStop(t *testing.T) {
 		feed    func(l *leftOutSession)
 		blocked func(sess *supervisor.Session) *fakeconn.FakeConn
 		wake    func(l *leftOutSession)
+		// stopCut: the stop cut the response partway through its body.
+		stopCut bool
 	}{
 		{
 			name: "its request's body is still to come",
@@ -365,6 +370,7 @@ func TestRecordV2_ReportsNothingAtARecordingStop(t *testing.T) {
 			},
 			blocked: func(sess *supervisor.Session) *fakeconn.FakeConn { return sess.DestStream },
 			wake:    func(l *leftOutSession) { l.sendResp([]byte("cd"), respAt, respAt) },
+			stopCut: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -376,6 +382,7 @@ func TestRecordV2_ReportsNothingAtARecordingStop(t *testing.T) {
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			l.sess.RecordingDone = ctx.Done()
 			done := make(chan error, 1)
 			go func() { done <- l.h.recordV2(ctx, l.sess) }()
 
@@ -401,7 +408,34 @@ func TestRecordV2_ReportsNothingAtARecordingStop(t *testing.T) {
 			if err != nil && !errors.Is(err, context.Canceled) {
 				t.Fatalf("recordV2 returned %v, want nil or the stop's context.Canceled", err)
 			}
-			l.done(err).nothingReported(t)
+			r := l.done(err)
+			if !tc.stopCut {
+				r.nothingReported(t)
+				return
+			}
+			if r.mocks != 0 {
+				t.Fatalf("%d mocks recorded, want none: the response is not whole", r.mocks)
+			}
+			if n := r.mgr.MocksLeftOut(); n != 1 {
+				t.Fatalf("the manager counts %d mocks left out, want 1", n)
+			}
+			if c, o := r.spans.Counts(); c != 1 || o != 0 {
+				t.Fatalf("the spans hold (closed=%d, open=%d), want one closed: the call the stop cut", c, o)
+			}
+			want := "per_conn_cap: " + supervisor.LeftOutStopCutOpen
+			var got []string
+			for _, e := range r.logs.All() {
+				if e.Message == supervisor.LeftOutWarnMsg || e.Message == supervisor.LeftOutDebugMsg {
+					reason, _ := e.ContextMap()["reason"].(string)
+					got = append(got, reason)
+				}
+			}
+			if len(got) != 1 || got[0] != want {
+				t.Fatalf("left out for %q, want once for %q", got, want)
+			}
+			if l.sess.IsMockIncomplete() {
+				t.Fatal("the incomplete-mock mark is still set, want it taken by the exchange it was left out under")
+			}
 		})
 	}
 }
