@@ -17,7 +17,8 @@
 #   declared  keploy.yml declares Referer noise: the replay is served from the
 #             mocks and passes
 #   control   keploy.yml declares none: the replay misses and fails, so the
-#             lane can tell a served call from a missed one
+#             lane can tell a served call from a missed one, and the miss's
+#             hint names the header noise that serves it
 #
 # Runs without the proven switch only: a replay under the switch needs a
 # build that judges each test (keploy enterprise), and this build refuses it
@@ -147,6 +148,16 @@ run_case() {
       FAIL=1
       ;;
   esac
+  # A miss names the remedy: the control's call lacks only the recorded
+  # Referer, so its hint names keploy.yml's header bucket for it.
+  if [ "$WANT" = fail ]; then
+    if grep -qF "add the headers under test.globalNoise.global.header (e.g. header: {referer: []})" rep.log; then
+      echo "ok: $LABEL: the miss's hint names test.globalNoise.global.header for the Referer"
+    else
+      echo "FAIL: $LABEL: the miss's hint does not name test.globalNoise.global.header for the Referer"
+      FAIL=1
+    fi
+  fi
   cd "$ROOT" || exit 1
 }
 

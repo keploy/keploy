@@ -283,8 +283,9 @@ func RecordCommand() string {
 
 // defaultNextSteps derives an actionable hint from the report shape. The
 // wording deliberately never references commands that don't exist; the two
-// real remedies are noise (for drifting values) and re-recording (for
-// structural change).
+// real remedies are keploy.yml noise (for drifted values and missing
+// recorded headers that a noise bucket reaches: matchingNoise) and
+// re-recording (for everything, and alone for anything else).
 func defaultNextSteps(r *models.MockMismatchReport) string {
 	onlyValueDrift := len(r.FieldDiffs) > 0
 	for _, d := range r.FieldDiffs {
@@ -293,6 +294,7 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 			break
 		}
 	}
+	noise, noiseOK := matchingNoise(r)
 	switch {
 	case r.MatchPhase == models.MatchPhaseNoMocks:
 		if mockMode.Load() {
@@ -331,41 +333,33 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 			paths = append(paths, d.Path)
 		}
 		// keploy test and keploy mock replay alike hand the agent
-		// keploy.yml's test.globalNoise, so the noise is a remedy in both; a
-		// mock run is only recorded again another way (rerecordRemedy).
-		rerecord := rerecordRemedy(r)
-		// Body diffs are reported "body."-prefixed for readability, but HTTP
-		// request matching reads the request-body noise bucket with
-		// root-relative keys — so strip the prefix in the copy-paste hint to
-		// avoid pointing users at the response-noise (body) bucket, which the
-		// request matcher never consults.
-		bodyKeys := make([]string, 0, len(r.FieldDiffs))
-		// The HTTP request matcher reads a header's noise from the header
-		// bucket by the header's name; a part of one
-		// ("header.authorization.signed_headers") is named by its header.
-		var headers []string
+		// keploy.yml's test.globalNoise, so the noise is a remedy in both
+		// where it reaches every drifted field; a mock run is only recorded
+		// again another way (rerecordRemedy).
+		if noiseOK {
+			return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add %s; otherwise %s.", strings.Join(paths, ", "), noise, rerecordRemedy(r))
+		}
+		return fmt.Sprintf("Only values drifted (%s). If the change is expected, %s.", strings.Join(paths, ", "), rerecordRemedy(r))
+	case noiseOK:
+		// Not only value drift, and still in the noise's reach: an HTTP call
+		// that does not carry recorded headers (matchingNoise reaches no other
+		// missing field), beside any value drift it reaches. The HTTP matcher
+		// requires a recorded header to be present unless keploy.yml declares
+		// it noise, so that declaration makes the call match.
+		var missing, drifted []string
 		for _, d := range r.FieldDiffs {
-			if k := strings.TrimPrefix(d.Path, "body."); k != d.Path {
-				bodyKeys = append(bodyKeys, k)
-			}
-			if n, ok := strings.CutPrefix(d.Path, "header."); ok && r.Protocol == ProtocolHTTP {
-				n, _, _ = strings.Cut(n, ".")
-				if !slices.Contains(headers, n) {
-					headers = append(headers, n)
-				}
+			if d.Kind == models.DiffKindMissingInLive {
+				missing = append(missing, d.Path)
+			} else {
+				drifted = append(drifted, d.Path)
 			}
 		}
-		var noise []string
-		if len(bodyKeys) > 0 {
-			noise = append(noise, fmt.Sprintf("the request-body fields under test.globalNoise.global.requestbody with root-relative keys (e.g. requestbody: {%s: []})", strings.Join(bodyKeys, ": [], ")))
+		lead, cond := "Recorded headers are missing from this call ("+strings.Join(missing, ", ")+")", "they are optional"
+		if len(drifted) > 0 {
+			lead += " and values drifted (" + strings.Join(drifted, ", ") + ")"
+			cond = "these are optional or dynamic (timestamps, ids, tokens)"
 		}
-		if len(headers) > 0 {
-			noise = append(noise, fmt.Sprintf("the headers under test.globalNoise.global.header (e.g. header: {%s: []})", strings.Join(headers, ": [], ")))
-		}
-		if len(noise) == 0 {
-			noise = append(noise, "them to the matching noise (test.globalNoise)")
-		}
-		return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add %s; otherwise %s.", strings.Join(paths, ", "), strings.Join(noise, " and "), rerecord)
+		return fmt.Sprintf("%s. If %s, add %s; otherwise %s.", lead, cond, noise, rerecordRemedy(r))
 	default:
 		// Not --update-test-mapping alone: it updates only a passing test's
 		// mapping, so a test this miss failed keeps its recorded one. With
@@ -376,6 +370,58 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 		}
 		return "Request structure changed since recording. Re-record the test set with '" + RecordCommand() + "', or, if you edited its mocks, remap it with --disable-mapping --update-test-mapping."
 	}
+}
+
+// matchingNoise is the keploy.yml noise that makes r's call match, named by
+// the bucket the matcher reads for each field, and whether there is any.
+//   - A request-body field's value drift is named under requestbody by its
+//     root-relative key: the "body." prefix is the report's, and a request
+//     is never matched with the response body bucket.
+//   - On HTTP, a header whose value drifted, or that was recorded and the
+//     call does not carry, is named under header by its lowercased name,
+//     once. Nothing else is in a bucket's reach there. url noise is never
+//     handed to the matcher, so a path, query, method, host or container
+//     drift has no noise remedy. Nor do the parts of a SigV4 Authorization
+//     ("header.authorization.region"): they are compared so that only its
+//     signature may differ, and declaring the header would stop that.
+//   - Elsewhere, a value drift outside the request body is named as
+//     test.globalNoise when no request-body field drifted.
+//
+// A call with any field out of every bucket's reach is offered no noise:
+// noise would leave that field's difference, so recording again is the
+// only remedy that makes the call match.
+func matchingNoise(r *models.MockMismatchReport) (string, bool) {
+	isHTTP := r.Protocol == ProtocolHTTP
+	var bodyKeys, headers []string
+	other := false
+	for _, d := range r.FieldDiffs {
+		name, isHeader := strings.CutPrefix(d.Path, "header.")
+		key, isBody := strings.CutPrefix(d.Path, "body.")
+		switch {
+		case isBody && d.Kind == models.DiffKindValueChanged:
+			bodyKeys = append(bodyKeys, key)
+		case isHTTP && isHeader && !strings.HasPrefix(name, "authorization.") &&
+			(d.Kind == models.DiffKindValueChanged || d.Kind == models.DiffKindMissingInLive):
+			if name = strings.ToLower(name); !slices.Contains(headers, name) {
+				headers = append(headers, name)
+			}
+		case !isHTTP && d.Kind == models.DiffKindValueChanged:
+			other = true
+		default:
+			return "", false
+		}
+	}
+	var noise []string
+	if len(bodyKeys) > 0 {
+		noise = append(noise, fmt.Sprintf("the request-body fields under test.globalNoise.global.requestbody with root-relative keys (e.g. requestbody: {%s: []})", strings.Join(bodyKeys, ": [], ")))
+	}
+	if len(headers) > 0 {
+		noise = append(noise, fmt.Sprintf("the headers under test.globalNoise.global.header (e.g. header: {%s: []})", strings.Join(headers, ": [], ")))
+	}
+	if len(noise) == 0 && other {
+		noise = append(noise, "them to the matching noise (test.globalNoise)")
+	}
+	return strings.Join(noise, " and "), len(noise) > 0
 }
 
 // rerecordRemedy is how the hint says to record r's call again: a mock run
