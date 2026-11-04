@@ -123,9 +123,11 @@ func (h *heldScope) othersOwn(moved *exactView, mk *models.Mock) bool {
 	if moved == nil || h.heldIn.owns(mk.Name) {
 		return false
 	}
-	if g := mk.TestModeInfo.ServedIn; g != 0 {
-		// heldIn is a round snapshot's view (snapped), never nil.
-		return g != h.heldIn.gen
+	if mk.TestModeInfo.ServedIn != 0 {
+		// A view's copy: the view that served it filed it in its index
+		// (exactView.add), so one heldIn served is one heldIn owns, and
+		// this copy another view served.
+		return true
 	}
 	return moved.owns(mk.Name)
 }
