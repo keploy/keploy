@@ -987,33 +987,219 @@ func wantTheClientsTimeout(t *testing.T, c *relayedConn, part string, mocks []*m
 	}
 }
 
-// Not the client's end: the upstream's end came first, before the recording's
-// stop began, and then the supervisor's abort at the stop closed the streams
-// while the relay waited on the client's half. The read the abort closed is
-// not judged by the client's end, and no fault is recorded from it: it is not
-// known to hold all the upstream sent before its end.
-func TestRecordV2_TheAbortsCloseAfterTheUpstreamsEndIsNotTheClients(t *testing.T) {
-	const part = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n01234"
-	c := newRelayedConn(t)
+// The ways the recording's stop ends a parser's read once a side's end came
+// first, before the stop began, while the relay waits on the other side's
+// half: the supervisor's abort closes the streams (the recording's context
+// not ended, as the session saw it), or, as at the stop, the parser's
+// context (the session's) ends and the abort closes the streams after it
+// while the parser waits in a read, or the parser's context ends as the
+// parser takes the next part of the response.
+type firstEndStop int
+
+const (
+	theAbortsClose firstEndStop = iota
+	theCtxThenTheAbort
+	theParsersCtx
+)
+
+func (w firstEndStop) String() string {
+	return [...]string{"the abort's close", "the context's end, then the abort's close", "the parser's context"}[w]
+}
+
+// firstEndThenStop runs c's call: part of the answer, then the first end
+// (end, before the recording's stop), then the stop's end of the read (way).
+// Where the parser's context ends, it is the session's, as the supervisor
+// makes it (Session.Ctx), and mocks go through the sync-mock manager, as the
+// proxy routes them, so it waits for want mocks the manager hands on. It
+// returns what the parser read of the answer, and when the request was sent
+// and the last part of it the parser read was written.
+func firstEndThenStop(t *testing.T, c *relayedConn, part, more string, way firstEndStop, want int, end func()) (read string, at cutTimes, mocks []*models.Mock, err error) {
+	t.Helper()
 	c.grace = time.Minute
-	c.start(t)
+	c.startRelay(t)
+	var held *ctxEndHeld
+	var cancel context.CancelFunc
+	switch way {
+	case theAbortsClose:
+		c.startParser(t)
+	case theCtxThenTheAbort, theParsersCtx:
+		var ctx context.Context
+		if way == theParsersCtx {
+			held = &ctxEndHeld{Context: context.Background(), released: make(chan struct{})}
+			t.Cleanup(held.release)
+			ctx = held
+		} else {
+			ctx, cancel = context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+		}
+		c.sess.Ctx = ctx
+		c.mgr.SetOutputChannel(c.mocks)
+		c.sess.RouteMocksViaSyncMock = true
+		go func() { c.done <- (&HTTP{Logger: zaptest.NewLogger(t)}).recordV2(ctx, c.sess) }()
+	}
 	write(t, c.app, c.src, faultReq)
 	relayed(t, c.dest, faultReq)
+	at = cutTimes{sent: time.Now()}
+	at.last = at.sent
 	write(t, c.dest, c.dst, part)
 	relayed(t, c.app, part)
+	at.done = time.Now()
 	awaitTaken(t, c.sess.DestStream, len(part))
-	_ = c.dest.Close()
-	awaitPeerEnd(t, c, fakeconn.FromDest)
-	_ = c.sess.ClientStream.Close()
-	_ = c.sess.DestStream.Close()
-	mocks, _ := c.collect(t)
-	if len(mocks) != 0 {
-		t.Errorf("recorded %d mocks (the first with the fault %v), want none: the abort's close cut the read", len(mocks), mocks[0].Spec.Fault)
+	read = part
+	if way == theParsersCtx {
+		// The parser takes the next part and checks its context, which
+		// holds it there until the first end has reached the relay.
+		held.ended.Store(true)
+		at.last = time.Now()
+		write(t, c.dest, c.dst, more)
+		relayed(t, c.app, more)
+		at.done = time.Now()
+		read += more
 	}
-	for _, r := range leftOutReasons(c) {
-		if strings.Contains(r, supervisor.LeftOutPartwayAtExit) || strings.Contains(r, supervisor.LeftOutPartwayUnjudged) {
-			t.Errorf("left out for %q, want no client's reason: the upstream's end came first", r)
+	end()
+	switch way {
+	case theAbortsClose:
+		_ = c.sess.ClientStream.Close()
+		_ = c.sess.DestStream.Close()
+	case theCtxThenTheAbort:
+		cancel()
+		_ = c.sess.ClientStream.Close()
+		_ = c.sess.DestStream.Close()
+	case theParsersCtx:
+		held.release()
+	}
+	mocks, err = c.collect(t)
+	for len(mocks) < want {
+		// The sync-mock manager may hand a mock on after the parser
+		// returned.
+		select {
+		case m := <-c.mocks:
+			mocks = append(mocks, m)
+		case <-time.After(10 * time.Second): // turns a lost mock into a failure
+			return read, at, mocks, err
 		}
+	}
+	return read, at, mocks, err
+}
+
+// The client's end partway through the response, before the recording's stop
+// began, then the stop as it ends a parser's read: the parser's context, the
+// session's, ends, and the supervisor's abort closes the streams after it
+// while the parser waits in a read; or the parser's context ends as it takes
+// the next part. The exchange is judged by the client's end, as when the
+// abort's close ends the read with no context's end: left out once with its
+// span for its process's exit or an end the hooks cannot judge; recorded
+// with the application's timeout (after the bytes of the answer it had, or
+// with no answer where the answer's head had not arrived whole) for its
+// giving up, though the session's context has ended. Never the context's end
+// returned with nothing recorded and nothing left out, and never a response
+// that does not decode, with an ERROR.
+func TestRecordV2_TheClientsEndBeforeTheStopJudgesTheContextsEnd(t *testing.T) {
+	ends := []struct {
+		name   string
+		why    supervisor.NoFaultEnd
+		reason string
+	}{
+		{"the application gave up", supervisor.EndMayBeFault, ""},
+		{"the client's process exited on its own", supervisor.EndAtExit, supervisor.LeftOutPartwayAtExit},
+		{"the hooks cannot judge the client's end", supervisor.EndUnjudged, supervisor.LeftOutPartwayUnjudged},
+	}
+	for _, proven := range []bool{false, true} {
+		for _, e := range ends {
+			for _, f := range stopCutAllParts {
+				for _, way := range []firstEndStop{theCtxThenTheAbort, theParsersCtx} {
+					t.Run(e.name+", "+f.name+", "+way.String()+switchName[proven], func(t *testing.T) {
+						t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+						c := newRelayedConn(t)
+						read, at, mocks, err := firstEndThenStop(t, c, f.part, stopCutMore[f.name], way, map[bool]int{false: 1, true: 0}[e.reason != ""], func() {
+							c.clientEnd.Store(uint32(e.why))
+							appClosed(t, c)
+							awaitPeerEnd(t, c, fakeconn.FromClient)
+						})
+						if e.reason != "" {
+							wantLeftOutForTheStop(t, c, at, mocks, err, e.reason, false)
+							return
+						}
+						wantTheClientsTimeout(t, c, read, mocks, err)
+					})
+				}
+			}
+		}
+	}
+}
+
+// The upstream's close partway through the response, before the recording's
+// stop began, then the stop ends the parser's read while the relay waits on
+// the client's half: the supervisor's abort closes the streams, with the
+// parser's context (the session's) ended before it or not, or the parser's
+// context ends as it takes the next part. The exchange is judged by the
+// upstream's close, as at the stream's end with no stop: recorded once with
+// the upstream's truncation, after the head and the body bytes the parser
+// read, as on the wire; a close-delimited body, which the close ends, is
+// recorded whole. Never a response that does not decode, with an ERROR, nor
+// the context's end returned with nothing recorded, and nothing is left out.
+func TestRecordV2_TheUpstreamsEndBeforeTheStopJudgesTheStopsCut(t *testing.T) {
+	parts := append(stopCutParts[:3:3], stopCutAllParts[len(stopCutAllParts)-1])
+	for _, proven := range []bool{false, true} {
+		for _, f := range parts {
+			for _, way := range []firstEndStop{theAbortsClose, theCtxThenTheAbort, theParsersCtx} {
+				t.Run(f.name+", "+way.String()+switchName[proven], func(t *testing.T) {
+					t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+					c := newRelayedConn(t)
+					read, _, mocks, err := firstEndThenStop(t, c, f.part, stopCutMore[f.name], way, 1, func() {
+						_ = c.dest.Close()
+						awaitPeerEnd(t, c, fakeconn.FromDest)
+					})
+					if err != nil {
+						t.Errorf("recordV2 = %v, want nil: the upstream's close is a fault to record, not a decode error", err)
+					}
+					if got := errorsLogged(c); len(got) != 0 {
+						t.Errorf("logged %q at ERROR, want nothing", got)
+					}
+					if got := leftOutReasons(c); len(got) != 0 {
+						t.Errorf("left out for %q, want the call recorded as the upstream gave it", got)
+					}
+					if len(mocks) != 1 {
+						t.Fatalf("recorded %d mocks, want 1", len(mocks))
+					}
+					body := read[strings.Index(read, "\r\n\r\n")+4:]
+					fault, r := mocks[0].Spec.Fault, mocks[0].Spec.HTTPResp
+					if f.name == "close-delimited body" {
+						if fault != nil || r == nil || r.Body != body {
+							t.Errorf("recorded the response %+v with the fault %v, want it whole, %q, with no fault: the upstream's close ends it", r, fault, body)
+						}
+						return
+					}
+					if fault == nil || fault.Kind != models.FaultTruncate || fault.BodyBytes != int64(len(body)) {
+						t.Fatalf("recorded the fault %v, want the upstream's truncation after %d body bytes", fault, len(body))
+					}
+					if r == nil || r.Body != body {
+						t.Errorf("recorded the response %+v, want the body as it came on the wire, %q", r, body)
+					}
+				})
+			}
+		}
+	}
+}
+
+// Not judged by the first end: the parser's context ended after the client's
+// end, before the recording's stop, with the response's stream ended at a
+// capture hole: the capture lost the rest, and the read is returned as
+// before, with no ERROR and no client's reason.
+func TestRecordV2_TheContextsEndAtAHoleIsNotTheClients(t *testing.T) {
+	const part = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n01234"
+	c := newRelayedConn(t)
+	_, _, mocks, err := firstEndThenStop(t, c, part, "56789", theParsersCtx, 0, func() {
+		c.sess.MarkEndedAtHole(fakeconn.FromDest, "test hole")
+		c.clientEnd.Store(uint32(supervisor.EndAtExit))
+		appClosed(t, c)
+		awaitPeerEnd(t, c, fakeconn.FromClient)
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("recordV2 = %v, want the parser's context's end, as before", err)
+	}
+	if len(mocks) != 0 || len(leftOutReasons(c)) != 0 || len(errorsLogged(c)) != 0 {
+		t.Errorf("recorded %d mocks, left out for %q, logged %q at ERROR; want none of them", len(mocks), leftOutReasons(c), errorsLogged(c))
 	}
 }
 

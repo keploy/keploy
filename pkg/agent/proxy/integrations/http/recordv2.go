@@ -201,6 +201,20 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		resTs := firstRespChunk.WrittenAt
 
 		gotLastWritten, err := h.readResponseV2(ctx, sess.DestStream, &finalResp, requestMethod(finalReq))
+		if ctxErr := ctx.Err(); err != nil && ctxErr != nil && errors.Is(err, ctxErr) && endJudgesAfterCtx(sess) {
+			// The parser's context ended after a side's end came first: as
+			// the supervisor's abort (at the recording's stop) closes the
+			// stream after it, the read takes what the stream already holds,
+			// with the context's end no longer asked, and then its reader's
+			// close (ErrClosed), and is judged as the abort's close is below.
+			// A response the stream holds whole is whole.
+			_ = sess.DestStream.Close()
+			var lastWritten time.Time
+			lastWritten, err = h.readResponseV2(context.WithoutCancel(ctx), sess.DestStream, &finalResp, requestMethod(finalReq))
+			if !lastWritten.IsZero() {
+				gotLastWritten = lastWritten
+			}
+		}
 		// The stream ended before readResponseV2 found the response's end.
 		// Where keploy relays the connection it has read all the server sent,
 		// so that is the server's doing, unless the relay ended the stream
@@ -329,17 +343,23 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 
 		// Build and emit the mock. Identical shape to the legacy path.
 		// The exchange is judged by how its connection ended where its
-		// read ended at the stream's end, and also where the client's end
-		// came first and the supervisor's abort (the recording's stop) then
-		// closed the stream while the relay still waited on the upstream's
-		// half (clientEndedFirst, readerClosed): the abort ended only that wait, and
-		// the exchange ended with the client's end, as it does at the
-		// stream's end that follows the client's end with no stop. Not as
-		// a response that does not decode, nor a close-delimited body
-		// recorded whole as far as it came: its end, the upstream's close,
-		// never came.
+		// read ended at the stream's end, and also where a side's end came
+		// first, before the recording's stop (stopCut judges one after it),
+		// and the supervisor's abort (the recording's stop) then closed the
+		// stream, or the parser's context ended (endJudgesAfterCtx), while
+		// the relay still waited on the other side's half (readerClosed):
+		// the abort ended only that wait, and the exchange ended with the
+		// end that came first, as it does at the stream's end that follows
+		// that end with no stop. The client's end is judged so (its giving
+		// up, its process's exit, an end the hooks cannot judge), and so is
+		// the upstream's (its reset or its close cut the answer short). Not
+		// as a response that does not decode, with an ERROR, nor a
+		// close-delimited body the client's end cut recorded whole as far
+		// as it came: its end, the upstream's close, never came.
+		_, endedFirst := sess.FirstPeerEnded()
+		judged := streamEnded || readerClosed && endedFirst
 		var fault *models.Fault
-		if streamEnded || readerClosed && clientEndedFirst(sess) {
+		if judged {
 			if reason, ok := partAnswerLeftOut(sess); ok {
 				// The client's end came first, partway through the response,
 				// and records no fault: the response is not known to be
@@ -384,9 +404,23 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			// again here would wipe a mark set while EmitMock delivered
 			// (on another goroutine, meanwhile): that mark is the
 			// next exchange's, whose mock would then be recorded with
-			// nothing reporting it.
-			if emitErr := sess.EmitMock(mock); emitErr != nil {
+			// nothing reporting it. The parser's context is the
+			// session's (Session.Ctx): once it has ended, as at the
+			// recording's stop, EmitMock would drop, with nothing
+			// reporting it, the mock of an exchange read before it
+			// (EmitMockOnShutdown).
+			emit := sess.EmitMock
+			if ctx.Err() != nil {
+				emit = sess.EmitMockOnShutdown
+			}
+			if emitErr := emit(mock); emitErr != nil {
 				return emitErr
+			}
+			if judged && ctx.Err() != nil {
+				// Judged by the connection's end, after which nothing
+				// more comes to record: recorded, and its recording
+				// ends with it, though the parser's context has ended.
+				return nil
 			}
 		} else {
 			// Nothing recorded for this exchange (a passthrough), so a mark
@@ -524,11 +558,17 @@ func stopCut(sess *supervisor.Session, readItsEnd bool) (reason string, ok bool)
 	return "", false
 }
 
-// clientEndedFirst reports whether the connection's first end
-// (Session.FirstPeerEnded) was the client's.
-func clientEndedFirst(sess *supervisor.Session) bool {
-	first, ok := sess.FirstPeerEnded()
-	return ok && first == fakeconn.FromClient
+// endJudgesAfterCtx reports whether a response read the parser's context
+// ended is judged by the connection's first end (Session.FirstPeerEnded), as
+// the supervisor's abort's close of the stream is: a side's end came, and the
+// destination's stream did not end at a capture hole (Session.EndedAtHole:
+// the capture lost the rest, and the read is returned as before).
+func endJudgesAfterCtx(sess *supervisor.Session) bool {
+	if _, hole := sess.EndedAtHole(fakeconn.FromDest); hole {
+		return false
+	}
+	_, ended := sess.FirstPeerEnded()
+	return ended
 }
 
 // partAnswerFault is the fault a call ends in whose response stream ended
