@@ -40,9 +40,10 @@ func iCall(path string, typ Type, rec, live string, rAt, fAt time.Time, w *Windo
 }
 
 // iSent is a request the call's own test sent at at (as recorded), its leaf
-// path holding rec, and holding live as round F sent it.
+// path holding rec, and holding live as round F sent it, with its exchange's
+// payload, as an adapter gives it (oPayload).
 func iSent(mock string, at time.Time, path string, typ Type, rec, live string) Earlier {
-	return Earlier{Mock: mock, At: at, Own: true, Seen: []Seen{{Side: Request,
+	return Earlier{Mock: mock, At: at, Own: true, Payload: oPayload(mock, at), Seen: []Seen{{Side: Request,
 		Leaf: Leaf{Path: path, Noise: path, Type: typ, Value: rec}, Live: live}}}
 }
 
@@ -1290,6 +1291,21 @@ func TestOutcomeTheReadingIsAskedBeforeAWideWindowsPlainRead(t *testing.T) {
 	oRefused(t, "the same read where the reading refuses its cut", oWord(t, Decide(in), rec, live), RefusalNoClockRead, "the stub reading's refusal")
 }
 
+// An answer whose text holds the changed moment as written, glued inside a
+// longer word the reader reads as no instant, gave the application that
+// moment in both runs: it is the value's source, bound to the answer as
+// main binds it, never set aside as a place that holds only a coarser unit
+// of it (a date: coarserOnly), which would leave it refused.
+func TestOutcomeAnAnswerHoldingTheMomentInsideALongerWordIsItsSource(t *testing.T) {
+	rT, fT, fAt := oAt.Add(-500*time.Millisecond), oAt.Add(24*time.Hour-300*time.Millisecond), oAt.Add(24*time.Hour)
+	inst, instF := iMs(rT), iMs(fT)
+	raw := oAnswer("mock-5", 2*time.Second, "ts"+inst+"x").ServedAs(1).ServedLive(oAnswer("mock-5", 2*time.Second, "ts"+instF+"x"))
+	iValue(t, "the moment inside a longer word of an answer", oWord(t, Decide(iCall("body.t", String, inst, instF, oAt, fAt, nil, nil, []Raw{raw})), inst, instF), "mock-5")
+	// Its date alone there is no source: refused, as no answer gave the time.
+	day := oAnswer("mock-5", 2*time.Second, "d"+rT.Format("2006-01-02")+"x").ServedAs(1).ServedLive(oAnswer("mock-5", 2*time.Second, "d"+fT.Format("2006-01-02")+"x"))
+	oRefused(t, "the date alone inside a longer word of an answer", oWord(t, Decide(iCall("body.t", String, inst, instF, oAt, fAt, nil, nil, []Raw{day})), inst, instF), RefusalNoClockRead)
+}
+
 // api-server's worker claims a job at a second that, under load, is also the
 // second of a UnixNano in an app's name an earlier answer gave. The answer
 // holds round F's second only as a cut of that finer instant: no application
@@ -1303,7 +1319,7 @@ func TestOutcomeASecondInsideAnAnswersNanosecondNameIsNoPick(t *testing.T) {
 	fAt := oAt.Add(time.Hour + 300*time.Millisecond)
 	rec, live := secs(rAt.Add(-5*time.Millisecond)), secs(fAt.Add(-5*time.Millisecond))
 	answer := func(v string) Earlier {
-		return Earlier{Mock: "mock-223", At: rAt.Add(-200 * time.Millisecond), Own: true,
+		return Earlier{Mock: "mock-223", At: rAt.Add(-200 * time.Millisecond), Own: true, Payload: oPayload("mock-223", rAt.Add(-200*time.Millisecond)),
 			Seen: []Seen{{Side: Response, Leaf: oText("resp.0.0.cursor.firstBatch.0.app.name", v), Live: v}}}
 	}
 	name := "[E2E] app-crud-" + strconv.FormatInt(fAt.Add(-150*time.Millisecond).UnixNano(), 10)

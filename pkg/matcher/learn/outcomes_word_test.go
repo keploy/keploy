@@ -853,11 +853,20 @@ func oEncoded() map[string]func(id string) string {
 	}
 }
 
-// oSent is an earlier call of the test that sent r, round F sending f.
+// oSent is an earlier call of the test that sent r, round F sending f, with
+// its exchange's payload (oPayload).
 func oSent(r, f string) []Earlier {
-	return []Earlier{{Mock: "mock-0", At: oAt.Add(-time.Second), Own: true, Seen: []Seen{
+	return []Earlier{{Mock: "mock-0", At: oAt.Add(-time.Second), Own: true, Payload: oPayload("mock-0", oAt.Add(-time.Second)), Seen: []Seen{
 		{Side: Request, Leaf: oText("body.user", r), Live: f, Place: "body.user"},
 	}}}
+}
+
+// oPayload is the payload of an exchange recorded at at and answered a
+// millisecond later that F served leaf by leaf, as its adapter reads it
+// (RawOf), holding no word of its own: keploy refuses what no place binds
+// beside an exchange whose payload it was not given (payloadless).
+func oPayload(mock string, at time.Time) Raw {
+	return RawOf(&models.Mock{Name: mock, Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}, true)
 }
 
 // An id an earlier call sent, carried inside an encoding keploy cannot bind a
@@ -908,6 +917,80 @@ func TestOutcomeAnEncodedValueNoPlaceHoldsTheWordsOfStaysFresh(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// An exchange F served leaf by leaf before the call whose payload keploy was
+// not given, or could not read, is a place whose answer cannot be searched:
+// a value no place binds (a word made anew, a read of the clock) may have
+// been built on it, so it is refused, naming the exchange, as main refuses it
+// (payloadUnread: offset.go, the offset and word rules). That holds for the
+// call's own test, the pool's mocks and the start-up. What a place binds
+// stands, as main binds it: a value its leaf or another recording's answer
+// holds, and a read of the clock beside a send of the same coarse moment.
+// An earlier test's place keeps no payload by design, and the test case's
+// own request is no exchange: beside either the word stays fresh. Where one
+// value stands at two fields, neither binds to the other.
+func TestOutcomeAValueNoPlaceBindsBesideAnExchangeWithNoPayloadIsRefused(t *testing.T) {
+	const r, f = "rAHcEraS7Qx1", "Zq81Lm0XpVb4"
+	sent := func(a, b string, mod func(*Earlier)) []Earlier {
+		e := Earlier{Mock: "mock-0", At: oAt.Add(-time.Second), Own: true, Seen: []Seen{
+			{Side: Request, Leaf: oText("body.user", a), Live: b, Place: "body.user"}}}
+		mod(&e)
+		return []Earlier{e}
+	}
+	inst, instF := iMs(oAt.Add(-500*time.Millisecond)), iMs(oAt.Add(-300*time.Millisecond))
+	clockAt := func(e []Earlier, raw []Raw) Input {
+		return iCall("body.t", String, inst, instF, oAt, oAt, iWin(oAt, oAt, time.Second), e, raw)
+	}
+	twice := func(e []Earlier) Input {
+		in := oInput("body.id", r, f, e, nil)
+		in.Drift = append(in.Drift, "body.id2")
+		in.Live.Leaves["body.id2"], in.Rec.Leaves["body.id2"] = oText("body.id2", f), oText("body.id2", r)
+		return in
+	}
+	for _, sh := range []struct {
+		what, why string
+		mod       func(*Earlier)
+	}{
+		{"the call's own test", "keploy was given no payload of mock-0", func(*Earlier) {}},
+		{"the pool's", "keploy was given no payload of mock-0", func(e *Earlier) { e.Own = false }},
+		{"the start-up's", "keploy was given no payload of mock-0", func(e *Earlier) { e.Own, e.Run, e.StartUp = false, true, true }},
+		{"a payload keploy could not read", "keploy could not read mock-0", func(e *Earlier) { e.Payload = Raw{mock: "mock-0", unread: "its kind is unknown"} }},
+	} {
+		for _, d := range Decide(oInput("body.id", r, f, sent("unrelated", "unrelated", sh.mod), nil)) {
+			oRefused(t, sh.what+": a word made anew", d, RefusalUnread, "mock-0", sh.why)
+		}
+		for _, d := range Decide(twice(sent("unrelated", "unrelated", sh.mod))) {
+			oRefused(t, sh.what+": one new value at two fields", d, RefusalUnread, "mock-0")
+		}
+		oRefused(t, sh.what+": a read of the clock", oWord(t, Decide(clockAt(sent("unrelated", "unrelated", sh.mod), nil)), inst, instF), RefusalUnread, "mock-0", sh.why)
+		if d := oWord(t, Decide(oInput("body.id", r, f, sent(r, f, sh.mod), nil)), r, f); d.Outcome != OutcomeValue || d.From.Mock != "mock-0" {
+			t.Errorf("%s: the leaf holds the value: %s; want a value of mock-0", sh.what, oDescribe([]Decision{d}))
+		}
+		raw := oAnswer("mock-5", 2*time.Second, inst).ServedAs(1).ServedLive(oAnswer("mock-5", 2*time.Second, instF))
+		if d := oWord(t, Decide(clockAt(sent("unrelated", "unrelated", sh.mod), []Raw{raw})), inst, instF); d.Outcome != OutcomeValue || d.From.Mock != "mock-5" {
+			t.Errorf("%s: an answer holds the moment: %s; want a value of mock-5", sh.what, oDescribe([]Decision{d}))
+		}
+		if d := oWord(t, Decide(clockAt(sent(inst, instF, sh.mod), nil)), inst, instF); d.Outcome != OutcomeClock {
+			t.Errorf("%s: a send of the same moment: %s; want a Clock", sh.what, oDescribe([]Decision{d}))
+		}
+	}
+	for _, sh := range []struct {
+		what string
+		mod  func(*Earlier)
+	}{
+		{"an earlier test's", func(e *Earlier) { e.Own, e.Run = false, true }},
+		{"the test case's own request", func(e *Earlier) { e.Own, e.Given = false, true }},
+		{"a payload keploy read", func(e *Earlier) { e.Payload = oPayload("mock-0", e.At) }},
+	} {
+		for _, d := range Decide(twice(sent("unrelated", "unrelated", sh.mod))) {
+			if d.Outcome == OutcomeRefused {
+				t.Errorf("%s: %s; want fresh, then its other use", sh.what, oDescribe([]Decision{d}))
+			}
+		}
+		costFresh(t, sh.what+": a word made anew", oWord(t, Decide(oInput("body.id", r, f, sent("unrelated", "unrelated", sh.mod), nil)), r, f))
+		iClock(t, sh.what+": a read of the clock", oWord(t, Decide(clockAt(sent("unrelated", "unrelated", sh.mod), nil)), inst, instF))
 	}
 }
 
@@ -1431,7 +1514,7 @@ func TestOutcomeAnOlderTestsRequestSetsNoWordAsideWhereTheOtherValueTookAWord(t 
 	ranU.Seen = []Seen{{Side: Request, Leaf: Leaf{Path: "body.id", Type: String, Value: "bb7ed9ee-670e-48d1-982f-b54b2b73982f"}, Live: "0c1d2e3f-4a5b-6c7d-8e9f-a0b1c2d3e4f5", Place: "body.id"}}
 	bU := eAnswer("mock-b", 200*time.Millisecond, "dddd").ServedAs(2).ServedAsRecorded()
 	costFresh(t, "a UUID's 4-hex piece at the request, F's piece in a later answer", oWord(t, Decide(costF("1111aaaa-2222-3333-48d1-444455556666", "9999cccc-7777-8888-dddd-000011112222", []Earlier{ranU}, []Raw{bU}, nil)), "48d1", "dddd"))
-	costFresh(t, "the call's own test's request", oWord(t, Decide(costF("slot 82", "slot 7", []Earlier{{Mock: ran.Mock, At: ran.At, Payload: ran.Payload, Seen: ran.Seen}}, []Raw{b}, nil)), "82", "7"))
+	costFresh(t, "the call's own test's request", oWord(t, Decide(costF("slot 82", "slot 7", []Earlier{{Mock: ran.Mock, At: ran.At, Payload: oPayload(ran.Mock, ran.At).ServedAs(1), Seen: ran.Seen}}, []Raw{b}, nil)), "82", "7"))
 }
 
 // Two signatures in upper-case hex (64 characters): read without their
