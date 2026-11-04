@@ -187,15 +187,9 @@ func TestTwoValues_WordRuns(t *testing.T) {
 	})
 }
 
-// textBinds is one call's bindings at every word of each text's value, live
-// and recorded, as variables prefix0, prefix1..., their runs filled.
-func textBinds(t *testing.T, texts ...[4]string) []Binding {
-	t.Helper()
-	return textBindsHeld(t, heldNowhere, texts...)
-}
-
-// textBindsHeld is textBinds in a mock that holds whole elsewhere what
-// elsewhere says.
+// textBindsHeld is one call's bindings at every word of each text's value,
+// live and recorded, as variables prefix0, prefix1..., their runs filled, in
+// a mock that holds whole elsewhere what elsewhere says.
 func textBindsHeld(t *testing.T, elsewhere func(string) bool, texts ...[4]string) []Binding {
 	t.Helper()
 	var ws []WordBind
