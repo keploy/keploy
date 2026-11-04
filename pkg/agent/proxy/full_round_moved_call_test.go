@@ -218,11 +218,12 @@ func TestAFullRoundCallWhoseViewMovedIsNeverAnsweredByAnotherTestsOwnRecording(t
 // consume door: not test-2's mock-own2 or mock-sess2 once test-2 began,
 // before the hold or after it; not mock-own2 in flight as test-1 ended (the
 // pool view's ahead); not a copy test-2's view served before test-2 ended
-// again under the call. Its MockSpent and Spent say so, so a parser's index
-// never offers one. The pool's mock-pool, a shared scope's, it still
-// reads. A call decided in the test the store opens next (the tracker
-// ahead) reads test-2's as before, and a call a snapshot of the pool view
-// read with mock-own2 in flight reads it once test-2 began. Before, the
+// again under the call; not the store's own mock-own2 or mock-sess2, which
+// carry no view (told by name). Its MockSpent and Spent say so, so a
+// parser's index never offers one. The pool's mock-pool, a shared scope's,
+// it still reads. A call decided in the test the store opens next (the
+// tracker ahead) reads test-2's as before, and a call a snapshot of the pool
+// view read with mock-own2 in flight reads it once test-2 began. Before, the
 // hold read and consumed test-2's own recordings in the view in force.
 func TestASnapshotMarkedCallsHoldReadsNoOtherTestsOwnRecording(t *testing.T) {
 	type tc struct {
@@ -367,6 +368,25 @@ func TestASnapshotMarkedCallsHoldReadsNoOtherTestsOwnRecording(t *testing.T) {
 				}
 				if cur, _ := mm.GetPerTestMocksInWindow(); indexOfName(cur, "mock-own2") < 0 {
 					t.Error("test-2's mock-own2 was consumed by test-1's call")
+				}
+				// The recordings carrying no view, as the store holds them
+				// and as a parser builds a mock by name: still test-2's own,
+				// told by name, while the view in force owns them.
+				for _, rec := range []*models.Mock{own2, sess2} {
+					if rec.TestModeInfo.ServedIn != 0 {
+						t.Fatalf("precondition: the store's %s carries a view (%d)", rec.Name, rec.TestModeInfo.ServedIn)
+					}
+					if hs, ok := held.(*heldScope); ok {
+						if got := hs.unhidden([]*models.Mock{rec}); len(got) > 0 {
+							t.Errorf("the hold keeps test-2's %s as the store holds it, carrying no view", rec.Name)
+						}
+					}
+					if held.DeleteFilteredMock(*rec) || held.MarkMockAsUsed(*rec) || held.DeleteUnFilteredMock(*rec) {
+						t.Errorf("a consume door of the hold settled test-2's %s as the store holds it", rec.Name)
+					}
+				}
+				if cur, _ := mm.GetPerTestMocksInWindow(); indexOfName(cur, "mock-own2") < 0 {
+					t.Error("test-2's mock-own2 was consumed by test-1's call, through the store's own recording")
 				}
 				if !strings.HasPrefix(c.name, "test-2") {
 					return
