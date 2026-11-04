@@ -91,11 +91,21 @@ func TestASignedPollServedManyTimesIsOneViewOfItsRecording(t *testing.T) {
 func TestAnAnswersKeyNamesEveryPartOfIt(t *testing.T) {
 	base := func() *models.HTTPResp {
 		return &models.HTTPResp{StatusCode: 200, StatusMessage: "OK", ProtoMajor: 1, ProtoMinor: 1,
-			Header: map[string]string{"Content-Type": "application/json", "X-Amzn-Requestid": "r-1"}, Body: `{}`}
+			Header: map[string]string{"Content-Type": "application/json", "X-Amzn-Requestid": "r-1", "Date": "Tue, 03 Nov 2026 23:43:00 GMT",
+				"Connection": "keep-alive", "Content-Length": "2", "X-Amz-Crc32": "2745614147"},
+			Body:       `{}`,
+			StreamBody: []models.HTTPStreamChunk{{TS: time.Unix(1, 0), Data: []models.HTTPStreamDataField{{Key: "data", Value: "a"}}}}}
 	}
 	key := answerKey(base())
-	if key == "" || key == recordedAnswerKey || answerKey(base()) != key {
-		t.Fatalf("an answer keyed %q, then %q; want one key of its own", key, answerKey(base()))
+	if key == "" || key == recordedAnswerKey {
+		t.Fatalf("an answer keyed %q; want one key of its own", key)
+	}
+	// One answer is one key however often it is keyed: its headers are
+	// hashed in name order, never in a map's.
+	for i := 0; i < 32; i++ {
+		if answerKey(base()) != key {
+			t.Fatal("one answer keyed twice gave two keys: one answer, many views")
+		}
 	}
 	for name, change := range map[string]func(r *models.HTTPResp){
 		"status":         func(r *models.HTTPResp) { r.StatusCode = 201 },
@@ -106,11 +116,17 @@ func TestAnAnswersKeyNamesEveryPartOfIt(t *testing.T) {
 		"one more header": func(r *models.HTTPResp) {
 			r.Header["X-Extra"] = "e"
 		},
-		"body":         func(r *models.HTTPResp) { r.Body = `{"Messages":[]}` },
-		"binary":       func(r *models.HTTPResp) { r.Binary = "AA==" },
-		"body skipped": func(r *models.HTTPResp) { r.BodySkipped = true },
-		"body size":    func(r *models.HTTPResp) { r.BodySize = 2 },
-		"stream body":  func(r *models.HTTPResp) { r.StreamBody = []models.HTTPStreamChunk{{TS: time.Unix(1, 0)}} },
+		"a header's name": func(r *models.HTTPResp) {
+			r.Header["X-Amzn-Requestie"] = r.Header["X-Amzn-Requestid"]
+			delete(r.Header, "X-Amzn-Requestid")
+		},
+		"body":                  func(r *models.HTTPResp) { r.Body = `{"Messages":[]}` },
+		"binary":                func(r *models.HTTPResp) { r.Binary = "AA==" },
+		"body skipped":          func(r *models.HTTPResp) { r.BodySkipped = true },
+		"body size":             func(r *models.HTTPResp) { r.BodySize = 2 },
+		"no stream body":        func(r *models.HTTPResp) { r.StreamBody = nil },
+		"a stream chunk's time": func(r *models.HTTPResp) { r.StreamBody[0].TS = time.Unix(2, 0) },
+		"a stream chunk's data": func(r *models.HTTPResp) { r.StreamBody[0].Data[0].Value = "b" },
 	} {
 		r := base()
 		change(r)
