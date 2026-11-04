@@ -88,3 +88,15 @@ func TestNameEarlierInNamesTheFirstOtherOwner(t *testing.T) {
 		})
 	}
 }
+
+// A miss's sanitized copy keeps the earlier recording a changed call names
+// and the test that owns it, and the window a background repeat was made
+// in: names, no value, which judging reads to say why a test failed and
+// which test's window a call of the set's landed in.
+func TestASanitizedMissKeepsItsEarlierRecordingAndItsWindow(t *testing.T) {
+	c := UnmatchedCall{Protocol: "HTTP", ActualSummary: "PUT /secret", Earlier: "mock-0", EarlierIn: "o::TestA", WindowOf: "o::TestB"}
+	s := c.Sanitized()
+	if s.Earlier != "mock-0" || s.EarlierIn != "o::TestA" || s.WindowOf != "o::TestB" {
+		t.Fatalf("the sanitized miss lost its earlier recording, its test or its window: %+v", s)
+	}
+}
