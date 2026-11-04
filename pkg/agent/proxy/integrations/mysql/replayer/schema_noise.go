@@ -1,6 +1,7 @@
 package replayer
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	lru "github.com/hashicorp/golang-lru/v2"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	// vitesslog must load before any vitess code logs: see that package.
 	_ "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/vitesslog"
@@ -215,17 +217,18 @@ type strictGate struct {
 	queries    map[*models.Mock]string
 
 	// Rejection diagnostics for the mismatch report:
-	//   rejected    — how many candidates strict enforcement ruled out.
-	//   closestMock — the FIRST strict-rejected candidate; it passed the
-	//                 lenient match, so it is the closest mock to name in
-	//                 the report.
-	//   fieldDiffs  — field-level drift vs that first candidate
-	//                 (noise-vocabulary "body."-paths with recorded vs live
-	//                 values via matcher.JSONFieldDiffs) so the report says
-	//                 exactly WHICH request fields drifted outside noise.
-	rejected    int
-	closestMock string
-	fieldDiffs  []models.MockFieldDiff
+	//   rejected   — how many candidates strict enforcement ruled out.
+	//   rejections — each strict-rejected candidate with the engine and
+	//                noise it was compared under, in the order compare met
+	//                them, from which fieldDiffsFor gives the field-level
+	//                drift of the recording a miss names (noise-vocabulary
+	//                "body."-paths with recorded vs live values via
+	//                matcher.JSONFieldDiffs), so the report says exactly
+	//                WHICH request fields of that recording drifted outside
+	//                noise. The scan names the recording (bestPartialMock):
+	//                each candidate it gates is one it can name.
+	rejected   int
+	rejections []strictRejection
 
 	// exactRejected is how many of rejected the rule of exact serving ruled
 	// out (allowsDrift without strict enforcement, allowsLiterals):
@@ -265,6 +268,21 @@ type strictGate struct {
 	// counts the builds.
 	noiseMade     map[bodyNoiseKey]map[string][]string
 	noiseSetsMade *int
+
+	// ctx is the command's (withCommand: when it arrived, whether it is a
+	// call of record's full round; the learn tracker), and mockDb the store
+	// it is matched in, for the literals the learn step learned as reads of
+	// the application's clock (clocksHold, learnsClocks). learned are the
+	// reads the learn step learned for this command, by recording;
+	// learnTried the recordings it was asked about; clockVerdicts
+	// clocksHold's answers; clockRefusals the recordings turned away at their
+	// literals, with why (refusedOnClock).
+	ctx           context.Context
+	mockDb        integrations.MockMemDb
+	learned       map[*models.Mock]map[string]models.ClockOffset
+	learnTried    map[*models.Mock]bool
+	clockVerdicts map[*models.Mock]bool
+	clockRefusals []clockRefusal
 }
 
 // bodyFor is the live request body mock's recorded one is compared with: the
@@ -438,7 +456,7 @@ func (g *strictGate) allows(mock *models.Mock) bool {
 // allowsDrift is the rule, under exact serving, for a recording of a live
 // COM_STMT_EXECUTE's statement whose parameters are not all equal (the FIFO
 // candidate): it answers only when every parameter that differs is noise,
-// configured (test.globalNoise.requestBody) or learned on the recording
+// configured (test.globalNoise.global.requestBody) or learned on the recording
 // (req_body_noise), compared as strict enforcement compares, whether or
 // not strict enforcement is on. A MySQL recording that declares variables
 // never reaches the matcher there (the agent's followable: the MySQL parser
@@ -469,7 +487,7 @@ var literalsLeftOut = []string{"query.comments"}
 // literal tiers: the same text once its literals are masked): it answers
 // only when every literal that differs, compared by position
 // (body.query.literals.N), is noise, configured
-// (test.globalNoise.requestBody) or learned on the recording
+// (test.globalNoise.global.requestBody) or learned on the recording
 // (req_body_noise), compared as strict enforcement compares, whether or not
 // strict enforcement is on. A COM_QUERY's literals are its parameters:
 // served with another one, the recording answered the command with the rows
@@ -484,6 +502,20 @@ func (g *strictGate) allowsLiterals(mock *models.Mock) bool {
 	}
 	if g.compare(g.strictEngine(), &g.literalVerdicts, mock, literalsLeftOut...) {
 		return true
+	}
+	// Record's full round asks the learn step whether the literals that
+	// differ are reads of the application's clock (learnsClocks), once a
+	// recording: served where they all are, its verdict kept so a scan
+	// that meets it again serves it too.
+	if v := g.literalVerdicts[mock]; !g.learnTried[mock] {
+		if g.learnTried == nil {
+			g.learnTried = make(map[*models.Mock]bool)
+		}
+		g.learnTried[mock] = true
+		if g.learnsClocks(mock, v.drift) {
+			g.literalVerdicts[mock] = gateVerdict{allowed: true}
+			return true
+		}
 	}
 	g.exactRejected++
 	return false
@@ -500,17 +532,20 @@ func (g *strictGate) strictEngine() *mocknoise.Engine {
 
 // compare is strict enforcement's verdict on mock by engine, cached in
 // verdicts, recording the rejection diagnostics when it is no. The paths in
-// leftOut are not compared, whatever their values.
+// leftOut are not compared, whatever their values. A recording whose body
+// is allowed but whose literals learned as reads of the application's clock
+// do not hold (clocksHold) is a rejection too, counted on every scan that
+// meets it, as one at another field is.
 func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Mock]gateVerdict, mock *models.Mock, leftOut ...string) bool {
 	v, seen := (*verdicts)[mock]
-	if seen && v.allowed {
+	if seen && v.allowed && g.clocksHold(mock) {
 		return true
 	}
+	leftOut = g.clockLeftOut(mock, leftOut)
 	noise := g.bodyNoise(mock, leftOut)
-	body := g.bodyDocFor(mock)
 	if !seen {
 		recorded, recordedOK := g.recordedJSONBody(mock)
-		v.allowed, v.drift = engine.StrictRejectRecordedJSONBody(mock, recorded, recordedOK, body, noise)
+		v.allowed, v.drift = engine.StrictRejectRecordedJSONBody(mock, recorded, recordedOK, g.bodyDocFor(mock), noise)
 		if g.compared != nil {
 			*g.compared++
 		}
@@ -519,19 +554,11 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 		}
 		(*verdicts)[mock] = v
 	}
-	if v.allowed {
+	if v.allowed && g.clocksHold(mock) {
 		return true
 	}
 	g.rejected++
-	if g.closestMock == "" {
-		g.closestMock = mock.Name
-		if recorded, recordedOK := g.recordedBody(mock); recordedOK {
-			// KnownNoise is root-relative (user ∪ learned); JSONFieldDiffs
-			// skips those paths so the report shows only non-noise drift.
-			known := engine.KnownNoise(mock, noise)
-			g.fieldDiffs = maskAttributeDiffs(matcher.JSONFieldDiffs(string(recorded), string(body.Raw()), known, "body.", 96), mock, g.live)
-		}
-	}
+	g.rejections = append(g.rejections, strictRejection{mock: mock, engine: engine, noise: noise})
 	if ce := g.logger.Check(zap.DebugLevel, "schema-noise strict: rejected candidate mock (non-noise request field drifted)"); ce != nil && !seen {
 		paths := make([]string, 0, len(v.drift))
 		for p := range v.drift {
@@ -568,6 +595,38 @@ func (g *strictGate) bodyNoise(mock *models.Mock, leftOut []string) map[string][
 	return noise
 }
 
+// strictRejection is a candidate compare rejected, with the engine and the
+// noise it compared it under.
+type strictRejection struct {
+	mock   *models.Mock
+	engine *mocknoise.Engine
+	noise  map[string][]string
+}
+
+// fieldDiffsFor is the field-level drift of the live command from mock, as
+// compare rejected it: the request fields outside the noise it compared
+// under, with their recorded and live values. A miss gives the drift of the
+// recording it names: of two recordings of a statement turned away at other
+// literals, the scan names the last, and the first one's drift would read as
+// the named one's. A recording compare did not reject (one turned away only
+// at a literal learned as a read of the application's clock, allowsClocks,
+// or none) has none. It is made only for a miss, not for every rejection.
+func (g *strictGate) fieldDiffsFor(mock *models.Mock) []models.MockFieldDiff {
+	for _, r := range g.rejections {
+		if r.mock != mock {
+			continue
+		}
+		// A body recordedBody cannot give (nil) is no valid JSON, so
+		// JSONFieldDiffs gives no diffs for it. KnownNoise is root-relative
+		// (user ∪ learned); JSONFieldDiffs skips those paths so the report
+		// shows only non-noise drift.
+		recorded, _ := g.recordedBody(mock)
+		known := r.engine.KnownNoise(mock, r.noise)
+		return maskAttributeDiffs(matcher.JSONFieldDiffs(string(recorded), string(g.bodyDocFor(mock).Raw()), known, "body.", 96), mock, g.live)
+	}
+	return nil
+}
+
 // bodyNoiseKey names a noise set bodyNoise made: its parameter count and its
 // leftOut paths, joined by NUL (no path holds one).
 type bodyNoiseKey struct {
@@ -578,7 +637,7 @@ type bodyNoiseKey struct {
 // resetDiagnostics clears the rejection diagnostics for a scan that starts over
 // on the same command, keeping the verdicts: they still hold.
 func (g *strictGate) resetDiagnostics() {
-	g.rejected, g.closestMock, g.fieldDiffs, g.exactRejected = 0, "", nil, 0
+	g.rejected, g.rejections, g.exactRejected = 0, nil, 0
 }
 
 // queryShape is the literal-split view of a SQL text: the query with every
@@ -589,6 +648,8 @@ func (g *strictGate) resetDiagnostics() {
 type queryShape struct {
 	template string
 	literals []string
+	// numeric tells, by position, which literals are numbers (not quoted).
+	numeric  []bool
 	comments string
 	ok       bool
 }
@@ -670,9 +731,11 @@ func computeQueryShape(sql string) (shape *queryShape) {
 	// `WHERE a = ? AND b = 5` and `WHERE a = 5 AND b = ?` would both render
 	// as `a = :v1 and b = :v1` and false-match as the same template.
 	var literals []string
+	var numeric []bool
 	out := sqlparser.Rewrite(stmt, func(cursor *sqlparser.Cursor) bool {
 		if lit, isLit := cursor.Node().(*sqlparser.Literal); isLit {
 			literals = append(literals, lit.Val)
+			numeric = append(numeric, lit.Type == sqlparser.IntVal || lit.Type == sqlparser.FloatVal || lit.Type == sqlparser.DecimalVal)
 			cursor.Replace(sqlparser.NewArgument("kp_lit_" + strconv.Itoa(len(literals))))
 		}
 		return true
@@ -681,6 +744,7 @@ func computeQueryShape(sql string) (shape *queryShape) {
 	return &queryShape{
 		template: sqlparser.String(out),
 		literals: literals,
+		numeric:  numeric,
 		comments: strings.TrimSpace(strings.Join(comments, " ")),
 		ok:       true,
 	}

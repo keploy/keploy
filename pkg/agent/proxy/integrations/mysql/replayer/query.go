@@ -35,7 +35,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 	// MySQL-specific bit (canonicalizing command packets into diffable JSON).
 	noiseEngine := mocknoise.New(mysqlNoiseAdapter{}, opts.NoiseDetection(), opts.NoiseStrict())
 
-	// User request-body noise from test.globalNoise.requestBody — the same
+	// User request-body noise from test.globalNoise.global.requestBody — the same
 	// DEDICATED request-matching bucket HTTP consumes (see http/decode.go for
 	// why the response "body" bucket must not soften request matching).
 	userBodyNoise := requestBodyNoise(opts.NoiseConfig)
@@ -72,6 +72,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 
 			// read the command from the client
 			command, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
+			arrived := time.Now()
 			if err != nil {
 				if ne, ok := err.(net.Error); ok && ne.Timeout() {
 					// Idle wait: keep the connection open and continue polling
@@ -114,7 +115,11 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			}
 
 			// Match the request with the mock
-			resp, ok, miss, err := matchCommand(ctx, logger, req, mockDb, decodeCtx, noiseEngine, userBodyNoise)
+			// The command's call: when keploy read it whole, the end of its
+			// span on the application's clock, and whether record's full
+			// round learns it (clock_literals.go).
+			cmdCtx := withCommand(ctx, commandCall{arrived: arrived, learn: opts.Learn})
+			resp, ok, miss, err := matchCommand(cmdCtx, logger, req, mockDb, decodeCtx, noiseEngine, userBodyNoise)
 			if err != nil {
 				if err == io.EOF {
 					logger.Debug("Connection closing due to EOF from matchCommand",
@@ -187,7 +192,12 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				case miss.nextSteps != "":
 					nextSteps = miss.nextSteps
 				case miss.strictRejected > 0:
-					nextSteps = fmt.Sprintf("schema-noise strict rejected %d candidate mock(s): the listed request fields drifted outside configured/learned noise. Mark them under test.globalNoise.requestBody, run once with --schema-noise-detection to learn them, or re-record.", miss.strictRejected)
+					nextSteps = fmt.Sprintf("schema-noise strict rejected %d candidate mock(s): the listed request fields drifted outside configured/learned noise. Mark them in keploy.yml, under test.globalNoise.global.requestBody, run once with --schema-noise-detection to learn them, or re-record.", miss.strictRejected)
+				}
+				if miss.reason == models.MissRequestChanged {
+					// The learn step's refusal first, as the HTTP learn
+					// step's misses give it: why, and judging's reason.
+					nextSteps = "keploy's learn step: " + strings.TrimSuffix(miss.why, ".") + ". The request changed since it was recorded in a way keploy does not learn (request_changed). " + nextSteps
 				}
 				report := &models.MockMismatchReport{
 					At:            time.Now(),
@@ -204,6 +214,9 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					// reported "match_phase":"" and "candidates":0 — indistinguishable
 					// from an empty mock pool.
 					CandidateCount: miss.candidateCount,
+					// Why the call missed, when record's full round's learn
+					// step decided it: judging's evidence.
+					Reason: miss.reason,
 				}
 				// The miss was decided where the command first read the
 				// round: whether that read found a staging is told from it.

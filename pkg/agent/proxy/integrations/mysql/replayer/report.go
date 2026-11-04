@@ -141,6 +141,10 @@ type mockMiss struct {
 	// in place of the generic diff note and advice.
 	why       string
 	nextSteps string
+	// reason is judging's reason for the miss (models.MockMismatchReport.
+	// Reason), which only record's full round gives: request_changed for a
+	// call its learn step refused at literals (matchCommand).
+	reason string
 	// restaged is set when the command's matcher, held to its first read,
 	// read nothing because of the hold (matchCommand): the replay staged a
 	// test set again under the command, or its store could not hold it

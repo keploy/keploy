@@ -486,8 +486,9 @@ func TestTrackerCallWindowStartsAtABeginThatMovedTheClock(t *testing.T) {
 // way to it; one after it starts the window, as before. A begin after the
 // recorded call gives none. A recorded begin is the next test's alone, and
 // a new set forgets it and the running test's begin: its first call before
-// a test begins has no window from the previous set's test. keploy test
-// reads none.
+// a test begins has no window from the previous set's test. keploy test's
+// server tests read it only where no earlier call is recorded: the test's
+// first call read the clock after the test's request reached the app.
 func TestTrackerCallWindowStartsAtATestsRecordedBegin(t *testing.T) {
 	recBegin := time.Date(2026, 10, 20, 15, 49, 54, 0, time.UTC)
 	paired := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: recBegin.Add(3 * time.Second)}}
@@ -519,7 +520,7 @@ func TestTrackerCallWindowStartsAtATestsRecordedBegin(t *testing.T) {
 		{"no recorded begin", true, time.Time{}, time.Time{}, base, time.Time{}},
 		{"a recorded begin after the call", true, time.Time{}, paired.Spec.ReqTimestampMock.Add(time.Millisecond), base, time.Time{}},
 		{"keploy test", false, time.Time{}, recBegin, base, time.Time{}},
-		{"keploy test, a serve after the begin", false, time.Time{}, recBegin, served, time.Time{}},
+		{"keploy test, a serve after the begin", false, time.Time{}, recBegin, served, recBegin},
 		{"keploy test, an earlier recorded call", false, recBegin.Add(-time.Second), recBegin, served, recBegin.Add(-time.Second)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

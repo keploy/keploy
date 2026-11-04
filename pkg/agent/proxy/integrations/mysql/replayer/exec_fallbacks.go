@@ -190,8 +190,8 @@ func (f *execFallbacks) scorePick() *models.Mock {
 	return f.scored
 }
 
-// diagnose gives the gate's rejection diagnostics (rejected, closestMock,
-// fieldDiffs, exactRejected) the values the eager walk left them with, for a
+// diagnose gives the gate's rejection diagnostics (rejected, rejections,
+// exactRejected) the values the eager walk left them with, for a
 // miss's report: it replays the eager walk's gate calls in walk order. The
 // verdicts are cached, so it compares no candidate a second time. Eager, the
 // walk left them so. The highest score the eager walk had admitted is 0 at

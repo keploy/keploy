@@ -382,12 +382,29 @@ func (w *Window) fromTestBegin() *Window {
 	return &Window{Rec: from(w.Rec), F: from(w.F), offsets: w.offsets}
 }
 
+// ClockWordIn is clockWordIn for a protocol's own learn step (the MySQL
+// replayer's LiteralLearner) that learns a value whose one changed word is a
+// read of the clock: the word recorded (rw) and seen (lw), and the text
+// before and after it, the same in both runs; ok false otherwise. The
+// caller reads the word alone (ClassifyIn) and, where that is a read of the
+// clock, records where it stands (models.ClockWordOf), so a replay checks
+// the word as the clock and compares the rest (CheckClockRead). zone is the
+// zone the application writes a wall clock of no zone in, beside UTC
+// (DriftCache.Zone; nil: UTC alone), the zones the caller's reading of the
+// word alone tries: a word whose text names no zone is a read where w holds
+// it read in either (Window.holdsIn).
+func ClockWordIn(rec, live string, w *Window, zone *time.Location) (before, rw, lw, after string, ok bool) {
+	return clockWordIn(rec, live, w, zone)
+}
+
 // clockWordIn finds the one instant that changed in a text, recorded as rec
 // and seen in record's full round as live, read in w in both runs: the word
 // rw of rec and lw of live, found as clockAt finds them (the first layout
 // of clockLayouts that matches them, at ASCII word boundaries), each a read
-// of its run's clock in w (Window.holds), with the text around it the same
-// in both runs, before it and after it. ok is false where no instant
+// of its run's clock in w, a word whose text names no zone read in UTC or
+// in zone, the application's (nil: UTC alone: Window.holdsIn), with the text
+// around it the same in both runs, before it and after it. ok is false where
+// no instant
 // changed, where more than one did, where the one that did is no read in w,
 // or where the text around it changed too: then no one word of the text is
 // the read, and the text is no read of the clock plus a text that stayed.
@@ -396,7 +413,7 @@ func (w *Window) fromTestBegin() *Window {
 // neighbourhood of them, never over a whole text, and its outcome is the
 // one a reading of both whole texts gives (clockWordWindow): its cost is
 // that of finding where two texts differ, whatever their length.
-func clockWordIn(rec, live string, w *Window) (before, rw, lw, after string, ok bool) {
+func clockWordIn(rec, live string, w *Window, zone *time.Location) (before, rw, lw, after string, ok bool) {
 	if w == nil || rec == live {
 		return "", "", "", "", false
 	}
@@ -405,7 +422,7 @@ func clockWordIn(rec, live string, w *Window) (before, rw, lw, after string, ok 
 		return "", "", "", "", false
 	}
 	takenR, takenL := make([]bool, er-q), make([]bool, el-q)
-	for _, lay := range clockLayouts {
+	for k, lay := range clockLayouts {
 		rm, lm := clockMatches(lay, rec, q, er, takenR), clockMatches(lay, live, q, el, takenL)
 		for j := 0; j < len(rm) && j < len(lm); j++ {
 			rs, ls := rec[rm[j][0]:rm[j][1]], live[lm[j][0]:lm[j][1]]
@@ -423,7 +440,7 @@ func clockWordIn(rec, live string, w *Window) (before, rw, lw, after string, ok 
 				return "", "", "", "", false
 			}
 			before, rw, lw, after = rec[:rm[j][0]], rs, ls, rec[rm[j][1]:]
-			if live[:lm[j][0]] != before || live[lm[j][1]:] != after || !w.holds(lay, rs, ls) {
+			if live[:lm[j][0]] != before || live[lm[j][1]:] != after || !w.holdsIn(k, rs, ls, zone) {
 				return "", "", "", "", false
 			}
 			ok = true
@@ -646,6 +663,22 @@ func (w *Window) holds(lay clockLayout, recorded, live string) bool {
 		return false
 	}
 	return w.Rec.holds(rt, rres) && w.F.holds(lt, lres)
+}
+
+// holdsIn reports whether recorded and live, an instant in layout k of
+// clockLayouts each, are reads of their runs' clocks within w (not nil),
+// read as a whole value's instants are (holdsRead): as its text names it,
+// and a wall clock of no zone in both runs read in zone too, the zone the
+// application writes one in (DriftCache.Zone; nil: UTC alone). w holds the
+// two where it holds one of those readings in both runs. A text its layout
+// matches and cannot read (a 30th of February) is no read.
+func (w *Window) holdsIn(k int, recorded, live string, zone *time.Location) bool {
+	rm, _, ok := instantKeyOf(k, recorded)
+	if !ok {
+		return false
+	}
+	lm, _, ok := instantKeyOf(k, live)
+	return ok && w.holdsRead(rm, lm, zone)
 }
 
 // Holds reports whether rec and live, instants a value carried in the

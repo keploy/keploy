@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
@@ -257,7 +258,14 @@ func NativeHandshakeForTest() *models.Mock { return nativeHandshake() }
 // and what Replay returns once it ends the connection.
 func ReplayCommandsForTest(t *testing.T, db integrations.MockMemDb, commands ...[]byte) ([][]byte, <-chan error) {
 	t.Helper()
-	client, done := replay(t, db)
+	return ReplayCommandsInForTest(t, context.Background(), db, models.OutgoingOptions{}, commands...)
+}
+
+// ReplayCommandsInForTest is ReplayCommandsForTest serving the connection in
+// ctx with opts: a connection of record's full round where opts.Learn is set.
+func ReplayCommandsInForTest(t *testing.T, ctx context.Context, db integrations.MockMemDb, opts models.OutgoingOptions, commands ...[]byte) ([][]byte, <-chan error) {
+	t.Helper()
+	client, done := replayIn(t, ctx, db, zap.NewNop(), opts)
 	client.greetAndAnswer("app", mysql.Native)
 	if ok := client.read(); len(ok) == 0 || ok[0] != mysql.OK {
 		t.Fatalf("the client read % x after its handshake; want the recorded OK", ok)
@@ -316,4 +324,24 @@ func checkDecodedBody(message any, statementParams int, query string, doc map[st
 		panic(fmt.Sprintf("a body made decoded is not what its bytes decode to:\nbytes   %s\ndecoded %#v\nwant    %#v", raw, decoded, want))
 	}
 	decodedBodiesChecked.Add(1)
+}
+
+// WithCommandForTest is ctx carrying the command's arrival and whether
+// record's full round learns it, as the command phase gives matchCommand.
+func WithCommandForTest(ctx context.Context, arrived time.Time, learn bool) context.Context {
+	return withCommand(ctx, commandCall{arrived: arrived, learn: learn})
+}
+
+// AttrQueryReqForTest is the COM_QUERY sql sent with the query attribute
+// traceparent tp, as a client that sends query attributes sends it.
+func AttrQueryReqForTest(t *testing.T, tp, sql string) mysql.Request {
+	return attrQueryReq(t, tp, sql)
+}
+
+// SetAttributeForTest gives m's recorded COM_QUERY the query attribute
+// traceparent tp, as record keeps it.
+func SetAttributeForTest(m *models.Mock, tp string) {
+	qp := m.Spec.MySQLRequests[0].Message.(*mysql.QueryPacket)
+	qp.ParameterCount, qp.NewParamsBindFlag, qp.NullBitmap = 1, 1, []byte{0}
+	qp.Parameters = []mysql.Parameter{{Type: uint16(mysql.FieldTypeString), Name: "traceparent", Value: tp}}
 }
