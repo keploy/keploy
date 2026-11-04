@@ -70,7 +70,7 @@ func TestEnactFault_ServesTheFaultOrLeavesTheWholeAnswer(t *testing.T) {
 			var got enacted
 			select {
 			case got = <-returned:
-			case <-time.After(10 * time.Second): // turns a hold past the run's end into a failure
+			case <-time.After(10 * time.Second): // a hold the run's end does not end fails the row instead of hanging the package
 				t.Fatal("EnactFault did not return within 10s")
 			}
 			if held := time.Since(called); held < tc.held {
