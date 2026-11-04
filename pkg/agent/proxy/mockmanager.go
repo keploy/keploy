@@ -42,6 +42,9 @@ import (
 //	swapMu  →  exact.outside.mu  →  treesMu  →  TreeDb.mu
 //	                         (prepareOutside reads the staged trees under the
 //	                          staging lock; nothing takes swapMu under it)
+//	swapMu  →  cursorMu      (a staging drops the per-test cursors and the
+//	                          recordings kept for repeats; keepOwned decides
+//	                          a recording's owner and keeps it under swapMu)
 //	swapMu  →  treesMu, carry.mu
 //	                         (fileCarryOver, under SetMocksWithWindow;
 //	                          carry.mu is a LEAF, also taken bare by
@@ -2469,6 +2472,48 @@ func (m *MockManager) KeptForRepeats() func(key string) bool {
 	m.cursorMu.Lock()
 	defer m.cursorMu.Unlock()
 	return snapshotKeys(m.kept)
+}
+
+// ClaimForRepeats keeps mk, the open test's own per-test recording, for its
+// test's byte-identical repeats and marks it used, when no consume kept it
+// yet (integrations.RepeatClaimer). It is false, keeping nothing, for a mock
+// of an earlier set, one that is not the open test's own (OwnedByOpenTest),
+// one already kept, and one the store cannot mark used (an unnamed mock).
+func (m *MockManager) ClaimForRepeats(mk models.Mock) bool {
+	if !m.keepOwned(&mk) {
+		return false
+	}
+	if m.MarkMockAsUsed(mk) {
+		return true
+	}
+	m.cursorMu.Lock()
+	delete(m.kept, mk.Name)
+	m.cursorMu.Unlock()
+	return false
+}
+
+// keepOwned keeps mk for its test's repeats when it is of this set, the open
+// test's own, and not kept yet. It decides holding swapMu, which every
+// staging holds while it drops what was kept and swaps the trees and the
+// window: no staging lands between the check and the keep, so a consume of
+// one test's recording that straddles the next test's staging keeps nothing
+// for that test.
+func (m *MockManager) keepOwned(mk *models.Mock) bool {
+	m.swapMu.RLock()
+	defer m.swapMu.RUnlock()
+	if m.stalePooled(mk) || !m.OwnedByOpenTest(mk) {
+		return false
+	}
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	if _, kept := m.kept[mk.Name]; kept {
+		return false
+	}
+	if m.kept == nil {
+		m.kept = make(map[string]struct{})
+	}
+	m.kept[mk.Name] = struct{}{}
+	return true
 }
 
 // OwnedByOpenTest reports whether mk is the open test's own recording
