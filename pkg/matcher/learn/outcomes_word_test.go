@@ -5,6 +5,7 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"reflect"
 	"slices"
 	"strconv"
@@ -1503,6 +1504,38 @@ func TestOutcomeAWordOnlyACheckedFormShowsIsNeverFresh(t *testing.T) {
 	}
 }
 
+// The checked-form rule reads a value's clock words in the call's window,
+// as main's readings do: a read of the clock there written with a zone
+// ("+05:30") makes a run of the base64 alphabet that does not decode
+// ("00+05"), and that run is the clock's, so an id beside it is still
+// fresh. Where the window does not hold the read, the run is no clock's,
+// and the id is refused, naming main's reason.
+func TestOutcomeAClockReadInTheCallsWindowIsReadByTheCheckedFormRule(t *testing.T) {
+	rAt := oAt.Add(300 * time.Millisecond)
+	fAt := oAt.Add(time.Hour + 7*time.Second + 800*time.Millisecond)
+	ist := time.FixedZone("IST", 5*3600+1800)
+	rec := "at " + rAt.In(ist).Format(time.RFC3339) + " id A7K29QXMab"
+	live := "at " + fAt.In(ist).Format(time.RFC3339) + " id Zq81Lm0Xcd"
+	for _, c := range []struct {
+		what  string
+		w     *Window
+		fresh bool
+	}{
+		{"the call's window holds the read", iWin(rAt, fAt, 2*time.Second), true},
+		{"the call's window ends before round F's read", iWin(rAt, fAt.Add(-time.Minute), 2*time.Second), false},
+	} {
+		in := oInput("url.query.state", rec, live, nil, nil)
+		in.At, in.Arrived, in.Window = rAt, fAt, c.w
+		d := oWord(t, Decide(in), "A7K29QXMab", "Zq81Lm0Xcd")
+		switch {
+		case c.fresh && d.Outcome != OutcomeFresh:
+			t.Errorf("%s: %s; want the id fresh", c.what, oDescribe([]Decision{d}))
+		case !c.fresh:
+			oRefused(t, c.what, d, RefusalCannotCheck, "a run of the base64 alphabet that does not decode")
+		}
+	}
+}
+
 // An id a decoded form of the value moved (swapped behind quoted-printable
 // escapes, or inside a base64 run's text while the value holds it as
 // written at its place in both runs) is a word of what changed, as main
@@ -1585,4 +1618,68 @@ func TestOutcomeTheMovedWordRuleReadsEachSideAndWholeIdsOnly(t *testing.T) {
 	oNoneFresh(t, "an id once more as recorded, the place held it as recorded", Decide(in(twice, once, a, "other")), "", "mock-11")
 	fresh("a 3-letter word swapped in base64 text, held at a place", Decide(in("=23 "+b64(`{"a":"k7q","b":"m2x"}`), "=23 "+b64(`{"a":"m2x","b":"k7q"}`), "k7q", "k7q")))
 	fresh("an id an escape hides that changed, not moved, the place kept it", Decide(in("x=3D=23"+a+" ok", "x=3D=23B8L30RQW ok", a, a)))
+}
+
+// An id that moved in the value as written (stayed at one place in round F
+// while it changed at another, held once more by one run, or swapped with
+// another word), held at a place before the call, leaves no word beside it
+// fresh, as main refuses the value ("unaccounted"): keploy cannot tell
+// whether the other words that changed came from that place too. The
+// reader judges the moved id by its own rules (a conflict here), and the
+// rule holds where only the place's case-folded text holds it. A place that
+// holds another word leaves the other word fresh.
+func TestOutcomeAnIdThatMovedAsWrittenLeavesNoWordBesideItFresh(t *testing.T) {
+	const a, b, w1, w2 = "A7K29QXMab", "Pq81Lm0Xzz", "Hd73Kw2Nqe", "Rt58Vb1Mxo"
+	shapes := []struct{ name, rec, live string }{
+		{"kept at one place, changed at another", "a=" + a + " b=" + w1 + " c=" + a, "a=" + b + " b=" + w2 + " c=" + a},
+		{"held once more as recorded", "a=" + a + " b=" + a + " c=" + w1, "a=" + a + " b=" + b + " c=" + w2},
+		{"held once more in round F", "a=" + b + " b=" + w1 + " c=" + a, "a=" + a + " b=" + w2 + " c=" + a},
+		{"swapped with another word", "a=" + a + " b=" + b + " c=" + w1, "a=" + b + " b=" + a + " c=" + w2},
+	}
+	held := func(run bool, r, f string) []Earlier {
+		return oServed("mock-11", run, false, Request, oText("body.ref", "ref "+r), "ref "+f, time.Millisecond)
+	}
+	for _, s := range shapes {
+		for _, run := range []bool{false, true} {
+			for _, h := range [][2]string{{a, a}, {strings.ToLower(a), strings.ToLower(a)}} {
+				what := fmt.Sprintf("%s, held %q (an older test: %v)", s.name, h[0], run)
+				oNoneFresh(t, what, Decide(oInput("url.query.state", s.rec, s.live, held(run, h[0], h[1]), nil)), "", "mock-11")
+			}
+			if d := oWord(t, Decide(oInput("url.query.state", s.rec, s.live, held(run, "other", "other"), nil)), w1, w2); d.Outcome != OutcomeFresh {
+				t.Errorf("%s, a place holding another word (an older test: %v): %s; want fresh", s.name, run, oDescribe([]Decision{d}))
+			}
+		}
+	}
+}
+
+// A run of the value that is a read of the clock in the call's window is not
+// decoded, as main reads the value: here an epoch in microseconds whose
+// digits read as hex text (" ABCDEFG"), beside the same id written in hex
+// and, in round F only, in base64 (another word's base64 as recorded). Read
+// so, round F holds the id once more,
+// and the place that holds it refuses the changed word beside it; decoding
+// the clock read too would pair the id with the read's and leave the word
+// fresh, where main refuses it. A place that holds another word leaves it
+// fresh.
+func TestOutcomeAClockReadInTheCallsWindowIsNoDecodedText(t *testing.T) {
+	const bus = 2041424344454647
+	b := time.UnixMicro(bus).UTC()
+	c := b.Add(time.Hour + 7*time.Second)
+	rAt, fAt := b.Add(300*time.Millisecond), c.Add(300*time.Millisecond)
+	id := "ABCDEFG"
+	B, C := strconv.FormatInt(bus, 10), strconv.FormatInt(c.UnixMicro(), 10)
+	rec := "t=" + B + " x=" + hex.EncodeToString([]byte(id)) + " y=" + base64.StdEncoding.EncodeToString([]byte("HIJKLMN")) + " c=Hd73Kw2Nqe"
+	live := "t=" + C + " x=" + hex.EncodeToString([]byte(id)) + " y=" + base64.StdEncoding.EncodeToString([]byte(id)) + " c=Rt58Vb1Mxo"
+	in := func(h string) Input {
+		e := oServed("mock-11", false, false, Request, oText("body.ref", "ref "+h), "ref "+h, time.Millisecond)
+		in := oInput("url.query.state", rec, live, e, nil)
+		in.At, in.Arrived, in.Window = rAt, fAt, iWin(rAt, fAt, 2*time.Second)
+		return in
+	}
+	if d := oWord(t, Decide(in(id)), "Hd73Kw2Nqe", "Rt58Vb1Mxo"); d.Outcome != OutcomeRefused || d.Refusal == nil || !strings.Contains(d.Refusal.Why, "mock-11") {
+		t.Errorf("FALSE GREEN? a place holding the id: %s; want refused naming mock-11", oDescribe([]Decision{d}))
+	}
+	if d := oWord(t, Decide(in("other")), "Hd73Kw2Nqe", "Rt58Vb1Mxo"); d.Outcome != OutcomeFresh {
+		t.Errorf("a place holding another word: %s; want fresh", oDescribe([]Decision{d}))
+	}
 }

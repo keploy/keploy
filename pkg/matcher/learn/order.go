@@ -752,24 +752,20 @@ func decodedOnly(dc *DriftCache, s, other string) []string {
 }
 
 // movedInAForm is why no word of a leaf may be learned fresh where a word of
-// 32 bits or more moved in a decoded form of one of its texts, and a place
-// before the call holds it, recorded for a word of the recorded value, in
-// round F for one of F's. A word moved there is one both runs hold in that
-// form, in another order or once more (main's valueDrift.movedRec and
-// movedLive, less what one run lost or gained: an id swapped behind
-// quoted-printable escapes, or inside a base64 run's text), which the
-// reader does not read as a changed word itself. keploy binds no word in
-// such a form, so it cannot tell whether the word came from there, as main
-// refuses it, and as the reader refuses the same swap as written. A word
-// one run lost or gained there is inDecodedForm's. A place keploy could not
-// read refuses every change of the call (decide).
+// 32 bits or more moved in a form of one of its texts (as written, or a
+// decoded form), and a place before the call holds it, recorded for a word
+// of the recorded value, in round F for one of F's. A word moved there is
+// one both runs hold in that form, in another order or once more (main's
+// valueDrift.movedRec and movedLive, read in the call's window, less what
+// one run lost or gained: an id swapped behind quoted-printable escapes,
+// inside a base64 run's text, or as written beside another changed word).
+// keploy cannot tell whether the leaf's other changed words came from
+// there, as main refuses the value, so it refuses them too, even where the
+// reader reads the moved word as a changed word itself (the reader judges
+// that word by its own rules, but not the words beside it). A word one run
+// lost or gained in a decoded form is inDecodedForm's. A place keploy could
+// not read refuses every change of the call (decide).
 func (dc *decider) movedInAForm(rds []textReading) (string, *evPlace) {
-	decided := [2]map[string]bool{{}, {}}
-	for _, rd := range rds {
-		for _, w := range rd.Words {
-			decided[0][strings.ToLower(w.Rec)], decided[1][strings.ToLower(w.Live)] = true, true
-		}
-	}
 	for _, rd := range rds {
 		v := dc.dr.ofIn(rd.Rec, rd.Live, dc.in.Window, dc.in.At)
 		for i := range v.movedRec {
@@ -779,7 +775,7 @@ func (dc *decider) movedInAForm(rds []textReading) (string, *evPlace) {
 					changed = v.lost[i]
 				}
 				for _, t := range v.inOrder(moved, recorded) {
-					if wordBits(t) < chanceBits || changed[t] || decided[side][strings.ToLower(t)] {
+					if wordBits(t) < chanceBits || changed[t] {
 						continue
 					}
 					for _, p := range dc.ps {
@@ -788,7 +784,7 @@ func (dc *decider) movedInAForm(rds []textReading) (string, *evPlace) {
 							text = p.t.rec
 						}
 						if held, _ := text.holdsWord(t); held && placedFor(p, t).state != stateNotBefore {
-							return p.name + " held " + strconv.Quote(t) + ", which this value carries in a decoded form where it moved, and keploy binds no word there", &p
+							return p.name + " held " + strconv.Quote(t) + ", which moved in this value (in another order, or once more), so keploy cannot tell where its changed words came from", &p
 						}
 					}
 				}
