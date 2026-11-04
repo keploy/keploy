@@ -327,3 +327,11 @@ func checkDecodedBody(message any, statementParams int, query string, doc map[st
 	}
 	decodedBodiesChecked.Add(1)
 }
+
+// ForgetAnsweredForTest drops the places the recordings answered in a test
+// window left (answeredInWindow), so a row starts with none.
+func ForgetAnsweredForTest() {
+	answeredInWindow.mu.Lock()
+	defer answeredInWindow.mu.Unlock()
+	answeredInWindow.places = redactedPlaces{}
+}

@@ -1122,9 +1122,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 
 	// logged reads the places the logs and the miss's report show the live
 	// statement by: every place any recording of the pool redacted
-	// (poolPlaces), so a line that compares the live statement with one
-	// candidate, or a report that names one recording, keeps hidden what
-	// another recording hid. Read once, by the first line that shows the
+	// (poolPlaces), and any recording of the test that answered a call and
+	// so left the pool (answeredPlaces), so a line that compares the live
+	// statement with one candidate, or a report that names one recording,
+	// keeps hidden what another recording hid. Read once, by the first line that shows the
 	// live statement or its bound values, or by the miss. A pool that
 	// cannot be read redacts the command whole (everyPlace): one whose read
 	// fails, one a store that could not hold the command to its mark reads
@@ -1139,10 +1140,14 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		if opts.placesRead != nil {
 			*opts.placesRead++
 		}
-		if (pool != nil || loadPool() == nil) && integrations.UnheldWhy(mockDb) == "" && (opts.restaged == nil || !opts.restaged()) {
-			return poolPlaces(pool)
+		if pool == nil && loadPool() != nil {
+			return everyPlace
 		}
-		return everyPlace
+		answered := answeredPlaces(mockDb)
+		if integrations.UnheldWhy(mockDb) != "" || opts.restaged != nil && opts.restaged() {
+			return everyPlace
+		}
+		return poolPlaces(pool).or(answered)
 	}}
 	if debugOn && (req.Header.Type == sCOM_QUERY || req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC) {
 		logged.places()
@@ -3713,6 +3718,11 @@ func updateMock(ctx context.Context, logger *zap.Logger, matchedMock *models.Moc
 		deleteMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(deleteMock.Spec.ReqBodyNoise, detectedNoise)
 	}
 	if mockDb.DeleteFilteredMock(deleteMock) {
+		// It is in no later read of the pool: a miss of the test redacts
+		// what it redacted all the same (answeredPlaces).
+		if !integrations.ExactServing(mockDb) {
+			answeredInWindow.add(mockDb, placesOf(matchedMock))
+		}
 		return true
 	}
 	if mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock) || usedOrRefused() {
