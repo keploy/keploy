@@ -199,7 +199,7 @@ jobs:
         run: bash .github/workflows/test_workflow_scripts/keploy-installer.tests.sh
 
   mock-kinds:
-    # Twenty-five cases on files the script writes; under a second.
+    # Twenty-seven cases on files the script writes; under a second.
     timeout-minutes: 5
     runs-on: ubuntu-latest
     steps:

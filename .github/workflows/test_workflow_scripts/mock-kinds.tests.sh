@@ -23,6 +23,9 @@
 # pass, and any DNS mock fails beside them, one included, as do the shapes
 # that fail http_mocks_are. other-in-place-of-http is the recording a count
 # of every mock passed: the right number of mocks, one of them not Http.
+#
+# The named- cases have mocks of two other kinds: the line names each, with
+# its count.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source-path=SCRIPTDIR
@@ -70,6 +73,38 @@ check_with() {
 check() { check_with http_mocks_are "$@"; }
 only() { check_with http_mocks_only "$@"; }
 
+# named FN NAME N HEAD KIND=COUNT... -- KIND:COUNT...: FN FILE N, FILE written
+# by mocks from the KIND:COUNTs after --, must fail and print
+# "FILE: HEAD (LIST)", LIST the KIND=COUNTs before --, each once, in any
+# order: awk's for-in order is unspecified.
+named() {
+    local fn=$1 name=$2 n=$3 head=$4 f="$tmp/$2.yaml" out rc list got want
+    local -a listed=() items=()
+    shift 4
+    while [ $# -gt 0 ] && [ "$1" != -- ]; do listed+=("$1"); shift; done
+    shift
+    mocks "$f" "$@"
+    out=$("$fn" "$f" "$n")
+    rc=$?
+    want=$(printf '%s\n' "${listed[@]}" | sort | paste -sd ' ' -)
+    got="(not \"$f: $head (...)\")"
+    case $out in
+    "$f: $head ("*")")
+        list=${out#"$f: $head ("}
+        read -ra items <<<"${list%)}"
+        got=$(printf '%s\n' "${items[@]}" | sort | paste -sd ' ' -)
+        ;;
+    esac
+    if [ "$rc" -eq 0 ] || [ "$got" != "$want" ]; then
+        echo "FAIL $name: $fn FILE $n returned $rc, want a failure"
+        echo "     printed: $out"
+        echo "     want:    $f: $head (each of: $want)"
+        fails=$((fails + 1))
+    else
+        echo "ok   $name (rc 1): $head ($want)"
+    fi
+}
+
 check http-only            0 3   "3 Http mocks, 0 DNS, 0 of other kinds"                 Http:3
 check aws-runner           0 200 "200 Http mocks, 3 DNS, 0 of other kinds"               DNS:3 Http:200
 check dns-last             0 200 "200 Http mocks, 3 DNS, 0 of other kinds"               Http:200 DNS:3
@@ -96,6 +131,9 @@ only only-other-in-place-of-http 1 3 "2 Http mocks, 0 DNS, 1 of other kinds (Gen
 only only-http2-is-not-http     1 3 "2 Http mocks, 0 DNS, 1 of other kinds (Http2=1)"     Http:2 Http2:1
 only only-no-kind               1 3 "3 Http mocks, 0 DNS, 1 of other kinds ((none)=1)"    Http:3 :1
 only only-no-file               1 3 "0 Http mocks, 0 DNS, 0 of other kinds"
+
+named http_mocks_are  named-are  3 "3 Http mocks, 0 DNS, 2 of other kinds" Generic=1 MySQL=1 -- Http:3 Generic:1 MySQL:1
+named http_mocks_only named-only 3 "3 Http mocks, 1 DNS, 3 of other kinds" Generic=2 MySQL=1 -- Http:3 DNS:1 Generic:2 MySQL:1
 
 if [ "$fails" -ne 0 ]; then
     echo "mock-kinds.tests.sh: $fails case(s) failed"
