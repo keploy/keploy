@@ -2,11 +2,14 @@ package tls
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -28,8 +31,32 @@ const storeLockName = "store.lock"
 // only spaces the tries: the change runs once the lock is free.
 var storeLockPoll = 10 * time.Millisecond
 
+// storeLockWait bounds how long a change waits for the store lock, and
+// storeLockSay is how often it says, while it waits, that it does. A run holds
+// the lock for one command, a keytool or a store's update, which takes
+// seconds. But whoever can open the file can hold it (on Windows any user of
+// the host: lockStores), and a run stopped while it holds it (Ctrl+Z, SIGSTOP,
+// a paused container) holds it until it goes on. Past the bound the change
+// does not run and fails with errStoreLockHeld: run without the lock, it could
+// undo another run's change, or have its own undone. Variables so tests can
+// shorten them.
+var (
+	storeLockWait = 2 * time.Minute
+	storeLockSay  = 5 * time.Second
+)
+
+// errStoreLockHeld is the error of a change that did not run because the
+// store lock stayed held past storeLockWait.
+var errStoreLockHeld = errors.New("the trust stores' lock stayed held")
+
 // storeLockTry is tryLockFile; a variable so tests can make a try fail.
 var storeLockTry = tryLockFile
+
+// storeLockStep is utils.BootStep, which each of the wait's "waiting" lines
+// takes as well: an agent's start that waits for the lock, which ends by
+// storeLockWait, has not stopped (the CLI that waits for the start judges by
+// its steps). A variable so tests can see the steps.
+var storeLockStep = utils.BootStep
 
 // storeLockWarned keeps the warning that a change ran without the store lock
 // to one per process.
@@ -37,9 +64,11 @@ var storeLockWarned atomic.Bool
 
 // withStoreLock runs change, a command that rewrites a trust store, holding
 // the host's store lock. While another process holds the lock it waits, says
-// so once at Info, and tries again until it has the lock or ctx ends; then
-// change does not run (it runs under ctx, so it would only be killed) and
-// ctx's error is returned. When the lock cannot be taken at all (its directory
+// so at Info every storeLockSay, and tries again until it has the lock, ctx
+// ends, or storeLockWait has passed. When ctx ends first, change does not run
+// (it runs under ctx, so it would only be killed) and ctx's error is returned;
+// past the bound, change does not run and the error is errStoreLockHeld,
+// naming the lock's file. When the lock cannot be taken at all (its directory
 // cannot be made, its file cannot be opened, or a try fails for another
 // reason than the lock being held), change runs without it, as every change
 // did before this lock, and the run says so once.
@@ -54,7 +83,8 @@ func withStoreLock(ctx context.Context, logger *zap.Logger, change func() error)
 
 // lockStores takes the host's store lock for withStoreLock and returns how to
 // give it up: one that does nothing when the change goes on without it. Its
-// error is ctx's, when ctx ended while the lock was held by another.
+// error is ctx's, when ctx ended while the lock was held by another, or
+// errStoreLockHeld, when it stayed held past storeLockWait.
 func lockStores(ctx context.Context, logger *zap.Logger) (unlock func(), err error) {
 	path := filepath.Join(caRunsDir, storeLockName)
 	if err := os.MkdirAll(caRunsDir, 0o755); err != nil {
@@ -65,7 +95,11 @@ func lockStores(ctx context.Context, logger *zap.Logger) (unlock func(), err err
 	// another user than the one who made it (on Windows, whose
 	// %ProgramData% lets every user read the files in it); a read handle
 	// takes both flock and LockFileEx. 0600: on Linux only root, whose runs
-	// change the stores, opens it.
+	// change the stores, opens it. On Windows a run that is not elevated
+	// changes a JDK keystore too (one the user can write, as a JDK in the
+	// user's profile), so the file stays one every user can open, and so
+	// lock: one who holds it keeps the runs' changes waiting up to
+	// storeLockWait, and then they fail, naming the file.
 	// #nosec G304 -- the path is caRunsDir and a constant name.
 	f, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE, 0o600)
 	if err != nil {
@@ -77,6 +111,9 @@ func lockStores(ctx context.Context, logger *zap.Logger) (unlock func(), err err
 		if ctx.Err() != nil {
 			return func() {}, ctx.Err()
 		}
+		if errors.Is(err, errStoreLockHeld) {
+			return func() {}, err
+		}
 		warnNoStoreLock(logger, path, err)
 		return func() {}, nil
 	}
@@ -87,12 +124,18 @@ func lockStores(ctx context.Context, logger *zap.Logger) (unlock func(), err err
 }
 
 // waitForStoreLock takes f's lock, trying again every storeLockPoll while
-// another process holds it, until ctx ends. The first try that finds it held
-// says so at Info: a run that holds it and does not go on (one stopped with
-// Ctrl+Z) keeps this one waiting until it is stopped too. A try that fails for
-// another reason ends the wait at once, with that error.
+// another process holds it, for at most storeLockWait, or until ctx ends.
+// While it waits it says so at Info, at the first try that finds the lock held
+// and then every storeLockSay, each time a step of the agent's start too
+// (storeLockStep). Past the bound it ends with errStoreLockHeld, naming path,
+// but no holder: Windows does not tell who holds a LockFileEx lock. A try
+// that fails for another reason than the lock being held ends the wait at
+// once, with that error.
 func waitForStoreLock(ctx context.Context, logger *zap.Logger, f *os.File, path string) error {
-	said := false
+	start := time.Now()
+	// When it last said it waits: before the first line, the zero time, which
+	// time.Since puts past any storeLockSay.
+	var said time.Time
 	for {
 		locked, err := storeLockTry(f)
 		if err != nil {
@@ -101,9 +144,15 @@ func waitForStoreLock(ctx context.Context, logger *zap.Logger, f *os.File, path 
 		if locked {
 			return nil
 		}
-		if !said {
-			said = true
-			logger.Info("waiting for another keploy run on this host to finish changing a trust store", zap.String("lock", path))
+		waited := time.Since(start)
+		if waited >= storeLockWait {
+			return fmt.Errorf("%w: %s was held for %s by another keploy run on this host, or by another process that opened it, and keploy changes a trust store only while it holds that lock (two changes of one store at once undo each other's)", errStoreLockHeld, path, storeLockWait)
+		}
+		if time.Since(said) >= storeLockSay {
+			said = time.Now()
+			logger.Info("waiting for another keploy run on this host to finish changing a trust store",
+				zap.String("lock", path), zap.Duration("waited", waited.Round(time.Second)), zap.Duration("bound", storeLockWait))
+			storeLockStep("waiting for the trust stores' lock " + path)
 		}
 		select {
 		case <-ctx.Done():

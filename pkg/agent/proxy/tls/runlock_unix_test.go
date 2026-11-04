@@ -218,9 +218,12 @@ func TestNativeInstallHoldsTheRunsLockUntilTeardown(t *testing.T) {
 	app, _ := fakeJDK(t, dir, "app-jdk", "lib/security/cacerts")
 	other, _ := fakeJDK(t, dir, "other-jdk", "lib/security/cacerts")
 	stores := fakeNativeLinux(t, 1, other)
-	// The store's update lists the lock files there are as it runs.
+	// The store's update lists the lock files there are as it runs, and says
+	// whether the store lock is held then (probeStoreLock): its file is
+	// there from the JDK import before, held or not.
 	probe, seen := t.TempDir(), filepath.Join(t.TempDir(), "locks-at-update")
-	script := "#!/bin/sh\nfor f in '" + caRunsDir + "'/*.lock; do [ -e \"$f\" ] && echo \"${f##*/}\" >> '" + seen + "'; done\nexit 0\n"
+	script := "#!/bin/sh\nfor f in '" + caRunsDir + "'/*.lock; do [ -e \"$f\" ] && echo \"${f##*/}\" >> '" + seen + "'; done\n" +
+		"p=$(KEPLOY_TEST_PROBE_STORE_LOCK='" + caRunsDir + "' '" + os.Args[0] + "')\necho \"store lock $p\" >> '" + seen + "'\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(probe, "keploy-test-update-ca"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -229,13 +232,13 @@ func TestNativeInstallHoldsTheRunsLockUntilTeardown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, nil, 0, app); err != nil {
+	if err := setupNativeForApp(installCtx(t), zap.NewNop(), ca, nil, 0, app); err != nil {
 		t.Fatal(err)
 	}
 	// The update runs holding the store lock too (storelock.go), whose file
 	// sorts after this run's hex id.
-	if b, _ := os.ReadFile(seen); strings.TrimSpace(string(b)) != filepath.Base(ownLockFile(ca.runID))+"\n"+storeLockName {
-		t.Fatalf("lock files when the store was updated: %q, want this run's %s and %s", b, filepath.Base(ownLockFile(ca.runID)), storeLockName)
+	if b, _ := os.ReadFile(seen); strings.TrimSpace(string(b)) != filepath.Base(ownLockFile(ca.runID))+"\n"+storeLockName+"\nstore lock held" {
+		t.Fatalf("lock files when the store was updated: %q, want this run's %s and %s, and the store lock held", b, filepath.Base(ownLockFile(ca.runID)), storeLockName)
 	}
 	if !runLive(ca.runID) {
 		t.Fatal("after the install, this run is not live: other runs' sweeps would remove its entries")
@@ -274,7 +277,7 @@ func TestNativeInstallLocksBeforeItsFirstAnchor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, nil, 0, ""); err != nil {
+	if err := setupNativeForApp(installCtx(t), zap.NewNop(), ca, nil, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(seen)

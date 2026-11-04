@@ -202,7 +202,7 @@ func TestNativeInstallImportsIntoTheAppJDK8KeystoreAndTeardownDeletesIt(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, nil, 0, app); err != nil {
+	if err := setupNativeForApp(installCtx(t), zap.NewNop(), ca, nil, 0, app); err != nil {
 		t.Fatal(err)
 	}
 	keystore := filepath.Join(app, "jre", "lib", "security", "cacerts")
@@ -270,7 +270,7 @@ func TestNativeInstallSweepsEarlierRunsJDKAliases(t *testing.T) {
 			fakeNativeLinux(t, 1, other)
 
 			core, logs := observer.New(zapcore.InfoLevel)
-			if err := setupNativeForApp(context.Background(), zap.New(core), ca, nil, 0, app); err != nil {
+			if err := setupNativeForApp(installCtx(t), zap.New(core), ca, nil, 0, app); err != nil {
 				t.Fatal(err)
 			}
 			keystore := filepath.Join(app, "lib", "security", "cacerts")
@@ -424,7 +424,7 @@ func TestImportJavaCAWhenTheKeystoreCannotBeListed(t *testing.T) {
 				t.Fatal(err)
 			}
 			ks := javaKeystore{keytool: filepath.Join(home, "bin", "keytool"), cacerts: filepath.Join(home, "lib", "security", "cacerts")}
-			if err := importJavaCA(context.Background(), zap.NewNop(), ks, "/ca.crt", "keploy-mitm-r1"); err != nil {
+			if err := importJavaCA(installCtx(t), zap.NewNop(), ks, "/ca.crt", "keploy-mitm-r1"); err != nil {
 				t.Fatal(err)
 			}
 			calls := keytoolCalls(t, log)

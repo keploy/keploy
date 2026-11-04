@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -104,6 +106,29 @@ func storeLockHeldHere(t *testing.T) bool {
 	return !locked
 }
 
+// setStoreLockTimes sets, for the rest of the test, how long a change waits
+// for the store lock at most (storeLockWait) and how often it says it waits
+// (storeLockSay).
+func setStoreLockTimes(t *testing.T, wait, say time.Duration) {
+	t.Helper()
+	oldWait, oldSay := storeLockWait, storeLockSay
+	storeLockWait, storeLockSay = wait, say
+	t.Cleanup(func() { storeLockWait, storeLockSay = oldWait, oldSay })
+}
+
+// recordStoreLockSteps records, for the rest of the test, the steps of the
+// agent's start that a wait for the store lock takes (storeLockStep), and
+// returns how to read them.
+func recordStoreLockSteps(t *testing.T) (steps func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var got []string
+	old := storeLockStep
+	storeLockStep = func(name string) { mu.Lock(); got = append(got, name); mu.Unlock() }
+	t.Cleanup(func() { storeLockStep = old })
+	return func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), got...) }
+}
+
 const storeLockWaitMsg = "waiting for another keploy run on this host to finish changing a trust store"
 const storeLockWarnMsg = "keploy could not take the trust stores' lock"
 
@@ -140,10 +165,14 @@ func TestStoreLockHeldWhileTheChangeRuns(t *testing.T) {
 	}
 }
 
-// While another holder keeps the store lock, a change waits, says so once at
-// Info, and runs once the holder lets go.
+// While another holder keeps the store lock, a change waits, says so at Info
+// and as a step of the agent's start, and runs once the holder lets go. The
+// line is said again only every storeLockSay (here an hour), and the bound
+// (an hour too) does not end the wait.
 func TestStoreLockWaitsForAnotherHolder(t *testing.T) {
 	useRunsDir(t)
+	setStoreLockTimes(t, time.Hour, time.Hour)
+	steps := recordStoreLockSteps(t)
 	unlock := holdStoreLockElsewhere(t)
 	// The holder lets go only after three tries: the Info must stay one.
 	var tries atomic.Int32
@@ -177,6 +206,80 @@ func TestStoreLockWaitsForAnotherHolder(t *testing.T) {
 		t.Fatal("the change did not run once the holder let go")
 	}
 	if n := logs.FilterMessageSnippet(storeLockWaitMsg).Len(); n != 1 || logs.Len() != 1 {
+		t.Fatalf("logs %v, want the one Info that it waited", logs.All())
+	}
+	if got := steps(); len(got) != 1 {
+		t.Fatalf("steps of the start %q, want the one that it waited", got)
+	}
+}
+
+// While it waits, a change says so again every storeLockSay (here at every
+// try), each line naming the lock's file and each one a step of the agent's
+// start too, which names the file: a start that waits for the lock is not one
+// that has stopped.
+func TestStoreLockWaitSaysSoAgain(t *testing.T) {
+	useRunsDir(t)
+	setStoreLockTimes(t, time.Hour, 0)
+	steps := recordStoreLockSteps(t)
+	unlock := holdStoreLockElsewhere(t)
+	core, logs := observer.New(zapcore.InfoLevel)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- withStoreLock(ctx, zap.New(core), func() error { return nil }) }()
+	for deadline := time.Now().Add(30 * time.Second); logs.FilterMessageSnippet(storeLockWaitMsg).Len() < 3; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d lines that it waits in 30 s, want 3: %v", logs.FilterMessageSnippet(storeLockWaitMsg).Len(), logs.All())
+		}
+	}
+	unlock()
+	if err := <-done; err != nil {
+		t.Fatalf("the change ended with %v once the holder let go", err)
+	}
+	path := filepath.Join(caRunsDir, storeLockName)
+	lines := logs.FilterMessageSnippet(storeLockWaitMsg).All()
+	for _, l := range lines {
+		if l.ContextMap()["lock"] != path {
+			t.Fatalf("a line that it waits names %v, not %s", l.ContextMap()["lock"], path)
+		}
+	}
+	got := steps()
+	if len(got) != len(lines) {
+		t.Fatalf("%d steps of the start for %d lines that it waits: %q", len(got), len(lines), got)
+	}
+	for _, s := range got {
+		if !strings.Contains(s, path) {
+			t.Fatalf("step %q does not name %s", s, path)
+		}
+	}
+}
+
+// A holder that never lets go: the change waits until storeLockWait has
+// passed (here 50 ms; its context's 30 s have not), does not run, and fails
+// with an error that names the lock's file and says another keploy run holds
+// it. It warns of nothing: it did not go on without the lock.
+func TestStoreLockHeldPastTheBound(t *testing.T) {
+	useRunsDir(t)
+	storeLockWarned.Store(false)
+	t.Cleanup(func() { storeLockWarned.Store(false) })
+	setStoreLockTimes(t, 50*time.Millisecond, time.Hour)
+	holdStoreLockElsewhere(t)
+	core, logs := observer.New(zapcore.InfoLevel)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ran := false
+	err := withStoreLock(ctx, zap.New(core), func() error { ran = true; return nil })
+	if ran || !errors.Is(err, errStoreLockHeld) || ctx.Err() != nil {
+		t.Fatalf("ran %v, error %v (context %v); want no change and the bound's error before the context ended", ran, err, ctx.Err())
+	}
+	path := filepath.Join(caRunsDir, storeLockName)
+	if msg := err.Error(); !strings.Contains(msg, path) || !strings.Contains(msg, "another keploy run on this host") {
+		t.Fatalf("the error %q does not name %s and who holds it", msg, path)
+	}
+	if n := logs.FilterMessageSnippet(storeLockWarnMsg).Len(); n != 0 {
+		t.Fatalf("it warned that it went on without the lock: %v", logs.All())
+	}
+	if n := logs.FilterMessageSnippet(storeLockWaitMsg).Len(); n != 1 {
 		t.Fatalf("logs %v, want the one Info that it waited", logs.All())
 	}
 }

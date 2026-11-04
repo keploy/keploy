@@ -70,6 +70,17 @@ func useRunsDir(t *testing.T) {
 	})
 }
 
+// installCtx bounds an install row's install and import: a store-lock wait
+// that does not end (a lock kept, or a held one read as taken) then fails the
+// row at its own bound, by name, instead of holding the package up until go
+// test's timeout.
+func installCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 // ownLockFile is this process's lock file for id.
 func ownLockFile(id string) string {
 	return filepath.Join(caRunsDir, id+"."+strconv.Itoa(os.Getpid())+".lock")
