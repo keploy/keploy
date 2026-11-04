@@ -41,7 +41,15 @@ func stateServed(ctx context.Context, m *models.Mock, live, written *mysql.Packe
 // the recording's: a PREPARE's statement id, which F numbers per connection
 // (matchCommandWith). An answer that is neither the recorded one nor that one
 // with another statement id, or a recording that is not one command, is a
-// view keploy cannot read: nil, "" (fail closed).
+// view keploy cannot read: nil, "" (fail closed). The key names the answer
+// F gave, never the command it answered: none, the recorded one, or the
+// recorded one with the statement id F numbered. Serves of m that gave the
+// same answer are one view, the first one's, so a command the application
+// makes anew on every call (a timestamp, a nonce in its SQL) fills no more
+// of the views a set keeps of m than one; each command named a view of its
+// own before, and a serve past the views a set keeps was read as one keploy
+// could not read, which refused every changed value of a later call that
+// may stand there.
 func servedView(m *models.Mock, live, written *mysql.PacketBundle) (func() (*models.Mock, error), string, bool) {
 	reqs, resps := m.Spec.MySQLRequests, m.Spec.MySQLResponses
 	if len(reqs) != 1 {
@@ -81,7 +89,6 @@ func servedView(m *models.Mock, live, written *mysql.PacketBundle) (func() (*mod
 		return nil, "", true
 	}
 	h := sha256.New()
-	h.Write([]byte(lk))
 	switch {
 	case written == nil:
 		h.Write([]byte{0})

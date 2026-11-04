@@ -22,8 +22,10 @@ func viewRecording(reqs []mysql.Request, resps []mysql.Response) *models.Mock {
 // the recorded answer, a PREPARE's answer with the statement id F gave it,
 // and no answer to a command the server does not answer. It is the
 // recording itself only where both are the recording's; it is built from
-// the recording, which it never changes; two serves that gave the same view
-// share its key, and another command or another id names another. An
+// the recording, which it never changes; its key names the answer F gave,
+// never the command: two serves that gave the same answer share it,
+// whatever command each answered, and another id, or no answer where the
+// recorded one was written, names another. An
 // answer F wrote that the recording does not hold, or a recording that is
 // not one command, is a view keploy cannot read.
 func TestServedView_IsTheCommandAsSentAndTheAnswerAsWritten(t *testing.T) {
@@ -78,8 +80,8 @@ func TestServedView_IsTheCommandAsSentAndTheAnswerAsWritten(t *testing.T) {
 	if rec.Spec.MySQLRequests[0].Message.(*mysql.StmtPreparePacket).Query != "SELECT ?" {
 		t.Fatal("the view changed the recorded command")
 	}
-	if _, k, _ := servedView(rec, func() *mysql.PacketBundle { p := prepare("SELECT   ?").PacketBundle; return &p }(), &rec.Spec.MySQLResponses[0].PacketBundle); k == key2 {
-		t.Fatal("two commands share a view's key")
+	if _, k, _ := servedView(rec, func() *mysql.PacketBundle { p := prepare("SELECT   ?").PacketBundle; return &p }(), &rec.Spec.MySQLResponses[0].PacketBundle); k != key2 {
+		t.Fatal("two commands answered with the same recorded answer are named different views")
 	}
 	// The command's header is the application's too: another sequence id
 	// is another command.
@@ -97,9 +99,13 @@ func TestServedView_IsTheCommandAsSentAndTheAnswerAsWritten(t *testing.T) {
 		t.Fatal("a close sent as recorded, answered with nothing as recorded, is not read as recorded")
 	}
 	answeredRec := viewRecording(closeRec.Spec.MySQLRequests, []mysql.Response{{PacketBundle: prepOK(1)}})
-	load, _, asRecorded = servedView(answeredRec, &sameClose, nil)
+	load, noAnswer, asRecorded := servedView(answeredRec, &sameClose, nil)
 	if asRecorded || load == nil {
 		t.Fatal("a recorded answer F did not write is read as given")
+	}
+	otherClose := viewPacket("COM_STMT_CLOSE", &mysql.StmtClosePacket{StatementID: 2})
+	if _, k, _ := servedView(answeredRec, &otherClose, &answeredRec.Spec.MySQLResponses[0].PacketBundle); k == "" || k == noAnswer {
+		t.Fatalf("a serve that wrote the recorded answer and one that wrote none share key %q; want a view each", k)
 	}
 	if v, err := load(); err != nil || len(v.Spec.MySQLResponses) != 0 {
 		t.Fatalf("view %+v %v; want no answer: F wrote none", v, err)

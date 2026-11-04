@@ -73,9 +73,13 @@ func stateHandshake(ctx context.Context, s *servedHandshake) {
 
 // view is F's view of s.mock (stateHandshake): the recording with each
 // packet the application sent as its requests and each packet F wrote as
-// its answers, and the key that names it among the recording's views;
-// asRecorded where they are the recording's own, packet for packet. A packet
-// keploy cannot read gives a view keploy cannot read: nil, "" (fail closed).
+// its answers, and the key that names it among the recording's views: the
+// packets F wrote, never those the application sent, so handshakes that
+// were given the same packets are one view, the first one's, whatever a
+// client sent in them (its process id in its connection attributes, its
+// scrambled password); asRecorded where they are the recording's own,
+// packet for packet. A packet keploy cannot read gives a view keploy cannot
+// read: nil, "" (fail closed).
 func (s *servedHandshake) view() (func() (*models.Mock, error), string, bool) {
 	m := s.mock
 	sentKeys, ok := packetKeys(s.sent)
@@ -106,15 +110,13 @@ func (s *servedHandshake) view() (func() (*models.Mock, error), string, bool) {
 		return nil, "", true
 	}
 	h := sha256.New()
-	for _, keys := range [][]string{sentKeys, writtenKeys} {
-		var n [8]byte
-		binary.BigEndian.PutUint64(n[:], uint64(len(keys)))
+	var n [8]byte
+	binary.BigEndian.PutUint64(n[:], uint64(len(writtenKeys)))
+	h.Write(n[:])
+	for _, k := range writtenKeys {
+		binary.BigEndian.PutUint64(n[:], uint64(len(k)))
 		h.Write(n[:])
-		for _, k := range keys {
-			binary.BigEndian.PutUint64(n[:], uint64(len(k)))
-			h.Write(n[:])
-			h.Write([]byte(k))
-		}
+		h.Write([]byte(k))
 	}
 	sent, written := s.sent, s.written
 	return func() (*models.Mock, error) {
