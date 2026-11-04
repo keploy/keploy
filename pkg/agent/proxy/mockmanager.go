@@ -484,6 +484,10 @@ type MockManager struct {
 	restagedMu sync.Mutex
 	restaged   map[any]func()
 
+	// parserKept is what the parsers keep with the manager, by slot
+	// (integrations.ParserKeep): it goes with the manager.
+	parserKept sync.Map
+
 	// noConnMocks is a negative cache for GetConnectionMocks's
 	// fallback scan. A connID that returned zero connection-scoped
 	// mocks on a full scan gets memoised here so subsequent matches

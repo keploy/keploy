@@ -36,6 +36,17 @@ func keptExecute(sql string, vals ...string) mysql.Request {
 	}}
 }
 
+// keptExecuteBytes is keptExecute binding each value as bytes, as a blob
+// or a binary string is bound.
+func keptExecuteBytes(sql string, vals ...string) mysql.Request {
+	r := keptExecute(sql)
+	msg := r.PacketBundle.Message.(*mysql.StmtExecutePacket)
+	for _, v := range vals {
+		msg.Parameters = append(msg.Parameters, mysql.Parameter{Type: 252, Value: []byte(v)})
+	}
+	return r
+}
+
 func keptChunk(data string) mysql.Request {
 	return mysql.Request{PacketBundle: mysql.PacketBundle{Message: &mysql.StmtSendLongDataPacket{Data: []byte(data)}}}
 }
@@ -61,6 +72,12 @@ func TestMySQLKeptPlacesAreKeptByEveryPartTheyAreReadFrom(t *testing.T) {
 			keptMock(redactedNoise, keptExecute(stored("other"), "1"))},
 		{"an EXECUTE's bound value", keptMock(redactedNoise, keptExecute(stored("a"), redactedPlaceholder)),
 			keptMock(redactedNoise, keptExecute(stored("a"), "other"))},
+		{"an EXECUTE's second bound value", keptMock(redactedNoise, keptExecute(stored("a"), "a", redactedPlaceholder)),
+			keptMock(redactedNoise, keptExecute(stored("a"), "a", "other"))},
+		{"an EXECUTE's bound bytes", keptMock(redactedNoise, keptExecuteBytes(stored("a"), redactedPlaceholder)),
+			keptMock(redactedNoise, keptExecuteBytes(stored("a"), "Oth3rValue1234"))},
+		{"an EXECUTE's bound bytes' bounds", keptMock(redactedNoise, keptExecuteBytes(stored("a"), redactedPlaceholder, "Q")),
+			keptMock(redactedNoise, keptExecuteBytes(stored("a"), redactedPlaceholder[:12], redactedPlaceholder[12:]+"Q"))},
 		// The same text bound, split into two values at another byte.
 		{"an EXECUTE's bound values' bounds", keptMock(redactedNoise, keptExecute(stored("a"), redactedPlaceholder, "Q")),
 			keptMock(redactedNoise, keptExecute(stored("a"), redactedPlaceholder[:12], redactedPlaceholder[12:]+"Q"))},
@@ -218,5 +235,20 @@ func TestMySQLPoolPlacesLeaveEachRecordingsKeptPlacesAsTheyWere(t *testing.T) {
 	poolPlaces(pool)
 	if allocs := testing.AllocsPerRun(10, func() { poolPlaces(pool) }); allocs >= n/10 {
 		t.Errorf("summing the places of %d recordings read before allocates %.0f objects; want a few maps, not one for each recording", n, allocs)
+	}
+}
+
+// A bound value of bytes is read into a recording's digest as it is, not
+// copied: a blob costs no copy of itself each time the recording that binds
+// it answers (the answer notes its places, placesOf).
+func TestMySQLPlacesKeyReadsBoundBytesInPlace(t *testing.T) {
+	const stmt = "SELECT name FROM t WHERE k = ?"
+	blob := keptMock(redactedNoise, keptExecuteBytes(stmt, string(make([]byte, 64<<10))))
+	small := keptMock(redactedNoise, keptExecuteBytes(stmt, "x"))
+	if a, b := testing.AllocsPerRun(20, func() { placesKey(blob) }), testing.AllocsPerRun(20, func() { placesKey(small) }); a > b {
+		t.Errorf("the digest of a recording binding 64 KiB of bytes allocates %v times, of one binding a byte %v; want no more", a, b)
+	}
+	if placesKey(blob) == placesKey(small) {
+		t.Errorf("two recordings binding other bytes have one digest")
 	}
 }

@@ -165,6 +165,20 @@ func placesKey(m *models.Mock) placesDigest {
 			_ = h[i].WriteByte(t)
 		}
 	}
+	// param writes a bound value as its text (paramText): bytes as they
+	// are, not copied into a string first, so a blob costs no copy each
+	// time a recording binding it answers.
+	param := func(v any) {
+		t, ok := v.([]byte)
+		if !ok {
+			write(paramText(v))
+			return
+		}
+		count(len(t))
+		for i := range h {
+			_, _ = h[i].Write(t)
+		}
+	}
 	count(len(m.Noise))
 	for _, pat := range m.Noise {
 		write(pat)
@@ -188,7 +202,7 @@ func placesKey(m *models.Mock) placesDigest {
 				write(b.StoredQuery())
 				count(len(msg.Parameters))
 				for _, prm := range msg.Parameters {
-					write(paramText(prm.Value))
+					param(prm.Value)
 				}
 			}
 		case *mysql.StmtSendLongDataPacket:
@@ -711,43 +725,85 @@ func poolPlaces(pool []*models.Mock) redactedPlaces {
 // recorded (a retry) would find in the pool no recording that redacted its
 // secret. Served exactly, they are the places of the open test's recordings
 // the store lists as answered (integrations.ExactConsumedReader); otherwise
-// those answered noted in the test's window (answeredInWindow).
+// those answered noted in the test's window (answeredNote).
 func answeredPlaces(db integrations.MockMemDb) redactedPlaces {
-	p := answeredInWindow.of(db)
+	p := answeredNote(db).of(db)
 	if er, ok := db.(integrations.ExactConsumedReader); ok {
 		p = p.or(poolPlaces(er.ConsumedTestMocks()))
 	}
 	return p
 }
 
-// answeredInWindow keeps the places of the recordings a store took out of
-// its pool as they answered, by the start of the store's open test window
-// (CurrentTestWindow): a window of another start, the next test's, starts
-// it again. A window whose end alone moved is the same test's, and keeps
-// them. It keeps their union, not the recordings, so it holds no more than
-// the places a test's recordings name, however many answered. Under exact
+// answeredKey is the slot a store keeps its answered note in
+// (integrations.Keep).
+type answeredKey struct{}
+
+// answeredNote is the note of the places of the recordings db took out of its
+// pool as they answered, by the start of db's open test window
+// (CurrentTestWindow): a window of another start, the next test's, starts it
+// again. A window whose end alone moved is the same test's, and keeps them.
+// It keeps their union, not the recordings, so it holds no more than the
+// places a test's recordings name, however many answered. Under exact
 // serving the store lists them itself, and no window is open (every test's
 // would be one).
-var answeredInWindow windowPlaces
+//
+// The note is kept with the store (integrations.Keep), so it is that store's
+// alone: a long-lived agent closes its store at each record session, and a
+// later store, whose window can open at the same start (the same recordings
+// replayed again), or none, or that serves exactly, reads none of it. A
+// connection of the closed store still reads it (it keeps the store it was
+// opened with), and it is collected with the store. Within the store it is
+// let go of when the store lets go of the recordings it staged
+// (integrations.WhenRestaged) at a staging that finds its window is not the
+// note's, as a new replay session's staging does (it opens none), so that
+// session reads none of it either; a staging lets go before it moves the
+// window to the next test, so a test's note is let go of at the staging
+// after that one, and no read finds it meanwhile, as the window is
+// another's. A store staged with no window (SetFilteredMocks, which lets
+// nothing go) keeps its note across its replay sessions, redacting more,
+// never less. A store that keeps nothing shares unkeptAnswered with every
+// other such store.
+func answeredNote(db integrations.MockMemDb) *windowPlaces {
+	if w, ok := integrations.Keep(db, answeredKey{}, func() any { return new(windowPlaces) }); ok {
+		return w.(*windowPlaces)
+	}
+	return &unkeptAnswered
+}
+
+// unkeptAnswered is the answered note of the stores that keep nothing
+// (answeredNote).
+var unkeptAnswered windowPlaces
 
 type windowPlaces struct {
-	mu     sync.Mutex
+	mu sync.Mutex
+	// held is set while a note is kept: from the first answer that adds to
+	// it until its store lets it go (released).
+	held   bool
 	start  time.Time
 	places redactedPlaces
+	// gen counts the notes begun, so a store's release lets go of the note
+	// it was asked for alone (unkeptAnswered is several stores' note).
+	gen uint64
 }
 
 // add folds p into the places of db's open test window.
-func (w *windowPlaces) add(db integrations.WindowAware, p redactedPlaces) {
+func (w *windowPlaces) add(db integrations.MockMemDb, p redactedPlaces) {
 	if !p.redactsAny() {
 		return
 	}
 	start, _ := db.CurrentTestWindow()
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	if !start.Equal(w.start) {
-		w.start, w.places = start, redactedPlaces{}
+	begun := !w.held || !start.Equal(w.start)
+	if begun {
+		w.gen++
+		w.held, w.start, w.places = true, start, redactedPlaces{}
 	}
 	w.places = w.places.or(p)
+	gen := w.gen
+	w.mu.Unlock()
+	if begun {
+		w.letGoWith(db, gen, start)
+	}
 }
 
 // of is the places kept for db's open test window; none when no recording
@@ -760,6 +816,42 @@ func (w *windowPlaces) of(db integrations.WindowAware) redactedPlaces {
 		return redactedPlaces{}
 	}
 	return w.places
+}
+
+// letGoWith asks db to let go of the note gen, begun in its window of start,
+// when it lets go of the recordings it staged (released). Outside w.mu: a
+// closed store runs the release at once.
+func (w *windowPlaces) letGoWith(db integrations.MockMemDb, gen uint64, start time.Time) {
+	var asked atomic.Bool
+	integrations.WhenRestaged(db, w, func() { w.released(db, gen, start, asked.Load()) })
+	asked.Store(true)
+}
+
+// released lets go of the note gen when db's window, at a staging or its
+// Close, is not the note's start; else it keeps the note and asks db again
+// (letGoWith). A Close keeps the window, so a closed store keeps its note
+// for its connections. asked is unset when the release ran before
+// WhenRestaged returned: at once, as db is closed, or at a staging that
+// raced the ask. db is not asked again then, so a closed store does not run
+// the release at once without end; a note kept by a staging that raced the
+// ask is let go of when the next note of the store begins, and redacts more
+// until then, never less.
+func (w *windowPlaces) released(db integrations.MockMemDb, gen uint64, start time.Time, asked bool) {
+	now, _ := db.CurrentTestWindow()
+	gone := !now.Equal(start)
+	w.mu.Lock()
+	if w.gen != gen {
+		// Another note was begun since.
+		w.mu.Unlock()
+		return
+	}
+	if gone {
+		w.held, w.places = false, redactedPlaces{}
+	}
+	w.mu.Unlock()
+	if !gone && asked {
+		w.letGoWith(db, gen, start)
+	}
 }
 
 // everyPlace redacts a live command whole: its statement, every bound

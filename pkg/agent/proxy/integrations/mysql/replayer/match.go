@@ -3721,7 +3721,7 @@ func updateMock(ctx context.Context, logger *zap.Logger, matchedMock *models.Moc
 		// It is in no later read of the pool: a miss of the test redacts
 		// what it redacted all the same (answeredPlaces).
 		if !integrations.ExactServing(mockDb) {
-			answeredInWindow.add(mockDb, placesOf(matchedMock))
+			answeredNote(mockDb).add(mockDb, placesOf(matchedMock))
 		}
 		return true
 	}

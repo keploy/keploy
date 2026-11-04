@@ -329,11 +329,13 @@ func checkDecodedBody(message any, statementParams int, query string, doc map[st
 }
 
 // ForgetAnsweredForTest drops the places the recordings answered in a test
-// window left (answeredInWindow), so a row starts with none.
+// window of a store that keeps nothing left (unkeptAnswered), so a row
+// starts with none; a store that keeps its note (integrations.Keep) starts
+// with none of its own.
 func ForgetAnsweredForTest() {
-	answeredInWindow.mu.Lock()
-	defer answeredInWindow.mu.Unlock()
-	answeredInWindow.places = redactedPlaces{}
+	unkeptAnswered.mu.Lock()
+	defer unkeptAnswered.mu.Unlock()
+	unkeptAnswered.held, unkeptAnswered.places = false, redactedPlaces{}
 }
 
 // ForgetPlacesForTest drops every recording's places kept (placesKept), so

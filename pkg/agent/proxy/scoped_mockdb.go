@@ -1551,3 +1551,11 @@ func (s *scopedMockDb) StatesLifetimes(kind models.Kind) bool {
 func (s *scopedMockDb) WhenRestaged(slot any, release func()) {
 	integrations.WhenRestaged(s.MockMemDb, slot, release)
 }
+
+// Keep implements integrations.ParserKeep: the store's, so what a parser keeps
+// through a view is the store's; nothing over a store that keeps nothing.
+func (s *scopedMockDb) Keep(slot any, mk func() any) (any, bool) {
+	return integrations.Keep(s.MockMemDb, slot, mk)
+}
+
+var _ integrations.ParserKeep = (*scopedMockDb)(nil)
