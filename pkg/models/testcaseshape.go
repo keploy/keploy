@@ -19,7 +19,7 @@ import (
 // without the values they hold. Two test cases have one shape when replaying
 // either exercises the same surface of the API:
 //
-//   - the same protocol, method and route: the path by shapeRoute, a gRPC
+//   - the same protocol, method and route: the path by RouteShape, a gRPC
 //     call by its :path;
 //   - the same query parameter names;
 //   - the same status: an HTTP status code, a gRPC call's grpc-status;
@@ -59,7 +59,7 @@ type TestCaseShape struct {
 	Kind string
 	// Method is the HTTP method, upper case; "" for gRPC.
 	Method string
-	// Route is the request path by shapeRoute, or a gRPC call's :path.
+	// Route is the request path by RouteShape, or a gRPC call's :path.
 	Route string
 	// Query is the sorted, distinct query parameter names (queryNameShapes).
 	Query []string
@@ -101,7 +101,7 @@ func HTTPShape(x HTTPExchange) TestCaseShape {
 	s := TestCaseShape{
 		Kind:      "http",
 		Method:    strings.ToUpper(x.Method),
-		Route:     shapeRoute(path),
+		Route:     RouteShape(path),
 		Query:     queryNameShapes(rawQuery),
 		Status:    strconv.Itoa(x.Status),
 		ReqMedia:  mediaType(x.ReqContentType),
@@ -243,22 +243,49 @@ func headerValue(h map[string]string, name string) string {
 	return ""
 }
 
-// shapeRoute is a request path, as sent (escaped), as a shape keeps it: each
-// piece between two '/' decoded, then written {} when it reads as a value
-// (isValueSegment), or else escaped again (url.PathEscape), so a piece that
-// holds an escaped '/' stays one piece and a literal "{}" is no value. An
-// empty path is "/"; a trailing '/' counts.
+// RouteShape is a request's path, as sent (escaped: url.URL.EscapedPath), as
+// a test case's shape keeps it: each piece between two '/' decoded, then
+// written {} when it reads as a value (isValueSegment), or else escaped again
+// (url.PathEscape), so a piece that holds an escaped '/' stays one piece and
+// a literal "{}" is no value. An empty path is "/"; a trailing '/' counts.
+// Code that matches a configured route against requests reads the route with
+// RouteTemplateShape, so both read routes by one rule.
 //
 // It is not PathShape: the proven mocks' rule writes {} for any piece with a
 // digit, which would merge /integrations/s3 and /integrations/ec2 into one
 // shape, so the recorder would drop the second as a duplicate and coverage
 // would count it covered.
-func shapeRoute(escapedPath string) string {
+func RouteShape(escapedPath string) string {
+	return routeShape(escapedPath, false)
+}
+
+// RouteTemplateShape is a configured route, as a person writes it
+// ("/users/{id}", "/orgs/:orgId/members"), as RouteShape writes the paths of
+// the requests it names: the query left out, the path taken from the root,
+// and each placeholder piece ("{name}", ":name", "{}") written {}. Every other
+// piece follows RouteShape's rule, so RouteTemplateShape("/users/{id}") and
+// RouteShape("/users/42") are both "/users/{}", and /oauth2/token stays apart
+// from /saml2/token.
+func RouteTemplateShape(path string) string {
+	path, _, _ = strings.Cut(path, "?")
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return routeShape(path, true)
+}
+
+// routeShape is RouteShape, reading placeholder pieces as values when
+// template is set.
+func routeShape(escapedPath string, template bool) string {
 	if escapedPath == "" {
 		return "/"
 	}
 	segs := strings.Split(escapedPath, "/")
 	for i, s := range segs {
+		if template && isRoutePlaceholder(s) {
+			segs[i] = pathHole
+			continue
+		}
 		d, err := url.PathUnescape(s)
 		if err != nil {
 			d = s
@@ -270,6 +297,12 @@ func shapeRoute(escapedPath string) string {
 		}
 	}
 	return strings.Join(segs, "/")
+}
+
+// isRoutePlaceholder reports whether a configured route's piece is a
+// placeholder: ":name", or a name in braces ("{id}", and "{}").
+func isRoutePlaceholder(s string) bool {
+	return (len(s) > 1 && s[0] == ':') || (len(s) >= 2 && s[0] == '{' && s[len(s)-1] == '}')
 }
 
 // Bounds of the pieces isValueSegment reads as values.

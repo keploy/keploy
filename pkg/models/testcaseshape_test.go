@@ -439,3 +439,37 @@ func TestBodyEdgeCases(t *testing.T) {
 	sameShape(t, "plain text", plain(`hello`), plain(`goodbye`))
 	differentShape(t, "text/plain JSON and plain text", plain(`{"user":"a"}`), plain(`hello`))
 }
+
+// TestRouteTemplateShape checks that a configured route, its placeholders
+// written {id}, :id or {}, reads as the route of the requests it names, by
+// the same rule as the shape's, so a config entry and a request's shape name
+// one route, and two routes the rule keeps apart stay apart.
+func TestRouteTemplateShape(t *testing.T) {
+	for _, c := range []struct{ template, request, route string }{
+		{"/users/{id}", "/users/42", "/users/{}"},
+		{"/orgs/:orgId/members", "/orgs/7/members", "/orgs/{}/members"},
+		{"/users/{}/orders", "/users/3f2b8c1e-9a4d-4e6f-8b7a-1c2d3e4f5a6b/orders", "/users/{}/orders"},
+		{"/oauth2/token", "/oauth2/token", "/oauth2/token"},
+		{"/saml2/token", "/saml2/token", "/saml2/token"},
+		{"/s3/buckets", "/s3/buckets", "/s3/buckets"},
+		{"/ec2/buckets", "/ec2/buckets", "/ec2/buckets"},
+		{"users/{id}?expand=items", "/users/9", "/users/{}"},
+		{"/reports/2024-01-02", "/reports/2025-12-31", "/reports/{}"},
+		{"/files/a%2Fb", "/files/a%2Fb", "/files/a%2Fb"},
+	} {
+		if got := RouteTemplateShape(c.template); got != c.route {
+			t.Errorf("RouteTemplateShape(%q) = %q, want %q", c.template, got, c.route)
+		}
+		if got := RouteShape(c.request); got != c.route {
+			t.Errorf("RouteShape(%q) = %q, want %q", c.request, got, c.route)
+		}
+		if s, _ := ShapeOf(jsonCase(c.request, `{}`)); s.Route != c.route {
+			t.Errorf("the shape's route of %q = %q, want %q", c.request, s.Route, c.route)
+		}
+	}
+	for _, s := range []string{"{id}", ":id", "{}"} {
+		if got := RouteShape("/users/" + s); got == "/users/{}" {
+			t.Errorf("RouteShape(%q) = %q: a request's literal piece is no placeholder", "/users/"+s, got)
+		}
+	}
+}
