@@ -1433,3 +1433,156 @@ func TestOutcomeAnOlderTestsRequestSetsNoWordAsideWhereTheOtherValueTookAWord(t 
 	costFresh(t, "a UUID's 4-hex piece at the request, F's piece in a later answer", oWord(t, Decide(costF("1111aaaa-2222-3333-48d1-444455556666", "9999cccc-7777-8888-dddd-000011112222", []Earlier{ranU}, []Raw{bU}, nil)), "48d1", "dddd"))
 	costFresh(t, "the call's own test's request", oWord(t, Decide(costF("slot 82", "slot 7", []Earlier{{Mock: ran.Mock, At: ran.At, Payload: ran.Payload, Seen: ran.Seen}}, []Raw{b}, nil)), "82", "7"))
 }
+
+// Two signatures in upper-case hex (64 characters): read without their
+// first two characters, as an escape in a quoted-printable form reads them,
+// neither is a run that decodes.
+const (
+	oSigA = "F0A1C2E3D4B5A69788796A5B4C3D2E1F0F1E2D3C4B5A69788796A5B4C3D2E1F0"
+	oSigB = "7C4E19B2A0D35F8E61C7B9042A3E5D8F1B6C0E9A2D4F7B3C5E8A1D6F0B2C4E97"
+)
+
+// oNoneFresh checks ds decides a word and refuses each it decides, naming
+// why: as kind, or as any kind where kind is "".
+func oNoneFresh(t *testing.T, what string, ds []Decision, kind RefusalKind, why string) {
+	t.Helper()
+	if len(ds) == 0 {
+		t.Errorf("%s: no decision; want each changed word refused", what)
+	}
+	for _, d := range ds {
+		k := kind
+		if k == "" && d.Refusal != nil {
+			k = d.Refusal.Kind
+		}
+		oRefused(t, what, d, k, why)
+	}
+}
+
+// What only a form main's readings check shows is refused, never learned
+// fresh, as main refuses it (readings.go unparsed, "what only a checked form
+// shows is refused"): the reader reads no such form whole, so a changed word
+// beside it may be part of what that form changed. Each way: a soft line
+// break joining a run of the base64 alphabet that does not decode (in a
+// header, in a JSON string, in a mail that says it is quoted-printable),
+// non-ASCII text that changed behind its escapes, a '%' in what a base64 run
+// decodes to, a stray '%' as written, and a hex signature a header's
+// padding shows is read as escapes, a run that does not decode. Where main reads the value
+// whole (a hex signature's change, a signature in a value nothing shows is
+// quoted-printable), the word is still fresh.
+func TestOutcomeAWordOnlyACheckedFormShowsIsNeverFresh(t *testing.T) {
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	mail := func(tok string) string {
+		return "From: shop@test\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nToken: =2B" + tok + " =E2=80=94 ok\r\n"
+	}
+	const run, script, escape = "a run of the base64 alphabet that does not decode", "text of a script keploy does not split into words", "a '%' or '\\'"
+	for _, c := range []struct{ name, rec, live, why string }{
+		{"a soft line break joins a base64 run", "Token: ab+=\r\ncd ok", "Token: ab+=\r\nxy ok", run},
+		{"the same, in a JSON string, a '!' escaped", `Token: ab+=\r\ncd ok=21`, `Token: ab+=\r\nxy ok=21`, run},
+		{"a mail that says it is quoted-printable", mail("YmFy"), mail("YmFz"), run},
+		{"non-ASCII text behind its escapes", "Commande =C3=A9t=C3=A9 ok", "Commande =C3=A8t=C3=A8 ok", script},
+		{"a Latin-1 escape of no text beside a soft line break", "caf=E9 ab+=\r\ncd ok", "caf=E9 ab+=\r\nce ok", run},
+		{"a '%' in base64 text", "data " + b64("price 10% off a7k29q"), "data " + b64("price 10% off b8l30r"), escape},
+		{"a stray '%'", "Save 20% now: 3f2b8c1e9a4d", "Save 20% now: a7c4e2d10b3f", escape},
+		{"a hex signature after a mail header", "X-A: YWJj=\r\nX-Sig: v1=2B" + oSigA[2:], "X-A: YWJj=\r\nX-Sig: v1=41" + oSigB[2:], run},
+	} {
+		for _, p := range [][2]string{{c.rec, c.live}, {c.live, c.rec}} {
+			oNoneFresh(t, c.name+", "+strconv.Quote(p[0]), Decide(oInput("url.query.state", p[0], p[1], nil, nil)), RefusalCannotCheck, c.why)
+		}
+	}
+	for _, c := range []struct{ name, rec, live string }{
+		{"an id main reads whole", "Token: A7K29QXM ok", "Token: Zq81Lm0X ok"},
+		{"a hex signature's change", "X-A: YWJj=\r\nX-Sig: v1=41" + oSigA[2:], "X-A: YWJj=\r\nX-Sig: v1=35" + oSigB[2:]},
+		{"a signature nothing shows is quoted-printable", "v1=2B" + oSigA[2:], "v1=41" + oSigB[2:]},
+	} {
+		for _, p := range [][2]string{{c.rec, c.live}, {c.live, c.rec}} {
+			ds := Decide(oInput("url.query.state", p[0], p[1], nil, nil))
+			if len(ds) == 0 || slices.ContainsFunc(ds, func(d Decision) bool { return d.Outcome != OutcomeFresh }) {
+				t.Errorf("%s, %q: %s; want every changed word fresh, as main reads it whole", c.name, p[0], oDescribe(ds))
+			}
+		}
+	}
+}
+
+// An id a decoded form of the value moved (swapped behind quoted-printable
+// escapes, or inside a base64 run's text while the value holds it as
+// written at its place in both runs) is a word of what changed, as main
+// reads it: where a place before the call holds it, recorded for the
+// recorded value's word, in round F for F's, in an older test or the
+// call's own, no word of the value is learned fresh, as the reader refuses
+// the same swap as written. Where no place holds it, the place holds
+// another word, or round F served the place only after the call arrived,
+// the words stay fresh.
+func TestOutcomeAnIdThatMovedInADecodedFormIsNeverFresh(t *testing.T) {
+	const a, b = "A7K29QXM", "Zq81Lm0X"
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	shapes := []struct{ name, rec, live string }{
+		{"swapped behind escapes", "x=3D=23" + a + " y=3D=23" + b, "x=3D=23" + b + " y=3D=23" + a},
+		{"swapped inside base64 text", "ref " + a + " " + b + " =23 " + b64(`{"a":"`+a+`","b":"`+b+`"}`), "ref " + a + " " + b + " =23 " + b64(`{"a":"`+b+`","b":"`+a+`"}`)},
+	}
+	// held is mock-11 holding "ref r", "ref f" in round F, in an older test
+	// (run) or the call's own; served after the call arrived in round F
+	// (#5018's arrival cut: no place before the call there) where after.
+	held := func(run bool, r, f string, after bool) []Earlier {
+		e := oServed("mock-11", run, false, Request, oText("body.ref", "ref "+r), "ref "+f, time.Millisecond)
+		e[0].Payload.servedAfter = after
+		return e
+	}
+	for _, s := range shapes {
+		for _, p := range [][2]string{{s.rec, s.live}, {s.live, s.rec}} {
+			for _, h := range []struct {
+				what string
+				e    []Earlier
+			}{
+				{"an older test held it in both runs", held(true, a, a, false)},
+				{"an older test held it recorded", held(true, a, "other", false)},
+				{"an older test held it in round F", held(true, "other", a, false)},
+				{"the call's own test held it in both runs", held(false, a, a, false)},
+			} {
+				oNoneFresh(t, s.name+", "+h.what+", "+strconv.Quote(p[0]), Decide(oInput("url.query.state", p[0], p[1], h.e, nil)), "", "mock-11")
+			}
+			for _, h := range []struct {
+				what string
+				e    []Earlier
+			}{
+				{"no place", nil},
+				{"a place held another word", held(true, "B8L30RQW", "B8L30RQW", false)},
+				{"round F served the place only after the call arrived", held(false, a, a, true)},
+			} {
+				ds := Decide(oInput("url.query.state", p[0], p[1], h.e, nil))
+				if len(ds) == 0 || slices.ContainsFunc(ds, func(d Decision) bool { return d.Outcome != OutcomeFresh }) {
+					t.Errorf("%s, %s, %q: %s; want every changed word fresh", s.name, h.what, p[0], oDescribe(ds))
+				}
+			}
+		}
+	}
+}
+
+// The moved-word rule reads each side on its own side and only whole ids:
+//   - an id a base64 run's text holds once more in round F only is a word
+//     of what changed in F alone: a place that held it only as recorded
+//     (round F gave another word there) does not refuse it, one that gave
+//     it in round F does;
+//   - a word under 32 bits that moved there stands all over a set, so a
+//     place that holds it is chance, as for a piece of a longer value;
+//   - an id that changed there (one run lost it), not moved, is the
+//     decoded-form rule's: a place that kept it says nothing of it.
+func TestOutcomeTheMovedWordRuleReadsEachSideAndWholeIdsOnly(t *testing.T) {
+	const a = "A7K29QXM"
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	in := func(rec, live, r, f string) Input {
+		return oInput("url.query.state", rec, live, oServed("mock-11", true, false, Request, oText("body.ref", "ref "+r), "ref "+f, time.Millisecond), nil)
+	}
+	fresh := func(what string, ds []Decision) {
+		t.Helper()
+		if len(ds) == 0 || slices.ContainsFunc(ds, func(d Decision) bool { return d.Outcome != OutcomeFresh }) {
+			t.Errorf("%s: %s; want every changed word fresh", what, oDescribe(ds))
+		}
+	}
+	once, twice := "=23 "+b64(`{"a":"`+a+`"}`), "=23 "+b64(`{"a":"`+a+`","b":"`+a+`"}`)
+	fresh("an id once more in F, the place held it only as recorded", Decide(in(once, twice, a, "other")))
+	oNoneFresh(t, "an id once more in F, the place gave it in F", Decide(in(once, twice, "other", a)), "", "mock-11")
+	fresh("an id once more as recorded, the place gave it only in F", Decide(in(twice, once, "other", a)))
+	oNoneFresh(t, "an id once more as recorded, the place held it as recorded", Decide(in(twice, once, a, "other")), "", "mock-11")
+	fresh("a 3-letter word swapped in base64 text, held at a place", Decide(in("=23 "+b64(`{"a":"k7q","b":"m2x"}`), "=23 "+b64(`{"a":"m2x","b":"k7q"}`), "k7q", "k7q")))
+	fresh("an id an escape hides that changed, not moved, the place kept it", Decide(in("x=3D=23"+a+" ok", "x=3D=23B8L30RQW ok", a, a)))
+}

@@ -119,6 +119,10 @@ type decider struct {
 	// encoded is the leaf's inDecodedForm, read once and only where a word
 	// of it would be learned fresh.
 	encoded func() (string, *evPlace)
+	// unchecked is why main's readings cannot read the leaf whole in a form
+	// they check (valueDrift.unparsed), read once and only where a word of
+	// it would be learned fresh; "" where they can.
+	unchecked func() string
 	// passes counts the instants atFinest reads, each read counted where
 	// it is made, and walked the bytes it walks to place them: what keeps
 	// its work linear in them.
@@ -272,7 +276,13 @@ func (dc *decider) leafText(path string, at variables.Address, rec, live string)
 	var out []Decision
 	between := textReading{Rec: rec, Live: live}
 	rds := readLeaf(dc.in.Drifts, at, rec, live)
-	dc.encoded = sync.OnceValues(func() (string, *evPlace) { return dc.inDecodedForm(rds) })
+	dc.encoded = sync.OnceValues(func() (string, *evPlace) {
+		if why, p := dc.inDecodedForm(rds); p != nil {
+			return why, p
+		}
+		return dc.movedInAForm(rds)
+	})
+	dc.unchecked = sync.OnceValue(func() string { return dc.dr.ofIn(rec, live, dc.in.Window, dc.in.At).unparsed })
 	for _, rd := range rds {
 		if len(between.Separators) == 0 {
 			between = rd
@@ -632,6 +642,15 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 		}
 		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalUnknown, why, []string{p.name}, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 	}
+	// What only a form main's readings check shows (its quoted-printable
+	// text, the text its base64 runs decode to, the value as written where
+	// it holds no escape) is refused there, as on main: a '%' or '\' that
+	// is no escape, text of a script keploy does not split into words, a
+	// run of the base64 alphabet that does not decode. keploy cannot read
+	// such a value whole, so a word of it is never learned fresh.
+	if why := dc.unchecked(); why != "" {
+		return dc.cannotCheck(path, at, n, w.Rec, w.Live, "keploy cannot read this value whole, so it cannot tell the word was made anew: "+why)
+	}
 	echo, no := dc.answered(path, bare, w, rec, live, true)
 	if no != nil {
 		return *no
@@ -730,6 +749,53 @@ func decodedOnly(dc *DriftCache, s, other string) []string {
 	}
 	slices.Sort(out)
 	return slices.Compact(out)
+}
+
+// movedInAForm is why no word of a leaf may be learned fresh where a word of
+// 32 bits or more moved in a decoded form of one of its texts, and a place
+// before the call holds it, recorded for a word of the recorded value, in
+// round F for one of F's. A word moved there is one both runs hold in that
+// form, in another order or once more (main's valueDrift.movedRec and
+// movedLive, less what one run lost or gained: an id swapped behind
+// quoted-printable escapes, or inside a base64 run's text), which the
+// reader does not read as a changed word itself. keploy binds no word in
+// such a form, so it cannot tell whether the word came from there, as main
+// refuses it, and as the reader refuses the same swap as written. A word
+// one run lost or gained there is inDecodedForm's. A place keploy could not
+// read refuses every change of the call (decide).
+func (dc *decider) movedInAForm(rds []textReading) (string, *evPlace) {
+	decided := [2]map[string]bool{{}, {}}
+	for _, rd := range rds {
+		for _, w := range rd.Words {
+			decided[0][strings.ToLower(w.Rec)], decided[1][strings.ToLower(w.Live)] = true, true
+		}
+	}
+	for _, rd := range rds {
+		v := dc.dr.ofIn(rd.Rec, rd.Live, dc.in.Window, dc.in.At)
+		for i := range v.movedRec {
+			for side, moved := range [2]map[string]bool{v.movedRec[i], v.movedLive[i]} {
+				recorded, changed := side == 0, v.gained[i]
+				if recorded {
+					changed = v.lost[i]
+				}
+				for _, t := range v.inOrder(moved, recorded) {
+					if wordBits(t) < chanceBits || changed[t] || decided[side][strings.ToLower(t)] {
+						continue
+					}
+					for _, p := range dc.ps {
+						text := p.t.live
+						if recorded {
+							text = p.t.rec
+						}
+						if held, _ := text.holdsWord(t); held && placedFor(p, t).state != stateNotBefore {
+							return p.name + " held " + strconv.Quote(t) + ", which this value carries in a decoded form where it moved, and keploy binds no word there", &p
+						}
+					}
+				}
+			}
+		}
+	}
+	return "", nil
 }
 
 // answered is where the call's answer reads back w, a word of the leaf at
