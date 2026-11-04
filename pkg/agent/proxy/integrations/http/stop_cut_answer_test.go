@@ -1016,3 +1016,64 @@ func TestRecordV2_TheAbortsCloseAfterTheUpstreamsEndIsNotTheClients(t *testing.T
 		}
 	}
 }
+
+// Not a cut: a parser behind its capture reads a whole response after the
+// client's end, which came once the application had it (its giving up, the
+// recording's stop, its process's exit, or an end the hooks cannot judge),
+// and before the upstream's close. The read ended with the response's
+// framing, not at the stream's end nor at its reader's close, so the client's
+// end does not judge it: the exchange is
+// recorded whole, with no fault, and nothing is left out.
+func TestRecordV2_AWholeAnswerReadAfterTheClientsEndIsRecorded(t *testing.T) {
+	const answer = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n01234"
+	ends := []struct {
+		name string
+		why  supervisor.NoFaultEnd
+	}{
+		{"the application gave up", supervisor.EndMayBeFault},
+		{"the recording's stop closed the application", supervisor.EndAtStop},
+		{"the client's process exited on its own", supervisor.EndAtExit},
+		{"the hooks cannot judge the client's end", supervisor.EndUnjudged},
+	}
+	for _, proven := range []bool{false, true} {
+		for _, e := range ends {
+			t.Run(e.name+switchName[proven], func(t *testing.T) {
+				t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+				c := newRelayedConn(t)
+				c.grace = time.Minute
+				c.startRelay(t)
+				write(t, c.app, c.src, faultReq)
+				relayed(t, c.dest, faultReq)
+				write(t, c.dest, c.dst, answer)
+				relayed(t, c.app, answer)
+				if e.why == supervisor.EndAtStop {
+					c.stopBegun.Store(true)
+				} else {
+					c.clientEnd.Store(uint32(e.why))
+				}
+				appClosed(t, c)
+				awaitPeerEnd(t, c, fakeconn.FromClient)
+				c.startParser(t)
+				// The upstream's close ends the connection, so the parser's
+				// wait for a next request ends.
+				_ = c.dest.Close()
+				mocks, err := c.collect(t)
+				if err != nil {
+					t.Errorf("recordV2 = %v, want nil", err)
+				}
+				if got := leftOutReasons(c); len(got) != 0 {
+					t.Errorf("left out for %q, want the whole exchange recorded", got)
+				}
+				if got := errorsLogged(c); len(got) != 0 {
+					t.Errorf("logged %q at ERROR, want nothing", got)
+				}
+				if len(mocks) != 1 {
+					t.Fatalf("recorded %d mocks, want 1", len(mocks))
+				}
+				if r := mocks[0].Spec.HTTPResp; mocks[0].Spec.Fault != nil || r == nil || r.Body != "01234" {
+					t.Errorf("recorded the response %+v with the fault %v, want it whole with no fault", r, mocks[0].Spec.Fault)
+				}
+			})
+		}
+	}
+}
