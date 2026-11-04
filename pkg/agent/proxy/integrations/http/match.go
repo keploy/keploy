@@ -808,11 +808,18 @@ func sameCursorRequest(m, want *models.Mock) bool {
 
 // recordedBefore orders recordings as they were recorded: the request
 // timestamp is stable across replay (SortOrder is mutated on every match, so
-// it cannot be used); ID then Name break ties.
+// it cannot be used); the number mockdb gave each as it wrote it
+// (models.CompareRecordedNumbers) breaks a tie, the order of the reads of
+// one write (an HTTP/1.1 pipeline), and ID then Name break the ties left.
+// The number comes before ID, which a tier stamps from its own slice and the
+// startup tier not at all.
 func recordedBefore(a, b *models.Mock) bool {
 	ta, tb := a.Spec.ReqTimestampMock, b.Spec.ReqTimestampMock
 	if !ta.Equal(tb) {
 		return ta.Before(tb)
+	}
+	if c := models.CompareRecordedNumbers(a.Name, b.Name); c != 0 {
+		return c < 0
 	}
 	if a.TestModeInfo.ID != b.TestModeInfo.ID {
 		return a.TestModeInfo.ID < b.TestModeInfo.ID
