@@ -684,7 +684,8 @@ func TestOutcomeAFreshWordBehindADecodeStepIsAnsweredWhereItsFieldIsEchoedWhole(
 
 // A Value behind a decode step whose field the answer echoes whole is bound,
 // as before: only a fresh word is read back there (wholeEchoes); a Value's
-// answer is left as readBack leaves it.
+// answer is left as readBack leaves it. Main's classifier gives the same
+// input the same verdict: a variable of mock-0, with no echo.
 func TestOutcomeAValueBehindADecodeStepKeepsItsAnswerWhereItsFieldIsEchoedWhole(t *testing.T) {
 	b := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	cur := b(`{"id":"A7K29QXM","n":3}`)
@@ -719,8 +720,10 @@ func TestOutcomeAFreshWordBesideAPlaceSetAsideIsRefusedWhereItsAnswerHoldsIt(t *
 // past it, and each word one lookup, with no scan of the answer per word.
 // n fresh words against n answer leaves, the last holding the first word:
 // that word is refused, every other one fresh, as a scan per word decided.
-// A word asked past the budget that is none of the call's (no request word
-// gives it) is still found, by a scan of the leaves past the budget.
+// That leaf's text opens with a separator: the index maps no key that glues
+// one to the word after it. A word asked past the budget that is none of the
+// call's (no request word gives it) is still found, by a scan of the leaves
+// past the budget.
 func TestOutcomeACallsAnswerIsReadOncePerCallForItsFreshWords(t *testing.T) {
 	defer func(b int64) { readerBudget = b }(readerBudget)
 	const n = 300
@@ -734,7 +737,7 @@ func TestOutcomeACallsAnswerIsReadOncePerCallForItsFreshWords(t *testing.T) {
 		drift = append(drift, p)
 		resp = append(resp, oText(fmt.Sprintf("body.rows.%d", i), "row "+word(i, 3)+" ok"))
 	}
-	resp = append(resp, oText("body.seen", "seen "+word(0, 1)+" once"), Leaf{Path: "body.at", Noise: "body.at", Type: Instant, Value: "2026-10-22T11:14:16Z"})
+	resp = append(resp, oText("body.seen", "(seen "+word(0, 1)+" once)"), Leaf{Path: "body.at", Noise: "body.at", Type: Instant, Value: "2026-10-22T11:14:16Z"})
 	for _, c := range []struct {
 		what   string
 		budget int64
