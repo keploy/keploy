@@ -95,10 +95,15 @@ func encodeGenericV2(sess *supervisor.Session, logger *zap.Logger) error {
 		return nil
 	}
 
-	// Seed the client's events with the initial client chunk so the merge
-	// and the main loop's state machine treat it like any other.
+	// The initial client chunk is the merge's client head from its start,
+	// so it goes on first whatever the dest's reader hands on: handed to the
+	// merge through clientEvents instead, it would be one of two events
+	// ready at once, and a select picks either, so an unnumbered reply (one
+	// the merge cannot place, and so takes as received) could go on ahead of
+	// it and be paired with no request.
+	var first *chunkEvent
 	if len(initial.Bytes) > 0 {
-		clientEvents <- chunkEvent{
+		first = &chunkEvent{
 			dir:       fakeconn.FromClient,
 			bytes:     initial.Bytes,
 			connSeq:   initial.ConnSeq,
@@ -128,7 +133,7 @@ func encodeGenericV2(sess *supervisor.Session, logger *zap.Logger) error {
 	defer close(stop)
 	go readStream(sess.ClientStream, fakeconn.FromClient, clientEvents, stop)
 	go readStream(sess.DestStream, fakeconn.FromDest, destEvents, stop)
-	go mergeByCapture([2]<-chan chunkEvent{clientEvents, destEvents}, events, sess.StreamedBefore, stop)
+	go mergeByCapture(first, [2]<-chan chunkEvent{clientEvents, destEvents}, events, sess.StreamedBefore, stop)
 
 	return pairChunkEvents(events, sess, logger)
 }
@@ -769,7 +774,11 @@ type streamedBefore func(dir fakeconn.Direction, seq uint32) (end int64, ok bool
 //
 // It returns, with nothing more sent, once stop has closed: nothing drains
 // out after the main loop returns.
-func mergeByCapture(in [2]<-chan chunkEvent, out chan<- chunkEvent, order streamedBefore, stop <-chan struct{}) {
+//
+// first, when set, is the connection's first chunk, the client's, read before
+// the readers started: the merge starts with it as the client's head, received
+// before anything else.
+func mergeByCapture(first *chunkEvent, in [2]<-chan chunkEvent, out chan<- chunkEvent, order streamedBefore, stop <-chan struct{}) {
 	defer close(out)
 	dirs := [2]fakeconn.Direction{fakeconn.FromClient, fakeconn.FromDest}
 	var (
@@ -780,6 +789,10 @@ func mergeByCapture(in [2]<-chan chunkEvent, out chan<- chunkEvent, order stream
 		arrived [2]uint64 // when each head was received, for what cannot be placed
 		n       uint64
 	)
+	if first != nil {
+		n++
+		head[0], has[0], arrived[0], through[0] = *first, true, n, first.through
+	}
 	// placed reports whether i's head can go on before anything the other
 	// direction has yet to hand on, and if not, what may tell when it can.
 	placed := func(i int) (ok bool, wake <-chan struct{}) {

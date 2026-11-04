@@ -63,9 +63,9 @@ const readersPanicMsg = "a panic of the generic V2 recorder's main loop"
 
 // readersStarted is how many goroutines encodeGenericV2 has started, and not
 // ended, while its main loop runs: the two stream readers and the merge that
-// hands their events on in capture order (mergeByCapture). The check fails its setup at once on another count,
-// so a creation line that names no goroutine cannot pass as one whose
-// goroutines all ended.
+// hands their events on in capture order (mergeByCapture). The check fails
+// its setup at once on another count, so a creation line that names no
+// goroutine cannot pass as one whose goroutines all ended.
 const readersStarted = 3
 
 // readersFill says what reaches the streams past their one exchange.

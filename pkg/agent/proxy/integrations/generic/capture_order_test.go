@@ -397,3 +397,43 @@ func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 		})
 	}
 }
+
+// The connection's first chunk, the client's, read before the readers start,
+// goes on ahead of everything the dest's reader hands on. Here a request and
+// its reply are both on their streams before the parser starts, and neither
+// is numbered, so the merge cannot place them by capture: each of 64
+// connections records its one exchange, with nothing left out. Handed to the
+// merge as one of two events ready at once, the request lost to the reply
+// about one time in two; the reply was then paired with no request, and the
+// connection recorded nothing.
+func TestV2_TheFirstClientChunkGoesOnAheadOfTheReply(t *testing.T) {
+	at := time.Unix(6000, 0)
+	for i := 0; i < 64; i++ {
+		clientCh, destCh := make(chan fakeconn.Chunk, 1), make(chan fakeconn.Chunk, 1)
+		clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("req0"), ReadAt: at, WrittenAt: at}
+		destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("resp0"), ReadAt: at, WrittenAt: at}
+		close(clientCh)
+		close(destCh)
+		sess, mocks := newV2Session(t, clientCh, destCh)
+		sess.Logger = zap.NewNop()
+		mgr := syncMock.New(nil)
+		sess.Mgr = mgr
+		done := make(chan error, 1)
+		go func() { done <- dispatch(t, sess) }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("connection %d: the parser returned %v", i, err)
+			}
+		case <-time.After(10 * time.Second): // only turns a hang into a failure
+			t.Fatalf("connection %d: the parser did not return once both streams ended", i)
+		}
+		var got []*models.Mock
+		for len(mocks) > 0 {
+			got = append(got, <-mocks)
+		}
+		if p := pairsOf(got); len(p) != 1 || p[0] != "req0|resp0" || mgr.MocksLeftOut() != 0 {
+			t.Fatalf("connection %d recorded %q and left out %d; want its one exchange", i, p, mgr.MocksLeftOut())
+		}
+	}
+}
