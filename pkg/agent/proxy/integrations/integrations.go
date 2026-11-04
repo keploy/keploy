@@ -463,6 +463,29 @@ func AnswerRepeatRead(db MockMemDb, matched []*models.Mock) (RepeatReadAnswer, b
 	return r.AnswerRepeatRead(matched)
 }
 
+// CallViewTeller is an optional capability of a store HoldToRound returned
+// under exact serving. CallViewMoved reports whether the view the store reads
+// its call in may not be the one it read it in before: true when the call
+// reads the view in force (one decided in the test the store opens next,
+// CallRound.TrackerAhead) and a test's begin or end installed another view
+// since the call was held. A call read in its own view reads there only, and
+// is never moved. A parser that joins two reads of one call, as a miss report
+// that hides the live call by the places its pool's recordings redacted and
+// those of the test's answered ones (ExactConsumedReader) does, asks after its
+// last read and, on true, cannot tell the two reads were of one view: such a
+// report redacts the call whole. Every MockMemDb wrapper that forwards
+// ExactConsumedReader must forward it.
+type CallViewTeller interface {
+	CallViewMoved() bool
+}
+
+// CallViewMoved is db's CallViewTeller answer: false for a store that tells
+// none (one that holds no call to a view).
+func CallViewMoved(db MockMemDb) bool {
+	t, ok := db.(CallViewTeller)
+	return ok && t.CallViewMoved()
+}
+
 // ExactServedReader is an optional MockMemDb extension of a store that
 // serves each test its own mocks exactly (the proven switch), with a served
 // observer (the learn tracker's ServedMock). ServedInOpenTest returns, of one

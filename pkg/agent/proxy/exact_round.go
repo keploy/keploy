@@ -960,7 +960,7 @@ const restagedWhy = "the staging moved: the test set was staged again"
 // staging call was marked in (heldScope). restaged reports whether a read or
 // a consume door of it found the staging moved since.
 func (m *MockManager) HoldToRound(call integrations.CallRound) (integrations.MockMemDb, func() bool) {
-	h := &heldScope{roundScope: roundScope{MockManager: m, g: roundGuard{at: integrations.RoundAt{Epoch: call.Epoch()}, staging: true}}}
+	h := &heldScope{roundScope: roundScope{MockManager: m, g: roundGuard{at: integrations.RoundAt{Epoch: call.Epoch()}, staging: true}}, heldIn: m.exactView()}
 	h.read.at, h.read.known = call.Round()
 	if call.TrackerAhead() {
 		// Decided in the test the store opens next: the call reads, walks
@@ -1010,6 +1010,11 @@ type heldScope struct {
 	// ownGen is the generation h reports while it reads elsewhere
 	// (elsewhereGen), 0 until then.
 	ownGen uint64
+	// heldIn is the view in force as h was held (HoldToRound), which a call
+	// that reads the view in force (readIn nil) is told it moved from
+	// (CallViewMoved). Views are installed new and never again, so one
+	// still in force is the one the call was held in.
+	heldIn *exactView
 }
 
 // SequenceView implements integrations.SequenceViewer: the sequence view of
@@ -1269,8 +1274,14 @@ func (h *heldScope) PairingCandidates(kind models.Kind) []*models.Mock {
 	return h.heldOf(h.MockManager.PairingCandidates(kind))
 }
 
+// ConsumedTestMocks implements integrations.ExactConsumedReader for h's
+// call: the test mocks that have answered in the view h's reads are made in
+// (readView), in the order they did, as its other reads are. So a call read
+// in a test's view is told that test's answered recordings, which none of
+// its reads shows any more, even once the test ended before it asks; never
+// those of the view in force since. None once the staging moved.
 func (h *heldScope) ConsumedTestMocks() []*models.Mock {
-	return h.heldOf(h.MockManager.ConsumedTestMocks())
+	return h.heldOf(consumedTestMocksIn(h.readView()))
 }
 
 // AnswerRepeatRead is the manager's (integrations.RepeatReadAnswerer) while
@@ -1291,6 +1302,18 @@ func (h *heldScope) AnswerRepeatRead(matched []*models.Mock) (integrations.Repea
 	}
 	return m.AnswerRepeatRead(matched)
 }
+
+// CallViewMoved implements integrations.CallViewTeller: whether h's call
+// reads the view in force (readView: one decided in the test the store opens
+// next, integrations.CallRound.TrackerAhead) and a test's begin or end has
+// installed another view since the call was held (heldIn), so two of its
+// reads may have been made in two views. A call read in its own view (readIn)
+// makes every read there: false.
+func (h *heldScope) CallViewMoved() bool {
+	return h.g.readIn == nil && h.exactView() != h.heldIn
+}
+
+var _ integrations.CallViewTeller = (*heldScope)(nil)
 
 // FindAnsweredEarlier is the manager's (integrations.AnsweredFinder) while
 // the staging is still h's call's after the lookup: the answered log is the

@@ -2039,7 +2039,12 @@ func (v *exactView) outcomeLocked() *testOutcome {
 // ConsumedTestMocks implements integrations.ExactConsumedReader: the open
 // test's mocks that have answered, in the order they did.
 func (m *MockManager) ConsumedTestMocks() []*models.Mock {
-	v := m.exactView()
+	return consumedTestMocksIn(m.exactView())
+}
+
+// consumedTestMocksIn is the test mocks of v that have answered, in the order
+// they did: none for no view or a pool view.
+func consumedTestMocksIn(v *exactView) []*models.Mock {
 	if v == nil || v.test == "" {
 		return nil
 	}

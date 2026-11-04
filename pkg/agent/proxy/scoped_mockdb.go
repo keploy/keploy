@@ -563,6 +563,13 @@ func (s *scopedMockDb) AnswerRepeatRead(matched []*models.Mock) (integrations.Re
 	return integrations.AnswerRepeatRead(s.MockMemDb, matched)
 }
 
+// CallViewMoved forwards the held store's answer (integrations.CallViewTeller)
+// with its answered test mocks (ConsumedTestMocks): false over a store that
+// tells none.
+func (s *scopedMockDb) CallViewMoved() bool { return integrations.CallViewMoved(s.MockMemDb) }
+
+var _ integrations.CallViewTeller = (*scopedMockDb)(nil)
+
 // ServedInOpenTest forwards the store's stamp of its open test and account of
 // what it was served (integrations.ExactServedReader), 0 and none when it
 // keeps none, so a learn step on a scoped view reads the store's account as

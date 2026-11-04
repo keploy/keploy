@@ -732,7 +732,11 @@ func poolPlaces(pool []*models.Mock) redactedPlaces {
 // on while the command was matched, the note may hold another test's
 // places or none of its own, and the command is redacted whole
 // (everyPlace). Under exact serving no window is told (both reads are
-// zero), and the store's list is read as it is then.
+// zero): the store's list is of the view the command's reads are made in,
+// the one it was read in, even once that test ended; when the command reads
+// the view in force and the store installed another since it was held
+// (integrations.CallViewMoved, asked after the list is read), its pool and
+// the list may be of two views, and the command is redacted whole.
 func answeredPlaces(db integrations.MockMemDb, start time.Time) redactedPlaces {
 	p, ok := answeredNote(db).of(db, start)
 	if !ok {
@@ -740,6 +744,9 @@ func answeredPlaces(db integrations.MockMemDb, start time.Time) redactedPlaces {
 	}
 	if er, ok := db.(integrations.ExactConsumedReader); ok {
 		p = p.or(poolPlaces(er.ConsumedTestMocks()))
+	}
+	if integrations.CallViewMoved(db) {
+		return everyPlace
 	}
 	return p
 }
