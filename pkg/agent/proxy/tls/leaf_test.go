@@ -44,7 +44,12 @@ func mintFor(t *testing.T, caKey any, caCert *x509.Certificate, host string, bac
 			cert, err = nil, fmt.Errorf("panic: %v", r)
 		}
 	}()
-	return CertForClient(zap.NewNop(), hello, caKey, caCert, backdate)
+	cert, err = CertForClient(zap.NewNop(), hello, caKey, caCert, backdate)
+	// Rows read cert.Leaf: a leaf without it fails here, not in a nil deref.
+	if err == nil && (cert == nil || cert.Leaf == nil) {
+		t.Fatalf("minting a leaf for %q gave no parsed Leaf", host)
+	}
+	return cert, err
 }
 
 // leafTestCA makes a CA certificate for key, signed with alg (0: crypto/x509's
@@ -242,9 +247,10 @@ func TestLeafVerifiesForTheHostAgainstTheCA(t *testing.T) {
 func TestLeafSerialIsTwentyRandomBytesWithTheTopBitCleared(t *testing.T) {
 	resetCertCacheForTest()
 	caKey, ca := helperCA(t)
-	widest := 0
+	const leaves = 64
+	full := 0
 	seen := map[string]bool{}
-	for i := 0; i < 32; i++ {
+	for i := 0; i < leaves; i++ {
 		cert, err := mintFor(t, caKey, ca, fmt.Sprintf("h%d.example.com", i), time.Time{})
 		if err != nil {
 			t.Fatal(err)
@@ -253,15 +259,19 @@ func TestLeafSerialIsTwentyRandomBytesWithTheTopBitCleared(t *testing.T) {
 		if n.Sign() <= 0 || n.BitLen() > 159 {
 			t.Errorf("serial %v has %d bits, want positive and at most 159", n, n.BitLen())
 		}
-		widest = max(widest, n.BitLen())
+		if n.BitLen() == 159 {
+			full++
+		}
 		seen[n.String()] = true
 	}
-	// 32 serials of 159 random bits all under 153 bits: odds 2^-224.
-	if widest < 153 {
-		t.Errorf("the widest of 32 serials has %d bits, want about 159", widest)
+	// Only the top bit is cleared, and the next one is random: a serial uses
+	// all 159 bits with odds 1/2. So all 64 or none of 64 do with odds 2^-64
+	// each, and clearing or setting that next bit fails every run.
+	if full == 0 || full == leaves {
+		t.Errorf("%d of %d serials have 159 bits, want some but not all", full, leaves)
 	}
-	if len(seen) != 32 {
-		t.Errorf("%d distinct serials of 32", len(seen))
+	if len(seen) != leaves {
+		t.Errorf("%d distinct serials of %d", len(seen), leaves)
 	}
 }
 
@@ -398,9 +408,12 @@ func TestLeafFailuresAreErrors(t *testing.T) {
 		{name: "no CA certificate", key: caKey, ca: nil, host: "api.example.com", want: "failed to sign server certificate"},
 		{name: "the CA key is not the CA certificate's", key: otherKey, ca: ca, host: "api.example.com",
 			want: "failed to sign server certificate", alsoA: "doesn't match parent's PublicKey"},
-		// A name a certificate cannot carry. cfssl panicked on it
+		// Names a certificate cannot carry. cfssl panicked on both
 		// ("Unable to wrap a wrapped error"), out of the client's handshake.
-		{name: "a host that is not ASCII", key: caKey, ca: ca, host: "bad\xffhost.example.com", want: "failed to sign server certificate"},
+		// Bytes that are not UTF-8: its subject does not encode.
+		{name: "a host that is not UTF-8", key: caKey, ca: ca, host: "bad\xffhost.example.com", want: "failed to sign server certificate", alsoA: "not valid UTF-8"},
+		// A raw UTF-8 IDN: its subject encodes, its DNS SAN does not.
+		{name: "a raw UTF-8 IDN", key: caKey, ca: ca, host: "bücher.example", want: "failed to sign server certificate", alsoA: "cannot be encoded as an IA5String"},
 		// A URI crypto/x509 writes but will not read back (an empty label).
 		{name: "a URI with an empty label", key: caKey, ca: ca, host: "http://a..b/", want: "failed to sign server certificate", alsoA: "invalid domain"},
 	} {
