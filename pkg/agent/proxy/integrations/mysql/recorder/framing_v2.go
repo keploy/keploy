@@ -153,7 +153,7 @@ func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *superv
 		var cs commandSeq
 		inExchange := false
 		var lastSeq byte
-		buf, err := mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.ClientStream, func(header []byte) error {
+		buf, err := mysqlUtils.ReadPacketBufferChecked(streamCtx(ctx), logger, sess.ClientStream, func(header []byte) error {
 			if !cs.started && !inExchange && (header[3] != 0 || passed && prevSeq == 255 && prevData) {
 				inExchange = true
 			}
@@ -408,7 +408,7 @@ func firstResponsePacket(ctx context.Context, logger *zap.Logger, sess *supervis
 		return buf, nil
 	}
 	ownErr := false
-	buf, err := mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.DestStream, func(header []byte) error {
+	buf, err := mysqlUtils.ReadPacketBufferChecked(streamCtx(ctx), logger, sess.DestStream, func(header []byte) error {
 		if seq.next != 0 && mayBeServersOwnErr(header) {
 			ownErr = true
 			return nil
@@ -811,7 +811,7 @@ func (h *heldPrepare) flush() {
 // payload it claims is waited for. The PREPARE is recorded or left out by the
 // time settle returns.
 func (h *heldPrepare) settle(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, cmd, respFirst byte) ([]byte, error) {
-	buf, err := mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.DestStream, func(header []byte) error {
+	buf, err := mysqlUtils.ReadPacketBufferChecked(streamCtx(ctx), logger, sess.DestStream, func(header []byte) error {
 		switch {
 		case header[3] == respFirst && continues(header):
 			// No response starts with a packet of 16 MiB or more (an OK, an
@@ -866,7 +866,7 @@ func (h *heldPrepare) settle(ctx context.Context, logger *zap.Logger, sess *supe
 // but a capture that lost one cannot be told from a client that was never
 // sent one. Any other packet is lost framing, which it returns.
 func (h *heldPrepare) end(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext) error {
-	buf, err := mysqlUtils.ReadPacketBufferChecked(ctx, logger, sess.DestStream, func(header []byte) error {
+	buf, err := mysqlUtils.ReadPacketBufferChecked(streamCtx(ctx), logger, sess.DestStream, func(header []byte) error {
 		if header[3] == h.eofSeq && mysqlUtils.GetPayloadLength(header[:3]) <= maxEOFPayload || mayBeServersOwnErr(header) {
 			return nil
 		}
