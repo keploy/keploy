@@ -276,14 +276,13 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 				return "", false
 			}
 		}
-		// EmitMock runs sess.OnMockRecorded before sending on sess.Mocks
-		// and short-circuits if the incomplete flag is set. Any error
-		// from EmitMock (ctx cancellation mid-send) is logged but does
-		// not stop the loop — the ctx will close the streams shortly
-		// after and the top-level for-loop will exit on EOF / ErrClosed.
-		if err := sess.EmitMock(mock); err != nil && logger != nil {
-			logger.Debug("generic v2: EmitMock returned error", zap.Error(err))
-		}
+		// The emit runs sess.OnMockRecorded before it hands the mock on,
+		// and leaves it out if the incomplete flag is set. An exchange
+		// read whole is handed on though the session's context has
+		// ended, as at the recording's stop, as a held one is: emit, the
+		// session deciding (EmitMockAcrossShutdown), not EmitMock, which
+		// drops it then with nothing reporting it.
+		emit(mock)
 		reset()
 		return "", false
 	}

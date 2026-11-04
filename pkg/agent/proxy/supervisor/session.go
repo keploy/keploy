@@ -485,7 +485,7 @@ const endFollowedStopBit = 1 << (peerEndFirstShift + 3)
 // ran on (the application's own timeout, the upstream's reset) is not one,
 // however late the stop. Nil-safe.
 func (s *Session) EndFollowedStop() bool {
-	return s != nil && s.peerEnds.Load()&endFollowedStopBit != 0
+	return s.marks().FollowedStop()
 }
 
 // NoFaultEnd is which end that records no fault the first end of a
@@ -517,10 +517,7 @@ const noFaultEndShift = endedWithConnectionShift + 2
 // first end was (MarkPeerEndedBy): EndMayBeFault where EndFollowedStop is
 // false. Nil-safe.
 func (s *Session) FirstEndNoFault() NoFaultEnd {
-	if s == nil {
-		return EndMayBeFault
-	}
-	return NoFaultEnd(s.peerEnds.Load() >> noFaultEndShift & 3)
+	return s.marks().NoFault()
 }
 
 // ServerSpokeUnasked reports whether the server sent bytes that answer no
@@ -589,23 +586,76 @@ func (s *Session) MarkPeerEndedBy(dir fakeconn.Direction, reset bool, why NoFaul
 // PeerEnded reports how dir's side of the connection ended (MarkPeerEnded):
 // PeerOpen while it has not been marked. Nil-safe.
 func (s *Session) PeerEnded(dir fakeconn.Direction) PeerEnd {
-	if s == nil || dir > fakeconn.FromDest {
-		return PeerOpen
-	}
-	return PeerEnd(s.peerEnds.Load() >> (2 * uint32(dir)) & 3)
+	return s.marks().Peer(dir)
 }
 
 // FirstPeerEnded reports which side of the connection ended its side first
 // (MarkPeerEnded), and ok false while neither has. Nil-safe.
 func (s *Session) FirstPeerEnded() (dir fakeconn.Direction, ok bool) {
+	return s.marks().First()
+}
+
+// Ends is one reading of how the connection's sides had ended (Session.Ends):
+// the marks the relay had made then (MarkPeerEndedBy), and whether the
+// destination's stream had ended at a capture hole (EndedAtHole). A parser
+// that judges a read by several of them takes them once, as the read ends: an
+// end the relay reads while the parser judges came after the read's end, and
+// does not change the verdict partway through it. The zero Ends is a
+// connection neither side of which has ended.
+type Ends struct {
+	bits     uint32
+	destHole bool
+}
+
+// Ends reads how the connection's sides have ended, at once (Ends). Nil-safe.
+func (s *Session) Ends() Ends {
 	if s == nil {
-		return 0, false
+		return Ends{}
 	}
-	first := (s.peerEnds.Load() >> peerEndFirstShift) & 3
+	e := s.marks()
+	_, e.destHole = s.EndedAtHole(fakeconn.FromDest)
+	return e
+}
+
+// marks is Ends without the capture hole: the relay's marks alone. Nil-safe.
+func (s *Session) marks() Ends {
+	if s == nil {
+		return Ends{}
+	}
+	return Ends{bits: s.peerEnds.Load()}
+}
+
+// First is FirstPeerEnded as e read it.
+func (e Ends) First() (dir fakeconn.Direction, ok bool) {
+	first := (e.bits >> peerEndFirstShift) & 3
 	if first == 0 {
 		return 0, false
 	}
 	return fakeconn.Direction(first - 1), true
+}
+
+// FollowedStop is EndFollowedStop as e read it.
+func (e Ends) FollowedStop() bool {
+	return e.bits&endFollowedStopBit != 0
+}
+
+// NoFault is FirstEndNoFault as e read it.
+func (e Ends) NoFault() NoFaultEnd {
+	return NoFaultEnd(e.bits >> noFaultEndShift & 3)
+}
+
+// Peer is PeerEnded(dir) as e read it.
+func (e Ends) Peer(dir fakeconn.Direction) PeerEnd {
+	if dir > fakeconn.FromDest {
+		return PeerOpen
+	}
+	return PeerEnd(e.bits >> (2 * uint32(dir)) & 3)
+}
+
+// DestAtHole is whether the destination's stream had ended at a capture hole
+// (EndedAtHole) as e read it.
+func (e Ends) DestAtHole() bool {
+	return e.destHole
 }
 
 // MarkEndedAtHole says dir's stream ended at a capture hole: a chunk of it was
@@ -1459,6 +1509,17 @@ const LeftOutStopCutAfterEnd = leftOutStopCutCause + ": the stop ended its read 
 
 // leftOutStopCutCause is LeftOutStopCut's cause: its text before the colon.
 const leftOutStopCutCause = "the recording's stop cut the response short"
+
+// LeftOutHeadCut is the reason an HTTP/1 recorder leaves an exchange out for
+// when the upstream ended the connection (its close or its reset) partway
+// through the response's head, before the recording's stop or with none. The
+// application got part of a head, then the end. A recorded fault sends a head
+// only whole (models.Fault: AfterHead, the mock's response as parsed), so none
+// replays that; and a fault with no answer replays as an end before any byte,
+// which an HTTP client meets by retrying the request on a new connection when
+// it had reused one, where at record it got bytes and did not. So the call is
+// left out, with its span, rather than served as a fault it did not see.
+const LeftOutHeadCut = "the upstream ended the connection partway through the response's head, which a recorded fault cannot replay"
 
 // LeftOutClientClosedPartway is the cause an HTTP/1 recorder leaves an
 // exchange out for when the client closed the connection partway through its

@@ -1296,25 +1296,22 @@ func TestRecordV2_AWholeAnswerReadAfterTheClientsEndIsRecorded(t *testing.T) {
 }
 
 // The upstream's end partway through the response's head, before the
-// recording's stop or with none: an answer whose head never arrived whole is
-// no answer to the application's HTTP client, so the call is recorded with
-// the upstream's reset or close and no answer (FaultReset, FaultEOF), as the
-// application's giving up there is recorded with its timeout and no answer.
-// Read at the stream's end, at the stop's abort's close after it, or with the
-// parser's context ending after it; on the connection's first request and on
-// a later one (bytes of an answer came, so it is not the keep-alive
-// idle-close race). Never a response that does not decode, with an ERROR.
-func TestRecordV2_TheUpstreamsEndInTheHeadIsAFaultWithNoAnswer(t *testing.T) {
+// recording's stop or with none: the application got part of a head, then the
+// end, and no recorded fault replays that (a fault sends a head only whole,
+// and one with no answer replays as an end before any byte, which an HTTP
+// client retries on a reused connection). So the call is left out, once, with
+// its span and LeftOutHeadCut: never recorded as a fault with no answer, nor
+// as a response that does not decode, with an ERROR. Read at the stream's
+// end, at the stop's abort's close after it, or with the parser's context
+// ending after it; on the connection's first request and on a later one,
+// whose earlier answer is recorded whole.
+func TestRecordV2_TheUpstreamsEndInTheHeadLeavesTheCallOut(t *testing.T) {
 	const part, more = "HTTP/1.1 200 OK\r\nContent-Le", "ngth: 5\r\n"
 	const whole = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
 	ends := []struct {
 		name  string
 		reset bool
-		want  models.Fault
-	}{
-		{"closed", false, models.Fault{Kind: models.FaultEOF}},
-		{"reset", true, models.Fault{Kind: models.FaultReset}},
-	}
+	}{{"closed", false}, {"reset", true}}
 	end := func(t *testing.T, c *relayedConn, reset bool) {
 		if reset {
 			resetConn(t, c.dest)
@@ -1323,26 +1320,34 @@ func TestRecordV2_TheUpstreamsEndInTheHeadIsAFaultWithNoAnswer(t *testing.T) {
 		}
 		awaitPeerEnd(t, c, fakeconn.FromDest)
 	}
-	check := func(t *testing.T, c *relayedConn, mocks []*models.Mock, err error, want models.Fault, n int) {
+	check := func(t *testing.T, c *relayedConn, at cutTimes, mocks []*models.Mock, err error, n int) {
 		t.Helper()
 		if err != nil {
-			t.Errorf("recordV2 = %v, want nil: the upstream's end is a fault to record, not a decode error", err)
+			t.Errorf("recordV2 = %v, want nil: a head the upstream cut short is no decode error", err)
 		}
 		if got := errorsLogged(c); len(got) != 0 {
 			t.Errorf("logged %q at ERROR, want nothing", got)
 		}
-		if got := leftOutReasons(c); len(got) != 0 {
-			t.Errorf("left out for %q, want the call recorded with the upstream's end", got)
+		if got := leftOutReasons(c); len(got) != 1 || got[0] != supervisor.LeftOutHeadCut {
+			t.Errorf("left out for %q, want once for %q", got, supervisor.LeftOutHeadCut)
+		}
+		if got := c.mgr.MocksLeftOut(); got != 1 {
+			t.Errorf("left out %d mocks, want 1", got)
 		}
 		if len(mocks) != n {
-			t.Fatalf("recorded %d mocks, want %d", len(mocks), n)
+			t.Fatalf("recorded %d mocks, want %d: the earlier calls' alone", len(mocks), n)
 		}
-		for _, m := range mocks[:n-1] {
+		for _, m := range mocks {
 			if m.Spec.Fault != nil || m.Spec.HTTPResp == nil || m.Spec.HTTPResp.Body != "ok" {
-				t.Errorf("recorded the earlier call as %+v with the fault %v, want its whole answer", m.Spec.HTTPResp, m.Spec.Fault)
+				t.Errorf("recorded %+v with the fault %v, want the earlier call's whole answer", m.Spec.HTTPResp, m.Spec.Fault)
 			}
 		}
-		wantFault(t, mocks[n-1], want)
+		spans := c.spans.all()
+		if len(spans) != 1 || spans[0][0].IsZero() || !spans[0][0].Before(at.sent) ||
+			spans[0][1].Before(at.last) || spans[0][1].After(at.done) {
+			t.Errorf("spans %v, want one, from the request's time (before %v) to the head's last chunk the parser read "+
+				"(stamped from %v to %v)", spans, at.sent, at.last, at.done)
+		}
 	}
 	for _, proven := range []bool{false, true} {
 		for _, e := range ends {
@@ -1352,29 +1357,32 @@ func TestRecordV2_TheUpstreamsEndInTheHeadIsAFaultWithNoAnswer(t *testing.T) {
 					t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
 					c := newRelayedConn(t)
 					c.start(t)
-					n := 1
+					n := 0
 					if later {
 						write(t, c.app, c.src, faultReq)
 						relayed(t, c.dest, faultReq)
 						write(t, c.dest, c.dst, whole)
 						relayed(t, c.app, whole)
-						n = 2
+						n = 1
 					}
 					write(t, c.app, c.src, faultReq)
 					relayed(t, c.dest, faultReq)
+					at := cutTimes{sent: time.Now()}
+					at.last = at.sent
 					write(t, c.dest, c.dst, part)
 					relayed(t, c.app, part)
+					at.done = time.Now()
 					end(t, c, e.reset)
 					mocks, err := c.finish(t)
-					check(t, c, mocks, err, e.want, n)
+					check(t, c, at, mocks, err, n)
 				})
 			}
 			for _, way := range []firstEndStop{theAbortsClose, theCtxThenTheAbort, theParsersCtx} {
 				t.Run(e.name+", "+way.String()+switchName[proven], func(t *testing.T) {
 					t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
 					c := newRelayedConn(t)
-					_, _, mocks, err := firstEndThenStop(t, c, part, more, way, 1, func() { end(t, c, e.reset) })
-					check(t, c, mocks, err, e.want, 1)
+					_, at, mocks, err := firstEndThenStop(t, c, part, more, way, 0, func() { end(t, c, e.reset) })
+					check(t, c, at, mocks, err, 0)
 				})
 			}
 		}
@@ -1540,6 +1548,90 @@ func TestRecordV2_AnEndReadAfterTheContextsEndAtTheStopDoesNotJudgeTheCut(t *tes
 							err, len(mocks), leftOutReasons(c), errorsLogged(c))
 					}
 					return
+				}
+				wantLeftOutForTheStop(t, c, at, mocks, err, supervisor.LeftOutStopCutOpen, false)
+			})
+		}
+	}
+}
+
+// ctxErrHook is a parser's context that does not end, and runs hook once, on
+// the first time Err is asked after the test arms it: an event the test makes
+// happen between two of recordV2's checks. fired says whether it ran.
+type ctxErrHook struct {
+	context.Context
+	armed atomic.Bool
+	hook  func()
+	fired atomic.Bool
+}
+
+func (c *ctxErrHook) Err() error {
+	if c.armed.Load() && c.fired.CompareAndSwap(false, true) {
+		c.hook()
+	}
+	return nil
+}
+
+// The supervisor's abort at the recording's stop closes the stream partway
+// through the response, with neither side's end come, and a side's end (the
+// stop closing the application, or the upstream's close) is read after the
+// close, before recordV2 has judged the read: here on its first check of its
+// context after the read returned. The read is judged by the ends as it ended
+// (Session.Ends, read once): the stop cut it with the connection still open
+// (LeftOutStopCutOpen), left out once with its span. Not judged by the end
+// that came after the close, as if the client had closed partway through the
+// call (LeftOutPartwayAtStop) or the upstream had ended the connection before
+// the stop's close (LeftOutStopCutAfterEnd).
+func TestRecordV2_AnEndReadAfterTheAbortsCloseDoesNotJudgeTheCut(t *testing.T) {
+	const part = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n01234"
+	for _, proven := range []bool{false, true} {
+		for _, upstream := range []bool{false, true} {
+			name := map[bool]string{false: "the stop closes the application", true: "the upstream closes"}[upstream] + switchName[proven]
+			t.Run(name, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, map[bool]string{false: "", true: "1"}[proven])
+				c := newRelayedConn(t)
+				c.grace = time.Minute
+				c.startRelay(t)
+				stopping := make(chan struct{})
+				close(stopping)
+				c.sess.RecordingDone = stopping
+				c.stopBegun.Store(true)
+				endRead := true
+				ctx := &ctxErrHook{Context: context.Background(), hook: func() {
+					if upstream {
+						_ = c.dest.Close()
+						endRead = peerEndRead(c, fakeconn.FromDest)
+						return
+					}
+					_ = c.app.Close()
+					endRead = peerEndRead(c, fakeconn.FromClient)
+				}}
+				go func() { c.done <- (&HTTP{Logger: zaptest.NewLogger(t)}).recordV2(ctx, c.sess) }()
+				write(t, c.app, c.src, faultReq)
+				relayed(t, c.dest, faultReq)
+				at := cutTimes{sent: time.Now()}
+				at.last = at.sent
+				write(t, c.dest, c.dst, part)
+				relayed(t, c.app, part)
+				at.done = time.Now()
+				awaitTaken(t, c.sess.DestStream, len(part))
+				// The parser is blocked for the rest, its check of its
+				// context before the read made: the next is after the read.
+				for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(time.Millisecond) {
+					if waiting, _ := c.sess.DestStream.Waiting(); waiting {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("the parser did not block for the rest of the response in 10s")
+					}
+				}
+				ctx.armed.Store(true)
+				_ = c.sess.DestStream.Close()
+				_ = c.sess.ClientStream.Close()
+				mocks, err := c.collect(t)
+				if !ctx.fired.Load() || !endRead {
+					t.Fatalf("the side's end ran %v, read by the relay %v: recordV2 did not ask its context after the read",
+						ctx.fired.Load(), endRead)
 				}
 				wantLeftOutForTheStop(t, c, at, mocks, err, supervisor.LeftOutStopCutOpen, false)
 			})

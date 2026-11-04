@@ -885,3 +885,33 @@ func TestV2AHeldExchangeWaitsForItsConsumerWhileTheContextLasts(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The session's context ends after the recorder last asked it and before its
+// emit asks it, here as the post-record hook runs, for an exchange the
+// recorder does not hold (the proven switch off): the exchange, read whole,
+// is handed on to the manager, not dropped with nothing reporting it
+// (Session.EmitMockAcrossShutdown).
+func TestV2AnExchangeEmittedAsTheContextEndsIsRecorded(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	t0 := time.Unix(5000, 0)
+	mgr := syncMock.New(zap.NewNop())
+	clientCh := make(chan fakeconn.Chunk, 2)
+	destCh := make(chan fakeconn.Chunk, 2)
+	clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("publish"), ReadAt: t0.Add(time.Second)}
+	destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok"), WrittenAt: t0.Add(2 * time.Second)}
+	close(clientCh)
+	close(destCh)
+	sess, _ := newV2Session(t, clientCh, destCh)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sess.Ctx = syncMock.NewContext(ctx, mgr)
+	sess.Mgr = mgr
+	sess.RouteMocksViaSyncMock = true
+	sess.AddPostRecordHook(func(*models.Mock) { cancel() })
+	if err := dispatch(t, sess); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, added, _ := mgr.GetDropStats(); added != 1 {
+		t.Fatalf("the manager was handed %d mocks, want the exchange read before the context ended", added)
+	}
+}
