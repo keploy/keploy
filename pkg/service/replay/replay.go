@@ -714,10 +714,10 @@ type Replayer struct {
 	failedTCsBySetID      map[string][]string
 	mockMismatchFailures  *TestFailureStore
 	fallbackDeprecateOnce sync.Once
-	// quarantined is, under the proven switch, each test this run skipped for
-	// a reason, keyed by test set and test, for the run's summary.
+	// quarantined is each test this run skipped for a reason, with its reason
+	// and kind, keyed by test set and test, for the run's summary.
 	quarantinedMu sync.Mutex
-	quarantined   map[[2]string]string
+	quarantined   map[[2]string]skipNote
 	// pidMark is where the next test set's refused PID map inserts are
 	// counted from (pidmaps.go).
 	pidMark pidMapMark
@@ -3595,6 +3595,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				TestCasePath: filepath.Join(r.config.Path, testSetID),
 				MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 				SkipReason:   r.skipReasonFor(testSetID, testCase.Name),
+				SkipKind:     r.skipKindFor(testSetID, testCase.Name),
 			}
 			runOrder.note(testCase.Name)
 			recordVerdict(testCase, testCaseResult)
@@ -3814,6 +3815,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				continue
 			}
 
+			// No ignored test reaches this today: the loop that builds
+			// activeTestCases reports each ignored test IGNORED, with its
+			// reason and kind, and leaves it out, and testsToRun is
+			// activeTestCases or the passes among them (nextTestsToRun).
 			if _, ok := ignoredTests[testCase.Name]; ok {
 				testCaseResult := &models.TestResult{
 					Kind:         ignoredKind(testCase),
@@ -3823,6 +3828,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					TestCasePath: filepath.Join(r.config.Path, testSetID),
 					MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 					SkipReason:   r.skipReasonFor(testSetID, testCase.Name),
+					SkipKind:     r.skipKindFor(testSetID, testCase.Name),
 				}
 				recordVerdict(testCase, testCaseResult)
 				loopErr = insertNow(testCase.Name, testCaseResult)
