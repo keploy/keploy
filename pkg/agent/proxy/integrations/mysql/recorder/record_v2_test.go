@@ -42,8 +42,17 @@ func postTLSCtxWithStore(store *models.TLSHandshakeStore) context.Context {
 // wait), and the count. A row reads it to prove by event, not by how long the
 // recording took, that a connection waited or did not.
 func countStashWaits(ctx context.Context) (context.Context, *atomic.Int32) {
+	return onStashWait(ctx, func(int32) {})
+}
+
+// onStashWait is countStashWaits that also calls act with the number of the
+// wait about to begin (1 for the first), on the recorder's goroutine before it
+// blocks. A row acts from it (pushes the raw leg, cancels) so that what it
+// injects is ordered after the recorder began that wait, whatever the
+// scheduler does; a timer started by the test is ordered by nothing.
+func onStashWait(ctx context.Context, act func(n int32)) (context.Context, *atomic.Int32) {
 	n := new(atomic.Int32)
-	return context.WithValue(ctx, postTLSStashWaitHookKey{}, func() { n.Add(1) }), n
+	return context.WithValue(ctx, postTLSStashWaitHookKey{}, func() { act(n.Add(1)) }), n
 }
 
 // collectPostTLSMocks drives RecordV2 under ctx and collects want mocks, with
@@ -285,12 +294,11 @@ func TestRecordV2_PostTLS_LostStash_FabricatedDest_NoDialCleanAbort(t *testing.T
 	// stash bound for its own raw leg before giving up.
 	h.pushClient(cannedHandshakeResponse41(t, 2, false), time.Now())
 
+	ctx, cancel := context.WithCancel(postTLSCtxWithStore(store))
+	defer cancel()
+	ctx, waits := countStashWaits(ctx)
 	done := make(chan error, 1)
-	go func() {
-		ctx, cancel := context.WithTimeout(postTLSCtxWithStore(store), 10*time.Second)
-		defer cancel()
-		done <- recordV2NoPanic(t, ctx, h.logger, h.sess)
-	}()
+	go func() { done <- recordV2NoPanic(t, ctx, h.logger, h.sess) }()
 
 	select {
 	case err := <-done:
@@ -303,8 +311,15 @@ func TestRecordV2_PostTLS_LostStash_FabricatedDest_NoDialCleanAbort(t *testing.T
 		if !strings.Contains(err.Error(), "refusing to dial") {
 			t.Errorf("error = %v, want the fabricated-address dial refusal as the cause", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("RecordV2 hung — the lost-stash abort must be bounded")
+	case <-time.After(45 * time.Second):
+		t.Fatal("RecordV2 did not return in 45s; this only stops a hung abort, the wait count below is the bound check")
+	}
+	// The abort is bounded by the 150ms stash bound, counted in waits: one,
+	// cut short by that bound (none if the recorder first looked past it).
+	// Waiting out the 30s default bound instead is some 60 waits of one poll
+	// slice each.
+	if n := waits.Load(); n > 1 {
+		t.Fatalf("the lost-stash abort waited %d times on the queue; the 150ms stash bound allows one", n)
 	}
 
 	select {
@@ -397,8 +412,17 @@ func TestResolvePreTLSGreeting_DroppedLegHitsCacheAtPrimaryBound(t *testing.T) {
 // is its own and takes it as the oldest on the port's queue it may take.
 // greetingShared is therefore the correct classification; what this test pins is
 // that the stashed entry (with its real timestamp) beats the cache.
+//
+// The own leg is pushed as the recorder begins its first wait: after it looked
+// for its leg and missed, with the cache already there, and inside the primary
+// bound by construction (the recorder waits only while that bound is ahead).
+// The bound is set at the 30s overall default, so it has only to outlast a
+// recorder slow to reach that wait. Pushing from a timer instead raced a 3s
+// bound with the pusher, and handed a recorder slower than the timer its leg
+// before it ever waited.
 func TestResolvePreTLSGreeting_OwnLatePreferredOverCache(t *testing.T) {
-	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_PRIMARY_MS", "3000")
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "")
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_PRIMARY_MS", "30000")
 
 	store := models.NewTLSHandshakeStore()
 	// Cache is populated (a sibling), but the own leg is merely late.
@@ -406,15 +430,16 @@ func TestResolvePreTLSGreeting_OwnLatePreferredOverCache(t *testing.T) {
 		RespPackets: [][]byte{[]byte("sibling-greeting")},
 	})
 	ownTs := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
-	go func() {
-		time.Sleep(150 * time.Millisecond)
-		store.Push(models.HandshakeStoreKey("", 3306), models.TLSHandshakeEntry{
-			RespPackets:  [][]byte{[]byte("own-greeting")},
-			ReqTimestamp: ownTs,
-		})
-	}()
+	ctx, _ := onStashWait(context.Background(), func(n int32) {
+		if n == 1 {
+			store.Push(models.HandshakeStoreKey("", 3306), models.TLSHandshakeEntry{
+				RespPackets:  [][]byte{[]byte("own-greeting")},
+				ReqTimestamp: ownTs,
+			})
+		}
+	})
 
-	entry, _, source := resolvePreTLSGreeting(context.Background(), store, models.HandshakeOwner{}, 3306, "", "", testDst("10.0.0.5:3306"), false)
+	entry, _, source := resolvePreTLSGreeting(ctx, store, models.HandshakeOwner{}, 3306, "", "", testDst("10.0.0.5:3306"), false)
 	if source != greetingShared {
 		t.Fatalf("source = %v, want greetingShared (a late own leg within the primary bound beats the cache)", source)
 	}
@@ -1394,8 +1419,15 @@ func TestRecordV2_PostTLS_ConcurrentPooledConnsDialTheServerOnce(t *testing.T) {
 // exits on ctx cancellation and the connection is being torn down, so there is
 // nothing to fetch a greeting for — only an aborted handshake to cost the host.
 // A fresh connection (HandshakeResponse41) is the one that waits.
+//
+// The teardown comes from the wait itself (the hook cancels as the recorder
+// begins its first wait), as in the cancel row, under the default 30s bound: a
+// recorder that ignored it would wait that out and dial. A cancel after a sleep
+// instead missed the wait when the recorder was slow to reach it, and came
+// after a 5s bound when the test goroutine was slow.
 func TestRecordV2_PostTLS_TeardownDuringStashWaitNeverDials(t *testing.T) {
-	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "5000")
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "")
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_PRIMARY_MS", "")
 	srv := startFakeMySQLGreeter(t, cannedHandshakeV10(t), 0)
 	h := newV2Harness(t)
 	h.sess.Opts.DstCfg = &models.ConditionalDstCfg{Addr: srv.addr, Port: 3306}
@@ -1403,19 +1435,44 @@ func TestRecordV2_PostTLS_TeardownDuringStashWaitNeverDials(t *testing.T) {
 	h.pushClient(cannedHandshakeResponse41(t, 2, false), time.Now())
 
 	ctx, cancel := context.WithCancel(postTLSCtxWithStore(models.NewTLSHandshakeStore()))
+	defer cancel()
+	ctx, waits := onStashWait(ctx, func(n int32) {
+		if n == 1 {
+			cancel()
+		}
+	})
 	done := make(chan error, 1)
 	go func() { done <- recordV2NoPanic(t, ctx, h.logger, h.sess) }()
-	time.Sleep(300 * time.Millisecond) // inside the 5s stash wait
-	cancel()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("RecordV2 did not return after teardown")
+	case <-time.After(45 * time.Second):
+		t.Fatal("RecordV2 did not return in 45s after teardown; this only stops a hung recording")
 	}
-	time.Sleep(100 * time.Millisecond)
-	if got := srv.accepted.Load(); got != 0 {
+	if waits.Load() == 0 {
+		t.Fatal("the recorder never waited for its raw leg, so the teardown did not come during the stash wait")
+	}
+	if got := dialsBefore(t, srv); got != 0 {
 		t.Fatalf("teardown during the stash wait dialled the server %d times", got)
 	}
+}
+
+// dialsBefore returns how many connections srv accepted before this call, by
+// event rather than by a settling sleep: it dials srv itself and reads the
+// greeting, so srv's one accept loop has taken every connection queued before
+// this one (the accept queue is FIFO) by the time the read returns.
+func dialsBefore(t *testing.T, srv *fakeMySQLGreeter) int32 {
+	t.Helper()
+	c, err := net.Dial("tcp", srv.addr)
+	if err != nil {
+		t.Fatalf("probe dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	// A hang-stop only: the greeter answers at once.
+	_ = c.SetReadDeadline(time.Now().Add(45 * time.Second))
+	if _, err := c.Read(make([]byte, 1)); err != nil {
+		t.Fatalf("probe read: %v", err)
+	}
+	return srv.accepted.Load() - 1
 }
 
 // A greeting remembered for the server (fetched, or captured on another
@@ -1425,9 +1482,20 @@ func TestRecordV2_PostTLS_TeardownDuringStashWaitNeverDials(t *testing.T) {
 // connection's real timestamp. Only the app-scoped cache of CAPTURED entries is
 // good enough at the primary bound; the per-server memo is used where the fetch
 // would have happened, after the overall wait.
+//
+// The own leg is pushed as the recorder begins its third wait, so it is late
+// past the primary bound by one whole poll slice. The first wait ends no
+// earlier than that bound (a wait never ends early without an entry), or began
+// past it, so the second wait begins past the bound and runs a full slice that
+// ends empty. A memo that answers at any look from the primary bound to one
+// slice past it answers before the push and fails the row, by event. The
+// overall bound is the 30s default, so it has only to outlast a slow
+// recorder. Pushing from a timer instead raced a 5s overall bound with the
+// pusher, and handed a recorder slower than the timer its leg before the
+// primary bound.
 func TestRecordV2_PostTLS_FetchedCacheDoesNotPreemptOwnLateLeg(t *testing.T) {
 	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_PRIMARY_MS", "100")
-	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "5000")
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "")
 
 	h := newV2Harness(t)
 	h.sess.Opts.DstCfg = &models.ConditionalDstCfg{Addr: "10.0.0.5:3306", Port: 3306}
@@ -1454,12 +1522,13 @@ func TestRecordV2_PostTLS_FetchedCacheDoesNotPreemptOwnLateLeg(t *testing.T) {
 		ReqPackets:   [][]byte{cannedSSLRequest(t, 1)},
 		ReqTimestamp: base,
 	}
-	go func() {
-		time.Sleep(700 * time.Millisecond)
-		store.Push(models.HandshakeStoreKey("", 3306), ownLeg)
-	}()
+	ctx, _ := onStashWait(postTLSCtxWithStore(store), func(n int32) {
+		if n == 3 {
+			store.Push(models.HandshakeStoreKey("", 3306), ownLeg)
+		}
+	})
 
-	got := collectPostTLSMocks(t, h, postTLSCtxWithStore(store), 2, 10*time.Second)
+	got := collectPostTLSMocks(t, h, ctx, 2, 45*time.Second)
 	cfg := got[0]
 	if cfg.Name != "config" {
 		t.Fatalf("first mock = %q, want config", cfg.Name)
@@ -1580,16 +1649,25 @@ func TestRecordV2_PostTLS_FreshConnWithALateRawLegGetsItsOwnGreetingNotTheMemo(t
 	h.pushDest(cannedOK(t, 3, greeting.CapabilityFlags), ownTs.Add(10*time.Millisecond))
 	h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), ownTs.Add(20*time.Millisecond))
 	h.pushDest(cannedOK(t, 1, greeting.CapabilityFlags), ownTs.Add(25*time.Millisecond))
-	go func() {
-		time.Sleep(600 * time.Millisecond) // the raw leg lands late
-		store.Push(models.HandshakeStoreKey("", 3306), models.TLSHandshakeEntry{
-			RespPackets:  [][]byte{own},
-			ReqPackets:   [][]byte{cannedSSLRequest(t, 1)},
-			ReqTimestamp: ownTs,
-		})
-	}()
+	// The raw leg lands late by a poll slice: as the recorder begins its
+	// second wait. Its first wait, with the server's greeting already
+	// remembered, ended empty after a full slice, inside the 8s primary bound
+	// unless the recorder reached it over 7.5s late. A memo taken after that
+	// empty slice answers before the push, by event. A push after a sleep
+	// instead handed a recorder slower than the sleep its leg before it ever
+	// waited.
+	ownLeg := models.TLSHandshakeEntry{
+		RespPackets:  [][]byte{own},
+		ReqPackets:   [][]byte{cannedSSLRequest(t, 1)},
+		ReqTimestamp: ownTs,
+	}
+	ctx, _ := onStashWait(postTLSCtxWithStore(store), func(n int32) {
+		if n == 2 {
+			store.Push(models.HandshakeStoreKey("", 3306), ownLeg)
+		}
+	})
 
-	got := collectPostTLSMocks(t, h, postTLSCtxWithStore(store), 2, 15*time.Second)
+	got := collectPostTLSMocks(t, h, ctx, 2, 45*time.Second)
 	cfg := got[0]
 	if cfg.Name != "config" {
 		t.Fatalf("first mock = %q, want config", cfg.Name)
@@ -1752,7 +1830,7 @@ func TestRecordV2_RawLegRemembersTheServerGreeting(t *testing.T) {
 				h.pushDest(cannedOK(t, 2, greeting.CapabilityFlags), base.Add(2*time.Millisecond))
 			}
 			rawCtx := context.WithValue(context.Background(), models.TLSHandshakeStoreKey, store)
-			ctx, cancel := context.WithTimeout(rawCtx, 5*time.Second)
+			ctx, cancel := context.WithCancel(rawCtx)
 			defer cancel()
 			done := make(chan error, 1)
 			go func() { done <- recordV2NoPanic(t, ctx, h.logger, h.sess) }()
@@ -1760,15 +1838,15 @@ func TestRecordV2_RawLegRemembersTheServerGreeting(t *testing.T) {
 				// Plaintext: the connection continues into its command phase.
 				select {
 				case <-h.mocks:
-				case <-time.After(5 * time.Second):
-					t.Fatal("no config mock from the plaintext raw leg")
+				case <-time.After(45 * time.Second):
+					t.Fatal("no config mock from the plaintext raw leg in 45s; this only stops a hung recording")
 				}
 				h.closeStreams()
 			}
 			select {
 			case <-done:
-			case <-time.After(5 * time.Second):
-				t.Fatal("RecordV2 did not return on the raw leg")
+			case <-time.After(45 * time.Second):
+				t.Fatal("RecordV2 did not return on the raw leg in 45s; this only stops a hung recording")
 			}
 			// Any other session's pooled connection to this server reads it.
 			other := models.OutgoingOptions{DstCfg: h.sess.Opts.DstCfg, PassThroughScope: "ns/other/test-set-9"}
