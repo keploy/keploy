@@ -429,7 +429,7 @@ func writeTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceipt) {
 	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
 		return
 	}
-	writeTestsFile(logger, dir, TestsReceiptFile, "# Written by `keploy mock replay`: what each test did in the last replay of this set.\n", "this replay", r)
+	writeTestsFile(logger, dir, TestsReceiptFile, "# Written by `keploy mock replay`: what each test did in the last replay of this set.\n# Local to this machine and git-ignored.\n", "this replay", r)
 }
 
 // RecordTestsReceiptFile holds what each test did in the last record of a set:
@@ -465,7 +465,7 @@ func writeRecordTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceip
 	} else if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
 		return
 	}
-	writeTestsFile(logger, dir, RecordTestsReceiptFile, "# Written by `keploy mock record`: what each test did against real infra in the last record of this set.\n", "this record", r)
+	writeTestsFile(logger, dir, RecordTestsReceiptFile, "# Written by `keploy mock record`: what each test did against real infra in the last record of this set.\n# Local to this machine and git-ignored.\n", "this record", r)
 	if err := utils.AddToGitIgnore(logger, keployDir, "/*/"+RecordTestsReceiptFile); err != nil {
 		logger.Debug("failed to git-ignore the record's per-test results", zap.Error(err))
 	}
