@@ -602,9 +602,9 @@ sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 -
 RC=${PIPESTATUS[0]}
 stop_dep
 [ "$RC" -eq 0 ] && grep -q "3 passed" rec-tls.log || { echo "FAIL: the TLS record should pass (exit 0, 3 passed), got $RC"; FAIL=1; }
-# keploy decrypted each call: what makes its process trusted.
-MOCKS=$(grep -c '^kind: Http' keploy/e2e-tls/mocks.yaml 2>/dev/null)
-[ "${MOCKS:-0}" -eq 3 ] || { echo "FAIL: want the 3 TLS calls recorded, decrypted, got ${MOCKS:-0} Http mocks"; FAIL=1; }
+# keploy decrypted each call: what makes its process trusted. Each is an
+# HTTP/1.1 GET, so an Http mock; the hang-ups send no call, so no mock.
+MOCKS=$(http_mocks_only keploy/e2e-tls/mocks.yaml 3) || { echo "FAIL: want the 3 TLS calls recorded, decrypted, as 3 Http mocks and no other, got $MOCKS"; FAIL=1; }
 HUNG=$(grep -o 'a client hung up on [0-9]* TLS handshake(s)' rec-tls.log | sort -u)
 [ "$HUNG" = "a client hung up on 1 TLS handshake(s)" ] ||
   { echo "FAIL: want only the rejecting process's hang-up charged (a client hung up on 1 TLS handshake(s)), got: ${HUNG:-none}"; FAIL=1; }

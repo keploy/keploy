@@ -30,11 +30,15 @@ name: Linux CI scripts
 # of its own too, and touch no fixed /tmp path, nor anyone else's files.
 #
 # And mock-kinds.tests.sh: http_mocks_are, the check of a lane that counts
-# the Http mocks its own calls make (repeated-headers' busy --sync pass). DNS
-# mocks of the runner's own name, which only some runners' resolvers answer,
-# pass beside them; an Http mock lost or duplicated, or a mock of any other
-# kind, fails. And http_mocks_only, the mock lanes' check, whose recordings
-# make no DNS query: a DNS mock fails there too.
+# the Http mocks its own calls make and may record DNS mocks beside them
+# (the DNS mocks of the runner's own name, which only some runners'
+# resolvers answer, in repeated-headers' busy --sync pass); an Http mock
+# lost or duplicated, or a mock of any other kind, fails. And
+# http_mocks_only, the check of a lane whose code makes no DNS query: a
+# DNS mock fails there too. And http_mock_count, the count of the Http
+# mocks of a lane that records other kinds beside them. All three match the
+# kind whole: an Http2 or HttpFault mock is not an Http one, though a
+# `^kind: Http` prefix counts it.
 
 on:
   push:
@@ -199,7 +203,7 @@ jobs:
         run: bash .github/workflows/test_workflow_scripts/keploy-installer.tests.sh
 
   mock-kinds:
-    # Twenty-seven cases on files the script writes; under a second.
+    # Thirty-three cases on files the script writes; under a second.
     timeout-minutes: 5
     runs-on: ubuntu-latest
     steps:

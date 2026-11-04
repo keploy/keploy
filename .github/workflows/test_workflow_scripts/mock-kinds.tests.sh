@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for mock-kinds.sh's http_mocks_are and http_mocks_only. Run by
-# linux-ci-scripts.yml, or
+# Tests for mock-kinds.sh's http_mocks_are, http_mocks_only and
+# http_mock_count. Run by linux-ci-scripts.yml, or
 # locally (it needs only bash and awk, and leaves nothing behind):
 #
 #   bash .github/workflows/test_workflow_scripts/mock-kinds.tests.sh
@@ -18,14 +18,16 @@
 # A mock of any other kind fails, Http2 included, and so does an empty file or
 # a missing one.
 #
-# http_mocks_only (the only- cases) is the check of the mock lanes, whose
-# pytest suite calls its dependency at an IP address: exactly N Http mocks
-# pass, and any DNS mock fails beside them, one included, as do the shapes
-# that fail http_mocks_are. other-in-place-of-http is the recording a count
-# of every mock passed: the right number of mocks, one of them not Http.
+# http_mocks_only (the only- cases) is the check of a lane whose code makes no
+# DNS query (the mock lanes' pytest suite, for one, calls its dependency at an
+# IP address): exactly N Http mocks pass, and any DNS mock fails beside them,
+# one included, as do the shapes that fail http_mocks_are.
+# other-in-place-of-http is the recording a count of every mock passed: the
+# right number of mocks, one of them not Http.
 #
 # The named- cases have mocks of two other kinds: the line names each, with
-# its count.
+# its count. http_mock_count (the count- cases) counts the Http mocks alone,
+# whatever is beside them; an Http2 or HttpFault mock is not one.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source-path=SCRIPTDIR
@@ -105,6 +107,21 @@ named() {
     fi
 }
 
+# count NAME WANT [KIND:COUNT...]: http_mock_count FILE, FILE written by mocks
+# from the KIND:COUNTs (with none, FILE is not there), must print WANT.
+count() {
+    local name=$1 want=$2 f="$tmp/$1.yaml" out
+    shift 2
+    [ $# -gt 0 ] && mocks "$f" "$@"
+    out=$(http_mock_count "$f")
+    if [ "$out" != "$want" ]; then
+        echo "FAIL $name: http_mock_count FILE printed $out, want $want"
+        fails=$((fails + 1))
+    else
+        echo "ok   $name: $want"
+    fi
+}
+
 check http-only            0 3   "3 Http mocks, 0 DNS, 0 of other kinds"                 Http:3
 check aws-runner           0 200 "200 Http mocks, 3 DNS, 0 of other kinds"               DNS:3 Http:200
 check dns-last             0 200 "200 Http mocks, 3 DNS, 0 of other kinds"               Http:200 DNS:3
@@ -134,6 +151,13 @@ only only-no-file               1 3 "0 Http mocks, 0 DNS, 0 of other kinds"
 
 named http_mocks_are  named-are  3 "3 Http mocks, 0 DNS, 2 of other kinds" Generic=1 MySQL=1 -- Http:3 Generic:1 MySQL:1
 named http_mocks_only named-only 3 "3 Http mocks, 1 DNS, 3 of other kinds" Generic=2 MySQL=1 -- Http:3 DNS:1 Generic:2 MySQL:1
+
+count count-http           3   Http:3
+count count-http-beside    200 DNS:3 Http:200 MySQL:7 PostgresV3:7
+count count-http2-httpfault 2  Http:1 Http2:1 HttpFault:1 Http:1
+count count-no-kind        3   Http:3 :1
+count count-no-mocks       0   Http:0
+count count-no-file        0
 
 if [ "$fails" -ne 0 ]; then
     echo "mock-kinds.tests.sh: $fails case(s) failed"
