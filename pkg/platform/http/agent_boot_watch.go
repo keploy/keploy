@@ -677,6 +677,11 @@ type startJudgment struct {
 // it has seen (bootJudge): whether its process runs (running), and its last
 // report (read). It sends one judgment when the start has failed or stopped
 // making progress, and nothing while it makes progress; it ends with ctx.
+// Its channel is closed once it has ended, and its look with it: the look
+// out as it ends is cancelled, and waited for until the engine command it
+// runs has been killed and waited for, unless keploy may not signal that
+// command, which is left to end by itself (containerEngineCommand,
+// runEngine).
 // Each look asks first whether the process runs, then, once it does, reads
 // its report, one look at a time, off the caller's goroutine: a look into a
 // container goes through the engine's CLI, which a busy daemon answers
@@ -707,34 +712,47 @@ func watchStart(ctx context.Context, logger *zap.Logger, read func(context.Conte
 	judge := newBootJudge(clk)
 	look, silence, every := bootLook, bootSilence, stillWaitingLooks
 	go func() {
-		defer release()
+		// The look out ends with the watch, however the watch ends, and the
+		// watch ends only once it has: a look's funcs return only once the
+		// engine command each ran on lookCtx has been killed, with the
+		// processes still in its process group that keploy may signal, and
+		// waited for, unless keploy may not signal it (containerEngineCommand,
+		// runEngine). Its channel closes then.
+		lookCtx, endLook := context.WithCancel(ctx)
+		var lookOut sync.WaitGroup
+		defer func() {
+			endLook()
+			lookOut.Wait()
+			release()
+			close(out)
+		}()
 		// A look's two words come on the one channel, in the order it
 		// says them: one look is out at a time, so neither is ever taken
 		// for another look's.
 		looks := make(chan bootLookResult, 2)
 		lookNow := func() {
-			go func() {
-				r := running(ctx)
+			lookOut.Go(func() {
+				r := running(lookCtx)
 				select {
 				case looks <- bootLookResult{running: r}:
-				case <-ctx.Done(): // the wait is over
+				case <-lookCtx.Done(): // the watch is over
 					return
 				}
 				l := bootLookResult{running: r, whole: true}
 				switch {
 				case r:
-					l.p, l.ok = read(ctx)
+					l.p, l.ok = read(lookCtx)
 				case ended != nil:
 					// Its last report, read out of the container that ended.
-					if l.code, l.ended = ended(ctx); l.ended {
-						l.p, l.ok = read(ctx)
+					if l.code, l.ended = ended(lookCtx); l.ended {
+						l.p, l.ok = read(lookCtx)
 					}
 				}
 				select {
 				case looks <- l:
-				case <-ctx.Done():
+				case <-lookCtx.Done():
 				}
-			}()
+			})
 		}
 		var cur bootLookResult
 		tick := time.NewTicker(look)
@@ -934,9 +952,10 @@ func startWaitNext(cur bootLookResult, inContainer bool, silence time.Duration) 
 // looks see is noted on an entry of its own, never on a client's.
 func WatchContainerAgentStart(ctx context.Context, logger *zap.Logger, name string) <-chan error {
 	read, running := containerBootLook(logger, &namedContainer{name: name})
-	return startErrors(ctx, watchStart(ctx, logger, read, running, nil, true, true), func(j startJudgment) error {
+	errs, _ := startErrors(ctx, watchStart(ctx, logger, read, running, nil, true, true), func(j startJudgment) error {
 		return startFailure(j.p.ExitCode, j.why)
 	})
+	return errs
 }
 
 // startFailure is the error of a start the agent reports failed (failure),
@@ -951,21 +970,31 @@ func startFailure(code int, failure string) error {
 // startErrors is judged's judgment as an error: failed's for a start the agent
 // reports failed or whose container exited, pkg.ErrAgentNotReady for one that
 // stopped making progress.
-// One is sent, once; none once ctx ends.
-func startErrors(ctx context.Context, judged <-chan startJudgment, failed func(startJudgment) error) <-chan error {
-	out := make(chan error, 1)
+// One is sent, once; none once ctx ends. over is closed once the watch that
+// judges (watchStart, on ctx) has ended: judged is closed.
+func startErrors(ctx context.Context, judged <-chan startJudgment, failed func(startJudgment) error) (errs <-chan error, over <-chan struct{}) {
+	out, ends := make(chan error, 1), make(chan struct{})
 	go func() {
+		defer close(ends)
 		select {
 		case <-ctx.Done():
-		case j := <-judged:
-			if j.verdict == bootFailed || j.verdict == bootExited {
-				out <- failed(j)
+		case j, ok := <-judged:
+			switch {
+			case !ok:
+				// The watch ended with no judgment (untilReady).
 				return
+			case j.verdict == bootFailed || j.verdict == bootExited:
+				out <- failed(j)
+			default:
+				out <- fmt.Errorf("%w: %s", pkg.ErrAgentNotReady, j.why)
 			}
-			out <- fmt.Errorf("%w: %s", pkg.ErrAgentNotReady, j.why)
+		}
+		// The watch ends with ctx too, and has ended, or is ending, once
+		// it has judged.
+		for range judged {
 		}
 	}()
-	return out
+	return out, ends
 }
 
 // WatchAgentStart implements pkg.AgentStartWatcher: it watches the start of
@@ -976,7 +1005,8 @@ func startErrors(ctx context.Context, judged <-chan startJudgment, failed func(s
 // it: a Kubernetes sidecar) is watched at its URI (watchAgentAt). nil, which
 // never sends, for a client with no agent at all.
 func (a *AgentClient) WatchAgentStart(ctx context.Context) <-chan error {
-	return a.watchAgent(ctx, false)
+	errs, _ := a.watchAgent(ctx, false)
+	return errs
 }
 
 // watchAgent is WatchAgentStart, ending also, with endOnExit, once the agent's
@@ -988,7 +1018,10 @@ func (a *AgentClient) WatchAgentStart(ctx context.Context) <-chan error {
 // of the application ends. It watches the container this client's Setup
 // named, through the entry the client keeps of it, not by its name: what it
 // sees is noted there, and what it asks (known, the run over) is asked there.
-func (a *AgentClient) watchAgent(ctx context.Context, endOnExit bool) <-chan error {
+// over is closed once the watch has ended, with ctx or its verdict, and its
+// look with it (watchStart, watchAgentAt). Both are nil where there is no
+// watch: a client with no agent, or an agent URI that names no address.
+func (a *AgentClient) watchAgent(ctx context.Context, endOnExit bool) (errs <-chan error, over <-chan struct{}) {
 	a.mu.Lock()
 	container, run := a.agentContainer, a.run
 	a.mu.Unlock()
@@ -1009,7 +1042,7 @@ func (a *AgentClient) watchAgent(ctx context.Context, endOnExit bool) <-chan err
 	case a.conf != nil && a.conf.Agent.AgentURI != "":
 		return a.watchAgentAt(ctx, a.conf.Agent.AgentURI)
 	default:
-		return nil
+		return nil, nil
 	}
 	inContainer := container != nil
 	return startErrors(ctx, watchStart(ctx, a.logger, read, running, ended, inContainer, false), func(j startJudgment) error {
@@ -1065,11 +1098,13 @@ const agentDialWait = time.Second
 //     that it still waits, and what it found.
 //
 // ctx ends it; so does the wait, once the agent's health check answers.
-func (a *AgentClient) watchAgentAt(ctx context.Context, uri string) <-chan error {
-	out := make(chan error, 1)
+// over is closed once it has ended, its look with it (each look is on the
+// watch's own goroutine). Both are nil for a URI that names no address.
+func (a *AgentClient) watchAgentAt(ctx context.Context, uri string) (errs <-chan error, over <-chan struct{}) {
+	out, ends := make(chan error, 1), make(chan struct{})
 	addr := agentAddr(uri)
 	if addr == "" {
-		return nil
+		return nil, nil
 	}
 	// Read here, on the caller's goroutine: the watch's outlives the wait.
 	clk, release := uriClock, func() {}
@@ -1078,6 +1113,7 @@ func (a *AgentClient) watchAgentAt(ctx context.Context, uri string) <-chan error
 	}
 	look, silence, every, lookAt := bootLook, bootSilence, stillWaitingLooks, lookAtAgent
 	go func() {
+		defer close(ends)
 		defer release()
 		tick := time.NewTicker(look)
 		defer tick.Stop()
@@ -1114,7 +1150,7 @@ func (a *AgentClient) watchAgentAt(ctx context.Context, uri string) <-chan error
 			}
 		}
 	}()
-	return out
+	return out, ends
 }
 
 // agentAddr is the host:port an agent URI names; "" for one that names none.

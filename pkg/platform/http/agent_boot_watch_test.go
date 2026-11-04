@@ -726,7 +726,7 @@ func TestOnlyTheReleaseEndsOnTheAgentsContainerHavingExited(t *testing.T) {
 		a := clientFor("http://127.0.0.1:1")
 		a.agentContainer = &namedContainer{name: "keploy-v3-test"}
 		ctx, cancel := context.WithCancel(context.Background())
-		errs := a.watchAgent(ctx, endOnExit)
+		errs, _ := a.watchAgent(ctx, endOnExit)
 		c.set(true, utils.BootProgress{Beat: 1, Seq: 1, Ready: true}, true)
 		c.awaitLooks(t, 2)
 		c.exit(137)
@@ -1305,6 +1305,258 @@ func TestALookTheEngineDoesNotAnswerIsSaidWhileItIsOut(t *testing.T) {
 			})
 		})
 	}
+}
+
+// A watch ends only once its look out has: however it ends, with its
+// caller's ctx or with its judgment, it cancels the look out, and closes its
+// channel only once that look has come back. The look here is cancelled, as
+// an engine command is killed with its ctx, and comes back only when the row
+// lets it, as that command's wait ends only once the command has (a look's
+// funcs wait for the engine commands they run: containerEngineCommand). The
+// row runs in a bubble (inBubble): what is not done yet once every goroutine
+// there is blocked is waiting on the row.
+func TestAWatchEndsOnlyOnceItsLookOutHasEnded(t *testing.T) {
+	look, silence, every := bootLook, bootSilence, stillWaitingLooks
+	t.Cleanup(func() { bootLook, bootSilence, stillWaitingLooks = look, silence, every })
+	for _, byJudgment := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ended by its caller", true: "ended by its judgment"}[byJudgment], func(t *testing.T) {
+			// With the silence bound at 0, the start of an agent whose
+			// process runs, with no report read, is given up on at the
+			// first tick that knows it runs: the 2nd, the look out.
+			bootLook, bootSilence, stillWaitingLooks = time.Second, time.Hour, 1000
+			if byJudgment {
+				bootSilence = 0
+			}
+			inBubble(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				// The look says the process runs, then reads its report
+				// until it is cancelled, and comes back once let go.
+				var looks, cancelled, back atomic.Int32
+				letGo, let := heldBack(t)
+				running := func(context.Context) bool {
+					looks.Add(1)
+					return true
+				}
+				read := func(ctx context.Context) (utils.BootProgress, bool) {
+					<-ctx.Done()
+					cancelled.Add(1)
+					<-letGo
+					back.Add(1)
+					return utils.BootProgress{}, false
+				}
+				judged := watchStart(ctx, zap.NewNop(), read, running, nil, true, false)
+				start := time.Now()
+				tickTo(start, 2)
+				if byJudgment {
+					select {
+					case j, ok := <-judged:
+						if !ok || j.verdict != bootStalled {
+							t.Fatalf("the watch sent %v (%s), open: %v; want the start given up on at the 2nd tick", j.verdict, j.why, ok)
+						}
+					default:
+						t.Fatal("the watch has not given up on the start by the 2nd tick")
+					}
+				} else {
+					notJudged(t, judged)
+					cancel()
+					synctest.Wait()
+				}
+				if n := looks.Load(); n != 1 {
+					t.Fatalf("%d looks begun; want 1, out from the 1st tick", n)
+				}
+				if cancelled.Load() != 1 {
+					t.Fatal("the watch has ended, and has not cancelled its look out")
+				}
+				select {
+				case _, ok := <-judged:
+					t.Fatalf("the watch's channel says it has ended (open: %v), with its look out", ok)
+				default:
+				}
+				let()
+				synctest.Wait()
+				select {
+				case j, ok := <-judged:
+					if ok {
+						t.Fatalf("the watch sent %v (%s) once its look came back; want its end", j.verdict, j.why)
+					}
+				default:
+					t.Fatal("the watch's look came back, and the watch has not ended")
+				}
+				if back.Load() != 1 {
+					t.Fatal("the watch ended before its look came back")
+				}
+			})
+		})
+	}
+}
+
+// A wait on the agent that watches its start returns only once its watch
+// has ended, and so once the watch's look out has come back: the release of
+// the app, the wait for the agent keploy started and the wait for an agent
+// docker compose started again. A look's command that ran on past the
+// release wrote to a test's directory as it was removed ("TempDir RemoveAll
+// cleanup: ...: directory not empty"). Each wait here ends with its
+// caller's ctx while a look is out; the look comes back only once the row
+// lets it. The row runs in a bubble (inBubble), with no network: the agent
+// has no address, and the client's requests fail at once.
+func TestAWaitOnTheAgentEndsOnlyOnceItsWatchHas(t *testing.T) {
+	look, lookFn, endFn := bootLook, containerBootLook, containerEnd
+	t.Cleanup(func() { bootLook, containerBootLook, containerEnd = look, lookFn, endFn })
+	bootLook = time.Second
+	for _, tc := range []struct {
+		name string
+		wait func(ctx context.Context, a *AgentClient, container string) error
+	}{
+		{"the release of the app", func(ctx context.Context, a *AgentClient, _ string) error {
+			return a.MakeAgentReadyForDockerCompose(ctx)
+		}},
+		{"the wait for the agent keploy started", func(ctx context.Context, a *AgentClient, container string) error {
+			return a.waitForAgent(ctx, nil, true, models.SetupOptions{KeployContainer: container})
+		}},
+		{"the wait for an agent compose started again", func(ctx context.Context, a *AgentClient, _ string) error {
+			return a.awaitAgentAnswers(ctx)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inBubble(t, func(t *testing.T) {
+				// The first look is out until it is cancelled, and comes
+				// back once let go; none other begins while it is out.
+				var looks, cancelled, back atomic.Int32
+				letGo, let := heldBack(t)
+				containerBootLook = func(*zap.Logger, *namedContainer) (func(context.Context) (utils.BootProgress, bool), func(context.Context) bool) {
+					read := func(context.Context) (utils.BootProgress, bool) { return utils.BootProgress{}, false }
+					return read, func(ctx context.Context) bool {
+						looks.Add(1)
+						<-ctx.Done()
+						cancelled.Add(1)
+						<-letGo
+						back.Add(1)
+						return false
+					}
+				}
+				containerEnd = func(*zap.Logger, *namedContainer) func(context.Context) (int, bool) {
+					return func(context.Context) (int, bool) { return 0, false }
+				}
+				a := clientFor("")
+				a.client.Transport = failingTransport{}
+				const container = "keploy-v3-held"
+				a.nameAgentContainer(container)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				done := make(chan error, 1)
+				go func() { done <- tc.wait(ctx, a, container) }()
+				time.Sleep(2 * bootLook)
+				synctest.Wait()
+				if n := looks.Load(); n != 1 {
+					t.Fatalf("%d looks begun by the 2nd tick; want 1, out from the 1st", n)
+				}
+				cancel()
+				synctest.Wait()
+				if cancelled.Load() != 1 {
+					t.Fatal("the wait's ctx ended, and its look out was not cancelled")
+				}
+				select {
+				case err := <-done:
+					t.Fatalf("the wait returned (%v) with its look out", err)
+				default:
+				}
+				let()
+				synctest.Wait()
+				select {
+				case err := <-done:
+					if err == nil {
+						t.Fatal("the wait, ended by its ctx, returned nil")
+					}
+				default:
+					t.Fatal("the wait's look came back, and the wait has not returned")
+				}
+				if back.Load() != 1 {
+					t.Fatal("the wait returned before its look came back")
+				}
+			})
+		})
+	}
+}
+
+// An engine command keploy may not signal (a sudo before 1.9.4, which makes
+// itself root in full so that the user who ran it cannot kill it) is left to
+// end by itself once its context has ended: its run returns at once, with
+// that context's cause, so the look that ran it, the watch and the wait that
+// owns the watch end (runEngine). One keploy may signal is waited for until
+// it has ended. The row runs in a bubble, the command's run held until the
+// row lets it go.
+func TestAnEngineCommandKeployMayNotSignalIsLeftToEndByItself(t *testing.T) {
+	for _, mayNot := range []bool{false, true} {
+		t.Run(map[bool]string{false: "one keploy may signal", true: "one keploy may not signal"}[mayNot], func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				letGo, let := heldBack(t)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				unsignalled := make(chan struct{})
+				var back atomic.Bool
+				output := func(*exec.Cmd) ([]byte, error) {
+					<-letGo
+					back.Store(true)
+					return []byte("running\n"), nil
+				}
+				done := make(chan error, 1)
+				go func() {
+					_, err := runEngine(ctx, &exec.Cmd{Args: []string{"docker", "inspect", "keploy-v3"}}, unsignalled, output)
+					done <- err
+				}()
+				cancel()
+				if mayNot {
+					close(unsignalled)
+				}
+				synctest.Wait()
+				select {
+				case err := <-done:
+					if !mayNot {
+						t.Fatalf("the run returned (%v) before its command ended", err)
+					}
+					if !errors.Is(err, context.Canceled) || back.Load() {
+						t.Fatalf("the run returned %v, its command back: %v; want its context's cause, with the command left running", err, back.Load())
+					}
+				default:
+					if mayNot {
+						t.Fatal("the context of a command keploy may not signal ended, and its run has not returned")
+					}
+				}
+				let()
+				synctest.Wait()
+				if !mayNot {
+					select {
+					case err := <-done:
+						if err != nil {
+							t.Fatalf("the run of a command that ended returned %v; want its output's", err)
+						}
+					default:
+						t.Fatal("the command ended, and its run has not returned")
+					}
+				}
+			})
+		})
+	}
+}
+
+// failingTransport fails every request at once, as one to an agent that is
+// not there yet would: a client's requests with no network.
+type failingTransport struct{}
+
+func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("no agent there yet")
+}
+
+// heldBack is a held look's hold, for a row in a bubble: letGo is closed
+// once let is called, or once the row ends, however it ends, so that a row
+// that fails with a look held leaves none blocked in its bubble.
+func heldBack(t *testing.T) (letGo <-chan struct{}, let func()) {
+	ch := make(chan struct{})
+	var once sync.Once
+	let = func() { once.Do(func() { close(ch) }) }
+	t.Cleanup(let)
+	return ch, let
 }
 
 // inBubble runs f in a synctest bubble, whose clock moves only once every
